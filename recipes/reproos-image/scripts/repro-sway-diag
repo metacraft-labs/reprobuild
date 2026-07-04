@@ -3,6 +3,32 @@
 # a launch header to /var/log/m9r71_sway.log so any crash cause
 # (assertion / abort / segfault before sway's own logging is
 # ready) is preserved across sddm respawn cycles.
+
+# M9.R.71.4 env fixes (validated 2026-07-04 against the M9.R.71.3
+# first-pass smoke output):
+#
+#  (a) WLR_RENDERER_ALLOW_SOFTWARE=1 — QEMU's bochs-drm is a
+#      software-only GPU; without this env var wlroots refuses to
+#      initialize the Mesa EGL swrast context and aborts.  In the
+#      M9.R.71.3 sway log every launch attempt showed:
+#        [wlr] Software rendering detected, please use the
+#              WLR_RENDERER_ALLOW_SOFTWARE environment variable
+#        [wlr] Failed to initialize EGL context
+#        sway: backend/backend.c:52: wlr_backend_finish: Assertion
+#              `wl_list_empty(&backend->events.new_output.listener_list)'
+#              failed.
+#
+#  (b) Ensure XDG_RUNTIME_DIR exists.  The M9.R.56.8.7 tmpfiles.d
+#      entry SHOULD have created /run/user/1000 at boot but the
+#      wrapper's preamble showed 'ls: cannot access
+#      /run/user/1000: No such file or directory' — so we
+#      belt-and-suspenders create it here (mkdir is a no-op if
+#      systemd-tmpfiles already ran).
+mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
+chmod 0700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+
+export WLR_RENDERER_ALLOW_SOFTWARE=1
+
 LOG=/var/log/m9r71_sway.log
 {
   echo "======================================================"
@@ -12,6 +38,7 @@ LOG=/var/log/m9r71_sway.log
   echo "  cwd=$(pwd)"
   echo "  HOME=$HOME"
   echo "  XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+  echo "  WLR_RENDERER_ALLOW_SOFTWARE=$WLR_RENDERER_ALLOW_SOFTWARE"
   echo "  WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
   echo "  SHELL=$SHELL"
   echo "  PATH=$PATH"

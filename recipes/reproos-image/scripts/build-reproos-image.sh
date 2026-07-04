@@ -1274,6 +1274,26 @@ ExecStart=/bin/sh -c 'cp /var/log/m9r71_sway.log /var/log/m9r56_diag/m9r71_sway.
 ExecStart=/bin/sh -c 'journalctl --no-pager _COMM=sway > /var/log/m9r56_diag/journal-sway.txt 2>&1 || true'
 DIAG_EXTEND_EOF
 
+  # M9.R.71.4: disable the live-ISO installer autostart script on
+  # the INSTALLED system.  /etc/profile.d/zz-reproos-installer-
+  # autostart.sh runs the reproos installer on the tty1 shell
+  # login whenever /etc/reproos/auto-config.toml is present.  On
+  # the live ISO that's the intended flow; on the installed qcow2
+  # it's a bug because the autologin session runs on VT 1 too and
+  # the installer body executes on every sddm-helper spawn,
+  # polluting the sway diagnostic log and delaying sway launch by
+  # ~5 seconds per attempt.
+  #
+  # Fix shape: rename /etc/reproos/auto-config.toml so the
+  # installer autostart script's presence check fails, short-
+  # circuiting the installer block.  Keep the .toml file
+  # available under an alternate name for manual re-run + a
+  # comment marker so future audit can trace the rename.
+  if [ -f '$MNT_DIR/etc/reproos/auto-config.toml' ]; then
+    mv '$MNT_DIR/etc/reproos/auto-config.toml' \
+       '$MNT_DIR/etc/reproos/auto-config.toml.M9R71-disabled-post-install'
+  fi
+
   # M9.R.56.8.7: create /run/user/1000 out-of-band + export
   # XDG_RUNTIME_DIR in the sway session environment.
   #

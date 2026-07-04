@@ -1,0 +1,374 @@
+======================================================
+M9.R.71 sway launch @ 2026-07-04T09:20:27Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:20 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:20 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:20 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:20 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:20 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, but has failed to switch to one.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+[2026-07-04 09:20:31] Phase 1: probing hardware...
+[2026-07-04 09:20:31] $ /usr/bin/repro hardware probe --output /tmp/repro-installer-610/probed-hardware.nim --regenerate
+[2026-07-04 09:20:31]   repro hardware probe: wrote /tmp/repro-installer-610/probed-hardware.nim
+[2026-07-04 09:20:31] Phase 2: applying disk layout...
+[2026-07-04 09:20:31] wrote /tmp/repro-installer-610/disko.json (578 bytes)
+[2026-07-04 09:20:31] $ /usr/bin/repro disk apply /tmp/repro-installer-610/disko.json --confirm --device /dev/vda
+[2026-07-04 09:20:31]   [apply] umount: umount -lf /dev/vda (exit 32)
+[2026-07-04 09:20:31]   [apply] umount: umount -lf /dev/vda1 (exit 32)
+[2026-07-04 09:20:31]   [apply] umount: umount -lf /dev/vda2 (exit 32)
+[2026-07-04 09:20:31]   repro disk apply: FAILED at step wipefs — wipefs failed (exit 127): wipefs -af /dev/vda
+[2026-07-04 09:20:31]   --- output ---
+[2026-07-04 09:20:31]   /bin/sh: 1: wipefs: not found
+[2026-07-04 09:20:31] disk apply failed
+install failed: disk apply failed
+Fontconfig error: Cannot load default config file: No such file: (null)
+pci id for fd 12: 1234:1111, driver (null)
+pci id for fd 13: 1234:1111, driver (null)
+kmsro: driver missing
+00:00:00.113 [ERROR] [wlr] [render/egl.c:334] Software rendering detected, please use the WLR_RENDERER_ALLOW_SOFTWARE environment variable to proceed
+00:00:00.114 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.114 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.117 [ERROR] [sway/server.c:438] Unable to open wayland socket
+sway: backend/backend.c:52: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_output.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T09:20:33Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:20 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:20 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:20 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:20 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:20 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, but has failed to switch to one.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+[2026-07-04 09:20:37] Phase 1: probing hardware...
+[2026-07-04 09:20:37] $ /usr/bin/repro hardware probe --output /tmp/repro-installer-678/probed-hardware.nim --regenerate
+[2026-07-04 09:20:37]   repro hardware probe: wrote /tmp/repro-installer-678/probed-hardware.nim
+[2026-07-04 09:20:37] Phase 2: applying disk layout...
+[2026-07-04 09:20:37] wrote /tmp/repro-installer-678/disko.json (578 bytes)
+[2026-07-04 09:20:37] $ /usr/bin/repro disk apply /tmp/repro-installer-678/disko.json --confirm --device /dev/vda
+[2026-07-04 09:20:37]   [apply] umount: umount -lf /dev/vda (exit 32)
+[2026-07-04 09:20:37]   [apply] umount: umount -lf /dev/vda1 (exit 32)
+[2026-07-04 09:20:37]   [apply] umount: umount -lf /dev/vda2 (exit 32)
+[2026-07-04 09:20:37]   repro disk apply: FAILED at step wipefs — wipefs failed (exit 127): wipefs -af /dev/vda
+[2026-07-04 09:20:37]   --- output ---
+[2026-07-04 09:20:37]   /bin/sh: 1: wipefs: not found
+[2026-07-04 09:20:37] disk apply failed
+install failed: disk apply failed
+Fontconfig error: Cannot load default config file: No such file: (null)
+pci id for fd 12: 1234:1111, driver (null)
+pci id for fd 13: 1234:1111, driver (null)
+kmsro: driver missing
+00:00:00.095 [ERROR] [wlr] [render/egl.c:334] Software rendering detected, please use the WLR_RENDERER_ALLOW_SOFTWARE environment variable to proceed
+00:00:00.096 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.096 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.098 [ERROR] [sway/server.c:438] Unable to open wayland socket
+sway: backend/backend.c:52: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_output.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T09:21:08Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:20 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:20 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:20 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:20 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:20 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, but has failed to switch to one.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+[2026-07-04 09:21:11] Phase 1: probing hardware...
+[2026-07-04 09:21:11] $ /usr/bin/repro hardware probe --output /tmp/repro-installer-742/probed-hardware.nim --regenerate
+[2026-07-04 09:21:11]   repro hardware probe: wrote /tmp/repro-installer-742/probed-hardware.nim
+[2026-07-04 09:21:11] Phase 2: applying disk layout...
+[2026-07-04 09:21:11] wrote /tmp/repro-installer-742/disko.json (578 bytes)
+[2026-07-04 09:21:11] $ /usr/bin/repro disk apply /tmp/repro-installer-742/disko.json --confirm --device /dev/vda
+[2026-07-04 09:21:12]   [apply] umount: umount -lf /dev/vda (exit 32)
+[2026-07-04 09:21:12]   [apply] umount: umount -lf /dev/vda1 (exit 32)
+[2026-07-04 09:21:12]   [apply] umount: umount -lf /dev/vda2 (exit 32)
+[2026-07-04 09:21:12]   repro disk apply: FAILED at step wipefs — wipefs failed (exit 127): wipefs -af /dev/vda
+[2026-07-04 09:21:12]   --- output ---
+[2026-07-04 09:21:12]   /bin/sh: 1: wipefs: not found
+[2026-07-04 09:21:12] disk apply failed
+install failed: disk apply failed
+Fontconfig error: Cannot load default config file: No such file: (null)
+pci id for fd 12: 1234:1111, driver (null)
+pci id for fd 13: 1234:1111, driver (null)
+kmsro: driver missing
+00:00:00.094 [ERROR] [wlr] [render/egl.c:334] Software rendering detected, please use the WLR_RENDERER_ALLOW_SOFTWARE environment variable to proceed
+00:00:00.094 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.095 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.097 [ERROR] [sway/server.c:438] Unable to open wayland socket
+sway: backend/backend.c:52: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_output.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T09:21:43Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:20 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:20 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:20 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:20 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:21 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, but has failed to switch to one.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+[2026-07-04 09:21:46] Phase 1: probing hardware...
+[2026-07-04 09:21:46] $ /usr/bin/repro hardware probe --output /tmp/repro-installer-806/probed-hardware.nim --regenerate
+[2026-07-04 09:21:46]   repro hardware probe: wrote /tmp/repro-installer-806/probed-hardware.nim
+[2026-07-04 09:21:46] Phase 2: applying disk layout...
+[2026-07-04 09:21:46] wrote /tmp/repro-installer-806/disko.json (578 bytes)
+[2026-07-04 09:21:46] $ /usr/bin/repro disk apply /tmp/repro-installer-806/disko.json --confirm --device /dev/vda
+[2026-07-04 09:21:46]   [apply] umount: umount -lf /dev/vda (exit 32)
+[2026-07-04 09:21:46]   [apply] umount: umount -lf /dev/vda1 (exit 32)
+[2026-07-04 09:21:46]   [apply] umount: umount -lf /dev/vda2 (exit 32)
+[2026-07-04 09:21:46]   repro disk apply: FAILED at step wipefs — wipefs failed (exit 127): wipefs -af /dev/vda
+[2026-07-04 09:21:46]   --- output ---
+[2026-07-04 09:21:46]   /bin/sh: 1: wipefs: not found
+[2026-07-04 09:21:46] disk apply failed
+install failed: disk apply failed
+Fontconfig error: Cannot load default config file: No such file: (null)
+pci id for fd 12: 1234:1111, driver (null)
+pci id for fd 13: 1234:1111, driver (null)
+kmsro: driver missing
+00:00:00.094 [ERROR] [wlr] [render/egl.c:334] Software rendering detected, please use the WLR_RENDERER_ALLOW_SOFTWARE environment variable to proceed
+00:00:00.094 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.095 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.097 [ERROR] [sway/server.c:438] Unable to open wayland socket
+sway: backend/backend.c:52: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_output.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T09:22:17Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:20 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:20 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:20 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:20 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:21 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, but has failed to switch to one.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+[2026-07-04 09:22:21] Phase 1: probing hardware...
+[2026-07-04 09:22:21] $ /usr/bin/repro hardware probe --output /tmp/repro-installer-870/probed-hardware.nim --regenerate
+[2026-07-04 09:22:21]   repro hardware probe: wrote /tmp/repro-installer-870/probed-hardware.nim
+[2026-07-04 09:22:21] Phase 2: applying disk layout...
+[2026-07-04 09:22:21] wrote /tmp/repro-installer-870/disko.json (578 bytes)
+[2026-07-04 09:22:21] $ /usr/bin/repro disk apply /tmp/repro-installer-870/disko.json --confirm --device /dev/vda
+[2026-07-04 09:22:21]   [apply] umount: umount -lf /dev/vda (exit 32)
+[2026-07-04 09:22:21]   [apply] umount: umount -lf /dev/vda1 (exit 32)
+[2026-07-04 09:22:21]   [apply] umount: umount -lf /dev/vda2 (exit 32)
+[2026-07-04 09:22:21]   repro disk apply: FAILED at step wipefs — wipefs failed (exit 127): wipefs -af /dev/vda
+[2026-07-04 09:22:21]   --- output ---
+[2026-07-04 09:22:21]   /bin/sh: 1: wipefs: not found
+[2026-07-04 09:22:21] disk apply failed
+install failed: disk apply failed
+Fontconfig error: Cannot load default config file: No such file: (null)
+pci id for fd 12: 1234:1111, driver (null)
+pci id for fd 13: 1234:1111, driver (null)
+kmsro: driver missing
+00:00:00.091 [ERROR] [wlr] [render/egl.c:334] Software rendering detected, please use the WLR_RENDERER_ALLOW_SOFTWARE environment variable to proceed
+00:00:00.091 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.091 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.093 [ERROR] [sway/server.c:438] Unable to open wayland socket
+sway: backend/backend.c:52: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_output.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T09:22:52Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:20 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:20 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:20 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:20 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:22 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, but has failed to switch to one.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+[2026-07-04 09:22:55] Phase 1: probing hardware...
+[2026-07-04 09:22:55] $ /usr/bin/repro hardware probe --output /tmp/repro-installer-934/probed-hardware.nim --regenerate
+[2026-07-04 09:22:55]   repro hardware probe: wrote /tmp/repro-installer-934/probed-hardware.nim
+[2026-07-04 09:22:55] Phase 2: applying disk layout...
+[2026-07-04 09:22:55] wrote /tmp/repro-installer-934/disko.json (578 bytes)
+[2026-07-04 09:22:55] $ /usr/bin/repro disk apply /tmp/repro-installer-934/disko.json --confirm --device /dev/vda
+[2026-07-04 09:22:55]   [apply] umount: umount -lf /dev/vda (exit 32)
+[2026-07-04 09:22:55]   [apply] umount: umount -lf /dev/vda1 (exit 32)
+[2026-07-04 09:22:55]   [apply] umount: umount -lf /dev/vda2 (exit 32)
+[2026-07-04 09:22:55]   repro disk apply: FAILED at step wipefs — wipefs failed (exit 127): wipefs -af /dev/vda
+[2026-07-04 09:22:55]   --- output ---
+[2026-07-04 09:22:55]   /bin/sh: 1: wipefs: not found
+[2026-07-04 09:22:55] disk apply failed
+install failed: disk apply failed
+Fontconfig error: Cannot load default config file: No such file: (null)
+pci id for fd 12: 1234:1111, driver (null)
+pci id for fd 13: 1234:1111, driver (null)
+kmsro: driver missing
+00:00:00.089 [ERROR] [wlr] [render/egl.c:334] Software rendering detected, please use the WLR_RENDERER_ALLOW_SOFTWARE environment variable to proceed
+00:00:00.090 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.090 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.092 [ERROR] [sway/server.c:438] Unable to open wayland socket
+sway: backend/backend.c:52: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_output.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T09:23:27Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:20 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:20 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:20 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:20 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:22 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, but has failed to switch to one.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+[2026-07-04 09:23:30] Phase 1: probing hardware...
+[2026-07-04 09:23:30] $ /usr/bin/repro hardware probe --output /tmp/repro-installer-998/probed-hardware.nim --regenerate
+[2026-07-04 09:23:30]   repro hardware probe: wrote /tmp/repro-installer-998/probed-hardware.nim
+[2026-07-04 09:23:30] Phase 2: applying disk layout...
+[2026-07-04 09:23:30] wrote /tmp/repro-installer-998/disko.json (578 bytes)
+[2026-07-04 09:23:30] $ /usr/bin/repro disk apply /tmp/repro-installer-998/disko.json --confirm --device /dev/vda
+[2026-07-04 09:23:30]   [apply] umount: umount -lf /dev/vda (exit 32)
+[2026-07-04 09:23:30]   [apply] umount: umount -lf /dev/vda1 (exit 32)
+[2026-07-04 09:23:30]   [apply] umount: umount -lf /dev/vda2 (exit 32)
+[2026-07-04 09:23:30]   repro disk apply: FAILED at step wipefs — wipefs failed (exit 127): wipefs -af /dev/vda
+[2026-07-04 09:23:30]   --- output ---
+[2026-07-04 09:23:30]   /bin/sh: 1: wipefs: not found
+[2026-07-04 09:23:30] disk apply failed
+install failed: disk apply failed
+Fontconfig error: Cannot load default config file: No such file: (null)
+pci id for fd 12: 1234:1111, driver (null)
+pci id for fd 13: 1234:1111, driver (null)
+kmsro: driver missing
+00:00:00.092 [ERROR] [wlr] [render/egl.c:334] Software rendering detected, please use the WLR_RENDERER_ALLOW_SOFTWARE environment variable to proceed
+00:00:00.092 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.092 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.094 [ERROR] [sway/server.c:438] Unable to open wayland socket
+sway: backend/backend.c:52: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_output.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T09:24:01Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:20 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:20 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:20 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:20 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:23 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+                                                                                                                                                                                                                                                                                                                                                                                                                                
