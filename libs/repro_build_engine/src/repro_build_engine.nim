@@ -2602,6 +2602,10 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   # LD_LIBRARY_PATH covers run-time test execution; LIBRARY_PATH covers
   # link-time. Same set of dirs feeds both.
   prependEnvDirs(env, "LD_LIBRARY_PATH", paths.libDirs)
+  when defined(macosx):
+    # macOS' dynamic loader ignores LD_LIBRARY_PATH; DYLD_LIBRARY_PATH is the
+    # run-time counterpart needed by tools that dlopen libraries by leaf name.
+    prependEnvDirs(env, "DYLD_LIBRARY_PATH", paths.libDirs)
 
 proc applyResolvedAuxPathsArgv*(env: seq[string];
                                 paths: ResolvedAuxPaths): seq[string] =
@@ -2618,6 +2622,8 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   result = prependEnvDirsToArgvEnv(result, "CPATH", paths.includeDirs)
   result = prependEnvDirsToArgvEnv(result, "LIBRARY_PATH", paths.libDirs)
   result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", paths.libDirs)
+  when defined(macosx):
+    result = prependEnvDirsToArgvEnv(result, "DYLD_LIBRARY_PATH", paths.libDirs)
 
 proc launchChildEnv(action: BuildAction;
                     config: BuildEngineConfig): seq[string] =
@@ -2832,7 +2838,15 @@ proc umaskWrappedArgv*(argv: openArray[string]): seq[string] =
     for i, a in argv:
       if i > 0: quoted.add(" ")
       quoted.add(quoteShell(a))
-    result.add("/bin/sh")
+    var shell = "/bin/sh"
+    when defined(macosx):
+      # RunQuota launches this argv directly. Using SIP-protected /bin/sh here
+      # strips DYLD_* before the monitored command starts, so daemon-hosted
+      # macOS actions lose both monitor injection and loader search paths.
+      let nonSipShell = resolveNonSipShell()
+      if nonSipShell.len > 0:
+        shell = nonSipShell
+    result.add(shell)
     result.add("-c")
     result.add("umask 022 && " & quoted)
   else:
@@ -2935,15 +2949,30 @@ proc startBypassRunQuotaProcess(action: BuildAction;
       options = {poUsePath})
   else:
     # POSIX wrapper shell. On Linux ``/bin/sh`` is not SIP-protected so it is
-    # used directly. On macOS a MONITORED action (one the engine wrapped with
-    # the io-mon monitor — ``action.monitorDepfile.len > 0``) MUST NOT be routed
-    # through the SIP-protected ``/bin/sh`` (B1): that strips
-    # ``DYLD_INSERT_LIBRARIES`` at the top of the tree and degrades injection.
+    # used directly. On macOS we prefer a non-SIP shell when one is available:
+    # a SIP-protected ``/bin/sh`` strips ``DYLD_*`` at the top of the tree,
+    # which breaks both monitored io-mon injection and unmonitored actions that
+    # need DYLD_LIBRARY_PATH for dlopen-only libraries.
     var wrapperShell = "/bin/sh"
     when defined(macosx):
-      if action.monitorDepfile.len > 0:
-        wrapperShell = resolveNonSipShell()
-        if wrapperShell.len == 0:
+      # SIP-protected /bin/sh strips all DYLD_* variables, not only
+      # DYLD_INSERT_LIBRARIES. The action environment may receive those
+      # variables after the daemon process itself started, so testing only
+      # getEnv("DYLD_LIBRARY_PATH") here misses daemon-hosted builds. Prefer the
+      # non-SIP shell whenever it exists; require it when correctness depends on
+      # preserving monitor injection or DYLD loader paths.
+      let nonSipShell = resolveNonSipShell()
+      if nonSipShell.len > 0:
+        wrapperShell = nonSipShell
+      else:
+        let needsDyldEnv =
+          getEnv("DYLD_LIBRARY_PATH").len > 0 or
+          getEnv("DYLD_FALLBACK_LIBRARY_PATH").len > 0 or
+          (env != nil and (
+            env.hasKey("DYLD_LIBRARY_PATH") or
+            env.hasKey("DYLD_FALLBACK_LIBRARY_PATH") or
+            env.hasKey("DYLD_INSERT_LIBRARIES")))
+        if action.monitorDepfile.len > 0 or needsDyldEnv:
           # Monitor-Hook-Shim.md:501 fail-safe: monitoring is required for this
           # action but no injectable (non-SIP) wrapper shell is available, so we
           # cannot launch it without losing shim injection on macOS. Running it
@@ -2953,12 +2982,18 @@ proc startBypassRunQuotaProcess(action: BuildAction;
           # failure" hazard the spec forbids. Fail the launch conservatively
           # instead; ``runBuild`` surfaces this as an action failure (and the
           # action is therefore never published to the cache).
+          let reason =
+            if action.monitorDepfile.len > 0:
+              "monitor injection"
+            else:
+              "DYLD_* loader path propagation"
           raiseEngine(
-            "monitored action " & action.id & " cannot be launched SIP-safely " &
-            "on macOS: no non-SIP shell found (set CT_SANDBOX_TOOLS_DIR to a " &
+            "action " & action.id & " cannot be launched SIP-safely for " &
+            reason & " on macOS: no non-SIP shell found " &
+            "(set CT_SANDBOX_TOOLS_DIR to a " &
             "drop-in bundle or provide a non-SIP sh on PATH). Refusing to run " &
-            "under SIP /bin/sh, which would strip DYLD_INSERT_LIBRARIES and " &
-            "produce incomplete, non-cacheable monitor evidence.")
+            "under SIP /bin/sh, which would strip DYLD_* loader variables and " &
+            "break either monitor injection or dlopen-only runtime libraries.")
     # M9.R.35.1 — pin the action's umask to a deterministic 022 so every
     # spawned tool creates files with the canonical ``rw-r--r--``
     # (0644) / ``rwxr-xr-x`` (0755) permissions. Without this pin, the
@@ -3145,7 +3180,7 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
     result.leaseId = node{"lease_id"}.getBiggestInt(0).uint64
     result.exitCode = node{"exit_code"}.getInt(1)
     result.stdout = node{"stdout"}.getStr("")
-    result.stderr = node{"stderr"}.getStr("")
+    result.stderr = stripMonitorBanner(node{"stderr"}.getStr(""))
     let runnerError = node{"runner_error"}.getStr("")
     if runnerError.len > 0:
       if result.stderr.len > 0:
@@ -3176,7 +3211,7 @@ proc finishInlineRunQuotaProcess(id: string;
     result.leaseId = execution.leaseId
     result.exitCode = execution.exitCode
     result.stdout = execution.stdout
-    result.stderr = execution.stderr
+    result.stderr = stripMonitorBanner(execution.stderr)
     result.runQuotaBackend = execution.backendName
     result.runQuotaSocket = getEnv("RUNQUOTA_SOCKET", "")
     result.status =
