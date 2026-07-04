@@ -76,11 +76,11 @@ package app:
 
 If you are already familiar with the modern DevOps and build toolchain, Reprobuild maps directly onto concepts you know:
 
-*   **Reprobuild is like Nix & Spack** in the sense that it pins every build tool and library dependency to a precise version. It differs from them by supporting Windows and macOS natively.
-*   **Reprobuild is like Terraform** in the sense that it handles declarative desired-state reconciliation for local machine state and cloud resources, but differs by being seamlessly integrated with your build system and host configuration management—and it can reuse all existing Terraform providers.
-*   **Reprobuild is like Bazel & Buck2** in the sense that it models the workspace as a build graph of targets with remote caching. It differs from them by using standard Nim code and compiling into a fast, native binary rather than requiring a JVM daemon or Starlark.
-*   **Reprobuild is like BuildXL & Tup** by enforcing hermeticity through filesystem monitoring. It differs from them by using the [io-mon](file:///Users/zahary/m/io-mon-fixes/io-mon) user-space filesystem interceptor rather than kernel-level drivers or FUSE filters.
-*   **Reprobuild is like Ninja** in the sense that it executes incremental builds in the fastest possible way. It differs from it by adding features such as OOM protection that enable agents to execute concurrent builds without thrashing.
+*   **Reprobuild is like Nix & Spack** in the sense that it pins every build tool and library dependency to a precise version. It differs from them by supporting **Windows and macOS** natively.
+*   **Reprobuild is like Terraform** in the sense that it handles declarative desired-state reconciliation for local machine state and cloud resources, but differs by being seamlessly integrated with your build system and host configuration management—and **it can reuse all existing Terraform providers**.
+*   **Reprobuild is like Bazel & Buck2** in the sense that it models the workspace as a build graph of targets with remote caching. It differs from them by using standard Nim code and compiling into a fast, native binary rather than requiring a JVM daemon or Starlark, while supporting native **distributed builds** and **test suite sharding**.
+*   **Reprobuild is like BuildXL & Tup** by enforcing hermeticity through filesystem monitoring. It differs from them by using the [io-mon](file:///Users/zahary/m/io-mon-fixes/io-mon) user-space filesystem interceptor to **automatically discover all build dependencies** rather than requiring kernel-level drivers or FUSE filters.
+*   **Reprobuild is like Ninja** in the sense that it is optimized to **execute incremental builds at maximum speed**. It differs from it by adding features such as **OOM protection** that enable agents to execute concurrent builds without thrashing.
 *   **Reprobuild is like Live++** by supporting hot code reloading, but does it on all operating systems.
 *   **Reprobuild is like direnv**, but is completely zero-bypass—since compiler tools are scoped to the project environment, you can't forget to run it.
 *   **Reprobuild is like Docker Compose & Process Compose**, but it type-checks your service configuration.
