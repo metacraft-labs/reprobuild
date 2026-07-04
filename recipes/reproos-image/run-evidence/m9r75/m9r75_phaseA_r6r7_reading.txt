@@ -1,0 +1,286 @@
+M9.R.75 Phase A — R6 (source read-only) + R7 (double-write reject) spec
+========================================================================
+audit + current-implementation gap enumeration
+========================================================================
+
+Objective
+---------
+Read reprobuild-specs R6 + R7 verbatim and grade the current engine +
+DSL implementation against each. Confirm what is enforceable at the
+DSL/engine layer today, what needs Phase B/C implementation work, and
+what shape (static-graph vs sandbox vs post-hoc monitor) makes sense
+per spec.
+
+The M9.R.72 Phase A summary already flagged R6/R7 as "Gap VI" — the
+current work operationalises Gap VI now that M9.R.74 has landed the
+ActionCwdKind + resolveCanonicalExecRoot foundation that lets us
+express per-action write scopes.
+
+
+R7 — Double Writes (verbatim quote)
+------------------------------------
+Filesystem-Policy-And-Observed-Inputs.md §"Double Writes",
+lines 246-262:
+
+    A double write occurs when more than one producer writes the same
+    output.
+
+    Reprobuild should support policy levels conceptually similar to
+    BuildXL:
+
+    - double writes are errors
+    - allow same-content double writes
+    - unsafe first-writer-wins
+
+    The default should be the strictest safe behavior:
+
+    - double writes are errors
+
+    Allowing same-content double writes may be acceptable in carefully
+    controlled cases.
+
+    First-writer-wins should be considered unsafe.
+
+
+R6 — Source Rewrites (verbatim quote)
+--------------------------------------
+Filesystem-Policy-And-Observed-Inputs.md §"Source Rewrites",
+lines 264-278:
+
+    A source rewrite occurs when an action mutates a source or other
+    nominally read-only file.
+
+    Reprobuild should support policy levels conceptually similar to
+    BuildXL:
+
+    - source rewrites are errors
+    - safe source rewrites are allowed only in tightly controlled
+      output-like situations
+
+    The default should be:
+
+    - source rewrites are errors
+
+    This is important because allowing in-place mutation of nominal
+    inputs quickly destroys reproducibility and cache correctness.
+
+
+Related upstream rules
+-----------------------
+R1 — Hermetic Contract (Hermetic-Builds-And-Path-Independence.md §"Core
+Hermetic Contract", lines 110-124):
+
+    - writable locations are explicitly constrained
+    - source-tree writes are disallowed unless the action explicitly
+      owns the target location
+
+R5 — Read-Only vs Writable Roots (Filesystem-Policy-And-Observed-
+Inputs.md §"Read-Only Versus Writable Roots", lines 130-144):
+
+    The default policy for strong reproducibility should be:
+    - sources, toolchains, and declared dependency roots are read-only
+    - outputs go only to declared writable locations
+    - everything else is denied unless policy says otherwise
+
+
+Current implementation grade
+-----------------------------
+
+## R7 — partially implemented
+
+libs/repro_build_engine/src/repro_build_engine.nim:986-1002
+(``validateGraph``):
+
+    for output in action.outputs:
+      if outputs.contains(output):
+        raiseEngine("duplicate declared output: " & output)
+      outputs.incl(output)
+
+This rejects two actions declaring THE SAME STRING as an output at
+graph-validation time. It runs before every ``executeBuildGraph`` call
+via ``validateGraph(buildGraph)`` at line 3384.
+
+**Gap**: the check is a strict string equality on the ``outputs`` seq
+each action declared. In practice conventions declare a single stamp
+file per action (typically ``.repro/stamps/<recipe>-<phase>.stamp``),
+NOT the full write scope of the action. So two actions can:
+  - both write to ``<buildDir>/config.log`` (different actions
+    invoking configure);
+  - both write to ``<installDir>/usr/lib/...`` (different install
+    actions targeting the same DESTDIR);
+  - both mkdir a shared parent directory;
+without the graph-time check firing, because their DECLARED outputs
+are the stamp files (which differ by design).
+
+The plan calls for a broader ``declaredOutputs`` seq that captures
+each action's WRITE ROOTS (buildDir / installDir / a caller-supplied
+list), and a graph-time intersection check that catches overlap
+(prefix/containment overlap, not just string equality).
+
+## R6 — not implemented
+
+No engine code inspects monitor evidence for writes into
+nominally-read-only source paths. Monitor evidence records
+``mrFileWrite`` events per-path but ``foldMonitorDepFileEvidence``
+(libs/repro_build_engine/src/repro_build_engine.nim:1309) does not
+classify writes against a "source root" allowlist.
+
+The M9.R.74 ActionCwdKind enum gives us the per-action semantic
+declaration we need: ``acwdSource`` means "the action's CWD is the
+extracted upstream source tree" which is a READ-ONLY root for R6
+purposes; ``acwdBuild`` / ``acwdInstall`` are writable. ``fetch``
+actions are the exception — they populate the source root and must
+be allowed to write there.
+
+
+Enforceable shapes
+-------------------
+
+## Shape A — sandbox bind-mount (Linux, primary)
+
+Wrap action spawn in ``bwrap --ro-bind $sourceDir $sourceDir
+--bind $buildDir $buildDir ...``. Writes to source fail with EROFS
+inside the sandbox. Requires bwrap in the dev shell (already
+provisioned via M9.R.53/54 for tool catalog work).
+
+Pros: architecturally correct, immediate hard-fail with a clear
+error, no false-positives from post-hoc analysis.
+
+Cons: Linux-only for the bwrap path; Windows would need a different
+mechanism (icacls read-only ACLs, WSL2 mount options, or a
+post-hoc-monitor fallback).
+
+## Shape B — post-hoc monitor evidence check
+
+After the action completes, walk io-mon evidence for ``mrFileWrite``
+records whose ``path`` lies inside a nominally-read-only root
+(sourceDir under an ``acwdSource``-classified action's owner
+package). Any hit → action fails.
+
+Pros: cross-platform (works wherever io-mon runs), does not require
+sandbox tooling.
+
+Cons: post-hoc — the write already happened, so the fix is a stronger
+"detect + fail" not a "prevent"; also depends on io-mon completeness
+being honoured (Level 0 = no loss).
+
+## Shape C — DSL-time refusal (both R6 + R7)
+
+At graph construction time, when a convention declares an action's
+``declaredOutputs``, refuse to register the action if any declared
+output path is nominally a source path (owned by an ``acwdSource``
+context). This catches a subset of R6 violations before the graph
+is executed.
+
+Complements Shape A/B; doesn't replace them.
+
+
+R7 implementation strategy
+---------------------------
+
+Add to ``BuildActionDef`` a new field:
+
+  ``declaredOutputs*: seq[string]``
+
+Semantically: the paths (or path prefixes) this action commits to
+writing during its execution. The conventions populate this from the
+same computation that produces ``outputs`` but with the FULL write
+root instead of just the stamp file:
+
+  - fetch      : source directory (write-once-then-read-only)
+  - configure  : buildDir
+  - compile    : buildDir
+  - install    : installDir (DESTDIR)
+
+Extend ``validateGraph`` with a pairwise intersection pass over the
+declared write roots. Two actions whose ``declaredOutputs`` overlap
+by prefix (one contains the other, or they share a path) → graph
+error with both action names + the conflicting path.
+
+Special-case: same-content double writes (BuildXL Level 2) are
+deferred as an optional policy hatch; the default is "double writes
+are errors" per R7.
+
+
+R6 implementation strategy
+---------------------------
+
+Shape A (bwrap sandbox) is architecturally correct and immediate. Add
+a new field to ``BuildActionDef``:
+
+  ``readOnlyRoots*: seq[string]``
+
+Populated by DSL constructors: the source directory is added to
+every non-fetch action's ``readOnlyRoots`` (fetch actions leave it
+empty since they are the exception R6 explicitly identifies as
+"the action explicitly owns the target location").
+
+At action-spawn time in the engine, on Linux, if ``bwrap`` is
+available in the tool catalog, wrap the action's argv with
+``bwrap --ro-bind $ro $ro --bind $rw $rw ...`` so writes to source
+fail hard with EROFS.
+
+For platforms without bwrap (Windows, macOS lacking sandbox tools),
+fall back to Shape B: after the action completes, walk io-mon
+evidence for writes into any ``readOnlyRoots`` entry. Any hit →
+action fails with a source-write-attempt error.
+
+
+Payload codec impact
+---------------------
+
+Both new fields require a payload codec bump: v22 appends
+``declaredOutputs`` (length-prefixed string seq) and
+``readOnlyRoots`` (length-prefixed string seq). v21-and-earlier
+decode with both empty seqs, preserving the pre-M9.R.75 behaviour
+byte-for-byte.
+
+
+Spec addendum needed?
+----------------------
+
+R6 + R7 as-written are clear enough that no spec addendum is
+required for M9.R.75. The BuildXL-style "double writes are errors"
+default is the shipping default; the M9.R.75 code lands the
+mechanism.
+
+An optional future addendum could tighten the "safe source rewrites
+are allowed only in tightly controlled output-like situations" clause
+(R6, line 271) into an explicit escape-hatch API — but that is a
+follow-up milestone.
+
+
+Summary — Phase B/C/D targets
+------------------------------
+
+Phase B (M9.R.75.2):
+  * Extend BuildActionDef with ``declaredOutputs: seq[string]``.
+  * Payload codec v22 for the new field.
+  * Extend ``validateGraph`` with a pairwise write-root
+    intersection pass.
+  * Regression test: two actions declaring overlapping write roots
+    → graph error.
+
+Phase C (M9.R.75.3):
+  * Extend BuildActionDef with ``readOnlyRoots: seq[string]``.
+  * Payload codec v22 also carries this.
+  * Shape A: engine-side spawn wrapper adds ``bwrap`` when the
+    tool catalog has it (Linux). On Windows, defer to Shape B.
+  * Shape B: post-execution monitor-evidence walker checks for
+    writes into ``readOnlyRoots``; hard-fail on any hit.
+  * Regression test: deliberately-buggy recipe touches its
+    source dir → build fails loudly.
+
+Phase D (M9.R.75.4):
+  * autotools_package / meson_package / cmake_package /
+    from_source_custom populate both ``declaredOutputs`` and
+    ``readOnlyRoots`` from the DSL-time computed buildDir /
+    installDir / sourceDir.
+
+Phase E (M9.R.75.5):
+  * Retroactive validation: rebuild pixman, wlroots, libseat
+    under new enforcement. Fix any recipe that accidentally
+    source-writes.
+
+
+End of Phase A audit.
