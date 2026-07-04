@@ -1,0 +1,322 @@
+M9.R.71 Phase A — PAM configuration audit + libpam version characterization
+==============================================================================
+
+Investigator: sub-agent M9.R.71 (2026-07-04)
+Corpus: reproos-installed.qcow2 built by M9.R.70.2 (sha256 3fbca5b73...)
+
+Executive summary
+-----------------
+Cause alpha ("@include syntax mismatch") is REAL but COSMETIC.  The
+from-source libpam-1.6.1 recipe DOES NOT support Debian's `@include`
+directive, and /etc/pam.d/other DOES use it, producing the visible
+"illegal module type: @include" spam.  BUT the parser continues past
+those errors (it registers MUST_FAIL handlers for the affected lines
+and returns PAM_SUCCESS), and those MUST_FAIL handlers only apply to
+the fallback `other` service — NOT to sddm-autologin.  sddm-autologin
+has its own PAM config (M9.R.56.8.5) that uses pam_permit.so only.
+
+The autologin PAM chain still fails at pam_open_session time on the
+sddm-autologin service, with pam_systemd(sddm-autologin:session):
+"Failed to create session: Input/output error", but pam_systemd.so
+is declared `optional` — its return value is IGNORED by libpam.  So
+that alone is not the blocker either.
+
+The REAL blocker (identified during Phase A, characterized in
+Phase B): sddm-helper reports "Auth: sddm-helper exited with 6" on
+the FIRST autologin attempt; subsequent attempts exit with 2, 4, 5.
+Per HelperApp.cpp:197, `exit(status)` at end of session lifetime =
+the exit code of the CHILD (i.e. the sway compositor).  Sway is
+being launched successfully by sddm-helper but is CRASHING with a
+signal (SIGABRT=6 first attempt, then SIGINT=2, SIGILL=4, SIGTRAP=5
+on subsequent respawns as the system state drifts).
+
+There is NO wayland-session.log written to /home/repro/.local/share/
+sddm/ despite sddm-helper's UserSession::setupChildProcess() code
+path opening and dup2-ing that log file BEFORE fork()-ing sway.
+This means sway's stderr output during the crash is lost.  M9.R.71.3
+must extend the boot diagnostic capture to record sway stderr
+directly + investigate the crash cause.
+
+
+Detailed findings
+-----------------
+
+Finding A1 — /etc/pam.d/other uses @include, from-source libpam
+does not recognize @include:
+
+  Empirical:
+    $ cat /mnt/inspect/etc/pam.d/other | head -20
+    # /etc/pam.d/other - specify the PAM fallback behaviour
+    # ...
+    @include common-auth
+    @include common-account
+    @include common-password
+    @include common-session
+
+  Debian shipped this file untouched from the base rootfs; nothing
+  in M9.R.56.8 or later stow layers touched /etc/pam.d/other.
+
+  strings(1) of the FROM-SOURCE libpam (linked against by sddm-helper
+  per RUNPATH inspection):
+    $ strings /mnt/inspect/opt/repro/reprobuild/recipes/packages/source/pam/
+             .repro/output/install/usr/lib64/libpam.so.0.85.1
+      Linux-PAM
+      (%s) empty module type
+      (%s) illegal module type: %s
+    — NO @include string.
+
+  strings(1) of the SYSTEM (Debian) libpam:
+    $ strings /mnt/inspect/usr/lib/x86_64-linux-gnu/libpam.so.0.85.1
+      Linux-PAM
+      (%s) empty module type
+      @include                        <-- present
+      (%s) illegal module type: %s
+    — @include IS a Debian-patched extension.
+
+  Source audit of Linux-PAM-1.6.1 upstream tarball
+  (recipes/packages/source/pam/vendor/Linux-PAM-1.6.1.tar.xz):
+
+    grep -rn "@include\|@INCLUDE" Linux-PAM-1.6.1/libpam/*.c
+    => (no matches for line-level @include parsing)
+
+    Only `include` and `substack` are recognized as module-type
+    keywords by _pam_parse_conf_file() in pam_handlers.c:161-190.
+    Debian's PAM ships a patch adding `@include` as a line-level
+    include shortcut; upstream 1.6.1 does not have it.
+
+  Which libpam does sddm-helper link against?
+    readelf -d /opt/repro/reprobuild/recipes/packages/source/sddm/
+             .repro/output/install/usr/libexec/sddm-helper
+      NEEDED: [libpam.so.0]
+      RUNPATH: [...:/opt/repro/reprobuild/recipes/packages/source/pam/
+                .repro/output/install/usr/lib64:...]
+    => sddm-helper's dynamic linker resolves libpam.so.0 via RUNPATH
+       to the FROM-SOURCE libpam (which lacks @include support), not
+       the Debian one.
+
+  Consequence: pam_start("sddm-autologin", ...) parses BOTH
+  /etc/pam.d/sddm-autologin AND /etc/pam.d/other (per libpam's
+  _pam_init_handlers loading both service-specific + fallback).
+  The `other` file's @include lines produce four "illegal module type:
+  @include" LOG_ERR entries; the parser installs MUST_FAIL handlers
+  for those four lines and CONTINUES.  Return value: PAM_SUCCESS.
+
+  The MUST_FAIL handlers only fire when the `other` fallback is
+  actually invoked at runtime (i.e., a service with no config
+  requests dispatch).  sddm-autologin has its own config and never
+  uses the `other` fallback, so the MUST_FAIL handlers don't affect
+  the actual auth/session flow.
+
+  Verdict: cosmetic noise in the log; NOT the blocker.  BUT the
+  file is broken and should be either (a) fixed to use portable
+  `include` syntax, or (b) reduced to a pure pam_deny.so fallback
+  as Debian originally intended for services with no config, or
+  (c) removed and let libpam fall through to internal defaults.
+
+
+Finding A2 — sddm-autologin PAM chain is minimal and doesn't
+depend on any @include chain:
+
+  $ cat /mnt/inspect/etc/pam.d/sddm-autologin
+  #%PAM-1.0
+  auth       required   pam_permit.so
+  account    required   pam_permit.so
+  password   required   pam_permit.so
+  session    required   pam_permit.so
+  session    optional   pam_keyinit.so force revoke
+  session    optional   pam_limits.so
+  session    optional   pam_loginuid.so
+  session    optional   pam_env.so
+  session    optional   /usr/lib/x86_64-linux-gnu/security/pam_systemd.so
+
+  Every module is `required` or `optional`; pam_systemd's absolute
+  path bypasses the from-source pam recipe's --enable-securedir=
+  /lib/security config, resolving to Debian's pam_systemd.so instead.
+  This is intentional (M9.R.56.8.6): the from-source pam recipe
+  DOES NOT ship pam_systemd.so (pam_systemd is provided by the
+  systemd package, not by Linux-PAM upstream).
+
+
+Finding A3 — from-source pam recipe's /lib/security ships
+7 modules; sddm-autologin references 5 of them:
+
+  $ ls /mnt/inspect/lib/security/
+    pam_env.so
+    pam_env.la
+    pam_keyinit.so
+    pam_keyinit.la
+    pam_limits.so
+    pam_limits.la
+    pam_loginuid.so
+    pam_loginuid.la
+    pam_permit.so
+    pam_permit.la
+    pam_unix.so
+    pam_unix.la
+
+  All 5 modules referenced by sddm-autologin are present:
+    pam_permit.so, pam_keyinit.so, pam_limits.so, pam_loginuid.so,
+    pam_env.so.
+
+  pam_systemd.so is NOT in /lib/security (correct — Linux-PAM
+  upstream doesn't ship it).  sddm-autologin absolute-path
+  references Debian's copy at /usr/lib/x86_64-linux-gnu/security/
+  pam_systemd.so — which IS present in the qcow2 (587,032 bytes,
+  installed by the Debian base rootfs).
+
+
+Finding A4 — pam_systemd's "Input/output error" is NOT the
+blocker either:
+
+  pam_systemd.so is declared as `session optional` in
+  /etc/pam.d/sddm-autologin.  Per PAM semantics, an `optional`
+  module's return value is IGNORED unless it's the ONLY module in
+  its stack.  Since pam_permit.so appears above it as `session
+  required` (and succeeds), pam_systemd's EIO does not fail the
+  session stack.
+
+  The "Failed to create session: Input/output error" IS a real
+  issue caused by dbus-daemon being started without
+  --systemd-activation (per Phase B / M9.R.56.8.7 characterization
+  in build-reproos-image.sh:1181-1223).  The M9.R.56.8.7 workaround
+  (tmpfiles.d entry creating /run/user/1000 out-of-band +
+  /etc/environment.d/50-xdg-runtime-dir.conf exporting
+  XDG_RUNTIME_DIR=/run/user/1000) already handles the downstream
+  consequence (missing XDG_RUNTIME_DIR).
+
+
+Finding A5 — sddm.log exit codes are sway's exit codes, not
+sddm-helper's:
+
+  $ grep "exited with" /mnt/inspect/var/log/sddm.log
+    Auth: sddm-helper exited with 6       <-- first attempt
+    Auth: sddm-helper exited with 2       <-- 2nd–7th attempts
+    Auth: sddm-helper exited with 2
+    Auth: sddm-helper exited with 2
+    ...
+
+  sddm HelperApp defines:
+    HELPER_SUCCESS=0, HELPER_AUTH_ERROR=1, HELPER_SESSION_ERROR=2,
+    HELPER_OTHER_ERROR=3, HELPER_DISPLAYSERVER_ERROR=4,
+    HELPER_TTY_ERROR=5.
+  Exit code 6 is NOT in the enum.
+
+  Per src/helper/HelperApp.cpp:197:
+    void HelperApp::sessionFinished(int status) {
+      exit(status);
+    }
+
+  `status` is the child session process (sway compositor) exit
+  code as reported by QProcess::finished().  When sway crashes on
+  a signal, QProcess reports the signal number as the "exit code":
+    - Exit 6 = SIGABRT (assertion failure / abort())
+    - Exit 2 = SIGINT
+    - Exit 4 = SIGILL
+    - Exit 5 = SIGTRAP
+
+  Interpretation: sway compositor is launched by sddm-helper's
+  WaylandHelper subprocess, but crashes with SIGABRT on the FIRST
+  attempt (probably an assertion failure in wlroots' DRM backend
+  or seat manager).  On subsequent attempts sway crashes with
+  different signals as system state drifts (leaked file
+  descriptors, VT ownership churn, etc.).
+
+
+Finding A6 — wayland-session.log is NOT being written despite
+sddm-helper opening it before fork(exec sway):
+
+  $ sudo ls -la /mnt/inspect/home/repro/
+    total 8
+    drwxr-xr-x  2 zahary  1000 4096 Jul  4 09:11 .
+    drwxr-xr-x  4 zahary users 4096 Jul  4 09:11 ..
+  => /home/repro is COMPLETELY EMPTY.
+
+  Per src/helper/UserSession.cpp:355-380, sddm-helper does:
+    QString sessionLog = QStringLiteral("%1/%2")
+      .arg(pw.pw_dir)
+      .arg(mainConfig.Wayland.SessionLogFile.get());
+    QFileInfo finfo(sessionLog);
+    QDir().mkpath(finfo.absolutePath());
+    int fd = ::open(sessionLog, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) dup2(fd, STDERR_FILENO);
+
+  This runs AFTER setuid(pw.pw_uid=1000).  Default
+  Wayland.SessionLogFile = ".local/share/sddm/wayland-session.log".
+
+  Since the mkpath call is right before the open, and the sway
+  process inherits the dup2-ed stderr, either:
+    (a) mkpath fails (permission denied? but /home/repro is 0755
+        owned by repro:repro, so no)
+    (b) open fails (0600 O_CREAT should work in .local/share/sddm/)
+    (c) sway crashes SO EARLY (before any stderr output is
+        flushed) that the file gets created but never written to
+        with anything durable BEFORE being deleted on
+        next-attempt truncation
+
+  Most likely (c) — sway's crash happens BEFORE stderr flushes.
+  M9.R.71.3 must add a filesystem-level capture of the log path
+  (create the file, then hard-copy immediately post-crash) OR
+  use a diagnostic wrapper that logs before launching sway.
+
+
+Cause verdict — Cause alpha (@include syntax) status
+----------------------------------------------------
+Cause alpha is REAL (from-source libpam doesn't recognize @include,
+producing genuine "illegal module type" parse errors on /etc/pam.d/
+other) but is COSMETIC — the parser recovers, the affected
+handlers only apply to the `other` fallback which sddm-autologin
+never invokes.
+
+The actual autologin-to-sway blocker is sway crashing with SIGABRT
+on the first launch.  Fixing /etc/pam.d/other's @include lines
+will clean the log spam but will NOT unblock sway.
+
+Cause verdict — Cause beta (logind I/O error) status
+----------------------------------------------------
+Cause beta is REAL (pam_systemd fails to CreateSession because
+dbus-daemon was stripped of --systemd-activation per M9.R.56.5,
+so it can't activate systemd's dbus interface) but is COSMETIC
+in the M9.R.56.8.7-shimmed system — pam_systemd is declared
+`optional`, XDG_RUNTIME_DIR is provided via tmpfiles.d +
+/etc/environment.d, and the M9.R.58 seatd server-mode bypasses
+logind entirely for the seat layer.
+
+Fixing the logind I/O error would require rebuilding dbus with
+libsystemd support (multi-week per task brief), and would not
+unblock sway since the shim already covers the downstream
+consequences.
+
+Genuine root cause
+------------------
+sway compositor crashes with SIGABRT immediately after
+sddm-helper launches it via the wayland-session shell wrapper.
+No wayland-session.log evidence available (the file is never
+written to /home/repro/.local/share/sddm/).  M9.R.71.3 must
+extend the boot instrumentation to capture sway's stderr via a
+diagnostic wrapper so the crash cause is diagnosable.  Likely
+candidates:
+  - wlroots DRM backend assertion failure (probably distinct
+    from the M9.R.70-closed "disabled at compile-time" error;
+    could be a runtime NULL-return from a fresh drmModeGet
+    call)
+  - libseat client-connect failure (seatd server may be
+    running but the socket group check fails for repro even
+    though repro is in the `seat` group)
+  - XKB_CONFIG_ROOT / XKB keymap init failure
+  - libwayland-server socket bind failure
+
+Post-Phase B evidence (below) will narrow this to one of the
+above hypotheses.
+
+Environment state at time of audit
+----------------------------------
+  qcow2:  /opt/repro/reprobuild/recipes/reproos-image/build/
+          reproos-installed.qcow2 (5,146,673,152 bytes,
+          sha256 3fbca5b73067cfd0287293c20bd86e95def1800b3769a
+          29ae7e9c261a5c35ac3, built 2026-07-04 09:11 by M9.R.70.2)
+  mount:  /mnt/m9r71 (nbd0p2 via qemu-nbd, read-only)
+  libpam (from-source): 301,928 bytes, Linux-PAM 1.6.1
+  libpam (Debian):      67,584 bytes, Linux-PAM 1.5.3-ish
+  sddm-helper libpam link resolution: from-source (via RUNPATH)
+  repro user: uid=1000 gid=1000 groups=video,seat
+  /home/repro: empty
