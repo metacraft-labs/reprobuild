@@ -357,6 +357,21 @@ proc emitShellActions(projectRoot, packageName, extractedPath, outPath,
       deps.add(fetchActionId)
       inputs.add(fetchStamp)
     let isLast = i == shellRows.high
+    # M9.R.79.5 — populate ``$OUT_MIRROR`` in the shell action's
+    # environment so recipes can reference the canonical per-recipe
+    # install-mirror root without hardcoding ``.repro/output/install``.
+    # The path shape matches ``types/package_result.emitInstallTreeMirror``
+    # (the ``dstUsrRoot`` local at line ~1413).  POSIX-slashed so
+    # embedded shell scripts don't need OS-specific escaping.
+    #
+    # Recipes migrate from hardcoded ``.repro/output/install`` paths
+    # to ``${OUT_MIRROR}`` (or ``$OUT_MIRROR``) — the value is stable
+    # across every shell action in the chain because the mirror root
+    # is a per-recipe property.  See the M9.R.79 Phase F recipe
+    # migration for the first live consumer (hwdata).
+    let outMirrorRoot = (projectRoot / ".repro" / "output" / "install").
+      replace("\\", "/")
+    let shellEnv = @[("OUT_MIRROR", outMirrorRoot)]
     let action = buildAction(
       id = actionId,
       call = inlineExecCall(argv, projectRoot),
@@ -369,6 +384,7 @@ proc emitShellActions(projectRoot, packageName, extractedPath, outPath,
       publishToBinaryCache = isLast,
       cacheEntryIdentity = if isLast: some(identity)
                            else: none(CacheEntryIdentity),
+      env = shellEnv,
       # M9.N Batch B: bare ``sh`` is resolved by the engine via the
       # ``toolIdentityRefs`` catalog at fork time.
       toolIdentityRefs = @["sh"],
