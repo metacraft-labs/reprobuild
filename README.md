@@ -26,21 +26,24 @@ Instead of maintaining separate package specifications, Dockerfiles, task runner
 import repro_dsl_stdlib
 
 package app:
-  uses:
+  buildDeps:
     "rust >=1.75 <2.0"
     "nodejs >=20 <21"
     "nim >=2.0 <3.0"
     "protoc >=25 <26"
 
   # Background services (databases, queues, daemons) needed in dev and prod
-  services:
+  serviceDeps:
     postgres:
       image = "postgres:16-alpine"
       ports = ["5432:5432"]
 
   devEnv:
-    # Developer CLI task automation
-    task "publish", command = "repro build --release && npm publish", description = "Builds release binaries and publishes the workspace bundle"
+    # Developer CLI task automation (runs inside the active environment)
+    task "publish":
+      description = "Builds release binaries and publishes the workspace bundle"
+      run:
+        npm.run("publish")
 
   # Hermetic, sandbox-monitored build recipes
   executable "backend":
