@@ -94,10 +94,16 @@
 ##
 ##   * **End-to-end build run.** On hosts without ``sh`` the convention
 ##     still emits the graph; the actions fail at execution time.
-##   * **Per-shell-action ``cwd`` override.** The DSL records a ``cwd``
-##     slot on each row but the M9.N Batch C.1 emitter ignores it (all
-##     actions cd into ``$extracted`` first). A follow-up can lift the
-##     row's ``cwd`` into a ``cd`` prefix when non-empty.
+##   * **Per-shell-action ``cwd`` override.** CLOSED in M9.R.74: the
+##     emitter now honours the DSL's ``DslShellAction.cwd`` slot. A
+##     populated ``cwd`` is threaded through ``substitutePlaceholders``
+##     (so ``$fetch`` / ``$extracted`` / ``$out`` work), used as the
+##     inline ``cd`` target, AND declared via the R2
+##     ``cwdKind = acwdCustom`` + ``cwdCustomPath = <resolved>``
+##     declaration so the engine's spawn-time CWD, monitor, and policy
+##     layer all see the intended execution root. When ``row.cwd`` is
+##     empty the emitter falls back to the pre-milestone behaviour
+##     (``cd $extracted``) byte-for-byte.
 ##   * **Per-shell-action ``deps`` / ``outputs``.** The DSL records both
 ##     slots but the M9.N Batch C.1 emitter ignores them (every shell
 ##     action chains to the previous one, and every shell action's
@@ -315,17 +321,31 @@ proc emitShellActions(projectRoot, packageName, extractedPath, outPath,
     let stamp = shellStampPath(projectRoot, packageName, actionId)
     let substituted = substitutePlaceholders(
       row.command, fetchPath, extractedPath, outPath)
-    # Compose the script: cd into $extracted, mkdir -p $out, run the
-    # substituted command, touch the stamp.
-    let escapedExtracted = extractedPath.replace("\\", "/").
+    # M9.R.74 — honour the DSL's per-row ``cwd`` slot when populated,
+    # otherwise fall back to the extracted source dir. The DSL's
+    # ``DslShellAction.cwd`` field has been declared since M9.N
+    # Batch C.1 but was ignored ("honest deferral" at module lines
+    # 96-100); the R2 declaration now flows through to the engine's
+    # spawn-time CWD via ``acwdCustom`` + the resolved path.
+    let effectiveCwd =
+      if row.cwd.len > 0: substitutePlaceholders(row.cwd, fetchPath,
+        extractedPath, outPath)
+      else: extractedPath
+    # Compose the script: cd into the effective CWD, mkdir -p $out,
+    # run the substituted command, touch the stamp. The inline ``cd``
+    # is preserved for backward compatibility with existing recipes
+    # that assumed the CWD via convention rather than declaration —
+    # closing the inline ``cd`` (so recipes declare via ``cwd = ...``
+    # only) is a follow-up milestone once the corpus is migrated.
+    let escapedCwd = effectiveCwd.replace("\\", "/").
       replace("\"", "\\\"")
     let escapedOut = outPath.replace("\\", "/").replace("\"", "\\\"")
     let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
     let escapedStampDir = parentDir(stamp).replace("\\", "/").
       replace("\"", "\\\"")
-    let script = "set -e; mkdir -p \"" & escapedExtracted &
+    let script = "set -e; mkdir -p \"" & escapedCwd &
       "\"; mkdir -p \"" & escapedOut & "\"; mkdir -p \"" &
-      escapedStampDir & "\"; cd \"" & escapedExtracted & "\"; " &
+      escapedStampDir & "\"; cd \"" & escapedCwd & "\"; " &
       substituted & "; touch \"" & escapedStamp & "\""
     let argv = @["sh", "-c", script]
     var deps: seq[string] = @[]
@@ -351,7 +371,21 @@ proc emitShellActions(projectRoot, packageName, extractedPath, outPath,
                            else: none(CacheEntryIdentity),
       # M9.N Batch B: bare ``sh`` is resolved by the engine via the
       # ``toolIdentityRefs`` catalog at fork time.
-      toolIdentityRefs = @["sh"])
+      toolIdentityRefs = @["sh"],
+      # M9.R.74 — declare the effective execution root via the R2
+      # enum. ``acwdCustom`` + the resolved absolute path lets the
+      # engine's monitor + policy layer see the intended CWD instead
+      # of the ambient project root. Preserves the pre-M9.R.74
+      # process CWD (still ``projectRoot`` for backward compat) via
+      # the ``inlineExecCall(argv, projectRoot)`` above — the
+      # engine's R2 resolution routes through ``payload.cwdKind``
+      # when it's non-default, otherwise honours the exec-call
+      # argument. When ``row.cwd`` is empty we leave the kind at
+      # the default so the pre-milestone behaviour holds byte-for-
+      # byte for recipes that never opted into per-row cwd
+      # declarations.
+      cwdKind = if row.cwd.len > 0: acwdCustom else: acwdRecipeRoot,
+      cwdCustomPath = if row.cwd.len > 0: effectiveCwd else: "")
     result.actions.add(action)
     prevId = actionId
     prevStamp = stamp
