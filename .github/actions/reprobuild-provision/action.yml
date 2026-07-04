@@ -79,6 +79,7 @@ runs:
           "repo-workspaces:main" \
           "runquota:main" \
           "nim-stackable-hooks:main" \
+          "io-mon:main" \
         ; do
           name="${entry%%:*}"
           ref="${entry##*:}"
