@@ -1,0 +1,8 @@
+Run-time dependency gbm found: YES 24.0.9
+Message: Required for vulkan renderer support.
+Dependency gbm found: YES 24.0.9 (cached)
+Message: Required for X11 backend support.
+    drm-backend      : YES
+    gles2-renderer   : YES
+    vulkan-renderer  : NO
+    session          : YES
