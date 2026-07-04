@@ -10564,7 +10564,66 @@ proc daemonCarriedEnvironment*(): seq[string] =
       seen.incl(key)
       result.add(key & "=" & value)
 
-proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool): owned(Process) =
+const StandardRunquotadPoolCaps* = [
+  ("compile", 8'u32),
+  ("fetch", 2'u32)
+]
+  ## RX pool-forwarding — the two convention pools the standard provider's
+  ## convention bodies always register (``buildPool("compile", 8'u32)`` /
+  ## ``buildPool("fetch", 2'u32)`` in ``runtime_core``; also pinned in the
+  ## engine's in-process ``poolCapacity`` table at
+  ## ``repro_build_engine.nim`` ~L3592). Kept as a named constant so the
+  ## defaults live in one place and the argv assembler + its test share
+  ## the same source of truth.
+
+proc assembleRunquotadPoolArgs*(extraPools: openArray[BuildPool]): seq[string] =
+  ## Build the ``--pool NAME=CAP`` argv fragment forwarded to ``runquotad``.
+  ##
+  ## The daemon initialises ``namedPoolCaps`` empty (see
+  ## ``runquota_daemon.canAdmitImmediately`` — ``cap == 0 or units > cap``
+  ## denies), so every action whose ``pool`` field is non-empty must have a
+  ## matching ``--pool`` flag or its lease is denied and the engine's
+  ## ``automaticMonitor`` retry loop spins forever (``repro build`` hangs).
+  ##
+  ## Historically only the two convention pools (``compile`` / ``fetch``)
+  ## were forwarded. RX: a recipe can declare its own pool via
+  ## ``buildPool("<name>", <cap>)`` and route execute edges through it
+  ## (``edge.testBinary.run(pool="<name>", poolUnits=1)``) to serialize
+  ## resource-contending tests. Those custom pools reach the CLI as
+  ## ``buildGraph.pools`` entries in the extracted project graph. We forward
+  ## every such pool here IN ADDITION to the convention defaults so its
+  ## leases are granted. Custom pool names carry dots / dashes (e.g.
+  ## ``nim_pty.pty-serial``); ``runquotad`` parses ``--pool`` with
+  ## ``split("=", 1)`` (apps/runquotad/runquotad.nim ~L91) so only the first
+  ## ``=`` splits and dotted names survive intact.
+  var seen = initTable[string, uint32]()
+  for (name, cap) in StandardRunquotadPoolCaps:
+    seen[name] = cap
+  # A recipe may legitimately re-declare a convention pool with a different
+  # cap (e.g. widen ``compile``). The recipe-declared value wins since it is
+  # what the engine's in-process ``poolCapacity`` table gates on, so the
+  # daemon budget must match it; otherwise the two gates disagree.
+  for pool in extraPools:
+    if pool.name.len == 0:
+      continue
+    seen[pool.name] = pool.capacity
+  # Deterministic order: convention pools first (stable historical shape the
+  # M9.R.12.3 contract pins), then remaining custom pools sorted by name.
+  for (name, _) in StandardRunquotadPoolCaps:
+    result.add("--pool")
+    result.add(name & "=" & $seen[name])
+    seen.del(name)
+  var customNames: seq[string] = @[]
+  for name in seen.keys:
+    customNames.add(name)
+  customNames.sort()
+  for name in customNames:
+    result.add("--pool")
+    result.add(name & "=" & $seen[name])
+
+proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
+                               extraPools: openArray[BuildPool] = []):
+    owned(Process) =
   if bypassRunQuota or not autoRunQuotaEnabled():
     return nil
   # If RUNQUOTA_SOCKET is set, the user (or a parent invocation) is
@@ -10659,10 +10718,14 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool): owned(Process) =
   # at ``buildPool("compile", 8'u32)`` / ``buildPool("fetch", 2'u32)``
   # — the engine-side ``poolCapacity`` table already pins these values
   # for in-process gating; the daemon now sees the matching budget.
-  let standardPoolArgs = @[
-    "--pool", "compile=8",
-    "--pool", "fetch=2"
-  ]
+  #
+  # RX: in ADDITION to the convention defaults, forward every
+  # recipe-declared custom pool (``extraPools`` — the pools present in the
+  # extracted project graph, i.e. ``buildGraph.pools``). Without this a
+  # recipe's ``buildPool("nim_pty.pty-serial", 1)`` never reaches the
+  # daemon, its execute-edge lease hits ``lease request exceeds named-pool
+  # budget: nim_pty.pty-serial``, and the build hangs.
+  let standardPoolArgs = assembleRunquotadPoolArgs(extraPools)
   when defined(windows):
     var args = @[
       "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
@@ -11508,6 +11571,14 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
                            publicCliPath, workRoot: string;
                            asJson: bool; packageFilter: string;
                            bypassRunQuota: bool): int
+
+# RX pool-forwarding forward declaration: extracts a recipe's declared
+# ``buildPool(...)`` set (the ``buildGraph.pools`` present in the extracted
+# project graph) so ``startAutoRunQuotaIfNeeded`` can forward them to the
+# daemon as ``--pool NAME=CAP``. Best-effort — defined after
+# ``prepareBuildGraphInspection`` (which it reuses) further down in the file.
+proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
+                             publicCliPath, workRoot: string): seq[BuildPool]
 
 # ---------------------------------------------------------------------------
 # Workspace-Manifest-Optional MO-1 — committed solved-graph lock.
@@ -12665,7 +12736,12 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         "captureGroups": statsCapture.captureGroupsText,
         "daemonHosted": true
       })
-    var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
+    # RX: forward recipe-declared custom pools to the daemon so their
+    # execute-edge leases are granted (not denied → hung). Best-effort
+    # extraction — falls back to the convention compile/fetch pools only.
+    let recipePools = extractRecipeBuildPools(target, mode, publicCliPath,
+      workRoot)
+    var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota, recipePools)
     # Peer-Cache M1 wiring (LDRV M5): start the LAN peer-cache runtime
     # when the user passed ``--peer-cache=lan://…``. The actual setup
     # lives in ``buildPeerCacheWiringFor`` further down the file so
@@ -13381,6 +13457,28 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
         let target = decodeBuildTargetPayload(toBytes(node.payload))
         if result.explicitTargetNames.find(target.name) < 0:
           result.explicitTargetNames.add(target.name)
+
+proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
+                             publicCliPath, workRoot: string): seq[BuildPool] =
+  ## RX pool-forwarding — return the recipe's declared build pools (the
+  ## ``buildGraph.pools`` present in the extracted project graph) so the
+  ## caller can forward them to ``runquotad`` alongside the convention
+  ## ``compile`` / ``fetch`` pools. Best-effort: any failure (recipe with no
+  ## build block, provider compile error, unresolved tools, etc.) yields an
+  ## empty seq so the daemon still spawns with the convention defaults and
+  ## the existing pre-RX behaviour is preserved. This reuses
+  ## ``prepareBuildGraphInspection`` whose provider-compile / lowered-graph
+  ## caches are shared with ``executeBuildTarget``, so the subsequent build
+  ## reuses the warmed caches rather than recompiling the provider.
+  var effectiveMode = mode
+  if effectiveMode == tpmUnspecified:
+    effectiveMode = tpmPathOnly
+  try:
+    let info = prepareBuildGraphInspection(target, effectiveMode,
+      publicCliPath, selectDefaultAction = false, workRoot = workRoot)
+    result = info.pools
+  except CatchableError:
+    result = @[]
 
 # ---------------------------------------------------------------------------
 # Workspace-Manifest-Optional MO-6 — projectExtension discovery + merge.

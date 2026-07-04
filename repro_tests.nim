@@ -8302,6 +8302,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_rx_runquotad_forwards_custom_pools.nim",
+    binary: "build/test-bin/t_rx_runquotad_forwards_custom_pools",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_version.nim",
     binary: "build/test-bin/t_version",
     defines: @[],
