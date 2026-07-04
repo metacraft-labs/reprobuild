@@ -28,6 +28,7 @@ const shmIndexSupported* = defined(linux) or defined(macosx)
 import std/[os, times]
 
 when shmIndexSupported:
+  import std/posix
   import ./repro_shm_index/[layout, mapping, atomics_shm, segment, ring]
   export layout, segment, ring
   export atomics_shm.ShmBase
@@ -200,6 +201,106 @@ when shmIndexSupported:
     else:
       0
 
+  # --- engine read/submit front-end (AC-2c) -------------------------------
+  #
+  # The N build engines are lock-free READERS + MPSC-ring SUBMITTERS of the
+  # shm tier (§4.3, §4.4). They NEVER write the shared table (only the daemon
+  # does). The helpers below wrap the AC-2a primitives for the engine:
+  #   * `readerSlotForPid` picks a reader-epoch slot without a layout change —
+  #     a pid-derived index. A collision (two engines share a slot) only makes
+  #     RCU reclamation MORE conservative (the daemon waits for the max of the
+  #     colliding epochs), never incorrect: a reader that pins gen G keeps G
+  #     mapped; and the reader's own per-process file-backed mmap stays valid
+  #     regardless (POSIX inode refcount). Correctness never depends on the slot
+  #     being exclusive.
+  #   * `lookupMetadata` follows `currentGeneration`, (re)attaches the live
+  #     segment if it advanced, publishes the reader epoch for the RCU grace
+  #     window, and does a lock-free seqlock lookup — returning the inline
+  #     metadata record bytes on a hit.
+  #   * `submitRecord` appends a metadata record to the MPSC ring so the daemon
+  #     publishes it to the table for other live builds (warm-on-record and
+  #     warm-on-miss).
+
+  proc readerSlotForPid*(): int {.inline.} =
+    int(uint64(getCurrentProcessId()) mod uint64(MaxReaders))
+
+  proc followLiveGeneration*(idx: var ShmIndex): bool =
+    ## Ensure `idx.liveSeg` is attached to the control region's CURRENT
+    ## generation (the daemon may have CAS-resized since we last looked). Best
+    ## effort: returns true iff a valid live segment is attached afterwards.
+    if not idx.available: return false
+    let gen = idx.currentGeneration()
+    if idx.liveSeg.isValid and idx.liveSeg.generation == gen:
+      return true
+    let cap = int(loadU64Relaxed(idx.ctl.base, CtlOffSegSlotCap))
+    discard idx.attachGeneration(gen, cap)
+    idx.liveSeg.isValid
+
+  proc lookupMetadata*(idx: var ShmIndex; digest: openArray[byte];
+      readerSlot: int; rec: var seq[byte]): bool =
+    ## Lock-free shm-first read of the metadata record for `digest` (the weak
+    ## fingerprint's 32 bytes). Publishes the reader epoch (RCU grace) for the
+    ## generation it reads, follows a generation swap, and retries a raced slot
+    ## a bounded number of times. Returns true + fills `rec` on a stable hit;
+    ## false on a miss / torn-after-retries / unavailable (caller falls to
+    ## Tier-1 disk — the decision is unchanged, shm is purely an accelerator).
+    if not idx.available: return false
+    if not idx.followLiveGeneration(): return false
+    var snap: SlotSnapshot
+    var tries = 0
+    while tries < 64:
+      # Re-follow in case the generation advanced between attempts; publish the
+      # (possibly new) epoch before each read so the daemon's RCU grace pins the
+      # generation we are actually reading.
+      if not idx.followLiveGeneration():
+        break
+      idx.publishReaderEpoch(readerSlot, idx.liveSeg.generation)
+      let st = idx.liveSeg.lookupSlot(digest, snap)
+      case st
+      of srsHit:
+        rec = snap.rec
+        idx.publishReaderEpoch(readerSlot, 0)     # done reading (idle)
+        return true
+      of srsMiss, srsProbeFull:
+        idx.publishReaderEpoch(readerSlot, 0)
+        return false
+      of srsRetry:
+        inc tries                                  # raced: retry the lookup
+    idx.publishReaderEpoch(readerSlot, 0)
+    false
+
+  proc submitRecord*(idx: ShmIndex; digest: openArray[byte];
+      rec: openArray[byte]): bool =
+    ## MPSC-ring append of a metadata record so the daemon publishes it to the
+    ## shared table (warm-on-record / warm-on-miss). Best effort: a full ring
+    ## (`rasDropped`, signalled) or an oversized record just means the record is
+    ## Tier-1-only and its future lookups fall through to disk — still correct.
+    if not idx.available: return false
+    idx.ringView.append(digest, rec) == rasAppended
+
+  const OwnerHeartbeatTtlSeconds* = 5.0
+    ## Mirrors the daemon's `HeartbeatTtlSeconds` (AC-2b): an owner whose
+    ## heartbeat is older than this (or whose pid is dead) is presumed gone.
+
+  proc ownerLooksStale*(idx: ShmIndex): bool =
+    ## True when NO live daemon owns the control region: the pid is unclaimed,
+    ## the owning PROCESS is dead (`kill(pid,0)` ⇒ ESRCH — a hard crash), OR the
+    ## heartbeat TTL elapsed. Used by an ENGINE to decide whether to auto-spawn a
+    ## daemon (AC-2c). This is a read-only PROBE — the election's actual
+    ## linearization point stays the daemon's `daemonPid` CAS, so a redundant
+    ## spawn (two engines both probing stale at once) is harmless: only one wins
+    ## the CAS. Mirrors the daemon's `ownershipIsStale` without importing the
+    ## daemon module (which would create an import cycle through repro_local_store).
+    if not idx.available: return false
+    let pid = loadU64Acquire(idx.ctl.base, CtlOffDaemonPid)
+    if pid == 0: return true
+    when defined(posix):
+      if posix.kill(Pid(pid), cint(0)) != 0:
+        return true                                  # ESRCH: owner process gone
+    let hb = loadU64Acquire(idx.ctl.base, CtlOffDaemonHeartbeat)
+    if hb == 0: return true
+    (epochTime() - float(hb)) > OwnerHeartbeatTtlSeconds
+
 else:
   # Non-POSIX: the library compiles but reports unavailable so callers fall to
   # the Tier-1 disk-only path (AC-2c).
@@ -207,3 +308,15 @@ else:
     ShmIndex(available: false, cacheRoot: cacheRoot)
 
   proc close*(idx: var ShmIndex) = discard
+
+  # Engine front-end stubs: on a non-POSIX host the shm tier is unavailable, so
+  # every call is a no-op and the engine runs pure Tier-1 disk-only (AC-2c
+  # fallback). Signatures mirror the POSIX versions so `repro_local_store`
+  # compiles unchanged.
+  proc readerSlotForPid*(): int {.inline.} = 0
+  proc followLiveGeneration*(idx: var ShmIndex): bool = false
+  proc lookupMetadata*(idx: var ShmIndex; digest: openArray[byte];
+      readerSlot: int; rec: var seq[byte]): bool = false
+  proc submitRecord*(idx: ShmIndex; digest: openArray[byte];
+      rec: openArray[byte]): bool = false
+  proc publishReaderEpoch*(idx: ShmIndex; slot: int; gen: uint32) = discard

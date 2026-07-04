@@ -45,6 +45,13 @@ repro-binary-cache-crosshost apps/repro-binary-cache-crosshost/repro_binary_cach
 # newHttpClient an SSL context for https:// endpoints). Plain http:// is
 # unchanged; the manifest ECDSA-P256 signature stays the end-to-end trust.
 repro-binary-cache-client apps/repro-binary-cache-client/repro_binary_cache_client_cli.nim --define:ssl
+# Action-Cache-Per-Edge-Store AC-2c: the single-writer shared-memory
+# action-cache daemon. A build engine auto-spawns this (detached) the first
+# time it opens a cache root whose shm control region has no live owner; the
+# control-region pid/heartbeat election (AC-2b) keeps exactly one owner per
+# root. Self-reaps after an idle window so isolated / hermetic-test roots do
+# not leak daemons.
+repro-cache-daemon apps/repro-cache-daemon/repro_cache_daemon.nim
 repro-peer-cache-tier2 apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim
 repro-peer-cache-admin apps/repro-peer-cache-admin/repro_peer_cache_admin.nim
 repro-peer-cache-mint-cert apps/repro-peer-cache-mint-cert/repro_peer_cache_mint_cert.nim

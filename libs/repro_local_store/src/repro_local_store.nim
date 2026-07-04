@@ -1,4 +1,4 @@
-import std/[algorithm, options, os, sets, strutils, tables, times]
+import std/[algorithm, options, os, osproc, sets, strutils, tables, times]
 
 when defined(posix):
   import std/posix
@@ -20,6 +20,7 @@ when defined(posix):
 
 import repro_core
 import repro_hash
+import repro_shm_index
 
 # Re-export the new M56 content-addressed local store API. The pre-M56
 # `LocalCas` and `ActionCache` types below remain for the action-cache
@@ -88,8 +89,25 @@ type
   LocalCas* = object
     root*: string
 
+  ShmTier* = ref object
+    ## The engine's attached view of the shared-memory hot tier (AC-2c) for one
+    ## cache root. A `ref` so an `ActionCache` VALUE can be copied (the warm
+    ## handle in the engine is copied in/out of a process-wide table) without
+    ## duplicating the mapped fds / double-attaching / double-closing — every
+    ## copy shares the one attached index. `enabled` gates the whole tier: when
+    ## false (non-POSIX, no atomics, attach failed, or opted out) every read is
+    ## pure Tier-1 disk and every record is Tier-1-only — exactly AC-1b behavior.
+    enabled*: bool
+    idx*: ShmIndex
+    readerSlot*: int
+
   ActionCache* = object
     root*: string
+    shm*: ShmTier
+      ## The optional shared-memory accelerator (AC-2c). nil / disabled ⇒ pure
+      ## Tier-1 disk-only (the AC-1b path). The DECISION (hit/miss/strong-fp) is
+      ## identical either way; shm only changes where a metadata record is
+      ## SOURCED (shm-first, warm-on-miss) and adds a ring submit on record.
     # Root holding the authoritative per-edge record store. Each edge (keyed
     # by its weak fingerprint via `perEdgeDirName`) owns a DIRECTORY
     # `hot-records/<key>/` containing one `<nonce>.rec` file per observed
@@ -1095,17 +1113,40 @@ proc migrateLegacyFile(cache: ActionCache; weak: ContentDigest) =
     cache.writeRecFileAtomically(dirPath,
       recFileNameForStrong(recs[0].strongFingerprint), recs)
 
+proc submitToShm(cache: ActionCache; record: ActionResultRecord) =
+  ## AC-2c engine WRITE path (§4.4): submit `record`'s METADATA-ONLY encoding to
+  ## the MPSC ring so the single-writer daemon publishes it to the shared table
+  ## for OTHER concurrently-running builds (live cross-build sharing). The engine
+  ## NEVER writes the shared table itself — only the daemon does. Best-effort:
+  ## a full ring (signalled drop) or oversized metadata (> the inline slot cap)
+  ## just leaves the record Tier-1-only; its future lookups fall through to disk
+  ## — still correct. The keyDigest is the weak fingerprint's 32 bytes.
+  ##
+  ## We submit the FULL encoded record (same bytes the engine just wrote to
+  ## Tier-1). This keeps the STRONG fingerprint + inputs intact so (a) the
+  ## daemon's Tier-1 persist round-trips byte-identically (never downgrading the
+  ## durable record) and (b) a shm-served read reconstructs the SAME record the
+  ## disk read would — the decision is unchanged. Records whose full encoding
+  ## exceeds the inline slot cap are simply not shm-cached (Tier-1-only).
+  if cache.shm == nil or not cache.shm.enabled: return
+  let enc = encodeActionResultRecord(record)
+  discard cache.shm.idx.submitRecord(record.weakFingerprint.bytes, enc)
+
 proc writePerEdgeRecord(cache: ActionCache; record: ActionResultRecord) =
   ## Publish ONE path-set's record into its edge directory
   ## `hot-records/<key>/<strongFp>.rec` via temp-file + atomic rename, WITHOUT
   ## touching any sibling `.rec` from a distinct concurrent path-set (AC-1b).
   ## Same strong fingerprint → same filename → convergence (an overwrite, never
   ## an accumulation). Bounded by `MaxRecFilesPerEdge`.
+  ##
+  ## AC-2c: the DURABLE Tier-1 write is unchanged (the backstop); we ALSO submit
+  ## the metadata record to the shm ring so the daemon warms other live builds.
   cache.migrateLegacyFile(record.weakFingerprint)
   let dirPath = cache.perEdgeDirPath(record.weakFingerprint)
   cache.writeRecFileAtomically(dirPath,
     recFileNameForStrong(record.strongFingerprint), @[record])
   cache.capRecFiles(dirPath)
+  cache.submitToShm(record)
 
 proc writePerEdgeRecords*(cache: ActionCache; weak: ContentDigest;
                          records: openArray[ActionResultRecord]) =
@@ -1170,16 +1211,65 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
   HotMetadataScan(status: hmssHit, recordCount: totalRecords,
     checkedInputCount: checkedInputs)
 
+proc shmReadRecord(cache: ActionCache; weak: ContentDigest):
+    tuple[found: bool; record: ActionResultRecord] =
+  ## AC-2c engine READ path (§4.3): lock-free seqlock read of the shm slot for
+  ## `weak` on the current generation. On a hit the inline bytes decode to the
+  ## FULL record another build submitted (byte-identical to what it wrote to
+  ## Tier-1), so this is a genuine shm-SERVED record — visible the instant the
+  ## daemon publishes it, independent of THIS process's Tier-1 view. A miss /
+  ## torn-after-retries / disabled tier returns not-found and the caller reads
+  ## Tier-1 disk (the decision is unchanged; shm is purely an accelerator).
+  if cache.shm == nil or not cache.shm.enabled:
+    return (found: false, record: ActionResultRecord())
+  var rec: seq[byte]
+  if not cache.shm.idx.lookupMetadata(weak.bytes, cache.shm.readerSlot, rec):
+    return (found: false, record: ActionResultRecord())
+  try:
+    let decoded = decodeActionResultRecord(rec)
+    if decoded.weakFingerprint == weak:
+      return (found: true, record: decoded)
+  except CatchableError:
+    discard
+  (found: false, record: ActionResultRecord())
+
+proc warmShmFromDisk(cache: ActionCache; record: ActionResultRecord) =
+  ## AC-2c warm-on-miss (§4.3): the record was found on Tier-1 disk but the shm
+  ## slot missed (a fresh daemon / evicted slot / another build's record we saw
+  ## on disk first). Submit it so the daemon publishes it to the shared table
+  ## for the NEXT lookup / other live builds. Best-effort (same submit path as
+  ## record).
+  cache.submitToShm(record)
+
 proc readHotRecord*(cache: var ActionCache; weak: ContentDigest):
     tuple[found: bool; record: ActionResultRecord] =
-  ## Read the newest metadata-only view of the edge's record from its single
-  ## per-edge file. Returns the most recent record (last in the bounded set)
-  ## matching `weak`, downcast to metadata-only so callers observe the same
-  ## shape the old hot store returned.
+  ## Read the newest metadata-only view of the edge's record.
+  ##
+  ## AC-2c: shm-first for the SHARED case, but Tier-1 disk stays authoritative
+  ## for the edge's NEWEST record so the decision is provably identical to
+  ## AC-1b. Concretely:
+  ##   * Read the edge's Tier-1 records (union of all path-sets, newest-ordered).
+  ##     If ANY match, return the disk newest exactly as AC-1b did AND — if the
+  ##     shm slot missed — warm it (submit) so future reads hit in shm. This
+  ##     NEVER lets a stale shm slot override the disk newest (no false miss).
+  ##   * Only when the edge has NO Tier-1 record at all do we consult shm: a
+  ##     genuine live-sharing rescue (another build's in-flight record the daemon
+  ##     published to shm but that THIS process has not yet read from disk). Such
+  ##     a shm hit is a valid record for `weak`; the caller re-checks input
+  ##     freshness, so it can only become a correct hit — never a false one.
   let records = cache.loadPerEdgeRecords(weak)
   for i in countdown(records.high, 0):
     if records[i].weakFingerprint == weak:
+      # Disk has the edge: warm shm if it was cold, then return the disk newest.
+      let shmHit = cache.shmReadRecord(weak)
+      if not shmHit.found:
+        cache.warmShmFromDisk(records[i])
       return (found: true, record: hotMetadataRecord(records[i]))
+  # Disk miss: the only possible hit is a live-shared record served from shm.
+  let shmHit = cache.shmReadRecord(weak)
+  if shmHit.found:
+    return (found: true, record: hotMetadataRecord(shmHit.record))
+  (found: false, record: ActionResultRecord())
 
 proc appendActionResultRecord*(cache: var ActionCache;
                                record: ActionResultRecord) {.gcsafe.} =
@@ -1200,11 +1290,37 @@ proc loadRecordsForWeak(cache: ActionCache; weak: ContentDigest):
   ## scan. All distinct concurrent path-sets are considered, so the normal
   ## strong-fingerprint match can hit whichever path-set matches the current
   ## inputs (AC-1b). Bounded by `MaxRecFilesPerEdge` (the disk cap).
+  ##
+  ## AC-2c (§4.3): the shm slot for `weak` is UNIONED in as an ADDITIONAL
+  ## candidate (a live-shared record another build published that this process
+  ## has not yet read from disk). This is DECISION-SAFE: every candidate — disk
+  ## or shm — is run through the SAME weak→strong / input-freshness / output-
+  ## verify check by `lookupActionResult`, so a shm candidate can only turn a
+  ## MISS into a HIT (live sharing) or be a no-op (deduped / rejected). It can
+  ## never produce a FALSE hit (the strong-fp + output check still gate it) nor
+  ## a FALSE miss (every disk record is still present). The shm candidate is
+  ## appended LAST so the reverse-iterating decision considers the freshest
+  ## cross-build record FIRST; on a shm miss the result is exactly AC-1b's disk
+  ## union. Warm-on-miss: if disk has records but shm was cold, re-publish the
+  ## newest so the next lookup / other live builds hit in shm.
+  var seenStrong = initHashSet[string]()
   for record in cache.loadPerEdgeRecords(weak):
     if record.weakFingerprint == weak:
       result.add(record)
+      seenStrong.incl(digestKey(record.strongFingerprint))
       if result.len > MaxRecFilesPerEdge:
         result = result[result.len - MaxRecFilesPerEdge .. ^1]
+  let shmHit = cache.shmReadRecord(weak)
+  if shmHit.found and shmHit.record.weakFingerprint == weak and
+      not seenStrong.contains(digestKey(shmHit.record.strongFingerprint)):
+    # A live-shared record this process's disk union does not have yet: consider
+    # it FIRST (append last → reverse iteration hits it first).
+    result.add(shmHit.record)
+    if result.len > MaxRecFilesPerEdge:
+      result = result[result.len - MaxRecFilesPerEdge .. ^1]
+  elif not shmHit.found and result.len > 0:
+    # Disk hit but shm cold: warm the slot for the next lookup / other builds.
+    cache.warmShmFromDisk(result[^1])
 
 const LegacyGlobalStoreFiles = [
   "action-results.records",
@@ -1225,7 +1341,102 @@ proc removeLegacyGlobalStore(root: string) =
       except OSError:
         discard
 
-proc openActionCache*(root: string): ActionCache =
+# --- Tier-2 shared-memory accelerator wiring (AC-2c) ----------------------
+#
+# The shm tier is OPTIONAL and BEST-EFFORT (Action-Cache-Per-Edge-Store.md §4.6,
+# §4.7). `openActionCache` attempts to attach the shm index for the root and to
+# ensure a cache daemon owns it; ANY failure (non-POSIX, no atomics, permission,
+# opted out via env) leaves `cache.shm` disabled and the engine runs pure Tier-1
+# disk-only — exactly the AC-1b behavior. A build NEVER fails or blocks because
+# the shm tier is unavailable.
+
+const
+  ShmDisableEnv = "REPRO_ACTION_CACHE_SHM"
+    ## Set to "0"/"off"/"false"/"no" to force pure Tier-1 (disable the shm
+    ## accelerator) — used by the fallback subtest and by callers on hosts where
+    ## shared memory is undesirable.
+  CacheDaemonEnv = "REPRO_CACHE_DAEMON_BIN"
+    ## Optional override of the `repro-cache-daemon` binary path the engine
+    ## auto-spawns. Defaults to a sibling of the current executable.
+  CacheDaemonIdleEnv = "REPRO_CACHE_DAEMON_IDLE_MS"
+    ## Optional override of the auto-spawned daemon's self-reap idle window (ms).
+    ## Hermetic tests set a small value so an isolated-root daemon exits promptly
+    ## and does not linger holding the temp cache root; the daemon's own default
+    ## (30 s, §4.7) applies when unset.
+
+proc shmTierEnabledByEnv(): bool =
+  ## The shm tier is on by default; an explicit falsey env var forces it off.
+  let v = getEnv(ShmDisableEnv, "1").toLowerAscii()
+  v notin ["0", "off", "false", "no"]
+
+proc cacheDaemonBinPath(): string =
+  ## Locate the `repro-cache-daemon` binary: an explicit override, else a
+  ## sibling of the current executable (both are installed into the same
+  ## `build/bin` / package `bin`). Empty if none is found (⇒ no auto-spawn; the
+  ## engine still reads/submits shm, and any co-running engine that DID spawn a
+  ## daemon services the table — else pure Tier-1).
+  let overridePath = getEnv(CacheDaemonEnv, "")
+  if overridePath.len > 0 and fileExists(overridePath):
+    return overridePath
+  try:
+    let selfDir = getAppDir()
+    for name in ["repro-cache-daemon", "repro_cache_daemon"]:
+      let p = selfDir / name
+      if fileExists(p):
+        return p
+  except CatchableError:
+    discard
+  ""
+
+proc ensureCacheDaemon(root: string; idx: ShmIndex) =
+  ## Best-effort: if no live daemon owns the shm control region for `root`,
+  ## spawn `repro-cache-daemon` DETACHED for it. The control-region
+  ## pid/heartbeat election makes a redundant spawn harmless (only one wins), so
+  ## we never coordinate — we just spawn when the region looks unowned. A failed
+  ## spawn is swallowed: the engine's reads/submits still work (a co-running
+  ## engine may have spawned the owner) and, worst case, records stay Tier-1.
+  when shmIndexSupported:
+    if not idx.available: return
+    if not ownerLooksStale(idx): return        # a live owner already runs
+    let bin = cacheDaemonBinPath()
+    if bin.len == 0: return
+    var args = @["--action-cache-root=" & root]
+    let idleMs = getEnv(CacheDaemonIdleEnv, "")
+    if idleMs.len > 0:
+      args.add("--idle-exit-ms=" & idleMs)
+    try:
+      let p = startProcess(bin, args = args,
+        options = {poDaemon, poStdErrToStdOut})
+      # Detach: we do not wait on it. `poDaemon` puts it in its own session so
+      # it outlives this engine (and services other concurrent builds).
+      close(p)
+    except CatchableError, OSError:
+      discard
+  else:
+    discard
+
+proc attachShmTier(root: string): ShmTier =
+  ## Attach the shm index for `root` and ensure a daemon owns it. Best-effort:
+  ## returns a DISABLED tier (engine runs pure Tier-1) on any failure or opt-out.
+  result = ShmTier(enabled: false, readerSlot: 0)
+  when shmIndexSupported:
+    if not shmIndexSupported: return
+    if not shmTierEnabledByEnv(): return
+    var idx = openShmIndex(root)               # create ctl + gen-0 if absent
+    if not idx.available:
+      return
+    result.idx = idx
+    result.readerSlot = readerSlotForPid()
+    result.enabled = true
+    ensureCacheDaemon(root, idx)
+
+proc openActionCache*(root: string; attachShm = true): ActionCache =
+  ## Open the per-edge Tier-1 store for `root`. When `attachShm` (the default,
+  ## the ENGINE path) it also attaches the OPTIONAL shared-memory hot tier and
+  ## ensures its daemon (AC-2c). The DAEMON opens its OWN store with
+  ## `attachShm = false` — it manages the shm table directly and must not
+  ## recursively auto-spawn itself nor submit its persisted records back into
+  ## the ring it drains.
   result.root = root
   result.hotRoot = root / "hot-records"
   createDir(extendedPath(result.root))
@@ -1234,6 +1445,13 @@ proc openActionCache*(root: string): ActionCache =
   # pre-existing `action-results.*` files and delete them on open so a
   # migrated cache root stops growing without a re-init.
   removeLegacyGlobalStore(result.root)
+  # Attach the OPTIONAL shared-memory hot tier (AC-2c) + ensure its daemon. On
+  # any failure (or `attachShm = false`) this is a disabled tier and the cache
+  # is pure Tier-1 (AC-1b).
+  if attachShm:
+    result.shm = attachShmTier(root)
+  else:
+    result.shm = ShmTier(enabled: false)
 
 proc flushHotIndex*(cache: var ActionCache) =
   ## Retained as a public no-op for callers that flushed the former
@@ -1241,6 +1459,16 @@ proc flushHotIndex*(cache: var ActionCache) =
   ## and atomically at record time, so there is nothing to flush. (The
   ## shared-memory write-back tier is AC-2; this proc gains real work there.)
   discard
+
+proc closeShmTier*(cache: var ActionCache) =
+  ## Detach the optional shm hot tier (unmap + close fds). Best-effort; safe to
+  ## call on a disabled/nil tier. The engine's process-long warm handle need not
+  ## call this (process exit reclaims the mappings); hermetic tests that open +
+  ## discard many caches call it to avoid fd growth. Does NOT stop the daemon —
+  ## the daemon self-reaps after its idle window (§4.7).
+  if cache.shm != nil and cache.shm.enabled:
+    cache.shm.idx.close()
+    cache.shm.enabled = false
 
 proc lookupHotMetadataRecord*(cache: var ActionCache; weak: ContentDigest;
                               policy: FileFingerprintPolicy):

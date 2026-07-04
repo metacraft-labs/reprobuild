@@ -5422,6 +5422,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_action_cache_two_tier_concurrent_builds_no_wedge_live_sharing.nim",
+    binary: "build/test-bin/t_action_cache_two_tier_concurrent_builds_no_wedge_live_sharing",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim",
     binary: "build/test-bin/t_add_respects_develop_mode_policy_and_overrides",
     defines: @[],

@@ -160,7 +160,11 @@ when shmIndexSupported:
     ## Tier-1 store (warm-start is lazy — §4.7).
     result.cacheRoot = cacheRoot
     result.idx = openShmIndex(cacheRoot, slotCap)
-    result.store = openActionCache(cacheRoot)
+    # The daemon is the SOLE shm writer: it opens its Tier-1 store WITHOUT the
+    # engine-side shm accelerator (`attachShm = false`) so it neither
+    # auto-spawns itself nor submits its own persisted records back into the
+    # ring it drains (AC-2c). It writes the shm table directly.
+    result.store = openActionCache(cacheRoot, attachShm = false)
     result.dirty = initTable[string, ContentDigest]()
 
   proc close*(d: var CacheDaemon) =
