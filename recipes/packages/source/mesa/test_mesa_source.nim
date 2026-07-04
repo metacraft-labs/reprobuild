@@ -27,10 +27,10 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "https://archive.mesa3d.org/mesa-23.3.6.tar.xz"
+  "https://archive.mesa3d.org/mesa-24.0.9.tar.xz"
 
 const ExpectedHash =
-  "cd3d6c60121dea73abbae99d399dc2facaecde1a8c6bd647e6d85410ff4b577b"
+  "51aa686ca4060e38711a9e8f60c8f1efaa516baf411946ed7f2c265cd582ca4c"
 
 suite "mesaSource — from-source recipe smoke test":
 
@@ -75,8 +75,8 @@ suite "mesaSource — from-source recipe smoke test":
   test "versions block records the upstream tag + URL + repository":
     let vs = registeredVersions("mesaSource")
     check vs.len == 1
-    check vs[0].version == "23.3.6"
-    check vs[0].sourceRevision == "mesa-23.3.6"
+    check vs[0].version == "24.0.9"
+    check vs[0].sourceRevision == "mesa-24.0.9"
     check vs[0].sourceUrl ==
-      "https://archive.mesa3d.org/mesa-23.3.6.tar.xz"
+      "https://archive.mesa3d.org/mesa-24.0.9.tar.xz"
     check vs[0].sourceRepository == "https://gitlab.freedesktop.org/mesa/mesa"

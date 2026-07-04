@@ -30,8 +30,8 @@
 ##
 ## ## sha256 strategy
 ##
-## We vendor the upstream 24.2.8 .tar.xz at
-## ``recipes/packages/source/mesa/vendor/mesa-24.2.8.tar.xz`` and
+## We vendor the upstream 24.0.9 .tar.xz at
+## ``recipes/packages/source/mesa/vendor/mesa-24.0.9.tar.xz`` and
 ## reference it via the canonical upstream URL recorded both in the
 ## ``versions:`` block AND the live ``fetch:`` block (the vendored copy
 ## is the on-host snapshot the canonical URL resolved to at
@@ -39,8 +39,15 @@
 ## post-M9.R.14d.2 convention that EVERY ``fetch:`` URL points at the
 ## upstream URL, never at a host-absolute ``file:///`` path.
 ##
-## ## Version choice — 23.3.6 (last stable before the 24.x
-## ``loader_wayland_helper.c`` regression)
+## ## Version choice — 24.0.9 (last 24.0.x before the 24.1+
+## ``loader_wayland_helper.c`` regression, ships DRI_IMAGE_DRIVER v1)
+##
+## M9.R.71 established empirically that Mesa 23.3.6 boots sway into
+## wlroots' HEADLESS backend on QEMU bochs-drm because wlroots' GBM
+## probe (``egl.c:create_gbm_device``) fails with
+## ``did not find extension DRI_IMAGE_DRIVER version 1``. The DRM
+## backend refuses to initialise; sway runs but renders no frames to
+## the framebuffer. Bumping to Mesa 24.0.x closes the gap.
 ##
 ## Mesa 24.2.8 and 24.3.4 ship a known compile-time bug in
 ## ``src/loader/loader_wayland_helper.c``: the function
@@ -55,20 +62,20 @@
 ##   error: implicit declaration of function 'clock_gettime'
 ##   error: 'CLOCK_MONOTONIC' undeclared
 ##
-## Mesa 23.3.6 PRE-DATES the ``loader_wayland_helper.c`` file
-## entirely (the file was added in mesa 24.0). Switching to the
-## 23.3.x line avoids the broken file without compromising on the
-## OpenGL/EGL/GBM ABI surface — KF6 / Qt6 / GNOME consumers do not
-## pin a tighter mesa version, and 23.3 still ships every public
-## symbol we need (libGL, libEGL, libGLESv2, libgbm).
+## Mesa 24.0.9 PRE-DATES the ``loader_wayland_helper.c`` file
+## entirely (verified against the vendored 24.0.9 tarball —
+## ``src/loader/`` contains loader.c + loader_dri3_helper.c +
+## loader_dri_helper.c only, no wayland helper). This gives us the
+## DRI_IMAGE_DRIVER v1 surface wlroots 0.19's GBM-backed DRM backend
+## needs while sidestepping the 24.1+ wayland-helper compile break.
 ##
 ## Once the v1 patching infrastructure lands (M9.M+), we can re-bump
-## to a 24.x stable with the one-line ``#include`` fix applied as a
-## proper patch series.
+## to a 24.2 / 24.3 stable with the one-line ``#include`` fix
+## applied as a proper patch series.
 ##
-## sha256 = cd3d6c60121dea73abbae99d399dc2facaecde1a8c6bd647e6d85410ff4b577b
-##  (computed locally over the vendored ``mesa-23.3.6.tar.xz``,
-##  19,455,492 bytes; downloaded once from the upstream URL recorded
+## sha256 = 51aa686ca4060e38711a9e8f60c8f1efaa516baf411946ed7f2c265cd582ca4c
+##  (computed locally over the vendored ``mesa-24.0.9.tar.xz``,
+##  20,197,892 bytes; downloaded once from the upstream URL recorded
 ##  in ``versions:`` above).
 ##
 ## ## Build shape
@@ -87,19 +94,20 @@
 ##                                 rasterizer satisfies compositor
 ##                                 startup probes without GPU).
 ##   * ``gallium-drivers=swrast`` — software rasterizer ONLY. Mesa
-##                                 23.3.x still ships ``swrast`` as a
-##                                 native choice (the 24.x rename to
-##                                 ``softpipe,llvmpipe`` happened
-##                                 post-24.0). ``swrast`` on 23.3
-##                                 builds the pure-C softpipe path
-##                                 when LLVM is disabled. No hardware
-##                                 drivers (i915, iris, radeon,
-##                                 nouveau, etc.) — these would pull
-##                                 libpciaccess + LLVM + kernel-DRM
-##                                 deps far beyond v1 scope. swrast is
-##                                 enough for KF6 / GNOME / Qt6 to
-##                                 link + run their software-fallback
-##                                 paths.
+##                                 24.0.x still ships ``swrast`` as a
+##                                 native gallium-drivers choice
+##                                 (verified against 24.0.9
+##                                 ``meson_options.txt``, choices list
+##                                 includes ``swrast``). ``swrast`` on
+##                                 24.0 builds the pure-C softpipe
+##                                 path when LLVM is disabled. No
+##                                 hardware drivers (i915, iris,
+##                                 radeon, nouveau, etc.) — these
+##                                 would pull libpciaccess + LLVM +
+##                                 kernel-DRM deps far beyond v1
+##                                 scope. swrast is enough for KF6 /
+##                                 GNOME / Qt6 to link + run their
+##                                 software-fallback paths.
 ##   * ``platforms=wayland``     — Wayland platform support ONLY. No
 ##                                 X11 (xcb/xlib) — the v1 desktop is
 ##                                 Wayland-native.
@@ -151,9 +159,12 @@ package mesaSource:
     ## archive.mesa3d.org release tarball URL; ``sourceRepository``
     ## points at the upstream gitlab project that hosts the mesa
     ## source tree.
-    "23.3.6":
-      sourceRevision = "mesa-23.3.6"
-      sourceUrl = "https://archive.mesa3d.org/mesa-23.3.6.tar.xz"
+    ##
+    ## M9.R.78.1: bumped 23.3.6 -> 24.0.9 to publish
+    ## DRI_IMAGE_DRIVER v1 (wlroots 0.19 GBM-EGL probe requirement).
+    "24.0.9":
+      sourceRevision = "mesa-24.0.9"
+      sourceUrl = "https://archive.mesa3d.org/mesa-24.0.9.tar.xz"
       sourceRepository = "https://gitlab.freedesktop.org/mesa/mesa"
 
   fetch:
@@ -163,11 +174,11 @@ package mesaSource:
     ## engine's content-addressed cache fingerprint stays stable
     ## across rebuilds.
     ##
-    ## sha256 was computed over the vendored 19,455,492-byte tarball
+    ## sha256 was computed over the vendored 20,197,892-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "https://archive.mesa3d.org/mesa-23.3.6.tar.xz"
-    sha256: "cd3d6c60121dea73abbae99d399dc2facaecde1a8c6bd647e6d85410ff4b577b"
+    url: "https://archive.mesa3d.org/mesa-24.0.9.tar.xz"
+    sha256: "51aa686ca4060e38711a9e8f60c8f1efaa516baf411946ed7f2c265cd582ca4c"
     extractStrip: 1
 
   nativeBuildDeps:
