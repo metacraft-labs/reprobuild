@@ -374,9 +374,38 @@ type
     monitorProbes*: seq[string]
     diagnostics*: seq[string]
 
+  MonitorEvidenceStatus* = enum
+    ## M9.R.72.3 — spec-graded monitor-loss status. Implements the ladder
+    ## from Failure-Semantics.md §"Monitoring Failures":
+    ##   Level 0 (no loss):        publish action-cache record.
+    ##   Level 1 (known scope):    invalidate affected path set;
+    ##                             this session's cache publish MAY be skipped
+    ##                             depending on the classifier.
+    ##   Level 2 (unknown scope):  disable cache hits for the session;
+    ##                             action still succeeds, no cache publish.
+    ##   Level 3 (no monitoring):  fail the action.
+    ##
+    ## Before M9.R.72.3, all of Levels 1/2/3 were collapsed into Level 3 by
+    ## the ``publishable = false`` sentinel in ``foldMonitorDepFileEvidence``
+    ## and ``collectEvidence``. See recipes/reproos-image/run-evidence/m9r72/
+    ## m9r72_phaseB_gap_enumeration.txt Gap I.
+    mesComplete            ## Level 0
+    mesKnownScopeLoss      ## Level 1 (currently treated as Level 2)
+    mesUnknownScopeLoss    ## Level 2
+    mesMonitorUnavailable  ## Level 3
+
   EvidenceCollection = object
     evidence: PathSetEvidence
     publishable: bool
+    disableCacheHits: bool
+      ## M9.R.72.3 — when ``true``, the action MAY still succeed (exit=0
+      ## flows through completeSuccess with asSucceeded) but MUST NOT
+      ## publish an action-cache record. Set when the monitor evidence
+      ## is incomplete due to Level 1/2 loss and ``publishable`` was
+      ## downgraded from a hard-fail to a cache-skip per the spec's
+      ## Failure-Semantics.md ladder. When ``false`` and
+      ## ``publishable == false``, the action is a Level 3 fail.
+    monitorStatus: MonitorEvidenceStatus
 
   ActionResult* = object
     id*: string
@@ -1234,20 +1263,88 @@ proc monitorProfileEvidenceComplete(detail: string): bool =
     if pair.len == 2 and pair[0] == "evidenceComplete":
       return pair[1] == "true"
 
+proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
+  ## M9.R.72.3 — spec-graded classification of io-mon eventLoss records.
+  ##
+  ## Maps the ``detail`` string io-mon's writer.nim emits at loss-injection
+  ## time to the Failure-Semantics.md monitor-loss ladder level. The detail
+  ## strings are documented in io-mon's src/io_mon/writer.nim at the emit
+  ## sites:
+  ##
+  ##   * "process killed with an un-flushed read batch (kill-before-flush)"
+  ##     — writer.nim:2205 / :2224. A subprocess died before flushing its
+  ##     read-batch tail. The io-mon writer knows precisely which pid/tid
+  ##     it lost, and every OTHER record in the RMDF is trustworthy.
+  ##     Level 1 (known scope): downgrade the session to non-cacheable but
+  ##     let the action succeed. Currently treated as Level 2 in this
+  ##     initial implementation until the per-class narrow-invalidation of
+  ##     Level 1 (Gap II in m9r72_phaseB_gap_enumeration.txt) is scoped.
+  ##
+  ##   * "unmonitored subtree/peer" — writer.nim:2266. A spawn/exec subtree
+  ##     ran under NO monitoring OR the client talked to an out-of-tree
+  ##     breakaway daemon. Level 2 (unknown scope for the peer's content).
+  ##
+  ##   * "ambiguous unstamped fragment record" — writer.nim:2062. Two runs
+  ##     shared a pid slot and we can't attribute a record to either.
+  ##     Level 2 (unknown scope).
+  ##
+  ##   * "duplicate identity token in fragment record" — writer.nim:2034 /
+  ##     :2068. A shim identity token appeared twice, so record-ordering
+  ##     integrity is compromised. Level 2.
+  ##
+  ## Every other unknown detail defaults to mesUnknownScopeLoss to fail
+  ## closed conservatively — the spec's R3 general rule for ambiguous
+  ## correctness failures.
+  const
+    KillBeforeFlushPrefix = "process killed with an un-flushed read batch"
+    UnmonitoredSubtreePrefix = "unmonitored subtree/peer"
+    AmbiguousUnstampedPrefix = "ambiguous unstamped fragment record"
+    DuplicateIdentityPrefix = "duplicate identity token"
+    ExternalContentPrefix = "external content"
+    BreakawayReportPrefix = "breakaway-report"
+  if detail.startsWith(KillBeforeFlushPrefix):
+    return mesKnownScopeLoss
+  if detail.startsWith(UnmonitoredSubtreePrefix):
+    return mesUnknownScopeLoss
+  if detail.startsWith(AmbiguousUnstampedPrefix):
+    return mesUnknownScopeLoss
+  if detail.startsWith(DuplicateIdentityPrefix):
+    return mesUnknownScopeLoss
+  if detail.startsWith(ExternalContentPrefix):
+    return mesUnknownScopeLoss
+  if detail.startsWith(BreakawayReportPrefix):
+    return mesUnknownScopeLoss
+  # Unknown detail — fail closed conservatively.
+  mesUnknownScopeLoss
+
+proc worseMonitorStatus(a, b: MonitorEvidenceStatus): MonitorEvidenceStatus =
+  ## Ordering: mesComplete < mesKnownScopeLoss < mesUnknownScopeLoss <
+  ## mesMonitorUnavailable. Return whichever is more severe.
+  if ord(a) >= ord(b): a else: b
+
 proc raiseMonitorDecodeError(kind: MonitorDepFileReaderErrorKind;
                              message: string) {.noreturn.} =
   raiseMonitorDepFileReaderError(kind, message)
 
 proc foldMonitorDepFileEvidence(path, cwd: string;
                                 evidence: var PathSetEvidence;
-                                seen: var EvidenceSeenSets): bool =
+                                seen: var EvidenceSeenSets):
+                                MonitorEvidenceStatus =
   ## Fold RMDF records directly into build-engine evidence.
   ##
   ## `io_mon.readMonitorDepFile` materializes both the decoded record seq and a
   ## `MonitorDepFile.records` copy. Provider compilation can emit large RMDFs
   ## because the compiler touches many source/toolchain files, so avoid retaining
   ## a full depfile object when the engine only needs path sets + completeness.
-  result = true
+  ##
+  ## M9.R.72.3: Returns the WORST-observed ``MonitorEvidenceStatus`` (Level 0-3)
+  ## instead of a plain bool. Each ``mrEventLoss`` / ``moEventLoss`` record's
+  ## ``detail`` string is fed through ``classifyEventLossDetail`` so the caller
+  ## can distinguish Level 1 (known-scope, downgrade session to non-cacheable)
+  ## from Level 2 (unknown-scope, disable cache hits) from Level 0 (complete).
+  ## Level 3 (monitor entirely unavailable) is asserted at ``collectEvidence``
+  ## when the ``monitorDepfile`` path itself is empty.
+  result = mesComplete
   if not fileExists(extendedPath(path)):
     raiseMonitorDecodeError(mrMissingFile, "RMDF file does not exist: " & path)
 
@@ -1307,10 +1404,16 @@ proc foldMonitorDepFileEvidence(path, cwd: string;
     inc decodedCount
 
     if record.kind == mrEventLoss or record.observationKind == moEventLoss:
-      result = false
+      # M9.R.72.3 — classify the loss instead of collapsing to a bool.
+      # ``classifyEventLossDetail`` maps io-mon's detail strings to Level
+      # 1 (known scope) or Level 2 (unknown scope); ``worseMonitorStatus``
+      # keeps the worst observed level across the whole depfile so the
+      # caller can decide session cache-skip vs hard-fail conservatively.
+      let recordStatus = classifyEventLossDetail(record.detail)
+      result = worseMonitorStatus(result, recordStatus)
     elif record.kind == mrBackendProfile and
         not monitorProfileEvidenceComplete(record.detail):
-      result = false
+      result = worseMonitorStatus(result, mesUnknownScopeLoss)
 
     let materialized = materialPath(cwd, record.path)
     case record.kind
@@ -1445,24 +1548,78 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
     # forced every from-source recipe's fetch action to fail regardless
     # of the fact that its exit code was 0. See M9.R.60.1's Phase A
     # characterization.
-    let mustFailOnIncompleteEvidence = action.cacheable
+    # M9.R.72.3 — implement the spec's monitor-loss ladder from
+    # Failure-Semantics.md §"Monitoring Failures":
+    #   Level 0 (mesComplete):        publish action-cache record.
+    #   Level 1 (mesKnownScopeLoss):  disable cache hits for this session
+    #                                 (skip action-cache publish) but let
+    #                                 the action succeed; a KNOWN scope
+    #                                 loss (e.g. kill-before-flush of a
+    #                                 specific pid) currently uses the same
+    #                                 Level-2 handling until Gap II's
+    #                                 narrow path-set invalidation ships.
+    #   Level 2 (mesUnknownScopeLoss): disable cache hits for the session.
+    #                                 Same handling as Level 1: succeed
+    #                                 without publishing.
+    #   Level 3 (mesMonitorUnavailable): fail closed. Only when the RMDF
+    #                                 path itself is absent OR the reader
+    #                                 hits a decode error — genuine
+    #                                 "monitoring unavailable" per spec.
+    #
+    # The previous ``mustFailOnIncompleteEvidence = action.cacheable`` flag
+    # collapsed all of Levels 1/2/3 into Level 3, causing exit=0 actions
+    # to flip to asFailed whenever io-mon injected even a single synthetic
+    # mrEventLoss record. See M9.R.60.D + M9.R.68 + M9.R.70 characterizations
+    # and recipes/reproos-image/run-evidence/m9r72/m9r72_phaseB_gap_enumeration.txt
+    # Gap I.
     if action.monitorDepfile.len == 0:
       result.evidence.diagnostics.add(
         "dependency policy requires monitor evidence but no RMDF path is selected")
-      if mustFailOnIncompleteEvidence:
+      # Genuine Level 3: no monitoring output at all. Preserve the M9.R.60.2
+      # non-cacheable carve-out (workspace sync fetch on hosts without a
+      # monitor CLI wired).
+      result.monitorStatus = worseMonitorStatus(result.monitorStatus,
+        mesMonitorUnavailable)
+      if action.cacheable:
         result.publishable = false
       if strict and not result.publishable:
         discard
       return
     try:
-      if not foldMonitorDepFileEvidence(action.monitorDepfile, action.cwd,
-          result.evidence, seen):
+      let status = foldMonitorDepFileEvidence(action.monitorDepfile,
+        action.cwd, result.evidence, seen)
+      result.monitorStatus = worseMonitorStatus(result.monitorStatus, status)
+      case status
+      of mesComplete:
+        discard
+      of mesKnownScopeLoss, mesUnknownScopeLoss:
+        # Spec Level 1/2: session cache-skip, action succeeds. Diagnostic
+        # preserved for ``repro why``. ``publishable`` stays true so the
+        # scheduler does NOT flip status to asFailed; the new
+        # ``disableCacheHits`` signal tells the scheduler to skip the
+        # ``cache.recordActionResult`` publish path.
+        result.evidence.diagnostics.add(
+          "monitor depfile is incomplete (" &
+          (if status == mesKnownScopeLoss: "known-scope loss"
+           else: "unknown-scope loss") &
+          "); action-cache publish skipped this session per " &
+          "Failure-Semantics.md §Monitoring Failures")
+        if action.cacheable:
+          result.disableCacheHits = true
+      of mesMonitorUnavailable:
+        # Unreachable from foldMonitorDepFileEvidence today (Level 3 is
+        # asserted here only when the RMDF path was empty), but future
+        # readers may promote decode errors to Level 3 — keep the branch.
         result.evidence.diagnostics.add("monitor depfile is incomplete")
-        if mustFailOnIncompleteEvidence:
+        if action.cacheable:
           result.publishable = false
     except MonitorDepFileReaderError as err:
       result.evidence.diagnostics.add("monitor depfile read failed: " & err.msg)
-      if mustFailOnIncompleteEvidence:
+      # A decode error means the RMDF file is corrupt — cannot classify the
+      # loss scope, must fail closed on a cacheable action.
+      result.monitorStatus = worseMonitorStatus(result.monitorStatus,
+        mesMonitorUnavailable)
+      if action.cacheable:
         result.publishable = false
   if strict and not result.publishable:
     discard
@@ -4172,7 +4329,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               launchedAny = true
               continue
             invalidateCachedWrites(action, evidence.evidence)
-            if action.cacheable:
+            # M9.R.72.3 — spec Level 1/2 monitor-loss handling. When
+            # ``disableCacheHits`` is set, the exit=0 action still succeeds
+            # (downstream can proceed) but the action-cache publish is
+            # skipped so a future rebuild will re-execute rather than
+            # trust an incomplete evidence set. See collectEvidence's
+            # M9.R.72.3 block for the spec citation.
+            if action.cacheable and not evidence.disableCacheHits:
               let recordStart = statStart()
               let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
                 config.peerCacheActionPublisher != nil or
@@ -4190,6 +4353,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 dependencyEvidencePath(cacheRoot, action.id), record)
               publishPeerCacheBundle(action.weakFingerprint, record)
               publishBinaryCacheBundle(action, record)
+            elif action.cacheable and evidence.disableCacheHits:
+              runResult.trace(id, "cache-skip-monitor-loss",
+                "session cache publish skipped per Failure-Semantics.md " &
+                "§Monitoring Failures Level 1/2")
             completeSuccess(id, asSucceeded,
               runResult.results[idx].cacheDecision, true, "elevated")
           else:
@@ -4266,7 +4433,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               launchedAny = true
               continue
             invalidateCachedWrites(plan.action, evidence.evidence)
-            if plan.action.cacheable:
+            # M9.R.72.3 — spec Level 1/2 monitor-loss handling. When
+            # ``disableCacheHits`` is set, the exit=0 action still succeeds
+            # (downstream can proceed) but the action-cache publish is
+            # skipped so a future rebuild will re-execute. See
+            # collectEvidence's M9.R.72.3 block.
+            if plan.action.cacheable and not evidence.disableCacheHits:
               let recordStart = statStart()
               # Peer-Cache M1: when a publisher closure is set, force
               # output-blob retention so the publisher can read the
@@ -4292,6 +4464,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 dependencyEvidencePath(cacheRoot, plan.action.id), record)
               publishPeerCacheBundle(plan.action.weakFingerprint, record)
               publishBinaryCacheBundle(plan.action, record)
+            elif plan.action.cacheable and evidence.disableCacheHits:
+              runResult.trace(finished.id, "cache-skip-monitor-loss",
+                "session cache publish skipped per Failure-Semantics.md " &
+                "§Monitoring Failures Level 1/2")
             completeSuccess(finished.id, asSucceeded,
               runResult.results[idx].cacheDecision, true, "builtin")
           else:
@@ -4628,7 +4804,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           completed = terminalCount()
           continue
         invalidateCachedWrites(action, evidence.evidence)
-        if action.cacheable:
+        # M9.R.72.3 — spec Level 1/2 monitor-loss handling. When
+        # ``disableCacheHits`` is set, the exit=0 action still succeeds
+        # but the action-cache publish is skipped so a future rebuild
+        # will re-execute. See collectEvidence's M9.R.72.3 block.
+        if action.cacheable and not evidence.disableCacheHits:
           let recordStart = statStart()
           # M9.L.4-refactor Step A: force output-blob retention when
           # either the peer-cache publisher OR the binary-cache
@@ -4648,6 +4828,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             dependencyEvidencePath(cacheRoot, action.id), record)
           publishPeerCacheBundle(action.weakFingerprint, record)
           publishBinaryCacheBundle(action, record)
+        elif action.cacheable and evidence.disableCacheHits:
+          runResult.trace(finished.id, "cache-skip-monitor-loss",
+            "session cache publish skipped per Failure-Semantics.md " &
+            "§Monitoring Failures Level 1/2")
         completeSuccess(finished.id, asSucceeded, runResult.results[idx].cacheDecision,
           true, "exit=0")
       else:
