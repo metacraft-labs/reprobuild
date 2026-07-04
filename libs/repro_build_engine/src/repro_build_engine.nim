@@ -1041,6 +1041,38 @@ proc writeRootsOverlap(a, b: string): bool =
     return b.startsWith(a & "/")
   return a.startsWith(b & "/")
 
+proc detectSourceWrites*(readOnlyRoots, monitorWrites: openArray[string]):
+    seq[tuple[write: string; root: string]] =
+  ## M9.R.75 — R6 (source-write reject) detection helper. Given the
+  ## action's declared ``readOnlyRoots`` (nominally-read-only scopes)
+  ## and the observed ``monitorWrites`` (io-mon-recorded write paths),
+  ## return every ``(write, root)`` pair where the write landed at or
+  ## under a read-only root.
+  ##
+  ## Spec cite: Filesystem-Policy-And-Observed-Inputs.md §"Source
+  ## Rewrites" (lines 264-278): "source rewrites are errors" is the
+  ## shipping default; the caller is responsible for turning any
+  ## non-empty return into a failure.
+  ##
+  ## Exported so unit tests can grade the detection logic against
+  ## synthetic evidence without depending on the full
+  ## ``collectEvidence`` scaffold.
+  var normalizedRoots: seq[string] = @[]
+  for raw in readOnlyRoots:
+    let n = normalizeWriteRoot(raw)
+    if n.len > 0:
+      normalizedRoots.add(n)
+  if normalizedRoots.len == 0:
+    return
+  for rawWrite in monitorWrites:
+    let write = normalizeWriteRoot(rawWrite)
+    if write.len == 0:
+      continue
+    for root in normalizedRoots:
+      if writeRootsOverlap(write, root):
+        result.add((write: write, root: root))
+        break
+
 proc validateGraph(g: BuildGraph) =
   var ids = initHashSet[string]()
   var byId = initTable[string, BuildAction]()
@@ -1779,6 +1811,37 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
         mesMonitorUnavailable)
       if action.cacheable:
         result.publishable = false
+  # M9.R.75 — R6 (source-write reject) post-hoc monitor-evidence check.
+  # Spec cite: reprobuild-specs Filesystem-Policy-And-Observed-Inputs.md
+  # §"Source Rewrites" (lines 264-278): "source rewrites are errors" is
+  # the shipping default. For every write recorded in monitorWrites
+  # whose path lies inside a declared readOnlyRoots entry, fail the
+  # action with a structured "source-write attempt" error.
+  #
+  # This is Shape B (post-hoc monitor check) from the M9.R.75 Phase A
+  # audit. Shape A (bwrap sandbox) would be the primary Linux
+  # enforcement; Shape B is the cross-platform fallback (and the only
+  # option on Windows). Both approaches read from the same readOnlyRoots
+  # declaration on ``BuildAction`` — this check is the immediate
+  # milestone deliverable; the bwrap wrapper can be layered on top
+  # later without changing the DSL surface.
+  #
+  # Fetch actions leave readOnlyRoots empty per R6's "action explicitly
+  # owns the target location" carve-out, so the check no-ops for them.
+  # Legacy actions predate the field and also see an empty seq (v21
+  # payload compatibility), so they are unaffected.
+  if action.readOnlyRoots.len > 0 and result.evidence.monitorWrites.len > 0:
+    let offenders = detectSourceWrites(action.readOnlyRoots,
+      result.evidence.monitorWrites)
+    for offender in offenders:
+      result.evidence.diagnostics.add(
+        "source-write attempt (R6): action wrote to '" & offender.write &
+        "' which lies under nominally-read-only root '" & offender.root &
+        "'. Spec: Filesystem-Policy-And-Observed-Inputs.md " &
+        "§\"Source Rewrites\" — default policy is 'source " &
+        "rewrites are errors'.")
+    if offenders.len > 0:
+      result.publishable = false
   if strict and not result.publishable:
     discard
 
