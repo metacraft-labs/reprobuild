@@ -146,3 +146,47 @@ proc packageInstallMirrorHumanFriendlyPath*(recipesRoot, depName: string):
   ## ``packageInstallMirrorRoot`` for actual on-disk operations.
   if depName.len == 0 or recipesRoot.len == 0: return ""
   legacyDepMirrorRoot(recipesRoot, depName)
+
+proc emitInstallMirrorReadOnlyEnforcement*(mirrorRoot: string;
+                                            mode = currentInstallMirrorMode()):
+    string =
+  ## M9.R.76.4 — emit a POSIX shell snippet that makes ``mirrorRoot``
+  ## read-only after publish, per spec R10 "Read-Only Enforcement".
+  ##
+  ## Gating:
+  ##   * ``immLegacy``: returns the empty string — the legacy mutable
+  ##     stable path MUST stay writable so the next rebuild's ``rm -rf``
+  ##     can clobber it.
+  ##   * ``immHashed`` / ``immHashedWithLegacyFallback``: emits
+  ##     ``chmod -R a-w`` on the mirror root. The prefix is content-
+  ##     hashed and will never be rewritten — any later attempt to
+  ##     mutate it MUST fail with EROFS per R7 (double-write is an
+  ##     error).
+  ##
+  ## The snippet is guarded by ``[ -d ... ]`` so an idempotent re-run
+  ## does not attempt to chmod a non-existent path.
+  ##
+  ## On non-Linux hosts the snippet is a no-op because the mirror
+  ## action itself never runs there. When the resolver is later
+  ## extended to a sandbox-policy backend (per the spec addendum's
+  ## "Read-Only Enforcement" §2), this helper is the single point
+  ## the mode-switch flows through.
+  if mode == immLegacy:
+    return ""
+  if mirrorRoot.len == 0:
+    return ""
+  let escapedRoot = mirrorRoot.replace("\"", "\\\"")
+  var s = ""
+  s.add("if [ -d \"" & escapedRoot & "\" ]; then ")
+  # ``chmod -R a-w`` strips write bits for user/group/other on every
+  # file + dir under the prefix. A deliberate mutation attempt then
+  # fails with EACCES (or EROFS on a bind-mounted ro root — the two
+  # error codes are treated identically at the sandbox policy layer).
+  s.add("chmod -R a-w \"" & escapedRoot & "\"; ")
+  s.add("fi; ")
+  s
+
+proc installMirrorEnforcesReadOnly*(mode = currentInstallMirrorMode()): bool =
+  ## Convenience predicate for callers that need to decide whether to
+  ## emit the enforcement snippet at plan time.
+  mode != immLegacy

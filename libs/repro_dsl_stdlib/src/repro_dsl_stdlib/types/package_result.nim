@@ -1532,7 +1532,15 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     depManifestPaths = depManifestPaths,
     ownManifestPath = ownManifestPath,
     packageName = packageName))
-  script.add("touch \"" & escapedStamp & "\"")
+  script.add("touch \"" & escapedStamp & "\"; ")
+  # M9.R.76.4 — spec R10 read-only enforcement. In legacy mode this
+  # returns the empty string (the mutable stable path stays writable
+  # so the next rebuild's ``rm -rf`` can clobber it). In hashed mode
+  # (opt-in via ``$REPRO_INSTALL_MIRROR_MODE``) the snippet runs
+  # ``chmod -R a-w`` on the mirror root so any downstream write
+  # attempt fails with EACCES / EROFS per R7 (double-write is an
+  # error).
+  script.add(emitInstallMirrorReadOnlyEnforcement(dstUsrRoot))
   let argv = @["sh", "-c", script]
   let stageId = "install-mirror-" & sanitizeStageCopyName(packageName)
   # M9.R.15q.5.1 — thread every declared dep onto the install-mirror's

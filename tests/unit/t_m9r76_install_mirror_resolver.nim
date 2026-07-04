@@ -117,3 +117,67 @@ suite "M9.R.76.2 — install-mirror resolver":
       "C:\\metacraft\\reprobuild\\recipes\\packages\\source", DepName)
     check '\\' notin root
     check root.contains("/wayland/.repro/output/install")
+
+suite "M9.R.76.4 — read-only enforcement gating":
+
+  test "legacy mode emits empty enforcement snippet":
+    # The mutable stable path MUST stay writable in legacy mode so
+    # the next rebuild's ``rm -rf`` can clobber it.
+    delEnv(InstallMirrorModeEnvVar)
+    let snippet = emitInstallMirrorReadOnlyEnforcement("/tmp/some/mirror")
+    check snippet == ""
+    check installMirrorEnforcesReadOnly() == false
+
+  test "hashed mode emits chmod -R a-w snippet":
+    putEnv(InstallMirrorModeEnvVar, "hashed")
+    try:
+      let snippet = emitInstallMirrorReadOnlyEnforcement("/tmp/some/mirror")
+      check snippet.contains("chmod -R a-w")
+      check snippet.contains("/tmp/some/mirror")
+      check snippet.contains("[ -d ")  # guarded by dir-exists check
+      check installMirrorEnforcesReadOnly() == true
+    finally:
+      delEnv(InstallMirrorModeEnvVar)
+
+  test "hashed-with-legacy-fallback mode enforces read-only":
+    putEnv(InstallMirrorModeEnvVar, "hashed-with-legacy-fallback")
+    try:
+      let snippet = emitInstallMirrorReadOnlyEnforcement("/tmp/some/mirror")
+      check snippet.contains("chmod -R a-w")
+      check installMirrorEnforcesReadOnly() == true
+    finally:
+      delEnv(InstallMirrorModeEnvVar)
+
+  test "empty mirror root produces empty snippet even in hashed mode":
+    # Defensive: if the resolver returns "" (e.g. dep name empty),
+    # the enforcement snippet should be a no-op, not a syntax error.
+    putEnv(InstallMirrorModeEnvVar, "hashed")
+    try:
+      let snippet = emitInstallMirrorReadOnlyEnforcement("")
+      check snippet == ""
+    finally:
+      delEnv(InstallMirrorModeEnvVar)
+
+  test "explicit mode arg overrides env var":
+    putEnv(InstallMirrorModeEnvVar, "legacy")
+    try:
+      # Caller can pin the mode explicitly for the plan-time decision.
+      let snippet = emitInstallMirrorReadOnlyEnforcement(
+        "/tmp/some/mirror", mode = immHashed)
+      check snippet.contains("chmod -R a-w")
+      check installMirrorEnforcesReadOnly(mode = immHashed) == true
+      check installMirrorEnforcesReadOnly(mode = immLegacy) == false
+    finally:
+      delEnv(InstallMirrorModeEnvVar)
+
+  test "shell path escapes preserve double-quote safety":
+    # If a mirror root ever contains a `"` (it shouldn't, but the
+    # sanitizer guards against it), the emitted snippet MUST escape
+    # it so the shell doesn't misparse the command.
+    putEnv(InstallMirrorModeEnvVar, "hashed")
+    try:
+      let snippet = emitInstallMirrorReadOnlyEnforcement("/tmp/weird\"root")
+      # `"` must be `\"` in the emitted script:
+      check snippet.contains("\\\"")
+    finally:
+      delEnv(InstallMirrorModeEnvVar)
