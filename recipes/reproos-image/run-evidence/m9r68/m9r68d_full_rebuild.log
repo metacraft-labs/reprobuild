@@ -1,0 +1,47 @@
+[++++++++++++++++++++++++] checked=1/1 running=1 started reproosImage.build_i...[########################] checked=1/1 running=0 failed reproosImage.build_imagerepro build: action failed: reproosImage.build_image (exit code 0)
+[stage-de-rootfs] entry-point missing: plasma-workspace/startplasma-x11 (recipe not built; symlink skipped)
+[stage-de-rootfs] entry-point missing: gdm/gdm-session-worker (recipe not built; symlink skipped)
+[stage-de-rootfs] entry-point missing: gdm/gdm (recipe not built; symlink skipped)
+[apply] umount: umount -lf /dev/nbd0 (exit 32)
+[apply] umount: umount -lf /dev/nbd0p1 (exit 32)
+[apply] umount: umount -lf /dev/nbd0p2 (exit 32)
+[apply] wipefs: wipefs -af /dev/nbd0 (exit 0)
+[apply] sgdisk: sgdisk -o /dev/nbd0 (exit 0)
+[apply] sgdisk: sgdisk -n 1:0:+512M -t 1:EF00 -c 1:esp /dev/nbd0 (exit 0)
+[apply] parted: parted -s /dev/nbd0 set 1 boot on (exit 0)
+[apply] sgdisk: sgdisk -n 2:0:0 -t 2:8300 -c 2:root /dev/nbd0 (exit 0)
+[apply] partprobe: partprobe /dev/nbd0 (exit 0)
+[apply] mkfs.vfat: mkfs.vfat -F 32 -n ESP /dev/nbd0p1 (exit 0)
+[apply] mkfs.ext4: mkfs.ext4 -F -L reproos-root /dev/nbd0p2 (exit 0)
+repro disk apply: OK (11 operations)
+repro infra install-root: rsync -aHAX --numeric-ids --one-file-system --info=stats2 --sparse '--exclude=/proc/*' '--exclude=/sys/*' '--exclude=/dev/*' '--exclude=/run/*' '--exclude=/tmp/*' '--exclude=/mnt/*' '--exclude=/media/*' --exclude=/lost+found '--exclude=/run/live/*' '--exclude=/lib/live/*' --exclude=/mnt --exclude=/media /opt/repro/reprobuild/recipes/reproos-image/build/work/stage/ /opt/repro/reprobuild/recipes/reproos-image/build/work/mnt/
+rsync: [generator] chown "/opt/repro/reprobuild/recipes/reproos-image/build/work/mnt/boot" failed: Operation not permitted (1)
+rsync: [receiver] chown "/opt/repro/reprobuild/recipes/reproos-image/build/work/mnt/boot/.initrd.img.SLG8h5" failed: Operation not permitted (1)
+rsync: [receiver] chown "/opt/repro/reprobuild/recipes/reproos-image/build/work/mnt/boot/.vmlinuz.g6z1oN" failed: Operation not permitted (1)
+rsync error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1338) [sender=3.4.1]
+repro infra install-root: rsync exit 23 (partial transfer / vanished files — ignored as benign)
+repro infra install-root: grub-install --target=x86_64-efi --efi-directory=/opt/repro/reprobuild/recipes/reproos-image/build/work/mnt/boot --boot-directory=/opt/repro/reprobuild/recipes/reproos-image/build/work/mnt/boot --no-nvram --removable --recheck /dev/nbd0
+Installing for x86_64-efi platform.
+Installation finished. No error reported.
+
+monitor depfile is incomplete
+daemon-hosted build failed
+
+repro build: tool provisioning active (tool-provisioning=path)
+repro build: provisioning-disabled mode active (tool-provisioning=path)
+project: reproosImage
+interface: /opt/repro/reprobuild/recipes/reproos-image/.repro/build/repro/project-interface.rbsz
+toolIdentity: /opt/repro/reprobuild/recipes/reproos-image/.repro/build/repro/path-only-tool-identities.rbtp
+inspection: /opt/repro/reprobuild/recipes/reproos-image/.repro/build/repro/path-only-tool-identities.inspect.json
+cachePortability: local-only
+runQuotaSocket: /tmp/nix-shell.OdrkKR/reprobuild-runquota-797800.sock
+providerCompile: started
+providerBinary: /opt/repro/reprobuild/recipes/reproos-image/.repro/build/repro/provider/project-provider
+providerCompileArtifact: /opt/repro/reprobuild/recipes/reproos-image/.repro/build/repro/provider-compile.rbsz
+providerArtifact: b73d2291f3452f53f1b217239da0b465506dc0ae818bb28312bba870b68b1d97
+providerGraphSnapshot: /opt/repro/reprobuild/recipes/reproos-image/.repro/build/repro/provider-graph/provider-fragments.rbsz
+providerInvocations: 0
+loweredGraphCache: hit
+scheduler: actions=1
+runQuota: active (lease authority)
+buildReport: /opt/repro/reprobuild/recipes/reproos-image/.repro/build/repro/build-report.json

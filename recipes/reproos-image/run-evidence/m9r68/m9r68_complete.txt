@@ -1,0 +1,250 @@
+M9.R.68 close-out — Phase D full-rebuild + boot smoke
+=====================================================
+
+Milestone summary
+-----------------
+M9.R.68 closed M9.R.67's residual by shipping the sway libdrm+libinput
+buildDeps fix (M9.R.68.1), then Phase B characterized the pre-existing
+reproos-image T0 signal (mis-attributed by M9.R.67 as signal-(a) — the
+actual class was signal-(b) failed-execve on bash Autotools ./configure
+platform probes), and landed the io-mon-side fixes (M9.R.68.3 T0
+signal-(b) failed-execve exemption + M9.R.68.4 summarizeRecords O(N)
+performance).
+
+Phase D took the pinned tree to the terminal end-to-end gates.
+
+
+Phase D.1 — sway rebuild verification (of M9.R.68.1)
+----------------------------------------------------
+Recipe: recipes/packages/source/sway
+Command: nix develop --command ./build/bin/repro build \
+         --tool-provisioning=from-source recipes/packages/source/sway
+Result:   RC=0 (success)
+Actions:  9/9 succeeded (mesonbin-setup, mesonbin-compile,
+          mesonbin-install, 4x autotools-stage-executable,
+          install-mirror-swaySource, meson-fetch-swaySource)
+
+M9.R.68.1's libdrm + libinput buildDeps addition VERIFIED — the
+prior missing-header trip on xf86drm.h + libinput.h is CLOSED.
+
+
+Phase D.2 — full reproos-image rebuild
+--------------------------------------
+Recipe: recipes/reproos-image
+Config: tests/fixtures/auto-config-minimal.toml (DE = sway)
+Command: nix develop --command ./build/bin/repro build recipes/reproos-image
+
+Inner shell script (scripts/build-reproos-image.sh):
+  - stage-de-rootfs.sh:           OK (4.7 GB staged)
+      Missing entry-point warnings (recipe-optional, benign):
+        - plasma-workspace/startplasma-x11 (not a sway dep)
+        - gdm/gdm-session-worker (not a sway dep)
+        - gdm/gdm (not a sway dep)
+  - repro disk apply:             OK (11 operations)
+      - wipefs / sgdisk / parted / partprobe / mkfs.vfat / mkfs.ext4
+  - repro infra install-root:     OK (rsync exit 23 partial-transfer
+      treated as benign, all needed files transferred)
+  - grub-install (x86_64-efi):    OK ("Installation finished. No error
+      reported.")
+
+qcow2 artefact: recipes/reproos-image/build/reproos-installed.qcow2
+  size:   5146738688 bytes (~4.8 GiB)
+  sha256: d06fd70342b658e06b48921eca20d51cc531d0ab463248bb4b692865e109108d
+  built:  2026-07-04 03:13 (during the current M9.R.68 Phase D run)
+
+Wrapper-level outcome (io-mon monitor):
+  m9r68d_full_rebuild.log line 27:  "monitor depfile is incomplete"
+  m9r68d_full_rebuild.log line 28:  "daemon-hosted build failed"
+  Depfile size: 7,717,572,245 bytes (7.72 GB) on disk after summarize.
+  Wrapper RC:  non-zero (repro build reported action failed).
+
+The qcow2 IS complete + bootable — every inner step succeeded and
+grub-install reported clean.  The failure is a monitor-side bookkeeping
+issue: the io-mon summarizeRecords O(N) codepath (M9.R.68.4) completes
+but the produced depfile is flagged incomplete by the daemon post-scan.
+The io monitor process peaked at 28.7 GB RSS while summarizing before
+the depfile flush completed.
+
+Phase D.2 verdict:
+  qcow2 build:         SUCCEEDED (bootable disk image produced)
+  wrapper accounting:  FAILED (monitor depfile incomplete)
+
+This is a NEW blocker at the wrapper/monitor layer, distinct from the
+recipe-cascade + T0-signal issues M9.R.68.1..4 closed.  M9.R.69 owns
+it (candidate shape: characterize what makes summarizeRecords flag the
+depfile incomplete on the reproosImage.build_image trace — 7.72 GB
+depfile is 100x the M9.R.67 pixel probe scale — and land the wrapper
+retry / streaming fix).  Do NOT paper over the "incomplete" flag by
+downgrading to a warning; per the M-FW-0 boundary the monitor is
+supposed to report incompleteness honestly.
+
+
+Phase D.3 — boot smoke (BOOT_TIMEOUT=300s, screendump every 30s)
+----------------------------------------------------------------
+Driver: _m9r68d_boot_smoke.sh (copy of the M9.R.56.6 driver via
+        /mnt/d/metacraft/reprobuild/_m9r56_boot_smoke.sh; QEMU q35 +
+        OVMF UEFI + 2048 MB RAM + KVM enabled, headless, QMP
+        screendump).
+Artifact input:  recipes/reproos-image/build/reproos-installed.qcow2
+
+Serial-log first 5 event lines:
+  Hostname set to <reproos-smoke>.
+  Reached target System Initialization.
+  Started Daily apt download activities.
+  Started Daily apt upgrade and clean activities.
+  Reached target Timer Units.
+
+Serial-log last 10 event lines (verbatim, ANSI stripped):
+  Started Serial Getty on ttyS0.
+  Reached target Login Prompts.
+  [    5.649334] seatd[553]: segfault at 2 ip 0000000000000002 sp 00007fff8530fbd8 error 14
+  [    5.650810] Code: Unable to access opcode bytes at 0xffffffffffffffd8.
+  Reached target Multi-User System.
+  Reached target Graphical Interface.
+  [    6.910268] seatd[577]: segfault at 2 ip 0000000000000002 sp 00007ffc4c2f2628 error 14
+  reproos-smoke login: [    8.162560] seatd[589]: segfault at 2 ip 0000000000000002 sp 00007ffc28c33e28 error 14
+  [    9.418528] seatd[591]: segfault at 2 ip 0000000000000002 sp 00007ffe2bbb68d8 error 14
+  [   10.694474] seatd[593]: segfault at 2 ip 0000000000000002 sp 00007ffd6e0c4978 error 14
+
+Boot outcome:
+  systemd:          Multi-User + Graphical targets reached OK
+  seatd:            5 kernel-logged segfaults inside the first 10s of
+                    boot (respawn loop), IP=0x0000000000000002 across
+                    all 5 crashes — indirect-call-through-invalid-vtable
+                    or unresolved-relocation, deterministic.
+  SDDM:             starts ("Started Simple Desktop Display Manager")
+                    but /var/log/sddm.log ends up empty because SDDM
+                    exits when seatd is unavailable.
+  wayland-session:  /var/log/m9r56_diag/ empty (the wayland-session tap
+                    fires only after DE launches; sway never runs
+                    because SDDM couldn't set up a seat).
+  Screendumps t={0,33,63,96,129,162,195,228,261,294}s:
+    t=0s:    99.7% RGB(0,0,0) + 0.3% RGB(170,170,170) — GRUB late boot
+    t≥33s:   100.0% RGB(0,0,0) — pure-black kmscon / DRM console after
+             seatd loop wedged the display path.
+
+Autologin-to-sway verdict:  NO — sway compositor is not running.
+                            Blocker is seatd binary crashing on
+                            startup at fixed IP=0x2.
+
+Screendumps in this directory: screen_00{0..9}_{0..294}s.ppm (10 files,
+1280x800 RGB, PPM raw). PNG conversion (ffmpeg) was attempted for the
+last screendump — m9r68_de_last_screen.png (3078 bytes; consistent
+with a solid-black frame).
+
+
+Phase D root-cause characterization (M9.R.68 out-of-scope; M9.R.69 owns)
+-----------------------------------------------------------------------
+Seatd binary is present at
+`/usr/bin/seatd -> /opt/repro/reprobuild/recipes/packages/source/libseat/.repro/output/install/usr/bin/seatd`,
+ELF64 x86-64, 65,624 bytes, dynamically linked (libc + ld-linux only,
+inspected via ldd from host).  The crashes all report:
+
+    RIP = 0x0000000000000002
+    error = 14 (page fault on instruction fetch)
+    "Unable to access opcode bytes at 0xffffffffffffffd8"
+
+This is an indirect-call-through-uninitialised-function-pointer
+pattern.  Given that the M9.R.58 residual close-out documented the
+same "seatd builtin backend + logind backend both fail" class and
+M9.R.59 landed hwdata + libdisplay-info to unblock wlroots's DRM
+backend, but NOT a rebuild of libseat itself, the seatd binary in
+this qcow2 was fetched into stage from the libseat install-mirror
+whose backend (logind vs builtin) may not match the reproos-smoke
+runtime (no logind D-Bus session, no libseat.so consumer up).
+
+Concretely, M9.R.68 did NOT rebuild libseat between M9.R.58/59 and
+now, so a stale binary from an earlier suboptimal libseat build may be
+what's shipped.  M9.R.69's first move should be:
+
+  1. rm -rf recipes/packages/source/libseat/.repro/build \
+             recipes/packages/source/libseat/.repro/output
+  2. repro build --tool-provisioning=from-source \
+       recipes/packages/source/libseat
+  3. Repeat boot smoke; if seatd still segfaults at ip=0x2, drop into
+     minimal-repro under strace to identify the failing call site
+     (candidate: unresolved GOT entry against a required libseat
+     seatd-plugin symbol, or a chown()/setuid() failure path that
+     leaves a fn pointer NULL and then calls it).
+
+
+Retroactive M9.R.57-59 validation
+---------------------------------
+NOT VALIDATED at this milestone.  M9.R.67 close-out claimed
+"UNBLOCKED at the shim layer — every M9.R.57-59 recipe now runs its
+cc1 compiles without SIGSEGV under the monitored `from-source` path.
+END-TO-END validation of sway boot into a GUI is blocked below M9.R.67
+by the aforementioned recipe-cascade gap (libdrm / libinput)."
+M9.R.68.1 closed the libdrm/libinput residual — sway's from-source
+build now succeeds — but the end-to-end sway-boot gate remains blocked
+by the seatd runtime crash (a new, distinct residual class first
+observed in the Phase D.3 boot smoke of this milestone).  Marking
+retroactive M9.R.57-59 validation: N.
+
+
+Residuals, honestly
+-------------------
+Strictly smaller than M9.R.67's residual on this milestone's chartered
+scope (M9.R.67 recipe-cascade coverage gap on libdrm + libinput is
+closed):
+
+  * Recipe-cascade gap (libdrm + libinput):   CLOSED (M9.R.68.1)
+  * T0 signal-(b) failed-execve on bash configure: CLOSED (M9.R.68.3)
+  * summarizeRecords O(N*P) → O(N):           CLOSED (M9.R.68.4)
+
+New residuals surfaced in Phase D (M9.R.69 owns):
+
+  * (i) reproos-image wrapper-level "monitor depfile is incomplete"
+    on a 7.72 GB depfile.  qcow2 built successfully, wrapper reports
+    FAILED because the io-mon depfile summary is flagged incomplete
+    after the summarize.  DO NOT paper over — characterize the exact
+    signal (ring overflow? unflushed sideband spill? summarize
+    truncation?  the 28.7 GB RSS peak is suspicious).
+
+  * (ii) seatd segfault at ip=0x0000000000000002 on reproos boot.
+    Deterministic across 5 respawn attempts.  Blocks SDDM +
+    autologin-to-sway.  First-move: rebuild libseat from clean;
+    if crash persists, minimal-repro under strace + gdb inside the
+    qcow2 mount to find the indirect-call site.
+
+
+Commit shortlog (M9.R.68)
+-------------------------
+Landed pre-Phase D:
+  fbc11457  M9.R.68.1        sway buildDeps += libdrm + libinput
+  6384bc11  M9.R.68.2        Phase B evidence
+  6707a992  M9.R.68.3.pin    io-mon pin bump (T0 signal-(b) exemption)
+  476eeab0  M9.R.68.4.pin    io-mon pin bump (summarizeRecords O(N))
+
+io-mon (main):
+  0297c4a   M9.R.68.3        T0 signal-(b) failed-execve exemption
+                              for bash Autotools configure
+  9c9ea35   M9.R.68.4        summarizeRecords O(N*P) → O(N)
+
+Phase D transcripts + evidence (this commit):
+  M9.R.68.5  Phase D transcripts + boot smoke evidence
+
+Push discipline
+---------------
+All commits pushed with pull-rebase between; no --force, no
+--no-verify; `--no-gpg-sign` on reprobuild per the standing convention
+documented in feedback_reprobuild_unsigned_commits.md.
+
+
+Files in this directory (M9.R.68 Phase D)
+-----------------------------------------
+  m9r68_complete.txt              this file
+  m9r68d_full_rebuild.log         Phase D.2 full-rebuild transcript
+  m9r68d_boot_serial.log          Phase D.3 boot-smoke QEMU serial
+  screen_00{0..9}_{0..294}s.ppm   Phase D.3 QMP screendumps (10 x 3 MB
+                                  PPM, 1280x800 RGB) — all black except
+                                  screen_000_0s (GRUB residue)
+  m9r68_de_last_screen.png        PNG render of screen_009_294s (3 KB —
+                                  100% RGB(0,0,0), no compositor output)
+
+  (Phase B evidence from earlier in the milestone:)
+  m9r68_phaseB_bash_prefix_shim_run.txt
+  m9r68_phaseB_signal_analysis.txt
+  m9r68_phaseB_signal_b_detail.txt
+  m9r68_phaseB_t0_signal_a_exec.txt
+  m9r68_phaseB_t0_signal_a_raw.txt
