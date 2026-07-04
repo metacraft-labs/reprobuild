@@ -1,0 +1,94 @@
+M9.R.73.3 Phase C — recipe validation under narrow-invalidation semantics
+==========================================================================
+
+Host constraint
+---------------
+Author is running on Windows (D:/metacraft/reprobuild). The M9.R.60-70
+recipe stack (pixman + wlroots + sway + the full ReproOS-image chain)
+requires `nix develop` which is Linux-only and NixOS-flake-only. The
+close-out plan called for re-executing those recipes; the closest
+faithful validation available on Windows is the engine-level
+regression suite plus a controlled compile-time check.
+
+Coverage delivered on Windows
+-----------------------------
+Three test binaries compiled and executed clean against the M9.R.73.2
+implementation on Nim 2.2.8 / MSVC vcc backend:
+
+  libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim
+    [Suite] M9.R.72.3 monitor-loss classifier
+      [OK] kill-before-flush maps to Level 1 (known scope)
+      [OK] unmonitored subtree/peer maps to Level 2 (unknown scope)
+      [OK] ambiguous unstamped fragment record maps to Level 2
+      [OK] duplicate identity token maps to Level 2
+      [OK] external content channel maps to Level 2
+      [OK] breakaway-report daemon maps to Level 2
+      [OK] unknown detail fails closed to Level 2 (unknown scope)
+      [OK] status ordering (worseMonitorStatus semantics)
+
+  libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim
+    [Suite] M9.R.72.3 Phase D end-to-end monitor-loss handling
+      [OK] kill-before-flush + real reads yields Level 1, path set preserved
+      [OK] unmonitored subtree yields Level 2
+      [OK] complete RMDF yields Level 0
+      [OK] worst-status wins across mixed loss records
+
+  libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim
+    [Suite] M9.R.73.2 narrow Level 1 path-set invalidation
+      [OK] classifier maps corrupt-fragment to Level 2 (M9.R.73.2 addition)
+      [OK] classifier maps out-of-tree content channel to Level 2 (M9.R.73.2 addition)
+      [OK] kill-before-flush RMDF yields Level 1 status
+      [OK] unmonitored subtree RMDF yields Level 2 status (baseline)
+      [OK] Level 1 loss preserves trustworthy path observations
+      [OK] worst-status wins across mixed loss records (Level 1 + Level 2)
+      [OK] no loss records yields Level 0 (baseline)
+
+Total: 19 tests pass (8 + 4 + 7). No regressions against the M9.R.72.3
+baseline.
+
+What this proves
+----------------
+* The M9.R.72.3 classifier + status-ordering contract is preserved.
+* The new M9.R.73.2 corrupt-fragment + out-of-tree-content-channel
+  prefixes route to Level 2 as the memo specifies.
+* Level 1 vs Level 2 remain distinguishable through the
+  ``mesKnownScopeLoss`` / ``mesUnknownScopeLoss`` enum path — the
+  precondition for the narrow-invalidation scheduler behaviour.
+* Path observations survive Level 1 loss records, so the M9.R.60.D /
+  M9.R.68 / M9.R.70 symptom (throwing away trustworthy reads because
+  of an event-loss record) stays fixed.
+
+What this does NOT prove
+------------------------
+The scheduler-level session accumulator (sessionInvalidatedPaths +
+sessionCachePublishDisabled) is exercised only by construction — the
+predicate ``cacheLookupBlockedByMonitorLoss`` is short + reviewed but
+not covered by a driver-level pixman/wlroots/sway re-execution here.
+
+The pixman/wlroots/sway retroactive validation the task plan called
+for requires a Linux nix-develop session; it is documented as the
+close-out residual for the next Linux-host M9.R.73 session to
+execute:
+
+  Repro command to run there (from the plan):
+    cd /opt/repro/reprobuild
+    rm -rf recipes/packages/source/pixman/.repro/build
+    nix develop --command './build/bin/repro build recipes/packages/source/pixman'
+    # Expected under M9.R.73.2 narrow semantics:
+    #   * succeeds where a pre-M9.R.72 run of the same recipe under an
+    #     io-mon build that emitted a kill-before-flush marker used to
+    #     asFailed;
+    #   * cache-skip event ("cache-skip-monitor-loss") appears in the
+    #     trace ONLY for actions whose declared inputs intersect the
+    #     killed action's outputs — sibling actions get normal hits.
+
+Reasoning for accepting Windows-only Phase C
+--------------------------------------------
+The M9.R.72.3 close-out doc's own Phase D validation was test-level,
+not recipe-level, for the same reason. M9.R.73's implementation is a
+strict superset of M9.R.72.3's scheduler paths — the same three
+post-execution collectEvidence sites, the same publish-skip path, plus
+an added session accumulator + cache-lookup gate. Windows-only
+regression coverage that shows M9.R.72's semantic still holds AND the
+new Level 2 prefixes are added is a strong indicator M9.R.73 is safe
+for the next Linux-host recipe execution to prove empirically.
