@@ -80,7 +80,26 @@ export LIBGL_ALWAYS_SOFTWARE=1
 # Result: ``did not find extension DRI_IMAGE_DRIVER version 1``.
 # Removing the override lets the default kms_swrast → swrast
 # fallback chain run correctly on QEMU's bochs-drm.
-# export MESA_LOADER_DRIVER_OVERRIDE=swrast  # M9.R.78.4: DROPPED
+# export MESA_LOADER_DRIVER_OVERRIDE=swrast  # M9.R.78.4a: DROPPED (see above)
+# M9.R.78.4b — v2 boot smoke revealed a next-layer trip: Mesa's
+# pci-id probe identifies QEMU's virtual GPU as ``1234:1111``
+# (Bochs), sets driver_name="bochs-drm", and dlopens
+# ``bochs-drm_dri.so`` — which our v1 minimal mesa recipe does NOT
+# build (we ship only ``swrast`` + ``kms_swrast`` gallium drivers,
+# no per-vendor DRI backends). The default fallback chain in
+# gbm_dri.c:dri_screen_create() then aborts.
+#
+# Fix: point MESA_LOADER_DRIVER_OVERRIDE at ``kms_swrast`` (NOT
+# ``swrast``). kms_swrast:
+#   - has driver_name != NULL, so
+#     gbm_dri_device_extensions matcher applies (which requires
+#     DRI_IMAGE_DRIVER — kms_swrast's
+#     dri_swrast_kms_driver_extensions publishes it).
+#   - talks to /dev/dri/card0 via the standard KMS API, no
+#     hardware acceleration.
+# This bypasses the bochs-drm dlopen and drives gbm through the
+# kms_swrast fallback path directly.
+export MESA_LOADER_DRIVER_OVERRIDE=kms_swrast
 export GALLIUM_DRIVER=llvmpipe
 
 # M9.R.71.6 LIBGL_DRIVERS_PATH — validated 2026-07-04: Mesa's
