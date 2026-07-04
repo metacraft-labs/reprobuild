@@ -8,17 +8,19 @@ Reprobuild (`repro`) is a unified build system, package and configuration manage
 
 ## 1. Core Philosophy: Modifying any software should be easy!
 
-Reprobuild exists to realize this vision by making all software instantly reproducible and modifiable.
-
 Imagine you want to fix a bug in Firefox. In a standard setup, this means spending hours setting up your build tools, matching libraries, and downloading massive toolchains. With Reprobuild, you simply run:
 
-`repro develop firefox`
+```bash
+repro develop firefox
+```
 
 This instantly clones Firefox and provisions the exact compiler toolchain, development packages, databases, and any required cloud resources.
 
 But what if the bug isn't in Firefox itself, but in Cairo, one of its underlying libraries? Instead of fork-and-link hell, you just type:
 
-`repro develop cairo`
+```bash
+repro develop cairo
+```
 
 Reprobuild pulls down the Cairo repository side-by-side, plugs it into your local workspace, and automatically routes Firefox's build system to compile against your local Cairo copy. When you edit and save a file in Cairo, the compiler recompiles the change and propagates it instantly up to Firefox. Your workspace grows dynamically to match exactly the slice of the universe you are modifying.
 
