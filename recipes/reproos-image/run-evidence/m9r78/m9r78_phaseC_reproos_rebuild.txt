@@ -1,0 +1,49 @@
+M9.R.78 Phase C — reproos-image full rebuild against Mesa 24.0.9
+=================================================================
+
+Command executed
+----------------
+  nix develop --command ./build/bin/repro build recipes/reproos-image
+
+  Wall-clock start:  20:07:XX (UTC+3)
+  Wall-clock end:    ~20:29:XX (UTC+3)
+  Elapsed:           ~22 minutes
+
+Build steps observed
+--------------------
+  1. reproosImage.build_image action fingerprint (1/1)
+  2. bash scripts/build-reproos-image.sh build/reproos-installed.qcow2
+     - Phase 2: bash scripts/stage-de-rootfs.sh (~15 min — largest step)
+     - Phase 4-6: qemu-img create + qemu-nbd + disk apply
+     - Phase 8: repro infra install-root
+     - Phase 9-10: /etc/repro/* + /etc/shadow render
+     - grub-install (x86_64-efi)
+     - qemu-nbd disconnect + rmmod nbd
+     - mv qcow2 to output path
+
+Result
+------
+  action:            succeeded reproosImage.build_image
+  exit code:         0 (repro build)
+  qcow2 path:        recipes/reproos-image/build/reproos-installed.qcow2
+  qcow2 size:        5,148,901,376 bytes (~4.79 GiB)
+  qcow2 sha256:      abc74b06818e09bf4adac87f41ed93100818d7d255839984bee2b1c53b41674f
+
+Mesa 24.0.9 propagation verified
+---------------------------------
+  On-host mesa install-mirror:
+    /opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64/dri/
+      kms_swrast_dri.so   (16,470,320 bytes)
+      swrast_dri.so       (16,470,320 bytes, hardlink to kms)
+
+  Staged into qcow2 via stage-de-rootfs.sh Phase 1 at same absolute
+  path (Nix-style install-mirror preservation):
+    /opt/repro/reprobuild/recipes/reproos-image/build/work/stage/
+      opt/repro/reprobuild/recipes/packages/source/mesa/
+        .repro/output/install/usr/lib64/dri/swrast_dri.so
+      (16,470,320 bytes — identical hardlink verified pre-install-root)
+
+Provider fingerprints
+---------------------
+  providerArtifact:  b73d2291f3452f53f1b217239da0b465506dc0ae818bb28312bba870b68b1d97
+  loweredGraphCache: hit (M9.R.76 R10 install-mirror content-addressed)
