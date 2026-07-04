@@ -173,3 +173,55 @@ suite "repro_cas_store basic":
     check not cas.casExists(b)
     check not cas.casExists(c)
     check freed > 0
+
+suite "repro_cas_store materialize (M9.R.77.4)":
+  test "casMaterialize writes verified bytes into destination paths":
+    let dir = createTempDir("repro-cas-mat-", "")
+    defer:
+      try: removeDir(extendedPath(dir)) except OSError: discard
+    var cas = openCasStore(dir / "store")
+    defer: cas.close()
+    let outDir = dir / "out"
+    let a = cas.casPut(@[byte(0xAA), byte(0xAA), byte(0xAA)])
+    let b = cas.casPut(@[byte(0xBB), byte(0xBB)])
+    let entries = @[
+      CasMaterialization(hash: a, destination: outDir / "a.bin"),
+      CasMaterialization(hash: b, destination: outDir / "sub" / "b.bin"),
+    ]
+    cas.casMaterialize(entries)
+    check fileExists(outDir / "a.bin")
+    check fileExists(outDir / "sub" / "b.bin")
+    let aOut = readFile(outDir / "a.bin")
+    check aOut.len == 3
+    check byte(aOut[0]) == byte(0xAA)
+    let bOut = readFile(outDir / "sub" / "b.bin")
+    check bOut.len == 2
+    check byte(bOut[0]) == byte(0xBB)
+
+  test "casMaterialize raises on missing hash without leaving partial state":
+    let dir = createTempDir("repro-cas-mat-miss-", "")
+    defer:
+      try: removeDir(extendedPath(dir)) except OSError: discard
+    var cas = openCasStore(dir / "store")
+    defer: cas.close()
+    let outDir = dir / "out"
+    let good = cas.casPut(@[byte(0x10)])
+    var missing: array[32, byte]
+    for i in 0 ..< 32: missing[i] = byte(i xor 0xFF)
+    let entries = @[
+      # The GOOD entry comes first, so if the loop wrote to disk it
+      # would be visible on the retry. The MISSING entry raises and
+      # aborts the loop.
+      CasMaterialization(hash: toContentHash(missing),
+                         destination: outDir / "missing.bin"),
+      CasMaterialization(hash: good,
+                         destination: outDir / "good.bin"),
+    ]
+    var raised = false
+    try:
+      cas.casMaterialize(entries)
+    except ECasMissing:
+      raised = true
+    check raised
+    check not fileExists(outDir / "missing.bin")
+    check not fileExists(outDir / "good.bin")

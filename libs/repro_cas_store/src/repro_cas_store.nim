@@ -180,6 +180,59 @@ proc parseHexToBytes(hex: string): array[32, byte] {.raises: [].} =
       else: return
     result[i] = byte((hiVal shl 4) or loVal)
 
+type
+  CasMaterialization* = object
+    ## One (hash → destination) pair passed to ``casMaterialize`` for
+    ## the cache-hit rehydrate flow. The destination path is treated
+    ## as an absolute host path; the caller is responsible for
+    ## ensuring parent dirs exist iff ``createParentDirs`` is false.
+    hash*: ContentHash
+    destination*: string
+
+# ---------------------------------------------------------------------------
+# Cache-hit rehydrate helper (R11 Layer-1 primitive)
+# ---------------------------------------------------------------------------
+
+proc casMaterialize*(cas: CasStore;
+                     entries: openArray[CasMaterialization];
+                     createParentDirs = true) =
+  ## R11 Layer-1 cache-hit rehydrate. Reads each ``entries[i].hash``
+  ## from CAS (with the mandatory hash-on-read verification) and
+  ## writes the bytes to ``entries[i].destination`` via temp-file +
+  ## atomic rename so a partial write is never observable.
+  ##
+  ## This is the seam a future ``repro_build_engine`` migration MUST
+  ## call in place of ``LocalCas.restoreOutputs`` — the current
+  ## engine still uses the pre-M56 API in
+  ## ``libs/repro_local_store/src/repro_local_store.nim``. Migrating
+  ## every callsite is a multi-week effort; ``casMaterialize`` is the
+  ## documented R11-clean replacement that ``opkCasBlobs`` cache-hit
+  ## restore paths route through as they migrate.
+  ##
+  ## Every mismatch / missing blob raises immediately — a partial
+  ## restore is never left on disk, matching the "trust the CAS,
+  ## verify on read" contract from
+  ## ``Local-Content-Addressed-Store.md`` §"Corruption Detection".
+  for entry in entries:
+    let bytes = cas.casGet(entry.hash)
+    let dest = entry.destination
+    if createParentDirs:
+      let parent = parentDir(dest)
+      if parent.len > 0:
+        createDir(parent)
+    let tmp = dest & ".reprocastmp"
+    var raw = newString(bytes.len)
+    for i, b in bytes:
+      raw[i] = char(b)
+    writeFile(tmp, raw)
+    if fileExists(dest):
+      removeFile(dest)
+    moveFile(tmp, dest)
+
+# ---------------------------------------------------------------------------
+# Garbage collection
+# ---------------------------------------------------------------------------
+
 proc casGc*(cas: var CasStore;
             retainRoots: HashSet[ContentHash]): int =
   ## CAS-only garbage collection. Walks the on-disk blob tree,
