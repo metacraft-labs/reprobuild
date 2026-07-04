@@ -1,0 +1,116 @@
+M9.R.75 Phase E — retroactive validation
+=========================================
+
+Objective
+---------
+Verify that the M9.R.75.2/.3/.3.1/.4 enforcement layer (R6 source-write
+reject + R7 dep-chain-aware double-write reject) does not regress the
+pixman + wlroots + libseat recipes the plan named, and grade any
+recipe fixes required.
+
+
+Recipe-convention audit
+------------------------
+All three recipes route through the ``meson_package`` convention:
+
+  * recipes/packages/source/pixman/repro.nim:
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+  * recipes/packages/source/wlroots/repro.nim:
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+  * recipes/packages/source/libseat/repro.nim:
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+
+Phase D (M9.R.75.4) EXPLICITLY DEFERRED thread-through for
+``meson_package`` / ``autotools_package`` / ``cmake_package``: they
+emit configure / compile / install edges through typed-tool call
+sites (``meson(...)`` / ``make(...)`` / ``cmake(...)``) rather than
+direct ``buildAction()`` calls that this milestone's convention layer
+controls. Threading ``declaredOutputs`` + ``readOnlyRoots`` through
+the typed-tool call-site emitter is a follow-up milestone.
+
+Consequence: for pixman / wlroots / libseat the new R6 + R7
+enforcement layers see empty ``declaredOutputs`` + empty
+``readOnlyRoots`` on every emitted action. The engine's
+``validateGraph`` R7 pass loops over an empty ``declaredIndex`` (no
+graph-time errors), and ``collectEvidence``'s R6 check short-circuits
+on ``action.readOnlyRoots.len == 0`` (no post-execution errors).
+
+Therefore the M9.R.75 enforcement layer is EFFECTIVELY INERT against
+these three recipes today — as designed by the empty-seq default —
+and the recipes MUST rebuild byte-for-byte identically to their
+pre-M9.R.75 state.
+
+
+Regression-test evidence
+-------------------------
+
+Engine-side regression suites re-run on a compiled binary:
+
+  * libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim
+    → 7/7 PASS (codec round-trip preserves declaredOutputs +
+      readOnlyRoots; legacy v21 payloads decode with both seqs empty)
+  * libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim
+    → 9/9 PASS (R7 detection + dep-chain relaxation; the newly-added
+      "sequential actions sharing a write root are allowed" and
+      "transitive dep chain relaxes the R7 check" cases pin the
+      canonical configure → compile → install pattern DOESN'T trip
+      the pass)
+  * libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim
+    → 11/11 PASS (R6 detection: at-root hit, under-root hit, sibling
+      miss, prefix look-alike miss, empty-roots carve-out no-op,
+      empty-writes no-op, multi-offender aggregation, trailing-slash
+      normalisation on both sides, multi-root cross-checks,
+      Windows-style separator normalisation)
+
+Adjacent engine test (spot check for no regression):
+  * libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim
+    → 4/4 PASS (monitor-loss ladder behaviour unchanged)
+
+
+Recipe fixes required
+----------------------
+NONE for pixman / wlroots / libseat.
+
+Rationale: they route through the deferred ``meson_package``
+convention; the new enforcement layer sees empty declaredOutputs +
+readOnlyRoots on every action and no-ops. The M9.R.75 milestone
+lands the MECHANISM; a follow-up milestone lifts the FROM-SOURCE
+CONVENTIONS to populate the new fields so pixman / wlroots / libseat
+would then be graded.
+
+
+Deferred to follow-up milestones
+---------------------------------
+
+1. **meson_package / autotools_package / cmake_package thread-through.**
+   These three high-level constructors emit configure / compile /
+   install edges through typed-tool call sites rather than
+   ``buildAction()``. Threading declaredOutputs + readOnlyRoots
+   through the typed-tool call-site emitter requires wiring the
+   fields onto the ``PublicCliCall`` shape OR extending the fragment
+   assembler that turns each call site into a ``BuildActionDef``.
+   Neither is one-milestone work; the M9.R.75 close-out doc names
+   this as the next mechanical step.
+
+2. **Shape A (bwrap sandbox) on Linux.** M9.R.75.3 landed Shape B
+   (post-hoc monitor check) as the immediate cross-platform
+   enforcement. Shape A would wrap each action's spawn in
+   ``bwrap --ro-bind $ro $ro --bind $rw $rw ...`` so writes to the
+   source tree fail hard with EROFS INSIDE the action, not just at
+   the post-hoc evidence-fold stage. Requires wiring bwrap into the
+   engine's spawn wrapper (``startBypassRunQuotaProcess`` +
+   ``startRunQuotaProcess``) with the tool catalog for Linux hosts;
+   Windows keeps Shape B as the sole enforcement.
+
+3. **``outputs`` field vs ``declaredOutputs`` field disambiguation.**
+   The engine's legacy ``BuildAction.outputs`` field represents the
+   per-action stamp / artefact set for post-run readiness + cache-key
+   composition; the M9.R.75 ``BuildAction.declaredOutputs`` field
+   represents the write ROOT for R7 grading. These are two orthogonal
+   concepts with confusingly similar names. A follow-up doc pass
+   could rename ``BuildAction.outputs`` to ``BuildAction.declaredArtifacts``
+   (or similar) to disambiguate; the codec would then need a v23 that
+   also renames the payload field.
+
+
+End of Phase E validation.
