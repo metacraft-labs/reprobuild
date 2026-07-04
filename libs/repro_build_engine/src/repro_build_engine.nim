@@ -405,6 +405,23 @@ type
       ## downgraded from a hard-fail to a cache-skip per the spec's
       ## Failure-Semantics.md ladder. When ``false`` and
       ## ``publishable == false``, the action is a Level 3 fail.
+      ##
+      ## M9.R.73.2: reserved for Level 2 (unknown-scope) semantics.
+      ## Level 1 no longer sets this bit — it populates
+      ## ``invalidatedPaths`` instead so the scheduler can narrow the
+      ## invalidation to only cache lookups whose input set intersects
+      ## the affected path set.
+    invalidatedPaths: HashSet[string]
+      ## M9.R.73.2 — per-Failure-Semantics.md-plus-Monitor-Loss-Path-Invalidation.md
+      ## the certainly-invalidated + ambiguous path set for a Level 1
+      ## (known-scope) monitor loss. Populated ONLY when
+      ## ``monitorStatus == mesKnownScopeLoss``. Currently maps
+      ## kill-before-flush to the action's own materialized declared
+      ## outputs — the tight closed-form bound derived in the memo.
+      ## The scheduler folds this into a session-wide accumulator and
+      ## consults it on each downstream cache lookup: a lookup whose
+      ## action's declared inputs (materialized to cwd) intersect the
+      ## accumulator is skipped as ``cdMiss``. Empty for Levels 0/2/3.
     monitorStatus: MonitorEvidenceStatus
 
   ActionResult* = object
@@ -1298,12 +1315,34 @@ proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ## closed conservatively — the spec's R3 general rule for ambiguous
   ## correctness failures.
   const
+    # Prefixes below match the exact strings io-mon's src/io_mon/writer.nim
+    # emits at the referenced sites. Any addition here MUST also land a
+    # row in reprobuild-specs/Monitor-Loss-Path-Invalidation.md, per that
+    # memo's "Contract For Future Loss Classes".
     KillBeforeFlushPrefix = "process killed with an un-flushed read batch"
+      ## writer.nim:2205, 2224 — Level 1 (known scope).
     UnmonitoredSubtreePrefix = "unmonitored subtree/peer"
+      ## writer.nim:2266 — Level 2.
     AmbiguousUnstampedPrefix = "ambiguous unstamped fragment record"
+      ## writer.nim:2062 — Level 2.
     DuplicateIdentityPrefix = "duplicate identity token"
+      ## writer.nim:2034, 2068 — Level 2.
+    OutOfTreeContentChannelPrefix = "out-of-tree content channel consumed"
+      ## writer.nim:2282 — Level 2. Replaces the earlier
+      ## "external content" placeholder from M9.R.72.3 which was never
+      ## an actual io-mon prefix.
     ExternalContentPrefix = "external content"
+      ## Legacy alias retained for the M9.R.72.3 unit-test corpus and any
+      ## pre-M9.R.73 depfile that might have been produced against an
+      ## older io-mon revision. Level 2.
+    CorruptFragmentPrefix = "corrupt or partial RMDF fragment"
+      ## writer.nim:2158 — Level 2. Newly classified in M9.R.73.2.
     BreakawayReportPrefix = "breakaway-report"
+      ## Reserved for the authenticated-daemon report Level 2 path;
+      ## io-mon currently emits its authentication failures inline
+      ## rather than as a distinct event-loss detail prefix, but the
+      ## classifier row is retained so a future writer change lands
+      ## in a Level 2 conservative bucket by default. See the memo.
   if detail.startsWith(KillBeforeFlushPrefix):
     return mesKnownScopeLoss
   if detail.startsWith(UnmonitoredSubtreePrefix):
@@ -1312,7 +1351,11 @@ proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
     return mesUnknownScopeLoss
   if detail.startsWith(DuplicateIdentityPrefix):
     return mesUnknownScopeLoss
+  if detail.startsWith(OutOfTreeContentChannelPrefix):
+    return mesUnknownScopeLoss
   if detail.startsWith(ExternalContentPrefix):
+    return mesUnknownScopeLoss
+  if detail.startsWith(CorruptFragmentPrefix):
     return mesUnknownScopeLoss
   if detail.startsWith(BreakawayReportPrefix):
     return mesUnknownScopeLoss
@@ -1594,17 +1637,38 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
       case status
       of mesComplete:
         discard
-      of mesKnownScopeLoss, mesUnknownScopeLoss:
-        # Spec Level 1/2: session cache-skip, action succeeds. Diagnostic
-        # preserved for ``repro why``. ``publishable`` stays true so the
-        # scheduler does NOT flip status to asFailed; the new
-        # ``disableCacheHits`` signal tells the scheduler to skip the
-        # ``cache.recordActionResult`` publish path.
+      of mesKnownScopeLoss:
+        # M9.R.73.2 — spec Level 1 narrow path-set invalidation per
+        # ``reprobuild-specs/Monitor-Loss-Path-Invalidation.md``. The
+        # sole class io-mon currently emits at Level 1 is
+        # kill-before-flush, whose invalidated-path predicate is the
+        # action's own declared outputs (the soundness proof in the
+        # memo). Populate ``invalidatedPaths`` with the materialized
+        # output paths and let the scheduler fold them into a
+        # session-scoped accumulator that gates DOWNSTREAM cache
+        # lookups. The current action still publishes its own cache
+        # entry — the narrow invalidation covers downstream consumers
+        # of its outputs, not the action itself.
         result.evidence.diagnostics.add(
-          "monitor depfile is incomplete (" &
-          (if status == mesKnownScopeLoss: "known-scope loss"
-           else: "unknown-scope loss") &
-          "); action-cache publish skipped this session per " &
+          "monitor depfile has known-scope loss; downstream cache " &
+          "lookups intersecting this action's outputs will be skipped " &
+          "this session per Failure-Semantics.md §Monitoring Failures " &
+          "and Monitor-Loss-Path-Invalidation.md")
+        if action.cacheable:
+          for output in action.outputs:
+            result.invalidatedPaths.incl(materialPath(action.cwd, output))
+      of mesUnknownScopeLoss:
+        # Spec Level 2: session cache-skip, action succeeds. Diagnostic
+        # preserved for ``repro why``. ``publishable`` stays true so the
+        # scheduler does NOT flip status to asFailed; ``disableCacheHits``
+        # tells the scheduler to skip THIS action's
+        # ``cache.recordActionResult`` publish. The unknown-scope
+        # semantic is fully realized by the scheduler by observing this
+        # ``mesUnknownScopeLoss`` status and flipping its own
+        # ``sessionCachePublishDisabled`` bit — see the scheduler.
+        result.evidence.diagnostics.add(
+          "monitor depfile is incomplete (unknown-scope loss); " &
+          "action-cache publish skipped this session per " &
           "Failure-Semantics.md §Monitoring Failures")
         if action.cacheable:
           result.disableCacheHits = true
@@ -3578,6 +3642,54 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var inlineRunQuotaSession: ReproRunQuotaSession
   var inlineRunQuotaSessionOpen = false
 
+  # M9.R.73.2 — session-scoped state for the spec-graded monitor-loss
+  # ladder from ``reprobuild-specs/Failure-Semantics.md`` §"Monitoring
+  # Failures" plus the per-loss-class table in
+  # ``reprobuild-specs/Monitor-Loss-Path-Invalidation.md``.
+  #
+  # ``sessionInvalidatedPaths`` — accumulator of the certainly-invalidated
+  # + ambiguous paths from EVERY completed Level 1 (known-scope) loss in
+  # this session. Grows monotonically; downstream cache LOOKUPS whose
+  # action.inputs (materialized to cwd) intersect this set are skipped
+  # as ``cdMiss`` with reason ``"monitor-loss-narrow-invalidation"``.
+  # Empty in the healthy case, so the intersection test is a cheap
+  # ``len == 0`` short-circuit.
+  #
+  # ``sessionCachePublishDisabled`` — set to ``true`` on the FIRST Level
+  # 2 (unknown-scope) loss observed in this session. Realizes the spec's
+  # "disable cache hits for the affected session" language: all
+  # subsequent cache lookups are treated as ``cdMiss``. Level 1 does NOT
+  # set this bit — its narrow ``sessionInvalidatedPaths`` accumulator is
+  # the whole story.
+  var sessionInvalidatedPaths = initHashSet[string]()
+  var sessionCachePublishDisabled = false
+
+  proc registerEvidenceInvalidation(evidence: EvidenceCollection) =
+    ## M9.R.73.2 — fold a completed action's evidence into the
+    ## session-scoped invalidation state.
+    for path in evidence.invalidatedPaths:
+      sessionInvalidatedPaths.incl(path)
+    if evidence.monitorStatus == mesUnknownScopeLoss:
+      sessionCachePublishDisabled = true
+
+  proc cacheLookupBlockedByMonitorLoss(action: BuildAction): bool =
+    ## M9.R.73.2 — return ``true`` when ``action``'s declared inputs
+    ## intersect the session-wide ``sessionInvalidatedPaths`` accumulator
+    ## OR ``sessionCachePublishDisabled`` is set (a Level 2 loss has
+    ## fired earlier in the session). The scheduler treats such a
+    ## lookup as ``cdMiss`` with reason ``"monitor-loss-invalidation"``.
+    ## The check is defensive against the common healthy path: when
+    ## both accumulators are empty/false this returns immediately.
+    if sessionCachePublishDisabled:
+      return true
+    if sessionInvalidatedPaths.len == 0:
+      return false
+    for input in action.inputs:
+      let materialized = materialPath(action.cwd, input)
+      if sessionInvalidatedPaths.contains(materialized):
+        return true
+    false
+
   proc invalidateCachedPath(path: string) =
     fileMetadataCache.invalidate(path)
 
@@ -4068,6 +4180,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if action.cacheable: cdMiss else: cdNotCacheable
           runResult.results[idToIndex.resultIndex(id)].reason = "force-rebuild"
           runResult.trace(id, "cache-skipped", "force-rebuild")
+        elif action.cacheable and cacheLookupBlockedByMonitorLoss(action):
+          # M9.R.73.2 — an earlier action in this session hit a monitor
+          # loss whose invalidated-path set intersects this action's
+          # declared inputs, OR a Level 2 (unknown-scope) loss disabled
+          # cache hits session-wide. Force a miss so the action
+          # re-executes rather than trusting evidence that pre-dates
+          # the invalidation. See ``registerEvidenceInvalidation``.
+          runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+          runResult.results[idToIndex.resultIndex(id)].reason =
+            if sessionCachePublishDisabled: "monitor-loss-session-disabled"
+            else: "monitor-loss-narrow-invalidation"
+          runResult.trace(id, "cache-skipped",
+            runResult.results[idToIndex.resultIndex(id)].reason)
         elif action.cacheable:
           if config.rebuildMissingOutputsOnCacheHit:
             let outputStatStart = statStart()
@@ -4331,6 +4456,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               launchedAny = true
               continue
             invalidateCachedWrites(action, evidence.evidence)
+            # M9.R.73.2 — fold Level 1 invalidated-path set (or Level 2
+            # session-disable flag) into the session-scoped accumulator
+            # so downstream cache LOOKUPS can skip narrowly.
+            registerEvidenceInvalidation(evidence)
             # M9.R.72.3 — spec Level 1/2 monitor-loss handling. When
             # ``disableCacheHits`` is set, the exit=0 action still succeeds
             # (downstream can proceed) but the action-cache publish is
@@ -4435,6 +4564,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               launchedAny = true
               continue
             invalidateCachedWrites(plan.action, evidence.evidence)
+            # M9.R.73.2 — fold Level 1 invalidated-path set (or Level 2
+            # session-disable flag) into the session-scoped accumulator
+            # so downstream cache LOOKUPS can skip narrowly.
+            registerEvidenceInvalidation(evidence)
             # M9.R.72.3 — spec Level 1/2 monitor-loss handling. When
             # ``disableCacheHits`` is set, the exit=0 action still succeeds
             # (downstream can proceed) but the action-cache publish is
@@ -4806,6 +4939,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           completed = terminalCount()
           continue
         invalidateCachedWrites(action, evidence.evidence)
+        # M9.R.73.2 — fold Level 1 invalidated-path set (or Level 2
+        # session-disable flag) into the session-scoped accumulator
+        # so downstream cache LOOKUPS can skip narrowly.
+        registerEvidenceInvalidation(evidence)
         # M9.R.72.3 — spec Level 1/2 monitor-loss handling. When
         # ``disableCacheHits`` is set, the exit=0 action still succeeds
         # but the action-cache publish is skipped so a future rebuild
