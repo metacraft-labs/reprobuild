@@ -1,0 +1,320 @@
+M9.R.71 Phase B — logind I/O error + sway SIGABRT characterization
+=====================================================================
+
+Investigator: sub-agent M9.R.71 (2026-07-04)
+
+Executive summary
+-----------------
+Cause beta (pam_systemd(sddm-autologin:session): Failed to create
+session: Input/output error) is characterized fully in Phase A
+finding A4 and re-summarized here.  The characterization is:
+
+  * dbus-daemon runs WITHOUT --systemd-activation (stripped by
+    M9.R.56.5's /etc/systemd/system/dbus.service.d/
+    20-no-systemd-activation.conf drop-in because the from-source
+    dbus recipe was compiled without libsystemd support).
+  * When pam_systemd.so on the sddm-autologin session stack tries
+    to call org.freedesktop.login1.CreateSession() over dbus,
+    logind internally tries to activate systemd-1 via
+    StartTransientUnit — but dbus can't route the activation
+    because of the missing --systemd-activation flag.
+  * The eventual return path surfaces as EIO ("Input/output
+    error") back to pam_systemd's session opener.
+  * BUT pam_systemd is declared `session optional` in
+    /etc/pam.d/sddm-autologin (M9.R.56.8.6), so libpam's
+    dispatcher IGNORES the return value and CONTINUES to
+    open_session() for the next stack entry (none — pam_systemd
+    is the last entry).  pam_open_session() returns PAM_SUCCESS.
+
+Consequence: cause beta is BENIGN in the current shim state.  The
+M9.R.56.8.7 tmpfiles.d + /etc/environment.d shims already provide
+XDG_RUNTIME_DIR=/run/user/1000 out-of-band, so sway inherits it
+via /etc/profile at wayland-session shell startup.
+
+Therefore cause beta is NOT the blocker either.
+
+The genuine blocker is: sway compositor crashes with SIGABRT
+immediately after sddm-helper spawns it.  Phase B below deepens
+the root-cause hypothesis for the sway crash and defines the
+Phase C fix shape.
+
+
+Detailed findings
+-----------------
+
+Finding B1 — dbus-daemon configuration is as-designed for
+non-systemd-activation:
+
+  $ cat /mnt/inspect/etc/systemd/system/dbus.service.d/
+       20-no-systemd-activation.conf
+  [Service]
+  Type=simple
+  ExecStart=
+  ExecStart=/usr/bin/dbus-daemon --system --nofork --nopidfile
+    --syslog-only
+
+  Missing --systemd-activation vs the upstream:
+  ExecStart=/usr/bin/dbus-daemon --system --address=systemd:
+    --nofork --nopidfile --systemd-activation --syslog-only
+
+  Empirical outcome: EIO returned by logind's CreateSession()
+  method during pam_systemd's open_session() call.
+
+  Fix would require a multi-week dbus rebuild with libsystemd
+  (per M9.R.56.8.7 comment).  Deferred; the shim provides the
+  needed downstream state (XDG_RUNTIME_DIR).
+
+
+Finding B2 — /run/user/1000 shim is in place:
+
+  $ cat /mnt/inspect/etc/tmpfiles.d/m9r56-8-xdg-runtime.conf
+  d /run/user 0755 root root -
+  d /run/user/1000 0700 1000 1000 -
+
+  $ cat /mnt/inspect/etc/environment.d/50-xdg-runtime-dir.conf
+  XDG_RUNTIME_DIR=/run/user/1000
+
+  $ grep XDG /mnt/inspect/etc/environment
+  XDG_RUNTIME_DIR=/run/user/1000
+
+  Belt-and-suspenders coverage.  When sway is invoked via
+  /usr/share/sddm/scripts/wayland-session, the script does
+  `exec $SHELL --login -c 'exec "$@"' - $@` for bash which
+  sources /etc/profile which sources /etc/environment.d/ via
+  pam_env.so's runtime.  So sway inherits XDG_RUNTIME_DIR.
+
+
+Finding B3 — seatd server-mode is running (M9.R.58 fix):
+
+  $ cat /mnt/inspect/etc/systemd/system/seatd.service
+  [Unit]
+  Description=Seat management daemon
+  After=systemd-user-sessions.service
+  Before=sddm.service
+  [Service]
+  ExecStart=/usr/bin/seatd -g seat
+  Restart=always
+
+  $ ls /mnt/inspect/etc/systemd/system/graphical.target.wants/
+  seatd.service -> /etc/systemd/system/seatd.service
+
+  Serial log confirms: "[  OK  ] Started Seat management daemon."
+  ~2s before sddm.service starts.
+
+  repro user's groups include `seat` (gid 985), so libseat should
+  be able to open /run/seatd.sock.
+
+  Empirical (from M9.R.70 boot smoke serial log): ZERO seatd
+  segfaults; seatd runs to completion.
+
+
+Finding B4 — sway compositor crash characterization:
+
+  Exit codes from sddm.log across 7 autologin attempts:
+    Attempt 1 (t+2s):  exit code 6  = SIGABRT
+    Attempt 2 (t+34s): exit code 2  = SIGINT
+    Attempts 3-7:      exit code 2  = SIGINT
+
+  The FIRST attempt gets SIGABRT, indicating an assertion failure
+  or abort() call in sway or wlroots.  Subsequent attempts get
+  SIGINT, which is the signal sddm sends when the ~30s watchdog
+  fires (sddm forcibly terminates the session).
+
+  So the primary crash IS an assertion failure on first attempt.
+  All later attempts hang instead of crashing — probably waiting
+  for a resource the first crash left in a stale state (VT
+  ownership? seatd fd? libinput device grab?).
+
+  Attempt 1 timing:
+    t+2s:  Session started true (pam_open_session returned OK)
+    t+2s:  Starting Wayland user session (helper spawns sway)
+    t+6s:  [PAM] Closing session
+    t+6s:  Auth: sddm-helper exited with 6
+
+  So sway lived ~4 seconds before SIGABRT.  That is enough time
+  to reach wlroots' backend_autocreate, seat setup, DRM backend
+  init, and probably output/CRTC probing.  Common
+  assertion-failure sites at this stage in wlroots 0.19:
+
+    - drm_backend.c: assert(!list_empty(&backend->drm.connectors))
+      when EDID probe returns zero connectors (unlikely on bochs-drm)
+    - libseat.c: assert(session->active) when seatd session
+      activation races with VT switch
+    - render/gles2.c: assert(egl->context != EGL_NO_CONTEXT)
+      when Mesa EGL swrast fails
+    - xdg-shell / input-method / other protocol init assertions
+
+  Or plain abort() calls from:
+    - wl_log() escalation on protocol errors
+    - sway's config parser on missing/malformed ~/.config/sway/config
+
+
+Finding B5 — wayland-session.log capture failure:
+
+  $ sudo find /mnt/inspect/home /mnt/inspect/var -name
+       "wayland-session.log" 2>&1
+  (no matches)
+
+  $ sudo ls -la /mnt/inspect/home/repro/
+  drwxr-xr-x  2 zahary  1000 4096 Jul  4 09:11 .
+  drwxr-xr-x  4 zahary users 4096 Jul  4 09:11 ..
+  (empty)
+
+  Per UserSession.cpp:355-380, sddm-helper opens sway's stderr
+  redirect to $HOME/.local/share/sddm/wayland-session.log AFTER
+  setuid(pw.pw_uid=1000) AND AFTER chdir($HOME).  If either
+  fails, the code path exits with HELPER_OTHER_ERROR (3), which
+  we DON'T see in sddm.log (we see 6, 2, 2, ...).  So setuid+
+  chdir succeeded.
+
+  The mkpath + open sequence:
+    QFileInfo finfo(sessionLog);      // parses ".local/share/sddm/wayland-session.log"
+    QDir().mkpath(finfo.absolutePath()); // mkdir -p .local/share/sddm/
+    int fd = ::open(sessionLog, O_WRONLY|O_CREAT|O_TRUNC, 0600);
+
+  If both succeed, we should see:
+    /home/repro/.local/share/sddm/wayland-session.log
+  in the qcow2, at least as a 0-byte file.  We see NOTHING —
+  meaning either:
+    (a) QDir::mkpath silently failed (permission issue? but repro
+        owns /home/repro at 0755 with default umask)
+    (b) The whole helper is killed BEFORE reaching this code path
+        (which would mean sway isn't launched at all, contradicting
+        the "Starting Wayland user session" log line)
+
+  Wait — re-read the sddm.log:
+    (II) HELPER: Starting Wayland user session: "...wayland-session" "sway"
+    (II) HELPER: Jumping to VT 1
+    (II) HELPER: VT mode didn't need to be fixed
+    (II) DAEMON: Session started true
+    (WW) HELPER: Failed to write utmpx:  No such file or directory
+    (II) HELPER: [PAM] Closing session
+    (WW) DAEMON: Auth: sddm-helper exited with 6
+
+  "Failed to write utmpx: No such file or directory" — utmp
+  file /var/run/utmp doesn't exist.  That's a diagnostic
+  warning, not the blocker.
+
+  So sway IS launched (Starting Wayland user session), but
+  wayland-session.log ISN'T persisted.  The most likely
+  explanation is (c): sway launches AS PART of the wayland-session
+  bash wrapper, and the CRASH happens INSIDE the shell wrapper
+  BEFORE reaching sway.  Or (d): sway's output goes to a different
+  file than we expect due to sddm.conf's SessionLogFile setting.
+
+
+Finding B6 — SessionLogFile config check:
+
+  $ sudo cat /mnt/inspect/etc/sddm.conf.d/*.conf 2>/dev/null | grep -i sessionlog
+
+  No SessionLogFile is set in the drop-ins — default value from
+  sddm's Configuration.h is used.  Per src/common/Configuration.h:
+    entry(Wayland, SessionLogFile, QString,
+      QStringLiteral(".local/share/sddm/wayland-session.log"), ...)
+
+  So the log SHOULD end up at
+  /home/repro/.local/share/sddm/wayland-session.log.  Since it
+  doesn't, either UserSession's mkpath silently failed OR the
+  file was created, sway wrote to it, then the file was deleted
+  before we could inspect (unlikely — filesystem journal would
+  preserve deleted-then-not-fsync'd files as at-least-empty
+  entries in the dir).
+
+
+Finding B7 — hypothesis: /etc/pam.d/other cascade DOES break
+sway in a subtle way I missed in Phase A:
+
+  Re-reading pam_handlers.c more carefully: the outer
+  _pam_init_handlers() opens BOTH /etc/pam.d/<service> AND
+  /etc/pam.d/other.  For each `include` module-type line, it
+  recursively calls _pam_load_conf_file() which parses the
+  included file with `not_other=1`.  In /etc/pam.d/other:
+    @include common-auth       <-- illegal, MUST_FAIL registered
+    @include common-account
+    @include common-password
+    @include common-session
+
+  Each `@include` line's `illegal module type: @include` error
+  causes:
+    - handler_type = PAM_HT_MUST_FAIL for the `other` service
+    - line CONTINUES parsing (does NOT propagate as
+      _pam_parse_conf_file failure)
+
+  In common-session, pam_systemd IS referenced:
+    session optional pam_systemd.so
+  Because the include never happens (@include is broken), the
+  actual common-session's pam_systemd.so entry never gets loaded
+  into the `other` fallback stack.  For sddm-autologin, pam_systemd
+  IS loaded directly from the sddm-autologin config (via absolute
+  path).
+
+  So the @include failures on /etc/pam.d/other do NOT affect
+  sddm-autologin's dispatch.
+
+  Confirmed: cause alpha is cosmetic.
+
+
+Cause verdict — Phase B
+-----------------------
+Cause alpha:     COSMETIC (from-source libpam lacks @include support,
+                 producing genuine LOG_ERR spam that DOES NOT
+                 propagate to any functional PAM failure)
+Cause beta:      COSMETIC (pam_systemd EIO is ignored due to
+                 `session optional` semantics; XDG_RUNTIME_DIR is
+                 provided out-of-band by M9.R.56.8.7 shims)
+Cause gamma:     GENUINE — sway compositor SIGABRTs on first
+                 launch attempt.  No wayland-session.log captured,
+                 blocking further diagnosis.
+
+Genuine root cause: sway crashes with SIGABRT during startup.
+Diagnostic gap: sway's stderr is lost (target log file never
+written to /home/repro/.local/share/sddm/).
+
+
+Phase C fix plan
+----------------
+Fix shape 1 (mandatory — reduces log noise + closes cause alpha):
+  Rewrite /etc/pam.d/other in Phase 10.8 of build-reproos-image.sh
+  to use portable syntax:
+    #%PAM-1.0
+    # M9.R.71.3 — replace Debian's @include chain with a minimal
+    # deny-only fallback stack.  The from-source libpam 1.6.1 does
+    # not recognize @include; this rewrite mirrors the semantics
+    # Debian intended (any service without its own config falls
+    # through to pam_deny.so) using portable directives.
+    auth       required   pam_deny.so
+    account    required   pam_deny.so
+    password   required   pam_deny.so
+    session    required   pam_deny.so
+  This eliminates the "illegal module type: @include" LOG_ERR
+  spam and preserves Debian's original security posture
+  (unspecified-service PAM invocations DENIED).
+
+Fix shape 2 (mandatory — closes sway diagnostic gap):
+  Add a sway diagnostic wrapper to the qcow2 that runs sway
+  under `strace -f -o /tmp/sway-strace.log` OR at minimum
+  redirects sway's stderr to /var/log/m9r71_sway_stderr.log
+  world-readable AND fsyncs each write.  Wire it into the
+  wayland-session script or add a systemd path/oneshot capture.
+
+  Cleaner shape: replace sddm's SessionCommand for the wayland
+  session with a wrapper that ensures stderr redirect + fsync:
+    /etc/sddm.conf.d/10-paths.conf's [Wayland] SessionCommand=
+    /usr/local/bin/sway-diag-wrapper
+  Where sway-diag-wrapper is:
+    #!/bin/sh
+    exec 2>>/var/log/m9r71_sway_stderr.log
+    echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) sway launch ===" >&2
+    exec /usr/share/sddm/scripts/wayland-session "$@" >&2
+
+  BUT: /var/log is not writable by repro.  So instead use
+  /tmp/m9r71_sway_stderr.log (world-writable via tmpfiles.d)
+  or /var/log/m9r71_sway_stderr.log with 0666.
+
+Fix shape 3 (optional — if sway still crashes after
+diagnostic capture):
+  Based on the captured stderr, either (a) file a wlroots
+  assertion fix in the wlroots recipe, (b) add missing sway
+  runtime config, or (c) escalate to the next milestone.
+
+Land shapes 1 + 2 in M9.R.71.3.
