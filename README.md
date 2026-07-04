@@ -82,8 +82,8 @@ If you are already familiar with the modern DevOps and build toolchain, Reprobui
 *   **Reprobuild is like BuildXL & Tup** by enforcing hermeticity through filesystem monitoring. It differs from them by using the [io-mon](file:///Users/zahary/m/io-mon-fixes/io-mon) user-space filesystem interceptor to **automatically discover all build dependencies** rather than requiring kernel-level drivers or FUSE filters.
 *   **Reprobuild is like Ninja** in the sense that it is optimized to **execute incremental builds at maximum speed**. It differs from it by adding features such as **OOM protection** that enable agents to execute concurrent builds without thrashing.
 *   **Reprobuild is like Live++** by supporting hot code reloading, but does it on all operating systems.
-*   **Reprobuild is like direnv**, but is completely zero-bypass—since compiler tools are scoped to the project environment, you can't forget to run it.
-*   **Reprobuild is like Docker Compose & Process Compose**, but it type-checks your service configuration.
+*   **Reprobuild is like direnv**, but is completely zero-bypass—since compiler tools are scoped to the project environment, **agents can't forget to run it**.
+*   **Reprobuild is like Docker Compose & Process Compose**, but it **type-checks** your service configuration.
 
 ---
 
