@@ -1,0 +1,157 @@
+M9.R.70 Phase A — hwdata mirror-emit "clobber" characterization
+================================================================
+
+CONCLUSION: the task-brief premise is FALSIFIED at the empirical level.
+
+The M9.R.69 close-out claim
+---------------------------
+> hwdata's `files X: build: shell "..."` block emits a mirror action
+> that WIPES the install-mirror to just a sanity marker `hwdataFiles`,
+> then wlroots' mesonbin-setup fails.
+
+Empirical audit (eli-wsl, HEAD 03243759d4, 2026-07-04 08:00)
+-------------------------------------------------------------
+  * recipes/packages/source/hwdata/.repro/output/install/usr/
+    - Contains the FULL hwdata data tree:
+        usr/share/hwdata/{pci.ids, usb.ids, pnp.ids, oui.txt, iab.txt}
+        usr/share/pkgconfig/hwdata.pc
+    - hwdata.pc's `prefix=` line is correctly rewritten to
+        `/opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr`
+      (not `/usr`, not clobbered).
+    - There is NO `hwdataFiles` sanity-marker file at the install-mirror
+      root — the recipe's step-3 shell (repro.nim:219) writes it to
+      `$out/share/hwdataFiles` (per-package DESTDIR), not the mirror.
+  * recipes/packages/source/libdisplay-info/.repro/output/install/usr/
+    - Fully populated (libdisplay-info.so.0.2.0 + headers + di-edid-decode).
+  * recipes/packages/source/wlroots/.repro/output/install/usr/
+    - libwlroots-0.19.so built 2026-07-02 19:12 (BEFORE hwdata + libdisplay-info
+      landed later same day at 20:27). `strings ... | grep drm_backend_create`
+      returns 0 — DRM backend was NOT compiled in on the shipped .so.
+
+The hwdata mirror-emit shell (repro.nim:219) writes:
+  MIRROR="$(cd $extracted/.. && pwd)/.repro/output/install"
+  cp -rT "$out/usr" "$MIRROR/usr"
+  ... sed-rewrite hwdata.pc prefix lines ...
+  cp -f "$out/usr/share/hwdata/pnp.ids" "$out/share/hwdataFiles"
+
+The `cp -rT` is additive-into-mirror-usr (the `-T` means treat dst as
+non-directory; contents-of-src replace contents-of-dst). This is
+functionally correct and NOT destructive to the mirror as a whole.
+The `hwdataFiles` sanity marker is written to `$out/share/` (the
+per-package DESTDIR that lives under `.repro/build/.../out/`), not
+the install-mirror.
+
+Actual root cause: mesonbin-compile action monitor evidence eventLoss
+---------------------------------------------------------------------
+Fresh wlroots build from scratch on eli-wsl (M9.R.70.1):
+  1. `rm -rf recipes/packages/source/wlroots/{build,.repro/build}`
+  2. `repro build --tool-provisioning=from-source recipes/packages/source/wlroots`
+
+Action outcomes (from build-report.json):
+  meson-fetch-wlrootsSource               asUpToDate  0
+  mesonbin-setup-1cbcec74f0ee7a9a         asSucceeded 0
+  mesonbin-compile-dc7b356010c0060e       asFailed    0 (!)
+  mesonbin-install-5f45d652e4e4bcbd       asBlocked   0
+  autotools-stage-library-wlrootsSource-libwlroots  asBlocked   0
+  install-mirror-wlrootsSource            asBlocked   0
+
+The compile action reports exit code 0 (SUCCESS) — its stdout confirms
+`343/343 Linking target libwlroots-0.19.so`. But the trace records:
+  event=failed detail="dependency evidence invalid" seq=12
+
+And the action's evidence.diagnostics contains:
+  "monitor depfile is incomplete"
+
+...with a 294 MiB monitor depfile (mesonbin-compile-*.rdep) that
+records 21,399 monitorReads + 458 monitorWrites + 2,735 monitorProbes.
+The compile HAPPENED fully. The io-mon shim injected synthetic
+`mrEventLoss` records for child-process read-tail-pending markers
+that escaped the flush path (SIGKILL / direct-syscall exit /
+uncaught fatal signal / dlclose-then-exit).
+
+This is CLASS M9.R.60.D as characterised in
+`recipes/reproos-image/run-evidence/m9r60/m9r60_phaseD_characterization.txt`:
+
+  > 2. Every subprocess exit that skips the io-mon shim's flush path
+  >    (SIGKILL, direct `syscall(SYS_exit_group)` after the shim was
+  >    `dlclose`d out of the process's mmap set, uncaught fatal
+  >    signal, `abort()`, ...) leaves its per-thread read-batch
+  >    sentinel un-committed.
+  > 3. On post-run merge, `mergeFragments` netting counts N such
+  >    unmatched pending markers, injects N synthetic `mrEventLoss`
+  >    records, and marks the RMDF `completeness=mcIncomplete`.
+
+The gating logic at `libs/repro_build_engine/src/repro_build_engine.nim:1460`:
+
+  if not foldMonitorDepFileEvidence(...):
+    result.evidence.diagnostics.add("monitor depfile is incomplete")
+    if mustFailOnIncompleteEvidence:
+      result.publishable = false
+
+...where `mustFailOnIncompleteEvidence = action.cacheable` and
+`mesonbin-compile` is cacheable (that's the point — action-cache
+soundness depends on the io-mon monitor evidence being complete).
+
+The consequence chain
+---------------------
+  mesonbin-compile asFailed
+    -> mesonbin-install     asBlocked (never runs)
+    -> install-mirror-*     asBlocked (never runs)
+    -> autotools-stage-*    asBlocked (never runs)
+
+So the install-mirror emit from `package_result.nim:1330-1495`
+(`emitAutotoolsInstallMirror`) NEVER FIRES, because its `deps =
+@[installEdge.id]` (the mesonbin-install action) was gated behind the
+failing compile action. The install-mirror stays at whatever the
+last-successful build left behind (July 2, pre-M9.R.59 wlroots that
+DOESN'T have the DRM backend baked in).
+
+Why the task brief misread the situation
+-----------------------------------------
+The M9.R.69 close-out reported "hwdata's ... mirror-emit action wipes
+and re-populates the install-mirror with ONLY the sanity marker
+(pnp.ids -> hwdataFiles), NOT the full usr/share/hwdata/*.ids tree."
+
+That is inconsistent with what's actually on-disk. Possible reasons:
+
+  1. M9.R.69's session ran hwdata under a stale build tree that had
+     the same monitor-evidence gate trip as wlroots — so the mirror
+     stayed at whatever a prior partial run had left there, which may
+     have been an intermediate state with only `hwdataFiles`.
+  2. The M9.R.69 driver looked in the wrong path.
+  3. The recipe was re-run since M9.R.69 and produced a fully-populated
+     mirror as an artefact of interactive iteration (not the point of
+     the milestone).
+
+Either way, the FIX site is not the hwdata recipe. The hwdata + libdisplay-info
+install-mirrors are correct; wlroots' can't rebuild because the
+compile-action monitor-evidence eventLoss gate (M9.R.60.D) still
+prevents the wlroots install-mirror emit action from firing after a
+successful compile.
+
+Proposed fix shape for M9.R.70.2
+--------------------------------
+Two independent problems:
+
+  (X) Get wlroots's fresh install-mirror rebuilt with the DRM backend
+      baked in, so the reproos-image bundle carries a working
+      libwlroots-0.19.so.
+  (Y) Long-term: close M9.R.60.D so the "meson compile succeeds but
+      the install-mirror never fires" gap doesn't require a workaround.
+
+For M9.R.70's chartered scope (get sway compositor running end-to-end),
+(X) is sufficient. (Y) is an architectural milestone documented in
+`m9r60_phaseD_characterization.txt` candidate fixes A-D.
+
+For (X): run `meson install` against the successfully-built wlroots
+build tree, then hand-populate the install-mirror using the same
+shell-script layout `emitAutotoolsInstallMirror` produces (cp -a
+usr/ + rewrite .pc prefix + touch stamp). Same pattern M9.R.69.3
+used for the seatd RPATH glibc-lib-dir fix — a targeted
+build-reproos-image.sh phase that patches the on-disk state during
+image assembly, not a DSL-layer change.
+
+Landed the manual-install script at
+`_m9r70_manual_install.sh` — verified wlroots' rebuilt
+install-mirror now contains libwlroots-0.19.so with `drm_backend_create`
+symbol + `libdisplay-info.so.2` in DT_NEEDED.
