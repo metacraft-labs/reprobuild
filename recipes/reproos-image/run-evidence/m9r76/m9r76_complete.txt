@@ -1,0 +1,353 @@
+M9.R.76 close-out — R10 immutable install-mirror prefix (design + core mechanism)
+===============================================================================
+
+User directive
+--------------
+"reprobuild-specs R10 defines install-mirrors as content-hashed
+side-by-side prefixes (per output-set hash), NOT stable per-recipe
+`.repro/output/install/` paths. Currently every recipe writes to a
+stable mutable filesystem path — a load-bearing architectural gap
+surfaced across M9.R.60-70. This is a multi-week refactor. Focus on
+landing the design + core mechanism in this milestone; leave migration
+of existing recipes as documented follow-up if scope grows."
+
+Motivating audit: M9.R.72 Phase A Gap III.
+
+
+Commits (5)
+-----------
+Repo A (reprobuild-specs), branch `latest`:
+  M9.R.76.1  spec addendum
+    (Store-And-Installation-Layout.md +3 sub-sections under R10;
+     new companion doc Immutable-Install-Mirror-Prefixes.md with
+     full migration story: resolver contract, emit-side flow,
+     4-phase per-recipe migration plan, non-goals, validation
+     criteria, prior art notes.)
+
+Repo B (reprobuild), branch `dev` (also pushed to `main`):
+  M9.R.76.2  DSL resolver — spec R10 core mechanism
+    (libs/repro_dsl_stdlib/src/repro_dsl_stdlib/types/install_mirror_resolver.nim
+     + package_result.nim routing + tests/unit/t_m9r76_install_mirror_resolver.nim
+     with 12 assertions.)
+
+  M9.R.76.3  threading — Qt6 module-path + mesa GLESv2 + generic
+             CMake-config
+    (3 more DSL threading sites routed through the resolver;
+     shared ``scanCmakeConfigDirsAt`` scanner core factored out.)
+
+  M9.R.76.4  read-only enforcement — spec R10 §"Read-Only Enforcement"
+    (emitInstallMirrorReadOnlyEnforcement + installMirrorEnforcesReadOnly
+     + wire into emitInstallTreeMirror + 6 gating assertions.)
+
+  M9.R.76.5.1  recipe migration — reproos-installer to resolver
+    (First apps/ recipe migrated off hardcoded paths.)
+
+  M9.R.76.6  this close-out
+
+
+Phase A — spec addendum
+=======================
+
+Reads
+-----
+1. Store-And-Installation-Layout.md §R10 (existing "Immutable Side-By-
+   Side Prefixes" section)
+2. M9.R.72 Phase A summary (recipes/reproos-image/run-evidence/m9r72/
+   m9r72_phaseA_spec_summary.txt)
+3. libs/repro_local_store/src/repro_local_store/store.nim (already-
+   compliant content-addressed store infrastructure with prefixes/
+   <package>/<version>-<realization-hash>/ layout)
+
+Addendum to Store-And-Installation-Layout.md §R10
+--------------------------------------------------
+Three normative sub-sections added:
+
+  * "Realization Hash Inputs (normative)" — the canonical BLAKE3-256
+    envelope:
+      1. package name + version
+      2. source acquisition identity (tarball SHA-256 / commit id)
+      3. resolved dep (name, hash) list
+      4. resolved options
+      5. target platform / ABI
+      6. toolchain identity
+      7. env-normalization identity
+
+  * "Legacy Fallback (transitional)" — the engine SHOULD support a
+    resolver that returns the mutable path when the content-hashed
+    prefix does not exist yet; driven by an opt-in env var. Removed
+    once every first-party recipe is migrated.
+
+  * "Read-Only Enforcement (post-publish)" — the prefix contents MUST
+    be read-only via mode bits or sandbox policy; peer-recipe writes
+    fail-closed as a double-write violation per R7.
+
+Companion doc Immutable-Install-Mirror-Prefixes.md
+---------------------------------------------------
+New file. Contains:
+  * Motivation (recap of M9.R.72 Gap III + R7 double-write violation)
+  * Content-hashed prefix layout
+  * Hash inputs cross-reference to R10
+  * Resolver contract (packageInstallMirrorRoot / -LibDirs / -PkgConfigDirs
+    / -CmakeRoot / -IncludeDir / -PropagatedManifestPath)
+  * Emit-side flow (legacy vs hashed mode)
+  * Migration story: Phase 0 (default today) → Phase 1 (this milestone)
+    → Phase 2 (per-recipe opt-in) → Phase 3 (legacy removal)
+  * Read-only enforcement (mode bits + sandbox policy)
+  * Non-goals (R11 two-layer split; action-cache fingerprinting; GC)
+  * Validation criteria
+  * Prior art (Nix / Spack / 0install)
+
+Both files landed under M9.R.76.1 commit (256 insertions total on
+reprobuild-specs latest branch).
+
+
+Phase B — engine + DSL core mechanism
+======================================
+
+Implementation site
+-------------------
+libs/repro_dsl_stdlib/src/repro_dsl_stdlib/types/install_mirror_resolver.nim
+(148 lines; new file).
+
+Public API
+----------
+  currentInstallMirrorMode() -> InstallMirrorMode
+      Reads $REPRO_INSTALL_MIRROR_MODE (legacy / hashed /
+      hashed-with-legacy-fallback); unset falls back to legacy.
+
+  packageInstallMirrorRoot(recipesRoot, depName) -> string
+      Returns the dep's install-mirror root POSIX-slashed.
+
+  packageInstallMirrorLibDirs(recipesRoot, depName) -> seq[string]
+      Returns [usr/lib, usr/lib64] under the resolved root.
+
+  packageInstallMirrorPkgConfigDirs(...) -> seq[string]
+      Returns [usr/lib/pkgconfig, usr/lib64/pkgconfig,
+      usr/share/pkgconfig].
+
+  packageInstallMirrorCmakeRoot(...) -> string
+      Returns <mirror>/usr/lib/cmake.
+
+  packageInstallMirrorIncludeDir(...) -> string
+  packageInstallMirrorPropagatedManifestPath(recipesRoot, dep, manifestFile)
+  packageInstallMirrorHumanFriendlyPath(...) -> string
+      Always-legacy shape for diagnostic messages that must be
+      stable across mode switches.
+
+Threading sites routed (M9.R.76.2 + M9.R.76.3)
+-----------------------------------------------
+  * m9r14fAppendDepMirrorDir            (M9.R.76.2)
+  * m9r30CollectDepPropagatedManifestPaths (M9.R.76.2)
+  * m9r15iCollectQt6ComponentDirs       (M9.R.76.2)
+  * m9r33Collect2Qt6CmakeModulePathDirs (M9.R.76.3)
+  * m9r33Emit2MesaGlesv2CacheVars       (M9.R.76.3)
+  * m9r15iCollectAllCmakeConfigDirs     (M9.R.76.3)
+
+In legacy mode (default) every returned path is byte-identical to
+the pre-M9.R.76 inline join. Verified via 79 assertions across 8
+regression test files passing unchanged (m9r14e_1, m9r14e_2,
+m9r14f_2, m9r15i_1 [Qt6 + generic], m9r15q_5, m9r30, m9r33_2).
+
+Regression coverage
+-------------------
+tests/unit/t_m9r76_install_mirror_resolver.nim (12 assertions):
+  * default mode is legacy when env var unset
+  * legacy mode returns pre-M9.R.76 path shape byte-identically
+  * empty inputs produce empty outputs
+  * lib dirs return both lib and lib64 in POSIX form
+  * pkgconfig dirs enumerate lib, lib64, and share
+  * cmake root and include dir compose against the same resolved root
+  * manifest path composes with the given filename
+  * hashed mode falls back to legacy when no recipe has opted in
+    (v1 behavior — emit-side wiring lands in a follow-up)
+  * hashed-with-legacy-fallback returns legacy when hashed absent
+  * unrecognised mode string falls back to legacy
+  * human-friendly diagnostic path always returns legacy shape
+  * paths are POSIX-slashed regardless of host
+
+
+Phase C — PKG_CONFIG_PATH/CMAKE_PREFIX_PATH threading
+======================================================
+
+Landed as part of M9.R.76.2 + M9.R.76.3. The 6 threading sites listed
+in Phase B cover the full PKG_CONFIG_PATH / CMAKE_PREFIX_PATH /
+CMAKE_MODULE_PATH / LD_LIBRARY_PATH resolution path used by the
+install-mirror shell emitter and the cmake_package / meson_package /
+autotools_package constructors' cacheVars emission.
+
+Not routed (documented for follow-up):
+  * emitInstallTreeMirror EMIT-side (the mirror writer itself; the
+    write-side wiring is Phase 2 of the migration when a recipe opts
+    into hashed mode via ``useHashedMirror = true``).
+  * cmake_package.nim inline references (already in comments/legacy
+    doc blocks; no live code path).
+
+
+Phase D — read-only enforcement (M9.R.76.4)
+============================================
+
+Implementation
+--------------
+emitInstallMirrorReadOnlyEnforcement(mirrorRoot, mode) in
+install_mirror_resolver.nim. Semantics:
+
+  immLegacy:                        returns "" (the mutable stable
+                                    path MUST stay writable).
+  immHashed:                        emits ``chmod -R a-w`` on the
+                                    mirror root, guarded by
+                                    ``[ -d ... ]``.
+  immHashedWithLegacyFallback:      emits ``chmod -R a-w``.
+
+installMirrorEnforcesReadOnly(mode) — companion predicate for
+plan-time callers.
+
+Wired into emitInstallTreeMirror after the touch stamp; recipes that
+opt into hashed mode automatically get read-only enforcement without
+any recipe-side change.
+
+Regression coverage (6 new assertions):
+  * legacy mode emits empty snippet
+  * hashed mode emits chmod -R a-w
+  * hashed-with-legacy-fallback enforces read-only
+  * empty mirror root produces empty snippet (defensive)
+  * explicit mode arg overrides env var (plan-time control)
+  * shell path escapes preserve double-quote safety
+
+Deferred: the actual EROFS regression test — a deliberately-buggy
+test recipe that tries to touch a peer recipe's published prefix —
+needs the recipe DSL to declare ``useHashedMirror = true`` at recipe
+scope. That per-recipe knob is Phase 2 of the migration (M9.R.77+)
+and gated on the emit-side wiring landing.
+
+
+Phase E — recipe migration
+===========================
+
+Landed (M9.R.76.5.1)
+--------------------
+  * apps/reproos-installer/repro.nim — first migration; hardcoded
+    "../../recipes/packages/source/qt6-declarative/.repro/output/install/
+    usr/lib/cmake" replaced with
+    packageInstallMirrorCmakeRoot(qt6SiblingsRoot, "qt6-declarative")
+    + same for qt6-quickcontrols2.
+    Compile-check: passes with only pre-existing "imported and not
+    used" warnings on 'os' + 'strutils'.
+
+Deferred (documented follow-ups)
+--------------------------------
+The M9.R.72 gap-III audit flagged 89 files touching the mirror path;
+most are diagnostic comments / evidence logs (not live code paths).
+Live production migration targets remaining:
+
+  11 recipe files with hardcoded shell-block references:
+    * recipes/packages/source/hwdata/repro.nim (line 219 — 90-char
+      inline shell block)
+    * recipes/packages/source/plasma-workspace/repro.nim
+    * recipes/packages/source/xtrans/repro.nim
+    * recipes/packages/source/xorgproto/repro.nim
+    * recipes/packages/source/iana-tzdata/repro.nim
+    * recipes/packages/source/qt6-quickcontrols2/repro.nim
+    * recipes/packages/source/breeze/repro.nim
+    * recipes/packages/source/kwin/repro.nim
+    * recipes/packages/source/plasma-wayland-protocols/repro.nim
+    * recipes/packages/source/ksolid/repro.nim
+    * recipes/packages/source/extra-cmake-modules/repro.nim
+
+  Migration blockers for these 11 files:
+    * They embed the mirror path in a ``shell "..."`` string (from-
+      source-custom convention) rather than a Nim expression, so the
+      resolver is not directly reachable from inside the shell script.
+    * Proper migration requires the engine to populate an env var
+      (``$OUT_MIRROR`` / ``$DEP_<name>_ROOT``) at action-plan time.
+    * That engine-side env-var population is the Phase 2 emit-side
+      wiring — deferred to a follow-up milestone once the ``useHashedMirror
+      = true`` per-recipe DSL knob is designed.
+
+  Additional targets (comment/doc-only references — inert until
+  someone runs a global text replace):
+    * recipes/reproos-image/scripts/build-reproos-image.sh (11 refs)
+    * recipes/reproos-iso/scripts/stage-de-rootfs.sh (15 refs)
+    * recipes/reproos-iso/scripts/build-base-rootfs.sh
+    * apps/reproos-installer/BUILD_EVIDENCE.txt (3 refs)
+    * various run-evidence *.txt files (frozen — not migrated)
+
+
+Phase F — this close-out
+=========================
+
+See commits listed at the top.
+
+
+Honest residuals
+================
+
+1. **Migration is incomplete by design.** M9.R.76 landed the core
+   mechanism (spec addendum + resolver + 6 threading sites +
+   read-only enforcement gating + 1 recipe migration). The bulk of
+   the recipe corpus (11 hardcoded live sites + doc-only references)
+   is documented as follow-up work. The user directive explicitly
+   scoped this milestone to "landing the design + core mechanism";
+   deferring recipe migration is on-plan.
+
+2. **Emit-side hashed-mode wiring not landed.** The resolver's
+   ``immHashed`` branch currently falls back to the legacy path
+   because ``hashedDepMirrorRoot`` returns "" (no recipe has opted
+   in via a per-recipe ``useHashedMirror = true`` DSL knob yet).
+   The knob + the emit-side realization-hash computation + the store-
+   registration write path are Phase 2 of the migration; the resolver
+   contract is already stable so those additions won't require
+   changing any of the 6 threading sites.
+
+3. **Realization-hash computation deferred.** The spec addendum's
+   normative hash-input list is authoritative but the engine-side
+   implementation of ``computeInstallMirrorHash(BuildActionDef)``
+   is not landed. That's blocked on the M9.R.74 canonical-execution-
+   root work (R2) settling — the hash includes the "env-normalization
+   identity" which depends on R2's environment-normalization pass
+   being stable.
+
+4. **Read-only enforcement is emit-side only.** The engine-side
+   sandbox-policy layer that would enforce EROFS on the FS-monitor
+   backend is deferred; today's enforcement is mode-bits only. The
+   spec addendum §"Read-Only Enforcement" §2 (sandbox policy backend)
+   is the follow-up landing site.
+
+5. **No cross-agent contention regression tests.** The mid-milestone
+   sub-agent-collision noted below was benign (correct code landed
+   under mislabeled commit titles) but exposed a workspace hygiene
+   issue that should be tracked separately.
+
+
+Cross-agent collision note
+==========================
+
+During this milestone a parallel sub-agent was landing M9.R.73 and
+M9.R.74 commits (canonical execution root + narrow monitor-loss
+invalidation). The pre-commit hook environment on Windows silently
+mixed staged tree contents between sub-agents:
+
+  * origin/dev's commit ce00ee16 (titled "M9.R.76.2: DSL install-mirror
+    resolver — spec R10 core mechanism") actually contains M9.R.74.4
+    from_source_custom.nim work.
+  * origin/dev's commit 47837fe7 (titled "M9.R.74.5: close-out")
+    actually contains MY M9.R.76.2 resolver + package_result.nim +
+    t_m9r76_install_mirror_resolver.nim files.
+
+The M9.R.74 sub-agent documented this in their close-out. Content is
+correct on both sides; commit-message log is misleading for two
+specific SHAs. The M9.R.76.3 / .4 / .5.1 / .6 commits landed cleanly
+after the collision resolved.
+
+This documents the honest git-log state for future readers.
+
+
+Time budget
+===========
+~1.5 hr wall-time. Well under the 48hr budget. Multi-week refactor
+scope was intentionally not attacked in one sitting — core mechanism
++ 1 migration + 3 threading sites + read-only enforcement gating is
+Phase 1 landing; Phase 2 (per-recipe opt-in) opens the recipe-corpus
+migration work.
+
+
+End of M9.R.76.
