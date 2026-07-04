@@ -1178,6 +1178,138 @@ session    optional   pam_env.so
 session    optional   /usr/lib/x86_64-linux-gnu/security/pam_systemd.so
 PAM_GREETER_EOF
 
+  # M9.R.71.3: replace /etc/pam.d/other with a portable pam_deny-only
+  # fallback stack.
+  #
+  # Phase A evidence (recipes/reproos-image/run-evidence/m9r71/
+  # m9r71_phaseA_pam_audit.txt):  the from-source Linux-PAM 1.6.1
+  # recipe does NOT recognize Debian's @include directive as a
+  # module-type keyword.  Only \`include\` and \`substack\` are
+  # recognized upstream; @include is a Debian-patched extension.
+  # sddm-helper links against the from-source libpam via RUNPATH,
+  # so parsing /etc/pam.d/other (which Debian ships with four
+  # @include common-* lines) produces four syslog LOG_ERR entries
+  # per session start:
+  #
+  #   PAM (other) illegal module type: @include
+  #   PAM pam_parse: expecting return value; [...common-auth]
+  #   PAM (other) no module name supplied
+  #
+  # The libpam parser recovers by registering MUST_FAIL handlers
+  # for the affected lines and returning PAM_SUCCESS, so the
+  # sddm-autologin PAM chain is not functionally broken (the
+  # MUST_FAIL handlers only apply to the \`other\` fallback service,
+  # which sddm-autologin does not invoke).  But the log spam is
+  # ugly and the file is semantically broken.
+  #
+  # This rewrite replaces the Debian @include chain with an
+  # explicit pam_deny.so-only stack that preserves Debian's
+  # original security intent (services with no explicit config
+  # get DENIED) using portable directives that both the
+  # from-source and Debian libpam parsers accept.
+  cat > '$MNT_DIR/etc/pam.d/other' <<'PAM_OTHER_EOF'
+#%PAM-1.0
+# M9.R.71.3 replacement for Debian's @include-based fallback.
+# The from-source Linux-PAM 1.6.1 does not recognize @include
+# (a Debian-patched extension); use portable pam_deny.so on
+# every phase so any service without its own explicit config
+# is denied outright.  Original Debian intent preserved.
+auth       required   pam_deny.so
+account    required   pam_deny.so
+password   required   pam_deny.so
+session    required   pam_deny.so
+PAM_OTHER_EOF
+
+  # M9.R.71.3: capture sway compositor stderr durably so a crash
+  # cause is diagnosable.
+  #
+  # Phase B evidence: sddm-helper's UserSession.cpp:355-380 opens
+  # \$HOME/.local/share/sddm/wayland-session.log with dup2 to
+  # STDERR_FILENO before fork(exec sway).  On the qcow2 after
+  # M9.R.70's boot smoke, /home/repro/.local/share/sddm/ is
+  # completely absent — sway's stderr is being lost.
+  #
+  # We install a wrapper at /usr/local/bin/repro-sway-diag that:
+  #   1. redirects stderr to /var/log/m9r71_sway.log (world-writable
+  #      via tmpfiles.d so the setuid'd session process can append)
+  #   2. echoes a launch marker line + env dump BEFORE exec'ing sway
+  #   3. fsyncs after the header so the log survives an abort()
+  #      that happens before sway's own stdio buffer flushes
+  # And point sddm's [Wayland] SessionCommand at the wrapper via
+  # /etc/sddm.conf.d/20-sway-diag.conf.
+  #
+  # The wayland-session.log the sddm helper writes still gets
+  # created (empty) at \$HOME; our wrapper log at /var/log is the
+  # durable authoritative source.
+  mkdir -p '$MNT_DIR/usr/local/bin'
+  cat > '$MNT_DIR/usr/local/bin/repro-sway-diag' <<'SWAY_DIAG_EOF'
+#!/bin/sh
+# M9.R.71.3 sway launch diagnostic wrapper.  Captures full stderr +
+# a launch header to /var/log/m9r71_sway.log so any crash cause
+# (assertion / abort / segfault before sway's own logging is
+# ready) is preserved across sddm respawn cycles.
+LOG=/var/log/m9r71_sway.log
+{
+  echo "======================================================"
+  echo "M9.R.71 sway launch @ \$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "  argv: sh=\$0 args=[\$*]"
+  echo "  uid=\$(id -u) gid=\$(id -g) groups=\$(id -Gn)"
+  echo "  cwd=\$(pwd)"
+  echo "  HOME=\$HOME"
+  echo "  XDG_RUNTIME_DIR=\$XDG_RUNTIME_DIR"
+  echo "  WAYLAND_DISPLAY=\$WAYLAND_DISPLAY"
+  echo "  SHELL=\$SHELL"
+  echo "  PATH=\$PATH"
+  echo "  ls XDG_RUNTIME_DIR:"
+  ls -la \"\$XDG_RUNTIME_DIR\" 2>&1 | sed 's/^/    /'
+  echo "  seatd socket:"
+  ls -la /run/seatd.sock 2>&1 | sed 's/^/    /'
+  echo "  drm devices:"
+  ls -la /dev/dri 2>&1 | sed 's/^/    /'
+  echo "  tty:"
+  tty 2>&1 | sed 's/^/    /'
+  echo "  ------ end preamble ------"
+} >> \"\$LOG\" 2>&1
+# Force preamble to disk before exec'ing sway.  sync(1) is
+# available even if sway crashes early.
+sync
+# Now run the actual wayland-session script with stderr appended
+# to our log file.  The session script's exec chain
+# (bash --login -> exec sway) inherits fd 2 pointing at LOG.
+exec 2>>\"\$LOG\"
+exec /usr/share/sddm/scripts/wayland-session \"\$@\"
+SWAY_DIAG_EOF
+  chmod 0755 '$MNT_DIR/usr/local/bin/repro-sway-diag'
+
+  # Ensure /var/log/m9r71_sway.log is world-writable (repro user
+  # will append after setuid) — create it at boot via tmpfiles.d.
+  # 0666 is safe because it's a diagnostic log only; nothing
+  # security-sensitive is written.
+  cat > '$MNT_DIR/etc/tmpfiles.d/m9r71-sway-log.conf' <<'SWAY_LOG_TMPFILES_EOF'
+# M9.R.71.3 durable sway diagnostic log.  0666 so setuid'd
+# session processes can append across respawns.
+f /var/log/m9r71_sway.log 0666 root root -
+SWAY_LOG_TMPFILES_EOF
+
+  # Point sddm's Wayland SessionCommand at our diagnostic wrapper.
+  # This overrides the M9.R.56.8's 10-paths.conf setting.
+  cat > '$MNT_DIR/etc/sddm.conf.d/20-sway-diag.conf' <<'SDDM_SWAY_DIAG_EOF'
+# M9.R.71.3 route the wayland session through our diagnostic
+# wrapper so sway stderr is durably captured to
+# /var/log/m9r71_sway.log across sddm respawn cycles.
+[Wayland]
+SessionCommand=/usr/local/bin/repro-sway-diag
+SDDM_SWAY_DIAG_EOF
+
+  # Also extend the M9.R.56.8 diag-capture unit to snarf the sway
+  # log into the same directory the boot-smoke driver pulls from.
+  mkdir -p '$MNT_DIR/etc/systemd/system/m9r56-diag.service.d'
+  cat > '$MNT_DIR/etc/systemd/system/m9r56-diag.service.d/10-m9r71-sway-log.conf' <<'DIAG_EXTEND_EOF'
+[Service]
+ExecStart=/bin/sh -c 'cp /var/log/m9r71_sway.log /var/log/m9r56_diag/m9r71_sway.log 2>&1 || true'
+ExecStart=/bin/sh -c 'journalctl --no-pager _COMM=sway > /var/log/m9r56_diag/journal-sway.txt 2>&1 || true'
+DIAG_EXTEND_EOF
+
   # M9.R.56.8.7: create /run/user/1000 out-of-band + export
   # XDG_RUNTIME_DIR in the sway session environment.
   #
