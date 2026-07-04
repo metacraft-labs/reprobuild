@@ -18,7 +18,39 @@ Your workspace grows dynamically into the exact slice of the dependency graph yo
 
 ---
 
-## 2. Framed for Experienced Developers
+## 2. Declarative, Strongly-Typed DSL
+
+Instead of maintaining separate package specifications, Dockerfiles, task runners, and Nix expressions, a project's configuration is defined in a standard, compile-time verified `repro.nim` file:
+
+```nim
+import repro_dsl_stdlib
+
+package app:
+  uses:
+    "nim >=2.0 <3.0"
+    "sqlite >=3.45 <4.0"
+
+  # Local dev background services (databases, queues, daemons)
+  devEnv:
+    service "postgres":
+      image = "postgres:16-alpine"
+      ports = ["5432:5432"]
+
+    # Developer CLI task automation
+    task "bump-version":
+      description = "Automates minor/major/patch version bump"
+      command = "nim r scripts/bump_version.nim"
+
+  # Hermetic, sandbox-monitored build recipes
+  executable "app":
+    build:
+      let objects = nim.compile(glob("src/*.nim"))
+      nim.link(objects = objects, libraries = [sqlite])
+```
+
+---
+
+## 3. Framed for Experienced Developers
 
 If you are already familiar with the modern DevOps and build toolchain, Reprobuild maps directly onto concepts you know:
 
@@ -30,7 +62,7 @@ If you are already familiar with the modern DevOps and build toolchain, Reprobui
 
 ---
 
-## 3. Key CLI Commands
+## 4. Key CLI Commands
 
 Reprobuild wraps all development workflows under one CLI.
 
@@ -60,7 +92,7 @@ Reprobuild wraps all development workflows under one CLI.
 
 ---
 
-## 4. Developing Reprobuild
+## 5. Developing Reprobuild
 
 This repository is the public `metacraft-labs/reprobuild` product repository.
 
@@ -79,6 +111,6 @@ gh repo clone metacraft-labs/codetracer-native-recorder ../codetracer-native-rec
 bash scripts/dev-shell.sh
 ```
 
-## 5. License
+## 6. License
 
 MIT
