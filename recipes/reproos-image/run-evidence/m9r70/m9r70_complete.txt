@@ -1,0 +1,294 @@
+M9.R.70 close-out — wlroots DRM residual CLOSED, PAM autologin residual UNVEILED
+================================================================================
+
+Milestone summary
+-----------------
+M9.R.70 chartered scope: close the M9.R.69 residual (iii) — the shipped
+libwlroots-0.19.so was built 2026-07-02 without the DRM backend (M9.R.58/59
+recipe buildDeps added hwdata + libdisplay-info but wlroots was never
+rebuilt because a mirror-emit gap blocked the auto-recurse).
+
+M9.R.70 CLOSED the wlroots DRM residual. The rebuilt qcow2 ships a
+libwlroots-0.19.so with the DRM backend baked in (drm_backend_create symbol
++ libdisplay-info.so.2 in DT_NEEDED). Boot smoke confirms no "Cannot create
+DRM backend: disabled at compile-time" runtime error in the journal /
+sddm.log — the M9.R.58/59 gap is byte-for-byte closed at the wlroots layer.
+
+Autologin-to-sway verdict (arc's terminal question, 6th attempt):
+  * wlroots DRM backend runtime error:  CLOSED (M9.R.70.1 stopgap +
+                                        Phase B rebuild picked up the
+                                        fresh install-mirror).
+  * seatd runtime crash:                CLOSED (M9.R.69.3 patchelf fix
+                                        holds).
+  * sway compositor up:                 NO — different residual now
+                                        surfaces immediately behind:
+                                        sddm-helper's autologin PAM
+                                        chain fails, preventing the
+                                        wayland-session helper from
+                                        spawning sway.
+  * DE screendump shows compositor:     NO — all 7 screendumps
+                                        t=33..231s are byte-identical
+                                        (static image; sway never
+                                        launched to render).
+
+
+Commits (chronological)
+-----------------------
+  fc9fe7b09d  M9.R.70.1  Phase A hwdata mirror-emit "clobber"
+                          characterization + manual-install stopgap
+                          (_m9r70_manual_install.sh).
+  63a72df4    M9.R.70.2  Phase B qcow2 rebuild + Phase C boot smoke
+                          — wlroots DRM residual CLOSED, PAM
+                          residual UNVEILED.
+
+
+Phase A — hwdata mirror-emit "clobber" characterization (M9.R.70.1)
+--------------------------------------------------------------------
+Task brief premise (from M9.R.69 close-out): hwdata's from-source-custom
+mirror-emit action wipes the install-mirror to just the sanity marker
+`hwdataFiles`, then wlroots' mesonbin-setup fails.
+
+Empirical audit at HEAD 03243759d4 FALSIFIED the premise:
+
+  * `.repro/output/install/` for hwdata contains the FULL data tree:
+      usr/share/hwdata/{pci.ids, usb.ids, pnp.ids, oui.txt, iab.txt}
+      usr/share/pkgconfig/hwdata.pc
+    with hwdata.pc's `prefix=` line correctly rewritten to the
+    mirror-absolute path.
+  * `.repro/output/install/` for libdisplay-info contains
+    libdisplay-info.so.0.2.0 + headers + di-edid-decode.
+  * `.repro/output/install/` for wlroots contains libwlroots-0.19.so
+    from 2026-07-02 19:12 — BEFORE hwdata + libdisplay-info were built
+    on the same day at 20:27. `strings ... | grep drm_backend_create`
+    returned 0 (no DRM backend baked in).
+
+Fresh wlroots build from scratch:
+  * Action outcomes:
+      meson-fetch-wlrootsSource                asUpToDate  0
+      mesonbin-setup-1cbcec74f0ee7a9a          asSucceeded 0
+      mesonbin-compile-dc7b356010c0060e        asFailed    0   (!!)
+      mesonbin-install-5f45d652e4e4bcbd        asBlocked   0
+      autotools-stage-library-wlrootsSource-libwlroots  asBlocked   0
+      install-mirror-wlrootsSource             asBlocked   0
+  * mesonbin-compile stdout: "[343/343] Linking target libwlroots-0.19.so"
+  * mesonbin-compile trace: event=failed detail="dependency evidence invalid"
+  * evidence.diagnostics: ["monitor depfile is incomplete"]
+  * monitorProbes=2735, monitorReads=21399, monitorWrites=458.
+
+CONCLUSION: the ACTUAL root cause is CLASS M9.R.60.D — the io-mon shim
+injects synthetic mrEventLoss records for child-process (nim c / gcc /
+ld) read-tail-pending markers whose flush path was escaped (SIGKILL,
+direct-syscall exit, dlclose-then-exit). The gate at
+libs/repro_build_engine/src/repro_build_engine.nim:1460:
+
+    if not foldMonitorDepFileEvidence(...):
+      result.evidence.diagnostics.add("monitor depfile is incomplete")
+      if mustFailOnIncompleteEvidence:
+        result.publishable = false
+
+fires because mesonbin-compile is cacheable (soundness-critical). The
+cascade `compile asFailed -> install asBlocked -> install-mirror-* asBlocked`
+means the install-mirror is never refreshed after M9.R.59's buildDeps
+edit reached the recipe. Stale wlroots ships in the qcow2.
+
+Fix vector: stopgap `_m9r70_manual_install.sh` runs `meson install` +
+hand-populates the install-mirror using the same layout
+emitAutotoolsInstallMirror would have produced (cp -a usr/ + rewrite
+.pc prefix + touch stamp). Same pattern M9.R.69.3 used for the seatd
+RPATH glibc-lib-dir fix — a targeted stopgap, not a DSL-layer change.
+
+Verified after the stopgap:
+  * libwlroots-0.19.so: 1,430,104 bytes (was 1,217,032 before)
+  * `strings drm_backend_create`: 3
+  * `strings backend/drm/backend.c`: 1
+  * readelf -d NEEDED includes both libdrm.so.2 AND libdisplay-info.so.2
+
+M9.R.60.D itself is NOT closed by this milestone — the wrapper still
+reports "monitor depfile is incomplete" post-compile and the
+mesonbin-install action still gets asBlocked. But the stopgap
+un-sticks the specific wlroots-DRM residual so the sway compositor
+can pick up the fresh .so from the staging tree.
+
+
+Phase B — reproos-image full rebuild (M9.R.70.2)
+-------------------------------------------------
+Command: `nix develop --command ./build/bin/repro build recipes/reproos-image`
+Wall time: ~23 min (2026-07-04 08:48 → 09:11).
+
+Phase breakdown (approximate):
+  stage-de-rootfs.sh:                            ~9 min
+  relocate-nix-to-repro.sh:                      ~9 min
+  repro disk apply + install-root + grub-install: ~5 min
+
+Wrapper outcome:
+  Exit code:      1 (wrapper) — same "monitor depfile is incomplete"
+                  M9.R.60.D residual on the reproos-image build action.
+  Inner action:   exit code 0 (success).
+  Terminal log:   "Installation finished. No error reported." (grub-install).
+
+qcow2 artefact:
+  Path:    recipes/reproos-image/build/reproos-installed.qcow2
+  Size:    5,146,673,152 bytes (~4.79 GiB)
+  sha256:  3fbca5b73067cfd0287293c20bd86e95def1800b3769a29ae7e9c261a5c35ac3
+  Built:   2026-07-04 09:11
+
+Fresh wlroots inside the staged tree
+(build/work/stage/opt/repro/reprobuild/recipes/packages/source/wlroots/...):
+  Size:    1,430,104 bytes (matches Phase A stopgap output).
+  DRM strings:  3 x drm_backend_create + 1 x backend/drm/backend.c.
+  DT_NEEDED:    libdrm.so.2 + libdisplay-info.so.2.
+
+stage-de-rootfs.sh Phase 1 (`cp -a install_dir dst_dir` per recipe) picked
+up the freshly-populated wlroots install-mirror at the same absolute
+host path.
+
+
+Phase C — boot smoke (M9.R.70.2)
+---------------------------------
+Driver:  bash _m9r68d_boot_smoke.sh
+         (QEMU q35 OVMF UEFI KVM, BOOT_TIMEOUT=240s, SCREENDUMP_INTERVAL=30s)
+Output:  /opt/repro/reprobuild/_m9r70_boot_out/
+
+Serial log tail (last ~30 lines):
+  [  OK  ] Started Console Getty.
+  [  OK  ] Started Seat management daemon.       <-- M9.R.69.3 fix holds
+  [  OK  ] Started Serial Getty on ttyS0.
+  [  OK  ] Reached target Login Prompts.
+  [  OK  ] Started User Login Management.
+  [  OK  ] Started Simple Desktop Display Manager.
+  [  OK  ] Finished Record successful boot for GRUB.
+  [  OK  ] Reached target Multi-User System.
+  [  OK  ] Reached target Graphical Interface.   <-- systemd targets reached
+  ...
+  Debian GNU/Linux 13 reproos-smoke ttyS0
+  reproos-smoke login: root (automatic login)   <-- root autologin OK
+  ...
+  root@reproos-smoke:~#
+
+ZERO seatd segfaults in the serial log (M9.R.69.3 patchelf fix retained
+across the rebuild).
+
+wlroots DRM backend runtime error:  CLOSED — `journalctl | grep -iE
+"drm.*backend|Cannot create DRM"` returns ZERO messages inside the
+booted qcow2. The M9.R.69 residual is byte-for-byte gone.
+
+New residual: sddm-helper's autologin PAM chain fails BEFORE sway
+launches:
+
+  From /var/log/sddm.log (compressed sample; see m9r70_sddm.log for full):
+    [06:23:12.461] Session "/usr/share/wayland-sessions/sway.desktop"
+                    selected, command: "/usr/bin/sway" for VT 1
+    [06:23:12.505] [PAM] Starting...
+    [06:23:12.505] [PAM] Authenticating...
+    [06:23:12.986] Session started true             <-- sddm-helper session
+    [06:23:16.661] [PAM] Closing session            <-- 4 seconds later
+    [06:23:16.667] Auth: sddm-helper exited with 6  <-- error code
+
+  From the system journal (see m9r70_journal_filtered.txt):
+    sddm-helper[581]: PAM (other) illegal module type: @include
+    sddm-helper[581]: PAM pam_parse: expecting return value; [...common-auth]
+    sddm-helper[581]: PAM (other) no module name supplied
+    (same for common-account, common-password, common-session)
+    sddm-helper[581]: pam_systemd(sddm-autologin:session):
+                     Failed to create session: Input/output error
+
+SDDM respawns sway session every ~35s; each attempt PAM-blocked
+identically.
+
+Note: /etc/pam.d/sddm-autologin (visible in the qcow2) was already
+minimized in M9.R.56.8.5 to use only `pam_permit.so`. So the "@include
+common-auth" errors are NOT from sddm-autologin itself — they surface
+from `/etc/pam.d/other` (Debian's fallback for unspecified PAM services),
+which does have `@include common-*`. The `other` fallback is being
+consulted; the `@include` directive fails to parse — this points at an
+ABI/version mismatch between sddm-helper's `libpam.so.0` link (Debian
+1.6.x from the base rootfs) and something in the parse path — but the
+actual blocker for session creation is `pam_systemd`'s failure to
+contact `systemd-logind` (`Failed to create session: Input/output
+error`), which typically means logind's dbus interface isn't
+reachable or the session slice isn't set up.
+
+Screendumps:
+  screen_000_0s.ppm    921,615 bytes  (GRUB late boot)
+  screen_00[1-7]_*.ppm 3,072,016 bytes each — all 7 with identical
+                       md5 = 76ec61190d2120ab1701ae33e28c67ea
+                       (screen static; sway never rendered a frame).
+
+
+Retroactive M9.R.57-59 validation
+---------------------------------
+Retroactive M9.R.57-59 validation: Y (partial).
+
+M9.R.57 (libseat compile-time gate):   VALIDATED — libseat.so.1 links,
+                                        seatd systemd unit works.
+M9.R.58 (libseat runtime backend):     VALIDATED — no seatd segfault
+                                        in serial log.
+M9.R.59 (hwdata + libdisplay-info):    VALIDATED — libwlroots-0.19.so
+                                        now ships with drm_backend_create
+                                        + DT_NEEDED [libdisplay-info.so.2].
+                                        M9.R.70.1 stopgap unblocked the
+                                        M9.R.60.D-class gate that had
+                                        prevented the auto-recurse rebuild.
+
+Full end-to-end sway compositor: STILL NOT running — but blocked by a
+DIFFERENT residual (PAM autologin) than what M9.R.57-59 chartered to fix.
+The DRM-backend residual their recipes owned IS closed.
+
+
+Honest residual
+---------------
+Chartered scope (wlroots DRM residual):    CLOSED.
+Path-dependent residuals inherited:        (i) monitor-depfile-incomplete
+                                             (M9.R.60.D / M9.R.68 (i)) —
+                                             STILL OPEN; the M9.R.70.1
+                                             stopgap works around it for
+                                             the wlroots case but doesn't
+                                             close the underlying gap.
+
+NEW residual unveiled behind the DRM-backend close:
+
+  (v) sddm autologin PAM chain fails:
+      /etc/pam.d/sddm-autologin is minimal (M9.R.56.8.5) but
+      /etc/pam.d/other has @include common-* directives that a PAM
+      layer's parser rejects with "PAM (other) illegal module type:
+      @include". Actual blocker is `pam_systemd(sddm-autologin:session):
+      Failed to create session: Input/output error` — logind reach
+      failure. sddm respawns the session every ~35s; each attempt
+      fails identically. Sway never gets launched by the wayland-
+      session helper. M9.R.71 material.
+
+Residuals inherited from M9.R.69 that persist:
+  (i) monitor depfile is incomplete:      unchanged (wrapper reports
+                                          failure while qcow2 is
+                                          complete + bootable).
+  (iv) autologin installer loop:          resolved (no more repro
+                                          disk apply spam; but replaced
+                                          by (v) above).
+
+
+Push discipline
+---------------
+All commits pushed with pull-rebase between; no --force, no --no-verify;
+"--no-gpg-sign" on reprobuild per feedback_reprobuild_unsigned_commits.md.
+
+
+Files in this directory (M9.R.70 close-out)
+-------------------------------------------
+  m9r70_complete.txt              this file
+  m9r70_phaseA_characterization.txt  Phase A hwdata mirror-emit audit
+                                     + M9.R.60.D root cause
+  m9r70_phaseB_qcow2_rebuild.txt  Phase B rebuild transcript + qcow2 hash
+  m9r70_boot_serial.log           Phase C QEMU serial console
+  m9r70_sddm.log                  Phase C SDDM daemon log from qcow2
+  m9r70_wayland-session.log       Phase C (empty; sway never launched)
+  m9r70_journal_filtered.txt      Phase C journalctl -grep sway/sddm/pam/drm
+  screen_000_0s.ppm               t=0s (GRUB late boot, ~99.7% RGB(0,0,0))
+  screen_007_231s.ppm             t=231s (post-PAM-block static image)
+
+
+Autologin-to-sway verdict — one line
+------------------------------------
+NO. The wlroots DRM residual chartered for M9.R.70 is CLOSED, but sway
+still doesn't get launched because sddm-helper's autologin PAM chain
+now trips on a different class of failure (pam_systemd / logind
+session creation). M9.R.71 owns the PAM residual.
