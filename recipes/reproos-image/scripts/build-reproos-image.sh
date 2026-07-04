@@ -1229,57 +1229,21 @@ PAM_OTHER_EOF
   # M9.R.70's boot smoke, /home/repro/.local/share/sddm/ is
   # completely absent — sway's stderr is being lost.
   #
-  # We install a wrapper at /usr/local/bin/repro-sway-diag that:
+  # The wrapper /usr/local/bin/repro-sway-diag:
   #   1. redirects stderr to /var/log/m9r71_sway.log (world-writable
   #      via tmpfiles.d so the setuid'd session process can append)
   #   2. echoes a launch marker line + env dump BEFORE exec'ing sway
-  #   3. fsyncs after the header so the log survives an abort()
+  #   3. sync(1)s after the header so the log survives an abort()
   #      that happens before sway's own stdio buffer flushes
   # And point sddm's [Wayland] SessionCommand at the wrapper via
   # /etc/sddm.conf.d/20-sway-diag.conf.
   #
-  # The wayland-session.log the sddm helper writes still gets
-  # created (empty) at \$HOME; our wrapper log at /var/log is the
-  # durable authoritative source.
+  # The wrapper source lives at
+  # recipes/reproos-image/scripts/repro-sway-diag to avoid the
+  # nested-quoting hazards of embedding a shell script inside
+  # this build script's bash -c wrapper.
   mkdir -p '$MNT_DIR/usr/local/bin'
-  cat > '$MNT_DIR/usr/local/bin/repro-sway-diag' <<'SWAY_DIAG_EOF'
-#!/bin/sh
-# M9.R.71.3 sway launch diagnostic wrapper.  Captures full stderr +
-# a launch header to /var/log/m9r71_sway.log so any crash cause
-# (assertion / abort / segfault before sway's own logging is
-# ready) is preserved across sddm respawn cycles.
-LOG=/var/log/m9r71_sway.log
-{
-  echo "======================================================"
-  echo "M9.R.71 sway launch @ \$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "  argv: sh=\$0 args=[\$*]"
-  echo "  uid=\$(id -u) gid=\$(id -g) groups=\$(id -Gn)"
-  echo "  cwd=\$(pwd)"
-  echo "  HOME=\$HOME"
-  echo "  XDG_RUNTIME_DIR=\$XDG_RUNTIME_DIR"
-  echo "  WAYLAND_DISPLAY=\$WAYLAND_DISPLAY"
-  echo "  SHELL=\$SHELL"
-  echo "  PATH=\$PATH"
-  echo "  ls XDG_RUNTIME_DIR:"
-  ls -la \"\$XDG_RUNTIME_DIR\" 2>&1 | sed 's/^/    /'
-  echo "  seatd socket:"
-  ls -la /run/seatd.sock 2>&1 | sed 's/^/    /'
-  echo "  drm devices:"
-  ls -la /dev/dri 2>&1 | sed 's/^/    /'
-  echo "  tty:"
-  tty 2>&1 | sed 's/^/    /'
-  echo "  ------ end preamble ------"
-} >> \"\$LOG\" 2>&1
-# Force preamble to disk before exec'ing sway.  sync(1) is
-# available even if sway crashes early.
-sync
-# Now run the actual wayland-session script with stderr appended
-# to our log file.  The session script's exec chain
-# (bash --login -> exec sway) inherits fd 2 pointing at LOG.
-exec 2>>\"\$LOG\"
-exec /usr/share/sddm/scripts/wayland-session \"\$@\"
-SWAY_DIAG_EOF
-  chmod 0755 '$MNT_DIR/usr/local/bin/repro-sway-diag'
+  install -m 0755 '$SCRIPT_DIR_SELF/repro-sway-diag' '$MNT_DIR/usr/local/bin/repro-sway-diag'
 
   # Ensure /var/log/m9r71_sway.log is world-writable (repro user
   # will append after setuid) — create it at boot via tmpfiles.d.

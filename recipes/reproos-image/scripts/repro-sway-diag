@@ -1,0 +1,35 @@
+#!/bin/sh
+# M9.R.71.3 sway launch diagnostic wrapper.  Captures full stderr +
+# a launch header to /var/log/m9r71_sway.log so any crash cause
+# (assertion / abort / segfault before sway's own logging is
+# ready) is preserved across sddm respawn cycles.
+LOG=/var/log/m9r71_sway.log
+{
+  echo "======================================================"
+  echo "M9.R.71 sway launch @ $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "  argv: sh=$0 args=[$*]"
+  echo "  uid=$(id -u) gid=$(id -g) groups=$(id -Gn)"
+  echo "  cwd=$(pwd)"
+  echo "  HOME=$HOME"
+  echo "  XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+  echo "  WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+  echo "  SHELL=$SHELL"
+  echo "  PATH=$PATH"
+  echo "  ls XDG_RUNTIME_DIR:"
+  ls -la "$XDG_RUNTIME_DIR" 2>&1 | sed 's/^/    /'
+  echo "  seatd socket:"
+  ls -la /run/seatd.sock 2>&1 | sed 's/^/    /'
+  echo "  drm devices:"
+  ls -la /dev/dri 2>&1 | sed 's/^/    /'
+  echo "  tty:"
+  tty 2>&1 | sed 's/^/    /'
+  echo "  ------ end preamble ------"
+} >> "$LOG" 2>&1
+# Force preamble to disk before exec'ing sway.  sync(1) is
+# available even if sway crashes early.
+sync
+# Now run the actual wayland-session script with stderr appended
+# to our log file.  The session script's exec chain
+# (bash --login -> exec sway) inherits fd 2 pointing at LOG.
+exec 2>>"$LOG"
+exec /usr/share/sddm/scripts/wayland-session "$@"
