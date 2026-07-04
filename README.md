@@ -39,11 +39,9 @@ package app:
       ports = ["5432:5432"]
 
   devEnv:
-    # Developer CLI task automation (runs inside the active environment)
+    ## Builds release binaries and publishes the workspace bundle
     task "publish":
-      description = "Builds release binaries and publishes the workspace bundle"
-      run:
-        npm.run("publish")
+      npm.run("publish")
 
   # Hermetic, sandbox-monitored build recipes
   executable "backend":
