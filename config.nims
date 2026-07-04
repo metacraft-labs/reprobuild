@@ -154,6 +154,12 @@ for libName in [
   "repro_dev_env_engine",
   "repro_tool_profiles",
   "repro_local_store",
+  # M9.R.77.2 — R11 Layer-1 CAS-store facade over ``repro_local_store``
+  # (spec: Store-And-Installation-Layout.md §R11 Two-Layer Split).
+  # Downstream code that needs only content-addressed put / get /
+  # verify / path / gc imports ``repro_cas_store`` so it does not gain
+  # access to the Layer-2 prefix / receipt / root / recovery surface.
+  "repro_cas_store",
   # Action-Cache-Per-Edge-Store AC-2a: shared-memory hot-tier data structures
   # (control region, generation segments, seqlock table, MPSC ring). Pure data
   # structures — no daemon (AC-2b) / engine wiring (AC-2c) yet.

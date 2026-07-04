@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Reprobuild content-addressed blob-store facade (R11 Layer 1)"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"
