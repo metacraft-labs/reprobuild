@@ -32,13 +32,15 @@ package app:
     "nim >=2.0 <3.0"
     "protoc >=25 <26"
 
+  # Background services (databases, queues, daemons) needed in dev and prod
+  services:
+    postgres:
+      image = "postgres:16-alpine"
+      ports = ["5432:5432"]
+
   devEnv:
     # Developer CLI task automation
     task "publish", command = "repro build --release && npm publish", description = "Builds release binaries and publishes the workspace bundle"
-
-    # Local dev background services (databases, queues, daemons)
-    # Registered via servicePlaceholder in the dev-env registry
-    servicePlaceholder "postgres", metadata = "postgres:16-alpine"
 
   # Hermetic, sandbox-monitored build recipes
   executable "backend":
