@@ -90,6 +90,12 @@ proc argByName(action: BuildActionDef; name: string): PublicCliArg =
     "' in call to " & action.call.packageName & "." &
     action.call.executableName & "." & action.call.subcommand)
 
+proc hasArg(action: BuildActionDef; name: string): bool =
+  for arg in action.call.arguments:
+    if arg.name == name:
+      return true
+  false
+
 suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecCall":
 
   test "configure edge uses reprobuild.builtin.exec call":
@@ -114,8 +120,8 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
     # M9.R.14b.3: the script now executes the canonical out-of-tree
     # autotools pattern (``mkdir -p <buildDir> && cd <buildDir> &&
     # ../<srcDir>/configure ...``) so the generated ``Makefile`` lands
-    # under ``<buildDir>/`` where the downstream ``make -C <buildDir>``
-    # actions look for it. Pre-M9.R.14b.3 the script ran
+    # under ``<buildDir>/`` where the downstream make actions run.
+    # Pre-M9.R.14b.3 the script ran
     # ``./src/configure`` from the recipe root, which wrote
     # ``Makefile`` into the recipe root and broke the ``make -C build``
     # invocation with ``build: No such file or directory``.
@@ -149,6 +155,53 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
     check "cd .repro/build/libffi-autotools" in argvParts[2]
     check "../../../src/configure" in argvParts[2]
     check "--disable-static" in argvParts[2]
+
+  test "make edges run with buildDir as canonical cwd":
+    let pkg = autotools_package(
+      srcDir = "./src",
+      buildDir = ".repro/build/libffi-autotools",
+      configureOptions = @["--disable-static"])
+
+    check pkg.compileEdge.cwdKind == acwdBuild
+    check pkg.compileEdge.cwdCustomPath == ".repro/build/libffi-autotools"
+    check not pkg.compileEdge.hasArg("workDir")
+    check ".repro/build/libffi-autotools" in pkg.compileEdge.inputs
+
+    check pkg.installMakeEdge.cwdKind == acwdBuild
+    check pkg.installMakeEdge.cwdCustomPath == ".repro/build/libffi-autotools"
+    check not pkg.installMakeEdge.hasArg("workDir")
+    check ".repro/build/libffi-autotools" in pkg.installMakeEdge.inputs
+
+  test "make action ids are deterministic and scoped by package/buildDir":
+    resetDslPortFetchState()
+    var packageABuildId = ""
+    var packageAInstallId = ""
+    setCurrentOwningPackageOverride("m9r84PkgA")
+    try:
+      let first = autotools_package(srcDir = "./src", buildDir = "build-a")
+      let repeat = autotools_package(srcDir = "./src", buildDir = "build-a")
+      let otherBuildDir = autotools_package(srcDir = "./src",
+        buildDir = "build-b")
+      packageABuildId = first.compileEdge.id
+      packageAInstallId = first.installMakeEdge.id
+
+      check first.compileEdge.id == repeat.compileEdge.id
+      check first.installMakeEdge.id == repeat.installMakeEdge.id
+      check first.compileEdge.id != first.installMakeEdge.id
+      check first.compileEdge.id != otherBuildDir.compileEdge.id
+      check first.installMakeEdge.id != otherBuildDir.installMakeEdge.id
+    finally:
+      clearCurrentOwningPackageOverride()
+
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("m9r84PkgB")
+    try:
+      let otherPackage = autotools_package(srcDir = "./src",
+        buildDir = "build-a")
+      check otherPackage.compileEdge.id != packageABuildId
+      check otherPackage.installMakeEdge.id != packageAInstallId
+    finally:
+      clearCurrentOwningPackageOverride()
 
   test "configure action id is deterministic across calls with same args":
     let a = autotools_package(srcDir = "./src",

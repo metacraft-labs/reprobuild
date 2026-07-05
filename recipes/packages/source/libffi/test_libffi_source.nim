@@ -26,6 +26,7 @@ import std/[unittest]
 
 when defined(reproProviderMode):
   import std/[os, strutils]
+  import repro_build_engine
   import repro_core
 import repro_project_dsl
 
@@ -96,11 +97,11 @@ when defined(reproProviderMode):
         return arg.encodedValue.split("\x1f")
     @[]
 
-  proc argValue(action: BuildActionDef; name: string): string =
-    let values = action.argValues(name)
-    if values.len == 0:
-      return ""
-    values[0]
+  proc hasArg(action: BuildActionDef; name: string): bool =
+    for arg in action.call.arguments:
+      if arg.name == name:
+        return true
+    false
 
   proc inlineScriptOf(action: BuildActionDef): string =
     let argv = action.argValues("argv")
@@ -215,11 +216,17 @@ suite "libffiSource — from-source recipe smoke test":
       check configure.declaredOutputs == @[expectedBuildRoot]
       check configure.readOnlyRoots == @[expectedSrcRoot]
 
-      check build.argValue("workDir") == ExpectedBuildDir
+      check build.cwdKind == acwdBuild
+      check build.cwdCustomPath == ExpectedBuildDir
+      check not build.hasArg("workDir")
+      check expectedBuildRoot in build.inputs
       check build.declaredOutputs == @[expectedBuildRoot]
       check build.readOnlyRoots == @[expectedSrcRoot]
 
-      check install.argValue("workDir") == ExpectedBuildDir
+      check install.cwdKind == acwdBuild
+      check install.cwdCustomPath == ExpectedBuildDir
+      check not install.hasArg("workDir")
+      check expectedBuildRoot in install.inputs
       check install.declaredOutputs == @[expectedInstallRoot]
       check install.readOnlyRoots == @[expectedSrcRoot]
 
@@ -227,3 +234,22 @@ suite "libffiSource — from-source recipe smoke test":
       check expectedSrcRoot notin configure.declaredOutputs
       check expectedSrcRoot notin build.declaredOutputs
       check expectedSrcRoot notin install.declaredOutputs
+
+      let libffiRelativeWrites = @[
+        "src/.dirstamp",
+        "src/.deps/.dirstamp",
+        "src/x86/.dirstamp",
+        "src/x86/unix64.loT",
+        "src/types.lo",
+        "src/raw_api.lo",
+      ]
+      var foldedAgainstBuildCwd: seq[string] = @[]
+      var foldedAgainstRecipeRoot: seq[string] = @[]
+      for rel in libffiRelativeWrites:
+        foldedAgainstBuildCwd.add(expectedBuildRoot / rel)
+        foldedAgainstRecipeRoot.add(projectRoot / rel)
+
+      check detectSourceWrites(build.readOnlyRoots,
+        foldedAgainstBuildCwd).len == 0
+      check detectSourceWrites(build.readOnlyRoots,
+        foldedAgainstRecipeRoot).len == libffiRelativeWrites.len

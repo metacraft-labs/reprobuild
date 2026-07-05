@@ -14,8 +14,8 @@ import repro_dsl_stdlib/constructors/meson_package
 import repro_dsl_stdlib/constructors/autotools_package
 import repro_dsl_stdlib/constructors/cmake_package
 
-# ``repro_project_dsl`` exports the two M9.R.79 registry mutators
-# ``meson_package`` / ``autotools_package`` / ``cmake_package`` use.
+# ``repro_project_dsl`` exports the registry mutators the constructor
+# modules use.
 import repro_project_dsl
 
 suite "t_m9r79_constructors_compile":
@@ -25,9 +25,9 @@ suite "t_m9r79_constructors_compile":
     # the constructor's compile would fail this file's build.
     check true
 
-  test "setRegisteredActionDeclaredOutputs + setRegisteredActionReadOnlyRoots exported":
-    # Compile-time gate: the two M9.R.79.2 registry mutators must be
-    # reachable from downstream constructor modules.  Call each proc
+  test "registry mutators are exported":
+    # Compile-time gate: registry mutators must be reachable from
+    # downstream constructor modules.  Call each proc
     # with a fake action id so ``dynOrStatic`` mode-lowered symbols get
     # actually referenced (a bare reference to the proc value trips
     # ``illegal discard proc``).  The mutators no-op when the id is not
@@ -36,4 +36,5 @@ suite "t_m9r79_constructors_compile":
     # id is safe.
     setRegisteredActionDeclaredOutputs("m9r79-fake-id", @["/tmp/x"])
     setRegisteredActionReadOnlyRoots("m9r79-fake-id", @["/tmp/y"])
+    setRegisteredActionCwd("m9r84-fake-id", acwdBuild, "/tmp/build")
     check true

@@ -1728,6 +1728,20 @@ proc setRegisteredActionReadOnlyRoots*(actionId: string;
       buildActionRegistry[i].readOnlyRoots = @roots
       return
 
+proc setRegisteredActionCwd*(actionId: string; kind: ActionCwdKind;
+                             customPath: string) {.dynOrStatic.} =
+  ## M9.R.84 — set the registry entry's canonical execution root in
+  ## place. Used by higher-level constructors when a typed tool's argv
+  ## has a build-directory concept but monitor evidence must be folded
+  ## against the actual process cwd. Mirrors the write-scope mutators
+  ## above: generated typed-tool wrappers register the action first,
+  ## then constructors stamp the more precise policy fields.
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      buildActionRegistry[i].cwdKind = kind
+      buildActionRegistry[i].cwdCustomPath = customPath
+      return
+
 proc recordToolInvocation*(id: string; call: PublicCliCall;
                            deps: openArray[string] = [];
                            extraInputs: openArray[string] = [];

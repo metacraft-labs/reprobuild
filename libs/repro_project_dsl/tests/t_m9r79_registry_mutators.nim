@@ -56,6 +56,23 @@ suite "t_m9r79_registry_mutators":
         break
     check found
 
+  test "setRegisteredActionCwd updates registry entry":
+    resetBuildActionRegistry()
+    let call = publicCliCall("pkg", "exe", "build",
+      "pkg.exe.build", @[])
+    discard buildAction(
+      id = "m9r84-cwd-check",
+      call = call)
+    setRegisteredActionCwd("m9r84-cwd-check", acwdBuild, "build/pkg")
+    var found = false
+    for a in registeredBuildActions():
+      if a.id == "m9r84-cwd-check":
+        found = true
+        check a.cwdKind == acwdBuild
+        check a.cwdCustomPath == "build/pkg"
+        break
+    check found
+
   test "setRegisteredActionDeclaredOutputs overwrites previous value":
     ## Semantics are SET, not APPEND — a second call replaces the
     ## previous seq entirely so the constructor's single-shot edge
@@ -93,10 +110,14 @@ suite "t_m9r79_registry_mutators":
       @["/tmp/x"])
     setRegisteredActionReadOnlyRoots("m9r79-nonexistent-id",
       @["/tmp/y"])
+    setRegisteredActionCwd("m9r79-nonexistent-id", acwdBuild,
+      "/tmp/build")
     for a in registeredBuildActions():
       if a.id == "m9r79-real-id":
         check a.declaredOutputs.len == 0
         check a.readOnlyRoots.len == 0
+        check a.cwdKind == acwdRecipeRoot
+        check a.cwdCustomPath.len == 0
         break
 
   test "both mutators independent on the same action":

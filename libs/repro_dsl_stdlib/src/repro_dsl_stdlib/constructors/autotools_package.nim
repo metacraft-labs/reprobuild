@@ -259,7 +259,7 @@ proc autotools_package*(srcDir: string;
   # M9.R.14b.3: out-of-tree autotools pattern. The previous shape ran
   # ``./src/configure`` from the recipe root, which wrote ``Makefile``
   # directly into the recipe root, NOT into the ``buildDir`` subdir
-  # the downstream ``make -C build`` actions expect. On Linux this
+  # where the downstream make actions execute. On Linux this
   # surfaced as ``make: *** build: No such file or directory.  Stop.``
   # — the ``-C build`` flag pointed at a directory that ``configure``
   # had never created. (Pre-M9.R.14b the issue was hidden because the
@@ -269,7 +269,7 @@ proc autotools_package*(srcDir: string;
   # buildDir, cd into it, run ``../src/configure`` (relative path
   # adjusts srcDir from a buildDir vantage point), so the generated
   # ``Makefile`` lands under ``buildDir/`` exactly where the downstream
-  # ``make -C buildDir`` actions look for it. This mirrors the gcc
+  # make actions run. This mirrors the gcc
   # recipe's ``from-source-custom`` four-shell-action sequence (mkdir
   # / cd / configure / make) but keeps it inline so the higher-level
   # ``autotools_package`` constructor stays a single fire-and-forget
@@ -360,8 +360,8 @@ proc autotools_package*(srcDir: string;
   # (libcap, linux-kernel, busybox etc.) that ship NO ``configure``
   # script but DO use ``make`` against a Makefile in the source tree
   # itself. The configure edge becomes a stamp-only ``mkdir -p buildDir
-  ## && cp -r src/* buildDir/`` so the downstream ``make -C buildDir``
-  ## sees the source-tree Makefile in-place; configureOptions are then
+  ## && cp -r src/* buildDir/`` so the downstream make actions use the
+  ## source-tree Makefile in-place; configureOptions are then
   ## passed as ``make`` command-line ``VAR=VALUE`` overrides via the
   ## downstream build/install action's ``vars`` slot (recipe sets them
   ## via ``configureOptions`` which we forward).
@@ -442,7 +442,7 @@ proc autotools_package*(srcDir: string;
   # build action declares ``buildDir`` as an input, so
   # ``inferDeclaredActionDeps`` (M5 / Recipe-Val M8) auto-wires the
   # edge via the output-producer table. The make typed CLI doesn't
-  # carry a ``-C buildDir`` output slot so we have to wire it
+  # carry a buildDir output slot so we have to wire it
   # explicitly via the ``after:`` parameter the typed-tool macro
   # generator emits on every typed-tool call site.
   #
@@ -457,17 +457,16 @@ proc autotools_package*(srcDir: string;
   # **Determinism guard.** The action's cache fingerprint
   # (``BuildAction.weakFingerprint``) is derived from the action ``id``
   # via ``weakFingerprintFromText(id)`` in ``repro_build_engine``. The
-  # ``id`` here is derived from ``defaultToolActionId(call)``, whose
-  # input is ``callIdentity(call)`` — the package name + executable
-  # name + subcommand + per-argument encoded values. Neither
-  # ``extraEnv`` nor the spawned-process ``BuildAction.env`` enters
-  # the fingerprint. So passing ``MAKEFLAGS=-j N`` via ``extraEnv``
-  # keeps the cache key BYTE-IDENTICAL across hosts with different
-  # core counts. Same recipe + same source → same cache key.
+  # autotools make ids are explicit and scoped by package + buildDir.
+  # Neither ``extraEnv`` nor the spawned-process ``BuildAction.env``
+  # enters the fingerprint. So passing ``MAKEFLAGS=-j N`` via
+  # ``extraEnv`` keeps the cache key BYTE-IDENTICAL across hosts with
+  # different core counts. Same package + buildDir + source -> same
+  # cache key.
   #
   # We deliberately do NOT pass ``-j N`` via the typed ``jobs`` flag
-  # because that would land in ``callIdentity`` and the action id
-  # would vary with N — defeating determinism.
+  # because that would put host-local parallelism into the typed CLI
+  # surface even though the explicit action id ignores it.
   let jobs = max(1, min(countProcessors(), 8))
   let makeflags = "-j" & $jobs
   # M9.R.15q.11.4 — when ``skipConfigure`` is true, ``configureOptions``
@@ -479,9 +478,21 @@ proc autotools_package*(srcDir: string;
   if skipConfigure:
     for o in configureOptions:
       buildVars.add(o)
-  let buildEdge = make(workDir = buildDir, vars = buildVars, targets = @[],
+  let buildActionId = "autotools-make-build-" &
+    sanitizedPackageName(pkgName) & "-" & sanitizedPackageName(buildDir)
+  var buildEdge = make(workDir = "", vars = buildVars, targets = @[],
+    actionId = buildActionId,
     after = @[configureEdge],
+    extraInputs = @[m9r79ConfBuildDirAbs],
     extraEnv = @[("MAKEFLAGS", makeflags)])
+  # M9.R.84 — run make from the configured build directory instead of
+  # running from the recipe root with ``make -C <buildDir>``. GNU make
+  # and recursive libtool children then report relative writes such as
+  # ``src/types.lo`` relative to the build tree, matching where libffi's
+  # generated Makefile actually writes them.
+  buildEdge.cwdKind = acwdBuild
+  buildEdge.cwdCustomPath = buildDir
+  setRegisteredActionCwd(buildEdge.id, acwdBuild, buildDir)
   # M9.R.79.3 — compile continues writing to buildDir; source stays
   # read-only.  Sequential edge via ``after = @[configureEdge]`` — R7
   # dep-chain relaxation permits the shared write root.
@@ -518,12 +529,10 @@ proc autotools_package*(srcDir: string;
   # fix is to pass ``DESTDIR=...`` on the make command line — GNU
   # make's command-line overrides ALWAYS win over Makefile
   # assignments, regardless of any ``-e`` switch. Adding it via
-  # ``vars`` (positional args) routes through the typed CLI and
-  # therefore enters ``callIdentity`` — but since the install step
-  # already used host-specific absolute paths in the typed
-  # ``workDir`` slot pre-M9.R.15a, the cache fingerprint was already
-  # host-bound. So spelling DESTDIR on cmdline doesn't make the cache
-  # any less portable than it already was.
+  # ``vars`` (positional args) routes through the typed CLI. M9.R.84
+  # gives these make edges explicit package/buildDir-scoped ids and
+  # moves the execution directory into cwd metadata, so spelling
+  # DESTDIR on the command line no longer affects the action id.
   let providerProjectRoot = activeProviderProjectRoot()
   var installVars: seq[string] = @[]
   var installEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
@@ -549,12 +558,19 @@ proc autotools_package*(srcDir: string;
   # assignments which beat any Makefile-level default.
   for v in installMakeVars:
     installVars.add(v)
-  let installEdge = make(
-    workDir = buildDir,
+  let installActionId = "autotools-make-install-" &
+    sanitizedPackageName(pkgName) & "-" & sanitizedPackageName(buildDir)
+  var installEdge = make(
+    workDir = "",
     targets = @[installTarget],
     vars = installVars,
+    actionId = installActionId,
     after = @[configureEdge, buildEdge],
+    extraInputs = @[m9r79ConfBuildDirAbs],
     extraEnv = installEnv)
+  installEdge.cwdKind = acwdBuild
+  installEdge.cwdCustomPath = buildDir
+  setRegisteredActionCwd(installEdge.id, acwdBuild, buildDir)
   # M9.R.79.3 — install writes the DESTDIR-staged tree at
   # ``installDestdir``; source stays read-only.  The install-mirror
   # emit stage that runs downstream (see
