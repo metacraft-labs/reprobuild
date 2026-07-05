@@ -1424,6 +1424,8 @@ proc monitorEvidenceRequired(action: BuildAction): bool =
 
 proc needsExecutionForPolicy(action: BuildAction): bool =
   action.dependencyPolicy.kind in MonitorPolicyKinds or
+    (not action.cacheable and
+      action.dependencyPolicy.kind in RecognizedPolicyKinds) or
     action.kind == bakPreserveTree
 
 type
@@ -2165,19 +2167,12 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   # from reprobuild's former repro_monitor_shim / repro_monitor_depfile libs).
   # The same io-monitor driver is used as on macOS — only the underlying
   # injection mechanism differs.
-  # Monitor-Hook-Shim.md:501 — when monitoring cannot be performed (no
-  # monitor wired, or an unsupported platform), the failure semantics are
-  # "fail the monitored action OR make it non-cacheable, depending on
-  # policy". A NON-CACHEABLE action is the "make it non-cacheable" branch:
-  # it is always re-executed, so no cache entry's soundness depends on its
-  # monitor evidence and there is nothing to gather. Run it unmonitored
-  # (leave ``monitorDepfile`` empty so ``monitorEvidenceRequired`` stays
-  # false) rather than failing it. This is the sanctioned home for pure
-  # network actions with no monitorable file evidence — e.g. ``workspace
-  # sync``'s ``git fetch`` (cacheable = false) — which must still run on a
-  # host without the monitor driver wired (the hermetic workspace/VCS
-  # integration tests). A CACHEABLE action still fails: caching it without
-  # complete evidence would be the removed declared-only soundness hole.
+  # Monitor-Hook-Shim.md:501 — when monitoring cannot be performed, the
+  # failure semantics are "fail the monitored action OR make it non-cacheable,
+  # depending on policy". A non-cacheable action may run without monitor
+  # evidence only when the monitor is unavailable; when a monitor driver is
+  # configured, still gather evidence so integration tests and build reports
+  # can inspect the real runtime reads/writes.
   when not (defined(macosx) or defined(linux) or defined(windows)):
     if not action.cacheable:
       return
@@ -2306,8 +2301,6 @@ proc prependPathDirsToArgvEnv(env: seq[string];
   ## spawn path (which carries env as ``seq[string]`` rather than a
   ## ``StringTableRef``) so the same M9.N Batch B behaviour applies
   ## to the daemon-backed launch as well as the bypass launch.
-  if binDirs.len == 0:
-    return env
   let sep =
     when defined(windows): ";"
     else: ":"
@@ -2327,6 +2320,11 @@ proc prependPathDirsToArgvEnv(env: seq[string];
       pathSeen = true
     else:
       result.add(entry)
+  # RunQuota action children inherit from runquotad, not from the invoking
+  # `repro build`; when action env overrides are present, materialise PATH
+  # even when there is nothing to prepend.
+  if binDirs.len == 0 and env.len == 0:
+    return env
   # M9.R.15q.3.3 — dedup the final PATH list so the env stays under
   # ARG_MAX even when 25+ buildDeps + a host PATH with overlapping
   # nix-shell entries pile up.
@@ -3904,22 +3902,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       finishStat("repro hot record lookup", hotRecordLookupStart)
       if hotRecord.isNone:
         return none(BuildRunResult)
-      if not config.skipCacheHitEvidence:
-        hotRecords.add(hotRecord.get())
+      hotRecords.add(hotRecord.get())
     let lookupStart = statStart()
     let inputScanStart = statStart()
     let inputsUnchanged =
-      if buildGraph.actions.len == cache.hotMetadataRecordCount():
-        cache.hotMetadataInputsUnchanged(addr metadataCache)
-      else:
-        if config.skipCacheHitEvidence:
-          var selectedHotRecords: seq[ActionResultRecord] = @[]
-          for action in buildGraph.actions:
-            selectedHotRecords.add(cache.lookupHotMetadataRecord(
-              action.weakFingerprint, action.actionCachePolicy).get())
-          hotMetadataRecordInputsUnchanged(selectedHotRecords, addr metadataCache)
-        else:
-          hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache)
+      hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache)
     finishStat("repro hot input scan", inputScanStart)
     finishStat("repro cache lookup", lookupStart)
     if not inputsUnchanged:

@@ -178,10 +178,10 @@ suite "Deferred-D4: collectEvidence aggregation scales linearly":
     check "proc addUnique(values: var seq[string]; value: string)" in src
 
     # Spot-check: the four ``monitorReads/Writes/Probes/depfileInputs``
-    # call sites inside ``collectEvidence``'s monitor-records loop must use
-    # the HashSet overload. Scan the slice of source between
-    # ``proc collectEvidence`` and the next top-level ``proc``, and assert
-    # NONE of the calls of the form ``result.evidence.monitorReads.addUnique(path)``
+    # hot paths must use the HashSet overload. RMDF folding now lives in
+    # ``foldMonitorDepFileEvidence`` and ``collectEvidence`` threads the
+    # same ``EvidenceSeenSets`` through it, so scan both bodies and assert
+    # NONE of the calls of the form ``evidence.monitorReads.addUnique(path)``
     # (the legacy single-arg shape) remain.
     let collectStart = src.find("proc collectEvidence(")
     check collectStart >= 0
@@ -191,18 +191,32 @@ suite "Deferred-D4: collectEvidence aggregation scales linearly":
     let collectBody =
       if collectEnd < 0: src.substr(bodyStart)
       else: src.substr(bodyStart, collectEnd - 1)
+    check "foldMonitorDepFileEvidence(action.monitorDepfile" in collectBody
+    check "action.cwd, result.evidence, seen" in collectBody
+
+    let foldStart = src.find("proc foldMonitorDepFileEvidence*(")
+    check foldStart >= 0
+    let foldBodyStart = src.find('\n', foldStart) + 1
+    let foldEnd = src.find("\nproc ", foldBodyStart)
+    let foldBody =
+      if foldEnd < 0: src.substr(foldBodyStart)
+      else: src.substr(foldBodyStart, foldEnd - 1)
+
     # The legacy shape on the evidence fields would be e.g.
-    # ``result.evidence.monitorReads.addUnique(path)``. The new shape is
-    # ``result.evidence.monitorReads.addUnique(seen.monitorReads, path)``.
+    # ``evidence.monitorReads.addUnique(path)``. The new shape is
+    # ``evidence.monitorReads.addUnique(seen.monitorReads, path)``.
     # Assert the new shape appears at least once and the old shape does NOT.
-    check "seen.monitorReads" in collectBody
-    check "seen.monitorWrites" in collectBody
-    check "seen.monitorProbes" in collectBody
+    check "seen.monitorReads" in foldBody
+    check "seen.monitorWrites" in foldBody
+    check "seen.monitorProbes" in foldBody
     # Anti-regression: the legacy single-arg dotted call on monitor* fields
-    # must NOT appear in collectEvidence's body.
+    # must NOT appear in either hot body.
     check not ("monitorReads.addUnique(path)" in collectBody)
     check not ("monitorWrites.addUnique(path)" in collectBody)
     check not ("monitorProbes.addUnique(path)" in collectBody)
+    check not ("monitorReads.addUnique(path)" in foldBody)
+    check not ("monitorWrites.addUnique(path)" in foldBody)
+    check not ("monitorProbes.addUnique(path)" in foldBody)
     checkpoint("engine source structural check: OK")
 
   test "behavioural: HashSet dedup scales linearly while linear-find is quadratic":

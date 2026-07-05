@@ -14,7 +14,7 @@
 ##
 ## Per Provider-Compile-Tiering.md §"2a — repro-cmake-trycompile-provider".
 
-import std/[os, strutils, tables]
+import std/[os, tables]
 
 import repro_cmake_trycompile
 import repro_core
@@ -135,7 +135,7 @@ when defined(reproProviderMode):
       if meta.defaultTargetName.len > 0 and
           meta.defaultTargetName in targetByName:
         defaultTarget(targetByName[meta.defaultTargetName])
-    buildPackageFragment(pkg, request, registerAll, includeDefault = false)
+    buildPackageFragment(pkg, request, registerAll)
 
   proc runDirectProvider(): int =
     try:

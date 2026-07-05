@@ -144,6 +144,18 @@ proc setupFixture(gitBin, slug: string): M13Fixture =
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
   result.workspaceRoot = workspaceRoot
 
+proc cleanupScratch(path: string) =
+  for attempt in 0 .. 4:
+    if not dirExists(path):
+      return
+    try:
+      removeDir(path)
+      return
+    except OSError, IOError:
+      if attempt == 4:
+        raise
+      sleep(100)
+
 # ---- the suite -------------------------------------------------------------
 
 suite "M13 — workspace branch survives init and status":
@@ -154,7 +166,7 @@ suite "M13 — workspace branch survives init and status":
       skip()
     else:
       let fx = setupFixture(gitBin, "init-records")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let res = runShell(shellCommand(@[
         fx.reproBin, "workspace", "init", "myproject",
@@ -191,7 +203,7 @@ suite "M13 — workspace branch survives init and status":
       skip()
     else:
       let fx = setupFixture(gitBin, "status-reads")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       # Step 1: init creates the workspace and records the branch.
       let initRes = runShell(shellCommand(@[
@@ -243,7 +255,7 @@ suite "M13 — workspace branch survives init and status":
       skip()
     else:
       let fx = setupFixture(gitBin, "idempotent")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let res1 = runShell(shellCommand(@[
         fx.reproBin, "workspace", "init", "myproject",

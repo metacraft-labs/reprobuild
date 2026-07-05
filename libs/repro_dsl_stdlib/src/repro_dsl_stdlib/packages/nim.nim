@@ -28,7 +28,7 @@
 ## Linux build targets glibc 2.17+ (the prebuilt is statically linked
 ## against the c runtime where feasible).
 
-import std/tables
+import std/[os, strutils, tables]
 import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
 export packages_schema
@@ -109,7 +109,16 @@ package nim:
         flag mm is string,
           alias = "--mm:",
           format = concat
+        flag cc is string,
+          alias = "--cc:",
+          format = concat
+        flag gccExe is string,
+          alias = "--gcc.exe:",
+          format = concat
         boolFlag threadsOn is bool, alias = "--threads:on"
+        flag parallelBuild is int,
+          alias = "--parallelBuild:",
+          format = concat
         # Test-Fixtures-In-Build-Graph M2: ``--app:lib`` produces a shared
         # library (``.so`` / ``.dylib`` / ``.dll``) rather than an
         # executable. The monitor shim (``repro_monitor_shim``) is built
@@ -226,19 +235,61 @@ package nim:
 # subsume this alias.
 # ---------------------------------------------------------------------------
 
+proc defaultNimcacheDir(binary: string): string =
+  let outputName = splitFile(binary).name
+  if outputName.len > 0:
+    result = "build" / "nimcache" / outputName
+  else:
+    result = "build" / "nimcache" / "nim-output"
+
+proc usesSslDefine(defines: openArray[string]): bool =
+  for define in defines:
+    if define == "ssl" or define == "-d:ssl" or define == "--define:ssl":
+      return true
+
+proc opensslPassLForSsl(defines: openArray[string]): seq[string] =
+  if not usesSslDefine(defines):
+    return
+  for token in getEnv("NIX_LDFLAGS").splitWhitespace:
+    if token.startsWith("-L") and token.contains("openssl"):
+      result.add(token)
+      result.add("-lssl")
+      result.add("-lcrypto")
+      return
+
+proc compileDependencyPolicy(cacheDir: string;
+                             cacheable: bool;
+                             policy: BuildActionDependencyPolicy):
+    BuildActionDependencyPolicy =
+  if policy.kind != bdpDefault:
+    return policy
+  if cacheable:
+    return defaultDependencyPolicy()
+  makeDepfilePolicy(cacheDir / "nim-compile.d")
+
 proc c*(pkg: NimPackage; source: string; binary: string;
         defines: seq[string] = @[];
         paths: seq[string] = @[];
         imports: seq[string] = @[];
+        cc = "";
+        gccExe = "";
         passC: seq[string] = @[];
         passL: seq[string] = @[];
-        nimcache: string = "";
+        nimcache = "";
         appLib = false;
         threadsOn = false;
+        parallelBuild = 0;
         actionId = "";
         deps: openArray[string] = [];
         after: openArray[BuildActionDef] = [];
-        extraEnv: openArray[(string, string)] = []): BuildActionDef
+        extraInputs: openArray[string] = [];
+        extraOutputs: openArray[string] = [];
+        extraEnv: openArray[(string, string)] = [];
+        depfile = "";
+        cacheable = true;
+        dependencyPolicy = defaultDependencyPolicy();
+        actionCachePolicy = defaultActionCachePolicy();
+        commandStatsId = ""): BuildActionDef
     {.discardable.} =
   ## Test-Fixtures-In-Build-Graph M2: ``appLib`` / ``threadsOn`` were
   ## added to the convenience alias so the monitor-shim fixture edge in
@@ -246,10 +297,20 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   ## backend ``--passC:`` / ``--passL:`` flags through the
   ## ``binary``-shorthand surface the rest of the build block uses.
   discard imports
-  c(pkg = pkg, source = source, output = binary, defines = defines,
-    paths = paths, passC = passC, passL = passL, nimcache = nimcache,
-    appLib = appLib, threadsOn = threadsOn, actionId = actionId, deps = deps,
-    after = after, extraEnv = extraEnv)
+  let cacheDir = if nimcache.len > 0: nimcache else: defaultNimcacheDir(binary)
+  let effectivePassL = passL & opensslPassLForSsl(defines)
+  c(pkg = pkg, source = source, output = binary, defines = defines, cc = cc,
+    gccExe = gccExe,
+    paths = paths, passC = passC, passL = effectivePassL, nimcache = cacheDir,
+    appLib = appLib, threadsOn = threadsOn, parallelBuild = parallelBuild,
+    actionId = actionId,
+    deps = deps, after = after, extraInputs = extraInputs,
+    extraOutputs = extraOutputs, extraEnv = extraEnv,
+    depfile = depfile, cacheable = cacheable,
+    dependencyPolicy = compileDependencyPolicy(
+      cacheDir, cacheable, dependencyPolicy),
+    actionCachePolicy = actionCachePolicy,
+    commandStatsId = commandStatsId)
 
 # ---------------------------------------------------------------------------
 # M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).

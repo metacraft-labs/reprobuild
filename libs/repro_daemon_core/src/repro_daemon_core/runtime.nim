@@ -217,19 +217,90 @@ proc absoluteNormalized(path: string): string =
   else:
     os.normalizedPath(getCurrentDir() / path)
 
+proc companionFullCliPath(imagePath: string): string =
+  let fullName = addFileExt("repro-full", ExeExt)
+  let normalizedImage = absoluteNormalized(imagePath)
+  if imagePath.len > 0:
+    let sibling = absoluteNormalized(parentDir(imagePath) / fullName)
+    if sibling != normalizedImage and fileExists(sibling):
+      return sibling
+  let running = absoluteNormalized(getAppFilename())
+  if running.extractFilename == fullName and running != normalizedImage and
+      fileExists(running):
+    return running
+  let onPath = findExe(fullName)
+  if onPath.len > 0:
+    let normalized = absoluteNormalized(onPath)
+    if normalized != normalizedImage and fileExists(normalized):
+      return normalized
+  ""
+
+proc imageDigestHex(imagePath: string): string =
+  let primary = fileDigestHex(imagePath)
+  if primary.len == 0:
+    return ""
+  let companion = companionFullCliPath(imagePath)
+  if companion.len == 0:
+    return primary
+  let companionDigest = fileDigestHex(companion)
+  if companionDigest.len == 0:
+    return primary
+  let hasher = initHasher()
+  defer: hasher.close()
+  hasher.update("repro-dev-image-v1\n")
+  hasher.update("primary=" & primary & "\n")
+  hasher.update("companion=" & companionDigest & "\n")
+  "blake3-256:" & hasher.finalize().toHex()
+
+proc expectedDaemonRunningDigestHex(sourceExe: string; devMode: bool): string =
+  if sourceExe.len == 0 or not isAbsolute(sourceExe) or
+      not fileExists(sourceExe):
+    return ""
+  if devMode:
+    return imageDigestHex(sourceExe)
+  let companion = companionFullCliPath(sourceExe)
+  if companion.len > 0:
+    let companionDigest = fileDigestHex(companion)
+    if companionDigest.len > 0:
+      return companionDigest
+  fileDigestHex(sourceExe)
+
+proc stageFullCliCompanion(sourceExe, generationDir: string) =
+  let companion = companionFullCliPath(sourceExe)
+  if companion.len == 0:
+    return
+  let dest = generationDir / addFileExt("repro-full", ExeExt)
+  copyFile(companion, dest)
+  try:
+    setFilePermissions(dest, {fpUserRead, fpUserWrite,
+      fpUserExec, fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+  except CatchableError:
+    discard
+
 proc reconnectLimitationsText(): string =
   "watch sessions can be reattached by run id/session id; completed build " &
     "session diagnostics and stats persist; attached build event streams are " &
     "not replayed after a dev self-restart"
+
+proc runningDevImagePath(config: UserDaemonConfig): string =
+  if config.stagedGenerationDir.len > 0:
+    let staged = config.stagedGenerationDir / addFileExt("repro-daemon", ExeExt)
+    if fileExists(staged):
+      return absoluteNormalized(staged)
+  if config.devMode and config.sourceExe.len > 0:
+    let source = absoluteNormalized(config.sourceExe)
+    if fileExists(source):
+      return source
+  absoluteNormalized(getAppFilename())
 
 proc initDevRestartState(config: UserDaemonConfig): DevRestartState =
   result.enabled = config.devMode
   result.sourceImagePath =
     if config.sourceExe.len > 0: absoluteNormalized(config.sourceExe)
     else: absoluteNormalized(getAppFilename())
-  result.runningImagePath = absoluteNormalized(getAppFilename())
-  result.sourceHash = fileDigestHex(result.sourceImagePath)
-  result.runningHash = fileDigestHex(result.runningImagePath)
+  result.runningImagePath = runningDevImagePath(config)
+  result.sourceHash = imageDigestHex(result.sourceImagePath)
+  result.runningHash = imageDigestHex(result.runningImagePath)
   result.protocolGeneration = $UserDaemonProtocolMajor & "." &
     $UserDaemonProtocolMinor
   result.restartRunId =
@@ -245,7 +316,7 @@ proc stageDevDaemonBinary*(sourceExe: string; config: UserDaemonConfig;
                            restartRunId = ""):
     tuple[imagePath: string; generationDir: string; runId: string;
           sourceHash: string] =
-  result.sourceHash = fileDigestHex(sourceExe)
+  result.sourceHash = imageDigestHex(sourceExe)
   if result.sourceHash.len == 0:
     raise newException(UserDaemonRuntimeError,
       "cannot stage missing repro-daemon source executable: " & sourceExe)
@@ -259,6 +330,7 @@ proc stageDevDaemonBinary*(sourceExe: string; config: UserDaemonConfig;
   createDir(result.generationDir)
   result.imagePath = result.generationDir / addFileExt("repro-daemon", ExeExt)
   copyFile(sourceExe, result.imagePath)
+  stageFullCliCompanion(sourceExe, result.generationDir)
   try:
     setFilePermissions(result.imagePath, {fpUserRead, fpUserWrite,
       fpUserExec, fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
@@ -842,20 +914,12 @@ proc runBuildRequestWorker(socket: IpcConn; config: UserDaemonConfig;
   proc cancelCheck(): bool =
     request.attached and request.cancelOnDisconnect and socket.clientDisconnected()
 
-  when defined(posix):
-    # Prewarm in the worker, not the daemon parent. This warms the on-disk
-    # action / file-metadata caches the build below reads, but does so in this
-    # short-lived forked process so its (potentially multi-GB) build-graph and
-    # provider-compile allocations are reclaimed on `quit` instead of
-    # accumulating in the long-lived daemon. Best-effort: a prewarm failure
-    # (e.g. tool-resolution not yet satisfiable) must never abort the build —
-    # the executor below re-derives everything authoritatively.
-    if userDaemonBuildPrewarmer != nil:
-      try:
-        userDaemonBuildPrewarmer(request)
-      except CatchableError as err:
-        logLine(config.logPath, "build prewarm skipped session=" &
-          sessionId & " error=" & err.msg)
+  # Do not run the optional build prewarmer here. It duplicates the graph /
+  # provider-compile path that the executor below runs authoritatively, but it
+  # happens before any terminal build event and cannot observe
+  # cancel-on-disconnect while inside heavyweight project inspection. CMake
+  # generated projects made that duplication visible as detached workers
+  # consuming multi-GB RSS after the attached client was gone.
 
   try:
     updateSessionState(config, session, "running",
@@ -942,20 +1006,10 @@ proc handleBuildRequest(socket: IpcConn; config: UserDaemonConfig;
         updateSessionState(config, session, "cancelled", 130,
           "daemon-hosted build cancelled before scheduling")
         return
-    # NOTE: the prewarm step (build-graph inspection + file-metadata cache
-    # warming) is intentionally NOT run here in the long-lived daemon parent.
-    # It used to be, but `prepareBuildGraphInspection` does heavyweight work
-    # (interface extraction, tool-identity resolution, and a nested
-    # provider-compile `runBuild`); running it in the single-threaded parent
-    # serialised every incoming build request behind a multi-minute warm-up
-    # and — because the parent never exits — leaked its large graph/ORC
-    # allocations into the daemon, growing RSS without bound across requests
-    # (observed wedging the `develop --cmake` inner-build path for tens of
-    # minutes with a multi-GB daemon). The worker repeats the same inspection
-    # anyway, so prewarming there is sufficient: it still warms the on-disk
-    # caches the build reads, runs in a short-lived process that frees
-    # everything on exit, and keeps the parent free to fork the next request
-    # immediately. See `runBuildRequestWorker`.
+    # The worker runs the authoritative build entrypoint directly. Earlier
+    # versions ran a speculative graph/file-metadata prewarm before the real
+    # executor, but that duplicated provider inspection, happened before any
+    # terminal event, and could outlive an attached client disconnect.
     when defined(posix):
       spawnDetachedDaemonWorker(config, "build worker", sessionId, socket):
         runBuildRequestWorker(socket, config, request, session)
@@ -1302,7 +1356,7 @@ proc restartCandidateReady(config: UserDaemonConfig;
   if nowMs - state.lastCheckMs < devRestartPollIntervalMs():
     return false
   state.lastCheckMs = nowMs
-  let currentHash = fileDigestHex(state.sourceImagePath)
+  let currentHash = imageDigestHex(state.sourceImagePath)
   if currentHash.len == 0 or currentHash == state.runningHash:
     state.candidateHash = ""
     state.candidateSinceMs = 0
@@ -1659,16 +1713,12 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
     # payload decoder (`unsupported build target payload version`), a progress
     # encoding the new client renders as raw `progress:` lines, and so on.
     # Detect that by comparing the daemon-reported running-image hash to the
-    # on-disk hash of the sibling daemon binary, and restart the daemon so it
-    # always tracks the current `repro`. The dev-mode self-restart only covers
-    # daemons already running the new image; this covers the hand-off from an
-    # older daemon. If either hash is unavailable we cannot prove staleness, so
-    # we leave the daemon running (fail safe).
-    let expectedHash =
-      if isAbsolute(sourceExe) and fileExists(sourceExe):
-        fileDigestHex(sourceExe)
-      else:
-        ""
+    # on-disk image that daemon startup will actually execute. In normal mode
+    # `repro` may be a thin wrapper which immediately execs `repro-full`, while
+    # dev mode stages both files and tracks the composite wrapper+companion
+    # image. If either hash is unavailable we cannot prove staleness, so we
+    # leave the daemon running (fail safe).
+    let expectedHash = expectedDaemonRunningDigestHex(sourceExe, config.devMode)
     if expectedHash.len == 0 or existing.runningHash.len == 0 or
         existing.runningHash == expectedHash:
       return existing

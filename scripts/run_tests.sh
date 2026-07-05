@@ -1,30 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Bootstrap-And-Self-Build B5: the legacy shell loop is compressed to
+# project-DSL graph steps. ``.#apps`` builds binaries, ``.#test-helpers``
+# builds helpers, and ``.#test-builds`` compiles every test with the HCR
+# flags baked into the edges. The runquota sibling build and final test runner
+# stay shell-shaped until typed-tool resolver coverage reaches those helpers.
+mkdir -p build build/nimcache test-logs
+rm -rf build/test-bin
+mkdir -p build/test-bin
 
-# Bootstrap-And-Self-Build B5: the original 6-step shell loop
-# (build_apps + build_sibling + build_test_helper x 3 + repro build
-# test + macOS-arm64 HCR rebuild + ct-test-runner) has been compressed
-# to 4 steps. Steps 1, 3, 4, and 5 from the original now flow through
-# the project DSL: ``.#apps`` builds the binaries (B1), ``.#test-helpers``
-# builds the helpers (B2), and ``.#test-builds`` compiles every test
-# (B3) with the macOS-arm64 HCR ``extraPassC`` / ``extraPassL`` flags
-# baked into the build edges (B4) so the standalone HCR re-compile
-# loop is no longer needed. The cross-project runquota build and the
-# test-execute runner stay shell-shaped until the engine's tool-
-# resolver gap closes for ``ct_test_nim_unittest.buildNimUnittest`` and
-# ``python_unittest_runner.pythonUnittest`` — see B4 outcome.
+# Test runs exercise user-facing CLI latency gates, so the app bootstrap and
+# graph-owned app rebuilds must use optimized binaries by default. Developers
+# can still opt into debug apps explicitly with REPROBUILD_BUILD_MODE=debug.
+export REPROBUILD_BUILD_MODE="${REPROBUILD_BUILD_MODE:-release}"
 
-mkdir -p build/test-bin build/nimcache test-logs
+# Tests must not depend on the developer's persistent action cache. Large or
+# stale user-level metadata can dominate memory use in daemon-hosted cache-hit
+# evidence reconstruction, so give this run a clean, reproducible cache root.
+export REPROBUILD_ACTION_CACHE_ROOT="$(pwd)/build/test-action-cache"
+rm -rf "${REPROBUILD_ACTION_CACHE_ROOT}"
+mkdir -p "${REPROBUILD_ACTION_CACHE_ROOT}"
 
-# Local Nix builds of repro link libclingo/libzstd dynamically. Make the
-# freshly bootstrapped ./build/bin/repro usable for every test-run invocation,
-# including the repro build collections below.
-CLINGO_LIB="${CLINGO_LIB:-$(find /nix/store -maxdepth 1 -type d -name '*clingo-5.*' -print -quit 2>/dev/null)/lib}"
-ZSTD_LIB="${ZSTD_LIB:-$(find /nix/store -maxdepth 1 -type d -name '*zstd-1.*' -print -quit 2>/dev/null)/lib}"
-if [[ -d "${CLINGO_LIB}" && -d "${ZSTD_LIB}" ]]; then
-  export DYLD_LIBRARY_PATH="${CLINGO_LIB}:${ZSTD_LIB}:${DYLD_LIBRARY_PATH:-}"
-  export DYLD_FALLBACK_LIBRARY_PATH="${CLINGO_LIB}:${ZSTD_LIB}:${DYLD_FALLBACK_LIBRARY_PATH:-}"
-  export LD_LIBRARY_PATH="${CLINGO_LIB}:${ZSTD_LIB}:${LD_LIBRARY_PATH:-}"
+# Local Nix builds of repro may need runtime library paths from the active
+# dev shell. Do not scan /nix/store for first matching names: long-lived
+# machines can retain older zstd/glibc closures, and prepending those paths
+# makes unrelated host tools load incompatible libraries.
+runtime_lib_dirs=()
+for candidate in ${CLINGO_LIB:-} ${ZSTD_LIB:-}; do
+  if [[ -d "${candidate}" ]]; then
+    runtime_lib_dirs+=("${candidate}")
+  fi
+done
+if [[ ${#runtime_lib_dirs[@]} -gt 0 ]]; then
+  runtime_lib_path="$(IFS=:; printf '%s' "${runtime_lib_dirs[*]}")"
+  export DYLD_LIBRARY_PATH="${runtime_lib_path}:${DYLD_LIBRARY_PATH:-}"
+  export DYLD_FALLBACK_LIBRARY_PATH="${runtime_lib_path}:${DYLD_FALLBACK_LIBRARY_PATH:-}"
+  export LD_LIBRARY_PATH="${runtime_lib_path}:${LD_LIBRARY_PATH:-}"
 fi
 if [[ -z "${REPRO_TEST_ADAPTERS_SRC:-}" &&
       -f "../reprobuild-test-adapters/src/repro_test_adapters/test_runner.nim" ]]; then
@@ -95,15 +106,33 @@ trap _repro_test_daemon_cleanup EXIT
 # Idempotent — the recipe no-ops when the binary already exists.
 just bootstrap
 
-# Step 2 (B5): build the runquota sibling so ``runquotad`` is on
-# PATH before the engine starts. The cross-project ``uses: runquota``
-# resolver isn't online yet (B0 outcome), so the daemon still builds
-# via the sibling's own Justfile; reprobuild's repro.nim declares
-# ``uses: "runquotad"`` (B0) which the path-mode resolver checks
-# during the engine's tool-resolution phase. Without runquotad on
-# PATH, Step 3 fails with ``tool-resolution failed: runquotad ...
-# was not found in PATH``. Once the cross-project selector lands,
-# this step folds into Step 3 as another ``.#`` fragment.
+# Provider compilation uses the io-monitor path, so it needs a valid
+# monitor shim before the graph can build the canonical ``.#test-fixtures``
+# shim edge. ``just bootstrap`` only runs ``scripts/build_apps.sh`` when
+# ``build/bin/repro`` is missing; on warm checkouts that can leave a present
+# repro binary with no shim artifact. Seed the shim directly from io-mon here,
+# then let ``.#test-fixtures`` rebuild/verify the graph-owned artifact below.
+bootstrap_monitor_shim() {
+  local io_mon_src="${IO_MON_SRC:-../io-mon}"
+  case "${io_mon_src}" in
+    */src) io_mon_src="${io_mon_src%/src}" ;;
+  esac
+  if [[ ! -x "${io_mon_src}/scripts/build_shim.sh" ]]; then
+    echo "missing io-mon shim builder at ${io_mon_src}/scripts/build_shim.sh; set IO_MON_SRC" >&2
+    return 2
+  fi
+  IO_MON_SHIM_OUT_DIR="$(pwd)/build/lib" \
+  IO_MON_SHIM_NIMCACHE_DIR="$(pwd)/build/nimcache/io-mon-shim" \
+  IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
+    bash "${io_mon_src}/scripts/build_shim.sh"
+}
+printf 'Bootstrapping monitor shim for provider compilation\n' >&2
+bootstrap_monitor_shim > test-logs/monitor-shim-bootstrap.log 2>&1 || {
+  echo "monitor shim bootstrap failed; see test-logs/monitor-shim-bootstrap.log" >&2
+  exit 1
+}
+
+# Step 2: build sibling prerequisites that path-mode tool resolution needs.
 if [[ -d "../runquota" ]]; then
   if [[ ! -x "../runquota/build/bin/runquotad${exe_ext}" ]]; then
     printf 'Building prerequisite sibling: ../runquota\n' >&2
@@ -112,97 +141,16 @@ if [[ -d "../runquota" ]]; then
       exit 1
     }
   fi
-  # Prepend ../runquota/build/bin so the path-mode resolver finds
-  # runquotad during the engine pass below.
   RUNQUOTA_BIN_ABS="$(cd ../runquota/build/bin && pwd)"
   export PATH="${RUNQUOTA_BIN_ABS}:${PATH}"
 fi
 
-# Step 2b: build the reprobuild-cmake fork so the cmake-develop e2e tests
-# (tests/e2e/cmake-develop/) have their forked ``cmake`` carrying the
-# Reprobuild generator. Those tests hard-require it (``check
-# forkedCMake.len > 0`` — no graceful skip), so the fork is a real test
-# prerequisite, not a benchmark-only artifact. Mirror the runquota
-# prerequisite above; idempotent — skip when already built (warm
-# self-hosted checkout). The CMake self-build is heavy, so cap parallelism
-# on shared runners.
 if [[ -d "../reprobuild-cmake" ]]; then
-  if [[ ! -x "../reprobuild-cmake/build/bin/cmake${exe_ext}" ]]; then
-    printf 'Building prerequisite sibling: ../reprobuild-cmake (CMake fork)\n' >&2
-    cmake_jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
-    if (( cmake_jobs > 16 )); then cmake_jobs=16; fi
-    cmake_generator="Unix Makefiles"
-    if command -v ninja >/dev/null 2>&1; then
-      cmake_generator="Ninja"
-    fi
-    cmake_cc="$(command -v cc)"
-    cmake_cxx="$(command -v c++)"
-    cmake_osx_sysroot=""
-    cmake_apple_framework_flags=()
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-      cmake_osx_sysroot="$(find /nix/store -maxdepth 7 -path '*/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk' -type d -print 2>/dev/null | LC_ALL=C sort | tail -n 1 || true)"
-      if [[ -z "${cmake_osx_sysroot}" ]]; then
-        echo "reprobuild-cmake build requires a macOS SDK in /nix/store" >&2
-        exit 1
-      fi
-      cmake_apple_framework_dir="${cmake_osx_sysroot}/System/Library/Frameworks"
-      if [[ -d "${cmake_apple_framework_dir}" ]]; then
-        cmake_apple_framework_flags=(
-          "-DCMAKE_C_FLAGS=-F${cmake_apple_framework_dir}"
-          "-DCMAKE_CXX_FLAGS=-F${cmake_apple_framework_dir}"
-          "-DCMAKE_EXE_LINKER_FLAGS=-F${cmake_apple_framework_dir}"
-        )
-      fi
-    fi
-    iconv_header="$(find /nix/store -maxdepth 3 -path '*/include/iconv.h' -print -quit 2>/dev/null || true)"
-    iconv_args=()
-    if [[ -n "${iconv_header}" ]]; then
-      iconv_include_dir="$(dirname "${iconv_header}")"
-      iconv_prefix="${iconv_include_dir%/include}"
-      iconv_lib="${iconv_prefix}/lib/libiconv.dylib"
-      if [[ ! -f "${iconv_lib}" ]]; then
-        iconv_lib="$(find /nix/store -maxdepth 3 -path '*/lib/libiconv.dylib' -print -quit 2>/dev/null || true)"
-      fi
-      if [[ -n "${iconv_lib}" && -f "${iconv_lib}" ]]; then
-        iconv_args=(
-          "-DICONV_INCLUDE_DIR=${iconv_include_dir}"
-          "-DLIBICONV_PATH=${iconv_lib}"
-        )
-      fi
-    fi
-    (cd ../reprobuild-cmake \
-        && if [[ -f build/CMakeCache.txt ]] && \
-             { ! grep -q "^CMAKE_GENERATOR:INTERNAL=${cmake_generator}$" build/CMakeCache.txt || \
-               ! grep -q "^CMAKE_C_COMPILER:FILEPATH=${cmake_cc}$" build/CMakeCache.txt || \
-               ! grep -q "^CMAKE_CXX_COMPILER:FILEPATH=${cmake_cxx}$" build/CMakeCache.txt || \
-               { [[ -n "${cmake_osx_sysroot}" ]] && ! grep -q "^CMAKE_OSX_SYSROOT:.*=${cmake_osx_sysroot}$" build/CMakeCache.txt; } || \
-               { [[ -n "${cmake_apple_framework_dir:-}" ]] && ! grep -q "^CMAKE_CXX_FLAGS:STRING=-F${cmake_apple_framework_dir}$" build/CMakeCache.txt; } || \
-               ! grep -q "^ENABLE_IPV6:.*=OFF$" build/CMakeCache.txt; }; then \
-             rm -rf build; \
-           fi \
-        && cmake -S . -B build -G "${cmake_generator}" \
-             -DCMAKE_BUILD_TYPE=Release \
-             -DCMAKE_C_COMPILER="${cmake_cc}" \
-             -DCMAKE_CXX_COMPILER="${cmake_cxx}" \
-             ${cmake_osx_sysroot:+-DCMAKE_OSX_SYSROOT="${cmake_osx_sysroot}"} \
-             "${cmake_apple_framework_flags[@]}" \
-             -DCMAKE_USE_SYSTEM_CURL=OFF \
-             -DCMAKE_USE_SYSTEM_ZLIB=OFF \
-             -DENABLE_IPV6=OFF \
-             "${iconv_args[@]}" \
-        && cmake --build build --target cmake --parallel "${cmake_jobs}") \
-        > test-logs/reprobuild-cmake-build.log 2>&1 || {
-      echo "reprobuild-cmake build failed; see test-logs/reprobuild-cmake-build.log" >&2
-      exit 1
-    }
-  fi
+  bash scripts/build_reprobuild_cmake_prereq.sh "${exe_ext}"
 fi
 
-# Step 3 (B5): build the apps, test helpers, and test binaries through
-# the engine. Replaces steps 1 (build_apps.sh) + 3 (build_test_helper
-# x 3) + 4 (./build/bin/repro build test) + 5 (HCR rebuild loop) of
-# the legacy script. Cap parallelism for memory-constrained CI runners
-# (same logic as the legacy script: ~300-500 MB peak per nim c).
+# Step 3: build the apps, helpers, fixtures, and test binaries through
+# the engine. Cap parallelism for memory-constrained CI runners.
 if [[ -z "${REPROBUILD_MAX_PARALLELISM:-}" ]]; then
   available_cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
   cap=$(( available_cores / 2 ))
@@ -224,7 +172,8 @@ printf 'Building apps + test-helpers + test-builds via repro (REPROBUILD_MAX_PAR
 # three invocations back into one.
 repro_build_collection() {
   local collection="$1"
-  if ! ./build/bin/repro build --tool-provisioning=path --daemon=off "${collection}"; then
+  # Suite setup uses the local pool gate; dedicated tests cover RunQuota itself.
+  if ! ./build/bin/repro build --tool-provisioning=path --daemon=off --no-runquota "${collection}"; then
     report_path=".repro/build/repro/build-report.json"
     if [[ -f "${report_path}" ]]; then
       printf '\n=== Failed actions for %s (from %s) ===\n' "${collection}" "${report_path}" >&2
@@ -241,14 +190,12 @@ repro_build_collection() {
 }
 repro_build_collection ".#apps" || exit 1
 repro_build_collection ".#test-helpers" || exit 1
-# Test-Fixtures-In-Build-Graph M2: build the monitor-shim fixture
+# Test-Fixtures-In-Build-Graph M2: rebuild the monitor-shim fixture
 # (``build/lib/librepro_monitor_shim.<ext>``) through the graph before
 # the tests run. ``prepareMonitorTools`` and the three self-shim outlier
 # tests now ``requireBinary`` this artifact instead of compiling it per
-# test. ``just bootstrap`` only runs ``build_apps.sh`` (which also
-# produces the shim) when ``build/bin/repro`` is MISSING, so on a warm
-# checkout the shim would otherwise never be built — this explicit
-# fixture build closes that gap.
+# test. The bootstrap shim above is only the provider-compile seed; this
+# graph edge remains the canonical fixture build the tests consume.
 repro_build_collection ".#test-fixtures" || exit 1
 repro_build_collection ".#test-builds" || exit 1
 
@@ -312,14 +259,18 @@ else
   fi
   # ``--no-build`` skips the runner's own build step (the engine
   # already produced every binary in build/test-bin via Step 2).
-  # Thread count capped at 2 to dodge the runner's known fd-race;
-  # callers can lift via REPROBUILD_TEST_THREADS once the runner fix
-  # lands. ct-test-runner is unaffected and is the preferred path.
+  # The fallback runner defaults to one worker because several heavy e2e
+  # tests capture nested ``repro build`` output until the child exits.
+  # Running two such tests together on a busy shared host can leave both
+  # silent long enough to trip the idle timeout despite real progress.
+  # Callers that want the faster, best-effort local path can still set
+  # REPROBUILD_TEST_THREADS explicitly. ct-test-runner is unaffected and
+  # is the preferred path.
   # ``--test-timeout`` is the D6 per-test SIGKILL deadline; the outer
   # ``timeout`` is the runner-phase wall-clock backstop.
   timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${runner_bin}" \
     --no-build \
-    --threads=${REPROBUILD_TEST_THREADS:-2} \
+    --threads=${REPROBUILD_TEST_THREADS:-1} \
     --test-timeout=${TEST_TIMEOUT} \
     --bin-dir=build/test-bin \
     --summary-json=test-logs/parallel-run.json \

@@ -246,8 +246,9 @@ proc requireZshHook(c: M6Case) =
   let statsPath = c.tempRoot / "zsh-native-stats.json"
   env["REPRO_NATIVE_SHELL_STATS"] = statsPath
   env["REPROBUILD_REPRO"] = reproPathWithSpaces(c)
-  let res = runProgram(zsh, @["-i", "-c", posixProbeScript(c.projectA,
-    c.projectB)], c.tempRoot, env)
+  let res = runProgram(zsh, @["-f", "-i", "-c",
+    "source " & q(c.homeDir / ".zshrc") & "\n" &
+      posixProbeScript(c.projectA, c.projectB)], c.tempRoot, env)
   check res.exitCode == 0
   requireShellValue(res.output, "A:",
     "A:alpha|one|" & c.projectA & "|tool:alpha:one")

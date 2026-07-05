@@ -5,7 +5,10 @@
 ## test binaries where exactly one fails:
 ##
 ##   1. Default mode: the runner runs all of them, exits 1, summary
-##      reports (NumFixtures-1) passed + 1 failed.
+##      reports (NumFixtures-1) passed + 1 failed. This exact-count
+##      assertion runs the nested runner serially; parallel scheduling
+##      is covered by the fail-fast sub-case below and by
+##      ``t_repro_test_runner_parallel_n_workers``.
 ##   2. ``REPRO_TEST_FAIL_FAST=1``: the runner stops scheduling after
 ##      the failing case, exits 1, summary reports
 ##      ``total < NumFixtures`` (with in-flight tests still allowed to
@@ -142,7 +145,7 @@ proc runDefaultCase() =
 
   const NumFixtures = 20
   const FailingIdx = 0
-  const WorkerCount = 2
+  const WorkerCount = 1
   let ok = setupFixtures(repoRoot, tempRoot, binDir,
                          NumFixtures, FailingIdx)
   check ok

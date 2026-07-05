@@ -74,14 +74,6 @@ static void write_custom(const char *path, const char *kind,
   fclose(file);
 }
 
-static void corrupt_monitor_fragment(void) {
-  const char *dir = getenv("REPRO_MONITOR_FRAGMENT_DIR");
-  if (dir == NULL || dir[0] == '\0') return;
-  char path[4096];
-  snprintf(path, sizeof(path), "%s/corrupt.rmdf-frag", dir);
-  write_text(path, "not an RMDF fragment");
-}
-
 int main(int argc, char **argv) {
   if (argc != 7) return 64;
   const char *mode = argv[1];
@@ -104,8 +96,6 @@ int main(int argc, char **argv) {
     write_custom(sidecar_path, "fail", visible_path, hidden_path);
   } else if (strcmp(mode, "custom-bad-output") == 0) {
     write_custom(sidecar_path, "bad-output", visible_path, hidden_path);
-  } else if (strcmp(mode, "corrupt-fragment") == 0) {
-    corrupt_monitor_fragment();
   }
 
   free(visible);
@@ -542,8 +532,10 @@ suite "integration_scheduler_dependency_gathering_policies":
         writeFixture(visible, "visible\n")
         writeFixture(hidden, "hidden\n")
 
+        let corruptDepfile = failDir / "corrupt.rdep"
+        writeFixture(corruptDepfile, "not an RMDF depfile")
         requireFailureNoPublish(action("corrupt-monitor-evidence",
-          [fixtureBin, "corrupt-fragment", visible, hidden,
+          [fixtureBin, "plain", visible, hidden,
             failDir / "corrupt.txt", failDir / "unused.sidecar",
             failDir / "corrupt.runs"],
           cwd = failDir,
@@ -551,12 +543,13 @@ suite "integration_scheduler_dependency_gathering_policies":
           outputs = ["corrupt.txt"],
           cacheable = true,
           weakFingerprint = weak("corrupt-monitor-evidence"),
+          monitorDepfile = corruptDepfile,
           dependencyPolicy = DependencyGatheringPolicy(
             kind: dgAutomaticMonitor,
             completeness: decComplete),
-          env = ["REPRO_MONITOR_SHIM_LIB=" & monitorTools.shim],
           commandStatsId = "m17-corrupt-monitor"), failRoot, app,
-          "", monitorTools.monitorCliPath, monitorTools.monitorCliArgs)
+          "monitor depfile read failed", monitorTools.monitorCliPath,
+          monitorTools.monitorCliArgs)
     else:
       test "automatic monitor policies are unsupported on this platform":
         skip()

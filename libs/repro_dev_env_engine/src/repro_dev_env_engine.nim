@@ -2,6 +2,7 @@ import std/[options, os, strutils]
 
 import repro_build_engine
 import repro_core
+import repro_dev_env_engine/cache_key as devEnvCacheKey
 import repro_hash
 import repro_interface_artifacts
 
@@ -115,7 +116,7 @@ proc invalidateStaleProviderCompileArtifact(plan: ProviderCompilePlan;
   if artifactPath.len == 0 or not fileExists(extendedPath(artifactPath)):
     return
   if providerCompileArtifactFresh(artifactPath, plan.outputBinaryPath,
-      plan.interfaceFingerprint, plan.providerFingerprint):
+      plan.interfaceFingerprint, plan.providerFingerprint, plan.workDir):
     return
   removeFile(extendedPath(artifactPath))
 
@@ -239,42 +240,8 @@ proc envVarPart(name: string): string =
 
 proc computeDevEnvEdgeCacheKey*(config: DevEnvEdgeConfig): string =
   ## See module-level note. Returns a 32-char lowercase hex digest.
-  let projectFile = canonicalProjectFilePath(config.projectRoot)
-  let projectFilePart =
-    if projectFile.len == 0:
-      config.projectRoot & "\n<no project file>"
-    else:
-      fileFingerprintPart(projectFile)
-  let activity =
-    if config.activity.len > 0: config.activity else: "default"
-  let parts = @[
-    CacheKeySchema,
-    "projectRoot=" & config.projectRoot,
-    "projectFile=" & projectFilePart,
-    "activity=" & activity,
-    "lockSliceId=" & config.lockSliceId,
-    "lockSliceFile=" & lockSliceFilePart(config.projectRoot),
-    "developOverrides=" & fileFingerprintPart(config.developOverridesPath),
-    # ``REPRO_DEVELOP_OVERRIDES_FILE`` is the only edge-consumed env
-    # variable that materially changes the activation — overriding the
-    # overrides file path swaps the develop-overrides resolution. The
-    # rest (``REPRO_MONITOR_SHIM_LIB`` and monitor CLI selection) are
-    # infrastructure for the build engine and do not change the
-    # dev-env contract; including them would burn cache-key matches
-    # whenever the user wraps ``repro`` under a custom monitor or runs from a
-    # different host with a different shim path.
-    envVarPart("REPRO_DEVELOP_OVERRIDES_FILE")
-  ]
-  let digest = weakFingerprintFromText(parts.join("\n"))
-  result = newStringOfCap(32)
-  # 16-byte prefix is plenty for cache-key equality at this layer; full
-  # 32-byte digest would only add bytes to the env block without
-  # narrowing the false-collision probability into anything the user
-  # can observe (a hypothetical 2^-64 collision triggers a stale env at
-  # the next prompt and is corrected on the prompt after that when the
-  # full walk runs).
-  for i in 0 ..< 16:
-    result.add(toHex(int(digest.bytes[i]), 2).toLowerAscii())
+  devEnvCacheKey.computeDevEnvEdgeCacheKey(config.projectRoot, config.activity,
+    config.lockSliceId, config.developOverridesPath)
 
 proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
                                provider: ProviderCompileArtifact;
@@ -383,7 +350,7 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   var provider: ProviderCompileArtifact
   let cachedProvider = readFreshProviderCompileArtifact(
     result.providerArtifactPath, active.modulePath, result.providerBinaryPath,
-    interfaceArtifact.interfaceFingerprint)
+    interfaceArtifact.interfaceFingerprint, workDir)
   if cachedProvider.isSome:
     provider = cachedProvider.get()
     result.stats.providerBuildSkippedFresh = true
@@ -413,7 +380,7 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
     provider = readProviderCompileArtifact(result.providerArtifactPath)
     if not providerCompileArtifactFresh(result.providerArtifactPath,
         providerPlan.outputBinaryPath, providerPlan.interfaceFingerprint,
-        providerPlan.providerFingerprint):
+        providerPlan.providerFingerprint, providerPlan.workDir):
       raiseDevEnvEdge("provider compile artifact is stale after edge execution")
 
   result.providerBinaryPath = provider.outputBinaryPath

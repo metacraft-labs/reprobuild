@@ -191,6 +191,8 @@ suite "Local daemons/control-plane M10 development self-restart":
       check fieldValue(started, "source-hash").len > 0
       check fieldValue(started, "source-hash") ==
         fieldValue(started, "running-hash")
+      check fileExists(fieldValue(started, "staged-generation-dir") /
+        addFileExt("repro-full", ExeExt))
       check fieldValue(started, "protocol-generation") == "1.1"
       check fieldValue(started, "reconnect-limitations").contains(
         "watch sessions can be reattached")

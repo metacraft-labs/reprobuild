@@ -190,6 +190,18 @@ proc setupFixture(gitBin, slug: string): Fixture =
   # The workspace/host root gets its OWN .envrc (the org-root hook).
   writeFile(result.workspaceRoot / ".envrc", "export RA12_ROOT=1\n")
 
+proc cleanupScratch(path: string) =
+  for attempt in 0 .. 4:
+    if not dirExists(path):
+      return
+    try:
+      removeDir(path)
+      return
+    except OSError, IOError:
+      if attempt == 4:
+        raise
+      sleep(100)
+
 proc readInitReport(workspaceRoot: string): JsonNode =
   let reportPath = workspaceRoot / ".repro" / "workspace" / "init-report.json"
   check fileExists(reportPath)
@@ -210,7 +222,7 @@ suite "RA-12 — auto-trust shell hooks after clone":
       # ---- init half ----
       block initHalf:
         let fx = setupFixture(gitBin, "init")
-        defer: removeDir(fx.scratch)
+        defer: cleanupScratch(fx.scratch)
         let logPath = fx.scratch / "init-allow.log"
         let fakeDirenv = makeFakeDirenv(fx.scratch, logPath)
 
@@ -249,7 +261,7 @@ suite "RA-12 — auto-trust shell hooks after clone":
       # ---- pull half (the other entry point) ----
       block pullHalf:
         let fx = setupFixture(gitBin, "pull")
-        defer: removeDir(fx.scratch)
+        defer: cleanupScratch(fx.scratch)
         let logPath = fx.scratch / "pull-allow.log"
         let fakeDirenv = makeFakeDirenv(fx.scratch, logPath)
 
@@ -272,7 +284,7 @@ suite "RA-12 — auto-trust shell hooks after clone":
       # ---- graceful-skip half: no activator available ----
       block skipHalf:
         let fx = setupFixture(gitBin, "skip")
-        defer: removeDir(fx.scratch)
+        defer: cleanupScratch(fx.scratch)
         let logPath = fx.scratch / "skip-allow.log"
         # Point the seam at a NON-EXISTENT path → resolveDirenvBin returns
         # empty → the whole pass is skipped gracefully.

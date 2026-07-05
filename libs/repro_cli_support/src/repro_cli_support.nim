@@ -9,10 +9,10 @@ import repro_dev_env_artifacts
 import repro_dev_env_engine
 import repro_interface_artifacts
 # Incremental-Test-Runner M7: the io-monitor CLI driver and shim discovery now
-# come from the shared ``io-mon`` library. The library still exposes the
-# historical ``io_mon/fs_snoop`` module path and proc names, so imports stay on
-# that API until the upstream package renames them.
-import io_mon/fs_snoop
+# come from the shared ``io-mon`` library. Import the package hub rather than
+# the retired in-tree module path; upstream still re-exports the driver proc
+# name for API compatibility.
+import io_mon
 
 proc runIoMonitorCli(programName: string; args: seq[string]): int =
   # io-mon still exports the CLI entrypoint under its historical proc name.
@@ -382,15 +382,19 @@ proc resolveActionCacheRoot*(explicitRoot: string = ""): string =
   ## Returns the user-level action-cache root with the precedence documented
   ## in Provider-Compile-Tiering.md §"Cache Scope" Phase 1:
   ##   1. ``explicitRoot`` (e.g. ``--action-cache-root=`` CLI flag)
-  ##   2. ``${REPROBUILD_STORE_ROOT}/action-cache`` if the env var is set
-  ##   3. ``${REPRO_STORE_ROOT}/action-cache`` (compat alias)
-  ##   4. Platform default user cache dir
+  ##   2. ``REPROBUILD_ACTION_CACHE_ROOT`` (direct cache root override)
+  ##   3. ``${REPROBUILD_STORE_ROOT}/action-cache`` if the env var is set
+  ##   4. ``${REPRO_STORE_ROOT}/action-cache`` (compat alias)
+  ##   5. Platform default user cache dir
   ##
   ## The returned path is a *directory* root. The build engine adds the
   ## conventional ``action-cache`` and ``cas`` subdirectories. So this
   ## function returns ``<root-for-cache-and-cas>`` directly.
   if explicitRoot.len > 0:
     return explicitRoot
+  let envRoot = getEnv("REPROBUILD_ACTION_CACHE_ROOT")
+  if envRoot.len > 0:
+    return envRoot
   let storeRoot = block:
     let v = getEnv("REPROBUILD_STORE_ROOT")
     if v.len > 0: v else: getEnv("REPRO_STORE_ROOT")
@@ -990,6 +994,50 @@ proc cmakeRegenerationOutputs(meta: CmakeRegenerationMetadata): seq[string] =
         key == "hcr_metadata":
       result.addUniquePath(value)
 
+proc cmakeRegenerationDepfile(meta: CmakeRegenerationMetadata): string =
+  meta.providerRoot / "cmake-regeneration.d"
+
+proc makeDepPath(path: string): string =
+  for ch in path:
+    case ch
+    of ' ', '\t', ':', '\\', '#', '$':
+      result.add('\\')
+      result.add(ch)
+    else:
+      result.add(ch)
+
+proc writeMakeDepfile(path: string; outputs, inputs: openArray[string]) =
+  if path.len == 0:
+    return
+  createDir(extendedPath(path.parentDir))
+  var text = ""
+  for i, output in outputs:
+    if i > 0:
+      text.add(' ')
+    text.add(makeDepPath(output))
+  text.add(":")
+  for input in inputs:
+    text.add(' ')
+    text.add(makeDepPath(input))
+  text.add('\n')
+  writeFile(extendedPath(path), text)
+
+proc requiredMakeDepfilePolicy(path: string): DependencyGatheringPolicy =
+  DependencyGatheringPolicy(
+    kind: dgRecognizedFormat,
+    completeness: decComplete,
+    recognizedReports: @[
+      RecognizedDependencyReportSpec(
+        formatName: DependencyFormatName(MakeDepfileFormatName),
+        outputs: @[
+          ExpectedDependencyFile(
+            logicalName: "deps",
+            path: path,
+            required: true)
+        ],
+        completeness: decComplete)
+    ])
+
 proc addCmakeFingerprintField(payload: var string; value: string) =
   payload.add($value.len)
   payload.add(":")
@@ -1011,9 +1059,6 @@ proc cmakeRegenerationFingerprint(meta: CmakeRegenerationMetadata;
   payload.addCmakeFingerprintField(meta.providerStateFile)
   weakFingerprintFromText(payload)
 
-proc resolveMonitorShimLibPath(): string  # defined below; used by the
-  # CMake regeneration edge so the automatic monitor can locate the shim.
-
 proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
                                   publicCliPath: string): BuildAction =
   var env: seq[string] = @[]
@@ -1025,24 +1070,14 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
   let sourceRoot = getEnv("REPROBUILD_SOURCE_ROOT")
   if sourceRoot.len > 0:
     env.add("REPROBUILD_SOURCE_ROOT=" & sourceRoot)
-  # The regeneration edge runs under the automatic io-monitor monitor
-  # (dependencyPolicy below). ``repro internal io monitor`` needs to locate
-  # librepro_monitor_shim.{so,dylib,dll}; when this action runs daemon-hosted
-  # — or the inner ``repro build`` is invoked by the forked CMake, which
-  # sanitizes the environment — the shim path is not inherited, so io-monitor
-  # fails with "cannot find librepro_monitor_shim". Bake the resolved path
-  # into the action env so the monitor finds it regardless of how the edge
-  # is launched. Resolution anchors on the running ``repro`` binary's repo,
-  # so this captures the develop-mode build tree even though the action may
-  # execute from the project's CMake binary dir.
-  let monitorShim = resolveMonitorShimLibPath()
-  if monitorShim.len > 0:
-    env.add("REPRO_MONITOR_SHIM_LIB=" & monitorShim)
+  let depfilePath = cmakeRegenerationDepfile(meta)
   let hasGlobVerification = meta.cmakeRegenerationHasGlobVerification()
   action("__repro_cmake_regenerate", @[
     publicCliPath,
     "__repro-cmake-regenerate",
-    "--metadata", meta.metadataFile
+    "--metadata", meta.metadataFile,
+    "--public-cli", publicCliPath,
+    "--depfile", depfilePath
   ],
     cwd = meta.binaryDir,
     inputs = cmakeRegenerationInputs(meta, publicCliPath),
@@ -1050,7 +1085,8 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
     commandStatsId = "repro cmake regeneration edge",
     cacheable = not hasGlobVerification,
     weakFingerprint = cmakeRegenerationFingerprint(meta, publicCliPath),
-    dependencyPolicy = automaticMonitorGatheringPolicy(),
+    depfile = depfilePath,
+    dependencyPolicy = requiredMakeDepfilePolicy(depfilePath),
     env = env)
 
 proc prependProcessPath(path: string) =
@@ -1071,6 +1107,19 @@ proc applyCmakeProviderEnvironment(meta: CmakeRegenerationMetadata) =
     return
   prependProcessPath(meta.values.metadataValue("wrapper_path",
     meta.providerRoot / "bin"))
+
+proc prependExplicitWorkRootToolPath(explicitWorkRoot: string) =
+  let root = configuredWorkRoot(explicitWorkRoot)
+  if root.len == 0:
+    return
+  let absRoot =
+    if root.isAbsolute:
+      os.normalizedPath(root)
+    else:
+      os.normalizedPath(absolutePath(root))
+  let toolDir = absRoot / "bin"
+  if dirExists(extendedPath(toolDir)):
+    prependProcessPath(toolDir)
 
 proc reprobuildLibraryWorkDir(): string =
   proc hasReprobuildLibs(root: string): bool =
@@ -2627,6 +2676,31 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
   else:
     lowerProviderSnapshot(snapshot, identity, projectRoot, [selectedActionId])
 
+proc poolsFromSnapshot*(snapshot: ProviderGraphSnapshot): seq[BuildPool] =
+  ## Gather the recipe's declared build pools DIRECTLY from the provider-graph
+  ## snapshot's ``reprobuild.build-pool.v1`` metadata nodes — the SAME pass
+  ## ``lowerProviderSnapshot`` runs (above), but WITHOUT the action-lowering /
+  ## tool-identity resolution that the full lower performs.
+  ##
+  ## RX pool-forwarding resilience: a recipe's ``buildPool(...)`` calls execute
+  ## at PROVIDER-EXECUTION time and land in the snapshot's fragments as
+  ## build-pool metadata nodes — they are INDEPENDENT of ``uses:`` sibling
+  ## resolution. Full graph LOWERING, by contrast, can throw for a CONSUMER
+  ## recipe whose ``uses:`` siblings are not yet resolvable at daemon-spawn
+  ## time. This proc lets the pool-forwarding path recover the consumer's OWN
+  ## declared pools from the snapshot even when lowering is incomplete, so a
+  ## consumer's ``buildPool("x.serial", 1)`` still reaches its runquotad.
+  var pools = initTable[string, BuildPoolDef]()
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-pool.v1":
+        let pool = decodeBuildPoolPayload(toBytes(node.payload))
+        if not pools.hasKey(pool.name):
+          pools[pool.name] = pool
+  for pool in pools.values:
+    result.add(repro_build_engine.pool(pool.name, pool.capacity))
+
 const DefaultBuildCollectionName* = "default"
   ## Per Build-Graph-Collections.md §"`default`" — the conventional
   ## collection that `repro build` with no positional target resolves
@@ -3699,6 +3773,87 @@ proc hasFailedActions(buildResult: BuildRunResult): bool =
     if item.status in {asFailed, asBlocked}:
       return true
 
+when defined(linux):
+  proc readU16Le(bytes: string; offset: int): uint16 =
+    if offset < 0 or offset + 2 > bytes.len:
+      return 0'u16
+    uint16(ord(bytes[offset])) or
+      (uint16(ord(bytes[offset + 1])) shl 8)
+
+  proc readU32Le(bytes: string; offset: int): uint32 =
+    if offset < 0 or offset + 4 > bytes.len:
+      return 0'u32
+    uint32(ord(bytes[offset])) or
+      (uint32(ord(bytes[offset + 1])) shl 8) or
+      (uint32(ord(bytes[offset + 2])) shl 16) or
+      (uint32(ord(bytes[offset + 3])) shl 24)
+
+  proc readU64Le(bytes: string; offset: int): uint64 =
+    if offset < 0 or offset + 8 > bytes.len:
+      return 0'u64
+    result = 0'u64
+    for i in 0 ..< 8:
+      result = result or (uint64(ord(bytes[offset + i])) shl (8 * i))
+
+  proc elfHasProgramInterpreter(path: string): bool =
+    ## True for ELF files that go through the dynamic loader. Linux io-mon uses
+    ## LD_PRELOAD, so a static ELF provider compiler cannot load the shim after
+    ## exec and must not make a cacheable monitor-completeness claim.
+    let raw = readFile(extendedPath(path))
+    if raw.len < 52:
+      return false
+    if raw[0] != char(0x7f) or raw[1] != 'E' or raw[2] != 'L' or raw[3] != 'F':
+      return false
+    if ord(raw[5]) != 1: # little-endian ELF
+      return false
+    const PtInterp = 3'u32
+    let elfClass = ord(raw[4])
+    var phoff: int
+    var phentsize: int
+    var phnum: int
+    case elfClass
+    of 1: # ELF32
+      phoff = int(readU32Le(raw, 28))
+      phentsize = int(readU16Le(raw, 42))
+      phnum = int(readU16Le(raw, 44))
+    of 2: # ELF64
+      if raw.len < 64:
+        return false
+      let phoff64 = readU64Le(raw, 32)
+      if phoff64 > uint64(int.high):
+        return false
+      phoff = int(phoff64)
+      phentsize = int(readU16Le(raw, 54))
+      phnum = int(readU16Le(raw, 56))
+    else:
+      return false
+    if phoff <= 0 or phentsize < 4 or phnum <= 0:
+      return false
+    for i in 0 ..< phnum:
+      let entry = phoff + i * phentsize
+      if entry < 0 or entry + 4 > raw.len:
+        return false
+      if readU32Le(raw, entry) == PtInterp:
+        return true
+    false
+
+  proc linuxElfWithoutProgramInterpreter(path: string): bool =
+    try:
+      let raw = readFile(extendedPath(path))
+      if raw.len < 4 or raw[0] != char(0x7f) or raw[1] != 'E' or
+          raw[2] != 'L' or raw[3] != 'F':
+        return false
+      not elfHasProgramInterpreter(path)
+    except CatchableError:
+      false
+
+proc providerCompileCacheable(plan: ProviderCompilePlan): bool =
+  when defined(linux):
+    if plan.compilerCommand.len > 0 and
+        linuxElfWithoutProgramInterpreter(plan.compilerCommand[0]):
+      return false
+  true
+
 proc providerCompileBuildAction(plan: ProviderCompilePlan;
                                 modulePath, interfacePath, artifactPath,
                                 publicCliPath, workDir: string;
@@ -3731,7 +3886,7 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     inputs = inputs,
     outputs = @[plan.outputBinaryPath, artifactPath],
     commandStatsId = "repro provider compile edge",
-    cacheable = true,
+    cacheable = providerCompileCacheable(plan),
     weakFingerprint = plan.compileEdge.actionFingerprint,
     dependencyPolicy = automaticMonitorGatheringPolicy())
 
@@ -3740,7 +3895,7 @@ proc invalidateStaleProviderCompileArtifact(plan: ProviderCompilePlan;
   if artifactPath.len == 0 or not fileExists(extendedPath(artifactPath)):
     return
   if providerCompileArtifactFresh(artifactPath, plan.outputBinaryPath,
-      plan.interfaceFingerprint, plan.providerFingerprint):
+      plan.interfaceFingerprint, plan.providerFingerprint, plan.workDir):
     return
   removeFile(extendedPath(artifactPath))
 
@@ -3788,6 +3943,8 @@ proc invalidateCmakeProviderDerivedState(meta: CmakeRegenerationMetadata) =
 
 proc runCmakeRegenerationHelper*(args: openArray[string]): int =
   var metadataFile = ""
+  var depfilePath = ""
+  var publicCliPath = ""
   var i = 0
   while i < args.len:
     let arg = args[i]
@@ -3799,11 +3956,29 @@ proc runCmakeRegenerationHelper*(args: openArray[string]): int =
     elif arg.startsWith("--metadata="):
       metadataFile = arg.split("=", maxsplit = 1)[1]
       inc i
+    elif arg == "--depfile":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--depfile requires a value")
+      depfilePath = args[i + 1]
+      inc i, 2
+    elif arg.startsWith("--depfile="):
+      depfilePath = arg.split("=", maxsplit = 1)[1]
+      inc i
+    elif arg == "--public-cli":
+      if i + 1 >= args.len:
+        raise newException(ValueError, "--public-cli requires a value")
+      publicCliPath = args[i + 1]
+      inc i, 2
+    elif arg.startsWith("--public-cli="):
+      publicCliPath = arg.split("=", maxsplit = 1)[1]
+      inc i
     else:
       raise newException(ValueError,
         "unsupported __repro-cmake-regenerate argument: " & arg)
   if metadataFile.len == 0:
     raise newException(ValueError, "--metadata is required")
+  if depfilePath.len == 0:
+    raise newException(ValueError, "--depfile is required")
 
   let values = readKeyValueMetadata(metadataFile)
   if values.len == 0:
@@ -3867,6 +4042,9 @@ proc runCmakeRegenerationHelper*(args: openArray[string]): int =
     invalidateCmakeProviderDerivedState(meta)
   createDir(extendedPath(parentDir(meta.providerStateFile)))
   writeFile(extendedPath(meta.providerStateFile), providerAfter)
+  writeMakeDepfile(depfilePath,
+    cmakeRegenerationOutputs(meta),
+    cmakeRegenerationInputs(meta, publicCliPath))
   echo "cmakeRegeneration: complete providerChanged=" &
     $(providerBefore.len > 0 and providerBefore != providerAfter)
   0
@@ -4522,6 +4700,11 @@ proc buildMaxParallelism(): uint32 =
       "REPROBUILD_MAX_PARALLELISM must be a positive integer")
 
 proc stablePublicCliPath(): string =
+  let configured = getEnv("REPRO_PUBLIC_CLI_PATH")
+  if configured.len > 0:
+    if configured.isAbsolute:
+      return os.normalizedPath(configured)
+    return os.normalizedPath(getCurrentDir() / configured)
   let app = getAppFilename()
   if app.isAbsolute:
     return os.normalizedPath(app)
@@ -5486,6 +5669,19 @@ proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
   ## present ``projectExtension`` sibling's fragments into the target
   ## project's snapshot before lowering / target-export aggregation.
 
+proc selectorFilesystemKey(selector: string): string =
+  ## A filesystem-safe directory name for a cross-repo producer selector:
+  ## alphanumerics + ``.`` / ``_`` / ``-`` pass through; every other byte
+  ## becomes ``_``. Empty selectors (never reached here — the caller guards
+  ## ``selector.len == 0``) map to ``package`` for safety.
+  for ch in selector:
+    if ch.isAlphaNumeric() or ch in {'.', '_', '-'}:
+      result.add(ch)
+    else:
+      result.add('_')
+  if result.len == 0:
+    result = "package"
+
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
                         selectDefaultAction = false;
@@ -5680,13 +5876,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # catalog bin dirs to PATH, and bare-name argv entries fall through
   # to the host's existing PATH (the legacy pre-Batch-B behaviour).
   var pendingToolIdentityResolver: ToolIdentityResolver = nil
+  var effectiveSelectDefaultAction = selectDefaultAction
 
   proc runLoweredGraphBuild(lowered: tuple[actions: seq[BuildAction];
                                           pools: seq[BuildPool]];
                             selectedActionId: string): int =
     if parsedTarget.fragmentKind == tfkActionSelection:
       logSummary("selectedTarget: " & parsedTarget.selectedActionId)
-    elif selectDefaultAction and selectedActionId.len > 0:
+    elif effectiveSelectDefaultAction and selectedActionId.len > 0:
       logSummary("selectedTarget: " & selectedActionId)
     logSummary("scheduler: actions=" & $lowered.actions.len)
     if lowered.actions.len == 0:
@@ -5844,6 +6041,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   var cmakeRegenerationResult: BuildRunResult
   let cmakeMeta = cmakeRegenerationMetadataForModule(modulePath)
   cmakeMeta.applyCmakeProviderEnvironment()
+  if cmakeMeta.enabled and parsedTarget.selectedActionId.len == 0 and
+      extraNameSelectors.len == 0:
+    effectiveSelectDefaultAction = true
   var cmakeRegenerated = false
   if cmakeMeta.enabled and not skipCmakeRegeneration:
     logSummary("cmakeRegeneration: started")
@@ -5869,14 +6069,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         let hot = cmakeCache.lookupHotMetadataRecord(
           cmakeRegenerationAction.weakFingerprint,
           cmakeRegenerationAction.actionCachePolicy)
-        if hot.isSome and cmakeCache.hotMetadataInputsUnchanged():
-          cmakeFastHit = true
-          cmakeRegenerationResult.results.add(ActionResult(
-            id: cmakeRegenerationAction.id,
-            status: asCacheHit,
-            launched: false,
-            cacheDecision: cdHit,
-            dependencyPolicyKind: cmakeRegenerationAction.dependencyPolicy.kind))
+        if hot.isSome:
+          let selectedInputsUnchanged =
+            hotMetadataRecordInputsUnchanged(@[hot.get()])
+          if selectedInputsUnchanged:
+            cmakeFastHit = true
+            cmakeRegenerationResult.results.add(ActionResult(
+              id: cmakeRegenerationAction.id,
+              status: asCacheHit,
+              launched: false,
+              cacheDecision: cdHit,
+              dependencyPolicyKind: cmakeRegenerationAction.dependencyPolicy.kind))
         finishStat(buildStats, statsEnabled, "repro cache lookup", lookupStart)
     if not cmakeFastHit:
       let stateStart = statStart(statsEnabled)
@@ -5946,7 +6149,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let cacheSelectedActionId =
     if parsedTarget.selectedActionId.len > 0:
       parsedTarget.selectedActionId
-    elif selectDefaultAction and logMode == blmQuiet:
+    elif effectiveSelectDefaultAction and logMode == blmQuiet:
       ""
     else:
       "\0"
@@ -6010,7 +6213,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     logSummary("providerGraphSnapshot: " & refresh.persistedSnapshotPath)
     logSummary("providerInvocations: " & $refresh.invoked.len)
     var selectedActionId = parsedTarget.selectedActionId
-    if selectDefaultAction and selectedActionId.len == 0:
+    if effectiveSelectDefaultAction and selectedActionId.len == 0:
       selectedActionId = defaultBuildActionId(refresh.snapshot)
       if selectedActionId.len > 0:
         logSummary("defaultTarget: " & selectedActionId)
@@ -6298,53 +6501,122 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           $FromSourceMaxRecursionDepth & ") while resolving \"" & selector &
           "\" at " & producerRootAbs & ". Active stack: " &
           producerBuildStack.join(" -> ") & ".")
-      logSummary("cross-repo producer: building \"" & selector &
+      logSummary("cross-repo producer: resolving \"" & selector &
         "\" from source at " & producerRootAbs & " (" & $producer.kind & ")")
       producerBuildStack.add(producerRootAbs)
+      # Stable per-producer output base under the consumer's ``outDir`` for the
+      # producer's interface-extract artifacts. Independent of whether the
+      # producer sub-build runs (it may be skipped for a pure-Nim library), so
+      # the interface can be extracted up front to SCOPE the decision below.
+      let producerOutDirBase =
+        outDir / "cross-repo-producers" / selectorFilesystemKey(selector)
+      createDir(extendedPath(producerOutDirBase))
       try:
-        let producerOutcome = executeBuildTarget(producerProjectFile,
-          effectiveMode, publicCliPath,
-          selectDefaultAction = true,
-          workRoot = workRoot,
-          progressMode = progressMode,
-          progressBarStyle = progressBarStyle,
-          statsMode = statsMode,
-          reportMode = reportMode,
-          logMode = logMode,
-          diagnosticsPath = "",
-          prepareOnly = false,
-          dryRun = dryRun,
-          forceRebuild = forceRebuild,
-          skipCmakeRegeneration = skipCmakeRegeneration,
-          bypassRunQuotaExplicit = bypassRunQuotaExplicit,
-          eventSink = eventSink,
-          cancelCheck = cancelCheck)
-        if producerOutcome.exitCode != 0:
-          raise newException(OSError,
-            "cross-repo producer build failed: sub-build of " &
-            producerRootAbs & " (selector \"" & selector &
-            "\") exited with status " & $producerOutcome.exitCode &
-            ". See the sub-build's diagnostics for the underlying failure.")
-        # Extract the producer's interface to bind its declared executable(s)
-        # to their output binaries by BASENAME (§4.2 point 2). The producer's
-        # ``executable <exp>: name: "<bin>"`` produces ``build/bin/<bin>``
-        # under the producer root; the bin dir spliced onto PATH is the parent
-        # of the realized binary.
-        let producerOutDir = producerOutcome.outDir
-        let producerIface = producerOutDir / "producer-interface.rbsz"
-        let producerStub = producerOutDir / "producer-interface.nim"
+        # Extract the producer's interface FIRST — BEFORE any sub-build — so we
+        # can SCOPE the sub-build to the exact artifact the consumer consumes.
+        # Interface extraction compiles only the producer's provider (its
+        # ``repro.nim``); it does NOT run the producer's build edges, so it is
+        # cheap and side-effect free with respect to the consumed artifact.
+        #
+        # Bug-fix (producer sub-build over-build): the old code ran
+        # ``executeBuildTarget(..., selectDefaultAction = true, ...)``
+        # unconditionally, which for a LIBRARY-ONLY producer materialized the
+        # producer's DEFAULT action — i.e. its test suite, including any
+        # POOL-SERIALIZED test-execute edges (``buildPool(...)``). The
+        # consumer's runquotad has no such producer-local pool, so those pooled
+        # edges lease-deny forever and the consumer build HANGS. Consuming a
+        # sibling library must build (at most) THAT library's own artifact and
+        # must never compile or run the producer's test suite.
+        let producerIface = producerOutDirBase / "producer-interface.rbsz"
+        let producerStub = producerOutDirBase / "producer-interface.nim"
         var binDirs: seq[string] = @[]
         var realizedBinaries: seq[string] = @[]
         let producerArtifact =
           try:
             extractInterfaceFromModule(producerProjectFile, producerIface,
               producerStub, reprobuildLibraryWorkDir(),
-              producerOutDir / "producer-iface-work", requireStub = false)
+              producerOutDirBase / "producer-iface-work", requireStub = false)
           except CatchableError:
             raise newException(OSError,
               "cross-repo producer \"" & selector & "\" at " &
-              producerRootAbs & " built but its interface could not be " &
-              "loaded to bind the declared executable to its output binary.")
+              producerRootAbs & "'s interface could not be loaded to bind " &
+              "the declared executable / library to its output.")
+        # Decide whether the producer sub-build is required for the CONSUMED
+        # artifact. A build is needed only when the producer exposes a
+        # COMPILED artifact on disk:
+        #
+        #   * a declared ``executable`` — its ``build/bin/<name>`` binary must
+        #     exist so the PATH / executable channel finds it (the byte-
+        #     identical pre-existing executable-consumption path — e.g.
+        #     runquota → ``build/bin/runquotad``); OR
+        #   * a declared non-header ``library`` whose consumed artifact is a
+        #     compiled ``.so``/``.a``/``.dylib`` rather than a pure-Nim source
+        #     tree — i.e. NO importable Nim source root exists at the library's
+        #     ``exportedPath`` (default ``src``). A C/C++ shared/static library
+        #     must be linked before the consumer can bind against it.
+        #
+        # A PURE-NIM-SOURCE library (SC-11 — ``library nim_pty`` etc.) exports
+        # NO compiled artifact: the consumer imports it directly from the
+        # producer's ``src/`` threaded onto ``nim c --path:`` (the nimPathDirs
+        # channel below). Its source root is discovered from disk + the
+        # interface alone and its source identity folds via SC-4 WITHOUT the
+        # producer having run any build edge, so we skip the producer
+        # sub-build entirely. This is what keeps a library consumer from
+        # dragging in the producer's pooled test suite.
+        var needsProducerBuild = false
+        for exe in producerArtifact.projectInterface.publicExecutables:
+          let binName =
+            if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
+          if binName.len > 0:
+            needsProducerBuild = true
+            break
+        if not needsProducerBuild:
+          for lib in producerArtifact.projectInterface.publicLibraries:
+            if lib.name.len == 0 or lib.kind == lkHeaderOnly:
+              continue
+            let exported =
+              if lib.exportedPath.len > 0: lib.exportedPath else: "src"
+            let nimSrcDir = producerRootAbs / exported
+            if not dirExists(extendedPath(nimSrcDir)):
+              # No importable Nim source root — the consumed artifact is a
+              # compiled ``.so``/``.a`` that must be built + discovered under
+              # ``build/lib``.
+              needsProducerBuild = true
+              break
+        if needsProducerBuild:
+          let producerOutcome = executeBuildTarget(producerProjectFile,
+            effectiveMode, publicCliPath,
+            selectDefaultAction = true,
+            workRoot = workRoot,
+            progressMode = progressMode,
+            progressBarStyle = progressBarStyle,
+            statsMode = statsMode,
+            reportMode = reportMode,
+            logMode = logMode,
+            diagnosticsPath = "",
+            prepareOnly = false,
+            dryRun = dryRun,
+            forceRebuild = forceRebuild,
+            skipCmakeRegeneration = skipCmakeRegeneration,
+            bypassRunQuotaExplicit = bypassRunQuotaExplicit,
+            eventSink = eventSink,
+            cancelCheck = cancelCheck)
+          if producerOutcome.exitCode != 0:
+            raise newException(OSError,
+              "cross-repo producer build failed: sub-build of " &
+              producerRootAbs & " (selector \"" & selector &
+              "\") exited with status " & $producerOutcome.exitCode &
+              ". See the sub-build's diagnostics for the underlying failure.")
+        else:
+          logSummary("cross-repo producer: consuming \"" & selector &
+            "\" as a pure-Nim-source library — skipping producer sub-build " &
+            "(no compiled artifact; src threaded via nimPathDirs).")
+        # Bind the producer's declared executable(s) to their output binaries
+        # by BASENAME (§4.2 point 2). The producer's
+        # ``executable <exp>: name: "<bin>"`` produces ``build/bin/<bin>``
+        # under the producer root; the bin dir spliced onto PATH is the parent
+        # of the realized binary. When the sub-build was skipped (pure-Nim
+        # library) there are no executables, so this loop is inert.
         for exe in producerArtifact.projectInterface.publicExecutables:
           let binName =
             if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
@@ -6589,7 +6861,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       logSummary("providerGraphSnapshot: " & refresh.persistedSnapshotPath)
       logSummary("providerInvocations: " & $refresh.invoked.len)
       var selectedActionId = parsedTarget.selectedActionId
-      if selectDefaultAction and selectedActionId.len == 0:
+      if effectiveSelectDefaultAction and selectedActionId.len == 0:
         selectedActionId = defaultBuildActionId(refresh.snapshot)
         if selectedActionId.len > 0:
           logSummary("defaultTarget: " & selectedActionId)
@@ -6684,7 +6956,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         none(ProviderCompileArtifact)
       else:
         readFreshProviderCompileArtifact(providerArtifactPath,
-          modulePath, providerBinaryPath, artifact.interfaceFingerprint)
+          modulePath, providerBinaryPath, artifact.interfaceFingerprint,
+          compileWorkDir)
     if cachedProvider.isSome:
       provider = cachedProvider.get()
     else:
@@ -6745,7 +7018,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       provider = readProviderCompileArtifact(providerArtifactPath)
       if not providerCompileArtifactFresh(providerArtifactPath,
           providerPlan.outputBinaryPath, providerPlan.interfaceFingerprint,
-          providerPlan.providerFingerprint):
+          providerPlan.providerFingerprint, providerPlan.workDir):
         raise newException(IOError,
           "provider compile artifact is stale after edge execution: " &
             providerArtifactPath)
@@ -6800,7 +7073,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       publicCliPath, workRoot)
 
     var selectedActionId = parsedTarget.selectedActionId
-    if selectDefaultAction and selectedActionId.len == 0:
+    if effectiveSelectDefaultAction and selectedActionId.len == 0:
       selectedActionId = defaultBuildActionId(refresh.snapshot)
       if selectedActionId.len > 0:
         logSummary("defaultTarget: " & selectedActionId)
@@ -6902,7 +7175,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           writeLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
             modulePath, projectRoot, selectedActionId, pathEnv, graphCacheKey,
             computed)
-          if selectDefaultAction and parsedTarget.selectedActionId.len == 0:
+          if effectiveSelectDefaultAction and parsedTarget.selectedActionId.len == 0:
             writeLoweredGraphCache(loweredGraphCachePath(outDir, ""), modulePath,
               projectRoot, "", pathEnv, graphCacheKey, computed)
         finishStat(buildStats, statsEnabled, "repro lowered graph cache write",
@@ -6931,7 +7204,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       return
     if parsedTarget.fragmentKind == tfkActionSelection:
       logSummary("selectedTarget: " & parsedTarget.selectedActionId)
-    elif selectDefaultAction and selectedActionId.len > 0:
+    elif effectiveSelectDefaultAction and selectedActionId.len > 0:
       logSummary("selectedTarget: " & selectedActionId)
     logSummary("scheduler: actions=" & $lowered.actions.len)
     if lowered.actions.len == 0:
@@ -10439,6 +10712,10 @@ const
     "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
     "REPROBUILD_AUTO_RUNQUOTA",
     "REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS",
+    # Source checkout overrides used by repro.nim/config.nims to resolve
+    # workspace sibling libraries when the daemon-hosted executor evaluates the
+    # provider under a login-launched daemon environment.
+    "IO_MON_SRC",
     # Tool-provisioning selection. The daemon-hosted executor re-parses the
     # request's rawArgs (which carry no --tool-provisioning when the user
     # selected the mode via the env var), so REPRO_TOOL_PROVISIONING must
@@ -10826,6 +11103,18 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
     else: socket
   raise newException(OSError,
     "runquotad did not become reachable at " & endpointHint)
+
+proc autoRunQuotaNeedsPoolPreflight(bypassRunQuota: bool): bool =
+  ## Pool discovery compiles/inspects the project provider. Do it only when
+  ## this process may actually spawn runquotad and can pass the discovered
+  ## pools at daemon startup; an already-reachable daemon cannot be amended.
+  if bypassRunQuota or not autoRunQuotaEnabled():
+    return false
+  if getEnv("RUNQUOTA_SOCKET", "").len > 0 and isRunQuotaDaemonReachable():
+    return false
+  if isRunQuotaDaemonReachable():
+    return false
+  findRunQuotaDaemonBin().len > 0
 
 proc runDepsRefreshCommand(args: openArray[string]): int =
   ## Implements ``repro deps refresh`` — the Mode 3 scanner CLI.
@@ -12716,6 +13005,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # both ``--list-targets`` and the engine build observe the same mode. A
   # value here only takes effect when ``--tool-provisioning`` was not passed.
   mode = resolveToolProvisioningWithEnv(mode)
+  prependExplicitWorkRootToolPath(workRoot)
 
   # Named-Targets M5: ``--list-targets`` short-circuits the engine pass.
   # The flag's job is to list every implicit / explicit target name
@@ -12794,11 +13084,15 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         "captureGroups": statsCapture.captureGroupsText,
         "daemonHosted": true
       })
-    # RX: forward recipe-declared custom pools to the daemon so their
-    # execute-edge leases are granted (not denied → hung). Best-effort
-    # extraction — falls back to the convention compile/fetch pools only.
-    let recipePools = extractRecipeBuildPools(target, mode, publicCliPath,
-      workRoot)
+    # RX: forward recipe-declared custom pools to a freshly spawned daemon so
+    # their execute-edge leases are granted (not denied -> hung). If a daemon
+    # is already reachable, pool caps are fixed and the inspection would only
+    # warm provider caches before the visible build.
+    let recipePools =
+      if autoRunQuotaNeedsPoolPreflight(bypassRunQuota):
+        extractRecipeBuildPools(target, mode, publicCliPath, workRoot)
+      else:
+        @[]
     var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota, recipePools)
     # Peer-Cache M1 wiring (LDRV M5): start the LAN peer-cache runtime
     # when the user passed ``--peer-cache=lan://…``. The actual setup
@@ -13386,7 +13680,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       none(ProviderCompileArtifact)
     else:
       readFreshProviderCompileArtifact(providerArtifactPath,
-        modulePath, providerBinaryPath, artifact.interfaceFingerprint)
+        modulePath, providerBinaryPath, artifact.interfaceFingerprint,
+        compileWorkDir)
   if cachedProvider.isSome:
     provider = cachedProvider.get()
     result.providerCompileCacheHit = true
@@ -13429,7 +13724,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     provider = readProviderCompileArtifact(providerArtifactPath)
     if not providerCompileArtifactFresh(providerArtifactPath,
         providerPlan.outputBinaryPath, providerPlan.interfaceFingerprint,
-        providerPlan.providerFingerprint):
+        providerPlan.providerFingerprint, providerPlan.workDir):
       raise newException(IOError,
         "provider compile artifact is stale after edge execution: " &
           providerArtifactPath)
@@ -13516,25 +13811,149 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
         if result.explicitTargetNames.find(target.name) < 0:
           result.explicitTargetNames.add(target.name)
 
+proc refreshRecipeProviderSnapshot(target: string;
+                                   mode: ToolProvisioningMode;
+                                   publicCliPath, workRoot: string):
+    Option[ProviderGraphSnapshot] =
+  ## Produce the recipe's (extension-merged) provider-graph snapshot — the
+  ## SNAPSHOT ONLY, with NO tool-identity resolution and NO graph lowering.
+  ##
+  ## This is the seam the RX pool-forwarding path needs. A recipe's declared
+  ## ``buildPool(...)`` calls execute at PROVIDER-EXECUTION time and land in
+  ## the snapshot's fragments as ``reprobuild.build-pool.v1`` metadata nodes.
+  ## Producing the snapshot requires only the interface extract + the provider
+  ## compile + the provider-graph refresh — it does NOT require resolving the
+  ## recipe's ``uses:`` sibling tools (that resolution happens later, in
+  ## ``warmResolveAndWriteIdentity`` / graph lowering, and THROWS at
+  ## daemon-spawn time for a CONSUMER whose siblings are not yet materialized).
+  ## By stopping at the snapshot we recover the consumer's OWN pools without
+  ## tripping over the unresolved-sibling failure. Returns ``none`` when the
+  ## recipe has no build block (leaf with no pools) — the caller treats that as
+  ## "no custom pools".
+  var parsedTarget = parseBuildTarget(target)
+  parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
+  let modulePath = parsedTarget.modulePath
+  if not fileExists(extendedPath(modulePath)):
+    raise newException(IOError, "build target module not found: " & modulePath)
+  let outDir = outputDirForTarget(parsedTarget, workRoot)
+  let projectRoot = projectRootForModule(modulePath)
+  let interfacePath = outDir / "project-interface.rbsz"
+  let stubPath = outDir / "project-interface.nim"
+  let compileWorkDir = reprobuildLibraryWorkDir()
+  let compileScratchDir = outDir / "provider-work"
+  ensureBootstrapToolchainEnv(mode, resolveStoreRoot() / "tool-store")
+  let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
+    compileWorkDir, compileScratchDir, requireStub = false)
+
+  var effectiveMode = mode
+  if effectiveMode == tpmUnspecified and
+      artifact.projectInterface.defaultToolProvisioning.len > 0:
+    effectiveMode = parseToolProvisioning(
+      artifact.projectInterface.defaultToolProvisioning)
+  # NOTE: deliberately NO tool-identity resolution here — pool metadata does
+  # not depend on it, and it is exactly the step that throws for an
+  # unresolved-sibling CONSUMER at spawn time.
+
+  if not moduleHasBuildBlock(modulePath):
+    return none(ProviderGraphSnapshot)
+
+  let providerBinaryPath = outDir / "provider" / "project-provider"
+  let providerArtifactPath = outDir / "provider-compile.rbsz"
+  var provider: ProviderCompileArtifact
+  let cachedProvider =
+    readFreshProviderCompileArtifact(providerArtifactPath,
+      modulePath, providerBinaryPath, artifact.interfaceFingerprint)
+  if cachedProvider.isSome:
+    provider = cachedProvider.get()
+  else:
+    let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
+      artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
+    invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
+    let providerCompileAction = providerCompileBuildAction(providerPlan,
+      modulePath, interfacePath, providerArtifactPath, publicCliPath,
+      compileWorkDir, compileScratchDir)
+    var providerCompileConfig = BuildEngineConfig(
+      cacheRoot: outDir / "build-engine-cache",
+      actionCacheRoot: currentActionCacheRoot(),
+      runQuotaCliPath: publicCliPath,
+      monitorCliPath: selfSpawnIoMonitorPath(),
+      monitorCliArgs: internalIoMonitorArgs,
+      maxParallelism: 1'u32,
+      stdoutLimit: 1024 * 1024,
+      stderrLimit: 1024 * 1024,
+      rebuildMissingOutputsOnCacheHit: true,
+      deferLocalOutputBlobs: true,
+      bypassRunQuota: runQuotaBypassedByEnv(),
+      fallbackToRunQuotaBypass: effectiveMode in {tpmPathOnly, tpmScoop},
+      inlineRunQuota: true,
+      dryRun: false,
+      forceRebuild: false,
+      suppressTrace: true,
+      skipCacheHitEvidence: true)
+    let providerCompileResult = runBuild(graph([providerCompileAction]),
+      providerCompileConfig)
+    if providerCompileResult.hasFailedActions():
+      raise newException(OSError, providerCompileFailure(providerCompileResult))
+    if not fileExists(extendedPath(providerArtifactPath)):
+      raise newException(IOError,
+        "provider compile edge did not write artifact: " & providerArtifactPath)
+    provider = readProviderCompileArtifact(providerArtifactPath)
+
+  let providerArtifactId = digestHex(provider.providerFingerprint)
+  let providerGraphStore = providerGraphStoreRoot(outDir / "provider-graph")
+  var refresh: ProviderRefreshReport
+  let freshSnapshot =
+    warmReadFreshProviderGraphSnapshot(providerGraphStore, providerArtifactId)
+  if freshSnapshot.isSome:
+    refresh.snapshot = freshSnapshot.get()
+  else:
+    refresh = refreshProviderGraph(RefreshConfig(
+      storeRoot: providerGraphStore,
+      providerBinaryPath: provider.outputBinaryPath,
+      providerArtifactId: providerArtifactId,
+      rootEntryPointId: artifact.projectInterface.packageName & ".root",
+      rootArguments: projectRoot,
+      namespace: "project",
+      lockSliceId: digestHex(artifact.interfaceFingerprint),
+      activity: "build",
+      providerWorkingDir: projectRoot))
+  discard mergeProjectExtensions(refresh.snapshot, projectRoot,
+    artifact.projectInterface.packageName, effectiveMode, publicCliPath,
+    workRoot)
+  some(refresh.snapshot)
+
 proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
                              publicCliPath, workRoot: string): seq[BuildPool] =
   ## RX pool-forwarding — return the recipe's declared build pools (the
   ## ``buildGraph.pools`` present in the extracted project graph) so the
   ## caller can forward them to ``runquotad`` alongside the convention
-  ## ``compile`` / ``fetch`` pools. Best-effort: any failure (recipe with no
-  ## build block, provider compile error, unresolved tools, etc.) yields an
-  ## empty seq so the daemon still spawns with the convention defaults and
-  ## the existing pre-RX behaviour is preserved. This reuses
-  ## ``prepareBuildGraphInspection`` whose provider-compile / lowered-graph
-  ## caches are shared with ``executeBuildTarget``, so the subsequent build
-  ## reuses the warmed caches rather than recompiling the provider.
+  ## ``compile`` / ``fetch`` pools.
+  ##
+  ## Consumer-own-pool forwarding fix: this is called at daemon-spawn time,
+  ## BEFORE the producer sub-builds / develop-override resolution have run, so
+  ## a CONSUMER recipe with ``uses:`` selectors cannot yet resolve its sibling
+  ## tools. The OLD path routed through ``prepareBuildGraphInspection``, whose
+  ## tool-identity resolution / graph lowering THROWS on those unresolved
+  ## siblings; the best-effort ``except`` then swallowed the failure and
+  ## returned an EMPTY pool set — dropping the consumer's OWN
+  ## ``buildPool(...)`` and starving its pooled edges (cap-0 → lease denial →
+  ## livelock). The consumer's own pools execute at provider-execution time
+  ## and are INDEPENDENT of ``uses:`` resolution, so we now recover them from
+  ## the provider-graph SNAPSHOT (``refreshRecipeProviderSnapshot`` +
+  ## ``poolsFromSnapshot``) — which stops BEFORE the throwing sibling
+  ## resolution. Still best-effort: a genuine recipe error (no build block,
+  ## provider compile failure) yields an empty seq so the daemon spawns with
+  ## the convention defaults and the pre-RX behaviour is preserved.
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified:
     effectiveMode = tpmPathOnly
   try:
-    let info = prepareBuildGraphInspection(target, effectiveMode,
-      publicCliPath, selectDefaultAction = false, workRoot = workRoot)
-    result = info.pools
+    let snapshot = refreshRecipeProviderSnapshot(target, effectiveMode,
+      publicCliPath, workRoot)
+    if snapshot.isSome:
+      result = poolsFromSnapshot(snapshot.get())
+    else:
+      result = @[]
   except CatchableError:
     result = @[]
 
@@ -18247,6 +18666,7 @@ proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
   var workRoot = ""
   var targetWasOmitted = true
   var forceRefresh = false
+  var prepareOnly = false
   var i = 0
   while i < args.len:
     let arg = args[i]
@@ -18269,15 +18689,16 @@ proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
         arg.startsWith("--log=") or arg.startsWith("--benchmark=") or
         arg.startsWith("--stats-capture="):
       discard
+    elif arg == "--prepare-only":
+      prepareOnly = true
     elif arg in ["-v", "--verbose", "-vv", "--very-verbose",
-        "--prepare-only", "--skip-cmake-regeneration", "--no-runquota",
-        "--runquota"]:
+        "--skip-cmake-regeneration", "--no-runquota", "--runquota"]:
       discard
     elif not arg.startsWith("-") and target.len == 0:
       target = arg
       targetWasOmitted = false
     inc i
-  if forceRefresh:
+  if forceRefresh or prepareOnly:
     return
   if target.len == 0:
     target = "."
@@ -25566,6 +25987,18 @@ type
     provenance*: string
     visibility*: WorkspaceVisibility
 
+proc sameFilesystemPath(a, b: string): bool =
+  ## Compare paths robustly across native vs forward-slash spelling.
+  if a == b:
+    return true
+  let
+    aN = os.normalizedPath(absolutePath(a)).replace('\\', '/')
+    bN = os.normalizedPath(absolutePath(b)).replace('\\', '/')
+  when defined(windows):
+    aN.toLowerAscii == bN.toLowerAscii
+  else:
+    aN == bN
+
 proc sanitizeManifestUrlForPath(raw: string): string =
   ## Mirror of ``compose.sanitizeForPath`` — the dotted alphanumeric +
   ## dash subset, runs of dashes collapsed, capped at 80 chars, leading
@@ -25681,6 +26114,31 @@ proc classifyRepoPathVisibility(workspaceRoot: string;
       if repo.path notin result:
         result[repo.path] = {}
       result[repo.path].incl(loc.visibility)
+
+proc findCurrentManifestLayer(layerLocations: openArray[ManifestLayerLocation];
+    currentRepoAbs: string): Option[ManifestLayerLocation] =
+  if currentRepoAbs.len == 0:
+    return none(ManifestLayerLocation)
+  for loc in layerLocations:
+    if sameFilesystemPath(loc.absPath, currentRepoAbs):
+      return some(loc)
+  none(ManifestLayerLocation)
+
+proc repoNamesDeclaredByLayer(loc: ManifestLayerLocation;
+    projectName: string): HashSet[string] =
+  ## Manifest-layer pushes scope sibling checks to the repos declared by the
+  ## layer being pushed. A public-layer push must not require unreadable private
+  ## layer repos to be cloned or routed; M26 separately rejects any public lock
+  ## that references them.
+  result = initHashSet[string]()
+  if not dirExists(loc.absPath):
+    return
+  let projectFile = loc.absPath / "projects" / (projectName & ".toml")
+  if not fileExists(projectFile):
+    return
+  let layerResolved = resolveProject(projectFile)
+  for repo in layerResolved.repos:
+    result.incl(repo.name)
 
 proc visibilityTierLabelLocal(v: WorkspaceVisibility): string =
   ## Local mirror of ``compose.visibilityTierLabel`` — kept private to
@@ -27390,7 +27848,7 @@ proc runGatewayCommand*(args: openArray[string]): int =
     return 2
 
 proc developSetClosure(repos: seq[ResolvedRepo];
-                       pushedRepoName: string): HashSet[string] =
+    pushedRepoName: string): HashSet[string] =
   ## RA-21 — compute the transitive develop-set dependency closure of the
   ## pushed repo, as a set of repo NAMES. The closure is the pushed repo
   ## itself plus every repo reachable through the per-repo ``depends``
@@ -27423,6 +27881,24 @@ proc developSetClosure(repos: seq[ResolvedRepo];
       for dep in byName[name].depends:
         if dep.len > 0 and dep notin result:
           pending.add(dep)
+
+proc prePushScope(resolved: ResolvedProject; currentRepoName: string;
+    currentLayer: Option[ManifestLayerLocation]):
+      tuple[names: HashSet[string]; wholeWorkspace: bool] =
+  ## Normal repo pushes use RA-21's develop-set closure. Manifest-layer pushes
+  ## are not project repos, so the old empty-closure fallback would widen them
+  ## to the whole composed workspace and make private layers block public-layer
+  ## publication. Use the current layer's declarations instead.
+  result.names = developSetClosure(resolved.repos, currentRepoName)
+  if result.names.len > 0:
+    result.wholeWorkspace = false
+    return
+  if currentLayer.isSome:
+    result.names = repoNamesDeclaredByLayer(
+      currentLayer.get(), resolved.projectName)
+    result.wholeWorkspace = false
+    return
+  result.wholeWorkspace = true
 
 type
   UnreadableRepoGateOutcome* = object
@@ -27638,6 +28114,10 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         currentRepoPath = repo.path
         currentRepoName = repo.name
         break
+  let layerLocations = enumerateManifestLayerLocations(
+    parsed.workspaceRoot, workspaceLocal)
+  let currentManifestLayer = findCurrentManifestLayer(
+    layerLocations, parsed.currentRepo)
 
   # RA-3: no branch-name enforcement. The pushed and active branch are
   # still observed and surfaced in the report (informational), but a
@@ -27656,8 +28136,9 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # ``depends`` edges). When ``--current-repo`` does not resolve to a
   # declared repo (the closure is empty), we fall back to the whole
   # workspace so the gate can never silently under-check.
-  let scopeClosure = developSetClosure(resolved.repos, currentRepoName)
-  let scopeIsWholeWorkspace = scopeClosure.len == 0
+  let scope = prePushScope(resolved, currentRepoName, currentManifestLayer)
+  let scopeClosure = scope.names
+  let scopeIsWholeWorkspace = scope.wholeWorkspace
   proc repoInScope(name: string): bool =
     scopeIsWholeWorkspace or name in scopeClosure
 
@@ -28355,8 +28836,6 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # who cannot acquire the private layer, which is exactly the
   # condition ``Workspace-And-Develop-Mode.md §"Interaction with
   # Locking and Publication"`` proscribes.
-  let layerLocations = enumerateManifestLayerLocations(
-    parsed.workspaceRoot, workspaceLocal)
   if layerLocations.len == 0:
     result.exitCode = 0
     applyCertificateGate()
@@ -28366,28 +28845,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     applyCertificateGate()
     return
   let currentRepoAbs = parsed.currentRepo
-  # Robust same-path test. Bare ``==`` is too brittle on Windows: the
-  # workspace.toml's ``local_path`` may be written with forward
-  # slashes (the test fixtures do, to avoid TOML basic-string ``\U``
-  # escape collisions on Windows paths), while ``--current-repo`` is
-  # passed in native backslashed form. The same on-disk directory
-  # would then compare unequal and the gate would silently skip the
-  # visibility check. Normalise separators, casing, and absolute form
-  # before comparing.
-  proc samePath(a, b: string): bool =
-    if a == b: return true
-    let
-      aN = os.normalizedPath(absolutePath(a)).replace('\\', '/')
-      bN = os.normalizedPath(absolutePath(b)).replace('\\', '/')
-    when defined(windows):
-      aN.toLowerAscii == bN.toLowerAscii
-    else:
-      aN == bN
-  var currentLayer = none(ManifestLayerLocation)
-  for loc in layerLocations:
-    if samePath(loc.absPath, currentRepoAbs):
-      currentLayer = some(loc)
-      break
+  let currentLayer = currentManifestLayer
   if currentLayer.isNone:
     result.exitCode = 0
     applyCertificateGate()
@@ -28518,8 +28976,9 @@ proc perBackendPublishTargets(parsed: CheckArgs; manifestLayerRoot: string;
   let composed = composeLockingRouting(parsed.workspaceRoot, identity.binaryPath)
   if not composed.hasExplicitRoutes: return
   var resolved: ResolvedProject
+  var workspaceLocal: Option[WorkspaceLocal]
   try:
-    (resolved, _) = resolveCheckProject(parsed)
+    (resolved, workspaceLocal) = resolveCheckProject(parsed)
   except CatchableError:
     return
   # Mirror the gate's RA-21 scope: only the pushed repo's develop-set closure
@@ -28530,8 +28989,13 @@ proc perBackendPublishTargets(parsed: CheckArgs; manifestLayerRoot: string;
       if absolutePath(parsed.workspaceRoot / repo.path) == parsed.currentRepo:
         currentRepoName = repo.name
         break
-  let scopeClosure = developSetClosure(resolved.repos, currentRepoName)
-  let scopeIsWholeWorkspace = scopeClosure.len == 0
+  let layerLocations = enumerateManifestLayerLocations(
+    parsed.workspaceRoot, workspaceLocal)
+  let currentLayer = findCurrentManifestLayer(
+    layerLocations, parsed.currentRepo)
+  let scope = prePushScope(resolved, currentRepoName, currentLayer)
+  let scopeClosure = scope.names
+  let scopeIsWholeWorkspace = scope.wholeWorkspace
   var inScope: seq[ResolvedRepo] = @[]
   for repo in resolved.repos:
     if scopeIsWholeWorkspace or repo.name in scopeClosure:

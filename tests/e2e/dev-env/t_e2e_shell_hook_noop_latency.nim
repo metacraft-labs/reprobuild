@@ -112,27 +112,39 @@ proc readFingerprint(script: string): string =
     raise newException(ValueError, "unterminated __REPRO_APPLIED quote")
   rest[0 ..< e]
 
-proc captureExportOutput(c: ShellHookCase; extraEnv: openArray[(string, string)] = []):
+proc exportBaseEnv(c: ShellHookCase): StringTableRef =
+  ## Build the stable environment block once. The latency gate is about
+  ## child process startup + the no-op fast path; rebuilding this table in
+  ## every measured iteration would time parent-side allocation/GC noise too.
+  let daemonStateDir = c.tempRoot / "daemon-state"
+  let actionCacheRoot = c.tempRoot / "action-cache"
+  createDir(daemonStateDir)
+  createDir(actionCacheRoot)
+  result = newStringTable(modeCaseSensitive)
+  for k, v in envPairs():
+    if k.startsWith("__REPRO_"):
+      continue
+    result[k] = v
+  result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
+  result["REPROBUILD_ACTION_CACHE_ROOT"] = actionCacheRoot
+  result["REPRO_DAEMON"] = "off"
+  result["REPRO_DAEMON_ENDPOINT"] =
+    daemonSocketEndpoint("repro-m77-noop-latency-" & $getCurrentProcessId())
+  result["REPRO_DAEMON_STATE_DIR"] = daemonStateDir
+  result["HOME"] = c.tempRoot
+
+proc captureExportOutput(c: ShellHookCase; env: StringTableRef):
     tuple[stdout: string; stderr: string; exitCode: int] =
   ## Spawn ``c.reproBin dev-env export bash --project-root <fixture>``
   ## and capture stdout. Goes through ``c.reproBin`` directly (no
   ## shim) so the latency we measure is the raw process spawn + fast
   ## path, not the shim's overhead.
-  var env = newStringTable(modeCaseSensitive)
-  for k, v in envPairs():
-    if k.startsWith("__REPRO_"):
-      continue
-    env[k] = v
-  env["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
-  env["HOME"] = c.tempRoot
-  for (k, v) in extraEnv:
-    env[k] = v
   var p = startProcess(c.reproBin,
     args = @["dev-env", "export", "bash",
       "--project-root", c.projectRoot],
     workingDir = c.repoRoot,
     env = env,
-    options = {poUsePath})
+    options = {poStdErrToStdOut})
   let outStream = p.outputStream
   let errStream = p.errorStream
   let outText = if outStream != nil: outStream.readAll() else: ""
@@ -162,18 +174,25 @@ suite "e2e_shell_hook_noop_latency":
       try: removeDir(c.tempRoot)
       except CatchableError: discard
 
+    let activationEnv = exportBaseEnv(c)
+    let fastPathEnv = exportBaseEnv(c)
+
     # Warm: run one activation to discover the fingerprint we want
     # subsequent invocations to short-circuit against.
-    let initial = captureExportOutput(c)
+    let initial = captureExportOutput(c, activationEnv)
+    if initial.exitCode != 0:
+      echo "=== initial stdout/stderr ===\n", initial.stdout
     check initial.exitCode == 0
     let fingerprint = readFingerprint(initial.stdout)
+    if fingerprint.len == 0:
+      echo "=== initial stdout/stderr ===\n", initial.stdout
     check fingerprint.len > 0
+    fastPathEnv["__REPRO_APPLIED"] = fingerprint
 
     # Sanity check: a SECOND invocation with __REPRO_APPLIED=<fp> must
     # emit the no-op script (proves the fast path is reachable before
     # we measure it).
-    let probe = captureExportOutput(c,
-      [("__REPRO_APPLIED", fingerprint)])
+    let probe = captureExportOutput(c, fastPathEnv)
     check probe.exitCode == 0
     if not probe.stdout.contains(FastPathExpectedSubstring):
       echo "=== probe stdout ===\n", probe.stdout
@@ -185,8 +204,7 @@ suite "e2e_shell_hook_noop_latency":
     # cache, and (on Windows) the kernel's loader fast path all reach
     # steady state.
     for i in 0 ..< WarmupIters:
-      let r = captureExportOutput(c,
-        [("__REPRO_APPLIED", fingerprint)])
+      let r = captureExportOutput(c, fastPathEnv)
       check r.exitCode == 0
       check r.stdout.contains(FastPathExpectedSubstring)
 
@@ -197,8 +215,7 @@ suite "e2e_shell_hook_noop_latency":
     var samples = newSeq[float](MeasuredIters)
     for i in 0 ..< MeasuredIters:
       let t0 = getMonoTime()
-      let r = captureExportOutput(c,
-        [("__REPRO_APPLIED", fingerprint)])
+      let r = captureExportOutput(c, fastPathEnv)
       let elapsed = getMonoTime() - t0
       let dt = float(inNanoseconds(elapsed)) / 1_000_000.0
       samples[i] = dt

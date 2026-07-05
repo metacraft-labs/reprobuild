@@ -197,6 +197,18 @@ proc readReport(fixture: M9Fixture): JsonNode =
   check fileExists(reportPath)
   parseFile(reportPath)
 
+proc cleanupScratch(path: string) =
+  for attempt in 0 .. 4:
+    if not dirExists(path):
+      return
+    try:
+      removeDir(path)
+      return
+    except OSError, IOError:
+      if attempt == 4:
+        raise
+      sleep(100)
+
 # ---- the suite -------------------------------------------------------------
 
 suite "M9 — repro workspace init":
@@ -207,7 +219,7 @@ suite "M9 — repro workspace init":
       skip()
     else:
       let fx = setupFixture(gitBin, "clone-missing")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let res = runShell(shellCommand(@[
         fx.reproBin, "workspace", "init", "myproject",
@@ -245,7 +257,7 @@ suite "M9 — repro workspace init":
       skip()
     else:
       let fx = setupFixture(gitBin, "existing-uptodate")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       cloneInto(gitBin, fx.libAOrigin, fx.workspaceRoot / "lib-a")
       cloneInto(gitBin, fx.libBOrigin, fx.workspaceRoot / "lib-b")
@@ -275,7 +287,7 @@ suite "M9 — repro workspace init":
       skip()
     else:
       let fx = setupFixture(gitBin, "divergence")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       cloneInto(gitBin, fx.libAOrigin, fx.workspaceRoot / "lib-a")
       cloneInto(gitBin, fx.libBOrigin, fx.workspaceRoot / "lib-b")
@@ -316,7 +328,7 @@ suite "M9 — repro workspace init":
       skip()
     else:
       let fx = setupFixture(gitBin, "unknown")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let res = runShell(shellCommand(@[
         fx.reproBin, "workspace", "init", "nonexistent",
@@ -335,7 +347,7 @@ suite "M9 — repro workspace init":
       skip()
     else:
       let fx = setupFixture(gitBin, "cwd-default")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       # Drop the explicit --workspace-root and rely on the dispatcher's
       # ``getCurrentDir()`` fallback.

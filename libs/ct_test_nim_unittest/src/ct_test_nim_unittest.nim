@@ -47,6 +47,8 @@
 ## for the ``TestRunner`` cross-cutting interface implementation that
 ## handles RUN/LIST/ENUMERATE at engine execution time.
 
+import std/os
+
 import ct_test_interface
 export ct_test_interface
 
@@ -91,6 +93,23 @@ const buildNimUnittest* = BuildNimUnittest()
   ## to record a build edge; that call expands via Nim UFCS to the
   ## ``build(tool, ...)`` proc declared below.
 
+proc defaultNimcacheDir(binary: string): string =
+  let outputName = splitFile(binary).name
+  if outputName.len > 0:
+    result = "build" / "nimcache" / outputName
+  else:
+    result = "build" / "nimcache" / "nim-unittest"
+
+proc compileDependencyPolicy(cacheDir: string;
+                             cacheable: bool;
+                             policy: BuildActionDependencyPolicy):
+    BuildActionDependencyPolicy =
+  if policy.kind != bdpDefault:
+    return policy
+  if cacheable:
+    return automaticMonitorPolicy()
+  makeDepfilePolicy(cacheDir / "nim-compile.d")
+
 proc build*(tool: BuildNimUnittest;
             source: string;
             binary: string;
@@ -109,7 +128,9 @@ proc build*(tool: BuildNimUnittest;
             extraInputs: openArray[string] = [];
             extraOutputs: openArray[string] = [];
             depfile = "";
+            nimcache = "";
             cacheable = true;
+            dependencyPolicy = defaultDependencyPolicy();
             actionCachePolicy = defaultActionCachePolicy();
             commandStatsId = "";
             extraEnv: openArray[(string, string)] = []):
@@ -192,6 +213,10 @@ proc build*(tool: BuildNimUnittest;
     cliArgs.add(cliArgSeq(name = "extraPassL", value = extraPassL,
       alias = "--passL:", format = cafConcat, repeated = true))
 
+  let cacheDir = if nimcache.len > 0: nimcache else: defaultNimcacheDir(binary)
+  cliArgs.add(cliArg(name = "nimcache", value = cacheDir,
+    alias = "--nimcache:", format = cafConcat))
+
   # ``binary`` is the output path. Nim's ``nim c`` flag is ``--out:`` in
   # concat form; tagging the arg with ``role = output`` makes the
   # engine register the path as a declared output and supplies the
@@ -234,7 +259,12 @@ proc build*(tool: BuildNimUnittest;
     # records every file the compile actually reads, so any input change
     # invalidates the binary and, transitively, its execute edge. Matches the
     # ``nim.c`` app/helper edges, which already declare ``automaticMonitor``.
-    dependencyPolicy = automaticMonitorPolicy(),
+    # Some self-hosted test graph compiles are deliberately non-cacheable
+    # because the io-mon preload shim can perturb host C compilers. In that
+    # case the caller may keep the compile fully executed while avoiding
+    # monitor wrapping; no cache entry is published for the incomplete evidence.
+    dependencyPolicy = compileDependencyPolicy(
+      cacheDir, cacheable, dependencyPolicy),
     actionCachePolicy = actionCachePolicy,
     extraEnv = extraEnv)
 

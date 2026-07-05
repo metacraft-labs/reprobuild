@@ -107,9 +107,9 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # empty recipeRevisionFingerprint string length (the v20 addition;
     # zero-length string round-trips as four zero bytes) + 1 for the
     # cwdKind byte + 4 for the empty cwdCustomPath string length (the
-    # v21 addition) + 4 for the empty declaredOutputs count + 4 for
-    # the empty readOnlyRoots count (the v22 addition). All ten fields
-    # are absent at v11.
+    # v21 addition) + 4 for the empty declaredOutputs count + 4 for the
+    # empty readOnlyRoots count (the v22 addition). All ten fields are
+    # absent at v11.
     let trimBytes = 36
     let oldLen = int(uint32(payload[6]) or
       (uint32(payload[7]) shl 8) or
@@ -139,11 +139,11 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # for the v17 toolIdentityRefs length-prefix + 1 for the v19
     # Windows-System-Resources Phase E requiresElevation sentinel byte
     # + 4 for the M9.R.34 v20 empty recipeRevisionFingerprint string
-    # length + 1 for the M9.R.74 v21 cwdKind byte + 4 for the empty
-    # cwdCustomPath string length + 4 for the M9.R.75 v22 empty
-    # declaredOutputs count + 4 for the empty readOnlyRoots count).
-    # v16-and-earlier payloads MUST decode with all post-v16 fields at
-    # their inert defaults so legacy artefacts keep working.
+    # length + 1 for the v21 cwdKind byte + 4 for the empty v21
+    # cwdCustomPath string + 4 for the empty v22 declaredOutputs seq +
+    # 4 for the empty v22 readOnlyRoots seq). v16-and-earlier payloads
+    # MUST decode with all newer fields at their inert defaults so
+    # legacy artefacts keep working.
     let action = BuildActionDef(
       id: "v16-legacy",
       call: publicCliCall("pkg", "exe", "build",

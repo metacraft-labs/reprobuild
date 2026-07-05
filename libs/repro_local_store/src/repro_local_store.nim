@@ -484,6 +484,23 @@ proc fingerprintMetadata(path: string;
   cache[].entries[path] = result
   processWarmFileMetadataEntries[path] = result
 
+proc fingerprintRecordedMetadata(path: string; recorded: FileMetadata;
+                                 cache: ptr FileMetadataCache): FileMetadata =
+  if cache.isNil:
+    return fingerprintMetadata(path)
+  if cache[].entries.hasKey(path):
+    inc cache[].stats.currentRunHits
+    return cache[].entries[path]
+  inc cache[].stats.warmEntries
+  inc cache[].stats.warmRevalidated
+  result = fingerprintMetadata(path)
+  if result == recorded:
+    inc cache[].stats.warmUnchanged
+  else:
+    inc cache[].stats.warmChanged
+  cache[].entries[path] = result
+  processWarmFileMetadataEntries[path] = result
+
 proc fileBytesForHash(path: string; metadata: FileMetadata): seq[byte] =
   if metadata.kind != ffkRegular:
     return @[]
@@ -1205,7 +1222,8 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
           record.policy == probe.policy:
         for input in record.inputs:
           inc checkedInputs
-          if fingerprintMetadata(input.path, metadataCache) != input.metadata:
+          if fingerprintRecordedMetadata(input.path, input.metadata,
+              metadataCache) != input.metadata:
             return HotMetadataScan(status: hmssInputChanged,
               recordCount: totalRecords, checkedInputCount: checkedInputs)
   HotMetadataScan(status: hmssHit, recordCount: totalRecords,
@@ -1505,7 +1523,8 @@ proc hotMetadataRecordInputsUnchanged*(records: openArray[ActionResultRecord];
       if seen.contains(inputKey):
         continue
       seen.incl(inputKey)
-      if fingerprintMetadata(input.path, metadataCache) != input.metadata:
+      if fingerprintRecordedMetadata(input.path, input.metadata,
+          metadataCache) != input.metadata:
         return false
   true
 
@@ -1555,7 +1574,8 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
                            reusedRecordedInputs: bool] =
   result.reusedRecordedInputs = true
   for i, recorded in record.inputs:
-    let currentMetadata = fingerprintMetadata(recorded.path, metadataCache)
+    let currentMetadata = fingerprintRecordedMetadata(recorded.path,
+      recorded.metadata, metadataCache)
     case recorded.policy
     of ffpTimestamp:
       if currentMetadata != recorded.metadata:
@@ -1620,7 +1640,8 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
       var changed = false
       var changedInput = ""
       for input in hot.record.inputs:
-        if fingerprintMetadata(input.path, metadataCache) != input.metadata:
+        if fingerprintRecordedMetadata(input.path, input.metadata,
+            metadataCache) != input.metadata:
           changed = true
           changedInput = input.path
           break

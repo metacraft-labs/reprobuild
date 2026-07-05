@@ -47,13 +47,16 @@ proc run*(tool: PythonUnittest;
           deps: openArray[string] = [];
           after: openArray[BuildActionDef] = [];
           extraInputs: openArray[string] = [];
-          cacheable = true;
+          cacheable = false;
           actionCachePolicy = defaultActionCachePolicy()):
     BuildActionDef {.discardable.} =
   ## Emit one execute edge that runs the given Python test file via
-  ## ``python3 <source>``. The source path flows in as a typed input so
-  ## the engine action-cache keys on the file's content; touching the
-  ## test re-runs the execute edge.
+  ## ``python3 <source>``. Python unittest execution is deliberately
+  ## non-cacheable by default: the Linux preload monitor can observe the
+  ## test's project-file reads, but current CPython startup still emits
+  ## incomplete-evidence diagnostics for raw syscalls. Re-running the
+  ## test is preferable to publishing a cache entry whose evidence is
+  ## known incomplete.
   ##
   ## Evidence: the subprocess exit code (0 = pass, non-zero = fail) per
   ## the standard Tier-1 protocol. Per-test JSON output (e.g.

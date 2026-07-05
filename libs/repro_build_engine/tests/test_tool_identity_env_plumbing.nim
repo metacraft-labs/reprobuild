@@ -25,6 +25,7 @@ import std/[options, os, strutils, tables, unittest]
 
 import repro_build_engine
 import repro_core
+import repro_depfile
 import repro_hash
 import repro_local_store
 import io_mon/writer
@@ -201,6 +202,22 @@ proc runnerCfg(cacheRoot: string;
   result.monitorCliPath = passthroughMonitorCli(cacheRoot)
   result.toolIdentityResolver = resolver
 
+proc makeDepfilePolicy(path: string): DependencyGatheringPolicy =
+  DependencyGatheringPolicy(
+    kind: dgRecognizedFormat,
+    completeness: decComplete,
+    recognizedReports: @[
+      RecognizedDependencyReportSpec(
+        formatName: DependencyFormatName(MakeDepfileFormatName),
+        outputs: @[
+          ExpectedDependencyFile(
+            logicalName: "deps",
+            path: path,
+            required: false)
+        ],
+        completeness: decComplete)
+    ])
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -329,3 +346,25 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     # ``nonexistent`` ref contributed nothing but did NOT block the
     # other refs from contributing.
     check captured.startsWith(mesonBin)
+
+  test "non-cacheable recognized-report actions execute even when outputs exist":
+    resetTmp()
+    let cacheRoot = TmpDir / "cache-noncacheable-recognized"
+    createDir(cacheRoot)
+    let depfilePath = TmpDir / "missing-optional.d"
+    let act = action("noncacheable-recognized",
+      stubArgv(),
+      cwd = getCurrentDir(),
+      cacheable = false,
+      dependencyPolicy = makeDepfilePolicy(depfilePath))
+    let g = graph(@[act], newSeq[BuildPool]())
+
+    let first = runBuild(g, runnerCfg(cacheRoot, nil))
+    check first.results.len == 1
+    check first.results[0].status == asSucceeded
+    check first.results[0].launched
+
+    let second = runBuild(g, runnerCfg(cacheRoot, nil))
+    check second.results.len == 1
+    check second.results[0].status == asSucceeded
+    check second.results[0].launched

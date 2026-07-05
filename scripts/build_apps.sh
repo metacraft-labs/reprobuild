@@ -10,32 +10,6 @@ if [ -z "${BEARSSL_SRC:-}" ]; then
   fi
 fi
 
-find_store_lib_dir() {
-  local fragment="$1"
-  shift
-  local pkg lib name
-  [ -d /nix/store ] || return 0
-  for pkg in /nix/store/*"${fragment}"*; do
-    [ -d "${pkg}/lib" ] || continue
-    lib="${pkg}/lib"
-    for name in "$@"; do
-      if compgen -G "${lib}/${name}" >/dev/null; then
-        printf '%s\n' "${lib}"
-        return 0
-      fi
-    done
-  done
-}
-
-runtime_rpath_passl=()
-for lib_dir in \
-  "${CLINGO_LIB:-$(find_store_lib_dir 'clingo-5.' 'libclingo.dylib' 'libclingo.so*')}" \
-  "${ZSTD_LIB:-$(find_store_lib_dir 'zstd-1.' 'libzstd.dylib' 'libzstd.so*')}"; do
-  if [ -d "${lib_dir}" ]; then
-    runtime_rpath_passl+=("--passL:-Wl,-rpath,${lib_dir}")
-  fi
-done
-
 nim_mode_flags=()
 case "${REPROBUILD_BUILD_MODE:-debug}" in
   debug)
@@ -136,6 +110,80 @@ for tok in ${NIX_LDFLAGS:-}; do
   esac
 done
 
+has_any_library() {
+  local dir="$1"
+  shift
+  local lib
+  for lib in "$@"; do
+    if [ -f "${dir}/${lib}" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+add_unique_lib_dir() {
+  local candidate="$1"
+  shift
+  local existing
+  [ -n "${candidate}" ] || return 0
+  [ -d "${candidate}" ] || return 0
+  for existing in "$@"; do
+    if [ "${existing}" = "${candidate}" ]; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+runtime_passl_for_libraries() {
+  local -a libs=()
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    libs+=("$1")
+    shift
+  done
+  [ "$#" -gt 0 ] && shift
+
+  local -a dirs=()
+  local tok dir prefix
+  for tok in ${NIX_LDFLAGS:-}; do
+    case "$tok" in
+      -L*)
+        dir="${tok#-L}"
+        if has_any_library "${dir}" "${libs[@]}" &&
+            add_unique_lib_dir "${dir}" "${dirs[@]+"${dirs[@]}"}"; then
+          dirs+=("${dir}")
+        fi
+        ;;
+    esac
+  done
+
+  for prefix in "$@"; do
+    [ -n "${prefix}" ] || continue
+    for dir in "${prefix}" "${prefix}/lib" "${prefix}/lib64"; do
+      if has_any_library "${dir}" "${libs[@]}" &&
+          add_unique_lib_dir "${dir}" "${dirs[@]+"${dirs[@]}"}"; then
+        dirs+=("${dir}")
+      fi
+    done
+  done
+
+  for dir in "${dirs[@]}"; do
+    printf '%s\n' "--passL:-L${dir}"
+    printf '%s\n' "--passL:-Wl,-rpath,${dir}"
+  done
+}
+
+# ``repro`` imports the ASP solver and dlopens libclingo by soname at process
+# startup. Keep the Nim compile-time search path scrubbed, but thread the
+# runtime loader path into the ELF/Mach-O so clean shells and SSH sessions work.
+mapfile -t repro_runtime_passl < <(
+  runtime_passl_for_libraries libclingo.so libclingo.dylib -- \
+    "${CLINGO_PREFIX:-}" \
+    /opt/homebrew/opt/clingo \
+    /usr/local/opt/clingo
+)
+
 while read -r name path extra_flags; do
   case "${name}" in
     ""|\#*) continue ;;
@@ -156,13 +204,19 @@ while read -r name path extra_flags; do
         ;;
     esac
   done
+  runtime_passl=()
+  case "${name}" in
+    repro|repro-full)
+      runtime_passl=(${repro_runtime_passl[@]+"${repro_runtime_passl[@]}"})
+      ;;
+  esac
   (
     unset_clingo_searchpath
     nim c \
       ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
       ${extra_flag_array[@]+"${extra_flag_array[@]}"} \
       ${ssl_passl[@]+"${ssl_passl[@]}"} \
-      ${runtime_rpath_passl[@]+"${runtime_rpath_passl[@]}"} \
+      ${runtime_passl[@]+"${runtime_passl[@]}"} \
       --nimcache:"build/nimcache/${name}" \
       --out:"build/bin/${name}" \
       "${path}"
@@ -196,7 +250,6 @@ esac
     --mm:orc \
     --define:reproProviderMode \
     --define:reproProviderRuntimeDll \
-    ${runtime_rpath_passl[@]+"${runtime_rpath_passl[@]}"} \
     --nimcache:build/nimcache/repro-project-dsl-runtime-dll \
     --out:"build/lib/librepro_project_dsl_runtime.${dll_ext}" \
     libs/repro_project_dsl_runtime_dll/src/repro_project_dsl_runtime_entry.nim

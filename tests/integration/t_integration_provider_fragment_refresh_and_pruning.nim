@@ -40,7 +40,7 @@ proc writeFixtureProvider(path: string) =
     "  RootBodyHash = \"" & RootBodyHash & "\"\n" &
     "  MemberBodyHash = when defined(memberBodyV2): \"" & MemberBodyHashV2 &
       "\" else: \"" & MemberBodyHashV1 & "\"\n" &
-    "  ProviderArtifact = when defined(memberBodyV2): \"" & ArtifactV2 &
+    "  ProviderArtifact = when defined(memberBodyV2) or defined(providerArtifactV2): \"" & ArtifactV2 &
       "\" else: \"" & ArtifactV1 & "\"\n\n" &
     "proc flagValue(args: openArray[string]; flag: string): string =\n" &
     "  var i = 0\n" &
@@ -278,6 +278,22 @@ suite "integration_provider_fragment_refresh_and_pruning":
       check removedMember.edgeIds().contains("workspace:edge:b.txt")
       check memberFragmentCount(removedMember.snapshot) == 2
 
+      let providerSameBodiesV2Artifact = compileProvider(providerSource,
+        binDir / "provider-artifact-v2", tempRoot / "nimcache-provider-artifact-v2",
+        ["providerArtifactV2"])
+      let artifactStore = tempRoot / "artifact-store"
+      createDir(artifactStore)
+      resetCounts(countsPath)
+      discard refresh(providerV1, ArtifactV1, store = artifactStore)
+      resetCounts(countsPath)
+      let artifactChanged = refresh(providerSameBodiesV2Artifact, ArtifactV2,
+        store = artifactStore)
+      check nonEmptyLines(countsPath) == @["root", "member:a.txt", "member:c.txt"]
+      check artifactChanged.invoked.len == 3
+      check artifactChanged.invoked[0].reason == girProviderArtifactChanged
+      check artifactChanged.invoked[1 .. ^1].allIt(it.reason == girNoPriorFragment)
+      check memberFragmentCount(artifactChanged.snapshot) == 2
+
       let providerV2 = compileProvider(providerSource, binDir / "provider-v2",
         tempRoot / "nimcache-provider-v2", ["memberBodyV2"])
 
@@ -289,18 +305,18 @@ suite "integration_provider_fragment_refresh_and_pruning":
       resetCounts(countsPath)
       let lockChanged = refresh(providerV2, ArtifactV2, store = lockStore,
         lockSlice = "lock-v2")
-      check nonEmptyLines(countsPath) == @["member:a.txt", "member:c.txt"]
-      check lockChanged.invoked.len == 2
-      check lockChanged.invoked.allIt(it.reason == girEntryPointBodyChanged)
+      check nonEmptyLines(countsPath) == @["root", "member:a.txt", "member:c.txt"]
+      check lockChanged.invoked.len == 3
+      check lockChanged.invoked[0].reason == girProviderArtifactChanged
+      check lockChanged.invoked[1 .. ^1].allIt(it.reason == girNoPriorFragment)
       check memberFragmentCount(lockChanged.snapshot) == 2
 
       resetCounts(countsPath)
       let bodyChanged = refresh(providerV2, ArtifactV2)
-      check nonEmptyLines(countsPath) == @["member:a.txt", "member:c.txt"]
-      check bodyChanged.invoked.len == 2
-      check bodyChanged.invoked.allIt(it.reason == girEntryPointBodyChanged)
-      check not nonEmptyLines(countsPath).contains("root")
-      check bodyChanged.earlyCutoffs.len == 2
+      check nonEmptyLines(countsPath) == @["root", "member:a.txt", "member:c.txt"]
+      check bodyChanged.invoked.len == 3
+      check bodyChanged.invoked[0].reason == girProviderArtifactChanged
+      check bodyChanged.invoked[1 .. ^1].allIt(it.reason == girNoPriorFragment)
       check memberBodyHashes(bodyChanged.snapshot).allIt(it == MemberBodyHashV2)
 
       writeFile(srcDir / "a.txt", "alpha graph-shape unchanged\n")

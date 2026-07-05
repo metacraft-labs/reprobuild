@@ -56,6 +56,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
   ## chatter on stderr and the profile binary's stdout JSON on stdout.
   ## Raises `CompileFailure` if either step exits non-zero.
   let nimExe = requireNimOnPath()
+  let repoRootAbs = absolutePath(repoRoot)
   createDir(extendedPath(nimcacheDir))
   createDir(extendedPath(outBinary.parentDir))
 
@@ -67,7 +68,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
   # repro_project_dsl -> nimcrypto/sha2 fail with "cannot open file".
   let profileDir = profileRoot.parentDir
   let stagedConfig = profileDir / "config.nims"
-  let upstreamConfig = repoRoot / "config.nims"
+  let upstreamConfig = repoRootAbs / "config.nims"
   var didStageConfig = false
   if fileExists(extendedPath(upstreamConfig)) and
      not fileExists(extendedPath(stagedConfig)):
@@ -78,7 +79,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
   var compileCmd = quoteShell(nimExe) & " c --hints:off --warnings:off" &
     " --nimcache:" & quoteShell(nimcacheDir) &
     " --out:" & quoteShell(outBinary)
-  for path in profileNimPaths(repoRoot):
+  for path in profileNimPaths(repoRootAbs):
     compileCmd.add " --path:" & quoteShell(path)
   compileCmd.add " " & quoteShell(profileRoot)
   if verbose:
@@ -115,7 +116,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
     # checkouts under <repoRoot>'s parent. (install-reprobuild.ps1
     # clones every sibling under <LOCALAPPDATA>/dev-deps/reprobuild/,
     # so they are siblings of ``src/``.)
-    let dd = repoRoot.parentDir  # <dev-deps>/reprobuild
+    let dd = repoRootAbs.parentDir  # <dev-deps>/reprobuild
     if dirExists(dd / "nimcrypto"):
       if getEnv("NIMCRYPTO_SRC").len == 0:
         childEnv["NIMCRYPTO_SRC"] = dd / "nimcrypto"
@@ -148,7 +149,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
         childEnv["REPRO_TEST_ADAPTERS_SRC"] = dd / "reprobuild-test-adapters" / "src"
 
     let nimArgv = parseCmdLine(compileCmd)
-    var p = startProcess(nimArgv[0], workingDir = repoRoot,
+    var p = startProcess(nimArgv[0], workingDir = repoRootAbs,
                          args = nimArgv[1 .. ^1],
                          env = childEnv,
                          options = {poUsePath, poStdErrToStdOut})

@@ -2037,6 +2037,8 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     formals.add("cacheable = true")
     formals.add("actionCachePolicy = defaultActionCachePolicy()")
     formals.add("commandStatsId = \"\"")
+    formals.add("dependencyPolicy = " &
+      dependencyPolicyCode(cmd.dependencyPolicy))
     let typedReturn = cmd.typedOutputs.len > 0
     let returnType =
       if typedReturn: buildEdgeSubtypeName(exe.exportName, cmd.name)
@@ -2064,8 +2066,7 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
       "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
       "extraEnv = extraEnv, " &
-      "dependencyPolicy = " &
-      dependencyPolicyCode(cmd.dependencyPolicy) & ")\n")
+      "dependencyPolicy = dependencyPolicy)\n")
     # Typed-Outputs M1: bind each typed-output field by evaluating its
     # ``pathExpr`` in the call-site flag scope. The shared
     # ``emitTypedOutputBindings`` helper handles both the typed-handle
@@ -2710,6 +2711,8 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
     formals.add("cacheable = true")
     formals.add("actionCachePolicy = defaultActionCachePolicy()")
     formals.add("commandStatsId = \"\"")
+    formals.add("dependencyPolicy = " &
+      dependencyPolicyCode(command.dependencyPolicy))
     let typedReturn = command.typedOutputs.len > 0
     let returnType =
       if typedReturn: buildEdgeSubtypeName(toolSymbol, command.name)
@@ -2734,8 +2737,7 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
       "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
       "extraEnv = extraEnv, " &
-      "dependencyPolicy = " &
-      dependencyPolicyCode(command.dependencyPolicy) & ")\n")
+      "dependencyPolicy = dependencyPolicy)\n")
     # Typed-Outputs M1: bind typed fields against the call-site flag
     # values via the shared helper (the ``package``-block wrapper uses
     # the same one).
