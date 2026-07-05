@@ -126,6 +126,7 @@ package cargo:
           depfiles = ["target/debug/deps/*.d", "target/release/deps/*.d"]
         boolFlag locked is bool, alias = "--locked"
         boolFlag release is bool, alias = "--release"
+        boolFlag noDefaultFeatures is bool, alias = "--no-default-features"
         flag manifestPath is string,
           alias = "--manifest-path",
           role = input
@@ -151,6 +152,7 @@ package cargo:
         boolFlag locked is bool, alias = "--locked"
         boolFlag release is bool, alias = "--release"
         boolFlag noRun is bool, alias = "--no-run"
+        boolFlag noDefaultFeatures is bool, alias = "--no-default-features"
         flag manifestPath is string,
           alias = "--manifest-path",
           role = input
