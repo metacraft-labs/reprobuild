@@ -109,7 +109,16 @@ package nim:
         flag mm is string,
           alias = "--mm:",
           format = concat
+        flag cc is string,
+          alias = "--cc:",
+          format = concat
+        flag gccExe is string,
+          alias = "--gcc.exe:",
+          format = concat
         boolFlag threadsOn is bool, alias = "--threads:on"
+        flag parallelBuild is int,
+          alias = "--parallelBuild:",
+          format = concat
         # Test-Fixtures-In-Build-Graph M2: ``--app:lib`` produces a shared
         # library (``.so`` / ``.dylib`` / ``.dll``) rather than an
         # executable. The monitor shim (``repro_monitor_shim``) is built
@@ -262,11 +271,14 @@ proc c*(pkg: NimPackage; source: string; binary: string;
         defines: seq[string] = @[];
         paths: seq[string] = @[];
         imports: seq[string] = @[];
+        cc = "";
+        gccExe = "";
         passC: seq[string] = @[];
         passL: seq[string] = @[];
         nimcache = "";
         appLib = false;
         threadsOn = false;
+        parallelBuild = 0;
         actionId = "";
         deps: openArray[string] = [];
         after: openArray[BuildActionDef] = [];
@@ -287,9 +299,11 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   discard imports
   let cacheDir = if nimcache.len > 0: nimcache else: defaultNimcacheDir(binary)
   let effectivePassL = passL & opensslPassLForSsl(defines)
-  c(pkg = pkg, source = source, output = binary, defines = defines,
+  c(pkg = pkg, source = source, output = binary, defines = defines, cc = cc,
+    gccExe = gccExe,
     paths = paths, passC = passC, passL = effectivePassL, nimcache = cacheDir,
-    appLib = appLib, threadsOn = threadsOn, actionId = actionId,
+    appLib = appLib, threadsOn = threadsOn, parallelBuild = parallelBuild,
+    actionId = actionId,
     deps = deps, after = after, extraInputs = extraInputs,
     extraOutputs = extraOutputs, extraEnv = extraEnv,
     depfile = depfile, cacheable = cacheable,

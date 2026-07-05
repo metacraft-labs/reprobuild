@@ -1,6 +1,7 @@
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_tool_profiles
+import repro_runquota
 import repro_test_support
 
 const MonitorFixtureSource = r"""
@@ -265,7 +266,7 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
   ], options = {poUsePath})
   putEnv("RUNQUOTA_SOCKET", socketPath)
   for _ in 0 ..< 200:
-    if pathExists(socketPath):
+    if pathExists(socketPath) and isRunQuotaDaemonReachable():
       return (process: daemon, socket: socketPath)
     sleep(25)
   daemon.terminate()
@@ -1623,26 +1624,39 @@ suite "e2e_local_reprobuild_project_build":
       let projectRoot = tempRoot / "project"
       let modulePath = projectRoot / "reprobuild.nim"
       writeM53BuiltinFsProject(modulePath)
+      writeFile(projectRoot / "provider_salt.nim",
+        "const providerSalt* = \"one\"\n")
+      writeFile(modulePath, readFile(modulePath).replace(
+        "import repro_project_dsl\n\n",
+        "import repro_project_dsl\nimport provider_salt\n\n"))
+      let providerOnlyArgs = ["--no-runquota"]
 
-      let first = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+      let first = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
+        extraArgs = providerOnlyArgs)
       check first.contains(
         "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
 
-      let second = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+      let second = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
+        extraArgs = providerOnlyArgs)
       check not second.contains(
         "providerCompileAction: __repro_provider_compile")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       check secondReport{"providerCompileActions"}.getElems().len == 0
 
-      writeFile(modulePath, readFile(modulePath) &
-        "\n# private provider implementation salt one\n")
-      let changed = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+      writeFile(projectRoot / "provider_salt.nim",
+        "const providerSalt* = \"two\"\n")
+      let changed = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
+        extraArgs = providerOnlyArgs)
       check changed.contains(
         "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
 
       writeFile(projectRoot / "provider_extra.nim",
         "const providerExtraSalt* = \"added-source\"\n")
-      let added = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+      writeFile(modulePath, readFile(modulePath).replace(
+        "import provider_salt\n",
+        "import provider_salt\nimport provider_extra\n"))
+      let added = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
+        extraArgs = providerOnlyArgs)
       check added.contains(
         "providerCompileAction: __repro_provider_compile status=asSucceeded launched=true")
 

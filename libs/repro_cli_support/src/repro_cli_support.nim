@@ -11105,6 +11105,18 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
   raise newException(OSError,
     "runquotad did not become reachable at " & endpointHint)
 
+proc autoRunQuotaNeedsPoolPreflight(bypassRunQuota: bool): bool =
+  ## Pool discovery compiles/inspects the project provider. Do it only when
+  ## this process may actually spawn runquotad and can pass the discovered
+  ## pools at daemon startup; an already-reachable daemon cannot be amended.
+  if bypassRunQuota or not autoRunQuotaEnabled():
+    return false
+  if getEnv("RUNQUOTA_SOCKET", "").len > 0 and isRunQuotaDaemonReachable():
+    return false
+  if isRunQuotaDaemonReachable():
+    return false
+  findRunQuotaDaemonBin().len > 0
+
 proc runDepsRefreshCommand(args: openArray[string]): int =
   ## Implements ``repro deps refresh`` — the Mode 3 scanner CLI.
   ##
@@ -13073,11 +13085,15 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         "captureGroups": statsCapture.captureGroupsText,
         "daemonHosted": true
       })
-    # RX: forward recipe-declared custom pools to the daemon so their
-    # execute-edge leases are granted (not denied → hung). Best-effort
-    # extraction — falls back to the convention compile/fetch pools only.
-    let recipePools = extractRecipeBuildPools(target, mode, publicCliPath,
-      workRoot)
+    # RX: forward recipe-declared custom pools to a freshly spawned daemon so
+    # their execute-edge leases are granted (not denied -> hung). If a daemon
+    # is already reachable, pool caps are fixed and the inspection would only
+    # warm provider caches before the visible build.
+    let recipePools =
+      if autoRunQuotaNeedsPoolPreflight(bypassRunQuota):
+        extractRecipeBuildPools(target, mode, publicCliPath, workRoot)
+      else:
+        @[]
     var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota, recipePools)
     # Peer-Cache M1 wiring (LDRV M5): start the LAN peer-cache runtime
     # when the user passed ``--peer-cache=lan://…``. The actual setup

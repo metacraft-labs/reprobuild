@@ -21,15 +21,21 @@ export REPROBUILD_ACTION_CACHE_ROOT="$(pwd)/build/test-action-cache"
 rm -rf "${REPROBUILD_ACTION_CACHE_ROOT}"
 mkdir -p "${REPROBUILD_ACTION_CACHE_ROOT}"
 
-# Local Nix builds of repro link libclingo/libzstd dynamically. Make the
-# freshly bootstrapped ./build/bin/repro usable for every test-run invocation,
-# including the repro build collections below.
-CLINGO_LIB="${CLINGO_LIB:-$(find /nix/store -maxdepth 1 -type d -name '*clingo-5.*' -print -quit 2>/dev/null)/lib}"
-ZSTD_LIB="${ZSTD_LIB:-$(find /nix/store -maxdepth 1 -type d -name '*zstd-1.*' -print -quit 2>/dev/null)/lib}"
-if [[ -d "${CLINGO_LIB}" && -d "${ZSTD_LIB}" ]]; then
-  export DYLD_LIBRARY_PATH="${CLINGO_LIB}:${ZSTD_LIB}:${DYLD_LIBRARY_PATH:-}"
-  export DYLD_FALLBACK_LIBRARY_PATH="${CLINGO_LIB}:${ZSTD_LIB}:${DYLD_FALLBACK_LIBRARY_PATH:-}"
-  export LD_LIBRARY_PATH="${CLINGO_LIB}:${ZSTD_LIB}:${LD_LIBRARY_PATH:-}"
+# Local Nix builds of repro may need runtime library paths from the active
+# dev shell. Do not scan /nix/store for first matching names: long-lived
+# machines can retain older zstd/glibc closures, and prepending those paths
+# makes unrelated host tools load incompatible libraries.
+runtime_lib_dirs=()
+for candidate in ${CLINGO_LIB:-} ${ZSTD_LIB:-}; do
+  if [[ -d "${candidate}" ]]; then
+    runtime_lib_dirs+=("${candidate}")
+  fi
+done
+if [[ ${#runtime_lib_dirs[@]} -gt 0 ]]; then
+  runtime_lib_path="$(IFS=:; printf '%s' "${runtime_lib_dirs[*]}")"
+  export DYLD_LIBRARY_PATH="${runtime_lib_path}:${DYLD_LIBRARY_PATH:-}"
+  export DYLD_FALLBACK_LIBRARY_PATH="${runtime_lib_path}:${DYLD_FALLBACK_LIBRARY_PATH:-}"
+  export LD_LIBRARY_PATH="${runtime_lib_path}:${LD_LIBRARY_PATH:-}"
 fi
 if [[ -z "${REPRO_TEST_ADAPTERS_SRC:-}" &&
       -f "../reprobuild-test-adapters/src/repro_test_adapters/test_runner.nim" ]]; then
@@ -126,15 +132,7 @@ bootstrap_monitor_shim > test-logs/monitor-shim-bootstrap.log 2>&1 || {
   exit 1
 }
 
-# Step 2 (B5): build the runquota sibling so ``runquotad`` is on
-# PATH before the engine starts. The cross-project ``uses: runquota``
-# resolver isn't online yet (B0 outcome), so the daemon still builds
-# via the sibling's own Justfile; reprobuild's repro.nim declares
-# ``uses: "runquotad"`` (B0) which the path-mode resolver checks
-# during the engine's tool-resolution phase. Without runquotad on
-# PATH, Step 3 fails with ``tool-resolution failed: runquotad ...
-# was not found in PATH``. Once the cross-project selector lands,
-# this step folds into Step 3 as another ``.#`` fragment.
+# Step 2: build sibling prerequisites that path-mode tool resolution needs.
 if [[ -d "../runquota" ]]; then
   if [[ ! -x "../runquota/build/bin/runquotad${exe_ext}" ]]; then
     printf 'Building prerequisite sibling: ../runquota\n' >&2
@@ -143,97 +141,16 @@ if [[ -d "../runquota" ]]; then
       exit 1
     }
   fi
-  # Prepend ../runquota/build/bin so the path-mode resolver finds
-  # runquotad during the engine pass below.
   RUNQUOTA_BIN_ABS="$(cd ../runquota/build/bin && pwd)"
   export PATH="${RUNQUOTA_BIN_ABS}:${PATH}"
 fi
 
-# Step 2b: build the reprobuild-cmake fork so the cmake-develop e2e tests
-# (tests/e2e/cmake-develop/) have their forked ``cmake`` carrying the
-# Reprobuild generator. Those tests hard-require it (``check
-# forkedCMake.len > 0`` — no graceful skip), so the fork is a real test
-# prerequisite, not a benchmark-only artifact. Mirror the runquota
-# prerequisite above; idempotent — skip when already built (warm
-# self-hosted checkout). The CMake self-build is heavy, so cap parallelism
-# on shared runners.
 if [[ -d "../reprobuild-cmake" ]]; then
-  if [[ ! -x "../reprobuild-cmake/build/bin/cmake${exe_ext}" ]]; then
-    printf 'Building prerequisite sibling: ../reprobuild-cmake (CMake fork)\n' >&2
-    cmake_jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
-    if (( cmake_jobs > 16 )); then cmake_jobs=16; fi
-    cmake_generator="Unix Makefiles"
-    if command -v ninja >/dev/null 2>&1; then
-      cmake_generator="Ninja"
-    fi
-    cmake_cc="$(command -v cc)"
-    cmake_cxx="$(command -v c++)"
-    cmake_osx_sysroot=""
-    cmake_apple_framework_flags=()
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-      cmake_osx_sysroot="$(find /nix/store -maxdepth 7 -path '*/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk' -type d -print 2>/dev/null | LC_ALL=C sort | tail -n 1 || true)"
-      if [[ -z "${cmake_osx_sysroot}" ]]; then
-        echo "reprobuild-cmake build requires a macOS SDK in /nix/store" >&2
-        exit 1
-      fi
-      cmake_apple_framework_dir="${cmake_osx_sysroot}/System/Library/Frameworks"
-      if [[ -d "${cmake_apple_framework_dir}" ]]; then
-        cmake_apple_framework_flags=(
-          "-DCMAKE_C_FLAGS=-F${cmake_apple_framework_dir}"
-          "-DCMAKE_CXX_FLAGS=-F${cmake_apple_framework_dir}"
-          "-DCMAKE_EXE_LINKER_FLAGS=-F${cmake_apple_framework_dir}"
-        )
-      fi
-    fi
-    iconv_header="$(find /nix/store -maxdepth 3 -path '*/include/iconv.h' -print -quit 2>/dev/null || true)"
-    iconv_args=()
-    if [[ -n "${iconv_header}" ]]; then
-      iconv_include_dir="$(dirname "${iconv_header}")"
-      iconv_prefix="${iconv_include_dir%/include}"
-      iconv_lib="${iconv_prefix}/lib/libiconv.dylib"
-      if [[ ! -f "${iconv_lib}" ]]; then
-        iconv_lib="$(find /nix/store -maxdepth 3 -path '*/lib/libiconv.dylib' -print -quit 2>/dev/null || true)"
-      fi
-      if [[ -n "${iconv_lib}" && -f "${iconv_lib}" ]]; then
-        iconv_args=(
-          "-DICONV_INCLUDE_DIR=${iconv_include_dir}"
-          "-DLIBICONV_PATH=${iconv_lib}"
-        )
-      fi
-    fi
-    (cd ../reprobuild-cmake \
-        && if [[ -f build/CMakeCache.txt ]] && \
-             { ! grep -q "^CMAKE_GENERATOR:INTERNAL=${cmake_generator}$" build/CMakeCache.txt || \
-               ! grep -q "^CMAKE_C_COMPILER:FILEPATH=${cmake_cc}$" build/CMakeCache.txt || \
-               ! grep -q "^CMAKE_CXX_COMPILER:FILEPATH=${cmake_cxx}$" build/CMakeCache.txt || \
-               { [[ -n "${cmake_osx_sysroot}" ]] && ! grep -q "^CMAKE_OSX_SYSROOT:.*=${cmake_osx_sysroot}$" build/CMakeCache.txt; } || \
-               { [[ -n "${cmake_apple_framework_dir:-}" ]] && ! grep -q "^CMAKE_CXX_FLAGS:STRING=-F${cmake_apple_framework_dir}$" build/CMakeCache.txt; } || \
-               ! grep -q "^ENABLE_IPV6:.*=OFF$" build/CMakeCache.txt; }; then \
-             rm -rf build; \
-           fi \
-        && cmake -S . -B build -G "${cmake_generator}" \
-             -DCMAKE_BUILD_TYPE=Release \
-             -DCMAKE_C_COMPILER="${cmake_cc}" \
-             -DCMAKE_CXX_COMPILER="${cmake_cxx}" \
-             ${cmake_osx_sysroot:+-DCMAKE_OSX_SYSROOT="${cmake_osx_sysroot}"} \
-             "${cmake_apple_framework_flags[@]}" \
-             -DCMAKE_USE_SYSTEM_CURL=OFF \
-             -DCMAKE_USE_SYSTEM_ZLIB=OFF \
-             -DENABLE_IPV6=OFF \
-             "${iconv_args[@]}" \
-        && cmake --build build --target cmake --parallel "${cmake_jobs}") \
-        > test-logs/reprobuild-cmake-build.log 2>&1 || {
-      echo "reprobuild-cmake build failed; see test-logs/reprobuild-cmake-build.log" >&2
-      exit 1
-    }
-  fi
+  bash scripts/build_reprobuild_cmake_prereq.sh "${exe_ext}"
 fi
 
-# Step 3 (B5): build the apps, test helpers, and test binaries through
-# the engine. Replaces steps 1 (build_apps.sh) + 3 (build_test_helper
-# x 3) + 4 (./build/bin/repro build test) + 5 (HCR rebuild loop) of
-# the legacy script. Cap parallelism for memory-constrained CI runners
-# (same logic as the legacy script: ~300-500 MB peak per nim c).
+# Step 3: build the apps, helpers, fixtures, and test binaries through
+# the engine. Cap parallelism for memory-constrained CI runners.
 if [[ -z "${REPROBUILD_MAX_PARALLELISM:-}" ]]; then
   available_cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
   cap=$(( available_cores / 2 ))
@@ -255,7 +172,8 @@ printf 'Building apps + test-helpers + test-builds via repro (REPROBUILD_MAX_PAR
 # three invocations back into one.
 repro_build_collection() {
   local collection="$1"
-  if ! ./build/bin/repro build --tool-provisioning=path --daemon=off "${collection}"; then
+  # Suite setup uses the local pool gate; dedicated tests cover RunQuota itself.
+  if ! ./build/bin/repro build --tool-provisioning=path --daemon=off --no-runquota "${collection}"; then
     report_path=".repro/build/repro/build-report.json"
     if [[ -f "${report_path}" ]]; then
       printf '\n=== Failed actions for %s (from %s) ===\n' "${collection}" "${report_path}" >&2

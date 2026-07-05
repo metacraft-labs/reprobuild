@@ -132,13 +132,16 @@ package consumer:
 
   uses:
     "nim"
+    "clang"
     "sh"
     "greetlib"
 
   build:
     let compiled = nim.c(
       source = "src/app.nim",
-      binary = "build/bin/app")
+      binary = "build/bin/app",
+      gccExe = "clang",
+      parallelBuild = 1)
     discard shell(
       command = "mkdir -p build && ./build/bin/app",
       actionId = "consumer.run.app",
@@ -159,11 +162,14 @@ package consumer:
 
   uses:
     "nim"
+    "clang"
 
   build:
     discard nim.c(
       source = "src/app.nim",
-      binary = "build/bin/app")
+      binary = "build/bin/app",
+      gccExe = "clang",
+      parallelBuild = 1)
 """
 
 # ---- Producer-sub-build-scope fix (Bug 1): a pure-Nim LIBRARY producer whose

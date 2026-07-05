@@ -14,7 +14,7 @@
 ##
 ## Per Provider-Compile-Tiering.md §"2a — repro-cmake-trycompile-provider".
 
-import std/[os, strutils, tables]
+import std/[os, tables]
 
 import repro_cmake_trycompile
 import repro_core
