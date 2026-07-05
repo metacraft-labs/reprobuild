@@ -125,6 +125,12 @@ runs:
             if [ -n "${dyld_library_path}" ]; then
               echo "DYLD_LIBRARY_PATH=${dyld_library_path}" >> "${GITHUB_ENV}"
             fi
+            if [ "$(uname -s)" = "Darwin" ]; then
+              sandbox_tools_dir="${GITHUB_WORKSPACE}/.reprobuild-sandbox-tools"
+              mkdir -p "${sandbox_tools_dir}/bin"
+              ln -sf "$(command -v bash)" "${sandbox_tools_dir}/bin/sh"
+              echo "CT_SANDBOX_TOOLS_DIR=${sandbox_tools_dir}" >> "${GITHUB_ENV}"
+            fi
           '
         # `just build` writes to ./build/bin/repro. Surface it on PATH.
         echo "${PWD}/build/bin" >> "$GITHUB_PATH"

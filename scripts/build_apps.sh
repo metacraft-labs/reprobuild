@@ -291,6 +291,16 @@ case "$(uname -s)" in
       fi
     }
 
+    append_clingo_candidate_root() {
+      local root="${1:-}"
+      local version
+      root="${root//\\//}"
+      [ -n "${root}" ] || return 0
+      for version in "${clingo_versions[@]}"; do
+        append_clingo_candidate_dir "${root}/clingo/${version}/bin"
+      done
+    }
+
     clingo_candidate_dirs=()
     clingo_exe="$(command -v clingo.exe 2>/dev/null || true)"
     if [ -n "${clingo_exe}" ]; then
@@ -331,9 +341,20 @@ case "$(uname -s)" in
       fi
     fi
     if [ -n "${windows_diy_root}" ]; then
-      for version in "${clingo_versions[@]}"; do
-        append_clingo_candidate_dir "${windows_diy_root}/clingo/${version}/bin"
-      done
+      append_clingo_candidate_root "${windows_diy_root}"
+    fi
+    if [ -n "${LOCALAPPDATA:-}" ]; then
+      append_clingo_candidate_root "${LOCALAPPDATA}/repo-workspaces/toolchains"
+      append_clingo_candidate_root "${LOCALAPPDATA}/reprobuild/toolchains"
+    fi
+    if [ -n "${USERPROFILE:-}" ]; then
+      append_clingo_candidate_root "${USERPROFILE}/AppData/Local/repo-workspaces/toolchains"
+      append_clingo_candidate_root "${USERPROFILE}/AppData/Local/reprobuild/toolchains"
+    fi
+    if [ -n "${HOME:-}" ]; then
+      append_clingo_candidate_root "${HOME}/AppData/Local/repo-workspaces/toolchains"
+      append_clingo_candidate_root "${HOME}/AppData/Local/reprobuild/toolchains"
+      append_clingo_candidate_root "${HOME}/reprobuild-toolchains"
     fi
 
     clingo_src_dll=""
@@ -349,7 +370,7 @@ case "$(uname -s)" in
       cp -f "${clingo_src_dll}" build/bin/clingo.dll
       echo "Staged clingo.dll from ${clingo_src_dll} -> build/bin/clingo.dll"
     else
-      echo "warning: clingo.dll not found in PATH/CLINGO_PREFIX/WINDOWS_DIY_INSTALL_ROOT candidates; repro.exe will fail to load in a clean shell" >&2
+      echo "warning: clingo.dll not found in PATH/CLINGO_PREFIX/known Windows toolchain roots; repro.exe will fail to load in a clean shell" >&2
     fi
     ;;
 esac
