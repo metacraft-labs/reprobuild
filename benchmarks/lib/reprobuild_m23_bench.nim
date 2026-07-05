@@ -204,6 +204,13 @@ proc benchActionPolicy(): DependencyGatheringPolicy =
   # to the throughput measurement.
   automaticMonitorGatheringPolicy()
 
+proc runtimeLoaderEnv(): seq[string] =
+  for name in ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+               "DYLD_FALLBACK_LIBRARY_PATH"]:
+    let value = getEnv(name)
+    if value.len > 0:
+      result.add(name & "=" & value)
+
 proc benchmarkEngineConfig(cacheRoot, app: string;
                            rebuildMissingOutputsOnCacheHit = true):
     BuildEngineConfig =
@@ -224,6 +231,7 @@ proc benchmarkEngineConfig(cacheRoot, app: string;
 proc runBuildWorkload(app, workRoot, cacheRoot: string; count: int):
     tuple[result: BuildRunResult; millis: float] =
   createDir(workRoot)
+  let runtimeEnv = runtimeLoaderEnv()
   var actions: seq[BuildAction] = @[]
   for i in 0 ..< count:
     actions.add action("wide-" & $i, [app, "fixture-action", "write", "2",
@@ -231,6 +239,7 @@ proc runBuildWorkload(app, workRoot, cacheRoot: string; count: int):
       outputs = ["wide/" & $i & ".txt"], cpuMilli = 100'u32,
       memoryBytes = 4'u64 * 1024'u64 * 1024'u64,
       commandStatsId = "m23-wide-" & $i,
+      env = runtimeEnv,
       dependencyPolicy = benchActionPolicy())
   let start = epochTime()
   result.result = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
@@ -240,6 +249,7 @@ proc runBuildWorkload(app, workRoot, cacheRoot: string; count: int):
 proc runNoopWorkload(app, workRoot, cacheRoot: string; count: int):
     tuple[result: BuildRunResult; millis: float] =
   createDir(workRoot)
+  let runtimeEnv = runtimeLoaderEnv()
   var actions: seq[BuildAction] = @[]
   for i in 0 ..< count:
     actions.add action("noop-" & $i, [app, "fixture-action", "write", "0",
@@ -249,6 +259,7 @@ proc runNoopWorkload(app, workRoot, cacheRoot: string; count: int):
       commandStatsId = "m23-noop-" & $i,
       cacheable = true,
       weakFingerprint = weak("noop-" & $i),
+      env = runtimeEnv,
       dependencyPolicy = benchActionPolicy())
   discard runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   let start = epochTime()
@@ -259,6 +270,7 @@ proc runNoopWorkload(app, workRoot, cacheRoot: string; count: int):
 proc runCacheRestoreWorkload(app, workRoot, cacheRoot: string; count: int):
     tuple[result: BuildRunResult; millis: float] =
   createDir(workRoot)
+  let runtimeEnv = runtimeLoaderEnv()
   let inputPath = workRoot / "cache" / "input.txt"
   writeFixture(inputPath, "cache input\n")
   var actions: seq[BuildAction] = @[]
@@ -272,6 +284,7 @@ proc runCacheRestoreWorkload(app, workRoot, cacheRoot: string; count: int):
       cpuMilli = 100'u32,
       memoryBytes = 4'u64 * 1024'u64 * 1024'u64,
       commandStatsId = "m23-cache-" & $i,
+      env = runtimeEnv,
       dependencyPolicy = benchActionPolicy())
   discard runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   for i in 0 ..< count:
