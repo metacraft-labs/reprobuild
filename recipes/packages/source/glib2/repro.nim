@@ -188,6 +188,10 @@ package glib2Source:
     ## ``meson`` cycle-broken bootstrap floor routes python3 through
     ## stdlib provisioning.
     "python3"
+    ## pkg-config lets meson resolve declared dependency roots such as
+    ## pcre2, libffi, and zlib. With wrap_mode=nofallback, missing
+    ## pkg-config turns dependency probing into a hard not-found error.
+    "pkg-config"
 
   buildDeps:
     ## pcre2 is the regex engine glib's GRegex API delegates to.

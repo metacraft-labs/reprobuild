@@ -120,6 +120,13 @@ suite "glib2Source — from-source recipe smoke test":
     check setupAction.readOnlyRoots == @["./src"]
     check "./src" notin setupAction.declaredOutputs
 
+  test "native build deps include pkg-config for meson dependency probes":
+    let native = registeredNativeBuildDeps("glib2Source")
+    let deps = registeredBuildDeps("glib2Source")
+    check "pkg-config" in native
+    check "pcre2 >=10.34" notin native
+    check "pcre2 >=10.34" in deps
+
   test "artifacts register four libraries":
     # M3 artifact registry: FOUR libraries are registered, each
     # tagged ``dakLibrary``. glib2's meson build emits four shared
