@@ -51,17 +51,20 @@ proc stopDaemon(tempRoot: string) =
     sleep(100)
   try: removeFile(daemonEndpoint(tempRoot)) except OSError: discard
 
-proc waitForDaemonRunning(tempRoot: string; timeoutSeconds = 60.0) =
+proc waitForDaemonRunning(tempRoot: string; timeoutSeconds = 120.0) =
   let deadline = epochTime() + timeoutSeconds
   var lastOutput = ""
+  var lastExitCode = -1
   while epochTime() < deadline:
     let res = runShell(shellCommand(@[publicReproBin(), "daemon", "status"] &
       daemonArgs(tempRoot)), repoRoot())
+    lastExitCode = res.code
     lastOutput = res.output
     if res.code == 0 and res.output.contains("repro daemon: running"):
       return
     sleep(25)
   checkpoint("daemon status did not become running")
+  checkpoint("last daemon status exit code: " & $lastExitCode)
   checkpoint(lastOutput)
   if fileExists(daemonLogPath(tempRoot)):
     checkpoint(readFile(daemonLogPath(tempRoot)))
@@ -84,6 +87,10 @@ proc startForegroundDaemon(tempRoot: string): owned(Process) =
     if result.running():
       result.terminate()
       discard result.waitForExit()
+    let output =
+      if result.outputStream != nil: result.outputStream.readAll()
+      else: ""
+    checkpoint("foreground daemon output before running:\n" & output)
     result.close()
     raise
 

@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Bootstrap-And-Self-Build B5: the legacy shell loop is compressed to
+# project-DSL graph steps. ``.#apps`` builds binaries, ``.#test-helpers``
+# builds helpers, and ``.#test-builds`` compiles every test with the HCR
+# flags baked into the edges. The runquota sibling build and final test runner
+# stay shell-shaped until typed-tool resolver coverage reaches those helpers.
+mkdir -p build build/nimcache test-logs
+rm -rf build/test-bin
+mkdir -p build/test-bin
 
-# Bootstrap-And-Self-Build B5: the original 6-step shell loop
-# (build_apps + build_sibling + build_test_helper x 3 + repro build
-# test + macOS-arm64 HCR rebuild + ct-test-runner) has been compressed
-# to 4 steps. Steps 1, 3, 4, and 5 from the original now flow through
-# the project DSL: ``.#apps`` builds the binaries (B1), ``.#test-helpers``
-# builds the helpers (B2), and ``.#test-builds`` compiles every test
-# (B3) with the macOS-arm64 HCR ``extraPassC`` / ``extraPassL`` flags
-# baked into the build edges (B4) so the standalone HCR re-compile
-# loop is no longer needed. The cross-project runquota build and the
-# test-execute runner stay shell-shaped until the engine's tool-
-# resolver gap closes for ``ct_test_nim_unittest.buildNimUnittest`` and
-# ``python_unittest_runner.pythonUnittest`` — see B4 outcome.
+# Test runs exercise user-facing CLI latency gates, so the app bootstrap and
+# graph-owned app rebuilds must use optimized binaries by default. Developers
+# can still opt into debug apps explicitly with REPROBUILD_BUILD_MODE=debug.
+export REPROBUILD_BUILD_MODE="${REPROBUILD_BUILD_MODE:-release}"
 
-mkdir -p build/test-bin build/nimcache test-logs
+# Tests must not depend on the developer's persistent action cache. Large or
+# stale user-level metadata can dominate memory use in daemon-hosted cache-hit
+# evidence reconstruction, so give this run a clean, reproducible cache root.
+export REPROBUILD_ACTION_CACHE_ROOT="$(pwd)/build/test-action-cache"
+rm -rf "${REPROBUILD_ACTION_CACHE_ROOT}"
+mkdir -p "${REPROBUILD_ACTION_CACHE_ROOT}"
 
 # Local Nix builds of repro link libclingo/libzstd dynamically. Make the
 # freshly bootstrapped ./build/bin/repro usable for every test-run invocation,
@@ -94,6 +99,32 @@ trap _repro_test_daemon_cleanup EXIT
 # Step 1 (B5): bootstrap ./build/bin/repro from nim when missing.
 # Idempotent — the recipe no-ops when the binary already exists.
 just bootstrap
+
+# Provider compilation uses the io-monitor path, so it needs a valid
+# monitor shim before the graph can build the canonical ``.#test-fixtures``
+# shim edge. ``just bootstrap`` only runs ``scripts/build_apps.sh`` when
+# ``build/bin/repro`` is missing; on warm checkouts that can leave a present
+# repro binary with no shim artifact. Seed the shim directly from io-mon here,
+# then let ``.#test-fixtures`` rebuild/verify the graph-owned artifact below.
+bootstrap_monitor_shim() {
+  local io_mon_src="${IO_MON_SRC:-../io-mon}"
+  case "${io_mon_src}" in
+    */src) io_mon_src="${io_mon_src%/src}" ;;
+  esac
+  if [[ ! -x "${io_mon_src}/scripts/build_shim.sh" ]]; then
+    echo "missing io-mon shim builder at ${io_mon_src}/scripts/build_shim.sh; set IO_MON_SRC" >&2
+    return 2
+  fi
+  IO_MON_SHIM_OUT_DIR="$(pwd)/build/lib" \
+  IO_MON_SHIM_NIMCACHE_DIR="$(pwd)/build/nimcache/io-mon-shim" \
+  IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
+    bash "${io_mon_src}/scripts/build_shim.sh"
+}
+printf 'Bootstrapping monitor shim for provider compilation\n' >&2
+bootstrap_monitor_shim > test-logs/monitor-shim-bootstrap.log 2>&1 || {
+  echo "monitor shim bootstrap failed; see test-logs/monitor-shim-bootstrap.log" >&2
+  exit 1
+}
 
 # Step 2 (B5): build the runquota sibling so ``runquotad`` is on
 # PATH before the engine starts. The cross-project ``uses: runquota``
@@ -241,14 +272,12 @@ repro_build_collection() {
 }
 repro_build_collection ".#apps" || exit 1
 repro_build_collection ".#test-helpers" || exit 1
-# Test-Fixtures-In-Build-Graph M2: build the monitor-shim fixture
+# Test-Fixtures-In-Build-Graph M2: rebuild the monitor-shim fixture
 # (``build/lib/librepro_monitor_shim.<ext>``) through the graph before
 # the tests run. ``prepareMonitorTools`` and the three self-shim outlier
 # tests now ``requireBinary`` this artifact instead of compiling it per
-# test. ``just bootstrap`` only runs ``build_apps.sh`` (which also
-# produces the shim) when ``build/bin/repro`` is MISSING, so on a warm
-# checkout the shim would otherwise never be built — this explicit
-# fixture build closes that gap.
+# test. The bootstrap shim above is only the provider-compile seed; this
+# graph edge remains the canonical fixture build the tests consume.
 repro_build_collection ".#test-fixtures" || exit 1
 repro_build_collection ".#test-builds" || exit 1
 
@@ -312,14 +341,18 @@ else
   fi
   # ``--no-build`` skips the runner's own build step (the engine
   # already produced every binary in build/test-bin via Step 2).
-  # Thread count capped at 2 to dodge the runner's known fd-race;
-  # callers can lift via REPROBUILD_TEST_THREADS once the runner fix
-  # lands. ct-test-runner is unaffected and is the preferred path.
+  # The fallback runner defaults to one worker because several heavy e2e
+  # tests capture nested ``repro build`` output until the child exits.
+  # Running two such tests together on a busy shared host can leave both
+  # silent long enough to trip the idle timeout despite real progress.
+  # Callers that want the faster, best-effort local path can still set
+  # REPROBUILD_TEST_THREADS explicitly. ct-test-runner is unaffected and
+  # is the preferred path.
   # ``--test-timeout`` is the D6 per-test SIGKILL deadline; the outer
   # ``timeout`` is the runner-phase wall-clock backstop.
   timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${runner_bin}" \
     --no-build \
-    --threads=${REPROBUILD_TEST_THREADS:-2} \
+    --threads=${REPROBUILD_TEST_THREADS:-1} \
     --test-timeout=${TEST_TIMEOUT} \
     --bin-dir=build/test-bin \
     --summary-json=test-logs/parallel-run.json \

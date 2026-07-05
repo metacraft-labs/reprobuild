@@ -35,12 +35,24 @@
 ## those before invoking ``just build``; an interactive developer gets
 ## them out of the ``nix develop`` shell.
 
-import std/os  # Incremental-Test-Runner M7: getEnv + the `/` path operator
+import std/[os, strutils]
+              # Incremental-Test-Runner M7: getEnv + the `/` path operator
               # for the io-mon / nim-stackable-hooks sibling resolution in the
               # test-fixtures monitor-shim build edge below.
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
 import repro_dsl_stdlib/types
+
+when defined(windows):
+  const CompileTimeIoMonSrc =
+    staticExec("cmd /C if defined IO_MON_SRC (echo %IO_MON_SRC%)").strip()
+  const CompileTimeStackableHooksSrc =
+    staticExec("cmd /C if defined STACKABLE_HOOKS_SRC (echo %STACKABLE_HOOKS_SRC%)").strip()
+else:
+  const CompileTimeIoMonSrc =
+    staticExec("sh -c 'printf %s \"${IO_MON_SRC:-}\"'").strip()
+  const CompileTimeStackableHooksSrc =
+    staticExec("sh -c 'printf %s \"${STACKABLE_HOOKS_SRC:-}\"'").strip()
 
 # Interface extraction compiles this project file without the provider build
 # body. Keep the stdlib typed-value surface visible for generated DSL helpers.
@@ -343,13 +355,57 @@ package reprobuild:
     # the gated build edge still produces a compilable binary on
     # Linux/Windows for any non-runtime CI sweep.
     const hostIsMacos = defined(macosx)
+
+    proc nixRuntimePassLForLibraries(libNames: openArray[string]): seq[string] =
+      ## Some runtime paths are resolved by dlopen() from plain library names.
+      ## Local graph-built binaries are not post-fixed by the flake package's
+      ## patchelf hook, so thread the Nix-provided lib dirs into DT_RPATH when
+      ## the dev shell exposes them.
+      when defined(linux):
+        var libDirs: seq[string] = @[]
+        for token in getEnv("NIX_LDFLAGS").splitWhitespace:
+          if token.startsWith("-L"):
+            let libDir = token[2 .. ^1]
+            for libName in libNames:
+              if fileExists(libDir / libName) and libDir notin libDirs:
+                libDirs.add(libDir)
+        if libDirs.len > 0:
+          result.add("-Wl,--disable-new-dtags")
+          for libDir in libDirs:
+            result.add("-Wl,-rpath," & libDir)
+      else:
+        @[]
+
+    let reproRuntimePassL = nixRuntimePassLForLibraries(@["libclingo.so"])
+    let testRuntimePassL = nixRuntimePassLForLibraries(@["libzstd.so.1"])
+
+    proc resolvedIoMonNimPaths(): seq[string] =
+      var candidates: seq[string] = @[]
+      let fromEnv = getEnv("IO_MON_SRC")
+      if fromEnv.len > 0:
+        candidates.add(fromEnv)
+        if not fromEnv.endsWith("/src") and not fromEnv.endsWith("\\src"):
+          candidates.add(fromEnv / "src")
+      candidates.add(".." / "io-mon" / "src")
+      for candidate in candidates:
+        if fileExists(candidate / "io_mon.nim"):
+          return @[candidate]
+
+    let ioMonNimPaths = resolvedIoMonNimPaths()
+
     for spec in reprobuildTestSpecs:
+      let platformPassC: seq[string] =
+        when hostIsMacos: spec.extraPassC else: newSeq[string]()
+      let platformPassL: seq[string] =
+        when hostIsMacos: spec.extraPassL else: newSeq[string]()
       let edge = buildNimUnittest.build(
         source = spec.source,
         binary = spec.binary,
         defines = spec.defines,
-        extraPassC = (when hostIsMacos: spec.extraPassC else: @[]),
-        extraPassL = (when hostIsMacos: spec.extraPassL else: @[]))
+        paths = ioMonNimPaths,
+        extraPassC = platformPassC,
+        extraPassL = platformPassL & testRuntimePassL,
+        cacheable = false)
       reprobuildTestBuildActions.add(edge.action)
       # B3: emit the EXECUTE edge.
       #
@@ -466,26 +522,53 @@ package reprobuild:
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro/repro.nim",
       binary = "build/bin/repro",
+      defines = @["release"],
+      paths = ioMonNimPaths,
+      passL = reproRuntimePassL,
+      nimcache = "build/nimcache/repro",
+      cacheable = false,
       actionId = "reprobuild.apps.repro"))
+
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-full/repro_full.nim",
+      binary = "build/bin/repro-full",
+      defines = @["release"],
+      paths = ioMonNimPaths,
+      passL = reproRuntimePassL,
+      nimcache = "build/nimcache/repro-full",
+      cacheable = false,
+      actionId = "reprobuild.apps.repro-full"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim",
       binary = "build/bin/repro-peer-cache-tier2",
+      defines = @["release"],
+      nimcache = "build/nimcache/repro-peer-cache-tier2",
+      cacheable = false,
       actionId = "reprobuild.apps.repro-peer-cache-tier2"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-peer-cache-admin/repro_peer_cache_admin.nim",
       binary = "build/bin/repro-peer-cache-admin",
+      defines = @["release"],
+      nimcache = "build/nimcache/repro-peer-cache-admin",
+      cacheable = false,
       actionId = "reprobuild.apps.repro-peer-cache-admin"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-peer-cache-mint-cert/repro_peer_cache_mint_cert.nim",
       binary = "build/bin/repro-peer-cache-mint-cert",
+      defines = @["release"],
+      nimcache = "build/nimcache/repro-peer-cache-mint-cert",
+      cacheable = false,
       actionId = "reprobuild.apps.repro-peer-cache-mint-cert"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-cmake-dyndep-fragment/repro_cmake_dyndep_fragment.nim",
       binary = "build/bin/repro-cmake-dyndep-fragment",
+      defines = @["release"],
+      nimcache = "build/nimcache/repro-cmake-dyndep-fragment",
+      cacheable = false,
       actionId = "reprobuild.apps.repro-cmake-dyndep-fragment"))
 
     # Provider-mode entries carry ``-d:reproProviderMode`` per the
@@ -493,13 +576,17 @@ package reprobuild:
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-cmake-trycompile-provider/repro_cmake_trycompile_provider.nim",
       binary = "build/bin/repro-cmake-trycompile-provider",
-      defines = @["reproProviderMode"],
+      nimcache = "build/nimcache/repro-cmake-trycompile-provider",
+      defines = @["release", "reproProviderMode"],
+      cacheable = false,
       actionId = "reprobuild.apps.repro-cmake-trycompile-provider"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-standard-provider/repro_standard_provider.nim",
       binary = "build/bin/repro-standard-provider",
-      defines = @["reproProviderMode"],
+      nimcache = "build/nimcache/repro-standard-provider",
+      defines = @["release", "reproProviderMode"],
+      cacheable = false,
       actionId = "reprobuild.apps.repro-standard-provider"))
 
     discard collect("apps", reprobuildAppsActions)
@@ -533,16 +620,22 @@ package reprobuild:
     reprobuildTestHelpersActions.add(nim.c(
       source = "tests/fixtures/local-daemons-control-plane/live-endpoint-helper/live_endpoint_helper.nim",
       binary = "build/test-bin/live_endpoint_helper",
+      nimcache = "build/nimcache/live_endpoint_helper",
+      cacheable = false,
       actionId = "reprobuild.test_helpers.live_endpoint_helper"))
 
     reprobuildTestHelpersActions.add(nim.c(
       source = "tests/fixtures/local-daemons-control-plane/fake-protocol-daemon-helper/fake_protocol_daemon_helper.nim",
       binary = "build/test-bin/fake_protocol_daemon_helper",
+      nimcache = "build/nimcache/fake_protocol_daemon_helper",
+      cacheable = false,
       actionId = "reprobuild.test_helpers.fake_protocol_daemon_helper"))
 
     reprobuildTestHelpersActions.add(nim.c(
       source = "tests/e2e/home-generations/harness_apply_lock_holder.nim",
       binary = "build/test-bin/harness_apply_lock_holder",
+      nimcache = "build/nimcache/harness_apply_lock_holder",
+      cacheable = false,
       actionId = "reprobuild.test_helpers.harness_apply_lock_holder"))
 
     # Binary-cache integration-test subprocess helpers (A2/A2.5/A3/A4).
@@ -558,18 +651,33 @@ package reprobuild:
     # here as ordinary graph edges materialises both on every platform
     # via ``repro build .#test-helpers``.
     #
-    # The CLI carries ``-d:ssl`` because it links ``std/httpclient`` for
-    # the HTTPS substitute path (the server itself only serves over
-    # ``std/asynchttpserver`` and needs no ssl define).
+    # ``repro_binary_cache`` stays plain for A2-A4 HTTP gates, while the
+    # M6 helper carries ``-d:ssl`` because that gate exercises the daemon's
+    # HTTPS listener with real TLS.
     reprobuildTestHelpersActions.add(nim.c(
       source = "apps/repro-binary-cache/repro_binary_cache.nim",
       binary = "build/test-bin/repro_binary_cache",
+      passL = testRuntimePassL,
+      nimcache = "build/nimcache/repro_binary_cache",
+      cacheable = false,
       actionId = "reprobuild.test_helpers.repro_binary_cache"))
+
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "apps/repro-binary-cache/repro_binary_cache.nim",
+      binary = "build/test-bin/repro_binary_cache_m6",
+      defines = @["ssl"],
+      passL = testRuntimePassL,
+      nimcache = "build/nimcache/repro_binary_cache_m6",
+      cacheable = false,
+      actionId = "reprobuild.test_helpers.repro_binary_cache_m6"))
 
     reprobuildTestHelpersActions.add(nim.c(
       source = "apps/repro-binary-cache-client/repro_binary_cache_client_cli.nim",
       binary = "build/test-bin/repro_binary_cache_client_cli",
       defines = @["ssl"],
+      passL = testRuntimePassL,
+      nimcache = "build/nimcache/repro_binary_cache_client_cli",
+      cacheable = false,
       actionId = "reprobuild.test_helpers.repro_binary_cache_client_cli"))
 
     discard collect("test-helpers", reprobuildTestHelpersActions)
@@ -604,11 +712,18 @@ package reprobuild:
     var reprobuildTestFixturesActions: seq[BuildActionDef] = @[]
 
     let ioMonSrc = block:
-      let fromEnv = getEnv("IO_MON_SRC")
+      let fromEnv = CompileTimeIoMonSrc
       if fromEnv.len > 0: fromEnv else: ".." / "io-mon" / "src"
     let stackableHooksSrc = block:
-      let fromEnv = getEnv("STACKABLE_HOOKS_SRC")
+      let fromEnv = CompileTimeStackableHooksSrc
       if fromEnv.len > 0: fromEnv else: ".." / "nim-stackable-hooks" / "src"
+    let monitorShimNimcache = "build/nimcache/repro_monitor_shim"
+    # The fixture builds the preload monitor itself. Running that compiler
+    # process under the same preload shim can trigger host compiler ICEs; keep
+    # the edge non-cacheable and avoid monitor wrapping rather than recording
+    # incomplete or unstable evidence.
+    let monitorShimPolicy =
+      makeDepfilePolicy(monitorShimNimcache / "nim-compile.d")
 
     when defined(macosx):
       const macosShimArchFlags =
@@ -624,6 +739,9 @@ package reprobuild:
         paths = @[ioMonSrc, stackableHooksSrc],
         passC = macosShimArchFlags,
         passL = macosShimArchFlags,
+        nimcache = monitorShimNimcache,
+        cacheable = false,
+        dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
     elif defined(windows):
       # The Windows shim imports the stackable-hooks framework primitives;
@@ -635,6 +753,9 @@ package reprobuild:
         appLib = true,
         threadsOn = true,
         paths = @[ioMonSrc, stackableHooksSrc],
+        nimcache = monitorShimNimcache,
+        cacheable = false,
+        dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
     else:
       # The Linux shim exports a version-scripted, interposed ``dlsym``
@@ -644,14 +765,18 @@ package reprobuild:
       # io-mon's ``build_shim.sh`` passes it via ``--version-script``; mirror it
       # here or the fixture link fails with "version node not found for symbol
       # dlsym@GLIBC_2.2.5 / failed to set dynamic section sizes".
+      let linuxShimVersionScript =
+        ioMonSrc / "io_mon" / "hooks" / "linux_preload_versions.map"
       reprobuildTestFixturesActions.add(nim.c(
         source = ioMonSrc / "io_mon" / "shim" / "linux_preload.nim",
         binary = "build/lib/librepro_monitor_shim.so",
         appLib = true,
         threadsOn = true,
         paths = @[ioMonSrc, stackableHooksSrc],
-        passL = @["-Wl,--version-script=" &
-          (ioMonSrc / "io_mon" / "hooks" / "linux_preload_versions.map")],
+        passL = @["-Wl,--version-script=" & linuxShimVersionScript],
+        nimcache = monitorShimNimcache,
+        cacheable = false,
+        dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
 
     discard collect("test-fixtures", reprobuildTestFixturesActions)

@@ -239,8 +239,11 @@ suite "M83 Phase C: profileCompileBuildAction":
     check "--manifest" in act.argv
     check "--nimcache" in act.argv
     check "--repo-root" in act.argv
+    check "--depfile" in act.argv
     check "/profile/home.nim" in act.argv
     check "/cache/abc.rbpi" in act.argv
+    check "/cache/abc.source.txt.d" in act.argv
+    check act.depfile == "/cache/abc.source.txt.d"
     check act.outputs == @["/cache/abc.rbpi", "/cache/abc.source.txt"]
     check act.inputs.len == 2
 

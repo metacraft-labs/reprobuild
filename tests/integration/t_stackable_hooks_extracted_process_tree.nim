@@ -267,10 +267,13 @@ int main(int argc, char **argv) {
         let fromEnv = getEnv("STACKABLE_HOOKS_SRC")
         if fromEnv.len > 0: fromEnv
         else: root.parentDir / "nim-stackable-hooks" / "src"
+      let versionScript =
+        ioMonSrc / "io_mon" / "hooks" / "linux_preload_versions.map"
       let command =
         "nim c --app:lib --threads:on " &
         "--path:" & quoteShell(ioMonSrc) & " " &
         "--path:" & quoteShell(stackableHooksSrc) & " " &
+        "--passL:" & quoteShell("-Wl,--version-script=" & versionScript) & " " &
         "--nimcache:" & quoteShell(root / "build/nimcache/integration-linux-stackable-runtime") & " " &
         "--out:" & quoteShell(outPath) & " " &
         quoteShell(sourcePath)

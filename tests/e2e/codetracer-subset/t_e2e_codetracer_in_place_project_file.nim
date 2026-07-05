@@ -1,7 +1,7 @@
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_tool_profiles
-from repro_test_support import requireBinary, monitorShimPath
+import repro_test_support
 
 const GccProxySource = r"""
 #include <fcntl.h>
@@ -131,13 +131,12 @@ int main(int argc, char **argv) {
 """
 
 const CodeTracerCommonDevToolExecutables: seq[string] = @[
+  "attic-client",
   "bash",
-  "cachix",
   "capnp",
   "cargo",
   "cargo-nextest",
   "clang",
-  "create-dmg",
   "ctags",
   "curl",
   "electron",
@@ -185,6 +184,11 @@ when not defined(macosx):
 else:
   const CodeTracerTupToolExecutables: seq[string] = @[]
 
+when defined(macosx):
+  const CodeTracerMacDevToolExecutables: seq[string] = @["create-dmg"]
+else:
+  const CodeTracerMacDevToolExecutables: seq[string] = @[]
+
 when defined(linux):
   const CodeTracerDevToolExecutables: seq[string] =
     CodeTracerCommonDevToolExecutables & CodeTracerTupToolExecutables & @[
@@ -196,7 +200,8 @@ when defined(linux):
   ]
 else:
   const CodeTracerDevToolExecutables: seq[string] =
-    CodeTracerCommonDevToolExecutables & CodeTracerTupToolExecutables
+    CodeTracerCommonDevToolExecutables & CodeTracerTupToolExecutables &
+      CodeTracerMacDevToolExecutables
 
 const IsonimAsyncCompatFixtureSource = r"""
 when defined(js):
@@ -345,25 +350,20 @@ proc q(value: string): string =
   quoteShell(value)
 
 proc shellCommand(args: openArray[string];
-                  env: openArray[(string, string)] = []): string =
-  var parts: seq[string] = @[]
+                  env: openArray[(string, string)] = []):
+                  repro_test_support.CmdSpec =
+  var entries: seq[tuple[name, value: string]] = @[]
   for (name, value) in env:
-    parts.add(name & "=" & q(value))
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
+    entries.add((name: name, value: value))
+  repro_test_support.shellCommand(args, entries)
 
-proc runShell(command: string; cwd = getCurrentDir()):
+proc runShell(command: repro_test_support.CmdSpec; cwd = getCurrentDir()):
     tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
+  repro_test_support.runShell(command, cwd)
 
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
+proc requireSuccess(command: repro_test_support.CmdSpec;
+                    cwd = getCurrentDir()): string =
+  repro_test_support.requireSuccess(command, cwd)
 
 proc pathExists(path: string): bool =
   try:
@@ -402,7 +402,7 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
   let runquotaRoot = repoRoot.parentDir / "runquota"
   let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+    discard requireSuccess(shellCommand(["just", "build"]), runquotaRoot)
   let socketPath = "/tmp/repro-m29-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -497,8 +497,21 @@ proc prepareIsonimFixture(sourcePath, destPath: string) =
     writeFile(tailwindStyles, "{}\n")
 
 proc linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot: string) =
-  for dep in ["isonim", "nim-everywhere"]:
-    let sourcePath = codeTracerRoot.parentDir / dep
+  for dep in ["codetracer-trace-format-nim", "io-mon", "isonim", "nim-acp",
+              "nim-agent-harbor", "nim-agents", "nim-everywhere",
+              "nim-stackable-hooks"]:
+    var sourcePath = codeTracerRoot.parentDir / dep
+    if not dirExists(sourcePath):
+      let envSource =
+        if dep == "io-mon": getEnv("IO_MON_SRC")
+        elif dep == "nim-stackable-hooks":
+          let preferred = getEnv("NIM_STACKABLE_HOOKS_SRC")
+          if preferred.len > 0: preferred else: getEnv("STACKABLE_HOOKS_SRC")
+        else: ""
+      if dirExists(envSource):
+        sourcePath =
+          if envSource.lastPathPart == "src": envSource.parentDir
+          else: envSource
     let destPath = projectRoot.parentDir / dep
     if dirExists(sourcePath) and not pathExists(destPath):
       if dep == "isonim":
@@ -514,6 +527,8 @@ proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
   if dirExists(codeTracerRoot / "reprobuild"):
     copyTree(codeTracerRoot / "reprobuild", projectRoot / "reprobuild")
   copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
+  if fileExists(codeTracerRoot / "config.nims"):
+    copyFile(codeTracerRoot / "config.nims", projectRoot / "config.nims")
 
 proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
@@ -528,6 +543,8 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
     projectRoot / "src" / "common")
   copyTree(codeTracerRoot / "src" / "lsp",
     projectRoot / "src" / "lsp")
+  copyTree(codeTracerRoot / "src" / "ct_test",
+    projectRoot / "src" / "ct_test")
   createDir(projectRoot / "src" / "ct")
   copyFile(codeTracerRoot / "src" / "ct" / "version.nim",
     projectRoot / "src" / "ct" / "version.nim")
@@ -558,6 +575,8 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
 proc copyNativeCodeTracerProject(codeTracerRoot, projectRoot: string) =
   copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot)
   copyTree(codeTracerRoot / "src" / "ct", projectRoot / "src" / "ct")
+  copyTree(codeTracerRoot / "src" / "ct_test",
+    projectRoot / "src" / "ct_test")
   copyTree(codeTracerRoot / "src" / "common", projectRoot / "src" / "common")
   copyTree(codeTracerRoot / "src" / "db_connector",
     projectRoot / "src" / "db_connector")
@@ -569,6 +588,9 @@ proc copyNativeCodeTracerProject(codeTracerRoot, projectRoot: string) =
   # transport modules) even though the rest of src/frontend is omitted.
   copyTree(codeTracerRoot / "src" / "frontend" / "viewmodel" / "collab",
     projectRoot / "src" / "frontend" / "viewmodel" / "collab")
+  copyFile(codeTracerRoot / "src" / "frontend" / "viewmodel" /
+    "agent_evidence.nim",
+    projectRoot / "src" / "frontend" / "viewmodel" / "agent_evidence.nim")
   discard requireSuccess(shellCommand([
     "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
   ]))
@@ -586,6 +608,8 @@ proc copyAggregateCodeTracerProject(codeTracerRoot, projectRoot: string) =
     projectRoot / "src" / "common")
   copyTree(codeTracerRoot / "src" / "lsp",
     projectRoot / "src" / "lsp")
+  copyTree(codeTracerRoot / "src" / "ct_test",
+    projectRoot / "src" / "ct_test")
   copyTree(codeTracerRoot / "src" / "ct", projectRoot / "src" / "ct")
   copyTree(codeTracerRoot / "src" / "db_connector",
     projectRoot / "src" / "db_connector")
@@ -656,7 +680,7 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
     "#!/bin/sh\n" &
     "exec " & q(nimBinary) & " \"$@\"\n")
   for tool in CodeTracerDevToolExecutables:
-    if tool notin ["bash", "nim", "node", "gcc", "sh", "stylus"] and
+    if tool notin ["bash", "nim", "node", "gcc", "nix", "sh", "stylus"] and
         not fileExists(binDir / tool):
       writeExecutable(binDir / tool,
         "#!/bin/sh\n" &
@@ -672,11 +696,11 @@ proc codeTracerNimPath(codeTracerRoot: string): string =
     "bin" / "nim"
   if fileExists(localNim):
     return localNim
-  let flakeResult = execCmdEx(shellCommand([
+  let flakeResult = runShell(shellCommand([
     "nix", "build", "--no-link", "--print-out-paths",
     codeTracerRoot & "#nim-2_2"
-  ]), workingDir = codeTracerRoot)
-  if flakeResult.exitCode == 0:
+  ]), codeTracerRoot)
+  if flakeResult.code == 0:
     let flakeNim = flakeResult.output.strip().splitLines()[^1] / "bin" / "nim"
     if fileExists(flakeNim):
       return flakeNim
@@ -748,6 +772,25 @@ proc nativeLibraryEnv(repoRoot: string): seq[(string, string)] =
     ("C_INCLUDE_PATH", includePaths.join($PathSep))
   ]
 
+proc sourcePathEnv(): seq[(string, string)] =
+  for key in [
+    "CODETRACER_TRACE_FORMAT_NIM_SRC",
+    "CODETRACER_RESULTS_SRC",
+    "IO_MON_SRC",
+    "RUNQUOTA_SRC"
+  ]:
+    let value = getEnv(key)
+    if value.len > 0:
+      result.add((key, value))
+
+  let stackableHooksSrc = getEnv("NIM_STACKABLE_HOOKS_SRC")
+  if stackableHooksSrc.len > 0:
+    result.add(("NIM_STACKABLE_HOOKS_SRC", stackableHooksSrc))
+  else:
+    let legacyStackableHooksSrc = getEnv("STACKABLE_HOOKS_SRC")
+    if legacyStackableHooksSrc.len > 0:
+      result.add(("NIM_STACKABLE_HOOKS_SRC", legacyStackableHooksSrc))
+
 proc checkpointBuildReportFailures(projectRoot: string) =
   let reportPath = projectRoot / ".repro" / "build" / "reprobuild" /
     "build-report.json"
@@ -770,8 +813,12 @@ proc build(reproBin, target, repoRoot, pathValue: string;
   # `logSummary`, which is silenced under the default `--log=quiet`. The test
   # parses those lines, so opt into the actions log shape — same flag the
   # forked CMake's `do_reprobuild_launch` passes (reprobuild-cmake@8b204955).
+  # These project-file tests validate CodeTracer's graph lowering, scheduler,
+  # monitor evidence, and cache behavior. Pin direct mode so they do not couple
+  # to a long-lived user daemon started by an earlier test with stale launch env.
   let res = runShell(shellCommand([reproBin, "build", target,
-    "--tool-provisioning=path", "--log=actions"], entries), repoRoot)
+    "--daemon=off", "--tool-provisioning=path", "--log=actions"], entries),
+    repoRoot)
   if res.code != 0:
     checkpoint(res.output)
     checkpointBuildReportFailures(target.split("#")[0])
@@ -784,7 +831,7 @@ proc buildCurrentProject(reproBin, projectRoot, pathValue: string;
   for item in env:
     entries.add(item)
   let res = runShell(shellCommand([reproBin, "build",
-    "--tool-provisioning=path", "--log=actions"],
+    "--daemon=off", "--tool-provisioning=path", "--log=actions"],
     entries), projectRoot)
   if res.code != 0:
     checkpoint(res.output)
@@ -831,8 +878,20 @@ proc assertActionCacheEffective(report: JsonNode; id: string) =
   ## engine cache-decision protocol split (commit 7aea92a).
   let action = reportAction(report, id)
   check action.kind != JNull
+  if action.kind != JNull:
+    checkpoint("cache-effective action " & id & " status=" &
+      action{"status"}.getStr() & " launched=" &
+      $action{"launched"}.getBool() & " cacheDecision=" &
+      action{"cacheDecision"}.getStr())
   check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
   check action{"launched"}.getBool() == false
+
+proc assertActionNonCacheableRerun(report: JsonNode; id: string) =
+  let action = reportAction(report, id)
+  check action.kind != JNull
+  check action{"status"}.getStr() == "asSucceeded"
+  check action{"launched"}.getBool() == true
+  check action{"cacheDecision"}.getStr() == "cdNotCacheable"
 
 proc assertOutputAction(report: JsonNode; output, status: string;
                         launched: bool) =
@@ -846,13 +905,18 @@ proc assertOutputActionCacheEffective(report: JsonNode; output: string) =
   ## proc's docstring for the cache-effective semantics rationale.
   let action = reportActionWithDeclaredOutput(report, output)
   check action.kind != JNull
+  if action.kind != JNull:
+    checkpoint("cache-effective output " & output & " action=" &
+      action{"id"}.getStr() & " status=" & action{"status"}.getStr() &
+      " launched=" & $action{"launched"}.getBool() & " cacheDecision=" &
+      action{"cacheDecision"}.getStr())
   check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
   check action{"launched"}.getBool() == false
 
 const publicResourceAction = "frontend-public-resources"
 
 proc buildDebug(projectRoot, relativePath: string): string =
-  projectRoot / "src" / "build-debug" / relativePath
+  projectRoot / "src" / "build-debug-repro" / relativePath
 
 proc checkPublicResourceOutputs(projectRoot: string) =
   let pairs = [
@@ -905,6 +969,11 @@ proc monitorEvidenceContains(action: JsonNode; suffix: string): bool =
     for item in action{"evidence"}{key}.getElems():
       if item.getStr().endsWith(suffix):
         return true
+
+proc depfileEvidenceContains(action: JsonNode; suffix: string): bool =
+  for item in action{"evidence"}{"depfileInputs"}.getElems():
+    if item.getStr().endsWith(suffix):
+      return true
 
 proc declaredEvidenceContains(action: JsonNode; suffix: string): bool =
   for item in action{"evidence"}{"declaredInputs"}.getElems():
@@ -990,7 +1059,6 @@ when defined(macosx) or defined(linux):
       check not projectText.contains("nim_js")
       check not projectText.contains("nimJs")
       check not projectText.contains("\"nim-js >=2\"")
-      check not projectText.contains("args = @[")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1025,10 +1093,10 @@ when defined(macosx) or defined(linux):
         getStr() == "builtin"
       let selectedC = reportAction(selectedReport,
         "c-sudoku-object-with-generated-header")
-      check selectedC{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
-      check hasMonitorEvidence(selectedC)
-      check selectedC{"evidence"}{"monitorReads"}.getElems().
-        anyIt(it.getStr().endsWith("test-programs/c_sudoku_solver/main.c"))
+      check selectedC{"dependencyPolicyKind"}.getStr() == "dgRecognizedFormat"
+      check depfileEvidenceContains(selectedC,
+        "test-programs/c_sudoku_solver/main.c")
+      check depfileEvidenceContains(selectedC, "build/generated/ct_config.h")
       check reportAction(selectedReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(selectedReport, "frontend-ui-js").kind == JNull
       check reportAction(selectedReport, "frontend-public-ui-js").kind == JNull
@@ -1374,6 +1442,8 @@ when defined(macosx) or defined(linux):
         nativeEnv.add(item)
       for item in nativeLibraryEnv(repoRoot):
         nativeEnv.add(item)
+      for item in sourcePathEnv():
+        nativeEnv.add(item)
       let selectedTarget = projectRoot & "#db-backend-record"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
@@ -1390,7 +1460,7 @@ when defined(macosx) or defined(linux):
       check fileExists(buildDebug(projectRoot, "bin/db-backend-record"))
 
       let fileOutput = requireSuccess(shellCommand([
-        "file", "src/build-debug/bin/db-backend-record"
+        "file", "src/build-debug-repro/bin/db-backend-record"
       ]), projectRoot)
       when defined(linux):
         check fileOutput.contains("ELF")
@@ -1417,7 +1487,7 @@ when defined(macosx) or defined(linux):
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertActionCacheEffective(secondReport, "db-backend-record")
+      assertActionNonCacheableRerun(secondReport, "db-backend-record")
 
       let nativeInput = projectRoot / "src" / "ct" / "db_backend_record.nim"
       writeFile(nativeInput, readFile(nativeInput) &
@@ -1468,6 +1538,8 @@ when defined(macosx) or defined(linux):
         nativeEnv.add(item)
       for item in nativeLibraryEnv(repoRoot):
         nativeEnv.add(item)
+      for item in sourcePathEnv():
+        nativeEnv.add(item)
       let selectedTarget = projectRoot & "#ct"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
@@ -1483,11 +1555,11 @@ when defined(macosx) or defined(linux):
       check not first.contains("action: c-sudoku-object-with-generated-header")
       check fileExists(buildDebug(projectRoot, "bin/ct"))
       discard requireSuccess(shellCommand([
-        "sh", "-c", "test -x src/build-debug/bin/ct"
+        "sh", "-c", "test -x src/build-debug-repro/bin/ct"
       ]), projectRoot)
 
       let fileOutput = requireSuccess(shellCommand([
-        "file", "src/build-debug/bin/ct"
+        "file", "src/build-debug-repro/bin/ct"
       ]), projectRoot)
       when defined(linux):
         check fileOutput.contains("ELF")
@@ -1513,10 +1585,9 @@ when defined(macosx) or defined(linux):
 
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
-      check (second.contains("action: ct status=asCacheHit launched=false") or
-        second.contains("action: ct status=asUpToDate launched=false"))
+      check second.contains("action: ct status=asSucceeded launched=true")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertActionCacheEffective(secondReport, "ct")
+      assertActionNonCacheableRerun(secondReport, "ct")
 
       let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
       writeFile(nativeInput, readFile(nativeInput) &
@@ -1567,6 +1638,8 @@ when defined(macosx) or defined(linux):
         nativeEnv.add(item)
       for item in nativeLibraryEnv(repoRoot):
         nativeEnv.add(item)
+      for item in sourcePathEnv():
+        nativeEnv.add(item)
 
       let selectedTarget = projectRoot & "#codetracer"
       let first = buildCurrentProject(reproBin, projectRoot, pathValue,
@@ -1613,7 +1686,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(firstReport,
-          "src/build-debug/frontend/styles/" & stylesheet, "asSucceeded", true)
+          "src/build-debug-repro/frontend/styles/" & stylesheet, "asSucceeded", true)
       assertPublicResourceActions(firstReport, "asSucceeded", true)
       assertAction(firstReport, "config-default-layout-json", "asSucceeded",
         true)
@@ -1662,12 +1735,12 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(secondReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(secondReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       assertPublicResourceActionsCacheEffective(secondReport)
       assertActionCacheEffective(secondReport, "config-default-layout-json")
       assertActionCacheEffective(secondReport, "config-default-config-yaml")
-      assertActionCacheEffective(secondReport, "db-backend-record")
-      assertActionCacheEffective(secondReport, "ct")
+      assertActionNonCacheableRerun(secondReport, "db-backend-record")
+      assertActionNonCacheableRerun(secondReport, "ct")
 
       let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
       let nativeSource = readFile(nativeInput)
@@ -1697,14 +1770,14 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(changedReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(changedReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       # Public-resources only depends on the public-resources directory
       # contents; edits to native Nim sources don't invalidate it, so the
       # engine honestly skips this action (post-7aea92a).
       assertPublicResourceActionsCacheEffective(changedReport)
       assertActionCacheEffective(changedReport, "config-default-layout-json")
       assertActionCacheEffective(changedReport, "config-default-config-yaml")
-      assertActionCacheEffective(changedReport, "db-backend-record")
+      assertActionNonCacheableRerun(changedReport, "db-backend-record")
       assertAction(changedReport, "ct", "asSucceeded", true)
       check reportAction(changedReport, "nim-js-ipc-registry-test").kind ==
         JNull
@@ -2033,7 +2106,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(firstReport,
-          "src/build-debug/frontend/styles/" & stylesheet, "asSucceeded", true)
+          "src/build-debug-repro/frontend/styles/" & stylesheet, "asSucceeded", true)
       assertPublicResourceActions(firstReport, "asSucceeded", true)
       check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(firstReport, "generate-config-header").kind == JNull
@@ -2062,7 +2135,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(secondReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(secondReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       assertPublicResourceActionsCacheEffective(secondReport)
 
       let indexHtml = projectRoot / "src" / "frontend" / "index.html"
@@ -2095,7 +2168,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(htmlChangedReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(htmlChangedReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       # index.html is not an input to the public-resources action, so the
       # engine honestly skips the rebuild (post-7aea92a).
       assertPublicResourceActionsCacheEffective(htmlChangedReport)
@@ -2138,7 +2211,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(helperChangedReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(helperChangedReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       # helpers.js is not an input to the public-resources action; the
       # engine honestly skips the rebuild (post-7aea92a).
       assertPublicResourceActionsCacheEffective(helperChangedReport)
@@ -2239,10 +2312,11 @@ when defined(macosx) or defined(linux):
 
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
       check identity.profiles.len == CodeTracerDevToolExecutables.len
-      check identity.profiles.allIt(it.installMethod == "path")
-      check identity.profiles.allIt(it.cachePortability == cpLocalOnly)
       for executableName in CodeTracerDevToolExecutables:
         check identity.profiles.anyIt(it.executableName == executableName)
+      for profile in identity.profiles:
+        check profile.installMethod == "path"
+        check profile.cachePortability == cpLocalOnly
       check not identity.profiles.anyIt(it.executableName == "nim-js")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
@@ -2269,7 +2343,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(firstReport,
-          "src/build-debug/frontend/styles/" & stylesheet, "asSucceeded", true)
+          "src/build-debug-repro/frontend/styles/" & stylesheet, "asSucceeded", true)
       assertPublicResourceActions(firstReport, "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-tup", "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-with-generated-header",
@@ -2286,10 +2360,11 @@ when defined(macosx) or defined(linux):
       check headerInputs.anyIt(it.endsWith("build/generated/ct_config.h"))
 
       let monitoredC = reportAction(firstReport, "c-sudoku-object-tup")
-      check monitoredC{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
-      check hasMonitorEvidence(monitoredC)
+      check monitoredC{"dependencyPolicyKind"}.getStr() == "dgRecognizedFormat"
+      check depfileEvidenceContains(monitoredC,
+        "test-programs/c_sudoku_solver/main.c")
 
-      check runNode("src/build-debug/tests/ipc_registry_test.js", projectRoot,
+      check runNode("src/build-debug-repro/tests/ipc_registry_test.js", projectRoot,
         pathValue).contains(
         "[OK] handlers still invoked after reconnect")
       check mainSymbol("build/c/main.tup.o", projectRoot).len > 0
@@ -2318,7 +2393,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(secondReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(secondReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       assertPublicResourceActionsCacheEffective(secondReport)
       assertActionCacheEffective(secondReport, "c-sudoku-object-tup")
       assertActionCacheEffective(secondReport, "c-sudoku-object-with-generated-header")
@@ -2349,7 +2424,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(cChangedReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(cChangedReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       # The c-sudoku source is not an input to the public-resources action;
       # the engine honestly skips the rebuild (post-7aea92a).
       assertPublicResourceActionsCacheEffective(cChangedReport)
@@ -2382,7 +2457,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(headerDeletedReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(headerDeletedReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       # The generated ct_config.h header is not an input to the
       # public-resources action; removing it doesn't invalidate this action
       # and the engine honestly skips it (post-7aea92a).

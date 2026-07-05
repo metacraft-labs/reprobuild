@@ -13,6 +13,7 @@
 ##     --manifest <output-source-manifest-path>
 ##     --nimcache <nimcache-dir>
 ##     --repo-root <reprobuild-repo-root>
+##     [--depfile <output-make-depfile-path>]
 ##     [--verbose]
 ##
 ## All paths must be absolute. The helper exits 0 on success and 1
@@ -41,6 +42,34 @@ proc hasFlag(args: openArray[string]; flag: string): bool =
       return true
   false
 
+proc makeDepPath(path: string): string =
+  ## Escape just the separators the local make-depfile parser treats as
+  ## token delimiters. Paths produced here are absolute and may contain spaces
+  ## in user profiles, so keep this writer conservative.
+  for ch in path:
+    case ch
+    of ' ', '\t', ':', '\\', '#', '$':
+      result.add('\\')
+      result.add(ch)
+    else:
+      result.add(ch)
+
+proc writeProfileCompileDepfile(path: string; outputs, inputs: openArray[string]) =
+  if path.len == 0:
+    return
+  createDir(extendedPath(path.parentDir))
+  var text = ""
+  for i, output in outputs:
+    if i > 0:
+      text.add(' ')
+    text.add(makeDepPath(output))
+  text.add(":")
+  for input in inputs:
+    text.add(' ')
+    text.add(makeDepPath(input))
+  text.add('\n')
+  writeFile(extendedPath(path), text)
+
 proc runProfileCompileHelper*(args: openArray[string]): int =
   ## Implementation of `repro __repro-compile-profile`. See module docs.
   let profileRoot = valueAfterFlag(args, "--profile")
@@ -48,6 +77,7 @@ proc runProfileCompileHelper*(args: openArray[string]): int =
   let manifestPath = valueAfterFlag(args, "--manifest")
   let nimcacheDir = valueAfterFlag(args, "--nimcache")
   let repoRoot = valueAfterFlag(args, "--repo-root")
+  let depfilePath = valueAfterFlag(args, "--depfile")
   let verbose = hasFlag(args, "--verbose")
 
   for (name, value) in [
@@ -110,4 +140,12 @@ proc runProfileCompileHelper*(args: openArray[string]): int =
 
   writeBytesAtomic(rbpiPath, rbpiBytes)
   writeFile(extendedPath(manifestPath), digest.manifest)
+  var depInputs = sources
+  let repoConfig = repoRoot / "config.nims"
+  if fileExists(extendedPath(repoConfig)):
+    depInputs.add(repoConfig)
+  for path in profileNimPaths(repoRoot):
+    if fileExists(extendedPath(path)) or dirExists(extendedPath(path)):
+      depInputs.add(path)
+  writeProfileCompileDepfile(depfilePath, [rbpiPath, manifestPath], depInputs)
   return 0

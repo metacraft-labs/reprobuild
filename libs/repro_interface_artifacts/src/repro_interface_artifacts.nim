@@ -148,6 +148,7 @@ type
     compileEdge*: ProviderCompileEdge
     interfaceFingerprint*: ContentDigest
     providerFingerprint*: ContentDigest
+    workDir*: string
 
   ProviderCompileArtifact* = object
     inputSources*: seq[string]
@@ -187,11 +188,14 @@ type
 
   ProviderFreshnessCacheRecord = object
     modulePath: string
+    workDir: string
     outputBinaryPath: string
     sourceStamps: seq[FileStamp]
+    reproLibStamps: seq[FileStamp]
     outputBinaryStamp: FileStamp
     interfaceFingerprint: ContentDigest
     providerFingerprint: ContentDigest
+    reproLibFingerprint: string
     outputBinaryFingerprint: ContentDigest
 
   InterfaceArtifactWarmStats* = object
@@ -245,7 +249,7 @@ const
   InterfaceExtractionCacheRecordMagic =
     "reprobuild.interfaceExtractionCache.v2"
   ProviderFreshnessCacheRecordMagic =
-    "reprobuild.providerFreshnessCache.v1"
+    "reprobuild.providerFreshnessCache.v2"
 
 var cachedNimCompilerPath = ""
 var processWarmInterfaceMetadata =
@@ -885,11 +889,14 @@ proc encodeProviderFreshnessCacheRecord(
     record: ProviderFreshnessCacheRecord): seq[byte] =
   result.writeString(ProviderFreshnessCacheRecordMagic)
   result.writeString(record.modulePath)
+  result.writeString(record.workDir)
   result.writeString(record.outputBinaryPath)
   result.writeFileStamps(record.sourceStamps)
+  result.writeFileStamps(record.reproLibStamps)
   result.writeFileStamp(record.outputBinaryStamp)
   result.writeDigest(record.interfaceFingerprint)
   result.writeDigest(record.providerFingerprint)
+  result.writeString(record.reproLibFingerprint)
   result.writeDigest(record.outputBinaryFingerprint)
 
 proc decodeProviderFreshnessCacheRecord(bytes: openArray[byte]):
@@ -899,11 +906,14 @@ proc decodeProviderFreshnessCacheRecord(bytes: openArray[byte]):
   if magic != ProviderFreshnessCacheRecordMagic:
     raiseEnvelopeError(eeUnknownType, "not a provider freshness cache record")
   result.modulePath = readString(bytes, pos)
+  result.workDir = readString(bytes, pos)
   result.outputBinaryPath = readString(bytes, pos)
   result.sourceStamps = readFileStamps(bytes, pos)
+  result.reproLibStamps = readFileStamps(bytes, pos)
   result.outputBinaryStamp = readFileStamp(bytes, pos)
   result.interfaceFingerprint = readDigest(bytes, pos)
   result.providerFingerprint = readDigest(bytes, pos)
+  result.reproLibFingerprint = readString(bytes, pos)
   result.outputBinaryFingerprint = readDigest(bytes, pos)
   if pos != bytes.len:
     raiseEnvelopeError(eeMalformed, "trailing provider freshness cache bytes")
@@ -1661,6 +1671,11 @@ proc hostCCompilerPath(): string =
   let ccEnv = getEnv("CC")
   if ccEnv.len > 0 and isAbsolute(ccEnv):
     return ccEnv
+  when not defined(windows):
+    let runtimeCC = findExe("cc")
+    if runtimeCC.len > 0 and isAbsolute(runtimeCC) and
+        fileExists(extendedPath(runtimeCC)):
+      return runtimeCC
   if BuiltCCompilerPath.len > 0 and fileExists(extendedPath(BuiltCCompilerPath)):
     return BuiltCCompilerPath
   ""
@@ -2304,15 +2319,16 @@ proc writeInterfaceExtractionCacheRecord(artifactPath: string;
     discard
 
 proc readInterfaceExtractionCacheRecord(path: string):
-    Option[InterfaceExtractionCacheRecord] =
+    tuple[record: Option[InterfaceExtractionCacheRecord];
+          warmHitAccounted: bool] =
   let evidence = fileStamp(path)
   if evidence.kind == fskMissing:
-    return none(InterfaceExtractionCacheRecord)
+    return (none(InterfaceExtractionCacheRecord), false)
   if processWarmInterfaceMetadata.hasKey(path):
     let warm = processWarmInterfaceMetadata[path]
     if cacheableWarmEvidence(evidence) and warm.evidence == evidence:
       inc processWarmInterfaceStats.metadataWarmHits
-      return some(warm.record)
+      return (some(warm.record), true)
     inc processWarmInterfaceStats.metadataWarmMisses
   else:
     inc processWarmInterfaceStats.metadataColdReads
@@ -2324,9 +2340,9 @@ proc readInterfaceExtractionCacheRecord(path: string):
         WarmInterfaceExtractionCacheRecord(
           evidence: evidence,
           record: record)
-    return some(record)
+    return (some(record), false)
   except CatchableError:
-    return none(InterfaceExtractionCacheRecord)
+    return (none(InterfaceExtractionCacheRecord), false)
 
 proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
                                        context: InterfaceExtractionContext;
@@ -2336,11 +2352,11 @@ proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
     return none(ProjectInterfaceArtifact)
   if requireStub and not fileExists(extendedPath(stubPath)):
     return none(ProjectInterfaceArtifact)
-  let record = readInterfaceExtractionCacheRecord(
+  let lookup = readInterfaceExtractionCacheRecord(
     interfaceExtractionMetadataPath(artifactPath))
-  if record.isNone:
+  if lookup.record.isNone:
     return none(ProjectInterfaceArtifact)
-  let cached = record.get()
+  let cached = lookup.record.get()
   if not interfaceContextsMatchForCache(cached.context, context):
     return none(ProjectInterfaceArtifact)
   processWarmInterfaceStats.metadataRevalidatedSources +=
@@ -2355,6 +2371,8 @@ proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
     let artifact = readInterfaceArtifactWithWarm(artifactPath)
     if artifact.interfaceFingerprint != cached.inputFingerprint:
       return none(ProjectInterfaceArtifact)
+    if not lookup.warmHitAccounted:
+      inc processWarmInterfaceStats.metadataWarmHits
     return some(artifact)
   except CatchableError:
     return none(ProjectInterfaceArtifact)
@@ -2371,7 +2389,9 @@ proc cachedInterfaceArtifactByFingerprint(artifactPath, stubPath: string;
   if readFile(extendedPath(cachePath)).strip() != toHex(fingerprint.bytes):
     return none(ProjectInterfaceArtifact)
   try:
-    return some(readInterfaceArtifactWithWarm(artifactPath))
+    let artifact = readInterfaceArtifactWithWarm(artifactPath)
+    inc processWarmInterfaceStats.metadataWarmHits
+    return some(artifact)
   except CatchableError:
     return none(ProjectInterfaceArtifact)
 
@@ -2422,6 +2442,7 @@ proc nixPrefix(namePattern, header: string;
     for libraryName in libraryNames:
       if firstExistingPrefix([path], header, [libraryName]).len > 0:
         return path
+  ""
 
 proc addExternalPackagePath(flags: var seq[string]; workDir, envName: string;
                             candidates: openArray[string]; marker: string) =
@@ -2582,8 +2603,8 @@ proc externalHashFlags(workDir = ""): seq[string] =
       nixPrefix("*-libblake3-*", "include/blake3.h",
         ["libblake3.dylib", "libblake3.so", "libblake3.a"])
   if blake3Prefix.len > 0:
-    result.add("--passC:-I" & blake3Prefix / "include")
-    result.add("--passL:-L" & blake3Prefix / "lib")
+    result.add("--passC:-I" & (blake3Prefix / "include"))
+    result.add("--passL:-L" & (blake3Prefix / "lib"))
     result.add("--passL:-lblake3")
 
   let xxhashPrefix = block:
@@ -2598,8 +2619,8 @@ proc externalHashFlags(workDir = ""): seq[string] =
       nixPrefix("*-xxHash-*", "include/xxhash.h",
         ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
   if xxhashPrefix.len > 0:
-    result.add("--passC:-I" & xxhashPrefix / "include")
-    result.add("--passL:-L" & xxhashPrefix / "lib")
+    result.add("--passC:-I" & (xxhashPrefix / "include"))
+    result.add("--passL:-L" & (xxhashPrefix / "lib"))
     result.add("--passL:-lxxhash")
 
   # repro's own ASP solver (repro_solver) dlopens libclingo at module-init
@@ -2625,8 +2646,8 @@ proc externalHashFlags(workDir = ""): seq[string] =
       nixPrefix("*-clingo-*", "include/clingo.h",
         ["libclingo.dylib", "libclingo.so"])
   if clingoPrefix.len > 0:
-    result.add("--passL:-L" & clingoPrefix / "lib")
-    result.add("--passL:-Wl,-rpath," & clingoPrefix / "lib")
+    result.add("--passL:-L" & (clingoPrefix / "lib"))
+    result.add("--passL:-Wl,-rpath," & (clingoPrefix / "lib"))
 
 proc consumerCompilePathFlags*(workDir = getCurrentDir()): seq[string] =
   ## ``--path:`` / ``--passC:`` / ``--passL:`` flags a downstream module
@@ -2923,9 +2944,12 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     inputFingerprint)
 
 proc providerFingerprintFor*(inputSources: openArray[string];
-                             interfaceFingerprint: ContentDigest): ContentDigest =
+                             interfaceFingerprint: ContentDigest;
+                             workDir = getCurrentDir()): ContentDigest =
   var payload: seq[byte] = @[]
+  payload.writeString("reprobuild.providerSources.v2")
   payload.writeDigest(interfaceFingerprint)
+  payload.writeString(reproLibSourceFingerprint(workDir))
   for path in inputSources:
     payload.writeString(path)
     let content = toBytes(readFile(extendedPath(path)))
@@ -2937,14 +2961,18 @@ proc providerFreshnessCachePath(artifactPath: string): string =
   artifactPath & ".inputs"
 
 proc writeProviderFreshnessCacheRecord(artifactPath, modulePath: string;
+                                       workDir: string;
                                        artifact: ProviderCompileArtifact) =
   let record = ProviderFreshnessCacheRecord(
     modulePath: normalizedStampPath(modulePath),
+    workDir: normalizedStampPath(workDir),
     outputBinaryPath: normalizedStampPath(artifact.outputBinaryPath),
     sourceStamps: fileStamps(artifact.inputSources),
+    reproLibStamps: reproLibStampsForCache(workDir),
     outputBinaryStamp: fileStamp(artifact.outputBinaryPath),
     interfaceFingerprint: artifact.interfaceFingerprint,
     providerFingerprint: artifact.providerFingerprint,
+    reproLibFingerprint: reproLibSourceFingerprint(workDir),
     outputBinaryFingerprint: artifact.outputBinaryFingerprint)
   try:
     writeFile(extendedPath(providerFreshnessCachePath(artifactPath)),
@@ -2963,20 +2991,25 @@ proc readProviderFreshnessCacheRecord(path: string):
 
 proc providerFreshnessRecordMatches(record: ProviderFreshnessCacheRecord;
                                     modulePath, outputBinaryPath: string;
+                                    workDir: string;
                                     inputSources: openArray[string];
                                     interfaceFingerprint,
                                     providerFingerprint,
                                     outputBinaryFingerprint: ContentDigest): bool =
   (modulePath.len == 0 or record.modulePath == normalizedStampPath(modulePath)) and
+    record.workDir == normalizedStampPath(workDir) and
     record.outputBinaryPath == normalizedStampPath(outputBinaryPath) and
     record.interfaceFingerprint == interfaceFingerprint and
     record.providerFingerprint == providerFingerprint and
+    record.reproLibFingerprint.len > 0 and
     record.outputBinaryFingerprint == outputBinaryFingerprint and
     record.sourceStamps == fileStamps(inputSources) and
+    record.reproLibStamps == reproLibStampsForCache(workDir) and
     record.outputBinaryStamp == fileStamp(outputBinaryPath)
 
 proc cachedProviderFreshnessByMetadata(artifactPath, modulePath,
                                        outputBinaryPath: string;
+                                       workDir: string;
                                        inputSources: openArray[string];
                                        cached: ProviderCompileArtifact):
     bool =
@@ -2985,7 +3018,7 @@ proc cachedProviderFreshnessByMetadata(artifactPath, modulePath,
   if record.isNone:
     return false
   providerFreshnessRecordMatches(record.get(), modulePath, outputBinaryPath,
-    inputSources, cached.interfaceFingerprint, cached.providerFingerprint,
+    workDir, inputSources, cached.interfaceFingerprint, cached.providerFingerprint,
     cached.outputBinaryFingerprint)
 
 proc normalizedProviderOutputPath*(outputBinaryPath: string): string =
@@ -3056,6 +3089,11 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
       nimcacheRoot / sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
   result = @[
     nimCompilerPath(), "c",
+    # Provider compiles are often nested inside latency-sensitive graph
+    # construction paths. Keep Nim's C backend serial so one provider edge
+    # cannot fan out into a burst of host C compiler jobs; this also avoids
+    # observed GCC 15 vregs ICEs during concurrent generated-C compilation.
+    "--parallelBuild:1",
     "--define:reproProviderMode",
     "--path:" & parentDir(modulePath),
     "--nimcache:" & nimcache,
@@ -3104,7 +3142,8 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
                           scratchDir = ""): ProviderCompilePlan =
   let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
   let sources = discoverNimSources(modulePath)
-  let providerFingerprint = providerFingerprintFor(sources, interfaceFingerprint)
+  let providerFingerprint = providerFingerprintFor(sources, interfaceFingerprint,
+    workDir)
   let command = providerCompileCommand(modulePath, normalizedOutputPath, workDir,
     scratchDir)
   let edge = providerCompileEdge(sources, normalizedOutputPath, command,
@@ -3115,11 +3154,13 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
     compilerCommand: command,
     compileEdge: edge,
     interfaceFingerprint: interfaceFingerprint,
-    providerFingerprint: providerFingerprint)
+    providerFingerprint: providerFingerprint,
+    workDir: workDir)
 
 proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
                                    interfaceFingerprint,
-                                   providerFingerprint: ContentDigest): bool =
+                                   providerFingerprint: ContentDigest;
+                                   workDir = getCurrentDir()): bool =
   let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
   if not (fileExists(extendedPath(artifactPath)) and fileExists(extendedPath(normalizedOutputPath))):
     return false
@@ -3132,7 +3173,7 @@ proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
     if cached.outputBinaryPath != normalizedOutputPath:
       return false
     if cachedProviderFreshnessByMetadata(artifactPath, "", normalizedOutputPath,
-        cached.inputSources, cached):
+        workDir, cached.inputSources, cached):
       return true
     if cached.outputBinaryFingerprint != casDigest(toBytes(readFile(
         extendedPath(normalizedOutputPath)))):
@@ -3143,7 +3184,8 @@ proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
 
 proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
                                        outputBinaryPath: string;
-                                       interfaceFingerprint: ContentDigest):
+                                       interfaceFingerprint: ContentDigest;
+                                       workDir = getCurrentDir()):
     Option[ProviderCompileArtifact] =
   let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
   if not (fileExists(extendedPath(artifactPath)) and fileExists(extendedPath(normalizedOutputPath))):
@@ -3156,16 +3198,16 @@ proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
       return none(ProviderCompileArtifact)
     let sources = discoverNimSources(modulePath)
     if cachedProviderFreshnessByMetadata(artifactPath, modulePath,
-        normalizedOutputPath, sources, cached):
+        normalizedOutputPath, workDir, sources, cached):
       return some(cached)
     let providerFingerprint = providerFingerprintFor(sources,
-      interfaceFingerprint)
+      interfaceFingerprint, workDir)
     if cached.providerFingerprint != providerFingerprint:
       return none(ProviderCompileArtifact)
     if cached.outputBinaryFingerprint != casDigest(toBytes(readFile(
         extendedPath(normalizedOutputPath)))):
       return none(ProviderCompileArtifact)
-    writeProviderFreshnessCacheRecord(artifactPath, modulePath, cached)
+    writeProviderFreshnessCacheRecord(artifactPath, modulePath, workDir, cached)
     return some(cached)
   except CatchableError:
     return none(ProviderCompileArtifact)
@@ -3178,7 +3220,8 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
   let plan = providerCompilePlan(modulePath, outputBinaryPath,
     interfaceFingerprint, workDir, scratchDir)
   if artifactPath.len > 0 and providerCompileArtifactFresh(artifactPath,
-      plan.outputBinaryPath, interfaceFingerprint, plan.providerFingerprint):
+      plan.outputBinaryPath, interfaceFingerprint, plan.providerFingerprint,
+      plan.workDir):
     return readProviderCompileArtifact(artifactPath)
   createDir(extendedPath(parentDir(plan.outputBinaryPath)))
   let execution = runCommand(plan.compilerCommand, cwd = workDir)
@@ -3198,4 +3241,4 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
     executionResult: execution)
   if artifactPath.len > 0:
     writeProviderCompileArtifact(artifactPath, result)
-    writeProviderFreshnessCacheRecord(artifactPath, modulePath, result)
+    writeProviderFreshnessCacheRecord(artifactPath, modulePath, workDir, result)

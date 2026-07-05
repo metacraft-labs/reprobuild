@@ -268,11 +268,18 @@ proc generatedHeaderCCommand(traceCommand: openArray[string];
   if not inserted:
     raise newException(ValueError, "trace_object_file command has no -o flag")
 
+proc withMakeDepfile(command: openArray[string]; depfilePath: string): seq[string] =
+  result = @command
+  result.add("-MMD")
+  result.add("-MF")
+  result.add(depfilePath)
+
 proc copySelectedCodeTracerFiles(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "src" / "frontend" / "tests")
   createDir(projectRoot / "src" / "frontend" / "index")
   createDir(projectRoot / "src" / "frontend" / "lib")
   createDir(projectRoot / "src" / "c")
+  createDir(projectRoot / "build" / "c")
   copyFile(codeTracerRoot / "src" / "frontend" / "tests" /
     "ipc_registry_test.nim",
     projectRoot / "src" / "frontend" / "tests" / "ipc_registry_test.nim")
@@ -334,19 +341,27 @@ proc writeProject(path: string; nimJsCommand, traceObjectCommand,
       nimString("src/frontend/index/ipc_registry.nim") & ", " &
       nimString("src/frontend/lib/jslib.nim") & "],\n" &
     "        outputs = @[" & nimString("tests/ipc_registry_test.js") & "])\n" &
+    "      let cSudokuTupDepfile = " & nimString("build/c/main.tup.d") & "\n" &
+    "      let cSudokuGeneratedHeaderDepfile = " &
+      nimString("build/c/main.with-header.d") & "\n" &
     "      discard buildAction(\"c-sudoku-object-tup\",\n" &
     "        codeTracerSubset.executable(\"gcc\").subcmd_2d_fPIC(\n" &
-    "          args = " & nimSeq(actionArgs(traceObjectCommand)) & "),\n" &
+    "          args = " & nimSeq(actionArgs(withMakeDepfile(
+      traceObjectCommand, "build/c/main.tup.d"))) & "),\n" &
     "        inputs = @[" & nimString("src/c/main.c") & "],\n" &
-    "        outputs = @[" & nimString("build/c/main.tup.o") & "])\n" &
+    "        outputs = @[" & nimString("build/c/main.tup.o") & "],\n" &
+    "        dependencyPolicy = makeDepfilePolicy(cSudokuTupDepfile))\n" &
     "      discard buildAction(\"c-sudoku-object-with-generated-header\",\n" &
     "        codeTracerSubset.executable(\"gcc\").subcmd_2d_fPIC(\n" &
-    "          args = " & nimSeq(actionArgs(generatedHeaderCCommand)) & "),\n" &
+    "          args = " & nimSeq(actionArgs(withMakeDepfile(
+      generatedHeaderCCommand, "build/c/main.with-header.d"))) & "),\n" &
     "        deps = @[" & nimString("generate-config-header") & "],\n" &
     "        inputs = @[" &
       nimString("src/c/main.c") & ", " &
       nimString("build/generated/ct_config.h") & "],\n" &
-    "        outputs = @[" & nimString("build/c/main.with-header.o") & "])\n")
+    "        outputs = @[" & nimString("build/c/main.with-header.o") & "],\n" &
+    "        dependencyPolicy = makeDepfilePolicy(" &
+      "cSudokuGeneratedHeaderDepfile))\n")
 
 proc build(reproBin, target, repoRoot, pathValue: string): string =
   # Pass `--log=actions` so the per-action `action: ID status=... ` evidence
@@ -354,9 +369,12 @@ proc build(reproBin, target, repoRoot, pathValue: string): string =
   # `progress: bpkActionCompleted ...` markers plus the `scheduler:` /
   # `providerInvocations:` / `buildReport:` headers; the assertions below
   # that key on the per-action shape need the action-level log.
+  let cacheRoot = repoRoot / ".repro" / "fixture-action-cache"
   requireSuccess(shellCommand(@[reproBin, "build", target,
     "--tool-provisioning=path", "--log=actions"],
-    @[(name: "PATH", value: pathValue)]), repoRoot)
+    @[(name: "PATH", value: pathValue),
+      (name: "REPROBUILD_ACTION_CACHE_ROOT", value: cacheRoot),
+      (name: "REPRO_CACHE_DISABLE", value: "1")]), repoRoot)
 
 proc valueAfter(output, prefix: string): string =
   for line in output.splitLines:

@@ -810,27 +810,9 @@ proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
     result.snapshot = snapshot
     return
 
-  snapshot.providerArtifactId = config.providerArtifactId
-  snapshot.manifest = manifest
-  refreshStoredBindings(snapshot, manifest)
-
-  var plans: seq[InvocationPlan] = @[]
-  var planKeys = initHashSet[string]()
-  var rootNeedsRerun = false
-
-  handleDirectoryChanges(config, manifest, snapshot, result, plans, planKeys,
-    rootNeedsRerun)
-  detectBodyHashChanges(config, manifest, snapshot, result, plans, planKeys,
-    rootNeedsRerun)
-  detectEvaluationInputChanges(manifest, snapshot, plans, planKeys)
-
-  if rootNeedsRerun:
-    runRootAndChildren(config, provider, manifest, snapshot, result,
-      girEntryPointBodyChanged)
-  else:
-    for plan in plans:
-      discard executePlan(config, provider, manifest, snapshot, result, plan)
-
+  snapshot = emptyProviderGraphSnapshot(config.providerArtifactId, manifest)
+  runRootAndChildren(config, provider, manifest, snapshot, result,
+    girProviderArtifactChanged)
   ensureNoDuplicateEffects(snapshot)
   saveProviderGraphSnapshot(config.storeRoot, snapshot)
   result.snapshot = snapshot

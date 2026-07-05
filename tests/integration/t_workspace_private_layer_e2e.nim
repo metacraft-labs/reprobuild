@@ -266,6 +266,18 @@ proc setupFixture(gitBin, slug: string;
     fileUrl(result.publicManifestBare),
     fileUrl(result.privateManifestBare))
 
+proc cleanupScratch(path: string) =
+  for attempt in 0 .. 4:
+    if not dirExists(path):
+      return
+    try:
+      removeDir(path)
+      return
+    except OSError, IOError:
+      if attempt == 4:
+        raise
+      sleep(100)
+
 # ---- helpers --------------------------------------------------------------
 
 proc invokeInit(fx: Fixture; extraArgs: openArray[string] = []): CmdResult =
@@ -300,7 +312,7 @@ suite "M25 — private manifest layering integrated end-to-end":
     else:
       let fx = setupFixture(gitBin, "full-access",
                             privateManifestReachable = true)
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let res = invokeInit(fx)
       if res.code != 0:
@@ -337,7 +349,7 @@ suite "M25 — private manifest layering integrated end-to-end":
     else:
       let fx = setupFixture(gitBin, "no-private-access",
                             privateManifestReachable = false)
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let res = invokeInit(fx)
       # Without ``--allow-missing-layers`` the unreachable private
@@ -365,7 +377,7 @@ suite "M25 — private manifest layering integrated end-to-end":
     else:
       let fx = setupFixture(gitBin, "lock-round-trip",
                             privateManifestReachable = true)
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let initRes = invokeInit(fx)
       if initRes.code != 0:
@@ -425,7 +437,7 @@ suite "M25 — private manifest layering integrated end-to-end":
     else:
       let fx = setupFixture(gitBin, "public-only-skip",
                             privateManifestReachable = false)
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let res = invokeInit(fx, @["--allow-missing-layers"])
       if res.code != 0:

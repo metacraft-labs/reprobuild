@@ -114,6 +114,9 @@ proc profileCompileBuildAction*(profileRoot, rbpiPath, manifestPath,
   ]
   if verbose:
     argv.add("--verbose")
+  let depfilePath = manifestPath & ".d"
+  argv.add("--depfile")
+  argv.add(depfilePath)
   let cwd =
     if workDir.len > 0: workDir
     else: profileRoot.parentDir
@@ -124,6 +127,7 @@ proc profileCompileBuildAction*(profileRoot, rbpiPath, manifestPath,
     commandStatsId = "repro profile compile edge",
     cacheable = true,
     weakFingerprint = weak,
+    depfile = depfilePath,
     dependencyPolicy = automaticMonitorGatheringPolicy())
 
 # ---------------------------------------------------------------------------

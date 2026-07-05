@@ -764,7 +764,7 @@ proc writeM52StdlibProject(path: string) =
     "  build:\n" &
     "    let nimOut = nim.c(\n" &
     "      source = \"src/main.nim\",\n" &
-    "      output = \"build/main\")\n" &
+    "      output = \"build/main-nim\")\n" &
     "    let cOut = gcc(\n" &
     "      source = \"src/main.c\",\n" &
     "      output = \"build/main.o\",\n" &
@@ -777,8 +777,8 @@ proc writeM52StdlibProject(path: string) =
     "      actionId = \"summary\",\n" &
     "      output = \"dist/summary.txt\",\n" &
     "      title = \"m52 stdlib\",\n" &
-    "      entries = @[\"build/main\", \"build/main.o\", \"public/main.css\"],\n" &
-    "      inputs = @[\"build/main\", \"build/main.o\", \"public/main.css\"])\n" &
+    "      entries = @[\"build/main-nim\", \"build/main.o\", \"public/main.css\"],\n" &
+    "      inputs = @[\"build/main-nim\", \"build/main.o\", \"public/main.css\"])\n" &
     "    defaultBuildAction(summary)\n")
 
 when defined(macosx) or defined(linux):
@@ -810,31 +810,10 @@ when defined(macosx) or defined(linux):
       "mkdir -p \"$(dirname \"$output\")\"\n" &
       "{ printf '/* stylus fixture */\\n'; cat \"$source\"; } > \"$output\"\n")
 
-  proc realStylusPathDir(tempRoot: string): string =
-    let existing = findExe("stylus")
-    if existing.len > 0:
-      return existing.splitPath.head
-    let npm = findExe("npm")
-    if npm.len == 0:
-      result = tempRoot / "stylus-fixture-bin"
-      createDir(result)
-      writeStylusImportMonitorFixture(result)
-      return
-    let npmRoot = tempRoot / "npm-stylus"
-    createDir(npmRoot)
-    let res = runShell(shellCommand(@[
-      npm, "install", "--silent", "--no-audit", "--no-fund",
-      "--prefix", npmRoot, "stylus@0.64.0"
-    ]))
-    if res.code != 0:
-      return ""
-    let candidate = npmRoot / "node_modules" / ".bin" / "stylus"
-    if fileExists(candidate):
-      return candidate.splitPath.head
-    else:
-      result = tempRoot / "stylus-fixture-bin"
-      createDir(result)
-      writeStylusImportMonitorFixture(result)
+  proc stylusFixturePathDir(tempRoot: string): string =
+    result = tempRoot / "stylus-fixture-bin"
+    createDir(result)
+    writeStylusImportMonitorFixture(result)
 
   proc writeM52StylusMonitorProject(path: string) =
     writeFile(path,
@@ -898,12 +877,73 @@ proc evidenceFile(evidenceRoot, actionId: string): string =
         return path
   ""
 
+proc envEntry(entries: openArray[(string, string)]; name: string): string =
+  for item in entries:
+    if item[0] == name:
+      return item[1]
+  ""
+
+proc selectorProjectRoot(selector, cwd: string): string =
+  var root = selector
+  let fragment = root.find('#')
+  if fragment >= 0:
+    root = root[0 ..< fragment]
+  if root.len == 0:
+    return cwd
+  if root.isAbsolute:
+    return root
+  if root.contains(DirSep):
+    return cwd / root
+  cwd
+
+proc addDefaultTestStoreEnv(entries: var seq[(string, string)];
+                            defaultStoreRoot: string) =
+  var storeRoot = envEntry(entries, "REPROBUILD_STORE_ROOT")
+  if storeRoot.len == 0:
+    storeRoot = envEntry(entries, "REPRO_STORE_ROOT")
+  if storeRoot.len == 0:
+    storeRoot = defaultStoreRoot
+
+  # Keep the e2e fixtures independent from the developer's user cache. The
+  # local store still honors REPRO_STORE_ROOT, while the action-cache resolver
+  # honors REPROBUILD_STORE_ROOT/REPROBUILD_ACTION_CACHE_ROOT.
+  if envEntry(entries, "REPROBUILD_STORE_ROOT").len == 0:
+    entries.add(("REPROBUILD_STORE_ROOT", storeRoot))
+  if envEntry(entries, "REPRO_STORE_ROOT").len == 0:
+    entries.add(("REPRO_STORE_ROOT", storeRoot))
+  if envEntry(entries, "REPROBUILD_ACTION_CACHE_ROOT").len == 0:
+    entries.add(("REPROBUILD_ACTION_CACHE_ROOT", storeRoot / "action-cache"))
+
+proc testStoreEnv(defaultStoreRoot: string;
+                  extra: openArray[(string, string)] = []): seq[(string, string)] =
+  result = @[]
+  for item in extra:
+    result.add(item)
+  addDefaultTestStoreEnv(result, defaultStoreRoot)
+
+proc testEnvForProject(projectRoot, pathValue: string;
+                       extra: openArray[(string, string)] = []): seq[(string, string)] =
+  result = @[("PATH", pathValue)]
+  for item in extra:
+    result.add(item)
+  addDefaultTestStoreEnv(result, projectRoot / ".repro" / "test-store")
+
+proc testEnvForSelector(selector, cwd, pathValue: string;
+                        extra: openArray[(string, string)] = []): seq[(string, string)] =
+  result = @[("PATH", pathValue)]
+  for item in extra:
+    result.add(item)
+  addDefaultTestStoreEnv(result,
+    selectorProjectRoot(selector, cwd) / ".repro" / "test-store")
+
 proc build(reproBin, target, repoRoot, pathValue: string;
            env: openArray[(string, string)] = [];
            extraArgs: openArray[string] = []): string =
   var entries = @[("PATH", pathValue)]
   for item in env:
     entries.add(item)
+  addDefaultTestStoreEnv(entries,
+    selectorProjectRoot(target, repoRoot) / ".repro" / "test-store")
   var args = @[reproBin, "build", target, "--tool-provisioning=path"]
   addDefaultTestDaemonFlag(args, extraArgs)
   addDefaultTestBuildLog(args, extraArgs)
@@ -917,6 +957,7 @@ proc buildCurrentProject(reproBin, projectRoot, pathValue: string;
   var entries = @[("PATH", pathValue)]
   for item in env:
     entries.add(item)
+  addDefaultTestStoreEnv(entries, projectRoot / ".repro" / "test-store")
   var args = @[reproBin, "build", "--tool-provisioning=path"]
   addDefaultTestDaemonFlag(args, extraArgs)
   addDefaultTestBuildLog(args, extraArgs)
@@ -1050,7 +1091,7 @@ suite "e2e_local_reprobuild_project_build":
 
       let invalid = requireFailure(shellCommand([reproBin, "build", invalidRoot,
         "--daemon=off", "--tool-provisioning=path"],
-        [("PATH", pathValue)]), repoRoot)
+        testEnvForSelector(invalidRoot, repoRoot, pathValue)), repoRoot)
       check invalid.contains("supplies legacy depfile and automatic monitor")
       check invalid.contains("remove depfile or use makeDepfilePolicy")
 
@@ -1106,10 +1147,8 @@ suite "e2e_local_reprobuild_project_build":
       let unknown = requireFailure(shellCommand(@[reproBin, "build",
         projectRoot & "#does-not-exist", "--daemon=off",
         "--tool-provisioning=path"],
-        @[
-          (name: "PATH", value: pathValue),
-          (name: "REPROBUILD_STORE_ROOT", value: tempRoot / "store")
-        ]), repoRoot)
+        testEnvForSelector(projectRoot & "#does-not-exist", repoRoot,
+          pathValue, [("REPROBUILD_STORE_ROOT", tempRoot / "store")])), repoRoot)
       # Named-Targets M2 (commit 396e312) replaced the pre-existing
       # ``unknown build target/action id: ... (available: ...)`` error
       # text with the shared ``renderUnknownTargetDiagnostic`` output:
@@ -1327,7 +1366,7 @@ suite "e2e_local_reprobuild_project_build":
       check output.contains("defaultTarget: summary")
       check output.contains("scheduler: actions=4")
       check output.contains("action: summary status=asSucceeded launched=true")
-      check readFile(projectRoot / "build" / "main").contains("nim:c:src/main.nim")
+      check readFile(projectRoot / "build" / "main-nim").contains("nim:c:src/main.nim")
       check readFile(projectRoot / "build" / "main.o").contains(
         "gcc:src/main.c:yes:yes")
       check fileExists(projectRoot / "public" / "main.css")
@@ -1353,7 +1392,7 @@ suite "e2e_local_reprobuild_project_build":
         let tempRoot = createTempDir("repro-m52-stylus-monitor", "")
         defer: removeDir(tempRoot)
 
-        let stylusDir = realStylusPathDir(tempRoot)
+        let stylusDir = stylusFixturePathDir(tempRoot)
         check stylusDir.len > 0
 
         var daemon = ensureRunQuotaDaemon(repoRoot)
@@ -1509,23 +1548,24 @@ suite "e2e_local_reprobuild_project_build":
       let projectRoot = tempRoot / "project"
       writeM53BuiltinFsProject(projectRoot / "reprobuild.nim")
       discard buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+      let projectEnv = testEnvForProject(projectRoot, getEnv("PATH"))
       discard requireSuccess(shellCommand([
         reproBin, "build", "--daemon=off",
         "--tool-provisioning", "path",
         "--progress", "quiet", "--log", "quiet"
-      ]), projectRoot)
+      ], projectEnv), projectRoot)
 
       let graphText = requireSuccess(shellCommand([
         reproBin, "graph", "--tool-provisioning", "path",
         "--focus", "copy-file"
-      ]), projectRoot)
+      ], projectEnv), projectRoot)
       check graphText.contains("build graph")
       check graphText.contains("action copy-file")
       check graphText.contains("directDependents: stamp")
 
       let graphJson = parseJson(requireSuccess(shellCommand([
         reproBin, "graph", "--tool-provisioning=path", "--json"
-      ]), projectRoot))
+      ], projectEnv), projectRoot))
       check graphJson{"schemaId"}.getStr() == "reprobuild.graph.build.v1"
       check graphJson{"selectedActionId"}.getStr() == "stamp"
       check graphJson{"actions"}.getElems().anyIt(
@@ -1536,14 +1576,14 @@ suite "e2e_local_reprobuild_project_build":
       let dotGraph = requireSuccess(shellCommand([
         reproBin, "graph", "--tool-provisioning", "path",
         "--format", "dot", "--focus", "copy-file"
-      ]), projectRoot)
+      ], projectEnv), projectRoot)
       check dotGraph.contains("digraph repro_build")
       check dotGraph.contains("\"copy-file\"")
       check dotGraph.contains("->")
 
       let whyText = requireSuccess(shellCommand([
         reproBin, "why", "copy-file", "--tool-provisioning=path"
-      ]), projectRoot)
+      ], projectEnv), projectRoot)
       check whyText.contains("why action copy-file")
       check whyText.contains("path: stamp -> copy-file")
       check whyText.contains("directDependents: stamp")
@@ -1552,7 +1592,7 @@ suite "e2e_local_reprobuild_project_build":
       let whyJson = parseJson(requireSuccess(shellCommand([
         reproBin, "why", "copy-file", "--tool-provisioning", "path",
         "--format", "json"
-      ]), projectRoot))
+      ], projectEnv), projectRoot))
       check whyJson{"schemaId"}.getStr() == "reprobuild.why.action.v1"
       check whyJson{"path"}.getElems().mapIt(it.getStr()) ==
         @["stamp", "copy-file"]
@@ -1561,14 +1601,14 @@ suite "e2e_local_reprobuild_project_build":
 
       let artifactText = requireSuccess(shellCommand([
         reproBin, "debug", "artifact", loweredGraphCachePath
-      ]), projectRoot)
+      ], projectEnv), projectRoot)
       check artifactText.contains("lowered graph cache")
       check artifactText.contains("- copy-file")
 
       let artifactJson = parseJson(requireSuccess(shellCommand([
         reproBin, "debug", "artifact", loweredGraphCachePath,
         "--format", "json"
-      ]), projectRoot))
+      ], projectEnv), projectRoot))
       check artifactJson{"schemaId"}.getStr() ==
         "reprobuild.debug.lowered-graph-cache.v1"
       check artifactJson{"actions"}.getElems().anyIt(
@@ -1663,7 +1703,8 @@ suite "e2e_local_reprobuild_project_build":
       let selected = requireSuccess(shellCommand([
         reproBin, "build", projectRoot & "#consume",
         "--daemon=off", "--tool-provisioning=path", "--log=actions"
-      ], [("PATH", pathValue)]), repoRoot)
+      ], testEnvForSelector(projectRoot & "#consume", repoRoot,
+        pathValue)), repoRoot)
       check selected.contains("selectedTarget: consume")
       check selected.contains("scheduler: actions=2")
       check selected.contains("action: produce status=asSucceeded launched=true")
@@ -1705,7 +1746,7 @@ suite "e2e_local_reprobuild_project_build":
       let first = requireSuccess(shellCommand([
         reproBin, "build", target, "--daemon=off",
         "--tool-provisioning=path", "--log=actions"
-      ], [("PATH", pathValue)]), repoRoot)
+      ], testEnvForSelector(target, repoRoot, pathValue)), repoRoot)
       check first.contains("selectedTarget: aggregate")
       check first.contains("providerInvocations: 1")
       check first.contains("scheduler: actions=3")
@@ -1719,7 +1760,7 @@ suite "e2e_local_reprobuild_project_build":
       let added = requireSuccess(shellCommand([
         reproBin, "build", target, "--daemon=off",
         "--tool-provisioning=path", "--log=actions"
-      ], [("PATH", pathValue)]), repoRoot)
+      ], testEnvForSelector(target, repoRoot, pathValue)), repoRoot)
       check added.contains("providerInvocations: 1")
       check added.contains("scheduler: actions=4")
       check added.contains("action: copy-gamma.txt status=asSucceeded launched=true")
@@ -1730,7 +1771,7 @@ suite "e2e_local_reprobuild_project_build":
       let removed = requireSuccess(shellCommand([
         reproBin, "build", target, "--daemon=off",
         "--tool-provisioning=path", "--log=actions"
-      ], [("PATH", pathValue)]), repoRoot)
+      ], testEnvForSelector(target, repoRoot, pathValue)), repoRoot)
       check removed.contains("providerInvocations: 1")
       check removed.contains("scheduler: actions=3")
       check not removed.contains("action: copy-beta.txt")
@@ -1766,7 +1807,8 @@ suite "e2e_local_reprobuild_project_build":
       writeM52ForeachStylusProject(projectRoot / "reprobuild.nim")
       let tracePath = tempRoot / "provider.trace"
       let target = projectRoot
-      let traceEnv = [("PATH", pathValue), ("REPRO_PROVIDER_TRACE", tracePath)]
+      let traceEnv = testEnvForSelector(target, repoRoot, pathValue,
+        [("REPRO_PROVIDER_TRACE", tracePath)])
 
       let first = requireSuccess(shellCommand([
         reproBin, "build", target, "--daemon=off",
@@ -1898,24 +1940,7 @@ suite "e2e_local_reprobuild_project_build":
       # moved the action cache out of the per-project ``.repro`` tree to a
       # user-level shared root resolved by ``resolveActionCacheRoot``. Mirror that
       # precedence here so the existence check tracks the live location.
-      let userActionCacheRoot = block:
-        let storeRoot = block:
-          let v = getEnv("REPROBUILD_STORE_ROOT")
-          if v.len > 0: v else: getEnv("REPRO_STORE_ROOT")
-        if storeRoot.len > 0:
-          storeRoot / "action-cache"
-        else:
-          when defined(windows):
-            let local = getEnv("LOCALAPPDATA")
-            let base = if local.len > 0: local
-                       else: getEnv("USERPROFILE") / "AppData" / "Local"
-            base / "repro" / "action-cache"
-          elif defined(macosx):
-            getEnv("HOME") / "Library" / "Caches" / "repro" / "action-cache"
-          else:
-            let xdg = getEnv("XDG_CACHE_HOME")
-            let base = if xdg.len > 0: xdg else: getEnv("HOME") / ".cache"
-            base / "repro" / "action-cache"
+      let userActionCacheRoot = tempRoot / "store" / "action-cache"
       # Per-edge store: a completed build writes authoritative records into
       # per-edge directories `hot-records/<key>/<nonce>.rec` (AC-1b; no global
       # `action-results.records`).
@@ -1975,17 +2000,15 @@ suite "e2e_local_reprobuild_project_build":
 
       let noFlag = requireFailure(shellCommand(
         [reproBin, "build", target, "--daemon=off"],
-        @[(name: "REPROBUILD_STORE_ROOT", value: tempRoot / "store")]), repoRoot)
+        testStoreEnv(tempRoot / "store")), repoRoot)
       check noFlag.contains("refusing implicit PATH fallback")
 
       let missingRoot = tempRoot / "missing-project"
       writeMissingProject(missingRoot / "reprobuild.nim")
       let missing = requireFailure(shellCommand(@[reproBin, "build",
         missingRoot, "--daemon=off", "--tool-provisioning=path"],
-        @[
-          (name: "PATH", value: pathValue),
-          (name: "REPROBUILD_STORE_ROOT", value: tempRoot / "store")
-        ]), repoRoot)
+        testEnvForSelector(missingRoot, repoRoot, pathValue,
+          [("REPROBUILD_STORE_ROOT", tempRoot / "store")])), repoRoot)
       check missing.contains("tool-resolution failed")
       check missing.contains("m19-missing-tool")
       check not fileExists(missingRoot / ".repro" / "missing-ran.log")

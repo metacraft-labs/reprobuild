@@ -48,9 +48,10 @@ proc runCmd(command: string; cwd = ""): tuple[code: int; output: string] =
 proc requireGit(command: string; cwd = ""): string =
   let res = runCmd(command, cwd)
   if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
+    let msg = "command failed: " & command & "\nexit=" & $res.code &
+      "\n" & res.output
+    checkpoint(msg)
+    raise newException(OSError, msg)
   res.output
 
 proc repoRoot(): string =
@@ -252,6 +253,10 @@ suite "RA-16 — resumable sync + --force-sync":
       # divergence by committing a local-only change that is NOT on origin,
       # then leaving uncommitted edits — classified as dirty / divergent.
       let repo0 = workspaceRoot / "repo0"
+      discard requireGit(q(gitBin) & " -C " & q(repo0) &
+        " config user.email tester@example.invalid")
+      discard requireGit(q(gitBin) & " -C " & q(repo0) &
+        " config user.name \"RA16 Tester\"")
       discard requireGit(q(gitBin) & " -C " & q(repo0) &
         " switch -c diverged-branch")
       writeFile(repo0 / "divergent.txt", "off-manifest work\n")

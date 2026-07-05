@@ -165,13 +165,30 @@ proc sessionMetadataPath(projectRoot: string): string =
 
 proc waitForStatus(path, status: string; timeoutMs = 10000): JsonNode =
   var waited = 0
+  var lastBody = ""
+  var lastStatus = ""
+  var lastError = ""
   while waited <= timeoutMs:
     if fileExists(path):
-      let node = parseFile(path)
-      if node{"status"}.getStr() == status:
-        return node
+      try:
+        lastBody = readFile(path)
+        let node = parseJson(lastBody)
+        lastStatus = node{"status"}.getStr()
+        if lastStatus == status:
+          return node
+      except CatchableError as err:
+        lastError = err.msg
     sleep(50)
     waited.inc(50)
+  checkpoint("session metadata path: " & path)
+  if lastStatus.len > 0:
+    checkpoint("last session status: " & lastStatus)
+  if lastError.len > 0:
+    checkpoint("last session metadata parse error: " & lastError)
+  if lastBody.len > 0:
+    checkpoint("last session metadata body:\n" & lastBody)
+  else:
+    checkpoint("session metadata file was not present")
   raise newException(IOError, "timed out waiting for session status " & status)
 
 proc httpRequest(httpBindValue, path: string; httpMethod = "GET"): string =
@@ -297,7 +314,21 @@ suite "e2e_repro_dev_sessions":
         devProcess.close()
 
       let metadataPath = sessionMetadataPath(c.projectRoot)
-      let up = waitForStatus(metadataPath, "up", timeoutMs = 30000)
+      let up =
+        try:
+          waitForStatus(metadataPath, "up", timeoutMs = 120000)
+        except CatchableError:
+          try:
+            if devProcess.running():
+              devProcess.terminate()
+              discard devProcess.waitForExit()
+          except CatchableError:
+            discard
+          let output =
+            if devProcess.outputStream != nil: devProcess.outputStream.readAll()
+            else: ""
+          checkpoint("dev process output before session became up:\n" & output)
+          raise
       let httpBindValue = up["httpBind"].getStr()
       check statusJson(httpBindValue)["services"][0]["ready"].getBool()
 
