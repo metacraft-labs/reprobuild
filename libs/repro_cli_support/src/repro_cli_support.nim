@@ -2627,6 +2627,31 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
   else:
     lowerProviderSnapshot(snapshot, identity, projectRoot, [selectedActionId])
 
+proc poolsFromSnapshot*(snapshot: ProviderGraphSnapshot): seq[BuildPool] =
+  ## Gather the recipe's declared build pools DIRECTLY from the provider-graph
+  ## snapshot's ``reprobuild.build-pool.v1`` metadata nodes — the SAME pass
+  ## ``lowerProviderSnapshot`` runs (above), but WITHOUT the action-lowering /
+  ## tool-identity resolution that the full lower performs.
+  ##
+  ## RX pool-forwarding resilience: a recipe's ``buildPool(...)`` calls execute
+  ## at PROVIDER-EXECUTION time and land in the snapshot's fragments as
+  ## build-pool metadata nodes — they are INDEPENDENT of ``uses:`` sibling
+  ## resolution. Full graph LOWERING, by contrast, can throw for a CONSUMER
+  ## recipe whose ``uses:`` siblings are not yet resolvable at daemon-spawn
+  ## time. This proc lets the pool-forwarding path recover the consumer's OWN
+  ## declared pools from the snapshot even when lowering is incomplete, so a
+  ## consumer's ``buildPool("x.serial", 1)`` still reaches its runquotad.
+  var pools = initTable[string, BuildPoolDef]()
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-pool.v1":
+        let pool = decodeBuildPoolPayload(toBytes(node.payload))
+        if not pools.hasKey(pool.name):
+          pools[pool.name] = pool
+  for pool in pools.values:
+    result.add(repro_build_engine.pool(pool.name, pool.capacity))
+
 const DefaultBuildCollectionName* = "default"
   ## Per Build-Graph-Collections.md §"`default`" — the conventional
   ## collection that `repro build` with no positional target resolves
@@ -5486,6 +5511,19 @@ proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
   ## present ``projectExtension`` sibling's fragments into the target
   ## project's snapshot before lowering / target-export aggregation.
 
+proc selectorFilesystemKey(selector: string): string =
+  ## A filesystem-safe directory name for a cross-repo producer selector:
+  ## alphanumerics + ``.`` / ``_`` / ``-`` pass through; every other byte
+  ## becomes ``_``. Empty selectors (never reached here — the caller guards
+  ## ``selector.len == 0``) map to ``package`` for safety.
+  for ch in selector:
+    if ch.isAlphaNumeric() or ch in {'.', '_', '-'}:
+      result.add(ch)
+    else:
+      result.add('_')
+  if result.len == 0:
+    result = "package"
+
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
                         selectDefaultAction = false;
@@ -6298,53 +6336,122 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           $FromSourceMaxRecursionDepth & ") while resolving \"" & selector &
           "\" at " & producerRootAbs & ". Active stack: " &
           producerBuildStack.join(" -> ") & ".")
-      logSummary("cross-repo producer: building \"" & selector &
+      logSummary("cross-repo producer: resolving \"" & selector &
         "\" from source at " & producerRootAbs & " (" & $producer.kind & ")")
       producerBuildStack.add(producerRootAbs)
+      # Stable per-producer output base under the consumer's ``outDir`` for the
+      # producer's interface-extract artifacts. Independent of whether the
+      # producer sub-build runs (it may be skipped for a pure-Nim library), so
+      # the interface can be extracted up front to SCOPE the decision below.
+      let producerOutDirBase =
+        outDir / "cross-repo-producers" / selectorFilesystemKey(selector)
+      createDir(extendedPath(producerOutDirBase))
       try:
-        let producerOutcome = executeBuildTarget(producerProjectFile,
-          effectiveMode, publicCliPath,
-          selectDefaultAction = true,
-          workRoot = workRoot,
-          progressMode = progressMode,
-          progressBarStyle = progressBarStyle,
-          statsMode = statsMode,
-          reportMode = reportMode,
-          logMode = logMode,
-          diagnosticsPath = "",
-          prepareOnly = false,
-          dryRun = dryRun,
-          forceRebuild = forceRebuild,
-          skipCmakeRegeneration = skipCmakeRegeneration,
-          bypassRunQuotaExplicit = bypassRunQuotaExplicit,
-          eventSink = eventSink,
-          cancelCheck = cancelCheck)
-        if producerOutcome.exitCode != 0:
-          raise newException(OSError,
-            "cross-repo producer build failed: sub-build of " &
-            producerRootAbs & " (selector \"" & selector &
-            "\") exited with status " & $producerOutcome.exitCode &
-            ". See the sub-build's diagnostics for the underlying failure.")
-        # Extract the producer's interface to bind its declared executable(s)
-        # to their output binaries by BASENAME (§4.2 point 2). The producer's
-        # ``executable <exp>: name: "<bin>"`` produces ``build/bin/<bin>``
-        # under the producer root; the bin dir spliced onto PATH is the parent
-        # of the realized binary.
-        let producerOutDir = producerOutcome.outDir
-        let producerIface = producerOutDir / "producer-interface.rbsz"
-        let producerStub = producerOutDir / "producer-interface.nim"
+        # Extract the producer's interface FIRST — BEFORE any sub-build — so we
+        # can SCOPE the sub-build to the exact artifact the consumer consumes.
+        # Interface extraction compiles only the producer's provider (its
+        # ``repro.nim``); it does NOT run the producer's build edges, so it is
+        # cheap and side-effect free with respect to the consumed artifact.
+        #
+        # Bug-fix (producer sub-build over-build): the old code ran
+        # ``executeBuildTarget(..., selectDefaultAction = true, ...)``
+        # unconditionally, which for a LIBRARY-ONLY producer materialized the
+        # producer's DEFAULT action — i.e. its test suite, including any
+        # POOL-SERIALIZED test-execute edges (``buildPool(...)``). The
+        # consumer's runquotad has no such producer-local pool, so those pooled
+        # edges lease-deny forever and the consumer build HANGS. Consuming a
+        # sibling library must build (at most) THAT library's own artifact and
+        # must never compile or run the producer's test suite.
+        let producerIface = producerOutDirBase / "producer-interface.rbsz"
+        let producerStub = producerOutDirBase / "producer-interface.nim"
         var binDirs: seq[string] = @[]
         var realizedBinaries: seq[string] = @[]
         let producerArtifact =
           try:
             extractInterfaceFromModule(producerProjectFile, producerIface,
               producerStub, reprobuildLibraryWorkDir(),
-              producerOutDir / "producer-iface-work", requireStub = false)
+              producerOutDirBase / "producer-iface-work", requireStub = false)
           except CatchableError:
             raise newException(OSError,
               "cross-repo producer \"" & selector & "\" at " &
-              producerRootAbs & " built but its interface could not be " &
-              "loaded to bind the declared executable to its output binary.")
+              producerRootAbs & "'s interface could not be loaded to bind " &
+              "the declared executable / library to its output.")
+        # Decide whether the producer sub-build is required for the CONSUMED
+        # artifact. A build is needed only when the producer exposes a
+        # COMPILED artifact on disk:
+        #
+        #   * a declared ``executable`` — its ``build/bin/<name>`` binary must
+        #     exist so the PATH / executable channel finds it (the byte-
+        #     identical pre-existing executable-consumption path — e.g.
+        #     runquota → ``build/bin/runquotad``); OR
+        #   * a declared non-header ``library`` whose consumed artifact is a
+        #     compiled ``.so``/``.a``/``.dylib`` rather than a pure-Nim source
+        #     tree — i.e. NO importable Nim source root exists at the library's
+        #     ``exportedPath`` (default ``src``). A C/C++ shared/static library
+        #     must be linked before the consumer can bind against it.
+        #
+        # A PURE-NIM-SOURCE library (SC-11 — ``library nim_pty`` etc.) exports
+        # NO compiled artifact: the consumer imports it directly from the
+        # producer's ``src/`` threaded onto ``nim c --path:`` (the nimPathDirs
+        # channel below). Its source root is discovered from disk + the
+        # interface alone and its source identity folds via SC-4 WITHOUT the
+        # producer having run any build edge, so we skip the producer
+        # sub-build entirely. This is what keeps a library consumer from
+        # dragging in the producer's pooled test suite.
+        var needsProducerBuild = false
+        for exe in producerArtifact.projectInterface.publicExecutables:
+          let binName =
+            if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
+          if binName.len > 0:
+            needsProducerBuild = true
+            break
+        if not needsProducerBuild:
+          for lib in producerArtifact.projectInterface.publicLibraries:
+            if lib.name.len == 0 or lib.kind == lkHeaderOnly:
+              continue
+            let exported =
+              if lib.exportedPath.len > 0: lib.exportedPath else: "src"
+            let nimSrcDir = producerRootAbs / exported
+            if not dirExists(extendedPath(nimSrcDir)):
+              # No importable Nim source root — the consumed artifact is a
+              # compiled ``.so``/``.a`` that must be built + discovered under
+              # ``build/lib``.
+              needsProducerBuild = true
+              break
+        if needsProducerBuild:
+          let producerOutcome = executeBuildTarget(producerProjectFile,
+            effectiveMode, publicCliPath,
+            selectDefaultAction = true,
+            workRoot = workRoot,
+            progressMode = progressMode,
+            progressBarStyle = progressBarStyle,
+            statsMode = statsMode,
+            reportMode = reportMode,
+            logMode = logMode,
+            diagnosticsPath = "",
+            prepareOnly = false,
+            dryRun = dryRun,
+            forceRebuild = forceRebuild,
+            skipCmakeRegeneration = skipCmakeRegeneration,
+            bypassRunQuotaExplicit = bypassRunQuotaExplicit,
+            eventSink = eventSink,
+            cancelCheck = cancelCheck)
+          if producerOutcome.exitCode != 0:
+            raise newException(OSError,
+              "cross-repo producer build failed: sub-build of " &
+              producerRootAbs & " (selector \"" & selector &
+              "\") exited with status " & $producerOutcome.exitCode &
+              ". See the sub-build's diagnostics for the underlying failure.")
+        else:
+          logSummary("cross-repo producer: consuming \"" & selector &
+            "\" as a pure-Nim-source library — skipping producer sub-build " &
+            "(no compiled artifact; src threaded via nimPathDirs).")
+        # Bind the producer's declared executable(s) to their output binaries
+        # by BASENAME (§4.2 point 2). The producer's
+        # ``executable <exp>: name: "<bin>"`` produces ``build/bin/<bin>``
+        # under the producer root; the bin dir spliced onto PATH is the parent
+        # of the realized binary. When the sub-build was skipped (pure-Nim
+        # library) there are no executables, so this loop is inert.
         for exe in producerArtifact.projectInterface.publicExecutables:
           let binName =
             if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
@@ -13517,25 +13624,149 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
         if result.explicitTargetNames.find(target.name) < 0:
           result.explicitTargetNames.add(target.name)
 
+proc refreshRecipeProviderSnapshot(target: string;
+                                   mode: ToolProvisioningMode;
+                                   publicCliPath, workRoot: string):
+    Option[ProviderGraphSnapshot] =
+  ## Produce the recipe's (extension-merged) provider-graph snapshot — the
+  ## SNAPSHOT ONLY, with NO tool-identity resolution and NO graph lowering.
+  ##
+  ## This is the seam the RX pool-forwarding path needs. A recipe's declared
+  ## ``buildPool(...)`` calls execute at PROVIDER-EXECUTION time and land in
+  ## the snapshot's fragments as ``reprobuild.build-pool.v1`` metadata nodes.
+  ## Producing the snapshot requires only the interface extract + the provider
+  ## compile + the provider-graph refresh — it does NOT require resolving the
+  ## recipe's ``uses:`` sibling tools (that resolution happens later, in
+  ## ``warmResolveAndWriteIdentity`` / graph lowering, and THROWS at
+  ## daemon-spawn time for a CONSUMER whose siblings are not yet materialized).
+  ## By stopping at the snapshot we recover the consumer's OWN pools without
+  ## tripping over the unresolved-sibling failure. Returns ``none`` when the
+  ## recipe has no build block (leaf with no pools) — the caller treats that as
+  ## "no custom pools".
+  var parsedTarget = parseBuildTarget(target)
+  parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
+  let modulePath = parsedTarget.modulePath
+  if not fileExists(extendedPath(modulePath)):
+    raise newException(IOError, "build target module not found: " & modulePath)
+  let outDir = outputDirForTarget(parsedTarget, workRoot)
+  let projectRoot = projectRootForModule(modulePath)
+  let interfacePath = outDir / "project-interface.rbsz"
+  let stubPath = outDir / "project-interface.nim"
+  let compileWorkDir = reprobuildLibraryWorkDir()
+  let compileScratchDir = outDir / "provider-work"
+  ensureBootstrapToolchainEnv(mode, resolveStoreRoot() / "tool-store")
+  let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
+    compileWorkDir, compileScratchDir, requireStub = false)
+
+  var effectiveMode = mode
+  if effectiveMode == tpmUnspecified and
+      artifact.projectInterface.defaultToolProvisioning.len > 0:
+    effectiveMode = parseToolProvisioning(
+      artifact.projectInterface.defaultToolProvisioning)
+  # NOTE: deliberately NO tool-identity resolution here — pool metadata does
+  # not depend on it, and it is exactly the step that throws for an
+  # unresolved-sibling CONSUMER at spawn time.
+
+  if not moduleHasBuildBlock(modulePath):
+    return none(ProviderGraphSnapshot)
+
+  let providerBinaryPath = outDir / "provider" / "project-provider"
+  let providerArtifactPath = outDir / "provider-compile.rbsz"
+  var provider: ProviderCompileArtifact
+  let cachedProvider =
+    readFreshProviderCompileArtifact(providerArtifactPath,
+      modulePath, providerBinaryPath, artifact.interfaceFingerprint)
+  if cachedProvider.isSome:
+    provider = cachedProvider.get()
+  else:
+    let providerPlan = providerCompilePlan(modulePath, providerBinaryPath,
+      artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
+    invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
+    let providerCompileAction = providerCompileBuildAction(providerPlan,
+      modulePath, interfacePath, providerArtifactPath, publicCliPath,
+      compileWorkDir, compileScratchDir)
+    var providerCompileConfig = BuildEngineConfig(
+      cacheRoot: outDir / "build-engine-cache",
+      actionCacheRoot: currentActionCacheRoot(),
+      runQuotaCliPath: publicCliPath,
+      monitorCliPath: selfSpawnIoMonitorPath(),
+      monitorCliArgs: internalIoMonitorArgs,
+      maxParallelism: 1'u32,
+      stdoutLimit: 1024 * 1024,
+      stderrLimit: 1024 * 1024,
+      rebuildMissingOutputsOnCacheHit: true,
+      deferLocalOutputBlobs: true,
+      bypassRunQuota: runQuotaBypassedByEnv(),
+      fallbackToRunQuotaBypass: effectiveMode in {tpmPathOnly, tpmScoop},
+      inlineRunQuota: true,
+      dryRun: false,
+      forceRebuild: false,
+      suppressTrace: true,
+      skipCacheHitEvidence: true)
+    let providerCompileResult = runBuild(graph([providerCompileAction]),
+      providerCompileConfig)
+    if providerCompileResult.hasFailedActions():
+      raise newException(OSError, providerCompileFailure(providerCompileResult))
+    if not fileExists(extendedPath(providerArtifactPath)):
+      raise newException(IOError,
+        "provider compile edge did not write artifact: " & providerArtifactPath)
+    provider = readProviderCompileArtifact(providerArtifactPath)
+
+  let providerArtifactId = digestHex(provider.providerFingerprint)
+  let providerGraphStore = providerGraphStoreRoot(outDir / "provider-graph")
+  var refresh: ProviderRefreshReport
+  let freshSnapshot =
+    warmReadFreshProviderGraphSnapshot(providerGraphStore, providerArtifactId)
+  if freshSnapshot.isSome:
+    refresh.snapshot = freshSnapshot.get()
+  else:
+    refresh = refreshProviderGraph(RefreshConfig(
+      storeRoot: providerGraphStore,
+      providerBinaryPath: provider.outputBinaryPath,
+      providerArtifactId: providerArtifactId,
+      rootEntryPointId: artifact.projectInterface.packageName & ".root",
+      rootArguments: projectRoot,
+      namespace: "project",
+      lockSliceId: digestHex(artifact.interfaceFingerprint),
+      activity: "build",
+      providerWorkingDir: projectRoot))
+  discard mergeProjectExtensions(refresh.snapshot, projectRoot,
+    artifact.projectInterface.packageName, effectiveMode, publicCliPath,
+    workRoot)
+  some(refresh.snapshot)
+
 proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
                              publicCliPath, workRoot: string): seq[BuildPool] =
   ## RX pool-forwarding — return the recipe's declared build pools (the
   ## ``buildGraph.pools`` present in the extracted project graph) so the
   ## caller can forward them to ``runquotad`` alongside the convention
-  ## ``compile`` / ``fetch`` pools. Best-effort: any failure (recipe with no
-  ## build block, provider compile error, unresolved tools, etc.) yields an
-  ## empty seq so the daemon still spawns with the convention defaults and
-  ## the existing pre-RX behaviour is preserved. This reuses
-  ## ``prepareBuildGraphInspection`` whose provider-compile / lowered-graph
-  ## caches are shared with ``executeBuildTarget``, so the subsequent build
-  ## reuses the warmed caches rather than recompiling the provider.
+  ## ``compile`` / ``fetch`` pools.
+  ##
+  ## Consumer-own-pool forwarding fix: this is called at daemon-spawn time,
+  ## BEFORE the producer sub-builds / develop-override resolution have run, so
+  ## a CONSUMER recipe with ``uses:`` selectors cannot yet resolve its sibling
+  ## tools. The OLD path routed through ``prepareBuildGraphInspection``, whose
+  ## tool-identity resolution / graph lowering THROWS on those unresolved
+  ## siblings; the best-effort ``except`` then swallowed the failure and
+  ## returned an EMPTY pool set — dropping the consumer's OWN
+  ## ``buildPool(...)`` and starving its pooled edges (cap-0 → lease denial →
+  ## livelock). The consumer's own pools execute at provider-execution time
+  ## and are INDEPENDENT of ``uses:`` resolution, so we now recover them from
+  ## the provider-graph SNAPSHOT (``refreshRecipeProviderSnapshot`` +
+  ## ``poolsFromSnapshot``) — which stops BEFORE the throwing sibling
+  ## resolution. Still best-effort: a genuine recipe error (no build block,
+  ## provider compile failure) yields an empty seq so the daemon spawns with
+  ## the convention defaults and the pre-RX behaviour is preserved.
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified:
     effectiveMode = tpmPathOnly
   try:
-    let info = prepareBuildGraphInspection(target, effectiveMode,
-      publicCliPath, selectDefaultAction = false, workRoot = workRoot)
-    result = info.pools
+    let snapshot = refreshRecipeProviderSnapshot(target, effectiveMode,
+      publicCliPath, workRoot)
+    if snapshot.isSome:
+      result = poolsFromSnapshot(snapshot.get())
+    else:
+      result = @[]
   except CatchableError:
     result = @[]
 

@@ -166,6 +166,50 @@ package consumer:
       binary = "build/bin/app")
 """
 
+# ---- Producer-sub-build-scope fix (Bug 1): a pure-Nim LIBRARY producer whose
+# DEFAULT action is a POOL-SERIALIZED test — the nim-pty shape. Its
+# ``buildPool("greetlib.pty-serial", 1)`` + a test-execute edge routed through
+# that pool models a producer whose default action, if run during a consumer
+# build, would (a) require a producer-local pool the consumer's runquotad does
+# not have (→ lease-deny → hang) and (b) WRITE a marker proving the test ran.
+# The Bug-1 fix scopes the producer sub-build to the CONSUMED library — a pure
+# Nim src library needs NO build — so this test edge is never materialized:
+# the consumer build completes and the marker is NEVER written. ----
+const producerReproPooledTestTemplate = """
+import repro_project_dsl
+
+package greetlib:
+  defaultToolProvisioning "path"
+
+  uses:
+    "sh"
+
+  library greetlib:
+    kind: static
+
+  build:
+    # A pool-serialized "test" execute edge — mirrors nim-pty's
+    # ``edge.testBinary.run(pool = "nim_pty.pty-serial")``. If the producer's
+    # default action runs during a consumer build, this edge (a) needs the
+    # ``greetlib.pty-serial`` pool the consumer daemon lacks and (b) writes the
+    # marker below. The Bug-1 fix scopes the producer sub-build to the consumed
+    # (pure-Nim) library, so this edge is never materialized.
+    discard buildPool("greetlib.pty-serial", 1'u32)
+    discard buildAction(
+      id = "greetlib.test.pooled",
+      call = inlineExecCall(@["sh", "-c",
+        "mkdir -p build && printf ran > build/PRODUCER-TEST-RAN.marker"]),
+      outputs = @["build/PRODUCER-TEST-RAN.marker"],
+      pool = "greetlib.pty-serial",
+      cacheable = false,
+      toolIdentityRefs = @["sh"])
+"""
+
+proc writeProducerSrcPooled(root, stamp: string) =
+  createDir(root / "src")
+  writeFile(root / "repro.nim", producerReproPooledTestTemplate)
+  writeFile(root / "src" / "greetlib.nim", producerModule(stamp))
+
 proc q(value: string): string = quoteShell(value)
 
 proc run(command: string; cwd = ""): tuple[code: int; output: string] =
@@ -406,3 +450,79 @@ created_at = "2026-07-04T00:00:00Z"
         check code != 0
         check not fileExists(ctlRoot / "build" / "bin" / "app")
         check output.toLowerAscii.contains("greetlib")
+
+  # ====================================================================
+  # Bug 1 — producer sub-build scope: consuming a pure-Nim LIBRARY must
+  # build (at most) that library's own artifact and must NEVER compile or
+  # run the producer's test suite. A library-only producer's DEFAULT action
+  # is its tests — here a POOL-SERIALIZED test edge (the nim-pty shape) whose
+  # pool the CONSUMER's runquotad does not have. Before the fix, the producer
+  # sub-build ran ``selectDefaultAction = true`` → the pooled test edge
+  # lease-denied forever → the consumer build HUNG. After the fix, the pure-
+  # Nim library needs no producer build, so the consumer build COMPLETES and
+  # the producer's test-execute marker is NEVER written.
+  #
+  # Falsifiability: restore the producer sub-build to ``selectDefaultAction =
+  # true`` (build unconditionally) and the marker appears (or the build hangs
+  # / denies on ``greetlib.pty-serial``) — this assertion fails.
+  # ====================================================================
+  test "t_cross_repo_library_consumer_does_not_build_producer_tests":
+    let gitBin = findExe("git")
+    if not fileExists(reproBinary):
+      checkpoint("skipped — ./build/bin/repro unbuilt")
+      skip()
+    else:
+      let repoRoot = getCurrentDir()
+      let reproAbs = absolutePath(reproBinary)
+      let scratch = getTempDir() / "sc11-bug1-" & $getCurrentProcessId()
+      removeDir(scratch)
+      createDir(scratch)
+      defer: removeDir(scratch)
+
+      let devRoot = absolutePath(scratch / "develop")
+      createDir(devRoot)
+      # The sibling library producer whose DEFAULT action is a pool-serialized
+      # test (the nim-pty shape).
+      let siblingRoot = devRoot / "greetlib"
+      createDir(siblingRoot)
+      writeProducerSrcPooled(siblingRoot, greetStamp)
+      # The consumer with a develop override → the sibling checkout.
+      let consumerRoot = devRoot / "consumer"
+      createDir(consumerRoot)
+      writeConsumer(consumerRoot, consumerReproWithGreetlib)
+      createDir(consumerRoot / ".repro")
+      writeFile(consumerRoot / ".repro" / "develop-overrides.toml", """
+schema = "reprobuild.workspace.develop-overrides.v1"
+
+[[override]]
+package = "greetlib"
+local_path = "../greetlib"
+state = "editable"
+created_at = "2026-07-04T00:00:00Z"
+""")
+
+      let marker = consumerRoot / "build" / "app-out.txt"
+      if fileExists(marker): removeFile(marker)
+      let producerTestMarker = siblingRoot / "build" / "PRODUCER-TEST-RAN.marker"
+      if fileExists(producerTestMarker): removeFile(producerTestMarker)
+      let cacheRoot = absolutePath(scratch / "bug1-cache")
+      createDir(cacheRoot)
+      let cmd = buildCommand(reproAbs, consumerRoot, cacheRoot)
+
+      # The consumer build COMPLETES (was: hang) — the pure-Nim library needs
+      # no producer sub-build, so the producer's pooled test edge is never
+      # materialized against the consumer's poolless runquotad.
+      checkpoint("bug1 build: " & cmd)
+      let (code, output) = run(cmd, repoRoot)
+      checkpoint("bug1 exit=" & $code)
+      checkpoint(output)
+      check code == 0
+      # The library consumption still resolves ``import greetlib`` via the
+      # threaded ``src/`` — the consumer binary ran + wrote the stamp.
+      check fileExists(marker)
+      if fileExists(marker):
+        check readFile(marker).strip() == greetStamp
+      # The producer's POOLED TEST edge NEVER ran — its marker is absent.
+      check not fileExists(producerTestMarker)
+      # No producer-pool lease denial leaked into the consumer build.
+      check not output.contains("greetlib.pty-serial")
