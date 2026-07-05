@@ -138,6 +138,40 @@ repro scheduler total                    1   25100.0        25.1
                 header,
             )
 
+    def test_runtime_loader_env_mirrors_ld_library_path_on_darwin(self):
+        original_system = bench.platform.system
+        bench.platform.system = lambda: "Darwin"
+        try:
+            env = bench.runtime_loader_env({
+                "LD_LIBRARY_PATH": "/nix/store/clingo/lib:/nix/store/zstd/lib",
+            })
+        finally:
+            bench.platform.system = original_system
+
+        self.assertEqual(
+            env["DYLD_LIBRARY_PATH"],
+            "/nix/store/clingo/lib:/nix/store/zstd/lib",
+        )
+        self.assertEqual(
+            env["DYLD_FALLBACK_LIBRARY_PATH"],
+            "/nix/store/clingo/lib:/nix/store/zstd/lib",
+        )
+
+    def test_runtime_loader_env_preserves_explicit_dyld_paths(self):
+        original_system = bench.platform.system
+        bench.platform.system = lambda: "Darwin"
+        try:
+            env = bench.runtime_loader_env({
+                "LD_LIBRARY_PATH": "/nix/store/clingo/lib",
+                "DYLD_LIBRARY_PATH": "/custom/dyld",
+                "DYLD_FALLBACK_LIBRARY_PATH": "/custom/fallback",
+            })
+        finally:
+            bench.platform.system = original_system
+
+        self.assertEqual(env["DYLD_LIBRARY_PATH"], "/custom/dyld")
+        self.assertEqual(env["DYLD_FALLBACK_LIBRARY_PATH"], "/custom/fallback")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -481,6 +481,20 @@ def prepend_path(env, prefix):
     return env
 
 
+def runtime_loader_env(env):
+    env = dict(env)
+    if platform.system() == "Darwin":
+        ld_library_path = env.get("LD_LIBRARY_PATH", "")
+        dyld_library_path = env.get("DYLD_LIBRARY_PATH", "")
+        dyld_fallback_library_path = env.get("DYLD_FALLBACK_LIBRARY_PATH", "")
+        if ld_library_path and not dyld_library_path:
+            dyld_library_path = ld_library_path
+            env["DYLD_LIBRARY_PATH"] = dyld_library_path
+        if (dyld_library_path or ld_library_path) and not dyld_fallback_library_path:
+            env["DYLD_FALLBACK_LIBRARY_PATH"] = dyld_library_path or ld_library_path
+    return env
+
+
 def direct_reprobuild_env(env, binary_dir):
     metadata = read_reprobuild_provider_metadata(binary_dir)
     wrapper_path = metadata.get("wrapper_path")
@@ -767,7 +781,7 @@ def benchmark_project_mode(args, context, project_report, key, source_dir,
     runquotad = context["runquotad"]
     c_compiler = context["cCompiler"]
     cxx_compiler = context["cxxCompiler"]
-    base_env = os.environ.copy()
+    base_env = runtime_loader_env(os.environ.copy())
 
     mode_root = args.work_root / "projects" / key / execution_mode
     mode_source = copy_source_tree(source_dir, mode_root / "source")
