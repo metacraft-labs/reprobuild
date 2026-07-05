@@ -34191,7 +34191,7 @@ proc newBuildPeerCacheWiring*(reader: PeerCacheActionCacheReader;
   result.reader = reader
   # `cas` and `cache` are retained for API stability but the active
   # install path uses the engine-supplied handles (the engine pushes
-  # its own `LocalCas` and `ptr ActionCache` into the installer
+  # its own `CasStore` and `ptr ActionCache` into the installer
   # closure). Earlier drafts of this helper closed over them locally;
   # we keep the parameters so existing callers don't break.
   discard cas
@@ -34204,7 +34204,7 @@ proc newBuildPeerCacheWiring*(reader: PeerCacheActionCacheReader;
     readerRef.readActionOutput(key)
   result.installer = proc(weakFingerprint: ContentDigest;
                           bundleBytes: seq[byte];
-                          engineCas: LocalCas;
+                          engineCas: var CasStore;
                           engineCache: ptr ActionCache):
                           tuple[ok: bool; reason: string]
       {.gcsafe, closure.} =
@@ -34308,7 +34308,7 @@ proc buildPeerCacheWiringFor*(spec: string): BuildPeerCacheWiring =
       readerRef.readActionOutput(key)
     result.installer = proc(weakFingerprint: ContentDigest;
                             bundleBytes: seq[byte];
-                            engineCas: LocalCas;
+                            engineCas: var CasStore;
                             engineCache: ptr ActionCache):
                             tuple[ok: bool; reason: string]
         {.gcsafe, closure.} =

@@ -49,7 +49,8 @@ import nimcrypto/sha2 as ncSha2
 # no parallel mirror type drifting away from the spec.
 import repro_binary_cache_client/cache_key
 import repro_binary_cache_server/types as bcsTypes
-export cache_key, bcsTypes
+import repro_project_dsl/install_mirror_resolver
+export cache_key, bcsTypes, install_mirror_resolver
 
 proc extendedPath(path: string): string =
   when defined(windows):

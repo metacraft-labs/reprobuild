@@ -371,7 +371,8 @@ proc emitShellActions(projectRoot, packageName, extractedPath, outPath,
     # migration for the first live consumer (hwdata).
     let outMirrorRoot = (projectRoot / ".repro" / "output" / "install").
       replace("\\", "/")
-    let shellEnv = @[("OUT_MIRROR", outMirrorRoot)]
+    let shellEnv = @[("OUT_MIRROR", outMirrorRoot)] &
+      packageDependencyRootEnvEntries(packageName, projectRoot)
     let action = buildAction(
       id = actionId,
       call = inlineExecCall(argv, projectRoot),

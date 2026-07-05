@@ -76,6 +76,7 @@ import ./wayland_protocols
 import ./wayland_scanner
 import ./linux_headers
 import ./python3
+import ./llvm_config
 import ./runquotad
 # M9.R.15b.5 — gtk-update-icon-cache is referenced by adwaita-icon-theme
 # (and any other icon-theme recipe) as a native build dep at meson-setup
@@ -224,6 +225,7 @@ export wayland_protocols
 export wayland_scanner
 export linux_headers
 export python3
+export llvm_config
 export runquotad
 export gtk_update_icon_cache
 export sassc

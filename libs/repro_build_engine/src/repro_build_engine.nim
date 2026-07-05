@@ -8,6 +8,7 @@ import repro_core
 import repro_depfile
 import repro_hash
 import repro_local_store
+import repro_cas_store
 # Incremental-Test-Runner M7: the build engine consumes the shared ``io-mon``
 # library (a byte-identical wire-format + ABI relocation of reprobuild's former
 # ``repro_monitor_depfile`` io-monitor stack) for its monitor-evidence dependency
@@ -546,7 +547,7 @@ type
 
   PeerCacheActionBundleInstaller* = proc(weakFingerprint: ContentDigest;
                                           bundleBytes: seq[byte];
-                                          cas: LocalCas;
+                                          cas: var CasStore;
                                           cache: ptr ActionCache):
                                           tuple[ok: bool; reason: string]
     {.gcsafe, closure.}
@@ -854,6 +855,38 @@ proc deriveActionCacheKeyHex*(action: BuildAction): string =
   let folded = applyCachePlatformTag(
     action.cacheEntryIdentity.get(), action.cachePlatformTag)
   deriveCacheEntryKeyHex(folded)
+
+proc actionOutputPath(outputRoot, path: string): string =
+  if path.isAbsolute or outputRoot.len == 0:
+    path
+  else:
+    outputRoot / path
+
+proc contentHashForActionBlob(blob: CasBlobRef): ContentHash =
+  if blob.digest.algorithm != haBlake3_256:
+    raise newException(CacheIntegrityError,
+      "unsupported CAS digest algorithm for " & digestHex(blob.digest))
+  toContentHash(blob.digest.bytes)
+
+proc materializeActionCacheOutputs*(cas: CasStore;
+                                    record: ActionResultRecord;
+                                    outputRoot = "") =
+  ## R11 action-cache restore helper shared by normal hits and hybrid-cutoff
+  ## hits. It translates stable RBAR output records into Layer-1
+  ## ``CasMaterialization`` requests; ``casMaterialize`` verifies every blob
+  ## before touching destinations, so missing/corrupt later blobs cannot leave
+  ## earlier outputs partially restored.
+  if record.outputPayloadKind != opkCasBlobs:
+    raise newException(CacheIntegrityError,
+      "cache record does not contain output payloads")
+  var entries: seq[CasMaterialization] = @[]
+  for output in record.outputs:
+    entries.add(CasMaterialization(
+      hash: contentHashForActionBlob(output.blob),
+      destination: actionOutputPath(outputRoot, output.path),
+      applyPermissions: true,
+      permissions: output.permissions))
+  cas.casMaterialize(entries)
 
 proc defaultBuildEngineConfig*(cacheRoot: string;
                                actionCacheRoot: string = ""): BuildEngineConfig =
@@ -3592,13 +3625,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     else:
       cacheRoot
   let casOpenStart = statStart()
-  let cas = openLocalCas(sharedRoot / "cas")
+  var cas = openCasStore(sharedRoot)
   finishStat("repro cas open", casOpenStart)
   let actionCacheOpenStart = statStart()
   let warmCache = warmActionCacheFor(sharedRoot / "action-cache")
   var cache = warmCache.cache
   finishStat("repro action cache open", actionCacheOpenStart)
   defer:
+    cas.close()
     cache.flushHotIndex()
     warmCache.cache = cache
     warmCache.evidence = actionCacheDurableEvidence(sharedRoot / "action-cache")
@@ -3637,7 +3671,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for b in recordBytes: bundleBytes.add(b)
     bundleBytes.writeU32Le(uint32(record.outputs.len))
     for output in record.outputs:
-      let payload = cas.readBlob(output.blob)
+      let payload = cas.casGet(contentHashForActionBlob(output.blob))
+      if uint64(payload.len) != output.blob.sizeBytes:
+        raise newException(CacheIntegrityError, "CAS size mismatch for " &
+          digestHex(output.blob.digest))
       bundleBytes.writeU32Le(uint32(payload.len))
       for b in payload: bundleBytes.add(b)
     config.peerCacheActionPublisher(weakFingerprint, bundleBytes)
@@ -4386,7 +4423,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             outputsPresentKnown = true
             finishStat("repro output stat", outputStatStart)
           let lookupStart = statStart()
-          var lookup = cache.lookupActionResult(cas, action.weakFingerprint,
+          var lookup = cache.lookupActionResult(cas.inner, action.weakFingerprint,
             action.actionCachePolicy,
             verifyOutputBlobs = not outputsPresentBeforeLookup,
             allowMetadataOnlyHit = config.rebuildMissingOutputsOnCacheHit and
@@ -4415,7 +4452,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               finishStat("repro peer-cache install", installStart)
               if install.ok:
                 let retryStart = statStart()
-                lookup = cache.lookupActionResult(cas, action.weakFingerprint,
+                lookup = cache.lookupActionResult(cas.inner, action.weakFingerprint,
                   action.actionCachePolicy,
                   verifyOutputBlobs = not outputsPresentBeforeLookup,
                   allowMetadataOnlyHit =
@@ -4446,7 +4483,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               runResult.trace(id, "cache-skipped", "missing-output")
             else:
               let restoreStart = statStart()
-              cas.restoreOutputs(lookup.record, action.cwd)
+              cas.materializeActionCacheOutputs(lookup.record, action.cwd)
               fileMetadataCache.clear()
               finishStat("repro cache restore", restoreStart)
               runResult.results[idToIndex.resultIndex(id)].evidence =
@@ -4474,7 +4511,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               runResult.trace(id, "cache-skipped", "missing-output")
             else:
               let restoreStart = statStart()
-              cas.restoreOutputs(lookup.record, action.cwd)
+              cas.materializeActionCacheOutputs(lookup.record, action.cwd)
               fileMetadataCache.clear()
               finishStat("repro cache restore", restoreStart)
               runResult.results[idToIndex.resultIndex(id)].evidence =
@@ -4658,7 +4695,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 config.peerCacheActionPublisher != nil or
                 (config.binaryCachePublisher != nil and
                   action.publishToBinaryCache)
-              let record = cache.recordActionResult(cas,
+              let record = cache.recordActionResult(cas.inner,
                 action.weakFingerprint,
                 action.actionCachePolicy,
                 action.cacheInputPaths(evidence.evidence),
@@ -4775,7 +4812,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 config.peerCacheActionPublisher != nil or
                 (config.binaryCachePublisher != nil and
                   plan.action.publishToBinaryCache)
-              let record = cache.recordActionResult(cas, plan.action.weakFingerprint,
+              let record = cache.recordActionResult(cas.inner, plan.action.weakFingerprint,
                 plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
                 plan.action.outputs, plan.action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
@@ -5143,7 +5180,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             config.peerCacheActionPublisher != nil or
             (config.binaryCachePublisher != nil and
               action.publishToBinaryCache)
-          let record = cache.recordActionResult(cas, action.weakFingerprint,
+          let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
             action.actionCachePolicy, action.cacheInputPaths(evidence.evidence),
             action.outputs, action.cwd,
             storeOutputBlobs = storeOutputBlobs,

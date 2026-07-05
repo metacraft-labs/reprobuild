@@ -710,6 +710,57 @@ proc storeCasBlob*(s: var Store; payload: openArray[byte]): PrefixIdBytes =
     if not fileExists(extendedPath(finalPath)):
       raise
 
+proc storeCasFileBlob*(s: var Store; path: string;
+                       sizeBytes: uint64): PrefixIdBytes =
+  ## Inserts the file at `path` into the content-addressed blob store without
+  ## loading the whole payload into memory. Returns the same raw BLAKE3-256 key
+  ## as `storeCasBlob`.
+  let stagePath = s.casStageDir() & ".blob"
+  createDir(extendedPath(parentDir(stagePath)))
+  var input = open(extendedPath(path), fmRead)
+  var output = open(extendedPath(stagePath), fmWrite)
+  var staged = false
+  var total = 0'u64
+  var hasher = blake3.initHasher()
+  try:
+    const ChunkSize = 1024 * 1024
+    var buffer = newSeq[byte](ChunkSize)
+    while true:
+      let n = input.readBuffer(addr buffer[0], buffer.len)
+      if n <= 0:
+        break
+      total += uint64(n)
+      hasher.update(addr buffer[0], n)
+      if output.writeBuffer(addr buffer[0], n) != n:
+        raise newException(IOError, "short write while staging CAS blob: " &
+          path)
+    if total != sizeBytes:
+      raise newException(IOError, "file changed while hashing: " & path)
+    result = hasher.finalize()
+    output.close()
+    input.close()
+    let finalPath = s.casPath(result)
+    if fileExists(extendedPath(finalPath)):
+      removeFile(extendedPath(stagePath))
+      staged = true
+      return
+    createDir(extendedPath(parentDir(finalPath)))
+    try:
+      moveFile(extendedPath(stagePath), extendedPath(finalPath))
+      staged = true
+    except OSError:
+      if fileExists(extendedPath(finalPath)):
+        removeFile(extendedPath(stagePath))
+        staged = true
+      else:
+        raise
+  finally:
+    try: hasher.close() except CatchableError: discard
+    try: input.close() except CatchableError: discard
+    try: output.close() except CatchableError: discard
+    if not staged and fileExists(extendedPath(stagePath)):
+      try: removeFile(extendedPath(stagePath)) except OSError: discard
+
 proc readCasBlob*(s: Store; digest: PrefixIdBytes): seq[byte] =
   ## Reads a CAS blob and verifies its BLAKE3-256 digest BEFORE the
   ## bytes are returned to the caller (mandatory per spec).

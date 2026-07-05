@@ -223,7 +223,7 @@ proc prepopulateCache(cacheRoot, workRoot, markerPath, outputPath: string) =
   let inputPath = workRoot / "cache" / "input.txt"
   fixtureWrite(inputPath, "cache input\n")
   fixtureWrite(outputPath, "restored cached output\n")
-  let cas = openLocalCas(cacheRoot / "cas")
+  var cas = openStore(cacheRoot)
   var cache = openActionCache(cacheRoot / "action-cache")
   discard cache.recordActionResult(cas, weak("cache-hit"), ffpTimestamp,
     [inputPath], ["cache/out.txt"], workRoot)
@@ -471,7 +471,7 @@ suite "integration_build_engine_api_ready_queue":
         inputs = [staleInput], outputs = ["out/stale.txt"],
         cacheable = true, weakFingerprint = weak("fast-noop-stale"))
 
-      let cas = openLocalCas(cacheRoot / "cas")
+      var cas = openStore(cacheRoot)
       var cache = openActionCache(cacheRoot / "action-cache")
       discard cache.recordActionResult(cas, selectedAction.weakFingerprint,
         selectedAction.actionCachePolicy, selectedAction.inputs,
@@ -1094,7 +1094,7 @@ suite "integration_build_engine_api_ready_queue":
       check cold.status == asSucceeded
       check readFile(presentOutputPath) == "seed:cache input\n"
       var actionCache = openActionCache(cacheRoot / "action-cache")
-      let cas = openLocalCas(cacheRoot / "cas")
+      var cas = openStore(cacheRoot)
       let seededLookup = actionCache.lookupActionResult(cas,
         weak("cache-present-output"), ffpTimestamp)
       check seededLookup.status == aclHit
@@ -1149,7 +1149,7 @@ suite "integration_build_engine_api_ready_queue":
       fixtureWrite(inputPath, "checksum input\n")
       fixtureWrite(outputPath, "checksum cached output\n")
 
-      let cas = openLocalCas(cacheRoot / "cas")
+      var cas = openStore(cacheRoot)
       var actionCache = openActionCache(cacheRoot / "action-cache")
       discard actionCache.recordActionResult(cas, weak("explicit-checksum"),
         ffpChecksum, [inputPath], ["out/cached.txt"], workRoot)

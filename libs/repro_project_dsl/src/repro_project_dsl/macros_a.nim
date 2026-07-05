@@ -2221,7 +2221,7 @@ proc workspaceProducerModule(selector, consumerSourceFile: string): string =
     if fileExists(candidate):
       # Return the extension-stripped path so the emitted
       # ``import "<path>" as <alias>`` resolves the module by file path.
-      return candidate[0 ..< candidate.len - ".nim".len]
+      return candidate[0 ..< candidate.len - ".nim".len].replace('\\', '/')
   ""
 
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =

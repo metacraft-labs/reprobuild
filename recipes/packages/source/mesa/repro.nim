@@ -86,8 +86,8 @@
 ## ## Configurables
 ##
 ## v1 ships NO configurables — the meson options are hardcoded to the
-## minimal modern-desktop baseline that ships ONLY the swrast software
-## rasterizer driver + the Wayland platform integration:
+## minimal modern-desktop baseline that ships the swrast/llvmpipe
+## software rasterizer driver + the Wayland platform integration:
 ##
 ##   * ``vulkan-drivers=``      — disable Vulkan entirely (no GPU
 ##                                 vendor backends; the swrast software
@@ -98,16 +98,13 @@
 ##                                 native gallium-drivers choice
 ##                                 (verified against 24.0.9
 ##                                 ``meson_options.txt``, choices list
-##                                 includes ``swrast``). ``swrast`` on
-##                                 24.0 builds the pure-C softpipe
-##                                 path when LLVM is disabled. No
-##                                 hardware drivers (i915, iris,
-##                                 radeon, nouveau, etc.) — these
-##                                 would pull libpciaccess + LLVM +
-##                                 kernel-DRM deps far beyond v1
-##                                 scope. swrast is enough for KF6 /
-##                                 GNOME / Qt6 to link + run their
-##                                 software-fallback paths.
+##                                 includes ``swrast``). With LLVM
+##                                 enabled, ``swrast`` builds the
+##                                 llvmpipe software path that wlroots
+##                                 can use against QEMU's KMS
+##                                 framebuffer. No hardware drivers
+##                                 (i915, iris, radeon, nouveau, etc.)
+##                                 are shipped.
 ##   * ``platforms=wayland``     — Wayland platform support ONLY. No
 ##                                 X11 (xcb/xlib) — the v1 desktop is
 ##                                 Wayland-native.
@@ -126,10 +123,12 @@
 ##                                 backend (no v1 consumer).
 ##   * ``gallium-xa=disabled``   — disable XA state tracker (X11
 ##                                 acceleration; v1 has no X11 server).
-##   * ``llvm=disabled``         — disable LLVM dependency (swrast can
-##                                 use it for JIT but works without;
-##                                 v1 avoids the multi-GB LLVM deps).
-##   * ``shared-llvm=disabled``  — paired with ``llvm=disabled``.
+##   * ``llvm=enabled``          — enable llvmpipe. M9.R.78 proved the
+##                                 LLVM-less softpipe path cannot
+##                                 construct a pipe_screen against
+##                                 QEMU's bochs-drm KMS fd.
+##   * ``shared-llvm=enabled``   — use libLLVM rather than statically
+##                                 absorbing LLVM into each DRI driver.
 ##   * ``valgrind=disabled``     — no valgrind integration in v1 builds.
 ##   * ``libunwind=disabled``    — no libunwind integration in v1
 ##                                 (skips the libunwind probe).
@@ -202,6 +201,10 @@ package mesaSource:
     "bison"
     ## flex generates the GLSL preprocessor lexer.
     "flex"
+    ## llvm-config lets Mesa enable the llvmpipe software rasterizer.
+    ## Mesa's meson files query LLVM through llvm-config and then link
+    ## the produced DRI drivers against the LLVM libraries it reports.
+    "llvm-config"
     ## gcc is the host C/C++ toolchain — mesa is C11 + C++17.
     "gcc >=11"
 
@@ -256,8 +259,8 @@ package mesaSource:
         "gallium-vdpau=disabled",
         "gallium-va=disabled",
         "gallium-xa=disabled",
-        "llvm=disabled",
-        "shared-llvm=disabled",
+        "llvm=enabled",
+        "shared-llvm=enabled",
         "valgrind=disabled",
         "libunwind=disabled",
         "android-libbacktrace=disabled",

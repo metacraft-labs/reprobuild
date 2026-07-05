@@ -188,6 +188,8 @@ type
     ## ensuring parent dirs exist iff ``createParentDirs`` is false.
     hash*: ContentHash
     destination*: string
+    applyPermissions*: bool
+    permissions*: set[FilePermission]
 
 # ---------------------------------------------------------------------------
 # Cache-hit rehydrate helper (R11 Layer-1 primitive)
@@ -209,12 +211,15 @@ proc casMaterialize*(cas: CasStore;
   ## documented R11-clean replacement that ``opkCasBlobs`` cache-hit
   ## restore paths route through as they migrate.
   ##
-  ## Every mismatch / missing blob raises immediately — a partial
-  ## restore is never left on disk, matching the "trust the CAS,
-  ## verify on read" contract from
+  ## Every mismatch / missing blob raises before any destination is
+  ## touched — a missing later blob cannot leave an earlier output on
+  ## disk, matching the "trust the CAS, verify on read" contract from
   ## ``Local-Content-Addressed-Store.md`` §"Corruption Detection".
+  var payloads: seq[seq[byte]] = @[]
   for entry in entries:
-    let bytes = cas.casGet(entry.hash)
+    payloads.add(cas.casGet(entry.hash))
+  for i, entry in entries:
+    let bytes = payloads[i]
     let dest = entry.destination
     if createParentDirs:
       let parent = parentDir(dest)
@@ -225,9 +230,15 @@ proc casMaterialize*(cas: CasStore;
     for i, b in bytes:
       raw[i] = char(b)
     writeFile(tmp, raw)
+    when not defined(windows):
+      if entry.applyPermissions:
+        setFilePermissions(tmp, entry.permissions)
     if fileExists(dest):
       removeFile(dest)
     moveFile(tmp, dest)
+    when not defined(windows):
+      if entry.applyPermissions:
+        setFilePermissions(dest, entry.permissions)
 
 # ---------------------------------------------------------------------------
 # Garbage collection

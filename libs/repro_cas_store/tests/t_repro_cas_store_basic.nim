@@ -212,10 +212,10 @@ suite "repro_cas_store materialize (M9.R.77.4)":
       # The GOOD entry comes first, so if the loop wrote to disk it
       # would be visible on the retry. The MISSING entry raises and
       # aborts the loop.
-      CasMaterialization(hash: toContentHash(missing),
-                         destination: outDir / "missing.bin"),
       CasMaterialization(hash: good,
                          destination: outDir / "good.bin"),
+      CasMaterialization(hash: toContentHash(missing),
+                         destination: outDir / "missing.bin"),
     ]
     var raised = false
     try:

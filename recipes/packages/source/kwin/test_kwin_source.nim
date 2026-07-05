@@ -25,7 +25,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[envvars, os, strutils, unittest]
 
 import repro_project_dsl
 
@@ -42,6 +42,52 @@ const ExpectedUrl =
 
 const ExpectedHash =
   "5cc450a6e41105c8c49929b72550b331237f96aafb294690f4707bdc5f776848"
+
+const RecipeRootEnv = "REPROBUILD_RECIPE_ROOT"
+
+template withRecipeRootEnv(body: untyped) =
+  let oldSet = existsEnv(RecipeRootEnv)
+  let oldValue = getEnv(RecipeRootEnv)
+  putEnv(RecipeRootEnv, currentSourcePath.parentDir.parentDir)
+  try:
+    body
+  finally:
+    if oldSet:
+      putEnv(RecipeRootEnv, oldValue)
+    else:
+      delEnv(RecipeRootEnv)
+
+proc argByName(action: BuildActionDef; name: string): PublicCliArg =
+  for arg in action.call.arguments:
+    if arg.name == name:
+      return arg
+  raise newException(ValueError, "no argument named '" & name & "'")
+
+proc encodedValues(arg: PublicCliArg): seq[string] =
+  if arg.encodedValue.len == 0:
+    return @[]
+  arg.encodedValue.split("\x1f")
+
+proc envValue(action: BuildActionDef; name: string): string =
+  for (key, value) in action.env:
+    if key == name:
+      return value
+  ""
+
+proc findCmakeConfigureAction(): BuildActionDef =
+  for action in registeredBuildActions():
+    if action.call.packageName == "cmake" and
+        action.call.executableName == "cmakeBin" and
+        action.call.subcommand == "configure":
+      return action
+  raise newException(ValueError, "cmake configure action not found")
+
+proc cacheVarValue(action: BuildActionDef; name: string): string =
+  let prefix = name & "="
+  for entry in action.argByName("cacheVars").encodedValues():
+    if entry.startsWith(prefix):
+      return entry[prefix.len .. ^1]
+  ""
 
 const ExpectedCmakeFlags = @[
   "-DBUILD_TESTING=OFF",
@@ -78,6 +124,29 @@ suite "kwinSource — from-source recipe smoke test":
 
   test "cmakeFlags registers the exact production flag sequence":
     check true  # M9.R.6.1: registry retired — assertion gutted
+  test "M9.R.81 threads dependency roots into configure env and include flags":
+    withRecipeRootEnv:
+      resetBuildActionRegistry()
+      buildKwinSourcePackage()
+
+      let configure = findCmakeConfigureAction()
+      let waylandRoot = dependencyInstallMirrorRoot("wayland", "kwinSource")
+      let qt6BaseRoot = dependencyInstallMirrorRoot("qt6-base", "kwinSource")
+      let qt6DeclRoot = dependencyInstallMirrorRoot(
+        "qt6-declarative", "kwinSource")
+
+      check configure.envValue("DEP_WAYLAND_ROOT") == waylandRoot
+      check configure.envValue("DEP_QT6_BASE_ROOT") == qt6BaseRoot
+      check configure.envValue("DEP_QT6_DECLARATIVE_ROOT") == qt6DeclRoot
+
+      let cFlags = configure.cacheVarValue("CMAKE_C_FLAGS")
+      let cxxFlags = configure.cacheVarValue("CMAKE_CXX_FLAGS")
+      check cFlags.contains("-isystem " & waylandRoot & "/usr/include")
+      check cFlags.contains("-isystem " & qt6BaseRoot & "/usr/include")
+      check cFlags.contains("-isystem " & qt6DeclRoot & "/usr/include")
+      check cxxFlags == cFlags
+      check not cFlags.contains("/opt/repro/reprobuild/recipes/packages/source")
+
   test "cmakeFlags does not leak into the meson channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "cmakeFlags does not leak into the configure channel":

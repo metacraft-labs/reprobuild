@@ -540,6 +540,15 @@ proc blobPath*(cas: LocalCas; digest: ContentDigest): string =
 proc blobRef*(digest: ContentDigest; sizeBytes: uint64): CasBlobRef =
   CasBlobRef(digest: digest, sizeBytes: sizeBytes)
 
+proc r11CasDigest(hash: PrefixIdBytes): ContentDigest =
+  ContentDigest(algorithm: haBlake3_256, domain: hdCasContent, bytes: hash)
+
+proc r11CasHash(blob: CasBlobRef): PrefixIdBytes =
+  if blob.digest.algorithm != haBlake3_256:
+    raise newException(CacheIntegrityError,
+      "unsupported CAS digest algorithm for " & digestHex(blob.digest))
+  blob.digest.bytes
+
 proc readBlob*(cas: LocalCas; blob: CasBlobRef): seq[byte] =
   let path = cas.blobPath(blob.digest)
   if not fileExists(extendedPath(path)):
@@ -613,6 +622,29 @@ proc storeFileBlob*(cas: LocalCas; path: string; sizeBytes: uint64): CasBlobRef 
       cas.verifyBlob(result)
     else:
       raise
+
+proc blobPath*(cas: Store; digest: ContentDigest): string =
+  cas.casPath(PrefixIdBytes(digest.bytes))
+
+proc readBlob*(cas: Store; blob: CasBlobRef): seq[byte] =
+  try:
+    result = cas.readCasBlob(blob.r11CasHash())
+  except StoreError as err:
+    raise newException(CacheIntegrityError, err.msg)
+  if uint64(result.len) != blob.sizeBytes:
+    raise newException(CacheIntegrityError, "CAS size mismatch for " &
+      digestHex(blob.digest))
+
+proc verifyBlob*(cas: Store; blob: CasBlobRef) =
+  discard cas.readBlob(blob)
+
+proc storeBlob*(cas: var Store; payload: openArray[byte]): CasBlobRef =
+  result.digest = r11CasDigest(cas.storeCasBlob(payload))
+  result.sizeBytes = uint64(payload.len)
+
+proc storeFileBlob*(cas: var Store; path: string; sizeBytes: uint64): CasBlobRef =
+  result.digest = r11CasDigest(cas.storeCasFileBlob(path, sizeBytes))
+  result.sizeBytes = sizeBytes
 
 proc materialPath(root, path: string): string =
   if path.isAbsolute or root.len == 0:
@@ -1547,6 +1579,44 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
       blob: blob, permissions: perms))
   cache.writePerEdgeRecord(result)
 
+proc recordActionResult*(cache: var ActionCache; cas: var Store;
+                         weak: ContentDigest; policy: FileFingerprintPolicy;
+                         inputPaths, outputPaths: openArray[string];
+                         outputRoot = "";
+                         storeOutputBlobs = true;
+                         metadataCache: ptr FileMetadataCache = nil):
+                         ActionResultRecord =
+  result.weakFingerprint = weak
+  result.policy = policy
+  for path in inputPaths:
+    let input = observeFile(path, policy, metadataCache)
+    if input.isRecordableInput():
+      result.inputs.add(input)
+  result.strongFingerprint = computeStrongFingerprint(weak, result.inputs)
+  result.outputPayloadKind =
+    if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
+  for path in outputPaths:
+    let source = materialPath(outputRoot, path)
+    let sourceMetadata = fingerprintMetadata(source, metadataCache)
+    # Windows: getFilePermissions returns a synthetic POSIX set derived from
+    # the read-only attribute; we don't preserve it (see writePermissions),
+    # so emit an empty set here. The cache record still round-trips cleanly.
+    when defined(windows):
+      let perms: set[FilePermission] = {}
+    else:
+      let perms = getFilePermissions(extendedPath(source))
+    let blob =
+      if storeOutputBlobs:
+        if sourceMetadata.kind == ffkRegular and isDirectRegularFile(source):
+          cas.storeFileBlob(source, sourceMetadata.sizeBytes)
+        else:
+          cas.storeBlob(bytes(readFile(extendedPath(source))))
+      else:
+        CasBlobRef()
+    result.outputs.add(OutputBlob(path: path, metadata: sourceMetadata,
+      blob: blob, permissions: perms))
+  cache.writePerEdgeRecord(result)
+
 proc refreshedInputs(record: ActionResultRecord; changed: var bool;
                      hybridCutoff: var bool;
                      changedInputPath: var string;
@@ -1609,11 +1679,20 @@ proc verifyOutputs(cas: LocalCas; record: ActionResultRecord) =
   for output in record.outputs:
     cas.verifyBlob(output.blob)
 
-proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
-                         weak: ContentDigest; policy: FileFingerprintPolicy;
-                         verifyOutputBlobs = true;
-                         allowMetadataOnlyHit = false;
-                         metadataCache: ptr FileMetadataCache = nil): ActionCacheLookup =
+proc verifyOutputs(cas: Store; record: ActionResultRecord) =
+  if record.outputPayloadKind != opkCasBlobs:
+    raise newException(CacheIntegrityError,
+      "cache record does not contain output payloads")
+  for output in record.outputs:
+    cas.verifyBlob(output.blob)
+
+proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
+                                  weak: ContentDigest;
+                                  policy: FileFingerprintPolicy;
+                                  verifyOutputBlobs = true;
+                                  allowMetadataOnlyHit = false;
+                                  metadataCache: ptr FileMetadataCache = nil):
+                                  ActionCacheLookup =
   if allowMetadataOnlyHit and not verifyOutputBlobs and policy in {ffpTimestamp, ffpHybrid}:
     let hot = cache.readHotRecord(weak)
     if hot.found and hot.record.policy == policy:
@@ -1688,3 +1767,23 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
   else:
     ActionCacheLookup(status: aclMissNoRecord,
       message: "no matching cache record for policy")
+
+proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
+                         weak: ContentDigest; policy: FileFingerprintPolicy;
+                         verifyOutputBlobs = true;
+                         allowMetadataOnlyHit = false;
+                         metadataCache: ptr FileMetadataCache = nil): ActionCacheLookup =
+  cache.lookupActionResultImpl(cas, weak, policy,
+    verifyOutputBlobs = verifyOutputBlobs,
+    allowMetadataOnlyHit = allowMetadataOnlyHit,
+    metadataCache = metadataCache)
+
+proc lookupActionResult*(cache: var ActionCache; cas: Store;
+                         weak: ContentDigest; policy: FileFingerprintPolicy;
+                         verifyOutputBlobs = true;
+                         allowMetadataOnlyHit = false;
+                         metadataCache: ptr FileMetadataCache = nil): ActionCacheLookup =
+  cache.lookupActionResultImpl(cas, weak, policy,
+    verifyOutputBlobs = verifyOutputBlobs,
+    allowMetadataOnlyHit = allowMetadataOnlyHit,
+    metadataCache = metadataCache)

@@ -92,6 +92,23 @@ proc findById(actions: seq[BuildActionDef]; id: string): BuildActionDef =
       return a
   raise newException(ValueError, "action not found: " & id)
 
+proc envValue(action: BuildActionDef; name: string): string =
+  for (key, value) in action.env:
+    if key == name:
+      return value
+  ""
+
+proc envCount(action: BuildActionDef; name: string): int =
+  for (key, _) in action.env:
+    if key == name:
+      inc result
+
+proc checkNoDuplicateEnvNames(action: BuildActionDef) =
+  var seen: seq[string] = @[]
+  for (key, _) in action.env:
+    check key notin seen
+    seen.add(key)
+
 suite "from-source-custom convention M9.N Batch C.1 — meson recipe":
 
   test "convention name is 'from-source-custom'":
@@ -210,6 +227,28 @@ suite "from-source-custom convention M9.N Batch C.1 — meson recipe":
         inc shellCount
     check sawFetch
     check sawStageMeson
+    check shellCount == 4
+
+  test "emitFragment: shell action env carries dependency roots once":
+    let conv = from_source_custom_convention.fromSourceCustomConvention()
+    let request = dummyRequest(MesonRecipe)
+    let fragment = conv.emitFragment(MesonRecipe, request)
+    let actions = extractActions(fragment)
+    let expectedOutMirror = (MesonRecipe / ".repro" / "output" /
+      "install").replace("\\", "/")
+    let expectedPythonRoot = (MesonRecipe.parentDir / "python3" /
+      ".repro" / "output" / "install").replace("\\", "/")
+
+    var shellCount = 0
+    for action in actions:
+      if not action.id.startsWith("from-source-custom-shell-"):
+        continue
+      inc shellCount
+      checkNoDuplicateEnvNames(action)
+      check action.envCount("OUT_MIRROR") == 1
+      check action.envCount("DEP_PYTHON3_ROOT") == 1
+      check action.envValue("OUT_MIRROR") == expectedOutMirror
+      check action.envValue("DEP_PYTHON3_ROOT") == expectedPythonRoot
     check shellCount == 4
 
   test "emitFragment: shell action argv carries substituted command":
