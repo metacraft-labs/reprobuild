@@ -12350,9 +12350,25 @@ proc committedLockRepoFacts(repoRoot: string):
     tuple[headSha, branch, originUrl: string] =
   ## Read the repo-local facts the committed-lock-derived model needs: the
   ## current ``HEAD`` SHA, the checked-out branch (empty when detached), and
-  ## the ``origin`` fetch URL (empty when no ``origin`` remote). Best-effort:
-  ## a missing ``git`` or a non-git directory yields empty fields (sync's
-  ## plan and the gate's own per-repo probes still work without them).
+  ## the canonical fetch URL (empty when the repo has NO remote at all).
+  ## Best-effort: a missing ``git`` or a non-git directory yields empty fields
+  ## (sync's plan and the gate's own per-repo probes still work without them).
+  ##
+  ## The fetch URL is resolved ROBUSTLY rather than hard-coded to ``origin``:
+  ## workspace repos do not universally name their canonical remote ``origin``
+  ## (a fork-based flow names it after the upstream org — e.g. the metacraft
+  ## workspace's ``metacraft-labs`` remote). Populating an EMPTY url here is
+  ## not harmless: it becomes the ``ckVcs`` coordinate url in the committed
+  ## lock, and ``fetchLockPinnedProducer`` then REFUSES to fetch a pinned
+  ## sibling with an incomplete coordinate — so a lock-only / lock-driven-CI
+  ## build cannot materialize the pinned source. The resolution order is:
+  ##   1. ``origin`` — preserves the historical behaviour where it exists;
+  ##   2. ``upstream`` — git's conventional name for the canonical upstream of
+  ##      a fork, so a fork checkout still records its true upstream URL;
+  ##   3. the FIRST remote (remotes are listed alphabetically by ``git``) — the
+  ##      general fallback that gives ANY repo with at least one remote a
+  ##      non-empty url.
+  ## No remotes at all → empty (unchanged graceful degradation).
   let gitBin = findExe("git")
   if gitBin.len == 0:
     return ("", "", "")
@@ -12363,9 +12379,31 @@ proc committedLockRepoFacts(repoRoot: string):
       cmd.add(quoteShell(a))
     let r = execCmdEx(cmd, options = {poUsePath})
     if r.exitCode == 0: r.output.strip() else: ""
+  proc remoteUrl(name: string): string =
+    if name.len == 0: "" else: run(["-C", repoRoot, "remote", "get-url", name])
+  proc resolveFetchUrl(): string =
+    let origin = remoteUrl("origin")
+    if origin.len > 0:
+      return origin
+    # Enumerate remotes and pick the canonical upstream, else the first.
+    let listed = run(["-C", repoRoot, "remote"])
+    if listed.len == 0:
+      return ""
+    var remotes: seq[string] = @[]
+    for line in listed.splitLines():
+      let name = line.strip()
+      if name.len > 0:
+        remotes.add(name)
+    if remotes.len == 0:
+      return ""
+    if "upstream" in remotes:
+      let u = remoteUrl("upstream")
+      if u.len > 0:
+        return u
+    remoteUrl(remotes[0])
   result.headSha = run(["-C", repoRoot, "rev-parse", "HEAD"])
   result.branch = run(["-C", repoRoot, "symbolic-ref", "--short", "-q", "HEAD"])
-  result.originUrl = run(["-C", repoRoot, "remote", "get-url", "origin"])
+  result.originUrl = resolveFetchUrl()
 
 const nestedDevelopDirs* = ["deps", "vendor", "third-party", "develop"]
   ## Workspace-Manifest-Optional MO-7 — the conventional project-local

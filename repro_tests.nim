@@ -5798,6 +5798,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_committed_lock_records_canonical_remote_url_when_not_named_origin.nim",
+    binary: "build/test-bin/t_committed_lock_records_canonical_remote_url_when_not_named_origin",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_completion_emits_shell_script.nim",
     binary: "build/test-bin/t_completion_emits_shell_script",
     defines: @[],
