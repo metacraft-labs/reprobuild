@@ -205,11 +205,40 @@ proc benchActionPolicy(): DependencyGatheringPolicy =
   automaticMonitorGatheringPolicy()
 
 proc runtimeLoaderEnv(): seq[string] =
-  for name in ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
-               "DYLD_FALLBACK_LIBRARY_PATH"]:
-    let value = getEnv(name)
-    if value.len > 0:
-      result.add(name & "=" & value)
+  let ldLibraryPath = getEnv("LD_LIBRARY_PATH")
+  if ldLibraryPath.len > 0:
+    result.add("LD_LIBRARY_PATH=" & ldLibraryPath)
+  when defined(macosx):
+    let explicitDyldLibraryPath = getEnv("DYLD_LIBRARY_PATH")
+    let explicitDyldFallbackLibraryPath = getEnv("DYLD_FALLBACK_LIBRARY_PATH")
+    let dyldLibraryPath =
+      if explicitDyldLibraryPath.len > 0: explicitDyldLibraryPath
+      else: ldLibraryPath
+    let dyldFallbackLibraryPath =
+      if explicitDyldFallbackLibraryPath.len > 0:
+        explicitDyldFallbackLibraryPath
+      else: dyldLibraryPath
+    if dyldLibraryPath.len > 0:
+      result.add("DYLD_LIBRARY_PATH=" & dyldLibraryPath)
+    if dyldFallbackLibraryPath.len > 0:
+      result.add("DYLD_FALLBACK_LIBRARY_PATH=" & dyldFallbackLibraryPath)
+  else:
+    for name in ["DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"]:
+      let value = getEnv(name)
+      if value.len > 0:
+        result.add(name & "=" & value)
+
+proc ensureRuntimeLoaderEnv() =
+  when defined(macosx):
+    let ldLibraryPath = getEnv("LD_LIBRARY_PATH")
+    if getEnv("DYLD_LIBRARY_PATH").len == 0 and ldLibraryPath.len > 0:
+      putEnv("DYLD_LIBRARY_PATH", ldLibraryPath)
+    if getEnv("DYLD_FALLBACK_LIBRARY_PATH").len == 0:
+      let fallback =
+        if getEnv("DYLD_LIBRARY_PATH").len > 0: getEnv("DYLD_LIBRARY_PATH")
+        else: ldLibraryPath
+      if fallback.len > 0:
+        putEnv("DYLD_FALLBACK_LIBRARY_PATH", fallback)
 
 proc benchmarkEngineConfig(cacheRoot, app: string;
                            rebuildMissingOutputsOnCacheHit = true):
@@ -437,6 +466,7 @@ proc parseArgs(): tuple[outputPath: string; historyPath: string; quick: bool] =
       raise newException(ValueError, "unknown benchmark argument: " & arg)
 
 proc main() =
+  ensureRuntimeLoaderEnv()
   let args = parseArgs()
   let repoRoot = getCurrentDir()
   let tempRoot = createTempDir("reprobuild-m23-bench", "")
