@@ -276,18 +276,30 @@ proc autotools_package*(srcDir: string;
   # call site for recipes.
   #
   # ``srcDir`` is treated as a recipe-root-relative path; from the
-  # buildDir vantage point we prepend ``../`` so e.g. ``./src``
-  # becomes ``../src``. We strip a leading ``./`` from ``srcDir``
-  # to keep the prepend clean.
-  var relSrcDir = srcDir
-  if relSrcDir.startsWith("./"):
-    relSrcDir = relSrcDir[2 .. ^1]
-  elif relSrcDir.startsWith("/"):
-    # Absolute path: leave as-is.
-    discard
-  let srcFromBuild =
-    if relSrcDir.len > 0 and relSrcDir[0] == '/': relSrcDir
-    else: "../" & relSrcDir
+  # buildDir vantage point we walk back to the recipe root, then down
+  # into ``srcDir``. A one-level ``build`` dir therefore still yields
+  # ``../src``, while nested scratch dirs such as
+  # ``.repro/build/<pkg>`` yield ``../../../src``.
+  proc recipeRelativeShellPath(value: string): string =
+    result = value.replace("\\", "/")
+    while result.startsWith("./"):
+      result = result[2 .. ^1]
+
+  proc sourcePathFromBuildDir(srcDir, buildDir: string): string =
+    let relSrc = recipeRelativeShellPath(srcDir)
+    if relSrc.len > 0 and relSrc[0] == '/':
+      return relSrc
+    let relBuild = recipeRelativeShellPath(buildDir)
+    var parentWalk = ""
+    if relBuild.len > 0 and relBuild != ".":
+      for part in relBuild.split('/'):
+        if part.len == 0 or part == ".":
+          continue
+        parentWalk.add("../")
+    parentWalk & relSrc
+
+  let shellBuildDir = buildDir.replace("\\", "/")
+  let srcFromBuild = sourcePathFromBuildDir(srcDir, buildDir)
   # M9.R.15a.3 — ``configureScriptName`` defaults to ``configure`` for
   # vanilla autotools; openssl-style projects pass ``"Configure"``
   # (uppercase, Perl-driven). The shape stays out-of-tree.
@@ -361,11 +373,11 @@ proc autotools_package*(srcDir: string;
   let configureScript =
     if skipConfigure:
       bootstrapPrefix &
-      "set -e; mkdir -p " & buildDir & " && cp -aL " & srcDir &
-        "/. " & buildDir & "/"
+      "set -e; mkdir -p " & shellBuildDir & " && cp -aL " &
+        srcDir.replace("\\", "/") & "/. " & shellBuildDir & "/"
     else:
       bootstrapPrefix &
-      "mkdir -p " & buildDir & " && cd " & buildDir & " && " &
+      "mkdir -p " & shellBuildDir & " && cd " & shellBuildDir & " && " &
       srcFromBuild & "/" & configureScriptName & " " & configureArgs.join(" ")
   let configureArgv = @["sh", "-c", configureScript]
   let call = inlineExecCall(configureArgv)

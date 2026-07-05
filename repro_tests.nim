@@ -3678,6 +3678,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/libffi/test_libffi_source.nim",
+    binary: "build/test-bin/test_libffi_source_provider",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/libgcrypt/test_libgcrypt_source.nim",
     binary: "build/test-bin/test_libgcrypt_source",
     defines: @[],

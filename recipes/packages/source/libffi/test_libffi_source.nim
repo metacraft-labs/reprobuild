@@ -24,6 +24,9 @@
 
 import std/[unittest]
 
+when defined(reproProviderMode):
+  import std/[os, strutils]
+  import repro_core
 import repro_project_dsl
 
 # Side-effect import: triggers the package macro which registers
@@ -42,6 +45,71 @@ const ExpectedConfigureFlags = @[
   "--disable-docs",
   "--disable-multi-os-directory",
 ]
+
+const ExpectedBuildDir = ".repro/build/libffi-autotools"
+
+when defined(reproProviderMode):
+  proc dummyRequest(projectRoot: string): ProviderGraphRequest =
+    ProviderGraphRequest(
+      kind: prkGraphInvocation,
+      providerArtifactId: "test-provider",
+      entryPointId: "libffiSource.root",
+      entryPointBodyHash: "test-body",
+      reason: girExplicitUserRequest,
+      arguments: projectRoot,
+      namespace: "project")
+
+  proc extractActions(fragment: GraphFragment): seq[BuildActionDef] =
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      result.add(decodeBuildActionPayload(toBytes(node.payload)))
+
+  proc findByCommandStatsId(actions: seq[BuildActionDef];
+                            commandStatsId: string): BuildActionDef =
+    for action in actions:
+      if action.commandStatsId == commandStatsId:
+        return action
+    raise newException(ValueError,
+      "action not found by commandStatsId: " & commandStatsId)
+
+  proc findById(actions: seq[BuildActionDef]; id: string): BuildActionDef =
+    for action in actions:
+      if action.id == id:
+        return action
+    raise newException(ValueError, "action not found: " & id)
+
+  proc argValues(action: BuildActionDef; name: string): seq[string] =
+    for arg in action.call.arguments:
+      if arg.name == name:
+        if arg.encodedValue.len == 0:
+          return @[]
+        return arg.encodedValue.split("\x1f")
+    @[]
+
+  proc argValue(action: BuildActionDef; name: string): string =
+    let values = action.argValues(name)
+    if values.len == 0:
+      return ""
+    values[0]
+
+  proc inlineScriptOf(action: BuildActionDef): string =
+    let argv = action.argValues("argv")
+    if argv.len >= 3:
+      return argv[2]
+    ""
+
+  proc findMakeAction(actions: seq[BuildActionDef];
+                      wantsInstall: bool): BuildActionDef =
+    for action in actions:
+      if action.call.packageName != "make" or
+          action.call.executableName != "makeBin":
+        continue
+      let targets = action.argValues("targets")
+      let isInstall = "install" in targets
+      if isInstall == wantsInstall:
+        return action
+    raise newException(ValueError, "make action not found")
 
 suite "libffiSource — from-source recipe smoke test":
 
@@ -103,3 +171,47 @@ suite "libffiSource — from-source recipe smoke test":
       "https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz"
     check vs[0].sourceRepository ==
       "https://github.com/libffi/libffi"
+
+  when defined(reproProviderMode):
+    test "provider actions keep libffi build artifacts out of fetched src":
+      let projectRoot = currentSourcePath.parentDir
+      let pkg = PackageDef(
+        packageName: "libffiSource",
+        sourceFile: projectRoot / "repro.nim",
+        hasDevEnv: false,
+        devEnvBodyHash: "",
+        toolUses: @[])
+      let fragment = buildPackageFragment(pkg, dummyRequest(projectRoot),
+        proc() = buildLibffiSourcePackage(),
+        includeDefault = false)
+      let actions = extractActions(fragment)
+
+      let configure = findByCommandStatsId(actions,
+        "autotools_package.configure")
+      let build = findMakeAction(actions, wantsInstall = false)
+      let install = findMakeAction(actions, wantsInstall = true)
+      let cleanup = findById(actions, "autotools-la-cleanup-libffiSource")
+
+      let expectedBuildRoot = projectRoot / ExpectedBuildDir
+      let expectedInstallRoot = expectedBuildRoot / "out"
+      let expectedSrcRoot = projectRoot / "src"
+      let configureScript = configure.inlineScriptOf()
+
+      check "mkdir -p " & ExpectedBuildDir in configureScript
+      check "cd " & ExpectedBuildDir in configureScript
+      check "../../../src/configure" in configureScript
+      check configure.declaredOutputs == @[expectedBuildRoot]
+      check configure.readOnlyRoots == @[expectedSrcRoot]
+
+      check build.argValue("workDir") == ExpectedBuildDir
+      check build.declaredOutputs == @[expectedBuildRoot]
+      check build.readOnlyRoots == @[expectedSrcRoot]
+
+      check install.argValue("workDir") == ExpectedBuildDir
+      check install.declaredOutputs == @[expectedInstallRoot]
+      check install.readOnlyRoots == @[expectedSrcRoot]
+
+      check cleanup.declaredOutputs == @[expectedInstallRoot]
+      check expectedSrcRoot notin configure.declaredOutputs
+      check expectedSrcRoot notin build.declaredOutputs
+      check expectedSrcRoot notin install.declaredOutputs

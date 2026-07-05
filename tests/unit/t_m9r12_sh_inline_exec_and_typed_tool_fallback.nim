@@ -137,6 +137,19 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
     check "--enable-gold" in argvParts[2]
     check "--disable-werror" in argvParts[2]
 
+  test "nested buildDir computes configure path from build dir depth":
+    let pkg = autotools_package(
+      srcDir = "./src",
+      buildDir = ".repro/build/libffi-autotools",
+      configureOptions = @["--disable-static"])
+    let argvArg = pkg.buildEdge.argByName("argv")
+    let argvParts = argvArg.encodedValue.split("\x1f")
+    check argvParts.len == 3
+    check "mkdir -p .repro/build/libffi-autotools" in argvParts[2]
+    check "cd .repro/build/libffi-autotools" in argvParts[2]
+    check "../../../src/configure" in argvParts[2]
+    check "--disable-static" in argvParts[2]
+
   test "configure action id is deterministic across calls with same args":
     let a = autotools_package(srcDir = "./src",
       configureOptions = @["--enable-gold"])

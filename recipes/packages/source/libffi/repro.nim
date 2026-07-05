@@ -102,6 +102,8 @@ import repro_project_dsl
 import repro_dsl_stdlib/constructors
 import repro_dsl_stdlib/types/package_result
 
+const LibffiAutotoolsBuildDir = ".repro/build/libffi-autotools"
+
 # ---------------------------------------------------------------------------
 # Package declaration
 # ---------------------------------------------------------------------------
@@ -195,7 +197,9 @@ package libffiSource:
         "--disable-docs",
         "--disable-multi-os-directory",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let pkg = autotools_package(srcDir = "./src",
+                                  buildDir = LibffiAutotoolsBuildDir,
+                                  configureOptions = opts)
       discard pkg.library("libFfi")
     finally:
       clearCurrentOwningPackageOverride()
