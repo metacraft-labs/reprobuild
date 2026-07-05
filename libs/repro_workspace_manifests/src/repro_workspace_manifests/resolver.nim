@@ -76,6 +76,11 @@ type
     wvTeam
     wvPersonal
 
+  ResolvedRemote* = object
+    name*: string      ## Local remote name (e.g. "origin", "upstream")
+    remoteName*: string ## Project remote name (e.g. "metacraft-github")
+    fetchUrl*: string  ## Full constructed fetch URL
+
   ResolvedRepo* = object
     ## Post-resolution facts for a single repo.
     ##
@@ -96,6 +101,7 @@ type
     path*: string
     remoteName*: string
     fetchUrl*: string
+    remotes*: seq[ResolvedRemote]
     revision*: string
     vcs*: string
     stability*: string
@@ -304,6 +310,14 @@ proc normalizeIncludePath(projectFile, raw: string): string =
         "include path escapes the manifest root via '..': '" & raw & "'")
   result = manifestRoot / raw.replace('/', DirSep)
 
+proc getFetchUrl(fetchBase, repoName: string): string =
+  if fetchBase.len == 0:
+    ""
+  elif fetchBase.endsWith(".git") or fetchBase.endsWith(".git/"):
+    fetchBase
+  else:
+    fetchBase & "/" & repoName
+
 # ---- on-disk entry point --------------------------------------------------
 
 proc resolveProject*(projectFile: string): ResolvedProject =
@@ -382,13 +396,40 @@ proc resolveProject*(projectFile: string): ResolvedProject =
         "fragment '" & rawInclude &
           "' omits `repo.remote` and the project has no `default_remote`")
 
-    if resolved.remoteName notin remotes:
-      raiseManifestError(absProject,
-        "includes[" & $incIdx & "]",
-        schemaProjectManifestV1, schemaProjectManifestV1,
-        "fragment '" & rawInclude & "' references unknown remote '" &
-          resolved.remoteName & "' (not declared in the project's [[remote]] table)")
-    resolved.fetchUrl = remotes[resolved.remoteName]
+    var resolvedRemotes = newSeq[ResolvedRemote]()
+    if fragment.repo.remotes.len > 0:
+      for r in fragment.repo.remotes:
+        if r.remote notin remotes:
+          raiseManifestError(absProject,
+            "includes[" & $incIdx & "]",
+            schemaProjectManifestV1, schemaProjectManifestV1,
+            "fragment '" & rawInclude & "' references unknown remote '" &
+              r.remote & "' (not declared in the project's [[remote]] table)")
+        let fullUrl = getFetchUrl(remotes[r.remote], fragment.repo.name)
+        resolvedRemotes.add(ResolvedRemote(name: r.name, remoteName: r.remote, fetchUrl: fullUrl))
+      
+      let primaryName = if fragmentRemote.len > 0: fragmentRemote else: resolvedRemotes[0].name
+      resolved.remoteName = primaryName
+      var primaryUrl = ""
+      for r in resolvedRemotes:
+        if r.name == primaryName:
+          primaryUrl = r.fetchUrl
+          break
+      if primaryUrl.len == 0:
+        primaryUrl = resolvedRemotes[0].fetchUrl
+      resolved.fetchUrl = primaryUrl
+    else:
+      if resolved.remoteName notin remotes:
+        raiseManifestError(absProject,
+          "includes[" & $incIdx & "]",
+          schemaProjectManifestV1, schemaProjectManifestV1,
+          "fragment '" & rawInclude & "' references unknown remote '" &
+            resolved.remoteName & "' (not declared in the project's [[remote]] table)")
+      let fullUrl = getFetchUrl(remotes[resolved.remoteName], fragment.repo.name)
+      resolved.fetchUrl = fullUrl
+      resolvedRemotes.add(ResolvedRemote(name: "origin", remoteName: resolved.remoteName, fetchUrl: fullUrl))
+
+    resolved.remotes = resolvedRemotes
 
     # Resolve revision: fragment's explicit value wins; otherwise the
     # project's `default_revision`. If neither is set we leave the field
@@ -631,14 +672,40 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
         "fragment '" & rawInclude &
           "' omits `repo.remote` and the base project has no `default_remote`")
 
-    if resolved.remoteName notin remotes:
-      raiseManifestError(absVariant,
-        "includes[" & $incIdx & "]",
-        schemaVariantManifestV1, schemaVariantManifestV1,
-        "fragment '" & rawInclude & "' references unknown remote '" &
-          resolved.remoteName &
-          "' (not declared in the base project's [[remote]] table)")
-    resolved.fetchUrl = remotes[resolved.remoteName]
+    var resolvedRemotes = newSeq[ResolvedRemote]()
+    if fragment.repo.remotes.len > 0:
+      for r in fragment.repo.remotes:
+        if r.remote notin remotes:
+          raiseManifestError(absVariant,
+            "includes[" & $incIdx & "]",
+            schemaVariantManifestV1, schemaVariantManifestV1,
+            "fragment '" & rawInclude & "' references unknown remote '" &
+              r.remote & "' (not declared in the base project's [[remote]] table)")
+        let fullUrl = getFetchUrl(remotes[r.remote], fragment.repo.name)
+        resolvedRemotes.add(ResolvedRemote(name: r.name, remoteName: r.remote, fetchUrl: fullUrl))
+      
+      let primaryName = if fragmentRemote.len > 0: fragmentRemote else: resolvedRemotes[0].name
+      resolved.remoteName = primaryName
+      var primaryUrl = ""
+      for r in resolvedRemotes:
+        if r.name == primaryName:
+          primaryUrl = r.fetchUrl
+          break
+      if primaryUrl.len == 0:
+        primaryUrl = resolvedRemotes[0].fetchUrl
+      resolved.fetchUrl = primaryUrl
+    else:
+      if resolved.remoteName notin remotes:
+        raiseManifestError(absVariant,
+          "includes[" & $incIdx & "]",
+          schemaVariantManifestV1, schemaVariantManifestV1,
+          "fragment '" & rawInclude & "' references unknown remote '" &
+            resolved.remoteName & "' (not declared in the base project's [[remote]] table)")
+      let fullUrl = getFetchUrl(remotes[resolved.remoteName], fragment.repo.name)
+      resolved.fetchUrl = fullUrl
+      resolvedRemotes.add(ResolvedRemote(name: "origin", remoteName: resolved.remoteName, fetchUrl: fullUrl))
+
+    resolved.remotes = resolvedRemotes
 
     let fragmentRevision =
       if fragment.repo.revision.isSome: fragment.repo.revision.get()
@@ -725,8 +792,23 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
           schemaVariantManifestV1, schemaVariantManifestV1,
           "override sets remote '" & newRemote &
             "' which is not declared in the base project's [[remote]] table")
+      let fullUrl = getFetchUrl(remotes[newRemote], result.repos[matchedIdx].name)
       result.repos[matchedIdx].remoteName = newRemote
-      result.repos[matchedIdx].fetchUrl = remotes[newRemote]
+      result.repos[matchedIdx].fetchUrl = fullUrl
+      
+      # Sync the remotes list
+      if result.repos[matchedIdx].remotes.len > 0:
+        var found = false
+        for idx, r in result.repos[matchedIdx].remotes:
+          if r.name == newRemote or r.name == "origin":
+            result.repos[matchedIdx].remotes[idx].remoteName = newRemote
+            result.repos[matchedIdx].remotes[idx].fetchUrl = fullUrl
+            found = true
+            break
+        if not found:
+          result.repos[matchedIdx].remotes.add(ResolvedRemote(name: "origin", remoteName: newRemote, fetchUrl: fullUrl))
+      else:
+        result.repos[matchedIdx].remotes = @[ResolvedRemote(name: "origin", remoteName: newRemote, fetchUrl: fullUrl)]
     if ov.path.isSome:
       result.repos[matchedIdx].path = ov.path.get()
 

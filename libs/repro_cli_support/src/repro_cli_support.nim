@@ -19961,6 +19961,41 @@ proc writeGeneratedWorkspaceProjects(workspaceRoot: string) =
 
   writeFile(workspaceRoot / "workspace-projects.md", output.join("\n") & "\n")
 
+proc gitRunPlain(identity: GitToolIdentity;
+                 args: openArray[string]): tuple[code: int; output: string]
+
+proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; identity: GitToolIdentity) =
+  ## Align on-disk Git remote configurations to match the resolved TOML manifests.
+  ## Expected remotes are added/updated with correct URLs, and stale remotes are cleaned up.
+  for repo in repos:
+    let repoAbs = workspaceRoot / repo.path
+    if not dirExists(repoAbs / ".git"):
+      continue
+    # 1. Get existing remotes
+    let existingRes = gitRunPlain(identity, ["-C", repoAbs, "remote"])
+    var existingRemotes = initHashSet[string]()
+    if existingRes.code == 0:
+      for line in existingRes.output.strip().splitLines():
+        let name = line.strip()
+        if name.len > 0:
+          existingRemotes.incl(name)
+
+    # 2. Add or update expected remotes
+    var expectedRemotes = initHashSet[string]()
+    for r in repo.remotes:
+      expectedRemotes.incl(r.name)
+      if r.name in existingRemotes:
+        let getRes = gitRunPlain(identity, ["-C", repoAbs, "remote", "get-url", r.name])
+        if getRes.code == 0 and getRes.output.strip() != r.fetchUrl:
+          discard gitRunPlain(identity, ["-C", repoAbs, "remote", "set-url", r.name, r.fetchUrl])
+      else:
+        discard gitRunPlain(identity, ["-C", repoAbs, "remote", "add", r.name, r.fetchUrl])
+
+    # 3. Clean up/remove unexpected remotes
+    for name in existingRemotes:
+      if name notin expectedRemotes:
+        discard gitRunPlain(identity, ["-C", repoAbs, "remote", "remove", name])
+
 proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## End-to-end driver. Resolves the named project / variant, classifies
   ## each declared repo against the on-disk workspace, schedules a
@@ -20162,6 +20197,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
       writeGeneratedWorkspaceProjects(args.workspaceRoot)
     except CatchableError as err:
       stderr.writeLine("workspace init: could not generate workspace-projects.md: " & err.msg)
+    alignWorkspaceRemotes(args.workspaceRoot, resolved.repos, identity)
 proc writeWorkspaceInitReport(report: WorkspaceInitReport) =
   let reportDir = report.workspaceRoot / ".repro" / "workspace"
   createDir(reportDir)
@@ -22833,6 +22869,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   let identity = ensureGitToolResolvable(
     args.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
+  alignWorkspaceRemotes(args.workspaceRoot, resolved.repos, identity)
 
   # RA-5c jobs resolution: ``--jobs-network`` (or ``--jobs``) bounds the
   # ``vcs/fetch`` pool; ``--jobs-checkout`` (or ``--jobs``) bounds the
@@ -23359,6 +23396,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       if m.status == "failed":
         stderr.writeLine("workspace sync: " & m.kind & " '" & m.dest &
           "' <- '" & repo.path & "/" & m.src & "' failed: " & m.diagnostic)
+
+  alignWorkspaceRemotes(args.workspaceRoot, resolved.repos, identity)
 
   # Step 6: exit code.
   if anyFailure:

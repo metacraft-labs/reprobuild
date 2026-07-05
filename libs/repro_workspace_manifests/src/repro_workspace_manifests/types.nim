@@ -105,10 +105,15 @@ type
     src*: string
     dest*: string
 
+  RepoRemoteEntry* = object
+    name*: string
+    remote*: string
+
   RepoBody* = object
     name*: string
     path*: string
     remote*: Option[string]
+    remotes*: seq[RepoRemoteEntry]
     revision*: Option[string]
     vcs*: Option[string]
     stability*: Option[string]
