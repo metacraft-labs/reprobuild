@@ -59,6 +59,15 @@ jobs:
           path: reprobuild-cmake
           token: ${{ steps.ci_token.outputs.token }}
 
+      - name: Clear stale macOS Nix symlink
+        if: matrix.platform == 'macos'
+        run: |
+          set -euo pipefail
+          if ! command -v nix >/dev/null 2>&1 && [ -L /nix ]; then
+            echo "Removing stale /nix symlink before installing Nix"
+            sudo rm /nix
+          fi
+
       - name: Setup Nix
         uses: metacraft-labs/nixos-modules/.github/setup-nix@main
         with:
