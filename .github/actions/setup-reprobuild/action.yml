@@ -140,6 +140,37 @@ runs:
         # non-nix-build/windows/ensure-*.ps1) and run `just build`. The build
         # drops `repro.exe` under build\bin\ which we add to GITHUB_PATH.
         Set-Location "$env:GITHUB_WORKSPACE\reprobuild"
+
+        $before = @{}
+        Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+
         . .\env.ps1
         just build
+
+        Get-ChildItem env: | ForEach-Object {
+          $name = $_.Name
+          $value = $_.Value
+          if ((-not $before.ContainsKey($name)) -or ($before[$name] -ne $value)) {
+            if ($name -eq "PATH" -or $name -eq "Path") {
+              $beforePath = if ($before.ContainsKey($name)) { $before[$name] } else { "" }
+              $oldEntries = $beforePath.Split([IO.Path]::PathSeparator)
+              $newEntries = $value.Split([IO.Path]::PathSeparator)
+              foreach ($entry in $newEntries) {
+                if ($entry -and ($oldEntries -notcontains $entry)) {
+                  Add-Content -Path $env:GITHUB_PATH -Value $entry
+                }
+              }
+            } else {
+              if ($value -match "`n") {
+                $eof = "EOF_$(Get-Random)"
+                Add-Content -Path $env:GITHUB_ENV -Value "$name<<$eof"
+                Add-Content -Path $env:GITHUB_ENV -Value $value
+                Add-Content -Path $env:GITHUB_ENV -Value $eof
+              } else {
+                Add-Content -Path $env:GITHUB_ENV -Value "$name=$value"
+              }
+            }
+          }
+        }
+
         Add-Content -Path $env:GITHUB_PATH -Value (Resolve-Path .\build\bin).Path

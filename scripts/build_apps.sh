@@ -299,6 +299,68 @@ case "$(uname -s)" in
     ;;
 esac
 
+# Windows self-containment for Nim's OpenSSL dynlib backend. The ssl-enabled
+# entrypoints dlopen libcrypto/libssl by name on first TLS use, so stage the
+# host-provided DLLs next to repro.exe and the helper binaries.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    openssl_dirs=()
+    for exe_name in openssl.exe openssl; do
+      openssl_exe="$(command -v "${exe_name}" 2>/dev/null || true)"
+      if [ -n "${openssl_exe}" ]; then
+        openssl_dirs+=("$(dirname "${openssl_exe}")")
+      fi
+    done
+
+    path_dirs=()
+    old_ifs="${IFS}"
+    IFS=':'
+    read -r -a path_dirs <<< "${PATH:-}"
+    IFS="${old_ifs}"
+    for path_dir in "${path_dirs[@]}"; do
+      if [ -n "${path_dir}" ]; then
+        openssl_dirs+=("${path_dir}")
+      fi
+    done
+
+    staged_openssl_dlls=" "
+    staged_nim_crypto=0
+    for openssl_dir in "${openssl_dirs[@]}"; do
+      for openssl_dll in \
+        libcrypto-1_1-x64.dll \
+        libssl-1_1-x64.dll \
+        libeay64.dll \
+        ssleay64.dll \
+        libcrypto-3-x64.dll \
+        libssl-3-x64.dll \
+        libcrypto-3.dll \
+        libssl-3.dll; do
+        case "${staged_openssl_dlls}" in
+          *" ${openssl_dll} "*)
+            continue
+            ;;
+        esac
+
+        openssl_src_dll="${openssl_dir}/${openssl_dll}"
+        if [ -f "${openssl_src_dll}" ]; then
+          cp -f "${openssl_src_dll}" "build/bin/${openssl_dll}"
+          staged_openssl_dlls="${staged_openssl_dlls}${openssl_dll} "
+          case "${openssl_dll}" in
+            libcrypto-1_1-x64.dll|libeay64.dll)
+              staged_nim_crypto=1
+              ;;
+          esac
+          echo "Staged ${openssl_dll} from ${openssl_src_dll} -> build/bin/${openssl_dll}"
+        fi
+      done
+    done
+
+    if [ "${staged_nim_crypto}" -eq 0 ]; then
+      echo "warning: no Nim-compatible OpenSSL crypto DLL found on PATH (expected libcrypto-1_1-x64.dll or libeay64.dll); ssl-enabled repro binaries will fail to load TLS support in a clean shell" >&2
+    fi
+    ;;
+esac
+
 # Windows-Runner-Binary-Cache-Deploy M3a -- Windows self-containment for the
 # binary-cache client CLI: stage libzstd.dll next to the built binaries so the
 # Nim ``{.dynlib: "libzstd.dll".}`` FFI in
