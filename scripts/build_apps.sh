@@ -301,6 +301,20 @@ case "$(uname -s)" in
       done
     }
 
+    append_clingo_candidate_search_root() {
+      local root="${1:-}"
+      local found_dll
+      root="${root//\\//}"
+      [ -n "${root}" ] || return 0
+      [ -d "${root}" ] || return 0
+      while IFS= read -r found_dll; do
+        append_clingo_candidate_dir "$(dirname "${found_dll}")"
+      done < <(
+        find "${root}" -maxdepth 8 -type f -iname clingo.dll -print 2>/dev/null |
+          head -n 20
+      )
+    }
+
     clingo_candidate_dirs=()
     clingo_exe="$(command -v clingo.exe 2>/dev/null || true)"
     if [ -n "${clingo_exe}" ]; then
@@ -356,6 +370,10 @@ case "$(uname -s)" in
       append_clingo_candidate_root "${HOME}/AppData/Local/reprobuild/toolchains"
       append_clingo_candidate_root "${HOME}/reprobuild-toolchains"
     fi
+    append_clingo_candidate_search_root "$(pwd)"
+    append_clingo_candidate_search_root "$(pwd)/.."
+    append_clingo_candidate_search_root "${GITHUB_WORKSPACE:-}"
+    append_clingo_candidate_search_root "${RUNNER_TEMP:-}"
 
     clingo_src_dll=""
     for clingo_src_dir in "${clingo_candidate_dirs[@]}"; do
