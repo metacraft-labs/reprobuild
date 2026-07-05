@@ -1074,6 +1074,14 @@ proc writeRootsOverlap(a, b: string): bool =
     return b.startsWith(a & "/")
   return a.startsWith(b & "/")
 
+proc pathAtOrUnderRoot(path, root: string): bool =
+  ## Directional containment predicate for R6: ``path`` must be equal
+  ## to ``root`` or be a descendant of it. A write to a parent of the
+  ## read-only root is not a source write.
+  if path.len == 0 or root.len == 0:
+    return false
+  path == root or path.startsWith(root & "/")
+
 proc detectSourceWrites*(readOnlyRoots, monitorWrites: openArray[string]):
     seq[tuple[write: string; root: string]] =
   ## M9.R.75 — R6 (source-write reject) detection helper. Given the
@@ -1102,7 +1110,7 @@ proc detectSourceWrites*(readOnlyRoots, monitorWrites: openArray[string]):
     if write.len == 0:
       continue
     for root in normalizedRoots:
-      if writeRootsOverlap(write, root):
+      if pathAtOrUnderRoot(write, root):
         result.add((write: write, root: root))
         break
 

@@ -47,11 +47,16 @@ suite "M9.R.75 — R6 source-write reject":
       monitorWrites = ["/repro/build/pkg/config.log"])
     check offenders.len == 0
 
+  test "write to parent of read-only root does NOT trigger detection":
+    let offenders = detectSourceWrites(
+      readOnlyRoots = ["/repro/src/pkg/src"],
+      monitorWrites = ["/repro/src/pkg"])
+    check offenders.len == 0
+
   test "prefix look-alike is not treated as containment (R6)":
     ## Regression: ``"/repro/src/pkg"`` MUST NOT be treated as a prefix
-    ## of ``"/repro/src/pkgkit"``. The R6 predicate reuses the R7
-    ## ``writeRootsOverlap`` helper which uses a ``/`` boundary; this
-    ## test pins that behaviour on the R6 side too.
+    ## of ``"/repro/src/pkgkit"``. The R6 predicate uses a ``/``
+    ## boundary; this test pins that behaviour.
     let offenders = detectSourceWrites(
       readOnlyRoots = ["/repro/src/pkg"],
       monitorWrites = ["/repro/src/pkgkit/foo"])
