@@ -331,6 +331,9 @@ var installMirrorEmitted {.threadvar.}: HashSet[string]
   ## multiple times; we want the install-tree mirror emitted exactly
   ## once per package so the action registry doesn't collide.
 
+proc installMirrorPublishVersion(packageName: string): string =
+  result = latestRegisteredPackageVersion(packageName)
+
 proc stageCopyEmittedKey(packageName, kind, name: string): string =
   packageName & "." & kind & "." & name
 
@@ -1420,6 +1423,8 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   # routinely install hundreds of headers).
   let stampPath = dstUsrRoot / ".m9r14e_2_install_mirror.stamp"
   let escapedStamp = stampPath.replace("\\", "/").replace("\"", "\\\"")
+  let recipesRoot = parentDir(projectRoot)
+  let publishVersion = installMirrorPublishVersion(packageName)
   var script = "set -e; "
   # Remove the previous mirror to avoid stale artefacts. ``rm -rf`` is
   # safe here because ``dstUsr`` is a deterministic per-recipe path that
@@ -1533,6 +1538,8 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     ownManifestPath = ownManifestPath,
     packageName = packageName))
   script.add("touch \"" & escapedStamp & "\"; ")
+  script.add(emitInstallMirrorStorePublish(recipesRoot, packageName,
+    publishVersion, dstUsrRoot))
   # M9.R.76.4 — spec R10 read-only enforcement. In legacy mode this
   # returns the empty string (the mutable stable path stays writable
   # so the next rebuild's ``rm -rf`` can clobber it). In hashed mode
@@ -1552,6 +1559,8 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   # deps (libltdl, hwdata, libxdmcp, ...) reach the patched ELF without
   # the install-mirror having to enumerate ``/nix/store`` paths itself.
   var mirrorToolRefs = @["sh"]
+  if InstallMirrorPublishToolName notin mirrorToolRefs:
+    mirrorToolRefs.add(InstallMirrorPublishToolName)
   for raw in registeredNativeBuildDeps(packageName):
     let dep = m9r14fStripDepConstraint(raw)
     if dep.len > 0 and dep notin mirrorToolRefs:
@@ -1565,7 +1574,7 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     call = inlineExecCall(argv),
     deps = @[installEdge.id],
     inputs = installEdge.outputs,
-    outputs = @[stampPath],
+    outputs = @[stampPath, realizationInfoPath(recipesRoot, packageName)],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.install_mirror",

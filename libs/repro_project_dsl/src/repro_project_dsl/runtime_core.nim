@@ -486,11 +486,22 @@ proc packageProjectRoot*(packageName: string): string {.dynOrStatic.} =
 proc currentPackageInstallMirrorRoot*(): string {.dynOrStatic.} =
   ## Resolver-backed install-mirror root for the active package's own
   ## recipe directory. Intended for recipe declarations that need a
-  ## concrete path, while shell commands should prefer ``$OUT_MIRROR``.
+  ## consumer view. Producer shell/action envs should use
+  ## ``currentPackageInstallMirrorStagingRoot`` via ``$OUT_MIRROR``.
   let projectRoot = packageProjectRoot(currentOwningPackage())
   if projectRoot.len == 0:
     return ""
   packageInstallMirrorRoot(parentDir(projectRoot), extractFilename(projectRoot))
+
+proc currentPackageInstallMirrorStagingRoot*(): string {.dynOrStatic.} =
+  ## Mutable producer staging root for the active package's own install
+  ## mirror. This always resolves to ``<projectRoot>/.repro/output/install``
+  ## even when the consumer resolver would follow a hashed sidecar.
+  let projectRoot = packageProjectRoot(currentOwningPackage())
+  if projectRoot.len == 0:
+    return ""
+  packageInstallMirrorStagingRoot(parentDir(projectRoot),
+    extractFilename(projectRoot))
 
 proc dependencyInstallMirrorRoot*(depName: string;
                                   packageName = currentOwningPackage()):
@@ -558,9 +569,9 @@ proc currentPackageActionEnvEntries*(): seq[(string, string)]
     {.dynOrStatic.} =
   ## Common package-root env entries injected into every action emitted
   ## while a package build body is active. ``OUT_MIRROR`` keeps typed
-  ## shell actions aligned with the M9.R.79 custom-shell convention;
-  ## DEP_* roots follow in declared dependency order.
-  let outMirror = currentPackageInstallMirrorRoot()
+  ## shell actions on the mutable producer staging root; DEP_* roots
+  ## remain resolver-backed and follow declared dependency order.
+  let outMirror = currentPackageInstallMirrorStagingRoot()
   if outMirror.len > 0:
     result.add(("OUT_MIRROR", outMirror))
   for entry in currentPackageDependencyRootEnvEntries():

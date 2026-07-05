@@ -502,6 +502,11 @@ package reprobuild:
       defines = @["reproProviderMode"],
       actionId = "reprobuild.apps.repro-standard-provider"))
 
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-install-mirror-publish/repro_install_mirror_publish.nim",
+      binary = "build/bin/repro-install-mirror-publish",
+      actionId = "reprobuild.apps.repro-install-mirror-publish"))
+
     discard collect("apps", reprobuildAppsActions)
 
     # Bootstrap-And-Self-Build B2: per-helper typed-tool build edges +

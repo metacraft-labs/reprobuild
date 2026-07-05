@@ -80,6 +80,12 @@ proc inlineArgvOf(action: BuildActionDef): seq[string] =
       return arg.encodedValue.split("\x1f")
   @[]
 
+proc inlineScriptOf(action: BuildActionDef): string =
+  let argv = inlineArgvOf(action)
+  if argv.len >= 3:
+    return argv[2]
+  ""
+
 proc extractActions(fragment: GraphFragment): seq[BuildActionDef] =
   for node in fragment.nodes:
     if node.kind != gnkAction:
@@ -108,6 +114,27 @@ proc checkNoDuplicateEnvNames(action: BuildActionDef) =
   for (key, _) in action.env:
     check key notin seen
     seen.add(key)
+
+template withInstallMirrorEnv(modeValue, storeRootValue: string;
+                              body: untyped) =
+  block:
+    let oldModeSet = existsEnv(InstallMirrorModeEnvVar)
+    let oldModeValue = getEnv(InstallMirrorModeEnvVar)
+    let oldStoreSet = existsEnv(StoreRootEnvVar)
+    let oldStoreValue = getEnv(StoreRootEnvVar)
+    putEnv(InstallMirrorModeEnvVar, modeValue)
+    putEnv(StoreRootEnvVar, storeRootValue)
+    try:
+      body
+    finally:
+      if oldModeSet:
+        putEnv(InstallMirrorModeEnvVar, oldModeValue)
+      else:
+        delEnv(InstallMirrorModeEnvVar)
+      if oldStoreSet:
+        putEnv(StoreRootEnvVar, oldStoreValue)
+      else:
+        delEnv(StoreRootEnvVar)
 
 suite "from-source-custom convention M9.N Batch C.1 — meson recipe":
 
@@ -205,28 +232,32 @@ suite "from-source-custom convention M9.N Batch C.1 — meson recipe":
     check not resolved.contains("$extracted")
     check not resolved.contains("$out")
 
-  test "emitFragment: produces fetch + N shell + per-member stage-copy":
+  test "emitFragment: produces fetch + N shell + stage-copy + mirror":
     let conv = from_source_custom_convention.fromSourceCustomConvention()
     let request = dummyRequest(MesonRecipe)
     require conv.recognize(MesonRecipe, request)
     let fragment = conv.emitFragment(MesonRecipe, request)
     let actions = extractActions(fragment)
 
-    # Expected shape: 1 fetch + 4 shell + 1 stage-copy = 6 actions.
-    check actions.len >= 6
+    # Expected shape: 1 fetch + 4 shell + 1 stage-copy + 1 mirror.
+    check actions.len >= 7
 
     var sawFetch = false
     var sawStageMeson = false
+    var sawMirror = false
     var shellCount = 0
     for a in actions:
       if a.id == "ccpp-fetch-mesonSource":
         sawFetch = true
       elif a.id == "from-source-custom-stage-meson":
         sawStageMeson = true
+      elif a.id == "from-source-custom-mirror-mesonSource":
+        sawMirror = true
       elif a.id.startsWith("from-source-custom-shell-"):
         inc shellCount
     check sawFetch
     check sawStageMeson
+    check sawMirror
     check shellCount == 4
 
   test "emitFragment: shell action env carries dependency roots once":
@@ -250,6 +281,58 @@ suite "from-source-custom convention M9.N Batch C.1 — meson recipe":
       check action.envValue("OUT_MIRROR") == expectedOutMirror
       check action.envValue("DEP_PYTHON3_ROOT") == expectedPythonRoot
     check shellCount == 4
+
+  test "emitFragment: shell OUT_MIRROR stays staging while DEP roots hash":
+    let scratchStore = getTempDir() /
+      "test_from_source_custom_hashed_store"
+    let ownHashHex = repeat("c", 64)
+    let depHashHex = repeat("d", 64)
+    let sidecar = realizationInfoPath(MesonRecipe.parentDir,
+      MesonRecipe.extractFilename)
+    let oldSidecarExists = fileExists(sidecar)
+    let oldSidecarParentExists = dirExists(parentDir(sidecar))
+    let oldSidecar =
+      if oldSidecarExists: readFile(sidecar)
+      else: ""
+    let pythonSidecar = realizationInfoPath(MesonRecipe.parentDir, "python3")
+    let oldPythonSidecarExists = fileExists(pythonSidecar)
+    let oldPythonSidecarParentExists = dirExists(parentDir(pythonSidecar))
+    let oldPythonSidecar =
+      if oldPythonSidecarExists: readFile(pythonSidecar)
+      else: ""
+    defer:
+      if oldSidecarExists:
+        createDir(parentDir(sidecar))
+        writeFile(sidecar, oldSidecar)
+      elif fileExists(sidecar):
+        removeFile(sidecar)
+      if not oldSidecarParentExists and dirExists(parentDir(sidecar)):
+        try: removeDir(parentDir(sidecar)) except OSError: discard
+      if oldPythonSidecarExists:
+        createDir(parentDir(pythonSidecar))
+        writeFile(pythonSidecar, oldPythonSidecar)
+      elif fileExists(pythonSidecar):
+        removeFile(pythonSidecar)
+      if not oldPythonSidecarParentExists and dirExists(parentDir(pythonSidecar)):
+        try: removeDir(parentDir(pythonSidecar)) except OSError: discard
+    writeRealizationInfoFile(MesonRecipe.parentDir, MesonRecipe.extractFilename,
+      "1.6.1", ownHashHex)
+    writeRealizationInfoFile(MesonRecipe.parentDir, "python3",
+      "3.12.0", depHashHex)
+    withInstallMirrorEnv("hashed", scratchStore.replace("\\", "/")):
+      let conv = from_source_custom_convention.fromSourceCustomConvention()
+      let request = dummyRequest(MesonRecipe)
+      let fragment = conv.emitFragment(MesonRecipe, request)
+      let actions = extractActions(fragment)
+      let firstShell = findById(actions,
+        "from-source-custom-shell-1-mesonSource")
+      check firstShell.envCount("OUT_MIRROR") == 1
+      check firstShell.envCount("DEP_PYTHON3_ROOT") == 1
+      check firstShell.envValue("OUT_MIRROR") ==
+        (MesonRecipe / ".repro" / "output" / "install").replace("\\", "/")
+      check firstShell.envValue("DEP_PYTHON3_ROOT") ==
+        scratchStore.replace("\\", "/") & "/" &
+          installMirrorStoreRelativePath("python3", "3.12.0", depHashHex)
 
   test "emitFragment: shell action argv carries substituted command":
     let conv = from_source_custom_convention.fromSourceCustomConvention()
@@ -295,6 +378,35 @@ suite "from-source-custom convention M9.N Batch C.1 — meson recipe":
     let actions = extractActions(fragment)
     let stage = findById(actions, "from-source-custom-stage-meson")
     check stage.deps == @["from-source-custom-shell-4-mesonSource"]
+
+  test "emitFragment: mirror publish action follows last shell":
+    let conv = from_source_custom_convention.fromSourceCustomConvention()
+    let request = dummyRequest(MesonRecipe)
+    let fragment = conv.emitFragment(MesonRecipe, request)
+    let actions = extractActions(fragment)
+    let mirror = findById(actions, "from-source-custom-mirror-mesonSource")
+    let sidecar = realizationInfoPath(MesonRecipe.parentDir,
+      MesonRecipe.extractFilename)
+    let legacyMirror = MesonRecipe.parentDir / MesonRecipe.extractFilename /
+      ".repro" / "output" / "install"
+    let script = inlineScriptOf(mirror)
+
+    check mirror.deps == @["from-source-custom-shell-4-mesonSource"]
+    check mirror.inputs == @[MesonRecipe / ".repro" / "build" /
+      "from-source-custom" / "mesonSource" / ".stamps" /
+      "from-source-custom-shell-4-mesonSource.stamp"]
+    check sidecar in mirror.outputs
+    check "sh" in mirror.toolIdentityRefs
+    check InstallMirrorPublishToolName in mirror.toolIdentityRefs
+    check legacyMirror in mirror.declaredOutputs
+    check sidecar in mirror.declaredOutputs
+    check InstallMirrorPublishToolName in script
+    check InstallMirrorModeEnvVar in script
+    check "hashed|hashed-with-legacy-fallback" in script
+    check "--package \"" & MesonRecipe.extractFilename & "\"" in script
+    check "--version \"1.6.1\"" in script
+    check "--source \"" & legacyMirror.replace("\\", "/") & "\"" in script
+    check "if [ ! -d" in script
 
   test "emitFragment: last shell + stage carry publishToBinaryCache":
     # M9.L.4-refactor Step B: only the LAST shell action + the stage-

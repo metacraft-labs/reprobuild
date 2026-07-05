@@ -8406,6 +8406,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_m9r83_install_mirror_publish.nim",
+    binary: "build/test-bin/t_m9r83_install_mirror_publish",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r83_install_mirror_action_shapes.nim",
+    binary: "build/test-bin/t_m9r83_install_mirror_action_shapes",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_m9r8_dispatcher_gate.nim",
     binary: "build/test-bin/t_m9r8_dispatcher_gate",
     defines: @[],

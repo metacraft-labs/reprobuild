@@ -3,7 +3,10 @@
 ## The resolver lives in repro_project_dsl because BuildAction emission needs
 ## it while repro_dsl_stdlib already depends on the project DSL layer.
 
-import std/[os, strutils]
+import std/[algorithm, os, strutils]
+
+import blake3
+import repro_local_store
 
 const InstallMirrorModeEnvVar* = "REPRO_INSTALL_MIRROR_MODE"
 
@@ -21,6 +24,7 @@ type
     immHashedWithLegacyFallback = "hashed-with-legacy-fallback"
 
 const LegacyInstallSubpath = ".repro/output/install"
+const InstallMirrorPublishToolName* = "repro-install-mirror-publish"
 
 proc currentInstallMirrorMode*(): InstallMirrorMode =
   case getEnv(InstallMirrorModeEnvVar).toLowerAscii()
@@ -55,15 +59,67 @@ proc realizationInfoPath*(recipesRoot, depName: string): string =
   (recipesRoot / depName / ".repro" / "output" / RealizationInfoFileName)
     .replace("\\", "/")
 
+proc toForwardSlash(value: string): string =
+  result = value
+  for i in 0 ..< result.len:
+    if result[i] == '\\':
+      result[i] = '/'
+
+proc hexValue(ch: char): int =
+  case ch
+  of '0' .. '9': ord(ch) - ord('0')
+  of 'a' .. 'f': ord(ch) - ord('a') + 10
+  else: -1
+
+proc parseRealizationHashHex*(value: string): PrefixIdBytes =
+  if value.len != 64:
+    raise newException(ValueError,
+      "realization hash must be 64 lowercase hex chars")
+  for i in 0 ..< 32:
+    let hi = hexValue(value[i * 2])
+    let lo = hexValue(value[i * 2 + 1])
+    if hi < 0 or lo < 0:
+      raise newException(ValueError,
+        "realization hash must be 64 lowercase hex chars")
+    result[i] = byte((hi shl 4) or lo)
+
+proc isValidRealizationHashHex(value: string): bool =
+  try:
+    discard parseRealizationHashHex(value)
+    true
+  except ValueError:
+    false
+
+proc installMirrorStoreRelativePath*(depName, version,
+                                     realizationHashHex: string): string =
+  if depName.len == 0 or version.len == 0:
+    return ""
+  try:
+    let prefixId = parseRealizationHashHex(realizationHashHex)
+    prefixRelativePath(depName, version, prefixId).replace("\\", "/")
+  except ValueError:
+    ""
+
 proc writeRealizationInfoFile*(recipesRoot, depName, version,
-                               realizationHashHex: string) =
+                               realizationHashHex: string;
+                               storeRelativePath = "") =
   if recipesRoot.len == 0 or depName.len == 0:
     return
-  if version.len == 0 or realizationHashHex.len != 64:
+  if version.len == 0 or not isValidRealizationHashHex(realizationHashHex):
+    return
+  let canonicalRel = installMirrorStoreRelativePath(depName, version,
+    realizationHashHex)
+  let rel =
+    if storeRelativePath.len > 0:
+      storeRelativePath.replace("\\", "/")
+    else:
+      canonicalRel
+  if rel.len == 0 or rel != canonicalRel:
     return
   let path = realizationInfoPath(recipesRoot, depName)
   let payload = "version=" & version & "\n" &
-                "realization-hash=" & realizationHashHex & "\n"
+                "realization-hash=" & realizationHashHex & "\n" &
+                "store-relative-path=" & rel & "\n"
   if fileExists(path):
     let existing = try:
       readFile(path)
@@ -78,6 +134,7 @@ type
   RealizationInfo* = object
     version*: string
     realizationHashHex*: string
+    storeRelativePath*: string
 
 proc readRealizationInfoFile*(recipesRoot, depName: string): RealizationInfo =
   if recipesRoot.len == 0 or depName.len == 0:
@@ -102,18 +159,27 @@ proc readRealizationInfoFile*(recipesRoot, depName: string): RealizationInfo =
     let value = line[eqIdx + 1 .. ^1].strip()
     if key == "version":
       result.version = value
-    elif key == "realization-hash" and value.len == 64:
+    elif key == "realization-hash" and isValidRealizationHashHex(value):
       result.realizationHashHex = value
+    elif key == "store-relative-path":
+      result.storeRelativePath = value.replace("\\", "/")
+  if result.version.len > 0 and result.realizationHashHex.len > 0:
+    let canonicalRel = installMirrorStoreRelativePath(depName,
+      result.version, result.realizationHashHex)
+    if result.storeRelativePath.len == 0:
+      result.storeRelativePath = canonicalRel
+    elif result.storeRelativePath != canonicalRel:
+      result.storeRelativePath = ""
 
 proc hashedDepMirrorRoot*(recipesRoot, depName: string): string =
   if recipesRoot.len == 0 or depName.len == 0:
     return ""
   let info = readRealizationInfoFile(recipesRoot, depName)
-  if info.version.len == 0 or info.realizationHashHex.len == 0:
+  if info.version.len == 0 or info.realizationHashHex.len == 0 or
+      info.storeRelativePath.len == 0:
     return ""
   let storeRoot = resolveCasStoreRoot().replace("\\", "/")
-  storeRoot & "/prefixes/" & depName & "/" &
-    info.version & "-" & info.realizationHashHex
+  storeRoot & "/" & info.storeRelativePath
 
 proc packageInstallMirrorRoot*(recipesRoot, depName: string): string =
   if depName.len == 0 or recipesRoot.len == 0:
@@ -134,6 +200,15 @@ proc packageInstallMirrorRoot*(recipesRoot, depName: string): string =
       hashed
     else:
       legacy
+
+proc packageInstallMirrorStagingRoot*(recipesRoot, depName: string): string =
+  ## Mutable producer staging root for a package's own install mirror.
+  ## Unlike ``packageInstallMirrorRoot`` this intentionally ignores the
+  ## hashed resolver mode and any realization sidecar, so producer
+  ## actions never write into immutable store prefixes.
+  if depName.len == 0 or recipesRoot.len == 0:
+    return ""
+  legacyDepMirrorRoot(recipesRoot, depName)
 
 proc packageInstallMirrorLibDirs*(recipesRoot, depName: string): seq[string] =
   let root = packageInstallMirrorRoot(recipesRoot, depName)
@@ -175,6 +250,120 @@ proc packageInstallMirrorHumanFriendlyPath*(recipesRoot, depName: string):
   if depName.len == 0 or recipesRoot.len == 0:
     return ""
   legacyDepMirrorRoot(recipesRoot, depName)
+
+proc installMirrorTreeDigest(sourceDir: string): string =
+  if not dirExists(sourceDir):
+    return ""
+  var entries: seq[tuple[path: string; size: int64; digest: PrefixIdBytes]] =
+    @[]
+  for entry in walkDirRec(sourceDir, yieldFilter = {pcFile, pcLinkToFile},
+                          relative = true):
+    let abs = sourceDir / entry
+    let raw = readFile(abs)
+    let digest = blake3.digest(raw)
+    entries.add((path: entry.replace("\\", "/"),
+      size: getFileSize(abs), digest: digest))
+  entries.sort(proc (a, b: tuple[path: string; size: int64;
+                                 digest: PrefixIdBytes]): int =
+    cmp(a.path, b.path))
+  var manifest = "reprobuild.install-mirror-tree.v1\n"
+  for e in entries:
+    manifest.add(e.path)
+    manifest.add("\t")
+    manifest.add($e.size)
+    manifest.add("\t")
+    manifest.add(prefixIdHex(e.digest))
+    manifest.add("\n")
+  prefixIdHex(blake3.digest(manifest))
+
+type
+  InstallMirrorPublishResult* = object
+    realizationHashHex*: string
+    storeRelativePath*: string
+    absolutePath*: string
+
+const InstallMirrorWritePermissions = {
+  fpUserWrite, fpGroupWrite, fpOthersWrite
+}
+
+proc stripWritePermissions(path: string) =
+  var permissions = getFilePermissions(path)
+  let original = permissions
+  for permission in InstallMirrorWritePermissions:
+    permissions.excl(permission)
+  if permissions != original:
+    setFilePermissions(path, permissions)
+
+proc enforceInstallMirrorStoreReadOnly(prefixRoot: string) =
+  if prefixRoot.len == 0 or not dirExists(prefixRoot):
+    raise newException(ValueError,
+      "install mirror store prefix is missing: " & prefixRoot)
+  var dirs = @[prefixRoot]
+  for entry in walkDirRec(prefixRoot,
+                          yieldFilter = {pcFile, pcLinkToFile, pcDir},
+                          relative = true):
+    let path = prefixRoot / entry
+    if dirExists(path):
+      dirs.add(path)
+    else:
+      stripWritePermissions(path)
+  dirs.sort(proc (a, b: string): int = cmp(b.len, a.len))
+  for dir in dirs:
+    stripWritePermissions(dir)
+
+proc publishInstallMirrorToStore*(recipesRoot, depName, version,
+                                  sourceDir: string;
+                                  storeRoot = resolveCasStoreRoot()):
+    InstallMirrorPublishResult =
+  if recipesRoot.len == 0 or depName.len == 0:
+    raise newException(ValueError, "recipes root and package name are required")
+  if version.len == 0:
+    raise newException(ValueError, "package version is required")
+  if sourceDir.len == 0 or not dirExists(sourceDir):
+    raise newException(ValueError, "install mirror source directory is missing")
+  let treeDigest = installMirrorTreeDigest(sourceDir)
+  var store = openStore(storeRoot)
+  defer: store.close()
+  let hint = StoreReceiptHint(
+    adapter: "install-mirror",
+    packageName: depName,
+    version: version,
+    declaredExecutablePath: "",
+    exportedExecutables: @[],
+    lockIdentity: "install-mirror:" & depName & ":" & version,
+    provenanceUrl: "",
+    provenanceChecksum: "",
+    materializationMechanism: "")
+  let realized = store.realizeDirectoryAsPrefix(sourceDir, hint,
+    extra = ["tree:" & treeDigest])
+  result.realizationHashHex = prefixIdHex(realized.prefixId)
+  result.storeRelativePath = realized.relativePath.replace("\\", "/")
+  result.absolutePath = realized.absolutePath.replace("\\", "/")
+  enforceInstallMirrorStoreReadOnly(result.absolutePath)
+  writeRealizationInfoFile(recipesRoot, depName, version,
+    result.realizationHashHex, result.storeRelativePath)
+
+proc shellDoubleQuote(value: string): string =
+  "\"" & value.replace("\\", "/").replace("\"", "\\\"") & "\""
+
+proc emitInstallMirrorStorePublish*(recipesRoot, depName, version,
+                                    sourceDir: string): string =
+  if recipesRoot.len == 0 or depName.len == 0 or version.len == 0 or
+      sourceDir.len == 0:
+    return ""
+  result.add("case \"${")
+  result.add(InstallMirrorModeEnvVar)
+  result.add(":-legacy}\" in hashed|hashed-with-legacy-fallback) ")
+  result.add(InstallMirrorPublishToolName)
+  result.add(" --recipes-root ")
+  result.add(shellDoubleQuote(recipesRoot))
+  result.add(" --package ")
+  result.add(shellDoubleQuote(depName))
+  result.add(" --version ")
+  result.add(shellDoubleQuote(version))
+  result.add(" --source ")
+  result.add(shellDoubleQuote(sourceDir))
+  result.add(" >/dev/null; ;; esac; ")
 
 proc emitInstallMirrorReadOnlyEnforcement*(mirrorRoot: string;
                                             mode = currentInstallMirrorMode()):

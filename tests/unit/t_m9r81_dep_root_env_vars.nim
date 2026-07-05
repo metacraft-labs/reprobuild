@@ -118,7 +118,8 @@ suite "M9.R.81 dependency root env vars":
       check entries == @[
         (
           "DEP_QT6_BASE_ROOT",
-          storeRoot & "/prefixes/qt6-base/6.6.2-" & hashHex
+          storeRoot & "/" &
+            installMirrorStoreRelativePath("qt6-base", "6.6.2", hashHex)
         )
       ]
 
@@ -158,3 +159,66 @@ suite "M9.R.81 dependency root env vars":
       check action.envValue("DEP_MESA_ROOT").endsWith(
         "/tests/mesa/.repro/output/install")
       check action.envValue("EXPLICIT_ENV") == "kept-last"
+
+  test "buildAction env keeps OUT_MIRROR staging while DEP roots hash":
+    let scratch = getTempDir() / "t_m9r81_action_env_hashed"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch)
+    defer:
+      if dirExists(scratch):
+        removeDir(scratch)
+
+    let recipesRoot = currentSourcePath.parentDir.parentDir
+    let storeRoot = (scratch / "store").replace("\\", "/")
+    let ownHashHex = repeat("b", 64)
+    let depHashHex = repeat("c", 64)
+    let ownSidecar = realizationInfoPath(recipesRoot, "unit")
+    let depSidecar = realizationInfoPath(recipesRoot, "qt6-base")
+    let oldOwnExists = fileExists(ownSidecar)
+    let oldOwnParentExists = dirExists(parentDir(ownSidecar))
+    let oldOwn =
+      if oldOwnExists: readFile(ownSidecar)
+      else: ""
+    let oldDepExists = fileExists(depSidecar)
+    let oldDepParentExists = dirExists(parentDir(depSidecar))
+    let oldDep =
+      if oldDepExists: readFile(depSidecar)
+      else: ""
+    defer:
+      if oldOwnExists:
+        createDir(parentDir(ownSidecar))
+        writeFile(ownSidecar, oldOwn)
+      elif fileExists(ownSidecar):
+        removeFile(ownSidecar)
+      if not oldOwnParentExists and dirExists(parentDir(ownSidecar)):
+        try: removeDir(parentDir(ownSidecar)) except OSError: discard
+      if oldDepExists:
+        createDir(parentDir(depSidecar))
+        writeFile(depSidecar, oldDep)
+      elif fileExists(depSidecar):
+        removeFile(depSidecar)
+      if not oldDepParentExists and dirExists(parentDir(depSidecar)):
+        try: removeDir(parentDir(depSidecar)) except OSError: discard
+
+    writeRealizationInfoFile(recipesRoot, "unit", "1.0.0", ownHashHex)
+    writeRealizationInfoFile(recipesRoot, "qt6-base", "6.6.2", depHashHex)
+
+    withInstallMirrorEnv("hashed", storeRoot):
+      resetBuildActionRegistry()
+      setCurrentOwningPackageOverride("m9r81DepEnvFixture")
+      try:
+        discard buildAction(
+          id = "m9r81-hashed-action-env",
+          call = publicCliCall("pkg", "exe", "build",
+            "pkg.exe.build", @[]))
+      finally:
+        clearCurrentOwningPackageOverride()
+
+      let action = findAction("m9r81-hashed-action-env")
+      check action.envValue("OUT_MIRROR") ==
+        (currentSourcePath.parentDir / ".repro" / "output" / "install").
+          replace("\\", "/")
+      check action.envValue("DEP_QT6_BASE_ROOT") ==
+        storeRoot & "/" &
+          installMirrorStoreRelativePath("qt6-base", "6.6.2", depHashHex)
