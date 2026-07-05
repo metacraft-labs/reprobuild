@@ -494,15 +494,20 @@ proc main() =
 
   let scheduler = runBuildWorkload(app, workRoot / "scheduler", cacheRoot,
     workloadCount)
+  # Quick PR runs are a smoke gate on shared runners; trend comparison is
+  # handled by the benchmark action. Keep the hard threshold as a broad sanity
+  # check while preserving the tighter full-run validation gate.
+  let schedulerMaxMillis = if args.quick: 120_000.0 else: 60_000.0
+  let schedulerMinThroughput = if args.quick: 0.1 else: 1.0
   metrics.addMetric("build-engine-throughput", "generated action throughput",
     "actions/sec", float(workloadCount) / (scheduler.millis / 1000.0),
-    tdGreaterOrEqual, 1.0,
+    tdGreaterOrEqual, schedulerMinThroughput,
     "real repro_build_engine scheduler with RunQuota helper-launched generated actions",
     ["repro_build_engine", "repro_runquota", "runquotad",
         "generated fixture actions"])
   metrics.addMetric("build-engine-throughput",
     "time to complete generated graph",
-    "ms", scheduler.millis, tdLessOrEqual, 60_000.0,
+    "ms", scheduler.millis, tdLessOrEqual, schedulerMaxMillis,
     "validation threshold for M23 gate",
     ["repro_build_engine", "repro_runquota", "runquotad"])
   metrics.addMetric("runquota-process-execution",
