@@ -29,7 +29,7 @@ proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
-const expectedFiles = [".envrc", "AGENTS.md", "workspace-projects.md"]
+const expectedFiles = [".envrc", ".gitignore", "AGENTS.md", "workspace-projects.md"]
 
 proc invokeBootstrap(reproBin, hostDir: string): CmdResult =
   runShell(shellCommand(@[reproBin, "workspace", "bootstrap", hostDir]))
@@ -57,6 +57,7 @@ suite "RA-6 — repro workspace bootstrap (scaffolds host files)":
 
     # Content spot-checks: the files reference the workspace conventions.
     check readFile(hostDir / ".envrc").contains("direnv")
+    check readFile(hostDir / ".gitignore").contains(".repro/")
     check readFile(hostDir / "AGENTS.md").contains("workspace-projects.md")
     check readFile(hostDir / "workspace-projects.md").contains("Workspace Projects")
 
@@ -76,7 +77,7 @@ suite "RA-6 — repro workspace bootstrap (scaffolds host files)":
     check first.code == 0
 
     # Capture the byte content after the first run.
-    var before: array[3, string]
+    var before: array[expectedFiles.len, string]
     for i, name in expectedFiles:
       before[i] = readFile(hostDir / name)
 
@@ -105,8 +106,9 @@ suite "RA-6 — repro workspace bootstrap (scaffolds host files)":
 
     let res = invokeBootstrap(reproBin, hostDir)
     check res.code == 0
-    # The user's .envrc is preserved verbatim; the other two are created.
+    # The user's .envrc is preserved verbatim; the other three are created.
     check readFile(hostDir / ".envrc") == sentinel
     check res.output.contains("skipped .envrc")
+    check fileExists(hostDir / ".gitignore")
     check fileExists(hostDir / "AGENTS.md")
     check fileExists(hostDir / "workspace-projects.md")

@@ -393,3 +393,80 @@ suite "M12 — repro workspace status (active branch + drift)":
       for entry in report["repos"]:
         check entry["lockState"].getStr() == "no-lock-recorded"
         check entry["lockedRevision"].getStr().len == 0
+
+  test "test_m12_status_extended_queries":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "extended-queries")
+      defer: removeDir(fx.scratch)
+
+      cloneAll(gitBin, fx)
+      check invokeLock(fx).code == 0
+
+      # 1. Create a stash in lib-b
+      writeFile(fx.workspaceRoot / "lib-b" / "stash.txt", "stash-me\n")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " add stash.txt")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " stash")
+
+      # 2. Ahead commit on main in lib-b
+      writeFile(fx.workspaceRoot / "lib-b" / "ahead.txt", "ahead-content\n")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " add ahead.txt")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " commit -m ahead")
+
+      # 3. Behind commit on origin in lib-b
+      writeFile(fx.scratch / "seed-lib-b" / "behind.txt", "behind-content\n")
+      discard requireGit(q(gitBin) & " -C " & q(fx.scratch / "seed-lib-b") & " add behind.txt")
+      discard requireGit(q(gitBin) & " -C " & q(fx.scratch / "seed-lib-b") & " commit -m behind")
+      discard requireGit(q(gitBin) & " -C " & q(fx.scratch / "seed-lib-b") & " push origin main")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " fetch")
+
+      # 4. Unmerged branch in lib-b
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " checkout -b feature")
+      writeFile(fx.workspaceRoot / "lib-b" & "/feature.txt", "feature-content\n")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " add feature.txt")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " commit -m feature")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " checkout main")
+
+      # 5. Untracked and modified files in lib-b
+      writeFile(fx.workspaceRoot / "lib-b" & "/untracked.txt", "untracked-content\n")
+      writeFile(fx.workspaceRoot / "lib-b" & "/README.md", "README modified\n")
+
+      # Run full status
+      let res = invokeStatus(fx)
+      check res.code == 0
+      
+      # Verify text output fields are present
+      check "modified=1 untracked=1" in res.output
+      check "stashes=1" in res.output
+      check "ahead=1 behind=1" in res.output
+      check "unmerged=feature" in res.output
+
+      # Verify JSON output
+      let report = readReport(fx)
+      let libBEntry = findRepo(report, "lib-b")
+      check not libBEntry.isNil
+      check libBEntry["modifiedCount"].getInt() == 1
+      check libBEntry["untrackedCount"].getInt() == 1
+      check libBEntry["stashCount"].getInt() == 1
+      check libBEntry["aheadCount"].getInt() == 1
+      check libBEntry["behindCount"].getInt() == 1
+      check libBEntry["unmergedBranches"].len == 1
+      check libBEntry["unmergedBranches"][0].getStr() == "feature"
+
+      # Run with selective flag (only stashes)
+      let resStashes = invokeStatus(fx, ["--stashes"])
+      check resStashes.code == 0
+      check "stashes=1" in resStashes.output
+      check "modified=" notin resStashes.output
+      check "ahead=" notin resStashes.output
+      check "unmerged=" notin resStashes.output
+
+      # Verify JSON output under selective flag
+      let reportStashes = readReport(fx)
+      let libBStashEntry = findRepo(reportStashes, "lib-b")
+      check libBStashEntry["stashCount"].getInt() == 1
+      check libBStashEntry["modifiedCount"].getInt() == 0
+      check libBStashEntry["aheadCount"].getInt() == 0
+      check libBStashEntry["unmergedBranches"].len == 0

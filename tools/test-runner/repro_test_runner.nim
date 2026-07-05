@@ -564,6 +564,7 @@ proc drainAndWaitWithTimeout(p: Process; timeoutSec: int):
   result = (output, TimeoutExitCode, timedOut)
 
 proc runWholeBinary(tc: TestCase; resultsDir: string;
+                    baseEnv: seq[tuple[key, value: string]];
                     testTimeoutSec: int): TestResult =
   result.testCase = tc
   result.status = tsFail
@@ -576,7 +577,10 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
   # child runs, so the test is genuinely "did not produce a result"
   # — failing the test is the right exit-code behaviour for the run.
   try:
-    let p = spawnedProcess(tc.binary, args = [], env = nil)
+    var childEnv = newStringTable(modeCaseSensitive)
+    for (k, v) in baseEnv:
+      childEnv[k] = v
+    let p = spawnedProcess(tc.binary, args = [], env = childEnv)
     let (output, exitCode, timedOut) =
       drainAndWaitWithTimeout(p, testTimeoutSec)
     if timedOut:
@@ -710,7 +714,8 @@ proc workerLoop(args: WorkerArgs) =
         res = runOneProtocol(tc, args.resultsDir, args.baseEnv[],
           args.testTimeoutSec)
       else:
-        res = runWholeBinary(tc, args.resultsDir, args.testTimeoutSec)
+        res = runWholeBinary(tc, args.resultsDir, args.baseEnv[],
+          args.testTimeoutSec)
     except CatchableError as e:
       res = TestResult(
         testCase: tc,
@@ -861,6 +866,76 @@ proc matchesFilter(stem: string; filters: seq[string]): bool =
 proc workerMain(args: WorkerArgs) {.thread.} =
   workerLoop(args)
 
+proc findNixStoreLibDir(nameFragment: string; libraryNames: openArray[string]): string =
+  ## Return the first already-realized /nix/store library directory whose
+  ## basename contains `nameFragment` and that actually contains one of
+  ## `libraryNames`. This deliberately avoids picking split `-dev`/`-bin`
+  ## outputs that match the package name but cannot satisfy dyld/ld.so.
+  if not dirExists("/nix/store"):
+    return ""
+  for kind, path in walkDir("/nix/store"):
+    if kind != pcDir:
+      continue
+    if path.lastPathPart.contains(nameFragment):
+      let libDir = path / "lib"
+      if not dirExists(libDir):
+        continue
+      for libraryName in libraryNames:
+        if fileExists(libDir / libraryName):
+          return libDir
+  ""
+
+proc prependEnvPath(name: string; entries: openArray[string]) =
+  var prefix: seq[string]
+  for entry in entries:
+    if entry.len > 0 and dirExists(entry):
+      prefix.add(entry)
+  if prefix.len == 0:
+    return
+  let existing = getEnv(name)
+  let sep = $PathSep
+  if existing.len > 0:
+    putEnv(name, prefix.join(sep) & sep & existing)
+  else:
+    putEnv(name, prefix.join(sep))
+
+proc ensureNixRuntimeLibraryEnv() =
+  let clingoLib =
+    if getEnv("CLINGO_LIB").len > 0: getEnv("CLINGO_LIB")
+    else: findNixStoreLibDir("clingo-5.", ["libclingo.dylib", "libclingo.so"])
+  let zstdLib =
+    if getEnv("ZSTD_LIB").len > 0: getEnv("ZSTD_LIB")
+    else: findNixStoreLibDir("zstd-1.", ["libzstd.dylib", "libzstd.so"])
+  if clingoLib.len > 0:
+    putEnv("CLINGO_LIB", clingoLib)
+  if zstdLib.len > 0:
+    putEnv("ZSTD_LIB", zstdLib)
+  when defined(posix):
+    prependEnvPath("DYLD_LIBRARY_PATH", [clingoLib, zstdLib])
+    prependEnvPath("DYLD_FALLBACK_LIBRARY_PATH", [clingoLib, zstdLib])
+    prependEnvPath("LD_LIBRARY_PATH", [clingoLib, zstdLib])
+
+proc putEnvIfUnsetDir(name, path: string) =
+  if getEnv(name).len == 0 and dirExists(path):
+    putEnv(name, path)
+
+proc ensureWorkspaceSourceEnv(repoRoot: string) =
+  ## Nested repro builds compile provider/interface helpers from scratch
+  ## projects, often against a /nix/store source snapshot. In that context
+  ## config.nims cannot discover developer sibling checkouts via "../...".
+  ## Seed the same source-package env vars the dev shell normally carries so
+  ## child tests can compile out-of-tree providers without depending on the
+  ## runner's launch shell.
+  let parent = repoRoot.parentDir
+  putEnvIfUnsetDir("REPROBUILD_SOURCE_ROOT", repoRoot)
+  putEnvIfUnsetDir("REPRO_TEST_ADAPTERS_SRC",
+    parent / "reprobuild-test-adapters" / "src")
+  putEnvIfUnsetDir("REPRO_CT_TEST_RUNNER_SRC",
+    parent / "reprobuild-ct-test-runner")
+  putEnvIfUnsetDir("CODETRACER_SRC", parent / "codetracer" / "src")
+  putEnvIfUnsetDir("STACKABLE_HOOKS_SRC",
+    parent / "nim-stackable-hooks" / "src")
+
 proc main() =
   let opts = parseArgs()
   let cwd = getCurrentDir()
@@ -969,6 +1044,9 @@ proc main() =
       "\tdirectory = *\n")
     putEnv("GIT_CONFIG_GLOBAL", hermeticGitConfigFile)
     putEnv("GIT_CONFIG_NOSYSTEM", "1")
+
+  ensureNixRuntimeLibraryEnv()
+  ensureWorkspaceSourceEnv(cwd)
 
   # Snapshot the process environment exactly once, on the main thread,
   # before any worker is created. From this point on no code in this

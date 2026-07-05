@@ -131,6 +131,7 @@ int main(int argc, char **argv) {
 """
 
 const CodeTracerCommonDevToolExecutables: seq[string] = @[
+  "attic-client",
   "bash",
   "cachix",
   "capnp",

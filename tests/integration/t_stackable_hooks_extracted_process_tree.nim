@@ -355,6 +355,8 @@ int main(int argc, char **argv) {
       discard finalizeMonitorFragments(fragmentDir, depfile)
       let dep = readMonitorDepFile(depfile)
       let records = dep.records
+      let canonicalParentInput = expandFilename(parentInput)
+      let canonicalChildInput = expandFilename(childInput)
 
       check readFile(depfile)[0 .. 3] == "RMDF"
       check records.len > 0
@@ -363,9 +365,9 @@ int main(int argc, char **argv) {
       check hasRecord(records, proc(record: MonitorRecord): bool =
         record.kind == mrProcessSpawn and record.childOsPid != 0)
       check hasRecord(records, proc(record: MonitorRecord): bool =
-        record.kind == mrFileRead and record.path == parentInput)
+        record.kind == mrFileRead and record.path == canonicalParentInput)
       check hasRecord(records, proc(record: MonitorRecord): bool =
-        record.kind == mrFileRead and record.path == childInput)
+        record.kind == mrFileRead and record.path == canonicalChildInput)
       check hasRecord(records, proc(record: MonitorRecord): bool =
         record.kind == mrPathProbe and record.path.contains("missing-parent-probe"))
       check hasRecord(records, proc(record: MonitorRecord): bool =

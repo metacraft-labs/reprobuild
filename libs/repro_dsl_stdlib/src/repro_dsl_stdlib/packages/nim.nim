@@ -232,11 +232,13 @@ proc c*(pkg: NimPackage; source: string; binary: string;
         imports: seq[string] = @[];
         passC: seq[string] = @[];
         passL: seq[string] = @[];
+        nimcache: string = "";
         appLib = false;
         threadsOn = false;
         actionId = "";
         deps: openArray[string] = [];
-        after: openArray[BuildActionDef] = []): BuildActionDef
+        after: openArray[BuildActionDef] = [];
+        extraEnv: openArray[(string, string)] = []): BuildActionDef
     {.discardable.} =
   ## Test-Fixtures-In-Build-Graph M2: ``appLib`` / ``threadsOn`` were
   ## added to the convenience alias so the monitor-shim fixture edge in
@@ -245,9 +247,9 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   ## ``binary``-shorthand surface the rest of the build block uses.
   discard imports
   c(pkg = pkg, source = source, output = binary, defines = defines,
-    paths = paths, passC = passC, passL = passL, appLib = appLib,
-    threadsOn = threadsOn, actionId = actionId, deps = deps,
-    after = after)
+    paths = paths, passC = passC, passL = passL, nimcache = nimcache,
+    appLib = appLib, threadsOn = threadsOn, actionId = actionId, deps = deps,
+    after = after, extraEnv = extraEnv)
 
 # ---------------------------------------------------------------------------
 # M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).

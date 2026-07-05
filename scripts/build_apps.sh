@@ -10,6 +10,32 @@ if [ -z "${BEARSSL_SRC:-}" ]; then
   fi
 fi
 
+find_store_lib_dir() {
+  local fragment="$1"
+  shift
+  local pkg lib name
+  [ -d /nix/store ] || return 0
+  for pkg in /nix/store/*"${fragment}"*; do
+    [ -d "${pkg}/lib" ] || continue
+    lib="${pkg}/lib"
+    for name in "$@"; do
+      if compgen -G "${lib}/${name}" >/dev/null; then
+        printf '%s\n' "${lib}"
+        return 0
+      fi
+    done
+  done
+}
+
+runtime_rpath_passl=()
+for lib_dir in \
+  "${CLINGO_LIB:-$(find_store_lib_dir 'clingo-5.' 'libclingo.dylib' 'libclingo.so*')}" \
+  "${ZSTD_LIB:-$(find_store_lib_dir 'zstd-1.' 'libzstd.dylib' 'libzstd.so*')}"; do
+  if [ -d "${lib_dir}" ]; then
+    runtime_rpath_passl+=("--passL:-Wl,-rpath,${lib_dir}")
+  fi
+done
+
 nim_mode_flags=()
 case "${REPROBUILD_BUILD_MODE:-debug}" in
   debug)
@@ -136,6 +162,7 @@ while read -r name path extra_flags; do
       ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
       ${extra_flag_array[@]+"${extra_flag_array[@]}"} \
       ${ssl_passl[@]+"${ssl_passl[@]}"} \
+      ${runtime_rpath_passl[@]+"${runtime_rpath_passl[@]}"} \
       --nimcache:"build/nimcache/${name}" \
       --out:"build/bin/${name}" \
       "${path}"
@@ -169,6 +196,7 @@ esac
     --mm:orc \
     --define:reproProviderMode \
     --define:reproProviderRuntimeDll \
+    ${runtime_rpath_passl[@]+"${runtime_rpath_passl[@]}"} \
     --nimcache:build/nimcache/repro-project-dsl-runtime-dll \
     --out:"build/lib/librepro_project_dsl_runtime.${dll_ext}" \
     libs/repro_project_dsl_runtime_dll/src/repro_project_dsl_runtime_entry.nim

@@ -24,6 +24,9 @@
 
 import std/[algorithm, httpclient, httpcore, net, os, random, strutils, times]
 
+when defined(ssl):
+  import wrappers/openssl
+
 import blake3
 
 import ./types
@@ -430,6 +433,11 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
   # (REPRO_BINARY_CACHE_CA_FILE / REPRO_BINARY_CACHE_TLS_INSECURE);
   # otherwise std/httpclient's getDefaultSSL() would reject verification
   # of a self-signed server cert.
+  when defined(ssl):
+    var openSslInitialized {.global.} = false
+    if not openSslInitialized:
+      discard SSL_library_init()
+      openSslInitialized = true
   let client =
     when defined(ssl):
       if baseUrl.toLowerAscii().startsWith("https://"):
@@ -442,7 +450,7 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
           else: newContext(verifyMode = CVerifyPeer)
         newHttpClient(timeout = 60_000, sslContext = ctx)
       else:
-        newHttpClient(timeout = 60_000)
+        newHttpClient(timeout = 60_000, sslContext = nil)
     else:
       newHttpClient(timeout = 60_000)
   defer: client.close()

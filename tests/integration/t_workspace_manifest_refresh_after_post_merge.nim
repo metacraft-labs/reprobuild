@@ -136,7 +136,7 @@ revision = "main"
 """
 
 proc writeWorkspaceTomlWithLayer(workspaceRoot, layerUrl: string) =
-  let dotRepo = workspaceRoot / ".repo"
+  let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
   let body =
     "schema = \"reprobuild.workspace.local.v1\"\n\n" &

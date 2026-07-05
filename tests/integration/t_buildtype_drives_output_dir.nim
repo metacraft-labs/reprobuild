@@ -66,6 +66,29 @@ proc reproRoot(): string =
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
 
+proc firstNixStoreLibDir(nameFragment: string;
+                         libraryNames: openArray[string]): string =
+  ## The probe imports repro_project_dsl, whose solver binding dlopens clingo
+  ## by leaf name at startup. Embed the Nix runtime library dir into the probe
+  ## itself so the assertion is independent of DYLD_* environment inheritance.
+  let direct = getEnv("CLINGO_LIB")
+  if direct.len > 0 and dirExists(direct):
+    return direct
+  when defined(windows):
+    discard nameFragment
+    discard libraryNames
+    return ""
+  else:
+    if not dirExists("/nix/store"):
+      return ""
+    for kind, path in walkDir("/nix/store"):
+      if kind == pcDir and nameFragment in path:
+        let libDir = path / "lib"
+        for libName in libraryNames:
+          if fileExists(libDir / libName):
+            return libDir
+    ""
+
 suite "Standard-Configurations: buildType drives the output directory":
 
   test "fixture's package macro drives the solver at module init":
@@ -99,8 +122,22 @@ suite "Standard-Configurations: buildType drives the output directory":
     createDir(cacheDir)
     createDir(root / "build" / "test-bin")
     writeFile(probeSrc, ProbeSrcTemplate.replace("@ROOT@", root))
-    let nimcmd = "nim c --hints:off --warnings:off --nimcache:" & cacheDir &
-      " --out:" & probeBin & " " & probeSrc
+    var nimArgs = @[
+      "nim", "c", "--hints:off", "--warnings:off",
+      "--nimcache:" & cacheDir,
+      "--out:" & probeBin
+    ]
+    let clingoLibDir = firstNixStoreLibDir("clingo-5.",
+      when defined(macosx): ["libclingo.dylib"] else: ["libclingo.so"])
+    if clingoLibDir.len > 0:
+      nimArgs.add("--passL:-L" & clingoLibDir)
+      when not defined(windows):
+        nimArgs.add("--passL:-Wl,-rpath," & clingoLibDir)
+    nimArgs.add(probeSrc)
+    var nimcmd = ""
+    for i, arg in nimArgs:
+      if i > 0: nimcmd.add(" ")
+      nimcmd.add(quoteShell(arg))
     let buildResult = execCmdEx(nimcmd)
     if buildResult.exitCode != 0:
       echo "PROBE BUILD FAILED:"

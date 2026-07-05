@@ -69,7 +69,31 @@ template emitKvBool(buf: var string; key: string; value: bool) =
 
 proc workspaceTomlPath*(workspaceRoot: string): string =
   ## Canonical absolute path of the workspace metadata file.
-  workspaceRoot / ".repo" / "workspace.toml"
+  let reproPath = workspaceRoot / ".repro" / "workspace.toml"
+  if fileExists(reproPath):
+    return reproPath
+  let repoPath = workspaceRoot / ".repo" / "workspace.toml"
+  if fileExists(repoPath):
+    return repoPath
+  if dirExists(workspaceRoot / ".repo"):
+    return repoPath
+  reproPath
+
+proc reproDir*(workspaceRoot: string): string =
+  ## Directory where the workspace.toml is stored (.repro).
+  if dirExists(workspaceRoot / ".repro") or fileExists(workspaceRoot / ".repro" / "workspace.toml"):
+    workspaceRoot / ".repro"
+  elif dirExists(workspaceRoot / ".repo") or fileExists(workspaceRoot / ".repo" / "workspace.toml"):
+    workspaceRoot / ".repo"
+  else:
+    workspaceRoot / ".repro"
+
+proc manifestsRoot*(workspaceRoot: string): string =
+  ## Directory containing projects/ and repos/ directories.
+  if dirExists(workspaceRoot / ".repo" / "manifests"):
+    workspaceRoot / ".repo" / "manifests"
+  else:
+    workspaceRoot
 
 # ---- serializer -----------------------------------------------------------
 
@@ -175,7 +199,7 @@ proc hasResolvedManifestCheckout*(workspaceRoot: string): bool =
   ## project/variant file present is NOT a resolved checkout — it is the
   ## half-bootstrapped state ``repo init`` leaves behind before the
   ## manifest repo is actually checked out.
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = manifestsRoot(workspaceRoot)
   for sub in ["projects", "variants"]:
     let dir = manifestsRoot / sub
     if dirExists(dir):
@@ -207,25 +231,22 @@ proc hasCommittedLockWorkspaceMarker*(workspaceRoot: string): bool =
 
 proc isInitializedWorkspace*(workspaceRoot: string): bool =
   ## RA-10 canonical "initialized workspace" marker. A directory counts
-  ## as an initialized workspace only when its ``.repo/`` shell carries a
-  ## *resolved manifest checkout* — NOT merely a bare ``.repo/``/
+  ## as an initialized workspace only when its ``.repro/`` shell carries a
+  ## *resolved manifest checkout* — NOT merely a bare
   ## ``.repro/`` directory left behind by a half-finished bootstrap — OR
   ## (MO-2) when it carries a committed ``repro.lock`` (the manifest-
   ## optional reproducibility artifact).
   ##
   ## Concretely, the marker is present when ANY of:
   ##
-  ##   * ``<workspaceRoot>/.repo/workspace.toml`` exists (the metadata
+  ##   * ``<workspaceRoot>/.repro/workspace.toml`` exists (the metadata
   ##     file ``repro workspace init`` writes once the workspace shell is
   ##     established — single-project or compositional), OR
-  ##   * ``<workspaceRoot>/.repo/manifests`` holds at least one resolved
-  ##     project/variant manifest (``projects/*.toml`` /
-  ##     ``variants/*.toml``), OR
   ##   * (MO-2) ``<workspaceRoot>/repro.lock`` exists — a committed-lock-
   ##     only repo with no manifest repo is a manifest-optional workspace,
   ##     so the hooks/gate must enforce there too.
   ##
-  ## A bare ``.repo/`` (or ``.repro/``) with none of those is treated
+  ## A bare ``.repro/`` with none of those is treated
   ## as "not an initialized workspace": the shared predicate the hook
   ## bodies and any init-skip logic consult so a managed hook installed
   ## under a half-bootstrapped or non-workspace parent no-ops with

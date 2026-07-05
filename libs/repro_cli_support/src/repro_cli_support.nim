@@ -9505,8 +9505,8 @@ proc detectWorkspaceProjectName(workspaceRoot: string): string =
   ## When ``workspace.toml`` is metadata-only the project name lives in
   ## ``[workspace].project``; when neither workspace.toml nor that field
   ## is present we look for exactly one ``projects/*.toml`` under
-  ## ``.repo/manifests/projects/`` and use its stem.
-  let workspaceToml = workspaceRoot / ".repo" / "workspace.toml"
+  ## ``projects/`` and use its stem.
+  let workspaceToml = workspaceTomlPath(workspaceRoot)
   if fileExists(workspaceToml):
     try:
       let recorded =
@@ -9515,7 +9515,7 @@ proc detectWorkspaceProjectName(workspaceRoot: string): string =
         return recorded
     except WorkspaceManifestParseError:
       discard
-  let projectsDir = workspaceRoot / ".repo" / "manifests" / "projects"
+  let projectsDir = manifestsRoot(workspaceRoot) / "projects"
   if dirExists(projectsDir):
     var single = ""
     var count = 0
@@ -9534,8 +9534,7 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
   ## ``"workspace"`` when the workspace shell (workspace.toml or a
   ## resolvable project file) is present, ``"single-repo"`` otherwise.
   if isCompositionalWorkspaceToml(workspaceRoot):
-    let workspaceToml = absolutePath(
-      workspaceRoot / ".repo" / "workspace.toml")
+    let workspaceToml = absolutePath(workspaceTomlPath(workspaceRoot))
     let resolved = composeManifestLayersFromFile(workspaceToml)
     result.mode = "workspace"
     result.projectName = resolved.projectName
@@ -9545,7 +9544,7 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
     return
   let projectName = detectWorkspaceProjectName(workspaceRoot)
   if projectName.len > 0:
-    let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+    let manifestsRoot = manifestsRoot(workspaceRoot)
     let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
     let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
     var resolved: ResolvedProject
@@ -9601,7 +9600,7 @@ proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
   result.exitCode = 0
 
 proc writeHooksEnsureReport(report: HooksEnsureReport) =
-  let reportDir = report.workspaceRoot / ".repo" / "workspace"
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
   createDir(reportDir)
   let reportPath = reportDir / "hooks-report.json"
   writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
@@ -17021,15 +17020,15 @@ proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
 proc resolveDevelopWorkspaceProject(
     workspaceRoot: string): ResolvedProject =
   ## M22 reuses the M9/M10 dispatch rule. Composer wins when
-  ## ``.repo/workspace.toml`` declares layers; otherwise we look up the
+  ## ``.repro/workspace.toml`` declares layers; otherwise we look up the
   ## single recorded project name (via the M13 metadata-only
   ## workspace.toml) or fall back to a single ``projects/*.toml`` if
   ## exactly one exists. A workspace with no resolvable project surfaces
   ## as a ``ValueError`` so the dispatcher exits 1 with a clear message.
-  let workspaceToml = workspaceRoot / ".repo" / "workspace.toml"
+  let workspaceToml = workspaceTomlPath(workspaceRoot)
   if isCompositionalWorkspaceToml(workspaceRoot):
     return composeManifestLayersFromFile(workspaceToml)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = manifestsRoot(workspaceRoot)
   if fileExists(workspaceToml):
     try:
       let recorded = readWorkspaceLocal(absolutePath(workspaceToml))
@@ -19024,7 +19023,7 @@ proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs):
   ## path uses the extended composer entry point so an unreachable
   ## URL-backed layer is dropped and reported back to the caller rather
   ## than aborting the whole init.
-  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let options = ComposeOptions(
       skipInaccessibleLayers: parsed.allowMissingLayers)
@@ -19038,7 +19037,7 @@ proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs):
         visibility: visibilityLabel(sl.visibility),
         diagnostic: sl.diagnostic))
     return
-  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" /
     (parsed.projectName & ".toml")
   let variantFile = manifestsRoot / "variants" /
@@ -19222,8 +19221,7 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
   ## When the workspace already has a ``.repo/manifests`` checkout (a sibling
   ## checkout or a prior bootstrap), no manifest URL is needed at all and the
   ## resolution is skipped; ``init`` reads the existing checkout directly.
-  let manifestsDir = args.workspaceRoot / ".repo" / "manifests"
-  if dirExists(manifestsDir):
+  if dirExists(args.workspaceRoot / "projects"):
     return
 
   # (1) Explicit flag wins outright — and may still pull default projects /
@@ -19259,27 +19257,27 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
 
 proc bootstrapManifestCache(args: WorkspaceInitArgs) =
   ## RA-11 bootstrap manifest cache. When ``--manifest-url`` is given and
-  ## the workspace has no ``.repo/manifests`` checkout yet, clone the
+  ## the workspace has no manifest checkout yet, clone the
   ## manifest repo into the tool-managed bootstrap cache
   ## (``resolveManifestCacheRoot`` order: ``REPRO_MANIFEST_CACHE`` →
   ## ``XDG_CACHE_HOME`` → ``%LOCALAPPDATA%`` → ``~/.cache``, all under
   ## ``reprobuild/manifests``; keyed by source URL) and materialise
-  ## ``.repo/manifests`` from it so the resolver finds
+  ## workspace manifests from it so the resolver finds
   ## ``projects/<name>.toml`` without a pre-existing sibling checkout.
   ##
   ## A private companion manifest (``--private-manifest-url``) is cloned
   ## into the PARALLEL private cache (``…/manifests-private``) and
-  ## materialised at ``.repo/manifests-private`` — a separate cache tree
+  ## materialised at ``.repro/manifests-private`` — a separate cache tree
   ## so the two never share a slug namespace.
   if args.manifestUrl.len == 0:
     return
-  let manifestsDir = args.workspaceRoot / ".repo" / "manifests"
-  if dirExists(manifestsDir):
+  let manifestsDir = args.workspaceRoot
+  if dirExists(manifestsDir / "projects"):
     # Already have a manifest checkout — bootstrap is a no-op (a sibling
     # checkout or a prior bootstrap already populated it).
     return
   let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
-  createDir(args.workspaceRoot / ".repo")
+  createDir(args.workspaceRoot / ".repro")
 
   let cacheRoot = defaultManifestCacheRoot(private = false)
   let cached = ensureManifestCache(identity.binaryPath, cacheRoot,
@@ -19294,7 +19292,7 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
   # bootstrap config requires a signature (or pins a revision), verify the
   # freshly-fetched manifest source's HEAD/pinned-tag signature against the
   # configured allowed-signers set. An unsigned / wrong-key / tampered /
-  # moved-pin source raises here, so ``.repo/manifests`` is never materialised
+  # moved-pin source raises here, so workspace manifests are never materialised
   # from an unverified source. When verification is NOT configured this is a
   # guaranteed no-op and the flow is unchanged.
   if isVerificationActive(args.verifySpec):
@@ -19315,7 +19313,7 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
     copyDir(cached.sharedBarePath, manifestsDir)
 
   if args.privateManifestUrl.len > 0:
-    let privateDir = args.workspaceRoot / ".repo" / "manifests-private"
+    let privateDir = args.workspaceRoot / ".repro" / "manifests-private"
     if not dirExists(privateDir):
       let privateCacheRoot = defaultManifestCacheRoot(private = true)
       let privCached = ensureManifestCache(identity.binaryPath,
@@ -19478,6 +19476,70 @@ proc discoverEnvrcRoots(workspaceRoot: string;
     if dirExists(abs):
       result.add(abs)
 
+proc workspaceProjectsPlaceholderContent(): string =
+  """
+No projects have been initialized in this workspace yet.
+
+Run `repro workspace init` to initialize configured defaults, or `repro workspace init <project>` to add one.
+""".strip() & "\n"
+
+proc writeGeneratedWorkspaceProjects(workspaceRoot: string) =
+  let workspaceToml = workspaceTomlPath(workspaceRoot)
+  var projectNames: seq[string] = @[]
+  if fileExists(workspaceToml):
+    try:
+      let workspaceLocal = readWorkspaceLocal(workspaceToml)
+      projectNames = workspaceLocal.workspace.projects
+      if projectNames.len == 0 and workspaceLocal.workspace.project.len > 0:
+        projectNames.add(workspaceLocal.workspace.project)
+    except CatchableError:
+      discard
+  projectNames.sort()
+
+  if projectNames.len == 0:
+    writeFile(workspaceRoot / "workspace-projects.md",
+        workspaceProjectsPlaceholderContent())
+    return
+
+  var output: seq[string] = @["# Active Workspace Projects"]
+  for projectName in projectNames:
+    let projectFile = workspaceRoot / "projects" / (projectName & ".toml")
+    output.add ""
+    output.add "## " & projectName
+
+    if not fileExists(projectFile):
+      output.add ""
+      output.add "No project description is available; the active manifest was not found on disk."
+      continue
+
+    let projectDescriptionFile = workspaceRoot / "projects" / (projectName & ".md")
+    var projectDescription = ""
+    if fileExists(projectDescriptionFile):
+      projectDescription = readFile(projectDescriptionFile).strip()
+    if projectDescription.len > 0:
+      output.add ""
+      output.add projectDescription
+
+    try:
+      let resolved = resolveProject(projectFile)
+      if resolved.repos.len > 0:
+        output.add ""
+        output.add "Repositories:"
+        for repo in resolved.repos:
+          let repoDescFile = workspaceRoot / "repos" / (repo.name & ".md")
+          var repoDesc = ""
+          if fileExists(repoDescFile):
+            repoDesc = readFile(repoDescFile).strip()
+          if repoDesc.len > 0:
+            output.add "- `" & repo.path & "` - " & repoDesc
+          else:
+            output.add "- `" & repo.path & "`"
+    except CatchableError as err:
+      output.add ""
+      output.add "Error resolving repositories: " & err.msg
+
+  writeFile(workspaceRoot / "workspace-projects.md", output.join("\n") & "\n")
+
 proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## End-to-end driver. Resolves the named project / variant, classifies
   ## each declared repo against the on-disk workspace, schedules a
@@ -19489,12 +19551,12 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # with NO hardcoded org default. The resolution is a no-op when a manifest
   # checkout already exists.
   resolveBootstrapConfig(args)
-  let manifestsDir = args.workspaceRoot / ".repo" / "manifests"
-  # A compositional ``.repo/workspace.toml`` (one or more ``[[manifest]]``
+  let manifestsDir = manifestsRoot(args.workspaceRoot) / "projects"
+  # A compositional ``.repro/workspace.toml`` (one or more ``[[manifest]]``
   # layers, M8/M25 semantics) IS the manifest configuration: the composer
   # (``resolveWorkspaceInitProject`` → ``composeManifestLayersFromFile*``)
   # clones each layer URL itself, so such a workspace has no on-disk
-  # ``.repo/manifests`` checkout and needs no ``--manifest-url``. The
+  # projects/repos files and needs no ``--manifest-url``. The
   # "no manifest configured" guard (added by the host-bootstrap-config
   # change AFTER M25) must not fire for it, or compositional init aborts
   # before the composer ever runs.
@@ -19675,7 +19737,10 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
         # — surface a structured diagnostic on stderr and continue.
         stderr.writeLine(
           "workspace init: could not record active branch: " & e.msg)
-
+    try:
+      writeGeneratedWorkspaceProjects(args.workspaceRoot)
+    except CatchableError as err:
+      stderr.writeLine("workspace init: could not generate workspace-projects.md: " & err.msg)
 proc writeWorkspaceInitReport(report: WorkspaceInitReport) =
   let reportDir = report.workspaceRoot / ".repro" / "workspace"
   createDir(reportDir)
@@ -20281,7 +20346,7 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
   ## The compositional branch also returns the parsed ``WorkspaceLocal`` so the
   ## gate / check can reuse it (active-branch derivation, manifest-layer root);
   ## the non-compositional branches return ``none`` exactly as before.
-  let workspaceToml = workspaceRoot / ".repo" / "workspace.toml"
+  let workspaceToml = workspaceTomlPath(workspaceRoot)
   if isCompositionalWorkspaceToml(workspaceRoot):
     let absToml = absolutePath(workspaceToml)
     let wl = readWorkspaceLocal(absToml)
@@ -20309,9 +20374,9 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
         discard
   if name.len == 0:
     raise newException(ValueError,
-      opLabel & " requires either `.repo/workspace.toml` or a <project> " &
+      opLabel & " requires either `.repro/workspace.toml` or a <project> " &
         "argument; neither was present at " & workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = manifestsRoot(workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (name & ".toml")
   let variantFile = manifestsRoot / "variants" / (name & ".toml")
   if fileExists(projectFile):
@@ -20326,10 +20391,10 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
 proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs): ResolvedProject =
   ## MO-9 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder
   ## (collapsed from the former per-op copies). Same dispatch rule as M9:
-  ## prefer ``.repo/workspace.toml`` when it
+  ## prefer ``.repro/workspace.toml`` when it
   ## declares at least one ``[[manifest]]`` layer (composer mode),
   ## otherwise look up the named project / variant under
-  ## ``.repo/manifests/``. A metadata-only workspace.toml (M13 — only
+  ## ``projects/``. A metadata-only workspace.toml (M13 — only
   ## carrying ``[workspace].project`` / ``[workspace].branch``) is
   ## treated as single-project mode because the composer requires
   ## manifest layers. A missing workspace.toml AND a missing project
@@ -20342,7 +20407,7 @@ proc resolveNamedProjectOrVariant(workspaceRoot, name: string): ResolvedProject 
   ## manifest layer so its repo set can scope the participating set. An
   ## unknown name is a clear, actionable error (Principle 2) naming where
   ## we looked — the spec's "unknown project name → clear error".
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = manifestsRoot(workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (name & ".toml")
   let variantFile = manifestsRoot / "variants" / (name & ".toml")
   if fileExists(projectFile):
@@ -20986,7 +21051,10 @@ proc vcsPrivateMetadataDir*(repoRoot: string; gitBin = ""): string =
         var common = res.output.strip()
         if common.len > 0:
           if not isAbsolute(common): common = root / common
-          return os.normalizedPath(absolutePath(common)) / "repro"
+          try:
+            return os.normalizedPath(expandFilename(common)) / "repro"
+          except OSError, CatchableError:
+            return os.normalizedPath(absolutePath(common)) / "repro"
     # No git on PATH: fall back to the literal .git dir when it is a real
     # directory (a non-worktree checkout). A worktree's ``.git`` is a file, so
     # this fallback is only reached for a plain checkout.
@@ -22275,7 +22343,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # equals that project's repos and the pre-RA-27 behavior is preserved.
   var resolveArgs = args
   if args.scopeProjects.len > 0:
-    let workspaceToml = args.workspaceRoot / ".repo" / "workspace.toml"
+    let workspaceToml = workspaceTomlPath(args.workspaceRoot)
     var haveBase = isCompositionalWorkspaceToml(args.workspaceRoot)
     if not haveBase and fileExists(workspaceToml):
       try:
@@ -22384,8 +22452,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # workspace genuinely needs.
   var lockedShasByPath = initTable[string, string]()
   block:
-    let manifestsRoot = args.workspaceRoot / ".repo" / "manifests"
-    if dirExists(manifestsRoot) and resolved.projectName.len > 0:
+    let manifestsRoot = args.workspaceRoot
+    if dirExists(manifestsRoot / "projects") and resolved.projectName.len > 0:
       try:
         # MO-10: route the RA-14 optimized-fetch lock read through the abstract
         # ``LockStore``. The git-checkout backend's ``latestLockShas`` delegates
@@ -22947,6 +23015,10 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   # happen). The plan is rendered to the chosen surface and we exit 0.
   if not parsed.dryRun:
     writeWorkspaceSyncReport(outcome.report)
+    try:
+      writeGeneratedWorkspaceProjects(parsed.workspaceRoot)
+    except CatchableError as err:
+      stderr.writeLine("workspace sync: could not generate workspace-projects.md: " & err.msg)
   if parsed.json:
     # RA-27 machine surface: the plan + per-repo results + summary digest as
     # one JSON document on stdout (the same shape persisted to
@@ -23579,7 +23651,7 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
   ## to single-project mode. Also returns the parsed
   ## ``WorkspaceLocal`` (when composer mode applies) so the caller can
   ## pick the anchor manifest layer for the lock destination.
-  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let absToml = absolutePath(workspaceToml)
     let workspaceLocal = readWorkspaceLocal(absToml)
@@ -23599,10 +23671,10 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
       except WorkspaceManifestParseError:
         discard
     raise newException(ValueError,
-      "`repro workspace lock` requires either `.repo/workspace.toml` " &
+      "`repro workspace lock` requires either `.repro/workspace.toml` " &
         "or a <project> argument; neither was present at " &
         parsed.workspaceRoot)
-  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" /
     (parsed.projectName & ".toml")
   let variantFile = manifestsRoot / "variants" /
@@ -23622,12 +23694,12 @@ proc pickManifestLayerRoot(parsed: WorkspaceLockArgs;
   ##   1. The explicit ``--manifest-layer-root`` flag (M16 callers,
   ##      multi-tier setups).
   ##   2. The first ``[[manifest]]`` layer in
-  ##      ``.repo/workspace.toml`` (composer mode). For ``local_path``
+  ##      ``.repro/workspace.toml`` (composer mode). For ``local_path``
   ##      layers the path is taken verbatim (relative to the
   ##      workspace root); for ``url`` layers it's the on-disk
   ##      checkout the composer materialised at
-  ##      ``<workspaceRoot>/.repo/manifests-<i>-<sanitized>``.
-  ##   3. ``<workspaceRoot>/.repo/manifests`` (single-project mode,
+  ##      ``<workspaceRoot>/.repro/manifests-<i>-<sanitized>``.
+  ##   3. ``<workspaceRoot>`` (single-project mode,
   ##      matching M9/M10's resolver dispatch).
   if parsed.manifestLayerRoot.len > 0:
     return parsed.manifestLayerRoot
@@ -23666,9 +23738,9 @@ proc pickManifestLayerRoot(parsed: WorkspaceLockArgs;
         let suffix =
           if sanitizedSegments.len > 0: sanitizedSegments
           else: "layer"
-        return parsed.workspaceRoot / ".repo" /
+        return parsed.workspaceRoot / ".repro" /
           ("manifests-0-" & suffix)
-  parsed.workspaceRoot / ".repo" / "manifests"
+  manifestsRoot(parsed.workspaceRoot)
 
 proc pickTriggerRepo(resolved: ResolvedProject;
                      explicit: string): ResolvedRepo =
@@ -24401,14 +24473,14 @@ proc toJsonNode*(report: PostCommitReport): JsonNode =
   result["exitCode"] = %report.exitCode
 
 proc resolvePostCommitWorkspaceRoot(currentRepo, workspaceRoot: string): string =
-  ## Walk up from ``--current-repo`` to find ``.repo/``. Matches the M18
+  ## Walk up from ``--current-repo`` to find ``.repro/``. Matches the M18
   ## ``parseCheckArgs`` heuristic so the dispatch wiring stays uniform.
   if workspaceRoot.len > 0:
     return absolutePath(workspaceRoot)
   if currentRepo.len > 0:
     var probe = absolutePath(currentRepo)
     while probe.len > 1:
-      if dirExists(probe / ".repo"):
+      if dirExists(probe / ".repro") or dirExists(probe / ".repo"):
         return probe
       let parent = parentDir(probe)
       if parent == probe: break
@@ -24555,14 +24627,13 @@ proc resolveWorkspaceReposForHook(workspaceRoot: string): seq[ResolvedRepo] =
   ## (always best-effort) can silently no-op.
   try:
     if isCompositionalWorkspaceToml(workspaceRoot):
-      let workspaceToml = absolutePath(
-        workspaceRoot / ".repo" / "workspace.toml")
+      let workspaceToml = absolutePath(workspaceTomlPath(workspaceRoot))
       return composeManifestLayersFromFile(workspaceToml).repos
     else:
       let projectName = detectWorkspaceProjectName(workspaceRoot)
       if projectName.len == 0:
         return @[]
-      let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+      let manifestsRoot = manifestsRoot(workspaceRoot)
       let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
       let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
       if fileExists(projectFile):
@@ -25021,12 +25092,13 @@ proc runManifestRefreshHookCommand*(hookName: string;
       parsed.currentRepo)
     return 0
 
-  if not fileExists(workspaceRoot / ".repo" / "workspace.toml"):
+  let workspaceToml = workspaceTomlPath(workspaceRoot)
+  if not fileExists(workspaceToml):
     # No workspace.toml means M6/M7 single-project mode (or a freshly-
-    # initialised .repo): nothing to refresh. Log once so the operator
+    # initialised .repro): nothing to refresh. Log once so the operator
     # can correlate; never raise.
     appendManifestRefreshLog(timestamp & " " & hookName &
-      " skipped: no .repo/workspace.toml at " & workspaceRoot)
+      " skipped: no workspace.toml at " & workspaceRoot)
     return 0
 
   var report: ManifestRefreshReport
@@ -25375,7 +25447,7 @@ proc parseCheckArgs*(args: openArray[string]): CheckArgs =
     if result.currentRepo.len > 0:
       var probe = absolutePath(result.currentRepo)
       while probe.len > 1:
-        if dirExists(probe / ".repo"):
+        if dirExists(probe / ".repro") or dirExists(probe / ".repo"):
           result.workspaceRoot = probe
           break
         let parent = parentDir(probe)
@@ -25553,8 +25625,17 @@ proc enumerateManifestLayerLocations(workspaceRoot: string;
       let url = entry.url.get()
       loc.provenance = url
       let suffix = sanitizeManifestUrlForPath(url)
-      loc.absPath = workspaceRoot / ".repo" /
+      let reproPath = workspaceRoot / ".repro" /
         ("manifests-" & $layerIdx & "-" & suffix)
+      if dirExists(reproPath):
+        loc.absPath = reproPath
+      else:
+        let repoPath = workspaceRoot / ".repo" /
+          ("manifests-" & $layerIdx & "-" & suffix)
+        if dirExists(repoPath):
+          loc.absPath = repoPath
+        else:
+          loc.absPath = reproPath
     elif hasLocal:
       let raw = entry.local_path.get()
       loc.provenance = raw
@@ -27914,10 +27995,9 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     toolProvisioning: parsed.toolProvisioning,
     dirtyScopeNames: scopeClosure)
   let manifestLayerRoot = pickManifestLayerRoot(lockArgs, workspaceLocal)
-  # MO-2 — manifest-optional gate. When the workspace has NO manifest store
-  # on disk (a committed-lock-only / manifest-less workspace, where
-  # ``pickManifestLayerRoot`` points at a ``.repo/manifests`` that does not
-  # exist), there is no manifest-repo SHA-lock to write or publish: the
+  # MO-2 — manifest-optional gate. When the workspace has NO resolved manifest
+  # checkout on disk (a committed-lock-only / manifest-less workspace), there
+  # is no manifest-repo SHA-lock to write or publish: the
   # committed ``repro.lock`` is the reproducibility artifact (validated
   # separately by the MO-1 ``validateCommittedLockAdvisory``). The
   # cleanliness / publication STAGES above already ran on the committed-lock-
@@ -27926,7 +28006,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # empty so the caller's publish step is a no-op. Manifest-present
   # workspaces always have a real ``.repo/manifests`` (or a composed layer)
   # on disk, so this never changes their behavior.
-  if not dirExists(manifestLayerRoot):
+  if workspaceLocal.isNone and not hasResolvedManifestCheckout(parsed.workspaceRoot):
     # MO-9 — the committed-lock gate consumes the unified ``LockedDependencies``
     # (populated from the committed-lock source) and verifies observed content
     # against the locked INTEGRITY: it recomputes each dependency's multihash at
@@ -29458,6 +29538,12 @@ type
     lockedRevision*: string
     lockState*: string
     manifestLayer*: string
+    stashCount*: int
+    aheadCount*: int
+    behindCount*: int
+    untrackedCount*: int
+    modifiedCount*: int
+    unmergedBranches*: seq[string]
 
   WorkspaceStatusManifestEntry* = object
     ## One per refreshed manifest layer (M10's ``refreshManifestLayers``
@@ -29523,6 +29609,14 @@ proc toJsonNode*(report: WorkspaceStatusReport): JsonNode =
     obj["lockedRevision"] = %entry.lockedRevision
     obj["lockState"] = %entry.lockState
     obj["manifestLayer"] = %entry.manifestLayer
+    obj["stashCount"] = %entry.stashCount
+    obj["aheadCount"] = %entry.aheadCount
+    obj["behindCount"] = %entry.behindCount
+    obj["untrackedCount"] = %entry.untrackedCount
+    obj["modifiedCount"] = %entry.modifiedCount
+    var unmerged = newJArray()
+    for b in entry.unmergedBranches: unmerged.add(%b)
+    obj["unmergedBranches"] = unmerged
     repos.add(obj)
   result["repos"] = repos
   var summary = newJObject()
@@ -29555,6 +29649,14 @@ proc renderStatusTextLines*(report: WorkspaceStatusReport): seq[string] =
     if entry.headSha.len > 0:
       line.add(" head=" & entry.headSha[0 ..< min(8, entry.headSha.len)])
     line.add(" lock=" & entry.lockState)
+    if entry.modifiedCount > 0 or entry.untrackedCount > 0:
+      line.add(" modified=" & $entry.modifiedCount & " untracked=" & $entry.untrackedCount)
+    if entry.stashCount > 0:
+      line.add(" stashes=" & $entry.stashCount)
+    if entry.aheadCount > 0 or entry.behindCount > 0:
+      line.add(" ahead=" & $entry.aheadCount & " behind=" & $entry.behindCount)
+    if entry.unmergedBranches.len > 0:
+      line.add(" unmerged=" & entry.unmergedBranches.join(","))
     if entry.diagnostic.len > 0:
       line.add(" (" & entry.diagnostic & ")")
     result.add(line)
@@ -29571,15 +29673,23 @@ type
     projectName: string
     json: bool
     toolProvisioning: ToolProvisioningMode
+    stashes: bool
+    files: bool
+    aheadBehind: bool
+    unmerged: bool
 
 proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
   ## ``repro workspace status`` argv parser. The single optional
   ## positional is the project name (only required when no
-  ## ``.repo/workspace.toml`` is present — same dispatch rule as
+  ## ``.repro/workspace.toml`` is present — same dispatch rule as
   ## M10's sync and M11's lock commands). Optional flags:
   ##   ``--workspace-root=PATH``
   ##   ``--tool-provisioning=path|nix|tarball|scoop``
   ##   ``--json``  — print the JSON report to stdout in place of text.
+  ##   ``--stashes`` — query/display stash count.
+  ##   ``--files`` — query/display modified/untracked file counts and clean/dirty states.
+  ##   ``--ahead-behind`` — query/display ahead/behind commit counts.
+  ##   ``--unmerged`` — query/display unmerged branches.
   result.workspaceRoot = ""
   result.toolProvisioning = tpmPathOnly
   var i = 0
@@ -29593,6 +29703,14 @@ proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
         valueFromFlag(args, i, "--tool-provisioning"))
     elif arg == "--json":
       result.json = true
+    elif arg == "--stashes":
+      result.stashes = true
+    elif arg == "--files":
+      result.files = true
+    elif arg == "--ahead-behind":
+      result.aheadBehind = true
+    elif arg == "--unmerged":
+      result.unmerged = true
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace status` flag: " & arg)
@@ -29603,6 +29721,11 @@ proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
         "unexpected positional argument to `repro workspace status`: " &
           arg)
     inc i
+  if not (result.stashes or result.files or result.aheadBehind or result.unmerged):
+    result.stashes = true
+    result.files = true
+    result.aheadBehind = true
+    result.unmerged = true
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
@@ -29782,15 +29905,28 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
       report.repos.add(entry)
       continue
 
-    let headRes = queryGitState(headShaQuery(repoAbsPath), identity)
-    let cleanRes = queryGitState(isCleanQuery(repoAbsPath), identity)
-    let pubRes = queryGitState(
-      isPublishedQuery(repoAbsPath, "origin"), identity)
-    # Build the M4 evidence triple — head-sha / is-clean / is-published —
-    # so a future caller that wants the unified record can construct it
-    # from the same observation set we use here. We do not persist the
-    # SSZ envelope inside the M12 report (the JSON view is what status
-    # needs), but the three queries are what the M4 schema folds.
+    let trunkBranch = if resolved.trunk.len > 0: resolved.trunk else: "main"
+    let extQuery = extendedStatusQuery(repoAbsPath, trunkBranch,
+      args.stashes, args.files, args.aheadBehind, args.unmerged)
+    let res = queryGitState(extQuery, identity)
+
+    # Re-create mock results for compatibility with evidence system
+    let headRes = GitQueryResult(
+      status: res.status,
+      headSha: res.headSha,
+      diagnostic: res.diagnostic
+    )
+    let cleanRes = GitQueryResult(
+      status: res.status,
+      isClean: res.isClean,
+      diagnostic: res.diagnostic
+    )
+    let pubRes = GitQueryResult(
+      status: res.status,
+      isPublished: res.isPublished,
+      diagnostic: res.diagnostic
+    )
+
     let evHeadSha = workspaceVcsEvidence.evidenceFor(
       headRes, repo.path, wvqHeadSha, toolDigest, observedAt)
     let evIsClean = workspaceVcsEvidence.evidenceFor(
@@ -29802,11 +29938,21 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
     entry.isClean = evIsClean.status == wvesResolved and evIsClean.isClean
     entry.isPublished = evIsPub.status == wvesResolved and evIsPub.isPublished
 
+    entry.stashCount = res.stashCount
+    entry.aheadCount = res.aheadCount
+    entry.behindCount = res.behindCount
+    entry.untrackedCount = res.untrackedCount
+    entry.modifiedCount = res.modifiedCount
+    entry.unmergedBranches = res.unmergedBranches
+
     var diagnostic = ""
     if evHeadSha.status == wvesFailed: diagnostic.add(evHeadSha.diagnostic)
     if evIsClean.status == wvesFailed:
       if diagnostic.len > 0: diagnostic.add("; ")
       diagnostic.add(evIsClean.diagnostic)
+    if res.diagnostic.len > 0 and res.status == gqsFailed:
+      if diagnostic.len > 0: diagnostic.add("; ")
+      diagnostic.add(res.diagnostic)
     entry.diagnostic = diagnostic
 
     let branchRes = gitRunPlain(identity,
@@ -29971,7 +30117,7 @@ proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
   ## ``[[manifest]]`` layer (composer mode), otherwise look up the
   ## named project / variant. A metadata-only workspace.toml (M13)
   ## routes to single-project mode.
-  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     return composeManifestLayersFromFile(workspaceToml)
   if parsed.projectName.len == 0:
@@ -29987,10 +30133,10 @@ proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
       except WorkspaceManifestParseError:
         discard
     raise newException(ValueError,
-      "`repro workspace list` requires either `.repo/workspace.toml` " &
+      "`repro workspace list` requires either `.repro/workspace.toml` " &
         "or a <project> argument; neither was present at " &
         parsed.workspaceRoot)
-  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" /
     (parsed.projectName & ".toml")
   let variantFile = manifestsRoot / "variants" /
@@ -30077,6 +30223,7 @@ type
     hfDirenvAllow     ## Run ``direnv allow`` on the workspace ``.envrc``.
     hfStartDaemon     ## Start the per-user store daemon.
     hfCloneSiblings   ## Clone the missing develop-mode siblings.
+    hfWorkspaceErgonomics ## Repair workspace-projects.md, gitignore, and AGENTS.md.
 
   HealthCheck* = object
     ## One diagnosed layer. ``remedy`` is the exact command the user (or
@@ -30412,6 +30559,51 @@ proc gatherHealthChecks(parsed: HealthArgs):
     detail: "certificates: advisory/off (pushes not gated)",
     remedy: "", fixKind: hfNone))
 
+  # 12. Workspace projects list and ignore/agents configuration (RA-30).
+  block workspaceProjectsCheck:
+    var ok = true
+    var details: seq[string] = @[]
+
+    let workspaceProjectsFile = parsed.workspaceRoot / "workspace-projects.md"
+    if not fileExists(workspaceProjectsFile):
+      ok = false
+      details.add("workspace-projects.md is missing")
+
+    let gitignoreFile = parsed.workspaceRoot / ".gitignore"
+    if fileExists(gitignoreFile):
+      let content = readFile(gitignoreFile)
+      if "workspace-projects.md" notin content or ".repro/" notin content:
+        ok = false
+        details.add("workspace-projects.md or .repro/ not ignored in .gitignore")
+    else:
+      ok = false
+      details.add(".gitignore is missing")
+
+    let agentsFile = parsed.workspaceRoot / "AGENTS.md"
+    if fileExists(agentsFile):
+      let content = readFile(agentsFile)
+      if "workspace-projects.md" notin content:
+        ok = false
+        details.add("workspace-projects.md not referenced in AGENTS.md")
+    else:
+      ok = false
+      details.add("AGENTS.md is missing")
+
+    if ok:
+      checks.add(HealthCheck(
+        name: "workspace-ergonomics",
+        status: hsOk,
+        detail: "workspace-projects.md generated, gitignored, and referenced in AGENTS.md",
+        remedy: "",
+        fixKind: hfNone))
+    else:
+      checks.add(HealthCheck(
+        name: "workspace-ergonomics",
+        status: hsFail,
+        detail: details.join("; "),
+        remedy: self & " health --fix",
+        fixKind: hfWorkspaceErgonomics))
+
   result = (checks: checks, ctx: ctx)
 
 proc healthHasFailure(checks: seq[HealthCheck]): bool =
@@ -30518,6 +30710,48 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
         else:
           result.add("fix: clone of " & repo.path & " failed: " &
             res.output.strip())
+    of hfWorkspaceErgonomics:
+      result.add("fix: repairing workspace ergonomics files")
+      let gitignoreFile = parsed.workspaceRoot / ".gitignore"
+      var gitignoreContent = ""
+      if fileExists(gitignoreFile):
+        gitignoreContent = readFile(gitignoreFile)
+      
+      var gitignoreModified = false
+      if ".repro/" notin gitignoreContent:
+        if gitignoreContent.len > 0 and not gitignoreContent.endsWith("\n"):
+          gitignoreContent.add("\n")
+        gitignoreContent.add("# reprobuild local workspace state\n.repro/\n")
+        gitignoreModified = true
+      if "workspace-projects.md" notin gitignoreContent:
+        if gitignoreContent.len > 0 and not gitignoreContent.endsWith("\n"):
+          gitignoreContent.add("\n")
+        gitignoreContent.add("# generated workspace project documentation\nworkspace-projects.md\n")
+        gitignoreModified = true
+      
+      if gitignoreModified:
+        writeFile(gitignoreFile, gitignoreContent)
+        result.add("fix: updated .gitignore to ignore .repro/ and workspace-projects.md")
+
+      let agentsFile = parsed.workspaceRoot / "AGENTS.md"
+      var agentsContent = ""
+      if fileExists(agentsFile):
+        agentsContent = readFile(agentsFile)
+      else:
+        agentsContent = "# Workspace\n\nThis is a multi-repo reprobuild workspace.\n"
+      
+      if "workspace-projects.md" notin agentsContent:
+        if not agentsContent.endsWith("\n"):
+          agentsContent.add("\n")
+        agentsContent.add("\nRead @workspace-projects.md for the active project set and per-repo descriptions.\n")
+        writeFile(agentsFile, agentsContent)
+        result.add("fix: updated AGENTS.md with workspace-projects.md reference")
+
+      try:
+        writeGeneratedWorkspaceProjects(parsed.workspaceRoot)
+        result.add("fix: generated workspace-projects.md")
+      except CatchableError as err:
+        result.add("fix: failed generating workspace-projects.md: " & err.msg)
 
 proc runHealthCommand*(args: openArray[string]): int =
   ## ``repro health [<project>] [--workspace-root=PATH] [--fix] [--json]``.
@@ -30696,15 +30930,20 @@ proc layerCheckoutPathFor(workspaceRoot: string; layerIdx: int;
     let suffix =
       if sanitizedSegments.len > 0: sanitizedSegments
       else: "layer"
-    return workspaceRoot / ".repo" /
+    let reproPath = workspaceRoot / ".repro" /
       ("manifests-" & $layerIdx & "-" & suffix)
+    if dirExists(reproPath): return reproPath
+    let repoPath = workspaceRoot / ".repo" /
+      ("manifests-" & $layerIdx & "-" & suffix)
+    if dirExists(repoPath): return repoPath
+    return reproPath
   ""
 
 proc executeWorkspaceManifests(args: WorkspaceManifestsArgs):
     WorkspaceManifestsReport =
   var report: WorkspaceManifestsReport
   report.workspaceRoot = args.workspaceRoot
-  let workspaceToml = args.workspaceRoot / ".repo" / "workspace.toml"
+  let workspaceToml = workspaceTomlPath(args.workspaceRoot)
   report.workspaceTomlPath = workspaceToml
   if not fileExists(workspaceToml):
     report.hasLayeredWorkspace = false
@@ -31542,7 +31781,7 @@ proc resolveBranchProject(parsed: BranchArgs):
   ## project name; we recover it from a metadata-only workspace.toml's
   ## ``[workspace].project`` field rather than asking the user to
   ## repeat it (M13's contract).
-  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let absToml = absolutePath(workspaceToml)
     let workspaceLocal = readWorkspaceLocal(absToml)
@@ -31560,10 +31799,10 @@ proc resolveBranchProject(parsed: BranchArgs):
       discard
   if projectName.len == 0:
     raise newException(ValueError,
-      "`repro branch <name>` requires either `.repo/workspace.toml` " &
+      "`repro branch <name>` requires either `.repro/workspace.toml` " &
         "or a project name recoverable from one; neither was present at " &
         parsed.workspaceRoot)
-  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
   let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
   if fileExists(projectFile):
@@ -31601,10 +31840,10 @@ proc executeBranchShow(parsed: BranchArgs): BranchReport =
   # Best-effort project name recovery for the JSON report's
   # ``project`` field. The show form never fails when no project is
   # recoverable; we just leave the field empty.
-  if fileExists(parsed.workspaceRoot / ".repo" / "workspace.toml"):
+  let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
+  if fileExists(workspaceToml):
     try:
-      let local = readWorkspaceLocal(
-        absolutePath(parsed.workspaceRoot / ".repo" / "workspace.toml"))
+      let local = readWorkspaceLocal(absolutePath(workspaceToml))
       if local.workspace.project.len > 0:
         result.project = local.workspace.project
     except WorkspaceManifestParseError:
@@ -32206,7 +32445,7 @@ proc resolveCheckoutProject(parsed: CheckoutArgs):
   ## single-project mode otherwise. The single-project path recovers
   ## the project name from a metadata-only workspace.toml's
   ## ``[workspace].project`` field (the M13 schema).
-  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let absToml = absolutePath(workspaceToml)
     let workspaceLocal = readWorkspaceLocal(absToml)
@@ -32224,10 +32463,10 @@ proc resolveCheckoutProject(parsed: CheckoutArgs):
       discard
   if projectName.len == 0:
     raise newException(ValueError,
-      "`repro checkout <branch>` requires either `.repo/workspace.toml` " &
+      "`repro checkout <branch>` requires either `.repro/workspace.toml` " &
         "or a project name recoverable from one; neither was present at " &
         parsed.workspaceRoot)
-  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
   let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
   if fileExists(projectFile):
@@ -33108,8 +33347,7 @@ proc executeAdd(parsed: AddArgs): AddReport =
     # `includes` edge so the dependency participates in the workspace.
     let remoteName = parsed.target & "-origin"
     ensureRemoteEntry(resolved.projectFile, remoteName, parsed.remoteUrl)
-    let manifestsRoot =
-      parsed.workspaceRoot / ".repo" / "manifests"
+    let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
     createDir(manifestsRoot / "repos")
     let fragmentRel = "repos/" & parsed.target & ".toml"
     let fragmentAbs = manifestsRoot / "repos" / (parsed.target & ".toml")
@@ -37385,6 +37623,13 @@ Run `repro workspace projects list` to see the active project set, and
 `repro workspace projects add <project>` to layer another project in.
 """
 
+  bootstrapGitignoreContent = """# reprobuild local workspace state
+.repro/
+
+# generated workspace project documentation
+workspace-projects.md
+"""
+
 type
   BootstrapFilePlan = object
     name: string
@@ -37398,6 +37643,7 @@ type
 proc bootstrapHostFiles(): seq[BootstrapFilePlan] =
   @[
     BootstrapFilePlan(name: ".envrc", content: bootstrapEnvrcContent),
+    BootstrapFilePlan(name: ".gitignore", content: bootstrapGitignoreContent),
     BootstrapFilePlan(name: "AGENTS.md", content: bootstrapAgentsContent),
     BootstrapFilePlan(name: "workspace-projects.md",
       content: bootstrapProjectsDocContent),
@@ -38845,9 +39091,9 @@ proc runThinApp*(programName: string): int =
           hasPositional = true
         elif not a.startsWith("-"):
           hasPositional = true
-      let cwdManifests = getCurrentDir() / ".repo" / "manifests"
+      let cwdProjects = getCurrentDir() / "projects"
       if hasPositional and not hasWorkspaceRoot and not hasManifestUrl and
-          not dirExists(cwdManifests):
+          not dirExists(cwdProjects):
         return runWorkspaceInitFromUrl(initArgs)
       return runWorkspaceInitCommand(initArgs)
     except CatchableError as err:

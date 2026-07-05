@@ -132,7 +132,7 @@ proc setupFixture(gitBin, slug: string; withManifest: bool): Fixture =
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
   if withManifest:
-    let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+    let manifestsRoot = workspaceRoot
     createDir(manifestsRoot / "projects")
     createDir(manifestsRoot / "repos")
     writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -198,7 +198,8 @@ suite "RA-30 — repro health reports each layer status with remedy":
 
       for name in ["install-version", "daemon-mode", "store", "direnv",
           "workspace", "manifest", "siblings", "vcs-host-auth",
-          "push-gateway", "toolchain", "certificate-policy"]:
+          "push-gateway", "toolchain", "certificate-policy",
+          "workspace-ergonomics"]:
         check not findCheck(report, name).isNil
 
   test "test_ra30_workspace_marker_drives_ok_vs_fail":

@@ -49,10 +49,11 @@ import reader
 # ---- path helper ----------------------------------------------------------
 
 proc developOverridesPath*(workspaceRoot: string): string =
-  ## Canonical absolute path of the develop-overrides metadata file.
-  ## ``.repro/`` (workspace-local scratch + metadata, gitignored) is
-  ## distinct from ``.repo/`` (repo-tool / workspace.toml metadata).
-  workspaceRoot / ".repro" / "develop-overrides.toml"
+  let reproPath = workspaceRoot / ".repro" / "develop-overrides.toml"
+  if fileExists(reproPath): return reproPath
+  let repoPath = workspaceRoot / ".repo" / "develop-overrides.toml"
+  if fileExists(repoPath): return repoPath
+  reproPath
 
 # ---- TOML escape helper ---------------------------------------------------
 

@@ -128,7 +128,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -201,9 +201,13 @@ suite "RA-30 — repro health --fix remediates safe issues only":
       let fx = setupFixture(gitBin, "unsafe")
       defer: removeDir(fx.scratch)
       # Strip the manifest so the workspace marker is genuinely absent.
+      removeDir(fx.workspaceRoot / "projects")
+      removeDir(fx.workspaceRoot / ".repro")
       removeDir(fx.workspaceRoot / ".repo")
+      check not dirExists(fx.workspaceRoot / "projects")
+      check not dirExists(fx.workspaceRoot / ".repro")
       check not dirExists(fx.workspaceRoot / ".repo")
-
+ 
       # Before --fix: workspace check fails (no marker).
       block before:
         let res = invokeHealth(fx, ["--json"])
@@ -212,12 +216,13 @@ suite "RA-30 — repro health --fix remediates safe issues only":
         check not ws.isNil
         check ws["status"].getStr() == "fail"
         check ws["fixable"].getBool() == false
-
+ 
       # --fix runs but must REPORT (skip) the unsafe workspace failure,
       # not perform it.
       let fixRes = invokeHealth(fx, ["--fix"])
       check "skip workspace" in fixRes.output
       # No workspace marker was fabricated.
+      check not dirExists(fx.workspaceRoot / ".repro")
       check not dirExists(fx.workspaceRoot / ".repo")
 
       # After --fix: the unsafe failure persists and exit stays non-zero.

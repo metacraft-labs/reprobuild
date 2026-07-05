@@ -65,6 +65,9 @@
 import std/[algorithm, asyncdispatch, httpclient, httpcore, net, os, parseopt,
             random, sequtils, strutils, tables, times]
 
+when defined(ssl):
+  import wrappers/openssl
+
 import ../../libs/repro_binary_cache_client/src/repro_binary_cache_client
 import ../../libs/repro_binary_cache_server/src/repro_binary_cache_server/types
 import ../../libs/repro_binary_cache_server/src/repro_binary_cache_server/key as bcsKey
@@ -254,6 +257,10 @@ proc newCacheHttpClient(url: string; timeoutMs: int): HttpClient =
   ## http (and non-ssl builds) keep the default client.
   when defined(ssl):
     if url.toLowerAscii().startsWith("https://"):
+      var openSslInitialized {.global.} = false
+      if not openSslInitialized:
+        discard SSL_library_init()
+        openSslInitialized = true
       let caFile = getEnv("REPRO_BINARY_CACHE_CA_FILE", "")
       let insecure = getEnv("REPRO_BINARY_CACHE_TLS_INSECURE", "") in
         ["1", "true", "yes"]
@@ -262,7 +269,9 @@ proc newCacheHttpClient(url: string; timeoutMs: int): HttpClient =
         elif caFile.len > 0: newContext(verifyMode = CVerifyPeer, caFile = caFile)
         else: newContext(verifyMode = CVerifyPeer)
       return newHttpClient(timeout = timeoutMs, sslContext = ctx)
-  return newHttpClient(timeout = timeoutMs)
+    return newHttpClient(timeout = timeoutMs, sslContext = nil)
+  else:
+    return newHttpClient(timeout = timeoutMs)
 
 proc defaultStoreRoot(): string =
   let envRoot = getEnv("REPRO_LOCAL_STORE", "")

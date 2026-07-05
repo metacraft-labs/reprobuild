@@ -111,7 +111,9 @@ proc build*(tool: BuildNimUnittest;
             depfile = "";
             cacheable = true;
             actionCachePolicy = defaultActionCachePolicy();
-            commandStatsId = ""): BuildNimUnittestBuildEdge {.discardable.} =
+            commandStatsId = "";
+            extraEnv: openArray[(string, string)] = []):
+    BuildNimUnittestBuildEdge {.discardable.} =
   ## M4 rewrite of the pre-M4 ``defineCliInterface buildNimUnittest`` /
   ## engine-shim pair. Records a ``PublicCliCall`` against the ``nim``
   ## profile (``executableName = "nim"``, ``subcommand = "c"``) so the
@@ -233,7 +235,8 @@ proc build*(tool: BuildNimUnittest;
     # invalidates the binary and, transitively, its execute edge. Matches the
     # ``nim.c`` app/helper edges, which already declare ``automaticMonitor``.
     dependencyPolicy = automaticMonitorPolicy(),
-    actionCachePolicy = actionCachePolicy)
+    actionCachePolicy = actionCachePolicy,
+    extraEnv = extraEnv)
 
   # Typed-Outputs M1 binding: populate ``edge.testBinary`` with a
   # ``NimUnittestBinary`` whose ``path`` is the resolved binary path so

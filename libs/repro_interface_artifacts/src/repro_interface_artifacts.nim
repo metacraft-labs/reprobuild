@@ -457,12 +457,14 @@ proc readExecutable(bytes: openArray[byte]; pos: var int): InterfaceExecutable =
   for i in 0 ..< count:
     result.commands[i] = readCommand(bytes, pos)
 
-proc writeLibrary(outp: var seq[byte]; lib: InterfaceLibrary) =
+proc writeLibrary(outp: var seq[byte]; lib: InterfaceLibrary;
+                  version = EnvelopeVersion) =
   outp.writeString(lib.name)
   outp.writeByte(byte(ord(lib.kind)))
   # v11 (SC-11): ``exportedPath`` appended AFTER ``kind`` and BEFORE
   # ``location``; v<11 readers never reach it (gated on ``version >= 11``).
-  outp.writeString(lib.exportedPath)
+  if version >= 11'u16:
+    outp.writeString(lib.exportedPath)
   outp.writeLocation(lib.location)
 
 proc readLibrary(bytes: openArray[byte]; pos: var int;
@@ -612,7 +614,8 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
       result.scoopProvisioning[i] = readScoopProvisioning(bytes, pos)
   result.location = readLocation(bytes, pos)
 
-proc encodeInterfacePayload*(value: ProjectInterface): seq[byte] =
+proc encodeInterfacePayload*(value: ProjectInterface;
+                             version = EnvelopeVersion): seq[byte] =
   ## Encodes the fingerprinted portion of the project-interface payload.
   ## ``standardBuildEligible`` is deliberately NOT serialised here so it
   ## does NOT contribute to ``interfaceFingerprint``: the flag is a
@@ -636,9 +639,10 @@ proc encodeInterfacePayload*(value: ProjectInterface): seq[byte] =
   # libraries block at all; ``decodeInterfacePayload`` gates this read
   # on ``version >= 9'u16`` so v8 on-disk artifacts load cleanly under
   # the v9 reader.
-  result.writeU32Le(uint32(value.publicLibraries.len))
-  for lib in value.publicLibraries:
-    result.writeLibrary(lib)
+  if version >= 9'u16:
+    result.writeU32Le(uint32(value.publicLibraries.len))
+    for lib in value.publicLibraries:
+      result.writeLibrary(lib, version)
   result.writeU32Le(uint32(value.toolUses.len))
   for useDef in value.toolUses:
     result.writeToolUse(useDef)
@@ -670,8 +674,12 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
   if pos != bytes.len:
     raiseEnvelopeError(eeMalformed, "trailing interface payload bytes")
 
+proc interfaceFingerprint(value: ProjectInterface;
+                          version: uint16): ContentDigest =
+  blake3DomainDigest(encodeInterfacePayload(value, version), hdMetadataEnvelope)
+
 proc interfaceFingerprint*(value: ProjectInterface): ContentDigest =
-  blake3DomainDigest(encodeInterfacePayload(value), hdMetadataEnvelope)
+  interfaceFingerprint(value, EnvelopeVersion)
 
 proc artifactFor*(value: ProjectInterface): ProjectInterfaceArtifact =
   ProjectInterfaceArtifact(
@@ -727,7 +735,7 @@ proc decodeProjectInterfaceArtifact*(bytes: openArray[
   pos += interfacePayloadLen
   result.interfaceFingerprint = readDigest(bytes, pos)
   if result.interfaceFingerprint != interfaceFingerprint(
-      result.projectInterface):
+      result.projectInterface, version):
     raiseEnvelopeError(eeMalformed, "interface fingerprint mismatch")
   if version >= 8'u16:
     result.projectInterface.standardBuildEligible =

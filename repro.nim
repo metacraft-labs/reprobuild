@@ -35,9 +35,10 @@
 ## those before invoking ``just build``; an interactive developer gets
 ## them out of the ``nix develop`` shell.
 
-import std/os  # Incremental-Test-Runner M7: getEnv + the `/` path operator
-              # for the io-mon / nim-stackable-hooks sibling resolution in the
-              # test-fixtures monitor-shim build edge below.
+import std/[os, strutils]  # Incremental-Test-Runner M7: getEnv + the `/` path
+                           # operator for the io-mon / nim-stackable-hooks
+                           # sibling resolution in the test-fixtures monitor-
+                           # shim build edge below.
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
 import repro_dsl_stdlib/types
@@ -342,14 +343,109 @@ package reprobuild:
     # The HCR tests themselves are macOS-only at runtime anyway, so
     # the gated build edge still produces a compilable binary on
     # Linux/Windows for any non-runtime CI sweep.
+    proc runtimeLibDir(envName: string; storeNeedle: string;
+                       dylibNames: seq[string]): string =
+      let fromEnv = getEnv(envName)
+      if fromEnv.len > 0:
+        return fromEnv
+      when defined(windows):
+        return ""
+      else:
+        const storeRoot = "/nix/store"
+        if not dirExists(storeRoot):
+          return ""
+        for kind, candidate in walkDir(storeRoot):
+          if kind == pcDir and extractFilename(candidate).contains(storeNeedle):
+            let libDir = candidate / "lib"
+            for dylibName in dylibNames:
+              if fileExists(libDir / dylibName):
+                return libDir
+
+    proc runtimeLibDirs(): seq[string] =
+      when defined(windows):
+        @[]
+      else:
+        let clingoLib =
+          when defined(macosx):
+            runtimeLibDir("CLINGO_LIB", "clingo-5.", @["libclingo.dylib"])
+          else:
+            runtimeLibDir("CLINGO_LIB", "clingo-5.", @["libclingo.so", "libclingo.so.5"])
+        let zstdLib =
+          when defined(macosx):
+            runtimeLibDir("ZSTD_LIB", "zstd-1.", @["libzstd.dylib", "libzstd.1.dylib"])
+          else:
+            runtimeLibDir("ZSTD_LIB", "zstd-1.", @["libzstd.so", "libzstd.so.1"])
+        for libDir in [clingoLib, zstdLib]:
+          if libDir.len > 0:
+            result.add(libDir)
+
+    proc runtimeRpathPassL(): seq[string] =
+      for libDir in runtimeLibDirs():
+        result.add("-Wl,-rpath," & libDir)
+
+    proc runtimeLibraryEnv(): seq[(string, string)] =
+      ## Some reprobuild modules import dynlib-backed bindings that Nim loads
+      ## while compiling, before the produced binary's rpaths can matter.
+      let libDirs = runtimeLibDirs()
+      if libDirs.len == 0:
+        return
+      let sep =
+        when defined(windows): ";"
+        else: ":"
+      let libPath = libDirs.join(sep)
+
+      proc withParentEnv(name: string): string =
+        let parent = getEnv(name)
+        if parent.len > 0: libPath & sep & parent else: libPath
+
+      when defined(macosx):
+        result.add(("DYLD_LIBRARY_PATH", withParentEnv("DYLD_LIBRARY_PATH")))
+        result.add(("DYLD_FALLBACK_LIBRARY_PATH",
+          withParentEnv("DYLD_FALLBACK_LIBRARY_PATH")))
+      elif defined(windows):
+        discard
+      else:
+        result.add(("LD_LIBRARY_PATH", withParentEnv("LD_LIBRARY_PATH")))
+
+    let appRuntimePassL = runtimeRpathPassL()
+    let appRuntimeEnv = runtimeLibraryEnv()
+
+    proc sourceOnlyPackagePath(envName: string; storeNeedle: string;
+                               marker: string): string =
+      ## Graph-built Nim binaries do not load this checkout's config.nims.
+      ## Source-only package roots such as nim-bearssl therefore have to be
+      ## threaded explicitly onto each graph compile edge.
+      let fromEnv = getEnv(envName)
+      if fromEnv.len > 0 and fileExists(fromEnv / marker):
+        return fromEnv
+      when defined(windows):
+        return ""
+      else:
+        const storeRoot = "/nix/store"
+        if not dirExists(storeRoot):
+          return ""
+        for kind, candidate in walkDir(storeRoot):
+          if kind == pcDir and extractFilename(candidate).contains(storeNeedle) and
+              fileExists(candidate / marker):
+            return candidate
+
+    var sourceOnlyPackagePaths: seq[string] = @[]
+    let bearsslSrc = sourceOnlyPackagePath("BEARSSL_SRC", "nim-bearssl",
+      "bearssl.nim")
+    if bearsslSrc.len > 0:
+      sourceOnlyPackagePaths.add(bearsslSrc)
+
     const hostIsMacos = defined(macosx)
     for spec in reprobuildTestSpecs:
       let edge = buildNimUnittest.build(
         source = spec.source,
         binary = spec.binary,
+        paths = sourceOnlyPackagePaths,
         defines = spec.defines,
         extraPassC = (when hostIsMacos: spec.extraPassC else: @[]),
-        extraPassL = (when hostIsMacos: spec.extraPassL else: @[]))
+        extraPassL = appRuntimePassL &
+          (when hostIsMacos: spec.extraPassL else: @[]),
+        extraEnv = appRuntimeEnv)
       reprobuildTestBuildActions.add(edge.action)
       # B3: emit the EXECUTE edge.
       #
@@ -466,26 +562,41 @@ package reprobuild:
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro/repro.nim",
       binary = "build/bin/repro",
+      paths = sourceOnlyPackagePaths,
+      passL = appRuntimePassL,
+      extraEnv = appRuntimeEnv,
       actionId = "reprobuild.apps.repro"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim",
       binary = "build/bin/repro-peer-cache-tier2",
+      paths = sourceOnlyPackagePaths,
+      passL = appRuntimePassL,
+      extraEnv = appRuntimeEnv,
       actionId = "reprobuild.apps.repro-peer-cache-tier2"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-peer-cache-admin/repro_peer_cache_admin.nim",
       binary = "build/bin/repro-peer-cache-admin",
+      paths = sourceOnlyPackagePaths,
+      passL = appRuntimePassL,
+      extraEnv = appRuntimeEnv,
       actionId = "reprobuild.apps.repro-peer-cache-admin"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-peer-cache-mint-cert/repro_peer_cache_mint_cert.nim",
       binary = "build/bin/repro-peer-cache-mint-cert",
+      paths = sourceOnlyPackagePaths,
+      passL = appRuntimePassL,
+      extraEnv = appRuntimeEnv,
       actionId = "reprobuild.apps.repro-peer-cache-mint-cert"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-cmake-dyndep-fragment/repro_cmake_dyndep_fragment.nim",
       binary = "build/bin/repro-cmake-dyndep-fragment",
+      paths = sourceOnlyPackagePaths,
+      passL = appRuntimePassL,
+      extraEnv = appRuntimeEnv,
       actionId = "reprobuild.apps.repro-cmake-dyndep-fragment"))
 
     # Provider-mode entries carry ``-d:reproProviderMode`` per the
@@ -494,12 +605,18 @@ package reprobuild:
       source = "apps/repro-cmake-trycompile-provider/repro_cmake_trycompile_provider.nim",
       binary = "build/bin/repro-cmake-trycompile-provider",
       defines = @["reproProviderMode"],
+      paths = sourceOnlyPackagePaths,
+      passL = appRuntimePassL,
+      extraEnv = appRuntimeEnv,
       actionId = "reprobuild.apps.repro-cmake-trycompile-provider"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-standard-provider/repro_standard_provider.nim",
       binary = "build/bin/repro-standard-provider",
       defines = @["reproProviderMode"],
+      paths = sourceOnlyPackagePaths,
+      passL = appRuntimePassL,
+      extraEnv = appRuntimeEnv,
       actionId = "reprobuild.apps.repro-standard-provider"))
 
     discard collect("apps", reprobuildAppsActions)
@@ -533,16 +650,22 @@ package reprobuild:
     reprobuildTestHelpersActions.add(nim.c(
       source = "tests/fixtures/local-daemons-control-plane/live-endpoint-helper/live_endpoint_helper.nim",
       binary = "build/test-bin/live_endpoint_helper",
+      paths = sourceOnlyPackagePaths,
+      extraEnv = appRuntimeEnv,
       actionId = "reprobuild.test_helpers.live_endpoint_helper"))
 
     reprobuildTestHelpersActions.add(nim.c(
       source = "tests/fixtures/local-daemons-control-plane/fake-protocol-daemon-helper/fake_protocol_daemon_helper.nim",
       binary = "build/test-bin/fake_protocol_daemon_helper",
+      paths = sourceOnlyPackagePaths,
+      extraEnv = appRuntimeEnv,
       actionId = "reprobuild.test_helpers.fake_protocol_daemon_helper"))
 
     reprobuildTestHelpersActions.add(nim.c(
       source = "tests/e2e/home-generations/harness_apply_lock_holder.nim",
       binary = "build/test-bin/harness_apply_lock_holder",
+      paths = sourceOnlyPackagePaths,
+      extraEnv = appRuntimeEnv,
       actionId = "reprobuild.test_helpers.harness_apply_lock_holder"))
 
     # Binary-cache integration-test subprocess helpers (A2/A2.5/A3/A4).
@@ -564,12 +687,30 @@ package reprobuild:
     reprobuildTestHelpersActions.add(nim.c(
       source = "apps/repro-binary-cache/repro_binary_cache.nim",
       binary = "build/test-bin/repro_binary_cache",
+      nimcache = "build/nimcache/test-helper-repro-binary-cache",
+      paths = sourceOnlyPackagePaths,
+      passL = appRuntimePassL,
+      extraEnv = appRuntimeEnv,
       actionId = "reprobuild.test_helpers.repro_binary_cache"))
+
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "apps/repro-binary-cache/repro_binary_cache.nim",
+      binary = "build/test-bin/repro_binary_cache_m6",
+      defines = @["ssl"],
+      nimcache = "build/nimcache/test-helper-repro-binary-cache-m6",
+      paths = sourceOnlyPackagePaths,
+      passL = appRuntimePassL,
+      extraEnv = appRuntimeEnv,
+      actionId = "reprobuild.test_helpers.repro_binary_cache_m6"))
 
     reprobuildTestHelpersActions.add(nim.c(
       source = "apps/repro-binary-cache-client/repro_binary_cache_client_cli.nim",
       binary = "build/test-bin/repro_binary_cache_client_cli",
       defines = @["ssl"],
+      nimcache = "build/nimcache/test-helper-repro-binary-cache-client-cli",
+      paths = sourceOnlyPackagePaths,
+      passL = appRuntimePassL,
+      extraEnv = appRuntimeEnv,
       actionId = "reprobuild.test_helpers.repro_binary_cache_client_cli"))
 
     discard collect("test-helpers", reprobuildTestHelpersActions)

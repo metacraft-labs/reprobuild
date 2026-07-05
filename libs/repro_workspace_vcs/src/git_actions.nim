@@ -128,6 +128,7 @@ type
     gqkHeadSha
     gqkIsClean
     gqkIsPublished
+    gqkExtendedStatus
 
   GitQueryAction* = object
     ## Observation-only descriptor for the read-only query operations
@@ -137,6 +138,11 @@ type
     kind*: GitQueryKind
     repoPath*: string
     remoteName*: string
+    trunkBranch*: string
+    queryStashes*: bool
+    queryFiles*: bool
+    queryAheadBehind*: bool
+    queryUnmerged*: bool
 
   GitQueryStatus* = enum
     gqsOk
@@ -148,6 +154,13 @@ type
     isClean*: bool
     isPublished*: bool
     diagnostic*: string
+    stashCount*: int
+    aheadCount*: int
+    behindCount*: int
+    untrackedCount*: int
+    modifiedCount*: int
+    unmergedBranches*: seq[string]
+
 
 const PayloadVersion* = "reprobuild.workspace-vcs.payload.v1"
   ## First-line magic of a git-flavored payload encoded into
@@ -1140,6 +1153,13 @@ proc isPublishedQuery*(repoPath, remoteName: string): GitQueryAction =
   GitQueryAction(kind: gqkIsPublished, repoPath: repoPath,
     remoteName: remoteName)
 
+proc extendedStatusQuery*(repoPath, trunkBranch: string;
+                          queryStashes, queryFiles, queryAheadBehind, queryUnmerged: bool): GitQueryAction =
+  GitQueryAction(kind: gqkExtendedStatus, repoPath: repoPath,
+    remoteName: "origin", trunkBranch: trunkBranch,
+    queryStashes: queryStashes, queryFiles: queryFiles,
+    queryAheadBehind: queryAheadBehind, queryUnmerged: queryUnmerged)
+
 proc queryGitState*(query: GitQueryAction;
                     identity: GitToolIdentity): GitQueryResult =
   ## Execute a read-only VCS query against the identity-bound git
@@ -1174,3 +1194,99 @@ proc queryGitState*(query: GitQueryAction;
     else:
       result = GitQueryResult(status: gqsFailed,
         diagnostic: res.diagnostic)
+  of gqkExtendedStatus:
+    var headSha = ""
+    var isClean = true
+    var isPublished = true
+    var stashCount = 0
+    var aheadCount = 0
+    var behindCount = 0
+    var untrackedCount = 0
+    var modifiedCount = 0
+    var unmergedBranches: seq[string] = @[]
+    var diagnostic = ""
+
+    # 1. HEAD SHA
+    let headRes = resolveHeadSha(payload, query.repoPath)
+    if headRes.ok:
+      headSha = headRes.sha
+    else:
+      diagnostic.add("failed to resolve HEAD SHA: " & headRes.diagnostic)
+
+    # 2. File Status
+    if query.queryFiles:
+      let statusRes = runGit(payload, ["-C", query.repoPath, "status", "--porcelain"])
+      if statusRes.exitCode == 0:
+        isClean = true
+        for line in statusRes.output.splitLines():
+          let stripped = line.strip()
+          if stripped.len == 0: continue
+          isClean = false
+          if stripped.startsWith("??"):
+            inc untrackedCount
+          else:
+            inc modifiedCount
+      else:
+        diagnostic.add("; git status failed: " & statusRes.output.trimmed)
+    else:
+      # If files aren't queried, fall back to simple clean check
+      let cleanRes = workingTreeIsClean(payload, query.repoPath)
+      if cleanRes.ok:
+        isClean = cleanRes.clean
+      else:
+        diagnostic.add("; clean check failed: " & cleanRes.diagnostic)
+
+    # 3. Published Check
+    let pubRes = remoteBranchContainsHead(payload, query.repoPath, query.remoteName)
+    if pubRes.ok:
+      isPublished = pubRes.published
+    else:
+      diagnostic.add("; published check failed: " & pubRes.diagnostic)
+
+    # 4. Stashes
+    if query.queryStashes:
+      let stashRes = runGit(payload, ["-C", query.repoPath, "stash", "list"])
+      if stashRes.exitCode == 0:
+        for line in stashRes.output.splitLines():
+          if line.strip().len > 0:
+            inc stashCount
+
+    # 5. Ahead / Behind
+    if query.queryAheadBehind:
+      let upstreamRes = runGit(payload, ["-C", query.repoPath, "rev-parse", "--abbrev-ref", "@{u}"])
+      if upstreamRes.exitCode == 0:
+        let upstream = upstreamRes.output.strip()
+        let revListRes = runGit(payload, ["-C", query.repoPath, "rev-list", "--count", "--left-right", upstream & "...HEAD"])
+        if revListRes.exitCode == 0:
+          try:
+            let parts = revListRes.output.strip().splitWhitespace()
+            if parts.len >= 2:
+              behindCount = parseInt(parts[0])
+              aheadCount = parseInt(parts[1])
+          except CatchableError:
+            discard
+
+    # 6. Unmerged Branches
+    if query.queryUnmerged:
+      let trunkBranch = if query.trunkBranch.len > 0: query.trunkBranch else: "main"
+      let unmergedRes = runGit(payload, ["-C", query.repoPath, "branch", "--no-merged", trunkBranch])
+      if unmergedRes.exitCode == 0:
+        for rawLine in unmergedRes.output.splitLines():
+          let line = rawLine.strip().replace("* ", "").strip()
+          if line.len > 0 and not line.startsWith("(") and line != trunkBranch:
+            unmergedBranches.add(line)
+
+    result = GitQueryResult(
+      status: if diagnostic.len == 0: gqsOk else: gqsFailed,
+      headSha: headSha,
+      isClean: isClean,
+      isPublished: isPublished,
+      diagnostic: if diagnostic.startsWith("; "): diagnostic[2..^1] else: diagnostic,
+      stashCount: stashCount,
+      aheadCount: aheadCount,
+      behindCount: behindCount,
+      untrackedCount: untrackedCount,
+      modifiedCount: modifiedCount,
+      unmergedBranches: unmergedBranches
+    )
+
