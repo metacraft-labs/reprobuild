@@ -5,7 +5,8 @@
 ## the store-registered relative path, hashed reads resolve through the
 ## sidecar, and legacy mode continues to use the mutable mirror path.
 
-import std/[algorithm, envvars, os, strutils, tempfiles, unittest]
+import std/[algorithm, envvars, os, osproc, streams, strutils, tempfiles,
+  unittest]
 
 import repro_local_store
 import repro_project_dsl/install_mirror_resolver
@@ -27,6 +28,26 @@ template withEnv(name, value: string; body: untyped) =
         putEnv(name, oldValue)
       else:
         delEnv(name)
+
+template withoutEnv(name: string; body: untyped) =
+  block:
+    let oldSet = existsEnv(name)
+    let oldValue = getEnv(name)
+    delEnv(name)
+    try:
+      body
+    finally:
+      if oldSet:
+        putEnv(name, oldValue)
+      else:
+        delEnv(name)
+
+proc runBashScript(scriptPath: string): tuple[exitCode: int; output: string] =
+  let process = startProcess("bash", args = @["-e", scriptPath],
+    options = {poUsePath, poStdErrToStdOut})
+  result.output = process.outputStream.readAll()
+  result.exitCode = process.waitForExit()
+  process.close()
 
 proc addWritePermissions(path: string) =
   if not fileExists(path) and not dirExists(path):
@@ -194,6 +215,25 @@ suite "M9.R.83 install-mirror store publication":
     check info.storeRelativePath == ""
     check hashedDepMirrorRoot(recipesRoot, "tiny") == ""
 
+  test "empty legacy sidecar is not hashed resolver metadata":
+    let scratch = createTempDir("m9r83-empty-sidecar-", "")
+    defer: removeScratch(scratch)
+    let recipesRoot = scratch / "recipes"
+    let sidecar = realizationInfoPath(recipesRoot, "tiny")
+    createDir(parentDir(sidecar))
+    writeFile(sidecar, "")
+
+    let info = readRealizationInfoFile(recipesRoot, "tiny")
+    check info.version.len == 0
+    check info.realizationHashHex.len == 0
+    check info.storeRelativePath.len == 0
+    check hashedDepMirrorRoot(recipesRoot, "tiny") == ""
+
+    let legacyRoot = (recipesRoot / "tiny" / ".repro" / "output" /
+      "install").replace("\\", "/")
+    withEnv(InstallMirrorModeEnvVar, "hashed"):
+      check packageInstallMirrorRoot(recipesRoot, "tiny") == legacyRoot
+
   test "CLI wrapper publishes and resolves through the sidecar":
     let scratch = createTempDir("m9r83-cli-", "")
     defer: removeScratch(scratch)
@@ -219,6 +259,36 @@ suite "M9.R.83 install-mirror store publication":
   test "emitted publish snippet is runtime-gated":
     let snippet = emitInstallMirrorStorePublish("/recipes", "pkg", "1.0",
       "/recipes/pkg/.repro/output/install")
+    let sidecar = realizationInfoPath("/recipes", "pkg")
     check InstallMirrorPublishToolName in snippet
     check "REPRO_INSTALL_MIRROR_MODE" in snippet
     check "hashed-with-legacy-fallback" in snippet
+    check "--source \"/recipes/pkg/.repro/output/install\"" in snippet
+    check "*) mkdir -p \"/recipes/pkg/.repro/output\"; : > \"" &
+      sidecar & "\"; ;; esac" in snippet
+
+  test "emitted default legacy snippet satisfies sidecar output only":
+    let scratch = createTempDir("m9r84-legacy-sidecar-", "")
+    defer: removeScratch(scratch)
+    let recipesRoot = scratch / "recipes"
+    let sourceRoot = recipesRoot / "legacy-tiny" / ".repro" / "output" /
+      "install"
+    let sidecar = realizationInfoPath(recipesRoot, "legacy-tiny")
+    let scriptPath = scratch / "publish-legacy.sh"
+    writeTinyMirror(sourceRoot)
+
+    writeFile(scriptPath, emitInstallMirrorStorePublish(recipesRoot,
+      "legacy-tiny", "1.0.0", sourceRoot))
+    withoutEnv(InstallMirrorModeEnvVar):
+      let run = runBashScript(scriptPath)
+      check run.exitCode == 0
+      checkpoint run.output
+
+    check fileExists(sidecar)
+    check getFileSize(sidecar) == 0
+    let info = readRealizationInfoFile(recipesRoot, "legacy-tiny")
+    check info.version == ""
+    check info.realizationHashHex == ""
+    check info.storeRelativePath == ""
+    withEnv(InstallMirrorModeEnvVar, "hashed"):
+      check hashedDepMirrorRoot(recipesRoot, "legacy-tiny") == ""

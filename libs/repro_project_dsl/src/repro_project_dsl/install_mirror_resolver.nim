@@ -351,6 +351,8 @@ proc emitInstallMirrorStorePublish*(recipesRoot, depName, version,
   if recipesRoot.len == 0 or depName.len == 0 or version.len == 0 or
       sourceDir.len == 0:
     return ""
+  let sidecarPath = realizationInfoPath(recipesRoot, depName)
+  let sidecarParent = parentDir(sidecarPath)
   result.add("case \"${")
   result.add(InstallMirrorModeEnvVar)
   result.add(":-legacy}\" in hashed|hashed-with-legacy-fallback) ")
@@ -363,7 +365,11 @@ proc emitInstallMirrorStorePublish*(recipesRoot, depName, version,
   result.add(shellDoubleQuote(version))
   result.add(" --source ")
   result.add(shellDoubleQuote(sourceDir))
-  result.add(" >/dev/null; ;; esac; ")
+  result.add(" >/dev/null; ;; *) mkdir -p ")
+  result.add(shellDoubleQuote(sidecarParent))
+  result.add("; : > ")
+  result.add(shellDoubleQuote(sidecarPath))
+  result.add("; ;; esac; ")
 
 proc emitInstallMirrorReadOnlyEnforcement*(mirrorRoot: string;
                                             mode = currentInstallMirrorMode()):

@@ -95,6 +95,8 @@ suite "M9.R.83 install mirror emitted action shape":
       check "--version \"2.4.6\"" in script
       check "--source \"" & (projectRoot / ".repro" / "output" /
         "install").replace("\\", "/") & "\"" in script
+      check "*) mkdir -p \"" & parentDir(sidecar).replace("\\", "/") &
+        "\"; : > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
     else:
       check true
 
@@ -144,5 +146,7 @@ suite "M9.R.83 install mirror emitted action shape":
       check InstallMirrorModeEnvVar in script
       check "hashed|hashed-with-legacy-fallback" in script
       check "--version \"8.3.0\"" in script
+      check "*) mkdir -p \"" & parentDir(sidecar).replace("\\", "/") &
+        "\"; : > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
     else:
       check true
