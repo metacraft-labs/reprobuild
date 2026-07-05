@@ -265,13 +265,12 @@ esac
 # then PATH -- and only env.ps1 puts the conda-forge clingo bin dir on
 # PATH.
 #
-# Source resolution policy (no hardcoded ``D:\metacraft-dev-deps`` --
-# the env.ps1 install root is not the canonical store): locate the
-# clingo.exe sibling on PATH at build time (``command -v clingo.exe``
-# works under MSYS / Git Bash, and env.ps1 always co-locates
-# clingo.exe with clingo.dll per the conda-forge layout). The
-# ``windows/ensure-clingo.ps1`` provisioner downloads the same conda
-# package on every install, so the DLL bytes are stable across hosts.
+# Source resolution policy: prefer the clingo.exe sibling on PATH at build
+# time, then fall back to explicit install roots that env.ps1 exposes. CI can
+# run this script through bash with a PATH that does not see PowerShell's
+# freshly prepended clingo dir, but env.ps1 still exports
+# WINDOWS_DIY_INSTALL_ROOT and the provisioner always installs clingo.dll under
+# clingo/<version>/bin.
 #
 # When clingo.exe is not on PATH (e.g. a non-env.ps1 dev shell on a
 # host that has never run the bootstrap), we surface a warning rather
@@ -283,18 +282,74 @@ esac
 # clean-shell sweep.
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    append_clingo_candidate_dir() {
+      local candidate="${1:-}"
+      candidate="${candidate//\\//}"
+      if add_unique_lib_dir "${candidate}" \
+          "${clingo_candidate_dirs[@]+"${clingo_candidate_dirs[@]}"}"; then
+        clingo_candidate_dirs+=("${candidate}")
+      fi
+    }
+
+    clingo_candidate_dirs=()
     clingo_exe="$(command -v clingo.exe 2>/dev/null || true)"
     if [ -n "${clingo_exe}" ]; then
-      clingo_src_dir="$(dirname "${clingo_exe}")"
-      clingo_src_dll="${clingo_src_dir}/clingo.dll"
-      if [ -f "${clingo_src_dll}" ]; then
-        cp -f "${clingo_src_dll}" build/bin/clingo.dll
-        echo "Staged clingo.dll from ${clingo_src_dll} -> build/bin/clingo.dll"
-      else
-        echo "warning: clingo.exe on PATH but sibling clingo.dll missing at ${clingo_src_dll}; repro.exe will fail to load in a clean shell" >&2
+      append_clingo_candidate_dir "$(dirname "${clingo_exe}")"
+    fi
+
+    if [ -n "${CLINGO_PREFIX:-}" ]; then
+      append_clingo_candidate_dir "${CLINGO_PREFIX}"
+      append_clingo_candidate_dir "${CLINGO_PREFIX}/bin"
+    fi
+
+    clingo_versions=()
+    if [ -n "${CLINGO_VERSION:-}" ]; then
+      clingo_versions+=("${CLINGO_VERSION}")
+    fi
+    if [ -f "../windows/toolchain-versions.env" ]; then
+      while IFS='=' read -r key value; do
+        if [ "${key}" = "CLINGO_VERSION" ]; then
+          value="${value%%#*}"
+          value="${value//$'\r'/}"
+          value="${value//[[:space:]]/}"
+          if [ -n "${value}" ]; then
+            clingo_versions+=("${value}")
+          fi
+        fi
+      done < "../windows/toolchain-versions.env"
+    fi
+    if [ "${#clingo_versions[@]}" -eq 0 ]; then
+      clingo_versions+=("5.8.0")
+    fi
+
+    windows_diy_root="${WINDOWS_DIY_INSTALL_ROOT:-}"
+    if [ -z "${windows_diy_root}" ]; then
+      if [ -d "D:/metacraft-dev-deps" ]; then
+        windows_diy_root="D:/metacraft-dev-deps"
+      elif [ -d "/d/metacraft-dev-deps" ]; then
+        windows_diy_root="/d/metacraft-dev-deps"
       fi
+    fi
+    if [ -n "${windows_diy_root}" ]; then
+      for version in "${clingo_versions[@]}"; do
+        append_clingo_candidate_dir "${windows_diy_root}/clingo/${version}/bin"
+      done
+    fi
+
+    clingo_src_dll=""
+    for clingo_src_dir in "${clingo_candidate_dirs[@]}"; do
+      clingo_candidate_dll="${clingo_src_dir}/clingo.dll"
+      if [ -f "${clingo_candidate_dll}" ]; then
+        clingo_src_dll="${clingo_candidate_dll}"
+        break
+      fi
+    done
+
+    if [ -n "${clingo_src_dll}" ]; then
+      cp -f "${clingo_src_dll}" build/bin/clingo.dll
+      echo "Staged clingo.dll from ${clingo_src_dll} -> build/bin/clingo.dll"
     else
-      echo "warning: clingo.exe not on PATH; cannot stage clingo.dll next to repro.exe -- run env.ps1 or windows/ensure-clingo.ps1 first" >&2
+      echo "warning: clingo.dll not found in PATH/CLINGO_PREFIX/WINDOWS_DIY_INSTALL_ROOT candidates; repro.exe will fail to load in a clean shell" >&2
     fi
     ;;
 esac

@@ -90,6 +90,7 @@ import repro_dsl_stdlib/packages/nim
 import repro_dsl_stdlib/packages/ninja
 import repro_dsl_stdlib/packages/node
 import repro_dsl_stdlib/packages/python3
+import repro_dsl_stdlib/packages/python_dev
 
 type
   CatalogUnderTest = object
@@ -213,3 +214,17 @@ suite "M68 — baseline dev-tool catalog validates":
         check x64.binary.sha256.len == 64
         check x64.binary.archive_format_override == afTarXz
         check "bin/nim" in x64.binary.bin_relpath_override
+
+  test "python standalone tarball entries declare real executable files":
+    ## python-build-standalone ships python/bin/python3 as a symlink to
+    ## python3.12. The tarball adapter rejects executable paths that traverse
+    ## symlinks, so the stdlib declarations must name the real file.
+    var checked = 0
+    for pkg in registeredPackages():
+      if pkg.packageName notin ["python3", "python-dev"]:
+        continue
+      for tb in pkg.tarballProvisioning:
+        if tb.os in ["linux", "macos", "darwin"]:
+          inc checked
+          check tb.executablePath == "python/bin/python3.12"
+    check checked == 4

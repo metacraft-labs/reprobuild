@@ -50,26 +50,29 @@ package `python-dev`:
       lockIdentity = "tarball:python-dev@3.12.13+20260610:sha256:f5e4d9f856567493776f3d1e832c939fbaba5dcbcc5e0492a82ecfceea83b316"
     # Linux x86_64: same astral-sh/python-build-standalone install_only
     # tarball pinned to the same (3.12.13, build 20260610) pair. Ships
-    # ``python/bin/python3`` plus the full Lib/ + include/ tree the PyO3
+    # ``python/bin/python3.12`` plus the full Lib/ + include/ tree the PyO3
     # link step needs (the Linux variant uses the standard POSIX layout
-    # under `python/bin/` rather than the Windows `python/` root).
+    # under `python/bin/` rather than the Windows `python/` root). The
+    # archive also ships ``python3`` as a symlink, but tarball realization
+    # rejects declared executable paths that traverse symlinks.
     tarball url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13+20260610-x86_64-unknown-linux-gnu-install_only.tar.gz",
       sha256 = "c218f50baeb2c06a30c2f03db5986b2bad6ab7c8a52faad2d5a59bda0677b93a",
       archiveType = "tar.gz",
-      executablePath = "python/bin/python3",
+      executablePath = "python/bin/python3.12",
       packageId = "python-dev@3.12.13+20260610",
       cpu = "x86_64",
       os = "linux",
       lockIdentity = "tarball:python-dev@3.12.13+20260610:linux:sha256:c218f50baeb2c06a30c2f03db5986b2bad6ab7c8a52faad2d5a59bda0677b93a"
     # macOS aarch64: same astral-sh/python-build-standalone install_only
     # tarball pinned to the same (3.12.13, build 20260610) pair — native
-    # Apple Silicon build. Ships ``python/bin/python3`` plus the full
+    # Apple Silicon build. Ships ``python/bin/python3.12`` plus the full
     # Lib/ + include/ tree the PyO3 link step needs (POSIX layout under
-    # `python/bin/`, matching the Linux entry).
+    # `python/bin/`, matching the Linux entry). The ``python3`` path is a
+    # symlink and is not a valid declared executable for the tarball adapter.
     tarball url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13+20260610-aarch64-apple-darwin-install_only.tar.gz",
       sha256 = "e18ddd4c1e8f4a1d6c4590b37f423d76aec734447edc20ed08e93983d95f2132",
       archiveType = "tar.gz",
-      executablePath = "python/bin/python3",
+      executablePath = "python/bin/python3.12",
       packageId = "python-dev@3.12.13+20260610",
       cpu = "aarch64",
       os = "macos",

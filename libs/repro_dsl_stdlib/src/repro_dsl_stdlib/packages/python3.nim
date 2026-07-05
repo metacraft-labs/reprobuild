@@ -73,12 +73,13 @@ package python3:
     # equivalent of the Windows python-X.Y.Z-embed-amd64.zip. Use the
     # astral-sh/python-build-standalone install_only tarball as the
     # Linux counterpart — same source `python_dev.nim` consumes; ships
-    # `python/bin/python3` plus the full Lib/ tree under a top-level
-    # `python/` directory.
+    # `python/bin/python3.12` plus the full Lib/ tree under a top-level
+    # `python/` directory. The `python3` path is a symlink; tarball
+    # realization rejects symlink-traversing executable declarations.
     tarball url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13+20260610-x86_64-unknown-linux-gnu-install_only.tar.gz",
       sha256 = "c218f50baeb2c06a30c2f03db5986b2bad6ab7c8a52faad2d5a59bda0677b93a",
       archiveType = "tar.gz",
-      executablePath = "python/bin/python3",
+      executablePath = "python/bin/python3.12",
       packageId = "python@3.12.13+20260610",
       cpu = "x86_64",
       os = "linux",
@@ -86,12 +87,13 @@ package python3:
     # macOS aarch64: same astral-sh/python-build-standalone install_only
     # tarball as the Linux entry (and the one `python_dev.nim` consumes
     # for its macOS aarch64 slice) — native Apple Silicon build. Ships
-    # `python/bin/python3` plus the full Lib/ tree under a top-level
-    # `python/` directory.
+    # `python/bin/python3.12` plus the full Lib/ tree under a top-level
+    # `python/` directory. The `python3` path is a symlink; tarball
+    # realization rejects symlink-traversing executable declarations.
     tarball url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13+20260610-aarch64-apple-darwin-install_only.tar.gz",
       sha256 = "e18ddd4c1e8f4a1d6c4590b37f423d76aec734447edc20ed08e93983d95f2132",
       archiveType = "tar.gz",
-      executablePath = "python/bin/python3",
+      executablePath = "python/bin/python3.12",
       packageId = "python@3.12.13+20260610",
       cpu = "aarch64",
       os = "macos",
