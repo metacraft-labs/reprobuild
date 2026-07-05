@@ -10,7 +10,7 @@
 ## first with two libraries, pango was the second with two libraries),
 ## and the FIRST to ship four artifacts under one ``package`` macro.
 ##
-## Coverage (10 check assertions across 8 tests):
+## Coverage:
 ##
 ##   * ``fetch:`` block round-trip (M9.H) — URL + sha256 length +
 ##     algorithm + kind discriminant + extractStrip.
@@ -23,7 +23,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[strutils, unittest]
 
 import repro_project_dsl
 
@@ -38,15 +38,35 @@ const ExpectedUrl =
 const ExpectedHash =
   "05c2031f9bdf6b5aba7a06ca84f0b4aced28b19bf1b50c6ab25cc675277cbc3f"
 
-const ExpectedMesonOptions = @[
-  "-Dtests=false",
-  "-Ddocumentation=false",
-  "-Dman-pages=disabled",
-  "-Dintrospection=disabled",
-  "-Dnls=disabled",
-  "-Dxattr=false",
-  "--buildtype=release",
+const ExpectedMesonConfigureOptions = @[
+  "tests=false",
+  "documentation=false",
+  "man-pages=disabled",
+  "introspection=disabled",
+  "nls=disabled",
+  "xattr=false",
+  "sysprof=disabled",
+  "wrap_mode=nofallback",
 ]
+
+proc argByName(action: BuildActionDef; name: string): PublicCliArg =
+  for arg in action.call.arguments:
+    if arg.name == name:
+      return arg
+  raise newException(ValueError, "no argument named '" & name & "'")
+
+proc encodedValues(arg: PublicCliArg): seq[string] =
+  if arg.encodedValue.len == 0:
+    return @[]
+  arg.encodedValue.split("\x1f")
+
+proc findMesonSetupAction(): BuildActionDef =
+  for action in registeredBuildActions():
+    if action.call.packageName == "meson" and
+        action.call.executableName == "mesonBin" and
+        action.call.subcommand == "setup":
+      return action
+  raise newException(ValueError, "meson setup action not found")
 
 suite "glib2Source — from-source recipe smoke test":
 
@@ -74,11 +94,32 @@ suite "glib2Source — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "mesonOptions registers the exact production flag sequence":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    resetBuildActionRegistry()
+    buildGlib2SourcePackage()
+    let setupAction = findMesonSetupAction()
+    check setupAction.argByName("options").encodedValues() ==
+      ExpectedMesonConfigureOptions
   test "mesonOptions does not leak into the cmake channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    resetBuildActionRegistry()
+    buildGlib2SourcePackage()
+    for action in registeredBuildActions():
+      check action.call.packageName != "cmake"
   test "mesonOptions does not leak into the configure channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    resetBuildActionRegistry()
+    buildGlib2SourcePackage()
+    for action in registeredBuildActions():
+      check action.call.packageName != "autotools"
+
+  test "meson setup forbids fallback subproject writes under fetched src":
+    resetBuildActionRegistry()
+    buildGlib2SourcePackage()
+    let setupAction = findMesonSetupAction()
+    let opts = setupAction.argByName("options").encodedValues()
+    check "wrap_mode=nofallback" in opts
+    check "sysprof=disabled" in opts
+    check setupAction.readOnlyRoots == @["./src"]
+    check "./src" notin setupAction.declaredOutputs
+
   test "artifacts register four libraries":
     # M3 artifact registry: FOUR libraries are registered, each
     # tagged ``dakLibrary``. glib2's meson build emits four shared
