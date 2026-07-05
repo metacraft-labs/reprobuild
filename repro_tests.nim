@@ -7614,6 +7614,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_workspace_remotes_alignment.nim",
+    binary: "build/test-bin/t_workspace_remotes_alignment",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_remove_prompts_on_dirty_and_refuses_in_non_tty.nim",
     binary: "build/test-bin/t_workspace_remove_prompts_on_dirty_and_refuses_in_non_tty",
     defines: @[],
@@ -7744,6 +7752,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim",
     binary: "build/test-bin/t_ct_test_nim_unittest_path_mm_pool",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_external_hash_runtime_paths.nim",
+    binary: "build/test-bin/t_external_hash_runtime_paths",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

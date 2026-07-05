@@ -2613,6 +2613,7 @@ proc externalHashFlags(workDir = ""): seq[string] =
   if blake3Prefix.len > 0:
     result.add("--passC:-I" & (blake3Prefix / "include"))
     result.add("--passL:-L" & (blake3Prefix / "lib"))
+    result.add("--passL:-Wl,-rpath," & (blake3Prefix / "lib"))
     result.add("--passL:-lblake3")
 
   let xxhashPrefix = block:
@@ -2629,6 +2630,7 @@ proc externalHashFlags(workDir = ""): seq[string] =
   if xxhashPrefix.len > 0:
     result.add("--passC:-I" & (xxhashPrefix / "include"))
     result.add("--passL:-L" & (xxhashPrefix / "lib"))
+    result.add("--passL:-Wl,-rpath," & (xxhashPrefix / "lib"))
     result.add("--passL:-lxxhash")
 
   # repro's own ASP solver (repro_solver) dlopens libclingo at module-init

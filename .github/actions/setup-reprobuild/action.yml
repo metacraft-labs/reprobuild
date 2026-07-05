@@ -91,14 +91,30 @@ runs:
             just build
             : "${NIMCRYPTO_SRC:?reprobuild dev shell did not set NIMCRYPTO_SRC}"
             : "${BEARSSL_SRC:?reprobuild dev shell did not set BEARSSL_SRC}"
+            : "${BLAKE3_PREFIX:?reprobuild dev shell did not set BLAKE3_PREFIX}"
+            : "${XXHASH_PREFIX:?reprobuild dev shell did not set XXHASH_PREFIX}"
             : "${GITHUB_ENV:?GitHub Actions did not set GITHUB_ENV}"
             echo "NIMCRYPTO_SRC=${NIMCRYPTO_SRC}" >> "${GITHUB_ENV}"
             echo "BEARSSL_SRC=${BEARSSL_SRC}" >> "${GITHUB_ENV}"
+            echo "BLAKE3_PREFIX=${BLAKE3_PREFIX}" >> "${GITHUB_ENV}"
+            echo "XXHASH_PREFIX=${XXHASH_PREFIX}" >> "${GITHUB_ENV}"
             # `repro` dlopens solver/cache libraries by leaf name. The dev
-            # shell provides the clingo/zstd runtime paths while building the
-            # CLI; persist them so later workflow steps can launch that CLI
-            # outside `nix develop`.
+            # shell provides clingo/zstd and hash-library runtime paths while
+            # building the CLI; persist them so later workflow steps can launch
+            # that CLI and its generated runners outside `nix develop`.
             runtime_library_path="${LD_LIBRARY_PATH:-}"
+            append_runtime_library_path() {
+              path="$1"
+              if [ -z "${path}" ] || [ ! -d "${path}" ]; then
+                return
+              fi
+              case ":${runtime_library_path}:" in
+                *":${path}:"*) ;;
+                *) runtime_library_path="${runtime_library_path:+${runtime_library_path}:}${path}" ;;
+              esac
+            }
+            append_runtime_library_path "${BLAKE3_PREFIX}/lib"
+            append_runtime_library_path "${XXHASH_PREFIX}/lib"
             dyld_library_path="${DYLD_LIBRARY_PATH:-}"
             if [ -z "${dyld_library_path}" ] && [ "$(uname -s)" = "Darwin" ]; then
               dyld_library_path="${runtime_library_path}"
