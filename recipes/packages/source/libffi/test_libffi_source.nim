@@ -40,13 +40,22 @@ const ExpectedUrl =
 const ExpectedHash =
   "b0dea9df23c863a7a50e825440f3ebffabd65df1497108e5d437747843895a4e"
 
+const ExpectedBuildDir = ".repro/build/libffi-autotools"
+
 const ExpectedConfigureFlags = @[
   "--disable-static",
   "--disable-docs",
   "--disable-multi-os-directory",
+  "--disable-dependency-tracking",
 ]
 
-const ExpectedBuildDir = ".repro/build/libffi-autotools"
+const ExpectedConfigureCommand =
+  "../../../src/configure --prefix=/usr --disable-static --disable-docs " &
+    "--disable-multi-os-directory --disable-dependency-tracking"
+
+const ExpectedConfigureScript =
+  "mkdir -p " & ExpectedBuildDir & " && cd " & ExpectedBuildDir & " && " &
+    ExpectedConfigureCommand
 
 when defined(reproProviderMode):
   proc dummyRequest(projectRoot: string): ProviderGraphRequest =
@@ -200,6 +209,9 @@ suite "libffiSource — from-source recipe smoke test":
       check "mkdir -p " & ExpectedBuildDir in configureScript
       check "cd " & ExpectedBuildDir in configureScript
       check "../../../src/configure" in configureScript
+      check configureScript == ExpectedConfigureScript
+      for flag in ExpectedConfigureFlags:
+        check flag in configureScript
       check configure.declaredOutputs == @[expectedBuildRoot]
       check configure.readOnlyRoots == @[expectedSrcRoot]
 
