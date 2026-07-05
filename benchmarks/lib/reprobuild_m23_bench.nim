@@ -294,7 +294,7 @@ proc runNoopWorkload(app, workRoot, cacheRoot: string; count: int):
   let start = epochTime()
   result.result = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   result.millis = elapsedMillis(start)
-  requireAll(result.result, {asUpToDate})
+  requireAll(result.result, {asUpToDate, asCacheHit})
 
 proc runCacheRestoreWorkload(app, workRoot, cacheRoot: string; count: int):
     tuple[result: BuildRunResult; millis: float] =
@@ -518,9 +518,10 @@ proc main() =
     "outputs-present warm run through real build-engine action-cache lookup",
     ["repro_build_engine", "repro_local_store"])
   metrics.addMetric("cache-consultation-latency", "warm no-op actions",
-    "count", float(noop.result.successful({asUpToDate})), tdGreaterOrEqual,
+    "count", float(noop.result.successful({asUpToDate, asCacheHit})),
+    tdGreaterOrEqual,
     float(cacheCount),
-    "up-to-date actions verified without launching child processes",
+    "warm actions verified without launching child processes",
     ["repro_build_engine", "repro_local_store"])
 
   let cache = runCacheRestoreWorkload(app, workRoot / "cache", cacheRoot,
