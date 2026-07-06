@@ -8366,6 +8366,74 @@ proc artifactIdFingerprint(artifact: DevEnvArtifact): string =
   for b in artifact.artifactId:
     result.add(toHex(int(b), 2).toLowerAscii())
 
+proc allowFileHash(path: string): string =
+  digestHex(blake3DomainDigest(path.bytesOf(), hdMetadataEnvelope))
+
+proc emitDirectoryNotAllowedScript(shell: ShellKind; path: string): string =
+  let msg = "repro: dev-env directory " & path & " is not allowed/trusted.\n" &
+            "Run 'repro dev-env allow' to trust it and activate the environment."
+  case shell
+  of skBash, skZsh:
+    "echo \"" & msg.replace("\"", "\\\"") & "\" >&2\n"
+  of skFish:
+    "echo \"" & msg.replace("\"", "\\\"") & "\" >&2\n"
+  of skNushell:
+    "print -e \"" & msg.replace("\"", "\\\"") & "\"\n"
+  of skPwsh:
+    "[Console]::Error.WriteLine(\"" & msg.replace("\"", "\\\"") & "\")\n"
+
+proc runDevEnvAllowCommand(args: openArray[string]): int =
+  var path = ""
+  if args.len > 0:
+    path = args[0]
+  else:
+    path = findDevEnvProjectRoot(getCurrentDir())
+    if path.len == 0:
+      stderr.writeLine("repro dev-env allow: no project root found; " &
+        "expected " & CanonicalProjectFileName & " or " &
+        LegacyProjectFileName &
+        " in the current directory or one of its parents")
+      return 1
+  
+  let root = os.normalizedPath(absolutePath(path))
+  let hash = allowFileHash(root)
+  let allowDir = getConfigDir() / "repro" / "allow"
+  try:
+    createDir(allowDir)
+    writeFile(allowDir / hash, root)
+    stderr.writeLine("Allowed repro dev-env for: " & root)
+    return 0
+  except CatchableError as err:
+    stderr.writeLine("repro dev-env allow: error writing trust file: " & err.msg)
+    return 1
+
+proc runDevEnvDenyCommand(args: openArray[string]): int =
+  var path = ""
+  if args.len > 0:
+    path = args[0]
+  else:
+    path = findDevEnvProjectRoot(getCurrentDir())
+    if path.len == 0:
+      stderr.writeLine("repro dev-env deny: no project root found; " &
+        "expected " & CanonicalProjectFileName & " or " &
+        LegacyProjectFileName &
+        " in the current directory or one of its parents")
+      return 1
+  
+  let root = os.normalizedPath(absolutePath(path))
+  let hash = allowFileHash(root)
+  let f = getConfigDir() / "repro" / "allow" / hash
+  try:
+    if fileExists(f):
+      removeFile(f)
+      stderr.writeLine("Denied/removed repro dev-env trust for: " & root)
+    else:
+      stderr.writeLine("repro dev-env deny: directory was not trusted: " & root)
+    return 0
+  except CatchableError as err:
+    stderr.writeLine("repro dev-env deny: error removing trust file: " & err.msg)
+    return 1
+
 proc runDevEnvExportCommand(args: openArray[string];
                             publicCliPath: string): int =
   ## ``repro dev-env export <shell>`` dispatch arm. Exit codes:
@@ -8392,6 +8460,24 @@ proc runDevEnvExportCommand(args: openArray[string];
       return 1
   else:
     parsed.projectRoot = os.normalizedPath(absolutePath(parsed.projectRoot))
+
+  # Check if directory is allowed/trusted
+  let allowFilePath = getConfigDir() / "repro" / "allow" / allowFileHash(parsed.projectRoot)
+  var isAllowed = false
+  if fileExists(allowFilePath):
+    try:
+      let contents = readFile(allowFilePath).strip()
+      if contents == parsed.projectRoot:
+        isAllowed = true
+    except CatchableError:
+      discard
+
+  if getEnv("REPRO_DEV_ENV_AUTO_ALLOW") == "1":
+    isAllowed = true
+
+  if not isAllowed:
+    stdout.write(emitDirectoryNotAllowedScript(parsed.shell, parsed.projectRoot))
+    return 0
 
   # M77 — cache-key fast path. BEFORE the project file is even
   # resolved or the selection's heavy ``resolveDevEnvSelection`` runs,
@@ -39474,6 +39560,22 @@ proc runThinApp*(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro shell: error: " & err.msg)
       return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "dev-env" and
+      args[1] == "allow":
+    let allowArgs =
+      if args.len > 2:
+        args[2 .. ^1]
+      else:
+        @[]
+    return runDevEnvAllowCommand(allowArgs)
+  if programName == "repro" and args.len >= 2 and args[0] == "dev-env" and
+      args[1] == "deny":
+    let denyArgs =
+      if args.len > 2:
+        args[2 .. ^1]
+      else:
+        @[]
+    return runDevEnvDenyCommand(denyArgs)
   if programName == "repro" and args.len >= 2 and args[0] == "dev-env" and
       args[1] == "export":
     # M74 — ``repro dev-env export <shell>``. New parent command
