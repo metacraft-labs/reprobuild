@@ -1811,6 +1811,22 @@ proc siblingReprobuildLibsRoot(workDir: string): string =
     return candidate
   ""
 
+const
+  faststreamsSrcBaked {.strdefine: "FASTSTREAMS_SRC".} = ""
+  nimStewSrcBaked {.strdefine: "NIM_STEW_SRC".} = ""
+  nimSerializationSrcBaked {.strdefine: "NIM_SERIALIZATION_SRC".} = ""
+  nimJsonSerializationSrcBaked {.strdefine: "NIM_JSON_SERIALIZATION_SRC".} = ""
+  nimTomlSerializationSrcBaked {.strdefine: "NIM_TOML_SERIALIZATION_SRC".} = ""
+  sszSerializationSrcBaked {.strdefine: "SSZ_SERIALIZATION_SRC".} = ""
+  nimcryptoSrcBaked {.strdefine: "NIMCRYPTO_SRC".} = ""
+  bearsslSrcBaked {.strdefine: "BEARSSL_SRC".} = ""
+  resultsSrcBaked {.strdefine: "RESULTS_SRC".} = ""
+  stintSrcBaked {.strdefine: "STINT_SRC".} = ""
+  stackableHooksSrcBaked {.strdefine: "STACKABLE_HOOKS_SRC".} = ""
+  vmHarnessSrcBaked {.strdefine: "VM_HARNESS_SRC".} = ""
+  reproTestAdaptersSrcBaked {.strdefine: "REPRO_TEST_ADAPTERS_SRC".} = ""
+  reproCtTestRunnerSrcBaked {.strdefine: "REPRO_CT_TEST_RUNNER_SRC".} = ""
+
 proc resolveBootstrapPackagePath*(envName: string;
                                   candidates: openArray[string];
                                   marker: string): string =
@@ -1828,13 +1844,32 @@ proc resolveBootstrapPackagePath*(envName: string;
   ## Resolution order (mirrors ``config.nims:112-121``):
   ## 1. ``$<envName>`` environment variable (if set and contains marker)
   ## 2. each candidate path in declaration order (if it contains marker)
-  ## 3. "" (caller skips the ``--path:`` flag entirely)
+  ## 3. baked-in compile-time path
+  ## 4. "" (caller skips the ``--path:`` flag entirely)
   let envPath = getEnv(envName)
   if envPath.len > 0 and fileExists(extendedPath(envPath / marker)):
     return envPath
   for candidate in candidates:
     if fileExists(extendedPath(candidate / marker)):
       return candidate
+  let baked =
+    case envName
+    of "FASTSTREAMS_SRC": faststreamsSrcBaked
+    of "NIM_STEW_SRC": nimStewSrcBaked
+    of "NIM_SERIALIZATION_SRC": nimSerializationSrcBaked
+    of "NIM_JSON_SERIALIZATION_SRC": nimJsonSerializationSrcBaked
+    of "NIM_TOML_SERIALIZATION_SRC": nimTomlSerializationSrcBaked
+    of "SSZ_SERIALIZATION_SRC": sszSerializationSrcBaked
+    of "NIMCRYPTO_SRC": nimcryptoSrcBaked
+    of "BEARSSL_SRC": bearsslSrcBaked
+    of "RESULTS_SRC": resultsSrcBaked
+    of "STINT_SRC": stintSrcBaked
+    of "STACKABLE_HOOKS_SRC": stackableHooksSrcBaked
+    of "VM_HARNESS_SRC": vmHarnessSrcBaked
+    of "REPRO_TEST_ADAPTERS_SRC": reproTestAdaptersSrcBaked
+    else: ""
+  if baked.len > 0 and fileExists(extendedPath(baked / marker)):
+    return baked
   ""
 
 proc resolveCtTestRunnerAdapterPath(anchorRoot: string): string =
@@ -1846,6 +1881,10 @@ proc resolveCtTestRunnerAdapterPath(anchorRoot: string): string =
   if anchorRoot.len > 0:
     let candidate = anchorRoot.parentDir / "reprobuild-ct-test-runner" /
       "libs" / "ct_test_runner_adapter" / "src"
+    if fileExists(extendedPath(candidate / "ct_test_runner_adapter.nim")):
+      return candidate
+  if reproCtTestRunnerSrcBaked.len > 0:
+    let candidate = reproCtTestRunnerSrcBaked / "libs" / "ct_test_runner_adapter" / "src"
     if fileExists(extendedPath(candidate / "ct_test_runner_adapter.nim")):
       return candidate
   ""
