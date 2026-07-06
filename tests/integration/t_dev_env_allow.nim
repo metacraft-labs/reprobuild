@@ -42,10 +42,10 @@ suite "integration_dev_env_allow":
     check resExportBlocked.exitCode == 0
     check "repro: dev-env directory" in resExportBlocked.output
     check "is not allowed/trusted" in resExportBlocked.output
-    check "Run 'repro dev-env allow'" in resExportBlocked.output
+    check "Run 'repro allow'" in resExportBlocked.output
     
-    # 2. Allow the directory
-    let resAllow = runRepro(reproBin, projectDir, @["dev-env", "allow"], env)
+    # 2. Allow the directory (without arguments, defaults to current directory)
+    let resAllow = runRepro(reproBin, projectDir, @["allow"], env)
     check resAllow.exitCode == 0
     check "Allowed repro dev-env for:" in resAllow.output
     
@@ -54,8 +54,8 @@ suite "integration_dev_env_allow":
     # It should not print the trust block warning message
     check "is not allowed/trusted" notin resExportAllowed.output
     
-    # 4. Deny the directory
-    let resDeny = runRepro(reproBin, projectDir, @["dev-env", "deny"], env)
+    # 4. Deny the directory (without arguments, defaults to current directory)
+    let resDeny = runRepro(reproBin, projectDir, @["deny"], env)
     check resDeny.exitCode == 0
     check "Denied/removed repro dev-env trust for:" in resDeny.output
     
@@ -63,3 +63,11 @@ suite "integration_dev_env_allow":
     let resExportBlockedAgain = runRepro(reproBin, projectDir, @["dev-env", "export", "zsh"], env)
     check resExportBlockedAgain.exitCode == 0
     check "is not allowed/trusted" in resExportBlockedAgain.output
+    
+    # 6. Test allowing arbitrary non-project directory
+    let nonProjectDir = tempRoot / "non-project"
+    createDir(nonProjectDir)
+    let resAllowNonProj = runRepro(reproBin, nonProjectDir, @["allow"], env)
+    check resAllowNonProj.exitCode == 0
+    check "Allowed repro dev-env for:" in resAllowNonProj.output
+    check nonProjectDir in resAllowNonProj.output

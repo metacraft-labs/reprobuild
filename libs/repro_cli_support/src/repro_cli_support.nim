@@ -8371,7 +8371,7 @@ proc allowFileHash(path: string): string =
 
 proc emitDirectoryNotAllowedScript(shell: ShellKind; path: string): string =
   let msg = "repro: dev-env directory " & path & " is not allowed/trusted.\n" &
-            "Run 'repro dev-env allow' to trust it and activate the environment."
+            "Run 'repro allow' to trust it and activate the environment."
   case shell
   of skBash, skZsh:
     "echo \"" & msg.replace("\"", "\\\"") & "\" >&2\n"
@@ -8382,18 +8382,12 @@ proc emitDirectoryNotAllowedScript(shell: ShellKind; path: string): string =
   of skPwsh:
     "[Console]::Error.WriteLine(\"" & msg.replace("\"", "\\\"") & "\")\n"
 
-proc runDevEnvAllowCommand(args: openArray[string]): int =
+proc runReproAllowCommand(args: openArray[string]): int =
   var path = ""
   if args.len > 0:
     path = args[0]
   else:
-    path = findDevEnvProjectRoot(getCurrentDir())
-    if path.len == 0:
-      stderr.writeLine("repro dev-env allow: no project root found; " &
-        "expected " & CanonicalProjectFileName & " or " &
-        LegacyProjectFileName &
-        " in the current directory or one of its parents")
-      return 1
+    path = getCurrentDir()
   
   let root = os.normalizedPath(absolutePath(path))
   let hash = allowFileHash(root)
@@ -8404,21 +8398,15 @@ proc runDevEnvAllowCommand(args: openArray[string]): int =
     stderr.writeLine("Allowed repro dev-env for: " & root)
     return 0
   except CatchableError as err:
-    stderr.writeLine("repro dev-env allow: error writing trust file: " & err.msg)
+    stderr.writeLine("repro allow: error writing trust file: " & err.msg)
     return 1
 
-proc runDevEnvDenyCommand(args: openArray[string]): int =
+proc runReproDenyCommand(args: openArray[string]): int =
   var path = ""
   if args.len > 0:
     path = args[0]
   else:
-    path = findDevEnvProjectRoot(getCurrentDir())
-    if path.len == 0:
-      stderr.writeLine("repro dev-env deny: no project root found; " &
-        "expected " & CanonicalProjectFileName & " or " &
-        LegacyProjectFileName &
-        " in the current directory or one of its parents")
-      return 1
+    path = getCurrentDir()
   
   let root = os.normalizedPath(absolutePath(path))
   let hash = allowFileHash(root)
@@ -8428,10 +8416,10 @@ proc runDevEnvDenyCommand(args: openArray[string]): int =
       removeFile(f)
       stderr.writeLine("Denied/removed repro dev-env trust for: " & root)
     else:
-      stderr.writeLine("repro dev-env deny: directory was not trusted: " & root)
+      stderr.writeLine("repro deny: directory was not trusted: " & root)
     return 0
   except CatchableError as err:
-    stderr.writeLine("repro dev-env deny: error removing trust file: " & err.msg)
+    stderr.writeLine("repro deny: error removing trust file: " & err.msg)
     return 1
 
 proc runDevEnvExportCommand(args: openArray[string];
@@ -39560,22 +39548,20 @@ proc runThinApp*(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro shell: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "dev-env" and
-      args[1] == "allow":
+  if programName == "repro" and args.len > 0 and args[0] == "allow":
     let allowArgs =
-      if args.len > 2:
-        args[2 .. ^1]
+      if args.len > 1:
+        args[1 .. ^1]
       else:
         @[]
-    return runDevEnvAllowCommand(allowArgs)
-  if programName == "repro" and args.len >= 2 and args[0] == "dev-env" and
-      args[1] == "deny":
+    return runReproAllowCommand(allowArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "deny":
     let denyArgs =
-      if args.len > 2:
-        args[2 .. ^1]
+      if args.len > 1:
+        args[1 .. ^1]
       else:
         @[]
-    return runDevEnvDenyCommand(denyArgs)
+    return runReproDenyCommand(denyArgs)
   if programName == "repro" and args.len >= 2 and args[0] == "dev-env" and
       args[1] == "export":
     # M74 — ``repro dev-env export <shell>``. New parent command
