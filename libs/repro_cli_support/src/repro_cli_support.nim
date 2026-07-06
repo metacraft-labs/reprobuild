@@ -8434,6 +8434,13 @@ proc runReproDenyCommand(args: openArray[string]): int =
     stderr.writeLine("repro deny: error removing trust file: " & err.msg)
     return 1
 
+proc devEnvWarnedUnsetScript(shell: ShellKind): string =
+  case shell
+  of skBash, skZsh: "unset __REPRO_WARNED\n"
+  of skFish: "set -e __REPRO_WARNED\n"
+  of skNushell: "hide-env __REPRO_WARNED\n"
+  of skPwsh: "Remove-Item Env:__REPRO_WARNED -ErrorAction SilentlyContinue\n"
+
 proc runDevEnvExportCommand(args: openArray[string];
                             publicCliPath: string): int =
   ## ``repro dev-env export <shell>`` dispatch arm. Exit codes:
@@ -8567,14 +8574,8 @@ proc runDevEnvExportCommand(args: openArray[string];
   # next cd-out.
   plan.appendReproActiveManifestMarker(manifestPath)
   plan.appendReproAppliedMarker(fingerprint)
-  var activationScript = formatExportPlan(plan, parsed.shell)
-  let unsetCmd =
-    case parsed.shell
-    of skBash, skZsh: "unset __REPRO_WARNED\n"
-    of skFish: "set -e __REPRO_WARNED\n"
-    of skNushell: "hide-env __REPRO_WARNED\n"
-    of skPwsh: "Remove-Item Env:__REPRO_WARNED -ErrorAction SilentlyContinue\n"
-  activationScript = unsetCmd & activationScript
+  var activationScript = devEnvWarnedUnsetScript(parsed.shell) &
+    formatExportPlan(plan, parsed.shell)
 
   # M75 — write the rollback manifest alongside the RBDE artifact.
   let preEnv =
@@ -8684,7 +8685,7 @@ proc runDevEnvDeactivateCommand(args: openArray[string]): int =
   var rederivedPlan = devEnvArtifactToExportPlan(artifactPath)
   rederivedPlan.appendReproActiveManifestMarker(parsed.manifestPath)
   rederivedPlan.appendReproAppliedMarker(manifest.artifact)
-  let rederivedScript =
+  let rederivedScript = devEnvWarnedUnsetScript(manifest.activationShell) &
     formatExportPlan(rederivedPlan, manifest.activationShell)
   let rederivedHash = computeActivationScriptHash(rederivedScript)
   if rederivedHash != manifest.activationScriptHash:

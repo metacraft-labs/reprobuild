@@ -104,6 +104,17 @@ proc sshArgs(h: SshHarness): seq[string] =
     "-i", h.clientKey,
     "-p", $h.port]
 
+proc sshCliOptions(h: SshHarness): seq[string] =
+  @[
+    "-F/dev/null",
+    "-oUserKnownHostsFile=/dev/null",
+    "-oGlobalKnownHostsFile=/dev/null",
+    "-oStrictHostKeyChecking=no",
+    "-oIdentitiesOnly=yes",
+    "-oPasswordAuthentication=no",
+    "-oKbdInteractiveAuthentication=no",
+    "-i" & h.clientKey]
+
 proc closeLoopbackProcess(h: var SshHarness) =
   if h.process != nil:
     try:
@@ -272,15 +283,7 @@ suite "M71 Phase C: SSH activation-bundle transfer/import":
           "--target-store-root", targetStoreRoot,
           "--ssh", sshd.ssh,
           "--port", $sshd.port]
-        for opt in [
-            "-F", "/dev/null",
-            "-o", "UserKnownHostsFile=" & sshd.knownHosts,
-            "-o", "GlobalKnownHostsFile=/dev/null",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "IdentitiesOnly=yes",
-            "-o", "PasswordAuthentication=no",
-            "-o", "KbdInteractiveAuthentication=no",
-            "-i", sshd.clientKey]:
+        for opt in sshCliOptions(sshd):
           transferArgs.add("--ssh-option")
           transferArgs.add(opt)
 
