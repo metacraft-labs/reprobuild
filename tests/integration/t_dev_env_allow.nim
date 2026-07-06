@@ -29,7 +29,15 @@ suite "integration_dev_env_allow":
     
     let projectDir = tempRoot / "project"
     createDir(projectDir)
-    writeFile(projectDir / "reprobuild.nim", "package test:\n  discard\n")
+    writeFile(projectDir / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package test:\n" &
+      "  uses:\n" &
+      "    \"nim >=2.2 <3.0\"\n" &
+      "  devEnv:\n" &
+      "    activity \"default\"\n" &
+      "    setEnv \"FIXTURE_MODE\", \"dev\"\n"
+    )
     
     # Override XDG_CONFIG_HOME so we don't poison the user's real configs
     let customXdgConfig = tempRoot / "xdg-config"
@@ -71,3 +79,35 @@ suite "integration_dev_env_allow":
     check resAllowNonProj.exitCode == 0
     check "Allowed repro dev-env for:" in resAllowNonProj.output
     check nonProjectDir in resAllowNonProj.output
+
+    # 7. Test warning suppression using __REPRO_WARNED
+    let blockedDir = tempRoot / "blocked-project"
+    createDir(blockedDir)
+    writeFile(blockedDir / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package blocked:\n" &
+      "  uses:\n" &
+      "    \"nim >=2.2 <3.0\"\n" &
+      "  devEnv:\n" &
+      "    activity \"default\"\n" &
+      "    setEnv \"FIXTURE_MODE\", \"dev\"\n"
+    )
+    
+    # First time, should output warning and export __REPRO_WARNED
+    let resWarn1 = runRepro(reproBin, blockedDir, @["dev-env", "export", "zsh"], env)
+    check resWarn1.exitCode == 0
+    check "is not allowed/trusted" in resWarn1.output
+    check "export __REPRO_WARNED=" in resWarn1.output
+    
+    # Second time, with __REPRO_WARNED in environment matching project dir, should be silent (no output)
+    let envWithWarned = env & @[("__REPRO_WARNED", blockedDir)]
+    let resWarn2 = runRepro(reproBin, blockedDir, @["dev-env", "export", "zsh"], envWithWarned)
+    check resWarn2.exitCode == 0
+    check resWarn2.output.strip() == ""
+    
+    # Now allow the directory
+    discard runRepro(reproBin, blockedDir, @["allow"], env)
+    
+    # Exporting should now clear __REPRO_WARNED (unset __REPRO_WARNED)
+    let resWarnClear = runRepro(reproBin, blockedDir, @["dev-env", "export", "zsh"], env)
+    check "unset __REPRO_WARNED" in resWarnClear.output

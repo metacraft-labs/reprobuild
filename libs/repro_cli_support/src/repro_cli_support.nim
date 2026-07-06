@@ -64,6 +64,14 @@ proc cloneUrlFor*(repo: ResolvedRepo): string =
   for r in repo.remotes:
     if r.name == repo.remoteName or r.remoteName == repo.remoteName:
       return r.fetchUrl
+
+proc gitRemoteNameFor*(repo: ResolvedRepo): string =
+  for r in repo.remotes:
+    if r.remoteName == repo.remoteName:
+      return r.name
+  if repo.remoteName.len > 0:
+    return repo.remoteName
+  return "origin"
 import repro_cli_support/dev_env_shell_export
 import repro_cli_support/dev_env_rollback_manifest
 import repro_cli_support/dev_env_shell_hook_templates
@@ -8374,13 +8382,17 @@ proc emitDirectoryNotAllowedScript(shell: ShellKind; path: string): string =
             "Run 'repro allow' to trust it and activate the environment."
   case shell
   of skBash, skZsh:
-    "echo \"" & msg.replace("\"", "\\\"") & "\" >&2\n"
+    result = "echo \"" & msg.replace("\"", "\\\"") & "\" >&2\n"
+    result.add("export __REPRO_WARNED=\"" & path.replace("\"", "\\\"") & "\"\n")
   of skFish:
-    "echo \"" & msg.replace("\"", "\\\"") & "\" >&2\n"
+    result = "echo \"" & msg.replace("\"", "\\\"") & "\" >&2\n"
+    result.add("set -gx __REPRO_WARNED \"" & path.replace("\"", "\\\"") & "\"\n")
   of skNushell:
-    "print -e \"" & msg.replace("\"", "\\\"") & "\"\n"
+    result = "print -e \"" & msg.replace("\"", "\\\"") & "\"\n"
+    result.add("$env.__REPRO_WARNED = \"" & path.replace("\"", "\\\"") & "\"\n")
   of skPwsh:
-    "[Console]::Error.WriteLine(\"" & msg.replace("\"", "\\\"") & "\")\n"
+    result = "[Console]::Error.WriteLine(\"" & msg.replace("\"", "\\\"") & "\")\n"
+    result.add("$env:__REPRO_WARNED = '" & path.replace("'", "''") & "'\n")
 
 proc runReproAllowCommand(args: openArray[string]): int =
   var path = ""
@@ -8464,6 +8476,19 @@ proc runDevEnvExportCommand(args: openArray[string];
     isAllowed = true
 
   if not isAllowed:
+    proc samePath(a, b: string): bool =
+      if a == b: return true
+      if a.len == 0 or b.len == 0: return false
+      var canonicalA = a
+      var canonicalB = b
+      try: canonicalA = expandFilename(a)
+      except CatchableError: discard
+      try: canonicalB = expandFilename(b)
+      except CatchableError: discard
+      return canonicalA == canonicalB
+
+    if samePath(getEnv("__REPRO_WARNED"), parsed.projectRoot):
+      return 0
     stdout.write(emitDirectoryNotAllowedScript(parsed.shell, parsed.projectRoot))
     return 0
 
@@ -8542,7 +8567,14 @@ proc runDevEnvExportCommand(args: openArray[string];
   # next cd-out.
   plan.appendReproActiveManifestMarker(manifestPath)
   plan.appendReproAppliedMarker(fingerprint)
-  let activationScript = formatExportPlan(plan, parsed.shell)
+  var activationScript = formatExportPlan(plan, parsed.shell)
+  let unsetCmd =
+    case parsed.shell
+    of skBash, skZsh: "unset __REPRO_WARNED\n"
+    of skFish: "set -e __REPRO_WARNED\n"
+    of skNushell: "hide-env __REPRO_WARNED\n"
+    of skPwsh: "Remove-Item Env:__REPRO_WARNED -ErrorAction SilentlyContinue\n"
+  activationScript = unsetCmd & activationScript
 
   # M75 — write the rollback manifest alongside the RBDE artifact.
   let preEnv =
@@ -19690,7 +19722,7 @@ proc classifyExistingRepo(
     # back to the local branch when no remote-tracking ref exists.
     # Any other state (detached HEAD, ahead of origin, behind origin)
     # is a divergence: the user has work to do.
-    let branchTip = expectedBranchTip(identity, repoPath, repo.revision, remoteName = repo.remoteName)
+    let branchTip = expectedBranchTip(identity, repoPath, repo.revision, remoteName = gitRemoteNameFor(repo))
     if branchTip.len > 0 and branchTip == headSha:
       upToDate.add(WorkspaceInitUpToDateEntry(
         name: repo.name, path: repo.path, headSha: headSha))
@@ -22178,7 +22210,7 @@ proc publishRoutedEvidence*(workspaceRoot: string;
         "from — the OWNER publishes from a clean, published checkout at the " &
         "locked revision"
       result.add(outc); continue
-    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+    let rName = gitRemoteNameFor(repo)
     let triple = gatherRepoEvidence(
       identity, repoAbs, repo.path, toolDigest, observedAtUnixMs, remoteName = rName)
     for rec in triple:
@@ -22499,7 +22531,7 @@ proc observeRepoForSync(identity: GitToolIdentity;
     result.currentBranch = branchRes.output.strip()
 
   # Branch tips (local + remote-tracking).
-  let rName = if resolved.remoteName.len > 0: resolved.remoteName else: "origin"
+  let rName = gitRemoteNameFor(resolved)
   if result.currentBranch.len > 0:
     result.localBranchTip = revParse(identity, repoPath,
       "refs/heads/" & result.currentBranch)
@@ -22604,7 +22636,7 @@ proc syncFetchActionFor(identity: GitToolIdentity; workspaceRoot: string;
   var deps: seq[string]
   if sharedBareRefreshDep.len > 0:
     deps.add(sharedBareRefreshDep)
-  let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+  let rName = gitRemoteNameFor(repo)
   result = action(id,
     @[identity.binaryPath, "-C", repoAbs, "fetch", "--quiet", rName],
     cwd = workspaceRoot,
@@ -23955,7 +23987,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
 
     # Converge to the manifest revision on a local tracking branch.
     let converged = convergeRepoToManifestRevision(
-      identity, absPath, repo.revision, remoteName = repo.remoteName)
+      identity, absPath, repo.revision, remoteName = gitRemoteNameFor(repo))
     if not converged.ok:
       entry.outcome = pullOutcomeTag(ppoFailed)
       entry.diagnostic = converged.diag
@@ -25433,7 +25465,7 @@ proc refreshEvidenceOnlyRepoAtPostCommit(workspaceRoot, currentRepoAbs: string):
   # Gather + publish the source-free triple (NO source captured).
   try:
     let toolDigest = digestHex(identity)
-    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+    let rName = gitRemoteNameFor(repo)
     let triple = gatherRepoEvidence(
       identity, repoAbs, repo.path, toolDigest, getTime().toUnix * 1000, remoteName = rName)
     let put = store.putEvidence(projectName, repo.name, triple)
@@ -28357,7 +28389,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       obs.isClean = cleanRes.isClean
     else:
       obs.cleanDiagnostic = cleanRes.diagnostic
-    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+    let rName = gitRemoteNameFor(repo)
     let pubRes = queryGitState(
       isPublishedQuery(absRepo, rName), identity)
     if pubRes.status == gqsOk:
@@ -29655,7 +29687,7 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
     # Detached HEAD — nothing branch-scoped to reconcile.
     return
   let branch = branchRes.output.strip()
-  let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+  let rName = gitRemoteNameFor(repo)
   # Fetch the upstream so the remote-tracking ref reflects teammate movement.
   let fetchRes = gitRunPlain(identity, ["-C", repoAbs, "fetch", "--quiet",
     rName])
@@ -29878,7 +29910,7 @@ proc executePush(args: PushArgs): PushReport =
       return
     # Published? (reuses the gate's publication probe.) Already-published is a
     # benign noop; unpublished commits get pushed.
-    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+    let rName = gitRemoteNameFor(repo)
     # Published? (reuses the gate's publication probe.) Already-published is a
     # benign noop; unpublished commits get pushed.
     let pubRes = queryGitState(isPublishedQuery(repoAbs, rName), identity)
@@ -33213,7 +33245,7 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
     # truthful answer even before any fetch. The standard remote name
     # after ``git clone`` is ``origin``.
     let remoteName =
-      if repo.remoteName.len > 0: repo.remoteName else: "origin"
+      gitRemoteNameFor(repo)
     let lsRemote = gitRunPlain(identity,
       ["-C", state.repoPath, "ls-remote", "--heads", remoteName,
        parsed.branchName])
@@ -33437,7 +33469,7 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
          "-" & $idx & ".receipt")
       let fetchActionId = "workspace-checkout-fetch-" &
         safeRepoIdSegment(state.repo.name) & "-" & $idx
-      let rName = if state.repo.remoteName.len > 0: state.repo.remoteName else: "origin"
+      let rName = gitRemoteNameFor(state.repo)
       var fetchAction = gitFetchAction(fetchActionId, identity,
         remoteName = rName,
         repoPath = state.repo.path,
@@ -34640,7 +34672,7 @@ proc executeWorkspaceStart(parsed: WorkspaceStartArgs): WorkspaceStartReport =
     if localProbe.code == 0 and localProbe.output.strip().len > 0:
       state.localHadBranch = true
     # Probe remote branch.
-    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+    let rName = gitRemoteNameFor(repo)
     let remoteProbe = gitRunPlain(identity,
       ["-C", state.repoPath, "ls-remote", "--heads", rName,
        parsed.branchName])
