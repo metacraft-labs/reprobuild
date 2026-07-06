@@ -376,7 +376,10 @@ package reprobuild:
       else:
         @[]
 
-    let reproRuntimePassL = nixRuntimePassLForLibraries(@["libclingo.so"])
+    let reproRuntimePassL = nixRuntimePassLForLibraries(@[
+      "libclingo.so",
+      "libblake3.so",
+      "libxxhash.so"])
     let testRuntimePassL = nixRuntimePassLForLibraries(@["libzstd.so.1"])
 
     proc resolvedIoMonNimPaths(): seq[string] =

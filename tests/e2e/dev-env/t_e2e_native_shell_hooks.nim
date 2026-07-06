@@ -180,6 +180,12 @@ proc reproPathWithSpaces(c: M6Case): string =
   result = dir / addFileExt("repro", ExeExt)
   if not fileExists(result):
     copyFile(c.reproBin, result)
+    let fullCli = parentDir(c.reproBin) / addFileExt("repro-full", ExeExt)
+    if fileExists(fullCli):
+      let copiedFullCli = dir / addFileExt("repro-full", ExeExt)
+      copyFile(fullCli, copiedFullCli)
+      setFilePermissions(copiedFullCli, {fpUserRead, fpUserWrite, fpUserExec,
+        fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
     setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec,
       fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
