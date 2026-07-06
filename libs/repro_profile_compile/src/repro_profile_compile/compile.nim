@@ -107,22 +107,30 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
     var childEnv = newStringTable(modeStyleInsensitive)
     for k, v in envPairs():
       childEnv[k] = v
-    proc setSiblingEnv(envName, siblingDir: string) =
-      let abs = repoRoot / siblingDir
-      if dirExists(abs) and getEnv(envName).len == 0:
-        childEnv[envName] = abs
     # Mirrors the addPackagePath calls in reprobuild's config.nims —
     # absolute paths pointing at the operator's existing sibling
     # checkouts under <repoRoot>'s parent. (install-reprobuild.ps1
     # clones every sibling under <LOCALAPPDATA>/dev-deps/reprobuild/,
     # so they are siblings of ``src/``.)
+    proc setPackageEnv(envName: string; candidates: openArray[string];
+                       marker: string) =
+      if getEnv(envName).len > 0:
+        return
+      for candidate in candidates:
+        if fileExists(candidate / marker):
+          childEnv[envName] = candidate
+          return
+
     let dd = repoRootAbs.parentDir  # <dev-deps>/reprobuild
-    if dirExists(dd / "nimcrypto"):
-      if getEnv("NIMCRYPTO_SRC").len == 0:
-        childEnv["NIMCRYPTO_SRC"] = dd / "nimcrypto"
-    if dirExists(dd / "nim-bearssl"):
-      if getEnv("BEARSSL_SRC").len == 0:
-        childEnv["BEARSSL_SRC"] = dd / "nim-bearssl"
+    setPackageEnv("NIMCRYPTO_SRC", [
+      repoRootAbs / "libs" / "nimcrypto",
+      dd / "codetracer" / "libs" / "nimcrypto",
+      dd / "nimcrypto",
+    ], "nimcrypto" / "hash.nim")
+    setPackageEnv("BEARSSL_SRC", [
+      dd / "nim-bearssl",
+      repoRootAbs / "libs" / "nim-bearssl",
+    ], "bearssl.nim")
     if dirExists(dd / "io-mon" / "src"):
       if getEnv("IO_MON_SRC").len == 0:
         childEnv["IO_MON_SRC"] = dd / "io-mon" / "src"

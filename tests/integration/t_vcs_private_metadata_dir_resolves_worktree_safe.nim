@@ -42,6 +42,16 @@ proc requireGit(command: string; cwd = ""): string =
     quit 1
   res.output
 
+proc canonical(path: string): string =
+  try:
+    normalizedPath(expandFilename(path))
+  except OSError, CatchableError:
+    let parent = path.parentDir
+    if parent.len > 0 and parent != path:
+      canonical(parent) / path.lastPathPart
+    else:
+      normalizedPath(absolutePath(path))
+
 suite "HL-1 — vcsPrivateMetadataDir is VCS-agnostic + worktree-safe":
 
   test "t_vcs_private_metadata_dir_resolves_worktree_safe":
@@ -66,7 +76,7 @@ suite "HL-1 — vcsPrivateMetadataDir is VCS-agnostic + worktree-safe":
 
       # The common dir's private repro dir for the MAIN checkout.
       let mainPrivate = vcsPrivateMetadataDir(main, gitBin)
-      check mainPrivate == (main / ".git" / "repro")
+      check canonical(mainPrivate) == canonical(main / ".git" / "repro")
 
       # ---- a LINKED worktree of the same repo ---------------------------
       let wt = scratch / "wt"
@@ -88,5 +98,5 @@ suite "HL-1 — vcsPrivateMetadataDir is VCS-agnostic + worktree-safe":
       # ---- non-git fallback ---------------------------------------------
       let plain = scratch / "plain"
       createDir(plain)
-      check vcsPrivateMetadataDir(plain, gitBin) ==
-        (absolutePath(plain) / ".repro-private")
+      check canonical(vcsPrivateMetadataDir(plain, gitBin)) ==
+        canonical(absolutePath(plain) / ".repro-private")

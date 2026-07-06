@@ -43,16 +43,24 @@ import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
 import repro_dsl_stdlib/types
 
+proc sanitizeStaticExec(val: string): string =
+  var cleanLines: seq[string] = @[]
+  for line in val.splitLines:
+    let s = line.strip()
+    if s.len > 0 and not s.startsWith("io-mon:"):
+      cleanLines.add(s)
+  if cleanLines.len > 0: cleanLines[^1] else: ""
+
 when defined(windows):
   const CompileTimeIoMonSrc =
-    staticExec("cmd /C if defined IO_MON_SRC (echo %IO_MON_SRC%)").strip()
+    sanitizeStaticExec(staticExec("cmd /C if defined IO_MON_SRC (echo %IO_MON_SRC%)"))
   const CompileTimeStackableHooksSrc =
-    staticExec("cmd /C if defined STACKABLE_HOOKS_SRC (echo %STACKABLE_HOOKS_SRC%)").strip()
+    sanitizeStaticExec(staticExec("cmd /C if defined STACKABLE_HOOKS_SRC (echo %STACKABLE_HOOKS_SRC%)"))
 else:
   const CompileTimeIoMonSrc =
-    staticExec("sh -c 'printf %s \"${IO_MON_SRC:-}\"'").strip()
+    sanitizeStaticExec(staticExec("sh -c 'printf %s \"${IO_MON_SRC:-}\"'"))
   const CompileTimeStackableHooksSrc =
-    staticExec("sh -c 'printf %s \"${STACKABLE_HOOKS_SRC:-}\"'").strip()
+    sanitizeStaticExec(staticExec("sh -c 'printf %s \"${STACKABLE_HOOKS_SRC:-}\"'"))
 
 # Interface extraction compiles this project file without the provider build
 # body. Keep the stdlib typed-value surface visible for generated DSL helpers.
@@ -361,16 +369,32 @@ package reprobuild:
       ## Local graph-built binaries are not post-fixed by the flake package's
       ## patchelf hook, so thread the Nix-provided lib dirs into DT_RPATH when
       ## the dev shell exposes them.
-      when defined(linux):
+      when defined(posix):
         var libDirs: seq[string] = @[]
+        for envName in ["CLINGO_LIB", "ZSTD_LIB"]:
+          let libDir = getEnv(envName)
+          if libDir.len > 0 and libDir notin libDirs:
+            for libName in libNames:
+              if fileExists(libDir / libName):
+                libDirs.add(libDir)
         for token in getEnv("NIX_LDFLAGS").splitWhitespace:
           if token.startsWith("-L"):
             let libDir = token[2 .. ^1]
             for libName in libNames:
               if fileExists(libDir / libName) and libDir notin libDirs:
                 libDirs.add(libDir)
+        when defined(macosx):
+          let storeRoot = "/nix/store"
+          if dirExists(storeRoot):
+            for kind, path in walkDir(storeRoot):
+              if kind != pcDir: continue
+              let libDir = path / "lib"
+              for libName in libNames:
+                if fileExists(libDir / libName) and libDir notin libDirs:
+                  libDirs.add(libDir)
         if libDirs.len > 0:
-          result.add("-Wl,--disable-new-dtags")
+          when defined(linux):
+            result.add("-Wl,--disable-new-dtags")
           for libDir in libDirs:
             result.add("-Wl,-rpath," & libDir)
       else:
@@ -378,9 +402,38 @@ package reprobuild:
 
     let reproRuntimePassL = nixRuntimePassLForLibraries(@[
       "libclingo.so",
+      "libclingo.dylib",
       "libblake3.so",
-      "libxxhash.so"])
-    let testRuntimePassL = nixRuntimePassLForLibraries(@["libzstd.so.1"])
+      "libblake3.dylib",
+      "libxxhash.so",
+      "libxxhash.dylib"])
+    let testRuntimePassL = nixRuntimePassLForLibraries(@[
+      "libzstd.so.1", "libzstd.dylib"])
+
+    proc findNixStoreSourceDir(namePart, marker: string): string =
+      when defined(posix):
+        let storeRoot = "/nix/store"
+        if dirExists(storeRoot):
+          for kind, path in walkDir(storeRoot):
+            if kind == pcDir and namePart in path.lastPathPart and
+                fileExists(path / marker):
+              return path
+      ""
+
+    proc sourceOnlyPackagePath(envName: string; candidates: openArray[string];
+                               marker: string; nixStoreNamePart = ""):
+        tuple[path: string; env: seq[(string, string)]] =
+      let fromEnv = getEnv(envName)
+      if fromEnv.len > 0 and fileExists(fromEnv / marker):
+        return (fromEnv, @[(envName, fromEnv)])
+      for candidate in candidates:
+        if fileExists(candidate / marker):
+          return (candidate, @[(envName, candidate)])
+      if nixStoreNamePart.len > 0:
+        let fromStore = findNixStoreSourceDir(nixStoreNamePart, marker)
+        if fromStore.len > 0:
+          return (fromStore, @[(envName, fromStore)])
+      ("", @[])
 
     proc resolvedIoMonNimPaths(): seq[string] =
       var candidates: seq[string] = @[]
@@ -395,6 +448,38 @@ package reprobuild:
           return @[candidate]
 
     let ioMonNimPaths = resolvedIoMonNimPaths()
+    let repoParent = ".."
+    var sourceOnlyNimPaths: seq[string] = @[]
+    var sourceOnlyEnv: seq[(string, string)] = @[]
+    for pkg in [
+      sourceOnlyPackagePath("NIMCRYPTO_SRC", [
+        "libs" / "nimcrypto",
+        repoParent / "codetracer" / "libs" / "nimcrypto",
+        repoParent / "nimcrypto",
+      ], "nimcrypto" / "hash.nim"),
+      sourceOnlyPackagePath("BEARSSL_SRC", [
+        "libs" / "nim-bearssl",
+        repoParent / "nim-bearssl",
+      ], "bearssl.nim", "nim-bearssl-"),
+      sourceOnlyPackagePath("REPRO_TEST_ADAPTERS_SRC", [
+        repoParent / "reprobuild-test-adapters" / "src",
+      ], "repro_test_adapters" / "test_runner.nim"),
+      sourceOnlyPackagePath("REPRO_CT_TEST_RUNNER_SRC", [
+        repoParent / "reprobuild-ct-test-runner",
+      ], "libs" / "ct_test_runner_adapter" / "src" /
+        "ct_test_runner_adapter.nim"),
+      sourceOnlyPackagePath("RUNQUOTA_SRC", [
+        repoParent / "runquota",
+      ], "runquota.nim"),
+      sourceOnlyPackagePath("STACKABLE_HOOKS_SRC", [
+        repoParent / "nim-stackable-hooks" / "src",
+      ], "stackable_hooks.nim"),
+    ]:
+      if pkg.path.len > 0:
+        sourceOnlyNimPaths.add(pkg.path)
+        for entry in pkg.env:
+          sourceOnlyEnv.add(entry)
+    let testNimPaths = ioMonNimPaths & sourceOnlyNimPaths
 
     for spec in reprobuildTestSpecs:
       let platformPassC: seq[string] =
@@ -405,9 +490,10 @@ package reprobuild:
         source = spec.source,
         binary = spec.binary,
         defines = spec.defines,
-        paths = ioMonNimPaths,
+        paths = testNimPaths,
         extraPassC = platformPassC,
         extraPassL = platformPassL & testRuntimePassL,
+        extraEnv = sourceOnlyEnv,
         cacheable = false)
       reprobuildTestBuildActions.add(edge.action)
       # B3: emit the EXECUTE edge.
@@ -526,8 +612,9 @@ package reprobuild:
       source = "apps/repro/repro.nim",
       binary = "build/bin/repro",
       defines = @["release"],
-      paths = ioMonNimPaths,
+      paths = ioMonNimPaths & sourceOnlyNimPaths,
       passL = reproRuntimePassL,
+      extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro",
       cacheable = false,
       actionId = "reprobuild.apps.repro"))
@@ -536,8 +623,9 @@ package reprobuild:
       source = "apps/repro-full/repro_full.nim",
       binary = "build/bin/repro-full",
       defines = @["release"],
-      paths = ioMonNimPaths,
+      paths = ioMonNimPaths & sourceOnlyNimPaths,
       passL = reproRuntimePassL,
+      extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-full",
       cacheable = false,
       actionId = "reprobuild.apps.repro-full"))
@@ -546,6 +634,8 @@ package reprobuild:
       source = "apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim",
       binary = "build/bin/repro-peer-cache-tier2",
       defines = @["release"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-peer-cache-tier2",
       cacheable = false,
       actionId = "reprobuild.apps.repro-peer-cache-tier2"))
@@ -554,6 +644,8 @@ package reprobuild:
       source = "apps/repro-peer-cache-admin/repro_peer_cache_admin.nim",
       binary = "build/bin/repro-peer-cache-admin",
       defines = @["release"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-peer-cache-admin",
       cacheable = false,
       actionId = "reprobuild.apps.repro-peer-cache-admin"))
@@ -562,6 +654,8 @@ package reprobuild:
       source = "apps/repro-peer-cache-mint-cert/repro_peer_cache_mint_cert.nim",
       binary = "build/bin/repro-peer-cache-mint-cert",
       defines = @["release"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-peer-cache-mint-cert",
       cacheable = false,
       actionId = "reprobuild.apps.repro-peer-cache-mint-cert"))
@@ -570,6 +664,8 @@ package reprobuild:
       source = "apps/repro-cmake-dyndep-fragment/repro_cmake_dyndep_fragment.nim",
       binary = "build/bin/repro-cmake-dyndep-fragment",
       defines = @["release"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-cmake-dyndep-fragment",
       cacheable = false,
       actionId = "reprobuild.apps.repro-cmake-dyndep-fragment"))
@@ -581,6 +677,8 @@ package reprobuild:
       binary = "build/bin/repro-cmake-trycompile-provider",
       nimcache = "build/nimcache/repro-cmake-trycompile-provider",
       defines = @["release", "reproProviderMode"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
       cacheable = false,
       actionId = "reprobuild.apps.repro-cmake-trycompile-provider"))
 
@@ -589,6 +687,8 @@ package reprobuild:
       binary = "build/bin/repro-standard-provider",
       nimcache = "build/nimcache/repro-standard-provider",
       defines = @["release", "reproProviderMode"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
       cacheable = false,
       actionId = "reprobuild.apps.repro-standard-provider"))
 
@@ -623,6 +723,8 @@ package reprobuild:
     reprobuildTestHelpersActions.add(nim.c(
       source = "tests/fixtures/local-daemons-control-plane/live-endpoint-helper/live_endpoint_helper.nim",
       binary = "build/test-bin/live_endpoint_helper",
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/live_endpoint_helper",
       cacheable = false,
       actionId = "reprobuild.test_helpers.live_endpoint_helper"))
@@ -630,6 +732,8 @@ package reprobuild:
     reprobuildTestHelpersActions.add(nim.c(
       source = "tests/fixtures/local-daemons-control-plane/fake-protocol-daemon-helper/fake_protocol_daemon_helper.nim",
       binary = "build/test-bin/fake_protocol_daemon_helper",
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/fake_protocol_daemon_helper",
       cacheable = false,
       actionId = "reprobuild.test_helpers.fake_protocol_daemon_helper"))
@@ -637,6 +741,8 @@ package reprobuild:
     reprobuildTestHelpersActions.add(nim.c(
       source = "tests/e2e/home-generations/harness_apply_lock_holder.nim",
       binary = "build/test-bin/harness_apply_lock_holder",
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/harness_apply_lock_holder",
       cacheable = false,
       actionId = "reprobuild.test_helpers.harness_apply_lock_holder"))
@@ -660,7 +766,9 @@ package reprobuild:
     reprobuildTestHelpersActions.add(nim.c(
       source = "apps/repro-binary-cache/repro_binary_cache.nim",
       binary = "build/test-bin/repro_binary_cache",
+      paths = sourceOnlyNimPaths,
       passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_binary_cache",
       cacheable = false,
       actionId = "reprobuild.test_helpers.repro_binary_cache"))
@@ -669,7 +777,9 @@ package reprobuild:
       source = "apps/repro-binary-cache/repro_binary_cache.nim",
       binary = "build/test-bin/repro_binary_cache_m6",
       defines = @["ssl"],
+      paths = sourceOnlyNimPaths,
       passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_binary_cache_m6",
       cacheable = false,
       actionId = "reprobuild.test_helpers.repro_binary_cache_m6"))
@@ -678,7 +788,9 @@ package reprobuild:
       source = "apps/repro-binary-cache-client/repro_binary_cache_client_cli.nim",
       binary = "build/test-bin/repro_binary_cache_client_cli",
       defines = @["ssl"],
+      paths = sourceOnlyNimPaths,
       passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_binary_cache_client_cli",
       cacheable = false,
       actionId = "reprobuild.test_helpers.repro_binary_cache_client_cli"))

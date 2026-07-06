@@ -278,7 +278,7 @@ proc acquireUrlLayer(
     receiptPath = receiptPath,
     revision = revision)
   action.cwd = workspaceRoot
-  let cacheRoot = dotRepo / "engine-cache"
+  let cacheRoot = workspaceRoot / ".repro" / "engine-cache"
   var config = defaultBuildEngineConfig(cacheRoot)
   config.suppressTrace = true
   let res = runBuild(graph([action]), config)
