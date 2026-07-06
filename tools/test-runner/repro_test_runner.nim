@@ -919,6 +919,16 @@ proc putEnvIfUnsetDir(name, path: string) =
   if getEnv(name).len == 0 and dirExists(path):
     putEnv(name, path)
 
+proc findNixStoreSourceDir(namePart, marker: string): string =
+  when defined(posix):
+    let storeRoot = "/nix/store"
+    if dirExists(storeRoot):
+      for kind, path in walkDir(storeRoot):
+        if kind == pcDir and namePart in path.lastPathPart and
+            fileExists(path / marker):
+          return path
+  ""
+
 proc ensureWorkspaceSourceEnv(repoRoot: string) =
   ## Nested repro builds compile provider/interface helpers from scratch
   ## projects, often against a /nix/store source snapshot. In that context
@@ -935,6 +945,11 @@ proc ensureWorkspaceSourceEnv(repoRoot: string) =
   putEnvIfUnsetDir("CODETRACER_SRC", parent / "codetracer" / "src")
   putEnvIfUnsetDir("STACKABLE_HOOKS_SRC",
     parent / "nim-stackable-hooks" / "src")
+  putEnvIfUnsetDir("BEARSSL_SRC", parent / "nim-bearssl")
+  if getEnv("BEARSSL_SRC").len == 0:
+    let bearssl = findNixStoreSourceDir("nim-bearssl-", "bearssl.nim")
+    if bearssl.len > 0:
+      putEnv("BEARSSL_SRC", bearssl)
 
 proc main() =
   let opts = parseArgs()
