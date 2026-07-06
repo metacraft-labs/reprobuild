@@ -827,7 +827,8 @@ proc executeForcePushRebase(payload: GitVcsPayload;
   let commitsToCherryPick = listRes.output.strip().splitLines()
 
   # 2. Reset the branch to the remote tracking tip
-  let remoteRef = "refs/remotes/origin/" & payload.branchName
+  let rName = if payload.remoteName.len > 0: payload.remoteName else: "origin"
+  let remoteRef = "refs/remotes/" & rName & "/" & payload.branchName
   let resetRes = runGit(payload,
     ["-C", target, "reset", "--hard", remoteRef])
   if resetRes.exitCode != 0:
@@ -1129,12 +1130,13 @@ proc gitForceResetAction*(id: string; identity: GitToolIdentity;
 
 proc gitForcePushRebaseAction*(id: string; identity: GitToolIdentity;
                               branchName, baseSha, repoPath, receiptPath: string;
+                              remoteName: string = "origin";
                               cwd = ""; deps: openArray[string] = [];
                               cacheable = false): BuildAction =
   ## Construct a force-push rebase action. The executor runs
   ## executeForcePushRebase, which resets the branch to the remote branch tip
   ## and cherry-picks the locally authored commits since `baseSha`.
-  let payload = buildPayload(identity, gvoForcePushRebase, "", "origin",
+  let payload = buildPayload(identity, gvoForcePushRebase, "", remoteName,
     branchName, "", repoPath, receiptPath, baseSha = baseSha)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,

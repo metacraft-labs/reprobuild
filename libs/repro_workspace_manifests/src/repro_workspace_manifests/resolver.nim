@@ -410,14 +410,14 @@ proc resolveProject*(projectFile: string): ResolvedProject =
       
       let primaryName = if fragmentRemote.len > 0: fragmentRemote else: resolvedRemotes[0].name
       resolved.remoteName = primaryName
-      var primaryUrl = ""
+      var primaryProjectRemote = ""
       for r in resolvedRemotes:
         if r.name == primaryName:
-          primaryUrl = r.fetchUrl
+          primaryProjectRemote = r.remoteName
           break
-      if primaryUrl.len == 0:
-        primaryUrl = resolvedRemotes[0].fetchUrl
-      resolved.fetchUrl = primaryUrl
+      if primaryProjectRemote.len == 0:
+        primaryProjectRemote = resolvedRemotes[0].remoteName
+      resolved.fetchUrl = remotes[primaryProjectRemote]
     else:
       if resolved.remoteName notin remotes:
         raiseManifestError(absProject,
@@ -426,7 +426,7 @@ proc resolveProject*(projectFile: string): ResolvedProject =
           "fragment '" & rawInclude & "' references unknown remote '" &
             resolved.remoteName & "' (not declared in the project's [[remote]] table)")
       let fullUrl = getFetchUrl(remotes[resolved.remoteName], fragment.repo.name)
-      resolved.fetchUrl = fullUrl
+      resolved.fetchUrl = remotes[resolved.remoteName]
       resolvedRemotes.add(ResolvedRemote(name: "origin", remoteName: resolved.remoteName, fetchUrl: fullUrl))
 
     resolved.remotes = resolvedRemotes
@@ -686,14 +686,14 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
       
       let primaryName = if fragmentRemote.len > 0: fragmentRemote else: resolvedRemotes[0].name
       resolved.remoteName = primaryName
-      var primaryUrl = ""
+      var primaryProjectRemote = ""
       for r in resolvedRemotes:
         if r.name == primaryName:
-          primaryUrl = r.fetchUrl
+          primaryProjectRemote = r.remoteName
           break
-      if primaryUrl.len == 0:
-        primaryUrl = resolvedRemotes[0].fetchUrl
-      resolved.fetchUrl = primaryUrl
+      if primaryProjectRemote.len == 0:
+        primaryProjectRemote = resolvedRemotes[0].remoteName
+      resolved.fetchUrl = remotes[primaryProjectRemote]
     else:
       if resolved.remoteName notin remotes:
         raiseManifestError(absVariant,
@@ -702,7 +702,7 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
           "fragment '" & rawInclude & "' references unknown remote '" &
             resolved.remoteName & "' (not declared in the base project's [[remote]] table)")
       let fullUrl = getFetchUrl(remotes[resolved.remoteName], fragment.repo.name)
-      resolved.fetchUrl = fullUrl
+      resolved.fetchUrl = remotes[resolved.remoteName]
       resolvedRemotes.add(ResolvedRemote(name: "origin", remoteName: resolved.remoteName, fetchUrl: fullUrl))
 
     resolved.remotes = resolvedRemotes
@@ -794,7 +794,7 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
             "' which is not declared in the base project's [[remote]] table")
       let fullUrl = getFetchUrl(remotes[newRemote], result.repos[matchedIdx].name)
       result.repos[matchedIdx].remoteName = newRemote
-      result.repos[matchedIdx].fetchUrl = fullUrl
+      result.repos[matchedIdx].fetchUrl = remotes[newRemote]
       
       # Sync the remotes list
       if result.repos[matchedIdx].remotes.len > 0:

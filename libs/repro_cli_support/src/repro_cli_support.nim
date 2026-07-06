@@ -58,6 +58,12 @@ import repro_hcr_linkgraph
 import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/dev_session
+
+proc cloneUrlFor*(repo: ResolvedRepo): string =
+  result = repo.fetchUrl
+  for r in repo.remotes:
+    if r.name == repo.remoteName or r.remoteName == repo.remoteName:
+      return r.fetchUrl
 import repro_cli_support/dev_env_shell_export
 import repro_cli_support/dev_env_rollback_manifest
 import repro_cli_support/dev_env_shell_hook_templates
@@ -17693,7 +17699,7 @@ proc executeWorkspaceDevelop(args: WorkspaceDevelopArgs):
       result.exitCode = 1
       return result
     let cloneRes = cloneForDevelop(args.workspaceRoot, args.package,
-      matched.fetchUrl, matched.revision, identity)
+      cloneUrlFor(matched), matched.revision, identity)
     if not cloneRes.ok:
       result.mode = "error"
       result.diagnostic = cloneRes.diagnostic
@@ -19541,16 +19547,18 @@ proc revParse(identity: GitToolIdentity;
     ""
 
 proc expectedBranchTip(identity: GitToolIdentity;
-                       repoPath, branch: string): string =
+                       repoPath, branch: string;
+                       remoteName: string = "origin"): string =
   ## Resolve the *expected* tip for a branch-pinned manifest. The
   ## divergence check is "does the working tree's HEAD match what the
   ## upstream branch points at" — we therefore consult the
-  ## remote-tracking branch first (``refs/remotes/origin/<branch>``
+  ## remote-tracking branch first (``refs/remotes/<remoteName>/<branch>``
   ## after a fresh clone) and fall back to the local branch only when
   ## no remote-tracking ref exists. Any other arrangement would
   ## misclassify a checkout that has local-only commits beyond the
   ## manifest pin (which is exactly the divergence M9 must surface).
-  let remoteTip = revParse(identity, repoPath, "refs/remotes/origin/" & branch)
+  let rName = if remoteName.len > 0: remoteName else: "origin"
+  let remoteTip = revParse(identity, repoPath, "refs/remotes/" & rName & "/" & branch)
   if remoteTip.len > 0:
     return remoteTip
   revParse(identity, repoPath, branch)
@@ -19608,7 +19616,7 @@ proc classifyExistingRepo(
     # back to the local branch when no remote-tracking ref exists.
     # Any other state (detached HEAD, ahead of origin, behind origin)
     # is a divergence: the user has work to do.
-    let branchTip = expectedBranchTip(identity, repoPath, repo.revision)
+    let branchTip = expectedBranchTip(identity, repoPath, repo.revision, remoteName = repo.remoteName)
     if branchTip.len > 0 and branchTip == headSha:
       upToDate.add(WorkspaceInitUpToDateEntry(
         name: repo.name, path: repo.path, headSha: headSha))
@@ -19726,16 +19734,17 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
   ##
   ## A private companion manifest (``--private-manifest-url``) is cloned
   ## into the PARALLEL private cache (``…/manifests-private``) and
-  ## materialised at ``.repro/manifests-private`` — a separate cache tree
+  ## materialised at ``.repo/manifests-private`` — a separate cache tree
   ## so the two never share a slug namespace.
   if args.manifestUrl.len == 0:
     return
-  let manifestsDir = args.workspaceRoot
+  let manifestsDir = args.workspaceRoot / ".repo" / "manifests"
   if dirExists(manifestsDir / "projects"):
     # Already have a manifest checkout — bootstrap is a no-op (a sibling
     # checkout or a prior bootstrap already populated it).
     return
   let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
+  createDir(args.workspaceRoot / ".repo")
   createDir(args.workspaceRoot / ".repro")
 
   let cacheRoot = defaultManifestCacheRoot(private = false)
@@ -19772,7 +19781,7 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
     copyDir(cached.sharedBarePath, manifestsDir)
 
   if args.privateManifestUrl.len > 0:
-    let privateDir = args.workspaceRoot / ".repro" / "manifests-private"
+    let privateDir = args.workspaceRoot / ".repo" / "manifests-private"
     if not dirExists(privateDir):
       let privateCacheRoot = defaultManifestCacheRoot(private = true)
       let privCached = ensureManifestCache(identity.binaryPath,
@@ -20126,12 +20135,13 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
       ("clone-" & safeRepoIdSegment(repo.name) & "-" & $idx & ".receipt")
     let cloneId = "workspace-init-clone-" & safeRepoIdSegment(repo.name) &
       "-" & $idx
+    let initCloneUrl = cloneUrlFor(repo)
     var action = gitCloneAction(cloneId, identity,
-      remoteUrl = repo.fetchUrl,
+      remoteUrl = initCloneUrl,
       repoPath = repo.path,
       receiptPath = receiptRel,
       revision = repo.revision,
-      referencePath = sharedReferenceFor(repo.fetchUrl),
+      referencePath = sharedReferenceFor(initCloneUrl),
       cloneFilter = repo.cloneFilter,
       depth = repo.depth,
       singleBranch = repo.singleBranch)
@@ -20145,7 +20155,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
     cloneActions.add(action)
     cloneEntries.add(WorkspaceInitClonedEntry(
       name: repo.name, path: repo.path,
-      remote: repo.fetchUrl, revision: repo.revision))
+      remote: initCloneUrl, revision: repo.revision))
 
   if cloneActions.len > 0:
     let cacheRoot = args.workspaceRoot / ".repro" / "workspace" /
@@ -21924,7 +21934,8 @@ type
     diagnostic*: string
 
 proc gatherRepoEvidence*(identity: GitToolIdentity;
-    repoAbsPath, recordPath, toolDigestHex: string; observedAtUnixMs: int64):
+    repoAbsPath, recordPath, toolDigestHex: string; observedAtUnixMs: int64;
+    remoteName: string = "origin"):
     seq[WorkspaceVcsEvidence] =
   ## Observe the source-free head-sha / is-clean / is-published triple for a
   ## repo's LOCAL checkout at ``repoAbsPath``. The OWNER of an evidence-only
@@ -21935,7 +21946,7 @@ proc gatherRepoEvidence*(identity: GitToolIdentity;
   ## record (never the absolute on-disk path).
   let headRes = queryGitState(headShaQuery(repoAbsPath), identity)
   let cleanRes = queryGitState(isCleanQuery(repoAbsPath), identity)
-  let pubRes = queryGitState(isPublishedQuery(repoAbsPath, "origin"), identity)
+  let pubRes = queryGitState(isPublishedQuery(repoAbsPath, remoteName), identity)
   @[
     workspaceVcsEvidence.evidenceFor(
       headRes, recordPath, wvqHeadSha, toolDigestHex, observedAtUnixMs),
@@ -22093,8 +22104,9 @@ proc publishRoutedEvidence*(workspaceRoot: string;
         "from — the OWNER publishes from a clean, published checkout at the " &
         "locked revision"
       result.add(outc); continue
+    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
     let triple = gatherRepoEvidence(
-      identity, repoAbs, repo.path, toolDigest, observedAtUnixMs)
+      identity, repoAbs, repo.path, toolDigest, observedAtUnixMs, remoteName = rName)
     for rec in triple:
       if rec.op == wvqHeadSha and rec.status == wvesResolved:
         outc.headSha = rec.headSha
@@ -22413,28 +22425,29 @@ proc observeRepoForSync(identity: GitToolIdentity;
     result.currentBranch = branchRes.output.strip()
 
   # Branch tips (local + remote-tracking).
+  let rName = if resolved.remoteName.len > 0: resolved.remoteName else: "origin"
   if result.currentBranch.len > 0:
     result.localBranchTip = revParse(identity, repoPath,
       "refs/heads/" & result.currentBranch)
     result.remoteBranchTip = revParse(identity, repoPath,
-      "refs/remotes/origin/" & result.currentBranch)
+      "refs/remotes/" & rName & "/" & result.currentBranch)
 
   # Where does the manifest's revision actually point in this clone?
-  # SHA pin → itself; branch pin → ``origin/<branch>`` (matches M9's
+  # SHA pin → itself; branch pin → ``remoteName/<branch>`` (matches M9's
   # ``expectedBranchTip``).
   if resolved.revision.len > 0:
     if looksLikeSha(resolved.revision):
       result.lockedRevisionTip = resolved.revision
     else:
       result.lockedRevisionTip = expectedBranchTip(identity, repoPath,
-        resolved.revision)
+        resolved.revision, remoteName = rName)
 
   # Unpublished commits: the M2 ``isPublished`` query already answers
   # "is HEAD on any remote tracking branch". We also fall back to the
   # local-vs-remote tip compare when ``isPublished`` cannot be probed
   # (e.g. brand-new branch with no upstream).
   let pubRes = queryGitState(
-    isPublishedQuery(repoPath, "origin"), identity)
+    isPublishedQuery(repoPath, rName), identity)
   if pubRes.status == gqsOk:
     result.hasUnpublishedCommits = not pubRes.isPublished
   else:
@@ -22517,8 +22530,9 @@ proc syncFetchActionFor(identity: GitToolIdentity; workspaceRoot: string;
   var deps: seq[string]
   if sharedBareRefreshDep.len > 0:
     deps.add(sharedBareRefreshDep)
+  let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
   result = action(id,
-    @[identity.binaryPath, "-C", repoAbs, "fetch", "--quiet", "origin"],
+    @[identity.binaryPath, "-C", repoAbs, "fetch", "--quiet", rName],
     cwd = workspaceRoot,
     deps = deps,
     pool = SyncFetchPool,
@@ -22567,7 +22581,7 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
     # action is scheduled for it at all — only the genuinely-incomplete
     # repo pays for the re-clone.
     var a = gitCloneAction("workspace-sync-clone-" & idSeg, identity,
-      remoteUrl = resolved.fetchUrl,
+      remoteUrl = cloneUrlFor(resolved),
       repoPath = resolved.path,
       receiptPath = receiptRel,
       revision = resolved.revision,
@@ -22587,8 +22601,9 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
     # engine action (RA-5c: no more synchronous ``gitRunPlain`` merge).
     let receiptRel = ".repro" / "workspace" / "receipts" /
       ("sync-merge-ff-" & idSeg & ".receipt")
+    let rName = if resolved.remoteName.len > 0: resolved.remoteName else: "origin"
     var a = gitMergeFfAction("workspace-sync-merge-ff-" & idSeg, identity,
-      remoteName = "origin",
+      remoteName = rName,
       branchName = decision.branch,
       repoPath = resolved.path,
       receiptPath = receiptRel)
@@ -22616,11 +22631,13 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
   of saForcePushRebase:
     let receiptRel = ".repro" / "workspace" / "receipts" /
       ("sync-force-push-rebase-" & idSeg & ".receipt")
+    let rName = if resolved.remoteName.len > 0: resolved.remoteName else: "origin"
     var a = gitForcePushRebaseAction("workspace-sync-force-push-rebase-" & idSeg, identity,
       branchName = decision.branch,
       baseSha = decision.forcePushedBaseSha,
       repoPath = resolved.path,
-      receiptPath = receiptRel)
+      receiptPath = receiptRel,
+      remoteName = rName)
     a.cwd = workspaceRoot
     return (true, a, "", "")
 
@@ -22948,7 +22965,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # workspace genuinely needs.
   var lockedShasByPath = initTable[string, string]()
   block:
-    let manifestsRoot = args.workspaceRoot
+    let manifestsRoot = manifestsRoot(args.workspaceRoot)
     if dirExists(manifestsRoot / "projects") and resolved.projectName.len > 0:
       try:
         # MO-10: route the RA-14 optimized-fetch lock read through the abstract
@@ -23704,25 +23721,27 @@ proc resolveWorkspacePullProject(parsed: WorkspacePullArgs): ResolvedProject =
 
 proc convergeRepoToManifestRevision(
     identity: GitToolIdentity;
-    repoPath, revision: string): tuple[ok: bool; branch, headSha, diag: string] =
+    repoPath, revision: string;
+    remoteName: string = "origin"): tuple[ok: bool; branch, headSha, diag: string] =
   ## ``ensureRepoTrackingBranches`` core (RA-11). Put the existing
   ## checkout at ``repoPath`` onto a LOCAL TRACKING BRANCH matching the
   ## manifest-declared ``revision``, with HEAD at that revision.
   ##
-  ##   - Branch-named revision (e.g. ``dev``): fetch ``origin``, then
+  ##   - Branch-named revision (e.g. ``dev``): fetch remote, then
   ##     ensure a local branch ``<revision>`` exists tracking
-  ##     ``origin/<revision>``, check it out, and fast-forward it to the
+  ##     ``<remoteName>/<revision>``, check it out, and fast-forward it to the
   ##     remote tip. The steady state is "on branch ``<revision>`` at
-  ##     ``origin/<revision>``".
-  ##   - SHA-pinned revision: fetch ``origin``, then create / reset a
+  ##     ``<remoteName>/<revision>``".
+  ##   - SHA-pinned revision: fetch remote, then create / reset a
   ##     synthetic local tracking branch
   ##     ``reprobuild/pinned/<short-sha>`` at the pinned SHA and check it
   ##     out, so HEAD is at the SHA but ATTACHED to a branch (never
   ##     detached — the spec's explicit requirement).
-  # Always fetch first so origin/<branch> reflects the manifest's
+  # Always fetch first so <remoteName>/<branch> reflects the manifest's
   # upstream tip (pull is a network-converge op, unlike a pure checkout).
+  let rName = if remoteName.len > 0: remoteName else: "origin"
   let fetched = gitRunPlain(identity, ["-C", repoPath, "fetch", "--quiet",
-    "--prune", "origin"])
+    "--prune", rName])
   if fetched.code != 0:
     return (false, "", "",
       "git fetch failed: " & fetched.output.strip())
@@ -23752,14 +23771,14 @@ proc convergeRepoToManifestRevision(
     return (true, branch, head, "")
 
   # Branch-named revision. Resolve the remote-tracking tip first.
-  let remoteTip = revParse(identity, repoPath, "refs/remotes/origin/" & revision)
+  let remoteTip = revParse(identity, repoPath, "refs/remotes/" & rName & "/" & revision)
   if remoteTip.len == 0:
     return (false, "", "",
-      "no remote-tracking branch 'origin/" & revision & "' after fetch")
-  # Create the local branch tracking origin/<revision> if it does not yet
+      "no remote-tracking branch '" & rName & "/" & revision & "' after fetch")
+  # Create the local branch tracking <remoteName>/<revision> if it does not yet
   # exist; ``checkout -B`` resets it to the remote tip and attaches HEAD.
   let co = gitRunPlain(identity, ["-C", repoPath, "checkout", "--quiet",
-    "-B", revision, "--track", "refs/remotes/origin/" & revision])
+    "-B", revision, "--track", "refs/remotes/" & rName & "/" & revision])
   if co.code != 0:
     return (false, "", "",
       "could not converge to tracking branch '" & revision & "': " &
@@ -23827,12 +23846,13 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
       let idSeg = safeRepoIdSegment(repo.name) & "-" & $idx
       let receiptRel = ".repro" / "workspace" / "receipts" /
         ("pull-clone-" & idSeg & ".receipt")
+      let pullCloneUrl = cloneUrlFor(repo)
       var action = gitCloneAction("workspace-pull-clone-" & idSeg, identity,
-        remoteUrl = repo.fetchUrl,
+        remoteUrl = pullCloneUrl,
         repoPath = repo.path,
         receiptPath = receiptRel,
         revision = repo.revision,
-        referencePath = sharedReferenceFor(repo.fetchUrl),
+        referencePath = sharedReferenceFor(pullCloneUrl),
         cloneFilter = repo.cloneFilter,
         depth = repo.depth,
         singleBranch = repo.singleBranch)
@@ -23861,7 +23881,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
 
     # Converge to the manifest revision on a local tracking branch.
     let converged = convergeRepoToManifestRevision(
-      identity, absPath, repo.revision)
+      identity, absPath, repo.revision, remoteName = repo.remoteName)
     if not converged.ok:
       entry.outcome = pullOutcomeTag(ppoFailed)
       entry.diagnostic = converged.diag
@@ -25339,8 +25359,9 @@ proc refreshEvidenceOnlyRepoAtPostCommit(workspaceRoot, currentRepoAbs: string):
   # Gather + publish the source-free triple (NO source captured).
   try:
     let toolDigest = digestHex(identity)
+    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
     let triple = gatherRepoEvidence(
-      identity, repoAbs, repo.path, toolDigest, getTime().toUnix * 1000)
+      identity, repoAbs, repo.path, toolDigest, getTime().toUnix * 1000, remoteName = rName)
     let put = store.putEvidence(projectName, repo.name, triple)
     if put.outcome == spoOk:
       return "evidence refreshed: '" & repo.name & "' at head-sha " & currentHead
@@ -27518,7 +27539,7 @@ proc installGatewayHooks*(gatewayBareDir: string) =
     inclFilePermissions(post, {fpUserExec, fpGroupExec, fpOthersExec})
 
 proc wirePushGateway*(gitBin, repoPath, gatewayBareDir, upstreamUrl: string;
-                      cfg: GatewayConfig):
+                      cfg: GatewayConfig; remoteName: string = "origin"):
     tuple[ok: bool; diagnostic: string] =
   ## CLONE-TIME wiring (Test-Certificates.md §"Enforcement"): make the
   ## daemon-managed BARE repo at ``gatewayBareDir`` the repo's push remote so a
@@ -27528,8 +27549,8 @@ proc wirePushGateway*(gitBin, repoPath, gatewayBareDir, upstreamUrl: string;
   ##   2. Install the gateway's ``pre-receive`` + ``post-receive`` hooks.
   ##   3. Write the daemon-owned ``GatewayConfig`` (policy + lock + registered
   ##      keys + the real upstream to forward to) under the bare dir.
-  ##   4. Set ``remote.origin.pushurl`` of ``repoPath`` to the gateway bare,
-  ##      while ``remote.origin.url`` (FETCH) stays the real upstream — so the
+  ##   4. Set ``remote.<remoteName>.pushurl`` of ``repoPath`` to the gateway bare,
+  ##      while ``remote.<remoteName>.url`` (FETCH) stays the real upstream — so the
   ##      developer still fetches from upstream but PUSHES through the gateway.
   ## The fetch/push split is the load-bearing piece: it routes the OUTBOUND
   ## push through the gateway's ``pre-receive`` without disturbing fetches.
@@ -27548,7 +27569,7 @@ proc wirePushGateway*(gitBin, repoPath, gatewayBareDir, upstreamUrl: string;
   # transport"); no ``file://`` wrapper is needed and a plain path avoids the
   # URL-encoding / Windows-drive pitfalls of ``file://``.
   let setRes = gitNoteRun(gitBin,
-    ["-C", repoPath, "remote", "set-url", "--push", "origin",
+    ["-C", repoPath, "remote", "set-url", "--push", remoteName,
      absolutePath(gatewayBareDir)])
   if setRes.code != 0:
     return (ok: false, diagnostic: "git remote set-url --push failed: " &
@@ -28262,8 +28283,9 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       obs.isClean = cleanRes.isClean
     else:
       obs.cleanDiagnostic = cleanRes.diagnostic
+    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
     let pubRes = queryGitState(
-      isPublishedQuery(absRepo, "origin"), identity)
+      isPublishedQuery(absRepo, rName), identity)
     if pubRes.status == gqsOk:
       obs.isPublished = pubRes.isPublished
     else:
@@ -29559,18 +29581,19 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
     # Detached HEAD — nothing branch-scoped to reconcile.
     return
   let branch = branchRes.output.strip()
+  let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
   # Fetch the upstream so the remote-tracking ref reflects teammate movement.
   let fetchRes = gitRunPlain(identity, ["-C", repoAbs, "fetch", "--quiet",
-    "origin"])
+    rName])
   if fetchRes.code != 0:
     result.stopped = true
-    result.diagnostic = "git fetch origin failed in " & repo.path & ": " &
+    result.diagnostic = "git fetch " & rName & " failed in " & repo.path & ": " &
       fetchRes.output.strip()
     result.remediation = "check connectivity / credentials for " & repo.path &
       " then re-run 'repro push --sync'"
     return
   let head = revParse(identity, repoAbs, "HEAD")
-  let upstream = revParse(identity, repoAbs, "refs/remotes/origin/" & branch)
+  let upstream = revParse(identity, repoAbs, "refs/remotes/" & rName & "/" & branch)
   if upstream.len == 0 or head.len == 0 or head == upstream:
     return
   # Is upstream already contained in HEAD? (we're strictly ahead — pure
@@ -29718,8 +29741,8 @@ proc executePush(args: PushArgs): PushReport =
   # and run ``repro push`` purely to ship the attestation). Best-effort: a
   # note-push failure is reported but never fails the branch publication.
   proc carryCertNotes(report: var PushReport;
-                      gitBin, repoAbs, repoPath: string) =
-    let notePush = pushCertificateNotes(gitBin, repoAbs, "origin")
+                      gitBin, repoAbs, repoPath, remoteName: string) =
+    let notePush = pushCertificateNotes(gitBin, repoAbs, remoteName)
     if notePush.pushed:
       report.certNotesPushed.add(repoPath)
     elif not notePush.ok:
@@ -29781,7 +29804,10 @@ proc executePush(args: PushArgs): PushReport =
       return
     # Published? (reuses the gate's publication probe.) Already-published is a
     # benign noop; unpublished commits get pushed.
-    let pubRes = queryGitState(isPublishedQuery(repoAbs, "origin"), identity)
+    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+    # Published? (reuses the gate's publication probe.) Already-published is a
+    # benign noop; unpublished commits get pushed.
+    let pubRes = queryGitState(isPublishedQuery(repoAbs, rName), identity)
     let isPublished =
       if pubRes.status == gqsOk: pubRes.isPublished
       else: false
@@ -29790,7 +29816,7 @@ proc executePush(args: PushArgs): PushReport =
       result.repos.add(entry)
       # TC-2: ship any attached certificates even though the commit is already
       # published (the cert may have been issued/attached after the push).
-      carryCertNotes(result, identity.binaryPath, repoAbs, repo.path)
+      carryCertNotes(result, identity.binaryPath, repoAbs, repo.path, rName)
       continue
     if entry.branch.len == 0:
       # Unpublished work on a detached HEAD: we have no branch to push. STOP
@@ -29805,10 +29831,10 @@ proc executePush(args: PushArgs): PushReport =
       result.exitCode = 2
       return
     let pushRes = gitRunPlain(identity,
-      ["-C", repoAbs, "push", "origin", "HEAD:" & entry.branch])
+      ["-C", repoAbs, "push", rName, "HEAD:" & entry.branch])
     if pushRes.code != 0:
       entry.outcome = proFailed
-      entry.diagnostic = "git push origin HEAD:" & entry.branch &
+      entry.diagnostic = "git push " & rName & " HEAD:" & entry.branch &
         " failed in " & repo.path & ": " & pushRes.output.strip()
       entry.remediation = "resolve the push failure in " & repo.path &
         " (fetch + reconcile, then re-run 'repro push --sync')"
@@ -29821,7 +29847,7 @@ proc executePush(args: PushArgs): PushReport =
     # SAME upstream by pushing the certificate notes ref alongside the branch.
     # Notes are not pushed by default, so this is the explicit step that makes
     # the attestations travel.
-    carryCertNotes(result, identity.binaryPath, repoAbs, repo.path)
+    carryCertNotes(result, identity.binaryPath, repoAbs, repo.path, rName)
 
   # ---- 3. certificate slot (FLAG only; obtain+attach deferred to TC) -----
   runPushCertifyStub(result, args.certify)
@@ -31471,13 +31497,13 @@ proc layerCheckoutPathFor(workspaceRoot: string; layerIdx: int;
     let suffix =
       if sanitizedSegments.len > 0: sanitizedSegments
       else: "layer"
-    let reproPath = workspaceRoot / ".repro" /
-      ("manifests-" & $layerIdx & "-" & suffix)
-    if dirExists(reproPath): return reproPath
     let repoPath = workspaceRoot / ".repo" /
       ("manifests-" & $layerIdx & "-" & suffix)
     if dirExists(repoPath): return repoPath
-    return reproPath
+    let reproPath = workspaceRoot / ".repro" /
+      ("manifests-" & $layerIdx & "-" & suffix)
+    if dirExists(reproPath): return reproPath
+    return repoPath
   ""
 
 proc executeWorkspaceManifests(args: WorkspaceManifestsArgs):
@@ -33113,7 +33139,7 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
     # truthful answer even before any fetch. The standard remote name
     # after ``git clone`` is ``origin``.
     let remoteName =
-      if repo.remoteName.len > 0: "origin" else: "origin"
+      if repo.remoteName.len > 0: repo.remoteName else: "origin"
     let lsRemote = gitRunPlain(identity,
       ["-C", state.repoPath, "ls-remote", "--heads", remoteName,
        parsed.branchName])
@@ -33337,8 +33363,9 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
          "-" & $idx & ".receipt")
       let fetchActionId = "workspace-checkout-fetch-" &
         safeRepoIdSegment(state.repo.name) & "-" & $idx
+      let rName = if state.repo.remoteName.len > 0: state.repo.remoteName else: "origin"
       var fetchAction = gitFetchAction(fetchActionId, identity,
-        remoteName = "origin",
+        remoteName = rName,
         repoPath = state.repo.path,
         receiptPath = fetchReceiptRel)
       fetchAction.cwd = parsed.workspaceRoot
@@ -34538,9 +34565,10 @@ proc executeWorkspaceStart(parsed: WorkspaceStartArgs): WorkspaceStartReport =
        "refs/heads/" & parsed.branchName])
     if localProbe.code == 0 and localProbe.output.strip().len > 0:
       state.localHadBranch = true
-    # Probe remote branch (origin).
+    # Probe remote branch.
+    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
     let remoteProbe = gitRunPlain(identity,
-      ["-C", state.repoPath, "ls-remote", "--heads", "origin",
+      ["-C", state.repoPath, "ls-remote", "--heads", rName,
        parsed.branchName])
     if remoteProbe.code == 0 and remoteProbe.output.strip().len > 0:
       state.remoteHadBranch = true
