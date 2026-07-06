@@ -266,11 +266,10 @@ esac
 # PATH.
 #
 # Source resolution policy: prefer the clingo.exe sibling on PATH at build
-# time, then fall back to explicit install roots that env.ps1 exposes. CI can
-# run this script through bash with a PATH that does not see PowerShell's
-# freshly prepended clingo dir, but env.ps1 still exports
-# WINDOWS_DIY_INSTALL_ROOT and the provisioner always installs clingo.dll under
-# clingo/<version>/bin.
+# time, then fall back to explicit install roots that env.ps1 exposes. CI's
+# setup-reprobuild action sets CLINGO_PREFIX after extracting the pinned
+# conda-forge solver runtime; local Windows shells may also use CLINGO_PREFIX
+# or a shared toolchain root once they have provisioned clingo.
 #
 # When clingo.exe is not on PATH (e.g. a non-env.ps1 dev shell on a
 # host that has never run the bootstrap), we surface a warning rather
