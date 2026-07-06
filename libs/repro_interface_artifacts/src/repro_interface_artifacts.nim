@@ -8,9 +8,17 @@ import repro_domain_types
 import repro_hash
 import repro_project_dsl
 
-const BuiltNimCompilerPath = staticExec("command -v nim").strip()
+proc sanitizeStaticExec(val: string): string =
+  var cleanLines: seq[string] = @[]
+  for line in val.splitLines:
+    let s = line.strip()
+    if s.len > 0 and not s.startsWith("io-mon:"):
+      cleanLines.add(s)
+  if cleanLines.len > 0: cleanLines[^1] else: ""
+
+const BuiltNimCompilerPath = sanitizeStaticExec(staticExec("command -v nim"))
 const BuiltCCompilerPath =
-  staticExec("command -v cc || command -v gcc || true").strip()
+  sanitizeStaticExec(staticExec("command -v cc || command -v gcc || true"))
 
 var interfaceTempNonce = uint64(getCurrentProcessId())
 

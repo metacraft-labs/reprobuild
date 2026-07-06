@@ -178,6 +178,16 @@ proc readReport(workspaceRoot: string): JsonNode =
   check fileExists(reportPath)
   parseFile(reportPath)
 
+proc canonical(path: string): string =
+  try:
+    normalizedPath(expandFilename(path))
+  except OSError, CatchableError:
+    let parent = path.parentDir
+    if parent.len > 0 and parent != path:
+      canonical(parent) / path.lastPathPart
+    else:
+      normalizedPath(absolutePath(path))
+
 proc findLayerByProvenance(layers: JsonNode; provenance: string): JsonNode =
   for entry in layers:
     if entry["provenance"].getStr() == provenance:
@@ -266,10 +276,10 @@ suite "M12 — repro workspace manifests (enumerates layers)":
 
       # The layer's on-disk checkout path must follow the composer's
       # ``manifests-<i>-<sanitized>`` convention.
-      check publicLayer["layerCheckoutPath"].getStr().startsWith(
-        workspaceRoot / ".repo" / "manifests-0-")
-      check privateLayer["layerCheckoutPath"].getStr().startsWith(
-        workspaceRoot / ".repo" / "manifests-1-")
+      check canonical(publicLayer["layerCheckoutPath"].getStr()).startsWith(
+        canonical(workspaceRoot / ".repo" / "manifests-0-"))
+      check canonical(privateLayer["layerCheckoutPath"].getStr()).startsWith(
+        canonical(workspaceRoot / ".repo" / "manifests-1-"))
 
   test "test_m12_manifests_no_workspace_toml_prints_no_layered_line":
     # No workspace.toml in this fixture; the subcommand should not

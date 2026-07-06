@@ -42,6 +42,13 @@ proc ensureReproFullCompanion(repoRoot, tempRoot: string) =
       "--nimcache:" & (tempRoot / "nimcache-repro-full"),
       "--out:" & dest, repoRoot / "apps" / "repro-full" / "repro_full.nim"])
   markExecutable(dest)
+  try:
+    let canonicalDest = expandFilename(tempRoot) / reproFull
+    if canonicalDest != dest and not fileExists(canonicalDest):
+      copyFile(dest, canonicalDest)
+      markExecutable(canonicalDest)
+  except OSError, CatchableError:
+    discard
 
 proc valueAfter(output, prefix: string): string =
   for line in output.splitLines:
