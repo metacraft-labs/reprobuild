@@ -91,8 +91,13 @@ suite "Deferred Item D2: <pkg>:<target> cross-project selector recognised":
         let runquotadBinary = runquotaCheckout / "build" / "bin" /
           addFileExt("runquotad", ExeExt)
         # Remove any stale artifact so the post-invocation check
-        # measures whether THIS run produced the binary.
-        if fileExists(runquotadBinary):
+        # measures whether THIS run produced the binary. The parallel CI
+        # harness sets RUNQUOTAD_BIN to a private copy; in that mode do
+        # not mutate the shared sibling artifact while other tests are
+        # running.
+        let suiteRunquotad = getEnv("RUNQUOTAD_BIN")
+        if fileExists(runquotadBinary) and
+            (suiteRunquotad.len == 0 or suiteRunquotad == runquotadBinary):
           removeFile(runquotadBinary)
 
         let args = @[

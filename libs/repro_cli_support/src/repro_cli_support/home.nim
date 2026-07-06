@@ -1515,7 +1515,8 @@ proc runCapture(program: string; args: seq[string]; input = ""):
 
 proc remoteReceiveCommand(remoteRepro, targetStoreRoot: string;
                           extra: openArray[string]): string =
-  var parts = @[remoteRepro, "home", "__receive-bundle",
+  let reproProgram = if remoteRepro.len > 0: remoteRepro else: "repro"
+  var parts = @[reproProgram, "home", "__receive-bundle",
     "--store-root", targetStoreRoot]
   for item in extra:
     parts.add item
@@ -1527,6 +1528,7 @@ proc remoteReceiveCommand(remoteRepro, targetStoreRoot: string;
 proc sshRun(sshPath, target: string; port: int; sshOptions: seq[string];
             remoteCommand: string; input = ""):
     tuple[exitCode: int; output: string] =
+  let sshProgram = if sshPath.len > 0: sshPath else: "ssh"
   var args: seq[string]
   for opt in sshOptions:
     args.add opt
@@ -1535,7 +1537,7 @@ proc sshRun(sshPath, target: string; port: int; sshOptions: seq[string];
     args.add($port)
   args.add(target)
   args.add(remoteCommand)
-  runCapture(sshPath, args, input)
+  runCapture(sshProgram, args, input)
 
 proc fieldValueLoose(output, name: string): string =
   let prefix = name & ": "
@@ -1737,7 +1739,8 @@ proc buildRemoteApplyBundle(parsed: EnableDisableFlags;
 
 proc remoteActivateCommand(remoteRepro, targetStoreRoot, targetStateDir,
                            bundleDigestHex: string): string =
-  let parts = @[remoteRepro, "home", "__remote-activate",
+  let reproProgram = if remoteRepro.len > 0: remoteRepro else: "repro"
+  let parts = @[reproProgram, "home", "__remote-activate",
     "--store-root", targetStoreRoot,
     "--state-dir", targetStateDir,
     "--bundle-digest", bundleDigestHex]
@@ -1758,7 +1761,8 @@ type
 
 proc remoteStoreDaemonCommand(remoteRepro, action, targetStoreRoot,
                               targetStoreEndpoint: string): string =
-  let parts = @[remoteRepro, "store", "daemon", action, "--dev",
+  let reproProgram = if remoteRepro.len > 0: remoteRepro else: "repro"
+  let parts = @[reproProgram, "store", "daemon", action, "--dev",
     "--store-root", targetStoreRoot, "--endpoint", targetStoreEndpoint]
   for idx, part in parts:
     if idx > 0:

@@ -23,7 +23,7 @@
 ## is testable today (M9.R.22.3) and the implementation lands in
 ## M9.R.22b / M9.R.22c without further surface-area churn.
 
-import std/[options, os, osproc, strutils, tables]
+import std/[options, os, osproc, strutils, tables, tempfiles]
 
 import repro_profile/emit
 import repro_profile/types
@@ -212,7 +212,12 @@ proc loadDiskoFromSource*(diskoNim: string): DiskPlanOutcome =
       result.failureMsg = "read " & diskoNim & " failed: " & e.msg
       return
   else:
+    let nimcache = createTempDir("repro-disk-nimcache-", "")
+    defer:
+      try: removeDir(nimcache)
+      except OSError: discard
     let cmd = "nim r --hints:off --warnings:off --verbosity:0 " &
+      "--nimcache:" & quoteShell(nimcache) & " " &
       quoteShell(diskoNim)
     let (output, exitCode) = execCmdEx(cmd)
     if exitCode != 0:

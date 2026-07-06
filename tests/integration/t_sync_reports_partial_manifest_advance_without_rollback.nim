@@ -72,6 +72,30 @@ proc gitConfig(gitBin, repoPath: string) =
 proc headSha(gitBin, repoPath: string): string =
   requireGit(q(gitBin) & " -C " & q(repoPath) & " rev-parse HEAD").strip()
 
+proc sanitizeForManifestLayer(raw: string): string =
+  var raw1 = newStringOfCap(raw.len)
+  for ch in raw:
+    case ch
+    of 'A'..'Z', 'a'..'z', '0'..'9', '-', '.', '_': raw1.add(ch)
+    else: raw1.add('-')
+  var prevDash = false
+  for ch in raw1:
+    if ch == '-':
+      if not prevDash: result.add(ch)
+      prevDash = true
+    else:
+      result.add(ch)
+      prevDash = false
+  if result.len > 80:
+    result.setLen(80)
+  result = result.strip(chars = {'-'}, leading = true, trailing = true)
+  if result.len == 0:
+    result = "layer"
+
+proc manifestLayerDir(workspaceRoot, layerUrl: string): string =
+  workspaceRoot / ".repo" / ("manifests-0-" &
+    sanitizeForManifestLayer(layerUrl))
+
 # Project manifest: declares ``lib-x`` whose remote is an unreachable URL
 # so the pull's clone step fails.
 proc projectTomlBody(unreachableUrl: string): string =
@@ -148,28 +172,11 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
       let workspaceRoot = scratch / "workspace"
       createDir(workspaceRoot)
       writeWorkspaceTomlWithLayer(workspaceRoot, layerUrl)
-      # The composer/refresh naming for layer 0 is
-      # ``manifests-0-<sanitized-url>``; recover it from a probe by asking
-      # git where the in-tree checkout would live. We mirror the sanitizer
-      # by cloning into a deterministic directory and pointing the
-      # workspace.toml at it — but the production code derives the dir from
-      # the URL. Use the same convention: clone into the dir refresh
-      # reports. Easiest hermetic route: clone into every plausible name is
-      # fragile, so instead drive the FIRST pull to materialise the layer,
-      # then advance, then the SECOND pull does the advance+fail.
-      #
-      # First pull: materialises the layer at commit#1 (composer clones it),
-      # and fails on the unreachable lib-x clone.
-      let firstPull = runShell(shellCommand(@[
-        reproBin, "workspace", "pull",
-        "--workspace-root=" & workspaceRoot,
-      ]))
-      # The layer now exists in .repo/manifests-0-*. Locate it.
-      var layerDir = ""
-      for kind, path in walkDir(workspaceRoot / ".repo"):
-        if kind == pcDir and path.lastPathPart.startsWith("manifests-0-"):
-          layerDir = path
-      check layerDir.len > 0
+      let layerDir = manifestLayerDir(workspaceRoot, layerUrl)
+      discard requireGit(q(gitBin) & " clone --branch main " &
+        q(layerUrl) & " " & q(layerDir))
+      # The layer now exists in the same .repo/manifests-0-* checkout that
+      # manifest refresh updates.
       let commit1 = headSha(gitBin, layerDir)
 
       # 3. Advance the bare manifest-host by commit#2.
@@ -178,9 +185,9 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
       discard requireGit(q(gitBin) & " clone " & q(fileUrl(manifestBare)) &
         " " & q(seedWork))
       gitConfig(gitBin, seedWork)
-      writeFile(seedWork / "repos" / "lib-y.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-        "[repo]\nname = \"lib-y\"\npath = \"lib-y\"\nrevision = \"main\"\n")
+      writeFile(seedWork / "projects" / "myproject.toml",
+        projectTomlBody(unreachable) &
+        "# second manifest commit keeps the resolved repo set unchanged\n")
       discard requireGit(q(gitBin) & " -C " & q(seedWork) & " add -A")
       discard requireGit(q(gitBin) & " -C " & q(seedWork) &
         " commit -m \"second manifest commit\"")
@@ -197,6 +204,8 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
         reproBin, "workspace", "pull",
         "--workspace-root=" & workspaceRoot,
       ]))
+      if secondPull.code != 0:
+        checkpoint("second pull output:\n" & secondPull.output)
       check secondPull.code != 0  # a later step failed
 
       # The manifest layer was ADVANCED and NOT rolled back.
@@ -226,5 +235,3 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
             entry["outcome"].getStr() == "failed":
           libXFailed = true
       check libXFailed
-
-      discard firstPull

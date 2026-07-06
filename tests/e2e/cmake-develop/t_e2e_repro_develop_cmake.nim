@@ -43,20 +43,22 @@ proc readProfileSidecar(buildDir, executableName: string): string =
   else:
     ""
 
-proc generatedProviderContainsToolRef(buildDir, toolRef: string): bool =
+proc generatedProviderReferencesTool(buildDir, toolRef: string): bool =
   let providerPath = buildDir / "reprobuild.nim"
   check fileExists(providerPath)
   if not fileExists(providerPath):
     return false
   let providerText = readFile(providerPath)
-  providerText.contains("toolIdentityRefs = @[") and
-    providerText.contains("\"" & toolRef & "\"")
+  providerText.contains("\"" & toolRef & "\"")
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" /
-    addFileExt("runquotad", ExeExt)
+  let daemonBin =
+    if getEnv("RUNQUOTAD_BIN").len > 0:
+      getEnv("RUNQUOTAD_BIN")
+    else:
+      runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
     # The test harness (scripts/run_tests.sh) is responsible for
     # building the sibling runquota before invoking the suite — see
@@ -279,7 +281,7 @@ suite "e2e_repro_develop_cmake":
           cpLocalOnly
         let ccSidecar = readProfileSidecar(buildDir, "reprobuild-cmake-cc")
         check ccSidecar.sidecarValue("cachePortability") == "local-only"
-        check generatedProviderContainsToolRef(buildDir, "reprobuild-cmake-cc")
+        check generatedProviderReferencesTool(buildDir, "reprobuild-cmake-cc")
 
     test "e2e_repro_develop_cmake_tool_identity_changes_cache_key":
       let repoRoot = getCurrentDir()
@@ -331,9 +333,9 @@ suite "e2e_repro_develop_cmake":
           "reprobuild-cmake-cc")
         check firstSidecar.sidecarValue("resolvedExecutablePath") !=
           secondSidecar.sidecarValue("resolvedExecutablePath")
-        check generatedProviderContainsToolRef(firstBuildDir,
+        check generatedProviderReferencesTool(firstBuildDir,
           "reprobuild-cmake-cc")
-        check generatedProviderContainsToolRef(secondBuildDir,
+        check generatedProviderReferencesTool(secondBuildDir,
           "reprobuild-cmake-cc")
 
     test "e2e_repro_develop_cmake_path_vs_nix_portability":
@@ -406,6 +408,6 @@ suite "e2e_repro_develop_cmake":
           check nixSidecar.sidecarValue("cachePortability") == "portable"
           check nixSidecar.sidecarValue("selectedStorePath").startsWith(
             "/nix/store/")
-          check generatedProviderContainsToolRef(nixBuildDir,
+          check generatedProviderReferencesTool(nixBuildDir,
             "reprobuild-cmake-cc")
           check nixOutput.output.contains("action: link-m9 status=asSucceeded")

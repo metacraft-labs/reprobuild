@@ -287,7 +287,9 @@ suite "RA-17 — manifest provenance verification":
       skip()
     else:
       let scratch = createTempDir("repro-ra17-provenance-", "")
-      defer: removeDir(scratch)
+      defer:
+        try: removeDir(scratch)
+        except OSError: discard
       if not supportsSshVerify(gitBin, scratch):
         skip()
       else:

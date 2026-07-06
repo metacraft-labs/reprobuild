@@ -114,8 +114,13 @@ suite "Bootstrap-And-Self-Build B0: repro build runquota:runquotad":
           addFileExt("runquotad", ExeExt)
 
         # Remove any stale artifact so a stale build doesn't make the
-        # downstream existence check spuriously pass.
-        if fileExists(runquotadBinary):
+        # downstream existence check spuriously pass. The parallel CI
+        # harness sets RUNQUOTAD_BIN to a private copy; in that mode do
+        # not mutate the shared sibling artifact while other tests are
+        # running.
+        let suiteRunquotad = getEnv("RUNQUOTAD_BIN")
+        if fileExists(runquotadBinary) and
+            (suiteRunquotad.len == 0 or suiteRunquotad == runquotadBinary):
           removeFile(runquotadBinary)
 
         # Spec-form invocation per Bootstrap-And-Self-Build B0: subcommand

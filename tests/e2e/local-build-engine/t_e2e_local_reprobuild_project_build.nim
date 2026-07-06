@@ -1625,7 +1625,7 @@ suite "e2e_local_reprobuild_project_build":
     test "provider compile fast path skips no-op and invalidates provider sources":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m55-provider-fast-path", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirIfPossible(tempRoot)
 
       let reproBin = reproBinary(repoRoot)
       let projectRoot = tempRoot / "project"

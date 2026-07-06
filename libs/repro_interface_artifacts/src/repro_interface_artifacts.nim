@@ -3072,10 +3072,10 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # The nimcache root MUST be independent of the per-recipe scratch/out tree,
   # otherwise deeply nested output paths can hit MAX_PATH on Windows. Anchor it
   # under a stable system-temp root on every platform; the full path is then
-  # `<temp>/repro-nimcache-provider/<moduleKey>` where the `moduleKey` scopes by
-  # module path + workDir + toolchain + library set + session token, so:
-  #   * repeated compiles of the same generated module in one `repro`
-  #     session/project share a nimcache;
+  # `<temp>/repro-nimcache-provider/<sharedKey>` where the `sharedKey` scopes by
+  # workDir + toolchain + library set + session token, so:
+  #   * generated provider modules in one `repro` session/project share a
+  #     nimcache and reuse the shared stdlib/repro object files;
   #   * different projects / toolchains get different keys (no collision);
   #   * concurrent independent sessions get different session tokens
   #     (the M9.R.12 ENOTEMPTY-collision safety property).
@@ -3089,8 +3089,7 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
     if providerNimcacheMode() == "per-binary":
       nimcacheRoot / providerNimcacheKey(outputBinaryPath)
     else:
-      let sharedKey = sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
-      nimcacheRoot / fnvHex64([sharedKey, "module=" & absolutePath(modulePath)])
+      nimcacheRoot / sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
   result = @[
     nimCompilerPath(), "c",
     # Provider compiles are often nested inside latency-sensitive graph

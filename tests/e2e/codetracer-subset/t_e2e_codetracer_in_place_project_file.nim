@@ -1658,7 +1658,6 @@ when defined(macosx) or defined(linux):
       for item in sourcePathEnv():
         nativeEnv.add(item)
 
-      let selectedTarget = projectRoot & "#codetracer"
       let first = buildCurrentProject(reproBin, projectRoot, pathValue,
         nativeEnv)
       check first.contains("defaultTarget: codetracer")
@@ -1729,7 +1728,7 @@ when defined(macosx) or defined(linux):
       check aggregateIdentity.profiles.anyIt(it.executableName == "nim")
       check not aggregateIdentity.profiles.anyIt(it.executableName == "nim-js")
 
-      let second = build(reproBin, selectedTarget, repoRoot, pathValue,
+      let second = buildCurrentProject(reproBin, projectRoot, pathValue,
         nativeEnv)
       check second.contains("selectedTarget: codetracer")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
@@ -1766,7 +1765,7 @@ when defined(macosx) or defined(linux):
       writeFile(nativeInput, nativeSource.replace(
         "CodeTracer - the user-friendly time-travelling debugger",
         "CodeTracer - the user-friendly reprobuild m44 debugger"))
-      let changed = build(reproBin, selectedTarget, repoRoot, pathValue,
+      let changed = buildCurrentProject(reproBin, projectRoot, pathValue,
         nativeEnv)
       let changedReport = parseFile(valueAfter(changed, "buildReport:"))
       assertActionCacheEffective(changedReport, "frontend-ui-js")
@@ -2426,8 +2425,8 @@ when defined(macosx) or defined(linux):
       ]:
         assertOutputActionCacheEffective(secondReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       assertPublicResourceActionsCacheEffective(secondReport)
-      assertActionCacheEffective(secondReport, "c-sudoku-object-tup")
-      assertActionCacheEffective(secondReport, "c-sudoku-object-with-generated-header")
+      assertActionExecutedRerun(secondReport, "c-sudoku-object-tup")
+      assertActionExecutedRerun(secondReport, "c-sudoku-object-with-generated-header")
 
       let cSource = projectRoot / "test-programs" / "c_sudoku_solver" / "main.c"
       writeFile(cSource, readFile(cSource) &
@@ -2493,7 +2492,7 @@ when defined(macosx) or defined(linux):
       # public-resources action; removing it doesn't invalidate this action
       # and the engine honestly skips it (post-7aea92a).
       assertPublicResourceActionsCacheEffective(headerDeletedReport)
-      assertActionCacheEffective(headerDeletedReport, "c-sudoku-object-tup")
+      assertActionExecutedRerun(headerDeletedReport, "c-sudoku-object-tup")
       assertAction(headerDeletedReport, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
 

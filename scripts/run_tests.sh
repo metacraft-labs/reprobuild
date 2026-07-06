@@ -142,8 +142,12 @@ if [[ -d "../runquota" ]]; then
     }
   fi
   RUNQUOTA_BIN_ABS="$(cd ../runquota/build/bin && pwd)"
-  export RUNQUOTAD_BIN="${RUNQUOTAD_BIN:-${RUNQUOTA_BIN_ABS}/runquotad${exe_ext}}"
-  export PATH="${RUNQUOTA_BIN_ABS}:${PATH}"
+  RUNQUOTA_TEST_BIN="$(pwd)/build/test-prereqs/runquota/bin"
+  mkdir -p "${RUNQUOTA_TEST_BIN}"
+  cp "../runquota/build/bin/runquotad${exe_ext}" "${RUNQUOTA_TEST_BIN}/"
+  chmod +x "${RUNQUOTA_TEST_BIN}/runquotad${exe_ext}" 2>/dev/null || true
+  export RUNQUOTAD_BIN="${RUNQUOTAD_BIN:-${RUNQUOTA_TEST_BIN}/runquotad${exe_ext}}"
+  export PATH="${RUNQUOTA_TEST_BIN}:${RUNQUOTA_BIN_ABS}:${PATH}"
 fi
 
 if [[ -d "../reprobuild-cmake" ]]; then

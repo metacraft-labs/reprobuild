@@ -9348,8 +9348,15 @@ proc nativePosixHookContent(shell: NativeShellKind): string =
     result.add("pushd() { builtin pushd \"$@\" || return $?; __repro_native_shell_hook; }\n")
     result.add("popd() { builtin popd \"$@\" || return $?; __repro_native_shell_hook; }\n")
   of nskZsh:
-    result.add("autoload -Uz add-zsh-hook\n")
-    result.add("add-zsh-hook chpwd __repro_native_shell_hook\n")
+    result.add("if autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook chpwd __repro_native_shell_hook 2>/dev/null; then\n")
+    result.add("  :\n")
+    result.add("else\n")
+    result.add("  typeset -ga chpwd_functions\n")
+    result.add("  case \" ${chpwd_functions[*]} \" in\n")
+    result.add("    *\" __repro_native_shell_hook \"*) ;;\n")
+    result.add("    *) chpwd_functions+=(__repro_native_shell_hook) ;;\n")
+    result.add("  esac\n")
+    result.add("fi\n")
   else:
     discard
   result.add("__repro_native_shell_hook\n")
