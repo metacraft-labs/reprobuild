@@ -329,6 +329,16 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if config.monitorCliPath.len == 0:
     raiseDevEnvEdge("monitorCliPath is required")
 
+  let candidateKey = devEnvCacheKey.computeDevEnvEdgeCacheKey(
+    config.projectRoot, config.activity, config.lockSliceId, config.developOverridesPath
+  )
+
+  result.artifactPath = config.outDir / "dev-env.rbde"
+  result.shellFragmentPath = config.outDir / "dev-env.env"
+  result.shellNavigatorStatsPath = config.outDir / "dev-env.env.navigator.json"
+
+  let cacheKeyPath = config.outDir / "dev-env.rbde.cache-key"
+
   createDir(extendedPath(config.outDir))
   let workDir =
     if config.workDir.len > 0: config.workDir else: getCurrentDir()
@@ -338,14 +348,25 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
 
   let interfacePath = active.outDir / "project-interface.rbsz"
   let stubPath = active.outDir / "project-interface.nim"
-  let interfaceArtifact = extractInterfaceFromModule(active.modulePath,
-    interfacePath, stubPath, workDir, compileScratchDir)
+
+  var interfaceArtifact: ProjectInterfaceArtifact
+  var useCachedInterface = false
+  if fileExists(extendedPath(interfacePath)) and
+     fileExists(extendedPath(cacheKeyPath)):
+    try:
+      let cachedKey = readFile(extendedPath(cacheKeyPath)).strip()
+      if cachedKey == candidateKey:
+        interfaceArtifact = readInterfaceArtifact(interfacePath)
+        useCachedInterface = true
+    except CatchableError:
+      discard
+
+  if not useCachedInterface:
+    interfaceArtifact = extractInterfaceFromModule(active.modulePath,
+      interfacePath, stubPath, workDir, compileScratchDir)
 
   result.providerBinaryPath = active.outDir / "provider" / "project-provider"
   result.providerArtifactPath = active.outDir / "provider-compile.rbsz"
-  result.artifactPath = active.outDir / "dev-env.rbde"
-  result.shellFragmentPath = active.outDir / "dev-env.env"
-  result.shellNavigatorStatsPath = active.outDir / "dev-env.env.navigator.json"
 
   var provider: ProviderCompileArtifact
   let cachedProvider = readFreshProviderCompileArtifact(
@@ -421,3 +442,8 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if not fileExists(extendedPath(result.artifactPath)):
     raiseDevEnvEdge("dev-env edge did not write artifact: " &
       result.artifactPath)
+
+  try:
+    writeFile(extendedPath(cacheKeyPath), candidateKey & "\n")
+  except CatchableError:
+    discard

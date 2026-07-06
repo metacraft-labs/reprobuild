@@ -544,15 +544,3 @@ when not defined(windows) and not defined(macosx):
   if sqliteLibDir.len > 0:
     switch("passL", "-L" & sqliteLibDir)
     switch("passL", "-Wl,-rpath," & sqliteLibDir)
-
-# Inject compile-time string define variables for package source roots.
-for envName in [
-  "FASTSTREAMS_SRC", "NIM_STEW_SRC", "NIM_SERIALIZATION_SRC",
-  "NIM_JSON_SERIALIZATION_SRC", "NIM_TOML_SERIALIZATION_SRC",
-  "SSZ_SERIALIZATION_SRC", "NIMCRYPTO_SRC", "BEARSSL_SRC",
-  "RESULTS_SRC", "STINT_SRC", "STACKABLE_HOOKS_SRC", "VM_HARNESS_SRC",
-  "REPRO_TEST_ADAPTERS_SRC", "REPRO_CT_TEST_RUNNER_SRC",
-]:
-  let val = getEnv(envName)
-  if val.len > 0:
-    switch("define", envName & ":" & val)

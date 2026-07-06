@@ -74,25 +74,6 @@ proc fastNoOpScript(shell: string): string =
   else:
     ""
 
-proc gitDirForProjectRoot(projectRoot: string): string =
-  let dotGit = projectRoot / ".git"
-  if dirExists(dotGit):
-    return dotGit
-  if fileExists(dotGit):
-    let content = readFile(dotGit).strip()
-    const prefix = "gitdir:"
-    if content.normalize().startsWith(prefix):
-      let raw = content[prefix.len .. ^1].strip()
-      if raw.isAbsolute:
-        return os.normalizedPath(raw)
-      return os.normalizedPath(projectRoot / raw)
-  ""
-
-proc developOverridesMetadataPath(projectRoot: string): string =
-  let gitDir = gitDirForProjectRoot(projectRoot)
-  if gitDir.len > 0:
-    return gitDir / "reprobuild" / "develop-overrides.json"
-  projectRoot / ".repro" / "local" / "develop-overrides.json"
 
 proc findDevEnvProjectRoot(startPath: string): string =
   var cursor = os.normalizedPath(absolutePath(startPath))
@@ -169,16 +150,11 @@ proc tryDevEnvExportFastPath*(args: openArray[string]): DevEnvFastPathResult =
       return DevEnvFastPathResult(handled: true, exitCode: 0)
     return
 
-  let overridesPath =
-    if parsed.developOverridesPath.len > 0:
-      os.normalizedPath(absolutePath(parsed.developOverridesPath))
-    else:
-      developOverridesMetadataPath(parsed.projectRoot)
   let activeKey = getEnv("__REPRO_APPLIED")
   if activeKey.len == 0:
     return
   let candidateKey = computeDevEnvEdgeCacheKey(parsed.projectRoot,
-    parsed.activity, "", overridesPath)
+    parsed.activity, "", parsed.developOverridesPath)
   if candidateKey != activeKey:
     return
   stdout.write(script)

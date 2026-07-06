@@ -62,6 +62,29 @@ proc textBytes(text: string): seq[byte] =
   for i, ch in text:
     result[i] = byte(ord(ch))
 
+proc gitDirForProjectRoot(projectRoot: string): string =
+  let dotGit = projectRoot / ".git"
+  if dirExists(dotGit):
+    return dotGit
+  if fileExists(dotGit):
+    try:
+      let content = readFile(dotGit).strip()
+      const prefix = "gitdir:"
+      if content.normalize().startsWith(prefix):
+        let raw = content[prefix.len .. ^1].strip()
+        if raw.isAbsolute:
+          return os.normalizedPath(raw)
+        return os.normalizedPath(projectRoot / raw)
+    except CatchableError:
+      discard
+  ""
+
+proc developOverridesMetadataPath*(projectRoot: string): string =
+  let gitDir = gitDirForProjectRoot(projectRoot)
+  if gitDir.len > 0:
+    return gitDir / "reprobuild" / "develop-overrides.json"
+  projectRoot / ".repro" / "local" / "develop-overrides.json"
+
 proc computeDevEnvEdgeCacheKey*(projectRoot, activity, lockSliceId,
     developOverridesPath: string): string =
   ## Deterministic prompt-time key for ``repro dev-env export`` no-op checks.
@@ -75,6 +98,11 @@ proc computeDevEnvEdgeCacheKey*(projectRoot, activity, lockSliceId,
       fileFingerprintPart(projectFile)
   let effectiveActivity =
     if activity.len > 0: activity else: "default"
+  let resolvedOverridesPath =
+    if developOverridesPath.len > 0:
+      os.normalizedPath(absolutePath(developOverridesPath))
+    else:
+      developOverridesMetadataPath(projectRoot)
   let parts = @[
     CacheKeySchema,
     "projectRoot=" & projectRoot,
@@ -82,7 +110,7 @@ proc computeDevEnvEdgeCacheKey*(projectRoot, activity, lockSliceId,
     "activity=" & effectiveActivity,
     "lockSliceId=" & lockSliceId,
     "lockSliceFile=" & lockSliceFilePart(projectRoot),
-    "developOverrides=" & fileFingerprintPart(developOverridesPath),
+    "developOverrides=" & fileFingerprintPart(resolvedOverridesPath),
     envVarPart("REPRO_DEVELOP_OVERRIDES_FILE")
   ]
   let digest = blake3DomainDigest(parts.join("\n").textBytes(),
