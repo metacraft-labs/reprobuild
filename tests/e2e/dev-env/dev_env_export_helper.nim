@@ -91,6 +91,7 @@ proc envFor*(c: M74Case): StringTableRef =
   for key, value in envPairs():
     result[key] = value
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
+  result["REPRO_DEV_ENV_AUTO_ALLOW"] = "1"
   if c.shim.len > 0:
     result["REPRO_MONITOR_SHIM_LIB"] = c.shim
 

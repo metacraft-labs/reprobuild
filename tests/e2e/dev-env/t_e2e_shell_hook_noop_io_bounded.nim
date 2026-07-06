@@ -65,6 +65,7 @@ proc runExport(c: ShellHookCase; extraEnv: openArray[(string, string)] = []):
     env[k] = v
   env["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
   env["HOME"] = c.tempRoot
+  env["REPRO_DEV_ENV_AUTO_ALLOW"] = "1"
   for (k, v) in extraEnv:
     env[k] = v
   var p = startProcess(c.reproBin,
@@ -91,6 +92,7 @@ proc runExportUnderMonitor(c: ShellHookCase; fingerprint, depfilePath: string):
   env["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
   env["HOME"] = c.tempRoot
   env["REPRO_MONITOR_SHIM_LIB"] = c.monitorShim
+  env["REPRO_DEV_ENV_AUTO_ALLOW"] = "1"
   env["__REPRO_APPLIED"] = fingerprint
   var p = startProcess(c.monitorCliPath,
     args = c.monitorCliArgs & @[

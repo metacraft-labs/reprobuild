@@ -131,6 +131,7 @@ proc exportBaseEnv(c: ShellHookCase): StringTableRef =
   result["REPRO_DAEMON_ENDPOINT"] =
     daemonSocketEndpoint("repro-m77-noop-latency-" & $getCurrentProcessId())
   result["REPRO_DAEMON_STATE_DIR"] = daemonStateDir
+  result["REPRO_DEV_ENV_AUTO_ALLOW"] = "1"
   result["HOME"] = c.tempRoot
 
 proc captureExportOutput(c: ShellHookCase; env: StringTableRef):

@@ -164,6 +164,7 @@ proc baselineEnvForBash*(c: ShellHookCase): StringTableRef =
       continue
     result[k] = v
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
+  result["REPRO_DEV_ENV_AUTO_ALLOW"] = "1"
   # The shim needs to know which counter to increment and which real
   # binary to dispatch to.
   result["REPRO_M76_SHIM_COUNTER"] = c.shimCounter

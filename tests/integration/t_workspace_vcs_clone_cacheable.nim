@@ -85,7 +85,8 @@ suite "Workspace VCS — clone-action cache (M2)":
           remoteUrl = fileUrl(originPath),
           repoPath = cloneTargetRel,
           receiptPath = receiptRel,
-          revision = "main")
+          revision = "main",
+          cacheable = true)
 
       let firstAction = cloneAction()
       let secondAction = cloneAction()

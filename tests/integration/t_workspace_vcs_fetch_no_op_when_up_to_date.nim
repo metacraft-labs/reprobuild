@@ -93,7 +93,8 @@ suite "Workspace VCS — fetch up-to-date (M2)":
         var act = gitFetchAction("m2-fetch", identity,
           remoteName = "origin",
           repoPath = downstream,
-          receiptPath = receiptRel)
+          receiptPath = receiptRel,
+          cacheable = true)
         act.cwd = workRoot
         act
 

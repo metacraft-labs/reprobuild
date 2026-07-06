@@ -70,7 +70,7 @@ suite "Bootstrap-And-Self-Build B5: run_tests.sh is slimmed and engine-driven":
 
     # Keep a broad size guard while the detailed assertions below catch
     # the legacy HCR loop and per-helper build_test_helper shapes. The
-    # threshold is 320 (not 150) because several CI-survival additions land
+    # threshold is 350 (not 150) because several CI-survival additions land
     # legitimately post-B5: the per-collection ``repro_build_collection``
     # helper (M3 multi-fragment selector workaround), the
     # ``timeout --kill-after=30s`` wrapper around the runner phase
@@ -79,8 +79,9 @@ suite "Bootstrap-And-Self-Build B5: run_tests.sh is slimmed and engine-driven":
     # daemon a test auto-launches doesn't leak onto a shared host), and
     # the reprobuild-cmake fork prerequisite build (the cmake-develop e2e
     # tests hard-require the forked cmake). Together these bring the
-    # script near 290 lines without reintroducing the legacy shape.
-    check lines < 320
+    # runtime library discovery for Nix-built test runners. Together these
+    # bring the script above 320 lines without reintroducing the legacy shape.
+    check lines < 350
 
     # The engine call — the single biggest delegation. The CLI
     # accepts ``--tool-provisioning=path`` either before or after the

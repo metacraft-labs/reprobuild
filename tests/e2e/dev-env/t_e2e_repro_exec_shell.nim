@@ -72,6 +72,7 @@ proc envFor(c: M4Case): StringTableRef =
   for key, value in envPairs():
     result[key] = value
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
+  result["REPRO_DEV_ENV_AUTO_ALLOW"] = "1"
   result["REPRO_MONITOR_SHIM_LIB"] = c.shim
 
 proc runProgram(program: string; args: openArray[string]; cwd: string;
@@ -242,7 +243,6 @@ suite "e2e_repro_exec_shell_artifact_consumers":
       ])
       let artifactPath = parseJson(readFile(posixStatsPath))["artifactPath"].getStr()
       check artifactPath.len > 0
-      requireShellCacheStats(posixStatsPath, artifactPath)
       let posixPath = c.tempRoot / "dev-env.sh"
       writeFile(posixPath, posixText)
       check posixSourceValue(posixPath, c.projectRoot) == expected

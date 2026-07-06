@@ -107,6 +107,7 @@ proc captureExportOutput(c: ShellHookCase;
     env[k] = v
   env["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
   env["HOME"] = c.tempRoot
+  env["REPRO_DEV_ENV_AUTO_ALLOW"] = "1"
   for (k, v) in extraEnv:
     env[k] = v
   var p = startProcess(c.reproBin,
