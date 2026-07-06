@@ -432,6 +432,9 @@
               pkgs.libblake3
               pkgs.openssl
               pkgs.p7zip
+              # Repro's tool resolver inspects .tar.xz archives by invoking
+              # tar, which shells out to xz on Linux/macOS.
+              pkgs.xz
               pkgs.sqlite
               pkgs.xxHash
               pkgs.zip

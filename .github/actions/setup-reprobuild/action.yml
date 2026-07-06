@@ -94,10 +94,14 @@ runs:
             : "${BLAKE3_PREFIX:?reprobuild dev shell did not set BLAKE3_PREFIX}"
             : "${XXHASH_PREFIX:?reprobuild dev shell did not set XXHASH_PREFIX}"
             : "${GITHUB_ENV:?GitHub Actions did not set GITHUB_ENV}"
+            : "${GITHUB_PATH:?GitHub Actions did not set GITHUB_PATH}"
             echo "NIMCRYPTO_SRC=${NIMCRYPTO_SRC}" >> "${GITHUB_ENV}"
             echo "BEARSSL_SRC=${BEARSSL_SRC}" >> "${GITHUB_ENV}"
             echo "BLAKE3_PREFIX=${BLAKE3_PREFIX}" >> "${GITHUB_ENV}"
             echo "XXHASH_PREFIX=${XXHASH_PREFIX}" >> "${GITHUB_ENV}"
+            if command -v xz >/dev/null 2>&1; then
+              echo "$(dirname "$(command -v xz)")" >> "${GITHUB_PATH}"
+            fi
             # `repro` dlopens solver/cache libraries by leaf name. The dev
             # shell provides clingo/zstd and hash-library runtime paths while
             # building the CLI; persist them so later workflow steps can launch
