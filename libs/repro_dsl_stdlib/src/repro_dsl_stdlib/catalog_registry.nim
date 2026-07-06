@@ -293,7 +293,7 @@ proc getCatalog*(toolName: string):
   # The Nim-identifier filenames (``gcc_winlibs`` / ``llvm_mingw``) are
   # mapped to the operator-facing hyphenated keys (``gcc-winlibs`` /
   # ``llvm-mingw``).
-  of "gcc-winlibs": selectIfNonEmpty(gcc_winlibsCatalog)
+  of "gcc-winlibs": selectIfNonEmpty(gcc_winlibsCatalog())
   of "llvm-mingw":  selectIfNonEmpty(llvm_mingwCatalog)
   # Recorder dev-env additions.
   of "cargo":       selectIfNonEmpty(cargoCatalog)

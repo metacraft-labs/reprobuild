@@ -6,7 +6,7 @@ import std/tables
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
-template gcc_winlibsCatalog*: untyped =
+proc gcc_winlibsCatalog*(): seq[VersionedProvisioning] =
   @[
     VersionedProvisioning(
       version: "16.1.0posix-14.0.0-ucrt-r2",

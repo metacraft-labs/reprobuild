@@ -66,7 +66,7 @@ type
     entries: seq[VersionedProvisioning]
 
 proc allCatalogs(): seq[CatalogUnderTest] =
-  result.add(CatalogUnderTest(name: "gcc-winlibs", entries: gcc_winlibsCatalog))
+  result.add(CatalogUnderTest(name: "gcc-winlibs", entries: gcc_winlibsCatalog()))
   result.add(CatalogUnderTest(name: "llvm-mingw",  entries: llvm_mingwCatalog))
   result.add(CatalogUnderTest(name: "7zip",        entries: sevenzipCatalog))
 
@@ -157,7 +157,7 @@ suite "M8 — bulk-harvested catalog validates":
     ## the M68 ``gcc`` (nuwen.net components-20.0) is that winlibs
     ## bundles a Fortran front-end while nuwen doesn't. Guard the
     ## bin_relpath against an accidental re-harvest that drops it.
-    let (found, entry) = selectDefault(gcc_winlibsCatalog)
+    let (found, entry) = selectDefault(gcc_winlibsCatalog())
     check found
     var sawGfortran = false
     for relpath in entry.bin_relpath:
