@@ -29,6 +29,8 @@
 
 import std/[json, os, osproc, strtabs, strutils, unittest]
 
+import ./runquota_fixture_paths
+
 const RepoMarker = "repro.nim"
 
 # The first entry in ``pythonTestPaths`` (``repro_tests.nim``) — a
@@ -54,7 +56,7 @@ proc findRepoRoot(): string =
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
-  let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
+  let runquotaBin = runquotaBinDir(repoRoot)
   var env = newStringTable()
   for k, v in envPairs():
     env[k] = v
@@ -113,8 +115,7 @@ suite "Deferred-Item D1: pythonUnittest resolves in path mode":
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /
       addFileExt("repro", ExeExt)
-    let runquotad = repoRoot.parentDir / "runquota" / "build" / "bin" /
-      addFileExt("runquotad", ExeExt)
+    let runquotad = runquotadPath(repoRoot)
 
     check fileExists(reproBin)
     check fileExists(runquotad)

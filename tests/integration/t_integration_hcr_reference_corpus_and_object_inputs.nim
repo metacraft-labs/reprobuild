@@ -59,6 +59,7 @@ suite "integration_hcr_reference_corpus_and_object_inputs":
       check gateMetadata.forbiddenBuildFlags.contains("-shared")
       check gateMetadata.forbiddenBuildFlags.contains("-dynamiclib")
 
+      var missingCheckouts: seq[string]
       for id in ["mold", "wild", "llvm-jitlink-lld"]:
         let entry = corpus.entryById(id)
         check entry.availabilityMode == "manifest-repo"
@@ -69,6 +70,10 @@ suite "integration_hcr_reference_corpus_and_object_inputs":
         check entry.sourcePaths.len >= 4
 
         let checkout = repoRoot / entry.localCheckout
+        if not dirExists(checkout):
+          missingCheckouts.add(checkout)
+          continue
+
         check dirExists(checkout)
         check gitHead(checkout) == entry.pinnedCommit
 
@@ -89,6 +94,11 @@ suite "integration_hcr_reference_corpus_and_object_inputs":
       check msvc.docsProvenance.contains("no network access")
       check msvc.algorithmAreas.contains("hotpatchable function padding")
       check msvc.hcrSpecSections.len >= 3
+
+      if missingCheckouts.len > 0:
+        checkpoint("skipped - HCR reference checkouts are absent: " &
+          missingCheckouts.join(", "))
+        skip()
 
       let tempRoot = createTempDir("repro-hcr-m25", "")
       defer: removeDir(tempRoot)

@@ -121,18 +121,22 @@ suite "M9.R.42.1: disk-apply kernel-state diag hook":
     # and one BEFORE + one AFTER for each partition + partprobe).
     check fileExists(diagFile)
     let body = readFile(diagFile)
-    check body.contains("label=before-table-main")
-    check body.contains("label=after-table-main")
-    check body.contains("label=before-sgdisk-n-esp")
-    check body.contains("label=after-sgdisk-n-esp")
+    check body.contains("label=before-table-first")
+    check body.contains("label=after-table-first")
     check body.contains("label=before-sgdisk-n-root")
     check body.contains("label=after-sgdisk-n-root")
+    check body.contains("label=before-table-second")
+    check body.contains("label=after-table-second")
+    check body.contains("label=before-sgdisk-n-data")
+    check body.contains("label=after-sgdisk-n-data")
     # partprobe-around snapshots fire only when partprobe is in PATH;
     # on the Windows test host findExe returns "" so we expect either
     # both partprobe-snapshot blocks or neither — gate on
     # before+after consistency.
     let hasBeforePartprobe = body.contains(
-      "label=before-partprobe-main")
+      "label=before-partprobe-first") and body.contains(
+      "label=before-partprobe-second")
     let hasAfterPartprobe = body.contains(
-      "label=after-partprobe-main")
+      "label=after-partprobe-first") and body.contains(
+      "label=after-partprobe-second")
     check hasBeforePartprobe == hasAfterPartprobe

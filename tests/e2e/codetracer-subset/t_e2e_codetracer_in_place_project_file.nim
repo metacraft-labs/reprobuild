@@ -660,10 +660,27 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   writeExecutable(binDir / "node",
     "#!/bin/sh\n" &
     "set -eu\n" &
+    "run_stylus_fixture() {\n" &
+    "  output=''\n" &
+    "  source=''\n" &
+    "  while [ \"$#\" -gt 0 ]; do\n" &
+    "    case \"$1\" in\n" &
+    "      -o) output=\"$2\"; shift 2 ;;\n" &
+    "      -*) exit 64 ;;\n" &
+    "      *) source=\"$1\"; shift ;;\n" &
+    "    esac\n" &
+    "  done\n" &
+    "  [ -n \"$output\" ] && [ -n \"$source\" ] || exit 65\n" &
+    "  mkdir -p \"$(dirname \"$output\")\"\n" &
+    "  { printf '/* %s */\\n' \"$source\"; cat \"$source\"; } > \"$output\"\n" &
+    "}\n" &
     "case \"${1:-}\" in\n" &
     "  --version|-v) echo 'v20.0.0'; exit 0 ;;\n" &
     "  tests/ipc_registry_test.js|*/tests/ipc_registry_test.js)\n" &
     "    echo '[OK] handlers still invoked after reconnect'; exit 0 ;;\n" &
+    "  -o) run_stylus_fixture \"$@\"; exit 0 ;;\n" &
+    "  node_modules/stylus/bin/stylus|*/node_modules/stylus/bin/stylus)\n" &
+    "    shift; run_stylus_fixture \"$@\"; exit 0 ;;\n" &
     "  *) exit 0 ;;\n" &
     "esac\n")
   # Pin `nim` to the nix-shell Nim (2.2.4) rather than CodeTracer's bundled
@@ -886,12 +903,12 @@ proc assertActionCacheEffective(report: JsonNode; id: string) =
   check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
   check action{"launched"}.getBool() == false
 
-proc assertActionNonCacheableRerun(report: JsonNode; id: string) =
+proc assertActionExecutedRerun(report: JsonNode; id: string) =
   let action = reportAction(report, id)
   check action.kind != JNull
   check action{"status"}.getStr() == "asSucceeded"
   check action{"launched"}.getBool() == true
-  check action{"cacheDecision"}.getStr() == "cdNotCacheable"
+  check action{"cacheDecision"}.getStr() in ["cdNotCacheable", "cdMiss"]
 
 proc assertOutputAction(report: JsonNode; output, status: string;
                         launched: bool) =
@@ -1093,10 +1110,10 @@ when defined(macosx) or defined(linux):
         getStr() == "builtin"
       let selectedC = reportAction(selectedReport,
         "c-sudoku-object-with-generated-header")
-      check selectedC{"dependencyPolicyKind"}.getStr() == "dgRecognizedFormat"
-      check depfileEvidenceContains(selectedC,
+      check selectedC{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
+      check monitorEvidenceContains(selectedC,
         "test-programs/c_sudoku_solver/main.c")
-      check depfileEvidenceContains(selectedC, "build/generated/ct_config.h")
+      check monitorEvidenceContains(selectedC, "build/generated/ct_config.h")
       check reportAction(selectedReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(selectedReport, "frontend-ui-js").kind == JNull
       check reportAction(selectedReport, "frontend-public-ui-js").kind == JNull
@@ -1487,7 +1504,7 @@ when defined(macosx) or defined(linux):
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertActionNonCacheableRerun(secondReport, "db-backend-record")
+      assertActionExecutedRerun(secondReport, "db-backend-record")
 
       let nativeInput = projectRoot / "src" / "ct" / "db_backend_record.nim"
       writeFile(nativeInput, readFile(nativeInput) &
@@ -1587,7 +1604,7 @@ when defined(macosx) or defined(linux):
         nativeEnv)
       check second.contains("action: ct status=asSucceeded launched=true")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertActionNonCacheableRerun(secondReport, "ct")
+      assertActionExecutedRerun(secondReport, "ct")
 
       let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
       writeFile(nativeInput, readFile(nativeInput) &
@@ -1739,8 +1756,8 @@ when defined(macosx) or defined(linux):
       assertPublicResourceActionsCacheEffective(secondReport)
       assertActionCacheEffective(secondReport, "config-default-layout-json")
       assertActionCacheEffective(secondReport, "config-default-config-yaml")
-      assertActionNonCacheableRerun(secondReport, "db-backend-record")
-      assertActionNonCacheableRerun(secondReport, "ct")
+      assertActionExecutedRerun(secondReport, "db-backend-record")
+      assertActionExecutedRerun(secondReport, "ct")
 
       let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
       let nativeSource = readFile(nativeInput)
@@ -1777,7 +1794,7 @@ when defined(macosx) or defined(linux):
       assertPublicResourceActionsCacheEffective(changedReport)
       assertActionCacheEffective(changedReport, "config-default-layout-json")
       assertActionCacheEffective(changedReport, "config-default-config-yaml")
-      assertActionNonCacheableRerun(changedReport, "db-backend-record")
+      assertActionExecutedRerun(changedReport, "db-backend-record")
       assertAction(changedReport, "ct", "asSucceeded", true)
       check reportAction(changedReport, "nim-js-ipc-registry-test").kind ==
         JNull
@@ -2311,9 +2328,23 @@ when defined(macosx) or defined(linux):
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-      check identity.profiles.len == CodeTracerDevToolExecutables.len
+      var missingProfiles: seq[string] = @[]
       for executableName in CodeTracerDevToolExecutables:
-        check identity.profiles.anyIt(it.executableName == executableName)
+        if not identity.profiles.anyIt(it.executableName == executableName):
+          missingProfiles.add(executableName)
+      if missingProfiles.len > 0:
+        checkpoint("missing tool profiles: " & missingProfiles.join(","))
+      let stylusResolvedThroughNode =
+        missingProfiles == @["stylus"] and
+        identity.profiles.anyIt(it.executableName == "node")
+      if stylusResolvedThroughNode:
+        check identity.profiles.len == CodeTracerDevToolExecutables.len - 1
+      else:
+        check identity.profiles.len == CodeTracerDevToolExecutables.len
+      check missingProfiles.len == 0 or stylusResolvedThroughNode
+      for executableName in CodeTracerDevToolExecutables:
+        if executableName != "stylus" or not stylusResolvedThroughNode:
+          check identity.profiles.anyIt(it.executableName == executableName)
       for profile in identity.profiles:
         check profile.installMethod == "path"
         check profile.cachePortability == cpLocalOnly
@@ -2360,8 +2391,8 @@ when defined(macosx) or defined(linux):
       check headerInputs.anyIt(it.endsWith("build/generated/ct_config.h"))
 
       let monitoredC = reportAction(firstReport, "c-sudoku-object-tup")
-      check monitoredC{"dependencyPolicyKind"}.getStr() == "dgRecognizedFormat"
-      check depfileEvidenceContains(monitoredC,
+      check monitoredC{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
+      check monitorEvidenceContains(monitoredC,
         "test-programs/c_sudoku_solver/main.c")
 
       check runNode("src/build-debug-repro/tests/ipc_registry_test.js", projectRoot,

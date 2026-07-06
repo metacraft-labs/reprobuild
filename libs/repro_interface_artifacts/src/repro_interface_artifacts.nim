@@ -3054,16 +3054,12 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # so anchor it under the short scratch root that the interface extractor also
   # uses.
   #
-  # The key is shared across every provider compile that targets the same
-  # toolchain + library set *within one `repro` session*
+  # The key is shared across provider compiles of the same generated module
+  # that target the same toolchain + library set *within one `repro` session*
   # (default `REPRO_PROVIDER_NIMCACHE_MODE=shared`).
-  # Each CMake configure pays for one cold provider compile; subsequent
-  # try_compile providers reuse all unchanged library object files via
-  # Nim's `.sha1`-based incremental compilation. The same caching extends
-  # across all 84 from-source recipes auto-recurse fires for a
-  # `--tool-provisioning=from-source` build: cold compile of the first
-  # recipe's provider populates the shared cache, every later recipe's
-  # provider compile reuses ~99 % of those `.o` files. Across `repro`
+  # Each CMake configure pays for one cold provider compile per generated
+  # module; repeated compiles of that same module reuse Nim's `.sha1`-based
+  # incremental compilation. Across `repro`
   # sessions the key is additionally scoped by a per-session token
   # (`REPRO_PROVIDER_NIMCACHE_SESSION`, see `sharedProviderNimcacheKey`)
   # so concurrent independent `repro` sessions building from the same
@@ -3073,16 +3069,13 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # per-output isolation.
   let hostFlags = hostCCompilerFlags()
   let libFlags = reproLibPathFlags(workDir)
-  # The nimcache root MUST be independent of the per-recipe scratch/out
-  # tree, otherwise every recipe's provider compile lands in its own
-  # directory and the cross-recipe `.o` sharing M9.R.13a delivers never
-  # materialises (auto-recurse fires one scratchDir per recipe). Anchor
-  # it under a stable system-temp root on every platform; the full path
-  # is then `<temp>/repro-nimcache-provider/<sharedKey>` where the
-  # `sharedKey` already scopes by workDir + toolchain + library set +
-  # session token, so:
-  #   * recipes A and B of the same `repro` session/project share a
-  #     nimcache (different scratchDir, identical key) — the speedup;
+  # The nimcache root MUST be independent of the per-recipe scratch/out tree,
+  # otherwise deeply nested output paths can hit MAX_PATH on Windows. Anchor it
+  # under a stable system-temp root on every platform; the full path is then
+  # `<temp>/repro-nimcache-provider/<moduleKey>` where the `moduleKey` scopes by
+  # module path + workDir + toolchain + library set + session token, so:
+  #   * repeated compiles of the same generated module in one `repro`
+  #     session/project share a nimcache;
   #   * different projects / toolchains get different keys (no collision);
   #   * concurrent independent sessions get different session tokens
   #     (the M9.R.12 ENOTEMPTY-collision safety property).
@@ -3096,7 +3089,8 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
     if providerNimcacheMode() == "per-binary":
       nimcacheRoot / providerNimcacheKey(outputBinaryPath)
     else:
-      nimcacheRoot / sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
+      let sharedKey = sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
+      nimcacheRoot / fnvHex64([sharedKey, "module=" & absolutePath(modulePath)])
   result = @[
     nimCompilerPath(), "c",
     # Provider compiles are often nested inside latency-sensitive graph

@@ -435,6 +435,11 @@
               # Repro's tool resolver inspects .tar.xz archives by invoking
               # tar, which shells out to xz on Linux/macOS.
               pkgs.xz
+              # Tests and package harvesters inspect .tar.zst archives. Keep
+              # the zstd executable paired with the dev shell's libzstd so
+              # host binaries do not load an incompatible library through
+              # LD_LIBRARY_PATH.
+              pkgs.zstd
               pkgs.sqlite
               pkgs.xxHash
               pkgs.zip

@@ -19680,7 +19680,8 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
   ## When the workspace already has a ``.repo/manifests`` checkout (a sibling
   ## checkout or a prior bootstrap), no manifest URL is needed at all and the
   ## resolution is skipped; ``init`` reads the existing checkout directly.
-  if dirExists(args.workspaceRoot / "projects"):
+  let manifestsDir = args.workspaceRoot / ".repo" / "manifests"
+  if dirExists(manifestsDir):
     return
 
   # (1) Explicit flag wins outright — and may still pull default projects /
@@ -19716,27 +19717,27 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
 
 proc bootstrapManifestCache(args: WorkspaceInitArgs) =
   ## RA-11 bootstrap manifest cache. When ``--manifest-url`` is given and
-  ## the workspace has no manifest checkout yet, clone the
+  ## the workspace has no ``.repo/manifests`` checkout yet, clone the
   ## manifest repo into the tool-managed bootstrap cache
   ## (``resolveManifestCacheRoot`` order: ``REPRO_MANIFEST_CACHE`` →
   ## ``XDG_CACHE_HOME`` → ``%LOCALAPPDATA%`` → ``~/.cache``, all under
   ## ``reprobuild/manifests``; keyed by source URL) and materialise
-  ## workspace manifests from it so the resolver finds
+  ## ``.repo/manifests`` from it so the resolver finds
   ## ``projects/<name>.toml`` without a pre-existing sibling checkout.
   ##
   ## A private companion manifest (``--private-manifest-url``) is cloned
   ## into the PARALLEL private cache (``…/manifests-private``) and
-  ## materialised at ``.repro/manifests-private`` — a separate cache tree
+  ## materialised at ``.repo/manifests-private`` — a separate cache tree
   ## so the two never share a slug namespace.
   if args.manifestUrl.len == 0:
     return
-  let manifestsDir = args.workspaceRoot
-  if dirExists(manifestsDir / "projects"):
+  let manifestsDir = args.workspaceRoot / ".repo" / "manifests"
+  if dirExists(manifestsDir):
     # Already have a manifest checkout — bootstrap is a no-op (a sibling
     # checkout or a prior bootstrap already populated it).
     return
   let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
-  createDir(args.workspaceRoot / ".repro")
+  createDir(args.workspaceRoot / ".repo")
 
   let cacheRoot = defaultManifestCacheRoot(private = false)
   let cached = ensureManifestCache(identity.binaryPath, cacheRoot,
@@ -19772,7 +19773,7 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
     copyDir(cached.sharedBarePath, manifestsDir)
 
   if args.privateManifestUrl.len > 0:
-    let privateDir = args.workspaceRoot / ".repro" / "manifests-private"
+    let privateDir = args.workspaceRoot / ".repo" / "manifests-private"
     if not dirExists(privateDir):
       let privateCacheRoot = defaultManifestCacheRoot(private = true)
       let privCached = ensureManifestCache(identity.binaryPath,
@@ -22948,7 +22949,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # workspace genuinely needs.
   var lockedShasByPath = initTable[string, string]()
   block:
-    let manifestsRoot = args.workspaceRoot
+    let manifestsRoot = args.workspaceRoot / ".repo" / "manifests"
     if dirExists(manifestsRoot / "projects") and resolved.projectName.len > 0:
       try:
         # MO-10: route the RA-14 optimized-fetch lock read through the abstract

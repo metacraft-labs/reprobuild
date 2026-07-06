@@ -224,9 +224,12 @@ proc requireBashHook(c: M6Case) =
   env["REPRO_NATIVE_SHELL_STATS"] = statsPath
   env["REPROBUILD_REPRO"] = reproPathWithSpaces(c)
   let res = runProgram(findExe("bash"), @[
-    "--rcfile", c.homeDir / ".bashrc", "-i", "-c",
-    posixProbeScript(c.projectA, c.projectB)
+    "--noprofile", "--norc", "-i", "-c",
+    "source " & q(c.homeDir / ".bashrc") & "\n" &
+      posixProbeScript(c.projectA, c.projectB)
   ], c.tempRoot, env)
+  if res.exitCode != 0 or not fileExists(statsPath):
+    checkpoint("bash native hook output:\n" & res.output)
   check res.exitCode == 0
   requireShellValue(res.output, "A:",
     "A:alpha|one|" & c.projectA & "|tool:alpha:one")

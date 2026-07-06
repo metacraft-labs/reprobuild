@@ -65,7 +65,9 @@ jobs:
           set -euo pipefail
           if ! command -v nix >/dev/null 2>&1 && [ -L /nix ]; then
             echo "Removing stale /nix symlink before installing Nix"
-            sudo rm /nix
+            if ! sudo rm /nix; then
+              echo "::warning::Could not remove stale /nix symlink; continuing to setup-nix"
+            fi
           fi
 
       - name: Setup Nix

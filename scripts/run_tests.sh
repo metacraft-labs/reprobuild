@@ -142,6 +142,7 @@ if [[ -d "../runquota" ]]; then
     }
   fi
   RUNQUOTA_BIN_ABS="$(cd ../runquota/build/bin && pwd)"
+  export RUNQUOTAD_BIN="${RUNQUOTAD_BIN:-${RUNQUOTA_BIN_ABS}/runquotad${exe_ext}}"
   export PATH="${RUNQUOTA_BIN_ABS}:${PATH}"
 fi
 

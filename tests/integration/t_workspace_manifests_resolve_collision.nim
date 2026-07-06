@@ -110,7 +110,8 @@ suite "M6 — resolveProject dual-fragment collision handling":
     # ---- metacraft side ----
     check resolved.repos[0].path == "metacraft"
     check resolved.repos[0].remoteName == "metacraft-labs"
-    check resolved.repos[0].fetchUrl == "https://github.com/metacraft-labs"
+    check resolved.repos[0].fetchUrl ==
+      "https://github.com/metacraft-labs/accounting"
     check resolved.repos[0].revision == "main"  # project default
     check resolved.repos[0].fragmentPath ==
       root / "repos" / "accounting.toml"
@@ -119,7 +120,7 @@ suite "M6 — resolveProject dual-fragment collision handling":
     check resolved.repos[1].path == "blocksense"
     check resolved.repos[1].remoteName == "blocksense-network"
     check resolved.repos[1].fetchUrl ==
-      "https://github.com/blocksense-network"
+      "https://github.com/blocksense-network/accounting"
     check resolved.repos[1].revision == "main"
     check resolved.repos[1].fragmentPath ==
       root / "repos" / "accounting-blocksense.toml"

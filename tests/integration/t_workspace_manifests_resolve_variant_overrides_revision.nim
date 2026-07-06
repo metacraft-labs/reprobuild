@@ -196,7 +196,7 @@ suite "M7 — resolveVariant against a metacraft-shaped fixture":
     let r0 = resolved.repos[0]
     check r0.path == "reprobuild"
     check r0.remoteName == "metacraft-labs"
-    check r0.fetchUrl == "https://github.com/metacraft-labs"
+    check r0.fetchUrl == "https://github.com/metacraft-labs/reprobuild"
     check r0.revision == "main"  # base's default
     check r0.vcs == "git"
     check r0.stability == "tracked"
@@ -206,7 +206,7 @@ suite "M7 — resolveVariant against a metacraft-shaped fixture":
     let r1 = resolved.repos[1]
     check r1.path == "runquota"
     check r1.remoteName == "metacraft-labs"  # project default
-    check r1.fetchUrl == "https://github.com/metacraft-labs"
+    check r1.fetchUrl == "https://github.com/metacraft-labs/runquota"
     check r1.revision == "main"
     check r1.fragmentPath == root / "repos" / "runquota.toml"
 
@@ -214,7 +214,7 @@ suite "M7 — resolveVariant against a metacraft-shaped fixture":
     let r2 = resolved.repos[2]
     check r2.path == "nim-everywhere"
     check r2.remoteName == "metacraft-labs"  # unchanged
-    check r2.fetchUrl == "https://github.com/metacraft-labs"
+    check r2.fetchUrl == "https://github.com/metacraft-labs/nim-everywhere"
     check r2.revision == "devel"  # OVERRIDE applied; was "main" pre-variant
     check r2.fragmentPath == root / "repos" / "nim-everywhere.toml"
 
@@ -243,7 +243,7 @@ suite "M7 — resolveVariant against a metacraft-shaped fixture":
     # declared in the BASE project's [[remote]] table, so the fetch URL
     # MUST be resolved from there.
     check extra.remoteName == "github"
-    check extra.fetchUrl == "https://github.com"
+    check extra.fetchUrl == "https://github.com/extra-component"
     check extra.revision == "main"  # base's default
     check extra.vcs == "git"
     check extra.stability == "tracked"

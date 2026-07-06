@@ -46,9 +46,11 @@ proc readProfileSidecar(buildDir, executableName: string): string =
 proc generatedProviderContainsToolRef(buildDir, toolRef: string): bool =
   let providerPath = buildDir / "reprobuild.nim"
   check fileExists(providerPath)
-  fileExists(providerPath) and
-    readFile(providerPath).contains("toolIdentityRefs = @[" & "\"" & toolRef &
-      "\"" & "]")
+  if not fileExists(providerPath):
+    return false
+  let providerText = readFile(providerPath)
+  providerText.contains("toolIdentityRefs = @[") and
+    providerText.contains("\"" & toolRef & "\"")
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =

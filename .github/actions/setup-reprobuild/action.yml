@@ -102,6 +102,9 @@ runs:
             if command -v xz >/dev/null 2>&1; then
               echo "$(dirname "$(command -v xz)")" >> "${GITHUB_PATH}"
             fi
+            if command -v zstd >/dev/null 2>&1; then
+              echo "$(dirname "$(command -v zstd)")" >> "${GITHUB_PATH}"
+            fi
             # `repro` dlopens solver/cache libraries by leaf name. The dev
             # shell provides clingo/zstd and hash-library runtime paths while
             # building the CLI; persist them so later workflow steps can launch

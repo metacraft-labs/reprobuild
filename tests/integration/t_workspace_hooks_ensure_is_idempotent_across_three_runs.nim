@@ -212,7 +212,7 @@ proc invokeDispatch(fx: M17Fixture; hookName: string): CmdResult =
   ]))
 
 proc readReport(fx: M17Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repo" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
     "hooks-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

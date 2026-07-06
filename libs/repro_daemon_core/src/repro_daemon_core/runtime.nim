@@ -608,12 +608,35 @@ proc removeEndpointFiles(config: UserDaemonConfig) =
   try: removeFile(config.endpoint) except OSError: discard
   removeStatusFile(config)
 
+proc userDaemonLockHeld(config: UserDaemonConfig): bool =
+  ## A startup status probe can observe the AF_UNIX socket path after bind()
+  ## creates it but before the listener accepts connections. Treat the daemon
+  ## lock as the ownership signal in that window so stale cleanup does not
+  ## unlink a live daemon's endpoint.
+  when defined(posix):
+    let lockPath = config.stateDir / UserDaemonLockFileName
+    let fd = posix.open(lockPath.cstring, O_RDWR)
+    if fd < 0:
+      return false
+    defer: discard posix.close(fd)
+    let rc = cFlock(fd, LockExclusive or LockNonBlocking)
+    if rc != 0:
+      return errno == EWOULDBLOCK or errno == EAGAIN
+    discard cFlock(fd, LockUnlock)
+    false
+  elif defined(windows):
+    false
+  else:
+    false
+
 proc cleanupStaleUserDaemonDiscovery*(config: UserDaemonConfig): bool =
   ## Remove stale discovery files only when the endpoint does not accept a raw
   ## connection. A protocol-incompatible but live daemon must keep its state.
   when defined(posix):
     let endpointPresent = userDaemonEndpointExists(config.endpoint)
     let accepts = userDaemonEndpointAcceptsConnections(config.endpoint)
+    if endpointPresent and not accepts and userDaemonLockHeld(config):
+      return false
     if endpointPresent and not accepts:
       try:
         removeFile(config.endpoint)

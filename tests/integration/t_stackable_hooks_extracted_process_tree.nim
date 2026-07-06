@@ -191,6 +191,8 @@ import std/[os, strutils]
 
 import io_mon/hooks/linux_preload_runtime
 
+{.emit: "void repro_linux_sig_safe_flush(void) {}".}
+
 proc appendLine(line: string) {.raises: [].} =
   try:
     let logPath = getEnv("REPRO_STACKABLE_HOOK_LOG")

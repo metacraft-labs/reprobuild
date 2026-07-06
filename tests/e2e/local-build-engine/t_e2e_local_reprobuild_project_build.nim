@@ -4,6 +4,13 @@ import repro_tool_profiles
 import repro_runquota
 import repro_test_support
 
+proc removeDirIfPossible(path: string) =
+  try:
+    if dirExists(path):
+      removeDir(path)
+  except OSError:
+    discard
+
 const MonitorFixtureSource = r"""
 #include <stdio.h>
 #include <stdlib.h>
@@ -1391,7 +1398,7 @@ suite "e2e_local_reprobuild_project_build":
       test "m52_stylus_import_monitoring_e2e":
         let repoRoot = getCurrentDir()
         let tempRoot = createTempDir("repro-m52-stylus-monitor", "")
-        defer: removeDir(tempRoot)
+        defer: removeDirIfPossible(tempRoot)
 
         let stylusDir = stylusFixturePathDir(tempRoot)
         check stylusDir.len > 0
@@ -1663,7 +1670,7 @@ suite "e2e_local_reprobuild_project_build":
     test "public CLI work root override isolates metadata by worktree":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m54-work-root", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirIfPossible(tempRoot)
 
       let reproBin = reproBinary(repoRoot)
       let sharedWorkRoot = tempRoot / "shared-work"

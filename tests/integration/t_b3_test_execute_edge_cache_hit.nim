@@ -10,6 +10,8 @@
 
 import std/[json, os, osproc, strtabs, strutils, unittest]
 
+import ./runquota_fixture_paths
+
 const RepoMarker = "repro.nim"
 const TargetTest = "t_dsl_outputs_statement_basic_accepted"
 const ExecuteActionId = "reprobuild.test_execute." & TargetTest
@@ -29,7 +31,7 @@ proc findRepoRoot(): string =
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
-  let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
+  let runquotaBin = runquotaBinDir(repoRoot)
   var env = newStringTable()
   for k, v in envPairs():
     env[k] = v
@@ -80,8 +82,7 @@ suite "Bootstrap-And-Self-Build B3: test execute edge":
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /
       addFileExt("repro", ExeExt)
-    let runquotad = repoRoot.parentDir / "runquota" / "build" / "bin" /
-      addFileExt("runquotad", ExeExt)
+    let runquotad = runquotadPath(repoRoot)
 
     check fileExists(reproBin)
     check fileExists(runquotad)

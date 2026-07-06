@@ -246,7 +246,7 @@ proc acquireUrlLayer(
   ## visibility tier ("public" / "org" / "team" / "private") so a
   ## public-only user reading the M9 init report can tell which layer
   ## the access-control failure originated in (M25 contract).
-  let dotRepo = workspaceRoot / ".repro"
+  let dotRepo = workspaceRoot / ".repo"
   createDir(dotRepo)
   let target = dotRepo / layerDirName(layerIdx, entry)
   if dirExists(target):
