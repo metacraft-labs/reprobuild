@@ -26,10 +26,59 @@ mkdir -p "${REPROBUILD_ACTION_CACHE_ROOT}"
 # machines can retain older zstd/glibc closures, and prepending those paths
 # makes unrelated host tools load incompatible libraries.
 runtime_lib_dirs=()
-for candidate in ${CLINGO_LIB:-} ${ZSTD_LIB:-}; do
-  if [[ -d "${candidate}" ]]; then
-    runtime_lib_dirs+=("${candidate}")
+add_runtime_lib_dir() {
+  local dir="$1"
+  shift
+  if [[ -z "${dir}" || ! -d "${dir}" ]]; then
+    return
   fi
+  local lib
+  for lib in "$@"; do
+    if compgen -G "${dir}/${lib}" >/dev/null; then
+      local existing
+      for existing in "${runtime_lib_dirs[@]}"; do
+        if [[ "${existing}" == "${dir}" ]]; then
+          return
+        fi
+      done
+      runtime_lib_dirs+=("${dir}")
+      return
+    fi
+  done
+}
+
+add_runtime_prefix() {
+  local prefix="$1"
+  shift
+  if [[ -z "${prefix}" ]]; then
+    return
+  fi
+  add_runtime_lib_dir "${prefix}" "$@"
+  add_runtime_lib_dir "${prefix}/lib" "$@"
+  add_runtime_lib_dir "${prefix}/lib64" "$@"
+}
+
+for candidate in ${CLINGO_LIB:-}; do
+  add_runtime_lib_dir "${candidate}" 'libclingo.so*' 'libclingo.dylib*'
+done
+for candidate in ${ZSTD_LIB:-}; do
+  add_runtime_lib_dir "${candidate}" 'libzstd.so*' 'libzstd.dylib*'
+done
+for prefix in ${CLINGO_PREFIX:-}; do
+  add_runtime_prefix "${prefix}" 'libclingo.so*' 'libclingo.dylib*'
+done
+for prefix in ${ZSTD_PREFIX:-}; do
+  add_runtime_prefix "${prefix}" 'libzstd.so*' 'libzstd.dylib*'
+done
+for tok in ${NIX_LDFLAGS:-}; do
+  case "${tok}" in
+    -L*)
+      dir="${tok#-L}"
+      add_runtime_lib_dir "${dir}" \
+        'libclingo.so*' 'libclingo.dylib*' \
+        'libzstd.so*' 'libzstd.dylib*'
+      ;;
+  esac
 done
 if [[ ${#runtime_lib_dirs[@]} -gt 0 ]]; then
   runtime_lib_path="$(IFS=:; printf '%s' "${runtime_lib_dirs[*]}")"
