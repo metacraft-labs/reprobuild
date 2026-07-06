@@ -147,6 +147,20 @@ proc thinConsumerEdge(consumerPath, interfacePath: string;
 
 when isNixSupported:
   suite "integration_project_interface_artifact_import_modes":
+    test "provider source discovery includes macro-injected stdlib uses":
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-provider-uses-sources", "")
+      defer: removeDir(tempRoot)
+      let providerModule = tempRoot / "reprobuild.nim"
+      writeFile(providerModule,
+        "import repro_project_dsl\n\n" &
+        "package providerUses:\n" &
+        "  uses:\n" &
+        "    \"stylus\"\n")
+      let sources = discoverProviderSources(providerModule, repoRoot)
+      check sources.anyIt(it.replace('\\', '/').endsWith(
+        "libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/stylus.nim"))
+
     test "interface artifacts, thin/source imports, and provider compile edge":
       let repoRoot = getCurrentDir()
       let dslPath = repoRoot / "libs" / "repro_project_dsl" / "src"

@@ -199,13 +199,18 @@ proc installNativeHooks(c: M6Case) =
     readFile(c.xdgConfig / "fish" / "config.fish")
 
 proc posixProbeScript(projectA, projectB: string): string =
-  "cd " & q(projectA) & "\n" &
+  "__repro_probe_activate() { command -v __repro_native_shell_hook >/dev/null 2>&1 && __repro_native_shell_hook; }\n" &
+    "cd " & q(projectA) & "\n" &
+    "__repro_probe_activate\n" &
     "printf 'A:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" \"$(fixture-tool)\"\n" &
     "cd " & q(projectB) & "\n" &
+    "__repro_probe_activate\n" &
     "printf 'B:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" \"$(fixture-tool)\"\n" &
     "cd " & q(parentDir(projectA)) & "\n" &
+    "__repro_probe_activate\n" &
     "printf 'OUT:%s|%s|%s\\n' \"${AUX_VALUE-unset}\" \"${FIXTURE_MODE-unset}\" \"${REPRO_DEV_ENV_PROJECT_ROOT-unset}\"\n" &
     "cd " & q(projectA) & "\n" &
+    "__repro_probe_activate\n" &
     "printf 'A2:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" \"$(fixture-tool)\"\n"
 
 proc fishProbeScript(projectA, projectB: string): string =

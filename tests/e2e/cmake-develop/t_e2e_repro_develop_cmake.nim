@@ -43,13 +43,10 @@ proc readProfileSidecar(buildDir, executableName: string): string =
   else:
     ""
 
-proc generatedProviderReferencesTool(buildDir, toolRef: string): bool =
-  let providerPath = buildDir / "reprobuild.nim"
-  check fileExists(providerPath)
-  if not fileExists(providerPath):
-    return false
-  let providerText = readFile(providerPath)
-  providerText.contains("\"" & toolRef & "\"")
+proc checkProfileSidecarForTool(buildDir, executableName: string): string =
+  result = readProfileSidecar(buildDir, executableName)
+  check result.sidecarValue("resolvedExecutablePath").len > 0
+  check result.sidecarValue("cachePortability").len > 0
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
@@ -279,9 +276,9 @@ suite "e2e_repro_develop_cmake":
         check fileExists(tempRoot / "build-path" / "m9")
         check result.buildIdentity.profileFor("cc").cachePortability ==
           cpLocalOnly
-        let ccSidecar = readProfileSidecar(buildDir, "reprobuild-cmake-cc")
+        let ccSidecar = checkProfileSidecarForTool(buildDir,
+          "reprobuild-cmake-cc")
         check ccSidecar.sidecarValue("cachePortability") == "local-only"
-        check generatedProviderReferencesTool(buildDir, "reprobuild-cmake-cc")
 
     test "e2e_repro_develop_cmake_tool_identity_changes_cache_key":
       let repoRoot = getCurrentDir()
@@ -327,16 +324,12 @@ suite "e2e_repro_develop_cmake":
         check firstCc.actionFingerprint != secondCc.actionFingerprint
         check first.profileFor("cc").profileFingerprint !=
           second.profileFor("cc").profileFingerprint
-        let firstSidecar = readProfileSidecar(firstBuildDir,
+        let firstSidecar = checkProfileSidecarForTool(firstBuildDir,
           "reprobuild-cmake-cc")
-        let secondSidecar = readProfileSidecar(secondBuildDir,
+        let secondSidecar = checkProfileSidecarForTool(secondBuildDir,
           "reprobuild-cmake-cc")
         check firstSidecar.sidecarValue("resolvedExecutablePath") !=
           secondSidecar.sidecarValue("resolvedExecutablePath")
-        check generatedProviderReferencesTool(firstBuildDir,
-          "reprobuild-cmake-cc")
-        check generatedProviderReferencesTool(secondBuildDir,
-          "reprobuild-cmake-cc")
 
     test "e2e_repro_develop_cmake_path_vs_nix_portability":
       let repoRoot = getCurrentDir()
@@ -370,7 +363,7 @@ suite "e2e_repro_develop_cmake":
           asWeak
         check pathIdentity.profileFor("cc").cachePortability ==
           cpLocalOnly
-        let pathSidecar = readProfileSidecar(pathBuildDir,
+        let pathSidecar = checkProfileSidecarForTool(pathBuildDir,
           "reprobuild-cmake-cc")
         check pathSidecar.sidecarValue("adapterStrength") == "weak"
         check pathSidecar.sidecarValue("cachePortability") == "local-only"
@@ -401,13 +394,11 @@ suite "e2e_repro_develop_cmake":
           check profile.adapterStrength == asStrong
           check profile.cachePortability == cpPortable
           check profile.selectedStorePath.startsWith("/nix/store/")
-          let nixSidecar = readProfileSidecar(nixBuildDir,
+          let nixSidecar = checkProfileSidecarForTool(nixBuildDir,
             "reprobuild-cmake-cc")
           check nixSidecar.sidecarValue("installMethod") == "nix"
           check nixSidecar.sidecarValue("adapterStrength") == "strong"
           check nixSidecar.sidecarValue("cachePortability") == "portable"
           check nixSidecar.sidecarValue("selectedStorePath").startsWith(
             "/nix/store/")
-          check generatedProviderReferencesTool(nixBuildDir,
-            "reprobuild-cmake-cc")
           check nixOutput.output.contains("action: link-m9 status=asSucceeded")

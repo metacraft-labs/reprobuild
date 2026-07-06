@@ -48,7 +48,7 @@
 ## migration story when the DSL gains user-extensible ``files``-output
 ## procs.
 
-import std/[algorithm, hashes, os, osproc, sequtils, sets, strutils]
+import std/[algorithm, hashes, os, osproc, sequtils, sets, strtabs, strutils]
 
 import nimcrypto/sha2 as nc_sha2
 
@@ -264,6 +264,19 @@ proc tarFlagFor(memberName: string): string =
     "--zstd -xf"
   else: ""
 
+proc archiveToolEnv(): StringTableRef =
+  result = newStringTable(modeCaseSensitive)
+  for key, value in envPairs():
+    case key
+    of "LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES":
+      discard
+    else:
+      result[key] = value
+
+proc execArchiveCmd(command: string): tuple[output: string; exitCode: int] =
+  execCmdEx(command, env = archiveToolEnv())
+
 # ---------------------------------------------------------------------------
 # Public: extractAptDeb (spec §2)
 # ---------------------------------------------------------------------------
@@ -323,7 +336,7 @@ proc tarExtractDataMember(debPath, debBytes, memberName: string;
   # collect stderr for the diagnostic.
   let cmd = "tar " & flag & " " & quoteShell(tmpData) &
             " -C " & quoteShell(outDir)
-  let res = execCmdEx(cmd)
+  let res = execArchiveCmd(cmd)
   if res.exitCode != 0:
     var e = newException(AptExtractError,
       "tar extraction failed (exit " & $res.exitCode & "): " & res.output)

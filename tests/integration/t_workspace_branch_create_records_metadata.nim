@@ -40,6 +40,20 @@ proc requireGit(command: string; cwd = ""): string =
 proc repoRoot(): string =
   result = currentSourcePath().parentDir.parentDir.parentDir
 
+proc removeDirIfPossible(path: string) =
+  if path.len == 0 or not dirExists(path):
+    return
+  for attempt in 0 .. 4:
+    try:
+      removeDir(path)
+      return
+    except OSError:
+      sleep(50 * (attempt + 1))
+  try:
+    removeDir(path)
+  except OSError:
+    discard
+
 # Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
 # (``reprobuild.apps.repro`` → ``build/bin/repro``, built by ``just bootstrap``
 # / the apps collection before tests run). Assert it exists and use it instead
@@ -176,7 +190,7 @@ suite "M14 — repro branch records metadata round-trip":
       skip()
     else:
       let fx = setupFixture(gitBin, "create-writes")
-      defer: removeDir(fx.scratch)
+      defer: removeDirIfPossible(fx.scratch)
 
       # Init clones both repos and records ``main`` (the resolver's
       # trunk) as the active branch.
@@ -224,7 +238,7 @@ suite "M14 — repro branch records metadata round-trip":
       skip()
     else:
       let fx = setupFixture(gitBin, "show-after-create")
-      defer: removeDir(fx.scratch)
+      defer: removeDirIfPossible(fx.scratch)
 
       check runInit(fx).code == 0
       check runBranchCreate(fx, "feature-show").code == 0
@@ -252,7 +266,7 @@ suite "M14 — repro branch records metadata round-trip":
       skip()
     else:
       let fx = setupFixture(gitBin, "show-after-init")
-      defer: removeDir(fx.scratch)
+      defer: removeDirIfPossible(fx.scratch)
 
       # ``workspace init`` records the resolver's ``trunk`` (``main``
       # in this fixture) as the active branch. ``repro branch``

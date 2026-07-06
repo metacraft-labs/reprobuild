@@ -233,12 +233,12 @@ proc remoteActivityArgs(command: string; h: SshHarness; targetStoreRoot,
     "--port", $h.port]
   for opt in [
       "-F", "/dev/null",
-      "-o", "UserKnownHostsFile=" & h.knownHosts,
-      "-o", "GlobalKnownHostsFile=/dev/null",
-      "-o", "StrictHostKeyChecking=no",
-      "-o", "IdentitiesOnly=yes",
-      "-o", "PasswordAuthentication=no",
-      "-o", "KbdInteractiveAuthentication=no",
+      "-oUserKnownHostsFile=" & h.knownHosts,
+      "-oGlobalKnownHostsFile=/dev/null",
+      "-oStrictHostKeyChecking=no",
+      "-oIdentitiesOnly=yes",
+      "-oPasswordAuthentication=no",
+      "-oKbdInteractiveAuthentication=no",
       "-i", h.clientKey]:
     result.add("--ssh-option")
     result.add(opt)

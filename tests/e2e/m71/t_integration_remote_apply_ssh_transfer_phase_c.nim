@@ -274,12 +274,12 @@ suite "M71 Phase C: SSH activation-bundle transfer/import":
           "--port", $sshd.port]
         for opt in [
             "-F", "/dev/null",
-            "-o", "UserKnownHostsFile=" & sshd.knownHosts,
-            "-o", "GlobalKnownHostsFile=/dev/null",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "IdentitiesOnly=yes",
-            "-o", "PasswordAuthentication=no",
-            "-o", "KbdInteractiveAuthentication=no",
+            "-oUserKnownHostsFile=" & sshd.knownHosts,
+            "-oGlobalKnownHostsFile=/dev/null",
+            "-oStrictHostKeyChecking=no",
+            "-oIdentitiesOnly=yes",
+            "-oPasswordAuthentication=no",
+            "-oKbdInteractiveAuthentication=no",
             "-i", sshd.clientKey]:
           transferArgs.add("--ssh-option")
           transferArgs.add(opt)

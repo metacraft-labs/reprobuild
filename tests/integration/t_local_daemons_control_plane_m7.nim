@@ -17,6 +17,21 @@ proc daemonStateDir(tempRoot: string): string =
 proc daemonLogPath(tempRoot: string): string =
   daemonStateDir(tempRoot) / "logs" / "repro-daemon.log"
 
+proc safeEndpointSegment(value, fallback: string): string =
+  for ch in value:
+    if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
+        ch in {'-', '_', '.'}:
+      result.add(ch)
+    else:
+      result.add('_')
+  if result.len == 0:
+    result = fallback
+
+proc daemonStatusPath(tempRoot: string): string =
+  daemonStateDir(tempRoot) / "status" /
+    (safeEndpointSegment(daemonEndpoint(tempRoot).extractFilename,
+      "repro-daemon") & ".status")
+
 proc daemonArgs(tempRoot: string): seq[string] =
   @[
     "--endpoint", daemonEndpoint(tempRoot),
@@ -43,11 +58,15 @@ proc waitForDaemonRunning(tempRoot: string; timeoutSeconds = 60.0) =
   let deadline = epochTime() + timeoutSeconds
   var lastOutput = ""
   while epochTime() < deadline:
-    let res = runShell(shellCommand(@[publicReproBin(), "daemon", "status"] &
-      daemonArgs(tempRoot)), repoRoot())
-    lastOutput = res.output
-    if res.code == 0 and res.output.contains("repro daemon: running"):
-      return
+    if fileExists(daemonStatusPath(tempRoot)):
+      let res = runShell(shellCommand(@[publicReproBin(), "daemon", "status"] &
+        daemonArgs(tempRoot)), repoRoot())
+      lastOutput = res.output
+      if res.code == 0 and res.output.contains("repro daemon: running"):
+        return
+    else:
+      lastOutput = "waiting for daemon status file: " &
+        daemonStatusPath(tempRoot)
     sleep(25)
   checkpoint(lastOutput)
   if fileExists(daemonLogPath(tempRoot)):

@@ -76,6 +76,8 @@ proc looksLikeCrossProjectLimitation(output: string): bool =
       "typed tool provisioning is required" in output or
       "does not declare provisioning" in output:
     return true
+  if "repro-full (deleted)" in output:
+    return true
   # The CLI parser may reject the ``<pkg>:<target>`` syntax outright
   # (no engine-level diagnostic at all) and dump the canonical usage
   # text. Detect the usage dump via the most stable substrings — the

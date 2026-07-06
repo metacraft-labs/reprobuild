@@ -374,7 +374,9 @@ proc build(reproBin, target, repoRoot, pathValue: string): string =
     "--tool-provisioning=path", "--log=actions"],
     @[(name: "PATH", value: pathValue),
       (name: "REPROBUILD_ACTION_CACHE_ROOT", value: cacheRoot),
-      (name: "REPRO_CACHE_DISABLE", value: "1")]), repoRoot)
+      (name: "REPRO_CACHE_DISABLE", value: "1"),
+      (name: "REPRO_PROVIDER_NIMCACHE_MODE", value: "per-binary")]),
+    repoRoot)
 
 proc valueAfter(output, prefix: string): string =
   for line in output.splitLines:

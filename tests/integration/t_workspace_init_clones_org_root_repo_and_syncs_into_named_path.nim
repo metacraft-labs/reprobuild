@@ -52,6 +52,20 @@ proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
+proc removeDirIfPossible(path: string) =
+  if path.len == 0 or not dirExists(path):
+    return
+  for attempt in 0 .. 4:
+    try:
+      removeDir(path)
+      return
+    except OSError:
+      sleep(50 * (attempt + 1))
+  try:
+    removeDir(path)
+  except OSError:
+    discard
+
 proc gitConfig(gitBin, repoPath: string) =
   discard requireGit(q(gitBin) & " -C " & q(repoPath) &
     " config user.email tester@example.invalid")
@@ -124,7 +138,7 @@ suite "RA-31 — clone org root repo + sync into named path":
       skip()
     else:
       let scratch = createTempDir("repro-ra31-clone-", "")
-      defer: removeDir(scratch)
+      defer: removeDirIfPossible(scratch)
       let reproBin = reproBinary()
       let org = "acme-org"
 

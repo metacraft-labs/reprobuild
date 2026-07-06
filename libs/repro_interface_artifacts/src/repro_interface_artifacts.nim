@@ -2163,6 +2163,89 @@ proc discoverNimSources*(rootModulePath: string): seq[string] =
         result.add(normalized)
   result.sort(system.cmp[string])
 
+proc selectorModuleNameForSourceScan(selector: string): string =
+  var previousWasWord = false
+  for ch in selector:
+    if ch.isAlphaNumeric():
+      if ch.isUpperAscii() and previousWasWord and result.len > 0 and
+          result[^1] != '_':
+        result.add('_')
+      result.add(ch.toLowerAscii())
+      previousWasWord = true
+    else:
+      if result.len > 0 and result[^1] != '_':
+        result.add('_')
+      previousWasWord = false
+  while result.len > 0 and result[^1] == '_':
+    result.setLen(result.len - 1)
+  if result.len == 0:
+    result = "package"
+
+proc usedSelectorsFromSource(path: string): seq[string] =
+  if not fileExists(extendedPath(path)):
+    return
+  var inUsesBlock = false
+  for rawLine in readFile(extendedPath(path)).splitLines:
+    var line = stripNimLineComment(rawLine)
+    let stripped = line.strip()
+    if stripped.len == 0:
+      if inUsesBlock:
+        inUsesBlock = false
+      continue
+    var payload = ""
+    if inUsesBlock:
+      if line.len > 0 and line[0] in {' ', '\t'}:
+        payload = stripped
+      else:
+        inUsesBlock = false
+    if payload.len == 0 and stripped.startsWith("uses:"):
+      payload = stripped["uses:".len .. ^1].strip()
+      if payload.len == 0:
+        inUsesBlock = true
+        continue
+    if payload.len == 0:
+      continue
+    var candidate = payload
+    if candidate.startsWith("["):
+      candidate = candidate[1 .. ^1]
+    if candidate.endsWith("]"):
+      candidate = candidate[0 ..< ^1]
+    for raw in candidate.split({',', ';'}):
+      let entry = raw.strip(chars = {' ', '\t', '"', '\''})
+      if entry.len == 0:
+        continue
+      let selector = entry.split({' ', '\t', '>', '<', '='})[0]
+      if selector.len > 0 and result.find(selector) < 0:
+        result.add(selector)
+
+proc bundledStdlibPackageSources*(modulePath, workDir: string): seq[string] =
+  ## The ``package`` macro injects imports for bundled stdlib packages named in
+  ## ``uses:`` blocks. Those imports are not visible to the plain text import
+  ## scanner above, but they do affect provider compilation and freshness.
+  let packagesRoot = workDir / "libs" / "repro_dsl_stdlib" / "src" /
+    "repro_dsl_stdlib" / "packages"
+  if not dirExists(extendedPath(packagesRoot)):
+    return
+  var seen = initHashSet[string]()
+  for selector in usedSelectorsFromSource(modulePath):
+    let candidate = normalizedStampPath(packagesRoot /
+      (selectorModuleNameForSourceScan(selector) & ".nim"))
+    if fileExists(extendedPath(candidate)) and not seen.containsOrIncl(candidate):
+      result.add(candidate)
+  result.sort(system.cmp[string])
+
+proc discoverProviderSources*(modulePath, workDir: string): seq[string] =
+  var seen = initHashSet[string]()
+  for source in discoverNimSources(modulePath):
+    let normalized = normalizedStampPath(source)
+    if not seen.containsOrIncl(normalized):
+      result.add(normalized)
+  for source in bundledStdlibPackageSources(modulePath, workDir):
+    let normalized = normalizedStampPath(source)
+    if not seen.containsOrIncl(normalized):
+      result.add(normalized)
+  result.sort(system.cmp[string])
+
 proc reproLibSources(workDir: string): seq[string] =
   let libsRoot = workDir / "libs"
   if not dirExists(extendedPath(libsRoot)):
@@ -2250,7 +2333,8 @@ proc interfaceExtractionContext(modulePath: string;
                                 workDir = getCurrentDir();
                                 includeReproLibFingerprint = true):
     InterfaceExtractionContext =
-  let sources = discoverNimSources(modulePath).mapIt(normalizedStampPath(it))
+  let sources = discoverProviderSources(modulePath, workDir).mapIt(
+    normalizedStampPath(it))
   InterfaceExtractionContext(
     modulePath: normalizedStampPath(modulePath),
     workDir: normalizedStampPath(workDir),
@@ -3144,7 +3228,7 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
                           workDir = getCurrentDir();
                           scratchDir = ""): ProviderCompilePlan =
   let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
-  let sources = discoverNimSources(modulePath)
+  let sources = discoverProviderSources(modulePath, workDir)
   let providerFingerprint = providerFingerprintFor(sources, interfaceFingerprint,
     workDir)
   let command = providerCompileCommand(modulePath, normalizedOutputPath, workDir,
@@ -3199,7 +3283,7 @@ proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
       return none(ProviderCompileArtifact)
     if cached.outputBinaryPath != normalizedOutputPath:
       return none(ProviderCompileArtifact)
-    let sources = discoverNimSources(modulePath)
+    let sources = discoverProviderSources(modulePath, workDir)
     if cachedProviderFreshnessByMetadata(artifactPath, modulePath,
         normalizedOutputPath, workDir, sources, cached):
       return some(cached)

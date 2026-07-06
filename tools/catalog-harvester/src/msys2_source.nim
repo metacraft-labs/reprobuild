@@ -41,7 +41,7 @@
 ## so the realize hook's ``flattenExtractPath`` materializes
 ## ``bin/ocaml.exe`` at the prefix root.
 
-import std/[algorithm, httpclient, os, osproc, strutils]
+import std/[algorithm, httpclient, os, osproc, strtabs, strutils]
 import repro_dsl_stdlib/packages_schema
 
 # SHA-256 is computed by shelling out to the host hasher (sha256sum on
@@ -79,6 +79,19 @@ type
                          ## ``VersionedProvisioning.bin_relpath``)
 
   Msys2HarvestError* = object of CatchableError
+
+proc archiveToolEnv(): StringTableRef =
+  result = newStringTable(modeCaseSensitive)
+  for key, value in envPairs():
+    case key
+    of "LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES":
+      discard
+    else:
+      result[key] = value
+
+proc runArchive(command: string): tuple[output: string; exitCode: int] =
+  execCmdEx(command, env = archiveToolEnv())
 
 # ---------------------------------------------------------------------------
 # Env <-> URL helpers
@@ -415,7 +428,7 @@ proc tarListEntries*(archivePath: string): seq[string] =
   # Try the --zstd filter first (GNU tar).
   let cmd1 = quoteShell(tar) & ForceLocalFlag &
     " --zstd -tf " & quoteShell(archivePath)
-  let res1 = execCmdEx(cmd1)
+  let res1 = runArchive(cmd1)
   if res1.exitCode == 0:
     for line in res1.output.splitLines:
       let s = line.strip(chars = {'\n', '\r', ' '})
@@ -424,7 +437,7 @@ proc tarListEntries*(archivePath: string): seq[string] =
   # Fallback A: bsdtar auto-detect via bare ``-tf``.
   let cmdAuto = quoteShell(tar) & ForceLocalFlag &
     " -tf " & quoteShell(archivePath)
-  let resAuto = execCmdEx(cmdAuto)
+  let resAuto = runArchive(cmdAuto)
   if resAuto.exitCode == 0:
     for line in resAuto.output.splitLines:
       let s = line.strip(chars = {'\n', '\r', ' '})
@@ -448,14 +461,14 @@ proc tarListEntries*(archivePath: string): seq[string] =
     try: removeFile(scratchTar) except OSError: discard
   let cmdDecompress = quoteShell(zstd) & " -dc -o " &
     quoteShell(scratchTar) & " " & quoteShell(archivePath)
-  let resDecompress = execCmdEx(cmdDecompress)
+  let resDecompress = runArchive(cmdDecompress)
   if resDecompress.exitCode != 0:
     raise newException(Msys2HarvestError,
       "zstd decompress failed (exit " & $resDecompress.exitCode &
       "): " & resDecompress.output)
   let cmdList = quoteShell(tar) & ForceLocalFlag &
     " -tf " & quoteShell(scratchTar)
-  let res2 = execCmdEx(cmdList)
+  let res2 = runArchive(cmdList)
   if res2.exitCode != 0:
     raise newException(Msys2HarvestError,
       "tar -tf on decompressed scratch failed (exit " & $res2.exitCode &
@@ -488,13 +501,13 @@ proc tarExtractMember*(archivePath, member, destFile: string): bool =
   let cmd1 = quoteShell(tar) & ForceLocalFlag &
     " --zstd -xf " & quoteShell(archivePath) &
     " -C " & quoteShell(scratch) & " " & quoteShell(member)
-  let res1 = execCmdEx(cmd1)
+  let res1 = runArchive(cmd1)
   if res1.exitCode != 0:
     # Fallback A: bsdtar auto-detect.
     let cmdAuto = quoteShell(tar) & ForceLocalFlag &
       " -xf " & quoteShell(archivePath) &
       " -C " & quoteShell(scratch) & " " & quoteShell(member)
-    let resAuto = execCmdEx(cmdAuto)
+    let resAuto = runArchive(cmdAuto)
     if resAuto.exitCode != 0:
       # Fallback B: decompress to a scratch .tar then extract from
       # it (see ``tarListEntries`` for the rationale — cmd.exe
@@ -505,13 +518,13 @@ proc tarExtractMember*(archivePath, member, destFile: string): bool =
       let scratchTar = scratch / "archive.tar"
       let cmdDecompress = quoteShell(zstd) & " -dc -o " &
         quoteShell(scratchTar) & " " & quoteShell(archivePath)
-      let resDecompress = execCmdEx(cmdDecompress)
+      let resDecompress = runArchive(cmdDecompress)
       if resDecompress.exitCode != 0:
         return false
       let cmd2 = quoteShell(tar) & ForceLocalFlag &
         " -xf " & quoteShell(scratchTar) &
         " -C " & quoteShell(scratch) & " " & quoteShell(member)
-      let res2 = execCmdEx(cmd2)
+      let res2 = runArchive(cmd2)
       if res2.exitCode != 0:
         return false
   let extracted = scratch / member
