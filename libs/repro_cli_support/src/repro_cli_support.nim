@@ -64,6 +64,14 @@ proc cloneUrlFor*(repo: ResolvedRepo): string =
   for r in repo.remotes:
     if r.name == repo.remoteName or r.remoteName == repo.remoteName:
       return r.fetchUrl
+
+proc gitRemoteNameFor*(repo: ResolvedRepo): string =
+  for r in repo.remotes:
+    if r.remoteName == repo.remoteName:
+      return r.name
+  if repo.remoteName.len > 0:
+    return repo.remoteName
+  return "origin"
 import repro_cli_support/dev_env_shell_export
 import repro_cli_support/dev_env_rollback_manifest
 import repro_cli_support/dev_env_shell_hook_templates
@@ -8366,6 +8374,66 @@ proc artifactIdFingerprint(artifact: DevEnvArtifact): string =
   for b in artifact.artifactId:
     result.add(toHex(int(b), 2).toLowerAscii())
 
+proc allowFileHash(path: string): string =
+  digestHex(blake3DomainDigest(path.bytesOf(), hdMetadataEnvelope))
+
+proc emitDirectoryNotAllowedScript(shell: ShellKind; path: string): string =
+  let msg = "repro: dev-env directory " & path & " is not allowed/trusted.\n" &
+            "Run 'repro allow' to trust it and activate the environment."
+  case shell
+  of skBash, skZsh:
+    result = "echo \"" & msg.replace("\"", "\\\"") & "\" >&2\n"
+    result.add("export __REPRO_WARNED=\"" & path.replace("\"", "\\\"") & "\"\n")
+  of skFish:
+    result = "echo \"" & msg.replace("\"", "\\\"") & "\" >&2\n"
+    result.add("set -gx __REPRO_WARNED \"" & path.replace("\"", "\\\"") & "\"\n")
+  of skNushell:
+    result = "print -e \"" & msg.replace("\"", "\\\"") & "\"\n"
+    result.add("$env.__REPRO_WARNED = \"" & path.replace("\"", "\\\"") & "\"\n")
+  of skPwsh:
+    result = "[Console]::Error.WriteLine(\"" & msg.replace("\"", "\\\"") & "\")\n"
+    result.add("$env:__REPRO_WARNED = '" & path.replace("'", "''") & "'\n")
+
+proc runReproAllowCommand(args: openArray[string]): int =
+  var path = ""
+  if args.len > 0:
+    path = args[0]
+  else:
+    path = getCurrentDir()
+
+  let root = os.normalizedPath(absolutePath(path))
+  let hash = allowFileHash(root)
+  let allowDir = getConfigDir() / "repro" / "allow"
+  try:
+    createDir(allowDir)
+    writeFile(allowDir / hash, root)
+    stderr.writeLine("Allowed repro dev-env for: " & root)
+    return 0
+  except CatchableError as err:
+    stderr.writeLine("repro allow: error writing trust file: " & err.msg)
+    return 1
+
+proc runReproDenyCommand(args: openArray[string]): int =
+  var path = ""
+  if args.len > 0:
+    path = args[0]
+  else:
+    path = getCurrentDir()
+
+  let root = os.normalizedPath(absolutePath(path))
+  let hash = allowFileHash(root)
+  let f = getConfigDir() / "repro" / "allow" / hash
+  try:
+    if fileExists(f):
+      removeFile(f)
+      stderr.writeLine("Denied/removed repro dev-env trust for: " & root)
+    else:
+      stderr.writeLine("repro deny: directory was not trusted: " & root)
+    return 0
+  except CatchableError as err:
+    stderr.writeLine("repro deny: error removing trust file: " & err.msg)
+    return 1
+
 proc runDevEnvExportCommand(args: openArray[string];
                             publicCliPath: string): int =
   ## ``repro dev-env export <shell>`` dispatch arm. Exit codes:
@@ -8392,6 +8460,37 @@ proc runDevEnvExportCommand(args: openArray[string];
       return 1
   else:
     parsed.projectRoot = os.normalizedPath(absolutePath(parsed.projectRoot))
+
+  # Check if directory is allowed/trusted
+  let allowFilePath = getConfigDir() / "repro" / "allow" / allowFileHash(parsed.projectRoot)
+  var isAllowed = false
+  if fileExists(allowFilePath):
+    try:
+      let contents = readFile(allowFilePath).strip()
+      if contents == parsed.projectRoot:
+        isAllowed = true
+    except CatchableError:
+      discard
+
+  if getEnv("REPRO_DEV_ENV_AUTO_ALLOW") == "1":
+    isAllowed = true
+
+  if not isAllowed:
+    proc samePath(a, b: string): bool =
+      if a == b: return true
+      if a.len == 0 or b.len == 0: return false
+      var canonicalA = a
+      var canonicalB = b
+      try: canonicalA = expandFilename(a)
+      except CatchableError: discard
+      try: canonicalB = expandFilename(b)
+      except CatchableError: discard
+      return canonicalA == canonicalB
+
+    if samePath(getEnv("__REPRO_WARNED"), parsed.projectRoot):
+      return 0
+    stdout.write(emitDirectoryNotAllowedScript(parsed.shell, parsed.projectRoot))
+    return 0
 
   # M77 — cache-key fast path. BEFORE the project file is even
   # resolved or the selection's heavy ``resolveDevEnvSelection`` runs,
@@ -8468,7 +8567,14 @@ proc runDevEnvExportCommand(args: openArray[string];
   # next cd-out.
   plan.appendReproActiveManifestMarker(manifestPath)
   plan.appendReproAppliedMarker(fingerprint)
-  let activationScript = formatExportPlan(plan, parsed.shell)
+  var activationScript = formatExportPlan(plan, parsed.shell)
+  let unsetCmd =
+    case parsed.shell
+    of skBash, skZsh: "unset __REPRO_WARNED\n"
+    of skFish: "set -e __REPRO_WARNED\n"
+    of skNushell: "hide-env __REPRO_WARNED\n"
+    of skPwsh: "Remove-Item Env:__REPRO_WARNED -ErrorAction SilentlyContinue\n"
+  activationScript = unsetCmd & activationScript
 
   # M75 — write the rollback manifest alongside the RBDE artifact.
   let preEnv =
@@ -39500,6 +39606,20 @@ proc runThinApp*(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro shell: error: " & err.msg)
       return 1
+  if programName == "repro" and args.len > 0 and args[0] == "allow":
+    let allowArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runReproAllowCommand(allowArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "deny":
+    let denyArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runReproDenyCommand(denyArgs)
   if programName == "repro" and args.len >= 2 and args[0] == "dev-env" and
       args[1] == "export":
     # M74 — ``repro dev-env export <shell>``. New parent command

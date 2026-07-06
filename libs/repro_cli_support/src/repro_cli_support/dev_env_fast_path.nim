@@ -1,6 +1,16 @@
 import std/[os, strutils]
 
+import repro_hash
 import repro_dev_env_engine/cache_key
+
+proc allowFileHash(path: string): string =
+  var bytes = newSeq[byte](path.len)
+  for i, ch in path:
+    bytes[i] = byte(ord(ch))
+  let digest = blake3DomainDigest(bytes, hdMetadataEnvelope)
+  result = ""
+  for b in digest.bytes:
+    result.add(toHex(int(b), 2).toLowerAscii())
 
 const
   CanonicalProjectFileName = "repro.nim"
@@ -130,6 +140,35 @@ proc tryDevEnvExportFastPath*(args: openArray[string]): DevEnvFastPathResult =
       return
   else:
     parsed.projectRoot = os.normalizedPath(absolutePath(parsed.projectRoot))
+  let allowFilePath = getConfigDir() / "repro" / "allow" / allowFileHash(parsed.projectRoot)
+  var isAllowed = false
+  if fileExists(allowFilePath):
+    try:
+      let contents = readFile(allowFilePath).strip()
+      if contents == parsed.projectRoot:
+        isAllowed = true
+    except CatchableError:
+      discard
+
+  if getEnv("REPRO_DEV_ENV_AUTO_ALLOW") == "1":
+    isAllowed = true
+
+  if not isAllowed:
+    proc samePath(a, b: string): bool =
+      if a == b: return true
+      if a.len == 0 or b.len == 0: return false
+      var canonicalA = a
+      var canonicalB = b
+      try: canonicalA = expandFilename(a)
+      except CatchableError: discard
+      try: canonicalB = expandFilename(b)
+      except CatchableError: discard
+      return canonicalA == canonicalB
+
+    if samePath(getEnv("__REPRO_WARNED"), parsed.projectRoot):
+      return DevEnvFastPathResult(handled: true, exitCode: 0)
+    return
+
   let overridesPath =
     if parsed.developOverridesPath.len > 0:
       os.normalizedPath(absolutePath(parsed.developOverridesPath))
