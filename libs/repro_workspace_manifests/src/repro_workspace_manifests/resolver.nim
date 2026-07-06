@@ -414,10 +414,11 @@ proc resolveProject*(projectFile: string): ResolvedProject =
       for r in resolvedRemotes:
         if r.name == primaryName:
           primaryProjectRemote = r.remoteName
+          resolved.fetchUrl = r.fetchUrl
           break
       if primaryProjectRemote.len == 0:
         primaryProjectRemote = resolvedRemotes[0].remoteName
-      resolved.fetchUrl = remotes[primaryProjectRemote]
+        resolved.fetchUrl = resolvedRemotes[0].fetchUrl
     else:
       if resolved.remoteName notin remotes:
         raiseManifestError(absProject,
@@ -426,7 +427,7 @@ proc resolveProject*(projectFile: string): ResolvedProject =
           "fragment '" & rawInclude & "' references unknown remote '" &
             resolved.remoteName & "' (not declared in the project's [[remote]] table)")
       let fullUrl = getFetchUrl(remotes[resolved.remoteName], fragment.repo.name)
-      resolved.fetchUrl = remotes[resolved.remoteName]
+      resolved.fetchUrl = fullUrl
       resolvedRemotes.add(ResolvedRemote(name: "origin", remoteName: resolved.remoteName, fetchUrl: fullUrl))
 
     resolved.remotes = resolvedRemotes
@@ -690,10 +691,11 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
       for r in resolvedRemotes:
         if r.name == primaryName:
           primaryProjectRemote = r.remoteName
+          resolved.fetchUrl = r.fetchUrl
           break
       if primaryProjectRemote.len == 0:
         primaryProjectRemote = resolvedRemotes[0].remoteName
-      resolved.fetchUrl = remotes[primaryProjectRemote]
+        resolved.fetchUrl = resolvedRemotes[0].fetchUrl
     else:
       if resolved.remoteName notin remotes:
         raiseManifestError(absVariant,
@@ -702,7 +704,7 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
           "fragment '" & rawInclude & "' references unknown remote '" &
             resolved.remoteName & "' (not declared in the base project's [[remote]] table)")
       let fullUrl = getFetchUrl(remotes[resolved.remoteName], fragment.repo.name)
-      resolved.fetchUrl = remotes[resolved.remoteName]
+      resolved.fetchUrl = fullUrl
       resolvedRemotes.add(ResolvedRemote(name: "origin", remoteName: resolved.remoteName, fetchUrl: fullUrl))
 
     resolved.remotes = resolvedRemotes

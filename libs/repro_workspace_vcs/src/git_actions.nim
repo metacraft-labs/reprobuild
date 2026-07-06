@@ -995,13 +995,13 @@ proc buildPayload(identity: GitToolIdentity; op: GitVcsOp;
 proc gitCloneAction*(id: string; identity: GitToolIdentity;
                      remoteUrl, repoPath, receiptPath: string;
                      revision = ""; cwd = ""; deps: openArray[string] = [];
-                     cacheable = true; referencePath = "";
+                     cacheable = false; referencePath = "";
                      cloneFilter = ""; depth = 0;
                      singleBranch = false): BuildAction =
-  ## Construct a cacheable clone action. The receipt path is the
-  ## action's declared output and the unit of caching (per M2 design
-  ## rule 1). ``revision``, when non-empty, is passed as ``--branch``
-  ## to ``git clone``.
+  ## Construct a clone action. The receipt is metadata; the working tree
+  ## is the real materialized state, so the action defaults to
+  ## non-cacheable. ``revision``, when non-empty, is passed as
+  ## ``--branch`` to ``git clone``.
   ##
   ## The action fingerprint folds the ``GitToolIdentity.digest`` so
   ## two workspaces resolving to different git binaries cannot share
@@ -1031,9 +1031,9 @@ proc gitCloneAction*(id: string; identity: GitToolIdentity;
 proc gitFetchAction*(id: string; identity: GitToolIdentity;
                      remoteName, repoPath, receiptPath: string;
                      cwd = ""; deps: openArray[string] = [];
-                     cacheable = true;
+                     cacheable = false;
                      cloneFilter = ""; depth = 0): BuildAction =
-  ## Construct a cacheable fetch action. The fingerprint includes the
+  ## Construct a fetch action. The fingerprint includes the
   ## ``repoPath`` because a fetch is a working-tree-local operation:
   ## two workspaces with the same remote name but different working
   ## trees must NOT share a cache entry.
@@ -1052,10 +1052,10 @@ proc gitFetchAction*(id: string; identity: GitToolIdentity;
 proc gitSwitchAction*(id: string; identity: GitToolIdentity;
                       branchName, repoPath, receiptPath: string;
                       cwd = ""; deps: openArray[string] = [];
-                      cacheable = true): BuildAction =
-  ## Construct a cacheable switch action. The executor refuses on a
-  ## dirty working tree and surfaces ``reason = "dirty"`` via the
-  ## ``ActionResult`` (per M2 design rule 4).
+                      cacheable = false): BuildAction =
+  ## Construct a switch action. The executor refuses on a dirty working
+  ## tree and surfaces ``reason = "dirty"`` via the ``ActionResult``
+  ## (per M2 design rule 4).
   let payload = buildPayload(identity, gvoSwitch, "", "", branchName,
     "", repoPath, receiptPath)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
@@ -1066,8 +1066,8 @@ proc gitSwitchAction*(id: string; identity: GitToolIdentity;
 proc gitBranchCreate*(id: string; identity: GitToolIdentity;
                      branchName, repoPath, receiptPath: string;
                      cwd = ""; deps: openArray[string] = [];
-                     cacheable = true): BuildAction =
-  ## Construct a cacheable branch-create action used by M14
+                     cacheable = false): BuildAction =
+  ## Construct a branch-create action used by M14
   ## (``repro branch <name>``). The executor invokes
   ## ``git branch <name> <HEAD-sha>`` in the named working tree —
   ## the branch is created from the current HEAD and the working tree
@@ -1291,4 +1291,3 @@ proc queryGitState*(query: GitQueryAction;
       modifiedCount: modifiedCount,
       unmergedBranches: unmergedBranches
     )
-

@@ -483,12 +483,11 @@ proc buildPayload(identity: HgToolIdentity; op: HgVcsOp;
 proc hgCloneAction*(id: string; identity: HgToolIdentity;
                     remoteUrl, repoPath, receiptPath: string;
                     revision = ""; cwd = ""; deps: openArray[string] = [];
-                    cacheable = true): BuildAction =
-  ## Construct a cacheable hg clone action. The receipt path is the
-  ## action's declared output and the unit of caching (per M2 design
-  ## rule 1, inherited). ``revision``, when non-empty, is passed as
-  ## ``--branch`` to ``hg clone`` (matching the git analogue's
-  ## treatment).
+                    cacheable = false): BuildAction =
+  ## Construct an hg clone action. The receipt is metadata; the working
+  ## tree is the real materialized state, so the action defaults to
+  ## non-cacheable. ``revision``, when non-empty, is passed as
+  ## ``--branch`` to ``hg clone`` (matching the git analogue's treatment).
   ##
   ## The action fingerprint folds the ``HgToolIdentity.digest`` so two
   ## workspaces resolving to different hg binaries cannot share a
@@ -503,8 +502,8 @@ proc hgCloneAction*(id: string; identity: HgToolIdentity;
 proc hgPullAction*(id: string; identity: HgToolIdentity;
                    repoPath, receiptPath: string;
                    cwd = ""; deps: openArray[string] = [];
-                   cacheable = true): BuildAction =
-  ## Construct a cacheable hg pull action. ``hg pull`` defaults to
+                   cacheable = false): BuildAction =
+  ## Construct an hg pull action. ``hg pull`` defaults to
   ## the ``default`` path recorded at clone time, which is the
   ## analogue of git's ``origin``. The fingerprint includes the
   ## ``repoPath`` because pull is a working-tree-local operation:
@@ -520,9 +519,9 @@ proc hgPullAction*(id: string; identity: HgToolIdentity;
 proc hgUpdateAction*(id: string; identity: HgToolIdentity;
                      branchName, repoPath, receiptPath: string;
                      cwd = ""; deps: openArray[string] = [];
-                     cacheable = true): BuildAction =
-  ## Construct a cacheable hg update action. The executor refuses on
-  ## a dirty working tree and surfaces ``reason = "dirty"`` via the
+                     cacheable = false): BuildAction =
+  ## Construct an hg update action. The executor refuses on a dirty
+  ## working tree and surfaces ``reason = "dirty"`` via the
   ## ``ActionResult`` (mirrors the M2 git-switch contract).
   let payload = buildPayload(identity, hvoUpdate, "", branchName, "",
     repoPath, receiptPath)

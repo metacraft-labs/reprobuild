@@ -19570,6 +19570,17 @@ proc expectedBranchTip(identity: GitToolIdentity;
     return remoteTip
   revParse(identity, repoPath, branch)
 
+proc primaryLocalRemoteName(repo: ResolvedRepo): string =
+  ## ``ResolvedRepo.remoteName`` is the manifest/project remote name in the
+  ## common single-remote case. Existing checkout refs use the local alias
+  ## recorded in ``repo.remotes`` (usually ``origin``).
+  for r in repo.remotes:
+    if r.fetchUrl == repo.fetchUrl:
+      return r.name
+  if repo.remotes.len > 0:
+    return repo.remotes[0].name
+  "origin"
+
 proc looksLikeSha(value: string): bool =
   ## Heuristic for the branch-vs-SHA divergence test. Git SHA-1s are
   ## 40-character lowercase hex; SHA-256 builds extend to 64. A user
@@ -19623,7 +19634,8 @@ proc classifyExistingRepo(
     # back to the local branch when no remote-tracking ref exists.
     # Any other state (detached HEAD, ahead of origin, behind origin)
     # is a divergence: the user has work to do.
-    let branchTip = expectedBranchTip(identity, repoPath, repo.revision, remoteName = repo.remoteName)
+    let branchTip = expectedBranchTip(identity, repoPath, repo.revision,
+      remoteName = primaryLocalRemoteName(repo))
     if branchTip.len > 0 and branchTip == headSha:
       upToDate.add(WorkspaceInitUpToDateEntry(
         name: repo.name, path: repo.path, headSha: headSha))
@@ -22112,7 +22124,7 @@ proc publishRoutedEvidence*(workspaceRoot: string;
         "from — the OWNER publishes from a clean, published checkout at the " &
         "locked revision"
       result.add(outc); continue
-    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+    let rName = primaryLocalRemoteName(repo)
     let triple = gatherRepoEvidence(
       identity, repoAbs, repo.path, toolDigest, observedAtUnixMs, remoteName = rName)
     for rec in triple:
@@ -22433,7 +22445,7 @@ proc observeRepoForSync(identity: GitToolIdentity;
     result.currentBranch = branchRes.output.strip()
 
   # Branch tips (local + remote-tracking).
-  let rName = if resolved.remoteName.len > 0: resolved.remoteName else: "origin"
+  let rName = primaryLocalRemoteName(resolved)
   if result.currentBranch.len > 0:
     result.localBranchTip = revParse(identity, repoPath,
       "refs/heads/" & result.currentBranch)
@@ -22472,7 +22484,7 @@ proc observeRepoForSync(identity: GitToolIdentity;
       result.hasUnpublishedCommits = ancestorRes.code != 0
 
   if result.currentBranch.len > 0 and forcePushedSHAs.len > 0:
-    let remoteRef = "refs/remotes/origin/" & result.currentBranch
+    let remoteRef = "refs/remotes/" & rName & "/" & result.currentBranch
     let logRes = gitRunPlain(identity, ["-C", repoPath, "log", "--format=%H", remoteRef & "..HEAD"])
     if logRes.code == 0:
       for rawSha in logRes.output.strip().splitLines():
@@ -22538,7 +22550,7 @@ proc syncFetchActionFor(identity: GitToolIdentity; workspaceRoot: string;
   var deps: seq[string]
   if sharedBareRefreshDep.len > 0:
     deps.add(sharedBareRefreshDep)
-  let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+  let rName = primaryLocalRemoteName(repo)
   result = action(id,
     @[identity.binaryPath, "-C", repoAbs, "fetch", "--quiet", rName],
     cwd = workspaceRoot,
@@ -22609,7 +22621,7 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
     # engine action (RA-5c: no more synchronous ``gitRunPlain`` merge).
     let receiptRel = ".repro" / "workspace" / "receipts" /
       ("sync-merge-ff-" & idSeg & ".receipt")
-    let rName = if resolved.remoteName.len > 0: resolved.remoteName else: "origin"
+    let rName = primaryLocalRemoteName(resolved)
     var a = gitMergeFfAction("workspace-sync-merge-ff-" & idSeg, identity,
       remoteName = rName,
       branchName = decision.branch,
@@ -22639,7 +22651,7 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
   of saForcePushRebase:
     let receiptRel = ".repro" / "workspace" / "receipts" /
       ("sync-force-push-rebase-" & idSeg & ".receipt")
-    let rName = if resolved.remoteName.len > 0: resolved.remoteName else: "origin"
+    let rName = primaryLocalRemoteName(resolved)
     var a = gitForcePushRebaseAction("workspace-sync-force-push-rebase-" & idSeg, identity,
       branchName = decision.branch,
       baseSha = decision.forcePushedBaseSha,
@@ -23032,7 +23044,9 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   for repoIdx, repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
     if dirExists(repoPath / ".git") and repo.revision.len > 0 and not looksLikeSha(repo.revision):
-      oldRemoteTips[repoIdx] = revParse(identity, repoPath, "refs/remotes/origin/" & repo.revision)
+      let rName = primaryLocalRemoteName(repo)
+      oldRemoteTips[repoIdx] = revParse(identity, repoPath,
+        "refs/remotes/" & rName & "/" & repo.revision)
 
   var sharedBareRefreshAction = initTable[string, string]()
   var fetchActions: seq[BuildAction]
@@ -23112,7 +23126,9 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   for repoIdx, repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
     if oldRemoteTips[repoIdx].len > 0:
-      let newTip = revParse(identity, repoPath, "refs/remotes/origin/" & repo.revision)
+      let rName = primaryLocalRemoteName(repo)
+      let newTip = revParse(identity, repoPath,
+        "refs/remotes/" & rName & "/" & repo.revision)
       if newTip.len > 0 and newTip != oldRemoteTips[repoIdx]:
         let ancestorRes = gitRunPlain(identity, ["-C", repoPath,
           "merge-base", "--is-ancestor", oldRemoteTips[repoIdx], newTip])
@@ -23242,8 +23258,9 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
           # Branch pin: reset onto the remote-tracking tip so the overwrite
           # converges to the published revision, not a stale local branch.
           let repoAbs = args.workspaceRoot / repo.path
+          let rName = primaryLocalRemoteName(repo)
           let remoteTip = revParse(identity, repoAbs,
-            "refs/remotes/origin/" & repo.revision)
+            "refs/remotes/" & rName & "/" & repo.revision)
           target = if remoteTip.len > 0: remoteTip else: repo.revision
       if target.len == 0:
         continue
@@ -23889,7 +23906,8 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
 
     # Converge to the manifest revision on a local tracking branch.
     let converged = convergeRepoToManifestRevision(
-      identity, absPath, repo.revision, remoteName = repo.remoteName)
+      identity, absPath, repo.revision,
+      remoteName = primaryLocalRemoteName(repo))
     if not converged.ok:
       entry.outcome = pullOutcomeTag(ppoFailed)
       entry.diagnostic = converged.diag
@@ -25367,7 +25385,7 @@ proc refreshEvidenceOnlyRepoAtPostCommit(workspaceRoot, currentRepoAbs: string):
   # Gather + publish the source-free triple (NO source captured).
   try:
     let toolDigest = digestHex(identity)
-    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+    let rName = primaryLocalRemoteName(repo)
     let triple = gatherRepoEvidence(
       identity, repoAbs, repo.path, toolDigest, getTime().toUnix * 1000, remoteName = rName)
     let put = store.putEvidence(projectName, repo.name, triple)
@@ -28291,7 +28309,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       obs.isClean = cleanRes.isClean
     else:
       obs.cleanDiagnostic = cleanRes.diagnostic
-    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+    let rName = primaryLocalRemoteName(repo)
     let pubRes = queryGitState(
       isPublishedQuery(absRepo, rName), identity)
     if pubRes.status == gqsOk:
@@ -29589,7 +29607,7 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
     # Detached HEAD — nothing branch-scoped to reconcile.
     return
   let branch = branchRes.output.strip()
-  let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+  let rName = primaryLocalRemoteName(repo)
   # Fetch the upstream so the remote-tracking ref reflects teammate movement.
   let fetchRes = gitRunPlain(identity, ["-C", repoAbs, "fetch", "--quiet",
     rName])
@@ -29615,7 +29633,7 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
     ["-C", repoAbs, "merge-base", "--is-ancestor", head, upstream])
   if headInUpstream.code == 0:
     let ff = gitRunPlain(identity,
-      ["-C", repoAbs, "merge", "--ff-only", "origin/" & branch])
+      ["-C", repoAbs, "merge", "--ff-only", rName & "/" & branch])
     if ff.code != 0:
       result.stopped = true
       result.diagnostic = "fast-forward of " & repo.path & " failed: " &
@@ -29633,35 +29651,35 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
     # rather than guess. (Unreachable from the dispatcher, which only calls
     # this when a sync mode is set; kept for completeness.)
     result.stopped = true
-    result.diagnostic = repo.path & " has diverged from origin/" & branch
+    result.diagnostic = repo.path & " has diverged from " & rName & "/" & branch
     result.remediation = "run 'repro push --sync --rebase' (or --merge) to " &
-      "integrate origin/" & branch & " in " & repo.path
+      "integrate " & rName & "/" & branch & " in " & repo.path
   of psmMerge:
     let m = gitRunPlain(identity,
-      ["-C", repoAbs, "merge", "--no-edit", "origin/" & branch])
+      ["-C", repoAbs, "merge", "--no-edit", rName & "/" & branch])
     if m.code != 0:
       # Abort the half-applied merge so the tree is not left mid-conflict
       # for the operator to puzzle over an unexpected state.
       discard gitRunPlain(identity, ["-C", repoAbs, "merge", "--abort"])
       result.stopped = true
-      result.diagnostic = "merge of origin/" & branch & " into " & repo.path &
+      result.diagnostic = "merge of " & rName & "/" & branch & " into " & repo.path &
         " hit a conflict: " & m.output.strip()
       result.remediation = "resolve the conflict in " & repo.path &
-        " (git -C " & repo.path & " merge origin/" & branch &
+        " (git -C " & repo.path & " merge " & rName & "/" & branch &
         "), commit, then re-run 'repro push'"
       return
     result.action = "merge"
     result.integrated = true
   of psmRebase:
     let r = gitRunPlain(identity,
-      ["-C", repoAbs, "rebase", "origin/" & branch])
+      ["-C", repoAbs, "rebase", rName & "/" & branch])
     if r.code != 0:
       discard gitRunPlain(identity, ["-C", repoAbs, "rebase", "--abort"])
       result.stopped = true
-      result.diagnostic = "rebase onto origin/" & branch & " in " & repo.path &
+      result.diagnostic = "rebase onto " & rName & "/" & branch & " in " & repo.path &
         " hit a conflict: " & r.output.strip()
       result.remediation = "resolve the conflict in " & repo.path &
-        " (git -C " & repo.path & " rebase origin/" & branch &
+        " (git -C " & repo.path & " rebase " & rName & "/" & branch &
         "), then re-run 'repro push'"
       return
     result.action = "rebase"
@@ -29812,7 +29830,7 @@ proc executePush(args: PushArgs): PushReport =
       return
     # Published? (reuses the gate's publication probe.) Already-published is a
     # benign noop; unpublished commits get pushed.
-    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+    let rName = primaryLocalRemoteName(repo)
     # Published? (reuses the gate's publication probe.) Already-published is a
     # benign noop; unpublished commits get pushed.
     let pubRes = queryGitState(isPublishedQuery(repoAbs, rName), identity)
@@ -33147,7 +33165,7 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
     # truthful answer even before any fetch. The standard remote name
     # after ``git clone`` is ``origin``.
     let remoteName =
-      if repo.remoteName.len > 0: repo.remoteName else: "origin"
+      primaryLocalRemoteName(repo)
     let lsRemote = gitRunPlain(identity,
       ["-C", state.repoPath, "ls-remote", "--heads", remoteName,
        parsed.branchName])
@@ -33371,7 +33389,7 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
          "-" & $idx & ".receipt")
       let fetchActionId = "workspace-checkout-fetch-" &
         safeRepoIdSegment(state.repo.name) & "-" & $idx
-      let rName = if state.repo.remoteName.len > 0: state.repo.remoteName else: "origin"
+      let rName = primaryLocalRemoteName(state.repo)
       var fetchAction = gitFetchAction(fetchActionId, identity,
         remoteName = rName,
         repoPath = state.repo.path,
@@ -34574,7 +34592,7 @@ proc executeWorkspaceStart(parsed: WorkspaceStartArgs): WorkspaceStartReport =
     if localProbe.code == 0 and localProbe.output.strip().len > 0:
       state.localHadBranch = true
     # Probe remote branch.
-    let rName = if repo.remoteName.len > 0: repo.remoteName else: "origin"
+    let rName = primaryLocalRemoteName(repo)
     let remoteProbe = gitRunPlain(identity,
       ["-C", state.repoPath, "ls-remote", "--heads", rName,
        parsed.branchName])
