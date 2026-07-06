@@ -296,7 +296,7 @@ proc refreshManifestLayers*(workspaceRoot: string):
     else: absolutePath(workspaceRoot)
   result.workspaceRoot = absRoot
   let workspaceTomlPath = workspaceTomlPath(absRoot)
-  let dotRepo = reproDir(absRoot)
+  let dotRepo = absRoot / ".repo"
   result.workspaceTomlPath = workspaceTomlPath
   if not fileExists(workspaceTomlPath):
     # No workspace.toml means M6/M7 single-project mode: nothing to
