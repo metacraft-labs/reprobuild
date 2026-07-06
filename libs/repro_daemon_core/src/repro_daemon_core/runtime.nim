@@ -13,6 +13,7 @@ when defined(posix):
   const
     LockExclusive = 2.cint
     LockNonBlocking = 4.cint
+    LockUnlock = 8.cint
 
   proc cFlock(fd: cint; operation: cint): cint
     {.importc: "flock", header: "<sys/file.h>".}
