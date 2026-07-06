@@ -134,3 +134,11 @@ tests/unit/t_config_nims_lib_resolution
 /full-suite-*.log
 /m*-review-suite.log
 /test-tmp/
+
+# Local scratch and test binaries
+/scratch/
+tests/integration/t_*
+!tests/integration/t_*.nim
+!tests/integration/t_*.nims
+!tests/integration/t_*.cfg
+tools/catalog-harvester/repro_catalog_harvester
