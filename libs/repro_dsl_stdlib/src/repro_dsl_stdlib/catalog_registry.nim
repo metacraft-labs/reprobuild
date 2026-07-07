@@ -130,7 +130,8 @@ import ./packages/alire
 #     ``llvm-mingw-<tag>-<crt>-<arch>/`` directory inside a ``.zip``.
 #     First clang-on-Windows catalog (M68 left clang DEFERRED per its
 #     header note — Scoop main has no ``clang.json``).
-import ./packages/gcc_winlibs
+when defined(windows):
+  import ./packages/gcc_winlibs
 import ./packages/llvm_mingw
 # Recorder dev-env additions (codetracer-*-recorder family). Each
 # entry pairs an existing nixpkgs# selector (where one exists) with
@@ -249,6 +250,9 @@ proc getCatalog*(toolName: string):
       some(catVal)
     else:
       none(seq[VersionedProvisioning])
+  when defined(windows):
+    if toolName == "gcc-winlibs":
+      return selectIfNonEmpty(gcc_winlibsCatalog())
   case toolName
   of "jdk":        selectIfNonEmpty(jdkCatalog)
   of "cabal":      selectIfNonEmpty(cabalCatalog)
@@ -293,7 +297,6 @@ proc getCatalog*(toolName: string):
   # The Nim-identifier filenames (``gcc_winlibs`` / ``llvm_mingw``) are
   # mapped to the operator-facing hyphenated keys (``gcc-winlibs`` /
   # ``llvm-mingw``).
-  of "gcc-winlibs": selectIfNonEmpty(gcc_winlibsCatalog())
   of "llvm-mingw":  selectIfNonEmpty(llvm_mingwCatalog)
   # Recorder dev-env additions.
   of "cargo":       selectIfNonEmpty(cargoCatalog)

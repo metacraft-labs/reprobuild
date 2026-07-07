@@ -56,7 +56,8 @@ import repro_dsl_stdlib/catalog_registry
 
 # The harvested files all re-export ``packages_schema`` so importing
 # any one of them brings the enum literals and validators into scope.
-import repro_dsl_stdlib/packages/gcc_winlibs
+when defined(windows):
+  import repro_dsl_stdlib/packages/gcc_winlibs
 import repro_dsl_stdlib/packages/llvm_mingw
 import repro_dsl_stdlib/packages/sevenzip
 
@@ -66,7 +67,8 @@ type
     entries: seq[VersionedProvisioning]
 
 proc allCatalogs(): seq[CatalogUnderTest] =
-  result.add(CatalogUnderTest(name: "gcc-winlibs", entries: gcc_winlibsCatalog()))
+  when defined(windows):
+    result.add(CatalogUnderTest(name: "gcc-winlibs", entries: gcc_winlibsCatalog()))
   result.add(CatalogUnderTest(name: "llvm-mingw",  entries: llvm_mingwCatalog))
   result.add(CatalogUnderTest(name: "7zip",        entries: sevenzipCatalog))
 
@@ -152,19 +154,24 @@ suite "M8 — bulk-harvested catalog validates":
       if resolved.isSome:
         check resolved.get.len == c.entries.len
 
-  test "gcc-winlibs entry bundles gfortran (winlibs's distinguishing trait)":
-    ## The whole reason for a separate ``gcc-winlibs`` entry alongside
-    ## the M68 ``gcc`` (nuwen.net components-20.0) is that winlibs
-    ## bundles a Fortran front-end while nuwen doesn't. Guard the
-    ## bin_relpath against an accidental re-harvest that drops it.
-    let (found, entry) = selectDefault(gcc_winlibsCatalog())
-    check found
-    var sawGfortran = false
-    for relpath in entry.bin_relpath:
-      if relpath.endsWith("gfortran.exe"):
-        sawGfortran = true
-        break
-    check sawGfortran
+  when defined(windows):
+    test "gcc-winlibs entry bundles gfortran (winlibs's distinguishing trait)":
+      ## The whole reason for a separate ``gcc-winlibs`` entry alongside
+      ## the M68 ``gcc`` (nuwen.net components-20.0) is that winlibs
+      ## bundles a Fortran front-end while nuwen doesn't. Guard the
+      ## bin_relpath against an accidental re-harvest that drops it.
+      let (found, entry) = selectDefault(gcc_winlibsCatalog())
+      check found
+      var sawGfortran = false
+      for relpath in entry.bin_relpath:
+        if relpath.endsWith("gfortran.exe"):
+          sawGfortran = true
+          break
+      check sawGfortran
+  else:
+    test "gcc-winlibs is named but not loaded on non-Windows provider builds":
+      check isRegistered("gcc-winlibs")
+      check getCatalog("gcc-winlibs").isNone
 
   test "llvm-mingw entry exposes clang + lld (no shared MinGW gcc)":
     ## Guard against a drift where the harvest accidentally pulls the
