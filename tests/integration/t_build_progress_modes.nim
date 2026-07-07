@@ -27,12 +27,13 @@ proc runBuild(reproBin, repoRoot: string; progressMode: string; workRoot: string
     reproBin,
     "build",
     ".#test-helpers",
-    "--progress=" & progressMode,
-    "--no-runquota",
-    "--tool-provisioning=path",
-    "--action-cache-root=" & tempCache,
-    "--work-root=" & workRoot,
   ]
+  if progressMode.len > 0:
+    args.add("--progress=" & progressMode)
+  args.add("--no-runquota")
+  args.add("--tool-provisioning=path")
+  args.add("--action-cache-root=" & tempCache)
+  args.add("--work-root=" & workRoot)
   for arg in extraArgs:
     args.add(arg)
   let cmd = args.join(" ")
@@ -85,3 +86,14 @@ suite "t_build_progress_modes":
       let paleDotsRes = runBuild(reproBin, repoRoot, "dots", workRoot, @["--dry-run"])
       check paleDotsRes.exitCode == 0
       check paleDotsRes.output.contains(".")
+
+      # 6. Test `IN_AGENT_SHELL` override (defaults to quiet mode)
+      putEnv("IN_AGENT_SHELL", "1")
+      let agentShellRes = runBuild(reproBin, repoRoot, "", workRoot, @["--dry-run"])
+      delEnv("IN_AGENT_SHELL")
+      check agentShellRes.exitCode == 0
+      # In quiet mode, stdout/stderr progress updates are suppressed
+      check not agentShellRes.output.contains("Starting:")
+      check not agentShellRes.output.contains("Finished:")
+      check not agentShellRes.output.contains("[OK]")
+      check not agentShellRes.output.contains("[✓]")
