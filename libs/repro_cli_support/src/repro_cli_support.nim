@@ -435,6 +435,19 @@ var actionCacheRootOverride: string = ""
 proc setActionCacheRootOverride*(value: string) =
   actionCacheRootOverride = value
 
+var unicodeOverride: Option[bool] = none(bool)
+
+proc setUnicodeOverride*(value: bool) =
+  unicodeOverride = some(value)
+
+proc unicodeEnabled*(): bool =
+  if unicodeOverride.isSome:
+    return unicodeOverride.get
+  let envVal = getEnv("REPRO_UNICODE", "").toLowerAscii()
+  if envVal in ["1", "true", "yes", "on"]:
+    return true
+  false
+
 proc currentActionCacheRoot(): string {.gcsafe.} =
   {.cast(gcsafe).}:
     resolveActionCacheRoot(actionCacheRootOverride)
@@ -2426,8 +2439,16 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
       hasSelector = true
       break
   if not hasSelector:
+    var excludedActionIds = initHashSet[string]()
+    for name, target in targets:
+      if name == "test" or name.endsWith(":test") or
+         name == "bench" or name.endsWith(":bench") or
+         name == "lint" or name.endsWith(":lint"):
+        for aid in target.actions:
+          excludedActionIds.incl(aid)
     for item in actionNodes:
-      result.actions.add(lowerItem(item))
+      if not excludedActionIds.contains(item.payload.id):
+        result.actions.add(lowerItem(item))
     return
 
   var byId = initTable[string, BuildActionDef]()
@@ -4778,6 +4799,9 @@ type
     bpmLines
     bpmLinesBar
     bpmDots
+    bpmSimpleDots
+    bpmSimpleLines
+    bpmLiveLines
 
   BuildProgressBarStyle* = enum
     bpbsOverlay
@@ -4811,6 +4835,10 @@ type
     color: bool
     nativeProgress: bool
     lastLen: int
+    actionStartTimes: Table[string, float]
+    actionCommands: Table[string, string]
+    activeActions: seq[string]
+    completedActions: HashSet[string]
 
   BuildCommandOutcome = object
     exitCode: int
@@ -4904,14 +4932,22 @@ proc parseBuildProgressMode(value: string): BuildProgressMode =
     bpmLinesBar
   of "dots", "dot":
     bpmDots
+  of "simple-dots":
+    bpmSimpleDots
+  of "simple-lines":
+    bpmSimpleLines
+  of "live-lines":
+    bpmLiveLines
   else:
     raise newException(ValueError,
       "unsupported --progress=" & value &
-        " (expected quiet, line, bar-line, lines, lines-bar, or dots)")
+        " (expected quiet, line, bar-line, lines, lines-bar, dots, simple-dots, simple-lines, or live-lines)")
 
 proc configuredBuildProgressMode(): BuildProgressMode =
   let configured = getEnv("REPROBUILD_PROGRESS", "")
   if configured.len == 0:
+    if getEnv("IN_AGENT_SHELL", "").len > 0:
+      return bpmQuiet
     return bpmBarLine
   parseBuildProgressMode(configured)
 
@@ -5046,7 +5082,11 @@ proc newBuildProgressRenderer(mode: BuildProgressMode;
     ansi: supportsAnsiProgress(),
     color: colorProgressEnabled(),
     nativeProgress: nativeTerminalProgressEnabled(),
-    lastLen: 0)
+    lastLen: 0,
+    actionStartTimes: initTable[string, float](),
+    actionCommands: initTable[string, string](),
+    activeActions: @[],
+    completedActions: initHashSet[string]())
 
 proc ansi(code, text: string): string =
   "\27[" & code & "m" & text & "\27[0m"
@@ -5397,6 +5437,22 @@ proc writeRedrawnProgress(renderer: var BuildProgressRenderer; line: string) =
   stderr.flushFile()
   renderer.lastLen = line.len
 
+proc clearLines(renderer: BuildProgressRenderer; count: int) =
+  if count <= 0: return
+  if renderer.ansi:
+    stderr.write("\r\27[2K")
+    for _ in 1 ..< count:
+      stderr.write("\27[1A\27[2K")
+  else:
+    stderr.write("\r")
+  stderr.flushFile()
+
+proc formatDuration(secs: float): string =
+  if secs < 1.0:
+    $int(secs * 1000.0) & "ms"
+  else:
+    formatFloat(secs, ffDecimal, 1) & "s"
+
 proc renderPhase(renderer: var BuildProgressRenderer; phase: string) =
   if not renderer.enabled:
     return
@@ -5430,17 +5486,126 @@ proc renderProgress(renderer: var BuildProgressRenderer; event: BuildProgressEve
     renderer.writeRedrawnProgress(formatBuildProgressBarLine(event, width,
       color = renderer.color, barStyle = renderer.barStyle))
   of bpmDots:
-    if shouldEmitProgressUnit(event):
+    if event.kind == bpkActionStarted:
+      if event.actionId notin renderer.actionStartTimes:
+        renderer.actionStartTimes[event.actionId] = epochTime()
+        renderer.actionCommands[event.actionId] = event.command
+        renderer.activeActions.add(event.actionId)
+    elif event.kind == bpkActionCompleted:
+      if event.actionId notin renderer.actionStartTimes:
+        renderer.actionStartTimes[event.actionId] = epochTime()
+        renderer.actionCommands[event.actionId] = event.command
+      var newActive: seq[string] = @[]
+      for act in renderer.activeActions:
+        if act != event.actionId:
+          newActive.add(act)
+      renderer.activeActions = newActive
+      renderer.completedActions.incl(event.actionId)
+
+    if renderer.actionStartTimes.len > 0:
+      renderer.clearProgressLine()
+      var dotsStr = ""
+      for id, _ in renderer.actionStartTimes:
+        if id in renderer.completedActions:
+          if renderer.color:
+            dotsStr.add(ansi("32", "."))
+          else:
+            dotsStr.add(".")
+        else:
+          if renderer.color:
+            dotsStr.add(ansi("90", "."))
+          else:
+            if unicodeEnabled():
+              dotsStr.add("·")
+            else:
+              dotsStr.add(",")
+      renderer.writeRedrawnProgress(fitProgressLine(dotsStr, width))
+
+  of bpmSimpleDots:
+    if event.kind == bpkActionCompleted:
       stderr.write(".")
       stderr.flushFile()
       renderer.lastLen.inc
 
+  of bpmSimpleLines:
+    if event.kind == bpkActionStarted:
+      if event.actionId notin renderer.actionStartTimes:
+        renderer.actionStartTimes[event.actionId] = epochTime()
+        renderer.actionCommands[event.actionId] = event.command
+        stderr.writeLine("Starting: " & event.command)
+        stderr.flushFile()
+    elif event.kind == bpkActionCompleted:
+      let startTime =
+        if event.actionId in renderer.actionStartTimes:
+          renderer.actionStartTimes[event.actionId]
+        else:
+          stderr.writeLine("Starting: " & event.command)
+          stderr.flushFile()
+          epochTime()
+      let elapsed = epochTime() - startTime
+      let statusStr = if event.status == asFailed: "FAILED" else: "SUCCESS"
+      stderr.writeLine("Finished: " & event.command & " in " & formatDuration(elapsed) & " [" & statusStr & "]")
+      stderr.flushFile()
+      renderer.completedActions.incl(event.actionId)
+
+  of bpmLiveLines:
+    if event.kind == bpkActionStarted:
+      if event.actionId notin renderer.actionStartTimes:
+        renderer.actionStartTimes[event.actionId] = epochTime()
+        renderer.actionCommands[event.actionId] = event.command
+        renderer.activeActions.add(event.actionId)
+    elif event.kind == bpkActionCompleted:
+      let startTime =
+        if event.actionId in renderer.actionStartTimes:
+          renderer.actionStartTimes[event.actionId]
+        else:
+          epochTime()
+      
+      var newActive: seq[string] = @[]
+      for act in renderer.activeActions:
+        if act != event.actionId:
+          newActive.add(act)
+      renderer.activeActions = newActive
+      renderer.completedActions.incl(event.actionId)
+      
+      # Write completed action permanently
+      renderer.clearLines(renderer.lastLen)
+      renderer.lastLen = 0
+      
+      let elapsed = epochTime() - startTime
+      let checkbox =
+        if event.status == asFailed:
+          if renderer.color: ansi("31", if unicodeEnabled(): "[✗]" else: "[FAIL]")
+          else: (if unicodeEnabled(): "[✗]" else: "[FAIL]")
+        else:
+          if renderer.color: ansi("32", if unicodeEnabled(): "[✓]" else: "[OK]")
+          else: (if unicodeEnabled(): "[✓]" else: "[OK]")
+      
+      stderr.writeLine(event.command & " (" & formatDuration(elapsed) & ") " & checkbox)
+      stderr.flushFile()
+
+    # Redraw active actions
+    if event.kind != bpkActionCompleted:
+      renderer.clearLines(renderer.lastLen)
+      renderer.lastLen = 0
+
+    for actId in renderer.activeActions:
+      let elapsed = epochTime() - renderer.actionStartTimes[actId]
+      let cmd = renderer.actionCommands.getOrDefault(actId, "")
+      stderr.writeLine(cmd & " (" & formatDuration(elapsed) & ")")
+    stderr.flushFile()
+    renderer.lastLen = renderer.activeActions.len
+
 proc finishProgress(renderer: var BuildProgressRenderer) =
   renderer.clearNativeProgress()
-  if renderer.enabled and renderer.lastLen > 0:
-    stderr.write("\n")
-    stderr.flushFile()
-    renderer.lastLen = 0
+  if renderer.enabled:
+    if renderer.mode == bpmLiveLines:
+      renderer.clearLines(renderer.lastLen)
+      renderer.lastLen = 0
+    elif renderer.lastLen > 0:
+      stderr.write("\n")
+      stderr.flushFile()
+      renderer.lastLen = 0
 
 proc tryRenderDaemonProgress(renderer: var BuildProgressRenderer;
                              payloadJson: string): bool =
@@ -5468,6 +5633,8 @@ proc tryRenderDaemonProgress(renderer: var BuildProgressRenderer;
   except ValueError:
     return false
   event.actionId = node{"actionId"}.getStr
+  event.command = node{"command"}.getStr
+  event.currentCommand = node{"currentCommand"}.getStr
   event.total = node{"total"}.getInt
   event.completed = node{"completed"}.getInt
   event.checked = node{"checked"}.getInt
@@ -5961,6 +6128,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             "event": "progress",
             "kind": $event.kind,
             "actionId": event.actionId,
+            "command": event.command,
+            "currentCommand": event.currentCommand,
             "status": $event.status,
             "cacheDecision": $event.cacheDecision,
             "total": event.total,
@@ -7279,6 +7448,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             "event": "progress",
             "kind": $event.kind,
             "actionId": event.actionId,
+            "command": event.command,
+            "currentCommand": event.currentCommand,
             "status": $event.status,
             "cacheDecision": $event.cacheDecision,
             "total": event.total,
@@ -13030,6 +13201,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       bypassRunQuota = true
     elif arg == "--runquota":
       bypassRunQuota = false
+    elif arg == "--unicode":
+      setUnicodeOverride(true)
+    elif arg == "--no-unicode":
+      setUnicodeOverride(false)
     elif arg == "--peer-cache" or arg.startsWith("--peer-cache="):
       peerCacheSpec = valueFromFlag(args, i, "--peer-cache")
     elif arg == "--lock" or arg.startsWith("--lock="):

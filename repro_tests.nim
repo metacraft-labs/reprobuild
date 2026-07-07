@@ -6566,6 +6566,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_build_progress_modes.nim",
+    binary: "build/test-bin/t_build_progress_modes",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_m9r21_4_hardware_e2e.nim",
     binary: "build/test-bin/t_m9r21_4_hardware_e2e",
     defines: @[],

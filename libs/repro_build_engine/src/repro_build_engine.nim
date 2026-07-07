@@ -5194,8 +5194,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       var runIndex = -1
       let waitStart = statStart()
       var nextGrantPoll = 0.0
+      var lastTickTime = epochTime()
       while runIndex < 0:
         raiseIfCancelled()
+        let now = epochTime()
+        if now - lastTickTime >= 0.1:
+          lastTickTime = now
+          for item in running:
+            emitProgress(bpkActionStarted, item.id)
         if hasPendingInlineRunQuota() and epochTime() >= nextGrantPoll:
           runIndex = pollInlineRunQuotaGrants()
           nextGrantPoll = epochTime() + 0.025
@@ -5236,7 +5242,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         let timeoutMs =
           if hasPendingInlineRunQuota(): 25
           elif anyInlineRunQuotaProcess(): 50
-          else: 250
+          else:
+            let nextTickInMs = int((lastTickTime + 0.1 - epochTime()) * 1000.0)
+            max(10, min(250, nextTickInMs))
         when defined(windows):
           let signaled = waitAnyProcessExitWindows(running, timeoutMs)
           if signaled >= 0:

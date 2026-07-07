@@ -1892,6 +1892,9 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
     candidates: seq[string]
     marker: string
   let specs: seq[SiblingSpec] = @[
+    ("REPRO_TEST_ADAPTERS_SRC", anchored([
+      ".." / "reprobuild-test-adapters" / "src",
+    ]), "repro_test_adapters" / "test_runner.nim"),
     ("FASTSTREAMS_SRC", anchored([
       "libs" / "nim-faststreams" / "src",
       ".." / "codetracer" / "libs" / "nim-faststreams",
@@ -2507,6 +2510,9 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
   let ctRunnerAdapter = resolveCtTestRunnerAdapterPath(workDir)
   if ctRunnerAdapter.len > 0:
     result.add("--path:" & ctRunnerAdapter)
+  result.addExternalPackagePath(workDir, "REPRO_TEST_ADAPTERS_SRC", [
+    ".." / "reprobuild-test-adapters" / "src",
+  ], "repro_test_adapters" / "test_runner.nim")
   result.addExternalPackagePath(workDir, "FASTSTREAMS_SRC", [
     "libs" / "nim-faststreams" / "src",
     ".." / "codetracer" / "libs" / "nim-faststreams",
