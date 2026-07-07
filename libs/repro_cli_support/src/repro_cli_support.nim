@@ -22478,6 +22478,8 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
           diagnostic: "recomputed registry integrity " & observed &
             " at the locked registry coordinates does not match the lock's " &
             "recorded integrity " & d.integrity))
+    of ckForeign:
+      discard
 
 proc commitReachableLocally(identity: GitToolIdentity;
                             repoPath, sha: string): bool =
@@ -37773,6 +37775,8 @@ proc runReproLockValidate(rest: openArray[string]): int =
           problems.add("dep '" & d.name &
             "' registry integrity mismatch: locked '" & d.integrity &
             "' but recomputes to '" & recomputed & "'")
+      of ckForeign:
+        discard
   if asJson:
     let arr = newJArray()
     for p in problems: arr.add(%p)

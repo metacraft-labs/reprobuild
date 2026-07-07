@@ -393,6 +393,7 @@
           };
 
           devShells.default = pkgs.mkShell {
+            inputsFrom = [ pkgs.nix ];
             # repro_solver's clingo bindings dlopen libclingo.so at module init.
             # build_apps.sh clears NIX_LDFLAGS + LD_LIBRARY_PATH for every `nim c`
             # (the .rodata-bake guard) so the binaries carry a bare
@@ -426,6 +427,14 @@
               # resolves its dlopen()s when run inside CodeTracer's dev shell.
               pkgs.patchelf
               pkgs.cmake
+              pkgs.pkg-config
+              pkgs.nix
+              pkgs.libsodium
+              pkgs.boost
+              pkgs.libgit2
+              pkgs.libarchive
+              pkgs.nlohmann_json
+              pkgs.pcre2
               pkgs.ninja
               pkgs.clang
               pkgs.curl

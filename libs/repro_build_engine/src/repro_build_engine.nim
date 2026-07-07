@@ -1,4 +1,4 @@
-import std/[algorithm, json, options, os, osproc, sets, streams, strtabs,
+import std/[algorithm, json, options, os, osproc, net, nativesockets, sets, streams, strtabs,
     strutils, tables, times]
 
 when defined(windows):
@@ -94,6 +94,8 @@ type
     # ``bakBinaryCacheSubstitute`` action per closure member and the
     # engine's pool/parallelism semantics drive them.
     bakBinaryCacheSubstitute
+    # Provisioning task delegating to Nix Evaluation Daemon or other foreign provisioners
+    bakForeignProvision
 
   EngineTypedOutput* = object
     ## Typed-Outputs M1: engine-side mirror of
@@ -1208,7 +1210,7 @@ proc pathExists(path: string): bool =
 
 proc outputPathReady(action: BuildAction; path: string): bool =
   # M2: bakWorkspaceVcs receipts are plain files, same readiness rule.
-  if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakWorkspaceVcs} and
+  if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakWorkspaceVcs, bakForeignProvision} and
       symlinkExists(extendedPath(path)):
     return false
   path.pathExists()
@@ -3472,7 +3474,7 @@ proc parsePreserveTreeEntry(entry: string): PreserveTreeEntry =
       target: fields[2])
   PreserveTreeEntry(kind: ptekFile, relative: normalized)
 
-proc executeBuiltinAction(action: BuildAction): ActionResult =
+proc executeBuiltinAction*(action: BuildAction): ActionResult =
   result = ActionResult(
     id: action.id,
     launched: true,
@@ -3602,6 +3604,93 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
       result.launched = subRes.launched
       result.runQuotaBackend = if subRes.runQuotaBackend.len > 0:
         subRes.runQuotaBackend else: "binary-cache-substitute"
+      return
+    of bakForeignProvision:
+      # Nix evaluation daemon or scoop provisioning action
+      let provisioner = if action.argv.len > 0: action.argv[0] else: ""
+      let selector = if action.argv.len > 1: action.argv[1] else: ""
+      if provisioner.len == 0 or selector.len == 0:
+        raiseEngine("bakForeignProvision action requires provisioner and selector in argv: " & action.id)
+      if action.outputs.len != 1:
+        raiseEngine("bakForeignProvision action requires exactly one output receipt: " & action.id)
+      
+      let receiptPath = action.builtinPath(action.outputs[0])
+      if provisioner != "nix":
+        raiseEngine("Unsupported provisioner: " & provisioner)
+      
+      let socketPath = "/tmp/reprobuild-nix-daemon-" & getEnv("USER", "default") & ".sock"
+      var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
+      var connected = false
+      try:
+        sock.connectUnix(socketPath)
+        connected = true
+      except CatchableError:
+        # Spawn daemon process detached
+        let localBin = action.cwd / "build" / "reprobuild-nix-daemon"
+        let localBin2 = action.cwd.parentDir / "reprobuild-nix-daemon" / "build" / "reprobuild-nix-daemon"
+        let daemonExe = if fileExists(localBin):
+                          localBin
+                        elif fileExists(localBin2):
+                          localBin2
+                        else:
+                          "reprobuild-nix-daemon"
+        echo "[Engine Debug] Spawning daemon executable: ", daemonExe
+        discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"], options = {poDaemon})
+        for i in 0 .. 40:
+          sleep(50)
+          try:
+            sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
+            sock.connectUnix(socketPath)
+            connected = true
+            echo "[Engine Debug] Connected on try ", i
+            break
+          except CatchableError as e:
+            if i == 40:
+              echo "[Engine Debug] Connection failed: ", e.msg
+      if not connected:
+        raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
+      
+      let req = %*{
+        "action": "resolve",
+        "selector": selector,
+        "workspaceRoot": action.cwd
+      }
+      sock.send($req & "\n")
+      var respLine = ""
+      sock.readLine(respLine)
+      sock.close()
+      
+      if respLine.len == 0:
+        raiseEngine("Received empty response from reprobuild-nix-daemon")
+      
+      echo "[Engine Debug] Raw daemon response: ", respLine
+      let resp = parseJson(respLine)
+      if resp.getOrDefault("status").getStr() != "success":
+        raiseEngine("Daemon resolution error: " & resp.getOrDefault("error").getStr())
+      
+      let paths = resp.getOrDefault("paths")
+      if paths.len == 0:
+        raiseEngine("Daemon returned no materialized paths for selector: " & selector)
+      
+      let outPath = paths[0].getStr()
+      createDir(extendedPath(receiptPath.splitPath.head))
+      prepareBuiltinFileOutput(receiptPath)
+      writeFile(extendedPath(receiptPath), outPath)
+      
+      var observedReads: seq[string] = @[]
+      if resp.hasKey("dependencies"):
+        for depNode in resp["dependencies"]:
+          let depPath = depNode.getOrDefault("path").getStr()
+          if depPath.len > 0:
+            observedReads.add(relativePath(depPath, action.cwd))
+            
+      result.status = asSucceeded
+      result.exitCode = 0
+      result.evidence = PathSetEvidence(
+        declaredInputs: action.inputs,
+        declaredOutputs: action.outputs,
+        monitorReads: observedReads
+      )
       return
     of bakProcess:
       raiseEngine("process action cannot be executed as a built-in: " & action.id)
