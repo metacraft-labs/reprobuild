@@ -142,11 +142,26 @@ suite "SC-1: engine routes producer selector through override + lock":
     check hostBinding.kind == pbkNotProducer
     check hostBinding.selector == "gcc"
 
-    # A workspace that pins NO producer at all resolves every ref to
-    # ``pbkNotProducer`` (the additive / byte-identical guarantee): rewrite the
-    # lock with no deps and re-check the producer selector itself.
+    # With neither an override nor a lock pin, a selector whose checkout is
+    # present as an on-disk workspace sibling (``../prod/repro.nim`` — created
+    # above at ``siblingCheckout``) resolves as a develop-mode ON-DISK-SIBLING
+    # producer (``pbkOnDiskSibling``), NOT ``pbkNotProducer``: the same on-disk
+    # sibling ``discoverProducerSourceRoot`` already trusts for the SC-8
+    # compile-time typed-contract discovery is now honored at the build-time
+    # resolution seam, so a develop-mode consumer with sibling checkouts but no
+    # lock/override still materializes its producers (rather than falling through
+    # to PATH tool resolution and failing "not found in PATH").
     writeLock(workspace, withProducerDep = false)
-    let noProducer = resolveProducerBinding(producerName, workspace)
+    let siblingProducer = resolveProducerBinding(producerName, workspace)
+    check siblingProducer.kind == pbkOnDiskSibling
+    check siblingProducer.selector == producerName
+    check parentDir(siblingProducer.siblingProjectFile) ==
+      normalizedPath(siblingCheckout)
+
+    # A ref with NEITHER a lock/override NOR an on-disk sibling still resolves to
+    # ``pbkNotProducer`` (the additive / byte-identical guarantee for genuine
+    # host tools): ``gcc`` has no ``../gcc`` sibling in the scratch workspace.
+    let noProducer = resolveProducerBinding("gcc", workspace)
     check noProducer.kind == pbkNotProducer
 
     # ---- (4) the seam is wired into the engine-facing resolver closure, not

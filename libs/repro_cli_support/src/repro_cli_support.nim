@@ -3071,6 +3071,38 @@ proc lockPinnedSourceBinding*(selector: string; dep: LockedDep):
     localPathAbsolute: "",
     contentIdentity: identity)
 
+proc onDiskSiblingSourceBinding*(selector, siblingRoot: string):
+    ResolvedPackageBinding =
+  ## Cross-Repo-Source-Consumption SC-4 (§4.3, develop-mode on-disk-sibling arm)
+  ## — project a producer consumed as a plain on-disk workspace sibling (no
+  ## develop-override entry, no committed lock pin: ``pbkOnDiskSibling``) onto
+  ## the SAME ``foldOverridesIntoFingerprint`` framing develop mode uses, by
+  ## synthesizing an ``rpbkOverride`` binding whose ``contentIdentity`` folds the
+  ## sibling's absolute root path + its root mtime — the develop-editable analogue
+  ## of ``computeOverrideContentIdentity`` (a develop override with ``state ==
+  ## "editable"`` points at exactly this same sibling checkout, so the folded
+  ## identity matches). A touched sibling root shifts the digest and therefore the
+  ## consumer cache key; an unchanged sibling leaves it stable.
+  let absRoot = absolutePath(siblingRoot)
+  let mtimeIso =
+    try:
+      if dirExists(extendedPath(absRoot)) or fileExists(extendedPath(absRoot)):
+        $getLastModificationTime(extendedPath(absRoot))
+      else:
+        ""
+    except CatchableError:
+      ""
+  var payload = "cross-repo-producer-sibling-source.v1\x00" & selector &
+    "\x00" & absRoot & "\x00" & mtimeIso & "\x00"
+  let identity = toHex(blake3DomainDigest(payload.bytesOf(),
+    hdActionFingerprint).bytes)
+  ResolvedPackageBinding(
+    kind: rpbkOverride,
+    shadowed: UpstreamPackageBinding(packageName: selector),
+    override: DevelopOverrideEntry(package: selector, state: "editable"),
+    localPathAbsolute: absRoot,
+    contentIdentity: identity)
+
 # ---------------------------------------------------------------------------
 # Cross-Repo-Source-Consumption SC-6 (§5.2, §6) — lock-pinned VCS-sibling
 # fetch. When a producer is consumed in LOCK-PINNED mode (no develop override)
@@ -4494,6 +4526,21 @@ type
     pbkNotProducer
     pbkDevelopOverride
     pbkLockPinned
+    pbkOnDiskSibling
+      ## Develop-mode ON-DISK workspace sibling with NEITHER a develop-override
+      ## entry NOR a committed ``LockedDep`` — the producer's checkout is simply
+      ## present one level up (``../<selector>/repro.nim``, the same convention
+      ## ``findSiblingProjectFile`` / ``discoverProducerSourceRoot`` use for the
+      ## SC-8 typed-contract discovery). A ``uses:`` selector that names such a
+      ## sibling is a cross-repo PRODUCER (its source root ships a ``library`` /
+      ## ``executable`` via its ``repro.nim``), so it MUST resolve through the
+      ## cross-repo producer path — NOT fall through to PATH tool resolution,
+      ## which would wrongly reject it as "not found in PATH" under
+      ## ``--tool-provisioning=path``. This mirrors the compile-time
+      ## ``discoverProducerSourceRoot`` on-disk-sibling arm at build time, so a
+      ## develop-mode consumer with sibling checkouts but no lock/override
+      ## (e.g. a fresh workspace) materializes its producers identically to a
+      ## lock-pinned consumer whose siblings happen to be on disk.
 
   ProducerBinding* = object
     selector*: string
@@ -4506,6 +4553,10 @@ type
       overrideBinding*: ResolvedPackageBinding
     of pbkLockPinned:
       lockedDep*: LockedDep
+    of pbkOnDiskSibling:
+      siblingProjectFile*: string
+        ## The resolved ``../<selector>/repro.nim`` (or ``reprobuild.nim``);
+        ## its ``parentDir`` is the producer source root.
 
 proc resolveProducerBinding*(selector: string;
                              workspaceRoot: string): ProducerBinding
@@ -6655,6 +6706,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           # unreachable revision / integrity mismatch; never a silent fallback).
           producerRoot = fetchLockPinnedProducer(
             producer.lockedDep, result.projectRoot)
+      of pbkOnDiskSibling:
+        # Develop-mode on-disk sibling (no override, no lock): the producer's
+        # source root is the sibling checkout one level up — the same root the
+        # lock-pinned arm above uses when the sibling is present on disk.
+        producerRoot = parentDir(producer.siblingProjectFile)
       of pbkNotProducer:
         continue
       if producerRoot.len == 0 or
@@ -6973,6 +7029,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         of pbkLockPinned:
           producerSourceBindings[selector] =
             lockPinnedSourceBinding(selector, producer.lockedDep)
+        of pbkOnDiskSibling:
+          producerSourceBindings[selector] =
+            onDiskSiblingSourceBinding(selector,
+              parentDir(producer.siblingProjectFile))
         of pbkNotProducer:
           discard
         # Prepend the freshly-built producer bin dir(s) to the process ``PATH``
@@ -12295,8 +12355,13 @@ proc resolveProducerBinding*(selector: string;
   ## lock pin (develop-mode local-on-top, §6), so we consult
   ## ``resolvePackageWithOverrides`` FIRST and only fall through to the
   ## committed ``LockedDep`` when no override matched (``rpbkUpstream``). A
-  ## selector present in NEITHER surface yields ``pbkNotProducer`` so the
-  ## caller's existing resolution branch is unchanged.
+  ## selector present in NEITHER surface — but whose checkout is present as an
+  ## on-disk workspace SIBLING (``../<selector>/repro.nim``) — yields
+  ## ``pbkOnDiskSibling`` (develop-mode without a persisted override/lock: the
+  ## same on-disk-sibling arm ``discoverProducerSourceRoot`` already trusts for
+  ## the SC-8 compile-time typed-contract discovery). A selector present in NONE
+  ## of the three surfaces yields ``pbkNotProducer`` so the caller's existing
+  ## PATH / host-tool resolution branch is unchanged.
   ##
   ## ``workspaceRoot`` MUST be absolute when ``overrides`` is ``some`` (see
   ## ``resolveOverrideAbsolutePath``). A resolution DIAGNOSTIC from the
@@ -12332,7 +12397,26 @@ proc resolveProducerBinding*(selector: string;
         kind: pbkLockPinned,
         lockedDep: dep)
 
-  # 3. Not a cross-repo producer — the caller keeps its existing branch.
+  # 3. develop-mode on-disk sibling — no override entry and no lock pin, but the
+  #    producer's checkout is present one level up (``../<selector>/repro.nim``).
+  #    This is the develop-mode posture of a fresh workspace whose sibling
+  #    checkouts have not (yet) been captured in a committed lock or a persisted
+  #    develop-override file. The SC-8 compile-time typed-contract discovery
+  #    (``discoverProducerSourceRoot``) ALREADY treats such a sibling as the
+  #    producer's source root, so the consumer compiles against its typed
+  #    contract; classifying it here as a producer keeps the BUILD-time
+  #    materialization consistent with that compile-time view — otherwise the
+  #    ``uses:`` selector falls through to PATH tool resolution and is wrongly
+  #    rejected as "not found in PATH" under ``--tool-provisioning=path``.
+  block onDiskSibling:
+    let sibling = findSiblingProjectFile(selector, workspaceRoot)
+    if sibling.len > 0:
+      return ProducerBinding(
+        selector: selector,
+        kind: pbkOnDiskSibling,
+        siblingProjectFile: sibling)
+
+  # 4. Not a cross-repo producer — the caller keeps its existing branch.
   ProducerBinding(selector: selector, kind: pbkNotProducer)
 
 proc resolveProducerBinding*(selector: string;
