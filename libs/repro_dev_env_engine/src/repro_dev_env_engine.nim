@@ -5,6 +5,7 @@ import repro_core
 import repro_dev_env_engine/cache_key as devEnvCacheKey
 import repro_hash
 import repro_interface_artifacts
+import repro_tool_profiles
 
 type
   DevEnvEdgeError* = object of CatchableError
@@ -368,6 +369,26 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   result.providerBinaryPath = active.outDir / "provider" / "project-provider"
   result.providerArtifactPath = active.outDir / "provider-compile.rbsz"
 
+  # Construct bakForeignProvision actions for Nix tool uses
+  var provisioningActions: seq[BuildAction] = @[]
+  var provisioningReceipts: seq[string] = @[]
+  for useDef in interfaceArtifact.projectInterface.toolUses:
+    if useDef.nixProvisioning.len > 0:
+      let plan = nixAcquisitionPlan(useDef)
+      let receiptDir = active.outDir / "tool-store" / "nix-provision"
+      let receiptFile = receiptDir / (safeStoreSegment(useDef.packageSelector, "nix-package") & ".receipt")
+
+      let provAction = BuildAction(
+        kind: bakForeignProvision,
+        id: "nix-provision." & useDef.packageSelector,
+        argv: @["nix", plan.nixSelector],
+        outputs: @[receiptFile],
+        cwd: workDir,
+        dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor)
+      )
+      provisioningActions.add(provAction)
+      provisioningReceipts.add(receiptFile)
+
   var provider: ProviderCompileArtifact
   let cachedProvider = readFreshProviderCompileArtifact(
     result.providerArtifactPath, active.modulePath, result.providerBinaryPath,
@@ -381,11 +402,17 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
       compileScratchDir)
     invalidateStaleProviderCompileArtifact(providerPlan,
       result.providerArtifactPath)
-    let providerAction = providerCompileBuildAction(providerPlan,
+    var providerAction = providerCompileBuildAction(providerPlan,
       active.modulePath, interfacePath, result.providerArtifactPath,
       active.publicCliPath, workDir, compileScratchDir)
+
+    # Wire the provisioning receipts as inputs to the compiler action
+    for receipt in provisioningReceipts:
+      if providerAction.inputs.find(receipt) < 0:
+        providerAction.inputs.add(receipt)
+
     var compileConfig = active.engineConfig()
-    result.providerCompileResult = runBuild(graph([providerAction]),
+    result.providerCompileResult = runBuild(graph(@[providerAction] & provisioningActions),
       compileConfig)
     result.providerCompileAction = result.providerCompileResult.actionById(
       "__repro_provider_compile")
@@ -407,13 +434,26 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   result.providerBinaryPath = provider.outputBinaryPath
   result.providerArtifactId = hexDigest(provider.providerFingerprint)
 
-  var actions = @[active.devEnvIntrospectionAction(provider,
-    result.providerArtifactPath, result.providerArtifactId, result.artifactPath)]
+  var introspectionAction = active.devEnvIntrospectionAction(provider,
+    result.providerArtifactPath, result.providerArtifactId, result.artifactPath)
+
+  # Wire the provisioning receipts as inputs to the introspection action
+  for receipt in provisioningReceipts:
+    if introspectionAction.inputs.find(receipt) < 0:
+      introspectionAction.inputs.add(receipt)
+
+  var actions = @[introspectionAction]
   if active.renderShell:
-    actions.add(active.shellRenderAction(result.artifactPath,
-      result.shellFragmentPath, result.shellNavigatorStatsPath))
+    var renderAction = active.shellRenderAction(result.artifactPath,
+      result.shellFragmentPath, result.shellNavigatorStatsPath)
+    # Wire the provisioning receipts as inputs to the shell render action
+    for receipt in provisioningReceipts:
+      if renderAction.inputs.find(receipt) < 0:
+        renderAction.inputs.add(receipt)
+    actions.add(renderAction)
+
   var devEnvConfig = active.engineConfig()
-  result.devEnvResult = runBuild(graph(actions), devEnvConfig)
+  result.devEnvResult = runBuild(graph(actions & provisioningActions), devEnvConfig)
   result.introspectionAction = result.devEnvResult.actionById(
     "__repro_dev_env_introspection")
   result.shellRenderAction = result.devEnvResult.actionById(

@@ -1,4 +1,4 @@
-import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, times]
+import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, times, net]
 
 import blake3
 import cbor
@@ -858,7 +858,7 @@ proc executableInStorePath(storePath, declaredExecutablePath: string;
     return absolutePath(candidate)
   return ""
 
-proc safeStoreSegment(value, fallback: string): string =
+proc safeStoreSegment*(value, fallback: string): string =
   for ch in value:
     if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
         ch in {'-', '_', '.'}:
@@ -1141,54 +1141,71 @@ proc resolveNixTool*(useDef: InterfaceToolUse;
   if cached.hit:
     return cached.profile
 
-  var nixArgs = @["nix", "build", "--no-link", "--print-out-paths"]
-  if plan.nixExpressionFile.len > 0:
-    nixArgs.add("--file")
-    nixArgs.add(plan.nixExpressionFile)
-  else:
-    # DSL-port M9.R.14h.5 — nixpkgs's multi-output packages (libjpeg,
-    # libtiff, libpng, ...) split runtime libraries into the ``.out``
-    # output and headers into ``.dev``.  ``nix build`` without an
-    # explicit output selector only realizes + prints
-    # ``meta.outputsToInstall`` (typically ``bin`` and ``man``), so a
-    # consumer asking for ``lib/libjpeg.so`` resolves zero outputs even
-    # though nix's libjpeg ships the .so under
-    # ``<...>-libjpeg-turbo-3.1.2/lib/libjpeg.so``.  Append ``^*`` so
-    # every output is realized and printed; the downstream loop already
-    # walks every line searching for ``declaredExecutablePath``.
-    var selectorWithAllOutputs = selector
-    if not selectorWithAllOutputs.contains("^"):
-      selectorWithAllOutputs.add("^*")
-    nixArgs.add(selectorWithAllOutputs)
-  let res = execCmdEx(shellCommand(nixArgs))
-  if res.exitCode != 0:
-    raise newException(OSError,
-      "tool-resolution failed: nix build for " & selector & " exited " &
-      $res.exitCode & "\n" & res.output)
+  # Connect to C++ Nix Evaluation Daemon and query evaluation
+  let socketPath = "/tmp/reprobuild-nix-daemon-" & getEnv("USER", "default") & ".sock"
+  var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
+  var connected = false
+  try:
+    sock.connectUnix(socketPath)
+    connected = true
+  except CatchableError:
+    # Spawn daemon process detached
+    let localBin = getCurrentDir() / "build" / "reprobuild-nix-daemon"
+    let localBin2 = getCurrentDir().parentDir / "reprobuild-nix-daemon" / "build" / "reprobuild-nix-daemon"
+    let daemonExe = if fileExists(localBin):
+                      localBin
+                    elif fileExists(localBin2):
+                      localBin2
+                    else:
+                      "reprobuild-nix-daemon"
+    discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"], options = {})
+    for i in 0 .. 40:
+      sleep(50)
+      try:
+        sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
+        sock.connectUnix(socketPath)
+        connected = true
+        break
+      except CatchableError:
+        discard
 
-  var realized: seq[string] = @[]
-  for line in res.output.splitLines:
-    let stripped = line.strip()
-    if stripped.startsWith("/nix/store/"):
-      realized.add(stripped)
-  if realized.len == 0:
-    raise newException(OSError,
-      "tool-resolution failed: nix build for " & selector &
-      " did not print any /nix/store outputs")
+  if not connected:
+    raise newException(OSError, "Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
 
-  var selectedStorePath = ""
+  let req = %*{
+    "action": "resolve",
+    "selector": selector,
+    "workspaceRoot": getCurrentDir(),
+    "evaluateOnly": true
+  }
+  sock.send($req & "\n")
+  var respLine = ""
+  sock.readLine(respLine)
+  sock.close()
+
+  if respLine.len == 0:
+    raise newException(OSError, "Received empty response from reprobuild-nix-daemon during tool resolution")
+
+  let resp = parseJson(respLine)
+  if resp.getOrDefault("status").getStr() != "success":
+    raise newException(OSError, "Daemon resolution error: " & resp.getOrDefault("error").getStr())
+
+  let paths = resp.getOrDefault("paths")
+  if paths.len == 0:
+    raise newException(OSError, "Daemon returned no materialized paths for selector: " & selector)
+
+  let outPath = paths[0].getStr()
+  let realized = @[outPath]
+
+  var selectedStorePath = outPath
   var resolved = ""
-  for storePath in realized:
-    let candidate = executableInStorePath(storePath,
-      plan.declaredExecutablePath)
-    if candidate.len > 0:
-      selectedStorePath = storePath
-      resolved = candidate
-      break
-  if resolved.len == 0:
-    raise newException(OSError,
-      "tool-resolution failed: nix build for " & selector &
-      " realized outputs without " & plan.declaredExecutablePath)
+  if dirExists(extendedPath(outPath)):
+    resolved = executableInStorePath(outPath, plan.declaredExecutablePath)
+    if resolved.len == 0:
+      raise newException(OSError,
+        "tool-resolution failed: nix package realized outputs without " & plan.declaredExecutablePath)
+  else:
+    resolved = outPath / plan.declaredExecutablePath
 
   result = PathOnlyToolProfile(
     installMethod: "nix",
@@ -1207,20 +1224,6 @@ proc resolveNixTool*(useDef: InterfaceToolUse;
     adapterStrength: asStrong,
     cachePortability: cpPortable)
 
-  # M9.R.14e.7 + M9.R.14f.10 — populate the same four auxiliary
-  # search-path channels the from-source resolver populates, but
-  # anchored at the nix store output. Many nix packages (e.g.
-  # wayland-protocols, libxml2-dev) ship ``.pc`` files at
-  # ``<store>/share/pkgconfig/`` and headers at ``<store>/include/``;
-  # the engine threads these onto ``PKG_CONFIG_PATH`` /
-  # ``CMAKE_PREFIX_PATH`` / ``CPATH`` / ``LIBRARY_PATH`` at fork time
-  # so a meson/cmake recipe consuming the dep finds its pc files /
-  # headers without having to declare a special-case ``env:`` block.
-  #
-  # M9.R.14f.10: multi-output nix packages ship the .pc / headers /
-  # libraries in DIFFERENT outputs. systemd's libudev.pc lives in the
-  # ``dev`` output, not ``out``. Walk every realized store path so
-  # consumers find them.
   for storePath in realized:
     addUniquePath(result.cmakePrefixList, storePath)
     addUniquePath(result.pkgConfigSearchList,
@@ -1233,23 +1236,18 @@ proc resolveNixTool*(useDef: InterfaceToolUse;
     addUniquePath(result.libraryPathList, storePath / "lib")
     addUniquePath(result.libraryPathList, storePath / "lib64")
 
-  result.probes = collectConfiguredProbes(resolved,
-    useDef.packageSelector, useDef.executableName)
+  # Only collect probes if the output directory exists
+  if dirExists(extendedPath(selectedStorePath)):
+    result.probes = collectConfiguredProbes(resolved,
+      useDef.packageSelector, useDef.executableName)
 
-  if storeRoot.len > 0:
-    # M56 — record the Nix realization in the unified index. The Nix
-    # store keeps the actual files at `/nix/store/...`; the unified
-    # prefix is a small marker directory whose receipt records the
-    # /nix/store path as adapter-specific provenance so a subsequent
-    # `repro store gc` knows which Nix outputs the user holds live.
+  if storeRoot.len > 0 and dirExists(extendedPath(selectedStorePath)):
     let nixPackageName = safeStoreSegment("nix." & plan.packageId,
       "nix-package")
     let nixVersion =
       if versionFromPackageSelector(plan.packageSelector).len > 0:
         versionFromPackageSelector(plan.packageSelector)
       else:
-        # Use the last path segment of the /nix/store derivation as
-        # version; it usually carries the upstream version string.
         let segment = selectedStorePath.extractFilename
         let dash = segment.find('-')
         if dash >= 0 and dash + 1 < segment.len:
@@ -1269,13 +1267,10 @@ proc resolveNixTool*(useDef: InterfaceToolUse;
       selectedStorePath, "nix-store-pointer", realized,
       unified.absolutePath, [plan.declaredExecutablePath],
       writerMode = writerMode)
-    # Update the path-only profile to advertise the unified store
-    # path alongside the /nix/store realization so callers can record
-    # both for downstream tooling.
     result.realizedStorePaths.add(unified.absolutePath)
+    writeCachedNixMaterialization(storeRoot, useDef, plan, result)
 
   result.profileFingerprint = profileFingerprintFor(result)
-  writeCachedNixMaterialization(storeRoot, useDef, plan, result)
 
 proc normalizedSha256(value: string): string =
   result = value.strip().toLowerAscii()
