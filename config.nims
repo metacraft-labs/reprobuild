@@ -2,6 +2,11 @@ import std/[os, strutils]
 
 switch("styleCheck", "hint")
 
+if defined(windows):
+  switch("define", "sslVersion=3-x64")
+
+
+
 # M9.R.47.2 — undefine ``nixbuild`` so Nim's ``{.dynlib: <const>.}`` pragma
 # does NOT bake an absolute ``/nix/store/<hash>-<pkg>/lib/<lib>.so`` path
 # into the binary's ``.rodata`` at compile time.

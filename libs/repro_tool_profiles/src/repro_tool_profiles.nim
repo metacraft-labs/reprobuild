@@ -1794,14 +1794,14 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     let command =
       case extractor.kind
       of "powershell":
-        # `Expand-Archive` over PowerShell handles both `\\` and `/`
-        # separator archives correctly. We pipe via -Command + -File
-        # would require an on-disk script; -Command + a one-line
-        # expression keeps the call self-contained.
+        let tempZip = getTempDir() / ($getCurrentProcessId() & "-" & $getTime().toUnix & ".zip")
         quoteShell(extractor.exe) &
           " -NoProfile -ExecutionPolicy Bypass -Command " &
-          quoteShell("Expand-Archive -Path " & quoteShell(archivePath) &
-            " -DestinationPath " & quoteShell(destination) & " -Force")
+          quoteShell(
+            "Copy-Item -LiteralPath " & quoteShell(archivePath) & " -Destination " & quoteShell(tempZip) & "; " &
+            "Expand-Archive -LiteralPath " & quoteShell(tempZip) & " -DestinationPath " & quoteShell(destination) & " -Force; " &
+            "Remove-Item -LiteralPath " & quoteShell(tempZip)
+          )
       of "unzip":
         quoteShell(extractor.exe) & " -q -o " & quoteShell(archivePath) &
           " -d " & quoteShell(destination)

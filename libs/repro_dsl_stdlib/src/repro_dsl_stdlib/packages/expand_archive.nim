@@ -49,6 +49,7 @@
 ## from Phase E's CLI seam).
 
 import std/strutils
+import std/[os, osproc]
 
 import repro_project_dsl
 
@@ -147,9 +148,11 @@ proc buildZipArgvWindows*(archive, destination: string): seq[string] =
   ## existing files in the destination (matches Linux/macOS ``unzip
   ## -o``); ``-NoProfile`` skips the operator's PowerShell profile
   ## so a slow / failing ``$PROFILE`` does not stall the apply.
+  let tempZip = "$env:TEMP\\repro-tmp-" & $getCurrentProcessId() & ".zip"
   @["powershell", "-NoProfile", "-Command",
-    "Expand-Archive -Path \"" & archive &
-    "\" -DestinationPath \"" & destination & "\" -Force"]
+    "Copy-Item -LiteralPath \"" & archive & "\" -Destination \"" & tempZip & "\"; " &
+    "Expand-Archive -LiteralPath \"" & tempZip & "\" -DestinationPath \"" & destination & "\" -Force; " &
+    "Remove-Item -LiteralPath \"" & tempZip & "\""]
 
 proc buildZipArgvPosix*(archive, destination: string): seq[string] =
   ## InfoZIP invocation. ``-q`` quiets the per-file output;

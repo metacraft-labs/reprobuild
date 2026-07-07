@@ -3038,11 +3038,12 @@ proc startBypassRunQuotaProcess(action: BuildAction;
     # environment; ``/C`` runs the command and terminates. Path lookup
     # for the real tool is delegated to ``cmd`` rather than ``startProcess``
     # because the wrapped command line itself contains the tool name.
-    result = startProcess("cmd.exe",
-      args = @["/D", "/C", redirectedArgv],
-      env = env,
+    let cmdExe = getEnv("SystemRoot") / "System32" / "cmd.exe"
+    let cmdLine = "\"" & cmdExe & "\" /D /C \"" & redirectedArgv & "\""
+    result = startProcess(command = cmdLine,
       workingDir = cwd,
-      options = {poUsePath})
+      env = env,
+      options = {poEvalCommand})
   else:
     # POSIX wrapper shell. On Linux ``/bin/sh`` is not SIP-protected so it is
     # used directly. On macOS we prefer a non-SIP shell when one is available:

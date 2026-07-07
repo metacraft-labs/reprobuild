@@ -1535,7 +1535,7 @@ proc runCommand(command: openArray[string];
     let assembledLen = command.mapIt(cmdExeShellEscape(it)).join(" ").len +
       cmdExeShellEscape(sinkPath).len + " > 2>&1\r\n@echo off\r\n".len
     let exeName = splitFile(command[0]).name.toLowerAscii()
-    let useResponseFile = assembledLen > 6000 and exeName == "nim"
+    let useResponseFile = assembledLen > 8100 and exeName == "nim"
     var responseFilePath = ""
     var effectiveCommand: seq[string]
     if useResponseFile:
