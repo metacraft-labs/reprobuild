@@ -2385,7 +2385,8 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # compiles-check) but sourced from the resolved sibling project root rather
   # than the bundled catalog. MODE-AGNOSTIC — it fixes non-develop typed
   # consumption too.
-  var producerModules: seq[(string, string)] = @[]  # (alias, module path)
+  var producerModules: seq[(string, string, string)] = @[]
+    # (alias, selector, absolute sibling repro module path WITH .nim)
   for useDef in pkg.toolUses:
     let selector = useDef.packageSelector
     if isBundledStdlibSelector(selector):
@@ -2395,17 +2396,78 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       continue
     let moduleAlias = selectorModuleName(selector) & "_workspace_module"
     var seen = false
-    for (existingAlias, _) in producerModules:
+    for (existingAlias, _, _) in producerModules:
       if existingAlias == moduleAlias:
         seen = true
         break
     if not seen:
-      producerModules.add((moduleAlias, producerModule))
-  for (moduleAlias, producerModule) in producerModules:
-    result.add("import \"" & producerModule & "\" as " & moduleAlias & "\n")
-    result.add("when compiles(" & moduleAlias &
-      ".reprobuildPackageMarker()):\n")
-    result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")
+      # ``workspaceProducerModule`` returns the module path WITHOUT its
+      # ``.nim`` extension (Nim's ``import "<path>"`` form). Re-attach it
+      # so the per-sibling shim below can ``include`` the real file.
+      producerModules.add((moduleAlias, selector, producerModule & ".nim"))
+  # Multi-Sibling interface-extraction object-collision fix.
+  #
+  # ``usesImportCode`` used to emit a direct ``import "<sibling>/repro"`` per
+  # consumed workspace producer. When a consumer ``uses:`` TWO OR MORE
+  # siblings that require interface extraction, the extract-runner ``nim c``
+  # compiles every ``../<sib>/repro.nim`` into ONE shared nimcache. The Nim
+  # backend derives each module's C-object basename from ``mangleModuleName``,
+  # which picks the SHORTEST path relative to the project / any ``--path`` /
+  # nimble search root but DROPS which root it chose. The consumer's own
+  # ``config.nims`` puts each sibling's ``src`` dir on the search path
+  # (``switch("path", "../<sib>/src")``), so every sibling's ``repro.nim``
+  # collapses to the identical ``../repro.nim`` -> ``@p..@srepro.nim.c.o``.
+  # The second sibling's object overwrites the first on disk, the extract
+  # link then lists the same object twice (multiple-definition on the shared
+  # ``composeBinding*`` / ``atpdotdotatsreprodotnim_Init000`` symbols) AND
+  # the clobbered sibling's ``composeBindingStorage_<name>_test*Actions``
+  # symbols go undefined.
+  #
+  # Give each consumed sibling a DISTINCT compiled-object identity: instead
+  # of importing ``../<sib>/repro`` directly, materialise a per-sibling shim
+  # module ``repro_sib_<selector>.nim`` in a consumer-keyed scratch dir whose
+  # ONLY statement ``include``s the sibling's real ``repro.nim`` by absolute
+  # path. The shim's uniquely-named basename mangles to a distinct object
+  # (``@…@srepro_sib_<selector>.nim.c.o``) that cannot collapse against any
+  # search root, so N siblings never collide. ``include`` (not ``import``)
+  # keeps the sibling's own per-line file info pointing at the REAL file, so
+  # the sibling's OWN ``usesImportCode`` / ``paths`` anchoring (which reads
+  # ``lineInfoObj().filename``) still resolves against the sibling's own
+  # directory — the shim is transparent to the sibling's expansion.
+  if producerModules.len > 0:
+    # ``usesImportCode`` runs only at macro-expansion time (compile time), so
+    # the shim materialisation below uses the Nim VM's ``std/os`` file ops.
+    # Consumer-keyed scratch dir under the system temp so concurrent
+    # extractions for different consumers never share shim files and the
+    # consumer's own source tree stays clean. The key is a filesystem-safe
+    # rendering of the consumer's absolute source path (unique per consumer
+    # ``repro.nim``) plus its length as a light collision guard.
+    var consumerKey = ""
+    for ch in consumerSourceFile:
+      if ch.isAlphaNumeric():
+        consumerKey.add(ch)
+      elif consumerKey.len > 0 and consumerKey[^1] != '_':
+        consumerKey.add('_')
+    consumerKey = "c" & $consumerSourceFile.len & "_" & consumerKey
+    let shimDir = getTempDir() / "repro-sibling-shims" / consumerKey
+    if not dirExists(shimDir):
+      createDir(shimDir)
+    for (moduleAlias, selector, siblingReproPath) in producerModules:
+      let shimStem = "repro_sib_" & selectorModuleName(selector)
+      let shimPath = shimDir / (shimStem & ".nim")
+      let shimContent = "include \"" & siblingReproPath & "\"\n"
+      # Rewrite only when content differs so an unchanged sibling set does
+      # not needlessly invalidate the shim's incremental-compile stamp.
+      if (not fileExists(shimPath)) or readFile(shimPath) != shimContent:
+        writeFile(shimPath, shimContent)
+      when defined(reproDebugProducerImports):
+        echo "[producer-import] alias=", moduleAlias, " selector=", selector,
+          " shim=", shimPath, " -> ", siblingReproPath
+      let shimModule = shimDir / shimStem
+      result.add("import \"" & shimModule & "\" as " & moduleAlias & "\n")
+      result.add("when compiles(" & moduleAlias &
+        ".reprobuildPackageMarker()):\n")
+      result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")
 
 proc parseInterfaceParam(node: NimNode;
                          defaultPlacement = capAfterSubcommand): CliParamDef =
