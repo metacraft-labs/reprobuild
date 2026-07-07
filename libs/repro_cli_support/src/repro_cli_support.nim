@@ -6146,6 +6146,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # to the host's existing PATH (the legacy pre-Batch-B behaviour).
   var pendingToolIdentityResolver: ToolIdentityResolver = nil
   var effectiveSelectDefaultAction = selectDefaultAction
+  let ownsFromSourceDryRunPlan =
+    dryRun and mode == tpmFromSource and fromSourceBuildStack.len == 0
+  if ownsFromSourceDryRunPlan:
+    fromSourceDryRunPlannedRecipes.clear()
+  defer:
+    if ownsFromSourceDryRunPlan:
+      fromSourceDryRunPlannedRecipes.clear()
 
   proc runLoweredGraphBuild(lowered: tuple[actions: seq[BuildAction];
                                           pools: seq[BuildPool]];
@@ -6671,6 +6678,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             siblingRecipeDir & " (tool \"" & outcome.toolName &
             "\") exited with status " & $siblingOutcome.exitCode &
             ". See the sub-build's diagnostics for the underlying failure.")
+        if dryRun:
+          fromSourceDryRunPlannedRecipes.incl(siblingRecipeDir)
       finally:
         if fromSourceBuildStack.len > 0 and
             fromSourceBuildStack[^1] == siblingRecipeDir:

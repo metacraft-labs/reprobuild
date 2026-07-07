@@ -3521,6 +3521,17 @@ var fromSourceCycleBrokenTools*: HashSet[string] = initHashSet[string]()
   ## Windows, tarball anywhere); the rest of the chain still builds from
   ## source. Exported for test introspection.
 
+var fromSourceDryRunPlannedRecipes*: HashSet[string] = initHashSet[string]()
+  ## DSL-port M9.R.9 dry-run bridge. During a top-level
+  ## ``--tool-provisioning=from-source --dry-run`` build, the auto-recurse
+  ## dispatcher dry-runs sibling recipes instead of materializing their
+  ## install trees. The resolver still needs a profile so the parent can
+  ## finish graph planning, so successfully dry-run-recursed recipe dirs are
+  ## recorded here and ``toolProfileFor(tpmFromSource, ...)`` synthesizes a
+  ## local-only profile for their expected artifact path. ``repro_cli_support``
+  ## clears this set at top-level dry-run entry/exit so a later real build
+  ## never treats a missing artifact as resolved.
+
 const BootstrapCycleBreakTools* = @[
   ## M9.R.14c.2 / .8 — pre-seeded cycle-break taxonomy for the
   ## bootstrap tool chain. The dispatcher's reactive cycle break
@@ -4227,6 +4238,36 @@ proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
   populateFromSourceSearchPathsImpl(profile, recipeDir, effectiveRoot,
     visited, 0)
 
+proc dryRunPlannedFromSourceProfile(useDef: InterfaceToolUse;
+                                    recipeDir, expectedArtifact: string):
+    PathOnlyToolProfile =
+  let name = useDef.executableName
+  let absolute =
+    when defined(windows):
+      addFileExt(expectedArtifact, ExeExt)
+    else:
+      expectedArtifact
+  let absoluteArtifact = absolutePath(absolute)
+  result = PathOnlyToolProfile(
+    installMethod: "from-source",
+    packageSelector: useDef.packageSelector,
+    packageId:
+      if useDef.packageSelector.len > 0: useDef.packageSelector
+      else: name & "@from-source",
+    declaredExecutablePath: name,
+    executableName: name,
+    pathSearchList: @[parentDir(absoluteArtifact)],
+    resolvedExecutablePath: absoluteArtifact,
+    realizedStorePaths: @[absolutePath(recipeDir)],
+    selectedStorePath: absolutePath(recipeDir),
+    realizationBoundary: absolutePath(recipeDir),
+    lockIdentity: "from-source:" & name & ":recipe:" &
+      absolutePath(recipeDir) & ":dry-run",
+    adapterStrength: asStrong,
+    cachePortability: cpLocalOnly,
+    practicalHardening: phNone)
+  result.profileFingerprint = profileFingerprintFor(result)
+
 proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
                                recipeRoot = ""): FromSourceResolveResult =
   ## DSL-port M9.R.9 — non-raising variant of ``resolveFromSourceTool``.
@@ -4670,6 +4711,10 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     of rrResolved:
       result = outcome.profile
     of rrNeedsBuild:
+      if absolutePath(outcome.recipeDir) in fromSourceDryRunPlannedRecipes:
+        result = dryRunPlannedFromSourceProfile(useDef, outcome.recipeDir,
+          outcome.expectedArtifact)
+        return
       raise newException(OSError,
         "tool-resolution failed: --tool-provisioning=from-source requested " &
         "for \"" & outcome.toolName & "\" but its sibling recipe at " &
