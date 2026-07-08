@@ -3858,6 +3858,21 @@ proc m9r14hProbeInstallMirrorLibrary*(recipeDir, depName: string): string =
             return absolutePath(path)
   return ""
 
+proc m9r14hProbeInstallMirrorExecutable*(recipeDir, depName: string): string =
+  ## Check the install-mirror for a compiled executable artifact.
+  ## Probes `<recipeDir>/.repro/output/install/usr/bin/<depName>`
+  ## (or with `.exe` on Windows).
+  let binDir = recipeDir / ".repro" / "output" / "install" / "usr" / "bin"
+  if not dirExists(extendedPath(binDir)):
+    return ""
+  let bareCandidate = binDir / depName
+  if fileExists(extendedPath(bareCandidate)):
+    return absolutePath(bareCandidate)
+  let exeCandidate = bareCandidate & ".exe"
+  if fileExists(extendedPath(exeCandidate)):
+    return absolutePath(exeCandidate)
+  return ""
+
 type
   FromSourceResolveKind* = enum
     ## DSL-port M9.R.9 — discriminated outcome for from-source
@@ -4143,6 +4158,13 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
       useDef.packageSelector & "\")")
   let recipeDir = root / name
   let recipeManifest = recipeDir / "repro.nim"
+  try:
+    let msg = "[RESOLVER] tryResolveFromSourceTool: name=" & name & " root=" & root & " manifest=" & recipeManifest & " exists=" & $fileExists(extendedPath(recipeManifest)) & "\n"
+    let f = open("/tmp/resolver-debug.txt", fmAppend)
+    f.write(msg)
+    f.close()
+  except:
+    discard
   if not fileExists(extendedPath(recipeManifest)):
     return FromSourceResolveResult(kind: rrSiblingMissing,
       attemptedRecipeManifest: recipeManifest,
@@ -4199,6 +4221,10 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     let mirrorHit = m9r14hProbeInstallMirrorLibrary(recipeDir, name)
     if mirrorHit.len > 0:
       resolved = mirrorHit
+    else:
+      let mirrorExeHit = m9r14hProbeInstallMirrorExecutable(recipeDir, name)
+      if mirrorExeHit.len > 0:
+        resolved = mirrorExeHit
   if resolved.len == 0:
     # DSL-port M9.R.15h.14 — share-only-package fast-path.
     #

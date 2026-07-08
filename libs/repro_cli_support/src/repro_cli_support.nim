@@ -11059,6 +11059,7 @@ const
     # workspace sibling libraries when the daemon-hosted executor evaluates the
     # provider under a login-launched daemon environment.
     "IO_MON_SRC",
+    "REPRO_FROM_SOURCE_ROOT",
     # Tool-provisioning selection. The daemon-hosted executor re-parses the
     # request's rawArgs (which carry no --tool-provisioning when the user
     # selected the mode via the env var), so REPRO_TOOL_PROVISIONING must

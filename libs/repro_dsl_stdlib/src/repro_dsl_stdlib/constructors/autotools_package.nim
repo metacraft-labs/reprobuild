@@ -285,6 +285,9 @@ proc autotools_package*(srcDir: string;
   elif relSrcDir.startsWith("/"):
     # Absolute path: leave as-is.
     discard
+  var relBuildDir = buildDir
+  if relBuildDir.startsWith("./"):
+    relBuildDir = relBuildDir[2 .. ^1]
   let srcFromBuild =
     if relSrcDir.len > 0 and relSrcDir[0] == '/': relSrcDir
     else: "../" & relSrcDir
@@ -405,7 +408,7 @@ proc autotools_package*(srcDir: string;
     if projectRoot.len > 0: projectRoot / srcDir
     else: srcDir
   var m9r79ConfReadOnly: seq[string] = @[]
-  if not patchHardcodedFile:
+  if not patchHardcodedFile and relBuildDir != relSrcDir:
     m9r79ConfReadOnly.add(m9r79ConfSrcDirAbs)
   let configureEdge = buildAction(
     id = actionId,

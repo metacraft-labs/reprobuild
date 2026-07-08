@@ -244,13 +244,14 @@ package vimSource:
       let opts = @[
         "--enable-gui=no",
         "--without-x",
+        "--disable-darwin",
         "--disable-gpm",
         "--disable-perlinterp",
         "--disable-pythoninterp",
         "--disable-rubyinterp",
         "--disable-luainterp",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let pkg = autotools_package(srcDir = "./src", buildDir = "src", configureOptions = opts)
       discard pkg.executable("vim")
       discard pkg.executable("vimdiff")
       discard pkg.executable("vimtutor")

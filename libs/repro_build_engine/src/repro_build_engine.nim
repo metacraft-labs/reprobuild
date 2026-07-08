@@ -1079,7 +1079,7 @@ proc detectSourceWrites*(readOnlyRoots, monitorWrites: openArray[string]):
     if write.len == 0:
       continue
     for root in normalizedRoots:
-      if writeRootsOverlap(write, root):
+      if write == root or write.startsWith(root & "/"):
         result.add((write: write, root: root))
         break
 
@@ -1574,6 +1574,7 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   discard ioMonCodec.readU16Le(raw, pos)
   let headerCount = ioMonCodec.readU64Le(raw, pos)
   let bodyLen64 = ioMonCodec.readU64Le(raw, pos)
+  echo "DEBUG DEFILE LIMIT: maxObservationCount=", options.maxObservationCount, " headerCount=", headerCount, " path=", path
   if headerCount > options.maxObservationCount:
     raiseMonitorDecodeError(mrRecordLimitExceeded,
       "RMDF record count exceeds configured limit")
@@ -2746,7 +2747,7 @@ proc launchChildEnv(action: BuildAction;
   ## inert for the ~99% of actions (plain ``nim c`` compiles) whose children
   ## never invoke ``repro``. Any explicit ``action.env`` entry wins (appended
   ## after).
-  result = @["REPROBUILD_NO_RUNQUOTA=1"]
+  result = @["REPROBUILD_NO_RUNQUOTA=1", "IO_MON_MUTE=1"]
   # M9.R.13c.2 — **shim-library env seed**. Inject
   # ``REPRO_MONITOR_SHIM_LIB`` at launch time so the daemon-spawned
   # ``repro internal io monitor`` subprocess deterministically locates

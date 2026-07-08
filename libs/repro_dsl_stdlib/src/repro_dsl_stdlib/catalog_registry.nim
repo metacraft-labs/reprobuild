@@ -148,6 +148,7 @@ import ./packages/foundry
 import ./packages/rustc
 import ./packages/rustfmt
 import ./packages/solc
+import ./packages/create_dmg
 
 export packages_schema
 
@@ -231,6 +232,7 @@ const RegisteredTools* = [
   "rustc",
   "rustfmt",
   "solc",
+  "create-dmg",
 ]
 
 proc getCatalog*(toolName: string):
@@ -304,6 +306,7 @@ proc getCatalog*(toolName: string):
   of "rustc":       selectIfNonEmpty(rustcCatalog)
   of "rustfmt":     selectIfNonEmpty(rustfmtCatalog)
   of "solc":        selectIfNonEmpty(solcCatalog)
+  of "create-dmg":  selectIfNonEmpty(create_dmgCatalog)
   else:
     none(seq[VersionedProvisioning])
 

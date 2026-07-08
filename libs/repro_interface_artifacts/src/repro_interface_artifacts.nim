@@ -2887,6 +2887,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     "import std/os\n" &
     "import repro_interface_artifacts\n" &
     "import repro_project_dsl\n" &
+    "import repro_dsl_stdlib/constructors\n" &
     "import \"" & absoluteModulePath & "\"\n\n" &
     "let artifact = artifactFromRegisteredDsl(paramStr(3))\n" &
     "writeInterfaceArtifact(paramStr(1), artifact)\n" &

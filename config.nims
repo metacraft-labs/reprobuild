@@ -241,11 +241,15 @@ for libName in [
 # ``src``; resolve the sibling checkout by path like every other workspace
 # Nim sibling. Prefer ``$IO_MON_SRC``, then the sibling checkout.
 let ioMonSrc = block:
-  let fromEnv = getEnv("IO_MON_SRC")
-  if fromEnv.len > 0:
-    fromEnv
+  let sibling = ".." / "io-mon" / "src"
+  if fileExists(sibling / "io_mon.nim"):
+    sibling
   else:
-    ".." / "io-mon" / "src"
+    let fromEnv = getEnv("IO_MON_SRC")
+    if fromEnv.len > 0:
+      fromEnv
+    else:
+      sibling
 if fileExists(ioMonSrc / "io_mon.nim"):
   switch("path", ioMonSrc)
 

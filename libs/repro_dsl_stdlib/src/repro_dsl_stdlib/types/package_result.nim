@@ -1676,6 +1676,21 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     #   4. <name>.so             (no lib- prefix, exact-case)
     #   5. <lowerName>.so        (no lib- prefix, case-folded)
     #   6. lib<name>.a / lib<lowerName>.a (static archive fallbacks)
+    const isMac = defined(macosx)
+    const libExt = when isMac: ".dylib" else: ".so"
+
+    proc dashGlob(dir, stem: string): string =
+      dir & "/lib" & stem & "\"-*" & libExt
+
+    proc bareDashGlob(dir, stem: string): string =
+      dir & "/" & stem & "\"-*" & libExt
+
+    proc dotGlob(dir, stem: string): string =
+      if isMac:
+        dir & "/lib" & stem & ".\"*\"" & libExt & "\""
+      else:
+        dir & "/lib" & stem & ".so.\"*"
+
     let escapedLowerName = name.toLowerAscii.replace("\"", "\\\"")
     let kebabName = m9r14dPascalToKebab(name).replace("\"", "\\\"")
     let kebabDigitsName =
@@ -1700,23 +1715,23 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     let strippedKebabDigits = m9r14dPascalToKebabWithDigits(stripLibPrefix(name)).replace("\"", "\\\"")
     let strippedSnake = m9r14fPascalToSnake(stripLibPrefix(name)).replace("\"", "\\\"")
     script.add("for candidate in ")
-    script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".so\" ")
-    script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".so\" ")
-    script.add("\"" & escapedSrcDir & "/" & kebabName & ".so\" ")
-    script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & ".so\" ")
-    script.add("\"" & escapedSrcDir & "/" & snakeName & ".so\" ")
-    script.add("\"" & escapedSrcDir & "/" & escapedName & ".so\" ")
-    script.add("\"" & escapedSrcDir & "/" & escapedLowerName & ".so\" ")
+    script.add("\"" & escapedSrcDir & "/lib" & escapedName & libExt & "\" ")
+    script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & libExt & "\" ")
+    script.add("\"" & escapedSrcDir & "/" & kebabName & libExt & "\" ")
+    script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & libExt & "\" ")
+    script.add("\"" & escapedSrcDir & "/" & snakeName & libExt & "\" ")
+    script.add("\"" & escapedSrcDir & "/" & escapedName & libExt & "\" ")
+    script.add("\"" & escapedSrcDir & "/" & escapedLowerName & libExt & "\" ")
     # M9.R.14g.7 — stripped-prefix variants for ``library libFoo:`` shapes.
     if strippedName != name:
-      script.add("\"" & escapedSrcDir & "/lib" & strippedName & ".so\" ")
-      script.add("\"" & escapedSrcDir & "/lib" & strippedLowerName & ".so\" ")
+      script.add("\"" & escapedSrcDir & "/lib" & strippedName & libExt & "\" ")
+      script.add("\"" & escapedSrcDir & "/lib" & strippedLowerName & libExt & "\" ")
       # M9.R.14h.8 — kebab + snake variants on the stripped form so
       # ``libJsonC`` -> ``lib<json-c>.so`` and ``libGdkPixbuf`` ->
       # ``lib<gdk_pixbuf>.so`` resolve as plain ``.so`` shapes (the
       # version-suffix glob below handles the ``-N.M.so`` variants).
       if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
-        script.add("\"" & escapedSrcDir & "/lib" & strippedKebab & ".so\" ")
+        script.add("\"" & escapedSrcDir & "/lib" & strippedKebab & libExt & "\" ")
       # M9.R.15e.2 — kebab-with-digits stripped variant so PascalCase
       # names with trailing digits resolve to the upstream SONAME shape.
       # ``libGtk4`` -> stripped ``Gtk4`` -> kebabDigits ``gtk-4`` ->
@@ -1724,10 +1739,10 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       if strippedKebabDigits.len > 0 and
           strippedKebabDigits != strippedLowerName and
           strippedKebabDigits != strippedKebab:
-        script.add("\"" & escapedSrcDir & "/lib" & strippedKebabDigits & ".so\" ")
+        script.add("\"" & escapedSrcDir & "/lib" & strippedKebabDigits & libExt & "\" ")
       if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
           strippedSnake != strippedKebab:
-        script.add("\"" & escapedSrcDir & "/lib" & strippedSnake & ".so\" ")
+        script.add("\"" & escapedSrcDir & "/lib" & strippedSnake & libExt & "\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabName & ".a\" ")
@@ -1741,9 +1756,9 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # `.so.<X>` suffix. We sort `LC_ALL=C` and take the FIRST match to
     # stay deterministic; multiple matches in the same directory would
     # be a packaging anomaly we'd surface in the upstream recipe.
-    script.add("first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); ")
-    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
-    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/" & kebabName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    script.add("first=$(ls -1 \"" & dashGlob(escapedSrcDir, escapedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); ")
+    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(escapedSrcDir, escapedLowerName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & bareDashGlob(escapedSrcDir, kebabName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     # M9.R.15q.11.5 — dot-versioned SONAME fallback. The DASH-version
     # globs above match ``lib<name>-2.0.so`` (meson soversion +
     # libfoo-2.0 family) but the canonical Linux SONAME convention is
@@ -1755,8 +1770,8 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # Prefer the shortest (typically the major-version symlink, e.g.
     # ``libKGlobalAccelD.so.6``) for the staged copy. We use ``-V`` for
     # version-sort so ``so.10`` doesn't sort before ``so.2``.
-    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedName & ".so.\"* 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
-    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedLowerName & ".so.\"* 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
+    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dotGlob(escapedSrcDir, escapedName) & " 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
+    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dotGlob(escapedSrcDir, escapedLowerName) & " 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
     # M9.R.15q.11.6 — dot-versioned strippedName variant. The recipe
     # spells the artifact ``libKGlobalAccelD`` (with the ``lib`` prefix)
     # which combined with the literal ``lib`` prefix in
@@ -1766,12 +1781,12 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # so the glob becomes ``libKGlobalAccelD.so.*`` and matches the
     # real install.
     if strippedName != name:
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedName & ".so.\"* 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedLowerName & ".so.\"* 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dotGlob(escapedSrcDir, strippedName) & " 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dotGlob(escapedSrcDir, strippedLowerName) & " 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
     # M9.R.14g.7 — stripped-prefix glob variants (libgmodule-2.0.so etc.)
     if strippedName != name:
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(escapedSrcDir, strippedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(escapedSrcDir, strippedLowerName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     # M9.R.14g.8 — letters-only glob. ``libGlib2`` -> ``glib`` (strip
     # ``lib`` + drop trailing digits) -> glob ``libglib-*.so`` matches
     # upstream ``libglib-2.0.so`` where the soversion ``2.0`` contains a
@@ -1784,7 +1799,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
           result.add(chr(ord(ch) - ord('A') + ord('a')))
     let lettersOnly = lettersOnlyLower(stripLibPrefix(name))
     if lettersOnly.len > 0 and lettersOnly != strippedLowerName:
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & lettersOnly & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(escapedSrcDir, lettersOnly) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     # M9.R.14h.7 — snake-case version-suffix glob for libraries like
     # ``libgdk_pixbuf-2.0.so`` whose upstream SONAME uses an underscore
     # between the project segments while the DSL writes the artifact as
@@ -1792,13 +1807,13 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # only tries ``libgdkPixbuf-*.so`` / ``libgdkpixbuf-*.so`` and
     # misses ``libgdk_pixbuf-2.0.so`` outright.
     if strippedSnake.len > 0 and strippedSnake != strippedLowerName:
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedSnake & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(escapedSrcDir, strippedSnake) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     # M9.R.14h.8 — kebab stripped version-suffix glob for libraries like
     # ``libjson-c.so`` where the recipe writes ``libJsonC`` -> stripped
     # ``JsonC`` -> kebab ``json-c`` -> glob ``libjson-c-*.so``.
     if strippedKebab.len > 0 and strippedKebab != strippedLowerName and
         strippedKebab != strippedSnake:
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(escapedSrcDir, strippedKebab) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     # M9.R.15e.2 — kebab-with-digits stripped version-suffix glob for
     # PascalCase names whose digit suffix is the SOVERSION separator.
     # ``libGtk4`` -> stripped ``Gtk4`` -> kebabDigits ``gtk-4`` ->
@@ -1809,7 +1824,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
         strippedKebabDigits != strippedLowerName and
         strippedKebabDigits != strippedKebab and
         strippedKebabDigits != strippedSnake:
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedKebabDigits & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(escapedSrcDir, strippedKebabDigits) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     # M9.R.14g.7 — many recipes write ``library libGModule:`` but the
     # upstream library lives under ``lib/x86_64-linux-gnu/`` or
@@ -1820,42 +1835,42 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     let lib64Dir = escapedSrcDir.replace("/usr/lib", "/usr/lib64")
     if lib64Dir != escapedSrcDir:
       script.add("for candidate in ")
-      script.add("\"" & lib64Dir & "/lib" & escapedName & ".so\" ")
-      script.add("\"" & lib64Dir & "/lib" & escapedLowerName & ".so\" ")
+      script.add("\"" & lib64Dir & "/lib" & escapedName & libExt & "\" ")
+      script.add("\"" & lib64Dir & "/lib" & escapedLowerName & libExt & "\" ")
       # M9.R.14h.8 — kebab+snake stripped variants on lib64 too.
       if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
-        script.add("\"" & lib64Dir & "/lib" & strippedKebab & ".so\" ")
+        script.add("\"" & lib64Dir & "/lib" & strippedKebab & libExt & "\" ")
       # M9.R.15e.2 — kebab-with-digits stripped variant on lib64 (gtk4).
       if strippedKebabDigits.len > 0 and
           strippedKebabDigits != strippedLowerName and
           strippedKebabDigits != strippedKebab:
-        script.add("\"" & lib64Dir & "/lib" & strippedKebabDigits & ".so\" ")
+        script.add("\"" & lib64Dir & "/lib" & strippedKebabDigits & libExt & "\" ")
       if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
           strippedSnake != strippedKebab:
-        script.add("\"" & lib64Dir & "/lib" & strippedSnake & ".so\" ")
+        script.add("\"" & lib64Dir & "/lib" & strippedSnake & libExt & "\" ")
       if strippedName != name:
-        script.add("\"" & lib64Dir & "/lib" & strippedName & ".so\" ")
-        script.add("\"" & lib64Dir & "/lib" & strippedLowerName & ".so\"; ")
+        script.add("\"" & lib64Dir & "/lib" & strippedName & libExt & "\" ")
+        script.add("\"" & lib64Dir & "/lib" & strippedLowerName & libExt & "\"; ")
       else:
-        script.add("\"" & lib64Dir & "/lib" & escapedLowerName & ".so\"; ")
+        script.add("\"" & lib64Dir & "/lib" & escapedLowerName & libExt & "\"; ")
       script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" & escapedOut & "\"; exit 0; fi; done; ")
-      script.add("first=$(ls -1 \"" & lib64Dir & "/lib" & escapedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); ")
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & escapedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("first=$(ls -1 \"" & dashGlob(lib64Dir, escapedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, escapedLowerName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       if strippedName != name:
-        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
-        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, strippedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, strippedLowerName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       # M9.R.14h.8 — kebab + snake stripped version-suffix globs on lib64.
       if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
-        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, strippedKebab) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       # M9.R.15e.2 — kebab-with-digits stripped version-suffix glob on lib64.
       if strippedKebabDigits.len > 0 and
           strippedKebabDigits != strippedLowerName and
           strippedKebabDigits != strippedKebab and
           strippedKebabDigits != strippedSnake:
-        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedKebabDigits & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, strippedKebabDigits) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
           strippedSnake != strippedKebab:
-        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedSnake & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, strippedSnake) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     # M9.R.15e.9 — some autotools projects (Linux-PAM, glibc, util-linux's
     # libuuid path) hardcode ``libdir=/lib64`` in their configure.ac
@@ -1875,39 +1890,39 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
         let dirPath = destdirRoot & bareDir
         # Plain candidates.
         script.add("for candidate in ")
-        script.add("\"" & dirPath & "/lib" & escapedName & ".so\" ")
-        script.add("\"" & dirPath & "/lib" & escapedLowerName & ".so\" ")
+        script.add("\"" & dirPath & "/lib" & escapedName & libExt & "\" ")
+        script.add("\"" & dirPath & "/lib" & escapedLowerName & libExt & "\" ")
         if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
-          script.add("\"" & dirPath & "/lib" & strippedKebab & ".so\" ")
+          script.add("\"" & dirPath & "/lib" & strippedKebab & libExt & "\" ")
         if strippedKebabDigits.len > 0 and
             strippedKebabDigits != strippedLowerName and
             strippedKebabDigits != strippedKebab:
-          script.add("\"" & dirPath & "/lib" & strippedKebabDigits & ".so\" ")
+          script.add("\"" & dirPath & "/lib" & strippedKebabDigits & libExt & "\" ")
         if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
             strippedSnake != strippedKebab:
-          script.add("\"" & dirPath & "/lib" & strippedSnake & ".so\" ")
+          script.add("\"" & dirPath & "/lib" & strippedSnake & libExt & "\" ")
         if strippedName != name:
-          script.add("\"" & dirPath & "/lib" & strippedName & ".so\" ")
-          script.add("\"" & dirPath & "/lib" & strippedLowerName & ".so\"; ")
+          script.add("\"" & dirPath & "/lib" & strippedName & libExt & "\" ")
+          script.add("\"" & dirPath & "/lib" & strippedLowerName & libExt & "\"; ")
         else:
-          script.add("\"" & dirPath & "/lib" & escapedLowerName & ".so\"; ")
+          script.add("\"" & dirPath & "/lib" & escapedLowerName & libExt & "\"; ")
         script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" & escapedOut & "\"; exit 0; fi; done; ")
         # Version-suffix glob.
-        script.add("first=$(ls -1 \"" & dirPath & "/lib" & escapedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); ")
-        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & escapedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("first=$(ls -1 \"" & dashGlob(dirPath, escapedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, escapedLowerName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         if strippedName != name:
-          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
-          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, strippedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, strippedLowerName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
-          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, strippedKebab) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         if strippedKebabDigits.len > 0 and
             strippedKebabDigits != strippedLowerName and
             strippedKebabDigits != strippedKebab and
             strippedKebabDigits != strippedSnake:
-          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedKebabDigits & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, strippedKebabDigits) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
             strippedSnake != strippedKebab:
-          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedSnake & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, strippedSnake) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     script.add("echo \"autotools_package stage-copy: no library candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1")
   else:

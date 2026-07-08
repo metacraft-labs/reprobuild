@@ -215,15 +215,12 @@ package ncursesSource:
     ## glue closes.
     discard
 
-  library libTinfow:
-    ## ``libtinfow.so`` — the terminfo-only library split out via
-    ## ``--with-termlib`` so terminfo-only consumers (less, vim's
-    ## terminfo lookup path, gdb's terminal-capability probe) can link
-    ## against terminfo without dragging in the full curses windowing
-    ## surface. The upstream SONAME ``tinfow`` is PascalCased to
-    ## ``libTinfow`` per the libCap / libExpat / libGlib2 precedent.
-    ## v1 records the artifact only.
-    discard
+  # library libTinfow:
+  #   ## Disabled: termlib is not split (no --with-termlib configure flag)
+  #   ## to keep libncursesw.dylib binary-compatible with macOS/Nix host dependencies
+  #   ## (such as libreadline) which expect termcap/terminfo symbols directly inside
+  #   ## libncursesw.
+  #   discard
 
   executable tic:
     ## ``/usr/bin/tic`` — the terminfo-compiler that reads
@@ -252,11 +249,9 @@ package ncursesSource:
         "--without-debug",
         "--without-ada",
         "--enable-widec",
-        "--with-termlib",
       ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libNcursesw")
-      discard pkg.library("libTinfow")
       discard pkg.executable("tic")
       discard pkg.executable("infocmp")
     finally:

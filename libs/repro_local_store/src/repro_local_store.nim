@@ -1553,7 +1553,11 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
     when defined(windows):
       let perms: set[FilePermission] = {}
     else:
-      let perms = getFilePermissions(extendedPath(source))
+      let perms =
+        try:
+          getFilePermissions(extendedPath(source))
+        except OSError:
+          set[FilePermission]({})
     let blob =
       if storeOutputBlobs:
         if sourceMetadata.kind == ffkRegular and isDirectRegularFile(source):
