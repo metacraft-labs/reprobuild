@@ -59,14 +59,12 @@ require_contains flake.nix "checks ="
 require_contains flake.nix "git-hooks.lib"
 require_contains flake.nix "shellHook = pre-commit-check.shellHook"
 
-# Capture `just --summary` once: the inline `just | tr | grep -q`
-# form trips `set -o pipefail` under bash 5 when grep finds an early
-# match — closing the pipe SIGPIPEs `just`/`tr`, and pipefail surfaces
-# that 141 as a "missing recipe" false positive for whichever recipes
-# happen to sort first in just's output.
+# Capture `just --summary` once and check it through a here-string. Piping into
+# `grep -q` under `set -o pipefail` can surface SIGPIPE as a false "missing
+# recipe" result when grep finds an early match and closes the pipe.
 just_recipes="$(just --summary | tr ' ' '\n')"
 for recipe in build bootstrap test lint format fmt t bump-version bench bench-quick bench_reprobuild_core_mvp_performance bench_cmake_reprobuild_vs_ninja bench_cmake_reprobuild_vs_ninja_quick bench_cmake_reprobuild_vs_ninja_medium e2e_reprobuild_mvp_acceptance repomix check-repo-requirements; do
-  printf '%s\n' "${just_recipes}" | grep -Fxq "${recipe}" || fail "missing Justfile recipe ${recipe}"
+  grep -Fxq "${recipe}" <<< "${just_recipes}" || fail "missing Justfile recipe ${recipe}"
 done
 
 # Shared-dev-env policy

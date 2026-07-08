@@ -13,6 +13,7 @@ proc writeDevEnvFixture(dir: string) =
     "import std/strutils\n" &
     "import repro_project_dsl\n\n" &
     "package fixture:\n" &
+    "  defaultToolProvisioning \"path\"\n" &
     "  uses:\n" &
     "    \"nim >=2.2 <3.0\"\n" &
     "  devEnv:\n" &

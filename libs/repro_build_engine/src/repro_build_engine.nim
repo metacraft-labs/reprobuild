@@ -1574,7 +1574,6 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   discard ioMonCodec.readU16Le(raw, pos)
   let headerCount = ioMonCodec.readU64Le(raw, pos)
   let bodyLen64 = ioMonCodec.readU64Le(raw, pos)
-  echo "DEBUG DEFILE LIMIT: maxObservationCount=", options.maxObservationCount, " headerCount=", headerCount, " path=", path
   if headerCount > options.maxObservationCount:
     raiseMonitorDecodeError(mrRecordLimitExceeded,
       "RMDF record count exceeds configured limit")

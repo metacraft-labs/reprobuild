@@ -39,6 +39,7 @@ type
     activity*: string
     lockSliceId*: string
     developOverridesPath*: string
+    toolProvisioning*: ToolProvisioningMode
     renderShell*: bool
     statsEnabled*: bool
 
@@ -152,6 +153,34 @@ proc commonMonitorEnv(config: DevEnvEdgeConfig): seq[string] =
   if config.developOverridesPath.len > 0:
     result.add("REPRO_DEVELOP_OVERRIDES_FILE=" &
       config.developOverridesPath)
+
+proc parseDevEnvToolProvisioning(value: string): ToolProvisioningMode =
+  case value.normalize()
+  of "path":
+    tpmPathOnly
+  of "nix":
+    tpmNix
+  of "tarball":
+    tpmTarball
+  of "scoop":
+    tpmScoop
+  of "fromsource", "source":
+    tpmFromSource
+  else:
+    raiseDevEnvEdge("unsupported dev-env tool provisioning mode: " & value)
+
+proc effectiveToolProvisioning(config: DevEnvEdgeConfig;
+                               artifact: ProjectInterfaceArtifact):
+    ToolProvisioningMode =
+  if config.toolProvisioning != tpmUnspecified:
+    return config.toolProvisioning
+  let envMode = getEnv("REPRO_TOOL_PROVISIONING").strip()
+  if envMode.len > 0:
+    return parseDevEnvToolProvisioning(envMode)
+  let defaultMode = artifact.projectInterface.defaultToolProvisioning.strip()
+  if defaultMode.len > 0:
+    return parseDevEnvToolProvisioning(defaultMode)
+  tpmUnspecified
 
 proc fingerprintText(parts: openArray[string]): ContentDigest =
   weakFingerprintFromText(parts.join("\n"))
@@ -365,6 +394,8 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if not useCachedInterface:
     interfaceArtifact = extractInterfaceFromModule(active.modulePath,
       interfacePath, stubPath, workDir, compileScratchDir)
+  let effectiveProvisioning =
+    active.effectiveToolProvisioning(interfaceArtifact)
 
   result.providerBinaryPath = active.outDir / "provider" / "project-provider"
   result.providerArtifactPath = active.outDir / "provider-compile.rbsz"
@@ -373,7 +404,8 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   var provisioningActions: seq[BuildAction] = @[]
   var provisioningReceipts: seq[string] = @[]
   for useDef in interfaceArtifact.projectInterface.toolUses:
-    if useDef.nixProvisioning.len > 0:
+    if effectiveProvisioning in {tpmUnspecified, tpmNix} and
+        useDef.nixProvisioning.len > 0:
       let plan = nixAcquisitionPlan(useDef)
       let receiptDir = active.outDir / "tool-store" / "nix-provision"
       let receiptFile = receiptDir / (safeStoreSegment(useDef.packageSelector, "nix-package") & ".receipt")
@@ -384,6 +416,13 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
         argv: @["nix", plan.nixSelector],
         outputs: @[receiptFile],
         cwd: workDir,
+        commandStatsId: "repro dev-env nix provision edge",
+        cacheable: true,
+        weakFingerprint: fingerprintText([
+          "reprobuild.dev-env.nix-provision.v1",
+          useDef.packageSelector,
+          plan.nixSelector
+        ]),
         dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor)
       )
       provisioningActions.add(provAction)
