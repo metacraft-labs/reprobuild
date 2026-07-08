@@ -51,7 +51,20 @@
       # io-mon's ``linux_preload_runtime.nim`` failed with "cannot open file:
       # stackable_hooks/platform/linux_preload" in both the sandboxed package
       # build and ``just bootstrap``.
-      url = "github:metacraft-labs/nim-stackable-hooks/c6cf6ad1ac95201288825970b6ca53f630ea8996";
+      #
+      # Bumped to the rev that additionally carries the Linux x86_64
+      # syscall-scanner rel32 guard (``looksLikeLinuxX8664Syscall`` /
+      # ``visitLinuxX8664SyscallMemory`` reject a ``0f 05`` sitting inside a
+      # ``call``/``jmp rel32`` displacement). Without it the monitor shim's
+      # INT3 syscall-trap patcher corrupted the ``call rmdir@plt`` displacement
+      # in glibc/Nim ``removeDir`` (``e8 0f 05 fa ff``) and SIGILL'd every test
+      # that removes a directory (e.g. isonim-tui
+      # ``test_snapshot_six_formats_recorded``). The dev shell exports this
+      # source as ``STACKABLE_HOOKS_SRC`` and ``build_shim.sh`` honors it, so
+      # the store pin — not the sibling — is what ``just build`` (and CI)
+      # actually compiles the shim from; the old pin therefore produced a
+      # crashing shim even though the local sibling was already hardened.
+      url = "github:metacraft-labs/nim-stackable-hooks/e637f810be073d3dc94b4768d114b5021535361e";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
