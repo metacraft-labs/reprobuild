@@ -1132,145 +1132,151 @@ proc addUniquePath*(dst: var seq[string]; value: string)
   ## further down. Resolved here so ``resolveNixTool`` can reuse the
   ## same dedup/exists-probe helper for nix-store aux-path population.
 
-proc resolveNixTool*(useDef: InterfaceToolUse;
-                     storeRoot = "";
-                     writerMode = "direct"): PathOnlyToolProfile =
-  let plan = nixAcquisitionPlan(useDef)
-  let selector = plan.nixSelector
-  let cached = readCachedNixMaterialization(storeRoot, useDef, plan)
-  if cached.hit:
-    return cached.profile
+when defined(windows):
+  proc resolveNixTool*(useDef: InterfaceToolUse;
+                       storeRoot = "";
+                       writerMode = "direct"): PathOnlyToolProfile =
+    raise newException(OSError, "resolveNixTool is not supported on Windows")
+else:
+  proc resolveNixTool*(useDef: InterfaceToolUse;
+                       storeRoot = "";
+                       writerMode = "direct"): PathOnlyToolProfile =
+    let plan = nixAcquisitionPlan(useDef)
+    let selector = plan.nixSelector
+    let cached = readCachedNixMaterialization(storeRoot, useDef, plan)
+    if cached.hit:
+      return cached.profile
 
-  # Connect to C++ Nix Evaluation Daemon and query evaluation
-  let socketPath = "/tmp/reprobuild-nix-daemon-" & getEnv("USER", "default") & ".sock"
-  var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
-  var connected = false
-  try:
-    sock.connectUnix(socketPath)
-    connected = true
-  except CatchableError:
-    # Spawn daemon process detached
-    let localBin = getCurrentDir() / "build" / "reprobuild-nix-daemon"
-    let localBin2 = getCurrentDir().parentDir / "reprobuild-nix-daemon" / "build" / "reprobuild-nix-daemon"
-    let daemonExe = if fileExists(localBin):
-                      localBin
-                    elif fileExists(localBin2):
-                      localBin2
-                    else:
-                      "reprobuild-nix-daemon"
-    discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"], options = {})
-    for i in 0 .. 40:
-      sleep(50)
-      try:
-        sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
-        sock.connectUnix(socketPath)
-        connected = true
-        break
-      except CatchableError:
-        discard
+    # Connect to C++ Nix Evaluation Daemon and query evaluation
+    let socketPath = "/tmp/reprobuild-nix-daemon-" & getEnv("USER", "default") & ".sock"
+    var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
+    var connected = false
+    try:
+      sock.connectUnix(socketPath)
+      connected = true
+    except CatchableError:
+      # Spawn daemon process detached
+      let localBin = getCurrentDir() / "build" / "reprobuild-nix-daemon"
+      let localBin2 = getCurrentDir().parentDir / "reprobuild-nix-daemon" / "build" / "reprobuild-nix-daemon"
+      let daemonExe = if fileExists(localBin):
+                        localBin
+                      elif fileExists(localBin2):
+                        localBin2
+                      else:
+                        "reprobuild-nix-daemon"
+      discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"], options = {})
+      for i in 0 .. 40:
+        sleep(50)
+        try:
+          sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
+          sock.connectUnix(socketPath)
+          connected = true
+          break
+        except CatchableError:
+          discard
 
-  if not connected:
-    raise newException(OSError, "Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
+    if not connected:
+      raise newException(OSError, "Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
 
-  let req = %*{
-    "action": "resolve",
-    "selector": selector,
-    "workspaceRoot": getCurrentDir(),
-    "evaluateOnly": true
-  }
-  sock.send($req & "\n")
-  var respLine = ""
-  sock.readLine(respLine)
-  sock.close()
+    let req = %*{
+      "action": "resolve",
+      "selector": selector,
+      "workspaceRoot": getCurrentDir(),
+      "evaluateOnly": true
+    }
+    sock.send($req & "\n")
+    var respLine = ""
+    sock.readLine(respLine)
+    sock.close()
 
-  if respLine.len == 0:
-    raise newException(OSError, "Received empty response from reprobuild-nix-daemon during tool resolution")
+    if respLine.len == 0:
+      raise newException(OSError, "Received empty response from reprobuild-nix-daemon during tool resolution")
 
-  let resp = parseJson(respLine)
-  if resp.getOrDefault("status").getStr() != "success":
-    raise newException(OSError, "Daemon resolution error: " & resp.getOrDefault("error").getStr())
+    let resp = parseJson(respLine)
+    if resp.getOrDefault("status").getStr() != "success":
+      raise newException(OSError, "Daemon resolution error: " & resp.getOrDefault("error").getStr())
 
-  let paths = resp.getOrDefault("paths")
-  if paths.len == 0:
-    raise newException(OSError, "Daemon returned no materialized paths for selector: " & selector)
+    let paths = resp.getOrDefault("paths")
+    if paths.len == 0:
+      raise newException(OSError, "Daemon returned no materialized paths for selector: " & selector)
 
-  let outPath = paths[0].getStr()
-  let realized = @[outPath]
+    let outPath = paths[0].getStr()
+    let realized = @[outPath]
 
-  var selectedStorePath = outPath
-  var resolved = ""
-  if dirExists(extendedPath(outPath)):
-    resolved = executableInStorePath(outPath, plan.declaredExecutablePath)
-    if resolved.len == 0:
-      raise newException(OSError,
-        "tool-resolution failed: nix package realized outputs without " & plan.declaredExecutablePath)
-  else:
-    resolved = outPath / plan.declaredExecutablePath
+    var selectedStorePath = outPath
+    var resolved = ""
+    if dirExists(extendedPath(outPath)):
+      resolved = executableInStorePath(outPath, plan.declaredExecutablePath)
+      if resolved.len == 0:
+        raise newException(OSError,
+          "tool-resolution failed: nix package realized outputs without " & plan.declaredExecutablePath)
+    else:
+      resolved = outPath / plan.declaredExecutablePath
 
-  result = PathOnlyToolProfile(
-    installMethod: "nix",
-    packageSelector: useDef.packageSelector,
-    packageId: plan.packageId,
-    nixSelector: selector,
-    declaredExecutablePath: plan.declaredExecutablePath,
-    nixExpressionFile: plan.nixExpressionFile,
-    realizedStorePaths: realized,
-    selectedStorePath: selectedStorePath,
-    lockIdentity: plan.lockIdentity,
-    realizationBoundary: selectedStorePath,
-    executableName: useDef.executableName,
-    pathSearchList: @[selectedStorePath / "bin"],
-    resolvedExecutablePath: resolved,
-    adapterStrength: asStrong,
-    cachePortability: cpPortable)
+    result = PathOnlyToolProfile(
+      installMethod: "nix",
+      packageSelector: useDef.packageSelector,
+      packageId: plan.packageId,
+      nixSelector: selector,
+      declaredExecutablePath: plan.declaredExecutablePath,
+      nixExpressionFile: plan.nixExpressionFile,
+      realizedStorePaths: realized,
+      selectedStorePath: selectedStorePath,
+      lockIdentity: plan.lockIdentity,
+      realizationBoundary: selectedStorePath,
+      executableName: useDef.executableName,
+      pathSearchList: @[selectedStorePath / "bin"],
+      resolvedExecutablePath: resolved,
+      adapterStrength: asStrong,
+      cachePortability: cpPortable)
 
-  for storePath in realized:
-    addUniquePath(result.cmakePrefixList, storePath)
-    addUniquePath(result.pkgConfigSearchList,
-      storePath / "lib" / "pkgconfig")
-    addUniquePath(result.pkgConfigSearchList,
-      storePath / "lib64" / "pkgconfig")
-    addUniquePath(result.pkgConfigSearchList,
-      storePath / "share" / "pkgconfig")
-    addUniquePath(result.cpathList, storePath / "include")
-    addUniquePath(result.libraryPathList, storePath / "lib")
-    addUniquePath(result.libraryPathList, storePath / "lib64")
+    for storePath in realized:
+      addUniquePath(result.cmakePrefixList, storePath)
+      addUniquePath(result.pkgConfigSearchList,
+        storePath / "lib" / "pkgconfig")
+      addUniquePath(result.pkgConfigSearchList,
+        storePath / "lib64" / "pkgconfig")
+      addUniquePath(result.pkgConfigSearchList,
+        storePath / "share" / "pkgconfig")
+      addUniquePath(result.cpathList, storePath / "include")
+      addUniquePath(result.libraryPathList, storePath / "lib")
+      addUniquePath(result.libraryPathList, storePath / "lib64")
 
-  # Only collect probes if the output directory exists
-  if dirExists(extendedPath(selectedStorePath)):
-    result.probes = collectConfiguredProbes(resolved,
-      useDef.packageSelector, useDef.executableName)
+    # Only collect probes if the output directory exists
+    if dirExists(extendedPath(selectedStorePath)):
+      result.probes = collectConfiguredProbes(resolved,
+        useDef.packageSelector, useDef.executableName)
 
-  if storeRoot.len > 0 and dirExists(extendedPath(selectedStorePath)):
-    let nixPackageName = safeStoreSegment("nix." & plan.packageId,
-      "nix-package")
-    let nixVersion =
-      if versionFromPackageSelector(plan.packageSelector).len > 0:
-        versionFromPackageSelector(plan.packageSelector)
-      else:
-        let segment = selectedStorePath.extractFilename
-        let dash = segment.find('-')
-        if dash >= 0 and dash + 1 < segment.len:
-          segment[dash + 1 .. ^1]
+    if storeRoot.len > 0 and dirExists(extendedPath(selectedStorePath)):
+      let nixPackageName = safeStoreSegment("nix." & plan.packageId,
+        "nix-package")
+      let nixVersion =
+        if versionFromPackageSelector(plan.packageSelector).len > 0:
+          versionFromPackageSelector(plan.packageSelector)
         else:
-          segment
-    let unified = unifiedPrefixPath(storeRoot, nixPackageName,
-      nixVersion, "nix", plan.lockIdentity,
-      plan.declaredExecutablePath, "nix://" & plan.nixSelector,
-      selectedStorePath, realized)
-    createDir(extendedPath(unified.absolutePath))
-    writeFile(extendedPath(unified.absolutePath / "nix-store-path.txt"),
-      selectedStorePath & "\n")
-    discard registerInUnifiedStore(storeRoot, nixPackageName,
-      nixVersion, "nix", plan.lockIdentity,
-      plan.declaredExecutablePath, "nix://" & plan.nixSelector,
-      selectedStorePath, "nix-store-pointer", realized,
-      unified.absolutePath, [plan.declaredExecutablePath],
-      writerMode = writerMode)
-    result.realizedStorePaths.add(unified.absolutePath)
-    writeCachedNixMaterialization(storeRoot, useDef, plan, result)
+          let segment = selectedStorePath.extractFilename
+          let dash = segment.find('-')
+          if dash >= 0 and dash + 1 < segment.len:
+            segment[dash + 1 .. ^1]
+          else:
+            segment
+      let unified = unifiedPrefixPath(storeRoot, nixPackageName,
+        nixVersion, "nix", plan.lockIdentity,
+        plan.declaredExecutablePath, "nix://" & plan.nixSelector,
+        selectedStorePath, realized)
+      createDir(extendedPath(unified.absolutePath))
+      writeFile(extendedPath(unified.absolutePath / "nix-store-path.txt"),
+        selectedStorePath & "\n")
+      discard registerInUnifiedStore(storeRoot, nixPackageName,
+        nixVersion, "nix", plan.lockIdentity,
+        plan.declaredExecutablePath, "nix://" & plan.nixSelector,
+        selectedStorePath, "nix-store-pointer", realized,
+        unified.absolutePath, [plan.declaredExecutablePath],
+        writerMode = writerMode)
+      result.realizedStorePaths.add(unified.absolutePath)
+      writeCachedNixMaterialization(storeRoot, useDef, plan, result)
 
-  result.profileFingerprint = profileFingerprintFor(result)
+    result.profileFingerprint = profileFingerprintFor(result)
 
 proc normalizedSha256(value: string): string =
   result = value.strip().toLowerAscii()
