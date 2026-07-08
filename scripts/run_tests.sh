@@ -133,15 +133,24 @@ bootstrap_monitor_shim > test-logs/monitor-shim-bootstrap.log 2>&1 || {
 }
 
 # Step 2: build sibling prerequisites that path-mode tool resolution needs.
-if [[ -d "../runquota" ]]; then
-  if [[ ! -x "../runquota/build/bin/runquotad${exe_ext}" ]]; then
-    printf 'Building prerequisite sibling: ../runquota\n' >&2
-    (cd ../runquota && just build) > test-logs/runquota-build.log 2>&1 || {
+runquota_src="${RUNQUOTA_SRC:-}"
+if [[ -z "${runquota_src}" && -d "../runquota" ]]; then
+  runquota_src="../runquota"
+fi
+if [[ -n "${runquota_src}" && -d "${runquota_src}" ]]; then
+  runquota_src_abs="$(cd "${runquota_src}" && pwd)"
+  export RUNQUOTA_SRC="${runquota_src_abs}"
+  if [[ ! -x "${runquota_src_abs}/build/bin/runquotad${exe_ext}" ||
+        ! -x "${runquota_src_abs}/build/bin/runquota${exe_ext}" ]]; then
+    printf 'Building prerequisite sibling: %s\n' "${runquota_src_abs}" >&2
+    (cd "${runquota_src_abs}" && just build) > test-logs/runquota-build.log 2>&1 || {
       echo "runquota build failed; see test-logs/runquota-build.log" >&2
       exit 1
     }
   fi
-  RUNQUOTA_BIN_ABS="$(cd ../runquota/build/bin && pwd)"
+  RUNQUOTA_BIN_ABS="$(cd "${runquota_src_abs}/build/bin" && pwd)"
+  export RUNQUOTAD_BIN="${RUNQUOTAD_BIN:-${RUNQUOTA_BIN_ABS}/runquotad${exe_ext}}"
+  export RUNQUOTA_BIN="${RUNQUOTA_BIN:-${RUNQUOTA_BIN_ABS}/runquota${exe_ext}}"
   export PATH="${RUNQUOTA_BIN_ABS}:${PATH}"
 fi
 

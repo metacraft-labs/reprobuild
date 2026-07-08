@@ -215,16 +215,43 @@ proc writeSleeperProject(projectRoot: string; sleepSeconds: int) =
     "        cacheable = false)\n" &
     "      defaultBuildAction(action)\n")
 
+proc executableFromEnvOrPath(envName, exeName: string): string =
+  let fromEnv = getEnv(envName)
+  if fromEnv.len > 0 and fileExists(fromEnv):
+    return os.normalizedPath(fromEnv)
+  let fromPath = findExe(exeName)
+  if fromPath.len > 0:
+    return os.normalizedPath(fromPath)
+  ""
+
+proc runquotaSourceRoot(repoRoot: string): string =
+  let fromEnv = getEnv("RUNQUOTA_SRC")
+  if fromEnv.len > 0 and dirExists(fromEnv):
+    return os.normalizedPath(fromEnv)
+  repoRoot.parentDir / "runquota"
+
 proc ensureRunQuotaDaemon(repoRoot, tempRoot: string): tuple[
     process: owned(Process); socket: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  let cliBin = runquotaRoot / "build" / "bin" / addFileExt("runquota", ExeExt)
+  let runquotaRoot = runquotaSourceRoot(repoRoot)
+  var daemonBin = executableFromEnvOrPath("RUNQUOTAD_BIN",
+    addFileExt("runquotad", ExeExt))
+  if daemonBin.len == 0:
+    let candidate = runquotaRoot / "build" / "bin" /
+      addFileExt("runquotad", ExeExt)
+    if fileExists(candidate):
+      daemonBin = os.normalizedPath(candidate)
+  var cliBin = executableFromEnvOrPath("RUNQUOTA_BIN",
+    addFileExt("runquota", ExeExt))
+  if cliBin.len == 0:
+    let candidate = runquotaRoot / "build" / "bin" /
+      addFileExt("runquota", ExeExt)
+    if fileExists(candidate):
+      cliBin = os.normalizedPath(candidate)
   if not fileExists(daemonBin) or not fileExists(cliBin):
     raise newException(OSError,
-      "runquotad/runquota binaries missing under " & runquotaRoot &
-      "/build/bin; build them via the test harness " &
-      "(scripts/run_tests.sh)")
+      "runquotad/runquota binaries missing. Set RUNQUOTAD_BIN/RUNQUOTA_BIN, " &
+      "put them on PATH, or set RUNQUOTA_SRC to a built runquota checkout; " &
+      "scripts/run_tests.sh provisions this before executing tests")
   let socketPath = runquotaSocketEndpoint(
     "repro-m4-rq-" & $getCurrentProcessId())
   when defined(posix):

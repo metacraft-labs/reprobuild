@@ -122,7 +122,7 @@ suite "MO-11: solved packages are first-class locked deps":
           check d.coordinates.registryName.len > 0
           check d.coordinates.registryVersion.len > 0
           check isWellFormedMultihash(d.integrity)
-        of ckVcs:
+        of ckVcs, ckForeign:
           discard
       check storeSeen
       check registrySeen

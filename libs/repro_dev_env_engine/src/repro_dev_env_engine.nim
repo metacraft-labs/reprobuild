@@ -87,13 +87,13 @@ proc providerCompileFailure(run: BuildRunResult): string =
 
 proc providerCompileBuildAction(plan: ProviderCompilePlan;
                                 modulePath, interfacePath, artifactPath,
-                                publicCliPath, workDir: string;
+                                helperCliPath, workDir: string;
                                 scratchDir = ""): BuildAction =
   var inputs = plan.inputSources
   if inputs.find(interfacePath) < 0:
     inputs.add(interfacePath)
   var command = @[
-    publicCliPath,
+    helperCliPath,
     "__repro-compile-provider",
     "--module", modulePath,
     "--out", plan.outputBinaryPath,
@@ -112,6 +112,33 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     cacheable = true,
     weakFingerprint = plan.compileEdge.actionFingerprint,
     dependencyPolicy = automaticMonitorGatheringPolicy())
+
+proc siblingFullReproPath(cliPath: string): string =
+  if cliPath.len == 0:
+    return ""
+  let candidate = parentDir(cliPath) / addFileExt("repro-full", ExeExt)
+  if fileExists(candidate):
+    os.normalizedPath(candidate)
+  else:
+    ""
+
+proc providerCompileCliPath(config: DevEnvEdgeConfig): string =
+  ## Dev-env tests may call this library from a test binary, so
+  ## ``getAppFilename()`` is not a reliable repro helper path here. When the
+  ## monitor is the consolidated ``repro internal io monitor`` driver, reuse
+  ## that repro image or its sibling ``repro-full``. Otherwise fall back to the
+  ## public CLI path.
+  let internalMonitorArgs = @["internal", "io", "monitor"]
+  if config.monitorCliArgs == internalMonitorArgs:
+    if extractFilename(config.monitorCliPath) == addFileExt("repro-full", ExeExt):
+      return os.normalizedPath(config.monitorCliPath)
+    let monitorSibling = siblingFullReproPath(config.monitorCliPath)
+    if monitorSibling.len > 0:
+      return monitorSibling
+  let publicSibling = siblingFullReproPath(config.publicCliPath)
+  if publicSibling.len > 0:
+    return publicSibling
+  config.publicCliPath
 
 proc invalidateStaleProviderCompileArtifact(plan: ProviderCompilePlan;
                                             artifactPath: string) =
@@ -443,7 +470,7 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
       result.providerArtifactPath)
     var providerAction = providerCompileBuildAction(providerPlan,
       active.modulePath, interfacePath, result.providerArtifactPath,
-      active.publicCliPath, workDir, compileScratchDir)
+      providerCompileCliPath(active), workDir, compileScratchDir)
 
     # Wire the provisioning receipts as inputs to the compiler action
     for receipt in provisioningReceipts:

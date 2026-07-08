@@ -3923,13 +3923,13 @@ proc providerCompileCacheable(plan: ProviderCompilePlan): bool =
 
 proc providerCompileBuildAction(plan: ProviderCompilePlan;
                                 modulePath, interfacePath, artifactPath,
-                                publicCliPath, workDir: string;
+                                helperCliPath, workDir: string;
                                 scratchDir = ""): BuildAction =
   var inputs = plan.inputSources
   if not inputs.contains(interfacePath):
     inputs.add(interfacePath)
   var command = @[
-    publicCliPath,
+    helperCliPath,
     "__repro-compile-provider",
     "--module", modulePath,
     "--out", plan.outputBinaryPath,
@@ -4815,6 +4815,31 @@ proc selfSpawnIoMonitorPath(): string =
   ## Path to the running ``repro`` image used to self-spawn the internal
   ## io-monitor role.
   os.normalizedPath(getAppFilename())
+
+proc siblingFullReproPath(publicCliPath: string): string =
+  if publicCliPath.len == 0:
+    return ""
+  let candidate = parentDir(publicCliPath) /
+    addFileExt("repro-full", ExeExt)
+  if fileExists(extendedPath(candidate)):
+    os.normalizedPath(candidate)
+  else:
+    ""
+
+proc internalReproHelperCliPath(publicCliPath: string): string =
+  ## Path used for monitored internal helper actions. On POSIX the public
+  ## ``repro`` executable is a thin wrapper that execs ``repro-full``; running
+  ## the wrapper as the root monitored process makes io-mon observe a root
+  ## exec replacement before the helper does any useful work. Prefer the
+  ## current full image when this code is executing inside repro/repro-daemon,
+  ## and fall back to the sibling full image for embedded/test callers.
+  let current = os.normalizedPath(getAppFilename())
+  if extractFilename(current) == addFileExt("repro-full", ExeExt):
+    return current
+  let sibling = siblingFullReproPath(publicCliPath)
+  if sibling.len > 0:
+    return sibling
+  current
 
 proc siblingTryCompileProviderPath(publicCliPath: string): string =
   ## Pre-built Tier 2a direct provider binary, normally shipped next to
@@ -7208,8 +7233,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
       invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
       let providerCompileAction = providerCompileBuildAction(providerPlan,
-        modulePath, interfacePath, providerArtifactPath, publicCliPath,
-        compileWorkDir, compileScratchDir)
+        modulePath, interfacePath, providerArtifactPath,
+        internalReproHelperCliPath(publicCliPath), compileWorkDir,
+        compileScratchDir)
       var providerCompileConfig = BuildEngineConfig(
         cacheRoot: outDir / "build-engine-cache",
         actionCacheRoot: currentActionCacheRoot(),
@@ -14100,8 +14126,9 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
     invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
     let providerCompileAction = providerCompileBuildAction(providerPlan,
-      modulePath, interfacePath, providerArtifactPath, publicCliPath,
-      compileWorkDir, compileScratchDir)
+      modulePath, interfacePath, providerArtifactPath,
+      internalReproHelperCliPath(publicCliPath), compileWorkDir,
+      compileScratchDir)
     var providerCompileConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
@@ -14280,8 +14307,9 @@ proc refreshRecipeProviderSnapshot(target: string;
       artifact.interfaceFingerprint, compileWorkDir, compileScratchDir)
     invalidateStaleProviderCompileArtifact(providerPlan, providerArtifactPath)
     let providerCompileAction = providerCompileBuildAction(providerPlan,
-      modulePath, interfacePath, providerArtifactPath, publicCliPath,
-      compileWorkDir, compileScratchDir)
+      modulePath, interfacePath, providerArtifactPath,
+      internalReproHelperCliPath(publicCliPath), compileWorkDir,
+      compileScratchDir)
     var providerCompileConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),

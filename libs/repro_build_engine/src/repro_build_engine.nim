@@ -3,6 +3,8 @@ import std/[algorithm, json, options, os, osproc, net, nativesockets, sets, stre
 
 when defined(windows):
   import std/winlean
+elif defined(posix):
+  from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid
 
 import repro_core
 import repro_depfile
@@ -799,6 +801,8 @@ type
     queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
     inlineFailure: ActionResult
     resultPath: string
+    when defined(posix):
+      processGroupPid: int
     when defined(windows):
       # Synchronize-only HANDLE duplicate of the child process, opened on
       # first wait-loop entry via OpenProcess(SYNCHRONIZE, pid). Used as a
@@ -2217,6 +2221,71 @@ proc envTableFromArgvStyle(env: openArray[string]): StringTableRef =
     if eq <= 0:
       continue
     result[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
+
+when defined(posix):
+  proc assignProcessGroup(process: Process): int =
+    ## Best-effort process-group isolation for externally launched actions.
+    ## It lets cancellation tear down shell wrappers together with their
+    ## children instead of only signalling the top-level monitor/helper.
+    let pid = processID(process)
+    if pid <= 0:
+      return 0
+    if setpgid(Pid(pid), Pid(pid)) == 0:
+      pid
+    else:
+      0
+
+  when defined(linux):
+    proc childPids(pid: int): seq[int] =
+      let path = "/proc" / $pid / "task" / $pid / "children"
+      if not fileExists(path):
+        return @[]
+      for token in readFile(path).splitWhitespace:
+        try:
+          result.add(parseInt(token))
+        except ValueError:
+          discard
+
+    proc collectDescendants(pid: int; seen: var HashSet[int];
+                            descendants: var seq[int]) =
+      for child in childPids(pid):
+        if seen.contains(child):
+          continue
+        seen.incl(child)
+        collectDescendants(child, seen, descendants)
+        descendants.add(child)
+
+    proc signalDescendants(pid: int; sig: cint) =
+      var seen = initHashSet[int]()
+      var descendants: seq[int] = @[]
+      collectDescendants(pid, seen, descendants)
+      for child in descendants:
+        discard kill(Pid(child), sig)
+
+  proc signalRunningAction(item: RunningAction; sig: cint) =
+    let pid = processID(item.process)
+    if pid <= 0:
+      return
+    when defined(linux):
+      signalDescendants(pid, sig)
+    if item.processGroupPid > 0:
+      discard kill(Pid(-item.processGroupPid), sig)
+    else:
+      discard kill(Pid(pid), sig)
+
+  proc terminateRunningAction(item: var RunningAction) =
+    if item.process.running():
+      item.signalRunningAction(SIGTERM)
+      for _ in 0 ..< 20:
+        if not item.process.running():
+          break
+        sleep(10)
+    item.signalRunningAction(SIGKILL)
+
+else:
+  proc terminateRunningAction(item: var RunningAction) =
+    if item.process.running():
+      item.process.terminate()
 
 when defined(windows):
   proc ensureRunningProcessHandle(item: var RunningAction): Handle =
@@ -5091,7 +5160,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           completed = terminalCount()
           launchedAny = true
           continue
-        running.add(RunningAction(
+        var runningAction = RunningAction(
           id: id,
           pool: poolName,
           poolUnits: units,
@@ -5099,7 +5168,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           processKind: processKind,
           process: process,
           resultPath: resultPath
-        ))
+        )
+        when defined(posix):
+          runningAction.processGroupPid = assignProcessGroup(process)
+        running.add(runningAction)
         runResult.trace(id, startEvent, startDetail)
         emitProgress(bpkActionStarted, id)
         launchedAny = true
@@ -5405,8 +5477,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       of rpkInlineRunQuotaFailed:
         discard
       of rpkHelperProcess, rpkBypassProcess:
-        if item.process.running():
-          item.process.terminate()
+        terminateRunningAction(item)
         item.process.close()
     if inlineRunQuotaSessionOpen:
       inlineRunQuotaSession.close()
