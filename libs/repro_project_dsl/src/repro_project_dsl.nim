@@ -56,7 +56,7 @@ proc extendedPath(path: string): string =
     if path.len == 0 or path.startsWith("\\\\"):
       path
     else:
-      "\\\\?\\" & absolutePath(path).replace('/', '\\')
+      "\\\\?\\" & normalizedPath(absolutePath(path)).replace('/', '\\')
   else:
     path
 

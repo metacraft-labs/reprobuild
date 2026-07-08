@@ -1,6 +1,4 @@
 import std/[strutils]
-from std/os import absolutePath
-
 type
   NormalizedPathKind* = enum
     npRelative
@@ -42,6 +40,8 @@ proc normalizedPath*(path: string): NormalizedPath =
 proc `$`*(path: NormalizedPath): string =
   path.value
 
+from std/os import absolutePath, normalizedPath
+
 proc extendedPath*(path: string): string =
   ## On Windows, rewrites a path into the `\\?\` extended-length form so
   ## file-system calls bypass the 260-character `MAX_PATH` limit. Returns
@@ -63,7 +63,7 @@ proc extendedPath*(path: string): string =
     if path.len == 0 or path.startsWith("\\\\"):
       path
     else:
-      var canonical = absolutePath(path).replace('/', '\\')
+      var canonical = os.normalizedPath(absolutePath(path)).replace('/', '\\')
       while "\\\\" in canonical:
         canonical = canonical.replace("\\\\", "\\")
       "\\\\?\\" & canonical

@@ -39393,6 +39393,14 @@ proc runThinApp*(programName: string): int =
   # pid -- the M9.R.12 pid-scoped key collapsed cross-recipe sharing.
   # See `sharedProviderNimcacheKey` for the full rationale.
   ensureProviderNimcacheSession()
+  when defined(windows):
+    let appDir = parentDir(getAppFilename())
+    if appDir.len > 0:
+      let pathEnv = getEnv("PATH")
+      if pathEnv.len > 0:
+        putEnv("PATH", appDir & ";" & pathEnv)
+      else:
+        putEnv("PATH", appDir)
   let args = normalizeInternalArgs(commandLineParams())
   let publicCliPath = stablePublicCliPath()
   if programName == "repro" and args.len > 0 and

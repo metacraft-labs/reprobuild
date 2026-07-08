@@ -1526,36 +1526,38 @@ proc runCommand(command: openArray[string];
     # cmd.exe truncates any single command line past ~8191 chars, so a
     # large `nim c` invocation (60+ --path: entries) silently produces an
     # empty sink and we report `command failed` with no stderr. Fall back
-    # to a Nim @response-file when the assembled arg list would overflow.
-    # Nim natively parses `@file` as "read further arguments from file";
-    # every other tool that accepts @-files (gcc via -Wl, node, etc.) does
-    # too, but we only rewrite when the target executable is nim (the only
-    # producer of these blowups in practice) so we don't guess wrong for a
-    # command whose semantics we don't own.
+    # to a project-local `nim.cfg` when the assembled arg list would overflow.
+    # Nim's command-line parser does not support `@response-file` syntax,
+    # but it automatically loads `nim.cfg` from the compiled project's
+    # directory. So we write the options there and run `nim c target.nim`.
     let assembledLen = command.mapIt(cmdExeShellEscape(it)).join(" ").len +
       cmdExeShellEscape(sinkPath).len + " > 2>&1\r\n@echo off\r\n".len
     let exeName = splitFile(command[0]).name.toLowerAscii()
-    let useResponseFile = assembledLen > 8100 and exeName == "nim"
+    let useResponseFile = exeName == "nim" and cwd.len > 0
     var responseFilePath = ""
     var effectiveCommand: seq[string]
     if useResponseFile:
-      responseFilePath = sinkDir /
-        ("repro-runcommand-" & nonce & ".rsp")
-      # Nim's @-file parser treats each whitespace-separated token as one
-      # argument, with double quotes escaping whitespace. Emit one arg per
-      # line, quoting anything that isn't already a bare identifier.
-      var rspLines = newSeqOfCap[string](command.len - 1)
-      for i in 1 ..< command.len:
+      responseFilePath = parentDir(command[command.len - 1]) / "nim.cfg"
+      var cfgLines = newSeqOfCap[string](command.len - 2)
+      for i in 2 ..< command.len - 1:
         let a = command[i]
         if a.len == 0:
-          rspLines.add "\"\""
-        elif a.contains(' ') or a.contains('"') or a.contains('\t'):
-          rspLines.add "\"" & a.replace("\"", "\\\"") & "\""
+          cfgLines.add "\"\""
+        elif a.contains(' ') or a.contains('"') or a.contains('\t') or a.contains('\\') or a.contains(':'):
+          let normalized = a.replace("\\", "/")
+          if normalized.contains('='):
+            let parts = normalized.split('=', 1)
+            cfgLines.add parts[0] & ":\"" & parts[1].replace("\"", "\\\"") & "\""
+          elif normalized.contains(':'):
+            let parts = normalized.split(':', 1)
+            cfgLines.add parts[0] & ":\"" & parts[1].replace("\"", "\\\"") & "\""
+          else:
+            cfgLines.add "\"" & normalized.replace("\"", "\\\"") & "\""
         else:
-          rspLines.add a
+          cfgLines.add a
       writeFile(extendedPath(responseFilePath),
-        rspLines.join("\r\n") & "\r\n")
-      effectiveCommand = @[command[0], "@" & responseFilePath]
+        cfgLines.join("\r\n") & "\r\n")
+      effectiveCommand = @[command[0], command[1], command[command.len - 1]]
     else:
       effectiveCommand = @command
     let scriptBody = "@echo off\r\n" &
@@ -2953,6 +2955,15 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
         ", compiler reported success but produced no binary): " &
         runnerExe & "\ncompiler output:\n" & compileExecution.output &
         "\ndirectory listing of " & runnerExeDir & ":\n" & listing)
+  when defined(windows):
+    # Copy DLLs from the application directory to tempRoot so the runner can resolve them
+    let appDir = parentDir(getAppFilename())
+    for kind, path in walkDir(appDir):
+      if kind == pcFile and path.endsWith(".dll"):
+        try:
+          copyFile(path, tempRoot / extractFilename(path))
+        except CatchableError:
+          discard
   ensureExecutable(runnerExe)
   let execution = runCommand(@[runnerExe, artifactPath, stubPath, modulePath],
     cwd = workDir)

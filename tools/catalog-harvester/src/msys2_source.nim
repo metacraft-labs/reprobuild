@@ -85,7 +85,10 @@ type
 # ---------------------------------------------------------------------------
 
 proc envBaseUrl*(env: Msys2Env): string =
-  "https://repo.msys2.org/mingw/" & $env & "/"
+  if env == meMsys:
+    "https://repo.msys2.org/msys/x86_64/"
+  else:
+    "https://repo.msys2.org/mingw/" & $env & "/"
 
 proc envPackagePrefix*(env: Msys2Env): string =
   ## The mingw-w64 package-name prefix the env uses. Operators can pass
@@ -107,7 +110,7 @@ proc envExtractRoot*(env: Msys2Env): string =
   of meUcrt64: "ucrt64"
   of meClang64: "clang64"
   of meMingw32: "mingw32"
-  of meMsys: ""  # base env files land at the root already
+  of meMsys: "usr"
 
 # ---------------------------------------------------------------------------
 # SHA-256 of a downloaded file
@@ -396,6 +399,12 @@ proc resolveLatestPackage*(env: Msys2Env; packageHint: string;
 # discovery (which probes for a catalog 7z) is independent. The
 # harvester is a maintainer tool; needing host tar+zstd is acceptable.
 
+proc isGnuTar*(tar: string): bool =
+  try:
+    execCmdEx(quoteShell(tar) & " --version").output.contains("GNU tar")
+  except CatchableError:
+    false
+
 proc tarListEntries*(archivePath: string): seq[string] =
   ## Return every entry path in the .tar.zst archive (file + directory).
   ## Used by the harvester to enumerate the ``<env>/bin/`` files for
@@ -409,11 +418,12 @@ proc tarListEntries*(archivePath: string): seq[string] =
   # Windows: GNU tar parses ``host:path`` as a remote, so a literal
   # ``C:\Users\…\foo.tar.zst`` argument errors out with "Cannot
   # connect to C: resolve failed". Pass ``--force-local`` so the
-  # argument is always treated as a local path. bsdtar tolerates the
-  # flag too (it ignores unknown long options) so we always pass it.
-  const ForceLocalFlag = when defined(windows): " --force-local" else: ""
+  # argument is always treated as a local path. bsdtar does NOT tolerate the
+  # flag on some versions, so we only pass it for GNU tar.
+  let isGnu = isGnuTar(tar)
+  let forceLocalFlag = if isGnu: " --force-local" else: ""
   # Try the --zstd filter first (GNU tar).
-  let cmd1 = quoteShell(tar) & ForceLocalFlag &
+  let cmd1 = quoteShell(tar) & forceLocalFlag &
     " --zstd -tf " & quoteShell(archivePath)
   let res1 = execCmdEx(cmd1)
   if res1.exitCode == 0:
@@ -422,7 +432,7 @@ proc tarListEntries*(archivePath: string): seq[string] =
       if s.len > 0: result.add(s)
     return
   # Fallback A: bsdtar auto-detect via bare ``-tf``.
-  let cmdAuto = quoteShell(tar) & ForceLocalFlag &
+  let cmdAuto = quoteShell(tar) & forceLocalFlag &
     " -tf " & quoteShell(archivePath)
   let resAuto = execCmdEx(cmdAuto)
   if resAuto.exitCode == 0:
@@ -453,7 +463,7 @@ proc tarListEntries*(archivePath: string): seq[string] =
     raise newException(Msys2HarvestError,
       "zstd decompress failed (exit " & $resDecompress.exitCode &
       "): " & resDecompress.output)
-  let cmdList = quoteShell(tar) & ForceLocalFlag &
+  let cmdList = quoteShell(tar) & forceLocalFlag &
     " -tf " & quoteShell(scratchTar)
   let res2 = execCmdEx(cmdList)
   if res2.exitCode != 0:
@@ -484,14 +494,15 @@ proc tarExtractMember*(archivePath, member, destFile: string): bool =
     except OSError: discard
   # ``--force-local`` keeps GNU tar from reading ``C:\path`` as
   # ``host:path`` on Windows; same rationale as in ``tarListEntries``.
-  const ForceLocalFlag = when defined(windows): " --force-local" else: ""
-  let cmd1 = quoteShell(tar) & ForceLocalFlag &
+  let isGnu = isGnuTar(tar)
+  let forceLocalFlag = if isGnu: " --force-local" else: ""
+  let cmd1 = quoteShell(tar) & forceLocalFlag &
     " --zstd -xf " & quoteShell(archivePath) &
     " -C " & quoteShell(scratch) & " " & quoteShell(member)
   let res1 = execCmdEx(cmd1)
   if res1.exitCode != 0:
     # Fallback A: bsdtar auto-detect.
-    let cmdAuto = quoteShell(tar) & ForceLocalFlag &
+    let cmdAuto = quoteShell(tar) & forceLocalFlag &
       " -xf " & quoteShell(archivePath) &
       " -C " & quoteShell(scratch) & " " & quoteShell(member)
     let resAuto = execCmdEx(cmdAuto)
@@ -508,7 +519,7 @@ proc tarExtractMember*(archivePath, member, destFile: string): bool =
       let resDecompress = execCmdEx(cmdDecompress)
       if resDecompress.exitCode != 0:
         return false
-      let cmd2 = quoteShell(tar) & ForceLocalFlag &
+      let cmd2 = quoteShell(tar) & forceLocalFlag &
         " -xf " & quoteShell(scratchTar) &
         " -C " & quoteShell(scratch) & " " & quoteShell(member)
       let res2 = execCmdEx(cmd2)

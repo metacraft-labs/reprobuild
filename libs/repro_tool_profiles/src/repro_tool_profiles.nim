@@ -2204,7 +2204,7 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
   ## nim falls back to the PATH lookup that picks up FPC's 1999-era
   ## i386-target gcc 2.95 — failing the C compile of e.g. `blake3/capi.c`
   ## with `stddef.h: Invalid argument`.
-  if mode != tpmTarball:
+  if mode != tpmTarball and mode != tpmFromSource:
     return
   let effectiveStoreRoot =
     if storeRoot.len > 0: storeRoot
