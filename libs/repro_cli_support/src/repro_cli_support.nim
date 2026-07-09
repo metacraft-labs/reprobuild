@@ -22891,7 +22891,7 @@ proc observeRepoForSync(identity: GitToolIdentity;
       result.hasUnpublishedCommits = ancestorRes.code != 0
 
   if result.currentBranch.len > 0 and forcePushedSHAs.len > 0:
-    let remoteRef = "refs/remotes/origin/" & result.currentBranch
+    let remoteRef = "refs/remotes/" & rName & "/" & result.currentBranch
     let logRes = gitRunPlain(identity, ["-C", repoPath, "log", "--format=%H", remoteRef & "..HEAD"])
     if logRes.code == 0:
       for rawSha in logRes.output.strip().splitLines():
@@ -22919,7 +22919,7 @@ proc observeRepoForSync(identity: GitToolIdentity;
 #       consistent object pool without racing a fetch into the same bare.
 #
 #   (classification) — the planner runs between the phases: it needs the
-#       post-fetch ``origin/<branch>`` tip to tell "clean at locked" from
+#       post-fetch ``<remote>/<branch>`` tip to tell "clean at locked" from
 #       "fast-forwardable". This is exactly ``repo``'s ``--no-interleaved``
 #       barrier, which the planner-in-the-middle makes mandatory here.
 #
@@ -22928,7 +22928,7 @@ proc observeRepoForSync(identity: GitToolIdentity;
 #       run once through the engine. These consume CPU slots
 #       (jobs-checkout).
 #
-# Determinism is preserved: a fetch only updates ``refs/remotes/origin/*``
+# Determinism is preserved: a fetch only updates ``refs/remotes/<remote>/*``
 # (never the working tree), the planner classification is unchanged, and the
 # resolved revisions are identical to the old serial path. Dirty /
 # locally-unpublished / divergent-feature-branch checkouts are still
@@ -22939,7 +22939,7 @@ const SyncFetchPool = "vcs/fetch"
 proc syncFetchActionFor(identity: GitToolIdentity; workspaceRoot: string;
                         repo: ResolvedRepo; repoIdx: int;
                         sharedBareRefreshDep: string): BuildAction =
-  ## Build a ``vcs/fetch``-pooled ``git fetch --quiet origin`` action for
+  ## Build a ``vcs/fetch``-pooled ``git fetch --quiet <remote>`` action for
   ## one existing checkout. The action runs as a ``bakProcess`` subprocess
   ## (genuinely parallel through the engine's running set, RunQuota-bound
   ## by the pool capacity) rather than a synchronous ``gitRunPlain``. A pure
@@ -23022,13 +23022,13 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
     a.poolUnits = 1'u32
     return (true, a, "", "")
   of saFetchFastForward:
-    # The fetch phase already advanced ``origin/<branch>``. The planner
+    # The fetch phase already advanced ``<remote>/<branch>``. The planner
     # established HEAD is an ancestor of it (strict fast-forward) on a
     # clean tree. ``gitMergeFfAction`` runs ``git merge --ff-only`` as an
     # engine action (RA-5c: no more synchronous ``gitRunPlain`` merge).
     let receiptRel = ".repro" / "workspace" / "receipts" /
       ("sync-merge-ff-" & idSeg & ".receipt")
-    let rName = if resolved.remoteName.len > 0: resolved.remoteName else: "origin"
+    let rName = gitRemoteNameFor(resolved)
     var a = gitMergeFfAction("workspace-sync-merge-ff-" & idSeg, identity,
       remoteName = rName,
       branchName = decision.branch,
@@ -23058,7 +23058,7 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
   of saForcePushRebase:
     let receiptRel = ".repro" / "workspace" / "receipts" /
       ("sync-force-push-rebase-" & idSeg & ".receipt")
-    let rName = if resolved.remoteName.len > 0: resolved.remoteName else: "origin"
+    let rName = gitRemoteNameFor(resolved)
     var a = gitForcePushRebaseAction("workspace-sync-force-push-rebase-" & idSeg, identity,
       branchName = decision.branch,
       baseSha = decision.forcePushedBaseSha,
@@ -23451,7 +23451,9 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   for repoIdx, repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
     if dirExists(repoPath / ".git") and repo.revision.len > 0 and not looksLikeSha(repo.revision):
-      oldRemoteTips[repoIdx] = revParse(identity, repoPath, "refs/remotes/origin/" & repo.revision)
+      let rName = gitRemoteNameFor(repo)
+      oldRemoteTips[repoIdx] = revParse(identity, repoPath,
+        "refs/remotes/" & rName & "/" & repo.revision)
 
   var sharedBareRefreshAction = initTable[string, string]()
   var fetchActions: seq[BuildAction]
@@ -23531,7 +23533,9 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   for repoIdx, repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
     if oldRemoteTips[repoIdx].len > 0:
-      let newTip = revParse(identity, repoPath, "refs/remotes/origin/" & repo.revision)
+      let rName = gitRemoteNameFor(repo)
+      let newTip = revParse(identity, repoPath,
+        "refs/remotes/" & rName & "/" & repo.revision)
       if newTip.len > 0 and newTip != oldRemoteTips[repoIdx]:
         let ancestorRes = gitRunPlain(identity, ["-C", repoPath,
           "merge-base", "--is-ancestor", oldRemoteTips[repoIdx], newTip])
@@ -23649,7 +23653,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       let repo = resolved.repos[repoIdx]
       # The concrete commit to reset onto: the SHA-pinned revision itself,
       # else the lock file's recorded SHA, else the post-fetch remote
-      # tracking tip ``origin/<branch>`` for a branch pin (the fetch phase
+      # tracking tip ``<remote>/<branch>`` for a branch pin (the fetch phase
       # already advanced it), else the bare revision as a last resort. The
       # fetch phase made the locked commit reachable for a tree with
       # ``.git``.
@@ -23661,8 +23665,9 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
           # Branch pin: reset onto the remote-tracking tip so the overwrite
           # converges to the published revision, not a stale local branch.
           let repoAbs = args.workspaceRoot / repo.path
+          let rName = gitRemoteNameFor(repo)
           let remoteTip = revParse(identity, repoAbs,
-            "refs/remotes/origin/" & repo.revision)
+            "refs/remotes/" & rName & "/" & repo.revision)
           target = if remoteTip.len > 0: remoteTip else: repo.revision
       if target.len == 0:
         continue
