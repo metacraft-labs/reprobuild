@@ -110,8 +110,12 @@ suite "Phase F — argv assemblers (pure)":
     check argv[2] == "-Command"
     # The PowerShell command body is one string; pin every load-
     # bearing element.
+    check argv[3].contains(
+      "Copy-Item -LiteralPath \"C:\\actions-runner-cache\\runner.zip\"")
     check argv[3].contains("Expand-Archive")
-    check argv[3].contains("-Path \"C:\\actions-runner-cache\\runner.zip\"")
+    check argv[3].contains(
+      "Expand-Archive -LiteralPath \"$env:TEMP\\repro-tmp-")
+    check not argv[3].contains("Expand-Archive -Path ")
     check argv[3].contains("-DestinationPath \"C:\\actions-runner\"")
     check argv[3].contains("-Force")
 
