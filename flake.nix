@@ -25,7 +25,7 @@
       #
       # Pinned to the hardened io-mon revision validated for this retirement
       # campaign.
-      url = "github:metacraft-labs/io-mon/adc75b994a1bfa314f443e3aea10d705d814cfcb";
+      url = "github:metacraft-labs/io-mon/387fb0fce53ccf55bc458a2cd2d6ab37b3e61dc5";
       flake = false;
     };
     nim-shm-queue-src = {
