@@ -496,11 +496,12 @@ proc prepareIsonimFixture(sourcePath, destPath: string) =
 proc linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot: string) =
   for dep in ["codetracer-trace-format-nim", "io-mon", "isonim", "nim-acp",
               "nim-agent-harbor", "nim-agents", "nim-everywhere",
-              "nim-stackable-hooks"]:
+              "nim-shm-queue", "nim-stackable-hooks"]:
     var sourcePath = codeTracerRoot.parentDir / dep
     if not dirExists(sourcePath):
       let envSource =
         if dep == "io-mon": getEnv("IO_MON_SRC")
+        elif dep == "nim-shm-queue": getEnv("SHM_QUEUE_SRC")
         elif dep == "nim-stackable-hooks":
           let preferred = getEnv("NIM_STACKABLE_HOOKS_SRC")
           if preferred.len > 0: preferred else: getEnv("STACKABLE_HOOKS_SRC")
@@ -774,7 +775,8 @@ proc sourcePathEnv(): seq[(string, string)] =
     "CODETRACER_TRACE_FORMAT_NIM_SRC",
     "CODETRACER_RESULTS_SRC",
     "IO_MON_SRC",
-    "RUNQUOTA_SRC"
+    "RUNQUOTA_SRC",
+    "SHM_QUEUE_SRC"
   ]:
     let value = getEnv(key)
     if value.len > 0:
