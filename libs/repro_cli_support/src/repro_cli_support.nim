@@ -4527,20 +4527,14 @@ type
     pbkDevelopOverride
     pbkLockPinned
     pbkOnDiskSibling
-      ## Develop-mode ON-DISK workspace sibling with NEITHER a develop-override
-      ## entry NOR a committed ``LockedDep`` — the producer's checkout is simply
-      ## present one level up (``../<selector>/repro.nim``, the same convention
-      ## ``findSiblingProjectFile`` / ``discoverProducerSourceRoot`` use for the
-      ## SC-8 typed-contract discovery). A ``uses:`` selector that names such a
-      ## sibling is a cross-repo PRODUCER (its source root ships a ``library`` /
-      ## ``executable`` via its ``repro.nim``), so it MUST resolve through the
-      ## cross-repo producer path — NOT fall through to PATH tool resolution,
-      ## which would wrongly reject it as "not found in PATH" under
-      ## ``--tool-provisioning=path``. This mirrors the compile-time
-      ## ``discoverProducerSourceRoot`` on-disk-sibling arm at build time, so a
-      ## develop-mode consumer with sibling checkouts but no lock/override
-      ## (e.g. a fresh workspace) materializes its producers identically to a
-      ## lock-pinned consumer whose siblings happen to be on disk.
+      ## Plain ON-DISK workspace sibling with NEITHER a develop-override entry
+      ## NOR a committed ``LockedDep``. The checkout is discoverable one level
+      ## up (``../<selector>/repro.nim``), which is useful for compile-time
+      ## typed-contract discovery, but it is NOT by itself a declared build
+      ## graph producer edge. Build-time materialization/splicing is allowed
+      ## only for explicit develop overrides or lock pins; otherwise a consumer
+      ## that requires the producer edge must fail instead of silently building
+      ## an undeclared sibling.
 
   ProducerBinding* = object
     selector*: string
@@ -4569,6 +4563,13 @@ var lastResolvedProducerBinding*: ProducerBinding =
   ## rather than the host-binary branch. SC-2 replaces the closure's
   ## ``return none`` with the spliced producer bin dir; SC-1 records the
   ## decision without yet materializing it.
+
+proc declaresProducerEdge*(binding: ProducerBinding): bool =
+  ## True iff ``binding`` represents an explicit build graph producer edge.
+  ## A plain on-disk sibling can provide compile-time schema discovery, but it
+  ## must not be built/spliced/folded unless the consumer declared the edge via
+  ## a develop override or a committed lock pin.
+  binding.kind in {pbkDevelopOverride, pbkLockPinned}
 
 proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
                              workspaceRoot = ""):
@@ -4719,7 +4720,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       # the git_actions / repro_local_store gcsafe I/O sites).
       {.cast(gcsafe).}:
         let producer = resolveProducerBinding(name, producerWorkspaceRoot)
-        if producer.kind != pbkNotProducer:
+        if producer.declaresProducerEdge:
           lastResolvedProducerBinding = producer
           # SC-2/SC-3 splice: the pre-pass has built this producer's declared
           # edge(s) and recorded the executable channel (``build/bin`` dir on
@@ -6670,7 +6671,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # above, but keyed on the SC-1 "resolve package binding" hook instead of the
   # corpus-recipe layout: for every ``uses:`` selector that resolves to a
   # cross-repo PRODUCER (a develop-overridden sibling checkout, or a lock-
-  # pinned checkout present on disk), LOAD the producer's ``repro.nim``, BUILD
+  # pinned dependency), LOAD the producer's ``repro.nim``, BUILD
   # its declared ``executable``'s producing edge from source (recursively, via
   # the SAME in-process ``executeBuildTarget`` the from-source pass uses — NOT
   # a ``repro build`` subprocess), and RECORD the producer's output ``bin`` dir
@@ -6692,8 +6693,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # the full cycle path rather than looping. ``FromSourceMaxRecursionDepth`` is
   # reused as the shared sanity ceiling.
   #
-  # This branch fires ONLY for a ``uses:`` selector that resolves as a producer
-  # via the develop-override map / committed ``LockedDep``; every other
+  # This branch fires ONLY for a ``uses:`` selector that resolves as a declared
+  # producer edge via the develop-override map / committed ``LockedDep``. A
+  # plain on-disk sibling is schema-visible but not an edge declaration, so it
+  # is intentionally left to the existing host/PATH behavior. Every other
   # selector (host / nix / tarball / scoop / corpus-recipe) is untouched, so a
   # build that consumes no cross-repo producer is byte-identical to today.
   if not prepareOnly and result.projectRoot.len > 0:
@@ -6708,6 +6711,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # (a registered override whose local checkout is missing) instead of a
       # silent host-PATH fallthrough — the SC-1 "no silent fallback" contract.
       let producer = resolveProducerBinding(selector, result.projectRoot)
+      if not producer.declaresProducerEdge:
+        continue
       # Materialize the producer's SOURCE root. Develop mode always has one on
       # disk (``localPathAbsolute``). Lock-pinned mode uses an existing sibling
       # checkout beside the consumer if present (SC-2); OTHERWISE — the SC-6
@@ -6732,10 +6737,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           producerRoot = fetchLockPinnedProducer(
             producer.lockedDep, result.projectRoot)
       of pbkOnDiskSibling:
-        # Develop-mode on-disk sibling (no override, no lock): the producer's
-        # source root is the sibling checkout one level up — the same root the
-        # lock-pinned arm above uses when the sibling is present on disk.
-        producerRoot = parentDir(producer.siblingProjectFile)
+        continue
       of pbkNotProducer:
         continue
       if producerRoot.len == 0 or
@@ -7055,9 +7057,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           producerSourceBindings[selector] =
             lockPinnedSourceBinding(selector, producer.lockedDep)
         of pbkOnDiskSibling:
-          producerSourceBindings[selector] =
-            onDiskSiblingSourceBinding(selector,
-              parentDir(producer.siblingProjectFile))
+          discard
         of pbkNotProducer:
           discard
         # Prepend the freshly-built producer bin dir(s) to the process ``PATH``
@@ -12375,11 +12375,12 @@ proc solverInputsPath*(projectDir: string): string =
 # and the ``foldOverridesIntoFingerprint`` invalidation (SC-4) build on the
 # ``ProducerBinding`` this hook returns.
 #
-# A ref that is NOT a cross-repo producer (no develop override AND no matching
-# ``LockedDep``) yields ``pbkNotProducer`` so every existing host-binary / nix
-# / tarball / scoop / corpus-recipe ref keeps its resolver branch byte-for-
-# byte (§4.1, §10). That is the "byte-identical for every non-producer ref"
-# deliverable, asserted negatively in the SC-1 integration test.
+# A ref that is NOT a declared cross-repo producer (no develop override AND no
+# matching ``LockedDep``) must not be materialized or spliced by the build graph,
+# so every existing host-binary / nix / tarball / scoop / corpus-recipe ref keeps
+# its resolver branch byte-for-byte (§4.1, §10). Plain on-disk siblings remain
+# discoverable for typed-contract import, but ``declaresProducerEdge`` keeps
+# them out of the build graph until an override or lock pin declares the edge.
 # ---------------------------------------------------------------------------
 
 ## SC-1 ``ProducerBinding`` / ``ProducerBindingKind`` are declared up next to
@@ -12398,6 +12399,9 @@ proc solverInputsPath*(projectDir: string): string =
 ##   * ``pbkLockPinned`` — no override matched but the consumer's committed
 ##     ``repro.lock`` pins the producer as a ``LockedDep`` (VCS ``Coordinates``
 ##     + ``integrity``, §5.2) SC-6 fetches + verifies + builds from.
+##   * ``pbkOnDiskSibling`` — a sibling source tree is discoverable, but no
+##     build graph edge was declared. Typed schema import may use it; producer
+##     materialization/splicing must not.
 
 proc resolveProducerBinding*(selector: string;
                              workspaceRoot: string;
@@ -12407,7 +12411,7 @@ proc resolveProducerBinding*(selector: string;
   ## The SC-1 "resolve package binding" hook (§4.1). Route ``selector``
   ## through the develop-override map first, then the committed ``LockedDep``
   ## set, and return the ``ProducerBinding`` describing how (or whether) the
-  ## selector names a cross-repo producer.
+  ## selector names a cross-repo producer or discoverable sibling.
   ##
   ## Order is significant and matches §5: a develop override always shadows a
   ## lock pin (develop-mode local-on-top, §6), so we consult
@@ -12415,11 +12419,11 @@ proc resolveProducerBinding*(selector: string;
   ## committed ``LockedDep`` when no override matched (``rpbkUpstream``). A
   ## selector present in NEITHER surface — but whose checkout is present as an
   ## on-disk workspace SIBLING (``../<selector>/repro.nim``) — yields
-  ## ``pbkOnDiskSibling`` (develop-mode without a persisted override/lock: the
-  ## same on-disk-sibling arm ``discoverProducerSourceRoot`` already trusts for
-  ## the SC-8 compile-time typed-contract discovery). A selector present in NONE
-  ## of the three surfaces yields ``pbkNotProducer`` so the caller's existing
-  ## PATH / host-tool resolution branch is unchanged.
+  ## ``pbkOnDiskSibling`` for schema discovery/diagnostics only. It is not a
+  ## declared build graph edge; callers that materialize producers must gate on
+  ## ``declaresProducerEdge``. A selector present in NONE of the three surfaces
+  ## yields ``pbkNotProducer`` so the caller's existing PATH / host-tool
+  ## resolution branch is unchanged.
   ##
   ## ``workspaceRoot`` MUST be absolute when ``overrides`` is ``some`` (see
   ## ``resolveOverrideAbsolutePath``). A resolution DIAGNOSTIC from the
@@ -12455,17 +12459,12 @@ proc resolveProducerBinding*(selector: string;
         kind: pbkLockPinned,
         lockedDep: dep)
 
-  # 3. develop-mode on-disk sibling — no override entry and no lock pin, but the
-  #    producer's checkout is present one level up (``../<selector>/repro.nim``).
-  #    This is the develop-mode posture of a fresh workspace whose sibling
-  #    checkouts have not (yet) been captured in a committed lock or a persisted
-  #    develop-override file. The SC-8 compile-time typed-contract discovery
-  #    (``discoverProducerSourceRoot``) ALREADY treats such a sibling as the
-  #    producer's source root, so the consumer compiles against its typed
-  #    contract; classifying it here as a producer keeps the BUILD-time
-  #    materialization consistent with that compile-time view — otherwise the
-  #    ``uses:`` selector falls through to PATH tool resolution and is wrongly
-  #    rejected as "not found in PATH" under ``--tool-provisioning=path``.
+  # 3. on-disk sibling — no override entry and no lock pin, but a checkout is
+  #    present one level up (``../<selector>/repro.nim``). This is intentionally
+  #    a discovery result, not a build-edge declaration: SC-8/SC-9 can import a
+  #    typed schema from the sibling, while SC-2/SC-3 materialization still
+  #    requires an explicit override or lock pin. Otherwise a no-producer-edge
+  #    consumer would silently build and splice a sibling it did not declare.
   block onDiskSibling:
     let sibling = findSiblingProjectFile(selector, workspaceRoot)
     if sibling.len > 0:
