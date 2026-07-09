@@ -16,7 +16,8 @@ suite "daemon carried environment":
       "REPRO_DAEMON_STATE_DIR",
       "REPRO_DAEMON_RUNTIME_DIR",
       "RUNQUOTAD_BIN",
-      "RUNQUOTA_BIN"
+      "RUNQUOTA_BIN",
+      "SHM_QUEUE_SRC"
     ]
     var previous: seq[tuple[key: string; value: string; present: bool]]
     for key in keys:
@@ -33,11 +34,13 @@ suite "daemon carried environment":
     let runtimeDir = getTempDir() / "repro-daemon-carried-env-runtime"
     let runquotadBin = getTempDir() / "runquotad-carried-env"
     let runquotaBin = getTempDir() / "runquota-carried-env"
+    let shmQueueSrc = getTempDir() / "shm-queue-src-carried-env"
     putEnv("REPRO_DAEMON_ENDPOINT", endpoint)
     putEnv("REPRO_DAEMON_STATE_DIR", stateDir)
     putEnv("REPRO_DAEMON_RUNTIME_DIR", runtimeDir)
     putEnv("RUNQUOTAD_BIN", runquotadBin)
     putEnv("RUNQUOTA_BIN", runquotaBin)
+    putEnv("SHM_QUEUE_SRC", shmQueueSrc)
 
     let carried = daemonCarriedEnvironment()
     check carried.hasEnvPair("REPRO_DAEMON_ENDPOINT", endpoint)
@@ -45,3 +48,4 @@ suite "daemon carried environment":
     check carried.hasEnvPair("REPRO_DAEMON_RUNTIME_DIR", runtimeDir)
     check carried.hasEnvPair("RUNQUOTAD_BIN", runquotadBin)
     check carried.hasEnvPair("RUNQUOTA_BIN", runquotaBin)
+    check carried.hasEnvPair("SHM_QUEUE_SRC", shmQueueSrc)
