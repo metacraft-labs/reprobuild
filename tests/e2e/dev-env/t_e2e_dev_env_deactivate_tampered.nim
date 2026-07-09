@@ -40,16 +40,14 @@ proc runDeactivate(c: M74Case; manifestPath: string;
   process.close()
 
 proc runActivate(c: M74Case; shell = "bash"): CommandOutcome =
-  var process = startProcess(c.reproBin,
-    args = @["dev-env", "export", shell,
-      "--project-root", c.projectRoot],
-    workingDir = c.repoRoot,
-    env = c.envFor(),
-    options = {poUsePath})
-  result.stdout = process.outputStream.readAll()
-  result.stderr = process.errorStream.readAll()
-  result.exitCode = process.waitForExit()
-  process.close()
+  let res = runShell(shellCommand(@[
+    c.reproBin,
+    "dev-env", "export", shell,
+    "--project-root", c.projectRoot
+  ], c.envFor().envEntries), c.repoRoot)
+  result.stdout = res.output
+  result.stderr = res.output
+  result.exitCode = res.code
 
 proc extractManifestPath(activationScript: string): string =
   ## The activation script emits

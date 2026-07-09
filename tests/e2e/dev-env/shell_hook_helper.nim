@@ -151,6 +151,10 @@ proc shimSpawnCount*(c: ShellHookCase): int =
 proc resetShimCounter*(c: ShellHookCase) =
   writeFile(c.shimCounter, "")
 
+proc envEntries*(env: StringTableRef): seq[tuple[name, value: string]] =
+  for key, value in env.pairs():
+    result.add((key, value))
+
 proc baselineEnvForBash*(c: ShellHookCase): StringTableRef =
   ## Build a clean-ish env block for the bash child. We strip
   ## reprobuild-internal ``__REPRO_*`` vars (so the test asserts the
@@ -159,6 +163,7 @@ proc baselineEnvForBash*(c: ShellHookCase): StringTableRef =
   result = newStringTable(modeCaseSensitive)
   for k, v in envPairs():
     if k.startsWith("__REPRO_"):
+      result[k] = ""
       continue
     if k == "PROMPT_COMMAND":
       continue
@@ -173,6 +178,18 @@ proc baselineEnvForBash*(c: ShellHookCase): StringTableRef =
   # Force a stable HOME well outside the project so the bounded walk
   # behaves predictably.
   result["HOME"] = c.tempRoot
+  result["XDG_CONFIG_HOME"] = c.tempRoot / "xdg-config"
+  result["REPROBUILD_ACTION_CACHE_ROOT"] = c.tempRoot / "action-cache"
+  result["REPRO_ACTION_CACHE_SHM"] = "0"
+  result["REPRO_DEV_ENV_AUTO_ALLOW"] = "1"
+  result["REPRO_DAEMON"] = "off"
+  result["REPRO_DAEMON_ENDPOINT"] =
+    daemonSocketEndpoint("repro-m76-shell-hook-" & $getCurrentProcessId() &
+      "-" & c.tempRoot.extractFilename)
+  result["REPRO_DAEMON_STATE_DIR"] = c.tempRoot / "daemon-state"
+  createDir(result["XDG_CONFIG_HOME"])
+  createDir(result["REPROBUILD_ACTION_CACHE_ROOT"])
+  createDir(result["REPRO_DAEMON_STATE_DIR"])
   # Make ps1 deterministic so we don't depend on the host's prompt.
   result["PS1"] = "$ "
   # Disable any locale weirdness.
@@ -229,16 +246,12 @@ proc runBashScript*(c: ShellHookCase; bashPath, rcfilePath, body: string):
   # is safe — bash buffers at most a few hundred bytes of output, well
   # under the 64KB OS pipe limit, so the parent never blocks the
   # child during waitForExit.
-  var process = startProcess(bashPath,
-    args = @["-c", ". '" & wrapperPath.replace("\\", "/") & "'"],
-    workingDir = c.tempRoot,
-    env = env,
-    options = {poUsePath, poStdErrToStdOut})
-  result.exitCode = process.waitForExit()
-  let outStream = process.outputStream
-  result.stdout = if outStream != nil: outStream.readAll() else: ""
+  let res = runShell(shellCommand(@[
+    bashPath, "-c", ". '" & wrapperPath.replace("\\", "/") & "'"
+  ], env.envEntries), c.tempRoot)
+  result.exitCode = res.code
+  result.stdout = res.output
   result.stderr = ""
-  process.close()
 
 proc findBash*(): string =
   ## Locate bash. Prefers ``bash`` on PATH (covers Linux/macOS hosts

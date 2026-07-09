@@ -57,6 +57,11 @@ import std/[algorithm, monotimes, os, osproc, sequtils, streams, strtabs,
 import repro_test_support
 import shell_hook_helper
 
+when defined(windows):
+  import std/winlean
+else:
+  import std/posix
+
 const
   Prompts = 40
   FastPathExpectedSubstring = "repro shell hook: no-op (cache key unchanged)"
@@ -100,13 +105,7 @@ proc readFingerprint(script: string): string =
 proc captureExportOutput(c: ShellHookCase;
                          extraEnv: openArray[(string, string)] = []):
     tuple[stdout: string; exitCode: int] =
-  var env = newStringTable(modeCaseSensitive)
-  for k, v in envPairs():
-    if k.startsWith("__REPRO_"):
-      continue
-    env[k] = v
-  env["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
-  env["HOME"] = c.tempRoot
+  var env = c.baselineEnvForBash()
   for (k, v) in extraEnv:
     env[k] = v
   var p = startProcess(c.reproBin,
@@ -114,12 +113,61 @@ proc captureExportOutput(c: ShellHookCase;
       "--project-root", c.projectRoot],
     workingDir = c.repoRoot,
     env = env,
-    options = {poUsePath})
-  let outStream = p.outputStream
-  let outText = if outStream != nil: outStream.readAll() else: ""
-  let code = p.waitForExit()
-  p.close()
-  (stdout: outText, exitCode: code)
+    options = {poUsePath, poStdErrToStdOut})
+  defer: p.close()
+
+  when defined(windows):
+    const PollSleepMs = 1
+    let outHandle = Handle(p.outputHandle)
+    var buf {.noinit.}: array[4096, char]
+    while true:
+      var bytesAvail: int32 = 0
+      let peeked = peekNamedPipe(outHandle, lpTotalBytesAvail = addr bytesAvail)
+      if peeked and bytesAvail > 0:
+        var bytesRead: int32 = 0
+        let toRead = min(int(bytesAvail), buf.len).int32
+        let ok = readFile(outHandle, addr buf[0], toRead, addr bytesRead, nil)
+        if ok != 0 and bytesRead > 0:
+          let prev = result.stdout.len
+          result.stdout.setLen(prev + bytesRead)
+          copyMem(addr result.stdout[prev], addr buf[0], bytesRead)
+          continue
+      result.exitCode = p.peekExitCode()
+      if result.exitCode != -1:
+        break
+      sleep(PollSleepMs)
+  else:
+    const PollSleepMs = 1
+    let fd = cint(p.outputHandle)
+    let prevFlags = fcntl(fd, F_GETFL)
+    if prevFlags != -1:
+      discard fcntl(fd, F_SETFL, prevFlags or O_NONBLOCK)
+
+    proc drainAvailable(fd: cint; sink: var string): bool =
+      var buf {.noinit.}: array[4096, char]
+      while true:
+        let n = read(fd, addr buf[0], buf.len)
+        if n > 0:
+          let prev = sink.len
+          sink.setLen(prev + n)
+          copyMem(addr sink[prev], addr buf[0], n)
+        elif n == 0:
+          return true
+        else:
+          if errno == EINTR:
+            continue
+          return false
+
+    while true:
+      let eof = drainAvailable(fd, result.stdout)
+      result.exitCode = p.peekExitCode()
+      if result.exitCode != -1:
+        discard drainAvailable(fd, result.stdout)
+        break
+      if eof:
+        result.exitCode = p.waitForExit()
+        break
+      sleep(PollSleepMs)
 
 proc runScenario() =
   let c = prepareShellHookCase("repro-m77-realistic")

@@ -8941,7 +8941,13 @@ proc runDevEnvDeactivateCommand(args: openArray[string]): int =
   var rederivedPlan = devEnvArtifactToExportPlan(artifactPath)
   rederivedPlan.appendReproActiveManifestMarker(parsed.manifestPath)
   rederivedPlan.appendReproAppliedMarker(manifest.artifact)
-  let rederivedScript =
+  let unsetCmd =
+    case manifest.activationShell
+    of skBash, skZsh: "unset __REPRO_WARNED\n"
+    of skFish: "set -e __REPRO_WARNED\n"
+    of skNushell: "hide-env __REPRO_WARNED\n"
+    of skPwsh: "Remove-Item Env:__REPRO_WARNED -ErrorAction SilentlyContinue\n"
+  let rederivedScript = unsetCmd &
     formatExportPlan(rederivedPlan, manifest.activationShell)
   let rederivedHash = computeActivationScriptHash(rederivedScript)
   if rederivedHash != manifest.activationScriptHash:
