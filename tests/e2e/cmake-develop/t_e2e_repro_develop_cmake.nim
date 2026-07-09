@@ -91,7 +91,7 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     raise newException(OSError, "runquotad socket did not appear")
 
 proc repoCMakeRoot(repoRoot: string): string =
-  repoRoot.parentDir / "reprobuild-cmake"
+  workspaceRootForRepo(repoRoot) / "reprobuild-cmake"
 
 proc findForkedCMake(repoRoot: string): string =
   let explicit = getEnv("REPROBUILD_FORKED_CMAKE")

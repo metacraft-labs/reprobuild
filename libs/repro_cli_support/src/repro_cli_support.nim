@@ -11095,11 +11095,17 @@ const
   ## current shell environment.
   DaemonExplicitForwardedEnvVars* = [
     "PATH", "HOME", "USER", "TMPDIR", "TEMP", "TMP",
-    "RUNQUOTA_SOCKET", "REPROBUILD_STORE_ROOT",
+    "RUNQUOTA_SOCKET", "RUNQUOTAD_BIN", "RUNQUOTA_BIN",
+    "REPROBUILD_STORE_ROOT",
     "REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_MAX_PARALLELISM",
     "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
     "REPROBUILD_AUTO_RUNQUOTA",
     "REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS",
+    # Nested CLI calls launched from daemon-hosted actions must keep using the
+    # caller-selected daemon, especially full-suite runs that isolate
+    # REPRO_DAEMON_* under a temporary endpoint/state/runtime root.
+    "REPRO_DAEMON_ENDPOINT", "REPRO_DAEMON_STATE_DIR",
+    "REPRO_DAEMON_RUNTIME_DIR",
     # Source checkout overrides used by repro.nim/config.nims to resolve
     # workspace sibling libraries when the daemon-hosted executor evaluates the
     # provider under a login-launched daemon environment.

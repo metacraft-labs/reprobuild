@@ -438,6 +438,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_daemon_carried_environment.nim",
+    binary: "build/test-bin/t_daemon_carried_environment",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim",
     binary: "build/test-bin/t_e2e_watch_via_adapter",
     defines: @[],
