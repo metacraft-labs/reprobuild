@@ -399,10 +399,7 @@ when defined(macosx) or defined(linux):
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  if not fileExists(daemonBin):
-    discard requireSuccess(shellCommand(["just", "build"]), runquotaRoot)
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   let socketPath = "/tmp/repro-m29-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -1031,7 +1028,7 @@ when defined(macosx) or defined(linux):
   suite "e2e_codetracer_in_place_project_file":
     test "real committed CodeTracer reprobuild.nim supports action-id target selection":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 
@@ -1113,7 +1110,7 @@ when defined(macosx) or defined(linux):
 
     test "selected frontend public ui.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 
@@ -1205,7 +1202,7 @@ when defined(macosx) or defined(linux):
 
     test "selected frontend src subwindow.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 
@@ -1304,7 +1301,7 @@ when defined(macosx) or defined(linux):
 
     test "selected frontend src index.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 
@@ -1406,7 +1403,7 @@ when defined(macosx) or defined(linux):
 
     test "selected db-backend-record target builds real native Nim binary":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 
@@ -1502,7 +1499,7 @@ when defined(macosx) or defined(linux):
 
     test "selected ct target builds real native Nim binary":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 
@@ -1603,7 +1600,7 @@ when defined(macosx) or defined(linux):
 
     test "selected codetracer aggregate builds implemented app slice":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 
@@ -1788,7 +1785,7 @@ when defined(macosx) or defined(linux):
 
     test "selected frontend server index.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 
@@ -1878,7 +1875,7 @@ when defined(macosx) or defined(linux):
 
     test "selected frontend public resource tree target copies generated resources":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 
@@ -1971,7 +1968,7 @@ when defined(macosx) or defined(linux):
 
     test "m51_codetracer_stdlib_file_ops":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
       let projectText = readFile(realProjectFile)
@@ -2022,7 +2019,7 @@ when defined(macosx) or defined(linux):
 
     test "selected frontend aggregate target builds current frontend bundle set":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 
@@ -2226,7 +2223,7 @@ when defined(macosx) or defined(linux):
 
     test "m52_codetracer_uses_stdlib_packages":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 

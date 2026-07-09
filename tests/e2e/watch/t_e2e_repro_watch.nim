@@ -1,6 +1,7 @@
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
-from repro_test_support import requireBinary, monitorShimPath
+from repro_test_support import requireBinary, monitorShimPath,
+  requireCodeTracerSourceRoot, requireRunQuotaDaemonBin
 
 const GccProxySource = r"""
 #include <fcntl.h>
@@ -263,10 +264,7 @@ proc pathExists(path: string): bool =
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  if not fileExists(daemonBin):
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   let socketPath = "/tmp/repro-m31-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -1288,7 +1286,7 @@ when defined(macosx):
 
     test "CodeTracer copied checkout watch rebuilds selected C action only":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 
@@ -1342,7 +1340,7 @@ when defined(macosx):
 
     test "CodeTracer copied checkout watch rebuilds selected frontend aggregate":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 
@@ -1423,7 +1421,7 @@ when defined(macosx):
 
     test "CodeTracer copied checkout watch rebuilds selected app aggregate":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 
@@ -1531,7 +1529,7 @@ when defined(macosx):
 
     test "CodeTracer copied checkout watch builds added frontend public resource":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let realProjectFile = codeTracerRoot / "reprobuild.nim"
       check fileExists(realProjectFile)
 

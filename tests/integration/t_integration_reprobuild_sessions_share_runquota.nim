@@ -135,14 +135,8 @@ proc writeProject(path, packageName, actionId, helperPath, stampPath, gatePath,
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string; cli: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  let cliBin = runquotaRoot / "build" / "bin" / addFileExt("runquota", ExeExt)
-  if not fileExists(daemonBin) or not fileExists(cliBin):
-    raise newException(OSError,
-      "runquotad/runquota binaries missing under " & runquotaRoot &
-      "/build/bin; build them via the test harness " &
-      "(scripts/run_tests.sh)")
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
+  let cliBin = requireRunQuotaCliBin(repoRoot)
   let socketPath = "/tmp/repro-m22-rq-" & $getCurrentProcessId() & ".sock"
   if pathExists(socketPath):
     removeFile(socketPath)
@@ -228,7 +222,7 @@ suite "integration_reprobuild_sessions_share_runquota":
   when isNixSupported:
     test "two repro build sessions serialize default 1000 milliCPU actions through one daemon":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       check fileExists(codeTracerRoot / "src" / "frontend" / "tests" /
         "ipc_registry_test.nim")
       check fileExists(codeTracerRoot / "test-programs" / "c_sudoku_solver" /

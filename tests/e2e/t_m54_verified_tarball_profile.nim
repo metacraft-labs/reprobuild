@@ -41,12 +41,7 @@ proc reproBinary(): string =
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  if not fileExists(daemonBin):
-    raise newException(OSError,
-      "runquotad binary missing at " & daemonBin & "; build it via " &
-      "the test harness (scripts/run_tests.sh)")
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   let socketPath = "/tmp/repro-m54-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -169,7 +164,8 @@ suite "m54_verified_tarball_profile":
       writeProject(projectRoot, brokenPrimary, goodMirror, archive.sha256)
 
       let first = requireSuccess(shellCommand([reproBin, "build", projectRoot,
-        "--tool-provisioning=tarball", "--log=actions"]), repoRoot)
+        "--daemon=off", "--tool-provisioning=tarball", "--log=actions"]),
+        repoRoot)
       check first.contains("tool-provisioning=tarball")
       check first.contains("cachePortability: portable")
       check first.contains("action: tarball-run status=asSucceeded launched=true")
@@ -213,7 +209,8 @@ suite "m54_verified_tarball_profile":
 
       let prefixInfo = getFileInfo(profile.selectedStorePath)
       let second = requireSuccess(shellCommand([reproBin, "build", projectRoot,
-        "--tool-provisioning=tarball", "--log=actions"]), repoRoot)
+        "--daemon=off", "--tool-provisioning=tarball", "--log=actions"]),
+        repoRoot)
       if not actionLineCacheEffective(second, "tarball-run"):
         checkpoint(second)
       check actionLineCacheEffective(second, "tarball-run")
@@ -229,7 +226,7 @@ suite "m54_verified_tarball_profile":
       writeProject(corruptRoot, "file://" & (tempRoot / "missing-corrupt.tar.gz"),
         "file://" & corruptArchive, archive.sha256)
       let corrupt = requireFailure(shellCommand([reproBin, "build", corruptRoot,
-        "--tool-provisioning=tarball"]), repoRoot)
+        "--daemon=off", "--tool-provisioning=tarball"]), repoRoot)
       check corrupt.contains("sha256 mismatch")
       check not fileExists(corruptRoot / "build" / "tarball-output.txt")
 
@@ -237,6 +234,6 @@ suite "m54_verified_tarball_profile":
       writeProject(unsafeRoot, brokenPrimary, goodMirror, archive.sha256,
         executablePath = "bin/../../m54tool")
       let unsafe = requireFailure(shellCommand([reproBin, "build", unsafeRoot,
-        "--tool-provisioning=tarball"]), repoRoot)
+        "--daemon=off", "--tool-provisioning=tarball"]), repoRoot)
       check unsafe.contains("tarball executablePath must be relative")
       check not fileExists(unsafeRoot / "build" / "tarball-output.txt")

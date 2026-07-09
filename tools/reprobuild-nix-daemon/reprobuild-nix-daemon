@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+
+
+def default_socket_path() -> str:
+    user = os.environ.get("USER") or "default"
+    return f"/tmp/reprobuild-nix-daemon-{user}.sock"
+
+
+def file_dep(path: Path):
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return {
+        "path": str(path.resolve()),
+        "hash": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def dependencies_for(workspace_root: Path):
+    result = []
+    for name in ("flake.nix", "flake.lock"):
+        dep = file_dep(workspace_root / name)
+        if dep is not None:
+            result.append(dep)
+    return result
+
+
+def dependency_cache_key(dependencies: list[dict]) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        sorted((str(dep.get("path") or ""), str(dep.get("hash") or ""))
+               for dep in dependencies)
+    )
+
+
+def run_command(argv, cwd: Path) -> list[str]:
+    proc = subprocess.run(
+        argv,
+        cwd=str(cwd),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        raise RuntimeError(f"{argv[0]} exited {proc.returncode}: {detail}")
+    paths = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if not paths:
+        raise RuntimeError(f"{argv[0]} produced no output paths")
+    return paths
+
+
+def preferred_executable(selector: str):
+    if selector == "reprobuild-stdlib-stylus-0.64.0":
+        return "bin/stylus"
+    if selector.endswith("#bash"):
+        return "bin/sh"
+    if selector.endswith("#gcc"):
+        return "bin/gcc"
+    if selector.endswith("#nim"):
+        return "bin/nim"
+    if selector.endswith("#nodejs"):
+        return "bin/node"
+    return None
+
+
+def put_executable_output_first(selector: str, paths: list[str]) -> list[str]:
+    rel = preferred_executable(selector)
+    if rel is None:
+        return paths
+    for idx, path in enumerate(paths):
+        if (Path(path) / rel).exists():
+            return [paths[idx]] + paths[:idx] + paths[idx + 1:]
+    return paths
+
+
+def resolve_selector(selector: str, workspace_root: Path, dependencies: list[dict]) -> dict:
+    if selector == "reprobuild-stdlib-stylus-0.64.0":
+        expr = (
+            workspace_root
+            / "libs"
+            / "repro_dsl_stdlib"
+            / "src"
+            / "repro_dsl_stdlib"
+            / "packages"
+            / "nix"
+            / "stylus-0.64.0"
+            / "default.nix"
+        )
+        paths = run_command(["nix-build", "--no-out-link", str(expr)], workspace_root)
+    else:
+        paths = run_command(
+            [
+                "nix",
+                "--extra-experimental-features",
+                "nix-command flakes",
+                "build",
+                "--no-link",
+                "--print-out-paths",
+                selector,
+            ],
+            workspace_root,
+        )
+    paths = put_executable_output_first(selector, paths)
+    return {
+        "status": "success",
+        "paths": paths,
+        "dependencies": dependencies,
+    }
+
+
+def response_for(line: bytes, cache: dict) -> dict:
+    try:
+        req = json.loads(line.decode("utf-8"))
+    except Exception as exc:
+        return {"status": "error", "error": f"malformed json: {exc}"}
+
+    if req.get("action") != "resolve":
+        return {"status": "error", "error": "unsupported action"}
+
+    selector = str(req.get("selector") or "")
+    if not selector:
+        return {"status": "error", "error": "missing selector"}
+
+    workspace_root = Path(str(req.get("workspaceRoot") or os.getcwd()))
+    workspace_root = workspace_root.expanduser().resolve()
+    dependencies = dependencies_for(workspace_root)
+    key = (
+        selector,
+        str(workspace_root),
+        bool(req.get("evaluateOnly")),
+        dependency_cache_key(dependencies),
+    )
+    if key not in cache:
+        cache[key] = resolve_selector(selector, workspace_root, dependencies)
+    return cache[key]
+
+
+def serve(socket_path: str, idle_exit_ms: int) -> int:
+    path = Path(socket_path)
+    if path.exists():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(socket_path)
+    server.listen(16)
+    server.settimeout(max(idle_exit_ms, 1) / 1000.0)
+
+    cache = {}
+    try:
+        while True:
+            try:
+                conn, _ = server.accept()
+            except socket.timeout:
+                break
+            with conn:
+                data = b""
+                while not data.endswith(b"\n"):
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                if not data:
+                    continue
+                try:
+                    resp = response_for(data.strip(), cache)
+                except Exception as exc:
+                    resp = {"status": "error", "error": str(exc)}
+                conn.sendall(
+                    (json.dumps(resp, separators=(",", ":")) + "\n").encode("utf-8")
+                )
+    finally:
+        server.close()
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--idle-exit-ms", type=int, default=300000)
+    parser.add_argument("--socket-path", default=default_socket_path())
+    args = parser.parse_args(argv)
+    return serve(args.socket_path, args.idle_exit_ms)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

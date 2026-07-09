@@ -339,6 +339,137 @@ proc runquotaEndpointReachable*(endpoint: string): bool =
   else:
     fileExists(endpoint)
 
+proc executableFile*(path: string): bool =
+  if path.len == 0 or not fileExists(path):
+    return false
+  when defined(posix):
+    let perms = getFilePermissions(path)
+    result = fpUserExec in perms or fpGroupExec in perms or fpOthersExec in perms
+  else:
+    result = true
+
+proc executableFromEnvOrPath*(envName, exeName: string): string =
+  ## Resolve a test fixture executable from an explicit environment variable
+  ## first, then PATH. Returns the empty string when neither location works.
+  let fromEnv = getEnv(envName)
+  if fromEnv.len > 0:
+    if fileExists(fromEnv) and not executableFile(fromEnv):
+      raise newException(OSError, envName & " is not executable: " & fromEnv)
+    if executableFile(fromEnv):
+      return normalizedPath(fromEnv)
+  let fromPath = findExe(exeName)
+  if fromPath.len > 0:
+    return normalizedPath(fromPath)
+  ""
+
+proc runquotaSourceRoot*(repoRoot: string): string =
+  ## Locate a built runquota checkout for tests that need to spawn their own
+  ## daemon. The full test harness may run from a temporary reprobuild
+  ## worktree, so ``repoRoot.parentDir / "runquota"`` is not always valid.
+  let fromEnv = getEnv("RUNQUOTA_SRC")
+  let sibling = repoRoot.parentDir / "runquota"
+  if fromEnv.len > 0 and dirExists(fromEnv):
+    let normalized = normalizedPath(fromEnv)
+    let envDaemon = normalized / "build" / "bin" /
+      addFileExt("runquotad", ExeExt)
+    if not normalized.startsWith("/nix/store/") or fileExists(envDaemon):
+      return normalized
+  if dirExists(sibling):
+    return normalizedPath(sibling)
+  if fromEnv.len > 0 and dirExists(fromEnv):
+    return normalizedPath(fromEnv)
+  ""
+
+proc absoluteCandidate(base, path: string): string =
+  if path.len == 0:
+    return ""
+  if path.isAbsolute:
+    normalizedPath(path)
+  else:
+    normalizedPath(base / path)
+
+proc isCodeTracerSourceRoot(path: string): bool =
+  path.len > 0 and
+    fileExists(path / "src" / "frontend" / "tests" /
+      "ipc_registry_test.nim") and
+    fileExists(path / "test-programs" / "c_sudoku_solver" / "main.c")
+
+proc gitCommonDir(repoRoot: string): string =
+  try:
+    let process = startProcess("git", workingDir = repoRoot,
+      args = ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      options = {poUsePath, poStdErrToStdOut})
+    defer: process.close()
+    let output =
+      if process.outputStream != nil: process.outputStream.readAll()
+      else: ""
+    if process.waitForExit() == 0:
+      result = output.strip()
+  except OSError:
+    discard
+
+proc codeTracerSourceRoot*(repoRoot: string): string =
+  ## Locate a Codetracer checkout for integration tests that copy a small,
+  ## real source subset. Tests may run from a temporary reprobuild worktree, so
+  ## the normal sibling checkout is not always adjacent to ``repoRoot``.
+  var candidates: seq[string]
+
+  let envRoot = getEnv("CODETRACER_ROOT")
+  if envRoot.len > 0:
+    candidates.add(absoluteCandidate(repoRoot, envRoot))
+
+  let envSrc = getEnv("CODETRACER_SRC")
+  if envSrc.len > 0:
+    let sourcePath = absoluteCandidate(repoRoot, envSrc)
+    candidates.add(sourcePath)
+    candidates.add(sourcePath.parentDir)
+
+  candidates.add(repoRoot.parentDir / "codetracer")
+
+  let commonDir = gitCommonDir(repoRoot)
+  if commonDir.len > 0:
+    candidates.add(commonDir.parentDir.parentDir / "codetracer")
+
+  for candidate in candidates:
+    if isCodeTracerSourceRoot(candidate):
+      return normalizedPath(candidate)
+
+proc requireCodeTracerSourceRoot*(repoRoot: string): string =
+  result = codeTracerSourceRoot(repoRoot)
+  if result.len == 0:
+    raise newException(OSError,
+      "Codetracer checkout missing; set CODETRACER_ROOT to the checkout " &
+      "root or CODETRACER_SRC to its src directory")
+
+proc resolveRunQuotaExecutable*(repoRoot, envName, exeName: string): string =
+  ## Resolve runquota tools from env/PATH first, then a built source checkout.
+  let executableName = addFileExt(exeName, ExeExt)
+  result = executableFromEnvOrPath(envName, executableName)
+  if result.len > 0:
+    return
+  let src = runquotaSourceRoot(repoRoot)
+  if src.len > 0:
+    let candidate = src / "build" / "bin" / executableName
+    if fileExists(candidate) and not executableFile(candidate):
+      raise newException(OSError,
+        "runquota source candidate is not executable: " & candidate)
+    if executableFile(candidate):
+      return normalizedPath(candidate)
+
+proc requireRunQuotaDaemonBin*(repoRoot: string): string =
+  result = resolveRunQuotaExecutable(repoRoot, "RUNQUOTAD_BIN", "runquotad")
+  if result.len == 0:
+    raise newException(OSError,
+      "runquotad binary missing; set RUNQUOTAD_BIN, put runquotad on PATH, " &
+      "or set RUNQUOTA_SRC to a built runquota checkout")
+
+proc requireRunQuotaCliBin*(repoRoot: string): string =
+  result = resolveRunQuotaExecutable(repoRoot, "RUNQUOTA_BIN", "runquota")
+  if result.len == 0:
+    raise newException(OSError,
+      "runquota binary missing; set RUNQUOTA_BIN, put runquota on PATH, " &
+      "or set RUNQUOTA_SRC to a built runquota checkout")
+
 type
   MonitorTools* = object
     monitorCliPath*: string

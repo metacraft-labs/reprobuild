@@ -3699,15 +3699,43 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           connected = true
         except CatchableError:
           # Spawn daemon process detached
+          let envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN")
           let localBin = action.cwd / "build" / "reprobuild-nix-daemon"
-          let localBin2 = action.cwd.parentDir / "reprobuild-nix-daemon" / "build" / "reprobuild-nix-daemon"
-          let daemonExe = if fileExists(localBin):
+          let localTool = action.cwd / "tools" / "reprobuild-nix-daemon" /
+            "reprobuild-nix-daemon"
+          let localBin2 = action.cwd.parentDir / "reprobuild-nix-daemon" /
+            "build" / "reprobuild-nix-daemon"
+          proc executableFile(path: string): bool =
+            if path.len == 0 or not fileExists(path):
+              return false
+            when defined(posix):
+              let perms = getFilePermissions(path)
+              result = fpUserExec in perms or fpGroupExec in perms or
+                fpOthersExec in perms
+            else:
+              result = true
+          proc requireExecutableCandidate(path, label: string): bool =
+            if path.len == 0 or not fileExists(path):
+              return false
+            if not executableFile(path):
+              raiseEngine(label & " exists but is not executable: " & path)
+            true
+          let daemonExe = if envBin.len > 0:
+                            if not requireExecutableCandidate(envBin,
+                                "REPROBUILD_NIX_DAEMON_BIN"):
+                              raiseEngine("REPROBUILD_NIX_DAEMON_BIN does not exist: " & envBin)
+                            envBin
+                          elif requireExecutableCandidate(localBin,
+                              "local reprobuild-nix-daemon"):
                             localBin
-                          elif fileExists(localBin2):
+                          elif requireExecutableCandidate(localTool,
+                              "local tools reprobuild-nix-daemon"):
+                            localTool
+                          elif requireExecutableCandidate(localBin2,
+                              "sibling reprobuild-nix-daemon"):
                             localBin2
                           else:
                             "reprobuild-nix-daemon"
-          echo "[Engine Debug] Spawning daemon executable: ", daemonExe
           discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"], options = {poDaemon})
           for i in 0 .. 40:
             sleep(50)
@@ -3715,11 +3743,9 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
               sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
               sock.connectUnix(socketPath)
               connected = true
-              echo "[Engine Debug] Connected on try ", i
               break
-            except CatchableError as e:
-              if i == 40:
-                echo "[Engine Debug] Connection failed: ", e.msg
+            except CatchableError:
+              discard
         if not connected:
           raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
         
@@ -3736,7 +3762,6 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         if respLine.len == 0:
           raiseEngine("Received empty response from reprobuild-nix-daemon")
         
-        echo "[Engine Debug] Raw daemon response: ", respLine
         let resp = parseJson(respLine)
         if resp.getOrDefault("status").getStr() != "success":
           raiseEngine("Daemon resolution error: " & resp.getOrDefault("error").getStr())

@@ -217,8 +217,11 @@ proc writeSleeperProject(projectRoot: string; sleepSeconds: int) =
 
 proc executableFromEnvOrPath(envName, exeName: string): string =
   let fromEnv = getEnv(envName)
-  if fromEnv.len > 0 and fileExists(fromEnv):
-    return os.normalizedPath(fromEnv)
+  if fromEnv.len > 0:
+    if fileExists(fromEnv) and not executableFile(fromEnv):
+      raise newException(OSError, envName & " is not executable: " & fromEnv)
+    if executableFile(fromEnv):
+      return os.normalizedPath(fromEnv)
   let fromPath = findExe(exeName)
   if fromPath.len > 0:
     return os.normalizedPath(fromPath)
@@ -238,14 +241,20 @@ proc ensureRunQuotaDaemon(repoRoot, tempRoot: string): tuple[
   if daemonBin.len == 0:
     let candidate = runquotaRoot / "build" / "bin" /
       addFileExt("runquotad", ExeExt)
-    if fileExists(candidate):
+    if fileExists(candidate) and not executableFile(candidate):
+      raise newException(OSError,
+        "runquotad candidate is not executable: " & candidate)
+    if executableFile(candidate):
       daemonBin = os.normalizedPath(candidate)
   var cliBin = executableFromEnvOrPath("RUNQUOTA_BIN",
     addFileExt("runquota", ExeExt))
   if cliBin.len == 0:
     let candidate = runquotaRoot / "build" / "bin" /
       addFileExt("runquota", ExeExt)
-    if fileExists(candidate):
+    if fileExists(candidate) and not executableFile(candidate):
+      raise newException(OSError,
+        "runquota candidate is not executable: " & candidate)
+    if executableFile(candidate):
       cliBin = os.normalizedPath(candidate)
   if not fileExists(daemonBin) or not fileExists(cliBin):
     raise newException(OSError,

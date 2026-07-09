@@ -1,12 +1,21 @@
-## Test: C++ Nix Evaluation Daemon IPC & Warm Cache Validation
+## Test: Python Nix Evaluation Daemon IPC & Warm Cache Validation
 ##
-## This test validates the C++ Nix evaluation daemon (`reprobuild-nix-daemon`)
-## IPC protocol, socket handshakes, malformed message handling, in-memory caching,
+## This test validates the in-repo Python Nix evaluation daemon
+## (`tools/reprobuild-nix-daemon/reprobuild-nix-daemon`) IPC protocol, socket
+## handshakes, malformed message handling, dependency-keyed in-memory caching,
 ## and idle self-reaping behavior.
 
-import std/[unittest, os, osproc, json, strutils, net, nativesockets, times, streams]
+import std/[unittest, os, osproc, json, strutils, net, nativesockets, times,
+  streams, tempfiles]
 
 const RepoMarker = "repro.nim"
+const FixtureRelRoot = "tests/fixtures/nix-daemon-local-flake"
+const FixtureSelector = ".#hello-sh"
+const FixtureExecutable = "bin/reprobuild-nix-daemon-fixture"
+const FixtureFlakeNixSha256 =
+  "4c7cdf3febfe4ccb9adf5f91bad3a0179cbb8a24ed4b1bc2a2d55bf07e4521d7"
+const FixtureFlakeLockSha256 =
+  "253b9070e88fd3ea6d247f4859279209375e9107e241af3c523b0e33a395c624"
 
 proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -21,11 +30,75 @@ proc findRepoRoot(): string =
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
 
-suite "C++ Nix Evaluation Daemon IPC Integration Tests":
+proc findNixDaemon(repoRoot: string): string =
+  let envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN")
+  for candidate in [
+    envBin,
+    repoRoot / "build" / "reprobuild-nix-daemon",
+    repoRoot / "tools" / "reprobuild-nix-daemon" / "reprobuild-nix-daemon",
+    repoRoot.parentDir / "reprobuild-nix-daemon" / "build" /
+      "reprobuild-nix-daemon"
+  ]:
+    if candidate.len == 0:
+      continue
+    if fileExists(candidate):
+      when defined(posix):
+        let perms = getFilePermissions(candidate)
+        if fpUserExec notin perms and fpGroupExec notin perms and
+            fpOthersExec notin perms:
+          raise newException(IOError,
+            "reprobuild-nix-daemon is not executable: " & candidate)
+      return candidate
+  raise newException(IOError,
+    "reprobuild-nix-daemon missing; set REPROBUILD_NIX_DAEMON_BIN")
+
+proc prepareFixtureRoot(repoRoot: string): string =
+  let sourceRoot = repoRoot / FixtureRelRoot
+  result = createTempDir("repro-nix-daemon-fixture-", "")
+  copyFile(sourceRoot / "flake.nix", result / "flake.nix")
+  copyFile(sourceRoot / "flake.lock", result / "flake.lock")
+  for args in [
+    "init -q",
+    "add flake.nix flake.lock"
+  ]:
+    let (output, code) = execCmdEx("git -C " & quoteShell(result) & " " & args)
+    if code != 0:
+      raise newException(IOError,
+        "failed to prepare Nix fixture git index: " & output)
+
+proc fixtureDependencyHash(resp: JsonNode; path: string): string =
+  for dep in resp["dependencies"]:
+    if dep["path"].getStr() == path:
+      return dep["hash"].getStr()
+  check false
+  ""
+
+proc requireFixtureDependency(resp: JsonNode; path, expectedHash: string) =
+  check fixtureDependencyHash(resp, path) == expectedHash
+
+suite "Python Nix Evaluation Daemon IPC Integration Tests":
+
+  when defined(posix):
+    test "non-executable REPROBUILD_NIX_DAEMON_BIN is rejected":
+      let repoRoot = findRepoRoot()
+      let previousDaemonBin = getEnv("REPROBUILD_NIX_DAEMON_BIN")
+      let sentinel = getTempDir() / "reprobuild-nix-daemon-nonexec"
+      writeFile(sentinel, "#!/bin/sh\necho should-not-run\n")
+      setFilePermissions(sentinel, {fpUserRead, fpUserWrite, fpGroupRead,
+        fpOthersRead})
+      putEnv("REPROBUILD_NIX_DAEMON_BIN", sentinel)
+      try:
+        expect IOError:
+          discard findNixDaemon(repoRoot)
+      finally:
+        putEnv("REPROBUILD_NIX_DAEMON_BIN", previousDaemonBin)
+        removeFile(sentinel)
 
   test "Scenario 1.1, 1.2, 1.3, 1.4, 1.5: Cold Start, IPC Exchange, Warm Cache, and Dependencies":
     let repoRoot = findRepoRoot()
-    let daemonPath = repoRoot.parentDir / "reprobuild-nix-daemon" / "build" / "reprobuild-nix-daemon"
+    let fixtureRoot = prepareFixtureRoot(repoRoot)
+    defer: removeDir(fixtureRoot)
+    let daemonPath = findNixDaemon(repoRoot)
     let socketPath = "/tmp/reprobuild-nix-daemon-ipc.sock"
     
     # Assert daemon binary is built and present
@@ -67,11 +140,13 @@ suite "C++ Nix Evaluation Daemon IPC Integration Tests":
     sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
     sock.connectUnix(socketPath)
     
-    # Scenario 1.2 & 1.4: Well-formed resolve request
+    # Scenario 1.2 & 1.4: Well-formed resolve request. Keep this fixture
+    # lightweight; the IPC suite validates the daemon protocol, not a full
+    # repo package build.
     let req = %*{
       "action": "resolve",
-      "selector": ".#reprobuild",
-      "workspaceRoot": repoRoot
+      "selector": FixtureSelector,
+      "workspaceRoot": fixtureRoot
     }
     sock.send($req & "\n")
     respLine = ""
@@ -82,16 +157,15 @@ suite "C++ Nix Evaluation Daemon IPC Integration Tests":
     let resp = parseJson(respLine)
     check resp["status"].getStr() == "success"
     check resp["paths"].len > 0
+    check fileExists(resp["paths"][0].getStr() / FixtureExecutable)
     check resp["dependencies"].len > 0
     
-    # Scenario 1.4: Accurate Dependency Tracking (check flake.nix is in dependencies)
-    var foundFlakeNix = false
-    for dep in resp["dependencies"]:
-      let depPath = dep["path"].getStr()
-      if depPath.endsWith("flake.nix"):
-        foundFlakeNix = true
-        check dep["hash"].getStr().len > 0
-    check foundFlakeNix
+    # Scenario 1.4: Accurate Dependency Tracking. The dependency assertions are
+    # tied to the local flake actually used for resolution, not the repo root.
+    let flakeNix = fixtureRoot / "flake.nix"
+    let flakeLock = fixtureRoot / "flake.lock"
+    requireFixtureDependency(resp, flakeNix, FixtureFlakeNixSha256)
+    requireFixtureDependency(resp, flakeLock, FixtureFlakeLockSha256)
     
     # Scenario 1.3: Warm In-Memory Cache Performance
     # Measure duration of the second identical request
@@ -110,6 +184,41 @@ suite "C++ Nix Evaluation Daemon IPC Integration Tests":
     check resp2["status"].getStr() == "success"
     checkpoint("Cache hit resolution completed in: " & $durationMs & " ms")
     check durationMs < 50.0 # Warm cache hit should easily resolve within <50ms
+
+    # Cache invalidation: the daemon cache key must include the observed input
+    # hashes, otherwise this second response would reuse the first dependency
+    # hash for the same selector/root after flake.nix changes.
+    let mutableFixture = prepareFixtureRoot(repoRoot)
+    defer: removeDir(mutableFixture)
+    let mutableReq = %*{
+      "action": "resolve",
+      "selector": FixtureSelector,
+      "workspaceRoot": mutableFixture
+    }
+    sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
+    sock.connectUnix(socketPath)
+    sock.send($mutableReq & "\n")
+    respLine = ""
+    sock.readLine(respLine)
+    sock.close()
+    let mutableResp = parseJson(respLine)
+    check mutableResp["status"].getStr() == "success"
+    let originalMutableHash = fixtureDependencyHash(mutableResp,
+      mutableFixture / "flake.nix")
+
+    writeFile(mutableFixture / "flake.nix",
+      readFile(mutableFixture / "flake.nix") & "\n# dependency hash mutation\n")
+    sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
+    sock.connectUnix(socketPath)
+    sock.send($mutableReq & "\n")
+    respLine = ""
+    sock.readLine(respLine)
+    sock.close()
+    let mutatedResp = parseJson(respLine)
+    check mutatedResp["status"].getStr() == "success"
+    let mutatedHash = fixtureDependencyHash(mutatedResp,
+      mutableFixture / "flake.nix")
+    check mutatedHash != originalMutableHash
     
     # Clean up daemon
     discard execCmd("pkill -f -u $USER reprobuild-nix-daemon-ipc.sock || true")
@@ -117,7 +226,7 @@ suite "C++ Nix Evaluation Daemon IPC Integration Tests":
 
   test "Scenario 1.6: Self-Reaping Timeout":
     let repoRoot = findRepoRoot()
-    let daemonPath = repoRoot.parentDir / "reprobuild-nix-daemon" / "build" / "reprobuild-nix-daemon"
+    let daemonPath = findNixDaemon(repoRoot)
     let socketPath = "/tmp/reprobuild-nix-daemon-reap.sock"
     
     # Assert daemon binary is built and present

@@ -11015,6 +11015,15 @@ proc autoRunQuotaEnabled(): bool =
   getEnv("REPROBUILD_AUTO_RUNQUOTA", "1").normalize notin
     ["0", "false", "no", "off"]
 
+proc executableFile(path: string): bool =
+  if path.len == 0 or not fileExists(path):
+    return false
+  when defined(posix):
+    let perms = getFilePermissions(path)
+    result = fpUserExec in perms or fpGroupExec in perms or fpOthersExec in perms
+  else:
+    result = true
+
 proc findRunQuotaDaemonBin*(): string =
   ## M9.R.11 — deterministic discovery of the ``runquotad`` binary.
   ##
@@ -11035,8 +11044,11 @@ proc findRunQuotaDaemonBin*(): string =
   ##      complete remediation hint (build the sibling, set
   ##      ``RUNQUOTAD_BIN``, or run with ``--bypass-runquota``).
   result = getEnv("RUNQUOTAD_BIN", "")
-  if result.len > 0 and fileExists(result):
-    return
+  if result.len > 0:
+    if fileExists(result) and not executableFile(result):
+      raise newException(OSError, "RUNQUOTAD_BIN is not executable: " & result)
+    if executableFile(result):
+      return
   result = findExe("runquotad")
   if result.len > 0:
     return
@@ -11051,7 +11063,10 @@ proc findRunQuotaDaemonBin*(): string =
     if dir.len == 0:
       break
     let candidate = dir.parentDir / "runquota" / "build" / "bin" / exeName
-    if fileExists(candidate):
+    if fileExists(candidate) and not executableFile(candidate):
+      raise newException(OSError,
+        "sibling runquotad exists but is not executable: " & candidate)
+    if executableFile(candidate):
       return candidate
     let parent = dir.parentDir
     if parent == dir:
@@ -11063,7 +11078,11 @@ proc findRunQuotaDaemonBin*(): string =
   # walk above terminated early.
   let cwdSibling = getCurrentDir().parentDir / "runquota" / "build" / "bin" /
     exeName
-  if fileExists(cwdSibling):
+  if fileExists(cwdSibling) and not executableFile(cwdSibling):
+    raise newException(OSError,
+      "current-workdir sibling runquotad exists but is not executable: " &
+      cwdSibling)
+  if executableFile(cwdSibling):
     return cwdSibling
   result = ""
 

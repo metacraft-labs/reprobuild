@@ -52,18 +52,7 @@ proc generatedProviderContainsToolRef(buildDir, toolRef: string): bool =
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" /
-    addFileExt("runquotad", ExeExt)
-  if not fileExists(daemonBin):
-    # The test harness (scripts/run_tests.sh) is responsible for
-    # building the sibling runquota before invoking the suite — see
-    # the prerequisite-build block at the top of that script. A
-    # missing binary here is a harness configuration error, not
-    # something the test should attempt to recover from in-band.
-    raise newException(OSError,
-      "runquotad binary missing at " & daemonBin & "; build it via " &
-      "the test harness (scripts/run_tests.sh)")
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   # The socket path needs platform-specific shape:
   #   Windows: a named pipe (\\.\pipe\...); the runquota daemon's --socket
   #            argument auto-detects this prefix and switches to pipe mode.

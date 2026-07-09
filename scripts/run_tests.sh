@@ -133,25 +133,46 @@ bootstrap_monitor_shim > test-logs/monitor-shim-bootstrap.log 2>&1 || {
 }
 
 # Step 2: build sibling prerequisites that path-mode tool resolution needs.
-runquota_src="${RUNQUOTA_SRC:-}"
-if [[ -z "${runquota_src}" && -d "../runquota" ]]; then
-  runquota_src="../runquota"
+runquotad_bin="${RUNQUOTAD_BIN:-}"
+runquota_bin="${RUNQUOTA_BIN:-}"
+if [[ -z "${runquotad_bin}" ]]; then
+  runquotad_bin="$(command -v "runquotad${exe_ext}" 2>/dev/null || true)"
 fi
-if [[ -n "${runquota_src}" && -d "${runquota_src}" ]]; then
-  runquota_src_abs="$(cd "${runquota_src}" && pwd)"
-  export RUNQUOTA_SRC="${runquota_src_abs}"
-  if [[ ! -x "${runquota_src_abs}/build/bin/runquotad${exe_ext}" ||
-        ! -x "${runquota_src_abs}/build/bin/runquota${exe_ext}" ]]; then
-    printf 'Building prerequisite sibling: %s\n' "${runquota_src_abs}" >&2
-    (cd "${runquota_src_abs}" && just build) > test-logs/runquota-build.log 2>&1 || {
-      echo "runquota build failed; see test-logs/runquota-build.log" >&2
-      exit 1
-    }
+if [[ -z "${runquota_bin}" ]]; then
+  runquota_bin="$(command -v "runquota${exe_ext}" 2>/dev/null || true)"
+fi
+if [[ -x "${runquotad_bin}" && -x "${runquota_bin}" ]]; then
+  runquotad_dir="$(cd "$(dirname "${runquotad_bin}")" && pwd)"
+  runquota_dir="$(cd "$(dirname "${runquota_bin}")" && pwd)"
+  export RUNQUOTAD_BIN="${runquotad_bin}"
+  export RUNQUOTA_BIN="${runquota_bin}"
+  export PATH="${runquotad_dir}:${runquota_dir}:${PATH}"
+else
+  runquota_src="${RUNQUOTA_SRC:-}"
+  if [[ -d "../runquota" &&
+        ( -z "${runquota_src}" || "${runquota_src}" == /nix/store/* ) ]]; then
+    runquota_src="../runquota"
   fi
-  RUNQUOTA_BIN_ABS="$(cd "${runquota_src_abs}/build/bin" && pwd)"
-  export RUNQUOTAD_BIN="${RUNQUOTAD_BIN:-${RUNQUOTA_BIN_ABS}/runquotad${exe_ext}}"
-  export RUNQUOTA_BIN="${RUNQUOTA_BIN:-${RUNQUOTA_BIN_ABS}/runquota${exe_ext}}"
-  export PATH="${RUNQUOTA_BIN_ABS}:${PATH}"
+  if [[ -n "${runquota_src}" && -d "${runquota_src}" ]]; then
+    runquota_src_abs="$(cd "${runquota_src}" && pwd)"
+    export RUNQUOTA_SRC="${runquota_src_abs}"
+    if [[ ! -x "${runquota_src_abs}/build/bin/runquotad${exe_ext}" ||
+          ! -x "${runquota_src_abs}/build/bin/runquota${exe_ext}" ]]; then
+      if [[ "${runquota_src_abs}" == /nix/store/* ]]; then
+        echo "RUNQUOTA_SRC points to source-only Nix store path ${runquota_src_abs}; set RUNQUOTAD_BIN/RUNQUOTA_BIN or use a built runquota checkout" >&2
+        exit 1
+      fi
+      printf 'Building prerequisite sibling: %s\n' "${runquota_src_abs}" >&2
+      (cd "${runquota_src_abs}" && just build) > test-logs/runquota-build.log 2>&1 || {
+        echo "runquota build failed; see test-logs/runquota-build.log" >&2
+        exit 1
+      }
+    fi
+    RUNQUOTA_BIN_ABS="$(cd "${runquota_src_abs}/build/bin" && pwd)"
+    export RUNQUOTAD_BIN="${RUNQUOTA_BIN_ABS}/runquotad${exe_ext}"
+    export RUNQUOTA_BIN="${RUNQUOTA_BIN_ABS}/runquota${exe_ext}"
+    export PATH="${RUNQUOTA_BIN_ABS}:${PATH}"
+  fi
 fi
 
 if [[ -d "../reprobuild-cmake" ]]; then

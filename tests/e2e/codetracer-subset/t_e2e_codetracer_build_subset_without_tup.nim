@@ -66,13 +66,7 @@ proc pathExists(path: string): bool =
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  if not fileExists(daemonBin):
-    raise newException(OSError,
-      "runquotad binary missing at " & daemonBin & "; build it via " &
-      "the test harness (scripts/run_tests.sh) — the test code must not " &
-      "spawn `just build` for the sibling repo")
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   let socketPath = "/tmp/repro-m20-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -371,7 +365,7 @@ proc build(reproBin, target, repoRoot, pathValue: string): string =
   # that key on the per-action shape need the action-level log.
   let cacheRoot = repoRoot / ".repro" / "fixture-action-cache"
   requireSuccess(shellCommand(@[reproBin, "build", target,
-    "--tool-provisioning=path", "--log=actions"],
+    "--daemon=off", "--tool-provisioning=path", "--log=actions"],
     @[(name: "PATH", value: pathValue),
       (name: "REPROBUILD_ACTION_CACHE_ROOT", value: cacheRoot),
       (name: "REPRO_CACHE_DISABLE", value: "1")]), repoRoot)
@@ -440,7 +434,7 @@ suite "e2e_codetracer_build_subset_without_tup":
   when isNixSupported:
     test "real CodeTracer sources build through DSL, provider, RunQuota, cache, and committed Tup command semantics":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       let tupRulesPath = codeTracerRoot / "src" / "Tuprules.tup"
       check fileExists(tupRulesPath)
       let tupRules = loadTupRules(tupRulesPath)
@@ -565,5 +559,6 @@ suite "e2e_codetracer_build_subset_without_tup":
       assertAction(headerDeletedReport, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
 
-      let noFlag = requireFailure(shellCommand([reproBin, "build", target]), repoRoot)
+      let noFlag = requireFailure(shellCommand([reproBin, "build", target,
+        "--daemon=off"]), repoRoot)
       check noFlag.contains("refusing implicit PATH fallback")
