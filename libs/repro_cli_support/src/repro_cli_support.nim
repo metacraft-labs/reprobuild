@@ -10248,7 +10248,7 @@ proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
   result.exitCode = 0
 
 proc writeHooksEnsureReport(report: HooksEnsureReport) =
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  let reportDir = report.workspaceRoot / ".repo" / "workspace"
   createDir(reportDir)
   let reportPath = reportDir / "hooks-report.json"
   writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
