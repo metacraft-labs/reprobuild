@@ -905,6 +905,8 @@ proc addDefaultTestStoreEnv(entries: var seq[(string, string)];
     entries.add(("REPRO_STORE_ROOT", storeRoot))
   if envEntry(entries, "REPROBUILD_ACTION_CACHE_ROOT").len == 0:
     entries.add(("REPROBUILD_ACTION_CACHE_ROOT", storeRoot / "action-cache"))
+  if envEntry(entries, "REPRO_CACHE_DAEMON_IDLE_MS").len == 0:
+    entries.add(("REPRO_CACHE_DAEMON_IDLE_MS", "400"))
 
 proc testStoreEnv(defaultStoreRoot: string;
                   extra: openArray[(string, string)] = []): seq[(string, string)] =
@@ -1382,7 +1384,7 @@ suite "e2e_local_reprobuild_project_build":
       test "m52_stylus_import_monitoring_e2e":
         let repoRoot = getCurrentDir()
         let tempRoot = createTempDir("repro-m52-stylus-monitor", "")
-        defer: removeDir(tempRoot)
+        defer: removeDirEventually(tempRoot)
 
         let stylusDir = stylusFixturePathDir(tempRoot)
         check stylusDir.len > 0

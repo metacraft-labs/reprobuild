@@ -254,6 +254,39 @@ proc requireFailure*(cmd: CmdSpec; cwd = getCurrentDir()): string =
   check res.code != 0
   res.output
 
+proc isTransientDirectoryNotEmpty(e: ref OSError): bool =
+  ## Nim's OSError does not expose the failing errno portably. Keep this
+  ## deliberately narrow: retry only the ENOTEMPTY-shaped cleanup race the
+  ## full suite has observed, and re-raise every other cleanup failure.
+  let msg = e.msg.toLowerAscii()
+  msg.contains("directory not empty") or msg.contains("directory is not empty")
+
+proc removeDirEventually*(path: string; attempts = 25; sleepMs = 40) =
+  ## Remove a test scratch directory, tolerating only transient ENOTEMPTY.
+  ##
+  ## Some production paths briefly leave background filesystem activity in
+  ## `.repro` / `.git` trees after all test assertions have passed. A plain
+  ## `removeDir` can lose that race and fail with "Directory not empty". This
+  ## helper gives that narrow condition a bounded chance to settle, then
+  ## re-raises the final OSError so cleanup regressions stay visible.
+  if path.len == 0 or not dirExists(path):
+    return
+  var last: ref OSError
+  for attempt in 0 ..< attempts:
+    try:
+      removeDir(path)
+      return
+    except OSError as e:
+      if not isTransientDirectoryNotEmpty(e):
+        raise
+      if not dirExists(path):
+        return
+      last = e
+      if attempt + 1 < attempts:
+        sleep(sleepMs)
+  if last != nil:
+    raise last
+
 proc registryRootEnv*(scratchDir: string): tuple[k, v: string] =
   ## Env-var entry that redirects HKCU registry writes made by a
   ## `repro home apply` subprocess into a per-test fake hive under

@@ -124,7 +124,7 @@ suite "RA-31 — clone org root repo + sync into named path":
       skip()
     else:
       let scratch = createTempDir("repro-ra31-clone-", "")
-      defer: removeDir(scratch)
+      defer: removeDirEventually(scratch)
       let reproBin = reproBinary()
       let org = "acme-org"
 
