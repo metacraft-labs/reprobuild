@@ -1,4 +1,4 @@
-import std/[algorithm, json, os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[algorithm, json, os, sequtils, strutils, tempfiles, unittest]
 
 import repro_test_support
 
@@ -21,6 +21,45 @@ proc containsAny(text: string; needles: openArray[string]): bool =
     if text.containsNeedle(needle):
       return true
   false
+
+const ReferenceFixtureMarker = "reprobuild.hcr.reference-corpus"
+
+proc copyFixtureTree(source, dest: string) =
+  if dirExists(dest):
+    removeDir(dest)
+  createDir(dest)
+  for path in walkDirRec(source, yieldFilter = {pcFile}):
+    let rel = relativePath(path, source).replace('\\', '/')
+    let target = dest / rel
+    createDir(parentDir(target))
+    copyFile(path, target)
+
+proc materializeReferenceCheckout(repoRoot: string; entry: HcrReferenceEntry) =
+  let fixtureSource = repoRoot / entry.fixtureSourceRoot
+  let checkout = repoRoot / entry.localCheckout
+  copyFixtureTree(fixtureSource, checkout)
+  discard requireSuccess(shellCommand([
+    "git", "-C", checkout, "init", "-b", "main", "--object-format=sha1"]))
+  discard requireSuccess(shellCommand([
+    "git", "-C", checkout, "config", "user.email",
+    "hcr-fixture@example.invalid"]))
+  discard requireSuccess(shellCommand([
+    "git", "-C", checkout, "config", "user.name", "HCR Fixture"]))
+  discard requireSuccess(shellCommand([
+    "git", "-C", checkout, "config", "core.autocrlf", "false"]))
+  discard requireSuccess(shellCommand(["git", "-C", checkout, "add", "."]))
+  discard requireSuccess(shellCommand([
+    "git", "-C", checkout, "-c", "commit.gpgsign=false", "commit",
+    "-m", "Seed HCR " & extractFilename(entry.fixtureSourceRoot) &
+      " reference fixture"
+  ], [
+    (name: "GIT_AUTHOR_NAME", value: "HCR Fixture"),
+    (name: "GIT_AUTHOR_EMAIL", value: "hcr-fixture@example.invalid"),
+    (name: "GIT_AUTHOR_DATE", value: "2026-05-16T00:00:00+0000"),
+    (name: "GIT_COMMITTER_NAME", value: "HCR Fixture"),
+    (name: "GIT_COMMITTER_EMAIL", value: "hcr-fixture@example.invalid"),
+    (name: "GIT_COMMITTER_DATE", value: "2026-05-16T00:00:00+0000")
+  ]))
 
 proc writeInspection(path: string; corpus: HcrReferenceCorpus;
                      oldObj, newObj, fileOld, fileNew, nmOld, nmNew,
@@ -61,16 +100,38 @@ suite "integration_hcr_reference_corpus_and_object_inputs":
 
       for id in ["mold", "wild", "llvm-jitlink-lld"]:
         let entry = corpus.entryById(id)
-        check entry.availabilityMode == "manifest-repo"
+        check entry.availabilityMode == "checked-in-minimal-fixture"
         check entry.localCheckout.len > 0
+        check entry.fixtureSourceRoot.len > 0
+        check entry.fixtureCommit.len == 40
+        check entry.fixtureCommit != entry.pinnedCommit
+        check entry.fixtureProvenance.contains(entry.upstreamUrl)
+        check entry.fixtureProvenance.contains(entry.pinnedCommit)
+        check entry.fixtureProvenance.contains("Hermetic")
+        check entry.fixtureProvenance.contains("minimal path map")
+        check entry.upstreamUrl.startsWith("https://github.com/")
         check entry.pinnedCommit.len == 40
         check entry.algorithmAreas.len >= 3
         check entry.hcrSpecSections.len >= 3
         check entry.sourcePaths.len >= 4
 
+        let fixtureSource = repoRoot / entry.fixtureSourceRoot
+        check dirExists(fixtureSource)
+        for mappedPath in entry.sourcePaths:
+          let fixturePath = fixtureSource / mappedPath
+          check fileExists(fixturePath)
+          check readFile(fixturePath).contains(ReferenceFixtureMarker)
+          check readFile(fixturePath).contains(entry.id)
+        for mappedPath in entry.documentationPaths:
+          let fixturePath = fixtureSource / mappedPath
+          check fileExists(fixturePath)
+          check readFile(fixturePath).contains(ReferenceFixtureMarker)
+          check readFile(fixturePath).contains(entry.id)
+
+        materializeReferenceCheckout(repoRoot, entry)
         let checkout = repoRoot / entry.localCheckout
         check dirExists(checkout)
-        check gitHead(checkout) == entry.pinnedCommit
+        check gitHead(checkout) == entry.fixtureCommit
 
         for mappedPath in entry.sourcePaths:
           check fileExists(checkout / mappedPath)
@@ -80,6 +141,9 @@ suite "integration_hcr_reference_corpus_and_object_inputs":
       let msvc = corpus.entryById("msvc-incremental")
       check msvc.availabilityMode == "pinned-map"
       check msvc.localCheckout.len == 0
+      check msvc.fixtureSourceRoot.len == 0
+      check msvc.fixtureCommit.len == 0
+      check msvc.fixtureProvenance.len == 0
       check msvc.pinnedCommit.len == 0
       check msvc.sourcePaths.len == 0
       check msvc.documentationPaths.len == 0

@@ -12794,6 +12794,9 @@ proc committedLockRepoFacts(repoRoot: string):
   ##      general fallback that gives ANY repo with at least one remote a
   ##      non-empty url.
   ## No remotes at all → empty (unchanged graceful degradation).
+  if not (dirExists(extendedPath(repoRoot / ".git")) or
+      fileExists(extendedPath(repoRoot / ".git"))):
+    return ("", "", "")
   let gitBin = findExe("git")
   if gitBin.len == 0:
     return ("", "", "")
