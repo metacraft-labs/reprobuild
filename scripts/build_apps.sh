@@ -55,6 +55,14 @@ if [ ! -x "${io_mon_src}/scripts/build_shim.sh" ]; then
   echo "missing io-mon shim builder at ${io_mon_src}/scripts/build_shim.sh; set IO_MON_SRC" >&2
   exit 2
 fi
+# SHM-QUEUE-MIGRATE: io-mon's shim (its dep queue) + reprobuild's action-cache
+# ring BOTH sit on the extracted ``shm_queue/ring`` MPSC ring (nim-shm-queue).
+# io-mon's ``build_shim.sh`` needs SHM_QUEUE_SRC to resolve ``import
+# shm_queue/ring``; the dev shell + package build export it (flake.nix), so
+# forward whatever is in the environment, defaulting to the sibling checkout —
+# same discipline as STACKABLE_HOOKS_SRC.
+shm_queue_src="${SHM_QUEUE_SRC:-../nim-shm-queue/src}"
+
 # Point BOTH the shim's output dir and its nimcache at reprobuild's own
 # (writable) build tree. io-mon's source is read-only when it comes from a Nix
 # flake input / store path (the package build + dev shell), so the shim must not
@@ -62,6 +70,7 @@ fi
 IO_MON_SHIM_OUT_DIR="$(pwd)/build/lib" \
 IO_MON_SHIM_NIMCACHE_DIR="$(pwd)/build/nimcache/io-mon-shim" \
 IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
+SHM_QUEUE_SRC="${shm_queue_src}" \
   bash "${io_mon_src}/scripts/build_shim.sh"
 
 # M9.R.47.3 — clear LD_LIBRARY_PATH and NIX_LDFLAGS for every ``nim c``

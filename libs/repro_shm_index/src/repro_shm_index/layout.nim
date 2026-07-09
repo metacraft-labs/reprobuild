@@ -46,29 +46,28 @@ const
 
 # --- MPSC submission ring -------------------------------------------------
 #
-# Ring header + fixed slot array follow the reader-epoch table.
-const
-  RingHdrBase*     = CtlOffReaderEpochs + MaxReaders * 8
-  RingOffHead*     = RingHdrBase                    # u64 atomic (consumer-owned)
-  RingOffTail*     = RingOffHead + 8                # u64 atomic (producers CAS)
-  RingOffDropped*  = RingOffTail + 8                # u64 atomic (drop-on-full count)
-  RingSlotsBase*   = RingOffDropped + 8             # ring[RingCap]
-
-# One submission slot: {ready(u64 seq), keyDigest[32], recLen(u32), pad,
-#                       recBytes[RingSlotRecCap]}
-# `ready` is a per-slot publication ticket: a producer CASes the tail to
-# RESERVE the index, fills the payload, then stores ready = reservation+1
-# (release). The consumer reads ready (acquire) to know the slot is complete.
-const
-  RingSlotOffReady*   = 0                           # u64 atomic
-  RingSlotOffDigest*  = RingSlotOffReady + 8        # byte[32]
-  RingSlotOffRecLen*  = RingSlotOffDigest + KeyDigestLen  # u32
-  RingSlotOffPad*     = RingSlotOffRecLen + 4       # u32 pad
-  RingSlotOffRec*     = RingSlotOffPad + 4          # byte[RingSlotRecCap]
-  RingSlotStride*     = align8(RingSlotOffRec + RingSlotRecCap)
+# SHM-QUEUE-MIGRATE: the submission ring is now the extracted, shared MPSC ring
+# from ``nim-shm-queue`` (Layer 1 ``shm_queue/ring``), EMBEDDED at ``RingHdrBase``
+# inside this control region (the caller-owned mapping this library owns). The
+# ring's coordination state (head/tail/dropped) + fixed slot array follow the
+# reader-epoch table; their byte span is computed by ``shm_queue`` from the ring
+# geometry so exactly ONE MPSC layout exists. reprobuild's record codec
+# (``(digest, rec)``) is unchanged — it is packed into the ring's opaque byte
+# blob as ``digest[32] ++ rec`` (see ring.nim); the ring never interprets it.
+import shm_queue/segment as shmseg
 
 const
-  CtlRegionSize* = align4k(RingSlotsBase + RingCap * RingSlotStride)
+  RingHdrBase*   = CtlOffReaderEpochs + MaxReaders * 8
+    ## Byte offset of the embedded ring (its head/tail/dropped header) within
+    ## the control region — the ``ringBase`` handed to ``initEmbeddedRing``.
+  RingBlobCap*   = KeyDigestLen + RingSlotRecCap
+    ## Per-slot blob capacity: the 32-byte key digest plus the inline record.
+  RingSpan*      = shmseg.embeddedRingSize(RingCap, RingBlobCap)
+    ## Total byte span of the embedded ring (header + ``RingCap`` slots), as laid
+    ## out by ``shm_queue`` — the single source of the ring's on-region layout.
+
+const
+  CtlRegionSize* = align4k(RingHdrBase + RingSpan)
     ## Fixed byte size of `action-index.ctl` (page-rounded).
 
 # --- Generation segment ---------------------------------------------------

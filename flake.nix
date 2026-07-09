@@ -28,6 +28,21 @@
       url = "github:metacraft-labs/io-mon/a417c8fded5817500414dbff03a78d06f4fa1d52";
       flake = false;
     };
+    nim-shm-queue-src = {
+      # nim-shm-queue ships the ``shm_queue`` package: the extracted, single
+      # lock-free MPSC ring (Layer 1 ``shm_queue/ring`` + ``segment``, over
+      # byte blobs; Layer 2 ``typed_queue``). repro_shm_index's action-cache
+      # submission ring and io-mon's dependency queue BOTH sit on it, so exactly
+      # one MPSC implementation exists. config.nims reads SHM_QUEUE_SRC (then
+      # falls back to a ``../nim-shm-queue`` sibling); the sandboxed package
+      # build + override-free CI jobs have no sibling, so seed it from here.
+      # repro_shm_index consumes ONLY Layer 1 (pure std/posix, no serialization).
+      #
+      # Pinned to the nim-shm-queue rev that adds the Layer-1 EmbeddedRing
+      # (repro_shm_index's action-cache ring embeds it in the control region).
+      url = "github:metacraft-labs/nim-shm-queue/08d87d26067568e980f4356c4abcf2a0d841a310";
+      flake = false;
+    };
     nimcrypto-src = {
       url = "github:cheatfate/nimcrypto/69eec0375dd146aede41f920c702c531bfe89c6b";
       flake = false;
@@ -120,6 +135,7 @@
       codetracer-native-recorder,
       runquota-src,
       io-mon-src,
+      nim-shm-queue-src,
       ...
     }:
     flake-parts.lib.mkFlake { inherit inputs; } {
@@ -211,6 +227,7 @@
                 export BEARSSL_SRC=${bearssl-src}
                 export STACKABLE_HOOKS_SRC=${stackable-hooks-src}/src
                 export IO_MON_SRC=${io-mon-src}/src
+                export SHM_QUEUE_SRC=${nim-shm-queue-src}/src
                 export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
                 export CT_INTERPOSE_SRC=${ctInterposeSrc}
@@ -263,6 +280,7 @@
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
             IO_MON_SRC = "${io-mon-src}/src";
+            SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;
@@ -424,6 +442,7 @@
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
             IO_MON_SRC = "${io-mon-src}/src";
+            SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;

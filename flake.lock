@@ -1158,6 +1158,23 @@
         "type": "github"
       }
     },
+    "nim-shm-queue-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1783605886,
+        "narHash": "sha256-5ZpUmdTcMrGX7b7U9kSIndvOqm6+tl7v3iFmB2JeO3g=",
+        "owner": "metacraft-labs",
+        "repo": "nim-shm-queue",
+        "rev": "b86d3fc09843bc121f18e6264c02d6eb2aa92fb1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "ref": "b86d3fc0",
+        "repo": "nim-shm-queue",
+        "type": "github"
+      }
+    },
     "nimcrypto-src": {
       "flake": false,
       "locked": {
@@ -2037,6 +2054,7 @@
           "git-hooks-nix"
         ],
         "io-mon-src": "io-mon-src",
+        "nim-shm-queue-src": "nim-shm-queue-src",
         "nimcrypto-src": "nimcrypto-src",
         "nixos-modules": "nixos-modules",
         "nixpkgs": [

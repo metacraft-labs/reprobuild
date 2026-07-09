@@ -334,6 +334,15 @@ addPackagePath("STACKABLE_HOOKS_SRC", [
   ".." / "nim-stackable-hooks" / "src",
 ], "stackable_hooks.nim")
 
+# SHM-QUEUE-MIGRATE: libs/repro_shm_index's action-cache submission ring now
+# delegates to the extracted single MPSC ring in ``nim-shm-queue`` (Layer 1
+# ``shm_queue/ring`` — pure std/posix, NO serialization), the SAME library
+# io-mon's dependency queue sits on. Resolve ``shm_queue`` by path like every
+# other Nim sibling: prefer ``$SHM_QUEUE_SRC``, then the sibling checkout.
+addPackagePath("SHM_QUEUE_SRC", [
+  ".." / "nim-shm-queue" / "src",
+], "shm_queue.nim")
+
 # R2: vm-harness lives in the sibling ``D:/metacraft/vm-harness/`` repo
 # (see ReproOS-MVP R0 status). The R2 boot integration test
 # (tests/integration/t_r2_iso_boot.nim) imports ``vm_harness`` to drive
