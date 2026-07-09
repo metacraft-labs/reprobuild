@@ -21,10 +21,7 @@ export REPROBUILD_ACTION_CACHE_ROOT="$(pwd)/build/test-action-cache"
 rm -rf "${REPROBUILD_ACTION_CACHE_ROOT}"
 mkdir -p "${REPROBUILD_ACTION_CACHE_ROOT}"
 
-# Local Nix builds of repro may need runtime library paths from the active
-# dev shell. Do not scan /nix/store for first matching names: long-lived
-# machines can retain older zstd/glibc closures, and prepending those paths
-# makes unrelated host tools load incompatible libraries.
+# Use only dev-shell runtime libraries; never scan stale /nix/store closures.
 runtime_lib_dirs=()
 for candidate in ${CLINGO_LIB:-} ${ZSTD_LIB:-}; do
   if [[ -d "${candidate}" ]]; then
@@ -52,11 +49,7 @@ if [[ -z "${BEARSSL_SRC:-}" ]]; then
   fi
 fi
 
-# Provision the NDE0-A jammy .deb fixtures (sha-pinned download, no
-# binaries vendored into git) so t_nde0a_apt_jammy has its inputs. The
-# step is idempotent, Linux-only, and best-effort — a network failure
-# warns and continues; the test stays the loud gate if a fixture is
-# absent.
+# Provision sha-pinned NDE0-A fixtures; the test remains the loud gate.
 bash recipes/reproos-mvp-config/fetch-test-fixtures.sh || true
 
 case "$(uname -s)" in
@@ -68,19 +61,8 @@ case "$(uname -s)" in
     ;;
 esac
 
-# Controlled, throwaway repro-daemon for the whole test run.
-#
-# The spec mandates that `repro build` auto-launches the per-user daemon
-# and keeps it alive across invocations. That is correct for real use,
-# but a CI / local test run that lets daemon-hosted tests fall through to
-# the default per-user endpoint (`~/.local/state/repro/daemon`) leaves a
-# live daemon behind after the suite finishes — it accumulates across
-# runs and on a shared host shows up as a leaked, sometimes busy, daemon
-# process. Point the whole run at an isolated endpoint + state dir so any
-# daemon a test auto-launches is OUR throwaway instance, then stop it and
-# remove its state on exit. Tests that drive their own daemon lifecycle
-# (the daemon control-plane / watch / dev-session suites) set their own
-# REPRO_DAEMON_ENDPOINT per invocation and are unaffected.
+# Use an isolated daemon endpoint/state dir so auto-launched daemons do not
+# leak into the developer's per-user daemon across test runs.
 REPRO_TEST_DAEMON_DIR="$(mktemp -d "${TMPDIR:-/tmp}/repro-test-daemon.XXXXXX")"
 export REPRO_DAEMON_STATE_DIR="${REPRO_TEST_DAEMON_DIR}/state"
 mkdir -p "${REPRO_DAEMON_STATE_DIR}"
@@ -93,8 +75,6 @@ case "$(uname -s)" in
     ;;
 esac
 _repro_test_daemon_cleanup() {
-  # Best-effort: stop the controlled daemon (no-op if none was launched)
-  # then drop its isolated state dir. Never fail the run on cleanup.
   if [[ -x "build/bin/repro${exe_ext}" ]]; then
     "build/bin/repro${exe_ext}" daemon stop >/dev/null 2>&1 || true
   fi
@@ -106,12 +86,8 @@ trap _repro_test_daemon_cleanup EXIT
 # Idempotent — the recipe no-ops when the binary already exists.
 just bootstrap
 
-# Provider compilation uses the io-monitor path, so it needs a valid
-# monitor shim before the graph can build the canonical ``.#test-fixtures``
-# shim edge. ``just bootstrap`` only runs ``scripts/build_apps.sh`` when
-# ``build/bin/repro`` is missing; on warm checkouts that can leave a present
-# repro binary with no shim artifact. Seed the shim directly from io-mon here,
-# then let ``.#test-fixtures`` rebuild/verify the graph-owned artifact below.
+# Seed the io-monitor shim for provider compilation on warm checkouts; the
+# graph-owned ``.#test-fixtures`` edge verifies the canonical artifact later.
 bootstrap_monitor_shim() {
   local io_mon_src="${IO_MON_SRC:-../io-mon}"
   case "${io_mon_src}" in
@@ -191,15 +167,7 @@ fi
 printf 'Building apps + test-helpers + test-builds via repro (REPROBUILD_MAX_PARALLELISM=%s)\n' \
   "${REPROBUILD_MAX_PARALLELISM}" >&2
 
-# Build each collection in its own invocation. The engine's M3
-# selector parser rejects multiple path/fragment selectors in a
-# single command ("multiple path / fragment selectors are not
-# supported in M3"); name-shaped selectors may follow a single
-# path anchor but ``.#apps``/``.#test-helpers``/``.#test-builds``
-# are all fragment-shaped and disambiguated against the on-disk
-# ``apps/`` directory. Looping is the M3 workaround; a future
-# milestone that grows multi-fragment selector support folds the
-# three invocations back into one.
+# M3 accepts one fragment selector per invocation; loop over collections.
 repro_build_collection() {
   local collection="$1"
   # Suite setup uses the local pool gate; dedicated tests cover RunQuota itself.
@@ -220,44 +188,19 @@ repro_build_collection() {
 }
 repro_build_collection ".#apps" || exit 1
 repro_build_collection ".#test-helpers" || exit 1
-# Test-Fixtures-In-Build-Graph M2: rebuild the monitor-shim fixture
-# (``build/lib/librepro_monitor_shim.<ext>``) through the graph before
-# the tests run. ``prepareMonitorTools`` and the three self-shim outlier
-# tests now ``requireBinary`` this artifact instead of compiling it per
-# test. The bootstrap shim above is only the provider-compile seed; this
-# graph edge remains the canonical fixture build the tests consume.
+# M2: build canonical test fixtures, including the io-monitor shim.
 repro_build_collection ".#test-fixtures" || exit 1
 repro_build_collection ".#test-builds" || exit 1
 
-# Step 4 (B5): Python tests + test-binary execution. The Python loop runs
-# before the Nim suite so a Python regression surfaces fast and doesn't get
-# buried in the Nim output. The Nim suite is driven by ct-test-runner (Tier-1
-# Standard --list-json/--run protocol) when installed, with the M3 internal
-# runner as the documented fallback. Execution stays shell-shaped until the
-# engine's typed-tool resolver grows profiles for ``buildNimUnittest`` /
-# ``python_unittest_runner`` — once that lands, ``repro test`` replaces both
-# halves of this step.
+# Step 4 (B5): run Python tests first, then the Nim binaries via
+# ct-test-runner when available or the M3 fallback runner.
 while IFS= read -r -d '' test_file; do
   python3 "${test_file}"
 done < <(
   find tests -type f -name 'test_*.py' -print0
 )
 
-# D6 lands a per-test ``--test-timeout=N`` flag on the M3 internal
-# runner. Default below is 600 seconds (10 minutes) per test — well
-# above any normal test on CI, but low enough that a single hung test
-# fails with a clear TIMEOUT signature in the build report while the
-# rest of the suite continues instead of starving every queue slot
-# behind it.
-#
-# The shell ``timeout`` wrapper stays as a very high wall-clock
-# backstop (default 4h) in case the runner itself wedges before any
-# per-test deadline fires (e.g. fd-race tear-down during spawn, signal
-# handler stuck). On CI a clean 500-test sweep at 4 threads completes
-# in ~45-60 min, so 4h is far above the normal envelope.
-# ``--kill-after=30s`` sends SIGKILL 30 seconds after SIGTERM in case
-# the runner is stuck in uninterruptible waits. CI surfaces the
-# SIGTERM via exit code 124.
+# D6 per-test timeout plus an outer wall-clock backstop for runner wedges.
 RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-4h}"
 TEST_TIMEOUT="${REPROBUILD_TEST_TIMEOUT:-600}"
 
@@ -287,17 +230,8 @@ else
       --out:"${runner_bin}" \
       tools/test-runner/repro_test_runner.nim
   fi
-  # ``--no-build`` skips the runner's own build step (the engine
-  # already produced every binary in build/test-bin via Step 2).
-  # The fallback runner defaults to one worker because several heavy e2e
-  # tests capture nested ``repro build`` output until the child exits.
-  # Running two such tests together on a busy shared host can leave both
-  # silent long enough to trip the idle timeout despite real progress.
-  # Callers that want the faster, best-effort local path can still set
-  # REPROBUILD_TEST_THREADS explicitly. ct-test-runner is unaffected and
-  # is the preferred path.
-  # ``--test-timeout`` is the D6 per-test SIGKILL deadline; the outer
-  # ``timeout`` is the runner-phase wall-clock backstop.
+  # The engine already built build/test-bin; default to one worker for heavy
+  # nested-build tests unless callers explicitly set REPROBUILD_TEST_THREADS.
   timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${runner_bin}" \
     --no-build \
     --threads=${REPROBUILD_TEST_THREADS:-1} \

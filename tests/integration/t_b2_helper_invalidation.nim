@@ -10,6 +10,7 @@
 ## report.
 
 import std/[json, os, osproc, sequtils, strtabs, strutils, unittest]
+import repro_test_support
 
 const RepoMarker = "repro.nim"
 
@@ -36,11 +37,15 @@ proc findRepoRoot(): string =
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
-  let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
+  let runquota = requireRunQuotaCliBin(repoRoot)
+  let runquotad = requireRunQuotaDaemonBin(repoRoot)
+  let runquotaBin = runquota.parentDir
   var env = newStringTable()
   for k, v in envPairs():
     env[k] = v
   let oldPath = env.getOrDefault("PATH")
+  env["RUNQUOTA_BIN"] = runquota
+  env["RUNQUOTAD_BIN"] = runquotad
   env["PATH"] = runquotaBin & $PathSep & oldPath
   execCmdEx(cmd, env = env, workingDir = repoRoot)
 
@@ -75,8 +80,7 @@ suite "Bootstrap-And-Self-Build B2: helper build edges":
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /
       addFileExt("repro", ExeExt)
-    let runquotad = repoRoot.parentDir / "runquota" / "build" / "bin" /
-      addFileExt("runquotad", ExeExt)
+    let runquotad = requireRunQuotaDaemonBin(repoRoot)
 
     check fileExists(reproBin)
     check fileExists(runquotad)

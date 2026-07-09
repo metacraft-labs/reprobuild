@@ -9,6 +9,7 @@
 ## runs it, and records a successful result.
 
 import std/[json, os, osproc, strtabs, strutils, unittest]
+import repro_test_support
 
 const RepoMarker = "repro.nim"
 const TargetTest = "t_dsl_outputs_statement_basic_accepted"
@@ -29,11 +30,15 @@ proc findRepoRoot(): string =
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
-  let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
+  let runquota = requireRunQuotaCliBin(repoRoot)
+  let runquotad = requireRunQuotaDaemonBin(repoRoot)
+  let runquotaBin = runquota.parentDir
   var env = newStringTable()
   for k, v in envPairs():
     env[k] = v
   let oldPath = env.getOrDefault("PATH")
+  env["RUNQUOTA_BIN"] = runquota
+  env["RUNQUOTAD_BIN"] = runquotad
   env["PATH"] = runquotaBin & $PathSep & oldPath
   execCmdEx(cmd, env = env, workingDir = repoRoot)
 
@@ -80,8 +85,7 @@ suite "Bootstrap-And-Self-Build B3: test execute edge":
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /
       addFileExt("repro", ExeExt)
-    let runquotad = repoRoot.parentDir / "runquota" / "build" / "bin" /
-      addFileExt("runquotad", ExeExt)
+    let runquotad = requireRunQuotaDaemonBin(repoRoot)
 
     check fileExists(reproBin)
     check fileExists(runquotad)

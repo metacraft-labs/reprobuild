@@ -21,6 +21,7 @@
 ## on PATH — same skip pattern as ``test_rust_convention.nim``.
 
 import std/[os, strutils, unittest]
+import repro_test_support
 
 import repro_core
 import repro_provider_runtime
@@ -29,13 +30,13 @@ import repro_standard_provider/convention
 import repro_standard_provider/crude
 import repro_standard_provider/conventions/rust as rust_convention
 
-const
+let
   ## ``parentDir`` four times from
   ## ``libs/repro_standard_provider/tests/test_crude_fallback.nim``
   ## lands at the ``reprobuild/`` repo root. The fixtures live in the
   ## sibling ``reprobuild-examples`` checkout under ``D:/metacraft/``.
   ReprobuildRoot = currentSourcePath.parentDir.parentDir.parentDir.parentDir
-  MetacraftRoot = ReprobuildRoot.parentDir
+  MetacraftRoot = workspaceRootForRepo(ReprobuildRoot)
   RustBinaryRoot = MetacraftRoot / "reprobuild-examples" / "rust" / "binary"
   RustBuildRsRoot = MetacraftRoot / "reprobuild-examples" / "rust" /
                     "binary-with-build-rs"

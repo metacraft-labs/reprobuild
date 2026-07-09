@@ -408,6 +408,25 @@ proc gitCommonDir(repoRoot: string): string =
   except OSError:
     discard
 
+proc workspaceRootForRepo*(repoRoot: string): string =
+  ## Locate the workspace root that owns ``repoRoot`` and its sibling repos.
+  ## A temporary Git worktree may live outside the repo-managed workspace; in
+  ## that case ``repoRoot.parentDir`` is only the temp parent. Follow the Git
+  ## common dir back to the primary checkout and use its parent as the
+  ## workspace root.
+  let direct = repoRoot.parentDir
+  if dirExists(direct / "reprobuild-examples") or
+      dirExists(direct / "runquota") or dirExists(direct / "codetracer"):
+    return normalizedPath(direct)
+
+  let commonDir = gitCommonDir(repoRoot)
+  if commonDir.len > 0:
+    let workspace = commonDir.parentDir.parentDir
+    if dirExists(workspace):
+      return normalizedPath(workspace)
+
+  normalizedPath(direct)
+
 proc codeTracerSourceRoot*(repoRoot: string): string =
   ## Locate a Codetracer checkout for integration tests that copy a small,
   ## real source subset. Tests may run from a temporary reprobuild worktree, so
@@ -425,6 +444,7 @@ proc codeTracerSourceRoot*(repoRoot: string): string =
     candidates.add(sourcePath.parentDir)
 
   candidates.add(repoRoot.parentDir / "codetracer")
+  candidates.add(workspaceRootForRepo(repoRoot) / "codetracer")
 
   let commonDir = gitCommonDir(repoRoot)
   if commonDir.len > 0:

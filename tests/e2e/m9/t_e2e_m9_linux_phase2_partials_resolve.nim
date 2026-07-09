@@ -58,19 +58,18 @@
 ## per-adapter classification.
 
 import std/[options, os, strutils, tables, unittest]
+import repro_test_support
 
 import repro_dsl_stdlib/catalog_registry
 import repro_dsl_stdlib/packages_schema
 import repro_home_apply/catalog_lookup
 import repro_home_apply/package_catalog
 
-const M9ReferenceHome =
-  currentSourcePath().parentDir().parentDir().parentDir().parentDir().parentDir() /
-    "reprobuild-examples" / "m9-linux-home-profile" / "home.nim"
-  ## The reprobuild repo lives at ``D:/metacraft/reprobuild`` and the
-  ## reprobuild-examples sibling lives at ``D:/metacraft/reprobuild-examples``.
-  ## Walk up 5 levels from ``tests/e2e/m9/t_e2e_*.nim`` to land on the
-  ## metacraft root, then into reprobuild-examples.
+let
+  ReprobuildRoot = currentSourcePath().parentDir().parentDir().parentDir().parentDir()
+  M9ReferenceHome =
+    workspaceRootForRepo(ReprobuildRoot) / "reprobuild-examples" /
+      "m9-linux-home-profile" / "home.nim"
 
 # The Phase-2 graduation matrix the M9 harness keys off of. Keep this
 # in sync with the ``graduation_table`` heredoc in

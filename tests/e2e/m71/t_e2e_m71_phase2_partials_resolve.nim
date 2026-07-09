@@ -33,19 +33,18 @@
 ## the intended contract — this gate is the canary.
 
 import std/[options, os, strutils, unittest]
+import repro_test_support
 
 import repro_dsl_stdlib/catalog_registry
 import repro_dsl_stdlib/packages_schema
 import repro_home_apply/catalog_lookup
 import repro_home_apply/package_catalog
 
-const M71ReferenceHome =
-  currentSourcePath().parentDir().parentDir().parentDir().parentDir().parentDir() /
-    "reprobuild-examples" / "m71-home-profile-walkthrough" / "home.nim"
-  ## The reprobuild repo lives at ``D:/metacraft/reprobuild`` and the
-  ## reprobuild-examples sibling lives at ``D:/metacraft/reprobuild-examples``.
-  ## Walk up 5 levels from ``tests/e2e/m71/t_e2e_*.nim`` to land on the
-  ## metacraft root, then into reprobuild-examples.
+let
+  ReprobuildRoot = currentSourcePath().parentDir().parentDir().parentDir().parentDir()
+  M71ReferenceHome =
+    workspaceRootForRepo(ReprobuildRoot) / "reprobuild-examples" /
+      "m71-home-profile-walkthrough" / "home.nim"
 
 # The Phase-2 graduation matrix the M71 harness keys off of. Keep this
 # in sync with $GraduationTable in

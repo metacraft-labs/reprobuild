@@ -60,11 +60,11 @@ import repro_standard_provider/convention
 import repro_standard_provider/conventions/go_direct as go_direct_convention
 import repro_test_support
 
-const
+let
   ## ``parentDir`` four times lands at the ``reprobuild/`` repo root.
   ## The fixture lives under the sibling ``reprobuild-examples``.
   ReprobuildRoot = currentSourcePath.parentDir.parentDir.parentDir.parentDir
-  MetacraftRoot = ReprobuildRoot.parentDir
+  MetacraftRoot = workspaceRootForRepo(ReprobuildRoot)
   Mode3Fixture =
     MetacraftRoot / "reprobuild-examples" / "go-mode3" /
       "binary-with-library"

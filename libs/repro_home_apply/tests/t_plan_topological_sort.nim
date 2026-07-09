@@ -47,6 +47,7 @@
 
 import std/[algorithm, os, tables, unittest]
 from repro_core/paths import extendedPath
+import repro_test_support
 
 import repro_home_apply/plan
 
@@ -54,14 +55,11 @@ import repro_home_apply/plan
 # Helpers
 # ---------------------------------------------------------------------------
 
-const M71ReferenceHome =
-  currentSourcePath().parentDir().parentDir().parentDir().parentDir().parentDir() /
-    "reprobuild-examples" / "m71-home-profile-walkthrough" / "home.nim"
-  ## The reprobuild repo lives at ``D:/metacraft/reprobuild`` and the
-  ## reprobuild-examples sibling lives at ``D:/metacraft/reprobuild-examples``.
-  ## Walk up 5 levels from ``libs/repro_home_apply/tests/t_*.nim`` to the
-  ## metacraft root (tests → repro_home_apply → libs → reprobuild →
-  ## metacraft), then into ``reprobuild-examples/``.
+let
+  ReprobuildRoot = currentSourcePath().parentDir().parentDir().parentDir().parentDir()
+  M71ReferenceHome =
+    workspaceRootForRepo(ReprobuildRoot) / "reprobuild-examples" /
+      "m71-home-profile-walkthrough" / "home.nim"
 
 proc pkg(id: string; version = ""): PlannedPackage =
   ## Synthetic ``PlannedPackage`` factory. The fields the topo sort

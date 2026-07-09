@@ -25,6 +25,7 @@
 ## the same directory is a HARD ERROR per the spec, not a warning.
 
 import std/[os, strutils, unittest]
+import repro_test_support
 
 import repro_core
 import repro_provider_runtime
@@ -32,9 +33,9 @@ import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/nim as nim_convention
 
-const
+let
   ReprobuildRoot = currentSourcePath.parentDir.parentDir.parentDir.parentDir
-  MetacraftRoot = ReprobuildRoot.parentDir
+  MetacraftRoot = workspaceRootForRepo(ReprobuildRoot)
   CanonicalFixtureRoot =
     MetacraftRoot / "reprobuild-examples" / "nim" / "binary"
 
