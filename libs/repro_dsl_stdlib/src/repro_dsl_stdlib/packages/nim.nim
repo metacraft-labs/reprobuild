@@ -28,10 +28,13 @@
 ## Linux build targets glibc 2.17+ (the prebuilt is statically linked
 ## against the c runtime where feasible).
 
-import std/[os, strutils, tables]
+import std/[options, os, sets, strutils, tables]
 import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
 export packages_schema
+
+var reproNimPathsEnabled {.threadvar.}: bool
+var reproConfigNimsFile {.threadvar.}: string
 
 # ---------------------------------------------------------------------------
 # Pre-existing M21 DSL declaration (CLI surface + Nix provisioning).
@@ -299,12 +302,16 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   discard imports
   let cacheDir = if nimcache.len > 0: nimcache else: defaultNimcacheDir(binary)
   let effectivePassL = passL & opensslPassLForSsl(defines)
+  var inputs = @extraInputs
+  if reproNimPathsEnabled and reproConfigNimsFile.len > 0:
+    inputs.add(reproConfigNimsFile)
+
   c(pkg = pkg, source = source, output = binary, defines = defines, cc = cc,
     gccExe = gccExe,
     paths = paths, passC = passC, passL = effectivePassL, nimcache = cacheDir,
     appLib = appLib, threadsOn = threadsOn, parallelBuild = parallelBuild,
     actionId = actionId,
-    deps = deps, after = after, extraInputs = extraInputs,
+    deps = deps, after = after, extraInputs = inputs,
     extraOutputs = extraOutputs, extraEnv = extraEnv,
     depfile = depfile, cacheable = cacheable,
     dependencyPolicy = compileDependencyPolicy(
@@ -338,3 +345,104 @@ let nimCatalog* = @[
     bootstrap_argv: @[],
     env: initTable[string, string]())
 ]
+
+
+proc package*(pkg: NimPackage; name: string; srcDir = "src"): BuildTargetDef {.discardable.} =
+  result = target(name, actions = @[])
+  let absSrcDir = absolutePath(srcDir).replace('\\', '/')
+  registerBuildTargetExtension(name, NimPackageExtension(
+    name: name,
+    srcDir: absSrcDir
+  ))
+
+proc resolveNimPackagePaths(): seq[string] =
+  let activePkg = currentOwningPackage()
+  var depNames = initHashSet[string]()
+  if activePkg.len > 0:
+    for edge in registeredWorkspaceDeps():
+      if cmpIgnoreCase(edge.package, activePkg) == 0:
+        depNames.incl(edge.dependency)
+    for pkg in registeredPackages():
+      if cmpIgnoreCase(pkg.packageName, activePkg) == 0:
+        for u in pkg.toolUses:
+          depNames.incl(u.packageSelector)
+        for u in pkg.nativeBuildDeps:
+          depNames.incl(u.packageSelector)
+        for u in pkg.runtimeDeps:
+          depNames.incl(u.packageSelector)
+  
+  var seenPaths = initHashSet[string]()
+  for target in registeredBuildTargets():
+    let ext = retrieveExtension[NimPackageExtension](target)
+    if ext.isSome:
+      let pkgExt = ext.get()
+      if depNames.contains(pkgExt.name) or depNames.contains(target.name):
+        if not seenPaths.contains(pkgExt.srcDir):
+          seenPaths.incl(pkgExt.srcDir)
+          result.add(pkgExt.srcDir)
+  for target in registeredCollections():
+    let ext = retrieveExtension[NimPackageExtension](target)
+    if ext.isSome:
+      let pkgExt = ext.get()
+      if depNames.contains(pkgExt.name) or depNames.contains(target.name):
+        if not seenPaths.contains(pkgExt.srcDir):
+          seenPaths.incl(pkgExt.srcDir)
+          result.add(pkgExt.srcDir)
+
+  # Check physical sibling directories next to the current project
+  let parent = getCurrentDir().parentDir()
+  for dep in depNames:
+    let siblingDir = parent / dep
+    if dirExists(siblingDir):
+      let srcDir = (siblingDir / "src").replace('\\', '/')
+      if dirExists(srcDir):
+        if not seenPaths.contains(srcDir):
+          seenPaths.incl(srcDir)
+          result.add(srcDir)
+      else:
+        let rootDir = siblingDir.replace('\\', '/')
+        if not seenPaths.contains(rootDir):
+          seenPaths.incl(rootDir)
+          result.add(rootDir)
+
+proc nimRepropathsConfig*(pkg: NimPackage;
+                           reproPathsFile = "repro.paths";
+                           gitignoreFile = ".gitignore";
+                           configNimsFile = "config.nims"): seq[BuildActionDef] {.discardable.} =
+  discard pkg
+  reproNimPathsEnabled = true
+  reproConfigNimsFile = configNimsFile
+  
+  let paths = resolveNimPackagePaths()
+  var lines: seq[string] = @[]
+  for p in paths:
+    lines.add("switch(\"path\", \"" & p & "\")")
+  let pathsContent = lines.join("\n") & "\n"
+  
+  let writePathsAction = fs.writeText(reproPathsFile, pathsContent,
+    actionId = "generate_nim_paths_" & currentOwningPackage())
+  result.add(writePathsAction)
+  
+  var ignoreFile = gitignoreFile
+  if dirExists(getCurrentDir() / ".hg"):
+    ignoreFile = ".hgignore"
+  let ignoreAction = fs.ensureLine(ignoreFile, reproPathsFile,
+    actionId = "ensure_ignore_nim_paths_" & currentOwningPackage())
+  result.add(ignoreAction)
+  
+  let label = "repro-paths-bootstrap"
+  let version = "1"
+  let openSentinel = "# >>> repro:project:" & currentOwningPackage() & ":" & label & ":v" & version & " >>>"
+  let closeSentinel = "# <<< repro:project:" & currentOwningPackage() & ":" & label & ":v" & version & " <<<"
+  let openSearch = "# >>> repro:project:" & currentOwningPackage() & ":" & label & ":v"
+  let closeSearch = "# <<< repro:project:" & currentOwningPackage() & ":" & label & ":v"
+  let snippet = "when withDir(thisDir(), system.fileExists(\"" & reproPathsFile & "\")):\n  include \"" & reproPathsFile & "\""
+  
+  let snippetAction = fs.ensureSnippet(configNimsFile,
+    openSentinel = openSentinel,
+    closeSentinel = closeSentinel,
+    openSearch = openSearch,
+    closeSearch = closeSearch,
+    snippet = snippet,
+    actionId = "ensure_snippet_config_nims_" & currentOwningPackage())
+  result.add(snippetAction)

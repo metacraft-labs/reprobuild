@@ -6686,6 +6686,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_nim_package_path_handling.nim",
+    binary: "build/test-bin/t_nim_package_path_handling",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_nix_daemon_ipc.nim",
     binary: "build/test-bin/t_nix_daemon_ipc",
     defines: @[],

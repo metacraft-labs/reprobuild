@@ -1792,6 +1792,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       of "writeText": bakWriteText
       of "stamp": bakStamp
       of "preserveTree": bakPreserveTree
+      of "ensureLine": bakEnsureLine
+      of "ensureSnippet": bakEnsureSnippet
       else:
         raise newException(ValueError,
           "unknown built-in fs operation: " & payload.call.subcommand)
@@ -1813,9 +1815,16 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       actionCachePolicy = actionCachePolicy,
       text = if payload.call.subcommand == "preserveTree":
           argValue("sourceRoot") & "\n" & argValue("outputRoot")
+        elif payload.call.subcommand == "ensureLine":
+          argValue("line")
         else:
           argValue("text") & argValue("title"),
-      entries = argSeqValue("entries"))
+      entries = if payload.call.subcommand == "ensureSnippet":
+          @[argValue("openSentinel"), argValue("closeSentinel"),
+            argValue("openSearch"), argValue("closeSearch"),
+            argValue("snippet")]
+        else:
+          argSeqValue("entries"))
 
   if payload.call.packageName == "reprobuild.builtin" and
       payload.call.executableName == "hcr":

@@ -23,8 +23,12 @@ if command -v ninja >/dev/null 2>&1; then
   cmake_generator="Ninja"
 fi
 
-cmake_cc="$(command -v cc)"
-cmake_cxx="$(command -v c++)"
+cmake_cc=""
+cmake_cxx=""
+if [[ "$(uname -s)" == "Darwin" || "$(uname -s)" == "Linux" ]]; then
+  cmake_cc="$(command -v cc || command -v gcc || echo gcc)"
+  cmake_cxx="$(command -v c++ || command -v g++ || echo g++)"
+fi
 cmake_osx_sysroot=""
 cmake_apple_framework_flags=()
 if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -72,8 +76,8 @@ fi
   cd "${cmake_root}"
   if [[ -f build/CMakeCache.txt ]] && {
       ! grep -q "^CMAKE_GENERATOR:INTERNAL=${cmake_generator}$" build/CMakeCache.txt ||
-      ! grep -q "^CMAKE_C_COMPILER:FILEPATH=${cmake_cc}$" build/CMakeCache.txt ||
-      ! grep -q "^CMAKE_CXX_COMPILER:FILEPATH=${cmake_cxx}$" build/CMakeCache.txt ||
+      { [[ -n "${cmake_cc}" ]] && ! grep -q "^CMAKE_C_COMPILER:FILEPATH=${cmake_cc}$" build/CMakeCache.txt; } ||
+      { [[ -n "${cmake_cxx}" ]] && ! grep -q "^CMAKE_CXX_COMPILER:FILEPATH=${cmake_cxx}$" build/CMakeCache.txt; } ||
       { [[ -n "${cmake_osx_sysroot}" ]] && ! grep -q "^CMAKE_OSX_SYSROOT:.*=${cmake_osx_sysroot}$" build/CMakeCache.txt; } ||
       { [[ -n "${cmake_apple_framework_dir:-}" ]] && ! grep -q "^CMAKE_CXX_FLAGS:STRING=-F${cmake_apple_framework_dir}$" build/CMakeCache.txt; } ||
       ! grep -q "^ENABLE_IPV6:.*=OFF$" build/CMakeCache.txt
@@ -83,8 +87,8 @@ fi
 
   cmake -S . -B build -G "${cmake_generator}" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_C_COMPILER="${cmake_cc}" \
-    -DCMAKE_CXX_COMPILER="${cmake_cxx}" \
+    ${cmake_cc:+-DCMAKE_C_COMPILER="${cmake_cc}"} \
+    ${cmake_cxx:+-DCMAKE_CXX_COMPILER="${cmake_cxx}"} \
     ${cmake_osx_sysroot:+-DCMAKE_OSX_SYSROOT="${cmake_osx_sysroot}"} \
     "${cmake_apple_framework_flags[@]}" \
     -DCMAKE_USE_SYSTEM_CURL=OFF \

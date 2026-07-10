@@ -477,6 +477,12 @@ package reprobuild:
     let testNimPaths = ioMonNimPaths & sourceOnlyNimPaths
 
     for spec in reprobuildTestSpecs:
+      when defined(windows):
+        if spec.source.contains("shm_index") or
+           spec.source.contains("cache_daemon") or
+           spec.source.contains("nix_daemon"):
+          continue
+
       let platformPassC: seq[string] =
         when hostIsMacos: spec.extraPassC else: newSeq[string]()
       let platformPassL: seq[string] =

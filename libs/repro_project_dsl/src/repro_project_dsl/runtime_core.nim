@@ -264,7 +264,7 @@ const
     ## with an empty ``targetNames`` list.
   BuildTargetPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')),
     byte(ord('P'))]
-  BuildTargetPayloadVersion = 3'u16
+  BuildTargetPayloadVersion = 4'u16
     ## v3: Spec-Implementation M5 — appends the ``kind`` byte distinguishing
     ## ``btkAggregate`` (0) from ``btkCollection`` (1) so the registry
     ## split is preserved when payloads round-trip through the engine
@@ -2305,6 +2305,13 @@ proc encodeBuildTargetPayload*(target: BuildTargetDef): seq[byte] {.dynOrStatic.
   # Spec-Implementation M5: v3 ``kind`` discriminator.
   payload.writeByte(byte(ord(target.kind)))
 
+  # Version 4: extensions serialization
+  payload.writeU32Le(uint32(target.extensions.len))
+  for box in target.extensions:
+    payload.writeString(box.typeId)
+    let jsonStr = extensionRegistry[box.typeId].marshal(box)
+    payload.writeString(jsonStr)
+
   result.add(BuildTargetPayloadMagic)
   result.writeU16Le(BuildTargetPayloadVersion)
   result.writeU32Le(uint32(payload.len))
@@ -2318,7 +2325,7 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
       raisePayload("unknown build target payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, 2'u16, BuildTargetPayloadVersion}:
+  if version notin {1'u16, 2'u16, 3'u16, BuildTargetPayloadVersion}:
     raisePayload("unsupported build target payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -2338,6 +2345,16 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
     if kindByte > byte(ord(btkCollection)):
       raisePayload("invalid build target kind in build target payload")
     result.kind = BuildTargetKind(kindByte)
+  if version >= 4'u16:
+    let extLen = int(readU32Le(bytes, pos))
+    for _ in 0 ..< extLen:
+      let typeId = readString(bytes, pos)
+      let jsonStr = readString(bytes, pos)
+      if extensionRegistry.contains(typeId):
+        let box = extensionRegistry[typeId].unmarshal(jsonStr)
+        result.extensions.add(box)
+      else:
+        discard
   if pos != bytes.len:
     raisePayload("trailing build target payload bytes")
 
@@ -2499,3 +2516,121 @@ proc defaultToolActionId*(call: PublicCliCall): string {.dynOrStatic.} =
   if call.subcommand.len > 0:
     base.add("-" & actionIdPart(call.subcommand))
   base & "-" & stableHashHex(callIdentity(call))
+
+# --- Graph Extensions API ---
+
+proc extensionTypeId*[T](): string =
+  when T is NimPackageExtension:
+    "NimPackageExtension"
+  elif T is GeneratedFileExtension:
+    "GeneratedFileExtension"
+  else:
+    {.error: "Type is not registered as a graph extension".}
+
+proc storeExtension*[T](obj: var BuildActionDef; val: T) =
+  let id = extensionTypeId[T]()
+  var found = false
+  for box in obj.extensions:
+    if box.typeId == id:
+      cast[TypedExtensionBox[T]](box).val = val
+      found = true
+      break
+  if not found:
+    obj.extensions.add(TypedExtensionBox[T](typeId: id, val: val))
+
+proc retrieveExtension*[T](obj: BuildActionDef): Option[T] =
+  let id = extensionTypeId[T]()
+  for box in obj.extensions:
+    if box.typeId == id:
+      return some(cast[TypedExtensionBox[T]](box).val)
+  return none[T]()
+
+proc storeExtension*[T](obj: var BuildTargetDef; val: T) =
+  let id = extensionTypeId[T]()
+  var found = false
+  for box in obj.extensions:
+    if box.typeId == id:
+      cast[TypedExtensionBox[T]](box).val = val
+      found = true
+      break
+  if not found:
+    obj.extensions.add(TypedExtensionBox[T](typeId: id, val: val))
+
+proc retrieveExtension*[T](obj: BuildTargetDef): Option[T] =
+  let id = extensionTypeId[T]()
+  for box in obj.extensions:
+    if box.typeId == id:
+      return some(cast[TypedExtensionBox[T]](box).val)
+  return none[T]()
+
+
+
+proc registerBuildTargetExtension*[T](targetName: string; val: T) =
+  var found = false
+  for i in 0 ..< buildTargetRegistry.len:
+    if buildTargetRegistry[i].name == targetName:
+      buildTargetRegistry[i].storeExtension(val)
+      found = true
+      break
+  if not found:
+    for i in 0 ..< collectionRegistry.len:
+      if collectionRegistry[i].name == targetName:
+        collectionRegistry[i].storeExtension(val)
+        found = true
+        break
+
+
+proc getBuildTargetDef*(name: string): Option[BuildTargetDef] {.dynOrStatic.} =
+  for target in buildTargetRegistry:
+    if target.name == name:
+      return some(target)
+  for target in collectionRegistry:
+    if target.name == name:
+      return some(target)
+  return none(BuildTargetDef)
+
+# --- Builtin fs additions ---
+
+proc ensureLine*(tool: ReproFs; output, line: string; actionId = "";
+                 deps: openArray[string] = [];
+                 after: openArray[BuildActionDef] = [];
+                 cacheable = true; commandStatsId = "";
+                 actionCachePolicy = defaultActionCachePolicy()):
+    BuildActionDef {.discardable, dynOrStatic.} =
+  discard tool
+  let call = builtinFsCall("ensureLine", [
+    outputArg("output", output),
+    cliArg("line", line)
+  ])
+  let selectedActionId =
+    if actionId.len > 0: actionId else: defaultBuiltinActionId("ensureLine", output)
+  recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
+    cacheable = cacheable, commandStatsId = commandStatsId,
+    dependencyPolicy = automaticMonitorPolicy(),
+    actionCachePolicy = actionCachePolicy)
+
+proc ensureSnippet*(tool: ReproFs; output, openSentinel, closeSentinel, openSearch, closeSearch, snippet: string; actionId = "";
+                    deps: openArray[string] = [];
+                    after: openArray[BuildActionDef] = [];
+                    cacheable = true; commandStatsId = "";
+                    actionCachePolicy = defaultActionCachePolicy()):
+    BuildActionDef {.discardable, dynOrStatic.} =
+  discard tool
+  let call = builtinFsCall("ensureSnippet", [
+    outputArg("output", output),
+    cliArg("openSentinel", openSentinel),
+    cliArg("closeSentinel", closeSentinel),
+    cliArg("openSearch", openSearch),
+    cliArg("closeSearch", closeSearch),
+    cliArg("snippet", snippet)
+  ])
+  let selectedActionId =
+    if actionId.len > 0: actionId else: defaultBuiltinActionId("ensureSnippet", output)
+  recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
+    cacheable = cacheable, commandStatsId = commandStatsId,
+    dependencyPolicy = automaticMonitorPolicy(),
+    actionCachePolicy = actionCachePolicy)
+
+# Registration
+registerExtension[NimPackageExtension]("NimPackageExtension")
+registerExtension[GeneratedFileExtension]("GeneratedFileExtension")

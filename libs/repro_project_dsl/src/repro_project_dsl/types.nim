@@ -1,5 +1,40 @@
+import std/[tables, json]
+
+type
+  ExtensionBox* = ref object of RootRef
+    typeId*: string
+
+  TypedExtensionBox*[T] = ref object of ExtensionBox
+    val*: T
+
+  ExtensionMarshaler* = object
+    marshal*: proc(box: ExtensionBox): string {.nimcall.}
+    unmarshal*: proc(jsonStr: string): ExtensionBox {.nimcall.}
+
+  NimPackageExtension* = object
+    name*: string
+    srcDir*: string
+
+  GeneratedFileExtension* = object
+    destPath*: string
+    content*: string
+
+var extensionRegistry* {.threadvar.}: Table[string, ExtensionMarshaler]
+
+template registerExtension*[T](id: string) =
+  block:
+    let m = ExtensionMarshaler(
+      marshal: proc(box: ExtensionBox): string =
+        $(%*(TypedExtensionBox[T](box).val)),
+      unmarshal: proc(jsonStr: string): ExtensionBox =
+        let val = jsonStr.parseJson().to(T)
+        return TypedExtensionBox[T](typeId: id, val: val)
+    )
+    extensionRegistry[id] = m
+
 type
   BuildActionPayloadError* = object of CatchableError
+
 
   Tool*[name: static string] = object
 
@@ -619,6 +654,7 @@ type
       ## codec v22+.
     sourceFile*: string
     sourceLine*: int
+    extensions*: seq[ExtensionBox]
 
   BuildTargetKind* = enum
     ## Spec-Implementation M5: discriminator on ``BuildTargetDef`` so the
@@ -645,6 +681,7 @@ type
       ## payloads decode with no ``kind`` field; promoting the zero value
       ## to ``btkAggregate`` keeps backward-compat with the v1 record
       ## shape.
+    extensions*: seq[ExtensionBox]
 
   BuildPoolDef* = object
     name*: string

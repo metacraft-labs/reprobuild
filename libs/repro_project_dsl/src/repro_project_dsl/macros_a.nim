@@ -2442,20 +2442,30 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
     # consumer's own source tree stays clean. The key is a filesystem-safe
     # rendering of the consumer's absolute source path (unique per consumer
     # ``repro.nim``) plus its length as a light collision guard.
-    var consumerKey = ""
-    for ch in consumerSourceFile:
+    var h = 2166136261u32
+    for c in consumerSourceFile:
+      h = h xor ord(c).uint32
+      h = h * 16777619u32
+    var baseName = ""
+    for i in countdown(consumerSourceFile.len - 1, 0):
+      let ch = consumerSourceFile[i]
       if ch.isAlphaNumeric():
-        consumerKey.add(ch)
-      elif consumerKey.len > 0 and consumerKey[^1] != '_':
-        consumerKey.add('_')
-    consumerKey = "c" & $consumerSourceFile.len & "_" & consumerKey
+        baseName.add(ch)
+      elif baseName.len > 0 and baseName[^1] != '_':
+        baseName.add('_')
+      if baseName.len >= 30:
+        break
+    var revBase = ""
+    for i in countdown(baseName.len - 1, 0):
+      revBase.add(baseName[i])
+    let consumerKey = "c_" & $h & "_" & revBase
     let shimDir = getTempDir() / "repro-sibling-shims" / consumerKey
     if not dirExists(shimDir):
       createDir(shimDir)
     for (moduleAlias, selector, siblingReproPath) in producerModules:
       let shimStem = "repro_sib_" & selectorModuleName(selector)
       let shimPath = shimDir / (shimStem & ".nim")
-      let shimContent = "include \"" & siblingReproPath & "\"\n"
+      let shimContent = "include \"" & siblingReproPath.replace('\\', '/') & "\"\n"
       # Rewrite only when content differs so an unchanged sibling set does
       # not needlessly invalidate the shim's incremental-compile stamp.
       if (not fileExists(shimPath)) or readFile(shimPath) != shimContent:
@@ -2464,7 +2474,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         echo "[producer-import] alias=", moduleAlias, " selector=", selector,
           " shim=", shimPath, " -> ", siblingReproPath
       let shimModule = shimDir / shimStem
-      result.add("import \"" & shimModule & "\" as " & moduleAlias & "\n")
+      result.add("import \"" & shimModule.replace('\\', '/') & "\" as " & moduleAlias & "\n")
       result.add("when compiles(" & moduleAlias &
         ".reprobuildPackageMarker()):\n")
       result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")

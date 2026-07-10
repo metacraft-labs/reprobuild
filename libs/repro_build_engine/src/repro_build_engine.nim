@@ -78,6 +78,8 @@ type
     bakWriteText
     bakStamp
     bakPreserveTree
+    bakEnsureLine
+    bakEnsureSnippet
     # M2 (Workspace-Management): a typed VCS operation (clone / fetch /
     # switch) dispatched through a registered executor so the engine
     # does not depend on the ``repro_workspace_vcs`` library. The
@@ -2692,6 +2694,7 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   # LD_LIBRARY_PATH covers run-time test execution; LIBRARY_PATH covers
   # link-time. Same set of dirs feeds both.
   prependEnvDirs(env, "LD_LIBRARY_PATH", paths.libDirs)
+  prependEnvDirs(env, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
   when defined(macosx):
     # macOS' dynamic loader ignores LD_LIBRARY_PATH; DYLD_LIBRARY_PATH is the
     # run-time counterpart needed by tools that dlopen libraries by leaf name.
@@ -2712,6 +2715,7 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   result = prependEnvDirsToArgvEnv(result, "CPATH", paths.includeDirs)
   result = prependEnvDirsToArgvEnv(result, "LIBRARY_PATH", paths.libDirs)
   result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", paths.libDirs)
+  result = prependEnvDirsToArgvEnv(result, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
   when defined(macosx):
     result = prependEnvDirsToArgvEnv(result, "DYLD_LIBRARY_PATH", paths.libDirs)
 
@@ -3066,7 +3070,7 @@ proc startBypassRunQuotaProcess(action: BuildAction;
   let binDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   let hasAuxPaths = auxPaths.pkgConfigDirs.len + auxPaths.cmakePrefixDirs.len +
-    auxPaths.includeDirs.len + auxPaths.libDirs.len > 0
+    auxPaths.includeDirs.len + auxPaths.libDirs.len + auxPaths.nimPathDirs.len > 0
   if binDirs.len > 0 or hasAuxPaths:
     if env == nil:
       env = newStringTable(modeCaseSensitive)
@@ -3346,7 +3350,18 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
     # build/reprobuild/build-engine-cache/runquota-results/1.json. Without
     # the \\?\ prefix, parseFile() raises "cannot read from file" even when
     # the prior fileExists() check (which DOES use extendedPath) saw it.
-    let node = parseFile(extendedPath(resultPath))
+    var node: JsonNode
+    var attempts = 0
+    while true:
+      try:
+        node = parseFile(extendedPath(resultPath))
+        break
+      except IOError as e:
+        attempts += 1
+        if attempts >= 20:
+          raise e
+        sleep(5)
+
     result.leaseId = node{"lease_id"}.getBiggestInt(0).uint64
     result.exitCode = node{"exit_code"}.getInt(1)
     result.stdout = node{"stdout"}.getStr("")
@@ -3574,9 +3589,82 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       if action.outputs.len != 1:
         raiseEngine("writeText action requires exactly one output: " & action.id)
       let destination = action.builtinPath(action.outputs[0])
-      createDir(extendedPath(destination.splitPath.head))
-      prepareBuiltinFileOutput(destination)
-      writeFile(extendedPath(destination), action.builtinText)
+      let destExt = extendedPath(destination)
+      let text = action.builtinText
+      if fileExists(destExt) and readFile(destExt) == text:
+        discard
+      else:
+        createDir(extendedPath(destination.splitPath.head))
+        prepareBuiltinFileOutput(destination)
+        writeFile(destExt, text)
+    of bakEnsureLine:
+      if action.outputs.len != 1:
+        raiseEngine("ensureLine action requires exactly one output: " & action.id)
+      let destination = action.builtinPath(action.outputs[0])
+      let destExt = extendedPath(destination)
+      let lineToEnsure = action.builtinText
+      var content = ""
+      var linesList: seq[string] = @[]
+      if fileExists(destExt):
+        content = readFile(destExt)
+        linesList = content.splitLines()
+      var found = false
+      let lineToEnsureStrip = lineToEnsure.strip()
+      for l in linesList:
+        if l.strip() == lineToEnsureStrip:
+          found = true
+          break
+      if not found:
+        createDir(destExt.splitPath.head)
+        prepareBuiltinFileOutput(destination)
+        var newContent = content
+        if newContent.len > 0 and not newContent.endsWith("\n") and not newContent.endsWith("\r"):
+          newContent.add("\n")
+        newContent.add(lineToEnsure)
+        newContent.add("\n")
+        writeFile(destExt, newContent)
+    of bakEnsureSnippet:
+      if action.outputs.len != 1:
+        raiseEngine("ensureSnippet action requires exactly one output: " & action.id)
+      if action.builtinEntries.len < 5:
+        raiseEngine("ensureSnippet action requires openSentinel, closeSentinel, openSearch, closeSearch, and snippet")
+      let destination = action.builtinPath(action.outputs[0])
+      let destExt = extendedPath(destination)
+      let openSentinel = action.builtinEntries[0]
+      let closeSentinel = action.builtinEntries[1]
+      let openSearch = action.builtinEntries[2]
+      let closeSearch = action.builtinEntries[3]
+      let snippet = action.builtinEntries[4]
+      var content = ""
+      if fileExists(destExt):
+        content = readFile(destExt)
+      let newBlock = openSentinel & "\n" & snippet & "\n" & closeSentinel
+      var startIdx = -1
+      var endIdx = -1
+      let linesList = content.splitLines()
+      for i, l in linesList:
+        if l.strip().startsWith(openSearch):
+          startIdx = i
+        elif l.strip().startsWith(closeSearch) and startIdx != -1:
+          endIdx = i
+          break
+      var newLinesList: seq[string] = @[]
+      if startIdx != -1 and endIdx != -1:
+        for i in 0 ..< startIdx:
+          newLinesList.add(linesList[i])
+        newLinesList.add(newBlock)
+        for i in (endIdx + 1) ..< linesList.len:
+          newLinesList.add(linesList[i])
+      else:
+        newLinesList = linesList
+        if newLinesList.len > 0 and newLinesList[^1].strip().len > 0:
+          newLinesList.add("")
+        newLinesList.add(newBlock)
+      let newContent = newLinesList.join("\n") & "\n"
+      if content != newContent:
+        createDir(destExt.splitPath.head)
+        prepareBuiltinFileOutput(destination)
+        writeFile(destExt, newContent)
     of bakStamp:
       if action.outputs.len != 1:
         raiseEngine("stamp action requires exactly one output: " & action.id)

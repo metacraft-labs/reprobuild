@@ -171,7 +171,13 @@ printf 'Building apps + test-helpers + test-builds via repro (REPROBUILD_MAX_PAR
 repro_build_collection() {
   local collection="$1"
   # Suite setup uses the local pool gate; dedicated tests cover RunQuota itself.
-  if ! ./build/bin/repro build --tool-provisioning=path --daemon=off --no-runquota "${collection}"; then
+  local repro_exe="./build/bin/repro${exe_ext}"
+  if [[ -n "${exe_ext}" ]]; then
+    cp -f "./build/bin/repro${exe_ext}" "./build/bin/repro_run${exe_ext}"
+    repro_exe="./build/bin/repro_run${exe_ext}"
+  fi
+  if ! "${repro_exe}" build --tool-provisioning=path --daemon=off --no-runquota "${collection}"; then
+
     report_path=".repro/build/repro/build-report.json"
     if [[ -f "${report_path}" ]]; then
       printf '\n=== Failed actions for %s (from %s) ===\n' "${collection}" "${report_path}" >&2

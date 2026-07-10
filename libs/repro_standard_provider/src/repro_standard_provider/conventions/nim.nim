@@ -1539,6 +1539,31 @@ proc collectLibraries(projectRoot, source: string): seq[NimLibraryTarget] =
       kind: lib.kind,
       package: owningPackage))
 
+  # Auto-Discovery of Bare Packages:
+  for use in usesEntries:
+    let pkgName = use.package
+    if packageOwnsNimToolchain(usesEntries, pkgName, source):
+      var declaresMembers = false
+      for row in ownership:
+        if row.package == pkgName:
+          declaresMembers = true
+          break
+
+      if not declaresMembers:
+        let autoPath = projectRoot / "src" / (pkgName & ".nim")
+        if fileExists(autoPath):
+          var alreadyAdded = false
+          for item in result:
+            if item.name == pkgName:
+              alreadyAdded = true
+              break
+          if not alreadyAdded:
+            result.add(NimLibraryTarget(
+              name: pkgName,
+              sourceFile: autoPath,
+              kind: nlkBoth,
+              package: pkgName))
+
 # ---------------------------------------------------------------------------
 # Cross-language C/C++ helpers (mixed-workspace support).
 #
@@ -2829,6 +2854,10 @@ proc nimEmitFragment(projectRoot: string;
                   packageNimUpstream[lib.package] = @[]
                 packageNimUpstream[lib.package].add(nimUp)
         discard target(lib.name, allActions)
+        registerBuildTargetExtension(lib.name, NimPackageExtension(
+          name: lib.name,
+          srcDir: lib.sourceFile.splitPath.head
+        ))
       # Resolve dep edges for each entrypoint: the set of libraries
       # imported by the executable's package, in declaration order.
       # Both Nim and C/C++ deps are looked up here — the schema-by-
