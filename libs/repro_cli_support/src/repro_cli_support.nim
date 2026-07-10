@@ -13040,7 +13040,44 @@ proc computeDepIntegrity*(repoAbsPath, headSha: string): string =
     return gitObjectMultihash(gitObjectFormatOf(repoAbsPath), headSha)
   narStyleTreeMultihash(collectTreeEntries(repoAbsPath))
 
-proc lockedDepsForWorkspace(workspaceRoot: string): seq[LockedDep] =
+proc usesProducerLockedDep(selector, root: string;
+                           existingDeps: seq[LockedDep]): Option[LockedDep] =
+  ## FUP-M — resolve a recipe ``uses:`` producer SELECTOR to a locked sibling
+  ## dependency so ``repro lock refresh`` carries the declared cross-repo
+  ## producer edge in the committed lock (the bug: refresh previously dropped
+  ## every ``uses:`` sibling, writing a self-only ``deps`` that would not
+  ## resolve on a lock-only checkout).
+  ##
+  ## A selector whose checkout is DISCOVERABLE on disk (a develop-override
+  ## checkout OR an on-disk workspace sibling — ``discoverProducerSourceRoot``)
+  ## is RE-PINNED from its live git facts. A selector present only in the
+  ## EXISTING committed lock (its checkout not present here) carries that pin
+  ## forward unchanged, preserving pinned revisions during a refresh. A selector
+  ## that names NO workspace producer — a plain toolchain/host ``uses:`` such as
+  ## ``nim`` / ``gcc`` — yields ``none`` and is not locked.
+  if selector.len == 0: return none(LockedDep)
+  let srcRoot =
+    try: discoverProducerSourceRoot(selector, root)
+    except CatchableError: ""
+  if srcRoot.len > 0 and dirExists(extendedPath(srcRoot)):
+    let depAbs = absolutePath(srcRoot)
+    let facts = committedLockRepoFacts(depAbs)
+    let rel = relativePath(depAbs, root).replace('\\', '/')
+    return some(LockedDep(
+      name: selector, path: rel,
+      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+        gitRef: facts.branch, revision: facts.headSha),
+      integrity: computeDepIntegrity(depAbs, facts.headSha),
+      version: "", visibility: "public", participation: "",
+      depends: @[], groups: @[]))
+  # Not discoverable on disk — carry an existing VCS lock pin forward if present.
+  for d in existingDeps:
+    if d.name == selector and d.coordinates.kind == ckVcs:
+      return some(d)
+  none(LockedDep)
+
+proc lockedDepsForWorkspace(workspaceRoot: string;
+                            usesSelectors: seq[string] = @[]): seq[LockedDep] =
   ## MO-8 — observe the workspace's participating repos and produce a
   ## ``LockedDep`` per dependency, each with checkout COORDINATES (vcs
   ## url/ref/revision) and a genuinely-computed INTEGRITY multihash. The root
@@ -13049,6 +13086,14 @@ proc lockedDepsForWorkspace(workspaceRoot: string): seq[LockedDep] =
   ## develop-override deps one level up) follow. ``repro lock refresh``
   ## serializes these into the v2 committed lock so a lock-file-only workspace
   ## — including its sibling develop deps — is fully self-describing.
+  ##
+  ## FUP-M — ``usesSelectors`` (the recipe's declared ``uses:`` producer
+  ## selectors) fold each cross-repo SOURCE sibling into ``deps`` too. Before
+  ## this, a ``uses:``-only sibling (present neither under ``deps/…`` nor in
+  ## ``.repro/develop-overrides.toml``) was silently dropped by refresh — the
+  ## lock resolved by the solver carried the sibling in ``packages`` but the
+  ## unified ``deps`` set omitted it, so a lock-only build could not resolve the
+  ## producer graph.
   result = @[]
   let root = absolutePath(workspaceRoot)
   let rootFacts = committedLockRepoFacts(root)
@@ -13056,8 +13101,42 @@ proc lockedDepsForWorkspace(workspaceRoot: string): seq[LockedDep] =
   let bare = extractFilename(root.strip(
     leading = false, trailing = true, chars = {'/', '\\'}))
   let rootName = if bare.len > 0: bare else: "workspace"
+  # Existing committed lock — the carry-forward source for a ``uses:`` sibling
+  # that is pinned but not checked out here.
+  var existingDeps: seq[LockedDep] = @[]
+  let existingLockP = committedLockPath(root)
+  if fileExists(extendedPath(existingLockP)):
+    try: existingDeps = parseLockedDependencies(
+      readFile(extendedPath(existingLockP))).deps
+    except CatchableError: discard
+  # Sibling deps: the develop-mode discovery set FIRST, then the recipe's
+  # ``uses:`` producer siblings folded in (deduped by path and name).
+  var siblingDeps: seq[LockedDep] = @[]
+  var seenPaths: seq[string] = @[]
+  var seenNames: seq[string] = @[]
+  for d in nested:
+    let depAbs = root / d.path
+    let facts = committedLockRepoFacts(depAbs)
+    siblingDeps.add(LockedDep(
+      name: d.name, path: d.path,
+      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+        gitRef: facts.branch, revision: facts.headSha),
+      integrity: computeDepIntegrity(depAbs, facts.headSha),
+      version: "", visibility: "public", participation: "",
+      depends: @[], groups: @[]))
+    seenPaths.add(d.path)
+    seenNames.add(d.name)
+  for selector in usesSelectors:
+    if selector in seenNames: continue
+    let depOpt = usesProducerLockedDep(selector, root, existingDeps)
+    if depOpt.isNone: continue
+    let dep = depOpt.get()
+    if dep.path in seenPaths or dep.name in seenNames: continue
+    siblingDeps.add(dep)
+    seenPaths.add(dep.path)
+    seenNames.add(dep.name)
   var rootDepends: seq[string] = @[]
-  for d in nested: rootDepends.add(d.name)
+  for d in siblingDeps: rootDepends.add(d.name)
   result.add(LockedDep(
     name: rootName, path: ".",
     coordinates: Coordinates(kind: ckVcs, url: rootFacts.originUrl,
@@ -13065,16 +13144,8 @@ proc lockedDepsForWorkspace(workspaceRoot: string): seq[LockedDep] =
     integrity: computeDepIntegrity(root, rootFacts.headSha),
     version: "", visibility: "public", participation: "",
     depends: rootDepends, groups: @[]))
-  for d in nested:
-    let depAbs = root / d.path
-    let facts = committedLockRepoFacts(depAbs)
-    result.add(LockedDep(
-      name: d.name, path: d.path,
-      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
-        gitRef: facts.branch, revision: facts.headSha),
-      integrity: computeDepIntegrity(depAbs, facts.headSha),
-      version: "", visibility: "public", participation: "",
-      depends: @[], groups: @[]))
+  for d in siblingDeps:
+    result.add(d)
 
 proc visibilityFromLockString(s: string): WorkspaceVisibility =
   case s.strip().toLowerAscii()
@@ -37817,7 +37888,8 @@ const SolverInputsEmitEnvVar = "REPRO_EMIT_SOLVER_INPUTS"
 
 proc solverInputsFromCompiledProvider(projectDir: string): Option[tuple[
     variants: seq[variant_encoder.VariantDecl];
-    packages: seq[PackageDecl]; text: string]] =
+    packages: seq[PackageDecl]; text: string;
+    usesSelectors: seq[string]]] =
   ## MO-12 — obtain solver inputs from the compiled project provider. Compiles
   ## the project's ``repro.nim`` / ``reprobuild.nim`` recipe to a provider
   ## binary and runs it with ``REPRO_EMIT_SOLVER_INPUTS`` set so module-init's
@@ -37830,7 +37902,7 @@ proc solverInputsFromCompiledProvider(projectDir: string): Option[tuple[
   ## ``repro.solver`` sidecar. All scratch lives under the system temp dir, so
   ## refresh still writes NO build artifacts into the project tree.
   result = none(tuple[variants: seq[variant_encoder.VariantDecl];
-    packages: seq[PackageDecl]; text: string])
+    packages: seq[PackageDecl]; text: string; usesSelectors: seq[string]])
   let match =
     try: resolveProjectFile(projectDir)
     except CatchableError: return result
@@ -37861,6 +37933,16 @@ proc solverInputsFromCompiledProvider(projectDir: string): Option[tuple[
     # falls straight back to the sidecar without paying for it.
     if artifact.projectInterface.toolUses.len == 0:
       return result
+    # FUP-M — capture the recipe's declared ``uses:`` producer selectors so
+    # ``lockedDepsForWorkspace`` can fold each sibling PRODUCER edge into the
+    # committed lock's ``deps``. A toolchain / host ``uses:`` (``nim`` / ``gcc``)
+    # that names no on-disk sibling producer is resolved to ``none`` there, so
+    # only genuine cross-repo source siblings become locked deps.
+    var usesSelectors: seq[string] = @[]
+    for useDef in artifact.projectInterface.toolUses:
+      if useDef.packageSelector.len > 0 and
+          useDef.packageSelector notin usesSelectors:
+        usesSelectors.add(useDef.packageSelector)
     let providerBinaryPath = scratchRoot / "provider" / "project-provider"
     let provider = compileProviderBinary(modulePath, providerBinaryPath,
       artifact.interfaceFingerprint, "", compileWorkDir, scratchDir)
@@ -37888,30 +37970,35 @@ proc solverInputsFromCompiledProvider(projectDir: string): Option[tuple[
     if parsed.packages.len == 0 and parsed.variants.len == 0:
       return result
     return some((variants: parsed.variants, packages: parsed.packages,
-                 text: text))
+                 text: text, usesSelectors: usesSelectors))
   except CatchableError:
     return result
 
 proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
     found: bool; variants: seq[variant_encoder.VariantDecl];
-    packages: seq[PackageDecl]; text: string; source: string] =
+    packages: seq[PackageDecl]; text: string; source: string;
+    usesSelectors: seq[string]] =
   ## MO-12 — resolve the solver inputs for ``lock refresh`` / ``validate``,
   ## PREFERRING the compiled project provider (the real recipe's solve) and
   ## falling back to the ``repro.solver`` sidecar. An explicit ``--inputs``
   ## override always selects that sidecar file verbatim (provider skipped) so
   ## the historical override semantics are preserved.
+  ##
+  ## FUP-M — ``usesSelectors`` carries the recipe's declared ``uses:`` producer
+  ## selectors (provider path only; the sidecar has none) so ``lock refresh``
+  ## folds each sibling PRODUCER edge into the committed lock's ``deps``.
   if inputsOverride.len == 0:
     let fromProvider = solverInputsFromCompiledProvider(projectDir)
     if fromProvider.isSome:
       let p = fromProvider.get()
-      return (true, p.variants, p.packages, p.text, "provider")
+      return (true, p.variants, p.packages, p.text, "provider", p.usesSelectors)
   let inputsP =
     if inputsOverride.len > 0: absolutePath(inputsOverride)
     else: solverInputsPath(projectDir)
   if fileExists(extendedPath(inputsP)):
     let loaded = loadSolverInputsFile(inputsP)
-    return (true, loaded.variants, loaded.packages, loaded.text, "sidecar")
-  return (false, @[], @[], "", "")
+    return (true, loaded.variants, loaded.packages, loaded.text, "sidecar", @[])
+  return (false, @[], @[], "", "", @[])
 
 proc runReproLockRefresh(rest: openArray[string]): int =
   ## ``repro lock refresh`` — re-solve the project's solver inputs and
@@ -37971,7 +38058,7 @@ proc runReproLockRefresh(rest: openArray[string]): int =
   # integrity observed from the workspace's participating repos.
   var ld = lockedDepsFromSolved(solvedLock)
   ld.schema = SolvedGraphLockSchemaV2
-  ld.deps = lockedDepsForWorkspace(projectDir)
+  ld.deps = lockedDepsForWorkspace(projectDir, resolved.usesSelectors)
   # MO-11 — lift each store / registry solved package into a first-class
   # ``LockedDep`` (coordinates + integrity) alongside the workspace repo deps.
   ld.deps.add(lockedDepsFromPackages(ld.packages, platform))
@@ -38043,7 +38130,8 @@ proc runReproLockValidate(rest: openArray[string]): int =
   block staleCheck:
     var resolved: tuple[found: bool;
       variants: seq[variant_encoder.VariantDecl];
-      packages: seq[PackageDecl]; text: string; source: string]
+      packages: seq[PackageDecl]; text: string; source: string;
+      usesSelectors: seq[string]]
     try:
       resolved = resolveRefreshSolverInputs(projectDir, inputsOverride)
     except CatchableError as e:

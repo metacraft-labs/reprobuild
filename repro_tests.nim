@@ -6558,6 +6558,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_lock_refresh_folds_uses_sibling_producer_deps.nim",
+    binary: "build/test-bin/t_lock_refresh_folds_uses_sibling_producer_deps",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_lock_store_backend_roundtrip_each_backend.nim",
     binary: "build/test-bin/t_lock_store_backend_roundtrip_each_backend",
     defines: @[],
