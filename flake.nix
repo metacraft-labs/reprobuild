@@ -25,7 +25,7 @@
       #
       # Pinned to the hardened io-mon revision validated for this retirement
       # campaign.
-      url = "github:metacraft-labs/io-mon/387fb0fce53ccf55bc458a2cd2d6ab37b3e61dc5";
+      url = "github:metacraft-labs/io-mon/4b315d437d6edbccc9d2a19756ca8466d58d7202";
       flake = false;
     };
     nim-shm-queue-src = {
@@ -79,7 +79,7 @@
       # the store pin — not the sibling — is what ``just build`` (and CI)
       # actually compiles the shim from; the old pin therefore produced a
       # crashing shim even though the local sibling was already hardened.
-      url = "github:metacraft-labs/nim-stackable-hooks/e637f810be073d3dc94b4768d114b5021535361e";
+      url = "github:metacraft-labs/nim-stackable-hooks/30f69b6ca69c7f06c9a9946b77a85a09f6e3881d";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
