@@ -1,0 +1,9 @@
+schema = "reprobuild.solved-graph-lock.v2"
+
+[lock]
+platform = "amd64-windows"
+optimal = false
+inputs_digest = "fnv1a64:b9d89352845e1c97"
+variants = []
+packages = [{ name = "gcc", version = "12.0.0", source = "gcc" }, { name = "just", version = "1.0.0", source = "just" }, { name = "nim", version = "2.2.0", source = "nim" }, { name = "python3", version = "1.0.0", source = "python3" }, { name = "reprobuild", version = "0.1.0", source = "reprobuild" }, { name = "runquotad", version = "1.0.0", source = "runquotad" }, { name = "sh", version = "1.0.0", source = "sh" }]
+deps = [{ name = "reprobuild", path = ".", coord_kind = "vcs", url = "https://github.com/metacraft-labs/reprobuild", ref = "dev", revision = "e454c1f69f32da4ef99131b37ca60196f6c2f0fa", integrity = "git-sha1:e454c1f69f32da4ef99131b37ca60196f6c2f0fa", version = "", visibility = "public", participation = "", depends = "", groups = "" }]
