@@ -1,0 +1,148 @@
+name: Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-release:
+    name: ${{ matrix.os-name }} (${{ matrix.arch }}) Release Build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os-name: linux
+            runner: [self-hosted, nixos]
+            env-flavor: nix
+            platform: linux
+            arch: x86_64
+            archive_ext: tar.gz
+          - os-name: macos
+            runner: [self-hosted, aarch64-darwin]
+            env-flavor: nix
+            platform: darwin
+            arch: aarch64
+            archive_ext: tar.gz
+          - os-name: windows
+            runner: [self-hosted, Windows, X64, nixos-equivalent]
+            env-flavor: windows-diy
+            platform: windows
+            arch: x86_64
+            archive_ext: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Mint a GitHub App installation token via the CI Token Provider
+      # app so the setup-dev-env / clone-siblings actions can clone private
+      # metacraft-labs repos (codetracer, runquota, etc.).
+      - name: Mint installation token for cross-repo sibling clones
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      # Setup dev environment using the shared composite workflow.
+      # Automatically clones all sibling repos defined in .github/sibling-repos.
+      - name: Setup dev environment
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+        with:
+          env-flavor: ${{ matrix.env-flavor }}
+          gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+          flake-override-inputs: |
+            runquota-src=../runquota
+            io-mon-src=../io-mon
+            nim-shm-queue-src=../nim-shm-queue
+            stackable-hooks-src=../nim-stackable-hooks
+            reprobuild-test-adapters-src=../reprobuild-test-adapters
+
+
+      # Clone status-im/nim-bearssl manually on Windows (since it belongs to a
+      # foreign organization and is not resolvable by metacraft-labs clone-siblings).
+      - name: Clone nim-bearssl (Windows)
+        if: matrix.os-name == 'windows'
+        shell: pwsh
+        run: |
+          if (Test-Path -Path ../nim-bearssl) { Remove-Item -Recurse -Force ../nim-bearssl }
+          git clone --depth 1 --recurse-submodules https://github.com/status-im/nim-bearssl.git ../nim-bearssl
+
+      # Build all release applications and monitor shims using repro.nim/repro.lock
+      - name: Bootstrap and Build (POSIX)
+        if: matrix.os-name != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dev-exec just bootstrap
+          dev-exec ./build/bin/repro build --tool-provisioning=path --daemon=off --no-runquota .#reprobuild.build_apps
+
+      - name: Bootstrap and Build (Windows)
+        if: matrix.os-name == 'windows'
+        shell: pwsh
+        run: |
+          # env.ps1 from setup-dev-env is already sourced in GITHUB_ENV/PATH
+          Push-Location ../runquota
+          just build
+          Pop-Location
+          $runquotaRoot = (Resolve-Path ../runquota).Path
+          $runquotaBin = Join-Path $runquotaRoot "build\bin"
+          Add-Content -Path $env:GITHUB_PATH -Value $runquotaBin
+          $env:Path = $runquotaBin + [IO.Path]::PathSeparator + $env:Path
+          just bootstrap
+          .\build\bin\repro.exe build --tool-provisioning=path --daemon=off --no-runquota .#reprobuild.build_apps
+
+
+      # Package the artifacts preserving the bin/ and lib/ structures
+      - name: Package release assets (POSIX)
+        if: matrix.os-name != 'windows'
+        shell: bash
+        run: |
+          dev-exec bash -c '
+            set -euo pipefail
+            version=$(grep "^version\s*=" reprobuild.nimble | sed -E "s/version\s*=\s*\"([^\"]+)\"/\1/")
+            pkg_name="reprobuild-${version}-${{ matrix.platform }}-${{ matrix.arch }}"
+
+            mkdir -p "${pkg_name}/bin" "${pkg_name}/lib"
+            cp -a build/bin/* "${pkg_name}/bin/"
+            cp -a build/lib/* "${pkg_name}/lib/"
+
+            tar -czf "${pkg_name}.tar.gz" "${pkg_name}"
+            echo "ASSET_PATH=${pkg_name}.tar.gz" >> "$GITHUB_ENV"
+          '
+
+      - name: Package release assets (Windows)
+        if: matrix.os-name == 'windows'
+        shell: pwsh
+        run: |
+          $version = (Get-Content reprobuild.nimble | Select-String -Pattern 'version\s*=\s*"([^"]+)"').Matches.Groups[1].Value
+          $pkg_name = "reprobuild-${version}-${{ matrix.platform }}-${{ matrix.arch }}"
+
+          New-Item -ItemType Directory -Force -Path "${pkg_name}\bin"
+          New-Item -ItemType Directory -Force -Path "${pkg_name}\lib"
+          Copy-Item -Path "build\bin\*" -Destination "${pkg_name}\bin\" -Recurse
+          Copy-Item -Path "build\lib\*" -Destination "${pkg_name}\lib\" -Recurse
+
+          Compress-Archive -Path "${pkg_name}" -DestinationPath "${pkg_name}.zip" -Force
+          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_PATH=${pkg_name}.zip"
+
+      # Upload to GitHub Releases when a version tag is pushed
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: ${{ env.ASSET_PATH }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

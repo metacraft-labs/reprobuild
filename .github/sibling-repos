@@ -32,6 +32,8 @@ nim-termctl=dev
 # recipe-interface extractor that reads codetracer/reprobuild.nim needs it on
 # the --path as `../reprobuild-test-adapters/src`. Mainline branch is `main`.
 reprobuild-test-adapters=main
+reprobuild-ct-test-runner=main
+
 
 # codetracer's incremental test engine (src/ct_test/incremental/io_mon_capture.nim
 # etc.) imports `io_mon` and `stackable_hooks/propagation`; codetracer's .envrc
@@ -40,3 +42,9 @@ reprobuild-test-adapters=main
 # used by this retirement campaign.
 io-mon=8b05657c75ccf389304ea9ffeb0433d472dccb3d
 nim-stackable-hooks=c6cf6ad1ac95201288825970b6ca53f630ea8996
+runquota=dev
+nim-shm-queue=08d87d26067568e980f4356c4abcf2a0d841a310
+repo-workspaces=main
+
+
+

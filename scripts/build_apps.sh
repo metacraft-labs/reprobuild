@@ -422,7 +422,8 @@ case "$(uname -s)" in
     fi
     if [ -n "${sqlite_src_dll}" ]; then
       cp -f "${sqlite_src_dll}" build/bin/sqlite3_64.dll
-      echo "Staged sqlite3_64.dll from ${sqlite_src_dll} -> build/bin/sqlite3_64.dll"
+      cp -f "${sqlite_src_dll}" build/bin/sqlite3.dll
+      echo "Staged sqlite3_64.dll and sqlite3.dll from ${sqlite_src_dll} -> build/bin/"
     else
       # TODO(Windows sqlite provisioning): the Windows Nim distribution ships
       # sqlite3_64.dll in its own tree; ensure-nim.ps1's provisioned Nim under

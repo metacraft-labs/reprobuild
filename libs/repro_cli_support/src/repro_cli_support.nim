@@ -1200,6 +1200,8 @@ proc resolveMonitorShimLibPath(): string =
     let candidate = exePath.parentDir.parentDir / "lib" /
       ("librepro_monitor_shim." & dllExt)
     if fileExists(extendedPath(candidate)):
+      if getEnv("REPROBUILD_SOURCE_ROOT").len == 0:
+        putEnv("REPROBUILD_SOURCE_ROOT", exePath.parentDir.parentDir)
       return candidate
   let sourceRoot = getEnv("REPROBUILD_SOURCE_ROOT")
   if sourceRoot.len > 0:
@@ -11111,7 +11113,7 @@ const
   DaemonExplicitForwardedEnvVars* = [
     "PATH", "HOME", "USER", "TMPDIR", "TEMP", "TMP",
     "RUNQUOTA_SOCKET", "RUNQUOTAD_BIN", "RUNQUOTA_BIN",
-    "REPROBUILD_STORE_ROOT",
+    "REPROBUILD_STORE_ROOT", "REPROBUILD_SOURCE_ROOT",
     "REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_MAX_PARALLELISM",
     "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
     "REPROBUILD_AUTO_RUNQUOTA",
