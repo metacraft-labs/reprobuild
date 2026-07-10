@@ -918,9 +918,14 @@ package reprobuild:
     # are inherited from the caller. Both the flake.nix and the new
     # nixpkgs-format package.nix at nix/pkgs/by-name/re/reprobuild/
     # set them before invoking this script.
+    let buildAppsCacheable = when defined(windows): false else: true
+    let buildAppsPolicy = when defined(windows): makeDepfilePolicy("build/dummy.d") else: automaticMonitorPolicy()
+
     shell(
       command = "bash scripts/build_apps.sh",
       actionId = "reprobuild.build_apps",
+      cacheable = buildAppsCacheable,
+      dependencyPolicy = buildAppsPolicy,
       extraInputs = @[
         "apps/entrypoints.txt",
         "apps",

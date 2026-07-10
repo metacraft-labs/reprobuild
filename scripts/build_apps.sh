@@ -194,6 +194,9 @@ mapfile -t repro_runtime_passl < <(
 )
 
 while read -r name path extra_flags; do
+  name="${name%$'\r'}"
+  path="${path%$'\r'}"
+  extra_flags="${extra_flags%$'\r'}"
   case "${name}" in
     ""|\#*) continue ;;
   esac
@@ -421,9 +424,11 @@ case "$(uname -s)" in
       fi
     fi
     if [ -n "${sqlite_src_dll}" ]; then
-      cp -f "${sqlite_src_dll}" build/bin/sqlite3_64.dll
-      cp -f "${sqlite_src_dll}" build/bin/sqlite3.dll
-      echo "Staged sqlite3_64.dll and sqlite3.dll from ${sqlite_src_dll} -> build/bin/"
+      if [ ! "${sqlite_src_dll}" -ef build/bin/sqlite3_64.dll ]; then
+        cp -f "${sqlite_src_dll}" build/bin/sqlite3_64.dll
+        cp -f "${sqlite_src_dll}" build/bin/sqlite3.dll
+        echo "Staged sqlite3_64.dll and sqlite3.dll from ${sqlite_src_dll} -> build/bin/"
+      fi
     else
       # TODO(Windows sqlite provisioning): the Windows Nim distribution ships
       # sqlite3_64.dll in its own tree; ensure-nim.ps1's provisioned Nim under
