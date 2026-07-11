@@ -125,6 +125,7 @@ done
 # sudo applies its host secure_path, which intentionally excludes Repro's
 # provisioned tool profile. Preserve the resolved binaries across that
 # boundary by invoking the commands through their absolute paths.
+QEMU_IMG_BIN="$(command -v qemu-img)"
 QEMU_NBD_BIN="$(command -v qemu-nbd)"
 PARTPROBE_BIN="$(command -v partprobe)"
 MODPROBE_BIN="$(command -v modprobe)"
@@ -181,7 +182,8 @@ cleanup() {
     fi
   done
   if [ -n "$NBD_DEV" ] && [ "$NBD_CONNECTED" = "1" ]; then
-    "$SUDO" "$QEMU_NBD_BIN" --disconnect "$NBD_DEV" 2>/dev/null || true
+    "$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$QEMU_NBD_BIN" \
+      --disconnect "$NBD_DEV" 2>/dev/null || true
   fi
   exit $rc
 }
@@ -320,14 +322,17 @@ VENDORED_KERNEL="$REPO_ROOT/recipes/reproos-iso/vendor/vmlinuz-debian-netinst"
 # staging pipeline packs the boot-from-disk /init instead.
 DISK_INITRD_CACHE="${REPRO_DISK_INITRD_CACHE:-/var/cache/reprobuild/reproos-image/initrd.img-disk}"
 STAGE_BOOT_MARKER="$STAGE_DIR/.repro-boot-seeded"
-if [ ! -f "$STAGE_BOOT_MARKER" ]; then
+if [ ! -f "$STAGE_BOOT_MARKER" ] || \
+   [ ! -s "$STAGE_DIR/boot/vmlinuz" ] || \
+   [ ! -s "$STAGE_DIR/boot/initrd.img" ]; then
   echo "[build-reproos-image] seeding $STAGE_DIR/boot with kernel + boot-from-disk initrd"
   mkdir -p "$STAGE_DIR/boot"
   if [ -f "$VENDORED_KERNEL" ]; then
     cp "$VENDORED_KERNEL" "$STAGE_DIR/boot/vmlinuz"
     echo "[build-reproos-image] vmlinuz: $(ls -la "$STAGE_DIR/boot/vmlinuz" | awk '{print $5}') bytes (from iso recipe vendor)"
   else
-    echo "[build-reproos-image] WARNING: $VENDORED_KERNEL missing; run \`pwsh recipes/reproos-iso/vendor/fetch.ps1\` first" >&2
+    echo "[build-reproos-image] $VENDORED_KERNEL missing; run \`pwsh recipes/reproos-iso/vendor/fetch.ps1\` first" >&2
+    exit 67
   fi
   if [ ! -f "$DISK_INITRD_CACHE" ]; then
     echo "[build-reproos-image] generating boot-from-disk initrd via build-initramfs.sh (REPRO_INITRAMFS_INIT=init-disk)"
@@ -416,7 +421,7 @@ echo "[build-reproos-image] disko json: $DISKO_JSON"
 # ---------------------------------------------------------------
 TMP_QCOW2="$WORK/reproos-installed.qcow2"
 rm -f "$TMP_QCOW2"
-qemu-img create -f qcow2 "$TMP_QCOW2" "${DISK_SIZE_GB}G" \
+LD_LIBRARY_PATH= "$QEMU_IMG_BIN" create -f qcow2 "$TMP_QCOW2" "${DISK_SIZE_GB}G" \
   || { echo "[build-reproos-image] qemu-img create failed" >&2; exit 68; }
 echo "[build-reproos-image] qcow2 created: $TMP_QCOW2 (${DISK_SIZE_GB}G)"
 
@@ -443,7 +448,8 @@ if [ -z "$NBD_DEV" ]; then
   exit 68
 fi
 echo "[build-reproos-image] qemu-nbd --connect=$NBD_DEV $TMP_QCOW2"
-"$SUDO" "$QEMU_NBD_BIN" --connect="$NBD_DEV" "$TMP_QCOW2" \
+"$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$QEMU_NBD_BIN" \
+  --connect="$NBD_DEV" "$TMP_QCOW2" \
   || { echo "[build-reproos-image] qemu-nbd connect failed" >&2; exit 68; }
 NBD_CONNECTED=1
 
@@ -465,7 +471,17 @@ sleep 2
 # only the var we ask for.
 # ---------------------------------------------------------------
 echo "[build-reproos-image] repro disk apply --device $NBD_DEV --confirm $DISKO_JSON"
-"$SUDO" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$REPRO_BIN" disk apply --device "$NBD_DEV" --confirm "$DISKO_JSON" \
+DISK_APPLY_PATH="$PATH"
+E2FSPROGS_SBIN="$REPO_ROOT/recipes/packages/source/e2fsprogs/.repro/output/install/usr/sbin"
+DISK_APPLY_LD="$REPO_ROOT/recipes/packages/source/e2fsprogs/.repro/output/install/usr/lib"
+DISK_APPLY_LD="$DISK_APPLY_LD:$REPO_ROOT/recipes/packages/source/parted/.repro/output/install/usr/lib"
+DISK_APPLY_LD="$DISK_APPLY_LD:$REPO_ROOT/recipes/packages/source/util-linux/.repro/output/install/usr/lib"
+DISK_APPLY_LD="$DISK_APPLY_LD:${LD_LIBRARY_PATH:-}"
+if [ -x "$E2FSPROGS_SBIN/mkfs.ext4" ]; then
+  DISK_APPLY_PATH="$E2FSPROGS_SBIN:$DISK_APPLY_PATH"
+fi
+"$SUDO" PATH="$DISK_APPLY_PATH" LD_LIBRARY_PATH="$DISK_APPLY_LD" \
+  "$REPRO_BIN" disk apply --device "$NBD_DEV" --confirm "$DISKO_JSON" \
   || { echo "[build-reproos-image] disk apply failed" >&2; exit 69; }
 
 # Re-scan the partition table.

@@ -117,6 +117,20 @@ const reproosImageRuntimeTools = @[
   "tail",
 ]
 
+const reproosImageRootfsDeps = @[
+  "sway",
+  "sddm",
+  "systemd",
+  "util-linux",
+  "kmod",
+  "dbus",
+  "sudo",
+  "e2fsprogs",
+  "btrfs-progs",
+  "shadow-utils",
+  "iana-tzdata",
+]
+
 package reproosImage:
   defaultToolProvisioning "path"
 
@@ -132,6 +146,19 @@ package reproosImage:
     # semantic slot.
     "sh"
     "bash"
+
+  buildDeps:
+    "sway"
+    "sddm"
+    "systemd"
+    "util-linux"
+    "kmod"
+    "dbus"
+    "sudo"
+    "e2fsprogs"
+    "btrfs-progs"
+    "shadow-utils"
+    "iana-tzdata"
 
   runtimeDeps:
     # M9.R.53: enumerate every bare-name host tool
@@ -235,4 +262,4 @@ package reproosImage:
     # entirely (the ``recordToolInvocation`` seam does not
     # auto-populate the slot from the package-level ``uses:`` block).
     appendRegisteredActionToolIdentityRefs(buildImageAction.id,
-      reproosImageRuntimeTools)
+      reproosImageRuntimeTools & reproosImageRootfsDeps)

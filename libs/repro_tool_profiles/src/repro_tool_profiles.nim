@@ -254,7 +254,7 @@ const
   # so the engine can thread them onto per-action env vars at fork time.
   ArtifactVersion = 7'u16
   NixMaterializationMagic = [byte(ord('R')), byte(ord('B')), byte(ord('N')), byte(ord('M'))]
-  NixMaterializationVersion = 1'u16
+  NixMaterializationVersion = 2'u16
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -1132,6 +1132,24 @@ proc addUniquePath*(dst: var seq[string]; value: string)
   ## further down. Resolved here so ``resolveNixTool`` can reuse the
   ## same dedup/exists-probe helper for nix-store aux-path population.
 
+proc expandNixPropagatedStorePaths*(paths: var seq[string]) =
+  ## Include split-output runtime and development dependencies declared
+  ## by Nix outputs. Their lib/include/pkg-config directories must feed
+  ## the same action environment as the selected output.
+  var index = 0
+  while index < paths.len:
+    let supportDir = paths[index] / "nix-support"
+    for manifestName in ["propagated-build-inputs",
+                         "propagated-native-build-inputs"]:
+      let manifest = supportDir / manifestName
+      if not fileExists(extendedPath(manifest)):
+        continue
+      for candidate in readFile(extendedPath(manifest)).splitWhitespace:
+        if not dirExists(extendedPath(candidate)) or candidate in paths:
+          continue
+        paths.add(candidate)
+    inc index
+
 when defined(windows):
   proc resolveNixTool*(useDef: InterfaceToolUse;
                        storeRoot = "";
@@ -1317,6 +1335,8 @@ else:
         raise newException(OSError,
           "tool-resolution failed: nix package realized outputs without " &
           plan.declaredExecutablePath & ": " & realized.join(", "))
+
+    expandNixPropagatedStorePaths(realized)
 
     result = PathOnlyToolProfile(
       installMethod: "nix",
@@ -4158,6 +4178,19 @@ proc m9r14fDepRecipeName(useDef: InterfaceToolUse): string =
     return m9r14fStripConstraint(useDef.rawConstraint)
   ""
 
+proc m9r14fDepRecipeNames(useDef: InterfaceToolUse): seq[string] =
+  ## Return every plausible sibling-recipe name for a dependency.
+  ## Library packages commonly provision a concrete artifact name
+  ## (for example ``libblkid.so``) while their source recipe is named
+  ## after the package selector (``util-linux``).
+  for candidate in [
+      m9r14fDepRecipeName(useDef),
+      m9r14fStripConstraint(useDef.packageSelector),
+      m9r14fStripConstraint(useDef.rawConstraint)]:
+    if candidate.len == 0 or candidate in result:
+      continue
+    result.add(candidate)
+
 proc m9r14fLoadInterfaceToolUses*(recipeDir: string): seq[InterfaceToolUse] =
   ## DSL-port M9.R.14f.1 — read the sibling recipe's
   ## ``project-interface.rbsz`` and return its ``toolUses`` (which carry
@@ -4196,14 +4229,15 @@ proc populateFromSourceSearchPathsImpl(profile: var PathOnlyToolProfile;
   # are silently skipped — they don't contribute install-tree search
   # paths anyway.
   for useDef in m9r14fLoadInterfaceToolUses(recipeDir):
-    let depName = m9r14fDepRecipeName(useDef)
-    if depName.len == 0: continue
-    if depName in fromSourceCycleBrokenTools: continue
-    let depDir = recipeRoot / depName
-    if not fileExists(extendedPath(depDir / "repro.nim")):
-      continue
-    populateFromSourceSearchPathsImpl(profile, depDir, recipeRoot,
-      visited, depth + 1)
+    for depName in m9r14fDepRecipeNames(useDef):
+      if depName in fromSourceCycleBrokenTools:
+        continue
+      let depDir = recipeRoot / depName
+      if not fileExists(extendedPath(depDir / "repro.nim")):
+        continue
+      populateFromSourceSearchPathsImpl(profile, depDir, recipeRoot,
+        visited, depth + 1)
+      break
 
 proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
                                     recipeDir: string;
@@ -4462,6 +4496,19 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
             if entry.endsWith(".pc"):
               resolved = absolutePath(entry)
               break pcWalk
+  if resolved.len == 0:
+    # Data-only packages such as IANA tzdata intentionally publish no
+    # executable, library, pkg-config file, or CMake config. A regular
+    # file in the realized share tree is sufficient build evidence.
+    block sharedDataWalk:
+      for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+        let shareRoot = recipeDir / prefixSubdir / "share"
+        if not dirExists(extendedPath(shareRoot)):
+          continue
+        for entry in walkDirRec(extendedPath(shareRoot)):
+          if fileExists(extendedPath(entry)):
+            resolved = absolutePath(entry)
+            break sharedDataWalk
   if resolved.len == 0:
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,

@@ -42,13 +42,13 @@ package `mkfs.vfat`:
 
 package `grub-install`:
   provisioning:
-    nixPackage "nixpkgs#grub2", executablePath = "bin/grub-install",
+    nixPackage "nixpkgs#grub2_efi", executablePath = "bin/grub-install",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 
 package `grub-mkconfig`:
   provisioning:
-    nixPackage "nixpkgs#grub2", executablePath = "bin/grub-mkconfig",
+    nixPackage "nixpkgs#grub2_efi", executablePath = "bin/grub-mkconfig",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 

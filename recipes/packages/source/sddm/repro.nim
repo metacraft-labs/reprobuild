@@ -212,6 +212,9 @@ package sddmSource:
     ## pam is the authentication-stack library sddm's greeter consumes
     ## to authenticate logins against ``/etc/pam.d/sddm``.
     "pam >=1.5"
+    ## Session helpers link libsystemd for logind integration even when
+    ## journald logging is disabled.
+    "systemd"
     ## M9.R.15q.8.1 — libxau supplies `xau.pc` which sddm's
     ## `pkg_check_modules(LIBXAU REQUIRED "xau")` probe consumes for
     ## the X11 authentication cookie generation in the greeter's
@@ -269,7 +272,7 @@ package sddmSource:
     ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `cmake_package(...)` constructor.
     setCurrentOwningPackageOverride("sddmSource")
     try:
-      let opts = @[
+      var opts = @[
         # M9.R.15q.8.1 — sddm 0.21.0's top-level CMakeLists declares
         # `cmake_minimum_required(VERSION 3.0.2)`. CMake 4.x (the cache's
         # cmake-4.1.2) removed compatibility with CMake < 3.5 and
@@ -286,6 +289,9 @@ package sddmSource:
         "BUILD_WITH_QT6=ON",
         "BUILD_TESTING=OFF",
         "BUILD_MAN_PAGES=OFF",
+        # The image staging script generates the target PAM policy. Do
+        # not let cmake --install write the build host's /etc/pam.d.
+        "INSTALL_PAM_CONFIGURATION=OFF",
         "ENABLE_JOURNALD=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
@@ -304,8 +310,22 @@ package sddmSource:
       # recipe install mirrors + glob /nix/store for libxau / libxcb /
       # libxkbcommon dev outputs supplied by the stdlib stubs.
       var pkgCfgDirs: seq[string] = @[]
-      let recipeRoot = getEnv("REPROBUILD_RECIPE_ROOT",
-        "/opt/repro/reprobuild/recipes/packages/source")
+      let providerRoot = activeProviderProjectRoot()
+      let recipeRoot =
+        if providerRoot.len > 0: parentDir(providerRoot)
+        else: getEnv("REPROBUILD_RECIPE_ROOT",
+          "/opt/repro/reprobuild/recipes/packages/source")
+      # SDDM's bundled FindPAM module does not consistently honor the
+      # action's CMAKE_PREFIX_PATH when PAM uses a lib64 layout. Pin the
+      # two cache entries to the realized sibling mirror.
+      let pamPrefix = recipeRoot / "pam" / ".repro" / "output" /
+        "install" / "usr"
+      let pamInclude = pamPrefix / "include"
+      let pamLibrary = pamPrefix / "lib64" / "libpam.so"
+      if fileExists(pamInclude / "security" / "pam_appl.h"):
+        opts.add("PAM_INCLUDE_DIR=" & pamInclude)
+      if fileExists(pamLibrary):
+        opts.add("PAM_LIBRARY=" & pamLibrary)
       # Sibling from-source pkg-config dirs.
       for sib in walkDir(recipeRoot, relative = false):
         if sib.kind == pcDir:
