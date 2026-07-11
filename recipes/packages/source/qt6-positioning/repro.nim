@@ -146,7 +146,8 @@ package qt6PositioningSource:
         # gen for v1.
         "QT_GENERATE_SBOM=OFF",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", generator = "Ninja",
+        cacheVars = opts, allowSourceWrites = true)
       discard pkg.library("libQt6Positioning")
       discard pkg.library("libQt6PositioningQuick")
     finally:
