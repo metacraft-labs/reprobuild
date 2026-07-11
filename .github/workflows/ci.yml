@@ -240,6 +240,13 @@ jobs:
           #    runs `repro build "$CODETRACER_REPROBUILD_TARGET"`; codetracer's
           #    toolchain comes from its dev shell (direnv).
           direnv allow "$ct_root"
+          # CodeTracer declares these adjacent checkouts as source library
+          # producers. Register the CI clones explicitly so Reprobuild can
+          # splice their exported Nim source roots into the consumer graph.
+          for dep in isonim nim-everywhere nim-agent-harbor nim-agents nim-acp; do
+            dep_root="$(cd "$ct_root/../$dep" && pwd)"
+            ( cd "$ct_root" && "$repro_bin" develop "$dep" --into="$dep_root" )
+          done
           ( cd "$ct_root" && \
             CODETRACER_REPROBUILD_LINUX=1 \
             CODETRACER_REPROBUILD_TARGET=ct \
