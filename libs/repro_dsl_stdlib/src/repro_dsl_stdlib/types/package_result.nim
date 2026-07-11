@@ -1871,6 +1871,8 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
           strippedSnake != strippedKebab:
         script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, strippedSnake) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      if lettersOnly.len > 0 and lettersOnly != strippedLowerName:
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, lettersOnly) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     # M9.R.15e.9 — some autotools projects (Linux-PAM, glibc, util-linux's
     # libuuid path) hardcode ``libdir=/lib64`` in their configure.ac
@@ -1923,6 +1925,8 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
         if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
             strippedSnake != strippedKebab:
           script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, strippedSnake) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        if lettersOnly.len > 0 and lettersOnly != strippedLowerName:
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, lettersOnly) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     script.add("echo \"autotools_package stage-copy: no library candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1")
   else:
