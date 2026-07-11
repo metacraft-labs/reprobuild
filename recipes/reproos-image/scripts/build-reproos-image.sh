@@ -274,6 +274,15 @@ echo "[build-reproos-image] staging rootfs at $STAGE_DIR"
 # is present (set REPRO_FORCE_RESTAGE=1 to bypass).
 STAGE_MARKER="$STAGE_DIR/.repro-stage-complete"
 STAGE_STALE=0
+for stage_input in \
+  "$REPO_ROOT/recipes/reproos-iso/scripts/build-base-rootfs.sh" \
+  "$REPO_ROOT/recipes/reproos-iso/scripts/stage-de-rootfs.sh" \
+  "$REPO_ROOT/recipes/reproos-iso/scripts/relocate-nix-to-repro.sh"; do
+  if [ -f "$STAGE_MARKER" ] && [ "$stage_input" -nt "$STAGE_MARKER" ]; then
+    STAGE_STALE=1
+    break
+  fi
+done
 if [ -f "$STAGE_MARKER" ] && \
    find "$REPO_ROOT/recipes/packages/source" \
      -path '*/.repro/output/install/*' -newer "$STAGE_MARKER" \

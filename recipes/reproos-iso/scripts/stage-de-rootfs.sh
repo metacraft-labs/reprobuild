@@ -1320,7 +1320,7 @@ echo "[stage-de-rootfs] overlayed repro CLI (bytes=$(stat -c %s "$STAGE_DIR/usr/
 # ---------------------------------------------------------------------------
 
 echo "[stage-de-rootfs] M9.R.46 relocate-nix-to-repro starting"
-bash "$SCRIPT_DIR_SELF/relocate-nix-to-repro.sh" "$STAGE_DIR"
+bash "$SCRIPT_DIR_SELF/relocate-nix-to-repro.sh" "$STAGE_DIR" "$ISO_SRC_MIRROR_ROOT"
 echo "[stage-de-rootfs] M9.R.46 relocate-nix-to-repro complete"
 
 # ---------------------------------------------------------------------------

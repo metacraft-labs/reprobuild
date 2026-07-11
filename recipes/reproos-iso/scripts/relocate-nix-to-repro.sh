@@ -55,19 +55,35 @@
 #      file path named.  Per the M9.R.46 brief: ``no fall-back to
 #      /nix/store``.
 #
-# Usage:  bash relocate-nix-to-repro.sh <stage-dir>
+# Usage:  bash relocate-nix-to-repro.sh <stage-dir> [source-mirror-root]
 
 set -uo pipefail
 
-if [ "$#" -ne 1 ]; then
-  echo "usage: $0 <stage-dir>" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  echo "usage: $0 <stage-dir> [source-mirror-root]" >&2
   exit 64
 fi
-STAGE_DIR="$1"
+STAGE_DIR="$(realpath -m "$1")"
 
 if [ ! -d "$STAGE_DIR" ]; then
   echo "[relocate-nix-to-repro] stage dir does not exist: $STAGE_DIR" >&2
   exit 65
+fi
+
+SOURCE_MIRROR_ROOT=""
+if [ "$#" -eq 2 ]; then
+  SOURCE_MIRROR_ROOT="$(realpath -m "$2")"
+  case "$SOURCE_MIRROR_ROOT" in
+    "$STAGE_DIR"/*) ;;
+    *)
+      echo "[relocate-nix-to-repro] source mirror root escapes stage dir: $SOURCE_MIRROR_ROOT" >&2
+      exit 64
+      ;;
+  esac
+  if [ ! -d "$SOURCE_MIRROR_ROOT" ]; then
+    echo "[relocate-nix-to-repro] source mirror root does not exist: $SOURCE_MIRROR_ROOT" >&2
+    exit 65
+  fi
 fi
 
 NIX_STORE_STAGED="$STAGE_DIR/nix/store"
@@ -98,17 +114,16 @@ echo "[relocate-nix-to-repro] staged /nix/store has $(ls -1 "$NIX_STORE_STAGED" 
 #   1. $STAGE_DIR/nix/store        (parent of the entries we mv-rename)
 #   2. each $STAGE_DIR/nix/store/<entry>/  (parent of nested files we
 #                                            patchelf later)
-#   3. $STAGE_DIR/opt              (the from-source install-mirrors;
-#                                    same Phase 2 behaviour applied
-#                                    cp -a-preserved 555 dirs on
-#                                    /opt/.../usr/lib too)
+#   3. the from-source install-mirror root (the same Phase 2 behaviour
+#      applied cp -a-preserved 555 dirs there too)
 # Idempotent + safe: u+w only, no group/other write.
 # ---------------------------------------------------------------------------
 
-echo "[relocate-nix-to-repro] chmod -R u+w on $NIX_STORE_STAGED + $STAGE_DIR/opt + $STAGE_DIR/usr"
+echo "[relocate-nix-to-repro] chmod -R u+w on staged store and runtime trees"
 chmod -R u+w "$NIX_STORE_STAGED" 2>/dev/null || true
 [ -d "$STAGE_DIR/opt" ] && chmod -R u+w "$STAGE_DIR/opt" 2>/dev/null || true
 [ -d "$STAGE_DIR/usr" ] && chmod -R u+w "$STAGE_DIR/usr" 2>/dev/null || true
+[ -n "$SOURCE_MIRROR_ROOT" ] && chmod -R u+w "$SOURCE_MIRROR_ROOT" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Phase 1: enumerate every prefix dir directly under $STAGE_DIR/nix/store.
@@ -150,7 +165,7 @@ rmdir "$STAGE_DIR/nix" 2>/dev/null || true
 # Phase 2: ELF RPATH + PT_INTERP rewrite.
 #
 # We walk every ELF candidate under the entire stage tree, including the
-# from-source install-mirrors at /opt/repro/... + the freshly-moved
+# from-source install-mirrors at their explicit staged path + the freshly-moved
 # /repro/store/<hash>-<pkg>/ trees + /usr/{bin,sbin,lib,lib64} + /lib +
 # /lib64.  Each ELF gets:
 #   * RPATH:  ``s|/nix/store/|/repro/store/|g`` on every entry;
@@ -162,6 +177,15 @@ scan_dirs=()
 for d in opt usr bin sbin lib lib64 repro; do
   [ -d "$STAGE_DIR/$d" ] && scan_dirs+=("$STAGE_DIR/$d")
 done
+if [ -n "$SOURCE_MIRROR_ROOT" ]; then
+  mirror_is_covered=0
+  for sd in "${scan_dirs[@]}"; do
+    case "$SOURCE_MIRROR_ROOT" in
+      "$sd"|"$sd"/*) mirror_is_covered=1; break ;;
+    esac
+  done
+  [ "$mirror_is_covered" = 1 ] || scan_dirs+=("$SOURCE_MIRROR_ROOT")
+fi
 
 if [ "${#scan_dirs[@]}" -eq 0 ]; then
   echo "[relocate-nix-to-repro] no scan dirs under $STAGE_DIR; aborting" >&2
@@ -255,8 +279,8 @@ echo "[relocate-nix-to-repro] rewrote $links_rewritten symlinks (/nix/store -> /
 # every non-binary file under the moved /repro/store/ tree and rewrite
 # the first line if it begins with #!/nix/store/.  This is bounded
 # (the wrapper scripts are a small fraction of the closure) so we walk
-# every text file under /repro/store/ + every script under
-# $STAGE_DIR/{usr,etc,opt}.
+# every text file under the same roots used by the ELF relocation pass,
+# plus configuration scripts under $STAGE_DIR/etc.
 #
 # We use sed for shebang rewriting; only the first 4 bytes are checked
 # against ``#!/n`` so a binary file with embedded /nix/store strings
@@ -283,8 +307,7 @@ while IFS= read -r f; do
   chmod "$mode" "$tmp"
   mv -f "$tmp" "$f"
   shebangs_rewritten=$((shebangs_rewritten + 1))
-done < <(find "$STAGE_DIR/repro/store" "$STAGE_DIR/usr" "$STAGE_DIR/etc" \
-           "$STAGE_DIR/opt" -type f 2>/dev/null)
+done < <(find "${scan_dirs[@]}" "$STAGE_DIR/etc" -type f 2>/dev/null)
 echo "[relocate-nix-to-repro] rewrote $shebangs_rewritten shebangs (#!/nix/store -> #!/repro/store)"
 
 # ---------------------------------------------------------------------------
