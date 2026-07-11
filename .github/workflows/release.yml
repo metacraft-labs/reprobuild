@@ -101,6 +101,32 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value $runquotaBin
           $env:Path = $runquotaBin + [IO.Path]::PathSeparator + $env:Path
           just bootstrap
+
+          # Find and stage required dynamic libraries (OpenSSL & Zstd) so repro.exe can run and be packaged
+          $opensslDll = Get-ChildItem -Path "C:\Program Files", "C:\Program Files (x86)" -Filter "libcrypto-3-x64.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -ne $opensslDll) {
+            $dllDir = Split-Path -Parent $opensslDll.FullName
+            Copy-Item -Path (Join-Path $dllDir "libcrypto-3-x64.dll") -Destination "build\bin\" -Force
+            Copy-Item -Path (Join-Path $dllDir "libssl-3-x64.dll") -Destination "build\bin\" -Force
+            Write-Host "Staged OpenSSL DLLs from $dllDir"
+          } else {
+            Write-Warning "libcrypto-3-x64.dll not found on system"
+          }
+
+          $zstdSearchPaths = @()
+          if ($env:WINDOWS_DIY_INSTALL_ROOT) {
+            $zstdSearchPaths += Join-Path $env:WINDOWS_DIY_INSTALL_ROOT "msys2"
+          }
+          $zstdSearchPaths += "C:\Program Files", "C:\Program Files (x86)"
+          $zstdDll = Get-ChildItem -Path $zstdSearchPaths -Filter "libzstd.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -ne $zstdDll) {
+            $dllDir = Split-Path -Parent $zstdDll.FullName
+            Copy-Item -Path (Join-Path $dllDir "libzstd.dll") -Destination "build\bin\" -Force
+            Write-Host "Staged libzstd.dll from $dllDir"
+          } else {
+            Write-Warning "libzstd.dll not found on system"
+          }
+
           .\build\bin\repro.exe build --tool-provisioning=path --daemon=off --no-runquota .#reprobuild.build_apps
 
 

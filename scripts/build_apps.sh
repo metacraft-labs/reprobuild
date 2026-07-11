@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Disable active dynamic injection hooks (DYLD_INSERT_LIBRARIES / LD_PRELOAD) during the build process.
+# This prevents tools (like mv, cp, ld) from failing to load active shims that are currently being rebuilt.
+unset DYLD_INSERT_LIBRARIES
+unset LD_PRELOAD
+
 mkdir -p build/bin build/lib build/nimcache
 
 # shellcheck source=scripts/source_paths.sh

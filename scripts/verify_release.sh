@@ -14,7 +14,8 @@ if [[ ! "$archive_path" =~ ^/|[a-zA-Z]:\\ ]]; then
 fi
 
 archive_name=$(basename "$archive_path")
-tmp_dir=$(mktemp -d -t reprobuild-verify-XXXXXX)
+mkdir -p "$(pwd)/build"
+tmp_dir=$(mktemp -d "$(pwd)/build/reprobuild-verify-XXXXXX")
 trap 'rm -rf "$tmp_dir"' EXIT
 
 echo "=== Extracting $archive_name to $tmp_dir ==="
