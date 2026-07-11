@@ -273,7 +273,15 @@ echo "[build-reproos-image] staging rootfs at $STAGE_DIR"
 # ~5 min cold.  Reuse a healthy existing stage when the marker file
 # is present (set REPRO_FORCE_RESTAGE=1 to bypass).
 STAGE_MARKER="$STAGE_DIR/.repro-stage-complete"
-if [ "${REPRO_FORCE_RESTAGE:-0}" = "1" ] || [ ! -f "$STAGE_MARKER" ]; then
+STAGE_STALE=0
+if [ -f "$STAGE_MARKER" ] && \
+   find "$REPO_ROOT/recipes/packages/source" \
+     -path '*/.repro/output/install/*' -newer "$STAGE_MARKER" \
+     -print -quit | grep -q .; then
+  STAGE_STALE=1
+fi
+if [ "${REPRO_FORCE_RESTAGE:-0}" = "1" ] || \
+   [ ! -f "$STAGE_MARKER" ] || [ "$STAGE_STALE" = "1" ]; then
   if [ -d "$STAGE_DIR" ] && [ -n "$(ls -A "$STAGE_DIR" 2>/dev/null || true)" ]; then
     chmod -R u+w "$STAGE_DIR" 2>/dev/null || true
     rm -rf "$STAGE_DIR"
