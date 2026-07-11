@@ -4090,6 +4090,9 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
     let escapedStampDir = stampDir.replace("\\", "/").
       replace("\"", "\\\"")
+    let outMirrorRoot = (projectRoot / ".repro" / "output" / "install").
+      replace("\\", "/")
+    let shellEnv = @[("OUT_MIRROR", outMirrorRoot)]
     let script = "set -e; mkdir -p \"" & escapedExtracted &
       "\"; mkdir -p \"" & escapedOut & "\"; mkdir -p \"" &
       escapedStampDir & "\"; cd \"" & escapedExtracted & "\"; " &
@@ -4111,6 +4114,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       pool = "compile",
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "from-source-custom.shell",
+      env = shellEnv,
       toolIdentityRefs = @["sh"])
     prevId = actionId
     prevStamp = stamp
@@ -4157,6 +4161,9 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     script.add("if [ -d \"" & escapedOutPath & "/install/usr\" ]; then ")
     script.add("cp -a -- \"" & escapedOutPath & "/install/usr\" \"" &
       escapedMirrorRoot & "/\"; ")
+    script.add("elif [ -d \"" & escapedOutPath & "/usr\" ]; then ")
+    script.add("cp -a -- \"" & escapedOutPath & "/usr\" \"" &
+      escapedMirrorRoot & "/\"; ")
     script.add("else ")
     # Fallback: bare $out/lib + $out/include + $out/bin (recipes that
     # didn't relocate to install/usr/). Compose a synthetic usr/ tree.
@@ -4166,6 +4173,19 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
         "\" ]; then cp -a -- \"" & escapedOutPath & "/" & sub &
         "\" \"" & escapedMirrorUsr & "/\"; fi; ")
     script.add("fi; ")
+    script.add("for pcdir in \"" & escapedMirrorUsr & "/lib/pkgconfig\" \"" &
+      escapedMirrorUsr & "/lib64/pkgconfig\" \"" & escapedMirrorUsr &
+      "/share/pkgconfig\"; do ")
+    script.add("if [ -d \"$pcdir\" ]; then for pc in \"$pcdir\"/*.pc; do ")
+    script.add("if [ -f \"$pc\" ]; then sed -i ")
+    script.add("'1,/^prefix=/{ s|^prefix=.*$|prefix=" & escapedMirrorUsr & "|; } ")
+    script.add("; s|^exec_prefix=/usr|exec_prefix=" & escapedMirrorUsr & "| ")
+    script.add("; s|^libdir=/usr/lib64|libdir=" & escapedMirrorUsr & "/lib64| ")
+    script.add("; s|^libdir=/usr/lib|libdir=" & escapedMirrorUsr & "/lib| ")
+    script.add("; s|^includedir=/usr/include|includedir=" & escapedMirrorUsr & "/include| ")
+    script.add("; s|^datadir=/usr/share|datadir=" & escapedMirrorUsr & "/share| ")
+    script.add("; s|^datarootdir=/usr/share|datarootdir=" & escapedMirrorUsr & "/share|' ")
+    script.add("\"$pc\"; fi; done; fi; done; ")
     script.add("touch \"" & escapedMirrorStamp & "\"")
     let mirrorActionId = "from-source-custom-mirror-" &
       dslPortSanitizeIdPart(packageName)
