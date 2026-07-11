@@ -178,8 +178,9 @@ cleanup() {
   local rc=$?
   set +e
   for p in "${MOUNTED_PATHS[@]}"; do
-    if mountpoint -q "$p"; then
-      "$SUDO" umount "$p" 2>/dev/null || "$SUDO" umount -l "$p" 2>/dev/null
+    if /usr/bin/env LD_LIBRARY_PATH= mountpoint -q "$p"; then
+      "$SUDO" /usr/bin/env LD_LIBRARY_PATH= umount "$p" 2>/dev/null \
+        || "$SUDO" /usr/bin/env LD_LIBRARY_PATH= umount -l "$p" 2>/dev/null
     fi
   done
   if [ -n "$NBD_DEV" ] && [ "$NBD_CONNECTED" = "1" ]; then
@@ -475,7 +476,7 @@ NBD_CONNECTED=1
 sed -i "s|/dev/nbd0|$NBD_DEV|g" "$DISKO_JSON"
 
 # Wait for the kernel to scan the (empty) partition table.
-"$SUDO" "$PARTPROBE_BIN" "$NBD_DEV" 2>/dev/null || true
+"$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$PARTPROBE_BIN" "$NBD_DEV" 2>/dev/null || true
 sleep 2
 
 # ---------------------------------------------------------------
@@ -525,11 +526,11 @@ if [ ! -b "$ROOT_DEV" ] || [ ! -b "$ESP_DEV" ]; then
   exit 69
 fi
 
-"$SUDO" mount "$ROOT_DEV" "$MNT_DIR" \
+"$SUDO" /usr/bin/env LD_LIBRARY_PATH= mount "$ROOT_DEV" "$MNT_DIR" \
   || { echo "[build-reproos-image] mount root failed" >&2; exit 69; }
 MOUNTED_PATHS+=("$MNT_DIR")
 "$SUDO" mkdir -p "$MNT_DIR/boot"
-"$SUDO" mount "$ESP_DEV" "$MNT_DIR/boot" \
+"$SUDO" /usr/bin/env LD_LIBRARY_PATH= mount "$ESP_DEV" "$MNT_DIR/boot" \
   || { echo "[build-reproos-image] mount esp failed" >&2; exit 69; }
 MOUNTED_PATHS+=("$MNT_DIR/boot")
 
@@ -1659,22 +1660,22 @@ echo "  mnt esp:       $MNT_DIR/boot ($(df -h "$MNT_DIR/boot" 2>/dev/null | tail
 # Cleanup trap handles errors; on success we unmount cleanly so
 # the qcow2 is fully flushed before we move it.
 # ---------------------------------------------------------------
-"$SUDO" sync
+"$SUDO" /usr/bin/env LD_LIBRARY_PATH= sync
 sleep 2
 # Unmount in reverse order (esp before root) so we don't try to
 # unmount the parent while a child is still mounted.  Use lazy
 # umount as fallback for stubbornly-busy mounts.
 for ((i=${#MOUNTED_PATHS[@]}-1; i>=0; i--)); do
   p="${MOUNTED_PATHS[$i]}"
-  "$SUDO" umount "$p" 2>/dev/null \
-    || "$SUDO" umount -l "$p" 2>/dev/null \
+  "$SUDO" /usr/bin/env LD_LIBRARY_PATH= umount "$p" 2>/dev/null \
+    || "$SUDO" /usr/bin/env LD_LIBRARY_PATH= umount -l "$p" 2>/dev/null \
     || { echo "[build-reproos-image] WARNING: failed to unmount $p" >&2; }
 done
-"$SUDO" sync
+"$SUDO" /usr/bin/env LD_LIBRARY_PATH= sync
 sleep 1
 MOUNTED_PATHS=()
 
-"$SUDO" "$QEMU_NBD_BIN" --disconnect "$NBD_DEV"
+"$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$QEMU_NBD_BIN" --disconnect "$NBD_DEV"
 NBD_CONNECTED=0
 
 # ---------------------------------------------------------------
