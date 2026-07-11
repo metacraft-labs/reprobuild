@@ -1963,6 +1963,11 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # we already used ``installPrefix = effectiveDestRoot & "/usr/bin"``
     # above, so derive ``sbinSrcDir`` parallel to it here.
     let sbinSrcDir = (effectiveDestRoot & "/usr/sbin").replace("\\", "/").replace("\"", "\\\"")
+    # Some upstream autotools projects deliberately install essential
+    # boot utilities into DESTDIR /bin and /sbin even with --prefix=/usr.
+    # util-linux is the canonical example.
+    let rootBinSrcDir = (effectiveDestRoot & "/bin").replace("\\", "/").replace("\"", "\\\"")
+    let rootSbinSrcDir = (effectiveDestRoot & "/sbin").replace("\\", "/").replace("\"", "\\\"")
     # M9.R.15q.11.4 — KDE Plasma daemons (kglobalacceld, kactivitymanagerd,
     # etc.) install under ``$libdir/libexec/`` per Qt6's INSTALL_LIBEXECDIR
     # convention; some upstreams use ``$prefix/libexec/`` directly. Probe
@@ -1987,7 +1992,9 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # /usr/lib/polkit-1/polkitd + /usr/lib/polkit-1/polkit-agent-helper-1.
     # Probe this AFTER the canonical $bindir + $sbindir + $libexec dirs.
     let libPolkit1SrcDir = (effectiveDestRoot & "/usr/lib/polkit-1").replace("\\", "/").replace("\"", "\\\"")
-    let candidateDirs = @[escapedSrcDir, sbinSrcDir, libexecSrcDir, libLibexecSrcDir, libSystemdSrcDir, libPolkit1SrcDir]
+    let candidateDirs = @[escapedSrcDir, sbinSrcDir, rootBinSrcDir,
+      rootSbinSrcDir, libexecSrcDir, libLibexecSrcDir, libSystemdSrcDir,
+      libPolkit1SrcDir]
     # M9.R.15q.7.9 — also probe snake_case form. The kebab probe
     # covers ``kwinWayland`` → ``kwin-wayland`` but kwin upstream
     # installs ``kwin_wayland`` (snake_case underscore). The library
@@ -2016,7 +2023,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       script.add("elif [ -f \"" & dir & "/" & escapedName & ".exe\" ]; then ")
       script.add("cp -fL \"" & dir & "/" & escapedName & ".exe\" \"" & escapedOut & ".exe\"; ")
       first = false
-    script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & " or " & sbinSrcDir & " or " & libexecSrcDir & " or " & libLibexecSrcDir & " or " & libSystemdSrcDir & " or " & libPolkit1SrcDir & "\" >&2; exit 1; fi")
+    script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & " or " & sbinSrcDir & " or " & rootBinSrcDir & " or " & rootSbinSrcDir & " or " & libexecSrcDir & " or " & libLibexecSrcDir & " or " & libSystemdSrcDir & " or " & libPolkit1SrcDir & "\" >&2; exit 1; fi")
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-" & kind & "-" & sanitizeStageCopyName(packageName) &
     "-" & sanitizeStageCopyName(name)
@@ -2070,9 +2077,11 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
   # them and forced recipes to over-specify install paths.
   let bin = (effectiveDestRoot & "/usr/bin").replace("\\", "/").replace("\"", "\\\"")
   let sbin = (effectiveDestRoot & "/usr/sbin").replace("\\", "/").replace("\"", "\\\"")
+  let rootBin = (effectiveDestRoot & "/bin").replace("\\", "/").replace("\"", "\\\"")
+  let rootSbin = (effectiveDestRoot & "/sbin").replace("\\", "/").replace("\"", "\\\"")
   let libexec = (effectiveDestRoot & "/usr/libexec").replace("\\", "/").replace("\"", "\\\"")
   let libLibexec = (effectiveDestRoot & "/usr/lib/libexec").replace("\\", "/").replace("\"", "\\\"")
-  let candidateDirs = [bin, sbin, libexec, libLibexec]
+  let candidateDirs = [bin, sbin, rootBin, rootSbin, libexec, libLibexec]
   var script = "set -e; mkdir -p \"" & escapedOutDir & "\"; "
   var firstClause = true
   for dir in candidateDirs:
@@ -2082,7 +2091,7 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
     script.add("elif [ -f \"" & dir & "/" & escapedSrc & ".exe\" ]; then ")
     script.add("cp -fL \"" & dir & "/" & escapedSrc & ".exe\" \"" & escapedOut & ".exe\"; ")
     firstClause = false
-  script.add("else echo \"executableAlias stage-copy: no source binary " & escapedSrc & " under " & bin & " or " & sbin & " or " & libexec & " or " & libLibexec & "\" >&2; exit 1; fi")
+  script.add("else echo \"executableAlias stage-copy: no source binary " & escapedSrc & " under " & bin & " or " & sbin & " or " & rootBin & " or " & rootSbin & " or " & libexec & " or " & libLibexec & "\" >&2; exit 1; fi")
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-alias-" & sanitizeStageCopyName(packageName) &
     "-" & sanitizeStageCopyName(aliasName)
