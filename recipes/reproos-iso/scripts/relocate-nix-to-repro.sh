@@ -214,6 +214,8 @@ echo "[relocate-nix-to-repro] $cand_total ELF candidates"
 
 elfs_rewritten=0
 elfs_inspected=0
+declare -A recipe_glibc_dirs=()
+declare -A recipe_glibc_ambiguous=()
 while IFS= read -r f; do
   # Cheap ELF magic check before patchelf invocation.
   magic=$(head -c 4 "$f" 2>/dev/null | od -An -c | tr -d ' \n' || true)
@@ -224,6 +226,29 @@ while IFS= read -r f; do
   elfs_inspected=$((elfs_inspected + 1))
   rp=$($patchelf_bin --print-rpath "$f" 2>/dev/null || true)
   ip=$($patchelf_bin --print-interpreter "$f" 2>/dev/null || true)
+  if [ -n "$SOURCE_MIRROR_ROOT" ]; then
+    case "$f" in
+      "$SOURCE_MIRROR_ROOT"/*/.repro/output/install/*)
+        recipe_rel="${f#"$SOURCE_MIRROR_ROOT"/}"
+        recipe_name="${recipe_rel%%/*}"
+        case "$ip" in
+          /nix/store/*-glibc-*/lib*/ld-linux*.so*|/repro/store/*-glibc-*/lib*/ld-linux*.so*)
+            glibc_dir="$(dirname "${ip/#\/nix\/store\//\/repro\/store\/}")"
+            if [ ! -e "$STAGE_DIR$glibc_dir/libc.so.6" ]; then
+              echo "[relocate-nix-to-repro] glibc for $recipe_name is missing: $glibc_dir/libc.so.6" >&2
+              exit 75
+            fi
+            prior_glibc_dir="${recipe_glibc_dirs[$recipe_name]-}"
+            if [ -z "$prior_glibc_dir" ]; then
+              recipe_glibc_dirs[$recipe_name]="$glibc_dir"
+            elif [ "$prior_glibc_dir" != "$glibc_dir" ]; then
+              recipe_glibc_ambiguous[$recipe_name]=1
+            fi
+            ;;
+        esac
+        ;;
+    esac
+  fi
   did_rewrite=0
   if [[ "$rp" == *"/nix/store/"* ]]; then
     new_rp="${rp//\/nix\/store\//\/repro\/store\/}"
@@ -244,6 +269,49 @@ while IFS= read -r f; do
   [ "$did_rewrite" = 1 ] && elfs_rewritten=$((elfs_rewritten + 1))
 done < "$cands_file"
 echo "[relocate-nix-to-repro] inspected $elfs_inspected ELFs, rewrote RPATH/INTERP on $elfs_rewritten"
+
+# Custom from-source builds may omit the toolchain's implicit glibc from
+# RUNPATH.  That is unsafe in the Debian-based stage: a private shared
+# library that directly needs ld-linux can otherwise load Debian's loader
+# and libc alongside its Nix-built process.  Infer one glibc per recipe
+# from its executables' PT_INTERP and make that recipe's dynamic ELFs use
+# the matching relocated glibc.  Recipes containing mixed interpreters are
+# left unchanged rather than choosing an arbitrary ABI.
+glibc_rpaths_added=0
+while IFS= read -r f; do
+  [ -n "$SOURCE_MIRROR_ROOT" ] || break
+  case "$f" in
+    "$SOURCE_MIRROR_ROOT"/*/.repro/output/install/*)
+      recipe_rel="${f#"$SOURCE_MIRROR_ROOT"/}"
+      recipe_name="${recipe_rel%%/*}"
+      ;;
+    *) continue ;;
+  esac
+  [ "${recipe_glibc_ambiguous[$recipe_name]-0}" = 0 ] || continue
+  glibc_dir="${recipe_glibc_dirs[$recipe_name]-}"
+  [ -n "$glibc_dir" ] || continue
+  magic=$(head -c 4 "$f" 2>/dev/null | od -An -c | tr -d ' \n' || true)
+  case "$magic" in
+    177ELF*) ;;
+    *) continue ;;
+  esac
+  needed=$($patchelf_bin --print-needed "$f" 2>/dev/null || true)
+  if ! printf '%s\n' "$needed" | grep -Eq '^(libc\.so\.6|ld-linux[^/]*\.so)'; then
+    continue
+  fi
+  rp=$($patchelf_bin --print-rpath "$f" 2>/dev/null || true)
+  case ":$rp:" in
+    *":$glibc_dir:"*) continue ;;
+  esac
+  new_rp="$glibc_dir"
+  [ -z "$rp" ] || new_rp="$rp:$glibc_dir"
+  if ! $patchelf_bin --set-rpath "$new_rp" "$f" 2>/dev/null; then
+    echo "[relocate-nix-to-repro] failed to add matching glibc RPATH to $f" >&2
+    exit 75
+  fi
+  glibc_rpaths_added=$((glibc_rpaths_added + 1))
+done < "$cands_file"
+echo "[relocate-nix-to-repro] added matching glibc RPATHs to $glibc_rpaths_added from-source ELFs"
 
 # ---------------------------------------------------------------------------
 # Phase 3: symlink target rewrite.
