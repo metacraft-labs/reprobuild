@@ -23,7 +23,7 @@ on:
 jobs:
   lint:
     name: Lint
-    runs-on: [self-hosted, nixos]
+    runs-on: incus  # CIP-5: nix job (setup-dev-env) → incus
     steps:
       - uses: actions/checkout@v4
       # Mint a GitHub App installation token via the CI Token Provider
@@ -64,6 +64,9 @@ jobs:
     # and the test runner hits an fd race at higher concurrency. The
     # metacraft-labs bare-metal pool has nixos hosts with plenty of
     # cores + RAM; lift the parallelism caps below for them.
+    # EXEMPTION (CIP-5): bare-metal runner — the parallel `nim c` phase OOMs on
+    # small ephemeral runners; kept on the persistent big-iron nixos bare-metal
+    # pool rather than the incus class.
     runs-on: [self-hosted, Linux, X64, bare-metal, nixos]
     env:
       REPROBUILD_MAX_PARALLELISM: "16"
@@ -243,7 +246,7 @@ jobs:
 
   nix-build:
     name: Nix Build
-    runs-on: [self-hosted, nixos]
+    runs-on: incus  # CIP-5: nix job (setup-dev-env) → incus
     steps:
       - uses: actions/checkout@v4
       - name: Mint installation token for cross-repo sibling access

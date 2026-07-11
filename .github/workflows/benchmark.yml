@@ -23,10 +23,12 @@ jobs:
       max-parallel: 1
       matrix:
         include:
+          # EXEMPTION (CIP-5): persistent benchmark runner — real perf hardware
+          # is required for meaningful numbers; not migrated to ephemeral incus.
           - platform: linux
             runner: '["self-hosted", "benchmark"]'
           - platform: macos
-            runner: '["self-hosted", "macos"]'
+            runner: '["macos-tart"]'  # CIP-5: nix macOS benchmark leg → macos-tart
     runs-on: ${{ fromJSON(matrix.runner) }}
     steps:
       - name: Checkout Reprobuild

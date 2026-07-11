@@ -18,19 +18,19 @@ jobs:
       matrix:
         include:
           - os-name: linux
-            runner: [self-hosted, nixos]
+            runner: incus  # CIP-5: nix release build → incus
             env-flavor: nix
             platform: linux
             arch: x86_64
             archive_ext: tar.gz
           - os-name: macos
-            runner: [self-hosted, aarch64-darwin]
+            runner: macos-tart  # CIP-5: nix release build → macos-tart
             env-flavor: nix
             platform: darwin
             arch: aarch64
             archive_ext: tar.gz
           - os-name: windows
-            runner: [self-hosted, Windows, X64, nixos-equivalent]
+            runner: [win-ephemeral, win-arm]  # CIP-5: windows-diy release build → Windows runner classes
             env-flavor: windows-diy
             platform: windows
             arch: x86_64
