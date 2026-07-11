@@ -244,6 +244,7 @@ jobs:
             CODETRACER_REPROBUILD_LINUX=1 \
             CODETRACER_REPROBUILD_TARGET=ct \
             CODETRACER_REPROBUILD_REPO_PATH="$repro_root" \
+            REPROBUILD_NIX_DAEMON_BIN="$repro_root/tools/reprobuild-nix-daemon/reprobuild-nix-daemon" \
             REPROBUILD_BIN="$repro_bin" \
             REPRO_BINARY_CACHE_URL="${REPRO_BINARY_CACHE_URL:-}" \
             REPRO_BINARY_CACHE_KEY_PATH="${REPRO_BINARY_CACHE_KEY_PATH:-}" \
