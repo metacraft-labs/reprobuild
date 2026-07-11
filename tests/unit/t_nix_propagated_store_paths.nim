@@ -22,3 +22,23 @@ suite "Nix propagated store path closure":
     expandNixPropagatedStorePaths(paths)
 
     check paths == @[devOutput, runtimeOutput, transitiveOutput]
+
+  test "adds propagated runtime directories to cached profile channels":
+    let scratch = createTempDir("repro-nix-profile-propagated-", "")
+    defer: removeDir(scratch)
+
+    let devOutput = scratch / "fribidi-dev"
+    let runtimeOutput = scratch / "fribidi-runtime"
+    createDir(devOutput / "nix-support")
+    createDir(devOutput / "lib" / "pkgconfig")
+    createDir(runtimeOutput / "lib")
+    writeFile(devOutput / "nix-support" / "propagated-build-inputs",
+      runtimeOutput & "\n")
+
+    var profile = PathOnlyToolProfile(
+      installMethod: "nix",
+      realizedStorePaths: @[devOutput])
+    expandNixProfilePropagatedPaths(profile)
+
+    check profile.realizedStorePaths == @[devOutput, runtimeOutput]
+    check absolutePath(runtimeOutput / "lib") in profile.libraryPathList

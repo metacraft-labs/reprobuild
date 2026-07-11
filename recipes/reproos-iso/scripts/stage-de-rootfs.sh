@@ -289,6 +289,17 @@ while :; do
     # shell fork (breeze-icons alone has 24k+ symlinks).
     find "$staged_prefix" -type l -lname '/nix/store/*' -printf '%l\n' 2>/dev/null | \
       sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
+    # Split Nix development outputs declare their runtime library
+    # outputs through nix-support propagation manifests. Those paths
+    # may not appear in an ELF RPATH when pkg-config points at the dev
+    # output, but they are still part of the runtime closure.
+    for propagated in \
+      "$staged_prefix/nix-support/propagated-build-inputs" \
+      "$staged_prefix/nix-support/propagated-native-build-inputs"; do
+      [ -f "$propagated" ] || continue
+      tr '[:space:]' '\n' < "$propagated" | \
+        sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
+    done
   done < "$nix_prefixes_file" | sort -u > "$new_prefixes_file"
 
   # Filter out prefixes we already mirrored.

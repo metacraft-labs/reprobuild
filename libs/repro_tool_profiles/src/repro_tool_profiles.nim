@@ -254,7 +254,7 @@ const
   # so the engine can thread them onto per-action env vars at fork time.
   ArtifactVersion = 7'u16
   NixMaterializationMagic = [byte(ord('R')), byte(ord('B')), byte(ord('N')), byte(ord('M'))]
-  NixMaterializationVersion = 2'u16
+  NixMaterializationVersion = 3'u16
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -1098,6 +1098,9 @@ proc decodeNixMaterializationProfile(bytes: openArray[byte]):
     raiseEnvelopeError(eeMalformed,
       "trailing nix materialization receipt bytes")
 
+proc expandNixPropagatedStorePaths*(paths: var seq[string])
+proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile)
+
 proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
                                   plan: NixAcquisitionPlan):
     tuple[hit: bool; profile: PathOnlyToolProfile] =
@@ -1108,10 +1111,11 @@ proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
   if not fileExists(extendedPath(path)):
     return
   try:
-    let profile = decodeNixMaterializationProfile(
+    var profile = decodeNixMaterializationProfile(
       fromByteString(readFile(extendedPath(path))))
     if not profile.nixMaterializationProfileMatches(useDef, plan):
       return
+    expandNixProfilePropagatedPaths(profile)
     return (hit: true, profile: profile)
   except CatchableError:
     return
@@ -1149,6 +1153,25 @@ proc expandNixPropagatedStorePaths*(paths: var seq[string]) =
           continue
         paths.add(candidate)
     inc index
+
+proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile) =
+  ## Repair cached Nix profiles as well as fresh resolutions. Split
+  ## development outputs commonly propagate the runtime output that
+  ## owns their shared libraries; omitting it leaves LD_LIBRARY_PATH
+  ## and embedded RPATHs pointed at an empty ``-dev/lib`` directory.
+  expandNixPropagatedStorePaths(profile.realizedStorePaths)
+  for storePath in profile.realizedStorePaths:
+    addUniquePath(profile.cmakePrefixList, storePath)
+    addUniquePath(profile.pkgConfigSearchList,
+      storePath / "lib" / "pkgconfig")
+    addUniquePath(profile.pkgConfigSearchList,
+      storePath / "lib64" / "pkgconfig")
+    addUniquePath(profile.pkgConfigSearchList,
+      storePath / "share" / "pkgconfig")
+    addUniquePath(profile.cpathList, storePath / "include")
+    addUniquePath(profile.libraryPathList, storePath / "lib")
+    addUniquePath(profile.libraryPathList, storePath / "lib64")
+  profile.profileFingerprint = profileFingerprintFor(profile)
 
 when defined(windows):
   proc resolveNixTool*(useDef: InterfaceToolUse;
