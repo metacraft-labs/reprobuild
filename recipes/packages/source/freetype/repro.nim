@@ -209,6 +209,7 @@ package freetypeSource:
         # use the ``--with-X=auto`` form for both.
         "--with-zlib=auto",
         "--without-bzip2",
+        "--with-brotli=no",
         "--with-png=auto",
         "--without-harfbuzz",
       ]
