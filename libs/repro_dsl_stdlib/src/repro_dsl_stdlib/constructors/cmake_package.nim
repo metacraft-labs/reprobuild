@@ -369,6 +369,26 @@ proc cmake_package*(srcDir: string;
         if key == "GLESv2_LIBRARY" and hasGlesLibrary:
           continue
         effectiveCacheVars.add(entry)
+  # Fold package dependencies into every CMake pipeline action. The typed
+  # configure wrapper registers immediately, while build/install are only
+  # registered after this constructor returns, so the latter must carry the
+  # refs on their values instead of relying on a registry mutation.
+  proc stripCmakeDepConstraint(value: string): string =
+    for i, ch in value:
+      if ch == ' ' or ch == '>' or ch == '<' or ch == '=' or
+          ch == '~' or ch == '^':
+        return value[0 ..< i]
+    return value
+  var cmakeDepRefs: seq[string] = @[]
+  for raw in registeredNativeBuildDeps(pkgName):
+    cmakeDepRefs.add(stripCmakeDepConstraint(raw))
+  for raw in registeredBuildDeps(pkgName):
+    cmakeDepRefs.add(stripCmakeDepConstraint(raw))
+  if projectRoot.len > 0:
+    for extra in m9r15oCollectQt6TransitiveCmakeDeps(projectRoot, pkgName):
+      if extra notin cmakeDepRefs:
+        cmakeDepRefs.add(extra)
+
   let configureEdge = cmake.configure(
     srcDir = srcDir,
     buildDir = buildDir,
@@ -506,7 +526,7 @@ proc cmake_package*(srcDir: string;
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "cmake_package.build",
-    toolIdentityRefs = @["cmake", "sh"],
+    toolIdentityRefs = @["cmake", "sh"] & cmakeDepRefs,
     env = extraEnv,
     # M9.R.79.4 — build continues writing to buildDir; source stays
     # read-only.  Sequential edge via ``deps = @[configureEdge.id]`` —
@@ -569,7 +589,7 @@ proc cmake_package*(srcDir: string;
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "cmake_package.install",
-    toolIdentityRefs = @["cmake", "sh"],
+    toolIdentityRefs = @["cmake", "sh"] & cmakeDepRefs,
     env = extraEnv,
     # M9.R.79.4 — install writes the ``--prefix``-staged tree at
     # ``effectiveDestRoot``; source stays read-only.  The install-mirror
@@ -578,39 +598,7 @@ proc cmake_package*(srcDir: string;
     # scope; here we cover the cmake --install step only.
     declaredOutputs = @[effectiveDestRoot],
     readOnlyRoots = m9r79CmReadOnly)
-  # M9.R.14e.5 — fold the recipe's declared ``nativeBuildDeps`` +
-  # ``buildDeps`` into each action's ``toolIdentityRefs`` so the M9.R.14e.1
-  # from-source search-path channels reach the action env at fork time.
-  # Mirrors the same pattern in ``meson_package.nim`` /
-  # ``autotools_package.nim``.
-  proc stripConstraint(value: string): string =
-    for i, ch in value:
-      if ch == ' ' or ch == '>' or ch == '<' or ch == '=' or
-          ch == '~' or ch == '^':
-        return value[0 ..< i]
-    return value
-  var depRefs: seq[string] = @[]
-  for raw in registeredNativeBuildDeps(pkgName):
-    depRefs.add(stripConstraint(raw))
-  for raw in registeredBuildDeps(pkgName):
-    depRefs.add(stripConstraint(raw))
-  # M9.R.15o.1 — virtually inject libxkbcommon + mesa as tool-identity
-  # refs whenever any qt6-* dep is in the recipe's deps, so the M9.R.14e
-  # search-path channels (PKG_CONFIG_PATH / CMAKE_PREFIX_PATH / CPATH /
-  # LIBRARY_PATH / LD_LIBRARY_PATH) reach the action env at fork time.
-  # Without this Qt6Gui's CMake config-package ``find_dependency(XKB)`` +
-  # ``find_dependency(GLESv2)`` walks miss the sibling install-mirrors
-  # at ``recipes/packages/source/{libxkbcommon,mesa}/.repro/output/...``
-  # and ``find_package(Qt6Gui REQUIRED)`` fails for every KF6 / Plasma
-  # consumer. The helper is inert when no qt6-* dep is present and
-  # silently skips deps the recipe already declared (so the M9.R.15n
-  # hand-patched recipes don't see duplicate refs).
-  if projectRoot.len > 0:
-    for extra in m9r15oCollectQt6TransitiveCmakeDeps(projectRoot, pkgName):
-      depRefs.add(extra)
-  appendRegisteredActionToolIdentityRefs(configureEdge.id, depRefs)
-  appendRegisteredActionToolIdentityRefs(buildEdge.id, depRefs)
-  appendRegisteredActionToolIdentityRefs(installEdge.id, depRefs)
+  appendRegisteredActionToolIdentityRefs(configureEdge.id, cmakeDepRefs)
   # M9.R.14h.8 — populate ``destdir`` with the SAME absolute install
   # prefix the install action passed via ``--prefix``.  meson_package
   # already does this (the destdir on the result is what stage-copy +
