@@ -107,7 +107,10 @@ export MESA_LOADER_DRIVER_OVERRIDE=kms_swrast
 # dri_device_create, making it call dri_screen_create_sw() DIRECTLY
 # and skip the per-fd driver_name resolution entirely.
 export GBM_ALWAYS_SOFTWARE=1
-export GALLIUM_DRIVER=llvmpipe
+# The Mesa recipe enables swrast with LLVM disabled, so llvmpipe is not
+# available. Forcing it prevents Mesa from falling back to the compiled
+# pure-C renderer.
+export GALLIUM_DRIVER=softpipe
 
 # M9.R.71.6 LIBGL_DRIVERS_PATH — validated 2026-07-04: Mesa's
 # dlopen search path for swrast_dri.so defaults to /usr/lib64/dri
