@@ -137,6 +137,17 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
     check "--enable-gold" in argvParts[2]
     check "--disable-werror" in argvParts[2]
 
+  test "source patches run before configure":
+    let pkg = autotools_package(
+      srcDir = "./src",
+      srcPatches = @["sed -i 's/old/new/' src/example.c"])
+    let argvArg = pkg.buildEdge.argByName("argv")
+    let script = argvArg.encodedValue.split("\x1f")[2]
+    let patchPos = script.find("sed -i 's/old/new/' src/example.c")
+    let configurePos = script.find("../src/configure")
+    check patchPos >= 0
+    check configurePos > patchPos
+
   test "configure action id is deterministic across calls with same args":
     let a = autotools_package(srcDir = "./src",
       configureOptions = @["--enable-gold"])
