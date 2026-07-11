@@ -115,12 +115,19 @@ echo "[build-reproos-image] sudo: $SUDO"
 # defence-in-depth loop catches any resolver bypass (e.g. direct
 # invocation of build-reproos-image.sh outside the repro build
 # harness) with the same clear diagnostic.
-for tool in qemu-img qemu-nbd parted sgdisk mkfs.ext4 mkfs.vfat rsync grub-install grub-mkconfig mountpoint; do
+for tool in qemu-img qemu-nbd parted partprobe sgdisk mkfs.ext4 mkfs.vfat rsync grub-install grub-mkconfig modprobe mountpoint; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "[build-reproos-image] required tool missing: $tool" >&2
     exit 65
   fi
 done
+
+# sudo applies its host secure_path, which intentionally excludes Repro's
+# provisioned tool profile. Preserve the resolved binaries across that
+# boundary by invoking the commands through their absolute paths.
+QEMU_NBD_BIN="$(command -v qemu-nbd)"
+PARTPROBE_BIN="$(command -v partprobe)"
+MODPROBE_BIN="$(command -v modprobe)"
 
 # Locate the `repro` binary.  Probe order:
 #   1. $REPRO_BIN env (caller override).
@@ -174,7 +181,7 @@ cleanup() {
     fi
   done
   if [ -n "$NBD_DEV" ] && [ "$NBD_CONNECTED" = "1" ]; then
-    "$SUDO" qemu-nbd --disconnect "$NBD_DEV" 2>/dev/null || true
+    "$SUDO" "$QEMU_NBD_BIN" --disconnect "$NBD_DEV" 2>/dev/null || true
   fi
   exit $rc
 }
@@ -418,7 +425,7 @@ echo "[build-reproos-image] qcow2 created: $TMP_QCOW2 (${DISK_SIZE_GB}G)"
 # ---------------------------------------------------------------
 if ! lsmod 2>/dev/null | grep -q '^nbd '; then
   echo "[build-reproos-image] modprobe nbd max_part=16"
-  "$SUDO" modprobe nbd max_part=16 \
+  "$SUDO" "$MODPROBE_BIN" nbd max_part=16 \
     || { echo "[build-reproos-image] modprobe nbd failed" >&2; exit 68; }
 fi
 # Find a free /dev/nbdN.
@@ -436,7 +443,7 @@ if [ -z "$NBD_DEV" ]; then
   exit 68
 fi
 echo "[build-reproos-image] qemu-nbd --connect=$NBD_DEV $TMP_QCOW2"
-"$SUDO" qemu-nbd --connect="$NBD_DEV" "$TMP_QCOW2" \
+"$SUDO" "$QEMU_NBD_BIN" --connect="$NBD_DEV" "$TMP_QCOW2" \
   || { echo "[build-reproos-image] qemu-nbd connect failed" >&2; exit 68; }
 NBD_CONNECTED=1
 
@@ -444,7 +451,7 @@ NBD_CONNECTED=1
 sed -i "s|/dev/nbd0|$NBD_DEV|g" "$DISKO_JSON"
 
 # Wait for the kernel to scan the (empty) partition table.
-"$SUDO" partprobe "$NBD_DEV" 2>/dev/null || true
+"$SUDO" "$PARTPROBE_BIN" "$NBD_DEV" 2>/dev/null || true
 sleep 2
 
 # ---------------------------------------------------------------
@@ -462,7 +469,7 @@ echo "[build-reproos-image] repro disk apply --device $NBD_DEV --confirm $DISKO_
   || { echo "[build-reproos-image] disk apply failed" >&2; exit 69; }
 
 # Re-scan the partition table.
-"$SUDO" partprobe "$NBD_DEV" 2>/dev/null || true
+"$SUDO" "$PARTPROBE_BIN" "$NBD_DEV" 2>/dev/null || true
 sleep 2
 
 # ---------------------------------------------------------------
@@ -1632,7 +1639,7 @@ done
 sleep 1
 MOUNTED_PATHS=()
 
-"$SUDO" qemu-nbd --disconnect "$NBD_DEV"
+"$SUDO" "$QEMU_NBD_BIN" --disconnect "$NBD_DEV"
 NBD_CONNECTED=0
 
 # ---------------------------------------------------------------
