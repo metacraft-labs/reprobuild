@@ -170,6 +170,10 @@ proc cmake_package*(srcDir: string;
   ## action-cache fingerprint stays stable across rebuilds.
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
+  let effectiveDestRoot =
+    if projectRoot.len > 0: projectRoot / buildDir / destdir
+    else: destdir
+  let effectiveInstallPrefix = effectiveDestRoot & prefix
   let extractedRel = block:
     let raw = registeredFetchSpec(pkgName).extractedRoot
     if raw.len > 0: raw else: "src"
@@ -230,6 +234,14 @@ proc cmake_package*(srcDir: string;
   # convention assumption that breaks under sibling install prefixes.
   # Threading each ``<Component>_DIR`` explicitly is the surgical fix.
   var effectiveCacheVars = cacheVars
+  if projectRoot.len > 0:
+    var hasInstallPrefix = false
+    for entry in effectiveCacheVars:
+      if entry.startsWith("CMAKE_INSTALL_PREFIX="):
+        hasInstallPrefix = true
+        break
+    if not hasInstallPrefix:
+      effectiveCacheVars.add("CMAKE_INSTALL_PREFIX=" & effectiveInstallPrefix)
   if projectRoot.len > 0:
     let qt6CompDirs = m9r15iCollectQt6ComponentDirs(projectRoot, pkgName)
     for entry in m9r15iEmitQt6ComponentCacheVars(qt6CompDirs):
@@ -552,13 +564,6 @@ proc cmake_package*(srcDir: string;
   # find the upstream-installed files at ``<destRoot>/usr/lib*/``.
   # ``installArgv``'s ``--prefix`` is the same root WITH ``/usr``
   # appended so cmake itself stages under the canonical FHS layout.
-  let providerProjectRootForInstall = activeProviderProjectRoot()
-  let effectiveDestRoot =
-    if providerProjectRootForInstall.len > 0:
-      providerProjectRootForInstall / buildDir / destdir
-    else:
-      destdir
-  let effectiveInstallPrefix = effectiveDestRoot & prefix
   let installArgv = @["cmake", "--install", buildDir, "--prefix", effectiveInstallPrefix]
   let installStamp = projectRoot / ".repro" / "build" / "cmake-install.stamp"
   createDir(parentDir(installStamp))

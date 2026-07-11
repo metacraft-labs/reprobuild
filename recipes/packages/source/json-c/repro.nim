@@ -186,7 +186,8 @@ package jsonCSource:
         "BUILD_APPS=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", generator = "Ninja",
+        cacheVars = opts, allowSourceWrites = true)
       discard pkg.library("libJsonC")
     finally:
       clearCurrentOwningPackageOverride()
