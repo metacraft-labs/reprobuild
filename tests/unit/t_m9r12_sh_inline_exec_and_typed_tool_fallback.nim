@@ -148,6 +148,12 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
     check patchPos >= 0
     check configurePos > patchPos
 
+  test "explicit source writes omit the configure read-only scope":
+    let pkg = autotools_package(
+      srcDir = "./src",
+      allowSourceWrites = true)
+    check pkg.buildEdge.readOnlyRoots.len == 0
+
   test "configure action id is deterministic across calls with same args":
     let a = autotools_package(srcDir = "./src",
       configureOptions = @["--enable-gold"])

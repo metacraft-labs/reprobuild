@@ -3,9 +3,7 @@
 ## Pins the M9.H/I/K trio's behaviour on the SIXTY-FIFTH real
 ## production from-source recipe. gettext's unique coverage angle vs
 ## the prior sixty-four is being the canonical GNU i18n / l10n
-## toolchain + the FIRST source recipe in the corpus with a
-## THREE-executable + ONE-library mixed-kind autotools shape (prior
-## precedents capped at two-of-each), with a FIVE-flag
+## toolchain with a FIVE-flag
 ## ``configureFlags:`` block exercising the mixed ``--disable-*`` /
 ## ``--without-*`` polarity convention.
 ##
@@ -16,11 +14,8 @@
 ##   * ``configureFlags:`` block round-trip (M9.I) — exact-order
 ##     sequence equality on the five-flag set + channel-isolation
 ##     spot-check (meson + cmake + make channels MUST be empty).
-##   * MIXED artifact registration (M3) — three executables
-##     (``dakExecutable``) + one library (``dakLibrary``) attributed
-##     to ``gettextSource`` with kind discriminators preserved
-##     per-artifact (unique coverage angle vs prior mixed-kind
-##     autotools recipes).
+##   * artifact registration (M3) — three executables
+##     (``dakExecutable``) attributed to ``gettextSource``.
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
@@ -29,8 +24,8 @@ import std/[unittest]
 import repro_project_dsl
 
 # Side-effect import: triggers the package macro which registers
-# fetch spec + configure flags + three executable + one library
-# artifacts under ``gettextSource`` at module init time.
+# fetch spec + configure flags + three executable artifacts under
+# ``gettextSource`` at module init time.
 import ./repro
 
 const ExpectedUrl =
@@ -79,23 +74,14 @@ suite "gettextSource — from-source recipe smoke test":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "configureFlags does not leak into the make channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
-  test "artifacts register three executables + one library":
-    # M3 artifact registry: ``msgfmt`` / ``msgmerge`` / ``xgettext``
-    # all tagged ``dakExecutable`` while ``libIntl`` is tagged
-    # ``dakLibrary``. The unique coverage of THIS recipe vs the prior
-    # mixed-kind autotools precedents (xz at one-of-each; util-linux /
-    # coreutils at varying executable cardinalities; ncurses at
-    # two-libs + two-execs) is the THREE-executable + ONE-library
-    # asymmetric balance — a regression that flattened the kind
-    # discriminator or collapsed any of the four artifact-name
-    # partitions would surface as either a missing entry, a wrong
-    # ``kind`` tag, or a duplicated entry shadowing one of the others.
+  test "artifacts register three executables":
+    # glibc provides the libintl API in libc, so this build installs the
+    # gettext toolchain but no standalone libintl.so artifact.
     let arts = registeredArtifacts("gettextSource")
-    check arts.len == 4
+    check arts.len == 3
     var seenMsgfmt = false
     var seenMsgmerge = false
     var seenXgettext = false
-    var seenIntl = false
     for art in arts:
       check art.packageName == "gettextSource"
       case art.artifactName
@@ -108,15 +94,11 @@ suite "gettextSource — from-source recipe smoke test":
       of "xgettext":
         seenXgettext = true
         check art.kind == dakExecutable
-      of "libIntl":
-        seenIntl = true
-        check art.kind == dakLibrary
       else:
         discard
     check seenMsgfmt
     check seenMsgmerge
     check seenXgettext
-    check seenIntl
 
   test "versions block records the upstream tag + URL + repository":
     # M2 versions registry: the upstream ftp.gnu.org release tag is

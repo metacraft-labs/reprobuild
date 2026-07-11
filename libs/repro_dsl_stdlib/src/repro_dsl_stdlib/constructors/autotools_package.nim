@@ -231,6 +231,7 @@ proc autotools_package*(srcDir: string;
                         configureScriptName = "configure";
                         prefixFlagFormat = "--prefix=";
                         patchHardcodedFile = false;
+                        allowSourceWrites = false;
                         skipConfigure = false;
                         installMakeVars: seq[string] = @[];
                         srcPatches: seq[string] = @[]):
@@ -407,6 +408,10 @@ proc autotools_package*(srcDir: string;
   # legitimately mutable so we skip the readOnlyRoots declaration.
   # (The regen writes are the exception R6 line 268 documents as
   # "action explicitly owns the target location".)
+  # ``allowSourceWrites`` covers configure scripts that legitimately
+  # refresh generated files under srcDir despite running out-of-tree.
+  # It must be requested explicitly so ordinary source trees remain
+  # protected by R6.
   let m9r79ConfBuildDirAbs =
     if projectRoot.len > 0: projectRoot / buildDir
     else: buildDir
@@ -414,7 +419,8 @@ proc autotools_package*(srcDir: string;
     if projectRoot.len > 0: projectRoot / srcDir
     else: srcDir
   var m9r79ConfReadOnly: seq[string] = @[]
-  if not patchHardcodedFile and srcPatches.len == 0 and
+  if not patchHardcodedFile and not allowSourceWrites and
+      srcPatches.len == 0 and
       relBuildDir != relSrcDir:
     m9r79ConfReadOnly.add(m9r79ConfSrcDirAbs)
   let configureEdge = buildAction(
