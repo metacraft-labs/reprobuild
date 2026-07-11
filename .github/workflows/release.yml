@@ -137,6 +137,11 @@ jobs:
           Compress-Archive -Path "${pkg_name}" -DestinationPath "${pkg_name}.zip" -Force
           Add-Content -Path $env:GITHUB_ENV -Value "ASSET_PATH=${pkg_name}.zip"
 
+      - name: Verify release assets
+        shell: bash
+        run: |
+          bash scripts/verify_release.sh "${{ env.ASSET_PATH }}"
+
       # Upload to GitHub Releases when a version tag is pushed
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
