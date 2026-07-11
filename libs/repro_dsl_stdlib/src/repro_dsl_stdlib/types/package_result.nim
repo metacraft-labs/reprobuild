@@ -1952,7 +1952,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # M9.R.15q.12.5 — also strip ``Daemon`` so ``pipewireDaemon``
     # probes for the bare ``pipewire`` binary name (same renaming
     # convention as systemdInit).
-    for suffix in ["Bin", "CLI", "Cmd", "Tool", "Exe", "Init", "Daemon"]:
+    for suffix in ["Bin", "CLI", "Cli", "Cmd", "Tool", "Exe", "Init", "Daemon"]:
       if strippedName.endsWith(suffix) and strippedName.len > suffix.len:
         strippedName = strippedName[0 ..< (strippedName.len - suffix.len)]
         break
