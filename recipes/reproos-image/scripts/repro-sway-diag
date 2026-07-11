@@ -59,7 +59,7 @@ export WLR_RENDERER_ALLOW_SOFTWARE=1
 #
 # Fix: pin ALL GL/EGL loads to the from-source Mesa install-mirror
 # via LD_LIBRARY_PATH so Debian's libglvnd is never picked up.
-FROM_SOURCE_MESA=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64
+FROM_SOURCE_MESA=@REPRO_SOURCE_RECIPES_ROOT@/mesa/.repro/output/install/usr/lib64
 if [ -f "$FROM_SOURCE_MESA/libEGL.so.1" ]; then
   LD_LIBRARY_PATH="$FROM_SOURCE_MESA${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   export LD_LIBRARY_PATH
@@ -156,10 +156,11 @@ LOG=/var/log/m9r71_sway.log
   ls -la /run/seatd.sock 2>&1 | sed 's/^/    /'
   echo "  drm devices:"
   ls -la /dev/dri 2>&1 | sed 's/^/    /'
-  echo "  Mesa GLES/EGL libraries + swrast driver:"
-  ls -la /usr/lib/x86_64-linux-gnu/libGLESv2.so.2 \
-         /usr/lib/x86_64-linux-gnu/libEGL.so.1 \
-         /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so 2>&1 | sed 's/^/    /'
+  echo "  Mesa GLES/EGL libraries + software DRI drivers:"
+  ls -la "$FROM_SOURCE_MESA/libGLESv2.so.2" \
+         "$FROM_SOURCE_MESA/libEGL.so.1" \
+         "$FROM_SOURCE_MESA/dri/kms_swrast_dri.so" \
+         "$FROM_SOURCE_MESA/dri/swrast_dri.so" 2>&1 | sed 's/^/    /'
   echo "  tty:"
   tty 2>&1 | sed 's/^/    /'
   echo "  ------ end preamble ------"
