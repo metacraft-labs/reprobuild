@@ -1286,7 +1286,10 @@ else:
         nixArgs.add("--file")
         nixArgs.add(plan.nixExpressionFile)
       else:
-        nixArgs.add(plan.nixSelector)
+        let selector =
+          if '^' in plan.nixSelector: plan.nixSelector
+          else: plan.nixSelector & "^*"
+        nixArgs.add(selector)
       let direct = execCmdEx(shellCommand(nixArgs))
       if direct.exitCode != 0:
         raise newException(OSError,
