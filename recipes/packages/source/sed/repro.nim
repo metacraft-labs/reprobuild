@@ -169,6 +169,7 @@ package sedSource:
     setCurrentOwningPackageOverride("sedSource")
     try:
       let opts = @[
+        "--disable-acl",
         "--without-selinux",
       ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
