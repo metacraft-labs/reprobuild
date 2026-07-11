@@ -12,6 +12,7 @@ const RepoMarker = "repro.nim"
 const FixtureRelRoot = "tests/fixtures/nix-daemon-local-flake"
 const FixtureSelector = ".#hello-sh"
 const FixtureExecutable = "bin/reprobuild-nix-daemon-fixture"
+const FixtureExpression = "default.nix"
 const FixtureFlakeNixSha256 =
   "4c7cdf3febfe4ccb9adf5f91bad3a0179cbb8a24ed4b1bc2a2d55bf07e4521d7"
 const FixtureFlakeLockSha256 =
@@ -57,9 +58,10 @@ proc prepareFixtureRoot(repoRoot: string): string =
   result = createTempDir("repro-nix-daemon-fixture-", "")
   copyFile(sourceRoot / "flake.nix", result / "flake.nix")
   copyFile(sourceRoot / "flake.lock", result / "flake.lock")
+  copyFile(sourceRoot / FixtureExpression, result / FixtureExpression)
   for args in [
     "init -q",
-    "add flake.nix flake.lock"
+    "add flake.nix flake.lock " & FixtureExpression
   ]:
     let (output, code) = execCmdEx("git -C " & quoteShell(result) & " " & args)
     if code != 0:
@@ -166,6 +168,29 @@ suite "Python Nix Evaluation Daemon IPC Integration Tests":
     let flakeLock = fixtureRoot / "flake.lock"
     requireFixtureDependency(resp, flakeNix, FixtureFlakeNixSha256)
     requireFixtureDependency(resp, flakeLock, FixtureFlakeLockSha256)
+
+    # Custom stdlib tools use synthetic selectors backed by a local Nix
+    # expression. The expression path must reach the daemon and participate in
+    # its dependency-keyed cache identity.
+    let expressionFile = fixtureRoot / FixtureExpression
+    let expressionReq = %*{
+      "action": "resolve",
+      "selector": "reprobuild-test-expression",
+      "expressionFile": expressionFile,
+      "workspaceRoot": fixtureRoot
+    }
+    sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+      protocol = IPPROTO_IP)
+    sock.connectUnix(socketPath)
+    sock.send($expressionReq & "\n")
+    respLine = ""
+    sock.readLine(respLine)
+    sock.close()
+    let expressionResp = parseJson(respLine)
+    check expressionResp["status"].getStr() == "success"
+    check expressionResp["paths"].len > 0
+    check fileExists(expressionResp["paths"][0].getStr() / FixtureExecutable)
+    check fixtureDependencyHash(expressionResp, expressionFile).len > 0
     
     # Scenario 1.3: Warm In-Memory Cache Performance
     # Measure duration of the second identical request

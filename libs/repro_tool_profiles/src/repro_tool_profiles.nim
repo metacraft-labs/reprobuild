@@ -1239,6 +1239,7 @@ else:
     let req = %*{
       "action": "resolve",
       "selector": selector,
+      "expressionFile": plan.nixExpressionFile,
       "workspaceRoot": getCurrentDir(),
       "evaluateOnly": true
     }

@@ -25,10 +25,14 @@ def file_dep(path: Path):
     }
 
 
-def dependencies_for(workspace_root: Path):
+def dependencies_for(workspace_root: Path, expression_file: Path | None = None):
     result = []
     for name in ("flake.nix", "flake.lock"):
         dep = file_dep(workspace_root / name)
+        if dep is not None:
+            result.append(dep)
+    if expression_file is not None:
+        dep = file_dep(expression_file)
         if dep is not None:
             result.append(dep)
     return result
@@ -100,20 +104,16 @@ def put_executable_output_first(selector: str, paths: list[str]) -> list[str]:
     return paths
 
 
-def resolve_selector(selector: str, workspace_root: Path, dependencies: list[dict]) -> dict:
-    if selector == "reprobuild-stdlib-stylus-0.64.0":
-        expr = (
-            workspace_root
-            / "libs"
-            / "repro_dsl_stdlib"
-            / "src"
-            / "repro_dsl_stdlib"
-            / "packages"
-            / "nix"
-            / "stylus-0.64.0"
-            / "default.nix"
+def resolve_selector(
+    selector: str,
+    workspace_root: Path,
+    dependencies: list[dict],
+    expression_file: Path | None,
+) -> dict:
+    if expression_file is not None:
+        paths = run_command(
+            ["nix-build", "--no-out-link", str(expression_file)], workspace_root
         )
-        paths = run_command(["nix-build", "--no-out-link", str(expr)], workspace_root)
     else:
         paths = run_command(
             [
@@ -150,15 +150,30 @@ def response_for(line: bytes, cache: dict) -> dict:
 
     workspace_root = Path(str(req.get("workspaceRoot") or os.getcwd()))
     workspace_root = workspace_root.expanduser().resolve()
-    dependencies = dependencies_for(workspace_root)
+    expression_value = str(req.get("expressionFile") or "")
+    expression_file = None
+    if expression_value:
+        expression_file = Path(expression_value).expanduser()
+        if not expression_file.is_absolute():
+            expression_file = workspace_root / expression_file
+        expression_file = expression_file.resolve()
+        if not expression_file.is_file():
+            return {
+                "status": "error",
+                "error": f"Nix expression file does not exist: {expression_file}",
+            }
+    dependencies = dependencies_for(workspace_root, expression_file)
     key = (
         selector,
         str(workspace_root),
+        str(expression_file or ""),
         bool(req.get("evaluateOnly")),
         dependency_cache_key(dependencies),
     )
     if key not in cache:
-        cache[key] = resolve_selector(selector, workspace_root, dependencies)
+        cache[key] = resolve_selector(
+            selector, workspace_root, dependencies, expression_file
+        )
     return cache[key]
 
 
