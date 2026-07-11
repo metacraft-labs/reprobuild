@@ -60,6 +60,7 @@ OUT_QCOW2="$1"
 # The recipe engine sets cwd to recipes/reproos-image; the repo
 # root is two levels up.
 REPO_ROOT="$(cd ../.. && pwd)"
+SOURCE_RECIPES_ROOT="$REPO_ROOT/recipes/packages/source"
 RECIPE_DIR="$(pwd)"
 SCRIPT_DIR_SELF="$(cd "$(dirname "$0")" && pwd)"
 ISO_SCRIPTS_DIR="$REPO_ROOT/recipes/reproos-iso/scripts"
@@ -854,7 +855,7 @@ DBUS_DROPIN_EOF
   # the from-source install-mirror so ExecStart's fork() finds it at
   # /usr/libexec/dbus-daemon-launch-helper.
   mkdir -p '$MNT_DIR/usr/libexec'
-  ln -sfn /opt/repro/reprobuild/recipes/packages/source/dbus/.repro/output/install/usr/libexec/dbus-daemon-launch-helper \\
+  ln -sfn '$SOURCE_RECIPES_ROOT/dbus/.repro/output/install/usr/libexec/dbus-daemon-launch-helper' \\
     '$MNT_DIR/usr/libexec/dbus-daemon-launch-helper'
 
   # Blocker 5 (M9.R.56.5) --- the from-source dbus 1.16.0 recipe does
@@ -1064,7 +1065,7 @@ echo "[build-reproos-image] Phase 10.8: shim compiled-in /usr/local sddm paths +
   # belongs in M9.R.57+ with the sddm-recipe CMAKE_INSTALL_PREFIX
   # fix.
   mkdir -p '$MNT_DIR/usr/local/libexec'
-  SDDM_INSTALL_LIBEXEC=/opt/repro/reprobuild/recipes/packages/source/sddm/.repro/output/install/usr/libexec
+  SDDM_INSTALL_LIBEXEC='$SOURCE_RECIPES_ROOT/sddm/.repro/output/install/usr/libexec'
   for helper in sddm-helper sddm-helper-start-wayland sddm-helper-start-x11user; do
     ln -sfn \"\$SDDM_INSTALL_LIBEXEC/\$helper\" \"$MNT_DIR/usr/local/libexec/\$helper\"
   done
@@ -1094,9 +1095,9 @@ echo "[build-reproos-image] Phase 10.8: shim compiled-in /usr/local sddm paths +
   # link_base_recipe_binaries, so pointing at the install-mirror
   # is equivalent and avoids a two-hop symlink).
   mkdir -p '$MNT_DIR/usr/local/bin'
-  ln -sfn /opt/repro/reprobuild/recipes/packages/source/sddm/.repro/output/install/usr/bin/sddm-greeter-qt6 \\
+  ln -sfn '$SOURCE_RECIPES_ROOT/sddm/.repro/output/install/usr/bin/sddm-greeter-qt6' \\
     '$MNT_DIR/usr/local/bin/sddm-greeter-qt6'
-  ln -sfn /opt/repro/reprobuild/recipes/packages/source/sddm/.repro/output/install/usr/bin/sddm \\
+  ln -sfn '$SOURCE_RECIPES_ROOT/sddm/.repro/output/install/usr/bin/sddm' \\
     '$MNT_DIR/usr/local/bin/sddm'
 
   # M9.R.56.8.3: shim /lib/security -> from-source pam's install-
@@ -1115,7 +1116,7 @@ echo "[build-reproos-image] Phase 10.8: shim compiled-in /usr/local sddm paths +
   # We link the whole /lib/security dir at the pam install-
   # mirror's usr/lib/security subtree.
   mkdir -p '$MNT_DIR/lib'
-  ln -sfn /opt/repro/reprobuild/recipes/packages/source/pam/.repro/output/install/usr/lib/security \\
+  ln -sfn '$SOURCE_RECIPES_ROOT/pam/.repro/output/install/usr/lib/security' \\
     '$MNT_DIR/lib/security'
 
   # M9.R.56.8.4: strip pam_selinux.so references from the sddm
@@ -1404,8 +1405,9 @@ ENVD_EOF
 
   # /usr/local/lib/sddm/sddm.conf.d -> /etc/sddm.conf.d so the
   # daemon's SYSTEM_CONFIG_DIR probe finds any drop-ins.
-  mkdir -p '$MNT_DIR/usr/local/lib/sddm'
+  mkdir -p '$MNT_DIR/usr/local/lib/sddm' '$MNT_DIR/usr/lib/sddm'
   ln -sfn /etc/sddm.conf.d '$MNT_DIR/usr/local/lib/sddm/sddm.conf.d'
+  ln -sfn /etc/sddm.conf.d '$MNT_DIR/usr/lib/sddm/sddm.conf.d'
 
   # --- Config-file overrides (belt-and-suspenders) ---
   # If a future sddm rebuild moves to CMAKE_INSTALL_PREFIX=/usr
@@ -1534,7 +1536,7 @@ echo "[build-reproos-image] Phase 10.9: install + enable seatd system service (l
   # <install>/usr/bin, so those should already be linked.  Belt-
   # and-suspenders: force-link them here in case the recipe layout
   # changes.
-  LIBSEAT_INSTALL=/opt/repro/reprobuild/recipes/packages/source/libseat/.repro/output/install/usr/bin
+  LIBSEAT_INSTALL='$SOURCE_RECIPES_ROOT/libseat/.repro/output/install/usr/bin'
   if [ -x \"\$LIBSEAT_INSTALL/seatd\" ]; then
     ln -sfn \"\$LIBSEAT_INSTALL/seatd\" '$MNT_DIR/usr/bin/seatd'
   else
@@ -1559,7 +1561,7 @@ echo "[build-reproos-image] Phase 10.9: install + enable seatd system service (l
   # every future clean rebuild patches the RPATH deterministically.
   PATCHELF=\$(command -v patchelf 2>/dev/null || true)
   if [ -n \"\$PATCHELF\" ]; then
-    LIBSEAT_INSTALL_ROOT='$MNT_DIR/opt/repro/reprobuild/recipes/packages/source/libseat/.repro/output/install'
+    LIBSEAT_INSTALL_ROOT='$MNT_DIR$SOURCE_RECIPES_ROOT/libseat/.repro/output/install'
     for target in \\
       \"\$LIBSEAT_INSTALL_ROOT/usr/bin/seatd\" \\
       \"\$LIBSEAT_INSTALL_ROOT/usr/bin/seatd-launch\" \\
