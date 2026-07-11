@@ -20,21 +20,21 @@ defineCliInterface nimC, "test-nimC":
       position = 0
     outputs output
 
-package tEnginePlainBasenamePkg:
+package `t_engine_plain_basename_pkg`:
   uses:
     "nim >=2.2 <3.0"
   build:
     discard nimC.c(source = "src/codetracer.nim",
       output = "bin/codetracer", actionId = "plain")
 
-package tEngineExeSuffixPkg:
+package `t_engine_exe_suffix_pkg`:
   uses:
     "nim >=2.2 <3.0"
   build:
     discard nimC.c(source = "src/codetracer.nim",
       output = "bin/codetracer.exe", actionId = "exe-suffix")
 
-package tEngineAbsolutePathPkg:
+package `t_engine_absolute_path_pkg`:
   uses:
     "nim >=2.2 <3.0"
   build:

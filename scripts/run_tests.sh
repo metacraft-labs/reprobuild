@@ -6,8 +6,32 @@ set -euo pipefail
 # flags baked into the edges. The runquota sibling build and final test runner
 # stay shell-shaped until typed-tool resolver coverage reaches those helpers.
 mkdir -p build build/nimcache test-logs
+
+repo_root="$(pwd -P)"
+# Keep large suite scratch off /tmp and outside the checkout; some tests build
+# "outside workspace" fixtures and scan ancestors for repo markers.
+cache_home="${XDG_CACHE_HOME:-${HOME:-}/.cache}"
+[[ -n "${cache_home}" && "${cache_home}" != "/.cache" ]] || cache_home="${repo_root}/../.cache"
+test_tmp_parent="${REPROBUILD_TEST_TMPDIR:-${cache_home}/reprobuild-test-tmp}"
+[[ -n "${test_tmp_parent}" && "${test_tmp_parent}" != "/" ]] || {
+  echo "refusing unsafe REPROBUILD_TEST_TMPDIR: ${test_tmp_parent}" >&2
+  exit 1
+}
+test_tmp_parent="$(mkdir -p "${test_tmp_parent}" && cd "${test_tmp_parent}" && pwd -P)"
+if [[ "${test_tmp_parent}" == "${repo_root}" || "${test_tmp_parent}" == "${repo_root}"/* ]]; then
+  echo "refusing REPROBUILD_TEST_TMPDIR inside checkout: ${test_tmp_parent}" >&2
+  exit 1
+fi
+test_tmp_root="${test_tmp_parent%/}/current"
+rm -rf "${test_tmp_root}"
+mkdir -p "${test_tmp_root}"
+export TMPDIR="${test_tmp_root}" TMP="${test_tmp_root}" TEMP="${test_tmp_root}"
+
 rm -rf build/test-bin
 mkdir -p build/test-bin
+
+# shellcheck source=scripts/source_paths.sh
+source scripts/source_paths.sh
 
 # Test runs exercise user-facing CLI latency gates, so the app bootstrap and
 # graph-owned app rebuilds must use optimized binaries by default. Developers
@@ -48,6 +72,8 @@ if [[ -z "${BEARSSL_SRC:-}" ]]; then
     export BEARSSL_SRC
   fi
 fi
+shm_queue_src="$(resolve_shm_queue_src)"
+export SHM_QUEUE_SRC="${shm_queue_src}"
 
 # Provision sha-pinned NDE0-A fixtures; the test remains the loud gate.
 bash recipes/reproos-mvp-config/fetch-test-fixtures.sh || true
@@ -92,6 +118,7 @@ bootstrap_monitor_shim() {
   local io_mon_src="${IO_MON_SRC:-../io-mon}"
   case "${io_mon_src}" in
     */src) io_mon_src="${io_mon_src%/src}" ;;
+    *\\src) io_mon_src="${io_mon_src%\\src}" ;;
   esac
   if [[ ! -x "${io_mon_src}/scripts/build_shim.sh" ]]; then
     echo "missing io-mon shim builder at ${io_mon_src}/scripts/build_shim.sh; set IO_MON_SRC" >&2
@@ -100,6 +127,7 @@ bootstrap_monitor_shim() {
   IO_MON_SHIM_OUT_DIR="$(pwd)/build/lib" \
   IO_MON_SHIM_NIMCACHE_DIR="$(pwd)/build/nimcache/io-mon-shim" \
   IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
+  SHM_QUEUE_SRC="${shm_queue_src}" \
     bash "${io_mon_src}/scripts/build_shim.sh"
 }
 printf 'Bootstrapping monitor shim for provider compilation\n' >&2

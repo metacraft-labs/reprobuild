@@ -246,7 +246,7 @@ suite "M14 — repro branch <name> refuses on any dirty sibling":
       skip()
     else:
       let fx = setupFixture(gitBin, "clean")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -289,7 +289,7 @@ suite "M14 — repro branch <name> refuses on any dirty sibling":
       skip()
     else:
       let fx = setupFixture(gitBin, "dirty")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -338,7 +338,7 @@ suite "M14 — repro branch <name> refuses on any dirty sibling":
       skip()
     else:
       let fx = setupFixture(gitBin, "collision-diff")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -401,7 +401,7 @@ suite "M14 — repro branch <name> refuses on any dirty sibling":
       skip()
     else:
       let fx = setupFixture(gitBin, "collision-head")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")

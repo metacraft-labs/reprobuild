@@ -209,9 +209,46 @@ package consumer:
 
 proc q(value: string): string = quoteShell(value)
 
+var runCounter = 0
+
 proc run(command: string; cwd = ""): tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
+  ## The SC-7 capstone runs several integration builds in one test binary.
+  ## Capture each build's full output to a log, but emit a heartbeat while the
+  ## subprocess runs so the test runner's idle-output deadline does not mistake
+  ## a live long build for a hang.
+  inc runCounter
+  let shBin =
+    block:
+      let found = findExe("sh")
+      if found.len > 0: found else: "sh"
+  let logPath = getTempDir() / ("sc7-run-" & $getCurrentProcessId() &
+    "-" & $runCounter & ".log")
+  let shellLine = command & " > " & q(logPath) & " 2>&1"
+  stdout.writeLine("[sc7] start: " & command)
+  flushFile(stdout)
+  let process = startProcess(shBin,
+    args = ["-c", shellLine],
+    workingDir = (if cwd.len > 0: cwd else: getCurrentDir()),
+    options = {poUsePath})
+  var elapsedMs = 0
+  while true:
+    result.code = process.peekExitCode()
+    if result.code != -1:
+      break
+    sleep(1000)
+    elapsedMs += 1000
+    if elapsedMs mod 30_000 == 0:
+      stdout.writeLine("[sc7] still running after " & $(elapsedMs div 1000) &
+        "s: " & command)
+      flushFile(stdout)
+  process.close()
+  if fileExists(logPath):
+    result.output = readFile(logPath)
+    try: removeFile(logPath)
+    except OSError: discard
+  stdout.writeLine("[sc7] finished exit=" & $result.code & " after " &
+    $(elapsedMs div 1000) & "s")
+  flushFile(stdout)
 
 proc buildCmdFor(reproAbs, consumerRoot, cacheRoot: string): string =
   q(reproAbs) & " build " & q(consumerRoot / "repro.nim") &

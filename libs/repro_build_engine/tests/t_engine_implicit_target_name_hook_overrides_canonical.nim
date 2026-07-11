@@ -43,7 +43,7 @@ proc actionsFromFragment(fragment: GraphFragment): seq[BuildActionDef] =
 suite "t_engine_implicit_target_name_hook_overrides_canonical":
 
   test "t_engine_implicit_target_name_hook_overrides_canonical":
-    let pkg = fixturePackage("tEngineHookConsumer")
+    let pkg = fixturePackage("t_engine_hook_consumer")
     let fragment = buildPackageFragment(
       pkg, dummyRequest(pkg), buildTEngineHookConsumerPackage,
       includeDefault = false)

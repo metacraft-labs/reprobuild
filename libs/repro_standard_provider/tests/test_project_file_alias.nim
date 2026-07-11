@@ -34,10 +34,13 @@ import repro_standard_provider/convention
 import repro_standard_provider/conventions/nim as nim_convention
 
 let
-  ReprobuildRoot = currentSourcePath.parentDir.parentDir.parentDir.parentDir
-  MetacraftRoot = workspaceRootForRepo(ReprobuildRoot)
-  CanonicalFixtureRoot =
-    MetacraftRoot / "reprobuild-examples" / "nim" / "binary"
+  reprobuildRoot = currentSourcePath.parentDir.parentDir.parentDir.parentDir
+  metacraftRoot = workspaceRootForRepo(reprobuildRoot)
+  canonicalFixtureRoot =
+    metacraftRoot / "reprobuild-examples" / "nim" / "binary"
+
+proc requireCanonicalFixture() =
+  require fileExists(canonicalFixtureRoot / "reprobuild.nim")
 
 proc dummyRequest(projectRoot: string): ProviderGraphRequest =
   ProviderGraphRequest(
@@ -68,7 +71,7 @@ proc materialiseCanonicalRename(scratchName: string): string =
   result = getTempDir() / scratchName
   if dirExists(result):
     removeDir(result)
-  copyTree(CanonicalFixtureRoot, result)
+  copyTree(canonicalFixtureRoot, result)
   let legacy = result / "reprobuild.nim"
   let canonical = result / "repro.nim"
   doAssert fileExists(legacy),
@@ -83,43 +86,40 @@ suite "standard-provider project-file alias integration":
     # whole convention path (recognise + emit) still works. This is the
     # Mode-3 recommended shape — the convention MUST work without the
     # legacy filename present at all.
-    if not fileExists(CanonicalFixtureRoot / "reprobuild.nim"):
-      checkpoint "fixture missing — looked at " & CanonicalFixtureRoot
-      skip()
-    else:
-      let scratch = materialiseCanonicalRename(
-        "test_project_file_alias_canonical_only")
-      defer: removeDir(scratch)
-      check fileExists(scratch / "repro.nim")
-      check not fileExists(scratch / "reprobuild.nim")
-      let conv = nim_convention.nimConvention()
-      let request = dummyRequest(scratch)
-      check conv.recognize(scratch, request)
-      # Emit is gated on ``nim`` being on PATH (the Nim convention runs
-      # an eager ``nim c --compileOnly`` from emitFragment). ``recognize``
-      # already returned true above, which short-circuits to false when
-      # ``nim`` is missing — so a green ``recognize`` plus a defensive
-      # try around the emit is the right shape.
-      var emitOk = false
-      var fragment: GraphFragment
-      try:
-        fragment = conv.emitFragment(scratch, request)
-        emitOk = true
-      except CatchableError as err:
-        checkpoint "emitFragment raised: " & err.msg
-        fail()
-      if emitOk:
-        check fragment.nodes.len > 0
-        # The engine's diagnostic surface ultimately surfaces the
-        # ``PackageDef.sourceFile`` via the interface-artifact pipeline
-        # (M2-and-beyond). The resolver's per-call test
-        # (``test_project_file_alias.nim`` under ``libs/repro_core/``)
-        # already pins that ``resolveProjectFile`` returns the canonical
-        # name here, so we trust the convention's own
-        # ``syntheticPackage`` to thread the right filename into the
-        # ``PackageDef``. The integration concern at this layer is
-        # simply that emit succeeded without the project file present
-        # at the legacy name.
+    requireCanonicalFixture()
+    let scratch = materialiseCanonicalRename(
+      "test_project_file_alias_canonical_only")
+    defer: removeDir(scratch)
+    check fileExists(scratch / "repro.nim")
+    check not fileExists(scratch / "reprobuild.nim")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    check conv.recognize(scratch, request)
+    # Emit is gated on ``nim`` being on PATH (the Nim convention runs
+    # an eager ``nim c --compileOnly`` from emitFragment). ``recognize``
+    # already returned true above, which short-circuits to false when
+    # ``nim`` is missing — so a green ``recognize`` plus a defensive
+    # try around the emit is the right shape.
+    var emitOk = false
+    var fragment: GraphFragment
+    try:
+      fragment = conv.emitFragment(scratch, request)
+      emitOk = true
+    except CatchableError as err:
+      checkpoint "emitFragment raised: " & err.msg
+      fail()
+    if emitOk:
+      check fragment.nodes.len > 0
+      # The engine's diagnostic surface ultimately surfaces the
+      # ``PackageDef.sourceFile`` via the interface-artifact pipeline
+      # (M2-and-beyond). The resolver's per-call test
+      # (``test_project_file_alias.nim`` under ``libs/repro_core/``)
+      # already pins that ``resolveProjectFile`` returns the canonical
+      # name here, so we trust the convention's own
+      # ``syntheticPackage`` to thread the right filename into the
+      # ``PackageDef``. The integration concern at this layer is
+      # simply that emit succeeded without the project file present
+      # at the legacy name.
 
   test "both files: convention path raises ProjectFileAmbiguousError":
     # Materialise the same fixture with BOTH files present. The spec
@@ -129,50 +129,44 @@ suite "standard-provider project-file alias integration":
     # resolver layer AND propagates through the convention's
     # ``recognize`` entry point (which calls ``resolveProjectFile``
     # via ``readReprobuildSource``).
-    if not fileExists(CanonicalFixtureRoot / "reprobuild.nim"):
-      checkpoint "fixture missing — looked at " & CanonicalFixtureRoot
-      skip()
-    else:
-      let scratch = getTempDir() / "test_project_file_alias_both"
-      if dirExists(scratch):
-        removeDir(scratch)
-      copyTree(CanonicalFixtureRoot, scratch)
-      defer: removeDir(scratch)
-      # Add the canonical name without removing the legacy one.
-      copyFile(scratch / "reprobuild.nim", scratch / "repro.nim")
-      check fileExists(scratch / "repro.nim")
-      check fileExists(scratch / "reprobuild.nim")
-      # Resolver-layer: raises.
-      var resolverRaised = false
-      var resolverMsg = ""
-      try:
-        discard resolveProjectFile(scratch)
-      except ProjectFileAmbiguousError as err:
-        resolverRaised = true
-        resolverMsg = err.msg
-      check resolverRaised
-      check resolverMsg.contains(CanonicalProjectFileName)
-      check resolverMsg.contains(LegacyProjectFileName)
-      check resolverMsg.contains(scratch)
-      # Convention path: ``recognize`` calls ``readReprobuildSource`` →
-      # ``resolveProjectFile``; the error propagates up.
-      let conv = nim_convention.nimConvention()
-      let request = dummyRequest(scratch)
-      var conventionRaised = false
-      try:
-        discard conv.recognize(scratch, request)
-      except ProjectFileAmbiguousError:
-        conventionRaised = true
-      check conventionRaised
+    requireCanonicalFixture()
+    let scratch = getTempDir() / "test_project_file_alias_both"
+    if dirExists(scratch):
+      removeDir(scratch)
+    copyTree(canonicalFixtureRoot, scratch)
+    defer: removeDir(scratch)
+    # Add the canonical name without removing the legacy one.
+    copyFile(scratch / "reprobuild.nim", scratch / "repro.nim")
+    check fileExists(scratch / "repro.nim")
+    check fileExists(scratch / "reprobuild.nim")
+    # Resolver-layer: raises.
+    var resolverRaised = false
+    var resolverMsg = ""
+    try:
+      discard resolveProjectFile(scratch)
+    except ProjectFileAmbiguousError as err:
+      resolverRaised = true
+      resolverMsg = err.msg
+    check resolverRaised
+    check resolverMsg.contains(CanonicalProjectFileName)
+    check resolverMsg.contains(LegacyProjectFileName)
+    check resolverMsg.contains(scratch)
+    # Convention path: ``recognize`` calls ``readReprobuildSource`` →
+    # ``resolveProjectFile``; the error propagates up.
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    var conventionRaised = false
+    try:
+      discard conv.recognize(scratch, request)
+    except ProjectFileAmbiguousError:
+      conventionRaised = true
+    check conventionRaised
 
   test "legacy reprobuild.nim only: existing fixtures keep working":
     # The unchanged canonical fixture. This is the regression: the M0-M29
     # corpus uses ``reprobuild.nim`` exclusively; the alias must not
     # have broken any of those.
-    if not fileExists(CanonicalFixtureRoot / "reprobuild.nim"):
-      checkpoint "fixture missing — looked at " & CanonicalFixtureRoot
-      skip()
-    else:
-      let conv = nim_convention.nimConvention()
-      let request = dummyRequest(CanonicalFixtureRoot)
-      check conv.recognize(CanonicalFixtureRoot, request)
+    requireCanonicalFixture()
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(canonicalFixtureRoot)
+    check conv.recognize(canonicalFixtureRoot, request)

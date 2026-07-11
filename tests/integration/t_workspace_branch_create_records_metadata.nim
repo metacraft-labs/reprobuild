@@ -176,7 +176,7 @@ suite "M14 — repro branch records metadata round-trip":
       skip()
     else:
       let fx = setupFixture(gitBin, "create-writes")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       # Init clones both repos and records ``main`` (the resolver's
       # trunk) as the active branch.
@@ -224,7 +224,7 @@ suite "M14 — repro branch records metadata round-trip":
       skip()
     else:
       let fx = setupFixture(gitBin, "show-after-create")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       check runInit(fx).code == 0
       check runBranchCreate(fx, "feature-show").code == 0
@@ -252,7 +252,7 @@ suite "M14 — repro branch records metadata round-trip":
       skip()
     else:
       let fx = setupFixture(gitBin, "show-after-init")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       # ``workspace init`` records the resolver's ``trunk`` (``main``
       # in this fixture) as the active branch. ``repro branch``

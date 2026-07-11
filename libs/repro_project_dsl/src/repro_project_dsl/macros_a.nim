@@ -2366,7 +2366,8 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   for modulePath in modules:
     let moduleName = modulePath.split('/')[^1]
     let moduleAlias = moduleName & "_module"
-    result.add("import " & modulePath & " as " & moduleAlias & "\n")
+    result.add("import " & modulePath & " as " & moduleAlias &
+      " except package\n")
     result.add("when compiles(" & moduleAlias &
       ".reprobuildPackageMarker()):\n")
     result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")
@@ -2474,7 +2475,8 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         echo "[producer-import] alias=", moduleAlias, " selector=", selector,
           " shim=", shimPath, " -> ", siblingReproPath
       let shimModule = shimDir / shimStem
-      result.add("import \"" & shimModule.replace('\\', '/') & "\" as " & moduleAlias & "\n")
+      result.add("import \"" & shimModule.replace('\\', '/') & "\" as " &
+        moduleAlias & " except package\n")
       result.add("when compiles(" & moduleAlias &
         ".reprobuildPackageMarker()):\n")
       result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")

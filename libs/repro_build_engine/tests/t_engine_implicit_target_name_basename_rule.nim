@@ -54,7 +54,7 @@ proc actionsFromFragment(fragment: GraphFragment): seq[BuildActionDef] =
 suite "t_engine_implicit_target_name_basename_rule":
 
   test "t_engine_implicit_target_name_basename_rule":
-    let plainPkg = fixturePackage("tEnginePlainBasenamePkg")
+    let plainPkg = fixturePackage("t_engine_plain_basename_pkg")
     let plainFragment = buildPackageFragment(
       plainPkg, dummyRequest(plainPkg), buildTEnginePlainBasenamePkgPackage,
       includeDefault = false)
@@ -63,7 +63,7 @@ suite "t_engine_implicit_target_name_basename_rule":
     check plainActions[0].id == "plain"
     check plainActions[0].targetNames == @["codetracer"]
 
-    let exePkg = fixturePackage("tEngineExeSuffixPkg")
+    let exePkg = fixturePackage("t_engine_exe_suffix_pkg")
     let exeFragment = buildPackageFragment(
       exePkg, dummyRequest(exePkg), buildTEngineExeSuffixPkgPackage,
       includeDefault = false)
@@ -72,7 +72,7 @@ suite "t_engine_implicit_target_name_basename_rule":
     check exeActions[0].id == "exe-suffix"
     check exeActions[0].targetNames == @["codetracer"]
 
-    let absPkg = fixturePackage("tEngineAbsolutePathPkg")
+    let absPkg = fixturePackage("t_engine_absolute_path_pkg")
     let absFragment = buildPackageFragment(
       absPkg, dummyRequest(absPkg), buildTEngineAbsolutePathPkgPackage,
       includeDefault = false)

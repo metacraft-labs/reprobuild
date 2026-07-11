@@ -147,7 +147,7 @@ suite "RA-11 — bootstrap manifest cache":
       skip()
     else:
       let scratch = createTempDir("repro-ra11-bootstrap-", "")
-      defer: removeDir(scratch)
+      defer: removeDirEventually(scratch)
       let reproBin = reproBinary()
 
       # Participating repo origin.

@@ -253,8 +253,31 @@ let ioMonSrc = block:
 if fileExists(ioMonSrc / "io_mon.nim"):
   switch("path", ioMonSrc)
 
+proc nixDevShellSourcePath(envName, marker: string): string =
+  when defined(windows):
+    ""
+  else:
+    if not fileExists("flake.nix"):
+      return ""
+    let systemResult =
+      gorgeEx("nix eval --raw --impure --expr 'builtins.currentSystem' 2>/dev/null")
+    if systemResult.exitCode != 0:
+      return ""
+    let system = systemResult.output.strip()
+    if system.len == 0:
+      return ""
+    let valueResult = gorgeEx(
+      "nix eval --raw '.#devShells." & system & ".default." & envName &
+      "' 2>/dev/null")
+    if valueResult.exitCode != 0:
+      return ""
+    let candidate = valueResult.output.strip()
+    if candidate.len > 0 and fileExists(candidate / marker):
+      return candidate
+    ""
+
 proc addPackagePath(envName: string; candidates: openArray[string];
-                    marker: string) =
+                    marker: string; useDevShellFallback = false) =
   let envPath = getEnv(envName)
   if envPath.len > 0 and fileExists(envPath / marker):
     switch("path", envPath)
@@ -262,6 +285,11 @@ proc addPackagePath(envName: string; candidates: openArray[string];
   for candidate in candidates:
     if fileExists(candidate / marker):
       switch("path", candidate)
+      return
+  if useDevShellFallback:
+    let flakePath = nixDevShellSourcePath(envName, marker)
+    if flakePath.len > 0:
+      switch("path", flakePath)
       return
 
 # M2 dev-env artifacts use status-im/nim-ssz-serialization for their canonical
@@ -341,7 +369,7 @@ addPackagePath("STACKABLE_HOOKS_SRC", [
 # other Nim sibling: prefer ``$SHM_QUEUE_SRC``, then the sibling checkout.
 addPackagePath("SHM_QUEUE_SRC", [
   ".." / "nim-shm-queue" / "src",
-], "shm_queue.nim")
+], "shm_queue.nim", useDevShellFallback = true)
 
 # R2: vm-harness lives in the sibling ``D:/metacraft/vm-harness/`` repo
 # (see ReproOS-MVP R0 status). The R2 boot integration test
@@ -479,8 +507,10 @@ proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
       return libDir
   ""
 
-let useSystemHashLibs = getEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS").toLowerAscii() in
-  ["1", "true", "yes", "on"]
+let useSystemHashLibs =
+  not defined(reproVendoredHash) and
+  getEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS").toLowerAscii() in
+    ["1", "true", "yes", "on"]
 
 if not useSystemHashLibs:
   switch("define", "reproVendoredHash")

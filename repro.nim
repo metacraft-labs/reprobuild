@@ -35,7 +35,7 @@
 ## those before invoking ``just build``; an interactive developer gets
 ## them out of the ``nix develop`` shell.
 
-import std/[os, strutils]
+import std/[os, osproc, strutils]
               # Incremental-Test-Runner M7: getEnv + the `/` path operator
               # for the io-mon / nim-stackable-hooks sibling resolution in the
               # test-fixtures monitor-shim build edge below.
@@ -415,6 +415,29 @@ package reprobuild:
               return path
       ""
 
+    proc nixDevShellSourcePath(envName, marker: string): string =
+      when defined(windows):
+        ""
+      else:
+        if not fileExists("flake.nix"):
+          return ""
+        let systemResult =
+          execCmdEx("nix eval --raw --impure --expr 'builtins.currentSystem' 2>/dev/null")
+        if systemResult.exitCode != 0:
+          return ""
+        let system = systemResult.output.strip()
+        if system.len == 0:
+          return ""
+        let valueResult = execCmdEx(
+          "nix eval --raw '.#devShells." & system & ".default." & envName &
+          "' 2>/dev/null")
+        if valueResult.exitCode != 0:
+          return ""
+        let candidate = valueResult.output.strip()
+        if candidate.len > 0 and fileExists(candidate / marker):
+          return candidate
+        ""
+
     proc sourceOnlyPackagePath(envName: string; candidates: openArray[string];
                                marker: string; nixStoreNamePart = ""):
         tuple[path: string; env: seq[(string, string)]] =
@@ -424,6 +447,9 @@ package reprobuild:
       for candidate in candidates:
         if fileExists(candidate / marker):
           return (candidate, @[(envName, candidate)])
+      let fromFlake = nixDevShellSourcePath(envName, marker)
+      if fromFlake.len > 0:
+        return (fromFlake, @[(envName, fromFlake)])
       if nixStoreNamePart.len > 0:
         let fromStore = findNixStoreSourceDir(nixStoreNamePart, marker)
         if fromStore.len > 0:
@@ -469,6 +495,9 @@ package reprobuild:
       sourceOnlyPackagePath("STACKABLE_HOOKS_SRC", [
         repoParent / "nim-stackable-hooks" / "src",
       ], "stackable_hooks.nim"),
+      sourceOnlyPackagePath("SHM_QUEUE_SRC", [
+        repoParent / "nim-shm-queue" / "src",
+      ], "shm_queue.nim"),
     ]:
       if pkg.path.len > 0:
         sourceOnlyNimPaths.add(pkg.path)
@@ -612,7 +641,7 @@ package reprobuild:
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro/repro.nim",
       binary = "build/bin/repro",
-      defines = @["release"],
+      defines = @["release", "reproVendoredHash"],
       paths = ioMonNimPaths & sourceOnlyNimPaths,
       passL = reproRuntimePassL,
       extraEnv = sourceOnlyEnv,
@@ -826,6 +855,40 @@ package reprobuild:
     # above. The shim is a host-native artifact (LD_PRELOAD / DYLD_INSERT
     # / IAT-patch DLL), so the host arm is the correct (and only) target.
     var reprobuildTestFixturesActions: seq[BuildActionDef] = @[]
+
+    # M76 shell-hook tests need a small counting shim to assert whether prompt
+    # evaluation spawned ``repro dev-env export``. Keep that executable in the
+    # build graph so tests never invoke ``nim c`` at runtime.
+    reprobuildTestFixturesActions.add(nim.c(
+      source = "tests/fixtures/shell-hook-counting-shim/repro_shell_hook_counting_shim.nim",
+      binary = "build/test-bin/repro_shell_hook_counting_shim",
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro_shell_hook_counting_shim",
+      cacheable = false,
+      actionId = "reprobuild.test_fixtures.shell_hook_counting_shim"))
+
+    # Variant/configuration tests need subprocess probes so module-level
+    # configurable solving can run under a different REPRO_VARIANTS value.
+    # Build those probes once in the graph; the tests only execute them.
+    reprobuildTestFixturesActions.add(nim.c(
+      source = "tests/fixtures/spec-examples/variant-feature-flag/probe_enable_tls_false.nim",
+      binary = "build/test-bin/variant_feature_flag_probe",
+      paths = sourceOnlyNimPaths,
+      passL = reproRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/variant_feature_flag_probe",
+      cacheable = false,
+      actionId = "reprobuild.test_fixtures.variant_feature_flag_probe"))
+    reprobuildTestFixturesActions.add(nim.c(
+      source = "tests/fixtures/spec-examples/buildtype-output/probe_release.nim",
+      binary = "build/test-bin/buildtype_output_probe",
+      paths = sourceOnlyNimPaths,
+      passL = reproRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/buildtype_output_probe",
+      cacheable = false,
+      actionId = "reprobuild.test_fixtures.buildtype_output_probe"))
 
     let ioMonSrc = block:
       let fromEnv = CompileTimeIoMonSrc

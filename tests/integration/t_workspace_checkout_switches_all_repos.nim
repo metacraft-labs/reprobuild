@@ -281,7 +281,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       skip()
     else:
       let fx = setupFixture(gitBin, "all-local")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -323,7 +323,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       skip()
     else:
       let fx = setupFixture(gitBin, "fetch-and-track")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       # Seed ``feature-remote`` on the lib-b origin BEFORE cloning so
       # the clones pick up only ``main`` (DWIM-able remote-only ref
@@ -380,7 +380,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       skip()
     else:
       let fx = setupFixture(gitBin, "missing-branch")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -431,7 +431,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       skip()
     else:
       let fx = setupFixture(gitBin, "dirty")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -480,7 +480,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       skip()
     else:
       let fx = setupFixture(gitBin, "metadata")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -521,7 +521,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       skip()
     else:
       let fx = setupFixture(gitBin, "idempotent")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")

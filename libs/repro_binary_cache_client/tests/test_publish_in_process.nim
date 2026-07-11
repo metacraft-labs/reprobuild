@@ -19,7 +19,7 @@
 ##
 ## Server subprocess is shared with the existing A2/A3 gates.
 
-import std/[net, os, osproc, random, strutils, unittest]
+import std/[net, os, osproc, random, streams, strutils, times, unittest]
 
 import ../src/repro_binary_cache_client
 import ../../repro_binary_cache_server/src/repro_binary_cache_server/types
@@ -30,24 +30,75 @@ const
   ServerBinary = "build/test-bin" / addFileExt("repro_binary_cache", ExeExt)
 
 proc pickPort(): int =
-  randomize(); 24_000 + rand(6_999)
+  var sock = newSocket()
+  sock.bindAddr(Port(0), "127.0.0.1")
+  let local = sock.getLocalAddr()
+  sock.close()
+  int(local[1])
 
-proc waitForListener(port: int; tries = 100; sleepMs = 50): bool =
+proc waitForListener(srvProc: Process; port: int; tries = 2400;
+                     sleepMs = 50): bool =
   for _ in 0 ..< tries:
+    if not srvProc.running():
+      checkpoint("server exited before opening listener; exit=" &
+        $srvProc.peekExitCode())
+      return false
+    var sock: Socket
     try:
-      let sock = newSocket()
+      sock = newSocket()
       sock.connect("127.0.0.1", Port(port))
-      sock.close()
       return true
     except CatchableError:
       sleep(sleepMs)
+    finally:
+      if not sock.isNil:
+        try: sock.close() except CatchableError: discard
   return false
 
 proc startServer(serverRoot: string; port: int): Process =
   startProcess(absolutePath(ServerBinary),
                args = @["--root=" & serverRoot,
-                        "--listen=127.0.0.1:" & $port],
-               options = {poStdErrToStdOut, poParentStreams})
+                        "--listen=127.0.0.1:" & $port,
+                        "--print-pubkey"],
+               options = {poStdErrToStdOut})
+
+proc waitForExitWithin(p: Process; millis: int): bool =
+  let deadline = epochTime() + (millis.float / 1000.0)
+  while epochTime() < deadline:
+    if p.peekExitCode() != -1:
+      return true
+    sleep(20)
+  p.peekExitCode() != -1
+
+proc drainServerOutput(p: Process): string =
+  try:
+    let stream = p.outputStream
+    if stream.isNil:
+      return ""
+    result = stream.readAll()
+  except CatchableError as e:
+    result = "failed to read server output: " & e.msg & "\n"
+
+proc stopServer(p: Process): string =
+  try:
+    if p.peekExitCode() == -1:
+      try: p.terminate() except CatchableError: discard
+      if not waitForExitWithin(p, 5000):
+        try: p.kill() except CatchableError: discard
+        discard waitForExitWithin(p, 30_000)
+    if p.peekExitCode() != -1:
+      discard p.waitForExit()
+      result = drainServerOutput(p)
+    else:
+      result = "server process did not exit after terminate/kill\n"
+  finally:
+    try: p.close() except CatchableError: discard
+
+proc checkpointServerOutput(prefix: string; output: string) =
+  if output.len > 0:
+    checkpoint(prefix & " server output:\n" & output)
+  else:
+    checkpoint(prefix & " server produced no output")
 
 proc localPlatform(): PlatformTriple =
   when defined(amd64) or defined(x86_64):
@@ -126,47 +177,62 @@ suite "M9.L.4-refactor Step A — publishInProcess library API":
     writeFile(prefixDir / "blob.bin", blob)
 
     let srvProc = startServer(serverRoot, port)
+    var serverStopped = false
+    var serverOutput = ""
+    proc stopServerOnce() =
+      if not serverStopped:
+        serverOutput = stopServer(srvProc)
+        serverStopped = true
     defer:
-      try: srvProc.terminate() except CatchableError: discard
-      try: srvProc.close() except CatchableError: discard
-    check waitForListener(port)
-    let baseUrl = "http://127.0.0.1:" & $port
+      stopServerOnce()
+      if serverOutput.contains("Traceback") or
+          serverOutput.contains("Error:") or
+          serverOutput.contains("Exception"):
+        checkpointServerOutput("multi-file", serverOutput)
+    if not waitForListener(srvProc, port):
+      checkpoint("server did not listen on port " & $port)
+      stopServerOnce()
+      checkpointServerOutput("multi-file", serverOutput)
+      check false
+    else:
+      let baseUrl = "http://127.0.0.1:" & $port
 
-    let kp = peerAuth.generateKeypair()
-    let identity = stubIdentity(rev = "multi-file-rev")
-    let derivedHex = deriveCacheEntryKeyHex(identity)
-    let req = PublishInProcessRequest(
-      entryKeyHex: derivedHex,
-      prefixDir: prefixDir,
-      identity: identity,
-      endpoint: baseUrl,
-      keypair: kp)
-    let res = publishInProcess(req)
-    if not res.ok:
-      echo "publish failed: status=", res.statusCode, " err=", res.error
-    check res.ok
-    check res.statusCode in 200 .. 299
-    check res.bytesUploaded > 0
-    check res.responseBody.contains(derivedHex)
+      let kp = peerAuth.generateKeypair()
+      let identity = stubIdentity(rev = "multi-file-rev")
+      let derivedHex = deriveCacheEntryKeyHex(identity)
+      let req = PublishInProcessRequest(
+        entryKeyHex: derivedHex,
+        prefixDir: prefixDir,
+        identity: identity,
+        endpoint: baseUrl,
+        keypair: kp)
+      let res = publishInProcess(req)
+      if not res.ok:
+        echo "publish failed: status=", res.statusCode, " err=", res.error
+      check res.ok
+      check res.statusCode in 200 .. 299
+      check res.bytesUploaded > 0
+      check res.responseBody.contains(derivedHex)
 
-    # The server now holds a manifest under derivedHex; fetch it
-    # back via the lookup HTTP route to confirm the signature shape
-    # is what the codec produced.
-    let pool = newHttpPool()
-    defer: pool.close()
-    let cfg = defaultConfig(getTempDir() / ("pub_in_proc_cli_" & $rand(999_999)), @[
-      SubstituteEndpoint(
-        baseUrl: baseUrl,
-        trustedSigners: @[kp.publicKey],
-        priority: 30)])
-    let ctx = newClientContext(cfg)
-    defer: ctx.close()
-    let endpoint = cfg.endpoints[0]
-    let fetched = fetchAndVerifyManifest(ctx, pool, endpoint, derivedHex)
-    check serverCodec.verifyManifest(fetched)
-    check fetched.entryKey.packageName == "publish-in-process-test"
-    check fetched.payloads.len == 1
-    check fetched.producerPubKey == kp.publicKey
+      # The server now holds a manifest under derivedHex; fetch it
+      # back via the lookup HTTP route to confirm the signature shape
+      # is what the codec produced.
+      let pool = newHttpPool()
+      defer: pool.close()
+      let cfg = defaultConfig(
+        getTempDir() / ("pub_in_proc_cli_" & $rand(999_999)), @[
+          SubstituteEndpoint(
+            baseUrl: baseUrl,
+            trustedSigners: @[kp.publicKey],
+            priority: 30)])
+      let ctx = newClientContext(cfg)
+      defer: ctx.close()
+      let endpoint = cfg.endpoints[0]
+      let fetched = fetchAndVerifyManifest(ctx, pool, endpoint, derivedHex)
+      check serverCodec.verifyManifest(fetched)
+      check fetched.entryKey.packageName == "publish-in-process-test"
+      check fetched.payloads.len == 1
+      check fetched.producerPubKey == kp.publicKey
 
   test "single-file prefix round-trip exercises packSingleFilePrefix":
     let port = pickPort()
@@ -182,24 +248,38 @@ suite "M9.L.4-refactor Step A — publishInProcess library API":
     writeFile(prefixFile, "single-file payload contents")
 
     let srvProc = startServer(serverRoot, port)
+    var serverStopped = false
+    var serverOutput = ""
+    proc stopServerOnce() =
+      if not serverStopped:
+        serverOutput = stopServer(srvProc)
+        serverStopped = true
     defer:
-      try: srvProc.terminate() except CatchableError: discard
-      try: srvProc.close() except CatchableError: discard
-    check waitForListener(port)
-    let baseUrl = "http://127.0.0.1:" & $port
+      stopServerOnce()
+      if serverOutput.contains("Traceback") or
+          serverOutput.contains("Error:") or
+          serverOutput.contains("Exception"):
+        checkpointServerOutput("single-file", serverOutput)
+    if not waitForListener(srvProc, port):
+      checkpoint("server did not listen on port " & $port)
+      stopServerOnce()
+      checkpointServerOutput("single-file", serverOutput)
+      check false
+    else:
+      let baseUrl = "http://127.0.0.1:" & $port
 
-    let kp = peerAuth.generateKeypair()
-    let identity = stubIdentity(rev = "single-file-rev")
-    let derivedHex = deriveCacheEntryKeyHex(identity)
-    let req = PublishInProcessRequest(
-      entryKeyHex: derivedHex,
-      prefixDir: prefixFile,
-      identity: identity,
-      endpoint: baseUrl,
-      keypair: kp)
-    let res = publishInProcess(req)
-    if not res.ok:
-      echo "single-file publish failed: status=", res.statusCode,
-           " err=", res.error
-    check res.ok
-    check res.bytesUploaded > 0
+      let kp = peerAuth.generateKeypair()
+      let identity = stubIdentity(rev = "single-file-rev")
+      let derivedHex = deriveCacheEntryKeyHex(identity)
+      let req = PublishInProcessRequest(
+        entryKeyHex: derivedHex,
+        prefixDir: prefixFile,
+        identity: identity,
+        endpoint: baseUrl,
+        keypair: kp)
+      let res = publishInProcess(req)
+      if not res.ok:
+        echo "single-file publish failed: status=", res.statusCode,
+             " err=", res.error
+      check res.ok
+      check res.bytesUploaded > 0

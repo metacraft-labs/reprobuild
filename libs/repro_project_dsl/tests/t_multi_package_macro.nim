@@ -34,12 +34,12 @@ import repro_dsl_stdlib/types
 # file compiles AT ALL is the primary regression assertion; the
 # ``suite`` below pins the runtime-visibility contract on top.
 
-package multiPkgAlpha:
+package `multi_pkg_alpha`:
   uses:
     "nim >=2.2 <3.0"
   library alphaLib
 
-package multiPkgBeta:
+package `multi_pkg_beta`:
   uses:
     "nim >=2.2 <3.0"
   executable betaBin:
@@ -47,7 +47,7 @@ package multiPkgBeta:
 
 # A third package, to prove the no-op-after-first guard scales beyond
 # two emissions in the same file.
-package multiPkgGamma:
+package `multi_pkg_gamma`:
   uses:
     "nim >=2.2 <3.0"
   library gammaLib
@@ -71,24 +71,24 @@ suite "DSL multi-package single-file (marker collision fix)":
       for p in packages:
         acc.add(p.packageName)
       acc
-    check "multiPkgAlpha" in names
-    check "multiPkgBeta" in names
-    check "multiPkgGamma" in names
+    check "multi_pkg_alpha" in names
+    check "multi_pkg_beta" in names
+    check "multi_pkg_gamma" in names
 
   test "alpha owns alphaLib, no executables":
-    let p = pkgByName("multiPkgAlpha")
+    let p = pkgByName("multi_pkg_alpha")
     check p.libraries.len == 1
     check p.libraries[0].name == "alphaLib"
     check p.executables.len == 0
 
   test "beta owns betaBin, no libraries":
-    let p = pkgByName("multiPkgBeta")
+    let p = pkgByName("multi_pkg_beta")
     check p.libraries.len == 0
     check p.executables.len == 1
     check p.executables[0].binaryName == "betaBin"
 
   test "gamma owns gammaLib, no executables":
-    let p = pkgByName("multiPkgGamma")
+    let p = pkgByName("multi_pkg_gamma")
     check p.libraries.len == 1
     check p.libraries[0].name == "gammaLib"
     check p.executables.len == 0

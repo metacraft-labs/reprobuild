@@ -3,6 +3,9 @@ set -euo pipefail
 
 mkdir -p build/bin build/lib build/nimcache
 
+# shellcheck source=scripts/source_paths.sh
+source scripts/source_paths.sh
+
 if [ -z "${BEARSSL_SRC:-}" ]; then
   bearssl_store_src="$(find /nix/store -maxdepth 1 -type d -name '*nim-bearssl-*' -print -quit 2>/dev/null || true)"
   if [ -n "${bearssl_store_src}" ] && [ -f "${bearssl_store_src}/bearssl.nim" ]; then
@@ -57,11 +60,8 @@ if [ ! -x "${io_mon_src}/scripts/build_shim.sh" ]; then
 fi
 # SHM-QUEUE-MIGRATE: io-mon's shim (its dep queue) + reprobuild's action-cache
 # ring BOTH sit on the extracted ``shm_queue/ring`` MPSC ring (nim-shm-queue).
-# io-mon's ``build_shim.sh`` needs SHM_QUEUE_SRC to resolve ``import
-# shm_queue/ring``; the dev shell + package build export it (flake.nix), so
-# forward whatever is in the environment, defaulting to the sibling checkout —
-# same discipline as STACKABLE_HOOKS_SRC.
-shm_queue_src="${SHM_QUEUE_SRC:-../nim-shm-queue/src}"
+shm_queue_src="$(resolve_shm_queue_src)"
+export SHM_QUEUE_SRC="${shm_queue_src}"
 
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)

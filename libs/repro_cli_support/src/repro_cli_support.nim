@@ -26479,7 +26479,11 @@ proc parseCheckArgs*(args: openArray[string]): CheckArgs =
   if result.workspaceRoot.len == 0:
     # When invoked from inside a participating repo (the usual hook
     # call site) we walk up from ``--current-repo`` to discover the
-    # workspace root. Failing that, fall back to the process cwd.
+    # workspace root. Failing that, use the current repo itself so the
+    # canonical workspace marker can decide that this is a non-workspace
+    # and no-op. Falling back to the process cwd is unsafe for managed
+    # hooks: test runners and nested invocations often run from a real
+    # workspace while dispatching against an unrelated standalone repo.
     if result.currentRepo.len > 0:
       var probe = absolutePath(result.currentRepo)
       while probe.len > 1:
@@ -26490,7 +26494,9 @@ proc parseCheckArgs*(args: openArray[string]): CheckArgs =
         if parent == probe: break
         probe = parent
     if result.workspaceRoot.len == 0:
-      result.workspaceRoot = getCurrentDir()
+      result.workspaceRoot =
+        if result.currentRepo.len > 0: absolutePath(result.currentRepo)
+        else: getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
   if result.currentRepo.len > 0:
     result.currentRepo = absolutePath(result.currentRepo)
