@@ -63,13 +63,14 @@ jobs:
     # too small (4 vCPU / 16 GB) — the parallel nim c phase trips OOM
     # and the test runner hits an fd race at higher concurrency. The
     # metacraft-labs bare-metal pool has nixos hosts with plenty of
-    # cores + RAM; lift the parallelism caps below for them.
+    # cores + RAM. Eight concurrent engine actions keep compilation fast
+    # without the non-deterministic tail stalls observed at sixteen.
     # EXEMPTION (CIP-5): bare-metal runner — the parallel `nim c` phase OOMs on
     # small ephemeral runners; kept on the persistent big-iron nixos bare-metal
     # pool rather than the incus class.
     runs-on: [self-hosted, Linux, X64, bare-metal, nixos]
     env:
-      REPROBUILD_MAX_PARALLELISM: "16"
+      REPROBUILD_MAX_PARALLELISM: "8"
       REPROBUILD_TEST_THREADS: "4"
     steps:
       - uses: actions/checkout@v4

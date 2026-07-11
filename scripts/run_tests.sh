@@ -194,6 +194,7 @@ if [[ -z "${REPROBUILD_MAX_PARALLELISM:-}" ]]; then
 fi
 printf 'Building apps + test-helpers + test-builds via repro (REPROBUILD_MAX_PARALLELISM=%s)\n' \
   "${REPROBUILD_MAX_PARALLELISM}" >&2
+BUILD_TIMEOUT="${REPROBUILD_BUILD_TIMEOUT:-60m}"
 
 # M3 accepts one fragment selector per invocation; loop over collections.
 repro_build_collection() {
@@ -204,7 +205,14 @@ repro_build_collection() {
     cp -f "./build/bin/repro${exe_ext}" "./build/bin/repro_run${exe_ext}"
     repro_exe="./build/bin/repro_run${exe_ext}"
   fi
-  if ! "${repro_exe}" build --tool-provisioning=path --daemon=off --no-runquota "${collection}"; then
+  local build_status=0
+  timeout --kill-after=30s "${BUILD_TIMEOUT}" \
+    "${repro_exe}" build --tool-provisioning=path --daemon=off --no-runquota "${collection}" \
+    || build_status=$?
+  if (( build_status != 0 )); then
+    if (( build_status == 124 )); then
+      printf 'Timed out building %s after %s\n' "${collection}" "${BUILD_TIMEOUT}" >&2
+    fi
 
     report_path=".repro/build/repro/build-report.json"
     if [[ -f "${report_path}" ]]; then
@@ -217,7 +225,7 @@ repro_build_collection() {
       mkdir -p test-logs
       cp "${report_path}" "test-logs/build-report-${collection//[^a-zA-Z0-9]/_}.json" 2>/dev/null || true
     fi
-    return 1
+    return "${build_status}"
   fi
 }
 repro_build_collection ".#apps" || exit 1
