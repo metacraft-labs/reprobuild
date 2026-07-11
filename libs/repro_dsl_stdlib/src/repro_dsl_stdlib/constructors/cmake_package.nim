@@ -112,6 +112,7 @@ proc cmake_package*(srcDir: string;
                     cacheVars: seq[string] = @[];
                     target = "";
                     extraEnv: seq[(string, string)] = @[];
+                    allowSourceWrites = false;
                     srcPatches: seq[string] = @[]): CmakePackageResult =
   ## Configure → build → install pipeline for an upstream cmake
   ## project. v1 leaves component selection up to the recipe
@@ -129,6 +130,10 @@ proc cmake_package*(srcDir: string;
   ## probes via the nix-wrapped pkg-config — the wrapper only consults
   ## PKG_CONFIG_PATH_FOR_TARGET, not the bare PKG_CONFIG_PATH, and the
   ## auto-channel doesn't compose for graphs with 70+ deps).
+  ##
+  ## ``allowSourceWrites`` is an explicit exception for upstream CMake
+  ## projects that generate configuration inputs inside their extracted
+  ## source tree. The default keeps the source root read-only.
   ##
   ## ## M9.R.14g.6 — inline-exec build + install
   ##
@@ -384,8 +389,11 @@ proc cmake_package*(srcDir: string;
   let m9r79CmSrcDirAbs =
     if projectRoot.len > 0: projectRoot / srcDir
     else: srcDir
+  let m9r79CmReadOnly =
+    if allowSourceWrites: newSeq[string]()
+    else: @[m9r79CmSrcDirAbs]
   setRegisteredActionDeclaredOutputs(configureEdge.id, @[m9r79CmBuildDirAbs])
-  setRegisteredActionReadOnlyRoots(configureEdge.id, @[m9r79CmSrcDirAbs])
+  setRegisteredActionReadOnlyRoots(configureEdge.id, m9r79CmReadOnly)
   # M9.R.14g.6 — inline-exec build action. cmake's real "build" mode is
   # selected by the ``--build`` flag, NOT by a ``build`` subcommand
   # literal.
@@ -504,7 +512,7 @@ proc cmake_package*(srcDir: string;
     # read-only.  Sequential edge via ``deps = @[configureEdge.id]`` —
     # R7 dep-chain relaxation permits the shared write root.
     declaredOutputs = @[m9r79CmBuildDirAbs],
-    readOnlyRoots = @[m9r79CmSrcDirAbs])
+    readOnlyRoots = m9r79CmReadOnly)
   # M9.R.14g.6 — inline-exec install action. cmake's real install mode
   # is selected by ``--install``, NOT by ``install`` subcommand.
   #
@@ -569,7 +577,7 @@ proc cmake_package*(srcDir: string;
     # ``types/package_result.emitInstallTreeMirror``) declares its own
     # scope; here we cover the cmake --install step only.
     declaredOutputs = @[effectiveDestRoot],
-    readOnlyRoots = @[m9r79CmSrcDirAbs])
+    readOnlyRoots = m9r79CmReadOnly)
   # M9.R.14e.5 — fold the recipe's declared ``nativeBuildDeps`` +
   # ``buildDeps`` into each action's ``toolIdentityRefs`` so the M9.R.14e.1
   # from-source search-path channels reach the action env at fork time.

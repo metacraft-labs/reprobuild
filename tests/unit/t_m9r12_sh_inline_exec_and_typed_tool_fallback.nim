@@ -154,6 +154,26 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
       allowSourceWrites = true)
     check pkg.buildEdge.readOnlyRoots.len == 0
 
+  test "cmake source-write opt-in applies to every pipeline edge":
+    let defaultPkg = cmake_package(srcDir = "./src")
+    var defaultConfigureRoots = -1
+    for action in registeredBuildActions():
+      if action.id == defaultPkg.buildEdge.id:
+        defaultConfigureRoots = action.readOnlyRoots.len
+    check defaultConfigureRoots == 1
+    check defaultPkg.compileEdge.readOnlyRoots.len == 1
+    check defaultPkg.installEdge.readOnlyRoots.len == 1
+
+    let mutablePkg = cmake_package(srcDir = "./src",
+      buildDir = "mutable-build", allowSourceWrites = true)
+    var mutableConfigureRoots = -1
+    for action in registeredBuildActions():
+      if action.id == mutablePkg.buildEdge.id:
+        mutableConfigureRoots = action.readOnlyRoots.len
+    check mutableConfigureRoots == 0
+    check mutablePkg.compileEdge.readOnlyRoots.len == 0
+    check mutablePkg.installEdge.readOnlyRoots.len == 0
+
   test "configure action id is deterministic across calls with same args":
     let a = autotools_package(srcDir = "./src",
       configureOptions = @["--enable-gold"])
