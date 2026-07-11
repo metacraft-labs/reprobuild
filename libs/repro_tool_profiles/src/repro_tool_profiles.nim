@@ -1258,43 +1258,61 @@ else:
     if paths.len == 0:
       raise newException(OSError, "Daemon returned no materialized paths for selector: " & selector)
 
-    # Multi-output nixpkgs derivations (e.g. ``nixpkgs#just`` realizes an
-    # ``out`` output plus a separate ``man`` output) report several store
-    # paths, and ``nix build --print-out-paths`` does NOT guarantee the
-    # ``out`` output comes first — for ``just`` the ``-man`` output is
-    # emitted ahead of the binary-bearing prefix. Blindly trusting
-    # ``paths[0]`` therefore picks a prefix that lacks ``bin/<exe>`` and the
-    # resolution fails with "realized outputs without bin/just". Scan all
-    # realized outputs for the one that actually carries the declared
-    # executable and prefer it; fall back to the first path so the existing
-    # not-found error still surfaces for genuinely missing binaries.
-    var outPath = paths[0].getStr()
-    var resolved = ""
-    for p in paths:
-      let candidate = p.getStr()
-      if candidate.len == 0:
-        continue
-      if dirExists(extendedPath(candidate)):
-        let hit = executableInStorePath(candidate, plan.declaredExecutablePath)
-        if hit.len > 0:
-          outPath = candidate
-          resolved = hit
-          break
-      elif fileExists(extendedPath(candidate / plan.declaredExecutablePath)):
-        outPath = candidate
-        resolved = candidate / plan.declaredExecutablePath
-        break
-    let realized = @[outPath]
+    var realized: seq[string] = @[]
+    for path in paths:
+      let realizedPath = path.getStr()
+      if realizedPath.len > 0:
+        realized.add(realizedPath)
+    if realized.len == 0:
+      raise newException(OSError,
+        "Daemon returned no materialized paths for selector: " & selector)
 
-    var selectedStorePath = outPath
+    var selectedStorePath = ""
+    var resolved = ""
+    for storePath in realized:
+      if dirExists(extendedPath(storePath)):
+        let candidate = executableInStorePath(storePath,
+          plan.declaredExecutablePath)
+        if candidate.len > 0:
+          selectedStorePath = storePath
+          resolved = candidate
+          break
+      elif selectedStorePath.len == 0:
+        selectedStorePath = storePath
+        resolved = storePath / plan.declaredExecutablePath
     if resolved.len == 0:
-      if dirExists(extendedPath(outPath)):
-        resolved = executableInStorePath(outPath, plan.declaredExecutablePath)
-        if resolved.len == 0:
-          raise newException(OSError,
-            "tool-resolution failed: nix package realized outputs without " & plan.declaredExecutablePath)
+      var nixArgs = @["nix", "build", "--no-link", "--print-out-paths"]
+      if plan.nixExpressionFile.len > 0:
+        nixArgs.add("--file")
+        nixArgs.add(plan.nixExpressionFile)
       else:
-        resolved = outPath / plan.declaredExecutablePath
+        nixArgs.add(plan.nixSelector)
+      let direct = execCmdEx(shellCommand(nixArgs))
+      if direct.exitCode != 0:
+        raise newException(OSError,
+          "tool-resolution failed: nix package realized outputs without " &
+          plan.declaredExecutablePath & "; direct nix build exited " &
+          $direct.exitCode & "\n" & direct.output)
+
+      realized.setLen(0)
+      for line in direct.output.splitLines:
+        let realizedPath = line.strip()
+        if realizedPath.startsWith("/nix/store/"):
+          realized.add(realizedPath)
+      selectedStorePath = ""
+      resolved = ""
+      for storePath in realized:
+        if dirExists(extendedPath(storePath)):
+          let candidate = executableInStorePath(storePath,
+            plan.declaredExecutablePath)
+          if candidate.len > 0:
+            selectedStorePath = storePath
+            resolved = candidate
+            break
+      if resolved.len == 0:
+        raise newException(OSError,
+          "tool-resolution failed: nix package realized outputs without " &
+          plan.declaredExecutablePath & ": " & realized.join(", "))
 
     result = PathOnlyToolProfile(
       installMethod: "nix",
