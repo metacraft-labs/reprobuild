@@ -63,15 +63,31 @@ fi
 # same discipline as STACKABLE_HOOKS_SRC.
 shm_queue_src="${SHM_QUEUE_SRC:-../nim-shm-queue/src}"
 
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    dll_ext="dll" ;;
+  Darwin)
+    dll_ext="dylib" ;;
+  *)
+    dll_ext="so" ;;
+esac
+
 # Point BOTH the shim's output dir and its nimcache at reprobuild's own
 # (writable) build tree. io-mon's source is read-only when it comes from a Nix
 # flake input / store path (the package build + dev shell), so the shim must not
 # write its nimcache into its own source — pass an absolute writable dir.
-IO_MON_SHIM_OUT_DIR="$(pwd)/build/lib" \
+mkdir -p build/lib/tmp
+IO_MON_SHIM_OUT_DIR="$(pwd)/build/lib/tmp" \
 IO_MON_SHIM_NIMCACHE_DIR="$(pwd)/build/nimcache/io-mon-shim" \
 IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
 SHM_QUEUE_SRC="${shm_queue_src}" \
   bash "${io_mon_src}/scripts/build_shim.sh"
+
+if [ -f "build/lib/librepro_monitor_shim.${dll_ext}" ]; then
+  mv -f "build/lib/librepro_monitor_shim.${dll_ext}" "build/lib/librepro_monitor_shim.${dll_ext}.old" || true
+fi
+mv -f "build/lib/tmp/librepro_monitor_shim.${dll_ext}" "build/lib/librepro_monitor_shim.${dll_ext}"
+rm -rf build/lib/tmp
 
 # M9.R.47.3 — clear LD_LIBRARY_PATH and NIX_LDFLAGS for every ``nim c``
 # invocation in this loop so Nim's compile-time ``{.dynlib: <const>.}``
@@ -263,9 +279,13 @@ esac
     --define:reproProviderMode \
     --define:reproProviderRuntimeDll \
     --nimcache:build/nimcache/repro-project-dsl-runtime-dll \
-    --out:"build/lib/librepro_project_dsl_runtime.${dll_ext}" \
+    --out:"build/lib/librepro_project_dsl_runtime.new.${dll_ext}" \
     libs/repro_project_dsl_runtime_dll/src/repro_project_dsl_runtime_entry.nim
 )
+if [ -f "build/lib/librepro_project_dsl_runtime.${dll_ext}" ]; then
+  mv -f "build/lib/librepro_project_dsl_runtime.${dll_ext}" "build/lib/librepro_project_dsl_runtime.${dll_ext}.old" || true
+fi
+mv -f "build/lib/librepro_project_dsl_runtime.new.${dll_ext}" "build/lib/librepro_project_dsl_runtime.${dll_ext}"
 
 # MR4 -- Windows self-containment: stage clingo.dll next to repro.exe
 # so the Nim ``{.dynlib: "clingo.dll".}`` FFI in
