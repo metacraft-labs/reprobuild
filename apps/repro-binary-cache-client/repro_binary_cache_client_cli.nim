@@ -22,8 +22,38 @@
 ##     used to LABEL the manifest; for v1 the build script computes
 ##     it via ``deriveCacheEntryKey`` and threads the hex through.
 ##
+## ## Cache config + trust (Reprobuild-Binary-Cache-Fleet R1)
+##
+## ``substitute`` no longer trusts whatever ``REPRO_BINARY_CACHE_URL``
+## serves. It reads a config file listing caches with their trusted
+## producer public keys and only substitutes from a cache when the
+## fetched manifest is signed by one of THAT cache's trusted keys.
+##
+##   * Precedence: ``REPRO_CACHES_CONFIG`` (single file, overrides
+##     everything) else ``/etc/repro/caches.conf`` (system) merged
+##     with ``~/.config/repro/caches.conf`` (user overrides/extends).
+##   * Format (INI-style, one section per cache):
+##
+##       [cache "fleet"]
+##       url = "https://repro-cache:7878"
+##       trusted-public-keys = "04ab…"   # 130-hex ECDSA-P256, comma/space list
+##       priority = 20                    # lower wins
+##
+##   * DEFAULT-UNTRUSTED: a cache with no ``trusted-public-keys`` is
+##     never substituted from — a MISS, never a silent trust. An
+##     untrusted / unsigned / tampered manifest is likewise a MISS.
+##   * Multi-cache: caches are tried in ascending priority order; a
+##     miss (or trust rejection) on one falls through to the next.
+##   * Back-compat: ``REPRO_BINARY_CACHE_URL`` is folded in as an
+##     implicit lowest-priority cache. Its trusted key is read from
+##     the producer cert at ``REPRO_BINARY_CACHE_CERT_PATH`` when that
+##     file is present (single-producer legacy setup); with no cert
+##     configured it stays untrusted and is a MISS.
+##
 ## ## Environment variables
 ##
+##   REPRO_CACHES_CONFIG             Override cache config path (single
+##                                   file; replaces system + user).
 ##   REPRO_BINARY_CACHE_URL          Default ``http://localhost:7878``.
 ##   REPRO_BINARY_CACHE_KEY_PATH     ECDSA-P256 private key (the
 ##                                   ``ecdsa-p256:<hex>`` format used by
@@ -95,6 +125,12 @@ Identity flags (for publish + derive-key):
   --provider-revision=HEX
   --dep=<hex>               (repeatable)
   --option=<name>=<value>   (repeatable)
+
+Cache config (substitute, R1 default-untrusted):
+  REPRO_CACHES_CONFIG             override config path (system+user else
+                                  /etc/repro/caches.conf + ~/.config/repro/caches.conf)
+  A cache is substituted from ONLY when the config lists its trusted
+  producer public key(s) and the manifest is signed by one of them.
 
 Environment:
   REPRO_BINARY_CACHE_URL          default http://localhost:7878
@@ -342,11 +378,24 @@ proc cmdSubstitute(args: seq[string]): int =
 
   let storeRoot = defaultStoreRoot()
   createDir(storeRoot)
-  let endpoint = SubstituteEndpoint(
-    baseUrl: defaultCacheUrl(),
-    trustedSigners: @[],   # v1 trusts any signer the server returned
-    priority: 0)
-  let res = substituteInProcess(hex, storeRoot, @[endpoint])
+  # Reprobuild-Binary-Cache-Fleet R1 — build the endpoint list from the
+  # config file(s) (system + user, or REPRO_CACHES_CONFIG override),
+  # folding in the REPRO_BINARY_CACHE_URL back-compat cache. Every
+  # endpoint enforces the default-untrusted model: a manifest signed
+  # by a producer key that is not in that cache's trusted-public-keys
+  # is rejected (a MISS), and a cache with NO trusted keys is never
+  # substituted from. The caches are tried in ascending priority order.
+  let endpoints =
+    try: loadEndpoints()
+    except CacheConfigError as e:
+      stderr.writeLine("substitute: cache config error: " & e.msg)
+      return 2
+  if endpoints.len == 0:
+    stderr.writeLine("substitute: no caches configured (see " &
+      "/etc/repro/caches.conf, ~/.config/repro/caches.conf, or " &
+      "$REPRO_CACHES_CONFIG); miss")
+    return 1
+  let res = substituteInProcess(hex, storeRoot, endpoints)
   if not res.ok:
     stderr.writeLine("substitute failed: " & res.reason)
     return 1

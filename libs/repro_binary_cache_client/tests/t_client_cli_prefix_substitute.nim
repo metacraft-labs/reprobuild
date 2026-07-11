@@ -209,10 +209,16 @@ suite "M3a — client CLI prefix substitute (byte-identity + exec-bit)":
     check pubOut.contains(entryHex)
 
     # ---- Substitute into a FRESH, EMPTY out dir over the real socket. ----
+    # Reprobuild-Binary-Cache-Fleet R1 — substitute is default-untrusted:
+    # it only materialises from a cache whose producer key is trusted.
+    # Passing REPRO_BINARY_CACHE_CERT_PATH folds the producer pubkey in
+    # as the env cache's trust anchor (single-producer back-compat), so
+    # this legacy round-trip keeps working.
     check not dirExists(outDir)
     let (subCode, subOut) = runCli(
       ["substitute", entryHex, outDir],
       env = @[("REPRO_BINARY_CACHE_URL", url),
+              ("REPRO_BINARY_CACHE_CERT_PATH", certPath),
               ("REPRO_LOCAL_STORE", clientStore)])
     if subCode != 0:
       echo "substitute failed (code=", subCode, "): ", subOut
