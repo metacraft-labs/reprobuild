@@ -1258,18 +1258,43 @@ else:
     if paths.len == 0:
       raise newException(OSError, "Daemon returned no materialized paths for selector: " & selector)
 
-    let outPath = paths[0].getStr()
+    # Multi-output nixpkgs derivations (e.g. ``nixpkgs#just`` realizes an
+    # ``out`` output plus a separate ``man`` output) report several store
+    # paths, and ``nix build --print-out-paths`` does NOT guarantee the
+    # ``out`` output comes first — for ``just`` the ``-man`` output is
+    # emitted ahead of the binary-bearing prefix. Blindly trusting
+    # ``paths[0]`` therefore picks a prefix that lacks ``bin/<exe>`` and the
+    # resolution fails with "realized outputs without bin/just". Scan all
+    # realized outputs for the one that actually carries the declared
+    # executable and prefer it; fall back to the first path so the existing
+    # not-found error still surfaces for genuinely missing binaries.
+    var outPath = paths[0].getStr()
+    var resolved = ""
+    for p in paths:
+      let candidate = p.getStr()
+      if candidate.len == 0:
+        continue
+      if dirExists(extendedPath(candidate)):
+        let hit = executableInStorePath(candidate, plan.declaredExecutablePath)
+        if hit.len > 0:
+          outPath = candidate
+          resolved = hit
+          break
+      elif fileExists(extendedPath(candidate / plan.declaredExecutablePath)):
+        outPath = candidate
+        resolved = candidate / plan.declaredExecutablePath
+        break
     let realized = @[outPath]
 
     var selectedStorePath = outPath
-    var resolved = ""
-    if dirExists(extendedPath(outPath)):
-      resolved = executableInStorePath(outPath, plan.declaredExecutablePath)
-      if resolved.len == 0:
-        raise newException(OSError,
-          "tool-resolution failed: nix package realized outputs without " & plan.declaredExecutablePath)
-    else:
-      resolved = outPath / plan.declaredExecutablePath
+    if resolved.len == 0:
+      if dirExists(extendedPath(outPath)):
+        resolved = executableInStorePath(outPath, plan.declaredExecutablePath)
+        if resolved.len == 0:
+          raise newException(OSError,
+            "tool-resolution failed: nix package realized outputs without " & plan.declaredExecutablePath)
+      else:
+        resolved = outPath / plan.declaredExecutablePath
 
     result = PathOnlyToolProfile(
       installMethod: "nix",

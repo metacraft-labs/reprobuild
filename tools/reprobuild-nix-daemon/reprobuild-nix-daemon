@@ -75,11 +75,28 @@ def preferred_executable(selector: str):
 
 def put_executable_output_first(selector: str, paths: list[str]) -> list[str]:
     rel = preferred_executable(selector)
-    if rel is None:
-        return paths
-    for idx, path in enumerate(paths):
-        if (Path(path) / rel).exists():
-            return [paths[idx]] + paths[:idx] + paths[idx + 1:]
+    if rel is not None:
+        for idx, path in enumerate(paths):
+            if (Path(path) / rel).exists():
+                return [paths[idx]] + paths[:idx] + paths[idx + 1:]
+    # Generic fallback for multi-output derivations (e.g. `nixpkgs#just`
+    # realizes `out` + a separate `man` output, and `nix build
+    # --print-out-paths` may emit the `-man` output first). The daemon
+    # doesn't know the declared executable path, but the binary-bearing
+    # `out` output is the one carrying a populated `bin/` directory, so
+    # hoist the first path that has a non-empty `bin/` ahead of the rest.
+    # The reprobuild client also re-scans all outputs, so this is
+    # belt-and-suspenders; it keeps `paths[0]` sensible for any other
+    # consumer that trusts the daemon's ordering.
+    if len(paths) > 1:
+        for idx, path in enumerate(paths):
+            bin_dir = Path(path) / "bin"
+            try:
+                has_bin = bin_dir.is_dir() and any(bin_dir.iterdir())
+            except OSError:
+                has_bin = False
+            if has_bin:
+                return [paths[idx]] + paths[:idx] + paths[idx + 1:]
     return paths
 
 
