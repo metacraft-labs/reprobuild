@@ -438,6 +438,10 @@ proc prepareIsonimFixture(sourcePath, destPath: string) =
   createDir(destPath)
   if dirExists(sourcePath / "src"):
     copyTree(sourcePath / "src", destPath / "src")
+  writeFile(destPath / "repro.nim",
+    "import repro_project_dsl\n\n" &
+    "package isonim:\n" &
+    "  library isonim\n")
   for fileName in ["isonim.nimble", "nim.cfg"]:
     let sourceFile = sourcePath / fileName
     if fileExists(sourceFile):
