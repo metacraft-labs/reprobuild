@@ -75,7 +75,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, bare-metal, nixos]
     env:
       REPROBUILD_MAX_PARALLELISM: "12"
-      REPROBUILD_TEST_THREADS: "4"
+      REPROBUILD_TEST_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
 

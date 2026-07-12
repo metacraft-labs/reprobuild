@@ -521,12 +521,10 @@ proc linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot: string) =
 
 proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
   linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot)
-  copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
+  copyFile(codeTracerRoot / "repro.nim", projectRoot / "repro.nim")
   if dirExists(codeTracerRoot / "reprobuild"):
     copyTree(codeTracerRoot / "reprobuild", projectRoot / "reprobuild")
-  copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
-  if fileExists(codeTracerRoot / "config.nims"):
-    copyFile(codeTracerRoot / "config.nims", projectRoot / "config.nims")
+  copyFile(codeTracerRoot / "config.nims", projectRoot / "config.nims")
 
 proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
@@ -1028,10 +1026,10 @@ proc checkConfigOutputs(projectRoot: string) =
 
 when defined(macosx) or defined(linux):
   suite "e2e_codetracer_in_place_project_file":
-    test "real committed CodeTracer reprobuild.nim supports action-id target selection":
+    test "real committed CodeTracer repro.nim supports action-id target selection":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      let realProjectFile = codeTracerRoot / "repro.nim"
       check fileExists(realProjectFile)
 
       let tempRoot = createTempDir("repro-m30-codetracer-target-selection", "")
@@ -1050,7 +1048,7 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      let projectText = readFile(projectRoot / "reprobuild.nim")
+      let projectText = readFile(projectRoot / "repro.nim")
       check projectText == readFile(realProjectFile)
       check not projectText.contains("writeProject")
       check not projectText.contains("buildAction(")
@@ -1113,7 +1111,7 @@ when defined(macosx) or defined(linux):
     test "selected frontend public ui.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      let realProjectFile = codeTracerRoot / "repro.nim"
       check fileExists(realProjectFile)
 
       let tempRoot = createTempDir("repro-m33-codetracer-ui-js", "")
@@ -1132,8 +1130,8 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1205,7 +1203,7 @@ when defined(macosx) or defined(linux):
     test "selected frontend src subwindow.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      let realProjectFile = codeTracerRoot / "repro.nim"
       check fileExists(realProjectFile)
 
       let tempRoot = createTempDir("repro-m34-codetracer-subwindow-js", "")
@@ -1224,8 +1222,8 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1304,7 +1302,7 @@ when defined(macosx) or defined(linux):
     test "selected frontend src index.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      let realProjectFile = codeTracerRoot / "repro.nim"
       check fileExists(realProjectFile)
 
       let tempRoot = createTempDir("repro-m36-codetracer-index-js", "")
@@ -1323,8 +1321,8 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1406,7 +1404,7 @@ when defined(macosx) or defined(linux):
     test "selected db-backend-record target builds real native Nim binary":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      let realProjectFile = codeTracerRoot / "repro.nim"
       check fileExists(realProjectFile)
 
       let tempRoot = createTempDir("repro-m42-codetracer-db-backend-record", "")
@@ -1425,8 +1423,8 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copyNativeCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1502,7 +1500,7 @@ when defined(macosx) or defined(linux):
     test "selected ct target builds real native Nim binary":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      let realProjectFile = codeTracerRoot / "repro.nim"
       check fileExists(realProjectFile)
 
       let tempRoot = createTempDir("repro-m43-codetracer-ct", "")
@@ -1521,8 +1519,8 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copyNativeCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1603,7 +1601,7 @@ when defined(macosx) or defined(linux):
     test "selected codetracer aggregate builds implemented app slice":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      let realProjectFile = codeTracerRoot / "repro.nim"
       check fileExists(realProjectFile)
 
       let tempRoot = createTempDir("repro-m44-codetracer-aggregate", "")
@@ -1622,8 +1620,8 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copyAggregateCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1788,7 +1786,7 @@ when defined(macosx) or defined(linux):
     test "selected frontend server index.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      let realProjectFile = codeTracerRoot / "repro.nim"
       check fileExists(realProjectFile)
 
       let tempRoot = createTempDir("repro-m37-codetracer-server-index-js", "")
@@ -1807,8 +1805,8 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1878,7 +1876,7 @@ when defined(macosx) or defined(linux):
     test "selected frontend public resource tree target copies generated resources":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      let realProjectFile = codeTracerRoot / "repro.nim"
       check fileExists(realProjectFile)
 
       let tempRoot = createTempDir("repro-m41-codetracer-public-resources", "")
@@ -1897,8 +1895,8 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").contains("writeProject")
 
       let pathValue = codeTracerPathValue(tempRoot)
       let selectedTarget = projectRoot & "#frontend-public-resources"
@@ -1971,7 +1969,7 @@ when defined(macosx) or defined(linux):
     test "m51_codetracer_stdlib_file_ops":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      let realProjectFile = codeTracerRoot / "repro.nim"
       check fileExists(realProjectFile)
       let projectText = readFile(realProjectFile)
       check projectText.contains("import repro_dsl_stdlib")
@@ -2001,7 +1999,7 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == projectText
+      check readFile(projectRoot / "repro.nim") == projectText
 
       let pathValue = codeTracerPathValue(tempRoot)
       let first = build(reproBin, projectRoot & "#frontend-public-resources",
@@ -2022,7 +2020,7 @@ when defined(macosx) or defined(linux):
     test "selected frontend aggregate target builds current frontend bundle set":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      let realProjectFile = codeTracerRoot / "repro.nim"
       check fileExists(realProjectFile)
 
       let tempRoot = createTempDir("repro-m38-codetracer-frontend", "")
@@ -2041,8 +2039,8 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -2226,7 +2224,7 @@ when defined(macosx) or defined(linux):
     test "m52_codetracer_uses_stdlib_packages":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
+      let realProjectFile = codeTracerRoot / "repro.nim"
       check fileExists(realProjectFile)
 
       let tempRoot = createTempDir("repro-m29-codetracer-in-place", "")
@@ -2247,7 +2245,7 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      let projectText = readFile(projectRoot / "reprobuild.nim")
+      let projectText = readFile(projectRoot / "repro.nim")
       check projectText == readFile(realProjectFile)
       check not projectText.contains("writeProject")
       check not projectText.contains("usesImportPath")

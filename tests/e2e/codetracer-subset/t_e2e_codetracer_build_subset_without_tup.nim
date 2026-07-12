@@ -119,10 +119,9 @@ proc loadTupRules(path: string): TupRules =
   # lines), and both files live in the same `src/` directory (the tup variant
   # root, marked by `src/Tupfile.ini`). For a Tuprules included by a Tupfile
   # in its own directory `$(TUP_CWD)` is therefore `.`, so codetracer's
-  # `ROOT = $(TUP_CWD)/../../` resolves relative to `src/`. The repo's real
-  # library search path comes from `nim.cfg` (replayed here by
-  # `withNimConfigPathContext`); the `$(ROOT)`-based `--path:` flags are the
-  # committed Tuprules text and are modeled verbatim.
+  # `ROOT = $(TUP_CWD)/../../` resolves relative to `src/`. The committed
+  # `NIM_REPO_PATH_FLAGS` carry the real library search path, so those
+  # `$(ROOT)`-based `--path:` flags are modeled verbatim.
   result.variables["TUP_CWD"] = "."
   for line in logicalTupLines(path):
     let eq = line.find('=')
@@ -199,23 +198,6 @@ proc replaceTupPlaceholders(token, sourcePath, outputPath: string): string =
 proc tupCommand(rules: TupRules; name, sourcePath, outputPath: string): seq[string] =
   for token in tupCommandTemplate(rules, name):
     result.add(replaceTupPlaceholders(token, sourcePath, outputPath))
-
-proc nimCfgPathArgs(codeTracerRoot: string): seq[string] =
-  for line in readFile(codeTracerRoot / "nim.cfg").splitLines:
-    let stripped = line.strip()
-    if stripped.startsWith("path:\"") and stripped.endsWith("\""):
-      let relativePath = stripped["path:\"".len .. ^2]
-      result.add("--path:" & codeTracerRoot / relativePath)
-
-proc withNimConfigPathContext(command: openArray[string];
-                              codeTracerRoot: string): seq[string] =
-  for item in command:
-    result.add(item)
-  let jsIndex = result.find("js")
-  if jsIndex < 0:
-    raise newException(ValueError, "!nim_js command has no js subcommand")
-  for index, pathArg in nimCfgPathArgs(codeTracerRoot):
-    result.insert(pathArg, jsIndex + index)
 
 proc stableHash64(text: string): string =
   var hash = 0xcbf29ce484222325'u64
@@ -439,14 +421,10 @@ suite "e2e_codetracer_build_subset_without_tup":
       check fileExists(tupRulesPath)
       let tupRules = loadTupRules(tupRulesPath)
       assertCommittedTupSemantics(tupRules)
-      let nimJsActionCommand = withNimConfigPathContext(
-        tupCommand(tupRules, "!nim_js",
-          "src/frontend/tests/ipc_registry_test.nim", "tests/ipc_registry_test.js"),
-        codeTracerRoot)
-      let nimJsOracleCommand = withNimConfigPathContext(
-        tupCommand(tupRules, "!nim_js",
-          "src/frontend/tests/ipc_registry_test.nim", "oracle/ipc_registry_test.js"),
-        codeTracerRoot)
+      let nimJsActionCommand = tupCommand(tupRules, "!nim_js",
+        "src/frontend/tests/ipc_registry_test.nim", "tests/ipc_registry_test.js")
+      let nimJsOracleCommand = tupCommand(tupRules, "!nim_js",
+        "src/frontend/tests/ipc_registry_test.nim", "oracle/ipc_registry_test.js")
       let traceObjectActionCommand = tupCommand(tupRules, "!trace_object_file",
         "src/c/main.c", "build/c/main.tup.o")
       let traceObjectOracleCommand = tupCommand(tupRules, "!trace_object_file",

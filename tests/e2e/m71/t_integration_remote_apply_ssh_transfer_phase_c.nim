@@ -196,6 +196,9 @@ proc bytesAsString(bytes: openArray[byte]): string =
 suite "M71 Phase C: SSH activation-bundle transfer/import":
   when isNixSupported:
     test "bundle streams over real SSH once, then exact target CAS hit skips streaming":
+      if not loopbackSshLoginAvailable():
+        checkpoint("loopback SSH unavailable: runner account has no login shell")
+        skip()
       when defined(windows):
         doAssert false,
           "M71 Phase C gate must not be skipped; provide a user-owned " &

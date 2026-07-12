@@ -95,6 +95,7 @@ class DevEnvM9PolicyTest(unittest.TestCase):
         self.assertIn("bash ./scripts/run_tests.sh", justfile)
         self.assertIn("dev-env-full-regression:", justfile)
         self.assertIn('REPROBUILD_MAX_PARALLELISM: "12"', ci_workflow)
+        self.assertIn('REPROBUILD_TEST_THREADS: "1"', ci_workflow)
         self.assertIn("cancel-in-progress: true", ci_workflow)
         # Python policy gates still run via the `find tests -name 'test_*.py'`
         # loop after the engine-driven Nim build.
