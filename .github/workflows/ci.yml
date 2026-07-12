@@ -187,10 +187,28 @@ jobs:
       # reprobuild content-addressed cache (persistent /nix/store + repro's own
       # cache on the self-hosted runners) makes rebuilds fast once warm.
       - name: Build codetracer ct (via reprobuild)
+        env:
+          REPRO_PUBLISH_KEY: ${{ secrets.REPRO_PUBLISH_KEY }}
+          REPRO_PUBLISH_CERT: ${{ secrets.REPRO_PUBLISH_CERT }}
         run: |
           set -euo pipefail
           repro_root="${{ github.workspace }}"
           ct_root="$(cd "$repro_root/../codetracer" && pwd)"
+          # R4: when a CI publisher key is configured (repo/org secret), publish
+          # the `repro build` action outputs to the fleet binary cache so other
+          # machines get cache hits. Fork PRs receive no secrets -> the vars stay
+          # empty -> reprobuild's engine publisher stays disabled (no publish).
+          if [ -n "${REPRO_PUBLISH_KEY:-}" ] && [ -n "${REPRO_PUBLISH_CERT:-}" ]; then
+            umask 077
+            printf '%s' "$REPRO_PUBLISH_KEY" > "$RUNNER_TEMP/repro-publish.key"
+            printf '%s' "$REPRO_PUBLISH_CERT" > "$RUNNER_TEMP/repro-publish.cert"
+            export REPRO_BINARY_CACHE_URL="https://repro-cache.metacraft-labs.com"
+            export REPRO_BINARY_CACHE_KEY_PATH="$RUNNER_TEMP/repro-publish.key"
+            export REPRO_BINARY_CACHE_CERT_PATH="$RUNNER_TEMP/repro-publish.cert"
+            echo "ct-build: repro binary-cache publish ENABLED -> $REPRO_BINARY_CACHE_URL"
+          else
+            echo "ct-build: no REPRO_PUBLISH_KEY; binary-cache publish disabled"
+          fi
           # 1. Materialise reprobuild's own `repro` binary (idempotent bootstrap).
           dev-exec just bootstrap
           repro_bin="$repro_root/build/bin/repro"
@@ -227,6 +245,9 @@ jobs:
             CODETRACER_REPROBUILD_TARGET=ct \
             CODETRACER_REPROBUILD_REPO_PATH="$repro_root" \
             REPROBUILD_BIN="$repro_bin" \
+            REPRO_BINARY_CACHE_URL="${REPRO_BINARY_CACHE_URL:-}" \
+            REPRO_BINARY_CACHE_KEY_PATH="${REPRO_BINARY_CACHE_KEY_PATH:-}" \
+            REPRO_BINARY_CACHE_CERT_PATH="${REPRO_BINARY_CACHE_CERT_PATH:-}" \
             direnv exec "$ct_root" just build-once )
           ct_bin="$ct_root/src/build-debug-repro/bin/ct"
           test -x "$ct_bin" || { echo "ct not built at $ct_bin" >&2; exit 1; }
