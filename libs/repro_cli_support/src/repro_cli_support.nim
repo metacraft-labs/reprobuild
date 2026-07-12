@@ -230,6 +230,8 @@ proc renderUsage*(programName: string): string =
           programName &
       " develop --list\n       " &
           programName &
+      " develop --all|--direct|--transitive-of=PKG [--filter=PAT] [--into=DIR] [--workspace-root=PATH]\n       " &
+          programName &
       " develop <dependency> --into=PATH\n       " &
           programName &
       " develop <target[#name]> --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] -- <command> [args...]\n       " &
@@ -18309,6 +18311,475 @@ proc runWorkspaceDevelopCommand*(args: openArray[string]): int =
         stderr.writeLine(line)
   report.exitCode
 
+# ---------------------------------------------------------------------------
+# L1 REPRO-DEVELOP-ALL — `repro develop --all` (and the related --direct /
+# --transitive-of / --filter / --into selection flags).
+#
+# Spec: reprobuild-specs/Reprobuild-Lock-Driven-Provisioning-And-Publish-
+# Scope.milestones.org §L1; CLI/develop.md; Workspace-And-Develop-Mode.md;
+# Locking-And-Solver.md.
+#
+# From inside a project/workspace that carries a committed ``repro.lock``, the
+# ``--all`` form resolves the develop SET over the solved graph / lock, clones
+# each selected dependency at its LOCK-PINNED revision into a sibling checkout
+# (reusing a suitable existing checkout over duplicating), and records the
+# ``solved node -> local path`` override in the local, non-versioned M20
+# ``.repro/develop-overrides.toml``. It FAILS LOUD on a missing lock and on an
+# unmappable node (no branch-tip fallback).
+#
+# This is DELIBERATELY built on the existing lock/override machinery rather
+# than reinventing it:
+#   * the develop set + its pinned coordinates come from ``populateLockedDeps``
+#     (``LockSource(kind: lskCommittedLock, ...)``), the ONE committed-lock
+#     reader that yields ``LockedDep`` with VCS ``Coordinates`` (url, ref,
+#     revision) + integrity — the source-of-record Locking-And-Solver.md names;
+#   * the clone is the same cacheable ``bakWorkspaceVcs`` engine action the M22
+#     single-target path and ``workspace sync`` use, followed by a
+#     ``gitForceResetAction`` so the checkout lands at the EXACT locked SHA
+#     (``git clone --branch`` alone only pins a branch/tag, not a bare commit);
+#   * the override is written through the M20 ``addOverride`` /
+#     ``writeDevelopOverridesFile`` helpers (the same file M21 reads to shadow
+#     upstream bindings so nix-flake sibling detection resolves the dep locally).
+# ---------------------------------------------------------------------------
+
+type
+  DevelopAllSelectionMode = enum
+    dasmAll            ## every dependency node in the lock (the closure)
+    dasmDirect         ## only the root repo's direct dependency edges
+    dasmTransitiveOf   ## the transitive closure below one named dependency
+
+  DevelopAllArgs = object
+    mode: DevelopAllSelectionMode
+    transitiveOf: string
+    filter: string
+    intoDir: string          ## ``--into=<dir>`` checkout-placement root (empty
+                             ## = sibling ``../<name>`` default)
+    workspaceRoot: string
+    toolProvisioning: ToolProvisioningMode
+    json: bool
+
+  DevelopAllNodeOutcome = object
+    node: string
+    path: string
+    revision: string
+    mode: string             ## cloned / adopted / idempotent / refused / error
+    diagnostic: string
+    ok: bool
+
+proc isRootLockedDep(d: LockedDep): bool =
+  ## The workspace root repo is recorded with ``path == "."`` (or empty). It is
+  ## the CONSUMER, not a develop-set dependency, so ``--all`` never clones it.
+  d.path.len == 0 or d.path == "."
+
+proc developSetFromLock(lock: LockedDependencies;
+                        args: DevelopAllArgs): seq[LockedDep] =
+  ## Resolve the requested selection to the concrete solved dependency nodes
+  ## (per CLI/develop.md: "resolve the requested selection to concrete solved
+  ## dependency nodes before deciding where any checkout should live").
+  ##
+  ## Selection is orthogonal to checkout placement — this proc only picks the
+  ## SET; the caller maps each node to a path.
+  # Index by name for the edge-following selection modes.
+  var byName = initTable[string, LockedDep]()
+  for d in lock.deps:
+    if d.name.len > 0:
+      byName[d.name] = d
+
+  var selectedNames: seq[string]
+  case args.mode
+  of dasmAll:
+    for d in lock.deps:
+      if not isRootLockedDep(d):
+        selectedNames.add(d.name)
+  of dasmDirect:
+    # The root repo's declared ``depends`` edges name its DIRECT dependencies.
+    for d in lock.deps:
+      if isRootLockedDep(d):
+        for dep in d.depends:
+          selectedNames.add(dep)
+  of dasmTransitiveOf:
+    if args.transitiveOf notin byName:
+      return @[]   # caller reports the unmappable root name
+    var pending = @[args.transitiveOf]
+    var seen = initHashSet[string]()
+    while pending.len > 0:
+      let cur = pending.pop()
+      if cur in seen: continue
+      seen.incl(cur)
+      let d = byName.getOrDefault(cur)
+      for dep in d.depends:
+        if dep notin seen:
+          pending.add(dep)
+      # The named root itself is INCLUDED in its transitive set (it is a dep of
+      # the consumer, just like everything below it).
+      selectedNames.add(cur)
+
+  # Materialize the selection back into LockedDep records, de-duplicated and in
+  # a stable (name-sorted) order so the report + clone scheduling is
+  # deterministic. Apply the optional ``--filter`` name substring last.
+  var emitted = initHashSet[string]()
+  for name in selectedNames:
+    if name in emitted: continue
+    if name notin byName: continue
+    if args.filter.len > 0 and not name.contains(args.filter): continue
+    emitted.incl(name)
+    result.add(byName[name])
+  result.sort(proc(a, b: LockedDep): int = cmp(a.name, b.name))
+
+proc developAllTargetPath(node: LockedDep; workspaceRoot, intoDir: string):
+    string =
+  ## Map a selected node to its checkout path. ``--into=<dir>`` places the
+  ## checkout under that root (``<dir>/<name>``); the default is the sibling
+  ## topology one level above the workspace root (``../<name>``), per
+  ## CLI/develop.md §"Checkout Placement". The lock's workspace-relative
+  ## ``path`` is honored when it already names a location (e.g. ``../sib``).
+  let seg = safeDevelopPathSegment(node.name)
+  if intoDir.len > 0:
+    return os.normalizedPath(absolutePath(intoDir) / seg)
+  if node.path.len > 0 and node.path != ".":
+    return os.normalizedPath(absolutePath(workspaceRoot / node.path))
+  os.normalizedPath(parentDir(absolutePath(workspaceRoot)) / seg)
+
+proc gitHeadShaOf(gitBinary, repoDir: string): string =
+  ## Best-effort ``git rev-parse HEAD`` for adopt/idempotent detection. Returns
+  ## "" when the directory is not a resolvable git checkout.
+  if gitBinary.len == 0 or not dirExists(repoDir / ".git"):
+    return ""
+  try:
+    let res = execProcess(gitBinary,
+      args = ["-C", repoDir, "rev-parse", "HEAD"],
+      options = {poUsePath})
+    result = res.strip()
+  except CatchableError:
+    result = ""
+
+proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
+                               node: LockedDep;
+                               identity: GitToolIdentity):
+    tuple[ok: bool; diagnostic: string] =
+  ## Clone ``node`` from its locked VCS coordinates into ``absTarget`` and
+  ## reset the checkout to the EXACT locked ``revision`` SHA. Two chained
+  ## ``bakWorkspaceVcs`` actions run in one engine graph:
+  ##   1. ``git clone`` (``--branch <ref>`` only when the lock carries an
+  ##      advisory branch/tag ref — a bare SHA cannot be a ``--branch`` arg);
+  ##   2. ``git reset --hard <revision>`` + ``git clean -ffdx`` so the tree
+  ##      lands byte-identical to a fresh checkout at the locked SHA.
+  ## The exact SHA is authoritative — there is NO branch-tip fallback.
+  let coords = node.coordinates
+  if coords.kind != ckVcs or coords.url.len == 0:
+    return (ok: false,
+      diagnostic: "node '" & node.name & "' has no VCS clone URL in the lock " &
+        "(coord_kind=" & $coords.kind &
+        "); cannot be mapped to a reproducible source origin")
+  if coords.revision.len == 0:
+    return (ok: false,
+      diagnostic: "node '" & node.name &
+        "' has no locked revision in the lock; refusing branch-tip fallback")
+  let relTarget = relativePath(absTarget, workspaceRoot)
+  let receiptDir = workspaceRoot / ".repro" / "workspace" / "receipts"
+  createDir(receiptDir)
+  let idSeg = safeDevelopPathSegment(node.name)
+  let cloneReceiptRel = ".repro" / "workspace" / "receipts" /
+    ("develop-all-clone-" & idSeg & ".receipt")
+  let resetReceiptRel = ".repro" / "workspace" / "receipts" /
+    ("develop-all-reset-" & idSeg & ".receipt")
+  # (1) clone — ``ref`` (advisory branch/tag) narrows the clone; a bare SHA is
+  # NOT passed as ``--branch`` (git refuses that). The reset step pins the SHA.
+  let cloneBranch =
+    if coords.gitRef.len > 0 and coords.gitRef != coords.revision:
+      coords.gitRef
+    else: ""
+  var cloneAction = gitCloneAction("workspace-develop-all-clone-" & idSeg,
+    identity, remoteUrl = coords.url, repoPath = relTarget,
+    receiptPath = cloneReceiptRel, revision = cloneBranch)
+  cloneAction.cwd = workspaceRoot
+  # (2) force-reset onto the exact locked SHA (depends on the clone).
+  var resetAction = gitForceResetAction("workspace-develop-all-reset-" & idSeg,
+    identity, revision = coords.revision, repoPath = relTarget,
+    receiptPath = resetReceiptRel, deps = @[cloneAction.id])
+  resetAction.cwd = workspaceRoot
+  let cacheRoot = workspaceRoot / ".repro" / "workspace" / "engine-cache"
+  var config = defaultBuildEngineConfig(cacheRoot)
+  config.suppressTrace = true
+  let res = runBuild(graph(@[cloneAction, resetAction]), config)
+  var cloneStatus, resetStatus: ActionStatus
+  var cloneSeen, resetSeen = false
+  var diag = ""
+  for outcome in res.results:
+    if outcome.id == cloneAction.id:
+      cloneStatus = outcome.status; cloneSeen = true
+      if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+        diag = "clone failed: status=" & $outcome.status & " reason=" &
+          outcome.reason &
+          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "")
+    elif outcome.id == resetAction.id:
+      resetStatus = outcome.status; resetSeen = true
+      if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+        diag = "reset-to-locked-revision failed: status=" & $outcome.status &
+          " reason=" & outcome.reason &
+          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "")
+  if not cloneSeen or not resetSeen:
+    return (ok: false,
+      diagnostic: if diag.len > 0: diag
+                  else: "build engine returned no result for clone/reset of " &
+                    node.name)
+  if cloneStatus notin {asSucceeded, asCacheHit, asUpToDate} or
+      resetStatus notin {asSucceeded, asCacheHit, asUpToDate}:
+    return (ok: false, diagnostic: diag)
+  (ok: true, diagnostic: "")
+
+proc executeDevelopAll(args: DevelopAllArgs):
+    tuple[outcomes: seq[DevelopAllNodeOutcome]; exitCode: int] =
+  ## L1 driver. (1) Read the committed lock — FAIL LOUD when absent. (2) Resolve
+  ## the develop set from it. (3) For each node: adopt a suitable existing
+  ## checkout, else clone at the locked revision — FAIL LOUD on an unmappable
+  ## node. (4) Record every successfully placed node's override via M20.
+  let root = args.workspaceRoot
+
+  # (1) The committed lock is the source-of-record. Its ABSENCE is a loud
+  # failure (no branch-tip fallback, no manifest-HEAD reconstruction).
+  let lockP = committedLockPath(root)
+  if not fileExists(extendedPath(lockP)):
+    return (@[], 1)   # caller emits the missing-lock diagnostic (needs the path)
+  var lock: LockedDependencies
+  try:
+    lock = populateLockedDeps(LockSource(kind: lskCommittedLock,
+      workspaceRoot: root))
+  except CatchableError:
+    lock = LockedDependencies()
+  if lock.deps.len == 0:
+    return (@[], 1)
+
+  # (2) Resolve the develop set.
+  let selected = developSetFromLock(lock, args)
+  if selected.len == 0:
+    # A selection that resolves to no node is itself a loud failure when the
+    # user asked for a specific ``--transitive-of`` root that is not in the lock.
+    if args.mode == dasmTransitiveOf:
+      return (@[DevelopAllNodeOutcome(node: args.transitiveOf, mode: "error",
+        ok: false, diagnostic: "'--transitive-of=" & args.transitiveOf &
+          "' names no dependency in the committed lock")], 1)
+    return (@[], 0)
+
+  # Resolve the git tool once for the whole batch.
+  var identity: GitToolIdentity
+  try:
+    identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
+    installGitVcsExecutor()
+  except CatchableError as err:
+    return (@[DevelopAllNodeOutcome(node: "*", mode: "error", ok: false,
+      diagnostic: "git tool not resolvable: " & err.msg)], 1)
+  let gitBinary = identity.binaryPath
+
+  # Load the existing override file once; fold every placed node into it.
+  var overrides =
+    try:
+      let existing = readDevelopOverridesFile(root)
+      if existing.isSome: existing.get() else: newDevelopOverrides()
+    except WorkspaceManifestParseError:
+      newDevelopOverrides()
+
+  var outcomes: seq[DevelopAllNodeOutcome]
+  var anyFailure = false
+  var mutated = false
+  for node in selected:
+    var outcome = DevelopAllNodeOutcome(node: node.name)
+    if node.coordinates.kind == ckVcs:
+      outcome.revision = node.coordinates.revision
+    # Unmappable node: no reproducible source origin. FAIL LOUD (per node).
+    if node.coordinates.kind != ckVcs or node.coordinates.url.len == 0 or
+        node.coordinates.revision.len == 0:
+      outcome.mode = "error"
+      outcome.ok = false
+      outcome.diagnostic = "node '" & node.name &
+        "' cannot be mapped to a reproducible source origin (missing VCS " &
+        "url/revision in the committed lock)"
+      outcomes.add(outcome)
+      anyFailure = true
+      continue
+
+    let absTarget = developAllTargetPath(node, root, args.intoDir)
+    outcome.path = absTarget
+
+    # Reuse / adopt an existing suitable checkout over cloning a duplicate.
+    let prior = findOverride(overrides, node.name)
+    if prior.isSome and os.normalizedPath(absolutePath(prior.get().local_path)) ==
+        absTarget:
+      # Already in develop mode at this exact path — idempotent no-op.
+      outcome.mode = "idempotent"
+      outcome.ok = true
+      outcomes.add(outcome)
+      continue
+    if prior.isSome:
+      # Existing override for this node points elsewhere — refuse (do not
+      # silently relocate someone's checkout).
+      outcome.mode = "refused"
+      outcome.ok = false
+      outcome.diagnostic = "existing override for '" & node.name &
+        "' points at " & prior.get().local_path & "; drop it before " &
+        "re-developing into " & absTarget
+      outcomes.add(outcome)
+      anyFailure = true
+      continue
+
+    if dirExists(absTarget):
+      # A checkout already exists on disk. Adopt it when it is a git checkout at
+      # the EXACT locked revision; otherwise refuse (never overwrite).
+      let headSha = gitHeadShaOf(gitBinary, absTarget)
+      if headSha.len > 0 and headSha == node.coordinates.revision:
+        outcome.mode = "adopted"
+        outcome.ok = true
+      else:
+        outcome.mode = "refused"
+        outcome.ok = false
+        outcome.diagnostic = "path " & absTarget & " already exists and is " &
+          (if headSha.len == 0: "not a git checkout"
+           else: "at " & headSha & ", not the locked revision " &
+             node.coordinates.revision) & "; refusing to overwrite"
+        outcomes.add(outcome)
+        anyFailure = true
+        continue
+    else:
+      # Clone fresh at the locked revision.
+      let cloneRes = cloneNodeAtLockedRevision(root, absTarget, node, identity)
+      if not cloneRes.ok:
+        outcome.mode = "error"
+        outcome.ok = false
+        outcome.diagnostic = cloneRes.diagnostic
+        outcomes.add(outcome)
+        anyFailure = true
+        continue
+      outcome.mode = "cloned"
+      outcome.ok = true
+
+    # Record the override (solved node -> local path) via M20.
+    var entry: repro_workspace_manifests.DevelopOverrideEntry
+    entry.package = node.name
+    entry.local_path = absTarget
+    entry.state = "editable"
+    entry.created_at = currentRfc3339Timestamp()
+    entry.provenance = some("repro develop --all")
+    overrides = addOverride(overrides, entry)
+    mutated = true
+    outcomes.add(outcome)
+
+  if mutated:
+    try:
+      writeDevelopOverridesFile(root, overrides)
+    except CatchableError as err:
+      outcomes.add(DevelopAllNodeOutcome(node: "*", mode: "error", ok: false,
+        diagnostic: "failed to write develop-overrides.toml: " & err.msg))
+      anyFailure = true
+
+  (outcomes, if anyFailure: 1 else: 0)
+
+proc runDevelopAllCommand(args: DevelopAllArgs): int =
+  ## Emit the missing-lock loud failure (it needs the resolved path), then run
+  ## the driver and render per-node results.
+  let lockP = committedLockPath(args.workspaceRoot)
+  if not fileExists(extendedPath(lockP)):
+    let msg = "repro develop --all: no committed lock at " & lockP &
+      " — run `repro lock refresh` first (a missing lock is a hard error; " &
+      "there is no branch-tip fallback)"
+    if args.json:
+      stdout.writeLine(pretty(%*{"error": msg, "exitCode": 1}, indent = 2))
+    else:
+      stderr.writeLine(msg)
+    return 1
+
+  let (outcomes, exitCode) = executeDevelopAll(args)
+
+  if args.json:
+    var arr = newJArray()
+    for o in outcomes:
+      var node = %*{
+        "node": o.node, "path": o.path, "revision": o.revision,
+        "mode": o.mode, "ok": o.ok}
+      if o.diagnostic.len > 0:
+        node["diagnostic"] = %o.diagnostic
+      arr.add(node)
+    stdout.writeLine(pretty(%*{"schemaId": "reprobuild.develop-all.v1",
+      "workspaceRoot": args.workspaceRoot, "nodes": arr,
+      "exitCode": exitCode}, indent = 2))
+  else:
+    for o in outcomes:
+      case o.mode
+      of "cloned":
+        stdout.writeLine("repro develop --all: cloned " & o.node & " @ " &
+          o.revision & " -> " & o.path)
+      of "adopted":
+        stdout.writeLine("repro develop --all: adopted existing checkout of " &
+          o.node & " @ " & o.revision & " -> " & o.path)
+      of "idempotent":
+        stdout.writeLine("repro develop --all: " & o.node &
+          " already in develop mode at " & o.path & " (no change)")
+      of "refused":
+        stderr.writeLine("repro develop --all: refused " & o.node & " — " &
+          o.diagnostic)
+      else:
+        stderr.writeLine("repro develop --all: error " & o.node & " — " &
+          o.diagnostic)
+    if exitCode == 0 and outcomes.len == 0:
+      stdout.writeLine("repro develop --all: no dependency nodes selected")
+  exitCode
+
+proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
+  ## ``repro develop --all|--direct|--transitive-of=<pkg> [--filter=<pat>]
+  ## [--into=<dir>] [--workspace-root=<path>]
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  result.mode = dasmAll
+  result.toolProvisioning = tpmPathOnly
+  var i = 0
+  var sawSelector = false
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--all":
+      result.mode = dasmAll; sawSelector = true
+    elif arg == "--direct":
+      result.mode = dasmDirect; sawSelector = true
+    elif arg == "--transitive-of" or arg.startsWith("--transitive-of="):
+      result.mode = dasmTransitiveOf
+      result.transitiveOf = valueFromFlag(args, i, "--transitive-of")
+      sawSelector = true
+    elif arg == "--filter" or arg.startsWith("--filter="):
+      result.filter = valueFromFlag(args, i, "--filter")
+    elif arg == "--into" or arg.startsWith("--into="):
+      result.intoDir = valueFromFlag(args, i, "--into")
+    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--json":
+      result.json = true
+    else:
+      raise newException(ValueError,
+        "unsupported `repro develop --all` argument: " & arg)
+    inc i
+  if not sawSelector and result.transitiveOf.len == 0:
+    result.mode = dasmAll
+  if result.mode == dasmTransitiveOf and result.transitiveOf.len == 0:
+    raise newException(ValueError,
+      "`repro develop --transitive-of=<pkg>` requires a package name")
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc looksLikeDevelopAllArgs(args: openArray[string]): bool =
+  ## The L1 develop-SET form is distinguished by a set-selection flag:
+  ## ``--all``, ``--direct``, or ``--transitive-of``. ``--into`` / ``--filter``
+  ## alone stay on the pre-L1 single-dependency ``--into`` route (that route
+  ## already owns ``--into``); only a set-selector routes here.
+  for arg in args:
+    if arg == "--" or arg == "--cmake" or arg == "--list":
+      return false
+  for arg in args:
+    if arg == "--all" or arg == "--direct" or
+        arg == "--transitive-of" or arg.startsWith("--transitive-of="):
+      return true
+  false
+
 proc looksLikeWorkspaceDevelopArgs(args: openArray[string]): bool =
   ## Decide whether the argv looks like the M22 workspace-overlay form
   ## (``repro develop <pkg> [--source=...] [--workspace-root=...]
@@ -18339,6 +18810,13 @@ proc looksLikeWorkspaceDevelopArgs(args: openArray[string]): bool =
   hasM22Marker
 
 proc runDevelopCommand(args: openArray[string]): int =
+  # L1 routing: a set-selection flag (``--all`` / ``--direct`` /
+  # ``--transitive-of``) routes to the lock-driven develop-SET command that
+  # clones every selected dependency at its locked revision (CLI/develop.md
+  # §"Develop Set Selection"). Checked FIRST so ``--all --into=...`` reaches the
+  # set path rather than the single-dependency ``--into`` route.
+  if looksLikeDevelopAllArgs(args):
+    return runDevelopAllCommand(parseDevelopAllArgs(args))
   # M22 routing: when the argv carries an M22-distinctive flag
   # (``--source``, ``--workspace-root``, ``--json``) and none of the
   # pre-M22 markers (``--list``, ``--into``, ``--cmake``,
