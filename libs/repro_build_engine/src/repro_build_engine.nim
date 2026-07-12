@@ -3793,6 +3793,28 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
             "reprobuild-nix-daemon"
           let localBin2 = action.cwd.parentDir / "reprobuild-nix-daemon" /
             "build" / "reprobuild-nix-daemon"
+          # When repro builds a FOREIGN target (e.g. codetracer's `ct`),
+          # `action.cwd` is the foreign repo, so the candidates above never find
+          # the daemon that ships in reprobuild's own tree. Anchor on
+          # reprobuild's source root instead — mirrors how the monitor shim is
+          # resolved (see repro_cli_support.resolveMonitorShim). REPROBUILD_
+          # SOURCE_ROOT is exported by codetracer's build-once.sh and forwarded
+          # by the daemon; getAppFilename() covers direct (non-daemon) builds.
+          let sourceRoot = block:
+            let env = getEnv("REPROBUILD_SOURCE_ROOT")
+            if env.len > 0: env
+            else:
+              let exe = getAppFilename()
+              if exe.len > 0: exe.parentDir.parentDir else: ""
+          let rootTool =
+            if sourceRoot.len > 0:
+              sourceRoot / "tools" / "reprobuild-nix-daemon" /
+                "reprobuild-nix-daemon"
+            else: ""
+          let rootBuild =
+            if sourceRoot.len > 0:
+              sourceRoot / "build" / "reprobuild-nix-daemon"
+            else: ""
           proc executableFile(path: string): bool =
             if path.len == 0 or not fileExists(path):
               return false
@@ -3822,6 +3844,12 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
                           elif requireExecutableCandidate(localBin2,
                               "sibling reprobuild-nix-daemon"):
                             localBin2
+                          elif requireExecutableCandidate(rootTool,
+                              "source-root tools reprobuild-nix-daemon"):
+                            rootTool
+                          elif requireExecutableCandidate(rootBuild,
+                              "source-root build reprobuild-nix-daemon"):
+                            rootBuild
                           else:
                             "reprobuild-nix-daemon"
           discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"], options = {poDaemon})

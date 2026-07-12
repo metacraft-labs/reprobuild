@@ -1162,6 +1162,26 @@ else:
         "reprobuild-nix-daemon"
       let localBin2 = getCurrentDir().parentDir / "reprobuild-nix-daemon" /
         "build" / "reprobuild-nix-daemon"
+      # When resolving toolchains for a FOREIGN build (the cwd is the foreign
+      # repo, not reprobuild), the candidates above miss the daemon that ships
+      # in reprobuild's own tree. Anchor on reprobuild's source root too —
+      # mirrors resolveMonitorShim. REPROBUILD_SOURCE_ROOT is exported by
+      # codetracer's build-once.sh; getAppFilename() covers direct builds.
+      let sourceRoot = block:
+        let env = getEnv("REPROBUILD_SOURCE_ROOT")
+        if env.len > 0: env
+        else:
+          let exe = getAppFilename()
+          if exe.len > 0: exe.parentDir.parentDir else: ""
+      let rootTool =
+        if sourceRoot.len > 0:
+          sourceRoot / "tools" / "reprobuild-nix-daemon" /
+            "reprobuild-nix-daemon"
+        else: ""
+      let rootBuild =
+        if sourceRoot.len > 0:
+          sourceRoot / "build" / "reprobuild-nix-daemon"
+        else: ""
       proc executableFile(path: string): bool =
         if path.len == 0 or not fileExists(path):
           return false
@@ -1194,6 +1214,12 @@ else:
                       elif requireExecutableCandidate(localBin2,
                           "sibling reprobuild-nix-daemon"):
                         localBin2
+                      elif requireExecutableCandidate(rootTool,
+                          "source-root tools reprobuild-nix-daemon"):
+                        rootTool
+                      elif requireExecutableCandidate(rootBuild,
+                          "source-root build reprobuild-nix-daemon"):
+                        rootBuild
                       else:
                         "reprobuild-nix-daemon"
       discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"], options = {})
