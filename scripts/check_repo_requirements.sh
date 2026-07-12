@@ -80,7 +80,10 @@ require_contains .github/workflows/ci.yml "run: dev-exec nix build .#default"
 require_contains .github/workflows/ci.yml "if: always()"
 require_contains .github/workflows/ci.yml "actions/upload-artifact@v4"
 require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "benchmark"]'\'''
-require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "macos"]'\'''
+# CIP-5 moved the macOS benchmark leg off the persistent self-hosted pool onto
+# the ephemeral `macos-tart` class; the Linux benchmark leg stays on the
+# persistent self-hosted `benchmark` runner (big-iron bench box).
+require_contains .github/workflows/benchmark.yml 'runner: '\''["macos-tart"]'\'''
 require_contains .github/workflows/benchmark.yml "metacraft-labs/runquota"
 require_contains .github/workflows/benchmark.yml "metacraft-labs/reprobuild-cmake"
 require_contains .github/workflows/benchmark.yml "ref: reprobuild"
