@@ -5,6 +5,10 @@ on:
     branches: [main, dev]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 # CI replays the project's deterministic dev environment via the
 # shared `metacraft-github-actions` composite actions. Per the
 # `ci-shared-dev-env` policy, this workflow:
@@ -63,14 +67,14 @@ jobs:
     # too small (4 vCPU / 16 GB) — the parallel nim c phase trips OOM
     # and the test runner hits an fd race at higher concurrency. The
     # metacraft-labs bare-metal pool has nixos hosts with plenty of
-    # cores + RAM. Eight concurrent engine actions keep compilation fast
-    # without the non-deterministic tail stalls observed at sixteen.
+    # cores + RAM. Twelve concurrent engine actions keep the full graph
+    # within its CI budget without the tail stalls observed at sixteen.
     # EXEMPTION (CIP-5): bare-metal runner — the parallel `nim c` phase OOMs on
     # small ephemeral runners; kept on the persistent big-iron nixos bare-metal
     # pool rather than the incus class.
     runs-on: [self-hosted, Linux, X64, bare-metal, nixos]
     env:
-      REPROBUILD_MAX_PARALLELISM: "8"
+      REPROBUILD_MAX_PARALLELISM: "12"
       REPROBUILD_TEST_THREADS: "4"
     steps:
       - uses: actions/checkout@v4

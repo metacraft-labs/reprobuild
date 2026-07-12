@@ -94,7 +94,8 @@ class DevEnvM9PolicyTest(unittest.TestCase):
         ci_workflow = text(WORKFLOW_DIR / "ci.yml")
         self.assertIn("bash ./scripts/run_tests.sh", justfile)
         self.assertIn("dev-env-full-regression:", justfile)
-        self.assertIn('REPROBUILD_MAX_PARALLELISM: "8"', ci_workflow)
+        self.assertIn('REPROBUILD_MAX_PARALLELISM: "12"', ci_workflow)
+        self.assertIn("cancel-in-progress: true", ci_workflow)
         # Python policy gates still run via the `find tests -name 'test_*.py'`
         # loop after the engine-driven Nim build.
         self.assertIn("find tests -type f -name 'test_*.py'", run_tests)
@@ -103,7 +104,7 @@ class DevEnvM9PolicyTest(unittest.TestCase):
         # collection fragments while the CLI aggregate catches up, but the
         # graph-owned test build fragment must remain in scope.
         self.assertIn("repro_build_collection", run_tests)
-        self.assertIn('REPROBUILD_BUILD_TIMEOUT:-60m', run_tests)
+        self.assertIn('REPROBUILD_BUILD_TIMEOUT:-90m', run_tests)
         self.assertIn('timeout --kill-after=30s "${BUILD_TIMEOUT}"', run_tests)
         for fragment in (".#apps", ".#test-helpers", ".#test-fixtures",
                          ".#test-builds"):

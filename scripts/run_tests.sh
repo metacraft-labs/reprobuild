@@ -194,7 +194,7 @@ if [[ -z "${REPROBUILD_MAX_PARALLELISM:-}" ]]; then
 fi
 printf 'Building apps + test-helpers + test-builds via repro (REPROBUILD_MAX_PARALLELISM=%s)\n' \
   "${REPROBUILD_MAX_PARALLELISM}" >&2
-BUILD_TIMEOUT="${REPROBUILD_BUILD_TIMEOUT:-60m}"
+BUILD_TIMEOUT="${REPROBUILD_BUILD_TIMEOUT:-90m}"
 
 # M3 accepts one fragment selector per invocation; loop over collections.
 repro_build_collection() {
