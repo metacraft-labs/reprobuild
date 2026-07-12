@@ -33,6 +33,8 @@ import std/[os, osproc, streams, strtabs, strutils, unittest]
 
 when defined(windows):
   import std/winlean
+else:
+  import std/posix
 
 proc loopbackSshLoginAvailable*(): bool =
   ## OpenSSH executes remote commands through the account's passwd shell.
@@ -52,8 +54,6 @@ proc loopbackSshLoginAvailable*(): bool =
     return not (shell.endsWith("/nologin") or shell.endsWith("/false"))
   else:
     return true
-else:
-  import std/posix
 
 const
   isNixSupported* = defined(linux) or defined(macosx)
