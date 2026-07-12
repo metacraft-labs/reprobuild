@@ -272,16 +272,11 @@ proc copySelectedCodeTracerFiles(codeTracerRoot, projectRoot: string) =
 proc writeProject(path: string; nimJsCommand, traceObjectCommand,
                   generatedHeaderCCommand: openArray[string]) =
   createDir(path.splitPath.head)
-  let headerScript =
-    "set -eu\n" &
-    "out=$1\n" &
-    "mkdir -p \"$(dirname \"$out\")\" build/c\n" &
-    "cat > \"$out\" <<'EOF'\n" &
+  let headerText =
     "#ifndef REPROBUILD_CT_SUBSET_CONFIG_H\n" &
     "#define REPROBUILD_CT_SUBSET_CONFIG_H\n" &
     "#define REPROBUILD_CT_SUBSET_GENERATED 1\n" &
-    "#endif\n" &
-    "EOF\n"
+    "#endif\n"
   writeFile(path,
     "import repro_project_dsl\n\n" &
     "package codeTracerSubset:\n" &
@@ -306,11 +301,10 @@ proc writeProject(path: string; nimJsCommand, traceObjectCommand,
     "      subcmd \"-fPIC\":\n" &
     "        pos args, seq[string], position = 0\n\n" &
     "    build:\n" &
-    "      discard buildAction(\"generate-config-header\",\n" &
-    "        codeTracerSubset.executable(\"sh\").subcmd_2d_c(\n" &
-    "          args = @[" & nimString(headerScript) & ", " &
-      nimString("sh") & ", " & nimString("build/generated/ct_config.h") & "]),\n" &
-    "        outputs = @[" & nimString("build/generated/ct_config.h") & "])\n" &
+    "      discard fs.writeText(\n" &
+    "        actionId = \"generate-config-header\",\n" &
+    "        output = \"build/generated/ct_config.h\",\n" &
+    "        text = " & nimString(headerText) & ")\n" &
     "      discard buildAction(\"nim-js-ipc-registry-test\",\n" &
     "        codeTracerSubset.executable(\"nim\")." & NimSubcmdProc & "(\n" &
     "          args = " & nimSeq(actionArgs(nimJsCommand)) & "),\n" &
@@ -386,6 +380,12 @@ proc assertActionCacheEffective(report: JsonNode; id: string) =
   ## the May-2026 engine cache-decision protocol split.
   let action = reportAction(report, id)
   check action.kind != JNull
+  if action.kind != JNull:
+    checkpoint("cache-effective action " & id & " status=" &
+      action{"status"}.getStr() & " launched=" &
+      $action{"launched"}.getBool() & " cacheDecision=" &
+      action{"cacheDecision"}.getStr() & " reason=" &
+      action{"reason"}.getStr())
   check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
   check action{"launched"}.getBool() == false
 
@@ -512,9 +512,6 @@ suite "e2e_codetracer_build_subset_without_tup":
       check mainSymbol("build/c/main.with-header.o", projectRoot) ==
         mainSymbol("oracle/main.o", projectRoot)
 
-      # The first monitored run discovers provider and tool inputs. Re-run once
-      # to publish records under that settled input set before asserting hits.
-      discard build(reproBin, target, repoRoot, pathValue)
       let second = build(reproBin, target, repoRoot, pathValue)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       assertActionCacheEffective(secondReport, "generate-config-header")
