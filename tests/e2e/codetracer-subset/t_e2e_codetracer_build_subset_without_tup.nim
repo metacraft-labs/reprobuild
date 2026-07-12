@@ -264,6 +264,8 @@ proc copySelectedCodeTracerFiles(codeTracerRoot, projectRoot: string) =
     projectRoot / "src" / "frontend" / "index" / "ipc_registry.nim")
   copyFile(codeTracerRoot / "src" / "frontend" / "lib" / "jslib.nim",
     projectRoot / "src" / "frontend" / "lib" / "jslib.nim")
+  copyFile(codeTracerRoot / "src" / "frontend" / "kdom.nim",
+    projectRoot / "src" / "frontend" / "kdom.nim")
   copyFile(codeTracerRoot / "test-programs" / "c_sudoku_solver" / "main.c",
     projectRoot / "src" / "c" / "main.c")
 
@@ -315,7 +317,8 @@ proc writeProject(path: string; nimJsCommand, traceObjectCommand,
     "        inputs = @[" &
       nimString("src/frontend/tests/ipc_registry_test.nim") & ", " &
       nimString("src/frontend/index/ipc_registry.nim") & ", " &
-      nimString("src/frontend/lib/jslib.nim") & "],\n" &
+      nimString("src/frontend/lib/jslib.nim") & ", " &
+      nimString("src/frontend/kdom.nim") & "],\n" &
     "        outputs = @[" & nimString("tests/ipc_registry_test.js") & "])\n" &
     "      let cSudokuTupDepfile = " & nimString("build/c/main.tup.d") & "\n" &
     "      let cSudokuGeneratedHeaderDepfile = " &

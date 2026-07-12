@@ -203,6 +203,14 @@ else:
     CodeTracerCommonDevToolExecutables & CodeTracerTupToolExecutables &
       CodeTracerMacDevToolExecutables
 
+const CodeTracerSourcePackages = [
+  "isonim",
+  "nim-everywhere",
+  "nim-agent-harbor",
+  "nim-agents",
+  "nim-acp"
+]
+
 const IsonimAsyncCompatFixtureSource = r"""
 when defined(js):
   import std/asyncjs
@@ -519,8 +527,23 @@ proc linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot: string) =
           "ln", "-s", sourcePath, destPath
         ]))
 
+proc writeCodeTracerDevelopOverrides(projectRoot: string) =
+  let metadataDir = projectRoot / ".repro"
+  createDir(metadataDir)
+  var content = "schema = \"reprobuild.workspace.develop-overrides.v1\"\n"
+  for packageName in CodeTracerSourcePackages:
+    let checkout = projectRoot.parentDir / packageName
+    check dirExists(checkout)
+    content.add("\n[[override]]\n")
+    content.add("package = " & packageName.escape() & "\n")
+    content.add("local_path = " & checkout.escape() & "\n")
+    content.add("state = \"editable\"\n")
+    content.add("created_at = \"2026-07-12T00:00:00Z\"\n")
+  writeFile(metadataDir / "develop-overrides.toml", content)
+
 proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
   linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot)
+  writeCodeTracerDevelopOverrides(projectRoot)
   copyFile(codeTracerRoot / "repro.nim", projectRoot / "repro.nim")
   if dirExists(codeTracerRoot / "reprobuild"):
     copyTree(codeTracerRoot / "reprobuild", projectRoot / "reprobuild")
