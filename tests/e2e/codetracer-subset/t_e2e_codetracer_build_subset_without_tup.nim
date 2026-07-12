@@ -512,6 +512,9 @@ suite "e2e_codetracer_build_subset_without_tup":
       check mainSymbol("build/c/main.with-header.o", projectRoot) ==
         mainSymbol("oracle/main.o", projectRoot)
 
+      # The first monitored run discovers provider and tool inputs. Re-run once
+      # to publish records under that settled input set before asserting hits.
+      discard build(reproBin, target, repoRoot, pathValue)
       let second = build(reproBin, target, repoRoot, pathValue)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       assertActionCacheEffective(secondReport, "generate-config-header")

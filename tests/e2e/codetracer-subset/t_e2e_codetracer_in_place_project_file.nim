@@ -994,11 +994,6 @@ proc monitorEvidenceContains(action: JsonNode; suffix: string): bool =
       if item.getStr().endsWith(suffix):
         return true
 
-proc depfileEvidenceContains(action: JsonNode; suffix: string): bool =
-  for item in action{"evidence"}{"depfileInputs"}.getElems():
-    if item.getStr().endsWith(suffix):
-      return true
-
 proc declaredEvidenceContains(action: JsonNode; suffix: string): bool =
   for item in action{"evidence"}{"declaredInputs"}.getElems():
     if item.getStr().endsWith(suffix):
@@ -1117,10 +1112,10 @@ when defined(macosx) or defined(linux):
         getStr() == "builtin"
       let selectedC = reportAction(selectedReport,
         "c-sudoku-object-with-generated-header")
-      check selectedC{"dependencyPolicyKind"}.getStr() == "dgRecognizedFormat"
-      check depfileEvidenceContains(selectedC,
+      check selectedC{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
+      check monitorEvidenceContains(selectedC,
         "test-programs/c_sudoku_solver/main.c")
-      check depfileEvidenceContains(selectedC, "build/generated/ct_config.h")
+      check monitorEvidenceContains(selectedC, "build/generated/ct_config.h")
       check reportAction(selectedReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(selectedReport, "frontend-ui-js").kind == JNull
       check reportAction(selectedReport, "frontend-public-ui-js").kind == JNull
@@ -1736,6 +1731,9 @@ when defined(macosx) or defined(linux):
       check aggregateIdentity.profiles.anyIt(it.executableName == "nim")
       check not aggregateIdentity.profiles.anyIt(it.executableName == "nim-js")
 
+      # Monitored actions discover provider and tool inputs on their first run.
+      # Publish records with that settled input set before asserting cache hits.
+      discard build(reproBin, selectedTarget, repoRoot, pathValue, nativeEnv)
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
       check second.contains("selectedTarget: codetracer")
@@ -2384,8 +2382,8 @@ when defined(macosx) or defined(linux):
       check headerInputs.anyIt(it.endsWith("build/generated/ct_config.h"))
 
       let monitoredC = reportAction(firstReport, "c-sudoku-object-tup")
-      check monitoredC{"dependencyPolicyKind"}.getStr() == "dgRecognizedFormat"
-      check depfileEvidenceContains(monitoredC,
+      check monitoredC{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
+      check monitorEvidenceContains(monitoredC,
         "test-programs/c_sudoku_solver/main.c")
 
       check runNode("src/build-debug-repro/tests/ipc_registry_test.js", projectRoot,
@@ -2394,6 +2392,9 @@ when defined(macosx) or defined(linux):
       check mainSymbol("build/c/main.tup.o", projectRoot).len > 0
       check mainSymbol("build/c/main.with-header.o", projectRoot).len > 0
 
+      # Monitored actions discover provider and tool inputs on their first run.
+      # Publish records with that settled input set before asserting cache hits.
+      discard build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
       let second = build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       assertActionCacheEffective(secondReport, "generate-config-header")
