@@ -139,6 +139,8 @@ package reproosInstaller:
       # relative-vs-absolute normalisation (the resolver produces
       # absolute POSIX paths; cmake accepts both).
       let qt6SiblingsRoot = "../../recipes/packages/source"
+      let qtBase = packageInstallMirrorCmakeRoot(
+        qt6SiblingsRoot, "qt6-base")
       let qtDecl = packageInstallMirrorCmakeRoot(
         qt6SiblingsRoot, "qt6-declarative")
       let qtQc2 = packageInstallMirrorCmakeRoot(
@@ -150,6 +152,8 @@ package reproosInstaller:
         # behaviour. Same pattern as the sddm / kwin recipes.
         "CMAKE_POLICY_VERSION_MINIMUM=3.16",
         "CMAKE_BUILD_TYPE=Release",
+        "CMAKE_MODULE_PATH=" & qtBase & "/Qt6;" &
+          qtBase & "/Qt6/platforms",
         # PRD Sec 7.1 -- Wayland-native. The runtime QPA plugin is
         # picked up at exec time from the from-source qt6-base
         # install; no extra cmake flag needed here.
@@ -169,7 +173,8 @@ package reproosInstaller:
         "Qt6QuickControls2_DIR=" & qtQc2 & "/Qt6QuickControls2",
         "Qt6QuickTemplates2_DIR=" & qtQc2 & "/Qt6QuickTemplates2",
       ]
-      let pkg = cmake_package(srcDir = ".", cacheVars = opts)
+      let pkg = cmake_package(srcDir = ".", generator = "Ninja",
+        cacheVars = opts, allowSourceWrites = true)
       discard pkg.executable("reproos-installer")
     finally:
       clearCurrentOwningPackageOverride()

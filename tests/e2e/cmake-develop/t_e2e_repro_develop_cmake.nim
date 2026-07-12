@@ -43,12 +43,14 @@ proc readProfileSidecar(buildDir, executableName: string): string =
   else:
     ""
 
-proc generatedProviderContainsToolRef(buildDir, toolRef: string): bool =
+proc generatedProviderDeclaresToolUse(buildDir, toolRef: string): bool =
   let providerPath = buildDir / "reprobuild.nim"
   check fileExists(providerPath)
-  fileExists(providerPath) and
-    readFile(providerPath).contains("toolIdentityRefs = @[" & "\"" & toolRef &
-      "\"" & "]")
+  if not fileExists(providerPath):
+    return false
+  let provider = readFile(providerPath)
+  provider.contains("uses:") and
+    provider.contains("\"" & toolRef & " >=1.0 <2.0\"")
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
@@ -266,7 +268,7 @@ suite "e2e_repro_develop_cmake":
           cpLocalOnly
         let ccSidecar = readProfileSidecar(buildDir, "reprobuild-cmake-cc")
         check ccSidecar.sidecarValue("cachePortability") == "local-only"
-        check generatedProviderContainsToolRef(buildDir, "reprobuild-cmake-cc")
+        check generatedProviderDeclaresToolUse(buildDir, "reprobuild-cmake-cc")
 
     test "e2e_repro_develop_cmake_tool_identity_changes_cache_key":
       let repoRoot = getCurrentDir()
@@ -318,9 +320,9 @@ suite "e2e_repro_develop_cmake":
           "reprobuild-cmake-cc")
         check firstSidecar.sidecarValue("resolvedExecutablePath") !=
           secondSidecar.sidecarValue("resolvedExecutablePath")
-        check generatedProviderContainsToolRef(firstBuildDir,
+        check generatedProviderDeclaresToolUse(firstBuildDir,
           "reprobuild-cmake-cc")
-        check generatedProviderContainsToolRef(secondBuildDir,
+        check generatedProviderDeclaresToolUse(secondBuildDir,
           "reprobuild-cmake-cc")
 
     test "e2e_repro_develop_cmake_path_vs_nix_portability":
@@ -393,6 +395,6 @@ suite "e2e_repro_develop_cmake":
           check nixSidecar.sidecarValue("cachePortability") == "portable"
           check nixSidecar.sidecarValue("selectedStorePath").startsWith(
             "/nix/store/")
-          check generatedProviderContainsToolRef(nixBuildDir,
+          check generatedProviderDeclaresToolUse(nixBuildDir,
             "reprobuild-cmake-cc")
           check nixOutput.output.contains("action: link-m9 status=asSucceeded")

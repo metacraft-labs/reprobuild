@@ -70,6 +70,18 @@ suite "DSL-port M9.R.14d.7 — meson_package stage-copy emission":
     finally:
       clearCurrentOwningPackageOverride()
 
+  test "extraEnv applies to every meson pipeline edge":
+    let bytecodeGuard = ("PYTHONDONTWRITEBYTECODE", "1")
+    setCurrentOwningPackageOverride("mesonExtraEnvTestPkg")
+    try:
+      let pkg = meson_package(srcDir = "./src",
+        extraEnv = @[bytecodeGuard])
+      check bytecodeGuard in pkg.buildEdge.env
+      check bytecodeGuard in pkg.compileEdge.env
+      check bytecodeGuard in pkg.installEdge.env
+    finally:
+      clearCurrentOwningPackageOverride()
+
   test "PascalCase artifact names convert to meson's kebab-case":
     # Naming-translation rule that lets the stage-copy probe find
     # `libwayland-client.so` from a recipe declaring

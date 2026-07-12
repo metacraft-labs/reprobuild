@@ -228,6 +228,35 @@ export -f extract_nix_prefixes_from_elf
   esac
 done | sort -u > "$nix_prefixes_file"
 
+# Expand split-output runtime propagation before copying any store
+# prefixes. Reading the host prefixes here avoids depending on a later
+# staged-tree iteration and ensures dev-only RPATH entries still bring
+# along the output that owns the shared library.
+propagation_iter=0
+while :; do
+  propagation_iter=$((propagation_iter + 1))
+  propagated_prefixes_file="$(mktemp -t reproos-iso-nix-propagated-XXXXXX)"
+  while IFS= read -r prefix; do
+    [ -z "$prefix" ] && continue
+    propagated="$prefix/nix-support/propagated-build-inputs"
+    [ -f "$propagated" ] || continue
+    tr '[:space:]' '\n' < "$propagated" | \
+      sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
+  done < "$nix_prefixes_file" | sort -u > "$propagated_prefixes_file"
+  to_add=$(comm -23 "$propagated_prefixes_file" "$nix_prefixes_file" 2>/dev/null || true)
+  if [ -z "$to_add" ]; then
+    rm -f "$propagated_prefixes_file"
+    break
+  fi
+  cat "$nix_prefixes_file" "$propagated_prefixes_file" | sort -u > "$nix_prefixes_file.next"
+  mv "$nix_prefixes_file.next" "$nix_prefixes_file"
+  rm -f "$propagated_prefixes_file"
+  if [ "$propagation_iter" -ge 10 ]; then
+    echo "[stage-de-rootfs] propagated nix-store closure didn't converge" >&2
+    exit 75
+  fi
+done
+
 nix_closure_count=$(wc -l < "$nix_prefixes_file")
 echo "[stage-de-rootfs] discovered $nix_closure_count unique /nix/store/ prefixes"
 
@@ -289,6 +318,15 @@ while :; do
     # shell fork (breeze-icons alone has 24k+ symlinks).
     find "$staged_prefix" -type l -lname '/nix/store/*' -printf '%l\n' 2>/dev/null | \
       sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
+    # Split Nix development outputs declare their runtime library
+    # outputs through nix-support propagation manifests. Those paths
+    # may not appear in an ELF RPATH when pkg-config points at the dev
+    # output, but they are still part of the runtime closure.
+    for propagated in "$staged_prefix/nix-support/propagated-build-inputs"; do
+      [ -f "$propagated" ] || continue
+      tr '[:space:]' '\n' < "$propagated" | \
+        sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
+    done
   done < "$nix_prefixes_file" | sort -u > "$new_prefixes_file"
 
   # Filter out prefixes we already mirrored.
@@ -1319,8 +1357,36 @@ echo "[stage-de-rootfs] overlayed repro CLI (bytes=$(stat -c %s "$STAGE_DIR/usr/
 # no-fallback-to-/nix/store rule.
 # ---------------------------------------------------------------------------
 
+# Final split-output audit over the staged store itself. A prefix can
+# enter through a later ELF/symlink closure iteration after the initial
+# host-side expansion, so walk every staged propagation manifest to a
+# fixed point before relocation.
+propagated_mirrored=0
+for propagation_iter in 1 2 3 4 5 6 7 8 9 10; do
+  added=0
+  while IFS= read -r prefix; do
+    [ -d "$prefix" ] || continue
+    dst="$STAGE_DIR$prefix"
+    [ -e "$dst" ] && continue
+    mkdir -p "$(dirname "$dst")"
+    cp -a "$prefix" "$dst"
+    added=$((added + 1))
+    propagated_mirrored=$((propagated_mirrored + 1))
+  done < <(
+    find "$STAGE_DIR/nix/store" -path '*/nix-support/propagated-build-inputs' \
+      -type f -exec cat {} + 2>/dev/null | tr '[:space:]' '\n' | \
+      sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p' | sort -u
+  )
+  [ "$added" -gt 0 ] || break
+  if [ "$propagation_iter" -eq 10 ]; then
+    echo "[stage-de-rootfs] staged propagated closure didn't converge" >&2
+    exit 75
+  fi
+done
+echo "[stage-de-rootfs] mirrored $propagated_mirrored propagated runtime prefixes"
+
 echo "[stage-de-rootfs] M9.R.46 relocate-nix-to-repro starting"
-bash "$SCRIPT_DIR_SELF/relocate-nix-to-repro.sh" "$STAGE_DIR"
+bash "$SCRIPT_DIR_SELF/relocate-nix-to-repro.sh" "$STAGE_DIR" "$ISO_SRC_MIRROR_ROOT"
 echo "[stage-de-rootfs] M9.R.46 relocate-nix-to-repro complete"
 
 # ---------------------------------------------------------------------------

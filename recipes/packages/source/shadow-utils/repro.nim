@@ -65,6 +65,7 @@ package shadowUtilsSource:
     "libtool"
     "make"
     "gcc >=11"
+    "file"
     "pkg-config"
     ## gettext provides msgfmt for the per-locale catalogs.
     "gettext"
@@ -121,7 +122,11 @@ package shadowUtilsSource:
         "--without-tcb",
         "--disable-nls",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let patches = @[
+        "sed -i 's|/usr/bin/file|file|g' src/configure",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
+                                  srcPatches = patches)
       discard pkg.executable("useradd")
       discard pkg.executable("passwd")
       discard pkg.executable("chsh")

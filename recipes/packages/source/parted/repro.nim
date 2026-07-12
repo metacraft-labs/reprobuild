@@ -33,19 +33,8 @@ package partedSource:
     "gettext"
 
   buildDeps:
-    ## device-mapper provides the libdevmapper.so parted uses for
-    ## LVM / dmcrypt partition introspection.
-    "device-mapper"
-    ## readline is the line-editing library parted uses for its
-    ## interactive shell.
-    "readline"
     ## libuuid (from util-linux) for partition UUIDs.
     "util-linux"
-    ## ncurses provides the terminfo/termcap library parted's
-    ## readline integration links against (parted's configure
-    ## hard-errors with "termcap could not be found which is required
-    ## for the --with-readline option" without it).
-    "ncurses"
 
   config:
     discard
@@ -62,7 +51,12 @@ package partedSource:
       let opts = @[
         "--disable-static",
         "--enable-shared",
-        "--with-readline",
+        # ReproOS invokes parted non-interactively. Avoid a termcap/readline
+        # development dependency that is unnecessary for image assembly.
+        "--without-readline",
+        # Image assembly targets raw block devices and does not need LVM or
+        # dm-crypt discovery through the optional device-mapper backend.
+        "--disable-device-mapper",
         "--disable-nls",
       ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts)

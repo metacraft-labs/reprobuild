@@ -264,7 +264,8 @@ package mesaSource:
         "tools=",
         "microsoft-clc=disabled",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts,
+        extraEnv = @[("PYTHONDONTWRITEBYTECODE", "1")])
       discard pkg.library("libEGL")
       discard pkg.library("libGLESv2")
       discard pkg.library("libGbm")

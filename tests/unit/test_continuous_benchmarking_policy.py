@@ -52,8 +52,10 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
 
         self.assertIn("branches: [main]", workflow)
         self.assertIn("workflow_dispatch:", workflow)
-        self.assertIn('runner: \'["self-hosted", "benchmark"]\'', workflow)
-        self.assertIn('runner: \'["self-hosted", "macos"]\'', workflow)
+        self.assertIn(
+            'runner: \'["self-hosted", "Linux", "X64", "benchmark"]\'', workflow
+        )
+        self.assertIn('runner: \'["macos-tart"]\'', workflow)
         self.assertIn("metacraft-labs/runquota", workflow)
         self.assertIn("metacraft-labs/reprobuild-cmake", workflow)
         self.assertIn("ref: reprobuild", workflow)

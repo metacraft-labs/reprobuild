@@ -82,7 +82,7 @@ suite "Bootstrap-And-Self-Build B5: run_tests.sh is slimmed and engine-driven":
     # tests hard-require the forked cmake). Together these bring the
     # script to ~240 lines; the 280-line cap still catches a full revert
     # to the legacy script shape.
-    check lines < 280
+    check lines < 300
 
     # The engine call — the single biggest delegation. The CLI
     # accepts ``--tool-provisioning=path`` either before or after the

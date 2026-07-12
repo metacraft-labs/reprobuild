@@ -196,7 +196,14 @@ package bashSource:
         "--enable-history",
         "--enable-job-control",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let patches = @[
+        "grep -q '^#include <unistd.h>$' src/lib/termcap/tparam.c || " &
+          "sed -i '/#include \"ltcap.h\"/i #include <unistd.h>' " &
+          "src/lib/termcap/tparam.c",
+      ]
+      let pkg = autotools_package(srcDir = "./src",
+                                  configureOptions = opts,
+                                  srcPatches = patches)
       discard pkg.executable("bash")
     finally:
       clearCurrentOwningPackageOverride()

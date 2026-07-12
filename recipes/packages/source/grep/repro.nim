@@ -176,7 +176,10 @@ package grepSource:
       let opts = @[
         "--disable-perl-regexp",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let pkg = autotools_package(
+        srcDir = "./src",
+        configureOptions = opts,
+        allowSourceWrites = true)
       discard pkg.executable("grep")
     finally:
       clearCurrentOwningPackageOverride()

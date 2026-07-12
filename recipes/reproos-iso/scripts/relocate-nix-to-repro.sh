@@ -55,19 +55,35 @@
 #      file path named.  Per the M9.R.46 brief: ``no fall-back to
 #      /nix/store``.
 #
-# Usage:  bash relocate-nix-to-repro.sh <stage-dir>
+# Usage:  bash relocate-nix-to-repro.sh <stage-dir> [source-mirror-root]
 
 set -uo pipefail
 
-if [ "$#" -ne 1 ]; then
-  echo "usage: $0 <stage-dir>" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  echo "usage: $0 <stage-dir> [source-mirror-root]" >&2
   exit 64
 fi
-STAGE_DIR="$1"
+STAGE_DIR="$(realpath -m "$1")"
 
 if [ ! -d "$STAGE_DIR" ]; then
   echo "[relocate-nix-to-repro] stage dir does not exist: $STAGE_DIR" >&2
   exit 65
+fi
+
+SOURCE_MIRROR_ROOT=""
+if [ "$#" -eq 2 ]; then
+  SOURCE_MIRROR_ROOT="$(realpath -m "$2")"
+  case "$SOURCE_MIRROR_ROOT" in
+    "$STAGE_DIR"/*) ;;
+    *)
+      echo "[relocate-nix-to-repro] source mirror root escapes stage dir: $SOURCE_MIRROR_ROOT" >&2
+      exit 64
+      ;;
+  esac
+  if [ ! -d "$SOURCE_MIRROR_ROOT" ]; then
+    echo "[relocate-nix-to-repro] source mirror root does not exist: $SOURCE_MIRROR_ROOT" >&2
+    exit 65
+  fi
 fi
 
 NIX_STORE_STAGED="$STAGE_DIR/nix/store"
@@ -98,17 +114,16 @@ echo "[relocate-nix-to-repro] staged /nix/store has $(ls -1 "$NIX_STORE_STAGED" 
 #   1. $STAGE_DIR/nix/store        (parent of the entries we mv-rename)
 #   2. each $STAGE_DIR/nix/store/<entry>/  (parent of nested files we
 #                                            patchelf later)
-#   3. $STAGE_DIR/opt              (the from-source install-mirrors;
-#                                    same Phase 2 behaviour applied
-#                                    cp -a-preserved 555 dirs on
-#                                    /opt/.../usr/lib too)
+#   3. the from-source install-mirror root (the same Phase 2 behaviour
+#      applied cp -a-preserved 555 dirs there too)
 # Idempotent + safe: u+w only, no group/other write.
 # ---------------------------------------------------------------------------
 
-echo "[relocate-nix-to-repro] chmod -R u+w on $NIX_STORE_STAGED + $STAGE_DIR/opt + $STAGE_DIR/usr"
+echo "[relocate-nix-to-repro] chmod -R u+w on staged store and runtime trees"
 chmod -R u+w "$NIX_STORE_STAGED" 2>/dev/null || true
 [ -d "$STAGE_DIR/opt" ] && chmod -R u+w "$STAGE_DIR/opt" 2>/dev/null || true
 [ -d "$STAGE_DIR/usr" ] && chmod -R u+w "$STAGE_DIR/usr" 2>/dev/null || true
+[ -n "$SOURCE_MIRROR_ROOT" ] && chmod -R u+w "$SOURCE_MIRROR_ROOT" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Phase 1: enumerate every prefix dir directly under $STAGE_DIR/nix/store.
@@ -150,7 +165,7 @@ rmdir "$STAGE_DIR/nix" 2>/dev/null || true
 # Phase 2: ELF RPATH + PT_INTERP rewrite.
 #
 # We walk every ELF candidate under the entire stage tree, including the
-# from-source install-mirrors at /opt/repro/... + the freshly-moved
+# from-source install-mirrors at their explicit staged path + the freshly-moved
 # /repro/store/<hash>-<pkg>/ trees + /usr/{bin,sbin,lib,lib64} + /lib +
 # /lib64.  Each ELF gets:
 #   * RPATH:  ``s|/nix/store/|/repro/store/|g`` on every entry;
@@ -162,6 +177,15 @@ scan_dirs=()
 for d in opt usr bin sbin lib lib64 repro; do
   [ -d "$STAGE_DIR/$d" ] && scan_dirs+=("$STAGE_DIR/$d")
 done
+if [ -n "$SOURCE_MIRROR_ROOT" ]; then
+  mirror_is_covered=0
+  for sd in "${scan_dirs[@]}"; do
+    case "$SOURCE_MIRROR_ROOT" in
+      "$sd"|"$sd"/*) mirror_is_covered=1; break ;;
+    esac
+  done
+  [ "$mirror_is_covered" = 1 ] || scan_dirs+=("$SOURCE_MIRROR_ROOT")
+fi
 
 if [ "${#scan_dirs[@]}" -eq 0 ]; then
   echo "[relocate-nix-to-repro] no scan dirs under $STAGE_DIR; aborting" >&2
@@ -190,6 +214,8 @@ echo "[relocate-nix-to-repro] $cand_total ELF candidates"
 
 elfs_rewritten=0
 elfs_inspected=0
+declare -A recipe_glibc_dirs=()
+declare -A recipe_glibc_ambiguous=()
 while IFS= read -r f; do
   # Cheap ELF magic check before patchelf invocation.
   magic=$(head -c 4 "$f" 2>/dev/null | od -An -c | tr -d ' \n' || true)
@@ -200,6 +226,29 @@ while IFS= read -r f; do
   elfs_inspected=$((elfs_inspected + 1))
   rp=$($patchelf_bin --print-rpath "$f" 2>/dev/null || true)
   ip=$($patchelf_bin --print-interpreter "$f" 2>/dev/null || true)
+  if [ -n "$SOURCE_MIRROR_ROOT" ]; then
+    case "$f" in
+      "$SOURCE_MIRROR_ROOT"/*/.repro/output/install/*)
+        recipe_rel="${f#"$SOURCE_MIRROR_ROOT"/}"
+        recipe_name="${recipe_rel%%/*}"
+        case "$ip" in
+          /nix/store/*-glibc-*/lib*/ld-linux*.so*|/repro/store/*-glibc-*/lib*/ld-linux*.so*)
+            glibc_dir="$(dirname "${ip/#\/nix\/store\//\/repro\/store\/}")"
+            if [ ! -e "$STAGE_DIR$glibc_dir/libc.so.6" ]; then
+              echo "[relocate-nix-to-repro] glibc for $recipe_name is missing: $glibc_dir/libc.so.6" >&2
+              exit 75
+            fi
+            prior_glibc_dir="${recipe_glibc_dirs[$recipe_name]-}"
+            if [ -z "$prior_glibc_dir" ]; then
+              recipe_glibc_dirs[$recipe_name]="$glibc_dir"
+            elif [ "$prior_glibc_dir" != "$glibc_dir" ]; then
+              recipe_glibc_ambiguous[$recipe_name]=1
+            fi
+            ;;
+        esac
+        ;;
+    esac
+  fi
   did_rewrite=0
   if [[ "$rp" == *"/nix/store/"* ]]; then
     new_rp="${rp//\/nix\/store\//\/repro\/store\/}"
@@ -220,6 +269,49 @@ while IFS= read -r f; do
   [ "$did_rewrite" = 1 ] && elfs_rewritten=$((elfs_rewritten + 1))
 done < "$cands_file"
 echo "[relocate-nix-to-repro] inspected $elfs_inspected ELFs, rewrote RPATH/INTERP on $elfs_rewritten"
+
+# Custom from-source builds may omit the toolchain's implicit glibc from
+# RUNPATH.  That is unsafe in the Debian-based stage: a private shared
+# library that directly needs ld-linux can otherwise load Debian's loader
+# and libc alongside its Nix-built process.  Infer one glibc per recipe
+# from its executables' PT_INTERP and make that recipe's dynamic ELFs use
+# the matching relocated glibc.  Recipes containing mixed interpreters are
+# left unchanged rather than choosing an arbitrary ABI.
+glibc_rpaths_added=0
+while IFS= read -r f; do
+  [ -n "$SOURCE_MIRROR_ROOT" ] || break
+  case "$f" in
+    "$SOURCE_MIRROR_ROOT"/*/.repro/output/install/*)
+      recipe_rel="${f#"$SOURCE_MIRROR_ROOT"/}"
+      recipe_name="${recipe_rel%%/*}"
+      ;;
+    *) continue ;;
+  esac
+  [ "${recipe_glibc_ambiguous[$recipe_name]-0}" = 0 ] || continue
+  glibc_dir="${recipe_glibc_dirs[$recipe_name]-}"
+  [ -n "$glibc_dir" ] || continue
+  magic=$(head -c 4 "$f" 2>/dev/null | od -An -c | tr -d ' \n' || true)
+  case "$magic" in
+    177ELF*) ;;
+    *) continue ;;
+  esac
+  needed=$($patchelf_bin --print-needed "$f" 2>/dev/null || true)
+  if ! printf '%s\n' "$needed" | grep -Eq '^(libc\.so\.6|ld-linux[^/]*\.so)'; then
+    continue
+  fi
+  rp=$($patchelf_bin --print-rpath "$f" 2>/dev/null || true)
+  case ":$rp:" in
+    *":$glibc_dir:"*) continue ;;
+  esac
+  new_rp="$glibc_dir"
+  [ -z "$rp" ] || new_rp="$rp:$glibc_dir"
+  if ! $patchelf_bin --set-rpath "$new_rp" "$f" 2>/dev/null; then
+    echo "[relocate-nix-to-repro] failed to add matching glibc RPATH to $f" >&2
+    exit 75
+  fi
+  glibc_rpaths_added=$((glibc_rpaths_added + 1))
+done < "$cands_file"
+echo "[relocate-nix-to-repro] added matching glibc RPATHs to $glibc_rpaths_added from-source ELFs"
 
 # ---------------------------------------------------------------------------
 # Phase 3: symlink target rewrite.
@@ -255,8 +347,8 @@ echo "[relocate-nix-to-repro] rewrote $links_rewritten symlinks (/nix/store -> /
 # every non-binary file under the moved /repro/store/ tree and rewrite
 # the first line if it begins with #!/nix/store/.  This is bounded
 # (the wrapper scripts are a small fraction of the closure) so we walk
-# every text file under /repro/store/ + every script under
-# $STAGE_DIR/{usr,etc,opt}.
+# every text file under the same roots used by the ELF relocation pass,
+# plus configuration scripts under $STAGE_DIR/etc.
 #
 # We use sed for shebang rewriting; only the first 4 bytes are checked
 # against ``#!/n`` so a binary file with embedded /nix/store strings
@@ -283,8 +375,7 @@ while IFS= read -r f; do
   chmod "$mode" "$tmp"
   mv -f "$tmp" "$f"
   shebangs_rewritten=$((shebangs_rewritten + 1))
-done < <(find "$STAGE_DIR/repro/store" "$STAGE_DIR/usr" "$STAGE_DIR/etc" \
-           "$STAGE_DIR/opt" -type f 2>/dev/null)
+done < <(find "${scan_dirs[@]}" "$STAGE_DIR/etc" -type f 2>/dev/null)
 echo "[relocate-nix-to-repro] rewrote $shebangs_rewritten shebangs (#!/nix/store -> #!/repro/store)"
 
 # ---------------------------------------------------------------------------

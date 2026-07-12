@@ -174,6 +174,7 @@ proc meson_package*(srcDir: string;
                     configureOptions: seq[string] = @[];
                     crossFile = "";
                     nativeFile = "";
+                    extraEnv: seq[(string, string)] = @[];
                     srcPatches: seq[string] = @[]): MesonPackageResult =
   ## Configure → build → install pipeline for an upstream meson
   ## project. v1 ignores ``--tags`` filtering at install time — the
@@ -194,6 +195,10 @@ proc meson_package*(srcDir: string;
   ## the v6.10-rc1 shim systemd v257 ships). Mirrors the cmake_package
   ## srcPatches channel (M9.R.15q.10.5) so meson recipes have the same
   ## per-recipe escape hatch the cmake recipes do.
+  ##
+  ## ``extraEnv`` applies per-edge environment overrides to setup,
+  ## compile, and install. This matches ``cmake_package`` and keeps
+  ## package-specific process controls scoped to the recipe pipeline.
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
   let extractedRel = block:
@@ -243,7 +248,8 @@ proc meson_package*(srcDir: string;
     options = configureOptions,
     crossFile = crossFile,
     nativeFile = nativeFile,
-    after = setupAfter)
+    after = setupAfter,
+    extraEnv = extraEnv)
   # M9.R.14e.5 — thread every nativeBuildDeps + buildDeps name onto the
   # setup action's ``toolIdentityRefs`` so the M9.R.14e.1 env-prepend
   # pass at fork time threads each from-source dep's
@@ -278,7 +284,8 @@ proc meson_package*(srcDir: string;
   # below; the automatic-monitor evidence on ``meson setup`` may not
   # land before the scheduler dispatches ``meson compile``, races the
   # build.ninja file write, and breaks vendored-subproject builds.
-  let compileEdge = meson.compile(workDir = buildDir, after = @[setup])
+  let compileEdge = meson.compile(workDir = buildDir, after = @[setup],
+    extraEnv = extraEnv)
   m9r14eThreadRecipeDepsAsToolRefs(compileEdge.id, pkgName)
   # M9.R.79.2 — compile continues writing to buildDir; source stays
   # read-only.  Sequential edge via ``after = @[setup]`` — R7 dep-chain
@@ -311,7 +318,8 @@ proc meson_package*(srcDir: string;
     workDir = buildDir,
     destdir = effectiveDestdir,
     tags = @[],
-    after = @[compileEdge])
+    after = @[compileEdge],
+    extraEnv = extraEnv)
   m9r14eThreadRecipeDepsAsToolRefs(installEdge.id, pkgName)
   # M9.R.79.2 — install writes the DESTDIR-staged tree at
   # ``effectiveDestdir``; source stays read-only.  The install-mirror

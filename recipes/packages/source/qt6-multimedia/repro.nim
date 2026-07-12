@@ -53,7 +53,8 @@ package qt6MultimediaSource:
         "QT_BUILD_EXAMPLES=OFF",
         "QT_GENERATE_SBOM=OFF",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", generator = "Ninja",
+        cacheVars = opts, allowSourceWrites = true)
       discard pkg.library("libQt6Multimedia")
     finally:
       clearCurrentOwningPackageOverride()

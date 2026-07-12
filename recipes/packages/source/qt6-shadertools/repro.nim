@@ -147,7 +147,8 @@ package qt6ShaderToolsSource:
         # Same trip as qt6-base / qt6-tools / qt6-declarative / qt6-svg.
         "QT_GENERATE_SBOM=OFF",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", generator = "Ninja",
+        cacheVars = opts, allowSourceWrites = true)
       discard pkg.executable("qsb")
       discard pkg.library("libQt6ShaderTools")
     finally:

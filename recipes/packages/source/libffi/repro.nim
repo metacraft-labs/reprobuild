@@ -195,7 +195,10 @@ package libffiSource:
         "--disable-docs",
         "--disable-multi-os-directory",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let pkg = autotools_package(
+        srcDir = "./src",
+        configureOptions = opts,
+        allowSourceWrites = true)
       discard pkg.library("libFfi")
     finally:
       clearCurrentOwningPackageOverride()

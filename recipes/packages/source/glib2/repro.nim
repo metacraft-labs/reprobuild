@@ -243,6 +243,7 @@ package glib2Source:
         "documentation=false",
         "man-pages=disabled",
         "introspection=disabled",
+        "sysprof=disabled",
         "nls=disabled",
         "xattr=false",
       ]

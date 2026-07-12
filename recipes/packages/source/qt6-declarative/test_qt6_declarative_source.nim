@@ -17,6 +17,7 @@
 import std/[unittest]
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors/cmake_package
 
 # Side-effect import: triggers the package macro which registers
 # fetch spec + library artifacts under ``qt6DeclarativeSource`` at
@@ -58,6 +59,17 @@ suite "qt6DeclarativeSource — from-source recipe smoke test":
     check "libQt6Qml" in names
     check "libQt6Quick" in names
     check "libQt6QuickControls2" in names
+
+  test "CMake actions carry Qt GUI transitive search-path dependencies":
+    setCurrentOwningPackageOverride("qt6DeclarativeSource")
+    try:
+      let pkg = cmake_package(srcDir = "./src", buildDir = "dependency-ref-test")
+      check "libxkbcommon" in pkg.compileEdge.toolIdentityRefs
+      check "mesa" in pkg.compileEdge.toolIdentityRefs
+      check "libxkbcommon" in pkg.installEdge.toolIdentityRefs
+      check "mesa" in pkg.installEdge.toolIdentityRefs
+    finally:
+      clearCurrentOwningPackageOverride()
 
   test "versions block records the upstream tag + URL + repository":
     let vs = registeredVersions("qt6DeclarativeSource")

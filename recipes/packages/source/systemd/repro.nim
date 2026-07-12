@@ -322,6 +322,9 @@ package systemdSource:
         "quotaon-path=/usr/sbin/quotaon",
         "quotacheck-path=/usr/sbin/quotacheck",
       ]
+      let env = @[
+        ("PYTHONDONTWRITEBYTECODE", "1"),
+      ]
       # M9.R.15q.12.3 — patch systemd's vendored
       # ``src/basic/linux/input-event-codes.h`` to add KEY_LINK_PHONE.
       # systemd v257 ships its own linux/* kernel header shims at
@@ -342,7 +345,7 @@ package systemdSource:
         "sed -i 's|^#define KEY_HANGUP_PHONE\\t0x1be.*|&\\n#define KEY_LINK_PHONE\\t\\t0x1bf\\t/* AL Phone Syncing */|' src/src/basic/linux/input-event-codes.h",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts,
-                              srcPatches = patches)
+                              extraEnv = env, srcPatches = patches)
       discard pkg.executable("systemdInit")
       discard pkg.executable("systemctl")
       discard pkg.executable("journalctl")

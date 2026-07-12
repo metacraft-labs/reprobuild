@@ -231,8 +231,10 @@ proc autotools_package*(srcDir: string;
                         configureScriptName = "configure";
                         prefixFlagFormat = "--prefix=";
                         patchHardcodedFile = false;
+                        allowSourceWrites = false;
                         skipConfigure = false;
-                        installMakeVars: seq[string] = @[]):
+                        installMakeVars: seq[string] = @[];
+                        srcPatches: seq[string] = @[]):
                         AutotoolsPackageResult =
   ## Configure → build → install pipeline for an upstream autotools
   ## project. The configure step is emitted via ``inlineExecCall`` so
@@ -361,13 +363,18 @@ proc autotools_package*(srcDir: string;
   ## script does pre-cd), so the copy source is ``srcDir`` verbatim
   ## (e.g. ``src/`` -- NOT ``../src/`` which is the path from inside
   ## buildDir that the configure path uses).
+  var patchPrefix = ""
+  if srcPatches.len > 0:
+    patchPrefix = "set -e; "
+    for patchCommand in srcPatches:
+      patchPrefix.add(patchCommand & "; ")
   let configureScript =
     if skipConfigure:
-      bootstrapPrefix &
+      patchPrefix & bootstrapPrefix &
       "set -e; mkdir -p " & buildDir & " && cp -aL " & srcDir &
         "/. " & buildDir & "/"
     else:
-      bootstrapPrefix &
+      patchPrefix & bootstrapPrefix &
       "mkdir -p " & buildDir & " && cd " & buildDir & " && " &
       srcFromBuild & "/" & configureScriptName & " " & configureArgs.join(" ")
   let configureArgv = @["sh", "-c", configureScript]
@@ -401,6 +408,10 @@ proc autotools_package*(srcDir: string;
   # legitimately mutable so we skip the readOnlyRoots declaration.
   # (The regen writes are the exception R6 line 268 documents as
   # "action explicitly owns the target location".)
+  # ``allowSourceWrites`` covers configure scripts that legitimately
+  # refresh generated files under srcDir despite running out-of-tree.
+  # It must be requested explicitly so ordinary source trees remain
+  # protected by R6.
   let m9r79ConfBuildDirAbs =
     if projectRoot.len > 0: projectRoot / buildDir
     else: buildDir
@@ -408,7 +419,9 @@ proc autotools_package*(srcDir: string;
     if projectRoot.len > 0: projectRoot / srcDir
     else: srcDir
   var m9r79ConfReadOnly: seq[string] = @[]
-  if not patchHardcodedFile and relBuildDir != relSrcDir:
+  if not patchHardcodedFile and not allowSourceWrites and
+      srcPatches.len == 0 and
+      relBuildDir != relSrcDir:
     m9r79ConfReadOnly.add(m9r79ConfSrcDirAbs)
   let configureEdge = buildAction(
     id = actionId,

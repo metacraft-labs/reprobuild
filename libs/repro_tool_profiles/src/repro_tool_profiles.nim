@@ -254,7 +254,7 @@ const
   # so the engine can thread them onto per-action env vars at fork time.
   ArtifactVersion = 7'u16
   NixMaterializationMagic = [byte(ord('R')), byte(ord('B')), byte(ord('N')), byte(ord('M'))]
-  NixMaterializationVersion = 1'u16
+  NixMaterializationVersion = 3'u16
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -1098,6 +1098,9 @@ proc decodeNixMaterializationProfile(bytes: openArray[byte]):
     raiseEnvelopeError(eeMalformed,
       "trailing nix materialization receipt bytes")
 
+proc expandNixPropagatedStorePaths*(paths: var seq[string])
+proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile)
+
 proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
                                   plan: NixAcquisitionPlan):
     tuple[hit: bool; profile: PathOnlyToolProfile] =
@@ -1108,10 +1111,11 @@ proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
   if not fileExists(extendedPath(path)):
     return
   try:
-    let profile = decodeNixMaterializationProfile(
+    var profile = decodeNixMaterializationProfile(
       fromByteString(readFile(extendedPath(path))))
     if not profile.nixMaterializationProfileMatches(useDef, plan):
       return
+    expandNixProfilePropagatedPaths(profile)
     return (hit: true, profile: profile)
   except CatchableError:
     return
@@ -1131,6 +1135,43 @@ proc addUniquePath*(dst: var seq[string]; value: string)
   ## Forward declaration — defined alongside the from-source populator
   ## further down. Resolved here so ``resolveNixTool`` can reuse the
   ## same dedup/exists-probe helper for nix-store aux-path population.
+
+proc expandNixPropagatedStorePaths*(paths: var seq[string]) =
+  ## Include split-output runtime and development dependencies declared
+  ## by Nix outputs. Their lib/include/pkg-config directories must feed
+  ## the same action environment as the selected output.
+  var index = 0
+  while index < paths.len:
+    let supportDir = paths[index] / "nix-support"
+    for manifestName in ["propagated-build-inputs",
+                         "propagated-native-build-inputs"]:
+      let manifest = supportDir / manifestName
+      if not fileExists(extendedPath(manifest)):
+        continue
+      for candidate in readFile(extendedPath(manifest)).splitWhitespace:
+        if not dirExists(extendedPath(candidate)) or candidate in paths:
+          continue
+        paths.add(candidate)
+    inc index
+
+proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile) =
+  ## Repair cached Nix profiles as well as fresh resolutions. Split
+  ## development outputs commonly propagate the runtime output that
+  ## owns their shared libraries; omitting it leaves LD_LIBRARY_PATH
+  ## and embedded RPATHs pointed at an empty ``-dev/lib`` directory.
+  expandNixPropagatedStorePaths(profile.realizedStorePaths)
+  for storePath in profile.realizedStorePaths:
+    addUniquePath(profile.cmakePrefixList, storePath)
+    addUniquePath(profile.pkgConfigSearchList,
+      storePath / "lib" / "pkgconfig")
+    addUniquePath(profile.pkgConfigSearchList,
+      storePath / "lib64" / "pkgconfig")
+    addUniquePath(profile.pkgConfigSearchList,
+      storePath / "share" / "pkgconfig")
+    addUniquePath(profile.cpathList, storePath / "include")
+    addUniquePath(profile.libraryPathList, storePath / "lib")
+    addUniquePath(profile.libraryPathList, storePath / "lib64")
+  profile.profileFingerprint = profileFingerprintFor(profile)
 
 when defined(windows):
   proc resolveNixTool*(useDef: InterfaceToolUse;
@@ -1239,6 +1280,7 @@ else:
     let req = %*{
       "action": "resolve",
       "selector": selector,
+      "expressionFile": plan.nixExpressionFile,
       "workspaceRoot": getCurrentDir(),
       "evaluateOnly": true
     }
@@ -1258,43 +1300,66 @@ else:
     if paths.len == 0:
       raise newException(OSError, "Daemon returned no materialized paths for selector: " & selector)
 
-    # Multi-output nixpkgs derivations (e.g. ``nixpkgs#just`` realizes an
-    # ``out`` output plus a separate ``man`` output) report several store
-    # paths, and ``nix build --print-out-paths`` does NOT guarantee the
-    # ``out`` output comes first — for ``just`` the ``-man`` output is
-    # emitted ahead of the binary-bearing prefix. Blindly trusting
-    # ``paths[0]`` therefore picks a prefix that lacks ``bin/<exe>`` and the
-    # resolution fails with "realized outputs without bin/just". Scan all
-    # realized outputs for the one that actually carries the declared
-    # executable and prefer it; fall back to the first path so the existing
-    # not-found error still surfaces for genuinely missing binaries.
-    var outPath = paths[0].getStr()
-    var resolved = ""
-    for p in paths:
-      let candidate = p.getStr()
-      if candidate.len == 0:
-        continue
-      if dirExists(extendedPath(candidate)):
-        let hit = executableInStorePath(candidate, plan.declaredExecutablePath)
-        if hit.len > 0:
-          outPath = candidate
-          resolved = hit
-          break
-      elif fileExists(extendedPath(candidate / plan.declaredExecutablePath)):
-        outPath = candidate
-        resolved = candidate / plan.declaredExecutablePath
-        break
-    let realized = @[outPath]
+    var realized: seq[string] = @[]
+    for path in paths:
+      let realizedPath = path.getStr()
+      if realizedPath.len > 0:
+        realized.add(realizedPath)
+    if realized.len == 0:
+      raise newException(OSError,
+        "Daemon returned no materialized paths for selector: " & selector)
 
-    var selectedStorePath = outPath
+    var selectedStorePath = ""
+    var resolved = ""
+    for storePath in realized:
+      if dirExists(extendedPath(storePath)):
+        let candidate = executableInStorePath(storePath,
+          plan.declaredExecutablePath)
+        if candidate.len > 0:
+          selectedStorePath = storePath
+          resolved = candidate
+          break
+      elif selectedStorePath.len == 0:
+        selectedStorePath = storePath
+        resolved = storePath / plan.declaredExecutablePath
     if resolved.len == 0:
-      if dirExists(extendedPath(outPath)):
-        resolved = executableInStorePath(outPath, plan.declaredExecutablePath)
-        if resolved.len == 0:
-          raise newException(OSError,
-            "tool-resolution failed: nix package realized outputs without " & plan.declaredExecutablePath)
+      var nixArgs = @["nix", "build", "--no-link", "--print-out-paths"]
+      if plan.nixExpressionFile.len > 0:
+        nixArgs.add("--file")
+        nixArgs.add(plan.nixExpressionFile)
       else:
-        resolved = outPath / plan.declaredExecutablePath
+        let selector =
+          if '^' in plan.nixSelector: plan.nixSelector
+          else: plan.nixSelector & "^*"
+        nixArgs.add(selector)
+      let direct = execCmdEx(shellCommand(nixArgs))
+      if direct.exitCode != 0:
+        raise newException(OSError,
+          "tool-resolution failed: nix package realized outputs without " &
+          plan.declaredExecutablePath & "; direct nix build exited " &
+          $direct.exitCode & "\n" & direct.output)
+
+      realized.setLen(0)
+      for line in direct.output.splitLines:
+        let realizedPath = line.strip()
+        if realizedPath.startsWith("/nix/store/"):
+          realized.add(realizedPath)
+      selectedStorePath = ""
+      resolved = ""
+      for storePath in realized:
+        if dirExists(extendedPath(storePath)):
+          let candidate = executableInStorePath(storePath,
+            plan.declaredExecutablePath)
+          if candidate.len > 0:
+            selectedStorePath = storePath
+            resolved = candidate
+            break
+      if resolved.len == 0:
+        raise newException(OSError,
+          "tool-resolution failed: nix package realized outputs without " &
+          plan.declaredExecutablePath & ": " & realized.join(", "))
+
+    expandNixPropagatedStorePaths(realized)
 
     result = PathOnlyToolProfile(
       installMethod: "nix",
@@ -3503,6 +3568,17 @@ var fromSourceCycleBrokenTools*: HashSet[string] = initHashSet[string]()
   ## Windows, tarball anywhere); the rest of the chain still builds from
   ## source. Exported for test introspection.
 
+var fromSourceDryRunPlannedRecipes*: HashSet[string] = initHashSet[string]()
+  ## DSL-port M9.R.9 dry-run bridge. During a top-level
+  ## ``--tool-provisioning=from-source --dry-run`` build, the auto-recurse
+  ## dispatcher dry-runs sibling recipes instead of materializing their
+  ## install trees. The resolver still needs a profile so the parent can
+  ## finish graph planning, so successfully dry-run-recursed recipe dirs are
+  ## recorded here and ``toolProfileFor(tpmFromSource, ...)`` synthesizes a
+  ## local-only profile for their expected artifact path. ``repro_cli_support``
+  ## clears this set at top-level dry-run entry/exit so a later real build
+  ## never treats a missing artifact as resolved.
+
 const BootstrapCycleBreakTools* = @[
   ## M9.R.14c.2 / .8 — pre-seeded cycle-break taxonomy for the
   ## bootstrap tool chain. The dispatcher's reactive cycle break
@@ -4125,6 +4201,19 @@ proc m9r14fDepRecipeName(useDef: InterfaceToolUse): string =
     return m9r14fStripConstraint(useDef.rawConstraint)
   ""
 
+proc m9r14fDepRecipeNames(useDef: InterfaceToolUse): seq[string] =
+  ## Return every plausible sibling-recipe name for a dependency.
+  ## Library packages commonly provision a concrete artifact name
+  ## (for example ``libblkid.so``) while their source recipe is named
+  ## after the package selector (``util-linux``).
+  for candidate in [
+      m9r14fDepRecipeName(useDef),
+      m9r14fStripConstraint(useDef.packageSelector),
+      m9r14fStripConstraint(useDef.rawConstraint)]:
+    if candidate.len == 0 or candidate in result:
+      continue
+    result.add(candidate)
+
 proc m9r14fLoadInterfaceToolUses*(recipeDir: string): seq[InterfaceToolUse] =
   ## DSL-port M9.R.14f.1 — read the sibling recipe's
   ## ``project-interface.rbsz`` and return its ``toolUses`` (which carry
@@ -4163,14 +4252,15 @@ proc populateFromSourceSearchPathsImpl(profile: var PathOnlyToolProfile;
   # are silently skipped — they don't contribute install-tree search
   # paths anyway.
   for useDef in m9r14fLoadInterfaceToolUses(recipeDir):
-    let depName = m9r14fDepRecipeName(useDef)
-    if depName.len == 0: continue
-    if depName in fromSourceCycleBrokenTools: continue
-    let depDir = recipeRoot / depName
-    if not fileExists(extendedPath(depDir / "repro.nim")):
-      continue
-    populateFromSourceSearchPathsImpl(profile, depDir, recipeRoot,
-      visited, depth + 1)
+    for depName in m9r14fDepRecipeNames(useDef):
+      if depName in fromSourceCycleBrokenTools:
+        continue
+      let depDir = recipeRoot / depName
+      if not fileExists(extendedPath(depDir / "repro.nim")):
+        continue
+      populateFromSourceSearchPathsImpl(profile, depDir, recipeRoot,
+        visited, depth + 1)
+      break
 
 proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
                                     recipeDir: string;
@@ -4208,6 +4298,36 @@ proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
   var visited: HashSet[string] = initHashSet[string]()
   populateFromSourceSearchPathsImpl(profile, recipeDir, effectiveRoot,
     visited, 0)
+
+proc dryRunPlannedFromSourceProfile(useDef: InterfaceToolUse;
+                                    recipeDir, expectedArtifact: string):
+    PathOnlyToolProfile =
+  let name = useDef.executableName
+  let absolute =
+    when defined(windows):
+      addFileExt(expectedArtifact, ExeExt)
+    else:
+      expectedArtifact
+  let absoluteArtifact = absolutePath(absolute)
+  result = PathOnlyToolProfile(
+    installMethod: "from-source",
+    packageSelector: useDef.packageSelector,
+    packageId:
+      if useDef.packageSelector.len > 0: useDef.packageSelector
+      else: name & "@from-source",
+    declaredExecutablePath: name,
+    executableName: name,
+    pathSearchList: @[parentDir(absoluteArtifact)],
+    resolvedExecutablePath: absoluteArtifact,
+    realizedStorePaths: @[absolutePath(recipeDir)],
+    selectedStorePath: absolutePath(recipeDir),
+    realizationBoundary: absolutePath(recipeDir),
+    lockIdentity: "from-source:" & name & ":recipe:" &
+      absolutePath(recipeDir) & ":dry-run",
+    adapterStrength: asStrong,
+    cachePortability: cpLocalOnly,
+    practicalHardening: phNone)
+  result.profileFingerprint = profileFingerprintFor(result)
 
 proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
                                recipeRoot = ""): FromSourceResolveResult =
@@ -4399,6 +4519,19 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
             if entry.endsWith(".pc"):
               resolved = absolutePath(entry)
               break pcWalk
+  if resolved.len == 0:
+    # Data-only packages such as IANA tzdata intentionally publish no
+    # executable, library, pkg-config file, or CMake config. A regular
+    # file in the realized share tree is sufficient build evidence.
+    block sharedDataWalk:
+      for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+        let shareRoot = recipeDir / prefixSubdir / "share"
+        if not dirExists(extendedPath(shareRoot)):
+          continue
+        for entry in walkDirRec(extendedPath(shareRoot)):
+          if fileExists(extendedPath(entry)):
+            resolved = absolutePath(entry)
+            break sharedDataWalk
   if resolved.len == 0:
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,
@@ -4652,6 +4785,10 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     of rrResolved:
       result = outcome.profile
     of rrNeedsBuild:
+      if absolutePath(outcome.recipeDir) in fromSourceDryRunPlannedRecipes:
+        result = dryRunPlannedFromSourceProfile(useDef, outcome.recipeDir,
+          outcome.expectedArtifact)
+        return
       raise newException(OSError,
         "tool-resolution failed: --tool-provisioning=from-source requested " &
         "for \"" & outcome.toolName & "\" but its sibling recipe at " &

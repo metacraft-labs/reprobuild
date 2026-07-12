@@ -119,10 +119,9 @@ proc loadTupRules(path: string): TupRules =
   # lines), and both files live in the same `src/` directory (the tup variant
   # root, marked by `src/Tupfile.ini`). For a Tuprules included by a Tupfile
   # in its own directory `$(TUP_CWD)` is therefore `.`, so codetracer's
-  # `ROOT = $(TUP_CWD)/../../` resolves relative to `src/`. The repo's real
-  # library search path comes from `nim.cfg` (replayed here by
-  # `withNimConfigPathContext`); the `$(ROOT)`-based `--path:` flags are the
-  # committed Tuprules text and are modeled verbatim.
+  # `ROOT = $(TUP_CWD)/../../` resolves relative to `src/`. The committed
+  # `NIM_REPO_PATH_FLAGS` carry the real library search path, so those
+  # `$(ROOT)`-based `--path:` flags are modeled verbatim.
   result.variables["TUP_CWD"] = "."
   for line in logicalTupLines(path):
     let eq = line.find('=')
@@ -200,23 +199,6 @@ proc tupCommand(rules: TupRules; name, sourcePath, outputPath: string): seq[stri
   for token in tupCommandTemplate(rules, name):
     result.add(replaceTupPlaceholders(token, sourcePath, outputPath))
 
-proc nimCfgPathArgs(codeTracerRoot: string): seq[string] =
-  for line in readFile(codeTracerRoot / "nim.cfg").splitLines:
-    let stripped = line.strip()
-    if stripped.startsWith("path:\"") and stripped.endsWith("\""):
-      let relativePath = stripped["path:\"".len .. ^2]
-      result.add("--path:" & codeTracerRoot / relativePath)
-
-proc withNimConfigPathContext(command: openArray[string];
-                              codeTracerRoot: string): seq[string] =
-  for item in command:
-    result.add(item)
-  let jsIndex = result.find("js")
-  if jsIndex < 0:
-    raise newException(ValueError, "!nim_js command has no js subcommand")
-  for index, pathArg in nimCfgPathArgs(codeTracerRoot):
-    result.insert(pathArg, jsIndex + index)
-
 proc stableHash64(text: string): string =
   var hash = 0xcbf29ce484222325'u64
   for ch in text:
@@ -282,22 +264,19 @@ proc copySelectedCodeTracerFiles(codeTracerRoot, projectRoot: string) =
     projectRoot / "src" / "frontend" / "index" / "ipc_registry.nim")
   copyFile(codeTracerRoot / "src" / "frontend" / "lib" / "jslib.nim",
     projectRoot / "src" / "frontend" / "lib" / "jslib.nim")
+  copyFile(codeTracerRoot / "src" / "frontend" / "kdom.nim",
+    projectRoot / "src" / "frontend" / "lib" / "kdom.nim")
   copyFile(codeTracerRoot / "test-programs" / "c_sudoku_solver" / "main.c",
     projectRoot / "src" / "c" / "main.c")
 
 proc writeProject(path: string; nimJsCommand, traceObjectCommand,
                   generatedHeaderCCommand: openArray[string]) =
   createDir(path.splitPath.head)
-  let headerScript =
-    "set -eu\n" &
-    "out=$1\n" &
-    "mkdir -p \"$(dirname \"$out\")\" build/c\n" &
-    "cat > \"$out\" <<'EOF'\n" &
+  let headerText =
     "#ifndef REPROBUILD_CT_SUBSET_CONFIG_H\n" &
     "#define REPROBUILD_CT_SUBSET_CONFIG_H\n" &
     "#define REPROBUILD_CT_SUBSET_GENERATED 1\n" &
-    "#endif\n" &
-    "EOF\n"
+    "#endif\n"
   writeFile(path,
     "import repro_project_dsl\n\n" &
     "package codeTracerSubset:\n" &
@@ -322,18 +301,18 @@ proc writeProject(path: string; nimJsCommand, traceObjectCommand,
     "      subcmd \"-fPIC\":\n" &
     "        pos args, seq[string], position = 0\n\n" &
     "    build:\n" &
-    "      discard buildAction(\"generate-config-header\",\n" &
-    "        codeTracerSubset.executable(\"sh\").subcmd_2d_c(\n" &
-    "          args = @[" & nimString(headerScript) & ", " &
-      nimString("sh") & ", " & nimString("build/generated/ct_config.h") & "]),\n" &
-    "        outputs = @[" & nimString("build/generated/ct_config.h") & "])\n" &
+    "      discard fs.writeText(\n" &
+    "        actionId = \"generate-config-header\",\n" &
+    "        output = \"build/generated/ct_config.h\",\n" &
+    "        text = " & nimString(headerText) & ")\n" &
     "      discard buildAction(\"nim-js-ipc-registry-test\",\n" &
     "        codeTracerSubset.executable(\"nim\")." & NimSubcmdProc & "(\n" &
     "          args = " & nimSeq(actionArgs(nimJsCommand)) & "),\n" &
     "        inputs = @[" &
       nimString("src/frontend/tests/ipc_registry_test.nim") & ", " &
       nimString("src/frontend/index/ipc_registry.nim") & ", " &
-      nimString("src/frontend/lib/jslib.nim") & "],\n" &
+      nimString("src/frontend/lib/jslib.nim") & ", " &
+      nimString("src/frontend/lib/kdom.nim") & "],\n" &
     "        outputs = @[" & nimString("tests/ipc_registry_test.js") & "])\n" &
     "      let cSudokuTupDepfile = " & nimString("build/c/main.tup.d") & "\n" &
     "      let cSudokuGeneratedHeaderDepfile = " &
@@ -401,6 +380,12 @@ proc assertActionCacheEffective(report: JsonNode; id: string) =
   ## the May-2026 engine cache-decision protocol split.
   let action = reportAction(report, id)
   check action.kind != JNull
+  if action.kind != JNull:
+    checkpoint("cache-effective action " & id & " status=" &
+      action{"status"}.getStr() & " launched=" &
+      $action{"launched"}.getBool() & " cacheDecision=" &
+      action{"cacheDecision"}.getStr() & " reason=" &
+      action{"reason"}.getStr())
   check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
   check action{"launched"}.getBool() == false
 
@@ -439,14 +424,10 @@ suite "e2e_codetracer_build_subset_without_tup":
       check fileExists(tupRulesPath)
       let tupRules = loadTupRules(tupRulesPath)
       assertCommittedTupSemantics(tupRules)
-      let nimJsActionCommand = withNimConfigPathContext(
-        tupCommand(tupRules, "!nim_js",
-          "src/frontend/tests/ipc_registry_test.nim", "tests/ipc_registry_test.js"),
-        codeTracerRoot)
-      let nimJsOracleCommand = withNimConfigPathContext(
-        tupCommand(tupRules, "!nim_js",
-          "src/frontend/tests/ipc_registry_test.nim", "oracle/ipc_registry_test.js"),
-        codeTracerRoot)
+      let nimJsActionCommand = tupCommand(tupRules, "!nim_js",
+        "src/frontend/tests/ipc_registry_test.nim", "tests/ipc_registry_test.js")
+      let nimJsOracleCommand = tupCommand(tupRules, "!nim_js",
+        "src/frontend/tests/ipc_registry_test.nim", "oracle/ipc_registry_test.js")
       let traceObjectActionCommand = tupCommand(tupRules, "!trace_object_file",
         "src/c/main.c", "build/c/main.tup.o")
       let traceObjectOracleCommand = tupCommand(tupRules, "!trace_object_file",

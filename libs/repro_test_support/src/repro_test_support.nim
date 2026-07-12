@@ -36,6 +36,25 @@ when defined(windows):
 else:
   import std/posix
 
+proc loopbackSshLoginAvailable*(): bool =
+  ## OpenSSH executes remote commands through the account's passwd shell.
+  ## Self-hosted service accounts commonly use nologin/false, which makes a
+  ## loopback sshd accept authentication but reject every command.
+  when defined(posix):
+    let user = getEnv("USER")
+    if user.len == 0:
+      return true
+    let probe = execCmdEx("getent passwd " & quoteShell(user))
+    if probe.exitCode != 0:
+      return true
+    let fields = probe.output.strip().split(':')
+    if fields.len < 7:
+      return true
+    let shell = fields[^1].strip()
+    return not (shell.endsWith("/nologin") or shell.endsWith("/false"))
+  else:
+    return true
+
 const
   isNixSupported* = defined(linux) or defined(macosx)
     ## True on platforms where `nix` / `nix build` is a realistic

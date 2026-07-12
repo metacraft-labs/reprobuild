@@ -34,7 +34,7 @@ suite "Nim package path handling integration and caching":
       createDir(sibRoot / "src")
       writeFile(sibRoot / "src" / "lib.nim", "const val* = 42\n")
       writeFile(sibRoot / "repro.nim", """
-import repro_project_dsl
+import repro_dsl_stdlib
 
 package sibling_dep:
   library sibling_dep:
@@ -142,7 +142,7 @@ created_at = "2026-07-02T00:00:00Z"
       createDir(sibRoot2 / "src")
       writeFile(sibRoot2 / "src" / "lib.nim", "const val* = 84\n")
       writeFile(sibRoot2 / "repro.nim", """
-import repro_project_dsl
+import repro_dsl_stdlib
 
 package sibling_dep_2:
   library sibling_dep_2:

@@ -272,6 +272,9 @@ proc otherPlatform(): string =
 suite "M71 Phase E: public remote home-profile apply":
   when isNixSupported:
     test "enable --host --now builds, transfers, activates, and is idempotent":
+      if not loopbackSshLoginAvailable():
+        checkpoint("loopback SSH unavailable: runner account has no login shell")
+        skip()
       when defined(windows):
         doAssert false,
           "M71 Phase E gate must not be skipped; Windows needs a " &
@@ -384,6 +387,9 @@ suite "M71 Phase E: public remote home-profile apply":
         check disabledProfile.contains("\"" & TargetHostName & "\": []")
 
     test "daemon-backed dev-store mode starts reprostored and remote applies":
+      if not loopbackSshLoginAvailable():
+        checkpoint("loopback SSH unavailable: runner account has no login shell")
+        skip()
       when defined(windows):
         doAssert false,
           "M71 daemon-backed dev-store gate is POSIX-only in this slice"
@@ -611,6 +617,9 @@ suite "M71 Phase E: public remote home-profile apply":
       check not fileExists(targetHomeDir / generatedRel)
 
     test "activation failure after transfer preserves intent and leaves bundle CAS":
+      if not loopbackSshLoginAvailable():
+        checkpoint("loopback SSH unavailable: runner account has no login shell")
+        skip()
       when defined(windows):
         doAssert false,
           "M71 Phase E gate must not be skipped; Windows needs a " &

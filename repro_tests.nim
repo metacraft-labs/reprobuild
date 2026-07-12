@@ -7838,6 +7838,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_fribidi_dev_stub.nim",
+    binary: "build/test-bin/t_fribidi_dev_stub",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_hcr_agent_coordinator.nim",
     binary: "build/test-bin/t_hcr_agent_coordinator",
     defines: @[],
@@ -8518,6 +8526,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_nix_propagated_store_paths.nim",
+    binary: "build/test-bin/t_nix_propagated_store_paths",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_runquota_grant_wait_unresponsive.nim",
     binary: "build/test-bin/t_runquota_grant_wait_unresponsive",
     defines: @[],
@@ -8544,6 +8560,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_rx_runquotad_forwards_custom_pools.nim",
     binary: "build/test-bin/t_rx_runquotad_forwards_custom_pools",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_shared_mime_info_dev_stub.nim",
+    binary: "build/test-bin/t_shared_mime_info_dev_stub",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

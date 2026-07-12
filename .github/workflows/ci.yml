@@ -5,6 +5,10 @@ on:
     branches: [main, dev]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 # CI replays the project's deterministic dev environment via the
 # shared `metacraft-github-actions` composite actions. Per the
 # `ci-shared-dev-env` policy, this workflow:
@@ -63,14 +67,15 @@ jobs:
     # too small (4 vCPU / 16 GB) — the parallel nim c phase trips OOM
     # and the test runner hits an fd race at higher concurrency. The
     # metacraft-labs bare-metal pool has nixos hosts with plenty of
-    # cores + RAM; lift the parallelism caps below for them.
+    # cores + RAM. Twelve concurrent engine actions keep the full graph
+    # within its CI budget without the tail stalls observed at sixteen.
     # EXEMPTION (CIP-5): bare-metal runner — the parallel `nim c` phase OOMs on
     # small ephemeral runners; kept on the persistent big-iron nixos bare-metal
     # pool rather than the incus class.
     runs-on: [self-hosted, Linux, X64, bare-metal, nixos]
     env:
-      REPROBUILD_MAX_PARALLELISM: "16"
-      REPROBUILD_TEST_THREADS: "4"
+      REPROBUILD_MAX_PARALLELISM: "12"
+      REPROBUILD_TEST_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -240,10 +245,18 @@ jobs:
           #    runs `repro build "$CODETRACER_REPROBUILD_TARGET"`; codetracer's
           #    toolchain comes from its dev shell (direnv).
           direnv allow "$ct_root"
+          # CodeTracer declares these adjacent checkouts as source library
+          # producers. Register the CI clones explicitly so Reprobuild can
+          # splice their exported Nim source roots into the consumer graph.
+          for dep in isonim nim-everywhere nim-agent-harbor nim-agents nim-acp; do
+            dep_root="$(cd "$ct_root/../$dep" && pwd)"
+            ( cd "$ct_root" && "$repro_bin" develop "$dep" --into="$dep_root" )
+          done
           ( cd "$ct_root" && \
             CODETRACER_REPROBUILD_LINUX=1 \
             CODETRACER_REPROBUILD_TARGET=ct \
             CODETRACER_REPROBUILD_REPO_PATH="$repro_root" \
+            REPROBUILD_NIX_DAEMON_BIN="$repro_root/tools/reprobuild-nix-daemon/reprobuild-nix-daemon" \
             REPROBUILD_BIN="$repro_bin" \
             REPRO_BINARY_CACHE_URL="${REPRO_BINARY_CACHE_URL:-}" \
             REPRO_BINARY_CACHE_KEY_PATH="${REPRO_BINARY_CACHE_KEY_PATH:-}" \

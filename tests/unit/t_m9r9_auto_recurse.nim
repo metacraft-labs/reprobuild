@@ -24,7 +24,7 @@
 ## The unit-test fixtures use ``createTempDir`` so nothing in the
 ## production ``recipes/packages/source/`` checkout is touched.
 
-import std/[options, os, sets, strutils, tempfiles, unittest]
+import std/[os, sets, strutils, tempfiles, unittest]
 
 import repro_cli_support
 import repro_tool_profiles
@@ -97,6 +97,41 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
     check outcome.recipeDir == scratch / "fake-tool"
     check outcome.expectedArtifact.contains("fake-tool")
     check outcome.expectedArtifact.contains(".repro")
+
+  test "test_m9r9_dry_run_planned_recipe_synthesizes_profile":
+    # A dry-run auto-recurse sub-build intentionally does not materialize
+    # package outputs. The parent still needs a profile to finish graph
+    # planning, so a recipe marked in ``fromSourceDryRunPlannedRecipes``
+    # resolves to the expected artifact path without probing the file.
+    let scratch = createTempDir("repro-m9r9-dryrun-plan-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "fake-tool")
+
+    let savedRoot = getEnv(FromSourceRootEnvVar)
+    let savedDryRunPlans = fromSourceDryRunPlannedRecipes
+    putEnv(FromSourceRootEnvVar, scratch)
+    fromSourceDryRunPlannedRecipes = initHashSet[string]()
+    defer:
+      if savedRoot.len > 0: putEnv(FromSourceRootEnvVar, savedRoot)
+      else: delEnv(FromSourceRootEnvVar)
+      fromSourceDryRunPlannedRecipes = savedDryRunPlans
+
+    let recipeDir = absolutePath(scratch / "fake-tool")
+    fromSourceDryRunPlannedRecipes.incl(recipeDir)
+    let useDef = syntheticUseDef("fake-tool")
+    let artifact = ProjectInterfaceArtifact(
+      projectInterface: ProjectInterface(
+        projectName: "t_m9r9_dryrun_plan",
+        toolUses: @[useDef]))
+
+    let identity = toolBuildIdentity(artifact, tpmFromSource,
+      storeRoot = scratch / "tool-store")
+    check identity.profiles.len == 1
+    let profile = identity.profiles[0]
+    check profile.installMethod == "from-source"
+    check profile.resolvedExecutablePath.startsWith(recipeDir)
+    check profile.pathSearchList == @[parentDir(profile.resolvedExecutablePath)]
+    check profile.lockIdentity.endsWith(":dry-run")
 
   test "test_m9r9_try_resolve_returns_rr_sibling_missing_when_no_recipe":
     # Stdlib fall-through trigger: no ``repro.nim`` at the sibling-recipe

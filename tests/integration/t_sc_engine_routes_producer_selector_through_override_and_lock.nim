@@ -42,7 +42,7 @@
 ## Hermetic: the consumer workspace + the sibling checkout live in a fresh
 ## tempdir; nothing touches $HOME and no network / git is required.
 
-import std/[options, os, unittest]
+import std/[json, options, os, unittest]
 
 import repro_cli_support
 import repro_lock
@@ -88,7 +88,38 @@ proc writeOverride(workspaceRoot, siblingCheckout: string) =
     created_at: "2026-07-01T00:00:00Z"))
   writeDevelopOverridesFile(workspaceRoot, file)
 
+proc writeLegacyOverride(workspaceRoot, siblingCheckout: string) =
+  let metadataDir = workspaceRoot / ".git" / "reprobuild"
+  createDir(metadataDir)
+  writeFile(metadataDir / "develop-overrides.json", pretty(%*{
+    "schemaId": "reprobuild.develop-overrides.v1",
+    "projectRoot": workspaceRoot,
+    "overrides": [{
+      "node": producerName,
+      "path": siblingCheckout
+    }]
+  }) & "\n")
+
 suite "SC-1: engine routes producer selector through override + lock":
+
+  test "legacy checkout override declares a producer edge":
+    let scratch = getTempDir() / "sc1-legacy-" & $getCurrentProcessId()
+    removeDir(scratch)
+    createDir(scratch)
+    defer: removeDir(scratch)
+
+    let workspace = absolutePath(scratch / "consumer")
+    let siblingCheckout = absolutePath(scratch / "prod")
+    createDir(workspace)
+    createDir(siblingCheckout)
+    writeFile(siblingCheckout / "repro.nim", "package prod:\n  discard\n")
+    writeLegacyOverride(workspace, siblingCheckout)
+
+    let binding = resolveProducerBinding(producerName, workspace)
+    check binding.kind == pbkDevelopOverride
+    check binding.localPathAbsolute == normalizedPath(siblingCheckout)
+    check binding.contentIdentity.len > 0
+    check binding.overrideBinding.kind == rpbkOverride
 
   test "t_sc_engine_routes_producer_selector_through_override_and_lock":
     let scratch = getTempDir() / "sc1-" & $getCurrentProcessId()

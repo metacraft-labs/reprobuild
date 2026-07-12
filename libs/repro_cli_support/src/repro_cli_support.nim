@@ -6146,6 +6146,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # to the host's existing PATH (the legacy pre-Batch-B behaviour).
   var pendingToolIdentityResolver: ToolIdentityResolver = nil
   var effectiveSelectDefaultAction = selectDefaultAction
+  let ownsFromSourceDryRunPlan =
+    dryRun and mode == tpmFromSource and fromSourceBuildStack.len == 0
+  if ownsFromSourceDryRunPlan:
+    fromSourceDryRunPlannedRecipes.clear()
+  defer:
+    if ownsFromSourceDryRunPlan:
+      fromSourceDryRunPlannedRecipes.clear()
 
   proc runLoweredGraphBuild(lowered: tuple[actions: seq[BuildAction];
                                           pools: seq[BuildPool]];
@@ -6671,6 +6678,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             siblingRecipeDir & " (tool \"" & outcome.toolName &
             "\") exited with status " & $siblingOutcome.exitCode &
             ". See the sub-build's diagnostics for the underlying failure.")
+        if dryRun:
+          fromSourceDryRunPlannedRecipes.incl(siblingRecipeDir)
       finally:
         if fromSourceBuildStack.len > 0 and
             fromSourceBuildStack[^1] == siblingRecipeDir:
@@ -12503,11 +12512,26 @@ proc resolveProducerBinding*(selector: string;
       parseLockedDependencies(readFile(extendedPath(lockP)))
     else:
       LockedDependencies()
-  let overrides =
+  var overrides =
     if workspaceRoot.len > 0:
       readDevelopOverridesFile(workspaceRoot)
     else:
       none(DevelopOverrides)
+  if overrides.isNone and workspaceRoot.len > 0:
+    var translated = newDevelopOverrides()
+    var foundLegacyOverride = false
+    for entry in readDevelopOverrides(
+        developOverridesMetadataPath(workspaceRoot)):
+      translated = translated.addOverride(
+        repro_workspace_manifests.DevelopOverrideEntry(
+          package: entry.node,
+          local_path: entry.path,
+          state: "editable",
+          created_at: "1970-01-01T00:00:00Z",
+          provenance: some("repro develop --into")))
+      foundLegacyOverride = true
+    if foundLegacyOverride:
+      overrides = some(translated)
   resolveProducerBinding(selector, workspaceRoot, lock, overrides)
 
 # ---------------------------------------------------------------------------

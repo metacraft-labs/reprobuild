@@ -112,6 +112,7 @@ proc cmake_package*(srcDir: string;
                     cacheVars: seq[string] = @[];
                     target = "";
                     extraEnv: seq[(string, string)] = @[];
+                    allowSourceWrites = false;
                     srcPatches: seq[string] = @[]): CmakePackageResult =
   ## Configure → build → install pipeline for an upstream cmake
   ## project. v1 leaves component selection up to the recipe
@@ -129,6 +130,10 @@ proc cmake_package*(srcDir: string;
   ## probes via the nix-wrapped pkg-config — the wrapper only consults
   ## PKG_CONFIG_PATH_FOR_TARGET, not the bare PKG_CONFIG_PATH, and the
   ## auto-channel doesn't compose for graphs with 70+ deps).
+  ##
+  ## ``allowSourceWrites`` is an explicit exception for upstream CMake
+  ## projects that generate configuration inputs inside their extracted
+  ## source tree. The default keeps the source root read-only.
   ##
   ## ## M9.R.14g.6 — inline-exec build + install
   ##
@@ -165,6 +170,10 @@ proc cmake_package*(srcDir: string;
   ## action-cache fingerprint stays stable across rebuilds.
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
+  let effectiveDestRoot =
+    if projectRoot.len > 0: projectRoot / buildDir / destdir
+    else: destdir
+  let effectiveInstallPrefix = effectiveDestRoot & prefix
   let extractedRel = block:
     let raw = registeredFetchSpec(pkgName).extractedRoot
     if raw.len > 0: raw else: "src"
@@ -225,6 +234,14 @@ proc cmake_package*(srcDir: string;
   # convention assumption that breaks under sibling install prefixes.
   # Threading each ``<Component>_DIR`` explicitly is the surgical fix.
   var effectiveCacheVars = cacheVars
+  if projectRoot.len > 0:
+    var hasInstallPrefix = false
+    for entry in effectiveCacheVars:
+      if entry.startsWith("CMAKE_INSTALL_PREFIX="):
+        hasInstallPrefix = true
+        break
+    if not hasInstallPrefix:
+      effectiveCacheVars.add("CMAKE_INSTALL_PREFIX=" & effectiveInstallPrefix)
   if projectRoot.len > 0:
     let qt6CompDirs = m9r15iCollectQt6ComponentDirs(projectRoot, pkgName)
     for entry in m9r15iEmitQt6ComponentCacheVars(qt6CompDirs):
@@ -364,6 +381,26 @@ proc cmake_package*(srcDir: string;
         if key == "GLESv2_LIBRARY" and hasGlesLibrary:
           continue
         effectiveCacheVars.add(entry)
+  # Fold package dependencies into every CMake pipeline action. The typed
+  # configure wrapper registers immediately, while build/install are only
+  # registered after this constructor returns, so the latter must carry the
+  # refs on their values instead of relying on a registry mutation.
+  proc stripCmakeDepConstraint(value: string): string =
+    for i, ch in value:
+      if ch == ' ' or ch == '>' or ch == '<' or ch == '=' or
+          ch == '~' or ch == '^':
+        return value[0 ..< i]
+    return value
+  var cmakeDepRefs: seq[string] = @[]
+  for raw in registeredNativeBuildDeps(pkgName):
+    cmakeDepRefs.add(stripCmakeDepConstraint(raw))
+  for raw in registeredBuildDeps(pkgName):
+    cmakeDepRefs.add(stripCmakeDepConstraint(raw))
+  if projectRoot.len > 0:
+    for extra in m9r15oCollectQt6TransitiveCmakeDeps(projectRoot, pkgName):
+      if extra notin cmakeDepRefs:
+        cmakeDepRefs.add(extra)
+
   let configureEdge = cmake.configure(
     srcDir = srcDir,
     buildDir = buildDir,
@@ -384,8 +421,11 @@ proc cmake_package*(srcDir: string;
   let m9r79CmSrcDirAbs =
     if projectRoot.len > 0: projectRoot / srcDir
     else: srcDir
+  let m9r79CmReadOnly =
+    if allowSourceWrites: newSeq[string]()
+    else: @[m9r79CmSrcDirAbs]
   setRegisteredActionDeclaredOutputs(configureEdge.id, @[m9r79CmBuildDirAbs])
-  setRegisteredActionReadOnlyRoots(configureEdge.id, @[m9r79CmSrcDirAbs])
+  setRegisteredActionReadOnlyRoots(configureEdge.id, m9r79CmReadOnly)
   # M9.R.14g.6 — inline-exec build action. cmake's real "build" mode is
   # selected by the ``--build`` flag, NOT by a ``build`` subcommand
   # literal.
@@ -498,13 +538,13 @@ proc cmake_package*(srcDir: string;
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "cmake_package.build",
-    toolIdentityRefs = @["cmake", "sh"],
+    toolIdentityRefs = @["cmake", "sh"] & cmakeDepRefs,
     env = extraEnv,
     # M9.R.79.4 — build continues writing to buildDir; source stays
     # read-only.  Sequential edge via ``deps = @[configureEdge.id]`` —
     # R7 dep-chain relaxation permits the shared write root.
     declaredOutputs = @[m9r79CmBuildDirAbs],
-    readOnlyRoots = @[m9r79CmSrcDirAbs])
+    readOnlyRoots = m9r79CmReadOnly)
   # M9.R.14g.6 — inline-exec install action. cmake's real install mode
   # is selected by ``--install``, NOT by ``install`` subcommand.
   #
@@ -524,13 +564,6 @@ proc cmake_package*(srcDir: string;
   # find the upstream-installed files at ``<destRoot>/usr/lib*/``.
   # ``installArgv``'s ``--prefix`` is the same root WITH ``/usr``
   # appended so cmake itself stages under the canonical FHS layout.
-  let providerProjectRootForInstall = activeProviderProjectRoot()
-  let effectiveDestRoot =
-    if providerProjectRootForInstall.len > 0:
-      providerProjectRootForInstall / buildDir / destdir
-    else:
-      destdir
-  let effectiveInstallPrefix = effectiveDestRoot & prefix
   let installArgv = @["cmake", "--install", buildDir, "--prefix", effectiveInstallPrefix]
   let installStamp = projectRoot / ".repro" / "build" / "cmake-install.stamp"
   createDir(parentDir(installStamp))
@@ -561,7 +594,7 @@ proc cmake_package*(srcDir: string;
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "cmake_package.install",
-    toolIdentityRefs = @["cmake", "sh"],
+    toolIdentityRefs = @["cmake", "sh"] & cmakeDepRefs,
     env = extraEnv,
     # M9.R.79.4 — install writes the ``--prefix``-staged tree at
     # ``effectiveDestRoot``; source stays read-only.  The install-mirror
@@ -569,40 +602,8 @@ proc cmake_package*(srcDir: string;
     # ``types/package_result.emitInstallTreeMirror``) declares its own
     # scope; here we cover the cmake --install step only.
     declaredOutputs = @[effectiveDestRoot],
-    readOnlyRoots = @[m9r79CmSrcDirAbs])
-  # M9.R.14e.5 — fold the recipe's declared ``nativeBuildDeps`` +
-  # ``buildDeps`` into each action's ``toolIdentityRefs`` so the M9.R.14e.1
-  # from-source search-path channels reach the action env at fork time.
-  # Mirrors the same pattern in ``meson_package.nim`` /
-  # ``autotools_package.nim``.
-  proc stripConstraint(value: string): string =
-    for i, ch in value:
-      if ch == ' ' or ch == '>' or ch == '<' or ch == '=' or
-          ch == '~' or ch == '^':
-        return value[0 ..< i]
-    return value
-  var depRefs: seq[string] = @[]
-  for raw in registeredNativeBuildDeps(pkgName):
-    depRefs.add(stripConstraint(raw))
-  for raw in registeredBuildDeps(pkgName):
-    depRefs.add(stripConstraint(raw))
-  # M9.R.15o.1 — virtually inject libxkbcommon + mesa as tool-identity
-  # refs whenever any qt6-* dep is in the recipe's deps, so the M9.R.14e
-  # search-path channels (PKG_CONFIG_PATH / CMAKE_PREFIX_PATH / CPATH /
-  # LIBRARY_PATH / LD_LIBRARY_PATH) reach the action env at fork time.
-  # Without this Qt6Gui's CMake config-package ``find_dependency(XKB)`` +
-  # ``find_dependency(GLESv2)`` walks miss the sibling install-mirrors
-  # at ``recipes/packages/source/{libxkbcommon,mesa}/.repro/output/...``
-  # and ``find_package(Qt6Gui REQUIRED)`` fails for every KF6 / Plasma
-  # consumer. The helper is inert when no qt6-* dep is present and
-  # silently skips deps the recipe already declared (so the M9.R.15n
-  # hand-patched recipes don't see duplicate refs).
-  if projectRoot.len > 0:
-    for extra in m9r15oCollectQt6TransitiveCmakeDeps(projectRoot, pkgName):
-      depRefs.add(extra)
-  appendRegisteredActionToolIdentityRefs(configureEdge.id, depRefs)
-  appendRegisteredActionToolIdentityRefs(buildEdge.id, depRefs)
-  appendRegisteredActionToolIdentityRefs(installEdge.id, depRefs)
+    readOnlyRoots = m9r79CmReadOnly)
+  appendRegisteredActionToolIdentityRefs(configureEdge.id, cmakeDepRefs)
   # M9.R.14h.8 — populate ``destdir`` with the SAME absolute install
   # prefix the install action passed via ``--prefix``.  meson_package
   # already does this (the destdir on the result is what stage-copy +

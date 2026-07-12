@@ -141,6 +141,42 @@ suite "DSL-port M9.R.14f.1 — transitive libDirs union":
     check sawWaylandPc
     check sawExpatPc
 
+  test "package selector locates recipe when provisioned artifact name differs":
+    let scratch = createTempDir("repro-m9r14f-1-selector-", "")
+    defer: removeDir(scratch)
+
+    writeRecipeManifest(scratch, "parted")
+    layInstallTree(scratch, "parted",
+      pcNames = @["libparted.pc"], headerNames = @["parted.h"],
+      libBareNames = @["parted"])
+
+    let outDir = scratch / "parted" / ".repro" / "build" / "repro"
+    createDir(outDir)
+    var pi = ProjectInterface(
+      projectName: "parted",
+      packageName: "parted",
+      defaultToolProvisioning: "")
+    pi.toolUses.add(InterfaceToolUse(
+      rawConstraint: "util-linux",
+      packageSelector: "util-linux",
+      executableName: "libblkid.so"))
+    writeInterfaceArtifact(outDir / "project-interface.rbsz", artifactFor(pi))
+
+    writeRecipeManifest(scratch, "util-linux")
+    layInstallTree(scratch, "util-linux",
+      pcNames = @["uuid.pc"], headerNames = @["uuid.h"],
+      libBareNames = @["uuid"])
+    writeSyntheticInterface(scratch, "util-linux", deps = @[])
+
+    var profile = PathOnlyToolProfile(installMethod: "from-source")
+    populateFromSourceSearchPaths(profile, scratch / "parted", scratch)
+
+    var sawUtilLinux = false
+    for entry in profile.libraryPathList:
+      if entry.contains(DirSep & "util-linux" & DirSep):
+        sawUtilLinux = true
+    check sawUtilLinux
+
   test "three_level_transitive_walk_exposes_grandchild":
     # consumer -> A -> B -> C. C's libraryPathList ends up on the
     # consumer's resolved profile via two recursive hops.

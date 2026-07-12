@@ -225,8 +225,9 @@ proc requireBashHook(c: M6Case) =
   env["REPRO_NATIVE_SHELL_STATS"] = statsPath
   env["REPROBUILD_REPRO"] = reproPathWithSpaces(c)
   let res = runProgram(findExe("bash"), @[
-    "--rcfile", c.homeDir / ".bashrc", "-i", "-c",
-    posixProbeScript(c.projectA, c.projectB)
+    "--noprofile", "--norc", "-c",
+    "source " & q(c.homeDir / ".bashrc") & "\n" &
+      posixProbeScript(c.projectA, c.projectB)
   ], c.tempRoot, env)
   check res.exitCode == 0
   requireShellValue(res.output, "A:",
@@ -247,7 +248,7 @@ proc requireZshHook(c: M6Case) =
   let statsPath = c.tempRoot / "zsh-native-stats.json"
   env["REPRO_NATIVE_SHELL_STATS"] = statsPath
   env["REPROBUILD_REPRO"] = reproPathWithSpaces(c)
-  let res = runProgram(zsh, @["-f", "-i", "-c",
+  let res = runProgram(zsh, @["-f", "-c",
     "source " & q(c.homeDir / ".zshrc") & "\n" &
       posixProbeScript(c.projectA, c.projectB)], c.tempRoot, env)
   check res.exitCode == 0
@@ -264,8 +265,9 @@ proc requireFishHook(c: M6Case; fish: string) =
   let env = c.envFor()
   let statsPath = c.tempRoot / "fish-native-stats.json"
   env["REPRO_NATIVE_SHELL_STATS"] = statsPath
-  let res = runProgram(fish, @["-i", "-c", fishProbeScript(c.projectA,
-    c.projectB)], c.tempRoot, env)
+  let res = runProgram(fish, @["--no-config", "-c",
+    "source " & q(c.xdgConfig / "fish" / "config.fish") & "\n" &
+      fishProbeScript(c.projectA, c.projectB)], c.tempRoot, env)
   check res.exitCode == 0
   requireShellValue(res.output, "A:",
     "A:alpha|one|" & c.projectA & "|tool:alpha:one")
