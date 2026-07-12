@@ -49,9 +49,9 @@ proc loopbackSshLoginAvailable*(): bool =
     if fields.len < 7:
       return true
     let shell = fields[^1].strip()
-    not (shell.endsWith("/nologin") or shell.endsWith("/false"))
+    return not (shell.endsWith("/nologin") or shell.endsWith("/false"))
   else:
-    true
+    return true
 else:
   import std/posix
 
