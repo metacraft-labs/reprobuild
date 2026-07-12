@@ -124,12 +124,18 @@
 ##
 ## See ``reprobuild-specs/Provisioning-And-Languages-Expansion.milestones.org`` §M60.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, options, os, strutils]
 
 import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+# Binary-cache publish identity — shared helper the from-source + Nim
+# conventions use to compose the ``CacheEntryIdentity`` the engine's
+# publisher hook consumes. Reused verbatim so every reusable Crystal
+# executable that lands in the local repro store is tagged for
+# publication with a uniform key shape.
+import repro_standard_provider/conventions/from_source_identity
 
 const
   ScratchDirName* = ".repro/build"
@@ -560,7 +566,14 @@ proc emitBuildAction(projectRoot, crystalExe: string;
     # engine monitors the real read-set instead of trusting only the
     # statically declared inputs.
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = statsId)
+    commandStatsId = statsId,
+    # Binary-cache publish: this single ``crystal build`` action
+    # materialises the reusable executable into the content-addressed
+    # store, so tag it for the engine's publisher hook. Inert when
+    # publishing is off (the hook only fires with a remote cache wired).
+    publishToBinaryCache = true,
+    cacheEntryIdentity =
+      some(computeCacheEntryIdentity(projectRoot, member.name, "crystal")))
 
 proc syntheticPackage(projectRoot: string;
                       members: seq[CrystalMember]): PackageDef =

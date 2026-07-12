@@ -70,13 +70,22 @@
 ##     compiler's default on Linux/MinGW. M3+ should consult ``uses:``
 ##     for ``msvc``/``clang`` pins and pick the matching compiler driver.
 
-import std/[algorithm, json, os, osproc, strutils, tables]
+import std/[algorithm, json, options, os, osproc, strutils, tables]
 
 import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/emit_cache
+# Binary-cache publish identity. ``computeCacheEntryIdentity`` is the
+# shared helper the from-source conventions use to compose the
+# ``CacheEntryIdentity`` tuple the engine's binary-cache publisher hook
+# consumes (see ``from_source_identity.nim``). The Nim convention reuses
+# it verbatim so every reusable executable/library it materialises into
+# the local repro store is tagged for publication with a key derived
+# from the same (package, version, platform, toolchain, provider-rev)
+# shape — no bespoke identity composition here.
+import repro_standard_provider/conventions/from_source_identity
 
 const
   ScratchDirName* = ".repro/build"
@@ -980,6 +989,29 @@ proc rustCrossRuntimeLinkLibs(): seq[string]
   ## (Nim app uses Rust lib) and is itself defined before the Rust
   ## helpers' textual position in the file.
 
+proc nimCacheEntryIdentity(projectRoot, memberName: string):
+    CacheEntryIdentity =
+  ## Compose the binary-cache publish identity for a single reusable Nim
+  ## artefact (one ``executable`` or ``library`` member). Reuses the
+  ## shared ``computeCacheEntryIdentity`` helper the from-source
+  ## conventions use so the key shape stays uniform across ecosystems:
+  ##
+  ##   * ``packageName`` = the member name. Each Nim member materialises a
+  ##     distinct reusable artefact (``<name>`` binary / ``lib<name>.a`` /
+  ##     ``lib<name>.so``) into the content-addressed store, so the member
+  ##     name is the right identity granularity — sibling members of the
+  ##     same recipe get distinct keys even though they share the recipe's
+  ##     ``providerRevision``.
+  ##   * ``packageVersion`` = last ``registeredVersions`` entry, or empty
+  ##     (Nim convention recipes carry no ``versions:`` block today; the
+  ##     empty string round-trips through the canonical key encoder just
+  ##     as it does for from-source recipes without a versions block).
+  ##   * ``platform`` = the hardcoded Linux x86_64 GNU glibc triple (host
+  ##     detection deferred, shared with the from-source pipeline).
+  ##   * ``toolchain.name`` = ``"nim"``.
+  ##   * ``providerRevision`` = BLAKE3 of the recipe file bytes.
+  computeCacheEntryIdentity(projectRoot, memberName, "nim")
+
 proc emitForEntrypoint(projectRoot, nimExe: string;
                       entry: NimEntrypoint;
                       depLibraries: openArray[NimWorkspaceLibrary] = [];
@@ -1166,6 +1198,12 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
     if phase3Inputs.find(lib.outputPath) < 0:
       phase3Inputs.add(lib.outputPath)
 
+  # Binary-cache publish: the Phase 3 gcc link materialises the reusable
+  # executable into the content-addressed store, so it is the action the
+  # engine's publisher hook should fire on. Tag it (and only it — Phase
+  # 1/2 emit intermediate nimcache/.o artefacts that no downstream
+  # project consumes). When publishing is disabled the flag is a no-op:
+  # the engine's hook only fires when a remote cache is configured.
   let phase3Action = buildAction(
     id = actionIdFor("gcc-link", entry.name, "binary"),
     call = inlineExecCall(finalArgv, projectRoot),
@@ -1174,7 +1212,9 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
     outputs = @[binaryOutput],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "nim.c.gcc-link")
+    commandStatsId = "nim.c.gcc-link",
+    publishToBinaryCache = true,
+    cacheEntryIdentity = some(nimCacheEntryIdentity(projectRoot, entry.name)))
 
   (phase1Action, phase2, phase3Action)
 
@@ -1311,6 +1351,9 @@ proc emitForLibrary(projectRoot, nimExe: string;
     var arArgv: seq[string] = @[arDriver(), "rcs", staticOutput]
     for obj in objFiles:
       arArgv.add(obj)
+    # Binary-cache publish: the ``ar`` archive is the reusable static
+    # library that lands in the store; tag it so the engine's publisher
+    # hook fires on it (see ``emitForEntrypoint`` for the rationale).
     let staticAction = buildAction(
       id = actionIdFor("ar-archive", lib.name, "static"),
       call = inlineExecCall(arArgv, projectRoot),
@@ -1319,7 +1362,9 @@ proc emitForLibrary(projectRoot, nimExe: string;
       outputs = @[staticOutput],
       pool = "compile",
       dependencyPolicy = automaticMonitorPolicy(),
-      commandStatsId = "nim.c.ar-archive")
+      commandStatsId = "nim.c.ar-archive",
+      publishToBinaryCache = true,
+      cacheEntryIdentity = some(nimCacheEntryIdentity(projectRoot, lib.name)))
     phase3.add(staticAction)
 
   if lib.kind in {nlkShared, nlkBoth}:
@@ -1356,6 +1401,11 @@ proc emitForLibrary(projectRoot, nimExe: string;
       finalArgv.add(obj)
     for j in 1 ..< linkerArgv.len:
       finalArgv.add(linkerArgv[j])
+    # Binary-cache publish: the shared object is a distinct reusable
+    # artefact from the static archive, so ``kind: both`` needs a
+    # distinct cache key. Suffix the identity's package name with
+    # ``-shared`` so the static (``<name>``) and shared
+    # (``<name>-shared``) outputs never collide on the same key.
     let sharedAction = buildAction(
       id = actionIdFor("gcc-link-shared", lib.name, "shared"),
       call = inlineExecCall(finalArgv, projectRoot),
@@ -1364,7 +1414,10 @@ proc emitForLibrary(projectRoot, nimExe: string;
       outputs = @[sharedOutput],
       pool = "compile",
       dependencyPolicy = automaticMonitorPolicy(),
-      commandStatsId = "nim.c.gcc-link-shared")
+      commandStatsId = "nim.c.gcc-link-shared",
+      publishToBinaryCache = true,
+      cacheEntryIdentity =
+        some(nimCacheEntryIdentity(projectRoot, lib.name & "-shared")))
     phase3.add(sharedAction)
 
   (phase1Action, phase2, phase3)
