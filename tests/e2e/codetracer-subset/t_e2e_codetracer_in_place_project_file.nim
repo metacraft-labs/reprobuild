@@ -33,22 +33,20 @@ int main(int argc, char **argv) {
       read_for_monitor(argv[i]);
     }
   }
-#if defined(__APPLE__)
-  unsetenv("DYLD_INSERT_LIBRARIES");
-  /* /usr/bin/gcc honours DEVELOPER_DIR and dispatches via xcrun, whose
-     SDK bin lacks gcc and falls back to PATH — re-finding this proxy
-     and looping until kern.maxprocperuid is exhausted. Strip the SDK
-     pointers so the underlying gcc uses its built-in SDK lookup. */
-  unsetenv("DEVELOPER_DIR");
-  unsetenv("SDKROOT");
-#elif defined(__linux__)
-  unsetenv("LD_PRELOAD");
-  unsetenv("REPRO_MONITOR_SHIM_LIB");
-#endif
   char **next_argv = calloc((size_t)argc + 1, sizeof(char *));
   if (next_argv == NULL) return 126;
   next_argv[0] = (char *)default_real_gcc;
   for (int i = 1; i < argc; i++) next_argv[i] = argv[i];
+
+#if defined(__APPLE__)
+  /* /usr/bin/gcc honours DEVELOPER_DIR and dispatches via xcrun, whose
+     SDK bin lacks gcc and falls back to PATH — re-finding this proxy
+     and looping until kern.maxprocperuid is exhausted. Strip the SDK
+     pointers and proxy directory while retaining monitor injection. */
+  unsetenv("DEVELOPER_DIR");
+  unsetenv("SDKROOT");
+  setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1);
+#endif
   execv(default_real_gcc, next_argv);
   perror("execv real gcc");
   return 127;
@@ -167,7 +165,6 @@ const CodeTracerCommonDevToolExecutables: seq[string] = @[
   "sh",
   "shellcheck",
   "sqlite3",
-  "stylus",
   "tmux",
   "tree-sitter",
   "vim",
@@ -909,15 +906,27 @@ proc assertActionCacheEffective(report: JsonNode; id: string) =
       action{"status"}.getStr() & " launched=" &
       $action{"launched"}.getBool() & " cacheDecision=" &
       action{"cacheDecision"}.getStr())
+    if action{"status"}.getStr() notin ["asCacheHit", "asUpToDate"]:
+      checkpoint("cache rejection reason=" & action{"reason"}.getStr() &
+        " diagnostics=" & $action{"evidence"}{"diagnostics"})
   check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
   check action{"launched"}.getBool() == false
 
-proc assertActionNonCacheableRerun(report: JsonNode; id: string) =
+proc assertActionMonitorLossRerun(report: JsonNode; id: string) =
   let action = reportAction(report, id)
   check action.kind != JNull
+  if action.kind != JNull:
+    checkpoint("rerun action " & id & " status=" &
+      action{"status"}.getStr() & " launched=" &
+      $action{"launched"}.getBool() & " cacheDecision=" &
+      action{"cacheDecision"}.getStr() & " reason=" &
+      action{"reason"}.getStr() & " diagnostics=" &
+      $action{"evidence"}{"diagnostics"})
   check action{"status"}.getStr() == "asSucceeded"
   check action{"launched"}.getBool() == true
-  check action{"cacheDecision"}.getStr() == "cdNotCacheable"
+  check action{"cacheDecision"}.getStr() == "cdMiss"
+  check ($action{"evidence"}{"diagnostics"}).contains(
+    "monitor depfile is incomplete")
 
 proc assertOutputAction(report: JsonNode; output, status: string;
                         launched: bool) =
@@ -1508,7 +1517,7 @@ when defined(macosx) or defined(linux):
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertActionNonCacheableRerun(secondReport, "db-backend-record")
+      assertActionMonitorLossRerun(secondReport, "db-backend-record")
 
       let nativeInput = projectRoot / "src" / "ct" / "db_backend_record.nim"
       writeFile(nativeInput, readFile(nativeInput) &
@@ -1606,9 +1615,9 @@ when defined(macosx) or defined(linux):
 
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
-      check second.contains("action: ct status=asSucceeded launched=true")
+      check second.contains("action: ct status=asUpToDate launched=false")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertActionNonCacheableRerun(secondReport, "ct")
+      assertActionCacheEffective(secondReport, "ct")
 
       let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
       writeFile(nativeInput, readFile(nativeInput) &
@@ -1763,8 +1772,8 @@ when defined(macosx) or defined(linux):
       assertPublicResourceActionsCacheEffective(secondReport)
       assertActionCacheEffective(secondReport, "config-default-layout-json")
       assertActionCacheEffective(secondReport, "config-default-config-yaml")
-      assertActionNonCacheableRerun(secondReport, "db-backend-record")
-      assertActionNonCacheableRerun(secondReport, "ct")
+      assertActionCacheEffective(secondReport, "db-backend-record")
+      assertActionCacheEffective(secondReport, "ct")
 
       let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
       let nativeSource = readFile(nativeInput)
@@ -1801,7 +1810,7 @@ when defined(macosx) or defined(linux):
       assertPublicResourceActionsCacheEffective(changedReport)
       assertActionCacheEffective(changedReport, "config-default-layout-json")
       assertActionCacheEffective(changedReport, "config-default-config-yaml")
-      assertActionNonCacheableRerun(changedReport, "db-backend-record")
+      assertActionCacheEffective(changedReport, "db-backend-record")
       assertAction(changedReport, "ct", "asSucceeded", true)
       check reportAction(changedReport, "nim-js-ipc-registry-test").kind ==
         JNull
@@ -2288,7 +2297,7 @@ when defined(macosx) or defined(linux):
       check first.contains("provisioning-disabled mode active")
       check first.contains("providerCompile:")
       check first.contains("providerGraphSnapshot:")
-      check first.contains("scheduler: actions=25")
+      check first.contains("scheduler: actions=28")
       check first.contains("action: generate-config-header status=asSucceeded launched=true")
       check first.contains("action: build-c-dir status=asSucceeded launched=true")
       check first.contains("action: nim-js-ipc-registry-test status=asSucceeded launched=true")
@@ -2335,9 +2344,12 @@ when defined(macosx) or defined(linux):
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-      check identity.profiles.len == CodeTracerDevToolExecutables.len
+      check identity.profiles.len == CodeTracerDevToolExecutables.len +
+        CodeTracerSourcePackages.len
       for executableName in CodeTracerDevToolExecutables:
         check identity.profiles.anyIt(it.executableName == executableName)
+      for packageName in CodeTracerSourcePackages:
+        check identity.profiles.anyIt(it.packageSelector == packageName)
       for profile in identity.profiles:
         check profile.installMethod == "path"
         check profile.cachePortability == cpLocalOnly
