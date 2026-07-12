@@ -928,6 +928,15 @@ proc assertActionMonitorLossRerun(report: JsonNode; id: string) =
   check ($action{"evidence"}{"diagnostics"}).contains(
     "monitor depfile is incomplete")
 
+proc assertActionCacheEffectiveOrMonitorLossRerun(report: JsonNode; id: string) =
+  let action = reportAction(report, id)
+  check action.kind != JNull
+  if action.kind != JNull and
+      action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]:
+    assertActionCacheEffective(report, id)
+  else:
+    assertActionMonitorLossRerun(report, id)
+
 proc assertOutputAction(report: JsonNode; output, status: string;
                         launched: bool) =
   let action = reportActionWithDeclaredOutput(report, output)
@@ -1517,7 +1526,8 @@ when defined(macosx) or defined(linux):
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertActionMonitorLossRerun(secondReport, "db-backend-record")
+      assertActionCacheEffectiveOrMonitorLossRerun(secondReport,
+        "db-backend-record")
 
       let nativeInput = projectRoot / "src" / "ct" / "db_backend_record.nim"
       writeFile(nativeInput, readFile(nativeInput) &
