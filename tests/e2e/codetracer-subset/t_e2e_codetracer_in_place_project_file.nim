@@ -685,6 +685,8 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
     "set -eu\n" &
     "case \"${1:-}\" in\n" &
     "  --version|-v) echo 'v20.0.0'; exit 0 ;;\n" &
+    "  node_modules/stylus/bin/stylus|*/node_modules/stylus/bin/stylus)\n" &
+    "    shift; exec " & q(stylusPath) & " \"$@\" ;;\n" &
     "  tests/ipc_registry_test.js|*/tests/ipc_registry_test.js)\n" &
     "    echo '[OK] handlers still invoked after reconnect'; exit 0 ;;\n" &
     "  *) exit 0 ;;\n" &
