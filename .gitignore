@@ -142,3 +142,15 @@ tests/integration/t_*
 !tests/integration/t_*.nims
 !tests/integration/t_*.cfg
 tools/catalog-harvester/repro_catalog_harvester
+
+# Source-recipe build outputs produced by `repro` when building the
+# recipes/packages/source/* packages. The tracked recipe inputs (repro.nim,
+# test_*_source.nim, vendor/*.tar.gz) stay; the extracted upstream source
+# trees, per-package build state, and compiled test binaries do not.
+recipes/packages/source/*/src/
+recipes/packages/source/*/.repro/
+recipes/packages/source/*/test_*_source
+!recipes/packages/source/*/test_*_source.nim
+
+# Compiled test binary dropped beside its .nim under repro_build_engine tests.
+libs/repro_build_engine/tests/test_m9r75_source_write_reject
