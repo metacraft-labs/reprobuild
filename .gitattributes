@@ -1,0 +1,3 @@
+recipes/cache/*.sh text eol=lf
+recipes/cache/systemd-units/* text eol=lf
+tools/bootstrap-linux-smoke.sh text eol=lf
