@@ -24,11 +24,11 @@ jobs:
       matrix:
         include:
           # EXEMPTION (CIP-5): persistent benchmark runner — real perf hardware
-          # is required for meaningful numbers; not migrated to ephemeral incus.
+          # is required for meaningful numbers; not migrated to ephemeral eph-linux-x64.
           - platform: linux
             runner: '["self-hosted", "Linux", "X64", "benchmark"]'
           - platform: macos
-            runner: '["macos-tart"]'  # CIP-5: nix macOS benchmark leg → macos-tart
+            runner: '["eph-macos-arm64"]'  # CIP-5: nix macOS benchmark leg → eph-macos-arm64
     runs-on: ${{ fromJSON(matrix.runner) }}
     steps:
       - name: Checkout Reprobuild

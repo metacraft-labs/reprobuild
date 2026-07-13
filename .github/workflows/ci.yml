@@ -27,7 +27,7 @@ concurrency:
 jobs:
   lint:
     name: Lint
-    runs-on: incus  # CIP-5: nix job (setup-dev-env) → incus
+    runs-on: eph-linux-x64  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
       - uses: actions/checkout@v4
       # Mint a GitHub App installation token via the CI Token Provider
@@ -71,7 +71,7 @@ jobs:
     # within its CI budget without the tail stalls observed at sixteen.
     # EXEMPTION (CIP-5): bare-metal runner — the parallel `nim c` phase OOMs on
     # small ephemeral runners; kept on the persistent big-iron nixos bare-metal
-    # pool rather than the incus class.
+    # pool rather than the eph-linux-x64 class.
     runs-on: [self-hosted, Linux, X64, bare-metal, nixos]
     env:
       REPROBUILD_MAX_PARALLELISM: "12"
@@ -286,7 +286,7 @@ jobs:
 
   nix-build:
     name: Nix Build
-    runs-on: incus  # CIP-5: nix job (setup-dev-env) → incus
+    runs-on: eph-linux-x64  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
       - uses: actions/checkout@v4
       - name: Mint installation token for cross-repo sibling access
