@@ -6,9 +6,19 @@ description: >
 
   This is the "dependency provisioning" half of the reprobuild dev-env flavor;
   the companion `setup-reprobuild` action clones the reprobuild source and builds
-  the CLI. Reprobuild's workspace/provisioning model is being aligned to the
-  repo-workspaces manifest+lock+sibling contract (repo-workspaces is the pilot);
-  until that lands, these dependency pins are inlined here.
+  the CLI.
+
+  Scope (post-L2, CI-PROVISION-FROM-LOCK): the pins that remain here are
+  REPROBUILD's OWN build-input siblings — the flake inputs its `repro` CLI build
+  depends on (codetracer-native-recorder, runquota) and the Windows env.ps1
+  source-only deps. Reprobuild itself is not yet integrated into the
+  solved-graph lock contract, so these can't be lock-resolved and stay pinned
+  to their mainline branch. A CONSUMER project's from-source dependency siblings
+  (e.g. codetracer's isonim + nim-* libs) are NO LONGER hard-coded here: the
+  workflow provisions those from the project's committed `repro.lock` via
+  `repro develop --all` (run in the project root), which clones/adopts each
+  locked dep in develop mode. When reprobuild joins the lock contract, these
+  remaining pins move to reprobuild's own lock too.
 
 inputs:
   gh-token:

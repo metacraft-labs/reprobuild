@@ -16,7 +16,14 @@ codetracer-trace-format-nim=dev
 # codetracer's `ct` binary (built via codetracer/reprobuild.nim's `ct` target so
 # ct_incremental_adapter can exec `ct test --incremental`) imports the IsoNim UI
 # stack and the shared Nim agent libs, so its Nim compile needs these adjacent on
-# the --path. Pinned to mainline; reprobuild only ever execs the resulting `ct`.
+# the --path. The `ct` build path (L2 CI-PROVISION-FROM-LOCK) no longer relies on
+# these branch pins for its dep set: it runs `repro develop --all` in codetracer,
+# which provisions isonim + the nim-* libs at the revisions pinned in codetracer's
+# committed `repro.lock` (adopting these clones in place when they match, else
+# failing loud). These `=dev` entries stay because reprobuild's OWN e2e tests
+# (codetracer-subset, watch) still consume the siblings adjacent on the --path;
+# keep them consistent with codetracer's lock by refreshing that lock when the
+# sibling `dev` tips move. reprobuild only ever execs the resulting `ct`.
 isonim=dev
 isonim-gpui=dev
 isonim-tui=dev

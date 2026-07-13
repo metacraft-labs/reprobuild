@@ -245,13 +245,19 @@ jobs:
           #    runs `repro build "$CODETRACER_REPROBUILD_TARGET"`; codetracer's
           #    toolchain comes from its dev shell (direnv).
           direnv allow "$ct_root"
-          # CodeTracer declares these adjacent checkouts as source library
-          # producers. Register the CI clones explicitly so Reprobuild can
-          # splice their exported Nim source roots into the consumer graph.
-          for dep in isonim nim-everywhere nim-agent-harbor nim-agents nim-acp; do
-            dep_root="$(cd "$ct_root/../$dep" && pwd)"
-            ( cd "$ct_root" && "$repro_bin" develop "$dep" --into="$dep_root" )
-          done
+          # L2 (CI-PROVISION-FROM-LOCK): provision codetracer's dependency
+          # siblings FROM THE LOCK, not from a hard-coded name list. codetracer
+          # ships a committed `repro.lock` enumerating its from-source deps
+          # (isonim + the nim-* libs it `uses:`) at pinned revisions; a single
+          # `repro develop --all` resolves that set over the solved graph and
+          # records the develop-mode override map so reprobuild splices each
+          # sibling's Nim source into the ct consumer graph. The sibling
+          # checkouts already sit adjacent to $ct_root (cloned by setup-dev-env
+          # from reprobuild's .github/sibling-repos), so `develop --all` ADOPTS
+          # them in place when they match the locked revision; --into=<siblings>
+          # names that adjacency explicitly. Fails loud if the lock is missing.
+          siblings_root="$(cd "$ct_root/.." && pwd)"
+          ( cd "$ct_root" && "$repro_bin" develop --all --into="$siblings_root" )
           ( cd "$ct_root" && \
             CODETRACER_REPROBUILD_LINUX=1 \
             CODETRACER_REPROBUILD_TARGET=ct \
