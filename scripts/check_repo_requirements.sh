@@ -81,9 +81,9 @@ require_contains .github/workflows/ci.yml "if: always()"
 require_contains .github/workflows/ci.yml "actions/upload-artifact@v4"
 require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "Linux", "X64", "benchmark"]'\'''
 # CIP-5 moved the macOS benchmark leg off the persistent self-hosted pool onto
-# the ephemeral `macos-tart` class; the Linux benchmark leg stays on the
+# the ephemeral `eph-macos-arm64` class; the Linux benchmark leg stays on the
 # persistent self-hosted `benchmark` runner (big-iron bench box).
-require_contains .github/workflows/benchmark.yml 'runner: '\''["macos-tart"]'\'''
+require_contains .github/workflows/benchmark.yml 'runner: '\''["eph-macos-arm64"]'\'''
 require_contains .github/workflows/benchmark.yml "metacraft-labs/runquota"
 require_contains .github/workflows/benchmark.yml "metacraft-labs/reprobuild-cmake"
 require_contains .github/workflows/benchmark.yml "ref: reprobuild"
