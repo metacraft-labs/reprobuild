@@ -37,6 +37,15 @@
 ##                               substituted from (default-untrusted).
 ##   * ``priority``            — integer; LOWER wins (Nix convention).
 ##                               Defaults to ``DefaultCachePriority``.
+##   * ``scope``               — ``release`` (default) or
+##                               ``intermediate``. L3 PUBLISH-SCOPE: a
+##                               RELEASE cache carries only a package's
+##                               public-interface binaries (declared
+##                               ``executable``/``library`` members); an
+##                               INTERMEDIATE cache carries every built
+##                               store output. Governs what the PRODUCER
+##                               uploads; substitution reads from either
+##                               regardless.
 ##
 ## ## Paths + precedence
 ##
@@ -80,6 +89,10 @@ const
   ConfigPathEnvVar* = "REPRO_CACHES_CONFIG"
   EnvUrlVar* = "REPRO_BINARY_CACHE_URL"
   EnvCertVar* = "REPRO_BINARY_CACHE_CERT_PATH"
+  EnvScopeVar* = "REPRO_BINARY_CACHE_SCOPE"
+    ## L3 PUBLISH-SCOPE — scope override for the single-cache publish
+    ## path (the ``REPRO_BINARY_CACHE_URL`` env cache the producer
+    ## publishes to). ``release`` (default) or ``intermediate``.
 
 type
   CacheConfigError* = object of CatchableError
@@ -87,12 +100,42 @@ type
     ## priority, …). A MISSING file is not an error — it yields no
     ## caches.
 
+  CacheScope* = enum
+    ## L3 PUBLISH-SCOPE — what a cache is intended to carry.
+    ##
+    ##   * ``csRelease`` — a RELEASE cache: only a package's PUBLIC
+    ##     INTERFACE binaries (the ``executable``/``library`` members
+    ##     declared in its ``repro.nim``, tagged
+    ##     ``publishToBinaryCache``) are uploaded. Intermediate build
+    ##     files are NOT pushed. This is the SAFE DEFAULT — a cache
+    ##     shared across a fleet or made public should not leak private
+    ##     intermediate artefacts, and release binaries are the reusable
+    ##     unit another project consumes.
+    ##   * ``csIntermediate`` — an INTERMEDIATE cache: EVERY publishable
+    ##     built store output is uploaded (public-interface artifacts
+    ##     AND private/intermediate ones). Use for a private, high-churn
+    ##     build cache where sharing intermediate objects across a
+    ##     workspace/CI accelerates incremental rebuilds.
+    ##
+    ## Private/intermediate built files still participate in develop-mode
+    ## invalidation regardless of scope — the scope only governs what is
+    ## UPLOADED to a given remote cache, not the local dep model.
+    csRelease
+    csIntermediate
+
   CacheEntry* = object
     ## One parsed ``[cache "name"]`` section.
     name*: string
     url*: string
     trustedKeys*: seq[peerKeys.PublicKeyBytes]
     priority*: int32
+    scope*: CacheScope
+
+const
+  DefaultCacheScope* = csRelease
+    ## L3 PUBLISH-SCOPE — the safe default for a cache that omits
+    ## ``scope``: RELEASE (only public-interface binaries upload).
+    ## Declared after ``CacheScope`` so the enum value is in scope.
 
 # ---------------------------------------------------------------------------
 # Path resolution.
@@ -134,6 +177,23 @@ proc parsePubKeyHex(hex: string): peerKeys.PublicKeyBytes =
         $(2 * i) & ": '" & h & "'")
     result[i] = byte((parseHexInt($hi) shl 4) or parseHexInt($lo))
 
+proc parseCacheScope*(raw: string): CacheScope =
+  ## Parse a ``scope`` value (case-insensitive). ``release`` / ``rel``
+  ## → ``csRelease``; ``intermediate`` / ``inter`` / ``all`` /
+  ## ``everything`` → ``csIntermediate``. Raises ``CacheConfigError``
+  ## on an unrecognised token so a typo is loud, not silently
+  ## release-defaulted.
+  case raw.strip().toLowerAscii()
+  of "release", "rel", "releases":
+    csRelease
+  of "intermediate", "inter", "all", "everything":
+    csIntermediate
+  of "":
+    DefaultCacheScope
+  else:
+    raise newException(CacheConfigError,
+      "scope must be 'release' or 'intermediate'; got '" & raw & "'")
+
 proc splitKeyList(raw: string): seq[string] =
   ## Splits a trusted-public-keys value on commas and/or whitespace,
   ## dropping empties. Lets a config write either
@@ -170,7 +230,7 @@ proc parseCachesText*(text, sourceLabel: string): seq[CacheEntry] =
   var p: CfgParser
   open(p, stream, sourceLabel)
   defer: close(p)
-  var cur = CacheEntry(priority: DefaultCachePriority)
+  var cur = CacheEntry(priority: DefaultCachePriority, scope: DefaultCacheScope)
   var inSection = false
   while true:
     let e = next(p)
@@ -183,7 +243,8 @@ proc parseCachesText*(text, sourceLabel: string): seq[CacheEntry] =
       if inSection:
         result.add(cur)
       cur = CacheEntry(name: sectionCacheName(e.section),
-                       priority: DefaultCachePriority)
+                       priority: DefaultCachePriority,
+                       scope: DefaultCacheScope)
       inSection = true
     of cfgKeyValuePair, cfgOption:
       if not inSection:
@@ -203,6 +264,8 @@ proc parseCachesText*(text, sourceLabel: string): seq[CacheEntry] =
           raise newException(CacheConfigError,
             sourceLabel & ": cache '" & cur.name &
             "' priority is not an integer: '" & e.value & "'")
+      of "scope":
+        cur.scope = parseCacheScope(e.value)
       else:
         # Unknown keys are ignored (forward-compat for future fields).
         discard
@@ -279,7 +342,8 @@ proc foldEnvUrl(entries: seq[CacheEntry]): seq[CacheEntry] =
     name: "env",
     url: envUrl,
     trustedKeys: envCertPubKey(),
-    priority: EnvCachePriority))
+    priority: EnvCachePriority,
+    scope: parseCacheScope(getEnv(EnvScopeVar, ""))))
 
 # ---------------------------------------------------------------------------
 # Public entry points.
@@ -299,6 +363,31 @@ proc loadCacheEntries*(): seq[CacheEntry] =
     let usr = parseCachesFile(userConfigPath())
     merged = mergeByName(sys, usr)
   result = foldEnvUrl(merged)
+
+proc publishTargetScope*(): CacheScope =
+  ## L3 PUBLISH-SCOPE — resolve the effective scope of the cache the
+  ## PRODUCER publishes to. The publish path targets a single endpoint
+  ## (``REPRO_BINARY_CACHE_URL``); its scope is resolved with this
+  ## precedence:
+  ##
+  ##   1. ``REPRO_BINARY_CACHE_SCOPE`` env override (``release`` /
+  ##      ``intermediate``) — highest, so a one-off publish run can flip
+  ##      scope without editing config.
+  ##   2. The ``scope`` of a configured ``caches.conf`` cache whose
+  ##      ``url`` matches ``REPRO_BINARY_CACHE_URL``.
+  ##   3. ``DefaultCacheScope`` (``csRelease``) — the safe default.
+  ##
+  ## Kept here (next to the config parser) so both the CLI publish
+  ## wiring and any diagnostic surface resolve scope identically.
+  let envScope = getEnv(EnvScopeVar, "").strip()
+  if envScope.len > 0:
+    return parseCacheScope(envScope)
+  let publishUrl = getEnv(EnvUrlVar, "").strip()
+  if publishUrl.len > 0:
+    for c in loadCacheEntries():
+      if c.url == publishUrl:
+        return c.scope
+  DefaultCacheScope
 
 proc toEndpoint*(c: CacheEntry): SubstituteEndpoint =
   ## Converts a parsed cache entry into a substitute endpoint with

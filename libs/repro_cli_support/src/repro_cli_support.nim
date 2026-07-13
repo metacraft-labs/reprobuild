@@ -129,6 +129,7 @@ import repro_lock_store
 # ``libs/repro_binary_cache_client/src/repro_binary_cache_client/
 # engine_publisher.nim`` for the contract.
 import repro_binary_cache_client/engine_publisher
+import repro_binary_cache_client/caches_config as bcCachesConfig
 
 export home.runHomeCommand, home.setPackageCatalogLookup,
        home.PackageCatalogLookup, home.CatalogEnvVar,
@@ -6202,6 +6203,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # populated ``cacheEntryIdentity`` — the from-source conventions
     # tag install + stage-copy actions accordingly.
     engineConfig.binaryCachePublisher = mkBinaryCachePublisher()
+    # L3 PUBLISH-SCOPE: resolve the target cache's scope. An INTERMEDIATE
+    # cache publishes every built store output; a RELEASE cache (default)
+    # only the public-interface members tagged ``publishToBinaryCache``.
+    engineConfig.binaryCacheIntermediateScope =
+      bcCachesConfig.publishTargetScope() == bcCachesConfig.csIntermediate
     # M9.N Batch B: attach the tool-identity resolver closure once
     # the outer scope has resolved the build identity. ``nil`` is
     # the legitimate fast-path-no-identity value — the engine then
@@ -7528,6 +7534,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # ``publishToBinaryCache = true`` + populated
     # ``cacheEntryIdentity``.
     engineConfig.binaryCachePublisher = mkBinaryCachePublisher()
+    # L3 PUBLISH-SCOPE: intermediate cache → publish everything;
+    # release cache (default) → only tagged public-interface members.
+    engineConfig.binaryCacheIntermediateScope =
+      bcCachesConfig.publishTargetScope() == bcCachesConfig.csIntermediate
     # M9.N Batch B: attach the tool-identity resolver closure here
     # too. ``identity`` is in scope at this site (the main inline
     # build path resolves it before reaching here); the closure

@@ -93,11 +93,12 @@ proc m9L4PlatformTriple*(): bcs_types.PlatformTriple =
   ## / aarch64) into a shared helper. The convention DOES populate every
   ## field so the canonical encoder round-trips identically across hosts
   ## that compute the same identity tuple.
-  bcs_types.PlatformTriple(
-    cpu: "x86_64",
-    os: "linux",
-    abi: "gnu",
-    libcVariant: "glibc")
+  ##
+  ## L3 PUBLISH-SCOPE: delegates to ``cache_key.publicInterfaceTriple``
+  ## so the from-source conventions and the hand-authored ``build:``-block
+  ## publish path (the ``nim.c`` alias) share ONE triple definition — a
+  ## public-interface artifact built either way lands under the same key.
+  publicInterfaceTriple()
 
 proc m9L4ToolchainIdentity*(name: string): bcs_types.ToolchainIdentity =
   ## Toolchain identity for the from-source pipeline. The ``name`` is
@@ -107,11 +108,10 @@ proc m9L4ToolchainIdentity*(name: string): bcs_types.ToolchainIdentity =
   ## canonical encoder so a follow-up that fills them in will produce
   ## a DIFFERENT cache key (intended — the spec mandates toolchain
   ## differences shift the key).
-  bcs_types.ToolchainIdentity(
-    name: name,
-    version: "",
-    hostLdSoAbi: "",
-    extraFingerprint: "")
+  ##
+  ## L3 PUBLISH-SCOPE: delegates to ``cache_key.publicInterfaceToolchain``
+  ## (shared with the build-block publish path).
+  publicInterfaceToolchain(name)
 
 proc deriveCacheKeyHex*(projectRoot, packageName, toolchainName: string): string =
   ## Compose the M9.L.4 v1 ``CacheEntryIdentity`` and derive its

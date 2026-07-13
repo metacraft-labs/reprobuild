@@ -33,6 +33,15 @@ import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
+# L3 PUBLISH-SCOPE (public-interface publishing for hand-authored
+# ``build:`` blocks). ``blake3`` composes the recipe-revision digest;
+# ``repro_core`` resolves the recipe file bytes. ``repro_project_dsl``
+# re-exports the ``CacheEntryIdentity`` shape + ``publicInterfaceIdentity``
+# (cache_key) + the ``registeredVersions`` / ``activeProviderProjectRoot`` /
+# ``currentBuild*`` context surface used below.
+import blake3
+import repro_core
+
 var reproNimPathsEnabled {.threadvar.}: bool
 var reproConfigNimsFile {.threadvar.}: string
 
@@ -270,6 +279,120 @@ proc compileDependencyPolicy(cacheDir: string;
     return defaultDependencyPolicy()
   makeDepfilePolicy(cacheDir / "nim-compile.d")
 
+# ---------------------------------------------------------------------------
+# L3 PUBLISH-SCOPE — public-interface publishing for hand-authored
+# ``build:`` blocks.
+#
+# The from-source + Nim/Crystal AUTO conventions tag their final
+# materialising action with ``publishToBinaryCache = true`` and a
+# ``cacheEntryIdentity`` so the engine's binary-cache publisher hook
+# fires. Hand-authored recipes drive their build through the ``nim.c``
+# alias (below) inside an artifact-scoped ``build:`` block:
+#
+#   package ct:
+#     executable ct:
+#       build:
+#         nim.c(source = "src/ct.nim", binary = "ct")
+#
+# The ``build:`` macro pushes an active-context frame carrying the
+# owning ``(package, artifact)`` while the body runs. When the ``nim.c``
+# output IS the artifact — i.e. the artifact is a declared
+# ``executable``/``library`` (the package's PUBLIC INTERFACE) — the
+# alias AUTO-TAGS the link action: the same ``publishToBinaryCache`` +
+# ``cacheEntryIdentity`` the conventions stamp, with the identity
+# composed off the shared ``publicInterfaceIdentity`` helper so the key
+# matches a Nim-convention build of the same member byte-for-byte.
+#
+# A recipe can also opt in/out explicitly:
+#   * ``publish = false`` — suppress the auto-tag even inside a declared
+#     artifact (e.g. a scratch helper edge that happens to run there).
+#   * ``publishAs = "<member>"`` — publish under a specific declared
+#     member's identity (used for package-level ``build:`` blocks, or
+#     when the binary basename differs from the member name).
+# The default is AUTOMATIC: no recipe change is needed for the common
+# case where the artifact name IS the public-interface member.
+
+proc nimRecipeRevisionHex(projectRoot: string): string =
+  ## BLAKE3 of the recipe file bytes, truncated to 32 hex chars — the
+  ## exact ``providerRevision`` shape ``from_source_identity.
+  ## providerRevisionHex`` produces, so a build-block publish and a
+  ## Nim-convention publish of the same member derive an identical key.
+  let match = resolveProjectFile(projectRoot)
+  if match.path.len == 0:
+    return ""
+  let bodyStr =
+    try: readFile(extendedPath(match.path))
+    except CatchableError: ""
+  if bodyStr.len == 0:
+    return ""
+  let dig = blake3.digest(bodyStr)
+  let full = blake3.toHex(dig)
+  if full.len >= 32: full[0 ..< 32] else: full
+
+proc nimMemberIsPublicInterface(packageName, memberName: string): bool =
+  ## True when ``memberName`` is a declared ``executable``/``library`` of
+  ## ``packageName`` — i.e. part of the package's PUBLIC INTERFACE. The
+  ## artifact registry is populated by the ``package`` macro's M3
+  ## ``executable:``/``library:`` lowering; ``files:`` artifacts are NOT
+  ## public interface and are excluded.
+  if packageName.len == 0 or memberName.len == 0:
+    return false
+  for artifact in registeredArtifacts(packageName):
+    if artifact.artifactName == memberName and
+        artifact.kind in {dakExecutable, dakLibrary}:
+      return true
+  false
+
+proc nimPublicInterfaceIdentity(packageName, memberName: string):
+    CacheEntryIdentity =
+  ## Compose the publish identity for one declared public-interface
+  ## member. ``packageName`` here is the MEMBER name (the granularity the
+  ## Nim convention uses — each member materialises a distinct reusable
+  ## artefact into the store), the toolchain tag is ``"nim"``, and the
+  ## version is the recipe's last ``versions:`` entry (empty when the
+  ## recipe carries no ``versions:`` block).
+  let versionStr = block:
+    var v = ""
+    let vs = registeredVersions(packageName)
+    if vs.len > 0:
+      v = vs[^1].version
+    v
+  publicInterfaceIdentity(
+    packageName = memberName,
+    packageVersion = versionStr,
+    toolchainName = "nim",
+    providerRevision = nimRecipeRevisionHex(activeProviderProjectRoot()))
+
+proc maybeTagPublicInterface(action: BuildActionDef;
+                             publish: Option[bool]; publishAs: string) =
+  ## Decide + apply the L3 publish tag for a ``nim.c`` edge, in place on
+  ## the just-registered action. ``publish``/``publishAs`` are the
+  ## explicit overrides; when unset the alias auto-associates the active
+  ## artifact frame with a declared public-interface member.
+  if publish.isSome and not publish.get():
+    return   # explicit opt-out.
+  let explicit = publish.isSome and publish.get()
+  let frame = currentBuildContextFrame()
+  let pkg = frame.packageName
+  # Which member does this edge materialise?  Explicit ``publishAs`` wins;
+  # otherwise the active artifact frame (the ``executable``/``library``
+  # the ``build:`` block is nested inside).
+  let member = if publishAs.len > 0: publishAs else: frame.artifactName
+  if pkg.len == 0 or member.len == 0:
+    # No active package/artifact context (e.g. a bare ``nim.c`` outside
+    # any artifact ``build:`` block, with no ``publishAs``). Nothing to
+    # attribute the publish to — stay inert.
+    return
+  # AUTO path: only tag when the member is genuinely part of the
+  # package's declared public interface. EXPLICIT ``publish = true`` (or
+  # a caller-named ``publishAs``) trusts the recipe author and publishes
+  # under that member's identity regardless.
+  if not explicit and publishAs.len == 0 and
+      not nimMemberIsPublicInterface(pkg, member):
+    return
+  setRegisteredActionPublish(action.id, true,
+    some(nimPublicInterfaceIdentity(pkg, member)))
+
 proc c*(pkg: NimPackage; source: string; binary: string;
         defines: seq[string] = @[];
         paths: seq[string] = @[];
@@ -290,6 +413,8 @@ proc c*(pkg: NimPackage; source: string; binary: string;
         extraEnv: openArray[(string, string)] = [];
         depfile = "";
         cacheable = true;
+        publish = none(bool);
+        publishAs = "";
         dependencyPolicy = defaultDependencyPolicy();
         actionCachePolicy = defaultActionCachePolicy();
         commandStatsId = ""): BuildActionDef
@@ -299,6 +424,13 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   ## ``repro.nim`` can express ``nim c --app:lib --threads:on`` and
   ## backend ``--passC:`` / ``--passL:`` flags through the
   ## ``binary``-shorthand surface the rest of the build block uses.
+  ##
+  ## L3 PUBLISH-SCOPE: ``publish`` / ``publishAs`` control binary-cache
+  ## publication of the resulting artifact (see the block comment above).
+  ## By default (``publish`` unset) the alias auto-tags the edge when it
+  ## runs inside a declared ``executable``/``library`` ``build:`` block,
+  ## so a hand-authored recipe's public-interface binaries publish with
+  ## no extra ceremony.
   discard imports
   let cacheDir = if nimcache.len > 0: nimcache else: defaultNimcacheDir(binary)
   let effectivePassL = passL & opensslPassLForSsl(defines)
@@ -306,8 +438,8 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   if reproNimPathsEnabled and reproConfigNimsFile.len > 0:
     inputs.add(reproConfigNimsFile)
 
-  c(pkg = pkg, source = source, output = binary, defines = defines, cc = cc,
-    gccExe = gccExe,
+  result = c(pkg = pkg, source = source, output = binary, defines = defines,
+    cc = cc, gccExe = gccExe,
     paths = paths, passC = passC, passL = effectivePassL, nimcache = cacheDir,
     appLib = appLib, threadsOn = threadsOn, parallelBuild = parallelBuild,
     actionId = actionId,
@@ -318,6 +450,7 @@ proc c*(pkg: NimPackage; source: string; binary: string;
       cacheDir, cacheable, dependencyPolicy),
     actionCachePolicy = actionCachePolicy,
     commandStatsId = commandStatsId)
+  maybeTagPublicInterface(result, publish, publishAs)
 
 # ---------------------------------------------------------------------------
 # M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).

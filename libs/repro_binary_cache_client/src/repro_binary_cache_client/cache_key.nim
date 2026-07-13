@@ -102,6 +102,43 @@ proc newCacheEntryIdentity*(packageName, packageVersion: string;
     depClosure: @[],
     providerRevision: providerRevision)
 
+proc publicInterfaceTriple*(): PlatformTriple =
+  ## L3 PUBLISH-SCOPE — the single source of truth for the M9.L.4
+  ## vertical-slice platform triple (Linux x86_64 GNU glibc). Both the
+  ## from-source conventions (via ``from_source_identity``) and the
+  ## hand-authored ``build:``-block publish path (via the DSL stdlib's
+  ## ``nim.c`` alias) compose their ``CacheEntryIdentity`` off this
+  ## helper so a public-interface artifact built either way lands under
+  ## a byte-identical cache-entry key. Host detection (Windows / macOS /
+  ## aarch64) is deferred; every field is populated so the canonical
+  ## encoder round-trips identically across hosts that compute the same
+  ## identity tuple.
+  PlatformTriple(cpu: "x86_64", os: "linux", abi: "gnu", libcVariant: "glibc")
+
+proc publicInterfaceToolchain*(name: string): ToolchainIdentity =
+  ## L3 PUBLISH-SCOPE — toolchain-identity shape shared between the
+  ## from-source and build-block publish paths. ``name`` is the
+  ## convention/toolchain tag (``"nim"`` for the ``nim.c`` alias);
+  ## version + host-ldso detection are deferred (empty strings
+  ## round-trip through the canonical encoder — a follow-up that fills
+  ## them in intentionally shifts the key).
+  ToolchainIdentity(name: name, version: "", hostLdSoAbi: "", extraFingerprint: "")
+
+proc publicInterfaceIdentity*(packageName, packageVersion, toolchainName,
+                              providerRevision: string): CacheEntryIdentity =
+  ## L3 PUBLISH-SCOPE — compose the public-interface publish identity
+  ## from already-resolved inputs. Kept layer-neutral (no ``os`` /
+  ## recipe-registry access) so the DSL stdlib can call it with the
+  ## member name as ``packageName`` and its own resolved recipe
+  ## revision, producing the SAME tuple shape the Nim convention's
+  ## ``computeCacheEntryIdentity`` builds for an auto-tagged member.
+  newCacheEntryIdentity(
+    packageName = packageName,
+    packageVersion = packageVersion,
+    platform = publicInterfaceTriple(),
+    toolchain = publicInterfaceToolchain(toolchainName),
+    providerRevision = providerRevision)
+
 proc addOption*(idy: var CacheEntryIdentity; name, value: string) =
   if idy.selectedOptions.isNil:
     idy.selectedOptions = newTable[string, string]()

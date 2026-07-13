@@ -37,7 +37,45 @@ proc foreachParts(stmt: NimNode): tuple[matched: bool; iteratorName: string;
   result.body = stmt[2]
   result.matched = true
 
-proc collectBuildStatements(pkgBody: NimNode): NimNode =
+proc artifactBuildBodyName(nameNode: NimNode): string =
+  ## Extract the artifact member name from an ``executable <name>:`` /
+  ## ``library <name>:`` head node. Mirrors ``m3ArtifactNameNode`` (which
+  ## is declared further down) so the flattened build body can carry the
+  ## owning member for the L3 per-artifact ``beginBuildContext`` push.
+  ## Returns ``""`` for unrecognised name shapes.
+  case nameNode.kind
+  of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+    nameNode.strVal
+  of nnkIdent, nnkSym, nnkAccQuoted:
+    identText(nameNode)
+  else:
+    ""
+
+proc wrapArtifactBuildBody(packageName, memberName: string;
+                           stmts: NimNode): NimNode =
+  ## Wrap one artifact's flattened ``build:`` statements in a
+  ## ``beginBuildContext(package, member) / try body finally
+  ## endBuildContext()`` block. This restores the M4 per-artifact
+  ## context frame around the artifact body in PROVIDER MODE — where the
+  ## M4 emitters gate their body splice off and ``buildXxxPackage``
+  ## (fed by this flattened list) is the sole executor. With the frame
+  ## present, ``nim.c``'s ``maybeTagPublicInterface`` can attribute the
+  ## edge to the owning ``(package, member)`` and tag declared
+  ## ``executable``/``library`` members for binary-cache publication.
+  ## The top-level (package-scoped) ``build:`` block is NOT wrapped —
+  ## it carries no owning member, so its edges stay untagged (correct:
+  ## they are not the package's declared public interface).
+  let pkgLit = newLit(packageName)
+  let memberLit = newLit(memberName)
+  result = quote do:
+    block:
+      beginBuildContext(`pkgLit`, `memberLit`)
+      try:
+        `stmts`
+      finally:
+        endBuildContext()
+
+proc collectBuildStatements(pkgBody: NimNode; packageName = ""): NimNode =
   ## Aggregate every ``build:`` block in the package body — both the
   ## top-level ``build:`` and any per-artifact ``build:`` nested inside
   ## an ``executable`` or ``library`` member — into a single flat
@@ -52,6 +90,14 @@ proc collectBuildStatements(pkgBody: NimNode): NimNode =
   ## evaluation that briefly touched the body); the provider mode
   ## emitted no graph fragment and crashed with "provider did not write
   ## a response file".
+  ##
+  ## L3 PUBLISH-SCOPE: when ``packageName`` is supplied, each
+  ## per-artifact ``build:`` body is wrapped in a
+  ## ``beginBuildContext``/``endBuildContext`` pair carrying the owning
+  ## ``(package, member)`` so provider-mode execution restores the M4
+  ## frame and public-interface tagging fires (see
+  ## ``wrapArtifactBuildBody``). Callers that only need the emptiness
+  ## check omit ``packageName`` and get the raw (unwrapped) flattening.
   result = newStmtList()
   for stmt in pkgBody:
     if calleeName(stmt).normalize == "build":
@@ -59,10 +105,17 @@ proc collectBuildStatements(pkgBody: NimNode): NimNode =
         result.add(buildStmt)
     elif calleeName(stmt).normalize == "executable":
       let exeBody = stmt[2]
+      let member = artifactBuildBodyName(stmt[1])
+      var artifactStmts = newStmtList()
       for exeStmt in exeBody:
         if calleeName(exeStmt).normalize == "build":
           for buildStmt in exeStmt[1]:
-            result.add(buildStmt)
+            artifactStmts.add(buildStmt)
+      if artifactStmts.len > 0:
+        if packageName.len > 0 and member.len > 0:
+          result.add(wrapArtifactBuildBody(packageName, member, artifactStmts))
+        else:
+          for s in artifactStmts: result.add(s)
     elif calleeName(stmt).normalize == "library":
       # ``library X:`` with a body has the same shape as ``executable X:``
       # — a Call/Command node whose third child is the body StmtList. A
@@ -71,10 +124,17 @@ proc collectBuildStatements(pkgBody: NimNode): NimNode =
       if stmt.len < 3:
         continue
       let libBody = stmt[2]
+      let member = artifactBuildBodyName(stmt[1])
+      var artifactStmts = newStmtList()
       for libStmt in libBody:
         if calleeName(libStmt).normalize == "build":
           for buildStmt in libStmt[1]:
-            result.add(buildStmt)
+            artifactStmts.add(buildStmt)
+      if artifactStmts.len > 0:
+        if packageName.len > 0 and member.len > 0:
+          result.add(wrapArtifactBuildBody(packageName, member, artifactStmts))
+        else:
+          for s in artifactStmts: result.add(s)
     elif calleeName(stmt).normalize == "files":
       # M9.R.59.1: data-only ``files X:`` follows the same shape as
       # ``executable X:`` / ``library X:`` — a Call/Command node whose
@@ -173,7 +233,7 @@ proc foreachDispatchCode(pkg: PackageDef; dispatchName: string;
   parseStmt(code)
 
 proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
-  let buildBody = collectBuildStatements(body)
+  let buildBody = collectBuildStatements(body, pkg.packageName)
   let devEnvBody = collectDevEnvStatements(body)
   if buildBody.len == 0 and devEnvBody.len == 0:
     return newStmtList()

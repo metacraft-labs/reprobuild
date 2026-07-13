@@ -1532,6 +1532,33 @@ proc setRegisteredActionDeclaredOutputs*(actionId: string;
       buildActionRegistry[i].declaredOutputs = @outputs
       return
 
+proc setRegisteredActionPublish*(actionId: string;
+                                 publishToBinaryCache: bool;
+                                 cacheEntryIdentity: Option[CacheEntryIdentity])
+    {.dynOrStatic.} =
+  ## L3 PUBLISH-SCOPE (public-interface tagging for hand-authored
+  ## ``build:`` blocks). Stamp the binary-cache publish tag +
+  ## ``cacheEntryIdentity`` onto an already-registered action IN PLACE.
+  ##
+  ## The typed-tool wrapper procs (e.g. ``nim.c``) register their
+  ## ``BuildActionDef`` through ``recordToolInvocation`` /
+  ## ``recordCommandAction``, neither of which forwards the publish
+  ## fields (only the from-source conventions, which call ``buildAction``
+  ## directly, do). Rather than thread two more params through the whole
+  ## macro-generated typed-tool surface, the ``nim.c`` alias records the
+  ## action first, then calls this helper to tag the artifact whose
+  ## output IS a declared public-interface member of the package.
+  ##
+  ## Mirrors the ``setRegisteredAction*`` family: walk the registry in
+  ## registration order, update the first entry whose id matches, no-op
+  ## when the id is absent (defensive — the alias always calls this
+  ## immediately after the wrapper registered the action).
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      buildActionRegistry[i].publishToBinaryCache = publishToBinaryCache
+      buildActionRegistry[i].cacheEntryIdentity = cacheEntryIdentity
+      return
+
 proc setRegisteredActionReadOnlyRoots*(actionId: string;
                                        roots: openArray[string])
     {.dynOrStatic.} =

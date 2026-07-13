@@ -358,6 +358,16 @@ type
       ## stats but does NOT abort the build. ``nil`` keeps the engine
       ## pure-local (legacy behaviour) — the publish hook becomes a
       ## no-op for every action regardless of the per-action flag.
+    binaryCacheIntermediateScope*: bool
+      ## L3 PUBLISH-SCOPE. When ``true`` the target binary cache is an
+      ## INTERMEDIATE cache: EVERY successful cacheable action's store
+      ## outputs are published (not just the public-interface members
+      ## tagged ``publishToBinaryCache``). When ``false`` (the default,
+      ## and the safe default for a RELEASE cache) only tagged
+      ## public-interface actions publish — untagged intermediate
+      ## artefacts stay local. The CLI sets this from the effective
+      ## cache scope (``REPRO_BINARY_CACHE_SCOPE`` / caches.conf
+      ## ``scope``). Ignored when ``binaryCachePublisher == nil``.
     toolIdentityResolver*: ToolIdentityResolver
       ## M9.N Batch B. Optional tool-identity resolver closure.
       ## When non-nil AND ``BuildAction.toolIdentityRefs.len > 0``,
@@ -4102,9 +4112,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ##     same guard in ``publishPeerCacheBundle``.
     if config.binaryCachePublisher == nil:
       return
-    if not action.publishToBinaryCache:
-      return
-    if action.cacheEntryIdentity.isNone:
+    # L3 PUBLISH-SCOPE — per-(action, cache) publish decision:
+    #   publish IF (cache scope == intermediate)
+    #          OR (action produces a public-interface artifact — i.e. it
+    #              carries ``publishToBinaryCache = true`` + an identity).
+    #
+    # RELEASE cache (default): only tagged public-interface members ship.
+    # INTERMEDIATE cache: EVERY successful cacheable action with CAS
+    # blobs ships, including untagged intermediate artefacts — the
+    # engine synthesises a per-action identity for those (keyed on the
+    # action id + weak fingerprint so intermediate entries are stable
+    # and distinct without a recipe-declared identity).
+    let isPublicInterface =
+      action.publishToBinaryCache and action.cacheEntryIdentity.isSome
+    if not isPublicInterface and not config.binaryCacheIntermediateScope:
       return
     if record.outputPayloadKind != opkCasBlobs:
       return
@@ -4120,7 +4141,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # two distinct entry-key hexes for the same recipe (and a
     # ``"native"``-tagged action produces a stable hex across recipes
     # that don't declare ``targetTriple`` at all).
-    var folded = action.cacheEntryIdentity.get()
+    var folded =
+      if isPublicInterface:
+        action.cacheEntryIdentity.get()
+      else:
+        # Intermediate, untagged action: synthesise a stable identity
+        # from the action id + weak fingerprint. Toolchain tag
+        # ``"intermediate"`` keeps these keys namespaced away from
+        # release (public-interface) entries so the two scopes never
+        # collide on the same cache.
+        publicInterfaceIdentity(
+          packageName = "intermediate:" & action.id,
+          packageVersion = "",
+          toolchainName = "intermediate",
+          providerRevision = toHex(action.weakFingerprint.bytes))
     let foldedTag =
       if action.cachePlatformTag.len == 0: NativeTriple
       else: action.cachePlatformTag
@@ -5082,7 +5116,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
                 config.peerCacheActionPublisher != nil or
                 (config.binaryCachePublisher != nil and
-                  action.publishToBinaryCache)
+                  (action.publishToBinaryCache or
+                   config.binaryCacheIntermediateScope))
               let record = cache.recordActionResult(cas,
                 action.weakFingerprint,
                 action.actionCachePolicy,
@@ -5199,7 +5234,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
                 config.peerCacheActionPublisher != nil or
                 (config.binaryCachePublisher != nil and
-                  plan.action.publishToBinaryCache)
+                  (plan.action.publishToBinaryCache or
+                   config.binaryCacheIntermediateScope))
               let record = cache.recordActionResult(cas, plan.action.weakFingerprint,
                 plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
                 plan.action.outputs, plan.action.cwd,
@@ -5578,7 +5614,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
             config.peerCacheActionPublisher != nil or
             (config.binaryCachePublisher != nil and
-              action.publishToBinaryCache)
+              (action.publishToBinaryCache or
+               config.binaryCacheIntermediateScope))
           let record = cache.recordActionResult(cas, action.weakFingerprint,
             action.actionCachePolicy, action.cacheInputPaths(evidence.evidence),
             action.outputs, action.cwd,
