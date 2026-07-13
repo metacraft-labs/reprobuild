@@ -3,7 +3,8 @@
 #
 # Invoked by `repro-binary-cache-rsync.service` every 5 minutes via
 # the matching .timer unit. Mirrors the live state under
-# `/var/lib/repro-binary-cache/{store,manifests,index}/` into a dated
+# `/var/lib/repro-binary-cache/{store,manifests,index,trust}/` plus
+# `server-pubkey.hex` into a dated
 # subdir under `/mnt/d/metacraft/repro-binary-cache-backup/`.
 #
 # ## Why no rsync `--link-dest` on Windows mounts
@@ -59,11 +60,15 @@ RSYNC_FLAGS=(
 
 # Stage into a tmp dir; only rename on success so a partial rsync
 # never overwrites today's snapshot.
-mkdir -p "$STAGE_DIR" "$STAGE_DIR/store" "$STAGE_DIR/manifests" "$STAGE_DIR/index"
+mkdir -p "$STAGE_DIR" "$STAGE_DIR/store" "$STAGE_DIR/manifests" \
+  "$STAGE_DIR/index" "$STAGE_DIR/trust"
 
 rsync "${RSYNC_FLAGS[@]}" "$SRC/store/"     "$STAGE_DIR/store/"
 rsync "${RSYNC_FLAGS[@]}" "$SRC/manifests/" "$STAGE_DIR/manifests/"
 rsync "${RSYNC_FLAGS[@]}" "$SRC/index/"     "$STAGE_DIR/index/"
+rsync "${RSYNC_FLAGS[@]}" "$SRC/trust/"     "$STAGE_DIR/trust/"
+rsync "${RSYNC_FLAGS[@]}" "$SRC/server-pubkey.hex" \
+  "$STAGE_DIR/server-pubkey.hex"
 
 # Atomic-rename into today's slot. mv -T may not work on DrvFs;
 # fall back to rm + mv.

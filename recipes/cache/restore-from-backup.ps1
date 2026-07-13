@@ -11,7 +11,7 @@
     key safe across that loss.
 
     Recovery steps (per the operator handbook, recipes/cache/README.md
-    § "Recovery"):
+    section "Recovery"):
 
     1. `wsl --unregister repro-cache` (if still present).
     2. `wsl --import repro-cache <state-dir> <rootfs>` from a fresh
@@ -41,7 +41,7 @@
     (e.g. `2026-06-13`) to roll back to a known-good state.
 
 .PARAMETER DaemonBinary
-    Same as setup-repro-cache.ps1 — path to the pre-built Linux ELF.
+    Same as setup-repro-cache.ps1 -- path to the pre-built Linux ELF.
 
 .PARAMETER StateDir, RootfsDir
     Same as setup-repro-cache.ps1.
@@ -52,7 +52,7 @@
 .NOTES
     RTO target: ~5 min on a warm rootfs cache (skipping the rootfs
     download). Total bytes copied during restore: the size of the
-    binary-cache state — typically tens to hundreds of GiB at steady
+    binary-cache state -- typically tens to hundreds of GiB at steady
     state. The Windows-side mount /mnt/d throughput dominates.
 #>
 [CmdletBinding()]
@@ -76,6 +76,23 @@ if ($ReservedDistros -contains $DistroName) {
 $snapshotPath = Join-Path $BackupRoot $SnapshotName
 if (-not (Test-Path $snapshotPath)) {
   throw "Backup snapshot not found at $snapshotPath. Listing the backup dir for the operator:`n$(Get-ChildItem $BackupRoot -ErrorAction SilentlyContinue | Format-Table | Out-String)"
+}
+
+# Validate the recovery identity before unregistering the live distro. Older
+# snapshots that omitted trust/ are useful for payload recovery but cannot
+# preserve the cache's signing identity, so they are not safe full restores.
+$requiredSnapshotFiles = @(
+  "trust/server-ecdsa-p256.key",
+  "trust/server-ecdsa-p256.cert",
+  "server-pubkey.hex"
+)
+$missingSnapshotFiles = @(
+  $requiredSnapshotFiles | Where-Object {
+    -not (Test-Path (Join-Path $snapshotPath $_))
+  }
+)
+if ($missingSnapshotFiles.Count -gt 0) {
+  throw "Backup snapshot $snapshotPath is not restorable: missing $($missingSnapshotFiles -join ', '). The live distro was not modified."
 }
 
 # 1. Re-import via setup-repro-cache.ps1 -Force.
@@ -107,12 +124,17 @@ for sub in store manifests index trust; do
     chown -R reprocache:reprocache "\$dst/\$sub"
   fi
 done
+cp -a "\$src/server-pubkey.hex" "\$dst/server-pubkey.hex"
+chown reprocache:reprocache "\$dst/server-pubkey.hex"
+chmod 0700 "\$dst/trust"
+chmod 0600 "\$dst/trust/server-ecdsa-p256.key"
+chmod 0644 "\$dst/trust/server-ecdsa-p256.cert" "\$dst/server-pubkey.hex"
 "@
 if ($LASTEXITCODE -ne 0) {
   throw "snapshot copy exited with $LASTEXITCODE"
 }
 
-# 4. Restart the daemon — same systemd unit, same listen address.
+# 4. Restart the daemon -- same systemd unit, same listen address.
 Write-Host "[restore-from-backup] starting repro-binary-cache.service ..."
 & wsl.exe -d $DistroName -- systemctl start repro-binary-cache.service
 if ($LASTEXITCODE -ne 0) {
@@ -127,5 +149,5 @@ if ($status.Trim() -ne 'active') {
 }
 
 Write-Host ""
-Write-Host "[restore-from-backup] OK — $DistroName restored from $snapshotPath."
+Write-Host "[restore-from-backup] OK -- $DistroName restored from $snapshotPath."
 Write-Host "[restore-from-backup] Verify retrievability with `bash tests/integration/binary_cache/t_a2_backup_restore.sh`."

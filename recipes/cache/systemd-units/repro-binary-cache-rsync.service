@@ -1,6 +1,6 @@
 [Unit]
 Description=rsync mirror of the reprobuild binary cache to the Windows-side backup
-Documentation=ReproOS-Generations-And-Foreign-Packages A2
+Documentation=https://github.com/metacraft-labs/reprobuild-specs/blob/latest/Binary-Caches.md
 After=repro-binary-cache.service
 Requires=repro-binary-cache.service
 
@@ -8,15 +8,12 @@ Requires=repro-binary-cache.service
 Type=oneshot
 User=reprocache
 Group=reprocache
-# Mirror /var/lib/repro-binary-cache/{store,manifests,index}/ to a
-# Windows-side dated subdir under /mnt/d/metacraft/repro-binary-cache-backup/.
-# rsync --link-dest=PREV makes the snapshot space-efficient by hard-
-# linking unchanged files against the previous snapshot.
+# Mirror /var/lib/repro-binary-cache/{store,manifests,index,trust}/ and
+# server-pubkey.hex to a Windows-side dated subdir under
+# /mnt/d/metacraft/repro-binary-cache-backup/.
 #
-# Rotation policy: the rotate-snapshots.sh helper (deployed by
-# setup-repro-cache.ps1) keeps the last 7 daily snapshots and
-# unlinks older ones. The script is idempotent — if invoked during a
-# moment when rsync is mid-flight it leaves the in-progress dir
-# alone and exits 0.
+# Rotation policy: the deployed snapshot helper keeps the last 7 daily
+# snapshots and unlinks older ones. A staged directory prevents a partial
+# rsync from replacing the current day's complete snapshot.
 ExecStart=/usr/local/bin/repro-binary-cache-rsync-snapshot
 WorkingDirectory=/var/lib/repro-binary-cache

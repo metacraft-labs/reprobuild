@@ -66,6 +66,7 @@ running the `repro-cache` distro on a workstation. It covers:
 | Daemon CLI               | [`apps/repro-binary-cache/repro_binary_cache.nim`](../../apps/repro-binary-cache/repro_binary_cache.nim)                      |
 | systemd units            | [`recipes/cache/systemd-units/`](./systemd-units/)                                                                            |
 | Provisioning             | [`recipes/cache/setup-repro-cache.ps1`](./setup-repro-cache.ps1)                                                              |
+| WSL keepalive + startup  | [`recipes/cache/start-repro-cache.ps1`](./start-repro-cache.ps1)                                                              |
 | Restore                  | [`recipes/cache/restore-from-backup.ps1`](./restore-from-backup.ps1)                                                          |
 
 ### Layer boundary
@@ -81,9 +82,14 @@ distinct from:
   *transport* for Layer 1 content blobs on a LAN; same identity
   space.
 
-A2 ships the SERVER side of Layer 3 only. The substitution CLIENT
-lives in the planned `libs/repro_binary_cache_client/` per the A2.5
-milestone.
+The R4-R9 ReproOS bootstrap scripts use
+[`scripts/cache-helper.sh`](./scripts/cache-helper.sh) for the package fast
+path. `cache_phase_prepare` derives a key from the package, platform,
+toolchain, provider revision, dependencies, and options, then attempts a
+trusted substitute before any build command runs. On a hit the script exits
+without compiling; on a miss it builds from source and `cache_phase_publish`
+signs and uploads the realized prefix. A separate `REPRO_LOCAL_STORE` can be
+used per builder while all builders share this persistent Layer 3 cache.
 
 ---
 
@@ -96,7 +102,7 @@ milestone.
 | Adversary tampers with the CacheEntryKey block      | The envelope embeds a redundant BLAKE3-256 of the canonical key. Decoder hard-fails before consuming the manifest if the redundancy check fails. |
 | Adversary substitutes a different producer pubkey   | The pubkey is part of the signed envelope. A swap invalidates the signature. The client's trust-anchor allowlist gates the pubkey at the consumer boundary. |
 | LAN attacker MITM-injects bytes between server/client | v1 ships as HTTP (single-tenant workstation; loopback / WSL-internal traffic). HTTPS is a documented follow-up; the signature on each manifest is the cryptographic boundary regardless of transport. |
-| Cache server compromise leaks the producer key      | Key lives under `/var/lib/repro-binary-cache/trust/server-ecdsa-p256.key`, root-owned and mode-0600. The disposable distro reduces the blast radius; key rotation is the operator's responsibility (and triggers re-signing of every entry — out of scope for v1). |
+| Cache server compromise leaks the producer key      | Key lives under `/var/lib/repro-binary-cache/trust/server-ecdsa-p256.key`, owned by `reprocache` and mode-0600. The disposable distro reduces the blast radius; key rotation is the operator's responsibility (and triggers re-signing of every entry — out of scope for v1). |
 | Loss of the disposable distro                       | rsync mirror to `/mnt/d/metacraft/repro-binary-cache-backup/` includes the producer key. Restoration via `restore-from-backup.ps1` preserves the signing identity verbatim. |
 
 ### Single-tenant scope
@@ -146,6 +152,11 @@ manifest it serves has the same `producerPubKey` field).
   cp /tmp/repro_binary_cache-linux /mnt/d/metacraft-dev-deps/builds/
   ```
 
+  The artifact must be runnable in the plain Ubuntu cache distro. In
+  particular, a binary whose ELF interpreter or shared libraries exist only
+  in a Nix build environment is not portable. Setup executes a staged
+  candidate on the target before stopping the currently-running daemon.
+
 ### One-shot setup
 
 ```powershell
@@ -161,11 +172,19 @@ service without resetting the producer key. To reset state, pass
 `-Force` (DESTROYS the producer key on the distro; the rsync mirror
 must be intact for the restore path to recover the signing identity).
 
+Setup also registers the per-user `Reprobuild Binary Cache Keepalive`
+scheduled task. WSL does not treat systemd services as foreground activity;
+without the long-lived `wsl.exe` client held by this task, it terminates the
+cache distro shortly after a one-shot command exits.
+
 ### Manual liveness probe
 
 ```powershell
 wsl -d repro-cache -e systemctl is-active repro-binary-cache.service
 # Expect: active
+
+Get-ScheduledTask -TaskName "Reprobuild Binary Cache Keepalive"
+# Expect: Running
 
 wsl -d repro-cache -e curl -fsS http://localhost:7878/healthz
 # Expect: ok
@@ -189,9 +208,11 @@ wsl -d repro-cache -e curl -fsS http://localhost:7878/cache-info | xxd | head
 - Daily rotation: the helper script
   `repro-binary-cache-rsync-snapshot.sh` keeps the last 7 daily
   snapshots and unlinks older ones at every fire.
-- Inter-day deduplication: `rsync --link-dest=PREV` hardlinks
-  unchanged files against the previous snapshot so the storage cost
-  is roughly the *delta* per day.
+- Every retained day is a full copy. DrvFs cannot preserve the metadata
+  needed for reliable `rsync --link-dest`, so the helper uses
+  `rsync -r --size-only` and bounds growth with seven-day rotation.
+- Each snapshot includes `store/`, `manifests/`, `index/`, `trust/`, and
+  `server-pubkey.hex`; the signing identity is therefore recoverable.
 
 ### Eviction (in-cache, NOT in-backup)
 
@@ -237,14 +258,15 @@ D:/metacraft/reprobuild/recipes/cache/restore-from-backup.ps1 `
   -DaemonBinary D:/metacraft-dev-deps/builds/repro_binary_cache-linux
 ```
 
-The script:
+The script first rejects snapshots missing the private key, certificate, or
+server public key, before it modifies the live distro. It then:
 
 1. Unregisters the (possibly-broken) `repro-cache` distro.
 2. Re-imports a fresh one.
 3. Re-installs the systemd units + daemon.
 4. Stops the daemon so we can atomically swap state.
 5. Copies `D:/metacraft/repro-binary-cache-backup/latest/{store,manifests,index,trust}/`
-   into `/var/lib/repro-binary-cache/`.
+   and `server-pubkey.hex` into `/var/lib/repro-binary-cache/`.
 6. Restarts the daemon and asserts `systemctl is-active` returns
    `active`.
 

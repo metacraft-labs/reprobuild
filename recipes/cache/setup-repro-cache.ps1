@@ -7,17 +7,15 @@
     Per the locked architectural decisions of the campaign (memo
     `project_reprobuild_destructive_gate_envs`):
 
-    * Cache host: `repro-cache` — new disposable Ubuntu WSL distro.
+    * Cache host: `repro-cache` -- new disposable Ubuntu WSL distro.
     * Long-lived but disposable per the WSL naming convention.
     * NEVER touches `nixos-main` or `ubuntu-main` (those names are
       reserved for future user-stateful instances).
 
     Steps the script performs:
 
-    1. If `repro-cache` already exists and `-Force` was NOT passed, abort
-       cleanly. The state under `/var/lib/repro-binary-cache/` is
-       preserved across re-runs precisely because the script is
-       idempotent against an existing distro.
+    1. If `repro-cache` already exists and `-Force` was NOT passed, preserve
+       its state and perform an in-place service upgrade.
     2. Vendors the Ubuntu rootfs tarball pinned by sha256 if not already
        cached at `$RootfsDir`.
     3. Imports the distro via `wsl --import repro-cache <state-dir>
@@ -25,8 +23,9 @@
     4. Writes `/etc/wsl.conf` enabling systemd boot (proven working from
        the R7 NixOS-on-WSL incident and the existing eli-wsl baseline).
     5. Installs minimal runtime deps inside the distro (`rsync`,
-       `ca-certificates`, `systemd` is pre-installed on Ubuntu).
-    6. Stages the daemon binary at `/usr/local/bin/repro-binary-cache`.
+       `ca-certificates`, `util-linux`; systemd is pre-installed on Ubuntu).
+    6. Executes a staged daemon candidate in the target distro, then installs
+       it at `/usr/local/bin/repro-binary-cache` only if that check passes.
     7. Drops the systemd unit at
        `/etc/systemd/system/repro-binary-cache.service` and the rsync
        timer at `/etc/systemd/system/repro-binary-cache-rsync.{service,timer}`.
@@ -34,6 +33,8 @@
        boot by running `repro-binary-cache --once` (which reuses the
        `repro_peer_cache/auth.nim` `loadOrGenerateKeypair` primitive).
     9. Enables + starts the systemd units.
+    10. Registers and starts the Windows logon task that keeps the WSL distro
+        alive while the cache is expected to serve builds.
 
     Idempotent: a second invocation of the script against an existing
     `repro-cache` distro re-applies the systemd units + restarts the
@@ -50,7 +51,7 @@
 
         URL:    https://cloud-images.ubuntu.com/wsl/jammy/current/ubuntu-jammy-wsl-amd64-wsl.rootfs.tar.gz
         SHA256: <not pinned here; the env's network-resolver writes the
-                 pin after the first download — re-run with `-VerifyPin`
+                 pin after the first download -- re-run with `-VerifyPin`
                  to enforce a previously recorded sha256>.
 
     The downstream A3 milestone hardens the pin set; A2 documents this
@@ -58,14 +59,14 @@
     the resulting distro's binary surface, not against the rootfs bytes.
 
 .PARAMETER DaemonBinary
-    Path to a pre-built `repro_binary_cache.exe` (Linux ELF — built in
+    Path to a pre-built `repro_binary_cache.exe` (Linux ELF -- built in
     a sibling repro-ubuntu distro for the kickstart). When not given,
     the script aborts; the operator handbook documents the cross-build.
 
 .PARAMETER Force
     Re-import the distro from the rootfs tarball, discarding any
     existing state. DESTROYS the producer key on the disposable distro
-    — the rsync mirror to `D:/metacraft/repro-binary-cache-backup/`
+    -- the rsync mirror to `D:/metacraft/repro-binary-cache-backup/`
     must be intact for the restore path to recover state.
 
 .PARAMETER Listen
@@ -155,7 +156,9 @@ function Write-WslFile {
   # through PowerShell's argv handling.
   $tmp = [System.IO.Path]::GetTempFileName()
   try {
-    Set-Content -Path $tmp -Value $Content -NoNewline -Encoding utf8
+    $unixContent = ($Content -replace "`r`n", "`n") -replace "`r", "`n"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($tmp, $unixContent, $utf8NoBom)
     $wslSrc = Convert-ToWslPath -Distro $Distro -WindowsPath $tmp
     Invoke-WslExec $Distro @("sh", "-c", "install -D -m 0644 '$wslSrc' '$Path'")
   } finally {
@@ -218,23 +221,49 @@ generateResolvConf=true
 
 # 4. Install runtime deps (idempotent).
 Write-Host "[setup-repro-cache] installing runtime deps ..."
-Invoke-WslExec $DistroName @("sh", "-c", "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync ca-certificates curl >/dev/null")
+Invoke-WslExec $DistroName @("sh", "-c", "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync ca-certificates curl util-linux >/dev/null")
 
 # Resolve the recipes/ source dir once; needed for both the daemon
 # binary install (step 5) AND the rsync-mirror script install (5b).
 $thisDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# 5. Stage daemon binary.
+# 5. Stage and validate the daemon binary before stopping the live service.
+# A Linux ELF can still be unusable in this distro when its interpreter or a
+# shared library exists only in the build environment. Keep the current daemon
+# running unless the candidate can execute here.
 $daemonWslPath = Convert-ToWslPath -Distro $DistroName -WindowsPath ([string](Resolve-Path $DaemonBinary))
-Invoke-WslExec $DistroName @("install", "-D", "-m", "0755", $daemonWslPath, "/usr/local/bin/repro-binary-cache")
+Invoke-WslExec $DistroName @("install", "-D", "-m", "0755", $daemonWslPath, "/usr/local/libexec/repro-binary-cache.candidate")
+try {
+  Invoke-WslExec $DistroName @("sh", "-c",
+    "/usr/local/libexec/repro-binary-cache.candidate --help >/dev/null")
+} catch {
+  & wsl.exe -d $DistroName -- rm -f /usr/local/libexec/repro-binary-cache.candidate
+  throw
+}
+
+# Stop the timer and daemon only after the candidate has passed its target-host
+# execution check. The one-shot key bootstrap must not race the live listener.
+Invoke-WslExec $DistroName @("sh", "-c",
+  "systemctl stop repro-binary-cache-rsync.timer repro-binary-cache.service 2>/dev/null || true")
+Invoke-WslExec $DistroName @("install", "-D", "-m", "0755",
+                             "/usr/local/libexec/repro-binary-cache.candidate",
+                             "/usr/local/bin/repro-binary-cache")
+Invoke-WslExec $DistroName @("rm", "-f", "/usr/local/libexec/repro-binary-cache.candidate")
 
 # 5b. Stage the rsync mirror helper script. The systemd unit's
 # ExecStart= references /usr/local/bin/repro-binary-cache-rsync-snapshot
-# (no .sh suffix) — install with that name from the recipes/ copy.
+# (no .sh suffix) -- install with that name from the recipes/ copy.
 $rsyncSnapshotSrc = (Resolve-Path (Join-Path $thisDir "repro-binary-cache-rsync-snapshot.sh")).Path
 $rsyncSnapshotWsl = Convert-ToWslPath -Distro $DistroName -WindowsPath $rsyncSnapshotSrc
 Invoke-WslExec $DistroName @("install", "-D", "-m", "0755", $rsyncSnapshotWsl,
                              "/usr/local/bin/repro-binary-cache-rsync-snapshot")
+
+# WSL does not keep a distro alive for systemd services alone. The Windows
+# launcher below holds this helper as the distro's foreground client.
+$keepaliveSrc = (Resolve-Path (Join-Path $thisDir "repro-binary-cache-keepalive.sh")).Path
+$keepaliveWsl = Convert-ToWslPath -Distro $DistroName -WindowsPath $keepaliveSrc
+Invoke-WslExec $DistroName @("install", "-D", "-m", "0755", $keepaliveWsl,
+                             "/usr/local/bin/repro-binary-cache-keepalive")
 
 # 6. Drop systemd units.
 $serviceUnit = Get-Content -Raw -Path (Join-Path $thisDir "systemd-units/repro-binary-cache.service")
@@ -248,7 +277,7 @@ $rsyncTimer = Get-Content -Raw -Path (Join-Path $thisDir "systemd-units/repro-bi
 Write-WslFile -Distro $DistroName -Path "/etc/systemd/system/repro-binary-cache-rsync.timer" -Content $rsyncTimer
 
 # 7. Create reprocache user + state dir.
-Invoke-WslExec $DistroName @("sh", "-c", @"
+$stateInitScript = @"
 id reprocache >/dev/null 2>&1 || useradd --system --home /var/lib/repro-binary-cache --shell /usr/sbin/nologin reprocache
 install -d -o reprocache -g reprocache -m 0755 /var/lib/repro-binary-cache
 install -d -o reprocache -g reprocache -m 0755 /var/lib/repro-binary-cache/manifests
@@ -256,25 +285,32 @@ install -d -o reprocache -g reprocache -m 0755 /var/lib/repro-binary-cache/store
 install -d -o reprocache -g reprocache -m 0755 /var/lib/repro-binary-cache/index
 install -d -o reprocache -g reprocache -m 0700 /var/lib/repro-binary-cache/trust
 install -d -o reprocache -g reprocache -m 0755 /mnt/d/metacraft/repro-binary-cache-backup
-"@)
+"@
+Invoke-WslExec $DistroName @("sh", "-c", ($stateInitScript -replace "`r", ""))
 
 # 8. Bootstrap producer key (idempotent).
 Invoke-WslExec $DistroName @("sh", "-c",
   "sudo -u reprocache /usr/local/bin/repro-binary-cache --root=/var/lib/repro-binary-cache --once >/var/lib/repro-binary-cache/server-pubkey.hex")
+Invoke-WslExec $DistroName @("sh", "-c",
+  "chown reprocache:reprocache /var/lib/repro-binary-cache/server-pubkey.hex; chmod 0700 /var/lib/repro-binary-cache/trust; chmod 0600 /var/lib/repro-binary-cache/trust/server-ecdsa-p256.key; chmod 0644 /var/lib/repro-binary-cache/trust/server-ecdsa-p256.cert /var/lib/repro-binary-cache/server-pubkey.hex")
 
 # 9. Reload systemd + enable.
 Invoke-WslExec $DistroName @("systemctl", "daemon-reload")
 Invoke-WslExec $DistroName @("systemctl", "enable", "--now", "repro-binary-cache.service")
 Invoke-WslExec $DistroName @("systemctl", "enable", "--now", "repro-binary-cache-rsync.timer")
 
-# 10. Smoke check.
-Start-Sleep -Seconds 2
+# 10. Keep the distro alive now and at future interactive logons. A systemd
+# service alone does not prevent WSL from terminating an otherwise-idle distro.
+$startScript = Join-Path $thisDir "start-repro-cache.ps1"
+& $startScript -Distro $DistroName -InstallStartupTask
+
+# 11. Smoke check.
 $status = & wsl.exe -d $DistroName -- systemctl is-active repro-binary-cache.service 2>&1
 Write-Host "[setup-repro-cache] systemctl is-active: $status"
 $pubkey = & wsl.exe -d $DistroName -- cat /var/lib/repro-binary-cache/server-pubkey.hex 2>&1
 Write-Host "[setup-repro-cache] producer pubkey: $pubkey"
 Write-Host ""
-Write-Host "[setup-repro-cache] OK — repro-cache provisioned + daemon running."
+Write-Host "[setup-repro-cache] OK -- repro-cache provisioned + daemon running."
 Write-Host "[setup-repro-cache] Listen address: $Listen"
 Write-Host "[setup-repro-cache] State root:    /var/lib/repro-binary-cache (inside the distro)"
 Write-Host "[setup-repro-cache] Backup root:   /mnt/d/metacraft/repro-binary-cache-backup (Windows-side)"
