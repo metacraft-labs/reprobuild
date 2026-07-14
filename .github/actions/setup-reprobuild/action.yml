@@ -45,7 +45,38 @@ inputs:
 runs:
   using: composite
   steps:
+    # Idempotency probe: if a `repro` CLI is already on PATH (e.g. baked into
+    # the runner image, or installed by an earlier invocation of this action in
+    # the same job), skip the clone + Nix install + build entirely. This makes
+    # the action a cheap no-op on hosts that already ship `repro` — the whole
+    # point of distributing `repro` as a self-contained portable binary. When
+    # `repro` is NOT found, `already-present` stays "false" and every existing
+    # step below runs exactly as before.
+    - name: Detect pre-installed repro CLI
+      id: probe
+      shell: bash
+      run: |
+        set -euo pipefail
+        # `command -v` finds `repro` on Linux/macOS and, under the bash shell
+        # Git-for-Windows provides, also resolves `repro.exe` via PATHEXT.
+        # Probe the Windows name explicitly too so a `.exe`-only install counts.
+        if command -v repro >/dev/null 2>&1 || command -v repro.exe >/dev/null 2>&1; then
+          resolved="$(command -v repro 2>/dev/null || command -v repro.exe 2>/dev/null || true)"
+          echo "repro already on PATH at: ${resolved}"
+          echo "already-present=true" >> "$GITHUB_OUTPUT"
+          # Keep it on PATH for subsequent workflow steps (its dir may only be
+          # on PATH for this action's shell, not the job-wide $GITHUB_PATH).
+          if [ -n "${resolved}" ]; then
+            dir="$(dirname "${resolved}")"
+            echo "${dir}" >> "$GITHUB_PATH"
+          fi
+        else
+          echo "no repro CLI on PATH; will clone + build"
+          echo "already-present=false" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Clone reprobuild source
+      if: ${{ steps.probe.outputs.already-present != 'true' }}
       shell: bash
       env:
         REPRO_BUILD_PIN: ${{ inputs.repro-build-pin }}
@@ -64,7 +95,7 @@ runs:
         fi
 
     - name: Install Nix (Linux/macOS, to build repro)
-      if: ${{ runner.os != 'Windows' }}
+      if: ${{ steps.probe.outputs.already-present != 'true' && runner.os != 'Windows' }}
       uses: metacraft-labs/metacraft-github-actions/setup-nix@main
       with:
         gh-token: ${{ inputs.gh-token }}
@@ -75,7 +106,7 @@ runs:
         attic-endpoint: ${{ inputs.attic-endpoint }}
 
     - name: Build repro CLI (Linux/macOS)
-      if: ${{ runner.os != 'Windows' }}
+      if: ${{ steps.probe.outputs.already-present != 'true' && runner.os != 'Windows' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -114,7 +145,7 @@ runs:
         echo "${PWD}/build/bin" >> "$GITHUB_PATH"
 
     - name: Relocate reprobuild + build repro CLI (Windows)
-      if: ${{ runner.os == 'Windows' }}
+      if: ${{ steps.probe.outputs.already-present != 'true' && runner.os == 'Windows' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -132,7 +163,7 @@ runs:
         fi
 
     - name: Build repro CLI (Windows)
-      if: ${{ runner.os == 'Windows' }}
+      if: ${{ steps.probe.outputs.already-present != 'true' && runner.os == 'Windows' }}
       shell: pwsh
       run: |
         # Windows-side: replay reprobuild's own DIY contract. Source its env.ps1

@@ -6,6 +6,17 @@
     nixpkgs.follows = "nixos-modules/nixpkgs-unstable";
     flake-parts.follows = "nixos-modules/flake-parts";
     git-hooks.follows = "nixos-modules/git-hooks-nix";
+    # `bundlers` is the official NixOS bundler collection (the same set
+    # `nix bundle --bundler github:NixOS/bundlers#toArx` reaches for). We
+    # only consume its `toArx` bundler (nix-community/nix-bundle under the
+    # hood) to package the full `reprobuild` store closure into ONE
+    # self-extracting, relocatable executable (see `packages.repro-portable`
+    # below). Follow our nixpkgs so the bundler's arx/nix-user-chroot helper
+    # tools share the fleet's package set rather than pulling a second one.
+    bundlers = {
+      url = "github:NixOS/bundlers";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     runquota-src = {
       # runquota's mainline is ``dev``; ``main`` is stale and lacks the
       # bounded grant-stream API (``pollNextGrantBounded`` / ``GrantPollResult``)
@@ -136,6 +147,7 @@
       runquota-src,
       io-mon-src,
       nim-shm-queue-src,
+      bundlers,
       ...
     }:
     flake-parts.lib.mkFlake { inherit inputs; } {
@@ -397,6 +409,38 @@
             type = "app";
             program = "${reproBinaryCacheClient}/bin/repro-binary-cache-client";
           };
+          # Portable/self-contained `repro`: package the ENTIRE `reprobuild`
+          # store closure into one self-extracting, relocatable executable so
+          # the CLI runs on a plain host (e.g. an im2-debian-cloud GitHub
+          # Actions runner image, or a developer workstation) that has NO
+          # /nix/store present.
+          #
+          # Why a bundle and NOT a static (musl/`--passL:-static`) build:
+          #  * `repro` is a thin dispatcher that `execv`s its `repro-full`
+          #    sibling for every real subcommand; `repro-full` links OpenSSL
+          #    (`--define:ssl`) and, at MODULE-INIT time (Nim `{.dynlib.}`
+          #    `DatInit`, before `main`), dlopens `libclingo.so` by the
+          #    absolute path the Nim compiler baked into `.rodata`
+          #    (libs/repro_solver/.../clingo_bindings.nim documents this eager
+          #    load). A dlopen-by-baked-abs-path solver cannot be statically
+          #    linked, and clingo/openssl/blake3/sqlite would all have to be
+          #    static too. So a true static binary is infeasible here.
+          #  * The `toArx` bundler embeds the whole closure and, at run time,
+          #    uses `nix-user-chroot` to expose the extracted store at the
+          #    real `/nix/store` inside a user namespace. That makes every
+          #    baked `/nix/store/...` rpath, PT_INTERP, and the clingo dlopen
+          #    path resolve WITHOUT a real `/nix/store` on the host. It
+          #    requires unprivileged user namespaces (default on the target
+          #    Debian image).
+          #
+          # This is the same machinery as `nix bundle --bundler
+          # github:NixOS/bundlers#toArx .#reprobuild`, wired as a first-class
+          # package output so callers can just `nix build .#repro-portable`.
+          # The bundler keys off `meta.mainProgram` ("repro"), so the produced
+          # executable launches `repro` (which finds its `repro-full` sibling
+          # inside the same extracted closure). It ADDS to — and does not
+          # disturb — `packages.default`/`packages.reprobuild` or `just build`.
+          reproPortable = bundlers.bundlers.${system}.toArx reprobuild;
         in
         {
           apps.default = reproApp;
@@ -408,6 +452,8 @@
           packages.reprobuild = reprobuild;
           packages.repro-binary-cache = reproBinaryCache;
           packages.repro-binary-cache-client = reproBinaryCacheClient;
+          # Self-contained, /nix/store-free `repro` (see `reproPortable`).
+          packages.repro-portable = reproPortable;
 
           checks = {
             inherit pre-commit-check;
@@ -436,7 +482,10 @@
             # package build's binaries, not the `just bootstrap` binaries the
             # ct build and `just test` run), so add it here too — otherwise a
             # bootstrapped `repro` aborts with "could not load: libzstd.so.1".
-            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.clingo pkgs.zstd ];
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.clingo
+              pkgs.zstd
+            ];
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
