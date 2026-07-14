@@ -256,8 +256,18 @@ jobs:
           # from reprobuild's .github/sibling-repos), so `develop --all` ADOPTS
           # them in place when they match the locked revision; --into=<siblings>
           # names that adjacency explicitly. Fails loud if the lock is missing.
+          #
+          # --reset: the siblings were pre-cloned by clone-siblings at their
+          # `=dev` BRANCH TIPS, which in general differ from the revisions
+          # codetracer's committed repro.lock pins. Without --reset, `develop
+          # --all` REFUSES to overwrite a checkout that drifted off the lock
+          # (the fleet-safe default). --reset makes `develop --all` reconcile
+          # each drifted sibling back to its locked revision (re-clone + hard
+          # reset at the locked SHA) so the ct build consumes the EXACT
+          # lock-pinned sources, not the moving `=dev` tips. This is the crux
+          # that keeps this step green as the sibling `dev` tips advance.
           siblings_root="$(cd "$ct_root/.." && pwd)"
-          ( cd "$ct_root" && "$repro_bin" develop --all --into="$siblings_root" )
+          ( cd "$ct_root" && "$repro_bin" develop --all --reset --into="$siblings_root" )
           ( cd "$ct_root" && \
             CODETRACER_REPROBUILD_LINUX=1 \
             CODETRACER_REPROBUILD_TARGET=ct \

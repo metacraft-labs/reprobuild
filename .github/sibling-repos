@@ -17,13 +17,17 @@ codetracer-trace-format-nim=dev
 # ct_incremental_adapter can exec `ct test --incremental`) imports the IsoNim UI
 # stack and the shared Nim agent libs, so its Nim compile needs these adjacent on
 # the --path. The `ct` build path (L2 CI-PROVISION-FROM-LOCK) no longer relies on
-# these branch pins for its dep set: it runs `repro develop --all` in codetracer,
-# which provisions isonim + the nim-* libs at the revisions pinned in codetracer's
-# committed `repro.lock` (adopting these clones in place when they match, else
-# failing loud). These `=dev` entries stay because reprobuild's OWN e2e tests
-# (codetracer-subset, watch) still consume the siblings adjacent on the --path;
-# keep them consistent with codetracer's lock by refreshing that lock when the
-# sibling `dev` tips move. reprobuild only ever execs the resulting `ct`.
+# these branch pins for its dep set: it runs `repro develop --all --reset` in
+# codetracer, which provisions isonim + the nim-* libs at the revisions pinned in
+# codetracer's committed `repro.lock`. `--reset` RECONCILES these `=dev`
+# pre-clones to the lock in place: when a clone matches the locked revision it is
+# adopted, and when it has drifted off the lock (the usual case, since `=dev`
+# tracks a moving tip) it is force-reset to the locked SHA rather than refused.
+# So these `=dev` entries no longer have to be kept in lock-step with codetracer's
+# lock for the ct build to stay green — the drift is reconciled at build time.
+# They stay because reprobuild's OWN e2e tests (codetracer-subset, watch) still
+# consume the siblings adjacent on the --path. reprobuild only ever execs the
+# resulting `ct`.
 isonim=dev
 isonim-gpui=dev
 isonim-tui=dev

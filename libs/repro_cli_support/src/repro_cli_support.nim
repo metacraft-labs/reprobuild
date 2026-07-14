@@ -231,7 +231,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " develop --list\n       " &
           programName &
-      " develop --all|--direct|--transitive-of=PKG [--filter=PAT] [--into=DIR] [--workspace-root=PATH]\n       " &
+      " develop --all|--direct|--transitive-of=PKG [--filter=PAT] [--into=DIR] [--reset] [--workspace-root=PATH]\n       " &
           programName &
       " develop <dependency> --into=PATH\n       " &
           programName &
@@ -18367,12 +18367,20 @@ type
     workspaceRoot: string
     toolProvisioning: ToolProvisioningMode
     json: bool
+    reset: bool              ## ``--reset`` — when an existing on-disk checkout
+                             ## has DRIFTED off the locked revision, force it
+                             ## back to the lock (destructive re-clone at the
+                             ## locked SHA) instead of refusing. Opt-in; the
+                             ## default (false) preserves the refuse-on-drift
+                             ## contract so fleet consumers are unaffected. This
+                             ## is the lever CI uses to reconcile siblings that a
+                             ## prior clone step placed at a `=dev` branch tip.
 
   DevelopAllNodeOutcome = object
     node: string
     path: string
     revision: string
-    mode: string             ## cloned / adopted / idempotent / refused / error
+    mode: string             ## cloned / adopted / reset / idempotent / refused / error
     diagnostic: string
     ok: bool
 
@@ -18634,10 +18642,34 @@ proc executeDevelopAll(args: DevelopAllArgs):
 
     if dirExists(absTarget):
       # A checkout already exists on disk. Adopt it when it is a git checkout at
-      # the EXACT locked revision; otherwise refuse (never overwrite).
+      # the EXACT locked revision; otherwise refuse (never overwrite) — UNLESS
+      # ``--reset`` was requested, in which case reconcile the drifted checkout
+      # to the lock by overwriting it (re-clone + hard-reset at the locked SHA).
       let headSha = gitHeadShaOf(gitBinary, absTarget)
       if headSha.len > 0 and headSha == node.coordinates.revision:
         outcome.mode = "adopted"
+        outcome.ok = true
+      elif args.reset:
+        # ``--reset``: the drift is the expected case (e.g. a CI pre-clone
+        # placed the sibling at a `=dev` branch tip). Force it back to the
+        # locked revision. The overwrite is a destructive re-clone that
+        # fetches the EXACT locked SHA and force-resets onto it, so the tree
+        # ends byte-identical to a fresh lock-pinned checkout regardless of
+        # what the prior checkout contained (shallow, dirty, or diverged).
+        removeDir(absTarget)
+        let resetRes =
+          cloneNodeAtLockedRevision(root, absTarget, node, identity)
+        if not resetRes.ok:
+          outcome.mode = "error"
+          outcome.ok = false
+          outcome.diagnostic = "reset-to-locked-revision failed for " &
+            node.name & " (was at " &
+            (if headSha.len == 0: "non-git-checkout" else: headSha) & "): " &
+            resetRes.diagnostic
+          outcomes.add(outcome)
+          anyFailure = true
+          continue
+        outcome.mode = "reset"
         outcome.ok = true
       else:
         outcome.mode = "refused"
@@ -18645,7 +18677,8 @@ proc executeDevelopAll(args: DevelopAllArgs):
         outcome.diagnostic = "path " & absTarget & " already exists and is " &
           (if headSha.len == 0: "not a git checkout"
            else: "at " & headSha & ", not the locked revision " &
-             node.coordinates.revision) & "; refusing to overwrite"
+             node.coordinates.revision) &
+          "; refusing to overwrite (pass --reset to force it to the lock)"
         outcomes.add(outcome)
         anyFailure = true
         continue
@@ -18720,6 +18753,9 @@ proc runDevelopAllCommand(args: DevelopAllArgs): int =
       of "adopted":
         stdout.writeLine("repro develop --all: adopted existing checkout of " &
           o.node & " @ " & o.revision & " -> " & o.path)
+      of "reset":
+        stdout.writeLine("repro develop --all: reset drifted checkout of " &
+          o.node & " to locked revision " & o.revision & " -> " & o.path)
       of "idempotent":
         stdout.writeLine("repro develop --all: " & o.node &
           " already in develop mode at " & o.path & " (no change)")
@@ -18735,8 +18771,12 @@ proc runDevelopAllCommand(args: DevelopAllArgs): int =
 
 proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
   ## ``repro develop --all|--direct|--transitive-of=<pkg> [--filter=<pat>]
-  ## [--into=<dir>] [--workspace-root=<path>]
+  ## [--into=<dir>] [--reset] [--workspace-root=<path>]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ##
+  ## ``--reset`` force-reconciles an already-present sibling checkout that has
+  ## drifted off the locked revision back to the lock (destructive re-clone at
+  ## the locked SHA) instead of refusing. Default off = refuse-on-drift.
   result.mode = dasmAll
   result.toolProvisioning = tpmPathOnly
   var i = 0
@@ -18763,6 +18803,8 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
         valueFromFlag(args, i, "--tool-provisioning"))
     elif arg == "--json":
       result.json = true
+    elif arg == "--reset":
+      result.reset = true
     else:
       raise newException(ValueError,
         "unsupported `repro develop --all` argument: " & arg)
