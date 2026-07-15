@@ -188,6 +188,21 @@ proc runScenario() {.async.} =
         break
     check ok
 
+  block publishLargerThanFrameworkDefault:
+    let kp = peerAuth.generateKeypair()
+    var payload = newSeq[byte](8 * 1024 * 1024 + 1)
+    for i in 0 ..< payload.len:
+      payload[i] = byte(i and 0xff)
+    let manifest = buildSignedManifest(kp, payload)
+    let manifestBytes = encodeManifest(manifest)
+    let boundary = "----RBC-large-" & $rand(99_999)
+    let body = buildMultipartBody(boundary, manifestBytes, payload)
+
+    let (code, hexBody) = await httpPublishMultipart(
+      base & "/publish", boundary, body)
+    check code == Http200
+    check hexBody.strip() == cacheEntryKeyHex(manifest.entryKey)
+
   block publishMissingManifest:
     let boundary = "----RBC-empty-" & $rand(99_999)
     var body = "--" & boundary & "\r\n"

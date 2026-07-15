@@ -22,7 +22,8 @@
 ## a thin wrapper that builds a ``PublishInProcessRequest`` from CLI
 ## flags and forwards.
 
-import std/[algorithm, httpclient, httpcore, net, os, random, strutils, times]
+import std/[algorithm, asyncdispatch, httpclient, httpcore, net, os, random,
+            strutils, times]
 
 when defined(ssl):
   import wrappers/openssl
@@ -448,20 +449,29 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
           if insecure: newContext(verifyMode = CVerifyNone)
           elif caFile.len > 0: newContext(verifyMode = CVerifyPeer, caFile = caFile)
           else: newContext(verifyMode = CVerifyPeer)
-        newHttpClient(timeout = 60_000, sslContext = ctx)
+        newAsyncHttpClient(sslContext = ctx)
       else:
-        newHttpClient(timeout = 60_000, sslContext = nil)
+        newAsyncHttpClient(sslContext = nil)
     else:
-      newHttpClient(timeout = 60_000)
+      newAsyncHttpClient()
   defer: client.close()
   client.headers["Content-Type"] = "multipart/form-data; boundary=" & boundary
   result.bytesUploaded = body.len
   try:
-    let resp = client.request(url, HttpPost, body)
+    let requestFuture = client.request(url, HttpPost, body)
+    if not waitFor requestFuture.withTimeout(60_000):
+      result.error = "publish failed: request timed out after 60000 ms"
+      return
+    let resp = requestFuture.read()
     result.statusCode = int(resp.code)
-    result.responseBody = resp.body
+    let bodyFuture = resp.body
+    if not waitFor bodyFuture.withTimeout(60_000):
+      result.error = "publish failed: response body timed out after 60000 ms"
+      return
+    result.responseBody = bodyFuture.read()
     if result.statusCode >= 300:
-      result.error = "publish failed: HTTP " & $resp.code & " " & resp.body
+      result.error = "publish failed: HTTP " & $resp.code & " " &
+        result.responseBody
       return
     result.ok = true
   except CatchableError as e:

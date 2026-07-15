@@ -344,6 +344,10 @@ proc handlePublish*(s: BinaryCacheServerState;
 # ---------------------------------------------------------------------------
 
 const
+  MaxPublishBodyBytes* = 1024 * 1024 * 1024
+    ## The operator handbook permits payloads up to 1 GiB. Nim's
+    ## ``AsyncHttpServer`` defaults to 8 MiB, which rejects ordinary package
+    ## prefixes before the publish handler sees them.
   RoutePrefixManifests = "/manifests/"
   RoutePrefixPayloads = "/payloads/"
   RoutePrefixSentinel = "/sentinel/"
@@ -644,7 +648,7 @@ proc handleRequest*(srv: BinaryCacheHttpServer;
 proc newBinaryCacheHttpServer*(state: BinaryCacheServerState): BinaryCacheHttpServer =
   BinaryCacheHttpServer(
     state: state,
-    server: newAsyncHttpServer(),
+    server: newAsyncHttpServer(maxBody = MaxPublishBodyBytes),
     running: false)
 
 proc parseListenAddr*(addrSpec: string): (string, Port) =
@@ -776,6 +780,9 @@ when defined(ssl):
             if value.toLowerAscii().contains("close"):
               keepAlive = false
         # Body (Content-Length only; the publish path always sends one).
+        if contentLength > MaxPublishBodyBytes:
+          await req.respond(Http413, "request body exceeds 1 GiB limit")
+          break
         if contentLength > 0:
           var body = ""
           while body.len < contentLength:
