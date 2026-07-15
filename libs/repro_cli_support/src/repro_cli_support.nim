@@ -196,7 +196,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--benchmark=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--publish-cache-hits] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--benchmark=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--publish-cache-hits] [--publish-materialized] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " graph [target[#name]] [--view=actions|neighborhood|inputs|dependents|blast-radius|critical-path|partition-candidates] [--focus=ACTION] [--path=PATH] [--run=last|ID] [--kind=dylib] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
           programName &
@@ -5973,6 +5973,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         dryRun = false;
                         forceRebuild = false;
                         publishCacheHits = false;
+                        publishMaterialized = false;
                         skipCmakeRegeneration = false;
                         bypassRunQuotaExplicit = false;
                         benchmarkPath = "";
@@ -6282,7 +6283,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     try:
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
-      buildResult = runBuild(graph(scheduledActions, lowered.pools), engineConfig)
+      let scheduledGraph = graph(scheduledActions, lowered.pools)
+      if publishMaterialized:
+        buildResult = publishMaterializedBinaryCacheEntries(
+          scheduledGraph, engineConfig.binaryCachePublisher)
+      else:
+        buildResult = runBuild(scheduledGraph, engineConfig)
     except CatchableError:
       progressRenderer.finishProgress()
       raise
@@ -6684,6 +6690,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           dryRun = dryRun,
           forceRebuild = forceRebuild,
           publishCacheHits = publishCacheHits,
+          publishMaterialized = publishMaterialized,
           skipCmakeRegeneration = skipCmakeRegeneration,
           bypassRunQuotaExplicit = bypassRunQuotaExplicit,
           eventSink = eventSink,
@@ -6900,6 +6907,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             dryRun = dryRun,
             forceRebuild = forceRebuild,
             publishCacheHits = publishCacheHits,
+            publishMaterialized = publishMaterialized,
             skipCmakeRegeneration = skipCmakeRegeneration,
             bypassRunQuotaExplicit = bypassRunQuotaExplicit,
             eventSink = eventSink,
@@ -7620,7 +7628,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     try:
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
-      buildResult = runBuild(graph(scheduledActions, lowered.pools), engineConfig)
+      let scheduledGraph = graph(scheduledActions, lowered.pools)
+      if publishMaterialized:
+        buildResult = publishMaterializedBinaryCacheEntries(
+          scheduledGraph, engineConfig.binaryCachePublisher)
+      else:
+        buildResult = runBuild(scheduledGraph, engineConfig)
     except CatchableError:
       progressRenderer.finishProgress()
       raise
@@ -13361,6 +13374,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var dryRun = false
   var forceRebuild = false
   var publishCacheHits = false
+  var publishMaterialized = false
   var skipCmakeRegeneration = false
   # MO-1 — committed solved-graph lock. ``--lock <file>`` selects an
   # alternate committed lock (default = ``<projectDir>/repro.lock``);
@@ -13471,6 +13485,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       forceRebuild = true
     elif arg == "--publish-cache-hits":
       publishCacheHits = true
+    elif arg == "--publish-materialized":
+      publishMaterialized = true
     elif arg == "--skip-cmake-regeneration":
       skipCmakeRegeneration = true
     elif arg == "--no-runquota":
@@ -13720,6 +13736,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         dryRun = dryRun,
         forceRebuild = forceRebuild,
         publishCacheHits = publishCacheHits,
+        publishMaterialized = publishMaterialized,
         skipCmakeRegeneration = skipCmakeRegeneration,
         bypassRunQuotaExplicit = bypassRunQuota,
         benchmarkPath = benchmarkPath,

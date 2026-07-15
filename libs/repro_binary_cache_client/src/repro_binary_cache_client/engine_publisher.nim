@@ -317,10 +317,8 @@ proc maybeAutoStartReproCache*(endpoint: string): bool =
     return probeEndpoint(host, port)
 
 proc deducePublishPrefix(req: BinaryCachePublishRequest): string =
-  ## M9.L.4-refactor Step B prefix-deduction heuristic. The from-source
-  ## conventions don't (yet) carry a dedicated ``publishPrefix`` field
-  ## on the ``BuildActionDef`` — the closure infers it from ``cwd``
-  ## (the recipe's project root) + ``declaredOutputs``.
+  ## Prefer the public-interface root selected by the engine. Legacy
+  ## requests retain the original declared-output heuristic.
   ##
   ## Rules:
   ##   1. If the action has no declared outputs, fall back to ``cwd``.
@@ -328,6 +326,8 @@ proc deducePublishPrefix(req: BinaryCachePublishRequest): string =
   ##   3. Otherwise treat the first declared output as a single file
   ##      prefix (``publishInProcess`` handles single-file prefixes via
   ##      ``packSingleFilePrefix``).
+  if req.publishPrefix.len > 0:
+    return req.publishPrefix
   if req.declaredOutputs.len == 0:
     return req.cwd
   let first = req.declaredOutputs[0]

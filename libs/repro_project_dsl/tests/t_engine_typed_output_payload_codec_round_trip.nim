@@ -7,7 +7,7 @@
 ## ``BuildActionDef`` in-line, encodes it, decodes it, and asserts on
 ## every field.
 
-import std/[unittest]
+import std/[options, unittest]
 
 import repro_project_dsl
 
@@ -37,6 +37,13 @@ suite "t_engine_typed_output_payload_codec_round_trip":
       commandStatsId: "build-foo",
       dependencyPolicy: defaultDependencyPolicy(),
       actionCachePolicy: defaultActionCachePolicy(),
+      publishToBinaryCache: true,
+      cacheEntryIdentity: some(newCacheEntryIdentity(
+        packageName = "foo",
+        packageVersion = "1.0",
+        platform = publicInterfaceTriple(),
+        toolchain = publicInterfaceToolchain("meson"),
+        providerRevision = "test-revision")),
       targetNames: @["foo"],
       typedOutputs: @[
         BuildActionTypedOutput(
@@ -57,6 +64,10 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     check decoded.deps == action.deps
     check decoded.inputs == action.inputs
     check decoded.outputs == action.outputs
+    check decoded.publishToBinaryCache
+    check decoded.cacheEntryIdentity.isSome
+    check deriveCacheEntryKeyHex(decoded.cacheEntryIdentity.get()) ==
+      deriveCacheEntryKeyHex(action.cacheEntryIdentity.get())
     check decoded.targetNames == action.targetNames
     check decoded.typedOutputs.len == 2
     check decoded.typedOutputs[0].fieldName == "testBinary"

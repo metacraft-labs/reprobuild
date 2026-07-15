@@ -85,7 +85,8 @@ proc fingerprintForPayload(payload: string): ContentDigest =
 proc oneAction(outputPath, payload: string;
                publish: bool;
                identity: Option[CacheEntryIdentity];
-               fingerprintToken = "default"): BuildGraph =
+               fingerprintToken = "default";
+               publishPrefix = ""): BuildGraph =
   let action = BuildAction(
     kind: bakWriteText,
     id: "t-bcp-write",
@@ -97,7 +98,9 @@ proc oneAction(outputPath, payload: string;
     weakFingerprint: fingerprintForPayload(payload & "|" & fingerprintToken),
     builtinText: payload,
     publishToBinaryCache: publish,
-    cacheEntryIdentity: identity)
+    cacheEntryIdentity: identity,
+    declaredOutputs:
+      if publishPrefix.len > 0: @[publishPrefix] else: @[])
   graph(@[action], newSeq[BuildPool]())
 
 proc producerCfg(cacheRoot: string; recorder: Recorder): BuildEngineConfig =
@@ -127,7 +130,8 @@ suite "M9.L.4-refactor Step A — engine binary-cache publisher hook":
       outputPath, payload,
       publish = true,
       identity = some(identity),
-      fingerprintToken = "fires")
+      fingerprintToken = "fires",
+      publishPrefix = absolutePath(TmpDir / "outputs-fires"))
     let res = runBuild(g, producerCfg(cacheRoot, recorder))
     check res.results.len == 1
     check res.results[0].status == asSucceeded
@@ -138,6 +142,7 @@ suite "M9.L.4-refactor Step A — engine binary-cache publisher hook":
     check req.identity.packageName == "test-pkg"
     check req.identity.packageVersion == "1.0.0"
     check req.identity.providerRevision == "rev-fires"
+    check req.publishPrefix == absolutePath(TmpDir / "outputs-fires")
     check req.declaredOutputs == @[outputPath]
     check req.recordOutputs.len == 1
     check req.recordOutputs[0] == outputPath
@@ -192,6 +197,31 @@ suite "M9.L.4-refactor Step A — engine binary-cache publisher hook":
     check backfill.results[0].status == asUpToDate
     check recorder.invocations.len == 1
     check recorder.invocations[0].declaredOutputs == @[outputPath]
+
+  test "materialized backfill publishes without launching the action":
+    resetTmp()
+    let prefix = absolutePath(TmpDir / "materialized-prefix")
+    let outputPath = prefix / "artifact.txt"
+    createDir(prefix)
+    writeFile(outputPath, "already built\n")
+    let recorder = newRecorder()
+    let identity = stubIdentity("materialized-pkg", "2.0", "materialized-rev")
+    let g = oneAction(
+      outputPath, "would overwrite this\n",
+      publish = true,
+      identity = some(identity),
+      fingerprintToken = "materialized",
+      publishPrefix = prefix)
+
+    let backfill = publishMaterializedBinaryCacheEntries(
+      g, makePublisher(recorder))
+    check backfill.results.len == 1
+    check backfill.results[0].status == asUpToDate
+    check not backfill.results[0].launched
+    check readFile(outputPath) == "already built\n"
+    check recorder.invocations.len == 1
+    check recorder.invocations[0].publishPrefix == prefix
+    check recorder.invocations[0].identity.packageName == "materialized-pkg"
 
   test "publisher is NOT invoked when publishToBinaryCache = false":
     resetTmp()

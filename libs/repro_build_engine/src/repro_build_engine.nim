@@ -616,6 +616,9 @@ type
     weakFingerprint*: ContentDigest
     identity*: CacheEntryIdentity
     cwd*: string
+    publishPrefix*: string
+      ## Explicit public-interface root to package. Empty preserves the
+      ## legacy first-declared-output fallback in the publisher.
     declaredOutputs*: seq[string]
     recordOutputs*: seq[string]
 
@@ -4073,6 +4076,65 @@ proc warmActionCacheFor(root: string): WarmActionCache =
   result = WarmActionCache(cache: openActionCache(root), evidence: evidence)
   processWarmActionCaches[root] = result
 
+proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
+    publisher: BinaryCachePublisher): BuildRunResult =
+  ## Publish tagged public-interface roots that are already materialized,
+  ## without scheduling or launching build actions. This is an explicit
+  ## operator backfill path: graph identities still select the cache keys,
+  ## while the existing filesystem trees provide the payloads.
+  for action in g.actions:
+    if not action.publishToBinaryCache or action.cacheEntryIdentity.isNone:
+      continue
+    var item = ActionResult(
+      id: action.id,
+      status: asFailed,
+      cacheDecision: cdNotCacheable,
+      reason: "materialized-binary-cache-publish")
+    let prefix =
+      if action.declaredOutputs.len == 1:
+        action.declaredOutputs[0]
+      elif action.outputs.len > 0:
+        action.outputs[0]
+      else:
+        ""
+    if publisher == nil:
+      item.stderr = "binary-cache publisher is not configured"
+      result.results.add(item)
+      continue
+    if prefix.len == 0 or
+        (not fileExists(prefix) and not dirExists(prefix)):
+      item.stderr = "materialized binary-cache prefix does not exist: " &
+        (if prefix.len > 0: prefix else: "<empty>")
+      result.results.add(item)
+      continue
+    var identity = action.cacheEntryIdentity.get()
+    let platformTag =
+      if action.cachePlatformTag.len == 0: NativeTriple
+      else: action.cachePlatformTag
+    identity.addOption(CachePlatformTagOptionKey, platformTag)
+    let request = BinaryCachePublishRequest(
+      actionId: action.id,
+      weakFingerprint: action.weakFingerprint,
+      identity: identity,
+      cwd: action.cwd,
+      publishPrefix: prefix,
+      declaredOutputs: action.outputs,
+      recordOutputs: @[])
+    let publishResult =
+      try: publisher(request)
+      except CatchableError as e:
+        BinaryCachePublishResult(
+          ok: false,
+          statusCode: 0,
+          error: "binary-cache publisher raised: " & e.msg)
+    if publishResult.ok:
+      item.status = asUpToDate
+      item.reason = "materialized-binary-cache-published"
+    else:
+      item.exitCode = publishResult.statusCode
+      item.stderr = publishResult.error
+    result.results.add(item)
+
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var stats: BuildStats
   proc statStart(): float =
@@ -4274,6 +4336,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       weakFingerprint: action.weakFingerprint,
       identity: folded,
       cwd: action.cwd,
+      publishPrefix:
+        if action.publishToBinaryCache and action.declaredOutputs.len == 1:
+          action.declaredOutputs[0]
+        else:
+          "",
       declaredOutputs: action.outputs,
       recordOutputs: recordOutputs)
     let res =

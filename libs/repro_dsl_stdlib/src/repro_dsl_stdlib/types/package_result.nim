@@ -25,9 +25,10 @@
 ## See [[file:Reprobuild-Standard-Library.md][Reprobuild-Standard-Library]]
 ## §"Multi-artifact result types" for the cross-tool contract.
 
-import std/[os, strutils, tables]
+import std/[options, os, strutils, tables]
 
 import repro_project_dsl
+import repro_project_dsl/source_cache_identity
 import ./library
 import ./executable
 import ./install_mirror_resolver
@@ -164,7 +165,8 @@ proc componentPath(components: Table[string, string]; name: string): string =
 proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
                             buildDir, destdir, packageName, kind, name: string)
 proc emitInstallTreeMirror*(installEdge: BuildActionDef;
-                            buildDir, destdir, packageName: string)
+                            buildDir, destdir, packageName,
+                            conventionTag: string)
 proc emitStageCopyAlias(installEdge: BuildActionDef;
                         buildDir, destdir, packageName, aliasName,
                         sourceName: string)
@@ -190,7 +192,7 @@ proc executable*(r: MesonPackageResult; name: string): Executable =
   # ``.pc`` / ``include`` / ``lib`` tree at a layout-stable location.
   # Idempotent (one mirror per package) — see ``emitInstallTreeMirror``.
   emitInstallTreeMirror(r.installEdge, "", r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "meson")
   newExecutable(
     install = r.installEdge,
     executableName = name,
@@ -209,7 +211,7 @@ proc library*(r: MesonPackageResult; name: string): Library =
     currentOwningPackage(), "library", name)
   # M9.R.14e.2 — install-tree mirror (see executable() above).
   emitInstallTreeMirror(r.installEdge, "", r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "meson")
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))
@@ -259,7 +261,7 @@ proc installTreeMirror*(r: MesonPackageResult) =
   ## pure-header packages). See the AutotoolsPackageResult variant for
   ## the rationale.
   emitInstallTreeMirror(r.installEdge, "", r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "meson")
 
 # ---------------------------------------------------------------------------
 # Slicing methods — CmakePackageResult
@@ -277,7 +279,7 @@ proc executable*(r: CmakePackageResult; name: string): Executable =
   emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
     currentOwningPackage(), "executable", name)
   emitInstallTreeMirror(r.installEdge, "", r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "cmake")
   newExecutable(
     install = r.installEdge,
     executableName = name,
@@ -294,7 +296,7 @@ proc library*(r: CmakePackageResult; name: string): Library =
   emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
     currentOwningPackage(), "library", name)
   emitInstallTreeMirror(r.installEdge, "", r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "cmake")
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))
@@ -1372,7 +1374,8 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script
 
 proc emitInstallTreeMirror*(installEdge: BuildActionDef;
-                            buildDir, destdir, packageName: string) =
+                            buildDir, destdir, packageName,
+                            conventionTag: string) =
   ## DSL-port M9.R.14e.2 — mirror the recipe's DESTDIR install tree
   ## (``<recipeRoot>/<buildDir>/<destdir>/usr/``) to the canonical
   ## stable location at ``<recipeRoot>/.repro/output/install/usr/`` so
@@ -1543,6 +1546,11 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   script.add(emitInstallMirrorReadOnlyEnforcement(dstUsrRoot))
   let argv = @["sh", "-c", script]
   let stageId = "install-mirror-" & sanitizeStageCopyName(packageName)
+  let packageVersion = block:
+    let versions = registeredVersions(packageName)
+    if versions.len > 0: versions[^1].version else: ""
+  let cacheIdentity = sourceCacheEntryIdentity(
+    projectRoot, packageName, packageVersion, conventionTag)
   # M9.R.15q.5.1 — thread every declared dep onto the install-mirror's
   # tool-identity-ref list so the engine populates ``LD_LIBRARY_PATH``
   # (and the rest of the auxiliary search-path channels) from each
@@ -1569,7 +1577,10 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.install_mirror",
-    toolIdentityRefs = mirrorToolRefs)
+    toolIdentityRefs = mirrorToolRefs,
+    publishToBinaryCache = true,
+    cacheEntryIdentity = some(cacheIdentity),
+    declaredOutputs = @[dstUsrRoot])
 
 proc m9r14dPascalToKebab*(value: string): string =
   ## DSL-port M9.R.14d.7c — convert ``libwaylandClient`` → ``libwayland-client``.
@@ -2125,7 +2136,7 @@ proc executable*(r: AutotoolsPackageResult; name: string): Executable =
   # M9.R.14e.2 — install-tree mirror at the canonical layout-stable
   # location ``.repro/output/install/usr/`` (see ``emitInstallTreeMirror``).
   emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "autotools")
   newExecutable(
     install = r.installEdge,
     executableName = name,
@@ -2146,7 +2157,7 @@ proc executableAlias*(r: AutotoolsPackageResult; aliasName, sourceName: string):
   emitStageCopyAlias(r.installEdge, r.buildDir, r.destdir,
     currentOwningPackage(), aliasName, sourceName)
   emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "autotools")
   newExecutable(
     install = r.installEdge,
     executableName = aliasName,
@@ -2156,7 +2167,7 @@ proc library*(r: AutotoolsPackageResult; name: string): Library =
   emitAutotoolsStageCopy(r.installEdge, r.buildDir, r.destdir,
     currentOwningPackage(), "library", name)
   emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "autotools")
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))
@@ -2174,4 +2185,4 @@ proc installTreeMirror*(r: AutotoolsPackageResult) =
   ## ``.repro/output/install/usr/`` and consumer recipes' M9.R.28.4
   ## pkgconfig-only-package fast-path can't see the .pc / .h files.
   emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "autotools")

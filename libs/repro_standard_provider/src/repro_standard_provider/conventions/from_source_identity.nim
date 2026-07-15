@@ -53,11 +53,11 @@
 ##   * ``reprobuild-specs/M9-DSL-Port-Engine-Provider.milestones.org``
 ##     §M9.L for the milestone history.
 
-import std/[options, os, strutils]
+import std/[options]
 
-import repro_core
 import repro_provider_runtime
 import repro_project_dsl
+import repro_project_dsl/source_cache_identity
 
 # M9.L.4 binary-cache identity wiring. ``cache_key`` derives the on-wire
 # entry-key hex from a ``CacheEntryIdentity`` tuple; ``types`` carries
@@ -68,24 +68,12 @@ import repro_project_dsl
 # below can be unit-tested without dragging the whole DSL umbrella in.
 import repro_binary_cache_client/cache_key
 import repro_binary_cache_server/types as bcs_types
-import blake3
-
 proc providerRevisionHex*(projectRoot: string): string =
   ## BLAKE3 of the recipe file bytes, truncated to 32 hex chars. Empty
   ## when the recipe file can't be read (the publish key still derives
   ## via the rest of the identity tuple — the empty string round-trips
   ## through the canonical encoder).
-  let match = resolveProjectFile(projectRoot)
-  if match.path.len == 0:
-    return ""
-  let bodyStr =
-    try: readFile(extendedPath(match.path))
-    except CatchableError: ""
-  if bodyStr.len == 0:
-    return ""
-  let dig = blake3.digest(bodyStr)
-  let full = blake3.toHex(dig)
-  if full.len >= 32: full[0 ..< 32] else: full
+  sourceProviderRevisionHex(projectRoot)
 
 proc m9L4PlatformTriple*(): bcs_types.PlatformTriple =
   ## Hardcoded Linux x86_64 GNU glibc triple — the M9.L.4 vertical-slice
@@ -125,14 +113,8 @@ proc deriveCacheKeyHex*(projectRoot, packageName, toolchainName: string): string
     if vs.len > 0:
       v = vs[^1].version
     v
-  var identity = newCacheEntryIdentity(
-    packageName = packageName,
-    packageVersion = versionStr,
-    platform = m9L4PlatformTriple(),
-    toolchain = m9L4ToolchainIdentity(toolchainName),
-    providerRevision = providerRevisionHex(projectRoot))
-  # options + depClosure intentionally empty for v1.
-  deriveCacheEntryKeyHex(identity)
+  deriveCacheEntryKeyHex(sourceCacheEntryIdentity(
+    projectRoot, packageName, versionStr, toolchainName))
 
 proc computeCacheEntryIdentity*(projectRoot, packageName,
                                 conventionTag: string):
@@ -158,9 +140,5 @@ proc computeCacheEntryIdentity*(projectRoot, packageName,
     if vs.len > 0:
       v = vs[^1].version
     v
-  newCacheEntryIdentity(
-    packageName = packageName,
-    packageVersion = versionStr,
-    platform = m9L4PlatformTriple(),
-    toolchain = m9L4ToolchainIdentity(conventionTag),
-    providerRevision = providerRevisionHex(projectRoot))
+  sourceCacheEntryIdentity(
+    projectRoot, packageName, versionStr, conventionTag)
