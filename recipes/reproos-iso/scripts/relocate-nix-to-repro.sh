@@ -350,18 +350,15 @@ echo "[relocate-nix-to-repro] rewrote $links_rewritten symlinks (/nix/store -> /
 # every text file under the same roots used by the ELF relocation pass,
 # plus configuration scripts under $STAGE_DIR/etc.
 #
-# We use sed for shebang rewriting; only the first 4 bytes are checked
-# against ``#!/n`` so a binary file with embedded /nix/store strings
-# isn't accidentally rewritten (binaries are handled by patchelf above).
+# Use one binary-safe grep traversal to identify candidate scripts.  Spawning
+# head and grep once per staged file makes large header and locale trees
+# dominate image builds and floods the I/O monitor with redundant events.
+# The first-line check below remains the authority, so matches later in a text
+# file are ignored and binaries are still handled only by patchelf above.
 # ---------------------------------------------------------------------------
 
 shebangs_rewritten=0
-while IFS= read -r f; do
-  # First 4 bytes: ``#!/n`` (the "n" prefix of "/nix/").
-  if ! head -c 4 "$f" 2>/dev/null | grep -qF '#!/n'; then
-    continue
-  fi
-  # Confirm it's actually a #!/nix/store/ shebang.
+while IFS= read -r -d '' f; do
   first_line=$(head -n1 "$f" 2>/dev/null || true)
   case "$first_line" in
     '#!/nix/store/'*) : ;;
@@ -375,7 +372,10 @@ while IFS= read -r f; do
   chmod "$mode" "$tmp"
   mv -f "$tmp" "$f"
   shebangs_rewritten=$((shebangs_rewritten + 1))
-done < <(find "${scan_dirs[@]}" "$STAGE_DIR/etc" -type f 2>/dev/null)
+done < <(
+  grep -rIlZ -m1 '^#!/nix/store/' \
+    "${scan_dirs[@]}" "$STAGE_DIR/etc" 2>/dev/null || true
+)
 echo "[relocate-nix-to-repro] rewrote $shebangs_rewritten shebangs (#!/nix/store -> #!/repro/store)"
 
 # ---------------------------------------------------------------------------
