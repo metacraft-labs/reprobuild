@@ -262,7 +262,9 @@ package reprobuild:
   # The A2/A2.5/A3/A4 binary-cache integration tests under
   # ``libs/repro_binary_cache_client/tests/`` spawn the
   # ``repro-binary-cache`` server daemon (and, for the A3 CLI gate, the
-  # ``repro-binary-cache-client`` CLI) as a subprocess from
+  # ``repro_binary_cache_client_cli`` test driver — a thin wrapper over
+  # the shared ``runCacheSubcommand`` dispatch that now backs
+  # ``repro cache``) as a subprocess from
   # ``build/test-bin/``. These were previously built only by the
   # Windows-only ``scripts/run-a2-gate.ps1`` gate, so the helpers were
   # absent on Linux/macOS and every binary-cache integration test
@@ -779,11 +781,15 @@ package reprobuild:
 
     # Binary-cache integration-test subprocess helpers (A2/A2.5/A3/A4).
     #
-    # The ``repro-binary-cache`` server daemon and the
-    # ``repro-binary-cache-client`` CLI are the SAME shipping app
-    # sources used under ``apps/``, but the integration tests spawn them
-    # from ``build/test-bin/`` (alongside the other test helpers) rather
-    # than from ``build/bin/``. Previously these were produced only by
+    # The ``repro-binary-cache`` server daemon is the SAME shipping app
+    # source used under ``apps/``. The client-side driver
+    # (``repro_binary_cache_client_cli``) is a test-only wrapper over the
+    # shared ``runCacheSubcommand`` dispatch that backs the shipping
+    # ``repro cache`` subcommand — the standalone
+    # ``repro-binary-cache-client`` binary was retired (Binary-Caches.md
+    # §"Client CLI Surface"). The integration tests spawn both from
+    # ``build/test-bin/`` (alongside the other test helpers) rather than
+    # from ``build/bin/``. Previously these were produced only by
     # the Windows-only ``scripts/run-a2-gate.ps1`` gate, so the helper
     # binaries never existed on Linux/macOS and every binary-cache
     # integration test failed its ``fileExists`` guard. Declaring them
@@ -815,7 +821,7 @@ package reprobuild:
       actionId = "reprobuild.test_helpers.repro_binary_cache_m6"))
 
     reprobuildTestHelpersActions.add(nim.c(
-      source = "apps/repro-binary-cache-client/repro_binary_cache_client_cli.nim",
+      source = "libs/repro_binary_cache_client/tests/repro_binary_cache_client_cli.nim",
       binary = "build/test-bin/repro_binary_cache_client_cli",
       defines = @["ssl"],
       paths = sourceOnlyNimPaths,

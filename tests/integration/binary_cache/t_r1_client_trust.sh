@@ -29,7 +29,7 @@ if [[ ! -f "$CLI_BIN" ]]; then
 fi
 [[ -f "$CLI_BIN" ]] || a2_fail "CLI binary missing; build with:
   nim c -o:build/test-bin/repro_binary_cache_client_cli.exe \\
-    apps/repro-binary-cache-client/repro_binary_cache_client_cli.nim"
+    libs/repro_binary_cache_client/tests/repro_binary_cache_client_cli.nim"
 
 a2_start_server
 TMP="$(mktemp -d -t r1trust-XXXXXX)"

@@ -45,7 +45,7 @@ fi
 if [[ ! -f "$CLI_BIN" ]]; then
   echo "transcode-r4-chain.sh: CLI binary missing; build with:" >&2
   echo "  nim c -o:build/test-bin/repro_binary_cache_client_cli.exe \\" >&2
-  echo "    apps/repro-binary-cache-client/repro_binary_cache_client_cli.nim" >&2
+  echo "    libs/repro_binary_cache_client/tests/repro_binary_cache_client_cli.nim" >&2
   exit 2
 fi
 

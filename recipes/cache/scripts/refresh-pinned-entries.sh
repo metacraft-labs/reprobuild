@@ -78,7 +78,7 @@ fi
 if [[ ! -x "$CLIENT_CLI" && ! -f "$CLIENT_CLI" ]]; then
   echo "refresh-pinned-entries: client CLI binary not built. Build with:" >&2
   echo "  nim c -o:build/test-bin/repro_binary_cache_client_cli.exe \\" >&2
-  echo "    apps/repro-binary-cache-client/repro_binary_cache_client_cli.nim" >&2
+  echo "    libs/repro_binary_cache_client/tests/repro_binary_cache_client_cli.nim" >&2
   exit 1
 fi
 

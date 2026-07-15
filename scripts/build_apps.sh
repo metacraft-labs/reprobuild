@@ -342,8 +342,10 @@ esac
 # ``libs/repro_binary_cache_client/src/repro_binary_cache_client/decompress.nim``
 # resolves from the executable's own directory at LoadLibrary time (the
 # streaming substitute path decompresses zstd frames via dlopen, not a
-# DT_NEEDED/import-lib dependency). Without this, a fresh-shell
-# ``repro-binary-cache-client-cli.exe substitute`` crashes the first time it
+# DT_NEEDED/import-lib dependency). The substitute path now ships inside
+# ``repro.exe`` as the ``repro cache substitute`` subcommand (the standalone
+# ``repro-binary-cache-client`` binary was retired). Without this, a
+# fresh-shell ``repro.exe cache substitute`` crashes the first time it
 # hits a zstd-compressed payload with ``could not load: libzstd.dll`` because
 # Win32's LoadLibrary searches the .exe's dir, then system dirs, then PATH --
 # and only a provisioned dev shell puts libzstd.dll on PATH.
@@ -374,7 +376,7 @@ case "$(uname -s)" in
         cp -f "${zstd_src_dll}" build/bin/libzstd.dll
         echo "Staged libzstd.dll from ${zstd_src_dll} -> build/bin/libzstd.dll"
       else
-        echo "warning: zstd.exe on PATH at ${zstd_exe} but no sibling libzstd.dll (checked ${zstd_src_dir}/libzstd.dll and ${zstd_src_dir}/dll/libzstd.dll); repro-binary-cache-client-cli.exe will fail to decompress payloads in a clean shell" >&2
+        echo "warning: zstd.exe on PATH at ${zstd_exe} but no sibling libzstd.dll (checked ${zstd_src_dir}/libzstd.dll and ${zstd_src_dir}/dll/libzstd.dll); repro.exe cache substitute will fail to decompress payloads in a clean shell" >&2
       fi
     else
       # TODO(Windows zstd provisioning): once a windows/ensure-zstd.ps1
@@ -384,7 +386,7 @@ case "$(uname -s)" in
       # warns. Intended source: MSYS2 ``pacman -S mingw-w64-x86_64-zstd`` (bin/
       # co-located) or the facebook/zstd v1.5.6 win64 release used by
       # libs/repro_dsl_stdlib/.../packages/zstd.nim.
-      echo "warning: zstd.exe not on PATH; cannot stage libzstd.dll next to repro-binary-cache-client-cli.exe -- provision zstd (MSYS2 mingw-w64-x86_64-zstd) first" >&2
+      echo "warning: zstd.exe not on PATH; cannot stage libzstd.dll next to repro.exe -- provision zstd (MSYS2 mingw-w64-x86_64-zstd) first" >&2
     fi
     ;;
 esac
@@ -395,9 +397,9 @@ esac
 # FFI in
 # ``libs/repro_local_store/src/repro_local_store/sqlite3_binding.nim``
 # resolves from the executable's own directory at LoadLibrary time. The
-# client CLI links ``repro_local_store``, so it HARD-REQUIRES this dynlib even
-# for ``derive-key`` -- without it a fresh-shell
-# ``repro-binary-cache-client.exe derive-key`` crashes at module init with
+# ``repro cache`` dispatch links ``repro_local_store`` (via repro.exe), so it
+# HARD-REQUIRES this dynlib even for ``derive-key`` -- without it a fresh-shell
+# ``repro.exe cache derive-key`` crashes at module init with
 # ``could not load: (sqlite3_64|sqlite3|sqlite3_32).dll`` because Win32's
 # LoadLibrary searches the .exe's dir, then system dirs, then PATH -- and only
 # a provisioned dev shell puts the Nim ``dist`` dir on PATH.
@@ -419,10 +421,10 @@ esac
 # no-op on Linux (guarded by ``uname -s``). The PRODUCTION seed's
 # sqlite3_64.dll is therefore captured from the GUEST's Nim install (the M3b
 # approach (b) seed: it is copied out of ``C:\dev-deps\nim\...`` next to the
-# guest-built repro-binary-cache-client.exe), NOT synthesised on Linux. This
+# guest-built repro.exe), NOT synthesised on Linux. This
 # build-time staging covers the from-source Windows build path (install-
 # reprobuild.ps1 on the guest), so a guest-side ``build_apps.sh`` run drops
-# sqlite3_64.dll next to repro.exe / the client reproducibly.
+# sqlite3_64.dll next to repro.exe reproducibly.
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
     sqlite_src_dll=""
@@ -464,7 +466,7 @@ case "$(uname -s)" in
       # nothing and only warns. Intended source: the guest's Nim install
       # (dist/sqlite3_64.dll), which is exactly where the M3b production seed's
       # sqlite3_64.dll was captured from.
-      echo "warning: sqlite3_64.dll not found near nim.exe or on PATH; cannot stage it next to repro-binary-cache-client.exe -- the client will fail 'could not load: sqlite3_64.dll' in a clean shell until Nim's dist sqlite dll is provisioned" >&2
+      echo "warning: sqlite3_64.dll not found near nim.exe or on PATH; cannot stage it next to repro.exe -- repro cache will fail 'could not load: sqlite3_64.dll' in a clean shell until Nim's dist sqlite dll is provisioned" >&2
     fi
     ;;
 esac

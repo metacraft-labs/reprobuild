@@ -338,8 +338,8 @@
             # .rodata-bake guard that clears NIX_LDFLAGS/LD_LIBRARY_PATH), so it
             # is not DT_NEEDED and the shrink strips any clingo rpath too.
             # Append clingo's lib dir alongside zstd so every reprobuild binary
-            # (repro, repro-binary-cache, repro-binary-cache-client — the latter
-            # two are overrideAttrs of this derivation and inherit this
+            # (repro, repro-binary-cache — the latter is an overrideAttrs of
+            # this derivation and inherits this
             # postFixup) resolves its clingo dlopen via its own DT_RPATH, with no
             # external LD_LIBRARY_PATH. This lets the nixos-modules
             # `mcl-repro-deploy-agent` unit drop its LD_LIBRARY_PATH workaround.
@@ -387,28 +387,13 @@
             type = "app";
             program = "${reproBinaryCache}/bin/repro-binary-cache";
           };
-          # Windows-Runner-Binary-Cache-Deploy M3a — expose the binary-cache
-          # client CLI as its own package so the Windows runner deploy path (and
-          # the nixos-modules integration tests) have a runnable artifact to
-          # reference. Same `just build` closure as `reprobuild` (the
-          # installPhase copies every build/bin/* entrypoint, including the
-          # newly-added build/bin/repro-binary-cache-client); we only
-          # retarget `meta.mainProgram` so `lib.getExe` resolves the CLI. It
-          # inherits the zstd `postFixup` DT_RPATH for free — the streaming
-          # substitute path dlopen()s libzstd.so.1, so without that rpath the
-          # CLI would fail at the first payload transfer, exactly like the
-          # daemon did under the M2 cross-host substitute gate.
-          reproBinaryCacheClient = reprobuild.overrideAttrs (old: {
-            pname = "repro-binary-cache-client";
-            meta = (old.meta or { }) // {
-              description = "Reprobuild binary-cache client CLI (publish/substitute/lookup)";
-              mainProgram = "repro-binary-cache-client";
-            };
-          });
-          reproBinaryCacheClientApp = {
-            type = "app";
-            program = "${reproBinaryCacheClient}/bin/repro-binary-cache-client";
-          };
+          # Binary-Caches.md §"Client CLI Surface (`repro cache`)" — the
+          # standalone `repro-binary-cache-client` package/app was RETIRED. Its
+          # toolset (publish/substitute/lookup/derive-key/gen-key) was folded
+          # into the `repro cache <subcommand>` dispatch shipped by the main
+          # `reprobuild` package (`bin/repro`). Callers that used
+          # `packages.repro-binary-cache-client` now use `packages.reprobuild`
+          # and invoke `repro cache …`.
           # Portable/self-contained `repro`: package the ENTIRE `reprobuild`
           # store closure into one self-extracting, relocatable executable so
           # the CLI runs on a plain host (e.g. an im2-debian-cloud GitHub
@@ -446,12 +431,10 @@
           apps.default = reproApp;
           apps.repro = reproApp;
           apps.repro-binary-cache = reproBinaryCacheApp;
-          apps.repro-binary-cache-client = reproBinaryCacheClientApp;
 
           packages.default = reprobuild;
           packages.reprobuild = reprobuild;
           packages.repro-binary-cache = reproBinaryCache;
-          packages.repro-binary-cache-client = reproBinaryCacheClient;
           # Self-contained, /nix/store-free `repro` (see `reproPortable`).
           packages.repro-portable = reproPortable;
 

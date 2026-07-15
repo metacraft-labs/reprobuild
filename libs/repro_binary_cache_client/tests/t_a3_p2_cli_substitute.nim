@@ -86,7 +86,12 @@ suite "A3 P2 — CLI substitute / publish / lookup":
     check fileExists(CliBinary)
     let (code, outp) = runCli(["--help"])
     check code == 0
-    check outp.contains("repro-binary-cache-client")
+    # The standalone ``repro-binary-cache-client`` banner was retired; the
+    # toolset now ships as ``repro cache <subcommand>`` (Binary-Caches.md
+    # §"Client CLI Surface"). The test driver forwards the bare verb into
+    # the same shared ``runCacheSubcommand`` dispatch, whose usage banner
+    # reads ``repro cache``.
+    check outp.contains("repro cache")
 
   test "publish + lookup + substitute round-trip":
     let port = pickPort()

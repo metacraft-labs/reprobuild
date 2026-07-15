@@ -130,6 +130,11 @@ import repro_lock_store
 # engine_publisher.nim`` for the contract.
 import repro_binary_cache_client/engine_publisher
 import repro_binary_cache_client/caches_config as bcCachesConfig
+# Binary-Caches.md §"Client CLI Surface (`repro cache`)" — the shared
+# single-entry publish/substitute dispatch (folded out of the retired
+# standalone ``repro-binary-cache-client`` binary). ``runCacheSubcommand``
+# routes ``repro cache <lookup|substitute|publish|derive-key|gen-key> …``.
+import repro_binary_cache_client/cli_dispatch as bcCliDispatch
 
 export home.runHomeCommand, home.setPackageCatalogLookup,
        home.PackageCatalogLookup, home.CatalogEnvVar,
@@ -39620,6 +39625,13 @@ const reproTopLevelCommands = [
   "daemon", "stats", "graph", "why", "deps", "home", "infra", "system",
   "deploy-agent",
   "hardware", "disk", "launch-plan", "locking",
+  # Binary-Caches.md §"Client CLI Surface" — ``repro cache <sub>`` folds
+  # in the retired standalone ``repro-binary-cache-client`` toolset.
+  "cache",
+]
+
+const reproCacheSubcommands = [
+  "lookup", "substitute", "publish", "derive-key", "gen-key",
 ]
 
 const reproLockingSubcommands = [
@@ -39859,6 +39871,7 @@ proc renderCompletionSnippet(shell, reproBin: string): string =
   let topCmds = reproTopLevelCommands.join(" ")
   let wsSubs = reproWorkspaceSubcommands.join(" ")
   let lockingSubs = reproLockingSubcommands.join(" ")
+  let cacheSubs = reproCacheSubcommands.join(" ")
   case shell
   of "bash":
     "# repro bash completion — add to ~/.bashrc:  source <(repro completion bash)\n" &
@@ -39878,21 +39891,28 @@ proc renderCompletionSnippet(shell, reproBin: string): string =
     "    COMPREPLY=( $(compgen -W \"" & lockingSubs & "\" -- \"$cur\") )\n" &
     "    return\n" &
     "  fi\n" &
+    "  if [[ ${COMP_WORDS[1]} == cache && $COMP_CWORD -eq 2 ]]; then\n" &
+    "    COMPREPLY=( $(compgen -W \"" & cacheSubs & "\" -- \"$cur\") )\n" &
+    "    return\n" &
+    "  fi\n" &
     "}\n" &
     "complete -F _repro_complete repro\n"
   of "zsh":
     "# repro zsh completion — add to ~/.zshrc:  source <(repro completion zsh)\n" &
     "_repro() {\n" &
-    "  local -a cmds wscmds lockingcmds\n" &
+    "  local -a cmds wscmds lockingcmds cachecmds\n" &
     "  cmds=(" & topCmds & ")\n" &
     "  wscmds=(" & wsSubs & ")\n" &
     "  lockingcmds=(" & lockingSubs & ")\n" &
+    "  cachecmds=(" & cacheSubs & ")\n" &
     "  if (( CURRENT == 2 )); then\n" &
     "    compadd -- $cmds\n" &
     "  elif [[ ${words[2]} == workspace && CURRENT == 3 ]]; then\n" &
     "    compadd -- $wscmds\n" &
     "  elif [[ ${words[2]} == locking && CURRENT == 3 ]]; then\n" &
     "    compadd -- $lockingcmds\n" &
+    "  elif [[ ${words[2]} == cache && CURRENT == 3 ]]; then\n" &
+    "    compadd -- $cachecmds\n" &
     "  fi\n" &
     "}\n" &
     "compdef _repro repro\n"
@@ -39904,7 +39924,9 @@ proc renderCompletionSnippet(shell, reproBin: string): string =
     "complete -c repro -n \"__fish_seen_subcommand_from workspace\" -a \"" &
       wsSubs & "\"\n" &
     "complete -c repro -n \"__fish_seen_subcommand_from locking\" -a \"" &
-      lockingSubs & "\"\n"
+      lockingSubs & "\"\n" &
+    "complete -c repro -n \"__fish_seen_subcommand_from cache\" -a \"" &
+      cacheSubs & "\"\n"
   else:
     ""
 
@@ -40695,6 +40717,24 @@ proc runThinApp*(programName: string): int =
       return runReproLockingCommand(lockingArgs)
     except CatchableError as err:
       stderr.writeLine("repro locking: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "cache":
+    # Binary-Caches.md §"Client CLI Surface (`repro cache`)" — the
+    # single-entry binary-cache client. Folds in the retired standalone
+    # ``repro-binary-cache-client`` toolset; ``runCacheSubcommand`` routes
+    # ``lookup|substitute|publish|derive-key|gen-key`` to the SAME shared
+    # ``substituteInProcess`` + HTTP-publish machinery ``repro build`` uses
+    # (including R1 default-untrusted trust). No behaviour beyond argv
+    # parsing + exit codes lives here.
+    try:
+      let cacheArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return bcCliDispatch.runCacheSubcommand(cacheArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro cache: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "check":
     # M18 — top-level `repro check` subcommand per CLI/check.md. The

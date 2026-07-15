@@ -1,8 +1,16 @@
-## ReproOS-Generations-And-Foreign-Packages A3 P2 — repro-binary-cache-client CLI.
+## `repro cache <subcommand>` dispatch — the shared client machinery.
 ##
-## Bridge between bash build-scripts and the in-process substitute /
-## publish machinery. Single-user mode only (calls
-## ``substituteInProcess`` + a direct HTTP publish to the server).
+## This is the single implementation behind the `repro cache` subcommand
+## group (see reprobuild-specs Binary-Caches.md §"Client CLI Surface
+## (`repro cache`)"). It was folded out of the historical standalone
+## ``repro-binary-cache-client`` binary — that executable was the
+## identical toolset under a different ``pname`` — so both the shipping
+## ``repro cache …`` entry point and the binary-cache integration-test
+## helper drive ONE copy of the handlers.
+##
+## The dispatcher adds no behaviour beyond argv parsing + process exit
+## codes; it routes each subcommand to the same ``substituteInProcess`` +
+## HTTP-publish machinery the build engine uses during ``repro build``.
 ##
 ## ## Subcommands
 ##
@@ -92,29 +100,25 @@
 ## with thousands of files, swap this format for tar+zstd; the
 ## manifest carries ``compression`` + a ``name`` field that distinguishes.
 
-import std/[algorithm, asyncdispatch, httpclient, httpcore, net, os, parseopt,
-            random, sequtils, strutils, tables, times]
+import std/[algorithm, httpclient, httpcore, net, os, parseopt, strutils]
 
 when defined(ssl):
   import wrappers/openssl
 
-import ../../libs/repro_binary_cache_client/src/repro_binary_cache_client
-import ../../libs/repro_binary_cache_server/src/repro_binary_cache_server/types
-import ../../libs/repro_binary_cache_server/src/repro_binary_cache_server/key as bcsKey
-import ../../libs/repro_binary_cache_server/src/repro_binary_cache_server/manifest_codec as serverCodec
-import ../../libs/repro_peer_cache/src/repro_peer_cache/auth as peerAuth
-import ../../libs/blake3/src/blake3
+import ../repro_binary_cache_client
+import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
 const
   DefaultUrl = "http://localhost:7878"
   Usage = """
-repro-binary-cache-client — A3 P2 bridge for build-script cache wiring.
+repro cache — binary-cache client (single-entry publish/substitute wiring).
 
 Usage:
-  repro-binary-cache-client lookup     <entry-key-hex>
-  repro-binary-cache-client substitute <entry-key-hex> <out-prefix-dir>
-  repro-binary-cache-client publish    <entry-key-hex> <prefix-dir>   [identity-flags]
-  repro-binary-cache-client derive-key                                 [identity-flags]
+  repro cache lookup     <entry-key-hex>
+  repro cache substitute <entry-key-hex> <out-prefix-dir>
+  repro cache publish    <entry-key-hex> <prefix-dir>   [identity-flags]
+  repro cache derive-key                                 [identity-flags]
+  repro cache gen-key                                    [identity-flags]
 
 Identity flags (for publish + derive-key):
   --package-name=NAME       --package-version=VER
@@ -513,27 +517,6 @@ proc cmdGenKey(args: seq[string]): int =
   echo pubHex
   return 0
 
-proc buildMultipartBody(boundary: string;
-                        manifestBytes: openArray[byte];
-                        payload: openArray[byte]): string =
-  result = ""
-  result.add("--" & boundary & "\r\n")
-  result.add("Content-Disposition: form-data; name=\"manifest\"\r\n\r\n")
-  for b in manifestBytes:
-    result.add(char(b))
-  result.add("\r\n")
-  result.add("--" & boundary & "\r\n")
-  result.add("Content-Disposition: form-data; name=\"payload\"\r\n\r\n")
-  for b in payload:
-    result.add(char(b))
-  result.add("\r\n")
-  result.add("--" & boundary & "--\r\n")
-
-proc bytesOfStr(s: string): seq[byte] =
-  result = newSeq[byte](s.len)
-  for i, ch in s:
-    result[i] = byte(ch)
-
 proc cmdPublish(rawArgs: seq[string]): int =
   ## M9.L.4-refactor Step A: thin wrapper that translates CLI flags +
   ## env vars into a ``PublishInProcessRequest`` and forwards to the
@@ -577,31 +560,33 @@ proc cmdPublish(rawArgs: seq[string]): int =
   return 0
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Dispatch
 # ---------------------------------------------------------------------------
 
-proc main(): int =
-  let rawParams = commandLineParams()
-  if rawParams.len == 0:
+proc runCacheSubcommand*(args: seq[string]): int =
+  ## Routes ``repro cache <subcommand> …`` (``args`` is everything AFTER
+  ## the ``cache`` verb) to the shared handlers. Adds no behaviour beyond
+  ## argv parsing + exit codes — the substitution / publish semantics
+  ## (including R1 trust) come from the shared library. This is the SAME
+  ## dispatch the historical standalone ``repro-binary-cache-client``
+  ## exposed under its own ``main``.
+  if args.len == 0:
     echo Usage
     return 0
-  case rawParams[0]
+  case args[0]
   of "lookup":
-    return cmdLookup(rawParams[1 .. ^1])
+    return cmdLookup(args[1 .. ^1])
   of "substitute":
-    return cmdSubstitute(rawParams[1 .. ^1])
+    return cmdSubstitute(args[1 .. ^1])
   of "publish":
-    return cmdPublish(rawParams[1 .. ^1])
+    return cmdPublish(args[1 .. ^1])
   of "derive-key":
-    return cmdDeriveKey(rawParams[1 .. ^1])
+    return cmdDeriveKey(args[1 .. ^1])
   of "gen-key":
-    return cmdGenKey(rawParams[1 .. ^1])
+    return cmdGenKey(args[1 .. ^1])
   of "-h", "--help", "help":
     echo Usage
     return 0
   else:
     echo Usage
     return 2
-
-when isMainModule:
-  quit(main())

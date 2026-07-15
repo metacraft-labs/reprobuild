@@ -1,7 +1,8 @@
 ## M9.L.4-refactor Step A — publishInProcess library API gate.
 ##
-## Exercises the new ``publishInProcess`` library API (lifted from
-## ``apps/repro-binary-cache-client/repro_binary_cache_client_cli.nim``
+## Exercises the new ``publishInProcess`` library API (lifted from the
+## ``repro cache publish`` handler in
+## ``libs/repro_binary_cache_client/src/repro_binary_cache_client/cli_dispatch.nim``
 ## §cmdPublish) directly, without going through the CLI binary, so
 ## the engine's new ``binaryCachePublisher`` closure can adopt it
 ## without forking.
