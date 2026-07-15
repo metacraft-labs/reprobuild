@@ -196,7 +196,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--benchmark=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--benchmark=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--publish-cache-hits] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " graph [target[#name]] [--view=actions|neighborhood|inputs|dependents|blast-radius|critical-path|partition-candidates] [--focus=ACTION] [--path=PATH] [--run=last|ID] [--kind=dylib] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
           programName &
@@ -5972,6 +5972,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         prepareOnly = false;
                         dryRun = false;
                         forceRebuild = false;
+                        publishCacheHits = false;
                         skipCmakeRegeneration = false;
                         bypassRunQuotaExplicit = false;
                         benchmarkPath = "";
@@ -6192,6 +6193,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       inlineRunQuota: true,
       dryRun: dryRun,
       forceRebuild: forceRebuild,
+      publishCachedResults: publishCacheHits,
       suppressTrace: reportMode == brmNone,
       skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet,
       cancelCallback: cancelCheck,
@@ -6681,6 +6683,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           prepareOnly = prepareOnly,
           dryRun = dryRun,
           forceRebuild = forceRebuild,
+          publishCacheHits = publishCacheHits,
           skipCmakeRegeneration = skipCmakeRegeneration,
           bypassRunQuotaExplicit = bypassRunQuotaExplicit,
           eventSink = eventSink,
@@ -6896,6 +6899,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             prepareOnly = false,
             dryRun = dryRun,
             forceRebuild = forceRebuild,
+            publishCacheHits = publishCacheHits,
             skipCmakeRegeneration = skipCmakeRegeneration,
             bypassRunQuotaExplicit = bypassRunQuotaExplicit,
             eventSink = eventSink,
@@ -7528,6 +7532,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       inlineRunQuota: true,
       dryRun: dryRun,
       forceRebuild: forceRebuild,
+      publishCachedResults: publishCacheHits,
       suppressTrace: reportMode == brmNone,
       skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet,
       cancelCallback: cancelCheck)
@@ -13355,6 +13360,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var prepareOnly = false
   var dryRun = false
   var forceRebuild = false
+  var publishCacheHits = false
   var skipCmakeRegeneration = false
   # MO-1 — committed solved-graph lock. ``--lock <file>`` selects an
   # alternate committed lock (default = ``<projectDir>/repro.lock``);
@@ -13463,6 +13469,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       dryRun = true
     elif arg in ["--force-rebuild", "--rebuild"]:
       forceRebuild = true
+    elif arg == "--publish-cache-hits":
+      publishCacheHits = true
     elif arg == "--skip-cmake-regeneration":
       skipCmakeRegeneration = true
     elif arg == "--no-runquota":
@@ -13711,6 +13719,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         prepareOnly = prepareOnly,
         dryRun = dryRun,
         forceRebuild = forceRebuild,
+        publishCacheHits = publishCacheHits,
         skipCmakeRegeneration = skipCmakeRegeneration,
         bypassRunQuotaExplicit = bypassRunQuota,
         benchmarkPath = benchmarkPath,

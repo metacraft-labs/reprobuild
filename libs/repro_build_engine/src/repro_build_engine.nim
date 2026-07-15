@@ -368,6 +368,12 @@ type
       ## artefacts stay local. The CLI sets this from the effective
       ## cache scope (``REPRO_BINARY_CACHE_SCOPE`` / caches.conf
       ## ``scope``). Ignored when ``binaryCachePublisher == nil``.
+    publishCachedResults*: bool
+      ## When true, eligible binary-cache outputs are published after a
+      ## validated local action-cache hit as well as after execution. This is
+      ## opt-in so ordinary no-op builds never perform network writes. Cached
+      ## metadata-only records are safe here because the engine requires the
+      ## declared outputs to be materialized before invoking the publisher.
     toolIdentityResolver*: ToolIdentityResolver
       ## M9.N Batch B. Optional tool-identity resolver closure.
       ## When non-nil AND ``BuildAction.toolIdentityRefs.len > 0``,
@@ -4192,7 +4198,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     finishStat("repro peer-cache publish", publishStart)
 
   proc publishBinaryCacheBundle(action: BuildAction;
-                                record: ActionResultRecord) =
+                                record: ActionResultRecord;
+                                allowMaterializedOutputs = false) =
     ## M9.L.4-refactor Step A binary-cache publisher hook. Soft-fail
     ## like ``publishPeerCacheBundle``: a failed publish is logged
     ## into stats but does NOT abort the build.
@@ -4208,10 +4215,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ##   * ``action.cacheEntryIdentity.isNone`` — no identity tuple
     ##     to derive the entry-key from. Hard requirement; without
     ##     the identity the publisher cannot run its drift-guard.
-    ##   * ``record.outputPayloadKind != opkCasBlobs`` — the cache
-    ##     record didn't capture output payloads (metadata-only
-    ##     mode), so the publisher has nothing to ship. Mirrors the
-    ##     same guard in ``publishPeerCacheBundle``.
+    ##   * ``record.outputPayloadKind != opkCasBlobs`` — unless the caller
+    ##     explicitly verified that the outputs are currently materialized.
+    ##     The binary-cache publisher packages declared filesystem outputs;
+    ##     unlike the peer-cache publisher it does not read local CAS blobs.
     if config.binaryCachePublisher == nil:
       return
     # L3 PUBLISH-SCOPE — per-(action, cache) publish decision:
@@ -4229,7 +4236,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       action.publishToBinaryCache and action.cacheEntryIdentity.isSome
     if not isPublicInterface and not config.binaryCacheIntermediateScope:
       return
-    if record.outputPayloadKind != opkCasBlobs:
+    if record.outputPayloadKind != opkCasBlobs and
+        not allowMaterializedOutputs:
       return
     let publishStart = statStart()
     var recordOutputs: seq[string] = @[]
@@ -4282,6 +4290,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     finishStat("repro binary-cache publish", publishStart)
 
   proc tryFastNoopCacheHits(): Option[BuildRunResult] =
+    # Backfill needs each full action-cache record so it can publish the
+    # validated, materialized output. The regular scheduler already performs
+    # that lookup and keeps publish failures soft.
+    if config.publishCachedResults:
+      return none(BuildRunResult)
     if not config.rebuildMissingOutputsOnCacheHit:
       return none(BuildRunResult)
     if config.progressCallback != nil:
@@ -4996,6 +5009,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if config.rebuildMissingOutputsOnCacheHit and outputsPresent:
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
+              if config.publishCachedResults:
+                publishBinaryCacheBundle(action, lookup.record,
+                  allowMaterializedOutputs = true)
               completeSuccess(id, asUpToDate, cdHit, false, "outputs-present")
               inc completed
               launchedAny = true
@@ -5012,6 +5028,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               finishStat("repro cache restore", restoreStart)
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
+              if config.publishCachedResults:
+                publishBinaryCacheBundle(action, lookup.record,
+                  allowMaterializedOutputs = true)
               completeSuccess(id, asCacheHit, cdHit, false, "restored")
               inc completed
               launchedAny = true
@@ -5023,6 +5042,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if config.rebuildMissingOutputsOnCacheHit and outputsPresent:
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
+              if config.publishCachedResults:
+                publishBinaryCacheBundle(action, lookup.record,
+                  allowMaterializedOutputs = true)
               completeSuccess(id, asUpToDate, cdHybridCutoff, false,
                 "outputs-present")
               inc completed
@@ -5040,6 +5062,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               finishStat("repro cache restore", restoreStart)
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
+              if config.publishCachedResults:
+                publishBinaryCacheBundle(action, lookup.record,
+                  allowMaterializedOutputs = true)
               completeSuccess(id, asCacheHit, cdHybridCutoff, false, "restored")
               inc completed
               launchedAny = true

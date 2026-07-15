@@ -142,6 +142,57 @@ suite "M9.L.4-refactor Step A — engine binary-cache publisher hook":
     check req.recordOutputs.len == 1
     check req.recordOutputs[0] == outputPath
 
+  test "cache hits are not published by default":
+    resetTmp()
+    let cacheRoot = TmpDir / "cache-hit-default"
+    let outputPath = absolutePath(TmpDir / "outputs-hit-default" / "hit.txt")
+    createDir(cacheRoot)
+    createDir(splitPath(outputPath).head)
+    let identity = stubIdentity("test-pkg", "1.0.0", "rev-hit-default")
+    let g = oneAction(outputPath, "cached payload\n", publish = true,
+      identity = some(identity), fingerprintToken = "hit-default")
+
+    let initialRecorder = newRecorder()
+    discard runBuild(g, producerCfg(cacheRoot, initialRecorder))
+    check initialRecorder.invocations.len == 1
+
+    let hitRecorder = newRecorder()
+    let hit = runBuild(g, producerCfg(cacheRoot, hitRecorder))
+    check hit.results.len == 1
+    check hit.results[0].status == asCacheHit
+    check hitRecorder.invocations.len == 0
+
+  test "opt-in publishes a validated metadata-only cache hit":
+    resetTmp()
+    let cacheRoot = TmpDir / "cache-hit-backfill"
+    let outputPath = absolutePath(TmpDir / "outputs-hit-backfill" / "hit.txt")
+    createDir(cacheRoot)
+    createDir(splitPath(outputPath).head)
+    let identity = stubIdentity("test-pkg", "1.0.0", "rev-hit-backfill")
+    let g = oneAction(outputPath, "backfill payload\n", publish = true,
+      identity = some(identity), fingerprintToken = "hit-backfill")
+
+    var initialCfg = defaultBuildEngineConfig(cacheRoot)
+    initialCfg.maxParallelism = 1
+    initialCfg.deferLocalOutputBlobs = true
+    initialCfg.rebuildMissingOutputsOnCacheHit = true
+    let initial = runBuild(g, initialCfg)
+    check initial.results.len == 1
+    check initial.results[0].status == asSucceeded
+
+    let recorder = newRecorder()
+    var backfillCfg = defaultBuildEngineConfig(cacheRoot)
+    backfillCfg.maxParallelism = 1
+    backfillCfg.deferLocalOutputBlobs = true
+    backfillCfg.rebuildMissingOutputsOnCacheHit = true
+    backfillCfg.binaryCachePublisher = makePublisher(recorder)
+    backfillCfg.publishCachedResults = true
+    let backfill = runBuild(g, backfillCfg)
+    check backfill.results.len == 1
+    check backfill.results[0].status == asUpToDate
+    check recorder.invocations.len == 1
+    check recorder.invocations[0].declaredOutputs == @[outputPath]
+
   test "publisher is NOT invoked when publishToBinaryCache = false":
     resetTmp()
     let cacheRoot = TmpDir / "cache-noflag"
