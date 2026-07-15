@@ -2380,6 +2380,27 @@ proc resolveTargetExportSelector*(exportTable: TargetExportTable;
   result.kind = trkUnknown
   result.suggestions = topLevenshteinCandidates(selector, known)
 
+proc lowerMaterializedProviderSnapshot(snapshot: ProviderGraphSnapshot;
+    projectRoot: string):
+    tuple[actions: seq[BuildAction]; pools: seq[BuildPool]] =
+  ## Lower only explicitly tagged public-interface actions. Materialized
+  ## publication never launches an edge, so resolving the full graph's tool
+  ## profiles and dependency closure would add irrelevant provisioning side
+  ## effects and can fail on absent per-artifact outputs.
+  let profiles = initTable[string, PathOnlyToolProfile]()
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkAction:
+        let payload = decodeBuildActionPayload(toBytes(node.payload))
+        if payload.publishToBinaryCache and
+            payload.cacheEntryIdentity.isSome:
+          result.actions.add(lowerGraphAction(node, profiles, projectRoot))
+      elif node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-pool.v1":
+        let poolDef = decodeBuildPoolPayload(toBytes(node.payload))
+        result.pools.add(
+          repro_build_engine.pool(poolDef.name, poolDef.capacity))
+
 proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
                             identity: PathOnlyBuildIdentity;
                             projectRoot: string;
@@ -6683,7 +6704,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       artifact.projectInterface.defaultToolProvisioning)
     fallbackToRunQuotaBypass = effectiveMode in {tpmPathOnly, tpmScoop}
 
-  if artifact.projectInterface.toolUses.len > 0 and
+  if not publishMaterialized and
+      artifact.projectInterface.toolUses.len > 0 and
       effectiveMode == tpmUnspecified:
     raise newException(ValueError,
       "typed tool provisioning is required for uses declarations; refusing " &
@@ -6709,7 +6731,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   #   3. ``FromSourceMaxRecursionDepth`` — sanity ceiling. Production
   #      recipe chains stay below 10; the ceiling exists to crash
   #      cleanly on a runaway pattern rather than blow the stack.
-  if effectiveMode == tpmFromSource:
+  if effectiveMode == tpmFromSource and not publishMaterialized:
     # M9.R.14c.2 — proactively seed the bootstrap tool chain so the
     # auto-recurse loop short-circuits gcc / make / binutils (and
     # binutils sub-binaries: ld, ar, ranlib, strip, nm, objdump,
@@ -6846,7 +6868,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # is intentionally left to the existing host/PATH behavior. Every other
   # selector (host / nix / tarball / scoop / corpus-recipe) is untouched, so a
   # build that consumes no cross-repo producer is byte-identical to today.
-  if not prepareOnly and result.projectRoot.len > 0:
+  if not publishMaterialized and not prepareOnly and
+      result.projectRoot.len > 0:
     for useDef in artifact.projectInterface.toolUses:
       let selector = useDef.packageSelector
       if selector.len == 0:
@@ -7292,7 +7315,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         if extra.len > 0 and selectorList.find(extra) < 0:
           selectorList.add(extra)
       let lowered =
-        if selectorList.len == 0:
+        if publishMaterialized:
+          lowerMaterializedProviderSnapshot(
+            refresh.snapshot, result.projectRoot)
+        elif selectorList.len == 0:
           lowerProviderSnapshot(refresh.snapshot, synthIdentity,
             result.projectRoot, "")
         else:
@@ -7307,8 +7333,18 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
 
   if shouldEnterBuildPipeline(effectiveMode):
     let identityStart = statStart(statsEnabled)
-    progressRenderer.renderPhase("resolving tool identities")
-    let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
+    let resolved =
+      if publishMaterialized:
+        progressRenderer.renderPhase(
+          "skipping tool provisioning for materialized publication")
+        (identity: PathOnlyBuildIdentity(
+            projectName: artifact.projectInterface.projectName,
+            interfaceFingerprint: artifact.interfaceFingerprint),
+          identityPath: "",
+          inspectionPath: "")
+      else:
+        progressRenderer.renderPhase("resolving tool identities")
+        warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
     finishStat(buildStats, statsEnabled, "repro tool identity resolve",
       identityStart)
     let identity = resolved.identity
@@ -7323,15 +7359,23 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # root so the resolver closure routes cross-repo producer refs through the
     # develop-override + committed-``LockedDep`` seam.
     pendingToolIdentityResolver =
-      mkToolIdentityResolver(identity, result.projectRoot)
-    logSummary("repro build: tool provisioning active (tool-provisioning=" &
-      effectiveMode.modeName & ")")
-    if effectiveMode == tpmPathOnly:
+      if publishMaterialized: nil
+      else: mkToolIdentityResolver(identity, result.projectRoot)
+    if publishMaterialized:
+      logSummary("repro build: materialized publication active " &
+        "(tool provisioning skipped)")
+    else:
+      logSummary("repro build: tool provisioning active " &
+        "(tool-provisioning=" & effectiveMode.modeName & ")")
+    if not publishMaterialized and effectiveMode == tpmPathOnly:
       logSummary("repro build: provisioning-disabled mode active (tool-provisioning=path)")
     logSummary("project: " & artifact.projectInterface.projectName)
     logSummary("interface: " & interfacePath)
-    logSummary("toolIdentity: " & resolved.identityPath)
-    logSummary("inspection: " & resolved.inspectionPath)
+    if publishMaterialized:
+      logSummary("toolIdentity: skipped for materialized publication")
+    else:
+      logSummary("toolIdentity: " & resolved.identityPath)
+      logSummary("inspection: " & resolved.inspectionPath)
     let portability =
       if effectiveMode == tpmNix:
         "portable"
@@ -7566,7 +7610,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let graphCacheReadStart = statStart(statsEnabled)
     progressRenderer.renderPhase("reading lowered graph cache")
     let cachedLowered =
-      if forceRebuild or multiTarget:
+      if forceRebuild or multiTarget or publishMaterialized:
         none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
       else:
         warmReadFreshLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
@@ -7581,7 +7625,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         let graphLowerStart = statStart(statsEnabled)
         progressRenderer.renderPhase("lowering project graph")
         let computed =
-          if selectorList.len == 0:
+          if publishMaterialized:
+            lowerMaterializedProviderSnapshot(refresh.snapshot, projectRoot)
+          elif selectorList.len == 0:
             lowerProviderSnapshot(refresh.snapshot, identity,
               projectRoot, "")
           else:
@@ -7589,7 +7635,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
               projectRoot, selectorList)
         finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
         let cacheWriteStart = statStart(statsEnabled)
-        if not multiTarget:
+        if not multiTarget and not publishMaterialized:
           writeLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
             modulePath, projectRoot, selectedActionId, pathEnv, graphCacheKey,
             computed)

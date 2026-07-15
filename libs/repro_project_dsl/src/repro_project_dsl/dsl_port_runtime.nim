@@ -4189,6 +4189,11 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     script.add("touch \"" & escapedMirrorStamp & "\"")
     let mirrorActionId = "from-source-custom-mirror-" &
       dslPortSanitizeIdPart(packageName)
+    let packageVersion = block:
+      let versions = registeredVersions(packageName)
+      if versions.len > 0: versions[^1].version else: ""
+    let cacheIdentity = sourceCacheEntryIdentity(
+      projectRoot, packageName, packageVersion, "custom")
     discard buildAction(
       id = mirrorActionId,
       call = inlineExecCall(@["sh", "-c", script], projectRoot),
@@ -4198,7 +4203,10 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       pool = "compile",
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "from-source-custom.mirror",
-      toolIdentityRefs = @["sh"])
+      publishToBinaryCache = true,
+      cacheEntryIdentity = some(cacheIdentity),
+      toolIdentityRefs = @["sh"],
+      declaredOutputs = @[mirrorRoot])
 
 # ---------------------------------------------------------------------------
 # DSL-port M9.R.3 — ``library <name>: api:`` block surface.
