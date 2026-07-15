@@ -2729,6 +2729,103 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   when defined(macosx):
     result = prependEnvDirsToArgvEnv(result, "DYLD_LIBRARY_PATH", paths.libDirs)
 
+proc shellScriptArgIndex(argv: openArray[string]): int =
+  ## Return the script argument consumed by a POSIX shell's ``-c`` option.
+  ## Monitored actions carry ``repro internal io monitor ... --`` before the
+  ## real command, so use the same last-separator rule as ``applyNimPathArgs``.
+  if argv.len < 3:
+    return -1
+  var base = 0
+  for i in countdown(argv.len - 1, 0):
+    if argv[i] == "--":
+      base = i + 1
+      break
+  if base >= argv.len - 1:
+    return -1
+  var stem = extractFilename(argv[base]).toLowerAscii
+  when defined(windows):
+    if stem.endsWith(".exe"):
+      stem.setLen(stem.len - 4)
+  const shells = ["sh", "bash", "dash", "ash", "ksh", "mksh", "zsh"]
+  if stem notin shells:
+    return -1
+  for i in base + 1 ..< argv.len - 1:
+    let option = argv[i]
+    if option == "-c" or
+        (option.len > 2 and option[0] == '-' and option[1] != '-' and
+         'c' in option[1 .. ^1]):
+      return i + 1
+  -1
+
+proc isRuntimeLibraryEnv(name: string): bool {.inline.} =
+  name == "LD_LIBRARY_PATH" or name == "DYLD_LIBRARY_PATH"
+
+proc deferRuntimeLibraryEnvForShell*(argv, env: seq[string]):
+    tuple[argv: seq[string], env: seq[string]] =
+  ## A dependency's runtime library directory may contain a SONAME also used
+  ## by the shell itself. Starting a Nix shell with a source-built readline
+  ## directory in ``LD_LIBRARY_PATH``, for example, can make the dynamic
+  ## loader pair Bash with an incompatible readline before ``-c`` runs.
+  ##
+  ## Shell actions do not need these variables until their program begins.
+  ## Move explicit loader-path entries from the process environment into
+  ## exports at the start of that program. The monitor and interpreter then
+  ## start against their own libraries, while every command run by the action
+  ## receives the same loader paths. Non-shell argv is unchanged.
+  result.argv = @[]
+  for arg in argv:
+    result.argv.add(arg)
+  result.env = @[]
+  for entry in env:
+    result.env.add(entry)
+  when defined(posix):
+    let scriptIndex = shellScriptArgIndex(argv)
+    if scriptIndex < 0:
+      return
+    var values: array[2, string]
+    var found: array[2, bool]
+    const names = ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"]
+    for entry in env:
+      let eq = entry.find('=')
+      if eq <= 0:
+        continue
+      let name = entry[0 ..< eq]
+      for i, candidate in names:
+        if name == candidate:
+          values[i] = entry[eq + 1 .. ^1]
+          found[i] = true
+    if not found[0] and not found[1]:
+      return
+    result.env.setLen(0)
+    for entry in env:
+      let eq = entry.find('=')
+      if eq <= 0 or not isRuntimeLibraryEnv(entry[0 ..< eq]):
+        result.env.add(entry)
+    var prefix = ""
+    for i, name in names:
+      if found[i]:
+        prefix.add("export " & name & "=" & quoteShell(values[i]) & "; ")
+    result.argv[scriptIndex] = prefix & result.argv[scriptIndex]
+
+proc deferRuntimeLibraryEnvForShell*(argv: seq[string];
+                                     env: StringTableRef): seq[string] =
+  ## StringTable counterpart for the direct RunQuota-bypass launcher.
+  result = @[]
+  for arg in argv:
+    result.add(arg)
+  when defined(posix):
+    let scriptIndex = shellScriptArgIndex(argv)
+    if scriptIndex < 0 or env == nil:
+      return
+    const names = ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"]
+    var prefix = ""
+    for name in names:
+      if env.hasKey(name):
+        prefix.add("export " & name & "=" & quoteShell(env[name]) & "; ")
+        env.del(name)
+    if prefix.len > 0:
+      result[scriptIndex] = prefix & result[scriptIndex]
+
 proc applyNimPathArgs*(argv: openArray[string];
                        nimPathDirs: openArray[string]): seq[string] =
   ## Cross-Repo-Source-Consumption SC-11 (§4.2a.3) — the Nim library-source
@@ -3107,7 +3204,8 @@ proc startBypassRunQuotaProcess(action: BuildAction;
   # SC-11 (§4.2a.3): thread the resolved Nim library source roots onto a
   # ``nim c`` argv as ``--path:<dir>`` flags before quoting (identity for a
   # non-Nim argv or when no cross-repo Nim library producer was resolved).
-  let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
+  var nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
+  nimAdjustedArgv = deferRuntimeLibraryEnvForShell(nimAdjustedArgv, env)
   var quotedArgv = ""
   for i, a in nimAdjustedArgv:
     if i > 0: quotedArgv.add(" ")
@@ -3232,6 +3330,8 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
   threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
+  let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
+  let deferred = deferRuntimeLibraryEnvForShell(nimAdjustedArgv, threadedEnv)
   # M9.R.36.3 — same umask-022 pin we apply on the bypass path. The
   # runquota helper forwards ``command.argv`` straight through to its
   # ``launchProcess`` call site, so without this wrap the daemon-mode
@@ -3241,9 +3341,9 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
   # SC-11 (§4.2a.3): thread resolved Nim library source roots onto a ``nim c``
   # argv as ``--path:<dir>`` flags before the umask wrap (identity otherwise).
   let command = ReproCommandSpec(
-    argv: umaskWrappedArgv(applyNimPathArgs(action.argv, auxPaths.nimPathDirs)),
+    argv: umaskWrappedArgv(deferred.argv),
     cwd: action.cwd,
-    env: threadedEnv,
+    env: deferred.env,
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
   let helper = if config.runQuotaCliPath.len > 0: config.runQuotaCliPath
@@ -3270,6 +3370,8 @@ proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
   threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
+  let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
+  let deferred = deferRuntimeLibraryEnvForShell(nimAdjustedArgv, threadedEnv)
   # M9.R.36.3 — apply the same umask-022 wrap the helper-spawn and
   # bypass paths use. The inline-runquota path likewise forwards
   # ``command.argv`` to ``launchProcess`` inside the helper / inline
@@ -3278,9 +3380,9 @@ proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
   # SC-11 (§4.2a.3): thread resolved Nim library source roots onto a ``nim c``
   # argv as ``--path:<dir>`` flags before the umask wrap (identity otherwise).
   ReproCommandSpec(
-    argv: umaskWrappedArgv(applyNimPathArgs(action.argv, auxPaths.nimPathDirs)),
+    argv: umaskWrappedArgv(deferred.argv),
     cwd: action.cwd,
-    env: threadedEnv,
+    env: deferred.env,
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
 

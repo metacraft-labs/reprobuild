@@ -147,6 +147,55 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     let r2 = applyResolvedAuxPathsArgv(env, paths)
     check r1 == r2
 
+  when defined(posix):
+    test "shell actions export runtime paths after interpreter startup":
+      let argv = @["/nix/store/bash/bin/sh", "-c", "printf ready"]
+      let env = @[
+        "PATH=/usr/bin",
+        "LD_LIBRARY_PATH=/source/readline/lib:/host/lib",
+        "OTHER=value"]
+      let deferred = deferRuntimeLibraryEnvForShell(argv, env)
+      check envValue(deferred.env, "LD_LIBRARY_PATH") == ""
+      check envValue(deferred.env, "OTHER") == "value"
+      check deferred.argv[0] == argv[0]
+      check deferred.argv[2].startsWith(
+        "export LD_LIBRARY_PATH=/source/readline/lib:/host/lib; ")
+      check deferred.argv[2].endsWith("printf ready")
+
+    test "monitor-wrapped shell actions defer runtime paths":
+      let argv = @[
+        "/opt/repro/bin/repro", "internal", "io", "monitor",
+        "--depfile", "/tmp/action.rdep", "--",
+        "/nix/store/bash/bin/bash", "-lc", "run-build"]
+      let env = @[
+        "LD_LIBRARY_PATH=/source/lib",
+        "DYLD_LIBRARY_PATH=/source/macos/lib"]
+      let deferred = deferRuntimeLibraryEnvForShell(argv, env)
+      check deferred.env.len == 0
+      check deferred.argv[9].startsWith(
+        "export LD_LIBRARY_PATH=/source/lib; " &
+        "export DYLD_LIBRARY_PATH=/source/macos/lib; ")
+      check deferred.argv[9].endsWith("run-build")
+
+    test "non-shell actions retain runtime paths in their environment":
+      let argv = @["/usr/bin/cc", "input.c"]
+      let env = @["LD_LIBRARY_PATH=/source/lib"]
+      let deferred = deferRuntimeLibraryEnvForShell(argv, env)
+      check deferred.argv == argv
+      check deferred.env == env
+
+    test "StringTable launcher defers shell runtime paths":
+      let argv = @["/bin/sh", "-c", "run-build"]
+      let table = newStringTable(modeCaseSensitive)
+      table["PATH"] = "/usr/bin"
+      table["LD_LIBRARY_PATH"] = "/source/lib"
+      let deferredArgv = deferRuntimeLibraryEnvForShell(argv, table)
+      check not table.hasKey("LD_LIBRARY_PATH")
+      check table["PATH"] == "/usr/bin"
+      check deferredArgv[2].startsWith(
+        "export LD_LIBRARY_PATH=/source/lib; ")
+      check deferredArgv[2].endsWith("run-build")
+
   test "multiple deps' paths concatenate in order":
     # Two distinct from-source deps each contribute a pkgconfig dir.
     # The order matches the ``toolIdentityRefs`` order — first ref
