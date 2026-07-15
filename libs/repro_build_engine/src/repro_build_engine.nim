@@ -4134,6 +4134,13 @@ proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
       item.exitCode = publishResult.statusCode
       item.stderr = publishResult.error
     result.results.add(item)
+  if result.results.len == 0:
+    result.results.add(ActionResult(
+      id: "binary-cache-materialized",
+      status: asFailed,
+      cacheDecision: cdNotCacheable,
+      reason: "materialized-binary-cache-no-entries",
+      stderr: "no tagged materialized binary-cache entries in selected graph"))
 
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var stats: BuildStats

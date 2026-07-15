@@ -223,6 +223,25 @@ suite "M9.L.4-refactor Step A — engine binary-cache publisher hook":
     check recorder.invocations[0].publishPrefix == prefix
     check recorder.invocations[0].identity.packageName == "materialized-pkg"
 
+  test "materialized backfill fails when the graph has no tagged entries":
+    resetTmp()
+    let outputPath = absolutePath(TmpDir / "untagged" / "artifact.txt")
+    let recorder = newRecorder()
+    let identity = stubIdentity("untagged-pkg", "1.0", "untagged-rev")
+    let g = oneAction(
+      outputPath, "not published\n",
+      publish = false,
+      identity = some(identity),
+      fingerprintToken = "untagged")
+
+    let backfill = publishMaterializedBinaryCacheEntries(
+      g, makePublisher(recorder))
+    check backfill.results.len == 1
+    check backfill.results[0].status == asFailed
+    check backfill.results[0].reason ==
+      "materialized-binary-cache-no-entries"
+    check recorder.invocations.len == 0
+
   test "publisher is NOT invoked when publishToBinaryCache = false":
     resetTmp()
     let cacheRoot = TmpDir / "cache-noflag"

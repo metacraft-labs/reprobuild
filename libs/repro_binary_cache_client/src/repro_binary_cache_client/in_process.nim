@@ -23,7 +23,7 @@
 ## flags and forwards.
 
 import std/[algorithm, asyncdispatch, httpclient, httpcore, net, os, random,
-            strutils, times]
+            sequtils, strutils, times]
 
 when defined(ssl):
   import wrappers/openssl
@@ -102,7 +102,18 @@ type
 
 const
   ArchiveMagic = "RBCA"
-  ArchiveVersion = 1'u32
+  ArchiveVersion = 2'u32
+  ArchiveVersionV1 = 1'u32
+
+type
+  ArchiveEntryKind = enum
+    aekFile = 0
+    aekDirectory = 1
+    aekSymlink = 2
+
+  ArchiveEntry = object
+    path: string
+    kind: ArchiveEntryKind
 
 # ---------------------------------------------------------------------------
 # Archive writer (mirror of the CLI's deterministic ``rbcarc-v1`` writer).
@@ -122,12 +133,28 @@ proc writeU64LE(buf: var seq[byte]; v: uint64) =
 proc normaliseSep(p: string): string =
   result = p.replace('\\', '/')
 
-proc walkPrefix(prefix: string): seq[string] =
+proc collectPrefixEntries(current, relativeBase: string;
+                          entries: var seq[ArchiveEntry]) =
+  for component, path in walkDir(current, skipSpecial = true):
+    let name = extractFilename(path)
+    let relativePath =
+      if relativeBase.len == 0: name else: relativeBase / name
+    case component
+    of pcFile:
+      entries.add(ArchiveEntry(
+        path: normaliseSep(relativePath), kind: aekFile))
+    of pcDir:
+      entries.add(ArchiveEntry(
+        path: normaliseSep(relativePath), kind: aekDirectory))
+      collectPrefixEntries(path, relativePath, entries)
+    of pcLinkToFile, pcLinkToDir:
+      entries.add(ArchiveEntry(
+        path: normaliseSep(relativePath), kind: aekSymlink))
+
+proc walkPrefix(prefix: string): seq[ArchiveEntry] =
   let prefixAbs = absolutePath(prefix)
-  for path in walkDirRec(prefixAbs, yieldFilter = {pcFile, pcLinkToFile},
-                         relative = true):
-    result.add(normaliseSep(path))
-  result.sort(cmp)
+  collectPrefixEntries(prefixAbs, "", result)
+  result.sort(proc(a, b: ArchiveEntry): int = cmp(a.path, b.path))
 
 proc filePermissionsMode*(permissions: set[FilePermission]): uint32 =
   if fpUserRead in permissions: result = result or 0o400'u32
@@ -174,14 +201,20 @@ proc packPrefix*(prefix: string): seq[byte] =
     result.add(byte(ch))
   writeU32LE(result, ArchiveVersion)
   writeU32LE(result, uint32(entries.len))
-  for rel in entries:
-    let absPath = prefix / rel
-    let mode = fileModeOctal(absPath)
-    let pathBytes = rel
-    let payload = readFile(absPath)
+  for entry in entries:
+    let absPath = prefix / entry.path
+    let mode =
+      if entry.kind == aekSymlink: 0'u32 else: fileModeOctal(absPath)
+    let pathBytes = entry.path
+    let payload =
+      case entry.kind
+      of aekFile: readFile(absPath)
+      of aekDirectory: ""
+      of aekSymlink: expandSymlink(absPath)
     writeU32LE(result, uint32(pathBytes.len))
     for ch in pathBytes:
       result.add(byte(ch))
+    result.add(byte(ord(entry.kind)))
     writeU32LE(result, mode)
     writeU64LE(result, uint64(payload.len))
     for ch in payload:
@@ -200,6 +233,7 @@ proc packSingleFilePrefix*(prefixPath: string): seq[byte] =
   writeU32LE(result, 1'u32)
   writeU32LE(result, uint32(name.len))
   for ch in name: result.add(byte(ch))
+  result.add(byte(ord(aekFile)))
   writeU32LE(result, fileModeOctal(pref))
   let body = readFile(pref)
   writeU64LE(result, uint64(body.len))
@@ -231,9 +265,9 @@ proc readU64LE(buf: openArray[byte]; pos: var int): uint64 =
     inc pos
 
 proc extractPrefix*(archive: openArray[byte]; outDir: string) =
-  ## Extract an ``rbcarc-v1`` archive into ``outDir``. Byte-identical
-  ## reader to the CLI's ``extractPrefix``: same magic / version guard,
-  ## same unsafe-path rejection, and exact POSIX permission restoration.
+  ## Extract an ``rbcarc-v1`` or ``rbcarc-v2`` archive into ``outDir``.
+  ## v2 preserves regular files, directory entries, and symbolic links;
+  ## v1 remains accepted so already-published cache entries keep working.
   ## Raises
   ## ``IOError`` on a malformed / truncated archive.
   if archive.len < 4 + 4 + 4:
@@ -243,10 +277,11 @@ proc extractPrefix*(archive: openArray[byte]; outDir: string) =
       raise newException(IOError, "rbcarc magic mismatch at byte " & $i)
   var pos = 4
   let ver = readU32LE(archive, pos)
-  if ver != ArchiveVersion:
+  if ver notin {ArchiveVersionV1, ArchiveVersion}:
     raise newException(IOError, "rbcarc version mismatch: got " & $ver)
   let count = readU32LE(archive, pos)
   createDir(outDir)
+  var directoryModes: seq[(string, uint32)] = @[]
   for _ in 0 ..< count:
     let pathLen = int(readU32LE(archive, pos))
     if pos + pathLen > archive.len:
@@ -255,8 +290,21 @@ proc extractPrefix*(archive: openArray[byte]; outDir: string) =
     for i in 0 ..< pathLen:
       rel[i] = char(archive[pos + i])
     inc pos, pathLen
-    if rel.contains("..") or rel.startsWith("/"):
+    let normalizedRel = normaliseSep(rel)
+    if normalizedRel.len == 0 or normalizedRel.startsWith("/") or
+        normalizedRel.split('/').anyIt(it.len == 0 or it == "." or it == ".."):
       raise newException(IOError, "rbcarc rejected unsafe path: " & rel)
+    let entryKind =
+      if ver == ArchiveVersionV1:
+        aekFile
+      else:
+        if pos >= archive.len:
+          raise newException(IOError, "rbcarc truncated reading entry kind")
+        let rawKind = archive[pos]
+        inc pos
+        if rawKind > byte(ord(high(ArchiveEntryKind))):
+          raise newException(IOError, "rbcarc invalid entry kind: " & $rawKind)
+        ArchiveEntryKind(rawKind)
     let mode = readU32LE(archive, pos)
     let size = readU64LE(archive, pos)
     if pos + int(size) > archive.len:
@@ -268,9 +316,27 @@ proc extractPrefix*(archive: openArray[byte]; outDir: string) =
     for i in 0 ..< int(size):
       data[i] = char(archive[pos + i])
     inc pos, int(size)
-    writeFile(absOut, data)
-    when not defined(windows):
-      setFilePermissions(absOut, modeFilePermissions(mode))
+    case entryKind
+    of aekFile:
+      writeFile(absOut, data)
+      when not defined(windows):
+        setFilePermissions(absOut, modeFilePermissions(mode))
+    of aekDirectory:
+      if data.len != 0:
+        raise newException(IOError,
+          "rbcarc directory entry has a non-empty payload: " & rel)
+      createDir(absOut)
+      directoryModes.add((absOut, mode))
+    of aekSymlink:
+      if data.len == 0:
+        raise newException(IOError,
+          "rbcarc symlink entry has an empty target: " & rel)
+      createSymlink(data, absOut)
+  when not defined(windows):
+    if directoryModes.len > 0:
+      for i in countdown(directoryModes.high, 0):
+        setFilePermissions(
+          directoryModes[i][0], modeFilePermissions(directoryModes[i][1]))
 
 # ---------------------------------------------------------------------------
 # Multipart body builder.

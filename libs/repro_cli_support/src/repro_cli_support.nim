@@ -2807,7 +2807,7 @@ proc defaultBuildActionId(snapshot: ProviderGraphSnapshot): string =
 
 const
   LoweredGraphCacheMagic = "RBLG"
-  LoweredGraphCacheVersion = 3'u16
+  LoweredGraphCacheVersion = 4'u16
   LoweredGraphAlgorithmVersion = "reprobuild.loweredGraph.v1"
 
 type
@@ -3477,6 +3477,49 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int):
     result.postBuildConverters[i].completeness = readCompleteness(bytes, pos)
   result.ignoredInputPrefixes = readStringSeq(bytes, pos)
 
+proc writeCacheEntryIdentity(outp: var seq[byte];
+                             identity: CacheEntryIdentity) =
+  outp.writeString(identity.packageName)
+  outp.writeString(identity.packageVersion)
+  var optionNames: seq[string] = @[]
+  for name in identity.selectedOptions.keys:
+    optionNames.add(name)
+  optionNames.sort(cmp)
+  outp.writeU32Le(uint32(optionNames.len))
+  for name in optionNames:
+    outp.writeString(name)
+    outp.writeString(identity.selectedOptions[name])
+  outp.writeString(identity.platform.cpu)
+  outp.writeString(identity.platform.os)
+  outp.writeString(identity.platform.abi)
+  outp.writeString(identity.platform.libcVariant)
+  outp.writeString(identity.toolchain.name)
+  outp.writeString(identity.toolchain.version)
+  outp.writeString(identity.toolchain.hostLdSoAbi)
+  outp.writeString(identity.toolchain.extraFingerprint)
+  outp.writeStringSeq(identity.depClosure)
+  outp.writeString(identity.providerRevision)
+
+proc readCacheEntryIdentity(bytes: openArray[byte]; pos: var int):
+    CacheEntryIdentity =
+  result.packageName = readString(bytes, pos)
+  result.packageVersion = readString(bytes, pos)
+  result.selectedOptions = newTable[string, string]()
+  let optionCount = int(readU32Le(bytes, pos))
+  for _ in 0 ..< optionCount:
+    let name = readString(bytes, pos)
+    result.selectedOptions[name] = readString(bytes, pos)
+  result.platform.cpu = readString(bytes, pos)
+  result.platform.os = readString(bytes, pos)
+  result.platform.abi = readString(bytes, pos)
+  result.platform.libcVariant = readString(bytes, pos)
+  result.toolchain.name = readString(bytes, pos)
+  result.toolchain.version = readString(bytes, pos)
+  result.toolchain.hostLdSoAbi = readString(bytes, pos)
+  result.toolchain.extraFingerprint = readString(bytes, pos)
+  result.depClosure = readStringSeq(bytes, pos)
+  result.providerRevision = readString(bytes, pos)
+
 proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.add(byte(ord(action.kind)))
   outp.writeString(action.id)
@@ -3500,10 +3543,30 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeDependencyPolicy(action.dependencyPolicy)
   outp.writeString(action.builtinText)
   outp.writeStringSeq(action.builtinEntries)
+  outp.writeStringSeq(action.targetNames)
+  outp.writeU32Le(uint32(action.typedOutputs.len))
+  for typedOutput in action.typedOutputs:
+    outp.writeString(typedOutput.fieldName)
+    outp.writeStringSeq(typedOutput.types)
+    outp.writeString(typedOutput.path)
+  outp.add(if action.publishToBinaryCache: 1'u8 else: 0'u8)
+  if action.cacheEntryIdentity.isSome:
+    outp.add(1'u8)
+    outp.writeCacheEntryIdentity(action.cacheEntryIdentity.get())
+  else:
+    outp.add(0'u8)
+  outp.writeStringSeq(action.toolIdentityRefs)
+  outp.writeU32Le(uint32(action.toolIdentityRefKinds.len))
+  for kind in action.toolIdentityRefKinds:
+    outp.add(byte(ord(kind)))
+  outp.writeString(action.cachePlatformTag)
+  outp.writeStringSeq(action.declaredOutputs)
+  outp.writeStringSeq(action.readOnlyRoots)
+  outp.add(if action.requiresElevation: 1'u8 else: 0'u8)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   let kind = readByteValue(bytes, pos)
-  if kind > byte(ord(bakPreserveTree)):
+  if kind > byte(ord(high(BuildActionKind))):
     raiseEnvelopeError(eeMalformed, "invalid build action kind")
   result.kind = BuildActionKind(kind)
   result.id = readString(bytes, pos)
@@ -3530,6 +3593,41 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.dependencyPolicy = readDependencyPolicy(bytes, pos)
   result.builtinText = readString(bytes, pos)
   result.builtinEntries = readStringSeq(bytes, pos)
+  result.targetNames = readStringSeq(bytes, pos)
+  let typedOutputCount = int(readU32Le(bytes, pos))
+  result.typedOutputs = newSeq[EngineTypedOutput](typedOutputCount)
+  for i in 0 ..< typedOutputCount:
+    result.typedOutputs[i].fieldName = readString(bytes, pos)
+    result.typedOutputs[i].types = readStringSeq(bytes, pos)
+    result.typedOutputs[i].path = readString(bytes, pos)
+  let publishByte = readByteValue(bytes, pos)
+  if publishByte > 1'u8:
+    raiseEnvelopeError(eeMalformed,
+      "invalid lowered action publish sentinel")
+  result.publishToBinaryCache = publishByte == 1'u8
+  let identityByte = readByteValue(bytes, pos)
+  if identityByte > 1'u8:
+    raiseEnvelopeError(eeMalformed,
+      "invalid lowered action identity sentinel")
+  if identityByte == 1'u8:
+    result.cacheEntryIdentity = some(readCacheEntryIdentity(bytes, pos))
+  result.toolIdentityRefs = readStringSeq(bytes, pos)
+  let refKindCount = int(readU32Le(bytes, pos))
+  result.toolIdentityRefKinds = newSeq[DepKind](refKindCount)
+  for i in 0 ..< refKindCount:
+    let rawKind = readByteValue(bytes, pos)
+    if rawKind > byte(ord(high(DepKind))):
+      raiseEnvelopeError(eeMalformed,
+        "invalid lowered action tool-reference kind")
+    result.toolIdentityRefKinds[i] = DepKind(rawKind)
+  result.cachePlatformTag = readString(bytes, pos)
+  result.declaredOutputs = readStringSeq(bytes, pos)
+  result.readOnlyRoots = readStringSeq(bytes, pos)
+  let elevationByte = readByteValue(bytes, pos)
+  if elevationByte > 1'u8:
+    raiseEnvelopeError(eeMalformed,
+      "invalid lowered action elevation sentinel")
+  result.requiresElevation = elevationByte == 1'u8
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)
@@ -3571,6 +3669,12 @@ proc decodeLoweredGraphCache(bytes: openArray[byte]): LoweredGraphCacheRecord =
     result.actions[i] = readBuildAction(bytes, pos)
   if pos != bytes.len:
     raiseEnvelopeError(eeMalformed, "trailing lowered graph cache bytes")
+
+when defined(reproLoweredGraphCodecTest):
+  proc loweredGraphActionRoundTripForTest*(actions: seq[BuildAction]):
+      seq[BuildAction] =
+    let record = LoweredGraphCacheRecord(actions: actions)
+    decodeLoweredGraphCache(encodeLoweredGraphCache(record)).actions
 
 proc loweredGraphCachePath(outDir, selectedActionId: string): string =
   let label =

@@ -127,7 +127,67 @@ proc stubIdentity(name = "publish-in-process-test";
                                   hostLdSoAbi: "", extraFingerprint: ""),
     providerRevision = rev)
 
+proc addU32Le(bytes: var seq[byte]; value: uint32) =
+  for shift in countup(0, 24, 8):
+    bytes.add(byte((value shr uint32(shift)) and 0xff'u32))
+
+proc addU64Le(bytes: var seq[byte]; value: uint64) =
+  for shift in countup(0, 56, 8):
+    bytes.add(byte((value shr uint64(shift)) and 0xff'u64))
+
 suite "M9.L.4-refactor Step A — publishInProcess library API":
+
+  test "rbcarc v2 preserves directories, permissions, and symlinks":
+    let prefixDir = getTempDir() / ("rbcarc_v2_prefix_" & $rand(999_999))
+    let outputDir = getTempDir() / ("rbcarc_v2_output_" & $rand(999_999))
+    removeDir(prefixDir)
+    removeDir(outputDir)
+    createDir(prefixDir / "bin")
+    createDir(prefixDir / "empty")
+    writeFile(prefixDir / "bin" / "tool", "payload\n")
+    when not defined(windows):
+      setFilePermissions(prefixDir / "bin" / "tool",
+        {fpUserRead, fpUserWrite, fpUserExec, fpGroupRead, fpGroupExec,
+         fpOthersRead, fpOthersExec})
+      createSymlink("tool", prefixDir / "bin" / "tool-link")
+    defer:
+      try: removeDir(prefixDir) except CatchableError: discard
+      try: removeDir(outputDir) except CatchableError: discard
+
+    let archive = packPrefix(prefixDir)
+    check archive == packPrefix(prefixDir)
+    extractPrefix(archive, outputDir)
+    check readFile(outputDir / "bin" / "tool") == "payload\n"
+    check dirExists(outputDir / "empty")
+    when not defined(windows):
+      check symlinkExists(outputDir / "bin" / "tool-link")
+      check expandSymlink(outputDir / "bin" / "tool-link") == "tool"
+      check fpUserExec in getFilePermissions(outputDir / "bin" / "tool")
+      check fpGroupExec in getFilePermissions(outputDir / "bin" / "tool")
+      check fpOthersExec in getFilePermissions(outputDir / "bin" / "tool")
+
+  test "rbcarc v1 archives remain extractable":
+    let outputDir = getTempDir() / ("rbcarc_v1_output_" & $rand(999_999))
+    removeDir(outputDir)
+    defer:
+      try: removeDir(outputDir) except CatchableError: discard
+    let relativePath = "legacy.txt"
+    let payload = "legacy payload\n"
+    var archive: seq[byte] = @[]
+    for ch in "RBCA":
+      archive.add(byte(ch))
+    archive.addU32Le(1'u32)
+    archive.addU32Le(1'u32)
+    archive.addU32Le(uint32(relativePath.len))
+    for ch in relativePath:
+      archive.add(byte(ch))
+    archive.addU32Le(0o644'u32)
+    archive.addU64Le(uint64(payload.len))
+    for ch in payload:
+      archive.add(byte(ch))
+
+    extractPrefix(archive, outputDir)
+    check readFile(outputDir / relativePath) == payload
 
   test "drift-guard fires when supplied hex disagrees with identity-derived hex":
     let identity = stubIdentity()

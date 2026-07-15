@@ -75,36 +75,35 @@
 ##                                   sink. Defaults to ``$HOME/.local/
 ##                                   share/repro/local-store``.
 ##
-## ## Archive format (``rbcarc-v1``)
+## ## Archive format (``rbcarc-v2``)
 ##
 ## A flat, deterministic archive used in place of ``tar``:
 ##
 ##   magic        "RBCA"
-##   version      u32-le == 1
+##   version      u32-le == 2
 ##   entryCount   u32-le
 ##   for each entry:
 ##     pathLen   u32-le
 ##     path      utf-8 bytes (forward-slash separators, repeating "../"
 ##               forbidden so extract cannot escape the prefix root)
+##     kind      u8 (0 regular file, 1 directory, 2 symbolic link)
 ##     mode      u32-le (POSIX permission bits; preserved exactly on POSIX.
 ##               Windows uses 0o755 for executable-looking extensions and
 ##               0o644 for other files because it has no equivalent mode).
 ##     size      u64-le
-##     bytes     raw file bytes
+##     bytes     raw file bytes, or the symlink target for kind 2
 ##
-## Empty dirs are not recorded; the extractor creates parent dirs as
-## needed when materialising leaf files. The format is intentionally
-## minimal — for v1 the build scripts produce small flat outputs
-## (single binaries, a handful of header files). When R5+ phases land
-## with thousands of files, swap this format for tar+zstd; the
-## manifest carries ``compression`` + a ``name`` field that distinguishes.
+## v2 records empty directories and symlinks without dereferencing them.
+## The reader continues to accept v1 archives, whose entries are regular
+## files, so existing cache content remains substitutable.
 
-import std/[algorithm, httpclient, httpcore, net, os, parseopt, strutils]
+import std/[httpclient, httpcore, net, os, parseopt, strutils]
 
 when defined(ssl):
   import wrappers/openssl
 
 import ../repro_binary_cache_client
+import ./in_process as inProcessArchive
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
 const
@@ -141,8 +140,6 @@ Environment:
   REPRO_BINARY_CACHE_CERT_PATH    matching pubkey file       (required for publish)
   REPRO_LOCAL_STORE               local store root for substitute
 """
-  ArchiveMagic = "RBCA"
-  ArchiveVersion = 1'u32
 
 type
   PublishArgs = object
@@ -163,114 +160,11 @@ type
     options: seq[(string, string)]
 
 # ---------------------------------------------------------------------------
-# Archive writer
+# Archive extraction
 # ---------------------------------------------------------------------------
 
-proc writeU32LE(buf: var seq[byte]; v: uint32) =
-  for shift in countup(0, 24, 8):
-    buf.add(byte((v shr uint32(shift)) and 0xff'u32))
-
-proc writeU64LE(buf: var seq[byte]; v: uint64) =
-  for shift in countup(0, 56, 8):
-    buf.add(byte((v shr uint64(shift)) and 0xff'u64))
-
-proc readU32LE(buf: openArray[byte]; pos: var int): uint32 =
-  if pos + 4 > buf.len:
-    raise newException(IOError, "rbcarc truncated reading u32")
-  result = 0'u32
-  for i in 0 ..< 4:
-    result = result or (uint32(buf[pos + i]) shl uint32(i * 8))
-  inc pos, 4
-
-proc readU64LE(buf: openArray[byte]; pos: var int): uint64 =
-  if pos + 8 > buf.len:
-    raise newException(IOError, "rbcarc truncated reading u64")
-  result = 0'u64
-  for i in 0 ..< 8:
-    result = result or (uint64(buf[pos + i]) shl uint64(i * 8))
-  inc pos, 8
-
-proc normaliseSep(p: string): string =
-  result = p.replace('\\', '/')
-
-proc walkPrefix(prefix: string): seq[string] =
-  ## Returns paths relative to ``prefix`` (forward-slash separators),
-  ## sorted lexicographically for determinism. Symlinks become regular
-  ## files (their target is read + recorded as bytes).
-  let prefixAbs = absolutePath(prefix)
-  for path in walkDirRec(prefixAbs, yieldFilter = {pcFile, pcLinkToFile},
-                         relative = true):
-    result.add(normaliseSep(path))
-  result.sort(cmp)
-
-proc fileModeOctal(path: string): uint32 =
-  ## Preserves POSIX permission bits. Windows approximates by extension.
-  when defined(windows):
-    let lower = path.toLowerAscii()
-    if lower.endsWith(".exe") or lower.endsWith(".com") or
-       lower.endsWith(".bat") or lower.endsWith(".ps1") or
-       lower.endsWith(".sh"):
-      return 0o755'u32
-    return 0o644'u32
-  else:
-    filePermissionsMode(getFilePermissions(path))
-
-proc packPrefix(prefix: string): seq[byte] =
-  ## Builds the deterministic archive bytes for the prefix tree.
-  let entries = walkPrefix(prefix)
-  result = newSeqOfCap[byte](4096)
-  for ch in ArchiveMagic:
-    result.add(byte(ch))
-  writeU32LE(result, ArchiveVersion)
-  writeU32LE(result, uint32(entries.len))
-  for rel in entries:
-    let absPath = prefix / rel
-    let mode = fileModeOctal(absPath)
-    let pathBytes = rel
-    let payload = readFile(absPath)
-    writeU32LE(result, uint32(pathBytes.len))
-    for ch in pathBytes:
-      result.add(byte(ch))
-    writeU32LE(result, mode)
-    writeU64LE(result, uint64(payload.len))
-    for ch in payload:
-      result.add(byte(ch))
-
 proc extractPrefix(archive: openArray[byte]; outDir: string) =
-  if archive.len < 4 + 4 + 4:
-    raise newException(IOError, "rbcarc too short: " & $archive.len)
-  for i in 0 ..< 4:
-    if archive[i] != byte(ArchiveMagic[i]):
-      raise newException(IOError, "rbcarc magic mismatch at byte " & $i)
-  var pos = 4
-  let ver = readU32LE(archive, pos)
-  if ver != ArchiveVersion:
-    raise newException(IOError, "rbcarc version mismatch: got " & $ver)
-  let count = readU32LE(archive, pos)
-  createDir(outDir)
-  for _ in 0 ..< count:
-    let pathLen = int(readU32LE(archive, pos))
-    if pos + pathLen > archive.len:
-      raise newException(IOError, "rbcarc truncated reading path")
-    var rel = newString(pathLen)
-    for i in 0 ..< pathLen:
-      rel[i] = char(archive[pos + i])
-    inc pos, pathLen
-    if rel.contains("..") or rel.startsWith("/"):
-      raise newException(IOError, "rbcarc rejected unsafe path: " & rel)
-    let mode = readU32LE(archive, pos)
-    let size = readU64LE(archive, pos)
-    if pos + int(size) > archive.len:
-      raise newException(IOError, "rbcarc truncated reading file body for " & rel)
-    let absOut = outDir / rel
-    createDir(parentDir(absOut))
-    var data = newString(int(size))
-    for i in 0 ..< int(size):
-      data[i] = char(archive[pos + i])
-    inc pos, int(size)
-    writeFile(absOut, data)
-    when not defined(windows):
-      setFilePermissions(absOut, modeFilePermissions(mode))
+  inProcessArchive.extractPrefix(archive, outDir)
 
 # ---------------------------------------------------------------------------
 # Helpers
