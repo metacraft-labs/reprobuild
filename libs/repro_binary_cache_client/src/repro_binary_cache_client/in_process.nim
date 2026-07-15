@@ -129,10 +129,31 @@ proc walkPrefix(prefix: string): seq[string] =
     result.add(normaliseSep(path))
   result.sort(cmp)
 
+proc filePermissionsMode*(permissions: set[FilePermission]): uint32 =
+  if fpUserRead in permissions: result = result or 0o400'u32
+  if fpUserWrite in permissions: result = result or 0o200'u32
+  if fpUserExec in permissions: result = result or 0o100'u32
+  if fpGroupRead in permissions: result = result or 0o040'u32
+  if fpGroupWrite in permissions: result = result or 0o020'u32
+  if fpGroupExec in permissions: result = result or 0o010'u32
+  if fpOthersRead in permissions: result = result or 0o004'u32
+  if fpOthersWrite in permissions: result = result or 0o002'u32
+  if fpOthersExec in permissions: result = result or 0o001'u32
+
+proc modeFilePermissions*(mode: uint32): set[FilePermission] =
+  if (mode and 0o400'u32) != 0: result.incl(fpUserRead)
+  if (mode and 0o200'u32) != 0: result.incl(fpUserWrite)
+  if (mode and 0o100'u32) != 0: result.incl(fpUserExec)
+  if (mode and 0o040'u32) != 0: result.incl(fpGroupRead)
+  if (mode and 0o020'u32) != 0: result.incl(fpGroupWrite)
+  if (mode and 0o010'u32) != 0: result.incl(fpGroupExec)
+  if (mode and 0o004'u32) != 0: result.incl(fpOthersRead)
+  if (mode and 0o002'u32) != 0: result.incl(fpOthersWrite)
+  if (mode and 0o001'u32) != 0: result.incl(fpOthersExec)
+
 proc fileModeOctal*(path: string): uint32 =
-  ## Returns 0o755 if the file is executable, 0o644 otherwise. Public
-  ## so the CLI's tests can re-use it via the re-exported in_process
-  ## module surface.
+  ## Preserves POSIX permission bits. Windows has no equivalent metadata,
+  ## so executable-looking extensions retain the portable 0o755 fallback.
   when defined(windows):
     let lower = path.toLowerAscii()
     if lower.endsWith(".exe") or lower.endsWith(".com") or
@@ -141,10 +162,7 @@ proc fileModeOctal*(path: string): uint32 =
       return 0o755'u32
     return 0o644'u32
   else:
-    let info = getFileInfo(path)
-    if (info.permissions * {fpUserExec, fpGroupExec, fpOthersExec}).len > 0:
-      return 0o755'u32
-    return 0o644'u32
+    filePermissionsMode(getFilePermissions(path))
 
 proc packPrefix*(prefix: string): seq[byte] =
   ## Builds the deterministic archive bytes for the prefix tree. Same
@@ -215,8 +233,8 @@ proc readU64LE(buf: openArray[byte]; pos: var int): uint64 =
 proc extractPrefix*(archive: openArray[byte]; outDir: string) =
   ## Extract an ``rbcarc-v1`` archive into ``outDir``. Byte-identical
   ## reader to the CLI's ``extractPrefix``: same magic / version guard,
-  ## same unsafe-path rejection, same POSIX exec-bit restore for entries
-  ## whose recorded mode carries the 0o100 owner-exec bit. Raises
+  ## same unsafe-path rejection, and exact POSIX permission restoration.
+  ## Raises
   ## ``IOError`` on a malformed / truncated archive.
   if archive.len < 4 + 4 + 4:
     raise newException(IOError, "rbcarc too short: " & $archive.len)
@@ -252,12 +270,7 @@ proc extractPrefix*(archive: openArray[byte]; outDir: string) =
     inc pos, int(size)
     writeFile(absOut, data)
     when not defined(windows):
-      if (mode and 0o100'u32) != 0:
-        var perms = getFilePermissions(absOut)
-        perms.incl(fpUserExec)
-        perms.incl(fpGroupExec)
-        perms.incl(fpOthersExec)
-        setFilePermissions(absOut, perms)
+      setFilePermissions(absOut, modeFilePermissions(mode))
 
 # ---------------------------------------------------------------------------
 # Multipart body builder.

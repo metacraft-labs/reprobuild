@@ -86,10 +86,9 @@
 ##     pathLen   u32-le
 ##     path      utf-8 bytes (forward-slash separators, repeating "../"
 ##               forbidden so extract cannot escape the prefix root)
-##     mode      u32-le (POSIX mode bits; 0o755 for executables,
-##               0o644 for regular files; reduced to {755, 644} for
-##               determinism — exec bit is preserved on Linux but
-##               normalised away on Windows where it's meaningless).
+##     mode      u32-le (POSIX permission bits; preserved exactly on POSIX.
+##               Windows uses 0o755 for executable-looking extensions and
+##               0o644 for other files because it has no equivalent mode).
 ##     size      u64-le
 ##     bytes     raw file bytes
 ##
@@ -205,9 +204,7 @@ proc walkPrefix(prefix: string): seq[string] =
   result.sort(cmp)
 
 proc fileModeOctal(path: string): uint32 =
-  ## Returns 0o755 if the file is executable, 0o644 otherwise. On
-  ## Windows there's no exec bit; we approximate by extension
-  ## (``.exe``, ``.com``, ``.bat``, ``.ps1``, ``.sh``).
+  ## Preserves POSIX permission bits. Windows approximates by extension.
   when defined(windows):
     let lower = path.toLowerAscii()
     if lower.endsWith(".exe") or lower.endsWith(".com") or
@@ -216,10 +213,7 @@ proc fileModeOctal(path: string): uint32 =
       return 0o755'u32
     return 0o644'u32
   else:
-    let info = getFileInfo(path)
-    if (info.permissions * {fpUserExec, fpGroupExec, fpOthersExec}).len > 0:
-      return 0o755'u32
-    return 0o644'u32
+    filePermissionsMode(getFilePermissions(path))
 
 proc packPrefix(prefix: string): seq[byte] =
   ## Builds the deterministic archive bytes for the prefix tree.
@@ -276,12 +270,7 @@ proc extractPrefix(archive: openArray[byte]; outDir: string) =
     inc pos, int(size)
     writeFile(absOut, data)
     when not defined(windows):
-      if (mode and 0o100'u32) != 0:
-        var perms = getFilePermissions(absOut)
-        perms.incl(fpUserExec)
-        perms.incl(fpGroupExec)
-        perms.incl(fpOthersExec)
-        setFilePermissions(absOut, perms)
+      setFilePermissions(absOut, modeFilePermissions(mode))
 
 # ---------------------------------------------------------------------------
 # Helpers
