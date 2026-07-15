@@ -222,9 +222,10 @@ export -f extract_nix_prefixes_from_elf
   fi
 } | while IFS= read -r elf; do
   # Cheap ELF-magic check before patchelf invocation.
-  magic=$(head -c 4 "$elf" 2>/dev/null | od -An -c | tr -d ' \n' || true)
+  magic=""
+  IFS= read -r -N 4 magic 2>/dev/null < "$elf" || true
   case "$magic" in
-    177ELF*) extract_nix_prefixes_from_elf "$elf" ;;
+    $'\177ELF') extract_nix_prefixes_from_elf "$elf" ;;
   esac
 done | sort -u > "$nix_prefixes_file"
 
@@ -299,9 +300,10 @@ while :; do
     find "$staged_prefix" -type f \
       \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) 2>/dev/null | \
       while IFS= read -r elf; do
-        magic=$(head -c 4 "$elf" 2>/dev/null | od -An -c | tr -d ' \n' || true)
+        magic=""
+        IFS= read -r -N 4 magic 2>/dev/null < "$elf" || true
         case "$magic" in
-          177ELF*) extract_nix_prefixes_from_elf "$elf" ;;
+          $'\177ELF') extract_nix_prefixes_from_elf "$elf" ;;
         esac
       done
     # M9.R.29.19 — also walk symlink targets that point into
