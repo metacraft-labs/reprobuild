@@ -40,9 +40,21 @@ const ExpectedConfigureFlags = @[
   "--disable-static",
   "--disable-nls",
   "--with-systemd=no",
+  "CPPFLAGS=-I/opt/repro/reprobuild/recipes/packages/source/ncurses/.repro/output/install/usr/include",
+  "LDFLAGS=-L/opt/repro/reprobuild/recipes/packages/source/ncurses/.repro/output/install/usr/lib",
+  "LIBS=-ltinfow",
+  "NCURSES_CFLAGS=-I/opt/repro/reprobuild/recipes/packages/source/ncurses/.repro/output/install/usr/include",
+  "NCURSES_LIBS=-lncursesw",
 ]
 
 suite "procpsSource — from-source recipe smoke test":
+
+  test "build dependencies cover autoreconf and top's terminal UI":
+    check registeredNativeBuildDeps("procpsSource") == @[
+      "autoconf", "automake", "libtool", "m4", "make", "gcc >=11",
+      "pkg-config",
+    ]
+    check registeredBuildDeps("procpsSource") == @["ncurses >=6.0"]
 
   test "fetch spec carries the vendored URL verbatim":
     # M9.H registry round-trip — URL is recorded exactly as declared.
@@ -79,7 +91,7 @@ suite "procpsSource — from-source recipe smoke test":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "artifacts register five executables + one library with correct kinds":
     # M3 artifact registry: ``ps`` + ``top`` + ``free`` + ``kill`` +
-    # ``uptime`` are tagged ``dakExecutable`` while ``libProc`` is
+    # ``uptime`` are tagged ``dakExecutable`` while ``libProc2`` is
     # tagged ``dakLibrary``. A regression that flattened the kind
     # discriminator would mis-route the M9.L install path (``lib/``
     # vs ``bin/``); a regression that collapsed the artifact-name
@@ -111,7 +123,7 @@ suite "procpsSource — from-source recipe smoke test":
       of "uptime":
         seenUptime = true
         check art.kind == dakExecutable
-      of "libProc":
+      of "libProc2":
         seenLibProc = true
         check art.kind == dakLibrary
       else:

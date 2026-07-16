@@ -1,6 +1,6 @@
 import std/[os, strutils, unittest]
 
-const MigratedPackages = ["parted", "dosfstools", "lvm2", "less"]
+const MigratedPackages = ["parted", "dosfstools", "lvm2", "less", "procps"]
 
 proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -43,5 +43,7 @@ suite "ReproOS source bridge inventory":
       check packageName notin aptPackages
       check packageName in sourceBridges
 
+    # Debian's gdb closure pulls procps through libdebuginfod-common and ucf.
+    check "gdb" notin aptPackages
     check "required source mirror missing: $recipe" in stageScript
     check "return 1" in stageScript

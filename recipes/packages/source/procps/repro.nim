@@ -82,10 +82,10 @@
 ##   * ``free``     — ``/usr/bin/free`` the memory-summary CLI.
 ##   * ``kill``     — ``/bin/kill`` the signal-delivery CLI.
 ##   * ``uptime``   — ``/usr/bin/uptime`` the load-average CLI.
-##   * ``libProc``  — ``libproc2.so`` the process-introspection C
+##   * ``libProc2`` — ``libproc2.so`` the process-introspection C
 ##                    library consumed by htop + glances + btop.
 ##
-## The upstream SONAME ``proc2`` is PascalCased to ``libProc`` per the
+## The upstream SONAME ``proc2`` is represented as ``libProc2`` so the
 ## task brief (matches the libCap / libExpat / libGlib2 precedent of
 ## preserving the canonical ``lib`` prefix while PascalCasing the
 ## SONAME body, with the ``2`` version-suffix folded into the
@@ -185,6 +185,8 @@ package procpsSource:
     ## drives for ``--disable-static`` to honour the shared-only build
     ## semantics correctly.
     "libtool"
+    ## m4 is required by the autoreconf bootstrap path below.
+    "m4"
     ## make is the build-system driver — the c_cpp_autotools convention's
     ## compile action invokes ``make`` after ``./configure``.
     "make"
@@ -193,6 +195,10 @@ package procpsSource:
     ## pkg-config is used by the autotools configure step to probe for
     ## ncurses (used by ``top``'s TUI).
     "pkg-config"
+
+  buildDeps:
+    ## top requires the wide-character ncurses headers and libraries.
+    "ncurses >=6.0"
 
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
@@ -229,10 +235,10 @@ package procpsSource:
     ## health-check script. v1 records the artifact only.
     discard
 
-  library libProc:
+  library libProc2:
     ## ``libproc2.so`` — the process-introspection C library consumed
     ## by htop + glances + btop. The upstream SONAME ``proc2`` is
-    ## PascalCased to ``libProc`` per the task brief (matches the
+    ## represented as ``libProc2`` to preserve the SONAME suffix (matches the
     ## libCap / libExpat / libGlib2 precedent of preserving the
     ## canonical ``lib`` prefix while PascalCasing the SONAME body,
     ## with the ``2`` version-suffix folded into the convention layer's
@@ -247,14 +253,28 @@ package procpsSource:
         "--disable-static",
         "--disable-nls",
         "--with-systemd=no",
+        "CPPFLAGS=-I/opt/repro/reprobuild/recipes/packages/source/ncurses/.repro/output/install/usr/include",
+        "LDFLAGS=-L/opt/repro/reprobuild/recipes/packages/source/ncurses/.repro/output/install/usr/lib",
+        "LIBS=-ltinfow",
+        "NCURSES_CFLAGS=-I/opt/repro/reprobuild/recipes/packages/source/ncurses/.repro/output/install/usr/include",
+        "NCURSES_LIBS=-lncursesw",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      # procps's gettext po/ recursion expects configure to generate
+      # po/Makefile beside the source tree, so build it in-tree.
+      let pkg = autotools_package(srcDir = "./src",
+                                  buildDir = "src",
+                                  configureOptions = opts,
+                                  patchHardcodedFile = true,
+                                  srcPatches = @[
+        "printf '4.0.5\\n' > ./src/.tarball-version",
+        "sed -i '/^[[:space:]]*po[[:space:]]/d' ./src/Makefile.am",
+      ])
       discard pkg.executable("ps")
       discard pkg.executable("top")
       discard pkg.executable("free")
       discard pkg.executable("kill")
       discard pkg.executable("uptime")
-      discard pkg.library("libProc")
+      discard pkg.library("libProc2")
     finally:
       clearCurrentOwningPackageOverride()
 

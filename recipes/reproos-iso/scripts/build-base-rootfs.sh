@@ -164,15 +164,13 @@ PKG_LIST=(
   # useradd + userdel + usermod + groupadd + groupdel + groupmod);
   # the Phase 4b shadow-link loop covers them.
   #
-  #   procps           FS:partial STAGE:no  (recipe exists; install dir
-  #                                          missing)
-  # Source bridge dropped ``less`` after its ncurses build dependency
-  # was made explicit. The recipe now ships less, lesskey, and lessecho,
-  # and Phase 4b exposes the complete usr/bin surface.
+  # Source bridge dropped ``procps`` and ``less`` after their ncurses
+  # build dependencies were made explicit. Their recipes now expose the
+  # complete installed usr/bin and usr/sbin surfaces through Phase 4b.
   #   nano             FS:none    STAGE:no  (not in from-source corpus;
   #                                          editor convenience, no
   #                                          runtime dep)
-  udev procps nano
+  udev nano
   # Locale data (no build cost; pure data).
   #   locales          FS:none    STAGE:no  (glibc recipe exists but
   #                                          locale-gen is a runtime
@@ -234,11 +232,13 @@ PKG_LIST=(
   #   grub-common            FS:none STAGE:no
   #   grub2-common           FS:none STAGE:no
   grub-efi-amd64-bin grub-pc-bin grub-common grub2-common
-  # M9.R.37.1 — diagnostic tools the installer's REPRO_INSTALLER_DIAG=1
+  # M9.R.37.1 — diagnostic tool the installer's REPRO_INSTALLER_DIAG=1
   # mode invokes to characterise the silent-wedge gap M9.R.36 left
-  # open.  ``strace`` traces every syscall the installer + its children
-  # make; ``gdb`` is for post-wedge core dumps.  Both are FS:none.
-  strace gdb
+  # open. ``strace`` traces every syscall the installer + its children
+  # make. Keep ``gdb`` out until it has a source recipe: its Debian
+  # closure pulls libdebuginfod-common -> ucf -> procps, reintroducing
+  # the binary procps package that the source bridge replaces.
+  strace
   # M9.R.41 — ``repro infra install-root`` (Phase 5 root-mirror) shells
   # out to ``rsync -aHAX --numeric-ids --one-file-system`` to mirror
   # the live ISO root onto /mnt.  ``rsync`` has no from-source recipe
