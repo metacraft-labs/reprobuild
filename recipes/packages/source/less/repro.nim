@@ -149,6 +149,12 @@ package lessSource:
     ## terminfo glue.
     "gcc >=11"
 
+  buildDeps:
+    ## less requires a terminal capability library at configure and link time.
+    ## The ncurses recipe provides the termcap-compatible headers and libtinfo
+    ## implementation used by the pager's terminal initialization path.
+    "ncurses >=6.0"
+
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
     discard

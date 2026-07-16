@@ -1,6 +1,6 @@
 import std/[os, strutils, unittest]
 
-const MigratedPackages = ["parted", "dosfstools", "lvm2"]
+const MigratedPackages = ["parted", "dosfstools", "lvm2", "less"]
 
 proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -26,7 +26,7 @@ proc shellArrayEntries(text, marker: string): seq[string] =
     result.add(code.splitWhitespace)
 
 suite "ReproOS source bridge inventory":
-  test "migrated disk tools are required from source and absent from apt inputs":
+  test "migrated packages are required from source and absent from apt inputs":
     let repoRoot = findRepoRoot()
     let baseScript = readFile(repoRoot / "recipes" / "reproos-iso" /
       "scripts" / "build-base-rootfs.sh")

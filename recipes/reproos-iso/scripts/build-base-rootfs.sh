@@ -166,11 +166,13 @@ PKG_LIST=(
   #
   #   procps           FS:partial STAGE:no  (recipe exists; install dir
   #                                          missing)
-  #   less             FS:done    STAGE:no
+  # Source bridge dropped ``less`` after its ncurses build dependency
+  # was made explicit. The recipe now ships less, lesskey, and lessecho,
+  # and Phase 4b exposes the complete usr/bin surface.
   #   nano             FS:none    STAGE:no  (not in from-source corpus;
   #                                          editor convenience, no
   #                                          runtime dep)
-  udev procps less nano
+  udev procps nano
   # Locale data (no build cost; pure data).
   #   locales          FS:none    STAGE:no  (glibc recipe exists but
   #                                          locale-gen is a runtime
