@@ -11,7 +11,6 @@ const ExpectedUrl =
   "https://downloads.sourceforge.net/gptfdisk/gptfdisk-1.0.10.tar.gz"
 const ExpectedHash =
   "2abed61bc6d2b9ec498973c0440b8b804b7a72d7144069b5a9209b2ad693a282"
-
 suite "gdiskSource — from-source recipe smoke test":
 
   test "fetch spec carries the upstream URL verbatim":
@@ -29,3 +28,21 @@ suite "gdiskSource — from-source recipe smoke test":
     let spec = registeredFetchSpec("gdiskSource")
     check spec.kind == dfkTarball
     check spec.extractStrip == 1
+
+  test "build dependencies are exact":
+    check registeredNativeBuildDeps("gdiskSource") == @[
+      "make", "gcc >=11", "pkg-config",
+    ]
+    check registeredBuildDeps("gdiskSource") == @[
+      "ncurses", "popt", "util-linux",
+    ]
+
+  test "four partitioning tools are registered":
+    let artifacts = registeredArtifacts("gdiskSource")
+    check artifacts.len == 4
+    check artifacts[0].artifactName == "gdisk"
+    check artifacts[1].artifactName == "sgdisk"
+    check artifacts[2].artifactName == "cgdisk"
+    check artifacts[3].artifactName == "fixparts"
+    for artifact in artifacts:
+      check artifact.kind == dakExecutable

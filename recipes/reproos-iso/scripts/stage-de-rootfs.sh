@@ -426,9 +426,10 @@ link_entry gdm gdm
 # audit annotations of build-base-rootfs.sh PKG_LIST (systemd,
 # util-linux, kmod, dbus, sudo, e2fsprogs, btrfs-progs, shadow-utils,
 # iana-tzdata), the source-migrated disk-tool set (parted, dosfstools,
-# lvm2), less, and procps. iana-tzdata ships /usr/share/zoneinfo + a
-# small /usr/bin tzdata helper; the remaining recipes expose binaries
-# and their runtime libraries from source install mirrors.
+# lvm2, gdisk), gdisk's popt runtime dependency, less, and procps.
+# iana-tzdata ships /usr/share/zoneinfo + a small /usr/bin tzdata helper;
+# popt is library-only; the remaining recipes expose binaries and their
+# runtime libraries from source install mirrors.
 
 BASE_USERSPACE_RECIPES=(
   systemd
@@ -443,6 +444,8 @@ BASE_USERSPACE_RECIPES=(
   parted
   dosfstools
   lvm2
+  popt
+  gdisk
   less
   procps
 )

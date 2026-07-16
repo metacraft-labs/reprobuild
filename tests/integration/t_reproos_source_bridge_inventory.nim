@@ -1,6 +1,8 @@
 import std/[os, strutils, unittest]
 
-const MigratedPackages = ["parted", "dosfstools", "lvm2", "less", "procps"]
+const MigratedPackages = [
+  "parted", "dosfstools", "lvm2", "gdisk", "less", "procps",
+]
 
 proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
