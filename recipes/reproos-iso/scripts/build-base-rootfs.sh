@@ -208,10 +208,10 @@ PKG_LIST=(
   # shells out to. These are the on-target install-time utilities.
   #
   # Source-bridge migration dropped ``parted``, ``dosfstools``, ``lvm2``,
-  # and ``gdisk``: each recipe has a populated install mirror and Phase
-  # 4b now exposes its complete usr/{bin,sbin} surface. Keep cryptsetup
-  # until its recipe produces a real output.
-  #   cryptsetup       FS:partial STAGE:no  (empty install mirror)
+  # ``gdisk``, and ``cryptsetup``: each recipe has a populated install
+  # mirror and Phase 4b now exposes its complete usr/{bin,sbin} surface.
+  # cryptsetup's libgpg-error, libgcrypt, json-c, lvm2, popt, and util-linux
+  # runtime dependencies are also sourced from their install mirrors.
   #
   # M9.R.33.9 dropped: ``e2fsprogs`` -- FS:done recipe ships 4 binaries
   # in usr/bin (chattr, lsattr, ...) + 24 in usr/sbin (mke2fs, tune2fs,
@@ -223,7 +223,6 @@ PKG_LIST=(
   # btrfs-image, btrfs-map-logical, btrfs-select-super, btrfstune,
   # fsck.btrfs, mkfs.btrfs); the Phase 4b shadow-link loop covers them.
   #
-  cryptsetup
   # Bootloader tools the installer's Phase 5 (system apply) shells
   # out to.  GRUB has no from-source recipe yet (TODO M9.R.33).
   #   grub-efi-amd64-bin     FS:none STAGE:no

@@ -29,3 +29,24 @@ suite "cryptsetupSource — from-source recipe smoke test":
     let spec = registeredFetchSpec("cryptsetupSource")
     check spec.kind == dfkTarball
     check spec.extractStrip == 1
+
+  test "build dependencies cover source runtime libraries":
+    check registeredNativeBuildDeps("cryptsetupSource") == @[
+      "autoconf", "automake", "libtool", "m4", "make", "gcc >=11",
+      "pkg-config", "gettext",
+    ]
+    check registeredBuildDeps("cryptsetupSource") == @[
+      "libgcrypt", "json-c", "popt", "lvm2", "util-linux",
+    ]
+
+  test "tools and shared library are registered":
+    let artifacts = registeredArtifacts("cryptsetupSource")
+    check artifacts.len == 4
+    check artifacts[0].artifactName == "cryptsetup"
+    check artifacts[1].artifactName == "veritysetup"
+    check artifacts[2].artifactName == "integritysetup"
+    check artifacts[3].artifactName == "libCryptsetup"
+    check artifacts[0].kind == dakExecutable
+    check artifacts[1].kind == dakExecutable
+    check artifacts[2].kind == dakExecutable
+    check artifacts[3].kind == dakLibrary

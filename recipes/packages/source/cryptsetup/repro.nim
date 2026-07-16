@@ -28,6 +28,7 @@ package cryptsetupSource:
     "autoconf"
     "automake"
     "libtool"
+    "m4"
     "make"
     "gcc >=11"
     "pkg-config"
@@ -41,8 +42,8 @@ package cryptsetupSource:
     ## popt for option parsing.
     "popt"
     ## device-mapper (libdevmapper.so) is the kernel-dm userspace
-    ## interface cryptsetup talks to.
-    "device-mapper"
+    ## interface cryptsetup talks to; it is supplied by source lvm2.
+    "lvm2"
     ## util-linux for libuuid + libblkid.
     "util-linux"
 
@@ -78,8 +79,13 @@ package cryptsetupSource:
         "--disable-udev",
         "--enable-internal-argon2",
       ]
+      let patches = @[
+        "export gettext_datadir=/opt/repro/reprobuild/recipes/packages/source/gettext/.repro/output/install/usr/share/gettext",
+        "grep -qF 'AM_CPPFLAGS += $(JSON_C_CFLAGS)' src/Makefile.am || sed -i '/EXTERNAL_LUKS2_TOKENS_PATH/a AM_CPPFLAGS += $(JSON_C_CFLAGS)' src/Makefile.am",
+      ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
-                                  patchHardcodedFile = true)
+                                  patchHardcodedFile = true,
+                                  srcPatches = patches)
       discard pkg.executable("cryptsetup")
       discard pkg.executable("veritysetup")
       discard pkg.executable("integritysetup")

@@ -171,10 +171,8 @@ package libgcryptSource:
   buildDeps:
     ## libgpg-error is libgcrypt's helper library for the canonical
     ## GnuPG error-code namespace. The upstream ``./configure`` probes
-    ## for it through ``gpg-error-config``; the ``uses:`` entry pins
-    ## the probe-time availability. (We do NOT yet ship a separate
-    ## ``libgpgErrorSource`` recipe; the system provider is assumed
-    ## until the v1 desktop story closes that gap.)
+    ## for it through ``gpg-error-config``. The source recipe provides
+    ## both the helper and shared library to this build.
     "libgpg-error"
 
   config:

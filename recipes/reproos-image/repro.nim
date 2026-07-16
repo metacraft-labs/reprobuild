@@ -129,6 +129,7 @@ const reproosImageRootfsDeps = @[
   "btrfs-progs",
   "shadow-utils",
   "iana-tzdata",
+  "cryptsetup",
 ]
 
 package reproosImage:
@@ -159,6 +160,7 @@ package reproosImage:
     "btrfs-progs"
     "shadow-utils"
     "iana-tzdata"
+    "cryptsetup"
 
   runtimeDeps:
     # M9.R.53: enumerate every bare-name host tool
