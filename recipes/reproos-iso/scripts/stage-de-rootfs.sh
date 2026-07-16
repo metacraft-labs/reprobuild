@@ -422,11 +422,13 @@ link_entry gdm gdm
 # source binary is the one resolved at PATH lookup time on the staged
 # ISO.
 #
-# The list mirrors the 9 FS:done entries documented in the M9.R.32.4
+# The list mirrors the FS:done entries documented in the M9.R.32.4
 # audit annotations of build-base-rootfs.sh PKG_LIST (systemd,
 # util-linux, kmod, dbus, sudo, e2fsprogs, btrfs-progs, shadow-utils,
-# iana-tzdata).  iana-tzdata ships /usr/share/zoneinfo + a small
-# /usr/bin tzdata helper; the rest ship pure executables.
+# iana-tzdata) plus the source-migrated disk-tool set (parted,
+# dosfstools, lvm2). iana-tzdata ships /usr/share/zoneinfo + a small
+# /usr/bin tzdata helper; the remaining recipes expose binaries and
+# their runtime libraries from source install mirrors.
 
 BASE_USERSPACE_RECIPES=(
   systemd
@@ -438,6 +440,9 @@ BASE_USERSPACE_RECIPES=(
   btrfs-progs
   shadow-utils
   iana-tzdata
+  parted
+  dosfstools
+  lvm2
 )
 
 link_base_recipe_binaries() {
@@ -446,8 +451,8 @@ link_base_recipe_binaries() {
   local install_usr="$install_root/usr"
   if [ ! -d "$install_usr" ] && [ ! -d "$install_root/bin" ] && \
      [ ! -d "$install_root/sbin" ]; then
-    echo "[stage-de-rootfs] base-userspace mirror missing: $recipe (recipe not built; skipped)" >&2
-    return 0
+    echo "[stage-de-rootfs] required source mirror missing: $recipe" >&2
+    return 1
   fi
   local sub
   local linked=0

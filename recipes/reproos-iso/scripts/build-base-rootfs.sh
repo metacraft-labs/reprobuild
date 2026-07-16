@@ -205,27 +205,26 @@ PKG_LIST=(
   #                                              + PAM files NOT staged)
   sddm
   # M9.R.24.2 -- disko apply tools the installer's Phase 2 driver
-  # shells out to.  These are the on-target install-time utilities;
-  # the from-source equivalents are part of a longer-tail recipe
-  # campaign (TODO M9.R.33).
-  #   gdisk            FS:partial STAGE:no
-  #   parted           FS:partial STAGE:no
+  # shells out to. These are the on-target install-time utilities.
+  #
+  # Source-bridge migration dropped ``parted``, ``dosfstools``, and
+  # ``lvm2``: each recipe has a populated install mirror and Phase 4b
+  # now exposes its complete usr/{bin,sbin} surface. Keep the two
+  # incomplete recipes until they produce real outputs.
+  #   gdisk            FS:partial STAGE:no  (empty install mirror)
+  #   cryptsetup       FS:partial STAGE:no  (empty install mirror)
   #
   # M9.R.33.9 dropped: ``e2fsprogs`` -- FS:done recipe ships 4 binaries
   # in usr/bin (chattr, lsattr, ...) + 24 in usr/sbin (mke2fs, tune2fs,
   # fsck.ext2/3/4, dumpe2fs, debugfs, ...); the Phase 4b shadow-link
   # loop covers them.
   #
-  #   dosfstools       FS:partial STAGE:no
-  #
   # M9.R.33.10 dropped: ``btrfs-progs`` -- FS:done recipe ships 9
   # binaries in usr/bin (btrfs, btrfs-convert, btrfs-find-root,
   # btrfs-image, btrfs-map-logical, btrfs-select-super, btrfstune,
   # fsck.btrfs, mkfs.btrfs); the Phase 4b shadow-link loop covers them.
   #
-  #   cryptsetup       FS:partial STAGE:no
-  #   lvm2             FS:partial STAGE:no
-  gdisk parted dosfstools cryptsetup lvm2
+  gdisk cryptsetup
   # Bootloader tools the installer's Phase 5 (system apply) shells
   # out to.  GRUB has no from-source recipe yet (TODO M9.R.33).
   #   grub-efi-amd64-bin     FS:none STAGE:no

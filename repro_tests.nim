@@ -5678,6 +5678,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_reproos_source_bridge_inventory.nim",
+    binary: "build/test-bin/t_reproos_source_bridge_inventory",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_b5_bootstrap_idempotent.nim",
     binary: "build/test-bin/t_b5_bootstrap_idempotent",
     defines: @[],
