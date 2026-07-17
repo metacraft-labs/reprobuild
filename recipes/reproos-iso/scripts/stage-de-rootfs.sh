@@ -458,6 +458,7 @@ BASE_USERSPACE_RECIPES=(
   xkeyboard-config
   libxkbfile
   xkbcomp
+  adwaita-icon-theme
 )
 
 link_base_recipe_binaries() {
@@ -541,6 +542,19 @@ link_base_recipe_binaries() {
     mkdir -p "$STAGE_DIR/usr/share/X11"
     rm -rf "$STAGE_DIR/usr/share/X11/xkb"
     ln -sf "$xkb_link_target" "$STAGE_DIR/usr/share/X11/xkb"
+  fi
+  # Adwaita is data-only. Expose the source-built icon tree at GTK's
+  # standard fallback-theme path instead of leaving it under the mirror.
+  if [ "$recipe" = "adwaita-icon-theme" ]; then
+    local adwaita_src="$install_usr/share/icons/Adwaita"
+    if [ ! -f "$adwaita_src/index.theme" ]; then
+      echo "[stage-de-rootfs] required Adwaita icon data missing" >&2
+      return 1
+    fi
+    local adwaita_link_target="${adwaita_src#$STAGE_DIR}"
+    mkdir -p "$STAGE_DIR/usr/share/icons"
+    rm -rf "$STAGE_DIR/usr/share/icons/Adwaita"
+    ln -sf "$adwaita_link_target" "$STAGE_DIR/usr/share/icons/Adwaita"
   fi
   # iana-tzdata: also stage /usr/share/zoneinfo from the recipe's
   # install-mirror.  Other base-userspace recipes ship usr/share/
