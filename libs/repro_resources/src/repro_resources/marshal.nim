@@ -1,0 +1,33 @@
+## Provider<->client marshalling for a `ResourceInstance`'s attribute
+## box, reusing the `Typed-Graph-Extensions.md` registry verbatim.
+##
+## A provider defines its attribute record `T` and calls
+## `registerExtension[T](typeId)` (typically right beside
+## `registerResourceProvider`); this module then serializes and
+## re-hydrates the `attrs` box by `typeId` across the provider->client
+## boundary. An unknown `typeId` at unmarshal time is a HARD error — an
+## unknown resource cannot be silently dropped.
+
+import std/tables
+
+import repro_project_dsl          # ExtensionBox, extensionRegistry
+
+proc marshalAttrs*(box: ExtensionBox): string =
+  ## Serialize an attribute box by its `typeId` through the shared
+  ## Typed-Graph-Extensions marshaller registry.
+  if not extensionRegistry.contains(box.typeId):
+    raise newException(KeyError,
+      "no attribute marshaller registered for resource typeId '" &
+      box.typeId & "'; the provider must call " &
+      "registerExtension[Attrs](\"" & box.typeId & "\")")
+  extensionRegistry[box.typeId].marshal(box)
+
+proc unmarshalAttrs*(typeId: string; jsonStr: string): ExtensionBox =
+  ## Re-hydrate an attribute box for `typeId`. Hard error on an
+  ## unknown id.
+  if not extensionRegistry.contains(typeId):
+    raise newException(KeyError,
+      "no attribute marshaller registered for resource typeId '" &
+      typeId & "'; the applying process must link the provider module")
+  result = extensionRegistry[typeId].unmarshal(jsonStr)
+  result.typeId = typeId

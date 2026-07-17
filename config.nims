@@ -150,6 +150,9 @@ for libName in [
   # home-profile rollback contract into system scope.
   "repro_system_rollback",
   "repro_home_resources",
+  # Composable-Resource-Types slice 2: the generic external-provider
+  # resource lane (ResourceInstance + provider registry + reconciler).
+  "repro_resources",
   "repro_homebrew_adapter",
   "repro_elevation",
   "repro_infra",
