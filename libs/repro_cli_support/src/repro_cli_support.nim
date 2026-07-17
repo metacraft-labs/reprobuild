@@ -10615,6 +10615,7 @@ proc runCheckCommand*(args: openArray[string]): int
 proc validateCommittedLockAdvisory(repoRoot: string)
 proc runPostCommitLockCommand*(args: openArray[string]): int
 proc runCachePushCommand*(args: openArray[string]): int
+proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string]
 proc runManifestRefreshHookCommand*(hookName: string;
                                     args: openArray[string]): int
 
@@ -26534,6 +26535,17 @@ proc runCachePushCommand*(args: openArray[string]): int =
     if gitBin.len == 0:
       return 0
     discard pushCacheRef(gitBin, repoAbs, bare, workspaceName)
+    # Opportunistic, budget-gated shared-bare maintenance (spec:
+    # Workspace-And-Develop-Mode.md §"Cache maintenance: gc / repack"). The
+    # post-commit cache-ref push is exactly what accumulates loose objects in
+    # the shared bare, and this runs inside the already-detached post-commit
+    # process, so a gc/repack + dead-workspace-ref prune here never blocks the
+    # commit. ``maintenanceDue`` bounds the pass to the loose-object / age /
+    # size budget (at most ~weekly on a quiet cache; fires once on a
+    # never-maintained bare, then respects the stamp).
+    if maintenanceDue(gitBin, bare, defaultMaintenanceBudget()):
+      let live = liveWorkspaceNamesForCache(workspaceRoot)
+      discard maintainSharedBare(gitBin, bare, live, defaultMaintenanceBudget())
   except CatchableError:
     discard
   0
