@@ -114,6 +114,14 @@ suite "DSL-port M9.R.5a — 84-recipe sweep smoke":
     check registeredBuildDeps("nettleSource") == @["gmp >=6.2"]
     check registeredRuntimeDeps("nettleSource") == @["gmp >=6.2"]
 
+  test "GMP source recipe declares its native build tools":
+    let native = registeredNativeBuildDeps("gmpSource")
+    check "make" in native
+    check "gcc >=11" in native
+    check "m4" in native
+    check registeredBuildDeps("gmpSource").len == 0
+    check registeredRuntimeDeps("gmpSource").len == 0
+
   test "gnutls declares its linked library closure":
     let expected = @["nettle >=3.7", "gmp >=6.2"]
     check registeredBuildDeps("gnutlsSource") == expected
