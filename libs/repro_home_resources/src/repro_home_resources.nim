@@ -27,10 +27,12 @@
 
 import repro_home_resources/errors
 import repro_home_resources/types
+import repro_home_resources/type_registry
 import repro_home_resources/manifest_record
 import repro_home_resources/validation
 import repro_home_resources/lifecycle
 import repro_home_resources/plan
+import repro_home_resources/builtin_registrations
 import repro_home_resources/drivers/env_user
 import repro_home_resources/drivers/managed_block
 import repro_home_resources/drivers/registry
@@ -47,6 +49,7 @@ import repro_home_resources/drivers/vscode_extension
 
 export errors
 export types
+export type_registry
 export manifest_record
 export validation
 export lifecycle
@@ -64,3 +67,10 @@ export launchd_user
 export systemd_user
 export user_file
 export vscode_extension
+export builtin_registrations
+
+# Populate the resource-type registry at import time so the closed-set
+# built-ins are available to `digestOfResource` / `observeResource`
+# before any planner call (Composable-Resource-Types.md Migration
+# step 1).
+registerBuiltinResourceTypes()

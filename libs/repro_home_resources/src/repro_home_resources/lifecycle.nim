@@ -39,6 +39,7 @@ import repro_homebrew_adapter/cask as homebrew_cask
 import ./errors
 import ./manifest_record
 import ./types
+import ./type_registry
 
 type
   ReconcilePolicy* = enum
@@ -85,172 +86,199 @@ proc managedBlockBodyDigest(content: string): Digest256 =
     buf[i] = byte(ord(ch))
   return digestOfBytes(buf)
 
+# ---------------------------------------------------------------------------
+# Per-kind digest leaf procs. Each is the extracted body of one former
+# `case desired.kind` branch, unchanged. `builtin_registrations.nim`
+# points each `ResourceTypeDef.driver.digest` at the matching proc;
+# `digestOfResource` dispatches through the registry.
+# ---------------------------------------------------------------------------
+
+proc digestFsManagedBlock*(desired: Resource): Digest256 {.nimcall.} =
+  # The driver normalizes the on-disk block body by ensuring a
+  # trailing `\n` (so the close sentinel sits on its own line).
+  # Mirror that normalization here so cache-hit comparison
+  # (desired digest == observed digest) holds when the content
+  # the user passed already ends with `\n` AND when it doesn't.
+  return managedBlockBodyDigest(desired.managedBlockContent)
+
+proc digestWindowsRegistryValue*(desired: Resource): Digest256 {.nimcall.} =
+  return digestOfBytes(desired.registryPayload.bytes)
+
+proc digestEnvUserVariable*(desired: Resource): Digest256 {.nimcall.} =
+  return digestOfBytes(desired.envVarPayload.bytes)
+
+proc digestEnvUserPath*(desired: Resource): Digest256 {.nimcall.} =
+  # The recorded payload is the joined entries; preserves order.
+  when defined(windows):
+    let sep = ";"
+  else:
+    let sep = ":"
+  let joined = desired.pathEntries.join(sep)
+  var buf = newSeq[byte](joined.len)
+  for i, ch in joined:
+    buf[i] = byte(ord(ch))
+  return digestOfBytes(buf)
+
+proc digestWindowsStartup*(desired: Resource): Digest256 {.nimcall.} =
+  var buf = newSeq[byte](desired.startupCommand.len)
+  for i, ch in desired.startupCommand:
+    buf[i] = byte(ord(ch))
+  return digestOfBytes(buf)
+
+proc digestShellIntegration*(desired: Resource): Digest256 {.nimcall.} =
+  # `shell.integration` is written by the SAME managed-block writer
+  # as `rkFsManagedBlock` (via `applyShellIntegration` ->
+  # `applyManagedBlockResource`), which appends a trailing `\n` to a
+  # non-empty body. The desired digest must therefore apply the
+  # identical trailing-newline normalization, otherwise an unchanged
+  # `shell.integration` resource re-plans as `update` instead of
+  # `no-op`. Genuine content drift still produces a differing digest.
+  return managedBlockBodyDigest(desired.shellBlockContent)
+
+proc digestLinuxGsettings*(desired: Resource): Digest256 {.nimcall.} =
+  var buf = newSeq[byte](desired.gsettingsValueLiteral.len)
+  for i, ch in desired.gsettingsValueLiteral:
+    buf[i] = byte(ord(ch))
+  return digestOfBytes(buf)
+
+proc digestSystemdUserUnit*(desired: Resource): Digest256 {.nimcall.} =
+  # The on-disk file the driver writes is just `unitContent`, but
+  # `unitEnabled` and `unitState` are RECONCILED by `systemctl`
+  # without touching the file. A change to either field must
+  # therefore re-trigger the apply path even when the file body
+  # itself is unchanged. `canonicalUnitBytes` encodes the triple
+  # consistently for both desired (here) and observed
+  # (`observeUserUnit`); same content + enabled + state -> same
+  # digest -> cache-hit no-op.
+  return digestOfBytes(canonicalUnitBytes(desired.unitContent,
+    desired.unitEnabled, desired.unitState))
+
+proc digestMacosUserDefault*(desired: Resource): Digest256 {.nimcall.} =
+  # Structural canonicalization (NOT a text compare): the
+  # `macos.userDefault` driver records and observes the
+  # structurally-canonicalized value, so the desired digest must
+  # be over the same canonical form. A dict with reordered keys
+  # or a value that differs only in quote style / whitespace
+  # therefore digests identically and does NOT register as drift.
+  let canonical = canonicalizeDefaultsValue(desired.defaultsValueLiteral)
+  var buf = newSeq[byte](canonical.len)
+  for i, ch in canonical:
+    buf[i] = byte(ord(ch))
+  return digestOfBytes(buf)
+
+proc digestLaunchdUserAgent*(desired: Resource): Digest256 {.nimcall.} =
+  # M83 step 4b: the canonical bytes are the rendered plist —
+  # `launchAgentPlistFor` returns `launchdPlistContent` verbatim
+  # when present (backwards-compat path) or freshly builds the
+  # XML from the typed `label` / `programArgs` / `runAtLoad` /
+  # `keepAlive` fields (the M83 step 4b common case). The
+  # `observeLaunchAgent` driver reads the plist from disk and
+  # digests its raw bytes; the two converge to the same hash
+  # when nothing on disk has drifted.
+  let canonical = launchAgentPlistFor(desired.launchdLabel,
+    desired.launchdProgramArgs, desired.launchdRunAtLoad,
+    desired.launchdKeepAlive, desired.launchdPlistContent)
+  var buf = newSeq[byte](canonical.len)
+  for i, ch in canonical:
+    buf[i] = byte(ord(ch))
+  return digestOfBytes(buf)
+
+proc digestFsUserFile*(desired: Resource): Digest256 {.nimcall.} =
+  # Whole-file: when `userFileContentFromCommand` is empty the
+  # digest is over the raw declared `content` bytes (verbatim — no
+  # trailing-newline normalization, unlike `fs.managedBlock` whose
+  # sentinel writer appends `\n`). On re-observation
+  # `observeUserFile` digests the same raw bytes, so a cache-hit
+  # re-apply compares equal byte-for-byte.
+  #
+  # M83 step 10: when `userFileContentFromCommand` is non-empty,
+  # the bytes-to-be-written are not knowable statically — the
+  # command's stdout determines them at apply time. We therefore
+  # cannot compute a content-equal desired digest; instead the
+  # digest covers `(cacheKey, argv)`. The lifecycle planner
+  # interprets this digest as "the declared INTENT" rather than
+  # "the literal file content" — so the desired-vs-observed
+  # comparison will (correctly) report inequality on every apply
+  # (the observed digest is the file body's BLAKE3, the desired
+  # is the argv hash) and force `rakUpdate`. The driver's apply
+  # path then uses its OWN cache-key short-circuit (non-empty
+  # `cacheKey` + matching recorded post-write digest = skip the
+  # command), so a steady-state re-apply is still cheap when
+  # `cacheKey` is non-empty. With `cacheKey == ""`, the command
+  # runs every apply — idempotent but slow, the documented
+  # trade-off.
+  if desired.userFileContentFromCommand.len > 0:
+    var seed = "cmd\x1e" & desired.userFileCacheKey & "\x1e"
+    for arg in desired.userFileContentFromCommand:
+      seed.add(arg)
+      seed.add('\x1f')
+    var buf = newSeq[byte](seed.len)
+    for i, ch in seed:
+      buf[i] = byte(ord(ch))
+    return digestOfBytes(buf)
+  var buf = newSeq[byte](desired.userFileContent.len)
+  for i, ch in desired.userFileContent:
+    buf[i] = byte(ord(ch))
+  return digestOfBytes(buf)
+
+proc digestVscodeExtension*(desired: Resource): Digest256 {.nimcall.} =
+  # The canonical-desired form is the sorted line-oriented rendering
+  # of the declared extension set (with `@version` pins preserved
+  # verbatim). `observeVscodeExtensions` computes the same canonical
+  # form against the installed set + `removeUnknown` policy, so a
+  # cache-hit re-apply digests equal.
+  let specs = parseDesiredExtensions(desired.vscodeExtensions)
+  let canon = canonicalExtensionSet(specs)
+  var buf = newSeq[byte](canon.len)
+  for i, ch in canon:
+    buf[i] = byte(ord(ch))
+  return digestOfBytes(buf)
+
+proc digestLinuxDconfKey*(desired: Resource): Digest256 {.nimcall.} =
+  # dconf is content-addressed; the digest covers the GVariant
+  # literal verbatim. `observeDconfKey` digests the same bytes
+  # (after stripping the trailing newline `dconf read` adds), so
+  # a cache-hit re-apply compares equal.
+  return digestOfBytes(canonicalDconfBytes(desired.dconfValue))
+
+proc digestLinuxKdeConfigKey*(desired: Resource): Digest256 {.nimcall.} =
+  # The on-disk file `~/.config/<file>` is shared with other
+  # KDE-managed keys, so the digest cannot cover the file body.
+  # Instead it covers just the declared VALUE — kwriteconfig is
+  # idempotent (re-writing the same value is a no-op), so a
+  # cache-hit re-apply compares equal byte-for-byte with what
+  # `kreadconfig` returns from the same slot.
+  return digestOfBytes(canonicalKdeConfigBytes(desired.kdeValue))
+
+proc digestHomebrewFormula*(desired: Resource): Digest256 {.nimcall.} =
+  # The desired identity is the (name, version) pair: same name
+  # + same version (or both empty version) cache-hits; a version
+  # bump or formula rename flips the digest. The `formulaArgs`
+  # list is NOT part of the digest — it controls HOW the install
+  # happens, not WHAT ends up installed. `observeHomebrewFormula`
+  # encodes the same (name, observed-version) pair, so a re-apply
+  # with the version still empty (track-latest mode) AND the tap
+  # still at the same version cache-hits.
+  return digestOfBytes(canonicalHomebrewFormulaBytes(
+    desired.formulaName, desired.formulaVersion))
+
+proc digestHomebrewCask*(desired: Resource): Digest256 {.nimcall.} =
+  # Parallel to the formula encoding: (name, version) digest.
+  # `caskArgs` are NOT part of the digest for the same reason.
+  return digestOfBytes(canonicalHomebrewCaskBytes(
+    desired.caskName, desired.caskVersion))
+
 proc digestOfResource*(desired: Resource): Digest256 =
   ## Canonical content digest for a desired resource. The bytes
   ## fed into the BLAKE3 hash are exactly the bytes the apply
   ## executor would record in `ResourceBinding.payloadBytes`,
   ## so cache-hit comparison is byte-for-byte with the previous
   ## generation's recorded `postWriteDigest`.
-  case desired.kind
-  of rkFsManagedBlock:
-    # The driver normalizes the on-disk block body by ensuring a
-    # trailing `\n` (so the close sentinel sits on its own line).
-    # Mirror that normalization here so cache-hit comparison
-    # (desired digest == observed digest) holds when the content
-    # the user passed already ends with `\n` AND when it doesn't.
-    return managedBlockBodyDigest(desired.managedBlockContent)
-  of rkWindowsRegistryValue:
-    return digestOfBytes(desired.registryPayload.bytes)
-  of rkEnvUserVariable:
-    return digestOfBytes(desired.envVarPayload.bytes)
-  of rkEnvUserPath:
-    # The recorded payload is the joined entries; preserves order.
-    when defined(windows):
-      let sep = ";"
-    else:
-      let sep = ":"
-    let joined = desired.pathEntries.join(sep)
-    var buf = newSeq[byte](joined.len)
-    for i, ch in joined:
-      buf[i] = byte(ord(ch))
-    return digestOfBytes(buf)
-  of rkWindowsStartup:
-    var buf = newSeq[byte](desired.startupCommand.len)
-    for i, ch in desired.startupCommand:
-      buf[i] = byte(ord(ch))
-    return digestOfBytes(buf)
-  of rkShellIntegration:
-    # `shell.integration` is written by the SAME managed-block writer
-    # as `rkFsManagedBlock` (via `applyShellIntegration` ->
-    # `applyManagedBlockResource`), which appends a trailing `\n` to a
-    # non-empty body. The desired digest must therefore apply the
-    # identical trailing-newline normalization, otherwise an unchanged
-    # `shell.integration` resource re-plans as `update` instead of
-    # `no-op`. Genuine content drift still produces a differing digest.
-    return managedBlockBodyDigest(desired.shellBlockContent)
-  of rkLinuxGsettings:
-    var buf = newSeq[byte](desired.gsettingsValueLiteral.len)
-    for i, ch in desired.gsettingsValueLiteral:
-      buf[i] = byte(ord(ch))
-    return digestOfBytes(buf)
-  of rkSystemdUserUnit:
-    # The on-disk file the driver writes is just `unitContent`, but
-    # `unitEnabled` and `unitState` are RECONCILED by `systemctl`
-    # without touching the file. A change to either field must
-    # therefore re-trigger the apply path even when the file body
-    # itself is unchanged. `canonicalUnitBytes` encodes the triple
-    # consistently for both desired (here) and observed
-    # (`observeUserUnit`); same content + enabled + state -> same
-    # digest -> cache-hit no-op.
-    return digestOfBytes(canonicalUnitBytes(desired.unitContent,
-      desired.unitEnabled, desired.unitState))
-  of rkMacosUserDefault:
-    # Structural canonicalization (NOT a text compare): the
-    # `macos.userDefault` driver records and observes the
-    # structurally-canonicalized value, so the desired digest must
-    # be over the same canonical form. A dict with reordered keys
-    # or a value that differs only in quote style / whitespace
-    # therefore digests identically and does NOT register as drift.
-    let canonical = canonicalizeDefaultsValue(desired.defaultsValueLiteral)
-    var buf = newSeq[byte](canonical.len)
-    for i, ch in canonical:
-      buf[i] = byte(ord(ch))
-    return digestOfBytes(buf)
-  of rkLaunchdUserAgent:
-    # M83 step 4b: the canonical bytes are the rendered plist —
-    # `launchAgentPlistFor` returns `launchdPlistContent` verbatim
-    # when present (backwards-compat path) or freshly builds the
-    # XML from the typed `label` / `programArgs` / `runAtLoad` /
-    # `keepAlive` fields (the M83 step 4b common case). The
-    # `observeLaunchAgent` driver reads the plist from disk and
-    # digests its raw bytes; the two converge to the same hash
-    # when nothing on disk has drifted.
-    let canonical = launchAgentPlistFor(desired.launchdLabel,
-      desired.launchdProgramArgs, desired.launchdRunAtLoad,
-      desired.launchdKeepAlive, desired.launchdPlistContent)
-    var buf = newSeq[byte](canonical.len)
-    for i, ch in canonical:
-      buf[i] = byte(ord(ch))
-    return digestOfBytes(buf)
-  of rkFsUserFile:
-    # Whole-file: when `userFileContentFromCommand` is empty the
-    # digest is over the raw declared `content` bytes (verbatim — no
-    # trailing-newline normalization, unlike `fs.managedBlock` whose
-    # sentinel writer appends `\n`). On re-observation
-    # `observeUserFile` digests the same raw bytes, so a cache-hit
-    # re-apply compares equal byte-for-byte.
-    #
-    # M83 step 10: when `userFileContentFromCommand` is non-empty,
-    # the bytes-to-be-written are not knowable statically — the
-    # command's stdout determines them at apply time. We therefore
-    # cannot compute a content-equal desired digest; instead the
-    # digest covers `(cacheKey, argv)`. The lifecycle planner
-    # interprets this digest as "the declared INTENT" rather than
-    # "the literal file content" — so the desired-vs-observed
-    # comparison will (correctly) report inequality on every apply
-    # (the observed digest is the file body's BLAKE3, the desired
-    # is the argv hash) and force `rakUpdate`. The driver's apply
-    # path then uses its OWN cache-key short-circuit (non-empty
-    # `cacheKey` + matching recorded post-write digest = skip the
-    # command), so a steady-state re-apply is still cheap when
-    # `cacheKey` is non-empty. With `cacheKey == ""`, the command
-    # runs every apply — idempotent but slow, the documented
-    # trade-off.
-    if desired.userFileContentFromCommand.len > 0:
-      var seed = "cmd\x1e" & desired.userFileCacheKey & "\x1e"
-      for arg in desired.userFileContentFromCommand:
-        seed.add(arg)
-        seed.add('\x1f')
-      var buf = newSeq[byte](seed.len)
-      for i, ch in seed:
-        buf[i] = byte(ord(ch))
-      return digestOfBytes(buf)
-    var buf = newSeq[byte](desired.userFileContent.len)
-    for i, ch in desired.userFileContent:
-      buf[i] = byte(ord(ch))
-    return digestOfBytes(buf)
-  of rkVscodeExtension:
-    # The canonical-desired form is the sorted line-oriented rendering
-    # of the declared extension set (with `@version` pins preserved
-    # verbatim). `observeVscodeExtensions` computes the same canonical
-    # form against the installed set + `removeUnknown` policy, so a
-    # cache-hit re-apply digests equal.
-    let specs = parseDesiredExtensions(desired.vscodeExtensions)
-    let canon = canonicalExtensionSet(specs)
-    var buf = newSeq[byte](canon.len)
-    for i, ch in canon:
-      buf[i] = byte(ord(ch))
-    return digestOfBytes(buf)
-  of rkLinuxDconfKey:
-    # dconf is content-addressed; the digest covers the GVariant
-    # literal verbatim. `observeDconfKey` digests the same bytes
-    # (after stripping the trailing newline `dconf read` adds), so
-    # a cache-hit re-apply compares equal.
-    return digestOfBytes(canonicalDconfBytes(desired.dconfValue))
-  of rkLinuxKdeConfigKey:
-    # The on-disk file `~/.config/<file>` is shared with other
-    # KDE-managed keys, so the digest cannot cover the file body.
-    # Instead it covers just the declared VALUE — kwriteconfig is
-    # idempotent (re-writing the same value is a no-op), so a
-    # cache-hit re-apply compares equal byte-for-byte with what
-    # `kreadconfig` returns from the same slot.
-    return digestOfBytes(canonicalKdeConfigBytes(desired.kdeValue))
-  of rkHomebrewFormula:
-    # The desired identity is the (name, version) pair: same name
-    # + same version (or both empty version) cache-hits; a version
-    # bump or formula rename flips the digest. The `formulaArgs`
-    # list is NOT part of the digest — it controls HOW the install
-    # happens, not WHAT ends up installed. `observeHomebrewFormula`
-    # encodes the same (name, observed-version) pair, so a re-apply
-    # with the version still empty (track-latest mode) AND the tap
-    # still at the same version cache-hits.
-    return digestOfBytes(canonicalHomebrewFormulaBytes(
-      desired.formulaName, desired.formulaVersion))
-  of rkHomebrewCask:
-    # Parallel to the formula encoding: (name, version) digest.
-    # `caskArgs` are NOT part of the digest for the same reason.
-    return digestOfBytes(canonicalHomebrewCaskBytes(
-      desired.caskName, desired.caskVersion))
+  ##
+  ## Dispatch is registry-based (`Composable-Resource-Types.md`
+  ## Migration step 1): the former closed `case desired.kind` is now
+  ## a `lookupResourceType($desired.kind)` into the per-kind driver.
+  lookupResourceType($desired.kind).driver.digest(desired)
 
 proc summarize*(action: ResourceActionKind; address: string;
                 kind: ResourceKind): string =

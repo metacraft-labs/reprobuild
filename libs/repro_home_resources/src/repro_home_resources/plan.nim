@@ -40,6 +40,7 @@ import repro_homebrew_adapter/cask as homebrew_cask
 import ./lifecycle
 import ./manifest_record
 import ./types
+import ./type_registry
 
 type
   PlanReport* = object
@@ -99,42 +100,70 @@ proc parseTwoPartIdentity(resourceId, prefix: string): tuple[a, b: string] =
 # Observation: ask each driver about the current real-world state.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Per-kind observe leaf procs. Each is the extracted body of one former
+# `case r.kind` branch, unchanged. `builtin_registrations.nim` points
+# each `ResourceTypeDef.driver.observe` at the matching proc;
+# `observeResource` dispatches through the registry.
+# ---------------------------------------------------------------------------
+
+proc observeFsManagedBlock*(r: Resource): ObservedState {.nimcall.} =
+  return observeManagedBlock(r.hostFilePath, r.managedBlockId)
+
+proc observeWindowsRegistryValue*(r: Resource): ObservedState {.nimcall.} =
+  return observeRegistryValue(r.registryKey, r.registryName)
+
+proc observeEnvUserVariable*(r: Resource): ObservedState {.nimcall.} =
+  return observeUserVariable(r.envVarName)
+
+proc observeEnvUserPath*(r: Resource): ObservedState {.nimcall.} =
+  return observeUserPath(r.pathEntries, r.pathHostFilePath,
+    r.pathBlockId)
+
+proc observeWindowsStartup*(r: Resource): ObservedState {.nimcall.} =
+  return observeStartup(r.startupName)
+
+proc observeShellIntegration*(r: Resource): ObservedState {.nimcall.} =
+  return observeManagedBlock(r.shellHostFilePath, r.shellBlockId)
+
+proc observeLinuxGsettings*(r: Resource): ObservedState {.nimcall.} =
+  return observeGsettings(r.gsettingsSchema, r.gsettingsPath, r.gsettingsKey)
+
+proc observeSystemdUserUnit*(r: Resource): ObservedState {.nimcall.} =
+  return observeUserUnit(getHomeDir(), r.unitName)
+
+proc observeMacosUserDefault*(r: Resource): ObservedState {.nimcall.} =
+  return observeUserDefault(r.defaultsDomain, r.defaultsKey)
+
+proc observeLaunchdUserAgent*(r: Resource): ObservedState {.nimcall.} =
+  return observeLaunchAgent(getHomeDir(), r.launchdLabel)
+
+proc observeFsUserFileR*(r: Resource): ObservedState {.nimcall.} =
+  return observeUserFile(r.userFileHostPath)
+
+proc observeVscodeExtension*(r: Resource): ObservedState {.nimcall.} =
+  return observeVscodeExtensions(r.vscodeExtensions, r.vscodeRemoveUnknown)
+
+proc observeLinuxDconfKeyR*(r: Resource): ObservedState {.nimcall.} =
+  return observeDconfKey(r.dconfKey)
+
+proc observeLinuxKdeConfigKeyR*(r: Resource): ObservedState {.nimcall.} =
+  return observeKdeConfigKey(r.kdeFile, r.kdeGroup, r.kdeKey,
+    r.kdeVersion)
+
+proc observeHomebrewFormulaR*(r: Resource): ObservedState {.nimcall.} =
+  return observeHomebrewFormula(r.formulaName, r.formulaVersion)
+
+proc observeHomebrewCaskR*(r: Resource): ObservedState {.nimcall.} =
+  return observeHomebrewCask(r.caskName, r.caskVersion)
+
 proc observeResource*(r: Resource): ObservedState =
-  case r.kind
-  of rkFsManagedBlock:
-    return observeManagedBlock(r.hostFilePath, r.managedBlockId)
-  of rkWindowsRegistryValue:
-    return observeRegistryValue(r.registryKey, r.registryName)
-  of rkEnvUserVariable:
-    return observeUserVariable(r.envVarName)
-  of rkEnvUserPath:
-    return observeUserPath(r.pathEntries, r.pathHostFilePath,
-      r.pathBlockId)
-  of rkWindowsStartup:
-    return observeStartup(r.startupName)
-  of rkShellIntegration:
-    return observeManagedBlock(r.shellHostFilePath, r.shellBlockId)
-  of rkLinuxGsettings:
-    return observeGsettings(r.gsettingsSchema, r.gsettingsPath, r.gsettingsKey)
-  of rkSystemdUserUnit:
-    return observeUserUnit(getHomeDir(), r.unitName)
-  of rkMacosUserDefault:
-    return observeUserDefault(r.defaultsDomain, r.defaultsKey)
-  of rkLaunchdUserAgent:
-    return observeLaunchAgent(getHomeDir(), r.launchdLabel)
-  of rkFsUserFile:
-    return observeUserFile(r.userFileHostPath)
-  of rkVscodeExtension:
-    return observeVscodeExtensions(r.vscodeExtensions, r.vscodeRemoveUnknown)
-  of rkLinuxDconfKey:
-    return observeDconfKey(r.dconfKey)
-  of rkLinuxKdeConfigKey:
-    return observeKdeConfigKey(r.kdeFile, r.kdeGroup, r.kdeKey,
-      r.kdeVersion)
-  of rkHomebrewFormula:
-    return observeHomebrewFormula(r.formulaName, r.formulaVersion)
-  of rkHomebrewCask:
-    return observeHomebrewCask(r.caskName, r.caskVersion)
+  ## Read the current real-world state for a desired resource.
+  ##
+  ## Dispatch is registry-based (`Composable-Resource-Types.md`
+  ## Migration step 1): the former closed `case r.kind` is now a
+  ## `lookupResourceType($r.kind)` into the per-kind driver.
+  lookupResourceType($r.kind).driver.observe(r)
 
 proc observeRecorded*(address: string; binding: RecordedBinding):
     ObservedState =
