@@ -152,6 +152,11 @@ package pkgconfSource:
     ## binary). v1 records the artifact only.
     discard
 
+  executable pkgConfig:
+    ## Conventional compatibility entry point for build systems that
+    ## invoke ``pkg-config`` rather than the implementation name.
+    discard
+
   library libpkgconf:
     ## ``$PREFIX/lib/libpkgconf.so`` — the pkgconf internals exposed
     ## as a C library so other tooling can query ``.pc`` metadata
@@ -168,8 +173,19 @@ package pkgconfSource:
         "--with-system-libdir=/lib:/usr/lib",
         "--with-system-includedir=/usr/include",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let patches = @[
+        "sed -i 's/^install-exec-am: /install-exec-am: install-exec-hook /' " &
+          "src/Makefile.in",
+        "printf '%b\\n' '' 'install-exec-hook:' " &
+          "'\\tln -sf pkgconf $(DESTDIR)$(bindir)/pkg-config' " &
+          ">> src/Makefile.in",
+      ]
+      let pkg = autotools_package(
+        srcDir = "./src",
+        configureOptions = opts,
+        srcPatches = patches)
       discard pkg.executable("pkgconf")
+      discard pkg.executableAlias("pkgConfig", "pkgconf")
       discard pkg.library("libpkgconf")
     finally:
       clearCurrentOwningPackageOverride()
