@@ -137,6 +137,7 @@ const reproosImageRootfsDeps = @[
   "adwaita-icon-theme",
   "xz",
   "tar",
+  "coreutils",
 ]
 
 package reproosImage:
@@ -175,6 +176,7 @@ package reproosImage:
     "adwaita-icon-theme"
     "xz"
     "tar"
+    "coreutils"
 
   runtimeDeps:
     # M9.R.53: enumerate every bare-name host tool

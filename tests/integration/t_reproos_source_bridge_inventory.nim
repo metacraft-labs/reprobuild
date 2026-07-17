@@ -8,6 +8,7 @@ const MigratedPackages = [
   "adwaita-icon-theme",
   "xz",
   "tar",
+  "coreutils",
 ]
 
 proc findRepoRoot(): string =
@@ -66,4 +67,5 @@ suite "ReproOS source bridge inventory":
     check "required source xz binary missing" in stageScript
     check "required source liblzma SONAME missing" in stageScript
     check "required source tar binary missing" in stageScript
+    check "required source coreutils binary missing" in stageScript
     check "return 1" in stageScript
