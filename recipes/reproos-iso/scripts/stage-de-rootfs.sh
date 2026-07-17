@@ -456,6 +456,8 @@ BASE_USERSPACE_RECIPES=(
   procps
   iproute2
   xkeyboard-config
+  libxkbfile
+  xkbcomp
 )
 
 link_base_recipe_binaries() {
@@ -519,6 +521,13 @@ link_base_recipe_binaries() {
     local ss_link_target="${ss_src#$STAGE_DIR}"
     mkdir -p "$STAGE_DIR/usr/bin"
     ln -sf "$ss_link_target" "$STAGE_DIR/usr/bin/ss"
+  fi
+  if [ "$recipe" = "xkbcomp" ]; then
+    local xkbcomp_src="$install_usr/bin/xkbcomp"
+    if [ ! -x "$xkbcomp_src" ]; then
+      echo "[stage-de-rootfs] required source xkbcomp binary missing" >&2
+      return 1
+    fi
   fi
   # xkeyboard-config is data-only. Replace Debian's XKB tree with the
   # source mirror consumed by libxkbcommon, Xwayland, and compositors.

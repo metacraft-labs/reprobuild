@@ -132,6 +132,8 @@ const reproosImageRootfsDeps = @[
   "cryptsetup",
   "iproute2",
   "xkeyboard-config",
+  "libxkbfile",
+  "xkbcomp",
 ]
 
 package reproosImage:
@@ -165,6 +167,8 @@ package reproosImage:
     "cryptsetup"
     "iproute2"
     "xkeyboard-config"
+    "libxkbfile"
+    "xkbcomp"
 
   runtimeDeps:
     # M9.R.53: enumerate every bare-name host tool

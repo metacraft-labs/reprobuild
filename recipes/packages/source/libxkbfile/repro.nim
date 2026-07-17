@@ -33,6 +33,7 @@ package libxkbfileSource:
 
   buildDeps:
     "xorgproto"
+    "libx11"
 
   config:
     discard

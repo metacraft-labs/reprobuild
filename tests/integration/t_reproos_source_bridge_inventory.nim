@@ -4,6 +4,7 @@ const MigratedPackages = [
   "parted", "dosfstools", "lvm2", "gdisk", "less", "procps",
   "cryptsetup", "iproute2",
   "xkeyboard-config",
+  "libxkbfile", "xkbcomp",
 ]
 
 proc findRepoRoot(): string =
@@ -56,4 +57,5 @@ suite "ReproOS source bridge inventory":
     check "dpkg --purge --force-depends xkb-data" in baseScript
     check "test ! -e /usr/share/X11/xkb" in baseScript
     check "$STAGE_DIR/usr/share/X11/xkb" in stageScript
+    check "required source xkbcomp binary missing" in stageScript
     check "return 1" in stageScript
