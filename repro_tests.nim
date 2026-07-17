@@ -542,6 +542,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_cli_support/tests/test_lowered_graph_cache_round_trip.nim",
+    binary: "build/test-bin/test_lowered_graph_cache_round_trip",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_cli_support/tests/test_m10_home_gc_cli.nim",
     binary: "build/test-bin/test_m10_home_gc_cli",
     defines: @[],
@@ -1168,6 +1176,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_home_resources/tests/t_registry_root_override.nim",
     binary: "build/test-bin/t_registry_root_override",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_home_resources/tests/t_resource_type_registry.nim",
+    binary: "build/test-bin/t_resource_type_registry",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -2358,6 +2374,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_resources/tests/t_resource_provider_lane.nim",
+    binary: "build/test-bin/t_resource_provider_lane",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_solver/tests/t_clingo_smoke.nim",
     binary: "build/test-bin/t_clingo_smoke",
     defines: @[],
@@ -3024,6 +3048,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/coreutils/test_coreutils_source.nim",
     binary: "build/test-bin/test_coreutils_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/create-dmg/test_create_dmg_source.nim",
+    binary: "build/test-bin/test_create_dmg_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -3718,6 +3750,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/libgpg-error/test_libgpg_error_source.nim",
+    binary: "build/test-bin/test_libgpg_error_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/libinput/test_libinput_source.nim",
     binary: "build/test-bin/test_libinput_source",
     defines: @[],
@@ -3992,6 +4032,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/polkit/test_polkit_source.nim",
     binary: "build/test-bin/test_polkit_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/popt/test_popt_source.nim",
+    binary: "build/test-bin/test_popt_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -5678,14 +5726,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "tests/integration/t_reproos_source_bridge_inventory.nim",
-    binary: "build/test-bin/t_reproos_source_bridge_inventory",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
     source: "tests/integration/t_b5_bootstrap_idempotent.nim",
     binary: "build/test-bin/t_b5_bootstrap_idempotent",
     defines: @[],
@@ -5984,6 +6024,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_develop_all_clones_deps_at_locked_revisions.nim",
     binary: "build/test-bin/t_develop_all_clones_deps_at_locked_revisions",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_develop_all_reset_reconciles_drifted_sibling.nim",
+    binary: "build/test-bin/t_develop_all_reset_reconciles_drifted_sibling",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -6694,6 +6742,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_manifests_reports_single_project_workspace.nim",
+    binary: "build/test-bin/t_manifests_reports_single_project_workspace",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_mixed_public_clean_team_unpublished_refuses.nim",
     binary: "build/test-bin/t_mixed_public_clean_team_unpublished_refuses",
     defines: @[],
@@ -7054,6 +7110,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_reproos_source_bridge_inventory.nim",
+    binary: "build/test-bin/t_reproos_source_bridge_inventory",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim",
     binary: "build/test-bin/t_runquota_bypass_is_reported_in_build_header_and_report",
     defines: @[],
@@ -7280,6 +7344,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_sync_skips_fetch_when_locked_sha_already_present.nim",
     binary: "build/test-bin/t_sync_skips_fetch_when_locked_sha_already_present",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_team_backend_routed_lock_reads_back_and_is_idempotent.nim",
+    binary: "build/test-bin/t_team_backend_routed_lock_reads_back_and_is_idempotent",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

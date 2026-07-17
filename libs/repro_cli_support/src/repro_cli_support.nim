@@ -22320,12 +22320,29 @@ proc latestLockShasViaGit(identity: GitToolIdentity;
   let candidates = orderedLockCandidates(identity, manifestLayerRoot, lockPrefix)
   if candidates.len == 0:
     return
-  let lockPath = manifestLayerRoot / candidates[0].relPath.replace('/', DirSep)
-  if not fileExists(lockPath):
-    return
-  let lock = readLock(lockPath)
-  for repo in lock.repo:
-    result.shas[repo.path] = repo.revision
+  # Merge ``path -> revision`` across every candidate newest-first, so BOTH
+  # lock shapes populate the map:
+  #   * the monolithic all-repos lock — a single newest file carrying every
+  #     repo (the no-explicit-route ``.repo/manifests`` default), and
+  #   * the HL-2 tier-routed records — one minimal file per repo under
+  #     ``locks/<project>/<repo>/`` written by the git-checkout backend.
+  # ``shasFromBody`` (repro_lock_store) tolerates both the full-schema lock
+  # body and the schema-less ``[[repo]]`` backend record; the strict
+  # ``readLock`` rejects the latter (``double bracket not allowed`` on a
+  # schema-less body), so it must NOT be used here — doing so crashed
+  # ``status`` / ``check`` / ``sync`` once a workspace adopted the manifest as
+  # its team backend. Newest-first with "first writer wins per path" keeps the
+  # most recent revision for each repo.
+  for cand in candidates:
+    let lockPath = manifestLayerRoot / cand.relPath.replace('/', DirSep)
+    if not fileExists(lockPath):
+      continue
+    let body =
+      try: readFile(lockPath)
+      except CatchableError: ""
+    for path, rev in shasFromBody(body):
+      if path notin result.shas:
+        result.shas[path] = rev
   result.lockRelPath = candidates[0].relPath
 
 # ---------------------------------------------------------------------------
@@ -22374,6 +22391,18 @@ method putLock*(s: GitCheckoutLockStore;
       ["-C", s.manifestRepoRoot, "add", "--", rel])
     if addRes.code != 0:
       return failed("git add " & rel & " failed: " & addRes.output.strip())
+    # Idempotent re-record: writing the SAME lock record again stages no
+    # change (the record is content-addressed by its SHA, so identical bytes
+    # land at the same path). ``git commit`` would then exit non-zero with
+    # "nothing to commit", which was surfaced as a spurious "failed to record"
+    # — and under the tier-isolation policy a failed team-tier record escalates
+    # to a push REFUSAL. Treat an unchanged re-write as success. ``git diff
+    # --cached --quiet`` exits 0 when the staged tree matches HEAD for this
+    # path (nothing to commit) and 1 when there is a real change to commit.
+    let stagedRes = gitRunPlain(s.identity,
+      ["-C", s.manifestRepoRoot, "diff", "--cached", "--quiet", "--", rel])
+    if stagedRes.code == 0:
+      return ok()
     let commitRes = gitRunPlain(s.identity,
       ["-C", s.manifestRepoRoot, "commit", "--quiet", "-m",
        "lockstore: " & rec.key.project & "/" & rec.key.repo & "@" &
@@ -25325,9 +25354,18 @@ proc toJsonNode*(report: WorkspaceLockReport): JsonNode =
 
 proc renderLockTextLines*(report: WorkspaceLockReport): seq[string] =
   if report.exitCode == 0:
-    result.add("workspace lock: wrote " & report.lockFilePath &
-      " (trigger=" & report.triggerRepo & "@" &
-      report.triggerSha & ")")
+    if report.lockFilePath.len > 0:
+      result.add("workspace lock: wrote " & report.lockFilePath &
+        " (trigger=" & report.triggerRepo & "@" &
+        report.triggerSha & ")")
+    else:
+      # HL-2 (§6 Decision 1) routed case: no monolithic trigger-keyed lock
+      # file is written when explicit `[locking]` routes are declared; each
+      # repo's record is routed to its assigned backend and reported by the
+      # `recorded … via … backend` lines below. Avoid printing a blank path.
+      result.add("workspace lock: recorded per-repo lock entries" &
+        " (trigger=" & report.triggerRepo & "@" &
+        report.triggerSha & ")")
     for entry in report.repos:
       result.add("workspace lock: locked " & entry.path & " @ " &
         entry.revision &
@@ -32665,8 +32703,19 @@ proc toJsonNode*(report: WorkspaceManifestsReport): JsonNode =
 proc renderManifestsTextLines*(report: WorkspaceManifestsReport):
     seq[string] =
   if not report.hasLayeredWorkspace:
-    result.add("workspace manifests: no layered workspace " &
-      "(.repo/workspace.toml not present at " & report.workspaceRoot & ")")
+    # ``hasLayeredWorkspace`` is false in two distinct cases; report each
+    # accurately rather than always claiming the file is absent. A
+    # single-project (metadata-only) ``.repo/workspace.toml`` IS present — it
+    # simply declares no ``[[manifest]]`` layers — so ``executeWorkspaceManifests``
+    # populates ``project`` for it while leaving it empty when the file is
+    # genuinely missing.
+    if report.project.len > 0:
+      result.add("workspace manifests: single-project workspace '" &
+        report.project & "' — no manifest layers declared in " &
+        report.workspaceTomlPath)
+    else:
+      result.add("workspace manifests: no workspace metadata " &
+        "(.repo/workspace.toml not present at " & report.workspaceRoot & ")")
     return
   result.add("workspace manifests: project=" & report.project &
     " layers=" & $report.layers.len)
