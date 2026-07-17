@@ -42,7 +42,7 @@ package xkeyboardConfigSource:
     setCurrentOwningPackageOverride("xkeyboardConfigSource")
     try:
       let pkg = meson_package(srcDir = "./src", configureOptions = @[])
-      discard pkg
+      pkg.installTreeMirror()
     finally:
       clearCurrentOwningPackageOverride()
 

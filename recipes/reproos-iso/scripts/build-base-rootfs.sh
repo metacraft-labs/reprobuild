@@ -181,12 +181,12 @@ PKG_LIST=(
   #                                          source tree)
   locales
   # Keyboard + console data.
-  #   xkb-data         FS:partial STAGE:no  (xkeyboard-config recipe
-  #                                          exists; not built)
   #   console-data     FS:none    STAGE:no
   #   console-setup    FS:none    STAGE:no
   #   keyboard-configuration FS:none STAGE:no
-  xkb-data console-data console-setup keyboard-configuration
+  # Source bridge dropped ``xkb-data`` after the xkeyboard-config recipe
+  # exposed its complete /usr/share/X11/xkb data tree.
+  console-data console-setup keyboard-configuration
   # Network / CA / users.
   #   ca-certificates  FS:partial STAGE:no  (recipe exists but install
   #                                          dir empty; needs upstream

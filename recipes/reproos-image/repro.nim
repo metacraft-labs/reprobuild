@@ -131,6 +131,7 @@ const reproosImageRootfsDeps = @[
   "iana-tzdata",
   "cryptsetup",
   "iproute2",
+  "xkeyboard-config",
 ]
 
 package reproosImage:
@@ -163,6 +164,7 @@ package reproosImage:
     "iana-tzdata"
     "cryptsetup"
     "iproute2"
+    "xkeyboard-config"
 
   runtimeDeps:
     # M9.R.53: enumerate every bare-name host tool

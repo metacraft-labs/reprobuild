@@ -455,6 +455,7 @@ BASE_USERSPACE_RECIPES=(
   less
   procps
   iproute2
+  xkeyboard-config
 )
 
 link_base_recipe_binaries() {
@@ -518,6 +519,19 @@ link_base_recipe_binaries() {
     local ss_link_target="${ss_src#$STAGE_DIR}"
     mkdir -p "$STAGE_DIR/usr/bin"
     ln -sf "$ss_link_target" "$STAGE_DIR/usr/bin/ss"
+  fi
+  # xkeyboard-config is data-only. Replace Debian's XKB tree with the
+  # source mirror consumed by libxkbcommon, Xwayland, and compositors.
+  if [ "$recipe" = "xkeyboard-config" ]; then
+    local xkb_src="$install_usr/share/X11/xkb"
+    if [ ! -d "$xkb_src" ]; then
+      echo "[stage-de-rootfs] required xkeyboard-config data missing" >&2
+      return 1
+    fi
+    local xkb_link_target="${xkb_src#$STAGE_DIR}"
+    mkdir -p "$STAGE_DIR/usr/share/X11"
+    rm -rf "$STAGE_DIR/usr/share/X11/xkb"
+    ln -sf "$xkb_link_target" "$STAGE_DIR/usr/share/X11/xkb"
   fi
   # iana-tzdata: also stage /usr/share/zoneinfo from the recipe's
   # install-mirror.  Other base-userspace recipes ship usr/share/
