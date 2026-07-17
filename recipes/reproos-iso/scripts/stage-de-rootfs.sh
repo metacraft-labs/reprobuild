@@ -460,6 +460,7 @@ BASE_USERSPACE_RECIPES=(
   xkbcomp
   adwaita-icon-theme
   xz
+  tar
 )
 
 link_base_recipe_binaries() {
@@ -566,6 +567,10 @@ link_base_recipe_binaries() {
       echo "[stage-de-rootfs] required source liblzma SONAME missing" >&2
       return 1
     fi
+  fi
+  if [ "$recipe" = "tar" ] && [ ! -x "$install_usr/bin/tar" ]; then
+    echo "[stage-de-rootfs] required source tar binary missing" >&2
+    return 1
   fi
   # iana-tzdata: also stage /usr/share/zoneinfo from the recipe's
   # install-mirror.  Other base-userspace recipes ship usr/share/

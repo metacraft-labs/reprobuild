@@ -7,6 +7,7 @@ const MigratedPackages = [
   "libxkbfile", "xkbcomp",
   "adwaita-icon-theme",
   "xz",
+  "tar",
 ]
 
 proc findRepoRoot(): string =
@@ -64,4 +65,5 @@ suite "ReproOS source bridge inventory":
     check "$STAGE_DIR/usr/share/icons/Adwaita" in stageScript
     check "required source xz binary missing" in stageScript
     check "required source liblzma SONAME missing" in stageScript
+    check "required source tar binary missing" in stageScript
     check "return 1" in stageScript
