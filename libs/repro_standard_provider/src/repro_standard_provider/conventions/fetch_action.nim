@@ -102,6 +102,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
   let kindTag = case spec.kind
     of dfkTarball: "tarball"
     of dfkGitArchive: "git"
+    of dfkDataFile: "data-file"
   let shExe = findExe("sh")
   let escapedUrl = spec.url.replace("\"", "\\\"")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
@@ -162,6 +163,21 @@ proc emitFetchAction*(projectRoot, packageName: string;
       script.add("tar -xf \"" & escapedTarball & "\" -C \"" &
         escapedExtracted & "\" --strip-components=" & $spec.extractStrip &
         "; ")
+    of dfkDataFile:
+      script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
+      script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" &
+        escapedUrl & "\"; fi; ")
+      case spec.hashAlg
+      of dshaSha256:
+        script.add("echo \"" & escapedHash & "  " & escapedTarball &
+          "\" | sha256sum -c -; ")
+      of dshaBlake3:
+        script.add("echo \"" & escapedHash & "  " & escapedTarball &
+          "\" | b2sum -a blake3 -c - || ")
+        script.add("echo \"" & escapedHash & "  " & escapedTarball &
+          "\" | blake3sum -c -; ")
+      script.add("cp \"" & escapedTarball & "\" \"" &
+        escapedExtracted & "/source\"; ")
     script.add("touch \"" & escapedStamp & "\"")
     argv = @[shExe, "-c", script]
   else:

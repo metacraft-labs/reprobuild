@@ -189,8 +189,12 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   # accept it but does not need it either, so gating on Windows keeps the
   # emitted script minimal and portable across all three host tar flavours.
   let tarForceLocal = when defined(windows): "--force-local " else: ""
-  script.add("tar " & tarForceLocal & "-xf \"" & escapedTarball & "\" -C \"" &
-    escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
+  if spec.kind == dfkDataFile:
+    script.add("cp \"" & escapedTarball & "\" \"" &
+      escapedExtracted & "/source\"; ")
+  else:
+    script.add("tar " & tarForceLocal & "-xf \"" & escapedTarball & "\" -C \"" &
+      escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
   script.add("touch \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
   # The fetch action is a pure source-acquisition step

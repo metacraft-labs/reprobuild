@@ -2438,6 +2438,7 @@ proc emitM9GBootloader*(packageName: string;
 #   * ``extractedRoot`` defaults to "" when not declared.
 #   * ``gitRevision`` defaults to "" when not declared (only meaningful
 #     for ``gitUrl`` mode).
+#   * ``dataFile`` defaults to false.
 #
 # Precedence:
 #   * If both ``sha256`` and ``blake3`` appear in the same body, the
@@ -2477,7 +2478,7 @@ proc emitM9HFetch*(packageName: string;
   ##                     <gitRevision-expr>,
   ##                     <dshaSha256 | dshaBlake3>,
   ##                     <hashHex-expr>,
-  ##                     <dfkTarball | dfkGitArchive>,
+  ##                     <dfkTarball | dfkGitArchive | dfkDataFile>,
   ##                     <extractStrip-expr>,
   ##                     <extractedRoot-expr>)
   ##
@@ -2510,6 +2511,7 @@ proc emitM9HFetch*(packageName: string;
     var blake3Node: NimNode = nil
     var extractStripNode: NimNode = nil
     var extractedRootNode: NimNode = nil
+    var dataFile = false
     for setterStmt in body:
       let head = m9gSetterHeadName(setterStmt)
       if head.len == 0:
@@ -2525,6 +2527,11 @@ proc emitM9HFetch*(packageName: string;
       of "blake3": blake3Node = valueNode
       of "extractstrip": extractStripNode = valueNode
       of "extractedroot": extractedRootNode = valueNode
+      of "datafile":
+        let parsed = m9gExtractBoolLit(setterStmt[1])
+        if not parsed.matched:
+          error("fetch: dataFile must be a bool literal", setterStmt)
+        dataFile = parsed.value
       else: discard
     # Validate.
     if urlNode == nil and gitUrlNode == nil:
@@ -2533,12 +2540,16 @@ proc emitM9HFetch*(packageName: string;
     if urlNode != nil and gitUrlNode != nil:
       error("fetch: block declares both url: and gitUrl: — pick one " &
             "(package " & packageName & ")", stmt)
+    if dataFile and gitUrlNode != nil:
+      error("fetch: dataFile cannot be combined with gitUrl: " &
+            "(package " & packageName & ")", stmt)
     if sha256Node == nil and blake3Node == nil:
       error("fetch: block must specify either sha256: or blake3: " &
             "(package " & packageName & ")", stmt)
     # Resolve kind + final URL.
     let kindIdent =
-      if gitUrlNode != nil: ident("dfkGitArchive")
+      if dataFile: ident("dfkDataFile")
+      elif gitUrlNode != nil: ident("dfkGitArchive")
       else: ident("dfkTarball")
     let finalUrlNode =
       if gitUrlNode != nil: gitUrlNode

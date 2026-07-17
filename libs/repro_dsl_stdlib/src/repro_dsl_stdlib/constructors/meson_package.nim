@@ -113,8 +113,12 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   # M9.R.13b.4 — ``--force-local`` so Windows tar (MSYS2 / Git-for-
   # Windows) doesn't interpret ``D:/...`` as a ``host:`` rsh path. See
   # the matching fix in ``autotools_package.nim`` for the full rationale.
-  script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
-    escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
+  if spec.kind == dfkDataFile:
+    script.add("cp \"" & escapedTarball & "\" \"" &
+      escapedExtracted & "/source\"; ")
+  else:
+    script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
+      escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
   script.add("touch \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
   let act = buildAction(

@@ -32,6 +32,13 @@ package fetchActionPkg:
     extractStrip: 1
     extractedRoot: "src"
 
+package dataFileActionPkg:
+  fetch:
+    url: "https://example.com/roots.pem"
+    sha256: "def" & repeat("0", 61)
+    dataFile: true
+    extractStrip: 0
+
 proc inlineArgvOf(action: BuildActionDef): seq[string] =
   for arg in action.call.arguments:
     if arg.name == "argv":
@@ -86,3 +93,22 @@ suite "DSL-port M9.K — fetch action emission from registry":
     check argvJoined.contains(spec.hashHex)
     let extractedRel = "src"
     check argvJoined.contains(extractedRel)
+
+  test "registered data file lowers to a copy action":
+    let spec = registeredFetchSpec("dataFileActionPkg")
+    check spec.kind == dfkDataFile
+
+    let scratch = getTempDir() / "t_dsl_fetch_data_action_emission_scratch"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch)
+    defer:
+      removeDir(scratch)
+
+    let action = emitFetchAction(scratch, "dataFileActionPkg", spec)
+    let argvJoined = inlineArgvOf(action).join(" ")
+    check argvJoined.contains(spec.url)
+    check argvJoined.contains(spec.hashHex)
+    check argvJoined.contains("cp ")
+    check argvJoined.contains("/source")
+    check not argvJoined.contains("tar -xf")

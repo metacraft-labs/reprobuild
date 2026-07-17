@@ -3436,6 +3436,8 @@ proc registeredBootloaderConfig*(packageName: string): DslBootloaderConfig =
 ## via a new ``fetch:`` block whose body recognises six setters:
 ##
 ##   * ``url: "string"`` — tarball URL (kind == ``dfkTarball``).
+##   * ``dataFile: true`` — download and verify a single file without
+##     archive extraction (kind == ``dfkDataFile``).
 ##   * ``gitUrl: "string"`` — git clone URL (kind == ``dfkGitArchive``).
 ##   * ``gitRevision: "string"`` — git ref/tag (only meaningful for
 ##     ``dfkGitArchive``).
@@ -3465,7 +3467,7 @@ proc registeredBootloaderConfig*(packageName: string): DslBootloaderConfig =
 
 type
   DslFetchKind* = enum
-    ## Discriminant for the fetch source kind. M9.H ships two kinds;
+    ## Discriminant for the fetch source kind.
     ## future milestones widen the enum (``dfkGitFull`` for a full clone,
     ## ``dfkLocal`` for an in-tree path) WITHOUT breaking the registry
     ## API because every consumer dispatches on this discriminant.
@@ -3477,6 +3479,9 @@ type
       ## payload comparable in size to a release tarball while still
       ## pinning a tag / commit not present in any upstream release
       ## archive.
+    dfkDataFile
+      ## Download a single file from ``url`` and place it at
+      ## ``<extractedRoot>/source`` without archive extraction.
 
   DslSourceHashAlg* = enum
     ## Hash algorithm used to verify the fetched source. Both sha256 and
@@ -3493,7 +3498,7 @@ type
     packageName*: string
     kind*: DslFetchKind
     url*: string
-      ## Tarball URL (``dfkTarball``) or git URL (``dfkGitArchive``).
+      ## Tarball/data URL or git URL, according to ``kind``.
     gitRevision*: string
       ## Tag / commit / branch the shallow-clone resolves. Empty for
       ## ``dfkTarball``.
@@ -3992,8 +3997,12 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
       "\" | b2sum -a blake3 -c - || ")
     script.add("echo \"" & escapedHash & "  " & escapedTarball &
       "\" | blake3sum -c -; ")
-  script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
-    escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
+  if spec.kind == dfkDataFile:
+    script.add("cp \"" & escapedTarball & "\" \"" &
+      escapedExtracted & "/source\"; ")
+  else:
+    script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
+      escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
   script.add("touch \"" & escapedStamp & "\"")
   script
 
