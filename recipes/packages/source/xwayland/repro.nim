@@ -144,6 +144,9 @@ package xwaylandSource:
         "xkb_default_layout=us",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      ## The alias slice does not emit a mirror on its own. Publish the
+      ## installed server tree as the package's cacheable public output.
+      pkg.installTreeMirror()
       discard pkg.executableAlias("xwaylandBin", sourceName = "Xwayland")
     finally:
       clearCurrentOwningPackageOverride()
