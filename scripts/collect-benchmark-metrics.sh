@@ -22,7 +22,7 @@ rows_html="${tmp_dir}/benchmark-rows.html"
 : >"${results_jsonl}"
 : >"${rows_html}"
 
-benchmark_suites="${REPROBUILD_BENCH_SUITES:-m0,m23,cmake}"
+benchmark_suites="${REPROBUILD_BENCH_SUITES:-m0,m23,cmake,rp1}"
 
 suite_enabled() {
   local suite="$1"
@@ -181,6 +181,25 @@ if kind == "m23":
                 1000.0 / value,
                 extra + f"; original={value} actions/sec",
             )
+elif kind == "rp1":
+    metadata = data.get("metadata", {})
+    quick_value = metadata.get("quick", mode == "quick")
+    quick = str(quick_value).lower() if isinstance(quick_value, bool) else str(quick_value)
+    provider_artifact_id = metadata.get("providerArtifactId", "unknown")
+    for metric in data.get("metrics", []):
+        direction = metric.get("direction", "lower-is-better")
+        unit = metric.get("unit", "ms")
+        suite = metric.get("suite", "rp1")
+        metric_name = metric.get("name", "unnamed metric")
+        value = as_float(metric.get("value"))
+        if value is None:
+            continue
+        extra = (
+            f"quick={quick}; suite={suite}; direction={direction}; "
+            f"status={metric.get('status', 'unknown')}; "
+            f"providerArtifactId={provider_artifact_id}; source={source_name}"
+        )
+        append_metric(f"Reprobuild {suite}: {metric_name}", unit, value, extra)
 elif kind == "cmake":
     profile = data.get("profile", mode)
     metadata = data.get("metadata", {})
@@ -359,6 +378,31 @@ run_cmake_suite() {
   append_benchmark_metrics "${output}" cmake "${profile}"
 }
 
+run_rp1_suite() {
+  # RP1 (Project-Provider-Runtime-Protocol) — provider-binary compile-time
+  # metric. Establishes the customSmallerIsBetter regression gate the later
+  # composition milestones (RP4/RP7) build on. The harness performs one cold
+  # provider compile and emits the metric JSON.
+  local harness_bin="build/test-bin/rp1_provider_compile_bench"
+  local output="bench-results/rp1-provider-compile.json"
+  local quick_flag=()
+  if [ "${quick}" = true ]; then
+    quick_flag+=(--quick)
+  fi
+
+  echo "running Reprobuild RP1 provider-compile benchmark suite (quick=${quick})" >&2
+  mkdir -p build/test-bin build/nimcache
+  nim c \
+    -d:release \
+    --hints:off \
+    --warnings:off \
+    --nimcache:build/nimcache/rp1-provider-compile-bench \
+    --out:"${harness_bin}" \
+    benchmarks/lib/rp1_provider_compile_bench.nim >&2
+  "./${harness_bin}" "${quick_flag[@]}" --out "${output}" >&2
+  append_benchmark_metrics "${output}" rp1 "${quick}"
+}
+
 if suite_enabled m0; then
   run_m0_suite
 fi
@@ -369,6 +413,10 @@ fi
 
 if suite_enabled cmake; then
   run_cmake_suite
+fi
+
+if suite_enabled rp1; then
+  run_rp1_suite
 fi
 
 json_results="$(emit_json)"

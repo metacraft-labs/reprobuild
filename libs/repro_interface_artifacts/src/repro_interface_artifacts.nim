@@ -156,6 +156,14 @@ type
     compileEdge*: ProviderCompileEdge
     interfaceFingerprint*: ContentDigest
     providerFingerprint*: ContentDigest
+    providerArtifactId*: ContentDigest
+      ## RP1: the Provider-Runtime-Protocol v1 ``ProviderArtifactId`` — the
+      ## content-addressed identity two consumers of the same dependency
+      ## version converge on (the sharing key). See
+      ## ``computeProviderArtifactId``.
+    providerCompileActionKey*: ContentDigest
+      ## RP1: the v1 ``ProviderCompileActionKey`` used as the engine edge's
+      ## action key. See ``computeProviderCompileActionKey``.
     workDir*: string
 
   ProviderCompileArtifact* = object
@@ -2991,6 +2999,188 @@ proc providerFingerprintFor*(inputSources: openArray[string];
     payload.add(content)
   blake3DomainDigest(payload, hdActionFingerprint)
 
+# ---------------------------------------------------------------------
+# RP1 — Provider-Runtime-Protocol v1 first-class identities.
+#
+# ``Provider-Runtime-Protocol-v1.md`` §1 pins the exact structure of the
+# two provider-edge identities. The pre-RP1 code already hashed a
+# ``providerFingerprint`` (source-based) and an ``actionFingerprint``
+# (compile-command-based) — those remain the on-disk artifact/freshness
+# key and are UNCHANGED here so existing artifacts keep round-tripping.
+#
+# RP1 layers the *named* v1 identities ON TOP:
+#
+#   ProviderArtifactId = hash(
+#     providerProtocolVersion, frontendRuntimeIdentity,
+#     projectSourceSemanticIdentity, generatedEntryPointIds+bodyHashes,
+#     providerImplementationImports, publicDependencyInterfaceFingerprints,
+#     providerCompileOptions)
+#
+#   ProviderCompileActionKey = hash(
+#     "compile-provider", ProviderArtifactId, nimCompilerIdentity,
+#     canonicalSourceInputPaths, declaredProviderCompileInputs)
+#
+# The ProviderCompileActionKey becomes the engine edge's action key so a
+# rebuild with an unchanged key is a cache HIT and — crucially — two
+# consumers whose lock resolves the SAME dependency version compute the
+# SAME ProviderArtifactId (because ``publicDependencyInterfaceFingerprints``
+# and the source semantic identity coincide) and therefore bind the SAME
+# cached binary. The interface-vs-provider fingerprint SPLIT (a private
+# impl edit NOT re-keying downstream) is deferred to RP6; v1 includes
+# ``publicDependencyInterfaceFingerprints`` in the key but does not yet
+# split private-impl edits out of ``projectSourceSemanticIdentity``.
+
+const
+  ProviderProtocolVersionV1* = 1'u32
+    ## Mirrors ``repro_provider_runtime/types.nim``'s
+    ## ``ProviderProtocolVersion``. Held as a local const so the identity
+    ## layer does not take a build-graph dependency on the runtime library
+    ## (which would form a cycle once RP2 wires the session launcher). Kept
+    ## in sync manually; a divergence would only change every
+    ## ProviderArtifactId uniformly (a full cache miss, never a correctness
+    ## bug).
+
+var cachedNimCompilerIdentity = ""
+
+proc nimCompilerIdentity*(): string =
+  ## Canonical identity of the Nim frontend used to compile providers:
+  ## the resolved compiler path plus its ``--version`` banner. Feeds
+  ## ``ProviderCompileActionKey`` so a compiler swap re-keys the compile
+  ## edge. Cached per process — the compiler does not change mid-run.
+  if cachedNimCompilerIdentity.len > 0:
+    return cachedNimCompilerIdentity
+  let path = nimCompilerPath()
+  var banner = ""
+  try:
+    banner = runCommand(@[path, "--version"]).output.splitLines()[0].strip()
+  except CatchableError:
+    banner = ""
+  cachedNimCompilerIdentity = path & "\n" & banner
+  cachedNimCompilerIdentity
+
+proc frontendRuntimeIdentity*(workDir = getCurrentDir()): string =
+  ## Identity of the frontend/runtime the provider binary links against —
+  ## the reprobuild DSL runtime source set. A change to the runtime
+  ## re-materializes every provider. Reuses the existing lib-source
+  ## fingerprint so it stays consistent with ``providerFingerprintFor``.
+  reproLibSourceFingerprint(workDir)
+
+proc commonSourceRoot(paths: openArray[string]): string =
+  ## The longest shared directory prefix of the given normalized source
+  ## paths. Used to make ``projectSourceSemanticIdentity`` content- and
+  ## LAYOUT-addressed rather than absolute-path-addressed, so two consumers
+  ## in different directories whose source closures are byte-identical and
+  ## laid out identically converge on the same semantic identity (the RP1
+  ## sharing property).
+  if paths.len == 0:
+    return ""
+  var prefix = parentDir(normalizedStampPath(paths[0]))
+  for i in 1 ..< paths.len:
+    let dir = parentDir(normalizedStampPath(paths[i]))
+    while prefix.len > 0 and not (dir == prefix or
+        dir.startsWith(prefix & "/")):
+      let up = parentDir(prefix)
+      if up == prefix:
+        prefix = ""
+        break
+      prefix = up
+  prefix
+
+proc projectSourceSemanticIdentity*(inputSources: openArray[string]):
+    ContentDigest =
+  ## The semantic identity of the project's own provider source closure:
+  ## the ordered (root-relative path, content) set of the ``.nim`` sources
+  ## compiled into the provider. Paths are made relative to the closure's
+  ## common root so the identity is content-addressed, not tied to a
+  ## consumer's absolute working directory — this is what lets two
+  ## consumers of the same dependency version converge on the same
+  ## ``ProviderArtifactId`` (the RP1 sharing property). In v1 this is the
+  ## whole source closure; RP6 will split the private-impl portion out so
+  ## it does not re-key downstream.
+  var normalized: seq[string] = @[]
+  for path in inputSources:
+    normalized.add(normalizedStampPath(path))
+  let root = commonSourceRoot(normalized)
+  var payload: seq[byte] = @[]
+  payload.writeString("reprobuild.projectSourceSemanticIdentity.v1")
+  for path in normalized:
+    let relPath =
+      if root.len > 0 and path == root: extractFilename(path)
+      elif root.len > 0 and path.startsWith(root & "/"):
+        path[root.len + 1 .. ^1]
+      else: extractFilename(path)
+    payload.writeString(relPath)
+    let content = toBytes(readFile(extendedPath(path)))
+    payload.writeU64Le(uint64(content.len))
+    payload.add(content)
+  blake3DomainDigest(payload, hdActionFingerprint)
+
+proc computeProviderArtifactId*(
+    inputSources: openArray[string];
+    interfaceFingerprint: ContentDigest;
+    generatedEntryPointIds: openArray[string] = [];
+    entryPointBodyHashes: openArray[string] = [];
+    providerImplementationImports: openArray[string] = [];
+    publicDependencyInterfaceFingerprints: openArray[string] = [];
+    providerCompileOptions: openArray[string] = [];
+    workDir = getCurrentDir()): ContentDigest =
+  ## The v1 ``ProviderArtifactId`` (Provider-Runtime-Protocol-v1.md §1).
+  ##
+  ## ``publicDependencyInterfaceFingerprints`` is the SHARING key: two
+  ## consumers whose lock resolves the same dependency version pass the
+  ## same fingerprints here and — with identical source semantic identity —
+  ## compute the same id, hence bind the same cached artifact.
+  var payload: seq[byte] = @[]
+  payload.writeString("reprobuild.providerArtifactId.v1")
+  payload.writeU32Le(ProviderProtocolVersionV1)
+  payload.writeString(frontendRuntimeIdentity(workDir))
+  payload.writeDigest(projectSourceSemanticIdentity(inputSources))
+  # The interface fingerprint is the project's own public-signature
+  # identity; carried so an interface-only change re-keys the artifact.
+  payload.writeDigest(interfaceFingerprint)
+  var entryIds = @generatedEntryPointIds
+  entryIds.sort(system.cmp[string])
+  payload.writeStringSeq(entryIds)
+  var bodyHashes = @entryPointBodyHashes
+  bodyHashes.sort(system.cmp[string])
+  payload.writeStringSeq(bodyHashes)
+  var imports = @providerImplementationImports
+  imports.sort(system.cmp[string])
+  payload.writeStringSeq(imports)
+  # Public dependency interface fingerprints are order-normalized so two
+  # consumers that list the same deps in different orders still converge.
+  var depFingerprints = @publicDependencyInterfaceFingerprints
+  depFingerprints.sort(system.cmp[string])
+  payload.writeStringSeq(depFingerprints)
+  var compileOptions = @providerCompileOptions
+  compileOptions.sort(system.cmp[string])
+  payload.writeStringSeq(compileOptions)
+  blake3DomainDigest(payload, hdActionFingerprint)
+
+proc computeProviderCompileActionKey*(
+    providerArtifactId: ContentDigest;
+    canonicalSourceInputPaths: openArray[string];
+    declaredProviderCompileInputs: openArray[string] = []): ContentDigest =
+  ## The v1 ``ProviderCompileActionKey`` (Provider-Runtime-Protocol-v1.md
+  ## §1) — the engine edge's action key. Keyed by ``nimCompilerIdentity``
+  ## so a compiler swap forces a recompile even when the artifact id is
+  ## unchanged.
+  var payload: seq[byte] = @[]
+  payload.writeString("compile-provider")
+  payload.writeDigest(providerArtifactId)
+  payload.writeString(nimCompilerIdentity())
+  var sourcePaths: seq[string] = @[]
+  for path in canonicalSourceInputPaths:
+    sourcePaths.add(normalizedStampPath(path))
+  sourcePaths.sort(system.cmp[string])
+  payload.writeStringSeq(sourcePaths)
+  var declared: seq[string] = @[]
+  for path in declaredProviderCompileInputs:
+    declared.add(normalizedStampPath(path))
+  declared.sort(system.cmp[string])
+  payload.writeStringSeq(declared)
+  blake3DomainDigest(payload, hdActionFingerprint)
+
 proc providerFreshnessCachePath(artifactPath: string): string =
   artifactPath & ".inputs"
 
@@ -3180,8 +3370,26 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
     workDir)
   let command = providerCompileCommand(modulePath, normalizedOutputPath, workDir,
     scratchDir)
+  # RP1: derive the v1-named identities. The ``providerCompileOptions`` set is
+  # the compiler command minus the compiler path and the ``--out:``/nimcache
+  # intermediate flags (which are output-location noise, not semantic inputs).
+  var compileOptions: seq[string] = @[]
+  for i in 1 ..< command.len:
+    let arg = command[i]
+    if arg.startsWith("--out:") or arg.startsWith("--nimcache:") or
+        arg == normalizedOutputPath or arg == modulePath:
+      continue
+    compileOptions.add(arg)
+  let providerArtifactId = computeProviderArtifactId(
+    sources, interfaceFingerprint,
+    providerCompileOptions = compileOptions, workDir = workDir)
+  let providerCompileActionKey = computeProviderCompileActionKey(
+    providerArtifactId, sources, sources)
+  # The engine edge is keyed by the v1 ProviderCompileActionKey so the
+  # action-cache HIT/rebuild decision follows the v1 identity exactly.
   let edge = providerCompileEdge(sources, normalizedOutputPath, command,
-    interfaceFingerprint, providerFingerprint, workDir = workDir)
+    interfaceFingerprint, providerFingerprint, workDir = workDir,
+    knownActionFingerprint = some(providerCompileActionKey))
   ProviderCompilePlan(
     inputSources: sources,
     outputBinaryPath: normalizedOutputPath,
@@ -3189,6 +3397,8 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
     compileEdge: edge,
     interfaceFingerprint: interfaceFingerprint,
     providerFingerprint: providerFingerprint,
+    providerArtifactId: providerArtifactId,
+    providerCompileActionKey: providerCompileActionKey,
     workDir: workDir)
 
 proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;

@@ -1246,6 +1246,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_rp1_provider_artifact_edge_identity.nim",
+    binary: "build/test-bin/t_rp1_provider_artifact_edge_identity",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_launch_plan/tests/t_codec_smoke.nim",
     binary: "build/test-bin/t_codec_smoke",
     defines: @[],
@@ -6048,6 +6056,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_dev_env_artifact.nim",
     binary: "build/test-bin/t_dev_env_artifact",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_rp1_provider_compile_edge_materializes.nim",
+    binary: "build/test-bin/t_rp1_provider_compile_edge_materializes",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
