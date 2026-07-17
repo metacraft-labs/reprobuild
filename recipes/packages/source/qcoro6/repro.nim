@@ -217,8 +217,7 @@ package qcoro6Source:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
-    ## DT_NEEDED inspection of the linked artifacts. Empty until
-    ## the M9.R.5b per-recipe pass populates per-output ELF
-    ## interrogation.
-    discard
+    ## libQCoro6Core, libQCoro6DBus, and libQCoro6Network link to the
+    ## corresponding Qt6 Base modules. The C++ runtime is supplied by
+    ## the host toolchain.
+    "qt6-base >=6.6"
