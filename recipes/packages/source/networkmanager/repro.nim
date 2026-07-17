@@ -73,19 +73,17 @@
 ##
 ## ## Build shape
 ##
-## NetworkManager's build system is autotools (the project has NOT
-## migrated to meson). The c_cpp_autotools convention (M9.K) reads
-## both the M9.H ``fetch:`` block and the M9.I ``configureFlags:``
-## block off this package's registries and lowers them into fetch +
-## ``./configure`` + ``make`` BuildActions; the per-artifact build
-## body + install glue lands in M9.L; the recipe records the
+## NetworkManager 1.56 builds with Meson. The c_cpp_meson convention
+## reads the M9.H ``fetch:`` block and the inlined Meson options and
+## lowers them into fetch + setup + compile + install BuildActions;
+## the per-artifact build body + install glue records the
 ## executable + executable + library artifacts via the two
-## ``executable`` + one ``library`` blocks so the M9.K artifact
+## ``executable`` + one ``library`` blocks so the artifact
 ## registry already knows what binaries + shared object to expect.
 ##
 ## ## Artifacts
 ##
-## NetworkManager's autotools build emits a vast set of binaries +
+## NetworkManager's Meson build emits a vast set of binaries +
 ## libraries + per-device plugins + nss modules; we register the
 ## three load-bearing ones for the v1 desktop story:
 ##
@@ -121,33 +119,16 @@
 ##
 ## ## Configurables
 ##
-## v1 ships NO configurables — the configure flags are hardcoded to
+## v1 ships NO configurables — the Meson options are hardcoded to
 ## the modern-desktop baseline per the task brief:
 ##
-##   * ``--disable-static``           — skip the static archive (not
-##                                        used by the v1 desktop story;
-##                                        consumers link dynamically).
-##   * ``--disable-tests``            — skip the upstream test suite to
-##                                        keep the build hermetic.
-##   * ``--disable-introspection``    — skip GObject Introspection
-##                                        (drops the g-ir-scanner
-##                                        toolchain dep; matches glib2
-##                                        + wireplumber precedents).
-##   * ``--without-docs``             — skip the gtk-doc + man-page
-##                                        build (heavy XSLT dependency
-##                                        surface).
-##   * ``--without-systemd-journal``  — skip the libsystemd-journal
-##                                        log-target build (use the
-##                                        plain syslog target instead;
-##                                        avoids a hard libsystemd
-##                                        version coupling).
-##   * ``--with-modify-system=true``  — allow ``nmcli`` modifications
-##                                        to system-wide connection
-##                                        profiles without polkit
-##                                        gating (NDE-K1 v1 manifest
-##                                        activations require this for
-##                                        declarative connection-
-##                                        profile install).
+##   * tests, docs, manpages, introspection, Vala, Qt, NMTUI, PPP,
+##     ModemManager, OVS, cloud setup, SELinux, audit, and connectivity
+##     checking are disabled to keep the initial daemon closure focused.
+##   * systemd session tracking, udev discovery, Wi-Fi, the internal
+##     DHCP client, D-Bus, and polkit remain enabled for desktop use.
+##   * GnuTLS is selected instead of the default NSS crypto backend so
+##     the package consumes the sibling source-built TLS stack.
 
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
@@ -164,12 +145,10 @@ package networkManagerSource:
   ## for Wi-Fi / Ethernet / VPN management and per-application
   ## network-status indicators.
   ##
-  ## Tier-2b c_cpp_autotools convention consumer: the convention
+  ## Tier-2b c_cpp_meson convention consumer: the convention
   ## layer reads the ``fetch:`` block (registered via
-  ## ``registeredFetchSpec``) and the ``configureFlags:`` block
-  ## (registered via ``registeredBuildFlags`` on the ``"configure"``
-  ## channel) and lowers them into fetch + configure BuildActions
-  ## wired with the right URL + hash + flags. Two-executable +
+  ## ``registeredFetchSpec``) and the inlined Meson options and lowers
+  ## them into fetch + setup + compile + install BuildActions. Two-executable +
   ## one-library artifact recipe.
 
   versions:
@@ -201,28 +180,18 @@ package networkManagerSource:
     extractStrip: 1
 
   nativeBuildDeps:
-    ## autoconf generates the upstream ``configure`` script when the
-    ## release tarball ships a stale ``configure.ac``. NetworkManager's
-    ## release tarball pre-generates ``configure`` but the convention's
-    ## fallback re-runs ``autoconf`` if the script is missing.
-    "autoconf"
-    ## automake provides the ``Makefile.in`` templates the release
-    ## tarball pre-generates.
-    "automake"
-    ## libtool provides the ``./libtool`` shim the autotools build
-    ## drives for ``--disable-static`` to honour the shared-only
-    ## build semantics correctly.
-    "libtool"
-    ## make is the build-system driver — the c_cpp_autotools
-    ## convention's compile action invokes ``make`` after
-    ## ``./configure``.
-    "make"
+    ## Meson is NetworkManager 1.56's only supported build system.
+    "meson >=0.56"
+    ## Ninja is Meson's build backend.
+    "ninja >=1.10"
     ## gcc is the host C toolchain — NetworkManager is C11 with light
     ## use of GNU extensions.
     "gcc >=11"
-    ## pkg-config is used by the autotools configure step to probe for
-    ## the glib2 + libnl + libuuid + dbus + libcurl dependencies.
+    ## pkg-config probes the GLib, libuuid, D-Bus, libndp, udev,
+    ## polkit, and GnuTLS inputs.
     "pkg-config"
+    ## Meson runs NetworkManager's export and code-generation scripts.
+    "perl >=5.32"
 
   buildDeps:
     ## glib2 supplies ``libglib-2.0`` + ``libgobject-2.0`` +
@@ -230,10 +199,6 @@ package networkManagerSource:
     ## GMainLoop and the NMClient / NMDevice public API are GObject
     ## types.
     "glib2 >=2.62"
-    ## libxml2 supplies the XML parser NetworkManager's
-    ## connection-import path uses for the legacy ifcfg-rh / network-
-    ## scripts XML formats.
-    "libxml2 >=2.9"
     ## util-linux supplies ``libuuid`` for the per-connection UUID
     ## generation NetworkManager uses to key system-connection
     ## profiles.
@@ -241,16 +206,20 @@ package networkManagerSource:
     ## dbus supplies ``libdbus-1`` — NetworkManager's D-Bus interface
     ## is the primary client API every desktop widget consumes.
     "dbus >=1.12"
-    ## openssl supplies ``libssl`` + ``libcrypto`` — NetworkManager's
-    ## WPA2-Enterprise / 802.1X paths use OpenSSL for the TLS handshake
-    ## with the RADIUS server via wpa_supplicant.
-    "openssl >=3.0"
+    ## libndp provides IPv6 Neighbor Discovery handling.
+    "libndp >=1.8"
+    ## GnuTLS handles certificate and key operations.
+    "gnutls >=3.7"
     ## systemd supplies ``libudev`` for netlink + udev device
     ## enumeration (the wired / wireless / Bluetooth interface probe).
     "systemd >=240"
+    ## polkit authorizes privileged connection changes over D-Bus.
+    "polkit >=0.120"
+    ## GNU Readline provides nmcli's interactive line editor.
+    "readline >=8.0"
 
   config:
-    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    ## No prefix lifted from `mesonOptions:`; options are inlined below.
     discard
   executable nmDaemon:
     ## ``/usr/sbin/NetworkManager`` — the connection manager daemon.
@@ -262,8 +231,8 @@ package networkManagerSource:
     ## ``networkmanager`` prefix (matching the systemdInit /
     ## sddmGreeter naming convention for disambiguating package-level
     ## daemon binaries from short package names). v1 records the
-    ## artifact only; the per-artifact build body lands in M9.L when
-    ## the convention's make-spawn + install-glue closes.
+    ## artifact only; the Meson install tree is staged via an explicit
+    ## alias from the upstream binary name.
     discard
 
   executable nmcli:
@@ -287,27 +256,58 @@ package networkManagerSource:
     discard
 
   build:
-    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    ## NetworkManager 1.56 ships Meson metadata and no configure script.
     setCurrentOwningPackageOverride("networkManagerSource")
     try:
       let opts = @[
-        "--disable-static",
-        "--disable-tests",
-        "--disable-introspection",
-        "--without-docs",
-        "--without-systemd-journal",
-        "--with-modify-system=true",
+        "default_library=shared",
+        "tests=no",
+        "introspection=false",
+        "vapi=false",
+        "docs=false",
+        "man=false",
+        "systemd_journal=false",
+        "config_logging_backend_default=syslog",
+        "session_tracking=systemd",
+        "suspend_resume=systemd",
+        "polkit=true",
+        "modify_system=true",
+        "selinux=false",
+        "libaudit=no",
+        "crypto=gnutls",
+        "concheck=false",
+        "libpsl=false",
+        "ppp=false",
+        "modem_manager=false",
+        "ovs=false",
+        "nmtui=false",
+        "nm_cloud_setup=false",
+        "firewalld_zone=false",
+        "ifupdown=false",
+        "nbft=false",
+        "qt=false",
+        "readline=libreadline",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
-      discard pkg.executable("nmDaemon")
+      let patches = @[
+        "sed -i 's/i18n.merge_file(/configure_file(/; s/    po_dir: po_dir,/    copy: true,/' src/data/meson.build",
+      ]
+      let pkg = meson_package(
+        srcDir = "./src",
+        configureOptions = opts,
+        srcPatches = patches)
+      discard pkg.executableAlias("nmDaemon", sourceName = "NetworkManager")
       discard pkg.executable("nmcli")
       discard pkg.library("libNm")
     finally:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
-    ## DT_NEEDED inspection of the linked artifacts. Empty until
-    ## the M9.R.5b per-recipe pass populates per-output ELF
-    ## interrogation.
-    discard
+    ## Keep the daemon, client, and libnm closure explicit so the image
+    ## resolves these libraries from source-built package mirrors.
+    "glib2 >=2.62"
+    "libndp >=1.8"
+    "gnutls >=3.7"
+    "systemd >=240"
+    "dbus >=1.12"
+    "polkit >=0.120"
+    "readline >=8.0"

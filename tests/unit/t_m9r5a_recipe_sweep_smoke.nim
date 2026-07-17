@@ -44,7 +44,7 @@ import repro_interface_artifacts
 import "../../recipes/packages/source/dbus-broker/repro"
 import "../../recipes/packages/source/cmake/repro"
 import "../../recipes/packages/source/coreutils/repro"
-import "../../recipes/packages/source/gnutls/repro"
+import "../../recipes/packages/source/networkmanager/repro"
 import "../../recipes/packages/source/kernel/repro"
 
 # Convention-bridge fixture: a synthetic package whose ONLY dep
@@ -118,6 +118,31 @@ suite "DSL-port M9.R.5a — 84-recipe sweep smoke":
     let expected = @["nettle >=3.7", "gmp >=6.2"]
     check registeredBuildDeps("gnutlsSource") == expected
     check registeredRuntimeDeps("gnutlsSource") == expected
+
+  test "readline declares its split terminfo closure":
+    check registeredBuildDeps("readlineSource") == @["ncurses >=6.0"]
+    check registeredRuntimeDeps("readlineSource") == @["ncurses >=6.0"]
+
+  test "NetworkManager declares its source runtime closure":
+    check registeredBuildDeps("networkManagerSource") == @[
+      "glib2 >=2.62",
+      "util-linux >=2.36",
+      "dbus >=1.12",
+      "libndp >=1.8",
+      "gnutls >=3.7",
+      "systemd >=240",
+      "polkit >=0.120",
+      "readline >=8.0",
+    ]
+    check registeredRuntimeDeps("networkManagerSource") == @[
+      "glib2 >=2.62",
+      "libndp >=1.8",
+      "gnutls >=3.7",
+      "systemd >=240",
+      "dbus >=1.12",
+      "polkit >=0.120",
+      "readline >=8.0",
+    ]
 
   test "convention bridge: nativeBuildDeps fold into projectInterface.toolUses":
     # The M9.R.5a bridge lives in ``packageLiteral`` —
