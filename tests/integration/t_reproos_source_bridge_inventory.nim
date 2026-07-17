@@ -53,5 +53,7 @@ suite "ReproOS source bridge inventory":
     check "required iproute2 ss binary missing" in stageScript
     check "$STAGE_DIR/usr/bin/ss" in stageScript
     check "required xkeyboard-config data missing" in stageScript
+    check "dpkg --purge --force-depends xkb-data" in baseScript
+    check "test ! -e /usr/share/X11/xkb" in baseScript
     check "$STAGE_DIR/usr/share/X11/xkb" in stageScript
     check "return 1" in stageScript

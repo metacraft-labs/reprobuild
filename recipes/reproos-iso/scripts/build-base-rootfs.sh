@@ -276,6 +276,11 @@ set -e
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends ${PKG_LIST[*]}
+# Several desktop packages depend on Debian's xkb-data package. Remove it
+# before the source bridge installs xkeyboard-config so dpkg cannot delete
+# files from the source-owned tree.
+dpkg --purge --force-depends xkb-data
+test ! -e /usr/share/X11/xkb
 rm -rf /var/lib/apt/lists/*
 if [ -f /etc/locale.gen ]; then
   sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen
