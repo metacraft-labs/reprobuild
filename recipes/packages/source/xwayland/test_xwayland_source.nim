@@ -32,3 +32,26 @@ suite "xwaylandSource — from-source recipe smoke test":
     let spec = registeredFetchSpec("xwaylandSource")
     check spec.kind == dfkTarball
     check spec.extractStrip == 1
+
+  test "declares source libX11":
+    let deps = registeredBuildDeps("xwaylandSource")
+    check "libx11 >=1.8" in deps
+    check "libxcvt >=0.1.1" in deps
+    check "libepoxy >=1.5" in deps
+    check "nettle >=3.7" in deps
+    check "xorgproto" in deps
+
+  test "declares the runtime server and XKB closure":
+    let deps = registeredRuntimeDeps("xwaylandSource")
+    check "pixman >=0.42" in deps
+    check "libxfont2" in deps
+    check "wayland >=1.22" in deps
+    check "libxcvt >=0.1.1" in deps
+    check "libxshmfence" in deps
+    check "libdrm >=2.4.110" in deps
+    check "libepoxy >=1.5" in deps
+    check "mesa" in deps
+    check "nettle >=3.7" in deps
+    check "libxau" in deps
+    check "xkbcomp" in deps
+    check "xkeyboard-config" in deps
