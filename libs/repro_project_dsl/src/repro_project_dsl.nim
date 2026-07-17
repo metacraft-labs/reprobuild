@@ -62,6 +62,7 @@ proc extendedPath(path: string): string =
     path
 
 when defined(reproProviderMode):
+  import std/streams
   import repro_provider_runtime
   export repro_provider_runtime
 

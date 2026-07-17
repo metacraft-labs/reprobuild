@@ -268,38 +268,202 @@ when defined(reproProviderMode):
         executableName: useDef.executableName,
         policyPath: useDef.policyPath))
 
+  proc dispatchProviderGraphRequest(pkg: PackageDef;
+                                    request: ProviderGraphRequest;
+                                    manifest: ProviderManifest;
+                                    buildProc: proc ();
+                                    foreachDispatch: proc (
+                                      request: ProviderGraphRequest):
+                                      GraphFragment;
+                                    devEnvProc: proc ()):
+      ProviderGraphResponse =
+    ## The single dispatch shared by the pre-RP2 file path and the RP2
+    ## stdio serve loop: route a decoded ``ProviderGraphRequest`` to the
+    ## existing entry-point machinery.
+    case request.kind
+    of prkManifest:
+      manifestResponse(manifest)
+    of prkGraphInvocation:
+      if request.entryPointId == rootEntryPointId(pkg):
+        graphResponse(manifest, buildPackageFragment(pkg, request, buildProc))
+      elif foreachDispatch != nil:
+        graphResponse(manifest, foreachDispatch(request))
+      else:
+        raise newException(ValueError,
+          "unknown provider entry point: " & request.entryPointId)
+    of prkDevEnvIntrospection:
+      if request.entryPointId == devEnvEntryPointId(pkg):
+        devEnvResponse(manifest, buildPackageDevEnv(pkg, request, devEnvProc))
+      else:
+        raise newException(ValueError,
+          "unknown provider dev-env entry point: " & request.entryPointId)
+
+  # RP2 (Provider-Runtime-Protocol-v1.md §2): the InvokeEntryPoint arg and the
+  # EntryPointResult value travel as ``(typeId, jsonStr)`` BoxedValues through
+  # the Typed-Graph-Extensions ``extensionRegistry`` — the same registry the
+  # resource lane (repro_resources/marshal.nim) marshals its attribute box
+  # through. The v1 §3 InvokeEntryPoint carries the provider's decoded request
+  # as its single arg; the EntryPointResult's value carries the produced
+  # fragment (or dev-env result) inside a ``ProviderGraphResponse``.
+  #
+  # The two payload types nest enums + object graphs that ``std/json``'s
+  # ``%*`` (what the default ``registerExtension[T]`` marshaller uses) cannot
+  # serialize, but a canonical binary codec (``encode/decodeProviderRequest`` /
+  # ``…Response`` in repro_provider_runtime) already exists and is the tested
+  # serializer for exactly these types. So the two typeIds are registered with
+  # a CUSTOM ``ExtensionMarshaler`` on the SAME shared registry whose payload
+  # string is that canonical codec's bytes carried verbatim in the (opaque)
+  # payload string — the registry stays the single codec of record (no
+  # parallel registry), while the proven binary serializer carries the
+  # enum/graph payload.
+  const
+    ProviderGraphRequestTypeId* = "reprobuild.provider-graph-request.v1"
+    ProviderGraphResponseTypeId* = "reprobuild.provider-graph-response.v1"
+
+  proc rpBytesToStr(bytes: openArray[byte]): string =
+    result = newString(bytes.len)
+    for i, b in bytes:
+      result[i] = char(b)
+
+  proc rpStrToBytes(text: string): seq[byte] =
+    result = newSeq[byte](text.len)
+    for i, ch in text:
+      result[i] = byte(ord(ch))
+
+  block:
+    extensionRegistry[ProviderGraphRequestTypeId] = ExtensionMarshaler(
+      marshal: proc(box: ExtensionBox): string =
+        rpBytesToStr(encodeProviderRequest(
+          TypedExtensionBox[ProviderGraphRequest](box).val)),
+      unmarshal: proc(jsonStr: string): ExtensionBox =
+        TypedExtensionBox[ProviderGraphRequest](
+          typeId: ProviderGraphRequestTypeId,
+          val: decodeProviderRequest(rpStrToBytes(jsonStr))))
+    extensionRegistry[ProviderGraphResponseTypeId] = ExtensionMarshaler(
+      marshal: proc(box: ExtensionBox): string =
+        rpBytesToStr(encodeProviderResponse(
+          TypedExtensionBox[ProviderGraphResponse](box).val)),
+      unmarshal: proc(jsonStr: string): ExtensionBox =
+        TypedExtensionBox[ProviderGraphResponse](
+          typeId: ProviderGraphResponseTypeId,
+          val: decodeProviderResponse(rpStrToBytes(jsonStr))))
+
+  proc boxGraphRequest(request: ProviderGraphRequest): BoxedValue =
+    BoxedValue(typeId: ProviderGraphRequestTypeId,
+      jsonStr: extensionRegistry[ProviderGraphRequestTypeId].marshal(
+        TypedExtensionBox[ProviderGraphRequest](
+          typeId: ProviderGraphRequestTypeId, val: request)))
+
+  proc unboxGraphRequest(box: BoxedValue): ProviderGraphRequest =
+    if box.typeId != ProviderGraphRequestTypeId:
+      raise newException(ValueError,
+        "InvokeEntryPoint arg has unexpected typeId '" & box.typeId & "'")
+    TypedExtensionBox[ProviderGraphRequest](
+      extensionRegistry[ProviderGraphRequestTypeId].unmarshal(box.jsonStr)).val
+
+  proc boxGraphResponse(response: ProviderGraphResponse): BoxedValue =
+    BoxedValue(typeId: ProviderGraphResponseTypeId,
+      jsonStr: extensionRegistry[ProviderGraphResponseTypeId].marshal(
+        TypedExtensionBox[ProviderGraphResponse](
+          typeId: ProviderGraphResponseTypeId, val: response)))
+
+  proc unboxGraphResponse*(box: BoxedValue): ProviderGraphResponse =
+    ## Engine-side helper: re-hydrate the EntryPointResult value into the
+    ## typed ``ProviderGraphResponse`` through the same registry.
+    if box.typeId != ProviderGraphResponseTypeId:
+      raise newException(ValueError,
+        "EntryPointResult value has unexpected typeId '" & box.typeId & "'")
+    TypedExtensionBox[ProviderGraphResponse](
+      extensionRegistry[ProviderGraphResponseTypeId].unmarshal(box.jsonStr)).val
+
+  proc marshalGraphRequest*(request: ProviderGraphRequest): BoxedValue =
+    ## Engine-side helper: marshal a ``ProviderGraphRequest`` into the
+    ## InvokeEntryPoint arg BoxedValue through the shared registry.
+    boxGraphRequest(request)
+
+  proc serveProviderSession(pkg: PackageDef; buildProc: proc ();
+                            foreachDefs: openArray[ProviderForeachDef];
+                            foreachDispatch: proc (
+                              request: ProviderGraphRequest): GraphFragment;
+                            devEnvProc: proc ()): int =
+    ## RP2 stdio serve loop (v1 §2-4). Reads EngineHello, replies with the
+    ## ProviderManifest, then services InvokeEntryPoint frames against the
+    ## existing entry-point machinery until the engine closes the pipe (EOF).
+    let toEngine = newFileStream(stdout)
+    let fromEngine = newFileStream(stdin)
+    # Handshake: EngineHello -> ProviderManifest.
+    let helloFrame = fromEngine.readFrame()
+    if helloFrame.messageType != smtEngineHello:
+      stderr.writeLine("repro provider serve: expected EngineHello, got " &
+        $ord(helloFrame.messageType))
+      return 2
+    let hello = decodeEngineHello(helloFrame.payload)
+    # The manifest's providerArtifactId is the identity the engine reconciles
+    # against its expected RP1 ProviderArtifactId; the EngineHello does not
+    # carry one, so v1 keeps the manifest self-reported id (see the RP2
+    # fingerprint-reconciliation note in the milestone). ``lockSliceId`` from
+    # the hello flows into each request below.
+    let manifest = providerManifest(pkg, "", foreachDefs)
+    toEngine.writeFrame(smtProviderManifest, encodeProviderManifestMsg(manifest))
+    while true:
+      var frame: tuple[messageType: SessionMessageType; payload: seq[byte]]
+      try:
+        frame = fromEngine.readFrame()
+      except ProviderSessionError:
+        # Clean EOF at a frame boundary = engine tore the session down.
+        break
+      if frame.messageType != smtInvokeEntryPoint:
+        stderr.writeLine("repro provider serve: expected InvokeEntryPoint, got " &
+          $ord(frame.messageType))
+        return 2
+      let invoke = decodeInvokeEntryPoint(frame.payload)
+      var result = EntryPointResult(ok: false)
+      try:
+        if invoke.args.len != 1:
+          raise newException(ValueError,
+            "InvokeEntryPoint expects exactly one request arg, got " &
+            $invoke.args.len)
+        var request = unboxGraphRequest(invoke.args[0])
+        if request.entryPointId.len == 0:
+          request.entryPointId = invoke.entryPointId
+        if request.lockSliceId.len == 0:
+          request.lockSliceId = hello.lockSliceId
+        let response = dispatchProviderGraphRequest(pkg, request, manifest,
+          buildProc, foreachDispatch, devEnvProc)
+        result.ok = true
+        result.value = boxGraphResponse(response)
+        result.hasValue = true
+        if response.kind == pskGraphResult:
+          result.evaluationInputs = response.fragment.evaluationInputs
+        elif response.kind == pskDevEnvResult:
+          result.evaluationInputs = response.devEnv.evaluationInputs
+      except CatchableError as err:
+        result.ok = false
+        result.hasValue = false
+        result.diagnostics = @[SessionDiagnostic(severity: "error",
+          message: err.msg)]
+      toEngine.writeFrame(smtEntryPointResult, encodeEntryPointResult(result))
+    0
+
   proc runPackageProvider*(pkg: PackageDef; buildProc: proc ();
                            foreachDefs: openArray[ProviderForeachDef] = [];
                            foreachDispatch: proc (
                              request: ProviderGraphRequest): GraphFragment = nil;
                            devEnvProc: proc () = nil): int {.dynOrStatic.} =
     try:
-      let paths = parseProviderProtocolArgs(commandLineParams())
+      let params = commandLineParams()
+      if ProviderServeFlag in params:
+        # RP2: long-lived stdio session (v1 §2-4).
+        return serveProviderSession(pkg, buildProc, foreachDefs,
+          foreachDispatch, devEnvProc)
+      # Pre-RP2: single-shot, file-based request/response.
+      let paths = parseProviderProtocolArgs(params)
       let request = readProviderRequestFile(paths.requestPath)
       let manifest = providerManifest(pkg, request.providerArtifactId,
         foreachDefs)
-      case request.kind
-      of prkManifest:
-        writeProviderResponseFile(paths.responsePath, manifestResponse(manifest))
-      of prkGraphInvocation:
-        if request.entryPointId == rootEntryPointId(pkg):
-          writeProviderResponseFile(paths.responsePath,
-            graphResponse(manifest, buildPackageFragment(pkg, request, buildProc)))
-        elif foreachDispatch != nil:
-          writeProviderResponseFile(paths.responsePath,
-            graphResponse(manifest, foreachDispatch(request)))
-        else:
-          stderr.writeLine("unknown provider entry point: " & request.entryPointId)
-          return 2
-      of prkDevEnvIntrospection:
-        if request.entryPointId == devEnvEntryPointId(pkg):
-          writeProviderResponseFile(paths.responsePath,
-            devEnvResponse(manifest, buildPackageDevEnv(pkg, request,
-              devEnvProc)))
-        else:
-          stderr.writeLine("unknown provider dev-env entry point: " &
-            request.entryPointId)
-          return 2
+      let response = dispatchProviderGraphRequest(pkg, request, manifest,
+        buildProc, foreachDispatch, devEnvProc)
+      writeProviderResponseFile(paths.responsePath, response)
       0
     except CatchableError as err:
       stderr.writeLine("repro project provider: error: " & err.msg)

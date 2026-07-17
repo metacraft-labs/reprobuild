@@ -22,7 +22,7 @@ rows_html="${tmp_dir}/benchmark-rows.html"
 : >"${results_jsonl}"
 : >"${rows_html}"
 
-benchmark_suites="${REPROBUILD_BENCH_SUITES:-m0,m23,cmake,rp1}"
+benchmark_suites="${REPROBUILD_BENCH_SUITES:-m0,m23,cmake,rp1,rp2}"
 
 suite_enabled() {
   local suite="$1"
@@ -181,7 +181,10 @@ if kind == "m23":
                 1000.0 / value,
                 extra + f"; original={value} actions/sec",
             )
-elif kind == "rp1":
+elif kind in ("rp1", "rp2"):
+    # RP1 and RP2 share the same metric-array JSON shape (suite/name/unit/
+    # value/direction). RP2 adds the provider-session round-trip (warm/cold)
+    # metrics; the loop below is agnostic to which suite emitted them.
     metadata = data.get("metadata", {})
     quick_value = metadata.get("quick", mode == "quick")
     quick = str(quick_value).lower() if isinstance(quick_value, bool) else str(quick_value)
@@ -403,6 +406,31 @@ run_rp1_suite() {
   append_benchmark_metrics "${output}" rp1 "${quick}"
 }
 
+run_rp2_suite() {
+  # RP2 (Project-Provider-Runtime-Protocol) — provider-session round-trip
+  # latency metric (warm reused-session invoke vs cold launch+handshake+invoke).
+  # The harness materializes the provider once (RP1 edge), then times the
+  # stdio session round-trips.
+  local harness_bin="build/test-bin/rp2_provider_session_bench"
+  local output="bench-results/rp2-provider-session.json"
+  local quick_flag=()
+  if [ "${quick}" = true ]; then
+    quick_flag+=(--quick)
+  fi
+
+  echo "running Reprobuild RP2 provider-session benchmark suite (quick=${quick})" >&2
+  mkdir -p build/test-bin build/nimcache
+  nim c \
+    -d:release \
+    --hints:off \
+    --warnings:off \
+    --nimcache:build/nimcache/rp2-provider-session-bench \
+    --out:"${harness_bin}" \
+    benchmarks/lib/rp2_provider_session_bench.nim >&2
+  "./${harness_bin}" "${quick_flag[@]}" --out "${output}" >&2
+  append_benchmark_metrics "${output}" rp2 "${quick}"
+}
+
 if suite_enabled m0; then
   run_m0_suite
 fi
@@ -417,6 +445,10 @@ fi
 
 if suite_enabled rp1; then
   run_rp1_suite
+fi
+
+if suite_enabled rp2; then
+  run_rp2_suite
 fi
 
 json_results="$(emit_json)"
