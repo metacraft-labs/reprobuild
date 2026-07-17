@@ -66,6 +66,8 @@ suite "ReproOS source bridge inventory":
     check "$STAGE_DIR/usr/share/icons/Adwaita" in stageScript
     check "required source xz binary missing" in stageScript
     check "required source liblzma SONAME missing" in stageScript
+    check "xz_source_lib" in stageScript
+    check "failed to set source liblzma RPATH" in stageScript
     check "required source tar binary missing" in stageScript
     check "required source coreutils binary missing" in stageScript
     check "return 1" in stageScript

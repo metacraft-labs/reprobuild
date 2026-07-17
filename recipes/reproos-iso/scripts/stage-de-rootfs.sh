@@ -568,6 +568,20 @@ link_base_recipe_binaries() {
       echo "[stage-de-rootfs] required source liblzma SONAME missing" >&2
       return 1
     fi
+    local xz_source_lib="${install_usr/lib#$STAGE_DIR}"
+    local xz_rpath
+    xz_rpath="$($patchelf_bin --print-rpath "$install_usr/bin/xz" 2>/dev/null || true)"
+    case ":$xz_rpath:" in
+      *":$xz_source_lib:"*) ;;
+      *)
+        local xz_new_rpath="$xz_source_lib"
+        [ -z "$xz_rpath" ] || xz_new_rpath="$xz_new_rpath:$xz_rpath"
+        if ! $patchelf_bin --set-rpath "$xz_new_rpath" "$install_usr/bin/xz"; then
+          echo "[stage-de-rootfs] failed to set source liblzma RPATH" >&2
+          return 1
+        fi
+        ;;
+    esac
   fi
   if [ "$recipe" = "tar" ] && [ ! -x "$install_usr/bin/tar" ]; then
     echo "[stage-de-rootfs] required source tar binary missing" >&2
