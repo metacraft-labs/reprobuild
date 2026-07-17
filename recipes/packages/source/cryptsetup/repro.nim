@@ -83,6 +83,9 @@ package cryptsetupSource:
         "export gettext_datadir=/opt/repro/reprobuild/recipes/packages/source/gettext/.repro/output/install/usr/share/gettext",
         "grep -qF 'AM_CPPFLAGS += $(JSON_C_CFLAGS)' src/Makefile.am || sed -i '/EXTERNAL_LUKS2_TOKENS_PATH/a AM_CPPFLAGS += $(JSON_C_CFLAGS)' src/Makefile.am",
       ]
+      # These administrative executables install under usr/sbin. The shared
+      # install-mirror RPATH pass must cover sbin so they resolve the declared
+      # source-built libraries rather than distribution fallbacks.
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
                                   patchHardcodedFile = true,
                                   srcPatches = patches)

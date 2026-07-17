@@ -1094,7 +1094,8 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
                                  ownManifestPath: string = "";
                                  packageName: string = ""): string =
   ## DSL-port M9.R.14f.2 — emit a POSIX shell snippet that walks every
-  ## ELF under ``<mirror>/lib`` + ``<mirror>/lib64`` + ``<mirror>/bin``
+  ## ELF under ``<mirror>/lib`` + ``<mirror>/lib64`` + ``<mirror>/bin`` +
+  ## ``<mirror>/sbin``
   ## and runs ``patchelf --set-rpath`` on each. RPATH layout:
   ## ``$ORIGIN:$ORIGIN/../lib:$ORIGIN/../lib64:<dep1>:<dep2>:...``.
   ##
@@ -1281,9 +1282,9 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     script.add("printf '%s\\n' \"$rp\" >> \"" & escapedManifest & "\"; ")
     script.add("done; IFS=$OLD_IFS; ")
   # Walk lib/ + lib64/ for .so* files (the SONAME-versioned chain).
-  # Walk bin/ for executables.
+  # Walk bin/ + sbin/ for executables.
   script.add("for d in \"" & escapedDstUsr & "/lib\" \"" & escapedDstUsr &
-    "/lib64\" \"" & escapedDstUsr & "/bin\"; do ")
+    "/lib64\" \"" & escapedDstUsr & "/bin\" \"" & escapedDstUsr & "/sbin\"; do ")
   script.add("if [ -d \"$d\" ]; then ")
   script.add("find \"$d\" -maxdepth 2 -type f \\( ")
   script.add("-name '*.so' -o -name '*.so.*' -o -perm -u+x ")
@@ -1299,7 +1300,7 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("done; ")
   script.add("fi; done; ")
   # DSL-port M9.R.30.3 — NEEDED safety net. After patching every ELF,
-  # re-walk lib/ + lib64/ + bin/ and run ``patchelf --print-needed``
+  # re-walk lib/ + lib64/ + bin/ + sbin/ and run ``patchelf --print-needed``
   # on each ELF. For every NEEDED SONAME, verify the file is found
   # under one of the RPATH dirs (split $rpath on ``:`` and probe
   # ``$dir/$soname``). If any NEEDED is unresolved, FAIL the build
@@ -1327,7 +1328,7 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     script.add("m9r30_unresolved_log=\"" & escapedManifest & ".m9r30_unresolved\"; ")
     script.add(": > \"$m9r30_unresolved_log\"; ")
     script.add("for d in \"" & escapedDstUsr & "/lib\" \"" & escapedDstUsr &
-      "/lib64\" \"" & escapedDstUsr & "/bin\"; do ")
+      "/lib64\" \"" & escapedDstUsr & "/bin\" \"" & escapedDstUsr & "/sbin\"; do ")
     script.add("if [ -d \"$d\" ]; then ")
     script.add("find \"$d\" -maxdepth 2 -type f \\( ")
     script.add("-name '*.so' -o -name '*.so.*' -o -perm -u+x ")

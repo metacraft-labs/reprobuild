@@ -30,7 +30,7 @@
 ##         verbatim).
 ##      c. Includes ``$ORIGIN/../lib`` for the bin/ → lib/ hop.
 ##      d. Includes every absolute peer-recipe dep mirror lib dir.
-##      e. Walks the mirror's lib/ + lib64/ + bin/ dirs.
+##      e. Walks the mirror's lib/ + lib64/ + bin/ + sbin/ dirs.
 ##   3. Idempotence: emitting the script twice with the same inputs
 ##      produces byte-identical output.
 ##   4. Linux-only end-to-end: when ``patchelf`` is on PATH AND a C
@@ -69,11 +69,12 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
     check script.contains("'$ORIGIN/../lib'")
     check script.contains("'$ORIGIN/../lib64'")
 
-  test "emitted_script_walks_lib_lib64_bin":
+  test "emitted_script_walks_lib_lib64_bin_sbin":
     let script = m9r14fEmitRpathPatchScript("/tmp/mirror/usr", @[])
     check script.contains("/tmp/mirror/usr/lib")
     check script.contains("/tmp/mirror/usr/lib64")
     check script.contains("/tmp/mirror/usr/bin")
+    check script.contains("/tmp/mirror/usr/sbin")
 
   test "emitted_script_includes_dep_mirror_lib_dirs":
     let deps = @[
