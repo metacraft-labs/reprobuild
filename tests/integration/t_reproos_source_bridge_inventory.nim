@@ -2,6 +2,7 @@ import std/[os, strutils, unittest]
 
 const MigratedPackages = [
   "parted", "dosfstools", "lvm2", "gdisk", "less", "procps",
+  "cryptsetup", "iproute2",
 ]
 
 proc findRepoRoot(): string =
@@ -48,4 +49,6 @@ suite "ReproOS source bridge inventory":
     # Debian's gdb closure pulls procps through libdebuginfod-common and ucf.
     check "gdb" notin aptPackages
     check "required source mirror missing: $recipe" in stageScript
+    check "required iproute2 ss binary missing" in stageScript
+    check "$STAGE_DIR/usr/bin/ss" in stageScript
     check "return 1" in stageScript

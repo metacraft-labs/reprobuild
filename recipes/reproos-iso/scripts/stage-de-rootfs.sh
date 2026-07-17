@@ -428,7 +428,7 @@ link_entry gdm gdm
 # iana-tzdata), the source-migrated disk-tool set (parted, dosfstools,
 # lvm2, gdisk, cryptsetup), their source runtime dependencies
 # (popt, libgpg-error, libgcrypt, json-c), less, and procps.
-# iana-tzdata ships /usr/share/zoneinfo + a small /usr/bin tzdata helper;
+# iproute2 supplies network utilities; iana-tzdata supplies /usr/share/zoneinfo.
 # popt, libgpg-error, libgcrypt, and json-c are library-only; the remaining
 # recipes expose binaries and their runtime libraries from source install
 # mirrors.
@@ -454,6 +454,7 @@ BASE_USERSPACE_RECIPES=(
   cryptsetup
   less
   procps
+  iproute2
 )
 
 link_base_recipe_binaries() {
@@ -506,6 +507,18 @@ link_base_recipe_binaries() {
       done
     done
   done
+  # Upstream installs the whole suite under SBINDIR, while Debian exposes
+  # the unprivileged socket-inspection command as /usr/bin/ss.
+  if [ "$recipe" = "iproute2" ]; then
+    local ss_src="$install_usr/sbin/ss"
+    if [ ! -x "$ss_src" ]; then
+      echo "[stage-de-rootfs] required iproute2 ss binary missing" >&2
+      return 1
+    fi
+    local ss_link_target="${ss_src#$STAGE_DIR}"
+    mkdir -p "$STAGE_DIR/usr/bin"
+    ln -sf "$ss_link_target" "$STAGE_DIR/usr/bin/ss"
+  fi
   # iana-tzdata: also stage /usr/share/zoneinfo from the recipe's
   # install-mirror.  Other base-userspace recipes ship usr/share/
   # files (man pages, locale, ...) that the apt-installed equivalents

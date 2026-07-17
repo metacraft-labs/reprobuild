@@ -192,12 +192,13 @@ PKG_LIST=(
   #                                          dir empty; needs upstream
   #                                          ca-cert-bundle staging)
   #   iputils-ping     FS:none    STAGE:no
-  #   iproute2         FS:partial STAGE:no  (recipe exists; not built)
   #
   # M9.R.33.8 dropped: ``sudo`` -- FS:done recipe ships 4 binaries
   # in usr/bin (sudo, sudoedit, sudoreplay, visudo) and 3 in usr/sbin;
   # the Phase 4b shadow-link loop covers them.
-  ca-certificates iputils-ping iproute2
+  # Source bridge dropped ``iproute2`` after its configured Makefile recipe
+  # exposed ip, tc, ss, and bridge through the Phase 4b shadow-link loop.
+  ca-certificates iputils-ping
   # SDDM systemd unit + PAM glue.  The BINARY is shadowed by the
   # from-source recipe in stage-de-rootfs.sh (Phase 4); we keep the
   # apt entry to pick up the .service file + /etc/pam.d/sddm policy.
