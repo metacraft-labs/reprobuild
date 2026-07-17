@@ -305,6 +305,12 @@ proc files*(r: CmakePackageResult; name: string): BuildActionDef =
   discard componentPath(r.components, name)
   r.installEdge
 
+proc installTreeMirror*(r: CmakePackageResult) =
+  ## Emit the complete install tree for CMake packages that produce no
+  ## executable or library slice, such as module and header collections.
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "cmake")
+
 # ---------------------------------------------------------------------------
 # Stage-copy emission (M9.R.14c.5)
 # ---------------------------------------------------------------------------
