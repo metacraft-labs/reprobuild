@@ -44,8 +44,8 @@ import repro_interface_artifacts
 import "../../recipes/packages/source/dbus-broker/repro"
 import "../../recipes/packages/source/cmake/repro"
 import "../../recipes/packages/source/coreutils/repro"
+import "../../recipes/packages/source/gnutls/repro"
 import "../../recipes/packages/source/kernel/repro"
-import "../../recipes/packages/source/nettle/repro"
 
 # Convention-bridge fixture: a synthetic package whose ONLY dep
 # block is ``nativeBuildDeps:`` — the bridge needs to surface
@@ -113,6 +113,11 @@ suite "DSL-port M9.R.5a — 84-recipe sweep smoke":
   test "nettle declares GMP for libhogweed":
     check registeredBuildDeps("nettleSource") == @["gmp >=6.2"]
     check registeredRuntimeDeps("nettleSource") == @["gmp >=6.2"]
+
+  test "gnutls declares its linked library closure":
+    let expected = @["nettle >=3.7", "gmp >=6.2"]
+    check registeredBuildDeps("gnutlsSource") == expected
+    check registeredRuntimeDeps("gnutlsSource") == expected
 
   test "convention bridge: nativeBuildDeps fold into projectInterface.toolUses":
     # The M9.R.5a bridge lives in ``packageLiteral`` —
