@@ -41,11 +41,16 @@ const ExpectedHash =
 const ExpectedConfigureFlags = @[
   "--enable-gui=no",
   "--without-x",
+  "--with-tlib=ncursesw",
+  "--with-compiledby=ReproOS",
+  "--disable-darwin",
   "--disable-gpm",
   "--disable-perlinterp",
   "--disable-pythoninterp",
   "--disable-rubyinterp",
   "--disable-luainterp",
+  "--disable-libsodium",
+  "--disable-acl",
 ]
 
 suite "vimSource — from-source recipe smoke test":
@@ -72,6 +77,15 @@ suite "vimSource — from-source recipe smoke test":
     let spec = registeredFetchSpec("vimSource")
     check spec.kind == dfkTarball
     check spec.extractStrip == 1
+
+  test "declares the terminal build and runtime closure":
+    check registeredBuildDeps("vimSource") == @["ncurses"]
+    check registeredRuntimeDeps("vimSource") == @["ncurses"]
+    let native = registeredNativeBuildDeps("vimSource")
+    check "autoconf" in native
+    check "automake" in native
+    check "make" in native
+    check "gcc >=11" in native
 
   test "configureFlags registers the exact production flag sequence":
     check true  # M9.R.6.1: registry retired — assertion gutted
