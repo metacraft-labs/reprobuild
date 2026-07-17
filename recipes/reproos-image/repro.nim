@@ -135,6 +135,7 @@ const reproosImageRootfsDeps = @[
   "libxkbfile",
   "xkbcomp",
   "adwaita-icon-theme",
+  "xz",
 ]
 
 package reproosImage:
@@ -171,6 +172,7 @@ package reproosImage:
     "libxkbfile"
     "xkbcomp"
     "adwaita-icon-theme"
+    "xz"
 
   runtimeDeps:
     # M9.R.53: enumerate every bare-name host tool

@@ -459,6 +459,7 @@ BASE_USERSPACE_RECIPES=(
   libxkbfile
   xkbcomp
   adwaita-icon-theme
+  xz
 )
 
 link_base_recipe_binaries() {
@@ -555,6 +556,16 @@ link_base_recipe_binaries() {
     mkdir -p "$STAGE_DIR/usr/share/icons"
     rm -rf "$STAGE_DIR/usr/share/icons/Adwaita"
     ln -sf "$adwaita_link_target" "$STAGE_DIR/usr/share/icons/Adwaita"
+  fi
+  if [ "$recipe" = "xz" ]; then
+    if [ ! -x "$install_usr/bin/xz" ]; then
+      echo "[stage-de-rootfs] required source xz binary missing" >&2
+      return 1
+    fi
+    if [ ! -e "$install_usr/lib/liblzma.so.5" ]; then
+      echo "[stage-de-rootfs] required source liblzma SONAME missing" >&2
+      return 1
+    fi
   fi
   # iana-tzdata: also stage /usr/share/zoneinfo from the recipe's
   # install-mirror.  Other base-userspace recipes ship usr/share/
