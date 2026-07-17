@@ -7254,6 +7254,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_shared_clone_uses_full_repo_url_for_base_remote.nim",
+    binary: "build/test-bin/t_shared_clone_uses_full_repo_url_for_base_remote",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_shm_index_mpsc_ring_multiproducer_single_consumer.nim",
     binary: "build/test-bin/t_shm_index_mpsc_ring_multiproducer_single_consumer",
     defines: @[],

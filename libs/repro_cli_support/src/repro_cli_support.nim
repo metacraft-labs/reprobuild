@@ -24324,16 +24324,21 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     # Refresh this URL's shared bare once, up front, and expose it as a
     # dependency action id so the URL's fetches wait on it.
     var refreshDepId = ""
-    if repo.fetchUrl.len > 0:
-      if not sharedBareRefreshAction.hasKey(repo.fetchUrl):
+    # The shared bare is keyed by the FULL repo URL (`cloneUrlFor`), not the
+    # bare remote base (`repo.fetchUrl`) — the latter is un-cloneable for the
+    # common one-remote-many-repos manifest layout, which left the cache
+    # permanently unpopulated.
+    let cloneUrl = cloneUrlFor(repo)
+    if cloneUrl.len > 0:
+      if not sharedBareRefreshAction.hasKey(cloneUrl):
         let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot,
-          repo.fetchUrl)
+          cloneUrl)
         if not refreshed.ok and refreshed.diagnostic.len > 0:
           stderr.writeLine("workspace sync: shared-clone cache miss for " &
-            repo.fetchUrl & " (continuing without shared bare): " &
+            cloneUrl & " (continuing without shared bare): " &
             refreshed.diagnostic)
-        sharedBareRefreshAction[repo.fetchUrl] = ""
-      refreshDepId = sharedBareRefreshAction[repo.fetchUrl]
+        sharedBareRefreshAction[cloneUrl] = ""
+      refreshDepId = sharedBareRefreshAction[cloneUrl]
     fetchActions.add(syncFetchActionFor(identity, args.workspaceRoot,
       repo, repoIdx, refreshDepId))
 
@@ -24554,7 +24559,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     # acceleration, and remember it as a clone so a failure is skip-not-fatal.
     var cloneRef = ""
     if decision.action == saClone:
-      cloneRef = cloneReferenceFor(resolvedRepo.fetchUrl)
+      cloneRef = cloneReferenceFor(cloneUrlFor(resolvedRepo))
       cloneRepoIdx.incl(repoIdx)
     let built = syncCheckoutActionFor(
       identity, args.workspaceRoot, resolvedRepo, decision, repoIdx, cloneRef)
@@ -26514,7 +26519,9 @@ proc runCachePushCommand*(args: openArray[string]): int =
     # change for a non-evidence repo (byte-identical path otherwise).
     if isEvidenceOnlyRepo(matched.get()):
       return 0
-    let fetchUrl = matched.get().fetchUrl
+    # The shared bare is keyed by the FULL repo URL (`cloneUrlFor`), matching
+    # the sync/init clone path — NOT the bare remote base (`fetchUrl`).
+    let fetchUrl = cloneUrlFor(matched.get())
     if fetchUrl.len == 0:
       return 0
     let cacheRoot = defaultCacheRoot(workspaceRoot)
@@ -33118,12 +33125,16 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   # RA-15: maintain each unique shared bare at most once per pass.
   var maintainedBares = initHashSet[string]()
   for repo in resolved.repos:
+    # The shared bare is keyed by the FULL repo URL (`cloneUrlFor`), not the
+    # bare remote base (`repo.fetchUrl`) — using the base leaves the cache
+    # un-cloneable and permanently unwired for one-remote-many-repos layouts.
+    let cloneUrl = cloneUrlFor(repo)
     var entry = SharedClonesRepoReport(
       name: repo.name,
       path: repo.path,
-      fetchUrl: repo.fetchUrl)
+      fetchUrl: cloneUrl)
     let info = inspectRepoWiring(parsed.workspaceRoot, result.cacheRoot,
-      repo.path, repo.fetchUrl)
+      repo.path, cloneUrl)
     entry.sharedBarePath = info.sharedBarePath
     entry.barePresent = info.barePresent
     entry.wired = info.wired
@@ -33136,11 +33147,11 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
         result.repos.add(entry)
         continue
       # Refresh the shared bare for this URL once.
-      if not sharedBareByUrl.hasKey(repo.fetchUrl):
-        sharedBareByUrl[repo.fetchUrl] =
+      if not sharedBareByUrl.hasKey(cloneUrl):
+        sharedBareByUrl[cloneUrl] =
           refreshSharedBare(identity.binaryPath, result.cacheRoot,
-            repo.fetchUrl)
-      let refreshed = sharedBareByUrl[repo.fetchUrl]
+            cloneUrl)
+      let refreshed = sharedBareByUrl[cloneUrl]
       if not refreshed.ok:
         entry.diagnostic = "shared bare unavailable: " & refreshed.diagnostic
         result.repos.add(entry)
