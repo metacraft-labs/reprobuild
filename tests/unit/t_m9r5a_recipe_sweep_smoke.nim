@@ -45,6 +45,7 @@ import "../../recipes/packages/source/dbus-broker/repro"
 import "../../recipes/packages/source/cmake/repro"
 import "../../recipes/packages/source/coreutils/repro"
 import "../../recipes/packages/source/kernel/repro"
+import "../../recipes/packages/source/nettle/repro"
 
 # Convention-bridge fixture: a synthetic package whose ONLY dep
 # block is ``nativeBuildDeps:`` — the bridge needs to surface
@@ -108,6 +109,10 @@ suite "DSL-port M9.R.5a — 84-recipe sweep smoke":
     # rather than the legacy ``libssl`` library spelling — matches the
     # sibling source recipe at ``recipes/packages/source/openssl``.
     check "openssl >=3.0" in build
+
+  test "nettle declares GMP for libhogweed":
+    check registeredBuildDeps("nettleSource") == @["gmp >=6.2"]
+    check registeredRuntimeDeps("nettleSource") == @["gmp >=6.2"]
 
   test "convention bridge: nativeBuildDeps fold into projectInterface.toolUses":
     # The M9.R.5a bridge lives in ``packageLiteral`` —
