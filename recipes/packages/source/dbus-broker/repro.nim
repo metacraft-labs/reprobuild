@@ -123,6 +123,9 @@ package dbusBrokerSource:
     ## ``Dependency "expat" not found, tried pkgconfig``. Recipe-level
     ## buildDep on the sibling expat from-source recipe.
     "expat"
+    ## libsystemd supplies sd-bus and daemon-notification APIs used by
+    ## both broker executables.
+    "systemd >=240"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
@@ -158,8 +161,5 @@ package dbusBrokerSource:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
-    ## DT_NEEDED inspection of the linked artifacts. Empty until
-    ## the M9.R.5b per-recipe pass populates per-output ELF
-    ## interrogation.
-    discard
+    "expat"
+    "systemd >=240"
