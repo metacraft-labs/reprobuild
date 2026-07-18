@@ -37,7 +37,7 @@ type
     actions*: seq[ResourceAction]         ## in applied (topological) order
     bindings*: seq[ResourceBinding]       ## recorded bindings after apply
 
-proc topoOrder(desired: seq[ResourceInstance]): seq[ResourceInstance] =
+proc topoOrder*(desired: seq[ResourceInstance]): seq[ResourceInstance] =
   ## Deterministic topological order by `dependsOn` (edges are resource
   ## addresses). Raises on an unknown dependency or a cycle.
   var byAddr = initTable[string, ResourceInstance]()
@@ -78,7 +78,7 @@ proc topoOrder(desired: seq[ResourceInstance]): seq[ResourceInstance] =
     visit(inst.address)
   ordered
 
-proc decide(desiredDigest: Digest256; observed: ObservedState;
+proc decide*(desiredDigest: Digest256; observed: ObservedState;
             recorded: Option[ResourceBinding];
             options: ReconcileOptions): ResourceActionKind =
   ## Minimal generic decision, mirroring the home lib's `decideAction`

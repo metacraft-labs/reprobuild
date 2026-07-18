@@ -2414,6 +2414,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim",
+    binary: "build/test-bin/t_rp5b_resource_protocol_marshalling",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_solver/tests/t_clingo_smoke.nim",
     binary: "build/test-bin/t_clingo_smoke",
     defines: @[],
@@ -6096,6 +6104,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_rp3_bind_deps_and_sharing.nim",
     binary: "build/test-bin/t_rp3_bind_deps_and_sharing",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_rp5b_resource_driver_via_protocol.nim",
+    binary: "build/test-bin/t_rp5b_resource_driver_via_protocol",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

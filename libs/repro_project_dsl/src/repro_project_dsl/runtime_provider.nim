@@ -451,6 +451,36 @@ when defined(reproProviderMode):
         logicalName,
       digest: digest))
 
+  # RP5b (Provider-Runtime-Protocol-v1.md §5): the resource-driver dispatch
+  # hook. A provider binary that registers a resource TYPE (via the RP4
+  # ``resourceType`` macro / ``registerResourceProvider``) links
+  # ``repro_resources``, whose ``installResourceOpDispatch`` sets this hook so
+  # the serve loop can route a ``<typeId>.observe/plan/apply/identity/digest``
+  # InvokeEntryPoint to the registered driver. The DSL cannot import
+  # ``repro_resources`` (the dependency runs the other way — ``repro_resources``
+  # imports the DSL), so the resource lane installs itself here at module init.
+  # The hook takes the entry-point id + the marshalled args and returns a fully
+  # formed EntryPointResult; ``nil`` means "no resource lane linked", in which
+  # case an unknown entry point is the usual hard error.
+  type ResourceOpDispatch* = proc (entryPointId: string;
+                                   args: seq[BoxedValue]): EntryPointResult
+                                  {.nimcall.}
+  var resourceOpDispatchHook: ResourceOpDispatch = nil
+
+  proc setResourceOpDispatchHook*(hook: ResourceOpDispatch) =
+    ## Installed by ``repro_resources`` (RP5b) so the provider serve loop can
+    ## dispatch resource driver ops as protocol entry points.
+    resourceOpDispatchHook = hook
+
+  proc isResourceOpEntryPoint(entryPointId: string): bool =
+    ## A resource op entry point is ``<typeId>.<op>`` for one of the five
+    ## driver ops. Package/foreach/dev-env ids never collide with these
+    ## suffixes (``.root`` / ``:dev-env`` / foreach stable names).
+    for op in [".identity", ".digest", ".observe", ".plan", ".apply"]:
+      if entryPointId.endsWith(op):
+        return true
+    false
+
   proc serveProviderSession(pkg: PackageDef; buildProc: proc ();
                             foreachDefs: openArray[ProviderForeachDef];
                             foreachDispatch: proc (
@@ -496,6 +526,24 @@ when defined(reproProviderMode):
           $ord(frame.messageType))
         return 2
       let invoke = decodeInvokeEntryPoint(frame.payload)
+      # RP5b (v1 §5): a resource driver op (``<typeId>.observe`` etc.) is
+      # dispatched to the registered driver through the resource lane's hook,
+      # bypassing the ``ProviderGraphRequest`` request/fragment machinery the
+      # package/foreach entry points use — its args + result are the
+      # resource-lane BoxedValues (ResourceInstance / ObservedState /
+      # ResourceBinding), not a graph request/response.
+      if resourceOpDispatchHook != nil and
+          isResourceOpEntryPoint(invoke.entryPointId):
+        var resResult: EntryPointResult
+        try:
+          resResult = resourceOpDispatchHook(invoke.entryPointId, invoke.args)
+        except CatchableError as err:
+          resResult = EntryPointResult(ok: false, hasValue: false,
+            diagnostics: @[SessionDiagnostic(severity: "error",
+              message: err.msg)])
+        toEngine.writeFrame(smtEntryPointResult,
+          encodeEntryPointResult(resResult))
+        continue
       var result = EntryPointResult(ok: false)
       try:
         if invoke.args.len != 1:
