@@ -310,7 +310,14 @@ proc normalizeIncludePath(projectFile, raw: string): string =
         "include path escapes the manifest root via '..': '" & raw & "'")
   result = manifestRoot / raw.replace('/', DirSep)
 
+# ---- fetch-URL construction -----------------------------------------------
+
 proc getFetchUrl(fetchBase, repoName: string): string =
+  ## Build a repo's clone URL from its remote's `fetch` base and the repo's
+  ## server-side `name`, following Android-`repo` manifest semantics: the
+  ## clone URL is `<remote fetch>/<project name>` (the `name` attribute, NOT
+  ## the local checkout `path`). A `fetch` base that already points at a full
+  ## repo (ends in `.git`) is used verbatim; otherwise the `name` is appended.
   if fetchBase.len == 0:
     ""
   elif fetchBase.endsWith(".git") or fetchBase.endsWith(".git/"):
@@ -407,7 +414,7 @@ proc resolveProject*(projectFile: string): ResolvedProject =
               r.remote & "' (not declared in the project's [[remote]] table)")
         let fullUrl = getFetchUrl(remotes[r.remote], fragment.repo.name)
         resolvedRemotes.add(ResolvedRemote(name: r.name, remoteName: r.remote, fetchUrl: fullUrl))
-      
+
       let primaryName = if fragmentRemote.len > 0: fragmentRemote else: resolvedRemotes[0].name
       resolved.remoteName = primaryName
       var primaryProjectRemote = ""
@@ -417,7 +424,7 @@ proc resolveProject*(projectFile: string): ResolvedProject =
           break
       if primaryProjectRemote.len == 0:
         primaryProjectRemote = resolvedRemotes[0].remoteName
-      resolved.fetchUrl = remotes[primaryProjectRemote]
+      resolved.fetchUrl = getFetchUrl(remotes[primaryProjectRemote], fragment.repo.name)
     else:
       if resolved.remoteName notin remotes:
         raiseManifestError(absProject,
@@ -426,7 +433,7 @@ proc resolveProject*(projectFile: string): ResolvedProject =
           "fragment '" & rawInclude & "' references unknown remote '" &
             resolved.remoteName & "' (not declared in the project's [[remote]] table)")
       let fullUrl = getFetchUrl(remotes[resolved.remoteName], fragment.repo.name)
-      resolved.fetchUrl = remotes[resolved.remoteName]
+      resolved.fetchUrl = fullUrl
       resolvedRemotes.add(ResolvedRemote(name: "origin", remoteName: resolved.remoteName, fetchUrl: fullUrl))
 
     resolved.remotes = resolvedRemotes
@@ -693,7 +700,7 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
           break
       if primaryProjectRemote.len == 0:
         primaryProjectRemote = resolvedRemotes[0].remoteName
-      resolved.fetchUrl = remotes[primaryProjectRemote]
+      resolved.fetchUrl = getFetchUrl(remotes[primaryProjectRemote], fragment.repo.name)
     else:
       if resolved.remoteName notin remotes:
         raiseManifestError(absVariant,
@@ -702,7 +709,7 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
           "fragment '" & rawInclude & "' references unknown remote '" &
             resolved.remoteName & "' (not declared in the base project's [[remote]] table)")
       let fullUrl = getFetchUrl(remotes[resolved.remoteName], fragment.repo.name)
-      resolved.fetchUrl = remotes[resolved.remoteName]
+      resolved.fetchUrl = fullUrl
       resolvedRemotes.add(ResolvedRemote(name: "origin", remoteName: resolved.remoteName, fetchUrl: fullUrl))
 
     resolved.remotes = resolvedRemotes
@@ -794,8 +801,8 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
             "' which is not declared in the base project's [[remote]] table")
       let fullUrl = getFetchUrl(remotes[newRemote], result.repos[matchedIdx].name)
       result.repos[matchedIdx].remoteName = newRemote
-      result.repos[matchedIdx].fetchUrl = remotes[newRemote]
-      
+      result.repos[matchedIdx].fetchUrl = fullUrl
+
       # Sync the remotes list
       if result.repos[matchedIdx].remotes.len > 0:
         var found = false
