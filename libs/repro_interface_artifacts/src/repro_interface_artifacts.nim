@@ -2109,6 +2109,19 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
     ("VM_HARNESS_SRC", anchored([
       ".." / "vm-harness" / "src",
     ]), "vm_harness.nim"),
+    # SHM-QUEUE-MIGRATE: ``libs/repro_shm_index`` (``repro_shm_index/layout``)
+    # imports ``shm_queue/segment`` from the ``nim-shm-queue`` sibling — the
+    # extracted single MPSC ring. ``config.nims:373`` registers it via
+    # ``addPackagePath("SHM_QUEUE_SRC", …, useDevShellFallback = true)``, so it
+    # is on the NORMAL build ``--path`` but was absent here — any producer whose
+    # ``repro.nim`` transitively pulls ``repro_shm_index`` (e.g. via
+    # ``import repro_resources``) failed to interface-extract with
+    # ``cannot open file: shm_queue/segment``. Mirror config.nims so the
+    # extractor's path set matches the build's: prefer ``$SHM_QUEUE_SRC``, then
+    # the sibling checkout.
+    ("SHM_QUEUE_SRC", anchored([
+      ".." / "nim-shm-queue" / "src",
+    ]), "shm_queue.nim"),
     ("REPRO_TEST_ADAPTERS_SRC", anchored([
       ".." / "reprobuild-test-adapters" / "src",
     ]), "repro_test_adapters" / "test_runner.nim"),

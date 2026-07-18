@@ -12768,7 +12768,8 @@ type
       ## must fail loudly at macro expansion (SC-9), not silently no-op.
     ptckContract
       ## The producer exports a consumable typed contract: its declared
-      ## ``executable … cli:`` command schema and/or ``library`` blocks.
+      ## ``executable … cli:`` command schema and/or ``library`` blocks
+      ## and/or ``resourceType`` resource contracts (RP5a).
 
   ProducerTypedContract* = object
     ## SC-8: a workspace producer's export-by-default typed contract, keyed by
@@ -12794,10 +12795,19 @@ type
       ## ``toolActionWrapperCode`` consumes to emit per-command typed wrappers.
     publicLibraries*: seq[InterfaceLibrary]
       ## The exported ``library`` blocks — export-by-default.
+    publicResources*: seq[InterfaceResource]
+      ## RP5a (the SC-9 analog for resource types): the exported
+      ## ``resourceType`` contracts — each ``InterfaceResource``'s stable
+      ## ``typeId``, determinism class, typed ``attr`` schema, and the
+      ## observe/plan/apply entry-point ids. Export-by-default: a producer
+      ## declaring a ``resourceType`` block exposes it here WITHOUT its
+      ## driver/implementation closure crossing the boundary — the consumer
+      ## imports the typed wrapper + contract only (compile-time, mode-
+      ## agnostic; the driver-invocation-via-protocol is RP5b).
 
 proc hasTypedContract*(contract: ProducerTypedContract): bool =
-  ## True iff the producer exports at least one ``executable`` or ``library``
-  ## the consumer can bind a typed accessor against.
+  ## True iff the producer exports at least one ``executable``, ``library``,
+  ## or ``resourceType`` (RP5a) the consumer can bind a typed accessor against.
   contract.kind == ptckContract
 
 proc typedContractCommands*(contract: ProducerTypedContract;
@@ -12812,6 +12822,46 @@ proc typedContractCommands*(contract: ProducerTypedContract;
     if exe.exportName == exportName:
       for cmd in exe.commands:
         result.add(cmd.name)
+      return
+
+proc hasResourceContract*(contract: ProducerTypedContract): bool =
+  ## RP5a: True iff the producer exports at least one ``resourceType``
+  ## resource contract (regardless of whether it also exports an
+  ## ``executable`` / ``library``).
+  contract.publicResources.len > 0
+
+proc typedContractResourceTypeIds*(contract: ProducerTypedContract):
+    seq[string] =
+  ## RP5a: the ``typeId``s of the resource contracts a consumer may bind a
+  ## typed resource wrapper against (the SC-9 analog of
+  ## ``typedContractCommands``, at the resource-type grain). A renamed /
+  ## dropped resource type therefore no longer appears here, so a stale
+  ## consumer bind fails to resolve.
+  for res in contract.publicResources:
+    result.add(res.typeId)
+
+proc typedContractResource*(contract: ProducerTypedContract;
+                            typeId: string): InterfaceResource =
+  ## RP5a: the exported resource contract for ``typeId`` — the typed
+  ## attribute schema + observe/plan/apply entry-point ids a consumer's
+  ## typed resource wrapper is emitted from. Returns a resource with an
+  ## empty ``typeId`` when the producer declares no resource type with that
+  ## id, so a renamed / mistyped resource id yields no binding (the RP5a
+  ## falsifiability end).
+  for res in contract.publicResources:
+    if res.typeId == typeId:
+      return res
+  InterfaceResource()
+
+proc typedContractResourceAttrs*(contract: ProducerTypedContract;
+                                 typeId: string): seq[string] =
+  ## RP5a: the ordered attribute NAMES of the resource contract ``typeId``
+  ## — the wrapper formals a consumer binds. Renaming an ``attr`` in the
+  ## producer shifts this set (the RP5a falsifiability end).
+  for res in contract.publicResources:
+    if res.typeId == typeId:
+      for attr in res.attributes:
+        result.add(attr.name)
       return
 
 proc discoverProducerSourceRoot*(selector: string;
@@ -12897,21 +12947,157 @@ proc resolveProducerTypedContract*(selector: string;
     try:
       extractInterfaceFromModule(projectFile, ifacePath, stubPath,
         reprobuildLibraryWorkDir(), scratchRoot / "work", requireStub = false)
-    except CatchableError:
-      # The producer's interface could not be extracted — surface as
-      # "no discoverable typed contract" rather than a hard failure, so a
-      # malformed / non-reprobuild sibling does not crash the consumer's macro
-      # expansion; SC-9 then falls back to the bundled-stdlib / local import.
+    except CatchableError as ex:
+      # The producer's interface could not be extracted. Keep the caller's
+      # graceful behavior — surface as "no discoverable typed contract"
+      # (``ptckNoProducer``) rather than a hard failure, so a malformed /
+      # non-reprobuild sibling does not crash the consumer's macro expansion;
+      # SC-9 then falls back to the bundled-stdlib / local import.
+      #
+      # But do NOT swallow it silently: a swallowed extraction failure that
+      # silently yields ``ptckNoProducer`` is a footgun (RP5a review) — the
+      # next debugger must SEE why a producer that plainly declares an
+      # ``executable`` / ``library`` / ``resourceType`` resolved to "no
+      # producer". Emit a diagnostic naming the selector, the project file, and
+      # the underlying error so the failure is visible without changing the
+      # graceful outcome. ``resolveProducerTypedContract`` is called both at
+      # runtime (CLI) AND at consumer compile time (the RP5a ``uses:`` macro
+      # path runs it in the Nim VM, where ``stderr`` is unavailable) — so route
+      # the diagnostic through ``echo`` under ``nimvm`` and ``stderr`` at
+      # runtime. Either way the failure is no longer swallowed silently.
+      let diag = "repro: interface extraction for producer '" &
+        selector & "' (" & projectFile & ") failed; treating as no " &
+        "discoverable typed contract: " & ex.msg
+      when nimvm:
+        echo diag
+      else:
+        stderr.writeLine(diag)
       return
   result.projectName = artifact.projectInterface.projectName
   result.publicExecutables = artifact.projectInterface.publicExecutables
   result.publicLibraries = artifact.projectInterface.publicLibraries
-  # Export-by-default verdict: a producer declaring an ``executable`` and/or a
-  # ``library`` exposes a typed contract; one declaring NEITHER exposes none.
-  if result.publicExecutables.len > 0 or result.publicLibraries.len > 0:
+  # RP5a (the SC-9 analog for resource types): project the producer's
+  # ``resourceType`` contracts off the SAME shipped ``ProjectInterface`` the
+  # extractor lifts (``publicResources`` — RP4's ``InterfaceResource``),
+  # verbatim, alongside the executables/libraries. Only the resource CONTRACT
+  # crosses (typeId + determinism + typed attr schema + observe/plan/apply
+  # entry-point ids); the producer's driver/implementation is NOT in the
+  # interface artifact, so it does not enter the consumer (RP5a: no closure).
+  result.publicResources = artifact.projectInterface.publicResources
+  # Export-by-default verdict: a producer declaring an ``executable``, a
+  # ``library``, and/or a ``resourceType`` exposes a typed contract; one
+  # declaring NONE of them exposes none.
+  if result.publicExecutables.len > 0 or result.publicLibraries.len > 0 or
+      result.publicResources.len > 0:
     result.kind = ptckContract
   else:
     result.kind = ptckNoContract
+
+# ---------------------------------------------------------------------------
+# RP5a — the resource-contract consumer-import ACCESSOR EMITTER (the SC-9
+# accessor-emission analog for resource types).
+#
+# For ``executable``/``library`` contracts, SC-9's ``usesImportCode`` widens
+# consumption by IMPORTING the producer's ``repro.nim`` module wholesale — cheap
+# because a ``toolActionWrapperCode`` producer module carries only pure wrapper
+# procs. A ``resourceType`` producer module is different: its expansion emits a
+# module-init ``registerResourceProvider(... driver: <driver>)`` that references
+# the producer's DRIVER, and module-init side effects are NOT dead-code
+# eliminated — so importing it whole would drag the producer's driver /
+# implementation closure into the consumer, exactly what the RP5a gate forbids.
+#
+# Instead RP5a emits the consumer's typed resource surface FROM THE EXTRACTED
+# ``InterfaceResource`` SCHEMA (``resolveProducerTypedContract`` above) — the
+# contract-only projection, which by construction contains no driver. The
+# emitted source is a driver-free typed wrapper (an attrs record synthesised
+# from the exported ``attr`` schema + a wrapper proc lowering to
+# ``resource(typeId, ...)``) plus the ``typeId`` / entry-point-id constants a
+# consumer binds against. It compiles into a consumer that links
+# ``repro_resources`` but NOT the producer's driver, so the resource CONTRACT
+# crosses at compile time while the IMPLEMENTATION stays behind (the driver
+# invocation is reconnected over the protocol in RP5b).
+# ---------------------------------------------------------------------------
+
+proc resourceAttrsTypeName*(typeId: string): string =
+  ## The synthesised consumer-side attrs record name for a resource
+  ## ``typeId`` — a filesystem/identifier-safe rendering (dots/dashes → ``_``)
+  ## suffixed ``Attrs``. Deterministic: two consumers of the same producer
+  ## resource type synthesise the same name.
+  var ident = ""
+  for ch in typeId:
+    if ch.isAlphaNumeric: ident.add(ch)
+    else: ident.add('_')
+  # Title-case the leading char so the record type reads as a type.
+  if ident.len > 0 and ident[0] in {'a'..'z'}:
+    ident[0] = char(ord(ident[0]) - 32)
+  ident & "Attrs"
+
+proc resourceWrapperProcName*(typeId: string): string =
+  ## The synthesised consumer-side typed wrapper proc name — the LAST dotted
+  ## segment of the ``typeId`` (e.g. ``vm_harness.container`` → ``container``),
+  ## dash-sanitised. This is the ``producer.<wrapper>(address, attrs…)`` verb a
+  ## consumer binds. Derived from the ``typeId`` (part of the exported
+  ## contract) so it stays stable across the interface boundary without adding
+  ## a wrapper-name field to the codec.
+  let segs = typeId.split('.')
+  var last = if segs.len > 0: segs[^1] else: typeId
+  var ident = ""
+  for ch in last:
+    if ch.isAlphaNumeric: ident.add(ch)
+    else: ident.add('_')
+  if ident.len == 0: ident = "resource"
+  ident
+
+proc emitResourceContractAccessors*(contract: ProducerTypedContract): string =
+  ## RP5a: emit the driver-free Nim source that imports a producer's resource
+  ## CONTRACTS into a consumer as a typed surface. For each exported
+  ## ``InterfaceResource`` it emits:
+  ##
+  ##   * ``type <TypeId>Attrs = object`` with one field per exported ``attr``
+  ##     (name + nimType) — the consumer-side typed attribute record;
+  ##   * ``proc <wrapper>(address; <attr>: <type>…; dependsOn): ResourceRef``
+  ##     lowering to ``resource(<typeId>, address, <Attrs>(…), dependsOn)`` —
+  ##     the same low-level surface the producer's own wrapper lowers to, but
+  ##     synthesised from the schema (no driver reference);
+  ##   * ``const <wrapper>TypeId* = "<typeId>"`` and the observe/plan/apply
+  ##     entry-point-id consts — the contract metadata a consumer / RP5b binds.
+  ##
+  ## The producer's driver body is never referenced, so linking this source
+  ## does not pull the producer's implementation closure. The emitted module
+  ## needs ``repro_resources`` (for ``resource`` / ``ResourceRef``) in scope.
+  result = ""
+  for res in contract.publicResources:
+    if res.typeId.len == 0:
+      continue
+    let attrsType = resourceAttrsTypeName(res.typeId)
+    let wrapper = resourceWrapperProcName(res.typeId)
+    # attrs record. An object with no fields is written with no body (Nim
+    # rejects a ``discard`` body on a type section), so emit the field lines
+    # only when the resource declares ``attr``s.
+    result.add("type\n  " & attrsType & "* = object\n")
+    for attr in res.attributes:
+      result.add("    " & attr.name & "*: " & attr.nimType & "\n")
+    # typed wrapper proc
+    var formals = @["address: string"]
+    for attr in res.attributes:
+      formals.add(attr.name & ": " & attr.nimType)
+    formals.add("dependsOn: seq[string] = @[]")
+    result.add("proc " & wrapper & "*(" & formals.join("; ") &
+      "): ResourceRef =\n")
+    var ctorFields: seq[string] = @[]
+    for attr in res.attributes:
+      ctorFields.add(attr.name & ": " & attr.name)
+    let ctor = attrsType & "(" & ctorFields.join(", ") & ")"
+    result.add("  resource(" & escape(res.typeId) & ", address, " &
+      ctor & ", dependsOn)\n")
+    # contract metadata
+    result.add("const " & wrapper & "TypeId* = " & escape(res.typeId) & "\n")
+    result.add("const " & wrapper & "ObserveEntrypoint* = " &
+      escape(res.entrypoints.observe) & "\n")
+    result.add("const " & wrapper & "PlanEntrypoint* = " &
+      escape(res.entrypoints.plan) & "\n")
+    result.add("const " & wrapper & "ApplyEntrypoint* = " &
+      escape(res.entrypoints.apply) & "\n")
 
 # ---------------------------------------------------------------------------
 # Workspace-Manifest-Optional MO-9 — the unified locked-dependency populator.

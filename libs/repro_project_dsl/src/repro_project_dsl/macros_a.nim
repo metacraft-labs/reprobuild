@@ -2240,6 +2240,37 @@ proc workspaceProducerModule(selector, consumerSourceFile: string): string =
       return candidate[0 ..< candidate.len - ".nim".len]
   ""
 
+proc workspaceProducerDeclaresResourceType(selector,
+                                           consumerSourceFile: string): bool =
+  ## RP5a — compile-time detection of whether a ``uses:`` selector names a
+  ## workspace sibling that declares a ``resourceType`` (RP4) block. A resource
+  ## producer cannot cross the boundary via SC-9's wholesale ``import`` of the
+  ## producer ``repro.nim``: the ``resourceType`` macro emits a module-init
+  ## ``registerResourceProvider(... driver: <driver>)`` referencing the
+  ## producer's DRIVER, and module-init side effects are NOT dead-code
+  ## eliminated — importing it whole would drag the driver / implementation
+  ## closure into the consumer, exactly what the RP5a gate forbids. So the
+  ## caller routes a resource-declaring sibling through the ACCESSOR-EMISSION
+  ## branch (``emitResourceContractAccessors`` off the extracted contract, which
+  ## carries no driver) instead of the module-import branch.
+  ##
+  ## The detection is a hermetic macro-time scan of the sibling's ``repro.nim``
+  ## for a top-level ``resourceType`` declaration — the same file-inspection
+  ## grain ``workspaceProducerModule`` above already uses. It is deliberately
+  ## conservative: any line whose first token is ``resourceType`` counts.
+  let modulePath = workspaceProducerModule(selector, consumerSourceFile)
+  if modulePath.len == 0:
+    return false
+  let sourcePath = modulePath & ".nim"
+  if not fileExists(sourcePath):
+    return false
+  for rawLine in readFile(sourcePath).splitLines():
+    let line = rawLine.strip()
+    if line.startsWith("resourceType\"") or line == "resourceType" or
+        line.startsWith("resourceType ") or line.startsWith("resourceType("):
+      return true
+  false
+
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   proc isBundledStdlibSelector(selector: string): bool =
     # M29 (Provisioning catalog cleanup): autoconf, automake, bun,
@@ -2388,12 +2419,29 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # consumption too.
   var producerModules: seq[(string, string, string)] = @[]
     # (alias, selector, absolute sibling repro module path WITH .nim)
+  # RP5a — the RESOURCE-CONSUMER-IMPORT branch. A ``uses:`` selector naming a
+  # sibling that declares a ``resourceType`` (RP4) is routed HERE instead of
+  # the wholesale-module-import branch below: importing a resource producer's
+  # ``repro.nim`` would drag its ``registerResourceProvider(... driver: …)``
+  # module-init closure into the consumer (the driver / implementation), which
+  # the RP5a gate forbids. Instead we splice the driver-free typed surface
+  # emitted FROM THE EXTRACTED ``InterfaceResource`` schema
+  # (``emitResourceContractAccessors(resolveProducerTypedContract(...))`` in
+  # ``repro_cli_support``) — the contract-only projection, no driver by
+  # construction. Collected here (selector) and emitted after the module loop.
+  var resourceProducerSelectors: seq[string] = @[]
   for useDef in pkg.toolUses:
     let selector = useDef.packageSelector
     if isBundledStdlibSelector(selector):
       continue
     let producerModule = workspaceProducerModule(selector, consumerSourceFile)
     if producerModule.len == 0:
+      continue
+    if workspaceProducerDeclaresResourceType(selector, consumerSourceFile):
+      # RP5a: resource producer — DO NOT import its module (driver closure).
+      # Route to the accessor-emission branch; skip the module-import path.
+      if resourceProducerSelectors.find(selector) < 0:
+        resourceProducerSelectors.add(selector)
       continue
     let moduleAlias = selectorModuleName(selector) & "_workspace_module"
     var seen = false
@@ -2480,6 +2528,124 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       result.add("when compiles(" & moduleAlias &
         ".reprobuildPackageMarker()):\n")
       result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")
+
+  # RP5a — emit the RESOURCE-CONTRACT accessors for every resource-declaring
+  # sibling collected above. The producer's driver never crosses: the emitted
+  # source is the driver-free typed wrapper + contract synthesised from the
+  # extracted ``InterfaceResource`` schema.
+  #
+  # ``resolveProducerTypedContract`` / ``emitResourceContractAccessors`` live in
+  # ``repro_cli_support`` (which imports ``repro_project_dsl``, so this module
+  # cannot import it back), AND ``resolveProducerTypedContract`` runs the
+  # interface extractor by SPAWNING ``nim c`` — neither the subprocess spawn nor
+  # its ``getCurrentDir`` calls are legal in the Nim macro VM. So we run the
+  # resolve+emit in a REAL out-of-VM process at macro-expansion time via
+  # ``staticExec``: write a tiny generator module that imports
+  # ``repro_cli_support`` and prints ``emitResourceContractAccessors(
+  # resolveProducerTypedContract(selector, workspaceRoot))``, compile+run it
+  # (``nim c -r``) with the CWD set to the reprobuild repo root (so its
+  # ``config.nims`` puts every ``libs/<lib>/src`` on ``--path``), and splice the
+  # captured driver-free source INLINE into the consumer's scope. Nothing here
+  # imports the producer module, so the producer's ``registerResourceProvider(
+  # ... driver: …)`` module-init closure never crosses (RP5a: no closure).
+  #
+  # RP5c FOLLOW-UP (documented limitation — do NOT rely on this for RP5c). The
+  # generator resolution below depends on the repo-root walk finding reprobuild's
+  # ``config.nims`` (which wires the lib ``--path``). That holds for the RP5a
+  # hermetic gate, where the consumer lives UNDER the reprobuild tree. It does
+  # NOT hold for RP5c's real infra recipe, whose consumer is OUTSIDE the
+  # reprobuild checkout: the walk finds no ``config.nims``, ``repoRoot`` stays
+  # empty, the generator falls back to ``$TMPDIR`` where Nim's config walk never
+  # sees ``config.nims``, and ``import repro_cli_support`` fails to resolve — so
+  # no accessors are spliced. RP5c MUST pass the resource-accessor path flags
+  # (the lib ``--path`` set) EXPLICITLY into this generator compile rather than
+  # depending on the repo-root walk. Tracked in the RP5c milestone.
+  #
+  # RP5c FOLLOW-UP (a second documented limitation). A sibling that declares BOTH
+  # a ``resourceType`` AND an ``executable``/``library`` is routed here and the
+  # ``continue`` above SKIPS the SC-9 wholesale-module import — so such a
+  # sibling's exec/lib typed wrappers do NOT cross alongside its resource
+  # contract. Acceptable for the RP5a resource-only gate (and for vm-harness,
+  # whose providers are resource-shaped); a mixed producer needing BOTH surfaces
+  # to cross is deferred (emit BOTH the accessor splice AND the module import for
+  # such a sibling).
+  if resourceProducerSelectors.len > 0:
+    # Locate the reprobuild repo root by walking up from the consumer's source
+    # file until a ``config.nims`` (next to ``reprobuild.nimble``) is found —
+    # the dir whose ``config.nims`` wires the lib ``--path`` set the generator
+    # compile needs. ``consumerSourceFile`` is absolute (``lineInfoObj``), so no
+    # ``getCurrentDir`` is required.
+    var repoRoot = ""
+    block findRepoRoot:
+      var dir = consumerSourceFile.parentDir
+      for _ in 0 ..< 12:
+        if dir.len == 0:
+          break
+        if fileExists(dir / "config.nims") and
+            fileExists(dir / "reprobuild.nimble"):
+          repoRoot = dir
+          break findRepoRoot
+        let parent = dir.parentDir
+        if parent == dir:
+          break
+        dir = parent
+    var h = 2166136261u32
+    for c in consumerSourceFile:
+      h = h xor ord(c).uint32
+      h = h * 16777619u32
+    let consumerKey = "r_" & $h
+    # The generator must be compiled from UNDER the reprobuild repo tree so Nim
+    # loads the repo ``config.nims`` (which wires every ``libs/<lib>/src`` onto
+    # ``--path``, letting the generator resolve ``import repro_cli_support``).
+    # Nim's config walk keys off the COMPILED FILE's directory chain — not the
+    # process CWD — so a generator under ``$TMPDIR`` never sees ``config.nims``.
+    # Anchor it under ``<repoRoot>/build/nimcache`` (mirrors the RP5a consumer
+    # test's own generated-consumer placement). Fall back to $TMPDIR only when
+    # the repo root could not be located (best effort).
+    let accDir =
+      if repoRoot.len > 0:
+        repoRoot / "build" / "nimcache" / "rp5a-resource-accessors" / consumerKey
+      else:
+        getTempDir() / "repro-resource-accessors" / consumerKey
+    if not dirExists(accDir):
+      createDir(accDir)
+    # Anchor the consumer's workspace root at its own source dir so the sibling
+    # ``../<selector>`` discovery in ``resolveProducerTypedContract`` finds the
+    # producer (mirrors ``findSiblingProjectFile``).
+    let workspaceRoot = consumerSourceFile.parentDir
+    # The emitted accessors use bare ``resource(...)`` / ``ResourceRef`` from
+    # ``repro_resources`` (which ``repro_project_dsl`` does NOT re-export), so
+    # bring it into the consumer's scope. This is the resource RUNTIME surface,
+    # NOT the producer's driver — importing it does not pull any producer
+    # implementation.
+    result.add("import repro_resources\n")
+    for selector in resourceProducerSelectors:
+      let genPath = accDir / ("rp5a_gen_" & selectorModuleName(selector) & ".nim")
+      let genSrc =
+        "import repro_cli_support\n" &
+        "stdout.write(emitResourceContractAccessors(\n" &
+        "  resolveProducerTypedContract(" & escape(selector) & ", " &
+        escape(workspaceRoot) & ")))\n"
+      writeFile(genPath, genSrc)
+      # ``staticExec`` runs a real process (out of the macro VM), so the
+      # generator's ``nim c`` extractor subprocess + ``getCurrentDir`` are fine.
+      # ``staticExec`` has no working-dir parameter, so embed a ``cd`` into the
+      # command to run with CWD = repoRoot (its ``config.nims`` supplies the lib
+      # ``--path`` the generator compile needs). Fall back to the compiler's own
+      # CWD when the repo root could not be located.
+      let nimCmd =
+        "nim c -r --hints:off --warnings:off " &
+        "--nimcache:" & quoteShell(accDir / ("nc_" & selectorModuleName(selector))) &
+        " " & quoteShell(genPath)
+      let genCmd =
+        if repoRoot.len > 0: "cd " & quoteShell(repoRoot) & " && " & nimCmd
+        else: nimCmd
+      let accessorSrc = staticExec(genCmd)
+      when defined(reproDebugProducerImports):
+        result.add("# [resource-import] selector=" & selector & "\n")
+      # Splice the captured driver-free typed surface inline.
+      result.add(accessorSrc)
+      result.add("\n")
 
 proc parseInterfaceParam(node: NimNode;
                          defaultPlacement = capAfterSubcommand): CliParamDef =
