@@ -1254,6 +1254,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim",
+    binary: "build/test-bin/t_rp4_resource_codec_roundtrip",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_launch_plan/tests/t_codec_smoke.nim",
     binary: "build/test-bin/t_codec_smoke",
     defines: @[],
@@ -2392,6 +2400,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_resources/tests/t_resource_provider_lane.nim",
     binary: "build/test-bin/t_resource_provider_lane",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_resources/tests/t_rp4_resource_type_macro.nim",
+    binary: "build/test-bin/t_rp4_resource_type_macro",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

@@ -67,6 +67,58 @@ type
       ## non-standard layout is known from the fetched interface alone.
     location*: SourceLocation
 
+  InterfaceResourceDeterminism* = enum
+    ## RP4: the determinism class carried on an ``InterfaceResource``,
+    ## a self-contained mirror (by ordinal) of
+    ## ``repro_home_resources``'s ``ResourceDeterminism`` so the codec
+    ## does not pull the home-resources / blake3 closure into the
+    ## interface-artifacts library. The ``resourceType`` DSL macro maps
+    ## the generic-lane ``ResourceDeterminism`` onto this enum at
+    ## interface-lifting time. Ordinals MUST stay aligned with
+    ## ``ResourceDeterminism`` (rdStrong=0 … rdVolatile=3).
+    irdStrong        ## bytewise reproducible; cross-machine substitutable
+    irdWeak          ## reproducible up to declared noise
+    irdHostBound     ## realization is machine-specific
+    irdVolatile      ## inherently non-reproducible
+
+  InterfaceResourceAttr* = object
+    ## RP4: one typed attribute of a resource contract — the field name
+    ## and its Nim type, as declared by an ``attr <name>: <type>`` line
+    ## in the ``resourceType`` block. Mirrors ``InterfaceParam`` in
+    ## spirit: it is the typed-wrapper parameter surface a consumer
+    ## binds against, so renaming a field (or changing its type) SHIFTS
+    ## the exported schema and the interface fingerprint.
+    name*: string
+    nimType*: string
+    location*: SourceLocation
+
+  InterfaceResourceEntrypoints* = object
+    ## RP4: the driver ops a resource provider exposes as protocol entry
+    ## points (v1 §5). Each is the ``providerEntrypointId`` a consumer's
+    ## resource op lowers to an ``InvokeEntryPoint`` against. ``plan`` is
+    ## carried as a first-class protocol op even though the generic
+    ## native driver folds planning into ``reconcileResources`` — the
+    ## contract shape is the protocol surface, not the native vtable.
+    identity*: string
+    digest*: string
+    observe*: string
+    plan*: string
+    apply*: string
+
+  InterfaceResource* = object
+    ## RP4 (Provider-Runtime-Protocol-v1 §5): a resource type crossing
+    ## the interface boundary as a typed contract, alongside
+    ## ``InterfaceExecutable`` / ``InterfaceLibrary``. Carries the stable
+    ## ``typeId``, the determinism class (part of the contract so a
+    ## consumer can reason about a resource edge WITHOUT invoking the
+    ## driver), the typed attribute schema, and the entry-point
+    ## descriptors for the driver ops.
+    typeId*: string
+    determinism*: InterfaceResourceDeterminism
+    attributes*: seq[InterfaceResourceAttr]
+    entrypoints*: InterfaceResourceEntrypoints
+    location*: SourceLocation
+
   InterfaceNixProvisioning* = object
     packageName*: string
     selector*: string
@@ -123,6 +175,11 @@ type
     defaultToolProvisioning*: string
     publicExecutables*: seq[InterfaceExecutable]
     publicLibraries*: seq[InterfaceLibrary]
+    publicResources*: seq[InterfaceResource]
+      ## RP4 (Provider-Runtime-Protocol-v1 §5): resource types this
+      ## package exposes as typed contracts, lifted from ``resourceType``
+      ## declarations. Encoded in the v12 codec AFTER ``publicLibraries``
+      ## and BEFORE ``toolUses``; v<12 readers treat it as empty.
     toolUses*: seq[InterfaceToolUse]
     publicSignatureDependencies*: seq[string]
     location*: SourceLocation
@@ -234,8 +291,21 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 11'u16
-    ## v11 (current): Cross-Repo-Source-Consumption SC-11 (§4.2a.4) adds
+  EnvelopeVersion = 12'u16
+    ## v12 (current): RP4 (Provider-Runtime-Protocol-v1 §5) adds
+    ##                ``ProjectInterface.publicResources`` — resource
+    ##                types lifted from ``resourceType`` declarations.
+    ##                Encoded as a ``u32`` count + per-entry
+    ##                ``InterfaceResource`` rows appended to the interface
+    ##                payload AFTER the ``publicLibraries`` block and
+    ##                BEFORE the ``toolUses`` block, matching the source
+    ##                field order. v11 readers reject v12 envelopes (the
+    ##                ``version > EnvelopeVersion`` check); v12 readers
+    ##                accept v<12 by treating ``publicResources`` as an
+    ##                empty seq (``decodeInterfacePayload`` gates the read
+    ##                on ``version >= 12``), mirroring the v8→v9
+    ##                ``publicLibraries`` precedent.
+    ## v11: Cross-Repo-Source-Consumption SC-11 (§4.2a.4) adds
     ##                ``InterfaceLibrary.exportedPath`` — the producer-relative
     ##                Nim library source root threaded onto a consumer's
     ##                ``nim c --path:``. Encoded as one string appended AFTER
@@ -500,6 +570,41 @@ proc readLibrary(bytes: openArray[byte]; pos: var int;
     result.exportedPath = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
+proc writeResource(outp: var seq[byte]; res: InterfaceResource) =
+  outp.writeString(res.typeId)
+  outp.writeByte(byte(ord(res.determinism)))
+  outp.writeString(res.entrypoints.identity)
+  outp.writeString(res.entrypoints.digest)
+  outp.writeString(res.entrypoints.observe)
+  outp.writeString(res.entrypoints.plan)
+  outp.writeString(res.entrypoints.apply)
+  outp.writeLocation(res.location)
+  outp.writeU32Le(uint32(res.attributes.len))
+  for attr in res.attributes:
+    outp.writeString(attr.name)
+    outp.writeString(attr.nimType)
+    outp.writeLocation(attr.location)
+
+proc readResource(bytes: openArray[byte]; pos: var int): InterfaceResource =
+  result.typeId = readString(bytes, pos)
+  let determinism = readByte(bytes, pos)
+  if determinism > byte(ord(irdVolatile)):
+    raiseEnvelopeError(eeMalformed, "invalid interface resource determinism")
+  result.determinism = InterfaceResourceDeterminism(determinism)
+  result.entrypoints.identity = readString(bytes, pos)
+  result.entrypoints.digest = readString(bytes, pos)
+  result.entrypoints.observe = readString(bytes, pos)
+  result.entrypoints.plan = readString(bytes, pos)
+  result.entrypoints.apply = readString(bytes, pos)
+  result.location = readLocation(bytes, pos)
+  let attrCount = int(readU32Le(bytes, pos))
+  result.attributes = newSeq[InterfaceResourceAttr](attrCount)
+  for i in 0 ..< attrCount:
+    result.attributes[i] = InterfaceResourceAttr(
+      name: readString(bytes, pos),
+      nimType: readString(bytes, pos),
+      location: readLocation(bytes, pos))
+
 proc writeNixProvisioning(outp: var seq[byte];
                           provisioning: InterfaceNixProvisioning) =
   outp.writeString(provisioning.packageName)
@@ -663,6 +768,15 @@ proc encodeInterfacePayload*(value: ProjectInterface;
     result.writeU32Le(uint32(value.publicLibraries.len))
     for lib in value.publicLibraries:
       result.writeLibrary(lib, version)
+  # v12 (RP4): publicResources are encoded AFTER publicLibraries and
+  # BEFORE toolUses so the field order matches the ``ProjectInterface``
+  # object literal. v<12 envelopes encode no resources block at all;
+  # ``decodeInterfacePayload`` gates this read on ``version >= 12'u16``
+  # so v11 on-disk artifacts load cleanly under the v12 reader.
+  if version >= 12'u16:
+    result.writeU32Le(uint32(value.publicResources.len))
+    for res in value.publicResources:
+      result.writeResource(res)
   result.writeU32Le(uint32(value.toolUses.len))
   for useDef in value.toolUses:
     result.writeToolUse(useDef)
@@ -687,6 +801,13 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
     result.publicLibraries = newSeq[InterfaceLibrary](libCount)
     for i in 0 ..< libCount:
       result.publicLibraries[i] = readLibrary(bytes, pos, version)
+  # v12 added publicResources between libraries and toolUses. v<12
+  # envelopes have no resource block — leave the seq empty.
+  if version >= 12'u16:
+    let resCount = int(readU32Le(bytes, pos))
+    result.publicResources = newSeq[InterfaceResource](resCount)
+    for i in 0 ..< resCount:
+      result.publicResources[i] = readResource(bytes, pos)
   let useCount = int(readU32Le(bytes, pos))
   result.toolUses = newSeq[InterfaceToolUse](useCount)
   for i in 0 ..< useCount:
@@ -1070,6 +1191,32 @@ proc toProjectInterface*(pkg: PackageDef;
       kind: lib.kind,
       exportedPath: lib.exportedPath,
       location: SourceLocation(file: lib.sourceFile, line: lib.sourceLine)))
+  # RP4 (Provider-Runtime-Protocol-v1 §5): fold every ``resourceType``
+  # declaration into the interface. Resource types are declared at
+  # module scope (like ``registerResourceProvider``), not lexically
+  # inside a ``package`` block, so they live in a module-global registry
+  # rather than on ``PackageDef``; the extractor attributes the whole
+  # set to the (single) project being lifted. ``determinismOrd`` maps
+  # ordinal-for-ordinal onto ``InterfaceResourceDeterminism`` (both
+  # enums share the rdStrong=0 … rdVolatile=3 ordering).
+  for rt in registeredResourceTypeInterfaces():
+    var res = InterfaceResource(
+      typeId: rt.typeId,
+      determinism: InterfaceResourceDeterminism(rt.determinismOrd),
+      entrypoints: InterfaceResourceEntrypoints(
+        identity: rt.identityEntrypoint,
+        digest: rt.digestEntrypoint,
+        observe: rt.observeEntrypoint,
+        plan: rt.planEntrypoint,
+        apply: rt.applyEntrypoint),
+      location: SourceLocation(file: rt.sourceFile, line: rt.sourceLine))
+    for attr in rt.attributes:
+      res.attributes.add(InterfaceResourceAttr(
+        name: attr.name,
+        nimType: attr.nimType,
+        location: SourceLocation(file: attr.sourceFile,
+          line: attr.sourceLine)))
+    result.publicResources.add(res)
 
 proc sameSourceFile(a, b: string): bool =
   if a.len == 0 or b.len == 0:

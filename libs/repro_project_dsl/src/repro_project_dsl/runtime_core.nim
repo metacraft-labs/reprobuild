@@ -306,6 +306,32 @@ proc registerPackageDef*(pkg: PackageDef) {.dynOrStatic.} =
 proc registeredPackages*(): seq[PackageDef] {.dynOrStatic.} =
   registry
 
+var resourceTypeInterfaceRegistry: seq[ResourceTypeInterfaceDef] = @[]
+  ## RP4 (Provider-Runtime-Protocol-v1 §5): module-global set of resource
+  ## types declared via the ``resourceType`` macro, collected for
+  ## interface lifting. A plain global (mirror of ``registry``), NOT a
+  ## threadvar: the DSL body evaluates on one thread and the interface
+  ## extractor reads it on the same thread. Resource types are declared
+  ## at module scope (like ``registerResourceProvider``), not lexically
+  ## inside a ``package`` block, so the interface extractor folds the
+  ## whole registry into the enclosing project's interface.
+
+proc resetResourceTypeInterfaceRegistry*() {.dynOrStatic.} =
+  resourceTypeInterfaceRegistry.setLen(0)
+
+proc registerResourceTypeInterface*(def: ResourceTypeInterfaceDef)
+    {.dynOrStatic.} =
+  ## Append one resource-type interface record. Emitted by the
+  ## ``resourceType`` macro alongside the ``registerResourceProvider`` /
+  ## ``registerExtension`` / typed-wrapper emissions.
+  resourceTypeInterfaceRegistry.add(def)
+
+proc registeredResourceTypeInterfaces*(): seq[ResourceTypeInterfaceDef]
+    {.dynOrStatic.} =
+  ## The resource-type interface records collected so far, in
+  ## declaration order. Consumed by ``toProjectInterface``.
+  resourceTypeInterfaceRegistry
+
 proc resetWorkspaceDepRegistry*() {.dynOrStatic.} =
   ## Reset the Mode 3 ``depends_on`` registry. Test helpers call this
   ## between scenarios so registry entries don't leak across cases.

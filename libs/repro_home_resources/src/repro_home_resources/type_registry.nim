@@ -29,6 +29,16 @@ type
     ## (`Composable-Resource-Types.md` "Determinism"). Slice 1 only
     ## POPULATES this field correctly; soft-rebuild consumption is a
     ## later slice.
+    ##
+    ## RP4 INVARIANT: `repro_interface_artifacts`'s
+    ## `InterfaceResourceDeterminism` (`irdStrong .. irdVolatile`) is an
+    ## ordinal-aligned mirror of this enum — it deliberately does NOT
+    ## import this module (to keep the blake3 / home-resources closure
+    ## out of the interface-artifacts codec), and maps across by
+    ## `int(ord(...))`. The `rdStrong=0 .. rdVolatile=3` ordering below
+    ## MUST stay in lockstep with that mirror; reordering or inserting a
+    ## case here without updating the mirror silently corrupts a lifted
+    ## `InterfaceResource.determinism`.
     rdStrong        ## bytewise reproducible; cross-machine substitutable
     rdWeak          ## reproducible up to declared noise; default for tools
     rdHostBound     ## realization is machine-specific (a snapshot, a

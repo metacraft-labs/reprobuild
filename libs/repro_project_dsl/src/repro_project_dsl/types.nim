@@ -160,6 +160,34 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  ResourceAttrDef* = object
+    ## RP4: one ``attr <name>: <type>`` declaration inside a
+    ## ``resourceType`` block — the typed-wrapper parameter surface the
+    ## interface lifting turns into an ``InterfaceResourceAttr``.
+    name*: string
+    nimType*: string
+    sourceFile*: string
+    sourceLine*: int
+
+  ResourceTypeInterfaceDef* = object
+    ## RP4 (Provider-Runtime-Protocol-v1 §5): the compile-time record a
+    ## ``resourceType`` block lowers to for interface lifting. Mirrors
+    ## ``ExecutableDef`` / ``LibraryDef``: a self-contained, codec-free
+    ## value the interface extractor projects into an
+    ## ``InterfaceResource``. ``determinism`` is stored as the ordinal of
+    ## the generic-lane ``ResourceDeterminism`` (rdStrong=0 … rdVolatile=3)
+    ## so this module stays free of the home-resources import.
+    typeId*: string
+    determinismOrd*: int
+    attributes*: seq[ResourceAttrDef]
+    identityEntrypoint*: string
+    digestEntrypoint*: string
+    observeEntrypoint*: string
+    planEntrypoint*: string
+    applyEntrypoint*: string
+    sourceFile*: string
+    sourceLine*: int
+
   PackageUseDef* = object
     rawConstraint*: string
     packageSelector*: string

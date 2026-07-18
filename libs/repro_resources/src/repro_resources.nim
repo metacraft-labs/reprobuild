@@ -25,8 +25,10 @@ import repro_resources/instance
 import repro_resources/collect
 import repro_resources/reconcile
 import repro_resources/marshal
+import repro_resources/resource_type
 
 export instance
 export collect
 export reconcile
 export marshal
+export resource_type
