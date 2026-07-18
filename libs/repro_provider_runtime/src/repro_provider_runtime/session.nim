@@ -39,9 +39,13 @@ type
   ProviderSessionError* = object of CatchableError
 
   SessionMessageType* = enum
-    ## The v1 §3 message set (MVP subset). BindDependencies is RP3.
+    ## The v1 §3 message set. BindDependencies (RP3) wires dependency handles
+    ## into a provider session between the ProviderManifest handshake and the
+    ## first InvokeEntryPoint.
     smtEngineHello = 1'u16
     smtProviderManifest = 2'u16
+    smtBindDependencies = 5'u16
+    smtBindDependenciesAck = 6'u16
     smtInvokeEntryPoint = 3'u16
     smtEntryPointResult = 4'u16
 
@@ -81,6 +85,45 @@ type
     hasValue*: bool
     evaluationInputs*: seq[GraphEvaluationInput]
     diagnostics*: seq[SessionDiagnostic]
+
+  DependencyBinding* = object
+    ## v1 §4 BindDependencies entry: the engine wires ONE dependency handle
+    ## into a consumer's provider session under a ``logicalDependencyName``.
+    ##
+    ## The engine resolves the dependency's realization FIRST (opening/REUSING
+    ## the dependency's provider session through the shared pool, keyed by
+    ## ProviderArtifactId — this is where two consumers of the same library
+    ## version converge on ONE launched dependency provider), then hands the
+    ## consumer the dependency's identities plus its already-computed result.
+    ## The consumer provider looks bindings up by ``logicalName``; it NEVER
+    ## discovers a sibling through ambient/global state. The provider does not
+    ## know whether the handle is backed by a local process, a remote worker,
+    ## or (as in the v1 synchronous-stdio case) a precomputed static result.
+    logicalName*: string
+    providerArtifactId*: string
+      ## The dependency's RP1 content-addressed id — the same across two
+      ## consumers that resolve the same dependency version.
+    providerSessionKey*: string
+      ## The dependency's RP2 ProviderSessionKey — the live session both
+      ## consumers share.
+    entryPointId*: string
+      ## The dependency entry point whose result is bound (v1: the dependency
+      ## root fragment producer).
+    hasResult*: bool
+    result*: BoxedValue
+      ## The dependency's already-computed result the consumer invokes
+      ## "through" (v1 synchronous-stdio: the engine precomputes it on the
+      ## shared session and binds the value; a future transport lets the
+      ## provider call back live). Gated by ``hasResult``.
+    evaluationInputs*: seq[GraphEvaluationInput]
+      ## The dependency's observed inputs (files read, locks), carried so the
+      ## consumer edge invalidates when the dependency's realization changes
+      ## (v1 §3 observed-input propagation).
+
+  BindDependencies* = object
+    ## v1 §4 BindDependencies message. Sent by the engine after the
+    ## ProviderManifest handshake and before InvokeEntryPoint.
+    bindings*: seq[DependencyBinding]
 
 const
   ## The stdio-serve invocation flag the provider binary recognizes to enter
@@ -244,6 +287,46 @@ proc decodeEntryPointResult*(bytes: openArray[byte]): EntryPointResult =
     result.diagnostics[i].severity = readString(bytes, pos)
     result.diagnostics[i].message = readString(bytes, pos)
 
+proc writeEvalInputSeq(outp: var seq[byte]; inputs: openArray[GraphEvaluationInput]) =
+  outp.writeU32Le(uint32(inputs.len))
+  for input in inputs:
+    outp.writeEvalInput(input)
+
+proc readEvalInputSeq(bytes: openArray[byte]; pos: var int): seq[GraphEvaluationInput] =
+  let count = int(readU32Le(bytes, pos))
+  result = newSeq[GraphEvaluationInput](count)
+  for i in 0 ..< count:
+    result[i] = readEvalInput(bytes, pos)
+
+proc encodeBindDependencies*(value: BindDependencies): seq[byte] =
+  result.writeU32Le(uint32(value.bindings.len))
+  for binding in value.bindings:
+    result.writeString(binding.logicalName)
+    result.writeString(binding.providerArtifactId)
+    result.writeString(binding.providerSessionKey)
+    result.writeString(binding.entryPointId)
+    result.add(if binding.hasResult: 1'u8 else: 0'u8)
+    if binding.hasResult:
+      result.writeBoxedValue(binding.result)
+    result.writeEvalInputSeq(binding.evaluationInputs)
+
+proc decodeBindDependencies*(bytes: openArray[byte]): BindDependencies =
+  var pos = 0
+  let count = int(readU32Le(bytes, pos))
+  result.bindings = newSeq[DependencyBinding](count)
+  for i in 0 ..< count:
+    result.bindings[i].logicalName = readString(bytes, pos)
+    result.bindings[i].providerArtifactId = readString(bytes, pos)
+    result.bindings[i].providerSessionKey = readString(bytes, pos)
+    result.bindings[i].entryPointId = readString(bytes, pos)
+    if pos >= bytes.len:
+      raiseEnvelopeError(eeMalformed, "truncated dependency binding result flag")
+    result.bindings[i].hasResult = bytes[pos] != 0'u8
+    inc pos
+    if result.bindings[i].hasResult:
+      result.bindings[i].result = readBoxedValue(bytes, pos)
+    result.bindings[i].evaluationInputs = readEvalInputSeq(bytes, pos)
+
 # --------------------------------------------------------------------------
 # Framing (v1 §2): u32le length + u16le messageType + payload
 # --------------------------------------------------------------------------
@@ -288,8 +371,10 @@ proc readFrame*(stream: Stream):
   let rest = readExact(stream, length)
   var rp = 0
   let typeWord = readU16Le(rest, rp)
-  if typeWord < uint16(ord(smtEngineHello)) or
-      typeWord > uint16(ord(smtEntryPointResult)):
+  if typeWord notin [uint16(ord(smtEngineHello)),
+      uint16(ord(smtProviderManifest)), uint16(ord(smtBindDependencies)),
+      uint16(ord(smtBindDependenciesAck)), uint16(ord(smtInvokeEntryPoint)),
+      uint16(ord(smtEntryPointResult))]:
     raiseSession("unknown provider session message type " & $typeWord)
   result.messageType = SessionMessageType(typeWord)
   result.payload = rest[2 ..< rest.len]
@@ -368,9 +453,17 @@ type
     toChild: Stream
     fromChild: Stream
     open: bool
+    boundDependencies*: seq[DependencyBinding]
+      ## The dependency bindings the engine last wired into this session (v1
+      ## §4). Carried on the session so a consumer's invoke can forward them to
+      ## the provider and so the engine can fold each binding's
+      ## ``evaluationInputs`` onto the consumer edge (observed-input
+      ## propagation, v1 §3).
 
   ProviderHandle* = object
-    ## Opaque handle the engine passes to ``invokeEntryPoint``.
+    ## Opaque handle the engine passes to ``invokeEntryPoint``. The provider
+    ## does not know whether it is backed by a local process, a remote worker,
+    ## or a precomputed static result (v1 §4).
     session*: ProviderSession
 
   ProviderSessionPool* = ref object
@@ -468,12 +561,71 @@ proc openProviderSession*(pool: ProviderSessionPool;
   pool.sessions.add(session)
   ProviderHandle(session: session)
 
+proc sessionKey*(handle: ProviderHandle): string =
+  ## The ProviderSessionKey backing this handle — the identity two consumers
+  ## of the same dependency version converge on (v1 §4).
+  if handle.session == nil: "" else: handle.session.key
+
+proc providerArtifactId*(handle: ProviderHandle): string =
+  if handle.session == nil: "" else: handle.session.providerArtifactId
+
+proc resolveDependencyBinding*(dependency: ProviderHandle;
+                               logicalName, entryPointId: string;
+                               dependencyResult: EntryPointResult):
+    DependencyBinding =
+  ## Build the wire ``DependencyBinding`` for a dependency the engine has
+  ## already resolved. ``dependency`` is the SHARED session handle (from
+  ## ``openProviderSession`` on the dependency's ProviderArtifactId, so two
+  ## consumers converge on one launched process), and ``dependencyResult`` is
+  ## the result the engine obtained by invoking the dependency on that shared
+  ## session — carried into the consumer plus the dependency's observed
+  ## ``evaluationInputs`` for consumer-edge invalidation (v1 §3).
+  DependencyBinding(
+    logicalName: logicalName,
+    providerArtifactId: dependency.providerArtifactId,
+    providerSessionKey: dependency.sessionKey,
+    entryPointId: entryPointId,
+    hasResult: dependencyResult.hasValue,
+    result: dependencyResult.value,
+    evaluationInputs: dependencyResult.evaluationInputs)
+
+proc bindDependencies*(consumer: ProviderHandle;
+                       bindings: openArray[DependencyBinding]) =
+  ## v1 §4: wire dependency handles into the CONSUMER's provider session. Sent
+  ## after the handshake, before any InvokeEntryPoint. The engine owns the
+  ## bindings; the provider receives them and never discovers siblings through
+  ## ambient state. The bindings are also retained on the session so the
+  ## engine can fold each dependency's observed inputs onto the consumer edge
+  ## (v1 §3).
+  let session = consumer.session
+  if session == nil or not session.open:
+    raiseSession("provider session is not open")
+  session.boundDependencies = @bindings
+  session.toChild.writeFrame(smtBindDependencies,
+    encodeBindDependencies(BindDependencies(bindings: @bindings)))
+  let frame = session.fromChild.readFrame()
+  if frame.messageType != smtBindDependenciesAck:
+    raiseSession("expected BindDependenciesAck from provider, got frame type " &
+      $ord(frame.messageType))
+
+proc boundDependencyInputs*(handle: ProviderHandle): seq[GraphEvaluationInput] =
+  ## v1 §3: the union of every bound dependency's observed inputs. The engine
+  ## folds these onto the consumer edge so a change to a dependency's
+  ## realization invalidates the consumer.
+  if handle.session == nil:
+    return
+  for binding in handle.session.boundDependencies:
+    for input in binding.evaluationInputs:
+      result.add(input)
+
 proc invokeEntryPoint*(handle: ProviderHandle; entryPointId: string;
                        args: openArray[BoxedValue];
                        dependencyBindings: openArray[BoxedValue] = []):
     EntryPointResult =
   ## v1 §3: send InvokeEntryPoint over the live session and read the
-  ## EntryPointResult back. Synchronous (one request → one response).
+  ## EntryPointResult back. Synchronous (one request → one response). The
+  ## dependency bindings previously wired via ``bindDependencies`` remain in
+  ## effect on the session; the provider reads them from its binding table.
   let session = handle.session
   if session == nil or not session.open:
     raiseSession("provider session is not open")
@@ -486,7 +638,22 @@ proc invokeEntryPoint*(handle: ProviderHandle; entryPointId: string;
   if frame.messageType != smtEntryPointResult:
     raiseSession("expected EntryPointResult from provider, got frame type " &
       $ord(frame.messageType))
-  decodeEntryPointResult(frame.payload)
+  var res = decodeEntryPointResult(frame.payload)
+  # v1 §3 observed-input propagation: fold the bound dependencies' observed
+  # inputs onto the consumer edge so the consumer invalidates when a
+  # dependency's realization changes. Deduplicated by (kind, identity, digest).
+  for binding in session.boundDependencies:
+    for depInput in binding.evaluationInputs:
+      var seen = false
+      for existing in res.evaluationInputs:
+        if existing.kind == depInput.kind and
+            existing.identity == depInput.identity and
+            existing.digest == depInput.digest:
+          seen = true
+          break
+      if not seen:
+        res.evaluationInputs.add(depInput)
+  res
 
 proc closeSession(session: ProviderSession) =
   if not session.open:

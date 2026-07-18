@@ -381,6 +381,76 @@ when defined(reproProviderMode):
     ## InvokeEntryPoint arg BoxedValue through the shared registry.
     boxGraphRequest(request)
 
+  # RP3 (Provider-Runtime-Protocol-v1.md §4): the dependency bindings the
+  # engine wired into THIS provider session via BindDependencies. A build body
+  # reaches a dependency ONLY through this table — there is no ambient/global
+  # sibling discovery. The table is (re)set by the serve loop when a
+  # BindDependencies frame arrives.
+  var providerDependencyBindings: seq[DependencyBinding] = @[]
+
+  proc setProviderDependencyBindings(bindings: seq[DependencyBinding]) =
+    providerDependencyBindings = bindings
+
+  proc boundDependencyResult*(logicalName: string): ProviderGraphResponse =
+    ## Provider-side (v1 §4): resolve a dependency the engine bound under
+    ## ``logicalName`` into the dependency's already-computed result. Raises a
+    ## clean error when the engine did NOT bind that name — the provider must
+    ## NOT fall back to ambient discovery.
+    for binding in providerDependencyBindings:
+      if binding.logicalName == logicalName:
+        if not binding.hasResult:
+          raise newException(ValueError,
+            "dependency '" & logicalName & "' is bound but carries no result")
+        return unboxGraphResponse(binding.result)
+    raise newException(ValueError,
+      "no dependency bound under logical name '" & logicalName &
+      "' (providers receive handles from the engine; ambient sibling " &
+      "discovery is not permitted)")
+
+  proc boundDependencyNames*(): seq[string] =
+    ## The logical names the engine bound for this session (v1 §4).
+    for binding in providerDependencyBindings:
+      result.add(binding.logicalName)
+
+  proc useBoundDependency*(logicalName: string) {.dynOrStatic.} =
+    ## Consumer-side (v1 §3+§4): reach a dependency the engine bound under
+    ## ``logicalName`` and record its realization as a
+    ## ``gevProviderDependencyResult`` evaluation input on the CURRENT fragment.
+    ## The identity is the dependency's ProviderArtifactId + entry point; the
+    ## digest is the dependency's fragment digest, so a change to the
+    ## dependency's realization re-keys this consumer input. Raises cleanly if
+    ## the engine did not bind ``logicalName`` (no ambient sibling discovery).
+    ##
+    ## The DSL runs a ``build:`` body once at module-init (to pre-populate the
+    ## shell registry) with NO active invocation and NO bindings; this call is
+    ## a no-op there (``activeProviderProjectRoot`` is empty) so init does not
+    ## spuriously demand a binding. During a REAL invocation the project root
+    ## is set, so an unbound dependency raises exactly as the contract requires.
+    if activeProviderProjectRoot().len == 0:
+      return
+    var binding: DependencyBinding
+    var found = false
+    for candidate in providerDependencyBindings:
+      if candidate.logicalName == logicalName:
+        binding = candidate
+        found = true
+        break
+    if not found:
+      raise newException(ValueError,
+        "no dependency bound under logical name '" & logicalName &
+        "' (providers receive handles from the engine; ambient sibling " &
+        "discovery is not permitted)")
+    let response = boundDependencyResult(logicalName)
+    let digest =
+      if response.kind == pskGraphResult: response.fragment.fragmentDigest
+      elif response.kind == pskDevEnvResult: response.devEnv.providerArtifactId
+      else: binding.providerSessionKey
+    providerEvaluationInputRegistry.add(GraphEvaluationInput(
+      kind: gevProviderDependencyResult,
+      identity: binding.providerArtifactId & ":" & binding.entryPointId & ":" &
+        logicalName,
+      digest: digest))
+
   proc serveProviderSession(pkg: PackageDef; buildProc: proc ();
                             foreachDefs: openArray[ProviderForeachDef];
                             foreachDispatch: proc (
@@ -412,6 +482,15 @@ when defined(reproProviderMode):
       except ProviderSessionError:
         # Clean EOF at a frame boundary = engine tore the session down.
         break
+      if frame.messageType == smtBindDependencies:
+        # RP3 (v1 §4): the engine wires dependency handles into this session.
+        # Store them for the build body to reach via ``boundDependencyResult``,
+        # then acknowledge so the engine knows the bind took effect before it
+        # invokes an entry point that needs a dependency.
+        let bindMsg = decodeBindDependencies(frame.payload)
+        setProviderDependencyBindings(bindMsg.bindings)
+        toEngine.writeFrame(smtBindDependenciesAck, @[])
+        continue
       if frame.messageType != smtInvokeEntryPoint:
         stderr.writeLine("repro provider serve: expected InvokeEntryPoint, got " &
           $ord(frame.messageType))

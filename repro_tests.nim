@@ -6078,6 +6078,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_rp3_bind_deps_and_sharing.nim",
+    binary: "build/test-bin/t_rp3_bind_deps_and_sharing",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_develop_all_clones_deps_at_locked_revisions.nim",
     binary: "build/test-bin/t_develop_all_clones_deps_at_locked_revisions",
     defines: @[],
