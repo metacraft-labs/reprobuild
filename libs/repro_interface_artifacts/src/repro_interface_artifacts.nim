@@ -2633,6 +2633,62 @@ proc nixPrefix(namePattern, header: string;
         return path
   ""
 
+const InterfaceLibSubdirs = [
+  "lib",
+  "lib64",
+  "lib/x86_64-linux-gnu",
+  "lib/aarch64-linux-gnu",
+]
+  ## Mirror of `config.nims`'s `LibSubdirs`: the standard lib subdirectories
+  ## a `-L` search must probe (plain `lib`, `lib64`, Debian-multiarch triples)
+  ## so a bare prefix like `/usr` resolves regardless of host layout.
+
+proc firstExistingPrefixLibDir(prefix: string;
+                               dylibNames: openArray[string]): string =
+  ## Mirror of `config.nims`'s `firstExistingPrefixLibDir`: return the
+  ## absolute libdir under `prefix` that holds one of `dylibNames`, or "".
+  for libSub in InterfaceLibSubdirs:
+    let candidate = prefix / libSub
+    for dylibName in dylibNames:
+      if fileExists(extendedPath(candidate / dylibName)):
+        return candidate
+  ""
+
+proc firstExistingLibDir(candidates: openArray[string];
+                         dylibNames: openArray[string]): string =
+  ## Mirror of `config.nims`'s `firstExistingLibDir`: probe each candidate
+  ## directly (it may already be a libdir like `/usr/lib64`) and then walk
+  ## the standard lib subdirectories so a candidate like `/usr` resolves on
+  ## `/usr/lib`, `/usr/lib64`, or a Debian-multiarch host.
+  for candidate in candidates:
+    let path = candidate.strip()
+    if path.len == 0:
+      continue
+    for dylibName in dylibNames:
+      if fileExists(extendedPath(path / dylibName)):
+        return path
+    let resolved = firstExistingPrefixLibDir(path, dylibNames)
+    if resolved.len > 0:
+      return resolved
+  ""
+
+proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
+  ## Mirror of `config.nims`'s `nixLibDir`: scan `/nix/store` for a store
+  ## path matching `namePattern` whose libdir holds one of `dylibNames`.
+  if not dirExists(extendedPath("/nix/store")):
+    return ""
+  let needle = namePattern.replace("*", "")
+  for kind, path in walkDir("/nix/store"):
+    if kind != pcDir:
+      continue
+    let tail = splitPath(path).tail
+    if needle.len > 0 and tail.find(needle) < 0:
+      continue
+    let libDir = firstExistingLibDir([path], dylibNames)
+    if libDir.len > 0:
+      return libDir
+  ""
+
 proc addExternalPackagePath(flags: var seq[string]; workDir, envName: string;
                             candidates: openArray[string]; marker: string) =
   ## Replay one of ``config.nims``'s ``addPackagePath`` resolutions as an
@@ -2840,6 +2896,38 @@ proc externalHashFlags(workDir = ""): seq[string] =
   if clingoPrefix.len > 0:
     result.add("--passL:-L" & (clingoPrefix / "lib"))
     result.add("--passL:-Wl,-rpath," & (clingoPrefix / "lib"))
+
+  # sqlite: `config.nims`'s non-Windows/non-macOS block links `-lsqlite3`
+  # (pulled in transitively by the cas / lock store deps that
+  # `repro_project_dsl` drags in) and adds the resolving `-L` + `-rpath`.
+  # The provider-compile / interface-extract edge emits the `-lsqlite3`
+  # via those transitive deps but, before this block, added no `-L`, so the
+  # link failed with `ld: cannot find -lsqlite3` (RP5c1). Mirror config.nims's
+  # exact resolution (SQLITE_LIBDIR / SQLITE_PREFIX / standard system libdirs /
+  # nix store) so any provider the normal build links, this edge links too.
+  # The Windows branch above has already returned; guard only macOS, which
+  # ships libsqlite3 in the SDK and needs no explicit `-L` (matching
+  # config.nims's `when not defined(windows) and not defined(macosx)`).
+  when not defined(macosx):
+    let sqliteLibDir = block:
+      let direct = firstExistingLibDir(
+        [
+          getEnv("SQLITE_LIBDIR"),
+          getEnv("SQLITE_PREFIX"),
+          "/usr",
+          "/usr/local",
+          "/usr/lib",
+          "/usr/lib64",
+          "/usr/lib/x86_64-linux-gnu",
+        ],
+        ["libsqlite3.so", "libsqlite3.a"])
+      if direct.len > 0:
+        direct
+      else:
+        nixLibDir("*-sqlite-*", ["libsqlite3.so", "libsqlite3.a"])
+    if sqliteLibDir.len > 0:
+      result.add("--passL:-L" & sqliteLibDir)
+      result.add("--passL:-Wl,-rpath," & sqliteLibDir)
 
 proc consumerCompilePathFlags*(workDir = getCurrentDir()): seq[string] =
   ## ``--path:`` / ``--passC:`` / ``--passL:`` flags a downstream module
