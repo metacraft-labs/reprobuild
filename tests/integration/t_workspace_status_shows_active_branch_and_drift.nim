@@ -470,3 +470,54 @@ suite "M12 — repro workspace status (active branch + drift)":
       check libBStashEntry["modifiedCount"].getInt() == 0
       check libBStashEntry["aheadCount"].getInt() == 0
       check libBStashEntry["unmergedBranches"].len == 0
+
+  test "test_m12_status_ambiguous_trunk_ref_does_not_leak_git_warning":
+    ## Regression: when the trunk ref name resolves ambiguously — e.g. a repo
+    ## that also has a *tag* named `main` alongside the `main` branch — then
+    ## `git branch --no-merged main` prints
+    ##   "warning: refname 'main' is ambiguous."
+    ## on stderr. runGit merges stderr into stdout (execCmdEx), so that
+    ## diagnostic previously leaked into `unmergedBranches` and surfaced as a
+    ## bogus `unmerged=warning: refname 'main' is ambiguous.` field. The parser
+    ## must reject the diagnostic (a real branch name has no whitespace/':')
+    ## while still reporting the genuine unmerged branch.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      # NB: keep "ambiguous" out of the fixture slug — it lands in the temp
+      # workspace path, which appears in status output and would false-match.
+      let fx = setupFixture(gitBin, "tag-shadows-trunk")
+      defer: removeDir(fx.scratch)
+
+      cloneAll(gitBin, fx)
+      check invokeLock(fx).code == 0
+
+      let libB = fx.workspaceRoot / "lib-b"
+      # A genuine unmerged branch that MUST still be reported.
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " checkout -b feature")
+      writeFile(libB / "feature.txt", "feature-content\n")
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " add feature.txt")
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " commit -m feature")
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " checkout main")
+      # Make bare `main` ambiguous: a tag named `main` next to the branch.
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " tag main")
+
+      let res = invokeStatus(fx)
+      check res.code == 0
+
+      # The genuine branch survives; the git "refname ... is ambiguous" warning
+      # must NOT leak into the unmerged field (the pre-fix symptom was
+      # `unmerged=warning: refname 'main' is ambiguous.`).
+      check "unmerged=feature" in res.output
+      check "unmerged=warning" notin res.output
+
+      let report = readReport(fx)
+      let libBEntry = findRepo(report, "lib-b")
+      check not libBEntry.isNil
+      check libBEntry["unmergedBranches"].len == 1
+      for b in libBEntry["unmergedBranches"]:
+        let s = b.getStr()
+        check s == "feature"
+        check ' ' notin s
+        check ':' notin s

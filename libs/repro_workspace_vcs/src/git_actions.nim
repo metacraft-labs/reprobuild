@@ -1274,9 +1274,22 @@ proc queryGitState*(query: GitQueryAction;
       let unmergedRes = runGit(payload, ["-C", query.repoPath, "branch", "--no-merged", trunkBranch])
       if unmergedRes.exitCode == 0:
         for rawLine in unmergedRes.output.splitLines():
-          let line = rawLine.strip().replace("* ", "").strip()
-          if line.len > 0 and not line.startsWith("(") and line != trunkBranch:
-            unmergedBranches.add(line)
+          var line = rawLine.strip()
+          # Strip git's current-branch ("* ") / worktree ("+ ") markers.
+          if line.startsWith("* ") or line.startsWith("+ "):
+            line = line[2 .. ^1].strip()
+          # `git branch --no-merged` prints one branch name per line, but runGit
+          # merges stderr into stdout (execCmdEx), so a git diagnostic can land
+          # here — e.g. "warning: refname '<trunk>' is ambiguous." emitted when
+          # the trunk name resolves ambiguously (a repo whose branch is literally
+          # named `heads/main` makes bare `main` ambiguous). A real branch name
+          # contains no whitespace or ':' and never starts with '(' (the
+          # detached-HEAD note), so reject anything else as non-branch noise.
+          if line.len == 0 or line == trunkBranch: continue
+          if line.startsWith("(") or line.contains(' ') or
+             line.contains('\t') or line.contains(':'):
+            continue
+          unmergedBranches.add(line)
 
     result = GitQueryResult(
       status: if diagnostic.len == 0: gqsOk else: gqsFailed,
