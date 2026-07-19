@@ -32,9 +32,9 @@
 ##        * every outcome reports ``bytesFetched > 0`` — payload bytes actually
 ##          traversed the socket from the remote server;
 ##        * total bytes fetched across the closure > 0;
-##        * for every member, the CAS blob materialised locally decodes as the
-##          ``rbcarc-v1`` archive and re-extracts BYTE-IDENTICAL to the original
-##          on-disk prefix tree that was published on the client before upload.
+##        * for every member, the CAS blob materialised locally is extracted by
+##          the shared version-aware rbcarc reader and is BYTE-IDENTICAL to the
+##          original on-disk prefix tree published by the client before upload.
 ##
 ## Exit 0 on success; non-zero (with a diagnostic on stderr) on any failure.
 ## The NixOS test asserts exit 0.
@@ -45,10 +45,6 @@ import ../../libs/repro_binary_cache_client/src/repro_binary_cache_client
 import ../../libs/repro_binary_cache_server/src/repro_binary_cache_server/types as bcsTypes
 import ../../libs/repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
-const
-  ArchiveMagic = "RBCA"
-  ArchiveVersion = 1'u32
-
 type
   Member = object
     name: string
@@ -58,58 +54,6 @@ type
     ## Absolute paths (relative to prefixDir) → original bytes, so the
     ## substitute-side re-extraction can be compared byte-for-byte.
     files: Table[string, string]
-
-# ---------------------------------------------------------------------------
-# rbcarc-v1 reader (mirror of the CLI/library archive layout) — used to prove
-# the materialised CAS blob decodes back to the exact published tree.
-# ---------------------------------------------------------------------------
-
-proc readU32LE(buf: openArray[byte]; pos: var int): uint32 =
-  if pos + 4 > buf.len:
-    raise newException(IOError, "rbcarc truncated reading u32")
-  result = 0'u32
-  for i in 0 ..< 4:
-    result = result or (uint32(buf[pos + i]) shl uint32(i * 8))
-  inc pos, 4
-
-proc readU64LE(buf: openArray[byte]; pos: var int): uint64 =
-  if pos + 8 > buf.len:
-    raise newException(IOError, "rbcarc truncated reading u64")
-  result = 0'u64
-  for i in 0 ..< 8:
-    result = result or (uint64(buf[pos + i]) shl uint64(i * 8))
-  inc pos, 8
-
-proc decodeArchive(archive: openArray[byte]): Table[string, string] =
-  ## Returns rel-path → bytes for every entry in the rbcarc-v1 archive.
-  result = initTable[string, string]()
-  if archive.len < 4 + 4 + 4:
-    raise newException(IOError, "rbcarc too short: " & $archive.len)
-  for i in 0 ..< 4:
-    if archive[i] != byte(ArchiveMagic[i]):
-      raise newException(IOError, "rbcarc magic mismatch at byte " & $i)
-  var pos = 4
-  let ver = readU32LE(archive, pos)
-  if ver != ArchiveVersion:
-    raise newException(IOError, "rbcarc version mismatch: got " & $ver)
-  let count = readU32LE(archive, pos)
-  for _ in 0 ..< count:
-    let pathLen = int(readU32LE(archive, pos))
-    if pos + pathLen > archive.len:
-      raise newException(IOError, "rbcarc truncated reading path")
-    var rel = newString(pathLen)
-    for i in 0 ..< pathLen:
-      rel[i] = char(archive[pos + i])
-    inc pos, pathLen
-    discard readU32LE(archive, pos)          # mode (unused for byte-compare)
-    let size = readU64LE(archive, pos)
-    if pos + int(size) > archive.len:
-      raise newException(IOError, "rbcarc truncated reading body for " & rel)
-    var data = newString(int(size))
-    for i in 0 ..< int(size):
-      data[i] = char(archive[pos + i])
-    inc pos, int(size)
-    result[rel] = data
 
 # ---------------------------------------------------------------------------
 # Member construction: on-disk prefix trees with deterministic content.
@@ -288,11 +232,18 @@ proc main() =
     var asBytes = newSeq[byte](raw.len)
     for j, ch in raw:
       asBytes[j] = byte(ch)
-    let extracted =
-      try: decodeArchive(asBytes)
-      except IOError as e:
-        die("member " & member.name & " CAS blob is not a valid rbcarc: " & e.msg)
-        return
+    let extractedDir = work / "verified" / member.name
+    removeDir(extractedDir)
+    try:
+      extractPrefix(asBytes, extractedDir)
+    except IOError as e:
+      die("member " & member.name & " CAS blob is not a valid rbcarc: " & e.msg)
+      return
+    var extracted = initTable[string, string]()
+    for path in walkDirRec(extractedDir):
+      if fileExists(path):
+        let rel = relativePath(path, extractedDir).replace('\\', '/')
+        extracted[rel] = readFile(path)
     # Same set of files.
     var wantKeys = toSeq(member.files.keys)
     var gotKeys = toSeq(extracted.keys)
