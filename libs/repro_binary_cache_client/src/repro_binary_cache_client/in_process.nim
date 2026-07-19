@@ -116,7 +116,7 @@ type
     kind: ArchiveEntryKind
 
 # ---------------------------------------------------------------------------
-# Archive writer (mirror of the CLI's deterministic ``rbcarc-v1`` writer).
+# Archive writer (the shared deterministic ``rbcarc-v2`` writer).
 #
 # Kept in the library so engine-side callers don't pay the cost of
 # shelling out to the CLI; the CLI's local copy delegates here.
@@ -193,7 +193,7 @@ proc fileModeOctal*(path: string): uint32 =
 
 proc packPrefix*(prefix: string): seq[byte] =
   ## Builds the deterministic archive bytes for the prefix tree. Same
-  ## ``rbcarc-v1`` layout the CLI documents at the top of
+  ## ``rbcarc-v2`` layout the CLI documents at the top of
   ## ``repro_binary_cache_client_cli.nim``.
   let entries = walkPrefix(prefix)
   result = newSeqOfCap[byte](4096)
@@ -246,10 +246,9 @@ proc packSingleFilePrefix*(prefixPath: string): seq[byte] =
 # substitute path (``repro_profile_compile.apply_build_actions``) needs
 # to MATERIALISE a substituted prefix archive from CAS back into a
 # target directory, byte-identically, the same way the CLI's
-# ``substitute`` command does. Lifting the reader into the library (next
-# to ``packPrefix``) lets the apply dispatcher share the exact
-# extraction logic without shelling out to the CLI. The CLI keeps its
-# own copy for now; both agree on the ``rbcarc-v1`` layout.
+# ``substitute`` command does. Keeping the reader in the library next to
+# ``packPrefix`` lets every verifier and apply dispatcher share the exact
+# version-aware extraction logic without shelling out to the CLI.
 # ---------------------------------------------------------------------------
 
 proc readU32LE(buf: openArray[byte]; pos: var int): uint32 =
@@ -428,7 +427,7 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
   ##      compare against ``entryKeyHex``; hard-fail on mismatch.
   ##      Without this gate, a stale baked-in hex on the caller side
   ##      would silently publish under the wrong key.
-  ##   2. Pack the prefix (directory → ``rbcarc-v1`` archive; single
+  ##   2. Pack the prefix (directory → ``rbcarc-v2`` archive; single
   ##      file → one-entry archive). Determinism mirrors the CLI's
   ##      ``packPrefix``.
   ##   3. BLAKE3-256 the archive bytes; populate the ``PayloadObject``
