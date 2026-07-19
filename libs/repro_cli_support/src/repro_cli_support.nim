@@ -32189,17 +32189,21 @@ proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     return composeManifestLayersFromFile(workspaceToml)
   if parsed.projectName.len == 0:
-    # Allow a metadata-only workspace.toml to supply the project name.
+    # Allow a metadata-only workspace.toml to supply the project name. Only the
+    # read of workspace.toml is guarded here: if resolving the *named* project
+    # fails (e.g. its manifest references an undeclared remote), that error must
+    # propagate rather than be masked by the "requires a project" message below.
+    var recordedProject = ""
     if fileExists(workspaceToml):
       try:
-        let recordedProject =
+        recordedProject =
           readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-        if recordedProject.len > 0:
-          var withProject = parsed
-          withProject.projectName = recordedProject
-          return resolveWorkspaceListProject(withProject)
       except WorkspaceManifestParseError:
-        discard
+        recordedProject = ""
+    if recordedProject.len > 0:
+      var withProject = parsed
+      withProject.projectName = recordedProject
+      return resolveWorkspaceListProject(withProject)
     raise newException(ValueError,
       "`repro workspace list` requires either `.repro/workspace.toml` " &
         "or a <project> argument; neither was present at " &
