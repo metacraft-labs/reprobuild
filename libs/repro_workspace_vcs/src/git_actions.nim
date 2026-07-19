@@ -749,6 +749,18 @@ proc executeMergeFf(payload: GitVcsPayload;
     return failed("merge-ff-failed",
       "git merge --ff-only exited " & $res.exitCode & ": " &
         res.output.trimmed)
+  # After the fast-forward the superproject's submodule gitlinks may point at
+  # new commits. Bring already-checked-out submodules in line so the
+  # superproject does not end up dirty with a stale ``M <submodule>`` gitlink
+  # (which would, e.g., block ``repro branch``). Only touches submodules that
+  # are already initialized (no ``--init``), so it never materializes a checkout
+  # the operator did not ask for; a no-op when there are no submodules. Best
+  # effort — a submodule-update failure must NOT fail the fast-forward itself
+  # (the superproject IS fast-forwarded), mirroring how ``git pull`` treats
+  # submodule recursion.
+  if fileExists(target / ".gitmodules"):
+    discard runGit(payload,
+      ["-C", target, "submodule", "update", "--recursive"])
   let headRes = resolveHeadSha(payload, target)
   if not headRes.ok:
     return failed("merge-ff-head-probe-failed", headRes.diagnostic)

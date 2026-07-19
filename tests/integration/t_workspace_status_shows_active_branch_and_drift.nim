@@ -521,3 +521,33 @@ suite "M12 — repro workspace status (active branch + drift)":
         check s == "feature"
         check ' ' notin s
         check ':' notin s
+
+  test "test_m12_status_active_branch_is_trunk_when_repos_diverge":
+    ## Regression: with no recorded `[workspace].branch` and repos on DIFFERENT
+    ## branches, the active-branch header must NOT report an arbitrary (first)
+    ## repo's branch. A mixed-branch workspace has no single active branch (and
+    ## `repro branch` would say `<none recorded>`), so the heuristic defers to
+    ## the manifest trunk instead of the first repo's divergent branch.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "divergent-branches")
+      defer: removeDir(fx.scratch)
+
+      cloneAll(gitBin, fx)
+      # Put the FIRST repo (lib-a) on a non-trunk branch; lib-b/lib-c stay on
+      # `main`. Pre-fix, the heuristic returned lib-a's branch (`feature-x`);
+      # post-fix, divergence defers to the trunk (`main`).
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-a") &
+        " checkout -b feature-x")
+
+      let res = invokeStatus(fx)
+      check res.code == 0
+
+      let report = readReport(fx)
+      check report["activeBranch"].getStr() == "main"
+      # The header (first line) carries the workspace-level branch.
+      check "project=lib-a branch=main" in res.output
+      # ...while lib-a's own per-repo line still honestly shows its branch.
+      check "lib-a clean branch=feature-x" in res.output

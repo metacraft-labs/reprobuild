@@ -317,6 +317,13 @@ suite "M14 — repro branch <name> refuses on any dirty sibling":
       check entryA["outcome"].getStr() == "ready"
       check entryC["outcome"].getStr() == "ready"
 
+      # Human-facing text MUST make the atomic abort unmistakable — a list of
+      # `ready` lines is not "success". The summary names the abort and the
+      # blocking repo so `ready` cannot be misread as "branch created".
+      check "ABORTED" in res.output
+      check "no branch 'feature-y' was created" in res.output
+      check "lib-b=dirty_refused" in res.output
+
       # No repo was actually mutated: the new branch must NOT exist
       # in any repo.
       for name in ["lib-a", "lib-b", "lib-c"]:

@@ -31896,9 +31896,22 @@ proc deriveActiveBranch(workspaceRoot: string;
       workspaceLocal.get().workspace.branch.isSome and
       workspaceLocal.get().workspace.branch.get().len > 0:
     return workspaceLocal.get().workspace.branch.get()
+  # M12 heuristic, tightened: only adopt a live branch as the workspace's
+  # active branch when EVERY checked-out repo that reports one agrees on it. A
+  # workspace whose repos legitimately sit on different branches (e.g.
+  # dev/live/main) has no single active branch, so returning the first repo's
+  # branch would misreport it (and disagree with `repro branch`, which reports
+  # `<none recorded>`). On divergence, defer to the manifest trunk instead.
+  var uniform = ""
   for entry in repos:
-    if entry.branch.len > 0:
-      return entry.branch
+    if entry.branch.len == 0: continue
+    if uniform.len == 0:
+      uniform = entry.branch
+    elif uniform != entry.branch:
+      uniform = ""
+      break
+  if uniform.len > 0:
+    return uniform
   resolved.trunk
 
 proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
@@ -33816,6 +33829,23 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
     result.add("workspace branch: '" & report.branch &
       "' created across " & $report.repos.len & " repos; metadata=" &
       report.recordedBranch)
+  else:
+    # Aborted: branch creation is atomic, so NOTHING was created in ANY repo —
+    # the per-repo lines above only report which repos passed their checks
+    # (``ready``) versus which blocked the operation. Make that unmistakable so
+    # a list of ``ready`` lines is not misread as success.
+    var blockers: seq[string]
+    for entry in report.repos:
+      if entry.outcome != "ready" and
+          entry.outcome != branchOutcomeTag(broAlreadyAtHead):
+        blockers.add(entry.path & "=" & entry.outcome)
+    var summary = "workspace branch: ABORTED — no branch '" &
+      report.branch & "' was created in any repo (creation is atomic)"
+    if blockers.len > 0:
+      summary.add("; " & $blockers.len & " repo(s) blocked: " &
+        blockers.join(", "))
+    summary.add(". Fix the blocker(s) and re-run.")
+    result.add(summary)
 
 type
   BranchArgs = object
