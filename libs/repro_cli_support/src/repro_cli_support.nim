@@ -680,17 +680,35 @@ proc findSiblingProjectFile*(packageName: string;
   let anchor =
     if currentDir.len > 0: currentDir
     else: getCurrentDir()
-  let siblingDir = anchor.parentDir / packageName
-  if not dirExists(extendedPath(siblingDir)):
-    return ""
-  let match =
-    try:
-      resolveProjectFile(siblingDir)
-    except ProjectFileAmbiguousError:
-      # Both repro.nim AND reprobuild.nim — let the regular project-
-      # loading codepath surface the diagnostic if the user proceeds.
-      return ""
-  match.path
+  # Walk UP from the anchor, probing ``<ancestor>/<packageName>`` at each level.
+  # Level one (``anchor.parentDir / packageName``) is the direct-sibling
+  # convention; the walk-up extends it to the WORKSPACE-ROOT sibling convention
+  # so a DEEP out-of-tree consumer (several dirs below the workspace root) can
+  # still discover a top-level workspace sibling (the RP5c2 shape). Purely
+  # additive — a direct sibling is still found at level one, and the nearest
+  # ancestor owning ``<packageName>`` wins (a closer same-named sibling shadows a
+  # farther one). Mirrors ``workspaceProducerModule``'s compile-time walk so the
+  # runtime and macro-time discoveries stay in lock-step.
+  var dir = anchor
+  for _ in 0 ..< 16:
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    let siblingDir = parent / packageName
+    if dirExists(extendedPath(siblingDir)):
+      let match =
+        try:
+          resolveProjectFile(siblingDir)
+        except ProjectFileAmbiguousError:
+          # Both repro.nim AND reprobuild.nim — let the regular project-
+          # loading codepath surface the diagnostic if the user proceeds.
+          return ""
+        except CatchableError:
+          ProjectFileMatch()
+      if match.path.len > 0:
+        return match.path
+    dir = parent
+  ""
 
 proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
                                command: string): ResolvedPositionalSelectors =

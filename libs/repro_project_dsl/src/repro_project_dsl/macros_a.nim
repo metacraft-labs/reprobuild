@@ -2229,15 +2229,32 @@ proc workspaceProducerModule(selector, consumerSourceFile: string): string =
   let anchorDir = consumerSourceFile.parentDir
   if anchorDir.len == 0:
     return ""
-  let siblingDir = anchorDir.parentDir / selector
-  if not dirExists(siblingDir):
-    return ""
-  for base in ["repro.nim", "reprobuild.nim"]:
-    let candidate = siblingDir / base
-    if fileExists(candidate):
-      # Return the extension-stripped path so the emitted
-      # ``import "<path>" as <alias>`` resolves the module by file path.
-      return candidate[0 ..< candidate.len - ".nim".len]
+  # Walk UP the directory chain from the consumer, probing ``<ancestor>/<selector>``
+  # at each level. The first level (``anchorDir.parentDir / selector``) is the
+  # direct-sibling convention the SC-9/RP5a/TI2 reference tests rely on
+  # (``../<selector>`` next to the consumer); the walk-up EXTENDS that to the
+  # WORKSPACE-ROOT sibling convention so a DEEP out-of-tree consumer (e.g. an
+  # ``infra/tests/rp5c2/recipe.nim`` several dirs below the workspace root) can
+  # still bind a producer checked out as a top-level workspace sibling
+  # (``<workspace>/vm-harness``) — the RP5c2 shape. It is purely additive: a
+  # direct sibling is still found at the first level, so no existing discovery
+  # changes; only the previously-unresolvable deeper case now resolves. The
+  # nearest ancestor that owns a ``<selector>`` project wins, so a same-named
+  # closer sibling always shadows a farther workspace-root one.
+  var dir = anchorDir
+  for _ in 0 ..< 16:
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    let siblingDir = parent / selector
+    if dirExists(siblingDir):
+      for base in ["repro.nim", "reprobuild.nim"]:
+        let candidate = siblingDir / base
+        if fileExists(candidate):
+          # Return the extension-stripped path so the emitted
+          # ``import "<path>" as <alias>`` resolves the module by file path.
+          return candidate[0 ..< candidate.len - ".nim".len]
+    dir = parent
   ""
 
 type
@@ -2846,6 +2863,20 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         if parent == dir:
           break
         dir = parent
+      # OUT-OF-TREE consumer fallback (the RP5c2 shape): a consumer whose source
+      # tree is NOT under the reprobuild checkout (e.g. an infra recipe) cannot
+      # reach reprobuild's ``config.nims`` by walking up. Honour the standard
+      # ``$REPROBUILD_REPO_ROOT`` override the interface-artifact / profile-compile
+      # edges already use for out-of-tree lib-path resolution, so the generator
+      # ``nim c -r`` below runs with ``cd <repoRoot>`` and resolves
+      # ``import repro_cli_support`` via reprobuild's own ``config.nims``. This is
+      # NOT the obsolete ``REPRO_ACCESSOR_*`` knob (removed): it reuses the single
+      # repo-root env the rest of reprobuild's out-of-tree machinery keys off.
+      if repoRoot.len == 0 and existsEnv("REPROBUILD_REPO_ROOT"):
+        let envRoot = getEnv("REPROBUILD_REPO_ROOT")
+        if envRoot.len > 0 and fileExists(envRoot / "config.nims") and
+            fileExists(envRoot / "reprobuild.nimble"):
+          repoRoot = envRoot
     # The emitted-accessor cache is keyed by the PRODUCER, not the consumer, so
     # every consumer of the same producer shares ONE lift + ONE cached splice.
     # Anchor it under ``<repoRoot>/build/nimcache`` (Nim's config walk keys off
