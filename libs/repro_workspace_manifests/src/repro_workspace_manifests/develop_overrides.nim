@@ -49,11 +49,8 @@ import reader
 # ---- path helper ----------------------------------------------------------
 
 proc developOverridesPath*(workspaceRoot: string): string =
-  let reproPath = workspaceRoot / ".repro" / "develop-overrides.toml"
-  if fileExists(reproPath): return reproPath
-  let repoPath = workspaceRoot / ".repo" / "develop-overrides.toml"
-  if fileExists(repoPath): return repoPath
-  reproPath
+  ## ``<workspaceRoot>/.repro/develop-overrides.toml`` (native layout only).
+  workspaceRoot / ".repro" / "develop-overrides.toml"
 
 # ---- TOML escape helper ---------------------------------------------------
 

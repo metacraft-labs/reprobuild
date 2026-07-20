@@ -10471,7 +10471,7 @@ proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
   result.exitCode = 0
 
 proc writeHooksEnsureReport(report: HooksEnsureReport) =
-  let reportDir = report.workspaceRoot / ".repo" / "workspace"
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
   createDir(reportDir)
   let reportPath = reportDir / "hooks-report.json"
   writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
@@ -18477,8 +18477,8 @@ proc resolveDevelopWorkspaceProject(
       return resolveProject(candidates[0])
   raise newException(ValueError,
     "`repro develop` could not resolve a project from workspace root '" &
-      workspaceRoot & "' (no .repo/workspace.toml and no single " &
-      "projects/*.toml under .repo/manifests/)")
+      workspaceRoot & "' (no .repro/workspace.toml and no single " &
+      "projects/*.toml at the workspace root)")
 
 proc safeDevelopPathSegment(value: string): string =
   ## File-system safe segment for the develop subdir. Mirrors
@@ -21209,17 +21209,16 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
   ##
   ## A private companion manifest (``--private-manifest-url``) is cloned
   ## into the PARALLEL private cache (``…/manifests-private``) and
-  ## materialised at ``.repo/manifests-private`` — a separate cache tree
+  ## materialised at ``.repro/manifests-private`` — a separate cache tree
   ## so the two never share a slug namespace.
   if args.manifestUrl.len == 0:
     return
-  let manifestsDir = args.workspaceRoot / ".repo" / "manifests"
+  let manifestsDir = args.workspaceRoot / ".repro" / "manifests"
   if dirExists(manifestsDir / "projects"):
     # Already have a manifest checkout — bootstrap is a no-op (a sibling
     # checkout or a prior bootstrap already populated it).
     return
   let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
-  createDir(args.workspaceRoot / ".repo")
   createDir(args.workspaceRoot / ".repro")
 
   let cacheRoot = defaultManifestCacheRoot(private = false)
@@ -21256,7 +21255,7 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
     copyDir(cached.sharedBarePath, manifestsDir)
 
   if args.privateManifestUrl.len > 0:
-    let privateDir = args.workspaceRoot / ".repo" / "manifests-private"
+    let privateDir = args.workspaceRoot / ".repro" / "manifests-private"
     if not dirExists(privateDir):
       let privateCacheRoot = defaultManifestCacheRoot(private = true)
       let privCached = ensureManifestCache(identity.binaryPath,
@@ -22900,7 +22899,7 @@ proc constructRoutedBackend(entry: LockingRouteEntry;
       raise newException(StoreRoutingError,
         "locking backend 'git-checkout' for visibility=\"" & entry.visibility &
         "\" requires a `path` (the manifest-repo root, e.g. " &
-        "`.repo/manifests-team`)")
+        "`.repro/manifests-team`)")
     newGitCheckoutLockStore(identity,
       resolveStoreLocation(workspaceRoot, pathParam))
   of "git-notes":
@@ -23413,28 +23412,27 @@ proc legacyManifestMigrationSentinelPath(workspaceRoot: string): string =
 
 proc maybeWarnLegacyManifestWithoutTeamRoute*(workspaceRoot: string;
     composed: ComposedRouting) =
-  ## HL-2 (§10) — emit the one-time migration guidance when a
-  ## ``.repo/manifests`` checkout exists but no explicit route is declared (the
-  ## legacy workspace that WOULD silently go public-only). Best-effort: never
-  ## raises, never blocks the caller.
-  let manifestsDir = workspaceRoot / ".repo" / "manifests"
+  ## HL-2 (§10) — emit the one-time guidance when a ``.repro/manifests`` DB
+  ## checkout exists but no explicit route is declared (the workspace that WOULD
+  ## silently go public-only). Best-effort: never raises, never blocks the caller.
+  let manifestsDir = workspaceRoot / ".repro" / "manifests"
   if not dirExists(manifestsDir): return
   if composed.hasExplicitRoutes: return
   let sentinel = legacyManifestMigrationSentinelPath(workspaceRoot)
   if fileExists(sentinel): return
   stderr.writeLine(
-    "repro: WARNING — this workspace has a `.repo/manifests` checkout but NO " &
+    "repro: WARNING — this workspace has a `.repro/manifests` checkout but NO " &
     "team route declared in any configuration layer.")
   stderr.writeLine(
     "  Under the tier-isolated locking model there is NO implicit team route: " &
     "without an explicit route this workspace is PUBLIC-ONLY and will stop " &
     "writing its team manifest lock (`" & manifestsDir & "/locks/...`).")
   stderr.writeLine(
-    "  To keep `.repo/manifests` as the TEAM backend, run:  " &
+    "  To keep `.repro/manifests` as the TEAM backend, run:  " &
     "repro locking adopt-manifest --workspace-root=" & workspaceRoot)
   stderr.writeLine(
     "  That scaffolds a `[locking] route = [{ visibility = \"team\", " &
-    "backend = \"git-checkout\", path = \".repo/manifests\", repos = [...] }]` " &
+    "backend = \"git-checkout\", path = \".repro/manifests\", repos = [...] }]` " &
     "route mapping the team tier to the existing manifest checkout.")
   try:
     createDir(sentinel.parentDir)
@@ -26586,7 +26584,7 @@ proc resolvePostCommitWorkspaceRoot(currentRepo, workspaceRoot: string): string 
   if currentRepo.len > 0:
     var probe = absolutePath(currentRepo)
     while probe.len > 1:
-      if dirExists(probe / ".repro") or dirExists(probe / ".repo"):
+      if dirExists(probe / ".repro"):
         return probe
       let parent = parentDir(probe)
       if parent == probe: break
@@ -27571,7 +27569,7 @@ proc parseCheckArgs*(args: openArray[string]): CheckArgs =
     if result.currentRepo.len > 0:
       var probe = absolutePath(result.currentRepo)
       while probe.len > 1:
-        if dirExists(probe / ".repro") or dirExists(probe / ".repo"):
+        if dirExists(probe / ".repro"):
           result.workspaceRoot = probe
           break
         let parent = parentDir(probe)
@@ -27763,17 +27761,8 @@ proc enumerateManifestLayerLocations(workspaceRoot: string;
       let url = entry.url.get()
       loc.provenance = url
       let suffix = sanitizeManifestUrlForPath(url)
-      let reproPath = workspaceRoot / ".repro" /
+      loc.absPath = workspaceRoot / ".repro" /
         ("manifests-" & $layerIdx & "-" & suffix)
-      if dirExists(reproPath):
-        loc.absPath = reproPath
-      else:
-        let repoPath = workspaceRoot / ".repo" /
-          ("manifests-" & $layerIdx & "-" & suffix)
-        if dirExists(repoPath):
-          loc.absPath = repoPath
-        else:
-          loc.absPath = reproPath
     elif hasLocal:
       let raw = entry.local_path.get()
       loc.provenance = raw
@@ -28440,7 +28429,7 @@ proc registeredKeyStorePath*(workspaceRoot: string): string =
   ## owns this set (Test-Certificates.md: "CI/server registers trusted public
   ## keys"); we colocate it with the workspace's daemon-owned ``.repo`` tree so
   ## both the issuance path and the pre-push gate read the SAME registry.
-  workspaceRoot / ".repo" / "workspace" / "certificates" / "registered-keys.toml"
+  workspaceRoot / ".repro" / "workspace" / "certificates" / "registered-keys.toml"
 
 proc readRegisteredKeyStore*(path: string): RegisteredKeyStore =
   ## Read the store from ``path``; a missing file is an EMPTY store
@@ -28475,7 +28464,7 @@ proc reproSigningKeyPath*(workspaceRoot: string): string =
   let injected = getEnv("REPRO_DAEMON_SIGNING_KEY")
   if injected.len > 0:
     return injected
-  workspaceRoot / ".repo" / "workspace" / "certificates" / "signing-key"
+  workspaceRoot / ".repro" / "workspace" / "certificates" / "signing-key"
 
 proc reproSigningKeyId*(): string =
   ## The ``key_id`` the daemon's signing key is registered under (the
@@ -31089,7 +31078,7 @@ proc parsePushArgs(args: openArray[string]): PushArgs =
     if result.currentRepo.len > 0:
       var probe = absolutePath(result.currentRepo)
       while probe.len > 1:
-        if dirExists(probe / ".repo"):
+        if dirExists(probe / ".repro"):
           result.workspaceRoot = probe
           break
         let parent = parentDir(probe)
@@ -31980,8 +31969,8 @@ proc pickStatusManifestLayerRoot(workspaceRoot: string;
         let suffix =
           if sanitizedSegments.len > 0: sanitizedSegments
           else: "layer"
-        return workspaceRoot / ".repo" / ("manifests-0-" & suffix)
-  workspaceRoot / ".repo" / "manifests"
+        return workspaceRoot / ".repro" / ("manifests-0-" & suffix)
+  workspaceRoot / ".repro" / "manifests"
 
 proc deriveActiveBranch(workspaceRoot: string;
     workspaceLocal: Option[WorkspaceLocal];
@@ -33066,7 +33055,7 @@ proc renderManifestsTextLines*(report: WorkspaceManifestsReport):
         report.workspaceTomlPath)
     else:
       result.add("workspace manifests: no workspace metadata " &
-        "(.repo/workspace.toml not present at " & report.workspaceRoot & ")")
+        "(.repro/workspace.toml not present at " & report.workspaceRoot & ")")
     return
   result.add("workspace manifests: project=" & report.project &
     " layers=" & $report.layers.len)
@@ -33155,13 +33144,8 @@ proc layerCheckoutPathFor(workspaceRoot: string; layerIdx: int;
     let suffix =
       if sanitizedSegments.len > 0: sanitizedSegments
       else: "layer"
-    let repoPath = workspaceRoot / ".repo" /
+    return workspaceRoot / ".repro" /
       ("manifests-" & $layerIdx & "-" & suffix)
-    if dirExists(repoPath): return repoPath
-    let reproPath = workspaceRoot / ".repro" /
-      ("manifests-" & $layerIdx & "-" & suffix)
-    if dirExists(reproPath): return reproPath
-    return repoPath
   ""
 
 proc executeWorkspaceManifests(args: WorkspaceManifestsArgs):
@@ -40348,9 +40332,9 @@ proc runReproLockingAdoptManifest(args: openArray[string]): int =
     workspaceRoot = getCurrentDir()
   workspaceRoot = absolutePath(workspaceRoot)
 
-  let manifestsDir = workspaceRoot / ".repo" / "manifests"
+  let manifestsDir = workspaceRoot / ".repro" / "manifests"
   if not dirExists(manifestsDir):
-    stderr.writeLine("repro locking adopt-manifest: no `.repo/manifests` " &
+    stderr.writeLine("repro locking adopt-manifest: no `.repro/manifests` " &
       "checkout at " & manifestsDir & " — nothing to adopt (this verb makes " &
       "an EXISTING manifest the team backend).")
     return 2
@@ -40375,15 +40359,15 @@ proc runReproLockingAdoptManifest(args: openArray[string]): int =
   for n in repoNames:
     quoted.add("\"" & n & "\"")
   let reposList = quoted.join(", ")
-  # The git-checkout backend path is workspace-relative (``.repo/manifests``),
+  # The git-checkout backend path is workspace-relative (``.repro/manifests``),
   # resolved against the workspace root by ``constructRoutedBackend``.
   let configBody =
     "schema = \"reprobuild.config.v1\"\n\n" &
-    "# HL-2 adopt-manifest: keep the existing `.repo/manifests` checkout as the\n" &
+    "# HL-2 adopt-manifest: keep the existing `.repro/manifests` checkout as the\n" &
     "# TEAM locking backend (VCS-private layer 5 — never tracked, never pushed).\n" &
     "[locking]\n" &
     "route = [{ visibility = \"team\", backend = \"git-checkout\", " &
-    "path = \".repo/manifests\", repos = [" & reposList & "] }]\n"
+    "path = \".repro/manifests\", repos = [" & reposList & "] }]\n"
 
   let configPath = vcsPrivateConfigPath(workspaceRoot, identity.binaryPath)
   try:
@@ -40395,7 +40379,7 @@ proc runReproLockingAdoptManifest(args: openArray[string]): int =
     return 1
 
   stderr.writeLine("repro locking adopt-manifest: wrote team route for " &
-    $repoNames.len & " repo(s) → git-checkout at `.repo/manifests`")
+    $repoNames.len & " repo(s) → git-checkout at `.repro/manifests`")
   stderr.writeLine("  config layer (VCS-private, never pushed): " & configPath)
   stderr.writeLine("  run `repro locking explain` to verify the resolved " &
     "(tier, backend) for each repo.")
@@ -40572,9 +40556,9 @@ proc gitOutput(gitBin, repoRoot: string; sub: openArray[string]): tuple[
   (code: res.exitCode, output: res.output)
 
 proc manifestRepoRootFor(workspaceRoot: string): string =
-  ## The manifest repo carrying ``projects/*.toml`` — ``.repo/manifests``
-  ## under the workspace root.
-  workspaceRoot / ".repo" / "manifests"
+  ## The git-checkout lock-store DB carrying the private-repo pins —
+  ## ``.repro/manifests`` under the workspace root.
+  workspaceRoot / ".repro" / "manifests"
 
 proc projectManifestStub(project: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
