@@ -365,14 +365,26 @@ addPackagePath("STACKABLE_HOOKS_SRC", [
   ".." / "nim-stackable-hooks" / "src",
 ], "stackable_hooks.nim")
 
-# SHM-QUEUE-MIGRATE: libs/repro_shm_index's action-cache submission ring now
-# delegates to the extracted single MPSC ring in ``nim-shm-queue`` (Layer 1
-# ``shm_queue/ring`` — pure std/posix, NO serialization), the SAME library
-# io-mon's dependency queue sits on. Resolve ``shm_queue`` by path like every
-# other Nim sibling: prefer ``$SHM_QUEUE_SRC``, then the sibling checkout.
-addPackagePath("SHM_QUEUE_SRC", [
-  ".." / "nim-shm-queue" / "src",
-], "shm_queue.nim", useDevShellFallback = true)
+# SHM-QUEUE-MIGRATE / io-mon LOSSLESS M1: reprobuild's action-cache submission
+# ring (libs/repro_shm_index) AND the io-mon sibling's dependency queue BOTH sit
+# on nim-shm-queue's Layer-1 MPSC ring; the io-mon sibling ALSO sits on
+# nim-shm-gset (``shm_gset/transport``). Because config.nims compiles the io-mon
+# SIBLING in-tree (the io-mon block above prefers ``../io-mon`` over $IO_MON_SRC),
+# these shm packages MUST resolve to their co-developed siblings too — otherwise
+# a newer sibling io-mon is compiled against an older $SHM_QUEUE_SRC pin or a
+# missing nim-shm-gset, which is exactly the version skew that breaks the build.
+# Precedence mirrors the io-mon block: sibling checkout first, then the env pin
+# ($SHM_QUEUE_SRC / $SHM_GSET_SRC), then the devshell fallback.
+proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
+  if fileExists(sibling / marker):
+    switch("path", sibling)
+    return
+  addPackagePath(envName, [], marker, useDevShellFallback = true)
+
+addSiblingFirstPackagePath(".." / "nim-shm-queue" / "src", "SHM_QUEUE_SRC",
+  "shm_queue.nim")
+addSiblingFirstPackagePath(".." / "nim-shm-gset" / "src", "SHM_GSET_SRC",
+  "shm_gset.nim")
 
 # SHM-GSET: io-mon's Linux dependency-capture channel is the grow-only
 # shared-memory set ``shm_gset`` (nim-shm-gset — Candidate C of the Lossless
