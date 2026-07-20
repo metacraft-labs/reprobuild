@@ -3288,6 +3288,35 @@ proc emitM9R3LibraryApis*(packageName: string;
         `apiSym`.exports = `exportsSym`
         registerLibraryApi(`pkgLit`, `libLit`, `apiSym`))
 
+macro resourceModule*(modulePath: static string; body: untyped = nil): untyped =
+  ## TI2 producer-surface declaration: a producer's ``repro.nim`` NAMES the
+  ## separate module carrying its ``resourceType`` blocks (the RP5c2 vm-harness
+  ## shape — ``src/vm_harness/repro/resources.nim`` — NOT inline in
+  ## ``repro.nim``), plus any extra ``--path`` search roots that module's imports
+  ## need, WITHOUT importing it into the core build:
+  ##
+  ## .. code-block:: nim
+  ##   resourceModule "src/vm_harness/repro/resources.nim":
+  ##     path "src"
+  ##
+  ## This is a PURE MARKER. It expands to nothing, so a producer's core
+  ## ``just build`` (which compiles ``repro.nim`` but imports only
+  ## ``repro_project_dsl``) never pulls in the resource module's driver closure
+  ## — the module stays outside the core build (RP5c1 invariant).
+  ##
+  ## The declaration is consumed at CONSUMER macro-expansion by a TEXTUAL scan of
+  ## the producer's ``repro.nim`` (``producerDeclaredResourceModule`` in
+  ## ``macros_a``), NOT by importing this module — so detection
+  ## (``workspaceProducerDeclaresResourceType``), the accessor-cache freshness
+  ## stamp (``producerSourceStamp``), and the interface-lift resolve
+  ## (``resolveProducerTypedContract`` → ``interfaceLiftPlan`` with
+  ## ``resourceModule``/``extraPaths``) all read the SAME declared module +
+  ## extra paths. The body's ``path "<dir>"`` entries name extra ``--path``
+  ## roots relative to the producer root.
+  discard modulePath
+  discard body
+  newEmptyNode()
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##

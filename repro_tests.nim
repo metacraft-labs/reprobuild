@@ -7310,6 +7310,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim",
+    binary: "build/test-bin/t_ti2_thin_interface_consumer_reads_cached_artifact",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_ti2_separate_module_producer.nim",
+    binary: "build/test-bin/t_ti2_separate_module_producer",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_sc_producer_source_change_invalidates_consumer.nim",
     binary: "build/test-bin/t_sc_producer_source_change_invalidates_consumer",
     defines: @[],

@@ -2319,6 +2319,32 @@ proc localNimModulePath(currentFile, projectRoot, spec: string): string =
       return module
   ""
 
+proc nimModulePathInRoot(currentFile, searchRoot, spec: string): string =
+  ## TI2 residual fix (b) — resolve a bare/relative import ``spec`` against an
+  ## EXTRA search root (an ``extraPaths`` ``--path`` dir), mirroring
+  ## ``localNimModulePath`` but anchored at ``searchRoot`` instead of the
+  ## module's own project root. Used so a resource module's cross-directory
+  ## dependency reachable ONLY via ``extraPaths`` enters the lift source
+  ## closure (and thus the ``InterfaceLiftActionKey``), so a content change in
+  ## that file re-keys the lift instead of serving a stale artifact.
+  if spec.len == 0 or spec.startsWith("std/") or spec == "std" or
+      spec.startsWith("pkg/") or spec == "pkg":
+    return ""
+  # Relative/absolute specs are already resolved by ``localNimModulePath``;
+  # here we only resolve the bare ``import somemod`` / ``import a/b`` form that
+  # ``--path`` search satisfies.
+  if spec.startsWith("./") or spec.startsWith("../") or spec.isAbsolute:
+    return ""
+  var module = normalizedStampPath(searchRoot) / spec
+  if not module.endsWith(".nim") and not module.endsWith(".nims"):
+    module.add(".nim")
+  module = normalizedStampPath(module)
+  let normalizedRoot = normalizedStampPath(searchRoot)
+  if (module == normalizedRoot or module.startsWith(normalizedRoot & "/")) and
+      fileExists(extendedPath(module)):
+    return module
+  ""
+
 proc nimImportSpecs(line: string): seq[string] =
   let stripped = stripNimLineComment(line).strip()
   if stripped.startsWith("import "):
@@ -2331,7 +2357,8 @@ proc nimImportSpecs(line: string): seq[string] =
     if pos > 0:
       return @[rest[0 ..< pos].strip()]
 
-proc discoverNimSources*(rootModulePath: string): seq[string] =
+proc discoverNimSources*(rootModulePath: string;
+                         extraRoots: openArray[string] = []): seq[string] =
   ## Enumerate the provider compile's input source set.
   ##
   ## Imports reachable from ``rootModulePath`` are included transitively
@@ -2344,7 +2371,21 @@ proc discoverNimSources*(rootModulePath: string): seq[string] =
   ## eligible imports. Sibling enumeration is intentionally
   ## non-recursive — subdirectory sources only enter the set through an
   ## explicit import edge.
+  ##
+  ## TI2 residual fix (b): ``extraRoots`` are additional ``--path`` search
+  ## roots (the lift's ``extraPaths``). A bare ``import somemod`` that resolves
+  ## into one of these roots is followed transitively (bounded to that root),
+  ## so a resource module's cross-directory dependency reachable ONLY via
+  ## ``extraPaths`` enters the source closure — and thus the content-addressed
+  ## ``InterfaceLiftActionKey``. A change to such a file then re-keys the lift
+  ## instead of serving a stale artifact.
   let projectRoot = normalizedStampPath(parentDir(rootModulePath))
+  var normalizedExtraRoots: seq[string] = @[]
+  for root in extraRoots:
+    if root.len > 0:
+      let normalized = normalizedStampPath(root)
+      if normalized notin normalizedExtraRoots:
+        normalizedExtraRoots.add(normalized)
   var pending = @[normalizedStampPath(rootModulePath)]
   var seen = initHashSet[string]()
   while pending.len > 0:
@@ -2355,12 +2396,25 @@ proc discoverNimSources*(rootModulePath: string): seq[string] =
     result.add(path)
     if not fileExists(extendedPath(path)):
       continue
+    # The dir the CURRENT file lives in is itself a resolution root for its
+    # bare/relative imports (mirrors Nim's own file-relative search), so a
+    # module pulled in via ``extraRoots`` can pull its own siblings.
+    let currentDir = normalizedStampPath(parentDir(path))
     for line in readFile(extendedPath(path)).splitLines:
       for spec in nimImportSpecs(line):
         for expanded in expandImportSpec(spec):
           let localPath = localNimModulePath(path, projectRoot, expanded)
           if localPath.len > 0 and localPath notin seen:
             pending.add(localPath)
+            continue
+          # Resolve against the current file's own directory and every extra
+          # ``--path`` root, following the bare/relative import out of the
+          # project root when (and only when) it lands under one of them.
+          for searchRoot in currentDir & normalizedExtraRoots:
+            let extraPath = nimModulePathInRoot(path, searchRoot, expanded)
+            if extraPath.len > 0 and extraPath notin seen:
+              pending.add(extraPath)
+              break
   if dirExists(extendedPath(projectRoot)):
     for kind, child in walkDir(projectRoot):
       if kind notin {pcFile, pcLinkToFile}:
@@ -2456,14 +2510,21 @@ proc reproLibStampsForCache(workDir: string): seq[FileStamp] =
     return @[]
   fileStamps(reproLibSources(workDir))
 
-proc interfaceLiftSources(modulePath, resourceModule: string): seq[string] =
+proc interfaceLiftSources(modulePath, resourceModule: string;
+                          extraPaths: openArray[string] = []): seq[string] =
   ## The full source closure a lift compiles: the producer's own module
   ## closure plus, when a producer declares a separate resource module (TI1),
   ## that module's closure. Both feed the extraction fingerprint so a
   ## resource-module edit re-keys the lift.
-  result = discoverNimSources(modulePath).mapIt(normalizedStampPath(it))
+  ##
+  ## TI2 residual fix (b): ``extraPaths`` are threaded into the source-closure
+  ## walk so a resource module's cross-directory dependency reachable ONLY via
+  ## an extra ``--path`` is discovered (with its CONTENT), not just named by
+  ## basename. A change to such a file re-keys the lift.
+  result = discoverNimSources(modulePath, extraPaths).mapIt(
+    normalizedStampPath(it))
   if resourceModule.len > 0:
-    for src in discoverNimSources(resourceModule):
+    for src in discoverNimSources(resourceModule, extraPaths):
       let normalized = normalizedStampPath(src)
       if normalized notin result:
         result.add(normalized)
@@ -2474,7 +2535,7 @@ proc interfaceExtractionContext(modulePath: string;
                                 resourceModule = "";
                                 extraPaths: openArray[string] = []):
     InterfaceExtractionContext =
-  let sources = interfaceLiftSources(modulePath, resourceModule)
+  let sources = interfaceLiftSources(modulePath, resourceModule, extraPaths)
   var libPathFlags = reproLibPathFlags(workDir)
   # TI1: the producer's declared resource module + extra ``--path``s are part
   # of the lift's input identity — a change to the extra path set re-keys the
@@ -3282,15 +3343,25 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   command.insert(externalHashFlags(workDir), 2)
   command.insert(reproPackagePathFlags(workDir), 2)
   command.insert(libFlags, 4)
-  # TI1: the producer-declared resource module + its extra ``--path``s. These
-  # let the lift resolve the producer's own src + the reprobuild libs the
-  # resource driver imports (the driver closure is producer-side only, compiled
-  # here once at lift time).
+  # TI2 residual fix (a) — ``--path`` ORDER: the producer-declared resource
+  # module dir + its extra ``--path``s MUST come AFTER the reprobuild lib flags
+  # (``libFlags``, inserted at index 4 above), never before. Nim's module
+  # resolution does NOT reliably prefer the first ``--path`` entry when the same
+  # logical module name exists under two roots, so a producer whose src tree
+  # (or an ``extraPaths`` dir) happens to contain a module colliding with a
+  # reprobuild lib module (e.g. a stray ``repro_*`` leaf) could SHADOW the
+  # reprobuild copy and silently lift against the wrong sources. Appending the
+  # producer paths AFTER ``libFlags`` guarantees the reprobuild libs win on any
+  # ambiguity. (Before TI2 these were inserted at the SAME index 4, which put
+  # them BEFORE ``libFlags`` — the shadowing hazard TI1 flagged as residual.)
+  var producerPathFlags: seq[string] = @[]
   if resourceModule.len > 0:
-    command.insert("--path:" & parentDir(absolutePath(resourceModule)), 4)
+    producerPathFlags.add("--path:" & parentDir(absolutePath(resourceModule)))
   for extra in extraPaths:
     if extra.len > 0:
-      command.insert("--path:" & absolutePath(extra), 4)
+      producerPathFlags.add("--path:" & absolutePath(extra))
+  if producerPathFlags.len > 0:
+    command.insert(producerPathFlags, 4 + libFlags.len)
   let compileExecution = runCommand(command, cwd = workDir)
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):
@@ -3941,7 +4012,7 @@ proc interfaceLiftPlan*(modulePath, artifactPath, stubPath: string;
   ## inputs are the producer's source closure (plus the resource-module
   ## closure when declared); the declared outputs are the interface artifact +
   ## stub. The engine edge is keyed by the ``InterfaceLiftActionKey``.
-  let sources = interfaceLiftSources(modulePath, resourceModule)
+  let sources = interfaceLiftSources(modulePath, resourceModule, extraPaths)
   let actionKey = interfaceLiftActionKey(sources, resourceModule, extraPaths,
     workDir)
   let declaredInputs = sources

@@ -29,7 +29,7 @@
 ##      ``publicResources`` with the REAL resource types (typeId / determinism
 ##      / typed attrs / entry-point ids) from that module.
 
-import std/[options, os, unittest]
+import std/[options, os, sequtils, strutils, unittest]
 
 import repro_interface_artifacts
 import repro_core
@@ -297,3 +297,53 @@ suite "TI1: interface-artifact edge (cached, content-addressed lift)":
     # The resource module is part of the lift's input identity: declaring it
     # produces a DIFFERENT action key than the resource-free control lift.
     check plan.interfaceLiftActionKey != controlPlan.interfaceLiftActionKey
+
+  test "t_ti1_extra_path_dependency_content_rekeys_lift":
+    ## TI2 residual fix (b): the ``InterfaceLiftActionKey`` must capture the
+    ## CONTENT of files reachable ONLY via ``extraPaths`` (a real cross-directory
+    ## resource-module dependency), not just their basenames — so a content
+    ## change to such a file re-keys the lift and no stale artifact is served.
+    let tempRoot = getTempDir() / "ti1-extrapath-" & $getCurrentProcessId()
+    removeDir(extendedPath(tempRoot))
+    let projectRoot = tempRoot / "project"
+    let outDir = tempRoot / "out"
+    createDir(extendedPath(outDir))
+    defer: removeDir(extendedPath(tempRoot))
+
+    # The producer project + its resource module (in a producer-side layout).
+    let modulePath = writeProject(projectRoot, resourceProducerRepro)
+    let resourceDir = projectRoot / "repro"
+    createDir(extendedPath(resourceDir))
+    let resourceModule = resourceDir / "resources.nim"
+
+    # A helper module living in a SEPARATE directory, reachable ONLY via an
+    # extra ``--path`` (not the producer's own project root, not the resource
+    # module's dir). The resource module imports it by its bare module name, so
+    # it resolves solely through the extra ``--path`` root.
+    let extraDir = tempRoot / "extra-dep"
+    createDir(extendedPath(extraDir))
+    let helperModule = extraDir / "ti1_extra_helper.nim"
+    writeFile(extendedPath(helperModule), "const helperTag* = 1\n")
+
+    # The resource module imports the cross-directory helper (reachable only via
+    # the extra ``--path``) so its content participates in the lift.
+    writeFile(extendedPath(resourceModule),
+      "import ti1_extra_helper\n" &
+      "static: doAssert helperTag >= 0\n" &
+      resourceModuleSource)
+
+    let plan = interfaceLiftPlan(modulePath,
+      outDir / "ti1-extrapath.rbsz", outDir / "ti1-extrapath.nim",
+      resourceModule = resourceModule,
+      extraPaths = @[projectRoot, extraDir], workDir = getCurrentDir())
+    # The cross-directory helper entered the source closure (discovered via the
+    # extra ``--path``), so its CONTENT is in the action key.
+    check plan.inputSources.anyIt(it.endsWith("ti1_extra_helper.nim"))
+
+    # Change ONLY the extra-path helper's content: the action key MUST move.
+    writeFile(extendedPath(helperModule), "const helperTag* = 2\n")
+    let planAfter = interfaceLiftPlan(modulePath,
+      outDir / "ti1-extrapath.rbsz", outDir / "ti1-extrapath.nim",
+      resourceModule = resourceModule,
+      extraPaths = @[projectRoot, extraDir], workDir = getCurrentDir())
+    check planAfter.interfaceLiftActionKey != plan.interfaceLiftActionKey

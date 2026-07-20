@@ -12945,8 +12945,33 @@ proc resolveProducerTypedContract*(selector: string;
   let stubPath = scratchRoot / "producer-typed-contract.nim"
   let artifact =
     try:
-      extractInterfaceFromModule(projectFile, ifacePath, stubPath,
-        reprobuildLibraryWorkDir(), scratchRoot / "work", requireStub = false)
+      # TI2: read the producer's interface via TI1's CACHED, content-addressed
+      # interface-artifact edge (``interfaceLiftPlan`` + ``liftInterfaceArtifact``)
+      # rather than re-extracting per consumer. The lift materializes ONCE into
+      # the selector-keyed artifact path (its ``.liftkey`` sidecar records the
+      # ``InterfaceLiftActionKey``); a second resolve with an unchanged producer
+      # source closure is a cache HIT that reads the artifact back without
+      # re-running the lift edge (replaces the RP5a re-extract-per-consumer path).
+      # The stub is written to the scratch tree (the extract runner emits it) but
+      # the typed-contract projection reads only the artifact.
+      # TI2 (separate-module producer — the RP5c2 vm-harness shape): if the
+      # producer's ``repro.nim`` NAMES a separate resource module via a
+      # ``resourceModule "<path>": path "<dir>" …`` surface entry, thread that
+      # module + its extra ``--path``s into the lift so the cached artifact's
+      # ``publicResources`` genuinely reflect the separate module (its
+      # ``resourceType`` blocks are NOT inline in ``repro.nim``). Without this the
+      # cached lift would only see the separate module if ``repro.nim``
+      # transitively imported it within the project root — which it must NOT (the
+      # core build stays reprobuild-free). The declaration is parsed TEXTUALLY
+      # from ``repro.nim`` (no import) and its paths are absolute (resolved
+      # against the producer root by ``parseResourceModuleDecl``).
+      let resDecl =
+        parseResourceModuleDecl(readFile(projectFile), sourceRootAbs)
+      let plan = interfaceLiftPlan(projectFile, ifacePath, stubPath,
+        resourceModule = resDecl.resourceModule,
+        extraPaths = resDecl.extraPaths,
+        workDir = reprobuildLibraryWorkDir())
+      liftInterfaceArtifact(plan)
     except CatchableError as ex:
       # The producer's interface could not be extracted. Keep the caller's
       # graceful behavior — surface as "no discoverable typed contract"

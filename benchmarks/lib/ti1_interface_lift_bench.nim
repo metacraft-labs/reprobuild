@@ -93,6 +93,23 @@ proc main() =
   if warm.interfaceFingerprint != cold.interfaceFingerprint:
     quit("ti1 bench: cache-HIT lift produced a different fingerprint", 1)
 
+  # TI2 consumer-compile contrast. The RP5a era paid the COLD lift (a full
+  # ``nim c`` interface re-extract) per consumer at macro-expansion. Under TI2
+  # the producer's interface is lifted ONCE; every subsequent consumer takes the
+  # cache-HIT artifact READ. Measure the per-consumer artifact-read cost the
+  # thin-interface consumer actually pays — the ``readInterfaceArtifact`` the
+  # ``usesImportCode`` fast path performs in the Nim VM — so the fast-compile win
+  # (cold re-extract → cache read) is visible as a suite metric.
+  var readMs = 0.0
+  block:
+    let iters = if quick: 5 else: 25
+    let readStart = epochTime()
+    for _ in 0 ..< iters:
+      let a = readInterfaceArtifact(artifactPath)
+      if a.interfaceFingerprint != cold.interfaceFingerprint:
+        quit("ti1 bench: artifact read produced a different fingerprint", 1)
+    readMs = elapsedMs(readStart) / float(iters)
+
   let interfaceFingerprintHex = toHex(cold.interfaceFingerprint.bytes)
 
   let doc = %*{
@@ -119,6 +136,22 @@ proc main() =
         "value": warmMs,
         "direction": "lower-is-better",
         "status": "measured"
+      },
+      {
+        "suite": "ti2",
+        "name": "consumer compile: cold re-extract (RP5a per-consumer)",
+        "unit": "ms",
+        "value": coldMs,
+        "direction": "lower-is-better",
+        "status": "measured"
+      },
+      {
+        "suite": "ti2",
+        "name": "consumer compile: cached artifact read (thin-interface)",
+        "unit": "ms",
+        "value": readMs,
+        "direction": "lower-is-better",
+        "status": "measured"
       }
     ]
   }
@@ -127,5 +160,8 @@ proc main() =
   writeFile(extendedPath(outPath), pretty(doc))
   echo "ti1 interface-lift-time: cold ", coldMs.formatFloat(ffDecimal, 3),
     " ms; cache-HIT ", warmMs.formatFloat(ffDecimal, 3), " ms"
+  echo "ti2 consumer-compile: cold re-extract ",
+    coldMs.formatFloat(ffDecimal, 3), " ms vs cached artifact read ",
+    readMs.formatFloat(ffDecimal, 4), " ms (per consumer)"
 
 main()
