@@ -22,7 +22,7 @@ rows_html="${tmp_dir}/benchmark-rows.html"
 : >"${results_jsonl}"
 : >"${rows_html}"
 
-benchmark_suites="${REPROBUILD_BENCH_SUITES:-m0,m23,cmake,rp1,rp2,rp3,rp5b}"
+benchmark_suites="${REPROBUILD_BENCH_SUITES:-m0,m23,cmake,rp1,rp2,rp3,rp5b,ti1}"
 
 suite_enabled() {
   local suite="$1"
@@ -181,13 +181,14 @@ if kind == "m23":
                 1000.0 / value,
                 extra + f"; original={value} actions/sec",
             )
-elif kind in ("rp1", "rp2", "rp3", "rp5b"):
-    # RP1, RP2, RP3 and RP5b share the same metric-array JSON shape (suite/name/
-    # unit/value/direction). RP2 adds the provider-session round-trip (warm/
-    # cold) metrics; RP3 adds the cold-vs-warm consumer-build ("build once,
-    # share") metrics; RP5b adds the resource-op (observe/apply) round-trip
-    # (warm/cold) metrics; the loop below is agnostic to which suite emitted
-    # them.
+elif kind in ("rp1", "rp2", "rp3", "rp5b", "ti1"):
+    # RP1, RP2, RP3, RP5b and TI1 share the same metric-array JSON shape
+    # (suite/name/unit/value/direction). RP2 adds the provider-session
+    # round-trip (warm/cold) metrics; RP3 adds the cold-vs-warm consumer-build
+    # ("build once, share") metrics; RP5b adds the resource-op (observe/apply)
+    # round-trip (warm/cold) metrics; TI1 adds the interface-lift-time (cold
+    # materialize vs cache HIT) metrics; the loop below is agnostic to which
+    # suite emitted them.
     metadata = data.get("metadata", {})
     quick_value = metadata.get("quick", mode == "quick")
     quick = str(quick_value).lower() if isinstance(quick_value, bool) else str(quick_value)
@@ -486,6 +487,31 @@ run_rp5b_suite() {
   append_benchmark_metrics "${output}" rp5b "${quick}"
 }
 
+run_ti1_suite() {
+  # TI1 (Production Thin Interface Mode) — interface-lift-time metric (cold
+  # materialization of the cached interface-artifact edge vs a cache-HIT lift
+  # that is NOT re-run). The harness lifts a producer's interface twice and
+  # emits the two metrics.
+  local harness_bin="build/test-bin/ti1_interface_lift_bench"
+  local output="bench-results/ti1-interface-lift.json"
+  local quick_flag=()
+  if [ "${quick}" = true ]; then
+    quick_flag+=(--quick)
+  fi
+
+  echo "running Reprobuild TI1 interface-lift benchmark suite (quick=${quick})" >&2
+  mkdir -p build/test-bin build/nimcache
+  nim c \
+    -d:release \
+    --hints:off \
+    --warnings:off \
+    --nimcache:build/nimcache/ti1-interface-lift-bench \
+    --out:"${harness_bin}" \
+    benchmarks/lib/ti1_interface_lift_bench.nim >&2
+  "./${harness_bin}" "${quick_flag[@]}" --out "${output}" >&2
+  append_benchmark_metrics "${output}" ti1 "${quick}"
+}
+
 if suite_enabled m0; then
   run_m0_suite
 fi
@@ -512,6 +538,10 @@ fi
 
 if suite_enabled rp5b; then
   run_rp5b_suite
+fi
+
+if suite_enabled ti1; then
+  run_ti1_suite
 fi
 
 json_results="$(emit_json)"

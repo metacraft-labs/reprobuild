@@ -233,6 +233,35 @@ type
     outputBinaryFingerprint*: ContentDigest
     executionResult*: ProviderCompileExecutionResult
 
+  InterfaceLiftEdge* = object
+    ## TI1: the engine build-edge that LIFTS a producer's interface once into
+    ## a cached, content-addressed ``ProjectInterfaceArtifact``. Mirrors
+    ## ``ProviderCompileEdge`` — a declared-input/-output edge whose action key
+    ## is the ``InterfaceLiftActionKey`` (canonical source inputs + compiler
+    ## identity + interface format version), so a rebuild with an unchanged
+    ## lift input set is a cache HIT (the lift is not re-run per consumer).
+    actionSpec*: ActionSpec
+    declaredInputs*: seq[string]
+    declaredOutputs*: seq[string]
+    actionFingerprint*: ContentDigest
+
+  InterfaceLiftPlan* = object
+    ## TI1: the plan for a producer's interface-lift edge. Analogous to
+    ## ``ProviderCompilePlan``. ``interfaceLiftActionKey`` decides the engine
+    ## action-cache HIT/re-run (input-keyed like the RP1
+    ## ``ProviderCompileActionKey``); ``interfaceFingerprint`` is the OUTPUT
+    ## identity — the hash of the resulting ``ProjectInterface``'s PUBLIC
+    ## surface only, which is what re-keys downstream consumers (TI2/TI3).
+    modulePath*: string
+    resourceModule*: string
+    extraPaths*: seq[string]
+    artifactPath*: string
+    stubPath*: string
+    inputSources*: seq[string]
+    liftEdge*: InterfaceLiftEdge
+    interfaceLiftActionKey*: ContentDigest
+    workDir*: string
+
   FileStampKind = enum
     fskMissing
     fskRegular
@@ -2427,31 +2456,62 @@ proc reproLibStampsForCache(workDir: string): seq[FileStamp] =
     return @[]
   fileStamps(reproLibSources(workDir))
 
+proc interfaceLiftSources(modulePath, resourceModule: string): seq[string] =
+  ## The full source closure a lift compiles: the producer's own module
+  ## closure plus, when a producer declares a separate resource module (TI1),
+  ## that module's closure. Both feed the extraction fingerprint so a
+  ## resource-module edit re-keys the lift.
+  result = discoverNimSources(modulePath).mapIt(normalizedStampPath(it))
+  if resourceModule.len > 0:
+    for src in discoverNimSources(resourceModule):
+      let normalized = normalizedStampPath(src)
+      if normalized notin result:
+        result.add(normalized)
+
 proc interfaceExtractionContext(modulePath: string;
                                 workDir = getCurrentDir();
-                                includeReproLibFingerprint = true):
+                                includeReproLibFingerprint = true;
+                                resourceModule = "";
+                                extraPaths: openArray[string] = []):
     InterfaceExtractionContext =
-  let sources = discoverNimSources(modulePath).mapIt(normalizedStampPath(it))
+  let sources = interfaceLiftSources(modulePath, resourceModule)
+  var libPathFlags = reproLibPathFlags(workDir)
+  # TI1: the producer's declared resource module + extra ``--path``s are part
+  # of the lift's input identity — a change to the extra path set re-keys the
+  # extraction (a different resource module resolves a different closure).
+  if resourceModule.len > 0:
+    libPathFlags.add("--resource-module:" & normalizedStampPath(resourceModule))
+  for extra in extraPaths:
+    if extra.len > 0:
+      libPathFlags.add("--path:" & normalizedStampPath(extra))
   InterfaceExtractionContext(
     modulePath: normalizedStampPath(modulePath),
     workDir: normalizedStampPath(workDir),
     nimCompiler: nimCompilerPath(),
-    libPathFlags: reproLibPathFlags(workDir),
+    libPathFlags: libPathFlags,
     reproLibFingerprint:
       if includeReproLibFingerprint: reproLibSourceFingerprint(workDir)
       else: "",
     sources: sources)
 
 proc interfaceExtractionCacheContext(modulePath: string;
-                                     workDir = getCurrentDir()):
+                                     workDir = getCurrentDir();
+                                     resourceModule = "";
+                                     extraPaths: openArray[string] = []):
     InterfaceExtractionContext =
+  var libPathFlags =
+    if immutableStorePath(workDir): @[]
+    else: reproLibPathFlags(workDir)
+  if resourceModule.len > 0:
+    libPathFlags.add("--resource-module:" & normalizedStampPath(resourceModule))
+  for extra in extraPaths:
+    if extra.len > 0:
+      libPathFlags.add("--path:" & normalizedStampPath(extra))
   InterfaceExtractionContext(
     modulePath: normalizedStampPath(modulePath),
     workDir: normalizedStampPath(workDir),
     nimCompiler: nimCompilerPath(),
-    libPathFlags:
-      if immutableStorePath(workDir): @[]
-      else: reproLibPathFlags(workDir),
+    libPathFlags: libPathFlags,
     reproLibFingerprint: "",
     sources: @[])
 
@@ -2486,6 +2546,12 @@ proc interfaceExtractionCachePath(artifactPath: string): string =
 
 proc interfaceExtractionMetadataPath(artifactPath: string): string =
   artifactPath & ".inputs.meta"
+
+proc interfaceLiftActionKeyPath*(artifactPath: string): string =
+  ## TI1: the sidecar recording the ``InterfaceLiftActionKey`` an artifact was
+  ## materialized under, so a second lift with an unchanged input closure is a
+  ## cache HIT without re-running the lift edge.
+  artifactPath & ".liftkey"
 
 proc writeInterfaceExtractionCacheRecord(artifactPath: string;
     context: InterfaceExtractionContext; fingerprint: ContentDigest) =
@@ -3081,15 +3147,30 @@ proc buildScratchRoot(workDir, scratchDir: string): string =
 proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
                                  workDir = getCurrentDir();
                                  scratchDir = "";
-                                 requireStub = true): ProjectInterfaceArtifact =
-  let extractionContext = interfaceExtractionCacheContext(modulePath, workDir)
+                                 requireStub = true;
+                                 resourceModule = "";
+                                 extraPaths: openArray[string] = []):
+    ProjectInterfaceArtifact =
+  ## TI1 (Project-Provider-Runtime-Protocol.milestones.org) — a producer may
+  ## declare a RESOURCE MODULE (e.g. vm-harness's ``src/vm_harness/repro/
+  ## resources.nim``) that carries its ``resourceType`` blocks, plus the extra
+  ## ``--path``s that module's imports need. When ``resourceModule`` is given
+  ## the extraction runner ALSO imports that module so its module-init
+  ## ``registerResourceTypeInterface`` side effects run before the interface is
+  ## projected — so ``publicResources`` reflects the producer's REAL resource
+  ## types, not a stub. The resource-module driver closure is producer-side
+  ## only (compiled once, here, at lift time). ``extraPaths`` are appended as
+  ## ``--path:`` flags for the runner compile.
+  let extractionContext = interfaceExtractionCacheContext(modulePath, workDir,
+    resourceModule, extraPaths)
   let metadataCached = cachedInterfaceArtifactByMetadata(artifactPath,
     stubPath, extractionContext, requireStub)
   if metadataCached.isSome:
     return metadataCached.get()
 
   let fingerprintContext = interfaceExtractionContext(modulePath, workDir,
-    includeReproLibFingerprint = true)
+    includeReproLibFingerprint = true, resourceModule = resourceModule,
+    extraPaths = extraPaths)
   let inputFingerprint = interfaceExtractionFingerprint(fingerprintContext)
   let cached = cachedInterfaceArtifactByFingerprint(artifactPath, stubPath,
     inputFingerprint, requireStub)
@@ -3141,11 +3222,23 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # reference; the per-module symbol scope still gives us the
   # ``registeredPackages()`` set as expected by ``artifactFromRegisteredDsl``.
   let absoluteModulePath = absolutePath(modulePath).replace('\\', '/')
+  # TI1: when a producer declares a separate RESOURCE MODULE, import it BEFORE
+  # the producer's own module so its ``resourceType`` module-init registrations
+  # run and ``artifactFromRegisteredDsl`` sees the real resource types. The
+  # ``resourceType`` macro emits a module-init proc calling
+  # ``registerResourceTypeInterface``; that side effect only executes if the
+  # module is actually imported into the extraction runner's compilation unit.
+  var resourceImport = ""
+  if resourceModule.len > 0:
+    let absoluteResourceModule =
+      absolutePath(resourceModule).replace('\\', '/')
+    resourceImport = "import \"" & absoluteResourceModule & "\"\n"
   writeFile(extendedPath(runnerPath),
     "import std/os\n" &
     "import repro_interface_artifacts\n" &
     "import repro_project_dsl\n" &
     "import repro_dsl_stdlib/constructors\n" &
+    resourceImport &
     "import \"" & absoluteModulePath & "\"\n\n" &
     "let artifact = artifactFromRegisteredDsl(paramStr(3))\n" &
     "writeInterfaceArtifact(paramStr(1), artifact)\n" &
@@ -3189,6 +3282,15 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   command.insert(externalHashFlags(workDir), 2)
   command.insert(reproPackagePathFlags(workDir), 2)
   command.insert(libFlags, 4)
+  # TI1: the producer-declared resource module + its extra ``--path``s. These
+  # let the lift resolve the producer's own src + the reprobuild libs the
+  # resource driver imports (the driver closure is producer-side only, compiled
+  # here once at lift time).
+  if resourceModule.len > 0:
+    command.insert("--path:" & parentDir(absolutePath(resourceModule)), 4)
+  for extra in extraPaths:
+    if extra.len > 0:
+      command.insert("--path:" & absolutePath(extra), 4)
   let compileExecution = runCommand(command, cwd = workDir)
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):
@@ -3734,3 +3836,174 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
   if artifactPath.len > 0:
     writeProviderCompileArtifact(artifactPath, result)
     writeProviderFreshnessCacheRecord(artifactPath, modulePath, workDir, result)
+
+# ---------------------------------------------------------------------
+# TI1 — the interface-lift EDGE.
+#
+# Project-Interface-Artifacts-And-Import-Modes.md §"Automatic Interface
+# Lifting" makes the interface artifact a first-class build product. TI1
+# turns the LIFT into a cached, content-addressed engine build edge —
+# mirroring RP1's provider-compile edge — so a producer's interface is
+# lifted ONCE and read from cache, not re-extracted per consumer (the
+# RP5a ``staticExec``-per-consumer workaround this replaces).
+#
+# Two identities, exactly parallel to RP1's (artifact-id vs action-key):
+#
+#   InterfaceLiftActionKey = hash(
+#     "lift-interface", interfaceFormatVersion, nimCompilerIdentity,
+#     canonicalSourceInputPaths+content (producer closure + resource
+#     module closure), resource-module identity, extra-path set)
+#     — the engine edge's action key. Input-keyed: any source edit (public
+#       OR private) re-keys the LIFT so the edge re-runs. This is correct:
+#       a private edit must still re-run the lift to CONFIRM the public
+#       surface is unchanged; the confirmation is cheap and the RESULT is
+#       the InterfaceFingerprint, which is what actually gates downstream.
+#
+#   InterfaceFingerprint = hash(ProjectInterface public surface only)
+#     — the OUTPUT identity (``interfaceFingerprint`` above). Excludes
+#       ``build:``/driver bodies + private helpers by CONSTRUCTION: it
+#       hashes the projected ``ProjectInterface`` (public exec/lib/resource
+#       decls + signatures), never the source closure. So a private/driver
+#       edit re-runs the lift but yields the SAME InterfaceFingerprint —
+#       the load-bearing TI3-readiness property established here.
+
+const
+  InterfaceFormatVersion* = EnvelopeVersion
+    ## The "relevant frontend/interface format version" the spec's
+    ## ``InterfaceFingerprint`` names — reuses the codec envelope version so a
+    ## format bump re-keys every lift.
+
+proc interfaceLiftActionKey*(
+    canonicalSourceInputPaths: openArray[string];
+    resourceModule = "";
+    extraPaths: openArray[string] = [];
+    workDir = getCurrentDir()): ContentDigest =
+  ## The TI1 ``InterfaceLiftActionKey`` — the engine edge's action key,
+  ## analogous to RP1's ``ProviderCompileActionKey``. Keyed by the canonical
+  ## (root-relative path, content) source set, the resource-module identity,
+  ## the extra ``--path`` set, the Nim frontend identity, and the interface
+  ## format version. Content-addressed (paths made relative to the source
+  ## closure root, like ``projectSourceSemanticIdentity``) so two consumers
+  ## whose lift inputs are byte-identical converge on the same key.
+  var normalized: seq[string] = @[]
+  for path in canonicalSourceInputPaths:
+    normalized.add(normalizedStampPath(path))
+  let root = commonSourceRoot(normalized)
+  var payload: seq[byte] = @[]
+  payload.writeString("lift-interface")
+  payload.writeU32Le(uint32(InterfaceFormatVersion))
+  payload.writeString(nimCompilerIdentity())
+  payload.writeString(frontendRuntimeIdentity(workDir))
+  for path in normalized:
+    let relPath =
+      if root.len > 0 and path == root: extractFilename(path)
+      elif root.len > 0 and path.startsWith(root & "/"):
+        path[root.len + 1 .. ^1]
+      else: extractFilename(path)
+    payload.writeString(relPath)
+    let content =
+      if fileExists(extendedPath(path)): toBytes(readFile(extendedPath(path)))
+      else: @[]
+    payload.writeU64Le(uint64(content.len))
+    payload.add(content)
+  payload.writeString(
+    if resourceModule.len > 0: extractFilename(normalizedStampPath(resourceModule))
+    else: "")
+  var extras: seq[string] = @[]
+  for extra in extraPaths:
+    if extra.len > 0:
+      extras.add(extractFilename(normalizedStampPath(extra)))
+  extras.sort(system.cmp[string])
+  payload.writeStringSeq(extras)
+  blake3DomainDigest(payload, hdActionFingerprint)
+
+proc interfaceLiftMetadata(declaredInputs, declaredOutputs: openArray[string];
+                           interfaceLiftActionKey: ContentDigest): DynamicValue =
+  var inputValues: seq[DynamicValue] = @[]
+  for value in declaredInputs:
+    inputValues.add(cborText(value))
+  var outputValues: seq[DynamicValue] = @[]
+  for value in declaredOutputs:
+    outputValues.add(cborText(value))
+  cborMap([
+    entry("kind", cborText("interfaceLift")),
+    entry("schema", cborUInt(1)),
+    entry("declaredInputs", cborArray(inputValues)),
+    entry("declaredOutputs", cborArray(outputValues)),
+    entry("interfaceLiftActionKey", digestHexValue(interfaceLiftActionKey))
+  ])
+
+proc interfaceLiftPlan*(modulePath, artifactPath, stubPath: string;
+                        resourceModule = "";
+                        extraPaths: openArray[string] = [];
+                        workDir = getCurrentDir()): InterfaceLiftPlan =
+  ## TI1: build the interface-lift edge plan for a producer. The declared
+  ## inputs are the producer's source closure (plus the resource-module
+  ## closure when declared); the declared outputs are the interface artifact +
+  ## stub. The engine edge is keyed by the ``InterfaceLiftActionKey``.
+  let sources = interfaceLiftSources(modulePath, resourceModule)
+  let actionKey = interfaceLiftActionKey(sources, resourceModule, extraPaths,
+    workDir)
+  let declaredInputs = sources
+  var declaredOutputs = @[artifactPath]
+  if stubPath.len > 0:
+    declaredOutputs.add(stubPath)
+  let process = directProcess(corepaths.normalizedPath(nimCompilerPath()), [],
+    corepaths.normalizedPath(workDir))
+  let edge = InterfaceLiftEdge(
+    actionSpec: ActionSpec(
+      actionId: stableIdFromDigest(actionKey),
+      process: process,
+      dependencyPolicy: automaticMonitorGatheringPolicy(),
+      metadata: interfaceLiftMetadata(declaredInputs, declaredOutputs,
+        actionKey)),
+    declaredInputs: declaredInputs,
+    declaredOutputs: declaredOutputs,
+    actionFingerprint: actionKey)
+  InterfaceLiftPlan(
+    modulePath: modulePath,
+    resourceModule: resourceModule,
+    extraPaths: @extraPaths,
+    artifactPath: artifactPath,
+    stubPath: stubPath,
+    inputSources: sources,
+    liftEdge: edge,
+    interfaceLiftActionKey: actionKey,
+    workDir: workDir)
+
+proc interfaceArtifactFresh*(plan: InterfaceLiftPlan): bool =
+  ## TI1: is the on-disk interface artifact a cache HIT for this plan? Fresh
+  ## iff the artifact exists AND the recomputed ``InterfaceLiftActionKey`` is
+  ## unchanged (the extraction cache record already gates the underlying
+  ## extractor on the same input closure). A stale artifact returns false and
+  ## the lift edge re-runs.
+  if plan.artifactPath.len == 0 or
+      not fileExists(extendedPath(plan.artifactPath)):
+    return false
+  try:
+    let sidecar = interfaceLiftActionKeyPath(plan.artifactPath)
+    if not fileExists(extendedPath(sidecar)):
+      return false
+    let stored = readFile(extendedPath(sidecar)).strip()
+    stored == toHex(plan.interfaceLiftActionKey.bytes)
+  except CatchableError:
+    false
+
+proc liftInterfaceArtifact*(plan: InterfaceLiftPlan): ProjectInterfaceArtifact =
+  ## TI1: MATERIALIZE the interface-lift edge — run the lift once and cache
+  ## the ``ProjectInterfaceArtifact`` keyed by the ``InterfaceLiftActionKey``.
+  ## A second call with an unchanged input closure is a cache HIT (the
+  ## underlying ``extractInterfaceFromModule`` short-circuits on its own
+  ## extraction cache; here we additionally short-circuit on the action-key
+  ## sidecar so the lift edge is not re-run). The persisted artifact round-
+  ## trips through the existing ``ProjectInterfaceArtifact`` codec.
+  if interfaceArtifactFresh(plan):
+    return readInterfaceArtifactWithWarm(plan.artifactPath)
+  result = extractInterfaceFromModule(plan.modulePath, plan.artifactPath,
+    plan.stubPath, plan.workDir, requireStub = plan.stubPath.len > 0,
+    resourceModule = plan.resourceModule, extraPaths = plan.extraPaths)
+  try:
+    writeFile(extendedPath(interfaceLiftActionKeyPath(plan.artifactPath)),
+      toHex(plan.interfaceLiftActionKey.bytes))
+  except CatchableError:
+    discard

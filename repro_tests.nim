@@ -6094,6 +6094,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_ti1_interface_artifact_edge.nim",
+    binary: "build/test-bin/t_ti1_interface_artifact_edge",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_rp2_provider_session_invoke.nim",
     binary: "build/test-bin/t_rp2_provider_session_invoke",
     defines: @[],
