@@ -379,6 +379,99 @@ suite "M16 — repro workspace start <branch> marks feature branch":
       check recorded.isSome
       check recorded.get() == "feature-switch"
 
+  test "test_m16_start_converges_mixed_local_matrix":
+    ## An earlier ``workspace start`` interrupted mid-create leaves the
+    ## feature branch present (locally, at HEAD) on SOME repos and absent on
+    ## the rest, with no remote branch involved. Re-running the identical
+    ## command must CONVERGE that partial matrix — create the branch on the
+    ## repos still missing it, switch every repo onto it, and set the mark —
+    ## rather than refusing it as "mixed".
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "converge")
+      defer: removeDir(fx.scratch)
+
+      cloneAll(gitBin, fx)
+      seedMetadataBranch(fx, "main")
+
+      # Purely-local partial matrix: branch present on lib-a and lib-b (at
+      # HEAD), absent on lib-c. Never pushed, so no remote branch exists.
+      createLocalBranchAtHead(gitBin, fx.workspaceRoot / "lib-a",
+        "feature-mixed")
+      createLocalBranchAtHead(gitBin, fx.workspaceRoot / "lib-b",
+        "feature-mixed")
+      check not localBranchExists(gitBin,
+        fx.workspaceRoot / "lib-c", "feature-mixed")
+
+      let res = invokeStart(fx, "feature-mixed")
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      let report = readReport(fx)
+      check report["exitCode"].getInt() == 0
+      # CONVERGE (not "refused", not "create") — the distinguishing mode
+      # for finishing a purely-local partial matrix.
+      check report["mode"].getStr() == "converge"
+      check report["branch"].getStr() == "feature-mixed"
+      check report["recordedBranch"].getStr() == "feature-mixed"
+      check report["featureStarted"].getBool() == true
+      check report["repos"].len == 3
+
+      # The branch now exists on every repo (freshly created on lib-c) and
+      # every repo is switched onto it.
+      for name in ["lib-a", "lib-b", "lib-c"]:
+        check localBranchExists(gitBin, fx.workspaceRoot / name,
+          "feature-mixed")
+        check currentBranch(gitBin, fx.workspaceRoot / name) ==
+          "feature-mixed"
+
+      check readWorkspaceFeatureStarted(fx.workspaceRoot) == true
+      let recorded = readWorkspaceBranch(fx.workspaceRoot)
+      check recorded.isSome
+      check recorded.get() == "feature-mixed"
+
+  test "test_m16_start_refuses_mixed_when_remote_branch_involved":
+    ## When the mixed matrix involves a REMOTE branch — some repo already
+    ## carries the branch on its remote while another lacks it entirely —
+    ## the intent (adopt the remote branch vs. create fresh) is genuinely
+    ## ambiguous, so ``start`` must still refuse cleanly (exit 2).
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "converge-remote")
+      defer: removeDir(fx.scratch)
+
+      cloneAll(gitBin, fx)
+      seedMetadataBranch(fx, "main")
+
+      # lib-a: branch present ONLY on its remote. lib-b/lib-c: absent
+      # everywhere. Mixed WITH a remote → ambiguous → refuse.
+      #
+      # `start` probes the remote under the manifest's remote name
+      # (``gitRemoteNameFor`` → "lib-a-origin"), but the fixture clone names
+      # its remote "origin"; add the manifest-named remote (same bare repo)
+      # so the probe resolves regardless of which name the resolver returns.
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-a") &
+        " remote add lib-a-origin " & q(fileUrl(fx.libA.origin)))
+      createLocalBranchAtHead(gitBin, fx.workspaceRoot / "lib-a",
+        "feature-remote")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-a") &
+        " push origin feature-remote")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-a") &
+        " branch -D feature-remote")
+
+      let res = invokeStart(fx, "feature-remote")
+      check res.code == 2
+
+      let report = readReport(fx)
+      check report["exitCode"].getInt() == 2
+      check report["mode"].getStr() == "refused"
+      check report["featureStarted"].getBool() == false
+
   test "test_m16_start_refuses_when_any_repo_dirty":
     let gitBin = findExe("git")
     if gitBin.len == 0:

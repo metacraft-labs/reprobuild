@@ -21443,21 +21443,84 @@ proc writeGeneratedWorkspaceProjects(workspaceRoot: string) =
 proc gitRunPlain(identity: GitToolIdentity;
                  args: openArray[string]): tuple[code: int; output: string]
 
+proc repoCheckoutRecognized(identity: GitToolIdentity; repoAbs: string;
+    repo: ResolvedRepo; existingRemoteUrls: seq[string]): bool =
+  ## Decide whether the git checkout at ``repoAbs`` is recognizably THIS
+  ## manifest repo. Used to gate the auto-modifying remote alignment so a
+  ## foreign checkout that happens to occupy a repo path is left untouched
+  ## rather than having its git remotes silently rewritten.
+  ##
+  ## Recognized when ANY of:
+  ##   * it has no remotes configured yet — nothing to clobber; a fresh or
+  ##     partial clone we may safely populate;
+  ##   * one of its remote URLs already matches an expected manifest URL —
+  ##     it is ours, possibly with drifted remote *names* or extras;
+  ##   * its HEAD is at the manifest's pinned revision — content identity,
+  ##     which covers a genuinely drifted remote *URL* (e.g. an org rename)
+  ##     where rewriting the remote is exactly the intended fix.
+  ##
+  ## Only a checkout that matches NONE of these — remotes present, none
+  ## pointing at an expected URL, and HEAD not at the pinned revision — is
+  ## treated as unrecognized (left untouched by the caller).
+  if existingRemoteUrls.len == 0:
+    return true
+  var expectedUrls = initHashSet[string]()
+  if repo.fetchUrl.len > 0: expectedUrls.incl(repo.fetchUrl)
+  for r in repo.remotes:
+    if r.fetchUrl.len > 0: expectedUrls.incl(r.fetchUrl)
+  for u in existingRemoteUrls:
+    if u in expectedUrls:
+      return true
+  if repo.revision.len > 0:
+    let headSha = localHeadOrEmpty(identity, repoAbs)
+    if headSha.len > 0:
+      if looksLikeSha(repo.revision):
+        if headSha.startsWith(repo.revision) or repo.revision.startsWith(headSha):
+          return true
+      else:
+        let branchTip = expectedBranchTip(identity, repoAbs, repo.revision,
+          remoteName = gitRemoteNameFor(repo))
+        if branchTip.len > 0 and branchTip == headSha:
+          return true
+  false
+
 proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; identity: GitToolIdentity) =
   ## Align on-disk Git remote configurations to match the resolved TOML manifests.
   ## Expected remotes are added/updated with correct URLs, and stale remotes are cleaned up.
+  ##
+  ## Rewriting remotes is an auto-modification, so — consistent with the
+  ## "observe, don't auto-modify an unrecognized checkout" contract the init
+  ## classifier follows — a checkout whose identity we cannot confirm
+  ## (``repoCheckoutRecognized`` false) is skipped and reported rather than
+  ## having its remotes rewritten. This protects an unrelated repository that
+  ## happens to occupy a repo path from being silently re-pointed.
   for repo in repos:
     let repoAbs = workspaceRoot / repo.path
     if not dirExists(repoAbs / ".git"):
       continue
-    # 1. Get existing remotes
+    # 1. Get existing remotes (names + URLs)
     let existingRes = gitRunPlain(identity, ["-C", repoAbs, "remote"])
     var existingRemotes = initHashSet[string]()
+    var existingRemoteUrls: seq[string]
     if existingRes.code == 0:
       for line in existingRes.output.strip().splitLines():
         let name = line.strip()
         if name.len > 0:
           existingRemotes.incl(name)
+          let urlRes = gitRunPlain(identity, ["-C", repoAbs, "remote", "get-url", name])
+          if urlRes.code == 0 and urlRes.output.strip().len > 0 and
+              urlRes.output.strip() notin existingRemoteUrls:
+            existingRemoteUrls.add(urlRes.output.strip())
+
+    # Identity guard: never rewrite the remotes of a checkout we cannot
+    # recognize as this manifest repo.
+    if not repoCheckoutRecognized(identity, repoAbs, repo, existingRemoteUrls):
+      stderr.writeLine("workspace: skipping remote alignment for '" & repo.path &
+        "' — its git remotes (" & existingRemoteUrls.join(", ") &
+        ") do not match the manifest source and its HEAD is not at the pinned " &
+        "revision; leaving this checkout untouched (not recognized as '" &
+        repo.name & "').")
+      continue
 
     # 2. Add or update expected remotes
     var expectedRemotes = initHashSet[string]()
@@ -36096,6 +36159,7 @@ proc executeWorkspaceStart(parsed: WorkspaceStartArgs): WorkspaceStartReport =
   var anyProbeFailed = false
   var allHaveBranch = true   # local OR remote on EVERY repo
   var noneHaveBranch = true  # neither local NOR remote on ANY repo
+  var anyRemote = false      # the branch exists on the remote of ANY repo
   for repo in resolved.repos:
     var state: StartRepoState
     state.repo = repo
@@ -36145,6 +36209,7 @@ proc executeWorkspaceStart(parsed: WorkspaceStartArgs): WorkspaceStartReport =
        parsed.branchName])
     if remoteProbe.code == 0 and remoteProbe.output.strip().len > 0:
       state.remoteHadBranch = true
+      anyRemote = true
     if state.localHadBranch or state.remoteHadBranch:
       noneHaveBranch = false
     else:
@@ -36208,8 +36273,14 @@ proc executeWorkspaceStart(parsed: WorkspaceStartArgs): WorkspaceStartReport =
       result.recordedBranch = recordedBranchPre.get()
     result.featureStarted = recordedFeatureStartedPre
     return
-  if not allHaveBranch and not noneHaveBranch:
-    # Mixed: some repos have the branch, some don't. Refuse cleanly.
+  if not allHaveBranch and not noneHaveBranch and anyRemote:
+    # Mixed WITH a remote branch involved: some repos already carry the
+    # branch on their remote while others lack it entirely. Whether the
+    # operator means to ADOPT the existing remote branch everywhere or to
+    # CREATE a fresh one is genuinely ambiguous, so refuse and report.
+    # (A purely-local mixed matrix — the fingerprint of an interrupted
+    # `start` create — is NOT refused here: it falls through to the
+    # CREATE/CONVERGE path below, which finishes it idempotently.)
     for state in states:
       var entry = WorkspaceStartRepoEntry(
         name: state.repo.name,
@@ -36272,9 +36343,16 @@ proc executeWorkspaceStart(parsed: WorkspaceStartArgs): WorkspaceStartReport =
         diagnostic: err.msg))
     return
 
-  # CREATE path — branch is absent on every repo. Delegate to
-  # executeBranchCreate, then layer the started mark on top.
-  result.mode = "create"
+  # CREATE / CONVERGE path. Either the branch is absent on every repo
+  # (a fresh create) OR an earlier `repro workspace start` was interrupted
+  # mid-create and left a purely-local partial matrix — the branch present
+  # (at HEAD) on some repos, absent on the rest, with no remote branch
+  # involved. `executeBranchCreate` is idempotent (a branch already at HEAD
+  # is a no-op) and collision-safe (a local branch at a DIFFERENT SHA is
+  # refused with exit 2), so delegating here CONVERGES the partial state on
+  # re-run rather than refusing it. `executeCheckout` then switches every
+  # repo onto the branch.
+  result.mode = if noneHaveBranch: "create" else: "converge"
   let branchParsed = BranchArgs(
     workspaceRoot: parsed.workspaceRoot,
     projectName: parsed.projectName,
