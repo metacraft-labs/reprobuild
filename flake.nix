@@ -36,7 +36,33 @@
       #
       # Pinned to the hardened io-mon revision validated for this retirement
       # campaign.
-      url = "github:metacraft-labs/io-mon/b462aea52321c685bf942c5c11505aa0251b7cad";
+      #
+      # Bumped to the Lossless-Event-Capture dev tip: io-mon's Linux dependency
+      # channel is now the grow-only shared-memory set ``nim-shm-gset`` (Candidate
+      # C — dedup-at-source, no orphan spill), NOT the ``shm_queue`` ring, which
+      # io-mon no longer imports at all. fs_snoop.nim / writer.nim now
+      # ``import shm_gset`` + ``shm_gset/transport``, so this pin requires the
+      # nim-shm-gset-src input below and its SHM_GSET_SRC wiring.
+      url = "github:metacraft-labs/io-mon/253ee15c117dace3c8af547f75efefa778ba82c1";
+      flake = false;
+    };
+    nim-shm-gset-src = {
+      # nim-shm-gset ships the ``shm_gset`` package: a lock-free grow-only set
+      # (G-Set / join-semilattice CRDT over opaque byte blobs — idempotent
+      # slot-claim CAS, no deletion, file-backed shards, app-id-scoped reaper).
+      # It is io-mon's PRIMARY Linux dependency-capture transport (Candidate C of
+      # the Lossless Event Capture campaign): dedup-at-source so ``configure`` /
+      # ``cmake`` probe storms collapse to the *distinct* dependency set. io-mon's
+      # config.nims reads SHM_GSET_SRC (then falls back to a ``../nim-shm-gset``
+      # sibling); the sandboxed package build + override-free CI jobs have no
+      # sibling, so seed it from here — exactly like nim-shm-queue-src.
+      # reprobuild does not import shm_gset directly; it flows in transitively
+      # through io_mon (fs_snoop / writer), so config.nims still adds it to Nim's
+      # --path for the io-mon compile to resolve.
+      #
+      # Pinned to the nim-shm-gset dev tip matching the io-mon pin above (ShmGSet
+      # API rename landed).
+      url = "github:metacraft-labs/nim-shm-gset/8a9f2f13beb24ab7949ff93c14fb34ae753bbe48";
       flake = false;
     };
     nim-shm-queue-src = {
@@ -146,6 +172,7 @@
       codetracer-native-recorder,
       runquota-src,
       io-mon-src,
+      nim-shm-gset-src,
       nim-shm-queue-src,
       bundlers,
       ...
@@ -239,6 +266,7 @@
                 export BEARSSL_SRC=${bearssl-src}
                 export STACKABLE_HOOKS_SRC=${stackable-hooks-src}/src
                 export IO_MON_SRC=${io-mon-src}/src
+                export SHM_GSET_SRC=${nim-shm-gset-src}/src
                 export SHM_QUEUE_SRC=${nim-shm-queue-src}/src
                 export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
@@ -292,6 +320,7 @@
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
             IO_MON_SRC = "${io-mon-src}/src";
+            SHM_GSET_SRC = "${nim-shm-gset-src}/src";
             SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
@@ -474,6 +503,7 @@
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
             IO_MON_SRC = "${io-mon-src}/src";
+            SHM_GSET_SRC = "${nim-shm-gset-src}/src";
             SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";

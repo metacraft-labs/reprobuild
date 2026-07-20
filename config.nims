@@ -374,6 +374,17 @@ addPackagePath("SHM_QUEUE_SRC", [
   ".." / "nim-shm-queue" / "src",
 ], "shm_queue.nim", useDevShellFallback = true)
 
+# SHM-GSET: io-mon's Linux dependency-capture channel is the grow-only
+# shared-memory set ``shm_gset`` (nim-shm-gset — Candidate C of the Lossless
+# Event Capture campaign; dedup-at-source over file-backed shards). reprobuild
+# does not import it directly, but io_mon's fs_snoop.nim / writer.nim do, so the
+# io-mon compile that flows in through ``import io_mon`` needs ``shm_gset`` on the
+# --path. Resolve it like every other Nim sibling: prefer ``$SHM_GSET_SRC``, then
+# the sibling checkout.
+addPackagePath("SHM_GSET_SRC", [
+  ".." / "nim-shm-gset" / "src",
+], "shm_gset.nim", useDevShellFallback = true)
+
 # R2: vm-harness lives in the sibling ``D:/metacraft/vm-harness/`` repo
 # (see ReproOS-MVP R0 status). The R2 boot integration test
 # (tests/integration/t_r2_iso_boot.nim) imports ``vm_harness`` to drive
