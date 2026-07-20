@@ -31612,6 +31612,7 @@ type
     untrackedCount*: int
     modifiedCount*: int
     unmergedBranches*: seq[string]
+    fileDetails*: seq[FileStatusEntry]
 
   WorkspaceStatusManifestEntry* = object
     ## One per refreshed manifest layer (M10's ``refreshManifestLayers``
@@ -31685,6 +31686,13 @@ proc toJsonNode*(report: WorkspaceStatusReport): JsonNode =
     var unmerged = newJArray()
     for b in entry.unmergedBranches: unmerged.add(%b)
     obj["unmergedBranches"] = unmerged
+    var details = newJArray()
+    for fd in entry.fileDetails:
+      var fdObj = newJObject()
+      fdObj["code"] = %fd.code
+      fdObj["path"] = %fd.path
+      details.add(fdObj)
+    obj["fileDetails"] = details
     repos.add(obj)
   result["repos"] = repos
   var summary = newJObject()
@@ -31728,6 +31736,10 @@ proc renderStatusTextLines*(report: WorkspaceStatusReport): seq[string] =
     if entry.diagnostic.len > 0:
       line.add(" (" & entry.diagnostic & ")")
     result.add(line)
+    # `--file-details`: one indented line per changed path, carrying the raw
+    # porcelain `XY` code (staged/unstaged/conflict), like `repo status`.
+    for fd in entry.fileDetails:
+      result.add("workspace status:     " & fd.code & " " & fd.path)
   result.add("workspace status: summary clean=" & $report.summary.clean &
     " dirty=" & $report.summary.dirty &
     " missing=" & $report.summary.missing &
@@ -31745,6 +31757,7 @@ type
     files: bool
     aheadBehind: bool
     unmerged: bool
+    fileDetails: bool
 
 proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
   ## ``repro workspace status`` argv parser. The single optional
@@ -31758,6 +31771,11 @@ proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
   ##   ``--files`` — query/display modified/untracked file counts and clean/dirty states.
   ##   ``--ahead-behind`` — query/display ahead/behind commit counts.
   ##   ``--unmerged`` — query/display unmerged branches.
+  ##   ``--file-details`` — list each changed path with its porcelain ``XY``
+  ##     status (staged/unstaged etc.), not just the modified/untracked counts.
+  ##     An additive opt-in: it does NOT participate in the "no selector → all
+  ##     on" default, so `status --file-details` augments the full default
+  ##     output rather than narrowing it. Implies file querying.
   result.workspaceRoot = ""
   result.toolProvisioning = tpmPathOnly
   var i = 0
@@ -31779,6 +31797,8 @@ proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
       result.aheadBehind = true
     elif arg == "--unmerged":
       result.unmerged = true
+    elif arg == "--file-details":
+      result.fileDetails = true
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace status` flag: " & arg)
@@ -31987,8 +32007,10 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
       continue
 
     let trunkBranch = if resolved.trunk.len > 0: resolved.trunk else: "main"
+    # `--file-details` implies file querying (it reads the same porcelain).
     let extQuery = extendedStatusQuery(repoAbsPath, trunkBranch,
-      args.stashes, args.files, args.aheadBehind, args.unmerged)
+      args.stashes, args.files or args.fileDetails, args.aheadBehind,
+      args.unmerged, queryFileDetails = args.fileDetails)
     let res = queryGitState(extQuery, identity)
 
     # Re-create mock results for compatibility with evidence system
@@ -32025,6 +32047,7 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
     entry.untrackedCount = res.untrackedCount
     entry.modifiedCount = res.modifiedCount
     entry.unmergedBranches = res.unmergedBranches
+    entry.fileDetails = res.fileDetails
 
     var diagnostic = ""
     if evHeadSha.status == wvesFailed: diagnostic.add(evHeadSha.diagnostic)

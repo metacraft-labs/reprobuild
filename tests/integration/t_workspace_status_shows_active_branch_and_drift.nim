@@ -551,3 +551,51 @@ suite "M12 — repro workspace status (active branch + drift)":
       check "project=lib-a branch=main" in res.output
       # ...while lib-a's own per-repo line still honestly shows its branch.
       check "lib-a clean branch=feature-x" in res.output
+
+  test "test_m12_status_file_details_lists_paths_with_xy_codes":
+    ## `--file-details` surfaces each changed path with its porcelain `XY`
+    ## status (the staged-vs-unstaged granularity `repo status` has, which the
+    ## coarse modified/untracked counts lack). It is additive: an opt-in that
+    ## augments — the default fields stay — rather than narrowing the output.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "file-details")
+      defer: removeDir(fx.scratch)
+      cloneAll(gitBin, fx)
+      check invokeLock(fx).code == 0
+
+      let libB = fx.workspaceRoot / "lib-b"
+      # Staged addition (X=A), unstaged modification (Y=M), and an untracked
+      # file (??) — three distinct porcelain codes the counts cannot express.
+      writeFile(libB / "added.txt", "new\n")
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " add added.txt")
+      writeFile(libB / "README.md", "changed\n")   # committed file, NOT staged
+      writeFile(libB / "untracked.txt", "loose\n")
+
+      # Default status: file details are NOT included (opt-in).
+      check invokeStatus(fx).code == 0
+      check findRepo(readReport(fx), "lib-b")["fileDetails"].len == 0
+
+      # With --file-details: the per-file XY list appears AND the default
+      # fields remain present (additive, not narrowing).
+      let res = invokeStatus(fx, ["--file-details"])
+      check res.code == 0
+      check "modified=2 untracked=1" in res.output   # coarse counts still there
+      check "A  added.txt" in res.output             # staged add
+      check " M README.md" in res.output             # unstaged modification
+      check "?? untracked.txt" in res.output         # untracked
+
+      let libBEntry = findRepo(readReport(fx), "lib-b")
+      check libBEntry["fileDetails"].len == 3
+      var codes, paths: seq[string]
+      for fd in libBEntry["fileDetails"]:
+        codes.add(fd["code"].getStr())
+        paths.add(fd["path"].getStr())
+      check "A " in codes    # staged add (X column)
+      check " M" in codes    # unstaged modification (leading space preserved)
+      check "??" in codes    # untracked
+      check "added.txt" in paths
+      check "README.md" in paths
+      check "untracked.txt" in paths

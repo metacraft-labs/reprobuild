@@ -143,10 +143,22 @@ type
     queryFiles*: bool
     queryAheadBehind*: bool
     queryUnmerged*: bool
+    queryFileDetails*: bool
 
   GitQueryStatus* = enum
     gqsOk
     gqsFailed
+
+  FileStatusEntry* = object
+    ## One changed path from ``git status --porcelain`` (v1). ``code`` is
+    ## the raw two-column ``XY`` status (index column X, worktree column
+    ## Y) — e.g. ``"M "`` (staged modification), ``" M"`` (unstaged),
+    ## ``"MM"`` (both), ``"A "`` (added), ``"??"`` (untracked), ``"UU"``
+    ## (conflict). ``path`` is the pathspec (for renames/copies the raw
+    ## ``ORIG -> DEST`` form is preserved). This is the per-file detail
+    ## behind the coarse ``modifiedCount`` / ``untrackedCount`` tallies.
+    code*: string
+    path*: string
 
   GitQueryResult* = object
     status*: GitQueryStatus
@@ -160,6 +172,7 @@ type
     untrackedCount*: int
     modifiedCount*: int
     unmergedBranches*: seq[string]
+    fileDetails*: seq[FileStatusEntry]
 
 
 const PayloadVersion* = "reprobuild.workspace-vcs.payload.v1"
@@ -1168,11 +1181,14 @@ proc isPublishedQuery*(repoPath, remoteName: string): GitQueryAction =
     remoteName: remoteName)
 
 proc extendedStatusQuery*(repoPath, trunkBranch: string;
-                          queryStashes, queryFiles, queryAheadBehind, queryUnmerged: bool): GitQueryAction =
+                          queryStashes, queryFiles, queryAheadBehind,
+                          queryUnmerged: bool;
+                          queryFileDetails = false): GitQueryAction =
   GitQueryAction(kind: gqkExtendedStatus, repoPath: repoPath,
     remoteName: "origin", trunkBranch: trunkBranch,
     queryStashes: queryStashes, queryFiles: queryFiles,
-    queryAheadBehind: queryAheadBehind, queryUnmerged: queryUnmerged)
+    queryAheadBehind: queryAheadBehind, queryUnmerged: queryUnmerged,
+    queryFileDetails: queryFileDetails)
 
 proc queryGitState*(query: GitQueryAction;
                     identity: GitToolIdentity): GitQueryResult =
@@ -1218,6 +1234,7 @@ proc queryGitState*(query: GitQueryAction;
     var untrackedCount = 0
     var modifiedCount = 0
     var unmergedBranches: seq[string] = @[]
+    var fileDetails: seq[FileStatusEntry] = @[]
     var diagnostic = ""
 
     # 1. HEAD SHA
@@ -1232,14 +1249,21 @@ proc queryGitState*(query: GitQueryAction;
       let statusRes = runGit(payload, ["-C", query.repoPath, "status", "--porcelain"])
       if statusRes.exitCode == 0:
         isClean = true
-        for line in statusRes.output.splitLines():
-          let stripped = line.strip()
-          if stripped.len == 0: continue
+        for rawLine in statusRes.output.splitLines():
+          if rawLine.strip().len == 0: continue
           isClean = false
-          if stripped.startsWith("??"):
+          # Porcelain v1: the two status columns (index X, worktree Y) are at
+          # positions 0-1; the path follows at position 3. The leading columns
+          # are SIGNIFICANT (a leading space means "unstaged"), so read them from
+          # the RAW line — never `strip()` — to preserve staged/unstaged.
+          let xy = if rawLine.len >= 2: rawLine[0 ..< 2] else: rawLine
+          let path = if rawLine.len >= 3: rawLine[3 .. ^1] else: ""
+          if xy == "??":
             inc untrackedCount
           else:
             inc modifiedCount
+          if query.queryFileDetails:
+            fileDetails.add(FileStatusEntry(code: xy, path: path))
       else:
         diagnostic.add("; git status failed: " & statusRes.output.trimmed)
     else:
@@ -1314,6 +1338,7 @@ proc queryGitState*(query: GitQueryAction;
       behindCount: behindCount,
       untrackedCount: untrackedCount,
       modifiedCount: modifiedCount,
-      unmergedBranches: unmergedBranches
+      unmergedBranches: unmergedBranches,
+      fileDetails: fileDetails
     )
 
