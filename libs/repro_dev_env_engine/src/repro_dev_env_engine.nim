@@ -113,31 +113,18 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     weakFingerprint = plan.compileEdge.actionFingerprint,
     dependencyPolicy = automaticMonitorGatheringPolicy())
 
-proc siblingFullReproPath(cliPath: string): string =
-  if cliPath.len == 0:
-    return ""
-  let candidate = parentDir(cliPath) / addFileExt("repro-full", ExeExt)
-  if fileExists(candidate):
-    os.normalizedPath(candidate)
-  else:
-    ""
-
 proc providerCompileCliPath(config: DevEnvEdgeConfig): string =
   ## Dev-env tests may call this library from a test binary, so
-  ## ``getAppFilename()`` is not a reliable repro helper path here. When the
-  ## monitor is the consolidated ``repro internal io monitor`` driver, reuse
-  ## that repro image or its sibling ``repro-full``. Otherwise fall back to the
-  ## public CLI path.
+  ## ``getAppFilename()`` is not a reliable repro helper path here. Since the
+  ## single-`repro` consolidation there is no ``repro-full`` companion, so the
+  ## monitor/public CLI path is already the full ``repro`` image to run the
+  ## monitored provider-compile edge with. When the monitor is the consolidated
+  ## ``repro internal io monitor`` driver, reuse its image; otherwise fall back
+  ## to the public CLI path.
   let internalMonitorArgs = @["internal", "io", "monitor"]
-  if config.monitorCliArgs == internalMonitorArgs:
-    if extractFilename(config.monitorCliPath) == addFileExt("repro-full", ExeExt):
-      return os.normalizedPath(config.monitorCliPath)
-    let monitorSibling = siblingFullReproPath(config.monitorCliPath)
-    if monitorSibling.len > 0:
-      return monitorSibling
-  let publicSibling = siblingFullReproPath(config.publicCliPath)
-  if publicSibling.len > 0:
-    return publicSibling
+  if config.monitorCliArgs == internalMonitorArgs and
+      config.monitorCliPath.len > 0:
+    return os.normalizedPath(config.monitorCliPath)
   config.publicCliPath
 
 proc invalidateStaleProviderCompileArtifact(plan: ProviderCompilePlan;

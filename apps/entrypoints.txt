@@ -10,7 +10,6 @@
 # http:// is unchanged. The reprobuild dev shell / nix build supplies the
 # OpenSSL `-L` via NIX_LDFLAGS.
 repro apps/repro/repro.nim --define:ssl --define:reproVendoredHash
-repro-full apps/repro-full/repro_full.nim --define:ssl
 # ReproOS-Generations-And-Foreign-Packages A2 / Windows-Runner-Binary-Cache-Deploy M1:
 # the long-lived binary-cache HTTP daemon. Serves GET /healthz, GET /cache-info,
 # GET /manifests/<hex>, GET /payloads/<hex>, POST /publish on 0.0.0.0:7878 by

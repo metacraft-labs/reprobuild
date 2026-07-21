@@ -1,50 +1,14 @@
-when defined(windows):
-  import repro_cli_support
+## The single `repro` CLI (Executable-Consolidation-And-Size-Optimization.md).
+##
+## `repro` is one binary that dispatches by subcommand via `runThinApp` and
+## self-spawns its internal role-processes (`repro internal …`). There is no
+## separate `repro-full` image and no thin POSIX launcher: the shell-hook
+## `dev-env export` fast path (Shell-Direnv-Hook.md) runs directly in this
+## binary through the same cache-key no-op check, trading the former sub-5 ms
+## launcher for one binary at a ~10 ms cold start (accepted; the sub-ms path is
+## the M78 daemon).
 
-  when isMainModule:
-    quit runThinApp("repro")
-else:
-  import std/[os, posix]
+import repro_cli_support
 
-  import repro_cli_support/dev_env_fast_path
-
-  proc publicCliPath(): string =
-    let app = getAppFilename()
-    if app.isAbsolute:
-      os.normalizedPath(app)
-    elif app.contains(DirSep) or app.contains(AltSep):
-      os.normalizedPath(getCurrentDir() / app)
-    else:
-      let resolved = findExe(app)
-      if resolved.len > 0 and resolved.isAbsolute:
-        os.normalizedPath(resolved)
-      elif resolved.len > 0:
-        os.normalizedPath(getCurrentDir() / resolved)
-      else:
-        os.normalizedPath(getCurrentDir() / app)
-
-  proc fullCliPath(): string =
-    let app = publicCliPath()
-    let sibling = parentDir(app) / addFileExt("repro-full", ExeExt)
-    if fileExists(sibling):
-      return sibling
-    let onPath = findExe(addFileExt("repro-full", ExeExt))
-    if onPath.len > 0:
-      return onPath
-    sibling
-
-  proc execFullCli(args: seq[string]) {.noreturn.} =
-    let full = fullCliPath()
-    putEnv("REPRO_PUBLIC_CLI_PATH", publicCliPath())
-    let argv = allocCStringArray(@[full] & args)
-    discard execv(cstring(full), argv)
-    stderr.writeLine("repro: failed to exec " & full & ": " &
-      osErrorMsg(osLastError()))
-    quit(127)
-
-  when isMainModule:
-    let args = commandLineParams()
-    let fast = tryDevEnvExportFastPath(args)
-    if fast.handled:
-      quit fast.exitCode
-    execFullCli(args)
+when isMainModule:
+  quit runThinApp("repro")

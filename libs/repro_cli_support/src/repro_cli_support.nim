@@ -4979,29 +4979,17 @@ proc selfSpawnIoMonitorPath(): string =
   ## io-monitor role.
   os.normalizedPath(getAppFilename())
 
-proc siblingFullReproPath(publicCliPath: string): string =
-  if publicCliPath.len == 0:
-    return ""
-  let candidate = parentDir(publicCliPath) /
-    addFileExt("repro-full", ExeExt)
-  if fileExists(extendedPath(candidate)):
-    os.normalizedPath(candidate)
-  else:
-    ""
-
 proc internalReproHelperCliPath(publicCliPath: string): string =
-  ## Path used for monitored internal helper actions. On POSIX the public
-  ## ``repro`` executable is a thin wrapper that execs ``repro-full``; running
-  ## the wrapper as the root monitored process makes io-mon observe a root
-  ## exec replacement before the helper does any useful work. Prefer the
-  ## current full image when this code is executing inside repro/repro-daemon,
-  ## and fall back to the sibling full image for embedded/test callers.
+  ## Path used for monitored internal helper actions. Since the single-`repro`
+  ## consolidation the running ``repro`` image IS the full CLI (no thin wrapper,
+  ## no ``repro-full`` companion), so a real ``repro`` process self-spawns its
+  ## current image. Embedded/test callers (whose ``getAppFilename`` is a test
+  ## binary) fall back to the explicit ``publicCliPath`` they pass in.
   let current = os.normalizedPath(getAppFilename())
-  if extractFilename(current) == addFileExt("repro-full", ExeExt):
+  if extractFilename(current) == addFileExt("repro", ExeExt):
     return current
-  let sibling = siblingFullReproPath(publicCliPath)
-  if sibling.len > 0:
-    return sibling
+  if publicCliPath.len > 0:
+    return os.normalizedPath(publicCliPath)
   current
 
 proc siblingTryCompileProviderPath(publicCliPath: string): string =

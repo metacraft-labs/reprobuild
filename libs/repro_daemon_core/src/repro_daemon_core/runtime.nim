@@ -218,21 +218,11 @@ proc absoluteNormalized(path: string): string =
     os.normalizedPath(getCurrentDir() / path)
 
 proc companionFullCliPath(imagePath: string): string =
-  let fullName = addFileExt("repro-full", ExeExt)
-  let normalizedImage = absoluteNormalized(imagePath)
-  if imagePath.len > 0:
-    let sibling = absoluteNormalized(parentDir(imagePath) / fullName)
-    if sibling != normalizedImage and fileExists(sibling):
-      return sibling
-  let running = absoluteNormalized(getAppFilename())
-  if running.extractFilename == fullName and running != normalizedImage and
-      fileExists(running):
-    return running
-  let onPath = findExe(fullName)
-  if onPath.len > 0:
-    let normalized = absoluteNormalized(onPath)
-    if normalized != normalizedImage and fileExists(normalized):
-      return normalized
+  ## After the single-`repro` consolidation there is no separate `repro-full`
+  ## companion image — `repro` IS the full CLI. Return "" so the image digest
+  ## and daemon-staleness checks track only the one binary (`imagePath`), and so
+  ## a stale `repro-full` lingering on PATH is never adopted as a companion.
+  discard imagePath
   ""
 
 proc imageDigestHex(imagePath: string): string =
@@ -266,16 +256,10 @@ proc expectedDaemonRunningDigestHex(sourceExe: string; devMode: bool): string =
   fileDigestHex(sourceExe)
 
 proc stageFullCliCompanion(sourceExe, generationDir: string) =
-  let companion = companionFullCliPath(sourceExe)
-  if companion.len == 0:
-    return
-  let dest = generationDir / addFileExt("repro-full", ExeExt)
-  copyFile(companion, dest)
-  try:
-    setFilePermissions(dest, {fpUserRead, fpUserWrite,
-      fpUserExec, fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
-  except CatchableError:
-    discard
+  ## No-op after the single-`repro` consolidation: there is no `repro-full`
+  ## companion image to stage alongside the primary daemon image.
+  discard sourceExe
+  discard generationDir
 
 proc reconnectLimitationsText(): string =
   "watch sessions can be reattached by run id/session id; completed build " &
@@ -1713,11 +1697,10 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
     # payload decoder (`unsupported build target payload version`), a progress
     # encoding the new client renders as raw `progress:` lines, and so on.
     # Detect that by comparing the daemon-reported running-image hash to the
-    # on-disk image that daemon startup will actually execute. In normal mode
-    # `repro` may be a thin wrapper which immediately execs `repro-full`, while
-    # dev mode stages both files and tracks the composite wrapper+companion
-    # image. If either hash is unavailable we cannot prove staleness, so we
-    # leave the daemon running (fail safe).
+    # on-disk image that daemon startup will actually execute. `repro` is a
+    # single full-CLI image (no thin wrapper / `repro-full` companion), so the
+    # digest tracks that one binary. If either hash is unavailable we cannot
+    # prove staleness, so we leave the daemon running (fail safe).
     let expectedHash = expectedDaemonRunningDigestHex(sourceExe, config.devMode)
     if expectedHash.len == 0 or existing.runningHash.len == 0 or
         existing.runningHash == expectedHash:
