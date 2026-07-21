@@ -36,6 +36,12 @@ package qt6MultimediaSource:
     "qt6-base >=6.8"
     "qt6-declarative >=6.8"
     "qt6-shadertools >=6.8"
+    "ffmpeg >=7.1"
+    "pulseaudio >=17.0"
+    "libx11 >=1.8"
+    "xorgproto"
+    "libxext >=1.3"
+    "libxrandr >=1.5"
 
   config:
     discard
@@ -52,6 +58,14 @@ package qt6MultimediaSource:
         "QT_BUILD_TESTS=OFF",
         "QT_BUILD_EXAMPLES=OFF",
         "QT_GENERATE_SBOM=OFF",
+        # Qt's Linux FFmpeg backend requires PulseAudio client support.
+        # PipeWire supplies the compatible server at runtime.
+        "INPUT_ffmpeg=yes",
+        "FEATURE_pulseaudio=ON",
+        "FEATURE_alsa=OFF",
+        "FEATURE_gstreamer=OFF",
+        "CMAKE_CXX_FLAGS=-I/opt/repro/reprobuild/recipes/packages/source/libx11/.repro/output/install/usr/include -I/opt/repro/reprobuild/recipes/packages/source/xorgproto/.repro/output/install/usr/include -I/opt/repro/reprobuild/recipes/packages/source/libxext/.repro/output/install/usr/include -I/opt/repro/reprobuild/recipes/packages/source/libxrandr/.repro/output/install/usr/include",
+        "CMAKE_SHARED_LINKER_FLAGS=-L/opt/repro/reprobuild/recipes/packages/source/libx11/.repro/output/install/usr/lib -L/opt/repro/reprobuild/recipes/packages/source/libxext/.repro/output/install/usr/lib -L/opt/repro/reprobuild/recipes/packages/source/libxrandr/.repro/output/install/usr/lib",
       ]
       let pkg = cmake_package(srcDir = "./src", generator = "Ninja",
         cacheVars = opts, allowSourceWrites = true)
@@ -60,4 +74,10 @@ package qt6MultimediaSource:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    discard
+    "qt6-base >=6.8"
+    "qt6-declarative >=6.8"
+    "ffmpeg >=7.1"
+    "pulseaudio >=17.0"
+    "libx11 >=1.8"
+    "libxext >=1.3"
+    "libxrandr >=1.5"

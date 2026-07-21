@@ -3830,6 +3830,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/libsndfile/test_libsndfile_source.nim",
+    binary: "build/test-bin/test_libsndfile_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/libtirpc/test_libtirpc_source.nim",
     binary: "build/test-bin/test_libtirpc_source",
     defines: @[],
@@ -3878,6 +3886,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/libxext/test_libxext_source.nim",
+    binary: "build/test-bin/test_libxext_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/libxfont2/test_libxfont2_source.nim",
     binary: "build/test-bin/test_libxfont2_source",
     defines: @[],
@@ -3904,6 +3920,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/libxml2/test_libxml2_source.nim",
     binary: "build/test-bin/test_libxml2_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/libxrandr/test_libxrandr_source.nim",
+    binary: "build/test-bin/test_libxrandr_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/libxrender/test_libxrender_source.nim",
+    binary: "build/test-bin/test_libxrender_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -4112,6 +4144,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/procps/test_procps_source.nim",
     binary: "build/test-bin/test_procps_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/pulseaudio/test_pulseaudio_source.nim",
+    binary: "build/test-bin/test_pulseaudio_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
