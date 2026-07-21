@@ -10671,12 +10671,20 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # documented ``repro check`` surface and propagate the exit code
     # verbatim so the installed hook script can hand it back to git.
     #
-    # When refsFile is empty the hook was invoked with no refs to
-    # push (or invoked without git context, as in M17's
-    # dispatch-noop test). git itself only fires pre-push when refs
-    # exist, so an empty refs file means "nothing to gate" — return
-    # 0 so dispatch stays a no-op until something is actually pushed.
-    if refsFile.len == 0:
+    # When no refs are being pushed the hook has nothing to gate —
+    # return 0 so dispatch stays a no-op until something is actually
+    # pushed. Two shapes reach here:
+    #   * No ``--refs-file`` at all (M17's dispatch-noop test, or a
+    #     non-git dispatch): ``refsFile.len == 0``.
+    #   * A ``--refs-file`` pointing at an EMPTY stream: the managed
+    #     body always ``cat``s stdin into ``$REFS_FILE`` (even when
+    #     empty) and always passes the flag, so the path is non-empty
+    #     but the FILE has no ref lines. git itself only fires pre-push
+    #     when refs exist; an empty stream is a direct invocation (as in
+    #     the RA-4 coexistence test) or a push git resolved to nothing.
+    # Gate the FILE's content, not just the flag's presence.
+    if refsFile.len == 0 or not fileExists(refsFile) or
+        readFile(refsFile).strip().len == 0:
       return 0
     var checkArgs = @["--mode=pre-push"]
     if repoRoot.len > 0:

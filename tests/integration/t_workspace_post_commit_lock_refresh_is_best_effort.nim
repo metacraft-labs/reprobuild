@@ -307,14 +307,20 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       defer: removeDir(fx.scratch)
       cloneAll(gitBin, fx)
       # No seedWorkspaceToml call AND no resolved manifest checkout — the
-      # workspace is genuinely uninitialized (RA-10 canonical marker:
-      # a bare ``.repro/`` with no ``workspace.toml`` and no resolved
-      # ``projects/*.toml`` is NOT a workspace). The wrapper must skip
-      # silently. (``setupFixture`` seeds the flat ``projects/lib-a.toml``
-      # membership manifest; RA-10 treats a single resolvable project as an
-      # initialized workspace, so we strip it here to model the genuine
-      # non-workspace case this test is about.)
+      # workspace is genuinely uninitialized (RA-10 canonical marker
+      # [Workspace-RepoWorkspaces-Alignment.milestones.org RA-10; hooksRoot
+      # discovery walks up for a ``.repro/`` dir]: a bare ``.repro/`` with no
+      # ``workspace.toml`` and no resolved ``projects/*.toml`` is NOT a
+      # workspace). The wrapper must find that ``.repro/`` root and skip
+      # silently, writing a ``skipped-no-workspace`` report. (``setupFixture``
+      # seeds the flat ``projects/lib-a.toml`` membership manifest; RA-10 treats
+      # a single resolvable project as an initialized workspace, so we strip it
+      # here to model the genuine non-workspace case this test is about.)
       removeDir(fx.workspaceRoot / "projects")
+      # Native RA-10 marker: the post-commit workspace-root discovery keys on a
+      # ``.repro/`` directory. Without seedWorkspaceToml (which would create it)
+      # there is none, so create the bare marker the "non-workspace" case models.
+      createDir(fx.workspaceRoot / ".repro")
 
       let res = invokePostCommit(fx, fx.workspaceRoot / "lib-a")
       check res.code == 0
