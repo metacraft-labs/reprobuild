@@ -16,7 +16,7 @@
 ##     repro.lock                  the committed solved-graph lock (MO-1)
 ##     deps/nesteddep/             a NESTED develop-mode dep — its OWN git repo
 ##       repro.nim                 ``projectExtension nestedext, nestedhost:``
-##   (NO `.repo/manifests`, NO `.repo/workspace.toml`, NO `<org>/repro-workspace`)
+##   (NO root `projects/`, NO `.repro/workspace.toml`, NO `<org>/repro-workspace`)
 ##
 ## Asserts the pipeline operates WITHOUT the star/org-root layout:
 ##
@@ -40,7 +40,7 @@
 ##      ``dirty`` — proving the nested dep participates in the gate, not just
 ##      the workspace repo.
 ##   6. NO org-root repo is needed: the workspace dir carries no
-##      ``repro-workspace`` directory and no ``.repo`` at all.
+##      ``repro-workspace`` directory and no ``.repro`` at all.
 ##
 ## Falsifiability: each assertion FAILS if a star/org-root requirement is
 ## reintroduced or the nested-topology handling is removed. If the committed-
@@ -176,9 +176,9 @@ suite "MO-7: nested-topology full pipeline without an org-root repo":
       check git(gitBin, repo, "commit -m host-lock").code == 0
       check git(gitBin, repo, "push origin main").code == 0
 
-      # Sanity: genuinely manifest-less AND star-free — no `.repo`, and the
+      # Sanity: genuinely manifest-less AND star-free — no `.repro`, and the
       # workspace carries no org-root `repro-workspace` repo of any kind.
-      check not dirExists(repo / ".repo")
+      check not dirExists(repo / ".repro")
       check not dirExists(repo / "repro-workspace")
       check not dirExists(scratch / "repro-workspace")
 

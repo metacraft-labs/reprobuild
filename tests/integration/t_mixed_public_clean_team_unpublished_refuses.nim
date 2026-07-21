@@ -127,7 +127,7 @@ proc buildWorkspace(gitBin, scratch: string; withDepends: bool):
 
   let ws = scratch / "workspace"
   createDir(ws)
-  let manifestsRoot = ws / ".repo" / "manifests"
+  let manifestsRoot = ws
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "mix.toml",

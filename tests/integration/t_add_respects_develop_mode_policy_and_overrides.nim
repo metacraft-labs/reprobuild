@@ -121,7 +121,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   result.projectFile = manifestsRoot / "projects" / "demo.toml"
@@ -141,7 +141,8 @@ proc setupFixture(gitBin, slug: string): Fixture =
     "[develop]\norg_urls = [\"" & result.orgPrefix & "\"]\n")
 
   # Metadata-only workspace.toml so the project resolves without `init`.
-  writeFile(workspaceRoot / ".repo" / "workspace.toml",
+  createDir(workspaceRoot / ".repro")
+  writeFile(workspaceRoot / ".repro" / "workspace.toml",
     "schema = \"reprobuild.workspace.local.v1\"\n\n" &
     "[workspace]\nproject = \"demo\"\nbranch = \"main\"\n")
   result.workspaceRoot = workspaceRoot

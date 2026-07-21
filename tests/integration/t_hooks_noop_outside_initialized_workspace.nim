@@ -5,16 +5,16 @@
 ## at git time, dispatch into ``repro hooks dispatch <hook> --repo-root
 ## <repo> ...`` (pre-push additionally forwards ``--refs-file``). A
 ## managed hook may end up running under a *half-bootstrapped* or
-## *non-workspace* parent — a plain git repo, or a bare ``.repo/`` that
+## *non-workspace* parent — a plain git repo, or a bare ``.repro/`` that
 ## ``repo init`` left behind before the manifest repo was actually
 ## checked out. In that case there is nothing to enforce, and the hooks
 ## MUST no-op with success: they exit 0 and do nothing, never blocking
 ## the commit/push with a fatal error.
 ##
 ## The canonical "initialized workspace" marker is the presence of a
-## *resolved manifest checkout* — a ``.repo/workspace.toml`` OR at least
-## one resolved ``projects/*.toml`` / ``variants/*.toml`` under
-## ``.repo/manifests`` — NOT merely a bare ``.repo/`` directory. The
+## *resolved manifest checkout* — a ``.repro/workspace.toml`` OR at least
+## one resolved ``projects/*.toml`` / ``variants/*.toml`` at the
+## workspace root — NOT merely a bare ``.repro/`` directory. The
 ## shared predicate ``isInitializedWorkspace`` (re-exported from
 ## ``repro_workspace_manifests``) backs both the hook-skip logic and any
 ## init-skip logic.
@@ -172,7 +172,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -251,7 +251,7 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
     else:
       # ============================================================
       # Part 1 — a genuine NON-workspace: a plain git repo whose parent
-      # has NO ``.repo/`` at all. Install the managed hooks against a real
+      # has NO ``.repro/`` at all. Install the managed hooks against a real
       # workspace first, then point the dispatched hook bodies at a
       # standalone repo that is not under any workspace. The hooks must
       # exit 0 and do nothing.
@@ -268,7 +268,7 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
         checkpoint("ensure output: " & ensureRes.output)
       check ensureRes.code == 0
 
-      # A plain git repo with NO ``.repo/`` anywhere above it.
+      # A plain git repo with NO ``.repro/`` anywhere above it.
       let lonePath = fx.scratch / "lone-repo"
       cloneInto(gitBin, fx.libA.origin, lonePath)
       let loneSha = requireGit(q(gitBin) & " -C " & q(lonePath) &
@@ -279,7 +279,7 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       check pcLone.code == 0
       # No workspace root is reachable from the lone repo, so no report
       # is written there — and crucially NO lock file is produced.
-      check not dirExists(lonePath / ".repo")
+      check not dirExists(lonePath / ".repro")
 
       # pre-push body dispatched under the non-workspace → exit 0, no-op,
       # with the clear "not a workspace" diagnostic.
@@ -288,7 +288,7 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       let ppLoneDispatch = invokeDispatchPrePush(fx, lonePath, loneRefs)
       check ppLoneDispatch.code == 0
       # Direct ``repro check`` against the lone repo: walks up, finds no
-      # ``.repo/`` (falls back to cwd), no resolved manifest checkout →
+      # ``.repro/`` (falls back to cwd), no resolved manifest checkout →
       # no-op exit 0 + diagnostic. (Falsifiable: before RA-10 this raised
       # a blocking exit 1.)
       let ppLoneCheck = invokeCheckPrePush(fx,
@@ -298,12 +298,12 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       check ppLoneCheck.output.contains("not a workspace")
 
       # ============================================================
-      # Part 2 — a HALF-BOOTSTRAPPED parent: a bare ``.repo/`` with NO
+      # Part 2 — a HALF-BOOTSTRAPPED parent: a bare ``.repro/`` with NO
       # resolved manifest checkout (no workspace.toml, no projects/*.toml).
       # The canonical marker must reject this and the hooks must no-op.
       # ============================================================
       let halfRoot = fx.scratch / "half-bootstrapped"
-      createDir(halfRoot / ".repo")            # bare .repo/, nothing else
+      createDir(halfRoot / ".repro")            # bare .repro/, nothing else
       let halfRepo = halfRoot / "lib-a"
       cloneInto(gitBin, fx.libA.origin, halfRepo)
       let halfSha = requireGit(q(gitBin) & " -C " & q(halfRepo) &
@@ -319,8 +319,8 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       check halfReport["outcome"].getStr() == "skipped-no-workspace"
       check halfReport["lockFilePath"].getStr() == ""
       check halfReport["diagnostic"].getStr().contains("not a workspace")
-      # No lock subtree created under the bare ``.repo/``.
-      check not dirExists(halfRoot / ".repo" / "manifests")
+      # No lock subtree created under the bare ``.repro/``.
+      check not dirExists(halfRoot / ".repro" / "manifests")
 
       # pre-push under the half-bootstrapped parent → exit 0 + diagnostic.
       let halfRefs = fx.scratch / "half-refs.txt"

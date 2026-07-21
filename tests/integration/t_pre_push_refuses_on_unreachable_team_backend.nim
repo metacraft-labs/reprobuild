@@ -3,7 +3,7 @@
 ## --mode=pre-push`` + its post-gate per-backend publish).
 ##
 ## A TEAM-tier repo is routed to a git-checkout lock backend on its OWN private
-## remote (NOT the ``.repo/manifests`` manifest). The backend's upstream bare is
+## remote (NOT the ``.repro/manifests`` manifest). The backend's upstream bare is
 ## removed after its tracking branch is configured, so the pre-push publish push
 ## to the team backend FAILS (``publishWorkspaceLock`` → ``lpoFailed``). Because
 ## the tier is SHARED (team), Decision 2 says REFUSE: the gate must exit 2 with a
@@ -104,7 +104,7 @@ proc repoFragment(name, remote: string): string =
   "revision = \"main\"\n"
 
 proc seedManifestGitLayer(gitBin, manifestsRoot, bare: string) =
-  ## ``.repo/manifests`` is a healthy git checkout WITH an upstream so the gate
+  ## ``.repro/manifests`` is a healthy git checkout WITH an upstream so the gate
   ## runs the full manifest-present path. No repo is routed to it, so its own
   ## publish is a benign no-op — the ONLY failing backend is the team one.
   discard requireGit(q(gitBin) & " init --bare -b main " & q(bare))
@@ -146,7 +146,7 @@ suite "HL-3 — pre-push refuses on an unreachable team backend":
       # ---- workspace + a HEALTHY manifest checkout ---------------------
       let ws = scratch / "workspace"
       createDir(ws)
-      let manifestsRoot = ws / ".repo" / "manifests"
+      let manifestsRoot = ws / ".repro" / "manifests"
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "team.toml",
@@ -220,7 +220,7 @@ suite "HL-3 — pre-push refuses on an unreachable team backend":
       check evidence.contains("backend=git-checkout")
 
       # ---- the manifest publish did NOT itself gate --------------------
-      # No repo is routed to ``.repo/manifests``; its publish is a no-op, so the
+      # No repo is routed to ``.repro/manifests``; its publish is a no-op, so the
       # ONLY refusal is the unreachable team backend (not a manifest publish
       # failure). Proves the refusal is the team-tier Decision-2 policy.
       check publishFailureFailure(report) == nil

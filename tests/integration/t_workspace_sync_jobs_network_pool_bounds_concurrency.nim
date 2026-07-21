@@ -226,7 +226,7 @@ suite "RA-5c — --jobs-network bounds the sync fetch pool":
       var seedWork: seq[string]
       let workspaceRoot = scratch / "workspace"
       createDir(workspaceRoot)
-      let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+      let manifestsRoot = workspaceRoot
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
 

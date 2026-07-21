@@ -4,7 +4,7 @@
 ## Combines M14 ``repro branch <name>`` (create when missing) with M15
 ## ``repro checkout <branch>`` (switch when present) and ALSO sets the
 ## ``[workspace].feature_started = true`` mark in
-## ``<workspaceRoot>/.repo/workspace.toml``. The mark is what tells
+## ``<workspaceRoot>/.repro/workspace.toml``. The mark is what tells
 ## the M10 sync planner to no-op the "clean fast-forwardable" arm on
 ## repos that sit on the marked workspace branch — see
 ## ``reprobuild-specs/Workspace-And-Develop-Mode.md`` §"Branch
@@ -227,7 +227,7 @@ proc setupFixture(gitBin, slug: string): M16Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -327,7 +327,7 @@ suite "M16 — repro workspace start <branch> marks feature branch":
 
       # The on-disk workspace.toml carries
       # ``feature_started = true`` under ``[workspace]``.
-      let tomlPath = fx.workspaceRoot / ".repo" / "workspace.toml"
+      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
       let parsed = readWorkspaceLocal(tomlPath)
       check parsed.workspace.branch.isSome
       check parsed.workspace.branch.get() == "feature-create"
@@ -606,7 +606,7 @@ suite "M16 — repro workspace start <branch> marks feature branch":
       let firstReport = readReport(fx)
       check firstReport["mode"].getStr() == "create"
 
-      let tomlPath = fx.workspaceRoot / ".repo" / "workspace.toml"
+      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
       let firstBytes = readFile(tomlPath)
 
       # Second invocation: every repo is already on the requested

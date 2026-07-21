@@ -12,20 +12,20 @@
 ## resolves to the local bare root repo. ``init`` then:
 ##   - clones the root repo into a directory named after the ORG (NOT cwd);
 ##   - reads the cloned ``.repro-workspace.toml``;
-##   - bootstraps ``.repo/manifests`` from the manifest URL (RA-11 cache);
+##   - bootstraps ``.repro/manifests`` from the manifest URL (RA-11 cache);
 ##   - syncs / clones the declared member repo.
 ##
 ## Assertions:
 ##   - the named ``<org>/`` directory is created (NOT cwd / parent);
-##   - the cwd and its parent are untouched (no ``.repo`` leaks out);
-##   - ``.repo/manifests`` materialised with the project TOML;
+##   - the cwd and its parent are untouched (no ``.repro`` leaks out);
+##   - ``.repro/manifests`` materialised with the project TOML;
 ##   - the member repo is checked out under the named dir;
 ##   - the output ends pointing the user at ``repro health``.
 ##
 ## Falsifiability:
 ##   - If ``local-path`` defaulted to cwd, the named-dir assertion fails and
 ##     the cwd-untouched assertion fails.
-##   - If the root repo's bootstrap config were ignored, ``.repo/manifests``
+##   - If the root repo's bootstrap config were ignored, ``.repro/manifests``
 ##     would not materialise and the member would not be cloned.
 ##   - If the closing ``repro health`` pointer were dropped, its check fails.
 ##
@@ -174,8 +174,8 @@ suite "RA-31 — clone org root repo + sync into named path":
 
       # cwd (runDir) and its parent are UNTOUCHED — init never materialised a
       # workspace into them.
-      check not dirExists(runDir / ".repo")
-      check not dirExists(parentOfRun / ".repo")
+      check not dirExists(runDir / ".repro")
+      check not dirExists(parentOfRun / ".repro")
       # The only child created under runDir is the named org dir.
       var childCount = 0
       for kind, path in walkDir(runDir):
@@ -185,9 +185,9 @@ suite "RA-31 — clone org root repo + sync into named path":
       # The org root repo was cloned (carrying the bootstrap config).
       check fileExists(named / ".repro-workspace.toml")
 
-      # ``.repo/manifests`` materialised from the manifest URL, with the
+      # ``.repro/manifests`` materialised from the manifest URL, with the
       # project TOML — proving the cloned bootstrap config drove the sync.
-      check fileExists(named / ".repo" / "manifests" / "projects" /
+      check fileExists(named / ".repro" / "manifests" / "projects" /
         "myproject.toml")
 
       # The declared member repo was checked out under the named dir.

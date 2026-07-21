@@ -141,7 +141,7 @@ suite "HL-2 — pre-push currency read routes per backend":
 
       let ws = scratch / "workspace"
       createDir(ws)
-      let manifestsRoot = ws / ".repo" / "manifests"
+      let manifestsRoot = ws
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "mix.toml",
@@ -195,7 +195,7 @@ suite "HL-2 — pre-push currency read routes per backend":
       check fileExists(teamManifest / "locks" / "mix" / "core" /
         (coreSha & ".toml"))
       check fileExists(db / ("lock_mix_secret_" & secretSha))
-      check not dirExists(manifestsRoot / "locks")
+      check not dirExists(ws / ".repro" / "manifests" / "locks")
 
       # ---- (1) clean gate reads each repo from its backend → current ---
       let refsFile = scratch / "pushed-refs.txt"

@@ -1,6 +1,6 @@
 ## M8 — Manifest-layer composition.
 ##
-## The composer reads `<workspaceRoot>/.repo/workspace.toml` (M5
+## The composer reads `<workspaceRoot>/.repro/workspace.toml` (M5
 ## surface), acquires each manifest layer (via M2 `bakWorkspaceVcs`
 ## clone for `url`-backed layers, in-tree for `local_path`-backed
 ## layers), resolves each layer's `projects/<project>.toml` via M6's
@@ -211,7 +211,7 @@ revision = "main"
 # ---- helpers --------------------------------------------------------------
 
 proc writeWorkspaceToml(workspaceRoot, body: string): string =
-  let dotRepo = workspaceRoot / ".repo"
+  let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
   result = dotRepo / "workspace.toml"
   writeFile(result, body)
@@ -322,7 +322,7 @@ suite "M8 — manifest-layer composition":
 
       # Pre-populate an in-tree local manifest directory containing the
       # private project + repo fragments.
-      let localManifestRel = ".repo/manifests-personal"
+      let localManifestRel = ".repro/manifests-personal"
       let localManifestAbs = workspaceRoot / localManifestRel
       createDir(localManifestAbs / "projects")
       createDir(localManifestAbs / "repos")

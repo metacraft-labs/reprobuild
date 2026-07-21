@@ -1,7 +1,7 @@
 ## RA-6 — `repro workspace project new` writes + commits + pushes a project
 ## manifest to the manifest repo (hermetic: a local bare upstream).
 ##
-## The manifest repo (`.repo/manifests`) is a real git repo whose `origin`
+## The manifest repo (the workspace root) is a real git repo whose `origin`
 ## is a local bare repo. `repro workspace project new <name>` writes
 ## `projects/<name>.toml`, commits it, and pushes to the bare. The test
 ## asserts: the project file exists locally, a commit landed, and the bare
@@ -60,7 +60,7 @@ suite "RA-6 — repro workspace project new (writes + pushes manifest)":
 
       # Workspace with a real manifest repo whose origin is the bare.
       let workspaceRoot = scratch / "workspace"
-      let manifestRoot = workspaceRoot / ".repo" / "manifests"
+      let manifestRoot = workspaceRoot
       createDir(manifestRoot)
       discard requireGit(q(gitBin) & " init -b main " & q(manifestRoot))
       gitConfig(gitBin, manifestRoot)

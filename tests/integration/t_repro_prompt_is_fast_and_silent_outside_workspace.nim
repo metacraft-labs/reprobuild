@@ -3,7 +3,7 @@
 ## `repro prompt` is recomputed on EVERY shell render, so it must be (a)
 ## SILENT and exit 0 outside a workspace — safe to drop into any prompt with
 ## no guards — and (b) FAST: it reads only CHEAP CACHED workspace state
-## (``.repo/workspace.toml``, the cached ``.repro/workspace/sync-report.json``,
+## (``.repro/workspace.toml``, the cached ``.repro/workspace/sync-report.json``,
 ## and the develop-overrides file), never fanning out a ``git`` subprocess per
 ## repo.
 ##
@@ -73,12 +73,12 @@ proc bestPromptMs(reproBin: string; cwd: string;
       result = m
 
 proc seedWorkspace(root: string) =
-  ## A minimal initialized workspace: the RA-10 marker (``.repo/workspace.toml``
+  ## A minimal initialized workspace: the RA-10 marker (``.repro/workspace.toml``
   ## with an active branch) plus a cached sync report recording three repos,
   ## one of which sits on a different branch (a drift signal). All cheap cached
   ## state — NO git repos are created.
-  createDir(root / ".repo")
-  writeFile(root / ".repo" / "workspace.toml",
+  createDir(root / ".repro")
+  writeFile(root / ".repro" / "workspace.toml",
     "schema = \"reprobuild.workspace.local.v1\"\n" &
     "[workspace]\n" &
     "project = \"demo\"\n" &
@@ -102,7 +102,7 @@ suite "RA-26 — repro prompt is fast and silent outside a workspace":
 
     # ========================================================================
     # Part 1 — OUTSIDE a workspace: silent + exit 0. A plain temp dir with no
-    # ``.repo/`` anywhere above it. The prompt must print NOTHING so it is safe
+    # ``.repro/`` anywhere above it. The prompt must print NOTHING so it is safe
     # to drop unconditionally into any shell prompt.
     # ========================================================================
     let plainDir = scratch / "not-a-workspace"

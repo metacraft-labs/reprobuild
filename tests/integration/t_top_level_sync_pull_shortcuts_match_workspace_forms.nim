@@ -129,7 +129,7 @@ type
     aOrigin, aSeed, aTip: string
 
 proc writeManifest(workspaceRoot, aOrigin: string) =
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",

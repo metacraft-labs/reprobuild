@@ -7,7 +7,7 @@
 ##
 ##   1. Fast-forwards every configured manifest layer (no-op here:
 ##      these fixtures use M6 / M7 single-project mode so there's no
-##      ``.repo/workspace.toml``).
+##      ``.repro/workspace.toml``).
 ##   2. Resolves the named project / variant via the M6 surface.
 ##   3. Gathers a structured ``RepoSyncObservation`` per declared
 ##      repo (HEAD SHA, clean/dirty, current branch, branch tips,
@@ -29,7 +29,7 @@
 ## The suite verifies all seven cases in order. Fixture pattern is
 ## identical to M9's ``t_workspace_init_clones_missing_and_reports_existing``:
 ## a hermetic local bare git repo stands in for the manifest's remote
-## URL, a workspace tree holds the ``.repo/manifests/`` TOMLs, and
+## URL, a workspace tree holds the ``projects/`` / ``repos/`` TOMLs, and
 ## each test case shapes the on-disk checkout into the state the
 ## planner must classify.
 ##
@@ -192,7 +192,7 @@ proc setupFixture(gitBin, slug: string): M10Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",

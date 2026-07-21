@@ -69,7 +69,7 @@ suite "RA-7 — managed-hook re-entry guard prevents recursive publish":
       let repoPath = workspaceRoot / "lib-a"
       discard requireGit(q(gitBin) & " init -b main " & q(repoPath))
 
-      let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+      let manifestsRoot = workspaceRoot
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "lib-a.toml",

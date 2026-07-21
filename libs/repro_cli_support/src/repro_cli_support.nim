@@ -24520,15 +24520,17 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # workspace genuinely needs.
   var lockedShasByPath = initTable[string, string]()
   block:
-    let manifestsRoot = manifestsRoot(args.workspaceRoot)
-    if dirExists(manifestsRoot / "projects") and resolved.projectName.len > 0:
+    # Membership resolves at the workspace root (or a `.repro/manifests`
+    # checkout); the lock records live in the `.repro/manifests` store DB.
+    let storeRoot = args.workspaceRoot / ".repro" / "manifests"
+    if resolved.projectName.len > 0 and dirExists(storeRoot):
       try:
         # MO-10: route the RA-14 optimized-fetch lock read through the abstract
         # ``LockStore``. The git-checkout backend's ``latestLockShas`` delegates
         # to the byte-identical ``latestLockShasViaGit``; we take its ``shas``
         # exactly as before.
         let fetchStore: LockStore =
-          newGitCheckoutLockStore(identity, manifestsRoot)
+          newGitCheckoutLockStore(identity, storeRoot)
         lockedShasByPath = fetchStore.latestLockShas(resolved.projectName).shas
       except CatchableError:
         lockedShasByPath = initTable[string, string]()
@@ -25832,7 +25834,11 @@ proc pickManifestLayerRoot(parsed: WorkspaceLockArgs;
           else: "layer"
         return parsed.workspaceRoot / ".repro" /
           ("manifests-0-" & suffix)
-  manifestsRoot(parsed.workspaceRoot)
+  # Native default git-checkout lock store: the `.repro/manifests` store DB,
+  # NOT the membership root. Membership (projects/repos) lives at the workspace
+  # root (or a `.repro/manifests` checkout); the lock store is always the
+  # `.repro/manifests` DB, separate from where membership resolves.
+  parsed.workspaceRoot / ".repro" / "manifests"
 
 proc pickTriggerRepo(resolved: ResolvedProject;
                      explicit: string): ResolvedRepo =
@@ -40544,9 +40550,11 @@ proc gitOutput(gitBin, repoRoot: string; sub: openArray[string]): tuple[
   (code: res.exitCode, output: res.output)
 
 proc manifestRepoRootFor(workspaceRoot: string): string =
-  ## The git-checkout lock-store DB carrying the private-repo pins —
-  ## ``.repro/manifests`` under the workspace root.
-  workspaceRoot / ".repro" / "manifests"
+  ## The membership manifest repo carrying ``projects/*.toml`` — the native
+  ## ``<org>/repro-workspace`` repo at the workspace root, where
+  ## ``repro workspace project new`` / ``project repo add`` write and commit new
+  ## membership. (The lock-store DB is a separate concern under ``.repro/``.)
+  workspaceRoot
 
 proc projectManifestStub(project: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &

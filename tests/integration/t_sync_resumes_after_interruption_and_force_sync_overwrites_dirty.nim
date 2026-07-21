@@ -132,7 +132,7 @@ suite "RA-16 — resumable sync + --force-sync":
 
       let workspaceRoot = scratch / "workspace"
       createDir(workspaceRoot)
-      let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+      let manifestsRoot = workspaceRoot
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       var remotes: seq[tuple[name, url: string]]

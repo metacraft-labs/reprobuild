@@ -6,7 +6,7 @@
 ## which:
 ##
 ##   1. Resolves the named project / variant via the M6 surface (or
-##      composes layers via M8 when ``.repo/workspace.toml`` is
+##      composes layers via M8 when ``.repro/workspace.toml`` is
 ##      present). The single-project / M6 path is exercised here.
 ##   2. For every declared repo, gathers the live M4 evidence triple
 ##      (head-sha, is-clean, is-published).
@@ -19,7 +19,7 @@
 ##
 ## Fixture pattern matches M9 / M10 / M11: hermetic local bare git
 ## repos stand in for the manifest's remote URLs, the workspace tree
-## holds the ``.repo/manifests/`` TOMLs, and the test compiles ``repro``
+## holds the ``projects/`` / ``repos/`` TOMLs, and the test compiles ``repro``
 ## once per ``setupFixture`` into the scratch directory.
 ##
 ## Skip rule: only when ``git`` is missing from PATH (same convention
@@ -190,7 +190,7 @@ proc setupFixture(gitBin, slug: string): M12Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",

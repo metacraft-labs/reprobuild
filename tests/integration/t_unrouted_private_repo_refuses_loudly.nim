@@ -17,7 +17,7 @@
 ## ``[[locking.route]]`` / ``apply_if`` remedy).
 ##
 ## Fixture (built ``./build/bin/repro``, black-box): a two-layer composer
-## workspace via ``.repo/workspace.toml`` with local_path manifest layers —
+## workspace via ``.repro/workspace.toml`` with local_path manifest layers —
 ##   - a PUBLIC layer contributing ``pub`` (wvPublic);
 ##   - a PRIVATE layer (``visibility = "private"``) contributing ``secret``
 ##     (wvPersonal) — the private-tier repo with NO route.
@@ -159,11 +159,11 @@ suite "HL-7 — unrouted private repo refuses loudly":
       cloneInto(gitBin, pubOrigin, ws / "pub")
       cloneInto(gitBin, secretOrigin, ws / "secret")
 
-      # ``.repo/workspace.toml`` — the composer-mode workspace with a PUBLIC
+      # ``.repro/workspace.toml`` — the composer-mode workspace with a PUBLIC
       # layer and a PRIVATE (``visibility = "private"``) layer. Repos from the
       # private layer inherit the ``wvPersonal`` tier.
-      createDir(ws / ".repo")
-      writeFile(ws / ".repo" / "workspace.toml",
+      createDir(ws / ".repro")
+      writeFile(ws / ".repro" / "workspace.toml",
         "schema = \"reprobuild.workspace.local.v1\"\n\n" &
         "[workspace]\nproject = \"mix\"\nbranch = \"main\"\n\n" &
         "[[manifest]]\n" &

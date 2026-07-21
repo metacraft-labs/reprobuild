@@ -10,7 +10,7 @@
 ## the personal backend + ``repro lock refresh`` — the push proceeds.
 ##
 ## Case B (manifest-LESS publish — carries deliverable 3). A workspace with NO
-## ``.repo/manifests`` checkout at all, routing its personal repo to a HEALTHY
+## ``.repro/manifests`` checkout at all, routing its personal repo to a HEALTHY
 ## git-checkout backend on its own remote, must STILL publish that personal
 ## backend at pre-push. This proves HL-3 lifted HL-2's ``manifestLayerRoot.len >
 ## 0`` gate on the per-backend publish: the routed personal backend's bare
@@ -162,7 +162,7 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
 
         let ws = scratch / "workspace"
         createDir(ws)
-        let manifestsRoot = ws / ".repo" / "manifests"
+        let manifestsRoot = ws / ".repro" / "manifests"
         createDir(manifestsRoot / "projects")
         createDir(manifestsRoot / "repos")
         writeFile(manifestsRoot / "projects" / "solo.toml",
@@ -229,7 +229,7 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
 
         # A GENUINELY manifest-LESS workspace: a single committed-lock git repo
         # (its ``repro.lock`` is the reproducibility artifact) with NO
-        # ``.repo/manifests`` directory at all — so the gate's
+        # ``.repro/manifests`` directory at all — so the gate's
         # ``manifestLayerRoot`` resolves EMPTY and the manifest publish path is
         # skipped entirely. The ONLY way the routed personal backend can be
         # published is the per-backend publish loop, whose ``manifestLayerRoot >

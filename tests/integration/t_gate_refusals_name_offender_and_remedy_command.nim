@@ -152,7 +152,7 @@ proc baseFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot / ".repro" / "manifests"
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -164,7 +164,7 @@ proc baseFixture(gitBin, slug: string): Fixture =
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
 
 proc seedManifestGitLayer(gitBin: string; fx: var Fixture) =
-  ## Make ``.repo/manifests`` a real git checkout tracking a bare upstream so
+  ## Make ``.repro/manifests`` a real git checkout tracking a bare upstream so
   ## the pre-push gate genuinely attempts a publish push.
   fx.manifestBare = fx.scratch / "manifest.git"
   discard requireGit(q(gitBin) & " init --bare -b main " & q(fx.manifestBare))

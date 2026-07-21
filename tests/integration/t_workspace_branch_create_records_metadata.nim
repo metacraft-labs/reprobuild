@@ -5,7 +5,7 @@
 ## forms:
 ##
 ##   1. A successful ``repro branch <name>`` writes ``<name>`` into
-##      ``[workspace].branch`` of ``.repo/workspace.toml``. The bytes
+##      ``[workspace].branch`` of ``.repro/workspace.toml``. The bytes
 ##      land via the M13 ``writeWorkspaceBranch`` writer; a re-read
 ##      through ``readWorkspaceBranch`` returns the new value.
 ##   2. After the create form, the show form (``repro branch`` with
@@ -131,7 +131,7 @@ proc setupFixture(gitBin, slug: string): M14MetaFixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
@@ -202,7 +202,7 @@ suite "M14 — repro branch records metadata round-trip":
       # form. The file is still a metadata-only workspace.toml (no
       # ``[[manifest]]`` entries) because we initialised in
       # single-project mode.
-      let tomlPath = fx.workspaceRoot / ".repo" / "workspace.toml"
+      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
       let parsed = readWorkspaceLocal(tomlPath)
       check parsed.workspace.project == "myproject"
       check parsed.workspace.branch.isSome

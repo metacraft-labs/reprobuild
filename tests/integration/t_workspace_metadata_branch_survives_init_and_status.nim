@@ -4,7 +4,7 @@
 ## project. Asserts:
 ##
 ##   1. ``repro workspace init`` writes the active branch into
-##      ``.repo/workspace.toml`` under ``[workspace].branch``. The
+##      ``.repro/workspace.toml`` under ``[workspace].branch``. The
 ##      branch value is the resolver's ``trunk`` field (the manifest's
 ##      documented default branch — ``main`` in this fixture).
 ##   2. ``repro workspace status`` (without a positional project)
@@ -133,7 +133,7 @@ proc setupFixture(gitBin, slug: string): M13Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
@@ -178,7 +178,7 @@ suite "M13 — workspace branch survives init and status":
 
       # The metadata-only workspace.toml must now exist with the
       # resolver's trunk recorded as the active branch.
-      let tomlPath = fx.workspaceRoot / ".repo" / "workspace.toml"
+      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
       check fileExists(tomlPath)
 
       let recorded = readWorkspaceBranch(fx.workspaceRoot)
@@ -224,7 +224,7 @@ suite "M13 — workspace branch survives init and status":
         checkpoint("status output: " & statusRes.output)
       check statusRes.code == 0
 
-      let reportPath = fx.workspaceRoot / ".repo" / ".." / ".repro" /
+      let reportPath = fx.workspaceRoot / ".repro" /
         "workspace" / "status-report.json"
       let normReportPath = fx.workspaceRoot / ".repro" / "workspace" /
         "status-report.json"
@@ -263,7 +263,7 @@ suite "M13 — workspace branch survives init and status":
       ]))
       check res1.code == 0
       let firstBytes = readFile(
-        fx.workspaceRoot / ".repo" / "workspace.toml")
+        fx.workspaceRoot / ".repro" / "workspace.toml")
 
       # Second invocation must NOT clobber the metadata. The
       # workspace.toml bytes round-trip identically when the
@@ -275,5 +275,5 @@ suite "M13 — workspace branch survives init and status":
       ]))
       check res2.code == 0
       let secondBytes = readFile(
-        fx.workspaceRoot / ".repo" / "workspace.toml")
+        fx.workspaceRoot / ".repro" / "workspace.toml")
       check firstBytes == secondBytes

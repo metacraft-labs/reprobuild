@@ -81,7 +81,7 @@ suite "regression — shared cache keys the bare by the full repo URL":
 
       let baseUrl = "file://" & remoteDir            # base, not .git
       let ws = scratch / "ws"
-      let manifestsRoot = ws / ".repo" / "manifests"
+      let manifestsRoot = ws
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "p.toml",
@@ -93,7 +93,8 @@ suite "regression — shared cache keys the bare by the full repo URL":
         "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
         "[repo]\nname = \"proj\"\npath = \"proj\"\nremote = \"o\"\n" &
         "revision = \"main\"\n")
-      writeFile(ws / ".repo" / "workspace.toml",
+      createDir(ws / ".repro")
+      writeFile(ws / ".repro" / "workspace.toml",
         "schema = \"reprobuild.workspace.local.v1\"\n\n[workspace]\n" &
         "project = \"p\"\n")
       # Existing checkout, not yet wired to any shared bare.

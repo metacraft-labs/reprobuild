@@ -148,7 +148,7 @@ proc setupFixture(gitBin, slug: string): M18Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -219,7 +219,7 @@ suite "M18 — repro check --mode=pre-push (happy path)":
       # RA-1: the lock lives at the per-repo path
       # ``locks/<project>/<repo>/<sha>.toml`` and NO index.toml is
       # written.
-      let manifestsRoot = fx.workspaceRoot / ".repo" / "manifests"
+      let manifestsRoot = fx.workspaceRoot / ".repro" / "manifests"
       let lockFile = manifestsRoot / "locks" / "lib-a" / "lib-a" /
         (fx.libA.sha & ".toml")
       check fileExists(lockFile)

@@ -118,7 +118,7 @@ type
 
 proc seedManifestGitLayer(gitBin, manifestsRoot, bare, projectToml: string;
                           branch = "main") =
-  ## ``.repo/manifests`` is a real git checkout tracking a bare upstream so
+  ## ``.repro/manifests`` is a real git checkout tracking a bare upstream so
   ## the publish path genuinely commits + pushes.
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " & q(bare))
   discard requireGit(q(gitBin) & " init -b " & branch & " " & q(manifestsRoot))
@@ -145,7 +145,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot / ".repro" / "manifests"
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",

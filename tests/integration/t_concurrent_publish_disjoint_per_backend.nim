@@ -146,7 +146,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   result.ws = result.scratch / "workspace"
   createDir(result.ws)
-  let manifestsRoot = result.ws / ".repo" / "manifests"
+  let manifestsRoot = result.ws
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "team.toml",

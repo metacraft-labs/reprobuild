@@ -162,13 +162,14 @@ suite "HL-7 — personal workspace restores on a fresh machine":
       # in the private manifests repo (Plane B). The app checkout is ABSENT.
       let ws = scratch / "fresh-machine"
       createDir(ws)
-      let manifestsRoot = ws / ".repo" / "manifests"
+      let manifestsRoot = ws
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "personal.toml",
         projectToml("file://" & appOrigin))
       writeFile(manifestsRoot / "repos" / "app.toml", repoFragment())
-      writeFile(ws / ".repo" / "workspace.toml", workspaceLocal())
+      createDir(ws / ".repro")
+      writeFile(ws / ".repro" / "workspace.toml", workspaceLocal())
 
       # The dotfiles config: apply-if scoped under the workspace path.
       let userCfg = scratch / "dotfiles.toml"

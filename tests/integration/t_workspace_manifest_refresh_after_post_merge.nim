@@ -14,7 +14,7 @@
 ##   1. Bare manifest-host git repo (the ``[[manifest]]`` ``url``)
 ##      seeded with one TOML-bearing commit.
 ##   2. The bare repo cloned into the workspace's
-##      ``.repo/manifests-0-<sanitized>/`` directory by a probe call
+##      ``.repro/manifests-0-<sanitized>/`` directory by a probe call
 ##      to ``refreshManifestLayers`` (the M10 helper reports the
 ##      ``layerPath`` even on its initial ``mrsSkippedAbsent`` pass).
 ##   3. Bare advanced by a second commit (the SHA the auto-refresh must

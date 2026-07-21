@@ -203,10 +203,8 @@ suite "RA-30 — repro health --fix remediates safe issues only":
       # Strip the manifest so the workspace marker is genuinely absent.
       removeDir(fx.workspaceRoot / "projects")
       removeDir(fx.workspaceRoot / ".repro")
-      removeDir(fx.workspaceRoot / ".repo")
       check not dirExists(fx.workspaceRoot / "projects")
       check not dirExists(fx.workspaceRoot / ".repro")
-      check not dirExists(fx.workspaceRoot / ".repo")
  
       # Before --fix: workspace check fails (no marker).
       block before:
@@ -223,7 +221,6 @@ suite "RA-30 — repro health --fix remediates safe issues only":
       check "skip workspace" in fixRes.output
       # No workspace marker was fabricated.
       check not dirExists(fx.workspaceRoot / ".repro")
-      check not dirExists(fx.workspaceRoot / ".repo")
 
       # After --fix: the unsafe failure persists and exit stays non-zero.
       block after:

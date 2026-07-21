@@ -1,6 +1,6 @@
-## Regression — a workspace that adopts its ``.repo/manifests`` checkout as the
+## Regression — a workspace that adopts its ``.repro/manifests`` checkout as the
 ## TEAM lock backend (an explicit ``[locking]`` route → git-checkout at
-## ``.repo/manifests``, exactly what ``repro locking adopt-manifest`` writes)
+## ``.repro/manifests``, exactly what ``repro locking adopt-manifest`` writes)
 ## must be able to READ BACK the per-repo lock records it wrote, and re-locking
 ## an unchanged workspace must stay a clean no-op.
 ##
@@ -118,7 +118,7 @@ suite "regression — manifest team backend routed lock reads back + idempotent"
 
       let ws = scratch / "workspace"
       createDir(ws)
-      let manifestsRoot = ws / ".repo" / "manifests"
+      let manifestsRoot = ws / ".repro" / "manifests"
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "mix.toml",
@@ -129,7 +129,7 @@ suite "regression — manifest team backend routed lock reads back + idempotent"
         repoFragment("lib", "lib-origin"))
 
       # The team backend is the manifest checkout itself (adopt-manifest's
-      # ``path = ".repo/manifests"``). It must be a real git repo so the
+      # ``path = ".repro/manifests"``). It must be a real git repo so the
       # git-checkout backend can commit each record.
       initGitRepo(gitBin, manifestsRoot)
       discard requireGit(q(gitBin) & " -C " & q(manifestsRoot) & " add -A")
@@ -149,7 +149,7 @@ suite "regression — manifest team backend routed lock reads back + idempotent"
         "url = \"https://example.invalid/manifests.git\"\n\n" &
         "[locking]\n" &
         "route = [{ visibility = \"team\", backend = \"git-checkout\", " &
-        "path = \".repo/manifests\", repos = [\"core\", \"lib\"] }]\n")
+        "path = \".repro/manifests\", repos = [\"core\", \"lib\"] }]\n")
 
       putEnv("REPROBUILD_SYSTEM_CONFIG", scratch / "no-system.toml")
       putEnv("REPROBUILD_USER_CONFIG", scratch / "no-user.toml")

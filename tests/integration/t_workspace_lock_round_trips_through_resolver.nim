@@ -6,12 +6,12 @@
 ## which:
 ##
 ##   1. Resolves the named project / variant via the M6 surface (or
-##      composes layers via M8 when ``.repo/workspace.toml`` is
+##      composes layers via M8 when ``.repro/workspace.toml`` is
 ##      present). The fixtures here exercise the single-project /
-##      M6 path: ``.repo/manifests/projects/<project>.toml``.
+##      M6 path: ``projects/<project>.toml``.
 ##   2. Picks the manifest layer that will OWN the lock file. With no
 ##      composer overlay this falls through to
-##      ``<workspaceRoot>/.repo/manifests/``.
+##      ``<workspaceRoot>/`` (the flat membership root).
 ##   3. For every declared repo, gathers the live HEAD SHA via the M2
 ##      ``headShaQuery`` adapter plus the clean/dirty and
 ##      current-branch observations.
@@ -28,7 +28,7 @@
 ##
 ## Fixture pattern matches M9 / M10: one or more hermetic local bare
 ## git repos stand in for the manifest's remote URLs; a workspace tree
-## holds the ``.repo/manifests/`` TOMLs. Three repos in the project
+## holds the flat ``projects/`` / ``repos/`` TOMLs. Three repos in the project
 ## (per the milestone spec for "round_trips_through_resolver") so the
 ## per-repo iteration is exercised.
 ##
@@ -195,7 +195,7 @@ proc setupFixture(gitBin, slug: string): M11Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -256,13 +256,13 @@ suite "M11 — repro workspace lock (round-trips through resolver)":
       # layer the dispatcher picks for single-project mode.
       let lockPath = report["lockFilePath"].getStr()
       check fileExists(lockPath)
-      check lockPath == fx.workspaceRoot / ".repo" / "manifests" /
+      check lockPath == fx.workspaceRoot / ".repro" / "manifests" /
         "locks" / "lib-a" / "lib-a" / (fx.libA.sha & ".toml")
 
       # RA-1: no shared index is written. The report carries an empty
       # indexFilePath and no index.toml is on disk.
       check report["indexFilePath"].getStr() == ""
-      check not fileExists(fx.workspaceRoot / ".repo" / "manifests" /
+      check not fileExists(fx.workspaceRoot / ".repro" / "manifests" /
         "locks" / "lib-a" / "index.toml")
 
       # Round-trip the lock TOML through the M5 strict reader and
@@ -363,7 +363,7 @@ suite "M11 — repro workspace lock (round-trips through resolver)":
 
       # No lock file should be on disk for this run (RA-1: per-repo
       # subtree, no index).
-      let locksDir = fx.workspaceRoot / ".repo" / "manifests" / "locks"
+      let locksDir = fx.workspaceRoot / ".repro" / "manifests" / "locks"
       if dirExists(locksDir):
         # Allow the directory to exist if some other code created it;
         # what matters is that no lock file (and no legacy index) was
@@ -419,11 +419,11 @@ suite "M11 — repro workspace lock (round-trips through resolver)":
       # RA-1: a new SHA produces a NEW per-repo lock file alongside the
       # old one (append-only by path); both live under the lib-a
       # subtree and no index.toml is written.
-      let repoLockDir = fx.workspaceRoot / ".repo" / "manifests" /
+      let repoLockDir = fx.workspaceRoot / ".repro" / "manifests" /
         "locks" / "lib-a" / "lib-a"
       check firstLockPath == repoLockDir / (fx.libA.sha & ".toml")
       check secondLockPath == repoLockDir / (newSha & ".toml")
-      check not fileExists(fx.workspaceRoot / ".repo" / "manifests" /
+      check not fileExists(fx.workspaceRoot / ".repro" / "manifests" /
         "locks" / "lib-a" / "index.toml")
       var shaFiles: seq[string]
       for f in walkFiles(repoLockDir / "*.toml"):

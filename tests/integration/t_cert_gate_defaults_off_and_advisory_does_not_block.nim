@@ -114,7 +114,7 @@ type
     daemonKey: string
 
 proc writeProjectManifest(fx: Fixture; certificatesTable: string) =
-  let manifestsRoot = fx.workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = fx.workspaceRoot
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
     projectToml(fileUrl(fx.libAOrigin), certificatesTable))
 
@@ -127,7 +127,7 @@ proc setupFixture(gitBin, slug, certificatesTable: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)

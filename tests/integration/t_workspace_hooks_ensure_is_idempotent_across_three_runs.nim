@@ -26,7 +26,7 @@
 ##
 ## Fixture pattern mirrors M9 / M10 / M11 / M14 / M15: three local bare
 ## origins stand in for remote URLs, a workspace tree carries
-## ``.repo/manifests/projects/<name>.toml`` plus three repo fragments,
+## ``projects/<name>.toml`` plus three repo fragments,
 ## and every repo is cloned into the workspace before the command runs.
 ##
 ## Skip rule: ``git`` missing on PATH (same convention as M9–M16).
@@ -179,7 +179,7 @@ proc setupFixture(gitBin, slug: string): M17Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -212,7 +212,7 @@ proc invokeDispatch(fx: M17Fixture; hookName: string): CmdResult =
   ]))
 
 proc readReport(fx: M17Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repo" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
     "hooks-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

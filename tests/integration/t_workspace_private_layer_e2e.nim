@@ -202,7 +202,7 @@ type
 proc writeWorkspaceToml(workspaceRoot: string;
                         publicManifestUrl, privateManifestUrl: string):
                           string =
-  let dotRepo = workspaceRoot / ".repo"
+  let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
   result = dotRepo / "workspace.toml"
   let body =

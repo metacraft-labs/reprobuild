@@ -12,7 +12,7 @@
 ##       .repro/develop-overrides.toml   RA-22 override: package "sib" -> "../sib"
 ##     sib/                        a SIBLING develop-mode dep — its OWN git repo
 ##       repro.nim                 a reprobuild project (the discovery discriminator)
-##   (NO `.repo/manifests`, NO `.repo/workspace.toml`, NO org-root repo)
+##   (NO root `projects/`, NO `.repro/workspace.toml`, NO org-root repo)
 ##
 ## Asserts:
 ##   1. After ``repro lock refresh``, the committed lock carries the sibling as
@@ -142,7 +142,7 @@ created_at = "2026-06-27T00:00:00Z"
       check git(gitBin, repo, "push origin main").code == 0
 
       # Sanity: genuinely manifest-less + star-free.
-      check not dirExists(repo / ".repo")
+      check not dirExists(repo / ".repro" / "manifests")
       check not dirExists(scratch / "repro-workspace")
 
       # (2) sync --dry-run folds the sibling into the participating set.

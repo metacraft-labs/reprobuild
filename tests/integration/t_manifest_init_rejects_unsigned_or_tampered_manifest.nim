@@ -4,7 +4,7 @@
 ## source before trusting it. When the host bootstrap config declares
 ## `[verify] require_signature = true` plus an allowed-signers trust anchor, the
 ## manifest source's HEAD commit must carry a VALID signature from an allowed
-## key; otherwise init FAILS CLOSED and never materialises `.repo/manifests`
+## key; otherwise init FAILS CLOSED and never materialises the root `projects/`
 ## from the unverified source. When verification is NOT configured, behavior is
 ## unchanged (no verification — existing init flows are unaffected).
 ##
@@ -16,7 +16,7 @@
 ##      PROCEEDS (manifest checkout materialised, participating repo cloned).
 ##   B. HEAD UNSIGNED + `require_signature = true`                        → init
 ##      REFUSES with a clear "provenance verification failed" diagnostic and
-##      NO `.repo/manifests` is materialised.
+##      NO root `projects/` is materialised.
 ##   C. HEAD signed by a key NOT in allowed-signers + `require_signature = true`
 ##      → init REFUSES (the allowed-signers check actually rejects a
 ##      non-allowed signer, not just an unsigned commit).
@@ -26,7 +26,7 @@
 ##
 ## Falsifiability:
 ##   - If verification were a no-op, case B and case C would PROCEED (init
-##     exit 0, `.repo/manifests` present) — the test asserts they REFUSE.
+##     exit 0, root `projects/` present) — the test asserts they REFUSE.
 ##   - If verification rejected everything, case A and case D would FAIL — the
 ##     test asserts they PROCEED.
 ##   - If the allowed-signers check ignored the principal/key, case C (a
@@ -245,7 +245,7 @@ template runProvenanceCases(gitBin, scratch: string) =
       if r.code != 0:
         checkpoint("case A init output: " & r.output)
       check r.code == 0
-      check fileExists(r.wsRoot / ".repo" / "manifests" / "projects" /
+      check fileExists(r.wsRoot / ".repro" / "manifests" / "projects" /
         "myproject.toml")
       check dirExists(r.wsRoot / "lib-a" / ".git")
 
@@ -256,7 +256,7 @@ template runProvenanceCases(gitBin, scratch: string) =
       check "provenance" in r.output.toLowerAscii()
       # Fail-closed: no manifest checkout materialised from the unverified
       # source.
-      check not fileExists(r.wsRoot / ".repo" / "manifests" / "projects" /
+      check not fileExists(r.wsRoot / ".repro" / "manifests" / "projects" /
         "myproject.toml")
       check not dirExists(r.wsRoot / "lib-a" / ".git")
 
@@ -265,7 +265,7 @@ template runProvenanceCases(gitBin, scratch: string) =
       let r = runInit("c-wrong-key", attackerBare, verifyTable)
       check r.code != 0
       check "provenance" in r.output.toLowerAscii()
-      check not fileExists(r.wsRoot / ".repo" / "manifests" / "projects" /
+      check not fileExists(r.wsRoot / ".repro" / "manifests" / "projects" /
         "myproject.toml")
 
     # ---- Case D: no [verify] table on the SAME unsigned manifest → PROCEEDS -
@@ -274,7 +274,7 @@ template runProvenanceCases(gitBin, scratch: string) =
       if r.code != 0:
         checkpoint("case D init output: " & r.output)
       check r.code == 0
-      check fileExists(r.wsRoot / ".repo" / "manifests" / "projects" /
+      check fileExists(r.wsRoot / ".repro" / "manifests" / "projects" /
         "myproject.toml")
       check dirExists(r.wsRoot / "lib-a" / ".git")
 

@@ -17,7 +17,7 @@
 ##   2. Dirty workspace → strict M11 would have refused with exit 2;
 ##      post-commit downgrades to ``outcome = "skipped-dirty"`` + exit 0
 ##      and writes NO lock file.
-##   3. No ``.repo/workspace.toml`` → wrapper logs
+##   3. No ``.repro/workspace.toml`` → wrapper logs
 ##      ``outcome = "skipped-no-workspace"`` + exit 0 without touching
 ##      the (missing) manifest layer.
 ##   4. Lock writer fails (manifests/ directory made non-writable) →
@@ -174,7 +174,7 @@ proc setupFixture(gitBin, slug: string): M19Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -250,11 +250,11 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       let lockPath = report["lockFilePath"].getStr()
       check lockPath.len > 0
       check fileExists(lockPath)
-      check lockPath == fx.workspaceRoot / ".repo" / "manifests" /
+      check lockPath == fx.workspaceRoot / ".repro" / "manifests" /
         "locks" / "lib-a" / "lib-a" / (fx.libA.sha & ".toml")
 
       check report["indexFilePath"].getStr() == ""
-      check not fileExists(fx.workspaceRoot / ".repo" / "manifests" /
+      check not fileExists(fx.workspaceRoot / ".repro" / "manifests" /
         "locks" / "lib-a" / "index.toml")
 
       # Log file has exactly one ``ok`` line.
@@ -288,7 +288,7 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       # No lock file path recorded — the wrapper never reached the
       # writer phase.
       check report["lockFilePath"].getStr() == ""
-      let lockDir = fx.workspaceRoot / ".repo" / "manifests" / "locks"
+      let lockDir = fx.workspaceRoot / ".repro" / "manifests" / "locks"
       check (not dirExists(lockDir)) or
         (toSeq(walkDirRec(lockDir, yieldFilter = {pcFile})).len == 0)
 
@@ -308,13 +308,13 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       cloneAll(gitBin, fx)
       # No seedWorkspaceToml call AND no resolved manifest checkout — the
       # workspace is genuinely uninitialized (RA-10 canonical marker:
-      # a bare ``.repo/`` with no ``workspace.toml`` and no resolved
+      # a bare ``.repro/`` with no ``workspace.toml`` and no resolved
       # ``projects/*.toml`` is NOT a workspace). The wrapper must skip
-      # silently. (``setupFixture`` seeds ``manifests/projects/lib-a.toml``;
-      # RA-10 treats a single resolvable project as an initialized
-      # workspace, so we strip it here to model the genuine non-workspace
-      # case this test is about.)
-      removeDir(fx.workspaceRoot / ".repo" / "manifests")
+      # silently. (``setupFixture`` seeds the flat ``projects/lib-a.toml``
+      # membership manifest; RA-10 treats a single resolvable project as an
+      # initialized workspace, so we strip it here to model the genuine
+      # non-workspace case this test is about.)
+      removeDir(fx.workspaceRoot / "projects")
 
       let res = invokePostCommit(fx, fx.workspaceRoot / "lib-a")
       check res.code == 0
@@ -356,10 +356,14 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       cloneAll(gitBin, fx)
       seedWorkspaceToml(fx)
 
-      # Make the manifest-layer directory read-only so the lock writer
-      # cannot create the ``locks/lib-a/`` subdirectory. Strict M11
+      # Make the lock-store directory (``.repro/manifests``) read-only so the
+      # lock writer cannot create the ``locks/lib-a/`` subdirectory. In the
+      # native layout membership lives flat at the workspace root, so the
+      # git-checkout lock store at ``.repro/manifests`` is created here (rather
+      # than by ``setupFixture``) purely to inject the write fault. Strict M11
       # would propagate the OSError as exit 1; post-commit downgrades.
-      let manifestsRoot = fx.workspaceRoot / ".repo" / "manifests"
+      let manifestsRoot = fx.workspaceRoot / ".repro" / "manifests"
+      createDir(manifestsRoot)
       var perms = getFilePermissions(manifestsRoot)
       perms.excl(fpUserWrite)
       perms.excl(fpGroupWrite)

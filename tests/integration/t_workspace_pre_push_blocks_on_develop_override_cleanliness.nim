@@ -30,7 +30,7 @@
 ##
 ## Fixture pattern mirrors the other M18 pre-push tests: one bare
 ## origin per repo, a workspace clone, a metadata-only
-## ``.repo/workspace.toml`` selecting the active branch. The develop
+## ``.repro/workspace.toml`` selecting the active branch. The develop
 ## override always points at ``<workspace>/develop/lib-a`` so the
 ## fifth stage has something to check; the sibling-repo set
 ## (``lib-a``, ``lib-b``, ``lib-c``) is kept clean and published so
@@ -188,7 +188,7 @@ proc setupFixture(gitBin, slug: string): M23Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",

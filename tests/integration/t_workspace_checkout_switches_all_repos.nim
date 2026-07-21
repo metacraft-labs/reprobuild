@@ -222,7 +222,7 @@ proc setupFixture(gitBin, slug: string): M15Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -501,7 +501,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       # The on-disk workspace.toml carries the new value under
       # ``[workspace].branch`` (still a metadata-only file — we did
       # not promote it to composer mode).
-      let tomlPath = fx.workspaceRoot / ".repo" / "workspace.toml"
+      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
       let parsed = readWorkspaceLocal(tomlPath)
       check parsed.workspace.project == "lib-a"
       check parsed.workspace.branch.isSome

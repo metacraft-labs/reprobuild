@@ -3,14 +3,14 @@
 ##
 ## MO-9 collapsed sync / pull / check onto one membership-resolution seam
 ## (``resolveWorkspaceProjectShared``) that, besides the manifest dispatch,
-## also resolves a committed-lock-only workspace (no ``.repo/manifests`` and no
-## ``.repo/workspace.toml``) from the committed ``repro.lock``. MO-10 finishes
+## also resolves a committed-lock-only workspace (no membership manifests and no
+## ``.repro/workspace.toml``) from the committed ``repro.lock``. MO-10 finishes
 ## the unification by routing the four remaining non-lock-handling resolvers —
 ## ``repro workspace status`` / ``repro health`` / ``repro add`` /
 ## ``repro remove`` — onto the SAME seam.
 ##
 ## Before MO-10 each of those four had its own dispatch ladder that RAISED on a
-## committed-lock-only workspace ("requires `.repo/workspace.toml` or a
+## committed-lock-only workspace ("requires `.repro/workspace.toml` or a
 ## <project> argument" / "no project named ..."). This suite drives all four
 ## against a committed-lock-only workspace and asserts each one RESOLVES the
 ## committed-lock-derived participating set instead of raising — i.e. it now
@@ -24,7 +24,7 @@
 ##     unresolved" instead of ``hsOk`` / "resolved";
 ##   - add would print "no project named ..." (non-zero) instead of the
 ##     dry-run "would record ... dependency of project '<name>'";
-##   - remove would print the "requires `.repo/workspace.toml`" resolution
+##   - remove would print the "requires `.repro/workspace.toml`" resolution
 ##     error instead of reaching the "is declared in project '<name>'" stage.
 ##
 ## Hermetic: every git repo lives in a fresh tempdir; nothing touches ``$HOME``
@@ -74,7 +74,7 @@ suite "MO-10: status/health/add/remove use the unified resolver":
       defer: removeDir(scratch)
 
       # ---- A committed-lock-only workspace: a single git repo carrying a
-      # committed ``repro.lock`` but NO ``.repo/`` of any kind. This is exactly
+      # committed ``repro.lock`` but NO ``.repro/`` of any kind. This is exactly
       # the dispatch case the four ladders used to raise on. ----
       let origin = scratch / "origin.git"
       let repo = scratch / "work"
@@ -101,7 +101,7 @@ suite "MO-10: status/health/add/remove use the unified resolver":
       check git(gitBin, repo, "push origin main").code == 0
 
       # Sanity: genuinely manifest-less.
-      check not dirExists(repo / ".repo")
+      check not dirExists(repo / ".repro")
 
       # ---- (1) `repro workspace status` resolves via the shared ladder. ----
       let status = run(reproBinary & " workspace status --workspace-root=" &
@@ -146,5 +146,5 @@ suite "MO-10: status/health/add/remove use the unified resolver":
       let remove = run(reproBinary & " remove no-such-repo --workspace-root=" &
         repo)
       check "is declared in project" in remove.output
-      check "requires `.repo/workspace.toml`" notin remove.output
+      check "requires `.repro/workspace.toml`" notin remove.output
       check "no project or variant" notin remove.output

@@ -9,7 +9,7 @@
 ## reached the manifest repo.
 ##
 ## This test sets up a single-repo workspace whose manifest layer
-## (``.repo/manifests``) IS a real git checkout WITH an upstream (so the
+## (``.repro/manifests``) IS a real git checkout WITH an upstream (so the
 ## gate genuinely attempts to publish), then makes the publish PUSH fail by
 ## removing the upstream bare after the tracking branch is configured.
 ## ``@{u}`` still resolves from local config, the lock is written and
@@ -121,7 +121,7 @@ type
 
 proc seedManifestGitLayer(gitBin, manifestsRoot, bare, projectToml: string;
                           branch = "main") =
-  ## Make ``.repo/manifests`` a real git checkout that TRACKS a bare
+  ## Make ``.repro/manifests`` a real git checkout that TRACKS a bare
   ## upstream — so the pre-push gate genuinely attempts a publish push.
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " & q(bare))
   discard requireGit(q(gitBin) & " init -b " & branch & " " & q(manifestsRoot))
@@ -150,7 +150,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot / ".repro" / "manifests"
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",

@@ -125,7 +125,7 @@ revision = "dev"
 """
 
 proc writeManifest(workspaceRoot, aOrigin, bOrigin: string) =
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",

@@ -6,7 +6,7 @@
 ## which:
 ##
 ##   1. Resolves the named project / variant via the M6 surface (or
-##      composes layers via M8 when ``.repo/workspace.toml`` is
+##      composes layers via M8 when ``.repro/workspace.toml`` is
 ##      present). Single-project / M6 path exercised here.
 ##   2. Walks the resulting ``ResolvedProject.repos`` and emits the
 ##      declared (name, path, remote, revision) tuples plus the
@@ -103,7 +103,7 @@ proc setupFixture(slug: string): M12ListFixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",

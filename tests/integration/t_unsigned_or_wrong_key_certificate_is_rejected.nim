@@ -110,7 +110,7 @@ type
     libASha: string
 
 proc writeProjectManifest(fx: Fixture; certificatesTable: string) =
-  let manifestsRoot = fx.workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = fx.workspaceRoot
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
     projectToml(fileUrl(fx.libAOrigin), certificatesTable))
 
@@ -128,7 +128,7 @@ proc setupFixture(gitBin: string): Fixture =
     result.scratch / "seed-lib-a")
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
@@ -166,7 +166,7 @@ proc readReport(fx: Fixture): JsonNode =
 proc lockDigestOf(fx: Fixture): string =
   ## The lock digest the gate binds certs to (so a hand-built cert matches the
   ## coverage requirement on every field EXCEPT its signature).
-  let locksRoot = fx.workspaceRoot / ".repo" / "manifests" / "locks" /
+  let locksRoot = fx.workspaceRoot / ".repro" / "manifests" / "locks" /
     "lib-a" / "lib-a"
   var lockFile = ""
   for f in walkFiles(locksRoot / "*.toml"): lockFile = f

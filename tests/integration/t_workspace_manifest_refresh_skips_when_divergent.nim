@@ -12,7 +12,7 @@
 ## This test verifies the divergent-skip arm end-to-end:
 ##
 ##   1. Bare manifest-host seeded; one TOML commit on ``main``.
-##   2. Layer cloned into ``.repo/manifests-0-<...>/`` via the M10
+##   2. Layer cloned into ``.repro/manifests-0-<...>/`` via the M10
 ##      probe.
 ##   3. Upstream advances by one commit (push from a side seed clone).
 ##   4. The layer checkout ALSO advances by one commit on top of
@@ -132,7 +132,7 @@ revision = "main"
 """
 
 proc writeWorkspaceTomlWithLayer(workspaceRoot, layerUrl: string) =
-  let dotRepo = workspaceRoot / ".repo"
+  let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
   let body =
     "schema = \"reprobuild.workspace.local.v1\"\n\n" &

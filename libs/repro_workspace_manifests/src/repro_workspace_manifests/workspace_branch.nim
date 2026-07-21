@@ -79,8 +79,17 @@ proc reproDir*(workspaceRoot: string): string =
 
 proc manifestsRoot*(workspaceRoot: string): string =
   ## Directory containing the workspace's membership manifests (``projects/``
-  ## and ``repos/``). In the native layout these live flat at the workspace
-  ## root of the ``<org>/repro-workspace`` repo.
+  ## and ``repos/``). Native layout: prefer the flat workspace root (the
+  ## ``<org>/repro-workspace`` repo's ``projects/``/``repos/``); fall back to a
+  ## materialized manifest checkout under ``.repro/manifests`` — e.g. an
+  ## ``init --manifest-url`` shared-cache symlink, or the git-checkout store
+  ## backend that also carries membership for the repos it covers. Both are
+  ## native ``.repro/`` locations; the legacy ``.repo/`` tree is never consulted.
+  if dirExists(workspaceRoot / "projects") or dirExists(workspaceRoot / "repos"):
+    return workspaceRoot
+  let reproManifests = workspaceRoot / ".repro" / "manifests"
+  if dirExists(reproManifests / "projects") or dirExists(reproManifests / "repos"):
+    return reproManifests
   workspaceRoot
 
 # ---- serializer -----------------------------------------------------------

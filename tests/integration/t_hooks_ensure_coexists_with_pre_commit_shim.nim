@@ -103,7 +103,7 @@ suite "RA-4 — hooks ensure coexists with pre-commit hook-impl shim":
 
       # Minimal single-project manifest so `enumerateParticipatingRepos`
       # discovers lib-a.
-      let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+      let manifestsRoot = workspaceRoot
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "lib-a.toml",

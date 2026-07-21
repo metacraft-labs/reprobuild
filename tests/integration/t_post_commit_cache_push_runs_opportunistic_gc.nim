@@ -74,7 +74,7 @@ suite "regression — post-commit cache-push runs opportunistic maintenance":
       discard requireGit(q(gitBin) & " -C " & q(seed) & " push origin main")
 
       let ws = scratch / "ws"
-      let manifestsRoot = ws / ".repo" / "manifests"
+      let manifestsRoot = ws
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "p.toml",
@@ -86,7 +86,8 @@ suite "regression — post-commit cache-push runs opportunistic maintenance":
         "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
         "[repo]\nname = \"r\"\npath = \"r\"\nremote = \"o\"\n" &
         "revision = \"main\"\n")
-      writeFile(ws / ".repo" / "workspace.toml",
+      createDir(ws / ".repro")
+      writeFile(ws / ".repro" / "workspace.toml",
         "schema = \"reprobuild.workspace.local.v1\"\n\n[workspace]\n" &
         "project = \"p\"\n")
       discard requireGit(q(gitBin) & " clone " & q("file://" & origin) & " " &

@@ -11,7 +11,7 @@
 ##      workspace uses composer mode (``[[manifest]]`` ``url``) so the
 ##      manifest repo itself is a refreshable layer.
 ##   2. The layer is pre-cloned into the workspace's
-##      ``.repo/manifests-0-<sanitized>`` directory at the FIRST manifest
+##      ``.repro/manifests-0-<sanitized>`` directory at the FIRST manifest
 ##      commit.
 ##   3. The bare manifest-host is then advanced by a SECOND commit. So
 ##      when ``pull`` runs, its manifest-refresh step fast-forwards the
@@ -110,7 +110,7 @@ proc seedBareWithFiles(gitBin, scratch, barePath: string;
     q(barePath))
 
 proc writeWorkspaceTomlWithLayer(workspaceRoot, layerUrl: string) =
-  let dotRepo = workspaceRoot / ".repo"
+  let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
   let body =
     "schema = \"reprobuild.workspace.local.v1\"\n\n" &
@@ -164,9 +164,9 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
         reproBin, "workspace", "pull",
         "--workspace-root=" & workspaceRoot,
       ]))
-      # The layer now exists in .repo/manifests-0-*. Locate it.
+      # The layer now exists in .repro/manifests-0-*. Locate it.
       var layerDir = ""
-      for kind, path in walkDir(workspaceRoot / ".repo"):
+      for kind, path in walkDir(workspaceRoot / ".repro"):
         if kind == pcDir and path.lastPathPart.startsWith("manifests-0-"):
           layerDir = path
       check layerDir.len > 0

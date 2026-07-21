@@ -6,11 +6,11 @@
 ## resolve the participating repo set + locked revisions. This suite drives
 ## a built ``./build/bin/repro`` against a single git repo that carries a
 ## committed ``repro.lock`` (refreshed from a ``repro.solver`` sidecar) but
-## has NO ``.repo/manifests`` and NO ``.repo/workspace.toml``. It asserts:
+## has NO membership manifests and NO ``.repro/workspace.toml``. It asserts:
 ##
 ##   1. ``repro workspace sync --dry-run`` OPERATES — it resolves the
 ##      committed-lock-derived participating set (the repo itself) and
-##      announces a plan, rather than raising "requires `.repo/workspace.toml`
+##      announces a plan, rather than raising "requires `.repro/workspace.toml`
 ##      or a <project> argument". Before MO-2 the resolver raised and the
 ##      command exited non-zero.
 ##   2. The top-level ``repro sync --dry-run`` shortcut behaves the same.
@@ -67,7 +67,7 @@ suite "MO-2: sync/check operate from the committed lock without manifests":
       defer: removeDir(scratch)
 
       # ---- A bare origin + a clone that becomes the committed-lock-only
-      # workspace repo. No `.repo/` of any kind is ever created. ----
+      # workspace repo. No `.repro/` of any kind is ever created. ----
       let origin = scratch / "origin.git"
       let repo = scratch / "work"
       check git(gitBin, "", "init --bare -b main " & q(origin)).code == 0
@@ -98,7 +98,7 @@ suite "MO-2: sync/check operate from the committed lock without manifests":
       check git(gitBin, repo, "push origin main").code == 0
 
       # Sanity: this is genuinely manifest-less.
-      check not dirExists(repo / ".repo")
+      check not dirExists(repo / ".repro")
 
       # ---- (1) `repro workspace sync --dry-run` operates from the lock. ----
       let sync = run(reproBinary & " workspace sync --workspace-root=" &

@@ -173,7 +173,7 @@ suite "HL-4 — integrity mismatch surfaces per tier on the manifest-present pat
 
       let ws = scratch / "workspace"
       createDir(ws)
-      let manifestsRoot = ws / ".repo" / "manifests"
+      let manifestsRoot = ws
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "mix.toml",
@@ -226,7 +226,7 @@ suite "HL-4 — integrity mismatch surfaces per tier on the manifest-present pat
       check fileExists(teamManifest / "locks" / "mix" / "core" /
         (coreSha & ".toml"))
       check fileExists(db / ("lock_mix_secret_" & secretSha))
-      check not dirExists(manifestsRoot / "locks")
+      check not dirExists(ws / ".repro" / "manifests" / "locks")
 
       let refsFile = scratch / "pushed-refs.txt"
       writeFile(refsFile, "refs/heads/main " & coreSha &

@@ -173,7 +173,7 @@ type
     other: RepoSeed
 
 proc seedManifestGitLayer(gitBin, manifestsRoot, bare: string; branch = "main") =
-  ## Make ``.repo/manifests`` a real git checkout tracking a bare upstream so
+  ## Make ``.repro/manifests`` a real git checkout tracking a bare upstream so
   ## ``repro push`` genuinely publishes the lock to it.
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " & q(bare))
   discard requireGit(q(gitBin) & " init -b " & branch & " " & q(manifestsRoot))
@@ -208,7 +208,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot / ".repro" / "manifests"
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "app.toml",

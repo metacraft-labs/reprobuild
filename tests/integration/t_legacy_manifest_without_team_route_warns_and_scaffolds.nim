@@ -107,7 +107,7 @@ suite "HL-2 — legacy manifest without team route warns and scaffolds":
 
       let ws = scratch / "workspace"
       createDir(ws)
-      let manifestsRoot = ws / ".repo" / "manifests"
+      let manifestsRoot = ws / ".repro" / "manifests"
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "legacy.toml",
@@ -148,7 +148,7 @@ suite "HL-2 — legacy manifest without team route warns and scaffolds":
       check fileExists(vcsPrivate)
       let cfgBody = readFile(vcsPrivate)
       check cfgBody.contains("git-checkout")
-      check cfgBody.contains(".repo/manifests")
+      check cfgBody.contains(".repro/manifests")
       check cfgBody.contains("\"team\"")
 
       # ---- (3) explain now resolves every repo to the TEAM backend -----

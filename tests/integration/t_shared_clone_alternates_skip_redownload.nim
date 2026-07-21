@@ -100,7 +100,7 @@ revision = "main"
 proc seedWorkspace(scratch, slug, libUrl: string): string =
   let workspaceRoot = scratch / ("ws-" & slug)
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "ra5proj.toml", projectToml(libUrl))
