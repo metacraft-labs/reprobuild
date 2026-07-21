@@ -1262,6 +1262,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim",
+    binary: "build/test-bin/t_provider_nimcache_key_tracks_external_libs",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_launch_plan/tests/t_codec_smoke.nim",
     binary: "build/test-bin/t_codec_smoke",
     defines: @[],

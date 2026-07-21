@@ -2035,6 +2035,39 @@ proc siblingReprobuildLibsRoot(workDir: string): string =
     return candidate
   ""
 
+proc workDirIsReprobuildTree(workDir: string): bool =
+  ## True when ``workDir`` IS itself a reprobuild source checkout — its own
+  ## ``libs/`` is the authoritative copy of the reprobuild libs the harness
+  ## compiles against, so no EXTERNAL root is consulted.
+  fileExists(extendedPath(
+    workDir / "libs" / "repro_project_dsl" / "src" / "repro_project_dsl.nim"))
+
+proc reprobuildExternalLibsRoot(workDir: string): string =
+  ## The reprobuild ``libs/`` root a NON-reprobuild consumer compiles its
+  ## provider/interface recipes against, resolved EXACTLY as
+  ## ``reproLibPathFlags`` does: ``$REPROBUILD_LIBS_DIR`` /
+  ## ``$REPROBUILD_REPO_ROOT`` → the running ``repro`` binary's own checkout →
+  ## a sibling ``../reprobuild/`` checkout. Empty when ``workDir`` IS itself a
+  ## reprobuild tree (its ``libs/`` is already the authoritative copy) or when
+  ## no external root is found.
+  ##
+  ## This is the single source of truth for "which reprobuild libs does the
+  ## harness use", consumed BOTH by ``reproLibPathFlags`` (to build the
+  ## ``--path:`` flags) AND by ``reproLibSources`` (to fold those libs into the
+  ## provider-nimcache freshness key). Without the latter, an out-of-tree
+  ## reprobuild lib edit would NOT change the nimcache key — the shared
+  ## nimcache would then reuse a STALE compiled ``repro_interface_artifacts``,
+  ## and the harness would emit interface artifacts the freshly-built ``repro``
+  ## binary cannot validate (an interface/provider fingerprint skew across the
+  ## harness↔binary boundary).
+  if workDirIsReprobuildTree(workDir):
+    return ""
+  result = reprobuildLibsRootFromEnv()
+  if result.len == 0:
+    result = reprobuildLibsRootFromBinaryLocation()
+  if result.len == 0:
+    result = siblingReprobuildLibsRoot(workDir)
+
 proc resolveBootstrapPackagePath*(envName: string;
                                   candidates: openArray[string];
                                   marker: string): string =
@@ -2242,20 +2275,16 @@ proc reproLibPathFlags(workDir: string): seq[string] =
   # pinned to a different branch), silently compiling the recipe against
   # stale stdlib sources. So only consult the external reprobuild root
   # when the consumer does not already provide the reprobuild libs itself.
-  let workDirIsReprobuildTree = fileExists(extendedPath(
-    workDir / "libs" / "repro_project_dsl" / "src" / "repro_project_dsl.nim"))
-
   var reprobuildLibsRoot = ""
-  if workDirIsReprobuildTree:
+  if workDirIsReprobuildTree(workDir):
     # In-tree: anchor the MR14 sibling source-only flags at the working
     # tree; the working-tree libs are already on ``paths`` above.
     reprobuildLibsRoot = workDir / "libs"
   else:
-    reprobuildLibsRoot = reprobuildLibsRootFromEnv()
-    if reprobuildLibsRoot.len == 0:
-      reprobuildLibsRoot = reprobuildLibsRootFromBinaryLocation()
-    if reprobuildLibsRoot.len == 0:
-      reprobuildLibsRoot = siblingReprobuildLibsRoot(workDir)
+    # Out-of-tree: the SAME external root ``reproLibSources`` folds into the
+    # provider-nimcache key, so ``--path:`` and the freshness key never
+    # diverge (that divergence is the harness↔binary fingerprint skew).
+    reprobuildLibsRoot = reprobuildExternalLibsRoot(workDir)
     if reprobuildLibsRoot.len > 0:
       walkLibSrcPathsInto(reprobuildLibsRoot, paths)
 
@@ -2465,8 +2494,8 @@ proc discoverNimSources*(rootModulePath: string;
         result.add(normalized)
   result.sort(system.cmp[string])
 
-proc reproLibSources(workDir: string): seq[string] =
-  let libsRoot = workDir / "libs"
+proc walkLibSourcesInto(libsRoot: string; sink: var seq[string];
+                        seen: var HashSet[string]) =
   if not dirExists(extendedPath(libsRoot)):
     return
   # NOTE: pass the *non*-extended ``libsRoot`` to ``walkDirRec`` here.
@@ -2478,7 +2507,26 @@ proc reproLibSources(workDir: string): seq[string] =
   # well under MAX_PATH so the raw form is safe.
   for path in walkDirRec(libsRoot):
     if path.endsWith(".nim") or path.endsWith(".nims"):
-      result.add(normalizedStampPath(path))
+      let normalized = normalizedStampPath(path)
+      if not seen.containsOrIncl(normalized):
+        sink.add(normalized)
+
+proc reproLibSources(workDir: string): seq[string] =
+  var seen = initHashSet[string]()
+  walkLibSourcesInto(workDir / "libs", result, seen)
+  # Out-of-tree consumers compile their provider/interface recipes against an
+  # EXTERNAL reprobuild libs root (``reproLibPathFlags`` resolves the same
+  # root). Fold those sources into the fingerprint so an edit to reprobuild's
+  # own libs (e.g. the interface-artifact codec) invalidates the shared
+  # provider-nimcache — otherwise the harness reuses a stale compiled
+  # ``repro_interface_artifacts`` and emits artifacts the freshly-built
+  # ``repro`` binary cannot validate (the harness↔binary fingerprint skew).
+  # In-tree (workDir IS reprobuild) this root is empty: the working-tree libs
+  # are already covered by the ``workDir / "libs"`` walk above, so reprobuild's
+  # own provider compiles are unchanged.
+  let externalRoot = reprobuildExternalLibsRoot(workDir)
+  if externalRoot.len > 0:
+    walkLibSourcesInto(externalRoot, result, seen)
   result.sort(system.cmp[string])
 
 proc reproLibSourceFingerprint(workDir: string): string =
