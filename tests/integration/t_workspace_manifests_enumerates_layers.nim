@@ -8,7 +8,7 @@
 ##   1. Reads ``<workspaceRoot>/.repro/workspace.toml`` (M5 surface). A
 ##      missing workspace.toml is treated as "no layered workspace" —
 ##      the report's ``hasLayeredWorkspace`` flag is false and the
-##      renderer prints a single info line; exit 0.
+##      renderer prints a single "no workspace metadata" info line; exit 0.
 ##   2. For each declared ``[[manifest]]`` layer, computes the layer's
 ##      provenance string (URL or local_path), visibility tier, and
 ##      on-disk checkout path that the M8 composer would have
@@ -281,7 +281,7 @@ suite "M12 — repro workspace manifests (enumerates layers)":
       check canonical(privateLayer["layerCheckoutPath"].getStr()).startsWith(
         canonical(workspaceRoot / ".repro" / "manifests-1-"))
 
-  test "test_m12_manifests_no_workspace_toml_prints_no_layered_line":
+  test "test_m12_manifests_no_workspace_toml_reports_missing_metadata":
     # No workspace.toml in this fixture; the subcommand should not
     # blow up — it should report ``hasLayeredWorkspace = false`` and
     # exit 0 cleanly. We use a fresh scratch directory without any

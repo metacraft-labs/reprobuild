@@ -175,6 +175,93 @@ proc runParallelCheck() =
   # the parallelism cap.)
   check maxParallel >= 2
 
+proc runExclusiveResourceCheck() =
+  ## Resource-sensitive tests stay enabled and visible in the summary, but the
+  ## runner must execute them one at a time even when --threads=4. Use the exact
+  ## production basenames that failed under nested compiler/loopback contention
+  ## so this test protects the scheduling classification, not a toy alias.
+  let repoRoot = findRepoRoot()
+  let runner = repoRoot / "build" / "bin" /
+    addFileExt("repro_test_runner", ExeExt)
+  check fileExists(runner)
+  if not fileExists(runner):
+    return
+
+  let tempRoot = createTempDir("repro-m3-exclusive-", "")
+  defer: removeDir(tempRoot)
+  let binDir = tempRoot / "bin"
+  let srcDir = tempRoot / "src"
+  createDir(binDir)
+  createDir(srcDir)
+
+  const ExclusiveFixtures = [
+    "t_a2_5_p3_streaming_sink",
+    "t_a2_5_p8_throughput_bench",
+    "t_b0_repro_build_runquota_daemon",
+    "t_b1_apps_action_cache_hit",
+    "t_b1_repro_build_apps_byte_equivalent",
+    "t_b1_repro_build_apps_collection",
+    "t_b2_helper_invalidation",
+    "t_b3_test_execute_edge_cache_hit",
+    "t_b3_test_invalidation_rebuilds_repro",
+    "t_cross_repo_nim_library_src_threaded_onto_consumer_path",
+    "t_d1_pythonunittest_resolves_in_path_mode",
+    "t_d2_cross_project_selector_recognised",
+    "t_d5_collection_member_selector",
+    "t_e2e_local_reprobuild_project_build",
+    "t_e2e_native_shell_hooks",
+    "t_e2e_repro_dev_sessions",
+    "t_e2e_shell_hook_noop_latency",
+    "t_repro_https_cache_end_to_end",
+    "t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes",
+  ]
+  for i, stem in ExclusiveFixtures:
+    let src = srcDir / (stem & ".nim")
+    writeFixtureSource(src, i)
+    let ok = compileFixture(repoRoot, tempRoot, src,
+      binDir / addFileExt(stem, ExeExt))
+    check ok
+    if not ok:
+      return
+
+  let logPath = tempRoot / "windows.log"
+  writeFile(logPath, "")
+  putEnv("REPRO_FIXTURE_LOG", logPath)
+
+  let summary = tempRoot / "summary.json"
+  let cmd = quoteShell(runner) & " --no-build" &
+    " --threads=4" &
+    " --bin-dir=" & quoteShell(binDir) &
+    " --summary-json=" & quoteShell(summary) &
+    " --results-dir=" & quoteShell(tempRoot / "results")
+  let (output, exitCode) = execCmdEx(cmd)
+  checkpoint("exclusive runner exit=" & $exitCode)
+  checkpoint(output)
+  check exitCode == 0
+  check $(ExclusiveFixtures.len * 2) &
+    " cases require exclusive execution" in output
+
+  var intervals: seq[(float, float)] = @[]
+  for line in readFile(logPath).splitLines():
+    let parts = line.split(',')
+    if parts.len < 3: continue
+    try:
+      intervals.add((parseFloat(parts[1]), parseFloat(parts[2])))
+    except ValueError:
+      discard
+  checkpoint("exclusive windows: " & $intervals.len)
+  check intervals.len == ExclusiveFixtures.len * 2
+  check countOverlap(intervals) == 1
+
+  let doc = parseJson(readFile(summary))
+  check doc{"summary"}{"total"}.getInt(-1) == ExclusiveFixtures.len * 2
+  check doc{"summary"}{"passed"}.getInt(-1) == ExclusiveFixtures.len * 2
+  check doc{"summary"}{"failed"}.getInt(-1) == 0
+  check doc{"summary"}{"skipped"}.getInt(-1) == 0
+
 suite "t_repro_test_runner_parallel_n_workers":
   test "runner caps parallelism at --threads N":
     runParallelCheck()
+
+  test "resource-sensitive tests remain enabled and run exclusively":
+    runExclusiveResourceCheck()

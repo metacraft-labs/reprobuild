@@ -101,21 +101,21 @@ package producer:
     discard
 """
 
-proc consumerRepro(bindStmt: string): string =
-  """
+proc consumerRepro(producerSelector, bindStmt: string): string =
+  ("""
 import repro_project_dsl
 
 package theconsumer:
   defaultToolProvisioning "path"
 
   uses:
-    "producer"
+    "$1"
 
   build:
     discard
 
 proc useContainer() =
-""" & bindStmt & "\n"
+""" % [producerSelector]) & bindStmt & "\n"
 
 proc countWitness(path: string): int =
   if not fileExists(path):
@@ -130,10 +130,12 @@ proc writeProducer(producerDir: string; resourcesSrc: string) =
   writeFile(producerDir / "repro.nim", producerRepro)
   writeFile(producerDir / "repro" / "resources.nim", resourcesSrc)
 
-proc compileConsumer(consumerDir, witnessPath, bindStmt, nimcache: string;
+proc compileConsumer(consumerDir, witnessPath, producerSelector, bindStmt,
+                     nimcache: string;
                      checkOnly = false): tuple[ok: bool, output: string] =
   createDir(consumerDir)
-  writeFile(consumerDir / "repro.nim", consumerRepro(bindStmt))
+  writeFile(consumerDir / "repro.nim",
+    consumerRepro(producerSelector, bindStmt))
   let nimExe = findExe("nim")
   doAssert nimExe.len > 0, "nim compiler not on PATH"
   let env = "REPRO_TI2_ACCESSOR_WITNESS=" & quoteShell(witnessPath)
@@ -159,12 +161,14 @@ suite "TI2: separate-module producer (vm-harness shape)":
     createDir(base)
     defer: removeDir(base)
 
-    # Clean the producer-keyed accessor cache so this run starts COLD.
+    # Use a process-unique producer selector so the inline TI2 binary can run
+    # concurrently without either test deleting the other's accessor cache.
+    let producerSelector = "producer_sep_" & $getCurrentProcessId()
     let accCache = repoRoot / "build" / "nimcache" / "ti2-resource-accessors" /
-      "producer"
+      producerSelector
     removeDir(accCache)
 
-    let producerDir = base / "producer"
+    let producerDir = base / producerSelector
     writeProducer(producerDir, resourcesModule)
 
     let witness = base / "witness.log"
@@ -175,14 +179,15 @@ suite "TI2: separate-module producer (vm-harness shape)":
     # the producer's ``repro.nim`` wholesale — which does NOT export ``container``
     # (the wrapper is emitted only via the accessor splice), so the bind would
     # not type-check. A green compile here proves the accessor-splice routing.
-    let c1 = compileConsumer(base / "consumer1", witness,
+    let c1 = compileConsumer(base / "consumer1", witness, producerSelector,
       "  discard container(\"web\", image = \"nginx\", cpus = 2)",
       base / "nc1")
     check c1.ok                          # detected + contract crossed + bind ok
     check countWitness(witness) == 1     # exactly one cold generation
 
     # ---- No driver closure crossed (assert on the emitted accessor cache). ----
-    let cachedAccessors = readFile(accCache / "producer.accessors.nim")
+    let cachedAccessors = readFile(accCache /
+      (producerSelector & ".accessors.nim"))
     check cachedAccessors.contains("proc container*")
     check cachedAccessors.contains("\"vm_harness.container\"")
     check not cachedAccessors.contains("containerDriver")
@@ -192,7 +197,7 @@ suite "TI2: separate-module producer (vm-harness shape)":
     # Compiled under ``nim check`` (cannot run ``staticExec``) — still sees the
     # ``container`` wrapper via the exec-free VM read, and the witness does NOT
     # grow: the lift ran once, shared across consumers.
-    let c2 = compileConsumer(base / "consumer2", witness,
+    let c2 = compileConsumer(base / "consumer2", witness, producerSelector,
       "  discard container(\"api\", image = \"redis\", cpus = 4)",
       base / "nc2", checkOnly = true)
     check c2.ok
@@ -208,7 +213,7 @@ suite "TI2: separate-module producer (vm-harness shape)":
       resourcesModule.replace("cpus", "vcpus"))
 
     # A consumer binding the NEW attr name compiles AND forces a re-gen.
-    let cNew = compileConsumer(base / "consumer3", witness,
+    let cNew = compileConsumer(base / "consumer3", witness, producerSelector,
       "  discard container(\"db\", image = \"pg\", vcpus = 8)",
       base / "nc3")
     check cNew.ok
@@ -217,7 +222,7 @@ suite "TI2: separate-module producer (vm-harness shape)":
     # A consumer binding the STALE attr name (``cpus``) no longer type-checks —
     # the falsifiable end. The cache is fresh from consumer3's re-gen, so this
     # reads the NEW-schema accessor on the fast path and the stale bind fails.
-    let cStale = compileConsumer(base / "consumer4", witness,
+    let cStale = compileConsumer(base / "consumer4", witness, producerSelector,
       "  discard container(\"cache\", image = \"mc\", cpus = 8)",
       base / "nc4", checkOnly = true)
     check not cStale.ok

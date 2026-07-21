@@ -41,6 +41,18 @@ proc runCmd(command: string; cwd = ""): tuple[code: int; output: string] =
   let res = execCmdEx(command, workingDir = cwd)
   (code: res.exitCode, output: res.output)
 
+proc removeDirEventually(path: string) =
+  for attempt in 0 ..< 20:
+    if not dirExists(path):
+      return
+    try:
+      removeDir(path)
+      return
+    except OSError:
+      if attempt == 19:
+        raise
+      sleep(100)
+
 proc requireGit(command: string; cwd = ""): string =
   let res = runCmd(command, cwd)
   if res.code != 0:

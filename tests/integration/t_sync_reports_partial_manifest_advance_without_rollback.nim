@@ -149,14 +149,9 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
       createDir(workspaceRoot)
       writeWorkspaceTomlWithLayer(workspaceRoot, layerUrl)
       # The composer/refresh naming for layer 0 is
-      # ``manifests-0-<sanitized-url>``; recover it from a probe by asking
-      # git where the in-tree checkout would live. We mirror the sanitizer
-      # by cloning into a deterministic directory and pointing the
-      # workspace.toml at it — but the production code derives the dir from
-      # the URL. Use the same convention: clone into the dir refresh
-      # reports. Easiest hermetic route: clone into every plausible name is
-      # fragile, so instead drive the FIRST pull to materialise the layer,
-      # then advance, then the SECOND pull does the advance+fail.
+      # ``manifests-0-<sanitized-url>`` under the tool-owned ``.repro``
+      # directory. Drive the FIRST pull to materialise the layer, then read
+      # the reported layer path instead of duplicating the sanitizer here.
       #
       # First pull: materialises the layer at commit#1 (composer clones it),
       # and fails on the unreachable lib-x clone.
@@ -164,11 +159,17 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
         reproBin, "workspace", "pull",
         "--workspace-root=" & workspaceRoot,
       ]))
-      # The layer now exists in .repro/manifests-0-*. Locate it.
+      # The layer now exists in .repro/manifests-0-*; locate it from the
+      # structured report emitted by the command under test.
       var layerDir = ""
-      for kind, path in walkDir(workspaceRoot / ".repro"):
-        if kind == pcDir and path.lastPathPart.startsWith("manifests-0-"):
-          layerDir = path
+      let firstReportPath = workspaceRoot / ".repro" / "workspace" /
+        "pull-report.json"
+      check fileExists(firstReportPath)
+      if fileExists(firstReportPath):
+        let firstReport = parseFile(firstReportPath)
+        for layer in firstReport["manifestLayers"]:
+          if layer["index"].getInt() == 0:
+            layerDir = layer["layerPath"].getStr()
       check layerDir.len > 0
       let commit1 = headSha(gitBin, layerDir)
 

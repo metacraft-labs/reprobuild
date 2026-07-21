@@ -68,9 +68,9 @@ suite "DSL-port M9.R.5a — 84-recipe sweep smoke":
     check "gcc >=11" in native
     # M9.R.15r.6 — dbus-broker's ``src/meson.build:75`` declares
     # ``dependency('expat')`` (the bus-configuration XML parser), so the
-    # recipe carries a single library ``buildDeps`` entry on the sibling
-    # expat from-source recipe.
-    check registeredBuildDeps("dbusBrokerSource") == @["expat"]
+    # recipe carries its XML and sd-bus library closure as ``buildDeps``.
+    check registeredBuildDeps("dbusBrokerSource") ==
+      @["expat", "systemd >=240"]
 
   test "cmake (from-source-custom recipe) populates nativeBuildDeps for toolchain":
     # cmake's uses: was just gcc + make — both classified as
@@ -203,13 +203,11 @@ suite "DSL-port M9.R.5a — 84-recipe sweep smoke":
     check "meson" in seen
     check "ninja" in seen
 
-  test "runtimeDeps stays empty by default for sampled recipes":
-    # The sweep emits a ``runtimeDeps: discard`` TODO stub per
-    # recipe; the M9.R.1 ``registeredRuntimeDeps`` accessor must
-    # return an empty seq because no constraint strings were
-    # registered. Sampled across our four upstream-build-system
-    # representatives.
-    check registeredRuntimeDeps("dbusBrokerSource").len == 0
+  test "runtimeDeps records declared closure and stays empty by default":
+    # dbus-broker now explicitly declares the two libraries its installed
+    # executables require. The other sampled recipes retain the empty default.
+    check registeredRuntimeDeps("dbusBrokerSource") ==
+      @["expat", "systemd >=240"]
     check registeredRuntimeDeps("cmakeSource").len == 0
     check registeredRuntimeDeps("coreutilsSource").len == 0
     check registeredRuntimeDeps("kernelSource").len == 0

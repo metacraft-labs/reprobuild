@@ -117,23 +117,23 @@ const driverBodyV2 =
 # resourceType, attrs) down by one line.
 const implPreamble = "# private-impl note: driver behaviour tuned (line-shift)"
 
-proc consumerRepro(bindStmt: string): string =
-  ## A consumer ``repro.nim`` that ``uses: "producer"`` and binds the typed
+proc consumerRepro(producerSelector, bindStmt: string): string =
+  ## A consumer ``repro.nim`` that uses ``producerSelector`` and binds the typed
   ## ``container`` wrapper.
-  """
+  ("""
 import repro_project_dsl
 
 package theconsumer:
   defaultToolProvisioning "path"
 
   uses:
-    "producer"
+    "$1"
 
   build:
     discard
 
 proc useContainer() =
-""" & bindStmt & "\n"
+""" % [producerSelector]) & bindStmt & "\n"
 
 proc countWitness(path: string): int =
   ## One line per COLD accessor REWRITE. A Level-1 HIT and a Level-2 reuse-in-
@@ -144,14 +144,16 @@ proc countWitness(path: string): int =
     if line.strip.len > 0:
       inc result
 
-proc compileConsumer(consumerDir, witnessPath, bindStmt, nimcache: string;
+proc compileConsumer(consumerDir, witnessPath, producerSelector, bindStmt,
+                     nimcache: string;
                      checkOnly = false): tuple[ok: bool, output: string] =
   ## Materialize + compile a consumer as a SUBPROCESS with the accessor witness
   ## redirected to ``witnessPath``. ``checkOnly`` uses ``nim check`` (which
   ## cannot run ``staticExec``), so a green check PROVES the consumer took the
   ## exec-free VM readFile fast path.
   createDir(consumerDir)
-  writeFile(consumerDir / "repro.nim", consumerRepro(bindStmt))
+  writeFile(consumerDir / "repro.nim",
+    consumerRepro(producerSelector, bindStmt))
   let nimExe = findExe("nim")
   doAssert nimExe.len > 0, "nim compiler not on PATH"
   let env = "REPRO_TI2_ACCESSOR_WITNESS=" & quoteShell(witnessPath)
@@ -168,21 +170,6 @@ proc compileConsumer(consumerDir, witnessPath, bindStmt, nimcache: string;
   let (output, code) = execCmdEx("cd " & quoteShell(repoRoot) & " && " & cmd)
   (code == 0, output)
 
-# The producer-keyed accessor cache paths (shared across all consumers of the
-# ``producer`` selector).
-const accCache = repoRoot / "build" / "nimcache" / "ti2-resource-accessors" /
-  "producer"
-const accessorFile = accCache / "producer.accessors.nim"
-const ifpFile = accCache / "producer.ifp"
-
-# The producer's own provider artifact (impl-INCLUDING) — proof of the SPLIT:
-# a private-impl edit re-materializes THIS while leaving the consumer's accessor
-# untouched. We approximate "provider artifact re-materialized" by the
-# producer's full-source stamp (impl-including), which the Level-2 path records
-# in the ``.stamp`` sidecar — it MUST change on a driver-body edit even though
-# the InterfaceFingerprint does not.
-const stampFile = accCache / "producer.stamp"
-
 suite "TI3: interface/provider fingerprint split":
 
   test "t_ti3_private_impl_edit_no_downstream_recompile":
@@ -192,10 +179,20 @@ suite "TI3: interface/provider fingerprint split":
     createDir(base)
     defer: removeDir(base)
 
+    let producerSelector =
+      "producer_ti3_a_" & $getCurrentProcessId()
+    let accCache = repoRoot / "build" / "nimcache" /
+      "ti2-resource-accessors" / producerSelector
+    let accessorFile = accCache / (producerSelector & ".accessors.nim")
+    let ifpFile = accCache / (producerSelector & ".ifp")
+    # The producer's own provider artifact is implementation-including. The
+    # Level-2 path records its full-source stamp in this sidecar.
+    let stampFile = accCache / (producerSelector & ".stamp")
+
     # Start COLD: clear the producer-keyed accessor cache.
     removeDir(accCache)
 
-    let producerDir = base / "producer"
+    let producerDir = base / producerSelector
     createDir(producerDir)
     writeFile(producerDir / "repro.nim",
       producerRepro(driverBodyV1, "cpus"))
@@ -203,7 +200,7 @@ suite "TI3: interface/provider fingerprint split":
     let witness = base / "witness.log"
 
     # ---- (1) COLD generate the accessor (witness == 1). ----
-    let c1 = compileConsumer(base / "consumer1", witness,
+    let c1 = compileConsumer(base / "consumer1", witness, producerSelector,
       "  discard container(\"web\", image = \"nginx\", cpus = 2)",
       base / "nc1")
     check c1.ok
@@ -225,7 +222,7 @@ suite "TI3: interface/provider fingerprint split":
     writeFile(producerDir / "repro.nim",
       producerRepro(driverBodyV2, "cpus", preamble = implPreamble))
 
-    let c2 = compileConsumer(base / "consumer2", witness,
+    let c2 = compileConsumer(base / "consumer2", witness, producerSelector,
       "  discard container(\"api\", image = \"redis\", cpus = 4)",
       base / "nc2")
     check c2.ok
@@ -255,9 +252,16 @@ suite "TI3: interface/provider fingerprint split":
     createDir(base)
     defer: removeDir(base)
 
+    let producerSelector =
+      "producer_ti3_b_" & $getCurrentProcessId()
+    let accCache = repoRoot / "build" / "nimcache" /
+      "ti2-resource-accessors" / producerSelector
+    let accessorFile = accCache / (producerSelector & ".accessors.nim")
+    let ifpFile = accCache / (producerSelector & ".ifp")
+
     removeDir(accCache)
 
-    let producerDir = base / "producer"
+    let producerDir = base / producerSelector
     createDir(producerDir)
     writeFile(producerDir / "repro.nim",
       producerRepro(driverBodyV1, "cpus"))
@@ -265,7 +269,7 @@ suite "TI3: interface/provider fingerprint split":
     let witness = base / "witness.log"
 
     # ---- (1) COLD generate (witness == 1). ----
-    let c1 = compileConsumer(base / "consumer1", witness,
+    let c1 = compileConsumer(base / "consumer1", witness, producerSelector,
       "  discard container(\"web\", image = \"nginx\", cpus = 2)",
       base / "nc1")
     check c1.ok
@@ -279,7 +283,7 @@ suite "TI3: interface/provider fingerprint split":
     writeFile(producerDir / "repro.nim",
       producerRepro(driverBodyV1, "vcpus"))
 
-    let cNew = compileConsumer(base / "consumer2", witness,
+    let cNew = compileConsumer(base / "consumer2", witness, producerSelector,
       "  discard container(\"db\", image = \"pg\", vcpus = 8)",
       base / "nc2")
     check cNew.ok
@@ -299,6 +303,7 @@ suite "TI3: interface/provider fingerprint split":
     # type-checks. Read on the fast path (``nim check``) against the fresh
     # NEW-schema accessor; the stale ``cpus`` bind fails to compile.
     let cStale = compileConsumer(base / "consumer3", witness,
+      producerSelector,
       "  discard container(\"cache\", image = \"mc\", cpus = 8)",
       base / "nc3", checkOnly = true)
     check not cStale.ok

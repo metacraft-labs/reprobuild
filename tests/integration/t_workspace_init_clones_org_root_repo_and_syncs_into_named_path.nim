@@ -116,6 +116,23 @@ proc bootstrapTomlBody(manifestUrl: string): string =
   "[projects]\n" &
   "default = [\"myproject\"]\n"
 
+proc removeDirEventually(path: string) =
+  ## Git can leave just-finished clone directories visible for a short window
+  ## after the command exits. Retry teardown, but still fail if the tree stays
+  ## non-empty.
+  if not dirExists(path):
+    return
+  var lastMsg = ""
+  for _ in 0 ..< 20:
+    try:
+      removeDir(path)
+      return
+    except OSError as e:
+      lastMsg = e.msg
+      sleep(50)
+  checkpoint("cleanup still failed for " & path & ": " & lastMsg)
+  removeDir(path)
+
 suite "RA-31 — clone org root repo + sync into named path":
 
   test "t_workspace_init_clones_org_root_repo_and_syncs_into_named_path":

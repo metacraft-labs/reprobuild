@@ -48,6 +48,22 @@ proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
+proc removeDirEventually(path: string) =
+  ## Git may still be closing files from a just-finished branch/create flow.
+  ## Retry teardown, but still fail if the workspace remains non-empty.
+  if not dirExists(path):
+    return
+  var lastMsg = ""
+  for _ in 0 ..< 40:
+    try:
+      removeDir(path)
+      return
+    except OSError as e:
+      lastMsg = e.msg
+      sleep(50)
+  checkpoint("cleanup still failed for " & path & ": " & lastMsg)
+  removeDir(path)
+
 # ---- bare-repo seed fixture ----------------------------------------------
 
 proc seedGitOrigin(gitBin, originPath, workPath: string;
