@@ -71,6 +71,14 @@ jobs:
           substituters: ${{ vars.SUBSTITUTERS }}
           nix-github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build Reprobuild CMake fork
+        env:
+          # The native-recorder flake input deliberately uses git+https because
+          # this private repository does not serve codeload archives. Keep the
+          # App token scoped to this process tree and bypass any persistent
+          # runner credential helper that would otherwise start device flow.
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token.outputs.token }}@github.com/.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/
         run: |
           nix develop ./reprobuild --command bash -c '
             set -euo pipefail
@@ -82,6 +90,10 @@ jobs:
 
       - name: Run quick benchmark suite
         working-directory: reprobuild
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token.outputs.token }}@github.com/.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/
         run: nix develop --command just bench --quick
 
       - name: Upload benchmark results
