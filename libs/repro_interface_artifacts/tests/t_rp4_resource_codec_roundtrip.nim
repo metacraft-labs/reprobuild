@@ -19,6 +19,7 @@ import std/[os, unittest]
 
 import repro_interface_artifacts
 import repro_project_dsl
+import repro_core
 import repro_hash
 
 proc addU16Le(outp: var seq[byte]; value: uint16) =
@@ -48,6 +49,22 @@ proc encodeV11ProjectInterfaceArtifact(pi: ProjectInterface): seq[byte] =
   payload.add(if pi.standardBuildEligible: 1'u8 else: 0'u8)
   result.add([byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))])
   result.addU16Le(11'u16)
+  result.addU16Le(101'u16)
+  result.addU32Le(uint32(payload.len))
+  result.add(payload)
+
+proc encodePreTi3V12ProjectInterfaceArtifact(pi: ProjectInterface): seq[byte] =
+  ## TI3 kept the v12 envelope but changed its fingerprint from the exact wire
+  ## payload digest to a location-normalized semantic digest. Reproduce a v12
+  ## artifact written before that change so compatibility remains testable.
+  var payload = encodeInterfacePayload(pi, 12'u16)
+  let fingerprint = blake3DomainDigest(payload, hdMetadataEnvelope)
+  payload.add(byte(ord(fingerprint.algorithm)))
+  payload.add(byte(ord(fingerprint.domain)))
+  payload.add(fingerprint.bytes)
+  payload.add(if pi.standardBuildEligible: 1'u8 else: 0'u8)
+  result.add([byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))])
+  result.addU16Le(12'u16)
   result.addU16Le(101'u16)
   result.addU32Le(uint32(payload.len))
   result.add(payload)
@@ -152,6 +169,21 @@ suite "interface-artifact codec RP4 (v12) publicResources":
     # The pre-existing v11 fields still decode.
     check decoded.projectInterface.publicLibraries.len == 1
     check decoded.projectInterface.publicLibraries[0].name == "core"
+
+  test "pre-TI3 v12 wire fingerprint remains decodable and tamper-safe":
+    var pi: ProjectInterface
+    pi.projectName = "rp4LegacyV12"
+    pi.packageName = "rp4LegacyV12"
+    pi.publicResources.add(sampleResource())
+    let encoded = encodePreTi3V12ProjectInterfaceArtifact(pi)
+    let decoded = decodeProjectInterfaceArtifact(encoded)
+    check decoded.projectInterface.publicResources.len == 1
+    check decoded.projectInterface.publicResources[0].location.line == 4
+
+    var corrupted = encoded
+    corrupted[^2] = corrupted[^2] xor 0xff'u8
+    expect EnvelopeError:
+      discard decodeProjectInterfaceArtifact(corrupted)
 
   test "empty publicResources round-trips":
     var pi: ProjectInterface
