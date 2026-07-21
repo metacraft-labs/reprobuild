@@ -28,8 +28,16 @@ proc addU32Le(outp: var seq[byte]; value: uint32) =
   outp.add(byte((value shr 24) and 0xff'u32))
 
 proc encodeV10ProjectInterfaceArtifact(pi: ProjectInterface): seq[byte] =
+  ## A v10 envelope (no ``exportedPath`` — that field arrives at v11) written by
+  ## the CURRENT codec: the on-disk payload keeps real locations, while the
+  ## InterfaceFingerprint is computed over the location-normalized payload
+  ## (``forFingerprint = true``), matching what ``decodeProjectInterfaceArtifact``
+  ## recomputes. Reprobuild has no pre-release on-disk artifacts to keep
+  ## compatible, so this exercises version-gated FIELD decoding, not a legacy
+  ## fingerprint shape.
   var payload = encodeInterfacePayload(pi, 10'u16)
-  let fingerprint = blake3DomainDigest(payload, hdMetadataEnvelope)
+  let fingerprint = blake3DomainDigest(
+    encodeInterfacePayload(pi, 10'u16, forFingerprint = true), hdMetadataEnvelope)
   payload.add(byte(ord(fingerprint.algorithm)))
   payload.add(byte(ord(fingerprint.domain)))
   payload.add(fingerprint.bytes)
@@ -115,7 +123,7 @@ suite "interface-artifact codec M12 (v9)":
     check artifactFor(piA).interfaceFingerprint !=
       artifactFor(piB).interfaceFingerprint
 
-  test "v10 library artifacts validate against their original wire shape":
+  test "v10-layout envelope decodes (exportedPath defaults empty)":
     var pi: ProjectInterface
     pi.projectName = "v10Lib"
     pi.packageName = "v10Lib"

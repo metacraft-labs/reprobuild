@@ -33,9 +33,15 @@ proc addU32Le(outp: var seq[byte]; value: uint32) =
 
 proc encodeV11ProjectInterfaceArtifact(pi: ProjectInterface): seq[byte] =
   ## A v11 envelope has NO publicResources block — the payload is encoded
-  ## at version 11 so the reader must default ``publicResources`` empty.
+  ## at version 11 so the reader must default ``publicResources`` empty. Written
+  ## by the CURRENT codec: the on-disk payload keeps real locations, while the
+  ## InterfaceFingerprint is over the location-normalized payload
+  ## (``forFingerprint = true``), matching ``decodeProjectInterfaceArtifact``'s
+  ## recompute. (No pre-release artifacts to keep compatible, so this checks
+  ## version-gated FIELD decoding, not a legacy fingerprint shape.)
   var payload = encodeInterfacePayload(pi, 11'u16)
-  let fingerprint = blake3DomainDigest(payload, hdMetadataEnvelope)
+  let fingerprint = blake3DomainDigest(
+    encodeInterfacePayload(pi, 11'u16, forFingerprint = true), hdMetadataEnvelope)
   payload.add(byte(ord(fingerprint.algorithm)))
   payload.add(byte(ord(fingerprint.domain)))
   payload.add(fingerprint.bytes)
