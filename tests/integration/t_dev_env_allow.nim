@@ -33,6 +33,7 @@ suite "integration_dev_env_allow":
     writeFile(projectDir / "reprobuild.nim",
       "import repro_project_dsl\n" &
       "package test:\n" &
+      "  defaultToolProvisioning \"path\"\n" &
       "  uses:\n" &
       "    \"nim >=2.2 <3.0\"\n" &
       "  devEnv:\n" &
@@ -101,6 +102,7 @@ suite "integration_dev_env_allow":
     writeFile(blockedDir / "reprobuild.nim",
       "import repro_project_dsl\n" &
       "package blocked:\n" &
+      "  defaultToolProvisioning \"path\"\n" &
       "  uses:\n" &
       "    \"nim >=2.2 <3.0\"\n" &
       "  devEnv:\n" &

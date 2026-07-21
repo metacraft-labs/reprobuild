@@ -1,12 +1,14 @@
 import std/[os, strutils]
 
-import repro_hash
+import blake3
 
 const CacheKeySchema* = "reprobuild.dev-env.cache-key.v1"
 
 const
   CanonicalProjectFileName = "repro.nim"
   LegacyProjectFileName = "reprobuild.nim"
+  FrameMagic = "reprobuild.hash.v1\0"
+  ActionFingerprintDomainTag = "action-fingerprint"
 
 proc fastPathFsPath(path: string): string =
   when defined(windows):
@@ -85,6 +87,28 @@ proc developOverridesMetadataPath*(projectRoot: string): string =
     return gitDir / "reprobuild" / "develop-overrides.json"
   projectRoot / ".repro" / "local" / "develop-overrides.json"
 
+proc addU16Le(outp: var seq[byte]; value: uint16) =
+  outp.add(byte(value and 0xff'u16))
+  outp.add(byte((value shr 8) and 0xff'u16))
+
+proc addU64Le(outp: var seq[byte]; value: uint64) =
+  for shift in [0, 8, 16, 24, 32, 40, 48, 56]:
+    outp.add(byte((value shr shift) and 0xff'u64))
+
+proc addString(outp: var seq[byte]; value: string) =
+  for ch in value:
+    outp.add(byte(ord(ch)))
+
+proc actionFingerprintDigest(payload: openArray[byte]): blake3.Blake3Digest =
+  var framed = newSeqOfCap[byte](
+    FrameMagic.len + 2 + ActionFingerprintDomainTag.len + 8 + payload.len)
+  framed.addString(FrameMagic)
+  framed.addU16Le(uint16(ActionFingerprintDomainTag.len))
+  framed.addString(ActionFingerprintDomainTag)
+  framed.addU64Le(uint64(payload.len))
+  framed.add(payload)
+  blake3.digest(framed)
+
 proc computeDevEnvEdgeCacheKey*(projectRoot, activity, lockSliceId,
     developOverridesPath: string): string =
   ## Deterministic prompt-time key for ``repro dev-env export`` no-op checks.
@@ -111,10 +135,10 @@ proc computeDevEnvEdgeCacheKey*(projectRoot, activity, lockSliceId,
     "lockSliceId=" & lockSliceId,
     "lockSliceFile=" & lockSliceFilePart(projectRoot),
     "developOverrides=" & fileFingerprintPart(resolvedOverridesPath),
-    envVarPart("REPRO_DEVELOP_OVERRIDES_FILE")
+    envVarPart("REPRO_DEVELOP_OVERRIDES_FILE"),
+    envVarPart("REPRO_TOOL_PROVISIONING")
   ]
-  let digest = blake3DomainDigest(parts.join("\n").textBytes(),
-    hdActionFingerprint)
+  let digest = actionFingerprintDigest(parts.join("\n").textBytes())
   result = newStringOfCap(32)
   for i in 0 ..< 16:
-    result.add(toHex(int(digest.bytes[i]), 2).toLowerAscii())
+    result.add(toHex(int(digest[i]), 2).toLowerAscii())

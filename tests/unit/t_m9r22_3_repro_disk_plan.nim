@@ -2,7 +2,7 @@
 ##
 ## Spec: ``reprobuild-specs/ReproOS-Disko-Port.md`` §4.1.
 ##
-## Four cases verifying the plan output format + the subcommand
+## Five cases verifying the plan output format + the subcommand
 ## surface area:
 ##   1. ``parseDiskArgs`` recognises all six subcommands + their flag
 ##      surface (--confirm / --target / --device / --output / --probe /
@@ -14,7 +14,9 @@
 ##      hardware.nim source file: compile, run, capture JSON, render
 ##      plan; assert the rendered text mentions every declared device /
 ##      partition / mount-point.
-##   4. ``runDiskCommand`` for the stub subcommands (apply / mount /
+##   4. ``loadDiskoFromSource`` also works outside the reprobuild
+##      checkout, as an installed CLI must not depend on its process cwd.
+##   5. ``runDiskCommand`` for the stub subcommands (apply / mount /
 ##      unmount / generate / image) returns exit-code 2 + the
 ##      "implementation pending" notice on stderr, and ``plan`` against
 ##      a missing file returns 2 with a "no such file" message.
@@ -188,7 +190,26 @@ suite "M9.R.22.3: `repro disk plan` CLI":
     check "tank" in text
     check "stripe" in text
 
-  test "Test#4: stub subcommands + missing-source error path":
+  test "Test#4: loadDiskoFromSource is independent of process cwd":
+    let sourceDir = absolutePath(resetDir("test4-source"))
+    let externalCwd = absolutePath(resetDir("test4-external-cwd"))
+    let src = sourceDir / "hardware.nim"
+    writeFile(src, SampleSource)
+    check not dirExists(externalCwd / "libs")
+
+    let originalCwd = getCurrentDir()
+    setCurrentDir(externalCwd)
+    defer: setCurrentDir(originalCwd)
+    let outcome = loadDiskoFromSource(src)
+    if outcome.failure:
+      checkpoint("failureMsg = " & outcome.failureMsg)
+    check not outcome.failure
+    check outcome.spec.id == "01M9R22-PLAN-FIXTURE"
+    check outcome.spec.disko.isSome
+    check "ata-PlanFixture" in outcome.text
+    check "ata-PoolDisk" in outcome.text
+
+  test "Test#5: stub subcommands + missing-source error path":
     # `plan` against a missing file → exit 2 + "no such file" stderr.
     # We can't trivially intercept stderr in cross-platform Nim, but we
     # can use `osproc` against the test binary's compiled CLI surface
