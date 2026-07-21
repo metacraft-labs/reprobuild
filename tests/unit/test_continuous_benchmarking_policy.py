@@ -47,6 +47,83 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
         self.assertIn('run-cmake-generator-competitiveness-benchmark.sh "${args[@]}" >&2', script)
         self.assertIn("ratioSummary", script)
 
+    def test_collector_wires_composition_benchmark_suites(self):
+        # RP7 close-out: the collector must wire ALL composition suites, not
+        # just the m0/m23/cmake cross-repo suites. Each composition suite must
+        # be in the default suite list, have its run_<suite>_suite defined and
+        # invoked, and be handled by append_benchmark_metrics.
+        script = (ROOT / "scripts" / "collect-benchmark-metrics.sh").read_text()
+
+        composition_suites = ["rp1", "rp2", "rp3", "rp5b", "ti1", "ti3"]
+
+        # Default suite list contains every composition suite.
+        import re
+
+        match = re.search(
+            r'benchmark_suites="\$\{REPROBUILD_BENCH_SUITES:-([^}"]+)\}"', script
+        )
+        self.assertIsNotNone(
+            match, "could not find default benchmark_suites assignment"
+        )
+        default_suites = match.group(1).split(",")
+        for suite in composition_suites:
+            self.assertIn(
+                suite, default_suites, f"{suite} missing from default suite list"
+            )
+
+        for suite in composition_suites:
+            self.assertIn(
+                f"run_{suite}_suite() {{",
+                script,
+                f"run_{suite}_suite not defined",
+            )
+            # Defined AND invoked (guarded by suite_enabled).
+            self.assertIn(f"suite_enabled {suite}; then", script)
+            self.assertIn(
+                f"  run_{suite}_suite",
+                script,
+                f"run_{suite}_suite not invoked",
+            )
+
+        # append_benchmark_metrics handles each composition kind. rp1/rp2/rp3/
+        # rp5b/ti1/ti3 share the rp1-shaped parser branch.
+        self.assertIn(
+            'kind in ("rp1", "rp2", "rp3", "rp5b", "ti1", "ti3")', script
+        )
+        for suite in composition_suites:
+            self.assertIn(
+                f'append_benchmark_metrics "${{output}}" {suite}',
+                script,
+                f"append_benchmark_metrics not called for {suite}",
+            )
+
+    def test_composition_gate_metrics_are_wired(self):
+        # RP7 close-out: the specific gate METRICS named by the milestone must
+        # be emitted by the composition harnesses so the customSmallerIsBetter
+        # regression gate actually guards them:
+        #   - RP1 provider-compile-time: INTERFACE mode vs FULL mode.
+        #   - RP2 provider-session round-trip: WARM and COLD.
+        #   - RP3 cold-vs-warm consumer build.
+        # Asserted structurally (against the harness sources) so the unit test
+        # stays fast; a live `just bench --quick` JSON check lives in the
+        # separate slow path below.
+        bench = ROOT / "benchmarks" / "lib"
+
+        rp1 = (bench / "rp1_provider_compile_bench.nim").read_text()
+        self.assertIn('"suite": "rp1"', rp1)
+        self.assertIn("interface mode", rp1)
+        self.assertIn("full mode", rp1)
+
+        rp2 = (bench / "rp2_provider_session_bench.nim").read_text()
+        self.assertIn('"suite": "rp2"', rp2)
+        self.assertIn("provider session round-trip (cold", rp2)
+        self.assertIn("provider session round-trip (warm", rp2)
+
+        rp3 = (bench / "rp3_consumer_build_bench.nim").read_text()
+        self.assertIn('"suite": "rp3"', rp3)
+        self.assertIn("consumer build (cold", rp3)
+        self.assertIn("consumer build (warm", rp3)
+
     def test_benchmark_workflow_follows_metacraft_policy(self):
         workflow = (ROOT / ".github" / "workflows" / "benchmark.yml").read_text()
 
@@ -83,6 +160,43 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
             "just bench_cmake_reprobuild_vs_ninja_medium",
         ]:
             self.assertIn(target, agents)
+
+
+@unittest.skipUnless(
+    os.environ.get("REPROBUILD_BENCH_LIVE") == "1",
+    "live composition-bench run is slow; set REPROBUILD_BENCH_LIVE=1 to enable",
+)
+class ContinuousBenchmarkingLiveGateTests(unittest.TestCase):
+    def test_quick_run_emits_composition_gate_metrics(self):
+        # Slow path: actually run the composition suites and assert the gate
+        # metrics land in the collector JSON as customSmallerIsBetter records.
+        env = os.environ.copy()
+        env["REPROBUILD_BENCH_SUITES"] = "rp1,rp2,rp3"
+        result = subprocess.run(
+            ["bash", "scripts/collect-benchmark-metrics.sh", "--quick"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        records = json.loads(result.stdout)
+        names = [r["name"] for r in records]
+
+        for record in records:
+            self.assertEqual(set(record), {"name", "unit", "value", "extra"})
+            self.assertIsInstance(record["value"], (int, float))
+
+        def has(fragment):
+            return any(fragment in n for n in names)
+
+        self.assertTrue(has("interface mode"), names)
+        self.assertTrue(has("full mode"), names)
+        self.assertTrue(has("provider session round-trip (cold"), names)
+        self.assertTrue(has("provider session round-trip (warm"), names)
+        self.assertTrue(has("consumer build (cold"), names)
+        self.assertTrue(has("consumer build (warm"), names)
 
 
 if __name__ == "__main__":

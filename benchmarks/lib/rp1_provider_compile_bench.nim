@@ -6,17 +6,21 @@
 ## for a representative small project via the first-class provider-compile
 ## edge (``providerCompilePlan`` + ``compileProviderBinary``).
 ##
-## It performs one COLD provider compile (freshness cache primed into an
-## isolated scratch dir so the measured run is not a cache hit) and emits a
-## JSON document mirroring the shape ``scripts/collect-benchmark-metrics.sh``
-## consumes for the ``rp1`` suite.
+## It emits the interface-vs-full contrast the RP7 gate names: the cheap
+## INTERFACE-mode thin-interface extraction (what a ``uses:`` consumer pays to
+## see the provider's public API) vs the FULL-mode cold provider-binary compile
+## that materializes the runnable ``provider(B)`` (freshness cache primed into an
+## isolated scratch dir so the measured full run is not a cache hit). The JSON
+## document mirrors the shape ``scripts/collect-benchmark-metrics.sh`` consumes
+## for the ``rp1`` suite.
 ##
 ## Usage:
 ##   rp1_provider_compile_bench [--quick] [--out <path>]
 ##
-## TODO(RP7): fold the session round-trip (RP2) and cold-vs-warm consumer
-## build (RP3) metrics into this suite and wire the 20%-regression gate on
-## the gh-pages baseline per continuous-benchmarking.md.
+## The RP7 close-out wires the session round-trip (RP2), cold-vs-warm consumer
+## build (RP3), and the other composition suites into the shared
+## ``scripts/collect-benchmark-metrics.sh`` default suite list, with the
+## 20%-regression gate on the gh-pages baseline per continuous-benchmarking.md.
 
 import std/[json, os, strutils, times]
 
@@ -69,13 +73,24 @@ proc main() =
 
   let interfacePath = outDir / "rp1-bench-interface.rbsz"
   let stubPath = outDir / "rp1-bench-interface.nim"
+
+  # INTERFACE mode — the cheap thin-interface extraction a downstream consumer
+  # pays to see the provider's public API (extract-only, no runnable binary).
+  # This is the "fast interface compile" the campaign headlines: it is what a
+  # `uses:` consumer needs, and it is strictly cheaper than the FULL
+  # provider-binary compile below.
+  let interfaceStart = epochTime()
   let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
     workDir)
+  let interfaceMs = elapsedMs(interfaceStart)
 
   let binPath = outDir / "rp1-bench-provider"
   let compilePath = outDir / "rp1-bench-provider-compile.rbsz"
 
-  # Cold provider compile — this is the metric.
+  # FULL mode — the cold provider-binary compile that materializes the runnable
+  # provider(B). This is the full source compile, contrasted against the cheap
+  # interface extraction above; the interface-vs-full delta is the headline
+  # RP7 gate metric.
   let start = epochTime()
   let compiled = compileProviderBinary(modulePath, binPath,
     artifact.interfaceFingerprint, compilePath, workDir)
@@ -98,7 +113,15 @@ proc main() =
     "metrics": [
       {
         "suite": "rp1",
-        "name": "provider binary compile time (interface mode)",
+        "name": "provider compile time (interface mode: thin interface extract)",
+        "unit": "ms",
+        "value": interfaceMs,
+        "direction": "lower-is-better",
+        "status": "measured"
+      },
+      {
+        "suite": "rp1",
+        "name": "provider compile time (full mode: provider binary compile)",
         "unit": "ms",
         "value": compileMs,
         "direction": "lower-is-better",
@@ -109,6 +132,8 @@ proc main() =
 
   createDir(extendedPath(parentDir(outPath)))
   writeFile(extendedPath(outPath), pretty(doc))
-  echo "rp1 provider-compile-time: ", compileMs.formatFloat(ffDecimal, 3), " ms"
+  echo "rp1 provider-compile-time: interface ",
+    interfaceMs.formatFloat(ffDecimal, 3), " ms; full ",
+    compileMs.formatFloat(ffDecimal, 3), " ms"
 
 main()
