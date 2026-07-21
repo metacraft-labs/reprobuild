@@ -13,24 +13,24 @@ direnv exec . python3 scripts/reprobuild_suite_inventory.py
 Timed cold plus repeated warm baseline after cleaning repo-local build outputs:
 
 ```sh
-REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 2 --suite-timeout-seconds 7200
+REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 2 --suite-timeout-seconds 7200
 ```
 
 Bounded timing attempt, useful when the full suite is too slow for an interactive audit:
 
 ```sh
-REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 0 --suite-timeout-seconds 1800
+REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 0 --suite-timeout-seconds 1800
 ```
 
 ## Source
 
 | Field | Value |
 | --- | --- |
-| Generated at | 2026-07-21T14:09:58Z |
-| HEAD | fe01c40214f2f753c0a0e3ee5952b69dee1a0d68 |
-| HEAD short | fe01c402 |
+| Generated at | 2026-07-21T15:38:54Z |
+| HEAD | 40e7e4042eb712d3a8d0b5fd1927cb6218ff3cd2 |
+| HEAD short | 40e7e404 |
 | Branch | codex/m0-baseline-rebased |
-| Source fingerprint | 1846f472c416575bfc1f37f6be2d8c6401b1325d8d0ddea1102c0d1218a6be1b |
+| Source fingerprint | 5f6c409d9e451b5659caafef81e50ac44f59a08c71ec913112137a49d4545e53 |
 | Runtime argv | scripts/reprobuild_suite_inventory.py |
 | Runtime env | {"CODETRACER_ROOT": "/home/zahary/metacraft/codetracer-m0-dev", "CODETRACER_TEST_ISONIM_ROOT": "/tmp/isonim-m0-pinned", "IO_MON_SRC": "/nix/store/gl11s2nhx88xqb7msngcn27gxfq1lp2y-source/src", "NIX_BUILD_CORES": "32", "REPRO_CT_TEST_RUNNER_SRC": "/nix/store/1wi731x4pkwmbgyddnd2xhfzbxgiqzcj-source", "REPRO_TEST_ADAPTERS_SRC": "/nix/store/ci66n6j19lj1ww8xfjha6k640i1ckvdq-source/src", "RUNQUOTA_SRC": "/nix/store/cs5z04x7vxl3cb8cfq2nhcan93k71926-source", "SHM_GSET_SRC": "/nix/store/680mzqbgffmfza88v9zm9h47d607h9pg-source/src", "SHM_QUEUE_SRC": "/nix/store/4xlba8v4g2pdinv3r9xqkrwzjicfkzlq-source/src", "STACKABLE_HOOKS_SRC": "/nix/store/2z8n2x8ifccgg2jlaaf4h7ycwf3gbp9p-source/src"} |
 | External source checkouts | {"codetracer": {"branch": "codex/fix-frontend-php-language-tables", "dirty": false, "head": "5626bd5e6df449736e089602b520010ff0a86bf2", "path": "/home/zahary/metacraft/codetracer-m0-dev", "status": ""}, "codetracer-trace-format-nim": {"branch": "main", "dirty": false, "head": "839ed880c6340b9d1c4f81feb7f8e9e70b492956", "path": "/home/zahary/metacraft/codetracer-trace-format-nim", "status": ""}, "isonim": {"branch": "", "dirty": false, "head": "9936c544925004bada019204b5b111f39d1a54bf", "path": "/tmp/isonim-m0-pinned", "status": ""}, "nim-acp": {"branch": "main", "dirty": false, "head": "92993d80a8782d8d5bc6da8bf415914eb6f56c39", "path": "/home/zahary/metacraft/nim-acp", "status": ""}, "nim-agent-harbor": {"branch": "main", "dirty": false, "head": "d5bbc474e50d34f62f1c2f0825c40836a8d01e3c", "path": "/home/zahary/metacraft/nim-agent-harbor", "status": ""}, "nim-agents": {"branch": "main", "dirty": false, "head": "5ec079652b29bc0c4e7f29c77c0de23648bc5f20", "path": "/home/zahary/metacraft/nim-agents", "status": ""}, "nim-everywhere": {"branch": "main", "dirty": false, "head": "d04c7d2f38cc95969724714666d3f4d7a37e5c1b", "path": "/home/zahary/metacraft/nim-everywhere", "status": ""}} |
@@ -45,7 +45,7 @@ REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_invento
 | Test entries | 1118 |
 | Nim test binaries | 1114 |
 | Python test files | 4 |
-| Source-level cases | 6330 |
+| Source-level cases | 6332 |
 | Measured protocol-aware cases | not measured (requires runner summary) |
 | Graph-owned helper/fixture artifacts | 12 |
 | Tests with direct helper/fixture compiler calls | 44 |
@@ -84,10 +84,10 @@ No runner summary is available, so failed-test details are not measured.
 | Path | Size | Executable files |
 | --- | --- | --- |
 | build/bin | 21.6 MiB | 14 |
-| build/test-bin | 516.5 MiB | 1129 |
-| build/nimcache | 3735.8 MiB | 0 |
+| build/test-bin | 520.0 MiB | 1130 |
+| build/nimcache | 3811.8 MiB | 0 |
 | build/lib | 1.5 MiB | 4 |
-| .repro | 69.6 MiB | 0 |
+| .repro | 69.7 MiB | 0 |
 | test-logs/results | 0.0 MiB | 0 |
 
 ## Classification
@@ -143,7 +143,7 @@ Every test entry and its class is recorded in the JSON inventory.
 | tests/integration/t_stackable_hooks_extracted_process_tree.nim | integration | 276 | nim-c | "nim c --app:lib --threads:on " & |
 | tests/integration/t_ti2_separate_module_producer.nim | integration | 146 | nim-compile-verb | "c --compileOnly --hints:off --warnings:off -o:" & |
 | tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim | integration | 145 | nim-compile-verb | "c --compileOnly --hints:off --warnings:off -o:" & |
-| tests/integration/t_ti3_fingerprint_split.nim | integration | 162 | nim-compile-verb | "c --compileOnly --hints:off --warnings:off -o:" & |
+| tests/integration/t_ti3_fingerprint_split.nim | integration | 164 | nim-compile-verb | "c --compileOnly --hints:off --warnings:off -o:" & |
 | tests/unit/t_hcr_watch_inference.nim | graph-fixture | 34 | cc | "cc", "-c", "-g", "-O0", "-fno-inline", |
 | tests/unit/t_m9r13a_provider_compile_sharing.nim | graph-fixture | 185 | nim-variable-argv | let cmd = @[nimExe, "c", |
 | tests/unit/t_m9r14f_2_rpath_patching.nim | graph-fixture | 135 | cc | if findExe("cc").len > 0: findExe("cc") |
@@ -214,4 +214,4 @@ Every test entry and its class is recorded in the JSON inventory.
 The static inventory deliverables are present, but the M0 timing baseline is incomplete until a cold run plus repeated warm runs complete successfully and every repeated-warm test above 20 seconds has a recorded review.
 Authoritative slow-test review coverage is unavailable until the deferred repeated-warm summary defines the current candidate set.
 84 prior diagnostic reviews remain available for follow-up planning.
-Deferred empirical command: `REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 2 --suite-timeout-seconds 7200`.
+Deferred empirical command: `REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 2 --suite-timeout-seconds 7200`.

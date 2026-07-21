@@ -7,13 +7,13 @@
         "path": "build/bin"
       },
       {
-        "executableFiles": 1129,
-        "kib": 528871,
+        "executableFiles": 1130,
+        "kib": 532524,
         "path": "build/test-bin"
       },
       {
         "executableFiles": 0,
-        "kib": 3825487,
+        "kib": 3903298,
         "path": "build/nimcache"
       },
       {
@@ -23,7 +23,7 @@
       },
       {
         "executableFiles": 0,
-        "kib": 71246,
+        "kib": 71334,
         "path": ".repro"
       },
       {
@@ -32,7 +32,7 @@
         "path": "test-logs/results"
       }
     ],
-    "totalKiB": 4449324
+    "totalKiB": 4530876
   },
   "helperCompilationInTestBody": [
     {
@@ -1399,7 +1399,7 @@
           "executedVariables": [
             "cmd"
           ],
-          "line": 162,
+          "line": 164,
           "path": "tests/integration/t_ti3_fingerprint_split.nim",
           "patterns": [
             "nim-compile-verb"
@@ -1631,9 +1631,9 @@
   ],
   "metadata": {
     "branch": "codex/m0-baseline-rebased",
-    "generatedAt": "2026-07-21T14:09:58Z",
-    "head": "fe01c40214f2f753c0a0e3ee5952b69dee1a0d68",
-    "headShort": "fe01c402",
+    "generatedAt": "2026-07-21T15:38:54Z",
+    "head": "40e7e4042eb712d3a8d0b5fd1927cb6218ff3cd2",
+    "headShort": "40e7e404",
     "repoRoot": "/home/zahary/metacraft/reprobuild-m0-baseline",
     "runtime": {
       "argv": [
@@ -1717,11 +1717,11 @@
         "python": "Python 3.13.12"
       }
     },
-    "sourceFingerprint": "1846f472c416575bfc1f37f6be2d8c6401b1325d8d0ddea1102c0d1218a6be1b",
-    "status": "M benchmarks/reports/README.md\n M flake.nix\n M libs/repro_binary_cache_client/tests/t_r1_caches_config.nim\n M libs/repro_build_engine/src/repro_build_engine.nim\n M libs/repro_cli_support/src/repro_cli_support.nim\n M libs/repro_cli_support/src/repro_cli_support/disk.nim\n M libs/repro_daemon_core/src/repro_daemon_core/runtime.nim\n M libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim\n M libs/repro_dev_env_engine/src/repro_dev_env_engine/cache_key.nim\n M libs/repro_interface_artifacts/src/repro_interface_artifacts.nim\n M libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim\n M repro.nim\n M repro_tests.nim\n M scripts/build_apps.sh\n M scripts/run_tests.sh\n M tests/e2e/codetracer-subset/t_e2e_codetracer_build_subset_without_tup.nim\n M tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim\n M tests/e2e/dev-env/shell_hook_helper.nim\n M tests/e2e/dev-env/t_e2e_native_shell_hooks.nim\n M tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim\n M tests/e2e/path-only/t_path_only_tool_interfaces.nim\n M tests/integration/t_b3_test_execute_edge_cache_hit.nim\n M tests/integration/t_b3_test_invalidation_rebuilds_repro.nim\n M tests/integration/t_dev_env_allow.nim\n M tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim\n M tests/integration/t_local_daemons_control_plane_m1.nim\n M tests/integration/t_local_daemons_control_plane_m10.nim\n M tests/integration/t_local_daemons_control_plane_m3.nim\n M tests/integration/t_repro_test_runner_parallel_n_workers.nim\n M tests/integration/t_sync_reports_partial_manifest_advance_without_rollback.nim\n M tests/integration/t_ti2_separate_module_producer.nim\n M tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim\n M tests/integration/t_workspace_bootstrap_reads_host_repo_config_no_hardcoded_defaults.nim\n M tests/integration/t_workspace_branch_create_records_metadata.nim\n M tests/integration/t_workspace_checkout_switches_all_repos.nim\n M tests/integration/t_workspace_init_clones_org_root_repo_and_syncs_into_named_path.nim\n M tests/integration/t_workspace_manifests_enumerates_layers.nim\n M tests/unit/t_m9r22_3_repro_disk_plan.nim\n M tests/unit/t_m9r5a_recipe_sweep_smoke.nim\n M tools/test-runner/repro_test_runner.nim\n?? benchmarks/reports/reprobuild-suite-m0-baseline.md\n?? benchmarks/reports/reprobuild-suite-m0-inventory.json\n?? benchmarks/reports/reprobuild-suite-m0-slow-reviews.json\n?? scripts/monitor_shim_probe.sh\n?? scripts/reprobuild_suite_inventory.py\n?? tests/unit/test_reprobuild_suite_inventory.py"
+    "sourceFingerprint": "5f6c409d9e451b5659caafef81e50ac44f59a08c71ec913112137a49d4545e53",
+    "status": ""
   },
   "performanceAssessment": {
-    "deferredMeasurementCommand": "REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 2 --suite-timeout-seconds 7200",
+    "deferredMeasurementCommand": "REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 2 --suite-timeout-seconds 7200",
     "inferences": [
       "Parallel execution can reduce the serial execution component, but the exclusive lane and longest dependency chain bound the achievable wall-time reduction.",
       "Consolidating compatible pure-unit groups should reduce repeated Nim compilation, link, and process-start overhead while preserving logical case identity.",
@@ -1743,7 +1743,7 @@
       "pureUnitConsolidationGroups": 37,
       "pureUnitTests": 590,
       "runtimeCompilerCallTests": 44,
-      "sourceCases": 6330,
+      "sourceCases": 6332,
       "testEntries": 1118
     },
     "status": "structural-inference-only"
@@ -2827,7 +2827,7 @@
     "measuredProtocolAwareCaseCount": null,
     "nimTestBinaryCount": 1114,
     "pythonTestFileCount": 4,
-    "sourceCaseCount": 6330,
+    "sourceCaseCount": 6332,
     "testEntryCount": 1118
   },
   "tests": [
@@ -22653,14 +22653,14 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/test_reprobuild_suite_inventory.py",
-      "sourceCaseCount": 9,
+      "sourceCaseCount": 11,
       "sourceSuiteCount": 1,
       "targetOs": "soAny"
     }
   ],
   "timing": {
     "complete": false,
-    "currentSourceFingerprint": "1846f472c416575bfc1f37f6be2d8c6401b1325d8d0ddea1102c0d1218a6be1b",
+    "currentSourceFingerprint": "5f6c409d9e451b5659caafef81e50ac44f59a08c71ec913112137a49d4545e53",
     "notes": [
       "No suite run was requested for this inventory."
     ],
