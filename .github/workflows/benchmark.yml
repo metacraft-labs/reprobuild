@@ -35,6 +35,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: reprobuild
+          persist-credentials: false
 
       # Mint an installation token via the CI Token Provider GitHub
       # App for the private metacraft-labs sibling checkouts below.
@@ -45,6 +46,11 @@ jobs:
           app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
+          repositories: |
+            runquota
+            reprobuild-cmake
+            codetracer-native-recorder
+          permission-contents: read
 
       - name: Checkout RunQuota
         uses: actions/checkout@v4
@@ -52,6 +58,7 @@ jobs:
           repository: metacraft-labs/runquota
           path: runquota
           token: ${{ steps.ci_token.outputs.token }}
+          persist-credentials: false
 
       - name: Checkout Reprobuild CMake fork
         uses: actions/checkout@v4
@@ -60,6 +67,7 @@ jobs:
           ref: reprobuild
           path: reprobuild-cmake
           token: ${{ steps.ci_token.outputs.token }}
+          persist-credentials: false
 
       - name: Setup Nix
         uses: metacraft-labs/nixos-modules/.github/setup-nix@main
@@ -74,11 +82,18 @@ jobs:
         env:
           # The native-recorder flake input deliberately uses git+https because
           # this private repository does not serve codeload archives. Keep the
-          # App token scoped to this process tree and bypass any persistent
-          # runner credential helper that would otherwise start device flow.
+          # App token scoped to this step environment and its descendants, and
+          # bypass any persistent runner credential helper that would otherwise
+          # start device flow.
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_TERMINAL_PROMPT: '0'
           GIT_CONFIG_COUNT: '1'
-          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token.outputs.token }}@github.com/.insteadOf
-          GIT_CONFIG_VALUE_0: https://github.com/
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token.outputs.token }}@github.com/metacraft-labs/codetracer-native-recorder.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/codetracer-native-recorder
+          NIX_CONFIG: >-
+            access-tokens = github.com=${{ github.token }}
+            github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token.outputs.token }}
         run: |
           nix develop ./reprobuild --command bash -c '
             set -euo pipefail
@@ -91,9 +106,15 @@ jobs:
       - name: Run quick benchmark suite
         working-directory: reprobuild
         env:
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_TERMINAL_PROMPT: '0'
           GIT_CONFIG_COUNT: '1'
-          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token.outputs.token }}@github.com/.insteadOf
-          GIT_CONFIG_VALUE_0: https://github.com/
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token.outputs.token }}@github.com/metacraft-labs/codetracer-native-recorder.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/codetracer-native-recorder
+          NIX_CONFIG: >-
+            access-tokens = github.com=${{ github.token }}
+            github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token.outputs.token }}
         run: nix develop --command just bench --quick
 
       - name: Upload benchmark results
