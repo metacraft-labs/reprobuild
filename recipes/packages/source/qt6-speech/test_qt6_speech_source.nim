@@ -17,3 +17,16 @@ suite "qt6SpeechSource — from-source recipe smoke test":
     let arts = registeredArtifacts("qt6SpeechSource")
     check arts.len == 1
     check arts[0].artifactName == "libQt6TextToSpeech"
+
+  test "build dependencies include the required Qt modules":
+    let deps = registeredBuildDeps("qt6SpeechSource")
+    check "qt6-base >=6.8" in deps
+    check "qt6-declarative >=6.8" in deps
+    check "qt6-multimedia >=6.8" in deps
+
+  test "runtime closure includes the required Qt modules":
+    check registeredRuntimeDeps("qt6SpeechSource") == @[
+      "qt6-base >=6.8",
+      "qt6-declarative >=6.8",
+      "qt6-multimedia >=6.8",
+    ]

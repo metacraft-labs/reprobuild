@@ -28,6 +28,11 @@ package ktexteditorSource:
   buildDeps:
     "extra-cmake-modules >=6.0"
     "qt6-base >=6.6"
+    # ktexteditor directly requests Qt6::Qml; dependency prefixes are not
+    # propagated transitively through qt6-speech.
+    "qt6-declarative >=6.8"
+    # Qt6TextToSpeechConfig exports Qt6Multimedia as a required dependency.
+    "qt6-multimedia >=6.8"
     "qt6-tools >=6.6"
     ## M9.R.15q.10.3 — Qt6TextToSpeech is REQUIRED by ktexteditor's
     ## find_package(Qt6 ... TextToSpeech). Sibling qt6-speech recipe.
@@ -37,15 +42,27 @@ package ktexteditorSource:
     "kconfig >=6.0"
     "kcoreaddons >=6.0"
     "kconfigwidgets >=6.0"
+    "kcodecs >=6.0"
+    "kcolorscheme >=6.0"
     "kguiaddons >=6.0"
     "kiconthemes >=6.0"
     "kjobwidgets >=6.0"
     "kio >=6.0"
+    # KF6KIOConfig exports these framework dependencies to consumers.
+    "kbookmarks >=6.0"
+    "kcompletion >=6.0"
+    "kitemviews >=6.0"
+    "ksolid >=6.0"
+    "kwidgetsaddons >=6.0"
+    "kwindowsystem >=6.0"
+    "kservice >=6.0"
     "ktextwidgets >=6.0"
     "kxmlgui >=6.0"
+    "kglobalaccel >=6.0"
     "sonnet >=6.0"
     "syntax-highlighting >=6.0"
     "karchive >=6.0"
+    "kauth >=6.0"
 
   config:
     discard
@@ -65,7 +82,8 @@ package ktexteditorSource:
         # the ``ENABLE_EDITORCONFIG`` cache var via standard option().
         "ENABLE_EDITORCONFIG=OFF",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+        allowSourceWrites = true)
       discard pkg.library("libKF6TextEditor")
     finally:
       clearCurrentOwningPackageOverride()
