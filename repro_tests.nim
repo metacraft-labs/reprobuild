@@ -7326,6 +7326,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_ti3_fingerprint_split.nim",
+    binary: "build/test-bin/t_ti3_fingerprint_split",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_sc_producer_source_change_invalidates_consumer.nim",
     binary: "build/test-bin/t_sc_producer_source_change_invalidates_consumer",
     defines: @[],

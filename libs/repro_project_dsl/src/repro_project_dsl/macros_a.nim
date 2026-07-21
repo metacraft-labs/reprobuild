@@ -2923,11 +2923,36 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         createDir(accDir)
       let accessorCachePath = accDir / (selectorKey & ".accessors.nim")
       let stampPath = accDir / (selectorKey & ".stamp")
+      # TI3: the InterfaceFingerprint (impl-EXCLUDING — TI1) the cached accessor
+      # was generated against, recorded next to the accessor + stamp. It is the
+      # Level-2 discriminant between a private-impl edit (fingerprint unchanged →
+      # reuse the cached accessor IN PLACE) and a public-signature edit
+      # (fingerprint changed → regenerate).
+      let ifpPath = accDir / (selectorKey & ".ifp")
       let witnessPath =
         if witnessOverride.len > 0: witnessOverride
         else: accDir / (selectorKey & ".genlog")
 
-      # ---- FAST PATH: cache HIT — read the cached accessor source in-VM. ----
+      # ==== TI3 two-level accessor-cache freshness keying =====================
+      # Level 1 (cheap, VM-safe, NO subprocess) — the TI2 warm fast path,
+      #   unchanged: if the producer's cheap source stamp is UNCHANGED vs the
+      #   sidecar AND the accessor exists → HIT, read the cached accessor. The
+      #   common no-change case stays subprocess-free.
+      # Level 2 (only when the source stamp CHANGED) — the producer's source
+      #   genuinely changed, but it may be IMPL-ONLY. Run the generator (which
+      #   drives TI1's CACHED interface-lift edge — the cheap cached lift, not a
+      #   provider/impl compile) and read back its InterfaceFingerprint:
+      #     * fingerprint UNCHANGED vs the ``.ifp`` sidecar → private-impl edit:
+      #       the accessor content is provably identical → REUSE the existing
+      #       cached accessor file WITHOUT rewriting its bytes/mtime (downstream
+      #       sees NO input change → no recompile) and refresh ONLY the stamp
+      #       sidecar so the next check is a Level-1 fast HIT. This is the TI3 win.
+      #     * fingerprint CHANGED → public-signature edit: rewrite the accessor
+      #       (new content) + record the new fingerprint + refresh the stamp →
+      #       downstream recompiles.
+      # ========================================================================
+
+      # ---- Level 1: FAST PATH — cache HIT, read the cached accessor in-VM. ----
       var accessorSrc = ""
       var cacheHit = false
       if stamp.len > 0 and fileExists(accessorCachePath) and
@@ -2935,14 +2960,19 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         accessorSrc = readFile(accessorCachePath)
         cacheHit = true
 
-      # ---- COLD PATH: run the generator ONCE, cache the emitted source. ----
+      # ---- Level 2 / COLD: run the generator (drives the cached lift). ----
       if not cacheHit:
         let genPath = accDir / ("ti2_gen_" & selectorKey & ".nim")
+        # The generator emits a framed output: a leading ``IFP:<hex>`` line
+        # carrying the producer's InterfaceFingerprint (from TI1's cached lift),
+        # then the driver-free accessor source. The VM reads the fingerprint to
+        # decide reuse-in-place vs regenerate WITHOUT a second lift.
         let genSrc =
           "import repro_cli_support\n" &
-          "stdout.write(emitResourceContractAccessors(\n" &
-          "  resolveProducerTypedContract(" & escape(selector) & ", " &
-          escape(workspaceRoot) & ")))\n"
+          "let c = resolveProducerTypedContract(" & escape(selector) & ", " &
+          escape(workspaceRoot) & ")\n" &
+          "stdout.write(\"IFP:\" & c.interfaceFingerprint & \"\\n\")\n" &
+          "stdout.write(emitResourceContractAccessors(c))\n"
         writeFile(genPath, genSrc)
         # ``staticExec`` runs a real process out of the macro VM, so the
         # generator's ``nim c`` extractor subprocess + ``getCurrentDir`` are
@@ -2956,22 +2986,55 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         let genCmd =
           if repoRoot.len > 0: "cd " & quoteShell(repoRoot) & " && " & nimCmd
           else: nimCmd
-        accessorSrc = staticExec(genCmd)
-        # Persist the emitted source + the freshness stamp so the NEXT consumer
-        # of this producer takes the fast path above — but ONLY when the
-        # generator actually produced accessors. ``staticExec`` swallows a failed
-        # / KILLED generator ``nim c -r`` (returning its empty/partial output), so
-        # caching an EMPTY result would POISON the cache: a later consumer would
-        # CACHE-HIT on empty accessors (valid stamp) and fail with the wrapper
-        # undefined, without ever re-running the generator. Guard on a non-empty
-        # result so a transient generation failure (e.g. an OOM/timeout kill under
-        # heavy load) is retried on the next consumer instead of being cached.
-        if accessorSrc.strip.len > 0:
+        let genOut = staticExec(genCmd)
+        # Split the framed output: first ``IFP:<hex>`` line, then the accessor
+        # source. A generator that failed / was killed returns empty/partial
+        # output (``staticExec`` swallows the failure) — then ``newFingerprint``
+        # stays empty and the guards below refuse to cache, so the next consumer
+        # retries instead of caching a poisoned/empty result.
+        var newFingerprint = ""
+        if genOut.len > 0:
+          let nl = genOut.find('\n')
+          if nl >= 0 and genOut.startsWith("IFP:"):
+            newFingerprint = genOut[4 ..< nl].strip()
+            accessorSrc = genOut[nl + 1 .. ^1]
+          else:
+            # No frame (older/edge output shape) — treat the whole thing as the
+            # accessor source; TI3's reuse-in-place simply doesn't engage and we
+            # fall back to TI2 behavior (regenerate on any source-stamp change).
+            accessorSrc = genOut
+
+        # TI3 Level-2 reuse-in-place: the producer's source changed (stamp miss)
+        # but if the InterfaceFingerprint matches the ``.ifp`` sidecar the edit
+        # was private-impl-only — the freshly emitted accessor is byte-identical
+        # to the cached one. Do NOT rewrite the accessor file (that would bump its
+        # mtime and force downstream recompiles); reuse it in place and refresh
+        # ONLY the stamp so the next check is a Level-1 HIT.
+        var reusedInPlace = false
+        if newFingerprint.len > 0 and fileExists(accessorCachePath) and
+            fileExists(ifpPath) and
+            readFile(ifpPath).strip() == newFingerprint:
+          accessorSrc = readFile(accessorCachePath)
+          if stamp.len > 0:
+            writeFile(stampPath, stamp)
+          reusedInPlace = true
+
+        # Persist the emitted source + the freshness stamp + the fingerprint so
+        # the NEXT consumer of this producer takes the fast path above — but ONLY
+        # when the generator actually produced accessors AND we did not reuse in
+        # place. Guard on a non-empty result so a transient generation failure
+        # (e.g. an OOM/timeout kill under heavy load) is retried on the next
+        # consumer instead of being cached as an empty (poisoning) result.
+        if not reusedInPlace and accessorSrc.strip.len > 0:
           writeFile(accessorCachePath, accessorSrc)
           if stamp.len > 0:
             writeFile(stampPath, stamp)
+          if newFingerprint.len > 0:
+            writeFile(ifpPath, newFingerprint)
           # Record one witness line so a test can assert how many cold
-          # generations ran (only successful generations are witnessed).
+          # generations (accessor REWRITES) ran. A Level-2 reuse-in-place does
+          # NOT witness — the accessor was not regenerated — which is exactly
+          # what the TI3 private-impl test asserts.
           var log = ""
           if fileExists(witnessPath):
             log = readFile(witnessPath)

@@ -514,21 +514,36 @@ proc providerCompileEdge*(inputSources: openArray[string];
     declaredOutputs: declaredOutputs,
     actionFingerprint: fingerprint)
 
-proc writeLocation(outp: var seq[byte]; loc: SourceLocation) =
-  outp.writeString(loc.file)
-  outp.writeU32Le(uint32(max(loc.line, 0)))
+proc writeLocation(outp: var seq[byte]; loc: SourceLocation;
+                   forFingerprint = false) =
+  ## Serialises a ``SourceLocation``. When ``forFingerprint`` is true the
+  ## location is normalised to a fixed sentinel (empty file, line 0) so the
+  ## InterfaceFingerprint depends only on the SEMANTIC public contract and is
+  ## invariant to WHERE a public decl is written. A private-impl edit that
+  ## shifts line numbers (a longer driver body, a comment before a
+  ## ``resourceType`` block) must not change the fingerprint. The artifact
+  ## round-trip path (``encodeProjectInterfaceArtifact``) keeps
+  ## ``forFingerprint = false`` so real locations are preserved for
+  ## diagnostics.
+  if forFingerprint:
+    outp.writeString("")
+    outp.writeU32Le(0'u32)
+  else:
+    outp.writeString(loc.file)
+    outp.writeU32Le(uint32(max(loc.line, 0)))
 
 proc readLocation(bytes: openArray[byte]; pos: var int): SourceLocation =
   SourceLocation(file: readString(bytes, pos), line: int(readU32Le(bytes, pos)))
 
-proc writeParam(outp: var seq[byte]; param: InterfaceParam) =
+proc writeParam(outp: var seq[byte]; param: InterfaceParam;
+                forFingerprint = false) =
   outp.writeString(param.name)
   outp.writeString(param.nimType)
   outp.writeByte(byte(ord(param.kind)))
   outp.writeU32Le(uint32(param.position))
   outp.writeString(param.alias)
   outp.writeByte(if param.required: 1'u8 else: 0'u8)
-  outp.writeLocation(param.location)
+  outp.writeLocation(param.location, forFingerprint)
 
 proc readParam(bytes: openArray[byte]; pos: var int): InterfaceParam =
   result.name = readString(bytes, pos)
@@ -542,13 +557,14 @@ proc readParam(bytes: openArray[byte]; pos: var int): InterfaceParam =
   result.required = readByte(bytes, pos) == 1'u8
   result.location = readLocation(bytes, pos)
 
-proc writeCommand(outp: var seq[byte]; cmd: InterfaceCommand) =
+proc writeCommand(outp: var seq[byte]; cmd: InterfaceCommand;
+                  forFingerprint = false) =
   outp.writeString(cmd.name)
   outp.writeString(cmd.providerEntrypointId)
-  outp.writeLocation(cmd.location)
+  outp.writeLocation(cmd.location, forFingerprint)
   outp.writeU32Le(uint32(cmd.params.len))
   for param in cmd.params:
-    outp.writeParam(param)
+    outp.writeParam(param, forFingerprint)
 
 proc readCommand(bytes: openArray[byte]; pos: var int): InterfaceCommand =
   result.name = readString(bytes, pos)
@@ -559,13 +575,14 @@ proc readCommand(bytes: openArray[byte]; pos: var int): InterfaceCommand =
   for i in 0 ..< count:
     result.params[i] = readParam(bytes, pos)
 
-proc writeExecutable(outp: var seq[byte]; exe: InterfaceExecutable) =
+proc writeExecutable(outp: var seq[byte]; exe: InterfaceExecutable;
+                     forFingerprint = false) =
   outp.writeString(exe.exportName)
   outp.writeString(exe.binaryName)
-  outp.writeLocation(exe.location)
+  outp.writeLocation(exe.location, forFingerprint)
   outp.writeU32Le(uint32(exe.commands.len))
   for cmd in exe.commands:
-    outp.writeCommand(cmd)
+    outp.writeCommand(cmd, forFingerprint)
 
 proc readExecutable(bytes: openArray[byte]; pos: var int): InterfaceExecutable =
   result.exportName = readString(bytes, pos)
@@ -577,14 +594,14 @@ proc readExecutable(bytes: openArray[byte]; pos: var int): InterfaceExecutable =
     result.commands[i] = readCommand(bytes, pos)
 
 proc writeLibrary(outp: var seq[byte]; lib: InterfaceLibrary;
-                  version = EnvelopeVersion) =
+                  version = EnvelopeVersion; forFingerprint = false) =
   outp.writeString(lib.name)
   outp.writeByte(byte(ord(lib.kind)))
   # v11 (SC-11): ``exportedPath`` appended AFTER ``kind`` and BEFORE
   # ``location``; v<11 readers never reach it (gated on ``version >= 11``).
   if version >= 11'u16:
     outp.writeString(lib.exportedPath)
-  outp.writeLocation(lib.location)
+  outp.writeLocation(lib.location, forFingerprint)
 
 proc readLibrary(bytes: openArray[byte]; pos: var int;
                  version = EnvelopeVersion): InterfaceLibrary =
@@ -599,7 +616,8 @@ proc readLibrary(bytes: openArray[byte]; pos: var int;
     result.exportedPath = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
-proc writeResource(outp: var seq[byte]; res: InterfaceResource) =
+proc writeResource(outp: var seq[byte]; res: InterfaceResource;
+                   forFingerprint = false) =
   outp.writeString(res.typeId)
   outp.writeByte(byte(ord(res.determinism)))
   outp.writeString(res.entrypoints.identity)
@@ -607,12 +625,12 @@ proc writeResource(outp: var seq[byte]; res: InterfaceResource) =
   outp.writeString(res.entrypoints.observe)
   outp.writeString(res.entrypoints.plan)
   outp.writeString(res.entrypoints.apply)
-  outp.writeLocation(res.location)
+  outp.writeLocation(res.location, forFingerprint)
   outp.writeU32Le(uint32(res.attributes.len))
   for attr in res.attributes:
     outp.writeString(attr.name)
     outp.writeString(attr.nimType)
-    outp.writeLocation(attr.location)
+    outp.writeLocation(attr.location, forFingerprint)
 
 proc readResource(bytes: openArray[byte]; pos: var int): InterfaceResource =
   result.typeId = readString(bytes, pos)
@@ -635,7 +653,8 @@ proc readResource(bytes: openArray[byte]; pos: var int): InterfaceResource =
       location: readLocation(bytes, pos))
 
 proc writeNixProvisioning(outp: var seq[byte];
-                          provisioning: InterfaceNixProvisioning) =
+                          provisioning: InterfaceNixProvisioning;
+                          forFingerprint = false) =
   outp.writeString(provisioning.packageName)
   outp.writeString(provisioning.selector)
   outp.writeString(provisioning.executablePath)
@@ -645,7 +664,7 @@ proc writeNixProvisioning(outp: var seq[byte];
   outp.writeString(provisioning.nixpkgsNarHash)
   outp.writeString(provisioning.packageId)
   outp.writeString(provisioning.lockIdentity)
-  outp.writeLocation(provisioning.location)
+  outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
                          version: uint16): InterfaceNixProvisioning =
@@ -663,7 +682,8 @@ proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
   result.location = readLocation(bytes, pos)
 
 proc writeTarballProvisioning(outp: var seq[byte];
-                              provisioning: InterfaceTarballProvisioning) =
+                              provisioning: InterfaceTarballProvisioning;
+                              forFingerprint = false) =
   outp.writeString(provisioning.packageName)
   outp.writeString(provisioning.url)
   outp.writeStringSeq(provisioning.mirrors)
@@ -675,7 +695,7 @@ proc writeTarballProvisioning(outp: var seq[byte];
   outp.writeString(provisioning.lockIdentity)
   outp.writeString(provisioning.cpu)
   outp.writeString(provisioning.os)
-  outp.writeLocation(provisioning.location)
+  outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
                              version: uint16): InterfaceTarballProvisioning =
@@ -697,7 +717,8 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
   result.location = readLocation(bytes, pos)
 
 proc writeScoopProvisioning(outp: var seq[byte];
-                            provisioning: InterfaceScoopProvisioning) =
+                            provisioning: InterfaceScoopProvisioning;
+                            forFingerprint = false) =
   outp.writeString(provisioning.packageName)
   outp.writeString(provisioning.bucket)
   outp.writeString(provisioning.app)
@@ -709,7 +730,7 @@ proc writeScoopProvisioning(outp: var seq[byte];
   outp.writeByte(byte(ord(provisioning.requiresExecutionProfileChecksum)))
   outp.writeString(provisioning.packageId)
   outp.writeString(provisioning.lockIdentity)
-  outp.writeLocation(provisioning.location)
+  outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readScoopProvisioning(bytes: openArray[byte]; pos: var int):
     InterfaceScoopProvisioning =
@@ -726,21 +747,22 @@ proc readScoopProvisioning(bytes: openArray[byte]; pos: var int):
   result.lockIdentity = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
-proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse) =
+proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
+                  forFingerprint = false) =
   outp.writeString(useDef.rawConstraint)
   outp.writeString(useDef.packageSelector)
   outp.writeString(useDef.executableName)
   outp.writeStringSeq(useDef.policyPath)
   outp.writeU32Le(uint32(useDef.nixProvisioning.len))
   for provisioning in useDef.nixProvisioning:
-    outp.writeNixProvisioning(provisioning)
+    outp.writeNixProvisioning(provisioning, forFingerprint)
   outp.writeU32Le(uint32(useDef.tarballProvisioning.len))
   for provisioning in useDef.tarballProvisioning:
-    outp.writeTarballProvisioning(provisioning)
+    outp.writeTarballProvisioning(provisioning, forFingerprint)
   outp.writeU32Le(uint32(useDef.scoopProvisioning.len))
   for provisioning in useDef.scoopProvisioning:
-    outp.writeScoopProvisioning(provisioning)
-  outp.writeLocation(useDef.location)
+    outp.writeScoopProvisioning(provisioning, forFingerprint)
+  outp.writeLocation(useDef.location, forFingerprint)
 
 proc readToolUse(bytes: openArray[byte]; pos: var int;
                  version: uint16): InterfaceToolUse =
@@ -769,8 +791,16 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
   result.location = readLocation(bytes, pos)
 
 proc encodeInterfacePayload*(value: ProjectInterface;
-                             version = EnvelopeVersion): seq[byte] =
+                             version = EnvelopeVersion;
+                             forFingerprint = false): seq[byte] =
   ## Encodes the fingerprinted portion of the project-interface payload.
+  ##
+  ## When ``forFingerprint`` is true every ``SourceLocation`` is normalised to
+  ## a fixed sentinel (see ``writeLocation``) so the InterfaceFingerprint is
+  ## invariant to WHERE the public surface is written — a private-impl edit
+  ## that only shifts line numbers must not change the fingerprint. The
+  ## on-disk artifact round-trip path leaves ``forFingerprint = false`` so real
+  ## locations are preserved for diagnostics and decode.
   ## ``standardBuildEligible`` is deliberately NOT serialised here so it
   ## does NOT contribute to ``interfaceFingerprint``: the flag is a
   ## function of the DSL source's structural shape (presence of a
@@ -783,10 +813,10 @@ proc encodeInterfacePayload*(value: ProjectInterface;
   result.writeString(value.packageName)
   result.writeString(value.defaultToolProvisioning)
   result.writeStringSeq(value.publicSignatureDependencies)
-  result.writeLocation(value.location)
+  result.writeLocation(value.location, forFingerprint)
   result.writeU32Le(uint32(value.publicExecutables.len))
   for exe in value.publicExecutables:
-    result.writeExecutable(exe)
+    result.writeExecutable(exe, forFingerprint)
   # v9: publicLibraries are encoded AFTER publicExecutables and BEFORE
   # toolUses so the field order matches the source-of-truth in the
   # ``ProjectInterface`` object literal above. v8 envelopes encode no
@@ -796,7 +826,7 @@ proc encodeInterfacePayload*(value: ProjectInterface;
   if version >= 9'u16:
     result.writeU32Le(uint32(value.publicLibraries.len))
     for lib in value.publicLibraries:
-      result.writeLibrary(lib, version)
+      result.writeLibrary(lib, version, forFingerprint)
   # v12 (RP4): publicResources are encoded AFTER publicLibraries and
   # BEFORE toolUses so the field order matches the ``ProjectInterface``
   # object literal. v<12 envelopes encode no resources block at all;
@@ -805,10 +835,10 @@ proc encodeInterfacePayload*(value: ProjectInterface;
   if version >= 12'u16:
     result.writeU32Le(uint32(value.publicResources.len))
     for res in value.publicResources:
-      result.writeResource(res)
+      result.writeResource(res, forFingerprint)
   result.writeU32Le(uint32(value.toolUses.len))
   for useDef in value.toolUses:
-    result.writeToolUse(useDef)
+    result.writeToolUse(useDef, forFingerprint)
 
 proc decodeInterfacePayload*(bytes: openArray[byte];
                              version = EnvelopeVersion): ProjectInterface =
@@ -846,7 +876,15 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
 
 proc interfaceFingerprint(value: ProjectInterface;
                           version: uint16): ContentDigest =
-  blake3DomainDigest(encodeInterfacePayload(value, version), hdMetadataEnvelope)
+  # TI3: the InterfaceFingerprint is a projection over the SEMANTIC public
+  # contract only. ``forFingerprint = true`` normalises every SourceLocation
+  # to a fixed sentinel so a private-impl edit that merely shifts line numbers
+  # (a longer driver body, a comment before a ``resourceType`` block) leaves
+  # the fingerprint UNCHANGED. The on-disk artifact serialisation
+  # (``encodeProjectInterfaceArtifact``) keeps real locations for diagnostics.
+  blake3DomainDigest(
+    encodeInterfacePayload(value, version, forFingerprint = true),
+    hdMetadataEnvelope)
 
 proc interfaceFingerprint*(value: ProjectInterface): ContentDigest =
   interfaceFingerprint(value, EnvelopeVersion)

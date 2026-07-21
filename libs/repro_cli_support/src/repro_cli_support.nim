@@ -12810,6 +12810,17 @@ type
       ## driver/implementation closure crossing the boundary — the consumer
       ## imports the typed wrapper + contract only (compile-time, mode-
       ## agnostic; the driver-invocation-via-protocol is RP5b).
+    interfaceFingerprint*: string
+      ## TI3 (interface/provider fingerprint split): the hex
+      ## ``InterfaceFingerprint`` of the producer's lifted ``ProjectInterface``
+      ## (``interfaceFingerprint(ProjectInterface)`` — computed to EXCLUDE the
+      ## producer's implementation bodies, per TI1's TI3-readiness property).
+      ## The TI3 two-level accessor-cache freshness key (``usesImportCode``)
+      ## uses this as its Level-2 discriminant: when the producer's cheap
+      ## source stamp changed but this fingerprint did NOT, the edit was
+      ## private-impl-only and the cached accessor is byte-identical — so it is
+      ## reused in place (no downstream input change). Empty for
+      ## ``ptckNoProducer`` (no interface could be lifted).
 
 proc hasTypedContract*(contract: ProducerTypedContract): bool =
   ## True iff the producer exports at least one ``executable``, ``library``,
@@ -13005,6 +13016,13 @@ proc resolveProducerTypedContract*(selector: string;
         stderr.writeLine(diag)
       return
   result.projectName = artifact.projectInterface.projectName
+  # TI3: carry the producer's InterfaceFingerprint (impl-EXCLUDING — TI1) so the
+  # consumer's two-level accessor-cache freshness key can distinguish a private-
+  # impl edit (fingerprint unchanged → reuse cached accessor in place) from a
+  # public-signature edit (fingerprint changed → regenerate). This is the
+  # fingerprint recorded on TI1's cached interface-lift artifact, so obtaining it
+  # here is the SAME cached lift edge (no second extraction).
+  result.interfaceFingerprint = digestHex(artifact.interfaceFingerprint)
   result.publicExecutables = artifact.projectInterface.publicExecutables
   result.publicLibraries = artifact.projectInterface.publicLibraries
   # RP5a (the SC-9 analog for resource types): project the producer's

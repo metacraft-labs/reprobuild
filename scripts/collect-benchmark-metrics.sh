@@ -22,7 +22,7 @@ rows_html="${tmp_dir}/benchmark-rows.html"
 : >"${results_jsonl}"
 : >"${rows_html}"
 
-benchmark_suites="${REPROBUILD_BENCH_SUITES:-m0,m23,cmake,rp1,rp2,rp3,rp5b,ti1}"
+benchmark_suites="${REPROBUILD_BENCH_SUITES:-m0,m23,cmake,rp1,rp2,rp3,rp5b,ti1,ti3}"
 
 suite_enabled() {
   local suite="$1"
@@ -181,8 +181,8 @@ if kind == "m23":
                 1000.0 / value,
                 extra + f"; original={value} actions/sec",
             )
-elif kind in ("rp1", "rp2", "rp3", "rp5b", "ti1"):
-    # RP1, RP2, RP3, RP5b and TI1 share the same metric-array JSON shape
+elif kind in ("rp1", "rp2", "rp3", "rp5b", "ti1", "ti3"):
+    # RP1, RP2, RP3, RP5b, TI1 and TI3 share the same metric-array JSON shape
     # (suite/name/unit/value/direction). RP2 adds the provider-session
     # round-trip (warm/cold) metrics; RP3 adds the cold-vs-warm consumer-build
     # ("build once, share") metrics; RP5b adds the resource-op (observe/apply)
@@ -512,6 +512,34 @@ run_ti1_suite() {
   append_benchmark_metrics "${output}" ti1 "${quick}"
 }
 
+run_ti3_suite() {
+  # TI3 (interface/provider fingerprint split) — the downstream-invalidation
+  # ASYMMETRY metric: a private-impl edit forces ZERO downstream consumer
+  # regenerations (the impl-EXCLUDING InterfaceFingerprint is unchanged →
+  # accessor reused in place), while a public-signature edit forces ONE (the
+  # fingerprint moved → accessor regenerated). The harness lifts the producer's
+  # interface under each edit and emits the regeneration-count + decision-time
+  # metrics.
+  local harness_bin="build/test-bin/ti3_fingerprint_split_bench"
+  local output="bench-results/ti3-fingerprint-split.json"
+  local quick_flag=()
+  if [ "${quick}" = true ]; then
+    quick_flag+=(--quick)
+  fi
+
+  echo "running Reprobuild TI3 fingerprint-split benchmark suite (quick=${quick})" >&2
+  mkdir -p build/test-bin build/nimcache
+  nim c \
+    -d:release \
+    --hints:off \
+    --warnings:off \
+    --nimcache:build/nimcache/ti3-fingerprint-split-bench \
+    --out:"${harness_bin}" \
+    benchmarks/lib/ti3_fingerprint_split_bench.nim >&2
+  "./${harness_bin}" "${quick_flag[@]}" --out "${output}" >&2
+  append_benchmark_metrics "${output}" ti3 "${quick}"
+}
+
 if suite_enabled m0; then
   run_m0_suite
 fi
@@ -542,6 +570,10 @@ fi
 
 if suite_enabled ti1; then
   run_ti1_suite
+fi
+
+if suite_enabled ti3; then
+  run_ti3_suite
 fi
 
 json_results="$(emit_json)"
