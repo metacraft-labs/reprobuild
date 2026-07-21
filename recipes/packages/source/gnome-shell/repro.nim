@@ -244,6 +244,8 @@ package gnomeShellSource:
     ## gdk-pixbuf is the image loader gnome-shell uses for icon
     ## decoding + wallpaper loading.
     "gdk-pixbuf >=2.40"
+    "gsettings-desktop-schemas >=47"
+    "at-spi2-core >=2.54"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
