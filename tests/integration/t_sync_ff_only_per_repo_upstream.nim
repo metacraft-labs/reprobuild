@@ -347,10 +347,13 @@ suite "RA-3 — sync fast-forwards each repo's own upstream":
         " remote add origin " & q(superOrigin))
       discard requireGit(q(gitBin) & " -C " & q(superSeed) & " push origin main")
 
-      # Single-repo workspace manifest for `super`.
+      # Single-repo workspace manifest for `super`. Native layout: the
+      # membership manifest (projects/ + repos/) lives at the workspace
+      # ROOT, matching setupFixture above — reprobuild resolves membership
+      # from the root, not a legacy `.repo/manifests` checkout.
       let workspaceRoot = scratch / "workspace"
       createDir(workspaceRoot)
-      let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+      let manifestsRoot = workspaceRoot
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "myproject.toml",
