@@ -183,6 +183,20 @@ jobs:
           flake-override-inputs: |
             runquota-src=../runquota
 
+      # Installation tokens expire after one hour. The sibling clones and
+      # initial dev-shell materialisation can consume most of that window on a
+      # cold persistent runner, while the CodeTracer build still needs Nix's
+      # GitHub fetcher. Mint a process-scoped replacement for the long build so
+      # Nix never turns an expired token into a 401 for public or private inputs.
+      - name: Refresh installation token for the long CodeTracer build
+        id: ci_token_build
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+          permission-contents: read
+
       # Build codetracer's `ct` binary that the ct_incremental_adapter execs
       # (`ct test --incremental --watch-decide|--watch-record`; resolved from
       # $CT_BIN). We build ONLY the `ct` target with reprobuild itself —
@@ -193,6 +207,7 @@ jobs:
       # cache on the self-hosted runners) makes rebuilds fast once warm.
       - name: Build codetracer ct (via reprobuild)
         env:
+          NIX_CONFIG: access-tokens = github.com=${{ steps.ci_token_build.outputs.token }}
           REPRO_PUBLISH_KEY: ${{ secrets.REPRO_PUBLISH_KEY }}
           REPRO_PUBLISH_CERT: ${{ secrets.REPRO_PUBLISH_CERT }}
         run: |
@@ -282,9 +297,19 @@ jobs:
           test -x "$ct_bin" || { echo "ct not built at $ct_bin" >&2; exit 1; }
           echo "CT_BIN=$ct_bin" >> "$GITHUB_ENV"
 
+      - name: Refresh installation token for tests
+        id: ci_token_test
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+          permission-contents: read
+
       - name: just test
         env:
           CT_BIN: ${{ env.CT_BIN }}
+          NIX_CONFIG: access-tokens = github.com=${{ steps.ci_token_test.outputs.token }}
         run: dev-exec just test
       - name: Upload logs
         if: always()
