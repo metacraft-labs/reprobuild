@@ -77,7 +77,7 @@ suite "Local daemons/control-plane M3 build routing":
       let tempRoot = createTempDir("repro-daemon-m3-matrix", "")
       defer:
         stopDaemon(tempRoot)
-        removeDir(tempRoot)
+        removeDirEventually(tempRoot)
 
       let directProject = tempRoot / "direct-project"
       copyFixtureProject(directProject)

@@ -90,6 +90,8 @@ proc prepareCase(prefix: string): M6Case =
 proc envFor(c: M6Case): StringTableRef =
   result = newStringTable(modeCaseSensitive)
   for key, value in envPairs():
+    if key.startsWith("__REPRO_"):
+      continue
     result[key] = value
   result["HOME"] = c.homeDir
   result["USERPROFILE"] = c.homeDir
@@ -98,9 +100,20 @@ proc envFor(c: M6Case): StringTableRef =
   result["XDG_CACHE_HOME"] = c.tempRoot / "xdg-cache"
   result["XDG_DATA_HOME"] = c.tempRoot / "xdg-data"
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
+  result["REPROBUILD_ACTION_CACHE_ROOT"] = c.tempRoot / "action-cache"
+  result["REPRO_DEV_ENV_AUTO_ALLOW"] = "1"
+  result["REPRO_DAEMON"] = "off"
+  result["REPRO_DAEMON_ENDPOINT"] =
+    daemonSocketEndpoint("repro-m6-native-shell-hooks-" &
+      $getCurrentProcessId() & "-" & c.tempRoot.extractFilename)
+  result["REPRO_DAEMON_STATE_DIR"] = c.tempRoot / "daemon-state"
   result["REPROBUILD_REPRO"] = c.reproBin
   result["REPRO_MONITOR_SHIM_LIB"] = c.shim
   result["PATH"] = parentDir(c.reproBin) & $PathSep & getEnv("PATH")
+  createDir(result["XDG_CACHE_HOME"])
+  createDir(result["XDG_DATA_HOME"])
+  createDir(result["REPROBUILD_ACTION_CACHE_ROOT"])
+  createDir(result["REPRO_DAEMON_STATE_DIR"])
 
 proc runProgram(program: string; args: openArray[string]; cwd: string;
                 env: StringTableRef = nil): tuple[exitCode: int; output: string] =
@@ -159,7 +172,10 @@ when isNixSupported:
 proc requireShellValue(output, prefix, expected: string) =
   for line in output.splitLines():
     if line.startsWith(prefix):
-      check line == expected
+      if line != expected:
+        raise newException(OSError,
+          "unexpected shell marker " & prefix & "\nexpected: " & expected &
+            "\nactual: " & line & "\noutput:\n" & output)
       return
   raise newException(OSError,
     "missing shell marker " & prefix & " in output:\n" & output)

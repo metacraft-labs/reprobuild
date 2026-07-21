@@ -4,6 +4,22 @@ import repro_tool_profiles
 import repro_runquota
 import repro_test_support
 
+proc removeDirEventually(path: string) =
+  ## Daemon-backed builds can leave just-closed metadata files visible briefly.
+  ## Retry teardown, but still fail if the tree stays non-empty.
+  if not dirExists(path):
+    return
+  var lastMsg = ""
+  for _ in 0 ..< 40:
+    try:
+      removeDir(path)
+      return
+    except OSError as e:
+      lastMsg = e.msg
+      sleep(50)
+  checkpoint("cleanup still failed for " & path & ": " & lastMsg)
+  removeDir(path)
+
 const MonitorFixtureSource = r"""
 #include <stdio.h>
 #include <stdlib.h>
@@ -984,7 +1000,7 @@ suite "e2e_local_reprobuild_project_build":
       test "public CLI automatic monitor policy records hidden inputs and invalidates cache":
         let repoRoot = getCurrentDir()
         let tempRoot = createTempDir("repro-m32-local-monitor", "")
-        defer: removeDir(tempRoot)
+        defer: removeDirEventually(tempRoot)
 
         var daemon = ensureRunQuotaDaemon(repoRoot)
         defer:
@@ -1047,7 +1063,7 @@ suite "e2e_local_reprobuild_project_build":
     test "public CLI lowers explicit make depfile policy and rejects incompatible monitor depfile":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m32-policy-lowering", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
       defer:
@@ -1092,7 +1108,7 @@ suite "e2e_local_reprobuild_project_build":
     test "public CLI selects an in-place project action and builds only its dependency closure":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m30-local-target-selection", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
       defer:
@@ -1160,7 +1176,7 @@ suite "e2e_local_reprobuild_project_build":
     test "public CLI no-target build uses current project default action":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m45-local-default-build", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
       defer:
@@ -1208,7 +1224,7 @@ suite "e2e_local_reprobuild_project_build":
     test "uses import path exposes typed tool package and declared paths infer dependency closure":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m46-uses-import-path", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
       defer:
@@ -1252,7 +1268,7 @@ suite "e2e_local_reprobuild_project_build":
     test "uses import path is opt-in for imported package helpers":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m46-no-implicit-import", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       let projectRoot = tempRoot / "project"
       writeM46ProjectWithoutImportPath(projectRoot / "reprobuild.nim")
@@ -1268,7 +1284,7 @@ suite "e2e_local_reprobuild_project_build":
     test "generated tool object records action and path roles without buildAction":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m47-typed-command-action", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
       defer:
@@ -1322,7 +1338,7 @@ suite "e2e_local_reprobuild_project_build":
     test "m52_stdlib_package_import_e2e":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m52-stdlib-packages", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
       defer:
@@ -1443,7 +1459,7 @@ suite "e2e_local_reprobuild_project_build":
     test "standard filesystem operations lower to built-in build actions":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m53-builtin-fs", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
       defer:
@@ -1528,7 +1544,7 @@ suite "e2e_local_reprobuild_project_build":
     test "graph why and debug artifact inspect the materialized build graph":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m56-graph-why", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
       defer:
@@ -1611,7 +1627,7 @@ suite "e2e_local_reprobuild_project_build":
     test "provider compile fast path skips no-op and invalidates provider sources":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m55-provider-fast-path", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       let reproBin = reproBinary(repoRoot)
       let projectRoot = tempRoot / "project"
@@ -1656,7 +1672,7 @@ suite "e2e_local_reprobuild_project_build":
     test "public CLI work root override isolates metadata by worktree":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m54-work-root", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       let reproBin = reproBinary(repoRoot)
       let sharedWorkRoot = tempRoot / "shared-work"
@@ -1684,7 +1700,7 @@ suite "e2e_local_reprobuild_project_build":
     test "relative public CLI keeps RunQuota helper path stable across project cwd":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m35-relative-public-cli", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
       defer:
@@ -1726,7 +1742,7 @@ suite "e2e_local_reprobuild_project_build":
     test "public CLI reruns provider root for DSL directory enumeration inputs":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m40-directory-dsl", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
       defer:
@@ -1791,7 +1807,7 @@ suite "e2e_local_reprobuild_project_build":
     test "provider foreach refreshes only changed directory members":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m52-provider-foreach", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
       defer:
@@ -1885,7 +1901,7 @@ suite "e2e_local_reprobuild_project_build":
     test "public CLI builds local DSL project through provider, scheduler, cache, and depfile evidence":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m19-local-project", "")
-      defer: removeDir(tempRoot)
+      defer: removeDirEventually(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
       defer:

@@ -937,13 +937,26 @@ proc decodeProjectInterfaceArtifact*(bytes: openArray[
   let interfacePayloadLen = payloadLength - 34 - standardBuildEligibleBytes
   if interfacePayloadLen < 0:
     raiseEnvelopeError(eeMalformed, "truncated interface fingerprint")
+  let interfacePayloadStart = pos
   result.projectInterface =
     decodeInterfacePayload(bytes.toOpenArray(pos, pos + interfacePayloadLen - 1),
       version)
   pos += interfacePayloadLen
   result.interfaceFingerprint = readDigest(bytes, pos)
-  if result.interfaceFingerprint != interfaceFingerprint(
-      result.projectInterface, version):
+  let semanticFingerprint = interfaceFingerprint(result.projectInterface, version)
+  # TI3 made interface fingerprints location-independent without changing the
+  # v12 wire version. Artifacts written before TI3 therefore carry the digest
+  # of the exact (location-bearing) interface payload, while current artifacts
+  # carry the normalized semantic digest. Accept either authentic shape so
+  # existing caches remain readable; a digest matching neither still fails
+  # closed. Hashing the original payload bytes (rather than a re-encoding) also
+  # preserves compatibility with every older supported envelope version.
+  let legacyWireFingerprint = blake3DomainDigest(
+    bytes.toOpenArray(interfacePayloadStart,
+      interfacePayloadStart + interfacePayloadLen - 1),
+    hdMetadataEnvelope)
+  if result.interfaceFingerprint != semanticFingerprint and
+      result.interfaceFingerprint != legacyWireFingerprint:
     raiseEnvelopeError(eeMalformed, "interface fingerprint mismatch")
   if version >= 8'u16:
     result.projectInterface.standardBuildEligible =

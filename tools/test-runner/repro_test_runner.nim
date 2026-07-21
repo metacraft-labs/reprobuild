@@ -56,6 +56,66 @@ const
     "repro_test_runner",
   ]
 
+  ## These tests intentionally drive self-hosted ``repro build`` actions
+  ## against shared workspace state. The B0/D2 cases mutate the sibling
+  ## ``../runquota/build/bin/runquotad`` prerequisite; the B1/D5 cases rebuild
+  ## or probe shared ``build/bin`` app artifacts, including the single public
+  ## ``repro`` CLI; the B2/B3 cases inspect
+  ## the global ``.repro/build/.../build-report.json`` emitted by those builds.
+  ## Run the cluster with no other test active so shared prerequisites,
+  ## app binaries, and report files are not removed or overwritten under
+  ## another test's feet. D1 is in the same family: it drives a self-hosted
+  ## Python test edge and reads the shared full build report for the
+  ## resulting action.
+  ##
+  ## The M7 HTTPS cache gate starts a real TLS cache daemon and relies on
+  ## process-local TLS context setup. Run it alone so other cache daemon tests
+  ## cannot starve its listener startup under clean-cold load.
+  ## The M77 no-op latency gate is also exclusive: it is a subprocess-spawn
+  ## microbenchmark, so running it beside clean-cold compiler/linker tests
+  ## measures runner contention instead of the shell-hook fast path.
+  ##
+  ## The dev-session e2e test starts foreground services, a file watcher, and an
+  ## HTTP/SSE control plane, then waits for readiness transitions. Running it
+  ## beside the heavier e2e cluster can starve the session startup path enough
+  ## that the test measures host load instead of dev-session behavior.
+  ##
+  ## The binary-cache streaming checks run a loopback server in the same test
+  ## process and deliberately enforce a 30-second receive/throughput budget.
+  ## Under nested compiler load the server thread can be starved for the entire
+  ## budget even though the transfer completes in under a second when the test
+  ## owns the host. Likewise, the comprehensive local-build e2e case performs
+  ## many nested Nim compiler invocations; concurrent nested builds have been
+  ## observed to make Nim report SuccessX without materializing its requested
+  ## extractor binary. The native-shell gate performs the same nested provider
+  ## extraction for Bash, Zsh, and Fish and must own the host for the same
+  ## reason. Keep these resource-sensitive checks fully enabled but execute
+  ## them without competing test processes. The SC-7 capstone and SC-11
+  ## cross-repo library test also perform repeated nested interface extraction;
+  ## under contention Nim can report SuccessX without materializing the
+  ## requested extractor binary, so they require the same scheduling boundary.
+  ExclusiveStems = [
+    "t_a2_5_p3_streaming_sink",
+    "t_a2_5_p8_throughput_bench",
+    "t_b0_repro_build_runquota_daemon",
+    "t_b1_apps_action_cache_hit",
+    "t_b1_repro_build_apps_byte_equivalent",
+    "t_b1_repro_build_apps_collection",
+    "t_b2_helper_invalidation",
+    "t_b3_test_execute_edge_cache_hit",
+    "t_b3_test_invalidation_rebuilds_repro",
+    "t_cross_repo_nim_library_src_threaded_onto_consumer_path",
+    "t_d1_pythonunittest_resolves_in_path_mode",
+    "t_d2_cross_project_selector_recognised",
+    "t_d5_collection_member_selector",
+    "t_e2e_local_reprobuild_project_build",
+    "t_e2e_native_shell_hooks",
+    "t_e2e_repro_dev_sessions",
+    "t_e2e_shell_hook_noop_latency",
+    "t_repro_https_cache_end_to_end",
+    "t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes",
+  ]
+
 type
   TestCase = object
     binary: string          ## absolute path to the compiled test binary
@@ -861,6 +921,23 @@ proc matchesFilter(stem: string; filters: seq[string]): bool =
       return true
   false
 
+proc requiresExclusiveExecution(tc: TestCase): bool =
+  tc.binaryStem in ExclusiveStems
+
+proc exclusiveRank(tc: TestCase): int =
+  ## Latency-sensitive microbenchmarks must run before the heavyweight
+  ## self-hosted build cluster. They are exclusive because concurrent load would
+  ## pollute the measurement; running them after the build cluster can also
+  ## inherit unrelated post-build host settling and daemon cleanup noise.
+  if tc.binaryStem == "t_e2e_shell_hook_noop_latency":
+    return 0
+  result = 10
+
+proc cmpExclusiveTestCase(a, b: TestCase): int =
+  result = cmp(exclusiveRank(a), exclusiveRank(b))
+  if result == 0:
+    result = cmp(a.binaryStem, b.binaryStem)
+
 # Worker threads need plain pointers, not closures, so we use a top-
 # level thread proc that receives a ``WorkerArgs`` value.
 proc workerMain(args: WorkerArgs) {.thread.} =
@@ -885,6 +962,18 @@ proc findNixStoreLibDir(nameFragment: string; libraryNames: openArray[string]): 
           return libDir
   ""
 
+proc findLibDirOnEnvPath(pathEnv: string; libraryNames: openArray[string]): string =
+  ## Prefer the active dev-shell loader path before scanning /nix/store.
+  ## Long-lived workstations often retain older zstd closures; choosing a
+  ## random store match can make a newer zstd binary load an older libzstd.
+  for dir in pathEnv.split($PathSep):
+    if dir.len == 0 or not dirExists(dir):
+      continue
+    for libraryName in libraryNames:
+      if fileExists(dir / libraryName):
+        return dir
+  ""
+
 proc prependEnvPath(name: string; entries: openArray[string]) =
   var prefix: seq[string]
   for entry in entries:
@@ -902,10 +991,22 @@ proc prependEnvPath(name: string; entries: openArray[string]) =
 proc ensureNixRuntimeLibraryEnv() =
   let clingoLib =
     if getEnv("CLINGO_LIB").len > 0: getEnv("CLINGO_LIB")
-    else: findNixStoreLibDir("clingo-5.", ["libclingo.dylib", "libclingo.so"])
+    else:
+      let fromEnv = findLibDirOnEnvPath(getEnv("LD_LIBRARY_PATH") & $PathSep &
+        getEnv("DYLD_LIBRARY_PATH") & $PathSep &
+        getEnv("DYLD_FALLBACK_LIBRARY_PATH"),
+        ["libclingo.dylib", "libclingo.so"])
+      if fromEnv.len > 0: fromEnv
+      else: findNixStoreLibDir("clingo-5.", ["libclingo.dylib", "libclingo.so"])
   let zstdLib =
     if getEnv("ZSTD_LIB").len > 0: getEnv("ZSTD_LIB")
-    else: findNixStoreLibDir("zstd-1.", ["libzstd.dylib", "libzstd.so"])
+    else:
+      let fromEnv = findLibDirOnEnvPath(getEnv("LD_LIBRARY_PATH") & $PathSep &
+        getEnv("DYLD_LIBRARY_PATH") & $PathSep &
+        getEnv("DYLD_FALLBACK_LIBRARY_PATH"),
+        ["libzstd.dylib", "libzstd.so.1", "libzstd.so"])
+      if fromEnv.len > 0: fromEnv
+      else: findNixStoreLibDir("zstd-1.", ["libzstd.dylib", "libzstd.so.1", "libzstd.so"])
   if clingoLib.len > 0:
     putEnv("CLINGO_LIB", clingoLib)
   if zstdLib.len > 0:
@@ -1063,6 +1164,20 @@ proc main() =
   ensureNixRuntimeLibraryEnv()
   ensureWorkspaceSourceEnv(cwd)
 
+  var exclusiveItems: seq[TestCase] = @[]
+  var parallelItems: seq[TestCase] = @[]
+  for tc in queue.items:
+    if requiresExclusiveExecution(tc):
+      exclusiveItems.add(tc)
+    else:
+      parallelItems.add(tc)
+  exclusiveItems.sort(cmpExclusiveTestCase)
+  queue.items = parallelItems
+
+  if exclusiveItems.len > 0:
+    stderr.writeLine "repro_test_runner: " & $exclusiveItems.len &
+      " cases require exclusive execution"
+
   # Snapshot the process environment exactly once, on the main thread,
   # before any worker is created. From this point on no code in this
   # process touches the global ``environ`` — workers compose per-child
@@ -1070,6 +1185,32 @@ proc main() =
   var baseEnv: seq[tuple[key, value: string]] = @[]
   for (k, v) in envPairs():
     baseEnv.add((k, v))
+
+  let wallT0 = epochTime()
+  var exclusiveFailed = false
+
+  if exclusiveItems.len > 0 and not (failFast and queue.failFastTriggered):
+    for tc in exclusiveItems:
+      var res: TestResult
+      try:
+        if tc.protocolAware:
+          res = runOneProtocol(tc, opts.resultsDir, baseEnv,
+            opts.testTimeoutSec)
+        else:
+          res = runWholeBinary(tc, opts.resultsDir, baseEnv,
+            opts.testTimeoutSec)
+      except CatchableError as e:
+        res = TestResult(
+          testCase: tc,
+          status: tsFail,
+          durationMs: 0,
+          stdout: "repro_test_runner: exclusive worker exception: " &
+            e.msg & "\n")
+      results.add(res)
+      emitProgress(opts.quiet, res)
+      if failFast and res.status == tsFail:
+        exclusiveFailed = true
+        break
 
   let args = WorkerArgs(
     queue: addr queue,
@@ -1082,9 +1223,12 @@ proc main() =
     activeCount: addr activeCount,
     baseEnv: addr baseEnv)
 
-  let nThreads = min(opts.threads, max(1, queue.items.len))
+  let nThreads =
+    if queue.items.len == 0 or (failFast and exclusiveFailed):
+      0
+    else:
+      min(opts.threads, queue.items.len)
   var threads = newSeq[Thread[WorkerArgs]](nThreads)
-  let wallT0 = epochTime()
   for i in 0 ..< nThreads:
     createThread(threads[i], workerMain, args)
   joinThreads(threads)

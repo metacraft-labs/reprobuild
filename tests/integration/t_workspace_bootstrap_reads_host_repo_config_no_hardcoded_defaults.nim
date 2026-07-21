@@ -247,13 +247,19 @@ suite "RA-8 — host bootstrap config; no hardcoded org defaults":
         let workspaceRoot = scratch / "ws-c"
         createDir(workspaceRoot)  # plain dir, NOT a git repo: no origin.
 
-        # No REPRO_WORKSPACE_CONFIG, no --manifest-url, no positional project.
+        # Point REPRO_WORKSPACE_CONFIG at a missing file to suppress config
+        # ancestor discovery; an empty value means "discover normally".
+        # Constrain Git discovery too: when TMPDIR lives under a developer
+        # workspace, `git -C <scratch>` would otherwise walk up to that host
+        # repo's origin and mask the no-manifest case this block exercises.
         let init = runShell(shellCommand(@[
           reproBin, "workspace", "init",
           "--workspace-root=" & workspaceRoot,
         ], env = @[
+          (name: "GIT_CEILING_DIRECTORIES", value: scratch),
           (name: "REPRO_MANIFEST_CACHE", value: manifestCacheRoot),
-          (name: "REPRO_WORKSPACE_CONFIG", value: ""),
+          (name: "REPRO_WORKSPACE_CONFIG",
+            value: scratch / "missing-bootstrap-config.toml"),
         ]))
         check init.code != 0
         check "no manifest configured" in init.output

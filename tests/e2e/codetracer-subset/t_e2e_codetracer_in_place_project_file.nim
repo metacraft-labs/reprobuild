@@ -431,18 +431,25 @@ proc copyTree(sourceRoot, destRoot: string) =
       createDir(destPath.splitPath.head)
       copyFile(sourcePath, destPath)
 
-proc prepareIsonimFixture(sourcePath, destPath: string) =
+proc prepareNimLibraryFixture(sourcePath, destPath, packageName: string) =
+  ## Develop overrides represent graph producers, not arbitrary source paths.
+  ## Give each copied pure-Nim dependency the minimal library contract the
+  ## real consumer resolves through SC-11 instead of falling back to PATH.
+  let nimName = packageName.replace('-', '_')
   createDir(destPath)
   if dirExists(sourcePath / "src"):
     copyTree(sourcePath / "src", destPath / "src")
   writeFile(destPath / "repro.nim",
     "import repro_project_dsl\n\n" &
-    "package isonim:\n" &
-    "  library isonim\n")
-  for fileName in ["isonim.nimble", "nim.cfg"]:
+    "package " & nimName & ":\n" &
+    "  library " & nimName & "\n")
+  for fileName in [nimName & ".nimble", "nim.cfg", "config.nims"]:
     let sourceFile = sourcePath / fileName
     if fileExists(sourceFile):
       copyFile(sourceFile, destPath / fileName)
+
+proc prepareIsonimFixture(sourcePath, destPath: string) =
+  prepareNimLibraryFixture(sourcePath, destPath, "isonim")
   createDir(destPath / "src" / "isonim" / "core")
   writeFile(destPath / "src" / "isonim" / "core" / "async_compat.nim",
     IsonimAsyncCompatFixtureSource)
@@ -505,11 +512,22 @@ proc prepareIsonimFixture(sourcePath, destPath: string) =
 proc linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot: string) =
   for dep in ["codetracer-trace-format-nim", "io-mon", "isonim", "nim-acp",
               "nim-agent-harbor", "nim-agents", "nim-everywhere",
-              "nim-shm-queue", "nim-stackable-hooks"]:
+              "nim-shm-gset", "nim-shm-queue", "nim-stackable-hooks"]:
     var sourcePath = codeTracerRoot.parentDir / dep
+    if dep == "isonim":
+      # This override selects the source copied into the disposable fixture;
+      # unlike ISONIM_SRC it is deliberately not inherited by build actions.
+      # That keeps the test exercising the prepared fixture and its patches.
+      let fixtureSource = getEnv("CODETRACER_TEST_ISONIM_ROOT")
+      if fixtureSource.len > 0:
+        sourcePath =
+          if fixtureSource.lastPathPart == "src": fixtureSource.parentDir
+          else: fixtureSource
+        check dirExists(sourcePath)
     if not dirExists(sourcePath):
       let envSource =
         if dep == "io-mon": getEnv("IO_MON_SRC")
+        elif dep == "nim-shm-gset": getEnv("SHM_GSET_SRC")
         elif dep == "nim-shm-queue": getEnv("SHM_QUEUE_SRC")
         elif dep == "nim-stackable-hooks":
           let preferred = getEnv("NIM_STACKABLE_HOOKS_SRC")
@@ -523,6 +541,8 @@ proc linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot: string) =
     if dirExists(sourcePath) and not pathExists(destPath):
       if dep == "isonim":
         prepareIsonimFixture(sourcePath, destPath)
+      elif dep in CodeTracerSourcePackages:
+        prepareNimLibraryFixture(sourcePath, destPath, dep)
       else:
         discard requireSuccess(shellCommand([
           "ln", "-s", sourcePath, destPath
@@ -542,6 +562,23 @@ proc writeCodeTracerDevelopOverrides(projectRoot: string) =
     content.add("created_at = \"2026-07-12T00:00:00Z\"\n")
   writeFile(metadataDir / "develop-overrides.toml", content)
 
+proc addCodeTracerFixtureTransitivePaths(projectRoot: string) =
+  ## The pinned CodeTracer fixture predates io-mon's shm_gset transport, while
+  ## this reprobuild checkout intentionally tests the current io-mon pin. Keep
+  ## the committed fixture untouched and extend only its disposable copy with
+  ## the same explicit-env-then-workspace-sibling lookup used by current
+  ## CodeTracer checkouts.
+  let siblingSrc = projectRoot.parentDir / "nim-shm-gset" / "src"
+  check dirExists(siblingSrc)
+  let configPath = projectRoot / "config.nims"
+  var content = readFile(configPath)
+  if not content.contains("SHM_GSET_SRC"):
+    content.add(
+      "\n# Test-fixture bridge for io-mon's shm_gset transport.\n" &
+      "addPathIfDir(getEnv(\"SHM_GSET_SRC\"))\n" &
+      "addPathIfDir(workspaceRoot / \"nim-shm-gset\" / \"src\")\n")
+    writeFile(configPath, content)
+
 proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
   linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot)
   writeCodeTracerDevelopOverrides(projectRoot)
@@ -549,6 +586,7 @@ proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
   if dirExists(codeTracerRoot / "reprobuild"):
     copyTree(codeTracerRoot / "reprobuild", projectRoot / "reprobuild")
   copyFile(codeTracerRoot / "config.nims", projectRoot / "config.nims")
+  addCodeTracerFixtureTransitivePaths(projectRoot)
 
 proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
@@ -800,6 +838,7 @@ proc sourcePathEnv(): seq[(string, string)] =
     "CODETRACER_RESULTS_SRC",
     "IO_MON_SRC",
     "RUNQUOTA_SRC",
+    "SHM_GSET_SRC",
     "SHM_QUEUE_SRC"
   ]:
     let value = getEnv(key)

@@ -6,7 +6,11 @@ import repro_test_support
 const
   NimFirstFlag = "-d:asyncBackend=asyncdispatch"
   NimSubcmdProc = "subcmd_2d_d_3a_asyncBackend_3d_asyncdispatch"
-  NimJsSemanticsHash = "a7cf3ce1b73f8bfa"
+  # CodeTracer 04d6aff3 restored ``-d:nimOldCaseObjects`` to the canonical
+  # Tup compiler flags. Keep the full-command fingerprint pinned to that
+  # corrected command, and assert the flag explicitly below so a future hash
+  # refresh cannot accidentally hide its removal.
+  NimJsSemanticsHash = "e64dd35563bfa374"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
 
 type
@@ -215,6 +219,7 @@ proc assertCommittedTupSemantics(rules: TupRules) =
   check tupOutputPatterns(rules, "!nim_js") == @["%B.js"]
   check tupOutputPatterns(rules, "!trace_object_file") == @["%o"]
   check tupCommandTemplate(rules, "!nim_js")[0 .. 1] == @["nim", NimFirstFlag]
+  check "-d:nimOldCaseObjects" in tupCommandTemplate(rules, "!nim_js")
   check tupCommandTemplate(rules, "!trace_object_file")[0 .. 3] ==
     @["gcc", "-fPIC", "-g3", "-c"]
   check tupSemanticsHash(rules, "!nim_js") == NimJsSemanticsHash

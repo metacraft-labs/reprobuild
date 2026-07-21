@@ -23,12 +23,29 @@
 ## is testable today (M9.R.22.3) and the implementation lands in
 ## M9.R.22b / M9.R.22c without further surface-area churn.
 
-import std/[options, os, osproc, strutils, tables]
+import std/[options, os, osproc, strutils, tables, tempfiles]
 
 import repro_profile/emit
 import repro_profile/types
 import repro_profile/disk_tools
 import repro_profile/disk_apply
+
+const CompiledReprobuildRoot = currentSourcePath().parentDir.parentDir.
+  parentDir.parentDir.parentDir
+
+proc diskoCompilerRoot(): string =
+  ## Locate the reprobuild sources needed when compiling a user-authored
+  ## ``hardware.nim`` file. The command may be invoked from any working
+  ## directory, so the process cwd is only a fallback.
+  proc hasProfileSources(root: string): bool =
+    dirExists(root / "libs" / "repro_profile" / "src")
+
+  let configuredRoot = getEnv("REPROBUILD_SOURCE_ROOT")
+  if configuredRoot.len > 0 and hasProfileSources(configuredRoot):
+    return configuredRoot
+  if hasProfileSources(CompiledReprobuildRoot):
+    return CompiledReprobuildRoot
+  getCurrentDir()
 
 # ---------------------------------------------------------------------
 # Plan output: human-readable summary of a DiskLayout.
@@ -212,8 +229,20 @@ proc loadDiskoFromSource*(diskoNim: string): DiskPlanOutcome =
       result.failureMsg = "read " & diskoNim & " failed: " & e.msg
       return
   else:
-    let cmd = "nim r --hints:off --warnings:off --verbosity:0 " &
-      quoteShell(diskoNim)
+    let repoRoot = diskoCompilerRoot()
+    let nimcache = createTempDir("repro-disk-nimcache-", "")
+    defer: removeDir(nimcache)
+    var pathArgs = " --path:" & quoteShell(getCurrentDir())
+    if repoRoot != getCurrentDir():
+      pathArgs.add " --path:" & quoteShell(repoRoot)
+    let libsRoot = repoRoot / "libs"
+    if dirExists(libsRoot):
+      for kind, path in walkDir(libsRoot):
+        if kind == pcDir and dirExists(path / "src"):
+          pathArgs.add " --path:" & quoteShell(path / "src")
+    let cmd = "nim r --hints:off --warnings:off --verbosity:0" &
+      " --nimcache:" & quoteShell(nimcache) &
+      pathArgs & " " & quoteShell(absolutePath(diskoNim))
     let (output, exitCode) = execCmdEx(cmd)
     if exitCode != 0:
       result.failure = true

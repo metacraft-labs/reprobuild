@@ -3973,7 +3973,8 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
                             rootBuild
                           else:
                             "reprobuild-nix-daemon"
-          discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"], options = {poDaemon})
+          discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
+            options = {poDaemon, poUsePath})
           for i in 0 .. 40:
             sleep(50)
             try:
@@ -4067,14 +4068,17 @@ proc actionCacheDurableEvidence(root: string): string =
   # (and its `createDir` work) for the same root within a process.
   durableEvidence(root / "hot-records")
 
-proc warmActionCacheFor(root: string): WarmActionCache =
+proc warmActionCacheFor(root: string; attachShm = true): WarmActionCache =
+  let key = root & "\0" & (if attachShm: "shm" else: "disk")
   let evidence = actionCacheDurableEvidence(root)
-  if processWarmActionCaches.hasKey(root):
-    let warm = processWarmActionCaches[root]
+  if processWarmActionCaches.hasKey(key):
+    let warm = processWarmActionCaches[key]
     if warm.evidence == evidence:
       return warm
-  result = WarmActionCache(cache: openActionCache(root), evidence: evidence)
-  processWarmActionCaches[root] = result
+  result = WarmActionCache(
+    cache: openActionCache(root, attachShm = attachShm),
+    evidence: evidence)
+  processWarmActionCaches[key] = result
 
 proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
     publisher: BinaryCachePublisher): BuildRunResult =
@@ -4209,7 +4213,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # The CAS and action-cache live under the shared user-level
   # `actionCacheRoot` when set (Provider-Compile-Tiering.md §"Cache Scope"
   # Phase 1). When empty (legacy / unmigrated callers, tests), they fall
-  # back to `cacheRoot` so the single-root layout still works.
+  # back to `cacheRoot` so the single-root layout still works. Only the
+  # explicit shared root attaches the shm hot tier: local/workspace scratch
+  # roots must stay fully synchronous Tier-1 stores so no detached cache daemon
+  # can outlive the command and write back into a directory the caller is
+  # immediately deleting.
   let sharedRoot = if config.actionCacheRoot.len > 0:
       config.actionCacheRoot
     else:
@@ -4218,7 +4226,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   let cas = openLocalCas(sharedRoot / "cas")
   finishStat("repro cas open", casOpenStart)
   let actionCacheOpenStart = statStart()
-  let warmCache = warmActionCacheFor(sharedRoot / "action-cache")
+  let attachActionCacheShm = config.actionCacheRoot.len > 0
+  let warmCache = warmActionCacheFor(sharedRoot / "action-cache",
+    attachShm = attachActionCacheShm)
   var cache = warmCache.cache
   finishStat("repro action cache open", actionCacheOpenStart)
   defer:
@@ -5005,7 +5015,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             dependencyLaunched = true
             break
         if dependencyLaunched:
-          runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+          runResult.results[idToIndex.resultIndex(id)].cacheDecision =
+            if action.cacheable: cdMiss else: cdNotCacheable
           runResult.results[idToIndex.resultIndex(id)].reason =
             "dependency-launched"
           runResult.trace(id, "cache-skipped", "dependency-launched")

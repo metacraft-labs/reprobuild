@@ -225,7 +225,9 @@ proc companionFullCliPath(imagePath: string): string =
   discard imagePath
   ""
 
-proc imageDigestHex(imagePath: string): string =
+proc imageDigestHex*(imagePath: string): string =
+  ## Digest a daemon image. Exported so identity regressions can be tested
+  ## without spawning a platform service manager.
   let primary = fileDigestHex(imagePath)
   if primary.len == 0:
     return ""
@@ -505,9 +507,18 @@ proc expandRecordSeq(value: string): seq[string] =
   for item in value.split('\t'):
     result.add(expandRecordValue(item.replace("\\t", "\t")))
 
+proc atomicWriteTextFile(path, content: string) =
+  let tmpPath = path & ".tmp." & $getCurrentProcessId()
+  writeFile(tmpPath, content)
+  try:
+    moveFile(tmpPath, path)
+  except CatchableError:
+    try: removeFile(tmpPath) except OSError: discard
+    raise
+
 proc writeSessionRecord(config: UserDaemonConfig; session: UserDaemonSession) =
   createDir(sessionRecordsDir(config))
-  writeFile(sessionRecordPath(config, session.sessionId),
+  atomicWriteTextFile(sessionRecordPath(config, session.sessionId),
     "sessionId=" & flattenRecordValue(session.sessionId) & "\n" &
     "projectRoot=" & flattenRecordValue(session.projectRoot) & "\n" &
     "mode=" & flattenRecordValue(session.mode) & "\n" &
@@ -813,6 +824,15 @@ proc updateSessionState(config: UserDaemonConfig; session: var UserDaemonSession
     session.endedAtUnix = getTime().toUnix
   writeSessionRecord(config, session)
 
+proc setSessionState(session: var UserDaemonSession; state: string;
+                     exitCode = -1; message = "") =
+  session.state = state
+  session.exitCode = exitCode
+  if message.len > 0:
+    session.message = message
+  if state notin ["accepted", "running", "cancelling", "watching", "idle"]:
+    session.endedAtUnix = getTime().toUnix
+
 proc buildResponseDelayMs(): int =
   let raw = getEnv("REPRO_DAEMON_M3_BUILD_RESPONSE_DELAY_MS", "")
   if raw.len == 0:
@@ -1047,11 +1067,17 @@ proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
       sessionRef[].state = "watching"
     if message.len > 0:
       sessionRef[].message = message
-    writeSessionRecord(config, sessionRef[])
     let event = nextWatchEvent(request.runId, sessionId, projectRoot, eventId,
       kind, message, terminal = terminal, exitCode = exitCode,
       severity = severity, payloadJson = payloadJson)
-    appendWatchEventRecord(config, sessionId, event)
+    if terminal:
+      # Attach streams must observe the terminal event before the session
+      # record moves to a terminal state, otherwise they can close early.
+      appendWatchEventRecord(config, sessionId, event)
+      writeSessionRecord(config, sessionRef[])
+    else:
+      writeSessionRecord(config, sessionRef[])
+      appendWatchEventRecord(config, sessionId, event)
     if streamToSocket:
       socket.writeFrame(udkWatchEvent, buildEventBody(event))
 
@@ -1083,8 +1109,8 @@ proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
       if stopped: "daemon-hosted watch stopped"
       elif exitCode == 0: "daemon-hosted watch finished"
       else: "daemon-hosted watch failed"
-    updateSessionState(config, sessionRef[], state, exitCode, message)
     if not terminalSent:
+      setSessionState(sessionRef[], state, exitCode, message)
       # Mirror the Named-Targets M2 ``runBuildRequestWorker`` guard: the
       # executor may have already emitted its own terminal event (e.g.
       # the M3 ``unknown_target`` / ``target_ambiguous`` translation in
@@ -1097,6 +1123,8 @@ proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
         "{\"executor\":\"direct-watch-entrypoint\"}",
         sessionRef[].watchedPaths,
         "exitCode=" & $exitCode)
+    else:
+      updateSessionState(config, sessionRef[], state, exitCode, message)
     try: socket.closeIpcConn() except CatchableError: discard
     flushStatsAfterTerminal(config, sessionRef[].sessionId)
     logLine(config.logPath, "watch request finished session=" &
@@ -1109,8 +1137,8 @@ proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
     let message =
       if cancelled: "daemon-hosted watch stopped"
       else: "daemon-hosted watch failed: " & err.msg
-    updateSessionState(config, sessionRef[], state, code, message)
     if not terminalSent:
+      setSessionState(sessionRef[], state, code, message)
       try:
         emitEvent(kind, message, true, code,
           if cancelled: "warning" else: "error",
@@ -1118,7 +1146,10 @@ proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
           sessionRef[].watchedPaths,
           "exitCode=" & $code)
       except CatchableError:
+        writeSessionRecord(config, sessionRef[])
         discard
+    else:
+      updateSessionState(config, sessionRef[], state, code, message)
     logLine(config.logPath, "watch request " & state & " session=" &
       sessionRef[].sessionId & " message=" & message)
 

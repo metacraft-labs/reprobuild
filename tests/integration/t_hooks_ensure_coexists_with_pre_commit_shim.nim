@@ -100,6 +100,13 @@ suite "RA-4 — hooks ensure coexists with pre-commit hook-impl shim":
         " config user.name \"RA4 Tester\"")
       discard requireGit(q(gitBin) & " -C " & q(repoPath) &
         " remote add origin " & q(origin))
+      writeFile(repoPath / "README.md", "RA-4 hook fixture\n")
+      discard requireGit(q(gitBin) & " -C " & q(repoPath) &
+        " add README.md")
+      discard requireGit(q(gitBin) & " -C " & q(repoPath) &
+        " commit -m fixture")
+      discard requireGit(q(gitBin) & " -C " & q(repoPath) &
+        " push -u origin main")
 
       # Minimal single-project manifest so `enumerateParticipatingRepos`
       # discovers lib-a.

@@ -534,10 +534,11 @@ package reprobuild:
       # ``ct_test_nim_unittest.run`` proc exposes (Bootstrap-And-Self-
       # Build B3 extension): when a TestSpec carries
       # ``requiresReproBinary``, the engine-built
-      # ``build/bin/repro`` artifact is recorded as an input on the
-      # execute edge. Without the flag the execute edge depends only on
-      # its own binary content — keeping the action-cache fingerprint
-      # small for the 500+ tests that do NOT spawn the CLI.
+      # single ``build/bin/repro`` CLI is recorded as an input on the execute
+      # edge. Without the
+      # flag the execute edge depends only on its own binary content —
+      # keeping the action-cache fingerprint small for the 500+ tests
+      # that do NOT spawn the CLI.
       let executeActionId = reproTestExecuteId(spec.binary)
       # ``registerImplicitName = false`` because the BUILD edge
       # already registers the binary basename as the implicit target
@@ -646,21 +647,13 @@ package reprobuild:
       defines = @["release", "reproVendoredHash"],
       paths = ioMonNimPaths & sourceOnlyNimPaths,
       passL = reproRuntimePassL,
-      extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro",
       cacheable = false,
+      # The public launcher sits on the prompt-time dev-env no-op path.
+      # Build it with the vendored portable hash backend so each no-op spawn
+      # does not load the system libblake3 -> TBB/C++ runtime closure.
+      extraEnv = sourceOnlyEnv & @[("REPROBUILD_USE_SYSTEM_HASH_LIBS", "0")],
       actionId = "reprobuild.apps.repro"))
-
-    reprobuildAppsActions.add(nim.c(
-      source = "apps/repro-full/repro_full.nim",
-      binary = "build/bin/repro-full",
-      defines = @["release"],
-      paths = ioMonNimPaths & sourceOnlyNimPaths,
-      passL = reproRuntimePassL,
-      extraEnv = sourceOnlyEnv,
-      nimcache = "build/nimcache/repro-full",
-      cacheable = false,
-      actionId = "reprobuild.apps.repro-full"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim",
@@ -723,6 +716,19 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       cacheable = false,
       actionId = "reprobuild.apps.repro-standard-provider"))
+
+    reprobuildAppsActions.add(shell(
+      command = "mkdir -p build/bin && " &
+        "cp tools/reprobuild-nix-daemon/reprobuild-nix-daemon " &
+        "build/bin/reprobuild-nix-daemon && " &
+        "chmod +x build/bin/reprobuild-nix-daemon",
+      actionId = "reprobuild.apps.reprobuild-nix-daemon",
+      extraInputs = @[
+        "tools/reprobuild-nix-daemon/reprobuild-nix-daemon",
+      ],
+      extraOutputs = @[
+        "build/bin/reprobuild-nix-daemon",
+      ]))
 
     discard collect("apps", reprobuildAppsActions)
 
@@ -798,7 +804,10 @@ package reprobuild:
     #
     # ``repro_binary_cache`` stays plain for A2-A4 HTTP gates, while the
     # M6 helper carries ``-d:ssl`` because that gate exercises the daemon's
-    # HTTPS listener with real TLS.
+    # HTTPS listener with real TLS. Both helpers compile the same Nim entry
+    # point with different define sets; keep them ordered so Nim never links
+    # one helper while the other is still writing generated same-source object
+    # state.
     reprobuildTestHelpersActions.add(nim.c(
       source = "apps/repro-binary-cache/repro_binary_cache.nim",
       binary = "build/test-bin/repro_binary_cache",
@@ -817,6 +826,7 @@ package reprobuild:
       passL = testRuntimePassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_binary_cache_m6",
+      deps = @["reprobuild.test_helpers.repro_binary_cache"],
       cacheable = false,
       actionId = "reprobuild.test_helpers.repro_binary_cache_m6"))
 

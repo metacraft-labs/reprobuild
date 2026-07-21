@@ -86,25 +86,25 @@ package producer:
     discard
 """
 
-proc consumerRepro(bindStmt: string): string =
+proc consumerRepro(producerSelector, bindStmt: string): string =
   ## A consumer ``repro.nim`` that ``uses: "producer"`` (so ``usesImportCode``
   ## splices the producer's driver-free resource surface) and binds the typed
   ## ``container`` wrapper in a proc body. Reaching a green compile means the
   ## contract crossed AND the bind type-checks.
-  """
+  ("""
 import repro_project_dsl
 
 package theconsumer:
   defaultToolProvisioning "path"
 
   uses:
-    "producer"
+    "$1"
 
   build:
     discard
 
 proc useContainer() =
-""" & bindStmt & "\n"
+""" % [producerSelector]) & bindStmt & "\n"
 
 proc countWitness(path: string): int =
   ## The number of COLD generator runs recorded in the witness log — one line
@@ -115,7 +115,8 @@ proc countWitness(path: string): int =
     if line.strip.len > 0:
       inc result
 
-proc compileConsumer(consumerDir, witnessPath, bindStmt, nimcache: string;
+proc compileConsumer(consumerDir, witnessPath, producerSelector, bindStmt,
+                     nimcache: string;
                      checkOnly = false): tuple[ok: bool, output: string] =
   ## Materialize a consumer ``repro.nim`` under ``consumerDir`` (a sibling of
   ## ``../producer``) and compile it as a SUBPROCESS with the accessor witness
@@ -132,7 +133,8 @@ proc compileConsumer(consumerDir, witnessPath, bindStmt, nimcache: string;
   ## the generator would fail to see the spliced ``container`` wrapper under
   ## ``nim check``. The cold (cache-miss) compile therefore uses ``nim c``.
   createDir(consumerDir)
-  writeFile(consumerDir / "repro.nim", consumerRepro(bindStmt))
+  writeFile(consumerDir / "repro.nim",
+    consumerRepro(producerSelector, bindStmt))
   let nimExe = findExe("nim")
   doAssert nimExe.len > 0, "nim compiler not on PATH"
   let env = "REPRO_TI2_ACCESSOR_WITNESS=" & quoteShell(witnessPath)
@@ -160,20 +162,21 @@ suite "TI2: thin-interface consumer reads the cached interface artifact":
     createDir(base)
     defer: removeDir(base)
 
-    # Clean the producer-keyed accessor cache so this run starts COLD regardless
-    # of prior runs (the cache is keyed by the ``producer`` selector).
+    # Use a process-unique producer selector so the separate-module TI2 binary
+    # can run concurrently without either test deleting the other's cache.
+    let producerSelector = "producer_" & $getCurrentProcessId()
     let accCache = repoRoot / "build" / "nimcache" / "ti2-resource-accessors" /
-      "producer"
+      producerSelector
     removeDir(accCache)
 
-    let producerDir = base / "producer"
+    let producerDir = base / producerSelector
     createDir(producerDir)
     writeFile(producerDir / "repro.nim", producerRepro)
 
     let witness = base / "witness.log"
 
     # ---- (1) FIRST consumer — COLD: the generator runs ONCE. ----
-    let c1 = compileConsumer(base / "consumer1", witness,
+    let c1 = compileConsumer(base / "consumer1", witness, producerSelector,
       "  discard container(\"web\", image = \"nginx\", cpus = 2)",
       base / "nc1")
     check c1.ok                          # the contract crossed + bind type-checks
@@ -186,14 +189,15 @@ suite "TI2: thin-interface consumer reads the cached interface artifact":
     # would not see ``container`` under ``nim check``). The witness log does NOT
     # grow — the lift ran once, shared across both consumers; the ~2m per-
     # consumer generator is gone.
-    let c2 = compileConsumer(base / "consumer2", witness,
+    let c2 = compileConsumer(base / "consumer2", witness, producerSelector,
       "  discard container(\"api\", image = \"redis\", cpus = 4)",
       base / "nc2", checkOnly = true)
     check c2.ok
     check countWitness(witness) == 1     # STILL one — the 2nd consumer re-used
 
     # ---- no driver closure crossed (assert on the emitted accessor cache). ----
-    let cachedAccessors = readFile(accCache / "producer.accessors.nim")
+    let cachedAccessors = readFile(accCache /
+      (producerSelector & ".accessors.nim"))
     check cachedAccessors.contains("proc container*")
     check cachedAccessors.contains("\"vm_harness.container\"")
     check not cachedAccessors.contains("containerDriver")
@@ -207,7 +211,7 @@ suite "TI2: thin-interface consumer reads the cached interface artifact":
       producerRepro.replace("cpus", "vcpus"))
 
     # A consumer binding the NEW attr name compiles (and forces a re-gen).
-    let cNew = compileConsumer(base / "consumer3", witness,
+    let cNew = compileConsumer(base / "consumer3", witness, producerSelector,
       "  discard container(\"db\", image = \"pg\", vcpus = 8)",
       base / "nc3")
     check cNew.ok
@@ -218,7 +222,7 @@ suite "TI2: thin-interface consumer reads the cached interface artifact":
     # producer decl rename breaks a stale consumer bind. The cache is fresh from
     # consumer3's re-gen, so this reads the NEW-schema accessor on the fast path
     # (``nim check``) and the stale ``cpus`` bind fails to compile.
-    let cStale = compileConsumer(base / "consumer4", witness,
+    let cStale = compileConsumer(base / "consumer4", witness, producerSelector,
       "  discard container(\"cache\", image = \"mc\", cpus = 8)",
       base / "nc4", checkOnly = true)
     check not cStale.ok

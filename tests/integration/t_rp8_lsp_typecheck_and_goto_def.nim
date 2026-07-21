@@ -101,25 +101,25 @@ package producer:
     discard
 """
 
-proc consumerRepro(bindStmt: string): string =
+proc consumerRepro(producerSelector, bindStmt: string): string =
   ## A consumer ``repro.nim`` that ``uses: "producer"`` (so ``usesImportCode``
   ## splices the producer's driver-free resource surface) and binds the typed
   ## ``container`` wrapper in a proc body. A green typecheck means the contract
   ## crossed AND the bind resolves via interface extraction.
-  """
+  ("""
 import repro_project_dsl
 
 package theconsumer:
   defaultToolProvisioning "path"
 
   uses:
-    "producer"
+    "$1"
 
   build:
     discard
 
 proc useContainer() =
-""" & bindStmt & "\n"
+""" % [producerSelector]) & bindStmt & "\n"
 
 proc writeProducer(producerDir: string) =
   createDir(producerDir)
@@ -149,12 +149,16 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
     createDir(base)
     defer: removeDir(base)
 
-    # Clean the producer-keyed accessor cache so this run starts fresh.
+    # Protocol cases from this and the TI3 binary may run in separate worker
+    # processes. Give this case a process-unique producer selector so their
+    # cold-cache setup cannot delete another case's live accessor cache.
+    let producerSelector = "producer_rp8_typecheck_" &
+      $getCurrentProcessId()
     let accCache = repoRoot / "build" / "nimcache" / "ti2-resource-accessors" /
-      "producer"
+      producerSelector
     removeDir(accCache)
 
-    writeProducer(base / "producer")
+    writeProducer(base / producerSelector)
 
     # ---- (a) A consumer that references ``container(...)`` type-checks. ----
     # First materialise the cached accessor via a ``nim c`` cold pass (nim check
@@ -163,7 +167,8 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
     let coldDir = base / "consumer_cold"
     createDir(coldDir)
     writeFile(coldDir / "repro.nim",
-      consumerRepro("  discard container(\"web\", image = \"nginx\", cpus = 2)"))
+      consumerRepro(producerSelector,
+        "  discard container(\"web\", image = \"nginx\", cpus = 2)"))
     let nimExe = findExe("nim")
     doAssert nimExe.len > 0, "nim compiler not on PATH"
     let coldCache = base / "nc_cold"
@@ -174,6 +179,8 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
       " " & quoteShell(coldDir / "repro.nim")
     let (coldOut, coldCode) =
       execCmdEx("cd " & quoteShell(repoRoot) & " && " & coldCmd)
+    if coldCode != 0:
+      checkpoint(coldOut)
     check coldCode == 0
 
     # The RP8 TYPECHECK capability: a ``nim check`` (NO staticExec) resolves the
@@ -181,9 +188,12 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
     let goodDir = base / "consumer_good"
     createDir(goodDir)
     writeFile(goodDir / "repro.nim",
-      consumerRepro("  discard container(\"api\", image = \"redis\", cpus = 4)"))
+      consumerRepro(producerSelector,
+        "  discard container(\"api\", image = \"redis\", cpus = 4)"))
     let good = typecheckConsumerAgainstInterface(
       goodDir / "repro.nim", repoRoot, base / "nc_good")
+    if not good.ok:
+      checkpoint(good.output)
     check good.ok                        # cross-project symbol resolved
 
     # ---- (b) NO impl compile: the consumer's generated C closure carries no
@@ -207,7 +217,8 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
     let badDir = base / "consumer_bad"
     createDir(badDir)
     writeFile(badDir / "repro.nim",
-      consumerRepro("  discard nonexistent_wrapper(\"x\", foo = 1)"))
+      consumerRepro(producerSelector,
+        "  discard nonexistent_wrapper(\"x\", foo = 1)"))
     let bad = typecheckConsumerAgainstInterface(
       badDir / "repro.nim", repoRoot, base / "nc_bad")
     check not bad.ok                     # unknown symbol does not resolve
@@ -223,7 +234,8 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
 
     let workspace = absolutePath(scratch / "consumer")
     createDir(workspace)
-    let producerDir = absolutePath(scratch / "producer")
+    let producerSelector = "producer_rp8_goto_" & $getCurrentProcessId()
+    let producerDir = absolutePath(scratch / producerSelector)
     writeProducer(producerDir)
 
     let resourcesPath = producerDir / "repro" / "resources.nim"
@@ -231,7 +243,7 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
     # ---- Go-to-def on the resource WRAPPER ``container`` → the resourceType
     #      block's decl location in the producer's resources.nim. ----
     let hitContainer =
-      gotoDefinitionForProducerSymbol("producer", workspace, "container")
+      gotoDefinitionForProducerSymbol(producerSelector, workspace, "container")
     check hitContainer.kind == gdskResourceType
     check hitContainer.typeId == "vm_harness.container"
     # The returned FILE is the producer's resource module.
@@ -248,13 +260,13 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
 
     # The full typeId also resolves to the same decl.
     let hitByTypeId = gotoDefinitionForProducerSymbol(
-      "producer", workspace, "vm_harness.container")
+      producerSelector, workspace, "vm_harness.container")
     check hitByTypeId.kind == gdskResourceType
     check hitByTypeId.location.line == expectedResLine
 
     # ---- Go-to-def on a resource ATTRIBUTE ``cpus`` → the attr's decl line. ----
     let hitAttr =
-      gotoDefinitionForProducerSymbol("producer", workspace, "cpus")
+      gotoDefinitionForProducerSymbol(producerSelector, workspace, "cpus")
     check hitAttr.kind == gdskResourceAttr
     check hitAttr.typeId == "vm_harness.container"
     check sameFile(hitAttr.location.file, resourcesPath)
@@ -265,12 +277,13 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
 
     # ---- REJECTION: a PRIVATE driver helper (``cIdentity``) does NOT resolve —
     #      it never crossed the interface, so there is no public location. ----
-    let priv = gotoDefinitionForProducerSymbol("producer", workspace,
+    let priv = gotoDefinitionForProducerSymbol(producerSelector, workspace,
       "cIdentity")
     check priv.kind == gdskNotFound
     check priv.location.line == 0
 
     # An UNKNOWN name likewise does not resolve.
     let unknown =
-      gotoDefinitionForProducerSymbol("producer", workspace, "no_such_symbol")
+      gotoDefinitionForProducerSymbol(producerSelector, workspace,
+        "no_such_symbol")
     check unknown.kind == gdskNotFound

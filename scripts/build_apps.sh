@@ -239,7 +239,7 @@ while read -r name path extra_flags; do
   done
   runtime_passl=()
   case "${name}" in
-    repro|repro-full)
+    repro)
       runtime_passl=(${repro_runtime_passl[@]+"${repro_runtime_passl[@]}"})
       ;;
   esac

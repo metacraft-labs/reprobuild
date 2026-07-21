@@ -6,7 +6,9 @@ set -euo pipefail
 # flags baked into the edges. The runquota sibling build and final test runner
 # stay shell-shaped until typed-tool resolver coverage reaches those helpers.
 mkdir -p build build/nimcache test-logs
-
+# Protocol evidence describes one execution, never a reusable build artifact.
+rm -rf test-logs/results test-logs/parallel-run.json
+mkdir -p test-logs/results
 repo_root="$(pwd -P)"
 # Keep large suite scratch off /tmp and outside the checkout; some tests build
 # "outside workspace" fixtures and scan ancestors for repo markers.
@@ -27,11 +29,16 @@ rm -rf "${test_tmp_root}"
 mkdir -p "${test_tmp_root}"
 export TMPDIR="${test_tmp_root}" TMP="${test_tmp_root}" TEMP="${test_tmp_root}"
 
-rm -rf build/test-bin
+if [[ "${REPROBUILD_TEST_WARM_REUSE:-0}" != "1" ]]; then
+  rm -rf build/test-bin
+fi
 mkdir -p build/test-bin
-
 # shellcheck source=scripts/source_paths.sh
 source scripts/source_paths.sh
+# shellcheck source=scripts/monitor_shim_probe.sh
+source scripts/monitor_shim_probe.sh
+# shellcheck source=scripts/test_parallelism.sh
+source scripts/test_parallelism.sh
 
 # Test runs exercise user-facing CLI latency gates, so the app bootstrap and
 # graph-owned app rebuilds must use optimized binaries by default. Developers
@@ -42,7 +49,9 @@ export REPROBUILD_BUILD_MODE="${REPROBUILD_BUILD_MODE:-release}"
 # stale user-level metadata can dominate memory use in daemon-hosted cache-hit
 # evidence reconstruction, so give this run a clean, reproducible cache root.
 export REPROBUILD_ACTION_CACHE_ROOT="$(pwd)/build/test-action-cache"
-rm -rf "${REPROBUILD_ACTION_CACHE_ROOT}"
+if [[ "${REPROBUILD_TEST_WARM_REUSE:-0}" != "1" ]]; then
+  rm -rf "${REPROBUILD_ACTION_CACHE_ROOT}"
+fi
 mkdir -p "${REPROBUILD_ACTION_CACHE_ROOT}"
 
 # Use only dev-shell runtime libraries; never scan stale /nix/store closures.
@@ -131,10 +140,15 @@ bootstrap_monitor_shim() {
     bash "${io_mon_src}/scripts/build_shim.sh"
 }
 printf 'Bootstrapping monitor shim for provider compilation\n' >&2
-bootstrap_monitor_shim > test-logs/monitor-shim-bootstrap.log 2>&1 || {
-  echo "monitor shim bootstrap failed; see test-logs/monitor-shim-bootstrap.log" >&2
-  exit 1
-}
+if [[ "${REPROBUILD_TEST_WARM_REUSE:-0}" == "1" ]] &&
+    repro_monitor_shim_available "build/lib"; then
+  printf 'Reusing warm monitor shim\n' >&2
+else
+  bootstrap_monitor_shim > test-logs/monitor-shim-bootstrap.log 2>&1 || {
+    echo "monitor shim bootstrap failed; see test-logs/monitor-shim-bootstrap.log" >&2
+    exit 1
+  }
+fi
 
 # Step 2: build sibling prerequisites that path-mode tool resolution needs.
 runquotad_bin="${RUNQUOTAD_BIN:-}"
@@ -187,10 +201,9 @@ fi
 # the engine. Cap parallelism for memory-constrained CI runners.
 if [[ -z "${REPROBUILD_MAX_PARALLELISM:-}" ]]; then
   available_cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
-  cap=$(( available_cores / 2 ))
-  if (( cap < 1 )); then cap=1; fi
-  if (( cap > 4 )); then cap=4; fi
-  export REPROBUILD_MAX_PARALLELISM="${cap}"
+  export REPROBUILD_MAX_PARALLELISM="$(
+    reprobuild_default_test_build_parallelism "${available_cores}"
+  )"
 fi
 printf 'Building apps + test-helpers + test-builds via repro (REPROBUILD_MAX_PARALLELISM=%s)\n' \
   "${REPROBUILD_MAX_PARALLELISM}" >&2
@@ -234,6 +247,9 @@ repro_build_collection ".#test-helpers" || exit 1
 repro_build_collection ".#test-fixtures" || exit 1
 repro_build_collection ".#test-builds" || exit 1
 
+REPROBUILD_BIN_ABS="$(cd build/bin && pwd)"
+export PATH="${REPROBUILD_BIN_ABS}:${PATH}"
+
 # Step 4 (B5): run Python tests first, then the Nim binaries via
 # ct-test-runner when available or the M3 fallback runner.
 while IFS= read -r -d '' test_file; do
@@ -272,8 +288,7 @@ else
       --out:"${runner_bin}" \
       tools/test-runner/repro_test_runner.nim
   fi
-  # The engine already built build/test-bin; default to one worker for heavy
-  # nested-build tests unless callers explicitly set REPROBUILD_TEST_THREADS.
+  # Default to one worker for heavy nested builds unless explicitly overridden.
   timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${runner_bin}" \
     --no-build \
     --threads=${REPROBUILD_TEST_THREADS:-1} \

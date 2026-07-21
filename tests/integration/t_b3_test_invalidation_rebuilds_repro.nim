@@ -53,6 +53,14 @@ proc reportActions(report: JsonNode): JsonNode =
   if result.isNil or result.kind == JNull:
     result = newJArray()
 
+proc fieldForCheckpoint(action: JsonNode; name: string): string =
+  let field = action{name}
+  if field.isNil or field.kind == JNull:
+    return "<missing>"
+  if field.kind == JString:
+    return field.getStr()
+  $field
+
 proc countOccurrences(haystack, needle: string): int =
   if needle.len == 0:
     return 0
@@ -152,19 +160,21 @@ suite "Bootstrap-And-Self-Build B3: repro binary input wiring":
 
         if reproAppAction != nil:
           checkpoint("reprobuild.apps.repro status=" &
-            reproAppAction{"status"}.getStr() & " launched=" &
-            $reproAppAction{"launched"}.getBool() & " cacheDecision=" &
-            reproAppAction{"cacheDecision"}.getStr())
+            fieldForCheckpoint(reproAppAction, "status") & " launched=" &
+            fieldForCheckpoint(reproAppAction, "launched") &
+            " cacheDecision=" &
+            fieldForCheckpoint(reproAppAction, "cacheDecision"))
           check reproAppAction{"status"}.getStr() == "asSucceeded"
           check reproAppAction{"launched"}.getBool()
           check reproAppAction{"cacheDecision"}.getStr() == "cdNotCacheable"
 
         if executeAction != nil:
           checkpoint(ExecuteActionId & " status=" &
-            executeAction{"status"}.getStr() & " launched=" &
-            $executeAction{"launched"}.getBool() & " cacheDecision=" &
-            executeAction{"cacheDecision"}.getStr() & " reason=" &
-            executeAction{"reason"}.getStr())
+            fieldForCheckpoint(executeAction, "status") & " launched=" &
+            fieldForCheckpoint(executeAction, "launched") &
+            " cacheDecision=" &
+            fieldForCheckpoint(executeAction, "cacheDecision") &
+            " reason=" & fieldForCheckpoint(executeAction, "reason"))
           check executeAction{"status"}.getStr() == "asSucceeded"
           check executeAction{"launched"}.getBool()
           check "exit=0" in executeAction{"reason"}.getStr()

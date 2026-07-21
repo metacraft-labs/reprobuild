@@ -61,6 +61,7 @@ proc providerText*(): string =
   "import std/strutils\n" &
     "import repro_project_dsl\n\n" &
     "package fixture:\n" &
+    "  defaultToolProvisioning \"path\"\n" &
     "  uses:\n" &
     "    \"nim >=2.2 <3.0\"\n" &
     "  devEnv:\n" &
@@ -124,6 +125,7 @@ proc baselineEnvForBash*(c: ShellHookCase): StringTableRef =
       continue
     result[k] = v
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
+  result["REPRO_DEV_ENV_AUTO_ALLOW"] = "1"
   # The shim needs to know which counter to increment and which real
   # binary to dispatch to.
   result["REPRO_M76_SHIM_COUNTER"] = c.shimCounter
