@@ -36,6 +36,21 @@
 
 import std/[macros, strutils]
 
+proc nodeLineInfo(n: NimNode): tuple[file: string; line: int] =
+  ## RP8 (LSP go-to-definition): the compile-time source location of a
+  ## ``NimNode``, mirroring ``macros_a.nim``'s ``lineFile`` helper. The
+  ## ``resourceType`` macro records this onto the emitted
+  ## ``ResourceTypeInterfaceDef`` (the block's location) and each
+  ## ``ResourceAttrDef`` (the attribute declaration's own location) so the
+  ## interface artifact carries a real definition site for go-to-def — the
+  ## same file/line surface an ``executable … cli:`` decl already ships.
+  ## ``filename`` is used verbatim (as the ``executable``/``command``/``param``
+  ## captures do); the lift compiles the producer module by the absolute path
+  ## the ``resourceModule`` decl resolves, so ``file`` resolves to the producer
+  ## module for the extractor's ``sameSourceFile`` / a caller's ``sameFile``.
+  let info = n.lineInfoObj()
+  (info.filename, info.line)
+
 # NOTE: this module emits code that references ``resource``,
 # ``ResourceRef`` (from ``repro_resources/collect``),
 # ``ResourceProviderDef`` (from ``repro_resources/instance``),
@@ -46,7 +61,7 @@ import std/[macros, strutils]
 # ``repro_resources`` umbrella's ``export``s, so this module needs no
 # imports of its own beyond ``std/macros`` + ``std/strutils``.
 
-macro resourceType*(typeIdArg: static string; body: untyped): untyped =
+macro resourceType*(typeIdNode: untyped; body: untyped): untyped =
   ## The RP4 resource-type declaration macro. The header is
   ## ``resourceType "<typeId>":`` and the body carries:
   ##
@@ -69,6 +84,44 @@ macro resourceType*(typeIdArg: static string; body: untyped): untyped =
   var driverExpr: NimNode = nil
   var attrNames: seq[string] = @[]
   var attrTypes: seq[NimNode] = @[]
+  var attrLocs: seq[tuple[file: string; line: int]] = @[]
+
+  # The typeId is the ``resourceType "<id>":`` header expression. Taken as an
+  # ``untyped`` node (not ``static string``) so its OWN line info is the
+  # header's line — the ``resourceType`` decl's definition site — for RP8
+  # go-to-def. (A ``static string`` param carries no callsite line info, and
+  # ``body``'s line info is the first BODY statement, one line too low.)
+  #
+  # Two callsite forms are accepted, matching the old ``static string`` param's
+  # runtime semantics (which folded both to the same string value):
+  #   * a string literal — ``resourceType "vm_harness.container":``
+  #   * a ``const`` identifier bound to a string — ``resourceType TypeContainer:``
+  # For BOTH we pass the node THROUGH into the emitted code wherever the runtime
+  # typeId VALUE is needed, so a const resolves at compile/runtime exactly as it
+  # did under ``static string``. Only the go-to-def location uses the node's
+  # lineinfo (which is correct for a literal AND an ident callsite), not its
+  # value. ``typeIdExpr`` is that pass-through value node.
+  case typeIdNode.kind
+  of nnkStrLit, nnkRStrLit, nnkTripleStrLit,
+     nnkIdent, nnkSym, nnkAccQuoted, nnkDotExpr:
+    discard
+  else:
+    error("resourceType: the type id must be a string literal or a const " &
+      "bound to a string, e.g. resourceType \"vm_harness.container\": or " &
+      "resourceType TypeContainer:", typeIdNode)
+  let typeIdExpr = copyNimTree(typeIdNode)
+
+  proc entrypointExpr(suffix: string): NimNode =
+    ## ``<typeId> & "<suffix>"`` as an emitted runtime expression, so a
+    ## const-ident typeId folds to its string value at compile/runtime just as
+    ## a string literal does — no macro-time ``strVal`` of the (possibly
+    ## non-literal) node is needed.
+    nnkInfix.newTree(ident("&"), copyNimTree(typeIdExpr), newLit(suffix))
+
+  # RP8: the ``resourceType`` block's own source location — the header line
+  # (the ``resourceType "<id>":`` decl), captured from the type-id literal's
+  # node so go-to-def on the wrapper/typeId lands on the decl, not its body.
+  let typeLoc = nodeLineInfo(typeIdNode)
 
   proc unwrapBody(n: NimNode): NimNode =
     ## A ``key: value`` line inside a block parses as a StmtList holding
@@ -81,6 +134,9 @@ macro resourceType*(typeIdArg: static string; body: untyped): untyped =
         stmt[0].kind == nnkIdent and stmt[0].strVal == "attr":
       attrNames.add(stmt[1].strVal)
       attrTypes.add(unwrapBody(stmt[2]))
+      # RP8: capture THIS attribute declaration's own line info so an attr's
+      # go-to-def points at the ``attr <name>: <type>`` line, not the block.
+      attrLocs.add(nodeLineInfo(stmt))
       continue
     # ``attrs: <T>`` / ``wrapper: <ident>`` / ``driver: <expr>`` /
     # ``determinism: <expr>`` parse as Call(<key>, StmtList(<value>)).
@@ -130,7 +186,7 @@ macro resourceType*(typeIdArg: static string; body: untyped): untyped =
   let wrapperBody = newStmtList(
     nnkCall.newTree(
       ident("resource"),
-      newLit(typeIdArg),
+      copyNimTree(typeIdExpr),
       ident("address"),
       attrsCtor,
       ident("dependsOn")))
@@ -148,7 +204,12 @@ macro resourceType*(typeIdArg: static string; body: untyped): untyped =
       ident("ResourceAttrDef"),
       nnkExprColonExpr.newTree(ident("name"), newLit(attrNames[i])),
       nnkExprColonExpr.newTree(ident("nimType"),
-        newLit(attrTypes[i].repr.strip()))))
+        newLit(attrTypes[i].repr.strip())),
+      # RP8: this attribute's own declaration location.
+      nnkExprColonExpr.newTree(ident("sourceFile"),
+        newLit(attrLocs[i].file)),
+      nnkExprColonExpr.newTree(ident("sourceLine"),
+        newLit(attrLocs[i].line))))
   let attrDefSeq = nnkPrefix.newTree(ident("@"), attrDefEntries)
 
   let regBody = newStmtList(
@@ -157,33 +218,44 @@ macro resourceType*(typeIdArg: static string; body: untyped): untyped =
       ident("registerResourceProvider"),
       nnkObjConstr.newTree(
         ident("ResourceProviderDef"),
-        nnkExprColonExpr.newTree(ident("typeId"), newLit(typeIdArg)),
+        nnkExprColonExpr.newTree(ident("typeId"), copyNimTree(typeIdExpr)),
         nnkExprColonExpr.newTree(ident("determinism"), determinismExpr),
         nnkExprColonExpr.newTree(ident("driver"), driverExpr))),
     # registerExtension[<Attrs>](typeId)
     nnkCall.newTree(
       nnkBracketExpr.newTree(ident("registerExtension"), attrsTypeIdent),
-      newLit(typeIdArg)),
+      copyNimTree(typeIdExpr)),
     # registerResourceTypeInterface(ResourceTypeInterfaceDef(...))
     nnkCall.newTree(
       ident("registerResourceTypeInterface"),
       nnkObjConstr.newTree(
         ident("ResourceTypeInterfaceDef"),
-        nnkExprColonExpr.newTree(ident("typeId"), newLit(typeIdArg)),
+        nnkExprColonExpr.newTree(ident("typeId"), copyNimTree(typeIdExpr)),
         nnkExprColonExpr.newTree(ident("determinismOrd"),
           nnkCall.newTree(ident("int"),
             nnkCall.newTree(ident("ord"), determinismExpr))),
         nnkExprColonExpr.newTree(ident("attributes"), attrDefSeq),
+        # ``<typeId>.<op>`` entrypoint ids: emit a runtime ``&`` against the
+        # typeId node so a const-ident typeId resolves at compile/runtime
+        # (matching the old ``static string`` folding) rather than requiring a
+        # macro-time literal.
         nnkExprColonExpr.newTree(ident("identityEntrypoint"),
-          newLit(typeIdArg & ".identity")),
+          entrypointExpr(".identity")),
         nnkExprColonExpr.newTree(ident("digestEntrypoint"),
-          newLit(typeIdArg & ".digest")),
+          entrypointExpr(".digest")),
         nnkExprColonExpr.newTree(ident("observeEntrypoint"),
-          newLit(typeIdArg & ".observe")),
+          entrypointExpr(".observe")),
         nnkExprColonExpr.newTree(ident("planEntrypoint"),
-          newLit(typeIdArg & ".plan")),
+          entrypointExpr(".plan")),
         nnkExprColonExpr.newTree(ident("applyEntrypoint"),
-          newLit(typeIdArg & ".apply")))))
+          entrypointExpr(".apply")),
+        # RP8: the ``resourceType`` block's own declaration location, so
+        # go-to-def on the wrapper/typeId lands on the producer decl. Flows
+        # through the extractor verbatim (repro_interface_artifacts) and is
+        # normalized out of the fingerprint (TI3 ``forFingerprint`` path).
+        nnkExprColonExpr.newTree(ident("sourceFile"), newLit(typeLoc.file)),
+        nnkExprColonExpr.newTree(ident("sourceLine"),
+          newLit(typeLoc.line)))))
   let regProc = newProc(determinismInterfaceDefIdent, @[newEmptyNode()], regBody)
 
   result = newStmtList(

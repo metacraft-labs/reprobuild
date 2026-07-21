@@ -7598,6 +7598,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim",
+    binary: "build/test-bin/t_rp8_lsp_typecheck_and_goto_def",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_top_level_sync_pull_shortcuts_match_workspace_forms.nim",
     binary: "build/test-bin/t_top_level_sync_pull_shortcuts_match_workspace_forms",
     defines: @[],

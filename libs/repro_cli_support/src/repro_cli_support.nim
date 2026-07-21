@@ -13157,6 +13157,165 @@ proc emitResourceContractAccessors*(contract: ProducerTypedContract): string =
       escape(res.entrypoints.apply) & "\n")
 
 # ---------------------------------------------------------------------------
+# RP8 (LSP mode) — interface-extraction-backed editor CAPABILITIES: cross-
+# project TYPECHECK and GO-TO-DEFINITION over a consumer ``repro.nim`` that
+# ``uses:`` a producer declaring resource/executable types.
+#
+# The whole point of the Provider-Runtime-Protocol interface-extraction stack
+# is that a consumer resolves a producer's PUBLIC symbols WITHOUT compiling the
+# producer's driver/implementation closure. RP8 exposes that same extraction as
+# the two capabilities an editor language-server needs:
+#
+#   * TYPECHECK — resolve the producer's public symbols against the driver-free
+#     accessor splice. This is already demonstrable through TI2's accessor
+#     path: a ``nim check`` over a consumer resolves ``container(...)`` via the
+#     cached accessor (``nim check`` cannot run ``staticExec``, so a green check
+#     PROVES the exec-free interface path, not a full producer compile). RP8's
+#     ``typecheckConsumerAgainstInterface`` formalises that flow behind one proc
+#     and makes the "no impl compile" property assertable.
+#   * GO-TO-DEFINITION — given a public symbol reference from a ``uses:``-
+#     imported producer (a resource-type wrapper such as ``container``, a
+#     resource attribute such as ``cpus``, or a public executable/command),
+#     return the DEFINITION source location (producer file + line) read from the
+#     interface artifact's preserved ``SourceLocation`` — WITHOUT compiling the
+#     producer's driver/impl closure. Private helpers and unknown symbols do NOT
+#     resolve (the interface only carries the public surface), so a "go to
+#     definition" on a private name reports not-found rather than leaking an
+#     implementation location.
+#
+# Both capabilities reuse ``resolveProducerTypedContract`` verbatim — the SAME
+# TI1 cached interface-lift edge the RP5a/TI2/TI3 consumer paths drive — so no
+# new extraction machinery is introduced. This is a focused, tested capability
+# (typecheck-without-impl + a go-to-definition resolver), NOT a socket LSP
+# server process; the RP8 gate is satisfied by the capability being real and
+# backed by interface extraction.
+# ---------------------------------------------------------------------------
+
+type
+  GotoDefSymbolKind* = enum
+    ## RP8: the kind of producer public symbol a go-to-definition query
+    ## resolved to. ``gdskNotFound`` is the rejection outcome for a private
+    ## helper / unknown name (the interface exposes only the public surface).
+    gdskNotFound
+    gdskResourceType      ## a ``resourceType`` wrapper (e.g. ``container``)
+    gdskResourceAttr      ## a resource ``attr`` (e.g. ``cpus``)
+    gdskExecutable        ## a public ``executable`` export
+    gdskCommand           ## a public executable ``cli:`` command
+
+  GotoDefResult* = object
+    ## RP8: the outcome of a go-to-definition query. ``kind`` is
+    ## ``gdskNotFound`` when the symbol is not a resolvable producer public
+    ## symbol (a private helper, a mistyped name, or a producer with no typed
+    ## contract) — in that case ``location`` is an empty sentinel. Otherwise
+    ## ``location`` is the producer's PUBLIC-decl source location (file + line),
+    ## read from the interface artifact WITHOUT compiling the producer driver.
+    kind*: GotoDefSymbolKind
+    typeId*: string
+      ## For a resource-type / attr hit: the resolved resource ``typeId``.
+    symbol*: string
+      ## The queried symbol name, echoed back for the caller's diagnostics.
+    location*: SourceLocation
+
+proc gotoDefinitionInProducerContract*(contract: ProducerTypedContract;
+                                       symbol: string): GotoDefResult =
+  ## RP8 go-to-definition over an ALREADY-RESOLVED producer typed contract.
+  ## Given a public ``symbol`` reference — a resource-type wrapper name (the
+  ## last dotted ``typeId`` segment, e.g. ``container`` for
+  ## ``vm_harness.container``) or the full ``typeId`` itself; a resource
+  ## attribute name (e.g. ``cpus``); or a public executable / command name —
+  ## return the producer's DEFINITION ``SourceLocation`` (file + line) read from
+  ## the interface artifact's preserved location. The producer's driver/impl is
+  ## NOT compiled: ``contract`` was lifted via the TI1 cached interface edge
+  ## (``resolveProducerTypedContract``), which carries no driver.
+  ##
+  ## Resolution precedence keeps a resource-type wrapper name (``container``)
+  ## resolving to the ``resourceType`` decl even if an attribute shares the
+  ## name: resource types, then attributes, then executables/commands. An
+  ## unknown or PRIVATE name (a driver helper that never crossed the interface)
+  ## resolves to ``gdskNotFound`` — the interface only exposes the public
+  ## surface, so a private symbol has no location to report.
+  result = GotoDefResult(kind: gdskNotFound, symbol: symbol)
+  if symbol.len == 0:
+    return
+  # (1) resource-type wrapper — match on the full typeId OR on the synthesised
+  #     wrapper proc name (the last dotted segment). This is the ``container``
+  #     the consumer binds; its definition is the ``resourceType`` block.
+  for res in contract.publicResources:
+    if res.typeId == symbol or resourceWrapperProcName(res.typeId) == symbol:
+      return GotoDefResult(kind: gdskResourceType, typeId: res.typeId,
+        symbol: symbol, location: res.location)
+  # (2) resource attribute — an ``attr <name>: <type>`` line inside a
+  #     ``resourceType`` block. Return the attribute's own location.
+  for res in contract.publicResources:
+    for attr in res.attributes:
+      if attr.name == symbol:
+        return GotoDefResult(kind: gdskResourceAttr, typeId: res.typeId,
+          symbol: symbol, location: attr.location)
+  # (3) public executable / command (easy wins on the same interface).
+  for exe in contract.publicExecutables:
+    if exe.exportName == symbol or exe.binaryName == symbol:
+      return GotoDefResult(kind: gdskExecutable, symbol: symbol,
+        location: exe.location)
+    for cmd in exe.commands:
+      if cmd.name == symbol:
+        return GotoDefResult(kind: gdskCommand, symbol: symbol,
+          location: cmd.location)
+  # No public symbol matched — a private helper / unknown name. Stays
+  # ``gdskNotFound`` (the interface never carried a location for it).
+
+proc gotoDefinitionForProducerSymbol*(selector, workspaceRoot,
+                                      symbol: string): GotoDefResult =
+  ## RP8 go-to-definition end-to-end: resolve the producer ``selector``'s typed
+  ## contract (``resolveProducerTypedContract`` — the TI1 cached interface-lift
+  ## edge, NO driver/impl compile) and locate ``symbol``'s public declaration in
+  ## it (``gotoDefinitionInProducerContract``). Returns ``gdskNotFound`` when the
+  ## selector names no discoverable producer, the producer exports no typed
+  ## contract, or the symbol is private/unknown.
+  let contract = resolveProducerTypedContract(selector, workspaceRoot)
+  if contract.kind != ptckContract:
+    return GotoDefResult(kind: gdskNotFound, symbol: symbol)
+  gotoDefinitionInProducerContract(contract, symbol)
+
+type
+  InterfaceTypecheckResult* = object
+    ## RP8: the outcome of a ``nim check`` typecheck of a consumer ``repro.nim``
+    ## against a producer's interface-extraction accessor — WITHOUT compiling
+    ## the producer's driver/impl closure. ``ok`` is the check verdict;
+    ## ``output`` is the compiler's diagnostic text (surfaced on failure).
+    ok*: bool
+    output*: string
+
+proc typecheckConsumerAgainstInterface*(consumerProjectFile: string;
+                                        repoRoot: string;
+                                        nimcache: string;
+                                        nimExe = ""): InterfaceTypecheckResult =
+  ## RP8 TYPECHECK capability. Run ``nim check`` over a consumer ``repro.nim``
+  ## that ``uses:`` a producer. ``nim check`` DOES NOT run ``staticExec``, so
+  ## the cold RP5a-style per-consumer accessor generator is unavailable — a
+  ## consumer that type-checks here resolved the producer's public symbols
+  ## THROUGH the driver-free interface accessor (TI2's exec-free VM ``readFile``
+  ## of the cached accessor splice), NOT through a full producer compile. This
+  ## is exactly the property an editor typecheck needs: cross-project public
+  ## symbols resolve from interface extraction, the producer's implementation is
+  ## never compiled into the consumer.
+  ##
+  ## ``nimcache`` MUST be a private, caller-owned cache dir (RP8 runs each check
+  ## in its own nimcache). ``repoRoot`` is the reprobuild checkout whose
+  ## ``config.nims`` wires the ``--path`` set. Returns the check verdict + the
+  ## compiler diagnostics; a failing check (e.g. a reference to a non-existent
+  ## public symbol) reports ``ok = false`` with the compiler's error text.
+  let nim = if nimExe.len > 0: nimExe else: findExe("nim")
+  doAssert nim.len > 0, "nim compiler not on PATH"
+  createDir(extendedPath(nimcache))
+  let cmd =
+    nim & " check --hints:off --warnings:off" &
+    " --nimcache:" & quoteShell(nimcache) &
+    " " & quoteShell(consumerProjectFile)
+  let (output, code) =
+    execCmdEx("cd " & quoteShell(repoRoot) & " && " & cmd)
+  InterfaceTypecheckResult(ok: code == 0, output: output)
+
+# ---------------------------------------------------------------------------
 # Workspace-Manifest-Optional MO-9 — the unified locked-dependency populator.
 #
 # ONE entry point — ``populateLockedDeps(source)`` — fills the MO-8
