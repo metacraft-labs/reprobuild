@@ -31,25 +31,6 @@ proc markExecutable(path: string) =
   setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
     fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
-proc ensureReproFullCompanion(repoRoot, tempRoot: string) =
-  let reproFull = addFileExt("repro-full", ExeExt)
-  let dest = tempRoot / reproFull
-  let built = repoRoot / "build" / "bin" / reproFull
-  if fileExists(built):
-    copyFile(built, dest)
-  else:
-    discard requireSuccess(@["nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & (tempRoot / "nimcache-repro-full"),
-      "--out:" & dest, repoRoot / "apps" / "repro-full" / "repro_full.nim"])
-  markExecutable(dest)
-  try:
-    let canonicalDest = expandFilename(tempRoot) / reproFull
-    if canonicalDest != dest and not fileExists(canonicalDest):
-      copyFile(dest, canonicalDest)
-      markExecutable(canonicalDest)
-  except OSError, CatchableError:
-    discard
-
 proc valueAfter(output, prefix: string): string =
   for line in output.splitLines:
     if line.startsWith(prefix):
@@ -96,8 +77,6 @@ suite "e2e_path_only_tool_interfaces":
       discard requireSuccess(@["nim", "c", "--verbosity:0", "--hints:off",
         "--nimcache:" & (tempRoot / "nimcache-repro"),
         "--out:" & reproBin, repoRoot / "apps" / "repro" / "repro.nim"])
-      ensureReproFullCompanion(repoRoot, tempRoot)
-
       let binDir = tempRoot / "bin"
       writeFixtureTool(binDir)
       let pathValue = binDir & $PathSep & getEnv("PATH")

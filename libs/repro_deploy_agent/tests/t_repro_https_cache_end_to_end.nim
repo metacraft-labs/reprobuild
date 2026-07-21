@@ -52,10 +52,11 @@
 ## ``REPRO_BINARY_CACHE_SERVER`` (the ``-d:ssl`` build), falling back to
 ## ``build/test-bin/repro_binary_cache_m6`` for a manual run.
 
-import std/[net, os, osproc, random, strtabs, strutils, tempfiles, unittest]
+import std/[httpclient, net, os, osproc, strtabs, strutils, tempfiles, unittest]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
+import ../../repro_binary_cache_client/src/repro_binary_cache_client/http_pool
 import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import repro_elevation      # FixtureContext (the per-apply fixture context)
 import repro_profile
@@ -69,7 +70,13 @@ proc sslServerBin(): string =
   result = getCurrentDir() / "build" / "test-bin" / "repro_binary_cache_m6"
 
 proc pickPort(): int =
-  randomize(); 27_200 + rand(6_499)
+  var sock = newSocket()
+  defer:
+    try: sock.close() except CatchableError: discard
+  sock.setSockOpt(OptReuseAddr, true)
+  sock.bindAddr(Port(0), "127.0.0.1")
+  let local = sock.getLocalAddr()
+  int(local[1])
 
 proc genSelfSignedCert(dir, cn: string): tuple[cert, key: string] =
   let cert = dir / "tls-cert.pem"
@@ -83,16 +90,57 @@ proc genSelfSignedCert(dir, cn: string): tuple[cert, key: string] =
     raise newException(IOError, "openssl cert gen failed: " & outp)
   (cert, key)
 
-proc waitForListener(port: int; tries = 300; sleepMs = 50): bool =
+proc waitForHttpsStatus(url: string; expectedStatus: int;
+                        expectedBody = ""; tries = 300;
+                        sleepMs = 100): bool =
+  let pool = newHttpPool(maxConnections = 1, receiveTimeoutMs = 2000)
+  defer: pool.close()
   for _ in 0 ..< tries:
     try:
-      let sock = newSocket()
-      sock.connect("127.0.0.1", Port(port))
-      sock.close()
-      return true
+      let res = pool.getEntireBody(url)
+      if res.statusCode == expectedStatus:
+        if expectedBody.len == 0 or cast[string](res.body) == expectedBody:
+          return true
     except CatchableError:
-      sleep(sleepMs)
-  return false
+      discard
+    sleep(sleepMs)
+  false
+
+proc waitForStdHttpsStatus(url, caFile: string; expectedStatus: int;
+                           tries = 300; sleepMs = 100): bool =
+  for _ in 0 ..< tries:
+    try:
+      let ctx = newContext(verifyMode = CVerifyPeer, caFile = caFile)
+      let client = newHttpClient(timeout = 2000, sslContext = ctx)
+      defer: client.close()
+      let resp = client.request(url, HttpGet)
+      if int(resp.code) == expectedStatus:
+        discard resp.body
+        return true
+    except CatchableError:
+      discard
+    sleep(sleepMs)
+  false
+
+proc stopProcess(p: Process) =
+  try: p.terminate() except CatchableError: discard
+  try:
+    discard p.waitForExit(timeout = 5000)
+    if p.peekExitCode() == -1:
+      try: p.kill() except CatchableError: discard
+      discard p.waitForExit(timeout = 5000)
+  except CatchableError:
+    discard
+  try: p.close() except CatchableError: discard
+
+proc processState(p: Process): string =
+  try:
+    let code = p.peekExitCode()
+    if code == -1:
+      return "still running"
+    return "exited " & $code
+  except CatchableError as e:
+    return "state unavailable: " & e.msg
 
 # ---------------------------------------------------------------------------
 # A minimal HTTPS static server for the M5 leg: serves ONE fixed byte-blob
@@ -257,7 +305,6 @@ suite "M7 — repro consumes the HTTPS binary cache end-to-end (M4 + M5 over TLS
         checkpoint("gate requires -d:ssl")
         fail()
       else:
-        randomize()
         let bin = sslServerBin()
         check fileExists(bin)
 
@@ -287,14 +334,12 @@ suite "M7 — repro consumes the HTTPS binary cache end-to-end (M4 + M5 over TLS
           "--listen=127.0.0.1:" & $tlsPort,
           "--tls-cert=" & certFile,
           "--tls-key=" & keyFile],
-          options = {poStdErrToStdOut})
-        defer:
-          try: srvProc.terminate() except CatchableError: discard
-          try: discard srvProc.waitForExit() except CatchableError: discard
-          try: srvProc.close() except CatchableError: discard
-        doAssert waitForListener(tlsPort),
-          "HTTPS cache daemon did not start on 127.0.0.1:" & $tlsPort
+          options = {poStdErrToStdOut, poParentStreams})
+        defer: stopProcess(srvProc)
         let httpsUrl = "https://127.0.0.1:" & $tlsPort
+        doAssert waitForHttpsStatus(httpsUrl & "/healthz", 200, "ok"),
+          "HTTPS cache daemon did not become healthy on 127.0.0.1:" &
+            $tlsPort & " (" & processState(srvProc) & ")"
 
         putEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR", tmpRoot / "cred")
         defer: delEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR")
@@ -354,15 +399,16 @@ suite "M7 — repro consumes the HTTPS binary cache end-to-end (M4 + M5 over TLS
         let manifest = signedM5Manifest(signer, applyCwd)
 
         # Bring up the threaded HTTPS static server serving the manifest.
-        let m5Port = pickPort() + 137
+        let m5Port = pickPort()
         gM5 = M5Server(certFile: certFile, keyFile: keyFile, port: m5Port,
                        body: manifestToString(manifest))
         gM5Stop = false
         var m5Thread: Thread[void]
         createThread(m5Thread, m5ServerThread)
-        doAssert waitForListener(m5Port),
-          "M5 HTTPS manifest server did not start on 127.0.0.1:" & $m5Port
         let manifestUrl = "https://127.0.0.1:" & $m5Port & "/latest.rdm"
+        doAssert waitForStdHttpsStatus(manifestUrl, certFile, 200),
+          "M5 HTTPS manifest server did not become ready on 127.0.0.1:" &
+            $m5Port
 
         let agentState = tmpRoot / "m5-agent"
         let applyState = tmpRoot / "m5-apply"

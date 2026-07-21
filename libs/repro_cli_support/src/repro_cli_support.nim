@@ -1114,7 +1114,10 @@ proc cmakeRegenerationFingerprint(meta: CmakeRegenerationMetadata;
 
 proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
                                   publicCliPath: string): BuildAction =
-  var env: seq[string] = @[]
+  # CMake may invoke ``repro build --prepare-only`` while regenerating.
+  # Keep that provider-priming call in the current process tree instead of
+  # handing a transient CMake binary dir to a second daemon session.
+  var env: seq[string] = @["REPRO_DAEMON=off"]
   if meta.providerRoot.len > 0:
     let wrapperPath = meta.values.metadataValue("wrapper_path",
       meta.providerRoot / "bin")
@@ -4974,9 +4977,13 @@ proc stablePublicCliPath(): string =
 # ``BuildEngineConfig.monitorCliArgs``.
 const internalIoMonitorArgs* = @["internal", "io", "monitor"]
 
-proc selfSpawnIoMonitorPath(): string =
+proc selfSpawnIoMonitorPath(publicCliPath = ""): string =
   ## Path to the running ``repro`` image used to self-spawn the internal
   ## io-monitor role.
+  let publicPath =
+    if publicCliPath.len > 0: publicCliPath else: stablePublicCliPath()
+  if publicPath.len > 0:
+    return os.normalizedPath(publicPath)
   os.normalizedPath(getAppFilename())
 
 proc internalReproHelperCliPath(publicCliPath: string): string =
@@ -6309,7 +6316,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
       runQuotaCliPath: publicCliPath,
-      monitorCliPath: selfSpawnIoMonitorPath(),
+      monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
       monitorCliArgs: internalIoMonitorArgs,
       maxParallelism: buildMaxParallelism(),
       stdoutLimit: 1024 * 1024,
@@ -6530,7 +6537,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         cacheRoot: cmakeCacheRoot,
         actionCacheRoot: currentActionCacheRoot(),
         runQuotaCliPath: publicCliPath,
-        monitorCliPath: selfSpawnIoMonitorPath(),
+        monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
         monitorCliArgs: internalIoMonitorArgs,
         maxParallelism: 1'u32,
         stdoutLimit: 1024 * 1024,
@@ -7448,7 +7455,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         # so editing e.g. the DSL or the test-edge adapter left a stale
         # provider (and, transitively, stale build/execute edges). This is the
         # same monitor wiring the main build's engine config uses.
-        monitorCliPath: selfSpawnIoMonitorPath(),
+        monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
         monitorCliArgs: internalIoMonitorArgs,
         maxParallelism: 1'u32,
         stdoutLimit: 1024 * 1024,
@@ -7684,7 +7691,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
       runQuotaCliPath: publicCliPath,
-      monitorCliPath: selfSpawnIoMonitorPath(),
+      monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
       monitorCliArgs: internalIoMonitorArgs,
       maxParallelism: buildMaxParallelism(),
       stdoutLimit: 1024 * 1024,
@@ -8497,7 +8504,7 @@ proc publicDevEnvMonitor(publicCliPath: string):
   ## image (``internal io monitor`` selector returned in ``args``, threaded via
   ## ``DevEnvEdgeConfig.monitorCliArgs``) rather than locating a standalone
   ## monitor binary.
-  (selfSpawnIoMonitorPath(), internalIoMonitorArgs)
+  (selfSpawnIoMonitorPath(publicCliPath), internalIoMonitorArgs)
 
 proc computePublicDevEnv(selection: DevEnvCliSelection;
                          publicCliPath: string;
@@ -8862,6 +8869,13 @@ proc emitDirectoryNotAllowedScript(shell: ShellKind; path: string): string =
     result = "[Console]::Error.WriteLine(\"" & msg.replace("\"", "\\\"") & "\")\n"
     result.add("$env:__REPRO_WARNED = '" & path.replace("'", "''") & "'\n")
 
+proc emitWarnedResetScript(shell: ShellKind): string =
+  case shell
+  of skBash, skZsh: "unset __REPRO_WARNED\n"
+  of skFish: "set -e __REPRO_WARNED\n"
+  of skNushell: "hide-env __REPRO_WARNED\n"
+  of skPwsh: "Remove-Item Env:__REPRO_WARNED -ErrorAction SilentlyContinue\n"
+
 proc runReproAllowCommand(args: openArray[string]): int =
   var path = ""
   if args.len > 0:
@@ -9035,14 +9049,8 @@ proc runDevEnvExportCommand(args: openArray[string];
   # next cd-out.
   plan.appendReproActiveManifestMarker(manifestPath)
   plan.appendReproAppliedMarker(fingerprint)
-  var activationScript = formatExportPlan(plan, parsed.shell)
-  let unsetCmd =
-    case parsed.shell
-    of skBash, skZsh: "unset __REPRO_WARNED\n"
-    of skFish: "set -e __REPRO_WARNED\n"
-    of skNushell: "hide-env __REPRO_WARNED\n"
-    of skPwsh: "Remove-Item Env:__REPRO_WARNED -ErrorAction SilentlyContinue\n"
-  activationScript = unsetCmd & activationScript
+  let activationScript =
+    emitWarnedResetScript(parsed.shell) & formatExportPlan(plan, parsed.shell)
 
   # M75 — write the rollback manifest alongside the RBDE artifact.
   let preEnv =
@@ -9152,13 +9160,8 @@ proc runDevEnvDeactivateCommand(args: openArray[string]): int =
   var rederivedPlan = devEnvArtifactToExportPlan(artifactPath)
   rederivedPlan.appendReproActiveManifestMarker(parsed.manifestPath)
   rederivedPlan.appendReproAppliedMarker(manifest.artifact)
-  let unsetCmd =
-    case manifest.activationShell
-    of skBash, skZsh: "unset __REPRO_WARNED\n"
-    of skFish: "set -e __REPRO_WARNED\n"
-    of skNushell: "hide-env __REPRO_WARNED\n"
-    of skPwsh: "Remove-Item Env:__REPRO_WARNED -ErrorAction SilentlyContinue\n"
-  let rederivedScript = unsetCmd &
+  let rederivedScript =
+    emitWarnedResetScript(manifest.activationShell) &
     formatExportPlan(rederivedPlan, manifest.activationShell)
   let rederivedHash = computeActivationScriptHash(rederivedScript)
   if rederivedHash != manifest.activationScriptHash:
@@ -10294,7 +10297,7 @@ type
 
   HooksEnsureReport* = object
     ## Structured outcome of one ``repro hooks ensure --vcs`` invocation
-    ## written to ``<workspaceRoot>/.repo/workspace/hooks-report.json``.
+    ## written to ``<workspaceRoot>/.repro/workspace/hooks-report.json``.
     workspaceRoot*: string
     mode*: string                  ## ``workspace`` or ``single-repo``.
     project*: string               ## resolved project name (workspace mode).
@@ -11060,6 +11063,8 @@ proc writeCMakeConfigureWrapperPosix(path: string;
   content.add(shellAssign("repro_source_root", sourceRepoRoot))
   content.add("export REPROBUILD_REPRO=\"$repro_cli\"\n")
   content.add("export REPROBUILD_SOURCE_ROOT=\"$repro_source_root\"\n")
+  content.add("# Provider priming is part of this CMake generation step.\n")
+  content.add("export REPRO_DAEMON=off\n")
   content.add("export REPRO_TOOL_PROFILE_ARTIFACT=" & q(identityPath) & "\n")
   content.add("export REPRO_TOOL_PROFILE_INSPECTION=" & q(inspectionPath) & "\n")
   content.add("export REPRO_PROJECT_ROOT=" & q(sourceRoot) & "\n")
@@ -11111,6 +11116,8 @@ proc writeCMakeConfigureWrapperWindows(path: string;
   content.add("$repro_source_root = " & ps1SingleQuote(sourceRepoRoot) & "\n")
   content.add("$env:REPROBUILD_REPRO = $repro_cli\n")
   content.add("$env:REPROBUILD_SOURCE_ROOT = $repro_source_root\n")
+  content.add("# Provider priming is part of this CMake generation step.\n")
+  content.add("$env:REPRO_DAEMON = 'off'\n")
   content.add("$env:REPRO_TOOL_PROFILE_ARTIFACT = " &
     ps1SingleQuote(identityPath) & "\n")
   content.add("$env:REPRO_TOOL_PROFILE_INSPECTION = " &
@@ -11230,10 +11237,12 @@ proc runCMakeDevelopCommand(target: string; mode: ToolProvisioningMode;
 
   if command.len == 0:
     return 0
+  # The command commonly runs ``cmake --build``, whose generated rules call
+  # back into ``repro build`` while the CMake binary dir is transaction-local.
   var devCommand = @["sh", "-c",
     "PATH=" & q(parentDir(wrapperPath) & $PathSep &
       binDirsForDevelop(resolved.identity).join($PathSep) & $PathSep &
-      getEnv("PATH")) & " " & shellCommand(command)]
+      getEnv("PATH")) & " REPRO_DAEMON=off " & shellCommand(command)]
   runInDevelopEnvironment(devCommand, sourceRoot, resolved.identity,
     resolved.identityPath, resolved.inspectionPath, interfacePath)
 
@@ -11336,6 +11345,7 @@ const
     # workspace sibling libraries when the daemon-hosted executor evaluates the
     # provider under a login-launched daemon environment.
     "IO_MON_SRC",
+    "SHM_GSET_SRC",
     "SHM_QUEUE_SRC",
     "REPRO_FROM_SOURCE_ROOT",
     # Tool-provisioning selection. The daemon-hosted executor re-parses the
@@ -14873,7 +14883,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       # compile reads (repro.nim + all transitive imports), not just the
       # statically declared inputs. See the matching wiring on the primary
       # provider-compile config above.
-      monitorCliPath: selfSpawnIoMonitorPath(),
+      monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
       monitorCliArgs: internalIoMonitorArgs,
       maxParallelism: 1'u32,
       stdoutLimit: 1024 * 1024,
@@ -15050,7 +15060,7 @@ proc refreshRecipeProviderSnapshot(target: string;
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
       runQuotaCliPath: publicCliPath,
-      monitorCliPath: selfSpawnIoMonitorPath(),
+      monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
       monitorCliArgs: internalIoMonitorArgs,
       maxParallelism: 1'u32,
       stdoutLimit: 1024 * 1024,
@@ -20427,6 +20437,12 @@ proc installUserDaemonBuildPrewarmer() =
       # subsequent real build reuses the provider-compile artifact this pass
       # writes, so build output and scheduling are unaffected.
       setRestorableEnv("REPROBUILD_NO_RUNQUOTA", "1")
+      let providerSession =
+        if request.runId.len > 0:
+          "daemon-build-" & request.runId
+        else:
+          "daemon-build-pid-" & $getCurrentProcessId()
+      setRestorableEnv(ProviderNimcacheSessionEnv, providerSession)
       if request.workingDir.len > 0:
         setCurrentDir(request.workingDir)
       let cliPath =
@@ -20459,6 +20475,15 @@ proc installUserDaemonBuildExecutor() =
         let value = item[split + 1 .. ^1]
         previousEnv.add((key: key, value: getEnv(key), present: existsEnv(key)))
         putEnv(key, value)
+      previousEnv.add((key: ProviderNimcacheSessionEnv,
+        value: getEnv(ProviderNimcacheSessionEnv),
+        present: existsEnv(ProviderNimcacheSessionEnv)))
+      let providerSession =
+        if request.runId.len > 0:
+          "daemon-build-" & request.runId
+        else:
+          "daemon-build-pid-" & $getCurrentProcessId()
+      putEnv(ProviderNimcacheSessionEnv, providerSession)
       if request.workingDir.len > 0:
         setCurrentDir(request.workingDir)
       let cliPath =

@@ -430,9 +430,8 @@
           # /nix/store present.
           #
           # Why a bundle and NOT a static (musl/`--passL:-static`) build:
-          #  * `repro` is a thin dispatcher that `execv`s its `repro-full`
-          #    sibling for every real subcommand; `repro-full` links OpenSSL
-          #    (`--define:ssl`) and, at MODULE-INIT time (Nim `{.dynlib.}`
+          #  * The single `repro` CLI links OpenSSL (`--define:ssl`) and, at
+          #    MODULE-INIT time (Nim `{.dynlib.}`
           #    `DatInit`, before `main`), dlopens `libclingo.so` by the
           #    absolute path the Nim compiler baked into `.rodata`
           #    (libs/repro_solver/.../clingo_bindings.nim documents this eager
@@ -451,8 +450,8 @@
           # github:NixOS/bundlers#toArx .#reprobuild`, wired as a first-class
           # package output so callers can just `nix build .#repro-portable`.
           # The bundler keys off `meta.mainProgram` ("repro"), so the produced
-          # executable launches `repro` (which finds its `repro-full` sibling
-          # inside the same extracted closure). It ADDS to — and does not
+          # executable launches the single `repro` image from the extracted
+          # closure. It ADDS to — and does not
           # disturb — `packages.default`/`packages.reprobuild` or `just build`.
           reproPortable = bundlers.bundlers.${system}.toArx reprobuild;
         in

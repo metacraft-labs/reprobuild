@@ -130,15 +130,19 @@ trusted-public-keys = "$1"
 priority = 10
 """ % [KeyA])
     withEnv(ConfigPathEnvVar, cfgPath, proc() =
-      withEnv(EnvUrlVar, "http://env-only", proc() =
-        let eps = loadEndpoints()
-        check eps.len == 2
-        # fleet (priority 10) before env (EnvCachePriority, lowest).
-        check eps[0].baseUrl == "http://fleet"
-        check eps[1].baseUrl == "http://env-only"
-        # The env cache carries NO trust => default-untrusted => a MISS.
-        check eps[1].trustedSigners.len == 0
-        check eps[1].enforceTrust))
+      # The test suite itself may publish through a temporary producer cert.
+      # This case specifically proves the no-cert fallback, so isolate that
+      # input instead of inheriting suite-level cache credentials.
+      withEnv(EnvCertVar, "", proc() =
+        withEnv(EnvUrlVar, "http://env-only", proc() =
+          let eps = loadEndpoints()
+          check eps.len == 2
+          # fleet (priority 10) before env (EnvCachePriority, lowest).
+          check eps[0].baseUrl == "http://fleet"
+          check eps[1].baseUrl == "http://env-only"
+          # The env cache carries NO trust => default-untrusted => a MISS.
+          check eps[1].trustedSigners.len == 0
+          check eps[1].enforceTrust)))
     removeDir(tmp)
 
   test "env URL already covered by a config cache is NOT duplicated":
