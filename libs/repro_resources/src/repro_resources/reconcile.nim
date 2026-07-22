@@ -19,6 +19,7 @@ from repro_home_resources/types import ObservedState, ResourceActionKind,
   rakNoOp, rakCreate, rakUpdate, rakReplace, rakDestroy, rakAdopt,
   rakDriftBlocked
 import repro_resources/instance
+import repro_resources/state_store
 
 type
   ReconcileOptions* = object
@@ -102,7 +103,8 @@ proc decide*(desiredDigest: Digest256; observed: ObservedState;
 
 proc reconcileResources*(desired: seq[ResourceInstance];
                          recorded: seq[ResourceBinding] = @[];
-                         options: ReconcileOptions = ReconcileOptions()):
+                         options: ReconcileOptions = ReconcileOptions();
+                         store: Option[StateStore] = none(StateStore)):
                          ReconcileResult =
   ## Drive the desired graph to convergence. Topologically orders by
   ## `dependsOn`, then per resource: look up the driver by `typeId`
@@ -110,6 +112,15 @@ proc reconcileResources*(desired: seq[ResourceInstance];
   ## recording the returned binding. Pure w.r.t. process state — all
   ## real-world effect is confined to the driver callbacks, so it is
   ## unit-testable with an in-memory driver.
+  ##
+  ## L1 (Ephemeral-State-Leases §3) additive persistence: when `store`
+  ## is `some`, a `ResourceStateRecord` is written for every resource
+  ## whose binding is present after this reconcile (created/updated, or a
+  ## no-op carrying a prior present binding) — the cross-run reuse index
+  ## + the reaper's source of truth. When `store` is `none` (the default)
+  ## the loop is BYTE-IDENTICAL to the pre-L1 behaviour: no store I/O, no
+  ## record writes. Lease fields are left at their zero value here; L2
+  ## populates them.
   result.actions = @[]
   result.bindings = @[]
 
@@ -134,13 +145,22 @@ proc reconcileResources*(desired: seq[ResourceInstance];
       kind: action,
       summary: $action & " " & inst.address & " (" & inst.typeId & ")"))
 
+    var effective = none(ResourceBinding)
     case action
     of rakCreate, rakUpdate, rakReplace, rakDestroy:
       let binding = drv.apply(inst, action, observed)
       result.bindings.add(binding)
       recordedByAddr[inst.address] = binding
+      effective = some(binding)
     of rakNoOp, rakAdopt, rakDriftBlocked:
       # No apply. Carry the prior binding forward if we had one so a
       # subsequent reconcile still sees the recorded post-write digest.
       if prior.isSome:
         result.bindings.add(prior.get)
+        effective = prior
+
+    # L1: persist a reconstructable record for a materialized resource,
+    # only when a store is configured (opt-in — the no-store path above
+    # is untouched).
+    if store.isSome and effective.isSome and effective.get.present:
+      writeStateRecord(store.get, inst, effective.get)
