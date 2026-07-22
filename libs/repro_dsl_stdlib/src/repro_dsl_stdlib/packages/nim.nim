@@ -480,7 +480,16 @@ let nimCatalog* = @[
 ]
 
 
-proc package*(pkg: NimPackage; name: string; srcDir = "src"): BuildTargetDef {.discardable.} =
+# NOTE: named ``nimPackage`` (not ``package``) on purpose. A recipe that does
+# ``import repro_dsl_stdlib/packages/nim as nim_pkg`` still brings this module's
+# exported symbols into scope UNQUALIFIED (Nim's ``as`` only renames the
+# qualified path, it does not hide unqualified access). A bare ``package`` proc
+# here therefore shadow-collides with the core ``package`` MACRO from
+# ``repro_project_dsl``: on ``package <name>:`` Nim eagerly typechecks this
+# proc's ``NimPackage`` first argument against the bare identifier and fails
+# with "undeclared identifier: '<name>'". Keeping a distinct name avoids the
+# collision for every recipe that imports this module.
+proc nimPackage*(pkg: NimPackage; name: string; srcDir = "src"): BuildTargetDef {.discardable.} =
   result = target(name, actions = @[])
   let absSrcDir = absolutePath(srcDir).replace('\\', '/')
   registerBuildTargetExtension(name, NimPackageExtension(
