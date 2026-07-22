@@ -30,7 +30,7 @@ export python_dep_scanner
 export jsts_dep_scanner
 export convention_attribution
 
-const ReprobuildVersion* = "0.1.0"
+const ReprobuildVersion* = "0.1.2"
 
 proc versionString*(): string =
   ReprobuildVersion
