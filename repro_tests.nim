@@ -4086,6 +4086,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/nspr/test_nspr_source.nim",
+    binary: "build/test-bin/test_nspr_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/openssl/test_openssl_source.nim",
     binary: "build/test-bin/test_openssl_source",
     defines: @[],
