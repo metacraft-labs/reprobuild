@@ -3838,6 +3838,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/libical/test_libical_source.nim",
+    binary: "build/test-bin/test_libical_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/libinput/test_libinput_source.nim",
     binary: "build/test-bin/test_libinput_source",
     defines: @[],
