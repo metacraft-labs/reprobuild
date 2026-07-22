@@ -1077,10 +1077,21 @@ proc gitFetchAction*(id: string; identity: GitToolIdentity;
 proc gitSwitchAction*(id: string; identity: GitToolIdentity;
                       branchName, repoPath, receiptPath: string;
                       cwd = ""; deps: openArray[string] = [];
-                      cacheable = true): BuildAction =
-  ## Construct a cacheable switch action. The executor refuses on a
-  ## dirty working tree and surfaces ``reason = "dirty"`` via the
-  ## ``ActionResult`` (per M2 design rule 4).
+                      cacheable = false): BuildAction =
+  ## Construct a switch action. The executor refuses on a dirty working
+  ## tree and surfaces ``reason = "dirty"`` via the ``ActionResult`` (per
+  ## M2 design rule 4).
+  ##
+  ## ``cacheable`` defaults to ``false`` (like ``gitMergeFfAction`` and
+  ## ``gitForceResetAction``): ``git switch`` mutates a working tree whose
+  ## precondition — the LIVE current HEAD — is observed at run time, not a
+  ## deterministic function of the declared inputs (branch + repo). Caching
+  ## its receipt is unsound: once a switch to branch ``B`` succeeded, a
+  ## later switch to ``B`` from a DIFFERENT branch would be served as a
+  ## cache hit and skip the actual ``git switch``, so ``repro checkout``
+  ## would report ``switched`` while HEAD never moved. ``git switch`` is
+  ## idempotent (already-on-branch is a safe no-op), so always executing is
+  ## both correct and cheap.
   let payload = buildPayload(identity, gvoSwitch, "", "", branchName,
     "", repoPath, receiptPath)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
