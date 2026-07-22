@@ -28,7 +28,7 @@
 ## `Digest256` array + the attrs payload survive verbatim (no lossy JSON
 ## of binary bytes).
 
-import std/[os, tables, times]
+import std/[os, tables, times, options]
 from std/strutils import toHex, startsWith, endsWith
 from std/algorithm import sort
 
@@ -38,8 +38,12 @@ import repro_resources/instance
 import repro_resources/marshal          # marshalAttrs / unmarshalAttrs (extension registry)
 
 const
-  StateRecordMagic = "RSST"             ## resource-state store, record v1
-  StateRecordVersion = 1'u32
+  StateRecordMagic = "RSST"             ## resource-state store, record
+  StateRecordVersion = 2'u32
+    ## v2: `effectiveDeadline` is an OPTIONAL deadline (presence flag +
+    ## u64) so "never reap" (keep / no dated holder) is `none`, not an
+    ## epoch-0/PAST sentinel that a `deadline < now -> reap` gate would
+    ## wrongly destroy. v1 stored a bare u64 and is not read.
   RecordSuffix = ".rec"
   TempPrefix = ".tmp-"
 
@@ -76,8 +80,14 @@ type
     # ----- lease fields (shape defined at L1; L2 populates, L3 uses) -----
     holders*: Table[string, Time]
       ## consumerId -> that lease's deadline.
-    effectiveDeadline*: Time
-      ## Derived: max over live holders' deadlines. The reaper's gate.
+    effectiveDeadline*: Option[Time]
+      ## Derived: MAX over live dated holders' deadlines — the reaper's gate
+      ## (`some(t)`: reapable once `now >= t`). `none` means NEVER REAP: no
+      ## dated holder, or at least one `keep` holder pinning the state with
+      ## no expiry. This is deliberately an `Option`, NOT an epoch-0/PAST
+      ## sentinel: a PAST sentinel would make the reaper's natural
+      ## `deadline < now -> reap` gate DESTROY a pinned state. The reaper
+      ## MUST skip `none` and only reap a `some(t)` with `t <= now`.
     lastRenewed*: Time
       ## Wall-clock of the most recent lease renewal.
 
@@ -143,7 +153,13 @@ proc encodeRecord(rec: ResourceStateRecord): seq[byte] =
   for consumerId, deadline in rec.holders:
     result.writeString(consumerId)
     result.writeU64Le(uint64(deadline.toUnix()))
-  result.writeU64Le(uint64(rec.effectiveDeadline.toUnix()))
+  # effectiveDeadline: presence flag (1 = a dated reap deadline, 0 = never
+  # reap / none) followed, when present, by the u64 unix deadline.
+  if rec.effectiveDeadline.isSome:
+    result.add(1'u8)
+    result.writeU64Le(uint64(rec.effectiveDeadline.get.toUnix()))
+  else:
+    result.add(0'u8)
   result.writeU64Le(uint64(rec.lastRenewed.toUnix()))
 
 proc decodeRecord(bytes: openArray[byte]): ResourceStateRecord =
@@ -179,7 +195,15 @@ proc decodeRecord(bytes: openArray[byte]): ResourceStateRecord =
     let consumerId = readString(bytes, pos)
     let deadline = fromUnix(int64(readU64Le(bytes, pos)))
     result.holders[consumerId] = deadline
-  result.effectiveDeadline = fromUnix(int64(readU64Le(bytes, pos)))
+  if pos >= bytes.len:
+    raise newException(IOError,
+      "truncated effectiveDeadline flag in state record")
+  let hasDeadline = bytes[pos] != 0'u8
+  inc pos
+  if hasDeadline:
+    result.effectiveDeadline = some(fromUnix(int64(readU64Le(bytes, pos))))
+  else:
+    result.effectiveDeadline = none(Time)
   result.lastRenewed = fromUnix(int64(readU64Le(bytes, pos)))
 
 # ---------------------------------------------------------------------------
@@ -204,7 +228,7 @@ proc writeStateRecord*(store: StateStore; rec: ResourceStateRecord) =
 
 proc buildStateRecord*(inst: ResourceInstance; binding: ResourceBinding;
                        holders: Table[string, Time] = initTable[string, Time]();
-                       effectiveDeadline: Time = fromUnix(0);
+                       effectiveDeadline: Option[Time] = none(Time);
                        lastRenewed: Time = fromUnix(0)): ResourceStateRecord =
   ## Assemble a record from a reconciled resource + its recorded binding.
   ## The attrs are serialized HERE via the extension-registry marshaller
@@ -227,7 +251,7 @@ proc buildStateRecord*(inst: ResourceInstance; binding: ResourceBinding;
 proc writeStateRecord*(store: StateStore; inst: ResourceInstance;
                        binding: ResourceBinding;
                        holders: Table[string, Time] = initTable[string, Time]();
-                       effectiveDeadline: Time = fromUnix(0);
+                       effectiveDeadline: Option[Time] = none(Time);
                        lastRenewed: Time = fromUnix(0)) =
   ## Convenience overload: build + atomically write in one call.
   writeStateRecord(store,

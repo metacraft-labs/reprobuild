@@ -167,7 +167,7 @@ suite "L1: persistent resource-state store":
     var holders = initTable[string, Time]()
     holders["run-A"] = fromUnix(1_700_000_100)
     holders["run-B"] = fromUnix(1_700_000_900)
-    let effective = fromUnix(1_700_000_900)
+    let effective = some(fromUnix(1_700_000_900))
     let renewed = fromUnix(1_700_000_050)
 
     writeStateRecord(store, inst, ResourceBinding(
@@ -181,6 +181,24 @@ suite "L1: persistent resource-state store":
     check rec.holders["run-B"] == fromUnix(1_700_000_900)
     check rec.effectiveDeadline == effective
     check rec.lastRenewed == renewed
+
+    # never-reap (keep / no dated holder) round-trips as `none`, NOT an
+    # epoch-0/PAST sentinel: the reaper's `deadline < now` gate must never
+    # see a past deadline for a pinned state.
+    discard stubThing("pinned", "pv")
+    let pinnedInst = collectedResources()[^1]
+    writeStateRecord(store, pinnedInst, ResourceBinding(
+      address: "pinned", typeId: pinnedInst.typeId,
+      resourceId: stubIdentity(pinnedInst),
+      postWriteDigest: stubDigest(pinnedInst), present: true),
+      holders = initTable[string, Time](),
+      effectiveDeadline = none(Time), lastRenewed = renewed)
+    let pinned = readStateRecord(store, "pinned")
+    check pinned.effectiveDeadline.isNone
+    # The reap gate a reaper would use never fires on a `none` deadline.
+    let nowFar = fromUnix(1_900_000_000)
+    check not (pinned.effectiveDeadline.isSome and
+               pinned.effectiveDeadline.get < nowFar)
 
   test "remove + list round-trip":
     discard stubThing("a", "va")

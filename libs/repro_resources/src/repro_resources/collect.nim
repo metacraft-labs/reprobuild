@@ -35,7 +35,8 @@ proc collectedResources*(): seq[ResourceInstance] =
   desiredResources
 
 proc resource*[T](typeId: string; address: string; attrs: T;
-                  dependsOn: seq[string] = @[]): ResourceRef =
+                  dependsOn: seq[string] = @[];
+                  consumes: seq[LeasedDep] = @[]): ResourceRef =
   ## Low-level generic instantiation. Boxes the typed attribute record
   ## `attrs` into a `ResourceInstance` (carrying the provider's declared
   ## determinism) and registers it into the desired-resource
@@ -43,6 +44,11 @@ proc resource*[T](typeId: string; address: string; attrs: T;
   ## `registerResourceProvider` (an unknown id is a hard error), which
   ## both supplies the determinism class and — through the paired
   ## `registerExtension[T](typeId)` — makes the attrs box marshallable.
+  ##
+  ## `consumes` (L2) attaches leased-consumption edges (see `leased(...)`):
+  ## each is BOTH an ordering edge (fed to `topoOrder` like `dependsOn`)
+  ## AND a renew/reap policy the store-backed reconcile applies. Bare
+  ## `dependsOn` is unchanged: omit `consumes` for the pre-L2 behaviour.
   let def = lookupResourceProvider(typeId)   # hard-errors on unknown typeId
   let box: ExtensionBox = TypedExtensionBox[T](typeId: typeId, val: attrs)
   desiredResources.add(ResourceInstance(
@@ -50,5 +56,6 @@ proc resource*[T](typeId: string; address: string; attrs: T;
     address: address,
     attrs: box,
     dependsOn: dependsOn,
-    determinism: def.determinism))
+    determinism: def.determinism,
+    consumes: consumes))
   ResourceRef(address: address)

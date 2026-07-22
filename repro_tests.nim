@@ -2438,6 +2438,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_resources/tests/t_l2_lease_edge.nim",
+    binary: "build/test-bin/t_l2_lease_edge",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_solver/tests/t_clingo_smoke.nim",
     binary: "build/test-bin/t_clingo_smoke",
     defines: @[],

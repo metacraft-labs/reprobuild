@@ -21,6 +21,7 @@
 ## is deliberately self-contained and does NOT rewrite the home-scope or
 ## system-scope engines.
 
+import repro_resources/lease
 import repro_resources/instance
 import repro_resources/collect
 import repro_resources/reconcile
@@ -29,6 +30,7 @@ import repro_resources/resource_type
 import repro_resources/protocol
 import repro_resources/state_store
 
+export lease
 export instance
 export collect
 export reconcile

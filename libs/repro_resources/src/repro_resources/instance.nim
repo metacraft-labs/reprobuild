@@ -27,11 +27,13 @@ from repro_home_generations/pointer import Digest256
 import repro_home_resources/type_registry     # ResourceDeterminism
 from repro_home_resources/types import ObservedState, ResourceActionKind
 import repro_project_dsl                        # ExtensionBox / TypedExtensionBox
+import repro_resources/lease                    # LeasedDep / LeasePolicy (L2)
 
 export ResourceDeterminism          # rdStrong / rdWeak / rdHostBound / rdVolatile
 export ObservedState, ResourceActionKind
 export ExtensionBox, TypedExtensionBox
 export Digest256
+export lease                        # LeasePolicy / LeasedDep / deadlineFrom / leased
 
 type
   ResourceInstance* = object
@@ -42,8 +44,12 @@ type
     typeId*: string                 ## -> resourceProviderRegistry
     address*: string                ## stable DSL address, the graph node key
     attrs*: ExtensionBox            ## typed attribute payload (Typed-Graph-Extensions)
-    dependsOn*: seq[string]         ## resource addresses; the graph edges
+    dependsOn*: seq[string]         ## resource addresses; the STRUCTURAL graph edges (never-reap)
     determinism*: ResourceDeterminism ## per-instance determinism (may narrow the type default)
+    consumes*: seq[LeasedDep]       ## L2: leased-consumption edges (address + consumerId + policy).
+                                    ## Each ALSO implies an ordering edge like `dependsOn`, plus a
+                                    ## renew/reap policy the store-backed reconcile applies. Bare
+                                    ## `dependsOn` is unchanged: an empty `consumes` is the pre-L2 value.
 
   ResourceBinding* = object
     ## The generic recorded-binding value returned by `apply` — a
