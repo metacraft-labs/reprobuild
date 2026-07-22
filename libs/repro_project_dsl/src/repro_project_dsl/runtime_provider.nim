@@ -33,7 +33,13 @@ when defined(reproProviderMode):
           argumentSchemaId: "reprobuild.project-root.v1",
           outputSchemaId: "reprobuild.graph-fragment.v1")
       ])
-    if pkg.hasDevEnv:
+    if exposesDevEnvIntrospection(pkg):
+      # Windows-dev-env M1: exposed for explicit ``devEnv:`` packages AND
+      # for ``uses:``-only packages (implicit floor-derived dev-env). The
+      # ``devEnvBodyHash`` is content-derived for both cases (an explicit
+      # block hashes its body; a ``uses:``-only floor hashes the floor —
+      # see ``parsePackageDef``), so the entry has a stable, deterministic
+      # id in either case.
       result.entryPoints.add(GraphEntryPointDescriptor(
         id: devEnvEntryPointId(pkg),
         kind: gpkDevEnvIntrospection,
@@ -217,14 +223,20 @@ when defined(reproProviderMode):
 
   proc buildPackageDevEnv*(pkg: PackageDef; request: ProviderGraphRequest;
                            devEnvProc: proc ()): DevEnvResult {.dynOrStatic.} =
-    if devEnvProc == nil:
-      raise newException(ValueError,
-        "provider does not implement dev-env introspection")
+    # Windows-dev-env M1: a ``uses:``-only recipe exposes dev-env
+    # introspection but has NO explicit ``devEnv:`` body, so the DSL emits
+    # no ``devEnv<Package>`` proc and ``runPackageProvider`` is called with
+    # ``devEnvProc = nil``. That is the IMPLICIT floor-derived dev-env: run
+    # no extra body, and let the ``pkg.toolUses`` append below carry the
+    # toolchain-floor env — the same append an explicit-``devEnv:`` recipe
+    # gets. A nil proc is therefore no longer an error; it is the implicit
+    # case.
     resetProviderEvaluationInputRegistry()
     resetDevEnvRegistry()
     currentProviderProjectRoot = request.arguments
     try:
-      devEnvProc()
+      if devEnvProc != nil:
+        devEnvProc()
     finally:
       currentProviderProjectRoot = ""
 

@@ -1434,6 +1434,24 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
   # See ``m9r15pAutoInjectQt6Transitive`` for the architectural
   # rationale + dedup semantics. Inert for non-qt6 recipes.
   m9r15pAutoInjectQt6Transitive(result)
+  # Windows-dev-env M1: a recipe with a non-empty ``uses:`` toolchain
+  # floor but NO explicit ``devEnv:`` block still exposes dev-env
+  # introspection (see ``exposesDevEnvIntrospection`` /
+  # ``runtime_provider.providerManifest``). Give that implicit entry a
+  # deterministic, content-derived ``devEnvBodyHash`` computed from the
+  # floor itself so the manifest entry has a stable, floor-derived body
+  # hash that re-keys when the floor changes. Explicit ``devEnv:`` blocks
+  # already set ``devEnvBodyHash`` above (and ``hasDevEnv``), so this only
+  # fires for the implicit case. Runs after ``m9r15pAutoInjectQt6Transitive``
+  # so any auto-injected floor entries are folded into the hash.
+  if not result.hasDevEnv and result.toolUses.len > 0:
+    var floorRepr = result.packageName & ".dev-env.implicit-floor.v1\n"
+    for useDef in result.toolUses:
+      floorRepr.add(useDef.rawConstraint & "\x1f" & useDef.packageSelector &
+        "\x1f" & useDef.executableName & "\x1f" &
+        useDef.policyPath.join("/") & "\x1f" & useDef.gateVariant & "\x1f" &
+        useDef.gateValue & "\n")
+    result.devEnvBodyHash = stableHashHex(floorRepr)
 
 proc escForCode(text: string): string =
   text.escape()

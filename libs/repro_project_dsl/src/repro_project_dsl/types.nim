@@ -763,3 +763,20 @@ type
   TargetExportTable* = object
     entries*: seq[TargetExportEntry]
     ambiguities*: seq[TargetExportAmbiguity]
+
+proc exposesDevEnvIntrospection*(pkg: PackageDef): bool =
+  ## Windows-dev-env M1: a package exposes a ``gpkDevEnvIntrospection``
+  ## entry point — so ``repro exec`` / ``repro shell`` / the direnv hook
+  ## can resolve a dev environment — in either of two cases:
+  ##
+  ## * it declared an explicit ``devEnv:`` block (``hasDevEnv``), which
+  ##   contributes shell ops / tasks / services / extra tool requirements
+  ##   on top of the floor; OR
+  ## * it declares a non-empty ``uses:`` toolchain floor (even with no
+  ##   ``devEnv:`` block). The IMPLICIT dev-env is just the floor: the
+  ##   PATH/env contributions of the ``uses:`` tools, with no extra tasks
+  ##   or env. ``buildPackageDevEnv`` already appends ``pkg.toolUses`` to
+  ##   the dev-env result's tool requirements for BOTH cases, so the
+  ##   implicit case reuses the exact same derivation with an empty
+  ##   "extra" dev-env body.
+  pkg.hasDevEnv or pkg.toolUses.len > 0
