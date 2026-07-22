@@ -1238,6 +1238,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim",
+    binary: "build/test-bin/t_provider_nimcache_key_tracks_external_libs",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_rp1_provider_artifact_edge_identity.nim",
     binary: "build/test-bin/t_rp1_provider_artifact_edge_identity",
     defines: @[],
@@ -1256,14 +1264,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim",
     binary: "build/test-bin/test_library_codec_roundtrip",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim",
-    binary: "build/test-bin/t_provider_nimcache_key_tracks_external_libs",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -3360,6 +3360,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/json-c/test_json_c_source.nim",
     binary: "build/test-bin/test_json_c_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/json-glib/test_json_glib_source.nim",
+    binary: "build/test-bin/test_json_glib_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -7302,6 +7310,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim",
+    binary: "build/test-bin/t_rp8_lsp_typecheck_and_goto_def",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim",
     binary: "build/test-bin/t_runquota_bypass_is_reported_in_build_header_and_report",
     defines: @[],
@@ -7592,14 +7608,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_ti3_fingerprint_split.nim",
     binary: "build/test-bin/t_ti3_fingerprint_split",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim",
-    binary: "build/test-bin/t_rp8_lsp_typecheck_and_goto_def",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
