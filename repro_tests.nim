@@ -3894,6 +3894,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/libsoup3/test_libsoup3_source.nim",
+    binary: "build/test-bin/test_libsoup3_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/libtirpc/test_libtirpc_source.nim",
     binary: "build/test-bin/test_libtirpc_source",
     defines: @[],
