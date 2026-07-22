@@ -16,7 +16,7 @@ proc cacheIdentityExtendedPath(path: string): string =
     if path.len == 0 or path.startsWith("\\\\"):
       path
     else:
-      "\\\\?\\" & normalizedPath(absolutePath(path)).replace('/', '\\')
+      "\\\\?\\" & os.normalizedPath(absolutePath(path)).replace('/', '\\')
   else:
     path
 
