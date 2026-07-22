@@ -24453,7 +24453,21 @@ proc confirmDestructive*(prompt: string; autoYes: bool; isTty: bool;
     return ddRefusedNonTty
   stderr.write(prompt)
   stderr.flushFile()
-  let answer = stdin.readLine().strip().toLowerAscii()
+  var answer: string
+  try:
+    answer = stdin.readLine().strip().toLowerAscii()
+  except CatchableError:
+    # ``isatty`` reported a TTY, yet the read failed. On Windows a console
+    # handle attached to a non-interactive context (CI / an agent harness)
+    # reports ``isatty == true`` but ``ReadConsole`` fails with
+    # ERROR_INVALID_FUNCTION ("Incorrect function"); POSIX would have
+    # returned EOF on a closed stdin. Either way we could not obtain an
+    # answer, so refuse cleanly (matching the non-TTY contract) instead of
+    # crashing the destructive command.
+    stderr.writeLine("")
+    stderr.writeLine(refuseMessage & " (re-run with " & flagName &
+      " to confirm)")
+    return ddRefusedNonTty
   if answer == "y" or answer == "yes":
     return ddConfirmed
   if declineMessage.len > 0:
