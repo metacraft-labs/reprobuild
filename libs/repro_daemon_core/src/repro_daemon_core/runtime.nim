@@ -6,6 +6,7 @@ import blake3
 import ./client
 import ./protocol
 import ./stats_store
+import ./lease_registry
 
 when defined(posix):
   import std/posix except Time
@@ -49,6 +50,15 @@ type
     stagedGenerationDir*: string
     previousStagedGenerationDir*: string
     restartRunId*: string
+    systemScope*: bool
+      ## Ephemeral-State-Leases L4 (§4.1): when true the daemon serves the
+      ## SYSTEM lease scope — its lease reaper tick sweeps the system state
+      ## store (``/var/lib/repro/state``) instead of the per-user one. Set by
+      ## ``repro daemon serve --system`` (the system reaper unit).
+    leaseStoreRoot*: string
+      ## Explicit lease state-store root override (``--state-root``). Empty
+      ## => derived from ``systemScope`` via ``leaseStoreRootForScope``. A
+      ## hermetic test points this at a throwaway dir under ``$HOME``.
 
   UserDaemonBuildEmit* = proc(kind: UserDaemonBuildEventKind;
                               message: string;
@@ -688,6 +698,36 @@ proc writeStatusFile(config: UserDaemonConfig; status: UserDaemonStatus) =
     "previousStagedGenerationDir=" &
       status.previousStagedGenerationDir & "\n" &
     "featureFlags=" & status.featureFlags & "\n")
+
+proc daemonLeaseScope(config: UserDaemonConfig): DaemonLeaseScope =
+  ## L4 (§4.1): a ``--system`` daemon serves the system lease scope; every
+  ## other daemon serves the per-user scope.
+  if config.systemScope: dlsSystem else: dlsUser
+
+proc daemonLeaseStoreRoot(config: UserDaemonConfig): string =
+  ## The state-store root this daemon's lease registry + reaper tick operate
+  ## on: an explicit ``--state-root`` wins, otherwise it is derived from the
+  ## daemon's scope (§4.1 routing).
+  leaseStoreRootForScope(daemonLeaseScope(config), config.leaseStoreRoot)
+
+proc handleLeaseRenew(socket: IpcConn; config: UserDaemonConfig;
+                      request: DaemonLeaseRenewRequest) =
+  ## L4 (§4.2) renew handler: advance the holder's lease in the scoped
+  ## store. The request's own ``scope`` selects the store root (a mismatched
+  ## scope is honoured verbatim so a client can address either registry);
+  ## the daemon's ``--state-root`` override still wins for a hermetic test.
+  let response =
+    try:
+      applyLeaseRenew(request, overrideRoot = config.leaseStoreRoot)
+    except CatchableError as err:
+      DaemonLeaseRenewResponse(ok: false,
+        reason: "lease renew raised: " & err.msg,
+        effectiveDeadlineUnix: LeaseRenewKeepSentinel)
+  socket.writeFrame(udkLeaseRenewAck, leaseRenewResponseBody(response))
+  logLine(config.logPath, "lease renew address=" & request.address &
+    " consumer=" & request.consumerId & " ttlSeconds=" &
+    $request.ttlSeconds & " ok=" & $response.ok & " hadRecord=" &
+    $response.hadRecord)
 
 proc handleHello(socket: IpcConn; config: UserDaemonConfig; generation: string;
                  frameBody: openArray[byte]): bool =
@@ -1345,6 +1385,15 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
       " ok=" & $response.ok & " plan=" & $response.plan.len &
       " realized=" & $response.realizedCasPaths.len &
       " bytes=" & $response.totalBytesFetched)
+  of udkLeaseRenew:
+    let request =
+      try:
+        parseLeaseRenewRequestBody(frame.body)
+      except CatchableError as err:
+        socket.writeFrame(udkError, errorBody(
+          "malformed udkLeaseRenew body: " & err.msg))
+        return
+    handleLeaseRenew(socket, config, request)
   else:
     socket.writeFrame(udkError, errorBody(
       "unsupported user-daemon message in lifecycle server: " &
@@ -1430,6 +1479,22 @@ proc performDevSelfRestart(config: UserDaemonConfig;
   logLine(config.logPath, "dev restart old process exiting runId=" & runId)
   true
 
+proc runScopedLeaseReapTick(config: UserDaemonConfig) =
+  ## Ephemeral-State-Leases L4 (§4.2): run ONE wall-clock reap sweep against
+  ## this daemon's scoped lease store. Best-effort — a reap must never wedge
+  ## the event loop or crash the daemon, so all errors are logged + swallowed.
+  ## The store is on disk, so this is correct on the FIRST tick after a
+  ## restart (an expired record left by a prior instance is reaped here).
+  try:
+    let report = runLeaseReapTick(daemonLeaseScope(config),
+      overrideRoot = config.leaseStoreRoot)
+    if report.reaped.len > 0:
+      logLine(config.logPath, "lease reap tick reaped=" & $report.reaped.len &
+        " kept=" & $report.skipped.len & " scope=" &
+        (if config.systemScope: "system" else: "user"))
+  except CatchableError as err:
+    logLine(config.logPath, "lease reap tick error: " & err.msg)
+
 proc runUserDaemonForeground*(config: UserDaemonConfig): int =
   # Named-pipe endpoints live under the kernel ``\\.\pipe\`` namespace
   # which is NOT a filesystem directory; ``createDir`` on its
@@ -1484,6 +1549,21 @@ proc runUserDaemonForeground*(config: UserDaemonConfig): int =
     devRestart.sourceImagePath & " running=" & devRestart.runningImagePath &
     " restartRunId=" & devRestart.restartRunId)
 
+  # L4 (§4.2): the wall-clock reaper tick. The event loop is otherwise
+  # event-driven (it only wakes on a client or the dev-restart poll); the
+  # tick is the one new capability. We cap the poll timeout at the reap
+  # cadence so a lapsed lease is swept promptly even with NO client traffic,
+  # and run the sweep BETWEEN accepts so socket handling is never stalled by
+  # a reap (a reap is a bounded store scan; it runs on the loop thread only
+  # when no client is waiting, so it cannot wedge an in-flight client).
+  let leaseReapMs = leaseReapIntervalMs()
+  var lastLeaseReapMs = nowUnixMs()
+  # Run an initial sweep at startup so a restart resumes reaping immediately
+  # (an expired record left by a crashed/stopped prior instance is reaped on
+  # the first pass rather than after a full interval).
+  if leaseReapMs > 0:
+    runScopedLeaseReapTick(config)
+
   var shuttingDown = false
   while not shuttingDown:
     if restartCandidateReady(config, devRestart):
@@ -1492,7 +1572,13 @@ proc runUserDaemonForeground*(config: UserDaemonConfig): int =
       if performDevSelfRestart(config, listener, daemonLock, devRestart):
         selfRestarting = true
         return 0
-    if not listener.waitForClient(int(devRestartPollIntervalMs())):
+    if leaseReapMs > 0 and nowUnixMs() - lastLeaseReapMs >= leaseReapMs:
+      runScopedLeaseReapTick(config)
+      lastLeaseReapMs = nowUnixMs()
+    var pollMs = int(devRestartPollIntervalMs())
+    if leaseReapMs > 0 and leaseReapMs < pollMs:
+      pollMs = leaseReapMs           # wake in time for the next reap tick
+    if not listener.waitForClient(pollMs):
       continue
     var client = listener.acceptIpc()
     try:
@@ -1548,6 +1634,11 @@ proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
   if config.restartRunId.len > 0:
     result.add("--restart-run-id")
     result.add(config.restartRunId)
+  if config.systemScope:
+    result.add("--system")
+  if config.leaseStoreRoot.len > 0:
+    result.add("--state-root")
+    result.add(config.leaseStoreRoot)
 
 proc launchdLabel(config: UserDaemonConfig): string =
   "org.reprobuild.repro-daemon." &
@@ -1912,6 +2003,10 @@ proc parseUserDaemonConfigFlags*(args: seq[string];
     elif raw == "--log" or raw.startsWith("--log="):
       result.config.logPath = valueFor("--log")
       explicitLog = true
+    elif raw == "--system":
+      result.config.systemScope = true
+    elif raw == "--state-root" or raw.startsWith("--state-root="):
+      result.config.leaseStoreRoot = valueFor("--state-root")
     else:
       result.rest.add(raw)
     inc i
@@ -1920,8 +2015,8 @@ proc parseUserDaemonConfigFlags*(args: seq[string];
       "repro-daemon.log"
 
 proc userDaemonUsage*(): string =
-  "usage: repro-daemon [--foreground] [--dev] [--endpoint PATH] " &
-    "[--state-dir PATH] [--log PATH]"
+  "usage: repro-daemon [--foreground] [--dev] [--system] [--endpoint PATH] " &
+    "[--state-dir PATH] [--log PATH] [--state-root PATH]"
 
 proc runUserDaemonCommand*(args: seq[string]): int =
   if args.len == 1 and args[0] in ["--help", "-h"]:

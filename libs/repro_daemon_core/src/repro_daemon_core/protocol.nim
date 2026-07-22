@@ -15,7 +15,7 @@ const
   UserDaemonFeatureFlags* =
     "lifecycle,status,logs,shutdown,sessions,build-routing,build-events," &
     "watch-routing,watch-events,watch-sessions,dev-self-restart," &
-    "substitute-routing"
+    "substitute-routing,lease-registry"
   BuildEventSchemaId* = "reprobuild.daemon.build-event.v1"
   BuildEventSchemaVersion* = 1'u16
   FrameMagic = "RBUD"
@@ -48,6 +48,17 @@ type
     udkSubstituteResponse = 19
       ## Reply for ``udkSubstituteRequest``: the plan, per-step outcomes,
       ## realized CAS paths, totals, and an aggregate ok/reason field.
+    udkLeaseRenew = 20
+      ## Ephemeral-State-Leases L4 (§4.2 renew). A ``repro`` reconcile that
+      ## CONSUMES a leased state sends this to advance the holder's lease
+      ## in the daemon-hosted registry: ``{scope, address, consumerId,
+      ## ttlSeconds}``. The daemon sets ``holders[consumerId] =
+      ## deadlineFrom(policy, now)``, recomputes the reference-counted MAX
+      ## ``effectiveDeadline`` (L2 semantics), and persists the record. The
+      ## daemon answers with ``udkLeaseRenewAck``.
+    udkLeaseRenewAck = 21
+      ## Reply for ``udkLeaseRenew``: whether a record existed + was
+      ## renewed, and the resulting (optional) effective deadline.
     udkError = 255
 
   UserDaemonBuildEventKind* = enum
@@ -776,3 +787,89 @@ proc parseSubstituteResponseBody*(body: openArray[byte]):
   result.realizedCasPaths = body.readStringSeq(pos)
   result.totalBytesFetched = body.readI64(pos)
   result.totalWallclockMillis = body.readI64(pos)
+
+# ---------------------------------------------------------------------------
+# Ephemeral-State-Leases L4 (§4.2) — lease renew messages
+# ---------------------------------------------------------------------------
+#
+# Wire format choice: the same hand-rolled little-endian binary the rest of
+# this module uses (``writeString`` / ``writeI64`` / ``writeBool``), so the
+# protocol module stays a leaf that depends only on ``repro_core`` — it does
+# NOT link ``repro_resources``. The daemon-side handler
+# (``lease_registry.nim``) translates the wire policy encoded in
+# ``ttlSeconds`` into a ``repro_resources`` ``LeasePolicy`` and drives the
+# L1/L2 store; the CLI-side client (``repro_resources`` or the reconcile
+# seam) encodes its ``LeasePolicy`` back into ``ttlSeconds`` at this boundary.
+#
+# ``ttlSeconds`` policy encoding (a single int64 keeps the frame tiny and
+# forward-compatible; a ``keep`` holder pins the state with no expiry):
+#   * ``LeaseRenewKeepSentinel`` (< 0) -> ``keep``       (never reap)
+#   * ``0``                             -> ``immediate``  (now-deadline)
+#   * ``> 0``                           -> ``delayed(ttl = ttlSeconds)``
+
+const
+  LeaseRenewKeepSentinel* = -1'i64
+    ## ``ttlSeconds`` value meaning ``keep`` (never auto-reap): the holder
+    ## pins the state with no deadline. Any negative value is treated as
+    ## ``keep`` on decode so a future renegotiation cannot mis-reap.
+
+type
+  DaemonLeaseScope* = enum
+    ## Which daemon / state-store root owns this lease (§4.1). ``dlsUser``
+    ## routes to the per-user daemon + ``$HOME/.cache/repro/state``;
+    ## ``dlsSystem`` routes to the system-scoped state dir served by the
+    ## system reaper unit.
+    dlsUser = 0
+    dlsSystem = 1
+
+  DaemonLeaseRenewRequest* = object
+    scope*: DaemonLeaseScope
+    address*: string
+      ## The leased state's resource address (the store record key).
+    consumerId*: string
+      ## This consumer's stable holder id (the ``holders`` map key).
+    ttlSeconds*: int64
+      ## The policy, encoded per the scheme above.
+
+  DaemonLeaseRenewResponse* = object
+    ok*: bool
+      ## True if the renew was applied (a matching record existed and was
+      ## updated). False (with ``reason``) if no record was found — a
+      ## best-effort renew against a store the daemon does not (yet) hold a
+      ## record for; the client must not treat this as fatal.
+    reason*: string
+    hadRecord*: bool
+    effectiveDeadlineUnix*: int64
+      ## The resulting effective deadline, or ``LeaseRenewKeepSentinel``
+      ## when the folded deadline is ``none`` (never reap).
+
+proc scopeFromWire(v: uint32): DaemonLeaseScope =
+  if v == uint32(ord(dlsSystem)): dlsSystem else: dlsUser
+
+proc leaseRenewRequestBody*(request: DaemonLeaseRenewRequest): seq[byte] =
+  result.writeU32Le(uint32(ord(request.scope)))
+  result.writeString(request.address)
+  result.writeString(request.consumerId)
+  result.writeI64(request.ttlSeconds)
+
+proc parseLeaseRenewRequestBody*(body: openArray[byte]):
+    DaemonLeaseRenewRequest =
+  var pos = 0
+  result.scope = scopeFromWire(body.readU32Le(pos))
+  result.address = body.readString(pos)
+  result.consumerId = body.readString(pos)
+  result.ttlSeconds = body.readI64(pos)
+
+proc leaseRenewResponseBody*(response: DaemonLeaseRenewResponse): seq[byte] =
+  result.writeBool(response.ok)
+  result.writeString(response.reason)
+  result.writeBool(response.hadRecord)
+  result.writeI64(response.effectiveDeadlineUnix)
+
+proc parseLeaseRenewResponseBody*(body: openArray[byte]):
+    DaemonLeaseRenewResponse =
+  var pos = 0
+  result.ok = body.readBool(pos)
+  result.reason = body.readString(pos)
+  result.hadRecord = body.readBool(pos)
+  result.effectiveDeadlineUnix = body.readI64(pos)
