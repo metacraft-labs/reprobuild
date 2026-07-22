@@ -5650,11 +5650,49 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if running.len == 0:
         if ready.len > 0 and not launchedAny:
           raiseEngine("ready queue is blocked by pool capacity")
+        # The graph can advance no further: nothing is running, ready, or
+        # launchable, yet ``completed < total``. Historically this raised
+        # with ONLY the ``asPending`` ids — but when the stall is caused by
+        # a failed action whose dependents were cascaded to ``asBlocked``
+        # (e.g. a dev-env provisioning/activation action whose tool couldn't
+        # be resolved), none of the survivors are ``asPending``, so the list
+        # was EMPTY and hid the real cause. Reconstruct the terminal
+        # failures — the failed actions with their reason/stderr and the
+        # blocked actions with their blocker — so the diagnostic names what
+        # actually went wrong. The message keeps the historical
+        # "build graph made no progress" prefix and a "pending actions:"
+        # segment so existing prefix/substring consumers still match.
         var pending: seq[string] = @[]
+        var failedActions: seq[string] = @[]
+        var blockedActions: seq[string] = @[]
         for action in buildGraph.actions:
-          if statuses[action.id] == asPending:
+          case statuses[action.id]
+          of asPending:
             pending.add(action.id)
-        raiseEngine("build graph made no progress; pending actions: " & pending.join(", "))
+          of asFailed:
+            let res = runResult.results[idToIndex.resultIndex(action.id)]
+            var detail = res.stderr.strip()
+            if detail.len == 0:
+              detail = res.reason.strip()
+            if detail.len == 0:
+              detail = "exit " & $res.exitCode
+            failedActions.add(action.id & " (" & detail & ")")
+          of asBlocked:
+            let res = runResult.results[idToIndex.resultIndex(action.id)]
+            if res.blockedBy.len > 0 and res.blockedBy != action.id:
+              blockedActions.add(action.id & " (blocked by " &
+                res.blockedBy & ")")
+            else:
+              blockedActions.add(action.id)
+          else:
+            discard
+        var segments: seq[string] = @[]
+        if failedActions.len > 0:
+          segments.add("failed actions: " & failedActions.join("; "))
+        if blockedActions.len > 0:
+          segments.add("blocked actions: " & blockedActions.join(", "))
+        segments.add("pending actions: " & pending.join(", "))
+        raiseEngine("build graph made no progress; " & segments.join("; "))
 
       var runIndex = -1
       let waitStart = statStart()

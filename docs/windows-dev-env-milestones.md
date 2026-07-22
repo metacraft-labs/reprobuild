@@ -179,6 +179,53 @@ Acceptance:
 - `from-source` parses; a provisioning failure reports the offending action.
 - Automated tests for the policy resolution + parsing + the surfaced diagnostic.
 
+### M2a — surface the swallowed no-progress failure (VERIFIED 2026-07-22)
+Sub-item (b) above ONLY. When the build graph can advance no further —
+nothing running/ready/launchable yet `completed < total` — the engine raised
+`build graph made no progress; pending actions:` with an EMPTY list, because the
+stall is caused by a FAILED action whose dependents were cascaded to `asBlocked`
+(none are `asPending`, so the old pending-only list was empty and hid the cause).
+
+Fix (`libs/repro_build_engine/src/repro_build_engine.nim`, the no-progress raise
+at ~5650): the raise path now reconstructs the terminal failures. It walks
+`buildGraph.actions` and, for each, keys off `statuses[id]`: `asFailed` actions
+are listed with their `stderr` (falling back to `reason`, then `exit <code>`);
+`asBlocked` actions are listed with their `blockedBy` blocker; `asPending`
+actions keep the historical list. The message keeps the
+`build graph made no progress` prefix and a trailing `pending actions:` segment
+so existing prefix/substring consumers still match, but now leads with
+`failed actions: <id> (<reason>); blocked actions: <id> (blocked by <id>)`. This
+is diagnostic-surfacing only — the miscounting offender (a failing built-in's
+`inc completed` at ~5471, analogous to the already-fixed broker path) is
+deliberately left as-is; the raise now names the failure regardless.
+
+Test: `libs/repro_build_engine/tests/test_no_progress_diagnostic.nim` — builds a
+2-node graph with a deliberately failing built-in (`bakCopyFile` with zero
+inputs → `asFailed` with a real message) and a dependent (cascaded `asBlocked`),
+runs `runBuild`, and asserts the raised `BuildEngineError` names the failing
+action id, carries its reason, lists the blocked dependent, and does NOT collapse
+to the empty pending-only message. Passes under `nim c -r --hints:off`. Existing
+`test_elevated_inline_exec_hook.nim` assertions unaffected (its Windows failures
+are the documented `.rbar` `removeDirEventually` teardown flake, reproduced
+byte-identically on the git-stash baseline — not a regression).
+
+ACTUAL io-mon dev-env failure now revealed (verbatim, `repro shell
+--print-env=powershell`, `REPRO_DEV_ENV_AUTO_ALLOW=1`), the key M2 driver:
+
+```
+repro shell: error: build graph made no progress; failed actions: nix-provision.nim (bakForeignProvision is not supported on Windows); nix-provision.nimble (bakForeignProvision is not supported on Windows); nix-provision.sh (bakForeignProvision is not supported on Windows); nix-provision.gcc (bakForeignProvision is not supported on Windows); blocked actions: __repro_provider_compile (blocked by nix-provision.nim); pending actions:
+```
+
+Root cause for M2b/M2c: io-mon's toolchain floor (`nim`, `nimble`, `sh`, `gcc`)
+is provisioned via `bakForeignProvision` (nix-daemon-backed) actions, and
+`executeBuiltinAction` hard-raises `bakForeignProvision is not supported on
+Windows` (`repro_build_engine.nim:3889`). So the Windows provisioning policy (M2)
+must replace/avoid the nix-`bakForeignProvision` path for the floor tools
+(source/tarball provisioning), not merely re-key it. Follow-up noted, NOT fixed
+in this cycle (scope): the nix daemon path in `executeBuiltinAction` is also
+POSIX-only (`connectUnix` to `/tmp/...`), so even off the hard-raise it could not
+serve Windows as-is.
+
 ## M3 — high-mem-server binary cache  ·  TODO
 Configure the repro binary cache on high-mem-server (managed in
 `d:\m\dev\infra`) as a trusted substituter in `~/dotfiles`; configure CI to push
@@ -222,3 +269,30 @@ commands here.
   observed dev-env/provider failures confirmed PRE-EXISTING via git-stash
   baseline rebuild (M2 provisioning gap, `.rbar` teardown flake, and a Windows
   `execCmdEx` bare-`nim` resolution quirk) — no regression. Committed to dev.
+- 2026-07-22: M2a IMPLEMENTED. The "build graph made no progress" raise path now
+  reconstructs terminal failures (failed actions + reason/stderr; blocked actions
+  + blocker) instead of an empty pending list. New test
+  `test_no_progress_diagnostic.nim` (green). Rebuilt CLI via `just bootstrap`;
+  io-mon `repro shell --print-env=powershell` now reveals the real cause verbatim:
+  the toolchain floor is provisioned via `bakForeignProvision` which
+  `executeBuiltinAction` hard-raises as "bakForeignProvision is not supported on
+  Windows" (`repro_build_engine.nim:3889`) — the root cause that drives the M2
+  provisioning policy. Diagnostic-surfacing only; provisioning policy/from-source
+  parse left for M2b/M2c. Left uncommitted for the review agent.
+- 2026-07-22: M2a VERIFIED (review agent). Reviewed the diff (minimal, confined to
+  the `runBuild` no-progress raise branch; no success-path or existing-test change;
+  the `inc completed` miscount deliberately left as documented). `just bootstrap`
+  rebuilt `build/bin/repro.exe` clean. `test_no_progress_diagnostic.nim` passes
+  under `nim c -r --hints:off` and exercises the real raise path (failing
+  `bakCopyFile` + cascaded `asBlocked` dependent; asserts the failing id, its
+  reason substring, the blocked dependent, and that it does NOT collapse to the
+  empty pending-only message). io-mon `repro shell --print-env=powershell`
+  (`REPRO_DEV_ENV_AUTO_ALLOW=1`) reproduces the recorded verbatim diagnostic
+  byte-for-byte. Ran the full `libs/repro_build_engine/tests/*` group plus the
+  `t_e2e_provider_dev_env_introspection` e2e (green). Failures are all
+  pre-existing, confirmed byte-identical on the git-stash baseline: the `.rbar`
+  `removeDirEventually` teardown flake (`test_binary_cache_publisher_hook`,
+  `test_elevated_inline_exec_hook`), a `duplicate implicit target name` fixture
+  error (`m1_fixtures_ambiguity`, `m1_fixtures_basename`), and a `clingo.dll`
+  load-path environment issue (resolved by putting clingo 5.8.0 on PATH). No
+  regression. Committed to dev.
