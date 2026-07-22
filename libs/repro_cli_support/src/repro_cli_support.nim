@@ -33697,6 +33697,20 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
         if wired.ok:
           entry.wired = true
           entry.rewired = true
+          # Align the checkout's remote-tracking refs with the freshly-mirrored
+          # bare. ``refreshSharedBare`` rebuilds the bare from the CURRENT remote
+          # (``clone --bare`` / ``fetch --all --prune``), so a branch DELETED or
+          # FORCE-PUSHED upstream leaves the checkout's remote-tracking ref
+          # pointing at an object the new bare no longer has. Without this, the
+          # rewired checkout still depends on whatever OLD object pool held that
+          # object (e.g. a legacy shared clone being retired) and is fsck-dirty
+          # on the shared bare alone. ``fetch --all --prune`` updates the moved
+          # refs and prunes the deleted ones to match the mirror. Best-effort —
+          # an offline/fetch failure does not fail the rewire; the checkout is
+          # already wired and functional. (Reflog entries a force-push stranded
+          # are harmless and are reaped by normal ``git gc`` reflog expiry.)
+          discard gitRunPlain(identity,
+            ["-C", repoAbs, "fetch", "--all", "--prune", "--quiet"])
         else:
           entry.diagnostic = "alternates wiring failed: " & wired.diagnostic
           # The bare WAS present but we could not wire — a genuine failure.
