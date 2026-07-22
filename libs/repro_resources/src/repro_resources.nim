@@ -29,6 +29,7 @@ import repro_resources/marshal
 import repro_resources/resource_type
 import repro_resources/protocol
 import repro_resources/state_store
+import repro_resources/reaper
 
 export lease
 export instance
@@ -38,3 +39,4 @@ export marshal
 export resource_type
 export protocol
 export state_store
+export reaper
