@@ -17,9 +17,9 @@ package pcre2Source:
     "gcc >=11"
   config:
     discard
-  executable pcre2grep:
+  library pcre2:
     discard
-  executable pcre2:
+  executable pcre2grep:
     discard
   build:
     setCurrentOwningPackageOverride("pcre2Source")
