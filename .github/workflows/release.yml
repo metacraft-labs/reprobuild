@@ -79,7 +79,25 @@ jobs:
           if (Test-Path -Path ../nim-bearssl) { Remove-Item -Recurse -Force ../nim-bearssl }
           git clone --depth 1 --recurse-submodules https://github.com/status-im/nim-bearssl.git ../nim-bearssl
 
-      # Build all release applications and monitor shims using repro.nim/repro.lock
+      # Enable the repro binary-cache publish for THIS per-platform build so its
+      # `repro build` outputs land in the fleet cache (repro-cache.metacraft-labs.com),
+      # giving Windows/macOS/ARM machines cache hits when provisioning from source.
+      # The composite action writes the signing key/cert to $RUNNER_TEMP and exports
+      # the REPRO_BINARY_CACHE_* env vars picked up by the build steps below; it is a
+      # no-op when the secrets are empty (fork PRs) and publish failures are non-fatal
+      # (see .github/actions/setup-repro-publish). It selects bash vs pwsh by
+      # runner.os, so it covers every matrix leg — including any currently-missing
+      # os x arch runner added later (linux-arm64, macos-x64, windows-arm64), which
+      # only need a matrix row + runner, not a change here.
+      - name: Configure repro binary-cache publish
+        uses: ./.github/actions/setup-repro-publish
+        with:
+          publish-key: ${{ secrets.REPRO_PUBLISH_KEY }}
+          publish-cert: ${{ secrets.REPRO_PUBLISH_CERT }}
+
+      # Build all release applications and monitor shims using repro.nim/repro.lock.
+      # The build inherits REPRO_BINARY_CACHE_* from $GITHUB_ENV (set by the step
+      # above) so reprobuild's engine publisher signs and POSTs the outputs.
       - name: Bootstrap and Build (POSIX)
         if: matrix.os-name != 'windows'
         shell: bash

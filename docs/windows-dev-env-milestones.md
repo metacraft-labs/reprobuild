@@ -226,7 +226,17 @@ in this cycle (scope): the nix daemon path in `executeBuiltinAction` is also
 POSIX-only (`connectUnix` to `/tmp/...`), so even off the hard-raise it could not
 serve Windows as-is.
 
-## M3 — high-mem-server binary cache  ·  TODO
+## Sequencing decision (2026-07-23)
+User chose: primary Windows provisioner = **from-source** (cache-backed), and **cache (M3) first**, then M2c on top. Order now: M3 → M2c → M2b → M4 → M5.
+
+## M3 — high-mem-server binary cache  ·  IN-PROGRESS (Commit A done)
+Architecture (verified): the "repro binary cache" is a **reprobuild-native** server at `https://repro-cache.metacraft-labs.com` (nginx → `127.0.0.1:7878`, NetBird-gated, publish gated by an allowed-signers allowlist; reads need only the VPN + a trusted-key match, no token). This host (eli-pc) is on NetBird and resolves it. Client reads INI `caches.conf` (`REPRO_CACHES_CONFIG` env → `%PROGRAMDATA%\repro\caches.conf` → `%XDG_CONFIG_HOME%\repro\caches.conf` else `~/.config`); trust is declarative via `trusted-public-keys`. CI push is already wired (`reprobuild/.github/workflows/ci.yml` → that endpoint, signed with `REPRO_PUBLISH_KEY`/`_CERT` secrets which exist). Server service + fleet config currently live only on infra branch `repro-cache/workstation-publisher-nixfmt` (not merged to `live`).
+- **Commit A (DONE, dotfiles 83b905a, not pushed):** dotfiles manage `stow/repro/.config/repro/caches.conf` + `REPRO_CACHES_CONFIG` env (fixes the `XDG_CONFIG_HOME=%APPDATA%` mis-placement so local installs substitute from the cache). Validated: config-load + real server-reached MISS over NetBird + `home plan` 51/0. Bundled with the earlier reprobuild-Windows dotfiles integration (install + native pwsh hook + direnv retirement).
+- **Commit C (RESOLVED — already-done):** the cache service + fleet config are already on the latest `metacraft-labs/live`; the deployed server matches. Only a cosmetic (nixfmt) formatting commit from `repro-cache/workstation-publisher-nixfmt` remains unmerged, which does not change service behavior. No functional action outstanding.
+- **Commit D (OPEN, verify):** confirm the reprobuild CI publish job runs on a NetBird-connected self-hosted runner (else `POST /publish` to the NetBird-only endpoint silently no-ops; publish is best-effort so CI stays green while populating nothing).
+- **Commit B (SKIPPED unless requested):** workstation publisher keypair as age secret (optional; only needed to publish FROM the workstation).
+
+## M3 (original text) — high-mem-server binary cache
 Configure the repro binary cache on high-mem-server (managed in
 `d:\m\dev\infra`) as a trusted substituter in `~/dotfiles`; configure CI to push
 built binaries to it; make local installs/provisioning fetch from it and be
@@ -235,6 +245,102 @@ auth; propose exact dotfiles + CI changes; nothing secret committed without
 confirmation.
 Acceptance: local provisioning demonstrably fetches from the cache; CI push
 path configured; validated end-to-end.
+
+## M3-E — Per-platform CI publish to the repro binary cache  ·  VERIFIED (2026-07-23)
+Goal: make reprobuild CI publish per-platform `repro build` outputs to the fleet
+binary cache (`https://repro-cache.metacraft-labs.com`) from every platform
+builder — not just Linux — so the cache holds artifacts for all OS×arch targets.
+This is the prerequisite that lets from-source dev-env provisioning (M2c) *fetch*
+prebuilt Windows/ARM tools instead of building them locally.
+
+### Before (publish coverage)
+- `.github/workflows/ci.yml` → job "test" (Linux bare-metal), step "Build
+  codetracer ct (via reprobuild)" already sets `REPRO_PUBLISH_KEY`/`_CERT` from
+  secrets, writes them to `$RUNNER_TEMP`, exports the three `REPRO_BINARY_CACHE_*`
+  env vars, and runs `repro build ct`. This publishes the **linux-x64 ct** build
+  only.
+- `.github/workflows/release.yml` → job "build-release" builds `.#reprobuild.build_apps`
+  on a per-platform matrix (linux, macOS-arm64, windows) but did NOT set any
+  publish env — so those platform builds populated **nothing**.
+
+### Change (what was implemented)
+- New composite action `.github/actions/setup-repro-publish/action.yml` — factors
+  the ci.yml inline publish snippet into ONE reusable, cross-platform step:
+  writes the signing key/cert from the `REPRO_PUBLISH_KEY`/`REPRO_PUBLISH_CERT`
+  secrets to `$RUNNER_TEMP` and exports `REPRO_BINARY_CACHE_URL`/`_KEY_PATH`/`_CERT_PATH`
+  to `$GITHUB_ENV`. It runs a **bash** leg on Linux/macOS and a **pwsh** leg on
+  Windows (selected via `runner.os`), so the identical wiring works on every
+  matrix leg. The pwsh leg writes the PEM bytes with `System.IO.File.WriteAllText`
+  + UTF8-no-BOM so the key/cert parse byte-exact.
+- `release.yml` gains one step, "Configure repro binary-cache publish", before the
+  Bootstrap-and-Build steps (POSIX + Windows). The build steps inherit the
+  exported `REPRO_BINARY_CACHE_*` env vars from `$GITHUB_ENV`, so reprobuild's
+  in-process engine publisher (`mkBinaryCachePublisher`, wired into
+  `BuildEngineConfig.binaryCachePublisher` by `executeBuildTarget`) signs and
+  POSTs each platform's `build_apps` outputs. The publisher is independent of the
+  repro-daemon, so it works under the release build's `--daemon=off`.
+- ci.yml is left as-is (its inline snippet is functionally identical to the
+  composite; not refactored to avoid churn on the delicate ct build step).
+
+### Best-effort / non-fatal (unchanged semantics)
+- Publish is gated on BOTH secrets being present. Fork PRs receive no secrets →
+  the composite exports nothing → the publisher self-generates a local (non-
+  allowlisted) keypair and any POST is rejected best-effort; the build stays
+  green. Matches the existing "key-empty disables" behavior.
+- A publish failure at runtime (e.g. a runner not on the NetBird VPN that fronts
+  the cache) is non-fatal: the engine wraps the publisher in try/except and, on a
+  non-`ok` result, only increments a "repro binary-cache publish failures"
+  stats counter — it does NOT abort the build (`repro_build_engine.nim` ~4368;
+  `BinaryCachePublishResult` doc ~626: "the engine logs the diagnostic into stats
+  but does NOT abort the build").
+
+### Coverage matrix (os × arch → runner → publishes now?)
+| os × arch      | runner label(s)                       | workflow leg                      | runs `repro build`? | publishes now? |
+|----------------|---------------------------------------|-----------------------------------|---------------------|----------------|
+| linux x64      | `eph-linux-x64`                       | release.yml (build_apps) + ci.yml (ct on Linux bare-metal) | yes | **YES** |
+| macos arm64    | `eph-macos-arm64`                     | release.yml (build_apps)          | yes                 | **YES** |
+| windows x64    | `[eph-win-x64, eph-win-arm64]`        | release.yml (build_apps)          | yes                 | **YES** |
+| linux arm64    | — (no runner class)                   | —                                 | no                  | **MISSING runner** |
+| macos x64      | — (no runner class)                   | —                                 | no                  | **MISSING runner** |
+| windows arm64  | — (no dedicated matrix row/runner)    | —                                 | no                  | **MISSING runner** |
+
+Notes on the gaps (no runners fabricated — see task rule 3):
+- **linux-arm64** and **macos-x64** have no `eph-linux-arm64` / `eph-macos-x64`
+  runner class today. Adding one matrix row per target (runner + `arch`) to
+  `release.yml` is all that's needed — the publish step is generic per `runner.os`
+  and activates automatically on the new leg with no change to the composite.
+- **windows-arm64**: `release.yml`'s single windows matrix row declares
+  `runner: [eph-win-x64, eph-win-arm64]` (a labels-AND requirement) with
+  `arch: x86_64`, so it produces exactly one **x86_64** windows artifact. A
+  distinct windows-arm64 build needs its own matrix row (its own runner + an
+  `aarch64` arch tag). This label/arch shape is PRE-EXISTING and left untouched
+  (out of scope: "only the CI publish wiring"). The publish wiring will cover it
+  the moment such a row exists.
+
+### Post-CI verification plan (cannot fully validate without a CI run)
+A push to `dev` does not run `release.yml` (it triggers on `v*` tags /
+`workflow_dispatch`). To exercise the new publish paths:
+1. Trigger `release.yml` via `workflow_dispatch` (or push a `v*` tag). Each matrix
+   leg's "Configure repro binary-cache publish" step logs
+   `repro binary-cache publish ENABLED -> https://repro-cache.metacraft-labs.com`
+   when the secrets are present, and the following Bootstrap-and-Build step's
+   `repro build .#reprobuild.build_apps` fires the engine publisher for the
+   install/stage-copy actions tagged `publishToBinaryCache`.
+2. Expected cache entries after a full run: `build_apps` outputs for
+   **linux-x86_64** (eph-linux-x64), **darwin-aarch64** (eph-macos-arm64), and
+   **windows-x86_64** (windows runner) — plus the existing **linux-x64 ct**
+   entry from ci.yml on `main`/`dev` pushes.
+3. Verify server-side by either (a) checking the cache access log on the server
+   (eli-pc, `127.0.0.1:7878` behind nginx) for `POST /publish` from each runner's
+   allowlisted publisher pubkey, or (b) from a NetBird-connected workstation, run
+   `repro cache lookup <entry-key>` / walk the cache
+   (`tools/binary-cache/walk.sh`) for a just-built per-platform entry.
+4. Caveat: the `eph-*` release runners are NOT guaranteed to be on NetBird. If a
+   given runner cannot reach the NetBird-only `/publish` endpoint, its publish
+   soft-fails (stats counter only) and populates nothing — the build still passes.
+   Confirming actual population therefore also confirms that runner's NetBird
+   connectivity; a green build alone does not. (This is the same open concern
+   tracked as M3 "Commit D".)
 
 ## M4 — Dev-env trust-level policies  ·  TODO
 Configurable trust levels for `repro dev-env`: (a) strict — refuse to execute any
@@ -296,3 +402,41 @@ commands here.
   error (`m1_fixtures_ambiguity`, `m1_fixtures_basename`), and a `clingo.dll`
   load-path environment issue (resolved by putting clingo 5.8.0 on PATH). No
   regression. Committed to dev.
+- 2026-07-23: M3-E IMPLEMENTED. Per-platform CI publish to the repro binary
+  cache. New composite action `.github/actions/setup-repro-publish` (bash + pwsh
+  legs, selected by `runner.os`) factors the ci.yml publish snippet into one
+  reusable step; `release.yml` now runs it before each Bootstrap-and-Build leg so
+  the linux-x64 / macos-arm64 / windows-x64 `build_apps` builds publish their
+  outputs (previously only ci.yml's linux-x64 ct build did). Best-effort
+  unchanged: gated on `REPRO_PUBLISH_KEY`/`_CERT`; a publish failure only bumps a
+  stats counter (`repro_build_engine.nim` ~4368), never fails the build. Missing
+  os×arch runners (linux-arm64, macos-x64, windows-arm64) documented as gaps — no
+  runners fabricated; the wiring activates automatically when a matrix row/runner
+  is added. Both YAML files parse; pwsh/bash legs reviewed shell-correct. Runtime
+  push unverifiable without a `release.yml` run (workflow_dispatch / `v*` tag) —
+  post-CI verification plan recorded in the M3-E section. Left uncommitted for the
+  review agent. M3 "Commit C" reclassified RESOLVED (already-done): cache service
+  is on latest `metacraft-labs/live`; only a cosmetic nixfmt commit remains
+  unmerged.
+- 2026-07-23: M3-E VERIFIED by review agent. Composite action
+  `.github/actions/setup-repro-publish/action.yml` compared byte-for-intent
+  against the proven inline publish snippet in `ci.yml` (~407-427): SAME three env
+  vars (`REPRO_BINARY_CACHE_URL`/`_KEY_PATH`/`_CERT_PATH`), SAME endpoint
+  (`https://repro-cache.metacraft-labs.com`), SAME secrets
+  (`REPRO_PUBLISH_KEY`/`_CERT`), SAME both-secrets-present gate; bash leg uses
+  `printf '%s'` (no trailing newline), pwsh leg writes PEM via
+  `System.IO.File.WriteAllText` + UTF8-no-BOM (no BOM/CRLF), and — unlike ci.yml's
+  single-step `export` — correctly exports via `$GITHUB_ENV` so the separate
+  Bootstrap-and-Build step inherits it. Non-fatal claim spot-checked:
+  `repro_build_engine.nim` 4364-4369 wraps the publisher in try/except and only
+  `addCounterMetric("repro binary-cache publish failures", 1)` on `not res.ok` —
+  never raises. Wiring: the new step sits after checkout / setup-dev-env and
+  before both Bootstrap-and-Build legs, with no `if:` guard so it runs on every
+  matrix leg; the composite selects bash (`runner.os != 'Windows'`) vs pwsh
+  internally. Coverage matrix reconciled against the actual `release.yml` matrix
+  (linux/eph-linux-x64, macos/eph-macos-arm64, windows/[eph-win-x64,eph-win-arm64]
+  arch x86_64) — accurate, gaps not fabricated. Both YAML files parse; `actionlint`
+  v1.7.12 reports only the two PRE-EXISTING self-hosted `runner-label` warnings
+  (lines 21/27), nothing on the new step or composite. Composite schema valid
+  (`runs.using: composite`; each step sets `shell:`). No secret bytes committed
+  (only `${{ secrets.* }}` refs). Committed to dev.
