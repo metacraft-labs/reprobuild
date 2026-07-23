@@ -2213,24 +2213,28 @@ proc aggregateTargetExportTable*(snapshot: ProviderGraphSnapshot):
         candidates: candidates))
 
 proc aggregateResourceGraph*(snapshot: ProviderGraphSnapshot):
-    tuple[resources: seq[ResourceInstance]; groups: seq[StateGroupDef]] =
-  ## Named-Runnable-Edges N2: union the ``reprobuild.resource-graph.v1``
+    tuple[resources: seq[ResourceInstance]; groups: seq[StateGroupDef];
+          providerArtifacts: seq[tuple[typeId: string;
+                                       artifact: ResourceProviderArtifactRef]]] =
+  ## Named-Runnable-Edges N2/N3b: union the ``reprobuild.resource-graph.v1``
   ## metadata nodes each package fragment emitted (see
   ## ``buildPackageFragment``) into one project-scoped resource-lane graph —
   ## the ``stateGroup`` resource subgraph + membership the leased-consumes
-  ## bridge reconciles. A snapshot with no such node (a project that declares
-  ## no resources) yields empty seqs, so a non-consuming ``repro run`` never
-  ## pays for the decode.
+  ## bridge reconciles, PLUS the N3b per-typeId provider-artifact refs the CLI
+  ## opens out-of-tree sessions over. A snapshot with no such node (a project
+  ## that declares no resources) yields empty seqs, so a non-consuming
+  ## ``repro run`` never pays for the decode.
   for fragment in snapshot.fragments:
     for node in fragment.nodes:
       if node.kind == gnkMetadata and
           node.stableName == "reprobuild.resource-graph.v1":
-        let (resources, groups) =
-          decodeResourceGraphPayload(toBytes(node.payload))
-        for inst in resources:
+        let decoded = decodeResourceGraphPayload(toBytes(node.payload))
+        for inst in decoded.resources:
           result.resources.add(inst)
-        for g in groups:
+        for g in decoded.groups:
           result.groups.add(g)
+        for pa in decoded.providerArtifacts:
+          result.providerArtifacts.add(pa)
 
 type
   TargetResolutionKind* = enum
@@ -8839,6 +8843,12 @@ type
       ## the bridge reconciles. Empty when the project declares none.
     groups: seq[StateGroupDef]
       ## Named-Runnable-Edges N2: the ``stateGroup`` membership records.
+    providerArtifacts: seq[tuple[typeId: string;
+                                 artifact: ResourceProviderArtifactRef]]
+      ## Named-Runnable-Edges N3b: the per-typeId provider-artifact refs
+      ## harvested from the resource-graph metadata. The bridge builds the
+      ## out-of-tree session resolver from these. Empty when every member is
+      ## in-tree (the in-process fast path).
 
 proc runEdgeExportEntries(publicCliPath: string):
     seq[TargetExportEntry] =
@@ -8910,9 +8920,10 @@ proc resolveRunTarget(parsed: ParsedReproRun;
               entry.name == parsed.target)):
           result.entry = entry
           break
-      let (resources, groups) = aggregateResourceGraph(info.snapshot)
-      result.resources = resources
-      result.groups = groups
+      let aggregated = aggregateResourceGraph(info.snapshot)
+      result.resources = aggregated.resources
+      result.groups = aggregated.groups
+      result.providerArtifacts = aggregated.providerArtifacts
   finally:
     if autoRunQuota != nil:
       try:
@@ -9096,7 +9107,15 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
         reconcileResourcesViaSession(desired, sessionResolver,
           store = some(store), now = now,
           inProcess = proc (typeId: string): bool =
-            false)  # PROBE3: break routing — send consumer over the session too
+            # Hybrid routing (spec §3.2): the always-linked synthetic run-edge
+            # consumer (registered in THIS process, no provider binary) runs
+            # in-process; the out-of-tree member types the CLI does not link go
+            # over the session. This is the ``isResourceProviderRegistered``
+            # gate the reconcile doc describes — and it lets the production
+            # ``sessionResolver`` map ONLY the real out-of-tree typeIds (the
+            # provider-artifact refs the resource-graph carries), never the
+            # synthetic consumer.
+            isResourceProviderRegistered(typeId))
       else:
         reconcileResources(desired, store = some(store), now = now)
     result.reconciled.add(outcome)
@@ -9104,6 +9123,58 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
     for edge in renewLeasesForConsumed(desired, scope, endpoint):
       if edge.sent and lease.address notin result.daemonSent:
         result.daemonSent.add(lease.address)
+
+# ---------------------------------------------------------------------------
+# Named-Runnable-Edges N3b — auto-build the out-of-tree session resolver.
+#
+# ``reconcileConsumedStateGroups`` takes a ``sessionResolver`` that a hermetic
+# test injects; in production ``repro run`` must construct it itself from the
+# provider-artifact refs the resource-graph metadata carries (N3b). This is the
+# CLI-side twin of the daemon reaper's ``buildLeaseReapTransport``
+# (``lease_registry.nim``): a per-typeId ``ProviderArtifactRef`` registry drives
+# a pooled resolver — one launched session per artifact id, reused across the
+# reconcile pass. The daemon reaper opens sessions from ``leaseReapProviders``;
+# here the same shape is fed from the run-edge's harvested provider artifacts.
+# ---------------------------------------------------------------------------
+
+proc runEdgeSessionEngineHello(): EngineHello =
+  ## The engine handshake ``repro run`` opens out-of-tree member sessions with
+  ## — the CLI analog of ``leaseReapEngineHello``.
+  EngineHello(
+    protocolVersion: ProviderProtocolVersion,
+    engineCapabilities: @["named-run-edge-consumes"],
+    lockSliceId: "run-edge-consumes",
+    canonicalExecutionRoot: getCurrentDir())
+
+proc buildRunEdgeSessionResolver*(
+    providerArtifacts: openArray[tuple[typeId: string;
+                                       artifact: ResourceProviderArtifactRef]];
+    pool: ProviderSessionPool):
+    ResourceSessionResolver =
+  ## Build the ``ResourceSessionResolver`` ``reconcileConsumedStateGroups`` uses
+  ## for an out-of-tree member, from the harvested per-typeId provider artifacts
+  ## — mirroring ``buildLeaseReapTransport``'s ``rtSession`` resolver. Returns
+  ## ``nil`` when no artifact is registered (all-in-tree ⇒ the in-process fast
+  ## path stays; the bridge records a still-out-of-tree member as missing rather
+  ## than crashing). ``pool`` is the caller-owned ``ProviderSessionPool`` (closed
+  ## after the run) so a session per artifact id is launched once and reused.
+  if providerArtifacts.len == 0:
+    return nil
+  var byType = initTable[string, ResourceProviderArtifactRef]()
+  for pa in providerArtifacts:
+    byType[pa.typeId] = pa.artifact
+  result = proc (typeId: string): ProviderHandle =
+    if not byType.hasKey(typeId):
+      raise newException(ValueError,
+        "no provider artifact registered for out-of-tree resource type " &
+        typeId)
+    let a = byType[typeId]
+    let artifact = ProviderArtifactRef(
+      binaryPath: a.binaryPath,
+      providerArtifactId: a.providerArtifactId,
+      workingDir: a.workingDir)
+    pool.openProviderSession(artifact, defaultSessionPolicy(),
+      runEdgeSessionEngineHello())
 
 proc runReproRunCommand(args: openArray[string];
                         publicCliPath: string): int =
@@ -9184,9 +9255,20 @@ proc runReproRunCommand(args: openArray[string];
         try:
           let storeRoot = leaseStoreRootForScope(dlsUser)
           let store = openStateStore(storeRoot)
+          # Named-Runnable-Edges N3b: auto-build the out-of-tree session
+          # resolver from the harvested provider-artifact refs (nil when every
+          # member is in-tree ⇒ the in-process fast path). A pooled resolver so
+          # a session per artifact id is launched once + reused; closed after
+          # the reconcile. No-daemon / no-session-safe: a nil resolver falls
+          # through to the missing-group warning below, never blocking the run.
+          let sessionPool = newProviderSessionPool()
+          defer: (try: sessionPool.closeAll() except CatchableError: discard)
+          let sessionResolver = buildRunEdgeSessionResolver(
+            resolution.providerArtifacts, sessionPool)
           let bridge = reconcileConsumedStateGroups(
             resolution.entry.consumes, resolution.entry.name,
-            resolution.resources, resolution.groups, store)
+            resolution.resources, resolution.groups, store,
+            sessionResolver = sessionResolver)
           for missing in bridge.missingGroups:
             stderr.writeLine("repro run: warning: run-edge '" &
               resolution.entry.name & "' consumes leased state '" & missing &

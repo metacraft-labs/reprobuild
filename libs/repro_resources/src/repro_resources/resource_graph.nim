@@ -21,7 +21,7 @@
 ##     ``reprobuild.resource-graph.v1`` ``gnkMetadata`` node without importing
 ##     ``repro_resources`` (the layering only runs this direction).
 
-import std/options
+import std/[options, tables, algorithm]
 
 import repro_core                        # writeString / readString / writeU32Le …
 from repro_home_generations/pointer import Digest256
@@ -96,16 +96,89 @@ proc registerRunEdgeConsumerProvider*() =
 
 registerRunEdgeConsumerProvider()
 
+# ---------------------------------------------------------------------------
+# Named-Runnable-Edges N3b — per-typeId provider-artifact refs.
+#
+# An out-of-tree ``stateGroup`` member (a vm-harness Incus type the ``repro``
+# CLI does not link) cannot be reconciled in-process; the leased-consumes
+# bridge routes it to a PROVIDER SESSION (N3a). To OPEN that session the CLI
+# must know the provider BINARY that serves the member's ``typeId`` — its
+# content-addressed ``providerArtifactId`` + working dir. That is exactly the
+# ``ProviderArtifactRef`` the engine launches and the daemon reaper's
+# ``leaseReapProviders`` registry holds.
+#
+# The recipe that declares a ``stateGroup`` also composes the provider that
+# owns its member types, so the provider artifact is derivable during recipe
+# eval. A recipe registers each out-of-tree type's artifact here — a plain
+# module global on the SAME eval thread as ``collectedResources`` /
+# ``registeredStateGroups`` — and the harvest hook folds the registry into the
+# ``reprobuild.resource-graph.v1`` metadata node (below), so ``repro run``
+# reads it back WITHOUT re-evaluating the recipe and builds the session
+# resolver ``reconcileConsumedStateGroups`` needs (N3b step 1). The mechanism
+# mirrors the daemon's ``registerLeaseReapProvider`` registry verbatim, on the
+# resources side.
+# ---------------------------------------------------------------------------
+
+type
+  ResourceProviderArtifactRef* = object
+    ## The provider binary that serves an out-of-tree resource ``typeId`` —
+    ## the CLI-side analog of the daemon reaper's ``LeaseReapProviderArtifact``
+    ## and a strict subset of the engine's ``ProviderArtifactRef`` (the three
+    ## fields a session launch needs). Carried in the resource-graph metadata.
+    binaryPath*: string
+    providerArtifactId*: string
+    workingDir*: string
+
+var resourceProviderArtifacts {.threadvar.}: Table[string, ResourceProviderArtifactRef]
+  ## typeId -> the provider artifact serving that out-of-tree type. Populated
+  ## on the eval thread by a recipe that composes the provider; harvested into
+  ## the metadata. A threadvar (like the collect/state-group registries) so the
+  ## single-threaded harvest reads what the same thread registered.
+
+proc registerResourceProviderArtifact*(typeId: string;
+                                       artifact: ResourceProviderArtifactRef) =
+  ## Register (or replace) the provider artifact that serves ``typeId``. A
+  ## recipe composing an out-of-tree resource type calls this during eval so
+  ## the harvest hook can carry the artifact ref to ``repro run``.
+  resourceProviderArtifacts[typeId] = artifact
+
+proc registeredResourceProviderArtifacts*():
+    seq[tuple[typeId: string; artifact: ResourceProviderArtifactRef]] =
+  ## The registered per-typeId provider artifacts, sorted by ``typeId`` for a
+  ## deterministic metadata payload. Empty when the recipe composed none —
+  ## keeping the metadata byte-identical to the pre-N3b (v1) layout.
+  result = @[]
+  for k, v in resourceProviderArtifacts:
+    result.add((typeId: k, artifact: v))
+  result.sort(proc(a, b: (string, ResourceProviderArtifactRef)): int =
+    cmp(a[0], b[0]))
+
+proc clearResourceProviderArtifacts*() =
+  ## Test isolation: drop every registered artifact ref.
+  resourceProviderArtifacts.clear()
+
 const
   ResourceGraphMagic = "RGPH"
-  ResourceGraphVersion = 1'u16
+  ResourceGraphVersionV1 = 1'u16
+    ## Pre-N3b layout: resources + groups only. Still emitted verbatim when no
+    ## provider-artifact ref is registered (byte-identical to N2).
+  ResourceGraphVersionV2 = 2'u16
+    ## N3b: appends the per-typeId provider-artifact section AFTER groups.
 
 proc encodeResourceGraphPayload*(resources: seq[ResourceInstance];
-                                 groups: seq[StateGroupDef]): seq[byte] =
-  ## Frame the desired resource graph + state-group membership. The per-
-  ## resource body reuses the RP protocol codec, so the receiving side needs
-  ## only each attrs typeId's ``registerExtension`` marshaller (never the
-  ## driver) to rehydrate.
+                                 groups: seq[StateGroupDef];
+                                 providerArtifacts: openArray[
+                                   tuple[typeId: string;
+                                         artifact: ResourceProviderArtifactRef]] = @[]):
+    seq[byte] =
+  ## Frame the desired resource graph + state-group membership (+ the N3b
+  ## per-typeId provider-artifact refs, if any). The per-resource body reuses
+  ## the RP protocol codec, so the receiving side needs only each attrs
+  ## typeId's ``registerExtension`` marshaller (never the driver) to rehydrate.
+  ##
+  ## When ``providerArtifacts`` is EMPTY the payload + version are byte-
+  ## identical to the pre-N3b v1 layout (the N2 invariant); a non-empty set
+  ## bumps to v2 and appends the section.
   registerResourceProtocolCodecs()
   var payload: seq[byte] = @[]
   payload.writeU32Le(uint32(resources.len))
@@ -122,17 +195,34 @@ proc encodeResourceGraphPayload*(resources: seq[ResourceInstance];
     payload.writeString(g.sourceFile)
     payload.writeU32Le(uint32(g.sourceLine))
 
+  let version =
+    if providerArtifacts.len == 0: ResourceGraphVersionV1
+    else: ResourceGraphVersionV2
+  if version == ResourceGraphVersionV2:
+    # Additive, non-empty-only: the section is present ONLY in v2 so a graph
+    # with no out-of-tree provider stays byte-identical to N2.
+    payload.writeU32Le(uint32(providerArtifacts.len))
+    for pa in providerArtifacts:
+      payload.writeString(pa.typeId)
+      payload.writeString(pa.artifact.binaryPath)
+      payload.writeString(pa.artifact.providerArtifactId)
+      payload.writeString(pa.artifact.workingDir)
+
   result.add(toBytes(ResourceGraphMagic))
-  result.writeU16Le(ResourceGraphVersion)
+  result.writeU16Le(version)
   result.writeU32Le(uint32(payload.len))
   result.add(payload)
 
 proc decodeResourceGraphPayload*(bytes: openArray[byte]):
-    tuple[resources: seq[ResourceInstance]; groups: seq[StateGroupDef]] =
+    tuple[resources: seq[ResourceInstance]; groups: seq[StateGroupDef];
+          providerArtifacts: seq[tuple[typeId: string;
+                                       artifact: ResourceProviderArtifactRef]]] =
   ## Inverse of ``encodeResourceGraphPayload``. Rehydrates each
   ## ``ResourceInstance`` via the RP codec (hard-errors on an attrs typeId
   ## with no registered marshaller — the applying process must link the
-  ## provider module) and the state-group membership.
+  ## provider module), the state-group membership, and (v2 only) the N3b
+  ## per-typeId provider-artifact refs. A v1 payload yields an empty
+  ## ``providerArtifacts`` seq — the all-in-tree fast path.
   registerResourceProtocolCodecs()
   if bytes.len < 10:
     raise newException(ValueError, "truncated resource-graph envelope")
@@ -142,7 +232,7 @@ proc decodeResourceGraphPayload*(bytes: openArray[byte]):
       raise newException(ValueError, "unknown resource-graph payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version != ResourceGraphVersion:
+  if version != ResourceGraphVersionV1 and version != ResourceGraphVersionV2:
     raise newException(ValueError, "unsupported resource-graph payload version")
   let payloadLen = int(readU32Le(bytes, pos))
   if pos + payloadLen != bytes.len:
@@ -165,6 +255,16 @@ proc decodeResourceGraphPayload*(bytes: openArray[byte]):
     g.sourceFile = readString(bytes, pos)
     g.sourceLine = int(readU32Le(bytes, pos))
     result.groups[i] = g
+  result.providerArtifacts = @[]
+  if version == ResourceGraphVersionV2:
+    let paCount = int(readU32Le(bytes, pos))
+    for i in 0 ..< paCount:
+      let typeId = readString(bytes, pos)
+      var a: ResourceProviderArtifactRef
+      a.binaryPath = readString(bytes, pos)
+      a.providerArtifactId = readString(bytes, pos)
+      a.workingDir = readString(bytes, pos)
+      result.providerArtifacts.add((typeId: typeId, artifact: a))
 
 proc encodeCollectedResourceGraphPayload*(): string {.gcsafe.} =
   ## The harvest-hook body ``buildPackageFragment`` calls: encode the
@@ -183,7 +283,8 @@ proc encodeCollectedResourceGraphPayload*(): string {.gcsafe.} =
     let groups = registeredStateGroups()
     if resources.len == 0 and groups.len == 0:
       return ""
-    fromBytes(encodeResourceGraphPayload(resources, groups))
+    let providerArtifacts = registeredResourceProviderArtifacts()
+    fromBytes(encodeResourceGraphPayload(resources, groups, providerArtifacts))
 
 proc installResourceGraphHarvestHook*() =
   ## Register the encoder onto ``repro_project_dsl``'s harvest hook so the
