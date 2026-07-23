@@ -9014,6 +9014,17 @@ proc buildStateGroupDesired*(lease: RunEdgeLease;
     determinism: rdVolatile,
     consumes: consumes))
 
+proc anyMemberUnlinked(desired: seq[ResourceInstance]): bool =
+  ## True when ANY member of the desired group's graph has a ``typeId`` whose
+  ## driver is NOT registered in this process — i.e. an OUT-OF-TREE resource
+  ## (a vm-harness Incus type the ``repro`` CLI does not link). The synthetic
+  ## run-edge-consumer type is always linked, so a group whose real members are
+  ## all in-tree returns false and keeps the in-process fast path.
+  for inst in desired:
+    if not isResourceProviderRegistered(inst.typeId):
+      return true
+  false
+
 proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
                                    runEdgeName: string;
                                    resources: seq[ResourceInstance];
@@ -9021,7 +9032,8 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
                                    store: StateStore;
                                    scope: DaemonLeaseScope = dlsUser;
                                    endpoint = defaultUserDaemonEndpoint();
-                                   now: Time = getTime()):
+                                   now: Time = getTime();
+                                   sessionResolver: ResourceSessionResolver = nil):
     RunConsumesBridgeResult =
   ## Named-Runnable-Edges N2 — the build↔resource bridge (spec §3.2). For each
   ## ``leased(group, policy)`` the run-edge consumes: materialize-or-reuse the
@@ -9039,24 +9051,31 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
   ## destroys idle groups. Correctness is independent of the daemon: the store
   ## write is the source of truth.
   ##
-  ## Driver resolution (N2 scope / N3 deferral). Materialization here uses the
-  ## IN-PROCESS ``reconcileResources``, which resolves each member's driver via
-  ## ``lookupResourceProvider(typeId)`` — so the ``stateGroup`` members' drivers
-  ## must be LINKED into the process that runs this bridge. That holds for the
-  ## N2 hermetic gates (an in-tree mock provider) and for any in-tree
-  ## ``stateGroup``. It does NOT yet cover N3's real topology, whose members are
-  ## OUT-OF-TREE vm-harness Incus resources whose drivers the ``repro`` CLI does
-  ## not link: reconciling those from the CLI needs the PROVIDER-SESSION path
-  ## (``reconcileResourcesViaSession`` + ``openProviderSession``, the same
-  ## artifact-backed resolver the L5 daemon reaper already uses via
-  ## ``buildLeaseReapTransport``). That session-backed materialize — and
-  ## carrying the provider artifact refs on the resource-graph metadata so the
-  ## CLI can open the session — is deferred to N3, where the topology gate is
-  ## recast onto real Incus. ``reconcileResourcesViaSession`` also does not yet
-  ## take a ``store`` (no L1/L2 reuse/renew over a session), so N3 must extend
-  ## it or route the store write alongside the session reconcile. N2 delivers
-  ## the bridge shape + the lease bookkeeping against a linked driver; N3 swaps
-  ## the in-process reconcile for the session path.
+  ## Driver resolution (N3a). Per consumed group the bridge picks the
+  ## materialize path by whether the group's members are LINKED in this process:
+  ##
+  ##   * ALL members linked (an in-tree ``stateGroup`` / the N2 hermitic mock)
+  ##     — the IN-PROCESS ``reconcileResources(store)`` fast path, byte-identical
+  ##     to N2.
+  ##   * ANY member OUT-OF-TREE (a vm-harness Incus type the ``repro`` CLI does
+  ##     not link) — the PROVIDER-SESSION path
+  ##     ``reconcileResourcesViaSession(store)``, the same artifact-backed
+  ##     resolver the L5 daemon reaper uses via ``buildLeaseReapTransport``. The
+  ##     out-of-tree members' ``observe/digest/apply`` run in the provider over
+  ##     the session (no driver linked here); the synthetic run-edge-consumer
+  ##     type — always linked, lease bookkeeping only, no provider binary — runs
+  ##     in-process via the ``inProcess = isResourceProviderRegistered`` hybrid
+  ##     gate, in the SAME pass so its ``consumes`` edges drive the members'
+  ##     store-backed reuse/renew. The store write is the source of truth in
+  ##     BOTH paths; the daemon renew (L4) is a best-effort notify.
+  ##
+  ## ``sessionResolver`` (non-nil) supplies the launched provider session for an
+  ## out-of-tree ``typeId`` — a hermetic test injects one over a mock provider
+  ## binary; production wires it from the pooled provider artifacts (the same
+  ## discovery the reaper transport uses). When a group has an out-of-tree
+  ## member but no ``sessionResolver`` is available, the member is recorded in
+  ## ``missingGroups`` rather than hard-erroring (the run proceeds without the
+  ## unreconcilable state — a clear diagnostic, not a crash).
   for lease in consumes:
     let desired = buildStateGroupDesired(lease, runEdgeName, resources, groups)
     if desired.len == 0:
@@ -9067,7 +9086,19 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
     # daemon renew (L4). We drive the two steps ourselves rather than
     # ``reconcileLeasedResources`` so we can observe whether the renew reached a
     # daemon (``sent``) without a second redundant renew.
-    let outcome = reconcileResources(desired, store = some(store), now = now)
+    let outcome =
+      if anyMemberUnlinked(desired):
+        # OUT-OF-TREE members: reconcile over the provider session WITH the
+        # store, routing the always-linked synthetic consumer in-process.
+        if sessionResolver == nil:
+          result.missingGroups.add(lease.address)
+          continue
+        reconcileResourcesViaSession(desired, sessionResolver,
+          store = some(store), now = now,
+          inProcess = proc (typeId: string): bool =
+            false)  # PROBE3: break routing — send consumer over the session too
+      else:
+        reconcileResources(desired, store = some(store), now = now)
     result.reconciled.add(outcome)
     result.renewedGroups.add(lease.address)
     for edge in renewLeasesForConsumed(desired, scope, endpoint):

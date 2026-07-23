@@ -7393,6 +7393,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    # Named-Runnable-Edges N3a: a consuming run-edge materialize-or-reuse +
+    # renew a stateGroup whose members are OUT-OF-TREE, over a provider session,
+    # WITH the L1 store (the session+store bridge path).
+    source: "tests/integration/t_run_consumes_session_store_out_of_tree.nim",
+    binary: "build/test-bin/t_run_consumes_session_store_out_of_tree",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim",
     binary: "build/test-bin/t_rp8_lsp_typecheck_and_goto_def",
     defines: @[],

@@ -34,7 +34,7 @@
 ## provider-graph request/response, keeping the registry the single codec of
 ## record.
 
-import std/[options, tables]
+import std/[options, tables, times]
 from std/strutils import parseInt, rfind
 
 import repro_core                    # writeString / readString / writeU32Le …
@@ -47,6 +47,7 @@ import repro_project_dsl             # ExtensionBox / extensionRegistry / marsha
 import repro_resources/instance
 import repro_resources/marshal
 import repro_resources/reconcile
+import repro_resources/state_store
 
 const
   ResourceInstanceTypeId* = "reprobuild.resource-instance.v1"
@@ -326,6 +327,18 @@ type
     ## (RP1/RP2) and reuses one session per key; the RP5b test supplies a
     ## resolver over a single launched provider.
 
+  ResourceInProcessPredicate* = proc (typeId: string): bool {.closure.}
+    ## Optional HYBRID gate for ``reconcileResourcesViaSession``: return true
+    ## for a ``typeId`` whose driver is LINKED in this process, so its leaf ops
+    ## run in-process (``lookupResourceProvider(typeId).driver.*``) instead of
+    ## over a session. This lets ONE reconcile drive a MIXED desired graph —
+    ## out-of-tree members over the session PLUS an in-tree resource (e.g. the
+    ## Named-Runnable-Edges synthetic run-edge-consumer, whose lease-bookkeeping
+    ## driver is always linked and has no provider binary to launch) — in a
+    ## single pass so ``collectLeaseHolders`` sees the consumer's ``consumes``
+    ## edges and renews the session-materialized members. ``nil`` (the default)
+    ## sends every op over the session (the RP5b / L5 behaviour, unchanged).
+
 proc invokeResourceOp(handle: ProviderHandle; typeId, op: string;
                       args: seq[BoxedValue]): EntryPointResult =
   let res = handle.invokeEntryPoint(typeId & "." & op, args)
@@ -360,10 +373,41 @@ proc applyViaSession*(handle: ProviderHandle; inst: ResourceInstance;
       boxResourceAction(action)])
   unboxResourceBinding(res.value)
 
+proc observeLeaf(resolve: ResourceSessionResolver;
+                 inProcess: ResourceInProcessPredicate;
+                 inst: ResourceInstance;
+                 prior: Option[ResourceBinding]): ObservedState =
+  ## Dispatch ``observe`` for ONE instance: in-process when the hybrid gate
+  ## claims the type, else over the resolved session.
+  if inProcess != nil and inProcess(inst.typeId):
+    lookupResourceProvider(inst.typeId).driver.observe(inst, prior)
+  else:
+    observeViaSession(resolve(inst.typeId), inst, prior)
+
+proc digestLeaf(resolve: ResourceSessionResolver;
+                inProcess: ResourceInProcessPredicate;
+                inst: ResourceInstance): Digest256 =
+  if inProcess != nil and inProcess(inst.typeId):
+    lookupResourceProvider(inst.typeId).driver.digest(inst)
+  else:
+    digestViaSession(resolve(inst.typeId), inst)
+
+proc applyLeaf(resolve: ResourceSessionResolver;
+               inProcess: ResourceInProcessPredicate;
+               inst: ResourceInstance; action: ResourceActionKind;
+               observed: ObservedState): ResourceBinding =
+  if inProcess != nil and inProcess(inst.typeId):
+    lookupResourceProvider(inst.typeId).driver.apply(inst, action, observed)
+  else:
+    applyViaSession(resolve(inst.typeId), inst, action, observed)
+
 proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
                                    resolve: ResourceSessionResolver;
                                    recorded: seq[ResourceBinding] = @[];
-                                   options: ReconcileOptions = ReconcileOptions()):
+                                   options: ReconcileOptions = ReconcileOptions();
+                                   store: Option[StateStore] = none(StateStore);
+                                   now: Time = getTime();
+                                   inProcess: ResourceInProcessPredicate = nil):
                                    ReconcileResult =
   ## The PROTOCOL-backed reconcile: the same seven-step algorithm as the
   ## in-process ``reconcileResources``, but each leaf op (observe / digest /
@@ -373,6 +417,27 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
   ## path and the in-process path is the CALLER's: use this when the resource
   ## type is provider-backed (a launched session), and ``reconcileResources``
   ## when the driver is locally registered.
+  ##
+  ## L1/L2 (Named-Runnable-Edges N3a) — store-backed reuse + lease renewal over
+  ## a SESSION. When ``store`` is ``some`` this path mirrors the in-process
+  ## ``reconcileResources(store)`` decisions EXACTLY, only running the leaf ops
+  ## over the session so an OUT-OF-TREE (unlinked) type materializes-or-reuses +
+  ## renews without linking its driver:
+  ##
+  ##   * REUSE-OR-MATERIALIZE: a leased state with a PRESENT, digest-matching
+  ##     store record is already up + current — REUSE it (emit ``rakNoOp``, no
+  ##     ``observe``/``apply`` over the wire), reconstructing the effective
+  ##     binding from the record. Otherwise materialize normally.
+  ##   * RENEW: for a leased state, merge this run's holder deadlines into the
+  ##     record and recompute the reference-counted MAX ``effectiveDeadline``
+  ##     (keep-dominates -> ``none``); persist with the record.
+  ##   * a non-leased resource follows the L1 persist path (a record for every
+  ##     present binding after the reconcile).
+  ##
+  ## When ``store`` is ``none`` (the default) the loop is BYTE-IDENTICAL to the
+  ## pre-N3a behaviour: no store I/O, no record writes — the RP5b tests and the
+  ## L5 reaper's no-store session reconcile are untouched. ``now`` is injectable
+  ## for hermetic tests, exactly as in-process.
   registerResourceProtocolCodecs()
   result.actions = @[]
   result.bindings = @[]
@@ -381,15 +446,56 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
   for b in recorded:
     recordedByAddr[b.address] = b
 
+  let leaseHolders =
+    if store.isSome: collectLeaseHolders(desired)
+    else: initTable[string, seq[LeasedDep]]()
+
   for inst in topoOrder(desired):
-    let handle = resolve(inst.typeId)
     let prior =
       if recordedByAddr.hasKey(inst.address): some(recordedByAddr[inst.address])
       else: none(ResourceBinding)
 
-    let observed = observeViaSession(handle, inst, prior)
-    let desiredDigest = digestViaSession(handle, inst)
-    let action = decide(desiredDigest, observed, prior, options)
+    let desiredDigest = digestLeaf(resolve, inProcess, inst)
+    let renewals =
+      if leaseHolders.hasKey(inst.address): leaseHolders[inst.address]
+      else: @[]
+    let isLeasedState = renewals.len > 0
+
+    # L2 cross-run reuse: a leased state with a PRESENT, digest-matching store
+    # record is already up + current — reuse it WITHOUT observing or re-applying
+    # over the wire (the store record is the reuse index).
+    var reuseRec = none(ResourceStateRecord)
+    if isLeasedState and store.isSome and hasStateRecord(store.get, inst.address):
+      let rec = readStateRecord(store.get, inst.address)
+      if rec.present and rec.digest == desiredDigest:
+        reuseRec = some(rec)
+
+    var effective = none(ResourceBinding)
+    var action: ResourceActionKind
+
+    if reuseRec.isSome:
+      action = rakNoOp
+      let rec = reuseRec.get
+      let binding = ResourceBinding(
+        address: rec.address, typeId: rec.typeId,
+        resourceId: rec.identity, postWriteDigest: rec.digest,
+        present: rec.present)
+      result.bindings.add(binding)
+      recordedByAddr[inst.address] = binding
+      effective = some(binding)
+    else:
+      let observed = observeLeaf(resolve, inProcess, inst, prior)
+      action = decide(desiredDigest, observed, prior, options)
+      case action
+      of rakCreate, rakUpdate, rakReplace, rakDestroy:
+        let binding = applyLeaf(resolve, inProcess, inst, action, observed)
+        result.bindings.add(binding)
+        recordedByAddr[inst.address] = binding
+        effective = some(binding)
+      of rakNoOp, rakAdopt, rakDriftBlocked:
+        if prior.isSome:
+          result.bindings.add(prior.get)
+          effective = prior
 
     result.actions.add(ResourceAction(
       address: inst.address,
@@ -397,11 +503,18 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
       kind: action,
       summary: $action & " " & inst.address & " (" & inst.typeId & ")"))
 
-    case action
-    of rakCreate, rakUpdate, rakReplace, rakDestroy:
-      let binding = applyViaSession(handle, inst, action, observed)
-      result.bindings.add(binding)
-      recordedByAddr[inst.address] = binding
-    of rakNoOp, rakAdopt, rakDriftBlocked:
-      if prior.isSome:
-        result.bindings.add(prior.get)
+    # L1/L2 persist (only with a store — the no-store path is untouched).
+    if store.isSome and effective.isSome and effective.get.present:
+      if isLeasedState:
+        let existingHolders =
+          if hasStateRecord(store.get, inst.address):
+            readStateRecord(store.get, inst.address).holders
+          else:
+            initTable[string, Time]()
+        let merged = mergeHolderDeadlines(existingHolders, renewals, now)
+        writeStateRecord(store.get, inst, effective.get,
+          holders = merged.holders,
+          effectiveDeadline = merged.effective,
+          lastRenewed = now)
+      else:
+        writeStateRecord(store.get, inst, effective.get)

@@ -116,7 +116,7 @@ proc decide*(desiredDigest: Digest256; observed: ObservedState;
     return rakUpdate
   return rakDriftBlocked
 
-proc collectLeaseHolders(desired: seq[ResourceInstance]):
+proc collectLeaseHolders*(desired: seq[ResourceInstance]):
     Table[string, seq[LeasedDep]] =
   ## Group every leased-consumption edge by the STATE address it targets:
   ## `stateAddress -> seq[LeasedDep]` (each carrying its consumerId +
@@ -126,7 +126,7 @@ proc collectLeaseHolders(desired: seq[ResourceInstance]):
     for ld in inst.consumes:
       result.mgetOrPut(ld.address, @[]).add(ld)
 
-proc mergeHolderDeadlines(existing: Table[string, Time];
+proc mergeHolderDeadlines*(existing: Table[string, Time];
                           renewals: seq[LeasedDep]; now: Time):
     tuple[holders: Table[string, Time]; effective: Option[Time];
           hasKeep: bool] =
