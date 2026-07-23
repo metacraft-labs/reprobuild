@@ -186,6 +186,20 @@ when defined(reproProviderMode):
       kind: gnkMetadata,
       stableName: "reprobuild.target-export-table.v2",
       payload: targetExportTablePayload(exportTable)))
+    # Named-Runnable-Edges N2: carry the resource-lane graph (the
+    # ``stateGroup`` resource subgraph + membership) that this package's
+    # ``buildProc()`` collected to the CLI, so the ``repro run`` leased-
+    # consumes bridge can reconcile the group without re-evaluating the
+    # recipe. Emitted only when a ``repro_resources`` encoder is linked AND
+    # it produced a non-empty payload (a package that declares no resources
+    # yields ``""`` ⇒ no node ⇒ byte-identical to a pre-N2 fragment).
+    let resourceGraphPayload = harvestResourceGraphPayload()
+    if resourceGraphPayload.len > 0:
+      result.nodes.add(GraphNode(
+        id: request.namespace & ":metadata:resource-graph",
+        kind: gnkMetadata,
+        stableName: "reprobuild.resource-graph.v1",
+        payload: resourceGraphPayload))
     if includeDefault and defaultAction.len > 0:
       var found = false
       for action in actions:

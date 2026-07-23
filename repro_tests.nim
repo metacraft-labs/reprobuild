@@ -2462,6 +2462,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    # Named-Runnable-Edges N2: the leased-consumes bridge (hermetic, mock
+    # provider) — materialize-then-reuse, immediate-vs-delayed refcount, and
+    # the no-daemon reap.
+    source: "tests/unit/t_run_consumes.nim",
+    binary: "build/test-bin/t_run_consumes",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_solver/tests/t_clingo_smoke.nim",
     binary: "build/test-bin/t_clingo_smoke",
     defines: @[],

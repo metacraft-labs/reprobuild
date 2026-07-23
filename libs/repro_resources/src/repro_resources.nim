@@ -31,6 +31,7 @@ import repro_resources/protocol
 import repro_resources/state_store
 import repro_resources/reaper
 import repro_resources/run_edge
+import repro_resources/resource_graph
 
 export lease
 export instance
@@ -42,3 +43,4 @@ export protocol
 export state_store
 export reaper
 export run_edge
+export resource_graph

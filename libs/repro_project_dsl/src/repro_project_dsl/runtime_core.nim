@@ -1516,6 +1516,34 @@ proc stateGroupMembers*(name: string): seq[string] {.dynOrStatic.} =
       return group.members
   @[]
 
+# Named-Runnable-Edges N2: the resource-lane graph the CLI's leased-consumes
+# bridge reconciles lives ONLY in the recipe-evaluation process (the provider
+# child) — ``collectedResources()`` + ``registeredStateGroups()`` are populated
+# while ``buildProc()`` runs, and the provider fragment the CLI reads back
+# carries only build-lane nodes. To carry the ``stateGroup`` resource subgraph
+# to the CLI, ``buildPackageFragment`` emits it as a ``gnkMetadata`` node — but
+# ``repro_project_dsl`` cannot import ``repro_resources`` (the layering runs the
+# other way, see ``run_edge.nim``). This hook inverts the dependency: at module
+# init ``repro_resources`` registers an encoder that serializes the collected
+# resource graph + state-group membership; the fragment builder invokes it (if
+# set) and attaches the returned payload. Unset (a project that links no
+# ``repro_resources``) ⇒ empty payload ⇒ no node ⇒ byte-identical to pre-N2.
+var resourceGraphHarvestHook: proc(): string {.gcsafe.} = nil
+
+proc setResourceGraphHarvestHook*(hook: proc(): string {.gcsafe.}) =
+  ## Named-Runnable-Edges N2: install the resource-graph encoder
+  ## ``repro_resources`` provides (``encodeCollectedResourceGraphPayload``).
+  ## Idempotent — the last writer wins; ``repro_resources`` sets it once at
+  ## module init.
+  resourceGraphHarvestHook = hook
+
+proc harvestResourceGraphPayload*(): string =
+  ## Named-Runnable-Edges N2: the encoded resource-lane graph payload for the
+  ## current package's ``buildProc()`` evaluation, or ``""`` when no
+  ## ``repro_resources`` encoder is linked / no resources were declared.
+  if resourceGraphHarvestHook == nil: ""
+  else: resourceGraphHarvestHook()
+
 proc recordCommandAction*(id: string; call: PublicCliCall;
                           deps: openArray[string] = [];
                           extraInputs: openArray[string] = [];

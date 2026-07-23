@@ -52,6 +52,7 @@ import repro_local_store
 import repro_cas_store
 import repro_store_daemon
 import repro_daemon_core
+import repro_resources          # Named-Runnable-Edges N2: ResourceInstance / StateStore / decodeResourceGraphPayload / toLeasedDep (the leased-consumes bridge)
 import repro_launch_plan
 import repro_hcr_agent
 import repro_hcr_linkgraph
@@ -2210,6 +2211,26 @@ proc aggregateTargetExportTable*(snapshot: ProviderGraphSnapshot):
       candidates.sort()
       result.ambiguities.add(TargetExportAmbiguity(name: name,
         candidates: candidates))
+
+proc aggregateResourceGraph*(snapshot: ProviderGraphSnapshot):
+    tuple[resources: seq[ResourceInstance]; groups: seq[StateGroupDef]] =
+  ## Named-Runnable-Edges N2: union the ``reprobuild.resource-graph.v1``
+  ## metadata nodes each package fragment emitted (see
+  ## ``buildPackageFragment``) into one project-scoped resource-lane graph —
+  ## the ``stateGroup`` resource subgraph + membership the leased-consumes
+  ## bridge reconciles. A snapshot with no such node (a project that declares
+  ## no resources) yields empty seqs, so a non-consuming ``repro run`` never
+  ## pays for the decode.
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkMetadata and
+          node.stableName == "reprobuild.resource-graph.v1":
+        let (resources, groups) =
+          decodeResourceGraphPayload(toBytes(node.payload))
+        for inst in resources:
+          result.resources.add(inst)
+        for g in groups:
+          result.groups.add(g)
 
 type
   TargetResolutionKind* = enum
@@ -8807,6 +8828,17 @@ type
     record: TargetResolutionRecord
     entryKind: TargetExportKind
     hasEntry: bool
+    entry: TargetExportEntry
+      ## Named-Runnable-Edges N2: the resolved ``tekRunEdge`` row itself, so
+      ## the leased-consumes bridge can read its ``consumes`` list without a
+      ## second table lookup. Meaningful only when ``hasEntry`` and
+      ## ``entryKind == tekRunEdge``.
+    resources: seq[ResourceInstance]
+      ## Named-Runnable-Edges N2: the project-scoped resource-lane graph
+      ## (``aggregateResourceGraph``) — the ``stateGroup`` member resources
+      ## the bridge reconciles. Empty when the project declares none.
+    groups: seq[StateGroupDef]
+      ## Named-Runnable-Edges N2: the ``stateGroup`` membership records.
 
 proc runEdgeExportEntries(publicCliPath: string):
     seq[TargetExportEntry] =
@@ -8863,6 +8895,24 @@ proc resolveRunTarget(parsed: ParsedReproRun;
     if result.record.kind == trkResolved:
       result.entryKind = result.record.targetKind
       result.hasEntry = true
+      # Named-Runnable-Edges N2: capture the resolved run-edge row (its
+      # ``consumes``) + the project's resource-lane graph so the leased-
+      # consumes bridge can reconcile the consumed ``stateGroup`` without a
+      # second inspection pass. Match on the resolved (name, actionId): a
+      # run-edge row is keyed by both, so this pins the exact row even when a
+      # name is shared across kinds.
+      for entry in info.targetExportTable.entries:
+        if entry.kind == tekRunEdge and
+            entry.actionId == result.record.actionId and
+            (entry.name == parsed.target or
+             (parsed.qualifier == rtqPackage and
+              entry.owningPackage == parsed.qualifierPackage and
+              entry.name == parsed.target)):
+          result.entry = entry
+          break
+      let (resources, groups) = aggregateResourceGraph(info.snapshot)
+      result.resources = resources
+      result.groups = groups
   finally:
     if autoRunQuota != nil:
       try:
@@ -8890,6 +8940,139 @@ proc emitMergedRunListing(tasks: seq[DevEnvTaskSummary];
     echo "  [task]     ", task.name, desc
   for entry in runEdges:
     echo "  [run-edge] ", entry.name
+
+type
+  RunConsumesBridgeResult* = object
+    ## Named-Runnable-Edges N2: the outcome of reconciling a consuming run-
+    ## edge's leased ``stateGroup``s before the exec. Purely observational —
+    ## the store write is the correctness source of truth; the daemon renew
+    ## is best-effort. Surfaced for the hermetic bridge tests + a diagnostic.
+    reconciled*: seq[ReconcileResult]     ## one per consumed group, in order
+    renewedGroups*: seq[string]           ## group addresses a renew was forwarded for
+    missingGroups*: seq[string]           ## consumed names with no ``stateGroup`` / no members
+    daemonSent*: seq[string]              ## group addresses whose renew reached a daemon
+
+proc buildStateGroupDesired*(lease: RunEdgeLease;
+                             runEdgeName: string;
+                             resources: seq[ResourceInstance];
+                             groups: seq[StateGroupDef]):
+    seq[ResourceInstance] =
+  ## Named-Runnable-Edges N2: assemble the desired graph the reconciler drives
+  ## for ONE consumed ``leased(group, policy)`` edge:
+  ##
+  ##   * the group's member ``ResourceInstance``s (the leased states to
+  ##     materialize-or-reuse), resolved from the project resource graph by the
+  ##     ``stateGroup`` membership; plus
+  ##   * a synthetic CONSUMER instance whose ``consumes`` targets every member
+  ##     under ``runEdgeName`` (the run-edge's stable name is the holder id, per
+  ##     spec §7) and the lease's policy — the edge the store-backed reconcile
+  ##     renews. This mirrors the L3 reaper tests' materialize helper (a state +
+  ##     a separate consumer that ``consumes`` it), reusing the landed lease
+  ##     renewal path verbatim.
+  ##
+  ## Returns an empty seq when the group is unknown / has no members present in
+  ## the graph, so a consuming edge whose group is not declared runs with no
+  ## reconcile (the N1 no-lease path) rather than erroring.
+  var members: seq[string] = @[]
+  for g in groups:
+    if g.name == lease.address:
+      members = g.members
+      break
+  # Fallback: a leased address that names a resource directly (not a group)
+  # still reconciles as a one-member group.
+  if members.len == 0:
+    for inst in resources:
+      if inst.address == lease.address:
+        members = @[lease.address]
+        break
+  if members.len == 0:
+    return @[]
+  var byAddr = initTable[string, ResourceInstance]()
+  for inst in resources:
+    byAddr[inst.address] = inst
+  var present: seq[string] = @[]
+  for m in members:
+    if byAddr.hasKey(m):
+      result.add(byAddr[m])
+      present.add(m)
+  if present.len == 0:
+    return @[]
+  # The synthetic consumer: one leased edge per member, all held by the run-
+  # edge's stable name under the declared policy. The consumer resource itself
+  # carries a never-reap (keep) record and is skipped by the reaper.
+  let policy = toLeasedDep(lease).policy
+  var consumes: seq[LeasedDep] = @[]
+  for m in present:
+    consumes.add(leased(m, runEdgeName, policy))
+  result.add(ResourceInstance(
+    typeId: RunEdgeConsumerTypeId,
+    address: runEdgeName & "::consumes::" & lease.address,
+    attrs: TypedExtensionBox[RunEdgeConsumerAttrs](
+      typeId: RunEdgeConsumerTypeId,
+      val: RunEdgeConsumerAttrs(runEdge: runEdgeName, group: lease.address)),
+    dependsOn: @[],
+    determinism: rdVolatile,
+    consumes: consumes))
+
+proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
+                                   runEdgeName: string;
+                                   resources: seq[ResourceInstance];
+                                   groups: seq[StateGroupDef];
+                                   store: StateStore;
+                                   scope: DaemonLeaseScope = dlsUser;
+                                   endpoint = defaultUserDaemonEndpoint();
+                                   now: Time = getTime()):
+    RunConsumesBridgeResult =
+  ## Named-Runnable-Edges N2 — the build↔resource bridge (spec §3.2). For each
+  ## ``leased(group, policy)`` the run-edge consumes: materialize-or-reuse the
+  ## group against the L1 store (``reconcileResources`` — first run stands it
+  ## up; a re-run whose digest matches REUSES it, no re-apply) and renew the
+  ## lease to the scope's daemon (``renewLeaseBestEffort`` via
+  ## ``reconcileLeasedResources``; no-daemon-safe, never raises). The run-edge's
+  ## stable name is the ``consumerId``. ``immediate`` / ``delayed(ttl)`` /
+  ## ``keep`` are honored verbatim by the landed reference-counted MAX /
+  ## keep-dominates fold — this bridge only assembles the desired graph and
+  ## delegates.
+  ##
+  ## Reaping is NOT done here — the L4 daemon wall-clock tick / L5 provider
+  ## session (or ``repro reap`` / the reconcile-start opportunistic reap)
+  ## destroys idle groups. Correctness is independent of the daemon: the store
+  ## write is the source of truth.
+  ##
+  ## Driver resolution (N2 scope / N3 deferral). Materialization here uses the
+  ## IN-PROCESS ``reconcileResources``, which resolves each member's driver via
+  ## ``lookupResourceProvider(typeId)`` — so the ``stateGroup`` members' drivers
+  ## must be LINKED into the process that runs this bridge. That holds for the
+  ## N2 hermetic gates (an in-tree mock provider) and for any in-tree
+  ## ``stateGroup``. It does NOT yet cover N3's real topology, whose members are
+  ## OUT-OF-TREE vm-harness Incus resources whose drivers the ``repro`` CLI does
+  ## not link: reconciling those from the CLI needs the PROVIDER-SESSION path
+  ## (``reconcileResourcesViaSession`` + ``openProviderSession``, the same
+  ## artifact-backed resolver the L5 daemon reaper already uses via
+  ## ``buildLeaseReapTransport``). That session-backed materialize — and
+  ## carrying the provider artifact refs on the resource-graph metadata so the
+  ## CLI can open the session — is deferred to N3, where the topology gate is
+  ## recast onto real Incus. ``reconcileResourcesViaSession`` also does not yet
+  ## take a ``store`` (no L1/L2 reuse/renew over a session), so N3 must extend
+  ## it or route the store write alongside the session reconcile. N2 delivers
+  ## the bridge shape + the lease bookkeeping against a linked driver; N3 swaps
+  ## the in-process reconcile for the session path.
+  for lease in consumes:
+    let desired = buildStateGroupDesired(lease, runEdgeName, resources, groups)
+    if desired.len == 0:
+      result.missingGroups.add(lease.address)
+      continue
+    # Materialize-or-reuse against the L1 store (the correctness source of
+    # truth — L2 reuse-on-digest-match / renew), then forward a best-effort
+    # daemon renew (L4). We drive the two steps ourselves rather than
+    # ``reconcileLeasedResources`` so we can observe whether the renew reached a
+    # daemon (``sent``) without a second redundant renew.
+    let outcome = reconcileResources(desired, store = some(store), now = now)
+    result.reconciled.add(outcome)
+    result.renewedGroups.add(lease.address)
+    for edge in renewLeasesForConsumed(desired, scope, endpoint):
+      if edge.sent and lease.address notin result.daemonSent:
+        result.daemonSent.add(lease.address)
 
 proc runReproRunCommand(args: openArray[string];
                         publicCliPath: string): int =
@@ -8949,14 +9132,42 @@ proc runReproRunCommand(args: openArray[string];
   # what ``repro build <run-edge-name>`` already does. Trailing ``-- args``
   # are forwarded to ``repro build`` after ``--``.
   #
-  # Note (N1 scope): a run-edge that declares ``consumes`` (leased state)
-  # STILL runs here — the ``consumes`` list is simply ignored for now; the
-  # reconcile/renew lease bridge is N2.
+  # Named-Runnable-Edges N2: a run-edge that declares ``consumes`` (leased
+  # ``stateGroup``s) now RECONCILES + RENEWS them before the exec (spec §3.2) —
+  # see the bridge below.
   let resolution = resolveRunTarget(parsed, publicCliPath)
   case resolution.record.kind
   of trkResolved:
     if resolution.entryKind == tekRunEdge or
         resolution.entryKind == tekCollection:
+      # Named-Runnable-Edges N2 — the leased-consumes bridge (spec §3.2). BEFORE
+      # delegating to the build engine, materialize-or-reuse each consumed
+      # ``stateGroup`` against the L1 store and renew the lease to the daemon
+      # (no-daemon-safe). The run-edge's stable name is the ``consumerId``. A
+      # non-consuming edge (empty ``consumes``) skips this entirely and runs
+      # exactly as N1. The reconcile NEVER blocks the run on a daemon: the store
+      # write is the correctness source of truth (L2), the daemon renew is a
+      # best-effort notification (L4), and idle reaping is the daemon's job.
+      if resolution.hasEntry and resolution.entry.kind == tekRunEdge and
+          resolution.entry.consumes.len > 0:
+        try:
+          let storeRoot = leaseStoreRootForScope(dlsUser)
+          let store = openStateStore(storeRoot)
+          let bridge = reconcileConsumedStateGroups(
+            resolution.entry.consumes, resolution.entry.name,
+            resolution.resources, resolution.groups, store)
+          for missing in bridge.missingGroups:
+            stderr.writeLine("repro run: warning: run-edge '" &
+              resolution.entry.name & "' consumes leased state '" & missing &
+              "' but no matching stateGroup / resource was found; running " &
+              "without it.")
+        except CatchableError as bridgeErr:
+          # A reconcile failure must not silently swallow the run in a way that
+          # hides the cause; surface it but let the edge run (the leased state
+          # is an optimization, and N1's no-lease path still executes).
+          stderr.writeLine("repro run: warning: leased-state reconcile for '" &
+            resolution.entry.name & "' failed: " & bridgeErr.msg &
+            " — running without it.")
       # Run-edge (or a collection of run-edges) — delegate to the build
       # engine, which executes it. Collections mirror ``repro build test``.
       var buildArgs = @[parsed.rawTarget]
