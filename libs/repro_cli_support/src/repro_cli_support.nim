@@ -8211,9 +8211,28 @@ type
     printFormat: DevEnvPrintFormat
     shellPath: string
 
+  RunTargetQualifier = enum
+    ## Named-Runnable-Edges N1: how the user spelled the ``repro run``
+    ## positional, so resolution can honour an explicit disambiguation
+    ## prefix (spec §5 / §7).
+    rtqNone       ## bare ``<name>`` — resolve task-first, then run-edge.
+    rtqTask       ## ``task:<name>`` — force the dev-env-task tier only.
+    rtqPackage    ## ``<pkg>:<name>`` — force the export-table (run-edge)
+                  ## tier, qualified to owning package ``<pkg>``.
+
   ParsedReproRun = object
     selection: DevEnvCliSelection
     target: string
+      ## Named-Runnable-Edges N1: the bare target name with any
+      ## ``task:`` / ``<pkg>:`` qualifier stripped.
+    rawTarget: string
+      ## Named-Runnable-Edges N1: the original positional as typed
+      ## (qualifier included) — the selector delegated to
+      ## ``runBuildCommand`` for a ``<pkg>:<name>`` run-edge hit and the
+      ## name echoed in diagnostics.
+    qualifier: RunTargetQualifier
+    qualifierPackage: string
+      ## Named-Runnable-Edges N1: the ``<pkg>`` of an ``rtqPackage`` form.
     choose: bool
     forwardedArgs: seq[string]
 
@@ -8458,20 +8477,36 @@ proc parseReproRunArgs(args: openArray[string]): ParsedReproRun =
       raise newException(ValueError, "unexpected run argument before --: " & arg)
     inc i
 
+  # Named-Runnable-Edges N1: the dev-env edge is always computed against
+  # the current project (``.``) — a ``<pkg>:<name>`` qualifier disambiguates
+  # the export-table resolution, NOT the project anchor, so it must not be
+  # fed to ``moduleForTarget`` (which would treat ``<pkg>`` as a sibling
+  # checkout path and fail). The raw positional is kept verbatim for the
+  # run-edge delegation + diagnostics.
+  selection.selector = "."
+  result.rawTarget = rawTarget
   if rawTarget.len > 0:
-    if rawTarget.contains('/') or rawTarget.contains('\\') or rawTarget.startsWith("."):
-      selection.selector = "."
+    if rawTarget.contains('/') or rawTarget.contains('\\') or
+        rawTarget.startsWith("."):
+      # A path/fragment positional stays as-is (dev-env task fallback keeps
+      # today's behaviour); no qualifier applies.
       result.target = rawTarget
+      result.qualifier = rtqNone
     else:
       let colonIdx = rawTarget.find(':')
-      if colonIdx >= 0:
-        selection.selector = rawTarget[0 ..< colonIdx]
-        result.target = rawTarget[colonIdx + 1 .. ^1]
+      if colonIdx > 0 and colonIdx < rawTarget.high:
+        let lhs = rawTarget[0 ..< colonIdx]
+        let rhs = rawTarget[colonIdx + 1 .. ^1]
+        if lhs == "task":
+          result.qualifier = rtqTask
+          result.target = rhs
+        else:
+          result.qualifier = rtqPackage
+          result.qualifierPackage = lhs
+          result.target = rhs
       else:
-        selection.selector = "."
+        result.qualifier = rtqNone
         result.target = rawTarget
-  else:
-    selection.selector = "."
 
   selection.resolveDevEnvSelection()
   result.selection = selection
@@ -8686,6 +8721,176 @@ proc runTaskCommand(artifact: DevEnvArtifact; artifactPath: string;
     result = process.waitForExit()
     process.close()
 
+type
+  GraphOutputFormat = enum
+    gofText
+    gofJson
+    gofDot
+
+  BuildGraphInspection = object
+    ## Named-Targets M5 build-graph inspection record. Defined here (ahead
+    ## of ``prepareBuildGraphInspection`` and the graph/build surfaces that
+    ## consume it) so the Named-Runnable-Edges N1 ``repro run`` resolver —
+    ## which sits earlier in the file — can forward-declare
+    ## ``prepareBuildGraphInspection`` with this return type in scope.
+    target: string
+    modulePath: string
+    projectRoot: string
+    outDir: string
+    interfacePath: string
+    toolProvisioning: ToolProvisioningMode
+    toolIdentityPath: string
+    toolInspectionPath: string
+    providerBinaryPath: string
+    providerCompileArtifactPath: string
+    providerArtifactId: string
+    providerGraphSnapshotPath: string
+    providerInvocations: int
+    providerCompileCacheHit: bool
+    providerGraphCacheHit: bool
+    loweredGraphCachePath: string
+    loweredGraphCacheHit: bool
+    selectedActionId: string
+    defaultActionId: string
+    actions: seq[BuildAction]
+    pools: seq[BuildPool]
+    targetExportTable: TargetExportTable
+      ## Named-Targets M5: cross-fragment aggregate of every package's
+      ## ``reprobuild.target-export-table.v1`` metadata node. Populated by
+      ## ``prepareBuildGraphInspection`` and used by ``runGraphCommand``
+      ## / ``runWhyCommand`` / ``--list-targets`` so the inspection
+      ## surface honours implicit / explicit target names without a
+      ## second pass over the snapshot.
+    explicitTargetNames: seq[string]
+      ## Named-Targets M5: every explicit ``target "name", handle`` label
+      ## visible in the lowered graph, captured before lowering so
+      ## ``resolveTargetExportSelector`` can pass it through.
+    snapshot: ProviderGraphSnapshot
+      ## Workspace-Manifest-Optional MO-6: the (possibly extension-merged)
+      ## provider-graph snapshot this inspection lowered. Exposed so
+      ## ``mergeProjectExtensions`` can reuse this proc to compile + evaluate
+      ## a discovered ``projectExtension`` recipe and harvest its fragments.
+
+# Named-Runnable-Edges N1 forward declarations: ``repro run`` resolves a
+# named run-edge/build target through the SAME target-export-table
+# resolver ``repro build`` uses (``prepareBuildGraphInspection`` +
+# ``resolveTargetExportSelector``) and delegates its execution to
+# ``runBuildCommand`` (which materializes the closure and, for a run-edge,
+# runs it — exactly as ``repro build <run-edge-name>`` does today). The
+# definitions all live further down the file; forward-declare them here so
+# the ``run`` command can call them (mirroring the M5 ``runListTargetsCommand``
+# forward declaration at the top of the build surface).
+proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
+                                 publicCliPath: string;
+                                 selectDefaultAction = false;
+                                 workRoot = "";
+                                 forceRefresh = false;
+                                 mergeExtensions = true): BuildGraphInspection
+
+proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
+                               extraPools: openArray[BuildPool] = []):
+    owned(Process)
+
+proc runBuildCommand(args: openArray[string]; publicCliPath: string;
+                     forceDirect = false;
+                     daemonHosted = false;
+                     eventSink: BuildCommandEventSink = nil;
+                     cancelCheck: BuildCancelCallback = nil): int
+
+type
+  RunTargetResolution = object
+    ## Named-Runnable-Edges N1: the outcome of resolving a ``repro run``
+    ## positional against the project's target-export table (the second
+    ## resolution tier, after dev-env tasks). Mirrors the ``repro build``
+    ## resolver's ``trkResolved/trkAmbiguous/trkUnknown`` outcomes plus the
+    ## run-edge-vs-artifact distinction the ``run`` verb needs.
+    record: TargetResolutionRecord
+    entryKind: TargetExportKind
+    hasEntry: bool
+
+proc runEdgeExportEntries(publicCliPath: string):
+    seq[TargetExportEntry] =
+  ## Named-Runnable-Edges N1: the project's named run-edge rows
+  ## (``tekRunEdge``), sorted by ``(package, name)`` for deterministic
+  ## listing. Best-effort: a project with no recipe / no export table
+  ## yields an empty seq so ``repro run`` listing degrades to the
+  ## dev-env-task-only view rather than erroring.
+  var autoRunQuota = startAutoRunQuotaIfNeeded(false)
+  try:
+    let info =
+      try:
+        prepareBuildGraphInspection(".", tpmPathOnly, publicCliPath,
+          selectDefaultAction = false)
+      except CatchableError:
+        return @[]
+    for entry in info.targetExportTable.entries:
+      if entry.kind == tekRunEdge:
+        result.add(entry)
+    result.sort(proc(a, b: TargetExportEntry): int =
+      let pkgCmp = cmp(a.owningPackage, b.owningPackage)
+      if pkgCmp != 0: pkgCmp else: cmp(a.name, b.name))
+  finally:
+    if autoRunQuota != nil:
+      try:
+        autoRunQuota.terminate()
+        discard autoRunQuota.waitForExit()
+        autoRunQuota.close()
+      except CatchableError:
+        discard
+
+proc resolveRunTarget(parsed: ParsedReproRun;
+                      publicCliPath: string): RunTargetResolution =
+  ## Named-Runnable-Edges N1: resolve the ``repro run`` positional against
+  ## the target-export table the same way ``repro build`` /
+  ## ``runGraphCommand`` do (``resolveTargetExportSelector`` over the
+  ## aggregated table + the lowered graph's action ids + explicit target
+  ## names). ``selector`` is the qualified form for a ``<pkg>:<name>``
+  ## invocation so cross-package disambiguation reuses the M5 path.
+  let selector =
+    if parsed.qualifier == rtqPackage:
+      parsed.qualifierPackage & ":" & parsed.target
+    else:
+      parsed.target
+  var autoRunQuota = startAutoRunQuotaIfNeeded(false)
+  try:
+    let info = prepareBuildGraphInspection(".", tpmPathOnly, publicCliPath,
+      selectDefaultAction = false)
+    var actionIds: seq[string] = @[]
+    for action in info.actions:
+      actionIds.add(action.id)
+    result.record = resolveTargetExportSelector(info.targetExportTable,
+      actionIds, info.explicitTargetNames, selector)
+    if result.record.kind == trkResolved:
+      result.entryKind = result.record.targetKind
+      result.hasEntry = true
+  finally:
+    if autoRunQuota != nil:
+      try:
+        autoRunQuota.terminate()
+        discard autoRunQuota.waitForExit()
+        autoRunQuota.close()
+      except CatchableError:
+        discard
+
+proc emitMergedRunListing(tasks: seq[DevEnvTaskSummary];
+                          runEdges: seq[TargetExportEntry]) =
+  ## Named-Runnable-Edges N1: the merged ``repro run`` / ``repro run
+  ## --choose`` / ``repro tasks`` listing — dev-env tasks AND named
+  ## run-edges, each labelled by source (``[task]`` / ``[run-edge]``), in
+  ## a deterministic order (tasks then run-edges, each already sorted by
+  ## name). Spec §5.
+  if tasks.len == 0 and runEdges.len == 0:
+    echo "No tasks or run-edges declared in this project."
+    return
+  echo "Available targets:"
+  var sortedTasks = tasks
+  sortedTasks.sort(proc(a, b: DevEnvTaskSummary): int = cmp(a.name, b.name))
+  for task in sortedTasks:
+    let desc = if task.description.len > 0: "  - " & task.description else: ""
+    echo "  [task]     ", task.name, desc
+  for entry in runEdges:
+    echo "  [run-edge] ", entry.name
+
 proc runReproRunCommand(args: openArray[string];
                         publicCliPath: string): int =
   let parsed = parseReproRunArgs(args)
@@ -8695,29 +8900,98 @@ proc runReproRunCommand(args: openArray[string];
   if emitDevEnvDiagnostics(artifact):
     return 1
 
+  # Named-Runnable-Edges N1: bare ``repro run`` / ``--choose`` lists BOTH
+  # dev-env tasks and named run-edges, source-labelled (spec §5). The
+  # run-edge rows come from the same target-export table ``repro build``
+  # resolves against.
   if parsed.target.len == 0 or parsed.choose:
-    if artifact.tasks.len == 0:
-      echo "No tasks declared in this project."
-      return 1
-    echo "Available tasks:"
-    for task in artifact.tasks:
-      let desc = if task.description.len > 0: "  - " & task.description else: ""
-      echo "  ", task.name, desc
+    emitMergedRunListing(artifact.tasks, runEdgeExportEntries(publicCliPath))
     return 0
 
+  # Tier 1 — dev-env task (today's behaviour, unchanged). A ``task:<name>``
+  # qualifier forces this tier only; a ``<pkg>:<name>`` qualifier skips it
+  # (it explicitly names an export-table row).
   var matchingTask: Option[DevEnvTaskSummary]
-  for task in artifact.tasks:
-    if task.name == parsed.target:
-      matchingTask = some(task)
-      break
+  if parsed.qualifier != rtqPackage:
+    for task in artifact.tasks:
+      if task.name == parsed.target:
+        matchingTask = some(task)
+        break
 
   if matchingTask.isSome:
+    # Named-Runnable-Edges N1 (spec §7): a bare name colliding between a
+    # dev-env task and a run-edge prefers the task, with a warning naming
+    # the qualifier to disambiguate. Only warn for the bare form — an
+    # explicit ``task:`` qualifier is already unambiguous.
+    if parsed.qualifier == rtqNone:
+      let runResolution = resolveRunTarget(parsed, publicCliPath)
+      if runResolution.hasEntry and runResolution.entryKind == tekRunEdge:
+        stderr.writeLine("repro run: warning: '" & parsed.target &
+          "' names both a dev-env task and a run-edge; running the task. " &
+          "Use 'task:" & parsed.target & "' or '<package>:" & parsed.target &
+          "' to disambiguate.")
     let task = matchingTask.get()
-    return runTaskCommand(artifact, edge.artifactPath, task, parsed.forwardedArgs, parsed.selection.projectRoot)
+    return runTaskCommand(artifact, edge.artifactPath, task,
+      parsed.forwardedArgs, parsed.selection.projectRoot)
 
-  # Fallback to build output name if no task matches
-  stderr.writeLine("Error: task '" & parsed.target & "' is not declared in the project.")
-  1
+  if parsed.qualifier == rtqTask:
+    # ``task:<name>`` explicitly requested the task tier, but no task
+    # matched — do NOT silently fall through to a run-edge.
+    stderr.writeLine("repro run: error: no dev-env task named '" &
+      parsed.target & "'.")
+    return 2
+
+  # Tier 2 — named run-edge / build target in the project's target-export
+  # table (the same resolver ``repro build`` uses). On a run-edge hit,
+  # delegate execution to ``runBuildCommand`` with an explicit name
+  # selector: the build engine materializes the edge's dependency closure
+  # and, because the edge's action is an execution, RUNS it — precisely
+  # what ``repro build <run-edge-name>`` already does. Trailing ``-- args``
+  # are forwarded to ``repro build`` after ``--``.
+  #
+  # Note (N1 scope): a run-edge that declares ``consumes`` (leased state)
+  # STILL runs here — the ``consumes`` list is simply ignored for now; the
+  # reconcile/renew lease bridge is N2.
+  let resolution = resolveRunTarget(parsed, publicCliPath)
+  case resolution.record.kind
+  of trkResolved:
+    if resolution.entryKind == tekRunEdge or
+        resolution.entryKind == tekCollection:
+      # Run-edge (or a collection of run-edges) — delegate to the build
+      # engine, which executes it. Collections mirror ``repro build test``.
+      var buildArgs = @[parsed.rawTarget]
+      if parsed.forwardedArgs.len > 0:
+        buildArgs.add("--")
+        for a in parsed.forwardedArgs:
+          buildArgs.add(a)
+      return runBuildCommand(buildArgs, publicCliPath)
+    else:
+      # Named-Runnable-Edges N1 (spec §3.1 / §7 — conservative default): a
+      # plain artifact edge that is not a run-edge is NOT run by ``repro
+      # run``. Point the user at ``repro build`` rather than guessing which
+      # output to execute. (Single-executable-output auto-run is deferred.)
+      stderr.writeLine("repro run: error: '" & parsed.rawTarget &
+        "' is a build target, not a runnable edge; build it with " &
+        "'repro build " & parsed.rawTarget & "'.")
+      return 2
+  of trkAmbiguous:
+    stderr.writeLine("repro run: error: target_ambiguous: '" &
+      parsed.rawTarget & "' is exported by multiple packages:")
+    for cand in resolution.record.candidates:
+      stderr.writeLine("  " & cand)
+    stderr.writeLine("repro run: hint: re-run with the qualified " &
+      "<package>:<name> form")
+    return 2
+  of trkUnknown:
+    # Exit-code + diagnostic parity with ``repro build``'s
+    # ``unknown_target`` (spec deliverable). Reuse the shared renderer so
+    # the two verbs cannot drift.
+    var err = newException(BuildTargetUnknownError,
+      "unknown run target: " & parsed.rawTarget)
+    err.selectorName = parsed.rawTarget
+    err.suggestions = resolution.record.suggestions
+    stderr.write(renderUnknownTargetDiagnostic(err[]))
+    return 2
 
 proc runReproTasksCommand(args: openArray[string];
                           publicCliPath: string): int =
@@ -8728,13 +9002,9 @@ proc runReproTasksCommand(args: openArray[string];
   if emitDevEnvDiagnostics(artifact):
     return 1
 
-  if artifact.tasks.len == 0:
-    echo "No tasks declared in this project."
-  else:
-    echo "Available tasks:"
-    for task in artifact.tasks:
-      let desc = if task.description.len > 0: "  - " & task.description else: ""
-      echo "  ", task.name, desc
+  # Named-Runnable-Edges N1: ``repro tasks`` lists dev-env tasks AND named
+  # run-edges, source-labelled (spec §5), matching ``repro run --choose``.
+  emitMergedRunListing(artifact.tasks, runEdgeExportEntries(publicCliPath))
   0
 
 proc runReproExecCommand(args: openArray[string];
@@ -14441,51 +14711,6 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       stderr.writeLine("repro build: daemon unavailable; falling back to " &
         "direct mode: " & err.msg)
     return runDirectBuild()
-
-type
-  GraphOutputFormat = enum
-    gofText
-    gofJson
-    gofDot
-
-  BuildGraphInspection = object
-    target: string
-    modulePath: string
-    projectRoot: string
-    outDir: string
-    interfacePath: string
-    toolProvisioning: ToolProvisioningMode
-    toolIdentityPath: string
-    toolInspectionPath: string
-    providerBinaryPath: string
-    providerCompileArtifactPath: string
-    providerArtifactId: string
-    providerGraphSnapshotPath: string
-    providerInvocations: int
-    providerCompileCacheHit: bool
-    providerGraphCacheHit: bool
-    loweredGraphCachePath: string
-    loweredGraphCacheHit: bool
-    selectedActionId: string
-    defaultActionId: string
-    actions: seq[BuildAction]
-    pools: seq[BuildPool]
-    targetExportTable: TargetExportTable
-      ## Named-Targets M5: cross-fragment aggregate of every package's
-      ## ``reprobuild.target-export-table.v1`` metadata node. Populated by
-      ## ``prepareBuildGraphInspection`` and used by ``runGraphCommand``
-      ## / ``runWhyCommand`` / ``--list-targets`` so the inspection
-      ## surface honours implicit / explicit target names without a
-      ## second pass over the snapshot.
-    explicitTargetNames: seq[string]
-      ## Named-Targets M5: every explicit ``target "name", handle`` label
-      ## visible in the lowered graph, captured before lowering so
-      ## ``resolveTargetExportSelector`` can pass it through.
-    snapshot: ProviderGraphSnapshot
-      ## Workspace-Manifest-Optional MO-6: the (possibly extension-merged)
-      ## provider-graph snapshot this inspection lowered. Exposed so
-      ## ``mergeProjectExtensions`` can reuse this proc to compile + evaluate
-      ## a discovered ``projectExtension`` recipe and harvest its fragments.
 
 proc parseGraphOutputFormat(value: string; allowDot: bool): GraphOutputFormat =
   case value.normalize()
