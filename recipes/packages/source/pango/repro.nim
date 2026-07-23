@@ -27,24 +27,23 @@
 ##
 ## ## sha256 strategy
 ##
-## We vendor the upstream 1.54.0 .tar.xz at
-## ``recipes/packages/source/pango/vendor/pango-1.54.0.tar.xz`` and
+## We vendor the upstream 1.56.4 .tar.xz at
+## ``recipes/packages/source/pango/vendor/pango-1.56.4.tar.xz`` and
 ## reference it via a ``file://`` URL. The download.gnome.org release
 ## URL is recorded as ``sourceUrl`` in the ``versions:`` block for
 ## documentation and future-bump purposes, but the live ``fetch:``
 ## block points at the vendored copy so the convention layer's
 ## emitted fetch action is offline-reproducible.
 ##
-## ## Version choice — 1.54.0 (current upstream stable)
+## ## Version choice - 1.56.4
 ##
 ## download.gnome.org publishes pango releases at
-## ``https://download.gnome.org/sources/pango/`` and 1.54.0 is the
-## current stable in the 1.54.x line as of mid-2026. The pango ABI
+## ``https://download.gnome.org/sources/pango/``. The pango ABI
 ## has been stable for years — anything ``>=1.50`` covers the sway
 ## consumption.
 ##
-## sha256 = 8a9eed75021ee734d7fc0fdf3a65c3bba51dfefe4ae51a9b414a60c70b2d1ed8
-##  (computed locally over the vendored ``pango-1.54.0.tar.xz``,
+## sha256 = 17065e2fcc5f5a5bdbffc884c956bfc7c451a96e8c4fb2f8ad837c6413cb5a01
+##  (computed locally over the vendored ``pango-1.56.4.tar.xz``,
 ##  1,963,180 bytes; downloaded once from the upstream URL recorded
 ##  in ``versions:`` above).
 ##
@@ -136,9 +135,9 @@ package pangoSource:
     ##
     ## ``sourceRepository`` points at the upstream GNOME gitlab
     ## project --- pango's canonical home post-freedesktop-migration.
-    "1.54.0":
-      sourceRevision = "1.54.0"
-      sourceUrl = "https://download.gnome.org/sources/pango/1.54/pango-1.54.0.tar.xz"
+    "1.56.4":
+      sourceRevision = "1.56.4"
+      sourceUrl = "https://download.gnome.org/sources/pango/1.56/pango-1.56.4.tar.xz"
       sourceRepository = "https://gitlab.gnome.org/GNOME/pango"
 
   fetch:
@@ -151,13 +150,13 @@ package pangoSource:
     ## sha256 was computed over the vendored 1,963,180-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "https://download.gnome.org/sources/pango/1.54/pango-1.54.0.tar.xz"
-    sha256: "8a9eed75021ee734d7fc0fdf3a65c3bba51dfefe4ae51a9b414a60c70b2d1ed8"
+    url: "https://download.gnome.org/sources/pango/1.56/pango-1.56.4.tar.xz"
+    sha256: "17065e2fcc5f5a5bdbffc884c956bfc7c451a96e8c4fb2f8ad837c6413cb5a01"
     extractStrip: 1
 
   nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
-    ## configure action invokes ``meson setup``. pango 1.54 requires
+    ## configure action invokes ``meson setup``. pango 1.56 requires
     ## meson 0.64 for the upstream build's option semantics.
     "meson >=0.64"
     ## ninja is meson's default backend — the compile action invokes
@@ -216,7 +215,7 @@ package pangoSource:
     setCurrentOwningPackageOverride("pangoSource")
     try:
       let opts = @[
-        # M9.R.14h.4 — pango 1.54 renamed ``gtk_doc`` to ``documentation``
+        # pango 1.54 renamed ``gtk_doc`` to ``documentation``
         # and dropped ``man-pages`` entirely (the man pages now live in
         # the documentation pipeline). Use the new option name; the
         # broader ``build-testsuite=false`` keeps the build minimal.

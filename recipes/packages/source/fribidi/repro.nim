@@ -23,7 +23,7 @@ package fribidiSource:
   config:
     discard
 
-  library libFribidi:
+  library fribidi:
     discard
 
   build:
@@ -32,11 +32,12 @@ package fribidiSource:
       let pkg = meson_package(
         srcDir = "./src",
         configureOptions = @[
+          "libdir=lib",
           "docs=false",
           "tests=false",
           "bin=true",
         ])
-      discard pkg.library("libFribidi")
+      discard pkg.library("fribidi")
     finally:
       clearCurrentOwningPackageOverride()
 

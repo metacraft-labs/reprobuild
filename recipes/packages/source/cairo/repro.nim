@@ -239,6 +239,7 @@ package cairoSource:
     setCurrentOwningPackageOverride("cairoSource")
     try:
       let opts = @[
+        "libdir=lib",
         "tests=disabled",
         "xlib=disabled",
         "xcb=disabled",
