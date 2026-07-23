@@ -18,6 +18,21 @@ when defined(reproProviderMode):
     if result.len == 0:
       result = "node"
 
+  proc effectiveDevEnvBodyHash(pkg: PackageDef): string =
+    if pkg.devEnvBodyHash.len > 0:
+      return pkg.devEnvBodyHash
+
+    # Constructors can append tool requirements after parsePackageDef's
+    # implicit-dev-env hash pass. Hash the final floor here as well so those
+    # packages never expose a manifest entry with an empty body hash.
+    var floorRepr = pkg.packageName & ".dev-env.implicit-floor.v1\n"
+    for useDef in pkg.toolUses:
+      floorRepr.add(useDef.rawConstraint & "\x1f" & useDef.packageSelector &
+        "\x1f" & useDef.executableName & "\x1f" &
+        useDef.policyPath.join("/") & "\x1f" & useDef.gateVariant & "\x1f" &
+        useDef.gateValue & "\n")
+    stableHashHex(floorRepr)
+
   proc providerManifest(pkg: PackageDef; providerArtifactId: string;
                         foreachDefs: openArray[ProviderForeachDef]):
       ProviderManifest =
@@ -44,7 +59,7 @@ when defined(reproProviderMode):
         id: devEnvEntryPointId(pkg),
         kind: gpkDevEnvIntrospection,
         stableName: pkg.packageName & ":dev-env",
-        bodyHash: pkg.devEnvBodyHash,
+        bodyHash: effectiveDevEnvBodyHash(pkg),
         argumentSchemaId: "reprobuild.dev-env-request.v1",
         outputSchemaId: "reprobuild.dev-env-result.v1"))
     for def in foreachDefs:
