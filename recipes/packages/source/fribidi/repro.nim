@@ -26,9 +26,6 @@ package fribidiSource:
   library libFribidi:
     discard
 
-  executable fribidi:
-    discard
-
   build:
     setCurrentOwningPackageOverride("fribidiSource")
     try:
@@ -40,7 +37,6 @@ package fribidiSource:
           "bin=true",
         ])
       discard pkg.library("libFribidi")
-      discard pkg.executable("fribidi")
     finally:
       clearCurrentOwningPackageOverride()
 
