@@ -246,6 +246,9 @@ package gnomeShellSource:
     "gdk-pixbuf >=2.40"
     "gsettings-desktop-schemas >=47"
     "at-spi2-core >=2.54"
+    "evolution-data-server >=3.54"
+    "gcr >=4.3"
+    "gobject-introspection >=1.80"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
