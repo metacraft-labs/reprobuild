@@ -729,6 +729,43 @@ type
     tekExplicit   ## Declared via ``target "name", handle`` in the DSL.
     tekAggregate  ## Declared via ``aggregate("name", ...)`` (M0 surface).
     tekCollection ## Declared via ``collect("name", ...)`` (M0 + M5 split).
+    tekRunEdge    ## Declared via ``run "name", build = <handle>, ...``
+                  ## (Named-Runnable-Edges N0). A named run-edge is a
+                  ## build target whose action is an *execution* rather
+                  ## than an artifact-producing edge; the row additionally
+                  ## carries the run-edge ``runArgs`` + ``consumes`` lease
+                  ## list so N1 (CLI routing) and N2 (lease bridge) can
+                  ## resolve + reconcile it. A dedicated kind (rather than
+                  ## a flag on ``tekExplicit``) follows the M5 grain where
+                  ## each new authoring surface gets its own discriminator
+                  ## byte, so ``classifyBuildSelector`` / the resolver can
+                  ## branch on it directly.
+
+  RunEdgeLeaseKind* = enum
+    ## Named-Runnable-Edges N0: the DSL-layer mirror of
+    ## ``repro_resources/lease.nim``'s ``LeaseKind``. The DSL sits BELOW
+    ## ``repro_resources`` in the dependency order (``repro_resources``
+    ## imports the DSL, not the reverse), so ``TargetExportEntry`` cannot
+    ## name ``LeaseKind``/``LeasedDep`` directly. ``repro_resources``'s
+    ## run-edge surface converts each ``LeasedDep`` into a
+    ## ``RunEdgeLease`` (primitives only) on the way in and back on the
+    ## way out, so the lease policy round-trips through the target-export
+    ## table codec without redefining the lease *value* type. The enum
+    ## ordinals MUST match ``LeaseKind`` (keep/immediate/delayed) so the
+    ## conversion is a plain ``ord`` cast.
+    relKeep       ## mirrors ``lkKeep`` — never auto-reap
+    relImmediate  ## mirrors ``lkImmediate`` — reapable when the consume finishes
+    relDelayed    ## mirrors ``lkDelayed`` — keep ``ttlSeconds`` after last use
+
+  RunEdgeLease* = object
+    ## Named-Runnable-Edges N0: the serializable projection of a
+    ## ``repro_resources`` ``LeasedDep`` attached to a run-edge's
+    ## ``consumes``. Primitives only (no ``Duration``/``Option``) so the
+    ## DSL can carry + serialize it without importing ``repro_resources``.
+    address*: string        ## the leased state's resource address / ``stateGroup`` name
+    consumerId*: string     ## the holder id (defaults to ``address``)
+    policyKind*: RunEdgeLeaseKind
+    ttlSeconds*: int64      ## meaningful only for ``relDelayed`` (else 0)
 
   TargetExportEntry* = object
     ## Named-Targets M1: one row in the project-scoped target-export
@@ -749,6 +786,21 @@ type
       ## collisions.
     sourceFile*: string
     sourceLine*: int
+    runArgs*: seq[string]
+      ## Named-Runnable-Edges N0: the ``args = @[...]`` list of a
+      ## ``run "name", ...`` run-target — forwarded to the execution by
+      ## N1's ``repro run`` executor. Empty for every non-run-edge row
+      ## (``tekImplicit``/``tekExplicit``/``tekAggregate``/
+      ## ``tekCollection``), so pre-N0 rows and recipes that use none of
+      ## the new surfaces round-trip byte-identically (the v3 codec writes
+      ## these trailing fields only when they are non-empty on a
+      ## ``tekRunEdge`` row; v1/v2 payloads decode them empty).
+    consumes*: seq[RunEdgeLease]
+      ## Named-Runnable-Edges N0: the run-edge's leased-state consumption
+      ## list — the serializable projection of ``repro_resources``'s
+      ## ``seq[LeasedDep]`` (see ``RunEdgeLease``). N2's lease bridge reads
+      ## this back to reconcile + renew the named ``stateGroup`` around the
+      ## exec. Empty for non-run-edge rows.
 
   TargetExportAmbiguity* = object
     ## Named-Targets M1: cross-package ambiguity record. When two or
@@ -763,6 +815,19 @@ type
   TargetExportTable* = object
     entries*: seq[TargetExportEntry]
     ambiguities*: seq[TargetExportAmbiguity]
+
+  StateGroupDef* = object
+    ## Named-Runnable-Edges N0 (spec §3.3): a named resource subgraph —
+    ## the leasable/reapable unit. ``members`` are the resource addresses
+    ## declared inside the ``stateGroup "name":`` block, in declaration
+    ## order. The group name resolves to exactly these addresses so N2's
+    ## lease bridge can reconcile the subgraph; the L1 state store still
+    ## keys per-resource — this record is only the ergonomic grouping
+    ## layered over member addresses (it does not change the store).
+    name*: string
+    members*: seq[string]
+    sourceFile*: string
+    sourceLine*: int
 
 proc exposesDevEnvIntrospection*(pkg: PackageDef): bool =
   ## Windows-dev-env M1: a package exposes a ``gpkDevEnvIntrospection``

@@ -61,6 +61,17 @@ proc delayed*(ttl: Duration): LeasePolicy =
   ## consume (deadline reset to `now + ttl`).
   LeasePolicy(kind: lkDelayed, ttl: ttl)
 
+proc delayed*(minutes = 0; hours = 0; seconds = 0): LeasePolicy =
+  ## Named-Runnable-Edges N0: the recipe-facing `delayed(minutes = 30)`
+  ## sugar of the spec's DSL sketch (§4). Composes the `minutes`/`hours`/
+  ## `seconds` keyword parts into a single `Duration` and forwards to the
+  ## `Duration` overload above, so a recipe never has to spell
+  ## `initDuration(...)` by hand. All parts default to zero, so
+  ## `delayed(hours = 1)` and `delayed(minutes = 30, seconds = 15)` both
+  ## type-check; an all-zero call yields a now-deadline `delayed` policy
+  ## (equivalent to `immediate` for reap purposes).
+  delayed(initDuration(minutes = minutes, hours = hours, seconds = seconds))
+
 proc keep*(): LeasePolicy =
   ## `lease = keep`: never auto-reap. Same never-reap semantics a bare
   ## `dependsOn` edge already has.
@@ -76,6 +87,16 @@ proc leased*(address: string; consumerId: string;
   ## held by `consumerId`. Attach the result to a resource's `consumes`
   ## seq (alongside bare `dependsOn`).
   LeasedDep(address: address, consumerId: consumerId, policy: policy)
+
+proc leased*(address: string; policy: LeasePolicy): LeasedDep =
+  ## Named-Runnable-Edges N0: the run-edge `consumes` spelling of the
+  ## spec's DSL sketch (§3.2 / §4) — `leased("topology", delayed(...))`.
+  ## The `consumerId` defaults to `address` (the leased state's own name),
+  ## which is the natural stable holder id for a run-target consuming the
+  ## group (spec §7 "the run-target's stable name is the natural
+  ## consumerId"). N2's executor may rebind the holder to the run-edge's
+  ## name before reconcile/renew; N0 only records the declaration.
+  LeasedDep(address: address, consumerId: address, policy: policy)
 
 # ---------------------------------------------------------------------------
 # The policy -> deadline mapping (§2.3). This is the ONLY place a policy is

@@ -3903,6 +3903,7 @@ proc targetResolutionJson(record: TargetResolutionRecord): JsonNode =
       of tekExplicit: "explicit"
       of tekAggregate: "aggregate"
       of tekCollection: "collection"
+      of tekRunEdge: "run-edge"
     result["targetKind"] = %targetKindText
   of trkAmbiguous:
     result["candidates"] = jsonStringSeq(record.candidates)
@@ -15444,6 +15445,7 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
       of tekExplicit: "explicit"
       of tekAggregate: "aggregate"
       of tekCollection: "collection"
+      of tekRunEdge: "run-edge"
     if asJson:
       var arr = newJArray()
       for entry in entries:

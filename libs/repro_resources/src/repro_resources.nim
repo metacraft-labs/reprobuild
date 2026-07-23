@@ -30,6 +30,7 @@ import repro_resources/resource_type
 import repro_resources/protocol
 import repro_resources/state_store
 import repro_resources/reaper
+import repro_resources/run_edge
 
 export lease
 export instance
@@ -40,3 +41,4 @@ export resource_type
 export protocol
 export state_store
 export reaper
+export run_edge

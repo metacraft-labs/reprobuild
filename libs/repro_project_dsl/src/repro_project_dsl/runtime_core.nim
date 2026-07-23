@@ -60,6 +60,13 @@ type
 
 var workspaceDepRegistry: seq[WorkspaceDepEdge] = @[]
 
+var stateGroupRegistry: seq[StateGroupDef] = @[]
+  ## Named-Runnable-Edges N0: named resource subgraphs declared via
+  ## ``stateGroup "name":`` (spec §3.3). Collected in declaration order;
+  ## the ``repro_resources`` run-edge surface fills ``members`` from the
+  ## resource addresses added inside the block so N2's lease bridge can
+  ## resolve the group name to exactly its member addresses.
+
 # ---------------------------------------------------------------------------
 # Project-DSL-Composition M5 — Approach B active-build-context handle.
 #
@@ -284,7 +291,7 @@ const
     byte(ord('E')), byte(ord('T'))]
     ## Named-Targets M1: tag for the project-scoped target-export table
     ## payload carried as a metadata node on the GraphFragment.
-  TargetExportTablePayloadVersion = 2'u16
+  TargetExportTablePayloadVersion = 3'u16
     ## Spec-Implementation M5: schema bump per
     ## Build-Graph-Collections.md §"Persistence and the Target-Export
     ## Table". v2 expands the per-row ``kind`` enumeration from
@@ -296,6 +303,16 @@ const
     ## ``reprobuild.target-export-table.v1`` for v1 emissions and
     ## ``reprobuild.target-export-table.v2`` for v2 emissions; the
     ## aggregator at ``aggregateTargetExportTable`` recognises both.
+    ##
+    ## Named-Runnable-Edges N0: v3 adds the ``tekRunEdge`` discriminator
+    ## byte (4) plus two trailing per-row fields — ``runArgs`` and the
+    ## ``consumes`` ``RunEdgeLease`` list — that only ``run "name", ...``
+    ## rows populate. v3 writes those trailing fields for EVERY row; a
+    ## row that is not a run-edge emits two empty seqs, so a table that
+    ## uses none of the N0 surfaces encodes to the same logical shape it
+    ## did at v2 (only the version word + the empty trailers differ).
+    ## v1/v2 payloads still decode through the same reader — the trailing
+    ## fields default to empty when the on-disk version is < 3.
 
 proc resetPackageRegistry*() {.dynOrStatic.} =
   registry.setLen(0)
@@ -1439,6 +1456,66 @@ proc registerExplicitTargetExport*(target: BuildTargetDef;
     sourceFile: target.sourceFile,
     sourceLine: target.sourceLine))
 
+proc registerRunEdgeExport*(name, owningPackage, actionId: string;
+                            runArgs: openArray[string] = [];
+                            consumes: openArray[RunEdgeLease] = [];
+                            sourceFile = "";
+                            sourceLine = 0) {.dynOrStatic.} =
+  ## Named-Runnable-Edges N0: register a ``run "name", ...`` run-target as
+  ## a ``tekRunEdge`` row in the project-scoped target-export table,
+  ## reusing the Named-Targets M1 collision/ambiguity machinery
+  ## (``registerTargetExportEntry``). ``actionId`` is the build handle
+  ## whose closure produces the runnable artifact (the ``build =`` edge);
+  ## ``runArgs`` + ``consumes`` are carried on the row so N1 (CLI routing)
+  ## and N2 (lease bridge) can read them back without re-parsing the DSL.
+  ##
+  ## ``repro_resources``'s ``run`` surface calls this after converting its
+  ## ``seq[LeasedDep]`` into ``seq[RunEdgeLease]`` (the DSL-layer
+  ## projection). The owning-package override applied to implicit exports
+  ## applies here too so a run-edge authored in one package but declared
+  ## from another's ``build:`` body attributes correctly.
+  if name.len == 0:
+    return
+  let effectiveOwner =
+    if currentOwningPackageOverride.len > 0:
+      currentOwningPackageOverride
+    else:
+      owningPackage
+  registerTargetExportEntry(TargetExportEntry(
+    name: name,
+    kind: tekRunEdge,
+    owningPackage: effectiveOwner,
+    actionId: actionId,
+    sourceFile: sourceFile,
+    sourceLine: sourceLine,
+    runArgs: @runArgs,
+    consumes: @consumes))
+
+proc resetStateGroupRegistry*() {.dynOrStatic.} =
+  ## Named-Runnable-Edges N0: test / re-evaluation seam — clear the
+  ## collected named resource subgraphs.
+  stateGroupRegistry.setLen(0)
+
+proc registerStateGroup*(group: StateGroupDef) {.dynOrStatic.} =
+  ## Named-Runnable-Edges N0: append one ``stateGroup "name":`` record.
+  ## Called by ``repro_resources``'s ``stateGroup`` surface after it has
+  ## captured the member resource addresses declared inside the block.
+  stateGroupRegistry.add(group)
+
+proc registeredStateGroups*(): seq[StateGroupDef] {.dynOrStatic.} =
+  ## Named-Runnable-Edges N0: the named resource subgraphs collected so
+  ## far, in declaration order.
+  stateGroupRegistry
+
+proc stateGroupMembers*(name: string): seq[string] {.dynOrStatic.} =
+  ## Named-Runnable-Edges N0: resolve a ``stateGroup`` name to exactly its
+  ## member resource addresses (declaration order). Empty seq when the
+  ## name is unknown — the resolver seam N2 consults for reconcile.
+  for group in stateGroupRegistry:
+    if group.name == name:
+      return group.members
+  @[]
+
 proc recordCommandAction*(id: string; call: PublicCliCall;
                           deps: openArray[string] = [];
                           extraInputs: openArray[string] = [];
@@ -1904,6 +1981,17 @@ proc readU32Le(bytes: openArray[byte]; pos: var int): uint32 =
   for i in 0 ..< 4:
     result = result or (uint32(bytes[pos + i]) shl (8 * i))
   pos += 4
+
+proc writeU64Le(outp: var seq[byte]; value: uint64) =
+  for i in 0 ..< 8:
+    outp.add(byte((value shr (8 * i)) and 0xff'u64))
+
+proc readU64Le(bytes: openArray[byte]; pos: var int): uint64 =
+  if pos + 8 > bytes.len:
+    raisePayload("truncated uint64 in build action payload")
+  for i in 0 ..< 8:
+    result = result or (uint64(bytes[pos + i]) shl (8 * i))
+  pos += 8
 
 proc writeString(outp: var seq[byte]; value: string) =
   outp.writeU32Le(uint32(value.len))
@@ -2445,6 +2533,21 @@ proc decodeBuildPoolPayload*(bytes: openArray[byte]): BuildPoolDef {.dynOrStatic
 proc poolPayload*(pool: BuildPoolDef): string {.dynOrStatic.} =
   fromBytes(encodeBuildPoolPayload(pool))
 
+proc writeRunEdgeLease(outp: var seq[byte]; lease: RunEdgeLease) =
+  outp.writeString(lease.address)
+  outp.writeString(lease.consumerId)
+  outp.writeByte(byte(ord(lease.policyKind)))
+  outp.writeU64Le(cast[uint64](lease.ttlSeconds))
+
+proc readRunEdgeLease(bytes: openArray[byte]; pos: var int): RunEdgeLease =
+  result.address = readString(bytes, pos)
+  result.consumerId = readString(bytes, pos)
+  let kindByte = readByte(bytes, pos)
+  if kindByte > byte(ord(relDelayed)):
+    raisePayload("invalid run-edge lease policy kind")
+  result.policyKind = RunEdgeLeaseKind(kindByte)
+  result.ttlSeconds = cast[int64](readU64Le(bytes, pos))
+
 proc writeTargetExportEntry(outp: var seq[byte]; entry: TargetExportEntry) =
   outp.writeString(entry.name)
   outp.writeByte(byte(ord(entry.kind)))
@@ -2452,6 +2555,13 @@ proc writeTargetExportEntry(outp: var seq[byte]; entry: TargetExportEntry) =
   outp.writeString(entry.actionId)
   outp.writeString(entry.sourceFile)
   outp.writeU32Le(uint32(max(entry.sourceLine, 0)))
+  # Named-Runnable-Edges N0 (v3): trailing run-edge fields. Non-run-edge
+  # rows carry two empty seqs, so a table with no ``run "name", ...`` row
+  # encodes the same logical shape it did at v2.
+  outp.writeStringSeq(entry.runArgs)
+  outp.writeU32Le(uint32(entry.consumes.len))
+  for lease in entry.consumes:
+    outp.writeRunEdgeLease(lease)
 
 proc readTargetExportEntry(bytes: openArray[byte]; pos: var int;
                            version: uint16):
@@ -2459,7 +2569,8 @@ proc readTargetExportEntry(bytes: openArray[byte]; pos: var int;
   result.name = readString(bytes, pos)
   let kindByte = readByte(bytes, pos)
   let maxKind =
-    if version >= 2'u16: byte(ord(tekCollection))
+    if version >= 3'u16: byte(ord(tekRunEdge))
+    elif version >= 2'u16: byte(ord(tekCollection))
     else: byte(ord(tekExplicit))
   if kindByte > maxKind:
     raisePayload("invalid target export entry kind")
@@ -2468,6 +2579,14 @@ proc readTargetExportEntry(bytes: openArray[byte]; pos: var int;
   result.actionId = readString(bytes, pos)
   result.sourceFile = readString(bytes, pos)
   result.sourceLine = int(readU32Le(bytes, pos))
+  # v1/v2 payloads have no run-edge trailers — leave the fields empty so
+  # legacy artifacts decode byte-compatibly.
+  if version >= 3'u16:
+    result.runArgs = readStringSeq(bytes, pos)
+    let consumeCount = int(readU32Le(bytes, pos))
+    result.consumes = newSeq[RunEdgeLease](consumeCount)
+    for i in 0 ..< consumeCount:
+      result.consumes[i] = readRunEdgeLease(bytes, pos)
 
 proc writeTargetExportAmbiguity(outp: var seq[byte];
                                 ambiguity: TargetExportAmbiguity) =
@@ -2515,7 +2634,7 @@ proc decodeTargetExportTablePayload*(bytes: openArray[byte]):
       raisePayload("unknown target export table payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, TargetExportTablePayloadVersion}:
+  if version notin {1'u16, 2'u16, TargetExportTablePayloadVersion}:
     raisePayload("unsupported target export table payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
