@@ -31,8 +31,13 @@
 import std/[os, options, times, tables, strutils]
 
 import repro_resources                    # state store + lease + reaper (L1-L3)
+import repro_provider_runtime             # ProviderSessionPool / openProviderSession
+                                          # (the RP session machinery the reaper's
+                                          # rtSession transport dispatches over)
 
 import ./protocol
+import ./client                            # renewLeaseBestEffort (the consume-site
+                                          # renew forward — no-daemon-safe)
 
 const
   DefaultLeaseReapIntervalMs* = 30_000
@@ -51,6 +56,97 @@ proc leaseReapIntervalMs*(): int =
     max(0, parseInt(raw))
   except ValueError:
     DefaultLeaseReapIntervalMs
+
+# ---------------------------------------------------------------------------
+# L5 deferral (i): the daemon's SESSION reap transport.
+#
+# The L3 reaper already accepts a caller-injected ``ReapTransport``; its
+# ``rtSession`` variant dispatches ``observe``/``apply(rakDestroy)`` over the
+# RP provider-session protocol (``observeViaSession``/``applyViaSession``)
+# against a launched OUT-OF-TREE provider — so the daemon can tear down
+# vm-harness's Incus resources WITHOUT linking their drivers.
+#
+# What was missing (the L4 deferral): the daemon called ``runLeaseReapTick``
+# with the DEFAULT ``inProcessTransport()`` — it never opened a provider
+# session. Here we add:
+#
+#   * a per-typeId registry of provider ARTIFACTS (binary path + the RP1
+#     content-addressed artifact id + working dir) the daemon may reap over —
+#     a plain module global (like the driver registry), so a daemon that must
+#     reap an out-of-tree type registers its provider artifact at startup;
+#   * a POOLED resolver: one long-lived ``ProviderSessionPool`` shared across
+#     reap ticks, so a session per ``ProviderArtifactId`` is launched once and
+#     REUSED across ticks (the §4.2 "opens/pools a provider session per
+#     typeId just as the engine does" contract) rather than respawned each
+#     sweep;
+#   * ``buildLeaseReapTransport`` — returns an ``rtSession`` transport when
+#     any provider artifact is registered, else the in-process default (the
+#     in-closure providers path stays the default for the hermetic L4 tests +
+#     in-tree providers).
+# ---------------------------------------------------------------------------
+
+type
+  LeaseReapProviderArtifact* = object
+    ## How the daemon launches the out-of-tree provider that owns a reapable
+    ## resource type, mirroring the engine's ``ProviderArtifactRef``.
+    binaryPath*: string
+    providerArtifactId*: string
+    workingDir*: string
+
+var
+  leaseReapProviders: Table[string, LeaseReapProviderArtifact]
+    ## typeId -> the provider artifact the daemon reaps that type over.
+  leaseReapSessionPool: ProviderSessionPool = nil
+    ## The daemon-owned pool, lazily created — one session per artifact id,
+    ## reused across reap ticks.
+
+proc registerLeaseReapProvider*(typeId: string;
+                                artifact: LeaseReapProviderArtifact) =
+  ## Register (or replace) the provider artifact the daemon reaps ``typeId``
+  ## over. A daemon that must reap vm-harness's ``vm_harness.container`` etc.
+  ## registers the compiled provider binary here at startup; the reap tick
+  ## then dispatches that type's destroy over a launched session.
+  leaseReapProviders[typeId] = artifact
+
+proc clearLeaseReapProviders*() =
+  ## Drop every registered provider artifact + close any pooled sessions
+  ## (test isolation; also the daemon's shutdown path).
+  leaseReapProviders.clear()
+  if leaseReapSessionPool != nil:
+    try: leaseReapSessionPool.closeAll() except CatchableError: discard
+    leaseReapSessionPool = nil
+
+proc hasLeaseReapProviders*(): bool =
+  leaseReapProviders.len > 0
+
+proc leaseReapEngineHello(): EngineHello =
+  EngineHello(
+    protocolVersion: ProviderProtocolVersion,
+    engineCapabilities: @["ephemeral-state-lease-reaper"],
+    lockSliceId: "lease-reaper",
+    canonicalExecutionRoot: getCurrentDir())
+
+proc buildLeaseReapTransport*(): ReapTransport =
+  ## The transport the daemon reap tick destroys over: an ``rtSession``
+  ## resolver backed by the pooled provider sessions when any provider
+  ## artifact is registered, else the in-process default.
+  if leaseReapProviders.len == 0:
+    return inProcessTransport()
+  if leaseReapSessionPool == nil:
+    leaseReapSessionPool = newProviderSessionPool()
+  let pool = leaseReapSessionPool
+  let resolve = proc (typeId: string): ProviderHandle =
+    if not leaseReapProviders.hasKey(typeId):
+      raise newException(ValueError,
+        "no lease-reap provider registered for type " & typeId)
+    let a = leaseReapProviders[typeId]
+    let artifact = ProviderArtifactRef(
+      binaryPath: a.binaryPath,
+      providerArtifactId: a.providerArtifactId,
+      workingDir: a.workingDir)
+    pool.openProviderSession(artifact, defaultSessionPolicy(),
+      leaseReapEngineHello())
+  sessionTransport(resolve)
 
 proc systemLeaseStoreRoot*(): string =
   ## The system-scoped state-store directory (§4.1). Defaults to
@@ -190,14 +286,84 @@ proc applyLeaseRenew*(request: DaemonLeaseRenewRequest;
 proc runLeaseReapTick*(scope: DaemonLeaseScope = dlsUser;
                        overrideRoot = "";
                        now: Time = getTime();
-                       transport: ReapTransport = inProcessTransport()):
+                       transport = none(ReapTransport)):
     ReapReport =
   ## Run ONE reap sweep against the scoped store (the L3
   ## ``reapExpiredAtReconcileStart`` — ``force = false``, so it never reaps a
   ## still-leased state). Returns the report (reaped + kept) so the caller
   ## (and a test) can observe it. A missing store dir is an empty report.
+  ##
+  ## L5 deferral (i): when no explicit ``transport`` is given, the transport
+  ## is chosen by ``buildLeaseReapTransport`` — an ``rtSession`` over the
+  ## pooled provider sessions when any provider artifact is registered
+  ## (reaping OUT-OF-TREE vm-harness resources over a real session), else the
+  ## in-process default (in-closure providers / the hermetic L4 stub). A test
+  ## may still pin an explicit transport.
   let root = leaseStoreRootForScope(scope, overrideRoot)
   if not dirExists(root):
     return ReapReport(reaped: @[], skipped: @[])
   let store = openStateStore(root)
-  reapExpiredAtReconcileStart(store, now, transport)
+  let t = if transport.isSome: transport.get else: buildLeaseReapTransport()
+  reapExpiredAtReconcileStart(store, now, t)
+
+# ---------------------------------------------------------------------------
+# L5 deferral (ii): the concrete consume-site renew hook.
+#
+# When a ``repro`` reconcile CONSUMES a leased state, L2 already folds the
+# holder deadline into the on-disk store IN-PROCESS (the store write is the
+# source of truth for correctness — see §4.3). The daemon, however, holds the
+# canonical registry that drives the wall-clock reap; a consume must also
+# NOTIFY the running daemon so its next tick honours the renewed deadline.
+#
+# ``renewLeasesForConsumed`` walks the reconciled desired graph, and for every
+# ``consumes`` edge forwards a best-effort ``renewLeaseBestEffort`` to the
+# daemon (address + consumerId + the policy's ttl). It NEVER regresses the
+# no-daemon path: ``renewLeaseBestEffort`` swallows every unreachable/absent-
+# daemon error, so a reconcile that already wrote the L1 record proceeds
+# unchanged whether or not a daemon is up.
+#
+# ``reconcileLeasedResources`` is the one-call consume site: reconcile with the
+# store (L1/L2) + forward the renews (L4). This is the seam the L5 topology
+# gate — and any future top-level ``repro`` reconcile that consumes a leased
+# state — calls.
+# ---------------------------------------------------------------------------
+
+proc renewLeasesForConsumed*(desired: seq[ResourceInstance];
+                             scope: DaemonLeaseScope = dlsUser;
+                             endpoint = defaultUserDaemonEndpoint()):
+    seq[tuple[address, consumerId: string; sent: bool]] =
+  ## Best-effort: for every leased-consume edge in ``desired`` forward a
+  ## RENEW to the daemon-hosted registry. Returns, per edge, whether the
+  ## renew reached a daemon (``sent``) — purely observational; a false
+  ## ``sent`` is a healthy no-daemon run, NOT an error. Never raises.
+  result = @[]
+  for inst in desired:
+    for dep in inst.consumes:
+      let req = DaemonLeaseRenewRequest(
+        scope: scope,
+        address: dep.address,
+        consumerId: dep.consumerId,
+        ttlSeconds: ttlSecondsFromPolicy(dep.policy))
+      let (sent, _) = renewLeaseBestEffort(req, endpoint)
+      result.add((address: dep.address, consumerId: dep.consumerId,
+                  sent: sent))
+
+proc reconcileLeasedResources*(desired: seq[ResourceInstance];
+                               store: StateStore;
+                               recorded: seq[ResourceBinding] = @[];
+                               options: ReconcileOptions = ReconcileOptions();
+                               scope: DaemonLeaseScope = dlsUser;
+                               endpoint = defaultUserDaemonEndpoint();
+                               now: Time = getTime()):
+    ReconcileResult =
+  ## The concrete consume site (L5 deferral (ii)). Reconcile the desired graph
+  ## against ``store`` (L1 persistence + L2 reuse-or-materialize/renew), then
+  ## forward a best-effort daemon RENEW for each consumed leased edge (L4).
+  ##
+  ## The store write is the correctness source of truth; the daemon renew is a
+  ## pure notification so the daemon's wall-clock reaper honours the advanced
+  ## deadline without waiting to re-read. No-daemon-safe: the renews are all
+  ## best-effort and never raise or alter the reconcile outcome.
+  result = reconcileResources(desired, recorded = recorded, options = options,
+    store = some(store), now = now)
+  discard renewLeasesForConsumed(desired, scope, endpoint)
