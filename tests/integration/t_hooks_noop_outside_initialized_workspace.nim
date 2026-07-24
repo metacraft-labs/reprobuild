@@ -211,15 +211,17 @@ proc writeRefsFile(path: string; localRef, localSha: string) =
   writeFile(path, localRef & " " & localSha & " " &
     "refs/heads/main " & zeroSha & "\n")
 
-proc invokeDispatchPrePush(fx: Fixture; repoRoot, refsFile: string):
+proc invokeDispatchPrePush(fx: Fixture; repoRoot, refsFile,
+                           remoteLocation: string):
     CmdResult =
-  ## Exact argv the managed pre-push hook body uses: ``--repo-root`` plus
-  ## ``--refs-file`` pointing at the refs git streamed on stdin.
+  ## Exact protocol-v2 argv the managed pre-push hook body uses, including
+  ## Git's agreed remote name/location binding after ``--``.
   runShell(shellCommand(@[
     fx.reproBin, "hooks", "dispatch", "pre-push",
+    "--protocol=2",
     "--repo-root", repoRoot,
     "--refs-file", refsFile,
-    "--",
+    "--", "origin", remoteLocation,
   ]))
 
 proc invokeCheckPrePush(fx: Fixture; workspaceRoot, currentRepo,
@@ -285,7 +287,8 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       # with the clear "not a workspace" diagnostic.
       let loneRefs = fx.scratch / "lone-refs.txt"
       writeRefsFile(loneRefs, "refs/heads/main", loneSha)
-      let ppLoneDispatch = invokeDispatchPrePush(fx, lonePath, loneRefs)
+      let ppLoneDispatch = invokeDispatchPrePush(fx, lonePath, loneRefs,
+        fileUrl(fx.libA.origin))
       check ppLoneDispatch.code == 0
       # Direct ``repro check`` against the lone repo: walks up, finds no
       # ``.repro/`` (falls back to cwd), no resolved manifest checkout →

@@ -79,6 +79,13 @@ proc writeLock(work, project, repo, sha, body: string) =
   createDir(dir)
   writeFile(dir / (sha & ".toml"), body)
 
+proc validLock(project, repo, sha: string): string =
+  "schema = \"reprobuild.workspace.lock.v1\"\n\n" &
+  "[lock]\nproject = \"" & project & "\"\n" &
+  "created_at = \"2026-07-22T00:00:00Z\"\n\n" &
+  "[[repo]]\nname = \"" & repo & "\"\npath = \"" & repo & "\"\n" &
+  "remote = \"origin\"\nrevision = \"" & sha & "\"\n"
+
 suite "RA-7 — lock publication (commit + push) and dirty-outside-locks guard":
 
   test "t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks":
@@ -95,10 +102,11 @@ suite "RA-7 — lock publication (commit + push) and dirty-outside-locks guard":
       check baseCount >= 1
 
       # ---- (1) clean-outside-locks → commit AND push ---------------------
-      writeLock(work, "demo", "demo",
-        "1111111111111111111111111111111111111111",
-        "[lock]\nproject = \"demo\"\n")
+      let firstSha = "1111111111111111111111111111111111111111"
+      writeLock(work, "demo", "demo", firstSha,
+        validLock("demo", "demo", firstSha))
       let pub1 = publishWorkspaceLock(identity, work)
+      checkpoint("first publish diagnostic: " & pub1.diagnostic)
       check pub1.outcome == lpoPublished
 
       # The local manifest branch advanced by exactly one commit.
@@ -118,9 +126,9 @@ suite "RA-7 — lock publication (commit + push) and dirty-outside-locks guard":
       let dirtyPath = work / "manifest.toml"
       let dirtyBefore = "schema = \"manifest\"\nDIRTY-EDIT\n"
       writeFile(dirtyPath, dirtyBefore)
-      writeLock(work, "demo", "demo",
-        "2222222222222222222222222222222222222222",
-        "[lock]\nproject = \"demo\"\n")
+      let secondSha = "2222222222222222222222222222222222222222"
+      writeLock(work, "demo", "demo", secondSha,
+        validLock("demo", "demo", secondSha))
 
       let pub2 = publishWorkspaceLock(identity, work)
       check pub2.outcome == lpoRefusedDirty

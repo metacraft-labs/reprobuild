@@ -460,6 +460,23 @@ proc gitCommonDir(repoRoot: string): string =
   except OSError:
     discard
 
+proc hasKnownWorkspaceSibling(path: string): bool =
+  dirExists(path / "reprobuild-examples") or
+    dirExists(path / "reprobuild-cmake") or
+    dirExists(path / "runquota") or
+    isCodeTracerSourceRoot(path / "codetracer")
+
+proc repoManagedWorkspace(commonDir: string): string =
+  ## Android ``repo`` keeps project Git directories below
+  ## ``<workspace>/.repo/projects`` (or ``project-objects``). A linked
+  ## worktree's common dir therefore cannot use the ordinary
+  ## ``<repo>/.git -> <workspace>`` parent walk.
+  let portable = commonDir.replace('\\', '/')
+  for marker in ["/.repo/projects/", "/.repo/project-objects/"]:
+    let markerPos = portable.find(marker)
+    if markerPos > 0:
+      return normalizedPath(commonDir[0 ..< markerPos])
+
 proc workspaceRootForRepo*(repoRoot: string): string =
   ## Locate the workspace root that owns ``repoRoot`` and its sibling repos.
   ## A temporary Git worktree may live outside the repo-managed workspace; in
@@ -467,14 +484,16 @@ proc workspaceRootForRepo*(repoRoot: string): string =
   ## common dir back to the primary checkout and use its parent as the
   ## workspace root.
   let direct = repoRoot.parentDir
-  if dirExists(direct / "reprobuild-examples") or
-      dirExists(direct / "runquota") or dirExists(direct / "codetracer"):
+  if hasKnownWorkspaceSibling(direct):
     return normalizedPath(direct)
 
   let commonDir = gitCommonDir(repoRoot)
   if commonDir.len > 0:
+    let repoWorkspace = repoManagedWorkspace(commonDir)
+    if repoWorkspace.len > 0 and dirExists(repoWorkspace):
+      return repoWorkspace
     let workspace = commonDir.parentDir.parentDir
-    if dirExists(workspace):
+    if hasKnownWorkspaceSibling(workspace):
       return normalizedPath(workspace)
 
   normalizedPath(direct)

@@ -36,6 +36,7 @@ import std/[json, os, osproc, strutils, tables, tempfiles, unittest]
 
 import repro_test_support
 import repro_workspace_manifests
+import repro_cli_support/push_hook_protocol
 
 proc q(value: string): string = quoteShell(value)
 
@@ -167,12 +168,14 @@ type
     workspaceRoot: string
     manifestsRoot: string
     manifestBare: string
+    userPostCommitLog: string
     app: RepoSeed
     lib: RepoSeed
     core: RepoSeed
     other: RepoSeed
 
-proc seedManifestGitLayer(gitBin, manifestsRoot, bare: string; branch = "main") =
+proc seedManifestGitLayer(gitBin, manifestsRoot, bare: string;
+    branch = "main") =
   ## Make ``.repro/manifests`` a real git checkout tracking a bare upstream so
   ## ``repro push`` genuinely publishes the lock to it.
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " & q(bare))
@@ -227,6 +230,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
   cloneInto(gitBin, result.core.origin, workspaceRoot / "core")
   cloneInto(gitBin, result.other.origin, workspaceRoot / "other")
   result.workspaceRoot = workspaceRoot
+  result.userPostCommitLog = result.scratch / "manifest-user-post-commit.log"
   writeWorkspaceBranch(workspaceRoot, project = "app", branch = "main")
 
 proc invokePush(fx: Fixture; fromProject = false): CmdResult =
@@ -237,7 +241,40 @@ proc invokePush(fx: Fixture; fromProject = false): CmdResult =
   argv.add("--workspace-root=" & fx.workspaceRoot)
   argv.add("--current-repo=" & (fx.workspaceRoot / "app"))
   argv.add("--json")
+  let prior = getEnv("REPROBUILD_REPRO")
+  putEnv("REPROBUILD_REPRO", fx.reproBin)
+  defer:
+    if prior.len > 0: putEnv("REPROBUILD_REPRO", prior)
+    else: delEnv("REPROBUILD_REPRO")
   runShell(shellCommand(argv))
+
+proc installV2Hooks(fx: Fixture) =
+  let userPostCommit = fx.manifestsRoot / ".git" / "hooks" / "post-commit"
+  writeFile(userPostCommit,
+    "#!/usr/bin/env sh\n" &
+    "printf 'context=%s\\n' \"${" & InternalHookContextEnv &
+      ":-}\" >> " & q(fx.userPostCommitLog) & "\n" &
+    "exit 0\n")
+  var userPerms = getFilePermissions(userPostCommit)
+  userPerms.incl({fpUserExec, fpGroupExec, fpOthersExec})
+  setFilePermissions(userPostCommit, userPerms)
+  for path in [fx.workspaceRoot, fx.manifestsRoot]:
+    let installed = runShell(shellCommand(@[fx.reproBin, "hooks", "ensure",
+      "--vcs", "--workspace-root=" & path]))
+    if installed.code != 0:
+      stderr.writeLine("hook installation failed for " & path & ":\n" &
+        installed.output)
+      quit 1
+    if path == fx.manifestsRoot and not fileExists(
+        fx.manifestsRoot / ".git" / "hooks" / "pre-push"):
+      stderr.writeLine("manifest hook installation reported success but hook " &
+        "is missing:\n" & installed.output)
+      quit 1
+  # A standalone manifest checkout is a hook target, not a nested workspace.
+  # The ensure command's audit report is local generated state; remove it so
+  # the backend's dirty-outside-locks guard sees the seeded manifest tree.
+  if dirExists(fx.manifestsRoot / ".repro"):
+    removeDir(fx.manifestsRoot / ".repro")
 
 proc readReport(fx: Fixture): JsonNode =
   let p = fx.workspaceRoot / ".repro" / "workspace" / "push-report.json"
@@ -272,6 +309,7 @@ suite "RA-25 — repro push: closure published in topological order":
       discard commitLocal(gitBin, fx.workspaceRoot / "app", "app work")
       discard commitLocal(gitBin, fx.workspaceRoot / "lib", "lib work")
       discard commitLocal(gitBin, fx.workspaceRoot / "core", "core work")
+      installV2Hooks(fx)
 
       let res = invokePush(fx)
       checkpoint("push output: " & res.output)
@@ -330,6 +368,22 @@ suite "RA-25 — repro push: closure published in topological order":
       check ls.code == 0
       check ls.output.contains("locks/app/")
 
+      # Every internal lock commit still runs the preserved user post-commit
+      # hook, but the dispatcher scrubs the typed internal context before it.
+      # The managed body consumes that context only to avoid recursively
+      # rewriting the lock just committed.
+      check fileExists(fx.userPostCommitLog)
+      let userPostLines = readFile(fx.userPostCommitLog).strip().splitLines()
+      check userPostLines.len == 3
+      for line in userPostLines:
+        check line == "context="
+      let manifestStatus = runCmd(q(gitBin) & " -C " & q(fx.manifestsRoot) &
+        " status --porcelain")
+      check manifestStatus.code == 0
+      check manifestStatus.output.strip().len == 0
+      check not fileExists(fx.workspaceRoot / ".repro" / "workspace" /
+        "post-commit-report.json")
+
   test "t_repro_push_named_project_publishes_same_closure":
     # ``repro push <project>`` resolves the same closure as the no-arg form.
     let gitBin = findExe("git")
@@ -341,6 +395,7 @@ suite "RA-25 — repro push: closure published in topological order":
       discard commitLocal(gitBin, fx.workspaceRoot / "app", "app work")
       discard commitLocal(gitBin, fx.workspaceRoot / "lib", "lib work")
       discard commitLocal(gitBin, fx.workspaceRoot / "core", "core work")
+      installV2Hooks(fx)
 
       let res = invokePush(fx, fromProject = true)
       checkpoint("named push output: " & res.output)

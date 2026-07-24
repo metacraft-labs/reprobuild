@@ -912,6 +912,11 @@ proc parseArgs(): RunnerOpts =
       quit(2)
   if result.threads <= 0:
     result.threads = 1
+  # Child tests routinely invoke ``git -C`` or change their process working
+  # directory. Keep both GIT_CONFIG_GLOBAL and protocol result-file paths
+  # stable across those operations by resolving the shared results directory
+  # once, before any child environment is constructed.
+  result.resultsDir = absolutePath(result.resultsDir)
 
 proc matchesFilter(stem: string; filters: seq[string]): bool =
   if filters.len == 0:

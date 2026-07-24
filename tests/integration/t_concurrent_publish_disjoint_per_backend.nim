@@ -15,11 +15,12 @@
 ## the corner case proves each per-tier backend handles its OWN concurrency
 ## independently, on a disjoint commit-addressed path.
 ##
-## Deterministic + hermetic (the RA-29 construction): rather than racing two live
-## publishers we ADVANCE the team backend's upstream OUT-OF-BAND (a second
-## developer's disjoint lock commit, pushed to the backend bare) BEFORE this
-## publisher pushes, so this publisher's local backend branch is behind and its
-## push is guaranteed non-fast-forward. The publisher is ``repro check
+## Deterministic + hermetic (the RA-29 construction): rather than scheduling two
+## live publishers nondeterministically, a real third-party ``pre-push`` hook on
+## the team backend publishes a second developer's disjoint lock commit after
+## Git has advertised the old remote tip but before receive-pack updates it.
+## This publisher is therefore guaranteed to lose a real compare-and-swap race.
+## The publisher is ``repro check
 ## --mode=pre-push`` (which writes + commits + publishes the routed lock).
 ##
 ## Assertions:
@@ -130,12 +131,50 @@ proc seedManifestGitLayer(gitBin, manifestsRoot, bare: string) =
     " push -u origin main")
 
 type
+  EnvSnapshot = object
+    existed: bool
+    value: string
+
+  ConfigEnvironment = object
+    system: EnvSnapshot
+    user: EnvSnapshot
+    vcsPrivate: EnvSnapshot
+
   Fixture = object
     scratch: string
     ws: string
     coreSha: string
     teamBackend: string
     teamBare: string
+
+proc overrideEnv(name, value: string): EnvSnapshot =
+  result = EnvSnapshot(existed: existsEnv(name), value: getEnv(name))
+  putEnv(name, value)
+
+proc restoreEnv(name: string; snapshot: EnvSnapshot) =
+  if snapshot.existed:
+    putEnv(name, snapshot.value)
+  else:
+    delEnv(name)
+
+proc routedConfig(fx: Fixture): string =
+  fx.ws / ".repro" / "config.toml"
+
+proc isolateConfigEnvironment(fx: Fixture): ConfigEnvironment =
+  ## Keep every layered-config lookup inside this fixture, while selecting the
+  ## native VCS-private route under test explicitly. Preserve even an ambient
+  ## variable that was present with an empty value.
+  result.system = overrideEnv("REPROBUILD_SYSTEM_CONFIG",
+    fx.scratch / "no-system.toml")
+  result.user = overrideEnv("REPROBUILD_USER_CONFIG",
+    fx.scratch / "no-user.toml")
+  result.vcsPrivate = overrideEnv("REPROBUILD_VCS_PRIVATE_CONFIG",
+    fx.routedConfig())
+
+proc restoreConfigEnvironment(environment: ConfigEnvironment) =
+  restoreEnv("REPROBUILD_VCS_PRIVATE_CONFIG", environment.vcsPrivate)
+  restoreEnv("REPROBUILD_USER_CONFIG", environment.user)
+  restoreEnv("REPROBUILD_SYSTEM_CONFIG", environment.system)
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("hl7-concpub-" & slug & "-", "")
@@ -146,7 +185,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   result.ws = result.scratch / "workspace"
   createDir(result.ws)
-  let manifestsRoot = result.ws
+  let manifestsRoot = result.ws / ".repro" / "manifests"
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "team.toml",
@@ -163,20 +202,17 @@ proc setupFixture(gitBin, slug: string): Fixture =
   result.teamBare = result.scratch / "team-backend.git"
   seedGitCheckoutBackend(gitBin, result.teamBackend, result.teamBare)
 
-  writeFile(result.ws / ".repro-workspace.toml",
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\n" &
-    "url = \"https://example.invalid/manifests.git\"\n\n" &
+  writeFile(result.routedConfig(),
+    "schema = \"reprobuild.config.v1\"\n\n" &
     "[locking]\n" &
     "route = [{ visibility = \"team\", backend = \"git-checkout\", " &
     "path = \"team-lockrepo\", repos = [\"core\"] }]\n")
 
-proc advanceTeamBackendOutOfBand(gitBin: string; fx: Fixture;
-                                 otherSha: string): string =
-  ## Simulate ANOTHER developer publishing a DIFFERENT commit's lock FIRST:
-  ## clone the team backend bare, add a DISJOINT commit-addressed lock record
-  ## (``locks/team/core/<otherSha>.toml``), push it. This publisher's local
-  ## backend branch is now behind → its later push is non-fast-forward.
+proc raceTeamBackendOnNextPush(gitBin: string; fx: Fixture;
+                               otherSha: string): string =
+  ## Prepare another developer's disjoint record, then use a real one-shot
+  ## third-party pre-push hook to publish it only after this publisher's
+  ## initial immutable fetch.
   ## Returns the disjoint lock path (backend-relative) the caller asserts
   ## survives.
   let sidecar = fx.scratch / "team-sidecar"
@@ -185,12 +221,23 @@ proc advanceTeamBackendOutOfBand(gitBin: string; fx: Fixture;
   createDir(sidecar / relDir)
   let rel = relDir / (otherSha & ".toml")
   writeFile(sidecar / rel,
-    "[[repo]]\npath = \"core\"\nrevision = \"" & otherSha & "\"\n")
+    "[[repo]]\nname = \"core\"\npath = \"core\"\nrevision = \"" &
+    otherSha & "\"\n")
   discard requireGit(q(gitBin) & " -C " & q(sidecar) & " add -A")
   discard requireGit(q(gitBin) & " -C " & q(sidecar) &
     " commit -m \"out-of-band team publish " & otherSha & "\"")
-  discard requireGit(q(gitBin) & " -C " & q(sidecar) & " push origin main")
-  removeDir(sidecar)
+  let hookDir = fx.teamBackend / ".git" / "hooks"
+  createDir(hookDir)
+  let hook = hookDir / "pre-push"
+  let fired = fx.scratch / "team-race-fired"
+  writeFile(hook,
+    "#!/bin/sh\nset -eu\n" &
+    "if [ ! -e " & q(fired) & " ]; then\n" &
+    "  : > " & q(fired) & "\n" &
+    "  " & q(gitBin) & " -C " & q(sidecar) &
+      " push origin main >/dev/null 2>&1\n" &
+    "fi\n")
+  setFilePermissions(hook, {fpUserRead, fpUserWrite, fpUserExec})
   rel
 
 proc backendUpstreamFiles(gitBin, bare: string): string =
@@ -217,21 +264,14 @@ suite "HL-7 — concurrent publishes to per-backend lock stores stay disjoint":
     if gitBin.len == 0 or not fileExists(reproBinary):
       skip()
     else:
-      putEnv("REPROBUILD_SYSTEM_CONFIG",
-        (createTempDir("hl7-concpub-env-", "")) / "no-system.toml")
-      putEnv("REPROBUILD_USER_CONFIG", "/nonexistent/no-user.toml")
-      putEnv("REPROBUILD_VCS_PRIVATE_CONFIG", "/nonexistent/no-vcs.toml")
-      defer:
-        delEnv("REPROBUILD_SYSTEM_CONFIG")
-        delEnv("REPROBUILD_USER_CONFIG")
-        delEnv("REPROBUILD_VCS_PRIVATE_CONFIG")
-
       # =================================================================
       # (1)+(2) non-ff concurrent per-backend publish RETRIES + both land.
       # =================================================================
       block retriesAndBothSurvive:
         let fx = setupFixture(gitBin, "retry")
         defer: removeDir(fx.scratch)
+        let configEnvironment = isolateConfigEnvironment(fx)
+        defer: restoreConfigEnvironment(configEnvironment)
 
         # Write the routed team lock so the backend has this publisher's
         # pending record (commit-addressed at ``core``'s HEAD, ``coreSha``).
@@ -246,7 +286,7 @@ suite "HL-7 — concurrent publishes to per-backend lock stores stay disjoint":
         # upstream so this publisher's push is non-fast-forward.
         let otherSha = "abcabcabcabcabcabcabcabcabcabcabcabcabca"
         check otherSha != fx.coreSha
-        let oobRel = advanceTeamBackendOutOfBand(gitBin, fx, otherSha)
+        let oobRel = raceTeamBackendOnNextPush(gitBin, fx, otherSha)
 
         let refsFile = fx.scratch / "pushed-refs.txt"
         writeFile(refsFile, "refs/heads/main " & fx.coreSha &
@@ -277,6 +317,8 @@ suite "HL-7 — concurrent publishes to per-backend lock stores stay disjoint":
       block unwritableStillLoud:
         let fx = setupFixture(gitBin, "loud")
         defer: removeDir(fx.scratch)
+        let configEnvironment = isolateConfigEnvironment(fx)
+        defer: restoreConfigEnvironment(configEnvironment)
         let lockRes = run(reproBinary & " workspace lock --workspace-root=" &
           q(fx.ws))
         check lockRes.code == 0

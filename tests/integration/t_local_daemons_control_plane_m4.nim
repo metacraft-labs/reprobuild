@@ -49,18 +49,19 @@ proc valueAfter(output, prefix: string): string =
     if line.startsWith(prefix):
       return line[prefix.len .. ^1].strip()
 
-proc waitForOutput(path, expected: string; timeoutSeconds = 120.0) =
-  # Generous default poll window so a slow shared runner does not trip the
-  # ``check false`` fail path before the awaited output materialises. The
-  # success path returns the instant the file matches, so a larger ceiling
-  # costs nothing on a healthy run and never masks a genuine miss.
+proc waitForOutput(path, expected: string; timeoutSeconds = 120.0): tuple[
+    matched: bool; diagnostic: string] =
+  # Return the diagnostic so the owning test can assert in its own unittest
+  # scope. The success path returns as soon as the file matches; cold provider
+  # compilation callers may choose a larger, still-bounded ceiling.
   let deadline = epochTime() + timeoutSeconds
   while epochTime() < deadline:
     if fileExists(path) and readFile(path) == expected:
-      return
+      return (true, "")
     sleep(25)
-  checkpoint("missing expected output " & path)
-  check false
+  result.diagnostic = "missing expected output " & path
+  if fileExists(path):
+    result.diagnostic.add("; actual: " & readFile(path))
 
 proc normalizedActionSummary(reportPath: string): JsonNode =
   let report = parseFile(reportPath)
@@ -339,10 +340,14 @@ suite "Local daemons/control-plane M4 daemon-hosted builds":
     check direct.contains("project: localDaemonParity")
     check daemon.contains("project: localDaemonParity")
     check not daemon.contains("daemon build unsupported")
-    waitForOutput(directProject / "dist" / "copied.txt",
+    let directReady = waitForOutput(directProject / "dist" / "copied.txt",
       "direct-mode fixture\n")
-    waitForOutput(daemonProject / "dist" / "copied.txt",
+    if not directReady.matched: checkpoint(directReady.diagnostic)
+    require directReady.matched
+    let daemonReady = waitForOutput(daemonProject / "dist" / "copied.txt",
       "direct-mode fixture\n")
+    if not daemonReady.matched: checkpoint(daemonReady.diagnostic)
+    require daemonReady.matched
 
     let directReport = valueAfter(direct, "buildReport:")
     let daemonReport = valueAfter(daemon, "buildReport:")
@@ -423,8 +428,10 @@ suite "Local daemons/control-plane M4 daemon-hosted builds":
 
       let active = waitForSessionsContains(tempRoot, "running")
       check active.contains("build")
-      waitForOutput(projectRoot / "build" / "started.txt", "started\n",
-        timeoutSeconds = 120.0)
+      let started = waitForOutput(projectRoot / "build" / "started.txt",
+        "started\n", timeoutSeconds = 600.0)
+      if not started.matched: checkpoint(started.diagnostic)
+      require started.matched
       client.terminate()
       discard client.waitForExit()
 

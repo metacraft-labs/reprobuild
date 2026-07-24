@@ -34,6 +34,7 @@
 import std/[json, os, osproc, strutils, tables, tempfiles, unittest]
 
 import repro_test_support
+import repro_workspace_manifests
 
 # ---- repro binary build ---------------------------------------------------
 
@@ -206,6 +207,17 @@ proc invokeEnsure(fx: M17Fixture; json = false): CmdResult =
   runShell(shellCommand(argv))
 
 proc invokeDispatch(fx: M17Fixture; hookName: string): CmdResult =
+  if hookName == "pre-push":
+    let refsFile = fx.scratch / "dispatch-noop-refs.txt"
+    writeFile(refsFile, "refs/heads/main " & fx.libA.sha &
+      " refs/heads/main " & fx.libA.sha & "\n")
+    return runShell(shellCommand(@[
+      fx.reproBin, "hooks", "dispatch", hookName,
+      "--protocol=2",
+      "--repo-root", fx.workspaceRoot / "lib-a",
+      "--refs-file", refsFile,
+      "--", "origin", fileUrl(fx.libA.origin),
+    ]))
   runShell(shellCommand(@[
     fx.reproBin, "hooks", "dispatch", hookName,
     "--repo-root", fx.workspaceRoot / "lib-a", "--",
@@ -437,6 +449,7 @@ suite "M17 — repro hooks ensure --vcs (workspace-aware)":
       let fx = setupFixture(gitBin, "dispatch-noop")
       defer: removeDir(fx.scratch)
       cloneAll(gitBin, fx)
+      writeWorkspaceBranch(fx.workspaceRoot, project = "lib-a", branch = "main")
 
       # ``dispatch`` is the entry point the installed hook scripts
       # call. With no body registered (M17 ground state) every known

@@ -177,6 +177,13 @@ proc setupFixture(gitBin, slug: string): Fixture =
   cloneInto(gitBin, result.libOrigin, workspaceRoot / "lib")
   result.workspaceRoot = workspaceRoot
   writeWorkspaceBranch(workspaceRoot, project = "app", branch = "main")
+  for path in [workspaceRoot, manifestsRoot]:
+    let installed = runShell(shellCommand(@[result.reproBin, "hooks", "ensure",
+      "--vcs", "--workspace-root=" & path]))
+    if installed.code != 0:
+      stderr.writeLine("hook installation failed for " & path & ":\n" &
+        installed.output)
+      quit 1
 
 proc invokePush(fx: Fixture; extra: openArray[string]): CmdResult =
   var argv = @[fx.reproBin, "push"]
@@ -185,7 +192,8 @@ proc invokePush(fx: Fixture; extra: openArray[string]): CmdResult =
   argv.add("--workspace-root=" & fx.workspaceRoot)
   argv.add("--current-repo=" & (fx.workspaceRoot / "app"))
   argv.add("--json")
-  runShell(shellCommand(argv))
+  runShell(shellCommand(argv,
+    @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
 
 proc readReport(fx: Fixture): JsonNode =
   let p = fx.workspaceRoot / ".repro" / "workspace" / "push-report.json"

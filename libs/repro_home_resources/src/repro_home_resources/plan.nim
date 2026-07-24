@@ -114,7 +114,7 @@ proc observeWindowsRegistryValue*(r: Resource): ObservedState {.nimcall.} =
   return observeRegistryValue(r.registryKey, r.registryName)
 
 proc observeEnvUserVariable*(r: Resource): ObservedState {.nimcall.} =
-  return observeUserVariable(r.envVarName)
+  return observeUserVariable(r.envVarName, r.envVarHostFilePath)
 
 proc observeEnvUserPath*(r: Resource): ObservedState {.nimcall.} =
   return observeUserPath(r.pathEntries, r.pathHostFilePath,
@@ -188,11 +188,12 @@ proc observeRecorded*(address: string; binding: RecordedBinding):
     return observeRegistryValue(binding.resourceId[0 ..< bs],
       binding.resourceId[bs + 1 .. ^1])
   of rkEnvUserVariable:
-    let bs = binding.resourceId.rfind('\\')
-    if bs <= 0:
+    let name = userVariableNameFromIdentity(binding.resourceId)
+    if name.len == 0:
       result.present = false
       return
-    return observeUserVariable(binding.resourceId[bs + 1 .. ^1])
+    return observeUserVariable(name,
+      userVariableHostFromIdentity(binding.resourceId))
   of rkEnvUserPath:
     let entries = parseRecordedPathEntries(binding.payloadBytes)
     return observeUserPath(entries,

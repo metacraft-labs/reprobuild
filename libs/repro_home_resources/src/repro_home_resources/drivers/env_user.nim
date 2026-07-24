@@ -68,6 +68,13 @@ proc bytesToString(b: openArray[byte]): string =
 proc shellSingleQuote(s: string): string =
   "'" & s.replace("'", "'\"'\"'") & "'"
 
+proc fishSingleQuote(s: string): string =
+  ## Fish single quotes recognize only escaped backslash and apostrophe.
+  "'" & s.replace("\\", "\\\\").replace("'", "\\'") & "'"
+
+proc isFishHostFile(hostFilePath: string): bool =
+  hostFilePath.replace('\\', '/').endsWith("/fish/config.fish")
+
 proc defaultUserPathHostFile*(homeDir = ""): string =
   ## POSIX fallback for `env.userPath` AND `env.userVariable`: write a
   ## managed block into the current user's shell rc. Tests may pin the
@@ -112,6 +119,24 @@ proc userVariableBlockId*(name: string): string =
   ## resources don't clobber each other when they share a host file.
   "repro-home-env-" & name
 
+proc userVariableHostFromIdentity*(identity: string): string =
+  ## POSIX identities are `<host-file>#repro-home-env-<name>`. Legacy
+  ## Windows-shaped records deliberately return no host path so old manifests
+  ## continue to resolve through the platform default.
+  const marker = "#repro-home-env-"
+  let split = identity.rfind(marker)
+  if split >= 0: identity[0 ..< split] else: ""
+
+proc userVariableNameFromIdentity*(identity: string): string =
+  const marker = "#repro-home-env-"
+  let split = identity.rfind(marker)
+  if split >= 0:
+    return identity[(split + marker.len) .. ^1]
+  let slash = identity.rfind('\\')
+  if slash >= 0 and slash < identity.high:
+    return identity[(slash + 1) .. ^1]
+  ""
+
 proc decodeRegistryStringValue(payload: RegistryValuePayload): string =
   ## Decode a REG_SZ / REG_EXPAND_SZ payload to a UTF-8 string. The
   ## trailing UTF-16LE NUL terminator is stripped. The POSIX arm
@@ -146,12 +171,16 @@ proc decodeRegistryStringValue(payload: RegistryValuePayload): string =
     decodeMultiString(payload.bytes).join("\n")
 
 proc renderUserVariableBlockContent*(name: string;
-                                     payload: RegistryValuePayload): string =
+                                     payload: RegistryValuePayload;
+                                     hostFilePath = ""): string =
   ## Shell fragment used by the POSIX `env.userVariable` arm. Single-
   ## quote-escapes the decoded value so embedded `'`, `"`, `$`, and
   ## backticks are passed verbatim to the shell.
   let value = decodeRegistryStringValue(payload)
-  "export " & name & "=" & shellSingleQuote(value) & "\n"
+  if isFishHostFile(hostFilePath):
+    "set -gx " & name & " " & fishSingleQuote(value) & "\n"
+  else:
+    "export " & name & "=" & shellSingleQuote(value) & "\n"
 
 proc observeUserVariable*(name: string;
                          hostFilePath = ""): ObservedState =
@@ -203,7 +232,7 @@ proc applyUserVariableCreate*(name: string;
       # the recorded post-write digest stable as the zero digest.
       result = @[]
       return
-    let content = renderUserVariableBlockContent(name, payload)
+    let content = renderUserVariableBlockContent(name, payload, hostFile)
     result = applyManagedBlockResource(hostFile,
       userVariableBlockId(name), content)
 
@@ -245,7 +274,8 @@ proc joinPathEntries*(entries: openArray[string]): string =
 # `env.userVariable` block so both arms share the helpers without
 # duplication.
 
-proc posixPathBlockContent*(entries: openArray[string]): string =
+proc posixPathBlockContent*(entries: openArray[string];
+                            hostFilePath = ""): string =
   ## Shell fragment used by POSIX `env.userPath`. It prepends the
   ## contributed directories while preserving the user's existing PATH.
   if entries.len == 0:
@@ -253,12 +283,18 @@ proc posixPathBlockContent*(entries: openArray[string]): string =
   var quoted: seq[string] = @[]
   for entry in entries:
     if entry.len > 0:
-      quoted.add(shellSingleQuote(entry))
+      quoted.add(
+        if isFishHostFile(hostFilePath): fishSingleQuote(entry)
+        else: shellSingleQuote(entry))
   if quoted.len == 0:
     return ""
-  "export PATH=" & quoted.join(":") & "${PATH:+:$PATH}\n"
+  if isFishHostFile(hostFilePath):
+    "set -gx PATH " & quoted.join(" ") & " $PATH\n"
+  else:
+    "export PATH=" & quoted.join(":") & "${PATH:+:$PATH}\n"
 
-proc parsePosixPathBlockEntries*(blockText: string): seq[string] =
+proc parsePosixPathBlockEntries*(blockText: string;
+                                 hostFilePath = ""): seq[string] =
   ## Inverse of `posixPathBlockContent`: walk the rendered block
   ## fragment and recover the contributed entries verbatim, undoing
   ## the single-quote escaping. Returns an empty seq when the block
@@ -267,19 +303,23 @@ proc parsePosixPathBlockEntries*(blockText: string): seq[string] =
   ## "can't reduce to entries" signal and falls back to digesting the
   ## raw bytes.
   result = @[]
-  const Prefix = "export PATH="
-  const Suffix = "${PATH:+:$PATH}"
+  let prefix =
+    if isFishHostFile(hostFilePath): "set -gx PATH "
+    else: "export PATH="
+  let suffix =
+    if isFishHostFile(hostFilePath): " $PATH"
+    else: "${PATH:+:$PATH}"
   var body = blockText
   # Strip a trailing newline if present (the renderer always appends
   # one but the live block may have been re-saved without it).
   while body.len > 0 and body[^1] == '\n':
     body.setLen(body.len - 1)
-  if not body.startsWith(Prefix):
+  if not body.startsWith(prefix):
     return @[]
-  body = body[Prefix.len .. ^1]
-  if not body.endsWith(Suffix):
+  body = body[prefix.len .. ^1]
+  if not body.endsWith(suffix):
     return @[]
-  body = body[0 ..< body.len - Suffix.len]
+  body = body[0 ..< body.len - suffix.len]
   if body.len == 0:
     return @[]
   # Walk: each entry is a single-quoted run; `'\"'\"'` represents an
@@ -296,7 +336,7 @@ proc parsePosixPathBlockEntries*(blockText: string): seq[string] =
         # Either end of the entry or the start of an embedded-quote
         # escape sequence `'\"'\"'` ( closing-quote, double-quoted
         # single-quote, opening-quote ).
-        if i + 4 < body.len and
+        if not isFishHostFile(hostFilePath) and i + 4 < body.len and
            body[i + 1] == '\"' and
            body[i + 2] == '\'' and
            body[i + 3] == '\"' and
@@ -307,11 +347,19 @@ proc parsePosixPathBlockEntries*(blockText: string): seq[string] =
         # End of the entry.
         inc i
         break
-      entry.add(body[i])
-      inc i
+      if isFishHostFile(hostFilePath) and body[i] == '\\' and
+          i + 1 < body.len and body[i + 1] in {'\\', '\''}:
+        entry.add(body[i + 1])
+        i += 2
+      else:
+        entry.add(body[i])
+        inc i
     result.add(entry)
     if i < body.len:
-      if body[i] != ':':
+      let separator =
+        if isFishHostFile(hostFilePath): ' '
+        else: ':'
+      if body[i] != separator:
         return @[]
       inc i
 
@@ -426,7 +474,7 @@ proc applyUserPath*(contributed: openArray[string];
       else: UserPathBlockId
     if hostFile.len > 0:
       discard applyManagedBlockResource(hostFile, effBlockId,
-        posixPathBlockContent(contributed))
+        posixPathBlockContent(contributed, hostFile))
   # Recorded payload: the JOINED CONTRIBUTION bytes (UTF-8).
   let joined = joinPathEntries(contributed)
   result = bytesOf(joined)
@@ -528,7 +576,7 @@ proc observeUserPath*(contribution: openArray[string];
       result.present = false
       result.digest = zeroDigest()
       return
-    let expected = posixPathBlockContent(contribution)
+    let expected = posixPathBlockContent(contribution, hostFile)
     let expectedBytes = bytesOf(expected)
     result.present = true
     if observed.rawBytes == expectedBytes:
@@ -558,7 +606,7 @@ proc observeUserPath*(contribution: openArray[string];
       # outside our format and reconciliation requires explicit
       # operator intent).
       let liveEntries = parsePosixPathBlockEntries(
-        bytesToString(observed.rawBytes))
+        bytesToString(observed.rawBytes), hostFile)
       if liveEntries.len > 0:
         let joined = bytesOf(joinPathEntries(liveEntries))
         result.rawBytes = joined

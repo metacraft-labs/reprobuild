@@ -187,6 +187,9 @@ type
       envVarName*: string
       envVarPayload*: RegistryValuePayload
         ## REG_SZ or REG_EXPAND_SZ.
+      envVarHostFilePath*: string
+        ## POSIX host rc file that receives the managed variable block.
+        ## Empty on Windows, where the target is HKCU\Environment.
     of rkEnvUserPath:
       pathEntries*: seq[string]
         ## Directories the resource contributes to the user's PATH.
@@ -601,7 +604,10 @@ proc realWorldIdentity*(r: Resource): string =
   of rkWindowsRegistryValue:
     return r.registryKey & "\\" & r.registryName
   of rkEnvUserVariable:
-    return "HKCU\\Environment\\" & r.envVarName
+    when defined(windows):
+      return "HKCU\\Environment\\" & r.envVarName
+    else:
+      return r.envVarHostFilePath & "#repro-home-env-" & r.envVarName
   of rkEnvUserPath:
     when defined(windows):
       return "HKCU\\Environment\\Path"

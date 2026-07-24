@@ -133,6 +133,11 @@ proc setupFixture(gitBin, slug: string): Fixture =
   result.libAPath = workspaceRoot / "lib-a"
   cloneInto(gitBin, result.libAOrigin, result.libAPath)
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
+  let installed = runShell(shellCommand(@[result.reproBin, "hooks", "ensure",
+    "--vcs", "--workspace-root=" & workspaceRoot]))
+  if installed.code != 0:
+    stderr.writeLine("hook installation failed:\n" & installed.output)
+    quit 1
   # TC-5: issuance signs the cert — provide + register a daemon key.
   if findExe("ssh-keygen").len > 0:
     let key = genEd25519Key(result.scratch / "daemon-keys", "tc2-key", tc2KeyId)
@@ -191,7 +196,7 @@ proc invokePush(fx: Fixture): CmdResult =
     "--no-certify",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & fx.libAPath,
-    "--json"]))
+    "--json"], @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
 
 proc clonedUpstreamCerts(gitBin, originPath, commit, scratch, slug: string):
     seq[TestCertificate] =

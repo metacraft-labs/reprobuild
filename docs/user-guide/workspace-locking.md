@@ -13,7 +13,7 @@ this page — locking works out of the box (see
 private team repo or a personal side-repo to the mix.
 
 For the full design rationale, see
-[Unified-Locking-And-Hooks.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Unified-Locking-And-Hooks.md)
+[Unified-Locking-And-Hooks.md](https://github.com/metacraft-labs/reprobuild-specs/blob/latest/Unified-Locking-And-Hooks.md)
 in `reprobuild-specs/`.
 
 ## The mental model: tiers and backends
@@ -279,6 +279,52 @@ Use this whenever a repo isn't landing in the tier you expect: the
 offending repo, its tier, its backend, and a copy-pasteable next step.
 Here is what each one means.
 
+### Refreshing hooks after a protocol mismatch
+
+The generated dispatcher, managed hook body, and `repro` CLI use hook
+protocol v2 as one executable contract. If any one of them is older or only a
+partial hook refresh landed, publication fails closed before the first source
+repository is pushed. Refresh the complete hook pair and retry:
+
+```console
+$ repro hooks ensure --vcs <repo-or-workspace>
+$ repro push --sync --rebase
+```
+
+Run the same `hooks ensure` command for a separately checked-out lock backend
+named by the diagnostic. The command preserves existing user hooks; preserved
+hooks run without Reprobuild's internal capability or legacy recursion marker
+in their environment.
+
+### A dependency is unpublished
+
+A raw `git push` may publish the current repository's exact clean `HEAD` when
+Git proposes one well-formed fast-forward branch update to the configured
+remote. It does not make an unpublished dependency publishable. Use
+`repro push` to publish the dependency closure in dependency-first order:
+
+```console
+$ repro push --sync --rebase
+```
+
+Unrelated repositories outside that closure do not block the operation.
+
+### A source push succeeded but a later step failed
+
+`repro push` is resumable, not all-or-nothing. If a later repository or lock
+backend refuses the operation, earlier source commits remain published. The
+text and JSON reports name the stopped repository/stage, retain the successfully
+published prefix, show any verified local-only lock-backend `HEAD`, and provide
+the retry command. Fix the named cause and run that command; Reprobuild treats
+the published prefix as no-ops and continues in dependency order.
+
+If the report says an expected lock record was never created, a retry alone
+does not synthesize it. Run the exact `repro workspace lock ...` command in the
+report and then retry `repro push`. If a prior attempt committed a valid
+lock-only chain locally but failed to push it, retry verifies every commit and
+record before resuming an ordinary fast-forward backend push. Dirty, divergent,
+or non-lock history is left untouched for manual inspection.
+
 ### `lock-backend-unreachable` (team or public backend down)
 
 > `team repo 'acme-internal' could not be published to its git-checkout
@@ -453,7 +499,10 @@ fix it.
 ## Related documentation
 
 - [Reprobuild docs home](../README.md).
-- [Unified-Locking-And-Hooks.md](https://github.com/metacraft-labs/reprobuild-specs/blob/main/Unified-Locking-And-Hooks.md) —
+- [Unified-Locking-And-Hooks.md](https://github.com/metacraft-labs/reprobuild-specs/blob/latest/Unified-Locking-And-Hooks.md) —
   the design spec behind this page.
-- [`repro hooks`](https://github.com/metacraft-labs/reprobuild-specs/blob/main/CLI/hooks.md) —
+- [`repro hooks`](https://github.com/metacraft-labs/reprobuild-specs/blob/latest/CLI/hooks.md) —
   installing and managing the VCS hooks.
+- [`repro push` and pre-push publication protocol](https://github.com/metacraft-labs/reprobuild-specs/blob/latest/CLI/push-hook-publication-protocol.md) —
+  strict outgoing-HEAD handling, hook protocol v2, lock recovery, and partial
+  publication semantics.

@@ -107,6 +107,8 @@ suite "RA-4 — hooks ensure coexists with pre-commit hook-impl shim":
         " commit -m fixture")
       discard requireGit(q(gitBin) & " -C " & q(repoPath) &
         " push -u origin main")
+      let headSha = requireGit(q(gitBin) & " -C " & q(repoPath) &
+        " rev-parse HEAD").strip()
 
       # Minimal single-project manifest so `enumerateParticipatingRepos`
       # discovers lib-a.
@@ -191,12 +193,14 @@ suite "RA-4 — hooks ensure coexists with pre-commit hook-impl shim":
       # ---- Run the installed dispatcher; assert NO migration abort -----
       #
       # The managed body is a no-op here (no `repro` resolution needed for
-      # the coexistence assertion — it exits 0 when the CLI is reachable,
-      # and the pre-push refs stream is empty so the gate is a no-op). We
-      # drive the dispatcher with an empty refs stream on stdin (pre-push
-      # contract) and a synthetic remote/url argv.
+      # the coexistence assertion. We drive the dispatcher with a canonical
+      # v2 refs record for the clean, published current branch and Git's
+      # configured remote/url argv.
       removeFile(ranFile)
-      let runRes = runCmd("printf '' | " & q(dispatcher) &
+      let refsLine = "refs/heads/main " & headSha & " refs/heads/main " &
+        headSha
+      let runRes = runCmd("printf '%s\\n' " & q(refsLine) &
+        " | env REPROBUILD_REPRO=" & q(reproBin) & " " & q(dispatcher) &
         " origin " & q(fileUrl(origin)), repoPath)
       if runRes.code != 0:
         checkpoint("dispatcher run output: " & runRes.output)

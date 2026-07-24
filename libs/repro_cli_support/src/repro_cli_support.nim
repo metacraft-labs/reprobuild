@@ -1,5 +1,8 @@
 import std/[algorithm, base64, hashes, json, options, os, osproc, sequtils,
-    sets, streams, strutils, tables, tempfiles, terminal, times]
+    sets, streams, strtabs, strutils, tables, tempfiles, terminal, times]
+
+when defined(windows):
+  import std/winlean
 import repro_core
 import repro_build_engine
 import repro_cmake_trycompile
@@ -59,6 +62,7 @@ import repro_hcr_linkgraph
 import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/dev_session
+import repro_cli_support/push_hook_protocol
 
 proc cloneUrlFor*(repo: ResolvedRepo): string =
   result = repo.fetchUrl
@@ -10047,7 +10051,7 @@ const
   DirenvActivationGuard = "REPRO_DIRENV_ACTIVATING"
   NativeShellManagedBlockPrefix = "repro-dev-env-native-"
   NativeShellActivationGuard = "REPRO_NATIVE_SHELL_HOOK_RUNNING"
-  VcsDispatcherMarker = "reprobuild hook dispatcher"
+  VcsDispatcherMarker = V2DispatcherMarker
   # M17: full VCS-hook bundle the workspace publication gate (M18)
   # and the manifest auto-refresh hook (M19a) depend on. Order matters
   # only for the deterministic JSON-report iteration.
@@ -10632,13 +10636,24 @@ proc gitHooksDir(targetPath: string): string =
     raise newException(ValueError,
       "VCS hook target is not inside a Git repository: " &
         resolveHooksTarget(targetPath))
-  let res = execCmdEx(shellCommand(@["git", "-C", repoRoot, "rev-parse",
-    "--absolute-git-dir"]))
-  if res.exitCode != 0:
+  # Respect core.hooksPath and linked-worktree/submodule gitdir indirection.
+  # Asking Git for its effective hook path is the only source of truth; simply
+  # appending `hooks` to --absolute-git-dir silently installs an unused bundle
+  # when core.hooksPath is configured.
+  var res = execCmdEx(shellCommand(@["git", "-C", repoRoot, "rev-parse",
+    "--path-format=absolute", "--git-path", "hooks"]))
+  if res.exitCode == 0 and res.output.strip().len > 0:
+    return os.normalizedPath(res.output.strip())
+  # Compatibility fallback for Git versions predating --path-format.
+  res = execCmdEx(shellCommand(@["git", "-C", repoRoot, "rev-parse",
+    "--git-path", "hooks"]))
+  if res.exitCode != 0 or res.output.strip().len == 0:
     raise newException(ValueError,
       "could not locate Git hooks directory for " & repoRoot & ": " &
         res.output.strip())
-  result = os.normalizedPath(res.output.strip()) / "hooks"
+  let raw = res.output.strip()
+  result = if raw.isAbsolute: os.normalizedPath(raw)
+    else: os.normalizedPath(repoRoot / raw)
 
 proc hookPath(hooksDir, hookName: string): string =
   hooksDir / hookName
@@ -10654,6 +10669,7 @@ proc fileContains(path, marker: string): bool =
 
 proc isReprobuildVcsHook(path, hookName: string): bool =
   fileContains(path, VcsDispatcherMarker) or
+    fileContains(path, "reprobuild hook dispatcher") or
     fileContains(path, "reprobuild managed " & hookName & " hook")
 
 proc ensureExecutable(path: string) =
@@ -10708,38 +10724,54 @@ proc vcsDispatcherContent(hookName: string): string =
   result.add("# " & VcsDispatcherMarker & "\n")
   result.add("# Dispatches preserved user hooks and Reprobuild-managed " &
     hookName & " logic.\n")
-  result.add("set -eu\n\n")
-  # RA-7: re-entry guard. Lock publication PUSHES the manifest repo, and
-  # that repo carries these same managed hooks, so a publish-push would
-  # re-fire the dispatcher (and recurse: the nested push would publish
-  # again, …). On first entry we set ``REPROBUILD_HOOK_ACTIVE=1``; a nested
-  # invocation sees it already set and short-circuits with success before
-  # re-running any body. (pilot ``24252a0``.)
-  result.add("if [ \"${REPROBUILD_HOOK_ACTIVE:-}\" = \"1\" ]; then\n")
-  result.add("  exit 0\n")
-  result.add("fi\n")
-  result.add("REPROBUILD_HOOK_ACTIVE=1\n")
-  result.add("export REPROBUILD_HOOK_ACTIVE\n\n")
+  result.add("set -eu\n")
+  result.add("set +x\n")
+  # Protocol v2 never trusts an inherited boolean recursion sentinel. Capture
+  # the opaque one-use token, then scrub both it and the legacy sentinel before
+  # invoking preserved user hooks.
+  result.add("REPROBUILD_CAPTURED_CAPABILITY=${" & HookCapabilityEnv & ":-}\n")
+  result.add("REPROBUILD_CAPTURED_INTERNAL_CONTEXT=${" &
+    InternalHookContextEnv & ":-}\n")
+  result.add("unset " & HookCapabilityEnv & " " & LegacyHookSentinelEnv &
+    " " & HookDispatcherProtocolEnv & " " & InternalHookContextEnv & "\n\n")
   result.add("HOOK_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n")
   result.add("LOCAL_HOOK=\"$HOOK_DIR/" & hookName & ".repro-local\"\n")
   result.add("MANAGED_HOOK=\"$HOOK_DIR/" & hookName & ".repro-managed\"\n\n")
+  result.add("REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)\n")
+  result.add("if [ -n \"${REPROBUILD_REPRO:-}\" ] && [ -x \"$REPROBUILD_REPRO\" ]; then\n")
+  result.add("  REPRO_REMEDY_CMD=$REPROBUILD_REPRO\n")
+  result.add("elif command -v repro >/dev/null 2>&1; then\n")
+  result.add("  REPRO_REMEDY_CMD=$(command -v repro)\n")
+  result.add("else\n")
+  result.add("  REPRO_REMEDY_CMD=repro\n")
+  result.add("fi\n\n")
   # (2) Drop a stale pre-commit `.legacy` that is actually our dispatcher,
   # otherwise a chained pre-commit shim re-enters us in a loop.
   result.add("PRECOMMIT_LEGACY=\"$HOOK_DIR/" & hookName & ".legacy\"\n")
   result.add("if [ -f \"$PRECOMMIT_LEGACY\" ] && " &
-    "grep -q '" & VcsDispatcherMarker & "' \"$PRECOMMIT_LEGACY\" 2>/dev/null; then\n")
+    "grep -q 'reprobuild hook dispatcher' \"$PRECOMMIT_LEGACY\" 2>/dev/null; then\n")
   result.add("  rm -f \"$PRECOMMIT_LEGACY\"\n")
   result.add("fi\n\n")
   if hookName == "pre-push":
     result.add("TMP_FILE=$(mktemp \"${TMPDIR:-/tmp}/reprobuild-pre-push.XXXXXX\")\n")
+    result.add("chmod 600 \"$TMP_FILE\"\n")
     result.add("trap 'rm -f \"$TMP_FILE\"' EXIT HUP INT TERM\n")
     result.add("cat > \"$TMP_FILE\"\n")
     # (1) Clear pre-commit's migration-mode guard for each chained hook.
     result.add("if [ -x \"$LOCAL_HOOK\" ]; then PRE_COMMIT_RUNNING_LEGACY= \"$LOCAL_HOOK\" \"$@\" < \"$TMP_FILE\" || exit $?; fi\n")
-    result.add("if [ -x \"$MANAGED_HOOK\" ]; then PRE_COMMIT_RUNNING_LEGACY= \"$MANAGED_HOOK\" \"$@\" < \"$TMP_FILE\" || exit $?; fi\n")
+    result.add("if [ ! -x \"$MANAGED_HOOK\" ] || ! grep -q '" &
+      V2ManagedMarker & "' \"$MANAGED_HOOK\" 2>/dev/null; then\n")
+    result.add("  echo \"repro hooks: hook protocol mismatch; run '$REPRO_REMEDY_CMD hooks ensure --vcs $REPO_ROOT' and retry\" >&2\n")
+    result.add("  exit 1\n")
+    result.add("fi\n")
+    result.add("PRE_COMMIT_RUNNING_LEGACY= " & HookDispatcherProtocolEnv &
+      "=2 " & HookCapabilityEnv &
+      "=\"$REPROBUILD_CAPTURED_CAPABILITY\" \"$MANAGED_HOOK\" \"$@\" < \"$TMP_FILE\" || exit $?\n")
   else:
     result.add("if [ -x \"$LOCAL_HOOK\" ]; then PRE_COMMIT_RUNNING_LEGACY= \"$LOCAL_HOOK\" \"$@\" || exit $?; fi\n")
-    result.add("if [ -x \"$MANAGED_HOOK\" ]; then PRE_COMMIT_RUNNING_LEGACY= \"$MANAGED_HOOK\" \"$@\" || exit $?; fi\n")
+    result.add("if [ -x \"$MANAGED_HOOK\" ]; then PRE_COMMIT_RUNNING_LEGACY= " &
+      InternalHookContextEnv &
+      "=\"$REPROBUILD_CAPTURED_INTERNAL_CONTEXT\" \"$MANAGED_HOOK\" \"$@\" || exit $?; fi\n")
   result.add("exit 0\n")
 
 proc vcsManagedHookContent(hookName: string): string =
@@ -10749,14 +10781,33 @@ proc vcsManagedHookContent(hookName: string): string =
   ## this exact string, so any future change to the body bumps every
   ## installed hook on the next ``ensure``.
   result = "#!/usr/bin/env sh\n"
-  result.add("# reprobuild managed " & hookName & " hook\n")
+  if hookName == "pre-push":
+    result.add("# " & V2ManagedMarker & "\n")
+  else:
+    result.add("# reprobuild managed " & hookName & " hook\n")
   result.add("# managed-by: reprobuild hooks ensure\n")
   result.add("# dispatches to: repro hooks dispatch " & hookName & "\n")
-  result.add("set -eu\n\n")
+  result.add("set -eu\n")
+  result.add("set +x\n")
+  result.add("REPROBUILD_CAPTURED_INTERNAL_CONTEXT=${" &
+    InternalHookContextEnv & ":-}\n")
+  result.add("unset " & InternalHookContextEnv & "\n")
+  if hookName == "post-commit":
+    result.add("if [ \"$REPROBUILD_CAPTURED_INTERNAL_CONTEXT\" = \"" &
+      InternalLockCommitContext & "\" ]; then exit 0; fi\n")
+  if hookName == "pre-push":
+    result.add("REPROBUILD_CAPTURED_CAPABILITY=${" & HookCapabilityEnv & ":-}\n")
+    result.add("REPROBUILD_CAPTURED_DISPATCH_PROTOCOL=${" &
+      HookDispatcherProtocolEnv & ":-}\n")
+    result.add("unset " & HookCapabilityEnv & " " &
+      HookDispatcherProtocolEnv & " " & LegacyHookSentinelEnv & "\n")
   result.add("find_repro_cmd() {\n")
-  result.add("  if [ -n \"${REPROBUILD_REPRO:-}\" ] && [ -x \"$REPROBUILD_REPRO\" ]; then\n")
-  result.add("    printf '%s\\n' \"$REPROBUILD_REPRO\"\n")
-  result.add("    return 0\n")
+  result.add("  if [ -n \"${REPROBUILD_REPRO:-}\" ]; then\n")
+  result.add("    if [ -x \"$REPROBUILD_REPRO\" ]; then\n")
+  result.add("      printf '%s\\n' \"$REPROBUILD_REPRO\"\n")
+  result.add("      return 0\n")
+  result.add("    fi\n")
+  result.add("    return 1\n")
   result.add("  fi\n")
   result.add("  if command -v repro >/dev/null 2>&1; then\n")
   result.add("    command -v repro\n")
@@ -10768,28 +10819,42 @@ proc vcsManagedHookContent(hookName: string): string =
   result.add("cd \"$REPO_ROOT\"\n")
   result.add("if REPRO_CMD=$(find_repro_cmd); then\n")
   if hookName == "pre-push":
+    result.add("  if [ \"$REPROBUILD_CAPTURED_DISPATCH_PROTOCOL\" != \"2\" ]; then\n")
+    result.add("    echo \"repro hooks: hook protocol mismatch; run '$REPRO_CMD hooks ensure --vcs $REPO_ROOT' and retry\" >&2\n")
+    result.add("    exit 1\n")
+    result.add("  fi\n")
     result.add("  REFS_FILE=$(mktemp \"${TMPDIR:-/tmp}/reprobuild-pre-push-backend.XXXXXX\")\n")
+    result.add("  chmod 600 \"$REFS_FILE\"\n")
     result.add("  trap 'rm -f \"$REFS_FILE\"' EXIT HUP INT TERM\n")
     result.add("  cat > \"$REFS_FILE\"\n")
-    result.add("  \"$REPRO_CMD\" hooks dispatch " & hookName &
-      " --repo-root \"$REPO_ROOT\" --refs-file \"$REFS_FILE\" -- \"$@\"\n")
+    result.add("  if ! \"$REPRO_CMD\" hooks protocol --require=2 >/dev/null; then\n")
+    result.add("    echo \"repro hooks: hook protocol mismatch; run '$REPRO_CMD hooks ensure --vcs $REPO_ROOT' and retry\" >&2\n")
+    result.add("    exit 1\n")
+    result.add("  fi\n")
+    result.add("  " & HookCapabilityEnv &
+      "=\"$REPROBUILD_CAPTURED_CAPABILITY\" \"$REPRO_CMD\" hooks dispatch " &
+      hookName & " --protocol=2 --repo-root \"$REPO_ROOT\" --refs-file \"$REFS_FILE\" -- \"$@\"\n")
   else:
     result.add("  \"$REPRO_CMD\" hooks dispatch " & hookName &
       " --repo-root \"$REPO_ROOT\" -- \"$@\"\n")
   result.add("  exit $?\n")
   result.add("fi\n")
-  result.add("echo \"repro hooks: repro CLI not found on PATH; skipping " &
-    hookName & "\" >&2\n")
-  result.add("exit 0\n")
+  if hookName == "pre-push":
+    result.add("echo \"repro hooks: hook protocol mismatch; run 'repro hooks ensure --vcs $REPO_ROOT' and retry\" >&2\n")
+    result.add("exit 1\n")
+  else:
+    result.add("echo \"repro hooks: repro CLI not found on PATH; skipping " &
+      hookName & "\" >&2\n")
+    result.add("exit 0\n")
 
 type
   VcsHookEnsureOutcome* = enum
     ## M17 status codes for ``repro hooks ensure --vcs``. Distinct from
     ## the M18+ runtime outcomes the dispatcher itself can return.
-    vheoAlreadyUpToDate     ## Dispatcher + managed body already match canonical content.
-    vheoInstalled           ## A fresh install or a missing file was created.
-    vheoChainedUserHook     ## A pre-existing non-managed hook was preserved as ``<name>.repro-local``.
-    vheoRefreshedDrifted    ## Sentinel present but body diverged; rewrote canonical content.
+    vheoAlreadyUpToDate ## Dispatcher + managed body already match canonical content.
+    vheoInstalled ## A fresh install or a missing file was created.
+    vheoChainedUserHook ## A pre-existing non-managed hook was preserved as ``<name>.repro-local``.
+    vheoRefreshedDrifted ## Sentinel present but body diverged; rewrote canonical content.
 
 proc sanitizePreCommitLegacyHook(hooksDir, hookName: string): bool =
   ## RA-4: pre-commit's ``hook-impl`` shim chains into
@@ -10802,7 +10867,7 @@ proc sanitizePreCommitLegacyHook(hooksDir, hookName: string): bool =
   ## dispatcher, never a genuine user hook, so it is safe to remove.
   let legacy = hooksDir / (hookName & ".legacy")
   if fileExists(extendedPath(legacy)) and
-      fileContains(legacy, VcsDispatcherMarker):
+      isReprobuildVcsHook(legacy, hookName):
     return removeFileIfExists(legacy)
   false
 
@@ -10990,6 +11055,17 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
   ## Returns ``(mode, projectName, repos)``. ``mode`` is
   ## ``"workspace"`` when the workspace shell (workspace.toml or a
   ## resolvable project file) is present, ``"single-repo"`` otherwise.
+  # An explicitly targeted Git worktree is a single-repo hook target even when
+  # it happens to contain manifest-shaped ``projects/`` and ``repos/`` data.
+  # This is the normal shape of the manifest lock backend itself. Treating it
+  # as a workspace would enumerate non-existent ``<manifest>/<repo.path>``
+  # children, install zero hooks, and make the printed ensure remediation
+  # ineffective.
+  let explicitGitRoot = gitTopLevel(workspaceRoot)
+  if explicitGitRoot.len > 0 and
+      sameFile(explicitGitRoot, workspaceRoot):
+    result.mode = "single-repo"
+    return
   if isCompositionalWorkspaceToml(workspaceRoot):
     let workspaceToml = absolutePath(workspaceTomlPath(workspaceRoot))
     let resolved = composeManifestLayersFromFile(workspaceToml)
@@ -11038,7 +11114,7 @@ proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
   for repo in enumerated.repos:
     result.repos.add(repo.name)
   for repo in enumerated.repos:
-    if not dirExists(repo.repoPath / ".git"):
+    if gitTopLevel(repo.repoPath).len == 0:
       # Skip repos that the operator hasn't materialized yet — same
       # rule the legacy repo-workspaces installer used.
       continue
@@ -11215,7 +11291,8 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
 # ``repro check --mode=pre-push`` gate; the implementation lives further
 # down (after ``runWorkspaceLockCommand``, which the gate calls to
 # create / refresh the workspace lock).
-proc runCheckCommand*(args: openArray[string]): int
+proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
+                      hookRemoteLocation = ""): int
 proc validateCommittedLockAdvisory(repoRoot: string)
 proc runPostCommitLockCommand*(args: openArray[string]): int
 proc runCachePushCommand*(args: openArray[string]): int
@@ -11253,15 +11330,25 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
   # gate logic stays oblivious to the dispatch wrapper.
   var repoRoot = ""
   var refsFile = ""
+  var protocol = 0
+  var hookArgs: seq[string]
   var i = 1
   while i < args.len:
     let arg = args[i]
     if arg == "--":
+      if i + 1 < args.len:
+        hookArgs = @args[(i + 1) .. ^1]
       break
     if arg == "--repo-root" or arg.startsWith("--repo-root="):
       repoRoot = valueFromFlag(args, i, "--repo-root")
     elif arg == "--refs-file" or arg.startsWith("--refs-file="):
       refsFile = valueFromFlag(args, i, "--refs-file")
+    elif arg == "--protocol" or arg.startsWith("--protocol="):
+      let raw = valueFromFlag(args, i, "--protocol")
+      if raw != "2":
+        raise newException(ValueError,
+          "unsupported managed-hook protocol " & raw & " (required: 2)")
+      protocol = 2
     inc i
   case hookName
   of "pre-push":
@@ -11269,26 +11356,68 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # documented ``repro check`` surface and propagate the exit code
     # verbatim so the installed hook script can hand it back to git.
     #
-    # When no refs are being pushed the hook has nothing to gate —
-    # return 0 so dispatch stays a no-op until something is actually
-    # pushed. Two shapes reach here:
-    #   * No ``--refs-file`` at all (M17's dispatch-noop test, or a
-    #     non-git dispatch): ``refsFile.len == 0``.
-    #   * A ``--refs-file`` pointing at an EMPTY stream: the managed
-    #     body always ``cat``s stdin into ``$REFS_FILE`` (even when
-    #     empty) and always passes the flag, so the path is non-empty
-    #     but the FILE has no ref lines. git itself only fires pre-push
-    #     when refs exist; an empty stream is a direct invocation (as in
-    #     the RA-4 coexistence test) or a push git resolved to nothing.
-    # Gate the FILE's content, not just the flag's presence.
-    if refsFile.len == 0 or not fileExists(refsFile) or
-        readFile(refsFile).strip().len == 0:
+    # When no refs are being pushed the hook has nothing to gate. The managed
+    # body always creates a refs file, copies stdin into it, and passes its
+    # path, so only a proven readable file whose exact byte length is zero is
+    # an empty-stream no-op. An omitted flag, a nonexistent path, or an
+    # unreadable file is a broken protocol boundary and must fail closed.
+    if refsFile.len == 0:
+      stderr.writeLine(
+        "repro hooks: pre-push protocol requires an existing readable refs file")
+      return 1
+    if not fileExists(refsFile):
+      stderr.writeLine(
+        "repro hooks: pre-push protocol requires an existing readable refs file")
+      return 1
+    var refsBytes: string
+    try:
+      refsBytes = readFile(refsFile)
+    except CatchableError:
+      stderr.writeLine(
+        "repro hooks: pre-push protocol requires an existing readable refs file")
+      return 1
+    if refsBytes.len == 0:
       return 0
+    if protocol != PrePushProtocolVersion:
+      let resolvedRepro = getAppFilename()
+      let candidate = if repoRoot.len > 0: repoRoot else: getCurrentDir()
+      let discoveredRepo = gitTopLevel(candidate)
+      let remedyRepo =
+        if discoveredRepo.len > 0: discoveredRepo else: absolutePath(candidate)
+      stderr.writeLine("repro hooks: hook protocol mismatch; run '" &
+        resolvedRepro & " hooks ensure --vcs " & remedyRepo & "' and retry")
+      return 1
+    if hookArgs.len != 2:
+      stderr.writeLine("repro hooks: pre-push protocol 2 requires Git's " &
+        "remote name and location")
+      return 1
+    let remoteName = hookArgs[0]
+    let remoteLocation = hookArgs[1]
+    let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+    let capability = getEnv(HookCapabilityEnv)
+    # Scrub before any helper or gate work. Only the typed consumer below sees
+    # the captured value, and it deletes a successfully claimed record before
+    # returning authorization.
+    delEnv(HookCapabilityEnv)
+    delEnv(LegacyHookSentinelEnv)
+    if capability.len > 0:
+      let consumed = consumeHookCapability(identity.binaryPath, repoRoot,
+        capability, remoteName, remoteLocation, refsFile)
+      if consumed.authorized:
+        return 0
+      if not consumed.claimLost:
+        stderr.writeLine("repro hooks: nested publication capability refused: " &
+          consumed.diagnostic)
+        return 1
+      # Another concurrent managed hook won the one-shot atomic claim (or a
+      # guessed/replayed token had no pending record). With the token already
+      # scrubbed, the loser receives no exemption and must pass the exact same
+      # ordinary policy gate as a source push.
     var checkArgs = @["--mode=pre-push"]
     if repoRoot.len > 0:
       checkArgs.add("--current-repo=" & repoRoot)
     checkArgs.add("--pushed-refs=" & refsFile)
-    return runCheckCommand(checkArgs)
+    return runCheckCommand(checkArgs, remoteName, remoteLocation)
   of "post-commit":
     # M19 best-effort lock refresh. Always exits 0 even when the lock
     # writer refuses, no workspace.toml exists, or the workspace is
@@ -11329,6 +11458,12 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     return 0
 
 proc runHooksCommand(args: openArray[string]): int =
+  if args.len > 0 and args[0] == "protocol":
+    if args.len == 2 and args[1] == "--require=2":
+      stdout.writeLine("2")
+      return 0
+    raise newException(ValueError,
+      "repro hooks protocol requires exactly --require=2")
   if args.len > 0 and args[0] == "dispatch":
     let dispatchArgs =
       if args.len > 1: args[1 .. ^1]
@@ -23225,17 +23360,109 @@ proc scopeRepoPathSet(workspaceRoot: string;
     for repo in proj.repos:
       result.incl(repo.path)
 
+const GitRepositoryLocalEnv = [
+  "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR",
+  "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_NAMESPACE", "GIT_PREFIX",
+  "GIT_QUARANTINE_PATH", "GIT_REPLACE_REF_BASE"]
+
+proc scrubbedGitRepositoryEnv(): StringTableRef =
+  ## Git exports repository-local variables to hooks. In a linked worktree
+  ## GIT_DIR is an absolute per-worktree directory, so an otherwise explicit
+  ## `git -C <different-backend>` silently keeps operating on the source repo.
+  ## Every cross-repository invocation supplies its own -C and must start from
+  ## an environment with those inherited bindings removed.
+  result = newStringTable(modeCaseSensitive)
+  for key, value in envPairs(): result[key] = value
+  for key in GitRepositoryLocalEnv: result.del(key)
+
 proc gitRunPlain(identity: GitToolIdentity;
                  args: openArray[string]): tuple[code: int; output: string] =
   ## Tiny ``execCmdEx`` wrapper used by the sync observation gatherer.
   ## Shares the same shape as ``revParse`` above but takes an argv so
   ## callers don't have to quoteShell every arg.
-  var cmd = quoteShell(identity.binaryPath)
-  for arg in args:
-    cmd.add(" ")
-    cmd.add(quoteShell(arg))
-  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath})
-  (code: res.exitCode, output: res.output)
+  when defined(windows):
+    # Keep argv structured. Besides avoiding Windows command-line quoting
+    # ambiguities, drain the pipe with PeekNamedPipe: Nim 2.2's readAll stops
+    # after the first short pipe read on Windows. `git log --name-only`, for
+    # example, then yielded only its first format marker and silently made a
+    # committed lock checkout look like an unordered working-tree scan.
+    let process = startProcess(identity.binaryPath, args = @args,
+      env = scrubbedGitRepositoryEnv(),
+      options = {poStdErrToStdOut, poUsePath})
+    defer: process.close()
+    const PollSleepMs = 25
+    let outHandle = Handle(process.outputHandle)
+    var buf {.noinit.}: array[4096, char]
+    while true:
+      var bytesAvail: int32 = 0
+      let peeked = peekNamedPipe(outHandle,
+        lpTotalBytesAvail = addr bytesAvail)
+      if peeked and bytesAvail > 0:
+        var bytesRead: int32 = 0
+        let toRead = min(int(bytesAvail), buf.len).int32
+        let ok = readFile(outHandle, addr buf[0], toRead,
+          addr bytesRead, nil)
+        if ok != 0 and bytesRead > 0:
+          let previousLen = result.output.len
+          result.output.setLen(previousLen + bytesRead)
+          copyMem(addr result.output[previousLen], addr buf[0], bytesRead)
+          continue
+      result.code = process.peekExitCode()
+      if result.code != -1:
+        break
+      sleep(PollSleepMs)
+  else:
+    var cmd = quoteShell(identity.binaryPath)
+    for arg in args:
+      cmd.add(" ")
+      cmd.add(quoteShell(arg))
+    let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+      env = scrubbedGitRepositoryEnv())
+    (code: res.exitCode, output: res.output)
+
+type
+  GitWorktreeDiscovery = object
+    ok: bool
+    worktreeRoot: string
+    commonDir: string
+    diagnostic: string
+
+proc canonicalDiscoveredGitPath(repoRoot, value: string): string =
+  let candidate =
+    if value.isAbsolute: value
+    else: repoRoot / value
+  try:
+    os.normalizedPath(expandFilename(candidate))
+  except OSError:
+    os.normalizedPath(absolutePath(candidate))
+
+proc discoverGitWorktree(identity: GitToolIdentity;
+    candidate: string): GitWorktreeDiscovery =
+  ## Publication code must ask Git whether a path is a worktree. In a linked
+  ## worktree `.git` is a file, while the common directory (where capabilities
+  ## live) is elsewhere; probing `dirExists(.git)` rejects that valid layout.
+  if candidate.len == 0:
+    result.diagnostic = "empty Git worktree path"
+    return
+  let top = gitRunPlain(identity,
+    ["-C", candidate, "rev-parse", "--show-toplevel"])
+  if top.code != 0 or top.output.strip().len == 0:
+    result.diagnostic = "not a Git worktree: " & candidate
+    return
+  let common = gitRunPlain(identity,
+    ["-C", candidate, "rev-parse", "--git-common-dir"])
+  if common.code != 0 or common.output.strip().len == 0:
+    result.diagnostic = "cannot resolve Git common directory for " & candidate
+    return
+  result.worktreeRoot = canonicalDiscoveredGitPath(candidate,
+    top.output.strip())
+  result.commonDir = canonicalDiscoveredGitPath(candidate,
+    common.output.strip())
+  result.ok = result.worktreeRoot.len > 0 and result.commonDir.len > 0
+  if not result.ok:
+    result.diagnostic = "cannot canonicalize Git worktree identity for " &
+      candidate
 
 # ---- RA-1: per-repo lock resolution via Git history ------------------------
 #
@@ -23255,6 +23482,17 @@ type
     committed: bool    ## true when the file is reachable from HEAD
     commitOrder: int   ## position in `git log` (0 = newest); -1 when uncommitted
 
+  ExpectedLockRecord* = object
+    ## The operation-specific immutable coordinate. `relPath` alone is not an
+    ## identity: a syntactically valid record for another repository can be
+    ## transplanted under a matching lock filename unless name, manifest path,
+    ## and object id are all bound here before verification begins.
+    project*: string
+    repoName*: string
+    repoPath*: string
+    oid*: string
+    relPath*: string
+
 proc orderedLockCandidates(identity: GitToolIdentity;
     manifestLayerRoot, lockPrefix: string): seq[LockCandidate] =
   ## Return the lock files under ``lockPrefix`` ordered newest-first.
@@ -23263,7 +23501,7 @@ proc orderedLockCandidates(identity: GitToolIdentity;
   ## working-tree locks sort ahead of every committed one (a lock just
   ## written by the current operation is "newer" than anything in
   ## history). ``lockPrefix`` carries a trailing slash.
-  let isGit = dirExists(manifestLayerRoot / ".git")
+  let isGit = discoverGitWorktree(identity, manifestLayerRoot).ok
   var committedOrder = initTable[string, int]()
   if isGit:
     # `git log --first-parent --name-only` over the subtree yields the
@@ -23407,11 +23645,19 @@ type
   GitCheckoutLockStore* = ref object of LockStore
     identity*: GitToolIdentity
     manifestRepoRoot*: string
+    pendingExpected*: seq[ExpectedLockRecord]
 
 proc newGitCheckoutLockStore*(identity: GitToolIdentity;
     manifestRepoRoot: string): GitCheckoutLockStore =
-  GitCheckoutLockStore(identity: identity,
-    manifestRepoRoot: absolutePath(manifestRepoRoot))
+  var canonicalRoot = os.normalizedPath(absolutePath(manifestRepoRoot))
+  when defined(windows):
+    # Config files intentionally use portable forward slashes, but Nim's
+    # Windows filesystem walkers do not treat a mixed ``C:/root\subtree``
+    # path identically to the native-separator form. Canonicalize once at the
+    # backend boundary so a store routed from TOML resolves the same Git
+    # history and lock subtree as one constructed from an OS-native path.
+    canonicalRoot = canonicalRoot.replace('/', DirSep)
+  GitCheckoutLockStore(identity: identity, manifestRepoRoot: canonicalRoot)
 
 method backendId*(s: GitCheckoutLockStore): string = "git-checkout"
 
@@ -23425,9 +23671,29 @@ method putLock*(s: GitCheckoutLockStore;
   try:
     let rel = "locks/" & rec.key.project & "/" & rec.key.repo & "/" &
       rec.key.sha & ".toml"
+    let coordinates = shasFromBody(rec.body)
+    if coordinates.len != 1:
+      return failed("Git lock backend requires one exact repository " &
+        "coordinate for " & rel)
+    var expected = ExpectedLockRecord(project: rec.key.project,
+      repoName: rec.key.repo, oid: rec.key.sha, relPath: rel)
+    for repoPath, revision in coordinates:
+      if revision.toLowerAscii() != rec.key.sha.toLowerAscii():
+        return failed("lock record revision does not match its store key at " &
+          rel)
+      expected.repoPath = repoPath
+    proc rememberExpected() =
+      for item in s.pendingExpected:
+        if item.relPath == expected.relPath: return
+      s.pendingExpected.add(expected)
     let abs = s.manifestRepoRoot / rel.replace('/', DirSep)
     createDir(parentDir(abs))
-    writeFile(abs, rec.body)
+    if fileExists(abs):
+      if readFile(abs) != rec.body:
+        return failed("immutable lock record already exists with different " &
+          "content at " & rel)
+    else:
+      writeFile(abs, rec.body)
     let addRes = gitRunPlain(s.identity,
       ["-C", s.manifestRepoRoot, "add", "--", rel])
     if addRes.code != 0:
@@ -23443,6 +23709,7 @@ method putLock*(s: GitCheckoutLockStore;
     let stagedRes = gitRunPlain(s.identity,
       ["-C", s.manifestRepoRoot, "diff", "--cached", "--quiet", "--", rel])
     if stagedRes.code == 0:
+      rememberExpected()
       return ok()
     let commitRes = gitRunPlain(s.identity,
       ["-C", s.manifestRepoRoot, "commit", "--quiet", "-m",
@@ -23450,6 +23717,7 @@ method putLock*(s: GitCheckoutLockStore;
        rec.key.sha, "--", rel])
     if commitRes.code != 0:
       return failed("git commit failed: " & commitRes.output.strip())
+    rememberExpected()
     ok()
   except CatchableError as err:
     failed(err.msg)
@@ -23600,6 +23868,11 @@ type
     attempted*: bool
     diagnostic*: string
 
+  DeferredParticipationWrite = object
+    outcome: ParticipationOutcome
+    store: LockStore
+    record: StoreLockRecord
+
   StoreRoutingError* = object of CatchableError
 
 proc lockingTierLabel*(v: WorkspaceVisibility): string =
@@ -23722,11 +23995,47 @@ proc resolveRepoBackends*(locking: BootstrapLockingBody;
       asg.backendKind = asg.store.backendId()
     result.add(asg)
 
-proc routedParticipationBody(repoPath, sha: string): string =
+proc routedParticipationBody(repoName, repoPath, sha: string): string =
   ## A minimal workspace-lock-shaped body recording a single repo's pinned
   ## revision. ``shasFromBody`` (repro_lock_store) parses it back to the
   ## ``path -> revision`` map the gate/check consume.
-  "[[repo]]\npath = \"" & repoPath & "\"\nrevision = \"" & sha & "\"\n"
+  "[[repo]]\nname = \"" & repoName & "\"\npath = \"" & repoPath &
+    "\"\nrevision = \"" & sha & "\"\n"
+
+proc prepareWorkspaceParticipation(
+    assignments: seq[RepoBackendAssignment]; projectName: string;
+    repoShas: Table[string, string]): seq[DeferredParticipationWrite] =
+  for asg in assignments:
+    var outc = ParticipationOutcome(
+      repoName: asg.repoName, repoPath: asg.repoPath,
+      backendKind: asg.backendKind, tier: asg.visibility)
+    if asg.store.isNil:
+      result.add(DeferredParticipationWrite(outcome: outc))
+      continue
+    outc.backendLocation = asg.store.storeLocationLabel()
+    let sha = repoShas.getOrDefault(asg.repoPath,
+      repoShas.getOrDefault(asg.repoName, ""))
+    result.add(DeferredParticipationWrite(outcome: outc, store: asg.store,
+      record: StoreLockRecord(
+        key: StoreLockKey(project: projectName, repo: asg.repoName, sha: sha),
+        body: routedParticipationBody(asg.repoName, asg.repoPath, sha))))
+
+proc executeParticipationWrites(
+    writes: seq[DeferredParticipationWrite]): seq[ParticipationOutcome] =
+  ## This is the only durable `putLock` point used by the pre-push gate. The
+  ## caller invokes it after every read-only visibility/integrity/certificate
+  ## policy has passed, so a later policy failure cannot partially publish a
+  ## successful earlier store.
+  for write in writes:
+    var outc = write.outcome
+    if write.store.isNil:
+      result.add(outc)
+      continue
+    outc.attempted = true
+    let put = write.store.putLock(write.record)
+    outc.recorded = put.outcome == spoOk
+    outc.diagnostic = put.diagnostic
+    result.add(outc)
 
 proc recordWorkspaceParticipation*(assignments: seq[RepoBackendAssignment];
     projectName: string; repoShas: Table[string, string]):
@@ -23736,32 +24045,8 @@ proc recordWorkspaceParticipation*(assignments: seq[RepoBackendAssignment];
   ## already captured by the committed solved-graph lock, so it is not
   ## re-recorded. Every repo with a real backend gets a ``StoreLockRecord``
   ## written into that backend's own medium.
-  result = @[]
-  for asg in assignments:
-    # HL-3 — carry the repo path, resolved tier, and backend location so the
-    # gate can inspect this outcome by tier (refuse-for-shared / warn-for-
-    # personal on an unreachable backend, §6 Decision 2).
-    var outc = ParticipationOutcome(
-      repoName: asg.repoName, repoPath: asg.repoPath,
-      backendKind: asg.backendKind, tier: asg.visibility)
-    if asg.store.isNil:
-      # Committed-lock (public) repo — captured by ``repro.lock``; NOT an
-      # attempted store write, so never a backend-unreachable failure.
-      outc.recorded = false
-      outc.attempted = false
-      result.add(outc)
-      continue
-    outc.attempted = true
-    outc.backendLocation = asg.store.storeLocationLabel()
-    let sha = repoShas.getOrDefault(asg.repoPath,
-      repoShas.getOrDefault(asg.repoName, ""))
-    let rec = StoreLockRecord(
-      key: StoreLockKey(project: projectName, repo: asg.repoName, sha: sha),
-      body: routedParticipationBody(asg.repoPath, sha))
-    let put = asg.store.putLock(rec)
-    outc.recorded = put.outcome == spoOk
-    outc.diagnostic = put.diagnostic
-    result.add(outc)
+  executeParticipationWrites(
+    prepareWorkspaceParticipation(assignments, projectName, repoShas))
 
 proc loadLockingRouting*(workspaceRoot: string): BootstrapLockingBody =
   ## Read the ``[locking]`` routing table from the host bootstrap config, or an
@@ -24098,6 +24383,16 @@ proc recordRoutedParticipation*(workspaceRoot: string;
   let assignments = resolveRepoBackends(
     composed, repos, workspaceRoot, identity, identity.binaryPath)
   recordWorkspaceParticipation(assignments, projectName, repoShas)
+
+proc prepareRoutedParticipation(workspaceRoot: string;
+    repos: seq[ResolvedRepo]; repoShas: Table[string, string];
+    projectName: string; identity: GitToolIdentity):
+    seq[DeferredParticipationWrite] =
+  let composed = composeLockingRouting(workspaceRoot, identity.binaryPath)
+  if not composed.hasExplicitRoutes: return @[]
+  let assignments = resolveRepoBackends(
+    composed, repos, workspaceRoot, identity, identity.binaryPath)
+  prepareWorkspaceParticipation(assignments, projectName, repoShas)
 
 # ---------------------------------------------------------------------------
 # HL-2 (Unified-Locking-And-Hooks §6 Decision 1) — strict per-backend, tier-
@@ -26380,6 +26675,7 @@ type
 
   WorkspaceLockOutcome* = object
     report*: WorkspaceLockReport
+    deferredParticipation: seq[DeferredParticipationWrite]
 
 proc toJsonNode*(report: WorkspaceLockReport): JsonNode =
   result = newJObject()
@@ -26640,7 +26936,8 @@ proc pickTriggerRepo(resolved: ResolvedProject;
         "' declares no repos; cannot pick a trigger anchor")
   resolved.repos[0]
 
-proc executeWorkspaceLock(args: WorkspaceLockArgs): WorkspaceLockOutcome =
+proc executeWorkspaceLock(args: WorkspaceLockArgs;
+    deferParticipation = false): WorkspaceLockOutcome =
   ## End-to-end driver. (1) Resolve the project / compose layers.
   ## (2) Pick the manifest layer that owns the lock. (3) Gather
   ## live HEAD-SHA + clean/dirty + current-branch observations for
@@ -26675,7 +26972,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs): WorkspaceLockOutcome =
   for repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
     let inDirtyScope = (not scopeDirty) or repo.name in args.dirtyScopeNames
-    if not dirExists(repoPath / ".git"):
+    if not discoverGitWorktree(identity, repoPath).ok:
       if inDirtyScope:
         raise newException(ValueError,
           "repo '" & repo.path &
@@ -26789,7 +27086,39 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs): WorkspaceLockOutcome =
   # path), so the trigger-keyed monolithic file is redundant AND would drop a
   # cross-tier mix keyed on a possibly-non-team trigger repo. We skip it.
   if not composed.hasExplicitRoutes:
-    writeLockFile(lock, lockPath)
+    if lockAlreadyExisted:
+      # The path is content-addressed by the exact trigger commit and lock
+      # publication accepts canonical additions only. Re-running a gate must
+      # therefore never rewrite an already-tracked record merely because
+      # generated metadata such as ``created_at`` changed. Accept the existing
+      # immutable record only when its complete path→revision coordinate map is
+      # identical to the state we would write; otherwise fail closed instead of
+      # turning an addition into a mutable lock-history update.
+      let existingShas = shasFromBody(readFile(lockPath))
+      var sameCoordinates = existingShas.len == lock.repos.len
+      var mismatchedPaths: seq[string]
+      if sameCoordinates:
+        for entry in lock.repos:
+          if entry.path notin existingShas or
+              existingShas[entry.path] != entry.revision:
+            sameCoordinates = false
+            mismatchedPaths.add(entry.path)
+      else:
+        for entry in lock.repos:
+          if entry.path notin existingShas or
+              existingShas[entry.path] != entry.revision:
+            mismatchedPaths.add(entry.path)
+      if not sameCoordinates:
+        raise newException(ValueError,
+          "immutable lock record already exists at '" & lockPath &
+          "' with different repository coordinates" &
+          (if mismatchedPaths.len > 0:
+            " (changed paths: " & mismatchedPaths.join(", ") & ")"
+          else: "") &
+          "; keep the existing record and create a lock anchored by the " &
+          "commit that changed")
+    else:
+      writeLockFile(lock, lockPath)
     report.lockFilePath = lockPath
     report.replacedExistingEntry = lockAlreadyExisted
     for entry in lock.repos:
@@ -26811,8 +27140,12 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs): WorkspaceLockOutcome =
   # every manifest-present operation are byte-unchanged. An unrouted private
   # repo raises `StoreRoutingError` (loud, names the repo) — propagated to the
   # operator by `repro workspace lock`; the gate surfaces it as a lock-failure.
-  report.participation = recordRoutedParticipation(
-    args.workspaceRoot, lockRepos, headShas, resolved.projectName, identity)
+  if deferParticipation:
+    result.deferredParticipation = prepareRoutedParticipation(
+      args.workspaceRoot, lockRepos, headShas, resolved.projectName, identity)
+  else:
+    report.participation = recordRoutedParticipation(
+      args.workspaceRoot, lockRepos, headShas, resolved.projectName, identity)
 
   report.exitCode = 0
   result.report = report
@@ -26854,21 +27187,26 @@ proc writeWorkspaceLockReport(report: WorkspaceLockReport) =
 
 type
   LockPublishOutcome* = enum
-    lpoPublished       ## Staged locks committed AND pushed to upstream.
+    lpoPublished        ## Staged locks committed AND pushed to upstream.
     lpoNothingToPublish ## No staged lock changes; nothing to commit/push.
-    lpoRefusedDirty    ## Manifest repo dirty outside ``locks/``; refused.
-    lpoNotPublishable  ## Manifest layer is not a git checkout / has no
-                       ## upstream — this workspace is not configured to
-                       ## publish locks at all. RA-21 treats this as a
-                       ## benign best-effort skip (NOT a loud refusal):
-                       ## there is no publication boundary to honour.
-    lpoFailed          ## A real publish ATTEMPT failed (empty lock, commit
-                       ## or push error). RA-21 treats this as a loud
-                       ## refusal in the pre-push gate.
+    lpoRefusedDirty     ## Manifest repo dirty outside ``locks/``; refused.
+    lpoNotPublishable   ## Manifest layer is not a git checkout / has no
+                        ## upstream — this workspace is not configured to
+                        ## publish locks at all. RA-21 treats this as a
+                        ## benign best-effort skip (NOT a loud refusal):
+                        ## there is no publication boundary to honour.
+    lpoFailed           ## A real publish ATTEMPT failed (empty lock, commit
+                        ## or push error). RA-21 treats this as a loud
+                        ## refusal in the pre-push gate.
 
   LockPublishResult* = object
     outcome*: LockPublishOutcome
     diagnostic*: string
+    verifiedLocalHead*: string
+      ## Non-empty only when a local-only backend HEAD was proven to be a
+      ## valid additions-only lock chain before a transport failure. Callers
+      ## surface this in partial-success reports so recovery is auditable.
+
 
 proc gitPorcelainEntries(identity: GitToolIdentity;
                          repoRoot: string): seq[tuple[code, path: string]] =
@@ -26902,9 +27240,21 @@ proc pushOutputIsNonFastForward(output: string): bool =
   ## ``(non-fast-forward)`` to stderr; we fold stderr into stdout
   ## (``poStdErrToStdOut``), so match those markers case-insensitively.
   let low = output.toLowerAscii()
-  ("[rejected]" in low) and
+  (("[rejected]" in low) and
     (("non-fast-forward" in low) or ("fetch first" in low) or
-     ("behind" in low))
+     ("behind" in low))) or
+    # When the remote advances after Git advertises its old value but before
+    # receive-pack updates the ref, Git reports the same compare-and-swap race
+    # as `remote rejected ... (incorrect old value provided)` rather than the
+    # usual client-side `[rejected] (fetch first)` spelling.
+    (("remote rejected" in low) and
+      ("cannot lock ref" in low) and
+      (("incorrect old value provided" in low) or
+       # Git-for-Windows 2.47 spells the same compare-and-swap failure as
+       # "is at <new> but expected <advertised>". It is still conclusive
+       # evidence that the remote advanced after advertisement, so it enters
+       # the same verified, bounded recovery path.
+       (("is at" in low) and ("but expected" in low))))
 
 const lockPublishNonFfRetryBudget = 8
   ## RA-29: bounded re-apply attempts for a non-fast-forward (concurrent
@@ -26914,44 +27264,687 @@ const lockPublishNonFfRetryBudget = 8
   ## tip NEVER conflicts; the budget only guards against pathological churn
   ## or a genuinely wedged remote (after which we stay loud, RA-21).
 
-proc reapplyLockCommitOntoFetchedTip(identity: GitToolIdentity;
-    manifestRepoRoot, remote, remoteBranch: string):
-    tuple[ok: bool; diagnostic: string] =
-  ## RA-29 non-ff re-apply. Our HEAD already carries the lock commit. Fetch
-  ## the remote tip and REBASE our single lock commit on top of it. Because
-  ## the lock path is commit-addressed (disjoint from every other
-  ## publisher's lock), the rebase replays cleanly with no conflict — it is
-  ## an append of a new file, never an edit of a shared one. We deliberately
-  ## do NOT force-push: the rebase preserves the other publisher's lock
-  ## commit (it becomes our new base), so re-pushing is an ordinary
-  ## fast-forward that ADDS our lock without clobbering theirs.
+type
+  LockUpstream = object
+    remote: string
+    branch: string
+    display: string
+
+proc resolveLockUpstream(identity: GitToolIdentity; repoRoot: string):
+    tuple[ok: bool; target: LockUpstream; diagnostic: string] =
+  let upstreamRes = gitRunPlain(identity,
+    ["-C", repoRoot, "rev-parse", "--abbrev-ref",
+     "--symbolic-full-name", "@{u}"])
+  if upstreamRes.code != 0 or upstreamRes.output.strip().len == 0:
+    return (false, LockUpstream(),
+      "manifest repo has no upstream (@{u}); cannot publish lock")
+  let upstream = upstreamRes.output.strip()
+  let slash = upstream.find('/')
+  if slash <= 0 or slash == upstream.high:
+    return (false, LockUpstream(), "unparseable upstream ref: " & upstream)
+  (true, LockUpstream(remote: upstream[0 ..< slash],
+    branch: upstream[(slash + 1) .. ^1], display: upstream), "")
+
+proc fetchImmutableLockTip(identity: GitToolIdentity; repoRoot: string;
+    target: LockUpstream): tuple[ok: bool; oid: string; diagnostic: string] =
+  ## Fetch the exact agreed branch, then immediately capture FETCH_HEAD as an
+  ## immutable object id. Later proofs never rely on a moving symbolic tracking
+  ## ref.
   let fetchRes = gitRunPlain(identity,
-    ["-C", manifestRepoRoot, "fetch", remote, remoteBranch])
+    ["-C", repoRoot, "fetch", "--quiet", "--no-tags", target.remote,
+     "refs/heads/" & target.branch])
   if fetchRes.code != 0:
-    return (ok: false, diagnostic: "git fetch " & remote & " " &
-      remoteBranch & " failed: " & fetchRes.output.strip())
-  # Rebase our lock commit onto the just-fetched remote tip. Disjoint paths
-  # ⇒ no conflict; if a rebase somehow stops (it should not for an
-  # append-only lock), abort so we never leave a half-rebased tree.
-  let rebaseRes = gitRunPlain(identity,
-    ["-C", manifestRepoRoot, "rebase", remote & "/" & remoteBranch])
-  if rebaseRes.code != 0:
-    discard gitRunPlain(identity,
-      ["-C", manifestRepoRoot, "rebase", "--abort"])
-    return (ok: false, diagnostic: "git rebase onto " & remote & "/" &
-      remoteBranch & " failed (lock paths should be disjoint): " &
-      rebaseRes.output.strip())
-  (ok: true, diagnostic: "")
+    return (false, "", "git fetch " & target.remote & " " & target.branch &
+      " failed; check backend connectivity and credentials")
+  let tip = gitRunPlain(identity,
+    ["-C", repoRoot, "rev-parse", "FETCH_HEAD^{commit}"])
+  if tip.code != 0 or tip.output.strip().len == 0:
+    return (false, "", "fetched upstream did not resolve to a commit")
+  (true, tip.output.strip().toLowerAscii(), "")
+
+type EffectivePrePushHookKind = enum
+  ephNone
+  ephReproV2
+  ephReproIncompatible
+  ephThirdParty
+
+proc effectivePrePushHook(identity: GitToolIdentity; repoRoot: string):
+    tuple[kind: EffectivePrePushHookKind; hookPath: string;
+          diagnostic: string] =
+  let pathRes = gitRunPlain(identity,
+    ["-C", repoRoot, "rev-parse", "--git-path", "hooks/pre-push"])
+  if pathRes.code != 0 or pathRes.output.strip().len == 0:
+    return (ephNone, "", "")
+  let raw = pathRes.output.strip()
+  let path =
+    if raw.isAbsolute: os.normalizedPath(raw)
+    else: os.normalizedPath(repoRoot / raw)
+  if not fileExists(path): return (ephNone, path, "")
+  let dispatcher = readFile(path)
+  let managed = path.parentDir() / "pre-push.repro-managed"
+  let managedContent = if fileExists(managed): readFile(managed) else: ""
+  let recognizesRepro = dispatcher.contains("reprobuild hook dispatcher") or
+    dispatcher.contains("reprobuild managed pre-push hook") or
+    managedContent.contains("reprobuild managed pre-push hook")
+  # Comments/markers are discovery hints only. Authorization and orchestration
+  # require the complete canonical dispatcher/body pair and executable files;
+  # a marker-only or partially refreshed bundle is incompatible, never v2.
+  if dispatcher == vcsDispatcherContent("pre-push") and
+      managedContent == vcsManagedHookContent("pre-push") and
+      executableFile(path) and executableFile(managed):
+    return (ephReproV2, path, "")
+  if recognizesRepro:
+    return (ephReproIncompatible, path,
+      "installed Reprobuild pre-push hooks are old or partially upgraded")
+  if not executableFile(path):
+    return (ephNone, path, "")
+  (ephThirdParty, path, "")
+
+proc resolveHookReproCli(repoRoot: string): string =
+  ## Byte-for-byte equivalent of the generated managed hook's
+  ## `find_repro_cmd`, evaluated from the same repository directory. This is
+  ## shared by preflight so it cannot probe getAppFilename() while the installed
+  ## hook will later execute a different REPROBUILD_REPRO/PATH binary.
+  let configured = getEnv("REPROBUILD_REPRO")
+  if configured.len > 0:
+    let candidate =
+      if configured.isAbsolute: configured else: repoRoot / configured
+    if executableFile(candidate): return candidate
+    return ""
+  findExe("repro")
+
+proc scrubbedGitChildEnv(capability = ""; internalContext = ""):
+    StringTableRef =
+  result = scrubbedGitRepositoryEnv()
+  result.del(HookCapabilityEnv)
+  result.del(LegacyHookSentinelEnv)
+  result.del(HookDispatcherProtocolEnv)
+  result.del(InternalHookContextEnv)
+  if capability.len > 0:
+    result[HookCapabilityEnv] = capability
+  if internalContext.len > 0:
+    result[InternalHookContextEnv] = internalContext
+
+proc gitRunPlainEnv(identity: GitToolIdentity; args: openArray[string];
+    capability = ""; internalContext = ""):
+    tuple[code: int; output: string] =
+  when defined(windows):
+    # Keep the capability-bearing push on the same structured Windows process
+    # boundary as ``gitRunPlain``. Command-string execution can lose or mangle
+    # the second non-fast-forward diagnostic in a retry sequence, causing a
+    # verified race to be misclassified as a generic transport failure.
+    let process = startProcess(identity.binaryPath, args = @args,
+      env = scrubbedGitChildEnv(capability, internalContext),
+      options = {poStdErrToStdOut, poUsePath})
+    defer: process.close()
+    const PollSleepMs = 25
+    let outHandle = Handle(process.outputHandle)
+    var buf {.noinit.}: array[4096, char]
+    while true:
+      var bytesAvail: int32 = 0
+      let peeked = peekNamedPipe(outHandle,
+        lpTotalBytesAvail = addr bytesAvail)
+      if peeked and bytesAvail > 0:
+        var bytesRead: int32 = 0
+        let toRead = min(int(bytesAvail), buf.len).int32
+        let ok = readFile(outHandle, addr buf[0], toRead,
+          addr bytesRead, nil)
+        if ok != 0 and bytesRead > 0:
+          let previousLen = result.output.len
+          result.output.setLen(previousLen + bytesRead)
+          copyMem(addr result.output[previousLen], addr buf[0], bytesRead)
+          continue
+      result.code = process.peekExitCode()
+      if result.code != -1:
+        break
+      sleep(PollSleepMs)
+  else:
+    var cmd = quoteShell(identity.binaryPath)
+    for arg in args:
+      cmd.add(" " & quoteShell(arg))
+    let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+      env = scrubbedGitChildEnv(capability, internalContext))
+    (res.exitCode, res.output)
+
+proc configuredPushLocation(identity: GitToolIdentity; repoRoot,
+    remote: string): tuple[ok: bool; value: string; diagnostic: string] =
+  let url = gitRunPlain(identity,
+    ["-C", repoRoot, "remote", "get-url", "--push", remote])
+  if url.code != 0 or url.output.strip().len == 0:
+    return (false, "", "configured push location is unavailable for remote " &
+      remote)
+  # The caller never logs ``value``. It is consumed only in-memory for the
+  # credential-free digest inside the typed capability.
+  (true, url.output.strip(), "")
+
+proc pushLockRef(identity: GitToolIdentity; repoRoot: string;
+    target: LockUpstream; remoteOldOid: string):
+    tuple[code: int; output: string] =
+  let hook = effectivePrePushHook(identity, repoRoot)
+  if hook.kind == ephReproIncompatible:
+    return (1, hook.diagnostic & "; run '" & getAppFilename() &
+      " hooks ensure --vcs " & repoRoot & "'")
+  var capability = ""
+  if hook.kind == ephReproV2:
+    let location = configuredPushLocation(identity, repoRoot, target.remote)
+    if not location.ok: return (1, location.diagnostic)
+    let head = gitRunPlain(identity,
+      ["-C", repoRoot, "rev-parse", "HEAD^{commit}"])
+    if head.code != 0: return (1, "cannot observe lock backend HEAD")
+    let issued = issueHookCapability(identity.binaryPath, repoRoot,
+      target.remote, location.value, "HEAD", head.output.strip(),
+      "refs/heads/" & target.branch, remoteOldOid)
+    if not issued.ok: return (1, issued.diagnostic)
+    capability = issued.token
+  try:
+    result = gitRunPlainEnv(identity,
+      ["-C", repoRoot, "push", target.remote, "HEAD:" & target.branch],
+      capability)
+  finally:
+    # Normal return, Git error, and local exceptions all remove an unclaimed
+    # pending record. POSIX issueHookCapability also arms an async-signal-safe
+    # unlinkat cleanup for HUP/INT/TERM while this child is outstanding.
+    if capability.len > 0:
+      discardHookCapability(identity.binaryPath, repoRoot, capability)
+
+proc isFullHexOid(value: string; expectedLength: int): bool =
+  if value.len != expectedLength: return false
+  for ch in value:
+    if ch notin {'0'..'9', 'a'..'f', 'A'..'F'}: return false
+  true
+
+proc minimalRoutedRepoName(body: string): string =
+  ## Routed participation records are intentionally tiny, but the repository
+  ## coordinate still has to be explicit so a valid SHA for repo A cannot be
+  ## moved under repo B's lock path. Reject duplicates and non-canonical quoted
+  ## scalars rather than guessing through a permissive parser.
+  var seen = false
+  for raw in body.splitLines():
+    let line = raw.strip()
+    if not line.startsWith("name"): continue
+    let eq = line.find('=')
+    if eq <= 0 or line[0 ..< eq].strip() != "name" or seen: return ""
+    let value = line[(eq + 1) .. ^1].strip()
+    if value.len < 2 or value[0] != '"' or value[^1] != '"': return ""
+    let decoded = value[1 ..< value.high]
+    if decoded.len == 0 or '\\' in decoded or '/' in decoded or
+        decoded == "." or decoded == "..": return ""
+    result = decoded
+    seen = true
+  if not seen: result = ""
+
+proc canonicalRepoCoordinate(value: string): bool =
+  if value.len == 0 or value.isAbsolute or '\0' in value: return false
+  # A manifest-less single-repository workspace uses `.` as its canonical
+  # root coordinate. It is not traversal: it names the workspace root itself.
+  if value == ".": return true
+  let normalized = value.replace('\\', '/')
+  if normalized.startsWith("/") or normalized.endsWith("/"): return false
+  for part in normalized.split('/'):
+    if part.len == 0 or part == "." or part == "..": return false
+  true
+
+proc verifyLockRecordPath(identity: GitToolIdentity; repoRoot, commit,
+    relPath, objectFormat: string;
+    expected = none(ExpectedLockRecord)):
+    tuple[ok: bool; diagnostic: string] =
+  let parts = relPath.replace('\\', '/').split('/')
+  if parts.len != 4 or parts[0] != "locks" or
+      not parts[3].endsWith(".toml"):
+    return (false, "non-canonical lock record path: " & relPath)
+  let oid = parts[3][0 ..< parts[3].len - ".toml".len]
+  let oidLength = if objectFormat == "sha256": 64 else: 40
+  if not isFullHexOid(oid, oidLength):
+    return (false, "lock record filename is not a full " & objectFormat &
+      " object id: " & relPath)
+  if expected.isSome:
+    let wanted = expected.get()
+    if relPath != wanted.relPath or parts[1] != wanted.project or
+        parts[2] != wanted.repoName or
+        oid.toLowerAscii() != wanted.oid.toLowerAscii():
+      return (false, "lock record path does not match the exact operation " &
+        "coordinate: " & relPath)
+    if not canonicalRepoCoordinate(wanted.repoPath):
+      return (false, "operation supplied a non-canonical repository path: " &
+        wanted.repoPath)
+  let show = gitRunPlain(identity,
+    ["-C", repoRoot, "show", commit & ":" & relPath])
+  if show.code != 0 or show.output.len == 0:
+    return (false, "lock record blob is missing or empty: " & relPath)
+  let temp = createTempFile("repro-lock-record-", ".toml")
+  let tempPath = temp.path
+  try:
+    temp.cfile.write(show.output)
+    temp.cfile.close()
+    var triggerMatches = false
+    try:
+      let lock = readLock(tempPath)
+      if lock.lock.project != parts[1]:
+        return (false, "lock project does not match its path: " & relPath)
+      for entry in lock.repo:
+        let coordinateMatches =
+          if expected.isSome:
+            entry.name == expected.get().repoName and
+              entry.path == expected.get().repoPath and
+              entry.revision.toLowerAscii() == expected.get().oid.toLowerAscii()
+          else:
+            entry.name == parts[2] and canonicalRepoCoordinate(entry.path) and
+              entry.revision.toLowerAscii() == oid.toLowerAscii()
+        if coordinateMatches:
+          triggerMatches = true
+          break
+    except CatchableError as workspaceLockError:
+      # Explicitly routed git-checkout backends carry the established minimal
+      # ``[[repo]] path/revision`` record shape rather than a complete
+      # ``reprobuild.workspace.lock.v1`` document. It is still typed by the
+      # canonical ``locks/<project>/<repo>/<sha>.toml`` store key. Parse it
+      # through the same reader used by routed lock consumers and require one
+      # non-empty repo coordinate bound to the exact path SHA.
+      let routed = shasFromBody(show.output)
+      let routedName = minimalRoutedRepoName(show.output)
+      if routed.len != 1 or routedName != parts[2]:
+        return (false, "lock record parse/integrity failure at " & relPath &
+          ": " & workspaceLockError.msg)
+      for repoPath, revision in routed:
+        let coordinateMatches =
+          if expected.isSome:
+            repoPath == expected.get().repoPath and
+              routedName == expected.get().repoName and
+              revision.toLowerAscii() == expected.get().oid.toLowerAscii()
+          else:
+            canonicalRepoCoordinate(repoPath) and
+              revision.toLowerAscii() == oid.toLowerAscii()
+        if coordinateMatches:
+          triggerMatches = true
+    if not triggerMatches:
+      return (false, "lock trigger identity does not match its path: " & relPath)
+  except CatchableError as err:
+    return (false, "lock record parse/integrity failure at " & relPath &
+      ": " & err.msg)
+  finally:
+    try: removeFile(tempPath)
+    except CatchableError: discard
+  (true, "")
+
+proc expectedLockRecordFromBody(relPath, body: string):
+    Option[ExpectedLockRecord] =
+  ## Compatibility seam for explicit `repro workspace lock` and the exported
+  ## low-level publisher. Normal pre-push/repro-push paths carry the expected
+  ## coordinate from the resolved manifest instead of deriving it here.
+  let parts = relPath.replace('\\', '/').split('/')
+  if parts.len != 4 or parts[0] != "locks" or
+      not parts[3].endsWith(".toml"):
+    return none(ExpectedLockRecord)
+  let oid = parts[3][0 ..< parts[3].len - ".toml".len]
+  var repoPath = ""
+  let temp = createTempFile("repro-lock-expected-", ".toml")
+  let tempPath = temp.path
+  try:
+    temp.cfile.write(body)
+    temp.cfile.close()
+    try:
+      let lock = readLock(tempPath)
+      if lock.lock.project != parts[1]: return none(ExpectedLockRecord)
+      for entry in lock.repo:
+        if entry.name == parts[2] and
+            entry.revision.toLowerAscii() == oid.toLowerAscii():
+          repoPath = entry.path
+          break
+    except CatchableError:
+      let routed = shasFromBody(body)
+      if routed.len == 1 and minimalRoutedRepoName(body) == parts[2]:
+        for path, revision in routed:
+          if revision.toLowerAscii() == oid.toLowerAscii(): repoPath = path
+  finally:
+    try: removeFile(tempPath)
+    except CatchableError: discard
+  if not canonicalRepoCoordinate(repoPath): return none(ExpectedLockRecord)
+  some(ExpectedLockRecord(project: parts[1], repoName: parts[2],
+    repoPath: repoPath, oid: oid, relPath: relPath))
+
+proc verifyLockBlobAt(identity: GitToolIdentity; repoRoot, commit,
+    relPath: string): tuple[ok: bool; diagnostic: string] =
+  let tree = gitRunPlain(identity,
+    ["-C", repoRoot, "ls-tree", commit, "--", relPath])
+  if tree.code != 0 or tree.output.strip().len == 0:
+    return (false, "expected lock record is not reachable at " & commit &
+      ": " & relPath)
+  let fields = tree.output.strip().splitWhitespace()
+  if fields.len < 3 or fields[0] != "100644" or fields[1] != "blob":
+    return (false, "expected lock record has an unsafe Git mode/type: " &
+      relPath)
+  (true, "")
+
+proc verifyExpectedRecordCoordinatesAt(identity: GitToolIdentity;
+    repoRoot, commit: string;
+    expected: openArray[ExpectedLockRecord]):
+    tuple[ok: bool; diagnostic: string] =
+  if expected.len == 0:
+    return (false, "no expected lock records were available to verify")
+  for item in expected:
+    let path = item.relPath
+    let blob = verifyLockBlobAt(identity, repoRoot, commit, path)
+    if not blob.ok: return blob
+    let format = storageObjectFormat(identity.binaryPath, repoRoot)
+    if format.len == 0:
+      return (false, "cannot determine backend Git object format")
+    let record = verifyLockRecordPath(identity, repoRoot, commit, path, format,
+      some(item))
+    if not record.ok: return record
+  (true, "")
+
+proc verifyExpectedLocksAt(identity: GitToolIdentity; repoRoot, commit: string;
+    expected: openArray[ExpectedLockRecord]):
+    tuple[ok: bool; diagnostic: string] =
+  let coordinates = verifyExpectedRecordCoordinatesAt(identity, repoRoot,
+    commit, expected)
+  if not coordinates.ok: return coordinates
+  for item in expected:
+    let path = item.relPath
+    let localTree = gitRunPlain(identity,
+      ["-C", repoRoot, "ls-tree", "HEAD", "--", path])
+    let remoteTree = gitRunPlain(identity,
+      ["-C", repoRoot, "ls-tree", commit, "--", path])
+    if localTree.code != 0 or remoteTree.code != 0 or
+        localTree.output.strip().len == 0 or
+        remoteTree.output.strip().len == 0:
+      return (false, "could not compare expected lock blob at " & path)
+    let localFields = localTree.output.strip().splitWhitespace()
+    let remoteFields = remoteTree.output.strip().splitWhitespace()
+    if localFields.len < 3 or remoteFields.len < 3 or
+        localFields[2] != remoteFields[2]:
+      return (false, "upstream lock blob differs from local expected record: " &
+        path)
+  (true, "")
+
+proc verifyLockOnlyAheadChain(identity: GitToolIdentity; repoRoot, base,
+    head: string; expected: openArray[ExpectedLockRecord];
+    requireAllExpected = true; rejectUnexpected = false;
+    restrictToExpectedCoordinates = false):
+    tuple[ok: bool; diagnostic: string] =
+  let format = storageObjectFormat(identity.binaryPath, repoRoot)
+  if format.len == 0:
+    return (false, "cannot determine backend Git object format")
+  let ancestry = gitRunPlain(identity,
+    ["-C", repoRoot, "merge-base", "--is-ancestor", base, head])
+  if ancestry.code != 0:
+    return (false, "local backend HEAD is not a fast-forward of fetched upstream")
+  let commitsRes = gitRunPlain(identity,
+    ["-C", repoRoot, "rev-list", "--reverse", base & ".." & head])
+  if commitsRes.code != 0:
+    return (false, "could not enumerate local backend ahead commits")
+  let commits = commitsRes.output.splitLines().filterIt(it.strip().len > 0)
+  if commits.len == 0:
+    return (false, "backend is not ahead of the fetched upstream")
+  var added: HashSet[string]
+  for rawCommit in commits:
+    let commit = rawCommit.strip()
+    let diff = gitRunPlain(identity,
+      ["-C", repoRoot, "diff-tree", "--no-commit-id", "--name-status",
+       "-r", "--no-renames", commit & "^", commit])
+    if diff.code != 0:
+      return (false, "could not inspect backend ahead commit " & commit)
+    var touched = 0
+    for rawLine in diff.output.splitLines():
+      if rawLine.len == 0: continue
+      let fields = rawLine.split('\t')
+      if fields.len != 2 or fields[0] != "A":
+        return (false, "backend ahead chain is not additions-only at " &
+          commit &
+          ": " & rawLine)
+      let path = fields[1]
+      if not pathIsUnderLocks(path):
+        return (false, "backend ahead chain touches outside locks/: " & path)
+      var exact = none(ExpectedLockRecord)
+      for item in expected:
+        if item.relPath == path:
+          exact = some(item)
+          break
+      if rejectUnexpected and exact.isNone:
+        return (false, "backend ahead chain contains an unexpected lock " &
+          "record: " & path)
+      if exact.isNone and restrictToExpectedCoordinates:
+        let parts = path.replace('\\', '/').split('/')
+        if parts.len == 4 and parts[0] == "locks" and
+            parts[3].endsWith(".toml"):
+          let oid = parts[3][0 ..< parts[3].len - ".toml".len]
+          for item in expected:
+            if item.project == parts[1] and item.repoName == parts[2]:
+              exact = some(ExpectedLockRecord(project: item.project,
+                repoName: item.repoName, repoPath: item.repoPath, oid: oid,
+                relPath: path))
+              break
+        if exact.isNone:
+          return (false, "backend ahead chain contains a lock record outside " &
+            "the expected repository coordinates: " & path)
+      let record = verifyLockRecordPath(identity, repoRoot, commit, path,
+        format, exact)
+      if not record.ok: return record
+      let blob = verifyLockBlobAt(identity, repoRoot, commit, path)
+      if not blob.ok: return blob
+      added.incl(path)
+      inc touched
+    if touched == 0:
+      return (false, "backend ahead commit contains no lock additions: " & commit)
+  if requireAllExpected:
+    for item in expected:
+      let path = item.relPath
+      if path notin added:
+        # Expected records may predate this ahead chain, but they still must be
+        # present in HEAD. Reachability, not re-addition, is the invariant.
+        let blob = verifyLockBlobAt(identity, repoRoot, head, path)
+        if not blob.ok: return blob
+  (true, "")
+
+proc rebaseVerifiedLockChain(identity: GitToolIdentity; repoRoot, oldBase,
+    newBase: string; expected: openArray[ExpectedLockRecord]):
+    tuple[ok: bool; diagnostic: string] =
+  let branch = gitRunPlain(identity,
+    ["-C", repoRoot, "symbolic-ref", "-q", "HEAD"])
+  if branch.code != 0 or not branch.output.strip().startsWith("refs/heads/"):
+    return (false, "lock backend must remain on a named branch for rebase")
+  let branchRef = branch.output.strip()
+  let upstream = gitRunPlain(identity,
+    ["-C", repoRoot, "rev-parse", "--symbolic-full-name", "@{u}"])
+  if upstream.code != 0 or upstream.output.strip().len == 0:
+    return (false, "cannot preserve lock backend upstream during rebase")
+  let upstreamRef = upstream.output.strip()
+  let head = gitRunPlain(identity,
+    ["-C", repoRoot, "rev-parse", "--verify", "HEAD^{commit}"])
+  if head.code != 0: return (false, "cannot observe backend HEAD before rebase")
+  let expectedOldHead = head.output.strip().toLowerAscii()
+  let verified = verifyLockOnlyAheadChain(identity, repoRoot, oldBase,
+    expectedOldHead, expected)
+  if not verified.ok: return verified
+  let unchanged = gitRunPlain(identity,
+    ["-C", repoRoot, "rev-parse", "--verify", "HEAD^{commit}"])
+  if unchanged.code != 0 or
+      unchanged.output.strip().toLowerAscii() != expectedOldHead:
+    return (false, "lock backend HEAD changed after verification; refusing rebase")
+  let rebase = gitRunPlain(identity,
+    ["-C", repoRoot, "rebase", "--onto", newBase, oldBase])
+  if rebase.code != 0:
+    discard gitRunPlain(identity, ["-C", repoRoot, "rebase", "--abort"])
+    return (false, "verified lock-only rebase failed: " & rebase.output.strip())
+  let branchAfter = gitRunPlain(identity,
+    ["-C", repoRoot, "symbolic-ref", "-q", "HEAD"])
+  let upstreamAfter = gitRunPlain(identity,
+    ["-C", repoRoot, "rev-parse", "--symbolic-full-name", "@{u}"])
+  if branchAfter.code != 0 or branchAfter.output.strip() != branchRef or
+      upstreamAfter.code != 0 or upstreamAfter.output.strip() != upstreamRef:
+    return (false, "verified rebase did not preserve branch/upstream identity")
+  let newHead = gitRunPlain(identity, ["-C", repoRoot, "rev-parse", "HEAD"])
+  if newHead.code != 0: return (false, "cannot observe backend HEAD after rebase")
+  verifyLockOnlyAheadChain(identity, repoRoot, newBase,
+    newHead.output.strip(), expected)
+
+proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
+    target: LockUpstream;
+    expected: openArray[ExpectedLockRecord]): LockPublishResult =
+  ## Complete or resume a lock publication from observed Git state. Success is
+  ## reported only after re-fetching the exact upstream ref and proving both
+  ## local-HEAD reachability and every expected lock blob at the immutable tip.
+  result.outcome = lpoFailed
+  for entry in gitPorcelainEntries(identity, repoRoot):
+    # Recovery starts only from an exact clean index/worktree. A pathname being
+    # under locks/ is not sufficient: modified, deleted, renamed, symlinked, or
+    # unrelated untracked lock files are user state and must never be swept into
+    # a resumed publication.
+    result.diagnostic = "backend has uncommitted state (" & entry.code & " " &
+      entry.path & "); refusing verified lock recovery"
+    return
+  let localHeadBefore = gitRunPlain(identity,
+    ["-C", repoRoot, "rev-parse", "HEAD^{commit}"])
+  if localHeadBefore.code != 0:
+    result.diagnostic = "cannot observe local backend HEAD"
+    return
+  let localFormat = storageObjectFormat(identity.binaryPath, repoRoot)
+  if localFormat.len == 0:
+    result.diagnostic = "cannot determine backend Git object format"
+    return
+  for item in expected:
+    let path = item.relPath
+    let blob = verifyLockBlobAt(identity, repoRoot,
+      localHeadBefore.output.strip(), path)
+    if not blob.ok:
+      result.diagnostic = blob.diagnostic
+      return
+    let record = verifyLockRecordPath(identity, repoRoot,
+      localHeadBefore.output.strip(), path, localFormat, some(item))
+    if not record.ok:
+      result.diagnostic = record.diagnostic
+      return
+  var fetched = fetchImmutableLockTip(identity, repoRoot, target)
+  if not fetched.ok:
+    result.diagnostic = fetched.diagnostic
+    return
+  var base = fetched.oid
+  let initialHeadRes = gitRunPlain(identity,
+    ["-C", repoRoot, "rev-parse", "HEAD^{commit}"])
+  if initialHeadRes.code != 0:
+    result.diagnostic = "cannot observe local backend HEAD"
+    return
+  let initialHead = initialHeadRes.output.strip().toLowerAscii()
+  var operationExpected = @expected
+  if gitRunPlain(identity,
+      ["-C", repoRoot, "merge-base", "--is-ancestor", initialHead,
+       base]).code == 0:
+    if operationExpected.len > 0:
+      let remoteProof = verifyExpectedLocksAt(identity, repoRoot, base,
+        operationExpected)
+      if not remoteProof.ok:
+        result.diagnostic = remoteProof.diagnostic
+        return
+    result.outcome = lpoNothingToPublish
+    result.diagnostic =
+      if operationExpected.len > 0:
+        "expected lock records are already reachable from " & target.display
+      else:
+        "backend HEAD is already reachable from " & target.display
+    return
+
+  # An empty operation binding is sufficient to prove an idle/behind backend
+  # is a no-op, but it can never authorize publishing an ahead chain. Without
+  # exact records there is no operation-scoped identity proof for those local
+  # commits, even when their paths happen to look lock-shaped.
+  if operationExpected.len == 0:
+    result.diagnostic = "no exact operation lock records were supplied"
+    return
+
+  var verified = verifyLockOnlyAheadChain(identity, repoRoot, base,
+    initialHead, operationExpected)
+  if not verified.ok:
+    # Recovery begins from one immutable fetch. If local and remote history
+    # were already divergent at that point, this invocation did not observe a
+    # push race and must not mutate either branch. Bounded rebase is permitted
+    # only after our own later push returns a non-fast-forward rejection.
+    result.diagnostic = "unverified local backend state: " & verified.diagnostic
+    return
+  let verifiedHead = gitRunPlain(identity,
+    ["-C", repoRoot, "rev-parse", "HEAD^{commit}"])
+  if verifiedHead.code == 0:
+    result.verifiedLocalHead = verifiedHead.output.strip().toLowerAscii()
+
+  var attempt = 0
+  while true:
+    # A fresh one-use capability is minted for each exact Git child. Rebase
+    # retries change HEAD, so the next loop iteration necessarily receives a
+    # new binding; a previous token is never reused.
+    let pushRes = pushLockRef(identity, repoRoot, target, base)
+    if pushRes.code == 0:
+      let completed = fetchImmutableLockTip(identity, repoRoot, target)
+      if not completed.ok:
+        result.diagnostic = "push completed but remote verification failed: " &
+          completed.diagnostic
+        return
+      let currentHead = gitRunPlain(identity,
+        ["-C", repoRoot, "rev-parse", "HEAD^{commit}"])
+      if currentHead.code != 0 or gitRunPlain(identity,
+          ["-C", repoRoot, "merge-base", "--is-ancestor",
+           currentHead.output.strip(), completed.oid]).code != 0:
+        result.diagnostic = "push completed but local backend HEAD is not " &
+          "reachable from the fetched upstream tip"
+        return
+      let remoteProof = verifyExpectedLocksAt(identity, repoRoot,
+        completed.oid, operationExpected)
+      if not remoteProof.ok:
+        result.diagnostic = "push completed but " & remoteProof.diagnostic
+        return
+      result.outcome = lpoPublished
+      result.verifiedLocalHead = ""
+      result.diagnostic = "published verified lock records to " &
+          target.display &
+        (if attempt > 0: " after " & $attempt & " race rebase attempt" &
+          (if attempt == 1: "" else: "s") else: "")
+      return
+
+    if not pushOutputIsNonFastForward(pushRes.output):
+      # Leave the verified local lock-only ahead chain intact. A normal retry
+      # will re-enter this state machine and resume it.
+      result.diagnostic = "git push " & target.remote & " HEAD:" &
+        target.branch & " failed; verified local lock-only commit retained; " &
+        "check backend connectivity, credentials, and branch policy"
+      return
+    inc attempt
+    if attempt > lockPublishNonFfRetryBudget:
+      result.diagnostic = "git push " & target.remote & " HEAD:" &
+        target.branch & " kept racing after " &
+        $lockPublishNonFfRetryBudget & " verified rebase attempts"
+      return
+    let advanced = fetchImmutableLockTip(identity, repoRoot, target)
+    if not advanced.ok:
+      result.diagnostic = "non-fast-forward recovery fetch failed: " &
+        advanced.diagnostic
+      return
+    if gitRunPlain(identity,
+        ["-C", repoRoot, "merge-base", "--is-ancestor", base,
+         advanced.oid]).code != 0:
+      result.diagnostic = "remote moved non-fast-forward during lock publication"
+      return
+    let rebased = rebaseVerifiedLockChain(identity, repoRoot, base,
+      advanced.oid, operationExpected)
+    if not rebased.ok:
+      result.diagnostic = "non-fast-forward recovery refused: " &
+        rebased.diagnostic
+      return
+    base = advanced.oid
+    let refreshedHead = gitRunPlain(identity,
+      ["-C", repoRoot, "rev-parse", "HEAD^{commit}"])
+    if refreshedHead.code != 0:
+      result.diagnostic = "cannot observe backend HEAD after verified rebase"
+      return
+    result.verifiedLocalHead = refreshedHead.output.strip().toLowerAscii()
 
 proc publishWorkspaceLock*(identity: GitToolIdentity;
-                           manifestRepoRoot: string): LockPublishResult =
+                           manifestRepoRoot: string;
+                           exactExpected: seq[ExpectedLockRecord] = @[]):
+                           LockPublishResult =
   ## RA-7. Commit the staged-under-``locks/`` subtree and push it to the
   ## manifest repo's upstream. Best-effort: never raises. See the block
   ## comment above for the full contract.
   result.outcome = lpoFailed
 
-  if manifestRepoRoot.len == 0 or
-      not dirExists(manifestRepoRoot / ".git"):
+  if not discoverGitWorktree(identity, manifestRepoRoot).ok:
     # The manifest layer is a plain directory, not a publishable git
     # checkout — this workspace simply has no manifest remote to publish
     # to. That is a benign skip, not a publish-attempt failure (RA-21).
@@ -26993,18 +27986,36 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
 
   # Collect the staged lock paths and reject empty/zero-byte locks.
   let stagedRes = gitRunPlain(identity,
-    ["-C", manifestRepoRoot, "diff", "--cached", "--name-only", "--", "locks"])
+    ["-C", manifestRepoRoot, "diff", "--cached", "--name-status",
+     "--no-renames", "--", "locks"])
   var stagedLocks: seq[string]
   if stagedRes.code == 0:
     for line in stagedRes.output.splitLines():
-      let p = line.strip()
-      if p.len > 0:
-        stagedLocks.add(p)
-
-  if stagedLocks.len == 0:
-    result.outcome = lpoNothingToPublish
-    result.diagnostic = "no staged lock changes to publish"
-    return
+      if line.len == 0: continue
+      let fields = line.split('\t')
+      if fields.len != 2 or fields[0] != "A":
+        discard gitRunPlain(identity,
+          ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+        result.diagnostic = "lock publication accepts canonical additions only: " &
+          line
+        return
+      let p = fields[1]
+      let parts = p.replace('\\', '/').split('/')
+      if parts.len != 4 or parts[0] != "locks" or
+          not parts[3].endsWith(".toml"):
+        discard gitRunPlain(identity,
+          ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+        result.diagnostic = "non-canonical generated lock addition: " & p
+        return
+      let stage = gitRunPlain(identity,
+        ["-C", manifestRepoRoot, "ls-files", "--stage", "--", p])
+      let stageFields = stage.output.strip().splitWhitespace()
+      if stage.code != 0 or stageFields.len < 4 or stageFields[0] != "100644":
+        discard gitRunPlain(identity,
+          ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+        result.diagnostic = "generated lock addition has unsafe mode/type: " & p
+        return
+      stagedLocks.add(p)
 
   for rel in stagedLocks:
     let abs = manifestRepoRoot / rel.replace('/', DirSep)
@@ -27017,91 +28028,93 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
         "refusing to publish empty/zero-byte lock file: " & rel
       return
 
-  # Resolve the upstream (remote + remote branch) of the current branch.
-  let upstreamRes = gitRunPlain(identity,
-    ["-C", manifestRepoRoot, "rev-parse", "--abbrev-ref",
-     "--symbolic-full-name", "@{u}"])
-  if upstreamRes.code != 0 or upstreamRes.output.strip().len == 0:
+  let upstream = resolveLockUpstream(identity, manifestRepoRoot)
+  if not upstream.ok:
     discard gitRunPlain(identity,
       ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
-    # A manifest repo with no upstream branch is not configured to publish
-    # (e.g. a brand-new local manifest with no remote). Benign skip, not a
-    # loud publish-attempt failure (RA-21).
+    result.outcome =
+      if "no upstream" in upstream.diagnostic: lpoNotPublishable
+      else: lpoFailed
+    result.diagnostic = upstream.diagnostic
+    return
+
+  if stagedLocks.len > 0:
+    let plural = if stagedLocks.len == 1: "entry" else: "entries"
+    let message = "Publish " & $stagedLocks.len & " workspace lock " & plural
+    let commitRes = gitRunPlainEnv(identity,
+      ["-C", manifestRepoRoot, "commit", "--quiet", "-m", message,
+       "--", "locks"], internalContext = InternalLockCommitContext)
+    if commitRes.code != 0:
+      result.outcome = lpoFailed
+      result.diagnostic = "git commit failed: " & commitRes.output.strip()
+      return
+
+  var expected = exactExpected
+  for rel in stagedLocks:
+    var alreadyBound = false
+    for item in expected:
+      if item.relPath == rel:
+        alreadyBound = true
+        break
+    if alreadyBound: continue
+    let abs = manifestRepoRoot / rel.replace('/', DirSep)
+    if not fileExists(abs):
+      result.diagnostic = "staged lock disappeared before publication: " & rel
+      return
+    let inferred = expectedLockRecordFromBody(rel, readFile(abs))
+    if inferred.isNone:
+      result.diagnostic = "cannot bind staged lock to an exact repository " &
+        "coordinate: " & rel
+      return
+    expected.add(inferred.get())
+  result = publishVerifiedLockState(identity, manifestRepoRoot,
+    upstream.target, expected)
+
+proc completeExpectedLockPublication*(identity: GitToolIdentity;
+    backendRoot: string;
+    expected: openArray[ExpectedLockRecord]): LockPublishResult =
+  ## Final ``repro push`` completion step. Unlike ``publishWorkspaceLock`` this
+  ## never stages, writes, or commits a lock. It proves the exact records that
+  ## the real source pre-push gates should already have produced are reachable
+  ## upstream, or resumes a previously verified lock-only ahead chain.
+  result.outcome = lpoFailed
+  if not discoverGitWorktree(identity, backendRoot).ok:
     result.outcome = lpoNotPublishable
-    result.diagnostic =
-      "manifest repo has no upstream (@{u}); cannot publish lock"
+    result.diagnostic = "lock backend root '" & backendRoot &
+      "' is not a Git checkout"
     return
-  let upstream = upstreamRes.output.strip()    # e.g. "origin/latest"
-  let slash = upstream.find('/')
-  if slash < 0:
-    discard gitRunPlain(identity,
-      ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
-    result.outcome = lpoFailed
-    result.diagnostic = "unparseable upstream ref: " & upstream
+  if expected.len == 0:
+    result.diagnostic = "no expected lock records were supplied"
     return
-  let remote = upstream[0 ..< slash]
-  let remoteBranch = upstream[(slash + 1) .. ^1]
-
-  let plural = if stagedLocks.len == 1: "entry" else: "entries"
-  let message = "Publish " & $stagedLocks.len & " workspace lock " & plural
-  let commitRes = gitRunPlain(identity,
-    ["-C", manifestRepoRoot, "commit", "--quiet", "-m", message,
-     "--", "locks"])
-  if commitRes.code != 0:
-    result.outcome = lpoFailed
-    result.diagnostic = "git commit failed: " & commitRes.output.strip()
+  let upstream = resolveLockUpstream(identity, backendRoot)
+  if not upstream.ok:
+    result.outcome =
+      if "no upstream" in upstream.diagnostic: lpoNotPublishable
+      else: lpoFailed
+    result.diagnostic = upstream.diagnostic
     return
+  result = publishVerifiedLockState(identity, backendRoot, upstream.target,
+    expected)
 
-  # RA-29: push with a bounded non-fast-forward retry. The first push may be
-  # rejected because a CONCURRENT publisher advanced the manifest tip between
-  # our fetch-state and our push. Locks are commit-addressed
-  # (``locks/<project>/<repo>/<sha>.toml``), so the concurrent writes touch
-  # DISJOINT paths — re-applying our lock commit onto the freshly fetched tip
-  # is conflict-free. We loop: fetch + rebase our lock commit onto the new
-  # tip + re-push (an ordinary fast-forward that ADDS our lock without
-  # clobbering theirs — NEVER a force-push). A non-ff race is therefore
-  # invisible to the user. Any OTHER push failure, or exhausting the retry
-  # budget, stays LOUD (``lpoFailed``) per RA-21.
-  var attempt = 0
-  var lastPushOutput = ""
-  while true:
-    let pushRes = gitRunPlain(identity,
-      ["-C", manifestRepoRoot, "push", remote, "HEAD:" & remoteBranch])
-    if pushRes.code == 0:
-      break
-    lastPushOutput = pushRes.output.strip()
-    # Only a non-fast-forward (concurrent publisher) is retryable. Any other
-    # push error (auth, unwritable upstream, missing remote) is a genuine
-    # failure: stay loud immediately.
-    if not pushOutputIsNonFastForward(pushRes.output):
-      result.outcome = lpoFailed
-      result.diagnostic =
-        "git push " & remote & " HEAD:" & remoteBranch & " failed: " &
-          lastPushOutput
-      return
-    inc attempt
-    if attempt > lockPublishNonFfRetryBudget:
-      result.outcome = lpoFailed
-      result.diagnostic =
-        "git push " & remote & " HEAD:" & remoteBranch &
-        " kept getting non-fast-forward after " &
-        $lockPublishNonFfRetryBudget & " re-apply attempts: " & lastPushOutput
-      return
-    # Re-apply our disjoint lock commit onto the advanced tip and retry.
-    let reapply = reapplyLockCommitOntoFetchedTip(
-      identity, manifestRepoRoot, remote, remoteBranch)
-    if not reapply.ok:
-      result.outcome = lpoFailed
-      result.diagnostic =
-        "non-fast-forward re-apply failed: " & reapply.diagnostic
-      return
-
-  result.outcome = lpoPublished
-  result.diagnostic =
-    "published " & $stagedLocks.len & " lock " & plural & " to " & upstream &
-    (if attempt > 0: " (after " & $attempt &
-      " non-fast-forward re-apply attempt" &
-      (if attempt == 1: "" else: "s") & ")" else: "")
+proc observeVerifiedLocalOnlyLockHead(identity: GitToolIdentity;
+    backendRoot: string; expected: openArray[ExpectedLockRecord]): string =
+  ## Read-only partial-success evidence used after a source push fails. Return
+  ## the local backend HEAD only when it is strictly ahead of the freshly
+  ## fetched upstream and the whole ahead chain is verified lock-only.
+  if not discoverGitWorktree(identity, backendRoot).ok or expected.len == 0:
+    return ""
+  let upstream = resolveLockUpstream(identity, backendRoot)
+  if not upstream.ok: return ""
+  let fetched = fetchImmutableLockTip(identity, backendRoot, upstream.target)
+  if not fetched.ok: return ""
+  let head = gitRunPlain(identity,
+    ["-C", backendRoot, "rev-parse", "HEAD^{commit}"])
+  if head.code != 0: return ""
+  let headOid = head.output.strip().toLowerAscii()
+  if headOid == fetched.oid: return ""
+  let proof = verifyLockOnlyAheadChain(identity, backendRoot, fetched.oid,
+    headOid, expected)
+  if proof.ok: headOid else: ""
 
 # MO-3: the store-level publish outcome (``StorePutOutcome``) and the RA-7
 # publish outcome (``LockPublishOutcome``) are a 1:1, lossless mapping, so the
@@ -27124,7 +28137,8 @@ proc lockPublishFromStorePut(o: StorePutOutcome): LockPublishOutcome =
   of spoFailed: lpoFailed
 
 proc pushCommittedLockCommits(identity: GitToolIdentity;
-    manifestRepoRoot: string): LockPublishResult =
+    manifestRepoRoot: string;
+    expected: openArray[ExpectedLockRecord]): LockPublishResult =
   ## HL-3 — push ALREADY-COMMITTED-but-unpushed lock commits to the backend's
   ## upstream. ``GitCheckoutLockStore.putLock`` COMMITS each record as it writes
   ## it (so the git-history "latest lock" query resolves it), which means that
@@ -27139,79 +28153,22 @@ proc pushCommittedLockCommits(identity: GitToolIdentity;
   ## (unreachable/unwritable remote) stays LOUD (``lpoFailed``) for Decision 2.
   result.outcome = lpoNothingToPublish
 
-  if manifestRepoRoot.len == 0 or not dirExists(manifestRepoRoot / ".git"):
+  if not discoverGitWorktree(identity, manifestRepoRoot).ok:
     result.outcome = lpoNotPublishable
     result.diagnostic =
       "manifest repo root '" & manifestRepoRoot &
         "' is not a git checkout; cannot publish lock"
     return
 
-  # No upstream configured ⇒ nothing to push to (benign skip, like RA-7).
-  let upstreamRes = gitRunPlain(identity,
-    ["-C", manifestRepoRoot, "rev-parse", "--abbrev-ref",
-     "--symbolic-full-name", "@{u}"])
-  if upstreamRes.code != 0 or upstreamRes.output.strip().len == 0:
-    result.outcome = lpoNotPublishable
-    result.diagnostic = "manifest repo has no upstream (@{u}); cannot publish lock"
+  let upstream = resolveLockUpstream(identity, manifestRepoRoot)
+  if not upstream.ok:
+    result.outcome =
+      if "no upstream" in upstream.diagnostic: lpoNotPublishable
+      else: lpoFailed
+    result.diagnostic = upstream.diagnostic
     return
-  let upstream = upstreamRes.output.strip()
-  let slash = upstream.find('/')
-  if slash < 0:
-    result.outcome = lpoFailed
-    result.diagnostic = "unparseable upstream ref: " & upstream
-    return
-  let remote = upstream[0 ..< slash]
-  let remoteBranch = upstream[(slash + 1) .. ^1]
-
-  # Count commits on HEAD not yet on the recorded upstream tip. Zero ⇒ nothing
-  # to publish (already pushed or never committed here).
-  let aheadRes = gitRunPlain(identity,
-    ["-C", manifestRepoRoot, "rev-list", "--count", "@{u}..HEAD"])
-  if aheadRes.code != 0:
-    # Cannot compare against the upstream tip (e.g. never fetched). Fall back to
-    # attempting the push; the push result is authoritative.
-    discard
-  elif aheadRes.output.strip() == "0":
-    result.outcome = lpoNothingToPublish
-    result.diagnostic = "no unpushed lock commits to publish"
-    return
-
-  var attempt = 0
-  var lastPushOutput = ""
-  while true:
-    let pushRes = gitRunPlain(identity,
-      ["-C", manifestRepoRoot, "push", remote, "HEAD:" & remoteBranch])
-    if pushRes.code == 0:
-      break
-    lastPushOutput = pushRes.output.strip()
-    if not pushOutputIsNonFastForward(pushRes.output):
-      result.outcome = lpoFailed
-      result.diagnostic =
-        "git push " & remote & " HEAD:" & remoteBranch & " failed: " &
-          lastPushOutput
-      return
-    inc attempt
-    if attempt > lockPublishNonFfRetryBudget:
-      result.outcome = lpoFailed
-      result.diagnostic =
-        "git push " & remote & " HEAD:" & remoteBranch &
-        " kept getting non-fast-forward after " &
-        $lockPublishNonFfRetryBudget & " re-apply attempts: " & lastPushOutput
-      return
-    let reapply = reapplyLockCommitOntoFetchedTip(
-      identity, manifestRepoRoot, remote, remoteBranch)
-    if not reapply.ok:
-      result.outcome = lpoFailed
-      result.diagnostic =
-        "non-fast-forward re-apply failed: " & reapply.diagnostic
-      return
-
-  result.outcome = lpoPublished
-  result.diagnostic =
-    "pushed committed lock commits to " & upstream &
-    (if attempt > 0: " (after " & $attempt &
-      " non-fast-forward re-apply attempt" &
-      (if attempt == 1: "" else: "s") & ")" else: "")
+  result = publishVerifiedLockState(identity, manifestRepoRoot,
+    upstream.target, expected)
 
 method publishPending*(s: GitCheckoutLockStore): StorePutResult =
   ## Route to the byte-identical RA-7 ``publishWorkspaceLock`` (commit + push,
@@ -27226,9 +28183,11 @@ method publishPending*(s: GitCheckoutLockStore): StorePutResult =
   ## (same non-ff retry), so the routed backend's records actually reach its
   ## remote and a push failure stays LOUD (Decision 2). The dirty-outside /
   ## refused / failed / published outcomes of the staged path are preserved.
-  let pub = publishWorkspaceLock(s.identity, s.manifestRepoRoot)
-  if pub.outcome == lpoNothingToPublish:
-    let pushed = pushCommittedLockCommits(s.identity, s.manifestRepoRoot)
+  let pub = publishWorkspaceLock(s.identity, s.manifestRepoRoot,
+    s.pendingExpected)
+  if pub.outcome == lpoNothingToPublish and s.pendingExpected.len > 0:
+    let pushed = pushCommittedLockCommits(s.identity, s.manifestRepoRoot,
+      s.pendingExpected)
     return StorePutResult(outcome: storePutFromLockPublish(pushed.outcome),
       diagnostic: pushed.diagnostic)
   StorePutResult(outcome: storePutFromLockPublish(pub.outcome),
@@ -28174,6 +29133,8 @@ type
     # with no explicit routes (the single-tier / manifest-less common shape) and
     # for a gate that short-circuited before the lock write.
     participation*: seq[ParticipationOutcome]
+    expectedManifestRecords: seq[ExpectedLockRecord]
+    deferredPublishWrites: seq[DeferredParticipationWrite]
     exitCode*: int
 
 proc lockUpdateKindTag(kind: CheckLockUpdateKind): string =
@@ -28274,6 +29235,8 @@ type
     pushedRefsPath*: string
     json*: bool
     toolProvisioning*: ToolProvisioningMode
+    hookRemoteName*: string
+    hookRemoteLocation*: string
     skipCertificateGate*: bool
       ## TC-3 / RA-32 — suppress the certificate-coverage stage of the
       ## pre-push gate. Set ONLY by ``evaluateIssuancePreconditions`` (the
@@ -28463,9 +29426,12 @@ proc sameFilesystemPath(a, b: string): bool =
   ## Compare paths robustly across native vs forward-slash spelling.
   if a == b:
     return true
-  let
-    aN = os.normalizedPath(absolutePath(a)).replace('\\', '/')
-    bN = os.normalizedPath(absolutePath(b)).replace('\\', '/')
+  var aN = os.normalizedPath(absolutePath(a)).replace('\\', '/')
+  var bN = os.normalizedPath(absolutePath(b)).replace('\\', '/')
+  try: aN = os.normalizedPath(expandFilename(a)).replace('\\', '/')
+  except OSError: discard
+  try: bN = os.normalizedPath(expandFilename(b)).replace('\\', '/')
+  except OSError: discard
   when defined(windows):
     aN.toLowerAscii == bN.toLowerAscii
   else:
@@ -28652,7 +29618,7 @@ proc lockPathsTouchedInPush(identity: GitToolIdentity;
   ## ``currentRepo`` to read the lock file from disk.
   if refsPath.len == 0 or not fileExists(refsPath):
     return
-  if currentRepo.len == 0 or not dirExists(currentRepo / ".git"):
+  if not discoverGitWorktree(identity, currentRepo).ok:
     return
   let zeroSha = "0000000000000000000000000000000000000000"
   let lockPrefix = "locks/" & projectName & "/"
@@ -30470,14 +31436,19 @@ proc personalBackendWarning(outc: ParticipationOutcome): string =
     "' participation was not recorded — run `repro lock refresh` when it is " &
     "reachable"
 
-proc applyParticipationTierPolicy(report: var CheckReport;
-    outcomes: seq[ParticipationOutcome]) =
+proc applyParticipationTierPolicy(report: var CheckReport) =
   ## HL-3 (§6 Decision 2) — inspect each per-repo ``ParticipationOutcome`` by
   ## tier and apply the refuse-for-shared / warn-for-personal split. A failed
   ## public/team write adds a ``lock-backend-unreachable`` ``CheckFailure`` and
   ## sets ``exitCode = 2``; a failed personal write adds a ``notices`` warning
   ## and leaves ``exitCode`` unchanged. Idempotent for the empty / all-recorded
   ## case (no explicit routes ⇒ ``@[]`` ⇒ no-op, byte-identical to pre-HL-3).
+  # Snapshot before mutating the report. Passing ``report.participation`` as a
+  # second argument while also passing ``report`` by ``var`` aliases the same
+  # object; Nim may materialize the ``var`` argument through a temporary, so
+  # the failure/notice mutations are lost even though the participation array
+  # itself is present in the returned report.
+  let outcomes = report.participation
   for outc in outcomes:
     if not participationFailed(outc): continue
     if tierIsShared(outc.tier):
@@ -30573,7 +31544,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   if parsed.currentRepo.len > 0:
     for repo in resolved.repos:
       let abs = absolutePath(parsed.workspaceRoot / repo.path)
-      if abs == parsed.currentRepo:
+      if sameFilesystemPath(abs, parsed.currentRepo):
         currentRepoPath = repo.path
         currentRepoName = repo.name
         break
@@ -30581,6 +31552,43 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     parsed.workspaceRoot, workspaceLocal)
   let currentManifestLayer = findCurrentManifestLayer(
     layerLocations, parsed.currentRepo)
+
+  # Protocol v2 distinguishes the one ordinary outgoing commit Git is asking
+  # this hook to approve from unrelated unpublished dependency state.  The
+  # stream itself has already been parsed strictly by ``runCheckCommand``;
+  # evaluate it again here with the resolved manifest-agreed remote so only an
+  # exact, single, fast-forward HEAD update can receive the provisional
+  # ``outgoing-current`` classification.
+  var agreedRemoteName = ""
+  if currentRepoName.len > 0:
+    for repo in resolved.repos:
+      if repo.name == currentRepoName:
+        agreedRemoteName = gitRemoteNameFor(repo)
+        break
+  elif currentManifestLayer.isSome:
+    let upstream = gitRunPlain(identity,
+      ["-C", parsed.currentRepo, "rev-parse", "--abbrev-ref",
+       "--symbolic-full-name", "@{u}"])
+    if upstream.code == 0:
+      let slash = upstream.output.strip().find('/')
+      if slash > 0:
+        agreedRemoteName = upstream.output.strip()[0 ..< slash]
+  let outgoing =
+    if parsed.pushedRefsPath.len > 0:
+      evaluateOutgoingCurrent(identity.binaryPath,
+        parsed.currentRepo, parsed.pushedRefsPath, parsed.hookRemoteName,
+        parsed.hookRemoteLocation, agreedRemoteName)
+    else:
+      OutgoingCurrentDecision(protocolOk: true)
+  if not outgoing.protocolOk:
+    result.failures.add(CheckFailure(
+      repo: currentRepoPath,
+      property: "pre-push-protocol",
+      remediation: "reinstall the managed hooks with 'repro hooks ensure --vcs " &
+        parsed.currentRepo & "' and retry the push",
+      evidence: outgoing.diagnostic))
+    result.exitCode = 2
+    return
 
   # RA-3: no branch-name enforcement. The pushed and active branch are
   # still observed and surfaced in the report (informational), but a
@@ -30621,6 +31629,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       cleanDiagnostic: string
       pubDiagnostic: string
       branch: string
+      remoteName: string
       hasGit: bool
   var observations: seq[RepoObs]
   # MO-5 — PRIVATE repos whose source is NOT present locally (unreadable /
@@ -30634,7 +31643,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       continue
     let absRepo = parsed.workspaceRoot / repo.path
     var obs = RepoObs(name: repo.name, path: repo.path, absPath: absRepo)
-    if not dirExists(absRepo / ".git"):
+    if not discoverGitWorktree(identity, absRepo).ok:
       if repo.visibility != wvPublic:
         unreadablePrivate.add(repo)
       observations.add(obs)
@@ -30649,6 +31658,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     else:
       obs.cleanDiagnostic = cleanRes.diagnostic
     let rName = gitRemoteNameFor(repo)
+    obs.remoteName = rName
     let pubRes = queryGitState(
       isPublishedQuery(absRepo, rName), identity)
     if pubRes.status == gqsOk:
@@ -30660,6 +31670,15 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     if branchRes.code == 0:
       obs.branch = branchRes.output.strip()
     observations.add(obs)
+  if currentRepoName.len > 0:
+    for obs in observations:
+      if obs.name == currentRepoName and obs.headSha.len > 0:
+        result.expectedManifestRecords.add(ExpectedLockRecord(
+          project: resolved.projectName, repoName: obs.name,
+          repoPath: obs.path, oid: obs.headSha,
+          relPath: lockFileRepoRelativePath(
+            resolved.projectName, obs.name, obs.headSha)))
+        break
   # M4 evidence records are intentionally not folded into the gate
   # report yet — the gate carries its own short-circuiting structure
   # and the unified evidence is already exposed by ``repro workspace
@@ -30767,6 +31786,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     if parsed.currentRepo.len > 0: parsed.currentRepo
     else: parsed.workspaceRoot
   var certPushedCommit = ""
+  var deferredParticipation: seq[DeferredParticipationWrite]
   if not parsed.skipCertificateGate and
       resolved.certificatePolicy.gateMode != cgmOff:
     # The pushed commit is the current repo's HEAD. Prefer the already-
@@ -30785,6 +31805,14 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       certificateGate(result, resolved.certificatePolicy, certPushedCommit,
         certRepoPath, identity.binaryPath, currentRepoName,
         registeredKeyStorePath(parsed.workspaceRoot))
+  template finalizePoliciesAndParticipation() =
+    ## Durable stores are the final gate side effect. Certificates and every
+    ## read-only policy run first; only a passing report may execute putLock.
+    applyCertificateGate()
+    if result.exitCode == 0:
+      result.deferredPublishWrites = deferredParticipation
+      result.participation = executeParticipationWrites(deferredParticipation)
+      applyParticipationTierPolicy(result)
 
   # ---- 1. dirty ----------------------------------------------------------
   for obs in observations:
@@ -30810,11 +31838,14 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   for obs in observations:
     if not obs.hasGit:
       continue
-    if not obs.isPublished:
+    if not obs.isPublished and not
+        (outgoing.outgoingCurrent and obs.name == currentRepoName and
+         obs.headSha == outgoing.headOid):
       let evidence =
         if obs.pubDiagnostic.len > 0:
           "publish-probe-failed: " & obs.pubDiagnostic
-        else: "HEAD " & obs.headSha & " not on any remote-tracking branch"
+        else: "HEAD " & obs.headSha &
+          " not on a '" & obs.remoteName & "/*' remote-tracking branch"
       result.failures.add(CheckFailure(
         repo: obs.path,
         property: "unpublished",
@@ -30871,7 +31902,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       # publication are vacuously satisfied because there is no VCS
       # state to compare against. A future milestone can tighten this
       # if non-git overrides become disallowed.
-      if not dirExists(sourcePath / ".git"):
+      if not discoverGitWorktree(identity, sourcePath).ok:
         continue
       let cleanRes = queryGitState(isCleanQuery(sourcePath), identity)
       if cleanRes.status != gqsOk:
@@ -30939,6 +31970,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     workspaceRoot: parsed.workspaceRoot,
     toolProvisioning: parsed.toolProvisioning,
     dirtyScopeNames: scopeClosure)
+  lockArgs.triggerRepo = currentRepoName
   let manifestLayerRoot = pickManifestLayerRoot(lockArgs, workspaceLocal)
   # MO-2 — manifest-optional gate. When the workspace has NO resolved manifest
   # checkout on disk (a committed-lock-only / manifest-less workspace), there
@@ -31000,7 +32032,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       for obs in observations:
         if obs.hasGit: repoShas[obs.path] = obs.headSha
       try:
-        result.participation = recordRoutedParticipation(
+        deferredParticipation = prepareRoutedParticipation(
           parsed.workspaceRoot, inScopeRepos, repoShas,
           resolved.projectName, identity)
       except StoreRoutingError as err:
@@ -31010,15 +32042,12 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           repo: "",
           property: "lock-failure",
           remediation:
-            "add a `[[locking.route]]` entry for the unrouted private repo " &
-            "named below, then re-run `repro check`",
+          "add a `[[locking.route]]` entry for the unrouted private repo " &
+          "named below, then re-run `repro check`",
           evidence: err.msg))
         result.exitCode = 2
         return
-      # HL-3 (§6 Decision 2) — apply the refuse-for-shared / warn-for-personal
-      # split on the routed backends of a manifest-less workspace too.
-      applyParticipationTierPolicy(result, result.participation)
-    applyCertificateGate()
+    finalizePoliciesAndParticipation()
     return
   # RA-7: surface the manifest-layer root so the caller can publish
   # (commit + push) the lock after the gate passes.
@@ -31058,6 +32087,25 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   if not gateComposed.hasExplicitRoutes:
     latest = gateStore.latestLockShas(resolved.projectName)
     lockedShas = latest.shas
+    # A publication operation is anchored by the exact outgoing current-repo
+    # commit. One manifest publication commit can legitimately carry several
+    # pending lock records that post-commit hooks created at different moments;
+    # Git's name ordering inside that shared commit is not a recency ordering.
+    # Prefer the immutable record at the exact outgoing coordinate when it is
+    # already present, rather than letting an alphabetically earlier stale
+    # sibling record force a rewrite of that exact content-addressed path.
+    if outgoing.outgoingCurrent and currentRepoName.len > 0 and
+        outgoing.headOid.len > 0:
+      let exactRel = lockFileRepoRelativePath(
+        resolved.projectName, currentRepoName, outgoing.headOid)
+      let exactAbs = manifestLayerRoot / exactRel.replace('/', DirSep)
+      if fileExists(exactAbs):
+        let exactShas = shasFromBody(readFile(exactAbs))
+        if exactShas.len > 0:
+          lockedShas = exactShas
+          latest = (shas: exactShas, lockKey: StoreLockKey(
+            project: resolved.projectName, repo: currentRepoName,
+            sha: outgoing.headOid))
   else:
     var inScopeRepos: seq[ResolvedRepo] = @[]
     for repo in resolved.repos:
@@ -31201,6 +32249,18 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # neither exists there is nothing to compare — the lock must be created.
   var lockMissing = latest.lockKey.sha.len == 0 and routedBackendRepos.len == 0
   var lockStale = false
+  if outgoing.outgoingCurrent and currentRepoName.len > 0 and
+      outgoing.headOid.len > 0:
+    # A global latest lock may already describe identical workspace HEADs, but
+    # ``repro push`` completion requires an immutable record anchored by each
+    # closure member's own outgoing commit. Do not let another repo's current
+    # record suppress creation of this exact trigger record.
+    let expectedCurrent = lockFileRepoRelativePath(
+      resolved.projectName, currentRepoName, outgoing.headOid)
+    let present = gitRunPlain(identity,
+      ["-C", manifestLayerRoot, "ls-tree", "HEAD", "--", expectedCurrent])
+    if present.code != 0 or present.output.strip().len == 0:
+      lockMissing = true
   if not lockMissing:
     if lockedShas.len == 0 and committedLockPaths.len == 0:
       lockMissing = true
@@ -31237,7 +32297,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     # out), so any non-zero exit here is genuinely lock-failure.
     var lockOutcome: WorkspaceLockOutcome
     try:
-      lockOutcome = executeWorkspaceLock(lockArgs)
+      lockOutcome = executeWorkspaceLock(lockArgs, deferParticipation = true)
     except CatchableError as err:
       result.lockUpdate.kind = cluFailed
       result.lockUpdate.diagnostic = err.msg
@@ -31274,7 +32334,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     # can see WHICH backend was unreachable. Empty for the no-explicit-route
     # single-tier shape (``recordRoutedParticipation`` returns ``@[]``), so this
     # is byte-identical to pre-HL-3 there.
-    result.participation = lockOutcome.report.participation
+    deferredParticipation = lockOutcome.deferredParticipation
 
   # ---- 5. M26: lock visibility (public locks must not reference -----------
   # private-only repos) ----------------------------------------------------
@@ -31302,31 +32362,31 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # Locking and Publication"`` proscribes.
   if layerLocations.len == 0:
     result.exitCode = 0
-    applyCertificateGate()
+    finalizePoliciesAndParticipation()
     return
   if parsed.currentRepo.len == 0:
     result.exitCode = 0
-    applyCertificateGate()
+    finalizePoliciesAndParticipation()
     return
   let currentRepoAbs = parsed.currentRepo
   let currentLayer = currentManifestLayer
   if currentLayer.isNone:
     result.exitCode = 0
-    applyCertificateGate()
+    finalizePoliciesAndParticipation()
     return
   if currentLayer.get().visibility != wvPublic:
     # A non-public layer pushing locks is allowed to reference any
     # tier. The spec only blocks public-lock references to private-only
     # repos.
     result.exitCode = 0
-    applyCertificateGate()
+    finalizePoliciesAndParticipation()
     return
   let touchedLocks = lockPathsTouchedInPush(
     identity, currentRepoAbs, parsed.pushedRefsPath, resolved.projectName)
   if touchedLocks.len == 0:
     # No lock changes in this push — the rule is vacuously satisfied.
     result.exitCode = 0
-    applyCertificateGate()
+    finalizePoliciesAndParticipation()
     return
   let pathVisibility = classifyRepoPathVisibility(
     parsed.workspaceRoot, layerLocations, resolved.projectName)
@@ -31399,8 +32459,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # a failed personal write adds a warning notice and leaves the exit unchanged
   # (WARN + ALLOW). A no-explicit-route workspace has an empty ``participation``
   # ⇒ this is a byte-identical no-op there.
-  applyParticipationTierPolicy(result, result.participation)
-  applyCertificateGate()
+  finalizePoliciesAndParticipation()
 
 proc writeCheckReport(report: CheckReport) =
   ## Persist the structured JSON report at the spec-mandated location.
@@ -31423,6 +32482,11 @@ type
     tier: WorkspaceVisibility
     location: string
     store: LockStore
+    repoNames: seq[string]
+      ## Repositories assigned to this de-duplicated backend. The pre-push
+      ## publisher uses this identity set to retain exact operation records
+      ## when a previous explicit lock command already wrote/committed the
+      ## record and the current gate therefore has no deferred write.
 
 proc perBackendPublishTargets(parsed: CheckArgs; manifestLayerRoot: string;
     identity: GitToolIdentity): seq[PerBackendPublishTarget] =
@@ -31450,7 +32514,8 @@ proc perBackendPublishTargets(parsed: CheckArgs; manifestLayerRoot: string;
   var currentRepoName = ""
   if parsed.currentRepo.len > 0:
     for repo in resolved.repos:
-      if absolutePath(parsed.workspaceRoot / repo.path) == parsed.currentRepo:
+      if sameFilesystemPath(parsed.workspaceRoot / repo.path,
+          parsed.currentRepo):
         currentRepoName = repo.name
         break
   let layerLocations = enumerateManifestLayerLocations(
@@ -31472,7 +32537,7 @@ proc perBackendPublishTargets(parsed: CheckArgs; manifestLayerRoot: string;
     # An unrouted private repo already surfaced as a gate failure on the write
     # side; do not double-report here.
     return
-  var seenBackends = initHashSet[string]()
+  var backendIndexes = initTable[string, int]()
   for asg in assignments:
     if asg.store.isNil: continue          # committed-lock: repo's own push
     if storeRootMatches(asg.store, manifestLayerRoot): continue
@@ -31481,13 +32546,61 @@ proc perBackendPublishTargets(parsed: CheckArgs; manifestLayerRoot: string;
     var key = asg.backendKind
     for r in asg.store.manifestLayerRoots():
       key.add("\0" & os.normalizedPath(absolutePath(r)))
-    if key in seenBackends: continue
-    seenBackends.incl(key)
+    if backendIndexes.hasKey(key):
+      result[backendIndexes[key]].repoNames.add(asg.repoName)
+      continue
+    backendIndexes[key] = result.len
     result.add(PerBackendPublishTarget(
       backendKind: asg.backendKind, tier: asg.visibility,
-      location: asg.store.storeLocationLabel(), store: asg.store))
+      location: asg.store.storeLocationLabel(), store: asg.store,
+      repoNames: @[asg.repoName]))
 
-proc runCheckCommand*(args: openArray[string]): int =
+proc manifestBackendParticipates(parsed: CheckArgs; manifestLayerRoot: string;
+    identity: GitToolIdentity): bool =
+  ## A legacy, unrouted workspace owns all of its generated records in the
+  ## manifest checkout. With explicit tier routes, publish that checkout only
+  ## when an in-scope repo is actually assigned to it. Otherwise an empty
+  ## default manifest must not manufacture a second publication failure beside
+  ## the real routed backend failure.
+  if manifestLayerRoot.len == 0: return false
+  let composed = composeLockingRouting(parsed.workspaceRoot,
+      identity.binaryPath)
+  if not composed.hasExplicitRoutes: return true
+  var resolved: ResolvedProject
+  var workspaceLocal: Option[WorkspaceLocal]
+  try:
+    (resolved, workspaceLocal) = resolveCheckProject(parsed)
+  except CatchableError:
+    return true
+  var currentRepoName = ""
+  for repo in resolved.repos:
+    if sameFilesystemPath(parsed.workspaceRoot / repo.path,
+        parsed.currentRepo):
+      currentRepoName = repo.name
+      break
+  let layerLocations = enumerateManifestLayerLocations(
+    parsed.workspaceRoot, workspaceLocal)
+  let currentLayer = findCurrentManifestLayer(
+    layerLocations, parsed.currentRepo)
+  let scope = prePushScope(resolved, currentRepoName, currentLayer)
+  var inScope: seq[ResolvedRepo]
+  for repo in resolved.repos:
+    if scope.wholeWorkspace or repo.name in scope.names:
+      inScope.add(repo)
+  try:
+    for asg in resolveRepoBackends(
+        composed, inScope, parsed.workspaceRoot, identity,
+        identity.binaryPath):
+      if storeRootMatches(asg.store, manifestLayerRoot):
+        return true
+  except StoreRoutingError:
+    # The write/gate path reports routing errors. Keep the conservative legacy
+    # behavior here rather than silently suppressing a potentially owned store.
+    return true
+  false
+
+proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
+                      hookRemoteLocation = ""): int =
   ## ``repro check --mode=pre-push [--workspace-root=PATH]
   ## [--current-repo=PATH] [--pushed-refs=FILE]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
@@ -31499,14 +32612,30 @@ proc runCheckCommand*(args: openArray[string]): int =
   ##         develop-override cleanliness / lock) failed. Git aborts
   ##         the push.
   ##   - 1 — IO / resolve / VCS-tool failure unrelated to the gate.
-  let parsed =
+  var parsed =
     try:
       parseCheckArgs(args)
     except ValueError as err:
       stderr.writeLine("repro check: " & err.msg)
       return 1
+  parsed.hookRemoteName = hookRemoteName
+  parsed.hookRemoteLocation = hookRemoteLocation
   case parsed.mode
   of cmPrePush:
+    # A malformed pre-push stream is an unconditional protocol refusal, even
+    # outside an initialized workspace and even when HEAD is already published.
+    # Parse before the historical non-workspace no-op below.
+    if parsed.pushedRefsPath.len > 0:
+      let identity = ensureGitToolResolvable(
+        parsed.toolProvisioning, getEnv("PATH"))
+      let refs = parsePrePushRefStream(identity.binaryPath,
+        if parsed.currentRepo.len > 0: parsed.currentRepo
+        else: parsed.workspaceRoot,
+        parsed.pushedRefsPath)
+      if not refs.ok:
+        stderr.writeLine("repro check: malformed pre-push protocol: " &
+          refs.diagnostic)
+        return 2
     # RA-10: no-op outside an initialized workspace. A managed pre-push
     # hook may be installed under a half-bootstrapped or non-workspace
     # parent (a plain git repo, or a bare ``.repo/`` with no resolved
@@ -31555,79 +32684,82 @@ proc runCheckCommand*(args: openArray[string]): int =
       # workspace's personal/team-on-their-own-remote backends still publish
       # (spec §5/§9). The manifest-present behavior below is byte-identical to
       # HL-2 (same store, same policy, same offer-to-run remedy).
-      if report.manifestLayerRoot.len > 0:
-       # MO-10: route the RA-7/RA-21 pre-push publish through the abstract
-       # ``LockStore`` (mirroring the gate's already-routed lock READ and
-       # ``executePush``). The git-checkout backend's ``publishPending`` delegates
-       # to the byte-identical ``publishWorkspaceLock``; the 1:1 outcome mapping
-       # recovers the exact ``LockPublishResult`` the gate policy below branches
-       # on.
-       let publishStore: LockStore =
-        newGitCheckoutLockStore(identity, report.manifestLayerRoot)
-       let storePub = publishStore.publishPending()
-       let pub = LockPublishResult(
-        outcome: lockPublishFromStorePut(storePub.outcome),
-        diagnostic: storePub.diagnostic)
-       case pub.outcome
-       of lpoPublished:
-        stderr.writeLine("repro check: " & pub.diagnostic)
-       of lpoNothingToPublish:
-        discard
-       of lpoNotPublishable:
-        # The workspace is not configured to publish (no manifest git
-        # checkout / no upstream). There is no publication boundary to
-        # honour, so this stays a benign best-effort skip — surfaced but
-        # not gating.
-        stderr.writeLine("repro check: lock publish skipped: " &
-          pub.diagnostic)
-       of lpoRefusedDirty, lpoFailed:
-        # Loud-on-failure (RA-21): the reproducible state COULD be published
-        # but the attempt was refused (manifest dirty outside ``locks/``) or
-        # failed (commit / push / network error). A teammate must never pull
-        # a commit whose lock never reached the manifest repo, so the push is
-        # refused: record the failure and flip the gate to a non-zero exit.
-        var pub2 = pub
-        # RA-28 offer-to-run (Principle 2 "offer to run it where safe"). A
-        # PUBLISH FAILURE (``lpoFailed``: a transient commit/push/network
-        # error) has a genuinely SAFE remedy: re-running the publish only
-        # commits + pushes the ``locks/`` subtree — it never touches the
-        # operator's working trees. So we OFFER to re-run it (TTY prompt, or
-        # ``REPRO_OFFER_FIXES=1`` auto-run in non-TTY). A REFUSED-DIRTY
-        # outcome is NOT offered: clearing a manifest dirty outside
-        # ``locks/`` is the operator's decision, not a safe auto-fix — we
-        # describe the remedy and leave it to them (honest: no faked offer).
-        if pub.outcome == lpoFailed:
-          let dec = offerSafeRemedy(
-            description = "re-publish the workspace lock to the manifest repo",
-            remedyCommand = "repro push",
-            autoRun = offerFixesOptIn(),
-            isTty = isatty(stdin))
-          if dec == odRun:
-            # MO-10: the offered re-publish also routes through the store.
-            let storePub2 = publishStore.publishPending()
-            pub2 = LockPublishResult(
-              outcome: lockPublishFromStorePut(storePub2.outcome),
-              diagnostic: storePub2.diagnostic)
-            if pub2.outcome in {lpoPublished, lpoNothingToPublish}:
-              stderr.writeLine("repro check: lock re-publish succeeded: " &
-                pub2.diagnostic)
-        if pub2.outcome in {lpoPublished, lpoNothingToPublish}:
-          # The offered remedy fixed it — the gate passes; do NOT record a
-          # failure or flip the exit code.
-          if pub2.outcome == lpoPublished:
-            stderr.writeLine("repro check: " & pub2.diagnostic)
-        else:
-          let diag = "lock publication failed: " & pub2.diagnostic
-          stderr.writeLine("repro check: " & diag)
-          report.failures.add(CheckFailure(
-            repo: "",
-            property: "lock-publish-failure",
-            remediation:
+      if report.manifestLayerRoot.len > 0 and
+          manifestBackendParticipates(
+            parsed, report.manifestLayerRoot, identity):
+        # MO-10: route the RA-7/RA-21 pre-push publish through the abstract
+        # ``LockStore`` (mirroring the gate's already-routed lock READ and
+        # ``executePush``). The git-checkout backend's ``publishPending`` delegates
+        # to the byte-identical ``publishWorkspaceLock``; the 1:1 outcome mapping
+        # recovers the exact ``LockPublishResult`` the gate policy below branches
+        # on.
+        let publishStore =
+          newGitCheckoutLockStore(identity, report.manifestLayerRoot)
+        publishStore.pendingExpected = report.expectedManifestRecords
+        let storePub = publishStore.publishPending()
+        let pub = LockPublishResult(
+         outcome: lockPublishFromStorePut(storePub.outcome),
+         diagnostic: storePub.diagnostic)
+        case pub.outcome
+        of lpoPublished:
+          stderr.writeLine("repro check: " & pub.diagnostic)
+        of lpoNothingToPublish:
+          discard
+        of lpoNotPublishable:
+          # The workspace is not configured to publish (no manifest git
+          # checkout / no upstream). There is no publication boundary to
+          # honour, so this stays a benign best-effort skip — surfaced but
+          # not gating.
+          stderr.writeLine("repro check: lock publish skipped: " &
+            pub.diagnostic)
+        of lpoRefusedDirty, lpoFailed:
+          # Loud-on-failure (RA-21): the reproducible state COULD be published
+          # but the attempt was refused (manifest dirty outside ``locks/``) or
+          # failed (commit / push / network error). A teammate must never pull
+          # a commit whose lock never reached the manifest repo, so the push is
+          # refused: record the failure and flip the gate to a non-zero exit.
+          var pub2 = pub
+          # RA-28 offer-to-run (Principle 2 "offer to run it where safe"). A
+          # PUBLISH FAILURE (``lpoFailed``: a transient commit/push/network
+          # error) has a genuinely SAFE remedy: re-running the publish only
+          # commits + pushes the ``locks/`` subtree — it never touches the
+          # operator's working trees. So we OFFER to re-run it (TTY prompt, or
+          # ``REPRO_OFFER_FIXES=1`` auto-run in non-TTY). A REFUSED-DIRTY
+          # outcome is NOT offered: clearing a manifest dirty outside
+          # ``locks/`` is the operator's decision, not a safe auto-fix — we
+          # describe the remedy and leave it to them (honest: no faked offer).
+          if pub.outcome == lpoFailed:
+            let dec = offerSafeRemedy(
+              description = "re-publish the workspace lock to the manifest repo",
+              remedyCommand = "repro push",
+              autoRun = offerFixesOptIn(),
+              isTty = isatty(stdin))
+            if dec == odRun:
+              # MO-10: the offered re-publish also routes through the store.
+              let storePub2 = publishStore.publishPending()
+              pub2 = LockPublishResult(
+                outcome: lockPublishFromStorePut(storePub2.outcome),
+                diagnostic: storePub2.diagnostic)
+              if pub2.outcome in {lpoPublished, lpoNothingToPublish}:
+                stderr.writeLine("repro check: lock re-publish succeeded: " &
+                  pub2.diagnostic)
+          if pub2.outcome in {lpoPublished, lpoNothingToPublish}:
+            # The offered remedy fixed it — the gate passes; do NOT record a
+            # failure or flip the exit code.
+            if pub2.outcome == lpoPublished:
+              stderr.writeLine("repro check: " & pub2.diagnostic)
+          else:
+            let diag = "lock publication failed: " & pub2.diagnostic
+            stderr.writeLine("repro check: " & diag)
+            report.failures.add(CheckFailure(
+              repo: "",
+              property: "lock-publish-failure",
+              remediation:
               "run 'repro push' to publish the workspace lock to the manifest " &
               "repo and re-push (fix the network / non-fast-forward / " &
               "manifest-dirty cause above)",
-            evidence: pub2.diagnostic))
-          report.exitCode = 2
+              evidence: pub2.diagnostic))
+            report.exitCode = 2
 
       # HL-2/HL-3 (§6 Decision 1 target publish path + Decision 2 tier policy) —
       # per-backend publish. The manifest git-checkout above is one backend; a
@@ -31645,6 +32777,32 @@ proc runCheckCommand*(args: openArray[string]): int =
       # unchanged), per §6 Decision 2.
       for target in perBackendPublishTargets(
           parsed, report.manifestLayerRoot, identity):
+        if target.store of GitCheckoutLockStore:
+          var expected: seq[ExpectedLockRecord]
+          for write in report.deferredPublishWrites:
+            if write.store.isNil or
+                write.store.backendId() != target.store.backendId() or
+                write.store.storeLocationLabel() !=
+                  target.store.storeLocationLabel():
+              continue
+            let relPath = lockFileRepoRelativePath(write.record.key.project,
+              write.record.key.repo, write.record.key.sha)
+            let exact = expectedLockRecordFromBody(relPath, write.record.body)
+            if exact.isSome: expected.add(exact.get())
+          # A prior `repro workspace lock` may already have written and
+          # committed this operation's routed record. In that case the gate
+          # correctly produces no deferred write, but publication still has
+          # to prove/resume that exact record rather than degrading to an
+          # unbound "nothing to publish" result.
+          for exact in report.expectedManifestRecords:
+            if exact.repoName notin target.repoNames: continue
+            var present = false
+            for item in expected:
+              if item.relPath == exact.relPath:
+                present = true
+                break
+            if not present: expected.add(exact)
+          GitCheckoutLockStore(target.store).pendingExpected = expected
         let otherPub = target.store.publishPending()
         let opub = LockPublishResult(
           outcome: lockPublishFromStorePut(otherPub.outcome),
@@ -31790,14 +32948,69 @@ type
     certNotesDiagnostic: string ## TC-2: a non-fatal note-push diagnostic.
     lockPublished: bool
     lockDiagnostic: string
+    stoppedRepo: string
+    stoppedStage: string
+    verifiedLocalBackendHead: string
+    retryCommand: string
     exitCode: int
+
+  PushPreflightRepo = object
+    branch: string
+    headSha: string
+    remoteName: string
+    remoteLocationFingerprint: string
+    destinationRef: string
+    advertisementFingerprint: string
+    published: bool
+    pushable: bool
+
+  PushLockBackendPlan = object
+    root: string
+    backendKind: string
+    tier: WorkspaceVisibility
+    expected: seq[ExpectedLockRecord]
+
+  AdvertisedPushHead = object
+    oid: string
+    refName: string
+
+  FreshPushPublication = object
+    ok: bool
+    published: bool
+    pushable: bool
+    advertisementFingerprint: string
+    diagnostic: string
+
+proc protocolV2HookReady(identity: GitToolIdentity; repoRoot: string):
+    tuple[ok: bool; diagnostic: string] =
+  let hook = effectivePrePushHook(identity, repoRoot)
+  if hook.kind != ephReproV2:
+    let reason =
+      case hook.kind
+      of ephNone: "missing Reprobuild pre-push hook"
+      of ephReproIncompatible: hook.diagnostic
+      of ephThirdParty: "effective pre-push hook is not Reprobuild protocol v2"
+      of ephReproV2: ""
+    return (false, reason & "; run '" & getAppFilename() &
+      " hooks ensure --vcs " & repoRoot & "'")
+  let hookCli = resolveHookReproCli(repoRoot)
+  if hookCli.len == 0:
+    return (false, "the hook-resolved repro executable is unavailable; run '" &
+      getAppFilename() & " hooks ensure --vcs " & repoRoot & "'")
+  let probe = execCmdEx(shellCommand(@[hookCli, "hooks", "protocol",
+    "--require=2"]), options = {poStdErrToStdOut, poUsePath},
+    env = scrubbedGitChildEnv())
+  if probe.exitCode != 0 or probe.output.strip() != "2":
+    return (false, "hook protocol mismatch; run '" & getAppFilename() &
+      " hooks ensure --vcs " & repoRoot & "' and retry")
+  (true, "")
 
 proc parsePushArgs(args: openArray[string]): PushArgs =
   ## ``repro push [<project>] [--sync] [--merge|--rebase]
   ## [--certify|--no-certify] [--workspace-root=PATH] [--current-repo=PATH]
   ## [--tool-provisioning=...] [--json]``.
   result.toolProvisioning = tpmPathOnly
-  result.certify = true        ## CLI/push.md: certify by default; --no-certify opts out.
+  result.certify = true ## CLI/push.md: certify by default; --no-certify opts out.
   var wantSync = false
   var explicitFlavor = false
   var i = 0
@@ -31938,7 +33151,7 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
   result.path = repo.path
   result.action = "noop"
   let repoAbs = workspaceRoot / repo.path
-  if not dirExists(repoAbs / ".git"):
+  if not discoverGitWorktree(identity, repoAbs).ok:
     return
   let branchRes = gitRunPlain(identity,
     ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
@@ -31947,13 +33160,38 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
     return
   let branch = branchRes.output.strip()
   let rName = gitRemoteNameFor(repo)
+  let upstreamBeforeRes = gitRunPlain(identity,
+    ["-C", repoAbs, "rev-parse", "--abbrev-ref",
+     "--symbolic-full-name", "@{u}"])
+  let upstreamBefore =
+    if upstreamBeforeRes.code == 0: upstreamBeforeRes.output.strip()
+    else: ""
+  defer:
+    let branchAfterRes = gitRunPlain(identity,
+      ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
+    let branchAfter =
+      if branchAfterRes.code == 0: branchAfterRes.output.strip()
+      else: ""
+    let upstreamAfterRes = gitRunPlain(identity,
+      ["-C", repoAbs, "rev-parse", "--abbrev-ref",
+       "--symbolic-full-name", "@{u}"])
+    let upstreamAfter =
+      if upstreamAfterRes.code == 0: upstreamAfterRes.output.strip()
+      else: ""
+    if branchAfter != branch or upstreamAfter != upstreamBefore:
+      result.stopped = true
+      result.integrated = false
+      result.diagnostic = "sync changed the checked-out branch or upstream " &
+        "binding in " & repo.path
+      result.remediation = "restore branch " & branch &
+        " and its upstream, then retry 'repro push --sync'"
   # Fetch the upstream so the remote-tracking ref reflects teammate movement.
   let fetchRes = gitRunPlain(identity, ["-C", repoAbs, "fetch", "--quiet",
     rName])
   if fetchRes.code != 0:
     result.stopped = true
-    result.diagnostic = "git fetch " & rName & " failed in " & repo.path & ": " &
-      fetchRes.output.strip()
+    result.diagnostic = "git fetch " & rName & " failed in " & repo.path &
+      "; transport output was withheld because remotes may contain credentials"
     result.remediation = "check connectivity / credentials for " & repo.path &
       " then re-run 'repro push --sync'"
     return
@@ -31972,7 +33210,7 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
     ["-C", repoAbs, "merge-base", "--is-ancestor", head, upstream])
   if headInUpstream.code == 0:
     let ff = gitRunPlain(identity,
-      ["-C", repoAbs, "merge", "--ff-only", "origin/" & branch])
+      ["-C", repoAbs, "merge", "--ff-only", rName & "/" & branch])
     if ff.code != 0:
       result.stopped = true
       result.diagnostic = "fast-forward of " & repo.path & " failed: " &
@@ -31990,35 +33228,37 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
     # rather than guess. (Unreachable from the dispatcher, which only calls
     # this when a sync mode is set; kept for completeness.)
     result.stopped = true
-    result.diagnostic = repo.path & " has diverged from origin/" & branch
+    result.diagnostic = repo.path & " has diverged from " & rName & "/" & branch
     result.remediation = "run 'repro push --sync --rebase' (or --merge) to " &
-      "integrate origin/" & branch & " in " & repo.path
+      "integrate " & rName & "/" & branch & " in " & repo.path
   of psmMerge:
     let m = gitRunPlain(identity,
-      ["-C", repoAbs, "merge", "--no-edit", "origin/" & branch])
+      ["-C", repoAbs, "merge", "--no-edit", rName & "/" & branch])
     if m.code != 0:
       # Abort the half-applied merge so the tree is not left mid-conflict
       # for the operator to puzzle over an unexpected state.
       discard gitRunPlain(identity, ["-C", repoAbs, "merge", "--abort"])
       result.stopped = true
-      result.diagnostic = "merge of origin/" & branch & " into " & repo.path &
+      result.diagnostic = "merge of " & rName & "/" & branch & " into " &
+        repo.path &
         " hit a conflict: " & m.output.strip()
       result.remediation = "resolve the conflict in " & repo.path &
-        " (git -C " & repo.path & " merge origin/" & branch &
+        " (git -C " & repo.path & " merge " & rName & "/" & branch &
         "), commit, then re-run 'repro push'"
       return
     result.action = "merge"
     result.integrated = true
   of psmRebase:
     let r = gitRunPlain(identity,
-      ["-C", repoAbs, "rebase", "origin/" & branch])
+      ["-C", repoAbs, "rebase", rName & "/" & branch])
     if r.code != 0:
       discard gitRunPlain(identity, ["-C", repoAbs, "rebase", "--abort"])
       result.stopped = true
-      result.diagnostic = "rebase onto origin/" & branch & " in " & repo.path &
+      result.diagnostic = "rebase onto " & rName & "/" & branch & " in " &
+        repo.path &
         " hit a conflict: " & r.output.strip()
       result.remediation = "resolve the conflict in " & repo.path &
-        " (git -C " & repo.path & " rebase origin/" & branch &
+        " (git -C " & repo.path & " rebase " & rName & "/" & branch &
         "), then re-run 'repro push'"
       return
     result.action = "rebase"
@@ -32040,6 +33280,569 @@ proc runPushCertifyStub(report: var PushReport; certify: bool) =
   else:
     report.certifyDeferred = false
 
+proc configuredPushLocationValues(identity: GitToolIdentity; repoRoot,
+    remoteName: string): tuple[ok: bool; values: seq[string];
+                               fingerprint: string] =
+  ## Return configured push destinations only to in-memory callers. URLs may
+  ## contain embedded credentials, so neither this helper nor its callers
+  ## include Git's output or an individual URL in a diagnostic.
+  let locations = gitRunPlainEnv(identity,
+    ["-C", repoRoot, "remote", "get-url", "--push", "--all", remoteName])
+  if locations.code != 0: return
+  var digests: seq[string]
+  for line in locations.output.splitLines():
+    let value = line.strip()
+    if value.len == 0: continue
+    result.values.add(value)
+    digests.add(remoteLocationDigest(value))
+  digests.sort()
+  if result.values.len == 0: return
+  result.fingerprint = digests.join(",")
+  result.ok = true
+
+proc advertisedPushHeads(identity: GitToolIdentity; probeGitDir,
+    pushLocation: string; oidLength: int):
+    tuple[ok: bool; heads: seq[AdvertisedPushHead]] =
+  ## Read the actual advertised branch tips at one push destination. The
+  ## location is passed as structured argv after `--` and never rendered in a
+  ## command, log, or error. Malformed advertisements fail closed.
+  let advertised = gitRunPlainEnv(identity,
+    ["--git-dir=" & probeGitDir, "ls-remote", "--heads", "--", pushLocation])
+  if advertised.code != 0: return
+  for raw in advertised.output.splitLines():
+    let line = raw.strip()
+    if line.len == 0: continue
+    let fields = line.splitWhitespace()
+    if fields.len != 2 or not isFullHexOid(fields[0], oidLength) or
+        not fields[1].startsWith("refs/heads/"):
+      return
+    result.heads.add(AdvertisedPushHead(
+      oid: fields[0].toLowerAscii(), refName: fields[1]))
+  result.heads.sort(proc(a, b: AdvertisedPushHead): int =
+    result = cmp(a.refName, b.refName)
+    if result == 0: result = cmp(a.oid, b.oid))
+  result.ok = true
+
+proc observeFreshPushPublication(identity: GitToolIdentity; repoRoot,
+    remoteName, expectedLocationFingerprint, headOid,
+    destinationRef: string):
+    FreshPushPublication =
+  ## Prove publication against every actual push URL, not against fetch-side
+  ## remote-tracking refs. This is used once during global preflight and again
+  ## immediately before deciding between a no-op and `git push`.
+  ##
+  ## A push remote can have multiple push URLs and Git publishes to each one.
+  ## For an attached checkout, classify the exact destination ref that the
+  ## later ``HEAD:<branch>`` transport will update at every URL. A partially
+  ## published set is pushable only when every existing destination tip is an
+  ## ancestor of HEAD; otherwise one URL could advance before a later URL
+  ## rejects the same multi-push. For a detached checkout there is no
+  ## destination ref to update, so only the already-published case is valid:
+  ## HEAD must be reachable from some advertised branch at every URL.
+  let format = storageObjectFormat(identity.binaryPath, repoRoot)
+  let oidLength =
+    case format
+    of "sha1": 40
+    of "sha256": 64
+    else: 0
+  if oidLength == 0 or not isFullHexOid(headOid, oidLength):
+    result.diagnostic = "cannot validate the source object format"
+    return
+  let beforeLocations = configuredPushLocationValues(identity, repoRoot,
+    remoteName)
+  if not beforeLocations.ok or
+      beforeLocations.fingerprint != expectedLocationFingerprint:
+    result.diagnostic = "agreed remote location changed or became unavailable"
+    return
+
+  # Transfer any advertised objects into a disposable bare probe. Its only
+  # alternate is the source repository's existing object directory, so Git can
+  # evaluate ancestry without adding loose objects, packs, refs, FETCH_HEAD, or
+  # configuration to the source checkout/common directory.
+  let source = discoverGitWorktree(identity, repoRoot)
+  if not source.ok:
+    result.diagnostic = "cannot locate the source object store"
+    return
+  let sourceObjects = source.commonDir / "objects"
+  if not dirExists(sourceObjects):
+    result.diagnostic = "cannot locate the source object store"
+    return
+  let probeGitDir = createTempDir("repro-push-advertisement-", "")
+  defer:
+    if dirExists(probeGitDir): removeDir(probeGitDir)
+  let initialized = gitRunPlainEnv(identity, ["init", "--bare", probeGitDir])
+  if initialized.code != 0:
+    result.diagnostic = "cannot initialize an isolated publication probe"
+    return
+  let alternatesDir = probeGitDir / "objects" / "info"
+  createDir(alternatesDir)
+  if '\n' in sourceObjects or '\r' in sourceObjects:
+    result.diagnostic = "source object-store path cannot be represented safely"
+    return
+  writeFile(alternatesDir / "alternates", sourceObjects & "\n")
+
+  result.published = true
+  result.pushable = true
+  var destinationStates: seq[string]
+  for index, pushLocation in beforeLocations.values:
+    let first = advertisedPushHeads(identity, probeGitDir, pushLocation,
+      oidLength)
+    if not first.ok:
+      result.diagnostic = "push destination " & $(index + 1) &
+        " did not provide a valid branch advertisement"
+      return
+
+    var relevantHeads: seq[AdvertisedPushHead]
+    if destinationRef.len > 0:
+      for head in first.heads:
+        if head.refName == destinationRef and
+            head.oid != repeat('0', oidLength):
+          relevantHeads.add(head)
+    else:
+      relevantHeads = first.heads
+
+    # `ls-remote` gives exact destination OIDs but does not transfer their
+    # objects. Fetch only the relevant named advertised heads, without
+    # FETCH_HEAD or any local ref update, when ancestry cannot yet be
+    # evaluated locally.
+    for head in relevantHeads:
+      let available = gitRunPlainEnv(identity,
+        ["--git-dir=" & probeGitDir, "cat-file", "-e",
+         head.oid & "^{commit}"])
+      if available.code != 0:
+        let fetched = gitRunPlainEnv(identity,
+          ["--git-dir=" & probeGitDir, "fetch", "--quiet", "--no-tags",
+           "--no-write-fetch-head", "--", pushLocation, head.refName])
+        if fetched.code != 0 or gitRunPlainEnv(identity,
+            ["--git-dir=" & probeGitDir, "cat-file", "-e",
+             head.oid & "^{commit}"]).code != 0:
+          result.diagnostic = "push destination " & $(index + 1) &
+            " advertised an unverifiable branch tip"
+          return
+
+    # Detect a destination race across the object transfer. A changed
+    # advertisement is never silently reinterpreted as a no-op or a push.
+    let second = advertisedPushHeads(identity, probeGitDir, pushLocation,
+      oidLength)
+    if not second.ok or second.heads != first.heads:
+      result.diagnostic = "push destination " & $(index + 1) &
+        " changed while publication was being revalidated"
+      return
+
+    let locationId = remoteLocationDigest(pushLocation)
+    if destinationRef.len > 0:
+      var exactTip = ""
+      for advertised in second.heads:
+        if advertised.refName == destinationRef and
+            advertised.oid != repeat('0', oidLength):
+          exactTip = advertised.oid
+          break
+      destinationStates.add(locationId & "\t" & destinationRef & "\t" &
+        (if exactTip.len > 0: exactTip else: "<missing>"))
+      if exactTip.len == 0:
+        result.published = false
+      else:
+        let headInTip = gitRunPlainEnv(identity,
+          ["--git-dir=" & probeGitDir, "merge-base", "--is-ancestor",
+           headOid, exactTip]).code == 0
+        let tipInHead = gitRunPlainEnv(identity,
+          ["--git-dir=" & probeGitDir, "merge-base", "--is-ancestor",
+           exactTip, headOid]).code == 0
+        if not headInTip:
+          result.published = false
+        if not tipInHead:
+          result.pushable = false
+    else:
+      var state = locationId
+      var reachable = false
+      for advertised in second.heads:
+        state.add("\t" & advertised.refName & "\t" & advertised.oid)
+        if gitRunPlainEnv(identity,
+            ["--git-dir=" & probeGitDir, "merge-base", "--is-ancestor",
+             headOid, advertised.oid]).code == 0:
+          reachable = true
+      destinationStates.add(state)
+      if not reachable:
+        result.published = false
+        result.pushable = false
+
+  # A strict descendant is harmless only for a complete no-op. If another
+  # destination is missing or behind, ``pushable`` remains false so the caller
+  # refuses before transport instead of risking a partial plural push.
+  result.advertisementFingerprint = destinationStates.join("\n")
+
+  # Remote configuration is mutable independently of the advertisement. Read
+  # it once more so a concurrent push-URL rewrite cannot switch the following
+  # `git push` to a destination that was never checked.
+  let afterLocations = configuredPushLocationValues(identity, repoRoot,
+    remoteName)
+  if not afterLocations.ok or
+      afterLocations.fingerprint != beforeLocations.fingerprint:
+    result.diagnostic = "agreed remote location changed during revalidation"
+    return
+  result.ok = true
+
+proc preflightPushRepo(identity: GitToolIdentity; workspaceRoot: string;
+    repo: ResolvedRepo; allowSyncDivergence = false):
+    tuple[ok: bool; observed: PushPreflightRepo;
+                                stage: string; diagnostic: string;
+                                remediation: string] =
+  ## Observe every predictable source-push prerequisite before the first
+  ## closure member is transmitted. Source checkout/common-dir state is
+  ## strictly read-only: all network advertisement and object transfer happens
+  ## in a disposable bare probe with the source object directory as a
+  ## read-only alternate.
+  let repoAbs = workspaceRoot / repo.path
+  if not discoverGitWorktree(identity, repoAbs).ok:
+    return (false, PushPreflightRepo(), "checkout-preflight",
+      "no Git checkout at " & repo.path,
+      "run 'repro workspace sync' and retry 'repro push'")
+  let hook = protocolV2HookReady(identity, repoAbs)
+  if not hook.ok:
+    return (false, PushPreflightRepo(), "hook-preflight", hook.diagnostic,
+      getAppFilename() & " hooks ensure --vcs " & repoAbs)
+  let head = gitRunPlain(identity,
+    ["-C", repoAbs, "rev-parse", "--verify", "HEAD^{commit}"])
+  if head.code != 0 or head.output.strip().len == 0:
+    return (false, PushPreflightRepo(), "state-preflight",
+      "HEAD does not resolve to a commit in " & repo.path,
+      "repair the checkout and retry 'repro push'")
+  result.observed.headSha = head.output.strip().toLowerAscii()
+  let clean = gitRunPlain(identity,
+    ["--no-optional-locks", "-C", repoAbs, "status", "--porcelain=v1"])
+  if clean.code != 0 or clean.output.strip().len > 0:
+    let reason =
+      if clean.code != 0: "clean-probe-failed"
+      else: "working tree has uncommitted changes"
+    return (false, result.observed, "clean-preflight", reason,
+      "commit or stash changes in " & repo.path & " and retry 'repro push'")
+  result.observed.remoteName = gitRemoteNameFor(repo)
+  let locations = configuredPushLocationValues(identity, repoAbs,
+    result.observed.remoteName)
+  if not locations.ok:
+    return (false, result.observed, "remote-preflight",
+      "configured push location is unavailable in " & repo.path,
+      "restore the agreed remote and retry 'repro push'")
+  result.observed.remoteLocationFingerprint = locations.fingerprint
+  let branch = gitRunPlain(identity,
+    ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
+  if branch.code == 0:
+    result.observed.branch = branch.output.strip()
+    result.observed.destinationRef =
+      "refs/heads/" & result.observed.branch
+  let published = observeFreshPushPublication(identity, repoAbs,
+    result.observed.remoteName, result.observed.remoteLocationFingerprint,
+    result.observed.headSha, result.observed.destinationRef)
+  if not published.ok:
+    return (false, result.observed, "remote-preflight",
+      published.diagnostic & " in " & repo.path &
+        "; transport output was withheld because remotes may contain credentials",
+      "fix connectivity, credentials, or remote configuration and retry " &
+        "'repro push --sync --rebase'")
+  result.observed.published = published.published
+  result.observed.pushable = published.pushable
+  result.observed.advertisementFingerprint =
+    published.advertisementFingerprint
+  if result.observed.branch.len == 0 and not result.observed.published:
+    return (false, result.observed, "branch-preflight",
+      "unpublished HEAD is detached in " & repo.path,
+      "attach the checkout to a branch and retry 'repro push'")
+  if result.observed.branch.len > 0 and
+      not result.observed.published and not result.observed.pushable and
+      not allowSyncDivergence:
+    return (false, result.observed, "divergence-preflight",
+      repo.path & " has a divergent exact push destination branch",
+      "run 'repro push --sync --rebase' after resolving " & repo.path)
+  result.ok = true
+
+proc revalidatePushRepo(identity: GitToolIdentity; workspaceRoot: string;
+    repo: ResolvedRepo; expected: PushPreflightRepo):
+    tuple[ok: bool; diagnostic: string; remediation: string] =
+  ## Run immediately before this repository's transport. A preserved hook on
+  ## an earlier dependency, another process, or an operator can change a later
+  ## checkout after global preflight; the stale plan must never authorize a
+  ## different HEAD/branch/tree/remote relationship.
+  let repoAbs = workspaceRoot / repo.path
+  if not discoverGitWorktree(identity, repoAbs).ok:
+    return (false, "Git worktree disappeared after preflight in " & repo.path,
+      "restore the checkout and retry 'repro push'")
+  let head = gitRunPlain(identity,
+    ["-C", repoAbs, "rev-parse", "--verify", "HEAD^{commit}"])
+  if head.code != 0 or
+      head.output.strip().toLowerAscii() != expected.headSha:
+    return (false, "HEAD changed after preflight in " & repo.path,
+      "review the new commit and retry 'repro push'")
+  let branch = gitRunPlain(identity,
+    ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
+  let currentBranch =
+    if branch.code == 0: branch.output.strip()
+    else: ""
+  if currentBranch != expected.branch:
+    return (false, "branch changed after preflight in " & repo.path,
+      "restore the intended branch and retry 'repro push'")
+  let clean = gitRunPlain(identity,
+    ["--no-optional-locks", "-C", repoAbs, "status", "--porcelain=v1"])
+  if clean.code != 0 or clean.output.strip().len > 0:
+    return (false, "working tree changed after preflight in " & repo.path,
+      "commit or stash changes and retry 'repro push'")
+  let locations = gitRunPlain(identity,
+    ["-C", repoAbs, "remote", "get-url", "--push", "--all",
+     expected.remoteName])
+  var locationDigests: seq[string]
+  if locations.code == 0:
+    for line in locations.output.splitLines():
+      let value = line.strip()
+      if value.len > 0:
+        locationDigests.add(remoteLocationDigest(value))
+  locationDigests.sort()
+  if locationDigests.len == 0 or
+      locationDigests.join(",") != expected.remoteLocationFingerprint:
+    return (false, "agreed remote location changed after preflight in " &
+      repo.path, "restore the intended remote and retry 'repro push'")
+  let locationsAfterObservation = gitRunPlain(identity,
+    ["-C", repoAbs, "remote", "get-url", "--push", "--all",
+     expected.remoteName])
+  var afterDigests: seq[string]
+  if locationsAfterObservation.code == 0:
+    for line in locationsAfterObservation.output.splitLines():
+      let value = line.strip()
+      if value.len > 0:
+        afterDigests.add(remoteLocationDigest(value))
+  afterDigests.sort()
+  if afterDigests.len == 0 or
+      afterDigests.join(",") != expected.remoteLocationFingerprint:
+    return (false, "agreed remote location changed during revalidation in " &
+      repo.path, "restore the intended remote and retry 'repro push'")
+  let published = observeFreshPushPublication(identity, repoAbs,
+    expected.remoteName, expected.remoteLocationFingerprint,
+    expected.headSha, expected.destinationRef)
+  if not published.ok:
+    return (false, "actual push destination could not be revalidated " &
+      "after preflight in " & repo.path & ": " & published.diagnostic &
+      "; transport output was withheld because remotes may contain credentials",
+      "fix connectivity, credentials, or remote configuration and retry " &
+        "'repro push --sync --rebase'")
+  if published.advertisementFingerprint !=
+      expected.advertisementFingerprint or
+      published.published != expected.published or
+      published.pushable != expected.pushable:
+    return (false, "exact destination advertisement changed after " &
+      "preflight in " & repo.path,
+      "review the actual push destination and retry " &
+        "'repro push --sync --rebase'")
+  (true, "", "")
+
+proc preflightBackendHook(identity: GitToolIdentity; backendRoot: string):
+    tuple[ok: bool; diagnostic: string] =
+  if backendRoot.len == 0 or gitTopLevel(backendRoot).len == 0:
+    return (true, "")
+  protocolV2HookReady(identity, backendRoot)
+
+proc pushLockBackendPlans(identity: GitToolIdentity; workspaceRoot: string;
+    resolved: ResolvedProject; order: openArray[string];
+    preflight: Table[string, PushPreflightRepo]; manifestLayerRoot: string):
+    seq[PushLockBackendPlan] =
+  ## Resolve the same composed routing plane used by the gate and group exact
+  ## content-addressed records by their durable Git checkout. A backend shared
+  ## by multiple repos is preflighted and completed once. If a configuration
+  ## ever aliases personal and shared repos to one location, shared refusal
+  ## semantics win (the backend is part of a teammate-visible boundary).
+  var reposByName = initTable[string, ResolvedRepo]()
+  for repo in resolved.repos: reposByName[repo.name] = repo
+  var indexByRoot = initTable[string, int]()
+  var plans: seq[PushLockBackendPlan]
+
+  proc canonicalExisting(path: string): string =
+    try: os.normalizedPath(expandFilename(path))
+    except OSError: os.normalizedPath(absolutePath(path))
+
+  proc add(root, kind: string; tier: WorkspaceVisibility;
+      repoName, repoPath, oid, lockPath: string) =
+    let canonical = canonicalExisting(root)
+    if canonical.len == 0: return
+    var index = indexByRoot.getOrDefault(canonical, -1)
+    if index < 0:
+      index = plans.len
+      indexByRoot[canonical] = index
+      plans.add(PushLockBackendPlan(root: canonical, backendKind: kind,
+        tier: tier))
+    elif tierIsShared(tier):
+      plans[index].tier = tier
+    for item in plans[index].expected:
+      if item.relPath == lockPath: return
+    plans[index].expected.add(ExpectedLockRecord(
+      project: resolved.projectName, repoName: repoName, repoPath: repoPath,
+      oid: oid, relPath: lockPath))
+
+  let composed = composeLockingRouting(workspaceRoot, identity.binaryPath)
+  if not composed.hasExplicitRoutes:
+    if manifestLayerRoot.len > 0 and gitTopLevel(manifestLayerRoot).len > 0:
+      for name in order:
+        add(manifestLayerRoot, "git-checkout", wvTeam, name,
+          reposByName[name].path, preflight[name].headSha,
+          lockFileRepoRelativePath(resolved.projectName, name,
+            preflight[name].headSha))
+    return plans
+
+  var inScope: seq[ResolvedRepo]
+  for name in order:
+    if reposByName.hasKey(name): inScope.add(reposByName[name])
+  let assignments = resolveRepoBackends(composed, inScope, workspaceRoot,
+    identity, identity.binaryPath)
+  for asg in assignments:
+    if asg.store.isNil: continue
+    let roots = asg.store.manifestLayerRoots()
+    for root in roots:
+      add(root, asg.backendKind, asg.visibility, asg.repoName, asg.repoPath,
+        preflight[asg.repoName].headSha,
+        lockFileRepoRelativePath(resolved.projectName, asg.repoName,
+          preflight[asg.repoName].headSha))
+  plans
+
+proc expectedPaths(plan: PushLockBackendPlan;
+    includedRepos: HashSet[string]): seq[ExpectedLockRecord] =
+  for item in plan.expected:
+    if item.repoName in includedRepos: result.add(item)
+
+proc allExpectedRecords(plan: PushLockBackendPlan): seq[ExpectedLockRecord] =
+  plan.expected
+
+type BackendPlanPreflight = object
+  ok: bool
+  diagnostic: string
+  verifiedLocalHead: string
+
+proc pendingFileIsCanonicalLock(plan: PushLockBackendPlan;
+    entry: tuple[code, path: string]): bool =
+  ## Post-commit refresh may have prepared an exact lock file without staging
+  ## it. That is expected input to the later pre-push publisher, not arbitrary
+  ## backend dirt. Preflight remains read-only and accepts only a new regular
+  ## file whose path/body form one exact typed coordinate. A dependency's
+  ## earlier post-commit refresh may have prepared a still-valid older record;
+  ## the publisher can safely append it alongside this operation's records.
+  if entry.code notin ["??", "A "]: return false
+  let relPath = entry.path.replace('\\', '/')
+  if not pathIsUnderLocks(relPath): return false
+  let path = plan.root / entry.path.replace('/', DirSep)
+  if not fileExists(path) or symlinkExists(path) or getFileSize(path) == 0:
+    return false
+  expectedLockRecordFromBody(relPath, readFile(path)).isSome
+
+proc verifiedExpectedPrefixAt(identity: GitToolIdentity;
+    plan: PushLockBackendPlan; commit: string):
+    tuple[ok: bool; records: seq[ExpectedLockRecord]; diagnostic: string] =
+  ## A failed earlier invocation can leave the backend ahead after only a
+  ## dependency prefix has run its real pre-push hook. Recover that prefix
+  ## without pretending later closure records exist: every present record is
+  ## exact, presence must be a contiguous topological prefix, and a later
+  ## record after a gap is an invalid/unexpected recovery state.
+  var sawGap = false
+  let format = storageObjectFormat(identity.binaryPath, plan.root)
+  if format.len == 0:
+    return (false, @[], "cannot determine backend Git object format")
+  for item in plan.expected:
+    let tree = gitRunPlain(identity,
+      ["-C", plan.root, "ls-tree", commit, "--", item.relPath])
+    let present = tree.code == 0 and tree.output.strip().len > 0
+    if not present:
+      sawGap = true
+      continue
+    if sawGap:
+      return (false, @[], "lock backend contains non-prefix operation " &
+        "record " & item.relPath)
+    let blob = verifyLockBlobAt(identity, plan.root, commit, item.relPath)
+    if not blob.ok: return (false, @[], blob.diagnostic)
+    let record = verifyLockRecordPath(identity, plan.root, commit,
+      item.relPath, format, some(item))
+    if not record.ok: return (false, @[], record.diagnostic)
+    result.records.add(item)
+  if result.records.len == 0:
+    return (false, @[], "lock backend ahead chain contains no verified " &
+      "operation prefix")
+  result.ok = true
+
+proc preflightLockBackendPlan(identity: GitToolIdentity;
+    plan: PushLockBackendPlan): BackendPlanPreflight =
+  ## A source ref is irreversible once transmitted, so every durable Git
+  ## backend is completely inspected first. This routine may authenticate and
+  ## fetch into FETCH_HEAD, but never stages, commits, rebases, resets, pushes,
+  ## writes a store, or changes a branch/worktree.
+  let discovery = discoverGitWorktree(identity, plan.root)
+  if not discovery.ok:
+    result.diagnostic = discovery.diagnostic
+    return
+  let hook = preflightBackendHook(identity, plan.root)
+  if not hook.ok:
+    result.diagnostic = hook.diagnostic
+    return
+  let dirty = gitPorcelainEntries(identity, plan.root)
+  let unexpectedDirty = dirty.filterIt(not plan.pendingFileIsCanonicalLock(it))
+  if unexpectedDirty.len > 0:
+    result.diagnostic = "lock backend is not clean before source publication: " &
+      unexpectedDirty.mapIt(it.code & " " & it.path).join(", ")
+    return
+  let upstream = resolveLockUpstream(identity, plan.root)
+  if not upstream.ok:
+    result.diagnostic = upstream.diagnostic
+    return
+  for item in plan.expected:
+    if not canonicalRepoCoordinate(item.repoPath) or
+        item.relPath != lockFileRepoRelativePath(item.project, item.repoName,
+          item.oid):
+      result.diagnostic = "lock backend plan contains a non-canonical exact " &
+        "record coordinate for " & item.repoName
+      return
+  let fetched = fetchImmutableLockTip(identity, plan.root, upstream.target)
+  if not fetched.ok:
+    result.diagnostic = fetched.diagnostic
+    return
+  let local = gitRunPlain(identity,
+    ["-C", plan.root, "rev-parse", "--verify", "HEAD^{commit}"])
+  if local.code != 0 or local.output.strip().len == 0:
+    result.diagnostic = "cannot observe lock backend HEAD"
+    return
+  let localOid = local.output.strip().toLowerAscii()
+  let localInRemote = gitRunPlain(identity,
+    ["-C", plan.root, "merge-base", "--is-ancestor", localOid, fetched.oid])
+  if localInRemote.code == 0:
+    # A fresh operation has not run any member gate yet, so its new expected
+    # records legitimately do not exist. At this point we prove the backend is
+    # clean, authenticated, and not locally divergent; final completion later
+    # proves the exact blobs. Only a local-ahead recovery state is required to
+    # contain this operation's expected records during preflight.
+    result.ok = true
+    return
+  let remoteInLocal = gitRunPlain(identity,
+    ["-C", plan.root, "merge-base", "--is-ancestor", fetched.oid, localOid])
+  if remoteInLocal.code != 0:
+    result.diagnostic = "lock backend is divergent from " &
+      upstream.target.display & "; refusing before source publication"
+    return
+  let prefix = verifiedExpectedPrefixAt(identity, plan, localOid)
+  if not prefix.ok:
+    result.diagnostic = "unverified lock backend ahead chain: " &
+      prefix.diagnostic
+    return
+  let ahead = verifyLockOnlyAheadChain(identity, plan.root, fetched.oid,
+    localOid, plan.expected, requireAllExpected = false,
+    # A partial recovery is operation-scoped and must contain only its verified
+    # prefix. A fully materialized routed operation can legitimately include
+    # earlier canonical refresh records for the same backend (its post-commit
+    # hooks write one immutable record per observed source generation).
+    rejectUnexpected = prefix.records.len < plan.expected.len,
+    restrictToExpectedCoordinates = true)
+  if not ahead.ok:
+    result.diagnostic = "unverified lock backend ahead chain: " &
+      ahead.diagnostic
+    return
+  let proof = verifyExpectedRecordCoordinatesAt(identity, plan.root, localOid,
+    prefix.records)
+  if not proof.ok:
+    result.diagnostic = proof.diagnostic
+    return
+  result.ok = true
+  result.verifiedLocalHead = localOid
+
 proc executePush(args: PushArgs): PushReport =
   result.workspaceRoot = args.workspaceRoot
   result.syncMode =
@@ -32050,7 +33853,7 @@ proc executePush(args: PushArgs): PushReport =
 
   # Resolve the workspace project / compose layers via the SAME dispatch the
   # gate uses, so push and the gate agree on the participating repo set.
-  let (resolved, _) = resolveCheckProject(CheckArgs(
+  let (resolved, workspaceLocal) = resolveCheckProject(CheckArgs(
     mode: cmPrePush,
     workspaceRoot: args.workspaceRoot,
     currentRepo: args.currentRepo,
@@ -32075,7 +33878,7 @@ proc executePush(args: PushArgs): PushReport =
   else:
     let abs = absolutePath(args.currentRepo)
     for repo in resolved.repos:
-      if absolutePath(args.workspaceRoot / repo.path) == abs:
+      if sameFilesystemPath(args.workspaceRoot / repo.path, abs):
         pushedRepoName = repo.name
         break
 
@@ -32100,6 +33903,10 @@ proc executePush(args: PushArgs): PushReport =
   for repo in resolved.repos:
     byName[repo.name] = repo
 
+  let manifestLayerRoot = pickManifestLayerRoot(WorkspaceLockArgs(
+    workspaceRoot: args.workspaceRoot,
+    toolProvisioning: args.toolProvisioning), workspaceLocal)
+
   # TC-2: carry the certificate notes ref of a closure member to its upstream.
   # Runs whether the member was just PUSHED or was already-published (a
   # developer may issue + attach a certificate for an already-published commit
@@ -32115,20 +33922,172 @@ proc executePush(args: PushArgs): PushReport =
         report.certNotesDiagnostic.add("; ")
       report.certNotesDiagnostic.add(repoPath & ": " & notePush.diagnostic)
 
-  # ---- 1. ``--sync`` reconcile (BEFORE any push) -------------------------
-  # CLI/push.md: reconcile upstream movement FIRST, then publish the closure
-  # on top. If a member needs human judgment (conflict/divergence), STOP and
-  # report with the remedy — publish nothing misleading.
+  # ---- 1. complete read-only preflight -----------------------------------
+  # Predictable checkout, hook, cleanliness, and divergence failures are
+  # collected against the whole closure up front. This prevents a dirty or
+  # partially-upgraded later member from being discovered only after an
+  # earlier dependency was irreversibly published. Even ``--sync`` performs
+  # this entire source-read-only and backend preflight before its first
+  # authorized fetch changes a source common directory.
+  var preflight = initTable[string, PushPreflightRepo]()
+  for name in result.order:
+    let observed = preflightPushRepo(identity, args.workspaceRoot, byName[name],
+      allowSyncDivergence = args.syncMode != psmNone)
+    if not observed.ok:
+      result.repos.add(PushRepoResult(
+        name: byName[name].name, path: byName[name].path,
+        branch: observed.observed.branch,
+        headSha: observed.observed.headSha,
+        outcome: proFailed, diagnostic: observed.diagnostic,
+        remediation: observed.remediation))
+      result.stoppedRepo = byName[name].name
+      result.stoppedStage = observed.stage
+      result.retryCommand =
+        if observed.stage == "hook-preflight": observed.remediation
+        else: "repro push --sync --rebase"
+      result.exitCode = 2
+      return
+    preflight[name] = observed.observed
+  var backendPlans: seq[PushLockBackendPlan]
+  try:
+    backendPlans = pushLockBackendPlans(identity, args.workspaceRoot, resolved,
+      result.order, preflight, manifestLayerRoot)
+  except CatchableError as err:
+    result.stoppedRepo = result.project
+    result.stoppedStage = "lock-backend-plan-preflight"
+    result.lockDiagnostic = err.msg
+    result.retryCommand = "fix locking routes and retry 'repro push'"
+    result.exitCode = 2
+    return
+  for plan in backendPlans:
+    let backend = preflightLockBackendPlan(identity, plan)
+    if not backend.ok:
+      let diagnostic = lockingTierLabel(plan.tier) & " " &
+        plan.backendKind & " backend at " & plan.root & ": " &
+        backend.diagnostic
+      if not tierIsShared(plan.tier):
+        if result.lockDiagnostic.len > 0: result.lockDiagnostic.add("; ")
+        result.lockDiagnostic.add("warning: " & diagnostic)
+        continue
+      result.stoppedRepo = plan.root
+      result.stoppedStage = "lock-backend-preflight"
+      result.lockDiagnostic = diagnostic
+      result.retryCommand =
+        if "hook" in backend.diagnostic.toLowerAscii():
+          getAppFilename() & " hooks ensure --vcs " & plan.root
+        else:
+          "repair the lock backend and retry 'repro push --sync --rebase'"
+      result.exitCode = 2
+      return
+    if backend.verifiedLocalHead.len > 0:
+      if result.verifiedLocalBackendHead.len > 0:
+        result.verifiedLocalBackendHead.add(", ")
+      result.verifiedLocalBackendHead.add(plan.root & "@" &
+        backend.verifiedLocalHead)
+
+  # ---- 2. optional source mutation, only after complete preflight --------
+  # A sync is explicitly authorized to fetch/integrate source state. Recheck
+  # the exact source and advertisement immediately before each mutation, then
+  # refresh the complete exact source/backend plan before any source ref is
+  # transmitted. A URL or advertisement race is a refusal, not a silent
+  # reinterpretation of the operation.
   if args.syncMode != psmNone:
+    let beforeSync = preflight
     for name in result.order:
+      let stable = revalidatePushRepo(identity, args.workspaceRoot,
+        byName[name], beforeSync[name])
+      if not stable.ok:
+        result.repos.add(PushRepoResult(
+          name: byName[name].name, path: byName[name].path,
+          branch: beforeSync[name].branch,
+          headSha: beforeSync[name].headSha,
+          outcome: proFailed, diagnostic: stable.diagnostic,
+          remediation: stable.remediation))
+        result.stoppedRepo = byName[name].name
+        result.stoppedStage = "source-revalidation"
+        result.retryCommand = "repro push --sync --rebase"
+        result.exitCode = 2
+        return
       let sr = reconcileMemberForPush(
         identity, args.workspaceRoot, byName[name], args.syncMode)
       result.syncResults.add(sr)
       if sr.stopped:
+        result.stoppedRepo = sr.name
+        result.stoppedStage = "sync"
+        result.retryCommand = "repro push --sync --rebase"
         result.exitCode = 2
         return
 
-  # ---- 2. closure push in topological order ------------------------------
+    var refreshed = initTable[string, PushPreflightRepo]()
+    for name in result.order:
+      let observed = preflightPushRepo(identity, args.workspaceRoot,
+        byName[name])
+      if not observed.ok:
+        result.repos.add(PushRepoResult(
+          name: byName[name].name, path: byName[name].path,
+          branch: observed.observed.branch,
+          headSha: observed.observed.headSha,
+          outcome: proFailed, diagnostic: observed.diagnostic,
+          remediation: observed.remediation))
+        result.stoppedRepo = byName[name].name
+        result.stoppedStage = observed.stage
+        result.retryCommand = "repro push --sync --rebase"
+        result.exitCode = 2
+        return
+      if observed.observed.remoteLocationFingerprint !=
+          beforeSync[name].remoteLocationFingerprint or
+          observed.observed.advertisementFingerprint !=
+            beforeSync[name].advertisementFingerprint:
+        result.repos.add(PushRepoResult(
+          name: byName[name].name, path: byName[name].path,
+          branch: observed.observed.branch,
+          headSha: observed.observed.headSha,
+          outcome: proFailed,
+          diagnostic: "exact destination advertisement changed during sync " &
+            "in " & byName[name].path,
+          remediation: "review the destination and retry " &
+            "'repro push --sync --rebase'"))
+        result.stoppedRepo = byName[name].name
+        result.stoppedStage = "source-revalidation"
+        result.retryCommand = "repro push --sync --rebase"
+        result.exitCode = 2
+        return
+      refreshed[name] = observed.observed
+    preflight = refreshed
+
+    try:
+      backendPlans = pushLockBackendPlans(identity, args.workspaceRoot,
+        resolved, result.order, preflight, manifestLayerRoot)
+    except CatchableError as err:
+      result.stoppedRepo = result.project
+      result.stoppedStage = "lock-backend-plan-preflight"
+      result.lockDiagnostic = err.msg
+      result.retryCommand = "fix locking routes and retry 'repro push'"
+      result.exitCode = 2
+      return
+    for plan in backendPlans:
+      let backend = preflightLockBackendPlan(identity, plan)
+      if not backend.ok:
+        let diagnostic = lockingTierLabel(plan.tier) & " " &
+          plan.backendKind & " backend at " & plan.root & ": " &
+          backend.diagnostic
+        if not tierIsShared(plan.tier):
+          if result.lockDiagnostic.len > 0: result.lockDiagnostic.add("; ")
+          result.lockDiagnostic.add("warning: " & diagnostic)
+          continue
+        result.stoppedRepo = plan.root
+        result.stoppedStage = "lock-backend-preflight"
+        result.lockDiagnostic = diagnostic
+        result.retryCommand =
+          if "hook" in backend.diagnostic.toLowerAscii():
+            getAppFilename() & " hooks ensure --vcs " & plan.root
+          else:
+            "repair the lock backend and retry " &
+              "'repro push --sync --rebase'"
+        result.exitCode = 2
+        return
+
+  # ---- 3. closure push in topological order ------------------------------
   # Walk dependency-first. A dirty/divergent member STOPS the push with an
   # actionable {offender, remedy} diagnostic (never silently discarded). A
   # member with unpublished commits is pushed; an already-published member
@@ -32136,47 +34095,25 @@ proc executePush(args: PushArgs): PushReport =
   for name in result.order:
     let repo = byName[name]
     let repoAbs = args.workspaceRoot / repo.path
-    var entry = PushRepoResult(name: repo.name, path: repo.path)
-    if not dirExists(repoAbs / ".git"):
-      # Not a checkout we can publish from. Treat as already-published (no
-      # local work to lose); the lock still records what it can observe.
-      entry.outcome = proAlreadyPublished
-      entry.diagnostic = "no git checkout at " & repo.path & "; nothing to push"
+    let observed = preflight[name]
+    var entry = PushRepoResult(name: repo.name, path: repo.path,
+      branch: observed.branch, headSha: observed.headSha)
+    # Published? (reuses the gate's publication probe.) Already-published is a
+    # benign noop; unpublished commits get pushed.
+    let rName = observed.remoteName
+    let current = revalidatePushRepo(identity, args.workspaceRoot, repo,
+      observed)
+    if not current.ok:
+      entry.outcome = proFailed
+      entry.diagnostic = current.diagnostic
+      entry.remediation = current.remediation
       result.repos.add(entry)
-      continue
-    let branchRes = gitRunPlain(identity,
-      ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
-    if branchRes.code == 0:
-      entry.branch = branchRes.output.strip()
-    let headRes = queryGitState(headShaQuery(repoAbs), identity)
-    if headRes.status == gqsOk:
-      entry.headSha = headRes.headSha
-    # Cleanliness FIRST — a dirty member stops the push (reuses the gate probe).
-    let cleanRes = queryGitState(isCleanQuery(repoAbs), identity)
-    let isClean =
-      if cleanRes.status == gqsOk: cleanRes.isClean
-      else: false
-    if not isClean:
-      entry.outcome = proSkippedDirty
-      entry.diagnostic =
-        if cleanRes.status != gqsOk: "clean-probe-failed: " & cleanRes.diagnostic
-        else: "working tree has uncommitted changes"
-      entry.remediation = "commit or stash changes in " & repo.path &
-        " — run 'git -C " & repo.path & " commit -a' (or 'git -C " &
-        repo.path & " stash') then 're-run repro push"
-      result.repos.add(entry)
+      result.stoppedRepo = repo.name
+      result.stoppedStage = "source-revalidation"
+      result.retryCommand = "repro push --sync --rebase"
       result.exitCode = 2
       return
-    # Published? (reuses the gate's publication probe.) Already-published is a
-    # benign noop; unpublished commits get pushed.
-    let rName = gitRemoteNameFor(repo)
-    # Published? (reuses the gate's publication probe.) Already-published is a
-    # benign noop; unpublished commits get pushed.
-    let pubRes = queryGitState(isPublishedQuery(repoAbs, rName), identity)
-    let isPublished =
-      if pubRes.status == gqsOk: pubRes.isPublished
-      else: false
-    if isPublished:
+    if observed.published:
       entry.outcome = proAlreadyPublished
       result.repos.add(entry)
       # TC-2: ship any attached certificates even though the commit is already
@@ -32195,15 +34132,31 @@ proc executePush(args: PushArgs): PushReport =
       result.repos.add(entry)
       result.exitCode = 2
       return
-    let pushRes = gitRunPlain(identity,
+    let pushRes = gitRunPlainEnv(identity,
       ["-C", repoAbs, "push", rName, "HEAD:" & entry.branch])
     if pushRes.code != 0:
       entry.outcome = proFailed
       entry.diagnostic = "git push " & rName & " HEAD:" & entry.branch &
-        " failed in " & repo.path & ": " & pushRes.output.strip()
+        " failed in " & repo.path &
+        "; transport output was withheld because remotes may contain credentials"
       entry.remediation = "resolve the push failure in " & repo.path &
         " (fetch + reconcile, then re-run 'repro push --sync')"
       result.repos.add(entry)
+      result.stoppedRepo = repo.name
+      result.stoppedStage = "source-push"
+      var producedRepos = initHashSet[string]()
+      for prior in result.repos:
+        if prior.headSha.len > 0:
+          producedRepos.incl(prior.name)
+      var localHeads: seq[string]
+      for plan in backendPlans:
+        let expected = plan.expectedPaths(producedRepos)
+        let localHead = observeVerifiedLocalOnlyLockHead(identity, plan.root,
+          expected)
+        if localHead.len > 0:
+          localHeads.add(plan.root & "@" & localHead)
+      result.verifiedLocalBackendHead = localHeads.join(", ")
+      result.retryCommand = "repro push --sync --rebase"
       result.exitCode = 1
       return
     entry.outcome = proPushed
@@ -32214,61 +34167,63 @@ proc executePush(args: PushArgs): PushReport =
     # the attestations travel.
     carryCertNotes(result, identity.binaryPath, repoAbs, repo.path, rName)
 
-  # ---- 3. certificate slot (FLAG only; obtain+attach deferred to TC) -----
+  # ---- 4. certificate slot (FLAG only; obtain+attach deferred to TC) -----
   runPushCertifyStub(result, args.certify)
 
-  # ---- 4. lock write + publish (loud on failure) -------------------------
-  # Write/refresh the lock for the now-published state (reusing the M11
-  # writer scoped to the closure, exactly like the gate), then PUBLISH it
-  # (RA-7). A publish FAILURE is loud: the push exit flips non-zero so a
-  # teammate never pulls a commit whose lock never reached the manifest repo.
-  var lockArgs = WorkspaceLockArgs(
-    workspaceRoot: args.workspaceRoot,
-    toolProvisioning: args.toolProvisioning,
-    dirtyScopeNames: closure)
-  var lockOutcome: WorkspaceLockOutcome
-  try:
-    lockOutcome = executeWorkspaceLock(lockArgs)
-  except CatchableError as err:
-    result.lockDiagnostic = "lock write failed: " & err.msg
-    result.exitCode = 1
-    return
-  if lockOutcome.report.exitCode != 0:
-    result.lockDiagnostic = "lock writer exited with code " &
-      $lockOutcome.report.exitCode
-    result.exitCode = 1
-    return
-  let manifestLayerRoot = lockOutcome.report.manifestLayerRoot
-  # MO-3: route the RA-7 pre-push publish through the abstract ``LockStore``
-  # interface. The git-checkout backend's ``publishPending`` delegates to the
-  # byte-identical ``publishWorkspaceLock``; the 1:1 outcome mapping recovers
-  # the exact ``LockPublishResult`` the gate policy below branches on.
-  let publishStore: LockStore =
-    newGitCheckoutLockStore(identity, manifestLayerRoot)
-  let storePub = publishStore.publishPending()
-  let pub = LockPublishResult(
-    outcome: lockPublishFromStorePut(storePub.outcome),
-    diagnostic: storePub.diagnostic)
-  case pub.outcome
-  of lpoPublished:
-    result.lockPublished = true
-    result.lockDiagnostic = pub.diagnostic
-  of lpoNothingToPublish:
-    # The lock was already current and committed earlier — benign.
-    result.lockPublished = true
-    result.lockDiagnostic = "lock already current: " & pub.diagnostic
-  of lpoNotPublishable:
-    # The workspace is not configured to publish (no manifest git checkout /
-    # no upstream). There is no publication boundary to honour — benign skip.
-    result.lockPublished = false
-    result.lockDiagnostic = "lock publish skipped: " & pub.diagnostic
-  of lpoRefusedDirty, lpoFailed:
-    # Loud-on-failure (RA-7/RA-21): the reproducible state could be published
-    # but the attempt failed/was refused. Refuse with a clear diagnostic
-    # rather than leaving a published commit whose lock never landed.
-    result.lockPublished = false
-    result.lockDiagnostic = "lock publication failed: " & pub.diagnostic
-    result.exitCode = 2
+  # ---- 5. final lock completion (verify/recover only; never write) -------
+  # Each real source pre-push gate has already created and published the record
+  # anchored by that member's exact preflight HEAD. The command now proves
+  # those exact records remotely reachable. It may resume a verified local-only
+  # lock chain, but it must never manufacture a second speculative lock after
+  # source refs have landed.
+  result.lockPublished = backendPlans.len > 0
+  if backendPlans.len == 0:
+    result.lockDiagnostic = "no durable Git lock backend requires verification"
+  for plan in backendPlans:
+    let expectedLocks = plan.allExpectedRecords()
+    let pub = completeExpectedLockPublication(identity, plan.root, expectedLocks)
+    case pub.outcome
+    of lpoPublished, lpoNothingToPublish:
+      if result.lockDiagnostic.len > 0: result.lockDiagnostic.add("; ")
+      result.lockDiagnostic.add(lockingTierLabel(plan.tier) & " " &
+        plan.backendKind & " backend " &
+        (if pub.outcome == lpoPublished: "published: "
+          else: "already current: ") & pub.diagnostic)
+    of lpoNotPublishable, lpoRefusedDirty, lpoFailed:
+      let diag = lockingTierLabel(plan.tier) & " " & plan.backendKind &
+        " backend at " & plan.root & " is not remotely proven: " &
+        pub.diagnostic
+      if result.lockDiagnostic.len > 0: result.lockDiagnostic.add("; ")
+      result.lockDiagnostic.add(diag)
+      if pub.verifiedLocalHead.len > 0:
+        if result.verifiedLocalBackendHead.len > 0:
+          result.verifiedLocalBackendHead.add(", ")
+        result.verifiedLocalBackendHead.add(plan.root & "@" &
+          pub.verifiedLocalHead)
+      result.lockPublished = false
+      if not tierIsShared(plan.tier):
+        # Existing tier policy: personal publication is warned but does not
+        # retroactively fail source publication.
+        continue
+      result.lockPublished = false
+      result.stoppedRepo = plan.root
+      result.stoppedStage = "final-lock-verification"
+      var missingRepo = ""
+      for item in plan.expected:
+        let local = gitRunPlain(identity,
+          ["-C", plan.root, "ls-tree", "HEAD", "--", item.relPath])
+        if local.code != 0 or local.output.strip().len == 0:
+          missingRepo = item.repoName
+          break
+      if missingRepo.len > 0:
+        result.retryCommand = "repro workspace lock " & result.project &
+          " --trigger-repo=" & missingRepo & " && repro push --sync --rebase"
+        result.lockDiagnostic.add("; expected record was never created; run '" &
+          result.retryCommand & "'")
+      else:
+        result.retryCommand = "repro push --sync --rebase"
+      result.exitCode = 2
+      return
 
 proc renderPushTextLines(report: PushReport): seq[string] =
   ## Per-repo outcomes + topological order + lock/cert summary, in the
@@ -32310,6 +34265,14 @@ proc renderPushTextLines(report: PushReport): seq[string] =
       report.certNotesDiagnostic)
   if report.lockDiagnostic.len > 0:
     result.add("repro push: " & report.lockDiagnostic)
+  if report.stoppedStage.len > 0:
+    result.add("repro push: stopped repo=" & report.stoppedRepo &
+      " stage=" & report.stoppedStage)
+  if report.verifiedLocalBackendHead.len > 0:
+    result.add("repro push: verified local-only lock backend HEAD " &
+      report.verifiedLocalBackendHead)
+  if report.retryCommand.len > 0:
+    result.add("repro push: retry: " & report.retryCommand)
 
 proc toJsonNode(report: PushReport): JsonNode =
   result = newJObject()
@@ -32352,6 +34315,10 @@ proc toJsonNode(report: PushReport): JsonNode =
   result["certNotesDiagnostic"] = %report.certNotesDiagnostic
   result["lockPublished"] = %report.lockPublished
   result["lockDiagnostic"] = %report.lockDiagnostic
+  result["stoppedRepo"] = %report.stoppedRepo
+  result["stoppedStage"] = %report.stoppedStage
+  result["verifiedLocalBackendHead"] = %report.verifiedLocalBackendHead
+  result["retryCommand"] = %report.retryCommand
   result["exitCode"] = %report.exitCode
 
 proc writePushReport(report: PushReport) =

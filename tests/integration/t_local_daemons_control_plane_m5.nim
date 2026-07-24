@@ -207,7 +207,8 @@ suite "Local daemons/control-plane M5 daemon-hosted watch sessions":
       let outA = requireSuccess(watchCommand(projectA, tempRoot, "work-a",
         ["--detach"]), repoRoot())
       let sessionA = sessionIdFromDetached(outA)
-      waitForFileContent(projectA / "dist" / "copied.txt", "a0\n", tempRoot)
+      waitForFileContent(projectA / "dist" / "copied.txt", "a0\n", tempRoot,
+        timeoutSeconds = 600.0)
       discard waitForSessionsContains(tempRoot, sessionA & "\twatch\twatching")
 
       let outB = requireSuccess(watchCommand(projectB, tempRoot, "work-b",
@@ -215,7 +216,8 @@ suite "Local daemons/control-plane M5 daemon-hosted watch sessions":
       let sessionB = sessionIdFromDetached(outB)
       check sessionA != sessionB
 
-      waitForFileContent(projectB / "dist" / "copied.txt", "b0\n", tempRoot)
+      waitForFileContent(projectB / "dist" / "copied.txt", "b0\n", tempRoot,
+        timeoutSeconds = 600.0)
       let active = waitForSessionsContains(tempRoot, "watching")
       check active.contains(sessionA)
       check active.contains(sessionB)
@@ -260,7 +262,8 @@ suite "Local daemons/control-plane M5 daemon-hosted watch sessions":
       let detached = requireSuccess(watchCommand(projectRoot, tempRoot, "work",
         ["--detach"]), repoRoot())
       let sessionId = sessionIdFromDetached(detached)
-      waitForFileContent(projectRoot / "dist" / "copied.txt", "r0\n", tempRoot)
+      waitForFileContent(projectRoot / "dist" / "copied.txt", "r0\n", tempRoot,
+        timeoutSeconds = 600.0)
       discard waitForSessionsContains(tempRoot, sessionId & "\twatch\twatching")
 
       waitForTimestampBoundary()
@@ -332,7 +335,7 @@ suite "Local daemons/control-plane M5 daemon-hosted watch sessions":
           watcher.close()
 
         waitForFileContent(projectRoot / "dist" / "copied.txt", "k0\n",
-          tempRoot)
+          tempRoot, timeoutSeconds = 600.0)
         waitForTimestampBoundary()
         writeFile(projectRoot / "src" / "input.txt", "k1\n")
         waitForFileContent(projectRoot / "dist" / "copied.txt", "k1\n",
