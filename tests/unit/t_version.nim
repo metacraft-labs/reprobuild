@@ -1,6 +1,20 @@
-import std/unittest
+import std/[strutils, unittest]
 import repro_core
 
+const
+  ExpectedReprobuildVersion = "0.1.2"
+  PackageMetadata = staticRead("../../reprobuild.nimble")
+
+proc packageVersionDeclarations(): seq[string] =
+  for line in PackageMetadata.splitLines():
+    if line.startsWith("version"):
+      result.add(line)
+
 suite "Reprobuild version":
-  test "version is exposed by the core library":
-    check versionString() == "0.1.0"
+  test "release version is exposed by the core library":
+    check ReprobuildVersion == ExpectedReprobuildVersion
+    check versionString() == ExpectedReprobuildVersion
+
+  test "package metadata declares the release version exactly once":
+    check packageVersionDeclarations() ==
+      @["version = \"" & ExpectedReprobuildVersion & "\""]
