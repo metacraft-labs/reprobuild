@@ -3,22 +3,22 @@
     "entries": [
       {
         "executableFiles": 14,
-        "kib": 26620,
+        "kib": 46868,
         "path": "build/bin"
       },
       {
         "executableFiles": 1125,
-        "kib": 1163736,
+        "kib": 1164104,
         "path": "build/test-bin"
       },
       {
         "executableFiles": 0,
-        "kib": 9543020,
+        "kib": 9777308,
         "path": "build/nimcache"
       },
       {
         "executableFiles": 4,
-        "kib": 2936,
+        "kib": 3624,
         "path": "build/lib"
       },
       {
@@ -32,7 +32,7 @@
         "path": "test-logs/results"
       }
     ],
-    "totalKiB": 10929216
+    "totalKiB": 11184808
   },
   "helperCompilationInTestBody": [
     {
@@ -1305,6 +1305,90 @@
       "class": "integration",
       "matches": [
         {
+          "assignedCommandVariable": "mOut",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "consumerBin",
+            "consumerNoExtBin",
+            "consumerNoExtSrc",
+            "consumerSrc",
+            "depFlags",
+            "dslPath",
+            "envelopePath",
+            "marshallerBin",
+            "marshallerSrc",
+            "providerDir",
+            "resPath",
+            "scratch",
+            "thinDir"
+          ],
+          "line": 164,
+          "path": "tests/integration/t_extension_type_lifted_and_consumed.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "let mOut = runNim(@[\"nim\", \"c\", \"--hints:off\", \"--verbosity:0\"] & depFlags &"
+        },
+        {
+          "assignedCommandVariable": "cOut",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "consumerBin",
+            "consumerNoExtBin",
+            "consumerNoExtSrc",
+            "consumerSrc",
+            "depFlags",
+            "dslPath",
+            "envelopePath",
+            "marshallerBin",
+            "marshallerSrc",
+            "providerDir",
+            "resPath",
+            "scratch",
+            "thinDir"
+          ],
+          "line": 196,
+          "path": "tests/integration/t_extension_type_lifted_and_consumed.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "let cOut = runNim(@[\"nim\", \"c\", \"--hints:off\", \"--verbosity:0\"] & depFlags &"
+        },
+        {
+          "assignedCommandVariable": "cnOut",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "consumerBin",
+            "consumerNoExtBin",
+            "consumerNoExtSrc",
+            "consumerSrc",
+            "depFlags",
+            "dslPath",
+            "envelopePath",
+            "marshallerBin",
+            "marshallerSrc",
+            "providerDir",
+            "resPath",
+            "scratch",
+            "thinDir"
+          ],
+          "line": 229,
+          "path": "tests/integration/t_extension_type_lifted_and_consumed.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "let cnOut = runNim(@[\"nim\", \"c\", \"--hints:off\", \"--verbosity:0\"] & depFlags &"
+        }
+      ],
+      "source": "tests/integration/t_extension_type_lifted_and_consumed.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
           "assignedCommandVariable": "command",
           "commandVariableExecuted": true,
           "directExecutionLine": false,
@@ -1630,10 +1714,10 @@
     }
   ],
   "metadata": {
-    "branch": "",
-    "generatedAt": "2026-07-24T08:55:41Z",
-    "head": "d4548148c40b6d1194002aaaa1e5f5cc651e269a",
-    "headShort": "d4548148",
+    "branch": "dev",
+    "generatedAt": "2026-07-24T20:06:29Z",
+    "head": "a0270384338e5110a9d621004501814a3e4047b8",
+    "headShort": "a0270384",
     "repoRoot": "/Users/zahary/m/dev/reprobuild",
     "runtime": {
       "argv": [
@@ -1665,8 +1749,8 @@
         "python": "Python 3.13.12"
       }
     },
-    "sourceFingerprint": "136509cf5386735a60d2aa57bbb9e22a68051347f41bac2ea276d7169f8d81d1",
-    "status": "M  benchmarks/reports/reprobuild-suite-m0-baseline.md\nM  benchmarks/reports/reprobuild-suite-m0-inventory.json\nM  docs/user-guide/workspace-locking.md\nM  libs/repro_cli_support/src/repro_cli_support.nim\nA  libs/repro_cli_support/src/repro_cli_support/push_hook_protocol.nim\nM  libs/repro_home_apply/src/repro_home_apply/env_binding.nim\nM  libs/repro_home_apply/src/repro_home_apply/pipeline.nim\nM  libs/repro_home_resources/src/repro_home_resources/drivers/env_user.nim\nM  libs/repro_home_resources/src/repro_home_resources/plan.nim\nM  libs/repro_home_resources/src/repro_home_resources/types.nim\nM  libs/repro_home_resources/tests/t_smoke_home_resources.nim\nM  libs/repro_home_rollback/src/repro_home_rollback/pipeline.nim\nM  libs/repro_profile_compile/tests/t_smoke_apply_integration.nim\nM  libs/repro_test_support/src/repro_test_support.nim\nM  repro_tests.nim\nM  tests/integration/t_certificates_travel_with_pushed_commit.nim\nM  tests/integration/t_concurrent_lock_publishes_retry_without_user_visible_failure.nim\nM  tests/integration/t_concurrent_publish_disjoint_per_backend.nim\nA  tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim\nM  tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim\nM  tests/integration/t_hooks_noop_outside_initialized_workspace.nim\nM  tests/integration/t_local_daemons_control_plane_m4.nim\nM  tests/integration/t_local_daemons_control_plane_m5.nim\nA  tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim\nM  tests/integration/t_managed_hook_reentry_guard_prevents_recursive_publish.nim\nA  tests/integration/t_nested_lock_push_capability_security.nim\nM  tests/integration/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks.nim\nA  tests/integration/t_pre_push_protocol_v2_policy_regressions.nim\nA  tests/integration/t_pre_push_protocol_v2_ref_validation.nim\nM  tests/integration/t_pre_push_refuses_when_lock_publish_fails.nim\nM  tests/integration/t_repro_push_publishes_dependency_closure_in_topological_order.nim\nA  tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim\nM  tests/integration/t_repro_push_sync_integrates_upstream_then_publishes.nim\nA  tests/integration/t_repro_test_runner_relative_results_git_config.nim\nM  tests/integration/t_workspace_hooks_ensure_is_idempotent_across_three_runs.nim\nA  tests/unit/t_workspace_root_for_repo_managed_worktree.nim\nM  tools/test-runner/repro_test_runner.nim"
+    "sourceFingerprint": "67c2a69c1ffdc7a9697ac082d75b6fe3ea67b0e69383350508e45406574b4d50",
+    "status": "M  libs/repro_cli_support/src/repro_cli_support.nim\nM  libs/repro_cli_support/src/repro_cli_support/push_hook_protocol.nim\nM  tests/integration/t_pre_push_protocol_v2_ref_validation.nim"
   },
   "performanceAssessment": {
     "deferredMeasurementCommand": "REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 2 --suite-timeout-seconds 7200",
@@ -1687,12 +1771,12 @@
     },
     "observedStructuralFacts": {
       "graphOwnedHelperArtifacts": 13,
-      "nimTestBinaries": 1144,
+      "nimTestBinaries": 1149,
       "pureUnitConsolidationGroups": 39,
-      "pureUnitTests": 604,
-      "runtimeCompilerCallTests": 44,
-      "sourceCases": 6482,
-      "testEntries": 1148
+      "pureUnitTests": 606,
+      "runtimeCompilerCallTests": 45,
+      "sourceCases": 6506,
+      "testEntries": 1153
     },
     "status": "structural-inference-only"
   },
@@ -2176,20 +2260,21 @@
       "targetOs": "soAny"
     },
     {
-      "count": 5,
+      "count": 6,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl",
         "repro_resources"
       ],
       "owner": "libs/repro_resources",
-      "sourceCaseCount": 31,
+      "sourceCaseCount": 34,
       "sources": [
         "libs/repro_resources/tests/t_l1_state_store.nim",
         "libs/repro_resources/tests/t_l2_lease_edge.nim",
         "libs/repro_resources/tests/t_l3_reaper.nim",
         "libs/repro_resources/tests/t_resource_provider_lane.nim",
-        "libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim"
+        "libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim",
+        "libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim"
       ],
       "targetOs": "soAny"
     },
@@ -2735,9 +2820,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 13,
-      "integration": 448,
+      "integration": 451,
       "platform/destructive": 83,
-      "pure unit": 604
+      "pure unit": 606
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2820,10 +2905,10 @@
       }
     ],
     "measuredProtocolAwareCaseCount": null,
-    "nimTestBinaryCount": 1144,
+    "nimTestBinaryCount": 1149,
     "pythonTestFileCount": 4,
-    "sourceCaseCount": 6482,
-    "testEntryCount": 1148
+    "sourceCaseCount": 6506,
+    "testEntryCount": 1153
   },
   "tests": [
     {
@@ -8258,6 +8343,41 @@
       "requiresReproBinary": false,
       "source": "libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim",
       "sourceCaseCount": 4,
+      "sourceSuiteCount": 1,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_attr_ssz_envelope_roundtrip",
+      "class": "pure unit",
+      "classificationReason": "in-process source-level test with no detected subprocess or fixture compile",
+      "defines": [],
+      "helperCompilationInTestBody": false,
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_resources",
+      "requiresReproBinary": false,
+      "source": "libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim",
+      "sourceCaseCount": 3,
+      "sourceSuiteCount": 1,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_attr_missing_interface_diagnostic",
+      "class": "pure unit",
+      "classificationReason": "in-process source-level test with no detected subprocess or fixture compile",
+      "defines": [],
+      "helperCompilationInTestBody": false,
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_resources"
+      ],
+      "owner": "libs/repro_resources",
+      "requiresReproBinary": false,
+      "source": "libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim",
+      "sourceCaseCount": 1,
       "sourceSuiteCount": 1,
       "targetOs": "soAny"
     },
@@ -15919,7 +16039,9 @@
       "defines": [],
       "helperCompilationInTestBody": false,
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_core"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_b1_repro_build_apps_byte_equivalent.nim",
@@ -16425,6 +16547,27 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_committed_lock_records_canonical_remote_url_when_not_named_origin.nim",
       "sourceCaseCount": 1,
+      "sourceSuiteCount": 1,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_compiler_scratch_isolation",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "helperCompilationInTestBody": false,
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_compiler_scratch_isolation.nim",
+      "sourceCaseCount": 2,
       "sourceSuiteCount": 1,
       "targetOs": "soAny"
     },
@@ -18233,6 +18376,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_macho_runtime_audit",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "helperCompilationInTestBody": false,
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_client",
+        "repro_solver"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_macho_runtime_audit.nim",
+      "sourceCaseCount": 15,
+      "sourceSuiteCount": 1,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_managed_hook_reentry_guard_prevents_recursive_publish",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -18717,7 +18878,7 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_pre_push_protocol_v2_ref_validation.nim",
-      "sourceCaseCount": 2,
+      "sourceCaseCount": 3,
       "sourceSuiteCount": 1,
       "targetOs": "soAny"
     },
@@ -19349,6 +19510,26 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_rp5a_producer_exports_resource_contract_across_workspace.nim",
+      "sourceCaseCount": 1,
+      "sourceSuiteCount": 1,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_extension_type_lifted_and_consumed",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "helperCompilationInTestBody": true,
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_resources",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_extension_type_lifted_and_consumed.nim",
       "sourceCaseCount": 1,
       "sourceSuiteCount": 1,
       "targetOs": "soAny"
@@ -22970,7 +23151,7 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_version.nim",
-      "sourceCaseCount": 1,
+      "sourceCaseCount": 2,
       "sourceSuiteCount": 1,
       "targetOs": "soAny"
     },
@@ -23201,7 +23382,7 @@
   ],
   "timing": {
     "complete": false,
-    "currentSourceFingerprint": "136509cf5386735a60d2aa57bbb9e22a68051347f41bac2ea276d7169f8d81d1",
+    "currentSourceFingerprint": "67c2a69c1ffdc7a9697ac082d75b6fe3ea67b0e69383350508e45406574b4d50",
     "notes": [
       "No suite run was requested for this inventory."
     ],

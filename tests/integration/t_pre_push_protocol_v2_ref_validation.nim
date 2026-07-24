@@ -221,6 +221,164 @@ proc assertRefused(res: tuple[code: int; output: string]; needle: string) =
     check res.code != 0
     check needle in res.output
 
+proc exerciseManifestRemoteAlias(gitBin: string) =
+    ## Reproduce the production naming mismatch exactly: the manifest calls the
+    ## repository remote ``origin``, while the checkout has only the local
+    ## alias ``metacraft-labs``. All destinations remain real bare Git repos.
+    var fx = setupFixture(gitBin, "sha1")
+    defer: removeDir(fx.scratch)
+    let priorRepro = overrideEnv("REPROBUILD_REPRO", fx.reproBin)
+    let priorSystem = overrideEnv("REPROBUILD_SYSTEM_CONFIG",
+      fx.scratch / "no-system.toml")
+    let priorUser = overrideEnv("REPROBUILD_USER_CONFIG",
+      fx.scratch / "no-user.toml")
+    let priorVcsPrivate = overrideEnv("REPROBUILD_VCS_PRIVATE_CONFIG",
+      fx.scratch / "no-vcs-private.toml")
+    defer:
+        restoreEnv("REPROBUILD_VCS_PRIVATE_CONFIG", priorVcsPrivate)
+        restoreEnv("REPROBUILD_USER_CONFIG", priorUser)
+        restoreEnv("REPROBUILD_SYSTEM_CONFIG", priorSystem)
+        restoreEnv("REPROBUILD_REPRO", priorRepro)
+
+    discard fx.git(["remote", "rename", "origin", "metacraft-labs"])
+    discard fx.git(["remote", "remove", "wrong"])
+    check fx.git(["remote"]).output.strip() == "metacraft-labs"
+
+    fx.commit("manifest-remote-alias")
+    let oldHead = require(q(gitBin) & " --git-dir=" & q(fx.origin) &
+      " rev-parse refs/heads/main").strip()
+    let refs = fx.scratch / "alias-refs"
+    writeFile(refs, "refs/heads/main " & fx.head() &
+      " refs/heads/main " & oldHead & "\n")
+
+    # Protocol helper: the different alias is eligible only because Git's hook
+    # location matches both its configured push URL and the manifest resolver's
+    # full repository URL.
+    let exactAlias = evaluateOutgoingCurrent(gitBin, fx.repo, refs,
+      "metacraft-labs", fx.origin, "origin", fx.origin)
+    check exactAlias.protocolOk
+    check exactAlias.outgoingCurrent
+
+    # Repository-location agreement cannot substitute for a missing symbolic
+    # remote declaration in the manifest.
+    let missingAgreedName = evaluateOutgoingCurrent(gitBin, fx.repo, refs,
+      "metacraft-labs", fx.origin, "", fx.origin)
+    check missingAgreedName.protocolOk
+    check not missingAgreedName.outgoingCurrent
+    check missingAgreedName.diagnostic ==
+      "push target is not the manifest-agreed remote"
+
+    # A different repository bound as both fetch and push destination rejects.
+    discard fx.git(["remote", "set-url", "metacraft-labs", fx.wrong])
+    let differentRepo = evaluateOutgoingCurrent(gitBin, fx.repo, refs,
+      "metacraft-labs", fx.wrong, "origin", fx.origin)
+    check differentRepo.protocolOk
+    check not differentRepo.outgoingCurrent
+    check differentRepo.diagnostic == "push target is not the manifest-agreed remote"
+
+    # Matching fetch identity is insufficient when this alias's pushURL points
+    # elsewhere: the actual hook destination is the pushURL.
+    discard fx.git(["remote", "set-url", "metacraft-labs", fx.origin])
+    discard fx.git(["remote", "set-url", "--push", "metacraft-labs",
+      fx.wrong])
+    let splitDestination = evaluateOutgoingCurrent(gitBin, fx.repo, refs,
+      "metacraft-labs", fx.wrong, "origin", fx.origin)
+    check splitDestination.protocolOk
+    check not splitDestination.outgoingCurrent
+    check splitDestination.diagnostic ==
+      "push target is not the manifest-agreed remote"
+
+    # Scheme is part of repository identity. A lexical file URL is not treated
+    # as equal to the manifest's local-path spelling.
+    let fileUrl = "file://" & fx.origin.replace('\\', '/')
+    discard fx.git(["remote", "set-url", "--push", "metacraft-labs",
+      fileUrl])
+    let schemeChanged = evaluateOutgoingCurrent(gitBin, fx.repo, refs,
+      "metacraft-labs", fileUrl, "origin", fx.origin)
+    check schemeChanged.protocolOk
+    check not schemeChanged.outgoingCurrent
+
+    # Credential-bearing aliases compare through the existing credential-free
+    # normalized identity. Neither a successful comparison nor a rejected
+    # installed-hook dispatch may disclose credential material.
+    let cleanUrl = "https://example.invalid/metacraft-labs/nixos-modules"
+    let secretUrl = "https://user:top-secret@example.invalid/" &
+      "metacraft-labs/nixos-modules?access_token=rotate-me#fragment"
+    discard fx.git(["remote", "set-url", "--push", "metacraft-labs",
+      secretUrl])
+    let credentialAlias = evaluateOutgoingCurrent(gitBin, fx.repo, refs,
+      "metacraft-labs", secretUrl, "origin", cleanUrl)
+    check credentialAlias.protocolOk
+    check credentialAlias.outgoingCurrent
+    check credentialAlias.diagnostic.len == 0
+    let dispatcher = fx.repo / ".git" / "hooks" / "pre-push"
+    writeFile(fx.capture, "")
+    let credentialDispatch = run(q(dispatcher) & " metacraft-labs " &
+      q(secretUrl) & " < " & q(refs), fx.repo)
+    check credentialDispatch.code != 0
+    var credentialSurfaces = @[credentialDispatch.output, readFile(fx.capture)]
+    for reportName in ["check-report.json", "push-report.json",
+        "hooks-report.json"]:
+        let report = fx.workspace / ".repro" / "workspace" / reportName
+        if fileExists(report):
+            credentialSurfaces.add(readFile(report))
+    for surface in credentialSurfaces:
+        for secret in ["user:top-secret", "top-secret", "access_token",
+            "rotate-me", "fragment", secretUrl]:
+            check secret notin surface
+
+    # Restore the exact manifest repository destination and drive the complete
+    # installed dispatcher + publication gate through real ``git push``.
+    discard fx.git(["config", "--unset-all",
+      "remote.metacraft-labs.pushurl"], required = false)
+    discard fx.git(["remote", "set-url", "metacraft-labs", fx.origin])
+    let exactPush = fx.git(["push", "metacraft-labs", "main"],
+      required = false)
+    if exactPush.code != 0: checkpoint(exactPush.output)
+    check exactPush.code == 0
+
+    # The full gate refuses both a wholly different alias destination and the
+    # subtler fetch-match/pushURL-mismatch without updating either bare repo.
+    fx.commit("alias-wrong-destination")
+    let wrongBefore = run(q(gitBin) & " --git-dir=" & q(fx.wrong) &
+      " rev-parse --verify refs/heads/main").code
+    check wrongBefore != 0
+    discard fx.git(["remote", "set-url", "metacraft-labs", fx.wrong])
+    assertRefused(fx.git(["push", "metacraft-labs", "main"],
+      required = false), "unpublished")
+    check run(q(gitBin) & " --git-dir=" & q(fx.wrong) &
+      " rev-parse --verify refs/heads/main").code != 0
+    discard fx.git(["remote", "set-url", "metacraft-labs", fx.origin])
+    discard fx.git(["remote", "set-url", "--push", "metacraft-labs",
+      fx.wrong])
+    assertRefused(fx.git(["push", "metacraft-labs", "main"],
+      required = false), "unpublished")
+    check run(q(gitBin) & " --git-dir=" & q(fx.wrong) &
+      " rev-parse --verify refs/heads/main").code != 0
+    discard fx.git(["config", "--unset-all",
+      "remote.metacraft-labs.pushurl"], required = false)
+
+    # A batch still cannot borrow the alias exception, and an exact retry
+    # remains eligible.
+    discard fx.git(["tag", "alias-batch"])
+    assertRefused(fx.git(["push", "metacraft-labs", "main",
+      "refs/tags/alias-batch"], required = false), "unpublished")
+    discard fx.git(["push", "metacraft-labs", "main"])
+
+    # A force/non-fast-forward update through the correct alias remains
+    # ineligible and leaves the real destination unchanged.
+    let published = fx.head()
+    discard fx.git(["checkout", "--orphan", "alias-rewritten"])
+    discard fx.git(["rm", "-rf", "."])
+    writeFile(fx.repo / "README.md", "alias rewritten\n")
+    discard fx.git(["add", "README.md"])
+    discard fx.git(["commit", "-m", "alias rewritten"])
+    discard fx.git(["branch", "-M", "main"])
+    assertRefused(fx.git(["push", "--force", "metacraft-labs", "main"],
+      required = false), "unpublished")
+    check require(q(gitBin) & " --git-dir=" & q(fx.origin) &
+      " rev-parse refs/heads/main").strip() == published
+
 proc exerciseFormat(gitBin, objectFormat: string) =
     var fx = setupFixture(gitBin, objectFormat)
     defer: removeDir(fx.scratch)
@@ -361,7 +519,7 @@ proc exerciseFormat(gitBin, objectFormat: string) =
     writeFile(missingRefs, "refs/heads/main " & fx.head() &
       " refs/heads/main " & missingOld & "\n")
     let missingDecision = evaluateOutgoingCurrent(gitBin, fx.repo,
-      missingRefs, "origin", fx.origin, "origin")
+      missingRefs, "origin", fx.origin, "origin", fx.origin)
     check missingDecision.protocolOk
     check not missingDecision.outgoingCurrent
     check "remote old object" in missingDecision.diagnostic
@@ -384,7 +542,7 @@ proc exerciseFormat(gitBin, objectFormat: string) =
     writeFile(blobRefs, "refs/heads/main " & fx.head() &
       " refs/heads/main " & realBlob & "\n")
     let blobDecision = evaluateOutgoingCurrent(gitBin, fx.repo, blobRefs,
-      "origin", fx.origin, "origin")
+      "origin", fx.origin, "origin", fx.origin)
     check blobDecision.protocolOk
     check not blobDecision.outgoingCurrent
     check "remote old object" in blobDecision.diagnostic
@@ -509,6 +667,13 @@ proc exerciseFormat(gitBin, objectFormat: string) =
     check "arg2-other\n" in readFile(fx.capture)
 
 suite "pre-push protocol v2 — ref validation":
+    test "manifest origin accepts only the exact metacraft-labs checkout alias":
+        let gitBin = findExe("git")
+        if gitBin.len == 0:
+            skip()
+        else:
+            exerciseManifestRemoteAlias(gitBin)
+
     test "real SHA-1 pushes enforce strict outgoing-current semantics":
         let gitBin = findExe("git")
         if gitBin.len == 0:

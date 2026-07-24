@@ -29429,6 +29429,10 @@ type
     absPath*: string
     provenance*: string
     visibility*: WorkspaceVisibility
+    sourceUrl*: string
+      ## Exact URL declared for a URL-backed manifest layer. Local-path layers
+      ## leave this empty: a checkout path is not authority for an alternate
+      ## Git push remote.
 
 proc sameFilesystemPath(a, b: string): bool =
   ## Compare paths robustly across native vs forward-slash spelling.
@@ -29503,6 +29507,7 @@ proc enumerateManifestLayerLocations(workspaceRoot: string;
     if hasUrl:
       let url = entry.url.get()
       loc.provenance = url
+      loc.sourceUrl = url
       let suffix = sanitizeManifestUrlForPath(url)
       loc.absPath = workspaceRoot / ".repro" /
         ("manifests-" & $layerIdx & "-" & suffix)
@@ -31568,12 +31573,20 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # exact, single, fast-forward HEAD update can receive the provisional
   # ``outgoing-current`` classification.
   var agreedRemoteName = ""
+  var agreedRemoteLocation = ""
   if currentRepoName.len > 0:
     for repo in resolved.repos:
       if repo.name == currentRepoName:
         agreedRemoteName = gitRemoteNameFor(repo)
+        # ``fetchUrl`` is already the resolver's full base+relative repository
+        # URL. Do not reconstruct repository identity from local branch state.
+        agreedRemoteLocation = repo.fetchUrl
         break
   elif currentManifestLayer.isSome:
+    # Only a URL-backed layer has a manifest-declared repository identity.
+    # A local_path layer may retain normal same-name behavior, but cannot
+    # authorize a different local remote alias.
+    agreedRemoteLocation = currentManifestLayer.get().sourceUrl
     let upstream = gitRunPlain(identity,
       ["-C", parsed.currentRepo, "rev-parse", "--abbrev-ref",
        "--symbolic-full-name", "@{u}"])
@@ -31585,7 +31598,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     if parsed.pushedRefsPath.len > 0:
       evaluateOutgoingCurrent(identity.binaryPath,
         parsed.currentRepo, parsed.pushedRefsPath, parsed.hookRemoteName,
-        parsed.hookRemoteLocation, agreedRemoteName)
+        parsed.hookRemoteLocation, agreedRemoteName, agreedRemoteLocation)
     else:
       OutgoingCurrentDecision(protocolOk: true)
   if not outgoing.protocolOk:

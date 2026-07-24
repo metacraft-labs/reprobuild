@@ -706,7 +706,8 @@ proc remoteLocationMatches*(gitBin, repoRoot, remoteName,
     if configured == candidate: return true
 
 proc evaluateOutgoingCurrent*(gitBin, repoRoot, refsPath, hookRemoteName,
-    hookRemoteLocation, agreedRemoteName: string): OutgoingCurrentDecision =
+    hookRemoteLocation, agreedRemoteName, agreedRemoteLocation: string):
+    OutgoingCurrentDecision =
   let parsed = parsePrePushRefStream(gitBin, repoRoot, refsPath)
   result.protocolOk = parsed.ok
   result.objectFormat = parsed.objectFormat
@@ -720,11 +721,26 @@ proc evaluateOutgoingCurrent*(gitBin, repoRoot, refsPath, hookRemoteName,
     result.diagnostic = "could not independently observe HEAD as a commit"
     return
   result.remoteName = hookRemoteName
-  if hookRemoteName.len == 0 or hookRemoteName != agreedRemoteName or
+  if hookRemoteName.len == 0 or agreedRemoteName.len == 0 or
       not remoteLocationMatches(gitBin, repoRoot, hookRemoteName,
         hookRemoteLocation):
     result.diagnostic = "push target is not the manifest-agreed remote"
     return
+  if hookRemoteName != agreedRemoteName:
+    # A checkout may use a different local alias for the exact repository
+    # named by the manifest (for example, manifest ``origin`` and checkout
+    # ``metacraft-labs``). The alias name alone carries no authority: its
+    # actual push destination must both match that alias's configured push URL
+    # (above) and equal the fully resolved manifest fetch location. Keeping
+    # this fallback location-exact prevents an alias whose fetch URL happens
+    # to agree but whose pushURL points elsewhere from borrowing provisional
+    # publication status.
+    let hookLocation = normalizedRemoteLocation(hookRemoteLocation)
+    let agreedLocation = normalizedRemoteLocation(agreedRemoteLocation)
+    if hookLocation.len == 0 or agreedLocation.len == 0 or
+        hookLocation != agreedLocation:
+      result.diagnostic = "push target is not the manifest-agreed remote"
+      return
   if parsed.updates.len != 1:
     result.diagnostic = "outgoing-current requires exactly one pushed ref"
     return
