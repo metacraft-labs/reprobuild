@@ -1,4 +1,6 @@
-import std/[tables, json]
+import std/[tables]
+
+import ./attr_ssz
 
 type
   ExtensionBox* = ref object of RootRef
@@ -8,8 +10,15 @@ type
     val*: T
 
   ExtensionMarshaler* = object
+    ## Typed-Extension-Interfaces M1: the marshaller round-trips the
+    ## attribute record through a versioned SSZ envelope
+    ## (``attr_ssz.encodeAttrEnvelope`` / ``decodeAttrEnvelope``) — NOT
+    ## ``std/json``. ``marshal`` returns the envelope bytes carried as a
+    ## byte-per-char string; ``unmarshal`` takes that same byte string.
+    ## The parameter is named ``payload`` (was ``jsonStr``) to reflect
+    ## the binary payload.
     marshal*: proc(box: ExtensionBox): string {.nimcall.}
-    unmarshal*: proc(jsonStr: string): ExtensionBox {.nimcall.}
+    unmarshal*: proc(payload: string): ExtensionBox {.nimcall.}
 
   NimPackageExtension* = object
     name*: string
@@ -22,12 +31,16 @@ type
 var extensionRegistry* {.threadvar.}: Table[string, ExtensionMarshaler]
 
 template registerExtension*[T](id: string) =
+  ## Register the versioned-SSZ-envelope marshaller for attribute record
+  ## ``T`` under ``id``. ``marshal`` emits ``[u16le version][ssz(val)]``
+  ## carried as a byte-per-char string; ``unmarshal`` reads the version
+  ## then SSZ-decodes ``T``. No ``std/json`` on this path.
   block:
     let m = ExtensionMarshaler(
       marshal: proc(box: ExtensionBox): string =
-        $(%*(TypedExtensionBox[T](box).val)),
-      unmarshal: proc(jsonStr: string): ExtensionBox =
-        let val = jsonStr.parseJson().to(T)
+        bytesToByteString(encodeAttrEnvelope(TypedExtensionBox[T](box).val)),
+      unmarshal: proc(payload: string): ExtensionBox =
+        let val = decodeAttrEnvelope[T](byteStringToBytes(payload))
         return TypedExtensionBox[T](typeId: id, val: val)
     )
     extensionRegistry[id] = m

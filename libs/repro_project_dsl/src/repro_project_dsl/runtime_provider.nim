@@ -347,9 +347,10 @@ when defined(reproProviderMode):
   # as its single arg; the EntryPointResult's value carries the produced
   # fragment (or dev-env result) inside a ``ProviderGraphResponse``.
   #
-  # The two payload types nest enums + object graphs that ``std/json``'s
-  # ``%*`` (what the default ``registerExtension[T]`` marshaller uses) cannot
-  # serialize, but a canonical binary codec (``encode/decodeProviderRequest`` /
+  # The two payload types nest enums + object graphs that the default
+  # ``registerExtension[T]`` marshaller (a versioned SSZ envelope over a
+  # flat record, see ``attr_ssz``) does not model, but a canonical binary
+  # codec (``encode/decodeProviderRequest`` /
   # ``…Response`` in repro_provider_runtime) already exists and is the tested
   # serializer for exactly these types. So the two typeIds are registered with
   # a CUSTOM ``ExtensionMarshaler`` on the SAME shared registry whose payload

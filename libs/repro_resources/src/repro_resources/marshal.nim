@@ -22,12 +22,13 @@ proc marshalAttrs*(box: ExtensionBox): string =
       "registerExtension[Attrs](\"" & box.typeId & "\")")
   extensionRegistry[box.typeId].marshal(box)
 
-proc unmarshalAttrs*(typeId: string; jsonStr: string): ExtensionBox =
+proc unmarshalAttrs*(typeId: string; payload: string): ExtensionBox =
   ## Re-hydrate an attribute box for `typeId`. Hard error on an
-  ## unknown id.
+  ## unknown id. `payload` is the versioned SSZ envelope bytes carried
+  ## as a byte-per-char string (see `attr_ssz`), NOT JSON.
   if not extensionRegistry.contains(typeId):
     raise newException(KeyError,
       "no attribute marshaller registered for resource typeId '" &
       typeId & "'; the applying process must link the provider module")
-  result = extensionRegistry[typeId].unmarshal(jsonStr)
+  result = extensionRegistry[typeId].unmarshal(payload)
   result.typeId = typeId
