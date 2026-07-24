@@ -19,6 +19,7 @@
 
 import ./[layout, atomics_shm]
 import shm_queue/ring as shmring
+import shm_queue/segment as shmseg
 
 type
   SubmissionRing* = object
@@ -35,11 +36,28 @@ type
     digest*: array[KeyDigestLen, byte]
     rec*: seq[byte]
 
-proc initRing*(base: ShmBase): SubmissionRing {.inline.} =
+  RingPeekStatus* = enum
+    rpsEmpty
+      ## No ticket is reserved at the current head.
+    rpsUnpublished
+      ## The head ticket is reserved but its producer has not published it.
+    rpsMalformed
+      ## The head ticket is published but not a valid cache-record blob.
+    rpsRecord
+      ## A complete record was copied without advancing the shared head.
+
+  PeekedRingRecord* = object
+    ## A stable copy of one published head record. `ticket` is the exact head
+    ## value that `ackPeek` must CAS to `ticket + 1`; a stale consumer can never
+    ## acknowledge a successor's record.
+    ticket*: uint64
+    record*: RingRecord
+
+proc initRing*(base: atomics_shm.ShmBase): SubmissionRing {.inline.} =
   SubmissionRing(er: shmring.initEmbeddedRing(base, RingHdrBase, RingCap,
     RingBlobCap))
 
-proc resetRing*(base: ShmBase) =
+proc resetRing*(base: atomics_shm.ShmBase) =
   ## Zero the ring header (fresh region init). Slot `ready` fields are already
   ## zero in a freshly-created (zero-filled) region. Delegates to shm_queue.
   shmring.resetEmbeddedRing(
@@ -68,12 +86,6 @@ proc append*(r: SubmissionRing; digest: openArray[byte];
   of prPushed: rasAppended
   of prDropped: rasDropped
   of prOversize: rasOversized
-  # Any other producer result is treated as a drop (the record could not be
-  # delivered). Newer nim-shm-queue revisions add ``prConsumerGone`` (an
-  # ``opBlockProducer``-only outcome the non-blocking ``tryPush`` never returns);
-  # ``else`` keeps this exhaustive and version-agnostic across nim-shm-queue revs
-  # (older pins have only the three named results above).
-  else: rasDropped
 
 # --- single-consumer drain -----------------------------------------------
 
@@ -94,6 +106,97 @@ proc tryDrainOne*(r: SubmissionRing; outRec: var RingRecord): bool =
   for i in 0 ..< recLen:
     outRec.rec[i] = blob[KeyDigestLen + i]
   true
+
+func embeddedSlotOff(ticket: uint64): int {.inline.} =
+  RingHdrBase + shmseg.ringSlotsBaseOffset() +
+    int(ticket mod uint64(RingCap)) * shmseg.slotStrideFor(RingBlobCap)
+
+proc peekOne*(r: SubmissionRing; outRec: var PeekedRingRecord):
+    RingPeekStatus =
+  ## Crash-replayable single-consumer read. Unlike shm_queue's `tryDrainOne`,
+  ## this copies the published head slot but deliberately does NOT clear
+  ## `ready` or advance `head`. The daemon first applies the record and only
+  ## then calls `ackPeek`, so a crash at any point before the ack replays the
+  ## same idempotent record under the next exact owner.
+  ##
+  ## The payload is revalidated through the publication ticket after copying.
+  ## A producer cannot reuse the slot until `head` advances, so a matching
+  ## ticket remains stable throughout this window.
+  if r.er.base.isNil:
+    return rpsEmpty
+  let base = r.er.base
+  let head = atomics_shm.loadU64Acquire(base,
+    RingHdrBase + shmseg.RingOffHead)
+  let tail = atomics_shm.loadU64Acquire(base,
+    RingHdrBase + shmseg.RingOffTail)
+  if head >= tail:
+    return rpsEmpty
+  let so = embeddedSlotOff(head)
+  let wantReady = head + 1'u64
+  if atomics_shm.loadU64Acquire(base,
+      so + shmseg.SlotOffReady) != wantReady:
+    return rpsUnpublished
+  let blobLen = int(atomics_shm.loadU32Acquire(base,
+    so + shmseg.SlotOffBlobLen))
+  if blobLen < KeyDigestLen or blobLen > RingBlobCap:
+    outRec.ticket = head
+    return rpsMalformed
+  var blob: array[RingBlobCap, byte]
+  atomics_shm.copyOut(base, so + shmseg.SlotOffBlob, blob, blobLen)
+  if atomics_shm.loadU64Acquire(base,
+      so + shmseg.SlotOffReady) != wantReady:
+    return rpsUnpublished
+  outRec.ticket = head
+  for i in 0 ..< KeyDigestLen:
+    outRec.record.digest[i] = blob[i]
+  let recLen = blobLen - KeyDigestLen
+  outRec.record.rec = newSeq[byte](recLen)
+  for i in 0 ..< recLen:
+    outRec.record.rec[i] = blob[KeyDigestLen + i]
+  rpsRecord
+
+proc ackPeek*(r: SubmissionRing; ticket: uint64): bool =
+  ## Retire exactly the record previously returned by `peekOne`.
+  ##
+  ## Advancing `head` is the sole acknowledgement/linearization point. We
+  ## intentionally leave the old `ready = ticket + 1` value in place: once
+  ## head advances, the producer for ticket+RingCap may reuse this slot, and
+  ## its new publication ticket cannot equal the stale value. Avoiding a
+  ## separate ready-clear removes both crash windows of the legacy drain
+  ## sequence (clear-before-head strands the ring; head-before-clear can erase
+  ## a successor publication).
+  if r.er.base.isNil:
+    return false
+  var expected = ticket
+  atomics_shm.casU64(r.er.base, RingHdrBase + shmseg.RingOffHead, expected,
+    ticket + 1'u64)
+
+proc headTicket*(r: SubmissionRing): uint64 {.inline.} =
+  if r.er.base.isNil: return 0
+  atomics_shm.loadU64Acquire(r.er.base,
+    RingHdrBase + shmseg.RingOffHead)
+
+proc tailTicket*(r: SubmissionRing): uint64 {.inline.} =
+  if r.er.base.isNil: return 0
+  atomics_shm.loadU64Acquire(r.er.base,
+    RingHdrBase + shmseg.RingOffTail)
+
+proc reserveUnpublishedForTesting*(r: SubmissionRing): uint64 =
+  ## Deterministic crash fixture for the one residual limitation of the
+  ## unchanged embedded MPSC layout: reserve a tail ticket and intentionally
+  ## never publish its slot. Production never calls this helper.
+  if r.er.base.isNil: return high(uint64)
+  let base = r.er.base
+  var tail = atomics_shm.loadU64Acquire(base,
+    RingHdrBase + shmseg.RingOffTail)
+  while true:
+    let head = atomics_shm.loadU64Acquire(base,
+      RingHdrBase + shmseg.RingOffHead)
+    if tail - head >= uint64(RingCap):
+      return high(uint64)
+    if atomics_shm.casU64(base, RingHdrBase + shmseg.RingOffTail, tail,
+        tail + 1'u64):
+      return tail
 
 proc droppedCount*(r: SubmissionRing): uint64 {.inline.} =
   r.er.droppedCount()
