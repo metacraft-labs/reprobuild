@@ -4135,6 +4135,12 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
   if scratchDir.len > 0:
     command.add("--scratch-dir")
     command.add(scratchDir)
+  let compilerCwd =
+    if scratchDir.len > 0:
+      scratchDir
+    else:
+      parentDir(plan.outputBinaryPath)
+  createDir(extendedPath(compilerCwd))
   # The provider-compile edge runs reprobuild's OWN ``nim c`` of the recipe's
   # provider binary (its inputs are reprobuild's pinned libs + the Nim stdlib,
   # NOT the package's source tree). It uses automatic monitoring like every
@@ -4144,7 +4150,7 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
   # unapproved soundness hole and has been removed; monitored builds work on
   # arm64e after the io-mon fix.
   action("__repro_provider_compile", command,
-    cwd = workDir,
+    cwd = compilerCwd,
     inputs = inputs,
     outputs = @[plan.outputBinaryPath, artifactPath],
     commandStatsId = "repro provider compile edge",
@@ -12075,6 +12081,7 @@ const
     # workspace sibling libraries when the daemon-hosted executor evaluates the
     # provider under a login-launched daemon environment.
     "IO_MON_SRC",
+    "STACKABLE_HOOKS_SRC",
     "SHM_GSET_SRC",
     "SHM_QUEUE_SRC",
     "REPRO_FROM_SOURCE_ROOT",
@@ -12145,7 +12152,8 @@ const
     # defaults to vendored-hash mode and tries to compile from
     # references/mold/, which is gitignored and so missing in CI checkouts.
     "REPROBUILD_USE_SYSTEM_HASH_LIBS",
-    "BLAKE3_PREFIX", "XXHASH_PREFIX", "SQLITE_PREFIX",
+    "BLAKE3_PREFIX", "XXHASH_PREFIX", "SQLITE_PREFIX", "CLINGO_PREFIX",
+    "REPROBUILD_RUNTIME_LIBRARY_PATH",
     "NIMCRYPTO_SRC", "RUNQUOTA_SRC", "BEARSSL_SRC",
     "REPRO_TEST_ADAPTERS_SRC", "REPRO_CT_TEST_RUNNER_SRC",
     "CODETRACER_SRC",

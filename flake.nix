@@ -280,16 +280,27 @@
               pass_filenames = false;
             };
           };
+          reprobuildSource = ./.;
+          runtimeLibraries = [
+            blake3Prefix
+            pkgs.xxHash
+            pkgs.sqlite.out
+            pkgs.openssl.out
+            pkgs.zstd.out
+            pkgs.clingo
+          ];
+          runtimeLibraryPath = pkgs.lib.makeLibraryPath runtimeLibraries;
           reprobuild = pkgs.stdenv.mkDerivation {
             pname = "reprobuild";
             inherit version;
-            src = ./.;
+            src = reprobuildSource;
 
             strictDeps = true;
             dontConfigure = true;
 
             nativeBuildInputs = [
               pkgs.just
+              pkgs.makeWrapper
               pkgs.nim2
               # Spec-Implementation M2a: clingo is the ASP solver
               # reprobuild's repro_solver lib binds against. The CLI
@@ -300,6 +311,17 @@
               # `just build`; the buildInputs entry below pulls the
               # shared library into the runtime closure.
               pkgs.clingo
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              # Rewrites Mach-O install IDs and internal dependency paths
+              # before postFixup adds the complete package LC_RPATH set. The
+              # signing hook is a postFixupHooks entry: stdenv runs the
+              # derivation's postFixup body first, so it signs only after our
+              # per-slice mutation and universal-image reassembly.
+              pkgs.fixDarwinDylibNames
+              pkgs.darwin.autoSignDarwinBinariesHook
+              pkgs.coreutils
+              pkgs.file
             ];
 
             buildInputs = [
@@ -349,35 +371,67 @@
               runHook postInstall
             '';
 
-            # The binary-cache client streaming path dlopen()s libzstd.so.1 at
-            # runtime (zstd frame decompress on substitute). Because it is
-            # dlopen'd it is NOT a DT_NEEDED dep, so the default fixupPhase
-            # (`patchelf --shrink-rpath`) strips any rpath entry pointing at
-            # zstd — which is why adding it in installPhase silently vanished.
-            # Re-add it in postFixup (runs AFTER the shrink) as a forced DT_RPATH
-            # (glibc reliably searches DT_RPATH — not always DT_RUNPATH — for a
-            # binary's own dlopen calls). Without this, repro-binary-cache /
-            # repro-binary-cache-crosshost fail at the first payload transfer
-            # with "could not load: libzstd.so.1" (M1's healthz/cache-info gate
-            # never transferred a payload, so it only surfaced under the M2
-            # cross-host substitute test).
-            #
-            # clingo is the same story: repro_solver's Nim bindings dlopen()
-            # libclingo.so by bare leaf name at runtime (see build_apps.sh's
-            # .rodata-bake guard that clears NIX_LDFLAGS/LD_LIBRARY_PATH), so it
-            # is not DT_NEEDED and the shrink strips any clingo rpath too.
-            # Append clingo's lib dir alongside zstd so every reprobuild binary
-            # (repro, repro-binary-cache — the latter is an overrideAttrs of
-            # this derivation and inherits this
-            # postFixup) resolves its clingo dlopen via its own DT_RPATH, with no
-            # external LD_LIBRARY_PATH. This lets the nixos-modules
-            # `mcl-repro-deploy-agent` unit drop its LD_LIBRARY_PATH workaround.
+            # Installed entry points span ordinary linked libraries and bare
+            # leaf-name dlopen()s (notably zstd and clingo). Normal fixup only
+            # retains paths visible from link dependencies, so restore the full
+            # runtime family for every installed ELF/Mach-O role. Linux uses a
+            # transitive DT_RPATH; Darwin needs one LC_RPATH load command per
+            # directory and valid install IDs for every installed dylib.
             postFixup = ''
+              ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+                for b in "$out"/bin/* "$out"/lib/*; do
+                  if orig=$(${pkgs.patchelf}/bin/patchelf --print-rpath "$b" 2>/dev/null); then
+                    ${pkgs.patchelf}/bin/patchelf --force-rpath \
+                      --set-rpath "$orig''${orig:+:}${runtimeLibraryPath}" "$b"
+                  fi
+                done
+              ''}
+
+              ${pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+                # fixDarwinDylibNames is a fixupOutputHook and has already run.
+                # Copy thin images or extract universal slices, mutate each
+                # architecture independently, then reassemble universal images.
+                # autoSignDarwinBinariesHook is registered in
+                # postFixupHooks, which stdenv invokes after this implicit
+                # postFixup body, so arm64/arm64e signatures cover final bytes.
+                FILE=${pkgs.file}/bin/file \
+                STAT=${pkgs.coreutils}/bin/stat \
+                CP=${pkgs.coreutils}/bin/cp \
+                MV=${pkgs.coreutils}/bin/mv \
+                ${pkgs.bash}/bin/bash ${./scripts/fixup_macho_runtime.sh} "$out" \
+                  ${pkgs.lib.concatStringsSep " " (map (library: "${library}/lib") runtimeLibraries)}
+              ''}
+
+              # Provider/interface compilation happens after installation, in
+              # the caller's project. Keep the package's exact source inputs in
+              # its runtime closure and expose them as defaults to every entry
+              # point. `--set-default` preserves explicit development/source
+              # overrides while making an ordinary installed package
+              # independent of sibling checkouts and the build-time dev shell.
+              # REPROBUILD_RUNTIME_LIBRARY_PATH is compiler input, not a loader
+              # variable: generated interface/provider binaries bake these dirs
+              # into their own RPATH. In particular, do not inject LD_LIBRARY_PATH
+              # or DYLD_* into wrappers because arbitrary user build actions
+              # inherit the wrapper environment.
               for b in "$out"/bin/*; do
-                if orig=$(${pkgs.patchelf}/bin/patchelf --print-rpath "$b" 2>/dev/null); then
-                  ${pkgs.patchelf}/bin/patchelf --force-rpath \
-                    --set-rpath "$orig''${orig:+:}${pkgs.zstd.out}/lib:${pkgs.clingo}/lib" "$b"
-                fi
+                wrapProgram "$b" \
+                  --set-default REPROBUILD_RUNTIME_LIBRARY_PATH ${runtimeLibraryPath} \
+                  --set-default REPROBUILD_SOURCE_ROOT ${reprobuildSource} \
+                  --set-default BLAKE3_PREFIX ${blake3Prefix} \
+                  --set-default NIMCRYPTO_SRC ${nimcrypto-src} \
+                  --set-default BEARSSL_SRC ${bearssl-src} \
+                  --set-default STACKABLE_HOOKS_SRC ${stackable-hooks-src}/src \
+                  --set-default IO_MON_SRC ${io-mon-src}/src \
+                  --set-default SHM_GSET_SRC ${nim-shm-gset-src}/src \
+                  --set-default SHM_QUEUE_SRC ${nim-shm-queue-src}/src \
+                  --set-default REPRO_CT_TEST_RUNNER_SRC ${reprobuild-ct-test-runner-src} \
+                  --set-default REPRO_TEST_ADAPTERS_SRC ${reprobuild-test-adapters-src}/src \
+                  --set-default CT_INTERPOSE_SRC ${ctInterposeSrc} \
+                  --set-default REPROBUILD_USE_SYSTEM_HASH_LIBS 1 \
+                  --set-default RUNQUOTA_SRC ${runquota-src} \
+                  --set-default SQLITE_PREFIX ${pkgs.sqlite.out} \
+                  --set-default XXHASH_PREFIX ${pkgs.xxHash} \
+                  --set-default CLINGO_PREFIX ${pkgs.clingo}
               done
             '';
 
@@ -394,6 +448,334 @@
               ];
             };
           };
+          reprobuildClosure = pkgs.closureInfo {
+            rootPaths = [ reprobuild ];
+          };
+          packagedRuntimeCompileCheck =
+            pkgs.runCommand "reprobuild-packaged-runtime-compile"
+              {
+                nativeBuildInputs = [
+                  pkgs.bash
+                  pkgs.coreutils
+                  pkgs.findutils
+                  pkgs.gcc
+                  pkgs.gnugrep
+                ]
+                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.patchelf ]
+                ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+                  pkgs.binutils
+                  pkgs.cctools
+                  pkgs.darwin.sigtool
+                ];
+              }
+              ''
+                                    export HOME="$TMPDIR/home"
+                                    export TMPDIR="$TMPDIR/tmp"
+                                    mkdir -p "$HOME" "$TMPDIR" "$TMPDIR/direct/project"
+
+                                    daemonEndpoint="$TMPDIR/packaged-repro-daemon.sock"
+                                    daemonState="$TMPDIR/packaged-daemon-state"
+                                    daemonRuntime="$TMPDIR/packaged-daemon-runtime"
+                                    runtimePath=${
+                                      pkgs.lib.makeBinPath [
+                                        pkgs.bash
+                                        pkgs.coreutils
+                                        pkgs.gcc
+                                        pkgs.gnugrep
+                                      ]
+                                    }
+
+                                    runDaemonControl() {
+                                      ${pkgs.coreutils}/bin/env -i \
+                                        HOME="$HOME" TMPDIR="$TMPDIR" PATH="$runtimePath" \
+                                        REPRO_DAEMON_RUNTIME_DIR="$daemonRuntime" \
+                                        ${reprobuild}/bin/repro daemon "$1" \
+                                          --endpoint "$daemonEndpoint" \
+                                          --state-dir "$daemonState" \
+                                          --log "$daemonState/logs/repro-daemon.log"
+                                    }
+                                    cleanupDaemon() {
+                                      runDaemonControl stop >/dev/null 2>&1 || true
+                                      rm -f "$daemonEndpoint"
+                                    }
+                                    showFailureLogs() {
+                                      status=$?
+                                      for log in \
+                                        "$TMPDIR/direct-build.log" \
+                                        "$TMPDIR/daemon-build.log" \
+                                        "$TMPDIR/daemon-status.log" \
+                                        "$TMPDIR/explicit-override.log"; do
+                                        if test -f "$log"; then
+                                          echo "--- tail of $log ---" >&2
+                                          tail -n 200 "$log" >&2
+                                        fi
+                                      done
+                                      exit "$status"
+                                    }
+                                    trap cleanupDaemon EXIT
+                                    trap showFailureLogs ERR
+
+                                    assertColdActionLog() {
+                                      log="$1"
+                                      test "$(grep -Ec '^providerCompileAction: ' "$log")" -eq 1
+                                      test "$(grep -Ec '^action: ' "$log")" -eq 3
+                                      test "$(grep -Ec '^providerCompileAction: __repro_provider_compile status=asSucceeded launched=true( |$)' "$log")" -eq 1
+                                      for actionName in build-dir compile-hello run-hello; do
+                                        test "$(grep -Ec "^action: $actionName status=asSucceeded launched=true( |$)" "$log")" -eq 1
+                                      done
+                                      if grep -Eq '^(providerCompileAction|action): .*status=(asFailed|asBlocked|asSkipped|asUpToDate|asCacheHit)' "$log"; then
+                                        echo "cold package gate accepted a non-launched action" >&2
+                                        return 1
+                                      fi
+                                    }
+
+                                    # Every public entry point must be a wrapper paired with one
+                                    # hidden target. Enumerate rather than hard-code the current
+                                    # binaries so newly installed helpers (including scripts)
+                                    # cannot bypass the packaged defaults.
+                                    wrapperCount=0
+                                    for wrapper in ${reprobuild}/bin/*; do
+                                      name=$(basename "$wrapper")
+                                      hidden=${reprobuild}/bin/.$name-wrapped
+                                      test -f "$hidden"
+                                      grep -Fq "$hidden" "$wrapper"
+                                      if grep -Eq 'LD_LIBRARY_PATH|DYLD_(LIBRARY_PATH|FALLBACK_LIBRARY_PATH)' "$wrapper"; then
+                                        echo "loader search path leaked through wrapper: $wrapper" >&2
+                                        exit 1
+                                      fi
+                                      while IFS='|' read -r variable expected; do
+                                        grep -Fq "$variable" "$wrapper"
+                                        grep -Fq "$expected" "$wrapper"
+                                      done <<DEFAULTS
+                REPROBUILD_RUNTIME_LIBRARY_PATH|${runtimeLibraryPath}
+                REPROBUILD_SOURCE_ROOT|${reprobuildSource}
+                BLAKE3_PREFIX|${blake3Prefix}
+                NIMCRYPTO_SRC|${nimcrypto-src}
+                BEARSSL_SRC|${bearssl-src}
+                STACKABLE_HOOKS_SRC|${stackable-hooks-src}/src
+                IO_MON_SRC|${io-mon-src}/src
+                SHM_GSET_SRC|${nim-shm-gset-src}/src
+                SHM_QUEUE_SRC|${nim-shm-queue-src}/src
+                REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
+                REPRO_TEST_ADAPTERS_SRC|${reprobuild-test-adapters-src}/src
+                CT_INTERPOSE_SRC|${ctInterposeSrc}
+                REPROBUILD_USE_SYSTEM_HASH_LIBS|1
+                RUNQUOTA_SRC|${runquota-src}
+                SQLITE_PREFIX|${pkgs.sqlite.out}
+                XXHASH_PREFIX|${pkgs.xxHash}
+                CLINGO_PREFIX|${pkgs.clingo}
+                DEFAULTS
+                                      wrapperCount=$((wrapperCount + 1))
+                                    done
+                                    test "$wrapperCount" -gt 0
+                                    for hidden in ${reprobuild}/bin/.*-wrapped; do
+                                      name=$(basename "$hidden")
+                                      publicName=$(printf '%s' "$name" | sed -e 's/^\.//' -e 's/-wrapped$//')
+                                      test -f "${reprobuild}/bin/$publicName"
+                                    done
+
+                                    ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+                                      # Every installed ELF role, including hidden wrapper
+                                      # targets and .old libraries, carries all six package
+                                      # runtime dirs as distinct DT_RPATH entries.
+                                      elfCount=0
+                                      for candidate in ${reprobuild}/bin/* ${reprobuild}/bin/.*-wrapped ${reprobuild}/lib/*; do
+                                        if rpath=$(${pkgs.patchelf}/bin/patchelf --print-rpath "$candidate" 2>/dev/null); then
+                                          elfCount=$((elfCount + 1))
+                                          for requiredRpath in \
+                                            ${blake3Prefix}/lib \
+                                            ${pkgs.xxHash}/lib \
+                                            ${pkgs.sqlite.out}/lib \
+                                            ${pkgs.openssl.out}/lib \
+                                            ${pkgs.zstd.out}/lib \
+                                            ${pkgs.clingo}/lib; do
+                                            case ":$rpath:" in
+                                              *":$requiredRpath:"*) ;;
+                                              *) echo "incomplete RPATH on $candidate: $rpath" >&2; exit 1 ;;
+                                            esac
+                                          done
+                                        else
+                                          case "$candidate" in
+                                            ${reprobuild}/lib/*|${reprobuild}/bin/.*-wrapped)
+                                              echo "non-ELF installed binary/library role: $candidate" >&2
+                                              exit 1
+                                              ;;
+                                          esac
+                                        fi
+                                      done
+                                      test "$elfCount" -gt 0
+                                    ''}
+
+                                    ${pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+                                      # Use the same strict per-slice audit exercised by the
+                                      # Linux-hosted behavioral fixture. It resolves dependency
+                                      # tokens against each architecture's own LC_RPATH list and
+                                      # verifies final arm signatures after postFixup mutation.
+                                      ${pkgs.bash}/bin/bash ${./scripts/audit_macho_runtime.sh} \
+                                        ${reprobuild} \
+                                        ${blake3Prefix}/lib \
+                                        ${pkgs.xxHash}/lib \
+                                        ${pkgs.sqlite.out}/lib \
+                                        ${pkgs.openssl.out}/lib \
+                                        ${pkgs.zstd.out}/lib \
+                                        ${pkgs.clingo}/lib
+
+                                      # Prove the installed program bytes use LC_RPATH-aware
+                                      # dlopen names, not bare leaf names. The pure target helper
+                                      # tests pin the same constants on Linux before this gate.
+                                      zstdLoaderCount=0
+                                      clingoLoaderCount=0
+                                      for candidate in ${reprobuild}/bin/.*-wrapped ${reprobuild}/lib/*; do
+                                        if lipo -archs "$candidate" >/dev/null 2>&1; then
+                                          loaderStrings=$(strings "$candidate")
+                                          if printf '%s\n' "$loaderStrings" | grep -Fxq '@rpath/libzstd.1.dylib'; then
+                                            zstdLoaderCount=$((zstdLoaderCount + 1))
+                                          fi
+                                          if printf '%s\n' "$loaderStrings" | grep -Fxq '@rpath/libclingo.dylib'; then
+                                            clingoLoaderCount=$((clingoLoaderCount + 1))
+                                          fi
+                                          if printf '%s\n' "$loaderStrings" | grep -Fxq 'libzstd.1.dylib'; then
+                                            echo "bare zstd Darwin loader name in $candidate" >&2
+                                            exit 1
+                                          fi
+                                          if printf '%s\n' "$loaderStrings" | grep -Fxq 'libclingo.dylib'; then
+                                            echo "bare clingo Darwin loader name in $candidate" >&2
+                                            exit 1
+                                          fi
+                                        fi
+                                      done
+                                      test "$zstdLoaderCount" -gt 0
+                                      test "$clingoLoaderCount" -gt 0
+                                    ''}
+
+                                    cp -R ${./tests/fixtures/packaged-runtime-compile}/. \
+                                      "$TMPDIR/direct/project/"
+                                    chmod -R u+w "$TMPDIR/direct/project"
+
+                                    # A source-looking sibling must not shadow the package's pinned
+                                    # adapter. The file is intentionally uncompilable: reaching it
+                                    # makes the positive real-execution gate fail hard.
+                                    hostile="$TMPDIR/direct/reprobuild-test-adapters/src/repro_test_adapters"
+                                    mkdir -p "$hostile"
+                                    printf '%s\n' '{.error: "HOSTILE_SIBLING_ADAPTER_WAS_USED".}' \
+                                      > "$hostile/test_runner.nim"
+
+                                    # Direct cold build: env -i deliberately omits the source root
+                                    # and every package prefix so the wrapper defaults are exercised.
+                                    (
+                                      cd "$TMPDIR/direct/project"
+                                      ${pkgs.coreutils}/bin/env -i \
+                                        HOME="$HOME" TMPDIR="$TMPDIR" PATH="$runtimePath" \
+                                        REPROBUILD_STORE_ROOT="$TMPDIR/direct-store" \
+                                        REPROBUILD_ACTION_CACHE_ROOT="$TMPDIR/direct-action-cache" \
+                                        ${reprobuild}/bin/repro build . \
+                                          --daemon=off --no-runquota \
+                                          --tool-provisioning=path --progress=none --log=actions
+                                    ) > "$TMPDIR/direct-build.log" 2>&1
+                                    assertColdActionLog "$TMPDIR/direct-build.log"
+                                    test "$(cat "$TMPDIR/direct/project/build/hello-output.txt")" = \
+                                      "reprobuild packaged runtime: hello"
+                                    if grep -Fq HOSTILE_SIBLING_ADAPTER_WAS_USED "$TMPDIR/direct-build.log"; then
+                                      echo "packaged build selected the hostile sibling adapter" >&2
+                                      exit 1
+                                    fi
+
+                                    # CodeTracer-style positive override: a writable source copy
+                                    # with spaces and shell metacharacters, while every external
+                                    # source/prefix remains the installed wrapper default. Start a
+                                    # real isolated daemon first so --daemon=require cannot fall
+                                    # back to direct execution.
+                                    sourceOverride="$TMPDIR/CodeTracer source [override] #1;copy"
+                                    daemonProject="$TMPDIR/daemon project [override] #1"
+                                    mkdir -p "$sourceOverride" "$daemonProject"
+                                    cp -R ${reprobuildSource}/. "$sourceOverride/"
+                                    cp -R ${./tests/fixtures/packaged-runtime-compile}/. "$daemonProject/"
+                                    chmod -R u+w "$sourceOverride" "$daemonProject"
+                                    runDaemonControl start > "$TMPDIR/daemon-start.log" 2>&1
+                                    runDaemonControl status > "$TMPDIR/daemon-status.log" 2>&1
+                                    grep -Fq 'repro daemon: running' "$TMPDIR/daemon-status.log"
+                                    (
+                                      cd "$daemonProject"
+                                      ${pkgs.coreutils}/bin/env -i \
+                                        HOME="$HOME" TMPDIR="$TMPDIR" PATH="$runtimePath" \
+                                        REPRO_DAEMON_ENDPOINT="$daemonEndpoint" \
+                                        REPRO_DAEMON_STATE_DIR="$daemonState" \
+                                        REPRO_DAEMON_RUNTIME_DIR="$daemonRuntime" \
+                                        REPROBUILD_SOURCE_ROOT="$sourceOverride" \
+                                        REPROBUILD_STORE_ROOT="$TMPDIR/daemon-store" \
+                                        REPROBUILD_ACTION_CACHE_ROOT="$TMPDIR/daemon-action-cache" \
+                                        ${reprobuild}/bin/repro build . \
+                                          --daemon=require --no-runquota \
+                                          --tool-provisioning=path --progress=none --log=actions
+                                    ) > "$TMPDIR/daemon-build.log" 2>&1
+                                    assertColdActionLog "$TMPDIR/daemon-build.log"
+                                    test "$(cat "$daemonProject/build/hello-output.txt")" = \
+                                      "reprobuild packaged runtime: hello"
+                                    runDaemonControl status > "$TMPDIR/daemon-status.log" 2>&1
+                                    grep -Fq 'active-sessions: 0' "$TMPDIR/daemon-status.log"
+                                    runDaemonControl stop > "$TMPDIR/daemon-stop.log" 2>&1
+                                    runDaemonControl status > "$TMPDIR/daemon-after-stop.log" 2>&1
+                                    grep -Fq 'repro daemon: not-running' "$TMPDIR/daemon-after-stop.log"
+                                    test ! -e "$daemonEndpoint"
+
+                                    # makeWrapper defaults must preserve explicit overrides. A
+                                    # deliberately broken adapter must be selected, not masked.
+                                    mkdir -p "$TMPDIR/explicit-adapter/src/repro_test_adapters" \
+                                      "$TMPDIR/override-project"
+                                    cp -R ${./tests/fixtures/packaged-runtime-compile}/. \
+                                      "$TMPDIR/override-project/"
+                                    chmod -R u+w "$TMPDIR/override-project"
+                                    printf '%s\n' '{.error: "EXPLICIT_ADAPTER_OVERRIDE_WAS_USED".}' \
+                                      > "$TMPDIR/explicit-adapter/src/repro_test_adapters/test_runner.nim"
+                                    if (
+                                      cd "$TMPDIR/override-project"
+                                      ${pkgs.coreutils}/bin/env -i \
+                                        HOME="$HOME" TMPDIR="$TMPDIR" PATH="$runtimePath" \
+                                        REPRO_TEST_ADAPTERS_SRC="$TMPDIR/explicit-adapter/src" \
+                                        REPROBUILD_STORE_ROOT="$TMPDIR/override-store" \
+                                        REPROBUILD_ACTION_CACHE_ROOT="$TMPDIR/override-action-cache" \
+                                        ${reprobuild}/bin/repro build . \
+                                          --daemon=off --no-runquota \
+                                          --tool-provisioning=path --progress=none --log=actions
+                                    ) > "$TMPDIR/explicit-override.log" 2>&1; then
+                                      echo "packaged wrapper masked an explicit adapter override" >&2
+                                      exit 1
+                                    fi
+                                    grep -Fq EXPLICIT_ADAPTER_OVERRIDE_WAS_USED \
+                                      "$TMPDIR/explicit-override.log"
+
+                                    # Every source/prefix used as an installed-runtime default must be
+                                    # a real member of the package closure, not an ambient store path.
+                                    cp ${reprobuildClosure}/store-paths "$TMPDIR/package-closure"
+                                    for required in \
+                                      ${reprobuildSource} \
+                                      ${nimcrypto-src} \
+                                      ${bearssl-src} \
+                                      ${stackable-hooks-src} \
+                                      ${io-mon-src} \
+                                      ${nim-shm-gset-src} \
+                                      ${nim-shm-queue-src} \
+                                      ${reprobuild-ct-test-runner-src} \
+                                      ${reprobuild-test-adapters-src} \
+                                      ${codetracer-native-recorder} \
+                                      ${runquota-src} \
+                                      ${blake3Prefix} \
+                                      ${pkgs.sqlite.out} \
+                                      ${pkgs.xxHash} \
+                                      ${pkgs.openssl.out} \
+                                      ${pkgs.zstd.out} \
+                                      ${pkgs.clingo}; do
+                                      if ! grep -Fxq "$required" "$TMPDIR/package-closure"; then
+                                        echo "missing packaged runtime closure path: $required" >&2
+                                        exit 1
+                                      fi
+                                    done
+
+                                    mkdir -p "$out"
+                                    cp "$TMPDIR/direct-build.log" "$out/"
+                                    cp "$TMPDIR/daemon-build.log" "$out/"
+                                    cp "$TMPDIR/package-closure" "$out/"
+              '';
           reproApp = {
             type = "app";
             program = "${reprobuild}/bin/repro";
@@ -469,6 +851,7 @@
           checks = {
             inherit pre-commit-check;
             package-build = reprobuild;
+            packaged-runtime-compile = packagedRuntimeCompileCheck;
             repo-requirements =
               pkgs.runCommand "reprobuild-repo-requirements" { nativeBuildInputs = [ pkgs.just ]; }
                 ''

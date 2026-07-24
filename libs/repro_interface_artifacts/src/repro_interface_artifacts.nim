@@ -1,5 +1,5 @@
 import std/[algorithm, options, os, osproc, sequtils, sets, streams, strutils,
-            tables, times]
+            tables, tempfiles, times]
 
 import cbor
 import repro_core
@@ -19,8 +19,6 @@ proc sanitizeStaticExec(val: string): string =
 const BuiltNimCompilerPath = sanitizeStaticExec(staticExec("command -v nim"))
 const BuiltCCompilerPath =
   sanitizeStaticExec(staticExec("command -v cc || command -v gcc || true"))
-
-var interfaceTempNonce = uint64(getCurrentProcessId())
 
 type
   InterfaceEnvelopeKind* = enum
@@ -3017,6 +3015,43 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
     ".." / "reprobuild-test-adapters" / "src",
   ], "repro_test_adapters" / "test_runner.nim")
 
+type RuntimeLinkTarget* = enum
+  rltWindows
+  rltLinux
+  rltDarwin
+  rltOtherPosix
+
+proc runtimeRpathCompilerFlags*(runtimeDirs: openArray[string];
+                                target: RuntimeLinkTarget): seq[string] =
+  ## Build linker flags for binaries compiled by reprobuild itself after
+  ## installation. Keep this target-parameterized so a Linux test can verify
+  ## Darwin argv shape: ld64 requires one LC_RPATH option per directory,
+  ## whereas GNU ld accepts a colon-delimited DT_RPATH value.
+  var uniqueDirs: seq[string] = @[]
+  for libDir in runtimeDirs:
+    if libDir.len > 0 and libDir notin uniqueDirs:
+      uniqueDirs.add(libDir)
+  case target
+  of rltWindows:
+    discard
+  of rltLinux:
+    if uniqueDirs.len > 0:
+      result.add("--passL:-Wl,--disable-new-dtags")
+      result.add("--passL:-Wl,-rpath," & uniqueDirs.join(":"))
+  of rltDarwin, rltOtherPosix:
+    for libDir in uniqueDirs:
+      result.add("--passL:-Wl,-rpath," & libDir)
+
+proc hostRuntimeLinkTarget(): RuntimeLinkTarget =
+  when defined(windows):
+    rltWindows
+  elif defined(linux):
+    rltLinux
+  elif defined(macosx):
+    rltDarwin
+  else:
+    rltOtherPosix
+
 proc externalHashFlags(workDir = ""): seq[string] =
   # Windows: there is no homebrew/nix prefix that ships libblake3 or libxxhash.
   # The reprobuild repo vendors portable C sources for both inside the
@@ -3027,6 +3062,15 @@ proc externalHashFlags(workDir = ""): seq[string] =
   # propagate the same define/include flags here. The vendored sources live
   # alongside the reprobuild library tree, so resolve the include dirs relative
   # to workDir (which is the reprobuildLibraryWorkDir).
+  # Installed wrappers publish this build-time-only search path. It is never
+  # assigned to LD_LIBRARY_PATH/DYLD_*: those variables would leak package
+  # libraries into arbitrary user actions. Instead, bake the package's
+  # complete runtime closure into the two binaries reprobuild compiles for
+  # itself after installation (the interface runner and project provider).
+  result.add(runtimeRpathCompilerFlags(
+    getEnv("REPROBUILD_RUNTIME_LIBRARY_PATH").split(PathSep),
+    hostRuntimeLinkTarget()))
+
   when defined(windows):
     # M9.R.13b.1 — propagate `--define:reproVendoredHash` so the vendored
     # path in `blake3.nim` / `xxh3.nim` (a `when defined(reproVendoredHash):
@@ -3346,19 +3390,21 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # …extract_runner.nim`. CMake TryCompile workdirs nested inside the
   # generator's per-build worktree blow past that limit, so prefer the
   # system temp dir for the runner scratch tree on Windows.
-  let tempParent =
+  let tempParent = absolutePath(
     when defined(windows):
       getTempDir() / "repro-interface-extract"
     else:
-      buildScratchRoot(workDir, scratchDir) / "m7-temp"
+      buildScratchRoot(workDir, scratchDir) / "m7-temp")
   createDir(extendedPath(tempParent))
-  inc interfaceTempNonce
-  let now = getTime()
-  let tempRoot = tempParent / ("repro-interface-extract-" &
-    $getCurrentProcessId() & "-" & $now.toUnix & "-" & $now.nanosecond &
-    "-" & $interfaceTempNonce)
-  createDir(extendedPath(tempRoot))
-  defer: removeDir(extendedPath(tempRoot))
+  # createTempDir uses an atomic create-and-retry loop. PID/timestamp names can
+  # collide between threads in one process and make compilers share response
+  # files; each extraction instead owns an exclusive writable directory.
+  let tempRoot = createTempDir("repro-interface-extract-", "", tempParent)
+  defer:
+    try:
+      removeDir(extendedPath(tempRoot))
+    except OSError:
+      discard
   let runnerPath = tempRoot / "extract_runner.nim"
   # M9.R.14b.2: Pin the recipe import to its absolute path so that
   # ``import repro`` does not resolve through Nim's search path. The
@@ -3461,7 +3507,12 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
       producerPathFlags.add("--path:" & absolutePath(extra))
   if producerPathFlags.len > 0:
     command.insert(producerPathFlags, 4 + libFlags.len)
-  let compileExecution = runCommand(command, cwd = workDir)
+  # `workDir` is the reprobuild library lookup/fingerprint root. Installed Nix
+  # packages deliberately point it at their immutable source closure, so it is
+  # not a valid compiler working directory: Nim writes relative linker response
+  # files (for example `extract_runner_linkerArgs.txt`) into its process CWD.
+  # The runner scratch directory already owns every generated extractor file.
+  let compileExecution = runCommand(command, cwd = tempRoot)
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):
     # `runCommand` already raises on non-zero exit, so reaching this branch
@@ -3493,8 +3544,12 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
         except CatchableError:
           discard
   ensureExecutable(runnerExe)
-  let execution = runCommand(@[runnerExe, artifactPath, stubPath, modulePath],
-    cwd = workDir)
+  let execution = runCommand(@[
+    runnerExe,
+    absolutePath(artifactPath),
+    absolutePath(stubPath),
+    absoluteModulePath
+  ], cwd = tempRoot)
   if not fileExists(extendedPath(artifactPath)):
     raise newException(IOError,
       "interface extraction did not write artifact: " & artifactPath &
@@ -3884,12 +3939,16 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
                           interfaceFingerprint: ContentDigest;
                           workDir = getCurrentDir();
                           scratchDir = ""): ProviderCompilePlan =
-  let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
-  let sources = discoverNimSources(modulePath)
+  # The compiler runs in an exclusive scratch CWD, so every path that belongs
+  # to the provider itself must be independent of that CWD.
+  let absoluteModulePath = absolutePath(modulePath)
+  let normalizedOutputPath = absolutePath(
+    normalizedProviderOutputPath(outputBinaryPath))
+  let sources = discoverNimSources(absoluteModulePath)
   let providerFingerprint = providerFingerprintFor(sources, interfaceFingerprint,
     workDir)
-  let command = providerCompileCommand(modulePath, normalizedOutputPath, workDir,
-    scratchDir)
+  let command = providerCompileCommand(absoluteModulePath,
+    normalizedOutputPath, workDir, scratchDir)
   # RP1: derive the v1-named identities. The ``providerCompileOptions`` set is
   # the compiler command minus the compiler path and the ``--out:``/nimcache
   # intermediate flags (which are output-location noise, not semantic inputs).
@@ -3897,7 +3956,7 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
   for i in 1 ..< command.len:
     let arg = command[i]
     if arg.startsWith("--out:") or arg.startsWith("--nimcache:") or
-        arg == normalizedOutputPath or arg == modulePath:
+        arg == normalizedOutputPath or arg == absoluteModulePath:
       continue
     compileOptions.add(arg)
   let providerArtifactId = computeProviderArtifactId(
@@ -3988,7 +4047,26 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
       plan.workDir):
     return readProviderCompileArtifact(artifactPath)
   createDir(extendedPath(parentDir(plan.outputBinaryPath)))
-  let execution = runCommand(plan.compilerCommand, cwd = workDir)
+  let compilerCwdRoot =
+    if scratchDir.len > 0:
+      absolutePath(scratchDir)
+    else:
+      absolutePath(parentDir(plan.outputBinaryPath))
+  createDir(extendedPath(compilerCwdRoot))
+  # Nim writes linker response files relative to CWD. Allocate that CWD with
+  # an atomic create-and-retry operation so concurrent compiles in the same
+  # process cannot collide even when their clocks and PID are identical.
+  let compilerCwd = createTempDir("provider-compiler-cwd-", "",
+    compilerCwdRoot)
+  defer:
+    try:
+      removeDir(extendedPath(compilerCwd))
+    except OSError:
+      discard
+  # Keep the immutable library lookup root (`workDir`) out of the write path.
+  # Nim emits relative linker response files in CWD even though `--nimcache`
+  # and `--out` are absolute.
+  let execution = runCommand(plan.compilerCommand, cwd = compilerCwd)
   if not fileExists(extendedPath(plan.outputBinaryPath)):
     raise newException(IOError,
       "provider compilation did not write binary: " & plan.outputBinaryPath &

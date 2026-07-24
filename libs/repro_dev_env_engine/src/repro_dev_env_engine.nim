@@ -104,8 +104,14 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
   if scratchDir.len > 0:
     command.add("--scratch-dir")
     command.add(scratchDir)
+  let compilerCwd =
+    if scratchDir.len > 0:
+      scratchDir
+    else:
+      parentDir(plan.outputBinaryPath)
+  createDir(extendedPath(compilerCwd))
   action("__repro_provider_compile", command,
-    cwd = workDir,
+    cwd = compilerCwd,
     inputs = inputs,
     outputs = @[plan.outputBinaryPath, artifactPath],
     commandStatsId = "repro provider compile edge",

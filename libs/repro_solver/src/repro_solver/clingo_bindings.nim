@@ -74,18 +74,14 @@
 # ``could not import: clingo_control_new``. The original macOS
 # DYLD-purging problem still needs a fix, but the ``let`` form makes
 # every provider call site unconditionally broken — the
-# ``t_repro_list_targets_lists_implicit_and_explicit`` end-to-end test
-# catches exactly that failure. Until the macOS path gets a real lazy-
-# load mechanism (proc-level dlopen or ``dynlibOverride``), keep the
-# eager ``const`` form on both ``repro`` and the providers so the
-# compile-time path resolution can do its job.
-const clingoLib* =
-  when defined(windows):
-    "clingo.dll"
-  elif defined(macosx):
-    "libclingo.dylib"
-  else:
-    "libclingo.so"
+# ``t_repro_list_targets_lists_implicit_and_explicit`` end-to-end test catches
+# exactly that failure. Keep the eager ``const`` form on both ``repro`` and the
+# providers. Darwin names ``@rpath/libclingo.dylib`` explicitly so dyld searches
+# the LC_RPATH entries baked into installed and generated helper images; Linux
+# keeps the bare soname resolved through DT_RPATH/ld.so rules.
+import ./dynlib_names
+
+const clingoLib* = clingoDynlibName(HostClingoDynlibTarget)
 
 # --------------------------------------------------------------------
 # Opaque handle types

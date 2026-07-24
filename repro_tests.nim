@@ -6166,6 +6166,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_compiler_scratch_isolation.nim",
+    binary: "build/test-bin/t_compiler_scratch_isolation",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_completion_emits_shell_script.nim",
     binary: "build/test-bin/t_completion_emits_shell_script",
     defines: @[],
@@ -6992,6 +7000,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_m9r22b_2_apply_loopback.nim",
     binary: "build/test-bin/t_m9r22b_2_apply_loopback",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_macho_runtime_audit.nim",
+    binary: "build/test-bin/t_macho_runtime_audit",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
