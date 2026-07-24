@@ -21,9 +21,10 @@
 ##      implement it) prints stable output with the expected app name
 ##      embedded — proves the binary is the right app and didn't get
 ##      cross-wired during the build path swap.
-##   3. The shipped ``./build/bin/repro`` self-identifies as
-##      ``repro 0.1.0`` via ``--version``, which is the load-bearing
-##      banner every B0 / B1 / future-milestone test relies on.
+##   3. The shipped ``./build/bin/repro`` self-identifies with the exact
+##      core-library release version via both supported version flags, which
+##      is the load-bearing banner every B0 / B1 / future-milestone test
+##      relies on.
 ##
 ## This is a structural smoke check that catches the worst regressions
 ## (silent rename, missing binary, app cross-wiring) without the cost
@@ -36,6 +37,7 @@
 ## ``--version`` output.
 
 import std/[os, osproc, strutils, unittest]
+import repro_core
 
 const RepoMarker = "repro.nim"
 
@@ -146,7 +148,7 @@ suite "Bootstrap-And-Self-Build B1: engine-built apps stay functionally equivale
       checkpoint("skipped — at least one entrypoint binary is missing")
       skip()
 
-  test "repro --version self-identifies as the right app":
+  test "repro version flags self-identify as the right app":
     ## This is the load-bearing assertion: the shipped ``./build/bin/repro``
     ## must self-identify as ``repro`` (and not as one of the other 13
     ## entrypoints) regardless of which build path produced it. Any
@@ -159,7 +161,9 @@ suite "Bootstrap-And-Self-Build B1: engine-built apps stay functionally equivale
       checkpoint("skipped — " & reproBin & " missing")
       skip()
     else:
-      let result = probe(reproBin, @["--version"])
-      checkpoint("repro --version output: " & result.output.strip())
-      check result.exitCode == 0
-      check "repro" in result.output
+      for versionFlag in ["--version", "-V"]:
+        let result = probe(reproBin, @[versionFlag])
+        checkpoint("repro " & versionFlag & " output: " &
+          result.output.strip())
+        check result.exitCode == 0
+        check result.output.strip() == "repro " & ReprobuildVersion
