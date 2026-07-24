@@ -219,8 +219,10 @@ proc decodeResourceGraphPayload*(bytes: openArray[byte]):
                                        artifact: ResourceProviderArtifactRef]]] =
   ## Inverse of ``encodeResourceGraphPayload``. Rehydrates each
   ## ``ResourceInstance`` via the RP codec (hard-errors on an attrs typeId
-  ## with no registered marshaller — the applying process must link the
-  ## provider module), the state-group membership, and (v2 only) the N3b
+  ## with no registered marshaller — M1b: the applying process must import
+  ## the producer's LIFTED interface, which regenerates the attrs type and
+  ## registers its SSZ codec without linking the provider/driver module),
+  ## the state-group membership, and (v2 only) the N3b
   ## per-typeId provider-artifact refs. A v1 payload yields an empty
   ## ``providerArtifacts`` seq — the all-in-tree fast path.
   registerResourceProtocolCodecs()

@@ -2502,6 +2502,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim",
+    binary: "build/test-bin/t_attr_missing_interface_diagnostic",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_solver/tests/t_clingo_smoke.nim",
     binary: "build/test-bin/t_clingo_smoke",
     defines: @[],
@@ -7520,6 +7528,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_rp5a_producer_exports_resource_contract_across_workspace.nim",
     binary: "build/test-bin/t_rp5a_producer_exports_resource_contract_across_workspace",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_extension_type_lifted_and_consumed.nim",
+    binary: "build/test-bin/t_extension_type_lifted_and_consumed",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

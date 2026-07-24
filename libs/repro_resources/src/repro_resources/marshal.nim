@@ -29,6 +29,10 @@ proc unmarshalAttrs*(typeId: string; payload: string): ExtensionBox =
   if not extensionRegistry.contains(typeId):
     raise newException(KeyError,
       "no attribute marshaller registered for resource typeId '" &
-      typeId & "'; the applying process must link the provider module")
+      typeId & "'; the applying process is missing the interface dependency " &
+      "that exports this resource type — import the producer's lifted " &
+      "interface (which regenerates the attrs type and registers its SSZ " &
+      "codec via registerExtension[Attrs](\"" & typeId & "\")) so the box " &
+      "can be unmarshalled without linking the provider/driver module")
   result = extensionRegistry[typeId].unmarshal(payload)
   result.typeId = typeId

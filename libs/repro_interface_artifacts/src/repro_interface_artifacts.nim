@@ -1669,9 +1669,98 @@ proc commandProcName(cmdName: string): string =
     else:
       result.add("_" & toHex(ord(ch), 2).toLowerAscii())
 
+proc liftedAttrsTypeName(typeId: string): string =
+  ## M1b: the generated name of the consumer-importable attribute record type
+  ## for a lifted ``resourceType``. The producer's OWN attrs type name never
+  ## crosses the boundary (it is private to the producer module); the consumer
+  ## imports THIS regenerated type, whose field set (name + type, in
+  ## declaration order) is a structural mirror of the producer's — enough for
+  ## the ``attr_ssz`` codec, which is purely field-shaped. Derived from the
+  ## stable ``typeId`` so two producers of the same resource type converge on
+  ## the same generated name and a consumer can name it deterministically.
+  result = ""
+  for ch in typeId:
+    if ch.isAlphaNumeric():
+      result.add(if result.len == 0: ch.toUpperAscii() else: ch)
+    elif result.len > 0 and result[^1] != '_':
+      result.add('_')
+  if result.len == 0 or not (result[0].isAlphaAscii() or result[0] == '_'):
+    result = "R" & result
+  result.add("Attrs")
+
+proc regenerableAttrType(nimType: string): string =
+  ## M1b: the consumer-side field type to regenerate for a lifted attribute,
+  ## or ``""`` when the declared type cannot be reconstructed structurally from
+  ## the interface schema alone. Only the flat SSZ-clean field kinds the
+  ## ``attr_ssz`` envelope supports AND whose spelling is self-contained
+  ## (needs no producer-private type definition) round-trip here: ``string``,
+  ## ``seq[string]``, and the integer / ``bool`` scalars. An ``enum`` attribute
+  ## names a producer-private enum type, so it is NOT regenerable in the
+  ## consumer (its type name is undefined there) — such a resource is lifted as
+  ## a typed CONTRACT (schema in ``publicResources``) but no consumer-side codec
+  ## is emitted for it.
+  case nimType.normalize
+  of "string": "string"
+  of "seq[string]": "seq[string]"
+  of "bool": "bool"
+  of "int", "int8", "int16", "int32", "int64",
+     "uint", "uint8", "uint16", "uint32", "uint64": nimType.strip()
+  else: ""
+
+proc emitLiftedExtensionTypes(code: var string;
+                              resources: seq[InterfaceResource]) =
+  ## M1b (Typed-Extension-Interfaces §2 capstone unblock): for each lifted
+  ## ``resourceType``, emit into the consumer stub (a) a regenerated attribute
+  ## record type whose fields mirror the producer's, and (b) a module-init
+  ## ``registerExtension[<T>](typeId)`` so the CONSUMING compilation installs
+  ## the SSZ codec (M1a) in its OWN process WITHOUT linking the producer's
+  ## provider/driver module. This is what lets ``unmarshalAttrs`` re-hydrate an
+  ## out-of-tree provider's attrs box: the marshaller now exists because the
+  ## attrs TYPE crossed the interface boundary (like a typed tool), not the
+  ## implementation. A resource with a non-regenerable attribute (e.g. an
+  ## ``enum`` naming a producer-private type) is skipped — it still ships as a
+  ## typed contract in the artifact, just without a consumer-side codec.
+  var typeBlock = ""
+  var regBody = ""
+  for res in resources:
+    var fields = ""
+    var regenerable = true
+    for attr in res.attributes:
+      let fieldType = regenerableAttrType(attr.nimType)
+      if fieldType.len == 0 or not validGeneratedIdent(attr.name):
+        regenerable = false
+        break
+      fields.add("    " & attr.name & "*: " & fieldType & "\n")
+    if not regenerable:
+      continue
+    let attrsName = liftedAttrsTypeName(res.typeId)
+    typeBlock.add("  " & attrsName & "* = object\n")
+    if fields.len == 0:
+      typeBlock.add("    discard\n")
+    else:
+      typeBlock.add(fields)
+    regBody.add("  registerExtension[" & attrsName & "](" &
+      escForCode(res.typeId) & ")\n")
+  if typeBlock.len == 0:
+    return
+  code.add("type\n" & typeBlock & "\n")
+  code.add("proc registerLiftedExtensions*() =\n")
+  code.add("  ## M1b: install the SSZ codecs for this dependency's lifted\n")
+  code.add("  ## resource attribute types in the CONSUMING compilation, so\n")
+  code.add("  ## ``unmarshalAttrs`` can round-trip their attrs boxes without\n")
+  code.add("  ## linking the producer's provider module.\n")
+  code.add(regBody)
+  # Run once at module init so a mere ``import`` of the lifted interface is
+  # enough to make the dependency's resource attrs marshallable — matching how
+  # importing the producer module used to run its ``registerExtension`` side
+  # effect. The explicit proc above is also exported for callers that register
+  # into a freshly-cleared registry (e.g. per-test isolation).
+  code.add("\nregisterLiftedExtensions()\n\n")
+
 proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
   let pkg = artifact.projectInterface
   var code = "import repro_project_dsl\n\n"
+  emitLiftedExtensionTypes(code, pkg.publicResources)
   let typeName = titleIdent(pkg.packageName)
   let exeTypeName = typeName & "Executable"
   code.add("type\n  " & typeName & "* = object\n")
