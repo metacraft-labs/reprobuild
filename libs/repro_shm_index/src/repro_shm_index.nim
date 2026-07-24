@@ -34,6 +34,22 @@ when shmIndexSupported:
   export atomics_shm.ShmBase
   export mapping.MappedRegion, mapping.isValid, mapping.detach
 
+when defined(macosx):
+  {.emit: """
+    #include <stdint.h>
+    #include <libproc.h>
+    static uint64_t repro_process_start_token(int pid) {
+      struct proc_bsdinfo info;
+      int got = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0,
+                             &info, sizeof(info));
+      if (got != (int)sizeof(info)) return 0;
+      return (((uint64_t)info.pbi_start_tvsec) << 20) ^
+             (uint64_t)info.pbi_start_tvusec;
+    }
+  """.}
+  proc macProcessStartToken(pid: cint): uint64
+    {.importc: "repro_process_start_token", nodecl.}
+
 type
   ShmIndex* = object
     ## An attached view of the shared-memory hot index for one cache root.
@@ -389,20 +405,6 @@ when shmIndexSupported:
       except CatchableError:
         discard
     elif defined(macosx):
-      {.emit: """
-        #include <stdint.h>
-        #include <libproc.h>
-        static uint64_t repro_process_start_token(int pid) {
-          struct proc_bsdinfo info;
-          int got = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0,
-                                 &info, sizeof(info));
-          if (got != (int)sizeof(info)) return 0;
-          return (((uint64_t)info.pbi_start_tvsec) << 20) ^
-                 (uint64_t)info.pbi_start_tvusec;
-        }
-      """.}
-      proc macProcessStartToken(pid: cint): uint64
-        {.importc: "repro_process_start_token", nodecl.}
       return macProcessStartToken(cint(pid))
     0
 
