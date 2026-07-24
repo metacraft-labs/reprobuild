@@ -39,7 +39,6 @@ source scripts/source_paths.sh
 source scripts/monitor_shim_probe.sh
 # shellcheck source=scripts/test_parallelism.sh
 source scripts/test_parallelism.sh
-
 # Test runs exercise user-facing CLI latency gates, so the app bootstrap and
 # graph-owned app rebuilds must use optimized binaries by default. Developers
 # can still opt into debug apps explicitly with REPROBUILD_BUILD_MODE=debug.
