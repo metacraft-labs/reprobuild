@@ -105,6 +105,30 @@ proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
 
 suite "Bootstrap-And-Self-Build B1: repro build apps collection":
 
+  test "action-cache daemon is a typed member of the apps collection":
+    let repoRoot = findRepoRoot()
+    let names = readEntrypointNames(repoRoot)
+    check "repro-cache-daemon" in names
+
+    # Keep this assertion tied to the collection body, rather than accepting
+    # matching literals elsewhere in the project file. The dynamic test below
+    # then drives that collection and verifies every declared output.
+    let projectText = readFile(repoRoot / "repro.nim")
+    check "executable reproCacheDaemon:" in projectText
+    let appsStart = projectText.find(
+      "var reprobuildAppsActions: seq[BuildActionDef] = @[]")
+    let appsEnd = projectText.find(
+      "discard collect(\"apps\", reprobuildAppsActions)", appsStart)
+    check appsStart >= 0
+    check appsEnd > appsStart
+    if appsStart >= 0 and appsEnd > appsStart:
+      let appsBlock = projectText[appsStart ..< appsEnd]
+      check "source = \"apps/repro-cache-daemon/repro_cache_daemon.nim\"" in
+        appsBlock
+      check "binary = \"build/bin/repro-cache-daemon\"" in appsBlock
+      check "cacheable = false" in appsBlock
+      check "actionId = \"reprobuild.apps.repro-cache-daemon\"" in appsBlock
+
   test "engine materialises every apps/entrypoints.txt binary":
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /

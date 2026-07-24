@@ -215,6 +215,9 @@ package reprobuild:
   executable repro:
     discard
 
+  executable reproCacheDaemon:
+    name: "repro-cache-daemon"
+
   executable reproPeerCacheTier2:
     name: "repro-peer-cache-tier2"
 
@@ -258,6 +261,9 @@ package reprobuild:
 
   executable harnessApplyLockHolder:
     name: "harness_apply_lock_holder"
+
+  executable legacyCachePeerOriginDev:
+    name: "legacy_cache_peer_origin_dev"
 
   # The A2/A2.5/A3/A4 binary-cache integration tests under
   # ``libs/repro_binary_cache_client/tests/`` spawn the
@@ -655,6 +661,20 @@ package reprobuild:
       extraEnv = sourceOnlyEnv & @[("REPROBUILD_USE_SYSTEM_HASH_LIBS", "0")],
       actionId = "reprobuild.apps.repro"))
 
+    # The shared-memory action-cache daemon is spawned by build processes, so
+    # it must be graph-owned alongside the engine binary. In particular, a
+    # warm checkout must not retain an older daemon after the imported
+    # repro_shm_index implementation changes.
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-cache-daemon/repro_cache_daemon.nim",
+      binary = "build/bin/repro-cache-daemon",
+      defines = @["release"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro-cache-daemon",
+      cacheable = false,
+      actionId = "reprobuild.apps.repro-cache-daemon"))
+
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim",
       binary = "build/bin/repro-peer-cache-tier2",
@@ -784,6 +804,29 @@ package reprobuild:
       nimcache = "build/nimcache/harness_apply_lock_holder",
       cacheable = false,
       actionId = "reprobuild.test_helpers.harness_apply_lock_holder"))
+
+    # Cross-version action-cache lifecycle peer. All shared-memory and daemon
+    # implementation files are byte-identical blobs from the pinned origin/dev
+    # commit documented by the fixture README. Keeping the helper in this
+    # collection makes the compatibility gate fully offline and graph-native.
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer.nim",
+      binary = "build/test-bin/legacy_cache_peer_origin_dev",
+      paths = sourceOnlyNimPaths,
+      extraInputs = @[
+        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/README.md",
+        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index.nim",
+        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/atomics_shm.nim",
+        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/daemon.nim",
+        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/layout.nim",
+        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/mapping.nim",
+        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/ring.nim",
+        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/segment.nim",
+      ],
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/legacy_cache_peer_origin_dev",
+      cacheable = false,
+      actionId = "reprobuild.test_helpers.legacy_cache_peer_origin_dev"))
 
     # Binary-cache integration-test subprocess helpers (A2/A2.5/A3/A4).
     #
