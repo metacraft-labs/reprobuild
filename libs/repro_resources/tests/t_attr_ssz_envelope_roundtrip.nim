@@ -23,6 +23,7 @@ import std/unittest
 import repro_project_dsl
 import repro_project_dsl/attr_ssz
 import repro_resources/marshal
+import ssz_serialization
 
 type
   Flavour = enum
@@ -37,6 +38,12 @@ type
     count*: int
     chilled*: bool
     flavour*: Flavour
+
+  StringListAttrs = object
+    values: seq[string]
+
+  FixedArrayWire = object
+    values: array[3, uint16]
 
 suite "t_attr_ssz_envelope_roundtrip":
 
@@ -58,6 +65,54 @@ suite "t_attr_ssz_envelope_roundtrip":
 
     check back.typeId == "rt.scoop"
     check TypedExtensionBox[ScoopAttrs](back).val == original
+
+    # Pin the nested variable-size bulk-copy path that writes
+    # ``List[List[byte]]`` and its canonical wire format.
+    let canonical = StringListAttrs(values: @["ab", "C"])
+    let canonicalBytes = encodeAttrEnvelope(canonical)
+    check canonicalBytes == @[
+      0x01'u8, 0x00,
+      0x01, 0x00, 0x00, 0x00,
+      0x0f, 0x00, 0x00, 0x00,
+      0x04, 0x00, 0x00, 0x00,
+      0x08, 0x00, 0x00, 0x00,
+      0x0a, 0x00, 0x00, 0x00,
+      0x61, 0x62, 0x43,
+    ]
+    check decodeAttrEnvelope[StringListAttrs](canonicalBytes) == canonical
+
+    # A present-but-empty inner string reaches writeElements[byte] with a
+    # zero-length openArray. This is the precise empty bulk-copy edge: it must
+    # emit no payload bytes and must not take the address of value[0].
+    let withEmptyItem = StringListAttrs(values: @[""])
+    let withEmptyItemBytes = encodeAttrEnvelope(withEmptyItem)
+    check withEmptyItemBytes == @[
+      0x01'u8, 0x00,
+      0x01, 0x00, 0x00, 0x00,
+      0x08, 0x00, 0x00, 0x00,
+      0x04, 0x00, 0x00, 0x00,
+      0x04, 0x00, 0x00, 0x00,
+    ]
+    check decodeAttrEnvelope[StringListAttrs](withEmptyItemBytes) == withEmptyItem
+
+    let empty = StringListAttrs(values: @[])
+    let emptyBytes = encodeAttrEnvelope(empty)
+    check emptyBytes == @[
+      0x01'u8, 0x00,
+      0x01, 0x00, 0x00, 0x00,
+      0x04, 0x00, 0x00, 0x00,
+      0x04, 0x00, 0x00, 0x00,
+    ]
+    check decodeAttrEnvelope[StringListAttrs](emptyBytes) == empty
+
+    # The second bulk-copy caller serializes fixed-size arrays. Pin its byte
+    # count and little-endian representation independently of the attr codec.
+    let fixed = FixedArrayWire(values: [0x1234'u16, 0xabcd'u16, 0x0001'u16])
+    let fixedBytes = SSZ.encode(fixed)
+    check fixedBytes == @[
+      0x34'u8, 0x12, 0xcd, 0xab, 0x01, 0x00,
+    ]
+    check SSZ.decode(fixedBytes, FixedArrayWire) == fixed
 
   test "the envelope is a u16le version (==1), NOT a JSON object":
     let original = ScoopAttrs(
