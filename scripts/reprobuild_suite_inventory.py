@@ -452,10 +452,757 @@ def load_slow_reviews(root: Path) -> dict[str, dict[str, str]]:
     return load_slow_review_document(root)["reviews"]
 
 
+@dataclasses.dataclass(frozen=True)
+class NimToken:
+    kind: str
+    value: str
+    line: int
+    column: int
+
+
+@dataclasses.dataclass(frozen=True)
+class NimUnittestBindings:
+    unqualified: frozenset[str]
+    qualifiers: frozenset[str]
+
+
+@dataclasses.dataclass(frozen=True)
+class NimDeclaration:
+    kind: str
+    token: NimToken
+    expression_start: int
+    colon: int
+
+
+NIM_DELIMITERS = {"(": ")", "[": "]", "{": "}"}
+NIM_CLOSING_DELIMITERS = set(NIM_DELIMITERS.values())
+NIM_WORD_OPERATORS = {
+    "and",
+    "div",
+    "in",
+    "is",
+    "isnot",
+    "mod",
+    "notin",
+    "or",
+    "shl",
+    "shr",
+    "xor",
+}
+NIM_INLINE_BLOCK_KEYWORDS = {
+    "block",
+    "case",
+    "defer",
+    "elif",
+    "else",
+    "except",
+    "finally",
+    "for",
+    "if",
+    "of",
+    "static",
+    "try",
+    "when",
+    "while",
+}
+NIM_BINDING_KEYWORDS = {
+    "const",
+    "func",
+    "let",
+    "macro",
+    "proc",
+    "template",
+    "type",
+    "var",
+}
+NIM_UNITTEST_PROVIDER_MODULES = {
+    # This repository's protocol shim deliberately overrides and re-exports
+    # std/unittest's suite/test templates.
+    "ct_test_unittest_parallel",
+}
+
+
+def nim_identifier_value(token: NimToken) -> str | None:
+    if token.kind == "identifier":
+        return token.value
+    if token.kind == "quoted_identifier" and token.value.endswith("`"):
+        return token.value[1:-1]
+    return None
+
+
+def nim_name_key(name: str) -> str:
+    if not name:
+        return ""
+    return name[0] + name[1:].replace("_", "").lower()
+
+
+def nim_identifier_matches(token: NimToken, expected: str) -> bool:
+    identifier = nim_identifier_value(token)
+    return (
+        identifier is not None
+        and nim_name_key(identifier) == nim_name_key(expected)
+    )
+
+
+def nim_tokens(text: str) -> list[NimToken]:
+    """Lex enough Nim syntax to find command-style test declarations.
+
+    The inventory must not mistake fixture source, shell snippets, or comments
+    for declarations. A full Nim parser would require compiling every test
+    with its platform-specific dependency graph. This lexer instead recognizes
+    all lexical constructs that can contain arbitrary text, including raw and
+    generalized strings, and retains the punctuation needed by the
+    import/statement analysis below.
+    """
+
+    tokens: list[NimToken] = []
+    index = 0
+    line = 1
+    column = 0
+    length = len(text)
+
+    def advance(count: int = 1) -> None:
+        nonlocal index, line, column
+        for _ in range(count):
+            if index >= length:
+                return
+            if text[index] == "\n":
+                line += 1
+                column = 0
+            elif text[index] == "\t":
+                column = (column // 8 + 1) * 8
+            else:
+                column += 1
+            index += 1
+
+    def add(kind: str, value: str, token_line: int, token_column: int) -> None:
+        tokens.append(NimToken(kind, value, token_line, token_column))
+
+    def consume_string(raw: bool) -> None:
+        triple = text.startswith('"""', index)
+        advance(3 if triple else 1)
+        while index < length:
+            if triple:
+                if text.startswith('"""', index):
+                    advance(3)
+                    return
+                advance()
+            elif text[index] == "\n":
+                # Single-line Nim strings cannot cross a physical line.
+                return
+            elif text[index] == '"':
+                if raw and index + 1 < length and text[index + 1] == '"':
+                    # Raw/generalized strings spell an embedded quote as "".
+                    advance(2)
+                else:
+                    advance()
+                    return
+            elif not raw and text[index] == "\\":
+                advance(min(2, length - index))
+            else:
+                advance()
+
+    while index < length:
+        char = text[index]
+        if char in " \t\f\v\r":
+            advance()
+            continue
+        if char == "\n":
+            add("newline", "\n", line, column)
+            advance()
+            continue
+
+        if text.startswith("#[", index):
+            depth = 1
+            advance(2)
+            while index < length and depth:
+                if text.startswith("#[", index):
+                    depth += 1
+                    advance(2)
+                elif text.startswith("]#", index):
+                    depth -= 1
+                    advance(2)
+                elif text[index] == "\n":
+                    add("newline", "\n", line, column)
+                    advance()
+                else:
+                    advance()
+            continue
+        if char == "#":
+            while index < length and text[index] != "\n":
+                advance()
+            continue
+
+        if char == '"':
+            token_line, token_column = line, column
+            start = index
+            consume_string(raw=False)
+            add("string", text[start:index], token_line, token_column)
+            continue
+
+        if char == "`":
+            token_line, token_column = line, column
+            start = index
+            advance()
+            while index < length and text[index] not in "`\n":
+                advance()
+            if index < length and text[index] == "`":
+                advance()
+            add("quoted_identifier", text[start:index], token_line, token_column)
+            continue
+
+        if char == "'" and (
+            index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_")
+        ):
+            token_line, token_column = line, column
+            start = index
+            advance()
+            while index < length and text[index] != "\n":
+                if text[index] == "\\":
+                    advance(min(2, length - index))
+                elif text[index] == "'":
+                    advance()
+                    break
+                else:
+                    advance()
+            add("char", text[start:index], token_line, token_column)
+            continue
+
+        if char.isalpha() or char == "_" or ord(char) >= 128:
+            token_line, token_column = line, column
+            start = index
+            while index < length and (
+                text[index].isalnum() or text[index] == "_" or ord(text[index]) >= 128
+            ):
+                advance()
+            identifier = text[start:index]
+            if index < length and text[index] == '"':
+                # Generalized strings (including r"...", fmt"...", and their
+                # triple-quoted forms) are one expression token. Treating the
+                # prefix separately would expose embedded fixture source.
+                consume_string(raw=True)
+                add("string", text[start:index], token_line, token_column)
+            else:
+                add("identifier", identifier, token_line, token_column)
+            continue
+
+        if char.isdigit():
+            token_line, token_column = line, column
+            start = index
+            while index < length and (
+                text[index].isalnum() or text[index] in "._'"
+            ):
+                advance()
+            add("atom", text[start:index], token_line, token_column)
+            continue
+
+        token_line, token_column = line, column
+        if char in "()[]{}:;,":
+            add("punctuation", char, token_line, token_column)
+            advance()
+            continue
+        if char in "+-*/\\<>!?^.|%=~&@$":
+            start = index
+            while index < length and text[index] in "+-*/\\<>!?^.|%=~&@$":
+                advance()
+            add("operator", text[start:index], token_line, token_column)
+            continue
+        add("punctuation", char, token_line, token_column)
+        advance()
+
+    return tokens
+
+
+def nim_outer_depths(tokens: list[NimToken]) -> list[int]:
+    """Return delimiter depth, using -1 after structurally invalid input."""
+
+    depths: list[int] = []
+    stack: list[str] = []
+    structurally_invalid = False
+    for token in tokens:
+        depths.append(-1 if structurally_invalid else len(stack))
+        if structurally_invalid:
+            continue
+        if token.value in NIM_DELIMITERS:
+            stack.append(NIM_DELIMITERS[token.value])
+        elif token.value in NIM_CLOSING_DELIMITERS:
+            if stack and stack[-1] == token.value:
+                stack.pop()
+            else:
+                structurally_invalid = True
+    return depths
+
+
+def nim_previous_token(tokens: list[NimToken], position: int) -> int | None:
+    position -= 1
+    while position >= 0 and tokens[position].kind == "newline":
+        position -= 1
+    return position if position >= 0 else None
+
+
+def nim_is_word_operator(token: NimToken) -> bool:
+    identifier = nim_identifier_value(token)
+    return (
+        identifier is not None
+        and nim_name_key(identifier) in NIM_WORD_OPERATORS
+    )
+
+
+def nim_is_continuation(token: NimToken) -> bool:
+    return (
+        token.kind == "operator"
+        or nim_is_word_operator(token)
+        or token.value in {",", "(", "[", "{"}
+    )
+
+
+def nim_statement_start(
+    tokens: list[NimToken],
+    depths: list[int],
+    position: int,
+    body_colons: set[int],
+) -> bool:
+    if depths[position] != 0:
+        return False
+    previous = nim_previous_token(tokens, position)
+    if previous is None:
+        return True
+    previous_token = tokens[previous]
+    if previous_token.line == tokens[position].line:
+        return previous_token.value == ";" or previous in body_colons
+    return not nim_is_continuation(previous_token)
+
+
+def nim_statement_end(
+    tokens: list[NimToken], depths: list[int], position: int
+) -> int:
+    """Find the conservative end of an import/from statement."""
+
+    start_depth = depths[position]
+    cursor = position + 1
+    previous: NimToken | None = None
+    while cursor < len(tokens):
+        token = tokens[cursor]
+        if token.value == ";" and depths[cursor] == start_depth:
+            return cursor
+        if token.kind == "newline" and depths[cursor] == start_depth:
+            if previous is not None and not nim_is_continuation(previous):
+                return cursor
+        elif token.kind != "newline":
+            previous = token
+        cursor += 1
+    return len(tokens)
+
+
+def nim_direct_unittest_imports(
+    statement: list[NimToken],
+) -> tuple[set[str], set[str]]:
+    """Resolve direct ``std/unittest`` imports and module aliases.
+
+    Bare ``import unittest`` is deliberately not inferred: a local module can
+    shadow the standard library. Re-exported and ``include``-provided bindings
+    are likewise outside a lexical inventory. The corpus gate below requires
+    every counted test file to have an explicit, resolvable stdlib binding.
+    """
+
+    unqualified: set[str] = set()
+    qualifiers: set[str] = set()
+    cursor = 0
+    while cursor < len(statement):
+        provider = nim_identifier_value(statement[cursor])
+        if (
+            provider is not None
+            and any(
+                nim_name_key(provider) == nim_name_key(name)
+                for name in NIM_UNITTEST_PROVIDER_MODULES
+            )
+            and (cursor == 0 or statement[cursor - 1].value == ",")
+        ):
+            tail = cursor + 1
+            alias: str | None = None
+            if (
+                tail + 1 < len(statement)
+                and nim_identifier_matches(statement[tail], "as")
+            ):
+                alias = nim_identifier_value(statement[tail + 1])
+                tail += 2
+            qualifiers.add(alias or provider)
+            if alias is None:
+                unqualified.update({"test", "suite"})
+            cursor = tail
+            continue
+
+        if cursor + 2 >= len(statement):
+            break
+        if not (
+            nim_identifier_matches(statement[cursor], "std")
+            and statement[cursor + 1].value == "/"
+        ):
+            cursor += 1
+            continue
+
+        module = statement[cursor + 2]
+        if nim_identifier_matches(module, "unittest"):
+            tail = cursor + 3
+            alias: str | None = None
+            if (
+                tail + 1 < len(statement)
+                and nim_identifier_matches(statement[tail], "as")
+            ):
+                alias = nim_identifier_value(statement[tail + 1])
+                tail += 2
+            qualifiers.add(alias or "unittest")
+            if alias is None:
+                excluded: set[str] = set()
+                except_position = next(
+                    (
+                        index
+                        for index in range(tail, len(statement))
+                        if nim_identifier_matches(statement[index], "except")
+                    ),
+                    None,
+                )
+                if except_position is not None:
+                    excluded = {
+                        name
+                        for token in statement[except_position + 1 :]
+                        if (name := nim_identifier_value(token)) is not None
+                    }
+                unqualified.update({"test", "suite"} - {
+                    name
+                    for name in {"test", "suite"}
+                    if any(
+                        nim_name_key(name) == nim_name_key(excluded_name)
+                        for excluded_name in excluded
+                    )
+                })
+            cursor = tail
+            continue
+
+        if module.value == "[":
+            bracket_depth = 1
+            member = cursor + 3
+            while member < len(statement) and bracket_depth:
+                token = statement[member]
+                if token.value == "[":
+                    bracket_depth += 1
+                elif token.value == "]":
+                    bracket_depth -= 1
+                elif bracket_depth == 1 and nim_identifier_matches(token, "unittest"):
+                    alias: str | None = None
+                    if (
+                        member + 2 < len(statement)
+                        and nim_identifier_matches(statement[member + 1], "as")
+                    ):
+                        alias = nim_identifier_value(statement[member + 2])
+                    qualifiers.add(alias or "unittest")
+                    if alias is None:
+                        unqualified.update({"test", "suite"})
+                member += 1
+            cursor = member
+            continue
+        cursor += 1
+
+    return unqualified, qualifiers
+
+
+def nim_unittest_bindings(
+    tokens: list[NimToken], depths: list[int]
+) -> NimUnittestBindings:
+    """Return std/unittest names that are lexically unambiguous in this file."""
+
+    unqualified: set[str] = set()
+    qualifiers: set[str] = set()
+    body_colons: set[int] = set()
+
+    for position, token in enumerate(tokens):
+        if depths[position] != 0 or token.kind == "newline":
+            continue
+        if token.value == ":":
+            previous = nim_previous_token(tokens, position)
+            if previous is not None:
+                head = previous
+                while head > 0 and not nim_statement_start(
+                    tokens, depths, head, body_colons
+                ):
+                    head -= 1
+                identifier = nim_identifier_value(tokens[head])
+                if (
+                    identifier is not None
+                    and nim_name_key(identifier) in NIM_INLINE_BLOCK_KEYWORDS
+                ):
+                    body_colons.add(position)
+            continue
+        if not nim_statement_start(tokens, depths, position, body_colons):
+            continue
+
+        if nim_identifier_matches(token, "import"):
+            end = nim_statement_end(tokens, depths, position)
+            statement = [
+                item
+                for item in tokens[position + 1 : end]
+                if item.kind != "newline"
+            ]
+            bare, modules = nim_direct_unittest_imports(statement)
+            unqualified.update(bare)
+            qualifiers.update(modules)
+        elif nim_identifier_matches(token, "from"):
+            end = nim_statement_end(tokens, depths, position)
+            statement = [
+                item
+                for item in tokens[position + 1 : end]
+                if item.kind != "newline"
+            ]
+            if (
+                len(statement) >= 4
+                and nim_identifier_matches(statement[0], "std")
+                and statement[1].value == "/"
+                and nim_identifier_matches(statement[2], "unittest")
+                and nim_identifier_matches(statement[3], "import")
+            ):
+                for item in statement[4:]:
+                    for name in ("test", "suite"):
+                        if nim_identifier_matches(item, name):
+                            unqualified.add(name)
+
+    # A local declaration with one of these names makes whole-file lexical
+    # resolution ambiguous without Nim's semantic scope graph. Fail
+    # conservatively rather than count an unrelated macro or receiver.
+    shadowed: set[str] = set()
+    for position, token in enumerate(tokens):
+        identifier = nim_identifier_value(token)
+        if (
+            identifier is None
+            or nim_name_key(identifier) not in NIM_BINDING_KEYWORDS
+            or not nim_statement_start(tokens, depths, position, body_colons)
+        ):
+            continue
+        cursor = position + 1
+        while cursor < len(tokens) and tokens[cursor].kind == "newline":
+            cursor += 1
+        if cursor >= len(tokens):
+            continue
+        bound_name = nim_identifier_value(tokens[cursor])
+        if bound_name is not None:
+            shadowed.add(bound_name)
+
+    return NimUnittestBindings(
+        unqualified=frozenset(
+            name
+            for name in unqualified
+            if not any(nim_name_key(name) == nim_name_key(item) for item in shadowed)
+        ),
+        qualifiers=frozenset(
+            name
+            for name in qualifiers
+            if not any(nim_name_key(name) == nim_name_key(item) for item in shadowed)
+        ),
+    )
+
+
+def nim_declaration_reference(
+    tokens: list[NimToken],
+    position: int,
+    bindings: NimUnittestBindings,
+) -> tuple[str, int] | None:
+    for name in ("suite", "test"):
+        if (
+            nim_identifier_matches(tokens[position], name)
+            and name in bindings.unqualified
+        ):
+            return name, position
+
+    if position + 2 >= len(tokens) or tokens[position + 1].value != ".":
+        return None
+    qualifier = nim_identifier_value(tokens[position])
+    if qualifier is None or not any(
+        nim_name_key(qualifier) == nim_name_key(item)
+        for item in bindings.qualifiers
+    ):
+        return None
+    for name in ("suite", "test"):
+        if nim_identifier_matches(tokens[position + 2], name):
+            return name, position + 2
+    return None
+
+
+def nim_parse_declaration(
+    tokens: list[NimToken],
+    reference_start: int,
+    keyword_position: int,
+    kind: str,
+) -> NimDeclaration | None:
+    """Parse one complete unittest declaration from a statement start."""
+
+    stack: list[str] = []
+    saw_expression = False
+    expression_token: NimToken | None = None
+    expression_start = keyword_position + 1
+    cursor = expression_start
+    declaration_colon: int | None = None
+
+    while cursor < len(tokens):
+        candidate = tokens[cursor]
+        if candidate.kind == "newline":
+            if not stack:
+                next_position = cursor + 1
+                while (
+                    next_position < len(tokens)
+                    and tokens[next_position].kind == "newline"
+                ):
+                    next_position += 1
+                if next_position >= len(tokens):
+                    break
+                next_token = tokens[next_position]
+                can_continue = (
+                    not saw_expression
+                    or (
+                        expression_token is not None
+                        and nim_is_continuation(expression_token)
+                    )
+                    or next_token.kind == "operator"
+                    or nim_is_word_operator(next_token)
+                )
+                if (
+                    next_token.column <= tokens[reference_start].column
+                    or not can_continue
+                ):
+                    break
+            cursor += 1
+            continue
+
+        if candidate.value in NIM_DELIMITERS:
+            stack.append(NIM_DELIMITERS[candidate.value])
+            saw_expression = True
+        elif candidate.value in NIM_CLOSING_DELIMITERS:
+            if not stack or stack[-1] != candidate.value:
+                break
+            stack.pop()
+            saw_expression = True
+        elif candidate.value == ":" and not stack:
+            if (
+                saw_expression
+                and expression_token is not None
+                and not nim_is_continuation(expression_token)
+                and expression_token.value not in {",", ";"}
+            ):
+                declaration_colon = cursor
+            break
+        elif candidate.value == ";" and not stack:
+            break
+        elif (
+            not stack
+            and candidate.kind == "operator"
+            and candidate.value.endswith("=")
+            and candidate.value not in {"==", "<=", ">=", "!="}
+        ):
+            break
+        else:
+            saw_expression = True
+        expression_token = candidate
+        cursor += 1
+
+    if declaration_colon is None:
+        return None
+
+    body_position = declaration_colon + 1
+    while (
+        body_position < len(tokens)
+        and tokens[body_position].kind == "newline"
+    ):
+        body_position += 1
+    if body_position >= len(tokens) or tokens[body_position].value == ";":
+        return None
+    body_token = tokens[body_position]
+    colon_token = tokens[declaration_colon]
+    if (
+        body_token.line != colon_token.line
+        and body_token.column <= tokens[reference_start].column
+    ):
+        return None
+    return NimDeclaration(
+        kind=kind,
+        token=tokens[keyword_position],
+        expression_start=expression_start,
+        colon=declaration_colon,
+    )
+
+
+def nim_declarations(tokens: list[NimToken]) -> list[NimDeclaration]:
+    """Return lexically resolvable std/unittest suite/test declarations."""
+
+    depths = nim_outer_depths(tokens)
+    bindings = nim_unittest_bindings(tokens, depths)
+    declarations: list[NimDeclaration] = []
+    body_colons: set[int] = set()
+
+    for position, token in enumerate(tokens):
+        if depths[position] != 0:
+            continue
+        if token.value == ":":
+            previous = nim_previous_token(tokens, position)
+            if previous is not None:
+                head = previous
+                while head > 0 and not nim_statement_start(
+                    tokens, depths, head, body_colons
+                ):
+                    head -= 1
+                identifier = nim_identifier_value(tokens[head])
+                if (
+                    identifier is not None
+                    and nim_name_key(identifier) in NIM_INLINE_BLOCK_KEYWORDS
+                ):
+                    body_colons.add(position)
+            continue
+        reference = nim_declaration_reference(tokens, position, bindings)
+        if reference is None or not nim_statement_start(
+            tokens, depths, position, body_colons
+        ):
+            continue
+        kind, keyword_position = reference
+        declaration = nim_parse_declaration(
+            tokens, position, keyword_position, kind
+        )
+        if declaration is None:
+            continue
+        declarations.append(declaration)
+        body_colons.add(declaration.colon)
+
+    return declarations
+
+
 def count_nim_cases(text: str) -> dict[str, Any]:
-    suites = re.findall(r'(?m)^\s*suite\s+"((?:\\"|[^"])*)"\s*:', text)
-    tests = re.findall(r'(?m)^\s*test\s+"((?:\\"|[^"])*)"\s*:', text)
-    return {"suiteCount": len(suites), "caseCount": len(tests), "suites": suites}
+    tokens = nim_tokens(text)
+    declarations = nim_declarations(tokens)
+    suite_declarations = [
+        declaration for declaration in declarations if declaration.kind == "suite"
+    ]
+    tests = [
+        declaration for declaration in declarations if declaration.kind == "test"
+    ]
+    suites: list[str] = []
+    for declaration in suite_declarations:
+        expression_position = declaration.expression_start
+        while (
+            expression_position < len(tokens)
+            and tokens[expression_position].kind == "newline"
+        ):
+            expression_position += 1
+        if expression_position >= len(tokens):
+            continue
+        expression = tokens[expression_position]
+        if (
+            expression.kind == "string"
+            and expression.value.startswith('"')
+            and not expression.value.startswith('"""')
+            and expression.value.endswith('"')
+        ):
+            suites.append(expression.value[1:-1])
+    return {
+        "suiteCount": len(suite_declarations),
+        "caseCount": len(tests),
+        "suites": suites,
+    }
 
 
 def count_python_cases(path: Path) -> dict[str, Any]:

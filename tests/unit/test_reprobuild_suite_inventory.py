@@ -20,6 +20,353 @@ SPEC.loader.exec_module(inventory)
 
 
 class SuiteInventoryTests(unittest.TestCase):
+    def assert_nim_case_counter_lexes_declarations_not_fixture_text(self):
+        source = r'''
+import std/unittest
+
+# test "line comment":
+#[ test "block comment":
+   #[ test "nested block comment": ]#
+]#
+const ordinary = "test \"escaped quote fixture\":"
+const raw = r"test ""raw fixture"":"
+const triple = """
+test "generated Nim fixture":
+  check false
+test -n "$shell_fixture"
+"""
+const rawTriple = r"""
+test "raw generated fixture":
+  check false
+"""
+const generalized = fmt"""
+test "interpolated generated fixture {value}":
+  check false
+"""
+
+proc testHelper() = discard
+testHelper()
+testCase "false identifier prefix":
+  discard
+contest "false identifier suffix":
+  discard
+test = "assignment is not a declaration":
+  discard
+object.test "qualified call is not a declaration":
+  discard
+let invalid =
+  test "continued expression is not a declaration":
+    discard
+let invalidWordOperator = condition and
+  test "word-operator continuation is not a declaration":
+    discard
+call(
+  test "nested call is not a declaration":
+    discard
+)
+
+suite "real suite":
+  test "literal":
+    check true
+  test "escaped quote: \"":
+    check true
+  test "multiline " &
+       "concatenation":
+    check true
+  test dynamicName(value):
+    check true
+  test buildName(
+      nestedCall(1, {"colon": otherCall(2, @[3, 4])}),
+      suffix = "value"
+    ):
+    check true
+  test
+    nameFrom(
+      "expression on the following line"
+    ):
+    check true
+  test r"raw declaration name":
+    check true
+  test """triple declaration name""":
+    check true
+  test fmt"generalized {value} name":
+    check true
+  test "same-line body": check true
+  t_e_s_t "style-insensitive identifier":
+    check true
+  `test` "quoted identifier":
+    check true
+  test condition and
+       otherCondition:
+    check true
+
+test "symbolic operator cannot end a name" &:
+  check false
+test "word operator cannot end a name" and:
+  check false
+test "missing body":
+test "missing colon"
+test "real after truncation":
+  check true
+test "unbalanced name at EOF" & (
+'''
+        counted = inventory.count_nim_cases(source)
+        self.assertEqual(counted["suiteCount"], 1)
+        self.assertEqual(counted["caseCount"], 14)
+        self.assertEqual(counted["suites"], ["real suite"])
+
+    def run_nim_fixture(
+        self,
+        source: str,
+        *,
+        command: str = "c",
+        run: bool = False,
+        companions: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess:
+        nim = subprocess.check_output(
+            ["bash", "-c", "command -v nim"], text=True
+        ).strip()
+        with tempfile.TemporaryDirectory(prefix="repro-m0-nim-parser-") as tmp:
+            root = Path(tmp)
+            source_path = root / "fixture.nim"
+            source_path.write_text(source, encoding="utf-8")
+            for name, content in (companions or {}).items():
+                (root / name).write_text(content, encoding="utf-8")
+            args = [
+                nim,
+                command,
+                "--colors:off",
+                "--hints:off",
+                "--verbosity:0",
+                f"--nimcache:{root / 'nimcache'}",
+                f"--path:{root}",
+            ]
+            if run:
+                args.append("-r")
+            args.append(str(source_path))
+            return subprocess.run(
+                args,
+                cwd=root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+
+    def assert_nim_case_counter_accepts_compiler_backed_statement_forms(self):
+        source = r'''
+import std/unittest
+
+suite "inline suite": test "inline suite case": check true
+if true: test "inline conditional": check true
+test "semicolon first": check true; test "semicolon second": check true
+test "continued " &
+     "operator name":
+  check true
+test ("nested " & $(1 + 1)):
+  check true
+'''
+        compiled = self.run_nim_fixture(source, run=True)
+        self.assertEqual(compiled.returncode, 0, compiled.stdout)
+        self.assertEqual(compiled.stdout.count("[OK]"), 6, compiled.stdout)
+        counted = inventory.count_nim_cases(source)
+        self.assertEqual(counted["suiteCount"], 1)
+        self.assertEqual(counted["caseCount"], 6)
+        self.assertEqual(counted["suites"], ["inline suite"])
+
+    def assert_nim_case_counter_resolves_only_imported_unittest_receivers(self):
+        standard_source = r'''
+import std/unittest
+
+unittest.suite "qualified standard suite":
+  unittest.test "qualified standard case":
+    check true
+'''
+        compiled = self.run_nim_fixture(standard_source, run=True)
+        self.assertEqual(compiled.returncode, 0, compiled.stdout)
+        self.assertEqual(compiled.stdout.count("[OK]"), 1, compiled.stdout)
+        self.assertEqual(
+            inventory.count_nim_cases(standard_source),
+            {
+                "suiteCount": 1,
+                "caseCount": 1,
+                "suites": ["qualified standard suite"],
+            },
+        )
+
+        alias_source = r'''
+import std/unittest as unit
+
+unit.suite "qualified alias suite":
+  unit.test "qualified alias case":
+    doAssert true
+'''
+        compiled = self.run_nim_fixture(alias_source, run=True)
+        self.assertEqual(compiled.returncode, 0, compiled.stdout)
+        self.assertEqual(compiled.stdout.count("[OK]"), 1, compiled.stdout)
+        self.assertEqual(
+            inventory.count_nim_cases(alias_source),
+            {
+                "suiteCount": 1,
+                "caseCount": 1,
+                "suites": ["qualified alias suite"],
+            },
+        )
+
+        arbitrary_receiver_source = r'''
+import fake_receiver as unittest
+
+unittest.test "custom receiver, not std/unittest":
+  doAssert true
+'''
+        compiled = self.run_nim_fixture(
+            arbitrary_receiver_source,
+            run=True,
+            companions={
+                "fake_receiver.nim": r'''
+template test*(name: string; body: untyped) =
+  body
+''',
+            },
+        )
+        self.assertEqual(compiled.returncode, 0, compiled.stdout)
+        self.assertEqual(
+            inventory.count_nim_cases(arbitrary_receiver_source)["caseCount"],
+            0,
+        )
+
+    def assert_nim_case_counter_rejects_compiler_rejected_operator_endings(self):
+        invalid_sources = {
+            "symbolic": r'''
+import std/unittest
+test "incomplete name" &:
+  check false
+''',
+            "word": r'''
+import std/unittest
+test "incomplete name" and:
+  check false
+''',
+        }
+        for name, source in invalid_sources.items():
+            with self.subTest(name=name):
+                checked = self.run_nim_fixture(source, command="check")
+                self.assertNotEqual(checked.returncode, 0, checked.stdout)
+                self.assertIn("Error:", checked.stdout)
+                counted = inventory.count_nim_cases(source)
+                self.assertEqual(counted["suiteCount"], 0)
+                self.assertEqual(counted["caseCount"], 0)
+
+    def assert_inventory_case_counts_pin_multiline_and_fixture_regressions(
+        self, data
+    ):
+        by_source = {item["source"]: item for item in data["tests"]}
+        expected_multiline_counts = {
+            "libs/repro_cli_support/tests/test_engine_publisher_wiring.nim": 5,
+            "libs/repro_profile_compile/tests/t_template_in_template_named_args.nim": 2,
+            "libs/repro_standard_provider/tests/test_examples_layout.nim": 1,
+            "tests/e2e/m72/t_integration_stow_non_destructive_over_existing.nim": 4,
+            "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim": 4,
+            "tests/e2e/m79/t_integration_shell_integration_replan_idempotent.nim": 1,
+            "tests/e2e/m83/t_e2e_profile_modules.nim": 6,
+        }
+        for source, expected in expected_multiline_counts.items():
+            with self.subTest(source=source):
+                self.assertEqual(by_source[source]["sourceCaseCount"], expected)
+
+        # The three test files added while this scanner change was in review
+        # contribute five real cases. The exact-destination ref-validation
+        # change contributes one more case in its existing source. Pin each
+        # source independently so aggregate drift cannot be accepted by merely
+        # updating the totals below.
+        expected_rebased_source_counts = {
+            "libs/repro_resources/tests/"
+            "t_attr_missing_interface_diagnostic.nim": 1,
+            "libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim": 3,
+            "tests/integration/t_extension_type_lifted_and_consumed.nim": 1,
+            "tests/integration/t_pre_push_protocol_v2_ref_validation.nim": 3,
+        }
+        for source, expected in expected_rebased_source_counts.items():
+            with self.subTest(source=source):
+                self.assertEqual(by_source[source]["sourceCaseCount"], expected)
+
+        # These files generate test programs at runtime. Their declarations
+        # inside triple-quoted fixture strings are not cases in the host file.
+        self.assertEqual(
+            by_source[
+                "tests/integration/t_repro_test_runner_aggregate_exit_code.nim"
+            ]["sourceCaseCount"],
+            2,
+        )
+        self.assertEqual(
+            by_source[
+                "tests/integration/t_repro_test_runner_parallel_n_workers.nim"
+            ]["sourceCaseCount"],
+            2,
+        )
+        macho = REPO_ROOT / "tests/integration/t_macho_runtime_audit.nim"
+        self.assertEqual(
+            len(
+                re.findall(
+                    r"(?m)^\s*test\s",
+                    macho.read_text(encoding="utf-8"),
+                )
+            ),
+            50,
+        )
+        self.assertEqual(
+            by_source[macho.relative_to(REPO_ROOT).as_posix()]["sourceCaseCount"],
+            15,
+        )
+
+        nim_total = sum(
+            item["sourceCaseCount"]
+            for item in data["tests"]
+            if item["language"] == "nim"
+        )
+        python_total = sum(
+            item["sourceCaseCount"]
+            for item in data["tests"]
+            if item["language"] == "python"
+        )
+        nim_specs, _ = inventory.parse_repro_tests(REPO_ROOT)
+        provider_only_sources = []
+        for spec in nim_specs:
+            source = (REPO_ROOT / spec.source).read_text(
+                encoding="utf-8", errors="replace"
+            )
+            has_std_unittest = (
+                re.search(
+                    r"(?m)^[ \t]*import[ \t]+std[ \t]*/[ \t]*unittest\b",
+                    source,
+                )
+                is not None
+                or re.search(
+                    r"(?ms)^[ \t]*import[ \t]+std[ \t]*/[ \t]*"
+                    r"\[[^\]]*\bunittest\b[^\]]*\]",
+                    source,
+                )
+                is not None
+            )
+            if (
+                not has_std_unittest
+                and inventory.count_nim_cases(source)["caseCount"] > 0
+            ):
+                provider_only_sources.append(spec.source)
+        # This is intentionally independent from the token scanner. It pins
+        # the sole current direct re-export provider so a future implicit
+        # import/re-export cannot silently disappear from the inventory.
+        self.assertEqual(
+            provider_only_sources,
+            [
+                "libs/ct_test_unittest_parallel/tests/"
+                "t_smoke_ct_test_unittest_parallel.nim"
+            ],
+        )
+        self.assertEqual(nim_total, 6485)
+        self.assertEqual(python_total, 31)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6516)
+
     def test_warm_monitor_shim_probe_is_portable_and_requires_an_artifact(self):
         probe = REPO_ROOT / "scripts" / "monitor_shim_probe.sh"
         probe_source = probe.read_text(encoding="utf-8")
@@ -95,6 +442,11 @@ class SuiteInventoryTests(unittest.TestCase):
 
     def test_static_inventory_covers_every_declared_test(self):
         data = inventory.build_inventory(REPO_ROOT, None)
+        self.assert_nim_case_counter_lexes_declarations_not_fixture_text()
+        self.assert_nim_case_counter_accepts_compiler_backed_statement_forms()
+        self.assert_nim_case_counter_resolves_only_imported_unittest_receivers()
+        self.assert_nim_case_counter_rejects_compiler_rejected_operator_endings()
+        self.assert_inventory_case_counts_pin_multiline_and_fixture_regressions(data)
         nim_specs, python_specs = inventory.parse_repro_tests(REPO_ROOT)
         declarations = (REPO_ROOT / "repro_tests.nim").read_text(encoding="utf-8")
         declared_nim_count = len(
