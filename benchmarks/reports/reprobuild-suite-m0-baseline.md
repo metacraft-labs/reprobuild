@@ -26,11 +26,11 @@ REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/
 
 | Field | Value |
 | --- | --- |
-| Generated at | 2026-07-25T13:21:12Z |
-| HEAD | a8ae1b728d6c5d1151bf0d1fc624c7b73b39b3c7 |
-| HEAD short | a8ae1b72 |
-| Branch | codex/m0-inventory-final-20260724 |
-| Source fingerprint | 9e1dd516dafa63eedd3afefcaa4b115011c337138b42c6dd42e5c1cb22671698 |
+| Generated at | 2026-07-25T14:21:31Z |
+| HEAD | 516e9c2e287610f6baa8a0055806badaa1410ef9 |
+| HEAD short | 516e9c2e |
+| Branch | codex/m0-inventory-tip-refresh-20260725 |
+| Source fingerprint | 00e88987328b87f6315edbd7e22d2f97ea78c85591c3ab0be9e1417229c0ed2b |
 | Runtime argv | scripts/reprobuild_suite_inventory.py |
 | Runtime env | {"IO_MON_SRC": "/nix/store/gl11s2nhx88xqb7msngcn27gxfq1lp2y-source/src", "NIX_BUILD_CORES": "32", "REPRO_CT_TEST_RUNNER_SRC": "/nix/store/1wi731x4pkwmbgyddnd2xhfzbxgiqzcj-source", "REPRO_TEST_ADAPTERS_SRC": "/nix/store/ci66n6j19lj1ww8xfjha6k640i1ckvdq-source/src", "RUNQUOTA_SRC": "/nix/store/cs5z04x7vxl3cb8cfq2nhcan93k71926-source", "SHM_GSET_SRC": "/nix/store/680mzqbgffmfza88v9zm9h47d607h9pg-source/src", "SHM_QUEUE_SRC": "/nix/store/4xlba8v4g2pdinv3r9xqkrwzjicfkzlq-source/src", "STACKABLE_HOOKS_SRC": "/nix/store/2z8n2x8ifccgg2jlaaf4h7ycwf3gbp9p-source/src"} |
 | External source checkouts | {} |
@@ -42,13 +42,13 @@ REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/
 
 | Metric | Value |
 | --- | --- |
-| Test entries | 1153 |
-| Nim test binaries | 1149 |
+| Test entries | 1154 |
+| Nim test binaries | 1150 |
 | Python test files | 4 |
-| Source-level cases | 6516 |
+| Source-level cases | 6517 |
 | Measured protocol-aware cases | not measured (requires runner summary) |
 | Graph-owned helper/fixture artifacts | 13 |
-| Tests with direct helper/fixture compiler calls | 45 |
+| Tests with statically detected runtime compiler flows | 63 |
 | Pure-unit consolidation groups | 39 |
 
 ## Evidence Status
@@ -59,7 +59,7 @@ Earlier contended or rejected timing attempts are diagnostic only and are intent
 
 ## Theoretical Performance Assessment
 
-The current graph contains 1149 Nim test binaries, 606 statically classified pure-unit entries in 39 compatible consolidation groups, and 45 tests with detected runtime compiler calls. These are measured structural counts, not timing results.
+The current graph contains 1150 Nim test binaries, 603 statically classified pure-unit entries in 39 compatible consolidation groups, and 63 tests with statically detected runtime compiler flows. These are structural counts, not timing results or an exhaustive semantic proof.
 
 - Parallel execution can reduce the serial execution component, but the exclusive lane and longest dependency chain bound the achievable wall-time reduction.
 - Consolidating compatible pure-unit groups should reduce repeated Nim compilation, link, and process-start overhead while preserving logical case identity.
@@ -83,10 +83,10 @@ No runner summary is available, so failed-test details are not measured.
 
 | Path | Size | Executable files |
 | --- | --- | --- |
-| build/bin | 15.4 MiB | 11 |
-| build/test-bin | 1.3 MiB | 4 |
-| build/nimcache | 82.4 MiB | 0 |
-| build/lib | 1.7 MiB | 4 |
+| build/bin | not present | n/a |
+| build/test-bin | 1.1 MiB | 3 |
+| build/nimcache | 14.8 MiB | 0 |
+| build/lib | not present | n/a |
 | .repro | not present | n/a |
 | test-logs/results | not present | n/a |
 
@@ -94,16 +94,18 @@ No runner summary is available, so failed-test details are not measured.
 
 | Class | Count |
 | --- | --- |
-| graph-fixture | 13 |
-| integration | 451 |
+| graph-fixture | 16 |
+| integration | 452 |
 | platform/destructive | 83 |
-| pure unit | 606 |
+| pure unit | 603 |
 
 Every test entry and its class is recorded in the JSON inventory.
 
-## Test-Body Helper Compilation
+## Statically Detected Runtime Compiler Flows
 
-| Source | Class | Line | Compiler | First matching command |
+This static audit combines explicit compiler-command data flow with trusted Reprobuild compilation-API imports and reachable local wrapper calls. It is intentionally not exhaustive: Dynamic dispatch, macro-generated calls, include/re-export bindings, and function-value data flow are not resolved. A statically detected API flow may take a valid cache-hit fast path and avoid launching the compiler on a particular run. Normal product-level repro invocations are not inferred to compile merely because a selected build could compile a provider.
+
+| Source | Class | Line | Detector | First matching flow |
 | --- | --- | --- | --- | --- |
 | libs/ct_test_unittest_parallel/tests/t_backward_compat_std_unittest_test_runs_unchanged.nim | graph-fixture | 36 | nim-c | let cmd = "nim c --hints:off --warnings:off --nimcache:" & |
 | libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim | integration | 39 | nim-c | let cmd = "nim c --threads:on --hints:off --warnings:off " & |
@@ -114,7 +116,12 @@ Every test entry and its class is recorded in the JSON inventory.
 | libs/repro_home_apply/tests/t_builtin_adapter_installer_innosetup_fpc.nim | graph-fixture | 117 | inno-iscc | let isccCmd = quoteShell(iscc) & " /Q " & quoteShell(issPath) |
 | libs/repro_home_apply/tests/test_m25_adapter_preference_text_macro_parity.nim | graph-fixture | 98 | nim-c | let compileCmd = "nim c --hints:off --warnings:off " & |
 | libs/repro_peer_cache/tests/t_peer_cache_admin_cli_status.nim | graph-fixture | 94 | nim-c | let compileCmd = "nim c --hints:off --path:" & libPath & |
+| libs/repro_profile_compile/tests/t_smoke_module_imports.nim | graph-fixture | 63 | repro-compile-profile-binary | let res = compileProfileBinary(profile, nimcache, bin, ProjectRoot) |
+| libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim | graph-fixture | 297 | repro-compile-profile-edge | let artifact = compileProfileToRbpi(root, opts) |
+| libs/repro_profile_compile/tests/t_template_in_template_named_args.nim | graph-fixture | 163 | repro-compile-profile-binary | let res = compileProfileBinary( |
 | tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim | integration | 706 | gcc | let gccPath = binDir / "gcc" |
+| tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim | integration | 40 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath, |
+| tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim | integration | 35 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath, |
 | tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim | integration | 69 | clang | "clang", "-c", "-arch", "arm64", "-g", asmPath, "-o", objPath |
 | tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim | integration | 90 | nim-argv | "nim", "c", "--threads:on", |
 | tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim | integration | 111 | gcc | let gccPath = binDir / "gcc" |
@@ -123,25 +130,38 @@ Every test entry and its class is recorded in the JSON inventory.
 | tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim | integration | 191 | cc | discard requireSuccess(shellCommand(["cc", "-pthread", sourcePath, "-o", outputPath])) |
 | tests/e2e/launcher-isolation/t_e2e_windows_launcher_isolation.nim | platform/destructive | 55 | nim-c | let res = execCmdEx("nim c --hints:off --verbosity:0 --nimcache:" & |
 | tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim | integration | 307 | cc | discard requireSuccess(shellCommand(["cc", sourcePath, "-o", toolPath])) |
+| tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim | platform/destructive | 285 | repro-compile-home-profile | let compiled = cli_home.compileAndAdaptHomeProfile(profilePath, |
 | tests/e2e/m83/t_e2e_phase_g_action_edges.nim | integration | 45 | nim-c | let compileCmd = "nim c --hints:off --warnings:off " & |
+| tests/e2e/m83/t_e2e_profile_modules.nim | integration | 162 | repro-compile-profile-edge | let artifact = compileProfileToRbpi(profileSrcDir / "home.nim", |
 | tests/e2e/m83/t_e2e_repro_profile_compile.nim | platform/destructive | 34 | nim-c | let compileCmd = "nim c --hints:off --warnings:off " & |
+| tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim | integration | 85 | repro-compile-profile-edge | let artifact = compileProfileToRbpi(profilePath, compileOpts(stateDir)) |
 | tests/e2e/macos-monitor/t_macos_monitor_shim_event_taxonomy.nim | platform/destructive | 175 | cc | "cc", "-pthread", sourcePath, "-o", outputPath |
 | tests/e2e/path-only/t_path_only_tool_interfaces.nim | integration | 77 | nim-argv | discard requireSuccess(@["nim", "c", "--verbosity:0", "--hints:off", |
 | tests/e2e/watch/t_e2e_repro_watch.nim | integration | 729 | gcc | let gccPath = binDir / "gcc" |
+| tests/integration/t_compiler_scratch_isolation.nim | integration | 149 | repro-extract-interface | let interfaceArtifact = extractInterfaceFromModule(modulePath, |
 | tests/integration/t_d6_runner_test_timeout.nim | integration | 91 | nim-c | let compileCmd = "nim c -d:release --hints:off --warnings:off " & |
+| tests/integration/t_dev_env_artifact.nim | integration | 36 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath, |
 | tests/integration/t_e2e_cross_compilation_aarch64.nim | integration | 155 | dynamic-c-compiler | let compileResult = execProcess(crossGcc, |
 | tests/integration/t_e2e_selectable_toolchain_fixture.nim | integration | 119 | nim-c | let nimcmd = "nim c --hints:off --warnings:off --nimcache:" & cacheDir & |
-| tests/integration/t_extension_type_lifted_and_consumed.nim | integration | 164 | nim-argv | let mOut = runNim(@["nim", "c", "--hints:off", "--verbosity:0"] & depFlags & |
+| tests/integration/t_extension_type_lifted_and_consumed.nim | integration | 127 | repro-extract-interface | let artifact = extractInterfaceFromModule(providerModule, artifactPath, |
 | tests/integration/t_integration_cross_compilation_fixture_compiles.nim | integration | 115 | nim-c | let nimcmd = "nim c --hints:off --warnings:off --nimcache:" & cacheDir & |
 | tests/integration/t_integration_launch_plan_binding_strategies.nim | integration | 329 | nim-c | let res = execCmdEx("nim c --hints:off --verbosity:0 --nimcache:" & |
 | tests/integration/t_integration_provider_fragment_refresh_and_pruning.nim | integration | 161 | nim-argv | var args = @["nim", "c", "--verbosity:0", "--hints:off", |
 | tests/integration/t_integration_reprobuild_sessions_share_runquota.nim | integration | 243 | nim-argv | "nim", "c", "--verbosity:0", "--hints:off", |
 | tests/integration/t_integration_scheduler_dependency_gathering_policies.nim | integration | 138 | cc | discard requireSuccess(shellCommand(["cc", sourcePath, "-o", outputPath])) |
 | tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim | integration | 95 | nim-argv | let compiled = runNim(@["nim", "c", "--verbosity:0", "--hints:off", |
-| tests/integration/t_project_interface_artifact_import_modes.nim | integration | 243 | nim-argv | let thinRunOut = requireNimSuccess(@["nim", "c", "-r", "--verbosity:0", |
+| tests/integration/t_project_interface_artifact_import_modes.nim | integration | 172 | repro-extract-interface | extractInterfaceFromModule(providerModule, artifactPath, stubPath, |
 | tests/integration/t_repro_test_runner_aggregate_exit_code.nim | integration | 91 | nim-c | let cmd = "nim c --threads:on --hints:off --warnings:off " & |
 | tests/integration/t_repro_test_runner_parallel_n_workers.nim | integration | 95 | nim-c | var cmd = "nim c --threads:on --hints:off --warnings:off " & |
+| tests/integration/t_rp1_provider_compile_edge_materializes.nim | integration | 51 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, |
+| tests/integration/t_rp2_provider_session_invoke.nim | integration | 113 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, |
+| tests/integration/t_rp3_bind_deps_and_sharing.nim | integration | 135 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, |
+| tests/integration/t_rp5b_resource_driver_via_protocol.nim | integration | 125 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, |
+| tests/integration/t_run_consumes_opaque_out_of_tree.nim | integration | 131 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, |
+| tests/integration/t_run_consumes_session_store_out_of_tree.nim | integration | 128 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, |
+| tests/integration/t_run_edge_session_resolver_auto.nim | integration | 126 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, |
 | tests/integration/t_stackable_hooks_extracted_process_tree.nim | integration | 276 | nim-c | "nim c --app:lib --threads:on " & |
+| tests/integration/t_ti1_interface_artifact_edge.nim | integration | 168 | repro-lift-interface-artifact | let cold = liftInterfaceArtifact(plan) |
 | tests/integration/t_ti2_separate_module_producer.nim | integration | 146 | nim-compile-verb | "c --compileOnly --hints:off --warnings:off -o:" & |
 | tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim | integration | 145 | nim-compile-verb | "c --compileOnly --hints:off --warnings:off -o:" & |
 | tests/integration/t_ti3_fingerprint_split.nim | integration | 164 | nim-compile-verb | "c --compileOnly --hints:off --warnings:off -o:" & |
