@@ -1,5 +1,5 @@
 ## Deferred Item D6: ``repro_test_runner`` honours a per-test
-## ``--test-timeout=N`` deadline so a single hung test fails with a
+## ``--test-timeout=N`` idle deadline so a single hung test fails with a
 ## clear TIMEOUT signature while the rest of the suite continues.
 ##
 ## Background
@@ -23,12 +23,17 @@
 ##      refactor that drops the timeout path surfaces immediately at
 ##      the source-level review surface.
 ##
-##   2. BEHAVIOURAL — write a small Nim source that does
+##   2. BEHAVIOURAL — write one small Nim source that does
 ##      ``sleep(60_000)`` (60 seconds), compile it under a private
 ##      temp ``--bin-dir``, then invoke the runner with
 ##      ``--test-timeout=3``. Assert: runner exits cleanly (not hung),
 ##      the sleeper's result entry has ``status=FAIL`` and stdout
 ##      contains "TIMEOUT", and total wall time is < 30 seconds.
+##
+##   3. IDLE RESET — a second real fixture emits progress at two seconds,
+##      writes a kernel-visible stamp at four seconds, then hangs. With a
+##      three-second idle window the stamp can exist only if that output reset
+##      the deadline; a fixed three-second wall timeout kills it first.
 
 import std/[json, os, osproc, strutils, times, unittest]
 
@@ -42,6 +47,18 @@ echo "d6 sleeper: woke up cleanly (timeout did not fire)"
 quit(0)
 """
 
+const ProgressFixtureSource = """
+import std/os
+echo "d6 progress fixture: starting"
+stdout.flushFile()
+sleep(2_000)
+echo "d6 progress fixture: still alive"
+stdout.flushFile()
+sleep(2_000)
+writeFile(getEnv("D6_PROGRESS_STAMP"), "idle deadline was reset\n")
+sleep(60_000)
+"""
+
 type
   BehaviouralFindings = object
     wallSec: float
@@ -51,6 +68,7 @@ type
     entryStem: string
     entryStatus: string
     entryStdout: string
+    progressStampReached: bool
 
 proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -65,13 +83,14 @@ proc findRepoRoot(): string =
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
 
-proc runBehavioural(runnerBin: string): BehaviouralFindings =
+proc runBehavioural(runnerBin: string; source = FixtureSource;
+                    scenario = "sleeper"): BehaviouralFindings =
   ## Compile the 60-second sleeper into a private temp dir, invoke the
   ## runner with ``--test-timeout=3``, return what we observe. Wrapped
   ## in a standalone proc so the ``defer`` cleanup and the early
   ## ``return`` shape compose naturally — ``unittest.test`` blocks
   ## expand to a template that forbids bare ``return``.
-  let tmpDir = getTempDir() / "reprobuild_d6_runner_timeout"
+  let tmpDir = getTempDir() / ("reprobuild_d6_runner_timeout_" & scenario)
   if dirExists(tmpDir):
     removeDir(tmpDir)
   createDir(tmpDir)
@@ -81,12 +100,13 @@ proc runBehavioural(runnerBin: string): BehaviouralFindings =
     except CatchableError:
       discard
 
-  let fixtureSrc = tmpDir / "t_d6_sleeper_fixture.nim"
-  let fixtureBin = tmpDir / "t_d6_sleeper_fixture"
+  let fixtureSrc = tmpDir / ("t_d6_" & scenario & "_fixture.nim")
+  let fixtureBin = tmpDir / ("t_d6_" & scenario & "_fixture")
   let resultsDir = tmpDir / "results"
   let summaryPath = tmpDir / "summary.json"
+  let progressStamp = tmpDir / "progress.stamp"
 
-  writeFile(fixtureSrc, FixtureSource)
+  writeFile(fixtureSrc, source)
 
   let compileCmd = "nim c -d:release --hints:off --warnings:off " &
     "--out:" & quoteShell(fixtureBin) & " " & quoteShell(fixtureSrc)
@@ -110,10 +130,23 @@ proc runBehavioural(runnerBin: string): BehaviouralFindings =
   ].join(" ")
 
   let t0 = epochTime()
-  let (runnerOut, runnerExit) = execCmdEx(runnerCmd)
+  let hadProgressStamp = existsEnv("D6_PROGRESS_STAMP")
+  let priorProgressStamp = getEnv("D6_PROGRESS_STAMP")
+  if scenario == "progress":
+    putEnv("D6_PROGRESS_STAMP", progressStamp)
+  let (runnerOut, runnerExit) =
+    try:
+      execCmdEx(runnerCmd)
+    finally:
+      if hadProgressStamp:
+        putEnv("D6_PROGRESS_STAMP", priorProgressStamp)
+      else:
+        delEnv("D6_PROGRESS_STAMP")
   result.wallSec = epochTime() - t0
   result.runnerExit = runnerExit
   result.runnerOut = runnerOut
+  result.progressStampReached = fileExists(progressStamp) and
+    readFile(progressStamp) == "idle deadline was reset\n"
 
   if not fileExists(summaryPath):
     raise newException(IOError,
@@ -132,9 +165,9 @@ proc runBehavioural(runnerBin: string): BehaviouralFindings =
     result.entryStatus = entry{"status"}.getStr()
     result.entryStdout = entry{"stdout"}.getStr()
 
-suite "Deferred Item D6: --test-timeout kills hung tests cleanly":
+suite "Deferred Item D6: --test-timeout enforces a bounded idle deadline":
 
-  test "structural: runner source carries --test-timeout parsing and a deadline-aware drain":
+  test "structural: runner source documents and implements idle reset plus hard ceiling":
     let repoRoot = findRepoRoot()
     let runnerSrc = repoRoot / "tools" / "test-runner" /
       "repro_test_runner.nim"
@@ -150,10 +183,13 @@ suite "Deferred Item D6: --test-timeout kills hung tests cleanly":
     # A deadline-aware ``drainAndWait``-equivalent must exist and must
     # carry the SIGTERM/SIGKILL escalation the spec calls for.
     check "drainAndWaitWithTimeout" in runnerText
+    check "lastProgress" in runnerText
+    check "AbsoluteTimeoutMultiplier" in runnerText
     check "peekExitCode" in runnerText
     check "terminate" in runnerText
     check "kill" in runnerText
     check "TIMEOUT" in runnerText
+    check "per-test idle timeout; output resets it" in runnerText
 
     checkpoint("D6 structural assertion: OK")
 
@@ -177,7 +213,7 @@ suite "Deferred Item D6: --test-timeout kills hung tests cleanly":
       # kill actually happened) AND well below the 30s ceiling the
       # spec calls for.
       check findings.wallSec < 30.0
-      # The 3s deadline plus the 5s SIGKILL grace plus spawn overhead
+      # The 3s idle deadline plus bounded TERM/KILL cleanup and spawn overhead
       # should resolve in well under 15s on any host. Floor at 1s so
       # a future "the runner short-circuits the spawn" regression
       # would surface here too.
@@ -202,3 +238,32 @@ suite "Deferred Item D6: --test-timeout kills hung tests cleanly":
       checkpoint("entry stdout (first 200 chars): " & preview)
       check "TIMEOUT" in findings.entryStdout
       check "SIGKILLed" in findings.entryStdout
+      check "IDLE TIMEOUT after 3s without output" in findings.entryStdout
+
+  test "behavioural: emitted output resets the idle deadline":
+    let repoRoot = findRepoRoot()
+    let runnerBin = repoRoot / "build" / "bin" /
+      addFileExt("repro_test_runner", ExeExt)
+
+    if not fileExists(runnerBin):
+      checkpoint("skipped — " & runnerBin &
+        " is missing; build the runner first")
+      skip()
+    else:
+      let findings = runBehavioural(runnerBin, ProgressFixtureSource,
+        "progress")
+      checkpoint("runner exit=" & $findings.runnerExit & " wall=" &
+        formatFloat(findings.wallSec, ffDecimal, 2) & "s")
+      if findings.runnerExit != 0:
+        checkpoint("runner stdout/stderr:\n" & findings.runnerOut)
+
+      check findings.runnerExit != 0
+      check findings.summaryEntries == 1
+      check findings.entryStem == "t_d6_progress_fixture"
+      check findings.entryStatus == "FAIL"
+      check findings.progressStampReached
+      check "d6 progress fixture: still alive" in findings.entryStdout
+      check "IDLE TIMEOUT after 3s without output" in findings.entryStdout
+      check "SIGKILLed" in findings.entryStdout
+      check findings.wallSec >= 5.0
+      check findings.wallSec < 20.0

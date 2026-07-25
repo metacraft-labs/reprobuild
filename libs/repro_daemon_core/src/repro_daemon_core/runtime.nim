@@ -8,6 +8,11 @@ import ./protocol
 import ./stats_store
 import ./lease_registry
 
+const ReproTestRunnerOwnerTokenEnv =
+  "REPRO_TEST_RUNNER_OWNER_TOKEN"
+  ## Private process-ownership marker installed by ``repro_test_runner``.
+  ## It is carried only across daemon process launch/restart boundaries.
+
 when defined(posix):
   import std/posix except Time
 
@@ -59,6 +64,9 @@ type
       ## Explicit lease state-store root override (``--state-root``). Empty
       ## => derived from ``systemScope`` via ``leaseStoreRootForScope``. A
       ## hermetic test points this at a throwaway dir under ``$HOME``.
+    processOwnerToken: string
+      ## Internal launch-only copy of ``ReproTestRunnerOwnerTokenEnv``. Never
+      ## serialize or log this field, or include it in action environments.
 
   UserDaemonBuildEmit* = proc(kind: UserDaemonBuildEventKind;
                               message: string;
@@ -1020,6 +1028,11 @@ proc runBuildRequestWorker(socket: IpcConn; config: UserDaemonConfig;
 proc handleBuildRequest(socket: IpcConn; config: UserDaemonConfig;
                         request: UserDaemonBuildRequest;
                         sessions: var seq[UserDaemonSession]) =
+  var workerRequest = request
+  # Sanitize immediately before the detached worker fork as defense in depth
+  # for direct runtime callers that bypass the wire codec.
+  workerRequest.environment =
+    sanitizeUserDaemonRequestEnvironment(request.environment)
   let started = getTime()
   let sessionId =
     if request.runId.len > 0:
@@ -1056,9 +1069,9 @@ proc handleBuildRequest(socket: IpcConn; config: UserDaemonConfig;
     # terminal event, and could outlive an attached client disconnect.
     when defined(posix):
       spawnDetachedDaemonWorker(config, "build worker", sessionId, socket):
-        runBuildRequestWorker(socket, config, request, session)
+        runBuildRequestWorker(socket, config, workerRequest, session)
     else:
-      runBuildRequestWorker(socket, config, request, session)
+      runBuildRequestWorker(socket, config, workerRequest, session)
   finally:
     sessions.removeSession(sessionId)
 
@@ -1219,6 +1232,11 @@ proc streamWatchSession(socket: IpcConn; config: UserDaemonConfig;
 proc handleWatchStart(socket: IpcConn; config: UserDaemonConfig;
                       request: UserDaemonWatchRequest;
                       sessions: var seq[UserDaemonSession]) =
+  var workerRequest = request
+  # Keep the build/watch spawn boundaries identical. Detached watch workers
+  # must not receive a private launch marker through an in-process request.
+  workerRequest.environment =
+    sanitizeUserDaemonRequestEnvironment(request.environment)
   let started = getTime()
   let sessionId =
     if request.runId.len > 0:
@@ -1246,10 +1264,10 @@ proc handleWatchStart(socket: IpcConn; config: UserDaemonConfig;
   socket.writeFrame(udkWatchEvent, buildEventBody(accepted))
   when defined(posix):
     spawnDetachedDaemonWorker(config, "watch worker", sessionId, socket):
-      runWatchRequestWorker(socket, config, request, session,
+      runWatchRequestWorker(socket, config, workerRequest, session,
         streamToSocket = request.attached and not request.detached)
   else:
-    runWatchRequestWorker(socket, config, request, session,
+    runWatchRequestWorker(socket, config, workerRequest, session,
       streamToSocket = request.attached and not request.detached)
   sessions.removeSession(sessionId)
 
@@ -1495,7 +1513,16 @@ proc runScopedLeaseReapTick(config: UserDaemonConfig) =
   except CatchableError as err:
     logLine(config.logPath, "lease reap tick error: " & err.msg)
 
-proc runUserDaemonForeground*(config: UserDaemonConfig): int =
+proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
+  var config = initialConfig
+  config.processOwnerToken = getEnv(ReproTestRunnerOwnerTokenEnv)
+  # The OS keeps the exec-time environment used by the test runner to identify
+  # this process. Remove the live entry before handling requests so daemon
+  # actions cannot inherit a runner-private implementation detail. Dev
+  # self-restarts use only the private config copy above.
+  if existsEnv(ReproTestRunnerOwnerTokenEnv):
+    delEnv(ReproTestRunnerOwnerTokenEnv)
+
   # Named-pipe endpoints live under the kernel ``\\.\pipe\`` namespace
   # which is NOT a filesystem directory; ``createDir`` on its
   # parent would raise. Filesystem endpoints (AF_UNIX socket paths)
@@ -1647,6 +1674,12 @@ proc launchdLabel(config: UserDaemonConfig): string =
 proc launchdPlistPath(config: UserDaemonConfig): string =
   config.stateDir / "launchd" / (launchdLabel(config) & ".plist")
 
+proc processOwnerTokenForLaunch(config: UserDaemonConfig): string =
+  if config.processOwnerToken.len > 0:
+    config.processOwnerToken
+  else:
+    getEnv(ReproTestRunnerOwnerTokenEnv)
+
 proc renderLaunchdUserAgentPlist*(exe: string; config: UserDaemonConfig):
     string =
   var args = @[exe] & daemonProcessArgs(config)
@@ -1659,7 +1692,15 @@ proc renderLaunchdUserAgentPlist*(exe: string; config: UserDaemonConfig):
     "  <key>ProgramArguments</key>\n  <array>\n"
   for arg in args:
     result.add("    <string>" & xmlEscape(arg) & "</string>\n")
-  result.add("  </array>\n" &
+  result.add("  </array>\n")
+  let processOwnerToken = processOwnerTokenForLaunch(config)
+  if processOwnerToken.len > 0:
+    result.add("  <key>EnvironmentVariables</key>\n" &
+      "  <dict>\n" &
+      "    <key>" & ReproTestRunnerOwnerTokenEnv & "</key>\n" &
+      "    <string>" & xmlEscape(processOwnerToken) & "</string>\n" &
+      "  </dict>\n")
+  result.add(
     "  <key>RunAtLoad</key>\n  <true/>\n" &
     "  <key>KeepAlive</key>\n  <false/>\n" &
     "  <key>StandardOutPath</key>\n  <string>" &
@@ -1678,8 +1719,17 @@ proc launchWithLaunchd(exe: string; config: UserDaemonConfig): bool =
   when defined(macosx):
     try:
       createDir(parentDir(launchdPlistPath(config)))
-      writeFile(launchdPlistPath(config), renderLaunchdUserAgentPlist(exe,
-        config))
+      let plistPath = launchdPlistPath(config)
+      writeFile(plistPath, renderLaunchdUserAgentPlist(exe, config))
+      setFilePermissions(plistPath, {fpUserRead, fpUserWrite})
+      # launchd snapshots the job definition during bootstrap. Remove the
+      # token-bearing source plist on every return path; the registered job
+      # remains available for status/bootout through its label.
+      defer:
+        try:
+          removeFile(plistPath)
+        except OSError:
+          discard
       let serviceTarget = "gui/" & $currentUid()
       # Boot out any prior registration of this label BEFORE bootstrapping the
       # fresh plist. A ``RunAtLoad=true`` / ``KeepAlive=false`` agent runs once
@@ -1698,7 +1748,7 @@ proc launchWithLaunchd(exe: string; config: UserDaemonConfig): bool =
       discard execCmdEx(quoteCommand(["launchctl", "bootout",
         serviceTarget & "/" & launchdLabel(config)]))
       let bootstrap = execCmdEx(quoteCommand(["launchctl", "bootstrap",
-        serviceTarget, launchdPlistPath(config)]))
+        serviceTarget, plistPath]))
       if bootstrap.exitCode == 0:
         logLine(config.logPath, "launch requested backend=launchd label=" &
           launchdLabel(config))
@@ -1735,8 +1785,13 @@ proc launchWithSystemdUser(exe: string; config: UserDaemonConfig): bool =
       # active as long as any process in the cgroup is alive, so the
       # replacement keeps running and can bind the endpoint.
       var args = @["systemd-run", "--user", "--unit=" & systemdUnitName(config),
-        "--collect", "--quiet", "-p", "ExitType=cgroup",
-        exe] & daemonProcessArgs(config)
+        "--collect", "--quiet", "-p", "ExitType=cgroup"]
+      let processOwnerToken = processOwnerTokenForLaunch(config)
+      if processOwnerToken.len > 0:
+        args.add("--setenv=" & ReproTestRunnerOwnerTokenEnv & "=" &
+          processOwnerToken)
+      args.add(exe)
+      args.add(daemonProcessArgs(config))
       let res = execCmdEx(quoteCommand(args))
       if res.exitCode == 0:
         logLine(config.logPath, "launch requested backend=systemd-user unit=" &
@@ -1755,6 +1810,14 @@ proc launchWithFork(exe: string; config: UserDaemonConfig) =
   when defined(posix):
     let argv = @[exe] & daemonProcessArgs(config)
     let cargv = allocCStringArray(argv)
+    var environment: seq[string] = @[]
+    for key, value in envPairs():
+      if key != ReproTestRunnerOwnerTokenEnv:
+        environment.add(key & "=" & value)
+    let processOwnerToken = processOwnerTokenForLaunch(config)
+    if processOwnerToken.len > 0:
+      environment.add(ReproTestRunnerOwnerTokenEnv & "=" & processOwnerToken)
+    let cenv = allocCStringArray(environment)
     let exeCString = cstring(exe)
     let logPathCString = cstring(config.logPath)
     let pid = fork()
@@ -1773,16 +1836,20 @@ proc launchWithFork(exe: string; config: UserDaemonConfig) =
         discard dup2(logFd, 2)
       for fd in 3.cint .. 255.cint:
         discard posix.close(fd)
-      discard execv(exeCString, cargv)
+      discard execve(exeCString, cargv, cenv)
       quit(127)
     logLine(config.logPath, "launch requested backend=posix-fork pid=" &
       $pid)
 
 proc cleanupPlatformBackgroundRegistration*(config: UserDaemonConfig) =
   when defined(macosx):
+    discard execCmdEx(quoteCommand(["launchctl", "bootout",
+      "gui/" & $currentUid() & "/" & launchdLabel(config)]))
     if fileExists(launchdPlistPath(config)):
-      discard execCmdEx(quoteCommand(["launchctl", "bootout",
-        "gui/" & $currentUid() & "/" & launchdLabel(config)]))
+      try:
+        removeFile(launchdPlistPath(config))
+      except OSError:
+        discard
   elif defined(linux):
     discard execCmdEx(quoteCommand(["systemctl", "--user", "stop",
       systemdUnitName(config)]))
@@ -1856,6 +1923,7 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
         publicCliPath & " and on PATH as 'repro-daemon'); set " &
         "REPRO_DAEMON=off or install/build repro-daemon next to repro")
   var launchConfig = config
+  launchConfig.processOwnerToken = getEnv(ReproTestRunnerOwnerTokenEnv)
   var exe = sourceExe
   if config.devMode:
     let staged = stageDevDaemonBinary(sourceExe, config,
@@ -1895,7 +1963,10 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
   else:
     var env = newStringTable()
     for key, value in envPairs():
-      env[key] = value
+      if key != ReproTestRunnerOwnerTokenEnv:
+        env[key] = value
+    if launchConfig.processOwnerToken.len > 0:
+      env[ReproTestRunnerOwnerTokenEnv] = launchConfig.processOwnerToken
     env["REPRO_DAEMON_ENDPOINT"] = launchConfig.endpoint
     env["REPRO_DAEMON_STATE_DIR"] = launchConfig.stateDir
     let process = startProcess(exe,

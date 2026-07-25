@@ -15076,7 +15076,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     # and watch sessions agree on the env-forwarding contract, and so that
     # cargo/rustc actions launched by the daemon see Nix cc-wrapper variables
     # (NIX_LDFLAGS et al) from the user's nix-develop shell.
-    daemonCarriedEnvironment()
+    sanitizeUserDaemonRequestEnvironment(daemonCarriedEnvironment())
 
   proc runDaemonBuild(): int =
     # Auto-spawn the daemon in dev (self-restart) mode. The daemon is a
@@ -18827,7 +18827,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
     # See ``daemonBuildEnvironment``; we share one carried-env contract across
     # build and watch so daemon-hosted compilers see the same toolchain
     # configuration the user expects from their nix-develop shell.
-    daemonCarriedEnvironment()
+    sanitizeUserDaemonRequestEnvironment(daemonCarriedEnvironment())
 
   proc runDaemonWatch(): int =
     if hcrConfig.hcrWatchEnabled or hcrTargetConfigs.len > 0:
@@ -21111,7 +21111,10 @@ proc installUserDaemonBuildPrewarmer() =
       previousEnv.add((key: key, value: getEnv(key), present: existsEnv(key)))
       putEnv(key, value)
     try:
-      for item in request.environment:
+      # Defense in depth for direct/in-process callers that bypass protocol
+      # serialization. Never install the runner-private ownership marker in
+      # the build prewarmer's live environment.
+      for item in sanitizeUserDaemonRequestEnvironment(request.environment):
         let split = item.find('=')
         if split < 0:
           continue
@@ -21161,7 +21164,10 @@ proc installUserDaemonBuildExecutor() =
     let previousCwd = getCurrentDir()
     var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
     try:
-      for item in request.environment:
+      # Defense in depth for direct/in-process callers that bypass protocol
+      # serialization. The executor environment feeds action fingerprints,
+      # cache inputs, and every exec'd action child.
+      for item in sanitizeUserDaemonRequestEnvironment(request.environment):
         let split = item.find('=')
         if split < 0:
           continue
@@ -21245,7 +21251,9 @@ proc installUserDaemonWatchExecutor() =
     let previousCwd = getCurrentDir()
     var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
     try:
-      for item in request.environment:
+      # Match the build executor: watch cycles may spawn the same actions and
+      # must enforce the same private-environment boundary.
+      for item in sanitizeUserDaemonRequestEnvironment(request.environment):
         let split = item.find('=')
         if split < 0:
           continue

@@ -1,5 +1,7 @@
 import std/[os, osproc, strutils, tempfiles, times, unittest]
 
+import repro_daemon_core/runtime
+
 when defined(posix):
   import std/posix
 
@@ -176,6 +178,47 @@ proc waitForStatsStore(projectRoot: string; timeoutSeconds = 20.0) =
   raise newException(IOError, "timed out waiting for stats store")
 
 suite "Local daemons/control-plane M10 development self-restart":
+  test "launchd ownership environment is absent unless runner supplied it":
+    const OwnerTokenEnv = "REPRO_TEST_RUNNER_OWNER_TOKEN"
+    let hadOwnerToken = existsEnv(OwnerTokenEnv)
+    let priorOwnerToken = getEnv(OwnerTokenEnv)
+    defer:
+      if hadOwnerToken:
+        putEnv(OwnerTokenEnv, priorOwnerToken)
+      else:
+        delEnv(OwnerTokenEnv)
+    delEnv(OwnerTokenEnv)
+
+    let config = UserDaemonConfig(
+      endpoint: "/tmp/repro-owner-plist.sock",
+      stateDir: "/tmp/repro-owner-plist-state",
+      logPath: "/tmp/repro-owner-plist-state/daemon.log")
+    let plist = renderLaunchdUserAgentPlist("/tmp/repro", config)
+    check not plist.contains("<key>EnvironmentVariables</key>")
+    check not plist.contains("<key>" & OwnerTokenEnv & "</key>")
+
+  test "launchd ownership environment is exact and XML escaped":
+    const OwnerTokenEnv = "REPRO_TEST_RUNNER_OWNER_TOKEN"
+    let hadOwnerToken = existsEnv(OwnerTokenEnv)
+    let priorOwnerToken = getEnv(OwnerTokenEnv)
+    defer:
+      if hadOwnerToken:
+        putEnv(OwnerTokenEnv, priorOwnerToken)
+      else:
+        delEnv(OwnerTokenEnv)
+    putEnv(OwnerTokenEnv, "<owner&\"'token>")
+
+    let config = UserDaemonConfig(
+      endpoint: "/tmp/repro-owner-plist.sock",
+      stateDir: "/tmp/repro-owner-plist-state",
+      logPath: "/tmp/repro-owner-plist-state/daemon.log")
+    let plist = renderLaunchdUserAgentPlist("/tmp/repro", config)
+    check plist.count("<key>EnvironmentVariables</key>") == 1
+    check plist.count("<key>" & OwnerTokenEnv & "</key>") == 1
+    check plist.contains(
+      "<string>&lt;owner&amp;&quot;&apos;token&gt;</string>")
+    check not plist.contains("<owner&\"'token>")
+
   test "integration_daemon_dev_restart_posix":
     when defined(posix):
       let tempRoot = createTempDir("repro-daemon-m10-posix", "")

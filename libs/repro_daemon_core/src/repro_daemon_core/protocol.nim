@@ -19,6 +19,23 @@ const
   BuildEventSchemaId* = "reprobuild.daemon.build-event.v1"
   BuildEventSchemaVersion* = 1'u16
   FrameMagic = "RBUD"
+  ReproTestRunnerOwnerTokenEnv = "REPRO_TEST_RUNNER_OWNER_TOKEN"
+
+proc sanitizeUserDaemonRequestEnvironment*(
+    environment: openArray[string]): seq[string] =
+  ## Remove the test runner's private process-ownership marker at every daemon
+  ## request boundary. The marker belongs only to OS process launch/restart
+  ## ownership. It must never enter the daemon wire protocol, build/watch
+  ## action environments, fingerprints, cache inputs, logs, or results.
+  ##
+  ## Preserve every unrelated entry byte-for-byte and in its original order.
+  ## A malformed marker entry without ``=`` is filtered as well so even its
+  ## private name cannot cross the wire.
+  for item in environment:
+    let split = item.find('=')
+    let key = if split < 0: item else: item[0 ..< split]
+    if key != ReproTestRunnerOwnerTokenEnv:
+      result.add(item)
 
 type
   UserDaemonMessageKind* = enum
@@ -521,7 +538,8 @@ proc buildRequestBody*(request: UserDaemonBuildRequest): seq[byte] =
   result.writeString(request.workRoot)
   result.writeString(request.publicCliPath)
   result.writeStringSeq(request.rawArgs)
-  result.writeStringSeq(request.environment)
+  result.writeStringSeq(
+    sanitizeUserDaemonRequestEnvironment(request.environment))
   result.writeBool(request.attached)
   result.writeBool(request.cancelOnDisconnect)
 
@@ -535,7 +553,8 @@ proc parseBuildRequestBody*(body: openArray[byte]): UserDaemonBuildRequest =
   result.workRoot = body.readString(pos)
   result.publicCliPath = body.readString(pos)
   result.rawArgs = body.readStringSeq(pos)
-  result.environment = body.readStringSeq(pos)
+  result.environment =
+    sanitizeUserDaemonRequestEnvironment(body.readStringSeq(pos))
   result.attached = body.readBool(pos)
   result.cancelOnDisconnect = body.readBool(pos)
 
@@ -548,7 +567,8 @@ proc watchRequestBody*(request: UserDaemonWatchRequest): seq[byte] =
   result.writeString(request.workRoot)
   result.writeString(request.publicCliPath)
   result.writeStringSeq(request.rawArgs)
-  result.writeStringSeq(request.environment)
+  result.writeStringSeq(
+    sanitizeUserDaemonRequestEnvironment(request.environment))
   result.writeBool(request.attached)
   result.writeBool(request.detached)
   result.writeBool(request.cancelOnDisconnect)
@@ -566,7 +586,8 @@ proc parseWatchRequestBody*(body: openArray[byte]): UserDaemonWatchRequest =
   result.workRoot = body.readString(pos)
   result.publicCliPath = body.readString(pos)
   result.rawArgs = body.readStringSeq(pos)
-  result.environment = body.readStringSeq(pos)
+  result.environment =
+    sanitizeUserDaemonRequestEnvironment(body.readStringSeq(pos))
   result.attached = body.readBool(pos)
   result.detached = body.readBool(pos)
   result.cancelOnDisconnect = body.readBool(pos)

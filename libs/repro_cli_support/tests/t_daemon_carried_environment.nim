@@ -1,6 +1,7 @@
-import std/[os, unittest]
+import std/[os, sequtils, strutils, unittest]
 
 import repro_cli_support
+import repro_daemon_core/protocol
 
 proc hasEnvPair(values: openArray[string]; key, value: string): bool =
   let expected = key & "=" & value
@@ -8,6 +9,16 @@ proc hasEnvPair(values: openArray[string]; key, value: string): bool =
     if item == expected:
       return true
   false
+
+proc replaceAscii(body: var seq[byte]; oldValue, newValue: string): bool =
+  if oldValue.len != newValue.len:
+    return false
+  let offset = cast[string](body).find(oldValue)
+  if offset < 0:
+    return false
+  for index, value in newValue:
+    body[offset + index] = byte(value)
+  true
 
 suite "daemon carried environment":
   test "daemon and runquota isolation is forwarded to nested daemon-hosted builds":
@@ -62,3 +73,96 @@ suite "daemon carried environment":
     check carried.hasEnvPair("REPROBUILD_RUNTIME_LIBRARY_PATH",
       runtimeLibraryPath)
     check carried.hasEnvPair("SHM_QUEUE_SRC", shmQueueSrc)
+
+  test "private runner ownership is excluded without changing unrelated env":
+    const
+      OwnerTokenEnv = "REPRO_TEST_RUNNER_OWNER_TOKEN"
+      OwnerToken = "private-owner-value-that-must-not-cross-the-wire"
+    let input = @[
+      "PATH=/first",
+      OwnerTokenEnv & "=" & OwnerToken,
+      "MALFORMED_UNRELATED",
+      "REPRO_TEST_RUNNER_OWNER_TOKEN_SUFFIX=preserved",
+      "VALUE_CONTAINS=" & OwnerTokenEnv & "=" & OwnerToken,
+      OwnerTokenEnv,
+      "PATH=/second",
+    ]
+    let expected = @[
+      "PATH=/first",
+      "MALFORMED_UNRELATED",
+      "REPRO_TEST_RUNNER_OWNER_TOKEN_SUFFIX=preserved",
+      "VALUE_CONTAINS=" & OwnerTokenEnv & "=" & OwnerToken,
+      "PATH=/second",
+    ]
+    check sanitizeUserDaemonRequestEnvironment(input) == expected
+
+  test "caller environment snapshot excludes private runner ownership":
+    const
+      OwnerTokenEnv = "REPRO_TEST_RUNNER_OWNER_TOKEN"
+      OwnerToken = "caller-owner-value-that-must-not-enter-a-request"
+    let hadOwnerToken = existsEnv(OwnerTokenEnv)
+    let priorOwnerToken = getEnv(OwnerTokenEnv)
+    defer:
+      if hadOwnerToken:
+        putEnv(OwnerTokenEnv, priorOwnerToken)
+      else:
+        delEnv(OwnerTokenEnv)
+
+    putEnv(OwnerTokenEnv, OwnerToken)
+    let carried = daemonCarriedEnvironment()
+    check not carried.hasEnvPair(OwnerTokenEnv, OwnerToken)
+    check carried.allIt(not it.startsWith(OwnerTokenEnv & "="))
+
+  test "build and watch wire codecs exclude private runner ownership":
+    const
+      OwnerTokenEnv = "REPRO_TEST_RUNNER_OWNER_TOKEN"
+      OwnerToken = "wire-owner-value-that-must-not-be-serialized"
+    let environment = @[
+      "PATH=/daemon-actions",
+      OwnerTokenEnv & "=" & OwnerToken,
+      "HOME=/daemon-home",
+    ]
+    let expected = @["PATH=/daemon-actions", "HOME=/daemon-home"]
+
+    let buildBody = buildRequestBody(UserDaemonBuildRequest(
+      runId: "build-owner-filter",
+      target: ".",
+      environment: environment,
+      attached: true,
+      cancelOnDisconnect: true))
+    check OwnerToken notin cast[string](buildBody)
+    check OwnerTokenEnv notin cast[string](buildBody)
+    check parseBuildRequestBody(buildBody).environment == expected
+
+    let watchBody = watchRequestBody(UserDaemonWatchRequest(
+      runId: "watch-owner-filter",
+      target: ".",
+      environment: environment,
+      attached: true,
+      cancelOnDisconnect: true))
+    check OwnerToken notin cast[string](watchBody)
+    check OwnerTokenEnv notin cast[string](watchBody)
+    check parseWatchRequestBody(watchBody).environment == expected
+
+  test "build and watch decoders reject a private marker from hostile wire":
+    const
+      OwnerTokenEnv = "REPRO_TEST_RUNNER_OWNER_TOKEN"
+      LookalikeEnv = "REPRO_TEST_RUNNER_OWNER_TOKEO"
+    let expected = @["PATH=/daemon-actions", "HOME=/daemon-home"]
+    let hostileEnvironment = @[
+      "PATH=/daemon-actions",
+      LookalikeEnv & "=hostile-wire-owner-value",
+      "HOME=/daemon-home",
+    ]
+
+    var buildBody = buildRequestBody(UserDaemonBuildRequest(
+      runId: "hostile-build-owner-filter",
+      environment: hostileEnvironment))
+    check buildBody.replaceAscii(LookalikeEnv, OwnerTokenEnv)
+    check parseBuildRequestBody(buildBody).environment == expected
+
+    var watchBody = watchRequestBody(UserDaemonWatchRequest(
+      runId: "hostile-watch-owner-filter",
+      environment: hostileEnvironment))
+    check watchBody.replaceAscii(LookalikeEnv, OwnerTokenEnv)
+    check parseWatchRequestBody(watchBody).environment == expected

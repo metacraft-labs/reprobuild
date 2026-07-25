@@ -280,11 +280,16 @@ test "incomplete name" and:
         # source independently so aggregate drift cannot be accepted by merely
         # updating the totals below.
         expected_rebased_source_counts = {
+            "libs/repro_cli_support/tests/t_daemon_carried_environment.nim": 5,
             "libs/repro_resources/tests/"
             "t_attr_missing_interface_diagnostic.nim": 1,
             "libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim": 3,
+            "tests/integration/t_d6_runner_test_timeout.nim": 3,
             "tests/integration/t_extension_type_lifted_and_consumed.nim": 1,
+            "tests/integration/t_local_daemons_control_plane_m10.nim": 5,
             "tests/integration/t_pre_push_protocol_v2_ref_validation.nim": 3,
+            "tests/integration/"
+            "t_repro_test_runner_process_group_cleanup.nim": 8,
         }
         for source, expected in expected_rebased_source_counts.items():
             with self.subTest(source=source):
@@ -375,9 +380,9 @@ test "incomplete name" and:
                 "t_smoke_ct_test_unittest_parallel.nim"
             ],
         )
-        self.assertEqual(nim_total, 6486)
+        self.assertEqual(nim_total, 6501)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6517)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6532)
 
     def assert_runtime_compiler_flow_inventory(self, data):
         flows = data["staticallyDetectedRuntimeCompilerFlows"]
@@ -512,8 +517,13 @@ test "incomplete name" and:
 
         # Derive the aggregate from independently pinned detector partitions.
         # Three tests have both an explicit compiler command and an API flow,
-        # so adding 45 + 21 directly would double count them.
-        self.assertEqual(len(explicit_sources), 45)
+        # so adding 46 + 21 directly would double count them.
+        cleanup_source = (
+            "tests/integration/"
+            "t_repro_test_runner_process_group_cleanup.nim"
+        )
+        self.assertIn(cleanup_source, explicit_sources)
+        self.assertEqual(len(explicit_sources), 46)
         self.assertEqual(len(api_sources), 21)
         self.assertEqual(
             explicit_sources & api_sources,
@@ -526,7 +536,7 @@ test "incomplete name" and:
             },
         )
         derived_total = len(explicit_sources | api_sources)
-        self.assertEqual(derived_total, 63)
+        self.assertEqual(derived_total, 64)
         self.assertEqual(len(flows), derived_total)
         self.assertFalse(data["runtimeCompilerFlowDetection"]["exhaustive"])
         self.assertEqual(

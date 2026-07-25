@@ -7486,6 +7486,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_repro_test_runner_process_group_cleanup.nim",
+    binary: "build/test-bin/t_repro_test_runner_process_group_cleanup",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_repro_test_runner_relative_results_git_config.nim",
     binary: "build/test-bin/t_repro_test_runner_relative_results_git_config",
     defines: @[],
