@@ -23276,6 +23276,58 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
+const
+  LegacyRepoMigrationMarkerBody = "reprobuild migration complete\n"
+    ## Exact sentinel written by repo-workspaces v2.10 after its one-time
+    ## Reprobuild hook/cache migration. It is deliberately narrower than a
+    ## generic ``.repo`` compatibility switch: only an already-migrated
+    ## workspace may use the legacy location as a read-only project-selection
+    ## artifact.
+
+proc legacyMigratedWorkspaceProjectName(workspaceRoot: string): string =
+  ## Compatibility seam for workspaces migrated by repo-workspaces v2.10
+  ## before Reprobuild's native-layout cutover. That migration recorded the
+  ## active project set in ``.repo/workspace.toml`` and its completion marker
+  ## in ``.repo/.repro-migration-complete``; the later native layout moved
+  ## canonical metadata to ``.repro/workspace.toml`` and membership to the
+  ## workspace root.
+  ##
+  ## Keep native layout authoritative. This helper supplies ONLY the primary
+  ## project name, and only when:
+  ##   * native root-level membership is present;
+  ##   * both legacy artifacts are regular, non-symlink files;
+  ##   * the completion marker has the exact producer-written body;
+  ##   * the legacy metadata passes the strict WorkspaceLocal reader; and
+  ##   * that project exists in native root-level membership.
+  ##
+  ## It never composes or resolves content from ``.repo/manifests``. A stray
+  ## ``.repo`` directory, an incomplete migration, or a malformed artifact
+  ## therefore cannot expand the workspace's trust or membership boundary.
+  let nativeProjects = workspaceRoot / "projects"
+  let nativeVariants = workspaceRoot / "variants"
+  if not dirExists(nativeProjects) and not dirExists(nativeVariants):
+    return ""
+  let legacyRoot = workspaceRoot / ".repo"
+  let marker = legacyRoot / ".repro-migration-complete"
+  let metadata = legacyRoot / "workspace.toml"
+  try:
+    if getFileInfo(marker, followSymlink = false).kind != pcFile or
+        readFile(marker) != LegacyRepoMigrationMarkerBody:
+      return ""
+    if getFileInfo(metadata, followSymlink = false).kind != pcFile:
+      return ""
+    let recorded =
+      readWorkspaceLocal(absolutePath(metadata)).workspace.project
+    if recorded.len == 0:
+      return ""
+    let projectFile = nativeProjects / (recorded & ".toml")
+    let variantFile = nativeVariants / (recorded & ".toml")
+    if not fileExists(projectFile) and not fileExists(variantFile):
+      return ""
+    return recorded
+  except CatchableError:
+    return ""
+
 proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string):
     tuple[resolved: ResolvedProject; workspaceLocal: Option[WorkspaceLocal]] =
   ## MO-9 — the ONE membership-resolution ladder shared by ``sync`` / ``pull``
@@ -23314,6 +23366,11 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
         if recorded.len > 0: name = recorded
       except WorkspaceManifestParseError:
         discard
+    else:
+      # repo-workspaces v2.10 wrote its metadata immediately before the
+      # native-layout cutover. Read that known migration artifact narrowly;
+      # never treat arbitrary legacy `.repo` state as canonical metadata.
+      name = legacyMigratedWorkspaceProjectName(workspaceRoot)
   if name.len == 0:
     raise newException(ValueError,
       opLabel & " requires either `.repro/workspace.toml` or a <project> " &
@@ -26851,6 +26908,13 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
           return resolveWorkspaceLockProject(withProject)
       except WorkspaceManifestParseError:
         discard
+    else:
+      let migratedProject =
+        legacyMigratedWorkspaceProjectName(parsed.workspaceRoot)
+      if migratedProject.len > 0:
+        var withProject = parsed
+        withProject.projectName = migratedProject
+        return resolveWorkspaceLockProject(withProject)
     raise newException(ValueError,
       "`repro workspace lock` requires either `.repro/workspace.toml` " &
         "or a <project> argument; neither was present at " &

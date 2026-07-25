@@ -7086,6 +7086,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_migrated_repo_workspace_real_pre_push.nim",
+    binary: "build/test-bin/t_migrated_repo_workspace_real_pre_push",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_mixed_public_clean_team_unpublished_refuses.nim",
     binary: "build/test-bin/t_mixed_public_clean_team_unpublished_refuses",
     defines: @[],

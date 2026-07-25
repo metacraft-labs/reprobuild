@@ -380,9 +380,9 @@ test "incomplete name" and:
                 "t_smoke_ct_test_unittest_parallel.nim"
             ],
         )
-        self.assertEqual(nim_total, 6501)
+        self.assertEqual(nim_total, 6502)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6532)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6533)
 
     def assert_runtime_compiler_flow_inventory(self, data):
         flows = data["staticallyDetectedRuntimeCompilerFlows"]
