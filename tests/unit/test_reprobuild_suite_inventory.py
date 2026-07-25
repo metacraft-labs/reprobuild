@@ -274,6 +274,22 @@ test "incomplete name" and:
             with self.subTest(source=source):
                 self.assertEqual(by_source[source]["sourceCaseCount"], expected)
 
+        # The three test files added while this scanner change was in review
+        # contribute five real cases. The exact-destination ref-validation
+        # change contributes one more case in its existing source. Pin each
+        # source independently so aggregate drift cannot be accepted by merely
+        # updating the totals below.
+        expected_rebased_source_counts = {
+            "libs/repro_resources/tests/"
+            "t_attr_missing_interface_diagnostic.nim": 1,
+            "libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim": 3,
+            "tests/integration/t_extension_type_lifted_and_consumed.nim": 1,
+            "tests/integration/t_pre_push_protocol_v2_ref_validation.nim": 3,
+        }
+        for source, expected in expected_rebased_source_counts.items():
+            with self.subTest(source=source):
+                self.assertEqual(by_source[source]["sourceCaseCount"], expected)
+
         # These files generate test programs at runtime. Their declarations
         # inside triple-quoted fixture strings are not cases in the host file.
         self.assertEqual(
@@ -347,9 +363,9 @@ test "incomplete name" and:
                 "t_smoke_ct_test_unittest_parallel.nim"
             ],
         )
-        self.assertEqual(nim_total, 6479)
+        self.assertEqual(nim_total, 6485)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6510)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6516)
 
     def test_warm_monitor_shim_probe_is_portable_and_requires_an_artifact(self):
         probe = REPO_ROOT / "scripts" / "monitor_shim_probe.sh"
