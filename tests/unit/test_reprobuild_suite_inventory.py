@@ -290,6 +290,18 @@ test "incomplete name" and:
             with self.subTest(source=source):
                 self.assertEqual(by_source[source]["sourceCaseCount"], expected)
 
+        # The opaque out-of-tree resource regression landed after the scanner
+        # work was merged. Pin its enrollment and classification independently
+        # from the aggregate totals below: changing only the totals must not be
+        # enough to hide a missing or miscounted catalog entry.
+        opaque_out_of_tree = by_source[
+            "tests/integration/t_run_consumes_opaque_out_of_tree.nim"
+        ]
+        self.assertEqual(opaque_out_of_tree["language"], "nim")
+        self.assertEqual(opaque_out_of_tree["sourceSuiteCount"], 1)
+        self.assertEqual(opaque_out_of_tree["sourceCaseCount"], 1)
+        self.assertEqual(opaque_out_of_tree["class"], "integration")
+
         # These files generate test programs at runtime. Their declarations
         # inside triple-quoted fixture strings are not cases in the host file.
         self.assertEqual(
@@ -363,9 +375,166 @@ test "incomplete name" and:
                 "t_smoke_ct_test_unittest_parallel.nim"
             ],
         )
-        self.assertEqual(nim_total, 6485)
+        self.assertEqual(nim_total, 6486)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6516)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6517)
+
+    def assert_runtime_compiler_flow_inventory(self, data):
+        flows = data["staticallyDetectedRuntimeCompilerFlows"]
+        by_source = {item["source"]: item for item in flows}
+        explicit_sources = {
+            item["source"]
+            for item in flows
+            if any(
+                not pattern.startswith("repro-")
+                for match in item["matches"]
+                for pattern in match["patterns"]
+            )
+        }
+        api_sources = {
+            item["source"]
+            for item in flows
+            if any(
+                pattern.startswith("repro-")
+                for match in item["matches"]
+                for pattern in match["patterns"]
+            )
+        }
+
+        # These eleven enrolled provider tests were invisible to the old
+        # command-string detector. Each imports and invokes the authoritative
+        # repro_interface_artifacts API through a direct or reachable wrapper.
+        provider_additions = {
+            "tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim",
+            "tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim",
+            "tests/integration/t_compiler_scratch_isolation.nim",
+            "tests/integration/t_dev_env_artifact.nim",
+            "tests/integration/t_rp1_provider_compile_edge_materializes.nim",
+            "tests/integration/t_rp2_provider_session_invoke.nim",
+            "tests/integration/t_rp3_bind_deps_and_sharing.nim",
+            "tests/integration/t_rp5b_resource_driver_via_protocol.nim",
+            "tests/integration/t_run_consumes_opaque_out_of_tree.nim",
+            "tests/integration/t_run_consumes_session_store_out_of_tree.nim",
+            "tests/integration/t_run_edge_session_resolver_auto.nim",
+        }
+        profile_additions = {
+            "libs/repro_profile_compile/tests/t_smoke_module_imports.nim",
+            "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
+            "libs/repro_profile_compile/tests/"
+            "t_template_in_template_named_args.nim",
+            "tests/e2e/m83/t_e2e_profile_modules.nim",
+            "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
+        }
+        equivalent_api_additions = {
+            "tests/e2e/m76/"
+            "t_integration_stow_byte_identical_target_is_cache_hit.nim",
+            "tests/integration/t_ti1_interface_artifact_edge.nim",
+        }
+        expected_additions = (
+            provider_additions | profile_additions | equivalent_api_additions
+        )
+        self.assertEqual(api_sources - explicit_sources, expected_additions)
+
+        for source in provider_additions:
+            with self.subTest(provider_runtime_compiler_source=source):
+                patterns = {
+                    pattern
+                    for match in by_source[source]["matches"]
+                    for pattern in match["patterns"]
+                }
+                self.assertTrue(
+                    patterns
+                    & {
+                        "repro-compile-provider-binary",
+                        "repro-extract-interface",
+                    }
+                )
+        for source in profile_additions:
+            with self.subTest(profile_runtime_compiler_source=source):
+                patterns = {
+                    pattern
+                    for match in by_source[source]["matches"]
+                    for pattern in match["patterns"]
+                }
+                self.assertTrue(
+                    patterns
+                    & {
+                        "repro-compile-profile-binary",
+                        "repro-compile-profile-edge",
+                    }
+                )
+        self.assertIn(
+            "repro-compile-home-profile",
+            {
+                pattern
+                for match in by_source[
+                    "tests/e2e/m76/"
+                    "t_integration_stow_byte_identical_target_is_cache_hit.nim"
+                ]["matches"]
+                for pattern in match["patterns"]
+            },
+        )
+        self.assertIn(
+            "repro-lift-interface-artifact",
+            {
+                pattern
+                for match in by_source[
+                    "tests/integration/t_ti1_interface_artifact_edge.nim"
+                ]["matches"]
+                for pattern in match["patterns"]
+            },
+        )
+
+        # The opaque-resource regression is pinned independently because it
+        # landed after the original M0 report and exercises the same provider
+        # materialization chain with a new resource representation.
+        opaque = by_source[
+            "tests/integration/t_run_consumes_opaque_out_of_tree.nim"
+        ]
+        self.assertTrue(opaque["matches"])
+        self.assertEqual(opaque["class"], "integration")
+
+        # Similar spellings in prose or fixture text are not runtime calls.
+        self.assertNotIn(
+            "tests/integration/"
+            "t_rp5a_producer_exports_resource_contract_across_workspace.nim",
+            api_sources,
+        )
+        self.assertNotIn(
+            "tests/integration/"
+            "t_sc_producer_exports_typed_cli_contract_across_workspace.nim",
+            api_sources,
+        )
+        self.assertNotIn(
+            "tests/e2e/m83/t_e2e_phase_g_action_edges.nim",
+            api_sources,
+        )
+
+        # Derive the aggregate from independently pinned detector partitions.
+        # Three tests have both an explicit compiler command and an API flow,
+        # so adding 45 + 21 directly would double count them.
+        self.assertEqual(len(explicit_sources), 45)
+        self.assertEqual(len(api_sources), 21)
+        self.assertEqual(
+            explicit_sources & api_sources,
+            {
+                "tests/integration/"
+                "t_extension_type_lifted_and_consumed.nim",
+                "tests/integration/"
+                "t_project_interface_artifact_import_modes.nim",
+                "tests/integration/t_ti3_fingerprint_split.nim",
+            },
+        )
+        derived_total = len(explicit_sources | api_sources)
+        self.assertEqual(derived_total, 63)
+        self.assertEqual(len(flows), derived_total)
+        self.assertFalse(data["runtimeCompilerFlowDetection"]["exhaustive"])
+        self.assertEqual(
+            data["performanceAssessment"]["observedStructuralFacts"][
+                "staticallyDetectedRuntimeCompilerFlowTests"
+            ],
+            derived_total,
+        )
 
     def test_warm_monitor_shim_probe_is_portable_and_requires_an_artifact(self):
         probe = REPO_ROOT / "scripts" / "monitor_shim_probe.sh"
@@ -447,6 +616,7 @@ test "incomplete name" and:
         self.assert_nim_case_counter_resolves_only_imported_unittest_receivers()
         self.assert_nim_case_counter_rejects_compiler_rejected_operator_endings()
         self.assert_inventory_case_counts_pin_multiline_and_fixture_regressions(data)
+        self.assert_runtime_compiler_flow_inventory(data)
         nim_specs, python_specs = inventory.parse_repro_tests(REPO_ROOT)
         declarations = (REPO_ROOT / "repro_tests.nim").read_text(encoding="utf-8")
         declared_nim_count = len(
@@ -481,7 +651,7 @@ test "incomplete name" and:
             sum(data["static"]["classificationCounts"].values()),
             data["static"]["testEntryCount"],
         )
-        self.assertTrue(data["helperCompilationInTestBody"])
+        self.assertTrue(data["staticallyDetectedRuntimeCompilerFlows"])
         self.assertTrue(data["pureUnitConsolidationCandidates"])
         self.assertTrue(data["static"]["graphOwnedTestArtifacts"])
         self.assertFalse(data["timing"]["complete"])
@@ -522,7 +692,7 @@ test "incomplete name" and:
             if group["owner"] == "tests/unit":
                 self.assertTrue(group["dependencyShape"])
         helper_sources = {
-            item["source"] for item in data["helperCompilationInTestBody"]
+            item["source"] for item in data["staticallyDetectedRuntimeCompilerFlows"]
         }
         self.assertIn(
             "tests/integration/t_stackable_hooks_extracted_process_tree.nim",
@@ -578,6 +748,138 @@ proc compileFixture() =
         self.assertEqual(matches[0]["patterns"], ["nim-compile-verb"])
         self.assertEqual(matches[0]["assignedCommandVariable"], "compileVerb")
         self.assertTrue(matches[0]["commandVariableExecuted"])
+        self.assert_runtime_compiler_api_detection_resolves_imports_and_wrappers()
+        self.assert_runtime_compiler_api_detection_rejects_non_runtime_text()
+
+    def assert_runtime_compiler_api_detection_resolves_imports_and_wrappers(self):
+        source = r'''
+import std/unittest
+import repro_interface_artifacts as artifacts
+from repro_profile_compile import compileProfileBinary
+
+proc providerLeaf() =
+  artifacts.compileProviderBinary()
+
+proc providerMiddle() =
+  providerLeaf()
+
+suite "runtime compiler API detector":
+  test "follows module aliases, selective imports, and local call closure":
+    providerMiddle()
+    compileProfileBinary()
+'''
+        compiled = self.run_nim_fixture(
+            source,
+            run=True,
+            companions={
+                "repro_interface_artifacts.nim": r'''
+proc compileProviderBinary*() =
+  discard
+''',
+                "repro_profile_compile.nim": r'''
+proc compileProfileBinary*() =
+  discard
+''',
+            },
+        )
+        self.assertEqual(compiled.returncode, 0, compiled.stdout)
+        self.assertEqual(compiled.stdout.count("[OK]"), 1, compiled.stdout)
+        matches = inventory.nim_runtime_compiler_api_invocations(
+            "tests/integration/example.nim", source
+        )
+        self.assertEqual(
+            [item["runtimeCompilerApi"] for item in matches],
+            ["compileProviderBinary", "compileProfileBinary"],
+        )
+        self.assertEqual(matches[0]["enclosingCallable"], "providerLeaf")
+        self.assertTrue(matches[0]["callableReachable"])
+        self.assertEqual(matches[1]["enclosingCallable"], "")
+
+    def assert_runtime_compiler_api_detection_rejects_non_runtime_text(self):
+        source = r'''
+import std/unittest
+import repro_interface_artifacts as artifacts
+
+const generatedFixture = """
+import repro_interface_artifacts
+discard compileProviderBinary()
+"""
+
+# artifacts.extractInterfaceFromModule()
+proc unusedWrapper() =
+  artifacts.extractInterfaceFromModule()
+
+static:
+  artifacts.compileProviderBinary()
+
+when false:
+  artifacts.liftInterfaceArtifact()
+
+suite "runtime compiler API detector negatives":
+  test "fixture text and unreachable declarations are not runtime flows":
+    check generatedFixture.len > 0
+'''
+        compiled = self.run_nim_fixture(
+            source,
+            run=True,
+            companions={
+                "repro_interface_artifacts.nim": r'''
+proc compileProviderBinary*() =
+  discard
+proc extractInterfaceFromModule*() =
+  discard
+proc liftInterfaceArtifact*() =
+  discard
+''',
+            },
+        )
+        self.assertEqual(compiled.returncode, 0, compiled.stdout)
+        self.assertEqual(compiled.stdout.count("[OK]"), 1, compiled.stdout)
+        self.assertEqual(
+            inventory.nim_runtime_compiler_api_invocations(
+                "tests/integration/example.nim", source
+            ),
+            [],
+        )
+
+        unrelated = r'''
+import unrelated_compiler
+proc wrapper() =
+  compileProviderBinary()
+wrapper()
+'''
+        unrelated_checked = self.run_nim_fixture(
+            unrelated,
+            command="check",
+            companions={
+                "unrelated_compiler.nim": r'''
+proc compileProviderBinary*() =
+  discard
+''',
+            },
+        )
+        self.assertEqual(
+            unrelated_checked.returncode, 0, unrelated_checked.stdout
+        )
+        self.assertEqual(
+            inventory.nim_runtime_compiler_api_invocations(
+                "tests/integration/unrelated.nim", unrelated
+            ),
+            [],
+        )
+
+        shadowed = r'''
+import repro_profile_compile
+proc compileProfileBinary() =
+  discard
+compileProfileBinary()
+'''
+        self.assertEqual(
+            inventory.nim_runtime_compiler_api_invocations(
+                "tests/integration/shadowed.nim", shadowed
+            ),
+            [],
+        )
 
     def test_completed_clean_attempt_requires_one_coherent_three_run_attempt(self):
         fingerprint = "same-source"

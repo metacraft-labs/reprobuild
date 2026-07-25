@@ -2,8 +2,10 @@
 """Generate the M0 reprobuild test-suite inventory.
 
 The default mode is static and quick: it reads the checked-in test edge table,
-classifies the current tests, finds direct compiler invocations in test bodies,
-and writes a markdown report plus JSON details.
+classifies the current tests, statically detects compiler flows in test bodies,
+and writes a markdown report plus JSON details. Detection covers both explicit
+compiler commands and calls through the repository's known compilation APIs;
+it is deliberately described as static rather than exhaustive.
 
 Use --run-suite in an isolated campaign worktree when a timed baseline is
 needed. With --clean-first, that mode removes repo-local build outputs, runs
@@ -82,6 +84,40 @@ COMPILER_PATTERNS = [
     ("wix-light", re.compile(r"\bquoteShell\(light\)")),
     ("inno-iscc", re.compile(r"\bquoteShell\(iscc\)")),
 ]
+
+# Public Reprobuild APIs whose successful cold path materializes a Nim-compiled
+# artifact. Keep this allow-list tied to authoritative implementation modules:
+# importing an unrelated module that happens to export the same spelling must
+# never classify a test as a runtime compiler flow.
+#
+# ``providerCompilePlan`` and ``interfaceLiftPlan`` are intentionally absent.
+# They declare commands/build edges but do not execute a compiler. Their
+# materializing counterparts below do. The two CLI-support adapters are
+# included because their implementation unconditionally enters
+# ``compileProfileToRbpi`` before adapting the result.
+NIM_RUNTIME_COMPILER_API_MODULES: dict[str, dict[str, str]] = {
+    "repro_interface_artifacts": {
+        "compileProviderBinary": "repro-compile-provider-binary",
+        "extractInterfaceFromModule": "repro-extract-interface",
+        "liftInterfaceArtifact": "repro-lift-interface-artifact",
+    },
+    "repro_profile_compile": {
+        "compileProfileBinary": "repro-compile-profile-binary",
+        "compileProfileToRbpi": "repro-compile-profile-edge",
+    },
+    "repro_profile_compile/compile": {
+        "compileProfileBinary": "repro-compile-profile-binary",
+    },
+    "repro_profile_compile/edge": {
+        "compileProfileToRbpi": "repro-compile-profile-edge",
+    },
+    "repro_cli_support/home": {
+        "compileAndAdaptHomeProfile": "repro-compile-home-profile",
+    },
+    "repro_cli_support/infra": {
+        "compileAndAdaptSystemProfile": "repro-compile-system-profile",
+    },
+}
 
 EXECUTOR_PATTERN = re.compile(
     r"\b(execCmdEx|execCmd|execProcess|startProcess|runShell|shellCommand|"
@@ -472,6 +508,21 @@ class NimDeclaration:
     token: NimToken
     expression_start: int
     colon: int
+
+
+@dataclasses.dataclass(frozen=True)
+class NimRuntimeCompilerApi:
+    module: str
+    name: str
+    pattern: str
+
+
+@dataclasses.dataclass(frozen=True)
+class NimCallable:
+    name: str
+    declaration_start: int
+    body_start: int
+    end: int
 
 
 NIM_DELIMITERS = {"(": ")", "[": "]", "{": "}"}
@@ -1218,6 +1269,506 @@ def count_python_cases(path: Path) -> dict[str, Any]:
     return {"suiteCount": 1 if count else 0, "caseCount": count, "suites": [path.stem] if count else []}
 
 
+def nim_next_token(tokens: list[NimToken], position: int) -> int | None:
+    position += 1
+    while position < len(tokens) and tokens[position].kind == "newline":
+        position += 1
+    return position if position < len(tokens) else None
+
+
+def nim_module_key(tokens: list[NimToken]) -> str:
+    """Normalize one explicit Nim module path without guessing resolution."""
+
+    parts: list[str] = []
+    for token in tokens:
+        name = nim_identifier_value(token)
+        if name is not None:
+            parts.append(nim_name_key(name))
+        elif token.value in {".", "/"}:
+            parts.append(token.value)
+    result = "".join(parts)
+    while result.startswith("./"):
+        result = result[2:]
+    return result
+
+
+def nim_runtime_api_modules() -> dict[str, dict[str, NimRuntimeCompilerApi]]:
+    result: dict[str, dict[str, NimRuntimeCompilerApi]] = {}
+    for module, names in NIM_RUNTIME_COMPILER_API_MODULES.items():
+        result[nim_module_key(nim_tokens(module))] = {
+            nim_name_key(name): NimRuntimeCompilerApi(module, name, pattern)
+            for name, pattern in names.items()
+        }
+    return result
+
+
+def nim_split_import_items(tokens: list[NimToken]) -> list[list[NimToken]]:
+    """Split a comma-separated import list while preserving bracket groups."""
+
+    items: list[list[NimToken]] = []
+    current: list[NimToken] = []
+    stack: list[str] = []
+    for token in tokens:
+        if token.value in NIM_DELIMITERS:
+            stack.append(NIM_DELIMITERS[token.value])
+        elif token.value in NIM_CLOSING_DELIMITERS:
+            if stack and stack[-1] == token.value:
+                stack.pop()
+        if token.value == "," and not stack:
+            if current:
+                items.append(current)
+            current = []
+        else:
+            current.append(token)
+    if current:
+        items.append(current)
+    return items
+
+
+def nim_first_identifier(tokens: list[NimToken], start: int) -> tuple[int, str] | None:
+    cursor = start
+    while cursor < len(tokens):
+        name = nim_identifier_value(tokens[cursor])
+        if name is not None:
+            return cursor, name
+        if tokens[cursor].kind != "newline" and tokens[cursor].value not in {"*", "`"}:
+            return None
+        cursor += 1
+    return None
+
+
+def nim_runtime_compiler_bindings(
+    tokens: list[NimToken], depths: list[int]
+) -> tuple[
+    dict[str, NimRuntimeCompilerApi],
+    dict[str, dict[str, NimRuntimeCompilerApi]],
+]:
+    """Resolve only explicit imports of authoritative compiler-owning modules.
+
+    Local bindings and selective imports from unrelated modules are treated as
+    shadows for the whole file. This intentionally prefers a false negative to
+    classifying a same-named local helper or third-party API as Reprobuild's
+    compiler entry point.
+    """
+
+    modules = nim_runtime_api_modules()
+    unqualified: dict[str, NimRuntimeCompilerApi] = {}
+    qualifiers: dict[str, dict[str, NimRuntimeCompilerApi]] = {}
+    ambiguous_unqualified: set[str] = set()
+    ambiguous_qualifiers: set[str] = set()
+    body_colons: set[int] = set()
+
+    for position, token in enumerate(tokens):
+        if depths[position] != 0 or token.kind == "newline":
+            continue
+        if token.value == ":":
+            previous = nim_previous_token(tokens, position)
+            if previous is not None:
+                head = previous
+                while head > 0 and not nim_statement_start(
+                    tokens, depths, head, body_colons
+                ):
+                    head -= 1
+                identifier = nim_identifier_value(tokens[head])
+                if (
+                    identifier is not None
+                    and nim_name_key(identifier) in NIM_INLINE_BLOCK_KEYWORDS
+                ):
+                    body_colons.add(position)
+            continue
+        if not nim_statement_start(tokens, depths, position, body_colons):
+            continue
+
+        if nim_identifier_matches(token, "import"):
+            end = nim_statement_end(tokens, depths, position)
+            statement = [
+                item
+                for item in tokens[position + 1 : end]
+                if item.kind != "newline"
+            ]
+            for item in nim_split_import_items(statement):
+                alias_position = next(
+                    (
+                        index
+                        for index, candidate in enumerate(item)
+                        if nim_identifier_matches(candidate, "as")
+                    ),
+                    None,
+                )
+                except_position = next(
+                    (
+                        index
+                        for index, candidate in enumerate(item)
+                        if nim_identifier_matches(candidate, "except")
+                    ),
+                    None,
+                )
+                module_end = min(
+                    index
+                    for index in [
+                        alias_position if alias_position is not None else len(item),
+                        except_position if except_position is not None else len(item),
+                    ]
+                )
+                module_key = nim_module_key(item[:module_end])
+                module_apis = modules.get(module_key)
+                alias = (
+                    nim_identifier_value(item[alias_position + 1])
+                    if alias_position is not None
+                    and alias_position + 1 < len(item)
+                    else None
+                )
+                default_qualifier = next(
+                    (
+                        nim_identifier_value(candidate)
+                        for candidate in reversed(item[:module_end])
+                        if nim_identifier_value(candidate) is not None
+                    ),
+                    None,
+                )
+                qualifier = alias or default_qualifier
+                if module_apis is None:
+                    if alias is not None:
+                        ambiguous_qualifiers.add(nim_name_key(alias))
+                    continue
+                if qualifier is not None:
+                    qualifiers[nim_name_key(qualifier)] = module_apis
+                # An aliased module is deliberately accepted only through its
+                # qualifier. That is the unambiguous spelling the alias exists
+                # to provide.
+                if alias is not None:
+                    continue
+                excluded = {
+                    nim_name_key(name)
+                    for candidate in (
+                        item[except_position + 1 :]
+                        if except_position is not None
+                        else []
+                    )
+                    if (name := nim_identifier_value(candidate)) is not None
+                }
+                for name, api in module_apis.items():
+                    if name not in excluded:
+                        unqualified[name] = api
+
+        elif nim_identifier_matches(token, "from"):
+            end = nim_statement_end(tokens, depths, position)
+            statement = [
+                item
+                for item in tokens[position + 1 : end]
+                if item.kind != "newline"
+            ]
+            import_position = next(
+                (
+                    index
+                    for index, candidate in enumerate(statement)
+                    if nim_identifier_matches(candidate, "import")
+                ),
+                None,
+            )
+            if import_position is None:
+                continue
+            module_key = nim_module_key(statement[:import_position])
+            module_apis = modules.get(module_key)
+            for member in nim_split_import_items(statement[import_position + 1 :]):
+                if not member:
+                    continue
+                source_name = nim_identifier_value(member[0])
+                if source_name is None:
+                    continue
+                alias = None
+                if (
+                    len(member) >= 3
+                    and nim_identifier_matches(member[1], "as")
+                ):
+                    alias = nim_identifier_value(member[2])
+                bound_name = alias or source_name
+                source_key = nim_name_key(source_name)
+                bound_key = nim_name_key(bound_name)
+                if module_apis is not None and source_key in module_apis:
+                    unqualified[bound_key] = module_apis[source_key]
+                elif source_key in {
+                    name
+                    for apis in modules.values()
+                    for name in apis
+                }:
+                    ambiguous_unqualified.add(bound_key)
+
+    local_bindings: set[str] = set()
+    for position, token in enumerate(tokens):
+        identifier = nim_identifier_value(token)
+        if (
+            identifier is None
+            or nim_name_key(identifier) not in NIM_BINDING_KEYWORDS
+        ):
+            continue
+        found = nim_first_identifier(tokens, position + 1)
+        if found is not None:
+            local_bindings.add(nim_name_key(found[1]))
+
+    for name in local_bindings | ambiguous_unqualified:
+        unqualified.pop(name, None)
+    for name in local_bindings | ambiguous_qualifiers:
+        qualifiers.pop(name, None)
+    return unqualified, qualifiers
+
+
+def nim_callable_declarations(
+    tokens: list[NimToken], depths: list[int]
+) -> list[NimCallable]:
+    """Find local callable bodies needed for conservative reachability."""
+
+    callables: list[NimCallable] = []
+    callable_keywords = {"proc", "func", "template", "macro", "method", "iterator"}
+    for position, token in enumerate(tokens):
+        identifier = nim_identifier_value(token)
+        if identifier is None or nim_name_key(identifier) not in callable_keywords:
+            continue
+        previous = nim_previous_token(tokens, position)
+        if (
+            previous is not None
+            and tokens[previous].line == token.line
+            and tokens[previous].value not in {":", ";"}
+        ):
+            continue
+        found = nim_first_identifier(tokens, position + 1)
+        if found is None:
+            continue
+        _, name = found
+        base_depth = depths[position]
+        body_marker: int | None = None
+        cursor = found[0] + 1
+        while cursor < len(tokens):
+            candidate = tokens[cursor]
+            if (
+                candidate.kind == "operator"
+                and candidate.value == "="
+                and depths[cursor] == base_depth
+            ):
+                body_marker = cursor
+                break
+            if (
+                candidate.kind == "newline"
+                and depths[cursor] == base_depth
+                and candidate.line > token.line + 8
+            ):
+                break
+            cursor += 1
+        if body_marker is None:
+            continue
+        body_start = nim_next_token(tokens, body_marker)
+        if body_start is None:
+            continue
+        end = len(tokens)
+        for candidate_position in range(body_start + 1, len(tokens)):
+            candidate = tokens[candidate_position]
+            if (
+                candidate.line > tokens[body_start].line
+                and candidate.column <= token.column
+                and depths[candidate_position] == base_depth
+                and candidate.kind != "newline"
+            ):
+                end = candidate_position
+                break
+        callables.append(
+            NimCallable(
+                name=name,
+                declaration_start=position,
+                body_start=body_start,
+                end=end,
+            )
+        )
+    return callables
+
+
+def nim_non_runtime_ranges(
+    tokens: list[NimToken], depths: list[int]
+) -> list[tuple[int, int]]:
+    """Find explicit compile-time or lexically dead blocks."""
+
+    ranges: list[tuple[int, int]] = []
+    for position, token in enumerate(tokens):
+        is_static = nim_identifier_matches(token, "static")
+        is_false_when = False
+        if nim_identifier_matches(token, "when"):
+            value_position = nim_next_token(tokens, position)
+            is_false_when = (
+                value_position is not None
+                and nim_identifier_matches(tokens[value_position], "false")
+            )
+        if not (is_static or is_false_when):
+            continue
+        base_depth = depths[position]
+        colon: int | None = None
+        cursor = position + 1
+        while cursor < len(tokens):
+            if tokens[cursor].value == ":" and depths[cursor] == base_depth:
+                colon = cursor
+                break
+            if (
+                tokens[cursor].kind == "newline"
+                and depths[cursor] == base_depth
+                and tokens[cursor].line > token.line
+            ):
+                break
+            cursor += 1
+        if colon is None:
+            continue
+        body_start = nim_next_token(tokens, colon)
+        if body_start is None:
+            continue
+        end = len(tokens)
+        for candidate_position in range(body_start + 1, len(tokens)):
+            candidate = tokens[candidate_position]
+            if (
+                candidate.line > tokens[body_start].line
+                and candidate.column <= token.column
+                and depths[candidate_position] == base_depth
+                and candidate.kind != "newline"
+            ):
+                end = candidate_position
+                break
+        ranges.append((body_start, end))
+    return ranges
+
+
+def nim_token_is_call(tokens: list[NimToken], name_position: int) -> bool:
+    next_position = nim_next_token(tokens, name_position)
+    return (
+        next_position is not None
+        and tokens[next_position].value == "("
+    )
+
+
+def nim_enclosing_callable(
+    callables: list[NimCallable], position: int
+) -> NimCallable | None:
+    candidates = [
+        callable
+        for callable in callables
+        if callable.body_start <= position < callable.end
+    ]
+    return max(candidates, key=lambda callable: callable.body_start) if candidates else None
+
+
+def nim_runtime_compiler_api_invocations(
+    path: str, text: str
+) -> list[dict[str, Any]]:
+    """Find reachable calls through known Reprobuild compilation APIs.
+
+    This is intentionally a static lexical/call-closure detector, not a Nim
+    semantic proof. It recognizes exact trusted imports and follows ordinary
+    local callable wrappers. Dynamic dispatch, include/re-export bindings,
+    function-value data flow, and calls assembled by macros remain outside its
+    scope and are stated as limitations in the generated report.
+    """
+
+    if not path.endswith(".nim"):
+        return []
+    tokens = nim_tokens(text)
+    depths = nim_outer_depths(tokens)
+    unqualified, qualifiers = nim_runtime_compiler_bindings(tokens, depths)
+    if not unqualified and not qualifiers:
+        return []
+
+    callables = nim_callable_declarations(tokens, depths)
+    excluded_ranges = nim_non_runtime_ranges(tokens, depths)
+
+    def excluded(position: int) -> bool:
+        return any(start <= position < end for start, end in excluded_ranges)
+
+    local_names = {
+        nim_name_key(callable.name)
+        for callable in callables
+    }
+    roots: set[str] = set()
+    edges: dict[str, set[str]] = {
+        name: set()
+        for name in local_names
+    }
+    for position, token in enumerate(tokens):
+        name = nim_identifier_value(token)
+        if name is None or nim_name_key(name) not in local_names:
+            continue
+        if not nim_token_is_call(tokens, position) or excluded(position):
+            continue
+        # Do not mistake ``proc wrapper(...) =`` for an invocation.
+        if any(
+            callable.declaration_start < position < callable.body_start
+            for callable in callables
+            if nim_name_key(callable.name) == nim_name_key(name)
+        ):
+            continue
+        owner = nim_enclosing_callable(callables, position)
+        if owner is None:
+            roots.add(nim_name_key(name))
+        else:
+            edges.setdefault(nim_name_key(owner.name), set()).add(
+                nim_name_key(name)
+            )
+
+    reachable = set(roots)
+    pending = list(roots)
+    while pending:
+        caller = pending.pop()
+        for callee in edges.get(caller, set()):
+            if callee not in reachable:
+                reachable.add(callee)
+                pending.append(callee)
+
+    source_lines = text.splitlines()
+    matches: list[dict[str, Any]] = []
+    for position, token in enumerate(tokens):
+        if excluded(position):
+            continue
+        api: NimRuntimeCompilerApi | None = None
+        name_position = position
+        name = nim_identifier_value(token)
+        if name is not None:
+            api = unqualified.get(nim_name_key(name))
+        if api is None and position + 2 < len(tokens):
+            qualifier = nim_identifier_value(token)
+            member = nim_identifier_value(tokens[position + 2])
+            if (
+                qualifier is not None
+                and tokens[position + 1].value == "."
+                and member is not None
+            ):
+                api = qualifiers.get(nim_name_key(qualifier), {}).get(
+                    nim_name_key(member)
+                )
+                name_position = position + 2
+        if api is None or not nim_token_is_call(tokens, name_position):
+            continue
+        owner = nim_enclosing_callable(callables, position)
+        if owner is not None and nim_name_key(owner.name) not in reachable:
+            continue
+        line = tokens[name_position].line
+        matches.append(
+            {
+                "path": path,
+                "line": line,
+                "patterns": [api.pattern],
+                "snippet": (
+                    source_lines[line - 1].strip()[:220]
+                    if 0 < line <= len(source_lines)
+                    else api.name
+                ),
+                "directExecutionLine": owner is None,
+                "assignedCommandVariable": "",
+                "commandVariableExecuted": False,
+                "executedVariables": [],
+                "runtimeCompilerApi": api.name,
+                "runtimeCompilerApiModule": api.module,
+                "enclosingCallable": owner.name if owner is not None else "",
+                "callableReachable": owner is None or (
+                    nim_name_key(owner.name) in reachable
+                ),
+            }
+        )
+    return matches
+
+
 def compiler_invocations(path: str, text: str) -> list[dict[str, Any]]:
     lines = text.splitlines()
     assignment_blocks: dict[str, tuple[int, int, str]] = {}
@@ -1351,11 +1902,15 @@ def compiler_invocations(path: str, text: str) -> list[dict[str, Any]]:
         )
         item["executedVariables"] = sorted(executed_vars)
 
-    return [
+    explicit_matches = [
         item
         for item in matches
         if item.get("directExecutionLine") or item.get("commandVariableExecuted")
     ]
+    return sorted(
+        explicit_matches + nim_runtime_compiler_api_invocations(path, text),
+        key=lambda item: (item["line"], item["patterns"]),
+    )
 
 
 def classify(spec: TestSpec, text: str, compile_matches: list[dict[str, Any]]) -> tuple[str, str]:
@@ -1903,7 +2458,7 @@ def build_inventory(root: Path, run_data: dict[str, Any] | None) -> dict[str, An
                 "sourceSuiteCount": case_info["suiteCount"],
                 "class": category,
                 "classificationReason": reason,
-                "helperCompilationInTestBody": bool(compiles),
+                "staticallyDetectedRuntimeCompilerFlow": bool(compiles),
                 "localDependencyShape": local_dependency_shape(spec, text),
             }
         )
@@ -1914,7 +2469,7 @@ def build_inventory(root: Path, run_data: dict[str, Any] | None) -> dict[str, An
         if (
             item["language"] == "nim"
             and item["class"] == "pure unit"
-            and not item["helperCompilationInTestBody"]
+            and not item["staticallyDetectedRuntimeCompilerFlow"]
         ):
             dependencies = tuple(item["localDependencyShape"])
             # tests/unit is a catch-all directory rather than a meaningful
@@ -1981,8 +2536,8 @@ def build_inventory(root: Path, run_data: dict[str, Any] | None) -> dict[str, An
             candidate["testClassificationReason"] = inventory_item.get(
                 "classificationReason", "no matching source inventory"
             )
-            candidate["helperCompilationInTestBody"] = inventory_item.get(
-                "helperCompilationInTestBody", False
+            candidate["staticallyDetectedRuntimeCompilerFlow"] = inventory_item.get(
+                "staticallyDetectedRuntimeCompilerFlow", False
             )
             review_name = candidate.get("qualified_name", "")
             review = accepted_reviews.get(review_name) or accepted_reviews.get(stem)
@@ -2037,7 +2592,7 @@ def build_inventory(root: Path, run_data: dict[str, Any] | None) -> dict[str, An
             "sourceCases": source_case_count,
             "pureUnitTests": class_counts.get("pure unit", 0),
             "pureUnitConsolidationGroups": len(consolidation_candidates),
-            "runtimeCompilerCallTests": len(helper_compiles),
+            "staticallyDetectedRuntimeCompilerFlowTests": len(helper_compiles),
             "graphOwnedHelperArtifacts": len(parse_graph_owned_artifacts(root)),
         },
         "inferences": [
@@ -2099,7 +2654,28 @@ def build_inventory(root: Path, run_data: dict[str, Any] | None) -> dict[str, An
             "graphOwnedTestArtifacts": parse_graph_owned_artifacts(root),
         },
         "tests": tests,
-        "helperCompilationInTestBody": helper_compiles,
+        "staticallyDetectedRuntimeCompilerFlows": helper_compiles,
+        "runtimeCompilerFlowDetection": {
+            "method": (
+                "static lexical, explicit-command data-flow, trusted-import, "
+                "and reachable local-call-closure analysis"
+            ),
+            "exhaustive": False,
+            "limitations": [
+                (
+                    "Dynamic dispatch, macro-generated calls, include/re-export "
+                    "bindings, and function-value data flow are not resolved."
+                ),
+                (
+                    "A statically detected API flow may take a valid cache-hit "
+                    "fast path and avoid launching the compiler on a particular run."
+                ),
+                (
+                    "Normal product-level repro invocations are not inferred to "
+                    "compile merely because a selected build could compile a provider."
+                ),
+            ],
+        },
         "pureUnitConsolidationCandidates": consolidation_candidates,
         "timing": timing,
         "runnerSummaries": runner_summaries,
@@ -2219,7 +2795,10 @@ def render_report(data: dict[str, Any], json_path: str) -> str:
                 ["Source-level cases", str(static["sourceCaseCount"])],
                 ["Measured protocol-aware cases", protocol_text],
                 ["Graph-owned helper/fixture artifacts", str(len(graph_artifacts))],
-                ["Tests with direct helper/fixture compiler calls", str(len(data["helperCompilationInTestBody"]))],
+                [
+                    "Tests with statically detected runtime compiler flows",
+                    str(len(data["staticallyDetectedRuntimeCompilerFlows"])),
+                ],
                 ["Pure-unit consolidation groups", str(len(data["pureUnitConsolidationCandidates"]))],
             ],
         )
@@ -2255,8 +2834,9 @@ def render_report(data: dict[str, Any], json_path: str) -> str:
         f"The current graph contains {facts['nimTestBinaries']} Nim test binaries, "
         f"{facts['pureUnitTests']} statically classified pure-unit entries in "
         f"{facts['pureUnitConsolidationGroups']} compatible consolidation groups, "
-        f"and {facts['runtimeCompilerCallTests']} tests with detected runtime compiler "
-        "calls. These are measured structural counts, not timing results."
+        f"and {facts['staticallyDetectedRuntimeCompilerFlowTests']} tests with "
+        "statically detected runtime compiler flows. These are structural counts, "
+        "not timing results or an exhaustive semantic proof."
     )
     lines.append("")
     for inference in assessment["inferences"]:
@@ -2432,13 +3012,23 @@ def render_report(data: dict[str, Any], json_path: str) -> str:
     lines.append("")
     lines.append("Every test entry and its class is recorded in the JSON inventory.")
     lines.append("")
-    lines.append("## Test-Body Helper Compilation")
+    lines.append("## Statically Detected Runtime Compiler Flows")
     lines.append("")
-    if not data["helperCompilationInTestBody"]:
-        lines.append("No direct helper or fixture compiler invocations were detected in current test bodies.")
+    detection = data["runtimeCompilerFlowDetection"]
+    lines.append(
+        "This static audit combines explicit compiler-command data flow with "
+        "trusted Reprobuild compilation-API imports and reachable local wrapper "
+        "calls. It is intentionally not exhaustive: "
+        + " ".join(detection["limitations"])
+    )
+    lines.append("")
+    if not data["staticallyDetectedRuntimeCompilerFlows"]:
+        lines.append(
+            "No runtime compiler flows were statically detected in current test bodies."
+        )
     else:
         rows = []
-        for item in data["helperCompilationInTestBody"]:
+        for item in data["staticallyDetectedRuntimeCompilerFlows"]:
             first = item["matches"][0]
             rows.append(
                 [
@@ -2449,7 +3039,12 @@ def render_report(data: dict[str, Any], json_path: str) -> str:
                     first["snippet"].replace("|", "\\|"),
                 ]
             )
-        lines.extend(md_table(["Source", "Class", "Line", "Compiler", "First matching command"], rows))
+        lines.extend(
+            md_table(
+                ["Source", "Class", "Line", "Detector", "First matching flow"],
+                rows,
+            )
+        )
     lines.append("")
     lines.append("## Graph-Owned Helper Artifacts")
     lines.append("")
