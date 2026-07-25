@@ -104,7 +104,13 @@ proc decodeResourceInstance*(bytes: openArray[byte]): ResourceInstance =
   result.address = readString(bytes, pos)
   let attrsTypeId = readString(bytes, pos)
   let attrsJson = readString(bytes, pos)
-  result.attrs = unmarshalAttrs(attrsTypeId, attrsJson)
+  # M2 opaque attr pass-through: an UNREGISTERED attrs typeId yields a
+  # ``RawExtensionBox`` (opaque bytes + typeId) instead of a hard error, so the
+  # ``repro`` CLI can decode an out-of-tree provider's resource graph and route
+  # the member to the provider SESSION (which HAS the codec) / the state store
+  # without linking the driver's attrs codec. A provider process that DOES have
+  # the codec still gets the typed box via the same registered path.
+  result.attrs = unmarshalAttrsOrRaw(attrsTypeId, attrsJson)
   let deps = int(readU32Le(bytes, pos))
   result.dependsOn = newSeq[string](deps)
   for i in 0 ..< deps:

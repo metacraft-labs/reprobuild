@@ -9,6 +9,23 @@ type
   TypedExtensionBox*[T] = ref object of ExtensionBox
     val*: T
 
+  RawExtensionBox* = ref object of ExtensionBox
+    ## Typed-Extension-Interfaces M2 (opaque attr pass-through): carries a
+    ## resource's attribute record OPAQUELY — the base ``typeId`` plus the
+    ## already-marshalled envelope bytes (``raw``, a byte-per-char string,
+    ## the exact output of ``marshalAttrs``) — WITHOUT a registered codec.
+    ##
+    ## The ``repro`` CLI is only a ROUTER for an out-of-tree provider's
+    ## resources: it decodes the resource graph, hands the members to the
+    ## provider SESSION (which HAS the codec), and stores the opaque
+    ## ``attrsJson`` in the state store. It must NOT need the attrs codec
+    ## in-process. ``unmarshalAttrsOrRaw`` produces this box for an
+    ## unregistered ``typeId``; ``marshalAttrs`` re-serializes it VERBATIM
+    ## (identity round-trip), so the bytes reaching the session / store are
+    ## byte-for-byte what was decoded. A process that DOES have the codec
+    ## (the provider) still gets the typed ``TypedExtensionBox[T]``.
+    raw*: string
+
   ExtensionMarshaler* = object
     ## Typed-Extension-Interfaces M1: the marshaller round-trips the
     ## attribute record through a versioned SSZ envelope

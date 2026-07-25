@@ -7558,6 +7558,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_run_consumes_opaque_out_of_tree.nim",
+    binary: "build/test-bin/t_run_consumes_opaque_out_of_tree",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_run_consumes_session_store_out_of_tree.nim",
     binary: "build/test-bin/t_run_consumes_session_store_out_of_tree",
     defines: @[],
