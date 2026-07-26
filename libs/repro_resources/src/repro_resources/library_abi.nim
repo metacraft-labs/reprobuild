@@ -92,6 +92,37 @@ const
   SymLastError* = "repro_last_error"
   SymCallCount* = "repro_provider_call_count"   ## no-spawn witness (test seam)
 
+# --------------------------------------------------------------------------
+# M4c — the nimRtl Nim-native FAST-PATH surface (§4.2b/§4.4). When host +
+# provider library are BOTH built ``-d:useNimRtl -d:reproNimRtlShared`` against
+# ONE ``nimrtl`` (matched Nim version + ORC), they share one GC/heap/type
+# machinery, so the boundary can pass LIVE Nim typed values directly — no
+# ``encode*``/``(ptr,len)`` marshal at all. These ``nimcall`` entries take a
+# live ``ResourceInstance`` / ``ObservedState`` and return a live
+# ``ObservedState`` / ``ResourceBinding``; because the GC is shared, ownership
+# is the GC's (the §6.2 explicit-free contract of the C-ABI path FALLS AWAY).
+#
+# The presence of ``SymRtlProbe`` in a loaded ``.so`` is the RUNTIME witness
+# that the library was compiled in the nimRtl-shared mode. When it is ABSENT
+# (a standalone C-ABI ``.so``) the transport falls back to the C-ABI buffer
+# path — the two are DISTINCT build artifacts with DISTINCT action keys
+# (``reproNimRtlShared`` is a semantic compile option, §4.4). The C-ABI symbols
+# above are STILL exported in nimRtl mode, so a nimRtl-shared library also
+# serves any host that only speaks the portable C ABI.
+const
+  ReproRtlSharedDefine* = "reproNimRtlShared"
+    ## The Nim ``--define`` that selects the nimRtl-shared build of a provider
+    ## library (paired with ``--define:useNimRtl`` + one shared ``nimrtl``).
+    ## It is a SEMANTIC compile option: it flows into ``providerCompileOptions``
+    ## → ``ProviderArtifactId`` → ``ProviderCompileActionKey`` so a
+    ## nimRtl-shared artifact and a standalone C-ABI artifact are DISTINCT cache
+    ## entries and never confused (§4.4).
+  SymRtlProbe* = "repro_provider_rtl_shared"   ## present ⇔ nimRtl-shared build
+  SymRtlDigest* = "repro_resource_digest_direct"
+  SymRtlObserve* = "repro_resource_observe_direct"
+  SymRtlApply* = "repro_resource_apply_direct"
+  SymRtlMarshalCount* = "repro_provider_marshal_count"  ## encode/decode witness
+
 # ===========================================================================
 # PROVIDER SIDE — exported cdecl entry points (only in a provider library).
 # ===========================================================================
@@ -107,6 +138,10 @@ when defined(reproProviderMode):
       ## The concrete object an opaque ``ReproProviderHandle`` points at.
       abiVersion: uint32
       calls: int          ## witness: number of in-process ABI ops served
+      marshals: int       ## witness: number of C-ABI ``encode*``/``decode*``
+                          ## boundary marshals performed (M4c). The nimRtl
+                          ## direct path leaves this at ZERO — the no-marshal
+                          ## witness.
       lastError: string   ## detail of the last op failure (borrowed via
                           ## ``repro_last_error``, §6.2 stable-until-next-call)
 
@@ -183,6 +218,17 @@ when defined(reproProviderMode):
     if handle == nil: return -1
     cint(cast[ptr ProviderState](handle).calls)
 
+  proc repro_provider_marshal_count(handle: ReproProviderHandle): cint
+                                   {.exportc: "repro_provider_marshal_count",
+                                     cdecl, dynlib.} =
+    ## Witness accessor (M4c test seam): how many C-ABI ``encode*``/``decode*``
+    ## boundary marshals this handle performed. A value that STAYS ZERO after a
+    ## direct nimRtl op — while ``repro_provider_call_count`` incremented — is
+    ## the NO-MARSHAL witness: the op ran on a live typed value, no buffer
+    ## round-trip. The C-ABI ops increment it (decode-in + encode-out).
+    if handle == nil: return -1
+    cint(cast[ptr ProviderState](handle).marshals)
+
   proc repro_last_error(handle: ReproProviderHandle): cstring
                        {.exportc: "repro_last_error", cdecl, dynlib.} =
     ## Borrowed, stable-until-next-call error detail for the last failed op on
@@ -217,11 +263,13 @@ when defined(reproProviderMode):
     outBuf.data = nil; outBuf.len = 0
     withState(handle):
       let inst = decodeResourceInstance(borrowedBytes(instData, instLen))
+      inc st.marshals
       let def = lookupResourceProvider(inst.typeId)
       var obs: ObservedState
       obs.present = true
       obs.digest = def.driver.digest(inst)
       outBuf[] = allocBuffer(encodeObservedState(obs))
+      inc st.marshals
       inc st.calls
       reproOk
 
@@ -238,12 +286,15 @@ when defined(reproProviderMode):
     outBuf.data = nil; outBuf.len = 0
     withState(handle):
       let inst = decodeResourceInstance(borrowedBytes(instData, instLen))
+      inc st.marshals
       var prior = none(ResourceBinding)
       if priorData != nil and priorLen > 0:
         prior = some(decodeResourceBinding(borrowedBytes(priorData, priorLen)))
+        inc st.marshals
       let def = lookupResourceProvider(inst.typeId)
       let obs = def.driver.observe(inst, prior)
       outBuf[] = allocBuffer(encodeObservedState(obs))
+      inc st.marshals
       inc st.calls
       reproOk
 
@@ -260,12 +311,70 @@ when defined(reproProviderMode):
     outBuf.data = nil; outBuf.len = 0
     withState(handle):
       let inst = decodeResourceInstance(borrowedBytes(instData, instLen))
+      inc st.marshals
       var observed: ObservedState
       if observedData != nil and observedLen > 0:
         observed = decodeObservedState(borrowedBytes(observedData, observedLen))
+        inc st.marshals
       let action = ResourceActionKind(actionKind)
       let def = lookupResourceProvider(inst.typeId)
       let binding = def.driver.apply(inst, action, observed)
       outBuf[] = allocBuffer(encodeResourceBinding(binding))
+      inc st.marshals
       inc st.calls
       reproOk
+
+  # ========================================================================
+  # M4c — the nimRtl Nim-native FAST PATH (§4.2b/§4.4). Emitted ONLY when the
+  # provider library is built ``-d:reproNimRtlShared`` (which the build pairs
+  # with ``-d:useNimRtl`` against one shared ``nimrtl``). These entries take a
+  # LIVE ``ResourceInstance`` / ``ObservedState`` Nim value and return a LIVE
+  # ``ObservedState`` / ``ResourceBinding`` — NO ``encode*``/``decode*``, NO
+  # ``(ptr,len)`` buffer, NO ``repro_buffer_free``. Because host + library
+  # share ONE nimRtl GC/heap, passing the GC'd values directly is sound and
+  # the GC owns their lifetime (the §6.2 explicit-free contract of the C-ABI
+  # path FALLS AWAY). ``st.marshals`` is deliberately NOT touched here — a
+  # non-zero ``st.calls`` with a still-zero ``st.marshals`` is the no-marshal
+  # witness.
+  #
+  # They are exported ``{.exportc, cdecl, dynlib.}`` so the host can bind them
+  # by symbol, but their PARAMETERS are native Nim ``ref``/``object`` values,
+  # not C-ABI (ptr,len) — this is exactly the nimRtl-only shape that is unsafe
+  # WITHOUT a shared runtime, which is why they are gated on the shared-runtime
+  # build and why ``SymRtlProbe`` advertises the mode.
+  when defined(reproNimRtlShared):
+    proc repro_provider_rtl_shared(): cint
+                                   {.exportc: "repro_provider_rtl_shared",
+                                     cdecl, dynlib.} =
+      ## Presence-probe: a nimRtl-shared build exports this symbol; a standalone
+      ## C-ABI build does NOT. The engine binds it optionally and, when present
+      ## (and the host itself is nimRtl-shared), takes the direct path.
+      1
+
+    proc repro_resource_digest_direct(handle: ReproProviderHandle;
+                                      inst: ResourceInstance): Digest256
+                                     {.exportc: "repro_resource_digest_direct",
+                                       cdecl, dynlib.} =
+      ## ``digest(inst)`` on a LIVE ``ResourceInstance`` — no marshal.
+      if handle != nil: inc cast[ptr ProviderState](handle).calls
+      lookupResourceProvider(inst.typeId).driver.digest(inst)
+
+    proc repro_resource_observe_direct(handle: ReproProviderHandle;
+                                       inst: ResourceInstance;
+                                       prior: Option[ResourceBinding]):
+                                       ObservedState
+                                      {.exportc: "repro_resource_observe_direct",
+                                        cdecl, dynlib.} =
+      ## ``observe(inst, prior)`` on LIVE values — no marshal.
+      if handle != nil: inc cast[ptr ProviderState](handle).calls
+      lookupResourceProvider(inst.typeId).driver.observe(inst, prior)
+
+    proc repro_resource_apply_direct(handle: ReproProviderHandle;
+                                     inst: ResourceInstance;
+                                     action: ResourceActionKind;
+                                     observed: ObservedState): ResourceBinding
+                                    {.exportc: "repro_resource_apply_direct",
+                                      cdecl, dynlib.} =
+      ## ``apply(inst, action, observed)`` on LIVE values — no marshal.
+      if handle != nil: inc cast[ptr ProviderState](handle).calls
+      lookupResourceProvider(inst.typeId).driver.apply(inst, action, observed)

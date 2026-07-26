@@ -3922,6 +3922,36 @@ proc normalizedProviderOutputPath*(outputBinaryPath: string): string =
   else:
     outputBinaryPath
 
+type
+  ReproRtlMode* = enum
+    ## Typed-Extension-Interfaces M4c — the RTL mode of a provider-LIBRARY
+    ## build (§4.4). It is part of the library edge's action key: a
+    ## nimRtl-shared artifact and a standalone C-ABI artifact are DISTINCT
+    ## cache entries and never confused. Rendered as SEMANTIC compiler
+    ## ``--define``s, so it flows into ``providerCompileOptions`` →
+    ## ``ProviderArtifactId`` → ``ProviderCompileActionKey`` automatically.
+    rtlStandaloneCAbi   ## ``--app:lib`` only — the portable C-ABI boundary,
+                        ## no nimRtl coupling; interoperates with ANY host.
+    rtlNimRtlShared     ## ``--app:lib -d:useNimRtl -d:reproNimRtlShared`` —
+                        ## the Nim-native fast path; sound ONLY when host +
+                        ## library share one pinned ``nimrtl`` (matched Nim
+                        ## version + ORC). Emits the ``*_direct`` no-marshal
+                        ## entry points + the ``SymRtlProbe`` presence symbol.
+
+proc rtlModeDefines*(mode: ReproRtlMode): seq[string] =
+  ## The extra compiler flags that render an ``ReproRtlMode`` as a LIBRARY
+  ## build. Both modes are ``--app:lib``; nimRtl-shared additionally shares the
+  ## runtime and emits the fast-path surface. These are semantic compile
+  ## options (they change the emitted symbols), so appending them re-keys the
+  ## provider-compile action deterministically.
+  case mode
+  of rtlStandaloneCAbi: @["--app:lib"]
+  of rtlNimRtlShared:   @["--app:lib", "--define:useNimRtl",
+                          # mirrors ``library_abi.ReproRtlSharedDefine``; held
+                          # as a local literal so this identity layer takes no
+                          # build-graph dependency on ``repro_resources``.
+                          "--define:reproNimRtlShared"]
+
 proc providerCompileCommand*(modulePath, outputBinaryPath: string;
                              workDir = getCurrentDir();
                              scratchDir = ""): seq[string] =
@@ -4023,6 +4053,52 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
       dynamicFlags.add("--passL:-Wl,-rpath," & libDir)
     for flag in dynamicFlags:
       result.insert(flag, 2)
+
+proc providerLibraryCompileCommand*(modulePath, outputBinaryPath: string;
+                                    mode: ReproRtlMode;
+                                    workDir = getCurrentDir();
+                                    scratchDir = ""): seq[string] =
+  ## The provider-LIBRARY compile command (M4c). Same base as
+  ## ``providerCompileCommand`` (full repro ``--path`` set + host flags +
+  ## ``-d:reproProviderMode``), rendered as a shared library in the requested
+  ## ``ReproRtlMode``. The RTL-mode ``--define``s are inserted BEFORE the
+  ## trailing module-path argument (flags after it are treated as run args),
+  ## so they land in ``providerCompileOptions`` and re-key the compile action
+  ## per mode — a nimRtl-shared artifact and a standalone C-ABI artifact are
+  ## DISTINCT cache entries (§4.4).
+  result = providerCompileCommand(modulePath, outputBinaryPath, workDir,
+    scratchDir)
+  for flag in rtlModeDefines(mode):
+    result.insert(flag, result.len - 1)
+
+proc providerLibraryCompileActionKey*(modulePath, outputBinaryPath: string;
+                                      interfaceFingerprint: ContentDigest;
+                                      mode: ReproRtlMode;
+                                      workDir = getCurrentDir();
+                                      scratchDir = ""): ContentDigest =
+  ## The action key for a provider-LIBRARY build in a given ``ReproRtlMode``
+  ## (M4c). Reuses the RP1 ``ProviderArtifactId`` machinery — the RTL-mode
+  ## ``--define``s enter ``providerCompileOptions``, so the two modes yield
+  ## DISTINCT keys by construction. This lets an engine cache/reuse the
+  ## nimRtl-shared and standalone C-ABI builds independently before the full
+  ## §4.3 library build-edge lands.
+  let absoluteModulePath = absolutePath(modulePath)
+  let normalizedOutputPath = absolutePath(
+    normalizedProviderOutputPath(outputBinaryPath))
+  let sources = discoverNimSources(absoluteModulePath)
+  let command = providerLibraryCompileCommand(absoluteModulePath,
+    normalizedOutputPath, mode, workDir, scratchDir)
+  var compileOptions: seq[string] = @[]
+  for i in 1 ..< command.len:
+    let arg = command[i]
+    if arg.startsWith("--out:") or arg.startsWith("--nimcache:") or
+        arg == normalizedOutputPath or arg == absoluteModulePath:
+      continue
+    compileOptions.add(arg)
+  let providerArtifactId = computeProviderArtifactId(
+    sources, interfaceFingerprint,
+    providerCompileOptions = compileOptions, workDir = workDir)
+  computeProviderCompileActionKey(providerArtifactId, sources, sources)
 
 proc providerCompilePlan*(modulePath, outputBinaryPath: string;
                           interfaceFingerprint: ContentDigest;

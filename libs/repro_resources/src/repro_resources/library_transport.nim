@@ -40,7 +40,22 @@ type
                   actionKind: uint32;
                   outBuf: ptr ReproBuffer): ReproStatus {.cdecl.}
   CallCountFn = proc (handle: ReproProviderHandle): cint {.cdecl.}
+  MarshalCountFn = proc (handle: ReproProviderHandle): cint {.cdecl.}
   LastErrorFn = proc (handle: ReproProviderHandle): cstring {.cdecl.}
+
+  # M4c — the nimRtl direct (no-marshal) signatures. These pass LIVE Nim typed
+  # values, so they are sound ONLY when host + library share one nimRtl runtime
+  # (§4.4). Bound only when ``SymRtlProbe`` is present (a nimRtl-shared build).
+  RtlProbeFn = proc (): cint {.cdecl.}
+  RtlDigestFn = proc (handle: ReproProviderHandle;
+                      inst: ResourceInstance): Digest256 {.cdecl.}
+  RtlObserveFn = proc (handle: ReproProviderHandle;
+                       inst: ResourceInstance;
+                       prior: Option[ResourceBinding]): ObservedState {.cdecl.}
+  RtlApplyFn = proc (handle: ReproProviderHandle;
+                     inst: ResourceInstance;
+                     action: ResourceActionKind;
+                     observed: ObservedState): ResourceBinding {.cdecl.}
 
   ResourceProviderLibraryObj = object
     lib: LibHandle
@@ -52,7 +67,14 @@ type
     observeFn: ObserveFn
     applyFn: ApplyFn
     callCountFn: CallCountFn
+    marshalCountFn: MarshalCountFn
     lastErrorFn: LastErrorFn
+    # nimRtl fast-path binding — non-nil ⇔ the library is a nimRtl-shared build
+    # (``SymRtlProbe`` present) AND this host is nimRtl-shared too.
+    rtlShared: bool
+    rtlDigestFn: RtlDigestFn
+    rtlObserveFn: RtlObserveFn
+    rtlApplyFn: RtlApplyFn
 
   LoadedResourceProviderLibrary* = ref ResourceProviderLibraryObj
     ## Scope-bound handle over a loaded provider ``.so``. ``=destroy`` closes
@@ -94,9 +116,26 @@ proc loadResourceProviderLibrary*(path: string): LoadedResourceProviderLibrary =
   let cc = symAddr(lib, SymCallCount)
   if cc != nil:
     result.callCountFn = cast[CallCountFn](cc)
+  let mc = symAddr(lib, SymRtlMarshalCount)
+  if mc != nil:
+    result.marshalCountFn = cast[MarshalCountFn](mc)
   let le = symAddr(lib, SymLastError)
   if le != nil:
     result.lastErrorFn = cast[LastErrorFn](le)
+  # M4c — bind the nimRtl direct fast path ONLY when BOTH sides are
+  # nimRtl-shared: the library advertises the mode via ``SymRtlProbe`` (only a
+  # ``-d:reproNimRtlShared`` build exports it) AND this host was itself compiled
+  # ``-d:reproNimRtlShared`` (so it shares the one nimRtl runtime, §4.4). If
+  # either side is standalone, the direct symbols stay unbound and every op
+  # falls back to the C-ABI buffer path — the two are distinct build artifacts
+  # with distinct action keys.
+  when defined(reproNimRtlShared):
+    let probe = symAddr(lib, SymRtlProbe)
+    if probe != nil and cast[RtlProbeFn](probe)() == 1:
+      result.rtlShared = true
+      result.rtlDigestFn = bindSym[RtlDigestFn](lib, SymRtlDigest)
+      result.rtlObserveFn = bindSym[RtlObserveFn](lib, SymRtlObserve)
+      result.rtlApplyFn = bindSym[RtlApplyFn](lib, SymRtlApply)
   var h: ReproProviderHandle
   let st = result.openFn(ReproAbiVersion, addr h)
   if st != reproOk:
@@ -109,6 +148,19 @@ proc callCount*(lib: LoadedResourceProviderLibrary): int =
   ## the library does not expose the accessor.
   if lib.callCountFn == nil: -1
   else: int(lib.callCountFn(lib.handle))
+
+proc marshalCount*(lib: LoadedResourceProviderLibrary): int =
+  ## The provider's C-ABI ``encode*``/``decode*`` marshal counter (M4c
+  ## no-marshal witness). A direct nimRtl op leaves this UNCHANGED while
+  ## ``callCount`` increments. ``-1`` when the accessor is absent.
+  if lib.marshalCountFn == nil: -1
+  else: int(lib.marshalCountFn(lib.handle))
+
+proc usesNimRtl*(lib: LoadedResourceProviderLibrary): bool =
+  ## True when this loaded library takes the nimRtl direct (no-marshal) path:
+  ## both the library and this host were built ``-d:reproNimRtlShared`` against
+  ## one shared ``nimrtl`` (§4.4). False ⇒ the portable C-ABI buffer path.
+  lib.rtlShared
 
 proc bufPtr(b: seq[byte]): pointer =
   if b.len == 0: nil else: unsafeAddr b[0]
@@ -133,9 +185,36 @@ proc raiseStatus(lib: LoadedResourceProviderLibrary; op: string;
     "resource op '" & op & "' failed over the C-ABI library transport: " & $st &
     (if detail.len > 0: " (" & detail & ")" else: ""))
 
+# --------------------------------------------------------------------------
+# M4c — the nimRtl DIRECT (no-marshal) ops. Call the ``*_direct`` cdecl entries
+# with LIVE Nim typed values: NO ``encode*``, NO ``(ptr,len)`` buffer, NO
+# ``repro_buffer_free`` — the shared nimRtl GC owns every value. Reached only
+# when ``lib.usesNimRtl`` (both sides ``-d:reproNimRtlShared`` against one
+# ``nimrtl``). The ``*ViaLibrary`` ops below prefer this path when available and
+# transparently fall back to the C-ABI buffer path otherwise.
+# --------------------------------------------------------------------------
+
+proc digestViaLibraryDirect*(lib: LoadedResourceProviderLibrary;
+                             inst: ResourceInstance): Digest256 =
+  lib.rtlDigestFn(lib.handle, inst)
+
+proc observeViaLibraryDirect*(lib: LoadedResourceProviderLibrary;
+                              inst: ResourceInstance;
+                              prior: Option[ResourceBinding]): ObservedState =
+  lib.rtlObserveFn(lib.handle, inst, prior)
+
+proc applyViaLibraryDirect*(lib: LoadedResourceProviderLibrary;
+                            inst: ResourceInstance;
+                            action: ResourceActionKind;
+                            observed: ObservedState): ResourceBinding =
+  lib.rtlApplyFn(lib.handle, inst, action, observed)
+
 proc digestViaLibrary*(lib: LoadedResourceProviderLibrary;
                        inst: ResourceInstance): Digest256 =
-  ## Run ``<typeId>.digest`` over the library ABI (direct cdecl call).
+  ## Run ``<typeId>.digest`` over the library ABI. Prefers the nimRtl direct
+  ## (no-marshal) path when both sides are nimRtl-shared, else the C-ABI buffer.
+  if lib.rtlShared:
+    return digestViaLibraryDirect(lib, inst)
   let instBytes = encodeResourceInstance(inst)
   var outBuf: ReproBuffer
   let st = lib.digestFn(lib.handle, bufPtr(instBytes), csize_t(instBytes.len),
@@ -146,7 +225,9 @@ proc digestViaLibrary*(lib: LoadedResourceProviderLibrary;
 proc observeViaLibrary*(lib: LoadedResourceProviderLibrary;
                         inst: ResourceInstance;
                         prior: Option[ResourceBinding]): ObservedState =
-  ## Run ``<typeId>.observe`` over the library ABI.
+  ## Run ``<typeId>.observe`` over the library ABI (nimRtl direct when shared).
+  if lib.rtlShared:
+    return observeViaLibraryDirect(lib, inst, prior)
   let instBytes = encodeResourceInstance(inst)
   var priorBytes: seq[byte] = @[]
   if prior.isSome:
@@ -161,7 +242,9 @@ proc applyViaLibrary*(lib: LoadedResourceProviderLibrary;
                       inst: ResourceInstance;
                       action: ResourceActionKind;
                       observed: ObservedState): ResourceBinding =
-  ## Run ``<typeId>.apply`` over the library ABI.
+  ## Run ``<typeId>.apply`` over the library ABI (nimRtl direct when shared).
+  if lib.rtlShared:
+    return applyViaLibraryDirect(lib, inst, action, observed)
   let instBytes = encodeResourceInstance(inst)
   let obsBytes = encodeObservedState(observed)
   var outBuf: ReproBuffer
