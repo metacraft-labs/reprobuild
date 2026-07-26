@@ -103,6 +103,14 @@ proc singleHelperBundle*(): seq[ActivityElement] =
   ]
 """
 
+const SelfContainedDependencyHomeNim = """
+import repro_profile
+
+profile "selfContainedDependencies":
+  activity default:
+    "dependency-path-smoke"
+"""
+
 suite "M83 Phase F1: single sibling-module compile":
 
   test "home.nim importing one sibling compiles successfully":
@@ -144,6 +152,50 @@ suite "M83 Phase F1: single sibling-module compile":
       if s.endsWith("single_helper.nim"):
         found = true
     check found
+
+  test "profile compile resolves vendored SSZ dependencies explicitly":
+    let dir = createTempDir("repro-m83-f1-dependency-paths-", "")
+    defer:
+      try: removeDir(dir) except OSError: discard
+    discard writeProfileFile(dir, "home.nim",
+      SelfContainedDependencyHomeNim)
+
+    # Poison every config.nims environment override in the SSZ dependency
+    # closure, plus Nim's global Nimble package root. The spawned compiler
+    # must use the repo-local source paths carried by profileNimPaths, not a
+    # developer checkout, dev-shell path, or globally installed package that
+    # happens to be available on the host.
+    const DependencyEnvVars = [
+      "NIMBLE_DIR",
+      "FASTSTREAMS_SRC",
+      "NIM_STEW_SRC",
+      "NIM_SERIALIZATION_SRC",
+      "NIM_JSON_SERIALIZATION_SRC",
+      "SSZ_SERIALIZATION_SRC",
+      "RESULTS_SRC",
+      "STINT_SRC",
+    ]
+    var prior: seq[tuple[name, value: string; existed: bool]]
+    for name in DependencyEnvVars:
+      prior.add((name: name, value: getEnv(name), existed: existsEnv(name)))
+      putEnv(name, dir / "missing-" & name.toLowerAscii())
+    defer:
+      for saved in prior:
+        if saved.existed:
+          putEnv(saved.name, saved.value)
+        else:
+          delEnv(saved.name)
+
+    var res: tuple[jsonOutput: string; binary: string]
+    try:
+      res = compileExample(dir, "home.nim")
+    except CompileFailure as err:
+      checkpoint(err.stderrText)
+      raise
+    let j = parseJson(res.jsonOutput.strip())
+    check j["name"].getStr() == "selfContainedDependencies"
+    check j["activities"].len == 1
+    check packageNames(j, "default") == @["dependency-path-smoke"]
 
 # ---------------------------------------------------------------------------
 # 2. Transitive sibling imports — a module importing another module.

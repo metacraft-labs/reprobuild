@@ -71,6 +71,18 @@ const ProfileNimPathLibs* = [
   # zip-fetch action edges). It is a libs/ package like the others, so
   # has to land on the profile-compile child's ``--path:``.
   "repro_dsl_stdlib",
+  # ``repro_project_dsl/types`` imports its SSZ attribute codec. Profile
+  # compilation happens from the user's profile directory, so the wrapper
+  # config.nims cannot discover these repo-local packages through paths
+  # relative to the Reprobuild checkout. Keep the complete vendored SSZ
+  # dependency closure on the child's explicit ``--path:`` instead.
+  "nim-faststreams",
+  "nim-stew",
+  "nim-serialization",
+  "nim-json-serialization",
+  "nim-ssz-serialization",
+  "results",
+  "stint",
 ]
 
 proc reprobuildRepoRoot*(): string =
