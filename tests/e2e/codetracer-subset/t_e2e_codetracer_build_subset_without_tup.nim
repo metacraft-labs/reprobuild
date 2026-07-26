@@ -7,11 +7,16 @@ const
   NimFirstFlag = "-d:asyncBackend=asyncdispatch"
   NimSubcmdProc = "subcmd_2d_d_3a_asyncBackend_3d_asyncdispatch"
   # CodeTracer 04d6aff3 restored ``-d:nimOldCaseObjects`` to the canonical
-  # Tup compiler flags. Keep the full-command fingerprint pinned to that
-  # corrected command, and assert the flag explicitly below so a future hash
-  # refresh cannot accidentally hide its removal.
+  # ``dev``-branch Tup compiler flags. Keep the full-command fingerprint
+  # pinned to that corrected command, and assert the flag explicitly below so
+  # a future hash refresh cannot accidentally hide its removal.
   NimJsSemanticsHash = "e64dd35563bfa374"
+  NimJsWithoutOldCaseObjectsHash = "a7cf3ce1b73f8bfa"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
+  CodeTracerTupSemanticsCommit =
+    "04d6aff3d012b3e768dbebba186c950637e0c2b3"
+  PinnedTupSemanticsFixture =
+    "tests/fixtures/codetracer-subset/Tuprules-04d6aff3.tup"
 
 type
   TupRules = object
@@ -67,6 +72,20 @@ proc pathExists(path: string): bool =
     true
   except OSError:
     false
+
+proc mustCompareLiveTupSemantics(codeTracerRoot: string): bool =
+  ## The normal CI sibling is CodeTracer ``dev``, which contains the reviewed
+  ## command-semantics commit. A local sibling may intentionally be on another
+  ## lineage, so compare its moving Tuprules oracle when Git proves it contains
+  ## the pinned contract. GitHub Actions is fail-closed: the checked-in sibling
+  ## contract selects ``codetracer=dev``, and a shallow clone must not silently
+  ## bypass the comparison merely because the pinned ancestor is absent.
+  if getEnv("GITHUB_ACTIONS").toLowerAscii() == "true":
+    return true
+  result = runShell(shellCommand(@[
+    "git", "-C", codeTracerRoot, "merge-base", "--is-ancestor",
+    CodeTracerTupSemanticsCommit, "HEAD"
+  ])).code == 0
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
@@ -225,6 +244,25 @@ proc assertCommittedTupSemantics(rules: TupRules) =
   check tupSemanticsHash(rules, "!nim_js") == NimJsSemanticsHash
   check tupSemanticsHash(rules, "!trace_object_file") ==
     TraceObjectFileSemanticsHash
+
+proc assertCompilerFlagChangesSemanticsHash(fixturePath: string;
+                                            rules: TupRules) =
+  ## Keep the full-command fingerprint load-bearing: removing a compiler
+  ## semantic input must deterministically produce a different hash.
+  let pinnedHash = tupSemanticsHash(rules, "!nim_js")
+  check pinnedHash == NimJsSemanticsHash
+
+  var withoutOldCaseObjects = loadTupRules(fixturePath)
+  let commonFlags = withoutOldCaseObjects.variables["NIM_COMMON_FLAGS"]
+  check "-d:nimOldCaseObjects" in commonFlags
+  withoutOldCaseObjects.variables["NIM_COMMON_FLAGS"] =
+    commonFlags.replace("-d:nimOldCaseObjects ", "")
+
+  check "-d:nimOldCaseObjects" notin
+    tupCommandTemplate(withoutOldCaseObjects, "!nim_js")
+  let changedHash = tupSemanticsHash(withoutOldCaseObjects, "!nim_js")
+  check changedHash == NimJsWithoutOldCaseObjectsHash
+  check changedHash != pinnedHash
 
 proc actionArgs(command: openArray[string]): seq[string] =
   if command.len < 2:
@@ -425,10 +463,30 @@ suite "e2e_codetracer_build_subset_without_tup":
     test "real CodeTracer sources build through DSL, provider, RunQuota, cache, and committed Tup command semantics":
       let repoRoot = getCurrentDir()
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      let tupRulesPath = codeTracerRoot / "src" / "Tuprules.tup"
+      # CI's sibling contract pins ``codetracer=dev``. A developer's adjacent
+      # checkout can legitimately be on another branch or contain unrelated
+      # work, so source the command oracle from the reviewed CodeTracer commit
+      # instead of silently changing the accepted hash with host state. The
+      # real sibling still supplies the source slice built below.
+      let tupRulesPath = repoRoot / PinnedTupSemanticsFixture
       check fileExists(tupRulesPath)
       let tupRules = loadTupRules(tupRulesPath)
       assertCommittedTupSemantics(tupRules)
+      assertCompilerFlagChangesSemanticsHash(tupRulesPath, tupRules)
+
+      # Preserve live integration-drift detection on the contracted CodeTracer
+      # lineage. This catches both committed and working-tree Tuprules changes
+      # in CI's ``codetracer=dev`` checkout, while an unrelated local branch
+      # cannot redefine the pinned Reprobuild test oracle.
+      if mustCompareLiveTupSemantics(codeTracerRoot):
+        let liveTupRulesPath = codeTracerRoot / "src" / "Tuprules.tup"
+        check fileExists(liveTupRulesPath)
+        let liveTupRules = loadTupRules(liveTupRulesPath)
+        assertCommittedTupSemantics(liveTupRules)
+        check tupSemanticsHash(liveTupRules, "!nim_js") ==
+          tupSemanticsHash(tupRules, "!nim_js")
+        check tupSemanticsHash(liveTupRules, "!trace_object_file") ==
+          tupSemanticsHash(tupRules, "!trace_object_file")
       let nimJsActionCommand = tupCommand(tupRules, "!nim_js",
         "src/frontend/tests/ipc_registry_test.nim", "tests/ipc_registry_test.js")
       let nimJsOracleCommand = tupCommand(tupRules, "!nim_js",
