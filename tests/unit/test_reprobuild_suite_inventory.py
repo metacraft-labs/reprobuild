@@ -284,6 +284,7 @@ test "incomplete name" and:
             "libs/repro_resources/tests/"
             "t_attr_missing_interface_diagnostic.nim": 1,
             "libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim": 3,
+            "libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim": 4,
             "tests/integration/t_d6_runner_test_timeout.nim": 3,
             "tests/integration/t_extension_type_lifted_and_consumed.nim": 1,
             "tests/integration/t_local_daemons_control_plane_m10.nim": 5,
@@ -380,9 +381,9 @@ test "incomplete name" and:
                 "t_smoke_ct_test_unittest_parallel.nim"
             ],
         )
-        self.assertEqual(nim_total, 6502)
+        self.assertEqual(nim_total, 6513)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6533)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6544)
 
     def assert_runtime_compiler_flow_inventory(self, data):
         flows = data["staticallyDetectedRuntimeCompilerFlows"]
@@ -517,13 +518,13 @@ test "incomplete name" and:
 
         # Derive the aggregate from independently pinned detector partitions.
         # Three tests have both an explicit compiler command and an API flow,
-        # so adding 46 + 21 directly would double count them.
+        # so adding 47 + 21 directly would double count them.
         cleanup_source = (
             "tests/integration/"
             "t_repro_test_runner_process_group_cleanup.nim"
         )
         self.assertIn(cleanup_source, explicit_sources)
-        self.assertEqual(len(explicit_sources), 46)
+        self.assertEqual(len(explicit_sources), 47)
         self.assertEqual(len(api_sources), 21)
         self.assertEqual(
             explicit_sources & api_sources,
@@ -536,7 +537,7 @@ test "incomplete name" and:
             },
         )
         derived_total = len(explicit_sources | api_sources)
-        self.assertEqual(derived_total, 64)
+        self.assertEqual(derived_total, 65)
         self.assertEqual(len(flows), derived_total)
         self.assertFalse(data["runtimeCompilerFlowDetection"]["exhaustive"])
         self.assertEqual(
