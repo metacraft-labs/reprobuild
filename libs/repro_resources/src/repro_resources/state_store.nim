@@ -30,8 +30,10 @@
 
 import std/[os, tables, times, options]
 from std/strutils import toHex, startsWith, endsWith
-from std/algorithm import sort
+from std/algorithm import sort, sortedByIt
 
+import blake3
+import ssz_serialization
 import repro_core                       # writeString / readString / writeU32Le …
 from repro_home_generations/pointer import Digest256, DigestSize
 import repro_resources/instance
@@ -40,12 +42,34 @@ import repro_resources/marshal          # marshalAttrs / unmarshalAttrs (extensi
 const
   StateRecordMagic = "RSST"             ## resource-state store, record
   StateRecordVersion = 2'u32
-    ## v2: `effectiveDeadline` is an OPTIONAL deadline (presence flag +
-    ## u64) so "never reap" (keep / no dated holder) is `none`, not an
+    ## LEGACY hand-rolled LE framing (magic + u32 version). v2:
+    ## `effectiveDeadline` is an OPTIONAL deadline (presence flag + u64) so
+    ## "never reap" (keep / no dated holder) is `none`, not an
     ## epoch-0/PAST sentinel that a `deadline < now -> reap` gate would
-    ## wrongly destroy. v1 stored a bare u64 and is not read.
+    ## wrongly destroy. v1 stored a bare u64 and is not read. Track B keeps
+    ## the v2 reader (`decodeRecordLegacy`) so on-disk records written
+    ## before the SSZ migration still decode — nothing on disk breaks.
+  StateRecordSszVersion = 3'u16
+    ## Track B (Typed-Extension-Interfaces-And-Provider-Libraries.md,
+    ## Incremental-Invalidation.md §"Binary formats from Reprobuild domain
+    ## types"): the CURRENT, WRITTEN format. The record body is now a
+    ## versioned SSZ envelope (magic + u16 version + u16 typeId + u32
+    ## payloadLen + SSZ payload + 32-byte BLAKE3 trailer) over the fixed
+    ## `ResourceStateRecordSsz` mirror type — spec-mandated versioned SSZ
+    ## over domain types, not a hand-written binary struct. The reader
+    ## accepts BOTH the SSZ envelope (this) and the legacy LE framing
+    ## (`StateRecordVersion` above): read-old / write-new, so pre-migration
+    ## caches degrade to a normal read, never a crash.
+  StateRecordSszTypeId = 1'u16
   RecordSuffix = ".rec"
   TempPrefix = ".tmp-"
+
+  # SSZ collection bounds. Generous — these records are one-per-resource
+  # and small; the bounds only fail a pathological / adversarial record.
+  MaxStateTextBytes = 64 * 1024
+  MaxStateDeps = 4096
+  MaxStateHolders = 4096
+  MaxAttrsBytes = 8 * 1024 * 1024
 
 type
   StateStore* = object
@@ -133,47 +157,17 @@ proc readDigest(bytes: openArray[byte]; pos: var int): Digest256 =
     result[i] = bytes[pos + i]
   pos += DigestSize
 
-proc encodeRecord(rec: ResourceStateRecord): seq[byte] =
-  for ch in StateRecordMagic:
-    result.add(byte(ord(ch)))
-  result.writeU32Le(StateRecordVersion)
-  result.writeString(rec.address)
-  result.writeString(rec.typeId)
-  result.writeU32Le(uint32(ord(rec.determinism)))
-  result.writeString(rec.attrsTypeId)
-  result.writeString(rec.attrsJson)
-  result.writeU32Le(uint32(rec.dependsOn.len))
-  for dep in rec.dependsOn:
-    result.writeString(dep)
-  result.writeString(rec.identity)
-  result.writeDigest(rec.digest)
-  result.add(if rec.present: 1'u8 else: 0'u8)
-  # lease fields
-  result.writeU32Le(uint32(rec.holders.len))
-  for consumerId, deadline in rec.holders:
-    result.writeString(consumerId)
-    result.writeU64Le(uint64(deadline.toUnix()))
-  # effectiveDeadline: presence flag (1 = a dated reap deadline, 0 = never
-  # reap / none) followed, when present, by the u64 unix deadline.
-  if rec.effectiveDeadline.isSome:
-    result.add(1'u8)
-    result.writeU64Le(uint64(rec.effectiveDeadline.get.toUnix()))
-  else:
-    result.add(0'u8)
-  result.writeU64Le(uint64(rec.lastRenewed.toUnix()))
+# --- Legacy LE reader (read-old). Kept verbatim so `.rec` files written
+#     before the Track B SSZ migration still decode into the SAME record
+#     — a pre-migration cache is a normal read, never a crash. NOTHING
+#     writes this format anymore; `encodeRecord` emits the SSZ envelope. ---
 
-proc decodeRecord(bytes: openArray[byte]): ResourceStateRecord =
-  var pos = 0
-  if bytes.len < StateRecordMagic.len:
-    raise newException(IOError, "state record too short for magic")
-  for i, ch in StateRecordMagic:
-    if bytes[i] != byte(ord(ch)):
-      raise newException(IOError, "bad state-record magic")
-  pos = StateRecordMagic.len
+proc decodeRecordLegacy(bytes: openArray[byte]): ResourceStateRecord =
+  var pos = StateRecordMagic.len
   let ver = readU32Le(bytes, pos)
   if ver != StateRecordVersion:
     raise newException(IOError,
-      "unsupported state-record version " & $ver)
+      "unsupported legacy state-record version " & $ver)
   result.address = readString(bytes, pos)
   result.typeId = readString(bytes, pos)
   result.determinism = ResourceDeterminism(int(readU32Le(bytes, pos)))
@@ -205,6 +199,208 @@ proc decodeRecord(bytes: openArray[byte]): ResourceStateRecord =
   else:
     result.effectiveDeadline = none(Time)
   result.lastRenewed = fromUnix(int64(readU64Le(bytes, pos)))
+
+# ---------------------------------------------------------------------------
+# Track B: versioned SSZ envelope over a fixed `ResourceStateRecordSsz` mirror
+# type. The append-only-per-file framing (one atomic `.rec` file per record)
+# is unchanged; only the record BODY moved from hand-rolled LE primitives to
+# the project-mandated versioned-SSZ format (Incremental-Invalidation.md
+# §"Binary formats from Reprobuild domain types"). Modelled on
+# repro_dev_env_artifacts/codec.nim: a proper SSZ mirror type for the fixed
+# schema, `SSZ.encode/decode` kept in NON-generic concrete procs (Nim #11225
+# generic-sandwich), and a magic+version envelope with a BLAKE3 trailer.
+# ---------------------------------------------------------------------------
+
+const
+  SszEnvelopeHeaderLen = 4 + 2 + 2 + 4   # magic + version + typeId + payloadLen
+  SszEnvelopeTrailerLen = 32             # BLAKE3-256 over header+payload
+
+type
+  StateStoreCodecError* = object of CatchableError
+
+  SszText = List[byte, MaxStateTextBytes]
+
+  StateHolderSsz = object
+    consumerId: SszText
+    deadlineUnix: uint64
+
+  ResourceStateRecordSsz = object
+    ## Fixed-schema SSZ mirror of `ResourceStateRecord`. Field order is the
+    ## schema; changing it requires a new `StateRecordSszTypeId`/version.
+    address: SszText
+    typeId: SszText
+    determinism: uint32
+    attrsTypeId: SszText
+    attrsJson: List[byte, MaxAttrsBytes]
+    dependsOn: List[SszText, MaxStateDeps]
+    identity: SszText
+    digest: array[DigestSize, byte]
+    present: bool
+    holders: List[StateHolderSsz, MaxStateHolders]
+    hasEffectiveDeadline: bool
+    effectiveDeadlineUnix: uint64
+    lastRenewedUnix: uint64
+
+proc failCodec(message: string) {.noreturn.} =
+  raise newException(StateStoreCodecError, message)
+
+proc toStateText(value: string): SszText =
+  if value.len > MaxStateTextBytes:
+    failCodec("state-record text field exceeds SSZ bound")
+  var wire = newSeq[byte](value.len)
+  for i, ch in value:
+    wire[i] = byte(ord(ch))
+  SszText.init(wire)
+
+proc fromStateText(value: SszText): string =
+  let raw = value.asSeq()
+  result = newString(raw.len)
+  for i, b in raw:
+    result[i] = char(b)
+
+proc toSszRecord(rec: ResourceStateRecord): ResourceStateRecordSsz =
+  result.address = toStateText(rec.address)
+  result.typeId = toStateText(rec.typeId)
+  result.determinism = uint32(ord(rec.determinism))
+  result.attrsTypeId = toStateText(rec.attrsTypeId)
+  if rec.attrsJson.len > MaxAttrsBytes:
+    failCodec("state-record attrs payload exceeds SSZ bound")
+  var attrsBytes = newSeq[byte](rec.attrsJson.len)
+  for i, ch in rec.attrsJson:
+    attrsBytes[i] = byte(ord(ch))
+  result.attrsJson = List[byte, MaxAttrsBytes].init(attrsBytes)
+  var deps: seq[SszText] = @[]
+  if rec.dependsOn.len > MaxStateDeps:
+    failCodec("state-record dependsOn exceeds SSZ bound")
+  for dep in rec.dependsOn:
+    deps.add(toStateText(dep))
+  result.dependsOn = List[SszText, MaxStateDeps].init(deps)
+  result.identity = toStateText(rec.identity)
+  result.digest = rec.digest
+  result.present = rec.present
+  # Tables have no stable iteration order; sort holders by consumerId so the
+  # SSZ payload (hence the on-disk bytes) is canonical for a given record.
+  var holders: seq[StateHolderSsz] = @[]
+  if rec.holders.len > MaxStateHolders:
+    failCodec("state-record holders exceeds SSZ bound")
+  var keys: seq[string] = @[]
+  for consumerId in rec.holders.keys:
+    keys.add(consumerId)
+  for consumerId in keys.sortedByIt(it):
+    holders.add(StateHolderSsz(
+      consumerId: toStateText(consumerId),
+      deadlineUnix: uint64(rec.holders[consumerId].toUnix())))
+  result.holders = List[StateHolderSsz, MaxStateHolders].init(holders)
+  if rec.effectiveDeadline.isSome:
+    result.hasEffectiveDeadline = true
+    result.effectiveDeadlineUnix = uint64(rec.effectiveDeadline.get.toUnix())
+  else:
+    result.hasEffectiveDeadline = false
+    result.effectiveDeadlineUnix = 0
+  result.lastRenewedUnix = uint64(rec.lastRenewed.toUnix())
+
+proc fromSszRecord(wire: ResourceStateRecordSsz): ResourceStateRecord =
+  result.address = fromStateText(wire.address)
+  result.typeId = fromStateText(wire.typeId)
+  result.determinism = ResourceDeterminism(int(wire.determinism))
+  result.attrsTypeId = fromStateText(wire.attrsTypeId)
+  let attrsBytes = wire.attrsJson.asSeq()
+  result.attrsJson = newString(attrsBytes.len)
+  for i, b in attrsBytes:
+    result.attrsJson[i] = char(b)
+  result.dependsOn = @[]
+  for dep in wire.dependsOn:
+    result.dependsOn.add(fromStateText(dep))
+  result.identity = fromStateText(wire.identity)
+  result.digest = wire.digest
+  result.present = wire.present
+  result.holders = initTable[string, Time]()
+  for holder in wire.holders:
+    result.holders[fromStateText(holder.consumerId)] =
+      fromUnix(int64(holder.deadlineUnix))
+  if wire.hasEffectiveDeadline:
+    result.effectiveDeadline = some(fromUnix(int64(wire.effectiveDeadlineUnix)))
+  else:
+    result.effectiveDeadline = none(Time)
+  result.lastRenewed = fromUnix(int64(wire.lastRenewedUnix))
+
+# `SSZ.encode`/`SSZ.decode` are the generic seam #11225 warns about: keep
+# them in these concrete, NON-generic wrappers so no generic proc closes over
+# the SSZ machinery.
+proc encodeSszPayload(rec: ResourceStateRecord): seq[byte] =
+  try:
+    SSZ.encode(toSszRecord(rec))
+  except SszError as err:
+    failCodec("could not SSZ-encode state record: " & err.msg)
+  except IOError as err:
+    failCodec("could not write SSZ state-record payload: " & err.msg)
+
+proc decodeSszPayload(payload: openArray[byte]): ResourceStateRecordSsz =
+  try:
+    SSZ.decode(payload, ResourceStateRecordSsz)
+  except SszError as err:
+    failCodec("invalid SSZ state-record payload: " & err.msg)
+  except IOError as err:
+    failCodec("could not read SSZ state-record payload: " & err.msg)
+
+proc encodeRecord(rec: ResourceStateRecord): seq[byte] =
+  ## WRITE-NEW: emit the versioned SSZ envelope (the only format written).
+  let payload = encodeSszPayload(rec)
+  result = newSeqOfCap[byte](
+    SszEnvelopeHeaderLen + payload.len + SszEnvelopeTrailerLen)
+  for ch in StateRecordMagic:
+    result.add(byte(ord(ch)))
+  result.writeU16Le(StateRecordSszVersion)
+  result.writeU16Le(StateRecordSszTypeId)
+  result.writeU32Le(uint32(payload.len))
+  result.add(payload)
+  let checksum = blake3.digest(result)   # over header + payload
+  for b in checksum:
+    result.add(b)
+
+proc decodeSszEnvelope(bytes: openArray[byte]): ResourceStateRecord =
+  if bytes.len < SszEnvelopeHeaderLen + SszEnvelopeTrailerLen:
+    failCodec("SSZ state-record envelope too short")
+  var pos = StateRecordMagic.len
+  let version = readU16Le(bytes, pos)
+  if version != StateRecordSszVersion:
+    failCodec("unsupported SSZ state-record version " & $version)
+  let typeId = readU16Le(bytes, pos)
+  if typeId != StateRecordSszTypeId:
+    failCodec("unexpected SSZ state-record type id " & $typeId)
+  let payloadLen = int(readU32Le(bytes, pos))
+  let payloadStart = pos
+  let payloadStop = payloadStart + payloadLen
+  if payloadStop + SszEnvelopeTrailerLen != bytes.len:
+    failCodec("SSZ state-record envelope length mismatch")
+  let expected = blake3.digest(bytes.toOpenArray(0, payloadStop - 1))
+  for i in 0 ..< SszEnvelopeTrailerLen:
+    if bytes[payloadStop + i] != expected[i]:
+      failCodec("SSZ state-record checksum mismatch")
+  var payload = newSeq[byte](payloadLen)
+  for i in 0 ..< payloadLen:
+    payload[i] = bytes[payloadStart + i]
+  fromSszRecord(decodeSszPayload(payload))
+
+proc decodeRecord(bytes: openArray[byte]): ResourceStateRecord =
+  ## READ-BOTH dispatcher: after the shared `RSST` magic, sniff the format
+  ## by the first version half-word. The SSZ envelope's version is a u16 LE
+  ## `StateRecordSszVersion` (3); the legacy LE framing's version is a u32 LE
+  ## `StateRecordVersion` (2), whose low half-word is therefore 2. The two
+  ## never collide (3 vs 2), so reading a u16 at the post-magic offset
+  ## disambiguates cleanly. A future SSZ version bump stays > any legacy
+  ## value, preserving the split.
+  if bytes.len < StateRecordMagic.len + 2:
+    raise newException(IOError, "state record too short for magic")
+  for i, ch in StateRecordMagic:
+    if bytes[i] != byte(ord(ch)):
+      raise newException(IOError, "bad state-record magic")
+  var probe = StateRecordMagic.len
+  let versionWord = readU16Le(bytes, probe)
+  if versionWord == StateRecordSszVersion:
+    decodeSszEnvelope(bytes)
+  else:
+    decodeRecordLegacy(bytes)
 
 # ---------------------------------------------------------------------------
 # Public store operations.
