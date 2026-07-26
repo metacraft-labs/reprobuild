@@ -7382,6 +7382,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_provider_library_c_abi_memory_ownership.nim",
+    binary: "build/test-bin/t_provider_library_c_abi_memory_ownership",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim",
     binary: "build/test-bin/t_public_committed_team_manifest_personal_db_mixed",
     defines: @[],
