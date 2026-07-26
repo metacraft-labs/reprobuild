@@ -333,6 +333,18 @@ type
     ## (RP1/RP2) and reuses one session per key; the RP5b test supplies a
     ## resolver over a single launched provider.
 
+  ResourceLibraryResolver* = proc (typeId: string): pointer {.closure.}
+    ## Typed-Extension-Interfaces M4a: optional gate for the C-ABI LIBRARY
+    ## transport. Return a non-nil, opaque ``LoadedResourceProviderLibrary``
+    ## (as a ``pointer`` to avoid a module cycle — ``library_transport`` imports
+    ## this module) for a ``typeId`` whose provider is available as a linkable
+    ## ``.so`` the engine ``dlopen``ed, else ``nil``. When it yields a library,
+    ## the leaf op runs over the C ABI (a direct in-process cdecl call, NO
+    ## process spawn / socket) instead of the session. ``nil`` (the default)
+    ## keeps the pre-M4a session / in-process choice unchanged. The three leaf
+    ## dispatchers are installed by ``library_transport.nim`` via
+    ## ``setResourceLibraryLeafHooks`` (below), breaking the import cycle.
+
   ResourceInProcessPredicate* = proc (typeId: string): bool {.closure.}
     ## Optional HYBRID gate for ``reconcileResourcesViaSession``: return true
     ## for a ``typeId`` whose driver is LINKED in this process, so its leaf ops
@@ -379,12 +391,48 @@ proc applyViaSession*(handle: ProviderHandle; inst: ResourceInstance;
       boxResourceAction(action)])
   unboxResourceBinding(res.value)
 
+# --------------------------------------------------------------------------
+# C-ABI LIBRARY transport leaf hooks (M4a). Installed by
+# ``library_transport.nim`` so the leaf dispatchers below can run an op over a
+# ``dlopen``ed provider ``.so`` without ``protocol.nim`` importing the loader
+# (which imports ``protocol.nim``). Each takes the opaque library pointer the
+# ``ResourceLibraryResolver`` returned.
+# --------------------------------------------------------------------------
+
+type
+  LibraryDigestHook = proc (lib: pointer; inst: ResourceInstance): Digest256 {.nimcall.}
+  LibraryObserveHook = proc (lib: pointer; inst: ResourceInstance;
+                             prior: Option[ResourceBinding]): ObservedState {.nimcall.}
+  LibraryApplyHook = proc (lib: pointer; inst: ResourceInstance;
+                           action: ResourceActionKind;
+                           observed: ObservedState): ResourceBinding {.nimcall.}
+
+var
+  libraryDigestHook: LibraryDigestHook
+  libraryObserveHook: LibraryObserveHook
+  libraryApplyHook: LibraryApplyHook
+
+proc setResourceLibraryLeafHooks*(digest: LibraryDigestHook;
+                                  observe: LibraryObserveHook;
+                                  apply: LibraryApplyHook) =
+  ## Install the C-ABI library leaf dispatchers (called once by
+  ## ``library_transport.nim`` at its module init).
+  libraryDigestHook = digest
+  libraryObserveHook = observe
+  libraryApplyHook = apply
+
 proc observeLeaf(resolve: ResourceSessionResolver;
                  inProcess: ResourceInProcessPredicate;
                  inst: ResourceInstance;
-                 prior: Option[ResourceBinding]): ObservedState =
-  ## Dispatch ``observe`` for ONE instance: in-process when the hybrid gate
-  ## claims the type, else over the resolved session.
+                 prior: Option[ResourceBinding];
+                 library: ResourceLibraryResolver = nil): ObservedState =
+  ## Dispatch ``observe`` for ONE instance. Preference order: C-ABI LIBRARY (a
+  ## dlopened provider ``.so``, direct cdecl call) > in-process (hybrid gate) >
+  ## the resolved session.
+  if library != nil and libraryObserveHook != nil:
+    let lib = library(inst.typeId)
+    if lib != nil:
+      return libraryObserveHook(lib, inst, prior)
   if inProcess != nil and inProcess(inst.typeId):
     lookupResourceProvider(inst.typeId).driver.observe(inst, prior)
   else:
@@ -392,7 +440,12 @@ proc observeLeaf(resolve: ResourceSessionResolver;
 
 proc digestLeaf(resolve: ResourceSessionResolver;
                 inProcess: ResourceInProcessPredicate;
-                inst: ResourceInstance): Digest256 =
+                inst: ResourceInstance;
+                library: ResourceLibraryResolver = nil): Digest256 =
+  if library != nil and libraryDigestHook != nil:
+    let lib = library(inst.typeId)
+    if lib != nil:
+      return libraryDigestHook(lib, inst)
   if inProcess != nil and inProcess(inst.typeId):
     lookupResourceProvider(inst.typeId).driver.digest(inst)
   else:
@@ -401,7 +454,12 @@ proc digestLeaf(resolve: ResourceSessionResolver;
 proc applyLeaf(resolve: ResourceSessionResolver;
                inProcess: ResourceInProcessPredicate;
                inst: ResourceInstance; action: ResourceActionKind;
-               observed: ObservedState): ResourceBinding =
+               observed: ObservedState;
+               library: ResourceLibraryResolver = nil): ResourceBinding =
+  if library != nil and libraryApplyHook != nil:
+    let lib = library(inst.typeId)
+    if lib != nil:
+      return libraryApplyHook(lib, inst, action, observed)
   if inProcess != nil and inProcess(inst.typeId):
     lookupResourceProvider(inst.typeId).driver.apply(inst, action, observed)
   else:
@@ -413,7 +471,8 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
                                    options: ReconcileOptions = ReconcileOptions();
                                    store: Option[StateStore] = none(StateStore);
                                    now: Time = getTime();
-                                   inProcess: ResourceInProcessPredicate = nil):
+                                   inProcess: ResourceInProcessPredicate = nil;
+                                   library: ResourceLibraryResolver = nil):
                                    ReconcileResult =
   ## The PROTOCOL-backed reconcile: the same seven-step algorithm as the
   ## in-process ``reconcileResources``, but each leaf op (observe / digest /
@@ -461,7 +520,7 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
       if recordedByAddr.hasKey(inst.address): some(recordedByAddr[inst.address])
       else: none(ResourceBinding)
 
-    let desiredDigest = digestLeaf(resolve, inProcess, inst)
+    let desiredDigest = digestLeaf(resolve, inProcess, inst, library)
     let renewals =
       if leaseHolders.hasKey(inst.address): leaseHolders[inst.address]
       else: @[]
@@ -490,11 +549,11 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
       recordedByAddr[inst.address] = binding
       effective = some(binding)
     else:
-      let observed = observeLeaf(resolve, inProcess, inst, prior)
+      let observed = observeLeaf(resolve, inProcess, inst, prior, library)
       action = decide(desiredDigest, observed, prior, options)
       case action
       of rakCreate, rakUpdate, rakReplace, rakDestroy:
-        let binding = applyLeaf(resolve, inProcess, inst, action, observed)
+        let binding = applyLeaf(resolve, inProcess, inst, action, observed, library)
         result.bindings.add(binding)
         recordedByAddr[inst.address] = binding
         effective = some(binding)
