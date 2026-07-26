@@ -1274,12 +1274,34 @@ suite "e2e_local_reprobuild_project_build":
       writeM46ProjectWithoutImportPath(projectRoot / "reprobuild.nim")
       writeFile(projectRoot / "src" / "input.txt", "v1\n")
 
-      let output = requireFailure(shellCommand([
-        "nim", "check", "--verbosity:0", "--hints:off",
-        "--path:" & repoRoot / "libs" / "repro_project_dsl" / "src",
-        projectRoot / "reprobuild.nim"
-      ]), projectRoot)
-      check output.contains("m46Tool")
+      var checkArgs = @[
+        "nim", "check", "--verbosity:0", "--hints:off", "--skipUserCfg:on",
+        "--skipParentCfg:on", "--skipProjCfg:on", "--noNimblePath"
+      ]
+      for relativePath in [
+        "libs/repro_project_dsl/src",
+        "libs/repro_dsl_stdlib/src",
+        "libs/repro_solver/src",
+        "libs/repro_binary_cache_client/src",
+        "libs/repro_binary_cache_server/src",
+        "libs/repro_core/src",
+        "libs/blake3/src",
+        "libs/nimcrypto",
+        "libs/nim-faststreams/src",
+        "libs/nim-stew/src",
+        "libs/nim-serialization/src",
+        "libs/nim-json-serialization/src",
+        "libs/nim-ssz-serialization/src",
+        "libs/results/src",
+        "libs/stint/src",
+      ]:
+        checkArgs.add("--path:" & repoRoot / relativePath)
+      checkArgs.add(projectRoot / "reprobuild.nim")
+
+      let output = requireFailure(shellCommand(checkArgs), projectRoot)
+      checkpoint(output)
+      check output.contains("undeclared identifier: 'm46Tool'")
+      check not output.contains("cannot open file:")
 
     test "generated tool object records action and path roles without buildAction":
       let repoRoot = getCurrentDir()
