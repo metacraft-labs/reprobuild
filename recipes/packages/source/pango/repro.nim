@@ -1,14 +1,14 @@
-## Source-from-tarball pango recipe — the ELEVENTH real from-source
-## production recipe to exercise the M9.H/I/K trio
-## (fetch: + mesonOptions: + convention-layer fetch-action emission).
+## Source-from-tarball pango recipe — the eleventh real from-source
+## production recipe in the package corpus.
 ##
 ## Follows the dbus-broker (executables only), libdrm (libraries only),
 ## Wayland (mixed), wlroots (single library), Sway (multiple
 ## executables), linux-kernel (executable + files), libxkbcommon
 ## (balanced 1+1), pixman (single library), libinput (name-collision
 ## 1+1), and cairo (single library) precedents: a meson/ninja build
-## of upstream pango fed by a vendored tarball whose sha256 is pinned
-## here for deterministic offline test reproduction. pango emits TWO
+## of upstream pango fed by the canonical GNOME release tarball whose
+## sha256 is pinned here. The content-addressed source cache makes
+## subsequent builds independent of the network. pango emits TWO
 ## library artifacts (``libpango-1.0.so`` + ``libpangocairo-1.0.so``)
 ## — the first multi-library single-package shape in the from-source
 ## corpus where both artifacts share the same SONAME prefix but ship
@@ -27,13 +27,11 @@
 ##
 ## ## sha256 strategy
 ##
-## We vendor the upstream 1.56.4 .tar.xz at
-## ``recipes/packages/source/pango/vendor/pango-1.56.4.tar.xz`` and
-## reference it via a ``file://`` URL. The download.gnome.org release
-## URL is recorded as ``sourceUrl`` in the ``versions:`` block for
-## documentation and future-bump purposes, but the live ``fetch:``
-## block points at the vendored copy so the convention layer's
-## emitted fetch action is offline-reproducible.
+## The ``versions:`` and live ``fetch:`` blocks both record the
+## canonical download.gnome.org release URL. The fetch action verifies
+## the exact upstream digest before extraction, and the
+## content-addressed cache permits offline reuse after the source has
+## been materialised once.
 ##
 ## ## Version choice - 1.56.4
 ##
@@ -43,29 +41,23 @@
 ## consumption.
 ##
 ## sha256 = 17065e2fcc5f5a5bdbffc884c956bfc7c451a96e8c4fb2f8ad837c6413cb5a01
-##  (computed locally over the vendored ``pango-1.56.4.tar.xz``,
-##  1,963,180 bytes; downloaded once from the upstream URL recorded
-##  in ``versions:`` above).
+##  (published alongside ``pango-1.56.4.tar.xz`` in GNOME's
+##  ``pango-1.56.4.sha256sum``; independently verified over the
+##  1,883,988-byte release payload).
 ##
 ## ## Build shape
 ##
-## The c_cpp_meson convention (M9.K) reads both the M9.H ``fetch:``
-## block and the M9.I ``mesonOptions:`` block off this package's
-## registries and lowers them into:
+## The package macro records the ``fetch:`` block, while the explicit
+## ``build:`` body calls the typed ``meson_package`` constructor. They
+## lower into:
 ##
 ##   1. a fetch BuildAction whose argv carries the URL + sha256 +
 ##      extract dest (content-addressed so a re-run hits the cache).
-##   2. a ``meson setup`` configure BuildAction that depends on the
-##      fetch action and passes every flag in ``mesonOptions:`` to
-##      ``meson setup``, in declared order.
-##   3. a ``ninja`` compile BuildAction (M9.L).
+##   2. a typed ``meson setup`` BuildAction that depends on the fetch
+##      action and passes every hardcoded option in declared order.
+##   3. a ``meson compile`` BuildAction.
 ##   4. install/output collection actions for the library artifacts
-##      (M9.L).
-##
-## M9.K only wires (1) + the flag-injection portion of (2). The
-## downstream ninja-spawn + install glue lands in M9.L; the recipe
-## records both library artifacts via the ``library`` blocks so the
-## M9.K artifact registry already knows what shared objects to expect.
+##      emitted by ``meson_package``.
 ##
 ## ## Library artifacts
 ##
@@ -97,12 +89,11 @@
 ##                                   the g-ir-scanner toolchain dep
 ##                                   the v1 desktop story doesn't
 ##                                   exercise).
-##   * ``gtk_doc=false``          — skip gtk-doc HTML generation.
-##   * ``man-pages=false``        — skip man-page generation.
+##   * ``documentation=false``    — skip documentation generation.
 ##   * ``build-testsuite=false``  — skip the upstream test suite to
 ##                                   keep the build hermetic + fast.
-##   * ``--buildtype=release``    — release-mode optimisation; matches
-##                                   the sibling from-source recipes.
+##
+## ``meson_package`` also supplies its standard release build type.
 ##
 ## Downstream configuration knobs would live here when the per-distro
 ## variants need different strategies (e.g. a developer variant that
@@ -117,21 +108,19 @@ import repro_dsl_stdlib/types/package_result
 # ---------------------------------------------------------------------------
 
 package pangoSource:
-  ## From-source pango — eleventh M9.H/I/K production recipe.
+  ## From-source pango recipe with two library artifacts.
   ##
-  ## Tier-2b c_cpp_meson convention consumer: the convention layer
-  ## reads the ``fetch:`` block (registered via ``registeredFetchSpec``)
-  ## and the ``mesonOptions:`` block (registered via
-  ## ``registeredBuildFlags`` on the ``"meson"`` channel) and lowers
-  ## them into fetch + configure BuildActions wired with the right
-  ## URL + hash + flags. Two-library single-package recipe.
+  ## The registered ``fetch:`` pin feeds the explicit package-level
+  ## ``build:`` body, whose typed ``meson_package`` call emits the
+  ## configure, compile, and install actions.
 
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## download.gnome.org release tarball URL so a future maintainer
-    ## running ``repro update-source`` can re-fetch from upstream; the
-    ## live ``fetch:`` block below points at the vendored copy for
-    ## deterministic offline test reproduction.
+    ## running ``repro update-source`` can re-fetch from upstream. The
+    ## live ``fetch:`` block below uses the same canonical URL and
+    ## checksum; the content-addressed cache supports offline reuse
+    ## after the first successful materialisation.
     ##
     ## ``sourceRepository`` points at the upstream GNOME gitlab
     ## project --- pango's canonical home post-freedesktop-migration.
@@ -141,24 +130,21 @@ package pangoSource:
       sourceRepository = "https://gitlab.gnome.org/GNOME/pango"
 
   fetch:
-    ## Vendored tarball (option 1 per the M9.K acceptance plan).
-    ## ``file://`` URL keeps the build deterministic when the network
-    ## is unavailable; the convention layer's argv carries this URL
-    ## verbatim so the engine's content-addressed cache fingerprint
-    ## stays stable across rebuilds.
+    ## Canonical upstream tarball. The convention layer carries this
+    ## URL and its independently pinned digest verbatim, so the engine
+    ## rejects source drift and reuses the content-addressed payload
+    ## without network access after its first materialisation.
     ##
-    ## sha256 was computed over the vendored 1,963,180-byte tarball
-    ## downloaded once from the upstream URL recorded in
-    ## ``versions:`` above.
+    ## GNOME publishes this sha256 beside the release tarball; it was
+    ## also independently verified over the 1,883,988-byte payload.
     url: "https://download.gnome.org/sources/pango/1.56/pango-1.56.4.tar.xz"
     sha256: "17065e2fcc5f5a5bdbffc884c956bfc7c451a96e8c4fb2f8ad837c6413cb5a01"
     extractStrip: 1
 
   nativeBuildDeps:
-    ## meson is the build-system driver — the c_cpp_meson convention's
-    ## configure action invokes ``meson setup``. pango 1.56 requires
-    ## meson 0.64 for the upstream build's option semantics.
-    "meson >=0.64"
+    ## meson is the build-system driver. Pango 1.56.4 declares
+    ## ``meson_version: >=1.2.0`` in its upstream ``meson.build``.
+    "meson >=1.2.0"
     ## ninja is meson's default backend — the compile action invokes
     ## ``ninja`` against the meson build directory.
     "ninja >=1.10"
@@ -173,45 +159,49 @@ package pangoSource:
   buildDeps:
     ## glib2 provides GObject + GIO that pango's text-layout objects
     ## subclass; pango is a GObject library at heart. Recipe name
-    ## ``glib2`` matches the sibling source recipe.
-    "glib2 >=2.62"
+    ## ``glib2`` matches the sibling source recipe. Pango 1.56.4
+    ## requires GLib 2.82.
+    "glib2 >=2.82"
     ## harfbuzz is the OpenType text-shaping engine pango drives for
-    ## script + bidi handling.
-    "harfbuzz >=4.0"
+    ## script + bidi handling. The upstream minimum is 8.4.0.
+    "harfbuzz >=8.4.0"
     ## fribidi is the Unicode bidi-algorithm implementation pango
-    ## consumes for RTL/LTR run-segmentation.
-    "fribidi >=1.0"
+    ## consumes for RTL/LTR run-segmentation. The upstream minimum is
+    ## 1.0.6.
+    "fribidi >=1.0.6"
     ## freetype is the font-glyph rasteriser pango's FreeType backend
     ## consumes.
     "freetype >=2.10"
     ## fontconfig is the font-discovery + matching layer pango's
     ## font backend consumes to resolve font families to file paths.
-    "fontconfig >=2.13"
+    ## The upstream minimum is 2.15.0.
+    "fontconfig >=2.15.0"
     ## cairo is the surface library the pangocairo binding emits to
     ## (and the sibling ``cairoSource`` recipe is the upstream-source
-    ## side of that edge).
-    "cairo >=1.16"
+    ## side of that edge). The upstream minimum is 1.18.0.
+    "cairo >=1.18.0"
 
   config:
-    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    ## No user-overridable values yet; options are explicit in ``build:``.
     discard
   library libpango:
     ## ``libpango-1.0.so`` — the core text-layout + font + script +
     ## bidi engine consumed by GTK / GNOME shell / swaybar's text
-    ## helpers. v1 records the artifact only; the per-artifact build
-    ## body lands in M9.L when the convention's ninja-spawn +
-    ## install-glue closes.
+    ## helpers. The package build slices this artifact from the Meson
+    ## install result.
     discard
 
   library libpangocairo:
     ## ``libpangocairo-1.0.so`` — the pango/cairo surface binding that
     ## lets cairo surfaces render pango layouts; the sibling
     ## ``cairoSource`` recipe is the upstream-source side of this
-    ## edge. v1 records the artifact only.
+    ## edge. The package build slices this artifact from the Meson
+    ## install result.
     discard
 
   build:
-    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    ## Explicit package-level build with inlined options, using the
+    ## high-level typed ``meson_package`` constructor.
     setCurrentOwningPackageOverride("pangoSource")
     try:
       let opts = @[

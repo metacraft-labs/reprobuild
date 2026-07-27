@@ -15,53 +15,70 @@
 ## distinct Nim-identifier artifact names while sharing the
 ## ``dakLibrary`` kind tag.
 ##
-## Coverage (8 check assertions across 7 tests):
+## Coverage across seven test cases:
 ##
 ##   * ``fetch:`` block round-trip (M9.H) — URL + sha256 length +
 ##     algorithm + kind discriminant + extractStrip.
-##   * ``mesonOptions:`` block round-trip (M9.I) — exact-order
-##     sequence equality on the production flag set + channel-isolation
-##     spot-check (the ``cmake`` channel must NOT see the meson flags).
+##   * Explicit ``build:`` lowering — the emitted Meson setup action
+##     carries the exact production option sequence, while the retired
+##     build-flags registry stays unavailable.
 ##   * TWO-library single-package artifact registration (M3) —
 ##     ``libpango`` AND ``libpangocairo`` both tagged ``dakLibrary``.
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
-##     repository for ``repro update-source``.
+##     repository for ``repro update-source`` and the exact tool/library
+##     constraints required by the pinned upstream release.
 
-import std/[unittest]
+import std/[strutils, unittest]
 
 import repro_project_dsl
 
 # Side-effect import: triggers the package macro which registers
-# fetch spec + meson options + library artifacts under ``pangoSource``
+# fetch spec + build actions + library artifacts under ``pangoSource``
 # at module init time.
 import ./repro
 
+const ExpectedVersion = "1.56.4"
+
 const ExpectedUrl =
-  "https://download.gnome.org/sources/pango/1.54/pango-1.54.0.tar.xz"
+  "https://download.gnome.org/sources/pango/1.56/pango-1.56.4.tar.xz"
 
 const ExpectedHash =
-  "8a9eed75021ee734d7fc0fdf3a65c3bba51dfefe4ae51a9b414a60c70b2d1ed8"
+  "17065e2fcc5f5a5bdbffc884c956bfc7c451a96e8c4fb2f8ad837c6413cb5a01"
 
 const ExpectedMesonOptions = @[
-  "-Dintrospection=disabled",
-  "-Dgtk_doc=false",
-  "-Dman-pages=false",
-  "-Dbuild-testsuite=false",
-  "--buildtype=release",
+  "introspection=disabled",
+  "documentation=false",
+  "build-testsuite=false",
+]
+
+const ExpectedNativeBuildDeps = @[
+  "meson >=1.2.0",
+  "ninja >=1.10",
+  "gcc >=7",
+  "python3",
+]
+
+const ExpectedBuildDeps = @[
+  "glib2 >=2.82",
+  "harfbuzz >=8.4.0",
+  "fribidi >=1.0.6",
+  "freetype >=2.10",
+  "fontconfig >=2.15.0",
+  "cairo >=1.18.0",
 ]
 
 suite "pangoSource — from-source recipe smoke test":
 
-  test "fetch spec carries the vendored URL verbatim":
+  test "fetch spec carries the canonical upstream URL verbatim":
     # M9.H registry round-trip — URL is recorded exactly as declared.
     let spec = registeredFetchSpec("pangoSource")
     check spec.packageName == "pangoSource"
     check spec.url == ExpectedUrl
 
   test "fetch spec hash is a 64-char sha256 hex string":
-    # sha256 over the vendored 1,963,180-byte tarball; length check
-    # guards against a future bump that forgets to widen the hash
-    # alongside the URL.
+    # GNOME publishes this digest beside the 1.56.4 release tarball.
+    # The test pins it locally rather than consulting the network at
+    # runtime; the length check also guards against a malformed bump.
     let spec = registeredFetchSpec("pangoSource")
     check spec.hashHex.len == 64
     check spec.hashHex == ExpectedHash
@@ -75,10 +92,30 @@ suite "pangoSource — from-source recipe smoke test":
     check spec.kind == dfkTarball
     check spec.extractStrip == 1
 
-  test "mesonOptions registers the exact production flag sequence":
-    check true  # M9.R.6.1: registry retired — assertion gutted
-  test "mesonOptions does not leak into the cmake channel":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+  test "Meson setup action carries the exact production option sequence":
+    # M9.R.6.1 moved recipe options from the retired build-flags
+    # registry into the explicit package-level build body. Inspect the
+    # resulting typed action rather than treating the source as text.
+    let expectedEncoded = ExpectedMesonOptions.join("\x1f")
+    var matchingSetupActions = 0
+    for action in registeredBuildActions():
+      if action.call.providerEntrypointId != "meson.mesonBin.setup":
+        continue
+      var optionArguments = 0
+      var hasExactOptions = false
+      for argument in action.call.arguments:
+        if argument.name == "options":
+          inc optionArguments
+          if argument.encodedValue == expectedEncoded:
+            hasExactOptions = true
+      if hasExactOptions:
+        inc matchingSetupActions
+        check optionArguments == 1
+    check matchingSetupActions == 1
+
+  test "retired build-flags registry cannot shadow explicit options":
+    check not compiles((proc (): seq[string] =
+      result = registeredBuildFlags("pangoSource", "", "meson"))())
   test "artifacts register two libraries":
     # M3 artifact registry: BOTH ``libpango`` and ``libpangocairo``
     # must be tagged ``dakLibrary``. The unique coverage of THIS
@@ -103,17 +140,18 @@ suite "pangoSource — from-source recipe smoke test":
     check seenPango
     check seenPangoCairo
 
-  test "versions block records the upstream tag + URL + repository":
+  test "release metadata and dependency constraints match upstream":
     # M2 versions registry: the upstream download.gnome.org release
-    # tag is recorded for ``repro update-source`` even though the
-    # live fetch points at the vendored copy. The repository points
-    # at the canonical GNOME gitlab project that hosts the pango
-    # source tree.
+    # tag is recorded for ``repro update-source`` and agrees with the
+    # independently pinned fetch URL. The repository points at the
+    # canonical GNOME gitlab project that hosts the pango source tree.
     let vs = registeredVersions("pangoSource")
     check vs.len == 1
-    check vs[0].version == "1.54.0"
-    check vs[0].sourceRevision == "1.54.0"
-    check vs[0].sourceUrl ==
-      "https://download.gnome.org/sources/pango/1.54/pango-1.54.0.tar.xz"
+    check vs[0].version == ExpectedVersion
+    check vs[0].sourceRevision == ExpectedVersion
+    check vs[0].sourceUrl == ExpectedUrl
     check vs[0].sourceRepository ==
       "https://gitlab.gnome.org/GNOME/pango"
+    check registeredNativeBuildDeps("pangoSource") ==
+      ExpectedNativeBuildDeps
+    check registeredBuildDeps("pangoSource") == ExpectedBuildDeps
