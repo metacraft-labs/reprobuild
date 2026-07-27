@@ -2,8 +2,8 @@
 ##
 ## Exercises the spec'd public surface of
 ## ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/apt_jammy.nim``
-## against real jammy .deb fixtures harvested under
-## ``recipes/reproos-mvp-config/vendored-archives/linux/``.
+## against deterministic minimal ``.deb`` fixtures assembled from
+## Apache-2.0 test-only payloads below.
 ##
 ## Required test surfaces (per the NDE0-A sub-agent prompt):
 ##
@@ -22,11 +22,13 @@
 ##   5. ``determinism`` — extract the same .deb twice into separate
 ##      store roots; byte-compare the resulting trees.
 ##
-## Fixtures are pre-fetched .debs from the Tier-2 harvest the
-## DE-G/DE-H/DE-K shell scripts already use; their bytes are stable
-## under the snapshot pin and have known sha256s.
+## The fixture archives are constructed byte-for-byte in this test instead
+## of fetched from a mutable Ubuntu pool URL. Their complete payload and
+## metadata are authored here under the repository's Apache-2.0 license;
+## they contain no Ubuntu package bytes. Exact sha256 pins below make archive
+## construction drift fail closed before the adapter sees the fixture.
 
-import std/[algorithm, os, sequtils, strutils, tables, tempfiles, unittest]
+import std/[algorithm, os, sequtils, strutils, tempfiles, unittest]
 
 import repro_dsl_stdlib/packages/apt_jammy
 
@@ -43,84 +45,174 @@ import repro_project_dsl
 import "../../../recipes/packages/adapters/apt-jammy/repro" as aptJammyRecipe
 
 # ---------------------------------------------------------------------------
-# The apt-jammy adapter unpacks Ubuntu *jammy* ``.deb`` archives via GNU
-# ``ar`` / ``tar`` and asserts on Debian-specific store layouts (systemd
-# unit normalisation, multiarch ``usr/lib/...`` paths) against vendored
-# ``.deb`` fixtures harvested under
-# ``recipes/reproos-mvp-config/vendored-archives/linux/``. Both the
-# fixtures and the asserted layout are Linux/Debian-only, so the suite is
+# The apt-jammy adapter unpacks Debian ``.deb`` archives via its internal
+# ``ar`` parser plus GNU ``tar`` and asserts on Debian-specific store layouts
+# (systemd unit normalisation and ``usr/share/...`` paths). The fixture
+# builder below emits a valid ``control.tar`` plus a pure-Nim raw-block
+# ``data.tar.zst`` in a deterministic ``ar`` container without consulting
+# the network. The asserted layout is Linux/Debian-only, so the suite is
 # compiled only on Linux; on macOS/Windows there is no meaningful run.
 # ---------------------------------------------------------------------------
 when defined(linux):
   # ---------------------------------------------------------------------------
-  # Fixture-path helpers
-  # ---------------------------------------------------------------------------
-
-  const RepoRoot =
-    currentSourcePath.parentDir.parentDir.parentDir.parentDir
-    ## .../libs/repro_dsl_stdlib/tests/<file>.nim
-    ## ^         ^                   ^     ^
-    ## └───┬─────┘                   │     └ this file
-    ##     │   parentDir = tests/    │
-    ##     │   parentDir = .../stdlib
-    ##     │   parentDir = .../libs
-    ##     └─ parentDir = repo root
-
-  const VendoredDir =
-    RepoRoot / "recipes" / "reproos-mvp-config" / "vendored-archives" / "linux"
-
-  # ---------------------------------------------------------------------------
-  # Fixture catalogue. sha256 + size computed against the actual on-disk
-  # bytes (sha256sum + stat on Windows via python3). These pins are the
-  # Tier-2 harvest the DE shell scripts already use; bumping them would
-  # require a corresponding pin bump in the .json catalogs under
-  # ``recipes/catalog/linux/`` and is intentionally tied to a snapshot
-  # revision the campaign tracks.
+  # Hermetic .deb fixture builder
   # ---------------------------------------------------------------------------
 
   type
+    DebFixtureKind = enum
+      dfCommonData
+      dfTerminfo
+      dfSystemdUnit
+
     DebFixture = object
       filename: string
       sha256: string
+      kind: DebFixtureKind
 
   const
-    # Tiny pure-data .deb (no executables, no soname links). Good for the
-    # sha256 + store-path + determinism tests.
-    FxLibdrmCommon = DebFixture(
-      filename: "libdrm-common_2.4.113-2~ubuntu0.22.04.1_all.deb",
-      sha256: "35a306712d8b15b30c42ecd73ec087813eb01c0b3125dc8f7ca2b5134e133522")
+    # Tiny pure-data fixtures (no executables or soname links). They use
+    # package-shaped names solely to keep adapter diagnostics realistic.
+    FxCommonData = DebFixture(
+      filename: "reprobuild-test-common_1.0_all.deb",
+      sha256: "18948ecdeb78661641999e4f74531ceacdc660dde8bdc3422c5560ce1b58050e",
+      kind: dfCommonData)
 
-    # Second small fixture so we can verify "different debs → different
-    # store paths".
-    FxFootTerminfo = DebFixture(
-      filename: "foot-terminfo_1.11.0-2_all.deb",
-      sha256: "f96344f31bc8f02aea4c3e82e451bca8ea2c723954dd5cbe5725f1eb2c0feffd")
+    FxTerminfo = DebFixture(
+      filename: "reprobuild-test-terminfo_1.0_all.deb",
+      sha256: "eae4d26c825346a9da1bec49f35e1b07445a50e31eb36ae2567a43a54f1d6394",
+      kind: dfTerminfo)
 
-    # Ships a systemd unit at lib/systemd/system/accounts-daemon.service —
-    # exercises the cascade-G normalisation (spec §5).
-    FxAccountsService = DebFixture(
-      filename: "accountsservice_22.07.5-2ubuntu1.5_amd64.deb",
-      sha256: "95ef667f9ada1acb2629bb98d3aa004dcf49a694430ac46b72d9add43adc569d")
+    # Carries a systemd unit at lib/systemd/system/accounts-daemon.service to
+    # exercise the cascade-G normalisation contract (spec §5).
+    FxSystemdUnit = DebFixture(
+      filename: "reprobuild-test-systemd-unit_1.0_all.deb",
+      sha256: "ebbb86717d84c517e05ed8e5ce53a9dff433f830f9f9753f354e4278b3b39164",
+      kind: dfSystemdUnit)
 
   # A wrong-sha for negative-test path (single bit flipped on the last char).
   const WrongSha =
-    "35a306712d8b15b30c42ecd73ec087813eb01c0b3125dc8f7ca2b5134e133523"
+    "18948ecdeb78661641999e4f74531ceacdc660dde8bdc3422c5560ce1b58050f"
 
   const TestSnapshot = "ubuntu/jammy/20260615T000000Z"
 
-  proc fixturePath(fx: DebFixture): string =
-    VendoredDir / fx.filename
+  const
+    CommonDataBytes = "reprobuild apt fixture: common data\n"
+    TerminfoBytes = "reprobuild apt fixture: terminfo\n"
+    SystemdUnitBytes = """[Unit]
+Description=Reprobuild apt adapter fixture
 
-  proc requireFixture(fx: DebFixture) =
-    ## Skip-by-fail: the .deb fixtures must be present for the test to be
-    ## meaningful. We fail loudly (not silently skip) so a missing fixture
-    ## blocks the regression suite the way the spec demands.
-    let p = fixturePath(fx)
-    if not fileExists(p):
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/true
+"""
+
+  proc putField(buf: var string; offset, width: int; value: string) =
+    doAssert value.len <= width
+    for i in 0 ..< value.len:
+      buf[offset + i] = value[i]
+
+  proc octalField(value, width: int): string =
+    doAssert width >= 2
+    value.toOct(width - 1) & '\0'
+
+  proc tarMember(path, payload: string): string =
+    ## Emit one deterministic POSIX ustar regular-file member.
+    doAssert path.len <= 100
+    var header = newString(512)
+    header.putField(0, 100, path)
+    header.putField(100, 8, octalField(0o644, 8))
+    header.putField(108, 8, octalField(0, 8))
+    header.putField(116, 8, octalField(0, 8))
+    header.putField(124, 12, octalField(payload.len, 12))
+    header.putField(136, 12, octalField(0, 12))
+    for i in 148 ..< 156:
+      header[i] = ' '
+    header[156] = '0'
+    header.putField(257, 6, "ustar\0")
+    header.putField(263, 2, "00")
+    var checksum = 0
+    for ch in header:
+      checksum += ord(ch)
+    header.putField(148, 8, checksum.toOct(6) & "\0 ")
+
+    result = header & payload
+    let padding = (512 - (payload.len mod 512)) mod 512
+    result.add(newString(padding))
+
+  proc tarArchive(path, payload: string): string =
+    tarMember(path, payload) & newString(1024)
+
+  proc zstdRawFrame(payload: string): string =
+    ## Encode one deterministic Zstandard frame containing a single raw
+    ## (uncompressed) block. This keeps the fixture builder pure Nim while
+    ## exercising the adapter's real ``data.tar.zst`` decompression path.
+    ##
+    ## Descriptor 0x60 means: two-byte Frame_Content_Size, single segment,
+    ## no dictionary, no checksum. In that encoding the stored content size
+    ## is the real size minus 256. A Zstandard block header is a 24-bit
+    ## little-endian value: size in bits 3..23, raw type 0 in bits 1..2,
+    ## and Last_Block=1 in bit 0.
+    doAssert payload.len >= 256
+    doAssert payload.len <= 65791
+    result = "\x28\xb5\x2f\xfd\x60"
+    let encodedSize = payload.len - 256
+    result.add(char(encodedSize and 0xff))
+    result.add(char((encodedSize shr 8) and 0xff))
+    let blockHeader = (payload.len shl 3) or 1
+    result.add(char(blockHeader and 0xff))
+    result.add(char((blockHeader shr 8) and 0xff))
+    result.add(char((blockHeader shr 16) and 0xff))
+    result.add(payload)
+
+  proc arMember(name, payload: string): string =
+    ## Emit one deterministic System V ar member. Debian packages require
+    ## even-byte alignment; newline is the conventional pad byte.
+    doAssert name.len + 1 <= 16
+    result =
+      (name & "/").alignLeft(16) &
+      "0".alignLeft(12) &
+      "0".alignLeft(6) &
+      "0".alignLeft(6) &
+      "100644".alignLeft(8) &
+      ($payload.len).alignLeft(10) &
+      "`\n" &
+      payload
+    if (payload.len and 1) == 1:
+      result.add('\n')
+
+  proc fixturePayload(fx: DebFixture): tuple[path, bytes: string] =
+    case fx.kind
+    of dfCommonData:
+      ("usr/share/libdrm/amdgpu.ids", CommonDataBytes)
+    of dfTerminfo:
+      ("usr/share/terminfo/f/foot", TerminfoBytes)
+    of dfSystemdUnit:
+      ("lib/systemd/system/accounts-daemon.service", SystemdUnitBytes)
+
+  proc fixtureBytes(fx: DebFixture): string =
+    let control = """Package: reprobuild-apt-fixture
+Version: 1.0
+Architecture: all
+Maintainer: Reprobuild test suite
+Description: deterministic apt adapter fixture
+"""
+    let payload = fixturePayload(fx)
+    result = "!<arch>\n"
+    result.add(arMember("debian-binary", "2.0\n"))
+    result.add(arMember("control.tar", tarArchive("control", control)))
+    result.add(arMember("data.tar.zst",
+      zstdRawFrame(tarArchive(payload.path, payload.bytes))))
+
+  proc materializeFixture(fx: DebFixture; root: string): string =
+    let fixtureDir = root / "apt-fixtures"
+    createDir(fixtureDir)
+    result = fixtureDir / fx.filename
+    writeFile(result, fixtureBytes(fx))
+    let observed = sha256OfFile(result)
+    if observed != fx.sha256:
       raise newException(IOError,
-        "NDE0-A fixture missing: " & p &
-        " — these .debs are checked into the repo under " &
-        "recipes/reproos-mvp-config/vendored-archives/linux/.")
+        "deterministic .deb fixture drift for " & fx.filename &
+        " (expected " & fx.sha256 & ", got " & observed & ")")
 
   # ---------------------------------------------------------------------------
   # Filesystem helpers
@@ -143,114 +235,121 @@ when defined(linux):
   suite "NDE0-A apt-jammy adapter":
 
     test "sha256 verification: matching sha succeeds":
-      requireFixture(FxLibdrmCommon)
       let storeRoot = createTempDir("nde0a_shaOk_", "")
       defer: removeDir(storeRoot)
+      let debPath = materializeFixture(FxCommonData, storeRoot)
 
       let res = extractAptDeb(
-        debPath = fixturePath(FxLibdrmCommon),
-        sha256 = FxLibdrmCommon.sha256,
+        debPath = debPath,
+        sha256 = FxCommonData.sha256,
         storeRoot = storeRoot)
 
       check res.storePath.startsWith(storeRoot)
       check dirExists(res.storePath)
-      # The libdrm-common archive plants usr/share/libdrm/amdgpu.ids per
-      # the dpkg-deb listing — assert it landed.
+      check extractFilename(res.storePath) ==
+        extractFingerprint(FxCommonData.sha256)
       check fileExists(res.storePath / "usr" / "share" / "libdrm" /
                        "amdgpu.ids")
+      check readFile(res.storePath / "usr" / "share" / "libdrm" /
+                     "amdgpu.ids") == CommonDataBytes
 
     test "sha256 verification: wrong sha raises AptVerifyError":
-      requireFixture(FxLibdrmCommon)
       let storeRoot = createTempDir("nde0a_shaBad_", "")
       defer: removeDir(storeRoot)
+      let debPath = materializeFixture(FxCommonData, storeRoot)
 
       # NO try/except swallowing — let the test fail loudly if the wrong
       # path doesn't raise.
       expect AptVerifyError:
         discard extractAptDeb(
-          debPath = fixturePath(FxLibdrmCommon),
+          debPath = debPath,
           sha256 = WrongSha,
           storeRoot = storeRoot)
 
     test "content-addressed store path: different debs → different paths":
-      requireFixture(FxLibdrmCommon)
-      requireFixture(FxFootTerminfo)
       let storeRoot = createTempDir("nde0a_caDiff_", "")
       defer: removeDir(storeRoot)
+      let commonDeb = materializeFixture(FxCommonData, storeRoot)
+      let terminfoDeb = materializeFixture(FxTerminfo, storeRoot)
 
       let a = extractAptDeb(
-        debPath = fixturePath(FxLibdrmCommon),
-        sha256 = FxLibdrmCommon.sha256,
+        debPath = commonDeb,
+        sha256 = FxCommonData.sha256,
         storeRoot = storeRoot)
       let b = extractAptDeb(
-        debPath = fixturePath(FxFootTerminfo),
-        sha256 = FxFootTerminfo.sha256,
+        debPath = terminfoDeb,
+        sha256 = FxTerminfo.sha256,
         storeRoot = storeRoot)
 
       check a.storePath != b.storePath
       check dirExists(a.storePath)
       check dirExists(b.storePath)
+      check readFile(a.tree("usr/share/libdrm/amdgpu.ids")) ==
+        CommonDataBytes
+      check readFile(b.tree("usr/share/terminfo/f/foot")) == TerminfoBytes
 
     test "content-addressed store path: same deb twice → same path":
-      requireFixture(FxLibdrmCommon)
       let storeRoot = createTempDir("nde0a_caSame_", "")
       defer: removeDir(storeRoot)
+      let debPath = materializeFixture(FxCommonData, storeRoot)
 
       let a = extractAptDeb(
-        debPath = fixturePath(FxLibdrmCommon),
-        sha256 = FxLibdrmCommon.sha256,
+        debPath = debPath,
+        sha256 = FxCommonData.sha256,
         storeRoot = storeRoot)
       let b = extractAptDeb(
-        debPath = fixturePath(FxLibdrmCommon),
-        sha256 = FxLibdrmCommon.sha256,
+        debPath = debPath,
+        sha256 = FxCommonData.sha256,
         storeRoot = storeRoot)
       check a.storePath == b.storePath
 
     test "expectedFiles failure: missing entry raises AptExpectedFileMissing":
-      requireFixture(FxLibdrmCommon)
       let storeRoot = createTempDir("nde0a_efMiss_", "")
       defer: removeDir(storeRoot)
+      let debPath = materializeFixture(FxCommonData, storeRoot)
 
       expect AptExpectedFileMissing:
         discard installAptDeb(
           snapshot = TestSnapshot,
           debs = @[AptDebSource(
-            name: "libdrm-common",
-            version: "2.4.113-2~ubuntu0.22.04.1",
-            debPath: fixturePath(FxLibdrmCommon),
-            sha256: FxLibdrmCommon.sha256)],
+            name: "reprobuild-test-common",
+            version: "1.0",
+            debPath: debPath,
+            sha256: FxCommonData.sha256)],
           expectedFiles = @["usr/lib/x86_64-linux-gnu/this-does-not-exist.so"],
           storeRoot = storeRoot)
 
     test "expectedFiles success: present entry produces output":
-      requireFixture(FxLibdrmCommon)
       let storeRoot = createTempDir("nde0a_efOk_", "")
       defer: removeDir(storeRoot)
+      let debPath = materializeFixture(FxCommonData, storeRoot)
 
       let res = installAptDeb(
         snapshot = TestSnapshot,
         debs = @[AptDebSource(
-          name: "libdrm-common",
-          version: "2.4.113-2~ubuntu0.22.04.1",
-          debPath: fixturePath(FxLibdrmCommon),
-          sha256: FxLibdrmCommon.sha256)],
+          name: "reprobuild-test-common",
+          version: "1.0",
+          debPath: debPath,
+          sha256: FxCommonData.sha256)],
         expectedFiles = @["usr/share/libdrm/amdgpu.ids"],
         storeRoot = storeRoot)
       check dirExists(res.storePath)
       check fileExists(res.tree("usr/share/libdrm/amdgpu.ids"))
+      check readFile(res.tree("usr/share/libdrm/amdgpu.ids")) ==
+        CommonDataBytes
 
     test "installSystemdUnit: normalises lib/systemd/system/ -> usr/lib/systemd/system/":
-      # Cascade-G fix (spec §5): the upstream .deb ships
+      # Cascade-G fix (spec §5): Debian packages may ship
       # ``lib/systemd/system/accounts-daemon.service`` but R9 systemd's
       # compiled-in UnitPath only includes ``usr/lib/systemd/system/``.
       # ``installSystemdUnit`` must move the bytes verbatim.
-      requireFixture(FxAccountsService)
       let storeRoot = createTempDir("nde0a_sysd_", "")
       defer: removeDir(storeRoot)
+      let debPath = materializeFixture(FxSystemdUnit, storeRoot)
 
       let extracted = extractAptDeb(
-        debPath = fixturePath(FxAccountsService),
-        sha256 = FxAccountsService.sha256,
+        debPath = debPath,
+        sha256 = FxSystemdUnit.sha256,
         storeRoot = storeRoot)
       # Sanity: the upstream layout is the cascade-G shape.
       check fileExists(
@@ -272,6 +371,7 @@ when defined(linux):
         "system" / "accounts-daemon.service")
       let destBytes = readFile(expectedDest)
       check srcBytes == destBytes
+      check destBytes == SystemdUnitBytes
 
     test "determinism: extract same deb twice into separate roots → byte-identical trees":
       # The spec's idempotency contract (§3) is "content-addressed
@@ -279,21 +379,22 @@ when defined(linux):
       # catches any non-deterministic state the fingerprint glosses over
       # (e.g. ordering bugs in walkDirRec, timestamp leaks, partial-write
       # races). Required by the sub-agent prompt.
-      requireFixture(FxLibdrmCommon)
-
       let rootA = createTempDir("nde0a_detA_", "")
       let rootB = createTempDir("nde0a_detB_", "")
       defer:
         removeDir(rootA)
         removeDir(rootB)
+      let debA = materializeFixture(FxCommonData, rootA)
+      let debB = materializeFixture(FxCommonData, rootB)
+      check sha256OfFile(debA) == sha256OfFile(debB)
 
       let a = extractAptDeb(
-        debPath = fixturePath(FxLibdrmCommon),
-        sha256 = FxLibdrmCommon.sha256,
+        debPath = debA,
+        sha256 = FxCommonData.sha256,
         storeRoot = rootA)
       let b = extractAptDeb(
-        debPath = fixturePath(FxLibdrmCommon),
-        sha256 = FxLibdrmCommon.sha256,
+        debPath = debB,
+        sha256 = FxCommonData.sha256,
         storeRoot = rootB)
 
       # The store-path basename must match (same fingerprint).
@@ -311,9 +412,6 @@ when defined(linux):
 
     test "fingerprint composition: install hash is order-independent":
       # Spec §3: permuting ``debs`` order is a cache hit.
-      requireFixture(FxLibdrmCommon)
-      requireFixture(FxFootTerminfo)
-
       let h1 = installFingerprint(TestSnapshot,
         @["libdrm-common", "foot-terminfo"], @[])
       let h2 = installFingerprint(TestSnapshot,
@@ -329,9 +427,9 @@ when defined(linux):
       check h1 != h2
 
     test "extractFingerprint: changes with sha256, stable with same sha256":
-      let hA = extractFingerprint(FxLibdrmCommon.sha256)
-      let hB = extractFingerprint(FxLibdrmCommon.sha256)
-      let hC = extractFingerprint(FxFootTerminfo.sha256)
+      let hA = extractFingerprint(FxCommonData.sha256)
+      let hB = extractFingerprint(FxCommonData.sha256)
+      let hC = extractFingerprint(FxTerminfo.sha256)
       check hA == hB
       check hA != hC
       check hA.len == 16

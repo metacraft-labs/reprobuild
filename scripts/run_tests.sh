@@ -83,9 +83,6 @@ fi
 shm_queue_src="$(resolve_shm_queue_src)"
 export SHM_QUEUE_SRC="${shm_queue_src}"
 
-# Provision sha-pinned NDE0-A fixtures; the test remains the loud gate.
-bash recipes/reproos-mvp-config/fetch-test-fixtures.sh || true
-
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
     exe_ext=".exe"

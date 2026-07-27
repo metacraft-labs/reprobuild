@@ -51,8 +51,7 @@ integration-stackable-hooks:
 
 # NDE0-A apt-jammy adapter unit tests.
 # Exercises spec'd extractAptDeb / installAptDeb / installSystemdUnit
-# against pre-fetched jammy .deb fixtures under
-# recipes/reproos-mvp-config/vendored-archives/linux/.
+# against deterministic, locally assembled minimal .deb fixtures.
 unit_nde0a_apt_jammy:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
