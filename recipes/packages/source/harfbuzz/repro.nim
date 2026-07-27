@@ -89,11 +89,8 @@
 ##
 ##   * ``tests=disabled``         — skip the upstream test suite to
 ##                                   keep the build hermetic + fast.
-##   * ``introspection=disabled`` — skip GObject Introspection (drops
-##                                   the g-ir-scanner toolchain dep
-##                                   the v1 desktop story doesn't
-##                                   exercise; pango consumes harfbuzz
-##                                   directly, not via gobject).
+##   * ``introspection=enabled``  — emit the GIR and typelib consumed
+##                                   by Pango and GTK introspection.
 ##   * ``docs=disabled``          — skip the gtk-doc HTML generation.
 ##   * ``gobject=disabled``       — skip the optional GObject wrapper
 ##                                   layer (pango uses harfbuzz's C
@@ -158,6 +155,7 @@ package harfbuzzSource:
     extractStrip: 1
 
   nativeBuildDeps:
+    "gobject-introspection"
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``. harfbuzz 10.x requires
     ## meson 0.55 for the modern option semantics.
@@ -176,6 +174,8 @@ package harfbuzzSource:
     "python3"
 
   buildDeps:
+    "gobject-introspection"
+    "glib2-introspection"
     ## glib2 is consumed for the GObject wrapper (disabled) AND for the
     ## ``g_uchar_*`` helpers in non-gobject builds; meson can probe it
     ## via pkg-config even when gobject=disabled. Recipe name ``glib2``
@@ -205,12 +205,14 @@ package harfbuzzSource:
     try:
       let opts = @[
         "tests=disabled",
-        "introspection=disabled",
+        "introspection=enabled",
         "docs=disabled",
-        "gobject=disabled",
+        "gobject=enabled",
         "icu=disabled",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts,
+        extraEnv = @[("GI_GIR_PATH",
+          "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share/gir-1.0")])
       discard pkg.library("libHarfbuzz")
     finally:
       clearCurrentOwningPackageOverride()

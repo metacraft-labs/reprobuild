@@ -186,9 +186,15 @@ package gobjectIntrospectionSource:
         # (``package_result.nim:1020-1021``).
         "libdir=lib",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      let pkg = meson_package(
+        srcDir = "./src",
+        configureOptions = opts,
+        extraEnv = @[("PYTHONNOUSERSITE", "1")],
+        srcPatches = @[
+          "sed -i \"s/if not os.path.isfile(os.path.join(pylibdir, 'giscanner', '_giscanner' + py_mod_suffix)):/if not os.path.isdir(os.path.join(pylibdir, 'giscanner')):/\" src/tools/g-ir-tool-template.in"
+        ])
       discard pkg.library("libGirepository")
-      discard pkg.executable("gIrScanner")
+      discard pkg.executableAlias("g-ir-scanner", sourceName = "g-ir-scanner")
       discard pkg.executable("gIrCompiler")
       # M9.R.15g.1 — alias ``gobject-introspection`` to ``g-ir-scanner``
       # so consumers writing ``nativeBuildDeps: "gobject-introspection"``

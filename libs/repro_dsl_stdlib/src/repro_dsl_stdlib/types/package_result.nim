@@ -1292,7 +1292,7 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("for d in \"" & escapedDstUsr & "/lib\" \"" & escapedDstUsr &
     "/lib64\" \"" & escapedDstUsr & "/bin\" \"" & escapedDstUsr & "/sbin\"; do ")
   script.add("if [ -d \"$d\" ]; then ")
-  script.add("find \"$d\" -maxdepth 2 -type f \\( ")
+  script.add("find \"$d\" -type f \\( ")
   script.add("-name '*.so' -o -name '*.so.*' -o -perm -u+x ")
   script.add("\\) 2>/dev/null | while IFS= read -r f; do ")
   # ``patchelf --set-rpath`` is no-op for non-ELF files (it errors with
@@ -1336,7 +1336,7 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     script.add("for d in \"" & escapedDstUsr & "/lib\" \"" & escapedDstUsr &
       "/lib64\" \"" & escapedDstUsr & "/bin\" \"" & escapedDstUsr & "/sbin\"; do ")
     script.add("if [ -d \"$d\" ]; then ")
-    script.add("find \"$d\" -maxdepth 2 -type f \\( ")
+    script.add("find \"$d\" -type f \\( ")
     script.add("-name '*.so' -o -name '*.so.*' -o -perm -u+x ")
     script.add("\\) 2>/dev/null | while IFS= read -r f; do ")
     script.add("magic=$(head -c 4 \"$f\" 2>/dev/null | od -An -c | head -1 | tr -d ' '); ")
@@ -2104,16 +2104,30 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
   let libexec = (effectiveDestRoot & "/usr/libexec").replace("\\", "/").replace("\"", "\\\"")
   let libLibexec = (effectiveDestRoot & "/usr/lib/libexec").replace("\\", "/").replace("\"", "\\\"")
   let candidateDirs = [bin, sbin, rootBin, rootSbin, libexec, libLibexec]
+  let launchPrefix =
+    if sourceName == "g-ir-scanner": "exec env -u PYTHONPATH "
+    else: "exec "
   var script = "set -e; mkdir -p \"" & escapedOutDir & "\"; "
   var firstClause = true
-  for dir in candidateDirs:
+  for index, dir in candidateDirs:
     let leader = (if firstClause: "if" else: "elif")
     script.add(leader & " [ -f \"" & dir & "/" & escapedSrc & "\" ]; then ")
-    script.add("cp -fL \"" & dir & "/" & escapedSrc & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+    let installSubdir = ["usr/bin", "usr/sbin", "bin", "sbin",
+      "usr/libexec", "usr/lib/libexec"][index]
+    script.add("printf '%s\\n' '#!/bin/sh' '" & launchPrefix &
+      "\"$(dirname \"$0\")/../install/" &
+      installSubdir & "/" & escapedSrc & "\" \"$@\"' > \"" & escapedOut &
+      "\"; chmod +x \"" & escapedOut & "\"; ")
     script.add("elif [ -f \"" & dir & "/" & escapedSrc & ".exe\" ]; then ")
     script.add("cp -fL \"" & dir & "/" & escapedSrc & ".exe\" \"" & escapedOut & ".exe\"; ")
     firstClause = false
   script.add("else echo \"executableAlias stage-copy: no source binary " & escapedSrc & " under " & bin & " or " & sbin & " or " & rootBin & " or " & rootSbin & " or " & libexec & " or " & libLibexec & "\" >&2; exit 1; fi")
+  var aliasOutputs = @[outputPath]
+  if sourceName != aliasName:
+    let sourceOutput = outputDir / sourceName
+    let escapedSourceOutput = sourceOutput.replace("\\", "/").replace("\"", "\\\"")
+    script.add("; ln -sfn \"" & aliasName & "\" \"" & escapedSourceOutput & "\"")
+    aliasOutputs.add(sourceOutput)
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-alias-" & sanitizeStageCopyName(packageName) &
     "-" & sanitizeStageCopyName(aliasName)
@@ -2122,7 +2136,7 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
     call = inlineExecCall(argv),
     deps = @[installEdge.id],
     inputs = installEdge.outputs,
-    outputs = @[outputPath],
+    outputs = aliasOutputs,
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.stage.executable_alias",

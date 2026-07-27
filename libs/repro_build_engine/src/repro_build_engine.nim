@@ -2704,7 +2704,18 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   ## reads ``PKG_CONFIG_PATH``) and the nix wrapper.
   if env == nil:
     return
-  prependEnvDirs(env, "PKG_CONFIG_PATH", paths.pkgConfigDirs)
+  var pkgConfigCompatDirs = paths.pkgConfigDirs
+  let pathSep =
+    when defined(windows): ';'
+    else: ':'
+  for varName in ["PKG_CONFIG_PATH_FOR_TARGET", "PKG_CONFIG_PATH_FOR_BUILD"]:
+    let inherited =
+      if env.hasKey(varName): env[varName]
+      else: getEnv(varName)
+    for entry in inherited.split(pathSep):
+      if entry.len > 0:
+        pkgConfigCompatDirs.add(entry)
+  prependEnvDirs(env, "PKG_CONFIG_PATH", pkgConfigCompatDirs)
   prependEnvDirs(env, "PKG_CONFIG_PATH_FOR_TARGET", paths.pkgConfigDirs)
   prependEnvDirs(env, "PKG_CONFIG_PATH_FOR_BUILD", paths.pkgConfigDirs)
   prependEnvDirs(env, "CMAKE_PREFIX_PATH", paths.cmakePrefixDirs)
@@ -2725,7 +2736,21 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   ## inline-runquota paths. See ``applyResolvedAuxPathsTable`` for
   ## the rationale on ``PKG_CONFIG_PATH_FOR_{TARGET,BUILD}``.
   result = env
-  result = prependEnvDirsToArgvEnv(result, "PKG_CONFIG_PATH", paths.pkgConfigDirs)
+  var pkgConfigCompatDirs = paths.pkgConfigDirs
+  let pathSep =
+    when defined(windows): ';'
+    else: ':'
+  for varName in ["PKG_CONFIG_PATH_FOR_TARGET", "PKG_CONFIG_PATH_FOR_BUILD"]:
+    var inherited = getEnv(varName)
+    for item in env:
+      let equals = item.find('=')
+      if equals > 0 and item[0 ..< equals] == varName:
+        inherited = item[equals + 1 .. ^1]
+    for entry in inherited.split(pathSep):
+      if entry.len > 0:
+        pkgConfigCompatDirs.add(entry)
+  result = prependEnvDirsToArgvEnv(result, "PKG_CONFIG_PATH",
+    pkgConfigCompatDirs)
   result = prependEnvDirsToArgvEnv(result, "PKG_CONFIG_PATH_FOR_TARGET",
     paths.pkgConfigDirs)
   result = prependEnvDirsToArgvEnv(result, "PKG_CONFIG_PATH_FOR_BUILD",

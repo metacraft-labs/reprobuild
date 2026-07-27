@@ -244,6 +244,29 @@ proc meson_package*(srcDir: string;
       commandStatsId = "meson_package.patch",
       toolIdentityRefs = @["sh"])
     setupAfter.add(patchEdge)
+  if projectRoot.len > 0:
+    let cleanStamp = projectRoot / ".repro" / "build" / "meson-clean.stamp"
+    let buildDirAbs = projectRoot / buildDir
+    let cleanScript = "set -e; rm -rf \"" &
+      buildDirAbs.replace("\"", "\\\"") & "\"; touch \"" &
+      cleanStamp.replace("\"", "\\\"") & "\""
+    var cleanDeps: seq[string] = @[]
+    var cleanInputs: seq[string] = @[]
+    for predecessor in setupAfter:
+      cleanDeps.add(predecessor.id)
+      for output in predecessor.outputs:
+        cleanInputs.add(output)
+    let cleanEdge = buildAction(
+      id = "meson-clean-build-dir-" & pkgName,
+      call = inlineExecCall(@["sh", "-c", cleanScript]),
+      deps = cleanDeps,
+      inputs = cleanInputs,
+      outputs = @[cleanStamp],
+      cacheable = false,
+      dependencyPolicy = automaticMonitorPolicy(),
+      commandStatsId = "meson_package.clean_build_dir",
+      toolIdentityRefs = @["sh"])
+    setupAfter = @[cleanEdge]
   let setup = meson.setup(
     srcDir = srcDir,
     buildDir = buildDir,
@@ -252,6 +275,7 @@ proc meson_package*(srcDir: string;
     options = configureOptions,
     crossFile = crossFile,
     nativeFile = nativeFile,
+    wrapMode = "nodownload",
     after = setupAfter,
     extraEnv = extraEnv)
   # M9.R.14e.5 — thread every nativeBuildDeps + buildDeps name onto the
@@ -288,8 +312,20 @@ proc meson_package*(srcDir: string;
   # below; the automatic-monitor evidence on ``meson setup`` may not
   # land before the scheduler dispatches ``meson compile``, races the
   # build.ninja file write, and breaks vendored-subproject builds.
-  let compileEdge = meson.compile(workDir = buildDir, after = @[setup],
-    extraEnv = extraEnv)
+  let buildNinja = m9r79BuildDirAbs / "build.ninja"
+  let refreshGeneratedMtime = buildAction(
+    id = "meson-refresh-generated-mtime-" & pkgName,
+    call = inlineExecCall(@["sh", "-c", "touch \"" &
+      buildNinja.replace("\"", "\\\"") & "\""]),
+    deps = @[setup.id],
+    inputs = setup.outputs,
+    outputs = @[buildNinja],
+    cacheable = false,
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "meson_package.refresh_generated_mtime",
+    toolIdentityRefs = @["sh"])
+  let compileEdge = meson.compile(workDir = buildDir,
+    after = @[refreshGeneratedMtime], extraEnv = extraEnv)
   m9r14eThreadRecipeDepsAsToolRefs(compileEdge.id, pkgName)
   # M9.R.79.2 — compile continues writing to buildDir; source stays
   # read-only.  Sequential edge via ``after = @[setup]`` — R7 dep-chain

@@ -217,6 +217,11 @@ package gnomeShellSource:
     ## gcc is the host C toolchain — gnome-shell is C11 with GJS
     ## (gjs-1.0) glue.
     "gcc >=11"
+    ## Meson's GNOME module invokes glib-mkenums and the GLib resource
+    ## compilers while generating the shell's bundled sources.
+    "glib2 >=2.62"
+    ## msgfmt compiles the shell's translation catalogs.
+    "gettext"
 
   buildDeps:
     ## glib2 is the foundation library gnome-shell consumes for the
@@ -244,6 +249,23 @@ package gnomeShellSource:
     ## gdk-pixbuf is the image loader gnome-shell uses for icon
     ## decoding + wallpaper loading.
     "gdk-pixbuf >=2.40"
+    "gtk4 >=4.12"
+    "graphene >=1.10"
+    "harfbuzz >=2.6"
+    "libepoxy >=1.4"
+    "libpng >=1.6"
+    "libjpeg >=2.0"
+    "libtiff"
+    "wayland >=1.22"
+    "wayland-protocols >=1.31"
+    "libdrm >=2.4.110"
+    "libx11"
+    "mesa"
+    "libglvnd >=1.7"
+    "fribidi"
+    "polkit >=0.120"
+    "gnome-desktop >=44"
+    "pulseaudio"
     "gsettings-desktop-schemas >=47"
     "at-spi2-core >=2.54"
     "evolution-data-server >=3.54"
@@ -280,7 +302,9 @@ package gnomeShellSource:
         "gtk_doc=false",
         "tests=false",
         "man=false",
+        "camera_monitor=false",
         "networkmanager=false",
+        "portal_helper=false",
         "systemd=false",
         "extensions_app=false",
         "extensions_tool=false",

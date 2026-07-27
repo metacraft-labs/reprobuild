@@ -153,6 +153,7 @@ package gdkPixbufSource:
     extractStrip: 1
 
   nativeBuildDeps:
+    "gobject-introspection"
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``. gdk-pixbuf 2.42
     ## requires meson 0.62 for the upstream build's option semantics.
@@ -170,6 +171,8 @@ package gdkPixbufSource:
     "python3"
 
   buildDeps:
+    "gobject-introspection"
+    "glib2-introspection"
     ## glib2 provides GObject + GIO that gdk-pixbuf's loader objects
     ## subclass; gdk-pixbuf is a GObject library at heart. Recipe name
     ## ``glib2`` matches the sibling source recipe.
@@ -203,9 +206,11 @@ package gdkPixbufSource:
         "tests=false",
         "man=false",
         "gtk_doc=false",
-        "introspection=disabled",
+        "introspection=enabled",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts,
+        extraEnv = @[("GI_GIR_PATH",
+          "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share/gir-1.0")])
       discard pkg.library("libgdkPixbuf")
     finally:
       clearCurrentOwningPackageOverride()

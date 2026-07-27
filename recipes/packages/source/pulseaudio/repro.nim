@@ -25,6 +25,7 @@ package pulseaudioSource:
     "m4"
 
   buildDeps:
+    "glib2 >=2.76"
     "libsndfile >=1.2"
 
   config:
@@ -34,6 +35,9 @@ package pulseaudioSource:
     discard
 
   library libPulseSimple:
+    discard
+
+  library libPulseMainloopGlib:
     discard
 
   build:
@@ -57,7 +61,7 @@ package pulseaudioSource:
         "dbus=disabled",
         "elogind=disabled",
         "fftw=disabled",
-        "glib=disabled",
+        "glib=enabled",
         "gsettings=disabled",
         "gstreamer=disabled",
         "gtk=disabled",
@@ -79,6 +83,7 @@ package pulseaudioSource:
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libPulse")
       discard pkg.library("libPulseSimple")
+      discard pkg.library("libPulseMainloopGlib")
     finally:
       clearCurrentOwningPackageOverride()
 

@@ -65,10 +65,8 @@
 ##
 ## v1 ships NO configurables — meson options are pinned:
 ##
-##   * ``introspection=disabled`` — drop the g-ir-scanner dep (the
-##                                   downstream v1 closure does not
-##                                   build gobject-introspection from
-##                                   source yet).
+##   * ``introspection=enabled``  — emit the GIR and typelib consumed
+##                                   by GTK introspection.
 ##   * ``gtk_doc=false``          — drop the gtk-doc HTML-reference
 ##                                   build (docbook + xsltproc not in
 ##                                   the v1 closure).
@@ -101,6 +99,7 @@ package grapheneSource:
     extractStrip: 1
 
   nativeBuildDeps:
+    "gobject-introspection"
     "meson >=0.55"
     "ninja >=1.10"
     "gcc >=11"
@@ -110,6 +109,8 @@ package grapheneSource:
     "python3"
 
   buildDeps:
+    "gobject-introspection"
+    "glib2-introspection"
     ## glib2 is graphene's only library dependency at the C level —
     ## graphene's GObject-introspection wrapper exposes the math
     ## primitives via GObject's type system, so libgobject-2.0 +
@@ -130,12 +131,14 @@ package grapheneSource:
     setCurrentOwningPackageOverride("grapheneSource")
     try:
       let opts = @[
-        "introspection=disabled",
+        "introspection=enabled",
         "gtk_doc=false",
         "installed_tests=false",
         "tests=false",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts,
+        extraEnv = @[("GI_GIR_PATH",
+          "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share/gir-1.0")])
       discard pkg.library("libGraphene")
     finally:
       clearCurrentOwningPackageOverride()

@@ -85,10 +85,8 @@
 ## v1 ships NO configurables — the meson options are hardcoded to the
 ## modern-desktop baseline per the task brief:
 ##
-##   * ``introspection=disabled`` — skip GObject Introspection (drops
-##                                   the g-ir-scanner toolchain dep
-##                                   the v1 desktop story doesn't
-##                                   exercise).
+##   * ``introspection=enabled``  — emit the GIRs and typelibs needed
+##                                   by GTK and GNOME Shell.
 ##   * ``documentation=false``    — skip documentation generation.
 ##   * ``build-testsuite=false``  — skip the upstream test suite to
 ##                                   keep the build hermetic + fast.
@@ -142,6 +140,7 @@ package pangoSource:
     extractStrip: 1
 
   nativeBuildDeps:
+    "gobject-introspection"
     ## meson is the build-system driver. Pango 1.56.4 declares
     ## ``meson_version: >=1.2.0`` in its upstream ``meson.build``.
     "meson >=1.2.0"
@@ -157,6 +156,8 @@ package pangoSource:
     "python3"
 
   buildDeps:
+    "gobject-introspection"
+    "glib2-introspection"
     ## glib2 provides GObject + GIO that pango's text-layout objects
     ## subclass; pango is a GObject library at heart. Recipe name
     ## ``glib2`` matches the sibling source recipe. Pango 1.56.4
@@ -209,11 +210,14 @@ package pangoSource:
         # and dropped ``man-pages`` entirely (the man pages now live in
         # the documentation pipeline). Use the new option name; the
         # broader ``build-testsuite=false`` keeps the build minimal.
-        "introspection=disabled",
+        "introspection=enabled",
         "documentation=false",
         "build-testsuite=false",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts,
+        extraEnv = @[("GI_GIR_PATH",
+          "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share/gir-1.0:" &
+          "/opt/repro/reprobuild/recipes/packages/source/harfbuzz/.repro/output/install/usr/share/gir-1.0")])
       discard pkg.library("libpango")
       discard pkg.library("libpangocairo")
     finally:

@@ -4828,6 +4828,13 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
     # decision. The native-build case (``cachePlatformTagFor`` ==
     # ``"native"``) is byte-identical to pre-M9.R.7.
     let cacheTag = cachePlatformTagFor(kind, nil)
+    var matched = false
+    var mergedBinDirs: seq[string] = @[]
+    var mergedExecutablePath = ""
+    var mergedPkgConfigDirs: seq[string] = @[]
+    var mergedCmakePrefixDirs: seq[string] = @[]
+    var mergedIncludeDirs: seq[string] = @[]
+    var mergedLibDirs: seq[string] = @[]
     for actionIdy in snapshot.actionIdentities:
       let matchByName = actionIdy.executableName == name
       let bareSelector = block:
@@ -4844,49 +4851,47 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       let matchBySelector = bareSelector == name
       if not (matchByName or matchBySelector):
         continue
-      var binDirs: seq[string] = @[]
+      matched = true
       if actionIdy.resolvedExecutablePath.len > 0:
+        if mergedExecutablePath.len == 0:
+          mergedExecutablePath = actionIdy.resolvedExecutablePath
         let parent = parentDir(actionIdy.resolvedExecutablePath)
-        if parent.len > 0:
-          binDirs.add(parent)
+        if parent.len > 0 and parent notin mergedBinDirs:
+          mergedBinDirs.add(parent)
       for searchDir in actionIdy.pathSearchList:
-        if searchDir.len > 0 and searchDir notin binDirs:
-          binDirs.add(searchDir)
-      let hasAuxLists = actionIdy.pkgConfigSearchList.len +
-        actionIdy.cmakePrefixList.len + actionIdy.cpathList.len +
-        actionIdy.libraryPathList.len > 0
-      # Cross-Repo-Source-Consumption SC-11 (§4.2a.3) — the Nim library-source
-      # channel. A pure Nim library producer resolves here as a path-mode
-      # ``mkAuxChannelProducerProfile`` (SC-3) whose actionIdy carries no C/C++
-      # aux lists; its importable ``src/`` reaches the consumer NOT through an
-      # env var but through a ``nim c --path:`` flag. The realized dirs live on
-      # the splice sink ``producerMaterializedAuxPaths[name].nimPathDirs`` (the
-      # SC-3 producer branch does not round-trip through the profile codec for
-      # the Nim channel, so read them directly here). Merge them onto the
-      # ``ResolvedToolIdentity`` this early-return path already builds so the
-      # engine's ``collectResolvedAuxPaths`` sees them and ``applyNimPathArgs``
-      # emits ``--path:<dir>`` onto the consumer's ``nim c``. Empty for every
-      # non-Nim-library producer, so this is a zero-impact passthrough.
+        if searchDir.len > 0 and searchDir notin mergedBinDirs:
+          mergedBinDirs.add(searchDir)
+      for path in actionIdy.pkgConfigSearchList:
+        if path.len > 0 and path notin mergedPkgConfigDirs:
+          mergedPkgConfigDirs.add(path)
+      for path in actionIdy.cmakePrefixList:
+        if path.len > 0 and path notin mergedCmakePrefixDirs:
+          mergedCmakePrefixDirs.add(path)
+        let prefixBin = path / "bin"
+        if dirExists(extendedPath(prefixBin)) and prefixBin notin mergedBinDirs:
+          mergedBinDirs.add(prefixBin)
+      for path in actionIdy.cpathList:
+        if path.len > 0 and path notin mergedIncludeDirs:
+          mergedIncludeDirs.add(path)
+      for path in actionIdy.libraryPathList:
+        if path.len > 0 and path notin mergedLibDirs:
+          mergedLibDirs.add(path)
+    if matched:
       var nimPathDirs: seq[string] = @[]
       {.cast(gcsafe).}:
         if producerMaterializedAuxPaths.hasKey(name):
           nimPathDirs = producerMaterializedAuxPaths[name].nimPathDirs
-      if binDirs.len == 0 and not hasAuxLists and nimPathDirs.len == 0:
+      let hasAuxLists = mergedPkgConfigDirs.len + mergedCmakePrefixDirs.len +
+        mergedIncludeDirs.len + mergedLibDirs.len > 0
+      if mergedBinDirs.len == 0 and not hasAuxLists and nimPathDirs.len == 0:
         return none(ResolvedToolIdentity)
-      # M9.R.14e.3 — project the from-source resolver's auxiliary
-      # search-path channels into the engine's ``ResolvedToolIdentity``
-      # so the env-prepend pass at action-launch time threads them onto
-      # ``PKG_CONFIG_PATH`` / ``CMAKE_PREFIX_PATH`` / ``CPATH`` /
-      # ``LIBRARY_PATH`` / ``LD_LIBRARY_PATH``. Empty for non-from-
-      # source profiles (they leave the seqs empty), so this is a
-      # zero-impact passthrough on existing recipe graphs.
       return some(ResolvedToolIdentity(
-        binDirs: binDirs,
-        resolvedExecutablePath: actionIdy.resolvedExecutablePath,
-        pkgConfigDirs: actionIdy.pkgConfigSearchList,
-        cmakePrefixDirs: actionIdy.cmakePrefixList,
-        includeDirs: actionIdy.cpathList,
-        libDirs: actionIdy.libraryPathList,
+        binDirs: mergedBinDirs,
+        resolvedExecutablePath: mergedExecutablePath,
+        pkgConfigDirs: mergedPkgConfigDirs,
+        cmakePrefixDirs: mergedCmakePrefixDirs,
+        includeDirs: mergedIncludeDirs,
+        libDirs: mergedLibDirs,
         nimPathDirs: nimPathDirs,
         cachePlatformTag: cacheTag))
     # Cross-Repo-Source-Consumption SC-1 (§4.1) — ADDITIVE cross-repo

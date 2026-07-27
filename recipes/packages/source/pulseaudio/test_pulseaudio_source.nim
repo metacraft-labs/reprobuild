@@ -12,10 +12,12 @@ suite "pulseaudioSource from-source recipe smoke test":
 
   test "registers the client libraries":
     let artifacts = registeredArtifacts("pulseaudioSource")
-    check artifacts.len == 2
+    check artifacts.len == 3
     check artifacts[0].artifactName == "libPulse"
     check artifacts[1].artifactName == "libPulseSimple"
+    check artifacts[2].artifactName == "libPulseMainloopGlib"
 
   test "declares the source-built audio-file dependency":
+    check "glib2 >=2.76" in registeredBuildDeps("pulseaudioSource")
     check "libsndfile >=1.2" in registeredBuildDeps("pulseaudioSource")
     check registeredRuntimeDeps("pulseaudioSource") == @["libsndfile >=1.2"]
