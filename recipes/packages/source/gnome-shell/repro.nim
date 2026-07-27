@@ -309,9 +309,51 @@ package gnomeShellSource:
         "extensions_app=false",
         "extensions_tool=false",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      let rpathLinkDirs = [
+        "/opt/repro/reprobuild/recipes/packages/source/polkit/.repro/output/install/usr/lib64",
+        "/opt/repro/reprobuild/recipes/packages/source/gcr/.repro/output/install/usr/lib64",
+        "/opt/repro/reprobuild/recipes/packages/source/gnome-desktop/.repro/output/install/usr/lib",
+        "/opt/repro/reprobuild/recipes/packages/source/pango/.repro/output/install/usr/lib64",
+      ]
+      var linkFlags = ""
+      for dir in rpathLinkDirs:
+        if linkFlags.len > 0:
+          linkFlags.add(' ')
+        linkFlags.add("-Wl,-rpath-link," & dir)
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts,
+        extraEnv = @[
+          ("LDFLAGS", linkFlags),
+          ("GI_GIR_PATH",
+            "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share/gir-1.0:" &
+            "/opt/repro/reprobuild/recipes/packages/source/gtk4/.repro/output/install/usr/share/gir-1.0:" &
+            "/opt/repro/reprobuild/recipes/packages/source/gdk-pixbuf/.repro/output/install/usr/share/gir-1.0:" &
+            "/opt/repro/reprobuild/recipes/packages/source/pango/.repro/output/install/usr/share/gir-1.0:" &
+            "/opt/repro/reprobuild/recipes/packages/source/graphene/.repro/output/install/usr/share/gir-1.0:" &
+              "/opt/repro/reprobuild/recipes/packages/source/harfbuzz/.repro/output/install/usr/share/gir-1.0:" &
+              "/opt/repro/reprobuild/recipes/packages/source/at-spi2-core/.repro/output/install/usr/share/gir-1.0:" &
+              "/opt/repro/reprobuild/recipes/packages/source/gsettings-desktop-schemas/.repro/output/install/usr/share/gir-1.0:" &
+              "/opt/repro/reprobuild/recipes/packages/source/gcr/.repro/output/install/usr/share/gir-1.0:" &
+              "/opt/repro/reprobuild/recipes/packages/source/polkit/.repro/output/install/usr/share/gir-1.0:" &
+              "/opt/repro/reprobuild/recipes/packages/source/mutter/.repro/output/install/usr/lib64/mutter-15:" &
+              "/opt/repro/reprobuild/recipes/packages/source/mutter/.repro/output/install/usr/share/gir-1.0:" &
+              "/opt/repro/reprobuild/recipes/packages/source/gnome-desktop/.repro/output/install/usr/share/gir-1.0"),
+          ("XDG_DATA_DIRS",
+              "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share:" &
+              "/opt/repro/reprobuild/recipes/packages/source/gtk4/.repro/output/install/usr/share:" &
+              "/opt/repro/reprobuild/recipes/packages/source/gdk-pixbuf/.repro/output/install/usr/share:" &
+              "/opt/repro/reprobuild/recipes/packages/source/pango/.repro/output/install/usr/share:" &
+              "/opt/repro/reprobuild/recipes/packages/source/graphene/.repro/output/install/usr/share:" &
+              "/opt/repro/reprobuild/recipes/packages/source/harfbuzz/.repro/output/install/usr/share:" &
+              "/opt/repro/reprobuild/recipes/packages/source/at-spi2-core/.repro/output/install/usr/share:" &
+              "/opt/repro/reprobuild/recipes/packages/source/gsettings-desktop-schemas/.repro/output/install/usr/share:" &
+              "/opt/repro/reprobuild/recipes/packages/source/gcr/.repro/output/install/usr/share:" &
+              "/opt/repro/reprobuild/recipes/packages/source/polkit/.repro/output/install/usr/share:" &
+              "/opt/repro/reprobuild/recipes/packages/source/mutter/.repro/output/install/usr/share:" &
+              "/opt/repro/reprobuild/recipes/packages/source/gnome-desktop/.repro/output/install/usr/share"),
+          ])
       discard pkg.executable("gnomeShell")
-      discard pkg.library("libGnomeShell")
+      # GNOME Shell installs its private libraries below
+      # /usr/lib64/gnome-shell; the install-tree mirror preserves them.
     finally:
       clearCurrentOwningPackageOverride()
 

@@ -78,11 +78,13 @@ package polkitSource:
     ## catalogs). Without it meson setup short-fails with
     ## ``Program 'msgfmt' not found or not executable``.
     "gettext"
+    "gobject-introspection"
 
   buildDeps:
     ## glib2 + gio supply the GMainLoop + GDBus the polkit daemon's
     ## D-Bus server uses. The sibling glib2Source recipe vendors 2.82.5.
     "glib2 >=2.62"
+    "glib2-introspection"
     ## expat is the XML parser polkit uses to load the per-action
     ## policy files from /usr/share/polkit-1/actions/. The sibling
     ## expatSource recipe vendors 2.7.0.
@@ -166,7 +168,7 @@ package polkitSource:
         # Drop optional surfaces we don't need at runtime.
         "examples=false",
         "tests=false",
-        "introspection=false",
+        "introspection=true",
         "gtk_doc=false",
         "man=false",
         # Don't ship the polkitd user creation hook; the installer
@@ -174,7 +176,11 @@ package polkitSource:
         # sysusers.d/polkit.conf.
         "polkitd_user=polkitd",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts,
+        extraEnv = @[
+          ("GI_GIR_PATH", "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share/gir-1.0"),
+          ("XDG_DATA_DIRS", "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share"),
+        ])
       discard pkg.executable("polkitd")
       discard pkg.executable("pkexec")
       # M9.R.27.2 — polkit-agent-helper-1 harvested via install-mirror,

@@ -191,7 +191,12 @@ package gobjectIntrospectionSource:
         configureOptions = opts,
         extraEnv = @[("PYTHONNOUSERSITE", "1")],
         srcPatches = @[
-          "sed -i \"s/if not os.path.isfile(os.path.join(pylibdir, 'giscanner', '_giscanner' + py_mod_suffix)):/if not os.path.isdir(os.path.join(pylibdir, 'giscanner')):/\" src/tools/g-ir-tool-template.in"
+          "sed -i \"s/if not os.path.isfile(os.path.join(pylibdir, 'giscanner', '_giscanner' + py_mod_suffix)):/if not os.path.isdir(os.path.join(pylibdir, 'giscanner')):/\" src/tools/g-ir-tool-template.in",
+          # Nix's Meson carries support for private GIR install directories
+          # through this scanner option. Keep the source-built scanner
+          # compatible while preserving ordinary FHS library names by default.
+          "sed -i '/parser.add_option(\"-L\", \"--library-path\",/i\\    parser.add_option(\"\", \"--fallback-library-path\", action=\"store\", dest=\"fallback_libpath\", default=\"\", help=\"Path to prepend to resolved shared libraries\")' src/giscanner/scannermain.py",
+          "sed -i 's@return list(map(sanitize_shlib_path, shlibs))@fallback_libpath = options.fallback_libpath or \"\"; return list(map(lambda p: os.path.join(fallback_libpath, p), map(sanitize_shlib_path, shlibs)))@' src/giscanner/shlibs.py"
         ])
       discard pkg.library("libGirepository")
       discard pkg.executableAlias("g-ir-scanner", sourceName = "g-ir-scanner")

@@ -19,11 +19,13 @@ package atSpi2CoreSource:
     "ninja >=1.10"
     "gcc >=11"
     "pkg-config"
+    "gobject-introspection"
 
   buildDeps:
     "glib2 >=2.70"
     "dbus >=1.14"
     "libxml2 >=2.10"
+    "glib2-introspection"
 
   config:
     discard
@@ -42,10 +44,15 @@ package atSpi2CoreSource:
     try:
       let pkg = meson_package(srcDir = "./src", configureOptions = @[
         "docs=false",
-        "introspection=disabled",
+        "introspection=enabled",
         "x11=disabled",
         "use_systemd=false",
         "gtk2_atk_adaptor=false",
+      ], extraEnv = @[
+        ("GI_GIR_PATH",
+          "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share/gir-1.0"),
+        ("XDG_DATA_DIRS",
+          "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share"),
       ])
       discard pkg.library("libAtspi")
       discard pkg.library("libAtk")

@@ -19,9 +19,11 @@ package gsettingsDesktopSchemasSource:
     "ninja >=1.10"
     "pkg-config"
     "glib2 >=2.70"
+    "gobject-introspection"
 
   buildDeps:
     "glib2 >=2.70"
+    "glib2-introspection"
 
   config:
     discard
@@ -33,7 +35,12 @@ package gsettingsDesktopSchemasSource:
     setCurrentOwningPackageOverride("gsettingsDesktopSchemasSource")
     try:
       let pkg = meson_package(srcDir = "./src", configureOptions = @[
-        "introspection=false",
+        "introspection=true",
+      ], extraEnv = @[
+        ("GI_GIR_PATH",
+          "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share/gir-1.0"),
+        ("XDG_DATA_DIRS",
+          "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share"),
       ])
       discard pkg.files("schemaFiles")
       pkg.installTreeMirror()
