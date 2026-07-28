@@ -76,7 +76,7 @@ BASE_IMAGE='debian:trixie-slim'
 #     equivalents in this milestone)
 #   - tzdata + locales (data-only packages, no build cost; no recipe)
 #   - keyboard data (xkb-data, console-data) -- data packages
-#   - Xorg server and DejaVu fonts -- explicit SDDM runtime bridges
+#   - Xorg server -- explicit SDDM runtime bridge
 #   - CA certificate bundle (data package)
 #
 ## M9.R.32.4 -- per-entry from-source audit (user's "no apt" principle).
@@ -197,10 +197,9 @@ PKG_LIST=(
   # exposed ip, tc, ss, and bridge through the Phase 4b shadow-link loop.
   # Source bridge dropped ``sddm`` after its upstream service and PAM
   # policies were included in the source recipe's install mirror.
-  # Keep SDDM's display/font runtime dependencies explicit until their
-  # own source recipes land; the sddm binary and policy remain source-built.
+  # Keep SDDM's Xorg runtime dependency explicit until its source recipe
+  # lands; SDDM and the DejaVu fonts are source-built.
   xserver-xorg-core
-  fonts-dejavu-core
   # M9.R.24.2 -- disko apply tools the installer's Phase 2 driver
   # shells out to. These are the on-target install-time utilities.
   #

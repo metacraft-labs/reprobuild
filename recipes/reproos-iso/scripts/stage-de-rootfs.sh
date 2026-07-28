@@ -505,6 +505,7 @@ BASE_USERSPACE_RECIPES=(
   libxkbfile
   xkbcomp
   adwaita-icon-theme
+  dejavu-fonts
   xz
   tar
   coreutils
@@ -604,6 +605,20 @@ link_base_recipe_binaries() {
     mkdir -p "$STAGE_DIR/usr/share/icons"
     rm -rf "$STAGE_DIR/usr/share/icons/Adwaita"
     ln -sf "$adwaita_link_target" "$STAGE_DIR/usr/share/icons/Adwaita"
+  fi
+  # DejaVu is data-only. Expose the FontForge-generated TTFs at the
+  # standard fontconfig search path.
+  if [ "$recipe" = "dejavu-fonts" ]; then
+    local dejavu_src="$install_usr/share/fonts/truetype/dejavu"
+    if [ ! -f "$dejavu_src/DejaVuSans.ttf" ]; then
+      echo "[stage-de-rootfs] required source DejaVu fonts missing" >&2
+      return 1
+    fi
+    local dejavu_link_target="${dejavu_src#$STAGE_DIR}"
+    mkdir -p "$STAGE_DIR/usr/share/fonts/truetype"
+    rm -rf "$STAGE_DIR/usr/share/fonts/truetype/dejavu"
+    ln -sf "$dejavu_link_target" \
+      "$STAGE_DIR/usr/share/fonts/truetype/dejavu"
   fi
   if [ "$recipe" = "xz" ]; then
     if [ ! -x "$install_usr/bin/xz" ]; then

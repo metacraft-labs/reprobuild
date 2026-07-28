@@ -77,6 +77,8 @@ import ../packages/automake as automake_module
 import ../packages/libtool as libtool_module
 import ../packages/m4 as m4_module
 import ../packages/perl as perl_module
+import ../packages/fontforge as fontforge_module
+import ../packages/libacl as libacl_module
 # M9.R.14d.3 — also auto-import gcc + pkg-config so application
 # recipes that consume autotools_package pick up those stdlib
 # provisioning channels for the cycle-break fall-through. libxml2

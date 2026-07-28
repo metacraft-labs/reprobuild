@@ -21,7 +21,7 @@ package rsyncSource:
     "gcc >=11"
 
   buildDeps:
-    discard
+    "libacl >=2.3"
 
   config:
     discard
@@ -32,16 +32,15 @@ package rsyncSource:
   build:
     setCurrentOwningPackageOverride("rsyncSource")
     try:
-      # Keep the install-time mirror tool independent of optional libraries
-      # that are not yet part of the ReproOS source closure.
+      # ReproOS image installation preserves ACLs and extended attributes.
+      # The libacl package also exposes the libattr development files used by
+      # rsync's xattr support.
       let opts = @[
         "--disable-xxhash",
         "--disable-zstd",
         "--disable-lz4",
         "--disable-openssl",
         "--disable-md2man",
-        "--disable-acl-support",
-        "--disable-xattr-support",
       ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("rsync")
