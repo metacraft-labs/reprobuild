@@ -510,6 +510,7 @@ BASE_USERSPACE_RECIPES=(
   xz
   tar
   coreutils
+  grub
 )
 
 link_base_recipe_binaries() {
@@ -671,6 +672,27 @@ link_base_recipe_binaries() {
         return 1
       fi
     done
+  fi
+  if [ "$recipe" = "grub" ]; then
+    local grub_modules="$install_usr/lib/grub/x86_64-efi"
+    if [ ! -x "$install_usr/sbin/grub-install" ] || \
+       [ ! -x "$install_usr/sbin/grub-mkconfig" ] || \
+       [ ! -f "$grub_modules/kernel.img" ]; then
+      echo "[stage-de-rootfs] required source GRUB UEFI surface missing" >&2
+      return 1
+    fi
+
+    mkdir -p "$STAGE_DIR/usr/lib" "$STAGE_DIR/usr/share" "$STAGE_DIR/etc"
+    rm -rf "$STAGE_DIR/usr/lib/grub"
+    ln -s "${install_usr#$STAGE_DIR}/lib/grub" "$STAGE_DIR/usr/lib/grub"
+    if [ -d "$install_usr/share/grub" ]; then
+      rm -rf "$STAGE_DIR/usr/share/grub"
+      ln -s "${install_usr#$STAGE_DIR}/share/grub" "$STAGE_DIR/usr/share/grub"
+    fi
+    if [ -d "$install_usr/etc/grub.d" ]; then
+      rm -rf "$STAGE_DIR/etc/grub.d"
+      ln -s "${install_usr#$STAGE_DIR}/etc/grub.d" "$STAGE_DIR/etc/grub.d"
+    fi
   fi
   if [ "$recipe" = "dbus" ]; then
     local dbus_system_units="$install_usr/lib/systemd/system"

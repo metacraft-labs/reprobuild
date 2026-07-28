@@ -140,6 +140,7 @@ const reproosImageRootfsDeps = @[
   "xz",
   "tar",
   "coreutils",
+  "grub",
 ]
 
 package reproosImage:
@@ -181,6 +182,7 @@ package reproosImage:
     "xz"
     "tar"
     "coreutils"
+    "grub"
 
   runtimeDeps:
     # M9.R.53: enumerate every bare-name host tool

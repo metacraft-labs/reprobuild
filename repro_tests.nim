@@ -3422,6 +3422,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/grub/test_grub_source.nim",
+    binary: "build/test-bin/test_grub_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/gsettings-desktop-schemas/test_gsettings_desktop_schemas_source.nim",
     binary: "build/test-bin/test_gsettings_desktop_schemas_source",
     defines: @[],

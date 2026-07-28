@@ -203,13 +203,8 @@ PKG_LIST=(
   # btrfs-image, btrfs-map-logical, btrfs-select-super, btrfstune,
   # fsck.btrfs, mkfs.btrfs); the Phase 4b shadow-link loop covers them.
   #
-  # Bootloader tools the installer's Phase 5 (system apply) shells
-  # out to.  GRUB has no from-source recipe yet (TODO M9.R.33).
-  #   grub-efi-amd64-bin     FS:none STAGE:no
-  #   grub-pc-bin            FS:none STAGE:no
-  #   grub-common            FS:none STAGE:no
-  #   grub2-common           FS:none STAGE:no
-  grub-efi-amd64-bin grub-pc-bin grub-common grub2-common
+  # Source-built GRUB supplies the x86_64 UEFI installer, management
+  # commands, scripts, and platform module tree.
   # M9.R.37.1 — diagnostic tool the installer's REPRO_INSTALLER_DIAG=1
   # mode invokes to characterise the silent-wedge gap M9.R.36 left
   # open. ``strace`` traces every syscall the installer + its children

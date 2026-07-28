@@ -401,6 +401,13 @@ test "incomplete name" and:
                 "sourceCaseCount": 10,
                 "class": "integration",
             },
+            "recipes/packages/source/grub/test_grub_source.nim": {
+                "binary": "build/test-bin/test_grub_source",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 2,
+                "class": "pure unit",
+            },
         }
         for source, expected in expected_enrollments.items():
             with self.subTest(enrolled_source=source):
@@ -428,7 +435,7 @@ test "incomplete name" and:
 
         # Exact generated-graph specification counts. An omitted, duplicated,
         # or substituted enrollment cannot be absorbed by the case totals.
-        self.assertEqual(len(nim_specs), 1167)
+        self.assertEqual(len(nim_specs), 1168)
         self.assertEqual(len(python_specs), 4)
 
         nim_total = sum(
@@ -476,9 +483,9 @@ test "incomplete name" and:
         )
         # Language totals and the overall total. These are the aggregate
         # backstop for the per-source pins above, not a substitute for them.
-        self.assertEqual(nim_total, 6535)
+        self.assertEqual(nim_total, 6537)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6566)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6568)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -744,7 +751,7 @@ test "incomplete name" and:
         # repro_tests.nim. This is an independent reading of the same
         # generated file as the parse_repro_tests pins above, so a dropped,
         # duplicated, or hand-edited specification fails here too.
-        self.assertEqual(declared_nim_count, 1167)
+        self.assertEqual(declared_nim_count, 1168)
         self.assertEqual(declared_python_count, 4)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -756,6 +763,7 @@ test "incomplete name" and:
             "test_libpciaccess_source.nim",
             "recipes/packages/source/util-macros/test_util_macros_source.nim",
             "recipes/packages/source/xorg-server/test_xorg_server_source.nim",
+            "recipes/packages/source/grub/test_grub_source.nim",
             "tests/integration/"
             "t_branch_forks_new_workspace_on_feature_branch.nim",
         ):
@@ -774,7 +782,7 @@ test "incomplete name" and:
             data["static"]["testEntryCount"],
             declared_nim_count + declared_python_count,
         )
-        self.assertEqual(data["static"]["testEntryCount"], 1171)
+        self.assertEqual(data["static"]["testEntryCount"], 1172)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),
