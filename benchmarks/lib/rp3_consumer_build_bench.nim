@@ -143,7 +143,8 @@ proc elapsedMs(start: float): float =
 
 # One consumer build: resolve the dependency (open-or-reuse its shared session
 # + invoke it), bind it into the consumer session, invoke the consumer root.
-proc consumerBuild(pool: ProviderSessionPool; dep, consumer: BuiltProvider) =
+proc consumerBuild(pool: ProviderSessionPool; dep, consumer: BuiltProvider):
+    ProviderHandle =
   let depHandle = pool.openProviderSession(dep.artifactRef(),
     defaultSessionPolicy(), engineHello())
   let depRes = depHandle.invokeEntryPoint(dep.packageName & ".root",
@@ -155,6 +156,7 @@ proc consumerBuild(pool: ProviderSessionPool; dep, consumer: BuiltProvider) =
   consumerHandle.bindDependencies(@[binding])
   discard consumerHandle.invokeEntryPoint(consumer.packageName & ".root",
     @[marshalRequest(consumer.rootRequest())])
+  depHandle
 
 proc main() =
   var quick = false
@@ -185,10 +187,17 @@ proc main() =
 
   # COLD: first consumer must launch + handshake the shared dependency provider.
   let pool = newProviderSessionPool()
+  let launchesBeforeCold = pool.launchCount
   let coldStart = epochTime()
-  consumerBuild(pool, dep, consumerA)
+  let coldDependencyHandle = consumerBuild(pool, dep, consumerA)
   let coldMs = elapsedMs(coldStart)
   let launchesAfterCold = pool.launchCount
+  let coldLaunches = launchesAfterCold - launchesBeforeCold
+  let observedDependencyArtifactId = coldDependencyHandle.providerArtifactId
+  if observedDependencyArtifactId.len == 0 or
+      observedDependencyArtifactId != dep.artifactId:
+    quit("rp3 bench: cold dependency session artifact id mismatch: expected " &
+      dep.artifactId & ", got " & observedDependencyArtifactId, 1)
 
   # WARM: second consumer reuses the already-launched dependency session
   # (median of a small batch of distinct-consumer builds against the shared
@@ -197,11 +206,33 @@ proc main() =
   var warmTotal = 0.0
   for _ in 0 ..< warmRuns:
     let warmStart = epochTime()
-    consumerBuild(pool, dep, consumerB)
+    let warmDependencyHandle = consumerBuild(pool, dep, consumerB)
     warmTotal += elapsedMs(warmStart)
+    if warmDependencyHandle.session != coldDependencyHandle.session:
+      quit("rp3 bench: warm consumer did not reuse the cold dependency session",
+        1)
+    if warmDependencyHandle.providerArtifactId != observedDependencyArtifactId:
+      quit("rp3 bench: warm dependency session artifact id mismatch: expected " &
+        observedDependencyArtifactId & ", got " &
+        warmDependencyHandle.providerArtifactId, 1)
   let warmMs = warmTotal / float(warmRuns)
-  # The dependency provider was launched exactly once across cold + warm.
-  let sharedDependencyLaunches = 1
+  let launchesAfterWarm = pool.launchCount
+  let warmLaunches = launchesAfterWarm - launchesAfterCold
+
+  # The cold phase launches the dependency and consumerA. The warm phase
+  # launches consumerB once while reusing both it and the dependency on later
+  # iterations. Their observed launch-delta difference therefore isolates the
+  # one shared-dependency launch rather than substituting the expected value.
+  if launchesBeforeCold != 0 or coldLaunches != 2:
+    quit("rp3 bench: expected cold launch delta 2 from an empty pool, got " &
+      $coldLaunches & " after " & $launchesBeforeCold & " prior launches", 1)
+  if launchesAfterWarm != 3 or warmLaunches != 1:
+    quit("rp3 bench: expected post-warm total 3 and warm launch delta 1, got " &
+      $launchesAfterWarm & " and " & $warmLaunches, 1)
+  let sharedDependencyLaunches = coldLaunches - warmLaunches
+  if sharedDependencyLaunches != 1:
+    quit("rp3 bench: expected exactly one shared dependency launch, observed " &
+      $sharedDependencyLaunches, 1)
   pool.closeAll()
 
   let doc = %*{
@@ -209,7 +240,12 @@ proc main() =
     "metadata": {
       "quick": quick,
       "warmRuns": warmRuns,
+      "launchesBeforeCold": launchesBeforeCold,
       "launchesAfterCold": launchesAfterCold,
+      "launchesAfterWarm": launchesAfterWarm,
+      "coldLaunches": coldLaunches,
+      "warmLaunches": warmLaunches,
+      "providerArtifactId": observedDependencyArtifactId,
       "dependencyProviderArtifactId": dep.artifactId
     },
     "metrics": [
