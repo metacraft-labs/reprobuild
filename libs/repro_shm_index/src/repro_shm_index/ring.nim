@@ -86,6 +86,13 @@ proc append*(r: SubmissionRing; digest: openArray[byte];
   of prPushed: rasAppended
   of prDropped: rasDropped
   of prOversize: rasOversized
+  # Any other producer result is treated as a drop (the record could not be
+  # delivered). Newer nim-shm-queue revisions add ``prConsumerGone`` — an
+  # ``opBlockProducer``-only outcome the non-blocking ``tryPush`` never returns
+  # — so naming it explicitly would fail to compile against the older pinned
+  # revisions that lack the enum value. This ``else`` keeps the case exhaustive
+  # AND version-agnostic across nim-shm-queue revs in both directions.
+  else: rasDropped
 
 # --- single-consumer drain -----------------------------------------------
 
