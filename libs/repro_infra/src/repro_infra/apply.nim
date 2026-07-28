@@ -25,6 +25,11 @@
 
 import std/[os, strutils, times]
 
+when defined(windows):
+  import std/winlean
+else:
+  import std/posix
+
 import repro_elevation
 import repro_profile
 
@@ -185,10 +190,84 @@ type
       ## cases).
 
 # ---------------------------------------------------------------------------
-# A trivial per-host apply lock (file presence). Concurrent system
-# applies are serialized through `<state-dir>/locks/apply.lock` per
-# the spec's validation criterion.
+# A per-host apply lock (file presence + owner PID). Concurrent system
+# applies are serialized through `<state-dir>/locks/apply.lock` per the
+# spec's validation criterion.
+#
+# The lock MUST be reclaimable. It is an ordinary file, so any owner that
+# dies without reaching `releaseApplyLock` — a crash, a SIGKILL, a severed
+# SSH session that orphans a remote apply, a service-manager start timeout —
+# leaves the file behind. Treating mere presence as "busy" then refuses
+# EVERY subsequent apply forever, with no self-healing path.
+#
+# That is not hypothetical: an interrupted apply on a Windows runner left a
+# dead PID in `C:\ProgramData\repro\system\locks\apply.lock` and blocked all
+# applies for three weeks, until an operator deleted the file by hand. The
+# host silently stopped converging the whole time.
+#
+# So: consult the recorded owner. A lock whose owner is gone (or whose
+# contents are unreadable//malformed, which can only mean a partially
+# written or corrupted lock) is stale and is reclaimed.
+#
+# NOTE: this is a cooperative advisory lock, and the check-then-write below
+# is not atomic — it serializes ordinary sequential applies, which is what
+# the spec asks for. `repro_system_apply/locks.nim` holds the stronger
+# OS-level primitive (exclusive `CreateFileW` / `flock`, released by the
+# kernel on process death) if strict mutual exclusion is ever required here.
 # ---------------------------------------------------------------------------
+
+when defined(windows):
+  const
+    StillActive: DWORD = 259
+    ProcessQueryLimitedInformation: DWORD = 0x1000
+    # Win32 code returned by OpenProcess for a pid that does not exist.
+    # Declared here because std/winlean does not export it.
+    ErrorInvalidParameter: int32 = 87
+
+  proc openProcessK32(desiredAccess: DWORD; inheritHandle: WINBOOL;
+                      processId: DWORD): Handle
+    {.importc: "OpenProcess", stdcall, dynlib: "kernel32".}
+
+  proc getExitCodeProcessK32(process: Handle; exitCode: ptr DWORD): WINBOOL
+    {.importc: "GetExitCodeProcess", stdcall, dynlib: "kernel32".}
+
+proc processAlive(pid: int): bool =
+  ## True when a process with `pid` currently exists.
+  ##
+  ## Deliberately conservative: anything we cannot positively establish as
+  ## dead is reported ALIVE, so an unexpected probe failure preserves the
+  ## lock rather than letting two applies run concurrently.
+  if pid <= 0:
+    return false
+  when defined(windows):
+    let h = openProcessK32(ProcessQueryLimitedInformation, 0, DWORD(pid))
+    if h == 0:
+      # Cannot open: the process is gone (ERROR_INVALID_PARAMETER) or we
+      # lack rights to it (ERROR_ACCESS_DENIED). Access-denied implies it
+      # EXISTS, so only treat "not found" as dead.
+      return getLastError() != ErrorInvalidParameter
+    defer: discard closeHandle(h)
+    var code: DWORD = 0
+    if getExitCodeProcessK32(h, addr code) == 0:
+      return true
+    code == StillActive
+  else:
+    # kill(pid, 0) performs the permission + existence checks without
+    # sending a signal: ESRCH means gone, EPERM means it exists but is
+    # owned by another user.
+    if posix.kill(Pid(pid), cint(0)) == 0:
+      return true
+    errno != ESRCH
+
+proc applyLockOwner*(stateDir: string): int =
+  ## PID recorded in the apply lock, or 0 when absent/unparseable.
+  let lockPath = applyLockPath(stateDir)
+  if not fileExists(lockPath):
+    return 0
+  try:
+    result = parseInt(readFile(lockPath).strip())
+  except ValueError, IOError, OSError:
+    result = 0
 
 proc acquireApplyLock*(stateDir: string): bool =
   ## Returns true when the lock was acquired. The lock file holds the
@@ -196,7 +275,11 @@ proc acquireApplyLock*(stateDir: string): bool =
   ensureSystemStateDir(stateDir)
   let lockPath = applyLockPath(stateDir)
   if fileExists(lockPath):
-    return false
+    let owner = applyLockOwner(stateDir)
+    # owner == 0 => unreadable/malformed lock; nobody can prove ownership,
+    # so it is reclaimable rather than a permanent wedge.
+    if owner != 0 and owner != getCurrentProcessId() and processAlive(owner):
+      return false
   writeFile(lockPath, $getCurrentProcessId())
   true
 
