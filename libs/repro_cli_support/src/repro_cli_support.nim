@@ -223,15 +223,15 @@ proc renderUsage*(programName: string): string =
           programName &
       " dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N]\n       " &
           programName &
-      " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [path]\n       " &
+      " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [--json] [--report[=PATH]] [path]\n       " &
           programName &
-      " check --mode=pre-push [--workspace-root=PATH] [--current-repo=PATH] [--pushed-refs=FILE] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
+      " check --mode=pre-push [--workspace-root=PATH] [--current-repo=PATH] [--pushed-refs=FILE] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--report[=PATH]]\n       " &
           programName &
-      " push [<project>] [--sync] [--merge|--rebase] [--certify|--no-certify] [--workspace-root=PATH] [--current-repo=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
+      " push [<project>] [--sync] [--merge|--rebase] [--certify|--no-certify] [--workspace-root=PATH] [--current-repo=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--report[=PATH]]\n       " &
           programName &
-      " branch [<name>] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
+      " branch [<name>] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--report[=PATH]]\n       " &
           programName &
-      " checkout <branch> [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
+      " checkout <branch> [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--report[=PATH]]\n       " &
           programName &
       " watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...]\n       " &
           programName &
@@ -280,6 +280,13 @@ proc renderUsage*(programName: string): string =
       " workspace {bootstrap [<dir>] | projects [list|add [--default]] | " &
       "project new <name> [-m DESC] | project repo add <project> <repo> " &
       "--remote=URL} [--workspace-root=PATH]\n\n" &
+      "workspace reports: the workspace verbs (init, sync, pull, lock, " &
+      "status, list, manifests, shared-clones, forall, develop, hooks " &
+      "ensure, check, push, branch, checkout) write a JSON report file " &
+      "ONLY when --report is given: --report writes " &
+      "<workspaceRoot>/.repro/workspace/<verb>-report.json, " &
+      "--report=PATH writes exactly PATH. --json prints the same " &
+      "document to stdout and never touches disk.\n\n" &
       "build progress: default=bar-line; aliases: " &
       "quiet=silent|none|off, line=ninja|single-line, " &
       "bar-line=bar|ninja-bar|auto|plain, lines=tup|per-line, " &
@@ -8314,6 +8321,40 @@ proc valueFromFlag(args: openArray[string]; i: var int; flag: string): string =
     return args[i]
   ""
 
+type
+  ReportSpec* = object
+    ## Opt-in ``--report[=PATH]`` surface shared by every workspace verb
+    ## that can persist a JSON report artifact. ``requested`` is false
+    ## unless the operator asked for one — the default is to write
+    ## NOTHING to disk (the ``--json`` stdout surface is independent and
+    ## unaffected).
+    requested*: bool
+    path*: string
+
+proc consumeReportFlag*(arg: string; spec: var ReportSpec): bool =
+  ## True when ``arg`` was a ``--report`` / ``--report=PATH`` flag and has
+  ## been consumed into ``spec``. Callers place this branch BEFORE their
+  ## generic "unsupported flag" catch-all.
+  if arg == "--report":
+    spec.requested = true
+    return true
+  if arg.startsWith("--report="):
+    spec.requested = true
+    spec.path = arg["--report=".len .. ^1]
+    return true
+  false
+
+proc reportDestination*(spec: ReportSpec; workspaceRoot, verb: string): string =
+  ## Absolute path the report must be written to, or ``""`` when no
+  ## report was requested (in which case the writer is a no-op).
+  if not spec.requested:
+    return ""
+  if spec.path.len > 0:
+    return absolutePath(spec.path)
+  if workspaceRoot.len == 0:
+    return ""
+  workspaceRoot / ".repro" / "workspace" / (verb & "-report.json")
+
 proc appendActivitySelection(current: var string; value: string) =
   for raw in value.split(','):
     let item = raw.strip()
@@ -10112,6 +10153,7 @@ type
     nativeShells: seq[NativeShellKind]
     workspaceRoot: string  ## M17: explicit --workspace-root override.
     json: bool             ## M17: emit JSON to stdout in addition to the report file.
+    report: ReportSpec     ## Opt-in ``--report[=PATH]`` artifact.
 
   NativeShellActivationRequest = object
     cwd: string
@@ -11167,11 +11209,12 @@ proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
       result.summary[tag] = result.summary.getOrDefault(tag, 0) + 1
   result.exitCode = 0
 
-proc writeHooksEnsureReport(report: HooksEnsureReport) =
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
-  createDir(reportDir)
-  let reportPath = reportDir / "hooks-report.json"
-  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+proc writeHooksEnsureReport(report: HooksEnsureReport; destination: string) =
+  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
+    return
+  createDir(parentDir(destination))
+  writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc uninstallVcsHook(hooksDir, hookName: string): bool =
   let standard = hookPath(hooksDir, hookName)
@@ -11254,7 +11297,8 @@ proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
     runVcsHooksCommand(hakEnsure, single)
     return 0
   var report = ensureWorkspaceHooks(workspaceRoot)
-  writeHooksEnsureReport(report)
+  writeHooksEnsureReport(report,
+    reportDestination(parsed.report, report.workspaceRoot, "hooks"))
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -11309,6 +11353,8 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
         result.nativeShells.add(parseNativeShell(value))
       elif arg.startsWith("--workspace-root="):
         result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+      elif consumeReportFlag(arg, result.report):
+        discard
       elif arg.startsWith("-"):
         raise newException(ValueError, "unsupported hooks flag: " & arg)
       elif result.targetPath.len > 0:
@@ -19304,6 +19350,7 @@ type
     json: bool
     explicitWorkspaceRoot: bool
     explicitSource: bool
+    report: ReportSpec    ## Opt-in ``--report[=PATH]`` artifact.
 
 proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
   ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH]
@@ -19330,6 +19377,8 @@ proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
         valueFromFlag(args, i, "--tool-provisioning"))
     elif arg == "--json":
       result.json = true
+    elif consumeReportFlag(arg, result.report):
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro develop` flag in M22 workspace-overlay form: " &
@@ -19604,20 +19653,20 @@ proc executeWorkspaceDevelop(args: WorkspaceDevelopArgs):
   result.overrideProvenance = provenance
   result.exitCode = 0
 
-proc writeWorkspaceDevelopReport(report: WorkspaceDevelopReport) =
+proc writeWorkspaceDevelopReport(report: WorkspaceDevelopReport;
+                                 destination: string) =
   ## Persist the JSON view alongside the other workspace dispatcher
   ## reports (``init-report.json``, ``sync-report.json`` etc.) so
-  ## downstream tooling can read one well-known location.
-  if report.workspaceRoot.len == 0:
+  ## downstream tooling can read one well-known location. Opt-in: only
+  ## written when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
     return
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
   try:
-    createDir(reportDir)
+    createDir(parentDir(destination))
   except CatchableError:
     return
-  let reportPath = reportDir / "develop-report.json"
   try:
-    writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+    writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
   except CatchableError:
     discard
 
@@ -19631,7 +19680,8 @@ proc runWorkspaceDevelopCommand*(args: openArray[string]): int =
   ## ``<workspaceRoot>/.repro/develop-overrides.toml`` via M20.
   let parsed = parseDevelopArgs(args)
   let report = executeWorkspaceDevelop(parsed)
-  writeWorkspaceDevelopReport(report)
+  writeWorkspaceDevelopReport(report,
+    reportDestination(parsed.report, report.workspaceRoot, "develop"))
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -20162,7 +20212,8 @@ proc looksLikeWorkspaceDevelopArgs(args: openArray[string]): bool =
   ## marker is present AND none of the pre-M22 markers are present.
   ##
   ## The M22-distinctive markers are: ``--source[=...]``, ``--json``,
-  ## ``--workspace-root[=...]``. The pre-M22 markers are: ``--list``,
+  ## ``--report[=...]``, ``--workspace-root[=...]``. The pre-M22 markers
+  ## are: ``--list``,
   ## ``--into[=...]``, ``--cmake``, ``--cmake-binary[=...]``,
   ## ``--work-root[=...]``, ``--tool-provisioning[=...]``, ``--``
   ## (the command separator).
@@ -20170,6 +20221,7 @@ proc looksLikeWorkspaceDevelopArgs(args: openArray[string]): bool =
   for arg in args:
     if arg == "--source" or arg.startsWith("--source=") or
         arg == "--json" or
+        arg == "--report" or arg.startsWith("--report=") or
         arg == "--workspace-root" or arg.startsWith("--workspace-root="):
       hasM22Marker = true
     if arg == "--list" or
@@ -21596,6 +21648,11 @@ type
       ## init flows are unaffected; when ``require_signature`` (or a revision
       ## pin) is configured, ``bootstrapManifestCache`` verifies the manifest
       ## source's signature/pin and FAILS CLOSED on any mismatch.
+    json: bool
+      ## ``--json`` — echo the structured init report to stdout (same
+      ## document that ``--report`` persists).
+    report: ReportSpec
+      ## Opt-in ``--report[=PATH]`` artifact.
 
   WorkspaceInitResolution = object
     project: ResolvedProject
@@ -21852,6 +21909,10 @@ proc parseWorkspaceInitArgs(args: openArray[string]): WorkspaceInitArgs =
       # private cache.
       result.privateManifestUrl = valueFromFlag(args, i,
         "--private-manifest-url")
+    elif arg == "--json":
+      result.json = true
+    elif consumeReportFlag(arg, result.report):
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace init` flag: " & arg)
@@ -22716,15 +22777,18 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
     except CatchableError as err:
       stderr.writeLine("workspace init: could not generate workspace-projects.md: " & err.msg)
     alignWorkspaceRemotes(args.workspaceRoot, resolved.repos, identity)
-proc writeWorkspaceInitReport(report: WorkspaceInitReport) =
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
-  createDir(reportDir)
-  let reportPath = reportDir / "init-report.json"
-  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+proc writeWorkspaceInitReport(report: WorkspaceInitReport;
+                              destination: string) =
+  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
+    return
+  createDir(parentDir(destination))
+  writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspaceInitCommand*(args: openArray[string]): int =
   ## ``repro workspace init <project-or-variant> [--workspace-root=PATH]
-  ## [--tool-provisioning=path|nix|tarball|scoop]``.
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]
+  ## [--report[=PATH]]``.
   ##
   ## Exit codes (per M9 design):
   ##   - 0 — every missing repo cloned successfully AND no divergences.
@@ -22736,9 +22800,13 @@ proc runWorkspaceInitCommand*(args: openArray[string]): int =
   ##         apart.
   let parsed = parseWorkspaceInitArgs(args)
   let outcome = executeWorkspaceInit(parsed)
-  writeWorkspaceInitReport(outcome.report)
-  for line in renderInitTextLines(outcome.report):
-    stdout.writeLine(line)
+  writeWorkspaceInitReport(outcome.report,
+    reportDestination(parsed.report, outcome.report.workspaceRoot, "init"))
+  if parsed.json:
+    stdout.writeLine(pretty(outcome.report.toJsonNode(), indent = 2))
+  else:
+    for line in renderInitTextLines(outcome.report):
+      stdout.writeLine(line)
   if outcome.cloneFailures > 0:
     return 1
   if outcome.report.divergences.len > 0:
@@ -23236,6 +23304,7 @@ type
     excludeGroups: seq[string]
       ## RA-18 ``--groups=-a`` / ``-a`` entries: repos in any of these groups
       ## are excluded (exclusion wins over inclusion).
+    report: ReportSpec   ## Opt-in ``--report[=PATH]`` artifact.
 
 const
   SyncDefaultJobsNetwork = 8
@@ -23332,6 +23401,8 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
       result.json = true
     elif arg == "--verbose" or arg == "-v":
       result.verbose = true
+    elif consumeReportFlag(arg, result.report):
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace sync` flag: " & arg)
@@ -26269,11 +26340,13 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     report.exitCode = 0
   result.report = report
 
-proc writeWorkspaceSyncReport(report: WorkspaceSyncReport) =
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
-  createDir(reportDir)
-  let reportPath = reportDir / "sync-report.json"
-  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+proc writeWorkspaceSyncReport(report: WorkspaceSyncReport;
+                              destination: string) =
+  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
+    return
+  createDir(parentDir(destination))
+  writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ## ``repro workspace sync [<project>...] [--workspace-root=PATH]
@@ -26335,7 +26408,8 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   # report artifact (there is nothing to persist about a run that did not
   # happen). The plan is rendered to the chosen surface and we exit 0.
   if not parsed.dryRun:
-    writeWorkspaceSyncReport(outcome.report)
+    writeWorkspaceSyncReport(outcome.report,
+      reportDestination(parsed.report, outcome.report.workspaceRoot, "sync"))
     try:
       writeGeneratedWorkspaceProjects(parsed.workspaceRoot)
     except CatchableError as err:
@@ -26487,6 +26561,7 @@ type
     workspaceRoot: string
     projectName: string
     toolProvisioning: ToolProvisioningMode
+    report: ReportSpec   ## Opt-in ``--report[=PATH]`` artifact.
 
 proc parseWorkspacePullArgs(args: openArray[string]): WorkspacePullArgs =
   ## ``repro workspace pull`` argv parser. Mirrors ``sync``'s shape: an
@@ -26503,6 +26578,8 @@ proc parseWorkspacePullArgs(args: openArray[string]): WorkspacePullArgs =
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
         valueFromFlag(args, i, "--tool-provisioning"))
+    elif consumeReportFlag(arg, result.report):
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace pull` flag: " & arg)
@@ -26733,11 +26810,13 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
 
   result.report = report
 
-proc writeWorkspacePullReport(report: WorkspacePullReport) =
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
-  createDir(reportDir)
-  let reportPath = reportDir / "pull-report.json"
-  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+proc writeWorkspacePullReport(report: WorkspacePullReport;
+                              destination: string) =
+  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
+    return
+  createDir(parentDir(destination))
+  writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspacePullCommand*(args: openArray[string]): int =
   ## ``repro workspace pull [<project>] [--workspace-root=PATH]
@@ -26754,7 +26833,8 @@ proc runWorkspacePullCommand*(args: openArray[string]): int =
   ##         left for a rerun.
   let parsed = parseWorkspacePullArgs(args)
   let outcome = executeWorkspacePull(parsed)
-  writeWorkspacePullReport(outcome.report)
+  writeWorkspacePullReport(outcome.report,
+    reportDestination(parsed.report, outcome.report.workspaceRoot, "pull"))
   for line in renderPullTextLines(outcome.report):
     stdout.writeLine(line)
   outcome.report.exitCode
@@ -26931,6 +27011,10 @@ type
     # the legacy whole-workspace refusal (explicit ``repro workspace lock``
     # and post-commit keep that behavior).
     dirtyScopeNames: HashSet[string]
+    report: ReportSpec
+      ## Opt-in ``--report[=PATH]`` artifact. Left default-empty by the
+      ## in-process (hook / pre-push) constructions of this object, which
+      ## manage their own report destinations.
 
 proc parseWorkspaceLockArgs(args: openArray[string]): WorkspaceLockArgs =
   ## ``repro workspace lock`` argv parser. The single optional
@@ -26961,6 +27045,8 @@ proc parseWorkspaceLockArgs(args: openArray[string]): WorkspaceLockArgs =
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
         valueFromFlag(args, i, "--tool-provisioning"))
+    elif consumeReportFlag(arg, result.report):
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace lock` flag: " & arg)
@@ -27326,11 +27412,13 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   report.exitCode = 0
   result.report = report
 
-proc writeWorkspaceLockReport(report: WorkspaceLockReport) =
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
-  createDir(reportDir)
-  let reportPath = reportDir / "lock-report.json"
-  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+proc writeWorkspaceLockReport(report: WorkspaceLockReport;
+                              destination: string) =
+  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
+    return
+  createDir(parentDir(destination))
+  writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 # ---- RA-7: lock publication (commit + push) ------------------------------
 #
@@ -28384,7 +28472,8 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
   ##         discard first.
   let parsed = parseWorkspaceLockArgs(args)
   let outcome = executeWorkspaceLock(parsed)
-  writeWorkspaceLockReport(outcome.report)
+  writeWorkspaceLockReport(outcome.report,
+    reportDestination(parsed.report, outcome.report.workspaceRoot, "lock"))
   for line in renderLockTextLines(outcome.report):
     stdout.writeLine(line)
   # RA-7: an explicit ``repro workspace lock`` PUBLISHES (commit + push)
@@ -28984,8 +29073,14 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
     report.outcome = postCommitOutcomeTag(pcoOk)
     report.diagnostic = "wrote " & outcome.report.lockFilePath
     # Best-effort write of the M11 lock-report.json so a manual
-    # invocation matches the operator-facing surface.
-    try: writeWorkspaceLockReport(outcome.report)
+    # invocation matches the operator-facing surface. The post-commit
+    # hook is driven by git, not by an operator-supplied argv, so there
+    # is no ``--report`` surface to consult here: it keeps writing to the
+    # conventional location unconditionally.
+    try:
+      writeWorkspaceLockReport(outcome.report,
+        outcome.report.workspaceRoot / ".repro" / "workspace" /
+          "lock-report.json")
     except CatchableError: discard
   of 2:
     # Strict M11 exit-2 = dirty working tree. The post-commit policy
@@ -29421,6 +29516,8 @@ type
       ## certificate (a chicken-and-egg that would make a project's FIRST
       ## ``required`` cert un-issuable). The real pre-push hook leaves this
       ## ``false`` so the gate enforces the policy as designed.
+    report*: ReportSpec
+      ## Opt-in ``--report[=PATH]`` artifact.
 
 proc parseCheckMode(value: string): CheckMode =
   case value
@@ -29455,6 +29552,8 @@ proc parseCheckArgs*(args: openArray[string]): CheckArgs =
         valueFromFlag(args, i, "--tool-provisioning"))
     elif arg == "--json":
       result.json = true
+    elif consumeReportFlag(arg, result.report):
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro check` flag: " & arg)
@@ -32650,12 +32749,13 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # ⇒ this is a byte-identical no-op there.
   finalizePoliciesAndParticipation()
 
-proc writeCheckReport(report: CheckReport) =
+proc writeCheckReport(report: CheckReport; destination: string) =
   ## Persist the structured JSON report at the spec-mandated location.
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
-  createDir(reportDir)
-  let reportPath = reportDir / "check-report.json"
-  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
+    return
+  createDir(parentDir(destination))
+  writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 type
   PerBackendPublishTarget = object
@@ -33032,7 +33132,8 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
               "reachable"
             stderr.writeLine("repro check: " & warn)
             report.notices.add(warn)
-    writeCheckReport(report)
+    writeCheckReport(report,
+      reportDestination(parsed.report, report.workspaceRoot, "check"))
     if parsed.json:
       stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
     else:
@@ -33093,6 +33194,7 @@ type
       ## (see ``runPushCertifyStub``). ``--no-certify`` skips it entirely.
     toolProvisioning: ToolProvisioningMode
     json: bool
+    report: ReportSpec    ## Opt-in ``--report[=PATH]`` artifact.
 
   PushRepoOutcome = enum
     proPushed              ## had unpublished commits → ``git push`` succeeded.
@@ -33227,6 +33329,8 @@ proc parsePushArgs(args: openArray[string]): PushArgs =
       result.certify = false
     elif arg == "--json":
       result.json = true
+    elif consumeReportFlag(arg, result.report):
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro push` flag: " & arg)
@@ -34510,10 +34614,12 @@ proc toJsonNode(report: PushReport): JsonNode =
   result["retryCommand"] = %report.retryCommand
   result["exitCode"] = %report.exitCode
 
-proc writePushReport(report: PushReport) =
-  let dir = report.workspaceRoot / ".repro" / "workspace"
-  createDir(dir)
-  writeFile(dir / "push-report.json", pretty(report.toJsonNode(), indent = 2))
+proc writePushReport(report: PushReport; destination: string) =
+  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
+    return
+  createDir(parentDir(destination))
+  writeFile(destination, pretty(report.toJsonNode(), indent = 2))
 
 proc runPushCommand*(args: openArray[string]): int =
   ## ``repro push [<project>] [--sync] [--merge|--rebase]
@@ -34542,7 +34648,8 @@ proc runPushCommand*(args: openArray[string]): int =
   except CatchableError as err:
     stderr.writeLine("repro push: error: " & err.msg)
     return 1
-  writePushReport(report)
+  writePushReport(report,
+    reportDestination(parsed.report, report.workspaceRoot, "push"))
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -34778,6 +34885,7 @@ type
     aheadBehind: bool
     unmerged: bool
     fileDetails: bool
+    report: ReportSpec    ## Opt-in ``--report[=PATH]`` artifact.
 
 proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
   ## ``repro workspace status`` argv parser. The single optional
@@ -34819,6 +34927,8 @@ proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
       result.unmerged = true
     elif arg == "--file-details":
       result.fileDetails = true
+    elif consumeReportFlag(arg, result.report):
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace status` flag: " & arg)
@@ -35115,11 +35225,13 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
   report.exitCode = 0
   result = report
 
-proc writeWorkspaceStatusReport(report: WorkspaceStatusReport) =
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
-  createDir(reportDir)
-  let reportPath = reportDir / "status-report.json"
-  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+proc writeWorkspaceStatusReport(report: WorkspaceStatusReport;
+                                destination: string) =
+  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
+    return
+  createDir(parentDir(destination))
+  writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspaceStatusCommand*(args: openArray[string]): int =
   ## ``repro workspace status [<project>] [--workspace-root=PATH]
@@ -35131,7 +35243,8 @@ proc runWorkspaceStatusCommand*(args: openArray[string]): int =
   ##   - 1 — IO failure, missing project, or resolver error.
   let parsed = parseWorkspaceStatusArgs(args)
   let report = executeWorkspaceStatus(parsed)
-  writeWorkspaceStatusReport(report)
+  writeWorkspaceStatusReport(report,
+    reportDestination(parsed.report, report.workspaceRoot, "status"))
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -35207,6 +35320,7 @@ type
     workspaceRoot: string
     projectName: string
     json: bool
+    report: ReportSpec    ## Opt-in ``--report[=PATH]`` artifact.
 
 proc parseWorkspaceListArgs(args: openArray[string]): WorkspaceListArgs =
   ## ``repro workspace list`` argv parser. Same dispatch rules as
@@ -35221,6 +35335,8 @@ proc parseWorkspaceListArgs(args: openArray[string]): WorkspaceListArgs =
       result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
     elif arg == "--json":
       result.json = true
+    elif consumeReportFlag(arg, result.report):
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace list` flag: " & arg)
@@ -35301,11 +35417,13 @@ proc executeWorkspaceList(args: WorkspaceListArgs): WorkspaceListReport =
   report.exitCode = 0
   result = report
 
-proc writeWorkspaceListReport(report: WorkspaceListReport) =
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
-  createDir(reportDir)
-  let reportPath = reportDir / "list-report.json"
-  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+proc writeWorkspaceListReport(report: WorkspaceListReport;
+                              destination: string) =
+  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
+    return
+  createDir(parentDir(destination))
+  writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspaceListCommand*(args: openArray[string]): int =
   ## ``repro workspace list [<project>] [--workspace-root=PATH]
@@ -35316,7 +35434,8 @@ proc runWorkspaceListCommand*(args: openArray[string]): int =
   ##   - 1 — IO failure, missing project, or resolver error.
   let parsed = parseWorkspaceListArgs(args)
   let report = executeWorkspaceList(parsed)
-  writeWorkspaceListReport(report)
+  writeWorkspaceListReport(report,
+    reportDestination(parsed.report, report.workspaceRoot, "list"))
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -35998,6 +36117,7 @@ type
   WorkspaceManifestsArgs = object
     workspaceRoot: string
     json: bool
+    report: ReportSpec    ## Opt-in ``--report[=PATH]`` artifact.
 
 proc parseWorkspaceManifestsArgs(args: openArray[string]):
     WorkspaceManifestsArgs =
@@ -36012,6 +36132,8 @@ proc parseWorkspaceManifestsArgs(args: openArray[string]):
       result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
     elif arg == "--json":
       result.json = true
+    elif consumeReportFlag(arg, result.report):
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace manifests` flag: " & arg)
@@ -36145,11 +36267,13 @@ proc executeWorkspaceManifests(args: WorkspaceManifestsArgs):
   report.exitCode = 0
   result = report
 
-proc writeWorkspaceManifestsReport(report: WorkspaceManifestsReport) =
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
-  createDir(reportDir)
-  let reportPath = reportDir / "manifests-report.json"
-  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+proc writeWorkspaceManifestsReport(report: WorkspaceManifestsReport;
+                                   destination: string) =
+  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
+    return
+  createDir(parentDir(destination))
+  writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
   ## ``repro workspace manifests [--workspace-root=PATH] [--json]``.
@@ -36162,7 +36286,8 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
   ##   - 1 — IO failure or malformed workspace.toml.
   let parsed = parseWorkspaceManifestsArgs(args)
   let report = executeWorkspaceManifests(parsed)
-  writeWorkspaceManifestsReport(report)
+  writeWorkspaceManifestsReport(report,
+    reportDestination(parsed.report, report.workspaceRoot, "manifests"))
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -36210,6 +36335,7 @@ type
     projectName: string
     json: bool
     force: bool
+    report: ReportSpec    ## Opt-in ``--report[=PATH]`` artifact.
 
   SharedClonesRepoReport* = object
     name*: string
@@ -36298,6 +36424,8 @@ proc parseSharedClonesArgs(args: openArray[string]): SharedClonesArgs =
     elif arg == "--force":
       # RA-15: bypass the budget gate for the manual ``gc`` trigger.
       result.force = true
+    elif consumeReportFlag(arg, result.report):
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace shared-clones` flag: " & arg)
@@ -36458,11 +36586,13 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
           result.exitCode = 1
     result.repos.add(entry)
 
-proc writeSharedClonesReport(report: SharedClonesReport) =
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
-  createDir(reportDir)
-  let reportPath = reportDir / "shared-clones-report.json"
-  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+proc writeSharedClonesReport(report: SharedClonesReport;
+                             destination: string) =
+  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
+    return
+  createDir(parentDir(destination))
+  writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
   ## ``repro workspace shared-clones [list|rewire|root|gc] [<project>]
@@ -36473,7 +36603,9 @@ proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
   # ``root`` prints just the path; do not write a report file for it (it
   # makes no per-repo claims).
   if parsed.verb != "root":
-    writeSharedClonesReport(report)
+    writeSharedClonesReport(report,
+      reportDestination(parsed.report, report.workspaceRoot,
+        "shared-clones"))
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -36535,6 +36667,7 @@ type
     failFast: bool
     json: bool
     quiet: bool       ## suppress per-repo captured output in text mode.
+    report: ReportSpec    ## Opt-in ``--report[=PATH]`` artifact.
 
 proc toJsonNode*(report: WorkspaceForallReport): JsonNode =
   result = newJObject()
@@ -36596,6 +36729,8 @@ proc parseWorkspaceForallArgs(args: openArray[string]):
       result.quiet = true
     elif arg == "--json":
       result.json = true
+    elif consumeReportFlag(arg, result.report):
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace forall` flag: " & arg)
@@ -36727,12 +36862,14 @@ proc renderForallTextLines(report: WorkspaceForallReport;
       " — re-run after fixing, or inspect with `repro workspace forall -c " &
       "'<diagnostic>'`")
 
-proc writeWorkspaceForallReport(report: WorkspaceForallReport) =
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+proc writeWorkspaceForallReport(report: WorkspaceForallReport;
+                                destination: string) =
+  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
+    return
   try:
-    createDir(reportDir)
-    let reportPath = reportDir / "forall-report.json"
-    writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+    createDir(parentDir(destination))
+    writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
   except CatchableError:
     # The report file is a convenience artifact; never let it change the
     # command's exit code.
@@ -36744,7 +36881,8 @@ proc runWorkspaceForallCommand*(args: openArray[string]): int =
   ## participating repo (RA-20).
   let parsed = parseWorkspaceForallArgs(args)
   let report = executeWorkspaceForall(parsed)
-  writeWorkspaceForallReport(report)
+  writeWorkspaceForallReport(report,
+    reportDestination(parsed.report, report.workspaceRoot, "forall"))
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -36929,6 +37067,7 @@ type
     checkout: bool          ## M28: create AND switch every repo onto the branch.
     json: bool
     toolProvisioning: ToolProvisioningMode
+    report: ReportSpec      ## Opt-in ``--report[=PATH]`` artifact.
 
 proc parseBranchArgs*(args: openArray[string]): BranchArgs =
   ## ``repro branch [<name>] [--workspace-root=PATH]
@@ -36955,6 +37094,8 @@ proc parseBranchArgs*(args: openArray[string]): BranchArgs =
       result.checkout = true
     elif arg == "--json":
       result.json = true
+    elif consumeReportFlag(arg, result.report):
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro branch` flag: " & arg)
@@ -37357,31 +37498,33 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport
   ## after ``resolveCheckoutProject`` (which it reuses so the fork resolves
   ## the participating repo set exactly like ``checkout``/``start`` do).
 
-proc writeBranchReport(report: BranchReport) =
+proc branchReportRoot(report: BranchReport): string =
   # M27: in the fork form ``workspaceRoot`` is the NEW workspace, which is
   # where the report belongs. But a fork refused BEFORE materializing (a bad
   # destination, a remote-branch collision) must not conjure that directory
   # into existence just to drop a report in it — fall back to the source.
-  var root = report.workspaceRoot
-  if report.sourceWorkspaceRoot.len > 0 and not dirExists(root / ".git"):
-    root = report.sourceWorkspaceRoot
-  if root.len == 0:
+  result = report.workspaceRoot
+  if report.sourceWorkspaceRoot.len > 0 and not dirExists(result / ".git"):
+    result = report.sourceWorkspaceRoot
+
+proc writeBranchReport(report: BranchReport; destination: string) =
+  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
     return
-  let reportDir = root / ".repro" / "workspace"
-  createDir(reportDir)
-  let reportPath = reportDir / "branch-report.json"
-  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+  createDir(parentDir(destination))
+  writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runBranchCommand*(args: openArray[string]): int =
   ## ``repro branch [<name>] [<path>] [--include-changes]
   ## [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop]
   ## [--json]``.
   ##
-  ## See the M14 block comment above for the contract. Always
-  ## writes a ``branch-report.json`` artifact under
-  ## ``<workspaceRoot>/.repro/workspace/`` so a script consumer has a
-  ## parseable record of what happened, in addition to the
-  ## stdout-formatted text lines.
+  ## See the M14 block comment above for the contract. With
+  ## ``--report`` it writes a ``branch-report.json`` artifact under
+  ## ``<workspaceRoot>/.repro/workspace/`` (or the explicit
+  ## ``--report=PATH``) so a script consumer has a parseable record of
+  ## what happened, in addition to the stdout-formatted text lines.
+  ## Without ``--report`` nothing is written to disk.
   ##
   ## M27 — when the optional ``<path>`` positional is present the command
   ## FORKS: it materializes a new workspace there with every repo (and the
@@ -37397,7 +37540,8 @@ proc runBranchCommand*(args: openArray[string]): int =
       executeBranchCreateAndCheckout(parsed)
     else:
       executeBranchCreate(parsed)
-  writeBranchReport(report)
+  writeBranchReport(report,
+    reportDestination(parsed.report, branchReportRoot(report), "branch"))
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -37653,6 +37797,7 @@ type
     json: bool
     assumeYes: bool      ## RA-9 ``--yes``: skip the per-repo confirmation.
     toolProvisioning: ToolProvisioningMode
+    report: ReportSpec   ## Opt-in ``--report[=PATH]`` artifact.
 
 proc parseCheckoutArgs*(args: openArray[string]): CheckoutArgs =
   ## ``repro checkout <branch> [--workspace-root=PATH]
@@ -37674,6 +37819,8 @@ proc parseCheckoutArgs*(args: openArray[string]): CheckoutArgs =
       result.json = true
     elif arg == "--yes" or arg == "--force":
       result.assumeYes = true
+    elif consumeReportFlag(arg, result.report):
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro checkout` flag: " & arg)
@@ -38205,24 +38352,27 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
 
   result.exitCode = 0
 
-proc writeCheckoutReport(report: CheckoutReport) =
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
-  createDir(reportDir)
-  let reportPath = reportDir / "checkout-report.json"
-  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+proc writeCheckoutReport(report: CheckoutReport; destination: string) =
+  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  if destination.len == 0:
+    return
+  createDir(parentDir(destination))
+  writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runCheckoutCommand*(args: openArray[string]): int =
   ## ``repro checkout <branch> [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
   ##
-  ## See the M15 block comment above for the contract. Always writes a
-  ## ``checkout-report.json`` artifact under
-  ## ``<workspaceRoot>/.repro/workspace/`` so a script consumer has a
-  ## parseable record of what happened, in addition to the
-  ## stdout-formatted text lines.
+  ## See the M15 block comment above for the contract. With ``--report``
+  ## it writes a ``checkout-report.json`` artifact under
+  ## ``<workspaceRoot>/.repro/workspace/`` (or the explicit
+  ## ``--report=PATH``) so a script consumer has a parseable record of
+  ## what happened, in addition to the stdout-formatted text lines.
+  ## Without ``--report`` nothing is written to disk.
   let parsed = parseCheckoutArgs(args)
   let report = executeCheckout(parsed)
-  writeCheckoutReport(report)
+  writeCheckoutReport(report,
+    reportDestination(parsed.report, report.workspaceRoot, "checkout"))
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:

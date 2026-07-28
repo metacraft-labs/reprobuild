@@ -304,27 +304,29 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   # The caller's observation pipeline supplies ``hasUnpublishedCommits
   # = false`` whenever HEAD is strictly behind ``origin/<branch>``,
   # which means a fast-forward is safe.
-  if observation.currentBranch.len > 0 and lockedTip.len > 0 and
+  # Fast-forwardable: HEAD is behind its OWN upstream (``<remote>/<current
+  # branch>``). Syncing the trunk and syncing a feature branch are the SAME
+  # operation — only which ref is upstream differs — so both take this one path.
+  #
+  # This previously also required ``remoteBranchTip == lockedTip`` (the
+  # MANIFEST's pinned revision). That holds only when the checked-out branch IS
+  # the manifest's branch, so a feature branch could never fast-forward from its
+  # own upstream and a teammate's pushed commits never arrived. The M16
+  # ``feature_started`` mark then suppressed this arm outright on the marked
+  # branch, which made the collaboration case worse rather than better. Both are
+  # gone: the sync target is simply the current branch's upstream.
+  #
+  # ``hasUnpublishedCommits = false`` is the observation pipeline's signal that
+  # HEAD is strictly BEHIND its upstream rather than diverged, which is what
+  # makes the fast-forward sound.
+  if observation.currentBranch.len > 0 and
       observation.remoteBranchTip.len > 0 and
-      sameSha(observation.remoteBranchTip, lockedTip):
-    # M16 — the workspace's feature-started mark amplifies this case:
-    # if the workspace is marked AND the current branch is the marked
-    # feature branch, the operator is mid-feature and sync should NOT
-    # reconcile the working tree to the lock's tip. Treat as a
-    # divergent-feature-branch report-only outcome instead.
-    if observation.workspaceFeatureStarted and
-        observation.workspaceBranch.len > 0 and
-        observation.currentBranch == observation.workspaceBranch:
-      result.syncCase = scDivergentFeatureBranch
-      result.action = saNone
-      result.message = "feature branch '" & observation.currentBranch &
-        "' at '" & resolved.path &
-        "' is the workspace's marked started branch; sync preserves it"
-      return
+      not observation.hasUnpublishedCommits and
+      not sameSha(observation.headSha, observation.remoteBranchTip):
     result.syncCase = scCleanFastForwardable
     result.action = saFetchFastForward
     result.message = "fast-forwarding '" & resolved.path & "' on branch " &
-      observation.currentBranch & " → " & lockedTip
+      observation.currentBranch & " → " & observation.remoteBranchTip
     return
 
   # Everything else: the working tree is clean, has nothing
