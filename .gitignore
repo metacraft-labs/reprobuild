@@ -154,3 +154,8 @@ recipes/packages/source/*/test_*_source
 
 # Compiled test binary dropped beside its .nim under repro_build_engine tests.
 libs/repro_build_engine/tests/test_m9r75_source_write_reject
+
+# The codetracer-nim fork emits per-macro sourcemap JSON next to compiled
+# sources (column-aware tracer). Build noise for reprobuild; ignore it.
+macro_sourcemap_*.json
+**/macro_sourcemap_*.json

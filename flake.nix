@@ -158,6 +158,47 @@
       url = "git+https://github.com/metacraft-labs/codetracer-native-recorder?ref=stable";
       flake = false;
     };
+
+    # ── reprobuild Nim toolchain: the metacraft-labs/nim fork ──────────────
+    # The fork (codetracer-nim, Nim 2.3.1 devel) replaces nixpkgs'
+    # nim-unwrapped-2.2.4. It carries a compiler effect-inference fix (so
+    # `std/streams`/`std/json` compile under `--mm:orc -d:useNimRtl`, which stock
+    # 2.2.x rejects) plus CodeTracer's column-aware tracer. Built koch-boot-free
+    # by nix/nim-fork.nix. The fork uses the ``git+https`` clone form (its
+    # codeload tarball 404s, same as codetracer-native-recorder above); the
+    # compiler itself imports the three vendored deps below (trace/stew/results).
+    nim-fork-src = {
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=6d14bb1d22dd8d27ddfe331c73a50085568adb71";
+      flake = false;
+    };
+    nim-csources-src = {
+      url = "github:nim-lang/csources_v3/eeab3ac46e93f10efda8e58c4db02b9438319d71";
+      flake = false;
+    };
+    ct-trace-format-src = {
+      url = "github:metacraft-labs/codetracer-trace-format-nim/c2f3dfc3bcb423a939ff4d6eab42f848957f7048";
+      flake = false;
+    };
+    nim-stew-src = {
+      url = "github:status-im/nim-stew/83eb1157963b7f49351dbdd858355fa990bbe23c";
+      flake = false;
+    };
+    nim-results-src = {
+      url = "github:metacraft-labs/nim-result/df8113dda4c2d74d460a8fa98252b0b771bf1f27";
+      flake = false;
+    };
+    # nim devel bundles `checksums` (md5/sha1, split out of the stdlib) into
+    # dist/; the compiler imports it. Pinned to koch's ChecksumsStableCommit.
+    nim-checksums-src = {
+      url = "github:nim-lang/checksums/0b8e46379c5bc1bf73d8b3011908389c60fb9b98";
+      flake = false;
+    };
+    # nim devel's compiler imports nimony/src/lib/treemangler; koch bundles it
+    # into dist/ non-recursively. Pinned to koch's NimonyStableCommit.
+    nim-nimony-src = {
+      url = "github:nim-lang/nimony/bbfb21529845567c55b67d176354daef0e7d6c29";
+      flake = false;
+    };
   };
 
   outputs =
@@ -174,6 +215,13 @@
       io-mon-src,
       nim-shm-gset-src,
       nim-shm-queue-src,
+      nim-fork-src,
+      nim-csources-src,
+      ct-trace-format-src,
+      nim-stew-src,
+      nim-results-src,
+      nim-checksums-src,
+      nim-nimony-src,
       bundlers,
       ...
     }:
@@ -207,6 +255,19 @@
               pkgs.libblake3.out
             ];
           };
+          # The reprobuild Nim toolchain: the metacraft-labs/nim fork (Nim 2.3.1
+          # devel), built from source (nix/nim-fork.nix). Used everywhere the
+          # flake previously used `pkgs.nim2` (nixpkgs nim-unwrapped-2.2.4).
+          nimFork = import ./nix/nim-fork.nix {
+            inherit pkgs;
+            forkSrc = nim-fork-src;
+            csourcesSrc = nim-csources-src;
+            traceFormatSrc = ct-trace-format-src;
+            stewSrc = nim-stew-src;
+            resultsSrc = nim-results-src;
+            checksumsSrc = nim-checksums-src;
+            nimonySrc = nim-nimony-src;
+          };
           # CT_INTERPOSE_SRC points at the directory that *contains* the
           # ``ct_interpose`` package (config.nims validates it by probing
           # ``<dir>/ct_interpose/hook_registry.nim``), which is
@@ -230,7 +291,7 @@
               pkgs.bash
               pkgs.coreutils
               pkgs.just
-              pkgs.nim2
+              nimFork
             ];
             buildPhase = ''
               runHook preBuild
@@ -258,7 +319,7 @@
                     pkgs.coreutils
                     pkgs.gnugrep
                     pkgs.just
-                    pkgs.nim2
+                    nimFork
                   ]
                 }:$PATH
                 export BLAKE3_PREFIX=${blake3Prefix}
@@ -301,7 +362,7 @@
             nativeBuildInputs = [
               pkgs.just
               pkgs.makeWrapper
-              pkgs.nim2
+              nimFork
               # Spec-Implementation M2a: clingo is the ASP solver
               # reprobuild's repro_solver lib binds against. The CLI
               # tool is used by smoke tests and the C library
@@ -844,6 +905,8 @@
 
           packages.default = reprobuild;
           packages.reprobuild = reprobuild;
+          # The Nim fork toolchain, exposed for standalone build/verification.
+          packages.nim-fork = nimFork;
           packages.repro-binary-cache = reproBinaryCache;
           # Self-contained, /nix/store-free `repro` (see `reproPortable`).
           packages.repro-portable = reproPortable;
@@ -897,7 +960,7 @@
             packages = [
               runquotaTools
               pkgs.just
-              pkgs.nim2
+              nimFork
               # Used by the ct-build CI step to bake reprobuild's runtime library
               # dirs (clingo + zstd) into the bootstrapped `repro`'s RPATH, so it
               # resolves its dlopen()s when run inside CodeTracer's dev shell.
