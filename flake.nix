@@ -939,9 +939,14 @@
             # package build's binaries, not the `just bootstrap` binaries the
             # ct build and `just test` run), so add it here too — otherwise a
             # bootstrapped `repro` aborts with "could not load: libzstd.so.1".
+            # openssl is likewise dlopen'd: binaries built `--define:ssl` (e.g.
+            # repro-harvest-apt's HTTPS fetch via std/net) carry a bare
+            # `dlopen("libcrypto.so.3")`, so a bootstrapped `repro` aborts with
+            # "could not load: libcrypto.so" in the bare dev shell without it.
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
               pkgs.clingo
               pkgs.zstd
+              pkgs.openssl
             ];
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
