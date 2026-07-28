@@ -134,7 +134,7 @@ PKG_LIST=(
   #   dbus-user-session FS:partial STAGE:no  (uses dbus recipe; user
   #                                           session unit files aren't
   #                                           shipped by from-source)
-  libpam-systemd dbus-user-session
+  dbus-user-session
   # Essential userspace.
   #
   # M9.R.33.5 dropped: ``util-linux`` -- FS:done recipe ships 63

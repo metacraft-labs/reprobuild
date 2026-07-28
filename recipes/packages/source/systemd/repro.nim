@@ -220,6 +220,8 @@ package systemdSource:
     ## libseccomp supplies the seccomp BPF filter library systemd's
     ## per-unit SystemCallFilter= directive compiles against.
     "libseccomp >=2.5"
+    ## Linux-PAM enables pam_systemd.so for desktop login sessions.
+    "pam >=1.4"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
@@ -294,6 +296,7 @@ package systemdSource:
         "importd=false",
         "portabled=false",
         "polkit=false",
+        "pam=true",
         # M9.R.56.1 — explicitly pin the runtime paths systemd bakes
         # into libsystemd-core-257.so for its .mount / .automount /
         # .service unit machinery.  Without these, meson's
@@ -356,8 +359,4 @@ package systemdSource:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
-    ## DT_NEEDED inspection of the linked artifacts. Empty until
-    ## the M9.R.5b per-recipe pass populates per-output ELF
-    ## interrogation.
-    discard
+    "pam >=1.4"

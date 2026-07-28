@@ -675,8 +675,14 @@ link_base_recipe_binaries() {
   if [ "$recipe" = "systemd" ]; then
     local systemd_lib="$install_usr/lib/systemd"
     local udev_lib="$install_usr/lib/udev"
+    local pam_systemd_src=""
+    for pam_systemd_src in "$install_usr/lib64/security/pam_systemd.so" \
+      "$install_usr/lib/security/pam_systemd.so"; do
+      [ -f "$pam_systemd_src" ] && break
+    done
     if [ ! -x "$install_usr/bin/udevadm" ] || \
-       [ ! -e "$systemd_lib/systemd-udevd" ] || [ ! -d "$udev_lib/rules.d" ]; then
+       [ ! -e "$systemd_lib/systemd-udevd" ] || [ ! -d "$udev_lib/rules.d" ] || \
+       [ ! -f "$pam_systemd_src" ]; then
       echo "[stage-de-rootfs] required source systemd udev surface missing" >&2
       return 1
     fi
@@ -706,6 +712,22 @@ link_base_recipe_binaries() {
       "$STAGE_DIR/usr/lib/systemd/system/sockets.target.wants/systemd-udevd-control.socket"
     ln -sfn ../systemd-udevd-kernel.socket \
       "$STAGE_DIR/usr/lib/systemd/system/sockets.target.wants/systemd-udevd-kernel.socket"
+
+    local pam_systemd_target="${pam_systemd_src#$STAGE_DIR}"
+    mkdir -p "$STAGE_DIR/usr/lib64/security" \
+      "$STAGE_DIR/usr/lib/x86_64-linux-gnu/security"
+    ln -sfn "$pam_systemd_target" "$STAGE_DIR/usr/lib64/security/pam_systemd.so"
+    ln -sfn "$pam_systemd_target" \
+      "$STAGE_DIR/usr/lib/x86_64-linux-gnu/security/pam_systemd.so"
+
+    local pam_policy
+    for pam_policy in common-session common-session-noninteractive; do
+      local pam_policy_path="$STAGE_DIR/etc/pam.d/$pam_policy"
+      if ! grep -q '^[[:space:]]*session[[:space:]].*pam_systemd\.so' \
+          "$pam_policy_path"; then
+        printf '%s\n' 'session optional pam_systemd.so' >> "$pam_policy_path"
+      fi
+    done
   fi
   # iana-tzdata: also stage /usr/share/zoneinfo from the recipe's
   # install-mirror.  Other base-userspace recipes ship usr/share/
