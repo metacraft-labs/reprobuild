@@ -198,7 +198,7 @@ PKG_LIST=(
   # the Phase 4b shadow-link loop covers them.
   # Source bridge dropped ``iproute2`` after its configured Makefile recipe
   # exposed ip, tc, ss, and bridge through the Phase 4b shadow-link loop.
-  ca-certificates iputils-ping
+  ca-certificates
   # SDDM systemd unit + PAM glue.  The BINARY is shadowed by the
   # from-source recipe in stage-de-rootfs.sh (Phase 4); we keep the
   # apt entry to pick up the .service file + /etc/pam.d/sddm policy.

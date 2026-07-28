@@ -456,6 +456,7 @@ BASE_USERSPACE_RECIPES=(
   procps
   rsync
   strace
+  iputils
   iproute2
   xkeyboard-config
   libxkbfile
