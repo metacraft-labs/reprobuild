@@ -1,13 +1,13 @@
-## M27 — ``repro workspace start <branch> <path>`` FORKS the workspace onto a
+## M27 — ``repro branch <name> <path>`` FORKS the workspace onto a
 ## new feature branch in a fresh directory.
 ##
 ## The optional second positional is the whole mode switch: with it, the
 ## command materializes a NEW workspace at ``<path>`` and starts ``<branch>``
 ## there, cut from the CURRENT workspace's committed HEADs — including commits
 ## that exist only locally and were never pushed — while leaving the current
-## workspace untouched. See ``reprobuild-specs/CLI/workspace.md``
-## §``repro workspace start <branch> [<path>]`` (Fork form) and the M27
-## milestone in ``reprobuild-specs/Workspace-Management.milestones.org``.
+## workspace untouched. See ``reprobuild-specs/CLI/branch.md`` §"Fork form"
+## and the M27 milestone in
+## ``reprobuild-specs/Workspace-Management.milestones.org``.
 ##
 ## Sub-cases:
 ##
@@ -35,7 +35,9 @@
 ##   8. ``test_m27_fork_rerun_is_idempotent`` — re-running the identical
 ##      command against the finished fork converges (exit 0) rather than
 ##      colliding, per the resumable/no-rollback contract.
-##   9. ``test_m27_include_changes_requires_the_fork_form`` — the flag is a
+##   9. ``test_m27_workspace_branch_alias_forks_identically`` — the namespaced
+##      spelling ``repro workspace branch <name> <path>`` is the SAME command.
+##  10. ``test_m27_include_changes_requires_the_fork_form`` — the flag is a
 ##      usage error in place (nothing to copy into).
 ##
 ## Real components (NO mocks): the real ``git`` binary, real bare repos on the
@@ -221,7 +223,7 @@ proc setupFixture(gitBin, slug: string): M27Fixture =
 
 proc invokeFork(fx: M27Fixture; branch, path: string;
                 extra: seq[string] = @[]; cwd = ""): CmdResult =
-  var argv = @[fx.reproBin, "workspace", "start", branch, path,
+  var argv = @[fx.reproBin, "branch", branch, path,
                "--workspace-root=" & fx.workspaceRoot]
   for e in extra:
     argv.add(e)
@@ -231,7 +233,7 @@ proc invokeFork(fx: M27Fixture; branch, path: string;
     runShell(shellCommand(argv))
 
 proc readForkReport(root: string): JsonNode =
-  let reportPath = root / ".repro" / "workspace" / "start-report.json"
+  let reportPath = root / ".repro" / "workspace" / "branch-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
@@ -241,7 +243,7 @@ proc entryByPath(report: JsonNode; path: string): JsonNode =
       return entry
   newJNull()
 
-suite "M27 — repro workspace start <branch> <path> forks a new workspace":
+suite "M27 — repro branch <name> <path> forks a new workspace":
 
   test "test_m27_fork_materializes_new_workspace_on_branch":
     let gitBin = findExe("git")
@@ -281,7 +283,7 @@ suite "M27 — repro workspace start <branch> <path> forks a new workspace":
       # Report shape.
       let report = readForkReport(forkPath)
       check report["exitCode"].getInt() == 0
-      check report["mode"].getStr() == "fork"
+      check report["form"].getStr() == "fork"
       check report["branch"].getStr() == "feature-x"
       check report["sourceWorkspaceRoot"].getStr() == fx.workspaceRoot
       check report["workspaceRoot"].getStr() == forkPath
@@ -487,6 +489,29 @@ suite "M27 — repro workspace start <branch> <path> forks a new workspace":
       check headSha(gitBin, forkPath / "lib-a") == shaAfterFirst
       check currentBranch(gitBin, forkPath / "lib-a") == "feature-again"
 
+  test "test_m27_workspace_branch_alias_forks_identically":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "alias")
+      defer: removeDirEventually(fx.scratch)
+
+      let srcSha = headSha(gitBin, fx.workspaceRoot / "lib-a")
+      let forkPath = fx.scratch / "feature-workspace"
+      # The namespaced spelling must behave exactly like the top-level verb.
+      let res = runShell(shellCommand(@[
+        fx.reproBin, "workspace", "branch", "feature-alias", forkPath,
+        "--workspace-root=" & fx.workspaceRoot,
+      ]))
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+      check currentBranch(gitBin, forkPath / "lib-a") == "feature-alias"
+      check headSha(gitBin, forkPath / "lib-a") == srcSha
+      check currentBranch(gitBin, forkPath) == "feature-alias"
+      check readForkReport(forkPath)["form"].getStr() == "fork"
+
   test "test_m27_include_changes_requires_the_fork_form":
     let gitBin = findExe("git")
     if gitBin.len == 0:
@@ -497,7 +522,7 @@ suite "M27 — repro workspace start <branch> <path> forks a new workspace":
 
       # No <path> → in place, where there is nothing to copy INTO.
       let res = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "start", "feature-x",
+        fx.reproBin, "branch", "feature-x",
         "--include-changes",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
