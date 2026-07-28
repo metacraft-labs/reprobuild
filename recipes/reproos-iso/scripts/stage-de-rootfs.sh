@@ -600,6 +600,41 @@ link_base_recipe_binaries() {
       fi
     done
   fi
+  if [ "$recipe" = "systemd" ]; then
+    local systemd_lib="$install_usr/lib/systemd"
+    local udev_lib="$install_usr/lib/udev"
+    if [ ! -x "$install_usr/bin/udevadm" ] || \
+       [ ! -e "$systemd_lib/systemd-udevd" ] || [ ! -d "$udev_lib/rules.d" ]; then
+      echo "[stage-de-rootfs] required source systemd udev surface missing" >&2
+      return 1
+    fi
+
+    mkdir -p "$STAGE_DIR/usr/lib/systemd" "$STAGE_DIR/usr/lib/systemd/system" \
+      "$STAGE_DIR/usr/lib/systemd/system/sysinit.target.wants" \
+      "$STAGE_DIR/usr/lib/systemd/system/sockets.target.wants" "$STAGE_DIR/usr/lib"
+    ln -sfn "${systemd_lib#$STAGE_DIR}/systemd-udevd" \
+      "$STAGE_DIR/usr/lib/systemd/systemd-udevd"
+    rm -rf "$STAGE_DIR/usr/lib/udev"
+    ln -s "${udev_lib#$STAGE_DIR}" "$STAGE_DIR/usr/lib/udev"
+
+    local udev_unit
+    for udev_unit in systemd-udevd.service systemd-udev-trigger.service \
+      systemd-udev-settle.service systemd-udevd-control.socket \
+      systemd-udevd-kernel.socket; do
+      if [ -e "$systemd_lib/system/$udev_unit" ]; then
+        ln -sfn "${systemd_lib#$STAGE_DIR}/system/$udev_unit" \
+          "$STAGE_DIR/usr/lib/systemd/system/$udev_unit"
+      fi
+    done
+    ln -sfn ../systemd-udevd.service \
+      "$STAGE_DIR/usr/lib/systemd/system/sysinit.target.wants/systemd-udevd.service"
+    ln -sfn ../systemd-udev-trigger.service \
+      "$STAGE_DIR/usr/lib/systemd/system/sysinit.target.wants/systemd-udev-trigger.service"
+    ln -sfn ../systemd-udevd-control.socket \
+      "$STAGE_DIR/usr/lib/systemd/system/sockets.target.wants/systemd-udevd-control.socket"
+    ln -sfn ../systemd-udevd-kernel.socket \
+      "$STAGE_DIR/usr/lib/systemd/system/sockets.target.wants/systemd-udevd-kernel.socket"
+  fi
   # iana-tzdata: also stage /usr/share/zoneinfo from the recipe's
   # install-mirror.  Other base-userspace recipes ship usr/share/
   # files (man pages, locale, ...) that the apt-installed equivalents

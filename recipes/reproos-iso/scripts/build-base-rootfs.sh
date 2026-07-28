@@ -148,8 +148,8 @@ PKG_LIST=(
   # in usr/bin (kmod, depmod, insmod, lsmod, modinfo, modprobe, rmmod);
   # the Phase 4b shadow-link loop covers them.
   #
-  #   udev             FS:none    STAGE:no  (eudev recipe exists but
-  #                                          install-mirror is empty)
+  # Source bridge dropped ``udev`` after the systemd source recipe's daemon,
+  # CLI, rules, hardware database, and units were exposed by Phase 4b.
   # M9.R.33.12 dropped: ``tzdata`` -- FS:done iana-tzdata recipe
   # ships usr/share/zoneinfo + 2 binaries in usr/bin (zdump, zic) +
   # 1 in usr/sbin (zic alias).  The Phase 4b shadow-link loop emits
@@ -169,7 +169,6 @@ PKG_LIST=(
   # complete installed usr/bin and usr/sbin surfaces through Phase 4b.
   # Source bridge dropped ``nano`` after its upstream source recipe exposed
   # the editor through the Phase 4b shadow-link loop.
-  udev
   # Locale data (no build cost; pure data).
   #   locales          FS:none    STAGE:no  (glibc recipe exists but
   #                                          locale-gen is a runtime
