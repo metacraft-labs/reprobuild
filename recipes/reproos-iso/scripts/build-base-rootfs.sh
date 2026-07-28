@@ -74,7 +74,6 @@ BASE_IMAGE='debian:trixie-slim'
 #     shells out to via libs/repro_profile (these run on the live ISO
 #     against the QEMU virtio-blk target; they have no from-source
 #     equivalents in this milestone)
-#   - keyboard data (console-data) -- data packages
 #   - Xorg server (from-source recipe)
 #   - CA certificate bundle (data package)
 #
@@ -169,13 +168,9 @@ PKG_LIST=(
   # the editor through the Phase 4b shadow-link loop.
   # Use glibc's built-in C.UTF-8 locale. It provides the UTF-8 behavior the
   # live image needs without Debian's generated locales package.
-  # Keyboard + console data.
-  #   console-data     FS:none    STAGE:no
-  #   console-setup    FS:none    STAGE:no
-  #   keyboard-configuration FS:none STAGE:no
-  # Source bridge dropped ``xkb-data`` after the xkeyboard-config recipe
-  # exposed its complete /usr/share/X11/xkb data tree.
-  console-data console-setup keyboard-configuration
+  # Source-built xkeyboard-config supplies graphical keyboard layouts. The
+  # early recovery console intentionally uses the kernel's built-in keymap
+  # and font, so no Debian console configuration packages are required.
   # Network / CA / users.
   # Source bridge dropped ``ca-certificates`` after its source-built Mozilla
   # bundle was staged at the conventional OpenSSL paths.
