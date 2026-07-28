@@ -62,6 +62,8 @@ const
     "reprobuild.workspace-vcs.force-reset-receipt.v1"
   ForkBranchReceiptHeader* =
     "reprobuild.workspace-vcs.fork-branch-receipt.v1"
+  RefreshBareReceiptHeader* =
+    "reprobuild.workspace-vcs.refresh-bare-receipt.v1"
   ForcePushRebaseReceiptHeader* =
     "reprobuild.workspace-vcs.force-push-rebase-receipt.v1"
 
@@ -75,6 +77,7 @@ type
     gvoForceReset
     gvoForcePushRebase
     gvoForkBranch
+    gvoRefreshBare
 
   GitVcsPayload* = object
     ## Compact per-action payload encoded into ``builtinText`` so the
@@ -199,6 +202,7 @@ proc opTag(op: GitVcsOp): string =
   of gvoForceReset: "force-reset"
   of gvoForcePushRebase: "force-push-rebase"
   of gvoForkBranch: "fork-branch"
+  of gvoRefreshBare: "refresh-bare"
 
 proc parseOpTag(tag: string): GitVcsOp =
   case tag
@@ -210,6 +214,7 @@ proc parseOpTag(tag: string): GitVcsOp =
   of "force-reset": gvoForceReset
   of "force-push-rebase": gvoForcePushRebase
   of "fork-branch": gvoForkBranch
+  of "refresh-bare": gvoRefreshBare
   else:
     raise newException(ValueError,
       "unknown workspace-vcs operation tag: " & tag)
@@ -328,7 +333,7 @@ proc fingerprintPayload(payload: GitVcsPayload): seq[byte] =
   of gvoClone:
     discard
   of gvoFetch, gvoSwitch, gvoBranchCreate, gvoMergeFf, gvoForceReset,
-      gvoForcePushRebase, gvoForkBranch:
+      gvoForcePushRebase, gvoForkBranch, gvoRefreshBare:
     result.writeString(payload.repoPath)
     if payload.op == gvoForcePushRebase:
       result.writeString(payload.baseSha)
@@ -835,6 +840,51 @@ proc executeForkBranch(payload: GitVcsPayload;
   writeReceipt(receiptPath, renderForkBranchReceipt(payload, wanted, outcome))
   succeeded()
 
+proc executeRefreshBare(payload: GitVcsPayload;
+                        cwd, receiptPath: string): ActionResult =
+  ## RA-27 — clone-if-missing / fetch-if-present the RA-5 shared bare for
+  ## ``remoteUrl`` at ``repoPath``. Scheduling this as an engine action (rather
+  ## than the serial in-line loop it replaces) is safe because each unique URL
+  ## maps to its OWN bare directory: the race the serial loop guarded against is
+  ## per-bare, and distinct bares share no state. The caller deduplicates by
+  ## URL, so two actions never target the same directory.
+  let bare = payload.repoPath
+  var outcome = "fetched"
+  if dirExists(bare / "objects") or dirExists(bare / ".git"):
+    let res = runGit(payload,
+      ["-C", bare, "fetch", "--all", "--prune", "--quiet"])
+    if res.exitCode != 0:
+      return failed("refresh-bare-fetch-failed",
+        "git fetch in shared bare failed (" & $res.exitCode & "): " &
+          res.output.trimmed)
+  else:
+    let parent = bare.splitPath.head
+    if parent.len > 0:
+      try: createDir(parent)
+      except OSError as e:
+        return failed("refresh-bare-parent-failed",
+          "could not create cache parent " & parent & ": " & e.msg)
+    let res = runGit(payload,
+      ["clone", "--bare", "--quiet", payload.remoteUrl, bare])
+    if res.exitCode != 0:
+      # Leave no half-populated bare behind so the next attempt re-clones.
+      if dirExists(bare):
+        try: removeDir(bare)
+        except OSError: discard
+      return failed("refresh-bare-clone-failed",
+        "git clone --bare into shared cache failed (" & $res.exitCode & "): " &
+          res.output.trimmed)
+    outcome = "cloned"
+  var receipt = RefreshBareReceiptHeader & "\n"
+  receipt.add("kind\t" & WorkspaceVcsKind & "\n")
+  receipt.add("operation\trefresh-bare\n")
+  receipt.add("remote-url\t" & payload.remoteUrl & "\n")
+  receipt.add("bare-path\t" & bare & "\n")
+  receipt.add("outcome\t" & outcome & "\n")
+  receipt.add("git-version\t" & payload.identityVersion & "\n")
+  writeReceipt(receiptPath, receipt)
+  succeeded()
+
 proc executeMergeFf(payload: GitVcsPayload;
                     cwd, receiptPath: string): ActionResult =
   ## RA-5c — fast-forward the working tree onto its tracked remote
@@ -1084,6 +1134,8 @@ proc executeWorkspaceVcsAction(action: BuildAction): ActionResult {.gcsafe.} =
     result = executeForcePushRebase(payload, action.cwd, receiptPath)
   of gvoForkBranch:
     result = executeForkBranch(payload, action.cwd, receiptPath)
+  of gvoRefreshBare:
+    result = executeRefreshBare(payload, action.cwd, receiptPath)
   result.id = action.id
   # ``executeBuiltinAction`` wraps the returned ``ActionResult`` and
   # re-sets ``dependencyPolicyKind`` from the action's declared
@@ -1243,6 +1295,21 @@ proc gitForkBranchAction*(id: string; identity: GitToolIdentity;
   ## idempotent, so always executing is both correct and cheap.
   let payload = buildPayload(identity, gvoForkBranch, sourceRepoPath, "",
     branchName, targetSha, repoPath, receiptPath)
+  result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
+    deps = deps, outputs = @[receiptPath], cacheable = cacheable,
+    weakFingerprint = actionFingerprint(payload),
+    text = encodePayload(payload))
+
+proc gitRefreshBareAction*(id: string; identity: GitToolIdentity;
+                           remoteUrl, barePath, receiptPath: string;
+                           cwd = ""; deps: openArray[string] = [];
+                           cacheable = false): BuildAction =
+  ## RA-27 — engine action for the RA-5 shared-bare warm-up, so the per-URL
+  ## network work runs on the ``vcs/fetch`` pool instead of a serial loop.
+  ## ``cacheable = false``: the bare's freshness is live remote state, not a
+  ## function of the declared inputs.
+  let payload = buildPayload(identity, gvoRefreshBare, remoteUrl, "", "",
+    "", barePath, receiptPath)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),

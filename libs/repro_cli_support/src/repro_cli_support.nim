@@ -25775,6 +25775,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
 
   var sharedBareRefreshAction = initTable[string, string]()
   var fetchActions: seq[BuildAction]
+  var refreshActions: seq[BuildAction]
   var optimizedFetchSkips = 0
   for repoIdx, repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
@@ -25800,13 +25801,29 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     let cloneUrl = cloneUrlFor(repo)
     if cloneUrl.len > 0:
       if not sharedBareRefreshAction.hasKey(cloneUrl):
-        let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot,
-          cloneUrl)
-        if not refreshed.ok and refreshed.diagnostic.len > 0:
-          stderr.writeLine("workspace sync: shared-clone cache miss for " &
-            cloneUrl & " (continuing without shared bare): " &
-            refreshed.diagnostic)
-        sharedBareRefreshAction[cloneUrl] = ""
+        # RA-27 — the RA-5 shared-bare warm-up used to run HERE, serially, one
+        # blocking `git fetch`/`clone --bare` per unique URL BEFORE any progress
+        # was announced. On a 30+ repo workspace that is minutes of silence, and
+        # it is the phase that actually dominates `repro sync`.
+        #
+        # It is now an engine action per unique URL on the same ``vcs/fetch``
+        # pool as the fetches, which each fetch depends on (that is what the
+        # long-present-but-unpopulated ``refreshDepId`` was always for). Safe to
+        # parallelise: the race the serial loop guarded against is per-BARE, and
+        # each URL maps to its own bare directory — this table is exactly the
+        # per-URL dedupe that guarantees no two actions target the same one.
+        let barePath = sharedBarePath(cacheRoot, cloneUrl)
+        let rid = "workspace-sync-refresh-bare-" &
+          $sharedBareRefreshAction.len
+        var ra = gitRefreshBareAction(rid, identity,
+          remoteUrl = cloneUrl, barePath = barePath,
+          receiptPath = ".repro" / "workspace" / "receipts" /
+            (rid & ".receipt"))
+        ra.cwd = args.workspaceRoot
+        ra.pool = SyncFetchPool
+        ra.poolUnits = 1'u32
+        refreshActions.add(ra)
+        sharedBareRefreshAction[cloneUrl] = rid
       refreshDepId = sharedBareRefreshAction[cloneUrl]
     fetchActions.add(syncFetchActionFor(identity, args.workspaceRoot,
       repo, repoIdx, refreshDepId))
@@ -25820,6 +25837,9 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # begins. Suppressed under ``--json`` so the machine surface stays a single
   # clean document on stdout (progress goes to stderr regardless).
   let emitProgress = not args.json
+  if emitProgress and refreshActions.len > 0:
+    stderr.writeLine("workspace sync: warming " & $refreshActions.len &
+      " shared clone(s) in parallel (jobs-network=" & $jobsNetwork & ") ...")
   if emitProgress and fetchActions.len > 0:
     stderr.writeLine("workspace sync: fetching " & $fetchActions.len &
       " repo(s) in parallel (jobs-network=" & $jobsNetwork & ") ...")
@@ -25829,8 +25849,11 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     config.suppressTrace = true
     config.maxParallelism = uint32(max(jobsNetwork, jobsCheckout))
     config.fallbackToRunQuotaBypass = true
-    let res = runBuild(graph(fetchActions, @[pool(SyncFetchPool,
-      uint32(jobsNetwork))]), config)
+    # The warm-up actions ride in the SAME graph so the engine orders each
+    # fetch after its bare's refresh (via ``refreshDepId``) while still running
+    # independent URLs concurrently.
+    let res = runBuild(graph(refreshActions & fetchActions,
+      @[pool(SyncFetchPool, uint32(jobsNetwork))]), config)
     var fetchById = initTable[string, ActionResult]()
     for outcome in res.results:
       fetchById[outcome.id] = outcome
