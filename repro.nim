@@ -847,12 +847,22 @@ package reprobuild:
     #
     # ``repro_binary_cache`` stays plain for A2-A4 HTTP gates, while the
     # M6 helper carries ``-d:ssl`` because that gate exercises the daemon's
-    # HTTPS listener with real TLS. Both helpers compile the same Nim entry
-    # point with different define sets; keep them ordered so Nim never links
-    # one helper while the other is still writing generated same-source object
-    # state.
+    # HTTPS listener with real TLS.
+    #
+    # Both helpers (and the shipped ``repro-binary-cache`` entrypoint) build
+    # from the same ``repro_binary_cache`` source. Nim writes the linker
+    # response file as ``<projectName>_linkerArgs.txt`` into its process CWD
+    # and ``removeFile``s it right after linking (compiler/extccomp.nim), so
+    # two build actions compiling that source under the SAME projectName race
+    # on that one shared file — one action's post-link cleanup deletes it
+    # while the other's ``gcc @…`` is still reading it (the intermittent
+    # ``cannot find @repro_binary_cache_linkerArgs.txt`` link failure). Each
+    # helper therefore compiles through its own uniquely-named ``include``
+    # wrapper entry module so Nim derives a DISTINCT projectName (hence a
+    # distinct response-file name) per action. This removes the collision at
+    # the source, with no per-action CWD juggling.
     reprobuildTestHelpersActions.add(nim.c(
-      source = "apps/repro-binary-cache/repro_binary_cache.nim",
+      source = "apps/repro-binary-cache/repro_binary_cache_a2.nim",
       binary = "build/test-bin/repro_binary_cache",
       paths = sourceOnlyNimPaths,
       passL = testRuntimePassL,
@@ -862,14 +872,13 @@ package reprobuild:
       actionId = "reprobuild.test_helpers.repro_binary_cache"))
 
     reprobuildTestHelpersActions.add(nim.c(
-      source = "apps/repro-binary-cache/repro_binary_cache.nim",
+      source = "apps/repro-binary-cache/repro_binary_cache_m6.nim",
       binary = "build/test-bin/repro_binary_cache_m6",
       defines = @["ssl"],
       paths = sourceOnlyNimPaths,
       passL = testRuntimePassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_binary_cache_m6",
-      deps = @["reprobuild.test_helpers.repro_binary_cache"],
       cacheable = false,
       actionId = "reprobuild.test_helpers.repro_binary_cache_m6"))
 
