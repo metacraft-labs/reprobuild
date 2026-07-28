@@ -457,6 +457,7 @@ BASE_USERSPACE_RECIPES=(
   rsync
   strace
   iputils
+  nano
   iproute2
   xkeyboard-config
   libxkbfile

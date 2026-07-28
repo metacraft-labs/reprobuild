@@ -167,10 +167,9 @@ PKG_LIST=(
   # Source bridge dropped ``procps`` and ``less`` after their ncurses
   # build dependencies were made explicit. Their recipes now expose the
   # complete installed usr/bin and usr/sbin surfaces through Phase 4b.
-  #   nano             FS:none    STAGE:no  (not in from-source corpus;
-  #                                          editor convenience, no
-  #                                          runtime dep)
-  udev nano
+  # Source bridge dropped ``nano`` after its upstream source recipe exposed
+  # the editor through the Phase 4b shadow-link loop.
+  udev
   # Locale data (no build cost; pure data).
   #   locales          FS:none    STAGE:no  (glibc recipe exists but
   #                                          locale-gen is a runtime
