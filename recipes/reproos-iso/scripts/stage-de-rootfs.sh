@@ -506,6 +506,7 @@ BASE_USERSPACE_RECIPES=(
   xkbcomp
   adwaita-icon-theme
   dejavu-fonts
+  xorg-server
   xz
   tar
   coreutils
@@ -619,6 +620,20 @@ link_base_recipe_binaries() {
     rm -rf "$STAGE_DIR/usr/share/fonts/truetype/dejavu"
     ln -sf "$dejavu_link_target" \
       "$STAGE_DIR/usr/share/fonts/truetype/dejavu"
+  fi
+  # Xorg loads video/input modules through its compiled FHS module path rather
+  # than through the dynamic linker. Point that path at the source install
+  # mirror so the built-in modesetting driver is available to SDDM.
+  if [ "$recipe" = "xorg-server" ]; then
+    local xorg_modules="$install_usr/lib64/xorg/modules"
+    if [ ! -f "$xorg_modules/drivers/modesetting_drv.so" ]; then
+      echo "[stage-de-rootfs] required source Xorg modesetting module missing" >&2
+      return 1
+    fi
+    local xorg_modules_target="${xorg_modules#$STAGE_DIR}"
+    mkdir -p "$STAGE_DIR/usr/lib64/xorg"
+    rm -rf "$STAGE_DIR/usr/lib64/xorg/modules"
+    ln -sf "$xorg_modules_target" "$STAGE_DIR/usr/lib64/xorg/modules"
   fi
   if [ "$recipe" = "xz" ]; then
     if [ ! -x "$install_usr/bin/xz" ]; then

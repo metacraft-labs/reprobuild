@@ -136,6 +136,7 @@ const reproosImageRootfsDeps = @[
   "xkbcomp",
   "adwaita-icon-theme",
   "dejavu-fonts",
+  "xorg-server",
   "xz",
   "tar",
   "coreutils",
@@ -176,6 +177,7 @@ package reproosImage:
     "xkbcomp"
     "adwaita-icon-theme"
     "dejavu-fonts"
+    "xorg-server"
     "xz"
     "tar"
     "coreutils"
