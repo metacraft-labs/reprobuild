@@ -337,6 +337,100 @@ test "incomplete name" and:
             15,
         )
 
+        nim_specs, python_specs = inventory.parse_repro_tests(REPO_ROOT)
+        graph_sources = {spec.source for spec in nim_specs}
+        graph_binaries = {spec.binary for spec in nim_specs}
+
+        # Enrollment pins for sources that reached the tree without exact
+        # inventory coverage: the ten-case workspace branch-fork integration
+        # test (present in the generated graph but unpinned) and five
+        # from-source recipe tests that were on disk but missing from the
+        # generated graph entirely. Pin each by exact source path, exact
+        # generated binary path, generated-graph membership, language, suite
+        # count, per-source case count, and classification. Deleting an
+        # enrollment, substituting a different source for it, or drifting a
+        # per-source case count therefore fails this gate on its own, without
+        # relying on the aggregate totals below.
+        expected_enrollments = {
+            "recipes/packages/source/dejavu-fonts/"
+            "test_dejavu_fonts_source.nim": {
+                "binary": "build/test-bin/test_dejavu_fonts_source",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "pure unit",
+            },
+            "recipes/packages/source/font-util/"
+            "test_font_util_source.nim": {
+                "binary": "build/test-bin/test_font_util_source",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "pure unit",
+            },
+            "recipes/packages/source/libpciaccess/"
+            "test_libpciaccess_source.nim": {
+                "binary": "build/test-bin/test_libpciaccess_source",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "pure unit",
+            },
+            "recipes/packages/source/util-macros/"
+            "test_util_macros_source.nim": {
+                "binary": "build/test-bin/test_util_macros_source",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "pure unit",
+            },
+            "recipes/packages/source/xorg-server/"
+            "test_xorg_server_source.nim": {
+                "binary": "build/test-bin/test_xorg_server_source",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 2,
+                "class": "pure unit",
+            },
+            "tests/integration/"
+            "t_branch_forks_new_workspace_on_feature_branch.nim": {
+                "binary": "build/test-bin/"
+                "t_branch_forks_new_workspace_on_feature_branch",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 10,
+                "class": "integration",
+            },
+        }
+        for source, expected in expected_enrollments.items():
+            with self.subTest(enrolled_source=source):
+                self.assertTrue((REPO_ROOT / source).is_file())
+                self.assertIn(source, graph_sources)
+                self.assertIn(expected["binary"], graph_binaries)
+                self.assertEqual(
+                    [
+                        spec.binary
+                        for spec in nim_specs
+                        if spec.source == source
+                    ],
+                    [expected["binary"]],
+                )
+                self.assertIn(source, by_source)
+                entry = by_source[source]
+                for field in (
+                    "language",
+                    "sourceSuiteCount",
+                    "sourceCaseCount",
+                    "class",
+                ):
+                    with self.subTest(field=field):
+                        self.assertEqual(entry[field], expected[field])
+
+        # Exact generated-graph specification counts. An omitted, duplicated,
+        # or substituted enrollment cannot be absorbed by the case totals.
+        self.assertEqual(len(nim_specs), 1167)
+        self.assertEqual(len(python_specs), 4)
+
         nim_total = sum(
             item["sourceCaseCount"]
             for item in data["tests"]
@@ -347,7 +441,6 @@ test "incomplete name" and:
             for item in data["tests"]
             if item["language"] == "python"
         )
-        nim_specs, _ = inventory.parse_repro_tests(REPO_ROOT)
         provider_only_sources = []
         for spec in nim_specs:
             source = (REPO_ROOT / spec.source).read_text(
@@ -381,9 +474,14 @@ test "incomplete name" and:
                 "t_smoke_ct_test_unittest_parallel.nim"
             ],
         )
-        self.assertEqual(nim_total, 6519)
+        # Language totals and the overall total. These are the aggregate
+        # backstop for the per-source pins above, not a substitute for them.
+        self.assertEqual(nim_total, 6535)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6550)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6566)
+        self.assertEqual(
+            data["static"]["sourceCaseCount"], nim_total + python_total
+        )
 
     def assert_runtime_compiler_flow_inventory(self, data):
         flows = data["staticallyDetectedRuntimeCompilerFlows"]
@@ -642,8 +740,27 @@ test "incomplete name" and:
         declared_python_count = len(
             re.findall(r'(?m)^\s*"[^"]+\.py",?\s*$', python_block.group(1))
         )
+        # Exact checked-in graph specification counts, read textually from
+        # repro_tests.nim. This is an independent reading of the same
+        # generated file as the parse_repro_tests pins above, so a dropped,
+        # duplicated, or hand-edited specification fails here too.
+        self.assertEqual(declared_nim_count, 1167)
+        self.assertEqual(declared_python_count, 4)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
+        for enrolled in (
+            "recipes/packages/source/dejavu-fonts/"
+            "test_dejavu_fonts_source.nim",
+            "recipes/packages/source/font-util/test_font_util_source.nim",
+            "recipes/packages/source/libpciaccess/"
+            "test_libpciaccess_source.nim",
+            "recipes/packages/source/util-macros/test_util_macros_source.nim",
+            "recipes/packages/source/xorg-server/test_xorg_server_source.nim",
+            "tests/integration/"
+            "t_branch_forks_new_workspace_on_feature_branch.nim",
+        ):
+            with self.subTest(enrolled_source=enrolled):
+                self.assertIn(enrolled, {spec.source for spec in nim_specs})
         self.assertEqual(
             len({spec.source for spec in nim_specs}), declared_nim_count
         )
@@ -657,6 +774,7 @@ test "incomplete name" and:
             data["static"]["testEntryCount"],
             declared_nim_count + declared_python_count,
         )
+        self.assertEqual(data["static"]["testEntryCount"], 1171)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),

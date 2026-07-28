@@ -3230,6 +3230,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/dejavu-fonts/test_dejavu_fonts_source.nim",
+    binary: "build/test-bin/test_dejavu_fonts_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/dosfstools/test_dosfstools_source.nim",
     binary: "build/test-bin/test_dosfstools_source",
     defines: @[],
@@ -3280,6 +3288,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/ffmpeg/test_ffmpeg_source.nim",
     binary: "build/test-bin/test_ffmpeg_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/font-util/test_font_util_source.nim",
+    binary: "build/test-bin/test_font_util_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -3966,6 +3982,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/libpciaccess/test_libpciaccess_source.nim",
+    binary: "build/test-bin/test_libpciaccess_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/libpng/test_libpng_source.nim",
     binary: "build/test-bin/test_libpng_source",
     defines: @[],
@@ -4534,6 +4558,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/util-macros/test_util_macros_source.nim",
+    binary: "build/test-bin/test_util_macros_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/vim/test_vim_source.nim",
     binary: "build/test-bin/test_vim_source",
     defines: @[],
@@ -4576,6 +4608,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/xkeyboard-config/test_xkeyboard_config_source.nim",
     binary: "build/test-bin/test_xkeyboard_config_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/xorg-server/test_xorg_server_source.nim",
+    binary: "build/test-bin/test_xorg_server_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
