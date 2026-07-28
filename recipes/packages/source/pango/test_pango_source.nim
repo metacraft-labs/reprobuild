@@ -46,12 +46,19 @@ const ExpectedHash =
   "17065e2fcc5f5a5bdbffc884c956bfc7c451a96e8c4fb2f8ad837c6413cb5a01"
 
 const ExpectedMesonOptions = @[
-  "introspection=disabled",
+  "introspection=enabled",
   "documentation=false",
   "build-testsuite=false",
 ]
 
+const ExpectedMesonExtraEnv = @[
+  ("GI_GIR_PATH",
+    "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share/gir-1.0:" &
+    "/opt/repro/reprobuild/recipes/packages/source/harfbuzz/.repro/output/install/usr/share/gir-1.0"),
+]
+
 const ExpectedNativeBuildDeps = @[
+  "gobject-introspection",
   "meson >=1.2.0",
   "ninja >=1.10",
   "gcc >=7",
@@ -59,6 +66,8 @@ const ExpectedNativeBuildDeps = @[
 ]
 
 const ExpectedBuildDeps = @[
+  "gobject-introspection",
+  "glib2-introspection",
   "glib2 >=2.82",
   "harfbuzz >=8.4.0",
   "fribidi >=1.0.6",
@@ -111,6 +120,7 @@ suite "pangoSource — from-source recipe smoke test":
       if hasExactOptions:
         inc matchingSetupActions
         check optionArguments == 1
+        check action.env == ExpectedMesonExtraEnv
     check matchingSetupActions == 1
 
   test "retired build-flags registry cannot shadow explicit options":
