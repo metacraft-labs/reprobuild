@@ -51,10 +51,11 @@ reprobuild-ct-test-runner=main
 # wires IO_MON_SRC / NIM_STACKABLE_HOOKS_SRC from the ../io-mon and
 # ../nim-stackable-hooks siblings. io-mon is pinned to the hardened revision
 # used by this retirement campaign.
-io-mon=8b05657c75ccf389304ea9ffeb0433d472dccb3d
+io-mon=8a55c4f215cb08ba3d17b84929242c3dc4161fef
 nim-stackable-hooks=c6cf6ad1ac95201288825970b6ca53f630ea8996
 runquota=dev
 nim-shm-queue=08d87d26067568e980f4356c4abcf2a0d841a310
+nim-shm-gset=8a9f2f13beb24ab7949ff93c14fb34ae753bbe48
 repo-workspaces=main
 
 
