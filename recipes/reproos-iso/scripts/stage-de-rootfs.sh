@@ -672,6 +672,43 @@ link_base_recipe_binaries() {
       fi
     done
   fi
+  if [ "$recipe" = "dbus" ]; then
+    local dbus_system_units="$install_usr/lib/systemd/system"
+    local dbus_user_units="$install_usr/lib/systemd/user"
+    local dbus_sysusers="$install_usr/lib/sysusers.d/dbus.conf"
+    if [ ! -f "$dbus_system_units/dbus.service" ] || \
+       [ ! -f "$dbus_system_units/dbus.socket" ] || \
+       [ ! -f "$dbus_user_units/dbus.service" ] || \
+       [ ! -f "$dbus_user_units/dbus.socket" ] || [ ! -f "$dbus_sysusers" ]; then
+      echo "[stage-de-rootfs] required source D-Bus systemd units missing" >&2
+      return 1
+    fi
+
+    mkdir -p "$STAGE_DIR/usr/lib/systemd/system/multi-user.target.wants" \
+      "$STAGE_DIR/usr/lib/systemd/system/sockets.target.wants" \
+      "$STAGE_DIR/usr/lib/systemd/user/sockets.target.wants" \
+      "$STAGE_DIR/usr/lib/sysusers.d" "$STAGE_DIR/var/lib/dbus"
+    ln -sfn "${dbus_system_units#$STAGE_DIR}/dbus.service" \
+      "$STAGE_DIR/usr/lib/systemd/system/dbus.service"
+    ln -sfn "${dbus_system_units#$STAGE_DIR}/dbus.socket" \
+      "$STAGE_DIR/usr/lib/systemd/system/dbus.socket"
+    ln -sfn "${dbus_user_units#$STAGE_DIR}/dbus.service" \
+      "$STAGE_DIR/usr/lib/systemd/user/dbus.service"
+    ln -sfn "${dbus_user_units#$STAGE_DIR}/dbus.socket" \
+      "$STAGE_DIR/usr/lib/systemd/user/dbus.socket"
+    ln -sfn ../dbus.service \
+      "$STAGE_DIR/usr/lib/systemd/system/multi-user.target.wants/dbus.service"
+    ln -sfn ../dbus.socket \
+      "$STAGE_DIR/usr/lib/systemd/system/sockets.target.wants/dbus.socket"
+    ln -sfn ../dbus.socket \
+      "$STAGE_DIR/usr/lib/systemd/user/sockets.target.wants/dbus.socket"
+    ln -sfn "${dbus_sysusers#$STAGE_DIR}" \
+      "$STAGE_DIR/usr/lib/sysusers.d/dbus.conf"
+    if [ ! -e "$STAGE_DIR/etc/machine-id" ]; then
+      : > "$STAGE_DIR/etc/machine-id"
+    fi
+    ln -sfn /etc/machine-id "$STAGE_DIR/var/lib/dbus/machine-id"
+  fi
   if [ "$recipe" = "systemd" ]; then
     local systemd_lib="$install_usr/lib/systemd"
     local udev_lib="$install_usr/lib/udev"
@@ -690,6 +727,7 @@ link_base_recipe_binaries() {
     mkdir -p "$STAGE_DIR/usr/lib/systemd" "$STAGE_DIR/usr/lib/systemd/system" \
       "$STAGE_DIR/usr/lib/systemd/system/sysinit.target.wants" \
       "$STAGE_DIR/usr/lib/systemd/system/sockets.target.wants" "$STAGE_DIR/usr/lib"
+    cp -a "$systemd_lib"/. "$STAGE_DIR/usr/lib/systemd/"
     ln -sfn "${systemd_lib#$STAGE_DIR}/systemd-udevd" \
       "$STAGE_DIR/usr/lib/systemd/systemd-udevd"
     rm -rf "$STAGE_DIR/usr/lib/udev"
