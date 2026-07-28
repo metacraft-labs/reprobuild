@@ -6094,6 +6094,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_branch_checkout_marks_feature_branch.nim",
+    binary: "build/test-bin/t_branch_checkout_marks_feature_branch",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim",
     binary: "build/test-bin/t_branch_forks_new_workspace_on_feature_branch",
     defines: @[],
@@ -8416,14 +8424,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_workspace_shared_clones_list_and_rewire.nim",
     binary: "build/test-bin/t_workspace_shared_clones_list_and_rewire",
-    defines: @[],
-    requiresReproBinary: true,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "tests/integration/t_workspace_start_marks_feature_branch.nim",
-    binary: "build/test-bin/t_workspace_start_marks_feature_branch",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

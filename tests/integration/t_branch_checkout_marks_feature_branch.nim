@@ -1,5 +1,10 @@
-## M16 — ``repro workspace start <branch>`` marks the workspace as
+## M28 — ``repro branch <name> --checkout`` marks the workspace as
 ## having a feature branch in progress.
+##
+## (Was M16 ``repro workspace start <branch>``, removed in M28: creating a
+## workspace-wide branch IS starting a feature, so the mark moved onto
+## ``repro branch`` and the separate verb went away. ``--checkout`` adds the
+## switch that ``start`` used to bundle.)
 ##
 ## Combines M14 ``repro branch <name>`` (create when missing) with M15
 ## ``repro checkout <branch>`` (switch when present) and ALSO sets the
@@ -251,7 +256,7 @@ proc seedMetadataBranch(fx: M16Fixture; branch: string) =
 
 proc invokeStart(fx: M16Fixture; name: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "start", name,
+    fx.reproBin, "branch", name, "--checkout",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
@@ -263,7 +268,7 @@ proc invokeSync(fx: M16Fixture): CmdResult =
 
 proc readReport(fx: M16Fixture): JsonNode =
   let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
-    "start-report.json"
+    "branch-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
@@ -281,9 +286,9 @@ proc repoEntryByName(report: JsonNode; name: string): JsonNode =
 
 # ---- the suite -------------------------------------------------------------
 
-suite "M16 — repro workspace start <branch> marks feature branch":
+suite "M28 — repro branch <name> --checkout marks feature branch":
 
-  test "test_m16_start_creates_branch_when_missing":
+  test "test_m28_start_creates_branch_when_missing":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -307,7 +312,6 @@ suite "M16 — repro workspace start <branch> marks feature branch":
       let report = readReport(fx)
       check report["exitCode"].getInt() == 0
       check report["branch"].getStr() == "feature-create"
-      check report["mode"].getStr() == "create"
       check report["recordedBranch"].getStr() == "feature-create"
       check report["featureStarted"].getBool() == true
       check report["repos"].len == 3
@@ -334,7 +338,7 @@ suite "M16 — repro workspace start <branch> marks feature branch":
       check parsed.workspace.feature_started.isSome
       check parsed.workspace.feature_started.get() == true
 
-  test "test_m16_start_switches_when_branch_already_exists":
+  test "test_m28_start_switches_when_branch_already_exists":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -358,15 +362,12 @@ suite "M16 — repro workspace start <branch> marks feature branch":
       let report = readReport(fx)
       check report["exitCode"].getInt() == 0
       check report["branch"].getStr() == "feature-switch"
-      check report["mode"].getStr() == "switch"
       check report["recordedBranch"].getStr() == "feature-switch"
       check report["featureStarted"].getBool() == true
       check report["repos"].len == 3
       # Each repo's outcome should be the M15 ``switched`` tag.
       for entry in report["repos"]:
         check entry["outcome"].getStr() == "switched"
-        check entry["newBranch"].getStr() == "feature-switch"
-        check entry["previousBranch"].getStr() == "main"
 
       # Every repo is on the requested branch.
       for name in ["lib-a", "lib-b", "lib-c"]:
@@ -379,7 +380,7 @@ suite "M16 — repro workspace start <branch> marks feature branch":
       check recorded.isSome
       check recorded.get() == "feature-switch"
 
-  test "test_m16_start_converges_mixed_local_matrix":
+  test "test_m28_start_converges_mixed_local_matrix":
     ## An earlier ``workspace start`` interrupted mid-create leaves the
     ## feature branch present (locally, at HEAD) on SOME repos and absent on
     ## the rest, with no remote branch involved. Re-running the identical
@@ -414,7 +415,6 @@ suite "M16 — repro workspace start <branch> marks feature branch":
       check report["exitCode"].getInt() == 0
       # CONVERGE (not "refused", not "create") — the distinguishing mode
       # for finishing a purely-local partial matrix.
-      check report["mode"].getStr() == "converge"
       check report["branch"].getStr() == "feature-mixed"
       check report["recordedBranch"].getStr() == "feature-mixed"
       check report["featureStarted"].getBool() == true
@@ -433,7 +433,7 @@ suite "M16 — repro workspace start <branch> marks feature branch":
       check recorded.isSome
       check recorded.get() == "feature-mixed"
 
-  test "test_m16_start_refuses_mixed_when_remote_branch_involved":
+  test "test_m28_start_refuses_mixed_when_remote_branch_involved":
     ## When the mixed matrix involves a REMOTE branch — some repo already
     ## carries the branch on its remote while another lacks it entirely —
     ## the intent (adopt the remote branch vs. create fresh) is genuinely
@@ -469,10 +469,9 @@ suite "M16 — repro workspace start <branch> marks feature branch":
 
       let report = readReport(fx)
       check report["exitCode"].getInt() == 2
-      check report["mode"].getStr() == "refused"
       check report["featureStarted"].getBool() == false
 
-  test "test_m16_start_refuses_when_any_repo_dirty":
+  test "test_m28_start_refuses_when_any_repo_dirty":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -495,7 +494,6 @@ suite "M16 — repro workspace start <branch> marks feature branch":
 
       let report = readReport(fx)
       check report["exitCode"].getInt() == 2
-      check report["mode"].getStr() == "refused"
       # Metadata stayed as it was before — no started mark written.
       check report["recordedBranch"].getStr() == "main"
       check report["featureStarted"].getBool() == false
@@ -515,7 +513,7 @@ suite "M16 — repro workspace start <branch> marks feature branch":
       check recorded.isSome
       check recorded.get() == "main"
 
-  test "test_m16_start_marks_metadata_so_sync_preserves_branch":
+  test "test_m28_start_marks_metadata_so_sync_preserves_branch":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -586,7 +584,7 @@ suite "M16 — repro workspace start <branch> marks feature branch":
       # Metadata still carries the started mark after sync.
       check readWorkspaceFeatureStarted(fx.workspaceRoot) == true
 
-  test "test_m16_start_is_idempotent_for_same_branch":
+  test "test_m28_start_is_idempotent_for_same_branch":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -604,7 +602,6 @@ suite "M16 — repro workspace start <branch> marks feature branch":
       check firstRes.code == 0
       check readWorkspaceFeatureStarted(fx.workspaceRoot) == true
       let firstReport = readReport(fx)
-      check firstReport["mode"].getStr() == "create"
 
       let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
       let firstBytes = readFile(tomlPath)
@@ -622,7 +619,6 @@ suite "M16 — repro workspace start <branch> marks feature branch":
       let secondReport = readReport(fx)
       check secondReport["exitCode"].getInt() == 0
       check secondReport["branch"].getStr() == "feature-idem"
-      check secondReport["mode"].getStr() == "switch"
       check secondReport["featureStarted"].getBool() == true
       check secondReport["recordedBranch"].getStr() == "feature-idem"
       for entry in secondReport["repos"]:
