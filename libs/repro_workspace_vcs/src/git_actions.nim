@@ -60,6 +60,8 @@ const
     "reprobuild.workspace-vcs.merge-ff-receipt.v1"
   ForceResetReceiptHeader* =
     "reprobuild.workspace-vcs.force-reset-receipt.v1"
+  ForkBranchReceiptHeader* =
+    "reprobuild.workspace-vcs.fork-branch-receipt.v1"
   ForcePushRebaseReceiptHeader* =
     "reprobuild.workspace-vcs.force-push-rebase-receipt.v1"
 
@@ -72,6 +74,7 @@ type
     gvoMergeFf
     gvoForceReset
     gvoForcePushRebase
+    gvoForkBranch
 
   GitVcsPayload* = object
     ## Compact per-action payload encoded into ``builtinText`` so the
@@ -195,6 +198,7 @@ proc opTag(op: GitVcsOp): string =
   of gvoMergeFf: "merge-ff"
   of gvoForceReset: "force-reset"
   of gvoForcePushRebase: "force-push-rebase"
+  of gvoForkBranch: "fork-branch"
 
 proc parseOpTag(tag: string): GitVcsOp =
   case tag
@@ -205,6 +209,7 @@ proc parseOpTag(tag: string): GitVcsOp =
   of "merge-ff": gvoMergeFf
   of "force-reset": gvoForceReset
   of "force-push-rebase": gvoForcePushRebase
+  of "fork-branch": gvoForkBranch
   else:
     raise newException(ValueError,
       "unknown workspace-vcs operation tag: " & tag)
@@ -322,7 +327,8 @@ proc fingerprintPayload(payload: GitVcsPayload): seq[byte] =
   case payload.op
   of gvoClone:
     discard
-  of gvoFetch, gvoSwitch, gvoBranchCreate, gvoMergeFf, gvoForceReset, gvoForcePushRebase:
+  of gvoFetch, gvoSwitch, gvoBranchCreate, gvoMergeFf, gvoForceReset,
+      gvoForcePushRebase, gvoForkBranch:
     result.writeString(payload.repoPath)
     if payload.op == gvoForcePushRebase:
       result.writeString(payload.baseSha)
@@ -472,6 +478,24 @@ proc renderBranchCreateReceipt(payload: GitVcsPayload;
   result.add("branch\t" & payload.branchName & "\n")
   result.add("repo-path\t" & payload.repoPath & "\n")
   result.add("head-sha\t" & headSha & "\n")
+  result.add("outcome\t" & outcome & "\n")
+  result.add("git-version\t" & payload.identityVersion & "\n")
+  result.add("git-identity\t" & payload.identityDigestHex & "\n")
+
+proc renderForkBranchReceipt(payload: GitVcsPayload;
+                             targetSha, outcome: string): string =
+  ## ``outcome`` is one of ``created`` (the branch was created at the
+  ## requested SHA and checked out), ``already-at-sha`` (an idempotent
+  ## re-run — the branch already pointed at the SHA; the checkout is
+  ## still asserted) or ``fetched-then-created`` (the SHA was absent and
+  ## had to be fetched from the source checkout first).
+  result = ForkBranchReceiptHeader & "\n"
+  result.add("kind\t" & WorkspaceVcsKind & "\n")
+  result.add("operation\tfork-branch\n")
+  result.add("branch\t" & payload.branchName & "\n")
+  result.add("repo-path\t" & payload.repoPath & "\n")
+  result.add("source\t" & payload.remoteUrl & "\n")
+  result.add("target-sha\t" & targetSha & "\n")
   result.add("outcome\t" & outcome & "\n")
   result.add("git-version\t" & payload.identityVersion & "\n")
   result.add("git-identity\t" & payload.identityDigestHex & "\n")
@@ -731,6 +755,86 @@ proc executeBranchCreate(payload: GitVcsPayload;
   writeReceipt(receiptPath, receipt)
   succeeded()
 
+proc executeForkBranch(payload: GitVcsPayload;
+                       cwd, receiptPath: string): ActionResult =
+  ## M27 — create ``branchName`` at an EXPLICIT ``revision`` (the source
+  ## workspace's committed HEAD) and check it out, fetching that object
+  ## from the source checkout (``remoteUrl``, a local path) when the
+  ## freshly cloned repo does not carry it yet.
+  ##
+  ## This is the fork counterpart to ``gvoBranchCreate``: that one always
+  ## branches from the target repo's OWN HEAD and never switches, which
+  ## cannot express "branch at the SHA another checkout is sitting on" —
+  ## including a commit that exists only locally and was never pushed.
+  ##
+  ## Idempotent, so a partially completed fork is finished by re-running
+  ## the identical action: a branch already at the requested SHA is
+  ## accepted and only the checkout is asserted. A branch of the same name
+  ## at a DIFFERENT SHA is a collision and fails loudly rather than
+  ## silently moving the operator's ref.
+  let target = absoluteRepoPath(payload, cwd)
+  if not dirExists(target / ".git"):
+    return failed("fork-branch-target-missing",
+      "fork-branch target is not a git working tree: " & target)
+  let wanted = payload.revision.strip()
+  if wanted.len == 0:
+    return failed("fork-branch-no-revision",
+      "fork-branch requires the source revision to branch at")
+
+  # Ensure the object is present. A fresh clone of the shared remote has
+  # every PUBLISHED commit, so this only fires for local-only work.
+  var outcome = "created"
+  let present = runGit(payload,
+    ["-C", target, "cat-file", "-e", wanted & "^{commit}"])
+  if present.exitCode != 0:
+    if payload.remoteUrl.len == 0:
+      return failed("fork-branch-source-missing",
+        "commit " & wanted & " is absent from " & target &
+          " and no source checkout was supplied to fetch it from")
+    let fetched = runGit(payload,
+      ["-C", target, "fetch", "--no-tags", payload.remoteUrl, wanted])
+    if fetched.exitCode != 0:
+      return failed("fork-branch-fetch-failed",
+        "could not fetch " & wanted & " from " & payload.remoteUrl &
+          " (" & $fetched.exitCode & "): " & fetched.output.trimmed)
+    let recheck = runGit(payload,
+      ["-C", target, "cat-file", "-e", wanted & "^{commit}"])
+    if recheck.exitCode != 0:
+      return failed("fork-branch-fetch-incomplete",
+        "commit " & wanted & " still absent after fetching from " &
+          payload.remoteUrl)
+    outcome = "fetched-then-created"
+
+  let existing = resolveBranchSha(payload, target, payload.branchName)
+  if existing.diagnostic.len > 0:
+    return failed("fork-branch-probe-failed", existing.diagnostic)
+  if existing.exists:
+    if existing.sha != wanted:
+      return failed("branch-collision",
+        "branch '" & payload.branchName & "' already exists at " &
+          existing.sha & " (≠ requested " & wanted & ") in " & target)
+    outcome = "already-at-sha"
+    # Idempotent re-run: the branch is right, but HEAD may not be on it
+    # yet (a run interrupted between create and checkout). Assert it.
+    let current = runGit(payload,
+      ["-C", target, "symbolic-ref", "--short", "-q", "HEAD"])
+    if current.exitCode != 0 or current.output.trimmed != payload.branchName:
+      let sw = runGit(payload, ["-C", target, "checkout", payload.branchName])
+      if sw.exitCode != 0:
+        return failed("fork-branch-checkout-failed",
+          "git checkout " & payload.branchName & " exited " & $sw.exitCode &
+            ": " & sw.output.trimmed)
+  else:
+    let created = runGit(payload,
+      ["-C", target, "checkout", "-b", payload.branchName, wanted])
+    if created.exitCode != 0:
+      return failed("fork-branch-create-failed",
+        "git checkout -b " & payload.branchName & " " & wanted & " exited " &
+          $created.exitCode & ": " & created.output.trimmed)
+
+  writeReceipt(receiptPath, renderForkBranchReceipt(payload, wanted, outcome))
+  succeeded()
+
 proc executeMergeFf(payload: GitVcsPayload;
                     cwd, receiptPath: string): ActionResult =
   ## RA-5c — fast-forward the working tree onto its tracked remote
@@ -978,6 +1082,8 @@ proc executeWorkspaceVcsAction(action: BuildAction): ActionResult {.gcsafe.} =
     result = executeForceReset(payload, action.cwd, receiptPath)
   of gvoForcePushRebase:
     result = executeForcePushRebase(payload, action.cwd, receiptPath)
+  of gvoForkBranch:
+    result = executeForkBranch(payload, action.cwd, receiptPath)
   result.id = action.id
   # ``executeBuiltinAction`` wraps the returned ``ActionResult`` and
   # re-sets ``dependencyPolicyKind`` from the action's declared
@@ -1114,6 +1220,29 @@ proc gitBranchCreate*(id: string; identity: GitToolIdentity;
   ## with ``reason = "branch-collision"``.
   let payload = buildPayload(identity, gvoBranchCreate, "", "", branchName,
     "", repoPath, receiptPath)
+  result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
+    deps = deps, outputs = @[receiptPath], cacheable = cacheable,
+    weakFingerprint = actionFingerprint(payload),
+    text = encodePayload(payload))
+
+proc gitForkBranchAction*(id: string; identity: GitToolIdentity;
+                          branchName, sourceRepoPath, targetSha,
+                          repoPath, receiptPath: string;
+                          cwd = ""; deps: openArray[string] = [];
+                          cacheable = false): BuildAction =
+  ## Construct the M27 fork-branch action used by
+  ## ``repro workspace start <branch> <path>``: create ``branchName`` at
+  ## ``targetSha`` (the source workspace's committed HEAD for this repo)
+  ## and check it out, fetching the commit from ``sourceRepoPath`` when
+  ## the freshly cloned repo does not already carry it.
+  ##
+  ## ``cacheable`` defaults to ``false`` for the same reason as
+  ## ``gitSwitchAction``: the action mutates a working tree whose
+  ## precondition is the LIVE state of the target checkout, not a
+  ## deterministic function of the declared inputs. The executor is
+  ## idempotent, so always executing is both correct and cheap.
+  let payload = buildPayload(identity, gvoForkBranch, sourceRepoPath, "",
+    branchName, targetSha, repoPath, receiptPath)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),

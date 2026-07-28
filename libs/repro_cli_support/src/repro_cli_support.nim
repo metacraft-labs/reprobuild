@@ -22768,6 +22768,56 @@ proc looksLikeColdStartUrl(spec: string): bool =
   ## cwd); this helper just rejects an empty spec.
   spec.strip().len > 0
 
+proc canonicalPathForCompare*(path: string): string =
+  ## Resolve symlinks so two spellings of the SAME directory compare equal.
+  ## This matters on macOS, where the process cwd reports ``/private/var/...``
+  ## while a caller-supplied path is the ``/var/...`` symlink — a plain string
+  ## compare would silently miss and let a destination guard through.
+  ## A path that does not exist yet is resolved through its deepest existing
+  ## ancestor, since the destination of a fresh materialization is by
+  ## definition not on disk.
+  if path.len == 0:
+    return path
+  try:
+    if dirExists(path) or fileExists(path):
+      return expandFilename(path)
+  except OSError, IOError:
+    discard
+  var head = absolutePath(path)
+  var tail: seq[string] = @[]
+  while head.len > 1 and not dirExists(head):
+    tail.add(head.extractFilename)
+    let parent = head.parentDir
+    if parent.len == 0 or parent == head:
+      break
+    head = parent
+  var base = head
+  try:
+    if dirExists(base):
+      base = expandFilename(base)
+  except OSError, IOError:
+    discard
+  for i in countdown(tail.high, 0):
+    base = base / tail[i]
+  base
+
+proc pathIsCwdOrAncestor*(candidate, fromDir: string): bool =
+  ## True when ``candidate`` IS ``fromDir`` or one of its ancestors. Shared by
+  ## RA-31 ``workspace init <url>`` and M27 ``workspace start <branch> <path>``:
+  ## both materialize into a fresh NAMED directory and must refuse to operate
+  ## on the current or an enclosing checkout (the destructive upward-walk trap
+  ## that made the repo-workspaces pilot drop its own ``init``/``start``).
+  let wanted = canonicalPathForCompare(candidate)
+  var dir = canonicalPathForCompare(fromDir)
+  while true:
+    if dir == wanted:
+      return true
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+  false
+
 proc cloneOrgRootRepo(identity: GitToolIdentity;
                       url, destination: string):
     tuple[ok: bool; diagnostic: string] =
@@ -22818,17 +22868,7 @@ proc runWorkspaceInitFromUrl*(args: openArray[string];
   # Safety: refuse to clone INTO the cwd itself or an ancestor of it. We test
   # this by walking cwd's ancestry up to the filesystem root and checking
   # whether destAbs is cwd or one of its ancestors.
-  proc isCwdOrAncestor(candidate, fromDir: string): bool =
-    var dir = fromDir
-    while true:
-      if dir == candidate:
-        return true
-      let parent = dir.parentDir
-      if parent.len == 0 or parent == dir:
-        break
-      dir = parent
-    false
-  if isCwdOrAncestor(destAbs, cwd):
+  if pathIsCwdOrAncestor(destAbs, cwd):
     raise newException(ValueError,
       "`repro workspace init <url>` refuses to materialise into the " &
         "current or an ancestor directory ('" & destAbs & "'); it always " &
@@ -38906,6 +38946,11 @@ type
     featureStarted*: bool
     repos*: seq[WorkspaceStartRepoEntry]
     exitCode*: int
+    sourceWorkspaceRoot*: string
+      ## M27 fork form only: the workspace the fork was cut FROM.
+      ## ``workspaceRoot`` is then the NEW workspace. Empty in place.
+    includeChanges*: bool
+      ## M27 fork form only: whether ``--include-changes`` was requested.
 
 proc toJsonNode*(report: WorkspaceStartReport): JsonNode =
   result = newJObject()
@@ -38929,6 +38974,9 @@ proc toJsonNode*(report: WorkspaceStartReport): JsonNode =
     repos.add(obj)
   result["repos"] = repos
   result["exitCode"] = %report.exitCode
+  if report.sourceWorkspaceRoot.len > 0:
+    result["sourceWorkspaceRoot"] = %report.sourceWorkspaceRoot
+    result["includeChanges"] = %report.includeChanges
 
 proc renderWorkspaceStartTextLines*(report: WorkspaceStartReport): seq[string] =
   for entry in report.repos:
@@ -38950,19 +38998,36 @@ proc renderWorkspaceStartTextLines*(report: WorkspaceStartReport): seq[string] =
     result.add("workspace start: '" & report.branch &
       "' active across " & $report.repos.len & " repos; metadata=" &
       report.recordedBranch & markedSuffix)
+    # M27 fork form: the operator's next step is in a DIFFERENT directory
+    # than the one they ran from, so say where it is (communicate-before-
+    # execute's closing half) and point at the readiness check.
+    if report.sourceWorkspaceRoot.len > 0:
+      result.add("workspace start: forked from " &
+        report.sourceWorkspaceRoot & " (left untouched) into " &
+        report.workspaceRoot)
+      result.add("workspace start: cd " & report.workspaceRoot &
+        " && repro health")
 
 type
   WorkspaceStartArgs = object
     workspaceRoot: string
     projectName: string
     branchName: string
+    forkPath: string        ## M27: optional 2nd positional — fork destination.
+    includeChanges: bool    ## M27: also copy the source's uncommitted work.
     json: bool
     toolProvisioning: ToolProvisioningMode
 
 proc parseWorkspaceStartArgs*(args: openArray[string]): WorkspaceStartArgs =
-  ## ``repro workspace start <branch> [--workspace-root=PATH]
-  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``. Positional
-  ## ``<branch>`` is REQUIRED.
+  ## ``repro workspace start <branch> [<path>] [--include-changes]
+  ## [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop]
+  ## [--json]``. Positional ``<branch>`` is REQUIRED.
+  ##
+  ## M27: the OPTIONAL second positional ``<path>`` selects the fork form —
+  ## materialize a NEW workspace there and start the branch in it, instead of
+  ## branching the current workspace in place. Its presence is the whole mode
+  ## switch; there is deliberately no mode flag (see
+  ## ``reprobuild-specs/CLI/workspace.md`` §``repro workspace start``).
   result.workspaceRoot = ""
   result.toolProvisioning = tpmPathOnly
   var i = 0
@@ -38974,6 +39039,8 @@ proc parseWorkspaceStartArgs*(args: openArray[string]): WorkspaceStartArgs =
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
         valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--include-changes":
+      result.includeChanges = true
     elif arg == "--json":
       result.json = true
     elif arg.startsWith("-"):
@@ -38981,6 +39048,8 @@ proc parseWorkspaceStartArgs*(args: openArray[string]): WorkspaceStartArgs =
         "unsupported `repro workspace start` flag: " & arg)
     elif result.branchName.len == 0:
       result.branchName = arg
+    elif result.forkPath.len == 0:
+      result.forkPath = arg
     else:
       raise newException(ValueError,
         "unexpected positional argument to `repro workspace start`: " & arg)
@@ -38988,9 +39057,381 @@ proc parseWorkspaceStartArgs*(args: openArray[string]): WorkspaceStartArgs =
   if result.branchName.len == 0:
     raise newException(ValueError,
       "`repro workspace start` requires a branch name positional argument")
+  if result.includeChanges and result.forkPath.len == 0:
+    # In place there is nothing to copy INTO — the changes are already here.
+    raise newException(ValueError,
+      "`--include-changes` requires the fork form " &
+        "`repro workspace start <branch> <path>`; in place the working " &
+        "trees already carry their changes")
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
+  if result.forkPath.len > 0:
+    result.forkPath = absolutePath(result.forkPath)
+
+proc copyWorkingTreeChanges(identity: GitToolIdentity;
+                            srcRepo, dstRepo, scratchDir, label: string):
+    tuple[ok: bool; changed: bool; diagnostic: string] =
+  ## M27 ``--include-changes`` — copy ``srcRepo``'s uncommitted work into
+  ## ``dstRepo``. The source is only READ: its changes stay exactly where they
+  ## are (copy, never move), so a failed apply can never cost the operator
+  ## work that exists nowhere else.
+  ##
+  ## Two disjoint halves, because one git command covers neither:
+  ##   * TRACKED modifications (staged + unstaged) via ``git diff HEAD
+  ##     --binary`` piped through ``git apply`` in the destination;
+  ##   * UNTRACKED, non-ignored files via ``ls-files --others
+  ##     --exclude-standard``, copied verbatim. Starting a feature branch
+  ##     almost always means new files, so skipping these would silently
+  ##     drop the most interesting part of the WIP.
+  var anyChange = false
+  # ---- tracked ----------------------------------------------------------
+  let diff = gitRunPlain(identity,
+    ["-C", srcRepo, "diff", "HEAD", "--binary"])
+  if diff.code != 0:
+    return (ok: false, changed: false,
+      diagnostic: "git diff HEAD failed in " & srcRepo & " (" & $diff.code &
+        "): " & diff.output.strip())
+  if diff.output.strip().len > 0:
+    createDir(scratchDir)
+    let patchPath = scratchDir / ("include-changes-" & label & ".patch")
+    try:
+      writeFile(patchPath, diff.output)
+    except IOError as err:
+      return (ok: false, changed: false,
+        diagnostic: "could not stage patch file: " & err.msg)
+    let applied = gitRunPlain(identity,
+      ["-C", dstRepo, "apply", "--whitespace=nowarn", patchPath])
+    if applied.code != 0:
+      return (ok: false, changed: false,
+        diagnostic: "git apply failed in " & dstRepo & " (" & $applied.code &
+          "): " & applied.output.strip())
+    anyChange = true
+  # ---- untracked --------------------------------------------------------
+  let others = gitRunPlain(identity,
+    ["-C", srcRepo, "ls-files", "--others", "--exclude-standard"])
+  if others.code != 0:
+    return (ok: false, changed: anyChange,
+      diagnostic: "git ls-files --others failed in " & srcRepo & " (" &
+        $others.code & "): " & others.output.strip())
+  for rawLine in others.output.splitLines():
+    let rel = rawLine.strip()
+    if rel.len == 0:
+      continue
+    let from0 = srcRepo / rel
+    let to0 = dstRepo / rel
+    if not fileExists(from0):
+      continue          # a directory entry or a file that vanished mid-run.
+    try:
+      createDir(to0.splitPath.head)
+      copyFile(from0, to0)
+      anyChange = true
+    except OSError, IOError:
+      return (ok: false, changed: anyChange,
+        diagnostic: "could not copy untracked file '" & rel & "' into " &
+          dstRepo)
+  (ok: true, changed: anyChange, diagnostic: "")
+
+proc executeWorkspaceStartFork(parsed: WorkspaceStartArgs):
+    WorkspaceStartReport =
+  ## M27 — ``repro workspace start <branch> <path>``: materialize a NEW
+  ## workspace at ``parsed.forkPath`` and start ``<branch>`` in it, cut from
+  ## THIS workspace's committed HEADs. The source workspace is never modified,
+  ## switched or stashed.
+  ##
+  ## Cutting from committed HEADs (not the remote tips, not the recorded lock)
+  ## is the point of the command: "branch off exactly what I have right now",
+  ## including commits that have never been pushed. Those are transferred by
+  ## the M27 fork-branch action, which fetches a missing object straight from
+  ## the source checkout.
+  ##
+  ## The source's uncommitted work is deliberately NOT carried unless
+  ## ``--include-changes`` says so — which is also why a dirty source is not a
+  ## refusal here, unlike the in-place form where dirt would be switched on top
+  ## of. See ``reprobuild-specs/CLI/workspace.md`` §``repro workspace start``.
+  result.branch = parsed.branchName
+  result.mode = "fork"
+  result.sourceWorkspaceRoot = parsed.workspaceRoot
+  result.workspaceRoot = parsed.forkPath
+  result.includeChanges = parsed.includeChanges
+
+  let parsedCheckout = CheckoutArgs(
+    workspaceRoot: parsed.workspaceRoot,
+    projectName: parsed.projectName,
+    branchName: parsed.branchName,
+    assumeYes: true,
+    toolProvisioning: parsed.toolProvisioning)
+  let (resolved, _) = resolveCheckoutProject(parsedCheckout)
+  result.project = resolved.projectName
+
+  let identity = ensureGitToolResolvable(
+    parsed.toolProvisioning, getEnv("PATH"))
+  installGitVcsExecutor()
+
+  # The ROOT workspace repo carries the membership manifests; the fork clones
+  # it from the SOURCE workspace's own origin (this is a fork of a workspace we
+  # are already inside, so no URL resolution is involved). Resolved BEFORE the
+  # destination guard because it is what tells an unrelated directory apart
+  # from a fork of THIS workspace that is already under way.
+  let rootOrigin = gitRemoteOriginUrl(identity, parsed.workspaceRoot)
+  if rootOrigin.len == 0:
+    result.exitCode = 1
+    result.repos.add(WorkspaceStartRepoEntry(
+      outcome: "root_origin_missing",
+      diagnostic: "the workspace root '" & parsed.workspaceRoot &
+        "' has no `origin` remote to fork from"))
+    return
+
+  # ---- destination guard -------------------------------------------------
+  # Refusing cwd/an ancestor is absolute (RA-31's upward-walk trap). A NON-EMPTY
+  # destination is refused too — EXCEPT when it is recognizably this same fork
+  # already materialized (a checkout of the same root origin), which is the
+  # resumable case the no-rollback contract promises: a run that failed partway
+  # leaves the tree in place precisely so the identical command finishes it.
+  # Without this exception "resumable" and "refuse non-empty" contradict.
+  var resuming = false
+  if pathIsCwdOrAncestor(parsed.forkPath, absolutePath(getCurrentDir())):
+    result.exitCode = 2
+    result.repos.add(WorkspaceStartRepoEntry(
+      outcome: "destination_refused",
+      diagnostic: "`repro workspace start <branch> <path>` refuses to " &
+        "materialise into the current or an ancestor directory ('" &
+        parsed.forkPath & "'); it always creates a fresh named directory"))
+    return
+  if dirExists(parsed.forkPath) and toSeq(walkDir(parsed.forkPath)).len > 0:
+    let destOrigin = gitRemoteOriginUrl(identity, parsed.forkPath)
+    if destOrigin.len > 0 and destOrigin == rootOrigin:
+      resuming = true
+    else:
+      result.exitCode = 2
+      result.repos.add(WorkspaceStartRepoEntry(
+        outcome: "destination_refused",
+        diagnostic: "destination '" & parsed.forkPath & "' already exists, " &
+          "is not empty, and is not a fork of this workspace " &
+          "(no `origin` matching '" & rootOrigin & "'); choose a different " &
+          "path or remove it first"))
+      return
+
+  # ---- observation pass over the SOURCE workspace ------------------------
+  type
+    ForkSourceState = object
+      repo: ResolvedRepo
+      srcPath: string
+      headSha: string
+      isClean: bool
+      probeFailed: bool
+      probeReason: string
+      remoteHasBranch: bool
+
+  var states: seq[ForkSourceState]
+  var anyProbeFailed = false
+  var remoteCollisions: seq[string]
+  for repo in resolved.repos:
+    var state: ForkSourceState
+    state.repo = repo
+    state.srcPath = parsed.workspaceRoot / repo.path
+    state.isClean = true
+    if not dirExists(state.srcPath / ".git"):
+      state.probeFailed = true
+      state.probeReason = "no on-disk checkout at '" & state.srcPath &
+        "'; run `repro workspace init` or `repro workspace sync` first"
+      anyProbeFailed = true
+      states.add(state)
+      continue
+    let headRes = queryGitState(headShaQuery(state.srcPath), identity)
+    if headRes.status != gqsOk:
+      state.probeFailed = true
+      state.probeReason = "head-sha probe failed: " & headRes.diagnostic
+      anyProbeFailed = true
+      states.add(state)
+      continue
+    state.headSha = headRes.headSha
+    let cleanRes = queryGitState(isCleanQuery(state.srcPath), identity)
+    if cleanRes.status == gqsOk:
+      state.isClean = cleanRes.isClean
+    # `start` starts something NEW. A branch that already exists upstream is
+    # a resume, and adopting it into a fresh directory is init + checkout.
+    let rName = gitRemoteNameFor(repo)
+    let remoteProbe = gitRunPlain(identity,
+      ["-C", state.srcPath, "ls-remote", "--heads", rName, parsed.branchName])
+    if remoteProbe.code == 0 and remoteProbe.output.strip().len > 0:
+      state.remoteHasBranch = true
+      remoteCollisions.add(repo.path)
+    states.add(state)
+
+  if anyProbeFailed or remoteCollisions.len > 0:
+    for state in states:
+      var entry = WorkspaceStartRepoEntry(
+        name: state.repo.name,
+        path: state.repo.path,
+        headSha: state.headSha)
+      if state.probeFailed:
+        entry.outcome = "probe_failed"
+        entry.diagnostic = state.probeReason
+      elif state.remoteHasBranch:
+        entry.outcome = "branch_exists_on_remote"
+        entry.diagnostic = "branch '" & parsed.branchName &
+          "' already exists on remote '" & gitRemoteNameFor(state.repo) &
+          "'; `start` creates a NEW branch — to work on the existing one " &
+          "use `repro workspace init <url> " & parsed.forkPath &
+          "` then `repro checkout " & parsed.branchName & "`"
+      else:
+        entry.outcome = "ready"
+      result.repos.add(entry)
+    result.exitCode = if anyProbeFailed: 1 else: 2
+    return
+
+  # ---- materialize the new workspace ------------------------------------
+  # Resuming (see the destination guard) means the root clone is already there.
+  if not resuming and not dirExists(parsed.forkPath / ".git"):
+    let rootClone = cloneOrgRootRepo(identity, rootOrigin, parsed.forkPath)
+    if not rootClone.ok:
+      result.exitCode = 1
+      result.repos.add(WorkspaceStartRepoEntry(
+        outcome: "root_clone_failed", diagnostic: rootClone.diagnostic))
+      return
+
+  # Member repos: reuse the M9 materialization pass verbatim — it already
+  # schedules the clones concurrently on the engine and is resumable, so a
+  # re-run after a partial fork only clones what is still missing.
+  var initArgs: WorkspaceInitArgs
+  initArgs.workspaceRoot = parsed.forkPath
+  initArgs.projectName = resolved.projectName
+  initArgs.toolProvisioning = parsed.toolProvisioning
+  let initOutcome = executeWorkspaceInit(initArgs)
+  if initOutcome.cloneFailures > 0:
+    # Partial materialization is LEFT IN PLACE (no rollback): re-running the
+    # identical command clones only what is still missing.
+    result.exitCode = 1
+    result.repos.add(WorkspaceStartRepoEntry(
+      outcome: "clone_failed",
+      diagnostic: $initOutcome.cloneFailures & " repo clone(s) failed while " &
+        "materializing '" & parsed.forkPath & "'; the partial workspace is " &
+        "left in place — re-run the same command to finish it (see " &
+        "init-report.json there for the per-repo detail)"))
+    return
+
+  # ---- branch pass (concurrent) -----------------------------------------
+  # One fork-branch action per repo, PLUS the root workspace repo itself so
+  # membership edits made on the feature branch stay on the feature branch.
+  let receiptDir = parsed.forkPath / ".repro" / "workspace" / "receipts"
+  createDir(receiptDir)
+  var actions: seq[BuildAction]
+  var actionRepoIndex = initTable[string, int]()
+
+  const RootEntryIndex = -1
+  let rootActionId = "workspace-start-fork-root"
+  let rootHead = queryGitState(headShaQuery(parsed.workspaceRoot), identity)
+  if rootHead.status != gqsOk:
+    result.exitCode = 1
+    result.repos.add(WorkspaceStartRepoEntry(
+      name: "<workspace-root>", path: ".",
+      outcome: "probe_failed",
+      diagnostic: "head-sha probe failed on the workspace root: " &
+        rootHead.diagnostic))
+    return
+  var rootAction = gitForkBranchAction(rootActionId, identity,
+    branchName = parsed.branchName,
+    sourceRepoPath = parsed.workspaceRoot,
+    targetSha = rootHead.headSha,
+    repoPath = ".",
+    receiptPath = ".repro" / "workspace" / "receipts" /
+      "start-fork-root.receipt")
+  rootAction.cwd = parsed.forkPath
+  actions.add(rootAction)
+  actionRepoIndex[rootActionId] = RootEntryIndex
+
+  for idx, state in states:
+    let receiptRel = ".repro" / "workspace" / "receipts" /
+      ("start-fork-" & safeRepoIdSegment(state.repo.name) & "-" & $idx &
+       ".receipt")
+    let actionId = "workspace-start-fork-" &
+      safeRepoIdSegment(state.repo.name) & "-" & $idx
+    var action = gitForkBranchAction(actionId, identity,
+      branchName = parsed.branchName,
+      sourceRepoPath = state.srcPath,
+      targetSha = state.headSha,
+      repoPath = state.repo.path,
+      receiptPath = receiptRel)
+    action.cwd = parsed.forkPath
+    action.pool = "vcs/fetch"
+    action.poolUnits = 1'u32
+    actions.add(action)
+    actionRepoIndex[actionId] = idx
+
+  var outcomeById = initTable[string, ActionResult]()
+  if actions.len > 0:
+    let cacheRoot = parsed.forkPath / ".repro" / "workspace" / "engine-cache"
+    var config = defaultBuildEngineConfig(cacheRoot)
+    config.suppressTrace = true
+    let res = runBuild(graph(actions, @[pool("vcs/fetch", 8'u32)]), config)
+    for outcome in res.results:
+      outcomeById[outcome.id] = outcome
+
+  var failures = 0
+  var rootFailed = false
+  for action in actions:
+    let outcome = outcomeById.getOrDefault(action.id)
+    let ok = outcome.status in {asSucceeded, asCacheHit, asUpToDate}
+    let idx = actionRepoIndex.getOrDefault(action.id, RootEntryIndex)
+    if idx == RootEntryIndex:
+      if not ok:
+        rootFailed = true
+        inc failures
+        result.repos.add(WorkspaceStartRepoEntry(
+          name: "<workspace-root>", path: ".",
+          outcome: "fork_failed",
+          diagnostic: "status=" & $outcome.status & " reason=" &
+            outcome.reason & " " & outcome.stderr))
+      else:
+        result.repos.add(WorkspaceStartRepoEntry(
+          name: "<workspace-root>", path: ".",
+          newBranch: parsed.branchName, outcome: "branched"))
+      continue
+    let state = states[idx]
+    var entry = WorkspaceStartRepoEntry(
+      name: state.repo.name,
+      path: state.repo.path,
+      headSha: state.headSha,
+      newBranch: parsed.branchName)
+    if not ok:
+      inc failures
+      entry.outcome = "fork_failed"
+      entry.diagnostic = "status=" & $outcome.status & " reason=" &
+        outcome.reason & " " & outcome.stderr
+    else:
+      entry.outcome = "branched"
+      # ---- optional WIP carry-over ------------------------------------
+      if parsed.includeChanges and not state.isClean:
+        let copied = copyWorkingTreeChanges(identity, state.srcPath,
+          parsed.forkPath / state.repo.path,
+          parsed.forkPath / ".repro" / "workspace",
+          safeRepoIdSegment(state.repo.name))
+        if not copied.ok:
+          inc failures
+          entry.outcome = "changes_failed"
+          entry.diagnostic = copied.diagnostic
+        elif copied.changed:
+          entry.outcome = "branched_with_changes"
+    result.repos.add(entry)
+
+  if failures > 0 or rootFailed:
+    result.exitCode = 1
+    return
+
+  # ---- metadata (only after every repo landed) --------------------------
+  try:
+    writeWorkspaceBranchWithStarted(parsed.forkPath,
+      project = resolved.projectName, branch = parsed.branchName,
+      featureStarted = true)
+    result.recordedBranch = parsed.branchName
+    result.featureStarted = true
+  except WorkspaceManifestParseError as err:
+    result.exitCode = 1
+    result.repos.add(WorkspaceStartRepoEntry(
+      outcome: "metadata_write_failed", diagnostic: err.msg))
+    return
+  result.exitCode = 0
 
 proc executeWorkspaceStart(parsed: WorkspaceStartArgs): WorkspaceStartReport =
   result.workspaceRoot = parsed.workspaceRoot
@@ -39301,22 +39742,47 @@ proc executeWorkspaceStart(parsed: WorkspaceStartArgs): WorkspaceStartReport =
       diagnostic: err.msg))
 
 proc writeWorkspaceStartReport(report: WorkspaceStartReport) =
-  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  # M27: in the fork form ``workspaceRoot`` is the NEW workspace, which is
+  # exactly where the report belongs. But a fork refused BEFORE materializing
+  # (a bad destination, a remote-branch collision) must not conjure that
+  # directory into existence just to drop a report in it — fall back to the
+  # source workspace in that case.
+  var root = report.workspaceRoot
+  if report.sourceWorkspaceRoot.len > 0 and
+      not dirExists(root / ".git"):
+    # A fork that never got as far as cloning the root repo (a refused
+    # destination, a remote-branch collision) has no workspace to report INTO
+    # — and must not create one. ``.git`` at the destination is the marker
+    # that materialization actually began.
+    root = report.sourceWorkspaceRoot
+  if root.len == 0:
+    root = report.sourceWorkspaceRoot
+  if root.len == 0:
+    return
+  let reportDir = root / ".repro" / "workspace"
   createDir(reportDir)
   let reportPath = reportDir / "start-report.json"
   writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspaceStartCommand*(args: openArray[string]): int =
-  ## ``repro workspace start <branch> [--workspace-root=PATH]
-  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ## ``repro workspace start <branch> [<path>] [--include-changes]
+  ## [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop]
+  ## [--json]``.
   ##
   ## M16 — combination of ``repro branch <name>`` + ``repro checkout
   ## <name>`` + a "feature started" mark in metadata so future
   ## ``repro workspace sync`` runs preserve the workspace branch even
   ## when the lock pins different SHAs on it. See the M16 block
   ## comment above for the contract.
+  ##
+  ## M27 — when the optional ``<path>`` positional is present the command
+  ## FORKS instead: it materializes a new workspace there and starts the
+  ## branch in it, cut from this workspace's committed HEADs, leaving the
+  ## current workspace untouched.
   let parsed = parseWorkspaceStartArgs(args)
-  let report = executeWorkspaceStart(parsed)
+  let report =
+    if parsed.forkPath.len > 0: executeWorkspaceStartFork(parsed)
+    else: executeWorkspaceStart(parsed)
   writeWorkspaceStartReport(report)
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
