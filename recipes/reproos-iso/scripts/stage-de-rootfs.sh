@@ -625,6 +625,17 @@ for base_recipe in "${BASE_USERSPACE_RECIPES[@]}"; do
   link_base_recipe_binaries "$base_recipe"
 done
 
+# Install the source-built Mozilla CA bundle at the conventional system paths.
+CA_CERTIFICATES_ROOT="$ISO_SRC_MIRROR_ROOT/ca-certificates/.repro/output/install"
+CA_CERTIFICATES_BUNDLE="$CA_CERTIFICATES_ROOT/etc/ssl/certs/ca-certificates.crt"
+if [ ! -f "$CA_CERTIFICATES_BUNDLE" ]; then
+  echo "[stage-de-rootfs] required source CA bundle missing: $CA_CERTIFICATES_BUNDLE" >&2
+  exit 1
+fi
+mkdir -p "$STAGE_DIR/etc/ssl/certs" "$STAGE_DIR/etc/pki/tls"
+cp "$CA_CERTIFICATES_BUNDLE" "$STAGE_DIR/etc/ssl/certs/ca-certificates.crt"
+ln -sfn ../../ssl/certs/ca-certificates.crt "$STAGE_DIR/etc/pki/tls/cert.pem"
+
 # Stage /etc/wayland-sessions/ session files for SDDM/GDM to enumerate.
 cat > "$STAGE_DIR/usr/share/wayland-sessions/sway.desktop" <<EOF
 [Desktop Entry]

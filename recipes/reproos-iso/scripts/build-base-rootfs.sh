@@ -188,9 +188,8 @@ PKG_LIST=(
   # exposed its complete /usr/share/X11/xkb data tree.
   console-data console-setup keyboard-configuration
   # Network / CA / users.
-  #   ca-certificates  FS:partial STAGE:no  (recipe exists but install
-  #                                          dir empty; needs upstream
-  #                                          ca-cert-bundle staging)
+  # Source bridge dropped ``ca-certificates`` after its source-built Mozilla
+  # bundle was staged at the conventional OpenSSL paths.
   #   iputils-ping     FS:none    STAGE:no
   #
   # M9.R.33.8 dropped: ``sudo`` -- FS:done recipe ships 4 binaries
@@ -198,7 +197,6 @@ PKG_LIST=(
   # the Phase 4b shadow-link loop covers them.
   # Source bridge dropped ``iproute2`` after its configured Makefile recipe
   # exposed ip, tc, ss, and bridge through the Phase 4b shadow-link loop.
-  ca-certificates
   # SDDM systemd unit + PAM glue.  The BINARY is shadowed by the
   # from-source recipe in stage-de-rootfs.sh (Phase 4); we keep the
   # apt entry to pick up the .service file + /etc/pam.d/sddm policy.
