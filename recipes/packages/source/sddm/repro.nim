@@ -290,9 +290,8 @@ package sddmSource:
         "BUILD_WITH_QT6=ON",
         "BUILD_TESTING=OFF",
         "BUILD_MAN_PAGES=OFF",
-        # The image staging script generates the target PAM policy. Do
-        # not let cmake --install write the build host's /etc/pam.d.
-        "INSTALL_PAM_CONFIGURATION=OFF",
+        # Upstream installs the distro-appropriate policy through DESTDIR.
+        "INSTALL_PAM_CONFIGURATION=ON",
         "ENABLE_JOURNALD=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
@@ -300,6 +299,14 @@ package sddmSource:
       # staged install prefix so stale CMake caches cannot write to the
       # build host when cmake --install runs.
       if providerRoot.len > 0:
+        opts.add("SYSTEMD_SYSTEM_UNIT_DIR=" & providerRoot / "build" / "out" /
+          "usr" / "lib" / "systemd" / "system")
+        opts.add("SYSTEMD_SYSUSERS_DIR=" & providerRoot / "build" / "out" /
+          "usr" / "lib" / "sysusers.d")
+        opts.add("SYSTEMD_TMPFILES_DIR=" & providerRoot / "build" / "out" /
+          "usr" / "lib" / "tmpfiles.d")
+        opts.add("DBUS_CONFIG_DIR=" & providerRoot / "build" / "out" /
+          "usr" / "share" / "dbus-1" / "system.d")
         let stagedData = providerRoot / "build" / "out" / "usr" /
           "share" / "sddm"
         opts.add("DATA_INSTALL_DIR=" & stagedData)
@@ -412,7 +419,7 @@ package sddmSource:
       # SDDM reuses absolute install destinations as runtime constants.
       # Keep installation staged, but compile target-rooted paths that
       # remain valid after the mirror is copied into ReproOS.
-      let runtimePathPatches = @[
+      var runtimePathPatches = @[
         "sed -i 's|@CMAKE_INSTALL_FULL_BINDIR@|/usr/bin|g' src/src/common/Constants.h.in",
         "sed -i 's|@CMAKE_INSTALL_FULL_LIBEXECDIR@|/usr/libexec|g' src/src/common/Constants.h.in",
         "sed -i 's|@DATA_INSTALL_DIR@|/usr/share/sddm|g' src/src/common/Constants.h.in",
@@ -420,7 +427,20 @@ package sddmSource:
         "sed -i 's|@SESSION_COMMAND@|/usr/share/sddm/scripts/Xsession|g' src/src/common/Constants.h.in",
         "sed -i 's|@WAYLAND_SESSION_COMMAND@|/usr/share/sddm/scripts/wayland-session|g' src/src/common/Constants.h.in",
         "sed -i 's|@SYSTEM_CONFIG_DIR@|/usr/lib/sddm/sddm.conf.d|g' src/src/common/Constants.h.in",
+        "sed -i 's|@CMAKE_INSTALL_FULL_BINDIR@/sddm|/usr/bin/sddm|g' src/services/sddm.service.in",
+        # CMake selects PAM policy by inspecting the build host. ReproOS is a
+        # Debian target even when the recipe runs on NixOS, so make every
+        # selection path use SDDM's upstream Debian policy.
+        "cp src/services/debian.sddm.pam src/services/sddm.pam",
+        "cp src/services/debian.sddm-autologin.pam src/services/sddm-autologin.pam",
+        "cp src/services/debian.sddm-autologin.pam src/services/sddm-autologin-tally2.pam",
+        "cp src/services/debian.sddm-greeter.pam src/services/sddm-greeter.pam.in",
       ]
+      if providerRoot.len > 0:
+        runtimePathPatches.add(
+          "sed -i 's|${CMAKE_INSTALL_FULL_SYSCONFDIR}/pam.d|" &
+          providerRoot / "build" / "out" / "etc" / "pam.d" &
+          "|g' src/services/CMakeLists.txt")
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env,
                               srcPatches = runtimePathPatches)

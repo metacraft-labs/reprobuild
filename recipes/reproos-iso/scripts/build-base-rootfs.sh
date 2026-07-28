@@ -5,7 +5,7 @@
 # Architectural model (revised M9.R.25): this script ships ONLY the
 # pieces of the live ISO base that have no from-source recipe yet --
 # kernel modules, bootloader tools, kernel-loader stub, the SDDM
-# systemd .service glue when sddm is the autologin target, and the
+# display/font bridge used by SDDM's autologin target, and the
 # bare-minimum coreutils/util-linux needed to bootstrap PID 1 until
 # the from-source equivalents (M9.R.15q.12 systemd, M9.R.15e.8 pam,
 # from-source glibc + util-linux) take over.
@@ -51,15 +51,14 @@ BASE_IMAGE='debian:trixie-slim'
 #
 # NOT INCLUDED (handled by from-source install-mirrors in stage-de-rootfs.sh):
 #   - sway, kwin-wayland, mutter, plasma-workspace, gnome-session
-#   - sddm (the BINARY is from-source; the systemd unit + PAM glue
-#     stay in the apt set below until the from-source recipe lands
-#     the unit files itself)
+#   - sddm (binary, service, PAM, sysusers, tmpfiles, scripts, and
+#     D-Bus policy are staged from the source recipe)
 #   - kf6 frameworks, qt6, qt6-wayland
 #   - libqt6gui6, libqt6widgets6, libqt6quick6, libqt6qml6, ...
 #   - mesa-vulkan-drivers, libgl1, libegl1, libglx-mesa0, libgles2
 #   - libwayland-server0, libwayland-client0, libxkbcommon0,
 #     libxcursor1, libxext6, libxrandr2, libxi6, libpipewire-0.3-0
-#   - fontconfig, fonts-dejavu-core (from-source recipes)
+#   - fontconfig (from-source recipe)
 #   - libpam0g, libpam-runtime, libpam-systemd (from-source pam recipe)
 #   - polkitd (genuinely absent from-source recipe -- TODO M9.R.26)
 #   - xwayland (genuinely absent from-source recipe -- TODO M9.R.26)
@@ -77,6 +76,7 @@ BASE_IMAGE='debian:trixie-slim'
 #     equivalents in this milestone)
 #   - tzdata + locales (data-only packages, no build cost; no recipe)
 #   - keyboard data (xkb-data, console-data) -- data packages
+#   - Xorg server and DejaVu fonts -- explicit SDDM runtime bridges
 #   - CA certificate bundle (data package)
 #
 ## M9.R.32.4 -- per-entry from-source audit (user's "no apt" principle).
@@ -195,12 +195,12 @@ PKG_LIST=(
   # the Phase 4b shadow-link loop covers them.
   # Source bridge dropped ``iproute2`` after its configured Makefile recipe
   # exposed ip, tc, ss, and bridge through the Phase 4b shadow-link loop.
-  # SDDM systemd unit + PAM glue.  The BINARY is shadowed by the
-  # from-source recipe in stage-de-rootfs.sh (Phase 4); we keep the
-  # apt entry to pick up the .service file + /etc/pam.d/sddm policy.
-  #   sddm             FS:done    STAGE:partial (binary staged; service
-  #                                              + PAM files NOT staged)
-  sddm
+  # Source bridge dropped ``sddm`` after its upstream service and PAM
+  # policies were included in the source recipe's install mirror.
+  # Keep SDDM's display/font runtime dependencies explicit until their
+  # own source recipes land; the sddm binary and policy remain source-built.
+  xserver-xorg-core
+  fonts-dejavu-core
   # M9.R.24.2 -- disko apply tools the installer's Phase 2 driver
   # shells out to. These are the on-target install-time utilities.
   #

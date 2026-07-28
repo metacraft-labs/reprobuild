@@ -395,6 +395,48 @@ link_entry kwin kwin_wayland_wrapper
 link_entry mutter mutter
 link_entry sddm sddm
 link_entry sddm sddm-greeter-qt6
+
+SDDM_INSTALL_ROOT="$ISO_SRC_MIRROR_ROOT/sddm/.repro/output/install"
+if [ ! -f "$SDDM_INSTALL_ROOT/usr/lib/systemd/system/sddm.service" ] || \
+   [ ! -f "$SDDM_INSTALL_ROOT/usr/lib/sysusers.d/sddm.conf" ] || \
+   [ ! -f "$SDDM_INSTALL_ROOT/usr/lib/tmpfiles.d/sddm.conf" ] || \
+   [ ! -f "$SDDM_INSTALL_ROOT/usr/share/dbus-1/system.d/org.freedesktop.DisplayManager.conf" ] || \
+   [ ! -x "$SDDM_INSTALL_ROOT/usr/share/sddm/scripts/wayland-session" ] || \
+   [ ! -f "$SDDM_INSTALL_ROOT/etc/pam.d/sddm" ] || \
+   [ ! -f "$SDDM_INSTALL_ROOT/etc/pam.d/sddm-autologin" ]; then
+  echo "[stage-de-rootfs] required source SDDM runtime files missing" >&2
+  exit 1
+fi
+mkdir -p "$STAGE_DIR/usr/lib/systemd/system" \
+  "$STAGE_DIR/usr/lib/sysusers.d" \
+  "$STAGE_DIR/usr/lib/tmpfiles.d" \
+  "$STAGE_DIR/usr/share/dbus-1/system.d" \
+  "$STAGE_DIR/usr/share/sddm" \
+  "$STAGE_DIR/etc/pam.d"
+cp "$SDDM_INSTALL_ROOT/usr/lib/systemd/system/sddm.service" \
+  "$STAGE_DIR/usr/lib/systemd/system/sddm.service"
+cp "$SDDM_INSTALL_ROOT/usr/lib/sysusers.d/sddm.conf" \
+  "$STAGE_DIR/usr/lib/sysusers.d/sddm.conf"
+cp "$SDDM_INSTALL_ROOT/usr/lib/tmpfiles.d/sddm.conf" \
+  "$STAGE_DIR/usr/lib/tmpfiles.d/sddm.conf"
+cp "$SDDM_INSTALL_ROOT/usr/share/dbus-1/system.d/org.freedesktop.DisplayManager.conf" \
+  "$STAGE_DIR/usr/share/dbus-1/system.d/org.freedesktop.DisplayManager.conf"
+cp -a "$SDDM_INSTALL_ROOT/usr/share/sddm/scripts" \
+  "$STAGE_DIR/usr/share/sddm/scripts"
+cp "$SDDM_INSTALL_ROOT/etc/pam.d/sddm" "$STAGE_DIR/etc/pam.d/sddm"
+cp "$SDDM_INSTALL_ROOT/etc/pam.d/sddm-autologin" \
+  "$STAGE_DIR/etc/pam.d/sddm-autologin"
+cp "$SDDM_INSTALL_ROOT/etc/pam.d/sddm-greeter" \
+  "$STAGE_DIR/etc/pam.d/sddm-greeter"
+mkdir -p "$STAGE_DIR/etc/systemd/system/sddm.service.d"
+cat > "$STAGE_DIR/etc/systemd/system/sddm.service.d/reproos.conf" <<'EOF'
+[Unit]
+After=seatd.service
+StartLimitIntervalSec=0
+
+[Service]
+RestartSec=1s
+EOF
 link_entry plasma-workspace plasmashell
 link_entry plasma-workspace startplasma-wayland
 link_entry plasma-workspace startplasma-x11
