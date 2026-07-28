@@ -3446,6 +3446,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/iputils/test_iputils_source.nim",
+    binary: "build/test-bin/test_iputils_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/json-c/test_json_c_source.nim",
     binary: "build/test-bin/test_json_c_source",
     defines: @[],
@@ -3918,6 +3926,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/libglvnd/test_libglvnd_source.nim",
+    binary: "build/test-bin/test_libglvnd_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/libgpg-error/test_libgpg_error_source.nim",
     binary: "build/test-bin/test_libgpg_error_source",
     defines: @[],
@@ -4136,6 +4152,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/mutter/test_mutter_source.nim",
     binary: "build/test-bin/test_mutter_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/nano/test_nano_source.nim",
+    binary: "build/test-bin/test_nano_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -4406,6 +4430,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/rsync/test_rsync_source.nim",
+    binary: "build/test-bin/test_rsync_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/sddm/test_sddm_source.nim",
     binary: "build/test-bin/test_sddm_source",
     defines: @[],
@@ -4440,6 +4472,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/sqlite/test_sqlite_source.nim",
     binary: "build/test-bin/test_sqlite_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/strace/test_strace_source.nim",
+    binary: "build/test-bin/test_strace_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
