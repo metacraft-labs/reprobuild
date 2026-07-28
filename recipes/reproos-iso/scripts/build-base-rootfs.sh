@@ -74,8 +74,7 @@ BASE_IMAGE='debian:trixie-slim'
 #     shells out to via libs/repro_profile (these run on the live ISO
 #     against the QEMU virtio-blk target; they have no from-source
 #     equivalents in this milestone)
-#   - tzdata + locales (data-only packages, no build cost; no recipe)
-#   - keyboard data (xkb-data, console-data) -- data packages
+#   - keyboard data (console-data) -- data packages
 #   - Xorg server (from-source recipe)
 #   - CA certificate bundle (data package)
 #
@@ -168,15 +167,8 @@ PKG_LIST=(
   # complete installed usr/bin and usr/sbin surfaces through Phase 4b.
   # Source bridge dropped ``nano`` after its upstream source recipe exposed
   # the editor through the Phase 4b shadow-link loop.
-  # Locale data (no build cost; pure data).
-  #   locales          FS:none    STAGE:no  (glibc recipe exists but
-  #                                          locale-gen is a runtime
-  #                                          glibc helper; locale data
-  #                                          generation needs the
-  #                                          glibc install-mirror's
-  #                                          localedef + locales
-  #                                          source tree)
-  locales
+  # Use glibc's built-in C.UTF-8 locale. It provides the UTF-8 behavior the
+  # live image needs without Debian's generated locales package.
   # Keyboard + console data.
   #   console-data     FS:none    STAGE:no
   #   console-setup    FS:none    STAGE:no
@@ -270,10 +262,8 @@ apt-get install -y --no-install-recommends ${PKG_LIST[*]}
 dpkg --purge --force-depends xkb-data
 test ! -e /usr/share/X11/xkb
 rm -rf /var/lib/apt/lists/*
-if [ -f /etc/locale.gen ]; then
-  sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen
-  locale-gen >/dev/null 2>&1 || true
-fi
+mkdir -p /etc/default
+printf 'LANG=C.UTF-8\n' > /etc/default/locale
 systemctl set-default graphical.target 2>/dev/null || true
 for g in audio video input plugdev netdev sudo; do
   groupadd -f \"\$g\" 2>/dev/null || true
