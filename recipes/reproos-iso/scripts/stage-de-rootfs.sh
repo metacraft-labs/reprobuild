@@ -454,6 +454,7 @@ BASE_USERSPACE_RECIPES=(
   cryptsetup
   less
   procps
+  rsync
   iproute2
   xkeyboard-config
   libxkbfile

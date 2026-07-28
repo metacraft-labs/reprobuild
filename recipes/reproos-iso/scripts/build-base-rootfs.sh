@@ -238,12 +238,8 @@ PKG_LIST=(
   # closure pulls libdebuginfod-common -> ucf -> procps, reintroducing
   # the binary procps package that the source bridge replaces.
   strace
-  # M9.R.41 — ``repro infra install-root`` (Phase 5 root-mirror) shells
-  # out to ``rsync -aHAX --numeric-ids --one-file-system`` to mirror
-  # the live ISO root onto /mnt.  ``rsync`` has no from-source recipe
-  # yet (TODO future M9.R milestone); the apt entry is the bridge.
-  #   rsync           FS:none STAGE:no
-  rsync
+  # Source bridge now exposes the ``repro infra install-root`` root-mirror
+  # executable from the official rsync source recipe through Phase 4b.
 )
 
 PKG_DIGEST="$(printf '%s\n' "${PKG_LIST[@]}" | LC_ALL=C sort | sha256sum | awk '{print $1}')"
