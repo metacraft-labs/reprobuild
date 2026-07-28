@@ -2322,6 +2322,15 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
     ("SHM_QUEUE_SRC", anchored([
       ".." / "nim-shm-queue" / "src",
     ]), "shm_queue.nim"),
+    # io-mon's writer now imports ``shm_gset/transport`` from the
+    # ``nim-shm-gset`` sibling (the grow-only shared-memory set, io-mon's Linux
+    # dependency-capture channel). Any producer whose ``repro.nim`` transitively
+    # pulls ``io_mon`` fails to interface-extract with ``cannot open file:
+    # shm_gset/transport`` unless nim-shm-gset is on the extractor's ``--path``.
+    # Mirror config.nims (SHM_GSET_SRC), exactly as SHM_QUEUE_SRC above.
+    ("SHM_GSET_SRC", anchored([
+      ".." / "nim-shm-gset" / "src",
+    ]), "shm_gset.nim"),
     ("REPRO_TEST_ADAPTERS_SRC", anchored([
       ".." / "reprobuild-test-adapters" / "src",
     ]), "repro_test_adapters" / "test_runner.nim"),
