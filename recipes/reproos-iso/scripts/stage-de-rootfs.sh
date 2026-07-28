@@ -455,6 +455,7 @@ BASE_USERSPACE_RECIPES=(
   less
   procps
   rsync
+  strace
   iproute2
   xkeyboard-config
   libxkbfile

@@ -237,7 +237,7 @@ PKG_LIST=(
   # make. Keep ``gdb`` out until it has a source recipe: its Debian
   # closure pulls libdebuginfod-common -> ucf -> procps, reintroducing
   # the binary procps package that the source bridge replaces.
-  strace
+  # Source bridge exposes strace from its official release recipe.
   # Source bridge now exposes the ``repro infra install-root`` root-mirror
   # executable from the official rsync source recipe through Phase 4b.
 )
