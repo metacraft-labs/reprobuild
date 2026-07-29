@@ -1760,3 +1760,9 @@ repomix *args:
 
 check-repo-requirements:
     bash ./scripts/check_repo_requirements.sh
+
+# Verify the Nim toolchain can complete a compile while the io-monitor shim is
+# interposed. Requires a built shim (`just test` bootstraps one); this is the
+# same probe `scripts/run_tests.sh` runs before the suite.
+check-toolchain-dlopen lib_dir="build/lib":
+    bash ./scripts/check_toolchain_dlopen.sh {{lib_dir}}
