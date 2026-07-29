@@ -146,6 +146,13 @@ else
   }
 fi
 
+# Fail fast when the Nim toolchain cannot complete a compile under the monitor
+# shim. Every test that builds anything goes through a monitored provider
+# compile, so a toolchain library missing from the loader search path takes the
+# entire suite down; without this probe the first symptom is an opaque
+# "__repro_provider_compile asFailed" hundreds of lines into the run.
+bash scripts/check_toolchain_dlopen.sh build/lib
+
 # Step 2: build sibling prerequisites that path-mode tool resolution needs.
 runquotad_bin="${RUNQUOTAD_BIN:-}"
 runquota_bin="${RUNQUOTA_BIN:-}"

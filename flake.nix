@@ -943,10 +943,31 @@
             # repro-harvest-apt's HTTPS fetch via std/net) carry a bare
             # `dlopen("libcrypto.so.3")`, so a bootstrapped `repro` aborts with
             # "could not load: libcrypto.so" in the bare dev shell without it.
+            #
+            # pcre is here for a DIFFERENT reason, and the distinction matters
+            # for anyone tempted to "fix" it in `nix/nim-fork.nix` instead. The
+            # Nim toolchain IS self-contained: `nix/nim-fork.nix` already lists
+            # pcre in `buildInputs` and patchelfs the pcre lib dir into
+            # `bin/nim`'s RUNPATH, and a bare `nim --version` loads
+            # `libpcre.so.1` fine. What breaks is monitored execution. The
+            # provider-compile edge runs `nim c` under automatic monitoring,
+            # which LD_PRELOADs `librepro_monitor_shim.so`; the shim interposes
+            # `dlopen`, so the forwarded call is issued from the shim's own DSO
+            # and the monitored binary's DT_RUNPATH stops governing the lookup:
+            # `LD_PRELOAD=<shim> nim --version` fails with "could not load:
+            # libpcre.so(.3|.1|)" while the identical command without the shim
+            # succeeds. LD_LIBRARY_PATH is process-global — consulted before
+            # any DT_RUNPATH and independent of which DSO issued the call — so
+            # listing pcre here restores resolution under interposition. The
+            # durable fix is in io-mon's dlopen hook, which should resolve
+            # against the calling binary's link map; that lives in io-mon's
+            # repo, not this one. `scripts/check_toolchain_dlopen.sh` guards
+            # this whole class (see `just check-toolchain-dlopen`).
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
               pkgs.clingo
               pkgs.zstd
               pkgs.openssl
+              pkgs.pcre
             ];
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
