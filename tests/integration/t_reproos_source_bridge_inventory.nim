@@ -9,6 +9,8 @@ const MigratedPackages = [
   "xz",
   "tar",
   "coreutils",
+  "grub",
+  "kernel",
 ]
 
 proc findRepoRoot(): string =
@@ -45,7 +47,6 @@ suite "ReproOS source bridge inventory":
     let aptPackages = shellArrayEntries(baseScript, "PKG_LIST")
     let sourceBridges = shellArrayEntries(stageScript,
       "BASE_USERSPACE_RECIPES")
-    check aptPackages.len > 0
     check sourceBridges.len > 0
 
     for packageName in MigratedPackages:
@@ -70,4 +71,6 @@ suite "ReproOS source bridge inventory":
     check "failed to set source liblzma RPATH" in stageScript
     check "required source tar binary missing" in stageScript
     check "required source coreutils binary missing" in stageScript
+    check "required source kernel payload missing" in stageScript
+    check "$STAGE_DIR/usr/lib/modules" in stageScript
     check "return 1" in stageScript

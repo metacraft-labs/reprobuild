@@ -51,9 +51,8 @@
 #   /etc/systemd/system/default.target -> ...      # autologin wiring
 #
 # The `build-base-rootfs.sh` companion now ships only the minimum
-# Debian base that has no from-source recipe yet (kernel modules,
-# core util-linux not-yet-stripped, gawk/grep/coreutils stand-ins
-# until those recipes' install-mirrors are wired into the ISO).
+# Debian base that has no from-source recipe yet. The kernel, modules,
+# core utilities, and the DE stack are supplied by source mirrors.
 # The DE stack and KF6/Qt6/Wayland/GL stack are sourced exclusively
 # from the from-source install-mirrors.
 #
@@ -511,6 +510,7 @@ BASE_USERSPACE_RECIPES=(
   tar
   coreutils
   grub
+  kernel
 )
 
 link_base_recipe_binaries() {
@@ -693,6 +693,20 @@ link_base_recipe_binaries() {
       rm -rf "$STAGE_DIR/etc/grub.d"
       ln -s "${install_usr#$STAGE_DIR}/etc/grub.d" "$STAGE_DIR/etc/grub.d"
     fi
+  fi
+  if [ "$recipe" = "kernel" ]; then
+    local kernel_payload="$install_usr/lib/reproos-kernel"
+    local kernel_release
+    kernel_release="$(cat "$kernel_payload/kernel.release")"
+    local kernel_modules="$install_usr/lib/modules/$kernel_release"
+    if [ ! -s "$kernel_payload/vmlinuz" ] || [ ! -d "$kernel_modules" ]; then
+      echo "[stage-de-rootfs] required source kernel payload missing" >&2
+      return 1
+    fi
+    mkdir -p "$STAGE_DIR/usr/lib" "$STAGE_DIR/lib"
+    rm -rf "$STAGE_DIR/usr/lib/modules" "$STAGE_DIR/lib/modules"
+    ln -s "${install_usr#$STAGE_DIR}/lib/modules" "$STAGE_DIR/usr/lib/modules"
+    ln -s /usr/lib/modules "$STAGE_DIR/lib/modules"
   fi
   if [ "$recipe" = "dbus" ]; then
     local dbus_system_units="$install_usr/lib/systemd/system"

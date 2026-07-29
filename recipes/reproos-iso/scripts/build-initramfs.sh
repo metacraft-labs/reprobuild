@@ -31,13 +31,12 @@
 # Required env:
 #   SOURCE_DATE_EPOCH (for cpio --reproducible)
 #
-# Dependencies in PATH:
-#   busybox  - statically linked, downloaded from upstream busybox
+# Inputs and dependencies:
+#   busybox  - statically linked, downloaded from upstream BusyBox's
 #              binary tree on demand (cached host-side).
-#   linux-image-6.12.86+deb13-amd64-unsigned.deb - upstream kernel
-#              modules.deb downloaded from deb.debian.org on demand
-#              (cached host-side).
-#   cpio, gzip, xz-utils, ar, tar, zstd, wget/curl  - host packages.
+#   kernel   - vmlinuz and any modules come from kernelSource's install
+#              mirror; no prebuilt kernel package is downloaded.
+#   cpio, gzip, xz-utils, curl and optional zstd - host tools.
 
 set -euo pipefail
 
@@ -50,35 +49,34 @@ OUT_INITRAMFS="$1"
 : "${SOURCE_DATE_EPOCH:?SOURCE_DATE_EPOCH must be set for reproducibility}"
 
 # Host tooling.
-for tool in cpio gzip xz curl ar tar; do
+for tool in cpio gzip xz curl; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "build-initramfs.sh: required host tool missing: $tool" >&2
     exit 66
   fi
 done
 
-# zstd is optional on hosts where the upstream .deb uses gzip data.tar.
-# .deb files extracted below pick the archiver dynamically.
+# zstd is optional and only needed when the source kernel emits .ko.zst.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RECIPE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 INITRAMFS_SRC="$RECIPE_DIR/initramfs"   # vendored /init + helper scripts
 
-# Cache directory. Persistent across builds so the heavy 108 MB
-# linux-image .deb download happens at most once.
+# Cache directory for the temporary upstream BusyBox binary.
 CACHE_DIR="${REPRO_INITRAMFS_CACHE:-/var/cache/reprobuild/initramfs}"
 mkdir -p "$CACHE_DIR"
 
 # Pinned upstream sources.
 #
-# Kernel modules: the linux-image .deb that matches the
-# vmlinuz-debian-netinst kernel release (6.12.86+deb13-amd64). This
-# .deb ships every module the netinst's vmlinuz can load - including
-# the squashfs/overlay/loop/ext4 trio the live-init needs.
-KERNEL_RELEASE='6.12.86+deb13-amd64'
-LINUX_IMAGE_DEB='linux-image-6.12.86+deb13-amd64-unsigned_6.12.86-1_amd64.deb'
-LINUX_IMAGE_URL="https://deb.debian.org/debian/pool/main/l/linux/${LINUX_IMAGE_DEB}"
-LINUX_IMAGE_SHA256='99f1a0bde6332e7c785e053807c3cd14a875ed0cfca21e4faf6632db4010b53f'
+# Kernel and modules come from the source recipe's canonical install mirror.
+KERNEL_INSTALL_ROOT="${REPRO_KERNEL_INSTALL_ROOT:-$RECIPE_DIR/../packages/source/kernel/.repro/output/install}"
+KERNEL_PAYLOAD="$KERNEL_INSTALL_ROOT/usr/lib/reproos-kernel"
+KERNEL_RELEASE="$(cat "$KERNEL_PAYLOAD/kernel.release")"
+MOD_ROOT="$KERNEL_INSTALL_ROOT/usr/lib/modules/$KERNEL_RELEASE"
+if [ ! -s "$KERNEL_PAYLOAD/vmlinuz" ] || [ ! -d "$MOD_ROOT" ]; then
+  echo "build-initramfs.sh: source kernel install mirror is incomplete" >&2
+  exit 67
+fi
 
 # Busybox: statically linked single binary. We use the upstream
 # build from busybox.net to avoid a glibc/musl mismatch with whatever
@@ -120,8 +118,6 @@ fetch_if_missing() {
 }
 
 # Fetch upstream blobs (cached).
-LINUX_IMAGE_PATH="$CACHE_DIR/$LINUX_IMAGE_DEB"
-fetch_if_missing "$LINUX_IMAGE_URL" "$LINUX_IMAGE_PATH" "$LINUX_IMAGE_SHA256"
 BUSYBOX_PATH="$CACHE_DIR/busybox-$BUSYBOX_VERSION"
 fetch_if_missing "$BUSYBOX_URL" "$BUSYBOX_PATH" "$BUSYBOX_SHA256"
 
@@ -155,78 +151,20 @@ for applet in "${BUSYBOX_APPLETS[@]}"; do
   ln -sf busybox "$STAGE/bin/$applet"
 done
 
-# 2) Kernel modules. Extract linux-image .deb -> get
-#    /lib/modules/<kver>/kernel/{fs,drivers,...}. We only ship the
-#    modules the live-init pipeline needs - selected by name to keep
-#    the initramfs small.
-DEB_EXTRACT="$WORK/linux-image"
-mkdir -p "$DEB_EXTRACT"
-(cd "$DEB_EXTRACT" && ar x "$LINUX_IMAGE_PATH")
-# Identify the data archive (data.tar.xz / data.tar.zst / data.tar.gz)
-data_tar=""
-for cand in data.tar.zst data.tar.xz data.tar.gz; do
-  if [ -f "$DEB_EXTRACT/$cand" ]; then data_tar="$DEB_EXTRACT/$cand"; break; fi
-done
-if [ -z "$data_tar" ]; then
-  echo "build-initramfs.sh: linux-image deb missing data.tar.*" >&2
-  exit 68
-fi
-DATA_DIR="$WORK/data"
-mkdir -p "$DATA_DIR"
-case "$data_tar" in
-  *.zst)
-    if ! command -v zstd >/dev/null 2>&1; then
-      echo "build-initramfs.sh: data.tar.zst but zstd not installed" >&2
-      exit 66
-    fi
-    zstd -d -c "$data_tar" | tar -C "$DATA_DIR" -xf -
-    ;;
-  *.xz)
-    xz -d -c "$data_tar" | tar -C "$DATA_DIR" -xf -
-    ;;
-  *.gz)
-    gzip -d -c "$data_tar" | tar -C "$DATA_DIR" -xf -
-    ;;
-esac
-
-MOD_ROOT="$DATA_DIR/usr/lib/modules/$KERNEL_RELEASE"
-if [ ! -d "$MOD_ROOT" ]; then
-  # Some debs ship modules under lib/ rather than usr/lib/.
-  if [ -d "$DATA_DIR/lib/modules/$KERNEL_RELEASE" ]; then
-    MOD_ROOT="$DATA_DIR/lib/modules/$KERNEL_RELEASE"
-  else
-    echo "build-initramfs.sh: modules root not found for $KERNEL_RELEASE" >&2
-    find "$DATA_DIR" -maxdepth 4 -name 'modules' -type d 2>&1 | head -5
-    exit 69
-  fi
-fi
-
-# The .deb's modules tree contains modules.builtin + modules.order but
-# NOT modules.dep / modules.alias / modules.symbols (those are emitted
-# by depmod post-install on the target system). Run depmod ourselves
-# against the staged tree so we have a real dep graph.
+# The source install intentionally skips depmod during packaging. Generate
+# metadata in a writable copy so the immutable install mirror stays intact.
 if [ ! -f "$MOD_ROOT/modules.dep" ]; then
   if ! command -v depmod >/dev/null 2>&1; then
     echo "build-initramfs.sh: depmod not in PATH (needed to regenerate modules.dep)" >&2
     exit 70
   fi
-  SYSTEM_MAP_SRC="$DATA_DIR/boot/System.map-$KERNEL_RELEASE"
-  if [ ! -f "$SYSTEM_MAP_SRC" ]; then
-    SYSTEM_MAP_SRC=""
-  fi
+  MODULE_METADATA_ROOT="$WORK/kernel-metadata"
+  mkdir -p "$MODULE_METADATA_ROOT/lib/modules"
+  cp -a "$MOD_ROOT" "$MODULE_METADATA_ROOT/lib/modules/$KERNEL_RELEASE"
+  MOD_ROOT="$MODULE_METADATA_ROOT/lib/modules/$KERNEL_RELEASE"
+  SYSTEM_MAP_SRC="$KERNEL_PAYLOAD/System.map"
   echo "[initramfs] running depmod for $KERNEL_RELEASE"
-  # depmod -b <basedir> hard-codes the layout <basedir>/lib/modules/<kver>.
-  # The .deb stages modules under <basedir>/usr/lib/modules; symlink so
-  # depmod finds them, then depmod writes the meta files alongside.
-  if [ ! -e "$DATA_DIR/lib" ]; then
-    mkdir -p "$DATA_DIR/lib"
-    ln -s ../usr/lib/modules "$DATA_DIR/lib/modules"
-  fi
-  if [ -n "$SYSTEM_MAP_SRC" ]; then
-    depmod -b "$DATA_DIR" -F "$SYSTEM_MAP_SRC" "$KERNEL_RELEASE"
-  else
-    depmod -b "$DATA_DIR" "$KERNEL_RELEASE"
-  fi
+  depmod -b "$MODULE_METADATA_ROOT" -F "$SYSTEM_MAP_SRC" "$KERNEL_RELEASE"
 fi
 
 STAGE_MOD_ROOT="$STAGE/lib/modules/$KERNEL_RELEASE"

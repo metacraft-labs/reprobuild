@@ -337,46 +337,37 @@ echo "[build-reproos-image] stage done; size: $(du -sh "$STAGE_DIR" | awk '{prin
 # ---------------------------------------------------------------
 # Phase 2.5: seed /boot in the staged tree with kernel + initrd.
 #
-# The stage-de-rootfs tree carries no kernel (the live ISO ships a
-# vendored Debian netinst kernel + a live-init initramfs from the
-# iso recipe).  For a build-time image we need the same vmlinuz +
+# The stage-de-rootfs tree carries the source-built kernel payload and
+# modules under /usr/lib. For a build-time image we also need vmlinuz +
 # a boot-from-disk initramfs in the staged tree so install-root's
 # copyLiveKernelAndInitrd finds them in candidate path
 # "<source>/boot/vmlinuz" / "<source>/boot/initrd.img".
 #
-# Source vmlinuz: extracted on-the-fly from the linux-image deb
-# that build-initramfs.sh already downloaded + cached at
-# /var/cache/reprobuild/initramfs/.
-#
-# Source initrd: re-use the iso recipe's vendored
-# initrd.img-live (live-boot initramfs from build-initramfs.sh).
-# It probes for /live/filesystem.squashfs; on the installed disk
-# it won't find one and falls through to a rescue shell -- which
-# means the boot smoke can SSH-style verify the kernel reached
-# userspace + the rootfs is intact, even if the system doesn't
-# auto-progress to multi-user.target.  A follow-up M9.R.50.x
-# milestone will replace this with a real "boot-from-disk"
-# initramfs (initramfs-tools / dracut) that pivots into
-# /dev/disk/by-label/reproos-root.
-VENDORED_KERNEL="$REPO_ROOT/recipes/reproos-iso/vendor/vmlinuz-debian-netinst"
+# The initramfs is generated from the same source kernel release and its
+# module tree. Keep the derived archive in this recipe's writable build
+# directory; host-global cache directories may be root-owned.
+SOURCE_KERNEL_ROOT="$REPO_ROOT/recipes/packages/source/kernel/.repro/output/install"
+SOURCE_KERNEL_PAYLOAD="$SOURCE_KERNEL_ROOT/usr/lib/reproos-kernel"
+SOURCE_KERNEL_RELEASE="$(cat "$SOURCE_KERNEL_PAYLOAD/kernel.release")"
+SOURCE_KERNEL="$SOURCE_KERNEL_PAYLOAD/vmlinuz"
 # M9.R.51: generate a boot-from-disk initramfs (init-disk variant of
 # the live-init) instead of reusing the ISO's live-boot initrd (which
 # probes for /live/filesystem.squashfs and drops to rescue on an
 # installed disk).  We invoke reproos-iso/scripts/build-initramfs.sh
 # with REPRO_INITRAMFS_INIT=init-disk so the same busybox+modules
 # staging pipeline packs the boot-from-disk /init instead.
-DISK_INITRD_CACHE="${REPRO_DISK_INITRD_CACHE:-/var/cache/reprobuild/reproos-image/initrd.img-disk}"
+DISK_INITRD_CACHE="${REPRO_DISK_INITRD_CACHE:-$RECIPE_DIR/build/initrd.img-disk-$SOURCE_KERNEL_RELEASE}"
 STAGE_BOOT_MARKER="$STAGE_DIR/.repro-boot-seeded"
 if [ ! -f "$STAGE_BOOT_MARKER" ] || \
    [ ! -s "$STAGE_DIR/boot/vmlinuz" ] || \
    [ ! -s "$STAGE_DIR/boot/initrd.img" ]; then
   echo "[build-reproos-image] seeding $STAGE_DIR/boot with kernel + boot-from-disk initrd"
   mkdir -p "$STAGE_DIR/boot"
-  if [ -f "$VENDORED_KERNEL" ]; then
-    cp "$VENDORED_KERNEL" "$STAGE_DIR/boot/vmlinuz"
-    echo "[build-reproos-image] vmlinuz: $(ls -la "$STAGE_DIR/boot/vmlinuz" | awk '{print $5}') bytes (from iso recipe vendor)"
+  if [ -f "$SOURCE_KERNEL" ]; then
+    cp "$SOURCE_KERNEL" "$STAGE_DIR/boot/vmlinuz"
+    echo "[build-reproos-image] vmlinuz: $(ls -la "$STAGE_DIR/boot/vmlinuz" | awk '{print $5}') bytes (from kernelSource)"
   else
-    echo "[build-reproos-image] $VENDORED_KERNEL missing; run \`pwsh recipes/reproos-iso/vendor/fetch.ps1\` first" >&2
+    echo "[build-reproos-image] source kernel missing: $SOURCE_KERNEL" >&2
     exit 67
   fi
   if [ ! -f "$DISK_INITRD_CACHE" ]; then

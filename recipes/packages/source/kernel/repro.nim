@@ -96,63 +96,12 @@
 ##
 ## ## Build shape
 ##
-## The c_cpp_make convention (M9.K's sibling lowering) reads both the
-## M9.H ``fetch:`` block and the M9.I ``makeFlags:`` block off this
-## package's registries and lowers them into:
-##
-##   1. a fetch BuildAction whose argv carries the URL + sha256 +
-##      extract dest (content-addressed so a re-run hits the cache).
-##   2. a ``make`` compile BuildAction that depends on the fetch
-##      action and passes every flag in ``makeFlags:`` to ``make``,
-##      in declared order.
-##   3. install/output collection actions for the kernel image +
-##      vmlinux + System.map + KERNELRELEASE artifacts (M9.L).
-##
-## M9.K only wires (1) + the flag-injection portion of (2). The
-## downstream make-spawn + install glue lands in M9.L; the recipe
-## records the artifacts via the ``executable`` + ``files`` blocks so
-## the M9.K artifact registry already knows what outputs to expect.
-##
-## ## Honest deferrals
-##
-## * **No ``.config`` pre-build hook.** A real kernel build needs a
-##   ``.config`` file at the source root BEFORE ``make bzImage`` will
-##   produce anything — the canonical pattern is
-##   ``make defconfig`` (or copy a pinned config file in) as a
-##   prerequisite step. The current c_cpp_make convention surface
-##   exposes only ``fetch:`` + ``makeFlags:`` + the artifact set; it
-##   does NOT yet support a pre-build hook for arbitrary commands
-##   like ``make defconfig`` or ``cp .config $srcRoot/``. This recipe
-##   declares the surface — fetch + makeFlags + artifacts — so the
-##   convention layer's M9.K bridge can lower it; M9.L will need to
-##   either (a) add a ``preBuild:`` block to the DSL surface, or
-##   (b) extend the c_cpp_make convention to auto-invoke
-##   ``make defconfig`` when no ``.config`` is present, or (c) let a
-##   future ``toolBuild`` edge pipe the NDE-E ``reproosKernel``
-##   configFile artifact's output into this recipe's source tree
-##   before the ``make bzImage`` action fires. The DECLARATIVE
-##   front end stays the same regardless of which approach M9.L
-##   picks.
-##
-## * **No modules artifacts.** The kernel build also emits a
-##   modules tree (``$(MODLIB)/kernel/...``) containing hundreds to
-##   thousands of ``.ko`` files. v1 does NOT enumerate them as
-##   ``files`` artifacts — the per-config set is too large and
-##   variable. M9.L will likely model the modules tree as a single
-##   directory-output artifact rather than enumerating each ``.ko``;
-##   that's a follow-up milestone. v1's four declared artifacts
-##   (bzImage / vmlinux / System.map / KERNELRELEASE) are the
-##   load-bearing outputs the bootloader-menu generator + activation
-##   layer consume.
-##
-## * **Single-threaded build (``-j1``).** The ``makeFlags:`` block
-##   pins ``-j1`` for deterministic single-threaded build. A real
-##   production build wants ``-j$(nproc)``; M9.L's convention layer
-##   can compute a host-job-count flag at action-emission time and
-##   override the ``-j1`` declared here. Single-threaded is the
-##   safe default — kbuild's parallelism is well-tested but adding
-##   ``-jN`` to the recipe surface would couple the cache-key to
-##   the host's CPU count, which is hostile to caching.
+## The build action fetches the pinned kernel source, creates an x86-64
+## defconfig, applies the boot-critical ReproOS configuration, and runs
+## kbuild through the standard package constructor. A dedicated install
+## target mirrors the kernel image, configuration, symbol map, release,
+## and module tree under ``usr/lib``. ReproOS stages that install mirror
+## directly and copies the same vmlinuz into ``/boot``.
 ##
 ## ## Artifacts
 ##
@@ -241,7 +190,6 @@ package kernelSource:
     ## binutils provides ``ld`` / ``as`` / ``objcopy`` / ``nm`` that
     ## kbuild invokes for linking the kernel ELF and stripping the
     ## bootable bzImage.
-    "binutils >=2.39"
     ## make is the kbuild driver — the c_cpp_make convention's
     ## compile action invokes ``make`` against the extracted source
     ## tree. ``make >=4.3`` is needed for kbuild's grouped-targets
@@ -262,24 +210,21 @@ package kernelSource:
     ## libelf is consumed by kbuild's ``objtool`` (in tools/objtool)
     ## for the CONFIG_STACK_VALIDATION pass that rewrites .o files
     ## to add unwind metadata.
-    "libelf >=0.187"
     ## openssl provides libssl, consumed by kbuild's certificate-
     ## handling code (the ``CONFIG_MODULE_SIG`` family); even with
     ## module signing disabled, the build occasionally invokes openssl
     ## helpers via ``scripts/sign-file``. Recipe name ``openssl``
     ## matches the sibling source recipe.
-    "openssl >=3.0"
     ## bc is the arbitrary-precision calculator kbuild's
     ## ``kernel/timeconst.bc`` script invokes to compute jiffies
     ## constants at build time. Required from 4.x onwards.
-    "bc"
     ## kmod provides ``depmod`` / ``modprobe`` that the modules-
     ## install pass invokes (when modules are emitted; deferred for
     ## v1 per the honest-deferrals comment).
-    "kmod"
     ## rsync is invoked by ``make headers_install`` and (in some
     ## configs) by the modules-install step.
-    "rsync"
+    "libelf >=0.187"
+    "bc"
 
   config:
     ## No prefix lifted from `makeFlags:`; flags inlined in the `build:` block.
@@ -327,7 +272,6 @@ package kernelSource:
     discard
 
   build:
-    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
     setCurrentOwningPackageOverride("kernelSource")
     try:
       let opts = @[
@@ -336,13 +280,21 @@ package kernelSource:
         "KBUILD_BUILD_USER=reprobuild",
         "KBUILD_BUILD_HOST=reprobuild",
         "KBUILD_BUILD_TIMESTAMP=@1577836800",
-        "-j1",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
-      discard pkg.executable("bzImage")
-      discard pkg.files("vmlinux")
-      discard pkg.files("systemMap")
-      discard pkg.files("kernelRelease")
+      let patches = @[
+        "make -C ./src ARCH=x86_64 defconfig",
+        "./src/scripts/config --file ./src/.config --disable DEBUG_INFO --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT --disable MODULE_SIG --disable SYSTEM_TRUSTED_KEYS --disable SYSTEM_REVOCATION_KEYS --disable STACK_VALIDATION --disable UNWINDER_ORC --enable UNWINDER_FRAME_POINTER --enable BLK_DEV_INITRD --enable DEVTMPFS --enable DEVTMPFS_MOUNT --enable VIRTIO --enable VIRTIO_PCI --enable VIRTIO_BLK --enable VIRTIO_NET --enable VIRTIO_CONSOLE --enable DRM --enable DRM_VIRTIO_GPU --enable EXT4_FS --enable VFAT_FS --enable TMPFS --enable OVERLAY_FS --enable SQUASHFS --enable BLK_DEV_LOOP --enable EFI --enable EFI_STUB",
+        "make -C ./src ARCH=x86_64 olddefconfig",
+        "printf '\\n.PHONY: repro_install\\nrepro_install:\\n\t$(MAKE) ARCH=x86_64 INSTALL_MOD_PATH=$(DESTDIR) DEPMOD=true modules_install\\n\tmkdir -p $(DESTDIR)/usr/lib/reproos-kernel\\n\tcp arch/x86/boot/bzImage $(DESTDIR)/usr/lib/reproos-kernel/vmlinuz\\n\tcp System.map $(DESTDIR)/usr/lib/reproos-kernel/System.map\\n\tcp .config $(DESTDIR)/usr/lib/reproos-kernel/config\\n\t$(MAKE) -s ARCH=x86_64 kernelrelease > $(DESTDIR)/usr/lib/reproos-kernel/kernel.release\\n' >> ./src/Makefile",
+      ]
+      let pkg = autotools_package(
+        srcDir = "./src",
+        configureOptions = opts,
+        skipConfigure = true,
+        installTarget = "repro_install",
+        srcPatches = patches,
+      )
+      pkg.installTreeMirror()
     finally:
       clearCurrentOwningPackageOverride()
 

@@ -141,6 +141,7 @@ const reproosImageRootfsDeps = @[
   "tar",
   "coreutils",
   "grub",
+  "kernel",
 ]
 
 package reproosImage:
