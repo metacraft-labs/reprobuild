@@ -91,6 +91,11 @@ doc["runnerZip"] = actionToJson(runnerZip)
 doc["runnerTarGz"] = actionToJson(runnerTarGz)
 doc["runnerTarXz"] = actionToJson(runnerTarXz)
 doc["ambiguousZip"] = actionToJson(ambiguousZip)
+# M3f: serialize the Windows branch explicitly even when this fixture is
+# compiled on POSIX. This pins the action intent before execution instead of
+# relying on the host-platform branch below.
+doc["windowsZipArgv"] = %buildZipArgvWindows(
+  "C:\\actions-runner-cache\\runner.zip", "C:\\actions-runner")
 # Compile-time platform marker so the e2e gate knows which dispatch
 # branch the host compiled into.
 when defined(windows):
