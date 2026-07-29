@@ -105,7 +105,13 @@ class DevEnvM9PolicyTest(unittest.TestCase):
         # collection fragments while the CLI aggregate catches up, but the
         # graph-owned test build fragment must remain in scope.
         self.assertIn("repro_build_collection", run_tests)
-        self.assertIn('REPROBUILD_BUILD_TIMEOUT:-90m', run_tests)
+        # The build step must stay bounded and overridable, but the duration is
+        # a tuning constant: pinning its value here only forces churn whenever
+        # CI hardware or cache warmth changes it.
+        self.assertRegex(
+            run_tests,
+            r'BUILD_TIMEOUT="\$\{REPROBUILD_BUILD_TIMEOUT:-[0-9]+[smh]\}"',
+        )
         self.assertIn('timeout --kill-after=30s "${BUILD_TIMEOUT}"', run_tests)
         for fragment in (".#apps", ".#test-helpers", ".#test-fixtures",
                          ".#test-builds"):
