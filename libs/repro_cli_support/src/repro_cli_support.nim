@@ -26022,22 +26022,11 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   if forcePushesUpdated:
     saveForcePushedCommits(args.workspaceRoot, forcePushes)
 
-  # Step 3b: observe each repo (now with fresh remote-tracking refs).
-  # Read the workspace metadata once and propagate it onto every
-  # observation so the M16 planner arm has the started flag + the
-  # marked branch name when classifying each repo.
-  var featureStarted = false
-  var workspaceBranchName = ""
-  try:
-    featureStarted = readWorkspaceFeatureStarted(args.workspaceRoot)
-    let recordedBranch = readWorkspaceBranch(args.workspaceRoot)
-    if recordedBranch.isSome:
-      workspaceBranchName = recordedBranch.get()
-  except WorkspaceManifestParseError:
-    # Malformed metadata: degrade gracefully — the M10 baseline policy
-    # still applies (the started-mark is just not honored).
-    featureStarted = false
-    workspaceBranchName = ""
+  # Step 3b: observe each repo (now with fresh remote-tracking refs). No
+  # workspace-wide metadata is folded in: a repo's classification is a function
+  # of that repo's own git state and the manifest's pin for it. The M16
+  # ``feature_started`` mark used to ride along here to suppress the
+  # fast-forward arm on the marked branch; nothing reads it any more.
   var observations: seq[RepoSyncObservation]
   for repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
@@ -26045,10 +26034,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     if forcePushes.hasKey(repo.path):
       for val in forcePushes[repo.path]:
         repoForcePushed.incl(val.getStr())
-    var obs = observeRepoForSync(identity, repoPath, repo, repoForcePushed)
-    obs.workspaceFeatureStarted = featureStarted
-    obs.workspaceBranch = workspaceBranchName
-    observations.add(obs)
+    observations.add(
+      observeRepoForSync(identity, repoPath, repo, repoForcePushed))
 
   # Step 4: planner.
   let planned = planSync(resolved.repos, observations, args.rebaseOnForcePush)

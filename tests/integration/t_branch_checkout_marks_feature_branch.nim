@@ -9,11 +9,19 @@
 ## Combines M14 ``repro branch <name>`` (create when missing) with M15
 ## ``repro checkout <branch>`` (switch when present) and ALSO sets the
 ## ``[workspace].feature_started = true`` mark in
-## ``<workspaceRoot>/.repro/workspace.toml``. The mark is what tells
-## the M10 sync planner to no-op the "clean fast-forwardable" arm on
-## repos that sit on the marked workspace branch — see
+## ``<workspaceRoot>/.repro/workspace.toml`` — see
 ## ``reprobuild-specs/Workspace-And-Develop-Mode.md`` §"Branch
-## Preservation Policy" and the milestone description for M16.
+## Preservation Policy".
+##
+## The mark used to also suppress the sync planner's "clean fast-forwardable"
+## arm on the marked branch. That arm is gone: sync is branch-relative, so a
+## repo behind its OWN upstream fast-forwards whether or not the operator
+## declared a feature started (declaring one cannot make a teammate's pushed
+## commit unwanted). The mark is now workspace metadata that `repro branch` /
+## `repro checkout` write, preserve and report, with no planner consumer. What
+## keeps the sub-cases below at rest is that a workspace-wide feature branch
+## created locally has no published upstream yet, so there is nothing to
+## fast-forward from.
 ##
 ## Sub-cases:
 ##
@@ -34,10 +42,13 @@
 ##      run ``workspace start <feature>`` to mark the workspace, push
 ##      an advancing commit on the manifest-pinned ``main`` branch so
 ##      the lock-equivalent (``origin/main``) is ahead, then run
-##      ``repro workspace sync``. The marked feature branch must NOT be
+##      ``repro workspace sync``. The feature branch must NOT be
 ##      reconciled back to the lock tip; the planner must emit
 ##      ``divergent_feature_branch`` (or refuse) and the executor must
-##      NOT switch the working tree off the feature branch.
+##      NOT switch the working tree off the feature branch. This is the
+##      manifest pin NOT dragging a feature branch across — the pin is
+##      authoritative for the build input, never a sync target for a
+##      checkout deliberately on another branch.
 ##   5. ``test_m16_start_is_idempotent_for_same_branch`` — running
 ##      ``workspace start <name>`` a second time on a workspace that
 ##      already has that branch active + marked is a clean no-op
@@ -532,11 +543,10 @@ suite "M28 — repro branch <name> --checkout marks feature branch":
       check readWorkspaceFeatureStarted(fx.workspaceRoot) == true
 
       # Step 2: advance the origin's ``main`` to put the lock-pinned
-      # tip ahead of HEAD on the feature branch. Without the M16
-      # mark, M10 sync would classify the feature branch as
-      # "clean_fast_forwardable" once we switch back to it. With the
-      # mark in place AND the operator on the marked feature branch,
-      # sync must NO-OP rather than reconcile.
+      # tip ahead of HEAD on the feature branch. The feature branch has
+      # no published upstream of its own, so there is nothing to
+      # fast-forward FROM, and the manifest's advanced ``main`` is not a
+      # sync target for a checkout on another branch: sync must NO-OP.
       for seed in [fx.libA, fx.libB, fx.libC]:
         discard seedSecondCommit(gitBin, seed.origin, seed.seedPath)
 
@@ -568,16 +578,13 @@ suite "M28 — repro branch <name> --checkout marks feature branch":
         check postHead == preHeads[name]
 
       # The sync report must NOT carry ``executionStatus = succeeded``
-      # for ANY repo (succeeded would mean a fast-forward landed,
-      # which would defeat the started-mark policy).
+      # for ANY repo — succeeded would mean a fast-forward landed, and
+      # the only candidate target here is the manifest's advanced
+      # ``main``, which this checkout is not on.
       let syncReport = readSyncReport(fx)
       for entry in syncReport["repos"]:
         let exec = entry["executionStatus"].getStr()
         check exec in ["noop", "refused"]
-        # And whenever the case is the M16-amplified arm, it should
-        # be reported as ``divergent_feature_branch`` (the M10
-        # baseline ``clean_fast_forwardable`` arm would mean the mark
-        # was ignored).
         let syncCaseStr = entry["syncCase"].getStr()
         check syncCaseStr != "clean_fast_forwardable"
 

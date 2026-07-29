@@ -98,21 +98,14 @@ type
     ##                          tracking ref (``git log @{u}..HEAD`` is
     ##                          non-empty, or the published-evidence
     ##                          query says ``isPublished=false``).
-    ## - ``workspaceFeatureStarted`` — M16 flag from the metadata.
-    ##                          When ``true`` AND the current checkout
-    ##                          is on the workspace's marked feature
-    ##                          branch, the planner switches the
-    ##                          "clean fast-forwardable" arm to
-    ##                          ``scDivergentFeatureBranch`` so sync
-    ##                          NO-OPS the working tree instead of
-    ##                          reconciling it to the lock's tip.
-    ## - ``workspaceBranch``   — the workspace's recorded branch
-    ##                          (M13). Empty when no metadata is
-    ##                          present. The planner uses this to gate
-    ##                          the started-mark policy to repos that
-    ##                          are actually on the marked branch — a
-    ##                          repo that happens to be on some OTHER
-    ##                          branch keeps the M10 baseline semantics.
+    ##
+    ## The observation deliberately carries NO workspace-wide metadata. It
+    ## used to also carry the M16 ``feature_started`` mark and the recorded
+    ## workspace branch, which together suppressed the fast-forward arm on the
+    ## marked branch. Both are gone: a repo's sync decision is a function of
+    ## that repo's own git state and the manifest's pin for it, and nothing
+    ## else. Whether the operator declared a feature "started" cannot make a
+    ## teammate's pushed commit unwanted.
     exists*: bool
     headSha*: string
     isClean*: bool
@@ -121,8 +114,6 @@ type
     remoteBranchTip*: string
     lockedRevisionTip*: string
     hasUnpublishedCommits*: bool
-    workspaceFeatureStarted*: bool
-    workspaceBranch*: string
     hasForcePushedCommits*: bool
     forcePushedBaseSha*: string
 
