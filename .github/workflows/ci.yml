@@ -100,6 +100,48 @@ jobs:
           path: test-logs/
           retention-days: 30
 
+  windows-expand-archive-boundary:
+    name: Windows expandArchive boundary
+    # M3f is an execution-boundary contract, not a cross-compiled unit test.
+    # Keeping this as its own required PR job means an unavailable Windows
+    # service leaves the gate queued/pending; there is no skip-as-pass branch.
+    runs-on: eph-win-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mint installation token for Windows dev environment
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      - name: Setup Windows dev environment
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+        with:
+          env-flavor: windows-diy
+          gh-token: ${{ steps.ci_token.outputs.token }}
+
+      - name: Run real PowerShell/filesystem execution-boundary gate
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/test-bin | Out-Null
+          New-Item -ItemType Directory -Force build/nimcache/windows-expand-archive-boundary | Out-Null
+          $nimArgs = @(
+            'c', '-r',
+            '--threads:on',
+            '--hints:off',
+            '--warnings:off',
+            '--nimcache:build/nimcache/windows-expand-archive-boundary',
+            '--out:build/test-bin/windows_expand_archive_execution_boundary.exe',
+            'tests/windows/windows_expand_archive_execution_boundary.nim'
+          )
+          & nim @nimArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows expandArchive execution-boundary gate failed with exit code $LASTEXITCODE"
+          }
+
   test:
     name: Test
     # Self-hosted bare-metal Linux runner. Standard ubuntu-latest is

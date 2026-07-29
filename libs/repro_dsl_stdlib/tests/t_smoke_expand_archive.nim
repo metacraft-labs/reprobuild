@@ -25,8 +25,13 @@
 ##     ``call``, and ``commandStatsId`` carry the expected values; and
 ##     the host-platform branch of the argv dispatch is exercised
 ##     directly via the live ``build*`` proc.
+##
+## Test-double policy: this file uses no mocks or test doubles. The
+## cross-process determinism gate below launches two real copies of this
+## test executable so process identity and ambient temporary-directory
+## differences cross an actual OS process boundary.
 
-import std/[strutils, unittest]
+import std/[json, os, osproc, streams, strtabs, strutils, unittest]
 
 import repro_project_dsl
 
@@ -35,6 +40,44 @@ import repro_dsl_stdlib/packages/expand_archive
 # pattern recipes use; we keep the explicit import so the symbol
 # resolution is direct.
 import repro_dsl_stdlib/packages/expand_archive as expandArchive
+
+const EmitWindowsZipArgvFlag = "--emit-windows-zip-argv"
+
+if paramCount() == 1 and paramStr(1) == EmitWindowsZipArgvFlag:
+  # Purpose-built subprocess mode for the cross-process determinism gate.
+  # Keep the process alive briefly so two emitters overlap and therefore
+  # cannot share a process id.
+  sleep(250)
+  var payload = newJObject()
+  payload["pid"] = %getCurrentProcessId()
+  payload["argv"] = %buildZipArgvWindows(
+    "C:\\stable-input\\runner.zip", "C:\\stable-output")
+  stdout.write($payload)
+  quit(0)
+
+proc emitterEnvironment(tempRoot: string): StringTableRef =
+  result = newStringTable(modeCaseSensitive)
+  for key, value in envPairs():
+    result[key] = value
+  result["TEMP"] = tempRoot
+  result["TMP"] = tempRoot
+  result["TMPDIR"] = tempRoot
+
+proc startArgvEmitter(tempRoot: string): Process =
+  startProcess(
+    getAppFilename(),
+    args = @[EmitWindowsZipArgvFlag],
+    env = emitterEnvironment(tempRoot),
+    options = {poStdErrToStdOut})
+
+proc finishArgvEmitter(process: Process): JsonNode =
+  let output = process.outputStream.readAll()
+  let exitCode = process.waitForExit()
+  process.close()
+  if exitCode != 0:
+    raise newException(IOError,
+      "Windows zip argv emitter exited " & $exitCode & ": " & output)
+  parseJson(output)
 
 suite "Phase F — expandArchive format dispatch (pure helpers)":
 
@@ -99,25 +142,61 @@ suite "Phase F — argv assemblers (pure)":
     check argv == @["unzip", "-q", "-o",
       "/tmp/runner.zip", "-d", "/opt/actions-runner"]
 
-  test "Windows zip: powershell Expand-Archive ...":
+  test "Windows zip: exact deterministic PowerShell argv":
     let argv = resolveExpandArchiveArgv(
-      "C:\\actions-runner-cache\\runner.zip",
-      "C:\\actions-runner", eafZip,
+      "C:\\runner's cache\\runner.zip",
+      "C:\\agent's runner", eafZip,
       stripComponents = 0, onWindows = true)
-    check argv.len == 4
-    check argv[0] == "powershell"
-    check argv[1] == "-NoProfile"
-    check argv[2] == "-Command"
-    # The PowerShell command body is one string; pin every load-
-    # bearing element.
-    check argv[3].contains(
-      "Copy-Item -LiteralPath \"C:\\actions-runner-cache\\runner.zip\"")
-    check argv[3].contains("Expand-Archive")
-    check argv[3].contains(
-      "Expand-Archive -LiteralPath \"$env:TEMP\\repro-tmp-")
-    check not argv[3].contains("Expand-Archive -Path ")
-    check argv[3].contains("-DestinationPath \"C:\\actions-runner\"")
-    check argv[3].contains("-Force")
+    check argv == @[
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "$ErrorActionPreference = 'Stop'; " &
+        "$scratch = Join-Path $env:TEMP " &
+          "('repro-expand-archive-' + $PID + '.zip'); " &
+        "try { " &
+          "Copy-Item -LiteralPath " &
+            "'C:\\runner''s cache\\runner.zip' " &
+            "-Destination $scratch -Force; " &
+          "Expand-Archive -LiteralPath $scratch " &
+            "-DestinationPath 'C:\\agent''s runner' -Force " &
+        "} finally { " &
+          "if (Test-Path -LiteralPath $scratch) { " &
+            "Remove-Item -LiteralPath $scratch -Force " &
+              "-ErrorAction Stop " &
+          "} " &
+        "}"]
+
+  test "Windows zip lowering is byte-identical across real processes":
+    let tempA = getTempDir() / "expand-archive-emitter-a"
+    let tempB = getTempDir() / "expand-archive-emitter-b"
+    createDir(tempA)
+    createDir(tempB)
+    let emitterA = startArgvEmitter(tempA)
+    let emitterB = startArgvEmitter(tempB)
+    let payloadA = finishArgvEmitter(emitterA)
+    let payloadB = finishArgvEmitter(emitterB)
+
+    check payloadA["pid"].getInt() != payloadB["pid"].getInt()
+    # Compare the complete serialized argv node, not selected substrings.
+    check $payloadA["argv"] == $payloadB["argv"]
+    check payloadA["argv"].getElems().len == 4
+    let command = payloadA["argv"][3].getStr()
+    check "$PID" in command
+    check $payloadA["pid"].getInt() notin command
+    check $payloadB["pid"].getInt() notin command
+    check tempA notin command
+    check tempB notin command
+
+  test "Windows zip lowering source has no compile-time entropy lookup":
+    let sourcePath = currentSourcePath().parentDir / ".." / "src" /
+      "repro_dsl_stdlib" / "packages" / "expand_archive.nim"
+    let source = readFile(sourcePath)
+    for forbidden in [
+      "getCurrentProcessId", "epochTime", "cpuTime", "randomize",
+      "rand(", "genOid", "getTempDir", "getEnv(\"TEMP\"",
+      "getEnv(\"TMP\"", "getEnv(\"TMPDIR\""]:
+      check forbidden notin source
 
   test "tar plain: tar -x -f <archive> -C <dest>":
     let argv = resolveExpandArchiveArgv(
