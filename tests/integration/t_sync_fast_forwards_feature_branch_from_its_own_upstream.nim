@@ -22,14 +22,20 @@
 ##      ``origin/feature/team``; the local checkout is strictly behind it and
 ##      clean. Sync MUST fast-forward it and materialize the teammate's file.
 ##      ``origin/feature/team`` is NOT ``origin/dev``, so this is exactly the
-##      configuration the old rule could not act on.
+##      configuration the old rule could not act on. It is also the ORDERING
+##      case: the branch was cut from the trunk and nothing pushed ``dev``, so
+##      HEAD still equals the manifest's pinned tip. A planner that compares
+##      the pin before the branch's own upstream declares this checkout
+##      finished and silently swallows the teammate's commit.
 ##   2. ``lib-b`` on ``feature/mine`` — upstream advanced AND the operator has
 ##      one local unpublished commit, so the branch is DIVERGED. Sync must
 ##      refuse-and-report: HEAD unchanged, the local commit intact, and the
 ##      teammate's file absent.
 ##   3. ``lib-c`` on ``feature/idle`` — a non-manifest branch already AT its
-##      own upstream tip. Nothing to fast-forward, so sync must leave it
-##      exactly where it is (report-only) and must not invent an action.
+##      own upstream tip while the manifest's ``dev`` has moved AHEAD. There
+##      is nothing to fast-forward on this branch, and the pin must not drag
+##      the checkout off it: sync must report the divergence and act on
+##      nothing.
 ##   4. ``lib-d`` on ``dev``          — the trunk case, where the current
 ##      branch and the manifest's revision coincide. It must still
 ##      fast-forward: the new rule is a generalization, not a replacement.
@@ -42,7 +48,9 @@
 ##     ``feature/team`` (not ``dev``) — the sync was keyed to the branch.
 ##   - lib-b HEAD == the local unpublished SHA; ``teammate.txt`` absent;
 ##     ``syncCase`` is ``locally_unpublished`` and ``action = none``.
-##   - lib-c HEAD unchanged and ``action = none``.
+##   - lib-c HEAD unchanged, still on ``feature/idle``, ``action = none`` and
+##     ``syncCase = divergent_feature_branch`` — the manifest's advanced ``dev``
+##     did not pull the checkout across.
 ##   - lib-d HEAD == its advanced ``origin/dev`` tip with
 ##     ``syncCase = clean_fast_forwardable``.
 ##   - Every repo's manifest revision is ``dev`` while three of the four are
@@ -273,8 +281,12 @@ suite "sync is keyed to the branch's own upstream, not the manifest pin":
         "teammate.txt", "from teammate\n")
       let divergedB = localCommit(gitBin, libB)
 
-      # (3) lib-c: nothing pushed — already at its own upstream tip.
+      # (3) lib-c: its own upstream is untouched, but the manifest's pinned
+      # ``dev`` moves ahead. Sync must leave the feature branch alone rather
+      # than reconcile it to the pin.
       let idleC = headSha(gitBin, libC)
+      discard pushCommitOn(gitBin, fx.seeds[2], "dev",
+        "pin-moved.txt", "pin moved\n")
 
       # (4) lib-d: the trunk case, upstream advanced on ``dev`` itself.
       let advancedD = pushCommitOn(gitBin, fx.seeds[3], "dev",
@@ -312,7 +324,10 @@ suite "sync is keyed to the branch's own upstream, not the manifest pin":
       # ---- (3) non-manifest branch with nothing to do. ------------------
       check headSha(gitBin, libC) == idleC
       check currentBranch(gitBin, libC) == "feature/idle"
-      check repoEntry(report, "lib-c")["action"].getStr() == "none"
+      check not fileExists(libC / "pin-moved.txt")
+      let cEntry = repoEntry(report, "lib-c")
+      check cEntry["action"].getStr() == "none"
+      check cEntry["syncCase"].getStr() == "divergent_feature_branch"
 
       # ---- (4) the trunk case still fast-forwards. ----------------------
       check headSha(gitBin, libD) == advancedD

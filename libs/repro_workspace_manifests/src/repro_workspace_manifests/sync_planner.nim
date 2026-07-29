@@ -277,33 +277,6 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   # straight to the divergent-feature-branch arm.
   let lockedTip = observation.lockedRevisionTip
 
-  if lockedTip.len > 0 and sameSha(observation.headSha, lockedTip):
-    if observation.currentBranch.len == 0:
-      # Detached HEAD that happens to point at the locked revision.
-      # Re-attach the checkout to the manifest's pinned branch (when
-      # the manifest names one) so the steady state is on-branch.
-      result.syncCase = scDetachedAtLockedRevision
-      result.action = saAttachBranch
-      result.message = "attaching '" & resolved.path & "' branch=" &
-        resolved.revision & " at " & lockedTip
-      return
-    result.syncCase = scCleanAtLockedRevision
-    result.action = saNone
-    result.message = "clean at locked revision: '" & resolved.path & "' @ " &
-      lockedTip
-    return
-
-  # Fast-forwardable: we're on a branch whose tip matches the locked
-  # tip via plain fast-forward — i.e. the locked tip is downstream of
-  # what's already in the working tree's branch. The simplest sound
-  # test is "the locked tip IS the remote tracking branch's tip and
-  # HEAD is reachable from it" — but in the local-only fixture the
-  # remote tracking ref and the locked tip are typically the same SHA
-  # the manifest pinned, so an exact SHA match on
-  # ``remoteBranchTip == lockedTip`` is the load-bearing signal here.
-  # The caller's observation pipeline supplies ``hasUnpublishedCommits
-  # = false`` whenever HEAD is strictly behind ``origin/<branch>``,
-  # which means a fast-forward is safe.
   # Fast-forwardable: HEAD is behind its OWN upstream (``<remote>/<current
   # branch>``). Syncing the trunk and syncing a feature branch are the SAME
   # operation — only which ref is upstream differs — so both take this one path.
@@ -319,6 +292,14 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   # ``hasUnpublishedCommits = false`` is the observation pipeline's signal that
   # HEAD is strictly BEHIND its upstream rather than diverged, which is what
   # makes the fast-forward sound.
+  #
+  # This arm is deliberately checked BEFORE the "clean at locked revision" arm
+  # below. A feature branch freshly cut from the trunk has ``headSha ==
+  # lockedTip`` on its very first day, so testing the manifest pin first would
+  # declare the checkout finished and swallow every commit a teammate pushed to
+  # that branch — the same manifest-pin-shadows-the-branch mistake in a
+  # different place. When the current branch IS at its own upstream tip this
+  # guard is false and control falls through to the pin comparison unchanged.
   if observation.currentBranch.len > 0 and
       observation.remoteBranchTip.len > 0 and
       not observation.hasUnpublishedCommits and
@@ -327,6 +308,22 @@ proc classifyRepoState*(resolved: ResolvedRepo;
     result.action = saFetchFastForward
     result.message = "fast-forwarding '" & resolved.path & "' on branch " &
       observation.currentBranch & " → " & observation.remoteBranchTip
+    return
+
+  if lockedTip.len > 0 and sameSha(observation.headSha, lockedTip):
+    if observation.currentBranch.len == 0:
+      # Detached HEAD that happens to point at the locked revision.
+      # Re-attach the checkout to the manifest's pinned branch (when
+      # the manifest names one) so the steady state is on-branch.
+      result.syncCase = scDetachedAtLockedRevision
+      result.action = saAttachBranch
+      result.message = "attaching '" & resolved.path & "' branch=" &
+        resolved.revision & " at " & lockedTip
+      return
+    result.syncCase = scCleanAtLockedRevision
+    result.action = saNone
+    result.message = "clean at locked revision: '" & resolved.path & "' @ " &
+      lockedTip
     return
 
   # Everything else: the working tree is clean, has nothing
