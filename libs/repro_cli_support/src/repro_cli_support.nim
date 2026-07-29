@@ -6151,6 +6151,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         prepareOnly = false;
                         dryRun = false;
                         forceRebuild = false;
+                        noOutputCleanup = false;
                         publishCacheHits = false;
                         publishMaterialized = false;
                         skipCmakeRegeneration = false;
@@ -7587,6 +7588,29 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let extensionSignature = mergeProjectExtensions(refresh.snapshot,
       projectRoot, artifact.projectInterface.packageName, effectiveMode,
       publicCliPath, workRoot)
+
+    # M84: owned-effect-claim output cleanup. When the provider graph refresh
+    # dropped edges that owned build outputs (a removed/renamed generated
+    # action), delete the now-orphaned files — honoring each claim's cleanup
+    # policy, retaining effects still claimed by a surviving fragment (including
+    # any just merged in from a project extension above), and refusing any path
+    # that escapes the project root. A warm snapshot cache hit leaves
+    # ``staleEffects`` empty, so this is a no-op then. ``--dry-run`` and
+    # ``--no-output-cleanup`` compute the plan and report it without deleting.
+    if refresh.staleEffects.len > 0:
+      let cleanupDryRun = dryRun or noOutputCleanup
+      let cleanup = applyOutputCleanup(refresh, projectRoot,
+        dryRun = cleanupDryRun)
+      let cleanupMsg = cleanup.summaryLine()
+      if cleanupMsg.len > 0:
+        logSummary("outputCleanup: " & cleanupMsg)
+      for act in cleanup.actions:
+        if act.outcome == ocoFailed:
+          logSummary("outputCleanup FAILED: " & act.resolvedPath & " — " &
+            act.detail)
+        elif act.outcome == ocoRefusedOutsideRoot:
+          logSummary("outputCleanup REFUSED: " & act.claim.identity & " — " &
+            act.detail)
 
     var selectedActionId = parsedTarget.selectedActionId
     if effectiveSelectDefaultAction and selectedActionId.len == 0:
@@ -14679,6 +14703,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var prepareOnly = false
   var dryRun = false
   var forceRebuild = false
+  var noOutputCleanup = false
   var publishCacheHits = false
   var publishMaterialized = false
   var skipCmakeRegeneration = false
@@ -14789,6 +14814,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       dryRun = true
     elif arg in ["--force-rebuild", "--rebuild"]:
       forceRebuild = true
+    elif arg == "--no-output-cleanup":
+      noOutputCleanup = true
     elif arg == "--publish-cache-hits":
       publishCacheHits = true
     elif arg == "--publish-materialized":
@@ -15041,6 +15068,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         prepareOnly = prepareOnly,
         dryRun = dryRun,
         forceRebuild = forceRebuild,
+        noOutputCleanup = noOutputCleanup,
         publishCacheHits = publishCacheHits,
         publishMaterialized = publishMaterialized,
         skipCmakeRegeneration = skipCmakeRegeneration,

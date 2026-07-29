@@ -213,9 +213,6 @@ proc namespacePrefix(namespace: string): string =
   if namespace.len == 0: ""
   else: namespace & ":"
 
-proc effectKey(claim: OwnedEffectClaim): string =
-  $claim.kind & "|" & claim.identity & "|" & claim.stableName
-
 proc edgeKey(edge: types.GraphEdge): string =
   edge.id & "|" & $edge.kind & "|" & edge.fromNode & "|" & edge.toNode
 

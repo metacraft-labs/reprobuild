@@ -269,6 +269,15 @@ suite "integration_provider_fragment_refresh_and_pruning":
       check addedMember.invoked[0].reason == girDirectoryMembershipChanged
       check memberFragmentCount(addedMember.snapshot) == 3
 
+      # M84: materialize the "built" outputs each member fragment claims, so the
+      # removal below can be shown to actually reclaim the orphaned file (not
+      # merely report it as stale, which is all this milestone did before).
+      let outRoot = tempRoot / "outputs"
+      for name in ["a.txt", "b.txt", "c.txt"]:
+        let built = outRoot / "build" / (name & ".out")
+        createDir(built.parentDir)
+        writeFile(built, "built:" & name)
+
       removeFile(srcDir / "b.txt")
       resetCounts(countsPath)
       let removedMember = refresh(providerV1, ArtifactV1)
@@ -277,6 +286,15 @@ suite "integration_provider_fragment_refresh_and_pruning":
       check removedMember.effectIdentities().contains("build/b.txt.out")
       check removedMember.edgeIds().contains("workspace:edge:b.txt")
       check memberFragmentCount(removedMember.snapshot) == 2
+
+      # M84: the executor turns the reported stale effect into an actual
+      # deletion. Only the orphaned output goes; outputs still claimed by the
+      # surviving a.txt / c.txt fragments are retained.
+      let cleanup = applyOutputCleanup(removedMember, outRoot)
+      check cleanup.deleted == 1
+      check not fileExists(outRoot / "build" / "b.txt.out")
+      check fileExists(outRoot / "build" / "a.txt.out")
+      check fileExists(outRoot / "build" / "c.txt.out")
 
       let providerSameBodiesV2Artifact = compileProvider(providerSource,
         binDir / "provider-artifact-v2", tempRoot / "nimcache-provider-artifact-v2",
