@@ -282,7 +282,7 @@ proc cleanupScratch(path: string) =
 
 proc invokeInit(fx: Fixture; extraArgs: openArray[string] = []): CmdResult =
   var argv = @[
-    fx.reproBin, "workspace", "init", "myproject",
+    fx.reproBin, "workspace", "init", "--report", "myproject",
     "--workspace-root=" & fx.workspaceRoot,
   ]
   for arg in extraArgs:
@@ -291,12 +291,12 @@ proc invokeInit(fx: Fixture; extraArgs: openArray[string] = []): CmdResult =
 
 proc invokeLock(fx: Fixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "lock",
+    fx.reproBin, "workspace", "lock", "--report",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc readInitReport(fx: Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "init-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
@@ -394,7 +394,7 @@ suite "M25 — private manifest layering integrated end-to-end":
         checkpoint("lock output: " & lockRes.output)
       check lockRes.code == 0
 
-      let lockReportPath = fx.workspaceRoot / ".repro" / "workspace" /
+      let lockReportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
         "lock-report.json"
       check fileExists(lockReportPath)
       let lockReport = parseFile(lockReportPath)

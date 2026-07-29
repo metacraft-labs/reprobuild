@@ -178,7 +178,7 @@ proc writeRefsFile(path: string; localRef, localSha: string) =
 proc invokeCheckPrePush(fx: M18Fixture; currentRepo, refsFile: string):
     CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "check", "--mode=pre-push",
+    fx.reproBin, "check", "--mode=pre-push", "--report",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & currentRepo,
     "--pushed-refs=" & refsFile,
@@ -193,7 +193,7 @@ proc invokeWorkspaceLock(fx: M18Fixture): CmdResult =
   ]))
 
 proc readReport(fx: M18Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "check-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

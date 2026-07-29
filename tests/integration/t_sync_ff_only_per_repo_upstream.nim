@@ -207,12 +207,12 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
 proc invokeSync(fx: Fixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "sync", "myproject",
+    fx.reproBin, "workspace", "sync", "--report", "myproject",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc readReport(fx: Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "sync-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
@@ -387,7 +387,7 @@ suite "RA-3 — sync fast-forwards each repo's own upstream":
 
       # Sync fast-forwards super AND must update its submodule.
       let res = runShell(shellCommand(@[
-        reproBin, "workspace", "sync", "myproject",
+        reproBin, "workspace", "sync", "--report", "myproject",
         "--workspace-root=" & workspaceRoot]))
       if res.code notin [0, 2]:
         checkpoint("sync output: " & res.output)

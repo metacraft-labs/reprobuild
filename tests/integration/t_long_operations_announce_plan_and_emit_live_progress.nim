@@ -149,7 +149,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
   result.workspaceRoot = workspaceRoot
 
 proc invokeSync(fx: Fixture; extra: openArray[string] = []): CmdResult =
-  var argv = @[fx.reproBin, "workspace", "sync", "myproject",
+  var argv = @[fx.reproBin, "workspace", "sync", "--report", "myproject",
     "--workspace-root=" & fx.workspaceRoot]
   for e in extra: argv.add(e)
   runShell(shellCommand(argv))
@@ -207,7 +207,7 @@ suite "RA-27 — announce plan + live progress + dry-run":
       check headSha(gitBin, fx.workspaceRoot / "lib-c") == beforeC
       check beforeA != advancedA  # the upstream really did advance
       # A dry run does not write a sync report artifact.
-      check not fileExists(fx.workspaceRoot / ".repro" / "workspace" /
+      check not fileExists(fx.workspaceRoot / ".repro" / "build" / "reports" /
         "sync-report.json")
 
       # ---- (a)/(b)/(c) plan precedes summary; per-repo progress; digest --
@@ -247,7 +247,7 @@ suite "RA-27 — announce plan + live progress + dry-run":
       # ---- (d) --json emits a valid machine surface --------------------
       # Capture stdout ONLY so progress/diagnostic stderr cannot corrupt the
       # JSON document.
-      let jsonText = captureStdoutOnly(@[fx.reproBin, "workspace", "sync",
+      let jsonText = captureStdoutOnly(@[fx.reproBin, "workspace", "sync", "--report",
         "myproject", "--workspace-root=" & fx.workspaceRoot, "--json"])
       let doc = parseJson(jsonText)
       check doc.hasKey("plan")

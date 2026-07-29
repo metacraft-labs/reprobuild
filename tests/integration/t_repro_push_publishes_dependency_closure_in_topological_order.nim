@@ -234,7 +234,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
   writeWorkspaceBranch(workspaceRoot, project = "app", branch = "main")
 
 proc invokePush(fx: Fixture; fromProject = false): CmdResult =
-  var argv = @[fx.reproBin, "push"]
+  var argv = @[fx.reproBin, "push", "--report"]
   if fromProject:
     argv.add("app")
   argv.add("--no-certify")
@@ -277,7 +277,7 @@ proc installV2Hooks(fx: Fixture) =
     removeDir(fx.manifestsRoot / ".repro")
 
 proc readReport(fx: Fixture): JsonNode =
-  let p = fx.workspaceRoot / ".repro" / "workspace" / "push-report.json"
+  let p = fx.workspaceRoot / ".repro" / "build" / "reports" / "push-report.json"
   check fileExists(p)
   parseFile(p)
 

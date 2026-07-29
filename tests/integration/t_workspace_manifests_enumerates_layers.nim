@@ -15,7 +15,7 @@
 ##      materialised at.
 ##   3. Composes the layers via M8 to learn which composed repos each
 ##      layer ultimately contributed to (post-shadow-merge).
-##   4. Emits ``<workspaceRoot>/.repro/workspace/manifests-report.json``
+##   4. Emits ``<workspaceRoot>/.repro/build/reports/manifests-report.json``
 ##      and exits 0 on success, 1 on malformed workspace.toml.
 ##
 ## Fixture pattern: hermetic bare-repo "manifest hosts" containing
@@ -166,14 +166,14 @@ proc writeWorkspaceToml(workspaceRoot, body: string): string =
 proc invokeManifests(reproBin, workspaceRoot: string;
                      extra: openArray[string] = []): CmdResult =
   var argv = @[
-    reproBin, "workspace", "manifests",
+    reproBin, "workspace", "manifests", "--report",
     "--workspace-root=" & workspaceRoot,
   ]
   for x in extra: argv.add(x)
   runShell(shellCommand(argv))
 
 proc readReport(workspaceRoot: string): JsonNode =
-  let reportPath = workspaceRoot / ".repro" / "workspace" /
+  let reportPath = workspaceRoot / ".repro" / "build" / "reports" /
     "manifests-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

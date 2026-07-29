@@ -186,7 +186,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
       quit 1
 
 proc invokePush(fx: Fixture; extra: openArray[string]): CmdResult =
-  var argv = @[fx.reproBin, "push"]
+  var argv = @[fx.reproBin, "push", "--report"]
   for e in extra: argv.add(e)
   argv.add("--no-certify")
   argv.add("--workspace-root=" & fx.workspaceRoot)
@@ -196,7 +196,7 @@ proc invokePush(fx: Fixture; extra: openArray[string]): CmdResult =
     @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
 
 proc readReport(fx: Fixture): JsonNode =
-  let p = fx.workspaceRoot / ".repro" / "workspace" / "push-report.json"
+  let p = fx.workspaceRoot / ".repro" / "build" / "reports" / "push-report.json"
   check fileExists(p)
   parseFile(p)
 

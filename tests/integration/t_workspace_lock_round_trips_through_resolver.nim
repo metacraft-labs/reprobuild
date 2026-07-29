@@ -19,7 +19,7 @@
 ##      otherwise builds the in-memory ``WorkspaceLockFile`` and the
 ##      matching index entry, writes both files, and emits the
 ##      structured JSON report at
-##      ``<workspaceRoot>/.repro/workspace/lock-report.json``.
+##      ``<workspaceRoot>/.repro/build/reports/lock-report.json``.
 ##
 ## The round-trip property: the lock TOML must read back through the
 ## M5 strict reader (``readLock``) and reproduce the same
@@ -215,12 +215,12 @@ proc cloneAll(gitBin: string; fx: M11Fixture) =
 
 proc invokeLock(fx: M11Fixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "lock", "lib-a",
+    fx.reproBin, "workspace", "lock", "--report", "lib-a",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc readReport(fx: M11Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "lock-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

@@ -141,12 +141,12 @@ proc setupFixture(gitBin, slug, configBody: string): Fixture =
 
 proc runInit(fx: Fixture): tuple[code: int; output: string] =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "init", "myproject",
+    fx.reproBin, "workspace", "init", "--report", "myproject",
     "--workspace-root=" & fx.workspaceRoot]))
 
 proc runSync(fx: Fixture): tuple[code: int; output: string] =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "sync", "myproject",
+    fx.reproBin, "workspace", "sync", "--report", "myproject",
     "--workspace-root=" & fx.workspaceRoot]))
 
 suite "RA-18 — copyfile / linkfile materialization":
@@ -183,7 +183,7 @@ suite "RA-18 — copyfile / linkfile materialization":
       check readFile(linkDest) == "#!/bin/sh\necho dev\n"
 
       # init-report records the materialized entries.
-      let initReport = parseFile(fx.workspaceRoot / ".repro" / "workspace" /
+      let initReport = parseFile(fx.workspaceRoot / ".repro" / "build" / "reports" /
         "init-report.json")
       check initReport["materialized"].len == 2
 
@@ -198,7 +198,7 @@ suite "RA-18 — copyfile / linkfile materialization":
       check symlinkExists(linkDest)
       check sameFile(linkDest, srcLink)
 
-      let syncReport = parseFile(fx.workspaceRoot / ".repro" / "workspace" /
+      let syncReport = parseFile(fx.workspaceRoot / ".repro" / "build" / "reports" /
         "sync-report.json")
       check syncReport["materialized"].len == 2
       for m in syncReport["materialized"]:

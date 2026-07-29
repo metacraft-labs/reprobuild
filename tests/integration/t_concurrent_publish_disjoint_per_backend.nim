@@ -247,7 +247,7 @@ proc backendUpstreamFiles(gitBin, bare: string): string =
   ls.output
 
 proc invokeGate(fx: Fixture; refsFile: string): tuple[code: int; output: string] =
-  run(reproBinary & " check --mode=pre-push" &
+  run(reproBinary & " check --mode=pre-push --report" &
     " --workspace-root=" & q(fx.ws) &
     " --current-repo=" & q(fx.ws / "core") &
     " --pushed-refs=" & q(refsFile) & " --json")
@@ -296,7 +296,7 @@ suite "HL-7 — concurrent publishes to per-backend lock stores stay disjoint":
         checkpoint("gate output: " & gate.output)
         # No user-visible failure — the non-ff was retried invisibly.
         check gate.code == 0
-        let report = parseFile(fx.ws / ".repro" / "workspace" /
+        let report = parseFile(fx.ws / ".repro" / "build" / "reports" /
           "check-report.json")
         check report["exitCode"].getInt() == 0
         check not hasFailure(report, "lock-backend-unreachable")
@@ -331,7 +331,7 @@ suite "HL-7 — concurrent publishes to per-backend lock stores stay disjoint":
         let gate = invokeGate(fx, refsFile)
         checkpoint("loud gate output: " & gate.output)
         check gate.code != 0
-        let report = parseFile(fx.ws / ".repro" / "workspace" /
+        let report = parseFile(fx.ws / ".repro" / "build" / "reports" /
           "check-report.json")
         check report["exitCode"].getInt() != 0
         check hasFailure(report, "lock-backend-unreachable")

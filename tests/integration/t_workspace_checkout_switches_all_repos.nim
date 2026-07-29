@@ -267,12 +267,12 @@ proc invokeCheckout(fx: M15Fixture; name: string): CmdResult =
   # post-confirmation switch outcomes, so they opt out with ``--yes``;
   # the dedicated RA-9 suite covers the non-TTY refuse path.
   runShell(shellCommand(@[
-    fx.reproBin, "checkout", name, "--yes",
+    fx.reproBin, "checkout", "--report", name, "--yes",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc readReport(fx: M15Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "checkout-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

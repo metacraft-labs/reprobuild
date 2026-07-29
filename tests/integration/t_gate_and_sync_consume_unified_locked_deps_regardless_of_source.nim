@@ -192,7 +192,7 @@ suite "MO-9 — gate + sync consume the unified locked deps regardless of source
 
         # GATE PASSES on the untampered committed lock (it verifies the locked
         # integrity through ``populateLockedDeps`` and finds it intact).
-        let chk = run(reproBinary & " check --mode=pre-push --workspace-root=" &
+        let chk = run(reproBinary & " check --mode=pre-push --report --workspace-root=" &
           work & " --pushed-refs=" & refs)
         check chk.code == 0
         check "committed solved-graph lock OK" in chk.output
@@ -215,10 +215,10 @@ suite "MO-9 — gate + sync consume the unified locked deps regardless of source
         writeFile(refs, "refs/heads/main " & head2 & " refs/heads/main " &
           "0000000000000000000000000000000000000000\n")
 
-        let chk2 = run(reproBinary & " check --mode=pre-push --workspace-root=" &
+        let chk2 = run(reproBinary & " check --mode=pre-push --report --workspace-root=" &
           work & " --pushed-refs=" & refs)
         check chk2.code == 2
-        let reportPath = work / ".repro" / "workspace" / "check-report.json"
+        let reportPath = work / ".repro" / "build" / "reports" / "check-report.json"
         check fileExists(reportPath)
         let report = parseJson(readFile(reportPath))
         var sawIntegrityFailure = false

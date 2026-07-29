@@ -194,7 +194,7 @@ suite "HL-3 — pre-push refuses on an unreachable team backend":
       let refsFile = scratch / "pushed-refs.txt"
       writeFile(refsFile, "refs/heads/main " & coreSha &
         " refs/heads/main 0000000000000000000000000000000000000000\n")
-      let gateRes = run(reproBinary & " check --mode=pre-push" &
+      let gateRes = run(reproBinary & " check --mode=pre-push --report" &
         " --workspace-root=" & q(ws) &
         " --current-repo=" & q(ws / "core") &
         " --pushed-refs=" & q(refsFile) & " --json")
@@ -203,7 +203,7 @@ suite "HL-3 — pre-push refuses on an unreachable team backend":
       # ---- REFUSE: exit non-zero ---------------------------------------
       check gateRes.code != 0
 
-      let reportPath = ws / ".repro" / "workspace" / "check-report.json"
+      let reportPath = ws / ".repro" / "build" / "reports" / "check-report.json"
       check fileExists(reportPath)
       let report = parseFile(reportPath)
       check report["exitCode"].getInt() != 0

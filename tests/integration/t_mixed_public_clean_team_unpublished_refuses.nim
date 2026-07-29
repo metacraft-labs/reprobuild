@@ -116,7 +116,7 @@ proc coreFragment(): string =
   "revision = \"main\"\n"
 
 proc readReport(ws: string): JsonNode =
-  parseFile(ws / ".repro" / "workspace" / "check-report.json")
+  parseFile(ws / ".repro" / "build" / "reports" / "check-report.json")
 
 proc buildWorkspace(gitBin, scratch: string; withDepends: bool):
     tuple[ws, pubSha, unpubSha: string] =
@@ -184,7 +184,7 @@ suite "HL-7 — mixed public-clean + team-unpublished refuses":
         let refsFile = sub / "pushed-refs.txt"
         writeFile(refsFile, "refs/heads/main " & pubSha &
           " refs/heads/main 0000000000000000000000000000000000000000\n")
-        let gate = run(reproBinary & " check --mode=pre-push" &
+        let gate = run(reproBinary & " check --mode=pre-push --report" &
           " --workspace-root=" & q(ws) &
           " --current-repo=" & q(ws / "pub") &
           " --pushed-refs=" & q(refsFile) & " --json")
@@ -216,7 +216,7 @@ suite "HL-7 — mixed public-clean + team-unpublished refuses":
         let refsFile = sub / "pushed-refs.txt"
         writeFile(refsFile, "refs/heads/main " & pubSha &
           " refs/heads/main 0000000000000000000000000000000000000000\n")
-        let gate = run(reproBinary & " check --mode=pre-push" &
+        let gate = run(reproBinary & " check --mode=pre-push --report" &
           " --workspace-root=" & q(ws) &
           " --current-repo=" & q(ws / "pub") &
           " --pushed-refs=" & q(refsFile) & " --json")

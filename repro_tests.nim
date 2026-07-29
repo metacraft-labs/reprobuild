@@ -7934,6 +7934,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_sync_fast_forwards_feature_branch_from_its_own_upstream.nim",
+    binary: "build/test-bin/t_sync_fast_forwards_feature_branch_from_its_own_upstream",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_sync_ff_only_per_repo_upstream.nim",
     binary: "build/test-bin/t_sync_ff_only_per_repo_upstream",
     defines: @[],

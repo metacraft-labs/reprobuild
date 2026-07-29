@@ -156,13 +156,13 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
       # First pull: materialises the layer at commit#1 (composer clones it),
       # and fails on the unreachable lib-x clone.
       let firstPull = runShell(shellCommand(@[
-        reproBin, "workspace", "pull",
+        reproBin, "workspace", "pull", "--report",
         "--workspace-root=" & workspaceRoot,
       ]))
       # The layer now exists in .repro/manifests-0-*; locate it from the
       # structured report emitted by the command under test.
       var layerDir = ""
-      let firstReportPath = workspaceRoot / ".repro" / "workspace" /
+      let firstReportPath = workspaceRoot / ".repro" / "build" / "reports" /
         "pull-report.json"
       check fileExists(firstReportPath)
       if fileExists(firstReportPath):
@@ -195,7 +195,7 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
       #    commit#2, then the lib-x clone fails. The manifest MUST stay at
       #    commit#2 (no rollback).
       let secondPull = runShell(shellCommand(@[
-        reproBin, "workspace", "pull",
+        reproBin, "workspace", "pull", "--report",
         "--workspace-root=" & workspaceRoot,
       ]))
       check secondPull.code != 0  # a later step failed
@@ -203,7 +203,7 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
       # The manifest layer was ADVANCED and NOT rolled back.
       check headSha(gitBin, layerDir) == commit2
 
-      let reportPath = workspaceRoot / ".repro" / "workspace" /
+      let reportPath = workspaceRoot / ".repro" / "build" / "reports" /
         "pull-report.json"
       check fileExists(reportPath)
       let report = parseFile(reportPath)

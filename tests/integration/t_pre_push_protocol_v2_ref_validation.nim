@@ -319,7 +319,7 @@ proc exerciseManifestRemoteAlias(gitBin: string) =
     var credentialSurfaces = @[credentialDispatch.output, readFile(fx.capture)]
     for reportName in ["check-report.json", "push-report.json",
         "hooks-report.json"]:
-        let report = fx.workspace / ".repro" / "workspace" / reportName
+        let report = fx.workspace / ".repro" / "build" / "reports" / reportName
         if fileExists(report):
             credentialSurfaces.add(readFile(report))
     for surface in credentialSurfaces:
@@ -655,9 +655,9 @@ proc exerciseFormat(gitBin, objectFormat: string) =
     check credentialResult.code != 0
     var credentialSurfaces = @[credentialResult.output, readFile(fx.capture)]
     for reportName in ["check-report.json", "push-report.json"]:
-        let report = fx.workspace / ".repro" / "workspace" / reportName
+        let report = fx.workspace / ".repro" / "build" / "reports" / reportName
         if fileExists(report): credentialSurfaces.add(readFile(report))
-    let hooksReport = fx.workspace / ".repro" / "workspace" /
+    let hooksReport = fx.workspace / ".repro" / "build" / "reports" /
       "hooks-report.json"
     if fileExists(hooksReport): credentialSurfaces.add(readFile(hooksReport))
     for surface in credentialSurfaces:

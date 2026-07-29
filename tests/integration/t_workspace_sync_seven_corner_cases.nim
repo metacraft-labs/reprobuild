@@ -20,7 +20,7 @@
 ##      fetch + fast-forward / branch re-attach / clone) via M2's
 ##      ``bakWorkspaceVcs`` executor.
 ##   6. Emits a structured stdout report AND writes
-##      ``<workspaceRoot>/.repro/workspace/sync-report.json``.
+##      ``<workspaceRoot>/.repro/build/reports/sync-report.json``.
 ##   7. Returns one of three exit codes — 0 (clean / fast-forwarded /
 ##      re-attached / cloned / divergent-feature-branch-reported),
 ##      1 (a mutating action failed), 2 (at least one refuse-and-report
@@ -201,14 +201,14 @@ proc setupFixture(gitBin, slug: string): M10Fixture =
   result.workspaceRoot = workspaceRoot
 
 proc readReport(fixture: M10Fixture): JsonNode =
-  let reportPath = fixture.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fixture.workspaceRoot / ".repro" / "build" / "reports" /
     "sync-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
 proc invokeSync(fixture: M10Fixture): CmdResult =
   runShell(shellCommand(@[
-    fixture.reproBin, "workspace", "sync", "myproject",
+    fixture.reproBin, "workspace", "sync", "--report", "myproject",
     "--workspace-root=" & fixture.workspaceRoot,
   ]))
 

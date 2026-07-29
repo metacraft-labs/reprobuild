@@ -192,7 +192,7 @@ proc invokePush(fx: Fixture): CmdResult =
   ## ``--no-certify`` so the push's own certify slot stays a no-op; the
   ## certificate transport (carry the attached notes) runs regardless.
   runShell(shellCommand(@[
-    fx.reproBin, "push",
+    fx.reproBin, "push", "--report",
     "--no-certify",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & fx.libAPath,
@@ -267,7 +267,7 @@ suite "TC-2 — certificates travel with the pushed commit":
       checkpoint("push output: " & pushed.output)
       check pushed.code == 0
       let report = parseFile(
-        fx.workspaceRoot / ".repro" / "workspace" / "push-report.json")
+        fx.workspaceRoot / ".repro" / "build" / "reports" / "push-report.json")
       check report["exitCode"].getInt() == 0
       # The push report records that the cert notes were carried for lib-a.
       var carried: seq[string]

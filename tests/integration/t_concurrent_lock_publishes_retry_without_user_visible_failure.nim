@@ -168,7 +168,7 @@ proc writeRefsFile(path: string; localSha: string) =
 
 proc invokeCheckPrePush(fx: Fixture; refsFile: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "check", "--mode=pre-push",
+    fx.reproBin, "check", "--mode=pre-push", "--report",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & (fx.workspaceRoot / "lib-a"),
     "--pushed-refs=" & refsFile,
@@ -238,7 +238,7 @@ suite "RA-29 — concurrent lock publishes retry without user-visible failure":
       # succeeded. (Falsifiable: no retry → RA-21 loud-on-failure → non-zero.)
       check res.code == 0
 
-      let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+      let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
         "check-report.json"
       check fileExists(reportPath)
       let report = parseFile(reportPath)
@@ -267,7 +267,7 @@ suite "RA-29 — concurrent lock publishes retry without user-visible failure":
       let loud = invokeCheckPrePush(fx2, refsFile2)
       checkpoint("loud output: " & loud.output)
       check loud.code != 0
-      let report2 = parseFile(fx2.workspaceRoot / ".repro" / "workspace" /
+      let report2 = parseFile(fx2.workspaceRoot / ".repro" / "build" / "reports" /
         "check-report.json")
       check report2["exitCode"].getInt() != 0
       var sawPublishFailure = false

@@ -256,24 +256,24 @@ proc seedMetadataBranch(fx: M16Fixture; branch: string) =
 
 proc invokeStart(fx: M16Fixture; name: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "branch", name, "--checkout",
+    fx.reproBin, "branch", "--report", name, "--checkout",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc invokeSync(fx: M16Fixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "sync",
+    fx.reproBin, "workspace", "sync", "--report",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc readReport(fx: M16Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "branch-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
 proc readSyncReport(fx: M16Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "sync-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

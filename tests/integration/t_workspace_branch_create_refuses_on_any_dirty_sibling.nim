@@ -215,17 +215,17 @@ proc seedMetadataBranch(fx: M14Fixture; branch: string) =
 proc invokeBranch(fx: M14Fixture; name: string): CmdResult =
   if name.len == 0:
     runShell(shellCommand(@[
-      fx.reproBin, "branch",
+      fx.reproBin, "branch", "--report",
       "--workspace-root=" & fx.workspaceRoot,
     ]))
   else:
     runShell(shellCommand(@[
-      fx.reproBin, "branch", name,
+      fx.reproBin, "branch", "--report", name,
       "--workspace-root=" & fx.workspaceRoot,
     ]))
 
 proc readReport(fx: M14Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "branch-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

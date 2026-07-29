@@ -181,7 +181,7 @@ suite "RA-11 — bootstrap manifest cache":
       check not dirExists(workspaceRoot / ".repro" / "manifests")
 
       let init = runShell(shellCommand(@[
-        reproBin, "workspace", "init", "myproject",
+        reproBin, "workspace", "init", "--report", "myproject",
         "--workspace-root=" & workspaceRoot,
         "--manifest-url=" & fileUrl(manifestBare),
         "--manifest-branch=main",
@@ -209,7 +209,7 @@ suite "RA-11 — bootstrap manifest cache":
       # The participating repo was cloned by init.
       check dirExists(workspaceRoot / "lib-a" / ".git")
 
-      let reportPath = workspaceRoot / ".repro" / "workspace" /
+      let reportPath = workspaceRoot / ".repro" / "build" / "reports" /
         "init-report.json"
       check fileExists(reportPath)
       let report = parseFile(reportPath)

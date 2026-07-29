@@ -203,12 +203,12 @@ proc cleanupScratch(path: string) =
       sleep(100)
 
 proc readInitReport(workspaceRoot: string): JsonNode =
-  let reportPath = workspaceRoot / ".repro" / "workspace" / "init-report.json"
+  let reportPath = workspaceRoot / ".repro" / "build" / "reports" / "init-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
 proc readPullReport(workspaceRoot: string): JsonNode =
-  let reportPath = workspaceRoot / ".repro" / "workspace" / "pull-report.json"
+  let reportPath = workspaceRoot / ".repro" / "build" / "reports" / "pull-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
@@ -227,7 +227,7 @@ suite "RA-12 — auto-trust shell hooks after clone":
         let fakeDirenv = makeFakeDirenv(fx.scratch, logPath)
 
         let init = runShell(shellCommand(@[
-          fx.reproBin, "workspace", "init", "myproject",
+          fx.reproBin, "workspace", "init", "--report", "myproject",
           "--workspace-root=" & fx.workspaceRoot,
         ], @[("REPRO_DIRENV_BIN", fakeDirenv)]))
         if init.code != 0:
@@ -266,7 +266,7 @@ suite "RA-12 — auto-trust shell hooks after clone":
         let fakeDirenv = makeFakeDirenv(fx.scratch, logPath)
 
         let pull = runShell(shellCommand(@[
-          fx.reproBin, "workspace", "pull", "myproject",
+          fx.reproBin, "workspace", "pull", "--report", "myproject",
           "--workspace-root=" & fx.workspaceRoot,
         ], @[("REPRO_DIRENV_BIN", fakeDirenv)]))
         if pull.code != 0:
@@ -291,7 +291,7 @@ suite "RA-12 — auto-trust shell hooks after clone":
         let missing = fx.scratch / "does-not-exist-direnv"
 
         let init = runShell(shellCommand(@[
-          fx.reproBin, "workspace", "init", "myproject",
+          fx.reproBin, "workspace", "init", "--report", "myproject",
           "--workspace-root=" & fx.workspaceRoot,
         ], @[("REPRO_DIRENV_BIN", missing)]))
         if init.code != 0:

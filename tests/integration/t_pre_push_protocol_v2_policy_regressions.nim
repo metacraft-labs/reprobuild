@@ -195,7 +195,7 @@ proc initGitStore(gitBin, path: string) =
   discard require(q(gitBin) & " -C " & q(path) & " commit -m seed")
 
 proc report(fx: Fixture): JsonNode =
-  parseFile(fx.workspace / ".repro" / "workspace" / "check-report.json")
+  parseFile(fx.workspace / ".repro" / "build" / "reports" / "check-report.json")
 
 proc hasFailure(report: JsonNode; property: string): bool =
   if not report.hasKey("failures"): return false
@@ -710,7 +710,7 @@ suite "pre-push protocol v2 policy regressions":
       let pushed = run(q(gitBin) & " -C " & q(publicLayer) &
         " push origin main")
       check pushed.code != 0
-      let visibilityReport = parseFile(workspace / ".repro" / "workspace" /
+      let visibilityReport = parseFile(workspace / ".repro" / "build" / "reports" /
         "check-report.json")
       check hasFailure(visibilityReport, "lock_references_private_repo")
       check "secret" in pushed.output

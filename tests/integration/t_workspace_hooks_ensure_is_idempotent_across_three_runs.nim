@@ -200,7 +200,7 @@ proc cloneAll(gitBin: string; fx: M17Fixture) =
 
 proc invokeEnsure(fx: M17Fixture; json = false): CmdResult =
   var argv = @[
-    fx.reproBin, "hooks", "ensure", "--vcs",
+    fx.reproBin, "hooks", "ensure", "--report", "--vcs",
     "--workspace-root=" & fx.workspaceRoot,
   ]
   if json: argv.add("--json")
@@ -224,7 +224,7 @@ proc invokeDispatch(fx: M17Fixture; hookName: string): CmdResult =
   ]))
 
 proc readReport(fx: M17Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "hooks-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

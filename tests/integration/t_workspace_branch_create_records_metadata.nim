@@ -166,18 +166,18 @@ proc runInit(fx: M14MetaFixture): CmdResult =
 
 proc runBranchShow(fx: M14MetaFixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "branch",
+    fx.reproBin, "branch", "--report",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc runBranchCreate(fx: M14MetaFixture; name: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "branch", name,
+    fx.reproBin, "branch", "--report", name,
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc readReport(fx: M14MetaFixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "branch-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

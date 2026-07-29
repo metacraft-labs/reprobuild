@@ -3,7 +3,7 @@
 ## `repro prompt` is recomputed on EVERY shell render, so it must be (a)
 ## SILENT and exit 0 outside a workspace — safe to drop into any prompt with
 ## no guards — and (b) FAST: it reads only CHEAP CACHED workspace state
-## (``.repro/workspace.toml``, the cached ``.repro/workspace/sync-report.json``,
+## (``.repro/workspace.toml``, the cached ``.repro/build/reports/sync-report.json``,
 ## and the develop-overrides file), never fanning out a ``git`` subprocess per
 ## repo.
 ##
@@ -84,7 +84,8 @@ proc seedWorkspace(root: string) =
     "project = \"demo\"\n" &
     "branch = \"feat-x\"\n")
   createDir(root / ".repro" / "workspace")
-  writeFile(root / ".repro" / "workspace" / "sync-report.json",
+  createDir(root / ".repro" / "build" / "reports")
+  writeFile(root / ".repro" / "build" / "reports" / "sync-report.json",
     """{ "repos": [
       {"name":"a","path":"a","branch":"feat-x"},
       {"name":"b","path":"b","branch":"other"},

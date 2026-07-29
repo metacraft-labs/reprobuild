@@ -217,16 +217,15 @@ suite "M13 — workspace branch survives init and status":
       # and the activeBranch field reflects M13's stored value
       # rather than the M12 live-HEAD heuristic.
       let statusRes = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "status",
+        fx.reproBin, "workspace", "status", "--report",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       if statusRes.code != 0:
         checkpoint("status output: " & statusRes.output)
       check statusRes.code == 0
 
-      let reportPath = fx.workspaceRoot / ".repro" /
-        "workspace" / "status-report.json"
-      let normReportPath = fx.workspaceRoot / ".repro" / "workspace" /
+      let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" / "status-report.json"
+      let normReportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
         "status-report.json"
       check fileExists(normReportPath)
       let report = parseFile(normReportPath)
@@ -242,7 +241,7 @@ suite "M13 — workspace branch survives init and status":
         project = "myproject", branch = "synthetic-branch-not-on-disk")
 
       let statusRes2 = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "status",
+        fx.reproBin, "workspace", "status", "--report",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       check statusRes2.code == 0

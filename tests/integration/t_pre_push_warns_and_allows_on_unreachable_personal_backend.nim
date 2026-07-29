@@ -198,7 +198,7 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
         let refsFile = scratch / "pushed-refs.txt"
         writeFile(refsFile, "refs/heads/main " & coreSha &
           " refs/heads/main 0000000000000000000000000000000000000000\n")
-        let gateRes = run(reproBinary & " check --mode=pre-push" &
+        let gateRes = run(reproBinary & " check --mode=pre-push --report" &
           " --workspace-root=" & q(ws) &
           " --current-repo=" & q(ws / "core") &
           " --pushed-refs=" & q(refsFile) & " --json")
@@ -207,7 +207,7 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
         # ALLOW: the push proceeds (exit 0) even though the personal backend
         # is unreachable.
         check gateRes.code == 0
-        let reportPath = ws / ".repro" / "workspace" / "check-report.json"
+        let reportPath = ws / ".repro" / "build" / "reports" / "check-report.json"
         check fileExists(reportPath)
         let report = parseFile(reportPath)
         check report["exitCode"].getInt() == 0
@@ -288,14 +288,14 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
         let refsFile = scratch / "pushed-refs.txt"
         writeFile(refsFile, "refs/heads/main " & headSha &
           " refs/heads/main 0000000000000000000000000000000000000000\n")
-        let gateRes = run(reproBinary & " check --mode=pre-push" &
+        let gateRes = run(reproBinary & " check --mode=pre-push --report" &
           " --workspace-root=" & q(ws) &
           " --pushed-refs=" & q(refsFile) & " --json")
         checkpoint("manifest-less gate output: " & gateRes.output)
 
         # The clean gate passes (exit 0).
         check gateRes.code == 0
-        let reportPath = ws / ".repro" / "workspace" / "check-report.json"
+        let reportPath = ws / ".repro" / "build" / "reports" / "check-report.json"
         check fileExists(reportPath)
         let report = parseFile(reportPath)
         check report["exitCode"].getInt() == 0

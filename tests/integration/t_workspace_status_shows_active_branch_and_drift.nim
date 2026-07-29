@@ -14,7 +14,7 @@
 ##      subtree (RA-1; no index) and compares each live HEAD against the
 ##      most-recently-locked SHA — ``at-lock``, ``drifted-from-lock``,
 ##      or ``no-lock-recorded``.
-##   4. Emits ``<workspaceRoot>/.repro/workspace/status-report.json``
+##   4. Emits ``<workspaceRoot>/.repro/build/reports/status-report.json``
 ##      plus a structured stdout summary; exits 0.
 ##
 ## Fixture pattern matches M9 / M10 / M11: hermetic local bare git
@@ -216,14 +216,14 @@ proc invokeLock(fx: M12Fixture): CmdResult =
 
 proc invokeStatus(fx: M12Fixture; extra: openArray[string] = []): CmdResult =
   var argv = @[
-    fx.reproBin, "workspace", "status", "lib-a",
+    fx.reproBin, "workspace", "status", "--report", "lib-a",
     "--workspace-root=" & fx.workspaceRoot,
   ]
   for x in extra: argv.add(x)
   runShell(shellCommand(argv))
 
 proc readReport(fx: M12Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "status-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

@@ -140,7 +140,7 @@ proc setupFixture(gitBin, slug: string): M10Fixture =
   result.workspaceRoot = workspaceRoot
 
 proc readReport(fixture: M10Fixture): JsonNode =
-  let reportPath = fixture.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fixture.workspaceRoot / ".repro" / "build" / "reports" /
     "sync-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
@@ -164,7 +164,7 @@ proc getClingoEnv(): seq[tuple[name, value: string]] =
 
 proc invokeSync(fixture: M10Fixture; extraArgs: openArray[string] = []): CmdResult =
   var cmdArgs = @[
-    fixture.reproBin, "workspace", "sync", "myproject",
+    fixture.reproBin, "workspace", "sync", "--report", "myproject",
     "--workspace-root=" & fixture.workspaceRoot,
   ]
   for arg in extraArgs:

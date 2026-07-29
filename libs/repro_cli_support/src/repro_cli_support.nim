@@ -284,7 +284,7 @@ proc renderUsage*(programName: string): string =
       "status, list, manifests, shared-clones, forall, develop, hooks " &
       "ensure, check, push, branch, checkout) write a JSON report file " &
       "ONLY when --report is given: --report writes " &
-      "<workspaceRoot>/.repro/workspace/<verb>-report.json, " &
+      "<workspaceRoot>/.repro/build/reports/<verb>-report.json, " &
       "--report=PATH writes exactly PATH. --json prints the same " &
       "document to stdout and never touches disk.\n\n" &
       "build progress: default=bar-line; aliases: " &
@@ -8344,6 +8344,16 @@ proc consumeReportFlag*(arg: string; spec: var ReportSpec): bool =
     return true
   false
 
+proc workspaceReportDir*(workspaceRoot: string): string =
+  ## Conventional home for workspace-wide report artifacts. Reports are
+  ## derived output, so they live under the WORKSPACE ROOT's disposable
+  ## ``.repro/build/`` tree rather than beside the ``.repro/workspace.toml``
+  ## metadata. Note this is deliberately the workspace root's build dir and
+  ## NOT ``<workspaceRoot>/<repo>/.repro/build/`` — the per-project build dir
+  ## that resolves relative to a module path. Nesting disambiguates; no path
+  ## hashing is needed.
+  workspaceRoot / ".repro" / "build" / "reports"
+
 proc reportDestination*(spec: ReportSpec; workspaceRoot, verb: string): string =
   ## Absolute path the report must be written to, or ``""`` when no
   ## report was requested (in which case the writer is a no-op).
@@ -8353,7 +8363,7 @@ proc reportDestination*(spec: ReportSpec; workspaceRoot, verb: string): string =
     return absolutePath(spec.path)
   if workspaceRoot.len == 0:
     return ""
-  workspaceRoot / ".repro" / "workspace" / (verb & "-report.json")
+  workspaceReportDir(workspaceRoot) / (verb & "-report.json")
 
 proc appendActivitySelection(current: var string; value: string) =
   for raw in value.split(','):
@@ -11034,7 +11044,7 @@ type
 
   HooksEnsureReport* = object
     ## Structured outcome of one ``repro hooks ensure --vcs`` invocation
-    ## written to ``<workspaceRoot>/.repro/workspace/hooks-report.json``.
+    ## written to ``<workspaceRoot>/.repro/build/reports/hooks-report.json``.
     workspaceRoot*: string
     mode*: string                  ## ``workspace`` or ``single-repo``.
     project*: string               ## resolved project name (workspace mode).
@@ -11498,6 +11508,12 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     if repoRoot.len > 0:
       checkArgs.add("--current-repo=" & repoRoot)
     checkArgs.add("--pushed-refs=" & refsFile)
+    # The gate can REFUSE a push, and git gives the operator no argv to
+    # thread a ``--report`` through. Same reasoning as post-commit: a
+    # hook-driven invocation opts in on the operator's behalf so the
+    # refusal always leaves machine-readable evidence behind. Operator
+    # invocations of `repro check` stay opt-in.
+    checkArgs.add("--report")
     return runCheckCommand(checkArgs, remoteName, remoteLocation)
   of "post-commit":
     # M19 best-effort lock refresh. Always exits 0 even when the lock
@@ -19263,7 +19279,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
 #         file before re-developing.
 #
 # JSON report path:
-#   ``<workspaceRoot>/.repro/workspace/develop-report.json``.
+#   ``<workspaceRoot>/.repro/build/reports/develop-report.json``.
 
 type
   WorkspaceDevelopReport* = object
@@ -21486,7 +21502,7 @@ type
     ## variant's or project's resolved name); ``workspaceRoot`` is the
     ## absolute path of the directory containing ``.repo/``. The three
     ## per-repo lists are emitted both as stdout text lines and as the
-    ## ``.repro/workspace/init-report.json`` machine-readable artifact.
+    ## ``.repro/build/reports/init-report.json`` machine-readable artifact.
     ##
     ## ``skippedLayers`` (M25) is the list of manifest layers the
     ## composer dropped because the operator passed
@@ -42671,7 +42687,7 @@ proc runReproLockCommand*(args: openArray[string]): int =
 #     and the active workspace branch (``readWorkspaceBranch``). Absence of
 #     the marker is what makes the command silent + exit 0 outside a
 #     workspace.
-#   * ``.repro/workspace/sync-report.json``      — the cached per-repo state
+#   * ``.repro/build/reports/sync-report.json``      — the cached per-repo state
 #     written by the last ``repro workspace sync`` (repo count + per-repo
 #     recorded branch); read for the repo count and a cheap drift signal.
 #   * ``develop-overrides.json``                 — the registered develop-mode
@@ -42722,7 +42738,7 @@ proc ascendToWorkspaceRoot(startDir: string): string =
     dir = parent
 
 proc cachedSyncReportPath(workspaceRoot: string): string =
-  workspaceRoot / ".repro" / "workspace" / "sync-report.json"
+  workspaceReportDir(workspaceRoot) / "sync-report.json"
 
 proc readPromptState(workspaceRoot: string): PromptState =
   ## Populate the segment facts from cached state ONLY. Each read is

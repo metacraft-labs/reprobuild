@@ -191,7 +191,7 @@ proc writeRefsFile(path: string; localSha: string) =
 
 proc invokeCheckPrePush(fx: Fixture; refsFile: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "check", "--mode=pre-push",
+    fx.reproBin, "check", "--mode=pre-push", "--report",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & (fx.workspaceRoot / "lib-a"),
     "--pushed-refs=" & refsFile,
@@ -200,13 +200,13 @@ proc invokeCheckPrePush(fx: Fixture; refsFile: string): CmdResult =
 
 proc invokeSync(fx: Fixture; project = "lib-a"): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "sync", project,
+    fx.reproBin, "workspace", "sync", "--report", project,
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc invokeCheckout(fx: Fixture; branch: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "checkout", branch,
+    fx.reproBin, "checkout", "--report", branch,
     "--workspace-root=" & fx.workspaceRoot, "--json",
   ]))
 
@@ -219,10 +219,10 @@ proc invokeRemove(fx: Fixture; target: string): CmdResult =
 # ---- report readers -------------------------------------------------------
 
 proc checkReport(fx: Fixture): JsonNode =
-  parseFile(fx.workspaceRoot / ".repro" / "workspace" / "check-report.json")
+  parseFile(fx.workspaceRoot / ".repro" / "build" / "reports" / "check-report.json")
 
 proc syncReport(fx: Fixture): JsonNode =
-  parseFile(fx.workspaceRoot / ".repro" / "workspace" / "sync-report.json")
+  parseFile(fx.workspaceRoot / ".repro" / "build" / "reports" / "sync-report.json")
 
 # ---- the contract assertion ----------------------------------------------
 
@@ -414,7 +414,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       let res = invokeCheckout(fx, "feat")
       check res.code == 2
       let rep = parseFile(
-        fx.workspaceRoot / ".repro" / "workspace" / "checkout-report.json")
+        fx.workspaceRoot / ".repro" / "build" / "reports" / "checkout-report.json")
       var entry: JsonNode = nil
       for e in rep["repos"]:
         if e["path"].getStr() == "lib-a": entry = e
@@ -441,7 +441,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       let res = invokeCheckout(fx, "nope-not-a-branch")
       check res.code == 2
       let rep = parseFile(
-        fx.workspaceRoot / ".repro" / "workspace" / "checkout-report.json")
+        fx.workspaceRoot / ".repro" / "build" / "reports" / "checkout-report.json")
       var entry: JsonNode = nil
       for e in rep["repos"]:
         if e["path"].getStr() == "lib-a": entry = e

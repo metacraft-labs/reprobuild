@@ -146,7 +146,7 @@ proc repoFragment(name, remote: string): string =
   "revision = \"main\"\n"
 
 proc readReport(ws: string): JsonNode =
-  parseFile(ws / ".repro" / "workspace" / "check-report.json")
+  parseFile(ws / ".repro" / "build" / "reports" / "check-report.json")
 
 proc integrityMismatch(report: JsonNode): JsonNode =
   for f in report["failures"]:
@@ -233,7 +233,7 @@ suite "HL-4 — integrity mismatch surfaces per tier on the manifest-present pat
         " refs/heads/main 0000000000000000000000000000000000000000\n")
 
       proc gate(current: string): tuple[code: int; output: string] =
-        run(reproBinary & " check --mode=pre-push" &
+        run(reproBinary & " check --mode=pre-push --report" &
           " --workspace-root=" & q(ws) &
           " --current-repo=" & q(ws / current) &
           " --pushed-refs=" & q(refsFile) & " --json")

@@ -189,7 +189,7 @@ proc issueRealCert(fx: Fixture; fixtureJson: string): CmdResult =
 
 proc invokeCheckPrePush(fx: Fixture; refsFile: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "check", "--mode=pre-push",
+    fx.reproBin, "check", "--mode=pre-push", "--report",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & fx.libAPath,
     "--pushed-refs=" & refsFile,
@@ -201,7 +201,7 @@ proc writeRefsFile(path, localSha: string) =
     zeroSha & "\n")
 
 proc readReport(fx: Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "check-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

@@ -308,7 +308,7 @@ proc withHookCli(fx: Fixture; command: string): tuple[code: int;
   run(command)
 
 proc invokePush(fx: Fixture): tuple[code: int; output: string] =
-  runShell(shellCommand(@[fx.reproBin, "push", "app", "--no-certify",
+  runShell(shellCommand(@[fx.reproBin, "push", "--report", "app", "--no-certify",
     "--workspace-root=" & fx.workspace, "--current-repo=" & fx.app,
     "--json"], @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
 
@@ -424,7 +424,7 @@ proc replaceWithLinkedWorktree(gitBin, path, primary: string) =
     " worktree add " & q(path) & " main")
 
 proc report(fx: Fixture): JsonNode =
-  parseFile(fx.workspace / ".repro" / "workspace" / "push-report.json")
+  parseFile(fx.workspace / ".repro" / "build" / "reports" / "push-report.json")
 
 proc remoteHasLock(gitBin: string; fx: Fixture; repo, sha: string): bool =
   let path = "locks/app/" & repo & "/" & sha & ".toml"

@@ -147,12 +147,12 @@ proc setupFixture(gitBin, slug: string): Fixture =
   writeManifest(result.workspaceRoot, result.aOrigin)
 
 proc readSyncReport(workspaceRoot: string): JsonNode =
-  let reportPath = workspaceRoot / ".repro" / "workspace" / "sync-report.json"
+  let reportPath = workspaceRoot / ".repro" / "build" / "reports" / "sync-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
 proc readPullReport(workspaceRoot: string): JsonNode =
-  let reportPath = workspaceRoot / ".repro" / "workspace" / "pull-report.json"
+  let reportPath = workspaceRoot / ".repro" / "build" / "reports" / "pull-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
@@ -187,7 +187,7 @@ suite "Top-level sync/pull shortcuts match the workspace forms":
       #     mutation. Before the fix this exits non-zero (usage banner) and
       #     never reaches the plan path.
       let dryRun = runShell(shellCommand(@[
-        fx.reproBin, "sync", "myproject",
+        fx.reproBin, "sync", "--report", "myproject",
         "--workspace-root=" & fx.workspaceRoot, "--dry-run",
       ]))
       if dryRun.code != 0:
@@ -198,7 +198,7 @@ suite "Top-level sync/pull shortcuts match the workspace forms":
       # (2) ``repro sync`` (TOP-LEVEL) fast-forwards lib-a to origin/dev's
       #     tip — the same effect as ``repro workspace sync``.
       let sync = runShell(shellCommand(@[
-        fx.reproBin, "sync", "myproject",
+        fx.reproBin, "sync", "--report", "myproject",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       if sync.code != 0:
@@ -223,7 +223,7 @@ suite "Top-level sync/pull shortcuts match the workspace forms":
           "dev")
       check ctlOld != ctlFx.aTip
       let ctlSync = runShell(shellCommand(@[
-        ctlFx.reproBin, "workspace", "sync", "myproject",
+        ctlFx.reproBin, "workspace", "sync", "--report", "myproject",
         "--workspace-root=" & ctlFx.workspaceRoot,
       ]))
       check ctlSync.code == 0
@@ -248,7 +248,7 @@ suite "Top-level sync/pull shortcuts match the workspace forms":
       check currentBranch(gitBin, pf.workspaceRoot / "lib-a") == "scratch"
 
       let pull = runShell(shellCommand(@[
-        pf.reproBin, "pull", "myproject",
+        pf.reproBin, "pull", "--report", "myproject",
         "--workspace-root=" & pf.workspaceRoot,
       ]))
       if pull.code != 0:

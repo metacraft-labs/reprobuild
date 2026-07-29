@@ -146,11 +146,11 @@ suite "RA-16 — resumable sync + --force-sync":
         projectToml(remotes, includes))
 
       proc invokeSync(extra: seq[string] = @[]): CmdResult =
-        runShell(shellCommand(@[reproBin, "workspace", "sync", "myproject",
+        runShell(shellCommand(@[reproBin, "workspace", "sync", "--report", "myproject",
           "--workspace-root=" & workspaceRoot] & extra))
 
       proc readReport(): JsonNode =
-        let p = workspaceRoot / ".repro" / "workspace" / "sync-report.json"
+        let p = workspaceRoot / ".repro" / "build" / "reports" / "sync-report.json"
         check fileExists(p)
         parseFile(p)
 

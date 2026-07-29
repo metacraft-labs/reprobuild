@@ -250,7 +250,7 @@ proc assertRefused(res: tuple[code: int; output: string]; needle = "") =
     check needle in res.output
 
 proc checkReport(fx: Fixture): JsonNode =
-  parseFile(fx.workspace / ".repro" / "workspace" / "check-report.json")
+  parseFile(fx.workspace / ".repro" / "build" / "reports" / "check-report.json")
 
 suite "migrated Google Repo workspace pre-push compatibility":
   test "real shared-gitdir hook uses only marker-bound legacy metadata":

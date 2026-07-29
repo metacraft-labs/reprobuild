@@ -201,14 +201,14 @@ suite "HL-7 — unrouted private repo refuses loudly":
       # (1)+(2) unrouted private repo ⇒ LOUD lock-failure refusal (exit 2).
       # =================================================================
       block refusesLoudly:
-        let gate = run(reproBinary & " check --mode=pre-push" &
+        let gate = run(reproBinary & " check --mode=pre-push --report" &
           " --workspace-root=" & q(ws) &
           " --current-repo=" & q(ws / "pub") &
           " --pushed-refs=" & q(refsFile) & " --json")
         checkpoint("gate output: " & gate.output)
         check gate.code == 2
 
-        let report = parseFile(ws / ".repro" / "workspace" / "check-report.json")
+        let report = parseFile(ws / ".repro" / "build" / "reports" / "check-report.json")
         check report["exitCode"].getInt() == 2
         let lf = lockFailure(report)
         check lf != nil
@@ -240,11 +240,11 @@ suite "HL-7 — unrouted private repo refuses loudly":
           "path = \"committed-store\", repos = [\"pub\"] }, " &
           "{ visibility = \"personal\", backend = \"committed-file\", " &
           "path = \"personal-store\", repos = [\"secret\"] }]\n")
-        let gate = run(reproBinary & " check --mode=pre-push" &
+        let gate = run(reproBinary & " check --mode=pre-push --report" &
           " --workspace-root=" & q(ws) &
           " --current-repo=" & q(ws / "pub") &
           " --pushed-refs=" & q(refsFile) & " --json")
         checkpoint("routed gate output: " & gate.output)
-        let report = parseFile(ws / ".repro" / "workspace" / "check-report.json")
+        let report = parseFile(ws / ".repro" / "build" / "reports" / "check-report.json")
         # With the private repo routed there is NO lock-failure refusal.
         check lockFailure(report) == nil
