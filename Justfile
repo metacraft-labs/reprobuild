@@ -797,6 +797,15 @@ integration_output_cleanup_executor:
         tests/integration/t_output_cleanup_executor.nim \
         2>&1 | tee test-logs/integration_output_cleanup_executor.log
 
+integration_provider_file_driven_fanout_cleanup:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_provider_file_driven_fanout_cleanup \
+        --out:build/test-bin/integration_provider_file_driven_fanout_cleanup \
+        tests/integration/t_provider_file_driven_fanout_cleanup.nim \
+        2>&1 | tee test-logs/integration_provider_file_driven_fanout_cleanup.log
+
 integration_configurable_system_basic_resolution:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
