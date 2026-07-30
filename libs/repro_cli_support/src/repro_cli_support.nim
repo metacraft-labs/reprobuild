@@ -33044,8 +33044,17 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           source: sourcePath))
         result.exitCode = 2
         return
+      # Accept ANY remote-tracking branch. A develop-override is an arbitrary
+      # local path, not a manifest repo, so there is no `ResolvedRepo` to feed
+      # `gitRemoteNameFor` and no configured expectation of which remote it
+      # should be published to. Hardcoding "origin" here (the other three
+      # isPublishedQuery call sites all resolve the real name) made this check
+      # fail for every worktree whose remote is named after its org rather than
+      # "origin" -- which is how the `repo` tool names them -- reporting
+      # commits that were sitting on the remote's default branch as
+      # unpublished and refusing the push.
       let pubRes = queryGitState(
-        isPublishedQuery(sourcePath, "origin"), identity)
+        isPublishedQuery(sourcePath, ""), identity)
       if pubRes.status != gqsOk:
         result.failures.add(CheckFailure(
           repo: entry.package,

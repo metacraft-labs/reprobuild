@@ -409,27 +409,50 @@ proc workingTreeIsClean(payload: GitVcsPayload; repoPath: string): tuple[ok: boo
   (ok: true, clean: res.output.strip.len == 0, diagnostic: "")
 
 proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string): tuple[ok: bool; published: bool; diagnostic: string] =
+  ## Is HEAD contained in a remote-tracking branch?
+  ##
+  ## ``remote`` scopes the answer to one remote's refs (``<remote>/…``). Pass
+  ## an EMPTY string to accept ANY remote-tracking branch — the right question
+  ## when the caller has no configured expectation of which remote a repo
+  ## should be published to, and the one the "not on any remote-tracking
+  ## branch" diagnostic has always claimed to be asking.
+  ##
+  ## The distinction is not academic: a repo checked out by the `repo` tool
+  ## names its remote after the org (``metacraft-labs``), not ``origin``. A
+  ## caller that hardcoded ``origin`` against such a worktree saw every commit
+  ## as unpublished, including commits sitting on the remote's own default
+  ## branch, and blocked pushes on that basis.
   let lookup = runGit(payload,
     ["-C", repoPath, "branch", "-r", "--contains", "HEAD"])
   if lookup.exitCode != 0:
     return (ok: false, published: false,
       diagnostic: "git branch -r --contains HEAD failed (" &
         $lookup.exitCode & "): " & lookup.output.trimmed)
+  let anyRemote = remote.len == 0
   let needle = remote & "/"
+  proc matches(candidate: string): bool =
+    if anyRemote:
+      # Any ``<remote>/<branch>`` line qualifies. Require the separator so a
+      # malformed bare line cannot be mistaken for a tracking ref.
+      candidate.len > 0 and '/' in candidate
+    else:
+      candidate.startsWith(needle)
   for raw in lookup.output.splitLines:
     let line = raw.strip()
     if line.len == 0:
       continue
     # Lines look like ``  origin/main`` or ``* origin/HEAD -> origin/main``.
     let normalized = line.replace("* ", "").strip()
-    if normalized.startsWith(needle):
-      return (ok: true, published: true, diagnostic: "")
-    # ``HEAD -> origin/main`` form: split on " -> " and re-check.
+    # ``HEAD -> origin/main`` form: prefer the target of the arrow, since the
+    # left side is a symbolic name rather than a branch that contains HEAD.
     let arrowIndex = normalized.find(" -> ")
     if arrowIndex >= 0:
       let tail = normalized[arrowIndex + 4 .. ^1].strip()
-      if tail.startsWith(needle):
+      if matches(tail):
         return (ok: true, published: true, diagnostic: "")
+      continue
+    if matches(normalized):
+      return (ok: true, published: true, diagnostic: "")
   (ok: true, published: false, diagnostic: "")
 
 proc writeReceipt(receiptPath, content: string) =
