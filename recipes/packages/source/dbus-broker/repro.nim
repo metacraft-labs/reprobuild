@@ -21,18 +21,11 @@
 ##
 ## ## sha256 strategy
 ##
-## We vendor the v36 tarball at
-## ``recipes/packages/source/dbus-broker/vendor/dbus-broker-v36.tar.gz``
-## and reference it via a ``file://`` URL. This is the safest
-## deterministic-test option per the M9.K acceptance plan: the
-## upstream GitHub URL is recorded as ``sourceUrl`` in the
-## ``versions:`` block for documentation / future-bump purposes, but
-## the live ``fetch:`` block points at the vendored copy so the
-## convention layer's emitted fetch action is offline-reproducible.
+## Use the maintainer-generated v36 release tarball. Unlike GitHub's
+## automatic tag archive, this distribution includes the c-util Meson
+## subprojects required for an offline, source-complete build.
 ##
-## sha256 = 5058a81eea8086636ef09a670d103e35e650a6f0200aadc2f59f3fb6e76c37b8
-##  (computed locally over the vendored
-##  ``dbus-broker-v36.tar.gz``, 241,290 bytes).
+## sha256 = d333d99bd2688135b6d6961e7ad1360099d186078781c87102230910ea4e162b
 ##
 ## ## Build shape
 ##
@@ -88,21 +81,14 @@ package dbusBrokerSource:
     ## deterministic offline test reproduction.
     "36":
       sourceRevision = "refs/tags/v36"
-      sourceUrl = "https://github.com/bus1/dbus-broker/archive/refs/tags/v36.tar.gz"
+      sourceUrl = "https://github.com/bus1/dbus-broker/releases/download/v36/dbus-broker-36.tar.xz"
       sourceRepository = "https://github.com/bus1/dbus-broker"
 
   fetch:
-    ## Vendored tarball (option 1 per the M9.K acceptance plan).
-    ## ``file://`` URL keeps the build deterministic when the network
-    ## is unavailable; the convention layer's argv carries this URL
-    ## verbatim so the engine's content-addressed cache fingerprint
-    ## stays stable across rebuilds.
-    ##
-    ## sha256 was computed over the vendored 241,290-byte tarball
-    ## downloaded once from the upstream tag URL recorded in
-    ## ``versions:`` above.
-    url: "https://github.com/bus1/dbus-broker/archive/refs/tags/v36.tar.gz"
-    sha256: "5058a81eea8086636ef09a670d103e35e650a6f0200aadc2f59f3fb6e76c37b8"
+    ## The upstream distribution archive includes the source of all
+    ## Meson fallback subprojects and is pinned by its byte hash.
+    url: "https://github.com/bus1/dbus-broker/releases/download/v36/dbus-broker-36.tar.xz"
+    sha256: "d333d99bd2688135b6d6961e7ad1360099d186078781c87102230910ea4e162b"
     extractStrip: 1
 
   nativeBuildDeps:

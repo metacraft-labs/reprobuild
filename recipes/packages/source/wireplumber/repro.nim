@@ -225,6 +225,11 @@ package wireplumberSource:
         "tests=false",
       ]
       let patches = @[
+        # Seed Meson's offline wrap cache with the exact Lua source and
+        # WrapDB build patch pinned by upstream's subprojects/lua.wrap.
+        "mkdir -p src/subprojects/packagecache",
+        "cp vendor/lua-5.5.0.tar.gz src/subprojects/packagecache/",
+        "cp vendor/lua_5.5.0-1_patch.zip src/subprojects/packagecache/",
         # Upstream 0.5.14 declares a build-tree conf.pot output but writes
         # it into the source tree. Keep generated translations in Meson's
         # build directory so monitored builds leave sources immutable.

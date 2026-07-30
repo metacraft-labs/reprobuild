@@ -109,6 +109,9 @@ package knotificationsSource:
     ## QtMultimedia the knotifications surface consumes (action
     ## buttons, sound playback, popup widgets, fallback channels).
     "qt6-base >=6.6"
+    ## ECMQmlModule and the optional notification QML plugin require
+    ## Qt6::Qml to exist before the ECM module is initialized.
+    "qt6-declarative >=6.6"
     ## qt6-tools supplies ``qhelpgenerator`` for QCH generation.
     "qt6-tools >=6.6"
     ## kconfig is the KF6 configuration-storage library knotifications
@@ -153,7 +156,16 @@ package knotificationsSource:
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let patches = @[
+        # Upstream includes ECMQmlModule before discovering Qt6::Qml.
+        # With split Qt prefixes that permanently suppresses the ECM QML
+        # commands even though Qt Declarative is found later.
+        "sed -i '/include(ECMQmlModule)/d' src/CMakeLists.txt",
+        "sed -i '/find_package(Qt6 .*OPTIONAL_COMPONENTS Qml)/a include(ECMQmlModule)' src/CMakeLists.txt",
+      ]
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true,
+                              srcPatches = patches)
       discard pkg.library("libKF6Notifications")
     finally:
       clearCurrentOwningPackageOverride()

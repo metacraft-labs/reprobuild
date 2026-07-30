@@ -36,12 +36,8 @@ package lvm2Source:
   buildDeps:
     ## udev (libudev) for device hotplug integration.
     "libudev"
-    ## readline for the lvm shell.
-    "readline"
     ## util-linux for libblkid + libuuid.
     "util-linux"
-    ## ncurses for the termcap library that readline links against.
-    "ncurses"
     ## libaio for the bcache async-I/O fast path.
     "libaio"
 
@@ -68,7 +64,9 @@ package lvm2Source:
       let opts = @[
         "--disable-static",
         "--enable-shared",
-        "--enable-readline",
+        # ReproOS invokes the LVM commands non-interactively. Disabling the
+        # optional shell removes its readline/termcap dependency.
+        "--disable-readline",
         "--enable-udev_sync",
         "--enable-udev_rules",
         "--enable-pkgconfig",
