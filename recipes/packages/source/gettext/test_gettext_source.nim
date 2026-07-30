@@ -3,7 +3,7 @@
 ## Pins the M9.H/I/K trio's behaviour on the SIXTY-FIFTH real
 ## production from-source recipe. gettext's unique coverage angle vs
 ## the prior sixty-four is being the canonical GNU i18n / l10n
-## toolchain with a FIVE-flag
+## toolchain with a SEVEN-flag
 ## ``configureFlags:`` block exercising the mixed ``--disable-*`` /
 ## ``--without-*`` polarity convention.
 ##
@@ -19,7 +19,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[strutils, unittest]
 
 import repro_project_dsl
 
@@ -38,6 +38,8 @@ const ExpectedConfigureFlags = @[
   "--disable-static",
   "--disable-java",
   "--disable-csharp",
+  "--disable-acl",
+  "--disable-xattr",
   "--without-emacs",
   "--without-included-libintl",
 ]
@@ -67,7 +69,10 @@ suite "gettextSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "configureFlags registers the exact production flag sequence":
-    check true  # M9.R.6.1: registry retired — assertion gutted
+    const recipe = staticRead("repro.nim")
+    for flag in ExpectedConfigureFlags:
+      check recipe.contains(flag)
+    check not recipe.contains("\"libacl\"")
   test "configureFlags does not leak into the meson channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "configureFlags does not leak into the cmake channel":

@@ -100,6 +100,14 @@
 ##                                       layer (heavy mono dependency
 ##                                       surface; no v1 desktop
 ##                                       consumer reaches for it).
+##   * ``--disable-acl``              — skip ACL-preserving file-copy
+##                                       helpers. ReproOS uses gettext
+##                                       only to compile catalogs, so
+##                                       this avoids a libacl/libattr
+##                                       runtime edge in build tools.
+##   * ``--disable-xattr``            — skip extended-attribute copy
+##                                       support for the same catalog-
+##                                       compiler-only build profile.
 ##   * ``--without-emacs``            — skip the emacs lisp bindings
 ##                                       (the v1 desktop's interactive
 ##                                       editor target is vim, not
@@ -193,20 +201,6 @@ package gettextSource:
     ## emits XML-formatted message catalogs for the (deprecated)
     ## glade / qt-linguist consumers.
     "libxml2 >=2.9"
-    ## M9.R.31.1 — gettext's autotools configure unconditionally probes
-    ## for ``libacl`` and links it into ``libgettextlib`` when present
-    ## (used for ACL preservation in file-copy helpers + Mac-OS-X
-    ## resource-fork compat shims; gettext upstream provides no
-    ## ``--without-acl`` opt-out). The previous build inherited the
-    ## libacl link via the host nix-shell's ambient
-    ## ``LD_LIBRARY_PATH``; when M9.R.30's batch rebuild ran without
-    ## that path, msgfmt's ``DT_NEEDED libacl.so.1`` no longer
-    ## resolved at runtime. Declaring libacl as a direct buildDep
-    ## threads its lib dir onto LIBRARY_PATH + LD_LIBRARY_PATH at
-    ## link time AND onto msgfmt's baked RPATH via M9.R.14f's walker
-    ## — closing the DE-rebuild trip surfaced by M9.R.31 Phase B
-    ## (mutter's i18n step short-fails with msgfmt → libacl gap).
-    "libacl"
 
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
@@ -242,6 +236,8 @@ package gettextSource:
         "--disable-static",
         "--disable-java",
         "--disable-csharp",
+        "--disable-acl",
+        "--disable-xattr",
         "--without-emacs",
         "--without-included-libintl",
       ]
