@@ -132,6 +132,7 @@ package qt6WaylandSource:
     extractStrip: 1
 
   nativeBuildDeps:
+    "bash >=5.2"
     ## cmake is the build-system driver — qt6-wayland 6.8.x requires
     ## cmake 3.16 floor (matches the broader Qt6 6.8.1 cmake floor).
     "cmake >=3.16"

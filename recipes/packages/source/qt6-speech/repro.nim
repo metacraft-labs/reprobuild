@@ -24,6 +24,7 @@ package qt6SpeechSource:
     extractStrip: 1
 
   nativeBuildDeps:
+    "bash >=5.2"
     "cmake >=3.21"
     "ninja >=1.10"
     "gcc >=11"
