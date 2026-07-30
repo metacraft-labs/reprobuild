@@ -7046,6 +7046,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_lock_coherence_reports_the_diff_advisory_only.nim",
+    binary: "build/test-bin/t_lock_coherence_reports_the_diff_advisory_only",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_lock_file_only_workspace_fully_described_from_lock_not_head.nim",
     binary: "build/test-bin/t_lock_file_only_workspace_fully_described_from_lock_not_head",
     defines: @[],
@@ -7480,6 +7488,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_project_new_writes_and_pushes_manifest.nim",
     binary: "build/test-bin/t_project_new_writes_and_pushes_manifest",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_prompt_cache_is_its_own_file_and_marks_staleness.nim",
+    binary: "build/test-bin/t_prompt_cache_is_its_own_file_and_marks_staleness",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

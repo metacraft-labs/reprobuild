@@ -8365,6 +8365,73 @@ proc reportDestination*(spec: ReportSpec; workspaceRoot, verb: string): string =
     return ""
   workspaceReportDir(workspaceRoot) / (verb & "-report.json")
 
+# ---------------------------------------------------------------------------
+# `repro prompt` state cache.
+#
+# The prompt segment is recomputed on EVERY shell render, so it must answer
+# from a cheap cached fact rather than enumerating repos live. It used to
+# answer from ``sync-report.json``, which is wrong twice over: a report is the
+# record of one invocation and is never a source of truth, and it carries no
+# way to tell a fresh record from a months-old one — so the segment could
+# confidently print drift counts describing a workspace that no longer exists.
+# Making the report opt-in turned that into a visible blank as well.
+#
+# This is a purpose-built cache instead: its own file, under the workspace
+# root's disposable build dir, carrying the timestamp and the BRANCH it
+# describes so the reader can say "these numbers may be stale" rather than
+# quietly print the wrong ones. It is written by the commands that CHANGE
+# workspace state, never by a read-only query, and the prompt still never runs
+# git.
+# ---------------------------------------------------------------------------
+
+const
+  PromptCacheSchema* = "reprobuild.prompt-cache.v1"
+  PromptCacheMaxAgeSeconds* = 7'i64 * 24 * 60 * 60
+    ## Beyond this the cache is reported STALE regardless of any other
+    ## signal. There is no cheap way to notice a repo someone deleted by
+    ## hand, so an absolute bound is the honest backstop: after a week the
+    ## segment says "possibly stale" instead of asserting a stale number.
+
+proc promptCachePath*(workspaceRoot: string): string =
+  ## The prompt cache is NOT a report and deliberately does not live in
+  ## ``reports/``: a report records one invocation and is never read back,
+  ## whereas this file exists precisely to be read back. Keeping them separate
+  ## is what stops ``--report`` from becoming load-bearing for the prompt.
+  workspaceRoot / ".repro" / "build" / "prompt-cache.json"
+
+proc writePromptCache*(workspaceRoot, verb: string;
+                       repoBranches: openArray[string]) =
+  ## Refresh the prompt cache after a state-changing command. ``repoBranches``
+  ## is the per-repo branch the command left each checkout on (empty entries
+  ## are counted as repos but never as drift).
+  ##
+  ## Best-effort and never raises: failing to refresh a prompt segment must not
+  ## fail the command that changed the workspace.
+  if workspaceRoot.len == 0:
+    return
+  try:
+    var branch = ""
+    let recorded = readWorkspaceBranch(workspaceRoot)
+    if recorded.isSome:
+      branch = recorded.get()
+    var drift = 0
+    for repoBranch in repoBranches:
+      if branch.len > 0 and repoBranch.len > 0 and repoBranch != branch:
+        inc drift
+    let doc = %*{
+      "schema": PromptCacheSchema,
+      "writtenAtUnix": getTime().toUnix,
+      "writtenBy": verb,
+      "branch": branch,
+      "repoCount": repoBranches.len,
+      "driftRepos": drift,
+    }
+    let path = promptCachePath(workspaceRoot)
+    createDir(parentDir(path))
+    writeFile(path, pretty(doc, indent = 2) & "\n")
+  except CatchableError:
+    discard
+
 proc appendActivitySelection(current: var string; value: string) =
   for raw in value.split(','):
     let item = raw.strip()
@@ -22818,6 +22885,15 @@ proc runWorkspaceInitCommand*(args: openArray[string]): int =
   let outcome = executeWorkspaceInit(parsed)
   writeWorkspaceInitReport(outcome.report,
     reportDestination(parsed.report, outcome.report.workspaceRoot, "init"))
+  # ``init`` leaves every materialized repo on the manifest's revision, i.e. on
+  # the workspace branch, so the cache records the count with no drift. The
+  # init report carries no per-repo branch field to be more precise than that.
+  block:
+    var branches: seq[string]
+    for _ in outcome.report.cloned: branches.add("")
+    for _ in outcome.report.upToDate: branches.add("")
+    for _ in outcome.report.divergences: branches.add("")
+    writePromptCache(outcome.report.workspaceRoot, "init", branches)
   if parsed.json:
     stdout.writeLine(pretty(outcome.report.toJsonNode(), indent = 2))
   else:
@@ -23856,6 +23932,332 @@ proc latestLockShasViaGit(identity: GitToolIdentity;
       if path notin result.shas:
         result.shas[path] = rev
   result.lockRelPath = candidates[0].relPath
+
+# ---------------------------------------------------------------------------
+# Lock coherence — a DIFF, not a solve.
+#
+# A workspace can hold several locks that each claim a revision for the same
+# node: every participating repo may carry its own committed ``repro.lock``, and
+# the manifests DB carries the private pins. Nothing forces those claims to
+# agree with each other, or with what is actually checked out.
+#
+# The solver's job is to FIND a set of revisions that satisfies every
+# constraint. This check does something far simpler and correspondingly
+# cheaper: it collects what each lock claims, compares that to the checked-out
+# HEAD, and reports where they disagree. No solve, no network, a bounded number
+# of local git queries — so it is affordable on every ``sync`` / ``status`` /
+# ``check``, and it is naturally ADVISORY. It never blocks and never mutates.
+#
+# The classification is by REACHABILITY, because that is what decides whether a
+# disagreement is a problem:
+#   * ancestor    — the claim is behind the checkout. The lock lags; the
+#                   checkout is a superset of what the lock describes.
+#   * descendant  — the claim is ahead of the checkout. A fast-forward closes
+#                   it.
+#   * unreachable — the claim and the checkout are on divergent histories.
+#                   Nothing cheap reconciles them.
+#   * not-fetched — the claimed object is not in the checkout at all, so the
+#                   relationship cannot even be evaluated.
+# Only the last two normally warrant interrupting the operator. The first two
+# are information: a lagging lock is the NORMAL state of a repo under active
+# development.
+#
+# Whose claim wins is stated plainly rather than left to inference: in develop
+# mode the CHECKOUT is what the build reads. A lock that disagrees is a stale
+# record, not an override.
+# ---------------------------------------------------------------------------
+
+type
+  CoherenceRelation* = enum
+    ## How a lock's claimed revision relates to the checked-out HEAD.
+    crMatch = "match"
+    crAncestor = "ancestor"
+    crDescendant = "descendant"
+    crUnreachable = "unreachable"
+    crNotFetched = "not-fetched"
+    crNoCheckout = "no-checkout"
+
+  LockClaim* = object
+    ## One lock's claim about one node.
+    node*: string        ## the node identity the claim is about
+    revision*: string    ## the revision it claims
+    source*: string      ## operator-facing origin ("lib-a/repro.lock", …)
+    relation*: CoherenceRelation
+
+  CoherenceFinding* = object
+    ## One node about which at least one lock disagrees with reality.
+    node*: string
+    path*: string          ## workspace-relative checkout path
+    checkoutHead*: string  ## observed HEAD ("" when nothing is checked out)
+    branch*: string        ## checked-out branch ("" when detached/absent)
+    claims*: seq[LockClaim]
+    claimsDisagree*: bool  ## two or more locks claim DIFFERENT revisions
+    interrupting*: bool    ## unreachable / not-fetched / no-checkout
+    remedies*: seq[string] ## cheapest first
+
+  CoherenceReport* = object
+    workspaceRoot*: string
+    findings*: seq[CoherenceFinding]
+    interrupting*: int
+    informational*: int
+
+proc relationTag*(r: CoherenceRelation): string = $r
+
+proc sameRevision(a, b: string): bool =
+  ## Revision equality that tolerates an abbreviated prefix on either side —
+  ## a lock may legitimately carry an abbreviation. An empty side matches
+  ## NOTHING, which is what lets the caller distinguish "no claim" from a hit.
+  if a.len == 0 or b.len == 0: return false
+  if a == b: return true
+  a.startsWith(b) or b.startsWith(a)
+
+proc objectPresent(identity: GitToolIdentity; repoPath, sha: string): bool =
+  ## ``cat-file -e <sha>^{commit}`` exits 0 only when the object is present AND
+  ## peels to a commit. A blobless/partial clone still has the commit object, so
+  ## this correctly answers "can I reason about this revision locally".
+  if sha.len == 0 or not looksLikeSha(sha):
+    return false
+  gitRunPlain(identity,
+    ["-C", repoPath, "cat-file", "-e", sha & "^{commit}"]).code == 0
+
+proc isAncestorOf(identity: GitToolIdentity;
+                  repoPath, maybeAncestor, descendant: string): bool =
+  gitRunPlain(identity, ["-C", repoPath, "merge-base", "--is-ancestor",
+    maybeAncestor, descendant]).code == 0
+
+proc classifyClaim(identity: GitToolIdentity;
+                   repoPath, claimed, head: string): CoherenceRelation =
+  if head.len == 0:
+    return crNoCheckout
+  if claimed.len == 0:
+    return crMatch
+  if sameRevision(claimed, head):
+    return crMatch
+  if not objectPresent(identity, repoPath, claimed):
+    return crNotFetched
+  if isAncestorOf(identity, repoPath, claimed, head):
+    return crAncestor
+  if isAncestorOf(identity, repoPath, head, claimed):
+    return crDescendant
+  crUnreachable
+
+proc coherenceRemedies(finding: CoherenceFinding): seq[string] =
+  ## Cheapest first. Every entry is something the operator can actually run;
+  ## the ordering is the cost of doing it, not the tidiness of the result.
+  var worst = crMatch
+  for claim in finding.claims:
+    if ord(claim.relation) > ord(worst):
+      worst = claim.relation
+  case worst
+  of crMatch:
+    @[]
+  of crDescendant:
+    @["`repro sync` — the checkout is behind the claim and fast-forwards to it"]
+  of crAncestor:
+    @["nothing, if the lock is simply older than your work",
+      "`repro workspace lock` — re-pin the lagging lock at the checkout"]
+  of crNotFetched:
+    @["`repro sync` — fetch the claimed revision so it can be compared",
+      "`repro workspace lock` — re-pin the lock at the checkout if the claimed " &
+        "revision is gone for good"]
+  of crUnreachable:
+    @["`repro workspace lock` — re-pin the lagging lock at the checkout, if the " &
+        "checkout is the history you want",
+      "`git -C " & finding.path & " checkout <locked-revision>` — point the " &
+        "checkout at the locked revision instead",
+      "materialize a second checkout and `repro develop --into` it — last " &
+        "resort, when both revisions must exist at once"]
+  of crNoCheckout:
+    @["`repro sync` — materialize the missing checkout"]
+
+proc collectLockCoherence*(identity: GitToolIdentity;
+                           workspaceRoot: string;
+                           repos: openArray[ResolvedRepo];
+                           manifestLayerRoot, project: string):
+                          CoherenceReport =
+  ## The one shared read-only implementation behind ``sync`` / ``status`` /
+  ## ``check``. Read-only in the strict sense: it runs only git QUERIES and
+  ## writes nothing.
+  ##
+  ## A private pin is NOT a special case. The diff is identical whether the
+  ## claim came from a committed ``repro.lock`` or from the manifests DB — only
+  ## the ``source`` label differs. On a feature branch that bumped a private
+  ## revision there is nowhere branch-local to record the bump, so this will
+  ## report a discrepancy that no remedy clears. That is the honest output: it
+  ## surfaces a modeling gap instead of hiding it behind a special case.
+  result.workspaceRoot = workspaceRoot
+
+  # Claim source 1: the manifests DB (the private-pin lock).
+  var dbClaims = initTable[string, string]()
+  var dbSource = ""
+  if manifestLayerRoot.len > 0 and project.len > 0:
+    try:
+      let latest = latestLockShasViaGit(identity, manifestLayerRoot, project)
+      dbClaims = latest.shas
+      if latest.lockRelPath.len > 0:
+        dbSource = latest.lockRelPath
+    except CatchableError:
+      discard
+
+  # Claim source 2: every participating repo's own committed lock. Keyed by the
+  # dep's workspace-relative path so a claim lines up with a checkout.
+  var repoClaims = initTable[string, seq[LockClaim]]()
+  for repo in repos:
+    let lockPath = committedLockPath(workspaceRoot / repo.path)
+    if not fileExists(extendedPath(lockPath)):
+      continue
+    var parsed: LockedDependencies
+    try:
+      parsed = parseLockedDependencies(readFile(extendedPath(lockPath)))
+    except CatchableError:
+      # A lock we cannot parse is not a coherence question; the lock verbs
+      # already report malformed locks loudly.
+      continue
+    for dep in parsed.deps:
+      if dep.coordinates.kind != ckVcs: continue
+      if dep.coordinates.revision.len == 0: continue
+      # ``.`` is the lock's own repo; anything else is workspace-relative to
+      # the repo holding the lock.
+      let key =
+        if dep.path.len == 0 or dep.path == ".": repo.path
+        else: os.normalizedPath(repo.path / dep.path).replace('\\', '/')
+      if key notin repoClaims:
+        repoClaims[key] = @[]
+      repoClaims[key].add(LockClaim(
+        node: dep.name,
+        revision: dep.coordinates.revision,
+        source: (repo.path & "/" & CommittedLockFileName).replace('\\', '/')))
+
+  for repo in repos:
+    let repoAbs = workspaceRoot / repo.path
+    var claims: seq[LockClaim]
+    if repo.path in dbClaims:
+      claims.add(LockClaim(node: repo.name, revision: dbClaims[repo.path],
+        source: (if dbSource.len > 0: dbSource else: "manifests lock DB")))
+    if repo.path in repoClaims:
+      for claim in repoClaims[repo.path]:
+        claims.add(claim)
+    if claims.len == 0:
+      continue
+
+    var finding = CoherenceFinding(node: repo.name, path: repo.path)
+    let hasCheckout = dirExists(extendedPath(repoAbs / ".git")) or
+      fileExists(extendedPath(repoAbs / ".git"))
+    if hasCheckout:
+      finding.checkoutHead = revParse(identity, repoAbs, "HEAD")
+      let branchRes = gitRunPlain(identity,
+        ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
+      if branchRes.code == 0:
+        finding.branch = branchRes.output.strip()
+
+    var distinctRevisions = initHashSet[string]()
+    for claim in claims.mitems:
+      claim.relation = classifyClaim(identity, repoAbs, claim.revision,
+        finding.checkoutHead)
+      distinctRevisions.incl(claim.revision.toLowerAscii())
+      if claim.relation in {crUnreachable, crNotFetched, crNoCheckout}:
+        finding.interrupting = true
+    finding.claims = claims
+    # Two locks naming DIFFERENT revisions for one node is worth surfacing even
+    # when both are ancestors of the checkout: the locks contradict each other,
+    # not merely reality, and no single re-pin fixes both.
+    finding.claimsDisagree = distinctRevisions.len > 1
+    if finding.claimsDisagree:
+      finding.interrupting = true
+
+    var allMatch = true
+    for claim in finding.claims:
+      if claim.relation != crMatch:
+        allMatch = false
+    if allMatch and not finding.claimsDisagree:
+      continue
+
+    finding.remedies = coherenceRemedies(finding)
+    if finding.interrupting: inc result.interrupting
+    else: inc result.informational
+    result.findings.add(finding)
+
+proc resolveCoherenceLayerRoot(workspaceRoot, project: string): string =
+  ## Where the manifests-DB locks live. Both supported layouts are probed by
+  ## looking for the thing we actually need (``locks/<project>/``) rather than
+  ## by inferring the layout, so a workspace in either shape gets the private
+  ## pins folded in and a workspace in neither simply contributes no DB claim.
+  if project.len == 0:
+    return ""
+  for candidate in [workspaceRoot / ".repro" / "manifests", workspaceRoot]:
+    if dirExists(extendedPath(candidate / "locks" / project)):
+      return candidate
+  ""
+
+proc lockCoherenceFor*(identity: GitToolIdentity;
+                       workspaceRoot, project: string;
+                       repos: openArray[tuple[name, path: string]]):
+                      CoherenceReport =
+  ## The call shape the three host commands use. They each already know their
+  ## participating repo set from their own report, so nothing is re-resolved
+  ## just to run the check.
+  var resolved: seq[ResolvedRepo]
+  for repo in repos:
+    if repo.path.len == 0: continue
+    resolved.add(ResolvedRepo(name: repo.name, path: repo.path))
+  collectLockCoherence(identity, workspaceRoot, resolved,
+    resolveCoherenceLayerRoot(workspaceRoot, project), project)
+
+proc coherenceReportToJson*(report: CoherenceReport): JsonNode =
+  result = %*{
+    "workspaceRoot": report.workspaceRoot,
+    "interrupting": report.interrupting,
+    "informational": report.informational,
+    "findings": newJArray(),
+  }
+  for finding in report.findings:
+    let entry = %*{
+      "node": finding.node,
+      "path": finding.path,
+      "checkoutHead": finding.checkoutHead,
+      "branch": finding.branch,
+      "claimsDisagree": finding.claimsDisagree,
+      "interrupting": finding.interrupting,
+      "claims": newJArray(),
+      "remedies": newJArray(),
+    }
+    for claim in finding.claims:
+      entry["claims"].add(%*{
+        "node": claim.node,
+        "revision": claim.revision,
+        "source": claim.source,
+        "relation": relationTag(claim.relation),
+      })
+    for remedy in finding.remedies:
+      entry["remedies"].add(%remedy)
+    result["findings"].add(entry)
+
+proc renderCoherenceTextLines*(report: CoherenceReport): seq[string] =
+  ## Advisory text. Emitted after the host command's own output and never
+  ## instead of it. Silent when every lock agrees with reality — the common
+  ## case must cost the operator no attention.
+  if report.findings.len == 0:
+    return @[]
+  result.add("lock coherence: " & $report.interrupting &
+    " needing attention, " & $report.informational & " informational")
+  for finding in report.findings:
+    let head =
+      if finding.checkoutHead.len > 0: finding.checkoutHead
+      else: "<no checkout>"
+    result.add("  " & finding.path & ": checked out " & head &
+      (if finding.branch.len > 0: " on " & finding.branch else: ""))
+    for claim in finding.claims:
+      result.add("    " & claim.source & " claims " & claim.revision &
+        " (" & relationTag(claim.relation) & ")")
+    if finding.claimsDisagree:
+      result.add("    these locks contradict EACH OTHER, not just the " &
+        "checkout — no single re-pin satisfies both")
+    # Say what the build will do, so nobody has to infer it.
+    result.add("    the build uses the CHECKOUT (develop mode); a " &
+      "disagreeing lock is a stale record, not an override")
+    for remedy in finding.remedies:
+      result.add("    remedy: " & remedy)
+  result.add("lock coherence is ADVISORY: nothing was blocked or changed")
 
 # ---------------------------------------------------------------------------
 # Workspace-Manifest-Optional MO-3 — git-checkout LockStore backend
@@ -26351,6 +26753,28 @@ proc writeWorkspaceSyncReport(report: WorkspaceSyncReport;
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
+proc emitLockCoherenceAdvisory*[T](toolProvisioning: ToolProvisioningMode;
+                                   workspaceRoot, project: string;
+                                   repos: openArray[T]) =
+  ## Print the lock-coherence advisory after a host command's own text output.
+  ## Generic over the report entry type because ``sync`` and ``status`` each
+  ## already know their participating set — the check reuses it rather than
+  ## resolving the project a second time. Every entry type it is instantiated
+  ## with supplies ``name`` and ``path``.
+  ##
+  ## Wrapped in a blanket catch on purpose: an advisory diff must never be able
+  ## to change the outcome of the command it is advising on.
+  try:
+    let identity = ensureGitToolResolvable(toolProvisioning, getEnv("PATH"))
+    var pairs: seq[tuple[name, path: string]]
+    for entry in repos:
+      pairs.add((entry.name, entry.path))
+    for line in renderCoherenceTextLines(
+        lockCoherenceFor(identity, workspaceRoot, project, pairs)):
+      stdout.writeLine(line)
+  except CatchableError:
+    discard
+
 proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ## ``repro workspace sync [<project>...] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop]
@@ -26413,6 +26837,14 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   if not parsed.dryRun:
     writeWorkspaceSyncReport(outcome.report,
       reportDestination(parsed.report, outcome.report.workspaceRoot, "sync"))
+    # Refresh the prompt cache. Unconditional and independent of ``--report``:
+    # the prompt is not allowed to depend on an operator flag, and this is
+    # workspace state we just observed rather than a record of the invocation.
+    block:
+      var branches: seq[string]
+      for entry in outcome.report.repos:
+        branches.add(entry.branch)
+      writePromptCache(outcome.report.workspaceRoot, "sync", branches)
     try:
       writeGeneratedWorkspaceProjects(parsed.workspaceRoot)
     except CatchableError as err:
@@ -26425,6 +26857,9 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   else:
     for line in renderSyncTextLines(outcome.report, parsed.verbose):
       stdout.writeLine(line)
+    emitLockCoherenceAdvisory(parsed.toolProvisioning,
+      outcome.report.workspaceRoot, outcome.report.project,
+      outcome.report.repos)
   outcome.report.exitCode
 
 # ---- RA-11: `repro workspace pull` ----------------------------------------
@@ -26838,6 +27273,11 @@ proc runWorkspacePullCommand*(args: openArray[string]): int =
   let outcome = executeWorkspacePull(parsed)
   writeWorkspacePullReport(outcome.report,
     reportDestination(parsed.report, outcome.report.workspaceRoot, "pull"))
+  block:
+    var branches: seq[string]
+    for entry in outcome.report.repos:
+      branches.add(entry.trackingBranch)
+    writePromptCache(outcome.report.workspaceRoot, "pull", branches)
   for line in renderPullTextLines(outcome.report):
     stdout.writeLine(line)
   outcome.report.exitCode
@@ -31818,6 +32258,22 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   let toolDigest = digestHex(identity)
   let observedAt = getTime().toUnix * 1000
 
+  # Lock coherence is ADVISORY, so it goes on the ``notices`` channel — the one
+  # documented never to touch ``exitCode``. It is reported BEFORE the gate's
+  # stages so an operator whose push is about to be refused still sees whether
+  # the workspace's locks agree with what is checked out; a disagreement here is
+  # frequently the reason the gate is unhappy.
+  try:
+    var pairs: seq[tuple[name, path: string]]
+    for repo in resolved.repos:
+      pairs.add((repo.name, repo.path))
+    for line in renderCoherenceTextLines(lockCoherenceFor(identity,
+        parsed.workspaceRoot, resolved.projectName, pairs)):
+      result.notices.add(line)
+  except CatchableError:
+    # An advisory diff must never be able to fail a gate run.
+    discard
+
   # Build a name-keyed lookup of the offending repo. The ``--current-repo``
   # flag is the directory the hook was invoked in; convert it to the
   # workspace-relative path so all the per-repo gate stages report
@@ -35253,6 +35709,8 @@ proc runWorkspaceStatusCommand*(args: openArray[string]): int =
   else:
     for line in renderStatusTextLines(report):
       stdout.writeLine(line)
+    emitLockCoherenceAdvisory(parsed.toolProvisioning, report.workspaceRoot,
+      report.project, report.repos)
   report.exitCode
 
 # ---- M12.B: `repro workspace list` ----------------------------------------
@@ -37545,6 +38003,14 @@ proc runBranchCommand*(args: openArray[string]): int =
       executeBranchCreate(parsed)
   writeBranchReport(report,
     reportDestination(parsed.report, branchReportRoot(report), "branch"))
+  # The read-only ``show`` form answers a question and must not write anything —
+  # the same rule that made the report opt-in. Only the forms that MOVE the
+  # workspace refresh the cache, and they leave every repo on the new branch.
+  if report.form != "show" and report.repos.len > 0:
+    var branches: seq[string]
+    for _ in report.repos:
+      branches.add(report.recordedBranch)
+    writePromptCache(branchReportRoot(report), "branch", branches)
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -38376,6 +38842,11 @@ proc runCheckoutCommand*(args: openArray[string]): int =
   let report = executeCheckout(parsed)
   writeCheckoutReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "checkout"))
+  block:
+    var branches: seq[string]
+    for entry in report.repos:
+      branches.add(entry.newBranch)
+    writePromptCache(report.workspaceRoot, "checkout", branches)
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -42674,9 +43145,14 @@ proc runReproLockCommand*(args: openArray[string]): int =
 #     and the active workspace branch (``readWorkspaceBranch``). Absence of
 #     the marker is what makes the command silent + exit 0 outside a
 #     workspace.
-#   * ``.repro/build/reports/sync-report.json``      — the cached per-repo state
-#     written by the last ``repro workspace sync`` (repo count + per-repo
-#     recorded branch); read for the repo count and a cheap drift signal.
+#   * ``.repro/build/prompt-cache.json``         — the purpose-built prompt
+#     cache (``promptCachePath`` / ``writePromptCache``), refreshed by the
+#     commands that CHANGE workspace state; read for the repo count and the
+#     drift signal. It carries the timestamp and the branch it describes, so a
+#     cache that can no longer be trusted is rendered with a ``?`` marker
+#     instead of silently asserting a stale number. This replaced scraping
+#     ``sync-report.json``, which had no invalidation at all and went blank
+#     once the report became opt-in.
 #   * ``develop-overrides.json``                 — the registered develop-mode
 #     (writable-checkout) dependencies; read for the ``dev:N`` count. This is
 #     also the on-disk side of the *physical signal* documented in
@@ -42705,9 +43181,14 @@ type
     ## invocation from filesystem reads only — never a per-repo git call.
     inWorkspace: bool
     branch: string        ## active workspace branch ("" if unknown)
-    repoCount: int        ## participating repos per the cached sync report
+    repoCount: int        ## participating repos per the prompt cache
     driftRepos: int       ## repos whose cached branch != workspace branch
     developCount: int     ## registered develop-mode (writable) dependencies
+    haveCache: bool       ## a readable prompt cache was found
+    stale: bool           ## the cache may no longer describe the workspace
+    staleReason: string   ## which staleness signal fired (empty when fresh)
+    cacheAgeSeconds: int64
+    cacheWrittenBy: string  ## the verb that last refreshed the cache
 
 proc ascendToWorkspaceRoot(startDir: string): string =
   ## Walk up from ``startDir`` to the nearest directory carrying the RA-10
@@ -42724,37 +43205,67 @@ proc ascendToWorkspaceRoot(startDir: string): string =
       return ""
     dir = parent
 
-proc cachedSyncReportPath(workspaceRoot: string): string =
-  workspaceReportDir(workspaceRoot) / "sync-report.json"
+proc promptCacheStaleness(workspaceRoot, cachePath, cacheBranch,
+                          liveBranch: string;
+                          writtenAtUnix: int64): tuple[stale: bool;
+                                                       reason: string;
+                                                       age: int64] =
+  ## Three cheap signals, no git and no per-repo work — one string compare and
+  ## at most two stats. Order matters: report the most specific cause.
+  let age = max(0'i64, getTime().toUnix - writtenAtUnix)
+  # 1. The workspace moved to another branch after the cache was written, so
+  #    the drift count is computed against the wrong baseline.
+  if liveBranch != cacheBranch:
+    return (true, "branch-changed", age)
+  # 2. The workspace metadata changed after the cache was written. Cheaper and
+  #    sharper than any heuristic: whatever touched `workspace.toml` also
+  #    plausibly changed the repo set.
+  try:
+    let markerPath = workspaceRoot / ".repro" / "workspace.toml"
+    if fileExists(extendedPath(markerPath)) and
+        fileExists(extendedPath(cachePath)) and
+        getLastModificationTime(extendedPath(markerPath)) >
+          getLastModificationTime(extendedPath(cachePath)):
+      return (true, "metadata-newer", age)
+  except CatchableError:
+    discard
+  # 3. Absolute age bound — the backstop for everything we cannot observe
+  #    cheaply (a repo deleted by hand, a branch switched with plain git).
+  if age > PromptCacheMaxAgeSeconds:
+    return (true, "expired", age)
+  (false, "", age)
 
 proc readPromptState(workspaceRoot: string): PromptState =
   ## Populate the segment facts from cached state ONLY. Each read is
   ## defensive: a missing or malformed cache degrades to a partial segment
   ## rather than raising (the prompt must never break the user's shell).
   result.inWorkspace = true
-  # Active branch — from ``.repo/workspace.toml`` (filesystem read, no git).
+  # Active branch — from ``.repro/workspace.toml`` (filesystem read, no git).
   try:
     let branchOpt = readWorkspaceBranch(workspaceRoot)
     if branchOpt.isSome:
       result.branch = branchOpt.get()
   except CatchableError:
     discard
-  # Repo count + drift — from the cached sync report, if one exists. We do
-  # NOT observe the live repos; we report what the last sync recorded.
-  let syncPath = cachedSyncReportPath(workspaceRoot)
-  if fileExists(extendedPath(syncPath)):
+  # Repo count + drift — from the purpose-built prompt cache, if one exists.
+  # We do NOT observe the live repos; we report what the last state-changing
+  # command recorded, and whether that record can still be trusted.
+  let cachePath = promptCachePath(workspaceRoot)
+  if fileExists(extendedPath(cachePath)):
     try:
-      let root = parseFile(extendedPath(syncPath))
-      if root.kind == JObject and root.hasKey("repos") and
-          root["repos"].kind == JArray:
-        for repo in root["repos"]:
-          if repo.kind != JObject:
-            continue
-          inc result.repoCount
-          let recordedBranch = repo{"branch"}.getStr()
-          if result.branch.len > 0 and recordedBranch.len > 0 and
-              recordedBranch != result.branch:
-            inc result.driftRepos
+      let root = parseFile(extendedPath(cachePath))
+      if root.kind == JObject and
+          root{"schema"}.getStr() == PromptCacheSchema:
+        result.haveCache = true
+        result.repoCount = root{"repoCount"}.getInt()
+        result.driftRepos = root{"driftRepos"}.getInt()
+        result.cacheWrittenBy = root{"writtenBy"}.getStr()
+        let staleness = promptCacheStaleness(workspaceRoot, cachePath,
+          root{"branch"}.getStr(), result.branch,
+          root{"writtenAtUnix"}.getBiggestInt())
+        result.stale = staleness.stale
+        result.staleReason = staleness.reason
+        result.cacheAgeSeconds = staleness.age
     except CatchableError:
       discard
   # Develop-mode (writable-checkout) dependency count — from the registered
@@ -42765,14 +43276,22 @@ proc readPromptState(workspaceRoot: string): PromptState =
   except CatchableError:
     discard
 
+proc promptStaleMark(state: PromptState): string =
+  ## The one-character staleness marker appended to any field the prompt cache
+  ## sourced. A visible ``?`` is the whole point: the previous behaviour was to
+  ## print a confidently wrong number, and "3 repos drifted, probably" is a
+  ## strictly better answer than "3 repos drifted".
+  if state.stale: "?" else: ""
+
 proc segmentFields(state: PromptState): seq[(string, string)] =
   ## The ordered (placeholder-key, rendered-value) pairs. Only non-empty
   ## fields are emitted, matching the CLI/prompt.md example
-  ## ``[ws:feat-x ●3 dev:2]``.
+  ## ``[ws:feat-x ●3 dev:2]``. The branch comes from workspace metadata and is
+  ## therefore always current; only the cache-sourced drift count can be stale.
   if state.branch.len > 0:
     result.add(("ws", "ws:" & state.branch))
   if state.driftRepos > 0:
-    result.add(("drift", "●" & $state.driftRepos))
+    result.add(("drift", "●" & $state.driftRepos & promptStaleMark(state)))
   if state.developCount > 0:
     result.add(("dev", "dev:" & $state.developCount))
 
@@ -42802,6 +43321,11 @@ proc renderPromptJson(state: PromptState): string =
     "repoCount": state.repoCount,
     "driftRepos": state.driftRepos,
     "developCount": state.developCount,
+    "haveCache": state.haveCache,
+    "stale": state.stale,
+    "staleReason": state.staleReason,
+    "cacheAgeSeconds": state.cacheAgeSeconds,
+    "cacheWrittenBy": state.cacheWrittenBy,
     "segment": renderPromptPlain(state),
   }
   $obj
@@ -42810,15 +43334,17 @@ proc renderPromptTemplate(state: PromptState; tmpl: string): string =
   ## Substitute documented ``{placeholder}`` tokens in a user format
   ## string. Unknown tokens are left verbatim. Documented placeholders:
   ##   {branch}  active workspace branch ("" if unknown)
-  ##   {repos}   participating repo count from the cached sync report
+  ##   {repos}   participating repo count from the prompt cache
   ##   {drift}   repos whose cached branch differs from the workspace branch
   ##   {develop} registered develop-mode (writable) dependency count
+  ##   {stale}   "?" when the cache may no longer describe the workspace, else ""
   ##   {segment} the default plain segment string
   result = tmpl
   result = result.replace("{branch}", state.branch)
   result = result.replace("{repos}", $state.repoCount)
   result = result.replace("{drift}", $state.driftRepos)
   result = result.replace("{develop}", $state.developCount)
+  result = result.replace("{stale}", promptStaleMark(state))
   result = result.replace("{segment}", renderPromptPlain(state))
 
 proc renderPromptSegment(state: PromptState; args: PromptArgs): string =
