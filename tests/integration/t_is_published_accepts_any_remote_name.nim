@@ -16,11 +16,17 @@
 ##      to ask. A commit reachable from ``metacraft-labs/main`` is published.
 ##      (Falsifiable: the pre-fix code built the needle ``"/"`` and matched
 ##      nothing, so this returned false.)
-##   2. A NON-EMPTY remote name still scopes the answer to that remote, so
-##      callers that do know which remote they mean keep their precision.
-##      Asking about ``origin`` in a repo whose only remote is
-##      ``metacraft-labs`` must answer false, not true.
-##   3. A genuinely unpublished commit is still reported as unpublished under
+##   2. A name that is NOT a configured remote of the worktree degrades to the
+##      any-remote answer. `gitRemoteNameFor` returns a hardcoded "origin"
+##      whenever the manifest entry carries no remote name, so callers
+##      routinely arrive asking about a remote that does not exist here — and
+##      in a `repo`-tool workspace it never does. Treating that guess as a
+##      constraint reported commits on the remote's own default branch as
+##      unpublished, which is a hard block on correct work.
+##   3. Scoping is still REAL when the named remote does exist: a configured
+##      remote that does not contain HEAD answers unpublished. The fallback in
+##      (2) must not collapse every scoped query into "any".
+##   4. A genuinely unpublished commit is still reported as unpublished under
 ##      the "any remote" mode — the fix must not degrade into "always true".
 ##
 ## Hermetic: one temp root holds a local bare upstream and a clone made with
@@ -88,11 +94,13 @@ suite "isPublishedQuery — remote naming":
       check anyRes.status == gqsOk
       check anyRes.isPublished
 
-      # (2) an explicit, WRONG remote name still scopes correctly
+      # (2) a name that is NOT a configured remote here — exactly what
+      #     `gitRemoteNameFor`'s "origin" fallback produces — degrades to the
+      #     any-remote answer instead of a confident falsehood.
       let originRes =
         queryGitState(isPublishedQuery(clonePath, "origin"), identity)
       check originRes.status == gqsOk
-      check not originRes.isPublished
+      check originRes.isPublished
 
       # (2b) the explicit, RIGHT remote name also answers published
       let namedRes =
@@ -100,7 +108,30 @@ suite "isPublishedQuery — remote naming":
       check namedRes.status == gqsOk
       check namedRes.isPublished
 
-      # (3) a local commit that was never pushed is still unpublished, so the
+      # (3) scoping is still real: a remote that IS configured but does not
+      #     contain HEAD answers unpublished. Point a second remote at an
+      #     unrelated upstream so the distinction is observable.
+      let otherOrigin = scratch / "other.git"
+      let otherWork = scratch / "otherseed"
+      createDir(otherWork)
+      requireSuccess("git init -q -b main " & quoteShell(otherWork))
+      requireSuccess("git config user.email t@example.com", otherWork)
+      requireSuccess("git config user.name Test", otherWork)
+      writeFile(otherWork / "other.txt", "unrelated\n")
+      requireSuccess("git add other.txt", otherWork)
+      requireSuccess("git commit -q -m unrelated", otherWork)
+      requireSuccess("git clone -q --bare " & quoteShell(otherWork) & " " &
+        quoteShell(otherOrigin))
+      requireSuccess("git remote add other " & quoteShell(fileUrl(otherOrigin)),
+        clonePath)
+      requireSuccess("git fetch -q other", clonePath)
+
+      let scopedRes =
+        queryGitState(isPublishedQuery(clonePath, "other"), identity)
+      check scopedRes.status == gqsOk
+      check not scopedRes.isPublished
+
+      # (4) a local commit that was never pushed is still unpublished, so the
       #     any-remote mode has not collapsed into "always true".
       requireSuccess("git config user.email t@example.com", clonePath)
       requireSuccess("git config user.name Test", clonePath)

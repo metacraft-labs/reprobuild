@@ -417,6 +417,11 @@ proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string):
   ## should be published to, and the one the "not on any remote-tracking
   ## branch" diagnostic has always claimed to be asking.
   ##
+  ## Scoping applies only when the named remote is actually configured in the
+  ## worktree. A name that is not a real remote is a caller's guess, so it
+  ## degrades to the any-remote answer rather than a confident falsehood; see
+  ## the comment on the lookup below.
+  ##
   ## The distinction is not academic: a repo checked out by the `repo` tool
   ## names its remote after the org (``metacraft-labs``), not ``origin``. A
   ## caller that hardcoded ``origin`` against such a worktree saw every commit
@@ -428,7 +433,26 @@ proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string):
     return (ok: false, published: false,
       diagnostic: "git branch -r --contains HEAD failed (" &
         $lookup.exitCode & "): " & lookup.output.trimmed)
-  let anyRemote = remote.len == 0
+  # A named remote that this checkout does not actually have is a GUESS, not a
+  # constraint. `gitRemoteNameFor` falls back to "origin" whenever the manifest
+  # entry carries no remote name, so callers routinely arrive here asking about
+  # a remote that does not exist in the worktree — and in a `repo`-tool
+  # workspace it never does, because the remotes are named after the org. Left
+  # as-is that guess answers "unpublished" for commits sitting on the remote's
+  # own default branch. Scoping is worth keeping when the caller names a remote
+  # that IS configured; when it names one that is not, fall back to accepting
+  # any remote-tracking branch rather than reporting a confident falsehood.
+  var anyRemote = remote.len == 0
+  if not anyRemote:
+    let remotes = runGit(payload, ["-C", repoPath, "remote"])
+    if remotes.exitCode == 0:
+      var found = false
+      for raw in remotes.output.splitLines:
+        if raw.strip() == remote:
+          found = true
+          break
+      if not found:
+        anyRemote = true
   let needle = remote & "/"
   proc matches(candidate: string): bool =
     if anyRemote:
