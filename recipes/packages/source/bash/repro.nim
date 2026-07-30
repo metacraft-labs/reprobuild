@@ -184,6 +184,9 @@ package bashSource:
     ## artifact build body lands in M9.L when the convention's make-
     ## spawn + install-glue closes.
     discard
+  executable sh:
+    ## POSIX shell tool name used by Ninja and Make command runners.
+    discard
 
   build:
     ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
@@ -200,11 +203,15 @@ package bashSource:
         "grep -q '^#include <unistd.h>$' src/lib/termcap/tparam.c || " &
           "sed -i '/#include \"ltcap.h\"/i #include <unistd.h>' " &
           "src/lib/termcap/tparam.c",
+        "printf '\ninstall-sh-alias: install\n\tln -sf bash " &
+          "\"$(DESTDIR)$(bindir)/sh\"\n' >> src/Makefile.in",
       ]
       let pkg = autotools_package(srcDir = "./src",
                                   configureOptions = opts,
+                                  installTarget = "install-sh-alias",
                                   srcPatches = patches)
       discard pkg.executable("bash")
+      discard pkg.executable("sh")
     finally:
       clearCurrentOwningPackageOverride()
 
