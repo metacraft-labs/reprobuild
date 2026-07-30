@@ -30,7 +30,8 @@ type
   RingAppendStatus* = enum
     rasAppended     ## the record was reserved + published
     rasDropped      ## ring full: SIGNALLED drop (the `dropped` counter bumped)
-    rasOversized    ## record > RingSlotRecCap: not enqueueable
+    rasOversized    ## record > RingSlotRecCap: not enqueueable (SIGNALLED via
+                    ## the `oversized` counter)
 
   RingRecord* = object
     digest*: array[KeyDigestLen, byte]
@@ -62,8 +63,22 @@ proc resetRing*(base: atomics_shm.ShmBase) =
   ## zero in a freshly-created (zero-filled) region. Delegates to shm_queue.
   shmring.resetEmbeddedRing(
     shmring.initEmbeddedRing(base, RingHdrBase, RingCap, RingBlobCap))
+  # The oversize counter is the ring's SECOND rejection signal and lives beside
+  # the ring (control-region extension) rather than in shm_queue's header, so it
+  # is reset here together with the `dropped` word shm_queue owns.
+  atomics_shm.storeU64Release(base, CtlExtOffRingOversizedCount, 0'u64)
 
 # --- multi-producer append (CAS tail) ------------------------------------
+
+proc noteOversized(r: SubmissionRing) {.inline.} =
+  ## SIGNAL an over-cap rejection the same way a ring-full drop is signalled:
+  ## an atomic, cross-process counter in the shared control region. Without it
+  ## an engine whose records all exceed `RingSlotRecCap` bypasses the shm
+  ## live-sharing tier 100% of the time and looks IDENTICAL, from outside, to a
+  ## healthy one — the ring stays empty, the daemon is never asked to publish,
+  ## and every lookup quietly falls through to Tier-1 disk.
+  if r.er.base.isNil: return
+  discard atomics_shm.fetchAddU64(r.er.base, CtlExtOffRingOversizedCount, 1'u64)
 
 proc append*(r: SubmissionRing; digest: openArray[byte];
     rec: openArray[byte]): RingAppendStatus =
@@ -72,8 +87,13 @@ proc append*(r: SubmissionRing; digest: openArray[byte];
   ## shm_queue ring's ``tryPush`` (CAS ticket reserve + release-store publish).
   ## Bounded: on a full ring the `dropped` counter is bumped and `rasDropped`
   ## returned (the drop is SIGNALLED, never silent — spec §4.6). A record larger
-  ## than the inline slot capacity is `rasOversized` (ring unchanged).
+  ## than the inline slot capacity leaves the ring unchanged and returns
+  ## `rasOversized`, bumping the `oversized` counter — that rejection is
+  ## SIGNALLED too (spec §4.4 / §8 AC-2c: oversized is "signalled Tier-1-only",
+  ## never silent), so `oversizedCount` tells an operator whether the shm tier
+  ## is actually carrying traffic or is being silently bypassed.
   if rec.len > RingSlotRecCap:
+    r.noteOversized()
     return rasOversized
   var blob: array[RingBlobCap, byte]
   # digest is exactly KeyDigestLen bytes (weak fingerprint); copy verbatim.
@@ -85,7 +105,12 @@ proc append*(r: SubmissionRing; digest: openArray[byte];
   case r.er.tryPush(blob.toOpenArray(0, KeyDigestLen + rec.len - 1))
   of prPushed: rasAppended
   of prDropped: rasDropped
-  of prOversize: rasOversized
+  of prOversize:
+    # Unreachable given the `RingSlotRecCap` pre-check above (the blob is
+    # exactly `KeyDigestLen + rec.len` <= `RingBlobCap`), but a geometry change
+    # must not turn a rejection into a silent one.
+    r.noteOversized()
+    rasOversized
   # Any other producer result is treated as a drop (the record could not be
   # delivered). Newer nim-shm-queue revisions add ``prConsumerGone`` — an
   # ``opBlockProducer``-only outcome the non-blocking ``tryPush`` never returns
@@ -207,6 +232,15 @@ proc reserveUnpublishedForTesting*(r: SubmissionRing): uint64 =
 
 proc droppedCount*(r: SubmissionRing): uint64 {.inline.} =
   r.er.droppedCount()
+
+proc oversizedCount*(r: SubmissionRing): uint64 {.inline.} =
+  ## Submissions rejected because the encoded record exceeded
+  ## `RingSlotRecCap` — the SIGNALLED counterpart of `droppedCount` for the
+  ## over-cap path. A steadily climbing value with a flat `droppedCount` means
+  ## the shm live-sharing tier is being bypassed (records are Tier-1-only),
+  ## not that it is idle.
+  if r.er.base.isNil: return 0
+  atomics_shm.loadU64Acquire(r.er.base, CtlExtOffRingOversizedCount)
 
 proc pendingCount*(r: SubmissionRing): uint64 {.inline.} =
   ## Reserved-but-not-yet-drained tickets (tail - head). Bounded by RingCap.

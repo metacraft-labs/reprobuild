@@ -308,7 +308,17 @@ suite "integration_action_cache_two_tier_concurrent_builds_no_wedge_live_sharing
         # Build A (this process, but the daemon is a SEPARATE process) records an
         # edge → writes Tier-1 disk AND submits the metadata to the MPSC ring.
         let weak = weakFor("shared-edge")
-        let inputPath = actionRoot / "shared-in.txt"
+        # The encoded record embeds every INPUT PATH verbatim, so an absolute
+        # path under a deep hermetic temp root makes the record's size a
+        # property of `$TMPDIR` rather than of the fixture: past
+        # `SlotInlineCap` the submission is rejected as oversized, nothing is
+        # ever published, and this test would "fail" as an opaque
+        # `waitForShmSlot` timeout that really only measured how long the
+        # runner's `$TMPDIR` happens to be. Record the input by a RELATIVE
+        # path resolved against `actionRoot` so the record stays short and this
+        # test exercises live sharing under ANY temp-root length.
+        const inputName = "shared-in.txt"
+        let inputPath = actionRoot / inputName
         let outPath = actionRoot / "shared-out.txt"
         writeFile(inputPath, "shared-input\n")
         writeFile(outPath, "shared-output\n")
@@ -316,21 +326,48 @@ suite "integration_action_cache_two_tier_concurrent_builds_no_wedge_live_sharing
         # submitted to the ring (an oversized record is Tier-1-only by design —
         # §4.2; the shm tier holds metadata-only records). This is exactly the
         # shape `readHotRecord` returns and the daemon publishes.
-        let recorded = seed.recordActionResult(cas, weak, ffpTimestamp,
-          [inputPath], ["shared-out.txt"], actionRoot, storeOutputBlobs = false)
+        var recorded: ActionResultRecord
+        let previousDir = getCurrentDir()
+        # `observeFile` resolves a relative input against the CWD and stores it
+        # verbatim, so record from `actionRoot` and restore the CWD right after.
+        setCurrentDir(actionRoot)
+        try:
+          recorded = seed.recordActionResult(cas, weak, ffpTimestamp,
+            [inputName], ["shared-out.txt"], actionRoot,
+            storeOutputBlobs = false)
+        finally:
+          setCurrentDir(previousDir)
+
+        # The fixture must stay inside the inline slot; an over-cap record is
+        # Tier-1-only BY DESIGN (§4.2), which would make every shm assertion
+        # below fail as an unexplained timeout. Fail HERE, naming the cap and
+        # the actual size, so a future fixture change is self-diagnosing.
+        let encodedLen = encodeActionResultRecord(recorded).len
+        if encodedLen > SlotInlineCap:
+          checkpoint("fixture record encodes to " & $encodedLen &
+            " bytes > SlotInlineCap (" & $SlotInlineCap & "): too big for a " &
+            "submission-ring slot, so it is never submitted and the shm tier " &
+            "can never publish it — shorten the fixture (input paths are " &
+            "stored verbatim in the record)")
+        check encodedLen <= SlotInlineCap
 
         # The DAEMON (a real separate process, auto-spawned on the cache open)
         # has already self-reaped. This fresh submission must re-spawn it, drain
         # the ring, and PUBLISH the record to the shm table.
-        check waitForShmSlot(cacheRoot, weak, 8.0)
-        # Prove it is shm, engine-independently: the shared-memory slot for the
-        # weak key is populated by the restarted daemon and carries A's exact
-        # encoded record payload.
-        let published = shmSlotRecord(cacheRoot, weak)
-        check published.found
-        if published.found:
-          check encodeActionResultRecord(published.record) ==
-            encodeActionResultRecord(recorded)
+        # One root cause (nothing was ever published) must report ONCE: the
+        # follow-up probes below all read the same empty slot and would only
+        # restate it as extra failures over a default-constructed record.
+        let publishedInTime = waitForShmSlot(cacheRoot, weak, 8.0)
+        check publishedInTime
+        if publishedInTime:
+          # Prove it is shm, engine-independently: the shared-memory slot for
+          # the weak key is populated by the restarted daemon and carries A's
+          # exact encoded record payload.
+          let published = shmSlotRecord(cacheRoot, weak)
+          check published.found
+          if published.found:
+            check encodeActionResultRecord(published.record) ==
+              encodeActionResultRecord(recorded)
 
         # Build B: a SECOND engine handle on the same root whose Tier-1 DISK view
         # of this edge is DELETED. Any hit B now gets can ONLY come from the shm
@@ -342,15 +379,19 @@ suite "integration_action_cache_two_tier_concurrent_builds_no_wedge_live_sharing
         check not dirExists(edgeDir)
         # readHotRecord: disk misses (dir gone) → the ONLY source left is shm.
         let served = buildB.readHotRecord(weak)
+        # `served` is a DEFAULT-constructed record when nothing was found, so
+        # every field assertion below would fail on the same root cause and
+        # print a meaningless all-zero record. Report the root cause ONCE.
         check served.found
-        check served.record.weakFingerprint == weak
-        # CORRECTNESS: the shm-served record's inputs match what A recorded (a
-        # valid hit, not a garbled one).
-        check served.record.inputs.len == recorded.inputs.len
-        if served.found and served.record.inputs.len == recorded.inputs.len:
-          check served.record.policy == recorded.policy
-          check served.record.inputs[0].path == recorded.inputs[0].path
-          check served.record.inputs[0].metadata == recorded.inputs[0].metadata
+        if served.found:
+          check served.record.weakFingerprint == weak
+          # CORRECTNESS: the shm-served record's inputs match what A recorded (a
+          # valid hit, not a garbled one).
+          check served.record.inputs.len == recorded.inputs.len
+          if served.record.inputs.len == recorded.inputs.len:
+            check served.record.policy == recorded.policy
+            check served.record.inputs[0].path == recorded.inputs[0].path
+            check served.record.inputs[0].metadata == recorded.inputs[0].metadata
 
         buildB.closeShmTier()
         seed.closeShmTier()

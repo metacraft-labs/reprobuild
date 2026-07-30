@@ -492,9 +492,9 @@ test "incomplete name" and:
         )
         # Language totals and the overall total. These are the aggregate
         # backstop for the per-source pins above, not a substitute for them.
-        self.assertEqual(nim_total, 6544)
+        self.assertEqual(nim_total, 6545)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6575)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6576)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )

@@ -1,4 +1,4 @@
-import std/[os, osproc, strutils, tempfiles, unittest]
+import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_shm_index
 import repro_test_support
@@ -7,7 +7,11 @@ import repro_test_support
 # submission ring. M producer PROCESSES each append K records; ONE consumer
 # process drains. Below capacity EVERY record is drained exactly once (none
 # lost, none duplicated). At capacity, drop-on-full is SIGNALLED via the atomic
-# `dropped` counter — never silent.
+# `dropped` counter — never silent. The ring's OTHER rejection, an over-cap
+# record turned away before any ticket is reserved, is signalled the same way
+# via the atomic `oversized` counter — otherwise a build whose records all
+# exceed `RingSlotRecCap` would bypass the shm tier with no observable
+# difference from a healthy idle one.
 #
 # Each record encodes (producerId, seqNo) in its digest + payload so the
 # consumer can verify no record is lost or duplicated: it tallies a
@@ -25,7 +29,9 @@ import repro_test_support
 
 const
   ProducerFlag = "--shm-ring-producer"
+  OversizeProducerFlag = "--shm-ring-oversize-producer"
   ExitOk = 0
+  ExitOversizeNotRejected = 3
 
 proc encodeDigest(producerId, seqNo: int): array[32, byte] =
   # First 4 bytes producerId, next 4 bytes seqNo (little-endian), rest derived.
@@ -72,10 +78,28 @@ proc runProducer(cacheRoot: string; producerId, count: int) =
   idx.close()
   quit(ExitOk)
 
+proc runOversizeProducer(cacheRoot: string; count: int) =
+  ## Producer worker for the OVER-CAP path: every append carries a record one
+  ## byte past `RingSlotRecCap`, so every one must be rejected without touching
+  ## the ring. The parent reads the resulting signal back out of ITS OWN
+  ## mapping, which is only possible if the counter lives in the shared control
+  ## region rather than in producer-local state.
+  var idx = openShmIndex(cacheRoot, create = false)
+  if not idx.available:
+    quit(ExitOk)
+  let overCap = newSeq[byte](RingSlotRecCap + 1)
+  for s in 0 ..< count:
+    if idx.ringView.append(encodeDigest(0, s), overCap) != rasOversized:
+      quit(ExitOversizeNotRejected)
+  idx.close()
+  quit(ExitOk)
+
 when isMainModule:
   let params = commandLineParams()
   if params.len >= 4 and params[0] == ProducerFlag:
     runProducer(params[1], parseInt(params[2]), parseInt(params[3]))
+  if params.len >= 3 and params[0] == OversizeProducerFlag:
+    runOversizeProducer(params[1], parseInt(params[2]))
 
 suite "integration_shm_index_mpsc_ring_multiproducer_single_consumer":
   when isNixSupported:
@@ -172,4 +196,62 @@ suite "integration_shm_index_mpsc_ring_multiproducer_single_consumer":
       check dropped == 200
       # The drop was SIGNALLED via the atomic counter, not silent.
       check idx.ringView.droppedCount() == 200'u64
+      # A full ring is NOT an over-cap rejection: the two signals are distinct.
+      check idx.ringView.oversizedCount() == 0'u64
+      idx.close()
+
+    test "over-cap rejection is SIGNALLED (counted), not silent":
+      # An over-cap record is turned away BEFORE the ring (no ticket reserved),
+      # so the `dropped` counter can never see it. Without its own signal an
+      # engine whose records all exceed `RingSlotRecCap` — e.g. records whose
+      # inlined input paths are long — bypasses the shm live-sharing tier 100%
+      # of the time and is indistinguishable from a healthy idle one: the ring
+      # stays empty, the daemon is never asked to publish, every lookup quietly
+      # falls through to Tier-1 disk. Spec §4.4 / §8 AC-2c require the
+      # oversized-Tier-1-only outcome to be SIGNALLED, not silent.
+      let tempRoot = createTempDir("repro-shm-ring-oversize", "")
+      defer: removeDir(tempRoot)
+      let cacheRoot = tempRoot / "action-cache"
+      var idx = openShmIndex(cacheRoot)
+      check idx.available
+      # A freshly created region starts both signals at zero.
+      check idx.ringView.oversizedCount() == 0'u64
+      check idx.ringView.droppedCount() == 0'u64
+
+      # NORMAL submits must NOT bump the oversize signal — including one
+      # exactly AT the cap, which is still enqueueable.
+      check idx.ringView.append(encodeDigest(0, 0), payloadFor(0, 0)) ==
+        rasAppended
+      check idx.ringView.append(encodeDigest(0, 1),
+        newSeq[byte](RingSlotRecCap)) == rasAppended
+      check idx.ringView.oversizedCount() == 0'u64
+
+      # OVER-CAP submits from real producer PROCESSES: each is rejected and
+      # each rejection is counted in the shared control region.
+      let self = getAppFilename()
+      let oversizeProducers = 4
+      let perProducer = 5
+      var procs: seq[Process] = @[]
+      for p in 0 ..< oversizeProducers:
+        procs.add(startProcess(self,
+          args = @[OversizeProducerFlag, cacheRoot, $perProducer],
+          options = {poStdErrToStdOut}))
+      var workersOk = true
+      for pr in procs:
+        let code = pr.waitForExit()
+        if code != ExitOk:
+          workersOk = false
+          checkpoint("oversize producer exited " & $code & ": " &
+            pr.outputStream.readAll())
+        pr.close()
+      check workersOk
+
+      # SIGNALLED: visible from this process's own mapping, so the counter is
+      # shared state, not producer-local. The ring is untouched (no ticket
+      # burned, no full-ring drop recorded) — only the two in-cap appends are
+      # pending.
+      check idx.ringView.oversizedCount() ==
+        uint64(oversizeProducers * perProducer)
+      check idx.ringView.droppedCount() == 0'u64
+      check idx.ringView.pendingCount() == 2'u64
       idx.close()
