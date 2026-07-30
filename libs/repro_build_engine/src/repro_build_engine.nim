@@ -2690,6 +2690,31 @@ proc collectResolvedAuxPaths(action: BuildAction;
         seenNimPath.incl(d)
         result.nimPathDirs.add(d)
 
+proc isNixGlibcLibDir(path: string): bool =
+  ## A Nix dependency profile may propagate its glibc output along with its
+  ## own libraries. Putting that directory in LD_LIBRARY_PATH interposes the
+  ## dependency's libc on the action launcher and can mix incompatible
+  ## GLIBC_PRIVATE ABIs. Keep it available to the linker, but never inject it
+  ## into a process runtime search path.
+  const storePrefix = "/nix/store/"
+  if not path.startsWith(storePrefix):
+    return false
+  let relative = path[storePrefix.len .. ^1]
+  let slash = relative.find('/')
+  if slash <= 0:
+    return false
+  let storeEntry = relative[0 ..< slash]
+  let hashSeparator = storeEntry.find('-')
+  if hashSeparator < 0 or hashSeparator + 1 >= storeEntry.len:
+    return false
+  let packageName = storeEntry[hashSeparator + 1 .. ^1]
+  packageName == "glibc" or packageName.startsWith("glibc-")
+
+proc runtimeSafeLibDirs(paths: ResolvedAuxPaths): seq[string] =
+  for path in paths.libDirs:
+    if not isNixGlibcLibDir(path):
+      result.add(path)
+
 proc applyResolvedAuxPathsTable*(env: StringTableRef;
                                  paths: ResolvedAuxPaths) =
   ## StringTable-style env mutator. Used by the bypass-spawn path. Each
@@ -2722,13 +2747,15 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   prependEnvDirs(env, "CPATH", paths.includeDirs)
   prependEnvDirs(env, "LIBRARY_PATH", paths.libDirs)
   # LD_LIBRARY_PATH covers run-time test execution; LIBRARY_PATH covers
-  # link-time. Same set of dirs feeds both.
-  prependEnvDirs(env, "LD_LIBRARY_PATH", paths.libDirs)
+  # link-time. Nix glibc outputs are link-only: loading an arbitrary
+  # dependency's libc into the action process can cross GLIBC_PRIVATE ABIs.
+  let runtimeLibDirs = runtimeSafeLibDirs(paths)
+  prependEnvDirs(env, "LD_LIBRARY_PATH", runtimeLibDirs)
   prependEnvDirs(env, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
   when defined(macosx):
     # macOS' dynamic loader ignores LD_LIBRARY_PATH; DYLD_LIBRARY_PATH is the
     # run-time counterpart needed by tools that dlopen libraries by leaf name.
-    prependEnvDirs(env, "DYLD_LIBRARY_PATH", paths.libDirs)
+    prependEnvDirs(env, "DYLD_LIBRARY_PATH", runtimeLibDirs)
 
 proc applyResolvedAuxPathsArgv*(env: seq[string];
                                 paths: ResolvedAuxPaths): seq[string] =
@@ -2758,10 +2785,11 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   result = prependEnvDirsToArgvEnv(result, "CMAKE_PREFIX_PATH", paths.cmakePrefixDirs)
   result = prependEnvDirsToArgvEnv(result, "CPATH", paths.includeDirs)
   result = prependEnvDirsToArgvEnv(result, "LIBRARY_PATH", paths.libDirs)
-  result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", paths.libDirs)
+  let runtimeLibDirs = runtimeSafeLibDirs(paths)
+  result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", runtimeLibDirs)
   result = prependEnvDirsToArgvEnv(result, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
   when defined(macosx):
-    result = prependEnvDirsToArgvEnv(result, "DYLD_LIBRARY_PATH", paths.libDirs)
+    result = prependEnvDirsToArgvEnv(result, "DYLD_LIBRARY_PATH", runtimeLibDirs)
 
 proc shellScriptArgIndex(argv: openArray[string]): int =
   ## Return the script argument consumed by a POSIX shell's ``-c`` option.

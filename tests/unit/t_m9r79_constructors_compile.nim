@@ -25,6 +25,12 @@ suite "t_m9r79_constructors_compile":
     # the constructor's compile would fail this file's build.
     check true
 
+  test "cmake runtime paths exclude propagated Nix glibc":
+    let glibcLib = "/nix/store/0123456789abcdefghijklmnopqrstuv-glibc-2.40/lib"
+    let dependencyLib = "/nix/store/vutsrqponmlkjihgfedcba9876543210-libfoo-1.0/lib"
+    check cmakeRuntimeLibraryDirs(@[glibcLib, dependencyLib]) ==
+      @[dependencyLib]
+
   test "setRegisteredActionDeclaredOutputs + setRegisteredActionReadOnlyRoots exported":
     # Compile-time gate: the two M9.R.79.2 registry mutators must be
     # reachable from downstream constructor modules.  Call each proc

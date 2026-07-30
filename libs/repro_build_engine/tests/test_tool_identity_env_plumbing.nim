@@ -21,7 +21,7 @@
 ## ``ToolIdentityResolver`` / ``BuildEngineConfig.toolIdentityResolver``
 ## for the seam under test.
 
-import std/[options, os, strutils, tables, unittest]
+import std/[options, os, strtabs, strutils, tables, unittest]
 
 import repro_build_engine
 import repro_core
@@ -40,6 +40,12 @@ proc resetTmp() =
 proc pathSeparator(): string =
   when defined(windows): ";"
   else: ":"
+
+proc envValue(env: openArray[string]; name: string): string =
+  for entry in env:
+    let prefix = name & "="
+    if entry.startsWith(prefix):
+      return entry[prefix.len .. ^1]
 
 proc stubArgv(): seq[string] =
   ## Build a platform-appropriate shell argv that prints ``$PATH``
@@ -223,6 +229,28 @@ proc makeDepfilePolicy(path: string): DependencyGatheringPolicy =
 # ---------------------------------------------------------------------------
 
 suite "M9.N Batch B — engine tool-identity env plumbing":
+
+  test "Nix glibc stays linkable without entering runtime loader paths":
+    let glibcLib = "/nix/store/0123456789abcdefghijklmnopqrstuv-glibc-2.40/lib"
+    let dependencyLib = "/nix/store/vutsrqponmlkjihgfedcba9876543210-libfoo-1.0/lib"
+    let paths = ResolvedAuxPaths(libDirs: @[glibcLib, dependencyLib])
+
+    let argvEnv = applyResolvedAuxPathsArgv(
+      @["LIBRARY_PATH=/existing/link", "LD_LIBRARY_PATH=/existing/runtime"],
+      paths)
+    check envValue(argvEnv, "LIBRARY_PATH").split(pathSeparator()) ==
+      @[glibcLib, dependencyLib, "/existing/link"]
+    check envValue(argvEnv, "LD_LIBRARY_PATH").split(pathSeparator()) ==
+      @[dependencyLib, "/existing/runtime"]
+
+    let tableEnv = newStringTable(modeCaseSensitive)
+    tableEnv["LIBRARY_PATH"] = "/existing/link"
+    tableEnv["LD_LIBRARY_PATH"] = "/existing/runtime"
+    applyResolvedAuxPathsTable(tableEnv, paths)
+    check tableEnv["LIBRARY_PATH"].split(pathSeparator()) ==
+      @[glibcLib, dependencyLib, "/existing/link"]
+    check tableEnv["LD_LIBRARY_PATH"].split(pathSeparator()) ==
+      @[dependencyLib, "/existing/runtime"]
 
   test "PATH is prepended with the resolved bin dir when ref + resolver are set":
     resetTmp()

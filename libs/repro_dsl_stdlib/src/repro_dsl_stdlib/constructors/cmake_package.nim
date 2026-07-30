@@ -29,6 +29,26 @@ import ../packages/sh as sh_module
 
 const FetchScratchSubdir = ".repro/fetch"
 
+proc cmakeRuntimeLibraryDirs*(libraryDirs: openArray[string]): seq[string] =
+  ## Nix profiles can propagate glibc outputs through otherwise unrelated
+  ## dependencies. Keep those directories in CMake's link-time search, but do
+  ## not interpose that libc on CMake, Ninja, or build-time helper processes.
+  const storePrefix = "/nix/store/"
+  for path in libraryDirs:
+    var isNixGlibc = false
+    if path.startsWith(storePrefix):
+      let relative = path[storePrefix.len .. ^1]
+      let slash = relative.find('/')
+      if slash > 0:
+        let storeEntry = relative[0 ..< slash]
+        let hashSeparator = storeEntry.find('-')
+        if hashSeparator >= 0 and hashSeparator + 1 < storeEntry.len:
+          let packageName = storeEntry[hashSeparator + 1 .. ^1]
+          isNixGlibc = packageName == "glibc" or
+            packageName.startsWith("glibc-")
+    if not isNixGlibc:
+      result.add(path)
+
 proc cmakeFetchActionId(packageName: string): string =
   var sanitized = ""
   for ch in packageName:
@@ -564,7 +584,7 @@ proc cmake_package*(srcDir: string;
   # of paths into the build script via ``export LD_LIBRARY_PATH`` makes
   # the channel bulletproof.  Inert in unit-test mode (empty
   # ``projectRoot``).
-  let ldLibraryDirs = linkLibraryDirs
+  let ldLibraryDirs = cmakeRuntimeLibraryDirs(linkLibraryDirs)
   let buildScript = block:
     var s = "set -e; "
     if ldLibraryDirs.len > 0:
