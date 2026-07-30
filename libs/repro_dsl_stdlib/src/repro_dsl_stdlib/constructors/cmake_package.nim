@@ -455,6 +455,33 @@ proc cmake_package*(srcDir: string;
       if extra notin cmakeDepRefs:
         cmakeDepRefs.add(extra)
 
+  # CMake records its generator and toolchain in the build tree. Reusing a
+  # directory configured by another generator makes a fresh source build fail
+  # before it can update any cache entries, so configure must start clean.
+  if projectRoot.len > 0:
+    let cleanStamp = projectRoot / ".repro" / "build" / "cmake-clean.stamp"
+    let buildDirAbs = projectRoot / buildDir
+    let cleanScript = "set -e; rm -rf \"" &
+      buildDirAbs.replace("\"", "\\\"") & "\"; : > \"" &
+      cleanStamp.replace("\"", "\\\"") & "\""
+    var cleanDeps: seq[string] = @[]
+    var cleanInputs: seq[string] = @[]
+    for predecessor in configureAfter:
+      cleanDeps.add(predecessor.id)
+      for output in predecessor.outputs:
+        cleanInputs.add(output)
+    let cleanEdge = buildAction(
+      id = "cmake-clean-build-dir-" & pkgName,
+      call = inlineExecCall(@["sh", "-c", cleanScript]),
+      deps = cleanDeps,
+      inputs = cleanInputs,
+      outputs = @[cleanStamp],
+      cacheable = false,
+      dependencyPolicy = automaticMonitorPolicy(),
+      commandStatsId = "cmake_package.clean_build_dir",
+      toolIdentityRefs = @["sh"])
+    configureAfter = @[cleanEdge]
+
   let configureEdge = cmake.configure(
     srcDir = srcDir,
     buildDir = buildDir,
