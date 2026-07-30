@@ -210,7 +210,11 @@ if [[ -z "${REPROBUILD_MAX_PARALLELISM:-}" ]]; then
 fi
 printf 'Building apps + test-helpers + test-builds via repro (REPROBUILD_MAX_PARALLELISM=%s)\n' \
   "${REPROBUILD_MAX_PARALLELISM}" >&2
-BUILD_TIMEOUT="${REPROBUILD_BUILD_TIMEOUT:-90m}"
+# A cold action cache has to compile every test binary from scratch, which
+# exceeds 90m on CI hardware (an observed cold run reached 969/1168 before
+# timing out). Match the runner's 4h backstop; a warm cache finishes far
+# sooner, so this only raises the ceiling for the cold case.
+BUILD_TIMEOUT="${REPROBUILD_BUILD_TIMEOUT:-4h}"
 
 # M3 accepts one fragment selector per invocation; loop over collections.
 repro_build_collection() {
