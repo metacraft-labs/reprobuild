@@ -1171,6 +1171,52 @@ suite "repro_infra: system state dir":
     check applyLogPath(sd, "gid").endsWith("apply.log")
     check applyLockPath(sd).endsWith("apply.lock")
 
+suite "repro_infra: the apply lock is reclaimable":
+  ## An apply lock whose owner died must NOT wedge the host forever: an
+  ## interrupted apply on a Windows runner once left a dead PID in the
+  ## lock and blocked every subsequent apply for three weeks.
+
+  setup:
+    let sd = createTempDir("repro-applylock-", "")
+    ensureSystemStateDir(sd)
+
+  teardown:
+    removeDir(sd)
+
+  test "a live owner keeps the lock held":
+    check acquireApplyLock(sd)
+    check applyLockOwner(sd) == getCurrentProcessId()
+    # A DIFFERENT live owner is refused. PID 1 (init/systemd) and PID 4
+    # (Windows "System") always exist; both are owned by another user, so
+    # this also exercises the probe's "exists but access denied ⇒ alive"
+    # path, which must NOT be mistaken for "dead".
+    let liveOther = when defined(windows): 4 else: 1
+    writeFile(applyLockPath(sd), $liveOther)
+    check not acquireApplyLock(sd)
+    check applyLockOwner(sd) == liveOther
+    releaseApplyLock(sd)
+    check not fileExists(applyLockPath(sd))
+
+  test "a lock owned by a dead process is reclaimed":
+    # PID 0 is never a live user process on either platform, but use a
+    # definitely-dead pid: spawn nothing and pick an implausible id.
+    writeFile(applyLockPath(sd), "2147483646")
+    check acquireApplyLock(sd)
+    check applyLockOwner(sd) == getCurrentProcessId()
+    releaseApplyLock(sd)
+
+  test "an empty or malformed lock is reclaimed rather than wedging":
+    for junk in ["", "   ", "not-a-pid", "12x34"]:
+      writeFile(applyLockPath(sd), junk)
+      check applyLockOwner(sd) == 0
+      check acquireApplyLock(sd)
+      check applyLockOwner(sd) == getCurrentProcessId()
+      releaseApplyLock(sd)
+
+  test "releasing a lock that is already gone is a no-op":
+    releaseApplyLock(sd)
+    check not fileExists(applyLockPath(sd))
+
 # ===========================================================================
 # M69 Phase B — windows.vsInstaller profile parsing, the structural
 # editor, and the RBSG generation envelope.
