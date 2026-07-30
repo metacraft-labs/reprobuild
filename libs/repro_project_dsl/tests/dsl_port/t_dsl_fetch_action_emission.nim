@@ -93,6 +93,8 @@ suite "DSL-port M9.K — fetch action emission from registry":
     check argvJoined.contains(spec.hashHex)
     let extractedRel = "src"
     check argvJoined.contains(extractedRel)
+    check argvJoined.contains(".repro-extract-" & spec.hashHex)
+    check argvJoined.contains("mv ")
 
   test "registered data file lowers to a copy action":
     let spec = registeredFetchSpec("dataFileActionPkg")

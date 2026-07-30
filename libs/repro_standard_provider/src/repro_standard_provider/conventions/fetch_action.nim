@@ -111,12 +111,15 @@ proc emitFetchAction*(projectRoot, packageName: string;
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted =
     extracted.replace("\\", "/").replace("\"", "\\\"")
+  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
   let escapedRev = spec.gitRevision.replace("\"", "\\\"")
   var argv: seq[string]
   if shExe.len > 0:
     var script = "set -e; "
-    script.add("mkdir -p \"")
-    script.add(escapedExtracted)
+    script.add("rm -rf \"")
+    script.add(escapedStaged)
+    script.add("\"; mkdir -p \"")
+    script.add(escapedStaged)
     script.add("\"; ")
     case spec.kind
     of dfkTarball:
@@ -137,7 +140,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
         script.add("echo \"" & escapedHash & "  " & escapedTarball &
           "\" | blake3sum -c -; ")
       script.add("tar -xf \"" & escapedTarball & "\" -C \"" &
-        escapedExtracted & "\" --strip-components=" & $spec.extractStrip &
+        escapedStaged & "\" --strip-components=" & $spec.extractStrip &
         "; ")
     of dfkGitArchive:
       # Shallow clone + archive. The git rev is verified by extracting
@@ -161,7 +164,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
         script.add("echo \"" & escapedHash & "  " & escapedTarball &
           "\" | blake3sum -c -; ")
       script.add("tar -xf \"" & escapedTarball & "\" -C \"" &
-        escapedExtracted & "\" --strip-components=" & $spec.extractStrip &
+        escapedStaged & "\" --strip-components=" & $spec.extractStrip &
         "; ")
     of dfkDataFile:
       script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
@@ -177,7 +180,9 @@ proc emitFetchAction*(projectRoot, packageName: string;
         script.add("echo \"" & escapedHash & "  " & escapedTarball &
           "\" | blake3sum -c -; ")
       script.add("cp \"" & escapedTarball & "\" \"" &
-        escapedExtracted & "/source\"; ")
+        escapedStaged & "/source\"; ")
+    script.add("rm -rf \"" & escapedExtracted & "\"; ")
+    script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
     script.add("touch \"" & escapedStamp & "\"")
     argv = @[shExe, "-c", script]
   else:

@@ -72,8 +72,10 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
+  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
   var script = "set -e; "
-  script.add("mkdir -p \"" & escapedExtracted & "\"; ")
+  script.add("rm -rf \"" & escapedStaged & "\"; ")
+  script.add("mkdir -p \"" & escapedStaged & "\"; ")
   script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
   script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" & escapedUrl &
     "\"; fi; ")
@@ -91,10 +93,12 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   # the matching fix in ``autotools_package.nim`` for the full rationale.
   if spec.kind == dfkDataFile:
     script.add("cp \"" & escapedTarball & "\" \"" &
-      escapedExtracted & "/source\"; ")
+      escapedStaged & "/source\"; ")
   else:
     script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
-      escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
+      escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
+  script.add("rm -rf \"" & escapedExtracted & "\"; ")
+  script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
   script.add("touch \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
   let act = buildAction(

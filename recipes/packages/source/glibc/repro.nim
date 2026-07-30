@@ -38,27 +38,20 @@
 ##
 ## ## sha256 strategy
 ##
-## We vendor the upstream 2.40 .tar.xz at
-## ``recipes/packages/source/glibc/vendor/glibc-2.40.tar.xz`` and
-## reference it via a ``file://`` URL. The ftp.gnu.org release URL is
-## recorded as ``sourceUrl`` in the ``versions:`` block for
-## documentation and future-bump purposes, but the live ``fetch:``
-## block points at the vendored copy so the convention layer's emitted
-## fetch action is offline-reproducible.
+## The upstream 2.42 .tar.xz is fetched from ftp.gnu.org and pinned by its
+## sha256. Once fetched, reprobuild's content-addressed source cache makes
+## subsequent builds independent of the network.
 ##
-## ## Version choice — 2.40 (current upstream stable)
+## ## Version choice — 2.42
 ##
 ## glibc releases are cut on sourceware.org under tags of the form
-## ``glibc-<X>.<Y>``. 2.40 is the current stable in the 2.4x line as of
-## mid-2026 and the ABI is stable since the 2.34 cut — anything ``>=2.34``
-## covers every consumer's pinning (the 2.34 cut is when libpthread +
-## libdl + librt got folded into libc.so.6 but the per-library SONAMEs
-## kept as compatibility forwarders).
+## ``glibc-<X>.<Y>``. 2.42 matches the repository development toolchain and
+## bootstrap wrappers while remaining backward-compatible with packages built
+## against glibc 2.40. The 2.34 cut folded libpthread, libdl, and librt into
+## libc.so.6 while preserving their compatibility SONAMEs.
 ##
-## sha256 = 19a890175e9263d748f627993de6f4b1af9cd21e03f080e4bfb3a1fac10205a2
-##  (computed locally over the vendored ``glibc-2.40.tar.xz``,
-##  18,752,204 bytes; downloaded once from the upstream URL recorded
-##  in ``versions:`` above).
+## sha256 = d1775e32e4628e64ef930f435b67bb63af7599acb6be2b335b9f19f16509f17f
+##  (computed locally over the upstream ``glibc-2.42.tar.xz`` release).
 ##
 ## ## Build shape
 ##
@@ -93,7 +86,7 @@
 ##                                  caveat).
 ##   * ``libCrypt`` (library)    — ``libcrypt.so.1`` the password-
 ##                                  hashing library (crypt() family).
-##                                  Note: glibc 2.40 still ships libcrypt
+##                                  Note: glibc 2.42 still ships libcrypt
 ##                                  in-tree but the longer-term plan
 ##                                  upstream is to migrate to libxcrypt
 ##                                  (out-of-tree); v1 uses the in-tree
@@ -164,28 +157,20 @@ package glibcSource:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## ftp.gnu.org release tarball URL so a future maintainer running
     ## ``repro update-source`` can re-fetch from upstream; the live
-    ## ``fetch:`` block below points at the vendored copy for
-    ## deterministic offline test reproduction.
+    ## ``fetch:`` block below points at the hash-pinned upstream release.
     ##
     ## ``sourceRepository`` points at the canonical sourceware.org
     ## git mirror that hosts the glibc source tree.
-    "2.40":
-      sourceRevision = "glibc-2.40"
-      sourceUrl = "https://ftp.gnu.org/gnu/glibc/glibc-2.40.tar.xz"
+    "2.42":
+      sourceRevision = "glibc-2.42"
+      sourceUrl = "https://ftp.gnu.org/gnu/glibc/glibc-2.42.tar.xz"
       sourceRepository = "https://sourceware.org/git/glibc.git"
 
   fetch:
-    ## Vendored tarball (option 1 per the M9.K acceptance plan).
-    ## ``file://`` URL keeps the build deterministic when the network
-    ## is unavailable; the convention layer's argv carries this URL
-    ## verbatim so the engine's content-addressed cache fingerprint
-    ## stays stable across rebuilds.
-    ##
-    ## sha256 was computed over the vendored 18,752,204-byte tarball
-    ## downloaded once from the upstream URL recorded in
-    ## ``versions:`` above.
-    url: "https://ftp.gnu.org/gnu/glibc/glibc-2.40.tar.xz"
-    sha256: "19a890175e9263d748f627993de6f4b1af9cd21e03f080e4bfb3a1fac10205a2"
+    ## Canonical upstream release tarball. The content hash is the source
+    ## identity and permits deterministic reuse from the shared cache.
+    url: "https://ftp.gnu.org/gnu/glibc/glibc-2.42.tar.xz"
+    sha256: "d1775e32e4628e64ef930f435b67bb63af7599acb6be2b335b9f19f16509f17f"
     extractStrip: 1
 
   nativeBuildDeps:
@@ -256,7 +241,7 @@ package glibcSource:
   library libCrypt:
     ## ``libcrypt.so.1`` — the password-hashing library (crypt /
     ## crypt_r). Note: the longer-term upstream plan is to migrate
-    ## to libxcrypt (out-of-tree) but v1 uses glibc 2.40's in-tree
+    ## to libxcrypt (out-of-tree) but v1 uses glibc 2.42's in-tree
     ## libcrypt. The libxcrypt migration would be a future per-distro
     ## variant. v1 records the artifact only.
     discard
@@ -281,7 +266,19 @@ package glibcSource:
         "--enable-kernel=4.19",
         "--without-selinux",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      # glibc probes and configures its own hardening. Nix's compiler wrapper
+      # otherwise injects _FORTIFY_SOURCE into every compiler invocation,
+      # which conflicts with glibc's fortified inline declarations.
+      let glibcBuildEnv = @[
+        ("NIX_HARDENING_ENABLE",
+         "bindnow format libcxxhardeningfast pic relro " &
+         "stackclashprotection strictflexarrays1 strictoverflow " &
+         "zerocallusedregs"),
+      ]
+      let pkg = autotools_package(
+        srcDir = "./src",
+        configureOptions = opts,
+        extraEnv = glibcBuildEnv)
       discard pkg.library("libC")
       discard pkg.library("libM")
       # glibc 2.34 folded libpthread, libdl, and librt into libc, while libcrypt

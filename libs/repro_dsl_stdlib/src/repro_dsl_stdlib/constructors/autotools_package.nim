@@ -158,8 +158,10 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
+  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
   var script = "set -e; "
-  script.add("mkdir -p \"" & escapedExtracted & "\"; ")
+  script.add("rm -rf \"" & escapedStaged & "\"; ")
+  script.add("mkdir -p \"" & escapedStaged & "\"; ")
   # Download (curl) → hash-verify → extract → touch stamp. ``file://``
   # URLs are handled by curl natively for the vendored-tarball case.
   script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
@@ -193,10 +195,12 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   let tarForceLocal = when defined(windows): "--force-local " else: ""
   if spec.kind == dfkDataFile:
     script.add("cp \"" & escapedTarball & "\" \"" &
-      escapedExtracted & "/source\"; ")
+      escapedStaged & "/source\"; ")
   else:
     script.add("tar " & tarForceLocal & "-xf \"" & escapedTarball & "\" -C \"" &
-      escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
+      escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
+  script.add("rm -rf \"" & escapedExtracted & "\"; ")
+  script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
   script.add("touch \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
   # The fetch action is a pure source-acquisition step
@@ -240,7 +244,8 @@ proc autotools_package*(srcDir: string;
                         allowSourceWrites = false;
                         skipConfigure = false;
                         installMakeVars: seq[string] = @[];
-                        srcPatches: seq[string] = @[]):
+                        srcPatches: seq[string] = @[];
+                        extraEnv: seq[(string, string)] = @[]):
                         AutotoolsPackageResult =
   ## Configure → build → install pipeline for an upstream autotools
   ## project. The configure step is emitted via ``inlineExecCall`` so
@@ -253,6 +258,10 @@ proc autotools_package*(srcDir: string;
   ## fetch action is auto-emitted and the configure action gains a dep
   ## on its stamp so the configure step doesn't run before the source
   ## tree is extracted.
+  ##
+  ## ``extraEnv`` supplies recipe-specific environment overrides to the
+  ## configure, compile, and install actions. The values are kept outside
+  ## the typed call identity, matching the other package constructors.
   # M9.R.15a.3 — accept a custom prefix flag format (openssl's
   # ``./Configure`` uses ``--prefix=`` like autotools, but Configure
   # also accepts ``--openssldir=`` etc. via the same channel; we keep
@@ -374,14 +383,23 @@ proc autotools_package*(srcDir: string;
     patchPrefix = "set -e; "
     for patchCommand in srcPatches:
       patchPrefix.add(patchCommand & "; ")
+  # A configure action runs only on a cache miss. Reset its out-of-tree
+  # output first so a changed source archive cannot reuse generated files
+  # or objects from the previous source identity. In-source builds keep the
+  # extracted source tree intact.
+  let cleanBuildPrefix =
+    if relBuildDir == relSrcDir:
+      "set -e; "
+    else:
+      "set -e; rm -rf -- " & quoteShell(buildDir) & "; "
   let configureScript =
     if skipConfigure:
       patchPrefix & bootstrapPrefix &
-      "set -e; mkdir -p " & buildDir & " && cp -aL " & srcDir &
+      cleanBuildPrefix & "mkdir -p " & buildDir & " && cp -aL " & srcDir &
         "/. " & buildDir & "/"
     else:
       patchPrefix & bootstrapPrefix &
-      "mkdir -p " & buildDir & " && cd " & buildDir & " && " &
+      cleanBuildPrefix & "mkdir -p " & buildDir & " && cd " & buildDir & " && " &
       srcFromBuild & "/" & configureScriptName & " " & configureArgs.join(" ")
   let configureArgv = @["sh", "-c", configureScript]
   let call = inlineExecCall(configureArgv)
@@ -438,6 +456,7 @@ proc autotools_package*(srcDir: string;
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.configure",
     toolIdentityRefs = @["sh"],
+    env = extraEnv,
     declaredOutputs = @[m9r79ConfBuildDirAbs],
     readOnlyRoots = m9r79ConfReadOnly)
   # M9.R.13b.5 — thread the configure edge as a sequencing dep through
@@ -489,9 +508,12 @@ proc autotools_package*(srcDir: string;
   if skipConfigure:
     for o in configureOptions:
       buildVars.add(o)
+  var buildEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
+  for envVar in extraEnv:
+    buildEnv.add(envVar)
   let buildEdge = make(workDir = buildDir, vars = buildVars, targets = @[],
     after = @[configureEdge],
-    extraEnv = @[("MAKEFLAGS", makeflags)])
+    extraEnv = buildEnv)
   # M9.R.79.3 — compile continues writing to buildDir; source stays
   # read-only.  Sequential edge via ``after = @[configureEdge]`` — R7
   # dep-chain relaxation permits the shared write root.
@@ -537,6 +559,8 @@ proc autotools_package*(srcDir: string;
   let providerProjectRoot = activeProviderProjectRoot()
   var installVars: seq[string] = @[]
   var installEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
+  for envVar in extraEnv:
+    installEnv.add(envVar)
   let installDestdir =
     if providerProjectRoot.len > 0:
       providerProjectRoot / buildDir / destdir
