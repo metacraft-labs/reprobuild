@@ -33,6 +33,15 @@ import repro_project_dsl
 # objdumpBin / objcopyBin / gasBin).
 import repro_dsl_stdlib/types/executable
 
+# Aggregate provisioning for recipes that depend on the binutils package as a
+# toolchain bundle. The resolver adds the selected binary's parent directory to
+# PATH, making the complete pinned binutils tool set available at cycle breaks.
+package binutils:
+  provisioning:
+    nixPackage "nixpkgs#binutils", executablePath = "bin/ld",
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+
 # ---------------------------------------------------------------------------
 # ld — GNU linker.
 #   ld -o <output> [-L<libdir>...] [-l<lib>...] [-shared] [-static]

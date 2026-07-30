@@ -284,11 +284,13 @@ package glibcSource:
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libC")
       discard pkg.library("libM")
-      discard pkg.library("libPthread")
-      discard pkg.library("libDl")
-      discard pkg.library("libRt")
-      discard pkg.library("libCrypt")
-      discard pkg.executable("ldso")
+      # glibc 2.34 folded libpthread, libdl, and librt into libc, while libcrypt
+      # is maintained separately. The complete install mirror below carries the
+      # compatibility linker scripts and runtime objects that this glibc ships.
+      # The dynamic linker installs below /lib64 rather than a bin directory.
+      # Preserve it through the complete install mirror; the declared ldso
+      # artifact remains available for typed dependency metadata.
+      pkg.installTreeMirror()
     finally:
       clearCurrentOwningPackageOverride()
 

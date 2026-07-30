@@ -50,11 +50,9 @@
 #   /usr/share/wayland-sessions/*.desktop          # session definitions
 #   /etc/systemd/system/default.target -> ...      # autologin wiring
 #
-# The `build-base-rootfs.sh` companion now ships only the minimum
-# Debian base that has no from-source recipe yet. The kernel, modules,
-# core utilities, and the DE stack are supplied by source mirrors.
-# The DE stack and KF6/Qt6/Wayland/GL stack are sourced exclusively
-# from the from-source install-mirrors.
+# The `build-base-rootfs.sh` companion ships only deterministic FHS
+# directories and machine-independent configuration. The kernel, modules,
+# shell, core utilities, and desktop stack are supplied by source mirrors.
 #
 # Invocation (from the reproos-iso recipe directory — engine cwd):
 #   bash scripts/stage-de-rootfs.sh <stage-dir>
@@ -80,7 +78,7 @@ if [ "$REPRO_BASE_ROOTFS_DISABLE" != "1" ]; then
   SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1735689600}" \
     bash "$SCRIPT_DIR_SELF/build-base-rootfs.sh" "$base_tar"
   echo "[stage-de-rootfs] extracting base userspace into $STAGE_DIR"
-  tar -C "$STAGE_DIR" -xf "$base_tar"
+  tar --same-permissions -C "$STAGE_DIR" -xf "$base_tar"
   rm -f "$base_tar"
 fi
 
@@ -144,7 +142,7 @@ echo "[stage-de-rootfs] staged $staged_recipes from-source install-mirrors"
 # cannot render its greeter.
 #
 # Overlay rule: cp -an (archive + no-clobber) so existing ``/etc/``
-# files (Debian base config, live-ISO overlays we write later in
+# files (rootfs skeleton config, live-ISO overlays we write later in
 # this script) win over from-source defaults.  This makes the
 # overlay additive-only, matching the ``pkg-config --variable=sysconfdir``
 # discipline every mainstream distro follows.
@@ -449,26 +447,16 @@ link_entry gdm gdm
 # install-mirror into the squashfs at the absolute path the build host
 # uses (e.g. /opt/repro/reprobuild/recipes/packages/source/systemd/
 # .repro/output/install/usr/bin/systemctl).  What's missing is the
-# /usr/{bin,sbin}/<name> shadow link so PID 1 / login shell / agetty
-# find these binaries via PATH; without it the Debian apt entries in
-# build-base-rootfs.sh's PKG_LIST shadow the from-source equivalents
-# for ever.
+# /usr/{bin,sbin}/<name> shadow link so PID 1, login shells, and agetty
+# find these binaries through the standard FHS PATH.
 #
 # This loop walks every recipe in BASE_USERSPACE_RECIPES and emits an
 # absolute /usr/bin or /usr/sbin symlink for every regular file under
 # the install-mirror's bin/ + sbin/ subtrees (matching the link_entry
-# helper above's pattern).  M9.R.33.4..12 then drop the corresponding
-# apt entries from build-base-rootfs.sh's PKG_LIST one commit at a
-# time, verified by rebuilding the base-rootfs + confirming the from-
-# source binary is the one resolved at PATH lookup time on the staged
-# ISO.
+# helper above's pattern).
 #
-# The list mirrors the FS:done entries documented in the M9.R.32.4
-# audit annotations of build-base-rootfs.sh PKG_LIST (systemd,
-# util-linux, kmod, dbus, sudo, e2fsprogs, btrfs-progs, shadow-utils,
-# iana-tzdata), the source-migrated disk-tool set (parted, dosfstools,
-# lvm2, gdisk, cryptsetup), their source runtime dependencies
-# (popt, libgpg-error, libgcrypt, json-c), less, and procps.
+# The list is the boot and installer userspace required at conventional FHS
+# paths. Every entry must have a populated source install mirror.
 # iproute2 supplies network utilities; iana-tzdata supplies /usr/share/zoneinfo.
 # popt, libgpg-error, libgcrypt, and json-c are library-only; the remaining
 # recipes expose binaries and their runtime libraries from source install
@@ -508,6 +496,8 @@ BASE_USERSPACE_RECIPES=(
   xorg-server
   xz
   tar
+  bash
+  glibc
   coreutils
   grub
   kernel
@@ -665,6 +655,34 @@ link_base_recipe_binaries() {
   if [ "$recipe" = "tar" ] && [ ! -x "$install_usr/bin/tar" ]; then
     echo "[stage-de-rootfs] required source tar binary missing" >&2
     return 1
+  fi
+  if [ "$recipe" = "bash" ]; then
+    if [ ! -x "$install_usr/bin/bash" ]; then
+      echo "[stage-de-rootfs] required source bash binary missing" >&2
+      return 1
+    fi
+    ln -sfn bash "$STAGE_DIR/usr/bin/sh"
+    ln -sfn bash "$STAGE_DIR/usr/bin/rbash"
+  fi
+  if [ "$recipe" = "glibc" ]; then
+    local glibc_ldconfig=""
+    local candidate
+    for candidate in "$install_usr/sbin/ldconfig" \
+                     "$install_root/sbin/ldconfig"; do
+      if [ -x "$candidate" ]; then
+        glibc_ldconfig="$candidate"
+        break
+      fi
+    done
+    if [ -z "$glibc_ldconfig" ]; then
+      echo "[stage-de-rootfs] required source glibc ldconfig missing" >&2
+      return 1
+    fi
+    if [ -z "$(find "$install_root" -type f -name 'libc.so.6' -print -quit)" ] || \
+       [ -z "$(find "$install_root" -type f -name 'ld-linux-*.so.*' -print -quit)" ]; then
+      echo "[stage-de-rootfs] required source glibc runtime missing" >&2
+      return 1
+    fi
   fi
   if [ "$recipe" = "coreutils" ]; then
     local coreutils_bin
@@ -1839,11 +1857,25 @@ if [ -x "$chroot_ldconfig" ]; then
   # all path resolution + writes the cache at ``<root>/etc/ld.so.cache``.
   # This is the canonical unprivileged-build replacement Debian's
   # debootstrap + Arch's pacstrap both use.
-  "$chroot_ldconfig" -r "$STAGE_DIR" 2>&1 | \
-    grep -vE 'is not a symbolic link|file format not recognized' || true
+  ldconfig_log="$STAGE_DIR/tmp/reproos-ldconfig.log"
+  mkdir -p "$(dirname "$ldconfig_log")"
+  if ! "$chroot_ldconfig" -r "$STAGE_DIR" >"$ldconfig_log" 2>&1; then
+    cat "$ldconfig_log" >&2
+    rm -f "$ldconfig_log"
+    echo "[stage-de-rootfs] source ldconfig failed" >&2
+    exit 1
+  fi
+  grep -vE 'is not a symbolic link|file format not recognized' \
+    "$ldconfig_log" || true
+  rm -f "$ldconfig_log"
+  if [ ! -s "$STAGE_DIR/etc/ld.so.cache" ]; then
+    echo "[stage-de-rootfs] source ldconfig did not create ld.so.cache" >&2
+    exit 1
+  fi
   echo "[stage-de-rootfs] rebuilt ld.so.cache via /sbin/ldconfig -r $STAGE_DIR (size: $(stat -c %s "$STAGE_DIR/etc/ld.so.cache" 2>/dev/null || echo missing))"
 else
-  echo "[stage-de-rootfs] no $chroot_ldconfig; dlopen() bare-name libs may fail" >&2
+  echo "[stage-de-rootfs] no source ldconfig at $chroot_ldconfig" >&2
+  exit 1
 fi
 
 echo "[stage-de-rootfs] stage-dir bytes=$(du -sb "$STAGE_DIR" | awk '{print $1}')"

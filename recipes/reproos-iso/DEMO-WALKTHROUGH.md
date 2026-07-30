@@ -223,7 +223,7 @@ nix-shell -p qemu OVMF --run \
   -- the Phase 2 driver.
 - `recipes/reproos-iso/scripts/stage-de-rootfs.sh` -- bundles Qt6 +
   libclingo + repro CLI + reproos-installer into the live ISO.
-- `recipes/reproos-iso/scripts/build-base-rootfs.sh` -- the Debian
-  trixie-slim PKG_LIST.
+- `recipes/reproos-iso/scripts/build-base-rootfs.sh` -- the deterministic
+  package-free rootfs skeleton.
 - `recipes/reproos-iso/initramfs/init` -- the live-init script that
   loads kernel modules + switch_roots into the overlayfs.

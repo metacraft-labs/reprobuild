@@ -139,6 +139,8 @@ const reproosImageRootfsDeps = @[
   "xorg-server",
   "xz",
   "tar",
+  "bash",
+  "glibc",
   "coreutils",
   "grub",
   "kernel",
@@ -183,6 +185,8 @@ package reproosImage:
     "xorg-server"
     "xz"
     "tar"
+    "bash"
+    "glibc"
     "coreutils"
     "grub"
 

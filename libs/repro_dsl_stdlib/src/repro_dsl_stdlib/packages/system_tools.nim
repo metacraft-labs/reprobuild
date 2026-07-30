@@ -22,6 +22,7 @@
 ## bounded.
 
 import ./bc
+import ./binutils
 import ./bison
 import ./file
 import ./flex
@@ -189,6 +190,7 @@ import ./libxcvt
 import ./mesa_gl_headers
 
 export bc
+export binutils
 export bison
 export file
 export flex

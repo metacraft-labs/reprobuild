@@ -126,12 +126,10 @@ live-init capable initramfs (see `scripts/build-initramfs.sh` +
 The squashfs payload is assembled by `scripts/stage-de-rootfs.sh`
 which:
 
-1. Pulls a base userspace (systemd, libc, Qt6, GL stack, sddm)
-   from `debian:trixie-slim` via Docker apt-install
+1. Generates a deterministic package-free FHS skeleton
    (`scripts/build-base-rootfs.sh`).
-2. Overlays the from-source DE binaries (sway, mutter, kwin, sddm,
-   plasma-workspace, gdm) from the sibling source recipes'
-   `.repro/output/install/usr/` trees.
+2. Stages source-built userspace and DE install mirrors, including systemd,
+   Bash, sway, mutter, kwin, SDDM, plasma-workspace, and GDM.
 3. Stages `/usr/share/wayland-sessions/{sway,plasma,gnome}.desktop`
    so SDDM enumerates all three at the login screen.
 4. Symlinks `/etc/systemd/system/display-manager.service ->

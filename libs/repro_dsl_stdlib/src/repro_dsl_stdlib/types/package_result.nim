@@ -1287,6 +1287,14 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     script.add("case \"$rp\" in /*) ;; *) continue;; esac; ")
     script.add("printf '%s\\n' \"$rp\" >> \"" & escapedManifest & "\"; ")
     script.add("done; IFS=$OLD_IFS; ")
+  # Nix compiler wrappers may inject a self-RPATH into runtime loaders while
+  # linking them. glibc rejects DT_RUNPATH on ld.so at startup, so normalize
+  # glibc and musl loader names before the general ELF patch pass below.
+  script.add("for loader in \"" & escapedDstUsr & "/lib\"/ld-*.so* \"")
+  script.add(escapedDstUsr & "/lib64\"/ld-*.so*; do ")
+  script.add("if [ -f \"$loader\" ]; then ")
+  script.add("patchelf --remove-rpath \"$loader\"; ")
+  script.add("fi; done; ")
   # Walk lib/ + lib64/ for .so* files (the SONAME-versioned chain).
   # Walk bin/ + sbin/ for executables.
   script.add("for d in \"" & escapedDstUsr & "/lib\" \"" & escapedDstUsr &
@@ -1295,6 +1303,9 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("find \"$d\" -type f \\( ")
   script.add("-name '*.so' -o -name '*.so.*' -o -perm -u+x ")
   script.add("\\) 2>/dev/null | while IFS= read -r f; do ")
+  # Runtime loaders reject a DT_RUNPATH on their own ELF. This covers glibc
+  # (ld-linux-*.so.*, ld-2.*.so) and musl (ld-musl-*.so.*) conventions.
+  script.add("case \"$(basename \"$f\")\" in ld-*.so*) continue;; esac; ")
   # ``patchelf --set-rpath`` is no-op for non-ELF files (it errors with
   # ``not an ELF executable``); guard with file-magic check via ``head``
   # before patching so non-ELF executables (shell scripts, etc.) don't

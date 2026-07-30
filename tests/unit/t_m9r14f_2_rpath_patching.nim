@@ -110,6 +110,11 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
     let script = m9r14fEmitRpathPatchScript("/tmp/mirror/usr", @[])
     check script.contains("command -v patchelf")
 
+  test "emitted_script_does_not_patch_runtime_loaders":
+    let script = m9r14fEmitRpathPatchScript("/tmp/mirror/usr", @[])
+    check script.contains("ld-*.so*) continue")
+    check script.contains("patchelf --remove-rpath")
+
   test "M9.R.26.5 emitted_script_enumerates_internal_versioned_subdirs":
     # DSL-port M9.R.26.5 — for recipes that ship internal-implementation
     # .so files in versioned subdirs (mutter-15/, qt6/plugins/, etc.),
