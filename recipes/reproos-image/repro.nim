@@ -263,8 +263,10 @@ package reproosImage:
                  "SOURCE_DATE_EPOCH=1735689600 LC_ALL=C TZ=UTC " &
                  "REPRO_AUTO_CONFIG=\"${REPRO_AUTO_CONFIG:-../../tests/fixtures/auto-config-minimal.toml}\" " &
                  "REPRO_QCOW2_SEED=\"${REPRO_QCOW2_SEED:-deadbeefcafebabe}\" " &
+                 "LD_LIBRARY_PATH= PATH=/run/current-system/sw/bin:$PATH " &
                  "bash scripts/build-reproos-image.sh " &
-                 "build/reproos-installed.qcow2"),
+                 "build/reproos-installed.qcow2 " &
+                 ">build/reproos-image-build.log 2>&1"),
       actionId = "reproosImage.build_image",
       # extraInputs are resolved relative to the action's cwd (the
       # recipe directory).  The build script + the smoke fixture +
