@@ -23359,7 +23359,7 @@ proc canonicalPathForCompare*(path: string): string =
 
 proc pathIsCwdOrAncestor*(candidate, fromDir: string): bool =
   ## True when ``candidate`` IS ``fromDir`` or one of its ancestors. Shared by
-  ## RA-31 ``workspace init <url>`` and M27 ``workspace start <branch> <path>``:
+  ## RA-31 ``workspace init <url>`` and M27 ``branch <name> <path>``:
   ## both materialize into a fresh NAMED directory and must refuse to operate
   ## on the current or an enclosing checkout (the destructive upward-walk trap
   ## that made the repo-workspaces pilot drop its own ``init``/``start``).
@@ -29329,7 +29329,7 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
 # writer refuses, no workspace metadata is present, the workspace is
 # dirty, or any subprocess errors. The operator-facing trace lives in
 # ``<workspaceRoot>/.repro/workspace/post-commit-lock.log`` (append-only)
-# and in ``<workspaceRoot>/.repro/workspace/post-commit-report.json``
+# and in ``<workspaceRoot>/.repro/build/reports/post-commit-report.json``
 # (overwritten on each run with the latest result).
 #
 # Design choice: a separate ``runPostCommitLockCommand`` wrapper around
@@ -30192,7 +30192,7 @@ type
 
   CheckReport* = object
     ## Structured outcome of one ``repro check`` invocation. The JSON
-    ## form is written to ``<workspaceRoot>/.repro/workspace/check-report.json``
+    ## form is written to ``<workspaceRoot>/.repro/build/reports/check-report.json``
     ## and (with ``--json``) also echoed to stdout.
     mode*: string
     workspaceRoot*: string
@@ -38316,7 +38316,7 @@ proc executeBranchCreate(parsed: BranchArgs): BranchReport =
   try:
     # M28 — creating a branch across EVERY participating repo is what starting
     # a feature means, so record the M16 ``feature_started`` mark here (it used
-    # to require the separate ``workspace start`` verb). The mark is inert until
+    # to require a separate verb). The mark is inert until
     # a repo is actually ON the marked branch — it only tells `repro sync` not
     # to fast-forward the workspace branch back to the lock's pins — so setting
     # it on a create that does not switch changes nothing until you check out.
@@ -38541,7 +38541,7 @@ proc restoreRepoWipOnReturn(identity: GitToolIdentity;
 #   2 — operator-visible refuse (any dirty repo, OR the requested
 #       branch is missing in any repo locally and remotely).
 #
-# The JSON report at ``<workspaceRoot>/.repro/workspace/checkout-report.json``
+# The JSON report at ``<workspaceRoot>/.repro/build/reports/checkout-report.json``
 # carries the per-repo classification, previous branch, new branch, and
 # the post-command ``recordedBranch`` (the M13 metadata value).
 
@@ -40102,7 +40102,7 @@ proc executeBranchCreateAndCheckout(parsed: BranchArgs): BranchReport =
   ## M28 — ``repro branch <name> --checkout``: create the branch across every
   ## participating repo AND leave them all switched onto it. This is the
   ## in-place feature-branch flow that used to need the separate
-  ## ``repro workspace start`` verb.
+  ## ``repro branch --checkout`` flag.
   ##
   ## The create pass runs first and is authoritative for refusals (dirty repos,
   ## probe failures). With ``--checkout`` a branch that already exists is NOT a
@@ -40197,7 +40197,7 @@ proc executeBranchCreateAndCheckout(parsed: BranchArgs): BranchReport =
       outcome: "metadata_write_failed", diagnostic: err.msg))
 
 proc executeBranchFork(parsed: BranchArgs): BranchReport =
-  ## M27 — ``repro workspace start <branch> <path>``: materialize a NEW
+  ## M27 — ``repro branch <name> <path>``: materialize a NEW
   ## workspace at ``parsed.forkPath`` and start ``<branch>`` in it, cut from
   ## THIS workspace's committed HEADs. The source workspace is never modified,
   ## switched or stashed.
@@ -40211,7 +40211,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   ## The source's uncommitted work is deliberately NOT carried unless
   ## ``--include-changes`` says so — which is also why a dirty source is not a
   ## refusal here, unlike the in-place form where dirt would be switched on top
-  ## of. See ``reprobuild-specs/CLI/workspace.md`` §``repro workspace start``.
+  ## of. See ``reprobuild-specs/CLI/branch.md``.
   result.branch = parsed.branchName
   result.form = "fork"
   result.sourceWorkspaceRoot = parsed.workspaceRoot
@@ -40257,7 +40257,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     result.exitCode = 2
     result.repos.add(BranchRepoEntry(
       outcome: "destination_refused",
-      diagnostic: "`repro workspace start <branch> <path>` refuses to " &
+      diagnostic: "`repro branch <name> <path>` refuses to " &
         "materialise into the current or an ancestor directory ('" &
         parsed.forkPath & "'); it always creates a fresh named directory"))
     return

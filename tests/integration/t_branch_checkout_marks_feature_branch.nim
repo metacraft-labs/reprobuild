@@ -1,7 +1,7 @@
 ## M28 — ``repro branch <name> --checkout`` marks the workspace as
 ## having a feature branch in progress.
 ##
-## (Was M16 ``repro workspace start <branch>``, removed in M28: creating a
+## (Was M16 ``repro branch <name> --checkout``, removed in M28: creating a
 ## workspace-wide branch IS starting a feature, so the mark moved onto
 ## ``repro branch`` and the separate verb went away. ``--checkout`` adds the
 ## switch that ``start`` used to bundle.)
@@ -26,20 +26,20 @@
 ## Sub-cases:
 ##
 ##   1. ``test_m16_start_creates_branch_when_missing`` — the branch is
-##      absent on every repo. ``workspace start`` creates the branch
+##      absent on every repo. ``branch --checkout`` creates the branch
 ##      across the workspace via the M14 path, switches every repo to
 ##      it via the M15 path, and writes the started mark. Exit 0,
 ##      ``feature_started = true``, every repo on the new branch.
 ##   2. ``test_m16_start_switches_when_branch_already_exists`` — the
-##      branch is present locally on every repo. ``workspace start``
+##      branch is present locally on every repo. ``branch --checkout``
 ##      delegates to the M15 ``checkout`` switch path and sets the
 ##      started mark. Exit 0, ``feature_started = true``.
 ##   3. ``test_m16_start_refuses_when_any_repo_dirty`` — one dirty
-##      sibling. ``workspace start`` refuses with exit 2; no repo is
+##      sibling. ``branch --checkout`` refuses with exit 2; no repo is
 ##      mutated; the metadata is left exactly as it was (no mark
 ##      written, no branch field updated).
 ##   4. ``test_m16_start_marks_metadata_so_sync_preserves_branch`` —
-##      run ``workspace start <feature>`` to mark the workspace, push
+##      run ``branch <feature> --checkout`` to mark the workspace, push
 ##      an advancing commit on the manifest-pinned ``main`` branch so
 ##      the lock-equivalent (``origin/main``) is ahead, then run
 ##      ``repro workspace sync``. The feature branch must NOT be
@@ -50,7 +50,7 @@
 ##      authoritative for the build input, never a sync target for a
 ##      checkout deliberately on another branch.
 ##   5. ``test_m16_start_is_idempotent_for_same_branch`` — running
-##      ``workspace start <name>`` a second time on a workspace that
+##      ``branch <name> --checkout`` a second time on a workspace that
 ##      already has that branch active + marked is a clean no-op
 ##      (exit 0). Metadata stays byte-identical.
 ##
@@ -392,7 +392,7 @@ suite "M28 — repro branch <name> --checkout marks feature branch":
       check recorded.get() == "feature-switch"
 
   test "test_m28_start_converges_mixed_local_matrix":
-    ## An earlier ``workspace start`` interrupted mid-create leaves the
+    ## An earlier ``branch --checkout`` interrupted mid-create leaves the
     ## feature branch present (locally, at HEAD) on SOME repos and absent on
     ## the rest, with no remote branch involved. Re-running the identical
     ## command must CONVERGE that partial matrix — create the branch on the

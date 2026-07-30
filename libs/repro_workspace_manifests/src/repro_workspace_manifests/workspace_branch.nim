@@ -257,7 +257,7 @@ proc readWorkspaceFeatureStarted*(workspaceRoot: string): bool =
   ## M16 — Return ``true`` iff the workspace metadata records that the
   ## current ``[workspace].branch`` value names a feature branch
   ## the operator deliberately started via
-  ## ``repro workspace start <branch>``. Returns ``false`` when the
+  ## ``repro branch <name> --checkout``. Returns ``false`` when the
   ## file is missing, the key is absent, or the key is present and
   ## ``false``. A malformed workspace.toml propagates as
   ## ``WorkspaceManifestParseError`` so the caller sees the same

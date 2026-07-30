@@ -1283,7 +1283,7 @@ proc gitForkBranchAction*(id: string; identity: GitToolIdentity;
                           cwd = ""; deps: openArray[string] = [];
                           cacheable = false): BuildAction =
   ## Construct the M27 fork-branch action used by
-  ## ``repro workspace start <branch> <path>``: create ``branchName`` at
+  ## ``repro branch <name> <path>``: create ``branchName`` at
   ## ``targetSha`` (the source workspace's committed HEAD for this repo)
   ## and check it out, fetching the commit from ``sourceRepoPath`` when
   ## the freshly cloned repo does not already carry it.
