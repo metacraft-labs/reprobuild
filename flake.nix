@@ -43,7 +43,7 @@
       # io-mon no longer imports at all. fs_snoop.nim / writer.nim now
       # ``import shm_gset`` + ``shm_gset/transport``, so this pin requires the
       # nim-shm-gset-src input below and its SHM_GSET_SRC wiring.
-      url = "github:metacraft-labs/io-mon/5c381ce40c0a80739c8b29a660cfaca3e51d732d";
+      url = "github:metacraft-labs/io-mon/74efa79d24be2ebb10ef0a0a6844a7d47d1f649c";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -62,7 +62,7 @@
       #
       # Pinned to the nim-shm-gset dev tip matching the io-mon pin above (ShmGSet
       # API rename landed).
-      url = "github:metacraft-labs/nim-shm-gset/8a9f2f13beb24ab7949ff93c14fb34ae753bbe48";
+      url = "github:metacraft-labs/nim-shm-gset/360bfc15cadab1ff583e6d1cbc20b389d5d6825f";
       flake = false;
     };
     nim-shm-queue-src = {
