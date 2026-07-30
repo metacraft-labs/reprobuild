@@ -122,6 +122,26 @@ for recipe_dir in "$SRC_RECIPES_ROOT"/*; do
 done
 echo "[stage-de-rootfs] staged $staged_recipes from-source install-mirrors"
 
+# Source-built packages use the glibc 2.40 ABI supplied by the glibc source
+# recipe. Record its final rootfs path before computing the bootstrap closure:
+# compatible Nix PT_INTERP entries are replaced with this loader during final
+# staging and therefore must not pull a duplicate Nix glibc into the image.
+SOURCE_GLIBC_INSTALL_ROOT="$ISO_SRC_MIRROR_ROOT/glibc/.repro/output/install"
+SOURCE_GLIBC_LOADER_STAGED="$(find "$SOURCE_GLIBC_INSTALL_ROOT" -type f \
+  -name 'ld-linux-x86-64.so.2' -print -quit 2>/dev/null)"
+if [ -z "$SOURCE_GLIBC_LOADER_STAGED" ]; then
+  echo "[stage-de-rootfs] required source glibc loader missing" >&2
+  exit 67
+fi
+SOURCE_GLIBC_RUNTIME_DIR_STAGED="$(dirname "$SOURCE_GLIBC_LOADER_STAGED")"
+if [ ! -e "$SOURCE_GLIBC_RUNTIME_DIR_STAGED/libc.so.6" ]; then
+  echo "[stage-de-rootfs] source glibc loader has no matching libc.so.6" >&2
+  exit 67
+fi
+SOURCE_GLIBC_LOADER="${SOURCE_GLIBC_LOADER_STAGED#$STAGE_DIR}"
+SOURCE_GLIBC_RUNTIME_DIR="${SOURCE_GLIBC_RUNTIME_DIR_STAGED#$STAGE_DIR}"
+echo "[stage-de-rootfs] source glibc runtime: $SOURCE_GLIBC_RUNTIME_DIR"
+
 # ---------------------------------------------------------------------------
 # Phase 1b (M9.R.56.6): overlay every from-source recipe's ``etc/`` subtree
 # onto the stage's ``/etc/``.  Every from-source recipe was built with
@@ -193,15 +213,28 @@ trap 'rm -f "$nix_prefixes_file"' EXIT
 
 extract_nix_prefixes_from_elf() {
   local elf="$1"
-  local rp interp
+  local rp interp source_runtime_elf=0
   rp="$($patchelf_bin --print-rpath "$elf" 2>/dev/null || true)"
   interp="$($patchelf_bin --print-interpreter "$elf" 2>/dev/null || true)"
+  case "$elf" in
+    "$ISO_SRC_MIRROR_ROOT"/*/.repro/output/install/*|"$SOURCE_RUNTIME_INSTALLER_BIN")
+      source_runtime_elf=1
+      ;;
+  esac
   # Split rp on ':' and emit each /nix/store/<hash>-<pkg>/ prefix.
   printf '%s\n' "$rp" | tr ':' '\n' | \
     sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
-  printf '%s\n' "$interp" | \
-    sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
+  # These binaries are built against glibc 2.40, matching the source recipe.
+  # Their PT_INTERP is normalized to SOURCE_GLIBC_LOADER below, so retaining
+  # the bootstrap glibc solely for that interpreter would be a runtime fallback.
+  if [ "$source_runtime_elf" = 1 ] && \
+     [[ "$interp" == /nix/store/*-glibc-2.40-*/lib*/ld-linux*.so* ]]; then
+    return
+  fi
+  printf '%s\n' "$interp" | sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
 }
+SOURCE_RUNTIME_INSTALLER_BIN="${REPROOS_INSTALLER_BIN:-$REPO_ROOT/apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer}"
+export ISO_SRC_MIRROR_ROOT SOURCE_RUNTIME_INSTALLER_BIN
 export -f extract_nix_prefixes_from_elf
 
 # Walk the staged source mirror + the reproos-installer + repro CLI.
@@ -211,8 +244,8 @@ export -f extract_nix_prefixes_from_elf
 {
   find "$ISO_SRC_MIRROR_ROOT" -type f \
     \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) 2>/dev/null
-  if [ -x "$REPO_ROOT/apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer" ]; then
-    echo "$REPO_ROOT/apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer"
+  if [ -x "$SOURCE_RUNTIME_INSTALLER_BIN" ]; then
+    echo "$SOURCE_RUNTIME_INSTALLER_BIN"
   fi
   if [ -x "$REPO_ROOT/build/bin/repro" ]; then
     echo "$REPO_ROOT/build/bin/repro"
@@ -1752,7 +1785,8 @@ done
 echo "[stage-de-rootfs] mirrored $propagated_mirrored propagated runtime prefixes"
 
 echo "[stage-de-rootfs] M9.R.46 relocate-nix-to-repro starting"
-bash "$SCRIPT_DIR_SELF/relocate-nix-to-repro.sh" "$STAGE_DIR" "$ISO_SRC_MIRROR_ROOT"
+bash "$SCRIPT_DIR_SELF/relocate-nix-to-repro.sh" \
+  "$STAGE_DIR" "$ISO_SRC_MIRROR_ROOT" "$SOURCE_GLIBC_LOADER"
 echo "[stage-de-rootfs] M9.R.46 relocate-nix-to-repro complete"
 
 # ---------------------------------------------------------------------------
@@ -1843,39 +1877,4 @@ if [ -x "$chroot_ldconfig" ]; then
   # absent (causing every bare-name dlopen to fall through to the
   # Debian system cache) or left at the 16027-byte base-rootfs.tar.xz
   # fossil (which Knew NOTHING about the from-source install-mirrors).
-  # Concretely: ``mkfs.ext4`` shipped via ``e2fsprogs/.repro/output/
-  # install/usr/sbin/mkfs.ext4`` failed at runtime with exit 127
-  # because its DT_NEEDED libs (libext2fs.so.2, libcom_err.so.2,
-  # libe2p.so.2) were ABSENT from /etc/ld.so.cache, and the binary's
-  # own DT_RUNPATH did NOT include its sister-lib dir.  ``repro disk
-  # apply`` consequently failed at Phase 2 / step mkfs.ext4 with
-  # ``mkfs.ext4 failed (exit 127)``, which surfaced to the M9.R.36
-  # investigation as a "silent installer wedge after Qt init".
-  #
-  # ``ldconfig -r <root>`` does what chroot+ldconfig does but WITHOUT
-  # requiring chroot privilege — it pretends ``<root>`` is "/" for
-  # all path resolution + writes the cache at ``<root>/etc/ld.so.cache``.
-  # This is the canonical unprivileged-build replacement Debian's
-  # debootstrap + Arch's pacstrap both use.
-  ldconfig_log="$STAGE_DIR/tmp/reproos-ldconfig.log"
-  mkdir -p "$(dirname "$ldconfig_log")"
-  if ! "$chroot_ldconfig" -r "$STAGE_DIR" >"$ldconfig_log" 2>&1; then
-    cat "$ldconfig_log" >&2
-    rm -f "$ldconfig_log"
-    echo "[stage-de-rootfs] source ldconfig failed" >&2
-    exit 1
-  fi
-  grep -vE 'is not a symbolic link|file format not recognized' \
-    "$ldconfig_log" || true
-  rm -f "$ldconfig_log"
-  if [ ! -s "$STAGE_DIR/etc/ld.so.cache" ]; then
-    echo "[stage-de-rootfs] source ldconfig did not create ld.so.cache" >&2
-    exit 1
-  fi
-  echo "[stage-de-rootfs] rebuilt ld.so.cache via /sbin/ldconfig -r $STAGE_DIR (size: $(stat -c %s "$STAGE_DIR/etc/ld.so.cache" 2>/dev/null || echo missing))"
-else
-  echo "[stage-de-rootfs] no source ldconfig at $chroot_ldconfig" >&2
-  exit 1
-fi
-
-echo "[stage-de-rootfs] stage-dir bytes=$(du -sb "$STAGE_DIR" | awk '{print $1}')"
+  # Conc                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   

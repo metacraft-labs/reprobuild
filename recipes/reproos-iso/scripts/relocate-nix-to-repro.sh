@@ -56,11 +56,12 @@
 #      /nix/store``.
 #
 # Usage:  bash relocate-nix-to-repro.sh <stage-dir> [source-mirror-root]
+#           [source-glibc-loader]
 
 set -uo pipefail
 
-if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-  echo "usage: $0 <stage-dir> [source-mirror-root]" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
+  echo "usage: $0 <stage-dir> [source-mirror-root] [source-glibc-loader]" >&2
   exit 64
 fi
 STAGE_DIR="$(realpath -m "$1")"
@@ -71,7 +72,7 @@ if [ ! -d "$STAGE_DIR" ]; then
 fi
 
 SOURCE_MIRROR_ROOT=""
-if [ "$#" -eq 2 ]; then
+if [ "$#" -ge 2 ]; then
   SOURCE_MIRROR_ROOT="$(realpath -m "$2")"
   case "$SOURCE_MIRROR_ROOT" in
     "$STAGE_DIR"/*) ;;
@@ -82,6 +83,33 @@ if [ "$#" -eq 2 ]; then
   esac
   if [ ! -d "$SOURCE_MIRROR_ROOT" ]; then
     echo "[relocate-nix-to-repro] source mirror root does not exist: $SOURCE_MIRROR_ROOT" >&2
+    exit 65
+  fi
+fi
+
+SOURCE_GLIBC_LOADER=""
+SOURCE_GLIBC_DIR=""
+SOURCE_GLIBC_VERSION=""
+if [ "$#" -eq 3 ]; then
+  SOURCE_GLIBC_LOADER="$3"
+  case "$SOURCE_GLIBC_LOADER" in
+    /*) ;;
+    *)
+      echo "[relocate-nix-to-repro] source glibc loader must be an absolute rootfs path" >&2
+      exit 64
+      ;;
+  esac
+  source_glibc_loader_staged="$STAGE_DIR$SOURCE_GLIBC_LOADER"
+  SOURCE_GLIBC_DIR="$(dirname "$SOURCE_GLIBC_LOADER")"
+  if [ ! -f "$source_glibc_loader_staged" ] || \
+     [ ! -e "$STAGE_DIR$SOURCE_GLIBC_DIR/libc.so.6" ]; then
+    echo "[relocate-nix-to-repro] incomplete source glibc runtime: $SOURCE_GLIBC_DIR" >&2
+    exit 65
+  fi
+  SOURCE_GLIBC_VERSION="$($source_glibc_loader_staged --version 2>&1 | \
+    sed -nE 's/.*version ([0-9]+\.[0-9]+).*/\1/p' | head -n1)"
+  if [ -z "$SOURCE_GLIBC_VERSION" ]; then
+    echo "[relocate-nix-to-repro] could not determine source glibc version" >&2
     exit 65
   fi
 fi
@@ -214,8 +242,32 @@ echo "[relocate-nix-to-repro] $cand_total ELF candidates"
 
 elfs_rewritten=0
 elfs_inspected=0
-declare -A recipe_glibc_dirs=()
-declare -A recipe_glibc_ambiguous=()
+is_source_glibc_elf() {
+  [ -n "$SOURCE_GLIBC_LOADER" ] && [ -n "$SOURCE_MIRROR_ROOT" ] || return 1
+  case "$1" in
+    "$SOURCE_MIRROR_ROOT"/*/.repro/output/install/*|"$STAGE_DIR/usr/bin/reproos-installer")
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+is_bootstrap_glibc_interpreter() {
+  [[ "$1" =~ ^/(nix|repro)/store/[^/]+-glibc-([0-9]+\.[0-9]+)(-[^/]*)?/lib[^/]*/ld-linux[^/]*\.so ]]
+}
+
+is_compatible_bootstrap_glibc() {
+  local interp="$1" bootstrap_version oldest_version
+  if [[ "$interp" =~ ^/(nix|repro)/store/[^/]+-glibc-([0-9]+\.[0-9]+)(-[^/]*)?/lib[^/]*/ld-linux[^/]*\.so ]]; then
+    bootstrap_version="${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
+  oldest_version="$(printf '%s\n%s\n' \
+    "$bootstrap_version" "$SOURCE_GLIBC_VERSION" | sort -V | head -n1)"
+  [ "$oldest_version" = "$bootstrap_version" ]
+}
+
 while IFS= read -r f; do
   # Cheap ELF magic check before patchelf invocation.
   magic=$(head -c 4 "$f" 2>/dev/null | od -An -c | tr -d ' \n' || true)
@@ -226,29 +278,6 @@ while IFS= read -r f; do
   elfs_inspected=$((elfs_inspected + 1))
   rp=$($patchelf_bin --print-rpath "$f" 2>/dev/null || true)
   ip=$($patchelf_bin --print-interpreter "$f" 2>/dev/null || true)
-  if [ -n "$SOURCE_MIRROR_ROOT" ]; then
-    case "$f" in
-      "$SOURCE_MIRROR_ROOT"/*/.repro/output/install/*)
-        recipe_rel="${f#"$SOURCE_MIRROR_ROOT"/}"
-        recipe_name="${recipe_rel%%/*}"
-        case "$ip" in
-          /nix/store/*-glibc-*/lib*/ld-linux*.so*|/repro/store/*-glibc-*/lib*/ld-linux*.so*)
-            glibc_dir="$(dirname "${ip/#\/nix\/store\//\/repro\/store\/}")"
-            if [ ! -e "$STAGE_DIR$glibc_dir/libc.so.6" ]; then
-              echo "[relocate-nix-to-repro] glibc for $recipe_name is missing: $glibc_dir/libc.so.6" >&2
-              exit 75
-            fi
-            prior_glibc_dir="${recipe_glibc_dirs[$recipe_name]-}"
-            if [ -z "$prior_glibc_dir" ]; then
-              recipe_glibc_dirs[$recipe_name]="$glibc_dir"
-            elif [ "$prior_glibc_dir" != "$glibc_dir" ]; then
-              recipe_glibc_ambiguous[$recipe_name]=1
-            fi
-            ;;
-        esac
-        ;;
-    esac
-  fi
   did_rewrite=0
   if [[ "$rp" == *"/nix/store/"* ]]; then
     new_rp="${rp//\/nix\/store\//\/repro\/store\/}"
@@ -258,7 +287,18 @@ while IFS= read -r f; do
     fi
     did_rewrite=1
   fi
-  if [[ "$ip" == /nix/store/* ]]; then
+  if is_source_glibc_elf "$f" && is_bootstrap_glibc_interpreter "$ip"; then
+    if ! is_compatible_bootstrap_glibc "$ip"; then
+      echo "[relocate-nix-to-repro] source glibc $SOURCE_GLIBC_VERSION is older than $ip" >&2
+      exit 75
+    fi
+    new_ip="$SOURCE_GLIBC_LOADER"
+    if ! $patchelf_bin --set-interpreter "$new_ip" "$f" 2>/dev/null; then
+      echo "[relocate-nix-to-repro] source glibc interpreter rewrite FAILED on $f" >&2
+      exit 75
+    fi
+    did_rewrite=1
+  elif [[ "$ip" == /nix/store/* ]]; then
     new_ip="${ip/#\/nix\/store\//\/repro\/store\/}"
     if ! $patchelf_bin --set-interpreter "$new_ip" "$f" 2>/dev/null; then
       echo "[relocate-nix-to-repro] patchelf --set-interpreter FAILED on $f" >&2
@@ -271,25 +311,11 @@ done < "$cands_file"
 echo "[relocate-nix-to-repro] inspected $elfs_inspected ELFs, rewrote RPATH/INTERP on $elfs_rewritten"
 
 # Custom from-source builds may omit the toolchain's implicit glibc from
-# RUNPATH.  That is unsafe in the Debian-based stage: a private shared
-# library that directly needs ld-linux can otherwise load Debian's loader
-# and libc alongside its Nix-built process.  Infer one glibc per recipe
-# from its executables' PT_INTERP and make that recipe's dynamic ELFs use
-# the matching relocated glibc.  Recipes containing mixed interpreters are
-# left unchanged rather than choosing an arbitrary ABI.
+# RUNPATH. Make every source-runtime ELF resolve libc and ld-linux from the
+# source glibc recipe that also supplies its normalized PT_INTERP.
 glibc_rpaths_added=0
 while IFS= read -r f; do
-  [ -n "$SOURCE_MIRROR_ROOT" ] || break
-  case "$f" in
-    "$SOURCE_MIRROR_ROOT"/*/.repro/output/install/*)
-      recipe_rel="${f#"$SOURCE_MIRROR_ROOT"/}"
-      recipe_name="${recipe_rel%%/*}"
-      ;;
-    *) continue ;;
-  esac
-  [ "${recipe_glibc_ambiguous[$recipe_name]-0}" = 0 ] || continue
-  glibc_dir="${recipe_glibc_dirs[$recipe_name]-}"
-  [ -n "$glibc_dir" ] || continue
+  is_source_glibc_elf "$f" || continue
   magic=$(head -c 4 "$f" 2>/dev/null | od -An -c | tr -d ' \n' || true)
   case "$magic" in
     177ELF*) ;;
@@ -301,17 +327,17 @@ while IFS= read -r f; do
   fi
   rp=$($patchelf_bin --print-rpath "$f" 2>/dev/null || true)
   case ":$rp:" in
-    *":$glibc_dir:"*) continue ;;
+    *":$SOURCE_GLIBC_DIR:"*) continue ;;
   esac
-  new_rp="$glibc_dir"
-  [ -z "$rp" ] || new_rp="$rp:$glibc_dir"
+  new_rp="$SOURCE_GLIBC_DIR"
+  [ -z "$rp" ] || new_rp="$rp:$SOURCE_GLIBC_DIR"
   if ! $patchelf_bin --set-rpath "$new_rp" "$f" 2>/dev/null; then
     echo "[relocate-nix-to-repro] failed to add matching glibc RPATH to $f" >&2
     exit 75
   fi
   glibc_rpaths_added=$((glibc_rpaths_added + 1))
 done < "$cands_file"
-echo "[relocate-nix-to-repro] added matching glibc RPATHs to $glibc_rpaths_added from-source ELFs"
+echo "[relocate-nix-to-repro] added source glibc RPATHs to $glibc_rpaths_added source-runtime ELFs"
 
 # ---------------------------------------------------------------------------
 # Phase 3: symlink target rewrite.
@@ -443,9 +469,10 @@ echo "[relocate-nix-to-repro] verified clean: no /nix/store references on staged
 # ---------------------------------------------------------------------------
 # Phase 6 (M9.R.46 glibc cache carve-out): glibc's ld-linux-x86-64.so.2
 # has the cache path ``/nix/store/<hash>-glibc-X.Y/etc/ld.so.cache``
-# baked into its .rodata at compile time.  patchelf does NOT rewrite
-# .rodata; we can't relocate this string without rebuilding glibc from
-# source (M9.R.39 documents the glibc-from-source recipe is a stub).
+# baked into its .rodata at compile time. patchelf does not rewrite
+# .rodata. Source-runtime ELFs now use the source glibc loader and its
+# standard /etc/ld.so.cache path; this compatibility path is retained only
+# for remaining non-source tools whose bootstrap glibc is still relocated.
 #
 # On the live ISO the bare-name dlopen() chain (libcrypto / libacl /
 # libcap / libsystemd-shared) relies on the cache for resolution; ld.so

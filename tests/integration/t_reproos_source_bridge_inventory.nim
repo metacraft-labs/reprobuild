@@ -85,6 +85,12 @@ suite "ReproOS source bridge inventory":
     check "required source bash binary missing" in stageScript
     check "required source glibc ldconfig missing" in stageScript
     check "required source glibc runtime missing" in stageScript
+    # Compatible source-built ELFs must use the source glibc at image runtime.
+    check "SOURCE_GLIBC_LOADER" in stageScript
+    check "SOURCE_GLIBC_VERSION" in stageScript
+    check "source_runtime_elf" in stageScript
+    check "source_glibc_supports_interpreter" in stageScript
+    check "\"$SOURCE_GLIBC_LOADER\"" in stageScript
     check "required source coreutils binary missing" in stageScript
     check "required source kernel payload missing" in stageScript
     check "source kernel module tree is contaminated" in stageScript
