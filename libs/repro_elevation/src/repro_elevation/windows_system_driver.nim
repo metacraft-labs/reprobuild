@@ -59,6 +59,18 @@ proc digestHexOfText*(text: string): string =
 # re-observed state against the value the plan EXPECTED.
 # ===========================================================================
 
+proc desiredServiceRecoverySlots*(op: PrivilegedOperation):
+    seq[ServiceRecoveryActionObservation] =
+  ## The operation's declared `windows.service` recovery slots rendered
+  ## in the SAME shape an observation carries (canonical lower-case
+  ## action token + delay), so the desired-state and observed-state
+  ## canonical strings are directly comparable.
+  result = @[]
+  for slot in op.serviceRecoveryActions:
+    result.add(ServiceRecoveryActionObservation(
+      action: windowsServiceRecoveryActionToken(slot.action),
+      delayMs: slot.delayMs))
+
 proc systemDesiredDigestHex*(op: PrivilegedOperation): string =
   ## Canonical desired-state digest. Dispatched on the closed kind
   ## set; the fixture kinds keep their `fixture_driver` digest.
@@ -74,8 +86,21 @@ proc systemDesiredDigestHex*(op: PrivilegedOperation): string =
   of pokWindowsCapability:
     digestHexOfText(canonicalCapabilityDesired(op.capabilityInstall))
   of pokWindowsService:
+    # Every field the operation MANAGES has to appear on this side too,
+    # because `observeWindowsService` folds the same fields into the
+    # observed digest. Leaving them at their defaults here made the two
+    # digests structurally unequal, so a service that already matched
+    # its declaration was still reported `applied` on every apply.
+    # An unmanaged field (empty displayName / binPath, empty recovery
+    # actions, zero reset window) is omitted from BOTH canonical
+    # strings, so a profile that declares none of them keeps the
+    # pre-existing `service:<startType>:<running>` digest exactly.
     digestHexOfText(canonicalServiceDesired(
-      op.serviceStartType, op.serviceRunning))
+      op.serviceStartType, op.serviceRunning,
+      wantDisplayName = op.serviceDisplayName,
+      wantBinPath = op.serviceBinPath,
+      wantRecoveryActions = desiredServiceRecoverySlots(op),
+      wantRecoveryResetSeconds = op.serviceRecoveryResetSeconds))
   of pokWindowsFirewallRule:
     if op.fwDestroy:
       ZeroDigestHex
@@ -715,7 +740,8 @@ proc observeWindowsService*(op: PrivilegedOperation):
       else: digestHexOfText(canonicalServiceState(obs,
         wantDisplayName = op.serviceDisplayName,
         wantBinPath = op.serviceBinPath,
-        includeRecovery = needRecovery))
+        wantRecoveryActions = desiredServiceRecoverySlots(op),
+        wantRecoveryResetSeconds = op.serviceRecoveryResetSeconds))
   else:
     raiseNotImplementedPlatform("windows.service observe")
 
@@ -815,11 +841,7 @@ proc applyWindowsService*(op: PrivilegedOperation): ObservedOperationState =
       let qf = parseScQfailureOutput(qfOut)
       after.recoveryActions = qf.actions
       after.recoveryResetSeconds = qf.resetSeconds
-    var wantSlots: seq[ServiceRecoveryActionObservation] = @[]
-    for slot in op.serviceRecoveryActions:
-      wantSlots.add(ServiceRecoveryActionObservation(
-        action: windowsServiceRecoveryActionToken(slot.action),
-        delayMs: slot.delayMs))
+    let wantSlots = desiredServiceRecoverySlots(op)
     if not serviceMatchesDesired(after, op.serviceStartType,
         op.serviceRunning,
         wantDisplayName = op.serviceDisplayName,
@@ -847,7 +869,8 @@ proc applyWindowsService*(op: PrivilegedOperation): ObservedOperationState =
       else: digestHexOfText(canonicalServiceState(after,
         wantDisplayName = op.serviceDisplayName,
         wantBinPath = op.serviceBinPath,
-        includeRecovery = needRecovery))
+        wantRecoveryActions = wantSlots,
+        wantRecoveryResetSeconds = op.serviceRecoveryResetSeconds))
   else:
     raiseNotImplementedPlatform("windows.service apply")
 
