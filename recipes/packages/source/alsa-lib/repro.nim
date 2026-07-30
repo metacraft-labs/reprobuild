@@ -198,7 +198,10 @@ package alsaLibSource:
         "--disable-static",
         "--disable-python",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      # Upstream configure generates version and the PCM/control symbol-list
+      # C files in the source tree even for an out-of-tree build.
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
+        allowSourceWrites = true)
       discard pkg.library("libAsound")
     finally:
       clearCurrentOwningPackageOverride()
