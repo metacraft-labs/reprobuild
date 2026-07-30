@@ -32,11 +32,11 @@
 #   SOURCE_DATE_EPOCH (for cpio --reproducible)
 #
 # Inputs and dependencies:
-#   busybox  - statically linked, downloaded from upstream BusyBox's
-#              binary tree on demand (cached host-side).
+#   busybox  - statically linked executable from busyboxSource's install
+#              mirror, built against the source-built musl sysroot.
 #   kernel   - vmlinuz and any modules come from kernelSource's install
 #              mirror; no prebuilt kernel package is downloaded.
-#   cpio, gzip, xz-utils, curl and optional zstd - host tools.
+#   cpio, gzip, xz-utils and optional zstd - host tools.
 
 set -euo pipefail
 
@@ -49,7 +49,7 @@ OUT_INITRAMFS="$1"
 : "${SOURCE_DATE_EPOCH:?SOURCE_DATE_EPOCH must be set for reproducibility}"
 
 # Host tooling.
-for tool in cpio gzip xz curl; do
+for tool in cpio gzip xz; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "build-initramfs.sh: required host tool missing: $tool" >&2
     exit 66
@@ -62,12 +62,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RECIPE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 INITRAMFS_SRC="$RECIPE_DIR/initramfs"   # vendored /init + helper scripts
 
-# Cache directory for the temporary upstream BusyBox binary.
-CACHE_DIR="${REPRO_INITRAMFS_CACHE:-/var/cache/reprobuild/initramfs}"
-mkdir -p "$CACHE_DIR"
-
-# Pinned upstream sources.
-#
 # Kernel and modules come from the source recipe's canonical install mirror.
 KERNEL_INSTALL_ROOT="${REPRO_KERNEL_INSTALL_ROOT:-$RECIPE_DIR/../packages/source/kernel/.repro/output/install}"
 KERNEL_PAYLOAD="$KERNEL_INSTALL_ROOT/usr/lib/reproos-kernel"
@@ -78,48 +72,14 @@ if [ ! -s "$KERNEL_PAYLOAD/vmlinuz" ] || [ ! -d "$MOD_ROOT" ]; then
   exit 67
 fi
 
-# Busybox: statically linked single binary. We use the upstream
-# build from busybox.net to avoid a glibc/musl mismatch with whatever
-# host built it.
-BUSYBOX_VERSION='1.36.1'
-BUSYBOX_URL='https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox'
-BUSYBOX_SHA256='6e123e7f3202a8c1e9b1f94d8941580a25135382b99e8d3e34fb858bba311348'
-
-fetch_if_missing() {
-  # $1 = url, $2 = output path, $3 = expected sha256 (optional)
-  local url="$1"
-  local out="$2"
-  local expected_sha256="${3:-}"
-  if [ -f "$out" ]; then
-    if [ -n "$expected_sha256" ]; then
-      local got
-      got="$(sha256sum "$out" | awk '{print $1}')"
-      if [ "$got" = "$expected_sha256" ]; then
-        echo "[fetch] cache-hit $(basename "$out") sha256=$got"
-        return 0
-      fi
-      echo "[fetch] cache sha256 mismatch ($got != $expected_sha256); re-fetching"
-      rm -f "$out"
-    else
-      echo "[fetch] cache-hit $(basename "$out") (no sha256 pin)"
-      return 0
-    fi
-  fi
-  echo "[fetch] $url -> $out"
-  curl -fsSL --retry 3 -o "$out" "$url"
-  if [ -n "$expected_sha256" ]; then
-    local got
-    got="$(sha256sum "$out" | awk '{print $1}')"
-    if [ "$got" != "$expected_sha256" ]; then
-      echo "[fetch] sha256 mismatch for $out: got $got, expected $expected_sha256" >&2
-      exit 67
-    fi
-  fi
-}
-
-# Fetch upstream blobs (cached).
-BUSYBOX_PATH="$CACHE_DIR/busybox-$BUSYBOX_VERSION"
-fetch_if_missing "$BUSYBOX_URL" "$BUSYBOX_PATH" "$BUSYBOX_SHA256"
+# BusyBox comes from its source recipe and must be a self-contained static
+# executable because no root filesystem exists when /init starts.
+BUSYBOX_INSTALL_ROOT="${REPRO_BUSYBOX_INSTALL_ROOT:-$RECIPE_DIR/../packages/source/busybox/.repro/output/install}"
+BUSYBOX_PATH="$BUSYBOX_INSTALL_ROOT/usr/bin/busybox"
+if [ ! -x "$BUSYBOX_PATH" ]; then
+  echo "build-initramfs.sh: source BusyBox install mirror is incomplete" >&2
+  exit 67
+fi
 
 # Stage area. Deleted on exit unless REPRO_INITRAMFS_KEEP_STAGE=1.
 WORK="$(mktemp -d -t reproos-initramfs-XXXXXX)"

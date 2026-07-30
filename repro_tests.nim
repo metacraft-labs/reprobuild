@@ -3166,6 +3166,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/busybox/test_busybox_source.nim",
+    binary: "build/test-bin/test_busybox_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/ca-certificates/test_ca_certificates_source.nim",
     binary: "build/test-bin/test_ca_certificates_source",
     defines: @[],
@@ -4176,6 +4184,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/meson/test_meson_source.nim",
     binary: "build/test-bin/test_meson_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/musl/test_musl_source.nim",
+    binary: "build/test-bin/test_musl_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

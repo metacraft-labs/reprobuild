@@ -350,26 +350,29 @@ SOURCE_KERNEL_ROOT="$REPO_ROOT/recipes/packages/source/kernel/.repro/output/inst
 SOURCE_KERNEL_PAYLOAD="$SOURCE_KERNEL_ROOT/usr/lib/reproos-kernel"
 SOURCE_KERNEL_RELEASE="$(cat "$SOURCE_KERNEL_PAYLOAD/kernel.release")"
 SOURCE_KERNEL="$SOURCE_KERNEL_PAYLOAD/vmlinuz"
+SOURCE_BUSYBOX="$REPO_ROOT/recipes/packages/source/busybox/.repro/output/install/usr/bin/busybox"
+if [ ! -s "$SOURCE_KERNEL" ] || [ ! -x "$SOURCE_BUSYBOX" ]; then
+  echo "[build-reproos-image] source kernel or BusyBox payload missing" >&2
+  exit 67
+fi
+SOURCE_KERNEL_SHA256="$(sha256sum "$SOURCE_KERNEL" | awk '{print $1}')"
+SOURCE_BUSYBOX_SHA256="$(sha256sum "$SOURCE_BUSYBOX" | awk '{print $1}')"
+BOOT_INPUT_ID="$SOURCE_KERNEL_RELEASE-${SOURCE_KERNEL_SHA256:0:16}-${SOURCE_BUSYBOX_SHA256:0:16}"
 # M9.R.51: generate a boot-from-disk initramfs (init-disk variant of
 # the live-init) instead of reusing the ISO's live-boot initrd (which
 # probes for /live/filesystem.squashfs and drops to rescue on an
 # installed disk).  We invoke reproos-iso/scripts/build-initramfs.sh
 # with REPRO_INITRAMFS_INIT=init-disk so the same busybox+modules
 # staging pipeline packs the boot-from-disk /init instead.
-DISK_INITRD_CACHE="${REPRO_DISK_INITRD_CACHE:-$RECIPE_DIR/build/initrd.img-disk-$SOURCE_KERNEL_RELEASE}"
+DISK_INITRD_CACHE="${REPRO_DISK_INITRD_CACHE:-$RECIPE_DIR/build/initrd.img-disk-$BOOT_INPUT_ID}"
 STAGE_BOOT_MARKER="$STAGE_DIR/.repro-boot-seeded"
-if [ ! -f "$STAGE_BOOT_MARKER" ] || \
+if [ "$(cat "$STAGE_BOOT_MARKER" 2>/dev/null || true)" != "$BOOT_INPUT_ID" ] || \
    [ ! -s "$STAGE_DIR/boot/vmlinuz" ] || \
    [ ! -s "$STAGE_DIR/boot/initrd.img" ]; then
   echo "[build-reproos-image] seeding $STAGE_DIR/boot with kernel + boot-from-disk initrd"
   mkdir -p "$STAGE_DIR/boot"
-  if [ -f "$SOURCE_KERNEL" ]; then
-    cp "$SOURCE_KERNEL" "$STAGE_DIR/boot/vmlinuz"
-    echo "[build-reproos-image] vmlinuz: $(ls -la "$STAGE_DIR/boot/vmlinuz" | awk '{print $5}') bytes (from kernelSource)"
-  else
-    echo "[build-reproos-image] source kernel missing: $SOURCE_KERNEL" >&2
-    exit 67
-  fi
+  cp "$SOURCE_KERNEL" "$STAGE_DIR/boot/vmlinuz"
+  echo "[build-reproos-image] vmlinuz: $(ls -la "$STAGE_DIR/boot/vmlinuz" | awk '{print $5}') bytes (from kernelSource)"
   if [ ! -f "$DISK_INITRD_CACHE" ]; then
     echo "[build-reproos-image] generating boot-from-disk initrd via build-initramfs.sh (REPRO_INITRAMFS_INIT=init-disk)"
     mkdir -p "$(dirname "$DISK_INITRD_CACHE")"
@@ -380,7 +383,7 @@ if [ ! -f "$STAGE_BOOT_MARKER" ] || \
   fi
   cp "$DISK_INITRD_CACHE" "$STAGE_DIR/boot/initrd.img"
   echo "[build-reproos-image] initrd.img (boot-from-disk): $(ls -la "$STAGE_DIR/boot/initrd.img" | awk '{print $5}') bytes"
-  touch "$STAGE_BOOT_MARKER"
+  printf '%s\n' "$BOOT_INPUT_ID" > "$STAGE_BOOT_MARKER"
 else
   echo "[build-reproos-image] /boot already seeded (marker present)"
 fi

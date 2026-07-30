@@ -142,6 +142,7 @@ const reproosImageRootfsDeps = @[
   "coreutils",
   "grub",
   "kernel",
+  "busybox",
 ]
 
 package reproosImage:

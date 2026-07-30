@@ -11,6 +11,7 @@ const MigratedPackages = [
   "coreutils",
   "grub",
   "kernel",
+  "musl", "busybox",
 ]
 
 proc findRepoRoot(): string =
@@ -72,5 +73,8 @@ suite "ReproOS source bridge inventory":
     check "required source tar binary missing" in stageScript
     check "required source coreutils binary missing" in stageScript
     check "required source kernel payload missing" in stageScript
+    check "source kernel module tree is contaminated" in stageScript
     check "$STAGE_DIR/usr/lib/modules" in stageScript
+    check "usr/lib|/usr/lib" in stageScript
+    check "unsupported /lib symlink target" in stageScript
     check "return 1" in stageScript

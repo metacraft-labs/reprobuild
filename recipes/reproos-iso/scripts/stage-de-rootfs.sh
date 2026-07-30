@@ -511,6 +511,8 @@ BASE_USERSPACE_RECIPES=(
   coreutils
   grub
   kernel
+  musl
+  busybox
 )
 
 link_base_recipe_binaries() {
@@ -703,10 +705,30 @@ link_base_recipe_binaries() {
       echo "[stage-de-rootfs] required source kernel payload missing" >&2
       return 1
     fi
-    mkdir -p "$STAGE_DIR/usr/lib" "$STAGE_DIR/lib"
-    rm -rf "$STAGE_DIR/usr/lib/modules" "$STAGE_DIR/lib/modules"
+    if [ -e "$install_usr/lib/modules/modules" ] || \
+       [ -L "$install_usr/lib/modules/modules" ]; then
+      echo "[stage-de-rootfs] source kernel module tree is contaminated" >&2
+      return 1
+    fi
+    mkdir -p "$STAGE_DIR/usr/lib"
+    rm -rf "$STAGE_DIR/usr/lib/modules"
     ln -s "${install_usr#$STAGE_DIR}/lib/modules" "$STAGE_DIR/usr/lib/modules"
-    ln -s /usr/lib/modules "$STAGE_DIR/lib/modules"
+    # On merged-/usr roots, /lib already resolves to /usr/lib. Creating a
+    # second /lib/modules link would follow /usr/lib/modules into the source
+    # module directory and try to create a nested "modules" entry there.
+    if [ -L "$STAGE_DIR/lib" ]; then
+      case "$(readlink "$STAGE_DIR/lib")" in
+        usr/lib|/usr/lib) ;;
+        *)
+          echo "[stage-de-rootfs] unsupported /lib symlink target" >&2
+          return 1
+          ;;
+      esac
+    else
+      mkdir -p "$STAGE_DIR/lib"
+      rm -rf "$STAGE_DIR/lib/modules"
+      ln -s /usr/lib/modules "$STAGE_DIR/lib/modules"
+    fi
   fi
   if [ "$recipe" = "dbus" ]; then
     local dbus_system_units="$install_usr/lib/systemd/system"
