@@ -31,6 +31,8 @@
 ##   6. Recipes with no project-interface.rbsz on disk fall back to
 ##      filesystem enumeration with ``makUnknown`` and still resolve
 ##      via the suffix-probe order.
+##   7. A bundled library dependency can resolve through an explicit
+##      source-package alias without changing the requested ABI name.
 
 import std/[os, strutils, tables, tempfiles, unittest]
 
@@ -150,6 +152,21 @@ suite "DSL-port M9.R.14d.1 — library-use-kind resolution":
     check outcome.profile.pathSearchList.len == 1
     check outcome.profile.pathSearchList[0] ==
       parentDir(absolutePath(artefact))
+
+  test "resolves_bundled_library_from_aliased_source_recipe":
+    let scratch = createTempDir("repro-m9r14d-alias-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "libtool")
+    let artefact = makeLibraryArtefact(scratch, "libtool", "libltdl")
+    writeSyntheticInterface(scratch, "libtool",
+      executables = @["libtool", "libtoolize"], libraries = @["libltdl"])
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("libltdl"), recipeRoot = scratch)
+    check outcome.kind == rrResolved
+    check outcome.profile.resolvedExecutablePath == absolutePath(artefact)
+    check outcome.profile.packageSelector == "libltdl"
+    check outcome.profile.selectedStorePath == absolutePath(scratch / "libtool")
 
   test "resolves_executable_artefact_when_recipe_declares_executable":
     let scratch = createTempDir("repro-m9r14d-exe-", "")

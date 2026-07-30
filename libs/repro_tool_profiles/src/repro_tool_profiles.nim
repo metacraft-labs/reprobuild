@@ -4201,11 +4201,20 @@ proc m9r14fDepRecipeName(useDef: InterfaceToolUse): string =
     return m9r14fStripConstraint(useDef.rawConstraint)
   ""
 
+const FromSourceRecipeAliases* = [
+  (dependency: "libltdl", recipe: "libtool"),
+]
+  ## Source packages can publish independently consumed libraries whose
+  ## ABI name differs from the upstream source-package name. Keep these
+  ## aliases explicit so a dependency still names the interface it consumes
+  ## while the resolver builds the source package that actually provides it.
+
 proc m9r14fDepRecipeNames(useDef: InterfaceToolUse): seq[string] =
   ## Return every plausible sibling-recipe name for a dependency.
   ## Library packages commonly provision a concrete artifact name
   ## (for example ``libblkid.so``) while their source recipe is named
-  ## after the package selector (``util-linux``).
+  ## after the package selector (``util-linux``). Bundled-library aliases
+  ## append the owning source package after the direct candidates.
   for candidate in [
       m9r14fDepRecipeName(useDef),
       m9r14fStripConstraint(useDef.packageSelector),
@@ -4213,6 +4222,12 @@ proc m9r14fDepRecipeNames(useDef: InterfaceToolUse): seq[string] =
     if candidate.len == 0 or candidate in result:
       continue
     result.add(candidate)
+  let directCandidates = result
+  for candidate in directCandidates:
+    for alias in FromSourceRecipeAliases:
+      if candidate.cmpIgnoreCase(alias.dependency) == 0 and
+          alias.recipe notin result:
+        result.add(alias.recipe)
 
 proc m9r14fLoadInterfaceToolUses*(recipeDir: string): seq[InterfaceToolUse] =
   ## DSL-port M9.R.14f.1 — read the sibling recipe's
@@ -4359,7 +4374,12 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
       "tool-resolution failed: from-source mode requires a non-empty " &
       "executableName on the tool use (package \"" &
       useDef.packageSelector & "\")")
-  let recipeDir = root / name
+  var recipeName = name
+  for candidate in m9r14fDepRecipeNames(useDef):
+    if fileExists(extendedPath(root / candidate / "repro.nim")):
+      recipeName = candidate
+      break
+  let recipeDir = root / recipeName
   let recipeManifest = recipeDir / "repro.nim"
   try:
     let msg = "[RESOLVER] tryResolveFromSourceTool: name=" & name & " root=" & root & " manifest=" & recipeManifest & " exists=" & $fileExists(extendedPath(recipeManifest)) & "\n"
@@ -4383,7 +4403,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
   # candidates can be enumerated (the recipe's `.repro/output/` tree
   # is empty / missing) so existing tests + the executable-style probe
   # for tools like ``meson`` keep working unchanged.
-  let baseCandidate = fromSourceArtifactCandidate(root, name, name)
+  let baseCandidate = fromSourceArtifactCandidate(root, recipeName, name)
   var candidates = m9r14dEnumerateArtifacts(recipeDir)
   var resolved = ""
   if candidates.len > 0:
