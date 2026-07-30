@@ -188,7 +188,7 @@ proc setupFixture(gitBin: string): Fixture =
 
 proc invokeSync(fx: Fixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "sync", "--report", "myproject",
+    fx.reproBin, "workspace", "sync", "--write-report", "myproject",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 

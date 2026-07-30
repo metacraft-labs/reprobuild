@@ -68,7 +68,7 @@ proc runBuildHelpers(reproBin, repoRoot: string):
     ".#test-helpers",
     "--tool-provisioning=path",
     "--daemon=off",
-    "--report=full",
+    "--write-report",
     "--log=actions",
     "--progress=quiet",
   ]

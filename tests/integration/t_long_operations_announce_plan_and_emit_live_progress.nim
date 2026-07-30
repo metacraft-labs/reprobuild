@@ -149,7 +149,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
   result.workspaceRoot = workspaceRoot
 
 proc invokeSync(fx: Fixture; extra: openArray[string] = []): CmdResult =
-  var argv = @[fx.reproBin, "workspace", "sync", "--report", "myproject",
+  var argv = @[fx.reproBin, "workspace", "sync", "--write-report", "myproject",
     "--workspace-root=" & fx.workspaceRoot]
   for e in extra: argv.add(e)
   runShell(shellCommand(argv))
@@ -247,7 +247,7 @@ suite "RA-27 — announce plan + live progress + dry-run":
       # ---- (d) --json emits a valid machine surface --------------------
       # Capture stdout ONLY so progress/diagnostic stderr cannot corrupt the
       # JSON document.
-      let jsonText = captureStdoutOnly(@[fx.reproBin, "workspace", "sync", "--report",
+      let jsonText = captureStdoutOnly(@[fx.reproBin, "workspace", "sync", "--write-report",
         "myproject", "--workspace-root=" & fx.workspaceRoot, "--json"])
       let doc = parseJson(jsonText)
       check doc.hasKey("plan")

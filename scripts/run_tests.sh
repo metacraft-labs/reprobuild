@@ -226,22 +226,31 @@ repro_build_collection() {
     repro_exe="./build/bin/repro_run${exe_ext}"
   fi
   local build_status=0
+  # ``--write-report`` keeps the full record for the CI artefact. The FAILURE
+  # report below needs no flag: a failed build writes it unasked, which is the
+  # whole point of the outcome-dependent persist default.
   timeout --kill-after=30s "${BUILD_TIMEOUT}" \
-    "${repro_exe}" build --tool-provisioning=path --daemon=off --no-runquota "${collection}" \
+    "${repro_exe}" build --tool-provisioning=path --daemon=off --no-runquota \
+    --write-report "${collection}" \
     || build_status=$?
   if (( build_status != 0 )); then
     if (( build_status == 124 )); then
       printf 'Timed out building %s after %s\n' "${collection}" "${BUILD_TIMEOUT}" >&2
     fi
 
+    failure_report_path=".repro/build/repro/build-failure-report.json"
     report_path=".repro/build/repro/build-report.json"
-    if [[ -f "${report_path}" ]]; then
-      printf '\n=== Failed actions for %s (from %s) ===\n' "${collection}" "${report_path}" >&2
+    if [[ -f "${failure_report_path}" ]]; then
+      printf '\n=== Failed actions for %s (from %s) ===\n' "${collection}" "${failure_report_path}" >&2
       if command -v jq >/dev/null 2>&1; then
-        jq '.actions[] | select(.exitCode != 0 and .exitCode != null) | {id, exitCode, executable, args, stdout, stderr, evidence}' "${report_path}" >&2 || true
+        jq '{counts, failedActions, blockedActions}' "${failure_report_path}" >&2 || true
       else
-        printf '(jq not available; copying full report to test-logs/build-report.json)\n' >&2
+        cat "${failure_report_path}" >&2 || true
       fi
+      mkdir -p test-logs
+      cp "${failure_report_path}" "test-logs/build-failure-report-${collection//[^a-zA-Z0-9]/_}.json" 2>/dev/null || true
+    fi
+    if [[ -f "${report_path}" ]]; then
       mkdir -p test-logs
       cp "${report_path}" "test-logs/build-report-${collection//[^a-zA-Z0-9]/_}.json" 2>/dev/null || true
     fi

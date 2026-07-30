@@ -62,7 +62,7 @@ proc runHotCacheCheck() =
       exitCode: int] =
     var args = @[
       reproBin, "build", "test", ".",
-      "--report=full",
+      "--write-report",
       "--no-runquota",
       "--work-root=" & workRoot,
       "--progress=quiet",

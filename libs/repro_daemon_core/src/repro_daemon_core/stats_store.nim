@@ -15,9 +15,16 @@ type
     scgSessions = "sessions"
 
   StatsCaptureConfig* = object
+    ## PERSIST axis, third sink (CLI/README.md §"The accumulating stats store
+    ## is the third sink"). ``enabled`` is set by ``--write-stats`` /
+    ## ``--stats-groups``; ``groups`` selects which SECTIONS of the store get
+    ## written, which is a persist decision rather than a collection one —
+    ## most sections project data the run always has. ``storePath`` is the
+    ## ``--write-stats=PATH`` override; empty means the conventional path.
     enabled*: bool
     groups*: set[StatsCaptureGroup]
     raw*: string
+    storePath*: string
 
   StatsFlushResult* = object
     storePath*: string
@@ -55,25 +62,32 @@ proc groupName*(group: StatsCaptureGroup): string =
   of scgSessions:
     "sessions"
 
+const
+  AllStatsCaptureGroups* = {scgTiming, scgCache, scgRunQuota, scgDeps,
+    scgSessions}
+
 proc stableStatsCaptureGroups*(): seq[string] =
   @["timing", "cache", "runquota", "deps", "sessions", "all"]
 
-proc parseStatsCaptureGroups*(raw: string): StatsCaptureConfig =
+proc parseStatsCaptureGroups*(raw: string; storePath = ""): StatsCaptureConfig =
+  ## Parses a ``--stats-groups=`` section list. Naming any section enables the
+  ## sink, so ``--stats-groups=timing`` is a complete request on its own.
   let trimmed = raw.strip()
   if trimmed.len == 0:
     raise newException(ValueError,
-      "unsupported --stats-capture= (expected one or more of " &
+      "unsupported --stats-groups= (expected one or more of " &
         stableStatsCaptureGroups().join(",") & ")")
   result.enabled = true
   result.raw = trimmed
+  result.storePath = storePath
   for itemRaw in trimmed.split(','):
     let item = itemRaw.strip().toLowerAscii()
     if item.len == 0:
       raise newException(ValueError,
-        "unsupported --stats-capture entry in " & raw)
+        "unsupported --stats-groups entry in " & raw)
     case item
     of "all":
-      result.groups = {scgTiming, scgCache, scgRunQuota, scgDeps, scgSessions}
+      result.groups = AllStatsCaptureGroups
     of "timing":
       result.groups.incl(scgTiming)
     of "cache":
@@ -86,7 +100,7 @@ proc parseStatsCaptureGroups*(raw: string): StatsCaptureConfig =
       result.groups.incl(scgSessions)
     else:
       raise newException(ValueError,
-        "unsupported --stats-capture=" & item &
+        "unsupported --stats-groups=" & item &
           " (expected one or more of " &
           stableStatsCaptureGroups().join(",") & ")")
 
@@ -104,6 +118,19 @@ proc defaultStatsStorePath*(projectRoot: string): string =
 
 proc defaultStatsSummaryPath*(projectRoot: string): string =
   projectRoot / ".repro" / "stats" / "summary.json"
+
+proc activeStatsStorePath*(projectRoot: string): string =
+  ## ``--write-stats=PATH`` names the store exactly; bare ``--write-stats``
+  ## uses the conventional path.
+  if currentCapture.storePath.len > 0:
+    return currentCapture.storePath
+  defaultStatsStorePath(projectRoot)
+
+proc activeStatsSummaryPath*(projectRoot: string): string =
+  if currentCapture.storePath.len > 0:
+    let dir = parentDir(currentCapture.storePath)
+    return (if dir.len > 0: dir else: ".") / "summary.json"
+  defaultStatsSummaryPath(projectRoot)
 
 proc enqueueStatsObservation*(group: StatsCaptureGroup; kind: string;
                               fields: JsonNode = newJObject())
@@ -260,8 +287,8 @@ proc flushStatsObservations*(): StatsFlushResult =
   result.flushed = 0
   if not currentCapture.enabled or currentProjectRoot.len == 0:
     return
-  result.storePath = defaultStatsStorePath(currentProjectRoot)
-  result.summaryPath = defaultStatsSummaryPath(currentProjectRoot)
+  result.storePath = activeStatsStorePath(currentProjectRoot)
+  result.summaryPath = activeStatsSummaryPath(currentProjectRoot)
   if observationQueue.len == 0:
     return
   let pending = observationQueue

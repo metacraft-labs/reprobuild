@@ -157,7 +157,7 @@ suite "Bootstrap-And-Self-Build B1: repro build apps collection":
       # form forces name-resolution per Named-Targets M3 / CLI's
       # build-target selection rules.
       #
-      # ``--report=none`` suppresses build-report.json emission. The
+      # ``--measure=none`` suppresses build-report.json emission. The
       # engine's evidence-aggregation pass (``collectEvidence`` in
       # ``libs/repro_build_engine/src/repro_build_engine.nim``) has
       # an ``addUnique``/``find`` interaction that is O(n²) over the
@@ -173,7 +173,7 @@ suite "Bootstrap-And-Self-Build B1: repro build apps collection":
         "--daemon=off",
         "--log=quiet",
         "--progress=quiet",
-        "--report=none",
+        "--measure=none",
       ]
       let cmd = args.join(" ")
       checkpoint("running: " & cmd)

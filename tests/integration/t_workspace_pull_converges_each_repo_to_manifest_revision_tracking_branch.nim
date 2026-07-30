@@ -215,7 +215,7 @@ suite "RA-11 — pull converges to manifest revision on a tracking branch":
 
       # ---- pull ----
       let pull = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "pull", "--report", "myproject",
+        fx.reproBin, "workspace", "pull", "--write-report", "myproject",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       if pull.code != 0:
@@ -254,7 +254,7 @@ suite "RA-11 — pull converges to manifest revision on a tracking branch":
       cloneInto(gitBin, fx.bOrigin, fx.workspaceRoot / "lib-b")
 
       let sync = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "sync", "--report", "myproject",
+        fx.reproBin, "workspace", "sync", "--write-report", "myproject",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       check sync.code in [0, 2]

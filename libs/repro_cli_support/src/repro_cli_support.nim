@@ -201,7 +201,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--benchmark=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--publish-cache-hits] [--publish-materialized] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--publish-cache-hits] [--publish-materialized] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " graph [target[#name]] [--view=actions|neighborhood|inputs|dependents|blast-radius|critical-path|partition-candidates] [--focus=ACTION] [--path=PATH] [--run=last|ID] [--kind=dylib] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
           programName &
@@ -223,15 +223,15 @@ proc renderUsage*(programName: string): string =
           programName &
       " dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N]\n       " &
           programName &
-      " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [--json] [--report[=PATH]] [path]\n       " &
+      " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [--json] [--write-report[=PATH]] [path]\n       " &
           programName &
-      " check --mode=pre-push [--workspace-root=PATH] [--current-repo=PATH] [--pushed-refs=FILE] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--report[=PATH]]\n       " &
+      " check --mode=pre-push [--workspace-root=PATH] [--current-repo=PATH] [--pushed-refs=FILE] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
           programName &
-      " push [<project>] [--sync] [--merge|--rebase] [--certify|--no-certify] [--workspace-root=PATH] [--current-repo=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--report[=PATH]]\n       " &
+      " push [<project>] [--sync] [--merge|--rebase] [--certify|--no-certify] [--workspace-root=PATH] [--current-repo=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
           programName &
-      " branch [<name>] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--report[=PATH]]\n       " &
+      " branch [<name>] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
           programName &
-      " checkout <branch> [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--report[=PATH]]\n       " &
+      " checkout <branch> [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
           programName &
       " watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...]\n       " &
           programName &
@@ -283,9 +283,9 @@ proc renderUsage*(programName: string): string =
       "workspace reports: the workspace verbs (init, sync, pull, lock, " &
       "status, list, manifests, shared-clones, forall, develop, hooks " &
       "ensure, check, push, branch, checkout) write a JSON report file " &
-      "ONLY when --report is given: --report writes " &
+      "ONLY when --write-report is given: --write-report writes " &
       "<workspaceRoot>/.repro/build/reports/<verb>-report.json, " &
-      "--report=PATH writes exactly PATH. --json prints the same " &
+      "--write-report=PATH writes exactly PATH. --json prints the same " &
       "document to stdout and never touches disk.\n\n" &
       "build progress: default=bar-line; aliases: " &
       "quiet=silent|none|off, line=ninja|single-line, " &
@@ -4037,6 +4037,114 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path), $root)
 
+const BuildFailureReportSchemaId* = "reprobuild.build.failure-report.v1"
+
+proc writeBuildFailureReport*(path: string; buildResult: BuildRunResult;
+                              actions: openArray[BuildAction];
+                              target, projectRoot, outDir: string;
+                              exitCode: int) =
+  ## CLI/build.md §"The failure report". Shaped FOR the failure rather than
+  ## the success document with a filter applied: only the failing actions,
+  ## what they were, what they said, and the cache state that led the
+  ## scheduler to run them, plus the ids that never ran because they were
+  ## waiting behind a failure. Successful actions are deliberately NOT
+  ## enumerated — a 4000-action build with one broken compile must produce a
+  ## document a person can read top to bottom.
+  var byId = initTable[string, int]()
+  for i, action in actions:
+    byId[action.id] = i
+  var failed = newJArray()
+  var blocked = newJArray()
+  var counts = (total: 0, succeeded: 0, failed: 0, blocked: 0, cacheHit: 0)
+  for item in buildResult.results:
+    inc counts.total
+    case item.status
+    of asFailed:
+      inc counts.failed
+    of asBlocked:
+      inc counts.blocked
+    of asCacheHit, asUpToDate:
+      inc counts.cacheHit
+      inc counts.succeeded
+    of asSucceeded:
+      inc counts.succeeded
+    else:
+      discard
+  for item in buildResult.results:
+    if item.status == asBlocked:
+      blocked.add(%*{
+        "id": item.id,
+        "blockedBy": item.blockedBy,
+        "reason": item.reason
+      })
+      continue
+    if item.status != asFailed:
+      continue
+    var node = %*{
+      "id": item.id,
+      "status": $item.status,
+      "exitCode": item.exitCode,
+      "reason": item.reason,
+      "blockedBy": item.blockedBy,
+      "cacheDecision": $item.cacheDecision,
+      "dependencyPolicyKind": $item.dependencyPolicyKind,
+      "runQuotaBackend": item.runQuotaBackend,
+      "leaseId": item.leaseId,
+      "stdout": item.stdout,
+      "stderr": item.stderr
+    }
+    if byId.hasKey(item.id):
+      let action = actions[byId[item.id]]
+      node["argv"] = %action.argv
+      node["cwd"] = %action.cwd
+      node["inputs"] = %action.inputs
+      node["outputs"] = %action.outputs
+      node["cacheable"] = %action.cacheable
+      node["weakFingerprint"] = %digestHex(action.weakFingerprint)
+    failed.add(node)
+  let root = %*{
+    "schemaId": BuildFailureReportSchemaId,
+    "target": target,
+    "projectRoot": projectRoot,
+    "outDir": outDir,
+    "exitCode": exitCode,
+    "counts": {
+      "total": counts.total,
+      "succeeded": counts.succeeded,
+      "failed": counts.failed,
+      "blocked": counts.blocked,
+      "cacheHit": counts.cacheHit
+    },
+    "failedActions": failed,
+    "blockedActions": blocked,
+    "runQuota": runQuotaReportJson(buildResult.runQuotaBypassed)
+  }
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), $root)
+
+proc renderBuildTrace*(buildResult: BuildRunResult): string =
+  ## ``--show=trace`` presenter for the scheduler trace.
+  if buildResult.trace.len == 0:
+    return "scheduler trace: (empty — nothing measured or nothing happened)\n"
+  result = "scheduler trace:\n"
+  for event in buildResult.trace:
+    result.add("  " & $event.seq & " " & event.actionId & " " & event.event)
+    if event.detail.len > 0:
+      result.add(" " & event.detail)
+    result.add('\n')
+
+proc renderBuildCacheEvidence*(buildResult: BuildRunResult): string =
+  ## ``--show=cache-evidence`` presenter for the per-action evidence counts.
+  result = "cache evidence:\n"
+  for item in buildResult.results:
+    result.add("  " & item.id &
+      " declaredInputs=" & $item.evidence.declaredInputs.len &
+      " declaredOutputs=" & $item.evidence.declaredOutputs.len &
+      " depfileInputs=" & $item.evidence.depfileInputs.len &
+      " monitorReads=" & $item.evidence.monitorReads.len &
+      " monitorWrites=" & $item.evidence.monitorWrites.len &
+      " monitorProbes=" & $item.evidence.monitorProbes.len & '\n')
+
 proc hasFailedActions(buildResult: BuildRunResult): bool =
   for item in buildResult.results:
     if item.status in {asFailed, asBlocked}:
@@ -5091,13 +5199,53 @@ type
     bpbsOverlay
     bpbsSplit
 
-  BuildStatsMode = enum
-    bsmNone
-    bsmText
+  MeasureCategory* = enum
+    ## CLI/README.md §"Measurement: Collect, Present, Persist" — the
+    ## measurement categories. Each one is backed by a real on/off
+    ## collection switch in the engine, and each one's data has NO consumer
+    ## in the correctness path: it lands in a report, on the screen, or in
+    ## the analytics store, and nothing reads it back to decide anything.
+    ##
+    ## Deliberately absent, and specified as never admissible here: runtime
+    ## input/output observation for actions that EXECUTE (it decides whether
+    ## the dependency set is publishable, narrows invalidation, and is folded
+    ## into the cache record), monitor depfile parsing, dynamic-dependency
+    ## discovery, fingerprints/cache keys, and per-action status/exit codes.
+    ## Those are the build, not telemetry about the build.
+    mcTrace = "trace"
+      ## Scheduler trace events (``BuildRunResult.trace``). Sole consumers:
+      ## the report document's ``trace`` array and the ``scheduler-trace``
+      ## stats observation.
+    mcCacheEvidence = "cache-evidence"
+      ## Dependency evidence decoded back out of the cache record for
+      ## actions that were CACHE HITS. Sole consumers: the report's
+      ## ``actions[].evidence``, the per-action log line, and the
+      ## ``dependency-evidence`` stats observation. Note the asymmetry with
+      ## the evidence collected from an action that RAN, which is inherent
+      ## and never gated: this category only skips reading stored evidence
+      ## for work that did not happen.
+    mcTiming = "timing"
+      ## Phase/metric timers (``BuildStats``). Sole consumers: the on-screen
+      ## timing table, the report's ``stats`` object, the benchmark document,
+      ## and the ``metric`` stats observation.
 
-  BuildReportMode = enum
-    brmFull
-    brmNone
+  MeasureSet* = set[MeasureCategory]
+
+  BuildReportPersistence* = object
+    ## PERSIST axis for ``repro build``'s report documents. The default is
+    ## outcome-dependent: a successful build writes nothing, a FAILED build
+    ## writes the failure report unasked. On failure the report is the
+    ## diagnostic payload rather than an optional artifact, and a re-run to
+    ## obtain it may not reproduce the failure at all.
+    requested*: bool
+      ## ``--write-report[=PATH]`` — write the FULL document whatever the
+      ## outcome.
+    path*: string
+      ## Exact destination from ``--write-report=PATH``; empty means the
+      ## conventional ``<outDir>/build-report.json``.
+    suppressed*: bool
+      ## ``--no-write-report`` — write nothing on any outcome. For hermetic
+      ## and CI-controlled contexts that must leave the tree untouched.
 
   BuildLogMode = enum
     blmActions
@@ -5252,37 +5400,74 @@ proc configuredBuildProgressBarStyle(): BuildProgressBarStyle =
     return bpbsOverlay
   parseBuildProgressBarStyle(configured)
 
-proc parseBuildStatsMode(value: string): BuildStatsMode =
-  case value.toLowerAscii()
-  of "1", "true", "yes", "on", "text", "stats":
-    bsmText
-  of "0", "false", "no", "off", "none":
-    bsmNone
-  else:
+const
+  DefaultMeasureSet*: MeasureSet = {mcTrace, mcCacheEvidence}
+    ## The collection default. ``trace`` and ``cache-evidence`` are on because
+    ## measurement is what makes a failure explicable and the moment you need
+    ## it is after the failure has already happened. ``timing`` is off: it
+    ## instruments the invalidation and cache-lookup hot paths, which is
+    ## exactly where a build's own overhead lives.
+
+proc measureCategoryNames*(): seq[string] =
+  result = @[]
+  for category in MeasureCategory:
+    result.add($category)
+
+proc parseMeasureCategories*(current: MeasureSet; value, flag: string):
+    MeasureSet =
+  ## Additive category-list parse. ``all`` selects every category and
+  ## ``none`` CLEARS the set, so ``--measure=none,timing`` is the idiom for an
+  ## exact set. There is deliberately no subtractive ``-category`` syntax.
+  result = current
+  let trimmed = value.strip()
+  if trimmed.len == 0:
     raise newException(ValueError,
-      "unsupported --stats=" & value & " (expected text or none)")
+      "unsupported " & flag & "= (expected one or more of " &
+        measureCategoryNames().join(",") & ",all,none)")
+  for rawItem in trimmed.split(','):
+    let item = rawItem.strip().toLowerAscii()
+    case item
+    of "":
+      raise newException(ValueError,
+        "unsupported " & flag & " entry in " & value)
+    of "all":
+      result = {low(MeasureCategory) .. high(MeasureCategory)}
+    of "none":
+      result = {}
+    else:
+      var matched = false
+      for category in MeasureCategory:
+        if $category == item:
+          result.incl(category)
+          matched = true
+          break
+      if not matched:
+        raise newException(ValueError,
+          "unsupported " & flag & "=" & item & " (expected one or more of " &
+            measureCategoryNames().join(",") & ",all,none)")
 
-proc configuredBuildStatsMode(): BuildStatsMode =
-  let configured = getEnv("REPROBUILD_STATS", "")
+proc measureSetText*(selection: MeasureSet): string =
+  if selection.card == 0:
+    return "none"
+  var names: seq[string] = @[]
+  for category in MeasureCategory:
+    if category in selection:
+      names.add($category)
+  names.join(",")
+
+proc configuredMeasureSet(): MeasureSet =
+  let configured = getEnv("REPROBUILD_MEASURE", "")
   if configured.len == 0:
-    return bsmNone
-  parseBuildStatsMode(configured)
+    return DefaultMeasureSet
+  parseMeasureCategories(DefaultMeasureSet, configured, "REPROBUILD_MEASURE")
 
-proc parseBuildReportMode(value: string): BuildReportMode =
-  case value.toLowerAscii()
-  of "1", "true", "yes", "on", "full":
-    brmFull
-  of "0", "false", "no", "off", "none":
-    brmNone
-  else:
-    raise newException(ValueError,
-      "unsupported --report=" & value & " (expected full or none)")
-
-proc configuredBuildReportMode(): BuildReportMode =
-  let configured = getEnv("REPROBUILD_REPORT", "")
+proc configuredShowSet(): MeasureSet =
+  ## Presentation defaults to nothing: a build prints progress and
+  ## diagnostics, not measurements, unless asked.
+  let configured = getEnv("REPROBUILD_SHOW", "")
   if configured.len == 0:
-    return brmFull
-  parseBuildReportMode(configured)
+    return {}
+  parseMeasureCategories({}, configured, "REPROBUILD_SHOW")
 
 proc parseBuildLogMode(value: string): BuildLogMode =
   case value.toLowerAscii()
@@ -6153,8 +6338,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         workRoot = "";
                         progressMode = bpmBarLine;
                         progressBarStyle = bpbsOverlay;
-                        statsMode = bsmNone;
-                        reportMode = brmFull;
+                        showSet: MeasureSet = {};
+                        measureSet: MeasureSet = DefaultMeasureSet;
+                        reportPersistence = BuildReportPersistence();
                         logMode = blmActions;
                         diagnosticsPath = "";
                         prepareOnly = false;
@@ -6186,14 +6372,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # per-CMake-configure breakdown. The dir is created lazily on first use.
   # Setting the dir also implicitly opts every spawned repro build into
   # text-mode stat collection so the per-metric breakdown survives — CMake
-  # never passes --stats= to its child repro build invocations, so the dir
+  # never passes --show= to its child repro build invocations, so the dir
   # is the only handle we have on enabling them.
   let configureStatsDir = getEnv("REPRO_STATS_DIR")
-  let effectiveStatsMode =
-    if configureStatsDir.len > 0 and statsMode == bsmNone: bsmText
-    else: statsMode
-  let statsEnabled = effectiveStatsMode == bsmText or benchmarkPath.len > 0 or
-    statsGroupEnabled(scgTiming)
+  let statsEnabled = mcTiming in measureSet or configureStatsDir.len > 0 or
+    benchmarkPath.len > 0 or statsGroupEnabled(scgTiming)
   var buildStats: BuildStats
   discard consumeInterfaceArtifactWarmStats()
   let buildTotalStart = statStart(statsEnabled)
@@ -6217,6 +6400,27 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   proc appendDiagnostic(line: string) =
     if diagnosticsPath.len > 0:
       diagnosticLines.add(line)
+  proc emitMeasurements(buildResult: BuildRunResult) =
+    ## PRESENT axis (CLI/build.md §"Present"). Renders exactly the categories
+    ## ``--show`` asked for and nothing else. Independent of what was
+    ## collected beyond that (``--show=X`` implies ``--measure=X``, resolved
+    ## at parse time) and independent of what was persisted.
+    if showSet.card == 0:
+      return
+    var body = ""
+    if mcTiming in showSet:
+      body.add(renderBuildStats(buildResult.stats))
+    if mcTrace in showSet:
+      body.add(renderBuildTrace(buildResult))
+    if mcCacheEvidence in showSet:
+      body.add(renderBuildCacheEvidence(buildResult))
+    if body.len == 0:
+      return
+    if eventSink != nil:
+      eventSink("diagnostic", body, "{}")
+    else:
+      stderr.write(body)
+      stderr.flushFile()
   defer:
     if diagnosticsPath.len > 0:
       try:
@@ -6278,6 +6482,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   result.modulePath = modulePath
   result.projectRoot = projectRootForModule(modulePath)
   result.outDir = outDir
+  # Local copy: the failure-report closure below must not capture ``result``.
+  let reportProjectRoot = result.projectRoot
   # When --no-runquota was passed (or the env knob is set), skip the daemon
   # entirely: every action goes through the bypass-spawn path with no lease
   # round-trip. Default is "use runquota when reachable, fall back if not".
@@ -6307,6 +6513,22 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     elif logMode == blmActions:
       progressRenderer.finishProgress()
       echo line
+
+  proc persistFailureReport(buildResult: BuildRunResult;
+                            actions: openArray[BuildAction]) =
+    ## PERSIST axis, outcome-dependent default (CLI/README.md §"Reports on
+    ## failure are written by default"). A failed build leaves its post-mortem
+    ## behind without being asked; ``--no-write-report`` is the only way to
+    ## suppress it.
+    if reportPersistence.suppressed:
+      return
+    let path = outDir / "build-failure-report.json"
+    try:
+      writeBuildFailureReport(path, buildResult, actions,
+        target, reportProjectRoot, outDir, 1)
+      logSummary("buildFailureReport: " & path)
+    except CatchableError:
+      discard
 
   proc usesRunQuotaBypass(runResult: BuildRunResult): bool =
     for item in runResult.results:
@@ -6384,8 +6606,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       dryRun: dryRun,
       forceRebuild: forceRebuild,
       publishCachedResults: publishCacheHits,
-      suppressTrace: reportMode == brmNone,
-      skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet,
+      suppressTrace: mcTrace notin measureSet,
+      skipCacheHitEvidence: mcCacheEvidence notin measureSet,
       cancelCallback: cancelCheck,
       peerCacheActionFetcher: peerCacheFetcher,
       peerCacheActionPublisher: peerCachePublisher,
@@ -6508,19 +6730,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     recordStatsForBuildRun(buildResult)
     if buildResult.hasFailedActions():
       emitFailedActionSummaries(buildResult, eventSink, progressRenderer)
-    # Only dump the text-mode table to stderr when --stats=text was
-    # requested explicitly. The implicit enable-via-REPRO_STATS_DIR path
-    # uses the JSON dropfile and does not want to spam CMake's child
-    # stderr with per-invocation tables.
-    if statsMode == bsmText:
-      let statsRenderStart = statStart(statsEnabled)
-      if eventSink != nil:
-        eventSink("diagnostic", renderBuildStats(buildResult.stats), "{}")
-      else:
-        stderr.write(renderBuildStats(buildResult.stats))
-        stderr.flushFile()
-      finishStat(buildStats, statsEnabled, "repro stats render",
-        statsRenderStart)
+      persistFailureReport(buildResult, lowered.actions)
+    let statsRenderStart = statStart(statsEnabled)
+    emitMeasurements(buildResult)
+    finishStat(buildStats, statsEnabled, "repro stats render", statsRenderStart)
     if buildResult.hasFailedActions():
       1
     else:
@@ -6541,7 +6754,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       cmakeRegenerationBuildAction(cmakeMeta, publicCliPath)
     let cmakeCacheRoot = outDir / "cmake-regeneration-cache"
     var cmakeFastHit = false
-    if reportMode == brmNone and logMode == blmQuiet and not forceRebuild:
+    if mcCacheEvidence notin measureSet and not forceRebuild:
       # The CMake regeneration action's cache lives under the shared
       # user-level action cache root, matching the runBuild() path below
       # (Provider-Compile-Tiering.md §"Cache Scope" Phase 1).
@@ -6600,8 +6813,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         inlineRunQuota: true,
         dryRun: false,
         forceRebuild: forceRebuild,
-        suppressTrace: reportMode == brmNone,
-        skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet,
+        suppressTrace: mcTrace notin measureSet,
+        skipCacheHitEvidence: mcCacheEvidence notin measureSet,
         cancelCallback: cancelCheck)
       cmakeRegenerationConfig.statsEnabled = statsEnabled
       cmakeRegenerationResult = runBuild(graph([cmakeRegenerationAction]),
@@ -6642,7 +6855,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     else:
       "\0"
   if cmakeMeta.enabled and not cmakeRegenerated and not prepareOnly and
-      mode == tpmPathOnly and reportMode == brmNone and
+      mode == tpmPathOnly and not reportPersistence.requested and
       cacheSelectedActionId != "\0":
     let loweredCacheStart = statStart(statsEnabled)
     progressRenderer.renderPhase("reading lowered graph cache")
@@ -6872,8 +7085,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           workRoot = workRoot,
           progressMode = progressMode,
           progressBarStyle = progressBarStyle,
-          statsMode = statsMode,
-          reportMode = reportMode,
+          showSet = showSet,
+          measureSet = measureSet,
+          reportPersistence = reportPersistence,
           logMode = logMode,
           diagnosticsPath = "",
           prepareOnly = prepareOnly,
@@ -7090,8 +7304,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             workRoot = workRoot,
             progressMode = progressMode,
             progressBarStyle = progressBarStyle,
-            statsMode = statsMode,
-            reportMode = reportMode,
+            showSet = showSet,
+            measureSet = measureSet,
+            reportPersistence = reportPersistence,
             logMode = logMode,
             diagnosticsPath = "",
             prepareOnly = false,
@@ -7518,8 +7733,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         inlineRunQuota: true,
         dryRun: false,
         forceRebuild: forceRebuild,
-        suppressTrace: reportMode == brmNone,
-        skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet,
+        suppressTrace: mcTrace notin measureSet,
+        skipCacheHitEvidence: mcCacheEvidence notin measureSet,
         cancelCallback: cancelCheck)
       providerCompileConfig.statsEnabled = statsEnabled
       # Distinguish "running" from "checking" so a silent hang inside
@@ -7742,15 +7957,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "repro cmake regeneration cache seed", seedStart)
       finishStat(buildStats, statsEnabled, "repro build total",
         buildTotalStart)
-      if statsMode == bsmText:
-        let statsRenderStart = statStart(statsEnabled)
-        if eventSink != nil:
-          eventSink("diagnostic", renderBuildStats(buildStats), "{}")
-        else:
-          stderr.write(renderBuildStats(buildStats))
-          stderr.flushFile()
-          finishStat(buildStats, statsEnabled, "repro stats render",
-            statsRenderStart)
+      emitMeasurements(BuildRunResult(stats: buildStats))
       result.exitCode = 0
       return
     if parsedTarget.fragmentKind == tfkActionSelection:
@@ -7778,8 +7985,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       dryRun: dryRun,
       forceRebuild: forceRebuild,
       publishCachedResults: publishCacheHits,
-      suppressTrace: reportMode == brmNone,
-      skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet,
+      suppressTrace: mcTrace notin measureSet,
+      skipCacheHitEvidence: mcCacheEvidence notin measureSet,
       cancelCallback: cancelCheck)
     # M9.L.4-refactor Step C: wire the binary-cache publisher closure
     # into the production engine config for the main inline build
@@ -7884,8 +8091,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     logRunQuotaAuthority(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
-    let reportPath = outDir / "build-report.json"
-    if reportMode == brmFull:
+    let reportPath =
+      if reportPersistence.path.len > 0: absolutePath(reportPersistence.path)
+      else: outDir / "build-report.json"
+    if reportPersistence.requested and not reportPersistence.suppressed:
       let reportStart = statStart(statsEnabled)
       writeBuildReport(reportPath, provider, refresh, cmakeRegenerationResult,
         providerCompileResult, buildResult,
@@ -7904,7 +8113,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             0: item.runQuotaSocket else: "default") &
         " lease=" & $item.leaseId &
         " evidence=depfile:" & $item.evidence.depfileInputs.len)
-    if reportMode == brmFull:
+    if reportPersistence.requested and not reportPersistence.suppressed:
       logSummary("buildReport: " & reportPath)
     finishStat(buildStats, statsEnabled, "repro action log render",
       actionLogStart)
@@ -7912,15 +8121,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     recordStatsForBuildRun(buildResult)
     if buildResult.hasFailedActions():
       emitFailedActionSummaries(buildResult, eventSink, progressRenderer)
-    if statsMode == bsmText:
-      let statsRenderStart = statStart(statsEnabled)
-      if eventSink != nil:
-        eventSink("diagnostic", renderBuildStats(buildResult.stats), "{}")
-      else:
-        stderr.write(renderBuildStats(buildResult.stats))
-        stderr.flushFile()
-      finishStat(buildStats, statsEnabled, "repro stats render",
-        statsRenderStart)
+      persistFailureReport(buildResult, scheduledActions)
+    let statsRenderStart = statStart(statsEnabled)
+    emitMeasurements(buildResult)
+    finishStat(buildStats, statsEnabled, "repro stats render", statsRenderStart)
     result.exitCode =
       if buildResult.hasFailedActions():
         1
@@ -8325,24 +8529,30 @@ proc valueFromFlag(args: openArray[string]; i: var int; flag: string): string =
 
 type
   ReportSpec* = object
-    ## Opt-in ``--report[=PATH]`` surface shared by every workspace verb
-    ## that can persist a JSON report artifact. ``requested`` is false
-    ## unless the operator asked for one — the default is to write
+    ## ``--write-report[=PATH]`` surface shared by every workspace verb that
+    ## can persist a JSON report artifact. ``requested`` is false unless the
+    ## operator asked for one — on a SUCCESSFUL run the default is to write
     ## NOTHING to disk (the ``--json`` stdout surface is independent and
-    ## unaffected).
+    ## unaffected). A FAILED run writes its failure report unasked; see
+    ## ``failureReportDestination``. ``--no-write-report`` sets
+    ## ``suppressed`` and defeats both.
     requested*: bool
     path*: string
+    suppressed*: bool
 
 proc consumeReportFlag*(arg: string; spec: var ReportSpec): bool =
-  ## True when ``arg`` was a ``--report`` / ``--report=PATH`` flag and has
-  ## been consumed into ``spec``. Callers place this branch BEFORE their
-  ## generic "unsupported flag" catch-all.
-  if arg == "--report":
+  ## True when ``arg`` was a ``--write-report`` / ``--write-report=PATH`` /
+  ## ``--no-write-report`` flag and has been consumed into ``spec``. Callers
+  ## place this branch BEFORE their generic "unsupported flag" catch-all.
+  if arg == "--write-report":
     spec.requested = true
     return true
-  if arg.startsWith("--report="):
+  if arg.startsWith("--write-report="):
     spec.requested = true
-    spec.path = arg["--report=".len .. ^1]
+    spec.path = arg["--write-report=".len .. ^1]
+    return true
+  if arg == "--no-write-report":
+    spec.suppressed = true
     return true
   false
 
@@ -8357,15 +8567,67 @@ proc workspaceReportDir*(workspaceRoot: string): string =
   workspaceRoot / ".repro" / "build" / "reports"
 
 proc reportDestination*(spec: ReportSpec; workspaceRoot, verb: string): string =
-  ## Absolute path the report must be written to, or ``""`` when no
+  ## Absolute path the FULL report must be written to, or ``""`` when no
   ## report was requested (in which case the writer is a no-op).
-  if not spec.requested:
+  if spec.suppressed or not spec.requested:
     return ""
   if spec.path.len > 0:
     return absolutePath(spec.path)
   if workspaceRoot.len == 0:
     return ""
   workspaceReportDir(workspaceRoot) / (verb & "-report.json")
+
+proc failureReportDestination*(spec: ReportSpec; workspaceRoot, verb: string;
+                               exitCode: int): string =
+  ## Absolute path the FAILURE report must be written to, or ``""`` when the
+  ## run succeeded or ``--no-write-report`` suppressed it. On failure the
+  ## report IS the diagnostic payload, so it is written without being asked:
+  ## requiring a re-run with a flag to learn why something broke asks for the
+  ## flag at the worst possible moment, and a re-run may not reproduce.
+  if spec.suppressed or exitCode == 0 or workspaceRoot.len == 0:
+    return ""
+  workspaceReportDir(workspaceRoot) / (verb & "-failure-report.json")
+
+const WorkspaceFailureReportSchemaId* = "reprobuild.workspace.failure-report.v1"
+
+var stagedFailureReport: tuple[spec: ReportSpec, root, verb: string,
+                               document: JsonNode]
+
+proc stageFailureReport*(spec: ReportSpec; workspaceRoot, verb: string;
+                         document: JsonNode) =
+  ## Records what a verb WOULD leave behind if the command turns out to have
+  ## failed. The exit code is not known at the point a verb writes its
+  ## report, so the decision is deferred to ``flushStagedFailureReport``,
+  ## called once with the real exit code.
+  stagedFailureReport = (spec, workspaceRoot, verb, document)
+
+proc flushStagedFailureReport*(exitCode: int) =
+  ## PERSIST axis, outcome-dependent default. A workspace verb that FAILED
+  ## leaves its post-mortem behind without being asked; on success nothing is
+  ## written unless ``--write-report`` asked for it.
+  ##
+  ## Unlike ``repro build``, whose failure document is independently shaped
+  ## because a build can carry thousands of successful actions, a workspace
+  ## report is bounded by the repo count and is already outcome-oriented, so
+  ## the failure document is that report inside a failure envelope.
+  if stagedFailureReport.document == nil:
+    return
+  let staged = stagedFailureReport
+  stagedFailureReport.document = nil
+  let dest = failureReportDestination(staged.spec, staged.root, staged.verb,
+    exitCode)
+  if dest.len == 0:
+    return
+  try:
+    createDir(extendedPath(parentDir(dest)))
+    writeFile(extendedPath(dest), $(%*{
+      "schemaId": WorkspaceFailureReportSchemaId,
+      "verb": staged.verb,
+      "exitCode": exitCode,
+      "report": staged.document
+    }))
+  except CatchableError:
+    discard
 
 # ---------------------------------------------------------------------------
 # `repro prompt` state cache.
@@ -8398,7 +8660,7 @@ proc promptCachePath*(workspaceRoot: string): string =
   ## The prompt cache is NOT a report and deliberately does not live in
   ## ``reports/``: a report records one invocation and is never read back,
   ## whereas this file exists precisely to be read back. Keeping them separate
-  ## is what stops ``--report`` from becoming load-bearing for the prompt.
+  ## is what stops ``--write-report`` from becoming load-bearing for the prompt.
   workspaceRoot / ".repro" / "build" / "prompt-cache.json"
 
 proc writePromptCache*(workspaceRoot, verb: string;
@@ -10232,7 +10494,7 @@ type
     nativeShells: seq[NativeShellKind]
     workspaceRoot: string  ## M17: explicit --workspace-root override.
     json: bool             ## M17: emit JSON to stdout in addition to the report file.
-    report: ReportSpec     ## Opt-in ``--report[=PATH]`` artifact.
+    report: ReportSpec     ## Opt-in ``--write-report[=PATH]`` artifact.
 
   NativeShellActivationRequest = object
     cwd: string
@@ -11289,7 +11551,7 @@ proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
   result.exitCode = 0
 
 proc writeHooksEnsureReport(report: HooksEnsureReport; destination: string) =
-  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   createDir(parentDir(destination))
@@ -11378,6 +11640,8 @@ proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
   var report = ensureWorkspaceHooks(workspaceRoot)
   writeHooksEnsureReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "hooks"))
+  stageFailureReport(parsed.report, report.workspaceRoot, "hooks",
+    report.toJsonNode())
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -11578,11 +11842,11 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
       checkArgs.add("--current-repo=" & repoRoot)
     checkArgs.add("--pushed-refs=" & refsFile)
     # The gate can REFUSE a push, and git gives the operator no argv to
-    # thread a ``--report`` through. Same reasoning as post-commit: a
+    # thread a ``--write-report`` through. Same reasoning as post-commit: a
     # hook-driven invocation opts in on the operator's behalf so the
     # refusal always leaves machine-readable evidence behind. Operator
     # invocations of `repro check` stay opt-in.
-    checkArgs.add("--report")
+    checkArgs.add("--write-report")
     return runCheckCommand(checkArgs, remoteName, remoteLocation)
   of "post-commit":
     # M19 best-effort lock refresh. Always exits 0 even when the lock
@@ -14825,8 +15089,11 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var daemonModeExplicit = false
   var progressMode = configuredBuildProgressMode()
   var progressBarStyle = configuredBuildProgressBarStyle()
-  var statsMode = configuredBuildStatsMode()
-  var reportMode = configuredBuildReportMode()
+  var showSet = configuredShowSet()
+  var measureSet = configuredMeasureSet()
+  var measureExplicit = false
+  var showExplicit = false
+  var reportPersistence = BuildReportPersistence()
   var logMode = configuredBuildLogMode()
   var diagnosticsPath = ""
   var benchmarkPath = ""
@@ -14847,7 +15114,6 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var lockOverride = ""
   var printSolvedGraph = false
   var logModeExplicit = false
-  var statsModeExplicit = false
   # Default: use runquota when reachable; --no-runquota forces full bypass.
   var bypassRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA").normalize in
     ["1", "true", "yes", "on"]
@@ -14911,25 +15177,49 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     elif arg == "--progress-bars" or arg.startsWith("--progress-bars="):
       progressBarStyle = parseBuildProgressBarStyle(valueFromFlag(args, i,
         "--progress-bars"))
-    elif arg == "--diagnostics" or arg.startsWith("--diagnostics="):
-      diagnosticsPath = valueFromFlag(args, i, "--diagnostics")
-    elif arg == "--benchmark" or arg.startsWith("--benchmark="):
-      benchmarkPath = valueFromFlag(args, i, "--benchmark")
-    elif arg == "--stats-capture" or arg.startsWith("--stats-capture="):
-      statsCapture = parseStatsCaptureGroups(valueFromFlag(args, i,
-        "--stats-capture"))
-    elif arg.startsWith("--stats="):
-      statsMode = parseBuildStatsMode(arg.split("=", maxsplit = 1)[1])
-      statsModeExplicit = true
-    elif arg == "--stats":
-      if i + 1 < args.len and args[i + 1] in ["text", "none"]:
-        inc i
-        statsMode = parseBuildStatsMode(args[i])
-      else:
-        statsMode = bsmText
-      statsModeExplicit = true
-    elif arg == "--report" or arg.startsWith("--report="):
-      reportMode = parseBuildReportMode(valueFromFlag(args, i, "--report"))
+    elif arg == "--write-diagnostics" or
+        arg.startsWith("--write-diagnostics="):
+      diagnosticsPath = valueFromFlag(args, i, "--write-diagnostics")
+    elif arg == "--write-benchmark" or arg.startsWith("--write-benchmark="):
+      benchmarkPath = valueFromFlag(args, i, "--write-benchmark")
+    elif arg == "--write-stats" or arg.startsWith("--write-stats="):
+      # PERSIST axis, third sink: the accumulating analytics store. Bare
+      # enables it at the conventional store path; ``=PATH`` names the store.
+      statsCapture.enabled = true
+      if statsCapture.groups.card == 0:
+        statsCapture.groups = AllStatsCaptureGroups
+        statsCapture.raw = "all"
+      if arg.startsWith("--write-stats="):
+        statsCapture.storePath = arg.split("=", maxsplit = 1)[1]
+    elif arg.startsWith("--stats-groups="):
+      # Section filter over the store. Naming any group enables the sink.
+      statsCapture = parseStatsCaptureGroups(arg.split("=", maxsplit = 1)[1],
+        statsCapture.storePath)
+    elif arg == "--stats-groups":
+      raise newException(ValueError,
+        "--stats-groups requires an inline value, for example " &
+          "--stats-groups=timing,cache")
+    elif arg == "--measure" or arg.startsWith("--measure="):
+      # COLLECT axis. Additive across occurrences; an explicit flag replaces
+      # the environment default rather than adding to it.
+      if not measureExplicit:
+        measureSet = {}
+        measureExplicit = true
+      measureSet = parseMeasureCategories(measureSet,
+        valueFromFlag(args, i, "--measure"), "--measure")
+    elif arg == "--show" or arg.startsWith("--show="):
+      # PRESENT axis. Same vocabulary; showing implies measuring.
+      if not showExplicit:
+        showSet = {}
+        showExplicit = true
+      showSet = parseMeasureCategories(showSet,
+        valueFromFlag(args, i, "--show"), "--show")
+    elif arg == "--write-report" or arg.startsWith("--write-report="):
+      reportPersistence.requested = true
+      if arg.startsWith("--write-report="):
+        reportPersistence.path = arg["--write-report=".len .. ^1]
+    elif arg == "--no-write-report":
+      reportPersistence.suppressed = true
     elif arg == "--log" or arg.startsWith("--log="):
       logMode = parseBuildLogMode(valueFromFlag(args, i, "--log"))
       logModeExplicit = true
@@ -15102,10 +15392,26 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     daemonMode = configuredBuildDaemonMode()
 
   if progressMode == bpmQuiet:
+    # Both are terminal output, so a quiet terminal clears the presentation
+    # axis. It does NOT touch ``--measure``: no UI setting may gate a
+    # collection decision (CLI/README.md §"UI flags are not part of this
+    # system").
     if not logModeExplicit:
       logMode = blmQuiet
-    if not statsModeExplicit:
-      statsMode = bsmNone
+    if not showExplicit:
+      showSet = {}
+
+  # PRESENT and PERSIST are consumers of COLLECT, so asking for either
+  # implies gathering what it needs. The implication is one-directional:
+  # measuring never implies showing or writing.
+  measureSet = measureSet + showSet
+  if benchmarkPath.len > 0:
+    measureSet.incl(mcTiming)
+  if statsCapture.enabled:
+    if scgTiming in statsCapture.groups:
+      measureSet.incl(mcTiming)
+    if scgDeps in statsCapture.groups:
+      measureSet.incl(mcCacheEvidence)
 
   # ----------------------------------------------------------------
   # M48 — Mode 1 (layout-as-manifest) fallback.
@@ -15146,7 +15452,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   if statsCapture.enabled and (forceDirect or daemonMode == bdmOff) and
       not daemonHosted:
     raise newException(ValueError,
-      "--stats-capture requires daemon-hosted build; direct-mode persistent " &
+      "--write-stats requires daemon-hosted build; direct-mode persistent " &
         "capture is not implemented")
 
   proc runDirectBuild(): int =
@@ -15192,8 +15498,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         workRoot = workRoot,
         progressMode = progressMode,
         progressBarStyle = progressBarStyle,
-        statsMode = statsMode,
-        reportMode = reportMode,
+        showSet = showSet,
+        measureSet = measureSet,
+        reportPersistence = reportPersistence,
         logMode = logMode,
         diagnosticsPath = diagnosticsPath,
         prepareOnly = prepareOnly,
@@ -18732,6 +19039,14 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   var maxCycles = 0
   var debounceMs = 250
   var workRoot = ""
+  # Measurement axes (CLI/README.md §"Measurement: Collect, Present, Persist").
+  # ``repro watch`` drives the same engine as ``repro build``, so it carries
+  # the same three axes rather than a private subset.
+  var showSet = configuredShowSet()
+  var measureSet = configuredMeasureSet()
+  var measureExplicit = false
+  var showExplicit = false
+  var reportPersistence = BuildReportPersistence()
   var hcrConfig: HcrWatchConfig
   # Named-Targets M4: per-target HCR config seq, populated by the
   # repeatable ``--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA]`` flag.
@@ -18781,12 +19096,44 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         "--daemon requires an inline value, for example --daemon=require")
     elif arg == "--detach":
       detach = true
-    elif arg.startsWith("--stats-capture="):
-      statsCapture = parseStatsCaptureGroups(arg.split("=", maxsplit = 1)[1])
-    elif arg == "--stats-capture":
+    elif arg == "--write-stats" or arg.startsWith("--write-stats="):
+      statsCapture.enabled = true
+      if statsCapture.groups.card == 0:
+        statsCapture.groups = AllStatsCaptureGroups
+        statsCapture.raw = "all"
+      if arg.startsWith("--write-stats="):
+        statsCapture.storePath = arg.split("=", maxsplit = 1)[1]
+    elif arg.startsWith("--stats-groups="):
+      statsCapture = parseStatsCaptureGroups(arg.split("=", maxsplit = 1)[1],
+        statsCapture.storePath)
+    elif arg == "--stats-groups":
       raise newException(ValueError,
-        "--stats-capture requires an inline value, for example " &
-          "--stats-capture=timing,cache")
+        "--stats-groups requires an inline value, for example " &
+          "--stats-groups=timing,cache")
+    elif arg.startsWith("--measure="):
+      if not measureExplicit:
+        measureSet = {}
+        measureExplicit = true
+      measureSet = parseMeasureCategories(measureSet,
+        arg.split("=", maxsplit = 1)[1], "--measure")
+    elif arg == "--measure":
+      raise newException(ValueError,
+        "--measure requires an inline value, for example --measure=timing")
+    elif arg.startsWith("--show="):
+      if not showExplicit:
+        showSet = {}
+        showExplicit = true
+      showSet = parseMeasureCategories(showSet,
+        arg.split("=", maxsplit = 1)[1], "--show")
+    elif arg == "--show":
+      raise newException(ValueError,
+        "--show requires an inline value, for example --show=timing")
+    elif arg == "--write-report" or arg.startsWith("--write-report="):
+      reportPersistence.requested = true
+      if arg.startsWith("--write-report="):
+        reportPersistence.path = arg["--write-report=".len .. ^1]
+    elif arg == "--no-write-report":
+      reportPersistence.suppressed = true
     elif arg.startsWith("--attach="):
       attachSessionId = arg.split("=", maxsplit = 1)[1]
     elif arg == "--attach":
@@ -18901,10 +19248,16 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   if not daemonModeExplicit:
     daemonMode = configuredBuildDaemonMode()
 
+  measureSet = measureSet + showSet
+  if statsCapture.enabled:
+    if scgTiming in statsCapture.groups:
+      measureSet.incl(mcTiming)
+    if scgDeps in statsCapture.groups:
+      measureSet.incl(mcCacheEvidence)
   if statsCapture.enabled and (forceDirect or daemonMode == bdmOff) and
       not daemonHosted:
     raise newException(ValueError,
-      "--stats-capture requires daemon-hosted watch; direct-mode persistent " &
+      "--write-stats requires daemon-hosted watch; direct-mode persistent " &
         "capture is not implemented")
 
   proc renderDaemonWatchEvent(event: UserDaemonBuildEvent) =
@@ -19181,6 +19534,9 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       let outcome = executeBuildTarget(target, mode, publicCliPath,
         selectDefaultAction = targetWasOmitted,
         workRoot = workRoot,
+        showSet = showSet,
+        measureSet = measureSet,
+        reportPersistence = reportPersistence,
         eventSink = buildEventSink,
         cancelCheck = cancelCheck,
         extraNameSelectors = extraNameSelectors)
@@ -19435,7 +19791,7 @@ type
     json: bool
     explicitWorkspaceRoot: bool
     explicitSource: bool
-    report: ReportSpec    ## Opt-in ``--report[=PATH]`` artifact.
+    report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
   ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH]
@@ -19743,7 +20099,7 @@ proc writeWorkspaceDevelopReport(report: WorkspaceDevelopReport;
   ## Persist the JSON view alongside the other workspace dispatcher
   ## reports (``init-report.json``, ``sync-report.json`` etc.) so
   ## downstream tooling can read one well-known location. Opt-in: only
-  ## written when ``--report[=PATH]`` supplied a destination.
+  ## written when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   try:
@@ -19767,6 +20123,8 @@ proc runWorkspaceDevelopCommand*(args: openArray[string]): int =
   let report = executeWorkspaceDevelop(parsed)
   writeWorkspaceDevelopReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "develop"))
+  stageFailureReport(parsed.report, report.workspaceRoot, "develop",
+    report.toJsonNode())
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -20297,7 +20655,7 @@ proc looksLikeWorkspaceDevelopArgs(args: openArray[string]): bool =
   ## marker is present AND none of the pre-M22 markers are present.
   ##
   ## The M22-distinctive markers are: ``--source[=...]``, ``--json``,
-  ## ``--report[=...]``, ``--workspace-root[=...]``. The pre-M22 markers
+  ## ``--write-report[=...]``, ``--workspace-root[=...]``. The pre-M22 markers
   ## are: ``--list``,
   ## ``--into[=...]``, ``--cmake``, ``--cmake-binary[=...]``,
   ## ``--work-root[=...]``, ``--tool-provisioning[=...]``, ``--``
@@ -20306,7 +20664,7 @@ proc looksLikeWorkspaceDevelopArgs(args: openArray[string]): bool =
   for arg in args:
     if arg == "--source" or arg.startsWith("--source=") or
         arg == "--json" or
-        arg == "--report" or arg.startsWith("--report=") or
+        arg == "--write-report" or arg.startsWith("--write-report=") or
         arg == "--workspace-root" or arg.startsWith("--workspace-root="):
       hasM22Marker = true
     if arg == "--list" or
@@ -21246,14 +21604,20 @@ proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
         "--action-cache-root"))
     elif arg == "--force-rebuild" or arg == "--rebuild" or arg == "--dry-run":
       forceRefresh = true
-    elif arg in ["--daemon", "--progress", "--progress-bars", "--diagnostics",
-        "--stats", "--report", "--log", "--benchmark", "--stats-capture"]:
+    elif arg in ["--daemon", "--progress", "--progress-bars",
+        "--write-diagnostics", "--show", "--measure", "--write-report",
+        "--log", "--write-benchmark", "--write-stats"]:
       discard valueFromFlag(args, i, arg)
+    elif arg == "--no-write-report":
+      discard
     elif arg.startsWith("--daemon=") or arg.startsWith("--progress=") or
-        arg.startsWith("--progress-bars=") or arg.startsWith("--diagnostics=") or
-        arg.startsWith("--stats=") or arg.startsWith("--report=") or
-        arg.startsWith("--log=") or arg.startsWith("--benchmark=") or
-        arg.startsWith("--stats-capture="):
+        arg.startsWith("--progress-bars=") or
+        arg.startsWith("--write-diagnostics=") or
+        arg.startsWith("--show=") or arg.startsWith("--measure=") or
+        arg.startsWith("--write-report=") or
+        arg.startsWith("--log=") or arg.startsWith("--write-benchmark=") or
+        arg.startsWith("--write-stats=") or
+        arg.startsWith("--stats-groups="):
       discard
     elif arg == "--prepare-only":
       prepareOnly = true
@@ -21735,9 +22099,9 @@ type
       ## source's signature/pin and FAILS CLOSED on any mismatch.
     json: bool
       ## ``--json`` — echo the structured init report to stdout (same
-      ## document that ``--report`` persists).
+      ## document that ``--write-report`` persists).
     report: ReportSpec
-      ## Opt-in ``--report[=PATH]`` artifact.
+      ## Opt-in ``--write-report[=PATH]`` artifact.
 
   WorkspaceInitResolution = object
     project: ResolvedProject
@@ -22864,7 +23228,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
     alignWorkspaceRemotes(args.workspaceRoot, resolved.repos, identity)
 proc writeWorkspaceInitReport(report: WorkspaceInitReport;
                               destination: string) =
-  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   createDir(parentDir(destination))
@@ -22873,7 +23237,7 @@ proc writeWorkspaceInitReport(report: WorkspaceInitReport;
 proc runWorkspaceInitCommand*(args: openArray[string]): int =
   ## ``repro workspace init <project-or-variant> [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]
-  ## [--report[=PATH]]``.
+  ## [--write-report[=PATH]]``.
   ##
   ## Exit codes (per M9 design):
   ##   - 0 — every missing repo cloned successfully AND no divergences.
@@ -22887,6 +23251,8 @@ proc runWorkspaceInitCommand*(args: openArray[string]): int =
   let outcome = executeWorkspaceInit(parsed)
   writeWorkspaceInitReport(outcome.report,
     reportDestination(parsed.report, outcome.report.workspaceRoot, "init"))
+  stageFailureReport(parsed.report, outcome.report.workspaceRoot, "init",
+    outcome.report.toJsonNode())
   # ``init`` leaves every materialized repo on the manifest's revision, i.e. on
   # the workspace branch, so the cache records the count with no drift. The
   # init report carries no per-repo branch field to be more precise than that.
@@ -23398,7 +23764,7 @@ type
     excludeGroups: seq[string]
       ## RA-18 ``--groups=-a`` / ``-a`` entries: repos in any of these groups
       ## are excluded (exclusion wins over inclusion).
-    report: ReportSpec   ## Opt-in ``--report[=PATH]`` artifact.
+    report: ReportSpec   ## Opt-in ``--write-report[=PATH]`` artifact.
 
 const
   SyncDefaultJobsNetwork = 8
@@ -26749,7 +27115,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
 
 proc writeWorkspaceSyncReport(report: WorkspaceSyncReport;
                               destination: string) =
-  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   createDir(parentDir(destination))
@@ -26839,7 +27205,9 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   if not parsed.dryRun:
     writeWorkspaceSyncReport(outcome.report,
       reportDestination(parsed.report, outcome.report.workspaceRoot, "sync"))
-    # Refresh the prompt cache. Unconditional and independent of ``--report``:
+    stageFailureReport(parsed.report, outcome.report.workspaceRoot, "sync",
+      outcome.report.toJsonNode())
+    # Refresh the prompt cache. Unconditional and independent of ``--write-report``:
     # the prompt is not allowed to depend on an operator flag, and this is
     # workspace state we just observed rather than a record of the invocation.
     block:
@@ -27001,7 +27369,7 @@ type
     workspaceRoot: string
     projectName: string
     toolProvisioning: ToolProvisioningMode
-    report: ReportSpec   ## Opt-in ``--report[=PATH]`` artifact.
+    report: ReportSpec   ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc parseWorkspacePullArgs(args: openArray[string]): WorkspacePullArgs =
   ## ``repro workspace pull`` argv parser. Mirrors ``sync``'s shape: an
@@ -27252,7 +27620,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
 
 proc writeWorkspacePullReport(report: WorkspacePullReport;
                               destination: string) =
-  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   createDir(parentDir(destination))
@@ -27275,6 +27643,8 @@ proc runWorkspacePullCommand*(args: openArray[string]): int =
   let outcome = executeWorkspacePull(parsed)
   writeWorkspacePullReport(outcome.report,
     reportDestination(parsed.report, outcome.report.workspaceRoot, "pull"))
+  stageFailureReport(parsed.report, outcome.report.workspaceRoot, "pull",
+    outcome.report.toJsonNode())
   block:
     var branches: seq[string]
     for entry in outcome.report.repos:
@@ -27457,7 +27827,7 @@ type
     # and post-commit keep that behavior).
     dirtyScopeNames: HashSet[string]
     report: ReportSpec
-      ## Opt-in ``--report[=PATH]`` artifact. Left default-empty by the
+      ## Opt-in ``--write-report[=PATH]`` artifact. Left default-empty by the
       ## in-process (hook / pre-push) constructions of this object, which
       ## manage their own report destinations.
 
@@ -27859,7 +28229,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
 
 proc writeWorkspaceLockReport(report: WorkspaceLockReport;
                               destination: string) =
-  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   createDir(parentDir(destination))
@@ -28919,6 +29289,8 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
   let outcome = executeWorkspaceLock(parsed)
   writeWorkspaceLockReport(outcome.report,
     reportDestination(parsed.report, outcome.report.workspaceRoot, "lock"))
+  stageFailureReport(parsed.report, outcome.report.workspaceRoot, "lock",
+    outcome.report.toJsonNode())
   for line in renderLockTextLines(outcome.report):
     stdout.writeLine(line)
   # RA-7: an explicit ``repro workspace lock`` PUBLISHES (commit + push)
@@ -29520,7 +29892,7 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
     # Best-effort write of the M11 lock-report.json so a manual
     # invocation matches the operator-facing surface. The post-commit
     # hook is driven by git, not by an operator-supplied argv, so there
-    # is no ``--report`` surface to consult here: it keeps writing to the
+    # is no ``--write-report`` surface to consult here: it keeps writing to the
     # conventional location unconditionally.
     try:
       writeWorkspaceLockReport(outcome.report,
@@ -29962,7 +30334,7 @@ type
       ## ``required`` cert un-issuable). The real pre-push hook leaves this
       ## ``false`` so the gate enforces the policy as designed.
     report*: ReportSpec
-      ## Opt-in ``--report[=PATH]`` artifact.
+      ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc parseCheckMode(value: string): CheckMode =
   case value
@@ -33212,7 +33584,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
 
 proc writeCheckReport(report: CheckReport; destination: string) =
   ## Persist the structured JSON report at the spec-mandated location.
-  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   createDir(parentDir(destination))
@@ -33595,6 +33967,8 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
             report.notices.add(warn)
     writeCheckReport(report,
       reportDestination(parsed.report, report.workspaceRoot, "check"))
+    stageFailureReport(parsed.report, report.workspaceRoot, "check",
+      report.toJsonNode())
     if parsed.json:
       stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
     else:
@@ -33655,7 +34029,7 @@ type
       ## (see ``runPushCertifyStub``). ``--no-certify`` skips it entirely.
     toolProvisioning: ToolProvisioningMode
     json: bool
-    report: ReportSpec    ## Opt-in ``--report[=PATH]`` artifact.
+    report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
   PushRepoOutcome = enum
     proPushed              ## had unpublished commits → ``git push`` succeeded.
@@ -35076,7 +35450,7 @@ proc toJsonNode(report: PushReport): JsonNode =
   result["exitCode"] = %report.exitCode
 
 proc writePushReport(report: PushReport; destination: string) =
-  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   createDir(parentDir(destination))
@@ -35111,6 +35485,8 @@ proc runPushCommand*(args: openArray[string]): int =
     return 1
   writePushReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "push"))
+  stageFailureReport(parsed.report, report.workspaceRoot, "push",
+    report.toJsonNode())
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -35346,7 +35722,7 @@ type
     aheadBehind: bool
     unmerged: bool
     fileDetails: bool
-    report: ReportSpec    ## Opt-in ``--report[=PATH]`` artifact.
+    report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
   ## ``repro workspace status`` argv parser. The single optional
@@ -35688,7 +36064,7 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
 
 proc writeWorkspaceStatusReport(report: WorkspaceStatusReport;
                                 destination: string) =
-  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   createDir(parentDir(destination))
@@ -35706,6 +36082,8 @@ proc runWorkspaceStatusCommand*(args: openArray[string]): int =
   let report = executeWorkspaceStatus(parsed)
   writeWorkspaceStatusReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "status"))
+  stageFailureReport(parsed.report, report.workspaceRoot, "status",
+    report.toJsonNode())
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -35783,7 +36161,7 @@ type
     workspaceRoot: string
     projectName: string
     json: bool
-    report: ReportSpec    ## Opt-in ``--report[=PATH]`` artifact.
+    report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc parseWorkspaceListArgs(args: openArray[string]): WorkspaceListArgs =
   ## ``repro workspace list`` argv parser. Same dispatch rules as
@@ -35882,7 +36260,7 @@ proc executeWorkspaceList(args: WorkspaceListArgs): WorkspaceListReport =
 
 proc writeWorkspaceListReport(report: WorkspaceListReport;
                               destination: string) =
-  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   createDir(parentDir(destination))
@@ -35899,6 +36277,8 @@ proc runWorkspaceListCommand*(args: openArray[string]): int =
   let report = executeWorkspaceList(parsed)
   writeWorkspaceListReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "list"))
+  stageFailureReport(parsed.report, report.workspaceRoot, "list",
+    report.toJsonNode())
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -36580,7 +36960,7 @@ type
   WorkspaceManifestsArgs = object
     workspaceRoot: string
     json: bool
-    report: ReportSpec    ## Opt-in ``--report[=PATH]`` artifact.
+    report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc parseWorkspaceManifestsArgs(args: openArray[string]):
     WorkspaceManifestsArgs =
@@ -36732,7 +37112,7 @@ proc executeWorkspaceManifests(args: WorkspaceManifestsArgs):
 
 proc writeWorkspaceManifestsReport(report: WorkspaceManifestsReport;
                                    destination: string) =
-  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   createDir(parentDir(destination))
@@ -36751,6 +37131,8 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
   let report = executeWorkspaceManifests(parsed)
   writeWorkspaceManifestsReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "manifests"))
+  stageFailureReport(parsed.report, report.workspaceRoot, "manifests",
+    report.toJsonNode())
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -36798,7 +37180,7 @@ type
     projectName: string
     json: bool
     force: bool
-    report: ReportSpec    ## Opt-in ``--report[=PATH]`` artifact.
+    report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
   SharedClonesRepoReport* = object
     name*: string
@@ -37051,7 +37433,7 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
 
 proc writeSharedClonesReport(report: SharedClonesReport;
                              destination: string) =
-  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   createDir(parentDir(destination))
@@ -37069,6 +37451,8 @@ proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
     writeSharedClonesReport(report,
       reportDestination(parsed.report, report.workspaceRoot,
         "shared-clones"))
+    stageFailureReport(parsed.report, report.workspaceRoot, "shared-clones",
+      report.toJsonNode())
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -37130,7 +37514,7 @@ type
     failFast: bool
     json: bool
     quiet: bool       ## suppress per-repo captured output in text mode.
-    report: ReportSpec    ## Opt-in ``--report[=PATH]`` artifact.
+    report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc toJsonNode*(report: WorkspaceForallReport): JsonNode =
   result = newJObject()
@@ -37327,7 +37711,7 @@ proc renderForallTextLines(report: WorkspaceForallReport;
 
 proc writeWorkspaceForallReport(report: WorkspaceForallReport;
                                 destination: string) =
-  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   try:
@@ -37346,6 +37730,8 @@ proc runWorkspaceForallCommand*(args: openArray[string]): int =
   let report = executeWorkspaceForall(parsed)
   writeWorkspaceForallReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "forall"))
+  stageFailureReport(parsed.report, report.workspaceRoot, "forall",
+    report.toJsonNode())
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -37530,7 +37916,7 @@ type
     checkout: bool          ## M28: create AND switch every repo onto the branch.
     json: bool
     toolProvisioning: ToolProvisioningMode
-    report: ReportSpec      ## Opt-in ``--report[=PATH]`` artifact.
+    report: ReportSpec      ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc parseBranchArgs*(args: openArray[string]): BranchArgs =
   ## ``repro branch [<name>] [--workspace-root=PATH]
@@ -37971,7 +38357,7 @@ proc branchReportRoot(report: BranchReport): string =
     result = report.sourceWorkspaceRoot
 
 proc writeBranchReport(report: BranchReport; destination: string) =
-  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   createDir(parentDir(destination))
@@ -37983,11 +38369,11 @@ proc runBranchCommand*(args: openArray[string]): int =
   ## [--json]``.
   ##
   ## See the M14 block comment above for the contract. With
-  ## ``--report`` it writes a ``branch-report.json`` artifact under
+  ## ``--write-report`` it writes a ``branch-report.json`` artifact under
   ## ``<workspaceRoot>/.repro/workspace/`` (or the explicit
-  ## ``--report=PATH``) so a script consumer has a parseable record of
+  ## ``--write-report=PATH``) so a script consumer has a parseable record of
   ## what happened, in addition to the stdout-formatted text lines.
-  ## Without ``--report`` nothing is written to disk.
+  ## Without ``--write-report`` nothing is written to disk.
   ##
   ## M27 — when the optional ``<path>`` positional is present the command
   ## FORKS: it materializes a new workspace there with every repo (and the
@@ -38005,6 +38391,8 @@ proc runBranchCommand*(args: openArray[string]): int =
       executeBranchCreate(parsed)
   writeBranchReport(report,
     reportDestination(parsed.report, branchReportRoot(report), "branch"))
+  stageFailureReport(parsed.report, branchReportRoot(report), "branch",
+    report.toJsonNode())
   # The read-only ``show`` form answers a question and must not write anything —
   # the same rule that made the report opt-in. Only the forms that MOVE the
   # workspace refresh the cache, and they leave every repo on the new branch.
@@ -38268,7 +38656,7 @@ type
     json: bool
     assumeYes: bool      ## RA-9 ``--yes``: skip the per-repo confirmation.
     toolProvisioning: ToolProvisioningMode
-    report: ReportSpec   ## Opt-in ``--report[=PATH]`` artifact.
+    report: ReportSpec   ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc parseCheckoutArgs*(args: openArray[string]): CheckoutArgs =
   ## ``repro checkout <branch> [--workspace-root=PATH]
@@ -38824,7 +39212,7 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
   result.exitCode = 0
 
 proc writeCheckoutReport(report: CheckoutReport; destination: string) =
-  ## Opt-in: writes only when ``--report[=PATH]`` supplied a destination.
+  ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   createDir(parentDir(destination))
@@ -38834,16 +39222,18 @@ proc runCheckoutCommand*(args: openArray[string]): int =
   ## ``repro checkout <branch> [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
   ##
-  ## See the M15 block comment above for the contract. With ``--report``
+  ## See the M15 block comment above for the contract. With ``--write-report``
   ## it writes a ``checkout-report.json`` artifact under
   ## ``<workspaceRoot>/.repro/workspace/`` (or the explicit
-  ## ``--report=PATH``) so a script consumer has a parseable record of
+  ## ``--write-report=PATH``) so a script consumer has a parseable record of
   ## what happened, in addition to the stdout-formatted text lines.
-  ## Without ``--report`` nothing is written to disk.
+  ## Without ``--write-report`` nothing is written to disk.
   let parsed = parseCheckoutArgs(args)
   let report = executeCheckout(parsed)
   writeCheckoutReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "checkout"))
+  stageFailureReport(parsed.report, report.workspaceRoot, "checkout",
+    report.toJsonNode())
   block:
     var branches: seq[string]
     for entry in report.repos:
@@ -40985,8 +41375,8 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
       result.fixturePath = valueFromFlag(args, i, "--fixture-from")
     elif arg == "--bin-dir" or arg.startsWith("--bin-dir="):
       result.binDir = valueFromFlag(args, i, "--bin-dir")
-    elif arg == "--report" or arg.startsWith("--report="):
-      result.reportPath = valueFromFlag(args, i, "--report")
+    elif arg == "--write-report" or arg.startsWith("--write-report="):
+      result.reportPath = valueFromFlag(args, i, "--write-report")
     elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
         valueFromFlag(args, i, "--tool-provisioning"))
@@ -44410,7 +44800,7 @@ proc runWorkspaceProjectCommand*(args: openArray[string]): int =
       "' (expected: new, repo)")
     return 2
 
-proc runThinApp*(programName: string): int =
+proc runThinAppDispatch(programName: string): int =
   # M9.R.13a — seed the provider-nimcache session token before any
   # subcommand routing, so every nested subprocess spawned downstream
   # (the build engine's per-recipe `__repro-compile-provider` helpers,
@@ -45616,3 +46006,9 @@ proc runThinApp*(programName: string): int =
     return runDiskCommand(diskArgs)
   stderr.writeLine(renderUsage(programName))
   2
+
+proc runThinApp*(programName: string): int =
+  ## Single chokepoint for the outcome-dependent report default: the verbs
+  ## stage what they would leave behind, and the real exit code decides.
+  result = runThinAppDispatch(programName)
+  flushStagedFailureReport(result)

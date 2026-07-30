@@ -267,13 +267,13 @@ proc seedMetadataBranch(fx: M16Fixture; branch: string) =
 
 proc invokeStart(fx: M16Fixture; name: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "branch", "--report", name, "--checkout",
+    fx.reproBin, "branch", "--write-report", name, "--checkout",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc invokeSync(fx: M16Fixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "sync", "--report",
+    fx.reproBin, "workspace", "sync", "--write-report",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 

@@ -267,7 +267,7 @@ created_at = "2026-07-02T00:00:00Z"
       createDir(cacheRoot)
       let buildCmd = q(reproAbs) & " build " & q(consumerRoot / "repro.nim") &
         " --tool-provisioning=path --daemon=off --log=quiet" &
-        " --progress=quiet --report=none" &
+        " --progress=quiet --measure=none" &
         " --action-cache-root=" & q(cacheRoot)
 
       # ---- Build the consumer. The SC-2/SC-3 pre-pass must build BOTH siblings

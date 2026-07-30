@@ -191,7 +191,7 @@ proc writeRefsFile(path: string; localSha: string) =
 
 proc invokeCheckPrePush(fx: Fixture; refsFile: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "check", "--mode=pre-push", "--report",
+    fx.reproBin, "check", "--mode=pre-push", "--write-report",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & (fx.workspaceRoot / "lib-a"),
     "--pushed-refs=" & refsFile,
@@ -200,13 +200,13 @@ proc invokeCheckPrePush(fx: Fixture; refsFile: string): CmdResult =
 
 proc invokeSync(fx: Fixture; project = "lib-a"): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "sync", "--report", project,
+    fx.reproBin, "workspace", "sync", "--write-report", project,
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc invokeCheckout(fx: Fixture; branch: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "checkout", "--report", branch,
+    fx.reproBin, "checkout", "--write-report", branch,
     "--workspace-root=" & fx.workspaceRoot, "--json",
   ]))
 

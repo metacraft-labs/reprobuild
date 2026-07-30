@@ -215,12 +215,12 @@ proc seedMetadataBranch(fx: M14Fixture; branch: string) =
 proc invokeBranch(fx: M14Fixture; name: string): CmdResult =
   if name.len == 0:
     runShell(shellCommand(@[
-      fx.reproBin, "branch", "--report",
+      fx.reproBin, "branch", "--write-report",
       "--workspace-root=" & fx.workspaceRoot,
     ]))
   else:
     runShell(shellCommand(@[
-      fx.reproBin, "branch", "--report", name,
+      fx.reproBin, "branch", "--write-report", name,
       "--workspace-root=" & fx.workspaceRoot,
     ]))
 

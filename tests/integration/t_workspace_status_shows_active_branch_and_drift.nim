@@ -216,7 +216,7 @@ proc invokeLock(fx: M12Fixture): CmdResult =
 
 proc invokeStatus(fx: M12Fixture; extra: openArray[string] = []): CmdResult =
   var argv = @[
-    fx.reproBin, "workspace", "status", "--report", "lib-a",
+    fx.reproBin, "workspace", "status", "--write-report", "lib-a",
     "--workspace-root=" & fx.workspaceRoot,
   ]
   for x in extra: argv.add(x)

@@ -267,7 +267,7 @@ proc invokeCheckout(fx: M15Fixture; name: string): CmdResult =
   # post-confirmation switch outcomes, so they opt out with ``--yes``;
   # the dedicated RA-9 suite covers the non-TTY refuse path.
   runShell(shellCommand(@[
-    fx.reproBin, "checkout", "--report", name, "--yes",
+    fx.reproBin, "checkout", "--write-report", name, "--yes",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 

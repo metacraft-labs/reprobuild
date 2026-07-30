@@ -1528,24 +1528,24 @@ suite "e2e_local_reprobuild_project_build":
       check progressOutput.contains("checked=4/4")
 
       let quietOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
-        extraArgs = ["--progress=quiet", "--report=none"])
+        extraArgs = ["--progress=quiet", "--measure=none"])
       check quietOutput.strip() == ""
 
       let diagnosticsPath = projectRoot / ".repro" / "progress-diagnostics.log"
       let quietDiagnosticsOutput = buildCurrentProject(reproBin, projectRoot,
-        getEnv("PATH"), extraArgs = ["--progress=quiet", "--report=none",
-          "--diagnostics=" & diagnosticsPath])
+        getEnv("PATH"), extraArgs = ["--progress=quiet", "--measure=none",
+          "--write-diagnostics=" & diagnosticsPath])
       check quietDiagnosticsOutput.strip() == ""
       let diagnostics = readFile(diagnosticsPath)
       check diagnostics.contains("scheduler: actions=4")
       check diagnostics.contains("action: stamp status=")
 
       let dotsOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
-        extraArgs = ["--progress=dots", "--log=quiet", "--report=none"])
+        extraArgs = ["--progress=dots", "--log=quiet", "--measure=none"])
       check dotsOutput.contains("....")
 
       let statsOutput = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"),
-        extraArgs = ["--stats"])
+        extraArgs = ["--show=timing"])
       check statsOutput.contains("metric")
       check statsOutput.contains("count")
       check statsOutput.contains("avg (us)")

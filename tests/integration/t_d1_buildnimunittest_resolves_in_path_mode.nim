@@ -128,7 +128,7 @@ suite "Deferred-Item D1: buildNimUnittest resolves in path mode":
         selector,
         "--tool-provisioning=path",
         "--daemon=off",
-        "--report=full",
+        "--write-report",
         "--log=actions",
         "--progress=quiet"].join(" ")
       checkpoint("running: " & cmd)

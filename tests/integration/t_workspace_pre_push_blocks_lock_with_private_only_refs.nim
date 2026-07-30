@@ -399,7 +399,7 @@ proc currentLayerHead(gitBin, layerPath: string): string =
 proc invokeCheckPrePush(fx: M26Fixture; currentRepo, refsFile: string):
     CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "check", "--mode=pre-push", "--report",
+    fx.reproBin, "check", "--mode=pre-push", "--write-report",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & currentRepo,
     "--pushed-refs=" & refsFile,

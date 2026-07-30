@@ -146,7 +146,7 @@ suite "RA-16 — resumable sync + --force-sync":
         projectToml(remotes, includes))
 
       proc invokeSync(extra: seq[string] = @[]): CmdResult =
-        runShell(shellCommand(@[reproBin, "workspace", "sync", "--report", "myproject",
+        runShell(shellCommand(@[reproBin, "workspace", "sync", "--write-report", "myproject",
           "--workspace-root=" & workspaceRoot] & extra))
 
       proc readReport(): JsonNode =

@@ -208,7 +208,7 @@ proc readReport(fixture: M10Fixture): JsonNode =
 
 proc invokeSync(fixture: M10Fixture): CmdResult =
   runShell(shellCommand(@[
-    fixture.reproBin, "workspace", "sync", "--report", "myproject",
+    fixture.reproBin, "workspace", "sync", "--write-report", "myproject",
     "--workspace-root=" & fixture.workspaceRoot,
   ]))
 

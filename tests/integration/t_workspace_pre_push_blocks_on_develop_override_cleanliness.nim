@@ -218,7 +218,7 @@ proc writeRefsFile(path: string; localRef, localSha: string) =
 proc invokeCheckPrePush(fx: M23Fixture; currentRepo, refsFile: string):
     CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "check", "--mode=pre-push", "--report",
+    fx.reproBin, "check", "--mode=pre-push", "--write-report",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & currentRepo,
     "--pushed-refs=" & refsFile,

@@ -166,13 +166,13 @@ proc runInit(fx: M14MetaFixture): CmdResult =
 
 proc runBranchShow(fx: M14MetaFixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "branch", "--report",
+    fx.reproBin, "branch", "--write-report",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc runBranchCreate(fx: M14MetaFixture; name: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "branch", "--report", name,
+    fx.reproBin, "branch", "--write-report", name,
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 

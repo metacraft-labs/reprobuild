@@ -67,7 +67,7 @@ proc runWorkspaceShard() =
   let res = runRepro(@[
     "test",
     "--shard", "1/3",
-    "--report=" & reportPath,
+    "--write-report=" & reportPath,
   ], repoRoot)
   let wallSec = epochTime() - t0
   checkpoint("repro test --shard 1/3 exit=" & $res.code &

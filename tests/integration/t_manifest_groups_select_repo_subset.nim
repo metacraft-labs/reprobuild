@@ -150,7 +150,7 @@ proc setupFixture(gitBin: string): Fixture =
 proc syncPaths(fx: Fixture; groupsArg: string): HashSet[string] =
   ## Run sync (optionally with a ``--groups=...`` flag) and return the set
   ## of repo paths the report classified — i.e. the selected subset.
-  var argv = @[fx.reproBin, "workspace", "sync", "--report", "myproject",
+  var argv = @[fx.reproBin, "workspace", "sync", "--write-report", "myproject",
     "--workspace-root=" & fx.workspaceRoot]
   if groupsArg.len > 0:
     argv.add("--groups=" & groupsArg)

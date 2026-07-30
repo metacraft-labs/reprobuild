@@ -162,7 +162,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
 proc invokeCheckout(fx: Fixture; name: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "checkout", "--report", name, "--yes",
+    fx.reproBin, "checkout", "--write-report", name, "--yes",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 

@@ -42,7 +42,7 @@ proc solverFeatureEnabled*(name: string): bool =
 
 proc solverEnabledFeatures*(): seq[string] =
   ## Helper — every variant whose solver-resolved value is truthy.
-  ## Diagnostic dumps and ``repro build --report`` consume this so the
+  ## Diagnostic dumps and ``repro build --write-report`` consume this so the
   ## report can list the active feature flags.
   if not hasSolverSolution():
     return @[]

@@ -290,7 +290,7 @@ suite "integration_reprobuild_sessions_share_runquota":
       # ``t_e2e_repro_build_multiple_named_targets`` (86be3f1).
       let codeBuild = startProcess(reproBin, workingDir = repoRoot,
         args = ["build", codeProject, "--daemon=off",
-          "--tool-provisioning=path", "--log=actions", "--report=full"],
+          "--tool-provisioning=path", "--log=actions", "--write-report"],
         options = {poUsePath, poStdErrToStdOut})
       let codeStartStamp = stampsDir / "codetracer.stamp.start"
       # Wait for the first session's action to actually start (its helper
@@ -307,7 +307,7 @@ suite "integration_reprobuild_sessions_share_runquota":
 
       let fixtureBuild = startProcess(reproBin, workingDir = repoRoot,
         args = ["build", fixtureProject, "--daemon=off",
-          "--tool-provisioning=path", "--log=actions", "--report=full"],
+          "--tool-provisioning=path", "--log=actions", "--write-report"],
         options = {poUsePath, poStdErrToStdOut})
       let launchEnd = nowMillis()
       check launchEnd - launchStart < 150000

@@ -1,11 +1,11 @@
 # Build Introspection
 
-`repro build` writes a structured build report when `--report=full` is active
+`repro build` writes a structured build report when `--write-report` is active
 and exposes a non-mutating scheduler/cache walk through `--dry-run`:
 
 ```sh
 repro build --dry-run --progress=quiet --log=actions
-repro build --dry-run --diagnostics=.repro/build/reprobuild/dry-run.log
+repro build --dry-run --write-diagnostics=.repro/build/reprobuild/dry-run.log
 ```
 
 Dry run mode resolves the project, lowers the selected graph, checks declared
@@ -37,10 +37,10 @@ For quiet terminal output with full diagnostics, combine:
 
 ```sh
 repro build --progress=quiet --log=quiet \
-  --diagnostics=.repro/build/reprobuild/diagnostics.log
+  --write-diagnostics=.repro/build/reprobuild/diagnostics.log
 ```
 
-`--diagnostics=PATH` records summary/action lines that would otherwise be printed
+`--write-diagnostics=PATH` records summary/action lines that would otherwise be printed
 to the terminal. It is a debugging artifact, not a persistent state file.
 
 ## Forced Rebuilds

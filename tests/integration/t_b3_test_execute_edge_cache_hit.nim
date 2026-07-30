@@ -69,7 +69,7 @@ proc runBuildTarget(reproBin, repoRoot, selector: string):
     selector,
     "--tool-provisioning=path",
     "--daemon=off",
-    "--report=full",
+    "--write-report",
     "--log=actions",
     "--progress=quiet",
   ]

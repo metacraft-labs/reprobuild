@@ -223,7 +223,7 @@ proc setupFixture(gitBin, slug: string): M27Fixture =
 
 proc invokeFork(fx: M27Fixture; branch, path: string;
                 extra: seq[string] = @[]; cwd = ""): CmdResult =
-  var argv = @[fx.reproBin, "branch", "--report", branch, path,
+  var argv = @[fx.reproBin, "branch", "--write-report", branch, path,
                "--workspace-root=" & fx.workspaceRoot]
   for e in extra:
     argv.add(e)
@@ -501,7 +501,7 @@ suite "M27 — repro branch <name> <path> forks a new workspace":
       let forkPath = fx.scratch / "feature-workspace"
       # The namespaced spelling must behave exactly like the top-level verb.
       let res = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "branch", "--report", "feature-alias", forkPath,
+        fx.reproBin, "workspace", "branch", "--write-report", "feature-alias", forkPath,
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       if res.code != 0:
@@ -522,7 +522,7 @@ suite "M27 — repro branch <name> <path> forks a new workspace":
 
       # No <path> → in place, where there is nothing to copy INTO.
       let res = runShell(shellCommand(@[
-        fx.reproBin, "branch", "--report", "feature-x",
+        fx.reproBin, "branch", "--write-report", "feature-x",
         "--include-changes",
         "--workspace-root=" & fx.workspaceRoot,
       ]))

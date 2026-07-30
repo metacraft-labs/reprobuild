@@ -192,7 +192,7 @@ proc invokePush(fx: Fixture): CmdResult =
   ## ``--no-certify`` so the push's own certify slot stays a no-op; the
   ## certificate transport (carry the attached notes) runs regardless.
   runShell(shellCommand(@[
-    fx.reproBin, "push", "--report",
+    fx.reproBin, "push", "--write-report",
     "--no-certify",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & fx.libAPath,

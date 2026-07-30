@@ -160,7 +160,7 @@ created_at = "2026-06-27T00:00:00Z"
       let zero = "0000000000000000000000000000000000000000"
       writeFile(refs, "refs/heads/main " & headSha & " refs/heads/main " &
         zero & "\n")
-      let chk = run(reproBinary & " check --mode=pre-push --report --workspace-root=" &
+      let chk = run(reproBinary & " check --mode=pre-push --write-report --workspace-root=" &
         repo & " --pushed-refs=" & refs)
       check chk.code == 0
       check "not a workspace" notin chk.output
@@ -170,7 +170,7 @@ created_at = "2026-06-27T00:00:00Z"
       # was folded into the committed-lock-derived participating set.
       writeFile(sib.work / "scratch.txt", "uncommitted\n")
       let dirtyChk = run(reproBinary &
-        " check --mode=pre-push --report --workspace-root=" & repo &
+        " check --mode=pre-push --write-report --workspace-root=" & repo &
         " --pushed-refs=" & refs)
       check dirtyChk.code == 2
       let reportPath = repo / ".repro" / "build" / "reports" / "check-report.json"

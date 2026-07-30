@@ -130,7 +130,7 @@ suite "Deferred-Item D1: pythonUnittest resolves in path mode":
         selector,
         "--tool-provisioning=path",
         "--daemon=off",
-        "--report=full",
+        "--write-report",
         "--log=actions",
         "--progress=quiet"].join(" ")
       checkpoint("running: " & cmd)

@@ -234,7 +234,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
   writeWorkspaceBranch(workspaceRoot, project = "app", branch = "main")
 
 proc invokePush(fx: Fixture; fromProject = false): CmdResult =
-  var argv = @[fx.reproBin, "push", "--report"]
+  var argv = @[fx.reproBin, "push", "--write-report"]
   if fromProject:
     argv.add("app")
   argv.add("--no-certify")

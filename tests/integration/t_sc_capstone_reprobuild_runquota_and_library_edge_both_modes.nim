@@ -253,7 +253,7 @@ proc run(command: string; cwd = ""): tuple[code: int; output: string] =
 proc buildCmdFor(reproAbs, consumerRoot, cacheRoot: string): string =
   q(reproAbs) & " build " & q(consumerRoot / "repro.nim") &
     " --tool-provisioning=path --daemon=off --log=quiet" &
-    " --progress=quiet --report=none" &
+    " --progress=quiet --measure=none" &
     " --action-cache-root=" & q(cacheRoot)
 
 # ---- git helpers for the lock-pinned mode "remotes" (SC-6 shape). ----

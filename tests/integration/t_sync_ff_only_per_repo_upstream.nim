@@ -207,7 +207,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
 proc invokeSync(fx: Fixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "sync", "--report", "myproject",
+    fx.reproBin, "workspace", "sync", "--write-report", "myproject",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
@@ -387,7 +387,7 @@ suite "RA-3 — sync fast-forwards each repo's own upstream":
 
       # Sync fast-forwards super AND must update its submodule.
       let res = runShell(shellCommand(@[
-        reproBin, "workspace", "sync", "--report", "myproject",
+        reproBin, "workspace", "sync", "--write-report", "myproject",
         "--workspace-root=" & workspaceRoot]))
       if res.code notin [0, 2]:
         checkpoint("sync output: " & res.output)

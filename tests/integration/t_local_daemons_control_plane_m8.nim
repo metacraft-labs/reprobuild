@@ -106,7 +106,7 @@ proc buildCommand(projectRoot, tempRoot, workName: string;
     "--action-cache-root=" & tempRoot / "action-cache",
     "--progress=quiet",
     "--log=quiet",
-    "--report=none",
+    "--measure=none",
     "--no-runquota"
   ] & @extra, daemonEnv(tempRoot))
 
@@ -170,7 +170,7 @@ suite "Local daemons/control-plane M8 graph and stats analysis":
       let projectRoot = tempRoot / "project"
       writeCopyProject(projectRoot, "daemonM8Rank", 3)
       discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
-        ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
+        ["--stats-groups=timing,cache,runquota,deps,sessions"]), repoRoot())
       waitForStatsStore(projectRoot)
 
       let actions = runStatsJson(projectRoot, tempRoot,
@@ -220,7 +220,7 @@ suite "Local daemons/control-plane M8 graph and stats analysis":
       let projectRoot = tempRoot / "project"
       writeCopyProject(projectRoot, "daemonM8Snapshot", 2)
       discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
-        ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
+        ["--stats-groups=timing,cache,runquota,deps,sessions"]), repoRoot())
       waitForStatsStore(projectRoot)
 
       let baseline = runStatsJson(projectRoot, tempRoot,
@@ -231,7 +231,7 @@ suite "Local daemons/control-plane M8 graph and stats analysis":
       waitForTimestampBoundary()
       writeFile(projectRoot / "src" / "input-0.txt", "changed\n")
       discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
-        ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
+        ["--stats-groups=timing,cache,runquota,deps,sessions"]), repoRoot())
       waitForStatsStore(projectRoot)
       let candidate = runStatsJson(projectRoot, tempRoot,
         ["snapshot", "--label=after"])
@@ -257,7 +257,7 @@ suite "Local daemons/control-plane M8 graph and stats analysis":
       let projectRoot = tempRoot / "project"
       writeCopyProject(projectRoot, "daemonM8Graph", 2)
       discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
-        ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
+        ["--stats-groups=timing,cache,runquota,deps,sessions"]), repoRoot())
       waitForStatsStore(projectRoot)
 
       let baseGraph = runGraphJson(projectRoot, tempRoot, [])

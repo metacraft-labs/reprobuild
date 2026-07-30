@@ -128,7 +128,7 @@ proc runBuildApps(reproBin, repoRoot: string; withReport: bool):
   # named-target table rather than treat ``apps`` as the on-disk
   # ``apps/`` directory.
   #
-  # ``withReport=false`` swaps ``--report=full`` for ``--report=none``
+  # ``withReport=false`` swaps ``--write-report`` for ``--measure=none``
   # on the first (warm-up) invocation. The report write itself is
   # cheap; the expensive part is per-action ``collectEvidence`` which
   # runs regardless of the report mode. We still skip the report on
@@ -140,7 +140,7 @@ proc runBuildApps(reproBin, repoRoot: string; withReport: bool):
     ".#apps",
     "--tool-provisioning=path",
     "--daemon=off",
-    "--report=" & (if withReport: "full" else: "none"),
+    "--write-report=" & (if withReport: "full" else: "none"),
     "--log=actions",
     "--progress=quiet",
   ]
@@ -199,7 +199,7 @@ suite "Bootstrap-And-Self-Build B1: apps action cache hits on second run":
             checkpoint("no buildReport: line in second-run output:")
             checkpoint(secondOut)
             checkpoint("skipped — engine did not emit a build report " &
-              "path (``--report=full`` may not be honoured by this " &
+              "path (``--write-report`` may not be honoured by this " &
               "build mode).")
             skip()
           elif not fileExists(reportPath):

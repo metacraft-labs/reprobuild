@@ -164,7 +164,7 @@ proc getClingoEnv(): seq[tuple[name, value: string]] =
 
 proc invokeSync(fixture: M10Fixture; extraArgs: openArray[string] = []): CmdResult =
   var cmdArgs = @[
-    fixture.reproBin, "workspace", "sync", "--report", "myproject",
+    fixture.reproBin, "workspace", "sync", "--write-report", "myproject",
     "--workspace-root=" & fixture.workspaceRoot,
   ]
   for arg in extraArgs:

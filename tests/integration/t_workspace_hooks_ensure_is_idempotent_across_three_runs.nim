@@ -200,7 +200,7 @@ proc cloneAll(gitBin: string; fx: M17Fixture) =
 
 proc invokeEnsure(fx: M17Fixture; json = false): CmdResult =
   var argv = @[
-    fx.reproBin, "hooks", "ensure", "--report", "--vcs",
+    fx.reproBin, "hooks", "ensure", "--write-report", "--vcs",
     "--workspace-root=" & fx.workspaceRoot,
   ]
   if json: argv.add("--json")

@@ -85,7 +85,7 @@ created_at = "2026-07-02T00:00:00Z"
       
       let buildCmd = q(reproAbs) & " build " & q(projRoot / "repro.nim") &
         " --tool-provisioning=path --daemon=off --log=quiet" &
-        " --progress=quiet --report=none --action-cache-root=" & q(cacheRoot)
+        " --progress=quiet --measure=none --action-cache-root=" & q(cacheRoot)
 
       # ---- RUN 1: Initial Generation ----
       checkpoint("RUN 1: " & buildCmd)

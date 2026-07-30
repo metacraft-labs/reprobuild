@@ -247,7 +247,7 @@ proc backendUpstreamFiles(gitBin, bare: string): string =
   ls.output
 
 proc invokeGate(fx: Fixture; refsFile: string): tuple[code: int; output: string] =
-  run(reproBinary & " check --mode=pre-push --report" &
+  run(reproBinary & " check --mode=pre-push --write-report" &
     " --workspace-root=" & q(fx.ws) &
     " --current-repo=" & q(fx.ws / "core") &
     " --pushed-refs=" & q(refsFile) & " --json")

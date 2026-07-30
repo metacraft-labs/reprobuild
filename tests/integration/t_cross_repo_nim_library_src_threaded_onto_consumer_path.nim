@@ -266,7 +266,7 @@ proc writeConsumer(root, reproText: string) =
 proc buildCommand(reproAbs, consumerRoot, cacheRoot: string): string =
   q(reproAbs) & " build " & q(consumerRoot / "repro.nim") &
     " --tool-provisioning=path --daemon=off --log=quiet" &
-    " --progress=quiet --report=none" &
+    " --progress=quiet --measure=none" &
     " --action-cache-root=" & q(cacheRoot)
 
 suite "SC-11: Nim library src threaded onto consumer nim c --path:":

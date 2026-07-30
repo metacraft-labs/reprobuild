@@ -120,7 +120,7 @@ proc invokeList(fx: M12ListFixture;
                 project = "myproject";
                 extra: openArray[string] = []): CmdResult =
   var argv = @[
-    fx.reproBin, "workspace", "list", "--report", project,
+    fx.reproBin, "workspace", "list", "--write-report", project,
     "--workspace-root=" & fx.workspaceRoot,
   ]
   for x in extra: argv.add(x)

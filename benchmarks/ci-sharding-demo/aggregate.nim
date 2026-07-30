@@ -1,7 +1,7 @@
 ## CI-Sharding demonstration — per-N aggregator.
 ##
 ## Reads the per-shard reports written by ``repro test --shard k/N
-## --fixture-from=... --report=<path>`` for a single N and computes:
+## --fixture-from=... --write-report=<path>`` for a single N and computes:
 ##
 ##   * Per-shard wall time (from ``actual_total_time_ns``)
 ##   * Max wall time across the N shards (the "wall-time-of-the-CI-matrix"

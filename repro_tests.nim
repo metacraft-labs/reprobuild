@@ -7222,6 +7222,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_measurement_flags_cli.nim",
+    binary: "build/test-bin/t_measurement_flags_cli",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_migrated_repo_workspace_real_pre_push.nim",
     binary: "build/test-bin/t_migrated_repo_workspace_real_pre_push",
     defines: @[],
@@ -9320,6 +9328,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_m9r9_auto_recurse.nim",
     binary: "build/test-bin/t_m9r9_auto_recurse",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_measurement_axes.nim",
+    binary: "build/test-bin/t_measurement_axes",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

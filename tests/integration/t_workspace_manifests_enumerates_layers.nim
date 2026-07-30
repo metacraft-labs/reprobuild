@@ -166,7 +166,7 @@ proc writeWorkspaceToml(workspaceRoot, body: string): string =
 proc invokeManifests(reproBin, workspaceRoot: string;
                      extra: openArray[string] = []): CmdResult =
   var argv = @[
-    reproBin, "workspace", "manifests", "--report",
+    reproBin, "workspace", "manifests", "--write-report",
     "--workspace-root=" & workspaceRoot,
   ]
   for x in extra: argv.add(x)

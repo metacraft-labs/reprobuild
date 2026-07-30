@@ -158,7 +158,7 @@ proc buildCommand(projectRoot, tempRoot, workName: string;
     "--action-cache-root=" & tempRoot / "action-cache",
     "--progress=quiet",
     "--log=quiet",
-    "--report=none",
+    "--measure=none",
     "--no-runquota"
   ] & @extra, daemonEnv(tempRoot))
 
@@ -275,7 +275,7 @@ suite "Local daemons/control-plane M10 development self-restart":
       writeCopyProject(projectRoot, "daemonM10State")
 
       discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
-        ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
+        ["--stats-groups=timing,cache,runquota,deps,sessions"]), repoRoot())
       waitForStatsStore(projectRoot)
       let sessionsBefore = requireSuccess(shellCommand(@[
         publicReproBin(), "daemon", "sessions"

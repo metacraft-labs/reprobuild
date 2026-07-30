@@ -175,7 +175,7 @@ created_at = "2026-07-02T00:00:00Z"
       createDir(cacheRoot)
       let cmd = q(reproAbs) & " build " & q(consumerRoot / "repro.nim") &
         " --tool-provisioning=path --daemon=off --log=quiet" &
-        " --progress=quiet --report=none" &
+        " --progress=quiet --measure=none" &
         " --action-cache-root=" & q(cacheRoot)
       checkpoint("running: " & cmd)
       let (code, output) = run(cmd, repoRoot)

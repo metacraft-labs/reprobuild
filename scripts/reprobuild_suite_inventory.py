@@ -3152,7 +3152,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", default=".", help="repository root")
     parser.add_argument("--json", default=str(DEFAULT_JSON), help="JSON inventory output path")
-    parser.add_argument("--report", default=str(DEFAULT_REPORT), help="markdown report output path")
+    parser.add_argument("--write-report", default=str(DEFAULT_REPORT), help="markdown report output path")
     parser.add_argument("--run-suite", action="store_true", help="run scripts/run_tests.sh before generating the report")
     parser.add_argument("--warm-runs", type=int, default=0, help="number of warm suite runs after the cold run")
     parser.add_argument("--clean-first", action="store_true", help="remove repo-local build outputs before the cold run")
@@ -3169,7 +3169,7 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     root = Path(args.repo_root).resolve()
     json_path = Path(args.json)
-    report_path = Path(args.report)
+    report_path = Path(args.write_report)
     if not json_path.is_absolute():
         json_path = root / json_path
     if not report_path.is_absolute():

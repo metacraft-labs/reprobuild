@@ -181,7 +181,7 @@ suite "RA-11 — bootstrap manifest cache":
       check not dirExists(workspaceRoot / ".repro" / "manifests")
 
       let init = runShell(shellCommand(@[
-        reproBin, "workspace", "init", "--report", "myproject",
+        reproBin, "workspace", "init", "--write-report", "myproject",
         "--workspace-root=" & workspaceRoot,
         "--manifest-url=" & fileUrl(manifestBare),
         "--manifest-branch=main",

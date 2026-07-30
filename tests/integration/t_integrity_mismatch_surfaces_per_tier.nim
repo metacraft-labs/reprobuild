@@ -233,7 +233,7 @@ suite "HL-4 — integrity mismatch surfaces per tier on the manifest-present pat
         " refs/heads/main 0000000000000000000000000000000000000000\n")
 
       proc gate(current: string): tuple[code: int; output: string] =
-        run(reproBinary & " check --mode=pre-push --report" &
+        run(reproBinary & " check --mode=pre-push --write-report" &
           " --workspace-root=" & q(ws) &
           " --current-repo=" & q(ws / current) &
           " --pushed-refs=" & q(refsFile) & " --json")

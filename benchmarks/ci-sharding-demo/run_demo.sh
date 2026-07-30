@@ -21,7 +21,7 @@
 # the live tool catalog does not yet expose as path-resolvable binaries.
 # The fixture path exercises the SAME ``planTestShards`` /
 # ``runquota_partition`` planner the workspace path delegates to and the
-# SAME ``--report=...`` JSON contract, so coverage / exclusivity / parity
+# SAME ``--write-report=...`` JSON contract, so coverage / exclusivity / parity
 # are verified against the actual production code, on the actual full test
 # suite, with the actual test binaries.  The only differences vs the
 # workspace path are: (1) the build step is a no-op because the binaries
@@ -231,7 +231,7 @@ run_shard() {
     --shard "${k}/${n}" \
     --partition-strategy=joint-duration \
     --fixture-from="${fixture}" \
-    --report="${report_path}" >"${log_path}" 2>&1
+    --write-report="${report_path}" >"${log_path}" 2>&1
   local code=$?
   set -e
   end="$EPOCHREALTIME"
@@ -366,7 +366,7 @@ if [[ -s "${PLAN_PATH}" ]]; then
       --partition-strategy=joint-duration \
       --fixture-from="${DEMO_FIXTURE}" \
       --plan-from="${PLAN_PATH}" \
-      --report="${DEMO_LOG_DIR}/plan-reuse-${k}-of-4.json" \
+      --write-report="${DEMO_LOG_DIR}/plan-reuse-${k}-of-4.json" \
       > "${DEMO_LOG_DIR}/plan-reuse-${k}-of-4.log" 2>&1 || true
   done
   # Compare per-shard assigned_selectors against the original N=4 demo run.

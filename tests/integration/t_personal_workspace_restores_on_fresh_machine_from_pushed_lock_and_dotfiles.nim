@@ -193,7 +193,7 @@ suite "HL-7 — personal workspace restores on a fresh machine":
       # (1)+(2) BOTH planes present → restore lands at the LOCKED sha1.
       # =================================================================
       putEnv("REPROBUILD_USER_CONFIG", userCfg)   # Plane A synced
-      let restore = run(reproBinary & " workspace sync --report --workspace-root=" &
+      let restore = run(reproBinary & " workspace sync --write-report --workspace-root=" &
         q(ws) & " --json")
       if restore.code != 0:
         checkpoint("restore output: " & restore.output)
@@ -219,7 +219,7 @@ suite "HL-7 — personal workspace restores on a fresh machine":
       block withholdPlaneA:
         removeDir(ws / "app")
         delEnv("REPROBUILD_USER_CONFIG")   # route withheld
-        let noRoute = run(reproBinary & " workspace sync --report --workspace-root=" &
+        let noRoute = run(reproBinary & " workspace sync --write-report --workspace-root=" &
           q(ws) & " --json")
         check noRoute.code == 0
         check dirExists(ws / "app")
@@ -238,7 +238,7 @@ suite "HL-7 — personal workspace restores on a fresh machine":
         discard requireGit(q(gitBin) & " -C " & q(privateManifests) &
           " commit -m \"drop pushed lock\"")
         putEnv("REPROBUILD_USER_CONFIG", userCfg)   # route present again
-        let noLock = run(reproBinary & " workspace sync --report --workspace-root=" &
+        let noLock = run(reproBinary & " workspace sync --write-report --workspace-root=" &
           q(ws) & " --json")
         check noLock.code == 0
         check dirExists(ws / "app")

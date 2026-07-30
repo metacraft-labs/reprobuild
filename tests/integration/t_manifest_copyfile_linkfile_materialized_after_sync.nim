@@ -141,12 +141,12 @@ proc setupFixture(gitBin, slug, configBody: string): Fixture =
 
 proc runInit(fx: Fixture): tuple[code: int; output: string] =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "init", "--report", "myproject",
+    fx.reproBin, "workspace", "init", "--write-report", "myproject",
     "--workspace-root=" & fx.workspaceRoot]))
 
 proc runSync(fx: Fixture): tuple[code: int; output: string] =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "sync", "--report", "myproject",
+    fx.reproBin, "workspace", "sync", "--write-report", "myproject",
     "--workspace-root=" & fx.workspaceRoot]))
 
 suite "RA-18 — copyfile / linkfile materialization":

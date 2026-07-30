@@ -85,7 +85,7 @@ repro scheduler total                    1   25100.0        25.1
                 "build-dir#genbench",
                 "--tool-provisioning=path",
                 "--work-root=build-dir/CMakeFiles/reprobuild",
-                "--stats",
+                "--show=timing",
             ],
         )
 

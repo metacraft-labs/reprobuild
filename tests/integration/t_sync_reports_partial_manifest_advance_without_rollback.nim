@@ -156,7 +156,7 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
       # First pull: materialises the layer at commit#1 (composer clones it),
       # and fails on the unreachable lib-x clone.
       let firstPull = runShell(shellCommand(@[
-        reproBin, "workspace", "pull", "--report",
+        reproBin, "workspace", "pull", "--write-report",
         "--workspace-root=" & workspaceRoot,
       ]))
       # The layer now exists in .repro/manifests-0-*; locate it from the
@@ -195,7 +195,7 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
       #    commit#2, then the lib-x clone fails. The manifest MUST stay at
       #    commit#2 (no rollback).
       let secondPull = runShell(shellCommand(@[
-        reproBin, "workspace", "pull", "--report",
+        reproBin, "workspace", "pull", "--write-report",
         "--workspace-root=" & workspaceRoot,
       ]))
       check secondPull.code != 0  # a later step failed

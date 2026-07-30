@@ -81,7 +81,7 @@ suite "CI-Sharding M2 — wall-time balance":
       let res = runRepro(@["test",
         "--shard", $k & "/" & $ShardCount,
         "--fixture-from=" & fixturePath,
-        "--report=" & reportPath],
+        "--write-report=" & reportPath],
         workspace)
       if res.code != 0:
         checkpoint(res.output)

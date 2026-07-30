@@ -456,7 +456,7 @@ def direct_reprobuild_build_command(repro, binary_dir, target,
         f"--work-root={reprobuild_provider_dir(binary_dir).as_posix()}",
     ])
     if reprobuild_diagnostics == "stats":
-        args.append("--stats")
+        args.append("--show=timing")
     return args
 
 
@@ -634,8 +634,9 @@ def repro_env(base_env, rb_bin, runquota_socket, binary_dir, parallel,
         "REPROBUILD_REPRO": str(rb_bin),
         "REPROBUILD_SOURCE_ROOT": str(ROOT),
         "REPROBUILD_MAX_PARALLELISM": str(max(1, parallel)),
-        "REPROBUILD_STATS": "1" if reprobuild_diagnostics == "stats" else "0",
-        "REPROBUILD_REPORT": "none",
+        "REPROBUILD_SHOW": ("timing" if reprobuild_diagnostics == "stats"
+                            else "none"),
+        "REPROBUILD_MEASURE": "none",
         "REPROBUILD_LOG": "quiet",
     })
     if use_runquota and runquota_socket is not None:

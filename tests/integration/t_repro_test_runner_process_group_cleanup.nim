@@ -217,7 +217,7 @@ if params.len == 0 and
     "--action-cache-root=" & root / "action-cache",
     "--progress=quiet",
     "--log=quiet",
-    "--report=none",
+    "--measure=none",
     "--no-runquota",
   ]
   when defined(linux):

@@ -215,7 +215,7 @@ proc cloneAll(gitBin: string; fx: M11Fixture) =
 
 proc invokeLock(fx: M11Fixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "lock", "--report", "lib-a",
+    fx.reproBin, "workspace", "lock", "--write-report", "lib-a",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 

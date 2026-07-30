@@ -184,7 +184,7 @@ suite "HL-7 — mixed public-clean + team-unpublished refuses":
         let refsFile = sub / "pushed-refs.txt"
         writeFile(refsFile, "refs/heads/main " & pubSha &
           " refs/heads/main 0000000000000000000000000000000000000000\n")
-        let gate = run(reproBinary & " check --mode=pre-push --report" &
+        let gate = run(reproBinary & " check --mode=pre-push --write-report" &
           " --workspace-root=" & q(ws) &
           " --current-repo=" & q(ws / "pub") &
           " --pushed-refs=" & q(refsFile) & " --json")
@@ -216,7 +216,7 @@ suite "HL-7 — mixed public-clean + team-unpublished refuses":
         let refsFile = sub / "pushed-refs.txt"
         writeFile(refsFile, "refs/heads/main " & pubSha &
           " refs/heads/main 0000000000000000000000000000000000000000\n")
-        let gate = run(reproBinary & " check --mode=pre-push --report" &
+        let gate = run(reproBinary & " check --mode=pre-push --write-report" &
           " --workspace-root=" & q(ws) &
           " --current-repo=" & q(ws / "pub") &
           " --pushed-refs=" & q(refsFile) & " --json")

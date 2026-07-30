@@ -282,7 +282,7 @@ proc cleanupScratch(path: string) =
 
 proc invokeInit(fx: Fixture; extraArgs: openArray[string] = []): CmdResult =
   var argv = @[
-    fx.reproBin, "workspace", "init", "--report", "myproject",
+    fx.reproBin, "workspace", "init", "--write-report", "myproject",
     "--workspace-root=" & fx.workspaceRoot,
   ]
   for arg in extraArgs:
@@ -291,7 +291,7 @@ proc invokeInit(fx: Fixture; extraArgs: openArray[string] = []): CmdResult =
 
 proc invokeLock(fx: Fixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "lock", "--report",
+    fx.reproBin, "workspace", "lock", "--write-report",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 

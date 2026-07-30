@@ -227,7 +227,7 @@ suite "RA-12 — auto-trust shell hooks after clone":
         let fakeDirenv = makeFakeDirenv(fx.scratch, logPath)
 
         let init = runShell(shellCommand(@[
-          fx.reproBin, "workspace", "init", "--report", "myproject",
+          fx.reproBin, "workspace", "init", "--write-report", "myproject",
           "--workspace-root=" & fx.workspaceRoot,
         ], @[("REPRO_DIRENV_BIN", fakeDirenv)]))
         if init.code != 0:
@@ -266,7 +266,7 @@ suite "RA-12 — auto-trust shell hooks after clone":
         let fakeDirenv = makeFakeDirenv(fx.scratch, logPath)
 
         let pull = runShell(shellCommand(@[
-          fx.reproBin, "workspace", "pull", "--report", "myproject",
+          fx.reproBin, "workspace", "pull", "--write-report", "myproject",
           "--workspace-root=" & fx.workspaceRoot,
         ], @[("REPRO_DIRENV_BIN", fakeDirenv)]))
         if pull.code != 0:
@@ -291,7 +291,7 @@ suite "RA-12 — auto-trust shell hooks after clone":
         let missing = fx.scratch / "does-not-exist-direnv"
 
         let init = runShell(shellCommand(@[
-          fx.reproBin, "workspace", "init", "--report", "myproject",
+          fx.reproBin, "workspace", "init", "--write-report", "myproject",
           "--workspace-root=" & fx.workspaceRoot,
         ], @[("REPRO_DIRENV_BIN", missing)]))
         if init.code != 0:

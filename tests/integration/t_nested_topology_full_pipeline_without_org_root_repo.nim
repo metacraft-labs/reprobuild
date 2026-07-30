@@ -198,7 +198,7 @@ suite "MO-7: nested-topology full pipeline without an org-root repo":
       let zero = "0000000000000000000000000000000000000000"
       writeFile(refs, "refs/heads/main " & headSha & " refs/heads/main " &
         zero & "\n")
-      let chk = run(reproBinary & " check --mode=pre-push --report --workspace-root=" &
+      let chk = run(reproBinary & " check --mode=pre-push --write-report --workspace-root=" &
         repo & " --pushed-refs=" & refs)
       check chk.code == 0
       check "committed solved-graph lock OK" in chk.output
@@ -212,7 +212,7 @@ suite "MO-7: nested-topology full pipeline without an org-root repo":
       # work artifacts into the (gitignored, so still clean) base tree.
       writeFile(nestedDir / "scratch.txt", "uncommitted\n")
       let dirtyChk = run(reproBinary &
-        " check --mode=pre-push --report --workspace-root=" & repo &
+        " check --mode=pre-push --write-report --workspace-root=" & repo &
         " --pushed-refs=" & refs)
       check dirtyChk.code == 2
       let reportPath = repo / ".repro" / "build" / "reports" / "check-report.json"

@@ -308,7 +308,7 @@ proc withHookCli(fx: Fixture; command: string): tuple[code: int;
   run(command)
 
 proc invokePush(fx: Fixture): tuple[code: int; output: string] =
-  runShell(shellCommand(@[fx.reproBin, "push", "--report", "app", "--no-certify",
+  runShell(shellCommand(@[fx.reproBin, "push", "--write-report", "app", "--no-certify",
     "--workspace-root=" & fx.workspace, "--current-repo=" & fx.app,
     "--json"], @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
 

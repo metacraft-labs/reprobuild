@@ -9,14 +9,14 @@
 ## invalidation or staleness bound, so it could confidently print drift counts
 ## describing a workspace that had since moved; and once the report became
 ## opt-in the segment simply went blank until someone happened to run
-## ``sync --report``. The replacement is ``.repro/build/prompt-cache.json``,
+## ``sync --write-report``. The replacement is ``.repro/build/prompt-cache.json``,
 ## written by the commands that CHANGE workspace state, carrying a timestamp
 ## and the branch it describes.
 ##
 ## Sub-cases:
 ##
 ##   1. ``prompt_cache_written_by_sync_without_report`` — run
-##      ``repro workspace sync`` with NO ``--report``. The prompt cache MUST
+##      ``repro workspace sync`` with NO ``--write-report``. The prompt cache MUST
 ##      exist and no ``sync-report.json`` may be written. ``repro prompt
 ##      --format json`` reports the live repo count, ``cacheWrittenBy = sync``
 ##      and ``stale = false``. This is the regression: the prompt works
@@ -39,7 +39,7 @@
 ##
 ## Falsifiability:
 ##   - If the prompt still scraped ``sync-report.json``, sub-case 1 fails: the
-##     sync ran without ``--report``, so no report exists and the repo count
+##     sync ran without ``--write-report``, so no report exists and the repo count
 ##     would be 0.
 ##   - If the cache had no staleness model (the old behaviour), sub-cases 2
 ##     and 3 fail: ``stale`` would stay false while the numbers described a
@@ -178,7 +178,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
   cloneInto(gitBin, result.originB, workspaceRoot / "lib-b", "side")
 
 proc invokeSyncWithoutReport(fx: Fixture): CmdResult =
-  ## Deliberately NO ``--report``: the prompt must not need one.
+  ## Deliberately NO ``--write-report``: the prompt must not need one.
   runShell(shellCommand(@[
     fx.reproBin, "workspace", "sync", "myproject",
     "--workspace-root=" & fx.workspaceRoot,
@@ -212,7 +212,7 @@ suite "repro prompt reads a purpose-built cache, not a report":
       let fx = setupFixture(gitBin, "main")
       defer: removeDir(fx.scratch)
 
-      # ---- (1) sync WITHOUT --report still feeds the prompt. -------------
+      # ---- (1) sync WITHOUT --write-report still feeds the prompt. -------------
       let syncRes = invokeSyncWithoutReport(fx)
       if syncRes.code notin [0, 2]:
         checkpoint("sync output: " & syncRes.output)

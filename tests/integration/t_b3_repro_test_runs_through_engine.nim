@@ -194,16 +194,16 @@ suite "Bootstrap-And-Self-Build B3: repro test runs through engine":
       attempts.add(@[
         reproBin.quoteShell, "build", ".#test#" & executeStem,
         "--tool-provisioning=path", "--daemon=off",
-        "--report=full", "--log=actions", "--progress=quiet"])
+        "--write-report", "--log=actions", "--progress=quiet"])
       attempts.add(@[
         reproBin.quoteShell, "build", executeStem,
         "--tool-provisioning=path", "--daemon=off",
-        "--report=full", "--log=actions", "--progress=quiet"])
+        "--write-report", "--log=actions", "--progress=quiet"])
       attempts.add(@[
         reproBin.quoteShell, "build",
         "reprobuild.test_execute." & executeStem,
         "--tool-provisioning=path", "--daemon=off",
-        "--report=full", "--log=actions", "--progress=quiet"])
+        "--write-report", "--log=actions", "--progress=quiet"])
 
       var lastOutput = ""
       var lastExit = -1

@@ -201,7 +201,7 @@ suite "HL-2 — pre-push currency read routes per backend":
       let refsFile = scratch / "pushed-refs.txt"
       writeFile(refsFile, "refs/heads/main " & coreSha &
         " refs/heads/main 0000000000000000000000000000000000000000\n")
-      let gate1 = run(reproBinary & " check --mode=pre-push --report" &
+      let gate1 = run(reproBinary & " check --mode=pre-push --write-report" &
         " --workspace-root=" & q(ws) &
         " --current-repo=" & q(ws / "core") &
         " --pushed-refs=" & q(refsFile) & " --json")
@@ -228,7 +228,7 @@ suite "HL-2 — pre-push currency read routes per backend":
       discard requireGit(q(gitBin) & " -C " & q(teamManifest) &
         " commit -m tamper")
 
-      let gate2 = run(reproBinary & " check --mode=pre-push --report" &
+      let gate2 = run(reproBinary & " check --mode=pre-push --write-report" &
         " --workspace-root=" & q(ws) &
         " --current-repo=" & q(ws / "core") &
         " --pushed-refs=" & q(refsFile) & " --json")

@@ -222,7 +222,7 @@ suite "M9 — repro workspace init":
       defer: cleanupScratch(fx.scratch)
 
       let res = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "init", "--report", "myproject",
+        fx.reproBin, "workspace", "init", "--write-report", "myproject",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       if res.code != 0:
@@ -263,7 +263,7 @@ suite "M9 — repro workspace init":
       cloneInto(gitBin, fx.libBOrigin, fx.workspaceRoot / "lib-b")
 
       let res = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "init", "--report", "myproject",
+        fx.reproBin, "workspace", "init", "--write-report", "myproject",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       if res.code != 0:
@@ -297,7 +297,7 @@ suite "M9 — repro workspace init":
         fx.workspaceRoot / "lib-a")
 
       let res = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "init", "--report", "myproject",
+        fx.reproBin, "workspace", "init", "--write-report", "myproject",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       check res.code == 2
@@ -331,7 +331,7 @@ suite "M9 — repro workspace init":
       defer: cleanupScratch(fx.scratch)
 
       let res = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "init", "--report", "nonexistent",
+        fx.reproBin, "workspace", "init", "--write-report", "nonexistent",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       check res.code == 1
@@ -352,7 +352,7 @@ suite "M9 — repro workspace init":
       # Drop the explicit --workspace-root and rely on the dispatcher's
       # ``getCurrentDir()`` fallback.
       let res = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "init", "--report", "myproject",
+        fx.reproBin, "workspace", "init", "--write-report", "myproject",
       ]), cwd = fx.workspaceRoot)
       if res.code != 0:
         checkpoint("output: " & res.output)
