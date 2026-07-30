@@ -89,7 +89,7 @@ proc runBuild(reproBin, repoRoot, selector: string;
     selector,
     "--tool-provisioning=path",
     "--daemon=off",
-    "--write-report=" & (if withReport: "full" else: "none"),
+    (if withReport: "--write-report" else: "--measure=none"),
     "--log=actions",
     "--progress=quiet",
   ]

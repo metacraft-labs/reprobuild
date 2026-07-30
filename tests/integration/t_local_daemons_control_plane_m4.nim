@@ -177,7 +177,10 @@ proc buildCommand(projectRoot, tempRoot: string; extra: openArray[string] = [];
     "--work-root=" & tempRoot / "work",
     "--action-cache-root=" & tempRoot / "action-cache",
     "--progress=quiet",
-    "--log=summary"
+    "--log=summary",
+    # The assertions below read the ``buildReport:`` line, so the full report
+    # is requested explicitly: persisting one is opt-in on success.
+    "--write-report"
   ] & @extra, daemonEnv(daemonEnvRoot) & @env)
 
 proc nimString(value: string): string =
@@ -416,7 +419,8 @@ suite "Local daemons/control-plane M4 daemon-hosted builds":
           "--action-cache-root=" & tempRoot / "action-cache",
           "--progress=quiet",
           "--log=summary",
-          "--no-runquota"
+          "--no-runquota",
+          "--write-report"
         ],
         workingDir = repoRoot(),
         options = {poUsePath, poStdErrToStdOut})

@@ -130,9 +130,10 @@ proc runBuildApps(reproBin, repoRoot: string; withReport: bool):
   #
   # ``withReport=false`` swaps ``--write-report`` for ``--measure=none``
   # on the first (warm-up) invocation. The report write itself is
-  # cheap; the expensive part is per-action ``collectEvidence`` which
-  # runs regardless of the report mode. We still skip the report on
-  # the warm-up because the test only reads it on the SECOND
+  # cheap; the expensive part is per-action ``collectEvidence``, which
+  # runs for every action that EXECUTES regardless of any flag — it is
+  # inherent measurement, not a ``--measure`` category. We still skip the
+  # report on the warm-up because the test only reads it on the SECOND
   # invocation and the engine writes a multi-MB JSON document.
   let args = @[
     reproBin.quoteShell,
@@ -140,7 +141,7 @@ proc runBuildApps(reproBin, repoRoot: string; withReport: bool):
     ".#apps",
     "--tool-provisioning=path",
     "--daemon=off",
-    "--write-report=" & (if withReport: "full" else: "none"),
+    (if withReport: "--write-report" else: "--measure=none"),
     "--log=actions",
     "--progress=quiet",
   ]

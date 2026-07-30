@@ -387,7 +387,8 @@ proc build(reproBin, target, repoRoot, pathValue: string): string =
   # that key on the per-action shape need the action-level log.
   let cacheRoot = repoRoot / ".repro" / "fixture-action-cache"
   requireSuccess(shellCommand(@[reproBin, "build", target,
-    "--daemon=off", "--tool-provisioning=path", "--log=actions"],
+    "--daemon=off", "--tool-provisioning=path", "--log=actions",
+    "--write-report"],
     @[(name: "PATH", value: pathValue),
       (name: "REPROBUILD_ACTION_CACHE_ROOT", value: cacheRoot),
       (name: "REPRO_CACHE_DISABLE", value: "1")]), repoRoot)

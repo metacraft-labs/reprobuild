@@ -175,7 +175,7 @@ suite "t_e2e_repro_build_multiple_named_targets":
     let output = requireSuccess(shellCommand([
       reproBin, "build", "alpha", "beta", "gamma",
       "--daemon=off",
-      "--tool-provisioning=path", "--log=actions"
+      "--tool-provisioning=path", "--log=actions", "--write-report"
     ], [("PATH", pathValue)]), projectRoot)
 
     # Single engine pass: exactly one ``scheduler:`` line is emitted by

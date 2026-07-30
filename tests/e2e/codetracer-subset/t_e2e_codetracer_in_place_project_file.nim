@@ -973,7 +973,8 @@ proc build(reproBin, target, repoRoot, pathValue: string;
   # monitor evidence, and cache behavior. Pin direct mode so they do not couple
   # to a long-lived user daemon started by an earlier test with stale launch env.
   let res = runShell(shellCommand([reproBin, "build", target,
-    "--daemon=off", "--tool-provisioning=path", "--log=actions"], entries),
+    "--daemon=off", "--tool-provisioning=path", "--log=actions",
+    "--write-report"], entries),
     repoRoot)
   if res.code != 0:
     checkpoint(res.output)
@@ -987,7 +988,8 @@ proc buildCurrentProject(reproBin, projectRoot, pathValue: string;
   for item in env:
     entries.add(item)
   let res = runShell(shellCommand([reproBin, "build",
-    "--daemon=off", "--tool-provisioning=path", "--log=actions"],
+    "--daemon=off", "--tool-provisioning=path", "--log=actions",
+    "--write-report"],
     entries), projectRoot)
   if res.code != 0:
     checkpoint(res.output)

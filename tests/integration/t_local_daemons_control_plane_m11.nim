@@ -92,7 +92,10 @@ proc buildCommand(projectRoot, tempRoot, workName: string;
     "--action-cache-root=" & tempRoot / "action-cache",
     "--progress=quiet",
     "--log=summary",
-    "--no-runquota"
+    "--no-runquota",
+    # The assertions below read the ``buildReport:`` line, so the full report
+    # is requested explicitly: persisting one is opt-in on success.
+    "--write-report"
   ] & @extra, daemonEnv(tempRoot, envExtra))
 
 proc watchCommand(projectRoot, tempRoot, workName: string;

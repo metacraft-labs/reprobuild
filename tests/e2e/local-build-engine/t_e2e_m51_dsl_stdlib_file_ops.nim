@@ -57,7 +57,8 @@ proc build(reproBin, target, repoRoot: string): string =
   # in the m51 surface this test guards. Direct mode covers the same
   # build-engine code path, just without the daemon hop.
   requireSuccess(shellCommand([reproBin, "build", target,
-    "--daemon=off", "--tool-provisioning=path", "--log=actions"]),
+    "--daemon=off", "--tool-provisioning=path", "--log=actions",
+    "--write-report"]),
     repoRoot)
 
 proc valueAfter(output, prefix: string): string =
