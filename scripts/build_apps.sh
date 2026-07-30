@@ -292,6 +292,23 @@ if [ -f "build/lib/librepro_project_dsl_runtime.${dll_ext}" ]; then
 fi
 mv -f "build/lib/librepro_project_dsl_runtime.new.${dll_ext}" "build/lib/librepro_project_dsl_runtime.${dll_ext}"
 
+# Windows runtime-DLL staging: the blocks below copy each dlopen'd library next
+# to the built binaries so LoadLibrary resolves it from the .exe's own
+# directory. clingo is unconditionally fatal (module-init dlopen -- see below);
+# libzstd and sqlite3 are loaded lazily by specific subcommands, so a dev build
+# without them is usable and only warns. A RELEASE build must not ship in that
+# state, so release.yml sets REPRO_REQUIRE_WINDOWS_RUNTIME_DLLS=1 to promote
+# those warnings to hard errors. scripts/verify_release.sh independently
+# enforces the same set against the packaged archive.
+windows_dll_staging_problem() {
+  if [ "${REPRO_REQUIRE_WINDOWS_RUNTIME_DLLS:-0}" = "1" ]; then
+    echo "error: $1" >&2
+    echo "       (REPRO_REQUIRE_WINDOWS_RUNTIME_DLLS=1 -- a release build must be self-contained)" >&2
+    exit 1
+  fi
+  echo "warning: $1" >&2
+}
+
 # MR4 -- Windows self-containment: stage clingo.dll next to repro.exe
 # so the Nim ``{.dynlib: "clingo.dll".}`` FFI in
 # ``libs/repro_solver/src/repro_solver/clingo_bindings.nim`` resolves
@@ -310,29 +327,50 @@ mv -f "build/lib/librepro_project_dsl_runtime.new.${dll_ext}" "build/lib/librepr
 # ``windows/ensure-clingo.ps1`` provisioner downloads the same conda
 # package on every install, so the DLL bytes are stable across hosts.
 #
-# When clingo.exe is not on PATH (e.g. a non-env.ps1 dev shell on a
-# host that has never run the bootstrap), we surface a warning rather
-# than failing the build -- ``repro.exe`` still builds; it just won't
-# self-load until the user provisions clingo. M3-style stdlib package
-# resolution (a ``packages/clingo.nim`` entry consumed by the engine's
-# tool-provisioning store) is the durable follow-up; this MR4 step is
-# the smallest fix that unblocks all 17 recorder tests in the
-# clean-shell sweep.
+# This step FAILS the build when it cannot find clingo, and deliberately so.
+# It used to warn and continue, on the reasoning that ``repro.exe`` still
+# builds. It does -- but it does not RUN: the dynlib block is resolved at
+# module init, before ``main``, so a repro.exe without clingo.dll beside it
+# has no working subcommand at all, not even ``--version``. Warning here
+# meant a release could be cut, packaged, "verified", and published in that
+# state (the release smoke test inherited the build host's PATH, where a
+# hand-provisioned C:\clingo satisfied the loader that the archive could not
+# -- see scripts/verify_release.sh). Failing at the staging step puts the
+# error where the missing input actually is.
+#
+# M3-style stdlib package resolution (a ``packages/clingo.nim`` entry consumed
+# by the engine's tool-provisioning store) is still the durable follow-up.
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
-    clingo_exe="$(command -v clingo.exe 2>/dev/null || true)"
-    if [ -n "${clingo_exe}" ]; then
-      clingo_src_dir="$(dirname "${clingo_exe}")"
-      clingo_src_dll="${clingo_src_dir}/clingo.dll"
-      if [ -f "${clingo_src_dll}" ]; then
-        cp -f "${clingo_src_dll}" build/bin/clingo.dll
-        echo "Staged clingo.dll from ${clingo_src_dll} -> build/bin/clingo.dll"
-      else
-        echo "warning: clingo.exe on PATH but sibling clingo.dll missing at ${clingo_src_dll}; repro.exe will fail to load in a clean shell" >&2
-      fi
+    # Prefer the provisioner's own install dir when env.ps1 exported it: it is
+    # the pinned, checksummed copy. Fall back to PATH so a hand-provisioned
+    # host (or one whose clingo came from elsewhere) still builds.
+    clingo_src_dll=""
+    if [ -n "${REPRO_WINDOWS_CLINGO_DIR:-}" ] &&
+       [ -f "${REPRO_WINDOWS_CLINGO_DIR}/clingo.dll" ]; then
+      clingo_src_dll="${REPRO_WINDOWS_CLINGO_DIR}/clingo.dll"
     else
-      echo "warning: clingo.exe not on PATH; cannot stage clingo.dll next to repro.exe -- run env.ps1 or windows/ensure-clingo.ps1 first" >&2
+      clingo_exe="$(command -v clingo.exe 2>/dev/null || true)"
+      if [ -n "${clingo_exe}" ]; then
+        candidate="$(dirname "${clingo_exe}")/clingo.dll"
+        if [ -f "${candidate}" ]; then
+          clingo_src_dll="${candidate}"
+        else
+          echo "error: clingo.exe found at ${clingo_exe} but its sibling clingo.dll is missing at ${candidate}." >&2
+        fi
+      fi
     fi
+    if [ -z "${clingo_src_dll}" ]; then
+      echo "error: cannot stage clingo.dll next to repro.exe -- no clingo found." >&2
+      echo "       repro_solver dlopens clingo.dll at module init, so a repro.exe" >&2
+      echo "       built without it aborts before main on every invocation." >&2
+      echo "       Fix: run '. .\\env.ps1' (which provisions the pinned conda-forge" >&2
+      echo "       clingo via windows/ensure-clingo.ps1), or point" >&2
+      echo "       REPRO_WINDOWS_CLINGO_DIR at a directory containing clingo.dll." >&2
+      exit 1
+    fi
+    cp -f "${clingo_src_dll}" build/bin/clingo.dll
+    echo "Staged clingo.dll from ${clingo_src_dll} -> build/bin/clingo.dll"
     ;;
 esac
 
@@ -376,7 +414,7 @@ case "$(uname -s)" in
         cp -f "${zstd_src_dll}" build/bin/libzstd.dll
         echo "Staged libzstd.dll from ${zstd_src_dll} -> build/bin/libzstd.dll"
       else
-        echo "warning: zstd.exe on PATH at ${zstd_exe} but no sibling libzstd.dll (checked ${zstd_src_dir}/libzstd.dll and ${zstd_src_dir}/dll/libzstd.dll); repro.exe cache substitute will fail to decompress payloads in a clean shell" >&2
+        windows_dll_staging_problem "zstd.exe on PATH at ${zstd_exe} but no sibling libzstd.dll (checked ${zstd_src_dir}/libzstd.dll and ${zstd_src_dir}/dll/libzstd.dll); repro.exe cache substitute will fail to decompress payloads in a clean shell"
       fi
     else
       # TODO(Windows zstd provisioning): once a windows/ensure-zstd.ps1
@@ -386,7 +424,7 @@ case "$(uname -s)" in
       # warns. Intended source: MSYS2 ``pacman -S mingw-w64-x86_64-zstd`` (bin/
       # co-located) or the facebook/zstd v1.5.6 win64 release used by
       # libs/repro_dsl_stdlib/.../packages/zstd.nim.
-      echo "warning: zstd.exe not on PATH; cannot stage libzstd.dll next to repro.exe -- provision zstd (MSYS2 mingw-w64-x86_64-zstd) first" >&2
+      windows_dll_staging_problem "zstd.exe not on PATH; cannot stage libzstd.dll next to repro.exe -- provision zstd (MSYS2 mingw-w64-x86_64-zstd) first"
     fi
     ;;
 esac
@@ -466,7 +504,7 @@ case "$(uname -s)" in
       # nothing and only warns. Intended source: the guest's Nim install
       # (dist/sqlite3_64.dll), which is exactly where the M3b production seed's
       # sqlite3_64.dll was captured from.
-      echo "warning: sqlite3_64.dll not found near nim.exe or on PATH; cannot stage it next to repro.exe -- repro cache will fail 'could not load: sqlite3_64.dll' in a clean shell until Nim's dist sqlite dll is provisioned" >&2
+      windows_dll_staging_problem "sqlite3_64.dll not found near nim.exe or on PATH; cannot stage it next to repro.exe -- repro cache will fail 'could not load: sqlite3_64.dll' in a clean shell until Nim's dist sqlite dll is provisioned"
     fi
     ;;
 esac

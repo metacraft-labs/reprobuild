@@ -10,6 +10,13 @@
 #   * Nim 2.2.x + a working C compiler (gcc/clang/cl)         -- via
 #     ../repo-workspaces/env.ps1 (Ensure-Nim + Ensure-Gcc).
 #   * just + gh + python + gpg + git-repo                     -- same.
+#   * clingo.dll (the ASP solver repro_solver dlopens at module init)
+#                                                             -- via
+#     windows/ensure-clingo.ps1. reprobuild-specific, so it lives here
+#     rather than in the shared framework. On Linux/macOS the flake
+#     devShell supplies it (`pkgs.clingo`); this is the Windows
+#     counterpart, and `scripts/build_apps.sh` stages the DLL it
+#     installs next to the built `repro.exe`.
 #   * Sibling repos checked out alongside `reprobuild/`:
 #       - codetracer/                  (libs/nim-stew, libs/nim-faststreams,
 #                                       libs/nim-serialization, libs/nimcrypto
@@ -32,6 +39,11 @@
 #   $env:WINDOWS_DIY_INSTALL_ROOT = <dir>  where toolchains land
 #
 # Knobs specific to reprobuild:
+#   $env:WINDOWS_DIY_SKIP_CLINGO = "1" skip the clingo step. Note that
+#       every `repro` binary built afterwards will abort at startup with
+#       `could not load: clingo.dll` unless clingo is on PATH by some
+#       other means -- the skip exists for hosts that provision it
+#       independently, not as a way to opt out of the dependency.
 #   $env:STACKABLE_HOOKS_SRC = <path>  override `../nim-stackable-hooks/src`.
 #   $env:RUNQUOTA_SRC     = <path>  override `../runquota`.
 #   $env:NIMCRYPTO_SRC    = <path>  override `../codetracer/libs/nimcrypto`.
@@ -48,6 +60,31 @@ if (-not (Test-Path $repoWorkspacesEnv)) {
     throw "reprobuild env.ps1: cannot find $repoWorkspacesEnv -- check out the repo-workspaces framework as a sibling of this repo."
 }
 . $repoWorkspacesEnv -Quiet
+
+# --- 1b. clingo (reprobuild-specific) ----------------------------------------
+# Dot-sourcing the framework env above brought its helpers ($installRoot,
+# Get-WindowsArch, Test-BootstrapStepEnabled, Read-KeyValueFile, ...) into this
+# scope. The framework's own $toolchain comes from repo-workspaces'
+# toolchain-versions.env, so read THIS repo's pin file for the clingo entries.
+#
+# Unlike the framework steps, a failure here is fatal rather than a warning:
+# every `repro` binary built without clingo aborts at module init, so a build
+# that proceeds past a failed clingo bootstrap only produces a broken binary
+# and defers the error to a much more confusing place.
+$clingoDir = ""
+if (Test-BootstrapStepEnabled "CLINGO") {
+    . (Join-Path $scriptDir "windows\ensure-clingo.ps1")
+    $reproToolchain = Read-KeyValueFile -Path (Join-Path $scriptDir "windows\toolchain-versions.env")
+    $clingoDir = Ensure-Clingo -Root $installRoot -Arch (Get-WindowsArch) -Toolchain $reproToolchain
+    # Two independent handles on the same directory, because
+    # `scripts/build_apps.sh` accepts either: the PATH entry makes
+    # `command -v clingo.exe` resolve (the long-standing discovery route, which
+    # also works for a hand-provisioned clingo), and the explicit variable
+    # names the pinned install directly so staging does not depend on PATH
+    # ordering against some other clingo that may be ahead of it.
+    Add-PathEntry -Dir $clingoDir
+    $env:REPRO_WINDOWS_CLINGO_DIR = $clingoDir
+}
 
 # --- 2. Sibling repo discovery -----------------------------------------------
 $parentDir = Split-Path -Parent $scriptDir
@@ -140,6 +177,7 @@ Write-Host "reprobuild dev environment ready."
 Write-Host "  nim          = $(Get-CommandSource 'nim')"
 Write-Host "  gcc          = $(Get-CommandSource 'gcc')"
 Write-Host "  just         = $(Get-CommandSource 'just')"
+Write-Host "  clingo       = $(if ($clingoDir) { Join-Path $clingoDir 'clingo.dll' } else { '(skipped -- repro.exe will not start)' })"
 Write-Host "  codetracer   = $(if ($codetracerDir) { $codetracerDir } else { '(missing -- see warning)' })"
 Write-Host "  runquota     = $(if ($runquotaDir) { $runquotaDir } else { '(missing -- see warning)' })"
 Write-Host "  stackable-hooks = $(if ($stackableHooksDir) { $stackableHooksDir } else { '(missing -- see warning)' })"

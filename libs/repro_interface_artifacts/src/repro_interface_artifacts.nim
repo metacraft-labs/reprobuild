@@ -3150,6 +3150,69 @@ proc hostRuntimeLinkTarget(): RuntimeLinkTarget =
   else:
     rltOtherPosix
 
+proc stageHostDynlibsBesideBinary*(destDir: string): seq[string]
+    {.discardable.} =
+  ## Windows: copy the dynlibs sitting next to the RUNNING reprobuild
+  ## executable into ``destDir``, so a binary reprobuild compiled for itself
+  ## into a scratch directory can load them.
+  ##
+  ## Every non-system library reprobuild uses on Windows is dlopen'd by leaf
+  ## name (``clingo.dll``, ``libzstd.dll``, ``sqlite3_64.dll``, the OpenSSL
+  ## pair) rather than linked through the import table. Win32's LoadLibrary
+  ## searches the .exe's OWN directory first and PATH last — and the .exe here
+  ## is not ``repro.exe`` but the helper reprobuild just compiled into a temp
+  ## or scratch tree, whose directory contains no DLLs at all. So the loader
+  ## falls through to PATH, and the helper starts only on hosts that happen to
+  ## carry clingo there.
+  ##
+  ## That "happens to" is the bug this closes: ``repro_solver``'s clingo
+  ## binding is resolved at MODULE INIT, before ``main``, so on a host without
+  ## clingo on PATH the helper aborts with ``could not load: clingo.dll``
+  ## before running a single line of its own code — which is what an installed
+  ## repro looks like to a user who never provisioned a dev environment.
+  ##
+  ## Copying rather than prepending the app dir to the child's ``PATH`` is
+  ## deliberate. Reprobuild goes out of its way NOT to leak its own library
+  ## directories into the environment of the actions it runs (see the
+  ## ``LD_LIBRARY_PATH`` / ``DYLD_*`` reasoning in ``externalHashFlags`` and
+  ## ``repro_provider_runtime/runtime.nim``); a PATH edit would put reprobuild's
+  ## OpenSSL and sqlite ahead of whatever the user's own build actions resolve,
+  ## which is exactly the kind of ambient influence hermeticity forbids. A copy
+  ## is scoped to the one directory that needs it.
+  ##
+  ## Returns the leaf names staged, so callers and tests can assert coverage.
+  ## Failures to copy an individual DLL are non-fatal: the loader error the
+  ## helper raises later is more specific than anything we could report here.
+  when defined(windows):
+    let appDir = parentDir(getAppFilename())
+    if appDir.len == 0 or destDir.len == 0:
+      return @[]
+    # Nothing to do when the helper already lives beside the app's DLLs;
+    # copyFile onto itself would truncate the source.
+    if cmpPaths(absolutePath(appDir), absolutePath(destDir)) == 0:
+      return @[]
+    for kind, path in walkDir(appDir):
+      if kind != pcFile or not path.toLowerAscii.endsWith(".dll"):
+        continue
+      let leaf = extractFilename(path)
+      let dest = destDir / leaf
+      try:
+        # Skip an already-staged copy of the same size. The provider scratch
+        # dir persists across builds, so re-copying ~12 MB of DLLs on every
+        # provider compile would be pure overhead.
+        if fileExists(extendedPath(dest)) and
+           getFileSize(extendedPath(dest)) == getFileSize(extendedPath(path)):
+          result.add(leaf)
+          continue
+        copyFile(path, dest)
+        result.add(leaf)
+      except CatchableError:
+        discard
+  else:
+    # POSIX resolves these through DT_RUNPATH / LC_RPATH baked in at link time
+    # by `runtimeRpathCompilerFlags`, so there is nothing to stage.
+    discard
+
 proc externalHashFlags(workDir = ""): seq[string] =
   # Windows: there is no homebrew/nix prefix that ships libblake3 or libxxhash.
   # The reprobuild repo vendors portable C sources for both inside the
@@ -3632,15 +3695,9 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
         ", compiler reported success but produced no binary): " &
         runnerExe & "\ncompiler output:\n" & compileExecution.output &
         "\ndirectory listing of " & runnerExeDir & ":\n" & listing)
-  when defined(windows):
-    # Copy DLLs from the application directory to tempRoot so the runner can resolve them
-    let appDir = parentDir(getAppFilename())
-    for kind, path in walkDir(appDir):
-      if kind == pcFile and path.endsWith(".dll"):
-        try:
-          copyFile(path, tempRoot / extractFilename(path))
-        except CatchableError:
-          discard
+  # Windows: the runner dlopens clingo/sqlite/zstd/OpenSSL by leaf name and
+  # lives in a temp tree with no DLLs of its own. See the proc's docstring.
+  stageHostDynlibsBesideBinary(parentDir(runnerExe))
   ensureExecutable(runnerExe)
   let execution = runCommand(@[
     runnerExe,
@@ -4245,6 +4302,14 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
     raise newException(IOError,
       "provider compilation did not write binary: " & plan.outputBinaryPath &
         "\n" & execution.output)
+  # Windows: the provider binary links repro's DSL, which pulls in
+  # `repro_solver` and its module-init clingo dlopen — the same requirement the
+  # interface-extract runner has. The provider is spawned directly from its own
+  # scratch directory (`repro_provider_runtime/runtime.nim`), so LoadLibrary
+  # searches THAT directory, not repro's bin. Without this the provider aborts
+  # at startup with `could not load: clingo.dll` on any host that does not
+  # carry clingo on PATH.
+  stageHostDynlibsBesideBinary(parentDir(plan.outputBinaryPath))
   result = ProviderCompileArtifact(
     inputSources: plan.inputSources,
     outputBinaryPath: plan.outputBinaryPath,

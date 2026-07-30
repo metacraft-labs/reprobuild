@@ -109,8 +109,20 @@ jobs:
       - name: Bootstrap and Build (Windows)
         if: matrix.os-name == 'windows'
         shell: pwsh
+        env:
+          # Promote scripts/build_apps.sh's runtime-DLL staging warnings to hard
+          # errors. A dev build missing libzstd/sqlite3 is merely degraded; a
+          # RELEASE missing them is broken for every user who unpacks it, and
+          # the failure surfaces far from the cause. clingo is fatal regardless
+          # (module-init dlopen), so it does not depend on this flag.
+          REPRO_REQUIRE_WINDOWS_RUNTIME_DLLS: "1"
         run: |
-          # env.ps1 from setup-dev-env is already sourced in GITHUB_ENV/PATH
+          # env.ps1 from setup-dev-env is already sourced in GITHUB_ENV/PATH.
+          # That is what provisions the pinned conda-forge clingo via
+          # windows/ensure-clingo.ps1 and exports REPRO_WINDOWS_CLINGO_DIR,
+          # which build_apps.sh stages into build/bin. Before that provisioner
+          # existed, clingo.dll was picked up only if the runner happened to
+          # carry a hand-provisioned C:\clingo on its machine PATH.
           Push-Location ../runquota
           just build
           Pop-Location
@@ -128,7 +140,10 @@ jobs:
             Copy-Item -Path (Join-Path $dllDir "libssl-3-x64.dll") -Destination "build\bin\" -Force
             Write-Host "Staged OpenSSL DLLs from $dllDir"
           } else {
-            Write-Warning "libcrypto-3-x64.dll not found on system"
+            # Hard error, not a warning: the archive is published from whatever
+            # build\bin holds at packaging time, so a warning here becomes a
+            # broken download rather than a failed build.
+            throw "libcrypto-3-x64.dll not found on system; cannot produce a self-contained release archive"
           }
 
           $zstdSearchPaths = @()
@@ -142,7 +157,7 @@ jobs:
             Copy-Item -Path (Join-Path $dllDir "libzstd.dll") -Destination "build\bin\" -Force
             Write-Host "Staged libzstd.dll from $dllDir"
           } else {
-            Write-Warning "libzstd.dll not found on system"
+            throw "libzstd.dll not found on system; cannot produce a self-contained release archive"
           }
 
           .\build\bin\repro.exe build --tool-provisioning=path --daemon=off --no-runquota .#reprobuild.build_apps
