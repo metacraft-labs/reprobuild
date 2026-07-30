@@ -240,24 +240,25 @@ suite "M4c: resource reconcile over the nimRtl Nim-native fast path (no marshal)
       rtlNimRtlShared, repoRoot, tempRoot)[0]  # the resolved nim compiler path
 
     # ── The nimRtl-shared END-TO-END build (nimrtl + provider .so + host) ──
-    # In Nim 2.2.4 this toolchain has an UPSTREAM nimRtl bug: `std/streams`
-    # (which the `reproProviderMode` closure imports via `repro_project_dsl`)
-    # fails to compile under `-d:useNimRtl` — `ssReadDataStr`'s inferred
-    # `raises: []` effect mismatches the `readDataStrImpl` field type
-    # (streams.nim ~1316, "raise effects differ"). That blocks the provider
-    # `.so` (and any `-d:useNimRtl` module pulling streams). We DETECT that
-    # specific failure and SKIP the direct-path witnesses with a clear
-    # diagnostic — the transport plumbing + the action-key discrimination
-    # (already asserted above) are proven; the end-to-end fast path is gated
-    # on the upstream fix (bump Nim / patch stdlib / drop streams from the
-    # provider-mode closure). If a future toolchain builds it, the witnesses
-    # run for real.
-    proc looksLikeStreamsNimRtlBug(output: string): bool =
-      output.contains("streams.nim") and output.contains("raise effects differ")
-
+    # HISTORY: under Nim 2.2.4 this toolchain hit an UPSTREAM nimRtl bug —
+    # `std/streams` (which the `reproProviderMode` closure imports via
+    # `repro_project_dsl`) failed to compile under `-d:useNimRtl` because
+    # `ssReadDataStr`'s inferred `raises: []` effect mismatched the
+    # `readDataStrImpl` field type (streams.nim ~1316, "raise effects
+    # differ"). The test used to sniff that message out of the compiler
+    # output and fall back to `check standaloneSo.len > 0` — a near-vacuous
+    # assertion that would have reported a green direct-path gate while the
+    # direct path was never built, let alone exercised.
+    #
+    # That fallback is GONE. Every build step below raises with the full
+    # compiler output on failure, so the direct-call witnesses at the end of
+    # this test always run. If a toolchain ever reintroduces the streams /
+    # nimRtl effect mismatch (or any other `-d:useNimRtl` breakage), this
+    # test FAILS and prints the exact compiler diagnostic — strictly more
+    # informative than a hard-coded toolchain-version assertion, and it
+    # cannot silently degrade to "the standalone .so exists".
     let nimrtlSo = tempRoot / ("libnimrtl." & soExt())
     var sharedSo, standaloneSo, hostBin = ""
-    var directBuilt = false
 
     proc buildStandaloneProvider(): string =
       ## The C-ABI standalone provider .so always builds (no useNimRtl).
@@ -274,15 +275,14 @@ suite "M4c: resource reconcile over the nimRtl Nim-native fast path (no marshal)
 
     standaloneSo = buildStandaloneProvider()
 
-    block nimrtlBuild:
+    block:
       # 1) the ONE shared nimrtl
       let cmd = @[nimBin, "c", "-d:createNimRtl", "-d:release", "--mm:orc",
         "--app:lib"] & selfBindFlags() &
         @["--out:" & nimrtlSo, locateNimrtlSource()]
       let (o, c) = execCmdEx(quoteShellCommand(cmd), workingDir = repoRoot)
       if c != 0 or not fileExists(nimrtlSo):
-        checkpoint("nimrtl build failed:\n" & o)
-        break nimrtlBuild
+        raise newException(IOError, "nimrtl build failed (" & $c & "):\n" & o)
 
       # 2) the nimRtl-shared provider .so (fast-path surface)
       let so = tempRoot / ("libshared." & soExt())
@@ -295,12 +295,6 @@ suite "M4c: resource reconcile over the nimRtl Nim-native fast path (no marshal)
         pcmd.insert(flag, pcmd.len - 1)
       let (po, pc) = execCmdEx(quoteShellCommand(pcmd), workingDir = repoRoot)
       if pc != 0 or not fileExists(so):
-        if looksLikeStreamsNimRtlBug(po):
-          checkpoint("SKIP direct path: upstream nimRtl+std/streams bug in " &
-            "Nim 2.2.4 blocks the -d:useNimRtl provider .so build " &
-            "(streams.nim 'raise effects differ'). Transport plumbing + " &
-            "RTL-mode action-key discrimination verified above.")
-          break nimrtlBuild
         raise newException(IOError, "nimRtl provider build failed (" & $pc &
           "):\n" & po)
       sharedSo = so
@@ -318,14 +312,9 @@ suite "M4c: resource reconcile over the nimRtl Nim-native fast path (no marshal)
       hcmd.add(@["--out:" & hb, hostSrc])
       let (ho, hc) = execCmdEx(quoteShellCommand(hcmd), workingDir = repoRoot)
       if hc != 0 or not fileExists(hb):
-        if looksLikeStreamsNimRtlBug(ho):
-          checkpoint("SKIP direct path: upstream nimRtl+std/streams bug " &
-            "blocks the -d:useNimRtl host driver build.")
-          break nimrtlBuild
         raise newException(IOError, "host driver build failed (" & $hc &
           "):\n" & ho)
       hostBin = hb
-      directBuilt = true
 
     # Run helper: the driver, given a provider .so, prints KEY=VALUE witnesses.
     proc runDriver(so: string): Table[string, string] =
@@ -349,28 +338,20 @@ suite "M4c: resource reconcile over the nimRtl Nim-native fast path (no marshal)
         let kv = line.split('=', 1)
         if kv.len == 2: result[kv[0]] = kv[1]
 
-    if not directBuilt:
-      # The end-to-end nimRtl fast path is blocked by the upstream
-      # nimRtl+std/streams bug (diagnosed above). The action-key discrimination
-      # (§4.4) is already asserted; that is the part that lands here. The
-      # direct-call witnesses run automatically once a toolchain builds the
-      # `-d:useNimRtl` provider .so.
-      check standaloneSo.len > 0            # C-ABI path artifact exists
-    else:
-      # ── DIRECT PATH: nimRtl-shared provider, no marshal ──────────────────
-      let direct = runDriver(sharedSo)
-      check direct["USES_NIMRTL"] == "true"
-      check direct["RESOURCE_ID"] == "counter:hits"
-      check direct["WORLD"] == "7"
-      # NO-MARSHAL WITNESS: the driver ops ran (callCount>0) but performed ZERO
-      # C-ABI encode/decode marshals — the live typed values crossed directly.
-      check parseInt(direct["CALL_COUNT"]) > 0
-      check direct["MARSHAL_COUNT"] == "0"
+    # ── DIRECT PATH: nimRtl-shared provider, no marshal ────────────────────
+    let direct = runDriver(sharedSo)
+    check direct["USES_NIMRTL"] == "true"
+    check direct["RESOURCE_ID"] == "counter:hits"
+    check direct["WORLD"] == "7"
+    # NO-MARSHAL WITNESS: the driver ops ran (callCount>0) but performed ZERO
+    # C-ABI encode/decode marshals — the live typed values crossed directly.
+    check parseInt(direct["CALL_COUNT"]) > 0
+    check direct["MARSHAL_COUNT"] == "0"
 
-      # ── FALLBACK: standalone C-ABI provider, buffer path ─────────────────
-      let fallback = runDriver(standaloneSo)
-      check fallback["USES_NIMRTL"] == "false"
-      check fallback["RESOURCE_ID"] == "counter:hits"
-      check fallback["WORLD"] == "7"
-      # The SAME provider logic, but over the C-ABI buffer path: marshals > 0.
-      check parseInt(fallback["MARSHAL_COUNT"]) > 0
+    # ── FALLBACK: standalone C-ABI provider, buffer path ───────────────────
+    let fallback = runDriver(standaloneSo)
+    check fallback["USES_NIMRTL"] == "false"
+    check fallback["RESOURCE_ID"] == "counter:hits"
+    check fallback["WORLD"] == "7"
+    # The SAME provider logic, but over the C-ABI buffer path: marshals > 0.
+    check parseInt(fallback["MARSHAL_COUNT"]) > 0
