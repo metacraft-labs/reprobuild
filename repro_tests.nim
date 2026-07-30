@@ -478,6 +478,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim",
+    binary: "build/test-bin/t_lock_publish_push_race_classification",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim",
     binary: "build/test-bin/t_m5_peer_cache_build_wiring",
     defines: @[],
