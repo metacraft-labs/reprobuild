@@ -4314,6 +4314,28 @@ proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
   populateFromSourceSearchPathsImpl(profile, recipeDir, effectiveRoot,
     visited, 0)
 
+proc fromSourceSearchPathsCurrent*(profile: PathOnlyToolProfile): bool =
+  ## Return whether a cached from-source profile still describes the
+  ## auxiliary paths currently exposed by its recipe closure. Source
+  ## packages can be rebuilt into a different FHS layout (most commonly
+  ## ``lib`` changing to ``lib64``) without changing the consumer's project
+  ## interface. Reusing the old identity in that case leaves pkg-config and
+  ## the linker pointed at directories that no longer contain the dependency.
+  if profile.installMethod != "from-source":
+    return true
+  if profile.selectedStorePath.len == 0 or
+      profile.resolvedExecutablePath.len == 0:
+    return false
+
+  var current = PathOnlyToolProfile(
+    pathSearchList: @[parentDir(profile.resolvedExecutablePath)])
+  populateFromSourceSearchPaths(current, profile.selectedStorePath)
+  current.pathSearchList == profile.pathSearchList and
+    current.pkgConfigSearchList == profile.pkgConfigSearchList and
+    current.cmakePrefixList == profile.cmakePrefixList and
+    current.cpathList == profile.cpathList and
+    current.libraryPathList == profile.libraryPathList
+
 proc dryRunPlannedFromSourceProfile(useDef: InterfaceToolUse;
                                     recipeDir, expectedArtifact: string):
     PathOnlyToolProfile =

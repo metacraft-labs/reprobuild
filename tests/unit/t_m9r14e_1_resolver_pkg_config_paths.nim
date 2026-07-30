@@ -181,6 +181,33 @@ suite "DSL-port M9.R.14e.1 — resolver populates pkg-config / cmake / CPATH / l
     check first.libraryPathList == second.libraryPathList
     removeDir(scratch)
 
+  test "cached profile detects a newly available lib64 search path":
+    let scratch = createTempDir("repro_m9r14e_1_", "")
+    createDir(scratch / "libfresh")
+    writeFile(scratch / "libfresh" / "repro.nim",
+      "## synthetic libfresh recipe\n")
+    let outDir = scratch / "libfresh" / ".repro" / "output" / "libfresh"
+    createDir(outDir)
+    writeFile(outDir / ("libfresh" & PlatformLibSuffix),
+      "\x7fELF\x02\x01\x01\x00")
+    layStagedTree(scratch, "libfresh",
+      pcNames = ["fresh.pc"], headerNames = ["fresh.h"],
+      libBareNames = ["fresh"])
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("libfresh"), scratch)
+    check outcome.kind == rrResolved
+    check outcome.profile.fromSourceSearchPathsCurrent()
+
+    let prefix = scratch / "libfresh" / "build" / "out" / "usr"
+    createDir(prefix / "lib64" / "pkgconfig")
+    writeFile(prefix / "lib64" / "pkgconfig" / "fresh64.pc",
+      "# newly materialized pc\n")
+    writeFile(prefix / "lib64" / ("libfresh64" & PlatformLibSuffix),
+      "\x7fELF\x02\x01\x01\x00")
+    check not outcome.profile.fromSourceSearchPathsCurrent()
+    removeDir(scratch)
+
   test "tryResolveFromSourceTool emits the search-path channels":
     # The end-to-end resolver path must thread the populator's output
     # onto the resolved profile so the CLI projection sees populated

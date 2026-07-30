@@ -4447,6 +4447,8 @@ proc toolIdentityRealizationsUsable(identity: PathOnlyBuildIdentity): bool =
     if profile.resolvedExecutablePath.len > 0 and
         not fileExists(extendedPath(profile.resolvedExecutablePath)):
       return false
+    if not profile.fromSourceSearchPathsCurrent():
+      return false
   true
 
 proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
