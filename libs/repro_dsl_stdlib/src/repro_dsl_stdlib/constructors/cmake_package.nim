@@ -99,7 +99,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
       escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
   script.add("rm -rf \"" & escapedExtracted & "\"; ")
   script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
-  script.add("touch \"" & escapedStamp & "\"")
+  script.add(": > \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
   let act = buildAction(
     id = cmakeFetchActionId(packageName),
@@ -203,7 +203,7 @@ proc cmake_package*(srcDir: string;
       # ``sed -i 's/X/Y/' src/foo.txt``). Append in declaration order
       # so subsequent patches see prior edits.
       script.add(sedExpr & "; ")
-    script.add("touch \"" & escapedStamp & "\"")
+    script.add(": > \"" & escapedStamp & "\"")
     var patchDeps: seq[string] = @[]
     var patchInputs: seq[string] = @[]
     if fetchActOpt.isSome:
@@ -242,6 +242,26 @@ proc cmake_package*(srcDir: string;
   # convention assumption that breaks under sibling install prefixes.
   # Threading each ``<Component>_DIR`` explicitly is the surgical fix.
   var effectiveCacheVars = cacheVars
+  var linkLibraryDirs: seq[string] = @[]
+  # ECM's KDEClangFormat module generates .clang-format in the source tree
+  # whenever clang-format is discoverable. Its platform check also opens the
+  # source-tree metainfo.yaml through CMake's file API, which the I/O monitor
+  # classifies as a write-capable access. Disable both optional developer-time
+  # behaviors so configure edges remain read-only.
+  for raw in registeredNativeBuildDeps(pkgName) & registeredBuildDeps(pkgName):
+    if raw == "extra-cmake-modules" or raw.startsWith("extra-cmake-modules "):
+      var hasKdeClangFormatExecutable = false
+      var hasKfIgnorePlatformCheck = false
+      for entry in effectiveCacheVars:
+        if entry.startsWith("KDE_CLANG_FORMAT_EXECUTABLE="):
+          hasKdeClangFormatExecutable = true
+        if entry.startsWith("KF_IGNORE_PLATFORM_CHECK="):
+          hasKfIgnorePlatformCheck = true
+      if not hasKdeClangFormatExecutable:
+        effectiveCacheVars.add("KDE_CLANG_FORMAT_EXECUTABLE=")
+      if not hasKfIgnorePlatformCheck:
+        effectiveCacheVars.add("KF_IGNORE_PLATFORM_CHECK=ON")
+      break
   if projectRoot.len > 0:
     var hasInstallPrefix = false
     for entry in effectiveCacheVars:
@@ -251,6 +271,29 @@ proc cmake_package*(srcDir: string;
     if not hasInstallPrefix:
       effectiveCacheVars.add("CMAKE_INSTALL_PREFIX=" & effectiveInstallPrefix)
   if projectRoot.len > 0:
+    proc appendExistingLinkDir(candidate: string) =
+      if candidate.len > 0 and dirExists(candidate) and
+          candidate notin linkLibraryDirs:
+        linkLibraryDirs.add(candidate)
+
+    let recipesRoot = parentDir(projectRoot)
+    for candidate in m9r14fCollectDepMirrorLibDirs(projectRoot, pkgName):
+      appendExistingLinkDir(candidate)
+    for candidate in m9r30ReadPropagatedLibDirs(
+        m9r30CollectDepPropagatedManifestPaths(projectRoot, pkgName)):
+      appendExistingLinkDir(candidate)
+
+    # Qt6Gui's virtual Mesa dependency is not part of the recipe's declared
+    # dependency list. Include both its own library directories and its
+    # propagated closure (notably Wayland) in the build-time link search.
+    for dep in m9r15oCollectQt6TransitiveCmakeDeps(projectRoot, pkgName):
+      for candidate in packageInstallMirrorLibDirs(recipesRoot, dep):
+        appendExistingLinkDir(candidate)
+      let manifestPath = packageInstallMirrorPropagatedManifestPath(
+        recipesRoot, dep, m9r30PropagatedManifestName)
+      for candidate in m9r30ReadPropagatedLibDirs(@[manifestPath]):
+        appendExistingLinkDir(candidate)
+
     let qt6CompDirs = m9r15iCollectQt6ComponentDirs(projectRoot, pkgName)
     for entry in m9r15iEmitQt6ComponentCacheVars(qt6CompDirs):
       effectiveCacheVars.add(entry)
@@ -336,17 +379,20 @@ proc cmake_package*(srcDir: string;
     # across re-configures. Recipes that need different link flags can
     # still override via their own cacheVars entries — CMake honours
     # the LAST -D<var>=<value> wins.
-    var hasExeLinkerFlags = false
-    var hasSharedLinkerFlags = false
-    for v in effectiveCacheVars:
-      if v.startsWith("CMAKE_EXE_LINKER_FLAGS="):
-        hasExeLinkerFlags = true
-      if v.startsWith("CMAKE_SHARED_LINKER_FLAGS="):
-        hasSharedLinkerFlags = true
-    if not hasExeLinkerFlags:
-      effectiveCacheVars.add("CMAKE_EXE_LINKER_FLAGS=-Wl,--copy-dt-needed-entries")
-    if not hasSharedLinkerFlags:
-      effectiveCacheVars.add("CMAKE_SHARED_LINKER_FLAGS=-Wl,--copy-dt-needed-entries")
+    var transitiveLinkerFlags = "-Wl,--copy-dt-needed-entries"
+    for libDir in linkLibraryDirs:
+      transitiveLinkerFlags.add(" -Wl,-rpath-link," & libDir)
+    proc appendLinkerFlags(cacheKey: string) =
+      var lastMatch = -1
+      for i, value in effectiveCacheVars:
+        if value.startsWith(cacheKey & "="):
+          lastMatch = i
+      if lastMatch >= 0:
+        effectiveCacheVars[lastMatch].add(" " & transitiveLinkerFlags)
+      else:
+        effectiveCacheVars.add(cacheKey & "=" & transitiveLinkerFlags)
+    appendLinkerFlags("CMAKE_EXE_LINKER_FLAGS")
+    appendLinkerFlags("CMAKE_SHARED_LINKER_FLAGS")
     # M9.R.33.2 — auto-thread Qt6 FindXxx.cmake module dirs into
     # CMAKE_MODULE_PATH and GLESv2 hints into cacheVars whenever any
     # qt6-* dep is declared on the recipe.  Without this, a fresh
@@ -491,38 +537,7 @@ proc cmake_package*(srcDir: string;
   # of paths into the build script via ``export LD_LIBRARY_PATH`` makes
   # the channel bulletproof.  Inert in unit-test mode (empty
   # ``projectRoot``).
-  proc m9r15q13StripDepConstraint(value: string): string =
-    for i, ch in value:
-      if ch == ' ' or ch == '>' or ch == '<' or ch == '=' or
-          ch == '~' or ch == '^':
-        return value[0 ..< i]
-    return value
-  var ldLibraryDirs: seq[string] = @[]
-  if projectRoot.len > 0:
-    # ``projectRoot`` is the recipe's package dir
-    # (``recipes/packages/source/<pkg>``).  ``parentDir`` is the sibling
-    # recipes' container (``recipes/packages/source``); siblings live
-    # alongside as ``<recipesRoot>/<dep>/.repro/output/install/usr``.
-    let recipesRoot = parentDir(projectRoot)
-    var allDeps: seq[string] = @[]
-    for raw in registeredNativeBuildDeps(pkgName):
-      allDeps.add(m9r15q13StripDepConstraint(raw))
-    for raw in registeredBuildDeps(pkgName):
-      allDeps.add(m9r15q13StripDepConstraint(raw))
-    for dep in allDeps:
-      if dep.len == 0:
-        continue
-      let sibRoot = recipesRoot / dep / ".repro" / "output" / "install" / "usr"
-      for sub in @["lib", "lib64"]:
-        let candidate = sibRoot / sub
-        if dirExists(candidate):
-          var present = false
-          for p in ldLibraryDirs:
-            if p == candidate:
-              present = true
-              break
-          if not present:
-            ldLibraryDirs.add(candidate)
+  let ldLibraryDirs = linkLibraryDirs
   let buildScript = block:
     var s = "set -e; "
     if ldLibraryDirs.len > 0:
@@ -535,7 +550,7 @@ proc cmake_package*(srcDir: string;
     for a in buildArgv:
       quoted.add("\"" & a.replace("\"", "\\\"") & "\"")
     s.add(quoted.join(" ") & "; ")
-    s.add("touch \"" & buildStamp.replace("\\", "/") & "\"")
+    s.add(": > \"" & buildStamp.replace("\\", "/") & "\"")
     s
   let buildEdge = buildAction(
     id = "cmake-build-" & pkgName,
@@ -591,7 +606,7 @@ proc cmake_package*(srcDir: string;
     for a in installArgv:
       quoted.add("\"" & a.replace("\"", "\\\"") & "\"")
     s.add(quoted.join(" ") & "; ")
-    s.add("touch \"" & installStamp.replace("\\", "/") & "\"")
+    s.add(": > \"" & installStamp.replace("\\", "/") & "\"")
     s
   let installEdge = buildAction(
     id = "cmake-install-" & pkgName,

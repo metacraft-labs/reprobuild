@@ -162,7 +162,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   var script = "set -e; "
   script.add("rm -rf \"" & escapedStaged & "\"; ")
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
-  # Download (curl) → hash-verify → extract → touch stamp. ``file://``
+  # Download (curl) → hash-verify → extract → write stamp. ``file://``
   # URLs are handled by curl natively for the vendored-tarball case.
   script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
   script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" & escapedUrl &
@@ -201,7 +201,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
       escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
   script.add("rm -rf \"" & escapedExtracted & "\"; ")
   script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
-  script.add("touch \"" & escapedStamp & "\"")
+  script.add(": > \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
   # The fetch action is a pure source-acquisition step
   # (download → verify → extract): it has NO monitorable file-dependency

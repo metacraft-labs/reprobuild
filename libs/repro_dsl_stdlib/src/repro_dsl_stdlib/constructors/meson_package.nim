@@ -123,7 +123,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
       escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
   script.add("rm -rf \"" & escapedExtracted & "\"; ")
   script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
-  script.add("touch \"" & escapedStamp & "\"")
+  script.add(": > \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
   let act = buildAction(
     id = mesonFetchActionId(packageName),
@@ -230,7 +230,7 @@ proc meson_package*(srcDir: string;
       # ``sed -i 's/X/Y/' src/foo.txt``). Append in declaration order
       # so subsequent patches see prior edits.
       script.add(sedExpr & "; ")
-    script.add("touch \"" & escapedStamp & "\"")
+    script.add(": > \"" & escapedStamp & "\"")
     var patchDeps: seq[string] = @[]
     var patchInputs: seq[string] = @[]
     if fetchActOpt.isSome:
@@ -252,7 +252,7 @@ proc meson_package*(srcDir: string;
     let cleanStamp = projectRoot / ".repro" / "build" / "meson-clean.stamp"
     let buildDirAbs = projectRoot / buildDir
     let cleanScript = "set -e; rm -rf \"" &
-      buildDirAbs.replace("\"", "\\\"") & "\"; touch \"" &
+      buildDirAbs.replace("\"", "\\\"") & "\"; : > \"" &
       cleanStamp.replace("\"", "\\\"") & "\""
     var cleanDeps: seq[string] = @[]
     var cleanInputs: seq[string] = @[]

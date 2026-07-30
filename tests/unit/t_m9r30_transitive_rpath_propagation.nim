@@ -40,7 +40,7 @@
 ##    reference the manifest mechanism (so existing M9.R.14f.2 tests
 ##    still pass).
 
-import std/[strutils, unittest]
+import std/[os, strutils, tempfiles, unittest]
 
 import repro_dsl_stdlib/types/package_result
 
@@ -48,6 +48,24 @@ suite "DSL-port M9.R.30.2 — transitive RPATH propagation":
 
   test "manifest_filename_is_well_known_constant":
     check m9r30PropagatedManifestName == ".m9r30_propagated_libdirs.txt"
+
+  test "propagated_lib_dirs_are_available_to_build_actions":
+    let scratch = createTempDir("repro-m9r30-build-dirs-", "")
+    defer: removeDir(scratch)
+    let first = scratch / "first.txt"
+    let second = scratch / "second.txt"
+    writeFile(first, "/recipes/wayland/usr/lib\n\n/recipes/mesa/usr/lib64\n")
+    writeFile(second, "/recipes/mesa/usr/lib64\n/recipes/libdrm/usr/lib\n")
+
+    check m9r30ReadPropagatedLibDirs(@[
+      first,
+      scratch / "missing.txt",
+      second,
+    ]) == @[
+      "/recipes/wayland/usr/lib",
+      "/recipes/mesa/usr/lib64",
+      "/recipes/libdrm/usr/lib",
+    ]
 
   test "default_args_preserve_M9R14f2_backward_compat":
     # Calling with only the two original args MUST produce a script

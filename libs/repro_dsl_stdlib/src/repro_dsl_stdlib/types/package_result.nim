@@ -468,6 +468,20 @@ proc m9r30CollectDepPropagatedManifestPaths*(projectRoot, packageName: string):
   for raw in registeredBuildDeps(packageName):
     appendManifestPath(result, raw)
 
+proc m9r30ReadPropagatedLibDirs*(manifestPaths: openArray[string]):
+    seq[string] =
+  ## Read already-materialized propagated-library manifests for use by
+  ## configure and link actions. Missing manifests are expected during a
+  ## bottom-up bootstrap and contribute no entries. Preserve declaration and
+  ## line order while removing blanks and duplicates.
+  for manifestPath in manifestPaths:
+    if manifestPath.len == 0 or not fileExists(manifestPath):
+      continue
+    for raw in readFile(manifestPath).splitLines():
+      let libDir = raw.strip()
+      if libDir.len > 0 and libDir notin result:
+        result.add(libDir)
+
 # ---------------------------------------------------------------------------
 # M9.R.15i.1 — Qt6 component CMake-config dir threading.
 # ---------------------------------------------------------------------------
