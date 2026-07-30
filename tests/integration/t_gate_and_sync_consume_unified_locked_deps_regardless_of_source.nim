@@ -104,7 +104,7 @@ suite "MO-9 — gate + sync consume the unified locked deps regardless of source
         body: recordBody("app", appSha)))
       doAssert put.outcome == spoOk, put.diagnostic
       let appResolved = ResolvedRepo(name: "app", path: "app",
-        remoteName: "origin", fetchUrl: appUrl, revision: "main",
+        projectRemote: "origin", fetchUrl: appUrl, revision: "main",
         visibility: wvPublic)
       let storeLd = populateLockedDeps(LockSource(kind: lskExternalStore,
         workspaceRoot: ws, projectName: "demo", repos: @[appResolved],

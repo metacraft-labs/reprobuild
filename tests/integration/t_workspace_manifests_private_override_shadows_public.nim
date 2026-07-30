@@ -6,7 +6,7 @@
 ## layers), resolves each layer's `projects/<project>.toml` via M6's
 ## `resolveProject`, and merges the per-layer `ResolvedProject` values
 ## into one flat `ResolvedProject`. Later layers shadow earlier ones on
-## the `(name, path, remoteName)` triple; non-matching repos APPEND.
+## the `(name, path, projectRemote)` triple; non-matching repos APPEND.
 ##
 ## Fixture: hermetic local bare git repos stand in for the public and
 ## private manifest URLs. Each bare repo is built by committing a real
@@ -439,7 +439,7 @@ includes = []
 
       # The public layer is well-formed (single repo). The private
       # layer deliberately lists two fragments with the SAME
-      # (name, path, remoteName) triple, which M6's per-layer
+      # (name, path, projectRemote) triple, which M6's per-layer
       # resolveProject rejects with a duplicate diagnostic. The
       # composer wraps that error with the layer's provenance so the
       # caller knows WHICH layer's project file the rejection

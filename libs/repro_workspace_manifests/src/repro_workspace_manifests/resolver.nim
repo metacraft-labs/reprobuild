@@ -77,14 +77,20 @@ type
     wvPersonal
 
   ResolvedRemote* = object
-    name*: string      ## Local remote name (e.g. "origin", "upstream")
-    remoteName*: string ## Project remote name (e.g. "metacraft-github")
-    fetchUrl*: string  ## Full constructed fetch URL
+    ## One git remote of a checkout, after the project manifest's
+    ## `[[remote]]` table has been applied to the fragment's declaration.
+    ##
+    ## The two name fields are DIFFERENT namespaces and must not be
+    ## confused: `localName` lives in the checkout's `.git/config`,
+    ## `projectRemote` lives in the project manifest.
+    localName*: string     ## Git remote name inside the checkout (e.g. "origin", "upstream")
+    projectRemote*: string ## Key into the project manifest's `[[remote]]` table (e.g. "metacraft-labs", "github")
+    fetchUrl*: string      ## Full constructed fetch URL
 
   ResolvedRepo* = object
     ## Post-resolution facts for a single repo.
     ##
-    ## The five load-bearing fields (`name`, `path`, `remoteName`,
+    ## The five load-bearing fields (`name`, `path`, `projectRemote`,
     ## `fetchUrl`, `revision`) are exactly the tuple the milestone names
     ## ("(name, path, fetch-url, revision)"); the `vcs` and `stability`
     ## fields carry the fragment's optional values with the documented
@@ -99,7 +105,23 @@ type
     ## attached at the single-project resolution boundary.
     name*: string
     path*: string
-    remoteName*: string
+    ## Which entry of the project manifest's `[[remote]]` table this repo
+    ## resolves through (e.g. "metacraft-labs"). NOT the git remote name
+    ## in the checkout — that is `ResolvedRemote.localName`, and
+    ## `gitRemoteNameFor` is the mapping between the two.
+    ##
+    ## One documented exception, preserved from the pre-rename behaviour:
+    ## when a fragment declares a `remotes` list but omits the scalar
+    ## `repo.remote`, this field holds the FIRST resolved remote's
+    ## `localName` instead of a `[[remote]]` key. Note this is NOT because
+    ## no key is available — the project's `default_remote` has already
+    ## been assigned here, and `remotes[0].remote` is a key too; the
+    ## `remotes`-list branch simply overwrites it with the local name.
+    ## Both `gitRemoteNameFor` and `cloneUrlFor` handle that case
+    ## explicitly; nothing else may assume this field is always a
+    ## `[[remote]]` key. Applies to `resolveProject` and `resolveVariant`
+    ## alike (the two branches are textually identical).
+    projectRemote*: string
     fetchUrl*: string
     remotes*: seq[ResolvedRemote]
     revision*: string
@@ -363,7 +385,7 @@ proc resolveProject*(projectFile: string): ResolvedProject =
     else:
       ""
 
-  # Track `(name, path, remoteName)` triples to detect genuine duplicates.
+  # Track `(name, path, projectRemote)` triples to detect genuine duplicates.
   # Two distinct fragments with the same `repo.name` but different `path`
   # and/or `remote` (the accounting / accounting-blocksense pattern) MUST
   # be allowed through; only an identical triple is a duplicate.
@@ -393,9 +415,9 @@ proc resolveProject*(projectFile: string): ResolvedProject =
       if fragment.repo.remote.isSome: fragment.repo.remote.get()
       else: ""
     if fragmentRemote.len > 0:
-      resolved.remoteName = fragmentRemote
+      resolved.projectRemote = fragmentRemote
     elif defaultRemoteName.len > 0:
-      resolved.remoteName = defaultRemoteName
+      resolved.projectRemote = defaultRemoteName
     else:
       raiseManifestError(absProject,
         "includes[" & $incIdx & "]",
@@ -413,28 +435,28 @@ proc resolveProject*(projectFile: string): ResolvedProject =
             "fragment '" & rawInclude & "' references unknown remote '" &
               r.remote & "' (not declared in the project's [[remote]] table)")
         let fullUrl = getFetchUrl(remotes[r.remote], fragment.repo.name)
-        resolvedRemotes.add(ResolvedRemote(name: r.name, remoteName: r.remote, fetchUrl: fullUrl))
+        resolvedRemotes.add(ResolvedRemote(localName: r.name, projectRemote: r.remote, fetchUrl: fullUrl))
 
-      let primaryName = if fragmentRemote.len > 0: fragmentRemote else: resolvedRemotes[0].name
-      resolved.remoteName = primaryName
+      let primaryName = if fragmentRemote.len > 0: fragmentRemote else: resolvedRemotes[0].localName
+      resolved.projectRemote = primaryName
       var primaryProjectRemote = ""
       for r in resolvedRemotes:
-        if r.name == primaryName:
-          primaryProjectRemote = r.remoteName
+        if r.localName == primaryName:
+          primaryProjectRemote = r.projectRemote
           break
       if primaryProjectRemote.len == 0:
-        primaryProjectRemote = resolvedRemotes[0].remoteName
+        primaryProjectRemote = resolvedRemotes[0].projectRemote
       resolved.fetchUrl = getFetchUrl(remotes[primaryProjectRemote], fragment.repo.name)
     else:
-      if resolved.remoteName notin remotes:
+      if resolved.projectRemote notin remotes:
         raiseManifestError(absProject,
           "includes[" & $incIdx & "]",
           schemaProjectManifestV1, schemaProjectManifestV1,
           "fragment '" & rawInclude & "' references unknown remote '" &
-            resolved.remoteName & "' (not declared in the project's [[remote]] table)")
-      let fullUrl = getFetchUrl(remotes[resolved.remoteName], fragment.repo.name)
+            resolved.projectRemote & "' (not declared in the project's [[remote]] table)")
+      let fullUrl = getFetchUrl(remotes[resolved.projectRemote], fragment.repo.name)
       resolved.fetchUrl = fullUrl
-      resolvedRemotes.add(ResolvedRemote(name: "origin", remoteName: resolved.remoteName, fetchUrl: fullUrl))
+      resolvedRemotes.add(ResolvedRemote(localName: "origin", projectRemote: resolved.projectRemote, fetchUrl: fullUrl))
 
     resolved.remotes = resolvedRemotes
 
@@ -485,17 +507,17 @@ proc resolveProject*(projectFile: string): ResolvedProject =
     # RA-21 — carry the develop-set dependency edges through verbatim.
     resolved.depends = fragment.repo.depends
 
-    # Duplicate check on the `(name, path, remoteName)` triple. We use
+    # Duplicate check on the `(name, path, projectRemote)` triple. We use
     # a tab-joined key because none of the three components legally
     # contains a tab character (repo names are file-system-safe; paths
     # use forward slashes; remote names are TOML identifiers).
-    let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.remoteName
+    let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.projectRemote
     if triple in seen:
       raiseManifestError(absProject,
         "includes[" & $incIdx & "]",
         schemaProjectManifestV1, schemaProjectManifestV1,
         "duplicate repo (name='" & resolved.name & "', path='" & resolved.path &
-          "', remote='" & resolved.remoteName & "') first declared at includes[" &
+          "', remote='" & resolved.projectRemote & "') first declared at includes[" &
           $seen[triple] & "]")
     seen[triple] = incIdx
 
@@ -640,10 +662,10 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
   #
   # Build the duplicate-detection set seeded from the base's resolved
   # repos so any extra include that collides with a base repo is
-  # rejected with the same `(name, path, remoteName)` rule M6 uses.
+  # rejected with the same `(name, path, projectRemote)` rule M6 uses.
   var seen = initTable[string, int]()
   for i, r in result.repos:
-    let triple = r.name & "\t" & r.path & "\t" & r.remoteName
+    let triple = r.name & "\t" & r.path & "\t" & r.projectRemote
     seen[triple] = i
 
   for incIdx, rawInclude in variant.includes:
@@ -669,9 +691,9 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
       if fragment.repo.remote.isSome: fragment.repo.remote.get()
       else: ""
     if fragmentRemote.len > 0:
-      resolved.remoteName = fragmentRemote
+      resolved.projectRemote = fragmentRemote
     elif defaultRemoteName.len > 0:
-      resolved.remoteName = defaultRemoteName
+      resolved.projectRemote = defaultRemoteName
     else:
       raiseManifestError(absVariant,
         "includes[" & $incIdx & "]",
@@ -689,28 +711,28 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
             "fragment '" & rawInclude & "' references unknown remote '" &
               r.remote & "' (not declared in the base project's [[remote]] table)")
         let fullUrl = getFetchUrl(remotes[r.remote], fragment.repo.name)
-        resolvedRemotes.add(ResolvedRemote(name: r.name, remoteName: r.remote, fetchUrl: fullUrl))
+        resolvedRemotes.add(ResolvedRemote(localName: r.name, projectRemote: r.remote, fetchUrl: fullUrl))
       
-      let primaryName = if fragmentRemote.len > 0: fragmentRemote else: resolvedRemotes[0].name
-      resolved.remoteName = primaryName
+      let primaryName = if fragmentRemote.len > 0: fragmentRemote else: resolvedRemotes[0].localName
+      resolved.projectRemote = primaryName
       var primaryProjectRemote = ""
       for r in resolvedRemotes:
-        if r.name == primaryName:
-          primaryProjectRemote = r.remoteName
+        if r.localName == primaryName:
+          primaryProjectRemote = r.projectRemote
           break
       if primaryProjectRemote.len == 0:
-        primaryProjectRemote = resolvedRemotes[0].remoteName
+        primaryProjectRemote = resolvedRemotes[0].projectRemote
       resolved.fetchUrl = getFetchUrl(remotes[primaryProjectRemote], fragment.repo.name)
     else:
-      if resolved.remoteName notin remotes:
+      if resolved.projectRemote notin remotes:
         raiseManifestError(absVariant,
           "includes[" & $incIdx & "]",
           schemaVariantManifestV1, schemaVariantManifestV1,
           "fragment '" & rawInclude & "' references unknown remote '" &
-            resolved.remoteName & "' (not declared in the base project's [[remote]] table)")
-      let fullUrl = getFetchUrl(remotes[resolved.remoteName], fragment.repo.name)
+            resolved.projectRemote & "' (not declared in the base project's [[remote]] table)")
+      let fullUrl = getFetchUrl(remotes[resolved.projectRemote], fragment.repo.name)
       resolved.fetchUrl = fullUrl
-      resolvedRemotes.add(ResolvedRemote(name: "origin", remoteName: resolved.remoteName, fetchUrl: fullUrl))
+      resolvedRemotes.add(ResolvedRemote(localName: "origin", projectRemote: resolved.projectRemote, fetchUrl: fullUrl))
 
     resolved.remotes = resolvedRemotes
 
@@ -755,13 +777,13 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
     # RA-21 — carry the develop-set dependency edges through verbatim.
     resolved.depends = fragment.repo.depends
 
-    let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.remoteName
+    let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.projectRemote
     if triple in seen:
       raiseManifestError(absVariant,
         "includes[" & $incIdx & "]",
         schemaVariantManifestV1, schemaVariantManifestV1,
         "duplicate repo (name='" & resolved.name & "', path='" & resolved.path &
-          "', remote='" & resolved.remoteName &
+          "', remote='" & resolved.projectRemote &
           "') already present from earlier resolution at index " &
           $seen[triple])
     seen[triple] = result.repos.len
@@ -800,22 +822,22 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
           "override sets remote '" & newRemote &
             "' which is not declared in the base project's [[remote]] table")
       let fullUrl = getFetchUrl(remotes[newRemote], result.repos[matchedIdx].name)
-      result.repos[matchedIdx].remoteName = newRemote
+      result.repos[matchedIdx].projectRemote = newRemote
       result.repos[matchedIdx].fetchUrl = fullUrl
 
       # Sync the remotes list
       if result.repos[matchedIdx].remotes.len > 0:
         var found = false
         for idx, r in result.repos[matchedIdx].remotes:
-          if r.name == newRemote or r.name == "origin":
-            result.repos[matchedIdx].remotes[idx].remoteName = newRemote
+          if r.localName == newRemote or r.localName == "origin":
+            result.repos[matchedIdx].remotes[idx].projectRemote = newRemote
             result.repos[matchedIdx].remotes[idx].fetchUrl = fullUrl
             found = true
             break
         if not found:
-          result.repos[matchedIdx].remotes.add(ResolvedRemote(name: "origin", remoteName: newRemote, fetchUrl: fullUrl))
+          result.repos[matchedIdx].remotes.add(ResolvedRemote(localName: "origin", projectRemote: newRemote, fetchUrl: fullUrl))
       else:
-        result.repos[matchedIdx].remotes = @[ResolvedRemote(name: "origin", remoteName: newRemote, fetchUrl: fullUrl)]
+        result.repos[matchedIdx].remotes = @[ResolvedRemote(localName: "origin", projectRemote: newRemote, fetchUrl: fullUrl)]
     if ov.path.isSome:
       result.repos[matchedIdx].path = ov.path.get()
 
@@ -827,14 +849,14 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
   var finalSeen = initTable[string, int]()
   for i in 0 ..< result.repos.len:
     let r = result.repos[i]
-    let triple = r.name & "\t" & r.path & "\t" & r.remoteName
+    let triple = r.name & "\t" & r.path & "\t" & r.projectRemote
     if triple in finalSeen:
       raiseManifestError(absVariant,
         "override",
         schemaVariantManifestV1, schemaVariantManifestV1,
         "after applying overrides, repos at indices " & $finalSeen[triple] &
           " and " & $i & " share the same (name='" & r.name &
-          "', path='" & r.path & "', remote='" & r.remoteName &
+          "', path='" & r.path & "', remote='" & r.projectRemote &
           "') triple")
     finalSeen[triple] = i
 

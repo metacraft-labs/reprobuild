@@ -103,13 +103,13 @@ suite "M6 — resolveProject dual-fragment collision handling":
 
     # Both repos share the `repo.name == "accounting"` value but the
     # resolver emits them as DISTINCT `ResolvedRepo` entries because
-    # their `path` AND `remoteName` differ.
+    # their `path` AND `projectRemote` differ.
     check resolved.repos[0].name == "accounting"
     check resolved.repos[1].name == "accounting"
 
     # ---- metacraft side ----
     check resolved.repos[0].path == "metacraft"
-    check resolved.repos[0].remoteName == "metacraft-labs"
+    check resolved.repos[0].projectRemote == "metacraft-labs"
     check resolved.repos[0].fetchUrl == "https://github.com/metacraft-labs/accounting"
     check resolved.repos[0].revision == "main"  # project default
     check resolved.repos[0].fragmentPath ==
@@ -117,7 +117,7 @@ suite "M6 — resolveProject dual-fragment collision handling":
 
     # ---- blocksense side ----
     check resolved.repos[1].path == "blocksense"
-    check resolved.repos[1].remoteName == "blocksense-network"
+    check resolved.repos[1].projectRemote == "blocksense-network"
     check resolved.repos[1].fetchUrl ==
       "https://github.com/blocksense-network/accounting"
     check resolved.repos[1].revision == "main"

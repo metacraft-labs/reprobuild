@@ -65,17 +65,36 @@ import repro_cli_support/dev_session
 import repro_cli_support/push_hook_protocol
 
 proc cloneUrlFor*(repo: ResolvedRepo): string =
+  ## Fetch URL to clone this repo from: the ``repo.remotes`` entry that
+  ## ``repo.projectRemote`` selects, falling back to ``repo.fetchUrl``.
+  ##
+  ## Both name namespaces are tried because ``projectRemote`` carries a
+  ## ``[[remote]]`` key in the normal case but a git remote name in the
+  ## documented exception (fragment lists ``remotes`` and omits the scalar
+  ## ``repo.remote`` — see ``ResolvedRepo.projectRemote``).
   result = repo.fetchUrl
   for r in repo.remotes:
-    if r.name == repo.remoteName or r.remoteName == repo.remoteName:
+    if r.localName == repo.projectRemote or r.projectRemote == repo.projectRemote:
       return r.fetchUrl
 
 proc gitRemoteNameFor*(repo: ResolvedRepo): string =
+  ## Map the repo's project-manifest remote key (``repo.projectRemote``,
+  ## e.g. "metacraft-labs") to the git remote name that key materializes as
+  ## inside the checkout (``ResolvedRemote.localName``, e.g. "origin").
   for r in repo.remotes:
-    if r.remoteName == repo.remoteName:
-      return r.name
-  if repo.remoteName.len > 0:
-    return repo.remoteName
+    if r.projectRemote == repo.projectRemote:
+      return r.localName
+  # No resolved remote carries this key. Then ``projectRemote`` is already a
+  # git remote name, not a ``[[remote]]`` key — either because the resolver
+  # hit the documented ``remotes``-without-``remote`` case, or because this
+  # ResolvedRepo was synthesized outside the resolver (lock files,
+  # develop-set discovery) and set the field to "origin" directly.
+  if repo.projectRemote.len > 0:
+    return repo.projectRemote
+  # Last-resort default. Reached ONLY when a repo resolves with NO project
+  # remote at all — ``projectRemote`` empty and ``remotes`` empty. It is
+  # never the answer for a manifest-resolved repo: those always return from
+  # one of the two branches above.
   return "origin"
 import repro_cli_support/dev_env_shell_export
 import repro_cli_support/dev_env_rollback_manifest
@@ -14691,7 +14710,7 @@ proc discoverNestedDevelopDeps(workspaceRoot: string): seq[ResolvedRepo] =
       result.add(ResolvedRepo(
         name: depName,
         path: sub & "/" & depName,
-        remoteName: "origin",
+        projectRemote: "origin",
         fetchUrl: facts.originUrl,
         revision: revision,
         vcs: defaultRepoVcs,
@@ -14755,7 +14774,7 @@ proc discoverSiblingDevelopDeps(workspaceRoot: string): seq[ResolvedRepo] =
     result.add(ResolvedRepo(
       name: entry.package,
       path: relPath,
-      remoteName: "origin",
+      projectRemote: "origin",
       fetchUrl: facts.originUrl,
       revision: revision,
       vcs: defaultRepoVcs,
@@ -14989,7 +15008,7 @@ proc committedLockDerivedProject(workspaceRoot: string):
       if d.coordinates.kind != ckVcs or d.coordinates.revision.len == 0:
         continue
       repos.add(ResolvedRepo(
-        name: d.name, path: d.path, remoteName: "origin",
+        name: d.name, path: d.path, projectRemote: "origin",
         fetchUrl: d.coordinates.url, revision: d.coordinates.revision,
         vcs: defaultRepoVcs, stability: defaultRepoStability,
         visibility: visibilityFromLockString(d.visibility),
@@ -15036,7 +15055,7 @@ proc committedLockDerivedProject(workspaceRoot: string):
   let repo = ResolvedRepo(
     name: repoName,
     path: ".",
-    remoteName: "origin",
+    projectRemote: "origin",
     fetchUrl: facts.originUrl,
     revision: revision,
     vcs: defaultRepoVcs,
@@ -23010,13 +23029,13 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
     # 2. Add or update expected remotes
     var expectedRemotes = initHashSet[string]()
     for r in repo.remotes:
-      expectedRemotes.incl(r.name)
-      if r.name in existingRemotes:
-        let getRes = gitRunPlain(identity, ["-C", repoAbs, "remote", "get-url", r.name])
+      expectedRemotes.incl(r.localName)
+      if r.localName in existingRemotes:
+        let getRes = gitRunPlain(identity, ["-C", repoAbs, "remote", "get-url", r.localName])
         if getRes.code == 0 and getRes.output.strip() != r.fetchUrl:
-          discard gitRunPlain(identity, ["-C", repoAbs, "remote", "set-url", r.name, r.fetchUrl])
+          discard gitRunPlain(identity, ["-C", repoAbs, "remote", "set-url", r.localName, r.fetchUrl])
       else:
-        discard gitRunPlain(identity, ["-C", repoAbs, "remote", "add", r.name, r.fetchUrl])
+        discard gitRunPlain(identity, ["-C", repoAbs, "remote", "add", r.localName, r.fetchUrl])
 
     # 3. Clean up/remove unexpected remotes
     for name in existingRemotes:
@@ -36256,7 +36275,7 @@ proc executeWorkspaceList(args: WorkspaceListArgs): WorkspaceListReport =
     report.repos.add(WorkspaceListRepoEntry(
       name: repo.name,
       path: repo.path,
-      remote: repo.remoteName,
+      remote: repo.projectRemote,
       fetchUrl: repo.fetchUrl,
       revision: repo.revision,
       vcs: repo.vcs,

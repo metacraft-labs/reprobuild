@@ -27,7 +27,7 @@
 ##
 ## For each layer's repos:
 ##
-## - If a repo's `(name, path, remoteName)` triple matches a triple
+## - If a repo's `(name, path, projectRemote)` triple matches a triple
 ##   already present from an EARLIER layer, the later layer's
 ##   `ResolvedRepo` REPLACES the earlier one in place (the position in
 ##   `repos` is preserved so source order across the whole composition
@@ -336,7 +336,7 @@ proc mergeLayerIntoResult(
     composed: var ResolvedProject;
     seen: var Table[string, int]) =
   ## Merge one layer's `ResolvedProject` into the accumulating composed
-  ## project. The triple `(name, path, remoteName)` is the identity used
+  ## project. The triple `(name, path, projectRemote)` is the identity used
   ## to detect a shadow: when a later layer's triple matches an earlier
   ## layer's, the later entry REPLACES the earlier one in place. A new
   ## triple is APPENDED.
@@ -344,7 +344,7 @@ proc mergeLayerIntoResult(
     var stamped = repo
     stamped.manifestLayer = layerProvenance
     stamped.visibility = visibility
-    let triple = stamped.name & "\t" & stamped.path & "\t" & stamped.remoteName
+    let triple = stamped.name & "\t" & stamped.path & "\t" & stamped.projectRemote
     if triple in seen:
       composed.repos[seen[triple]] = stamped
     else:
@@ -498,13 +498,13 @@ proc composeManifestLayersWithOptions*(
   # future change in the merge rule ever loses uniqueness.
   var finalSeen = initTable[string, int]()
   for i, repo in composed.repos:
-    let triple = repo.name & "\t" & repo.path & "\t" & repo.remoteName
+    let triple = repo.name & "\t" & repo.path & "\t" & repo.projectRemote
     if triple in finalSeen:
       raiseManifestError(workspaceTomlPath,
         "manifest",
         schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
         "composed repo set has duplicate (name='" & repo.name &
-          "', path='" & repo.path & "', remote='" & repo.remoteName &
+          "', path='" & repo.path & "', remote='" & repo.projectRemote &
           "') at indices " & $finalSeen[triple] & " and " & $i)
     finalSeen[triple] = i
 

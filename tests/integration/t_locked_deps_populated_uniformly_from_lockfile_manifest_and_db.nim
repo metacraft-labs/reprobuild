@@ -132,7 +132,7 @@ suite "MO-9 — populateLockedDeps fills one model uniformly from any source":
       putRecord(manifestStore, "demo", "app", "app", manifestSha)
 
       let appResolved = ResolvedRepo(name: "app", path: "app",
-        remoteName: "origin", fetchUrl: appUrl, revision: "main",
+        projectRemote: "origin", fetchUrl: appUrl, revision: "main",
         visibility: wvPublic)
 
       block manifestSource:
@@ -163,7 +163,7 @@ suite "MO-9 — populateLockedDeps fills one model uniformly from any source":
       let libSha = "3333333333333333333333333333333333333333"
       putRecord(dbStore, "demo", "lib", "lib", libSha)
       let libResolved = ResolvedRepo(name: "lib", path: "lib",
-        remoteName: "origin", fetchUrl: "https://example.invalid/lib.git",
+        projectRemote: "origin", fetchUrl: "https://example.invalid/lib.git",
         revision: "main", visibility: wvPersonal)
 
       block mixedWorkspace:
