@@ -244,9 +244,11 @@ package cairoSource:
         "xlib=disabled",
         "xcb=disabled",
         "png=enabled",
-        "wrap_mode=nofallback",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      let pkg = meson_package(
+        srcDir = "./src",
+        configureOptions = opts,
+        wrapMode = "nofallback")
       discard pkg.library("libcairo")
     finally:
       clearCurrentOwningPackageOverride()

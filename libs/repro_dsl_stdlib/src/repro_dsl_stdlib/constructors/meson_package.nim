@@ -182,6 +182,7 @@ proc meson_package*(srcDir: string;
                     configureOptions: seq[string] = @[];
                     crossFile = "";
                     nativeFile = "";
+                    wrapMode = "nodownload";
                     extraEnv: seq[(string, string)] = @[];
                     srcPatches: seq[string] = @[]): MesonPackageResult =
   ## Configure → build → install pipeline for an upstream meson
@@ -279,7 +280,7 @@ proc meson_package*(srcDir: string;
     options = configureOptions,
     crossFile = crossFile,
     nativeFile = nativeFile,
-    wrapMode = "nodownload",
+    wrapMode = wrapMode,
     after = setupAfter,
     extraEnv = extraEnv)
   # M9.R.14e.5 — thread every nativeBuildDeps + buildDeps name onto the
