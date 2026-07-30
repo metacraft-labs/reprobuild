@@ -157,6 +157,11 @@ package kioSource:
     ## kitemviews supplies the QtWidgets model/view extensions kio's
     ## file-dialog list / icon / tree views consume.
     "kitemviews >=6.0"
+    ## KIO's local-file implementation links POSIX ACL and extended-
+    ## attribute support. Declare both outputs explicitly because the
+    ## resolver does not flatten transitive Nix store references.
+    "libacl >=2.3"
+    "libattr >=2.5"
     ## M9.R.15p.4.3 — kio's src/CMakeLists.txt:91 declares
     ## ``if (UNIX AND NOT ANDROID) find_package(KF6Auth REQUIRED)``;
     ## kauth published M9.R.15p.4.1 and supplies
@@ -218,7 +223,8 @@ package kioSource:
         "WITH_X11=OFF",
         "WITH_WAYLAND=OFF",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true)
       discard pkg.library("libKF6KIOCore")
       discard pkg.library("libKF6KIOGui")
       discard pkg.library("libKF6KIOWidgets")

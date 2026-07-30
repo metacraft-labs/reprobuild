@@ -102,7 +102,8 @@ package kwindowsystemSource:
         # buildDeps above.
         "KWINDOWSYSTEM_X11=ON",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true)
       discard pkg.library("libKF6WindowSystem")
     finally:
       clearCurrentOwningPackageOverride()

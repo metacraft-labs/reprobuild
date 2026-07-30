@@ -229,7 +229,8 @@ package kconfigSource:
         # message).  Flip it back on so the KF6ConfigQml target ships.
         "KCONFIG_USE_QML=ON",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true)
       discard pkg.library("libKF6ConfigCore")
       discard pkg.library("libKF6ConfigGui")
     finally:

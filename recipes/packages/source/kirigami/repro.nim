@@ -166,7 +166,8 @@ package kirigamiSource:
         "BUILD_QCH=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true)
       discard pkg.library("libKirigamiPlatform")
       discard pkg.library("libKirigamiPrimitives")
       discard pkg.library("libKirigamiPrivate")

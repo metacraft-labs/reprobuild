@@ -211,7 +211,8 @@ package qcoro6Source:
         "QCORO_WITH_QTTEST=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true)
       discard pkg.library("libQCoro6Core")
     finally:
       clearCurrentOwningPackageOverride()

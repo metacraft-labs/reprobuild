@@ -220,6 +220,11 @@ package plasmaWorkspaceSource:
     "ksvg >=6.0"
     "ksolid >=6.0"
     "kio >=6.0"
+    ## KIOWidgets carries POSIX ACL support. Its DT_NEEDED closure
+    ## includes libacl and libattr, which ld must resolve while linking
+    ## workspace libraries and executables against KIO.
+    "libacl >=2.3"
+    "libattr >=2.5"
     "kded >=6.0"
     "plasma-framework >=6.0"
     ## M9.R.15q.9.8 — additional REQUIRED KF6 components from
@@ -768,7 +773,8 @@ package plasmaWorkspaceSource:
       # the same dirs + hints whenever a qt6-* dep is declared AND the
       # corresponding install-mirror is present on disk.
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
-                              extraEnv = env, srcPatches = patches)
+                              extraEnv = env, allowSourceWrites = true,
+                              srcPatches = patches)
       discard pkg.executable("plasmashell")
       discard pkg.executable("startplasmaWayland")
       # M9.R.36.2 — renamed from speculative ``libPlasmaWorkspace`` to

@@ -65,7 +65,8 @@ package kidletimeSource:
         # the runtime idle-detection backend wired up yet.
         "WITH_WAYLAND=OFF",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true)
       discard pkg.library("libKF6IdleTime")
     finally:
       clearCurrentOwningPackageOverride()

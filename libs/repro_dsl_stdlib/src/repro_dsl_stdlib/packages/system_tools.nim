@@ -57,6 +57,7 @@ import ./libelf
 import ./libudev
 import ./libgpg_error
 import ./libacl
+import ./libattr
 import ./libcrypt
 import ./libxcrypt
 import ./libfontenc
@@ -215,6 +216,7 @@ export libelf
 export libudev
 export libgpg_error
 export libacl
+export libattr
 export libcrypt
 export libltdl
 export libseccomp
