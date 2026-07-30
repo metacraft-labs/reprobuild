@@ -1154,13 +1154,14 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   # loader silently skips it at run time, masking the resolution gap
   # until something later trips a missing-SONAME error.
   #
-  # In ADDITION to the existence-check, fold every directory present
-  # in ``$LD_LIBRARY_PATH`` into the rpath. The engine's
+  # In ADDITION to the existence-check, inspect directories present
+  # in ``$LD_LIBRARY_PATH`` for unresolved DT_NEEDED SONAMEs. The engine's
   # ``applyResolvedAuxPaths`` populates ``LD_LIBRARY_PATH`` from each
   # tool-identity-ref's ``libraryPathList`` (nix-store lib dirs for
   # nix-stub deps; sibling install-mirror lib dirs for from-source
   # deps). This is the load-bearing channel that carries the nix-store
-  # paths the install-mirror script has no other way to discover.
+  # paths the install-mirror script has no other way to discover. Build-only
+  # directories are excluded from the installed RPATH.
   script.add("rpath=$(printf '%s' '$ORIGIN'")
   script.add("; printf ':%s' '$ORIGIN/../lib'")
   script.add("; printf ':%s' '$ORIGIN/../lib64'")
@@ -1193,21 +1194,57 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     script.add("if [ -f \"" & escapedManifest & "\" ]; then ")
     script.add("while IFS= read -r line || [ -n \"$line\" ]; do ")
     script.add("if [ -z \"$line\" ] || ! [ -d \"$line\" ]; then continue; fi; ")
+    # A dependency's Nix runtime dirs belong on that dependency's ELFs, not
+    # on every downstream consumer. The stage closure walks every ELF, so
+    # propagating these paths only multiplies unrelated store outputs.
+    script.add("case \"$line\" in /nix/store/*|/repro/store/*) continue;; esac; ")
     script.add("case \":$rpath:\" in *\":$line:\"*) ;; ")
     script.add("*) rpath=\"$rpath:$line\";; esac; ")
     script.add("done < \"" & escapedManifest & "\"; ")
     script.add("fi; ")
-  # Append every directory present in ``$LD_LIBRARY_PATH``. Splits on
-  # ``:`` via IFS; existence-check via ``[ -d ... ]`` so empty
-  # segments + stale entries don't pollute the embedded RPATH.
+  # Collect the SONAMEs actually needed by this package's output. Tool
+  # provisioning can put hundreds of build-only directories on
+  # LD_LIBRARY_PATH; only a directory that resolves an otherwise missing
+  # DT_NEEDED entry belongs in the installed RPATH.
+  script.add("needed_sonames=$(for d in \"" & escapedDstUsr &
+    "/lib\" \"" & escapedDstUsr & "/lib64\" \"" & escapedDstUsr &
+    "/bin\" \"" & escapedDstUsr & "/sbin\"; do ")
+  script.add("if [ -d \"$d\" ]; then ")
+  script.add("find \"$d\" -type f \\( -name '*.so' -o -name '*.so.*' -o -perm -u+x \\) 2>/dev/null | ")
+  script.add("while IFS= read -r f; do ")
+  script.add("magic=$(head -c 4 \"$f\" 2>/dev/null | od -An -c | head -1 | tr -d ' '); ")
+  script.add("case \"$magic\" in 177ELF*) patchelf --print-needed \"$f\" 2>/dev/null || true;; esac; ")
+  script.add("done; fi; done | sort -u); ")
+
+  # Return success when a SONAME already exists in the package itself or in
+  # the RPATH assembled from source dependency mirrors.
+  script.add("m9r14f_soname_resolved() { m9r14f_so=$1; ")
+  script.add("for own in \"" & escapedDstUsr & "/lib/$m9r14f_so\" \"")
+  script.add(escapedDstUsr & "/lib64/$m9r14f_so\" \"")
+  script.add(escapedDstUsr & "/lib\"/*/\"$m9r14f_so\" \"")
+  script.add(escapedDstUsr & "/lib64\"/*/\"$m9r14f_so\"; do ")
+  script.add("if [ -e \"$own\" ]; then return 0; fi; done; ")
+  script.add("m9r14f_old_ifs=$IFS; IFS=':'; ")
+  script.add("for rp in $rpath; do case \"$rp\" in '$ORIGIN'*) continue;; esac; ")
+  script.add("if [ -e \"$rp/$m9r14f_so\" ]; then IFS=$m9r14f_old_ifs; return 0; fi; ")
+  script.add("done; IFS=$m9r14f_old_ifs; return 1; }; ")
+
+  # Append only LD_LIBRARY_PATH entries that satisfy an unresolved SONAME.
+  # Parse the colon-separated list without changing IFS around the SONAME
+  # loop and without clobbering the action's positional parameters.
   script.add("if [ -n \"$LD_LIBRARY_PATH\" ]; then ")
-  script.add("OLD_IFS=$IFS; IFS=':'; ")
-  script.add("for ldp in $LD_LIBRARY_PATH; do ")
-  script.add("if [ -n \"$ldp\" ] && [ -d \"$ldp\" ]; then ")
-  script.add("rpath=\"$rpath:$ldp\"; ")
-  script.add("fi; ")
+  script.add("m9r14f_ldpaths=$LD_LIBRARY_PATH; ")
+  script.add("while [ -n \"$m9r14f_ldpaths\" ]; do ")
+  script.add("ldp=${m9r14f_ldpaths%%:*}; ")
+  script.add("if [ \"$m9r14f_ldpaths\" = \"$ldp\" ]; then m9r14f_ldpaths=; ")
+  script.add("else m9r14f_ldpaths=${m9r14f_ldpaths#*:}; fi; ")
+  script.add("if [ -z \"$ldp\" ] || ! [ -d \"$ldp\" ]; then continue; fi; ")
+  script.add("case \":$rpath:\" in *\":$ldp:\"*) continue;; esac; ")
+  script.add("m9r14f_use_ldp=0; for so in $needed_sonames; do ")
+  script.add("if ! m9r14f_soname_resolved \"$so\" && [ -e \"$ldp/$so\" ]; then ")
+  script.add("m9r14f_use_ldp=1; break; fi; done; ")
+  script.add("if [ \"$m9r14f_use_ldp\" = 1 ]; then rpath=\"$rpath:$ldp\"; fi; ")
   script.add("done; ")
-  script.add("IFS=$OLD_IFS; ")
   script.add("fi; ")
   # DSL-port M9.R.15h.14.4 — preserve the toolchain libstdc++ / libgcc_s
   # path. Without a from-source gcc recipe, the C++ compiler is the
@@ -1225,12 +1262,13 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   # which echoes the absolute path of the named library file even when
   # the compiler isn't on PATH. The directory of that path is what we
   # want on rpath.
-  script.add(
-    "stdcxx_dir=$(gcc -print-file-name=libstdc++.so.6 2>/dev/null); ")
-  script.add("if [ -n \"$stdcxx_dir\" ] && [ \"$stdcxx_dir\" != " &
-    "\"libstdc++.so.6\" ]; then ")
-  script.add("rpath=\"$rpath:$(dirname \"$stdcxx_dir\")\"; ")
-  script.add("fi; ")
+  script.add("if printf '%s\\n' \"$needed_sonames\" | grep -qx 'libstdc++.so.6' && ")
+  script.add("! m9r14f_soname_resolved 'libstdc++.so.6'; then ")
+  script.add("stdcxx_file=$(gcc -print-file-name=libstdc++.so.6 2>/dev/null); ")
+  script.add("if [ -n \"$stdcxx_file\" ] && [ \"$stdcxx_file\" != \"libstdc++.so.6\" ]; then ")
+  script.add("stdcxx_dir=$(dirname \"$stdcxx_file\"); ")
+  script.add("case \":$rpath:\" in *\":$stdcxx_dir:\"*) ;; *) rpath=\"$rpath:$stdcxx_dir\";; esac; ")
+  script.add("fi; fi; ")
   # DSL-port M9.R.26.5 — discover the recipe's OWN internal versioned
   # subdirs under lib/ + lib64/ (e.g. mutter-15/, qt6/plugins/, etc.)
   # and append each as an absolute path to the rpath. Without this,
