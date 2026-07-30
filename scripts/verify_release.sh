@@ -118,26 +118,62 @@ run_repro "$repro_bin" --help > /dev/null
 capabilities=$(run_repro "$repro_bin" capabilities 2>&1)
 echo "Capabilities: $capabilities"
 
-# On Linux, run docker tests across multiple distros
+# On Linux, run docker tests across multiple distros.
+#
+# This sweep is the glibc-compatibility gate: it is the only check that the
+# Linux tarball runs anywhere other than the machine that produced it. It is
+# also EXTRA coverage on top of the native smoke test above, so a host without
+# a usable Docker must not fail the release outright -- that is what happened
+# on every release since v0.1.0, where the `eph-linux-x64` runner class has no
+# Docker (the fleet's nested-Docker capability lives on `eph-linux-x64-nested`)
+# and this loop aborted the job with `docker: command not found` (exit 127),
+# taking the Upload step with it. The Linux tarball was built and packaged
+# fine; it just never got published.
+#
+# So: skip when Docker is unusable, but skip LOUDLY, and let a caller that
+# knows Docker should be present turn the skip back into a failure with
+# REPRO_VERIFY_REQUIRE_DOCKER=1 -- otherwise "no Docker" would silently become
+# the permanent normal and the sweep would quietly stop protecting anything.
 if [[ "$(uname -s)" == Linux* ]]; then
-  distros=(
-    "ubuntu:24.04"
-    "ubuntu:22.04"
-    "debian:12"
-    "debian:11"
-    "fedora:40"
-    "almalinux:9"
-  )
-  
-  for distro in "${distros[@]}"; do
-    echo "=== Running smoke test on Docker distro: $distro ==="
-    # Mount the worktree-specific package directory read-only
-    docker run --rm \
-      -v "${pkg_dir}:/reprobuild:ro" \
-      "$distro" \
-      /reprobuild/bin/repro --version
-  done
-  echo "=== All Linux distros passed! ==="
+  docker_status=""
+  if ! command -v docker > /dev/null 2>&1; then
+    docker_status="docker is not on PATH"
+  elif ! docker info > /dev/null 2>&1; then
+    docker_status="docker is installed but its daemon is not reachable"
+  fi
+
+  if [[ -n "$docker_status" ]]; then
+    if [[ "${REPRO_VERIFY_REQUIRE_DOCKER:-0}" == "1" ]]; then
+      echo "ERROR: $docker_status, and REPRO_VERIFY_REQUIRE_DOCKER=1." >&2
+      echo "       The multi-distro glibc sweep cannot run. Either use a runner" >&2
+      echo "       class with nested Docker (eph-linux-x64-nested) or clear the" >&2
+      echo "       flag to accept reduced coverage." >&2
+      exit 1
+    fi
+    echo "=== SKIPPING multi-distro Docker sweep: $docker_status ==="
+    echo "    Reduced coverage: the archive was smoke-tested only on this host's"
+    echo "    glibc, not against ubuntu/debian/fedora/almalinux. Set"
+    echo "    REPRO_VERIFY_REQUIRE_DOCKER=1 to make this a hard failure."
+  else
+    distros=(
+      "ubuntu:24.04"
+      "ubuntu:22.04"
+      "debian:12"
+      "debian:11"
+      "fedora:40"
+      "almalinux:9"
+    )
+
+    for distro in "${distros[@]}"; do
+      echo "=== Running smoke test on Docker distro: $distro ==="
+      # Mount the worktree-specific package directory read-only
+      docker run --rm \
+        -v "${pkg_dir}:/reprobuild:ro" \
+        "$distro" \
+        /reprobuild/bin/repro --version
+    done
+    echo "=== All Linux distros passed! ==="
+  fi
 fi
 
 echo "=== Smoke test PASSED successfully for $archive_name ==="

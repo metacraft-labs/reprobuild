@@ -29,8 +29,25 @@ jobs:
             platform: darwin
             arch: aarch64
             archive_ext: tar.gz
+          # Single label, not an array. `runs-on: [a, b]` is an AND over labels
+          # -- it demands ONE runner carrying BOTH -- not a choice between two
+          # classes. `eph-win-x64` and `eph-win-arm64` are separate pools on
+          # separate hosts (a libvirt Windows 11 VM on high-mem-server vs a
+          # QEMU/HVF Windows-ARM VM on m3; see infra's
+          # services/ephemeral-runner-host/darwin.nix and
+          # services/garm-incus-runners.nix), so no runner ever matched and this
+          # job was never scheduled: every release since v0.1.0 ended with
+          # "exceeded the maximum execution time while awaiting a runner for
+          # 24h0m0s". The ephemeral-fleet runbook documents the single-value
+          # form as the way these classes compose in a matrix.
+          #
+          # No ARM64 Windows row: conda-forge publishes clingo for win-64 only
+          # (windows/ensure-clingo.ps1 rejects arm64 rather than install an x64
+          # DLL a native ARM64 repro.exe cannot load), and the staged runtime
+          # DLLs are x64-specific by name (libcrypto-3-x64.dll). Adding the row
+          # before those exist would just add a permanently-red release leg.
           - os-name: windows
-            runner: [eph-win-x64, eph-win-arm64]  # CIP-5: windows-diy release build → Windows runner classes
+            runner: eph-win-x64  # CIP-5: windows-diy release build → eph-win-x64
             env-flavor: windows-diy
             platform: windows
             arch: x86_64
@@ -196,6 +213,17 @@ jobs:
           Compress-Archive -Path "${pkg_name}" -DestinationPath "${pkg_name}.zip" -Force
           Add-Content -Path $env:GITHUB_ENV -Value "ASSET_PATH=${pkg_name}.zip"
 
+      # Smoke-tests the PACKAGED archive, not the build tree: on Windows it
+      # asserts the runtime-DLL manifest and runs the binary with PATH scrubbed
+      # to the system directories, so the build host cannot satisfy a dlopen
+      # the archive omits.
+      #
+      # The Linux leg's multi-distro glibc sweep needs Docker, which the
+      # `eph-linux-x64` class does not have -- it is skipped loudly rather than
+      # failing the job (that `docker: command not found` was aborting every
+      # release before the tarball could be uploaded). To restore the sweep,
+      # move the linux matrix row to `eph-linux-x64-nested` (nested Docker) and
+      # set REPRO_VERIFY_REQUIRE_DOCKER=1 here so a future regression is loud.
       - name: Verify release assets
         shell: bash
         run: |
