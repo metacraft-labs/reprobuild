@@ -80,6 +80,9 @@ package gdiskSource:
                                   configureOptions = opts,
                                   skipConfigure = true,
                                   srcPatches = @[
+        # Our wide-character ncurses build installs the portable header as
+        # /usr/include/ncurses.h while retaining the ncursesw library ABI.
+        "sed -i 's|<ncursesw/ncurses.h>|<ncurses.h>|' ./src/gptcurses.cc",
         "printf '\ninstall: all\n\tmkdir -p $(DESTDIR)/usr/sbin\n" &
           "\tfor binary in gdisk sgdisk cgdisk fixparts; do " &
           "old=$$(patchelf --print-rpath $$binary); " &
