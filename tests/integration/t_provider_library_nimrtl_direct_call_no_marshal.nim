@@ -42,6 +42,35 @@ proc soExt(): string =
   else: "so"
 
 # ---------------------------------------------------------------------------
+# The SHARED attrs-type module, compiled into BOTH the provider .so and the
+# host driver.
+#
+# The direct no-marshal path passes a LIVE Nim ``TypedExtensionBox[CounterAttrs]``
+# across the boundary, so the two sides must agree on the TYPE, not merely on
+# its field layout. ORC's runtime type identity is derived from the mangled type
+# name, so two structurally identical ``CounterAttrs`` declarations — one in the
+# host, one in the provider — are DISTINCT types: the provider's
+# ``TypedExtensionBox[CounterAttrs](inst.attrs)`` conversion then raises
+# ``ObjectConversionDefect`` even though host and provider share one nimRtl.
+# Hoisting the declaration into one module that both builds ``--path`` in
+# mirrors the real shape (the defining repo publishes the attrs type; provider
+# and consumer both compile against that one declaration) and is what makes the
+# live-value crossing sound. The C-ABI fallback path does not need this — it
+# goes through the ``encode*`` codec keyed by ``typeId`` — but both provider
+# builds come from the same source, so it uses the shared module too.
+# ---------------------------------------------------------------------------
+const sharedTypesBody = """
+import repro_project_dsl
+
+type
+  CounterAttrs* = object
+    name*: string
+    target*: int
+
+registerExtension[CounterAttrs]("m4c.counter")
+"""
+
+# ---------------------------------------------------------------------------
 # The mock provider source (a live-value counter, same shape as M4a). Compiled
 # --app:lib it exports the C ABI; with -d:reproNimRtlShared it ADDITIONALLY
 # exports the *_direct no-marshal entry points + the SymRtlProbe presence
@@ -51,11 +80,7 @@ const providerBody = """
 import std/[options, os, strutils]
 import repro_resources
 import repro_project_dsl
-
-type
-  CounterAttrs = object
-    name*: string
-    target*: int
+import m4c_shared_types
 
 proc cIdentity(inst: ResourceInstance): string {.nimcall.} =
   let a = TypedExtensionBox[CounterAttrs](inst.attrs).val
@@ -87,7 +112,6 @@ registerResourceProvider(ResourceProviderDef(
   typeId: "m4c.counter", determinism: rdVolatile,
   driver: ResourceProviderDriver(
     identity: cIdentity, digest: cDigest, observe: cObserve, apply: cApply)))
-registerExtension[CounterAttrs]("m4c.counter")
 """
 
 # ---------------------------------------------------------------------------
@@ -101,13 +125,7 @@ import std/[options, os, strutils]
 import repro_resources
 import repro_resources/library_transport
 import repro_project_dsl
-
-type
-  CounterAttrs = object
-    name*: string
-    target*: int
-
-registerExtension[CounterAttrs]("m4c.counter")
+import m4c_shared_types
 
 proc desired(name: string; target: int): ResourceInstance =
   ResourceInstance(
@@ -116,7 +134,17 @@ proc desired(name: string; target: int): ResourceInstance =
       typeId: "m4c.counter", val: CounterAttrs(name: name, target: target)),
     dependsOn: @[], determinism: rdVolatile)
 
-let soPath = paramStr(1)
+# The provider .so path arrives through the environment, NOT through argv.
+# This driver is built -d:useNimRtl, and std/cmdline reads the `importc`
+# globals `cmdCount`/`cmdLine`, which the Nim runtime only populates from a
+# real program entry point -- Nim documents that "on Posix, there is no
+# portable way to get the command line from a DLL". Under -d:useNimRtl those
+# globals stay at zero, so `paramStr(1)` raises IndexDefect. -d:useNimRtl is
+# the feature under test here and must not be dropped, so we mirror the
+# M4C_WORLD env-var handoff below instead.
+let soPath = getEnv("M4C_PROVIDER_SO")
+if soPath.len == 0:
+  quit("M4C_PROVIDER_SO is unset: the host driver has no provider .so to dlopen", 2)
 let lib = loadResourceProviderLibrary(soPath)
 echo "USES_NIMRTL=", lib.usesNimRtl()
 
@@ -137,6 +165,33 @@ proc writeSource(dir, name, body: string): string =
   createDir(dir)
   result = dir / name
   writeFile(result, body)
+
+proc selfBindFlags(): seq[string] =
+  ## Force every shared object built here to bind its OWN function definitions
+  ## internally instead of letting the process-wide lookup scope hijack them.
+  ##
+  ## Nim emits a library constructor that calls ``NimMainInit`` (module init),
+  ## and it exports ``NimMain`` / ``NimMainInit`` with default visibility. On
+  ## ELF, the executable and its already-loaded dependencies outrank a
+  ## ``dlopen``ed object in the global lookup scope, so with an unqualified
+  ## build we measured (``LD_DEBUG=bindings``):
+  ##
+  ##   * ``libnimrtl.so``'s internal ``NimMain`` bound to the HOST DRIVER
+  ##     EXECUTABLE's ``NimMain`` -- the driver's whole module body, dlopen and
+  ##     reconcile included, ran twice.
+  ##   * the provider ``.so``'s constructor call to ``NimMainInit`` bound to
+  ##     ``libnimrtl.so``'s ``NimMainInit`` -- so the provider's OWN modules
+  ##     never initialised, ``registerResourceProvider`` never ran, and the ops
+  ##     failed with ``no resource provider registered for typeId
+  ##     'm4c.counter'`` (C-ABI path) or segfaulted (direct path).
+  ##
+  ## ``-Bsymbolic-functions`` only redirects references a shared object makes to
+  ## functions it defines ITSELF; calls from the host into ``libnimrtl`` and from
+  ## the provider into ``libnimrtl`` are unaffected, so the ONE-shared-nimRtl
+  ## premise under test is preserved. Mach-O (two-level namespace) and PE
+  ## already bind per-module, so the flag is ELF-only.
+  when defined(macosx) or defined(windows): @[]
+  else: @["--passL:-Wl,-Bsymbolic-functions"]
 
 proc locateNimrtlSource(): string =
   ## Find ``lib/nimrtl.nim`` in the active Nim toolchain via ``nim dump``.
@@ -163,6 +218,12 @@ suite "M4c: resource reconcile over the nimRtl Nim-native fast path (no marshal)
 
     let modulePath = writeSource(tempRoot / "provider", "mock_provider.nim",
       providerBody)
+    # ONE declaration of the attrs type, compiled into the provider .so AND the
+    # host driver, so the live typed value the direct path passes has the same
+    # ORC type identity on both sides (see ``sharedTypesBody``).
+    let sharedDir = tempRoot / "shared"
+    discard writeSource(sharedDir, "m4c_shared_types.nim", sharedTypesBody)
+    let sharedPath = "--path:" & sharedDir
 
     # ── RTL-mode IN THE ACTION KEY ─────────────────────────────────────────
     # The nimRtl-shared and standalone C-ABI library builds are DISTINCT
@@ -201,8 +262,11 @@ suite "M4c: resource reconcile over the nimRtl Nim-native fast path (no marshal)
     proc buildStandaloneProvider(): string =
       ## The C-ABI standalone provider .so always builds (no useNimRtl).
       result = tempRoot / ("libstandalone." & soExt())
-      let cmd = providerLibraryCompileCommand(modulePath, result,
+      var cmd = providerLibraryCompileCommand(modulePath, result,
         rtlStandaloneCAbi, repoRoot, tempRoot)
+      # Flags go BEFORE the trailing module path (anything after it is a run arg).
+      for flag in selfBindFlags() & @[sharedPath]:
+        cmd.insert(flag, cmd.len - 1)
       let (o, c) = execCmdEx(quoteShellCommand(cmd), workingDir = repoRoot)
       if c != 0 or not fileExists(result):
         raise newException(IOError, "standalone provider build failed (" & $c &
@@ -213,7 +277,8 @@ suite "M4c: resource reconcile over the nimRtl Nim-native fast path (no marshal)
     block nimrtlBuild:
       # 1) the ONE shared nimrtl
       let cmd = @[nimBin, "c", "-d:createNimRtl", "-d:release", "--mm:orc",
-        "--app:lib", "--out:" & nimrtlSo, locateNimrtlSource()]
+        "--app:lib"] & selfBindFlags() &
+        @["--out:" & nimrtlSo, locateNimrtlSource()]
       let (o, c) = execCmdEx(quoteShellCommand(cmd), workingDir = repoRoot)
       if c != 0 or not fileExists(nimrtlSo):
         checkpoint("nimrtl build failed:\n" & o)
@@ -226,6 +291,8 @@ suite "M4c: resource reconcile over the nimRtl Nim-native fast path (no marshal)
       pcmd.insert("--passL:-L" & tempRoot, pcmd.len - 1)
       pcmd.insert("--passL:-lnimrtl", pcmd.len - 1)
       pcmd.insert("--passL:-Wl,-rpath," & tempRoot, pcmd.len - 1)
+      for flag in selfBindFlags() & @[sharedPath]:
+        pcmd.insert(flag, pcmd.len - 1)
       let (po, pc) = execCmdEx(quoteShellCommand(pcmd), workingDir = repoRoot)
       if pc != 0 or not fileExists(so):
         if looksLikeStreamsNimRtlBug(po):
@@ -246,7 +313,7 @@ suite "M4c: resource reconcile over the nimRtl Nim-native fast path (no marshal)
         "-d:reproNimRtlShared", "-d:useNimRtl",
         "--passL:-L" & tempRoot, "--passL:-lnimrtl",
         "--passL:-Wl,-rpath," & tempRoot,
-        "--path:" & (tempRoot / "host")]
+        "--path:" & (tempRoot / "host"), sharedPath]
       hcmd.add(consumerCompilePathFlags(repoRoot))
       hcmd.add(@["--out:" & hb, hostSrc])
       let (ho, hc) = execCmdEx(quoteShellCommand(hcmd), workingDir = repoRoot)
@@ -264,10 +331,15 @@ suite "M4c: resource reconcile over the nimRtl Nim-native fast path (no marshal)
     proc runDriver(so: string): Table[string, string] =
       let worldPath = tempRoot / ("world-" & extractFilename(so) & ".txt")
       putEnv("M4C_WORLD", worldPath)
+      # The driver is a -d:useNimRtl binary, so argv is not readable from it
+      # (std/cmdline's cmdCount/cmdLine stay unpopulated -- see the note in
+      # hostDriverBody). Hand the provider .so path over via the environment,
+      # the same channel as M4C_WORLD.
+      putEnv("M4C_PROVIDER_SO", so)
       let ld = tempRoot & (if existsEnv("LD_LIBRARY_PATH"):
         ":" & getEnv("LD_LIBRARY_PATH") else: "")
       putEnv("LD_LIBRARY_PATH", ld)
-      let (o, c) = execCmdEx(quoteShellCommand(@[hostBin, so]),
+      let (o, c) = execCmdEx(quoteShellCommand(@[hostBin]),
         workingDir = tempRoot)
       if c != 0:
         raise newException(IOError, "driver run on " & so & " failed (" & $c &
