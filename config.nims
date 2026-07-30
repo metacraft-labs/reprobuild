@@ -244,15 +244,13 @@ for libName in [
 # ``src``; resolve the sibling checkout by path like every other workspace
 # Nim sibling. Prefer ``$IO_MON_SRC``, then the sibling checkout.
 let ioMonSrc = block:
-  let sibling = ".." / "io-mon" / "src"
-  if fileExists(sibling / "io_mon.nim"):
-    sibling
+  let fromEnv = getEnv("IO_MON_SRC")
+  if fromEnv.len > 0 and fileExists(fromEnv / "io_mon.nim"):
+    fromEnv
+  elif fromEnv.len > 0 and fileExists(fromEnv / "src" / "io_mon.nim"):
+    fromEnv / "src"
   else:
-    let fromEnv = getEnv("IO_MON_SRC")
-    if fromEnv.len > 0:
-      fromEnv
-    else:
-      sibling
+    ".." / "io-mon" / "src"
 if fileExists(ioMonSrc / "io_mon.nim"):
   switch("path", ioMonSrc)
 
@@ -371,9 +369,9 @@ addPackagePath("STACKABLE_HOOKS_SRC", [
 # nim-shm-gset (``shm_gset/transport``). Because config.nims compiles the io-mon
 # SIBLING in-tree (the io-mon block above prefers ``../io-mon`` over $IO_MON_SRC),
 # these shm packages MUST resolve to their co-developed siblings too — otherwise
-# a newer sibling io-mon is compiled against an older $SHM_QUEUE_SRC pin or a
+# a newer io-mon is compiled against an older $SHM_QUEUE_SRC pin or a
 # missing nim-shm-gset, which is exactly the version skew that breaks the build.
-# Precedence mirrors the io-mon block: sibling checkout first, then the env pin
+# These libraries retain their own sibling-first policy, then the env pin
 # ($SHM_QUEUE_SRC / $SHM_GSET_SRC), then the devshell fallback.
 proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
   if fileExists(sibling / marker):
