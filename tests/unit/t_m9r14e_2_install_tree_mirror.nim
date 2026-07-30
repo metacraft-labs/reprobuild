@@ -21,7 +21,7 @@
 ##   5. ``emitInstallTreeMirror`` is exposed via the package_result
 ##      surface for downstream test inspection.
 
-import std/[sets, unittest]
+import std/[strutils, unittest]
 
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
@@ -30,6 +30,13 @@ import repro_dsl_stdlib/types/executable
 import repro_dsl_stdlib/types/library
 
 suite "DSL-port M9.R.14e.2 — install-tree mirror emission":
+
+  test "bare FHS destinations are removed before replacement":
+    let script = m9r14e2ResetBareFhsMirrorScript("/tmp/mirror root")
+    for subdir in ["etc", "sbin", "bin"]:
+      check script.contains(
+        "rm -rf \"/tmp/mirror root/" & subdir & "\";")
+    check not script.contains("/usr/")
 
   test "meson executable slicing preserves the legacy Executable value":
     resetDslPortFetchState()

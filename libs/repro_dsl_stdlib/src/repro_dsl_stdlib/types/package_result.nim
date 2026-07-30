@@ -1443,6 +1443,15 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("fi; ")
   script
 
+proc m9r14e2ResetBareFhsMirrorScript*(dstRoot: string): string =
+  ## Remove bare FHS trees before replacing them from a staged install.
+  ## This is required for overlay-backed mirrors where protected files in
+  ## the lower layer cannot be overwritten in place.
+  for bareSubdir in ["etc", "sbin", "bin"]:
+    let escapedDst = (dstRoot / bareSubdir).
+      replace("\\", "/").replace("\"", "\\\"")
+    result.add("rm -rf \"" & escapedDst & "\"; ")
+
 proc emitInstallTreeMirror*(installEdge: BuildActionDef;
                             buildDir, destdir, packageName,
                             conventionTag: string) =
@@ -1499,6 +1508,7 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   # we own; no user data lives under ``.repro/output/install/usr``.
   script.add("rm -rf \"" & escapedDstUsr & "\"; ")
   script.add("mkdir -p \"" & escapedDstUsrRoot & "\"; ")
+  script.add(m9r14e2ResetBareFhsMirrorScript(dstUsrRoot))
   # ``cp -a`` preserves symlinks, modes, timestamps. The ``--`` guards
   # against a future ``destdir`` whose value starts with ``-`` from
   # being interpreted as a flag.
