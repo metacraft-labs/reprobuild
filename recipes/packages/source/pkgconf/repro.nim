@@ -177,6 +177,7 @@ package pkgconfSource:
         "sed -i 's/^install-exec-am: /install-exec-am: install-exec-hook /' " &
           "src/Makefile.in",
         "printf '%b\\n' '' 'install-exec-hook:' " &
+          "'\\t$(MKDIR_P) $(DESTDIR)$(bindir)' " &
           "'\\tln -sf pkgconf $(DESTDIR)$(bindir)/pkg-config' " &
           ">> src/Makefile.in",
       ]
