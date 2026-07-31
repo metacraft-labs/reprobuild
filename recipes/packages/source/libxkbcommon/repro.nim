@@ -181,6 +181,9 @@ package libxkbcommonSource:
     ## gcc is the host C toolchain — libxkbcommon is plain C11 with
     ## a small C++ helper layer the C compiler handles.
     "gcc >=7"
+    ## glibc's public errno.h, fcntl.h, and limits.h delegate Linux
+    ## ABI definitions to headers under linux/.
+    "linux-headers >=4.19"
     ## bison generates the keymap-text-format parser at build time;
     ## upstream's meson build hard-requires a bison-compatible
     ## yacc(1).

@@ -230,16 +230,28 @@ proc makeDepfilePolicy(path: string): DependencyGatheringPolicy =
 
 suite "M9.N Batch B — engine tool-identity env plumbing":
 
-  test "Nix glibc stays linkable without entering runtime loader paths":
-    let glibcLib = "/nix/store/0123456789abcdefghijklmnopqrstuv-glibc-2.40/lib"
+  test "core runtimes stay linkable without entering loader paths":
+    let nixGlibcLib =
+      "/nix/store/0123456789abcdefghijklmnopqrstuv-glibc-2.40/lib"
+    let sourceGlibcLib =
+      "/work/recipes/packages/source/glibc/.repro/output/install/usr/lib64"
+    let nixPythonLib =
+      "/nix/store/abcdefghijklmnopqrstuvwxyz012345-python3-3.13.9/lib"
+    let sourcePythonLib =
+      "/work/recipes/packages/source/python3/.repro/output/install/usr/lib"
+    let sourcePythonBundleLib =
+      "/work/recipes/packages/source/python3-with-modules/.repro/output/install/usr/lib"
     let dependencyLib = "/nix/store/vutsrqponmlkjihgfedcba9876543210-libfoo-1.0/lib"
-    let paths = ResolvedAuxPaths(libDirs: @[glibcLib, dependencyLib])
+    let paths = ResolvedAuxPaths(
+      libDirs: @[nixGlibcLib, sourceGlibcLib, nixPythonLib,
+        sourcePythonLib, sourcePythonBundleLib, dependencyLib])
 
     let argvEnv = applyResolvedAuxPathsArgv(
       @["LIBRARY_PATH=/existing/link", "LD_LIBRARY_PATH=/existing/runtime"],
       paths)
     check envValue(argvEnv, "LIBRARY_PATH").split(pathSeparator()) ==
-      @[glibcLib, dependencyLib, "/existing/link"]
+      @[nixGlibcLib, sourceGlibcLib, nixPythonLib, sourcePythonLib,
+        sourcePythonBundleLib, dependencyLib, "/existing/link"]
     check envValue(argvEnv, "LD_LIBRARY_PATH").split(pathSeparator()) ==
       @[dependencyLib, "/existing/runtime"]
 
@@ -248,7 +260,8 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     tableEnv["LD_LIBRARY_PATH"] = "/existing/runtime"
     applyResolvedAuxPathsTable(tableEnv, paths)
     check tableEnv["LIBRARY_PATH"].split(pathSeparator()) ==
-      @[glibcLib, dependencyLib, "/existing/link"]
+      @[nixGlibcLib, sourceGlibcLib, nixPythonLib, sourcePythonLib,
+        sourcePythonBundleLib, dependencyLib, "/existing/link"]
     check tableEnv["LD_LIBRARY_PATH"].split(pathSeparator()) ==
       @[dependencyLib, "/existing/runtime"]
 
@@ -350,6 +363,40 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     check gccPos > mesonPos
     # The boundary between the two is the platform separator.
     check captured.contains(mesonBin & sep & gccBin)
+
+  test "explicit tool bins precede transitive bins from earlier refs":
+    resetTmp()
+    let cacheRoot = TmpDir / "cache-direct-before-transitive"
+    createDir(cacheRoot)
+
+    let mesonBin = absolutePath(TmpDir / "mock-store" / "meson" / "bin")
+    let basePythonBin =
+      absolutePath(TmpDir / "mock-store" / "python3" / "bin")
+    let modulePythonBin =
+      absolutePath(TmpDir / "mock-store" / "python3-modules" / "bin")
+    for path in [mesonBin, basePythonBin, modulePythonBin]:
+      createDir(path)
+    let executableSuffix = when defined(windows): ".exe" else: ""
+    var table = initTable[string, ResolvedToolIdentity]()
+    table["meson"] = mockedIdentity(@[mesonBin, basePythonBin],
+      resolvedExe = mesonBin / ("meson" & executableSuffix))
+    table["python3-with-modules"] =
+      mockedIdentity(@[modulePythonBin, basePythonBin],
+        resolvedExe = modulePythonBin /
+          ("python3-with-modules" & executableSuffix))
+    let resolver = makeResolver(table)
+
+    let g = oneAction("direct-before-transitive",
+      @["meson", "python3-with-modules"],
+      fingerprintToken = "direct-before-transitive")
+    let res = runBuild(g, runnerCfg(cacheRoot, resolver))
+    check res.results.len == 1
+    check res.results[0].status == asSucceeded
+    let captured = stripPathPrefix(
+      readBypassStdout(cacheRoot, "direct-before-transitive"))
+    let entries = captured.split(pathSeparator())
+    check entries.len >= 3
+    check entries[0 .. 2] == @[mesonBin, modulePythonBin, basePythonBin]
 
   test "An unresolved ref is silently skipped, others still contribute":
     resetTmp()

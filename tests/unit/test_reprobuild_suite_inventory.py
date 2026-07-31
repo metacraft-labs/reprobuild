@@ -280,7 +280,10 @@ test "incomplete name" and:
         # source independently so aggregate drift cannot be accepted by merely
         # updating the totals below.
         expected_rebased_source_counts = {
-            "libs/repro_cli_support/tests/t_daemon_carried_environment.nim": 5,
+            # 6, not 5: the automatic-build-memory-capacity change added a
+            # sixth case here without bumping this pin, which is exactly the
+            # drift these per-source pins exist to catch.
+            "libs/repro_cli_support/tests/t_daemon_carried_environment.nim": 6,
             "libs/repro_resources/tests/"
             "t_attr_missing_interface_diagnostic.nim": 1,
             "libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim": 3,
@@ -444,7 +447,7 @@ test "incomplete name" and:
 
         # Exact generated-graph specification counts. An omitted, duplicated,
         # or substituted enrollment cannot be absorbed by the case totals.
-        self.assertEqual(len(nim_specs), 1180)
+        self.assertEqual(len(nim_specs), 1186)
         self.assertEqual(len(python_specs), 4)
 
         nim_total = sum(
@@ -492,9 +495,9 @@ test "incomplete name" and:
         )
         # Language totals and the overall total. These are the aggregate
         # backstop for the per-source pins above, not a substitute for them.
-        self.assertEqual(nim_total, 6634)
+        self.assertEqual(nim_total, 6664)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6665)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6695)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -760,7 +763,7 @@ test "incomplete name" and:
         # repro_tests.nim. This is an independent reading of the same
         # generated file as the parse_repro_tests pins above, so a dropped,
         # duplicated, or hand-edited specification fails here too.
-        self.assertEqual(declared_nim_count, 1180)
+        self.assertEqual(declared_nim_count, 1186)
         self.assertEqual(declared_python_count, 4)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -791,7 +794,7 @@ test "incomplete name" and:
             data["static"]["testEntryCount"],
             declared_nim_count + declared_python_count,
         )
-        self.assertEqual(data["static"]["testEntryCount"], 1184)
+        self.assertEqual(data["static"]["testEntryCount"], 1190)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),

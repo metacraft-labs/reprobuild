@@ -187,11 +187,18 @@ package libinputSource:
     ## gcc is the host C toolchain — libinput is plain C99 with a
     ## modern compiler-flag surface.
     "gcc >=7"
+    ## Meson uses pkg-config to locate libudev, mtdev, and libevdev.
+    "pkgconf >=1.8"
+    ## Syscall probes and the evdev backend consume Linux UAPI headers.
+    "linux-headers >=4.19"
 
   buildDeps:
     ## libudev is the userspace device-management library libinput's
     ## evdev backend wraps for hot-plug event delivery.
     "libudev >=232"
+    ## libudev's pkg-config metadata requires libcap when generating
+    ## the complete compile and link flags.
+    "libcap >=2.60"
     ## libmtdev is the multitouch-protocol-translation library
     ## libinput consumes for non-mtdev kernels and trackpad mt-A
     ## drivers.
@@ -233,6 +240,9 @@ package libinputSource:
         "tests=false",
         "libwacom=false",
         "udev-dir=/lib/udev",
+        # glibc 2.42 feature redirects intentionally redeclare several
+        # symbols; libinput enables -Wredundant-decls globally.
+        "c_args=-Wno-redundant-decls",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libinput")

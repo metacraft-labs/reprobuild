@@ -16,8 +16,8 @@
 ##     sequence equality on the production five-flag set + channel-
 ##     isolation spot-check (meson + cmake + make channels MUST be
 ##     empty).
-##   * SINGLE executable artifact registration (M3) — ``bash`` tagged
-##     ``dakExecutable``.
+##   * Executable artifact registration (M3) — ``bash`` and its
+##     ``sh`` alias, both tagged ``dakExecutable``.
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
@@ -77,20 +77,26 @@ suite "bashSource — from-source recipe smoke test":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "configureFlags does not leak into the make channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
-  test "artifacts register a single bash executable tagged dakExecutable":
-    # M3 artifact registry: ``bash`` is tagged ``dakExecutable``. bash's
-    # autotools build emits a single load-bearing binary (the shell
-    # interpreter); auxiliary ``bashbug`` helper + loadable builtins
-    # are NOT registered in v1. A regression that flattened the kind
-    # discriminator would mis-route the M9.L install path; a
-    # regression that collapsed the artifact-name partitioning at the
-    # one-artifact cardinality would not produce a single entry with
-    # the expected name.
+  test "artifacts register the bash interpreter plus its sh alias":
+    # M3 artifact registry: bash's autotools build emits one load-
+    # bearing binary (the shell interpreter) and the recipe's
+    # ``install-sh-alias`` patch additionally plants ``$(bindir)/sh``
+    # as a link to it, so the POSIX ``sh`` tool name is provisionable
+    # for Ninja / Make command runners that spawn ``/bin/sh -c``.
+    # Both are tagged ``dakExecutable``; the auxiliary ``bashbug``
+    # helper + loadable builtins are NOT registered in v1. A
+    # regression that flattened the kind discriminator would mis-route
+    # the M9.L install path; a regression that collapsed the
+    # artifact-name partitioning would not produce two distinctly
+    # named entries in declaration order.
     let arts = registeredArtifacts("bashSource")
-    check arts.len == 1
+    check arts.len == 2
     check arts[0].packageName == "bashSource"
     check arts[0].artifactName == "bash"
     check arts[0].kind == dakExecutable
+    check arts[1].packageName == "bashSource"
+    check arts[1].artifactName == "sh"
+    check arts[1].kind == dakExecutable
 
   test "versions block records the upstream tag + URL + repository":
     # M2 versions registry: the upstream ftp.gnu.org release tag is

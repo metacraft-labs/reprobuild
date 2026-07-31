@@ -147,13 +147,48 @@ proc endpointKindOf*(endpoint: string): EndpointKind =
 # ---------------------------------------------------------------------------
 
 when defined(posix):
+  var ipcBindStagingSequence = 0
+
   proc bindIpcListener*(endpoint: string): IpcListener =
+    ## Publish the endpoint path only once the socket is ALREADY
+    ## listening.
+    ##
+    ## ``bindUnix`` creates the filesystem entry, but a client that
+    ## ``connect(2)``s in the window between ``bind`` and ``listen``
+    ## gets ``ECONNREFUSED``. Discovery treats a present-but-refusing
+    ## endpoint as a crashed daemon's leftover
+    ## (``cleanupStaleUserDaemonDiscovery`` in ``runtime.nim``, reached
+    ## from every ``repro daemon status`` that reports not-running) and
+    ## UNLINKS it — so a poll that lands in that window permanently
+    ## disconnects a daemon that was merely still starting up: the
+    ## daemon then serves forever on an unlinked inode while every
+    ## subsequent status probe stats a missing path and answers
+    ## "not-running".
+    ##
+    ## Binding a private sibling name and ``rename(2)``-ing it into
+    ## place closes the window outright: the published path either does
+    ## not exist yet or accepts connections, never anything in between.
+    ## ``rename`` within one directory is atomic and, like the previous
+    ## unconditional ``removeFile(endpoint)``, replaces any leftover
+    ## entry.
     result.endpoint = endpoint
     createDir(parentDir(endpoint))
-    try: removeFile(endpoint) except OSError: discard
+    # Deliberately a SHORT leaf: AF_UNIX ``sun_path`` is 108 bytes, so
+    # the staging name must not be meaningfully longer than the
+    # endpoint it stands in for.
+    inc ipcBindStagingSequence
+    let staging = parentDir(endpoint) /
+      ("." & $getCurrentProcessId() & "-" & $ipcBindStagingSequence & ".bind")
+    try: removeFile(staging) except OSError: discard
     result.socket = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
-    result.socket.bindUnix(endpoint)
-    result.socket.listen()
+    try:
+      result.socket.bindUnix(staging)
+      result.socket.listen()
+      moveFile(staging, endpoint)
+    except CatchableError:
+      try: result.socket.close() except CatchableError: discard
+      try: removeFile(staging) except OSError: discard
+      raise
     result.bound = true
 
   proc closeIpcListener*(listener: var IpcListener) =

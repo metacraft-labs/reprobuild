@@ -642,15 +642,21 @@ proc autotools_package*(srcDir: string;
           ch == '~' or ch == '^':
         return value[0 ..< i]
     return value
-  var depRefs: seq[string] = @[]
+  var nativeRefs: seq[string] = @[]
   for raw in registeredNativeBuildDeps(pkgName):
-    depRefs.add(stripConstraint(raw))
+    nativeRefs.add(stripConstraint(raw))
+  var buildRefs: seq[string] = @[]
   for raw in registeredBuildDeps(pkgName):
-    depRefs.add(stripConstraint(raw))
+    buildRefs.add(stripConstraint(raw))
+  let depRefs = nativeRefs & buildRefs
   appendRegisteredActionToolIdentityRefs(configureEdge.id, depRefs)
   appendRegisteredActionToolIdentityRefs(buildEdge.id, depRefs)
   appendRegisteredActionToolIdentityRefs(installEdge.id, depRefs)
   appendRegisteredActionToolIdentityRefs(laCleanupEdge.id, depRefs)
+  classifyRegisteredActionToolIdentityRefs(configureEdge.id, buildRefs)
+  classifyRegisteredActionToolIdentityRefs(buildEdge.id, buildRefs)
+  classifyRegisteredActionToolIdentityRefs(installEdge.id, buildRefs)
+  classifyRegisteredActionToolIdentityRefs(laCleanupEdge.id, buildRefs)
   AutotoolsPackageResult(
     buildEdge: configureEdge,
     compileEdge: buildEdge,

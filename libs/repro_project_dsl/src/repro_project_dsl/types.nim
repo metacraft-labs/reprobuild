@@ -499,6 +499,14 @@ type
                      ## resolved path is taken from
                      ## ``BuildActionDef.cwdCustomPath``.
 
+  ToolIdentityRefKind* = enum
+    ## Platform role for an action's tool-identity reference. Values match
+    ## ``repro_build_engine/platform.DepKind`` and are mapped explicitly by
+    ## the CLI when the provider graph is lowered.
+    tirkBuild = 0'u8
+    tirkNative = 1'u8
+    tirkRuntime = 2'u8
+
   BuildActionDef* = object
     id*: string
     call*: PublicCliCall
@@ -594,6 +602,12 @@ type
       ## the engine resolves them at fork time, and PATH is
       ## populated with the resolved store paths so the bare tool
       ## name finds the right binary.
+    toolIdentityRefKinds*: seq[ToolIdentityRefKind]
+      ## Platform role parallel to ``toolIdentityRefs``. An empty or
+      ## mismatched list preserves the legacy ``tirkBuild`` default.
+      ## Constructor-generated actions populate this list so native tools
+      ## retain PATH priority while target dependency headers and libraries
+      ## can precede a native toolchain's transitive sysroot.
     requiresElevation*: bool
       ## Windows-System-Resources Phase E: marks an action edge as
       ## one whose execution must cross the privileged-operation

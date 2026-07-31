@@ -97,6 +97,8 @@
 ## variants need different strategies (e.g. a developer variant that
 ## flips introspection on for GNOME-shell developer bundles).
 
+import std/os
+
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
 import repro_dsl_stdlib/types/package_result
@@ -214,10 +216,14 @@ package pangoSource:
         "documentation=false",
         "build-testsuite=false",
       ]
+      let recipeRoot = getEnv("REPROBUILD_RECIPE_ROOT",
+        parentDir(getCurrentDir()))
+      let girPath = recipeRoot / "glib2-introspection" / ".repro" /
+        "output" / "install" / "usr" / "share" / "gir-1.0" & ":" &
+        recipeRoot / "harfbuzz" / ".repro" / "output" / "install" /
+        "usr" / "share" / "gir-1.0"
       let pkg = meson_package(srcDir = "./src", configureOptions = opts,
-        extraEnv = @[("GI_GIR_PATH",
-          "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share/gir-1.0:" &
-          "/opt/repro/reprobuild/recipes/packages/source/harfbuzz/.repro/output/install/usr/share/gir-1.0")])
+        extraEnv = @[("GI_GIR_PATH", girPath)])
       discard pkg.library("libpango")
       discard pkg.library("libpangocairo")
     finally:

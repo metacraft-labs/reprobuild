@@ -8,7 +8,7 @@
 
 import repro_workspace_manifests/[types, diagnostics, reader, resolver,
   compose, sync_planner, manifest_refresh, lock_writer, workspace_branch,
-  develop_overrides, override_resolution, provenance]
+  develop_overrides, override_resolution, provenance, project_set]
 
 export types
 export diagnostics
@@ -22,3 +22,4 @@ export workspace_branch
 export develop_overrides
 export override_resolution
 export provenance
+export project_set

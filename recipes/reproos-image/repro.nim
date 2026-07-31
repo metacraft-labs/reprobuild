@@ -140,6 +140,9 @@ const reproosImageRootfsDeps = @[
   "xz",
   "tar",
   "bash",
+  "gawk",
+  "perl",
+  "python3",
   "glibc",
   "coreutils",
   "grub",
@@ -186,6 +189,9 @@ package reproosImage:
     "xz"
     "tar"
     "bash"
+    "gawk"
+    "perl"
+    "python3"
     "glibc"
     "coreutils"
     "grub"
@@ -282,6 +288,7 @@ package reproosImage:
         # they change.
         "../reproos-iso/scripts/stage-de-rootfs.sh",
         "../reproos-iso/scripts/relocate-nix-to-repro.sh",
+        "../reproos-iso/scripts/normalize-source-runtime.sh",
         "../reproos-iso/scripts/build-base-rootfs.sh",
       ],
       extraOutputs = @[

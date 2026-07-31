@@ -131,11 +131,39 @@ IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
 SHM_QUEUE_SRC="${shm_queue_src}" \
   bash "${io_mon_src}/scripts/build_shim.sh"
 
-if [ -f "build/lib/librepro_monitor_shim.${dll_ext}" ]; then
-  mv -f "build/lib/librepro_monitor_shim.${dll_ext}" "build/lib/librepro_monitor_shim.${dll_ext}.old" || true
+# Publishing the shim = replacing the library this very process's children are
+# being monitored with.
+#
+# When this script runs as the ``reprobuild.build_apps`` engine action it is
+# monitor-wrapped: the engine exports REPRO_MONITOR_SHIM_LIB pointing at
+# ``build/lib/librepro_monitor_shim.<ext>`` and injects it into every child. The
+# lines below used to move that exact file aside and swap a freshly built one
+# into its place WHILE the action was still spawning children. repro.nim's own
+# comment on the shim edge already names the hazard: "Running that compiler
+# process under the same preload shim can trigger host compiler ICEs."
+#
+# So the build and the publish are now separate steps, per the house pattern for
+# this class of problem: build the binary in one location, copy it into the live
+# location in a FOLLOW-UP edge, once nothing is spawning children against it.
+# ``REPRO_DEFER_SHIM_PUBLISH=1`` (set by the engine action in repro.nim, which
+# then runs ``reprobuild.build_apps.publish_monitor_shim`` afterwards) stops this
+# script from doing the swap in-band. Standalone runs (``just bootstrap`` /
+# ``just build``) are not monitored and keep publishing inline, so local
+# workflows are unchanged.
+staged_shim="build/lib/tmp/librepro_monitor_shim.${dll_ext}"
+if [ ! -f "${staged_shim}" ]; then
+  echo "error: io-mon shim builder did not produce ${staged_shim}" >&2
+  exit 2
 fi
-mv -f "build/lib/tmp/librepro_monitor_shim.${dll_ext}" "build/lib/librepro_monitor_shim.${dll_ext}"
-rm -rf build/lib/tmp
+if [ "${REPRO_DEFER_SHIM_PUBLISH:-0}" = "1" ]; then
+  echo "Staged ${staged_shim}; publish deferred to the follow-up edge."
+else
+  if [ -f "build/lib/librepro_monitor_shim.${dll_ext}" ]; then
+    mv -f "build/lib/librepro_monitor_shim.${dll_ext}" "build/lib/librepro_monitor_shim.${dll_ext}.old" || true
+  fi
+  mv -f "${staged_shim}" "build/lib/librepro_monitor_shim.${dll_ext}"
+  rm -rf build/lib/tmp
+fi
 
 # M9.R.47.3 — clear LD_LIBRARY_PATH and NIX_LDFLAGS for every ``nim c``
 # invocation in this loop so Nim's compile-time ``{.dynlib: <const>.}``
@@ -247,14 +275,37 @@ runtime_passl_for_libraries() {
   done
 }
 
-# ``repro`` imports the ASP solver and dlopens libclingo by soname at process
-# startup. Keep the Nim compile-time search path scrubbed, but thread the
-# runtime loader path into the ELF/Mach-O so clean shells and SSH sessions work.
+# ``repro`` dlopens two libraries by bare soname: libclingo (the ASP solver,
+# loaded eagerly in the module's DatInit, i.e. before ``main``) and libzstd
+# (loaded lazily by the binary-cache client on the first ckZstd payload). Keep
+# the Nim compile-time search path scrubbed -- an absolute ``/nix/store`` path
+# baked into .rodata survives the stage-time store relocation and breaks the
+# installed system -- but thread the runtime loader path into the ELF/Mach-O so
+# clean shells and SSH sessions work.
+#
+# This is the ONLY thing that makes those sonames resolvable off the dev shell.
+# The dev shell's LD_LIBRARY_PATH is not available to a ``repro`` on the far
+# side of an SSH transport (sshd does not propagate it into a non-interactive
+# session, which is how the M71 remote-apply phases invoke ``repro home
+# __receive-bundle`` on the target host), to a CI step that is not wrapped in
+# ``nix develop``, or to an installed ``repro`` -- flake.nix deliberately
+# refuses to inject a loader search path into the installed wrapper (arbitrary
+# user build actions inherit the wrapper environment) and patches the same
+# directories into the packaged binaries' RPATH instead.
+#
+# ``tests/integration/t_repro_runtime_dlopen_without_library_path.nim`` is the
+# gate: it runs the built binary with the loader search-path variables removed
+# from the child environment, so this threading silently disappearing is a test
+# failure rather than a remote-only outage.
 mapfile -t repro_runtime_passl < <(
-  runtime_passl_for_libraries libclingo.so libclingo.dylib -- \
+  runtime_passl_for_libraries \
+    libclingo.so libclingo.dylib libzstd.so.1 libzstd.1.dylib -- \
     "${CLINGO_PREFIX:-}" \
     /opt/homebrew/opt/clingo \
-    /usr/local/opt/clingo
+    /usr/local/opt/clingo \
+    "${ZSTD_PREFIX:-}" \
+    /opt/homebrew/opt/zstd \
+    /usr/local/opt/zstd
 )
 
 while read -r name path extra_flags; do

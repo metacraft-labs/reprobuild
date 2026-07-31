@@ -153,6 +153,9 @@ package pixmanSource:
     ## gcc is the host C toolchain — pixman is plain C99 with
     ## per-arch SIMD intrinsics.
     "gcc >=7"
+    ## glibc's public limits.h delegates Linux ABI definitions to
+    ## linux/limits.h.
+    "linux-headers >=4.19"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.

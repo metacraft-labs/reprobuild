@@ -1719,6 +1719,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # action's bare-name argv (``meson`` / ``ninja`` / ``gcc`` / ...)
     # finds the right binaries.
     result.toolIdentityRefs = payload.toolIdentityRefs
+    result.toolIdentityRefKinds = @[]
+    for kind in payload.toolIdentityRefKinds:
+      result.toolIdentityRefKinds.add(
+        case kind
+        of tirkBuild: dkBuild
+        of tirkNative: dkNative
+        of tirkRuntime: dkRuntime)
     # M9.R.75: propagate the convention-supplied R6/R7 write-scope
     # declarations through to the engine-side ``BuildAction``. The
     # engine's ``validateGraph`` R7 pairwise-intersection pass reads
@@ -4488,7 +4495,7 @@ proc addCacheField(payload: var string; value: string) =
 proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
                           mode: ToolProvisioningMode): string =
   var payload = ""
-  payload.addCacheField("reprobuild.toolIdentityCache.v1")
+  payload.addCacheField("reprobuild.toolIdentityCache.v2")
   payload.addCacheField(mode.modeName)
   payload.addCacheField(artifact.projectInterface.projectName)
   payload.addCacheField(artifact.projectInterface.packageName)
@@ -5297,6 +5304,23 @@ type
     projectRoot: string
     outDir: string
     buildReportPath: string
+    inputEvidencePaths: seq[string]
+      ## Every input path the just-finished run observed, harvested
+      ## straight off ``BuildRunResult.results[].evidence`` (declared +
+      ## depfile + monitor reads/probes).
+      ##
+      ## ``repro watch`` arms its filesystem watcher from this set, so it
+      ## must NOT be derived from the persisted build report: report
+      ## persistence is an operator PRESENTATION choice
+      ## (``--write-report`` / ``--no-write-report``), while the watched
+      ## path set is operational input the watch loop cannot function
+      ## without. Reading it from the report file made
+      ## ``repro watch`` silently blind to every source file outside the
+      ## project's own directory whenever the operator did not pass
+      ## ``--write-report`` — the watcher then armed on the project file
+      ## plus its parent only, and inotify/kqueue directory watches are
+      ## not recursive, so an edit under ``src/`` produced no event and
+      ## the loop blocked forever.
 
   BuildCommandEventSink = proc(kind, message, payloadJson: string)
   WatchCommandEventSink = proc(kind, message, payloadJson: string;
@@ -6594,6 +6618,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if ownsFromSourceDryRunPlan:
       fromSourceDryRunPlannedRecipes.clear()
 
+  # Input evidence harvested off every engine run this call makes, so
+  # ``repro watch`` can arm its watcher without depending on whether the
+  # operator asked for a persisted report. Accumulated here rather than
+  # assigned to ``result`` directly because ``runLoweredGraphBuild``
+  # below is a nested proc whose own ``result`` is an ``int``.
+  var collectedInputEvidence: seq[string] = @[]
+
+  proc collectInputEvidence(buildResult: BuildRunResult) =
+    for item in buildResult.results:
+      for group in [item.evidence.declaredInputs, item.evidence.depfileInputs,
+          item.evidence.monitorReads, item.evidence.monitorProbes]:
+        for path in group:
+          collectedInputEvidence.add(path)
+
   proc runLoweredGraphBuild(lowered: tuple[actions: seq[BuildAction];
                                           pools: seq[BuildPool]];
                             selectedActionId: string): int =
@@ -6746,6 +6784,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro action log render",
       actionLogStart)
     buildResult.stats = buildStats
+    collectInputEvidence(buildResult)
     recordStatsForBuildRun(buildResult)
     if buildResult.hasFailedActions():
       emitFailedActionSummaries(buildResult, eventSink, progressRenderer)
@@ -6887,6 +6926,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       logSummary("loweredGraphCache: hit")
       result.exitCode = runLoweredGraphBuild(loweredCache.get(),
         cacheSelectedActionId)
+      result.inputEvidencePaths = collectedInputEvidence
       return
 
   # Tier 2a fast path: stereotyped CMake try_compile() projects ship a
@@ -6974,6 +7014,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       result.exitCode = 0
       return
     result.exitCode = runLoweredGraphBuild(lowered, selectedActionId)
+    result.inputEvidencePaths = collectedInputEvidence
     return
 
   let interfacePath = outDir / "project-interface.rbsz"
@@ -7041,19 +7082,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # etc.) still build from source.
     seedBootstrapCycleBreakTools()
     for useDef in artifact.projectInterface.toolUses:
-      # M9.R.14c.2 — if the tool is in the cycle-break set (either
-      # seeded as part of the bootstrap floor OR added reactively by
-      # an earlier closing-edge cycle), skip the auto-recurse + sibling
-      # probe entirely. The downstream ``toolProfileFor`` resolver
-      # routes it through stdlib provisioning instead. Without this
-      # gate the dispatcher would still recurse into the sibling
-      # binutils / gcc / make recipe even though we already decided
-      # the tool comes from stdlib -- wasting ~15 minutes of CI on a
-      # build whose output we'll never consume.
+      # A completed source mirror remains authoritative even for a
+      # bootstrap tool. The cycle-break set only suppresses recursive
+      # construction when that mirror is absent; this lets later
+      # consumers use bootstrap tools that an earlier build completed.
+      let outcome = tryResolveFromSourceTool(useDef)
+      if outcome.kind == rrResolved:
+        continue
+      # M9.R.14c.2 — if the unresolved tool is in the cycle-break set
+      # (either seeded as part of the bootstrap floor OR added
+      # reactively by an earlier closing-edge cycle), skip auto-recurse.
+      # The downstream resolver routes it through stdlib provisioning.
       if useDef.executableName.len > 0 and
           useDef.executableName in fromSourceCycleBrokenTools:
         continue
-      let outcome = tryResolveFromSourceTool(useDef)
       if outcome.kind != rrNeedsBuild:
         continue
       let siblingRecipeDir = absolutePath(outcome.recipeDir)
@@ -7624,6 +7666,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             result.projectRoot, selectorList)
       finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
       result.exitCode = runLoweredGraphBuild(lowered, selectedActionId)
+      result.inputEvidencePaths = collectedInputEvidence
       return
     else:
       logSummary("standardDirect: provider binary missing; falling back to " &
@@ -8137,6 +8180,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro action log render",
       actionLogStart)
     buildResult.stats = buildStats
+    collectInputEvidence(buildResult)
+    result.inputEvidencePaths = collectedInputEvidence
     recordStatsForBuildRun(buildResult)
     if buildResult.hasFailedActions():
       emitFailedActionSummaries(buildResult, eventSink, progressRenderer)
@@ -8176,9 +8221,16 @@ proc addWatchCandidate(paths: var HashSet[string]; projectRoot, path: string) =
   if parent.len > 0 and not parent.isUnderReproDir():
     paths.incl(parent)
 
-proc watchPathsFromReport(outcome: BuildCommandOutcome): seq[string] =
+proc watchPathsFromOutcome(outcome: BuildCommandOutcome): seq[string] =
+  ## The path set ``repro watch`` arms its filesystem watcher over: the
+  ## project file plus every input the run observed. The in-memory
+  ## evidence is the primary source (always collected); the persisted
+  ## report is read as well so a caller that has one loses nothing, but
+  ## it is never the only source — see ``inputEvidencePaths``.
   var paths = initHashSet[string]()
   addWatchCandidate(paths, outcome.projectRoot, outcome.modulePath)
+  for item in outcome.inputEvidencePaths:
+    addWatchCandidate(paths, outcome.projectRoot, item)
   if outcome.buildReportPath.len > 0 and fileExists(extendedPath(outcome.buildReportPath)):
     let report = parseFile(outcome.buildReportPath)
     for action in report{"actions"}:
@@ -11505,7 +11557,10 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
     return
   if isCompositionalWorkspaceToml(workspaceRoot):
     let workspaceToml = absolutePath(workspaceTomlPath(workspaceRoot))
-    let resolved = composeManifestLayersFromFile(workspaceToml)
+    # PS-2: hooks are installed in EVERY participating repo, so the hook
+    # target set is the whole active project set — not just the primary.
+    let resolved = extendWithActiveProjectSet(workspaceRoot,
+      composeManifestLayersFromFile(workspaceToml))
     result.mode = "workspace"
     result.projectName = resolved.projectName
     for repo in resolved.repos:
@@ -11519,9 +11574,11 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
     let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
     var resolved: ResolvedProject
     if fileExists(projectFile):
-      resolved = resolveProject(projectFile)
+      resolved = extendWithActiveProjectSet(workspaceRoot,
+        resolveProject(projectFile))
     elif fileExists(variantFile):
-      resolved = resolveVariant(variantFile)
+      resolved = extendWithActiveProjectSet(workspaceRoot,
+        resolveVariant(variantFile))
     else:
       resolved.projectName = ""
     if resolved.projectName.len > 0:
@@ -12429,6 +12486,22 @@ proc autoRunQuotaEnabled(): bool =
   getEnv("REPROBUILD_AUTO_RUNQUOTA", "1").normalize notin
     ["0", "false", "no", "off"]
 
+const DefaultAutoRunQuotaMemoryBytes* = 16'u64 * 1024'u64 * 1024'u64 *
+  1024'u64
+
+proc autoRunQuotaMemoryBytes*(): uint64 =
+  let configured = getEnv("REPROBUILD_RUNQUOTA_MEMORY_BYTES", "")
+  if configured.len == 0:
+    return DefaultAutoRunQuotaMemoryBytes
+  try:
+    result = parseBiggestUInt(configured).uint64
+  except ValueError:
+    raise newException(ValueError,
+      "REPROBUILD_RUNQUOTA_MEMORY_BYTES must be a positive integer")
+  if result == 0:
+    raise newException(ValueError,
+      "REPROBUILD_RUNQUOTA_MEMORY_BYTES must be a positive integer")
+
 proc executableFile(path: string): bool =
   if path.len == 0 or not fileExists(path):
     return false
@@ -12512,6 +12585,7 @@ const
     "RUNQUOTA_SOCKET", "RUNQUOTAD_BIN", "RUNQUOTA_BIN",
     "REPROBUILD_STORE_ROOT", "REPROBUILD_SOURCE_ROOT",
     "REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_MAX_PARALLELISM",
+    "REPROBUILD_RUNQUOTA_MEMORY_BYTES",
     "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
     "REPROBUILD_AUTO_RUNQUOTA",
     "REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS",
@@ -12874,10 +12948,11 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
   # daemon, its execute-edge lease hits ``lease request exceeds named-pool
   # budget: nim_pty.pty-serial``, and the build hangs.
   let standardPoolArgs = assembleRunquotadPoolArgs(extraPools)
+  let memoryBytes = $autoRunQuotaMemoryBytes()
   when defined(windows):
     var args = @[
       "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
-      "--memory-bytes", "17179869184"
+      "--memory-bytes", memoryBytes
     ]
     args.add(standardPoolArgs)
     # Clear any stale value so the client side falls through to
@@ -12892,7 +12967,7 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
     var args = @[
       "--socket", socket,
       "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
-      "--memory-bytes", "17179869184"
+      "--memory-bytes", memoryBytes
     ]
     args.add(standardPoolArgs)
     putEnv("RUNQUOTA_SOCKET", socket)
@@ -19326,7 +19401,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   # the shared ``parseAndResolveSelectors`` helper. The resolver turns
   # ``repro watch name1 name2`` into the project anchor + the union of
   # every name's dependency closure; ``lowerProviderSnapshot`` then
-  # builds them in one engine pass and ``watchPathsFromReport`` unions
+  # builds them in one engine pass and ``watchPathsFromOutcome`` unions
   # the inputs so the watcher monitors every selected closure.
   # ----------------------------------------------------------------
   let resolved = parseAndResolveSelectors(positionalSelectors, "repro watch")
@@ -19630,7 +19705,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
           })
         return 0
 
-      let paths = watchPathsFromReport(outcome)
+      let paths = watchPathsFromOutcome(outcome)
       ctLastWatchPaths = paths
       var watcher = openFilesystemWatcher(paths)
       try:
@@ -19856,7 +19931,7 @@ proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
-proc resolveDevelopWorkspaceProject(
+proc resolveDevelopWorkspacePrimary(
     workspaceRoot: string): ResolvedProject =
   ## M22 reuses the M9/M10 dispatch rule. Composer wins when
   ## ``.repro/workspace.toml`` declares layers; otherwise we look up the
@@ -19898,6 +19973,15 @@ proc resolveDevelopWorkspaceProject(
     "`repro develop` could not resolve a project from workspace root '" &
       workspaceRoot & "' (no .repro/workspace.toml and no single " &
       "projects/*.toml at the workspace root)")
+
+proc resolveDevelopWorkspaceProject(
+    workspaceRoot: string): ResolvedProject =
+  ## PS-2 — the develop-set candidates are every repo the workspace
+  ## participates in, so the primary project resolved above is extended with
+  ## the rest of the active project set. Unchanged for single-project
+  ## workspaces.
+  extendWithActiveProjectSet(workspaceRoot,
+    resolveDevelopWorkspacePrimary(workspaceRoot))
 
 proc safeDevelopPathSegment(value: string): string =
   ## File-system safe segment for the develop subdir. Mirrors
@@ -22431,7 +22515,10 @@ proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs):
       skipInaccessibleLayers: parsed.allowMissingLayers)
     let composed = composeManifestLayersFromFileWithOptions(
       workspaceToml, options)
-    result.project = composed.project
+    # PS-2 — init restores the WHOLE workspace, so a recorded project set is
+    # materialized in full rather than just its primary project.
+    result.project = extendWithActiveProjectSet(parsed.workspaceRoot,
+      composed.project)
     for sl in composed.skippedLayers:
       result.skippedLayers.add(WorkspaceInitSkippedLayerEntry(
         index: sl.index,
@@ -22444,6 +22531,11 @@ proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs):
     (parsed.projectName & ".toml")
   let variantFile = manifestsRoot / "variants" /
     (parsed.projectName & ".toml")
+  # An EXPLICIT ``repro workspace init <project>`` names one project and
+  # initializes exactly that one; the active project set is materialized by
+  # ``repro sync`` / ``repro workspace projects add`` instead. (The
+  # compositional branch above has no explicit-name semantics — membership
+  # there comes from workspace.toml — so it does extend.)
   if fileExists(projectFile):
     result.project = resolveProject(projectFile)
     return
@@ -23967,7 +24059,10 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
   if isCompositionalWorkspaceToml(workspaceRoot):
     let absToml = absolutePath(workspaceToml)
     let wl = readWorkspaceLocal(absToml)
-    return (composeManifestLayers(wl, workspaceRoot, absToml), some(wl))
+    # PS-2 — layers compose WITHIN the project; the active project set unions
+    # ACROSS projects. Both axes apply, layers first.
+    return (extendWithActiveProjectSet(workspaceRoot,
+      composeManifestLayers(wl, workspaceRoot, absToml)), some(wl))
   # MO-2 — manifest-optional fallback. When there is no resolved manifest
   # checkout (and no compositional workspace.toml, handled above), a
   # committed-lock-only workspace resolves its participating repo set from
@@ -24001,10 +24096,20 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
   let manifestsRoot = manifestsRoot(workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (name & ".toml")
   let variantFile = manifestsRoot / "variants" / (name & ".toml")
+  # PS-2 — when the project name was NOT supplied by the caller (it came from
+  # the workspace's own metadata), the question being asked is "what does this
+  # WORKSPACE consist of", so the answer is the union of the active project
+  # set. An explicit ``<project>`` argument still resolves that one project.
+  # A single-project workspace resolves byte-identically either way.
+  let membershipFromMetadata = projectName.len == 0
+  proc withSet(resolved: ResolvedProject): ResolvedProject =
+    if membershipFromMetadata:
+      extendWithActiveProjectSet(workspaceRoot, resolved)
+    else: resolved
   if fileExists(projectFile):
-    return (resolveProject(projectFile), none(WorkspaceLocal))
+    return (withSet(resolveProject(projectFile)), none(WorkspaceLocal))
   if fileExists(variantFile):
-    return (resolveVariant(variantFile), none(WorkspaceLocal))
+    return (withSet(resolveVariant(variantFile)), none(WorkspaceLocal))
   raise newException(ValueError,
     "no project or variant named '" & name & "' found under '" &
       manifestsRoot & "' (looked for '" & projectFile & "' and '" &
@@ -28003,8 +28108,8 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let absToml = absolutePath(workspaceToml)
     let workspaceLocal = readWorkspaceLocal(absToml)
-    let resolved = composeManifestLayers(
-      workspaceLocal, parsed.workspaceRoot, absToml)
+    let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
+      composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
   if parsed.projectName.len == 0:
     # Allow a metadata-only workspace.toml to supply the project name.
@@ -28015,7 +28120,13 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
         if recordedProject.len > 0:
           var withProject = parsed
           withProject.projectName = recordedProject
-          return resolveWorkspaceLockProject(withProject)
+          # PS-2 — a lock with no explicit ``<project>`` is a snapshot of the
+          # WORKSPACE, so it pins every repo of the active project set. The
+          # lock's DESTINATION stays the primary project (see
+          # ``pickManifestLayerRoot`` and the ``locks/<project>/`` layout).
+          let recovered = resolveWorkspaceLockProject(withProject)
+          return (extendWithActiveProjectSet(parsed.workspaceRoot,
+            recovered.resolved), recovered.workspaceLocal)
       except WorkspaceManifestParseError:
         discard
     else:
@@ -28024,7 +28135,9 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
       if migratedProject.len > 0:
         var withProject = parsed
         withProject.projectName = migratedProject
-        return resolveWorkspaceLockProject(withProject)
+        let recovered = resolveWorkspaceLockProject(withProject)
+        return (extendWithActiveProjectSet(parsed.workspaceRoot,
+          recovered.resolved), recovered.workspaceLocal)
     raise newException(ValueError,
       "`repro workspace lock` requires either `.repro/workspace.toml` " &
         "or a <project> argument; neither was present at " &
@@ -36397,7 +36510,8 @@ proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
   ## routes to single-project mode.
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
-    return composeManifestLayersFromFile(workspaceToml)
+    return extendWithActiveProjectSet(parsed.workspaceRoot,
+      composeManifestLayersFromFile(workspaceToml))
   if parsed.projectName.len == 0:
     # Allow a metadata-only workspace.toml to supply the project name. Only the
     # read of workspace.toml is guarded here: if resolving the *named* project
@@ -36413,7 +36527,10 @@ proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
     if recordedProject.len > 0:
       var withProject = parsed
       withProject.projectName = recordedProject
-      return resolveWorkspaceListProject(withProject)
+      # PS-2 — no explicit ``<project>``: list what the WORKSPACE consists of,
+      # i.e. the union of the active project set (deduplicated by path).
+      return extendWithActiveProjectSet(parsed.workspaceRoot,
+        resolveWorkspaceListProject(withProject))
     raise newException(ValueError,
       "`repro workspace list` requires either `.repro/workspace.toml` " &
         "or a <project> argument; neither was present at " &
@@ -38181,10 +38298,13 @@ proc resolveBranchProject(parsed: BranchArgs):
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let absToml = absolutePath(workspaceToml)
     let workspaceLocal = readWorkspaceLocal(absToml)
-    let resolved = composeManifestLayers(
-      workspaceLocal, parsed.workspaceRoot, absToml)
+    let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
+      composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
   var projectName = parsed.projectName
+  # PS-2 — a workspace branch is workspace-wide, so with no explicit project
+  # argument every repo of the active project set participates.
+  let membershipFromMetadata = parsed.projectName.len == 0
   if projectName.len == 0 and fileExists(workspaceToml):
     try:
       let recorded =
@@ -38201,10 +38321,14 @@ proc resolveBranchProject(parsed: BranchArgs):
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
   let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
+  proc withSet(resolved: ResolvedProject): ResolvedProject =
+    if membershipFromMetadata:
+      extendWithActiveProjectSet(parsed.workspaceRoot, resolved)
+    else: resolved
   if fileExists(projectFile):
-    return (resolveProject(projectFile), none(WorkspaceLocal))
+    return (withSet(resolveProject(projectFile)), none(WorkspaceLocal))
   if fileExists(variantFile):
-    return (resolveVariant(variantFile), none(WorkspaceLocal))
+    return (withSet(resolveVariant(variantFile)), none(WorkspaceLocal))
   raise newException(ValueError,
     "no project or variant named '" & projectName &
       "' found under '" & manifestsRoot &
@@ -38905,10 +39029,13 @@ proc resolveCheckoutProject(parsed: CheckoutArgs):
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let absToml = absolutePath(workspaceToml)
     let workspaceLocal = readWorkspaceLocal(absToml)
-    let resolved = composeManifestLayers(
-      workspaceLocal, parsed.workspaceRoot, absToml)
+    let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
+      composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
   var projectName = parsed.projectName
+  # PS-2 — ``repro checkout`` switches the WHOLE workspace, so with no
+  # explicit project argument every repo of the active project set switches.
+  let membershipFromMetadata = parsed.projectName.len == 0
   if projectName.len == 0 and fileExists(workspaceToml):
     try:
       let recorded =
@@ -38925,10 +39052,14 @@ proc resolveCheckoutProject(parsed: CheckoutArgs):
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
   let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
+  proc withSet(resolved: ResolvedProject): ResolvedProject =
+    if membershipFromMetadata:
+      extendWithActiveProjectSet(parsed.workspaceRoot, resolved)
+    else: resolved
   if fileExists(projectFile):
-    return (resolveProject(projectFile), none(WorkspaceLocal))
+    return (withSet(resolveProject(projectFile)), none(WorkspaceLocal))
   if fileExists(variantFile):
-    return (resolveVariant(variantFile), none(WorkspaceLocal))
+    return (withSet(resolveVariant(variantFile)), none(WorkspaceLocal))
   raise newException(ValueError,
     "no project or variant named '" & projectName &
       "' found under '" & manifestsRoot &
@@ -39812,12 +39943,40 @@ proc executeAdd(parsed: AddArgs): AddReport =
       return
     # Develop membership: record the remote, the repo fragment, and the
     # `includes` edge so the dependency participates in the workspace.
-    let remoteName = parsed.target & "-origin"
-    ensureRemoteEntry(resolved.projectFile, remoteName, parsed.remoteUrl)
+    # Reuse a declared remote that already serves this URL for this repo
+    # name; only fall back to a per-repo remote when none can. (`repro add`
+    # keeps `[repo].name == target` because the develop-set `depends` edges
+    # key off that name, so a plan that would rename the repo is declined.)
+    var remoteName = ""
+    var remoteFetch = parsed.remoteUrl
+    try:
+      let declared = readProjectManifest(resolved.projectFile)
+      let defaultRemote =
+        if declared.project.default_remote.isSome:
+          declared.project.default_remote.get()
+        else:
+          ""
+      let plan = planRepoRemote(declared.remote, defaultRemote,
+        parsed.target, parsed.remoteUrl)
+      if plan.error.len == 0 and plan.repoName == parsed.target:
+        remoteName = plan.remoteName
+        remoteFetch = plan.mintedFetch
+    except CatchableError:
+      discard
+    if remoteName.len == 0:
+      remoteName = parsed.target & "-origin"
+      remoteFetch = parsed.remoteUrl
+    if remoteFetch.len > 0:
+      ensureRemoteEntry(resolved.projectFile, remoteName, remoteFetch)
     let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
     createDir(manifestsRoot / "repos")
     let fragmentRel = "repos/" & parsed.target & ".toml"
     let fragmentAbs = manifestsRoot / "repos" / (parsed.target & ".toml")
+    # Pin `revision` only when it is NOT identical to what the fragment
+    # would inherit from the project's `default_revision`; a redundant pin
+    # freezes the repo the day it is added.
+    let pinRevision =
+      parsed.revision.len > 0 or resolved.defaultRevision.len == 0
     if not fileExists(fragmentAbs):
       writeFile(fragmentAbs,
         "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
@@ -39825,7 +39984,7 @@ proc executeAdd(parsed: AddArgs): AddReport =
         "name = \"" & parsed.target & "\"\n" &
         "path = \"" & repoPath & "\"\n" &
         "remote = \"" & remoteName & "\"\n" &
-        "revision = \"" & revision & "\"\n")
+        (if pinRevision: "revision = \"" & revision & "\"\n" else: ""))
     result.declarationChanged =
       appendFragmentInclude(resolved.projectFile, fragmentRel)
     # RA-21 develop-set edge: when `--depends-of=<repo>` is given, record
@@ -44400,12 +44559,27 @@ proc readDefaultProjectsFromHostConfig(workspaceRoot: string): seq[string] =
   except CatchableError:
     return @[]
 
+proc projectSetRepoPathsMissingOnDisk(workspaceRoot: string;
+                                      names: openArray[string]): seq[string] =
+  ## PS-3 — the checkout paths the named projects declare that are NOT on disk
+  ## yet. ``projects add`` materializes only when this is non-empty, so adding
+  ## projects whose repos are all present (or which declare no repos at all)
+  ## stays a pure metadata operation and never reaches for the network.
+  let resolved = resolveProjectSet(workspaceRoot, names)
+  for repo in resolved.repos:
+    if not dirExists(workspaceRoot / repo.path / ".git"):
+      result.add(repo.path)
+
 proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
   ## ``repro workspace projects [list|add ...]`` — inspect or grow the active
-  ## PROJECT SET recorded in ``.repo/workspace.toml``.
+  ## PROJECT SET recorded in ``.repro/workspace.toml``.
   ##
   ##   * ``list`` (default) — print the active set, one per line.
-  ##   * ``add <project>...`` — layer the named projects into the set.
+  ##   * ``add <project>...`` — layer the named projects into the set AND
+  ##     check out the repos the enlarged set introduces (PS-3). Membership
+  ##     without working trees is not a state any other command can act on,
+  ##     so recording and materializing are one operation.
+  ##   * ``add ... --no-sync`` — record membership only.
   ##   * ``add --default`` — auto-layer the set from ``REPRO_DEFAULT_PROJECTS``
   ##     (a path-separator / comma / whitespace-delimited list), falling back
   ##     to the RA-8 host config ``[projects] default``. Does NOTHING when
@@ -44424,9 +44598,12 @@ proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
   of "add":
     var explicit: seq[string]
     var useDefault = false
+    var noSync = false
     for arg in rest:
       if arg == "--default":
         useDefault = true
+      elif arg == "--no-sync":
+        noSync = true
       elif arg.startsWith("--workspace-root="):
         discard
       elif not arg.startsWith("-"):
@@ -44467,10 +44644,54 @@ proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
     for p in toAdd:
       if p notin merged:
         merged.add(p)
+
+    # PS-4 — validate the PROSPECTIVE set before touching anything. Two
+    # projects that declare one checkout path with different facts refuse the
+    # whole command: no metadata is written and no working tree is touched,
+    # so a refused `add` leaves the workspace exactly as it was.
+    #
+    # Any OTHER resolution failure is not a refusal. A workspace whose
+    # manifest checkout has not landed yet (the RA-6 fresh-clone bootstrap
+    # runs `projects add --default` before any manifest is materialized) can
+    # still record membership; it just has nothing to materialize yet, so the
+    # clone phase is skipped and the reason is reported.
+    var missing: seq[string]
+    var unresolved = ""
+    try:
+      discard resolveProjectSet(workspaceRoot, merged)
+      missing = projectSetRepoPathsMissingOnDisk(workspaceRoot, toAdd)
+    except WorkspaceProjectSetConflictError as err:
+      stderr.writeLine("repro workspace projects add: refusing to record " &
+        "the project set — " & err.msg)
+      stderr.writeLine("  active set unchanged: " &
+        (if existing.len > 0: existing.join(", ") else: "<empty>"))
+      return 1
+    except CatchableError as err:
+      unresolved = err.msg
+
     writeWorkspaceProjects(workspaceRoot, merged)
     for p in readWorkspaceProjects(workspaceRoot):
       stdout.writeLine(p)
-    return 0
+
+    # PS-3 — materialize what was just recorded. Only the repos the named
+    # projects introduce are missing-checkout candidates; everything already
+    # on disk is left untouched by the sync policy, which also makes a
+    # re-`add` of an already-active project the repair path for a partially
+    # cloned workspace.
+    if unresolved.len > 0:
+      stderr.writeLine("repro workspace projects add: recorded membership " &
+        "but could not resolve the manifest yet, so nothing was checked " &
+        "out — " & unresolved)
+      stderr.writeLine("  run `repro workspace sync` once the manifest is " &
+        "available")
+      return 0
+    if noSync or missing.len == 0:
+      return 0
+    stdout.writeLine("repro workspace projects add: checking out " &
+      $missing.len & " repo(s) introduced by " & toAdd.join(", "))
+    var syncArgs = @(toAdd)
+    syncArgs.add("--workspace-root=" & workspaceRoot)
+    return runWorkspaceSyncCommand(syncArgs)
   else:
     stderr.writeLine("repro workspace projects: unknown subcommand '" & sub &
       "' (expected: list, add)")
@@ -44832,13 +45053,56 @@ proc manifestRepoRootFor(workspaceRoot: string): string =
   ## membership. (The lock-store DB is a separate concern under ``.repro/``.)
   workspaceRoot
 
+type
+  RemoteRevisionState = enum
+    ## Outcome of asking a remote whether a revision exists.
+    rrsOk       ## the remote advertises the ref (or it is a full commit id)
+    rrsMissing  ## the remote answered, and the ref is NOT there
+    rrsUnknown  ## the remote could not be asked (offline, auth, no git)
+
+proc remoteRevisionState(gitBin, remoteUrl, revision: string): tuple[
+    state: RemoteRevisionState; diagnostic: string] =
+  ## Ask the remote whether `revision` resolves, via `git ls-remote`. Used to
+  ## validate a revision the caller supplied rather than writing it into a
+  ## manifest unchecked: a manifest that pins a non-existent branch resolves
+  ## fine at authoring time and fails for everyone at sync time.
+  if revision.len == 0:
+    return (rrsUnknown, "empty revision")
+  # A full commit id is not advertised by `ls-remote` in the general case
+  # (only tips are), so it cannot be refuted this way — accept it.
+  if revision.len == 40 and revision.allCharsInSet(HexDigits):
+    return (rrsOk, "")
+  if gitBin.len == 0:
+    return (rrsUnknown, "no git binary")
+  # Never let a credential prompt block manifest authoring.
+  putEnv("GIT_TERMINAL_PROMPT", "0")
+  let res = execCmdEx(quoteShellCommand(
+    [gitBin, "ls-remote", "--heads", "--tags", remoteUrl, revision]))
+  if res.exitCode != 0:
+    return (rrsUnknown, res.output.strip())
+  for line in res.output.splitLines():
+    let trimmed = line.strip()
+    if trimmed.len == 0: continue
+    if trimmed.endsWith("refs/heads/" & revision) or
+       trimmed.endsWith("refs/tags/" & revision) or
+       trimmed.endsWith("refs/tags/" & revision & "^{}"):
+      return (rrsOk, "")
+  (rrsMissing, "")
+
 proc projectManifestStub(project: string): string =
+  ## A NEW project has no repos and no remotes yet, so the stub carries
+  ## neither. The `includes` array is deliberately absent rather than empty:
+  ## a bare `includes = [ … ]` written directly under `[project]` is read as
+  ## a key OF that table and the manifest stops parsing (the pilot manifests
+  ## only work because their `[[remote]]` blocks sit between the two). The
+  ## array is created by `project repo add` once the file has a `[[remote]]`
+  ## table for it to follow, which is the layout every hand-written manifest
+  ## in the pilot has.
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"" & project & "\"\n" &
   "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
-  "includes = [\n]\n"
+  "trunk = \"main\"\n"
 
 proc commitAndPushManifest(identity: GitToolIdentity;
                            gitBin, manifestRoot, message: string;
@@ -44901,7 +45165,13 @@ proc runWorkspaceProjectCommand*(args: openArray[string]): int =
   if args.len == 0 or args[0] in ["--help", "-h", "help"]:
     echo "repro workspace project new <name> [-m DESC] [--workspace-root=PATH]"
     echo "repro workspace project repo add <project> <repo> --remote=URL " &
-      "[--revision=REV] [--workspace-root=PATH]"
+      "[-m DESC] [--revision=REV] [--workspace-root=PATH]"
+    echo "  --remote=URL   reuses the project's matching [[remote]] when one " &
+      "already serves that URL; otherwise adds one org-named remote."
+    echo "  --revision=REV pins the fragment (validated against the remote). " &
+      "Omitted, the repo inherits the project's default_revision."
+    echo "  -m DESC        writes repos/<repo>.md, the source of the " &
+      "generated project docs."
     return (if args.len == 0: 2 else: 0)
 
   let workspaceRoot = parseProjectsWorkspaceRoot(args)
@@ -44963,7 +45233,8 @@ proc runWorkspaceProjectCommand*(args: openArray[string]): int =
     var project = ""
     var repo = ""
     var remote = ""
-    var revision = "main"
+    var revision = ""
+    var desc = ""
     var i = 2
     var positional: seq[string]
     while i < args.len:
@@ -44972,6 +45243,11 @@ proc runWorkspaceProjectCommand*(args: openArray[string]): int =
         remote = a["--remote=".len .. ^1]
       elif a.startsWith("--revision="):
         revision = a["--revision=".len .. ^1]
+      elif a == "-m" or a == "--message":
+        if i + 1 < args.len:
+          desc = args[i + 1]; inc i
+      elif a.startsWith("--message="):
+        desc = a["--message=".len .. ^1]
       elif a.startsWith("--workspace-root="):
         discard
       elif not a.startsWith("-"):
@@ -44993,25 +45269,97 @@ proc runWorkspaceProjectCommand*(args: openArray[string]): int =
       stderr.writeLine("repro workspace project repo add: project '" &
         project & "' does not exist (" & projectFileAbs & ")")
       return 1
+    # Plan the fragment's remote against what the project ALREADY declares,
+    # so a repo from an org the project knows reuses that org's remote
+    # instead of growing the shared `[[remote]]` table with a single-use
+    # `<repo>-origin` entry. See `planRepoRemote` for the rules.
+    var manifest: ProjectManifest
+    try:
+      manifest = readProjectManifest(projectFileAbs)
+    except CatchableError as exc:
+      stderr.writeLine("repro workspace project repo add: cannot read " &
+        projectFileAbs & ": " & exc.msg)
+      return 1
+    let defaultRemote =
+      if manifest.project.default_remote.isSome:
+        manifest.project.default_remote.get()
+      else:
+        ""
+    let defaultRevision =
+      if manifest.project.default_revision.isSome:
+        manifest.project.default_revision.get()
+      else:
+        ""
+    let plan = planRepoRemote(manifest.remote, defaultRemote, repo, remote)
+    if plan.error.len > 0:
+      stderr.writeLine("repro workspace project repo add: " & plan.error)
+      return 1
+    # The revision is NEVER guessed. Without `--revision` the fragment omits
+    # the key entirely and inherits the project's `default_revision` — a
+    # guessed `main` pins the repo to a branch that need not exist, and the
+    # failure only surfaces later, at sync time, for everyone.
+    let effectiveRevision =
+      if revision.len > 0: revision else: defaultRevision
+    if revision.len > 0:
+      # An explicit pin is VALIDATED, not trusted: a manifest that pins a
+      # branch the remote does not have authors cleanly and then fails for
+      # every consumer at sync time. Only this branch talks to the network —
+      # the default (inherit `default_revision`) keeps manifest authoring an
+      # offline operation, and writes nothing that could be wrong.
+      let check = remoteRevisionState(gitBin, remote, revision)
+      if check.state == rrsMissing:
+        stderr.writeLine("repro workspace project repo add: revision '" &
+          revision & "' does not exist on " & remote &
+          " (no matching branch or tag). Omit --revision to inherit the " &
+          "project's default_revision" &
+          (if defaultRevision.len > 0: " (" & defaultRevision & ")" else: "") &
+          ".")
+        return 1
+      elif check.state == rrsUnknown:
+        stderr.writeLine("repro workspace project repo add: warning: could " &
+          "not verify revision '" & revision & "' on " & remote & ": " &
+          check.diagnostic)
     createDir(manifestRoot / "repos")
-    let remoteName = repo & "-origin"
     let fragmentRel = "repos/" & repo & ".toml"
     let fragmentAbs = manifestRoot / "repos" / (repo & ".toml")
     if not fileExists(fragmentAbs):
       writeFile(fragmentAbs,
         "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
         "[repo]\n" &
-        "name = \"" & repo & "\"\n" &
+        "name = \"" & plan.repoName & "\"\n" &
         "path = \"" & repo & "\"\n" &
-        "remote = \"" & remoteName & "\"\n" &
-        "revision = \"" & revision & "\"\n")
-    ensureRemoteEntry(projectFileAbs, remoteName, remote)
+        "remote = \"" & plan.remoteName & "\"\n" &
+        (if revision.len > 0: "revision = \"" & revision & "\"\n" else: ""))
+    if plan.mintedFetch.len > 0:
+      ensureRemoteEntry(projectFileAbs, plan.remoteName, plan.mintedFetch)
     discard appendFragmentInclude(projectFileAbs, fragmentRel)
-    let msg = "Add repo " & repo & " to project " & project
-    let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg,
-      ["projects/" & project & ".toml", fragmentRel])
+    var paths = @["projects/" & project & ".toml", fragmentRel]
+    # `repos/<repo>.md` is where a repo's one-paragraph description lives —
+    # `workspace-projects.md` (and the agent-facing project docs) are
+    # generated from those files, so a repo added without one is invisible
+    # in the generated docs. Write it when `-m` is given; otherwise say so.
+    let docRel = "repos/" & repo & ".md"
+    let docAbs = manifestRoot / "repos" / (repo & ".md")
+    if desc.len > 0:
+      if not fileExists(docAbs):
+        writeFile(docAbs, desc.strip() & "\n")
+      paths.add(docRel)
+    elif not fileExists(docAbs):
+      stderr.writeLine("repro workspace project repo add: note: no " &
+        docRel & " description written (pass -m \"<description>\"); the " &
+        "generated project docs will have no entry for " & repo)
+    let msg = "Add repo " & repo & " to project " & project &
+      (if desc.len > 0: " (" & desc.strip().splitLines()[0] & ")" else: "")
+    let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
     stdout.writeLine("repro workspace project repo add: " & repo & " -> " &
-      project & " — " & res.diagnostic)
+      project & " — remote " & plan.remoteName &
+      (if plan.mintedFetch.len > 0: " (new, fetch " & plan.mintedFetch & ")"
+       else: " (reused)") &
+      ", revision " &
+      (if revision.len > 0: revision & " (pinned)"
+       elif effectiveRevision.len > 0: effectiveRevision & " (inherited)"
+       else: "(unset)") &
+      " — " & res.diagnostic)
     return res.code
   else:
     stderr.writeLine("repro workspace project: unknown subcommand '" & sub &

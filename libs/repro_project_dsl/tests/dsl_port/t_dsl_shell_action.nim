@@ -33,6 +33,14 @@ import repro_dsl_stdlib/types
 # module-init sequence runs every block once and populates the registry
 # before the test cases below open.
 package shellActionPkg:
+  nativeBuildDeps:
+    "gcc >=11"
+    "pkg-config"
+    "gcc >=12"
+  buildDeps:
+    "zlib"
+    "pkg-config"
+
   executable firstTool:
     build:
       shell "tar -xf $fetch -C $extracted"
@@ -104,6 +112,10 @@ suite "DSL-port M9.N Batch C.1 — shell() action registry":
     for r in rows:
       check r.deps == emptyStrSeq
       check r.outputs == emptyStrSeq
+
+  test "custom shell actions inherit unique declared dependency identities":
+    check dslPortCustomShellToolIdentityRefs("shellActionPkg") ==
+      @["sh", "gcc", "pkg-config", "zlib"]
 
   test "registry is empty for packages that never called shell()":
     let rows = registeredShellActions("noSuchPackage")

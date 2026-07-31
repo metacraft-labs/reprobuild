@@ -1452,6 +1452,28 @@ proc m9r14e2ResetBareFhsMirrorScript*(dstRoot: string): string =
       replace("\\", "/").replace("\"", "\\\"")
     result.add("rm -rf \"" & escapedDst & "\"; ")
 
+proc m9r14e2NormalizeGlibcMirrorScript*(dstUsr: string): string =
+  ## Glibc installs runtime libraries under bare /lib64 and emits linker
+  ## scripts with absolute /lib64 and /usr/lib64 references. The canonical
+  ## mirror folds those files into usr/lib64, so make its symlinks and linker
+  ## scripts relative to that final directory.
+  let escapedLib64 = (dstUsr / "lib64").
+    replace("\\", "/").replace("\"", "\\\"")
+  result.add("if [ -d \"" & escapedLib64 & "\" ]; then ")
+  result.add("for link in \"" & escapedLib64 & "\"/*; do ")
+  result.add("if [ -L \"$link\" ]; then ")
+  result.add("target=\"$(readlink \"$link\")\"; ")
+  result.add("case \"$target\" in ../../lib64/*) ")
+  result.add("ln -sfn \"$(basename \"$target\")\" \"$link\" ;; esac; ")
+  result.add("fi; done; ")
+  result.add("for linker_script in libc.so libm.so libm.a; do ")
+  result.add("linker_script_path=\"" & escapedLib64 &
+    "/$linker_script\"; ")
+  result.add("if [ -f \"$linker_script_path\" ]; then ")
+  result.add("sed -i -e 's|/usr/lib64/||g' -e 's|/lib64/||g' " &
+    "\"$linker_script_path\"; ")
+  result.add("fi; done; fi; ")
+
 proc emitInstallTreeMirror*(installEdge: BuildActionDef;
                             buildDir, destdir, packageName,
                             conventionTag: string) =
@@ -1555,6 +1577,8 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
       script.add("mkdir -p \"" & escapedDstBare & "\"; ")
       script.add("cp -a -- \"" & escapedSrcBare & "\"/. \"" & escapedDstBare & "/\"; ")
       script.add("fi; ")
+  if packageName == "glibcSource":
+    script.add(m9r14e2NormalizeGlibcMirrorScript(dstUsr))
   # M9.R.14e.8 — rewrite the .pc files' ``prefix=`` line to point at the
   # absolute path of the mirrored ``usr/`` tree so consumers that consult
   # ``pkg-config --variable=...`` or ``pkg-config --cflags`` see real

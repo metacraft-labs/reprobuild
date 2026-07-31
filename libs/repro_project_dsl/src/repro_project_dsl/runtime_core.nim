@@ -177,7 +177,11 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 22'u16
+  BuildActionPayloadVersion = 23'u16
+    ## v23: appends the platform role parallel to each tool-identity
+    ## reference. v22-and-earlier payloads decode with an empty list and
+    ## retain the legacy build-dependency default.
+    ##
     ## v22: M9.R.75 — R6 (source-write reject) + R7 (double-write
     ## reject) per-action write-scope declaration. Appends two
     ## length-prefixed string seqs: ``declaredOutputs`` (write roots
@@ -966,6 +970,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   publishToBinaryCache = false;
                   cacheEntryIdentity = none(CacheEntryIdentity);
                   toolIdentityRefs: openArray[string] = [];
+                  toolIdentityRefKinds:
+                    openArray[ToolIdentityRefKind] = [];
                   requiresElevation = false;
                   cwdKind = acwdRecipeRoot;
                   cwdCustomPath = "";
@@ -1030,6 +1036,7 @@ proc buildAction*(id: string; call: PublicCliCall;
     publishToBinaryCache: publishToBinaryCache,
     cacheEntryIdentity: cacheEntryIdentity,
     toolIdentityRefs: @toolIdentityRefs,
+    toolIdentityRefKinds: @toolIdentityRefKinds,
     requiresElevation: requiresElevation,
     recipeRevisionFingerprint: recipeRevisionFingerprint,
     cwdKind: cwdKind,
@@ -1621,6 +1628,34 @@ proc appendRegisteredActionToolIdentityRefs*(actionId: string;
         if not found:
           buildActionRegistry[i].toolIdentityRefs.add(refName)
       return
+
+proc classifyRegisteredActionToolIdentityRefs*(
+    actionId: string;
+    buildRefs: openArray[string];
+    runtimeRefs: openArray[string] = []) {.dynOrStatic.} =
+  ## Populate the platform-role list parallel to an already-registered
+  ## action's tool refs. Typed-tool refs and native build dependencies are
+  ## BUILD-platform tools; explicit build/runtime dependencies target the
+  ## HOST platform. Build classification wins when a selector appears in
+  ## both lists because its headers and libraries must precede the native
+  ## toolchain's transitive sysroot.
+  proc containsRef(refs: openArray[string]; name: string): bool =
+    for candidate in refs:
+      if candidate == name:
+        return true
+
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id != actionId:
+      continue
+    buildActionRegistry[i].toolIdentityRefKinds.setLen(0)
+    for refName in buildActionRegistry[i].toolIdentityRefs:
+      if containsRef(buildRefs, refName):
+        buildActionRegistry[i].toolIdentityRefKinds.add(tirkBuild)
+      elif containsRef(runtimeRefs, refName):
+        buildActionRegistry[i].toolIdentityRefKinds.add(tirkRuntime)
+      else:
+        buildActionRegistry[i].toolIdentityRefKinds.add(tirkNative)
+    return
 
 proc appendRegisteredActionTypedOutput*(actionId: string;
                                         fieldName: string;
@@ -2291,6 +2326,12 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
   # behaviour byte-for-byte.
   payload.writeStringSeq(action.declaredOutputs)
   payload.writeStringSeq(action.readOnlyRoots)
+  # v23: one strict enum byte per tool-identity ref. The decoder accepts
+  # an empty list for legacy/manual actions and the engine applies its
+  # historical build-dependency default in that case.
+  payload.writeU32Le(uint32(action.toolIdentityRefKinds.len))
+  for kind in action.toolIdentityRefKinds:
+    payload.writeByte(byte(ord(kind)))
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -2307,7 +2348,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
       9'u16, 10'u16, 11'u16, 12'u16, 13'u16, 14'u16, 15'u16, 16'u16,
-      17'u16, 18'u16, 19'u16, 20'u16, 21'u16, BuildActionPayloadVersion}:
+      17'u16, 18'u16, 19'u16, 20'u16, 21'u16, 22'u16,
+      BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -2458,6 +2500,18 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # no-op for them.
     result.declaredOutputs = @[]
     result.readOnlyRoots = @[]
+  if version >= 23'u16:
+    let refKindCount = int(readU32Le(bytes, pos))
+    result.toolIdentityRefKinds =
+      newSeq[ToolIdentityRefKind](refKindCount)
+    for i in 0 ..< refKindCount:
+      let rawKind = readByte(bytes, pos)
+      if rawKind > byte(ord(high(ToolIdentityRefKind))):
+        raisePayload(
+          "invalid toolIdentityRefKind ordinal in build action payload")
+      result.toolIdentityRefKinds[i] = ToolIdentityRefKind(rawKind)
+  else:
+    result.toolIdentityRefKinds = @[]
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

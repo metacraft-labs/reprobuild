@@ -174,3 +174,6 @@ suite "DSL-port M9.R.15q.2.1 — from-source-custom registry population":
       # registry is empty here, confirming the helper's no-op behaviour
       # outside provider mode.
       check actions.len == 0
+
+  test "fallback mirror includes executable support files":
+    check "libexec" in customMirrorFallbackSubdirs

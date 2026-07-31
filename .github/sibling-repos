@@ -51,7 +51,22 @@ reprobuild-ct-test-runner=main
 # wires IO_MON_SRC / NIM_STACKABLE_HOOKS_SRC from the ../io-mon and
 # ../nim-stackable-hooks siblings. io-mon is pinned to the hardened revision
 # used by this retirement campaign.
-io-mon=8a55c4f215cb08ba3d17b84929242c3dc4161fef
+#
+# 75de6f2 is 8a55c4f + ONE cherry-picked commit touching only
+# `scripts/build_shim.sh` (io-mon branch `pin/hardened-platform-detect`). It is
+# deliberately not io-mon's dev tip: dev carries five further commits to
+# dep_queue / writer / the macOS sandbox-tools lifecycle, and moving the pin
+# would change the io-mon RUNTIME this campaign is hardening against. The
+# cherry-pick changes a build script only.
+#
+# Why it is needed: at 8a55c4f, build_shim.sh dispatches on `$(uname -s)`, and
+# inside reprobuild's MONITORED `repro build` action on macOS that expands to
+# the empty string — the v0.1.3 release and the 30608858466 validation run both
+# died on `unsupported platform  for the io-mon shim` (note the doubled space)
+# minutes after the same script had succeeded outside the engine in the same
+# job. The cherry-pick resolves the platform from `$OSTYPE`/`$HOSTTYPE` (bash
+# builtins — no fork for a monitoring shim to interpose) with uname as fallback.
+io-mon=75de6f292f3df7303662915988874ac310012406
 nim-stackable-hooks=c6cf6ad1ac95201288825970b6ca53f630ea8996
 runquota=dev
 nim-shm-queue=08d87d26067568e980f4356c4abcf2a0d841a310

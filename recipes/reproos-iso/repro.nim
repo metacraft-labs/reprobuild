@@ -126,6 +126,7 @@ package reproosIso:
         "vendor/SHA256SUMS",
         "scripts/build-iso.sh",
         "scripts/stage-de-rootfs.sh",
+        "scripts/normalize-source-runtime.sh",
         # M9.R.17c.1 -- live-init initramfs builder + its vendored
         # init script. Regenerates the initramfs in-tree so the
         # SquashFS payload is consumed by the kernel via pivot_root

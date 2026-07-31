@@ -4032,6 +4032,20 @@ proc m9r14hProbeInstallMirrorExecutable*(recipeDir, depName: string): string =
     return absolutePath(exeCandidate)
   return ""
 
+proc m9r14hInstallMirrorHasExecutable(recipeDir: string): bool =
+  ## Package selectors do not always name a real executable. For example,
+  ## the ``binutils`` package exposes ``ld``, ``as``, and related tools.
+  ## A populated final install-mirror bin directory is sufficient evidence
+  ## that such a bootstrap package completed.
+  let binDir = recipeDir / ".repro" / "output" / "install" / "usr" / "bin"
+  if not dirExists(extendedPath(binDir)):
+    return false
+  for kind, unusedPath in walkDir(extendedPath(binDir)):
+    discard unusedPath
+    if kind in {pcFile, pcLinkToFile}:
+      return true
+  false
+
 type
   FromSourceResolveKind* = enum
     ## DSL-port M9.R.9 — discriminated outcome for from-source
@@ -4203,6 +4217,7 @@ proc m9r14fDepRecipeName(useDef: InterfaceToolUse): string =
 
 const FromSourceRecipeAliases* = [
   (dependency: "libltdl", recipe: "libtool"),
+  (dependency: "pkg-config", recipe: "pkgconf"),
 ]
   ## Source packages can publish independently consumed libraries whose
   ## ABI name differs from the upstream source-package name. Keep these
@@ -4263,15 +4278,17 @@ proc populateFromSourceSearchPathsImpl(profile: var PathOnlyToolProfile;
   visited.incl(key)
   populateFromSourceSearchPathsLocal(profile, recipeDir)
   # Walk the recipe's declared deps and recurse for each from-source
-  # sibling. Tools without a sibling recipe (gcc / meson / ninja / ...)
-  # are silently skipped — they don't contribute install-tree search
-  # paths anyway.
+  # sibling. An unresolved cycle-break tool is skipped, while a completed
+  # source mirror remains part of the search-path closure.
   for useDef in m9r14fLoadInterfaceToolUses(recipeDir):
     for depName in m9r14fDepRecipeNames(useDef):
-      if depName in fromSourceCycleBrokenTools:
-        continue
       let depDir = recipeRoot / depName
       if not fileExists(extendedPath(depDir / "repro.nim")):
+        continue
+      if depName in fromSourceCycleBrokenTools and
+          m9r14hProbeInstallMirrorExecutable(
+            depDir, useDef.executableName).len == 0 and
+          not m9r14hInstallMirrorHasExecutable(depDir):
         continue
       populateFromSourceSearchPathsImpl(profile, depDir, recipeRoot,
         visited, depth + 1)
@@ -4294,9 +4311,9 @@ proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
   ## discover the dep's own deps and recurses into each from-source
   ## sibling. The visited-set prevents infinite recursion on accidental
   ## cycles; depth is capped at ``M9R14fMaxTransitiveDepth`` as a
-  ## sanity bound. Tools in ``fromSourceCycleBrokenTools`` (gcc, meson,
-  ## ninja, ...) are skipped — they're stdlib-provisioned and don't
-  ## contribute install-tree search paths.
+  ## sanity bound. Unresolved tools in ``fromSourceCycleBrokenTools`` are
+  ## skipped because they are stdlib-provisioned. Completed source mirrors
+  ## still contribute their install-tree search paths.
   ##
   ## The autotools_package / meson_package constructors stage the
   ## upstream's ``make install DESTDIR=<recipe>/build/out`` (or
@@ -4428,7 +4445,14 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
   let baseCandidate = fromSourceArtifactCandidate(root, recipeName, name)
   var candidates = m9r14dEnumerateArtifacts(recipeDir)
   var resolved = ""
-  if candidates.len > 0:
+  # Prefer the complete install mirror for executable tools. Its ELF RPATH
+  # normalization has already run and its sibling data/library tree is intact.
+  # The per-artifact copy can retain a build-only RPATH, which makes otherwise
+  # valid source tools such as xz fail before the action receives aux paths.
+  let mirrorExecutable = m9r14hProbeInstallMirrorExecutable(recipeDir, name)
+  if mirrorExecutable.len > 0:
+    resolved = mirrorExecutable
+  elif candidates.len > 0:
     let pickIdx = m9r14dPickBestMatch(candidates, name)
     if pickIdx >= 0 and candidates[pickIdx].resolvedPath.len > 0:
       resolved = candidates[pickIdx].resolvedPath
@@ -4798,15 +4822,17 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     # in the normal path (and surface a clean OSError if we do, with
     # the M9.Q operator hint preserved).
     #
-    # DSL-port M9.R.10a — cycle-break override. The auto-recurse
-    # dispatcher (``executeBuildTarget``) marks the closing-edge tool of
-    # a recursion cycle in ``fromSourceCycleBrokenTools`` and falls
-    # through to the stdlib provisioning channels HERE instead of
-    # raising a cycle diagnostic. Bootstrap tools (gcc, binutils, make,
-    # autoconf, automake, libtool, pkg-config) thereby come from stdlib
-    # provisioning at cycle-break time; everything else still builds
-    # from source. When the stdlib has NO provisioning the cycle is
+    # DSL-port M9.R.10a — cycle-break override. Completed source mirrors
+    # take precedence, including for bootstrap tools. If no completed
+    # mirror exists, the auto-recurse dispatcher marks the closing-edge
+    # tool of a recursion cycle in ``fromSourceCycleBrokenTools`` and
+    # falls through to stdlib provisioning HERE instead of raising a
+    # cycle diagnostic. When the stdlib has NO provisioning the cycle is
     # genuinely unrecoverable and we surface the original diagnostic.
+    let outcome = tryResolveFromSourceTool(useDef)
+    if outcome.kind == rrResolved:
+      result = outcome.profile
+      return
     if useDef.executableName.len > 0 and
         useDef.executableName in fromSourceCycleBrokenTools:
       var fallProfile: PathOnlyToolProfile
@@ -4822,7 +4848,6 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
         "provisioning block in the stdlib package definition for \"" &
         useDef.executableName & "\" OR break the cycle by editing one " &
         "of the recipes' nativeBuildDeps lists.")
-    let outcome = tryResolveFromSourceTool(useDef)
     case outcome.kind
     of rrResolved:
       result = outcome.profile

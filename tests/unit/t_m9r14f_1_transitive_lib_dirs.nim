@@ -36,8 +36,8 @@
 ##   5. Depth cap: a synthetic linear chain longer than
 ##      ``M9R14fMaxTransitiveDepth`` terminates at the cap.
 ##   6. Cycle-broken tools (gcc / meson / ninja) declared as
-##      ``nativeBuildDeps`` of a dep don't cause the walk to look for
-##      their sibling recipe.
+##      ``nativeBuildDeps`` of a dep are skipped while unresolved, but a
+##      completed source mirror contributes its executable directory.
 ##   7. The transitive walk preserves the immediate dep's behaviour —
 ##      a recipe with NO declared deps gets the same lists as it would
 ##      under M9.R.14e.* (single-node populate).
@@ -75,6 +75,18 @@ proc writeRecipeManifest(root, recipeName: string) =
   let recipeDir = root / recipeName
   createDir(recipeDir)
   writeFile(recipeDir / "repro.nim", "## synthetic " & recipeName & " recipe\n")
+
+proc writeInstallMirrorExecutable(root, recipeName, executableName: string):
+    string =
+  result = root / recipeName / ".repro" / "output" / "install" /
+    "usr" / "bin" / executableName
+  createDir(parentDir(result))
+  writeFile(result, "#!/bin/sh\nexit 0\n")
+  when not defined(windows):
+    setFilePermissions(result, {
+      fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec,
+      fpOthersRead, fpOthersExec})
 
 proc writeSyntheticInterface(root, recipeName: string;
                              deps: openArray[string]) =
@@ -327,6 +339,56 @@ suite "DSL-port M9.R.14f.1 — transitive libDirs union":
       if entry.contains(DirSep & "expat" & DirSep):
         sawExpat = true
     check sawExpat
+
+  test "completed_cycle_broken_source_tool_contributes_bin_path":
+    # Meson is itself a source-built tool whose launcher needs its
+    # source-built Python runtime. The bootstrap cycle-break set must not
+    # hide Python once its complete install mirror exists.
+    let scratch = createTempDir("repro-m9r14f-1-cycle-source-", "")
+    defer: removeDir(scratch)
+
+    let savedSet = fromSourceCycleBrokenTools
+    defer: fromSourceCycleBrokenTools = savedSet
+    fromSourceCycleBrokenTools = initHashSet[string]()
+    fromSourceCycleBrokenTools.incl("python3")
+
+    writeRecipeManifest(scratch, "meson")
+    layInstallTree(scratch, "meson",
+      pcNames = @[], headerNames = @[], libBareNames = @[])
+    writeSyntheticInterface(scratch, "meson", deps = @["python3"])
+
+    writeRecipeManifest(scratch, "python3")
+    let python = writeInstallMirrorExecutable(
+      scratch, "python3", "python3")
+    writeSyntheticInterface(scratch, "python3", deps = @[])
+
+    var profile = PathOnlyToolProfile(installMethod: "from-source")
+    populateFromSourceSearchPaths(profile, scratch / "meson", scratch)
+    check parentDir(absolutePath(python)) in profile.pathSearchList
+
+  test "completed_cycle_broken_package_selector_can_differ_from_executable":
+    # The binutils selector resolves to ld, so completeness cannot require
+    # an executable literally named "binutils".
+    let scratch = createTempDir("repro-m9r14f-1-binutils-source-", "")
+    defer: removeDir(scratch)
+
+    let savedSet = fromSourceCycleBrokenTools
+    defer: fromSourceCycleBrokenTools = savedSet
+    fromSourceCycleBrokenTools = initHashSet[string]()
+    fromSourceCycleBrokenTools.incl("binutils")
+
+    writeRecipeManifest(scratch, "gcc")
+    layInstallTree(scratch, "gcc",
+      pcNames = @[], headerNames = @[], libBareNames = @[])
+    writeSyntheticInterface(scratch, "gcc", deps = @["binutils"])
+
+    writeRecipeManifest(scratch, "binutils")
+    let ld = writeInstallMirrorExecutable(scratch, "binutils", "ld")
+    writeSyntheticInterface(scratch, "binutils", deps = @[])
+
+    var profile = PathOnlyToolProfile(installMethod: "from-source")
+    populateFromSourceSearchPaths(profile, scratch / "gcc", scratch)
+    check parentDir(absolutePath(ld)) in profile.pathSearchList
 
   test "single_node_with_no_deps_matches_pre_m9r14f_behaviour":
     # Backwards-compat: a recipe with NO declared toolUses produces

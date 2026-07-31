@@ -43,7 +43,7 @@
       # io-mon no longer imports at all. fs_snoop.nim / writer.nim now
       # ``import shm_gset`` + ``shm_gset/transport``, so this pin requires the
       # nim-shm-gset-src input below and its SHM_GSET_SRC wiring.
-      url = "github:metacraft-labs/io-mon/74efa79d24be2ebb10ef0a0a6844a7d47d1f649c";
+      url = "github:metacraft-labs/io-mon/8b6d0b9b91ee8fb907b5cb99ce8f535b7cacb9d8";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -77,7 +77,7 @@
       #
       # Pinned to the nim-shm-queue rev that adds the Layer-1 EmbeddedRing
       # (repro_shm_index's action-cache ring embeds it in the control region).
-      url = "github:metacraft-labs/nim-shm-queue/08d87d26067568e980f4356c4abcf2a0d841a310";
+      url = "github:metacraft-labs/nim-shm-queue/5a8e43b52fa202859658692c9f8432967f3971ea";
       flake = false;
     };
     nimcrypto-src = {
