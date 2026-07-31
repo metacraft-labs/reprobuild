@@ -1057,7 +1057,7 @@ package reprobuild:
     # documents the resulting "host compiler ICEs". The script therefore only
     # STAGES the shim under ``build/lib/tmp/`` here, and the publish edge below
     # copies it into place once this action has finished spawning anything.
-    let buildAppsAction = shell(
+    shell(
       command = "REPRO_DEFER_SHIM_PUBLISH=1 bash scripts/build_apps.sh",
       actionId = "reprobuild.build_apps",
       extraInputs = @[
@@ -1069,20 +1069,16 @@ package reprobuild:
         "scripts/build_apps.sh",
       ])
 
-    # The follow-up publish edge. It runs AFTER the build action, so by the time
-    # the live shim is replaced there is no longer a monitored process about to
-    # fork children against it. ``cp`` (not ``mv``) leaves the staged copy in
-    # place as the build's own record of what it produced.
-    const shimExt =
-      when defined(macosx): "dylib"
-      elif defined(windows): "dll"
-      else: "so"
-    let stagedMonitorShim = "build/lib/tmp/librepro_monitor_shim." & shimExt
-    let liveMonitorShim = "build/lib/librepro_monitor_shim." & shimExt
-    shell(
-      command = "cp -f " & stagedMonitorShim & " " & liveMonitorShim,
-      actionId = "reprobuild.build_apps.publish_monitor_shim",
-      after = @[buildAppsAction],
-      extraInputs = @[stagedMonitorShim],
-      extraOutputs = @[liveMonitorShim],
-      cacheable = false)
+    # No publish edge is added here on purpose. ``build/lib/librepro_monitor_shim.<ext>``
+    # is ALREADY an owned output of the ``reprobuild.test_fixtures.monitor_shim``
+    # nim edge above, and the engine rejects two edges claiming the same output
+    # ("duplicate owned effect claim in fragment"). More importantly that edge is
+    # the right owner: it carries ``makeDepfilePolicy``, so it is NOT
+    # monitor-wrapped, and writing the live shim from an unmonitored edge is
+    # exactly the property that makes it safe.
+    #
+    # So the split is: the monitored wrapper stages only, and the unmonitored nim
+    # edge remains the sole producer of the live shim. A standalone
+    # ``just bootstrap`` still publishes inline (REPRO_DEFER_SHIM_PUBLISH unset),
+    # which is what puts the shim in place before an engine build starts
+    # monitoring anything.
