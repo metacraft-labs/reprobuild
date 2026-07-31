@@ -452,10 +452,23 @@ proc runSystemAudit(args: openArray[string]): int =
   echo "  generation : " & generationId
   echo "  log        : " & logPath
   echo "  records    : " & $auditResult.records.len
+  # Break the count down by population. An apply converges live-state
+  # resources AND build-action edges; the summary counters pool them,
+  # so the audit view states each half explicitly rather than leaving
+  # a reader to guess which resources a number refers to.
+  var liveStateRecords = 0
+  var buildActionRecords = 0
+  for rec in auditResult.records:
+    if rec.isBuildActionRecord(): inc buildActionRecords
+    else: inc liveStateRecords
+  echo "    live-state   : " & $liveStateRecords
+  echo "    build-action : " & $buildActionRecords
   for rec in auditResult.records:
     let ts = $fromUnix(rec.timestamp).utc()
-    echo "  [" & ts & "] " & rec.outcome & "  " & rec.operationKind &
-      "  " & rec.resourceAddress
+    echo "  [" & ts & "] " & rec.outcome & "  " & rec.recordClass &
+      "  " & rec.operationKind & "  " & rec.resourceAddress
+    if rec.fingerprintHex.len > 0:
+      echo "      fingerprint " & rec.fingerprintHex
     if rec.diagnostic.len > 0:
       echo "      " & rec.diagnostic
     if rec.restartNeeded:

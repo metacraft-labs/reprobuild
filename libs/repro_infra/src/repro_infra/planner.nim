@@ -583,6 +583,14 @@ proc loadRecordedDigests*(stateDir: string): Table[string, string] =
   for rec in records.records:
     if rec.resourceAddress.len == 0:
       continue
+    if rec.isBuildActionRecord():
+      # A build-action edge is a cache decision, not observed system
+      # state: it carries no pre/post digest. Folding it into the
+      # drift baseline would register an empty "what we last left it
+      # at" digest under the edge's build-graph id — exactly the
+      # live-state/build-edge conflation the record class exists to
+      # prevent.
+      continue
     # `appendAuditRecord` is append-only; later records for the same
     # address (e.g. a re-apply that turned a no-op into an applied)
     # overwrite earlier ones — that matches the desired "what we LAST

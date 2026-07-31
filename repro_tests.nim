@@ -1814,6 +1814,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim",
+    binary: "build/test-bin/t_infra_apply_audits_build_action_edges",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim",
     binary: "build/test-bin/t_infra_apply_substitutes_from_cache",
     defines: @[],

@@ -94,6 +94,21 @@ proc weakFingerprintForProfileBuildAction(action: ProfileBuildAction):
     parts.add("tool:" & t)
   weakFingerprintFromText(parts.join("\n"))
 
+proc buildActionFingerprintHex*(action: ProfileBuildAction): string =
+  ## Hex of the edge's weak (declared-identity) fingerprint — the value
+  ## the dispatcher hands the engine as the edge's cache key seed, and
+  ## the value written into the edge's RBSL audit record.
+  ##
+  ## Scope, stated honestly: this covers the edge's DECLARED identity
+  ## (id, cwd, elevation, commandStatsId, argv, outputs, tool refs). It
+  ## does NOT cover the engine's input digests, which the engine folds
+  ## in privately and does not surface on `ActionResult`. So an
+  ## audit-log reader can conclude "this edge re-keyed" when the value
+  ## changes between generations, and "the declared identity is stable,
+  ## so a repeated miss comes from inputs or monitor evidence" when it
+  ## does not. Both conclusions are actionable; neither overclaims.
+  toHex(weakFingerprintForProfileBuildAction(action).bytes)
+
 proc profileBuildActionToBuildAction*(pba: ProfileBuildAction):
     BuildAction =
   ## Lower one ``ProfileBuildAction`` to the engine-side ``BuildAction``
@@ -233,7 +248,8 @@ proc projectActionResult(action: ProfileBuildAction;
   result = BuildActionApplyOutcome(
     id: action.id,
     address: action.id,
-    requiresElevation: action.requiresElevation)
+    requiresElevation: action.requiresElevation,
+    fingerprintHex: buildActionFingerprintHex(action))
   case res.status
   of asSucceeded:
     result.ok = true
@@ -314,7 +330,8 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
               ok: true,
               requiresElevation: a.requiresElevation,
               cacheHit: true,
-              substitutedFromCache: true)
+              substitutedFromCache: true,
+              fingerprintHex: buildActionFingerprintHex(a))
             continue
         toBuild.add(a)
 
@@ -368,7 +385,8 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
           result.add(BuildActionApplyOutcome(
             id: a.id, address: a.id, ok: false,
             requiresElevation: a.requiresElevation,
-            cacheHit: false, diagnostic: engineFailDetail))
+            cacheHit: false, diagnostic: engineFailDetail,
+            fingerprintHex: buildActionFingerprintHex(a)))
           continue
         var matched = false
         for r in byId:
@@ -397,5 +415,6 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
             ok: false,
             requiresElevation: a.requiresElevation,
             cacheHit: false,
+            fingerprintHex: buildActionFingerprintHex(a),
             diagnostic: "engine produced no ActionResult for this " &
               "action edge (likely filtered by validateGraph)"))

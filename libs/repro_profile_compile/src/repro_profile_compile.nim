@@ -91,3 +91,4 @@ export apply_build_actions.profileBuildActionToBuildAction
 export apply_build_actions.buildActionsToBuildGraph
 export apply_build_actions.applyBuildActionsEngineConfig
 export apply_build_actions.mkBuildActionDispatcher
+export apply_build_actions.buildActionFingerprintHex
