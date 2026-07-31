@@ -171,3 +171,38 @@ suite "DSL-port M9.R.14h.1 — auto-recurse idempotency":
     writeFile(expected, "ELF synthetic")
     let hit = m9r14hProbeInstallMirrorLibrary(scratch / "cairo", "cairo")
     check hit == absolutePath(expected)
+
+  test "test_m9r14h_1_resolver_accepts_package_named_lib_payload":
+    # Non-executable system payloads can live under a package-specific
+    # lib directory. The kernel install mirror uses this shape and must
+    # count as a completed source build without a synthetic /usr/bin tool.
+    let scratch = createTempDir("repro-m9r14h-lib-payload-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "kernel")
+    let payloadDir = scratch / "kernel" / ".repro" / "output" /
+      "install" / "usr" / "lib" / "reproos-kernel"
+    createDir(payloadDir)
+    let expected = payloadDir / "vmlinuz"
+    writeFile(expected, "synthetic kernel image")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("kernel"), recipeRoot = scratch)
+
+    check outcome.kind == rrResolved
+    check outcome.profile.resolvedExecutablePath == absolutePath(expected)
+
+  test "test_m9r14h_1_resolver_rejects_unrelated_lib_payload":
+    # A random directory under usr/lib is not evidence for the requested
+    # package; the package-name boundary is the guard on this fallback.
+    let scratch = createTempDir("repro-m9r14h-unrelated-payload-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "kernel")
+    let unrelatedDir = scratch / "kernel" / ".repro" / "output" /
+      "install" / "usr" / "lib" / "firmware"
+    createDir(unrelatedDir)
+    writeFile(unrelatedDir / "blob.bin", "synthetic firmware")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("kernel"), recipeRoot = scratch)
+
+    check outcome.kind == rrNeedsBuild

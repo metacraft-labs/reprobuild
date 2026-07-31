@@ -4601,6 +4601,33 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
             resolved = absolutePath(entry)
             break sharedDataWalk
   if resolved.len == 0:
+    # Some non-executable system payloads live under a package-specific
+    # lib directory instead of share/. The Linux kernel, for example,
+    # publishes vmlinuz, System.map, and its module tree below
+    # usr/lib/reproos-kernel. Restrict this fallback to directories whose
+    # basename matches the dependency at a hyphen boundary so an unrelated
+    # library file cannot satisfy a missing package.
+    let depName = name.toLowerAscii
+    block packageLibDataWalk:
+      for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+        let prefixRoot = recipeDir / prefixSubdir
+        for libSubdir in ["lib", "lib64"]:
+          let libRoot = prefixRoot / libSubdir
+          if not dirExists(extendedPath(libRoot)):
+            continue
+          for kindPc, walked in walkDir(extendedPath(libRoot)):
+            if kindPc != pcDir and kindPc != pcLinkToDir:
+              continue
+            let dirName = lastPathPart(walked).toLowerAscii
+            if dirName != depName and
+                not dirName.startsWith(depName & "-") and
+                not dirName.endsWith("-" & depName):
+              continue
+            for entry in walkDirRec(extendedPath(walked)):
+              if fileExists(extendedPath(entry)):
+                resolved = absolutePath(entry)
+                break packageLibDataWalk
+  if resolved.len == 0:
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,
       expectedArtifact: baseCandidate,
