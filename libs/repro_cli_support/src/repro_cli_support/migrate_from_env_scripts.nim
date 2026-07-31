@@ -82,7 +82,7 @@ const
     (envVar: "FPC_VERSION",     tool: "fpc"),
   ]
 
-  IgnoredEnvVars*: array[5, string] = [
+  IgnoredEnvVars*: array[8, string] = [
     ## Env-file keys that are intentionally NOT tools (build qualifiers,
     ## runtime-only deps that don't have a catalog representation, or
     ## graphics stacks owned by the parallel system-profile track per
@@ -93,6 +93,18 @@ const
     "VULKAN_HEADERS_VERSION",  # runtime SDK; system-profile track
     "MESA_VERSION",         # software-renderer; system-profile track
     "MSYS2_AUTOTOOLS_VERSION", # MSYS2 pacman bundle; future system-profile track
+    # clingo is not a user-facing toolchain the home profile can own: it
+    # is a hard runtime prerequisite of ``repro`` itself (``repro_solver``
+    # dlopens libclingo at MODULE INIT, before ``main``), so it must
+    # already be installed before a migrated ``home.nim`` could be
+    # applied at all. ``libs/repro_dsl_stdlib/.../packages/clingo.nim``
+    # is deliberately not wired into ``catalog_registry.nim`` for that
+    # reason, and ``windows/ensure-clingo.ps1`` owns the install. All
+    # three keys (version + conda build string + asset digest) are one
+    # pin for that provisioner, not three tools.
+    "CLINGO_VERSION",
+    "CLINGO_BUILD_STRING",
+    "CLINGO_SHA256",
   ]
 
   DeferredTools*: array[8, string] = [

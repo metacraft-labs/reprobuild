@@ -92,23 +92,38 @@ suite "DSL-port M9.R.5a — 84-recipe sweep smoke":
     check "perl >=5.32" in native
 
   test "kernel (make recipe) mixes nativeBuildDeps + buildDeps":
-    # kernel uses: had a long list — gcc / binutils / make / bison /
-    # flex / perl (all nativeBuildDeps) AND libelf / libssl / bc /
-    # kmod / rsync (categorised buildDeps by the lib*-prefix +
-    # default-bucket heuristic).
+    # The kernel is the reference two-bucket recipe: BUILD-platform
+    # tools land in nativeBuildDeps, linked/consumed libraries and
+    # data-driven helpers land in buildDeps.
     let native = registeredNativeBuildDeps("kernelSource")
     let build = registeredBuildDeps("kernelSource")
     check "gcc >=12" in native
-    check "binutils >=2.39" in native
     check "make >=4.3" in native
     check "bison >=3.6" in native
     check "flex >=2.6" in native
     check "perl >=5.32" in native
     check "libelf >=0.187" in build
-    # The kernel recipe lists ``openssl >=3.0`` (the recipe name)
-    # rather than the legacy ``libssl`` library spelling — matches the
-    # sibling source recipe at ``recipes/packages/source/openssl``.
-    check "openssl >=3.0" in build
+    check "bc" in build
+    # Both buckets must stay populated — that split is what this case
+    # exists to pin.
+    check native.len > 0
+    check build.len > 0
+    # binutils is NOT declared here. It travels with the C toolchain:
+    # across the whole from-source tree only ``gcc`` and ``glibc``
+    # (which bootstrap that toolchain) name binutils explicitly, and
+    # the kernel recipe was normalised onto that convention when it
+    # became a real build.
+    check "binutils >=2.39" notin native
+    # openssl / kmod / rsync are likewise absent, because the recipe's
+    # ``build:`` block disables MODULE_SIG + SYSTEM_TRUSTED_KEYS +
+    # SYSTEM_REVOCATION_KEYS (so ``scripts/sign-file`` never links
+    # libssl), passes ``DEPMOD=true`` to ``modules_install`` (so
+    # ``depmod`` is never spawned), and does not run
+    # ``make headers_install`` (the only rsync consumer). A recipe that
+    # re-enables any of those must re-declare the matching dependency.
+    check "openssl >=3.0" notin build
+    check "kmod" notin build
+    check "rsync" notin build
 
   test "nettle declares GMP for libhogweed":
     check registeredBuildDeps("nettleSource") == @["gmp >=6.2"]
