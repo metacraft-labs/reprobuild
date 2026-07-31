@@ -40,6 +40,15 @@ proc makeInstallMirrorLib(root, name, libBaseName: string;
   writeFile(path, "ELF synthetic")
   path
 
+proc makeExecutable(path: string) =
+  createDir(parentDir(path))
+  writeFile(path, "#!/bin/sh\nexit 0\n")
+  when not defined(windows):
+    setFilePermissions(path, {
+      fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec,
+      fpOthersRead, fpOthersExec})
+
 proc syntheticUseDef(name: string): InterfaceToolUse =
   InterfaceToolUse(
     rawConstraint: name,
@@ -94,6 +103,24 @@ suite "DSL-port M9.R.14h.1 — auto-recurse idempotency":
     check outcome.kind == rrResolved
     check outcome.profile.installMethod == "from-source"
     check outcome.profile.resolvedExecutablePath.endsWith("libcairo.so")
+
+  test "test_m9r14h_1_resolver_prefers_complete_executable_mirror":
+    # Per-artifact executable copies can retain build-only RPATHs. The full
+    # install mirror is normalized and carries the executable's sibling
+    # libraries, so it must be the selected source-tool runtime.
+    let scratch = createTempDir("repro-m9r14h-executable-mirror-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "xz")
+    let artifact = scratch / "xz" / ".repro" / "output" / "xz" / "xz"
+    let mirror = scratch / "xz" / ".repro" / "output" / "install" /
+      "usr" / "bin" / "xz"
+    makeExecutable(artifact)
+    makeExecutable(mirror)
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("xz"), recipeRoot = scratch)
+    check outcome.kind == rrResolved
+    check outcome.profile.resolvedExecutablePath == absolutePath(mirror)
+    check outcome.profile.pathSearchList[0] == parentDir(absolutePath(mirror))
 
   test "test_m9r14h_1_resolver_returns_needs_build_when_no_mirror_no_stage":
     # Negative pin: without the install-mirror AND without a per-artifact

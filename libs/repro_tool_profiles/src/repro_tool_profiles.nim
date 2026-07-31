@@ -4428,7 +4428,14 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
   let baseCandidate = fromSourceArtifactCandidate(root, recipeName, name)
   var candidates = m9r14dEnumerateArtifacts(recipeDir)
   var resolved = ""
-  if candidates.len > 0:
+  # Prefer the complete install mirror for executable tools. Its ELF RPATH
+  # normalization has already run and its sibling data/library tree is intact.
+  # The per-artifact copy can retain a build-only RPATH, which makes otherwise
+  # valid source tools such as xz fail before the action receives aux paths.
+  let mirrorExecutable = m9r14hProbeInstallMirrorExecutable(recipeDir, name)
+  if mirrorExecutable.len > 0:
+    resolved = mirrorExecutable
+  elif candidates.len > 0:
     let pickIdx = m9r14dPickBestMatch(candidates, name)
     if pickIdx >= 0 and candidates[pickIdx].resolvedPath.len > 0:
       resolved = candidates[pickIdx].resolvedPath

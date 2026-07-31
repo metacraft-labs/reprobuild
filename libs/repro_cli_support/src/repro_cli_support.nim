@@ -4488,7 +4488,7 @@ proc addCacheField(payload: var string; value: string) =
 proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
                           mode: ToolProvisioningMode): string =
   var payload = ""
-  payload.addCacheField("reprobuild.toolIdentityCache.v1")
+  payload.addCacheField("reprobuild.toolIdentityCache.v2")
   payload.addCacheField(mode.modeName)
   payload.addCacheField(artifact.projectInterface.projectName)
   payload.addCacheField(artifact.projectInterface.packageName)
