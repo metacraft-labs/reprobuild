@@ -131,11 +131,39 @@ IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
 SHM_QUEUE_SRC="${shm_queue_src}" \
   bash "${io_mon_src}/scripts/build_shim.sh"
 
-if [ -f "build/lib/librepro_monitor_shim.${dll_ext}" ]; then
-  mv -f "build/lib/librepro_monitor_shim.${dll_ext}" "build/lib/librepro_monitor_shim.${dll_ext}.old" || true
+# Publishing the shim = replacing the library this very process's children are
+# being monitored with.
+#
+# When this script runs as the ``reprobuild.build_apps`` engine action it is
+# monitor-wrapped: the engine exports REPRO_MONITOR_SHIM_LIB pointing at
+# ``build/lib/librepro_monitor_shim.<ext>`` and injects it into every child. The
+# lines below used to move that exact file aside and swap a freshly built one
+# into its place WHILE the action was still spawning children. repro.nim's own
+# comment on the shim edge already names the hazard: "Running that compiler
+# process under the same preload shim can trigger host compiler ICEs."
+#
+# So the build and the publish are now separate steps, per the house pattern for
+# this class of problem: build the binary in one location, copy it into the live
+# location in a FOLLOW-UP edge, once nothing is spawning children against it.
+# ``REPRO_DEFER_SHIM_PUBLISH=1`` (set by the engine action in repro.nim, which
+# then runs ``reprobuild.build_apps.publish_monitor_shim`` afterwards) stops this
+# script from doing the swap in-band. Standalone runs (``just bootstrap`` /
+# ``just build``) are not monitored and keep publishing inline, so local
+# workflows are unchanged.
+staged_shim="build/lib/tmp/librepro_monitor_shim.${dll_ext}"
+if [ ! -f "${staged_shim}" ]; then
+  echo "error: io-mon shim builder did not produce ${staged_shim}" >&2
+  exit 2
 fi
-mv -f "build/lib/tmp/librepro_monitor_shim.${dll_ext}" "build/lib/librepro_monitor_shim.${dll_ext}"
-rm -rf build/lib/tmp
+if [ "${REPRO_DEFER_SHIM_PUBLISH:-0}" = "1" ]; then
+  echo "Staged ${staged_shim}; publish deferred to the follow-up edge."
+else
+  if [ -f "build/lib/librepro_monitor_shim.${dll_ext}" ]; then
+    mv -f "build/lib/librepro_monitor_shim.${dll_ext}" "build/lib/librepro_monitor_shim.${dll_ext}.old" || true
+  fi
+  mv -f "${staged_shim}" "build/lib/librepro_monitor_shim.${dll_ext}"
+  rm -rf build/lib/tmp
+fi
 
 # M9.R.47.3 — clear LD_LIBRARY_PATH and NIX_LDFLAGS for every ``nim c``
 # invocation in this loop so Nim's compile-time ``{.dynlib: <const>.}``

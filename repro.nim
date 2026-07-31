@@ -1049,8 +1049,16 @@ package reprobuild:
     # are inherited from the caller. Both the flake.nix and the new
     # nixpkgs-format package.nix at nix/pkgs/by-name/re/reprobuild/
     # set them before invoking this script.
-    shell(
-      command = "bash scripts/build_apps.sh",
+    # ``REPRO_DEFER_SHIM_PUBLISH=1``: this action is monitor-wrapped, and the
+    # script it runs rebuilds ``build/lib/librepro_monitor_shim.<ext>`` — the
+    # very library the engine injects into this action's own children via
+    # REPRO_MONITOR_SHIM_LIB. Swapping it in-band replaces the monitor out from
+    # under the compilers still to be spawned; the shim edge above already
+    # documents the resulting "host compiler ICEs". The script therefore only
+    # STAGES the shim under ``build/lib/tmp/`` here, and the publish edge below
+    # copies it into place once this action has finished spawning anything.
+    let buildAppsAction = shell(
+      command = "REPRO_DEFER_SHIM_PUBLISH=1 bash scripts/build_apps.sh",
       actionId = "reprobuild.build_apps",
       extraInputs = @[
         "apps/entrypoints.txt",
@@ -1060,3 +1068,21 @@ package reprobuild:
         "reprobuild.nimble",
         "scripts/build_apps.sh",
       ])
+
+    # The follow-up publish edge. It runs AFTER the build action, so by the time
+    # the live shim is replaced there is no longer a monitored process about to
+    # fork children against it. ``cp`` (not ``mv``) leaves the staged copy in
+    # place as the build's own record of what it produced.
+    const shimExt =
+      when defined(macosx): "dylib"
+      elif defined(windows): "dll"
+      else: "so"
+    let stagedMonitorShim = "build/lib/tmp/librepro_monitor_shim." & shimExt
+    let liveMonitorShim = "build/lib/librepro_monitor_shim." & shimExt
+    shell(
+      command = "cp -f " & stagedMonitorShim & " " & liveMonitorShim,
+      actionId = "reprobuild.build_apps.publish_monitor_shim",
+      after = @[buildAppsAction],
+      extraInputs = @[stagedMonitorShim],
+      extraOutputs = @[liveMonitorShim],
+      cacheable = false)
