@@ -465,15 +465,17 @@ proc cmake_package*(srcDir: string;
           ch == '~' or ch == '^':
         return value[0 ..< i]
     return value
-  var cmakeDepRefs: seq[string] = @[]
+  var cmakeNativeRefs: seq[string] = @[]
   for raw in registeredNativeBuildDeps(pkgName):
-    cmakeDepRefs.add(stripCmakeDepConstraint(raw))
+    cmakeNativeRefs.add(stripCmakeDepConstraint(raw))
+  var cmakeBuildRefs: seq[string] = @[]
   for raw in registeredBuildDeps(pkgName):
-    cmakeDepRefs.add(stripCmakeDepConstraint(raw))
+    cmakeBuildRefs.add(stripCmakeDepConstraint(raw))
   if projectRoot.len > 0:
     for extra in m9r15oCollectQt6TransitiveCmakeDeps(projectRoot, pkgName):
-      if extra notin cmakeDepRefs:
-        cmakeDepRefs.add(extra)
+      if extra notin cmakeBuildRefs:
+        cmakeBuildRefs.add(extra)
+  let cmakeDepRefs = cmakeNativeRefs & cmakeBuildRefs
 
   # CMake records its generator and toolchain in the build tree. Reusing a
   # directory configured by another generator makes a fresh source build fail
@@ -674,6 +676,9 @@ proc cmake_package*(srcDir: string;
     declaredOutputs = @[effectiveDestRoot],
     readOnlyRoots = m9r79CmReadOnly)
   appendRegisteredActionToolIdentityRefs(configureEdge.id, cmakeDepRefs)
+  classifyRegisteredActionToolIdentityRefs(configureEdge.id, cmakeBuildRefs)
+  classifyRegisteredActionToolIdentityRefs(buildEdge.id, cmakeBuildRefs)
+  classifyRegisteredActionToolIdentityRefs(installEdge.id, cmakeBuildRefs)
   # M9.R.14h.8 — populate ``destdir`` with the SAME absolute install
   # prefix the install action passed via ``--prefix``.  meson_package
   # already does this (the destdir on the result is what stage-copy +

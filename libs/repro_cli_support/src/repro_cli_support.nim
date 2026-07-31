@@ -1719,6 +1719,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # action's bare-name argv (``meson`` / ``ninja`` / ``gcc`` / ...)
     # finds the right binaries.
     result.toolIdentityRefs = payload.toolIdentityRefs
+    result.toolIdentityRefKinds = @[]
+    for kind in payload.toolIdentityRefKinds:
+      result.toolIdentityRefKinds.add(
+        case kind
+        of tirkBuild: dkBuild
+        of tirkNative: dkNative
+        of tirkRuntime: dkRuntime)
     # M9.R.75: propagate the convention-supplied R6/R7 write-scope
     # declarations through to the engine-side ``BuildAction``. The
     # engine's ``validateGraph`` R7 pairwise-intersection pass reads

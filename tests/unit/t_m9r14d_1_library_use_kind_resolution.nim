@@ -168,6 +168,28 @@ suite "DSL-port M9.R.14d.1 — library-use-kind resolution":
     check outcome.profile.packageSelector == "libltdl"
     check outcome.profile.selectedStorePath == absolutePath(scratch / "libtool")
 
+  test "resolves_compatibility_executable_from_aliased_source_recipe":
+    let scratch = createTempDir("repro-m9r14d-exe-alias-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "pkgconf")
+    let binDir = scratch / "pkgconf" / ".repro" / "output" / "install" /
+      "usr" / "bin"
+    createDir(binDir)
+    let artefact = binDir / "pkg-config"
+    writeFile(artefact, "#!/bin/sh\necho synth\n")
+    when not defined(windows):
+      setFilePermissions(artefact, {fpUserExec, fpUserRead, fpUserWrite,
+        fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+    writeSyntheticInterface(scratch, "pkgconf",
+      executables = @["pkgconf", "pkg-config"], libraries = @["libpkgconf"])
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("pkg-config"), recipeRoot = scratch)
+    check outcome.kind == rrResolved
+    check outcome.profile.resolvedExecutablePath == absolutePath(artefact)
+    check outcome.profile.packageSelector == "pkg-config"
+    check outcome.profile.selectedStorePath == absolutePath(scratch / "pkgconf")
+
   test "resolves_executable_artefact_when_recipe_declares_executable":
     let scratch = createTempDir("repro-m9r14d-exe-", "")
     defer: removeDir(scratch)

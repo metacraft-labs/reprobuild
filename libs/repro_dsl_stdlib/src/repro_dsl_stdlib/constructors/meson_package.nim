@@ -167,12 +167,15 @@ proc m9r14eThreadRecipeDepsAsToolRefs(actionId, pkgName: string) =
   ## mutating the wrapper's return value doesn't affect the registry
   ## entry the engine sees later. ``appendRegisteredActionToolIdentityRefs``
   ## (in ``repro_project_dsl``) updates the registry in place.
-  var refs: seq[string] = @[]
+  var nativeRefs: seq[string] = @[]
   for raw in registeredNativeBuildDeps(pkgName):
-    refs.add(m9r14eStripConstraint(raw))
+    nativeRefs.add(m9r14eStripConstraint(raw))
+  var buildRefs: seq[string] = @[]
   for raw in registeredBuildDeps(pkgName):
-    refs.add(m9r14eStripConstraint(raw))
+    buildRefs.add(m9r14eStripConstraint(raw))
+  let refs = nativeRefs & buildRefs
   appendRegisteredActionToolIdentityRefs(actionId, refs)
+  classifyRegisteredActionToolIdentityRefs(actionId, buildRefs)
 
 proc meson_package*(srcDir: string;
                     buildDir = "build";

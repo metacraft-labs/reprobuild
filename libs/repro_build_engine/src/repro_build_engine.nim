@@ -2634,8 +2634,8 @@ type
       ## ``nim c`` argv as ``--path:<dir>`` compiler flags via
       ## ``applyNimPathArgs`` at launch, through the SAME aux-projection seam.
 
-proc collectResolvedAuxPaths(action: BuildAction;
-                             resolver: ToolIdentityResolver):
+proc collectResolvedAuxPaths*(action: BuildAction;
+                              resolver: ToolIdentityResolver):
     ResolvedAuxPaths =
   ## Walk every ``toolIdentityRefs`` entry through the resolver and
   ## accumulate the in-order union of each ref's aux-path lists. Same
@@ -2661,34 +2661,42 @@ proc collectResolvedAuxPaths(action: BuildAction;
   var seenInclude: HashSet[string] = initHashSet[string]()
   var seenLib: HashSet[string] = initHashSet[string]()
   var seenNimPath: HashSet[string] = initHashSet[string]()
-  for i, refName in action.toolIdentityRefs:
-    let kind = kindForRef(action, i)
-    let resolved = resolver(refName, kind)
-    if resolved.isNone:
-      continue
-    let r = resolved.get()
-    for d in r.pkgConfigDirs:
-      if d.len > 0 and d notin seenPkgConfig:
-        seenPkgConfig.incl(d)
-        result.pkgConfigDirs.add(d)
-    for d in r.cmakePrefixDirs:
-      if d.len > 0 and d notin seenCmakePrefix:
-        seenCmakePrefix.incl(d)
-        result.cmakePrefixDirs.add(d)
-    for d in r.includeDirs:
-      if d.len > 0 and d notin seenInclude:
-        seenInclude.incl(d)
-        result.includeDirs.add(d)
-    for d in r.libDirs:
-      if d.len > 0 and d notin seenLib:
-        seenLib.incl(d)
-        result.libDirs.add(d)
-    # SC-11 (§4.2a.3): accumulate the Nim library source roots in-order,
-    # deduped, exactly as the four C/C++ lists above.
-    for d in r.nimPathDirs:
-      if d.len > 0 and d notin seenNimPath:
-        seenNimPath.incl(d)
-        result.nimPathDirs.add(d)
+  # Target libraries and headers must precede the native toolchain's
+  # transitive sysroot. Otherwise a compiler profile can expose a kernel
+  # UAPI header before the matching userspace library header (for example
+  # linux/drm.h before libdrm's drm.h). Keep each dependency class stable,
+  # but collect host-side channels before build-machine tools.
+  for priorityKind in [dkBuild, dkRuntime, dkNative]:
+    for i, refName in action.toolIdentityRefs:
+      let kind = kindForRef(action, i)
+      if kind != priorityKind:
+        continue
+      let resolved = resolver(refName, kind)
+      if resolved.isNone:
+        continue
+      let r = resolved.get()
+      for d in r.pkgConfigDirs:
+        if d.len > 0 and d notin seenPkgConfig:
+          seenPkgConfig.incl(d)
+          result.pkgConfigDirs.add(d)
+      for d in r.cmakePrefixDirs:
+        if d.len > 0 and d notin seenCmakePrefix:
+          seenCmakePrefix.incl(d)
+          result.cmakePrefixDirs.add(d)
+      for d in r.includeDirs:
+        if d.len > 0 and d notin seenInclude:
+          seenInclude.incl(d)
+          result.includeDirs.add(d)
+      for d in r.libDirs:
+        if d.len > 0 and d notin seenLib:
+          seenLib.incl(d)
+          result.libDirs.add(d)
+      # SC-11 (§4.2a.3): accumulate the Nim library source roots in-order,
+      # deduped, exactly as the four C/C++ lists above.
+      for d in r.nimPathDirs:
+        if d.len > 0 and d notin seenNimPath:
+          seenNimPath.incl(d)
+          result.nimPathDirs.add(d)
 
 proc isGlibcLibDir(path: string): bool =
   ## A dependency profile may propagate a Nix or source-built glibc output

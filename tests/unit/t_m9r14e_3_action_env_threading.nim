@@ -33,7 +33,7 @@
 ##   7. Empty input lists are a no-op (no env entries injected).
 ##   8. The order of channels is deterministic.
 
-import std/[strtabs, strutils, unittest]
+import std/[options, strtabs, strutils, unittest]
 
 import repro_build_engine
 
@@ -209,6 +209,36 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     let v = envValue(result, "PKG_CONFIG_PATH")
     check v.startsWith("/synth/wayland/lib/pkgconfig" & Sep &
       "/synth/expat/lib/pkgconfig")
+
+  test "host dependency paths precede native toolchain paths":
+    let action = BuildAction(
+      toolIdentityRefs: @["gcc", "libdrm", "wayland"],
+      toolIdentityRefKinds: @[dkNative, dkBuild, dkBuild])
+    let resolver: ToolIdentityResolver =
+      proc(name: string; kind: DepKind):
+          Option[ResolvedToolIdentity] {.gcsafe, closure.} =
+        case name
+        of "gcc":
+          check kind == dkNative
+          some(ResolvedToolIdentity(
+            includeDirs: @["/sysroot/include", "/sysroot/include/drm"],
+            libDirs: @["/sysroot/lib"]))
+        of "libdrm":
+          check kind == dkBuild
+          some(ResolvedToolIdentity(
+            includeDirs: @["/libdrm/include", "/libdrm/include/libdrm"],
+            libDirs: @["/libdrm/lib"]))
+        of "wayland":
+          check kind == dkBuild
+          some(ResolvedToolIdentity(includeDirs: @["/wayland/include"]))
+        else:
+          none(ResolvedToolIdentity)
+
+    let paths = collectResolvedAuxPaths(action, resolver)
+    check paths.includeDirs == @["/libdrm/include",
+      "/libdrm/include/libdrm", "/wayland/include",
+      "/sysroot/include", "/sysroot/include/drm"]
+    check paths.libDirs == @["/libdrm/lib", "/sysroot/lib"]
 
 # ===========================================================================
 # DSL-port M9.R.15q.3.3 — env-var dedup against ARG_MAX explosion.
