@@ -737,6 +737,50 @@ package reprobuild:
       cacheable = false,
       actionId = "reprobuild.apps.repro-standard-provider"))
 
+    # B5: the last three ``apps/entrypoints.txt`` rows that had no edge and so
+    # existed only inside the ``bash scripts/build_apps.sh`` wrapper. Moving
+    # them here is not only bookkeeping — a ``nim.c`` edge with
+    # ``cacheable = false`` resolves to ``makeDepfilePolicy`` (see
+    # ``compileDependencyPolicy``), i.e. it is NOT monitor-wrapped, whereas
+    # everything inside the wrapper runs as a child under the io-mon shim.
+    #
+    # ``ssl`` in ``defines`` is what the entrypoints file spells
+    # ``--define:ssl``; the ``nim.c`` alias appends OpenSSL's ``-L`` itself via
+    # ``opensslPassLForSsl``, which is the typed equivalent of the
+    # ``ssl_passl`` NIX_LDFLAGS scrape in the shell loop.
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-binary-cache/repro_binary_cache.nim",
+      binary = "build/bin/repro-binary-cache",
+      defines = @["release", "ssl"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro-binary-cache",
+      cacheable = false,
+      actionId = "reprobuild.apps.repro-binary-cache"))
+
+    reprobuildAppsActions.add(nim.c(
+      source =
+        "apps/repro-binary-cache-crosshost/repro_binary_cache_crosshost.nim",
+      binary = "build/bin/repro-binary-cache-crosshost",
+      defines = @["release"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro-binary-cache-crosshost",
+      cacheable = false,
+      actionId = "reprobuild.apps.repro-binary-cache-crosshost"))
+
+    # The only entrypoint with a row-local ``--path:``; it becomes an ordinary
+    # entry in the typed ``paths`` list.
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-harvest-apt/repro_harvest_apt.nim",
+      binary = "build/bin/repro-harvest-apt",
+      defines = @["release", "ssl"],
+      paths = @["apps/repro-harvest-apt/src"] & sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro-harvest-apt",
+      cacheable = false,
+      actionId = "reprobuild.apps.repro-harvest-apt"))
+
     reprobuildAppsActions.add(shell(
       command = "mkdir -p build/bin && " &
         "cp tools/reprobuild-nix-daemon/reprobuild-nix-daemon " &
@@ -1068,6 +1112,36 @@ package reprobuild:
         "reprobuild.nimble",
         "scripts/build_apps.sh",
       ])
+
+    # B5: the shared DSL runtime library (Tier 1 in
+    # reprobuild-specs/Provider-Compile-Tiering.md). Per-project provider
+    # compiles link against this instead of statically embedding the DSL +
+    # runtime surface, so it must carry ``reproProviderMode`` to expose the
+    # provider-mode-only runtime procs, plus ``reproProviderRuntimeDll``.
+    #
+    # Previously built only inside the wrapper, which compiled it to
+    # ``.new.<ext>`` and then ``mv``-ed it over the live file. The rename dance
+    # exists because a shell script has no way to say "this file is my output";
+    # an edge does, so the edge writes the final path directly and the engine
+    # owns it. Like every other ``nim.c`` edge here it is ``cacheable = false``
+    # and therefore depfile-policied rather than monitor-wrapped.
+    const dslRuntimeDllExt =
+      when defined(macosx): "dylib"
+      elif defined(windows): "dll"
+      else: "so"
+    reprobuildTestFixturesActions.add(nim.c(
+      source =
+        "libs/repro_project_dsl_runtime_dll/src/repro_project_dsl_runtime_entry.nim",
+      binary = "build/lib/librepro_project_dsl_runtime." & dslRuntimeDllExt,
+      appLib = true,
+      threadsOn = true,
+      mm = "orc",
+      defines = @["reproProviderMode", "reproProviderRuntimeDll"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro-project-dsl-runtime-dll",
+      cacheable = false,
+      actionId = "reprobuild.test_fixtures.project_dsl_runtime_dll"))
 
     # No publish edge is added here on purpose. ``build/lib/librepro_monitor_shim.<ext>``
     # is ALREADY an owned output of the ``reprobuild.test_fixtures.monitor_shim``

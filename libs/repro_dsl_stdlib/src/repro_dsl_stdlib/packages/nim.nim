@@ -399,6 +399,7 @@ proc c*(pkg: NimPackage; source: string; binary: string;
         imports: seq[string] = @[];
         cc = "";
         gccExe = "";
+        mm = "";
         passC: seq[string] = @[];
         passL: seq[string] = @[];
         nimcache = "";
@@ -439,7 +440,7 @@ proc c*(pkg: NimPackage; source: string; binary: string;
     inputs.add(reproConfigNimsFile)
 
   result = c(pkg = pkg, source = source, output = binary, defines = defines,
-    cc = cc, gccExe = gccExe,
+    cc = cc, gccExe = gccExe, mm = mm,
     paths = paths, passC = passC, passL = effectivePassL, nimcache = cacheDir,
     appLib = appLib, threadsOn = threadsOn, parallelBuild = parallelBuild,
     actionId = actionId,
