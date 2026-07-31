@@ -255,7 +255,10 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       "CPATH=/inherited/include",
       "CPPFLAGS=-D_FILE_OFFSET_BITS=64",
       "CFLAGS=-O2",
-      "CXXFLAGS=-O3"]
+      "CXXFLAGS=-O3",
+      "CPPFLAGS_FOR_BUILD=-DBUILD_HELPER",
+      "CFLAGS_FOR_BUILD=-Og",
+      "CXXFLAGS_FOR_BUILD=-O0"]
     let result = applyResolvedAuxPathsArgv(env, paths)
     let systemFlags =
       "-idirafter " & glibcRoot & " -idirafter " & linuxRoot
@@ -266,6 +269,10 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       systemFlags & " -D_FILE_OFFSET_BITS=64"
     check envValue(result, "CFLAGS") == systemFlags & " -O2"
     check envValue(result, "CXXFLAGS") == systemFlags & " -O3"
+    check envValue(result, "CPPFLAGS_FOR_BUILD") ==
+      systemFlags & " -DBUILD_HELPER"
+    check envValue(result, "CFLAGS_FOR_BUILD") == systemFlags & " -Og"
+    check envValue(result, "CXXFLAGS_FOR_BUILD") == systemFlags & " -O0"
 
   test "StringTable source system-header projection mirrors argv env":
     let glibcRoot =
@@ -282,6 +289,9 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     table["CPPFLAGS"] = "-DTEST"
     table["CFLAGS"] = "-O1"
     table["CXXFLAGS"] = "-O2"
+    table["CPPFLAGS_FOR_BUILD"] = "-DBUILD"
+    table["CFLAGS_FOR_BUILD"] = "-Og"
+    table["CXXFLAGS_FOR_BUILD"] = "-O0"
     applyResolvedAuxPathsTable(table, paths)
     let systemFlags =
       "-idirafter " & glibcRoot & " -idirafter " & linuxRoot
@@ -289,6 +299,9 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     check table["CPPFLAGS"] == systemFlags & " -DTEST"
     check table["CFLAGS"] == systemFlags & " -O1"
     check table["CXXFLAGS"] == systemFlags & " -O2"
+    check table["CPPFLAGS_FOR_BUILD"] == systemFlags & " -DBUILD"
+    check table["CFLAGS_FOR_BUILD"] == systemFlags & " -Og"
+    check table["CXXFLAGS_FOR_BUILD"] == systemFlags & " -O0"
 
   test "direct GCC-family compiler actions receive system includes":
     let glibcRoot = "/source/glibc/usr/include"
