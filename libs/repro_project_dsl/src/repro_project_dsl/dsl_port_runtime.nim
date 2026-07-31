@@ -4045,6 +4045,10 @@ proc dslPortSanitizeIdPart(value: string): string =
   if result.len == 0:
     result = "x"
 
+const customMirrorFallbackSubdirs* = [
+  "lib", "lib64", "libexec", "include", "bin", "share"
+]
+
 proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
   ## M9.R.15q.2.1 — translate ``registeredShellActions(packageName)``
   ## (and the package's ``registeredFetchSpec``) into ``BuildActionDef``
@@ -4197,7 +4201,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     # Fallback: bare $out/lib + $out/include + $out/bin (recipes that
     # didn't relocate to install/usr/). Compose a synthetic usr/ tree.
     script.add("mkdir -p \"" & escapedMirrorUsr & "\"; ")
-    for sub in ["lib", "lib64", "include", "bin", "share"]:
+    for sub in customMirrorFallbackSubdirs:
       script.add("if [ -d \"" & escapedOutPath & "/" & sub &
         "\" ]; then cp -a -- \"" & escapedOutPath & "/" & sub &
         "\" \"" & escapedMirrorUsr & "/\"; fi; ")
