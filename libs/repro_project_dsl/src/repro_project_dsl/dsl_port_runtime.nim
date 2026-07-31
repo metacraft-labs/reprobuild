@@ -4049,6 +4049,28 @@ const customMirrorFallbackSubdirs* = [
   "lib", "lib64", "libexec", "include", "bin", "share"
 ]
 
+proc dslPortStripDepConstraint(value: string): string =
+  for i, ch in value:
+    if ch == ' ' or ch == '>' or ch == '<' or ch == '=' or
+        ch == '~' or ch == '^':
+      return value[0 ..< i]
+  value
+
+proc dslPortCustomShellToolIdentityRefs*(packageName: string):
+    seq[string] {.dynOrStatic.} =
+  ## Attach every declared dependency profile to custom shell actions.
+  ## This supplies PATH and the auxiliary CPATH/LIBRARY_PATH channels
+  ## while preserving the shell as the command interpreter identity.
+  result = @["sh"]
+  for raw in registeredNativeBuildDeps(packageName):
+    let dep = dslPortStripDepConstraint(raw)
+    if dep.len > 0 and dep notin result:
+      result.add(dep)
+  for raw in registeredBuildDeps(packageName):
+    let dep = dslPortStripDepConstraint(raw)
+    if dep.len > 0 and dep notin result:
+      result.add(dep)
+
 proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
   ## M9.R.15q.2.1 — translate ``registeredShellActions(packageName)``
   ## (and the package's ``registeredFetchSpec``) into ``BuildActionDef``
@@ -4067,6 +4089,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
   let rows = registeredShellActions(packageName)
   if rows.len == 0:
     return
+  let shellToolRefs = dslPortCustomShellToolIdentityRefs(packageName)
   let projectRoot = activeProviderProjectRoot()
   if projectRoot.len == 0:
     # Outside provider mode (test fixtures importing the recipe) the
@@ -4148,7 +4171,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "from-source-custom.shell",
       env = shellEnv,
-      toolIdentityRefs = @["sh"])
+      toolIdentityRefs = shellToolRefs)
     prevId = actionId
     prevStamp = stamp
 
