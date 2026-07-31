@@ -459,7 +459,11 @@ proc autotools_package*(srcDir: string;
     "export CC_FOR_BUILD=\"${CC_FOR_BUILD:-gcc}\"; " &
     "export CFLAGS_FOR_BUILD=\"${CFLAGS_FOR_BUILD:-${CFLAGS:-}}\"; " &
     "export CPPFLAGS_FOR_BUILD=\"${CPPFLAGS_FOR_BUILD:-${CPPFLAGS:-}}\"; " &
-    "export LDFLAGS_FOR_BUILD=\"${LDFLAGS_FOR_BUILD:-${LDFLAGS:-}}\"; "
+    "export LDFLAGS_FOR_BUILD=\"${LDFLAGS_FOR_BUILD:-${LDFLAGS:-}}\"; " &
+    "export BUILD_CC=\"${BUILD_CC:-${CC_FOR_BUILD}}\"; " &
+    "export BUILD_CFLAGS=\"${BUILD_CFLAGS:-${CFLAGS_FOR_BUILD}}\"; " &
+    "export BUILD_CPPFLAGS=\"${BUILD_CPPFLAGS:-${CPPFLAGS_FOR_BUILD}}\"; " &
+    "export BUILD_LDFLAGS=\"${BUILD_LDFLAGS:-${LDFLAGS_FOR_BUILD}}\"; "
   let configureScript =
     if skipConfigure:
       patchPrefix & bootstrapPrefix &

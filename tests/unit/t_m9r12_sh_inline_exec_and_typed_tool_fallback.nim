@@ -144,6 +144,10 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
     check "export CFLAGS_FOR_BUILD=\"${CFLAGS_FOR_BUILD:-${CFLAGS:-}}\"" in script
     check "export CPPFLAGS_FOR_BUILD=\"${CPPFLAGS_FOR_BUILD:-${CPPFLAGS:-}}\"" in script
     check "export LDFLAGS_FOR_BUILD=\"${LDFLAGS_FOR_BUILD:-${LDFLAGS:-}}\"" in script
+    check "export BUILD_CC=\"${BUILD_CC:-${CC_FOR_BUILD}}\"" in script
+    check "export BUILD_CFLAGS=\"${BUILD_CFLAGS:-${CFLAGS_FOR_BUILD}}\"" in script
+    check "export BUILD_CPPFLAGS=\"${BUILD_CPPFLAGS:-${CPPFLAGS_FOR_BUILD}}\"" in script
+    check "export BUILD_LDFLAGS=\"${BUILD_LDFLAGS:-${LDFLAGS_FOR_BUILD}}\"" in script
     check script.find("export CC_FOR_BUILD=") < script.find("../src/configure")
 
   test "autoreconf uses modules from the resolved source Perl":
