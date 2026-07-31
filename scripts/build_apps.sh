@@ -275,14 +275,37 @@ runtime_passl_for_libraries() {
   done
 }
 
-# ``repro`` imports the ASP solver and dlopens libclingo by soname at process
-# startup. Keep the Nim compile-time search path scrubbed, but thread the
-# runtime loader path into the ELF/Mach-O so clean shells and SSH sessions work.
+# ``repro`` dlopens two libraries by bare soname: libclingo (the ASP solver,
+# loaded eagerly in the module's DatInit, i.e. before ``main``) and libzstd
+# (loaded lazily by the binary-cache client on the first ckZstd payload). Keep
+# the Nim compile-time search path scrubbed -- an absolute ``/nix/store`` path
+# baked into .rodata survives the stage-time store relocation and breaks the
+# installed system -- but thread the runtime loader path into the ELF/Mach-O so
+# clean shells and SSH sessions work.
+#
+# This is the ONLY thing that makes those sonames resolvable off the dev shell.
+# The dev shell's LD_LIBRARY_PATH is not available to a ``repro`` on the far
+# side of an SSH transport (sshd does not propagate it into a non-interactive
+# session, which is how the M71 remote-apply phases invoke ``repro home
+# __receive-bundle`` on the target host), to a CI step that is not wrapped in
+# ``nix develop``, or to an installed ``repro`` -- flake.nix deliberately
+# refuses to inject a loader search path into the installed wrapper (arbitrary
+# user build actions inherit the wrapper environment) and patches the same
+# directories into the packaged binaries' RPATH instead.
+#
+# ``tests/integration/t_repro_runtime_dlopen_without_library_path.nim`` is the
+# gate: it runs the built binary with the loader search-path variables removed
+# from the child environment, so this threading silently disappearing is a test
+# failure rather than a remote-only outage.
 mapfile -t repro_runtime_passl < <(
-  runtime_passl_for_libraries libclingo.so libclingo.dylib -- \
+  runtime_passl_for_libraries \
+    libclingo.so libclingo.dylib libzstd.so.1 libzstd.1.dylib -- \
     "${CLINGO_PREFIX:-}" \
     /opt/homebrew/opt/clingo \
-    /usr/local/opt/clingo
+    /usr/local/opt/clingo \
+    "${ZSTD_PREFIX:-}" \
+    /opt/homebrew/opt/zstd \
+    /usr/local/opt/zstd
 )
 
 while read -r name path extra_flags; do

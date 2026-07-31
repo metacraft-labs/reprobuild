@@ -444,7 +444,7 @@ test "incomplete name" and:
 
         # Exact generated-graph specification counts. An omitted, duplicated,
         # or substituted enrollment cannot be absorbed by the case totals.
-        self.assertEqual(len(nim_specs), 1180)
+        self.assertEqual(len(nim_specs), 1182)
         self.assertEqual(len(python_specs), 4)
 
         nim_total = sum(
@@ -492,9 +492,9 @@ test "incomplete name" and:
         )
         # Language totals and the overall total. These are the aggregate
         # backstop for the per-source pins above, not a substitute for them.
-        self.assertEqual(nim_total, 6629)
+        self.assertEqual(nim_total, 6637)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6660)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6668)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -760,7 +760,7 @@ test "incomplete name" and:
         # repro_tests.nim. This is an independent reading of the same
         # generated file as the parse_repro_tests pins above, so a dropped,
         # duplicated, or hand-edited specification fails here too.
-        self.assertEqual(declared_nim_count, 1180)
+        self.assertEqual(declared_nim_count, 1182)
         self.assertEqual(declared_python_count, 4)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -791,7 +791,7 @@ test "incomplete name" and:
             data["static"]["testEntryCount"],
             declared_nim_count + declared_python_count,
         )
-        self.assertEqual(data["static"]["testEntryCount"], 1184)
+        self.assertEqual(data["static"]["testEntryCount"], 1186)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),

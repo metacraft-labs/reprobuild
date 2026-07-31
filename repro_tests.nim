@@ -7686,6 +7686,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_repro_runtime_dlopen_without_library_path.nim",
+    binary: "build/test-bin/t_repro_runtime_dlopen_without_library_path",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_repro_test_issues_certificate_by_default_in_clean_state.nim",
     binary: "build/test-bin/t_repro_test_issues_certificate_by_default_in_clean_state",
     defines: @[],
