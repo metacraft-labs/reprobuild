@@ -1877,4 +1877,39 @@ if [ -x "$chroot_ldconfig" ]; then
   # absent (causing every bare-name dlopen to fall through to the
   # Debian system cache) or left at the 16027-byte base-rootfs.tar.xz
   # fossil (which Knew NOTHING about the from-source install-mirrors).
-  # Conc                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
+  # Concretely: ``mkfs.ext4`` shipped via ``e2fsprogs/.repro/output/
+  # install/usr/sbin/mkfs.ext4`` failed at runtime with exit 127
+  # because its DT_NEEDED libs (libext2fs.so.2, libcom_err.so.2,
+  # libe2p.so.2) were ABSENT from /etc/ld.so.cache, and the binary's
+  # own DT_RUNPATH did NOT include its sister-lib dir.  ``repro disk
+  # apply`` consequently failed at Phase 2 / step mkfs.ext4 with
+  # ``mkfs.ext4 failed (exit 127)``, which surfaced to the M9.R.36
+  # investigation as a "silent installer wedge after Qt init".
+  #
+  # ``ldconfig -r <root>`` does what chroot+ldconfig does but WITHOUT
+  # requiring chroot privilege -- it pretends ``<root>`` is "/" for
+  # all path resolution + writes the cache at ``<root>/etc/ld.so.cache``.
+  # This is the canonical unprivileged-build replacement Debian's
+  # debootstrap + Arch's pacstrap both use.
+  ldconfig_log="$STAGE_DIR/tmp/reproos-ldconfig.log"
+  mkdir -p "$(dirname "$ldconfig_log")"
+  if ! "$chroot_ldconfig" -r "$STAGE_DIR" >"$ldconfig_log" 2>&1; then
+    cat "$ldconfig_log" >&2
+    rm -f "$ldconfig_log"
+    echo "[stage-de-rootfs] source ldconfig failed" >&2
+    exit 1
+  fi
+  grep -vE 'is not a symbolic link|file format not recognized' \
+    "$ldconfig_log" || true
+  rm -f "$ldconfig_log"
+  if [ ! -s "$STAGE_DIR/etc/ld.so.cache" ]; then
+    echo "[stage-de-rootfs] source ldconfig did not create ld.so.cache" >&2
+    exit 1
+  fi
+  echo "[stage-de-rootfs] rebuilt ld.so.cache via /sbin/ldconfig -r $STAGE_DIR (size: $(stat -c %s "$STAGE_DIR/etc/ld.so.cache" 2>/dev/null || echo missing))"
+else
+  echo "[stage-de-rootfs] no source ldconfig at $chroot_ldconfig" >&2
+  exit 1
+fi
+
+echo "[stage-de-rootfs] stage-dir bytes=$(du -sb "$STAGE_DIR" | awk '{print $1}')"
