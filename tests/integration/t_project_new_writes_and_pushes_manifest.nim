@@ -10,6 +10,11 @@
 ##
 ## `project repo add` then records a repo fragment + include and pushes again.
 ##
+## The second case pins WHICH repository those verbs act on: a workspace root
+## that is a plain directory nested inside an unrelated checkout must be
+## refused, with that enclosing repository left without a commit, with nothing
+## staged and with a clean tracked tree.
+##
 ## Skip rule: `git` missing on PATH.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
@@ -110,3 +115,60 @@ suite "RA-6 — repro workspace project new (writes + pushes manifest)":
         " show main:projects/myproj.toml")
       check bareProj.code == 0
       check bareProj.output.contains("repos/lib-x.toml")
+
+  test "test_ra6_project_new_refuses_a_workspace_root_inside_another_checkout":
+    ## The manifest verbs commit and PUSH; which repository they act on is
+    ## decided by Git's repository discovery, which walks UPWARDS. With a
+    ## workspace root that is a plain directory nested inside somebody else's
+    ## checkout, ``git -C <workspace-root> add -- projects/x.toml`` succeeds
+    ## against that ENCLOSING repository — these are ordinary new files, so no
+    ## ignore rule intervenes — ``git commit`` writes a commit there, and the
+    ## push publishes that repository's branch. Not forcing the stage is no
+    ## protection: only asking whether the root IS a checkout root is.
+    ##
+    ## Falsifiable: the command must fail with a diagnostic naming the
+    ## not-a-checkout root, and the enclosing repository must gain no commit,
+    ## stage nothing, and keep a clean tracked tree. Hermetic: one local
+    ## ``git init``; no upstream, no network.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let scratch = createTempDir("repro-ra6-nested-", "")
+      defer: removeDir(scratch)
+      let reproBin = reproBinary()
+
+      let outer = scratch / "outer"
+      createDir(outer)
+      discard requireGit(q(gitBin) & " init -b main " & q(outer))
+      gitConfig(gitBin, outer)
+      writeFile(outer / "README.md", "unrelated checkout\n")
+      discard requireGit(q(gitBin) & " -C " & q(outer) & " add README.md")
+      discard requireGit(q(gitBin) & " -C " & q(outer) & " commit -m seed")
+      let outerCommits = requireGit(q(gitBin) & " -C " & q(outer) &
+        " rev-list --count HEAD").strip()
+
+      # A plain directory inside it, handed to the manifest verb as the
+      # workspace (and therefore manifest-repo) root.
+      let nested = outer / "workspace"
+      createDir(nested)
+      let res = runShell(shellCommand(@[reproBin, "workspace", "project",
+        "new", "nested-proj", "-m", "Nested", "--workspace-root=" & nested]))
+      checkpoint("nested project new output: " & res.output)
+      check res.code != 0
+      check res.output.contains("is not a git checkout")
+      check res.output.contains(nested)
+
+      # The enclosing repository took no part: no commit, nothing staged, no
+      # tracked change. (The written manifest file is left as untracked
+      # residue of the refused verb; that is not a publication side effect.)
+      check requireGit(q(gitBin) & " -C " & q(outer) &
+        " rev-list --count HEAD").strip() == outerCommits
+      let staged = runCmd(q(gitBin) & " -C " & q(outer) &
+        " diff --cached --name-only")
+      check staged.code == 0
+      check staged.output.strip().len == 0
+      let porcelain = runCmd(q(gitBin) & " -C " & q(outer) &
+        " status --porcelain --untracked-files=no")
+      check porcelain.code == 0
+      check porcelain.output.strip().len == 0

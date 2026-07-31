@@ -37,15 +37,23 @@
 ## The third case covers the complementary half: a manifest layer that IS its
 ## own checkout but whose lock path is IGNORED there. Keeping the manifest
 ## layer out of ordinary status/add noise is a legitimate operator choice, so
-## publication forces the stage of its own generated records. Both halves are
-## needed and neither substitutes for the other — forcing without the
-## is-it-a-checkout guard would commit the lock into whatever repo happens to
-## contain the layer.
+## publication forces the stage of its own generated records — and so does the
+## ``git-checkout`` LOCK STORE, for both the lock record and the evidence blob.
+## Both halves are needed and neither substitutes for the other — forcing
+## without the is-it-a-checkout guard would commit the lock into whatever repo
+## happens to contain the layer.
+##
+## The fourth case pins that guard where the store itself is routed: a
+## ``[[locking.route]] backend = "git-checkout"`` entry whose ``path`` is a
+## plain directory nested inside a checkout must be REFUSED by
+## ``putLock`` / ``putEvidence``, with the enclosing repository left without a
+## commit, without anything staged, and with a clean tracked tree.
 ##
 ## Skip rule: ``git`` missing on PATH.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
+import evidence
 import git_tool
 import repro_cli_support
 import repro_lock_store
@@ -372,8 +380,10 @@ suite "RA-7 — lock publication (commit + push) and dirty-outside-locks guard":
       discard requireGit(q(gitBin) & " -C " & q(layerB) &
         " push -u origin latest")
       # The ignore arrives from OUTSIDE the repository's tracked content,
-      # exactly the way a global core.excludesFile would.
-      writeFile(layerB / ".git" / "info" / "exclude", "locks/\n")
+      # exactly the way a global core.excludesFile would. It covers BOTH
+      # generated subtrees the git-checkout store owns — the lock records and
+      # the evidence blobs — because both must be recordable under it.
+      writeFile(layerB / ".git" / "info" / "exclude", "locks/\nevidence/\n")
       let baseB = commitCount(gitBin, bareB, "refs/heads/latest")
       check baseB >= 1
 
@@ -417,3 +427,132 @@ suite "RA-7 — lock publication (commit + push) and dirty-outside-locks guard":
         " log --oneline -- locks/demo/demo/" & shaC & ".toml")
       check logC.code == 0
       check logC.output.strip().len > 0
+
+      # ---- and so does the routed EVIDENCE write --------------------------
+      # ``putEvidence`` is the other forced writer, and the one whose failure
+      # used to be invisible: its ``git add`` / ``git commit`` results were
+      # discarded, so under this very ignore it answered ``spoOk`` while
+      # recording nothing. Assert the blob reaches the checkout's HISTORY (not
+      # merely the working tree), which is what the MO-5 consume path reads.
+      let evLayerCommits = commitCount(gitBin, layerB, "HEAD")
+      let evTriple = @[
+        WorkspaceVcsEvidence(vcsKind: wvkGit, path: "demo", op: wvqHeadSha,
+          status: wvesResolved, headSha: shaC),
+        WorkspaceVcsEvidence(vcsKind: wvkGit, path: "demo", op: wvqIsClean,
+          status: wvesResolved, isClean: true),
+        WorkspaceVcsEvidence(vcsKind: wvkGit, path: "demo", op: wvqIsPublished,
+          status: wvesResolved, isPublished: true)]
+      let putEv = store.putEvidence("demo", "demo", evTriple)
+      checkpoint("routed putEvidence diagnostic: " & putEv.diagnostic)
+      check putEv.outcome == spoOk
+      let logEv = run(q(gitBin) & " -C " & q(layerB) &
+        " log --oneline -- evidence/demo/demo.ev")
+      check logEv.code == 0
+      check logEv.output.strip().len > 0
+      check commitCount(gitBin, layerB, "HEAD") == evLayerCommits + 1
+      let readBack = store.getEvidence("demo", "demo")
+      check readBack.len == evTriple.len
+      if readBack.len == evTriple.len:
+        check readBack[0].headSha == shaC
+      # Re-recording IDENTICAL evidence stages no change; ``git commit`` then
+      # exits non-zero with "nothing to commit". That is a successful no-op,
+      # not a failure — surfacing the commit result must not turn it into one.
+      let putEvAgain = store.putEvidence("demo", "demo", evTriple)
+      checkpoint("idempotent putEvidence diagnostic: " & putEvAgain.diagnostic)
+      check putEvAgain.outcome == spoOk
+      check commitCount(gitBin, layerB, "HEAD") == evLayerCommits + 1
+
+      # The enclosing workspace repo still took no part in either write.
+      check commitCount(gitBin, workspace, "HEAD") == workspaceCommits
+      let stagedWsAfterStore = run(q(gitBin) & " -C " & q(workspace) &
+        " diff --cached --name-only")
+      check stagedWsAfterStore.code == 0
+      check stagedWsAfterStore.output.strip().len == 0
+
+  test "t_lock_store_route_refuses_a_plain_directory_nested_in_a_checkout":
+    ## The complement of the forced-write case above, at the ``LockStore``
+    ## boundary this time. A ``[[locking.route]] backend = "git-checkout",
+    ## path = <dir>`` entry constructs exactly the store built below, and
+    ## nothing on that path proves ``<dir>`` is a checkout —
+    ## ``newGitCheckoutLockStore`` only canonicalizes the spelling. Git's
+    ## repository discovery walks UPWARDS, so with ``<dir>`` a plain directory
+    ## nested inside a checkout every ``git -C <dir> add/commit`` the store runs
+    ## acts on the ENCLOSING repository: the routed record is committed into a
+    ## repo that merely happens to contain the directory, and the store reports
+    ## success. Forcing the stage (which a routed record legitimately needs —
+    ## see the case above) removes even the accidental protection an ignore
+    ## rule used to give, so the store must ask whether its root IS a checkout
+    ## root and refuse when it is not.
+    ##
+    ## Falsifiable, and specifically falsifiable against the FORCE rather than
+    ## the guard: both halves of the write path (``putLock``, ``putEvidence``)
+    ## must refuse with a diagnostic naming the non-checkout root, AND the
+    ## enclosing repository must gain no commit, have nothing staged, and keep
+    ## a clean tracked tree. Only the checkout-root question can produce that;
+    ## an implementation that merely dropped ``-f`` would still stage and
+    ## commit here, because these generated paths are NOT ignored by the
+    ## enclosing repo in this fixture. Hermetic: one local ``git init``; no
+    ## remote, no network.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let scratch = createTempDir("repro-mo3-routed-plaindir-", "")
+      defer: removeDir(scratch)
+      let identity = ensureGitToolResolvable(tpmPathOnly, gitBin.parentDir)
+
+      # An ordinary checkout. Nothing here ignores the routed subtree, so an
+      # unguarded store would stage and commit into THIS repository.
+      let workspace = scratch / "workspace"
+      createDir(workspace)
+      discard requireGit(q(gitBin) & " init -b main " & q(workspace))
+      discard requireGit(q(gitBin) & " -C " & q(workspace) &
+        " config user.email tester@example.invalid")
+      discard requireGit(q(gitBin) & " -C " & q(workspace) &
+        " config user.name \"MO-3 Tester\"")
+      writeFile(workspace / "README.md", "workspace\n")
+      discard requireGit(q(gitBin) & " -C " & q(workspace) & " add README.md")
+      discard requireGit(q(gitBin) & " -C " & q(workspace) & " commit -m seed")
+      let workspaceCommits = commitCount(gitBin, workspace, "HEAD")
+      check workspaceCommits >= 1
+
+      # The route names a plain directory nested inside that checkout.
+      let routed = workspace / ".repro" / "manifests-team"
+      createDir(routed)
+      let store: LockStore = newGitCheckoutLockStore(identity, routed)
+      check store.storeLocationLabel().len > 0
+
+      let sha = "8888888888888888888888888888888888888888"
+      let put = store.putLock(StoreLockRecord(
+        key: StoreLockKey(project: "demo", repo: "demo", sha: sha),
+        body: validLock("demo", "demo", sha)))
+      checkpoint("plain-directory putLock diagnostic: " & put.diagnostic)
+      check put.outcome == spoFailed
+      check "is not a git checkout" in put.diagnostic
+      check routed in put.diagnostic
+
+      let putEv = store.putEvidence("demo", "demo", @[
+        WorkspaceVcsEvidence(vcsKind: wvkGit, path: "demo", op: wvqHeadSha,
+          status: wvesResolved, headSha: sha)])
+      checkpoint("plain-directory putEvidence diagnostic: " & putEv.diagnostic)
+      check putEv.outcome == spoFailed
+      check "is not a git checkout" in putEv.diagnostic
+
+      # THE assertion: the enclosing repository is untouched. No commit was
+      # created in it, nothing was staged in its index, and no tracked path
+      # changed. (Untracked residue is excluded on purpose — the routed
+      # directory itself exists in the working tree by construction.)
+      check commitCount(gitBin, workspace, "HEAD") == workspaceCommits
+      let staged = run(q(gitBin) & " -C " & q(workspace) &
+        " diff --cached --name-only")
+      check staged.code == 0
+      check staged.output.strip().len == 0
+      let porcelain = run(q(gitBin) & " -C " & q(workspace) &
+        " status --porcelain --untracked-files=no")
+      check porcelain.code == 0
+      check porcelain.output.strip().len == 0
+      # Nor did the record sneak into the enclosing repo's tracked content by
+      # any other route.
+      let tracked = run(q(gitBin) & " -C " & q(workspace) & " ls-files")
+      check tracked.code == 0
+      check "manifests-team" notin tracked.output

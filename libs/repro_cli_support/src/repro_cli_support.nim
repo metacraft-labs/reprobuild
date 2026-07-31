@@ -24704,6 +24704,38 @@ proc newGitCheckoutLockStore*(identity: GitToolIdentity;
     canonicalRoot = canonicalRoot.replace('/', DirSep)
   GitCheckoutLockStore(identity: identity, manifestRepoRoot: canonicalRoot)
 
+proc checkoutRootRefusal(s: GitCheckoutLockStore; action: string): string =
+  ## "" when ``manifestRepoRoot`` really is a Git worktree ROOT; otherwise the
+  ## refusal every MUTATING method must return instead of touching Git.
+  ##
+  ## The routed path is operator-supplied (``[[locking.route]] backend =
+  ## "git-checkout", path = …``) and nothing before this point proves it names
+  ## a checkout — ``newGitCheckoutLockStore`` only canonicalizes the spelling.
+  ## Git's repository discovery walks UPWARDS, so when the path is a plain
+  ## directory nested inside a checkout every ``git -C <root> add/commit`` this
+  ## store runs operates on the ENCLOSING repository: the record is committed
+  ## into a repo that merely happens to contain the routed directory, and the
+  ## store then reports success. That mis-targeting at least used to fail
+  ## loudly whenever the enclosing repo ignored the routed path; forcing the
+  ## stage (which a routed record legitimately needs — see ``putLock``) removes
+  ## even that accident, so the question "is this path a checkout ROOT?" has to
+  ## be asked explicitly. Same reasoning as ``publishWorkspaceLock``'s
+  ## not-a-checkout refusal, and deliberately the same phrasing.
+  ##
+  ## Asked HERE — at each mutating operation — rather than in the constructor
+  ## because the constructor has no failure channel and, more importantly,
+  ## because CONSTRUCTION is not the operation that can do harm: the pre-push
+  ## gate builds this store over a manifest layer that is ALLOWED to be a plain
+  ## directory (RA-21) purely to READ from it, and ``getEvidence`` /
+  ## ``latestLock`` on such a layer are ordinary file/history reads that must
+  ## keep working (and answering "nothing recorded") rather than raising.
+  let discovery = discoverGitWorktree(s.identity, s.manifestRepoRoot)
+  if discovery.ok: return ""
+  result = "git-checkout lock store root '" & s.manifestRepoRoot &
+    "' is not a git checkout; cannot " & action
+  if discovery.diagnostic.len > 0:
+    result.add(" (" & discovery.diagnostic & ")")
+
 method backendId*(s: GitCheckoutLockStore): string = "git-checkout"
 
 method storeLocationLabel*(s: GitCheckoutLockStore): string = s.manifestRepoRoot
@@ -24714,6 +24746,11 @@ method putLock*(s: GitCheckoutLockStore;
   ## layout — identical bytes to the existing lock writer) and commit it, so
   ## the git-history "latest lock" queries resolve it.
   try:
+    # Before ANY filesystem or Git effect: the routed root must be a checkout
+    # ROOT, or the commit below lands in whatever repository encloses it.
+    let refusal = checkoutRootRefusal(s, "record lock")
+    if refusal.len > 0:
+      return failed(refusal)
     let rel = "locks/" & rec.key.project & "/" & rec.key.repo & "/" &
       rec.key.sha & ".toml"
     let coordinates = shasFromBody(rec.body)
@@ -24817,19 +24854,43 @@ method manifestLayerRoots*(s: GitCheckoutLockStore): seq[string] =
 method putEvidence*(s: GitCheckoutLockStore; project, repo: string;
     ev: seq[WorkspaceVcsEvidence]): StorePutResult =
   try:
+    # Same checkout-ROOT precondition as ``putLock``: without it the commit
+    # below is made in whatever repository encloses the routed root.
+    let refusal = checkoutRootRefusal(s, "record evidence")
+    if refusal.len > 0:
+      return failed(refusal)
     let rel = "evidence/" & project & "/" & repo & ".ev"
     let abs = s.manifestRepoRoot / rel.replace('/', DirSep)
     createDir(parentDir(abs))
     writeFile(abs, encodeEvidenceBlob(ev))
     # ``-f``: same generated-record-under-a-possibly-ignored-layer case as
-    # ``putLock`` above. Without it an ignored manifest layer silently records
-    # no evidence at all (this stage's result is discarded), and the MO-5
-    # consume path then has nothing to verify a private repo's boundary from.
-    discard gitRunPlain(s.identity,
+    # ``putLock`` above — the operator may legitimately ignore the manifest
+    # layer, and this one generated blob must still be recorded under it.
+    let addRes = gitRunPlain(s.identity,
       ["-C", s.manifestRepoRoot, "add", "-f", "--", rel])
-    discard gitRunPlain(s.identity,
+    if addRes.code != 0:
+      return failed("git add " & rel & " failed: " & addRes.output.strip())
+    # These two results used to be DISCARDED, so this method reported ``ok()``
+    # whenever staging or committing had in fact recorded nothing — and the
+    # MO-5 consume path then had nothing to verify a private repo's boundary
+    # from, with no diagnostic anywhere to say why. Both callers act on the
+    # outcome (``publishRoutedEvidence`` reports FAILED and exits non-zero; the
+    # post-commit refresh reports "evidence refresh failed"), so surfacing the
+    # failure is what makes the record's absence visible.
+    #
+    # Re-recording IDENTICAL evidence bytes stages no change, and ``git
+    # commit`` then exits non-zero with "nothing to commit"; that is a
+    # successful no-op, exactly as in ``putLock``. ``git diff --cached
+    # --quiet`` distinguishes the two: 0 = nothing staged for this path.
+    let stagedRes = gitRunPlain(s.identity,
+      ["-C", s.manifestRepoRoot, "diff", "--cached", "--quiet", "--", rel])
+    if stagedRes.code == 0:
+      return ok()
+    let commitRes = gitRunPlain(s.identity,
       ["-C", s.manifestRepoRoot, "commit", "--quiet", "-m",
        "lockstore evidence: " & project & "/" & repo, "--", rel])
+    if commitRes.code != 0:
+      return failed("git commit failed: " & commitRes.output.strip())
     ok()
   except CatchableError as err:
     failed(err.msg)
@@ -44779,12 +44840,33 @@ proc projectManifestStub(project: string): string =
   "trunk = \"main\"\n\n" &
   "includes = [\n]\n"
 
-proc commitAndPushManifest(gitBin, manifestRoot, message: string;
+proc commitAndPushManifest(identity: GitToolIdentity;
+                           gitBin, manifestRoot, message: string;
                            paths: openArray[string]): tuple[
     code: int; diagnostic: string] =
   ## Stage ``paths``, commit with ``message``, and push ``HEAD`` to the
   ## manifest repo's upstream when one is configured. Best-effort push: the
   ## commit always lands locally; a missing upstream is reported, not fatal.
+  ##
+  ## The stage below is deliberately NOT forced: these are operator-AUTHORED
+  ## manifest sources (``projects/<name>.toml``, its sibling description,
+  ## ``repos/<repo>.toml``), so an ignore rule the operator arranged over their
+  ## own sources must fail loudly rather than be quietly overridden.
+  ##
+  ## The checkout-ROOT guard is a SEPARATE question and applies here all the
+  ## same, because it decides WHICH repository the stage/commit/push act on.
+  ## Git's discovery walks upwards, so with ``manifestRoot`` a plain directory
+  ## nested inside a checkout, ``git -C <manifestRoot> add -- projects/x.toml``
+  ## succeeds against the ENCLOSING repository (no ignore involved — these are
+  ## ordinary new files), ``git commit`` writes a commit there, and ``git
+  ## push`` publishes that repo's branch. Not forcing is no protection against
+  ## that; only asking whether the root IS a checkout is.
+  let discovery = discoverGitWorktree(identity, manifestRoot)
+  if not discovery.ok:
+    return (code: 1, diagnostic: "manifest repo root '" & manifestRoot &
+      "' is not a git checkout; refusing to commit manifest changes" &
+      (if discovery.diagnostic.len > 0: " (" & discovery.diagnostic & ")"
+       else: ""))
   for p in paths:
     let st = gitOutput(gitBin, manifestRoot, ["add", "--", p])
     if st.code != 0:
@@ -44870,7 +44952,7 @@ proc runWorkspaceProjectCommand*(args: openArray[string]): int =
       paths.add(docRel)
     let msg = "Add project " & name &
       (if desc.len > 0: " (" & desc & ")" else: "")
-    let res = commitAndPushManifest(gitBin, manifestRoot, msg, paths)
+    let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
     stdout.writeLine("repro workspace project new: " & name & " — " &
       res.diagnostic)
     return res.code
@@ -44926,7 +45008,7 @@ proc runWorkspaceProjectCommand*(args: openArray[string]): int =
     ensureRemoteEntry(projectFileAbs, remoteName, remote)
     discard appendFragmentInclude(projectFileAbs, fragmentRel)
     let msg = "Add repo " & repo & " to project " & project
-    let res = commitAndPushManifest(gitBin, manifestRoot, msg,
+    let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg,
       ["projects/" & project & ".toml", fragmentRel])
     stdout.writeLine("repro workspace project repo add: " & repo & " -> " &
       project & " — " & res.diagnostic)
