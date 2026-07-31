@@ -70,23 +70,19 @@
 ## Linux 6.6 LTS kernel + the systemd / KDE / Plasma desktop
 ## components all build against.
 ##
-## ## Build deferral — declarative shape only
+## ## Build execution
 ##
 ## gcc is the LARGEST package in the from-source corpus: the upstream
 ## tarball weighs ~88 MB, the extracted tree is ~3.5 GB, the build
-## consumes ~15 GB of disk + 8-16 GB of RAM, and the
-## ``--disable-bootstrap`` single-stage build takes 2-4 HOURS on a
-## modern desktop CPU. Per the task brief, v1 of this recipe
-## DECLARES the build pipeline as shell actions but defers the actual
-## compilation — the recipe records the four-shell mkdir-configure-
-## build-install sequence so the M9.K convention layer's stage-copy
-## step knows what binaries to harvest, but the heavy lifting fires
-## only when a downstream consumer recipe explicitly asks for a
-## ``$out/bin/gcc`` artifact edge.
+## consumes substantial disk and memory, and the
+## ``--disable-bootstrap`` single-stage build is intentionally fixed
+## at eight parallel jobs. The recipe executes the complete
+## configure-build-install pipeline and publishes the resulting host
+## compiler and runtime libraries.
 ##
 ## ## Artifacts
 ##
-## gcc exposes three load-bearing CLI binaries + two shared libraries
+## gcc exposes three load-bearing CLI binaries + four shared libraries
 ## on disk (out of the dozens of binaries the upstream install body
 ## lays out under ``$PREFIX/bin/`` / ``$PREFIX/lib/`` —
 ## ``cc1`` / ``cc1plus`` / ``collect2`` / ``lto1`` / ... live under
@@ -113,6 +109,10 @@
 ##                      namespace + the ABI symbols the C++ ecosystem
 ##                      pins (libstdc++.so.6 SONAME, GCC_*
 ##                      versioned-symbol stamps).
+##   * ``libgomp``    — ``$PREFIX/lib/libgomp.so``, the OpenMP
+##                      runtime used by binaries built with ``-fopenmp``.
+##   * ``libatomic``  — ``$PREFIX/lib/libatomic.so``, the fallback
+##                      runtime for non-lock-free atomic operations.
 ##
 ## ## Configurables
 ##
@@ -160,6 +160,7 @@ import repro_dsl_stdlib/types
 # finds their provisioning metadata on this recipe's nativeBuildDeps
 # / buildDeps uses.
 import repro_dsl_stdlib/packages/system_tools
+import repro_dsl_stdlib/packages/clang
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -204,6 +205,10 @@ package gccSource:
     extractStrip: 1
 
   nativeBuildDeps:
+    ## Break the compiler self-cycle with the pinned Clang bootstrap
+    ## toolchain. The resulting GCC binaries and runtime libraries are
+    ## still compiled from this recipe's upstream GCC sources.
+    "clang"
     ## binutils provides ``ld`` / ``as`` / ``ar`` that gcc shells out
     ## to at link + assemble time. gcc's configure probes for the
     ## binutils versions at ``./configure`` time so the version pin
@@ -250,18 +255,19 @@ package gccSource:
     ## probe for ``bin/gcc`` + ``bin/g++`` + ``bin/cpp`` +
     ## ``lib/libgcc_s.so`` + ``lib/libstdc++.so``.
     ##
-    ## NOTE: the v1 build is DEFERRED — the recipe declares the
-    ## pipeline so the convention layer's stage-copy step knows what
-    ## binaries to harvest, but the heavy compilation (2-4 hours,
-    ## ~15 GB disk, 8-16 GB RAM) fires only when a downstream
-    ## consumer recipe explicitly asks for a ``$out/bin/gcc``
-    ## artifact edge.
+    ## The recipe executes the full single-stage compilation. The
+    ## heavy build is cacheable as a normal custom-convention action
+    ## and is reused when downstream recipes request compiler or
+    ## runtime artifacts from this install tree.
     build:
       # Out-of-tree build directory — gcc's upstream documentation
       # REQUIRES this because the in-tree configure would
       # contaminate the source tree with build artefacts. The
-      # mkdir-cd-configure idiom is the canonical pattern.
-      shell "mkdir -p $extracted/build"
+      # bootstrap sysroot supplies the glibc headers and startup files
+      # that NixOS intentionally does not expose under /usr. It is used
+      # only while building target libraries and is not installed as
+      # GCC's default runtime sysroot.
+      shell "bootstrap_sysroot=$extracted/bootstrap-sysroot; glibc_include=$(clang -E -Wp,-v -xc /dev/null 2>&1 | grep glibc | tail -n1 | xargs); glibc_lib=$(dirname $(clang --print-file-name=libc.so.6)); test -d $glibc_include; test -f $glibc_lib/libc.so.6; mkdir -p $extracted/build $bootstrap_sysroot/usr; ln -sfn $glibc_include $bootstrap_sysroot/usr/include; ln -sfn $glibc_lib $bootstrap_sysroot/lib; ln -sfn $glibc_lib $bootstrap_sysroot/lib64; ln -sfn $glibc_lib $bootstrap_sysroot/usr/lib"
       # Configure step — out-of-tree configure with the desktop-
       # baseline flag set per the task brief. ``--prefix=$out``
       # routes the install body under the per-package output dir;
@@ -270,18 +276,25 @@ package gccSource:
       # 32-bit-on-64-bit pass; ``--disable-bootstrap`` cuts the
       # triple-recompile self-bootstrap (8-12 -> 2-4 hours);
       # ``--disable-nls`` skips the gettext NLS pass;
-      # ``--without-headers`` skips the libc-headers integration
-      # (the host glibc / musl headers under ``/usr/include`` are
-      # already on the include path).
-      shell "cd $extracted/build && ../configure --prefix=$out --enable-languages=c,c++ --disable-multilib --disable-bootstrap --disable-nls --without-headers"
-      # Build step — drives the generated ``Makefile``s. No ``-jN``
-      # flag because the cache-key would be coupled to the host's
-      # CPU count; M9.L's convention layer can compute a host-job-
-      # count flag at action-emission time and override.
-      shell "cd $extracted/build && make"
+      # optional sanitizer, transactional-memory, vtable-verification,
+      # legacy SSP, and Fortran quadmath runtimes are outside the
+      # package's declared C/C++ compiler and OpenMP artifact surface;
+      # ``--with-build-sysroot`` makes the first source-built xgcc find
+      # libc headers and startup objects while compiling libgcc/libstdc++.
+      # GCC's target linker must bypass the Nix binutils wrapper. That
+      # wrapper injects its host glibc RUNPATH into xgcc outputs, which
+      # is incompatible with the newer glibc paired with Clang.
+      shell "gmp_prefix=$(pwd)/../../gmp/.repro/output/install/usr; mpfr_prefix=$(pwd)/../../mpfr/.repro/output/install/usr; mpc_prefix=$(pwd)/../../mpc/.repro/output/install/usr; glibc_lib=$(dirname $(clang --print-file-name=libc.so.6)); binutils_wrapper=$(dirname $(dirname $(readlink -f $(command -v ld)))); raw_binutils=$(cat $binutils_wrapper/nix-support/orig-bintools); test -x $raw_binutils/bin/ld; cd $extracted/build && CC=clang CXX=clang++ LD=$raw_binutils/bin/ld LDFLAGS_FOR_TARGET=-Wl,--dynamic-linker=$glibc_lib/ld-linux-x86-64.so.2 ../configure --prefix=$out --enable-languages=c,c++ --disable-multilib --disable-bootstrap --disable-nls --disable-werror --disable-libsanitizer --disable-libitm --disable-libvtv --disable-libssp --disable-libquadmath --with-build-sysroot=$extracted/bootstrap-sysroot --with-gmp=$gmp_prefix --with-mpfr=$mpfr_prefix --with-mpc=$mpc_prefix"
+      # Build step — drives the generated ``Makefile``s with a fixed
+      # job count. Keeping the value explicit makes the action and its
+      # cache identity independent of host CPU discovery.
+      shell "cd $extracted/build && make -j8"
       # Install step — copies the binaries + libraries + libexec
       # tree under ``$out/bin/`` + ``$out/lib/`` + ``$out/libexec/``.
       shell "cd $extracted/build && make install"
+      # GCC uses lib64 for x86_64 target runtimes. Publish stable lib
+      # aliases so declared library artifacts resolve consistently.
+      shell "mkdir -p $out/lib; for runtime in libgcc_s.so libgcc_s.so.1 libstdc++.so libstdc++.so.6 libgomp.so libgomp.so.1 libatomic.so libatomic.so.1; do test -e $out/lib64/$runtime; ln -sfn ../lib64/$runtime $out/lib/$runtime; done"
 
   executable "g++":
     ## ``$PREFIX/bin/g++`` — the canonical C++ compiler driver.
@@ -315,6 +328,14 @@ package gccSource:
     ## identifier character; the M3 artifact registry stores the
     ## literal ``"libstdc++"`` string. No per-artifact build body:
     ## shared install-tree with ``gcc``.
+    discard
+
+  library libgomp:
+    ## OpenMP runtime required by binaries built with ``-fopenmp``.
+    discard
+
+  library libatomic:
+    ## Atomic fallback runtime for targets without lock-free operations.
     discard
 
   runtimeDeps:
