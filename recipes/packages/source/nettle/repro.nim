@@ -224,7 +224,11 @@ package nettleSource:
         "--disable-documentation",
         "--enable-shared",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let patches = @[
+        "sed -i 's|$(CC_FOR_BUILD) $< -lm -o $@|$(CC_FOR_BUILD) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -lm -o $@|' src/Makefile.in",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
+                                  srcPatches = patches)
       discard pkg.library("libNettle")
       discard pkg.library("libHogweed")
     finally:
