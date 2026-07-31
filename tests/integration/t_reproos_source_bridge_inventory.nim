@@ -9,12 +9,17 @@ const MigratedPackages = [
   "xz",
   "tar",
   "bash",
+  "gawk",
+  "perl",
+  "python3",
   "glibc",
   "coreutils",
   "grub",
   "kernel",
   "musl", "busybox",
 ]
+
+const ScriptRuntimePackages = ["gawk", "perl", "python3"]
 
 proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -46,6 +51,8 @@ suite "ReproOS source bridge inventory":
       "scripts" / "build-base-rootfs.sh")
     let stageScript = readFile(repoRoot / "recipes" / "reproos-iso" /
       "scripts" / "stage-de-rootfs.sh")
+    let imageRecipe = readFile(repoRoot / "recipes" / "reproos-image" /
+      "repro.nim")
 
     let sourceBridges = shellArrayEntries(stageScript,
       "BASE_USERSPACE_RECIPES")
@@ -53,6 +60,9 @@ suite "ReproOS source bridge inventory":
 
     for packageName in MigratedPackages:
       check packageName in sourceBridges
+
+    for packageName in ScriptRuntimePackages:
+      check '"' & packageName & '"' in imageRecipe
 
     let normalizedBaseScript = baseScript.toLowerAscii
     check "debian:" notin normalizedBaseScript
@@ -83,6 +93,12 @@ suite "ReproOS source bridge inventory":
     check "failed to set source liblzma RPATH" in stageScript
     check "required source tar binary missing" in stageScript
     check "required source bash binary missing" in stageScript
+    check "required source gawk binary missing" in stageScript
+    check "required source Perl runtime missing" in stageScript
+    check "$STAGE_DIR/usr/lib/perl5" in stageScript
+    check "required source Python runtime missing" in stageScript
+    check "$STAGE_DIR/usr/lib/python3.13" in stageScript
+    check "ln -sfn python3 \"$STAGE_DIR/usr/bin/python\"" in stageScript
     check "required source glibc ldconfig missing" in stageScript
     check "required source glibc runtime missing" in stageScript
     # Compatible source-built ELFs must use the source glibc at image runtime.

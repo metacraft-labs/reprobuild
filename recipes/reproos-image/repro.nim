@@ -140,6 +140,9 @@ const reproosImageRootfsDeps = @[
   "xz",
   "tar",
   "bash",
+  "gawk",
+  "perl",
+  "python3",
   "glibc",
   "coreutils",
   "grub",
@@ -186,6 +189,9 @@ package reproosImage:
     "xz"
     "tar"
     "bash"
+    "gawk"
+    "perl"
+    "python3"
     "glibc"
     "coreutils"
     "grub"

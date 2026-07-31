@@ -63,7 +63,8 @@ echo "[normalize-source-runtime] duplicate names=${#provider_conflicts[@]}"
 candidates_file="$(mktemp -t reproos-source-runtime-candidates-XXXXXX)"
 missing_file="$(mktemp -t reproos-source-runtime-missing-XXXXXX)"
 leaks_file="$(mktemp -t reproos-source-runtime-leaks-XXXXXX)"
-trap 'rm -f "$candidates_file" "$missing_file" "$leaks_file"' EXIT
+shebang_plan_file="$(mktemp -t reproos-source-runtime-shebang-plan-XXXXXX)"
+trap 'rm -f "$candidates_file" "$missing_file" "$leaks_file" "$shebang_plan_file"' EXIT
 
 find "$source_root" -type f \
   \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) \
@@ -80,19 +81,65 @@ is_elf() {
   [ "$magic" = $'\177ELF' ]
 }
 
-record_store_shebangs() {
-  local output_file="$1"
-  local executable runtime_path first_line
+plan_runtime_shebangs() {
+  local plan_file="$1"
+  local error_file="$2"
+  local executable runtime_path first_line shebang_re interpreter args target
+  shebang_re='^#![[:space:]]*(/usr/bin/env[[:space:]]+)?([^[:space:]]+)([[:space:]].*)?$'
   while IFS= read -r -d '' executable; do
-    runtime_path="${executable#$stage_dir}"
+    runtime_path="${executable#"$stage_dir"}"
     case "$runtime_path" in
       /nix/*|/repro/store/*) continue ;;
     esac
     first_line=""
     IFS= read -r first_line < "$executable" 2>/dev/null || true
     case "$first_line" in
-      '#!'*'/nix/store/'*|'#!'*'/repro/store/'*)
-        printf 'store-shebang:%s\t%s\n' \
+      '#!'*'/nix/store/'*|'#!'*'/repro/store/'*|'#!'*'/run/current-system/sw/'*) ;;
+      *) continue ;;
+    esac
+    if [[ ! "$first_line" =~ $shebang_re ]]; then
+      printf 'unsupported-shebang:%s\t%s\n' \
+        "$first_line" "$runtime_path" >> "$error_file"
+      continue
+    fi
+    interpreter="${BASH_REMATCH[2]}"
+    args="${BASH_REMATCH[3]:-}"
+    case "$interpreter" in
+      */bin/bash) target=/usr/bin/bash ;;
+      */bin/sh) target=/usr/bin/sh ;;
+      */bin/python*) target=/usr/bin/python3 ;;
+      */bin/perl*) target=/usr/bin/perl ;;
+      */bin/gawk|*/bin/awk) target=/usr/bin/gawk ;;
+      *)
+        printf 'unsupported-shebang-interpreter:%s\t%s\n' \
+          "$interpreter" "$runtime_path" >> "$error_file"
+        continue
+        ;;
+    esac
+    if [ ! -x "$stage_dir$target" ]; then
+      printf 'missing-shebang-interpreter:%s\t%s\n' \
+        "$target" "$runtime_path" >> "$error_file"
+      continue
+    fi
+    printf '%s\t#!%s%s\n' "$executable" "$target" "$args" >> "$plan_file"
+  done < <(
+    find "$stage_dir" -type f -perm /111 -print0 2>/dev/null
+  )
+}
+
+record_runtime_shebang_leaks() {
+  local output_file="$1"
+  local executable runtime_path first_line
+  while IFS= read -r -d '' executable; do
+    runtime_path="${executable#"$stage_dir"}"
+    case "$runtime_path" in
+      /nix/*|/repro/store/*) continue ;;
+    esac
+    first_line=""
+    IFS= read -r first_line < "$executable" 2>/dev/null || true
+    case "$first_line" in
+      '#!'*'/nix/store/'*|'#!'*'/repro/store/'*|'#!'*'/run/current-system/sw/'*)
+        printf 'runtime-shebang:%s\t%s\n' \
           "$first_line" "$runtime_path" >> "$output_file"
         ;;
     esac
@@ -139,7 +186,7 @@ done < <(
     -print 2>/dev/null
 )
 
-record_store_shebangs "$missing_file"
+plan_runtime_shebangs "$shebang_plan_file" "$missing_file"
 
 if [ -s "$missing_file" ]; then
   missing_count="$(wc -l < "$missing_file")"
@@ -147,6 +194,21 @@ if [ -s "$missing_file" ]; then
   sort -u "$missing_file" | sed -n '1,100p' >&2
   exit 75
 fi
+
+rewritten_shebangs=0
+while IFS=$'\t' read -r executable replacement; do
+  [ -n "$executable" ] || continue
+  replacement_file="${executable}.repro-shebang.$$"
+  {
+    printf '%s\n' "$replacement"
+    tail -n +2 "$executable"
+  } > "$replacement_file"
+  chmod --reference="$executable" "$replacement_file"
+  touch --reference="$executable" "$replacement_file"
+  mv -f "$replacement_file" "$executable"
+  rewritten_shebangs=$((rewritten_shebangs + 1))
+done < "$shebang_plan_file"
+echo "[normalize-source-runtime] rewrote $rewritten_shebangs runtime shebangs"
 
 normalized=0
 inspected=0
@@ -258,7 +320,7 @@ find "$source_root" -type l \
   \( -lname '/nix/store/*' -o -lname '/repro/store/*' \) \
   -printf '%p\tTARGET=%l\n' 2>/dev/null >> "$leaks_file" || true
 
-record_store_shebangs "$leaks_file"
+record_runtime_shebang_leaks "$leaks_file"
 
 if [ -s "$leaks_file" ]; then
   leak_count="$(wc -l < "$leaks_file")"

@@ -551,6 +551,9 @@ BASE_USERSPACE_RECIPES=(
   xz
   tar
   bash
+  gawk
+  perl
+  python3
   glibc
   coreutils
   grub
@@ -717,6 +720,36 @@ link_base_recipe_binaries() {
     fi
     ln -sfn bash "$STAGE_DIR/usr/bin/sh"
     ln -sfn bash "$STAGE_DIR/usr/bin/rbash"
+  fi
+  if [ "$recipe" = "gawk" ] && [ ! -x "$install_usr/bin/gawk" ]; then
+    echo "[stage-de-rootfs] required source gawk binary missing" >&2
+    return 1
+  fi
+  if [ "$recipe" = "perl" ]; then
+    local perl_core
+    perl_core="$(find "$install_usr/lib/perl5" -path '*/CORE/libperl.so' \
+      -type f -print -quit 2>/dev/null)"
+    if [ ! -x "$install_usr/bin/perl" ] || [ -z "$perl_core" ]; then
+      echo "[stage-de-rootfs] required source Perl runtime missing" >&2
+      return 1
+    fi
+    mkdir -p "$STAGE_DIR/usr/lib"
+    rm -rf "$STAGE_DIR/usr/lib/perl5"
+    ln -s "${install_usr#"$STAGE_DIR"}/lib/perl5" \
+      "$STAGE_DIR/usr/lib/perl5"
+  fi
+  if [ "$recipe" = "python3" ]; then
+    local python_stdlib="$install_usr/lib/python3.13"
+    if [ ! -x "$install_usr/bin/python3" ] || \
+       [ ! -f "$install_usr/lib/libpython3.13.so.1.0" ] || \
+       [ ! -f "$python_stdlib/os.py" ]; then
+      echo "[stage-de-rootfs] required source Python runtime missing" >&2
+      return 1
+    fi
+    mkdir -p "$STAGE_DIR/usr/lib"
+    rm -rf "$STAGE_DIR/usr/lib/python3.13"
+    ln -s "${python_stdlib#"$STAGE_DIR"}" "$STAGE_DIR/usr/lib/python3.13"
+    ln -sfn python3 "$STAGE_DIR/usr/bin/python"
   fi
   if [ "$recipe" = "glibc" ]; then
     local glibc_ldconfig=""
