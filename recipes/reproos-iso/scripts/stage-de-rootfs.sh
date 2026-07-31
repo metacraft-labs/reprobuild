@@ -140,6 +140,13 @@ if [ ! -e "$SOURCE_GLIBC_RUNTIME_DIR_STAGED/libc.so.6" ]; then
 fi
 SOURCE_GLIBC_LOADER="${SOURCE_GLIBC_LOADER_STAGED#$STAGE_DIR}"
 SOURCE_GLIBC_RUNTIME_DIR="${SOURCE_GLIBC_RUNTIME_DIR_STAGED#$STAGE_DIR}"
+SOURCE_GLIBC_VERSION="$("$SOURCE_GLIBC_LOADER_STAGED" --version 2>&1 | \
+  sed -nE 's/.*version ([0-9]+\.[0-9]+).*/\1/p' | head -n1)"
+if [ -z "$SOURCE_GLIBC_VERSION" ]; then
+  echo "[stage-de-rootfs] could not determine source glibc version" >&2
+  exit 67
+fi
+export SOURCE_GLIBC_VERSION
 echo "[stage-de-rootfs] source glibc runtime: $SOURCE_GLIBC_RUNTIME_DIR"
 
 # ---------------------------------------------------------------------------
@@ -211,6 +218,20 @@ fi
 nix_prefixes_file="$(mktemp -t reproos-iso-nix-prefixes-XXXXXX)"
 trap 'rm -f "$nix_prefixes_file"' EXIT
 
+is_compatible_bootstrap_glibc_interpreter() {
+  local interp="$1"
+  local bootstrap_version oldest_version
+  if [[ "$interp" =~ ^/nix/store/[^/]+-glibc-([0-9]+\.[0-9]+)(-[^/]*)?/lib[^/]*/ld-linux[^/]*\.so ]]; then
+    bootstrap_version="${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
+  oldest_version="$(printf '%s\n%s\n' \
+    "$bootstrap_version" "$SOURCE_GLIBC_VERSION" | sort -V | head -n1)"
+  [ "$oldest_version" = "$bootstrap_version" ]
+}
+export -f is_compatible_bootstrap_glibc_interpreter
+
 extract_nix_prefixes_from_elf() {
   local elf="$1"
   local rp interp source_runtime_elf=0
@@ -224,11 +245,11 @@ extract_nix_prefixes_from_elf() {
   # Split rp on ':' and emit each /nix/store/<hash>-<pkg>/ prefix.
   printf '%s\n' "$rp" | tr ':' '\n' | \
     sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
-  # These binaries are built against glibc 2.40, matching the source recipe.
-  # Their PT_INTERP is normalized to SOURCE_GLIBC_LOADER below, so retaining
-  # the bootstrap glibc solely for that interpreter would be a runtime fallback.
+  # Compatible bootstrap interpreters are normalized to SOURCE_GLIBC_LOADER
+  # below, so retaining a duplicate glibc solely for PT_INTERP would be a
+  # runtime fallback.
   if [ "$source_runtime_elf" = 1 ] && \
-     [[ "$interp" == /nix/store/*-glibc-2.40-*/lib*/ld-linux*.so* ]]; then
+     is_compatible_bootstrap_glibc_interpreter "$interp"; then
     return
   fi
   printf '%s\n' "$interp" | sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
