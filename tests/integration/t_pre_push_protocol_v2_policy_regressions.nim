@@ -626,6 +626,67 @@ suite "pre-push protocol v2 policy regressions":
       check bareHead(gitBin, fx.appOrigin) == appUnpublished
       check not fileExists(integrityCommitMarker)
 
+  test "an unpublished develop override on the outgoing repo does not refuse":
+    ## Bootstrapping. ``repro develop <pkg> --source=<sibling>`` routinely
+    ## points an override at a checkout the operator then pushes. Refusing that
+    ## push because the override's HEAD is unpublished is circular — the push
+    ## under evaluation is what publishes it — so the first push of a new
+    ## commit could never be made. The sibling-repo ``unpublished`` stage
+    ## already grants the outgoing repo provisional status from the strict
+    ## ``outgoing-current`` classification; the override stage now reads the
+    ## same proof.
+    ##
+    ## Falsifiable in both directions: the outgoing repo's own unpublished
+    ## HEAD pushes through and lands on the bare remote, while an override on
+    ## a DIFFERENT unpublished checkout still refuses and leaves the remote
+    ## where it was. Real installed hooks, real local bare remotes, nothing
+    ## mocked.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setup(gitBin)
+      defer: removeDir(fx.scratch)
+      let prior = getEnv("REPROBUILD_REPRO")
+      putEnv("REPROBUILD_REPRO", fx.reproBin)
+      defer:
+        if prior.len > 0: putEnv("REPROBUILD_REPRO", prior)
+        else: delEnv("REPROBUILD_REPRO")
+
+      let appRemoteBefore = bareHead(gitBin, fx.appOrigin)
+      # The override points at the very repository Git is about to push, and
+      # that repository carries a commit no remote has seen yet.
+      let appOutgoing = commit(gitBin, fx.app, "app-outgoing")
+      check appOutgoing != appRemoteBefore
+      writeDevelopOverride(fx.workspace, "app", fx.app)
+
+      let pushed = run(q(gitBin) & " -C " & q(fx.app) & " push origin main")
+      checkpoint("outgoing-repo override push:\n" & pushed.output)
+      check pushed.code == 0
+      check "develop_override_unpublished" notin pushed.output
+      check bareHead(gitBin, fx.appOrigin) == appOutgoing
+
+      # The exemption is bound to the outgoing checkout, not to overrides in
+      # general: a second override pointing at a DIFFERENT unpublished
+      # checkout must still refuse.
+      let sideCar = fx.workspace / "develop" / "tool"
+      createDir(sideCar.parentDir())
+      discard require(q(gitBin) & " clone " & q(fx.depOrigin) & " " &
+        q(sideCar))
+      discard require(q(gitBin) & " -C " & q(sideCar) &
+        " config user.email tester@example.invalid")
+      discard require(q(gitBin) & " -C " & q(sideCar) &
+        " config user.name 'Policy Tester'")
+      discard commit(gitBin, sideCar, "override-local-only")
+      writeDevelopOverride(fx.workspace, "tool", sideCar)
+      discard commit(gitBin, fx.app, "app-outgoing-2")
+
+      let refused = run(q(gitBin) & " -C " & q(fx.app) & " push origin main")
+      checkpoint("foreign override push:\n" & refused.output)
+      check refused.code != 0
+      check hasFailure(fx.report(), "develop_override_unpublished")
+      check bareHead(gitBin, fx.appOrigin) == appOutgoing
+
   test "public manifest lock cannot publish a private-only reference":
     let gitBin = findExe("git")
     if gitBin.len == 0:

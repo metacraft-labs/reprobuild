@@ -24135,9 +24135,22 @@ proc canonicalDiscoveredGitPath(repoRoot, value: string): string =
 
 proc discoverGitWorktree(identity: GitToolIdentity;
     candidate: string): GitWorktreeDiscovery =
-  ## Publication code must ask Git whether a path is a worktree. In a linked
-  ## worktree `.git` is a file, while the common directory (where capabilities
-  ## live) is elsewhere; probing `dirExists(.git)` rejects that valid layout.
+  ## Publication code must ask Git whether a path IS a worktree ROOT. In a
+  ## linked worktree `.git` is a file, while the common directory (where
+  ## capabilities live) is elsewhere; probing `dirExists(.git)` rejects that
+  ## valid layout, so the question is put to Git instead.
+  ##
+  ## Git repository discovery walks UPWARDS, so `rev-parse --show-toplevel`
+  ## answers for the nearest ANCESTOR checkout when `candidate` is a plain
+  ## directory nested inside one. Every caller here treats `candidate` as a
+  ## repository/backend root and then drives `git -C <candidate> …` against it
+  ## (staging, committing, pushing, reading HEAD). Accepting an ancestor's
+  ## answer silently retargets those commands at the WRONG repository — e.g. a
+  ## workspace whose `.repro/manifests` lock layer is a plain directory inside
+  ## a git-tracked workspace checkout would try to stage its locks into the
+  ## workspace repo (which ignores `.repro/`) and refuse every push, instead of
+  ## taking the "no publishable manifest remote" skip. So the discovered top
+  ## level must be the candidate itself.
   if candidate.len == 0:
     result.diagnostic = "empty Git worktree path"
     return
@@ -24151,14 +24164,24 @@ proc discoverGitWorktree(identity: GitToolIdentity;
   if common.code != 0 or common.output.strip().len == 0:
     result.diagnostic = "cannot resolve Git common directory for " & candidate
     return
-  result.worktreeRoot = canonicalDiscoveredGitPath(candidate,
-    top.output.strip())
-  result.commonDir = canonicalDiscoveredGitPath(candidate,
-    common.output.strip())
-  result.ok = result.worktreeRoot.len > 0 and result.commonDir.len > 0
-  if not result.ok:
+  let worktreeRoot = canonicalDiscoveredGitPath(candidate, top.output.strip())
+  let commonDir = canonicalDiscoveredGitPath(candidate, common.output.strip())
+  if worktreeRoot.len == 0 or commonDir.len == 0:
     result.diagnostic = "cannot canonicalize Git worktree identity for " &
       candidate
+    return
+  # Canonicalize the candidate exactly the way the discovered paths were, so
+  # symlinked / non-normalized spellings of the same directory still compare
+  # equal. `cmpPaths` is case-insensitive on case-insensitive filesystems.
+  let canonicalCandidate = canonicalDiscoveredGitPath(candidate, candidate)
+  if cmpPaths(canonicalCandidate, worktreeRoot) != 0:
+    result.diagnostic = "not a Git worktree root: " & candidate &
+      " (it is a plain directory inside the Git worktree at " &
+      worktreeRoot & ")"
+    return
+  result.worktreeRoot = worktreeRoot
+  result.commonDir = commonDir
+  result.ok = true
 
 # ---- RA-1: per-repo lock resolution via Git history ------------------------
 #
@@ -24716,8 +24739,14 @@ method putLock*(s: GitCheckoutLockStore;
           "content at " & rel)
     else:
       writeFile(abs, rec.body)
+    # ``-f`` for the same reason ``publishWorkspaceLock`` forces its stage: the
+    # operator may legitimately ignore the manifest layer (a global
+    # ``core.excludesFile`` or a ``.gitignore`` naming ``.repro/`` / ``locks/``
+    # applies inside this checkout too), and a routed team/personal record must
+    # still be written under it — an unrecorded team-tier participation
+    # escalates to a push REFUSAL. The pathspec is this one generated record.
     let addRes = gitRunPlain(s.identity,
-      ["-C", s.manifestRepoRoot, "add", "--", rel])
+      ["-C", s.manifestRepoRoot, "add", "-f", "--", rel])
     if addRes.code != 0:
       return failed("git add " & rel & " failed: " & addRes.output.strip())
     # Idempotent re-record: writing the SAME lock record again stages no
@@ -24792,8 +24821,12 @@ method putEvidence*(s: GitCheckoutLockStore; project, repo: string;
     let abs = s.manifestRepoRoot / rel.replace('/', DirSep)
     createDir(parentDir(abs))
     writeFile(abs, encodeEvidenceBlob(ev))
+    # ``-f``: same generated-record-under-a-possibly-ignored-layer case as
+    # ``putLock`` above. Without it an ignored manifest layer silently records
+    # no evidence at all (this stage's result is discarded), and the MO-5
+    # consume path then has nothing to verify a private repo's boundary from.
     discard gitRunPlain(s.identity,
-      ["-C", s.manifestRepoRoot, "add", "--", rel])
+      ["-C", s.manifestRepoRoot, "add", "-f", "--", rel])
     discard gitRunPlain(s.identity,
       ["-C", s.manifestRepoRoot, "commit", "--quiet", "-m",
        "lockstore evidence: " & project & "/" & repo, "--", rel])
@@ -29103,9 +29136,22 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
   # Stage only the locks subtree. ``git add`` of a non-existent path errors;
   # guard so a manifest layer that has never produced a lock is a clean
   # "nothing to publish", not a failure.
+  #
+  # ``-f`` (force) because the operator is entitled to keep the whole manifest
+  # layer out of ordinary status/add noise — a global ``core.excludesFile`` or
+  # a repo ``.gitignore`` naming e.g. ``.repro/`` or ``locks/`` is a legitimate
+  # configuration, and lock publication must still work under it. These paths
+  # are generated and owned by reprobuild, and the pathspec is pinned to
+  # ``locks`` alone, so the force can only ever stage this tool's own records;
+  # everything the operator authored is still governed by their ignore rules.
+  # This is safe ONLY because the guard above proved ``manifestRepoRoot`` is
+  # the checkout ROOT: without it, Git's upward repository discovery would
+  # point these commands at an enclosing repository and the force would commit
+  # the lock into — and push the branch of — a repo that merely happens to
+  # contain the manifest layer.
   if dirExists(manifestRepoRoot / "locks"):
     let addRes = gitRunPlain(identity,
-      ["-C", manifestRepoRoot, "add", "--", "locks"])
+      ["-C", manifestRepoRoot, "add", "-f", "--", "locks"])
     if addRes.code != 0:
       result.diagnostic = "git add locks failed: " & addRes.output.strip()
       return
@@ -33136,6 +33182,20 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         let headSha =
           if headRes.status == gqsOk: headRes.headSha
           else: ""
+        # An override may point at the very checkout Git is asking this hook
+        # to approve — `repro develop <pkg> --source=<sibling>` on a repo you
+        # then push is the ordinary way to work. Refusing THAT on the grounds
+        # that its HEAD is unpublished is circular: this push is what would
+        # publish it, so the first push of a new commit/branch could never be
+        # made. Stage 2 already grants the same provisional status to the
+        # outgoing repo; the ``outgoing-current`` classification is exactly
+        # the proof that one well-formed fast-forward update of this HEAD is
+        # in flight to the manifest-agreed remote. Every other override —
+        # a genuine dependency this push does not publish — still refuses.
+        if outgoing.outgoingCurrent and headSha.len > 0 and
+            headSha == outgoing.headOid and
+            sameFilesystemPath(sourcePath, parsed.currentRepo):
+          continue
         let evidence =
           if headSha.len > 0:
             "HEAD " & headSha & " not on any remote-tracking branch"
