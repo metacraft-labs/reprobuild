@@ -4155,7 +4155,7 @@ proc populateFromSourceSearchPathsLocal(profile: var PathOnlyToolProfile;
           case child.toLowerAscii()
           of "stdbool.h", "stdio.h", "stddef.h", "stdlib.h",
              "stdint.h", "string.h", "stdarg.h", "assert.h",
-             "errno.h", "ctype.h", "math.h", "time.h", "limits.h",
+             "errno.h", "err.h", "ctype.h", "math.h", "time.h", "limits.h",
              "float.h", "locale.h", "setjmp.h", "signal.h",
              "wchar.h", "wctype.h", "iso646.h", "stdalign.h",
              "stdnoreturn.h", "stdatomic.h", "uchar.h",
