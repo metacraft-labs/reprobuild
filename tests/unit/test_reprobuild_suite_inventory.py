@@ -408,6 +408,15 @@ test "incomplete name" and:
                 "sourceCaseCount": 2,
                 "class": "pure unit",
             },
+            "libs/repro_cli_support/tests/"
+            "t_lock_publish_push_race_classification.nim": {
+                "binary": "build/test-bin/"
+                "t_lock_publish_push_race_classification",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 7,
+                "class": "pure unit",
+            },
         }
         for source, expected in expected_enrollments.items():
             with self.subTest(enrolled_source=source):
@@ -435,7 +444,7 @@ test "incomplete name" and:
 
         # Exact generated-graph specification counts. An omitted, duplicated,
         # or substituted enrollment cannot be absorbed by the case totals.
-        self.assertEqual(len(nim_specs), 1168)
+        self.assertEqual(len(nim_specs), 1180)
         self.assertEqual(len(python_specs), 4)
 
         nim_total = sum(
@@ -483,9 +492,9 @@ test "incomplete name" and:
         )
         # Language totals and the overall total. These are the aggregate
         # backstop for the per-source pins above, not a substitute for them.
-        self.assertEqual(nim_total, 6537)
+        self.assertEqual(nim_total, 6610)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6568)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6641)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -629,7 +638,7 @@ test "incomplete name" and:
             "t_repro_test_runner_process_group_cleanup.nim"
         )
         self.assertIn(cleanup_source, explicit_sources)
-        self.assertEqual(len(explicit_sources), 47)
+        self.assertEqual(len(explicit_sources), 48)
         self.assertEqual(len(api_sources), 21)
         self.assertEqual(
             explicit_sources & api_sources,
@@ -642,7 +651,7 @@ test "incomplete name" and:
             },
         )
         derived_total = len(explicit_sources | api_sources)
-        self.assertEqual(derived_total, 65)
+        self.assertEqual(derived_total, 66)
         self.assertEqual(len(flows), derived_total)
         self.assertFalse(data["runtimeCompilerFlowDetection"]["exhaustive"])
         self.assertEqual(
@@ -751,7 +760,7 @@ test "incomplete name" and:
         # repro_tests.nim. This is an independent reading of the same
         # generated file as the parse_repro_tests pins above, so a dropped,
         # duplicated, or hand-edited specification fails here too.
-        self.assertEqual(declared_nim_count, 1168)
+        self.assertEqual(declared_nim_count, 1180)
         self.assertEqual(declared_python_count, 4)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -782,7 +791,7 @@ test "incomplete name" and:
             data["static"]["testEntryCount"],
             declared_nim_count + declared_python_count,
         )
-        self.assertEqual(data["static"]["testEntryCount"], 1172)
+        self.assertEqual(data["static"]["testEntryCount"], 1184)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),

@@ -194,9 +194,7 @@ proc keyFromDigest(digest: Digest256): PrefixIdBytes =
 suite "M71 Phase D: remote activation over loopback SSH":
   when isNixSupported:
     test "target activation commits generation, roots, current, launchers, and owned files idempotently":
-      if not loopbackSshLoginAvailable():
-        checkpoint("loopback SSH unavailable: runner account has no login shell")
-        skip()
+      requireLoopbackSshLogin("M71 Phase D")
       when defined(windows):
         doAssert false,
           "M71 Phase D gate must not be skipped; Windows needs a " &

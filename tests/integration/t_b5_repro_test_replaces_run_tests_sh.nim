@@ -9,8 +9,10 @@
 ##   1. ``scripts/run_tests.sh`` still exists (the original B5 spec
 ##      said "5-line shim or deletion"; the engine's tool-resolver gap
 ##      blocks the 5-line form, so the slimmed-but-substantial form is
-##      what landed). Slimmed means under ~150 lines vs. the original
-##      ~250.
+##      what landed). "Slimmed" is asserted structurally — by the
+##      absence of the legacy per-helper and per-HCR-test compile
+##      loops — not by a line count; see the note on the line-count
+##      checkpoint below.
 ##
 ##   2. The script delegates the apps + test-helpers + test-builds
 ##      compilation to the engine via ``repro ... build .#apps
@@ -68,21 +70,34 @@ suite "Bootstrap-And-Self-Build B5: run_tests.sh is slimmed and engine-driven":
     let lines = lineCount(text)
     checkpoint("scripts/run_tests.sh line count: " & $lines)
 
-    # The original ran ~250 lines. B5 slimmed it; assert under 280
-    # so a regression that re-introduces the legacy HCR loop or the
-    # per-helper build_test_helper calls is caught. The threshold is
-    # 280 (not 150) because several CI-survival additions land
-    # legitimately post-B5: the per-collection ``repro_build_collection``
-    # helper (M3 multi-fragment selector workaround), the
-    # ``timeout --kill-after=30s`` wrapper around the runner phase
-    # (orphan-daemon hang mitigation), the throwaway isolated-daemon
-    # block (REPRO_DAEMON_ENDPOINT + state-dir + EXIT-trap cleanup, so a
-    # daemon a test auto-launches doesn't leak onto a shared host), and
-    # the reprobuild-cmake fork prerequisite build (the cmake-develop e2e
-    # tests hard-require the forked cmake). Together these bring the
-    # script to ~240 lines; the 280-line cap still catches a full revert
-    # to the legacy script shape.
-    check lines < 300
+    # NO line-count assertion, deliberately. The line count is reported
+    # as a checkpoint above for human interest only.
+    #
+    # A cap here was originally meant to catch "someone reverted to the
+    # legacy script shape". It cannot: the pre-B5 script (``git show
+    # 00f4d4ac^:scripts/run_tests.sh``) was 248 lines, B5 cut it to 142,
+    # and legitimate post-B5 CI-survival additions have since taken it
+    # back past the legacy size — the per-collection
+    # ``repro_build_collection`` helper (M3 multi-fragment selector
+    # workaround), the ``timeout --kill-after=30s`` wrappers (orphan-daemon
+    # hang mitigation), the throwaway isolated-daemon block
+    # (REPRO_DAEMON_ENDPOINT + state-dir + EXIT-trap cleanup so an
+    # auto-launched daemon doesn't leak onto a shared host), the
+    # reprobuild-cmake fork prerequisite build, and the monitor-shim
+    # bootstrap + dlopen probe. Any cap loose enough to admit the current
+    # legitimate script is therefore also loose enough to admit the entire
+    # legacy script, so the metric is provably incapable of detecting the
+    # regression it claimed to guard. It only produced churn: the threshold
+    # was raised five times (150 -> 200 -> 240 -> 280 -> 300) plus one
+    # trim commit, and the rationale text had already drifted out of sync
+    # with the number.
+    #
+    # The real property is asserted directly and precisely by the
+    # structural checks below: the legacy ``compile_hcr_workaround`` and
+    # ``build_test_helper`` definitions must be absent, and the engine
+    # delegation (``.#apps`` / ``.#test-helpers`` / ``.#test-builds``) plus
+    # ``just bootstrap`` must be present. A revert to the legacy shape
+    # fails those unconditionally, at any line count.
 
     # The engine call — the single biggest delegation. The CLI
     # accepts ``--tool-provisioning=path`` either before or after the

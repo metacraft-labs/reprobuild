@@ -163,9 +163,16 @@ const
   # cleanup claimant must exclude every other process until physical reuse.
   #
   # Only 232 compatible padding bytes remain in the deployed control mapping:
-  # 48 naturally-aligned u32 per-slot tickets consume 192 bytes, and the four
-  # u64 words below consume another 32. Cleanup is therefore serialized only
-  # on the exceptional terminal-takeover path; healthy release is unaffected.
+  # 48 naturally-aligned u32 per-slot tickets consume 192 bytes, and the five
+  # u64 words below consume the remaining 40. Cleanup is therefore serialized
+  # only on the exceptional terminal-takeover path; healthy release is
+  # unaffected.
+  #
+  # NOTE: with the oversize counter below, the compatible zero-filled padding
+  # of the deployed control mapping is now FULLY consumed (`CtlExtEnd ==
+  # CtlRegionSize`, enforced by the static assert at the end of this block).
+  # Any further control-region field needs a `FormatVersion` bump (which
+  # recreates the region) rather than another compatible extension.
   CoordCleanupTicketStride* = 4
   CtlExtCoordCleanupTicketsBase* = CtlExtCoordGuardsEnd
   CtlExtOffCleanupClaim* =
@@ -175,7 +182,17 @@ const
   CtlExtOffCleanupStartClaim* = CtlExtOffCleanupStart + 8 # association guard
   CtlExtOffCleanupEpoch* = CtlExtOffCleanupStartClaim + 8 # full cleanup generation
 
-  CtlExtEnd* = CtlExtOffCleanupEpoch + 8
+  # An OVER-CAP submission (`rec.len > RingSlotRecCap`) is rejected before it
+  # ever reaches the ring, so it cannot be signalled by the ring header's
+  # `dropped` word the way a ring-full drop is. It gets its own atomic,
+  # cross-process counter here — same shared, zero-initialised control region
+  # every producer already maps, so the oversize signal is observable from a
+  # running system exactly like the drop signal
+  # (Action-Cache-Per-Edge-Store.md §4.4 / §8 AC-2c: an oversized record is
+  # "signalled Tier-1-only", never silent).
+  CtlExtOffRingOversizedCount* = CtlExtOffCleanupEpoch + 8 # u64 fetch-add
+
+  CtlExtEnd* = CtlExtOffRingOversizedCount + 8
 
 static:
   doAssert CtlExtBase >= RingHdrBase + RingSpan
@@ -186,6 +203,7 @@ static:
   doAssert (CtlExtOffCleanupStart and 7) == 0
   doAssert (CtlExtOffCleanupStartClaim and 7) == 0
   doAssert (CtlExtOffCleanupEpoch and 7) == 0
+  doAssert (CtlExtOffRingOversizedCount and 7) == 0
   doAssert CtlExtEnd <= CtlRegionSize
 
 # --- Generation segment ---------------------------------------------------

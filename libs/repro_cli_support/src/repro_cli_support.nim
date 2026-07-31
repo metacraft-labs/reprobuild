@@ -28332,27 +28332,75 @@ proc pathIsUnderLocks(path: string): bool =
   let normalized = path.replace('\\', '/')
   normalized == "locks" or normalized.startsWith("locks/")
 
-proc pushOutputIsNonFastForward(output: string): bool =
-  ## A push rejected because the remote tip advanced (another publisher
-  ## raced us). Git prints ``! [rejected] ... (fetch first)`` /
-  ## ``(non-fast-forward)`` to stderr; we fold stderr into stdout
-  ## (``poStdErrToStdOut``), so match those markers case-insensitively.
+proc pushOutputIsNonFastForward*(output: string): bool =
+  ## A push rejected because a COMPETING WRITER moved the remote ref (or held
+  ## its lock) while we were pushing — the lost race RA-29's bounded, verified
+  ## re-apply loop may retry. Every failure whose cause is transport,
+  ## credentials, or branch policy returns ``false`` and stays LOUD (RA-21).
+  ## We fold stderr into stdout (``poStdErrToStdOut``), so all markers are
+  ## matched case-insensitively against the combined transcript.
+  ##
+  ## Git's wording for the SAME compare-and-swap loss changes between
+  ## releases, so no single phrase may be a required conjunct (that bug shipped
+  ## once already: requiring ``cannot lock ref`` made every 2.51 race a
+  ## user-visible hard failure). Observed transcripts:
+  ##
+  ## * git 2.50.1 — ``remote: error: cannot lock ref 'refs/heads/main': is at
+  ##   <new> but expected <advertised>`` plus
+  ##   ``! [remote rejected] HEAD -> main (failed to update ref)``.
+  ## * git 2.51.2 — ``! [remote rejected] HEAD -> main (incorrect old value
+  ##   provided)`` and NOTHING else; the ``cannot lock ref`` detail line is
+  ##   gone.
+  ## * client-side detection (remote already ahead at advertisement time) —
+  ##   ``! [rejected]        HEAD -> main (fetch first)`` /
+  ##   ``(non-fast-forward)``.
+  ##
+  ## So we require two facts that ARE stable across every observed release:
+  ##
+  ## 1. Git reported a rejected ref update. Both spellings are live —
+  ##    ``[rejected]`` for a client-side non-fast-forward, ``[remote
+  ##    rejected]`` for a receive-pack compare-and-swap loss — and neither is
+  ##    a substring of the other, so both are matched. A DNS, connection or
+  ##    credential failure dies before ref-update reporting and prints
+  ##    neither, which is what keeps those loud.
+  ## 2. At least ONE marker that the rejection was about the ref's VALUE or
+  ##    LOCK rather than about policy. ``(pre-receive hook declined)``,
+  ##    ``(deny current branch)`` and similar refusals satisfy fact 1 but
+  ##    carry none of these markers, so a protected branch never enters the
+  ##    retry loop.
+  ##
+  ## Widening fact 2 is safe by construction because this predicate only
+  ## decides whether to ENTER recovery, never whether recovery may mutate
+  ## anything: the caller re-fetches an immutable tip, refuses unless the
+  ## previously observed tip is still an ancestor of it, and replays the
+  ## chain only after re-proving it is lock-only and matches the exact
+  ## expected records. A false positive therefore costs at most
+  ## ``lockPublishNonFfRetryBudget`` non-destructive attempts before the
+  ## failure is reported loudly anyway; a false negative costs a spurious
+  ## "check backend connectivity" failure on a perfectly healthy remote.
+  ##
+  ## Pinned against literal captured transcripts from both git versions in
+  ## this library's ``tests/t_lock_publish_push_race_classification.nim`` — a
+  ## live-git test only ever proves whichever wording the local git emits.
   let low = output.toLowerAscii()
-  (("[rejected]" in low) and
-    (("non-fast-forward" in low) or ("fetch first" in low) or
-     ("behind" in low))) or
-    # When the remote advances after Git advertises its old value but before
-    # receive-pack updates the ref, Git reports the same compare-and-swap race
-    # as `remote rejected ... (incorrect old value provided)` rather than the
-    # usual client-side `[rejected] (fetch first)` spelling.
-    (("remote rejected" in low) and
-      ("cannot lock ref" in low) and
-      (("incorrect old value provided" in low) or
-       # Git-for-Windows 2.47 spells the same compare-and-swap failure as
-       # "is at <new> but expected <advertised>". It is still conclusive
-       # evidence that the remote advanced after advertisement, so it enters
-       # the same verified, bounded recovery path.
-       (("is at" in low) and ("but expected" in low))))
+  if not (("[rejected]" in low) or ("[remote rejected]" in low)):
+    return false
+  # Client-side: the ref we advertised was already behind the remote tip.
+  if ("non-fast-forward" in low) or ("fetch first" in low) or
+     ("behind" in low):
+    return true
+  # receive-pack side: the compare-and-swap against the advertised old value
+  # lost, or the ref could not be locked because another writer held it.
+  # ``incorrect old value provided`` (2.51+) and ``failed to update ref``
+  # (2.50 and earlier) are the reason parentheticals; ``cannot lock ref`` and
+  # ``is at <new> but expected <advertised>`` are the detail lines that older
+  # Git (including Git-for-Windows 2.47) additionally emits. ``stale info`` is
+  # the same loss reported against an explicit lease.
+  ("incorrect old value provided" in low) or
+    ("failed to update ref" in low) or
+    ("cannot lock ref" in low) or
+    (("is at" in low) and ("but expected" in low)) or
+    ("stale info" in low)
 
 const lockPublishNonFfRetryBudget = 8
   ## RA-29: bounded re-apply attempts for a non-fast-forward (concurrent

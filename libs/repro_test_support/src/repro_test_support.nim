@@ -36,24 +36,76 @@ when defined(windows):
 else:
   import std/posix
 
-proc loopbackSshLoginAvailable*(): bool =
+type
+  LoopbackSshLogin = object
+    ## Outcome of the loopback-SSH login-shell capability probe.
+    ## Deliberately NOT exported: the only supported way to consult it is
+    ## ``requireLoopbackSshLogin``, which fails closed. An exported
+    ## boolean predicate invites the ``if not available(): skip()`` shape
+    ## that started this — and ``skip()`` does not return (the stdlib
+    ## docstring says verbatim "The test code is still executed"), so the
+    ## guarded body ran anyway and hard-failed with sshd's opaque
+    ## "This account is currently not available".
+    available: bool
+    user: string
+    shell: string
+
+proc loopbackSshLogin(): LoopbackSshLogin =
   ## OpenSSH executes remote commands through the account's passwd shell.
   ## Self-hosted service accounts commonly use nologin/false, which makes a
   ## loopback sshd accept authentication but reject every command.
+  result = LoopbackSshLogin(available: true, user: "", shell: "")
   when defined(posix):
-    let user = getEnv("USER")
-    if user.len == 0:
-      return true
-    let probe = execCmdEx("getent passwd " & quoteShell(user))
+    result.user = getEnv("USER")
+    if result.user.len == 0:
+      return
+    let probe = execCmdEx("getent passwd " & quoteShell(result.user))
     if probe.exitCode != 0:
-      return true
+      return
     let fields = probe.output.strip().split(':')
     if fields.len < 7:
-      return true
-    let shell = fields[^1].strip()
-    return not (shell.endsWith("/nologin") or shell.endsWith("/false"))
-  else:
-    return true
+      return
+    result.shell = fields[^1].strip()
+    result.available = not (result.shell.endsWith("/nologin") or
+      result.shell.endsWith("/false"))
+
+proc requireLoopbackSshLogin*(gate: string) =
+  ## Fail-closed preflight for the gates that drive a REAL user-owned
+  ## loopback ``sshd`` (M71 phases C/D/E).
+  ##
+  ## A usable login shell is a HARD PREREQUISITE of these gates, in the
+  ## same class as ``ssh`` / ``sshd`` / ``ssh-keygen`` being installed —
+  ## which the same tests already treat as ``doAssert false`` blockers.
+  ## The subject under test IS the SSH transport (bundle streaming,
+  ## remote activation, ``enable --host --now``); there is no residual
+  ## assertion worth making once the transport cannot run, so degrading
+  ## to a partial run would be a green light over an unexercised gate.
+  ##
+  ## It therefore reports a deterministic FAILURE, never a skip: M0's
+  ## exit gate requires a full-suite run with zero skips, so a
+  ## ``[SKIPPED]`` is itself a gate failure. The message names the
+  ## account, its shell, and the remedy, so the failure is actionable
+  ## from the CI log alone instead of surfacing as sshd's opaque
+  ## "This account is currently not available" 6 seconds into a probe
+  ## loop.
+  let probe = loopbackSshLogin()
+  if probe.available:
+    return
+  doAssert false,
+    gate & " blocker: this gate drives a real user-owned loopback sshd, " &
+    "and OpenSSH runs every remote command through the account's passwd " &
+    "login shell. Account '" & probe.user & "' has login shell '" &
+    probe.shell & "', so sshd authenticates the connection and then " &
+    "rejects every command with \"This account is currently not " &
+    "available\".\n" &
+    "  This is an environment defect, and it is deliberately NOT " &
+    "skippable: M0's exit gate requires a full-suite run with zero " &
+    "skips, so the gate fails hard rather than reporting a green or " &
+    "skipped result over an SSH transport that never ran.\n" &
+    "  Remedy: run the suite as an account with a real login shell, or " &
+    "give this one a shell (e.g. `usermod -s /bin/sh " & probe.user &
+    "`). Note the probe keys off $USER, so $USER must name the account " &
+    "the suite actually runs as."
 
 const
   isNixSupported* = defined(linux) or defined(macosx)
