@@ -39,7 +39,8 @@ package muslSource:
         "--syslibdir=/usr/lib",
       ]
       let patches = @[
-        "printf '\n.PHONY: repro_install\nrepro_install:\n\t$(MAKE) install\n\tsed -i s@/usr/@/opt/repro/reprobuild/recipes/packages/source/musl/.repro/output/install/usr/@g $(DESTDIR)/usr/lib/musl-gcc.specs\n\tsed -i s@/usr/lib/musl-gcc.specs@/opt/repro/reprobuild/recipes/packages/source/musl/.repro/output/install/usr/lib/musl-gcc.specs@ $(DESTDIR)/usr/bin/musl-gcc\n\tln -sf musl-gcc $(DESTDIR)/usr/bin/musl\n' >> ./src/Makefile",
+        "printf '%s\\n' '#!/bin/sh' 'self_dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)' 'sysroot=$(CDPATH= cd -- \"$self_dir/../..\" && pwd)' 'exec \"${REALGCC:-gcc}\" --sysroot=\"$sysroot\" \"$@\" -specs \"$sysroot/usr/lib/musl-gcc.specs\"' > ./src/tools/repro-musl-gcc",
+        "printf '\n.PHONY: repro_install\nrepro_install:\n\t$(MAKE) install\n\tsed -i s@/usr/@%%R/usr/@g $(DESTDIR)/usr/lib/musl-gcc.specs\n\tsed -i s@-dynamic-linker\\ %%R/usr/lib/@-dynamic-linker\\ /usr/lib/@g $(DESTDIR)/usr/lib/musl-gcc.specs\n\tcp ../src/tools/repro-musl-gcc $(DESTDIR)/usr/bin/musl-gcc\n\tchmod +x $(DESTDIR)/usr/bin/musl-gcc\n\tln -sf musl-gcc $(DESTDIR)/usr/bin/musl\n' >> ./src/Makefile",
       ]
       let pkg = autotools_package(
         srcDir = "./src",
