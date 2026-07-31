@@ -171,6 +171,10 @@ package gawkSource:
     ## gcc is the host C toolchain — gawk is C99 + GNU extensions.
     "gcc >=11"
 
+  buildDeps:
+    ## glibc's limits.h includes linux/limits.h from the exported UAPI tree.
+    "linux-headers >=4.19"
+
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
     discard

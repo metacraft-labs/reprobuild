@@ -23,14 +23,19 @@ package perlSource:
     "make"
     "gcc >=11"
 
+  buildDeps:
+    "linux-headers >=4.19"
+
   executable perl:
     build:
       # Compile FHS paths into Perl, install through DESTDIR, then expose
       # the resulting tree at the custom convention's output root.
-      shell "./Configure -des -Dprefix=/usr -Dvendorprefix=/usr -Dsiteprefix=/usr -Duseshrplib -Dman1dir=none -Dman3dir=none"
+      shell "./Configure -des -Dcc=gcc -Dprefix=/usr -Dvendorprefix=/usr -Dsiteprefix=/usr -Duseshrplib -Dman1dir=none -Dman3dir=none"
+      shell "echo \"d_perl_lc_all_uses_name_value_pairs='define'\" >> config.sh && sh config_h.SH"
       shell "make -j8"
       shell "rm -rf $out/stage && make DESTDIR=$out/stage install"
       shell "cp -a $out/stage/usr/. $out/ && rm -rf $out/stage"
+      shell "ln -sf perl5/5.40.0/x86_64-linux/CORE/libperl.so $out/lib/libperl.so"
 
   runtimeDeps:
     discard
