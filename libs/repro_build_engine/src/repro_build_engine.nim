@@ -2690,12 +2690,15 @@ proc collectResolvedAuxPaths(action: BuildAction;
         seenNimPath.incl(d)
         result.nimPathDirs.add(d)
 
-proc isNixGlibcLibDir(path: string): bool =
-  ## A Nix dependency profile may propagate its glibc output along with its
-  ## own libraries. Putting that directory in LD_LIBRARY_PATH interposes the
-  ## dependency's libc on the action launcher and can mix incompatible
-  ## GLIBC_PRIVATE ABIs. Keep it available to the linker, but never inject it
-  ## into a process runtime search path.
+proc isGlibcLibDir(path: string): bool =
+  ## A dependency profile may propagate a Nix or source-built glibc output
+  ## along with its own libraries. Putting that directory in LD_LIBRARY_PATH
+  ## interposes the dependency's libc on the action launcher and can mix
+  ## incompatible GLIBC_PRIVATE ABIs. Keep it available to the linker, but
+  ## never inject it into a process runtime search path.
+  let normalized = path.replace('\\', '/')
+  if normalized.contains("/recipes/packages/source/glibc/"):
+    return true
   const storePrefix = "/nix/store/"
   if not path.startsWith(storePrefix):
     return false
@@ -2712,7 +2715,7 @@ proc isNixGlibcLibDir(path: string): bool =
 
 proc runtimeSafeLibDirs(paths: ResolvedAuxPaths): seq[string] =
   for path in paths.libDirs:
-    if not isNixGlibcLibDir(path):
+    if not isGlibcLibDir(path):
       result.add(path)
 
 proc applyResolvedAuxPathsTable*(env: StringTableRef;
@@ -2747,8 +2750,8 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   prependEnvDirs(env, "CPATH", paths.includeDirs)
   prependEnvDirs(env, "LIBRARY_PATH", paths.libDirs)
   # LD_LIBRARY_PATH covers run-time test execution; LIBRARY_PATH covers
-  # link-time. Nix glibc outputs are link-only: loading an arbitrary
-  # dependency's libc into the action process can cross GLIBC_PRIVATE ABIs.
+  # link-time. Glibc outputs are link-only: loading an arbitrary dependency's
+  # libc into the action process can cross GLIBC_PRIVATE ABIs.
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   prependEnvDirs(env, "LD_LIBRARY_PATH", runtimeLibDirs)
   prependEnvDirs(env, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)

@@ -230,16 +230,20 @@ proc makeDepfilePolicy(path: string): DependencyGatheringPolicy =
 
 suite "M9.N Batch B — engine tool-identity env plumbing":
 
-  test "Nix glibc stays linkable without entering runtime loader paths":
-    let glibcLib = "/nix/store/0123456789abcdefghijklmnopqrstuv-glibc-2.40/lib"
+  test "glibc stays linkable without entering runtime loader paths":
+    let nixGlibcLib =
+      "/nix/store/0123456789abcdefghijklmnopqrstuv-glibc-2.40/lib"
+    let sourceGlibcLib =
+      "/work/recipes/packages/source/glibc/.repro/output/install/usr/lib64"
     let dependencyLib = "/nix/store/vutsrqponmlkjihgfedcba9876543210-libfoo-1.0/lib"
-    let paths = ResolvedAuxPaths(libDirs: @[glibcLib, dependencyLib])
+    let paths = ResolvedAuxPaths(
+      libDirs: @[nixGlibcLib, sourceGlibcLib, dependencyLib])
 
     let argvEnv = applyResolvedAuxPathsArgv(
       @["LIBRARY_PATH=/existing/link", "LD_LIBRARY_PATH=/existing/runtime"],
       paths)
     check envValue(argvEnv, "LIBRARY_PATH").split(pathSeparator()) ==
-      @[glibcLib, dependencyLib, "/existing/link"]
+      @[nixGlibcLib, sourceGlibcLib, dependencyLib, "/existing/link"]
     check envValue(argvEnv, "LD_LIBRARY_PATH").split(pathSeparator()) ==
       @[dependencyLib, "/existing/runtime"]
 
@@ -248,7 +252,7 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     tableEnv["LD_LIBRARY_PATH"] = "/existing/runtime"
     applyResolvedAuxPathsTable(tableEnv, paths)
     check tableEnv["LIBRARY_PATH"].split(pathSeparator()) ==
-      @[glibcLib, dependencyLib, "/existing/link"]
+      @[nixGlibcLib, sourceGlibcLib, dependencyLib, "/existing/link"]
     check tableEnv["LD_LIBRARY_PATH"].split(pathSeparator()) ==
       @[dependencyLib, "/existing/runtime"]
 

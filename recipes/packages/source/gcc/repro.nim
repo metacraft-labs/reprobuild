@@ -229,6 +229,10 @@ package gccSource:
     "flex >=2.6"
 
   buildDeps:
+    ## GCC's driver and collect2 require the C runtime startup objects
+    ## and linker scripts when compiling downstream programs. Expose the
+    ## source-built glibc install tree as part of the compiler profile.
+    "glibc >=2.39"
     ## gmp / mpfr / mpc are the arbitrary-precision-arithmetic
     ## libraries gcc's middle-end consumes for constant folding +
     ## floating-point analysis. The upstream tarball ships a

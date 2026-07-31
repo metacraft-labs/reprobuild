@@ -194,12 +194,10 @@ package mesonSource:
       # Copy the bundled ``mesonbuild`` Python package into the
       # share dir.
       shell "cp -r $extracted/mesonbuild $out/share/meson/"
-      # Write the wrapper script — execs the bundled package via
-      # ``python3``. The double-quoted shell heredoc keeps the
-      # ``$@``/``$out`` placeholders distinguishable: ``$out`` is the
-      # DSL substitution (resolved at emit time), ``$@`` is the shell
-      # variable expanded at run time.
-      shell "printf '#!/bin/sh\\nexec python3 %s/share/meson/__main__.py \"$@\"\\n' \"$out\" > $out/bin/meson"
+      # Write a relocatable wrapper. The install mirror moves the whole
+      # tree away from ``$out``, so the launcher derives the bundled
+      # Python package path from its own final location.
+      shell "printf '#!/bin/sh\\nMESON_ROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")/../share/meson\" && pwd)\\nPYTHONPATH=\"$MESON_ROOT${PYTHONPATH:+:$PYTHONPATH}\" exec python3 -m mesonbuild.mesonmain \"$@\"\\n' > $out/bin/meson"
       # Make the wrapper executable so the stage-copy step finds a
       # runnable binary.
       shell "chmod +x $out/bin/meson"
