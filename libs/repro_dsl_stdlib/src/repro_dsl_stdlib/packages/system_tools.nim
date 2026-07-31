@@ -56,6 +56,15 @@ import ./libelf
 # recipes/packages/source/libevdev/. The stdlib nix-stub is retired.
 import ./libudev
 import ./libgpg_error
+import ./libusb
+import ./gusb
+import ./libxslt
+import ./libpthread_stubs
+import ./nasm
+import ./libmd
+import ./libbsd
+import ./libaio
+import ./lzo
 import ./libacl
 import ./libattr
 import ./libcrypt
@@ -167,6 +176,7 @@ import ./xorgproto
 # M9.R.15q.4.3 — libxau ships libXau.so + xau.pc; libxcb's xcb.pc has
 # Requires.private: xau so any pkg-config probe through xcb needs it.
 import ./libxau
+import ./xcb_proto
 # M9.R.15q.4.6 — libxdmcp ships xdmcp.pc; xcb.pc has
 # Requires.private: xau xdmcp so probes through xcb need it.
 import ./libxdmcp
@@ -215,6 +225,15 @@ export libelf
 # M9.R.26.2 — libevdev promoted to from-source recipe; stdlib stub retired.
 export libudev
 export libgpg_error
+export libusb
+export gusb
+export libxslt
+export libpthread_stubs
+export nasm
+export libmd
+export libbsd
+export libaio
+export lzo
 export libacl
 export libattr
 export libcrypt
@@ -263,6 +282,7 @@ export libxfixes
 export libxrender
 export xorgproto
 export libxau
+export xcb_proto
 export libxdmcp
 export libcanberra
 export libepoxy
