@@ -364,6 +364,40 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     # The boundary between the two is the platform separator.
     check captured.contains(mesonBin & sep & gccBin)
 
+  test "explicit tool bins precede transitive bins from earlier refs":
+    resetTmp()
+    let cacheRoot = TmpDir / "cache-direct-before-transitive"
+    createDir(cacheRoot)
+
+    let mesonBin = absolutePath(TmpDir / "mock-store" / "meson" / "bin")
+    let basePythonBin =
+      absolutePath(TmpDir / "mock-store" / "python3" / "bin")
+    let modulePythonBin =
+      absolutePath(TmpDir / "mock-store" / "python3-modules" / "bin")
+    for path in [mesonBin, basePythonBin, modulePythonBin]:
+      createDir(path)
+    let executableSuffix = when defined(windows): ".exe" else: ""
+    var table = initTable[string, ResolvedToolIdentity]()
+    table["meson"] = mockedIdentity(@[mesonBin, basePythonBin],
+      resolvedExe = mesonBin / ("meson" & executableSuffix))
+    table["python3-with-modules"] =
+      mockedIdentity(@[modulePythonBin, basePythonBin],
+        resolvedExe = modulePythonBin /
+          ("python3-with-modules" & executableSuffix))
+    let resolver = makeResolver(table)
+
+    let g = oneAction("direct-before-transitive",
+      @["meson", "python3-with-modules"],
+      fingerprintToken = "direct-before-transitive")
+    let res = runBuild(g, runnerCfg(cacheRoot, resolver))
+    check res.results.len == 1
+    check res.results[0].status == asSucceeded
+    let captured = stripPathPrefix(
+      readBypassStdout(cacheRoot, "direct-before-transitive"))
+    let entries = captured.split(pathSeparator())
+    check entries.len >= 3
+    check entries[0 .. 2] == @[mesonBin, modulePythonBin, basePythonBin]
+
   test "An unresolved ref is silently skipped, others still contribute":
     resetTmp()
     let cacheRoot = TmpDir / "cache-skip"

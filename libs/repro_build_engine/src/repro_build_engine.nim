@@ -2592,6 +2592,11 @@ proc resolvedToolBinDirs(action: BuildAction;
   ## the catalog signals "no contribution for this ref" by returning
   ## ``none`` and the engine then leaves PATH untouched for that ref.
   ##
+  ## Each declared ref's resolved executable directory is promoted before
+  ## any transitive bin directories. A later explicit tool can therefore
+  ## override an earlier ref's transitive dependency without changing the
+  ## direct tools' declaration order.
+  ##
   ## M9.R.7: the resolver receives a per-ref ``DepKind`` so it can
   ## route the materialization cache lookup against the correct
   ## platform-tagged cache key. On a native build the choice is
@@ -2605,13 +2610,24 @@ proc resolvedToolBinDirs(action: BuildAction;
   if action.toolIdentityRefs.len == 0 or resolver == nil:
     return @[]
   result = @[]
+  var resolvedIdentities: seq[ResolvedToolIdentity] = @[]
   for i, refName in action.toolIdentityRefs:
     let kind = kindForRef(action, i)
     let resolved = resolver(refName, kind)
     if resolved.isNone:
       continue
-    for binDir in resolved.get().binDirs:
-      if binDir.len > 0:
+    resolvedIdentities.add(resolved.get())
+  var promotedDirs = initHashSet[string]()
+  for resolved in resolvedIdentities:
+    if resolved.resolvedExecutablePath.len == 0:
+      continue
+    let directDir = parentDir(resolved.resolvedExecutablePath)
+    if directDir.len > 0 and directDir notin promotedDirs:
+      promotedDirs.incl(directDir)
+      result.add(directDir)
+  for resolved in resolvedIdentities:
+    for binDir in resolved.binDirs:
+      if binDir.len > 0 and binDir notin promotedDirs:
         result.add(binDir)
 
 type
