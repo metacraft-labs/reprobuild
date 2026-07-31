@@ -1758,23 +1758,17 @@ chmod +x "$STAGE_DIR/usr/bin/repro"
 echo "[stage-de-rootfs] overlayed repro CLI (bytes=$(stat -c %s "$STAGE_DIR/usr/bin/repro"))"
 
 # ---------------------------------------------------------------------------
-# Phase 6b (M9.R.46): relocate /nix/store/<hash>-<pkg>/ -> /repro/store/
-# at the same hash, and rewrite every from-source ELF's RPATH + PT_INTERP
-# (+ every cross-prefix symlink + every #!/nix/store/ shebang) so the
-# live ISO + installed system carry NO /nix/store directory at all.
+# Phase 6b: replace bootstrap runtime paths with source recipe providers.
 #
-# This closes the M9.R.25 architectural debt: the spec said all
-# content-addressed paths live at /repro/store/<hash>-<name>/, but the
-# combination of nix-stubbed deps + M9.R.30's transitive RPATH walker
-# + M9.R.31.2's bootstrap propagation left ~1.3 GiB of /nix/store
-# referenced from-source on every ISO.  The relocate script does a
-# same-hash prefix swap (nix's hash IS a content hash) so the address
-# semantics survive intact while the directory layout matches the spec.
+# The bootstrap closure mirrored above is temporary evidence used to
+# translate legacy RPATH entries, including dlopen-only paths that do not
+# appear in DT_NEEDED. normalize-source-runtime.sh first verifies that every
+# direct ELF dependency has a staged source provider. It then rewrites
+# RPATHs and PT_INTERP to those providers and the source glibc.
 #
-# The script is HARD-FAIL: any remaining /nix/store reference in any
-# ELF RPATH/INTERP, symlink target, or filesystem subtree under
-# $STAGE_DIR/nix/ exits 75 and aborts the ISO build per the M9.R.46
-# no-fallback-to-/nix/store rule.
+# Only after that audit succeeds do we delete both bootstrap store trees.
+# The installed image therefore has no Nix-derived runtime fallback under
+# either /nix/store or /repro/store.
 # ---------------------------------------------------------------------------
 
 # Final split-output audit over the staged store itself. A prefix can
@@ -1805,10 +1799,25 @@ for propagation_iter in 1 2 3 4 5 6 7 8 9 10; do
 done
 echo "[stage-de-rootfs] mirrored $propagated_mirrored propagated runtime prefixes"
 
-echo "[stage-de-rootfs] M9.R.46 relocate-nix-to-repro starting"
-bash "$SCRIPT_DIR_SELF/relocate-nix-to-repro.sh" \
-  "$STAGE_DIR" "$ISO_SRC_MIRROR_ROOT" "$SOURCE_GLIBC_LOADER"
-echo "[stage-de-rootfs] M9.R.46 relocate-nix-to-repro complete"
+echo "[stage-de-rootfs] normalizing source-only runtime closure"
+bash "$SCRIPT_DIR_SELF/normalize-source-runtime.sh" \
+  "$STAGE_DIR" "$ISO_SRC_MIRROR_ROOT" "$SOURCE_GLIBC_LOADER" \
+  "$STAGE_DIR/usr/bin/reproos-installer" "$STAGE_DIR/usr/bin/repro"
+
+for bootstrap_store in "$STAGE_DIR/nix" "$STAGE_DIR/repro/store"; do
+  [ -e "$bootstrap_store" ] || continue
+  chmod -R u+w "$bootstrap_store" 2>/dev/null || true
+  rm -rf "$bootstrap_store"
+done
+
+if { [ -d "$STAGE_DIR/nix" ] && \
+     find "$STAGE_DIR/nix" -mindepth 1 -print -quit | grep -q .; } || \
+   { [ -d "$STAGE_DIR/repro/store" ] && \
+     find "$STAGE_DIR/repro/store" -mindepth 1 -print -quit | grep -q .; }; then
+  echo "[stage-de-rootfs] bootstrap runtime store residue remains" >&2
+  exit 75
+fi
+echo "[stage-de-rootfs] source-only runtime closure verified"
 
 # ---------------------------------------------------------------------------
 # Phase 7: rebuild ld.so.cache so dlopen(bare-name) calls inside DE
