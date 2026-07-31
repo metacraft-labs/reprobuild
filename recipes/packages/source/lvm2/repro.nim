@@ -73,7 +73,17 @@ package lvm2Source:
         "--disable-selinux",
         "--disable-nls",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      # LVM's symbol-export generator invokes CC as a preprocessor but omits
+      # the standard compiler flag variables, so staged libc headers are not
+      # visible even though ordinary object compilation is configured.
+      let patches = @[
+        "sed -i " &
+          "'s|$(CC) -E -P $(INCLUDES) $(DEFS)|" &
+          "$(CC) -E -P $(CPPFLAGS) $(CFLAGS) $(INCLUDES) $(DEFS)|' " &
+          "src/make.tmpl.in src/libdm/make.tmpl.in",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
+                                  srcPatches = patches)
       discard pkg.executable("lvm")
       discard pkg.executable("lvcreate")
       discard pkg.executable("vgcreate")

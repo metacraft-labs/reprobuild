@@ -4218,6 +4218,8 @@ proc m9r14fDepRecipeName(useDef: InterfaceToolUse): string =
 const FromSourceRecipeAliases* = [
   (dependency: "libltdl", recipe: "libtool"),
   (dependency: "pkg-config", recipe: "pkgconf"),
+  (dependency: "libudev", recipe: "systemd"),
+  (dependency: "libsystemd", recipe: "systemd"),
 ]
   ## Source packages can publish independently consumed libraries whose
   ## ABI name differs from the upstream source-package name. Keep these
