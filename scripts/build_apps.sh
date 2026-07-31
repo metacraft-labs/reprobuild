@@ -308,6 +308,19 @@ mapfile -t repro_runtime_passl < <(
     /usr/local/opt/zstd
 )
 
+# Mach-O load commands live in a fixed-size header pad decided at LINK time,
+# and every `-Wl,-rpath,<dir>` above consumes part of it. Packaging then adds
+# MORE LC_RPATH entries after the fact (flake.nix's postFixup replays the
+# packaged runtime library dirs through install_name_tool), which fails with
+# "larger updated load commands do not fit ... the program must be relinked"
+# once the pad is exhausted. Reserving the maximum pad at link time is the
+# standard remedy and costs only header bytes, so ask for it on every darwin
+# link rather than tuning it per binary as the rpath set grows.
+darwin_headerpad=()
+if [ "${REPRO_HOST_PLATFORM}" = "darwin" ]; then
+  darwin_headerpad=("--passL:-Wl,-headerpad_max_install_names")
+fi
+
 while read -r name path extra_flags; do
   name="${name%$'\r'}"
   path="${path%$'\r'}"
@@ -344,6 +357,7 @@ while read -r name path extra_flags; do
       ${extra_flag_array[@]+"${extra_flag_array[@]}"} \
       ${ssl_passl[@]+"${ssl_passl[@]}"} \
       ${runtime_passl[@]+"${runtime_passl[@]}"} \
+      ${darwin_headerpad[@]+"${darwin_headerpad[@]}"} \
       --nimcache:"build/nimcache/${name}" \
       --out:"build/bin/${name}" \
       "${path}"
@@ -372,6 +386,7 @@ esac
   unset_clingo_searchpath
   nim c \
     ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
+    ${darwin_headerpad[@]+"${darwin_headerpad[@]}"} \
     --app:lib \
     --threads:on \
     --mm:orc \
