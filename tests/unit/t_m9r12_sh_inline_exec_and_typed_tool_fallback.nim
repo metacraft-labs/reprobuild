@@ -137,6 +137,15 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
     check "--enable-gold" in argvParts[2]
     check "--disable-werror" in argvParts[2]
 
+  test "configure defaults native build probes to source toolchain flags":
+    let pkg = autotools_package(srcDir = "./src")
+    let script = pkg.buildEdge.argByName("argv").encodedValue.split("\x1f")[2]
+    check "export CC_FOR_BUILD=\"${CC_FOR_BUILD:-gcc}\"" in script
+    check "export CFLAGS_FOR_BUILD=\"${CFLAGS_FOR_BUILD:-${CFLAGS:-}}\"" in script
+    check "export CPPFLAGS_FOR_BUILD=\"${CPPFLAGS_FOR_BUILD:-${CPPFLAGS:-}}\"" in script
+    check "export LDFLAGS_FOR_BUILD=\"${LDFLAGS_FOR_BUILD:-${LDFLAGS:-}}\"" in script
+    check script.find("export CC_FOR_BUILD=") < script.find("../src/configure")
+
   test "source patches run before configure":
     let pkg = autotools_package(
       srcDir = "./src",
