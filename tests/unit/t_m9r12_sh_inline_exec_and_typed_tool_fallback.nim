@@ -146,6 +146,25 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
     check "export LDFLAGS_FOR_BUILD=\"${LDFLAGS_FOR_BUILD:-${LDFLAGS:-}}\"" in script
     check script.find("export CC_FOR_BUILD=") < script.find("../src/configure")
 
+  test "autoreconf uses modules from the resolved source Perl":
+    let pkg = autotools_package(
+      srcDir = "./src",
+      patchHardcodedFile = true)
+    let script = pkg.buildEdge.argByName("argv").encodedValue.split("\x1f")[2]
+    check "perl_bin=$(which perl 2>/dev/null)" in script
+    check "perl_lib=\"$perl_prefix/lib/perl5\"" in script
+    check "export PERL5LIB=\"$perl_lib${PERL5LIB:+:$PERL5LIB}\"" in script
+    check "export autom4te_perllibdir=\"$autoconf_share\"" in script
+    check "relocated_autom4te_cfg=$(mktemp)" in script
+    check "export AUTOMAKE_LIBDIR=\"$automake_share\"" in script
+    check "export ACLOCAL_AUTOMAKE_DIR=\"$aclocal_share\"" in script
+    check "export ACLOCAL=\"aclocal --system-acdir=$system_aclocal" in script
+    check "for perl_tool in autoreconf autoconf autoheader autom4te" in script
+    check "export PATH=\"$perl_tool_dir:$PATH\"" in script
+    check "export AUTOM4TE=autom4te" in script
+    check "ad=\"$bin_dir/../share/aclocal\"" in script
+    check script.find("export PERL5LIB=") < script.find("autoreconf -fi")
+
   test "source patches run before configure":
     let pkg = autotools_package(
       srcDir = "./src",

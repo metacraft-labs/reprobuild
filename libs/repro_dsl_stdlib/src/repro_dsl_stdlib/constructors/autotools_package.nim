@@ -350,10 +350,68 @@ proc autotools_package*(srcDir: string;
       "    if [ -d \"$ad\" ]; then aclocal_dirs=\"$ad:$aclocal_dirs\"; fi; " &
       "  fi; " &
       "done; " &
+      "for bin_dir in $(printf '%s' \"$PATH\" | tr ':' '\\n'); do " &
+      "  ad=\"$bin_dir/../share/aclocal\"; " &
+      "  if [ -d \"$ad\" ]; then aclocal_dirs=\"$ad:$aclocal_dirs\"; fi; " &
+      "done; " &
       "for sp in /nix/store/*-pkg-config-*/share/aclocal /nix/store/*-libtool-*/share/aclocal /nix/store/*-gtk-doc-*/share/aclocal /nix/store/*-libgcrypt-*-dev/share/aclocal /nix/store/*-libgpg-error-*-dev/share/aclocal; do " &
       "  if [ -d \"$sp\" ]; then aclocal_dirs=\"$sp:$aclocal_dirs\"; fi; " &
       "done; " &
       "export ACLOCAL_PATH=\"$aclocal_dirs\"; " &
+      "perl_bin=$(which perl 2>/dev/null); " &
+      "if [ -n \"$perl_bin\" ]; then " &
+      "  perl_prefix=$(dirname \"$(dirname \"$perl_bin\")\"); " &
+      "  perl_lib=\"$perl_prefix/lib/perl5\"; " &
+      "  if [ -d \"$perl_lib\" ]; then " &
+      "    export PERL5LIB=\"$perl_lib${PERL5LIB:+:$PERL5LIB}\"; " &
+      "  fi; " &
+      "  autoconf_bin=$(which autoconf 2>/dev/null); " &
+      "  if [ -n \"$autoconf_bin\" ]; then " &
+      "    autoconf_prefix=$(dirname \"$(dirname \"$autoconf_bin\")\"); " &
+      "    autoconf_share=\"$autoconf_prefix/share/autoconf\"; " &
+      "    if [ -d \"$autoconf_share\" ]; then " &
+      "      export autom4te_perllibdir=\"$autoconf_share\"; " &
+      "      export autom4te_buildauxdir=\"$autoconf_share/build-aux\"; " &
+      "      export AC_MACRODIR=\"$autoconf_share\"; " &
+      "      relocated_autom4te_cfg=$(mktemp); " &
+      "      sed \"s|/usr/share/autoconf|$autoconf_share|g\" \"$autoconf_share/autom4te.cfg\" > \"$relocated_autom4te_cfg\"; " &
+      "      export AUTOM4TE_CFG=\"$relocated_autom4te_cfg\"; " &
+      "      export trailer_m4=\"$autoconf_share/autoconf/trailer.m4\"; " &
+      "      export PERL5LIB=\"$autoconf_share${PERL5LIB:+:$PERL5LIB}\"; " &
+      "    fi; " &
+      "  fi; " &
+      "  automake_bin=$(which automake 2>/dev/null); " &
+      "  if [ -n \"$automake_bin\" ]; then " &
+      "    automake_prefix=$(dirname \"$(dirname \"$automake_bin\")\"); " &
+      "    automake_share=$(find \"$automake_prefix/share\" -maxdepth 1 -type d -name 'automake-*' 2>/dev/null | head -n 1); " &
+      "    aclocal_share=$(find \"$automake_prefix/share\" -maxdepth 1 -type d -name 'aclocal-*' 2>/dev/null | head -n 1); " &
+      "    if [ -n \"$automake_share\" ]; then " &
+      "      export AUTOMAKE_LIBDIR=\"$automake_share\"; " &
+      "      export PERL5LIB=\"$automake_share${PERL5LIB:+:$PERL5LIB}\"; " &
+      "    fi; " &
+      "    if [ -n \"$aclocal_share\" ]; then " &
+      "      export ACLOCAL_AUTOMAKE_DIR=\"$aclocal_share\"; " &
+      "      export ACLOCAL_PATH=\"$aclocal_share:$ACLOCAL_PATH\"; " &
+      "    fi; " &
+      "    system_aclocal=\"$automake_prefix/share/aclocal\"; " &
+      "    if [ -d \"$system_aclocal\" ]; then " &
+      "      export ACLOCAL=\"aclocal --system-acdir=$system_aclocal${aclocal_share:+ --automake-acdir=$aclocal_share}\"; " &
+      "    fi; " &
+      "  fi; " &
+      "  perl_tool_dir=$(mktemp -d); " &
+      "  for perl_tool in autoreconf autoconf autoheader autom4te autoscan autoupdate ifnames aclocal automake; do " &
+      "    real_perl_tool=$(which \"$perl_tool\" 2>/dev/null); " &
+      "    if [ -n \"$real_perl_tool\" ]; then " &
+      "      printf '#!/bin/sh\\nexec \"%s\" \"%s\" \"$@\"\\n' \"$perl_bin\" \"$real_perl_tool\" > \"$perl_tool_dir/$perl_tool\"; " &
+      "      chmod +x \"$perl_tool_dir/$perl_tool\"; " &
+      "    fi; " &
+      "  done; " &
+      "  export PATH=\"$perl_tool_dir:$PATH\"; " &
+      "  export AUTOCONF=autoconf; " &
+      "  export AUTOHEADER=autoheader; " &
+      "  export AUTOM4TE=autom4te; " &
+      "  export AUTOMAKE=automake; " &
+      "fi; " &
       "if ! command -v gtkdocize >/dev/null 2>&1; then " &
       "  mkdir -p gtkdoc && [ -f gtkdoc/gtk-doc.make ] || echo 'EXTRA_DIST =' > gtkdoc/gtk-doc.make; " &
       "  stubdir=$(mktemp -d); " &
