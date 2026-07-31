@@ -11557,7 +11557,10 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
     return
   if isCompositionalWorkspaceToml(workspaceRoot):
     let workspaceToml = absolutePath(workspaceTomlPath(workspaceRoot))
-    let resolved = composeManifestLayersFromFile(workspaceToml)
+    # PS-2: hooks are installed in EVERY participating repo, so the hook
+    # target set is the whole active project set — not just the primary.
+    let resolved = extendWithActiveProjectSet(workspaceRoot,
+      composeManifestLayersFromFile(workspaceToml))
     result.mode = "workspace"
     result.projectName = resolved.projectName
     for repo in resolved.repos:
@@ -11571,9 +11574,11 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
     let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
     var resolved: ResolvedProject
     if fileExists(projectFile):
-      resolved = resolveProject(projectFile)
+      resolved = extendWithActiveProjectSet(workspaceRoot,
+        resolveProject(projectFile))
     elif fileExists(variantFile):
-      resolved = resolveVariant(variantFile)
+      resolved = extendWithActiveProjectSet(workspaceRoot,
+        resolveVariant(variantFile))
     else:
       resolved.projectName = ""
     if resolved.projectName.len > 0:
@@ -19908,7 +19913,7 @@ proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
-proc resolveDevelopWorkspaceProject(
+proc resolveDevelopWorkspacePrimary(
     workspaceRoot: string): ResolvedProject =
   ## M22 reuses the M9/M10 dispatch rule. Composer wins when
   ## ``.repro/workspace.toml`` declares layers; otherwise we look up the
@@ -19950,6 +19955,15 @@ proc resolveDevelopWorkspaceProject(
     "`repro develop` could not resolve a project from workspace root '" &
       workspaceRoot & "' (no .repro/workspace.toml and no single " &
       "projects/*.toml at the workspace root)")
+
+proc resolveDevelopWorkspaceProject(
+    workspaceRoot: string): ResolvedProject =
+  ## PS-2 — the develop-set candidates are every repo the workspace
+  ## participates in, so the primary project resolved above is extended with
+  ## the rest of the active project set. Unchanged for single-project
+  ## workspaces.
+  extendWithActiveProjectSet(workspaceRoot,
+    resolveDevelopWorkspacePrimary(workspaceRoot))
 
 proc safeDevelopPathSegment(value: string): string =
   ## File-system safe segment for the develop subdir. Mirrors
@@ -22483,7 +22497,10 @@ proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs):
       skipInaccessibleLayers: parsed.allowMissingLayers)
     let composed = composeManifestLayersFromFileWithOptions(
       workspaceToml, options)
-    result.project = composed.project
+    # PS-2 — init restores the WHOLE workspace, so a recorded project set is
+    # materialized in full rather than just its primary project.
+    result.project = extendWithActiveProjectSet(parsed.workspaceRoot,
+      composed.project)
     for sl in composed.skippedLayers:
       result.skippedLayers.add(WorkspaceInitSkippedLayerEntry(
         index: sl.index,
@@ -22496,6 +22513,11 @@ proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs):
     (parsed.projectName & ".toml")
   let variantFile = manifestsRoot / "variants" /
     (parsed.projectName & ".toml")
+  # An EXPLICIT ``repro workspace init <project>`` names one project and
+  # initializes exactly that one; the active project set is materialized by
+  # ``repro sync`` / ``repro workspace projects add`` instead. (The
+  # compositional branch above has no explicit-name semantics — membership
+  # there comes from workspace.toml — so it does extend.)
   if fileExists(projectFile):
     result.project = resolveProject(projectFile)
     return
@@ -24019,7 +24041,10 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
   if isCompositionalWorkspaceToml(workspaceRoot):
     let absToml = absolutePath(workspaceToml)
     let wl = readWorkspaceLocal(absToml)
-    return (composeManifestLayers(wl, workspaceRoot, absToml), some(wl))
+    # PS-2 — layers compose WITHIN the project; the active project set unions
+    # ACROSS projects. Both axes apply, layers first.
+    return (extendWithActiveProjectSet(workspaceRoot,
+      composeManifestLayers(wl, workspaceRoot, absToml)), some(wl))
   # MO-2 — manifest-optional fallback. When there is no resolved manifest
   # checkout (and no compositional workspace.toml, handled above), a
   # committed-lock-only workspace resolves its participating repo set from
@@ -24053,10 +24078,20 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
   let manifestsRoot = manifestsRoot(workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (name & ".toml")
   let variantFile = manifestsRoot / "variants" / (name & ".toml")
+  # PS-2 — when the project name was NOT supplied by the caller (it came from
+  # the workspace's own metadata), the question being asked is "what does this
+  # WORKSPACE consist of", so the answer is the union of the active project
+  # set. An explicit ``<project>`` argument still resolves that one project.
+  # A single-project workspace resolves byte-identically either way.
+  let membershipFromMetadata = projectName.len == 0
+  proc withSet(resolved: ResolvedProject): ResolvedProject =
+    if membershipFromMetadata:
+      extendWithActiveProjectSet(workspaceRoot, resolved)
+    else: resolved
   if fileExists(projectFile):
-    return (resolveProject(projectFile), none(WorkspaceLocal))
+    return (withSet(resolveProject(projectFile)), none(WorkspaceLocal))
   if fileExists(variantFile):
-    return (resolveVariant(variantFile), none(WorkspaceLocal))
+    return (withSet(resolveVariant(variantFile)), none(WorkspaceLocal))
   raise newException(ValueError,
     "no project or variant named '" & name & "' found under '" &
       manifestsRoot & "' (looked for '" & projectFile & "' and '" &
@@ -27961,8 +27996,8 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let absToml = absolutePath(workspaceToml)
     let workspaceLocal = readWorkspaceLocal(absToml)
-    let resolved = composeManifestLayers(
-      workspaceLocal, parsed.workspaceRoot, absToml)
+    let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
+      composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
   if parsed.projectName.len == 0:
     # Allow a metadata-only workspace.toml to supply the project name.
@@ -27973,7 +28008,13 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
         if recordedProject.len > 0:
           var withProject = parsed
           withProject.projectName = recordedProject
-          return resolveWorkspaceLockProject(withProject)
+          # PS-2 — a lock with no explicit ``<project>`` is a snapshot of the
+          # WORKSPACE, so it pins every repo of the active project set. The
+          # lock's DESTINATION stays the primary project (see
+          # ``pickManifestLayerRoot`` and the ``locks/<project>/`` layout).
+          let recovered = resolveWorkspaceLockProject(withProject)
+          return (extendWithActiveProjectSet(parsed.workspaceRoot,
+            recovered.resolved), recovered.workspaceLocal)
       except WorkspaceManifestParseError:
         discard
     else:
@@ -27982,7 +28023,9 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
       if migratedProject.len > 0:
         var withProject = parsed
         withProject.projectName = migratedProject
-        return resolveWorkspaceLockProject(withProject)
+        let recovered = resolveWorkspaceLockProject(withProject)
+        return (extendWithActiveProjectSet(parsed.workspaceRoot,
+          recovered.resolved), recovered.workspaceLocal)
     raise newException(ValueError,
       "`repro workspace lock` requires either `.repro/workspace.toml` " &
         "or a <project> argument; neither was present at " &
@@ -36328,7 +36371,8 @@ proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
   ## routes to single-project mode.
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
-    return composeManifestLayersFromFile(workspaceToml)
+    return extendWithActiveProjectSet(parsed.workspaceRoot,
+      composeManifestLayersFromFile(workspaceToml))
   if parsed.projectName.len == 0:
     # Allow a metadata-only workspace.toml to supply the project name. Only the
     # read of workspace.toml is guarded here: if resolving the *named* project
@@ -36344,7 +36388,10 @@ proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
     if recordedProject.len > 0:
       var withProject = parsed
       withProject.projectName = recordedProject
-      return resolveWorkspaceListProject(withProject)
+      # PS-2 — no explicit ``<project>``: list what the WORKSPACE consists of,
+      # i.e. the union of the active project set (deduplicated by path).
+      return extendWithActiveProjectSet(parsed.workspaceRoot,
+        resolveWorkspaceListProject(withProject))
     raise newException(ValueError,
       "`repro workspace list` requires either `.repro/workspace.toml` " &
         "or a <project> argument; neither was present at " &
@@ -38112,10 +38159,13 @@ proc resolveBranchProject(parsed: BranchArgs):
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let absToml = absolutePath(workspaceToml)
     let workspaceLocal = readWorkspaceLocal(absToml)
-    let resolved = composeManifestLayers(
-      workspaceLocal, parsed.workspaceRoot, absToml)
+    let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
+      composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
   var projectName = parsed.projectName
+  # PS-2 — a workspace branch is workspace-wide, so with no explicit project
+  # argument every repo of the active project set participates.
+  let membershipFromMetadata = parsed.projectName.len == 0
   if projectName.len == 0 and fileExists(workspaceToml):
     try:
       let recorded =
@@ -38132,10 +38182,14 @@ proc resolveBranchProject(parsed: BranchArgs):
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
   let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
+  proc withSet(resolved: ResolvedProject): ResolvedProject =
+    if membershipFromMetadata:
+      extendWithActiveProjectSet(parsed.workspaceRoot, resolved)
+    else: resolved
   if fileExists(projectFile):
-    return (resolveProject(projectFile), none(WorkspaceLocal))
+    return (withSet(resolveProject(projectFile)), none(WorkspaceLocal))
   if fileExists(variantFile):
-    return (resolveVariant(variantFile), none(WorkspaceLocal))
+    return (withSet(resolveVariant(variantFile)), none(WorkspaceLocal))
   raise newException(ValueError,
     "no project or variant named '" & projectName &
       "' found under '" & manifestsRoot &
@@ -38836,10 +38890,13 @@ proc resolveCheckoutProject(parsed: CheckoutArgs):
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let absToml = absolutePath(workspaceToml)
     let workspaceLocal = readWorkspaceLocal(absToml)
-    let resolved = composeManifestLayers(
-      workspaceLocal, parsed.workspaceRoot, absToml)
+    let resolved = extendWithActiveProjectSet(parsed.workspaceRoot,
+      composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
   var projectName = parsed.projectName
+  # PS-2 — ``repro checkout`` switches the WHOLE workspace, so with no
+  # explicit project argument every repo of the active project set switches.
+  let membershipFromMetadata = parsed.projectName.len == 0
   if projectName.len == 0 and fileExists(workspaceToml):
     try:
       let recorded =
@@ -38856,10 +38913,14 @@ proc resolveCheckoutProject(parsed: CheckoutArgs):
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
   let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
+  proc withSet(resolved: ResolvedProject): ResolvedProject =
+    if membershipFromMetadata:
+      extendWithActiveProjectSet(parsed.workspaceRoot, resolved)
+    else: resolved
   if fileExists(projectFile):
-    return (resolveProject(projectFile), none(WorkspaceLocal))
+    return (withSet(resolveProject(projectFile)), none(WorkspaceLocal))
   if fileExists(variantFile):
-    return (resolveVariant(variantFile), none(WorkspaceLocal))
+    return (withSet(resolveVariant(variantFile)), none(WorkspaceLocal))
   raise newException(ValueError,
     "no project or variant named '" & projectName &
       "' found under '" & manifestsRoot &
@@ -44359,12 +44420,27 @@ proc readDefaultProjectsFromHostConfig(workspaceRoot: string): seq[string] =
   except CatchableError:
     return @[]
 
+proc projectSetRepoPathsMissingOnDisk(workspaceRoot: string;
+                                      names: openArray[string]): seq[string] =
+  ## PS-3 — the checkout paths the named projects declare that are NOT on disk
+  ## yet. ``projects add`` materializes only when this is non-empty, so adding
+  ## projects whose repos are all present (or which declare no repos at all)
+  ## stays a pure metadata operation and never reaches for the network.
+  let resolved = resolveProjectSet(workspaceRoot, names)
+  for repo in resolved.repos:
+    if not dirExists(workspaceRoot / repo.path / ".git"):
+      result.add(repo.path)
+
 proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
   ## ``repro workspace projects [list|add ...]`` — inspect or grow the active
-  ## PROJECT SET recorded in ``.repo/workspace.toml``.
+  ## PROJECT SET recorded in ``.repro/workspace.toml``.
   ##
   ##   * ``list`` (default) — print the active set, one per line.
-  ##   * ``add <project>...`` — layer the named projects into the set.
+  ##   * ``add <project>...`` — layer the named projects into the set AND
+  ##     check out the repos the enlarged set introduces (PS-3). Membership
+  ##     without working trees is not a state any other command can act on,
+  ##     so recording and materializing are one operation.
+  ##   * ``add ... --no-sync`` — record membership only.
   ##   * ``add --default`` — auto-layer the set from ``REPRO_DEFAULT_PROJECTS``
   ##     (a path-separator / comma / whitespace-delimited list), falling back
   ##     to the RA-8 host config ``[projects] default``. Does NOTHING when
@@ -44383,9 +44459,12 @@ proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
   of "add":
     var explicit: seq[string]
     var useDefault = false
+    var noSync = false
     for arg in rest:
       if arg == "--default":
         useDefault = true
+      elif arg == "--no-sync":
+        noSync = true
       elif arg.startsWith("--workspace-root="):
         discard
       elif not arg.startsWith("-"):
@@ -44426,10 +44505,54 @@ proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
     for p in toAdd:
       if p notin merged:
         merged.add(p)
+
+    # PS-4 — validate the PROSPECTIVE set before touching anything. Two
+    # projects that declare one checkout path with different facts refuse the
+    # whole command: no metadata is written and no working tree is touched,
+    # so a refused `add` leaves the workspace exactly as it was.
+    #
+    # Any OTHER resolution failure is not a refusal. A workspace whose
+    # manifest checkout has not landed yet (the RA-6 fresh-clone bootstrap
+    # runs `projects add --default` before any manifest is materialized) can
+    # still record membership; it just has nothing to materialize yet, so the
+    # clone phase is skipped and the reason is reported.
+    var missing: seq[string]
+    var unresolved = ""
+    try:
+      discard resolveProjectSet(workspaceRoot, merged)
+      missing = projectSetRepoPathsMissingOnDisk(workspaceRoot, toAdd)
+    except WorkspaceProjectSetConflictError as err:
+      stderr.writeLine("repro workspace projects add: refusing to record " &
+        "the project set — " & err.msg)
+      stderr.writeLine("  active set unchanged: " &
+        (if existing.len > 0: existing.join(", ") else: "<empty>"))
+      return 1
+    except CatchableError as err:
+      unresolved = err.msg
+
     writeWorkspaceProjects(workspaceRoot, merged)
     for p in readWorkspaceProjects(workspaceRoot):
       stdout.writeLine(p)
-    return 0
+
+    # PS-3 — materialize what was just recorded. Only the repos the named
+    # projects introduce are missing-checkout candidates; everything already
+    # on disk is left untouched by the sync policy, which also makes a
+    # re-`add` of an already-active project the repair path for a partially
+    # cloned workspace.
+    if unresolved.len > 0:
+      stderr.writeLine("repro workspace projects add: recorded membership " &
+        "but could not resolve the manifest yet, so nothing was checked " &
+        "out — " & unresolved)
+      stderr.writeLine("  run `repro workspace sync` once the manifest is " &
+        "available")
+      return 0
+    if noSync or missing.len == 0:
+      return 0
+    stdout.writeLine("repro workspace projects add: checking out " &
+      $missing.len & " repo(s) introduced by " & toAdd.join(", "))
+    var syncArgs = @(toAdd)
+    syncArgs.add("--workspace-root=" & workspaceRoot)
+    return runWorkspaceSyncCommand(syncArgs)
   else:
     stderr.writeLine("repro workspace projects: unknown subcommand '" & sub &
       "' (expected: list, add)")
