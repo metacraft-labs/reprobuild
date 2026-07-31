@@ -2698,19 +2698,28 @@ proc collectResolvedAuxPaths*(action: BuildAction;
           seenNimPath.incl(d)
           result.nimPathDirs.add(d)
 
-proc isGlibcLibDir(path: string): bool =
-  ## A dependency profile may propagate a Nix or source-built glibc output
-  ## along with its own libraries. Putting that directory in LD_LIBRARY_PATH
-  ## interposes the dependency's libc on the action launcher and can mix
-  ## incompatible GLIBC_PRIVATE ABIs. Keep it available to the linker, but
-  ## never inject it into a process runtime search path.
+proc isUnsafeRuntimeLibDir(path: string): bool =
+  ## Dependency profiles may propagate libc or language-runtime libraries
+  ## alongside ordinary libraries. Globally interposing one of those runtimes
+  ## can replace the runtime selected by an executable's own RPATH. Keep the
+  ## directories available to the linker, but never inject them into a process
+  ## runtime search path.
   let normalized = path.replace('\\', '/')
-  if normalized.contains("/recipes/packages/source/glibc/"):
-    return true
+  const sourceMarker = "/recipes/packages/source/"
+  let sourceIndex = normalized.find(sourceMarker)
+  if sourceIndex >= 0:
+    let packageStart = sourceIndex + sourceMarker.len
+    let packageEnd = normalized.find('/', packageStart)
+    let packageName =
+      if packageEnd < 0: normalized[packageStart .. ^1]
+      else: normalized[packageStart ..< packageEnd]
+    if packageName == "glibc" or packageName == "python3" or
+        packageName.startsWith("python3-"):
+      return true
   const storePrefix = "/nix/store/"
-  if not path.startsWith(storePrefix):
+  if not normalized.startsWith(storePrefix):
     return false
-  let relative = path[storePrefix.len .. ^1]
+  let relative = normalized[storePrefix.len .. ^1]
   let slash = relative.find('/')
   if slash <= 0:
     return false
@@ -2719,11 +2728,12 @@ proc isGlibcLibDir(path: string): bool =
   if hashSeparator < 0 or hashSeparator + 1 >= storeEntry.len:
     return false
   let packageName = storeEntry[hashSeparator + 1 .. ^1]
-  packageName == "glibc" or packageName.startsWith("glibc-")
+  packageName == "glibc" or packageName.startsWith("glibc-") or
+    packageName == "python3" or packageName.startsWith("python3-")
 
 proc runtimeSafeLibDirs(paths: ResolvedAuxPaths): seq[string] =
   for path in paths.libDirs:
-    if not isGlibcLibDir(path):
+    if not isUnsafeRuntimeLibDir(path):
       result.add(path)
 
 type
