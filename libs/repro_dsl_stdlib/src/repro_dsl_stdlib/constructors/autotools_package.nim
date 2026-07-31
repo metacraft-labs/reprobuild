@@ -392,6 +392,16 @@ proc autotools_package*(srcDir: string;
       "set -e; "
     else:
       "set -e; rm -rf -- " & quoteShell(buildDir) & "; "
+  # Autoconf projects that compile helper programs for the build machine
+  # consult the *_FOR_BUILD variables instead of the ordinary toolchain
+  # flags. Default those variables from the source toolchain environment so
+  # native probes retain its sysroot headers and libraries. Recipes can still
+  # provide explicit build-machine values through extraEnv.
+  let nativeBuildEnvPrefix =
+    "export CC_FOR_BUILD=\"${CC_FOR_BUILD:-gcc}\"; " &
+    "export CFLAGS_FOR_BUILD=\"${CFLAGS_FOR_BUILD:-${CFLAGS:-}}\"; " &
+    "export CPPFLAGS_FOR_BUILD=\"${CPPFLAGS_FOR_BUILD:-${CPPFLAGS:-}}\"; " &
+    "export LDFLAGS_FOR_BUILD=\"${LDFLAGS_FOR_BUILD:-${LDFLAGS:-}}\"; "
   let configureScript =
     if skipConfigure:
       patchPrefix & bootstrapPrefix &
@@ -400,7 +410,8 @@ proc autotools_package*(srcDir: string;
     else:
       patchPrefix & bootstrapPrefix &
       cleanBuildPrefix & "mkdir -p " & buildDir & " && cd " & buildDir & " && " &
-      srcFromBuild & "/" & configureScriptName & " " & configureArgs.join(" ")
+      nativeBuildEnvPrefix & srcFromBuild & "/" & configureScriptName & " " &
+      configureArgs.join(" ")
   let configureArgv = @["sh", "-c", configureScript]
   let call = inlineExecCall(configureArgv)
   let actionId = defaultToolActionId(call)

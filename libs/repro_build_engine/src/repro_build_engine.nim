@@ -2907,7 +2907,12 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   let includePaths = partitionCompilerIncludePaths(paths)
   prependEnvDirs(env, "CPATH", includePaths.regularDirs)
   let systemFlags = compilerSystemIncludeFlags(includePaths.systemDirs)
-  for varName in ["CPPFLAGS", "CFLAGS", "CXXFLAGS"]:
+  # Build-machine helper programs need the same source sysroot as target
+  # objects. Several Autotools projects compile those helpers through the
+  # *_FOR_BUILD variables during a later make action.
+  for varName in ["CPPFLAGS", "CFLAGS", "CXXFLAGS",
+                  "CPPFLAGS_FOR_BUILD", "CFLAGS_FOR_BUILD",
+                  "CXXFLAGS_FOR_BUILD"]:
     prependEnvFlags(env, varName, systemFlags)
   prependEnvDirs(env, "LIBRARY_PATH", paths.libDirs)
   # LD_LIBRARY_PATH covers run-time test execution; LIBRARY_PATH covers
@@ -2951,7 +2956,9 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   result = prependEnvDirsToArgvEnv(result, "CPATH",
     includePaths.regularDirs)
   let systemFlags = compilerSystemIncludeFlags(includePaths.systemDirs)
-  for varName in ["CPPFLAGS", "CFLAGS", "CXXFLAGS"]:
+  for varName in ["CPPFLAGS", "CFLAGS", "CXXFLAGS",
+                  "CPPFLAGS_FOR_BUILD", "CFLAGS_FOR_BUILD",
+                  "CXXFLAGS_FOR_BUILD"]:
     result = prependEnvFlagsToArgvEnv(result, varName, systemFlags)
   result = prependEnvDirsToArgvEnv(result, "LIBRARY_PATH", paths.libDirs)
   let runtimeLibDirs = runtimeSafeLibDirs(paths)

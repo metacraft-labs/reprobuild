@@ -28,9 +28,16 @@ package libbsdSource:
   build:
     setCurrentOwningPackageOverride("libbsdSource")
     try:
+      # Upstream emits an ld script with /usr/lib/<soname> in GROUP().
+      # Keep the soname relative so consumers can link against the staged
+      # source output before it is assembled into the final /usr tree.
+      let patches = @[
+        "sed -i 's|GROUP($(runtimelibdir)/$$soname|GROUP($$soname|' " &
+          "src/src/Makefile.in",
+      ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = @[
         "--disable-static", "--enable-shared",
-      ])
+      ], srcPatches = patches)
       discard pkg.library("libbsd")
     finally:
       clearCurrentOwningPackageOverride()

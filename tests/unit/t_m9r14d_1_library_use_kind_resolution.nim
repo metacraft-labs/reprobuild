@@ -190,6 +190,28 @@ suite "DSL-port M9.R.14d.1 — library-use-kind resolution":
     check outcome.profile.packageSelector == "pkg-config"
     check outcome.profile.selectedStorePath == absolutePath(scratch / "pkgconf")
 
+  test "resolves systemd bundled libraries from source aliases":
+    let scratch = createTempDir("repro-m9r14d-systemd-alias-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "systemd")
+    let udevArtefact = makeLibraryArtefact(scratch, "systemd", "libUdev")
+    let systemdArtefact =
+      makeLibraryArtefact(scratch, "systemd", "libSystemd")
+    writeSyntheticInterface(scratch, "systemd",
+      executables = @["systemdInit", "systemctl"],
+      libraries = @["libUdev", "libSystemd"])
+
+    for (dependency, expected) in [
+        ("libudev", udevArtefact),
+        ("libsystemd", systemdArtefact)]:
+      let outcome = tryResolveFromSourceTool(
+        syntheticUseDef(dependency), recipeRoot = scratch)
+      check outcome.kind == rrResolved
+      check outcome.profile.resolvedExecutablePath == absolutePath(expected)
+      check outcome.profile.packageSelector == dependency
+      check outcome.profile.selectedStorePath ==
+        absolutePath(scratch / "systemd")
+
   test "resolves_executable_artefact_when_recipe_declares_executable":
     let scratch = createTempDir("repro-m9r14d-exe-", "")
     defer: removeDir(scratch)
