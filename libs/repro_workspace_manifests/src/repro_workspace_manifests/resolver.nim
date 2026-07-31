@@ -334,18 +334,227 @@ proc normalizeIncludePath(projectFile, raw: string): string =
 
 # ---- fetch-URL construction -----------------------------------------------
 
-proc getFetchUrl(fetchBase, repoName: string): string =
+proc getFetchUrl*(fetchBase, repoName: string): string =
   ## Build a repo's clone URL from its remote's `fetch` base and the repo's
   ## server-side `name`, following Android-`repo` manifest semantics: the
   ## clone URL is `<remote fetch>/<project name>` (the `name` attribute, NOT
   ## the local checkout `path`). A `fetch` base that already points at a full
   ## repo (ends in `.git`) is used verbatim; otherwise the `name` is appended.
+  ##
+  ## Exported because manifest AUTHORING (`repro workspace project repo add`)
+  ## has to invert this function: given a requested clone URL it must find the
+  ## declared remote that already composes to it. Authoring and resolution
+  ## must never drift apart, so both sides call this one proc.
   if fetchBase.len == 0:
     ""
   elif fetchBase.endsWith(".git") or fetchBase.endsWith(".git/"):
     fetchBase
   else:
     fetchBase & "/" & repoName
+
+# ---- remote planning (manifest authoring) ---------------------------------
+#
+# `repro workspace project repo add <project> <repo> --remote=URL` has to turn
+# a clone URL into a `repos/<repo>.toml` fragment plus, at most, one new
+# `[[remote]]` entry in `projects/<project>.toml`. The rules below are the
+# inverse of `getFetchUrl`:
+#
+#   1. REUSE — a declared remote whose `fetch` base, composed with the repo's
+#      name, already reproduces the requested URL. Nothing is added to the
+#      project's remote table.
+#   2. REUSE WITH A SERVER-SIDE NAME — only when the URL's last segment is not
+#      the repo name (e.g. `…/llvm/llvm-project` added as `llvm-project`): a
+#      declared base is a prefix of the URL, so the fragment carries the
+#      remaining path as its `name` (Android-`repo` semantics: `name` is the
+#      server-side path, `path` is the local checkout dir). This is how the
+#      hand-written `repos/llvm-project.toml` is shaped.
+#   3. MINT — no declared remote can produce the URL: add exactly ONE entry,
+#      named after the org (or the host when the URL has no org segment) and
+#      carrying the org base as `fetch`, so the NEXT repo from the same org
+#      hits rule 1 and adds nothing.
+#
+# A per-repo remote (`<repo>-origin` with the full URL as `fetch`) is never
+# minted: it grows the project's shared remote table by one entry per repo and
+# can never be reused, because a `fetch` ending in `.git` is used verbatim.
+
+type
+  RepoRemotePlan* = object
+    ## The outcome of planning a repo fragment's remote against a project's
+    ## existing `[[remote]]` table.
+    remoteName*: string
+      ## The `[repo].remote` value the fragment should carry.
+    repoName*: string
+      ## The `[repo].name` value the fragment should carry. Equal to the
+      ## requested repo name except when the URL's server-side path differs
+      ## from the local checkout dir (rule 2 / a bare-repo URL whose last
+      ## segment keeps its `.git`).
+    mintedFetch*: string
+      ## When non-empty, the `fetch` base of a NEW `[[remote]]` entry that the
+      ## caller must append to the project manifest under `remoteName`. Empty
+      ## means an existing declared remote was reused — add nothing.
+    error*: string
+      ## Non-empty when the URL cannot be turned into a manifest entry at all
+      ## (e.g. it carries no path segment to use as a repo name).
+
+proc isLocalGitUrl(url: string): bool =
+  ## `true` for URLs that name a directory on a filesystem (`file://…`, an
+  ## absolute path, a Windows drive path). For those the trailing `.git` is
+  ## part of the DIRECTORY NAME and must never be stripped — `file:///srv/x`
+  ## and `file:///srv/x.git` are two different places. Every network git host
+  ## in practice serves `…/repo` and `…/repo.git` as the same repository, so
+  ## the suffix is optional there and safe to normalize away.
+  url.startsWith("file://") or url.startsWith("/") or url.startsWith("\\\\") or
+    (url.len >= 3 and url[1] == ':' and (url[2] == '/' or url[2] == '\\'))
+
+proc canonicalGitUrl*(url: string): string =
+  ## Normalize a clone URL for comparison: drop a trailing `/`, then drop a
+  ## trailing `.git` (network URLs only — see `isLocalGitUrl`).
+  result = url
+  while result.len > 1 and result.endsWith("/"):
+    result.setLen(result.len - 1)
+  if not isLocalGitUrl(result) and result.endsWith(".git"):
+    result.setLen(result.len - ".git".len)
+    while result.len > 1 and result.endsWith("/"):
+      result.setLen(result.len - 1)
+
+proc splitLastSegment(url: string): tuple[base, leaf: string] =
+  ## Split a canonical URL into everything before the final `/` and the final
+  ## segment itself. Returns an empty `base` when there is no separator.
+  let idx = url.rfind('/')
+  if idx <= 0:
+    ("", url)
+  else:
+    (url[0 ..< idx], url[idx + 1 .. ^1])
+
+proc orgLabelFor(base: string): string =
+  ## The name to give a newly minted remote: the org segment of the base
+  ## (`https://github.com/metacraft-labs` → `metacraft-labs`), or — when the
+  ## base is just a host — the host's first label (`https://github.com` →
+  ## `github`, matching the hand-written `github` remote in the pilot
+  ## manifests).
+  var rest = base
+  let scheme = rest.find("://")
+  var hostOnly = false
+  if scheme >= 0:
+    rest = rest[scheme + 3 .. ^1]
+    hostOnly = '/' notin rest
+  elif ':' in rest:
+    # scp-style `git@host:org/repo`.
+    rest = rest[rest.find(':') + 1 .. ^1]
+    hostOnly = rest.len == 0
+  if hostOnly or rest.len == 0:
+    # Host (possibly `user@host:port`) — take its first DNS label.
+    var host = if scheme >= 0: rest else: base
+    let at = host.rfind('@')
+    if at >= 0: host = host[at + 1 .. ^1]
+    let colon = host.find(':')
+    if colon >= 0: host = host[0 ..< colon]
+    let dot = host.find('.')
+    result = if dot > 0: host[0 ..< dot] else: host
+  else:
+    let idx = rest.rfind('/')
+    result = if idx >= 0: rest[idx + 1 .. ^1] else: rest
+  # A remote name is a TOML key-ish identifier in practice; keep it tame.
+  if result.endsWith(".git"):
+    result.setLen(result.len - ".git".len)
+
+proc hostLabelFor(base: string): string =
+  ## The host's first DNS label, used to disambiguate a minted remote name
+  ## that collides with an existing, differently-pointed remote.
+  var rest = base
+  let scheme = rest.find("://")
+  if scheme >= 0:
+    rest = rest[scheme + 3 .. ^1]
+  let at = rest.rfind('@')
+  if at >= 0 and (rest.find('/') < 0 or at < rest.find('/')):
+    rest = rest[at + 1 .. ^1]
+  var host = rest
+  for sep in ['/', ':']:
+    let idx = host.find(sep)
+    if idx >= 0: host = host[0 ..< idx]
+  let dot = host.find('.')
+  result = if dot > 0: host[0 ..< dot] else: host
+
+proc planRepoRemote*(remotes: openArray[RemoteEntry];
+                     defaultRemote: string;
+                     repoName, requestedUrl: string): RepoRemotePlan =
+  ## Plan the `[repo].remote` / `[repo].name` of a fragment for `repoName`
+  ## cloned from `requestedUrl`, against a project's declared `remotes`.
+  ## See the rules documented above this type.
+  result.repoName = repoName
+  if requestedUrl.len == 0:
+    result.error = "remote URL is empty"
+    return
+  let wanted = canonicalGitUrl(requestedUrl)
+
+  # Rule 1 — a declared remote already composes to the requested URL for this
+  # repo name. Deterministic pick when several do (a project may declare two
+  # names for one org): the project's `default_remote` first, then a remote
+  # named after the org segment of its own base (`metacraft-labs` beats a
+  # generic `origin` alias), then declaration order.
+  var bestRank = high(int)
+  for idx, r in remotes.pairs:
+    if r.fetch.len == 0: continue
+    if canonicalGitUrl(getFetchUrl(r.fetch, repoName)) != wanted: continue
+    var rank = idx
+    if r.name == orgLabelFor(canonicalGitUrl(r.fetch)): rank -= 1_000
+    if defaultRemote.len > 0 and r.name == defaultRemote: rank -= 1_000_000
+    if rank < bestRank:
+      bestRank = rank
+      result.remoteName = r.name
+  if result.remoteName.len > 0:
+    return
+
+  let (base, leaf) = splitLastSegment(wanted)
+  if base.len == 0 or leaf.len == 0:
+    result.error = "remote URL '" & requestedUrl &
+      "' has no repository path segment to compose a manifest entry from"
+    return
+
+  # Rule 2 — the URL's server-side name differs from the local checkout name
+  # (`llvm/llvm-project` checked out as `llvm-project`, or a bare `…/x.git`
+  # directory). A declared base that PREFIXES the URL can still serve it; the
+  # fragment carries the remaining path as its `name`.
+  if leaf != repoName:
+    var bestBaseLen = -1
+    for r in remotes:
+      if r.fetch.len == 0: continue
+      let rBase = canonicalGitUrl(r.fetch)
+      if rBase.endsWith(".git"): continue   # verbatim, single-repo base
+      if not wanted.startsWith(rBase & "/"): continue
+      if rBase.len > bestBaseLen:
+        bestBaseLen = rBase.len
+        result.remoteName = r.name
+        result.repoName = wanted[rBase.len + 1 .. ^1]
+    if result.remoteName.len > 0:
+      return
+
+  # Rule 3 — mint ONE org-named remote carrying the org base, so the next
+  # repo from the same org reuses it via rule 1.
+  result.repoName = leaf
+  var candidate = orgLabelFor(base)
+  if candidate.len == 0: candidate = hostLabelFor(base)
+  if candidate.len == 0: candidate = "origin"
+  var taken = initTable[string, string]()
+  for r in remotes:
+    taken[r.name] = canonicalGitUrl(r.fetch)
+  var name = candidate
+  var attempt = 0
+  while taken.hasKey(name):
+    if taken[name] == base:
+      # Same base under a different name — reuse it rather than duplicating.
+      result.remoteName = name
+      result.mintedFetch = ""
+      return
+    inc attempt
+    name =
+      if attempt == 1 and hostLabelFor(base).len > 0 and
+          hostLabelFor(base) != candidate:
+        hostLabelFor(base) & "-" & candidate
+      else:
+        candidate & "-" & $(attempt + 1)
+  result.remoteName = name
+  result.mintedFetch = base
 
 # ---- on-disk entry point --------------------------------------------------
 

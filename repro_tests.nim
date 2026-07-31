@@ -7550,6 +7550,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_project_repo_add_reuses_remotes_and_inherits_revision.nim",
+    binary: "build/test-bin/t_project_repo_add_reuses_remotes_and_inherits_revision",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_prompt_cache_is_its_own_file_and_marks_staleness.nim",
     binary: "build/test-bin/t_prompt_cache_is_its_own_file_and_marks_staleness",
     defines: @[],

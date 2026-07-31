@@ -39691,12 +39691,40 @@ proc executeAdd(parsed: AddArgs): AddReport =
       return
     # Develop membership: record the remote, the repo fragment, and the
     # `includes` edge so the dependency participates in the workspace.
-    let remoteName = parsed.target & "-origin"
-    ensureRemoteEntry(resolved.projectFile, remoteName, parsed.remoteUrl)
+    # Reuse a declared remote that already serves this URL for this repo
+    # name; only fall back to a per-repo remote when none can. (`repro add`
+    # keeps `[repo].name == target` because the develop-set `depends` edges
+    # key off that name, so a plan that would rename the repo is declined.)
+    var remoteName = ""
+    var remoteFetch = parsed.remoteUrl
+    try:
+      let declared = readProjectManifest(resolved.projectFile)
+      let defaultRemote =
+        if declared.project.default_remote.isSome:
+          declared.project.default_remote.get()
+        else:
+          ""
+      let plan = planRepoRemote(declared.remote, defaultRemote,
+        parsed.target, parsed.remoteUrl)
+      if plan.error.len == 0 and plan.repoName == parsed.target:
+        remoteName = plan.remoteName
+        remoteFetch = plan.mintedFetch
+    except CatchableError:
+      discard
+    if remoteName.len == 0:
+      remoteName = parsed.target & "-origin"
+      remoteFetch = parsed.remoteUrl
+    if remoteFetch.len > 0:
+      ensureRemoteEntry(resolved.projectFile, remoteName, remoteFetch)
     let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
     createDir(manifestsRoot / "repos")
     let fragmentRel = "repos/" & parsed.target & ".toml"
     let fragmentAbs = manifestsRoot / "repos" / (parsed.target & ".toml")
+    # Pin `revision` only when it is NOT identical to what the fragment
+    # would inherit from the project's `default_revision`; a redundant pin
+    # freezes the repo the day it is added.
+    let pinRevision =
+      parsed.revision.len > 0 or resolved.defaultRevision.len == 0
     if not fileExists(fragmentAbs):
       writeFile(fragmentAbs,
         "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
@@ -39704,7 +39732,7 @@ proc executeAdd(parsed: AddArgs): AddReport =
         "name = \"" & parsed.target & "\"\n" &
         "path = \"" & repoPath & "\"\n" &
         "remote = \"" & remoteName & "\"\n" &
-        "revision = \"" & revision & "\"\n")
+        (if pinRevision: "revision = \"" & revision & "\"\n" else: ""))
     result.declarationChanged =
       appendFragmentInclude(resolved.projectFile, fragmentRel)
     # RA-21 develop-set edge: when `--depends-of=<repo>` is given, record
@@ -44711,13 +44739,56 @@ proc manifestRepoRootFor(workspaceRoot: string): string =
   ## membership. (The lock-store DB is a separate concern under ``.repro/``.)
   workspaceRoot
 
+type
+  RemoteRevisionState = enum
+    ## Outcome of asking a remote whether a revision exists.
+    rrsOk       ## the remote advertises the ref (or it is a full commit id)
+    rrsMissing  ## the remote answered, and the ref is NOT there
+    rrsUnknown  ## the remote could not be asked (offline, auth, no git)
+
+proc remoteRevisionState(gitBin, remoteUrl, revision: string): tuple[
+    state: RemoteRevisionState; diagnostic: string] =
+  ## Ask the remote whether `revision` resolves, via `git ls-remote`. Used to
+  ## validate a revision the caller supplied rather than writing it into a
+  ## manifest unchecked: a manifest that pins a non-existent branch resolves
+  ## fine at authoring time and fails for everyone at sync time.
+  if revision.len == 0:
+    return (rrsUnknown, "empty revision")
+  # A full commit id is not advertised by `ls-remote` in the general case
+  # (only tips are), so it cannot be refuted this way — accept it.
+  if revision.len == 40 and revision.allCharsInSet(HexDigits):
+    return (rrsOk, "")
+  if gitBin.len == 0:
+    return (rrsUnknown, "no git binary")
+  # Never let a credential prompt block manifest authoring.
+  putEnv("GIT_TERMINAL_PROMPT", "0")
+  let res = execCmdEx(quoteShellCommand(
+    [gitBin, "ls-remote", "--heads", "--tags", remoteUrl, revision]))
+  if res.exitCode != 0:
+    return (rrsUnknown, res.output.strip())
+  for line in res.output.splitLines():
+    let trimmed = line.strip()
+    if trimmed.len == 0: continue
+    if trimmed.endsWith("refs/heads/" & revision) or
+       trimmed.endsWith("refs/tags/" & revision) or
+       trimmed.endsWith("refs/tags/" & revision & "^{}"):
+      return (rrsOk, "")
+  (rrsMissing, "")
+
 proc projectManifestStub(project: string): string =
+  ## A NEW project has no repos and no remotes yet, so the stub carries
+  ## neither. The `includes` array is deliberately absent rather than empty:
+  ## a bare `includes = [ … ]` written directly under `[project]` is read as
+  ## a key OF that table and the manifest stops parsing (the pilot manifests
+  ## only work because their `[[remote]]` blocks sit between the two). The
+  ## array is created by `project repo add` once the file has a `[[remote]]`
+  ## table for it to follow, which is the layout every hand-written manifest
+  ## in the pilot has.
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"" & project & "\"\n" &
   "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
-  "includes = [\n]\n"
+  "trunk = \"main\"\n"
 
 proc commitAndPushManifest(gitBin, manifestRoot, message: string;
                            paths: openArray[string]): tuple[
@@ -44759,7 +44830,13 @@ proc runWorkspaceProjectCommand*(args: openArray[string]): int =
   if args.len == 0 or args[0] in ["--help", "-h", "help"]:
     echo "repro workspace project new <name> [-m DESC] [--workspace-root=PATH]"
     echo "repro workspace project repo add <project> <repo> --remote=URL " &
-      "[--revision=REV] [--workspace-root=PATH]"
+      "[-m DESC] [--revision=REV] [--workspace-root=PATH]"
+    echo "  --remote=URL   reuses the project's matching [[remote]] when one " &
+      "already serves that URL; otherwise adds one org-named remote."
+    echo "  --revision=REV pins the fragment (validated against the remote). " &
+      "Omitted, the repo inherits the project's default_revision."
+    echo "  -m DESC        writes repos/<repo>.md, the source of the " &
+      "generated project docs."
     return (if args.len == 0: 2 else: 0)
 
   let workspaceRoot = parseProjectsWorkspaceRoot(args)
@@ -44821,7 +44898,8 @@ proc runWorkspaceProjectCommand*(args: openArray[string]): int =
     var project = ""
     var repo = ""
     var remote = ""
-    var revision = "main"
+    var revision = ""
+    var desc = ""
     var i = 2
     var positional: seq[string]
     while i < args.len:
@@ -44830,6 +44908,11 @@ proc runWorkspaceProjectCommand*(args: openArray[string]): int =
         remote = a["--remote=".len .. ^1]
       elif a.startsWith("--revision="):
         revision = a["--revision=".len .. ^1]
+      elif a == "-m" or a == "--message":
+        if i + 1 < args.len:
+          desc = args[i + 1]; inc i
+      elif a.startsWith("--message="):
+        desc = a["--message=".len .. ^1]
       elif a.startsWith("--workspace-root="):
         discard
       elif not a.startsWith("-"):
@@ -44851,25 +44934,97 @@ proc runWorkspaceProjectCommand*(args: openArray[string]): int =
       stderr.writeLine("repro workspace project repo add: project '" &
         project & "' does not exist (" & projectFileAbs & ")")
       return 1
+    # Plan the fragment's remote against what the project ALREADY declares,
+    # so a repo from an org the project knows reuses that org's remote
+    # instead of growing the shared `[[remote]]` table with a single-use
+    # `<repo>-origin` entry. See `planRepoRemote` for the rules.
+    var manifest: ProjectManifest
+    try:
+      manifest = readProjectManifest(projectFileAbs)
+    except CatchableError as exc:
+      stderr.writeLine("repro workspace project repo add: cannot read " &
+        projectFileAbs & ": " & exc.msg)
+      return 1
+    let defaultRemote =
+      if manifest.project.default_remote.isSome:
+        manifest.project.default_remote.get()
+      else:
+        ""
+    let defaultRevision =
+      if manifest.project.default_revision.isSome:
+        manifest.project.default_revision.get()
+      else:
+        ""
+    let plan = planRepoRemote(manifest.remote, defaultRemote, repo, remote)
+    if plan.error.len > 0:
+      stderr.writeLine("repro workspace project repo add: " & plan.error)
+      return 1
+    # The revision is NEVER guessed. Without `--revision` the fragment omits
+    # the key entirely and inherits the project's `default_revision` — a
+    # guessed `main` pins the repo to a branch that need not exist, and the
+    # failure only surfaces later, at sync time, for everyone.
+    let effectiveRevision =
+      if revision.len > 0: revision else: defaultRevision
+    if revision.len > 0:
+      # An explicit pin is VALIDATED, not trusted: a manifest that pins a
+      # branch the remote does not have authors cleanly and then fails for
+      # every consumer at sync time. Only this branch talks to the network —
+      # the default (inherit `default_revision`) keeps manifest authoring an
+      # offline operation, and writes nothing that could be wrong.
+      let check = remoteRevisionState(gitBin, remote, revision)
+      if check.state == rrsMissing:
+        stderr.writeLine("repro workspace project repo add: revision '" &
+          revision & "' does not exist on " & remote &
+          " (no matching branch or tag). Omit --revision to inherit the " &
+          "project's default_revision" &
+          (if defaultRevision.len > 0: " (" & defaultRevision & ")" else: "") &
+          ".")
+        return 1
+      elif check.state == rrsUnknown:
+        stderr.writeLine("repro workspace project repo add: warning: could " &
+          "not verify revision '" & revision & "' on " & remote & ": " &
+          check.diagnostic)
     createDir(manifestRoot / "repos")
-    let remoteName = repo & "-origin"
     let fragmentRel = "repos/" & repo & ".toml"
     let fragmentAbs = manifestRoot / "repos" / (repo & ".toml")
     if not fileExists(fragmentAbs):
       writeFile(fragmentAbs,
         "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
         "[repo]\n" &
-        "name = \"" & repo & "\"\n" &
+        "name = \"" & plan.repoName & "\"\n" &
         "path = \"" & repo & "\"\n" &
-        "remote = \"" & remoteName & "\"\n" &
-        "revision = \"" & revision & "\"\n")
-    ensureRemoteEntry(projectFileAbs, remoteName, remote)
+        "remote = \"" & plan.remoteName & "\"\n" &
+        (if revision.len > 0: "revision = \"" & revision & "\"\n" else: ""))
+    if plan.mintedFetch.len > 0:
+      ensureRemoteEntry(projectFileAbs, plan.remoteName, plan.mintedFetch)
     discard appendFragmentInclude(projectFileAbs, fragmentRel)
-    let msg = "Add repo " & repo & " to project " & project
-    let res = commitAndPushManifest(gitBin, manifestRoot, msg,
-      ["projects/" & project & ".toml", fragmentRel])
+    var paths = @["projects/" & project & ".toml", fragmentRel]
+    # `repos/<repo>.md` is where a repo's one-paragraph description lives —
+    # `workspace-projects.md` (and the agent-facing project docs) are
+    # generated from those files, so a repo added without one is invisible
+    # in the generated docs. Write it when `-m` is given; otherwise say so.
+    let docRel = "repos/" & repo & ".md"
+    let docAbs = manifestRoot / "repos" / (repo & ".md")
+    if desc.len > 0:
+      if not fileExists(docAbs):
+        writeFile(docAbs, desc.strip() & "\n")
+      paths.add(docRel)
+    elif not fileExists(docAbs):
+      stderr.writeLine("repro workspace project repo add: note: no " &
+        docRel & " description written (pass -m \"<description>\"); the " &
+        "generated project docs will have no entry for " & repo)
+    let msg = "Add repo " & repo & " to project " & project &
+      (if desc.len > 0: " (" & desc.strip().splitLines()[0] & ")" else: "")
+    let res = commitAndPushManifest(gitBin, manifestRoot, msg, paths)
     stdout.writeLine("repro workspace project repo add: " & repo & " -> " &
-      project & " — " & res.diagnostic)
+      project & " — remote " & plan.remoteName &
+      (if plan.mintedFetch.len > 0: " (new, fetch " & plan.mintedFetch & ")"
+       else: " (reused)") &
+      ", revision " &
+      (if revision.len > 0: revision & " (pinned)"
+       elif effectiveRevision.len > 0: effectiveRevision & " (inherited)"
+       else: "(unset)") &
+      " — " & res.diagnostic)
     return res.code
   else:
     stderr.writeLine("repro workspace project: unknown subcommand '" & sub &
