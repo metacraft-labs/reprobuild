@@ -24238,6 +24238,17 @@ proc canonicalDiscoveredGitPath(repoRoot, value: string): string =
   except OSError:
     os.normalizedPath(absolutePath(candidate))
 
+proc samePathIdentity(a, b: string): bool =
+  ## Do two paths name the same directory? Compared through the same
+  ## canonicalization ``discoverGitWorktree`` applies to what Git reports, so a
+  ## symlinked or non-normalized spelling of one side does not read as a
+  ## different directory. ``sameFile`` is not used because it raises when
+  ## either side does not exist, and callers ask this question about paths Git
+  ## merely *reported*.
+  if a.len == 0 or b.len == 0:
+    return false
+  canonicalDiscoveredGitPath(a, a) == canonicalDiscoveredGitPath(b, b)
+
 proc discoverGitWorktree(identity: GitToolIdentity;
     candidate: string): GitWorktreeDiscovery =
   ## Publication code must ask Git whether a path IS a worktree ROOT. In a
@@ -29297,7 +29308,8 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
   ## comment above for the full contract.
   result.outcome = lpoFailed
 
-  if not discoverGitWorktree(identity, manifestRepoRoot).ok:
+  let worktree = discoverGitWorktree(identity, manifestRepoRoot)
+  if not worktree.ok:
     # The manifest layer is a plain directory, not a publishable git
     # checkout — this workspace simply has no manifest remote to publish
     # to. That is a benign skip, not a publish-attempt failure (RA-21).
@@ -29305,6 +29317,26 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     result.diagnostic =
       "manifest repo root '" & manifestRepoRoot &
         "' is not a git checkout; cannot publish lock"
+    return
+
+  # ...and being INSIDE someone else's checkout is not the same as BEING one.
+  # The default store path (`<workspace>/.repro/manifests`) sits inside the
+  # workspace's own repo, so `rev-parse` answers for that enclosing repo and
+  # the check above passes for a directory that is merely a local-state dir —
+  # one the enclosing repo typically gitignores (`.repro/`), which makes the
+  # subsequent `git add locks` fail and turns a workspace with NO lock store
+  # into one that cannot push at all. A store DB is its own checkout by
+  # construction (that is what makes it publishable to a remote), so require
+  # the path to be the worktree ROOT and otherwise take the same benign
+  # not-publishable skip.
+  if not samePathIdentity(worktree.worktreeRoot, manifestRepoRoot):
+    result.outcome = lpoNotPublishable
+    result.diagnostic =
+      "manifest repo root '" & manifestRepoRoot &
+        "' is not its own git checkout (it lives inside '" &
+        worktree.worktreeRoot &
+        "'); no lock store is configured for this workspace, so there is " &
+        "nothing to publish to"
     return
 
   # Stage only the locks subtree. ``git add`` of a non-existent path errors;

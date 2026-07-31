@@ -7158,6 +7158,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_lock_store_inside_another_repo_is_not_publishable.nim",
+    binary: "build/test-bin/t_lock_store_inside_another_repo_is_not_publishable",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db.nim",
     binary: "build/test-bin/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db",
     defines: @[],
