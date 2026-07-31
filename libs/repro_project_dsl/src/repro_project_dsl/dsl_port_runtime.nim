@@ -3716,12 +3716,28 @@ proc registerPackageDep*(packageName, kind, constraint: string) =
   ## block, in source-declaration order. Multiple blocks of the same
   ## kind on one package APPEND to the registered seq (matches M9.I's
   ## ``mesonOptions:`` append semantics).
+  ##
+  ## The append is SET-like: re-registering a ``(packageName, kind,
+  ## constraint)`` triple that is already present is a no-op. A
+  ## package's dep list is a set of constraints, so a repeat carries no
+  ## information — but it is NOT harmless to record it. One recipe
+  ## module can be instantiated several times in a single process (the
+  ## per-consumer sibling shims give each consumer its own module
+  ## instance, so a diamond in the source dep closure re-runs a shared
+  ## recipe's module init once per path to it), and every instance
+  ## replays the same registration calls. Appending blindly made the
+  ## registered list grow with the number of instantiations, and the
+  ## Layer-1 package constructors read that list to auto-thread cache
+  ## vars / link dirs / CMake module paths — so the lowered graph
+  ## stopped being a pure function of the recipe. Collapsing the repeat
+  ## keeps every instantiation observing the declared list verbatim.
   case kind
   of "build", "native", "runtime":
     let key = m9r1PackageDepsKey(packageName, kind)
     if key notin dslPortPackageDeps:
       dslPortPackageDeps[key] = @[]
-    dslPortPackageDeps[key].add(constraint)
+    if constraint notin dslPortPackageDeps[key]:
+      dslPortPackageDeps[key].add(constraint)
   else:
     discard
 
