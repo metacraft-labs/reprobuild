@@ -130,6 +130,22 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     check table["LIBRARY_PATH"].startsWith("/synth/proto/lib")
     check table["LD_LIBRARY_PATH"].startsWith("/synth/proto/lib")
 
+  test "source Perl module roots reach both action launch paths":
+    let perlLib =
+      "/workspace/recipes/packages/source/perl/.repro/output/install/usr/lib"
+    let moduleRoot = perlLib & "/perl5"
+    let paths = ResolvedAuxPaths(libDirs: @[perlLib, "/synth/other/lib"])
+
+    let argvResult = applyResolvedAuxPathsArgv(
+      @["PERL5LIB=/inherited/perl"], paths)
+    check envValue(argvResult, "PERL5LIB") ==
+      moduleRoot & Sep & "/inherited/perl"
+
+    let table = newStringTable(modeCaseSensitive)
+    table["PERL5LIB"] = "/inherited/perl"
+    applyResolvedAuxPathsTable(table, paths)
+    check table["PERL5LIB"] == moduleRoot & Sep & "/inherited/perl"
+
   test "empty paths leave env untouched":
     let env = @["PATH=/usr/bin", "USER=alice"]
     let paths = ResolvedAuxPaths()  # all four lists empty
@@ -256,6 +272,8 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       "CPPFLAGS=-D_FILE_OFFSET_BITS=64",
       "CFLAGS=-O2",
       "CXXFLAGS=-O3",
+      "HOSTCFLAGS=-Os",
+      "HOSTCXXFLAGS=-Oz",
       "CPPFLAGS_FOR_BUILD=-DBUILD_HELPER",
       "CFLAGS_FOR_BUILD=-Og",
       "CXXFLAGS_FOR_BUILD=-O0"]
@@ -269,6 +287,8 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       systemFlags & " -D_FILE_OFFSET_BITS=64"
     check envValue(result, "CFLAGS") == systemFlags & " -O2"
     check envValue(result, "CXXFLAGS") == systemFlags & " -O3"
+    check envValue(result, "HOSTCFLAGS") == systemFlags & " -Os"
+    check envValue(result, "HOSTCXXFLAGS") == systemFlags & " -Oz"
     check envValue(result, "CPPFLAGS_FOR_BUILD") ==
       systemFlags & " -DBUILD_HELPER"
     check envValue(result, "CFLAGS_FOR_BUILD") == systemFlags & " -Og"
@@ -289,6 +309,8 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     table["CPPFLAGS"] = "-DTEST"
     table["CFLAGS"] = "-O1"
     table["CXXFLAGS"] = "-O2"
+    table["HOSTCFLAGS"] = "-Os"
+    table["HOSTCXXFLAGS"] = "-Oz"
     table["CPPFLAGS_FOR_BUILD"] = "-DBUILD"
     table["CFLAGS_FOR_BUILD"] = "-Og"
     table["CXXFLAGS_FOR_BUILD"] = "-O0"
@@ -299,6 +321,8 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     check table["CPPFLAGS"] == systemFlags & " -DTEST"
     check table["CFLAGS"] == systemFlags & " -O1"
     check table["CXXFLAGS"] == systemFlags & " -O2"
+    check table["HOSTCFLAGS"] == systemFlags & " -Os"
+    check table["HOSTCXXFLAGS"] == systemFlags & " -Oz"
     check table["CPPFLAGS_FOR_BUILD"] == systemFlags & " -DBUILD"
     check table["CFLAGS_FOR_BUILD"] == systemFlags & " -Og"
     check table["CXXFLAGS_FOR_BUILD"] == systemFlags & " -O0"

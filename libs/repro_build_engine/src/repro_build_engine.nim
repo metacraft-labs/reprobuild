@@ -2875,6 +2875,19 @@ proc applyCompilerSystemIncludeArgs*(argv: openArray[string];
   for i in base + 1 ..< argv.len:
     result.add(argv[i])
 
+proc sourcePerlModuleDirs(libDirs: openArray[string]): seq[string] =
+  ## A relocated source Perl keeps core modules under usr/lib/perl5, while
+  ## its compiled-in @INC still names the original host prefix.
+  var seen = initHashSet[string]()
+  const sourcePerlMarker = "/recipes/packages/source/perl/"
+  for libDir in libDirs:
+    if sourcePerlMarker notin libDir.replace('\\', '/'):
+      continue
+    let moduleDir = libDir / "perl5"
+    if moduleDir notin seen:
+      seen.incl(moduleDir)
+      result.add(moduleDir)
+
 proc applyResolvedAuxPathsTable*(env: StringTableRef;
                                  paths: ResolvedAuxPaths) =
   ## StringTable-style env mutator. Used by the bypass-spawn path. Each
@@ -2911,6 +2924,7 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   # objects. Several Autotools projects compile those helpers through the
   # *_FOR_BUILD variables during a later make action.
   for varName in ["CPPFLAGS", "CFLAGS", "CXXFLAGS",
+                  "HOSTCFLAGS", "HOSTCXXFLAGS",
                   "CPPFLAGS_FOR_BUILD", "CFLAGS_FOR_BUILD",
                   "CXXFLAGS_FOR_BUILD"]:
     prependEnvFlags(env, varName, systemFlags)
@@ -2920,6 +2934,7 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   # libc into the action process can cross GLIBC_PRIVATE ABIs.
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   prependEnvDirs(env, "LD_LIBRARY_PATH", runtimeLibDirs)
+  prependEnvDirs(env, "PERL5LIB", sourcePerlModuleDirs(paths.libDirs))
   prependEnvDirs(env, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
   when defined(macosx):
     # macOS' dynamic loader ignores LD_LIBRARY_PATH; DYLD_LIBRARY_PATH is the
@@ -2957,12 +2972,15 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
     includePaths.regularDirs)
   let systemFlags = compilerSystemIncludeFlags(includePaths.systemDirs)
   for varName in ["CPPFLAGS", "CFLAGS", "CXXFLAGS",
+                  "HOSTCFLAGS", "HOSTCXXFLAGS",
                   "CPPFLAGS_FOR_BUILD", "CFLAGS_FOR_BUILD",
                   "CXXFLAGS_FOR_BUILD"]:
     result = prependEnvFlagsToArgvEnv(result, varName, systemFlags)
   result = prependEnvDirsToArgvEnv(result, "LIBRARY_PATH", paths.libDirs)
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", runtimeLibDirs)
+  result = prependEnvDirsToArgvEnv(result, "PERL5LIB",
+    sourcePerlModuleDirs(paths.libDirs))
   result = prependEnvDirsToArgvEnv(result, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
   when defined(macosx):
     result = prependEnvDirsToArgvEnv(result, "DYLD_LIBRARY_PATH", runtimeLibDirs)
