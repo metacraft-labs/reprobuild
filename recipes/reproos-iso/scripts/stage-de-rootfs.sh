@@ -122,7 +122,7 @@ for recipe_dir in "$SRC_RECIPES_ROOT"/*; do
 done
 echo "[stage-de-rootfs] staged $staged_recipes from-source install-mirrors"
 
-# Source-built packages use the glibc 2.40 ABI supplied by the glibc source
+# Source-built packages use the ABI supplied by the glibc source
 # recipe. Record its final rootfs path before computing the bootstrap closure:
 # compatible Nix PT_INTERP entries are replaced with this loader during final
 # staging and therefore must not pull a duplicate Nix glibc into the image.
@@ -988,38 +988,32 @@ fi
 
 # M9.R.36.1 — build a TARGETED LD_LIBRARY_PATH for the installer's
 # QProcess children (libclingo / libsqlite3 dlopen via Nim
-# {.dynlib: const-string.}).  Skip glibc dirs to avoid shadowing the
-# Debian-installed libc.so.6 with a foreign nix-store glibc (which
-# would break every Debian binary in the chain).
-_repro_nix_dirs=""
-# M9.R.37.2 — use a subshell for the glob-existence test so the
-# script's positional parameters ($@) are not clobbered.  This GUI
-# launcher doesn't pass $@ to the installer (it execs sway, then sway
-# execs the installer via SWAY_INIT), but the hygiene fix matches the
-# sister-launcher fix in the ``.sh`` variant and prevents future
-# regressions.
-#
-# M9.R.46 — store dirs live at /repro/store (was /nix/store before the
-# stage-time prefix-swap relocate).  The same-hash relocation guarantees
-# every binary's RPATH points here.
-for d in /repro/store/*/lib; do
+# {.dynlib: const-string.}). The ELF normalizer also records these paths
+# in the consuming binaries' RPATHs, while this environment keeps the
+# kiosk launcher's child-process behavior explicit.
+_repro_source_dirs=""
+if [ ! -e /opt/repro/reprobuild/recipes/packages/source/clingo/.repro/output/install/usr/lib/libclingo.so ] || \
+   [ ! -e /opt/repro/reprobuild/recipes/packages/source/sqlite/.repro/output/install/usr/lib/libsqlite3.so ]; then
+  echo "required source clingo/sqlite runtime libraries missing" >&2
+  exit 127
+fi
+for d in \
+  /opt/repro/reprobuild/recipes/packages/source/clingo/.repro/output/install/usr/lib \
+  /opt/repro/reprobuild/recipes/packages/source/sqlite/.repro/output/install/usr/lib; do
   [ -d "$d" ] || continue
-  case "$d" in
-    /repro/store/*-glibc-*/lib) continue ;;
-  esac
   if ! ( set -- "$d"/*.so*; [ -e "$1" ] ); then
     continue
   fi
-  if [ -z "$_repro_nix_dirs" ]; then
-    _repro_nix_dirs="$d"
+  if [ -z "$_repro_source_dirs" ]; then
+    _repro_source_dirs="$d"
   else
-    _repro_nix_dirs="$_repro_nix_dirs:$d"
+    _repro_source_dirs="$_repro_source_dirs:$d"
   fi
 done
 if [ -n "${LD_LIBRARY_PATH:-}" ]; then
-  LD_LIBRARY_PATH="$_repro_nix_dirs:$LD_LIBRARY_PATH"
+  LD_LIBRARY_PATH="$_repro_source_dirs:$LD_LIBRARY_PATH"
 else
-  LD_LIBRARY_PATH="$_repro_nix_dirs"
+  LD_LIBRARY_PATH="$_repro_source_dirs"
 fi
 export LD_LIBRARY_PATH
 
@@ -1231,10 +1225,15 @@ cat > "$STAGE_DIR/usr/bin/reproos-installer-launcher.sh" <<'EOF'
 #                              ``QT_QPA_PLATFORM=offscreen`` env var
 #                              the installer respects resolves the
 #                              ``libqoffscreen.so`` plugin.
-_repro_nix_libs=""
+_repro_source_libs=""
 _repro_qt_plugins=""
 _repro_qml_imports=""
 _repro_qpa_plugins=""
+if [ ! -e /opt/repro/reprobuild/recipes/packages/source/clingo/.repro/output/install/usr/lib/libclingo.so ] || \
+   [ ! -e /opt/repro/reprobuild/recipes/packages/source/sqlite/.repro/output/install/usr/lib/libsqlite3.so ]; then
+  echo "required source clingo/sqlite runtime libraries missing" >&2
+  exit 127
+fi
 # M9.R.37.2 — DO NOT use ``set -- "$d"/*.so*`` to test for the glob
 # existence: ``set --`` overwrites the script's positional parameters
 # ($@), which is what we ultimately pass to ``reproos-installer``.
@@ -1262,38 +1261,11 @@ _repro_qpa_plugins=""
 # This dramatically narrows LD_LIBRARY_PATH from ~600 entries to
 # a handful, slashing each dlopen()'s syscall cost from ~600 ENOENT
 # probes to ~5.
-# M9.R.46 — store dirs live at /repro/store (was /nix/store before the
-# stage-time prefix-swap relocate).
-for d in /repro/store/*/lib; do
+# Source clingo and sqlite provide the two bare-name dlopen targets.
+for d in \
+  /opt/repro/reprobuild/recipes/packages/source/clingo/.repro/output/install/usr/lib \
+  /opt/repro/reprobuild/recipes/packages/source/sqlite/.repro/output/install/usr/lib; do
   [ -d "$d" ] || continue
-  # Skip glibc dirs — Debian system glibc must remain canonical so
-  # every Debian binary in the live ISO chain keeps working.
-  case "$d" in
-    /repro/store/*-glibc-*/lib) continue ;;
-  esac
-  # M9.R.38.3 — skip ANY content-addressed Qt6 prefix.  The installer is
-  # compiled + RPATH'd against ``/opt/repro/.../qt6-base/.repro/
-  # output/install/usr/lib/libQt6Core.so.6.8.1``, but the de-rootfs
-  # mirror also ships an UNRELATED ``zp6r9bxds...-qtbase-6.10.1/lib/``
-  # tree pulled in as a transitive of layer-shell-qt-6.5.3 (which is
-  # in the DE closure).  Without this skip the launcher's qt-6/plugins
-  # / qt-6/qml walk below picks up the 6.10.1 plugin tree as well, and
-  # the Qt 6.8.1 binary loading a 6.10.1 ``libqoffscreen.so`` /
-  # ``QtQuick.Controls`` plugin trips C++ ABI mismatch -> heap
-  # corruption -> ``munmap_chunk(): invalid pointer`` on init, SIGABRT
-  # before Phase 1.  The qt6-base + qt6-declarative + qt6-quickcontrols2
-  # the installer needs live at /opt/repro/... paths the RPATH already
-  # covers; no /repro/store Qt6 mirror is required.
-  case "$d" in
-    /repro/store/*-qtbase-*/lib | \
-    /repro/store/*-qtdeclarative-*/lib | \
-    /repro/store/*-qt5compat-*/lib | \
-    /repro/store/*-layer-shell-qt-*/lib | \
-    /repro/store/*-kquickcharts-*/lib | \
-    /repro/store/*-qtquickcontrols*/lib | \
-    /repro/store/*-qttools-*/lib | \
-    /repro/store/*-qtwayland-*/lib) continue ;;
-  esac
   # M9.R.37.5: include ONLY dirs that ship a library the ``repro``
   # binary's Nim {.dynlib: "..."} pragma resolves by bare leaf name:
   #   * libclingo.so      (libs/repro_solver/.../clingo_bindings.nim)
@@ -1302,33 +1274,10 @@ for d in /repro/store/*/lib; do
   # variants on Windows only; libsqlite3.so covers POSIX).
   if [ -e "$d/libclingo.so" ] || [ -e "$d/libsqlite3.so" ] || \
      [ -e "$d/libsqlite3.so.0" ]; then
-    if [ -z "$_repro_nix_libs" ]; then
-      _repro_nix_libs="$d"
+    if [ -z "$_repro_source_libs" ]; then
+      _repro_source_libs="$d"
     else
-      _repro_nix_libs="$_repro_nix_libs:$d"
-    fi
-  fi
-  # Qt6 plugin dirs ship under ``<prefix>/lib/qt-6/plugins/``.
-  if [ -d "$d/qt-6/plugins" ]; then
-    if [ -z "$_repro_qt_plugins" ]; then
-      _repro_qt_plugins="$d/qt-6/plugins"
-    else
-      _repro_qt_plugins="$_repro_qt_plugins:$d/qt-6/plugins"
-    fi
-    if [ -d "$d/qt-6/plugins/platforms" ]; then
-      if [ -z "$_repro_qpa_plugins" ]; then
-        _repro_qpa_plugins="$d/qt-6/plugins/platforms"
-      else
-        _repro_qpa_plugins="$_repro_qpa_plugins:$d/qt-6/plugins/platforms"
-      fi
-    fi
-  fi
-  # Qt6 QML modules ship under ``<prefix>/lib/qt-6/qml/``.
-  if [ -d "$d/qt-6/qml" ]; then
-    if [ -z "$_repro_qml_imports" ]; then
-      _repro_qml_imports="$d/qt-6/qml"
-    else
-      _repro_qml_imports="$_repro_qml_imports:$d/qt-6/qml"
+      _repro_source_libs="$_repro_source_libs:$d"
     fi
   fi
 done
@@ -1363,47 +1312,26 @@ done
 # ``munmap_chunk(): invalid pointer`` on Qt static-init heap
 # allocations.
 #
-# Discovery: scan the installer binary's first 4096 bytes for the
-# PT_INTERP nix-store glibc path.  ELF's PT_INTERP segment is a
-# nul-terminated string under the PHDR table, normally near the
-# beginning.  ``grep -aoE`` on a fixed-size head is the simplest
-# portable extraction.  Fallback to the most recent nix-store glibc
-# if extraction fails (shouldn't, given the binary is RPATH-laced
-# with /nix/store paths).
-_repro_installer_bin=/usr/bin/reproos-installer
-_repro_glibc_dir=""
-if [ -x "$_repro_installer_bin" ]; then
-  # M9.R.46 — the installer's PT_INTERP is patched to /repro/store at
-  # stage time by relocate-nix-to-repro.sh.  Match the new prefix.
-  _repro_glibc_interp="$(head -c 4096 "$_repro_installer_bin" 2>/dev/null \
-    | tr -c '[:print:]' '\n' \
-    | grep -oE '/repro/store/[a-z0-9]+-glibc-[^/]+/lib/ld-linux-x86-64\.so\.2' \
-    | head -1)"
-  if [ -n "$_repro_glibc_interp" ]; then
-    _repro_glibc_dir="${_repro_glibc_interp%/ld-linux-x86-64.so.2}"
-  fi
+# The stage-time normalizer gives the installer this same source-built
+# glibc as PT_INTERP. Invoking it directly here preserves the diagnostic
+# launcher's explicit --library-path behavior without a bootstrap store.
+_repro_glibc_dir="@SOURCE_GLIBC_RUNTIME_DIR@"
+if [ ! -x "$_repro_glibc_dir/ld-linux-x86-64.so.2" ]; then
+  echo "source glibc loader missing: $_repro_glibc_dir" >&2
+  exit 127
 fi
-if [ -z "$_repro_glibc_dir" ]; then
-  # Fallback: latest content-addressed glibc on disk.
-  _repro_glibc_dir="$(ls -d /repro/store/*-glibc-*/lib 2>/dev/null \
-    | grep -vE -- '-bin|-locales|-dev|-debug|-doc|-static|-loop|-i686' \
-    | head -1)"
-fi
-# Prepend the PT_INTERP glibc dir to LD_LIBRARY_PATH so the loader
-# resolves ALL glibc subsystems via the SAME nix glibc instance.
-if [ -n "$_repro_glibc_dir" ] && [ -d "$_repro_glibc_dir" ]; then
-  if [ -n "$_repro_nix_libs" ]; then
-    _repro_nix_libs="$_repro_glibc_dir:$_repro_nix_libs"
-  else
-    _repro_nix_libs="$_repro_glibc_dir"
-  fi
+# Keep every glibc subsystem on the same source-built runtime.
+if [ -n "$_repro_source_libs" ]; then
+  _repro_source_libs="$_repro_glibc_dir:$_repro_source_libs"
+else
+  _repro_source_libs="$_repro_glibc_dir"
 fi
 
 # Append caller-supplied paths last so any operator override wins.
 if [ -n "${LD_LIBRARY_PATH:-}" ]; then
-  _repro_ldpath="$_repro_nix_libs:$LD_LIBRARY_PATH"
+  _repro_ldpath="$_repro_source_libs:$LD_LIBRARY_PATH"
 else
-  _repro_ldpath="$_repro_nix_libs"
+  _repro_ldpath="$_repro_source_libs"
 fi
 
 # M9.R.37.1 / M9.R.39.1 — diagnostic mode.  When ``REPRO_INSTALLER_DIAG=1``
@@ -1630,6 +1558,8 @@ QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-}${QT_QPA_PLATFORM_P
     --library-path "$_repro_ldpath" \
     /usr/bin/reproos-installer "$@"
 EOF
+sed -i "s|@SOURCE_GLIBC_RUNTIME_DIR@|$SOURCE_GLIBC_RUNTIME_DIR|g" \
+  "$STAGE_DIR/usr/bin/reproos-installer-launcher.sh"
 chmod 0755 "$STAGE_DIR/usr/bin/reproos-installer-launcher.sh"
 
 # Profile hook to auto-launch the installer on root login (tty1 only).
@@ -1822,9 +1752,8 @@ echo "[stage-de-rootfs] source-only runtime closure verified"
 # ---------------------------------------------------------------------------
 # Phase 7: rebuild ld.so.cache so dlopen(bare-name) calls inside DE
 # binaries find shared libs that aren't reachable via embedded RPATH.
-# We feed every nix-store-mirrored /lib dir + every from-source
-# install-mirror /lib + /lib64 into /etc/ld.so.conf.d/ and let
-# /sbin/ldconfig under chroot do the rest.
+# We feed every from-source install-mirror /lib + /lib64 into
+# /etc/ld.so.conf.d/ and let /sbin/ldconfig process the staged root.
 # ---------------------------------------------------------------------------
 
 mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
@@ -1844,59 +1773,10 @@ mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
   # libmutter-15.so.0 + the internal mutter-15/libmutter-*-15.so libs
   # all carry the right RPATH entry.  No more ld.so.conf fall-through
   # needed — pure embedded RPATH does the job.
-  # M9.R.46 — content-addressed store /lib dirs (formerly /nix/store/*/lib;
-  # the relocate-nix-to-repro.sh script in Phase 6b same-hash-prefix-swaps
-  # the whole tree to /repro/store).
-  for d in "$STAGE_DIR"/repro/store/*/lib; do
-    if [ -d "$d" ]; then
-      echo "${d#$STAGE_DIR}"
-    fi
-  done
   # Standard fallbacks for the slim Debian base.
   echo "/usr/lib"
   echo "/usr/lib64"
 } > "$STAGE_DIR/etc/ld.so.conf.d/zz-reproos-overlay.conf"
-
-# M9.R.37.4 — symlink every glibc's hard-coded ``etc/ld.so.cache`` path
-# to ``/etc/ld.so.cache`` so the from-source-built binaries' PT_INTERPs
-# find the cache the Debian system loader writes.  Without this, every
-# binary with PT_INTERP ``/repro/store/<hash>-glibc-X.Y/lib/ld-linux-x86-64
-# .so.2`` reads ``/repro/store/<hash>-glibc-X.Y/etc/ld.so.cache`` (the
-# /nix/store path is baked into ld-linux at compile time -- the M9.R.46
-# relocate script's patchelf --set-interpreter swap doesn't change THAT
-# string, because ld.so reads it from its own .rodata + concatenates the
-# unchanged hard-coded cache-relative suffix).  We DO still ship the
-# glibc layout under /repro/store/<hash>-glibc-X.Y/etc/ on the ISO (the
-# M9.R.46 relocate moved it from /nix/store to /repro/store at the
-# SAME hash), and ld.so reads its hard-coded cache path from compile
-# time -- the cache lookup path inside the glibc package's etc/ resolves
-# against the /repro/store/ runtime location because the relocate kept
-# the trailing subpath identical.  Conclusion: the symlink is what
-# matters; the leading prefix is /repro/store after M9.R.46.
-#
-# Concretely: ``mkfs.ext4`` failed at exec-time with ``libext2fs.so.2:
-# cannot open shared object file`` because its PT_INTERP pointed at the
-# ``xx7cm72...-glibc-2.40-66`` ld-linux which reads
-# ``<store>/xx7cm72.../etc/ld.so.cache`` (ENOENT), bypassing the
-# Debian system cache at ``/etc/ld.so.cache``.
-#
-# Fix: for each glibc dir on the stage, ``chmod u+w`` its ``etc/``
-# subdir then drop a relative symlink at ``etc/ld.so.cache ->
-# /etc/ld.so.cache``.  Now every loader -- from-source or Debian --
-# reads the SAME cache the system ldconfig wrote.
-for glibc_etc in "$STAGE_DIR"/repro/store/*-glibc-*/etc; do
-  [ -d "$glibc_etc" ] || continue
-  glibc_dir="$(dirname "$glibc_etc")"
-  chmod u+w "$glibc_etc" 2>/dev/null || true
-  if [ -e "$glibc_etc/ld.so.cache" ] && [ ! -L "$glibc_etc/ld.so.cache" ]; then
-    rm -f "$glibc_etc/ld.so.cache"
-  fi
-  if [ ! -L "$glibc_etc/ld.so.cache" ]; then
-    ln -s /etc/ld.so.cache "$glibc_etc/ld.so.cache"
-  fi
-  echo "[stage-de-rootfs] linked $glibc_etc/ld.so.cache -> /etc/ld.so.cache"
-
-done
 
 chroot_ldconfig="$STAGE_DIR/sbin/ldconfig"
 if [ -x "$chroot_ldconfig" ]; then

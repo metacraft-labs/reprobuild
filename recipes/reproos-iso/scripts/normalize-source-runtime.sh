@@ -80,6 +80,27 @@ is_elf() {
   [ "$magic" = $'\177ELF' ]
 }
 
+record_store_shebangs() {
+  local output_file="$1"
+  local executable runtime_path first_line
+  while IFS= read -r -d '' executable; do
+    runtime_path="${executable#$stage_dir}"
+    case "$runtime_path" in
+      /nix/*|/repro/store/*) continue ;;
+    esac
+    first_line=""
+    IFS= read -r first_line < "$executable" 2>/dev/null || true
+    case "$first_line" in
+      '#!'*'/nix/store/'*|'#!'*'/repro/store/'*)
+        printf 'store-shebang:%s\t%s\n' \
+          "$first_line" "$runtime_path" >> "$output_file"
+        ;;
+    esac
+  done < <(
+    find "$stage_dir" -type f -perm /111 -print0 2>/dev/null
+  )
+}
+
 is_compatible_bootstrap_glibc() {
   local interpreter="$1"
   local bootstrap_version oldest_version
@@ -117,6 +138,8 @@ done < <(
     \( -lname '/nix/store/*' -o -lname '/repro/store/*' \) \
     -print 2>/dev/null
 )
+
+record_store_shebangs "$missing_file"
 
 if [ -s "$missing_file" ]; then
   missing_count="$(wc -l < "$missing_file")"
@@ -234,6 +257,8 @@ done < "$candidates_file"
 find "$source_root" -type l \
   \( -lname '/nix/store/*' -o -lname '/repro/store/*' \) \
   -printf '%p\tTARGET=%l\n' 2>/dev/null >> "$leaks_file" || true
+
+record_store_shebangs "$leaks_file"
 
 if [ -s "$leaks_file" ]; then
   leak_count="$(wc -l < "$leaks_file")"
