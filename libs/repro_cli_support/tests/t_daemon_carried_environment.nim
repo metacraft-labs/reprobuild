@@ -21,6 +21,25 @@ proc replaceAscii(body: var seq[byte]; oldValue, newValue: string): bool =
   true
 
 suite "daemon carried environment":
+  test "auto runquota memory budget accepts a positive byte override":
+    const Key = "REPROBUILD_RUNQUOTA_MEMORY_BYTES"
+    let previous = getEnv(Key)
+    let wasPresent = existsEnv(Key)
+    defer:
+      if wasPresent:
+        putEnv(Key, previous)
+      else:
+        delEnv(Key)
+
+    delEnv(Key)
+    check autoRunQuotaMemoryBytes() == DefaultAutoRunQuotaMemoryBytes
+    putEnv(Key, "68719476736")
+    check autoRunQuotaMemoryBytes() == 68719476736'u64
+    for invalid in ["0", "not-a-number"]:
+      putEnv(Key, invalid)
+      expect ValueError:
+        discard autoRunQuotaMemoryBytes()
+
   test "daemon and runquota isolation is forwarded to nested daemon-hosted builds":
     let keys = [
       "REPRO_DAEMON_ENDPOINT",
@@ -28,6 +47,7 @@ suite "daemon carried environment":
       "REPRO_DAEMON_RUNTIME_DIR",
       "RUNQUOTAD_BIN",
       "RUNQUOTA_BIN",
+      "REPROBUILD_RUNQUOTA_MEMORY_BYTES",
       "STACKABLE_HOOKS_SRC",
       "CLINGO_PREFIX",
       "REPROBUILD_RUNTIME_LIBRARY_PATH",
@@ -48,6 +68,7 @@ suite "daemon carried environment":
     let runtimeDir = getTempDir() / "repro-daemon-carried-env-runtime"
     let runquotadBin = getTempDir() / "runquotad-carried-env"
     let runquotaBin = getTempDir() / "runquota-carried-env"
+    let runquotaMemoryBytes = "68719476736"
     let stackableHooksSrc = getTempDir() / "stackable-hooks-src-carried-env"
     let clingoPrefix = getTempDir() / "clingo-prefix-carried-env"
     let runtimeLibraryPath = getTempDir() / "runtime-libraries-carried-env"
@@ -57,6 +78,7 @@ suite "daemon carried environment":
     putEnv("REPRO_DAEMON_RUNTIME_DIR", runtimeDir)
     putEnv("RUNQUOTAD_BIN", runquotadBin)
     putEnv("RUNQUOTA_BIN", runquotaBin)
+    putEnv("REPROBUILD_RUNQUOTA_MEMORY_BYTES", runquotaMemoryBytes)
     putEnv("STACKABLE_HOOKS_SRC", stackableHooksSrc)
     putEnv("CLINGO_PREFIX", clingoPrefix)
     putEnv("REPROBUILD_RUNTIME_LIBRARY_PATH", runtimeLibraryPath)
@@ -68,6 +90,8 @@ suite "daemon carried environment":
     check carried.hasEnvPair("REPRO_DAEMON_RUNTIME_DIR", runtimeDir)
     check carried.hasEnvPair("RUNQUOTAD_BIN", runquotadBin)
     check carried.hasEnvPair("RUNQUOTA_BIN", runquotaBin)
+    check carried.hasEnvPair("REPROBUILD_RUNQUOTA_MEMORY_BYTES",
+      runquotaMemoryBytes)
     check carried.hasEnvPair("STACKABLE_HOOKS_SRC", stackableHooksSrc)
     check carried.hasEnvPair("CLINGO_PREFIX", clingoPrefix)
     check carried.hasEnvPair("REPROBUILD_RUNTIME_LIBRARY_PATH",

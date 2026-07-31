@@ -12486,6 +12486,22 @@ proc autoRunQuotaEnabled(): bool =
   getEnv("REPROBUILD_AUTO_RUNQUOTA", "1").normalize notin
     ["0", "false", "no", "off"]
 
+const DefaultAutoRunQuotaMemoryBytes* = 16'u64 * 1024'u64 * 1024'u64 *
+  1024'u64
+
+proc autoRunQuotaMemoryBytes*(): uint64 =
+  let configured = getEnv("REPROBUILD_RUNQUOTA_MEMORY_BYTES", "")
+  if configured.len == 0:
+    return DefaultAutoRunQuotaMemoryBytes
+  try:
+    result = parseBiggestUInt(configured).uint64
+  except ValueError:
+    raise newException(ValueError,
+      "REPROBUILD_RUNQUOTA_MEMORY_BYTES must be a positive integer")
+  if result == 0:
+    raise newException(ValueError,
+      "REPROBUILD_RUNQUOTA_MEMORY_BYTES must be a positive integer")
+
 proc executableFile(path: string): bool =
   if path.len == 0 or not fileExists(path):
     return false
@@ -12569,6 +12585,7 @@ const
     "RUNQUOTA_SOCKET", "RUNQUOTAD_BIN", "RUNQUOTA_BIN",
     "REPROBUILD_STORE_ROOT", "REPROBUILD_SOURCE_ROOT",
     "REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_MAX_PARALLELISM",
+    "REPROBUILD_RUNQUOTA_MEMORY_BYTES",
     "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
     "REPROBUILD_AUTO_RUNQUOTA",
     "REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS",
@@ -12931,10 +12948,11 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
   # daemon, its execute-edge lease hits ``lease request exceeds named-pool
   # budget: nim_pty.pty-serial``, and the build hangs.
   let standardPoolArgs = assembleRunquotadPoolArgs(extraPools)
+  let memoryBytes = $autoRunQuotaMemoryBytes()
   when defined(windows):
     var args = @[
       "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
-      "--memory-bytes", "17179869184"
+      "--memory-bytes", memoryBytes
     ]
     args.add(standardPoolArgs)
     # Clear any stale value so the client side falls through to
@@ -12949,7 +12967,7 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
     var args = @[
       "--socket", socket,
       "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
-      "--memory-bytes", "17179869184"
+      "--memory-bytes", memoryBytes
     ]
     args.add(standardPoolArgs)
     putEnv("RUNQUOTA_SOCKET", socket)
