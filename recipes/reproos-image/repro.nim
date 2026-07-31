@@ -126,6 +126,7 @@ const reproosImageRootfsDeps = @[
   "dbus",
   "sudo",
   "e2fsprogs",
+  "dosfstools",
   "btrfs-progs",
   "shadow-utils",
   "iana-tzdata",
@@ -175,6 +176,7 @@ package reproosImage:
     "dbus"
     "sudo"
     "e2fsprogs"
+    "dosfstools"
     "btrfs-progs"
     "shadow-utils"
     "iana-tzdata"
@@ -266,6 +268,7 @@ package reproosImage:
     # volume-serials are deterministic.
     let buildImageAction = shell(
       command = ("set -euo pipefail; " &
+                 "mkdir -p build; " &
                  "SOURCE_DATE_EPOCH=1735689600 LC_ALL=C TZ=UTC " &
                  "REPRO_AUTO_CONFIG=\"${REPRO_AUTO_CONFIG:-../../tests/fixtures/auto-config-minimal.toml}\" " &
                  "REPRO_QCOW2_SEED=\"${REPRO_QCOW2_SEED:-deadbeefcafebabe}\" " &
