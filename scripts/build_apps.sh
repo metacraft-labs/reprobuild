@@ -68,10 +68,53 @@ fi
 shm_queue_src="$(resolve_shm_queue_src)"
 export SHM_QUEUE_SRC="${shm_queue_src}"
 
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+# Platform detection must not depend on an external ``uname``.
+#
+# This script runs BOTH directly (``just bootstrap``) and as a monitored build
+# action under ``repro build``. In the monitored case on macOS the engine
+# injects the io-mon shim into every child process, and ``$(uname -s)`` has
+# been observed to expand to the EMPTY string there: the v0.1.3 release's macOS
+# leg died on ``unsupported platform  for the io-mon shim`` -- note the doubled
+# space where the platform name should be -- 3 minutes after the very same
+# script had run this same dispatch successfully outside the engine.
+#
+# An empty ``uname`` is worse than a hard failure here, because two of the case
+# statements below carry a ``*)`` arm that silently means "Linux": ``dll_ext``
+# would resolve to ``so`` on macOS and the build would emit
+# ``librepro_project_dsl_runtime.so`` where repro.nim's macOS branch expects
+# ``.dylib``. That is a wrong artifact, not a stopped build.
+#
+# ``$OSTYPE`` is a bash builtin -- no fork, no PATH lookup, nothing for a
+# monitoring shim to interpose. Consult it first, fall back to ``uname -s``,
+# and REFUSE to continue when neither answers rather than guessing.
+repro_host_platform() {
+  case "${OSTYPE:-}" in
+    darwin*) printf 'darwin\n'; return 0 ;;
+    linux*) printf 'linux\n'; return 0 ;;
+    msys*|cygwin*|win32) printf 'windows\n'; return 0 ;;
+  esac
+  case "$(uname -s 2>/dev/null || true)" in
+    Darwin) printf 'darwin\n'; return 0 ;;
+    Linux) printf 'linux\n'; return 0 ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) printf 'windows\n'; return 0 ;;
+  esac
+  return 1
+}
+
+if ! REPRO_HOST_PLATFORM="$(repro_host_platform)"; then
+  echo "error: cannot determine the host platform." >&2
+  echo "       \$OSTYPE='${OSTYPE:-}'; 'uname -s' gave '$(uname -s 2>/dev/null || true)'." >&2
+  echo "       Refusing to guess: the dynamic-library extension and every" >&2
+  echo "       staging step below depend on it, and a wrong guess silently" >&2
+  echo "       produces the wrong artifact instead of stopping." >&2
+  exit 2
+fi
+export REPRO_HOST_PLATFORM
+
+case "${REPRO_HOST_PLATFORM}" in
+  windows)
     dll_ext="dll" ;;
-  Darwin)
+  darwin)
     dll_ext="dylib" ;;
   *)
     dll_ext="so" ;;
@@ -265,10 +308,10 @@ done < apps/entrypoints.txt
 # with `--define:reproProviderMode`, so the DLL must also compile with
 # that define to expose the provider-mode-only runtime procs.
 mkdir -p build/lib
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+case "${REPRO_HOST_PLATFORM}" in
+  windows)
     dll_ext="dll" ;;
-  Darwin)
+  darwin)
     dll_ext="dylib" ;;
   *)
     dll_ext="so" ;;
@@ -340,8 +383,8 @@ windows_dll_staging_problem() {
 #
 # M3-style stdlib package resolution (a ``packages/clingo.nim`` entry consumed
 # by the engine's tool-provisioning store) is still the durable follow-up.
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+case "${REPRO_HOST_PLATFORM}" in
+  windows)
     # Prefer the provisioner's own install dir when env.ps1 exported it: it is
     # the pinned, checksummed copy. Fall back to PATH so a hand-provisioned
     # host (or one whose clingo came from elsewhere) still builds.
@@ -398,8 +441,8 @@ esac
 # prefix root with ``libzstd.dll`` under a sibling ``dll/`` subdir. When
 # neither is found we WARN rather than fail -- the binaries still build; the
 # client just won't self-load a compressed payload until zstd is provisioned.
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+case "${REPRO_HOST_PLATFORM}" in
+  windows)
     zstd_exe="$(command -v zstd.exe 2>/dev/null || true)"
     if [ -n "${zstd_exe}" ]; then
       zstd_src_dir="$(dirname "${zstd_exe}")"
@@ -463,8 +506,8 @@ esac
 # build-time staging covers the from-source Windows build path (install-
 # reprobuild.ps1 on the guest), so a guest-side ``build_apps.sh`` run drops
 # sqlite3_64.dll next to repro.exe reproducibly.
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+case "${REPRO_HOST_PLATFORM}" in
+  windows)
     sqlite_src_dll=""
     nim_exe="$(command -v nim.exe 2>/dev/null || true)"
     if [ -n "${nim_exe}" ]; then
