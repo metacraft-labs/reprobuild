@@ -3517,6 +3517,51 @@ macro package*(name: untyped; body: untyped): untyped =
   # the partitioned section walk; the runtime registry is the
   # diagnostic surface tests use today).
   result.add(m3ArtifactEmission)
+  # ── DSL-port M9.R.1: per-package dep-block registration emission.
+  # ``parsePackageDef`` already collected every constraint string into
+  # the three seqs ``pkg.toolUses`` (the ``uses:`` / ``buildDeps:``
+  # synonym pair), ``pkg.nativeBuildDeps``, and ``pkg.runtimeDeps``.
+  # We emit one ``registerPackageDep(...)`` call per entry so the
+  # in-memory accessors (``registeredBuildDeps`` /
+  # ``registeredNativeBuildDeps`` / ``registeredRuntimeDeps``) return
+  # the declared constraint strings at run / test time. The legacy
+  # solver path (``registerSolverDependency`` emitted by
+  # ``emitVariantDeclarations``) is UNCHANGED — this milestone
+  # ADDITIVELY widens the surface so M9.R.2 / M9.R.5 callers have a
+  # stable diagnostic registry to query.
+  #
+  # ORDERING (must stay ABOVE the M4 ``build:`` lowering below). The
+  # Layer-1 constructors a ``build:`` body calls (``cmake_package`` /
+  # ``meson_package`` / ``autotools_package``) query this registry
+  # WHILE THE BODY RUNS — the declared deps decide auto-threaded cache
+  # vars, link-library dirs and CMake module paths. Emitting the
+  # registrations after the body left the FIRST module-init pass
+  # reading an EMPTY dep list (so the auto-threading silently did
+  # nothing) while any later pass in the same process read the rows the
+  # first pass had left behind. A recipe reachable twice in one process
+  # — the per-consumer sibling shims materialise one module instance
+  # per consumer, so a diamond in the source dep closure instantiates a
+  # shared recipe several times — therefore produced TWO DIFFERENT
+  # configure actions for one package and tripped the Named-Targets
+  # within-package collision check. Registering first makes every pass
+  # read the same declared dep list, so the lowered graph is a pure
+  # function of the recipe.
+  let pkgLitForDeps = newLit(packageName)
+  let buildKindLit = newLit("build")
+  let nativeKindLit = newLit("native")
+  let runtimeKindLit = newLit("runtime")
+  for useDef in pkg.toolUses:
+    let constraintLit = newLit(useDef.rawConstraint)
+    result.add(quote do:
+      registerPackageDep(`pkgLitForDeps`, `buildKindLit`, `constraintLit`))
+  for useDef in pkg.nativeBuildDeps:
+    let constraintLit = newLit(useDef.rawConstraint)
+    result.add(quote do:
+      registerPackageDep(`pkgLitForDeps`, `nativeKindLit`, `constraintLit`))
+  for useDef in pkg.runtimeDeps:
+    let constraintLit = newLit(useDef.rawConstraint)
+    result.add(quote do:
+      registerPackageDep(`pkgLitForDeps`, `runtimeKindLit`, `constraintLit`))
   # ── DSL-port M4: ``build:`` block lowering (package-level +
   # artifact-scoped). Both emitters walk the SAME classified seq
   # M3's emitter consumed (no second classification pass) and emit
@@ -3629,34 +3674,10 @@ macro package*(name: untyped; body: untyped): untyped =
   # falls through the ``classifySectionStmt`` arms to the legacy
   # parser which silently discards unknown sections (see the
   # comment on the ``else`` arm in ``cross_project.nim``).
-  # ── DSL-port M9.R.1: per-package dep-block registration emission.
-  # ``parsePackageDef`` already collected every constraint string into
-  # the three seqs ``pkg.toolUses`` (the ``uses:`` / ``buildDeps:``
-  # synonym pair), ``pkg.nativeBuildDeps``, and ``pkg.runtimeDeps``.
-  # We emit one ``registerPackageDep(...)`` call per entry so the
-  # in-memory accessors (``registeredBuildDeps`` /
-  # ``registeredNativeBuildDeps`` / ``registeredRuntimeDeps``) return
-  # the declared constraint strings at run / test time. The legacy
-  # solver path (``registerSolverDependency`` emitted by
-  # ``emitVariantDeclarations``) is UNCHANGED — this milestone
-  # ADDITIVELY widens the surface so M9.R.2 / M9.R.5 callers have a
-  # stable diagnostic registry to query.
-  let pkgLitForDeps = newLit(packageName)
-  let buildKindLit = newLit("build")
-  let nativeKindLit = newLit("native")
-  let runtimeKindLit = newLit("runtime")
-  for useDef in pkg.toolUses:
-    let constraintLit = newLit(useDef.rawConstraint)
-    result.add(quote do:
-      registerPackageDep(`pkgLitForDeps`, `buildKindLit`, `constraintLit`))
-  for useDef in pkg.nativeBuildDeps:
-    let constraintLit = newLit(useDef.rawConstraint)
-    result.add(quote do:
-      registerPackageDep(`pkgLitForDeps`, `nativeKindLit`, `constraintLit`))
-  for useDef in pkg.runtimeDeps:
-    let constraintLit = newLit(useDef.rawConstraint)
-    result.add(quote do:
-      registerPackageDep(`pkgLitForDeps`, `runtimeKindLit`, `constraintLit`))
+  # ── DSL-port M9.R.1: the dep-block registration emission USED to sit
+  # here. It now runs BEFORE the M4 ``build:`` lowering (see the
+  # emission site above ``m4BuildActionEmission``) because the Layer-1
+  # package constructors read the dep registry while the body executes.
   # ── DSL-port M9.R.3: per-library ``api:`` block registration emission.
   # ``emitM9R3LibraryApis`` walks the M3 ``soM3LibraryArtifact`` entries,
   # finds nested ``api:`` blocks, and emits one runtime block per match
