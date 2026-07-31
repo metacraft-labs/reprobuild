@@ -130,7 +130,20 @@ const reproosImageRootfsDeps = @[
   "btrfs-progs",
   "shadow-utils",
   "iana-tzdata",
+  "parted",
+  "lvm2",
+  "popt",
+  "gdisk",
+  "libgpg-error",
+  "libgcrypt",
+  "json-c",
   "cryptsetup",
+  "less",
+  "procps",
+  "rsync",
+  "strace",
+  "iputils",
+  "nano",
   "iproute2",
   "xkeyboard-config",
   "libxkbfile",
@@ -148,6 +161,7 @@ const reproosImageRootfsDeps = @[
   "coreutils",
   "grub",
   "kernel",
+  "musl",
   "busybox",
 ]
 
@@ -180,7 +194,20 @@ package reproosImage:
     "btrfs-progs"
     "shadow-utils"
     "iana-tzdata"
+    "parted"
+    "lvm2"
+    "popt"
+    "gdisk"
+    "libgpg-error"
+    "libgcrypt"
+    "json-c"
     "cryptsetup"
+    "less"
+    "procps"
+    "rsync"
+    "strace"
+    "iputils"
+    "nano"
     "iproute2"
     "xkeyboard-config"
     "libxkbfile"
@@ -197,6 +224,9 @@ package reproosImage:
     "glibc"
     "coreutils"
     "grub"
+    "kernel"
+    "musl"
+    "busybox"
 
   runtimeDeps:
     # M9.R.53: enumerate every bare-name host tool
