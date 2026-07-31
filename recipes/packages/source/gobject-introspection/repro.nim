@@ -191,6 +191,7 @@ package gobjectIntrospectionSource:
         configureOptions = opts,
         extraEnv = @[("PYTHONNOUSERSITE", "1")],
         srcPatches = @[
+          "sed -i '1s|.*|#!/usr/bin/env python3-with-modules|' src/tools/g-ir-tool-template.in",
           "sed -i \"s/if not os.path.isfile(os.path.join(pylibdir, 'giscanner', '_giscanner' + py_mod_suffix)):/if not os.path.isdir(os.path.join(pylibdir, 'giscanner')):/\" src/tools/g-ir-tool-template.in",
           # Nix's Meson carries support for private GIR install directories
           # through this scanner option. Keep the source-built scanner
