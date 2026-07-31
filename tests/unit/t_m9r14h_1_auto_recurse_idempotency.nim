@@ -206,3 +206,22 @@ suite "DSL-port M9.R.14h.1 — auto-recurse idempotency":
       syntheticUseDef("kernel"), recipeRoot = scratch)
 
     check outcome.kind == rrNeedsBuild
+
+  test "test_m9r14h_1_resolver_accepts_configuration_only_payload":
+    # ca-certificates publishes only an etc/ssl bundle. A completed
+    # configuration-only mirror must not recurse forever looking for a
+    # synthetic executable named after the package.
+    let scratch = createTempDir("repro-m9r14h-etc-payload-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "ca-certificates")
+    let certDir = scratch / "ca-certificates" / ".repro" / "output" /
+      "install" / "etc" / "ssl" / "certs"
+    createDir(certDir)
+    let expected = certDir / "ca-certificates.crt"
+    writeFile(expected, "synthetic certificate bundle")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("ca-certificates"), recipeRoot = scratch)
+
+    check outcome.kind == rrResolved
+    check outcome.profile.resolvedExecutablePath == absolutePath(expected)

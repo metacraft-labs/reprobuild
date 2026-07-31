@@ -4601,6 +4601,20 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
             resolved = absolutePath(entry)
             break sharedDataWalk
   if resolved.len == 0:
+    # Configuration-only packages can publish exclusively below etc/.
+    # ca-certificates is the canonical case: its completed artifact is
+    # etc/ssl/certs/ca-certificates.crt rather than an executable or
+    # library. Treat a regular staged configuration file as build evidence.
+    block configurationDataWalk:
+      for etcSubdir in [".repro/output/install/etc", "build/out/etc"]:
+        let etcRoot = recipeDir / etcSubdir
+        if not dirExists(extendedPath(etcRoot)):
+          continue
+        for entry in walkDirRec(extendedPath(etcRoot)):
+          if fileExists(extendedPath(entry)):
+            resolved = absolutePath(entry)
+            break configurationDataWalk
+  if resolved.len == 0:
     # Some non-executable system payloads live under a package-specific
     # lib directory instead of share/. The Linux kernel, for example,
     # publishes vmlinuz, System.map, and its module tree below
