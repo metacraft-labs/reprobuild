@@ -1122,6 +1122,85 @@ suite "repro_infra: planner action decision + partition":
     check decideAction(ResourceObservation(present: true,
       observedDigestHex: "ff"), "ff", destroy = true) == "destroy"
 
+  test "a converged fs.systemDirectory decides no-op, a drifted one updates":
+    # End-to-end at the planner's altitude: parse a `system.nim`
+    # stanza, take the desired digest the planner would compute, and
+    # feed it the digest the observer would produce for a live
+    # directory. A directory that already matches its declaration must
+    # decide `no-op`; when the two sides canonicalise different strings
+    # it can only ever decide `update`, so the resource is reported
+    # applied on every apply forever even though nothing changes.
+    let profile = parseSystemProfile("""
+fs.systemDirectory {
+  path = "C:\service-tokens"
+  aclOwner = "SYSTEM"
+  aclEntries = ["SYSTEM:(F)", "BUILTIN\Administrators:(F)"]
+  aclInheritance = "protected-clear-inherited"
+}
+""")
+    check profile.resources.len == 1
+    let op = toPrivilegedOperation(profile.resources[0])
+    let desired = desiredDigestForKind(op)
+    # Exactly what `observeFsSystemDirectory` hashes for a directory
+    # that exists with the given live DACL.
+    let convergedHex = posixDigestHexOfText(
+      "fs.systemDirectory:present|" &
+      canonicalDirAclObserved(true, op.fsdAclOwner, op.fsdAclEntries,
+        @["SYSTEM:(F)", "BUILTIN\\Administrators:(F)"], true,
+        op.fsdAclInheritance))
+    check decideAction(ResourceObservation(present: true,
+      observedDigestHex: convergedHex), desired,
+      destroy = false) == "no-op"
+    let driftedHex = posixDigestHexOfText(
+      "fs.systemDirectory:present|" &
+      canonicalDirAclObserved(true, op.fsdAclOwner, op.fsdAclEntries,
+        @["SYSTEM:(F)"], true, op.fsdAclInheritance))
+    check decideAction(ResourceObservation(present: true,
+      observedDigestHex: driftedHex), desired,
+      destroy = false) == "update"
+
+  test "a converged windows.service decides no-op, a drifted one updates":
+    let profile = parseSystemProfile("""
+windows.service {
+  name = "example.runner.service"
+  startType = Automatic
+  state = Running
+  displayName = "Example Runner"
+  binPath = "C:\runner\Runner.Listener.exe"
+  recoveryActions = ["restart:5000", "reboot:60000"]
+  recoveryResetSeconds = 86400
+}
+""")
+    check profile.resources.len == 1
+    let op = toPrivilegedOperation(profile.resources[0])
+    let desired = desiredDigestForKind(op)
+    var obs = ServiceObservation(present: true, startType: "Automatic",
+      running: true, displayName: "Example Runner",
+      binPath: "C:\\runner\\Runner.Listener.exe",
+      recoveryActions: @[
+        ServiceRecoveryActionObservation(action: "restart", delayMs: 5000),
+        ServiceRecoveryActionObservation(action: "reboot", delayMs: 60000)],
+      recoveryResetSeconds: 86400)
+    # Exactly what `observeWindowsService` hashes for a live service
+    # whose probe parsed to `obs`.
+    let convergedHex = digestHexOfText(canonicalServiceState(obs,
+      wantDisplayName = op.serviceDisplayName,
+      wantBinPath = op.serviceBinPath,
+      wantRecoveryActions = desiredServiceRecoverySlots(op),
+      wantRecoveryResetSeconds = op.serviceRecoveryResetSeconds))
+    check decideAction(ResourceObservation(present: true,
+      observedDigestHex: convergedHex), desired,
+      destroy = false) == "no-op"
+    obs.binPath = "C:\\stale\\Runner.Listener.exe"
+    let driftedHex = digestHexOfText(canonicalServiceState(obs,
+      wantDisplayName = op.serviceDisplayName,
+      wantBinPath = op.serviceBinPath,
+      wantRecoveryActions = desiredServiceRecoverySlots(op),
+      wantRecoveryResetSeconds = op.serviceRecoveryResetSeconds))
+    check decideAction(ResourceObservation(present: true,
+      observedDigestHex: driftedHex), desired,
+      destroy = false) == "update"
+
   test "every Windows system resource partitions as privileged":
     let profile = parseSystemProfile("""
 windows.optionalFeature { name = "Hyper-V" }

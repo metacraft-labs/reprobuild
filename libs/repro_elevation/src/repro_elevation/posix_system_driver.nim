@@ -200,13 +200,22 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       posixDigestHexOfText(op.sfContent)
   of pokFsSystemDirectory:
     # The directory has no content to digest the way `pokFsSystemFile`
-    # does. The driver's "present" sentinel is a fixed string so two
-    # observations of the same created directory hash identically; the
-    # destroy direction uses the absent sentinel.
+    # does. The desired payload is therefore the "present" sentinel,
+    # EXTENDED with the declared ACL exactly the way
+    # `observeFsSystemDirectory` extends the observed payload — both
+    # sides go through `fsSystemDirectoryDigestPayload`, so a converged
+    # directory digests equal on both sides and the planner reports a
+    # genuine no-op. When no ACL is declared (`fsdAclPresent == false`)
+    # the payload collapses to the bare `"fs.systemDirectory:present"`
+    # sentinel, byte-identical to the pre-ACL digest. The destroy
+    # direction uses the absent sentinel.
     if op.fsdDestroy:
       ZeroDigestHex
     else:
-      posixDigestHexOfText("fs.systemDirectory:present")
+      posixDigestHexOfText(fsSystemDirectoryDigestPayload(
+        present = true, aclPresent = op.fsdAclPresent,
+        aclOwner = op.fsdAclOwner, aclEntries = op.fsdAclEntries,
+        aclInheritance = op.fsdAclInheritance))
   of pokEnvSystemVariable:
     # The desired digest is over the JOINED CONTRIBUTION — the same
     # recorded-payload model `env.userPath` uses, so the broker's
@@ -1276,13 +1285,26 @@ when defined(linux) or defined(macosx):
 proc observePasswdUser*(op: PrivilegedOperation): ObservedOperationState =
   ## Re-observe a user account. `present` is true when the account
   ## exists; the digest covers the canonical observed state (uid,
-  ## home, shell, supplementary groups).
+  ## home, shell, supplementary groups) MASKED by whatever the
+  ## resource actually pinned.
+  ##
+  ## The mask is what makes the observation comparable to
+  ## `posixSystemDesiredDigestHex`'s `canonicalPasswdUserDesired`:
+  ## that renders every unpinned attribute as a literal `*`, and the
+  ## uid is never pinnable by the resource at all. Digesting the raw
+  ## observed values instead would put a real uid on one side and `*`
+  ## on the other, so an account that already matched its declaration
+  ## could never report a no-op. `applyPasswdUser` already returns the
+  ## masked digest for exactly this reason — observing unmasked also
+  ## made the recorded apply digest disagree with the next plan's
+  ## observation of an untouched account.
   when defined(linux) or defined(macosx):
     let obs = observePasswdUserRaw(op.puName)
     result.present = obs.present
     result.digestHex =
       if not obs.present: ZeroDigestHex
-      else: posixDigestHexOfText(canonicalPasswdUserState(obs))
+      else: posixDigestHexOfText(
+        canonicalPasswdUserStateMaskedBy(obs, desiredStateOf(op)))
   else:
     raiseNotImplementedPlatform("passwd.user observe")
 
