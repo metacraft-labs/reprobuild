@@ -240,6 +240,77 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       "/sysroot/include", "/sysroot/include/drm"]
     check paths.libDirs == @["/libdrm/lib", "/sysroot/lib"]
 
+  test "source toolchain headers use ordered compiler system flags":
+    let glibcRoot =
+      "/workspace/recipes/packages/source/glibc/.repro/output/install/usr/include"
+    let linuxRoot =
+      "/workspace/recipes/packages/source/linux-headers/.repro/output/install/usr/include"
+    let paths = ResolvedAuxPaths(includeDirs: @[
+      linuxRoot,
+      "/workspace/recipes/packages/source/gcc/.repro/output/install/usr/include/c++/14.2.0",
+      glibcRoot & "/x86_64-linux-gnu",
+      "/workspace/recipes/packages/source/libdrm/.repro/output/install/usr/include/libdrm",
+      glibcRoot])
+    let env = @[
+      "CPATH=/inherited/include",
+      "CPPFLAGS=-D_FILE_OFFSET_BITS=64",
+      "CFLAGS=-O2",
+      "CXXFLAGS=-O3"]
+    let result = applyResolvedAuxPathsArgv(env, paths)
+    let systemFlags =
+      "-idirafter " & glibcRoot & " -idirafter " & linuxRoot
+    check envValue(result, "CPATH") ==
+      "/workspace/recipes/packages/source/libdrm/.repro/output/install/usr/include/libdrm" &
+      Sep & "/inherited/include"
+    check envValue(result, "CPPFLAGS") ==
+      systemFlags & " -D_FILE_OFFSET_BITS=64"
+    check envValue(result, "CFLAGS") == systemFlags & " -O2"
+    check envValue(result, "CXXFLAGS") == systemFlags & " -O3"
+
+  test "StringTable source system-header projection mirrors argv env":
+    let glibcRoot =
+      "/workspace/recipes/packages/source/glibc/.repro/output/install/usr/include"
+    let linuxRoot =
+      "/workspace/recipes/packages/source/linux-headers/.repro/output/install/usr/include"
+    let paths = ResolvedAuxPaths(includeDirs: @[
+      "/workspace/recipes/packages/source/gcc/.repro/output/install/usr/include",
+      linuxRoot,
+      "/ordinary/include",
+      glibcRoot])
+    let table = newStringTable(modeCaseSensitive)
+    table["CPATH"] = "/inherited/include"
+    table["CPPFLAGS"] = "-DTEST"
+    table["CFLAGS"] = "-O1"
+    table["CXXFLAGS"] = "-O2"
+    applyResolvedAuxPathsTable(table, paths)
+    let systemFlags =
+      "-idirafter " & glibcRoot & " -idirafter " & linuxRoot
+    check table["CPATH"] == "/ordinary/include" & Sep & "/inherited/include"
+    check table["CPPFLAGS"] == systemFlags & " -DTEST"
+    check table["CFLAGS"] == systemFlags & " -O1"
+    check table["CXXFLAGS"] == systemFlags & " -O2"
+
+  test "direct GCC-family compiler actions receive system includes":
+    let glibcRoot = "/source/glibc/usr/include"
+    let linuxRoot = "/source/linux/usr/include"
+    let argv = @[
+      "/opt/repro/bin/repro", "internal", "io", "monitor",
+      "--depfile", "/tmp/action.rdep", "--",
+      "/source/gcc/bin/x86_64-linux-gnu-g++-14", "-c", "input.cc"]
+    let result = applyCompilerSystemIncludeArgs(argv,
+      @[glibcRoot, linuxRoot])
+    check result == @[
+      "/opt/repro/bin/repro", "internal", "io", "monitor",
+      "--depfile", "/tmp/action.rdep", "--",
+      "/source/gcc/bin/x86_64-linux-gnu-g++-14",
+      "-idirafter", glibcRoot, "-idirafter", linuxRoot,
+      "-c", "input.cc"]
+
+  test "non-compiler argv ignores system include projection":
+    let argv = @["meson", "compile", "-C", "build"]
+    check applyCompilerSystemIncludeArgs(argv,
+      @["/source/glibc/usr/include"]) == argv
+
 # ===========================================================================
 # DSL-port M9.R.15q.3.3 — env-var dedup against ARG_MAX explosion.
 # ===========================================================================

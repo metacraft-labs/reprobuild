@@ -2726,6 +2726,129 @@ proc runtimeSafeLibDirs(paths: ResolvedAuxPaths): seq[string] =
     if not isGlibcLibDir(path):
       result.add(path)
 
+type
+  CompilerIncludePaths = object
+    regularDirs: seq[string]
+    systemDirs: seq[string]
+
+proc partitionCompilerIncludePaths(paths: ResolvedAuxPaths):
+    CompilerIncludePaths =
+  ## GCC's C++ forwarding headers use ``#include_next`` to reach libc.
+  ## Putting a source libc in CPATH makes it appear before GCC's intrinsic
+  ## C++ headers, so include_next cannot find it. Keep package headers in
+  ## CPATH, but place source libc and kernel UAPI roots after GCC's intrinsic
+  ## headers with ``-idirafter``. GCC's own propagated include tree is omitted
+  ## because the selected compiler already contributes it intrinsically.
+  const sourceMarker = "/recipes/packages/source/"
+  var glibcRoots: seq[string] = @[]
+  var linuxRoots: seq[string] = @[]
+  for path in paths.includeDirs:
+    var normalized = path.replace('\\', '/')
+    while normalized.len > 1 and normalized.endsWith("/"):
+      normalized.setLen(normalized.len - 1)
+    let marker = normalized.find(sourceMarker)
+    if marker < 0:
+      result.regularDirs.add(path)
+      continue
+    let packageStart = marker + sourceMarker.len
+    let packageEnd = normalized.find('/', packageStart)
+    let packageName =
+      if packageEnd < 0: normalized[packageStart .. ^1]
+      else: normalized[packageStart ..< packageEnd]
+    case packageName
+    of "gcc":
+      discard
+    of "glibc":
+      if normalized.endsWith("/usr/include") and
+          normalized notin glibcRoots:
+        glibcRoots.add(normalized)
+    of "linux-headers":
+      if normalized.endsWith("/usr/include") and
+          normalized notin linuxRoots:
+        linuxRoots.add(normalized)
+    else:
+      result.regularDirs.add(path)
+  result.systemDirs = glibcRoots
+  result.systemDirs.add(linuxRoots)
+
+proc compilerSystemIncludeFlags(systemDirs: openArray[string]): seq[string] =
+  for path in systemDirs:
+    if path.len > 0:
+      result.add("-idirafter")
+      result.add(path)
+
+proc prependEnvFlags(table: StringTableRef; varName: string;
+                     flags: openArray[string]) =
+  if table == nil or flags.len == 0:
+    return
+  let prefix = @flags.join(" ")
+  let inherited =
+    if table.hasKey(varName): table[varName]
+    else: getEnv(varName)
+  table[varName] =
+    if inherited.len > 0: prefix & " " & inherited
+    else: prefix
+
+proc prependEnvFlagsToArgvEnv(env: seq[string]; varName: string;
+                              flags: openArray[string]): seq[string] =
+  if flags.len == 0:
+    return env
+  var inherited = getEnv(varName)
+  result = newSeqOfCap[string](env.len + 1)
+  for entry in env:
+    let equals = entry.find('=')
+    if equals > 0 and entry[0 ..< equals] == varName:
+      inherited = entry[equals + 1 .. ^1]
+    else:
+      result.add(entry)
+  let prefix = @flags.join(" ")
+  result.add(varName & "=" &
+    (if inherited.len > 0: prefix & " " & inherited else: prefix))
+
+proc compilerStemWithoutVersion(stem: string): string =
+  result = stem.toLowerAscii
+  let separator = result.rfind('-')
+  if separator < 0 or separator + 1 >= result.len:
+    return
+  var isVersion = true
+  for ch in result[separator + 1 .. ^1]:
+    if ch notin {'0'..'9', '.'}:
+      isVersion = false
+      break
+  if isVersion:
+    result.setLen(separator)
+
+proc isGccFamilyCompiler(stem: string): bool =
+  let candidate = compilerStemWithoutVersion(stem)
+  for compiler in ["gcc", "g++", "cc", "c++", "cpp"]:
+    if candidate == compiler or candidate.endsWith("-" & compiler):
+      return true
+
+proc applyCompilerSystemIncludeArgs*(argv: openArray[string];
+                                     systemDirs: openArray[string]):
+    seq[string] =
+  ## Environment flags cover build-system compiler launches. Mirror them onto
+  ## direct GCC-family actions, including io-monitor-wrapped commands.
+  result = @argv
+  if systemDirs.len == 0 or argv.len == 0:
+    return
+  var base = 0
+  for i in countdown(argv.len - 1, 0):
+    if argv[i] == "--":
+      base = i + 1
+      break
+  if base >= argv.len or not isGccFamilyCompiler(extractFilename(argv[base])):
+    return
+  let flags = compilerSystemIncludeFlags(systemDirs)
+  if flags.len == 0:
+    return
+  result = @[]
+  for i in 0 .. base:
+    result.add(argv[i])
+  result.add(flags)
+  for i in base + 1 ..< argv.len:
+    result.add(argv[i])
+
 proc applyResolvedAuxPathsTable*(env: StringTableRef;
                                  paths: ResolvedAuxPaths) =
   ## StringTable-style env mutator. Used by the bypass-spawn path. Each
@@ -2755,7 +2878,11 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   prependEnvDirs(env, "PKG_CONFIG_PATH_FOR_TARGET", paths.pkgConfigDirs)
   prependEnvDirs(env, "PKG_CONFIG_PATH_FOR_BUILD", paths.pkgConfigDirs)
   prependEnvDirs(env, "CMAKE_PREFIX_PATH", paths.cmakePrefixDirs)
-  prependEnvDirs(env, "CPATH", paths.includeDirs)
+  let includePaths = partitionCompilerIncludePaths(paths)
+  prependEnvDirs(env, "CPATH", includePaths.regularDirs)
+  let systemFlags = compilerSystemIncludeFlags(includePaths.systemDirs)
+  for varName in ["CPPFLAGS", "CFLAGS", "CXXFLAGS"]:
+    prependEnvFlags(env, varName, systemFlags)
   prependEnvDirs(env, "LIBRARY_PATH", paths.libDirs)
   # LD_LIBRARY_PATH covers run-time test execution; LIBRARY_PATH covers
   # link-time. Glibc outputs are link-only: loading an arbitrary dependency's
@@ -2794,7 +2921,12 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   result = prependEnvDirsToArgvEnv(result, "PKG_CONFIG_PATH_FOR_BUILD",
     paths.pkgConfigDirs)
   result = prependEnvDirsToArgvEnv(result, "CMAKE_PREFIX_PATH", paths.cmakePrefixDirs)
-  result = prependEnvDirsToArgvEnv(result, "CPATH", paths.includeDirs)
+  let includePaths = partitionCompilerIncludePaths(paths)
+  result = prependEnvDirsToArgvEnv(result, "CPATH",
+    includePaths.regularDirs)
+  let systemFlags = compilerSystemIncludeFlags(includePaths.systemDirs)
+  for varName in ["CPPFLAGS", "CFLAGS", "CXXFLAGS"]:
+    result = prependEnvFlagsToArgvEnv(result, varName, systemFlags)
   result = prependEnvDirsToArgvEnv(result, "LIBRARY_PATH", paths.libDirs)
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", runtimeLibDirs)
@@ -3277,10 +3409,13 @@ proc startBypassRunQuotaProcess(action: BuildAction;
   # SC-11 (§4.2a.3): thread the resolved Nim library source roots onto a
   # ``nim c`` argv as ``--path:<dir>`` flags before quoting (identity for a
   # non-Nim argv or when no cross-repo Nim library producer was resolved).
-  var nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
-  nimAdjustedArgv = deferRuntimeLibraryEnvForShell(nimAdjustedArgv, env)
+  let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
+  let includePaths = partitionCompilerIncludePaths(auxPaths)
+  var adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
+    includePaths.systemDirs)
+  adjustedArgv = deferRuntimeLibraryEnvForShell(adjustedArgv, env)
   var quotedArgv = ""
-  for i, a in nimAdjustedArgv:
+  for i, a in adjustedArgv:
     if i > 0: quotedArgv.add(" ")
     quotedArgv.add(quoteShell(a))
   let redirectedArgv =
@@ -3404,7 +3539,10 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
   var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
   threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
   let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
-  let deferred = deferRuntimeLibraryEnvForShell(nimAdjustedArgv, threadedEnv)
+  let includePaths = partitionCompilerIncludePaths(auxPaths)
+  let adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
+    includePaths.systemDirs)
+  let deferred = deferRuntimeLibraryEnvForShell(adjustedArgv, threadedEnv)
   # M9.R.36.3 — same umask-022 pin we apply on the bypass path. The
   # runquota helper forwards ``command.argv`` straight through to its
   # ``launchProcess`` call site, so without this wrap the daemon-mode
@@ -3444,7 +3582,10 @@ proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
   var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
   threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
   let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
-  let deferred = deferRuntimeLibraryEnvForShell(nimAdjustedArgv, threadedEnv)
+  let includePaths = partitionCompilerIncludePaths(auxPaths)
+  let adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
+    includePaths.systemDirs)
+  let deferred = deferRuntimeLibraryEnvForShell(adjustedArgv, threadedEnv)
   # M9.R.36.3 — apply the same umask-022 wrap the helper-spawn and
   # bypass paths use. The inline-runquota path likewise forwards
   # ``command.argv`` to ``launchProcess`` inside the helper / inline
