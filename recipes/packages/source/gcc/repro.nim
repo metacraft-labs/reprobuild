@@ -288,10 +288,17 @@ package gccSource:
       # Build step — drives the generated ``Makefile``s with a fixed
       # job count. Keeping the value explicit makes the action and its
       # cache identity independent of host CPU discovery.
-      shell "cd $extracted/build && make -j8"
+      # GCC's libcpp intentionally forwards diagnostic text as a format
+      # string. The Nix compiler wrapper's format hardening turns those
+      # upstream calls into errors independently of GCC's --disable-werror.
+      # Keep the remaining upstream/Nix build flags while disabling that
+      # wrapper-only injection for the compiler build. GCC's freshly linked
+      # cc1 binaries also need the source-built arithmetic libraries while
+      # running their build-time self-tests.
+      shell "source_libs=$extracted/../../mpc/.repro/output/install/usr/lib:$extracted/../../mpfr/.repro/output/install/usr/lib:$extracted/../../gmp/.repro/output/install/usr/lib; cd $extracted/build && LD_LIBRARY_PATH=$source_libs NIX_HARDENING_ENABLE= make -j8"
       # Install step — copies the binaries + libraries + libexec
       # tree under ``$out/bin/`` + ``$out/lib/`` + ``$out/libexec/``.
-      shell "cd $extracted/build && make install"
+      shell "source_libs=$extracted/../../mpc/.repro/output/install/usr/lib:$extracted/../../mpfr/.repro/output/install/usr/lib:$extracted/../../gmp/.repro/output/install/usr/lib; cd $extracted/build && LD_LIBRARY_PATH=$source_libs make install"
       # GCC uses lib64 for x86_64 target runtimes. Publish stable lib
       # aliases so declared library artifacts resolve consistently.
       shell "mkdir -p $out/lib; for runtime in libgcc_s.so libgcc_s.so.1 libstdc++.so libstdc++.so.6 libgomp.so libgomp.so.1 libatomic.so libatomic.so.1; do test -e $out/lib64/$runtime; ln -sfn ../lib64/$runtime $out/lib/$runtime; done"
