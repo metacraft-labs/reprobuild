@@ -5297,6 +5297,23 @@ type
     projectRoot: string
     outDir: string
     buildReportPath: string
+    inputEvidencePaths: seq[string]
+      ## Every input path the just-finished run observed, harvested
+      ## straight off ``BuildRunResult.results[].evidence`` (declared +
+      ## depfile + monitor reads/probes).
+      ##
+      ## ``repro watch`` arms its filesystem watcher from this set, so it
+      ## must NOT be derived from the persisted build report: report
+      ## persistence is an operator PRESENTATION choice
+      ## (``--write-report`` / ``--no-write-report``), while the watched
+      ## path set is operational input the watch loop cannot function
+      ## without. Reading it from the report file made
+      ## ``repro watch`` silently blind to every source file outside the
+      ## project's own directory whenever the operator did not pass
+      ## ``--write-report`` — the watcher then armed on the project file
+      ## plus its parent only, and inotify/kqueue directory watches are
+      ## not recursive, so an edit under ``src/`` produced no event and
+      ## the loop blocked forever.
 
   BuildCommandEventSink = proc(kind, message, payloadJson: string)
   WatchCommandEventSink = proc(kind, message, payloadJson: string;
@@ -6594,6 +6611,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if ownsFromSourceDryRunPlan:
       fromSourceDryRunPlannedRecipes.clear()
 
+  # Input evidence harvested off every engine run this call makes, so
+  # ``repro watch`` can arm its watcher without depending on whether the
+  # operator asked for a persisted report. Accumulated here rather than
+  # assigned to ``result`` directly because ``runLoweredGraphBuild``
+  # below is a nested proc whose own ``result`` is an ``int``.
+  var collectedInputEvidence: seq[string] = @[]
+
+  proc collectInputEvidence(buildResult: BuildRunResult) =
+    for item in buildResult.results:
+      for group in [item.evidence.declaredInputs, item.evidence.depfileInputs,
+          item.evidence.monitorReads, item.evidence.monitorProbes]:
+        for path in group:
+          collectedInputEvidence.add(path)
+
   proc runLoweredGraphBuild(lowered: tuple[actions: seq[BuildAction];
                                           pools: seq[BuildPool]];
                             selectedActionId: string): int =
@@ -6746,6 +6777,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro action log render",
       actionLogStart)
     buildResult.stats = buildStats
+    collectInputEvidence(buildResult)
     recordStatsForBuildRun(buildResult)
     if buildResult.hasFailedActions():
       emitFailedActionSummaries(buildResult, eventSink, progressRenderer)
@@ -6887,6 +6919,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       logSummary("loweredGraphCache: hit")
       result.exitCode = runLoweredGraphBuild(loweredCache.get(),
         cacheSelectedActionId)
+      result.inputEvidencePaths = collectedInputEvidence
       return
 
   # Tier 2a fast path: stereotyped CMake try_compile() projects ship a
@@ -6974,6 +7007,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       result.exitCode = 0
       return
     result.exitCode = runLoweredGraphBuild(lowered, selectedActionId)
+    result.inputEvidencePaths = collectedInputEvidence
     return
 
   let interfacePath = outDir / "project-interface.rbsz"
@@ -7624,6 +7658,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             result.projectRoot, selectorList)
       finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
       result.exitCode = runLoweredGraphBuild(lowered, selectedActionId)
+      result.inputEvidencePaths = collectedInputEvidence
       return
     else:
       logSummary("standardDirect: provider binary missing; falling back to " &
@@ -8137,6 +8172,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro action log render",
       actionLogStart)
     buildResult.stats = buildStats
+    collectInputEvidence(buildResult)
+    result.inputEvidencePaths = collectedInputEvidence
     recordStatsForBuildRun(buildResult)
     if buildResult.hasFailedActions():
       emitFailedActionSummaries(buildResult, eventSink, progressRenderer)
@@ -8176,9 +8213,16 @@ proc addWatchCandidate(paths: var HashSet[string]; projectRoot, path: string) =
   if parent.len > 0 and not parent.isUnderReproDir():
     paths.incl(parent)
 
-proc watchPathsFromReport(outcome: BuildCommandOutcome): seq[string] =
+proc watchPathsFromOutcome(outcome: BuildCommandOutcome): seq[string] =
+  ## The path set ``repro watch`` arms its filesystem watcher over: the
+  ## project file plus every input the run observed. The in-memory
+  ## evidence is the primary source (always collected); the persisted
+  ## report is read as well so a caller that has one loses nothing, but
+  ## it is never the only source — see ``inputEvidencePaths``.
   var paths = initHashSet[string]()
   addWatchCandidate(paths, outcome.projectRoot, outcome.modulePath)
+  for item in outcome.inputEvidencePaths:
+    addWatchCandidate(paths, outcome.projectRoot, item)
   if outcome.buildReportPath.len > 0 and fileExists(extendedPath(outcome.buildReportPath)):
     let report = parseFile(outcome.buildReportPath)
     for action in report{"actions"}:
@@ -19326,7 +19370,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   # the shared ``parseAndResolveSelectors`` helper. The resolver turns
   # ``repro watch name1 name2`` into the project anchor + the union of
   # every name's dependency closure; ``lowerProviderSnapshot`` then
-  # builds them in one engine pass and ``watchPathsFromReport`` unions
+  # builds them in one engine pass and ``watchPathsFromOutcome`` unions
   # the inputs so the watcher monitors every selected closure.
   # ----------------------------------------------------------------
   let resolved = parseAndResolveSelectors(positionalSelectors, "repro watch")
@@ -19630,7 +19674,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
           })
         return 0
 
-      let paths = watchPathsFromReport(outcome)
+      let paths = watchPathsFromOutcome(outcome)
       ctLastWatchPaths = paths
       var watcher = openFilesystemWatcher(paths)
       try:

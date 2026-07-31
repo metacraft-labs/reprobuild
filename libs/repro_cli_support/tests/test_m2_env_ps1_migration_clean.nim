@@ -7,9 +7,10 @@
 ## the M70 CLI uses on Windows hosts) and asserts the post-M2 outcome
 ## distribution per the M2 spec table:
 ##
-##   - 10 env-file lines total
-##   - 3 moIgnored from the M70 ``IgnoredEnvVars`` list
-##     (JDK_BUILD, VULKAN_HEADERS_VERSION, MESA_VERSION)
+##   - 13 env-file lines total
+##   - 6 moIgnored from the M70 ``IgnoredEnvVars`` list
+##     (JDK_BUILD, VULKAN_HEADERS_VERSION, MESA_VERSION,
+##     CLINGO_VERSION, CLINGO_BUILD_STRING, CLINGO_SHA256)
 ##   - 7 catalog-eligible
 ##     - 6 moMigrate (jdk, maven, gradle, zig, go, fpc)
 ##     - 1 moDeferred (swift — the M70 deferred-8 contract;
@@ -90,6 +91,15 @@ const ExpectedIgnoredSet = [
   "VULKAN_HEADERS_VERSION",
   "MESA_VERSION",
   "MSYS2_AUTOTOOLS_VERSION",  # future system-profile track per M70
+  # clingo is a hard runtime prerequisite of ``repro`` itself, not a
+  # home-profile toolchain: ``repro_solver`` dlopens libclingo at module
+  # init, so it must exist before a migrated ``home.nim`` could be
+  # applied. Its catalog entry is deliberately unwired and
+  # ``windows/ensure-clingo.ps1`` owns the install; the three keys form
+  # one pin for that provisioner.
+  "CLINGO_VERSION",
+  "CLINGO_BUILD_STRING",
+  "CLINGO_SHA256",
 ]
 
 # Catalog-eligible, non-deferred tools the current
@@ -135,19 +145,22 @@ suite "M2 — real toolchain-versions.env reconciles per the decision table":
     check envFilePath.len > 0
     check fileExists(envFilePath)
 
-  test "real env file parses to the expected 10 pins":
+  test "real env file parses to the expected 13 pins":
     let parsed = loadEnvFile(envFilePath)
     # Pin count tracks the current ``windows/toolchain-versions.env``:
     # 10 lines after just/gh/python/git_repo were delegated to the
-    # framework and go/vulkan/mesa/fpc were added.
-    check parsed.pins.len == 10
+    # framework and go/vulkan/mesa/fpc were added, plus the three
+    # CLINGO_* keys the self-contained-clingo change introduced.
+    check parsed.pins.len == 13
 
   test "post-M2 migrator reports the expected outcome distribution":
     let parsed = loadEnvFile(envFilePath)
     let plan = planMigration(parsed, "migrated_from_env_scripts",
       initHashSet[string]())
     let s = summarize(plan)
-    check s.ignored == 3
+    # JDK_BUILD + VULKAN_HEADERS_VERSION + MESA_VERSION + the three
+    # CLINGO_* provisioner keys.
+    check s.ignored == 6
     check s.migrated == 6
     check s.deferred == 1
     check s.missingVersion == 0

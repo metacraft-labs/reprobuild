@@ -89,7 +89,12 @@ suite "ReproOS source bridge inventory":
     check "SOURCE_GLIBC_LOADER" in stageScript
     check "SOURCE_GLIBC_VERSION" in stageScript
     check "source_runtime_elf" in stageScript
-    check "source_glibc_supports_interpreter" in stageScript
+    # The predicate that decides whether a bootstrap interpreter may be
+    # normalised onto the source loader. It shares its name and its
+    # comparison with `is_compatible_bootstrap_glibc` in
+    # relocate-nix-to-repro.sh, so both halves of the decision stay driven
+    # by the version derived above rather than by a hardcoded literal.
+    check "is_compatible_bootstrap_glibc_interpreter" in stageScript
     check "\"$SOURCE_GLIBC_LOADER\"" in stageScript
     check "required source coreutils binary missing" in stageScript
     check "required source kernel payload missing" in stageScript

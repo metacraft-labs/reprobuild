@@ -186,10 +186,14 @@ package kernelSource:
   nativeBuildDeps:
     ## gcc is the host C toolchain — kbuild assumes a C11-capable gcc
     ## for kernel 6.x. R8 Tier-2 reference uses jammy gcc 11.4.
+    ##
+    ## binutils (``ld`` / ``as`` / ``objcopy`` / ``nm``, which kbuild
+    ## invokes to link the kernel ELF and strip the bootable bzImage) is
+    ## NOT declared separately: it travels with the C toolchain, which is
+    ## the convention every other from-source recipe in this tree follows
+    ## — only ``gcc`` and ``glibc`` (which bootstrap the toolchain) name
+    ## binutils explicitly.
     "gcc >=12"
-    ## binutils provides ``ld`` / ``as`` / ``objcopy`` / ``nm`` that
-    ## kbuild invokes for linking the kernel ELF and stripping the
-    ## bootable bzImage.
     ## make is the kbuild driver — the c_cpp_make convention's
     ## compile action invokes ``make`` against the extracted source
     ## tree. ``make >=4.3`` is needed for kbuild's grouped-targets
@@ -207,24 +211,26 @@ package kernelSource:
     "perl >=5.32"
 
   buildDeps:
-    ## libelf is consumed by kbuild's ``objtool`` (in tools/objtool)
-    ## for the CONFIG_STACK_VALIDATION pass that rewrites .o files
-    ## to add unwind metadata.
-    ## openssl provides libssl, consumed by kbuild's certificate-
-    ## handling code (the ``CONFIG_MODULE_SIG`` family); even with
-    ## module signing disabled, the build occasionally invokes openssl
-    ## helpers via ``scripts/sign-file``. Recipe name ``openssl``
-    ## matches the sibling source recipe.
+    ## libelf is consumed by kbuild's ``objtool`` (in tools/objtool);
+    ## kbuild's own configure probe wants it present even though the
+    ## ``build:`` block disables ``STACK_VALIDATION``.
+    "libelf >=0.187"
     ## bc is the arbitrary-precision calculator kbuild's
     ## ``kernel/timeconst.bc`` script invokes to compute jiffies
     ## constants at build time. Required from 4.x onwards.
-    ## kmod provides ``depmod`` / ``modprobe`` that the modules-
-    ## install pass invokes (when modules are emitted; deferred for
-    ## v1 per the honest-deferrals comment).
-    ## rsync is invoked by ``make headers_install`` and (in some
-    ## configs) by the modules-install step.
-    "libelf >=0.187"
     "bc"
+    ##
+    ## Deliberately NOT declared, because the ``build:`` block's
+    ## configuration never reaches the code paths that would need them:
+    ##
+    ##   * ``openssl`` — only kbuild's certificate handling links libssl,
+    ##     and the config pass disables ``MODULE_SIG``,
+    ##     ``SYSTEM_TRUSTED_KEYS`` and ``SYSTEM_REVOCATION_KEYS``, so
+    ##     ``scripts/sign-file`` is never built or run.
+    ##   * ``kmod`` — the ``repro_install`` target passes ``DEPMOD=true``,
+    ##     so ``modules_install`` never shells out to ``depmod``.
+    ##   * ``rsync`` — ``make headers_install`` is not part of the
+    ##     install target.
 
   config:
     ## No prefix lifted from `makeFlags:`; flags inlined in the `build:` block.

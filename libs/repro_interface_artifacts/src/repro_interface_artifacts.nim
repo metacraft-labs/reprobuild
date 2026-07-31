@@ -1817,6 +1817,38 @@ proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path), code)
 
+when compileOption("threads"):
+  import std/locks
+
+  var spawnWorkingDirLock: Lock
+  spawnWorkingDirLock.initLock()
+
+template withSpawnWorkingDir(body: untyped) =
+  ## Serialise `startProcess(workingDir = ...)` against itself.
+  ##
+  ## On POSIX, `osproc.startProcess` applies `workingDir` by calling
+  ## `setCurrentDir` in the PARENT, spawning, and then restoring the old
+  ## directory (`startProcessAuxSpawn`; the posix_spawn path has no
+  ## per-spawn chdir file action). The current directory is a
+  ## process-global, so two threads spawning concurrently with different
+  ## `workingDir` values race: whichever chdir lands last wins for BOTH
+  ## children, and the second spawn's child silently inherits the first
+  ## one's directory.
+  ##
+  ## `compileProviderBinary` allocates a private compiler CWD per provider
+  ## compile precisely because `nim` writes its linker response files
+  ## (`*_linkerArgs.txt`) relative to the current directory — two compiles
+  ## landing in one directory clobber each other's response file. Holding
+  ## this lock across the whole `startProcess` call keeps the chdir /
+  ## spawn / restore triple atomic, so the private CWD is exclusive in
+  ## fact and not merely by luck. Only the spawn itself is serialised;
+  ## the compiles that follow still run concurrently.
+  when compileOption("threads"):
+    withLock spawnWorkingDirLock:
+      body
+  else:
+    body
+
 proc shellQuote(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
 
@@ -1886,9 +1918,11 @@ proc runCommand(command: openArray[string];
       effectiveCommand.mapIt(cmdExeShellEscape(it)).join(" ") &
       " > " & cmdExeShellEscape(sinkPath) & " 2>&1\r\n"
     writeFile(extendedPath(scriptPath), scriptBody)
-    var process = startProcess("cmd.exe",
-      args = @["/c", scriptPath],
-      workingDir = cwd, options = {poUsePath})
+    var process: Process
+    withSpawnWorkingDir:
+      process = startProcess("cmd.exe",
+        args = @["/c", scriptPath],
+        workingDir = cwd, options = {poUsePath})
     let exitCode = process.waitForExit()
     process.close()
     try:
@@ -1914,10 +1948,12 @@ proc runCommand(command: openArray[string];
       exitCode: exitCode,
       output: output)
   else:
-    let process = startProcess(command[0],
-      args = command[1 .. ^1],
-      workingDir = cwd,
-      options = {poUsePath, poStdErrToStdOut})
+    var process: Process
+    withSpawnWorkingDir:
+      process = startProcess(command[0],
+        args = command[1 .. ^1],
+        workingDir = cwd,
+        options = {poUsePath, poStdErrToStdOut})
     var output = ""
     if process.outputStream != nil:
       output = process.outputStream.readAll()
