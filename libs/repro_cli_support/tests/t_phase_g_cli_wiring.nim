@@ -147,7 +147,7 @@ suite "Windows-System-Resources Phase G — CLI wiring":
     var opts = ApplyOptions(stateDir: tmp, hostIdentity: "phaseG-cli-host")
     cli_infra.attachBuildActionDispatcher(opts, actions, tmp)
     check opts.buildActionDispatcher != nil
-    let outcomes = opts.buildActionDispatcher(opts.buildActions)
+    let outcomes = opts.buildActionDispatcher(opts.buildActions, nil)
     # One outcome per input action — the dispatcher's hard contract
     # (see ``BuildActionDispatcher``'s docstring in
     # ``libs/repro_infra/src/repro_infra/apply.nim``).

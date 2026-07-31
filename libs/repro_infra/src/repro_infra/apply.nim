@@ -25,14 +25,10 @@
 
 import std/[os, strutils, times]
 
-when defined(windows):
-  import std/winlean
-else:
-  import std/posix
-
 import repro_elevation
 import repro_profile
 
+import ./apply_lock
 import ./audit_log
 import ./errors
 import ./gen_envelope
@@ -40,6 +36,8 @@ import ./plan_envelope
 import ./planner
 import ./profile
 import ./state_dir
+
+export apply_lock
 
 type
   ElevationMode* = enum
@@ -97,7 +95,8 @@ type
       ## address and verdict, it just cannot explain a miss.
     diagnostic*: string
 
-  BuildActionDispatcher* = proc(actions: seq[ProfileBuildAction]):
+  BuildActionDispatcher* = proc(actions: seq[ProfileBuildAction];
+                                onProgress: ApplyProgressHook):
       seq[BuildActionApplyOutcome] {.gcsafe.}
     ## Windows-System-Resources Phase G: caller-supplied closure that
     ## drives the action-edge half of the apply. The dispatcher takes
@@ -106,6 +105,13 @@ type
     ## ``repro_profile_compile.mkInfraApplyBrokerSpawn(ctx)``), runs
     ## ``runBuild`` against it, and projects each per-edge
     ## ``ActionResult`` into a ``BuildActionApplyOutcome``.
+    ##
+    ## ``onProgress`` MUST be invoked once per resolved action edge (it
+    ## may be ``nil``). The action-edge half is otherwise a single
+    ## opaque call across every edge in the profile, and the apply lock
+    ## would fall silent for its whole duration — see
+    ## ``apply_lock.nim``. Reporting per edge is what makes "no beat
+    ## for N seconds" mean STUCK rather than BUSY.
     ##
     ## Living the dispatcher behind a typed closure (rather than
     ## hard-coding ``runBuild`` here) keeps ``repro_infra`` from
@@ -200,105 +206,6 @@ type
       ## dispatcher was not wired (the latter case raises ``EProtocol``
       ## at apply time so this seq stays empty only for genuine no-op
       ## cases).
-
-# ---------------------------------------------------------------------------
-# A per-host apply lock (file presence + owner PID). Concurrent system
-# applies are serialized through `<state-dir>/locks/apply.lock` per the
-# spec's validation criterion.
-#
-# The lock MUST be reclaimable. It is an ordinary file, so any owner that
-# dies without reaching `releaseApplyLock` — a crash, a SIGKILL, a severed
-# SSH session that orphans a remote apply, a service-manager start timeout —
-# leaves the file behind. Treating mere presence as "busy" then refuses
-# EVERY subsequent apply forever, with no self-healing path.
-#
-# That is not hypothetical: an interrupted apply on a Windows runner left a
-# dead PID in `C:\ProgramData\repro\system\locks\apply.lock` and blocked all
-# applies for three weeks, until an operator deleted the file by hand. The
-# host silently stopped converging the whole time.
-#
-# So: consult the recorded owner. A lock whose owner is gone (or whose
-# contents are unreadable//malformed, which can only mean a partially
-# written or corrupted lock) is stale and is reclaimed.
-#
-# NOTE: this is a cooperative advisory lock, and the check-then-write below
-# is not atomic — it serializes ordinary sequential applies, which is what
-# the spec asks for. `repro_system_apply/locks.nim` holds the stronger
-# OS-level primitive (exclusive `CreateFileW` / `flock`, released by the
-# kernel on process death) if strict mutual exclusion is ever required here.
-# ---------------------------------------------------------------------------
-
-when defined(windows):
-  const
-    StillActive: DWORD = 259
-    ProcessQueryLimitedInformation: DWORD = 0x1000
-    # Win32 code returned by OpenProcess for a pid that does not exist.
-    # Declared here because std/winlean does not export it.
-    ErrorInvalidParameter: int32 = 87
-
-  proc openProcessK32(desiredAccess: DWORD; inheritHandle: WINBOOL;
-                      processId: DWORD): Handle
-    {.importc: "OpenProcess", stdcall, dynlib: "kernel32".}
-
-  proc getExitCodeProcessK32(process: Handle; exitCode: ptr DWORD): WINBOOL
-    {.importc: "GetExitCodeProcess", stdcall, dynlib: "kernel32".}
-
-proc processAlive(pid: int): bool =
-  ## True when a process with `pid` currently exists.
-  ##
-  ## Deliberately conservative: anything we cannot positively establish as
-  ## dead is reported ALIVE, so an unexpected probe failure preserves the
-  ## lock rather than letting two applies run concurrently.
-  if pid <= 0:
-    return false
-  when defined(windows):
-    let h = openProcessK32(ProcessQueryLimitedInformation, 0, DWORD(pid))
-    if h == 0:
-      # Cannot open: the process is gone (ERROR_INVALID_PARAMETER) or we
-      # lack rights to it (ERROR_ACCESS_DENIED). Access-denied implies it
-      # EXISTS, so only treat "not found" as dead.
-      return getLastError() != ErrorInvalidParameter
-    defer: discard closeHandle(h)
-    var code: DWORD = 0
-    if getExitCodeProcessK32(h, addr code) == 0:
-      return true
-    code == StillActive
-  else:
-    # kill(pid, 0) performs the permission + existence checks without
-    # sending a signal: ESRCH means gone, EPERM means it exists but is
-    # owned by another user.
-    if posix.kill(Pid(pid), cint(0)) == 0:
-      return true
-    errno != ESRCH
-
-proc applyLockOwner*(stateDir: string): int =
-  ## PID recorded in the apply lock, or 0 when absent/unparseable.
-  let lockPath = applyLockPath(stateDir)
-  if not fileExists(lockPath):
-    return 0
-  try:
-    result = parseInt(readFile(lockPath).strip())
-  except ValueError, IOError, OSError:
-    result = 0
-
-proc acquireApplyLock*(stateDir: string): bool =
-  ## Returns true when the lock was acquired. The lock file holds the
-  ## PID; a stale lock from a dead process is reclaimed.
-  ensureSystemStateDir(stateDir)
-  let lockPath = applyLockPath(stateDir)
-  if fileExists(lockPath):
-    let owner = applyLockOwner(stateDir)
-    # owner == 0 => unreadable/malformed lock; nobody can prove ownership,
-    # so it is reclaimable rather than a permanent wedge.
-    if owner != 0 and owner != getCurrentProcessId() and processAlive(owner):
-      return false
-  writeFile(lockPath, $getCurrentProcessId())
-  true
-
-proc releaseApplyLock*(stateDir: string) =
-  let lockPath = applyLockPath(stateDir)
-  if fileExists(lockPath):
-    try: removeFile(lockPath) except OSError: discard
 
 # ---------------------------------------------------------------------------
 # Generation-id derivation. A 32-hex-char id over the profile digest +
@@ -426,6 +333,20 @@ proc writeAuditRecords(logPath: string;
 # The apply.
 # ---------------------------------------------------------------------------
 
+proc applyLockBeat(stateDir: string): ApplyProgressHook =
+  ## The per-unit-of-work progress hook the apply hands to the broker /
+  ## in-process dispatcher / build-action dispatcher. Each call refreshes
+  ## the apply lock's heartbeat, which is what proves to a LATER acquirer
+  ## that this apply is moving rather than hung (``apply_lock.nim``).
+  ##
+  ## `refreshApplyLock` is a no-op when this process does not hold the
+  ## lock (library tests, in-process drivers), so the hook is always safe
+  ## to install.
+  let dir = stateDir
+  result = proc() {.gcsafe.} =
+    {.cast(gcsafe).}:
+      discard refreshApplyLock(dir)
+
 proc dispatchBuildActions(opts: ApplyOptions; result: var ApplyResult) =
   ## Windows-System-Resources Phase G: action-edge half of the apply.
   ## Runs BEFORE the live-state dispatch so a profile that extracts an
@@ -460,7 +381,10 @@ proc dispatchBuildActions(opts: ApplyOptions; result: var ApplyResult) =
       "cannot run without a dispatcher (no silent fallback). Construct " &
       "one via repro_profile_compile.mkBuildActionDispatcher(...) " &
       "before calling runInfraApply.")
-  let outcomes = opts.buildActionDispatcher(opts.buildActions)
+  # The dispatcher beats the apply lock once per resolved edge, so a
+  # profile with a long action-edge half never falls silent.
+  let outcomes = opts.buildActionDispatcher(
+    opts.buildActions, applyLockBeat(opts.stateDir))
   result.buildActionResults = outcomes
   for o in outcomes:
     if not o.ok:
@@ -494,7 +418,20 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   ##   2. partition the effective operations.
   ##   3. apply: already-elevated fast path | one broker | skip.
   ##   4. write the RBSL audit log + commit the generation pointer.
+  ##
+  ## Throughout, the apply refreshes the lock's progress heartbeat —
+  ## once per step boundary AND, crucially, once per UNIT OF WORK inside
+  ## the two unbounded steps: every action edge in step 0 and every
+  ## privileged operation in step 3. Step boundaries alone are not
+  ## enough: a profile with a large privileged set would run for hours
+  ## between beat 4 and beat 5 and look exactly like a hung apply to the
+  ## next acquirer. See ``apply_lock.nim``.
+  ##
+  ## `refreshApplyLock` is a no-op when this process does not hold the
+  ## lock (library tests, in-process drivers), so every beat is safe to
+  ## issue unconditionally.
   resetBrokerLaunchCount()
+  refreshApplyLock(opts.stateDir)
 
   # --- 0. Action-edge half (Windows-System-Resources Phase G). ---
   # Per spec § 2.3, action edges and live-state resources share one
@@ -503,6 +440,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   # FIRST so a downstream live-state resource (a service that points
   # at an extracted binary) sees the extraction side effect.
   dispatchBuildActions(opts, result)
+  refreshApplyLock(opts.stateDir)
 
   # --- 1. Resolve the plan. ---
   var env: PlanEnvelope
@@ -526,6 +464,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     # Persist the fresh plan so the apply is auditable by id.
     writePlanFile(planPath(opts.stateDir, env.planId), env)
   result.planId = env.planId
+  refreshApplyLock(opts.stateDir)
 
   # --- 2. Partition the effective operations. ---
   var planned = plannedOperationsFor(profileText, env)
@@ -564,8 +503,15 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
       for p in planned: ops.add(p.operation)
       ops,
     nonPrivilegedOperationCount = 0)
+  refreshApplyLock(opts.stateDir)
 
   # --- 3. Apply the privileged set. ---
+  # The privileged set is the longest unbounded stretch of the apply: a
+  # profile that installs a Visual Studio workload plus its siblings can
+  # run for hours in here. Both dispatch paths therefore beat the lock
+  # once per COMPLETED operation, so the silence a later acquirer has to
+  # interpret is bounded by ONE operation rather than the whole set.
+  let beat = applyLockBeat(opts.stateDir)
   var outcome: PrivilegedApplyOutcome
   if not partition.hasPrivilegedWork():
     # Nothing privileged: no broker, no prompt.
@@ -573,7 +519,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   elif opts.elevationMode == emNoElevate:
     # --no-elevate: apply the non-privileged subset (none, for a
     # pure-Windows profile) and report every privileged op skipped.
-    outcome = reportPrivilegedSetSkipped(planned)
+    outcome = reportPrivilegedSetSkipped(planned, onProgress = beat)
     result.usedBroker = false
   else:
     let alreadyElevated = isProcessElevated()
@@ -581,22 +527,24 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
       # Already-elevated fast path: run the privileged set in-process,
       # no broker, no prompt.
       outcome = applyPrivilegedSetInProcess(
-        FixtureContext(), planned)
+        FixtureContext(), planned, onProgress = beat)
       result.usedBroker = false
     else:
       # Launch EXACTLY ONE broker. A declined prompt is equivalent to
       # --no-elevate (a clean partial result, not a crash).
       try:
-        let brokerApply = launchAndDriveBroker(opts.reproExe, planned)
+        let brokerApply = launchAndDriveBroker(opts.reproExe, planned,
+          onProgress = beat)
         outcome = brokerApply.outcome
         result.usedBroker = true
       except EElevationDeclined:
-        outcome = reportPrivilegedSetSkipped(planned)
+        outcome = reportPrivilegedSetSkipped(planned, onProgress = beat)
         result.diagnostics.add(
           "the elevation prompt was declined; privileged operations " &
           "were skipped (equivalent to --no-elevate)")
         result.usedBroker = false
   result.brokerLaunchCount = brokerLaunchCount()
+  refreshApplyLock(opts.stateDir)
 
   # --- Tally the outcome. ---
   for r in outcome.results:
@@ -648,6 +596,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   # The generation pointer / `current` marker is updated by the
   # NON-elevated parent (this proc), never the broker.
   writeCurrentGenerationId(opts.stateDir, generationId)
+  refreshApplyLock(opts.stateDir)
   for d in outcome.results:
     if d.driftDetected or (not d.ok and "requires elevation" notin
         d.diagnostic):

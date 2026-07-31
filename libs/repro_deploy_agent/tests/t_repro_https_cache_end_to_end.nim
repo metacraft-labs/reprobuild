@@ -352,7 +352,7 @@ suite "M7 — repro consumes the HTTPS binary cache end-to-end (M4 + M5 over TLS
         createDir(cwd1); createDir(cacheRoot1)
         let ctx1 = FixtureContext(filePrefix: tmpRoot / "m4-ctx1")
         let disp1 = mkBuildActionDispatcher(cacheRoot1, ctx1)
-        let out1 = disp1(@[m4Action(cwd1)])
+        let out1 = disp1(@[m4Action(cwd1)], nil)
         check out1.len == 1
         if not out1[0].ok:
           echo "M4 RUN1 DIAGNOSTIC: ", out1[0].diagnostic
@@ -376,7 +376,7 @@ suite "M7 — repro consumes the HTTPS binary cache end-to-end (M4 + M5 over TLS
         # substitute over https:// is what must not raise; the ``raised``
         # flag proves that ssl is linked (an ssl-less build raises here).
         try:
-          let out2 = disp2(@[m4Action(cwd2)])
+          let out2 = disp2(@[m4Action(cwd2)], nil)
           check out2.len == 1
           check out2[0].ok
           # THE M4-over-HTTPS ASSERTION: served from the TLS cache.
