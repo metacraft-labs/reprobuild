@@ -688,9 +688,33 @@ proc restoreOutputs*(cas: LocalCas; record: ActionResultRecord;
     # preserve ACLs / read-only attribute via icacls / SetFileAttributes.
     when not defined(windows):
       setFilePermissions(extendedPath(tmpPath), output.permissions)
-    if fileExists(extendedPath(destination)):
-      removeFile(extendedPath(destination))
-    moveFile(extendedPath(tmpPath), extendedPath(destination))
+    # The unlink+rename below can fail for reasons that have nothing to
+    # do with cache integrity: the destination may be an executable image
+    # another process currently has mapped (Windows refuses to unlink a
+    # running image), the parent directory may be read-only, or the
+    # destination may be held by a mandatory lock. Without this handler
+    # the raise escapes with the staged temp file still on disk, so every
+    # retry cycle leaves another ``<output>.reprotmp.<pid>`` sibling
+    # behind and the directory accumulates them indefinitely.
+    #
+    # Mirrors the recovery in ``storeFileBlob`` above: drop the temp file,
+    # then re-raise. The error is deliberately still propagated — the
+    # caller asked for the declared outputs to be materialized and they
+    # were not, so swallowing it here would report a cache restore that
+    # silently left a stale file in place. Only the leak is fixed; the
+    # failure stays visible.
+    try:
+      if fileExists(extendedPath(destination)):
+        removeFile(extendedPath(destination))
+      moveFile(extendedPath(tmpPath), extendedPath(destination))
+    except OSError:
+      if fileExists(extendedPath(tmpPath)):
+        try:
+          removeFile(extendedPath(tmpPath))
+        except OSError:
+          # Cleanup is best-effort; never mask the original failure.
+          discard
+      raise
     when not defined(windows):
       setFilePermissions(extendedPath(destination), output.permissions)
 

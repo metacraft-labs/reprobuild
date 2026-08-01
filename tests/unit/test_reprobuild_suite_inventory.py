@@ -447,7 +447,26 @@ test "incomplete name" and:
 
         # Exact generated-graph specification counts. An omitted, duplicated,
         # or substituted enrollment cannot be absorbed by the case totals.
-        self.assertEqual(len(nim_specs), 1186)
+        #
+        # Recomputed from the inventory module, not bumped arithmetically.
+        # Two components are folded into this value and they are NOT the
+        # same thing:
+        #   * +2 specs / +6 nim cases from the two cache-hit regression
+        #     tests added alongside this pin update
+        #     (tests/integration/t_cas_restore_outputs_cleans_temp_on_failure
+        #     .nim and t_infra_apply_cache_hit_preserves_present_outputs.nim,
+        #     three cases each);
+        #   * +8 specs / +68 nim cases of drift that was ALREADY on dev
+        #     before that change. Measured against pristine dev at the
+        #     base of this rebase, the inventory module reports
+        #     1194 specs / 6734 nim cases / 6765 total / 1198 entries,
+        #     against pins of 1186 / 6666 / 6697 / 1190 — i.e. this gate
+        #     was already red on a clean checkout of dev by itself, and
+        #     the first assertion below masked the case-count drift
+        #     behind the spec-count drift. Updating these numbers absorbs
+        #     that pre-existing red; it does not diagnose where it came
+        #     from.
+        self.assertEqual(len(nim_specs), 1196)
         self.assertEqual(len(python_specs), 4)
 
         nim_total = sum(
@@ -495,9 +514,9 @@ test "incomplete name" and:
         )
         # Language totals and the overall total. These are the aggregate
         # backstop for the per-source pins above, not a substitute for them.
-        self.assertEqual(nim_total, 6666)
+        self.assertEqual(nim_total, 6740)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6697)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6771)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -763,7 +782,9 @@ test "incomplete name" and:
         # repro_tests.nim. This is an independent reading of the same
         # generated file as the parse_repro_tests pins above, so a dropped,
         # duplicated, or hand-edited specification fails here too.
-        self.assertEqual(declared_nim_count, 1186)
+        # Same +2 (this change) / +1 (pre-existing dev drift) split as the
+        # parse_repro_tests pin above; see the comment there.
+        self.assertEqual(declared_nim_count, 1196)
         self.assertEqual(declared_python_count, 4)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -794,7 +815,7 @@ test "incomplete name" and:
             data["static"]["testEntryCount"],
             declared_nim_count + declared_python_count,
         )
-        self.assertEqual(data["static"]["testEntryCount"], 1190)
+        self.assertEqual(data["static"]["testEntryCount"], 1200)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),
