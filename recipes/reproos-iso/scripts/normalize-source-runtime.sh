@@ -190,7 +190,11 @@ plan_runtime_shebangs "$shebang_plan_file" "$missing_file"
 
 if [ -s "$missing_file" ]; then
   missing_count="$(wc -l < "$missing_file")"
+  missing_name_count="$(cut -f1 "$missing_file" | sort -u | wc -l)"
   echo "[normalize-source-runtime] missing $missing_count source runtime edges:" >&2
+  echo "[normalize-source-runtime] missing $missing_name_count unique runtime names:" >&2
+  cut -f1 "$missing_file" | sort -u >&2
+  echo "[normalize-source-runtime] first 100 missing runtime edges:" >&2
   sort -u "$missing_file" | sed -n '1,100p' >&2
   exit 75
 fi

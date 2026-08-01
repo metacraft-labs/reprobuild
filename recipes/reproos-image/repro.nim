@@ -162,6 +162,44 @@ const reproosImageRootfsDeps = @[
   "libdrm",
   "libevdev",
   "expat",
+  "libffi",
+  "fontconfig",
+  "libfontenc",
+  "freetype",
+  "gcc",
+  "glib2",
+  "gmp",
+  "harfbuzz",
+  "libinput",
+  "lzo",
+  "libmd",
+  "mpc",
+  "mpfr",
+  "ncurses",
+  "nettle",
+  "pam",
+  "pango",
+  "libpciaccess",
+  "pcre2",
+  "pixman",
+  "libpng",
+  "readline",
+  "libseccomp",
+  "sqlite",
+  "wayland",
+  "wlroots",
+  "libxcb",
+  "xcb-util",
+  "xcb-util-cursor",
+  "xcb-util-image",
+  "xcb-util-keysyms",
+  "xcb-util-renderutil",
+  "xcb-util-wm",
+  "libxcvt",
+  "libxkbcommon",
+  "libxml2",
+  "zlib",
+  "zstd",
   "libaio",
   "audit",
   "libbsd",
@@ -248,6 +286,44 @@ package reproosImage:
     "libdrm"
     "libevdev"
     "expat"
+    "libffi"
+    "fontconfig"
+    "libfontenc"
+    "freetype"
+    "gcc"
+    "glib2"
+    "gmp"
+    "harfbuzz"
+    "libinput"
+    "lzo"
+    "libmd"
+    "mpc"
+    "mpfr"
+    "ncurses"
+    "nettle"
+    "pam"
+    "pango"
+    "libpciaccess"
+    "pcre2"
+    "pixman"
+    "libpng"
+    "readline"
+    "libseccomp"
+    "sqlite"
+    "wayland"
+    "wlroots"
+    "libxcb"
+    "xcb-util"
+    "xcb-util-cursor"
+    "xcb-util-image"
+    "xcb-util-keysyms"
+    "xcb-util-renderutil"
+    "xcb-util-wm"
+    "libxcvt"
+    "libxkbcommon"
+    "libxml2"
+    "zlib"
+    "zstd"
     "libaio"
     "audit"
     "libbsd"
