@@ -25,6 +25,9 @@
 
 import std/[strutils, unittest]
 
+when defined(reproProviderMode):
+  import std/os
+  import repro_core
 import repro_project_dsl
 
 # Side-effect import: triggers the package macro which registers
@@ -67,6 +70,43 @@ proc findMesonSetupAction(): BuildActionDef =
         action.call.subcommand == "setup":
       return action
   raise newException(ValueError, "meson setup action not found")
+
+when defined(reproProviderMode):
+  proc dummyRequest(projectRoot: string): ProviderGraphRequest =
+    ProviderGraphRequest(
+      kind: prkGraphInvocation,
+      providerArtifactId: "test-provider",
+      entryPointId: "glib2Source.root",
+      entryPointBodyHash: "test-body",
+      reason: girExplicitUserRequest,
+      arguments: projectRoot,
+      namespace: "project")
+
+  proc extractActions(fragment: GraphFragment): seq[BuildActionDef] =
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      result.add(decodeBuildActionPayload(toBytes(node.payload)))
+
+  proc findById(actions: seq[BuildActionDef]; id: string): BuildActionDef =
+    for action in actions:
+      if action.id == id:
+        return action
+    raise newException(ValueError, "action not found: " & id)
+
+  proc argValues(action: BuildActionDef; name: string): seq[string] =
+    for arg in action.call.arguments:
+      if arg.name == name:
+        if arg.encodedValue.len == 0:
+          return @[]
+        return arg.encodedValue.split("\x1f")
+    @[]
+
+  proc inlineScriptOf(action: BuildActionDef): string =
+    let argv = action.argValues("argv")
+    if argv.len >= 3:
+      return argv[2]
+    ""
 
 suite "glib2Source — from-source recipe smoke test":
 
@@ -159,6 +199,35 @@ suite "glib2Source — from-source recipe smoke test":
     check seenGObject
     check seenGio
     check seenGModule
+
+  when defined(reproProviderMode):
+    test "stage-copy probes lib64 letters-only SONAME for libGlib2":
+      let projectRoot = currentSourcePath.parentDir
+      let pkg = PackageDef(
+        packageName: "glib2Source",
+        sourceFile: projectRoot / "repro.nim",
+        hasDevEnv: false,
+        devEnvBodyHash: "",
+        toolUses: @[])
+      let fragment = buildPackageFragment(pkg, dummyRequest(projectRoot),
+        proc() = buildGlib2SourcePackage(),
+        includeDefault = false)
+      let actions = extractActions(fragment)
+      let stage = findById(actions,
+        "autotools-stage-library-glib2Source-libGlib2")
+      let script = stage.inlineScriptOf()
+      let usrLib = (projectRoot / "build" / "out" / "usr" / "lib").
+        replace("\\", "/")
+      let usrLib64 = (projectRoot / "build" / "out" / "usr" / "lib64").
+        replace("\\", "/")
+      let outputPath = projectRoot / ".repro" / "output" / "libGlib2" /
+        "libGlib2"
+
+      check stage.commandStatsId == "autotools_package.stage.library"
+      check stage.outputs == @[outputPath]
+      check usrLib & "/libglib\"-*.so" in script
+      check usrLib64 & "/libglib\"-*.so" in script
+      check "no library candidate for libGlib2" in script
 
   test "versions block records the upstream tag + URL + repository":
     # M2 versions registry: the upstream download.gnome.org release

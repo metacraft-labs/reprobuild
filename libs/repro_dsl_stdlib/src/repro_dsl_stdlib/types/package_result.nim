@@ -1853,6 +1853,10 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       if strippedName != name:
         script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      # Keep the usr/lib64 fallback in parity with usr/lib for GLib-style
+      # versioned SONAME stems: libGlib2 -> libglib-2.0.so.
+      if lettersOnly.len > 0 and lettersOnly != strippedLowerName:
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & lettersOnly & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       # M9.R.14h.8 — kebab + snake stripped version-suffix globs on lib64.
       if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
         script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
@@ -1907,6 +1911,8 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
         if strippedName != name:
           script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
           script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        if lettersOnly.len > 0 and lettersOnly != strippedLowerName:
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & lettersOnly & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
           script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         if strippedKebabDigits.len > 0 and
