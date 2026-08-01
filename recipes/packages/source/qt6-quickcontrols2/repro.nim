@@ -63,9 +63,10 @@
 ## ``uses`` / ``buildDeps`` topological-order pre-resolves qt6-
 ## declarative before this recipe.
 
-import std/[strutils]
+import std/[options, strutils]
 
 import repro_project_dsl
+import repro_project_dsl/source_cache_identity
 import repro_dsl_stdlib/packages/sh
 
 # ---------------------------------------------------------------------------
@@ -155,7 +156,7 @@ package qt6QuickControls2Source:
       "  exit 66; " &
       "}; " &
       "echo \"[qt6-quickcontrols2 shim] staged from $SRC -> $DST\""
-    shell(
+    let stageAction = shell(
       command = cmd,
       actionId = "qt6QuickControls2Source.shim_stage",
       extraInputs = @[
@@ -167,3 +168,11 @@ package qt6QuickControls2Source:
       extraOutputs = @[
         ".repro/output/install/usr/lib/cmake/Qt6QuickControls2/Qt6QuickControls2Config.cmake",
       ])
+    setRegisteredActionDeclaredOutputs(stageAction.id,
+      @[".repro/output/install"])
+    setRegisteredActionPublish(stageAction.id, true,
+      some(sourceCacheEntryIdentity(
+        activeProviderProjectRoot(),
+        "qt6QuickControls2Source",
+        "6.8.1",
+        "custom")))

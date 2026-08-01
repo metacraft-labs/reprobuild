@@ -53,6 +53,8 @@ suite "ReproOS source bridge inventory":
       "scripts" / "stage-de-rootfs.sh")
     let imageRecipe = readFile(repoRoot / "recipes" / "reproos-image" /
       "repro.nim")
+    let quickControlsRecipe = readFile(repoRoot / "recipes" / "packages" /
+      "source" / "qt6-quickcontrols2" / "repro.nim")
 
     let sourceBridges = shellArrayEntries(stageScript,
       "BASE_USERSPACE_RECIPES")
@@ -118,6 +120,9 @@ suite "ReproOS source bridge inventory":
     check "required source coreutils binary missing" in stageScript
     check "required source kernel payload missing" in stageScript
     check "source kernel module tree is contaminated" in stageScript
+    check "setRegisteredActionDeclaredOutputs" in quickControlsRecipe
+    check "setRegisteredActionPublish" in quickControlsRecipe
+    check "\".repro/output/install\"" in quickControlsRecipe
     check "$STAGE_DIR/usr/lib/modules" in stageScript
     check "usr/lib|/usr/lib" in stageScript
     check "unsupported /lib symlink target" in stageScript
