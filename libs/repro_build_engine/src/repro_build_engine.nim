@@ -2762,7 +2762,7 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
   ## directories available to the linker, but never inject them into a process
   ## runtime search path.
   let normalized = path.replace('\\', '/')
-  const sourceMarker = "/recipes/packages/source/"
+  const sourceMarker = "/packages/source/"
   let sourceIndex = normalized.find(sourceMarker)
   if sourceIndex >= 0:
     let packageStart = sourceIndex + sourceMarker.len
@@ -2806,7 +2806,7 @@ proc partitionCompilerIncludePaths(paths: ResolvedAuxPaths):
   ## CPATH, but place source libc and kernel UAPI roots after GCC's intrinsic
   ## headers with ``-idirafter``. GCC's own propagated include tree is omitted
   ## because the selected compiler already contributes it intrinsically.
-  const sourceMarker = "/recipes/packages/source/"
+  const sourceMarker = "/packages/source/"
   var glibcRoots: seq[string] = @[]
   var linuxRoots: seq[string] = @[]
   for path in paths.includeDirs:
@@ -2920,7 +2920,7 @@ proc sourcePerlModuleDirs(libDirs: openArray[string]): seq[string] =
   ## A relocated source Perl keeps core modules under usr/lib/perl5, while
   ## its compiled-in @INC still names the original host prefix.
   var seen = initHashSet[string]()
-  const sourcePerlMarker = "/recipes/packages/source/perl/"
+  const sourcePerlMarker = "/packages/source/perl/"
   for libDir in libDirs:
     if sourcePerlMarker notin libDir.replace('\\', '/'):
       continue
