@@ -83,6 +83,18 @@ type
       ## ``ApplyResult.substitutedFromCacheCount`` so the apply summary
       ## can report "N substituted from cache, M built locally" and the
       ## M4 gate can assert hits > 0 / locally-built == 0.
+    fingerprintHex*: string
+      ## The edge's cache fingerprint (hex), as computed by the
+      ## dispatcher that keyed the edge. Written verbatim into the
+      ## edge's RBSL audit record (`AuditRecord.fingerprintHex`) so a
+      ## PERMANENTLY-missing edge is diagnosable from the on-disk log
+      ## alone: comparing the value across consecutive generations
+      ## separates "the edge re-keys every apply" from "the edge keys
+      ## stably and misses for some other reason".
+      ##
+      ## A dispatcher that cannot compute a fingerprint leaves this
+      ## empty; the audit record then still identifies the edge by
+      ## address and verdict, it just cannot explain a miss.
     diagnostic*: string
 
   BuildActionDispatcher* = proc(actions: seq[ProfileBuildAction]):
@@ -324,10 +336,64 @@ proc plannedOperationsFor(profileText: string;
 # RBSL audit log of the new generation.
 # ---------------------------------------------------------------------------
 
+proc buildActionOperationKind(o: BuildActionApplyOutcome): string =
+  ## The `operationKind` of a build-action audit record names WHERE the
+  ## edge's outputs came from, because that — not a state transition —
+  ## is what happened to the edge:
+  ##
+  ##   * `cache-substitute` — outputs fetched from the binary cache;
+  ##   * `cache-hit`        — the engine's own action cache short-
+  ##                          circuited the launch;
+  ##   * `build`            — a local process ran (or was attempted and
+  ##                          failed; the `outcome` field carries the
+  ##                          verdict).
+  if o.ok and o.cacheHit:
+    if o.substitutedFromCache: "cache-substitute" else: "cache-hit"
+  else:
+    "build"
+
+proc buildActionOutcomeTag(o: BuildActionApplyOutcome): string =
+  ## The verdict, using the SAME vocabulary the live-state half uses so
+  ## the log's per-verdict record counts reconcile with the printed
+  ## apply summary. The mapping mirrors `dispatchBuildActions` exactly:
+  ## failed -> error (errorCount), cache hit -> no-op (noOpCount),
+  ## everything else -> applied (appliedCount).
+  if not o.ok: "error"
+  elif o.cacheHit: "no-op"
+  else: "applied"
+
+proc writeBuildActionAuditRecords(logPath: string; ts: int64;
+                                  outcomes: seq[BuildActionApplyOutcome]) =
+  ## Audit the build-action half of the apply.
+  ##
+  ## These records are deliberately NOT shaped like live-state records:
+  ## `preDigestHex` / `postDigestHex` stay EMPTY because a build edge
+  ## has no observed pre/post system state, and `recordClass` is
+  ## `AuditClassBuildAction` so no reader can mistake the two
+  ## populations for one. Before this existed the apply summary counted
+  ## edges that the audit log never mentioned, so a generation's log
+  ## described a strict subset of the resources the summary tallied.
+  for o in outcomes:
+    appendAuditRecord(logPath, AuditRecord(
+      timestamp: ts,
+      operationKind: buildActionOperationKind(o),
+      resourceAddress: (if o.address.len > 0: o.address else: o.id),
+      outcome: buildActionOutcomeTag(o),
+      diagnostic: (if o.ok: "" else: o.diagnostic),
+      preDigestHex: "",
+      postDigestHex: "",
+      restartNeeded: false,
+      recordClass: AuditClassBuildAction,
+      fingerprintHex: o.fingerprintHex))
+
 proc writeAuditRecords(logPath: string;
                        applyLog: seq[ApplyLogRecord];
-                       noOps: seq[PlannedOperationRecord]) =
+                       noOps: seq[PlannedOperationRecord];
+                       buildActions: seq[BuildActionApplyOutcome] = @[]) =
   let ts = getTime().toUnix()
+  # The action-edge half runs FIRST (see `runInfraApply` step 0), so its
+  # records lead the log — the log reads in execution order.
+  writeBuildActionAuditRecords(logPath, ts, buildActions)
   # No-op records first — the audit log captures the full apply,
   # including the resources that needed no change (the spec's
   # "observe" outcome).
@@ -340,7 +406,9 @@ proc writeAuditRecords(logPath: string;
       diagnostic: "",
       preDigestHex: rec.baselineDigestHex,
       postDigestHex: rec.desiredDigestHex,
-      restartNeeded: false))
+      restartNeeded: false,
+      recordClass: AuditClassLiveState,
+      fingerprintHex: ""))
   for rec in applyLog:
     appendAuditRecord(logPath, AuditRecord(
       timestamp: ts,
@@ -350,7 +418,9 @@ proc writeAuditRecords(logPath: string;
       diagnostic: (if rec.outcome in ["drift", "error"]: rec.detail else: ""),
       preDigestHex: rec.preWriteDigestHex,
       postDigestHex: rec.postWriteDigestHex,
-      restartNeeded: rec.restartNeeded))
+      restartNeeded: rec.restartNeeded,
+      recordClass: AuditClassLiveState,
+      fingerprintHex: ""))
 
 # ---------------------------------------------------------------------------
 # The apply.
@@ -553,7 +623,11 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   let genDir = generationDir(opts.stateDir, generationId)
   createDir(genDir)
   let logPath = applyLogPath(opts.stateDir, generationId)
-  writeAuditRecords(logPath, outcome.applyLog, noOps)
+  # Every resource the apply summary counts — BOTH halves — lands in
+  # this one log, so a generation's audit trail accounts for the same
+  # population the printed `applied / no-op` counters do.
+  writeAuditRecords(logPath, outcome.applyLog, noOps,
+    result.buildActionResults)
   result.auditLogPath = logPath
   # Write the per-generation RBSG envelope. It embeds the applied
   # `system.nim` text so `repro system history` can enumerate this
