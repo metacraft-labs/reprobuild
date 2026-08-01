@@ -739,9 +739,25 @@ package reprobuild:
       cacheable = false,
       actionId = "reprobuild.apps.repro-standard-provider"))
 
+    # ``cacheable = false`` is not incidental here, and this edge was the only
+    # one in the block missing it. Via ``compileDependencyPolicy`` it is what
+    # selects ``makeDepfilePolicy`` — evidence from the compiler's own depfile,
+    # and NO monitor wrapping. Left at the default the edge takes
+    # ``defaultDependencyPolicy()`` and is monitored like an opaque tool.
+    #
+    # On macOS that is the difference between building and not: in run
+    # 30719789911 the release collection reported built=15/15 with every
+    # depfile-policied sibling linking fine, and this single monitored edge
+    # died on `clang` exiting non-zero while emitting no diagnostic of its own
+    # — the same signature as the retired wrapper, which was monitored for the
+    # same reason.
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-install-mirror-publish/repro_install_mirror_publish.nim",
       binary = "build/bin/repro-install-mirror-publish",
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro-install-mirror-publish",
+      cacheable = false,
       actionId = "reprobuild.apps.repro-install-mirror-publish"))
 
     # B5: the last three ``apps/entrypoints.txt`` rows that had no edge and so
