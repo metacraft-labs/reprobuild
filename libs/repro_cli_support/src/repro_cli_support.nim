@@ -28333,7 +28333,24 @@ proc pickManifestLayerRoot(parsed: WorkspaceLockArgs;
   # NOT the membership root. Membership (projects/repos) lives at the workspace
   # root (or a `.repro/manifests` checkout); the lock store is always the
   # `.repro/manifests` DB, separate from where membership resolves.
-  parsed.workspaceRoot / ".repro" / "manifests"
+  #
+  # ...but ONLY when that store actually exists as a git checkout. Returning the
+  # path unconditionally infers a team route from a path that may never have been
+  # declared, which Unified-Locking-And-Hooks.md §10 ("No implicit team route")
+  # forbids: "The route is EXPLICIT, not inferred from the manifest's presence. A
+  # workspace that never declares a team route is public-only and writes only
+  # `repro.lock`." The unconditional return also made every downstream
+  # `manifestLayerRoot.len > 0` guard permanently true — including the HL-3 guard
+  # on the RA-7/RA-21 manifest publish, documented as firing "ONLY when a
+  # `.repro/manifests` git-checkout is present". An all-public workspace would
+  # then materialize a lock under a gitignored, non-git directory and report
+  # "cannot publish lock" for a publish that should never have been attempted.
+  # Empty means "no manifest-backed route declared"; the committed in-tree
+  # `repro.lock` is the whole story (spec §8.2 public row).
+  let nativeStore = parsed.workspaceRoot / ".repro" / "manifests"
+  if dirExists(nativeStore / ".git") or fileExists(nativeStore / ".git"):
+    return nativeStore
+  ""
 
 proc pickTriggerRepo(resolved: ResolvedProject;
                      explicit: string): ResolvedRepo =
@@ -28509,7 +28526,14 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # team git-checkout backend included, at its own ``locks/<p>/<repo>/<sha>``
   # path), so the trigger-keyed monolithic file is redundant AND would drop a
   # cross-tier mix keyed on a possibly-non-team trigger repo. We skip it.
-  if not composed.hasExplicitRoutes:
+  #
+  # ``manifestLayerRoot`` is EMPTY when no manifest-backed route is declared
+  # (§10 "No implicit team route"): there is no git-checkout store to write a
+  # trigger-keyed record into, and the committed in-tree ``repro.lock`` is the
+  # whole publication story. Writing anyway would resolve ``lockPath`` relative
+  # to the process CWD and scatter a ``locks/`` tree wherever the gate happened
+  # to run. Public-only workspaces write no manifest lock at all.
+  if not composed.hasExplicitRoutes and manifestLayerRoot.len > 0:
     if lockAlreadyExisted:
       # The path is content-addressed by the exact trigger commit and lock
       # publication accepts canonical additions only. Re-running a gate must
@@ -30726,18 +30750,26 @@ proc renderCheckTextLines*(report: CheckReport): seq[string] =
     result.add(line)
   for notice in report.notices:
     result.add("repro check: " & notice)
+  # A public-only workspace declares no manifest-backed route, so no manifest
+  # lock record exists to name (§10 "No implicit team route"): the lock-store
+  # path is empty and these lines would read "lock created at " with nothing
+  # after it. Report the state only when there is a real record to point at —
+  # the in-tree ``repro.lock`` is reported by its own advisory.
   case report.lockUpdate.kind
   of cluNone:
     discard
   of cluAlreadyCurrent:
-    result.add("repro check: lock already current at " &
-      report.lockUpdate.lockFilePath)
+    if report.lockUpdate.lockFilePath.len > 0:
+      result.add("repro check: lock already current at " &
+        report.lockUpdate.lockFilePath)
   of cluCreated:
-    result.add("repro check: lock created at " &
-      report.lockUpdate.lockFilePath)
+    if report.lockUpdate.lockFilePath.len > 0:
+      result.add("repro check: lock created at " &
+        report.lockUpdate.lockFilePath)
   of cluRefreshed:
-    result.add("repro check: lock refreshed at " &
-      report.lockUpdate.lockFilePath)
+    if report.lockUpdate.lockFilePath.len > 0:
+      result.add("repro check: lock refreshed at " &
+        report.lockUpdate.lockFilePath)
   of cluFailed:
     result.add("repro check: lock update FAILED: " &
       report.lockUpdate.diagnostic)
@@ -32837,15 +32869,112 @@ proc developSetClosure(repos: seq[ResolvedRepo];
         if dep.len > 0 and dep notin result:
           pending.add(dep)
 
+proc repoNameForFragment(identity: GitToolIdentity; membershipRoot, relPath,
+    newTip, oldTip: string): string =
+  ## Resolve a changed ``repos/<file>.toml`` fragment to the repo NAME it
+  ## declares. The file's basename is NOT the name: a fragment may declare a
+  ## different one (``repos/accounting-blocksense.toml`` declares
+  ## ``name = "accounting"``), so read the fragment's own ``[repo] name``. The
+  ## blob is read from the pushed tip, falling back to the pre-push tip for a
+  ## fragment the commit DELETED (removing a repo from the workspace is exactly
+  ## the kind of membership change the scope must cover). Basename is the last
+  ## resort so an unreadable blob narrows the scope rather than dropping it.
+  for tip in [newTip, oldTip]:
+    if tip.len == 0:
+      continue
+    let show = gitRunPlain(identity,
+      ["-C", membershipRoot, "show", tip & ":" & relPath])
+    if show.code != 0:
+      continue
+    for rawLine in show.output.splitLines():
+      let line = rawLine.strip()
+      if line.startsWith("name") and '=' in line:
+        let value = line[line.find('=') + 1 .. ^1].strip()
+        let unquoted = value.strip(chars = {'"', '\''})
+        if unquoted.len > 0:
+          return unquoted
+  relPath.extractFilename.changeFileExt("")
+
+proc membershipPushScope(identity: GitToolIdentity; resolved: ResolvedProject;
+    membershipRoot, newTip, oldTip: string): HashSet[string] =
+  ## Workspace-And-Develop-Mode.md §"Gate scope when the pushed repo is the
+  ## membership repo" — the repos whose manifest fragments the pushed commit
+  ## range actually modifies. A manifest commit can only break a teammate on a
+  ## repo whose pin or membership IT changes (a revision re-pinned to a SHA
+  ## nobody pushed, a repo added that nobody can clone); a repo the commit does
+  ## not mention cannot be broken by it. An empty result is a real answer —
+  ## "this commit touches no fragment" — and scopes the gate to the membership
+  ## repo's own cleanliness/publication, NOT to the whole workspace.
+  result = initHashSet[string]()
+  if newTip.len == 0:
+    return
+  # Prefer the exact pushed range. A brand-new remote branch has no old tip, so
+  # fall back to the tip commit's own first-parent diff: still a well-defined
+  # "what this push introduces" for the common single-commit case, and far
+  # narrower than widening to every repo in the workspace.
+  var diff = gitRunPlain(identity,
+    ["-C", membershipRoot, "diff", "--name-only", oldTip & ".." & newTip])
+  if oldTip.len == 0 or diff.code != 0:
+    diff = gitRunPlain(identity,
+      ["-C", membershipRoot, "diff", "--name-only", newTip & "^", newTip])
+  if diff.code != 0:
+    return
+  var byName = initTable[string, ResolvedRepo]()
+  for repo in resolved.repos:
+    byName[repo.name] = repo
+  for rawPath in diff.output.splitLines():
+    let relPath = rawPath.strip()
+    if relPath.len == 0 or not relPath.endsWith(".toml"):
+      continue
+    if relPath.startsWith("repos/"):
+      let name = repoNameForFragment(identity, membershipRoot, relPath,
+        newTip, oldTip)
+      if name.len > 0 and name in byName:
+        result.incl(name)
+    elif relPath.startsWith("projects/"):
+      # A project manifest changed: its membership as a whole is what moved, so
+      # the repos that project declares are in scope. Only repos that actually
+      # participate in the resolved workspace can be observed, so intersect.
+      let projectName = relPath.extractFilename.changeFileExt("")
+      if projectName == resolved.projectName:
+        for repo in resolved.repos:
+          result.incl(repo.name)
+      else:
+        let projectFile = membershipRoot / "projects" / (projectName & ".toml")
+        if fileExists(projectFile):
+          try:
+            for repo in resolveProject(projectFile).repos:
+              if repo.name in byName:
+                result.incl(repo.name)
+          except CatchableError:
+            # A project manifest we cannot resolve (malformed, or referencing
+            # fragments this workspace does not carry) contributes nothing
+            # rather than failing the gate on a parse error.
+            discard
+
 proc prePushScope(resolved: ResolvedProject; currentRepoName: string;
-    currentLayer: Option[ManifestLayerLocation]):
+    currentLayer: Option[ManifestLayerLocation];
+    membershipScope: Option[HashSet[string]] = none(HashSet[string])):
       tuple[names: HashSet[string]; wholeWorkspace: bool] =
   ## Normal repo pushes use RA-21's develop-set closure. Manifest-layer pushes
   ## are not project repos, so the old empty-closure fallback would widen them
   ## to the whole composed workspace and make private layers block public-layer
   ## publication. Use the current layer's declarations instead.
+  ##
+  ## A push of the MEMBERSHIP repo (the ``repro-workspace`` repo carrying
+  ## ``projects/``/``repos/``) is neither: it declares no ``depends`` edges, so
+  ## its closure is empty, and in the flat native layout it is not a
+  ## ``[[manifest]]`` layer either — which is how it used to fall through to the
+  ## whole-workspace fallback and let an unrelated dirty sibling block a
+  ## one-line manifest edit. ``membershipScope`` carries the touched-fragment
+  ## answer (``membershipPushScope``); when present it is authoritative, INCLUDING
+  ## when it is empty.
   result.names = developSetClosure(resolved.repos, currentRepoName)
   if result.names.len > 0:
+    result.wholeWorkspace = false
+    return
+  if membershipScope.isSome:
+    result.names = membershipScope.get()
     result.wholeWorkspace = false
     return
   if currentLayer.isSome:
@@ -33157,7 +33286,28 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # ``depends`` edges). When ``--current-repo`` does not resolve to a
   # declared repo (the closure is empty), we fall back to the whole
   # workspace so the gate can never silently under-check.
-  let scope = prePushScope(resolved, currentRepoName, currentManifestLayer)
+  #
+  # ...except for the MEMBERSHIP repo, which is never a declared repo and would
+  # therefore always take that fallback. Its scope is the repos whose manifest
+  # fragments the pushed range modifies (Workspace-And-Develop-Mode.md §"Gate
+  # scope when the pushed repo is the membership repo").
+  var membershipScope = none(HashSet[string])
+  if currentRepoName.len == 0 and parsed.currentRepo.len > 0:
+    let membershipRoot = manifestsRoot(parsed.workspaceRoot)
+    if sameFilesystemPath(absolutePath(membershipRoot), parsed.currentRepo) and
+        discoverGitWorktree(identity, membershipRoot).ok:
+      let newTip =
+        if outgoing.headOid.len > 0: outgoing.headOid
+        else: gitRunPlain(identity,
+          ["-C", membershipRoot, "rev-parse", "HEAD"]).output.strip()
+      let oldTip =
+        if outgoing.remoteOldOid.len > 0 and not isZeroOid(outgoing.remoteOldOid):
+          outgoing.remoteOldOid
+        else: ""
+      membershipScope = some(membershipPushScope(
+        identity, resolved, membershipRoot, newTip, oldTip))
+  let scope = prePushScope(resolved, currentRepoName, currentManifestLayer,
+    membershipScope)
   let scopeClosure = scope.names
   let scopeIsWholeWorkspace = scope.wholeWorkspace
   proc repoInScope(name: string): bool =

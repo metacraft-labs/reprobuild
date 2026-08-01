@@ -183,6 +183,23 @@ proc setupFixture(gitBin, slug: string): Fixture =
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-c.toml", libCFragmentToml)
+  # The "real workspace still enforces" case asserts a manifest lock RECORD is
+  # produced, which happens only where a manifest-backed route is DECLARED
+  # (Unified-Locking-And-Hooks.md §10, "No implicit team route"). Make
+  # `.repro/manifests` a real git checkout so the route is declared rather than
+  # inferred from a path. The no-op cases below are unaffected: they point at
+  # directories that are not workspaces at all.
+  let lockStore = workspaceRoot / ".repro" / "manifests"
+  createDir(lockStore)
+  discard requireGit(q(gitBin) & " init -b main " & q(lockStore))
+  discard requireGit(q(gitBin) & " -C " & q(lockStore) &
+    " config user.email tester@example.invalid")
+  discard requireGit(q(gitBin) & " -C " & q(lockStore) &
+    " config user.name \"Hooks Noop Tester\"")
+  writeFile(lockStore / ".gitkeep", "")
+  discard requireGit(q(gitBin) & " -C " & q(lockStore) & " add -A")
+  discard requireGit(q(gitBin) & " -C " & q(lockStore) &
+    " commit -m \"seed lock store\"")
   result.workspaceRoot = workspaceRoot
 
 proc cloneAll(gitBin: string; fx: Fixture) =
