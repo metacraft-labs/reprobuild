@@ -30,12 +30,23 @@ import ../packages/sh as sh_module
 const FetchScratchSubdir = ".repro/fetch"
 
 proc cmakeRuntimeLibraryDirs*(libraryDirs: openArray[string]): seq[string] =
-  ## Nix profiles can propagate glibc outputs through otherwise unrelated
-  ## dependencies. Keep those directories in CMake's link-time search, but do
-  ## not interpose that libc on CMake, Ninja, or build-time helper processes.
+  ## Profiles can propagate libc or Python runtimes through otherwise
+  ## unrelated dependencies. Keep those directories in CMake's link-time
+  ## search, but do not interpose them on CMake, Ninja, or helper processes.
   const storePrefix = "/nix/store/"
   for path in libraryDirs:
-    var isNixGlibc = false
+    var isCoreRuntime = fileExists(path / "libc.so.6")
+    let normalized = path.replace('\\', '/')
+    const sourceMarker = "/packages/source/"
+    let sourceIndex = normalized.find(sourceMarker)
+    if sourceIndex >= 0:
+      let packageStart = sourceIndex + sourceMarker.len
+      let packageEnd = normalized.find('/', packageStart)
+      let packageName =
+        if packageEnd < 0: normalized[packageStart .. ^1]
+        else: normalized[packageStart ..< packageEnd]
+      isCoreRuntime = isCoreRuntime or packageName == "glibc" or
+        packageName == "python3" or packageName.startsWith("python3-")
     if path.startsWith(storePrefix):
       let relative = path[storePrefix.len .. ^1]
       let slash = relative.find('/')
@@ -44,9 +55,10 @@ proc cmakeRuntimeLibraryDirs*(libraryDirs: openArray[string]): seq[string] =
         let hashSeparator = storeEntry.find('-')
         if hashSeparator >= 0 and hashSeparator + 1 < storeEntry.len:
           let packageName = storeEntry[hashSeparator + 1 .. ^1]
-          isNixGlibc = packageName == "glibc" or
-            packageName.startsWith("glibc-")
-    if not isNixGlibc:
+          isCoreRuntime = isCoreRuntime or packageName == "glibc" or
+            packageName.startsWith("glibc-") or packageName == "python3" or
+            packageName.startsWith("python3-")
+    if not isCoreRuntime:
       result.add(path)
 
 proc cmakeFetchActionId(packageName: string): string =

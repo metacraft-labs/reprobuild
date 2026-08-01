@@ -8,7 +8,7 @@
 ## higher level; here we just want a fast tripwire that a future
 ## refactor doesn't accidentally break the M9.R.79 threading.
 
-import std/[unittest]
+import std/[os, tempfiles, unittest]
 
 import repro_dsl_stdlib/constructors/meson_package
 import repro_dsl_stdlib/constructors/autotools_package
@@ -29,6 +29,14 @@ suite "t_m9r79_constructors_compile":
     let glibcLib = "/nix/store/0123456789abcdefghijklmnopqrstuv-glibc-2.40/lib"
     let dependencyLib = "/nix/store/vutsrqponmlkjihgfedcba9876543210-libfoo-1.0/lib"
     check cmakeRuntimeLibraryDirs(@[glibcLib, dependencyLib]) ==
+      @[dependencyLib]
+
+  test "cmake runtime paths exclude federated compiler bootstrap libc":
+    let scratch = createTempDir("repro-cmake-bootstrap-libc-", "")
+    defer: removeDir(scratch)
+    writeFile(scratch / "libc.so.6", "synthetic bootstrap libc")
+    let dependencyLib = scratch & "-dependency"
+    check cmakeRuntimeLibraryDirs(@[scratch, dependencyLib]) ==
       @[dependencyLib]
 
   test "registry mutators are exported":
