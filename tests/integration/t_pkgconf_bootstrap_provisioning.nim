@@ -4,11 +4,11 @@ import repro_interface_artifacts
 import repro_project_dsl
 
 package pkgconfConsumer:
-  uses:
+  nativeBuildDeps:
     "pkgconf"
 
 suite "pkgconf bootstrap provisioning":
-  test "plain pkgconf use imports its canonical Nix realization":
+  test "native build dependency imports its canonical Nix realization":
     let packages = registeredPackages()
     let consumers = packages.filterIt(it.packageName == "pkgconfConsumer")
     check consumers.len == 1

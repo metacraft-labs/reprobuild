@@ -2669,8 +2669,12 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       "yarn",
       "zstd"
     ]
+  # The emitted PackageDef projects all three dependency classes into
+  # `toolUses`; import discovery must use the same union or native/runtime
+  # dependencies lose their package interfaces before that projection runs.
+  let allUses = pkg.toolUses & pkg.nativeBuildDeps & pkg.runtimeDeps
   var modules: seq[string] = @[]
-  for useDef in pkg.toolUses:
+  for useDef in allUses:
     if isBundledStdlibSelector(useDef.packageSelector):
       let modulePath = "repro_dsl_stdlib/packages/" &
         selectorModuleName(useDef.packageSelector)
@@ -2680,7 +2684,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
     let normalizedBase = normalizedImportBase(base)
     if normalizedBase.len == 0:
       continue
-    for useDef in pkg.toolUses:
+    for useDef in allUses:
       let modulePath = normalizedBase & "/" &
         selectorModuleName(useDef.packageSelector)
       if modules.find(modulePath) < 0:
@@ -2721,7 +2725,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # ``repro_cli_support``) — the contract-only projection, no driver by
   # construction. Collected here (selector) and emitted after the module loop.
   var resourceProducerSelectors: seq[string] = @[]
-  for useDef in pkg.toolUses:
+  for useDef in allUses:
     let selector = useDef.packageSelector
     if isBundledStdlibSelector(selector):
       continue
