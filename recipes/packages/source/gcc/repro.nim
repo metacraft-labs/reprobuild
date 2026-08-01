@@ -35,7 +35,7 @@
 ##
 ## The M9.N Batch C.1 ``from-source-custom`` convention claims this
 ## recipe via the ``shell()`` action surface on ``build:`` blocks: the
-## recipe records the four-shell-action mkdir-configure-build-install
+## recipe records the five-shell-action mkdir-configure-build-install
 ## pipeline as a verbatim shell sequence under the ``gcc`` artifact.
 ## This mirrors the cmake precedent (the only other ``from-source-
 ## custom`` consumer in the corpus that drives a multi-shell build).
@@ -170,7 +170,7 @@ package gccSource:
   ## From-source gcc — M9.N Batch E compiler-chain slice.
   ##
   ## ``from-source-custom`` convention consumer: the recipe's
-  ## ``build:`` block records the four-shell-action mkdir-configure-
+  ## ``build:`` block records the five-shell-action mkdir-configure-
   ## build-install pipeline as a verbatim shell sequence under the
   ## ``gcc`` artifact. ``$extracted`` resolves to ``<projectRoot>/src/
   ## ``; ``$out`` resolves to ``<projectRoot>/.repro/build/from-source-

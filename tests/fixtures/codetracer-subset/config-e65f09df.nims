@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Pinned verbatim payload from CodeTracer commit
-# e63a8d545e55843ceaca03cb345e9387af658119, config.nims.
-# Source: https://github.com/metacraft-labs/codetracer/blob/e63a8d545e55843ceaca03cb345e9387af658119/config.nims
+# e65f09dfa0979817592973d4de378f4d8d3c439c, config.nims.
+# Source: https://github.com/metacraft-labs/codetracer/blob/e65f09dfa0979817592973d4de378f4d8d3c439c/config.nims
 #
 # Keep every byte after this provenance header identical to the public source.
 import std/[os, strutils]
@@ -76,6 +76,12 @@ addPathIfDir(getEnv("IO_MON_SRC"))
 addPathIfDir(workspaceRoot / "io-mon" / "src")
 addPathIfDir(getEnv("SHM_QUEUE_SRC"))
 addPathIfDir(workspaceRoot / "nim-shm-queue" / "src")
+# io-mon's writer now imports `shm_gset/transport` (the grow-only shared-memory
+# set that backs io-mon's Linux dependency-capture channel), in addition to
+# `shm_queue`. Thread nim-shm-gset onto the path the same way, or the `ct`
+# compile fails with `cannot open file: shm_gset/transport`.
+addPathIfDir(getEnv("SHM_GSET_SRC"))
+addPathIfDir(workspaceRoot / "nim-shm-gset" / "src")
 addPathIfDir(getEnv("NIM_STACKABLE_HOOKS_SRC"))
 addPathIfDir(workspaceRoot / "nim-stackable-hooks" / "src")
 

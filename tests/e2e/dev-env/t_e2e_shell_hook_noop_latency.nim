@@ -99,7 +99,30 @@ when defined(windows):
     MaxBudgetMs = 1500.0
 else:
   const
-    P50BudgetMs = 5.0
+    # WHICH QUANTITY THIS BOUNDS: per-prompt WALL time, i.e. process spawn +
+    # fast-path logic. Every measured iteration spawns `repro` (see the
+    # `startProcess` in the measured loop), so the spawn floor is included in
+    # every sample.
+    #
+    # Shell-Direnv-Hook.md gives "< 5 ms on Linux/macOS", but immediately
+    # qualifies it: `repro` is a single binary whose fast path "pays the full
+    # binary's ~10 ms cold start ... accepted as still-fast for a per-prompt
+    # hook", and "the < 5 ms figure therefore describes the *spawn-free logic
+    # cost*, not the current per-prompt wall time." Holding a spawn-inclusive
+    # measurement to the spawn-free number is unsatisfiable by construction: a
+    # 500-iteration sweep on a 32-core host measured min=5.765 ms, so even the
+    # fastest sample exceeded the old 5.0 ms bound before any logic ran.
+    #
+    # 10.0 ms therefore bounds the quantity actually measured, and matches the
+    # cold start the spec accepts. The Windows branch already carries the same
+    # kind of headroom over its own spec figure. A genuine fast-path regression
+    # moves p50 by a multiple (the walk is orders of magnitude dearer than the
+    # cache-key check), not by the couple of ms this releases.
+    #
+    # The spec's real bar — spawn-FREE logic cost < 5 ms — is not asserted here
+    # and still needs its own measurement; the M78 daemon path is where that
+    # becomes observable without a per-prompt spawn.
+    P50BudgetMs = 10.0
     P99BudgetMs = 50.0   # CI tolerance — see milestone note.
     MaxBudgetMs = 250.0
 

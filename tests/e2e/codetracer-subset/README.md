@@ -34,12 +34,12 @@ that the selected source slice resolves the same checked-in libraries.
 
 The in-place project-file tests use exact `repro.nim` and `config.nims`
 payloads pinned from reviewed CodeTracer `dev` commit
-`e63a8d545e55843ceaca03cb345e9387af658119`. The files retain CodeTracer's
+`e65f09dfa0979817592973d4de378f4d8d3c439c`. The files retain CodeTracer's
 `AGPL-3.0-or-later` license in explicit SPDX/provenance headers. Every byte
 after those headers is identical to the corresponding public source:
 
-- `https://github.com/metacraft-labs/codetracer/blob/e63a8d545e55843ceaca03cb345e9387af658119/repro.nim`
-- `https://github.com/metacraft-labs/codetracer/blob/e63a8d545e55843ceaca03cb345e9387af658119/config.nims`
+- `https://github.com/metacraft-labs/codetracer/blob/e65f09dfa0979817592973d4de378f4d8d3c439c/repro.nim`
+- `https://github.com/metacraft-labs/codetracer/blob/e65f09dfa0979817592973d4de378f4d8d3c439c/config.nims`
 
 The real sibling still supplies every source file copied and built by the
 tests. Using Reprobuild-owned graph/config fixtures keeps an unrelated local

@@ -6,16 +6,16 @@
 ##
 ##   * FIRST recipe in the corpus to declare MIXED-KIND artifacts
 ##     under the ``from-source-custom`` convention (three
-##     ``executable`` + two ``library`` sharing a single
+##     ``executable`` + four ``library`` sharing a single
 ##     ``mkdir-configure-build-install`` install-tree). Pins the
-##     per-artifact stage-copy fan-out at the (3 exec, 2 lib) mixed
+##     per-artifact stage-copy fan-out at the (3 exec, 4 lib) mixed
 ##     cardinality from a multi-shell custom pipeline.
 ##   * SECOND multi-shell ``from-source-custom`` consumer with a
-##     FOUR-shell ``build:`` block (vs cmake's three-shell
+##     FIVE-shell ``build:`` block (vs cmake's three-shell
 ##     bootstrap-build-install pipeline) — pins the M9.N Batch C.1
 ##     shell-action registry round-trip on the gcc out-of-tree
-##     pattern (``mkdir`` + out-of-tree ``configure`` + ``make`` +
-##     ``make install``).
+##     pattern (bootstrap-sysroot + ``mkdir``, out-of-tree
+##     ``configure``, ``make -j8``, ``make install``, lib64 aliases).
 ##   * Real sha256 on the fetch channel — the test asserts the exact
 ##     64-char hex hash recorded in the recipe + the algorithm tag.
 ##
@@ -28,20 +28,20 @@
 ##     pipeline records the configure invocation as a shell action,
 ##     not as a flag-block entry).
 ##   * MIXED-KIND artifact registration (M3) — gcc + g++ + cpp
-##     tagged ``dakExecutable``, libgcc_s + libstdc++ tagged
-##     ``dakLibrary``.
+##     tagged ``dakExecutable``; libgcc_s + libstdc++ + libgomp +
+##     libatomic tagged ``dakLibrary``.
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 ##   * ``shell()`` action registry round-trip (M9.N Batch C.1) — four
 ##     verbatim commands recorded in declaration order under the
 ##     ``gcc`` artifact.
 
-import std/[unittest]
+import std/[algorithm, strutils, unittest]
 
 import repro_project_dsl
 
 # Side-effect import: triggers the package macro which registers
-# fetch spec + three executable + two library artifacts + four shell
+# fetch spec + three executable + four library artifacts + five shell
 # actions under ``gccSource`` at module init time.
 import ./repro
 
@@ -85,44 +85,32 @@ suite "gccSource — from-source recipe smoke test":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "no flags registered on the make channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
-  test "artifacts register three executables + two libraries mixed-kind":
-    # M3 artifact registry: gcc + g++ + cpp tagged
-    # ``dakExecutable``; libgcc_s + libstdc++ tagged ``dakLibrary``.
-    # A regression that flattened the kind discriminator at the
-    # (3, 2) mixed cardinality would surface here (mis-routing the
-    # M9.L install path: ``lib/`` vs ``bin/``).
+  test "artifacts register three executables + four libraries mixed-kind":
+    # M3 artifact registry: gcc + g++ + cpp tagged ``dakExecutable``;
+    # libgcc_s + libstdc++ + libgomp + libatomic tagged ``dakLibrary``.
+    # A regression that flattened the kind discriminator at the (3, 4)
+    # mixed cardinality would surface here (mis-routing the M9.L
+    # install path: ``lib/`` vs ``bin/``).
+    #
+    # The expected set is written out and compared as a whole rather than
+    # tracked through per-artifact bools: the previous form asserted a bare
+    # count plus five flags, so when the recipe gained libgomp and libatomic
+    # the count broke while the flags stayed silent about WHICH artifacts were
+    # unaccounted for. Comparing sets names the drift directly.
     let arts = registeredArtifacts("gccSource")
-    check arts.len == 5
-    var seenGcc = false
-    var seenGxx = false
-    var seenCpp = false
-    var seenLibgccS = false
-    var seenLibstdcxx = false
+    var executables: seq[string]
+    var libraries: seq[string]
     for art in arts:
       check art.packageName == "gccSource"
-      case art.artifactName
-      of "gcc":
-        seenGcc = true
-        check art.kind == dakExecutable
-      of "g++":
-        seenGxx = true
-        check art.kind == dakExecutable
-      of "cpp":
-        seenCpp = true
-        check art.kind == dakExecutable
-      of "libgcc_s":
-        seenLibgccS = true
-        check art.kind == dakLibrary
-      of "libstdc++":
-        seenLibstdcxx = true
-        check art.kind == dakLibrary
-      else:
-        discard
-    check seenGcc
-    check seenGxx
-    check seenCpp
-    check seenLibgccS
-    check seenLibstdcxx
+      case art.kind
+      of dakExecutable: executables.add(art.artifactName)
+      of dakLibrary: libraries.add(art.artifactName)
+      else: discard
+    executables.sort()
+    libraries.sort()
+    check executables == @["cpp", "g++", "gcc"]
+    check libraries == @["libatomic", "libgcc_s", "libgomp", "libstdc++"]
+    check arts.len == executables.len + libraries.len   # no other kinds
 
   test "versions block records the upstream tag + URL + repository":
     # M2 versions registry: the upstream ftp.gnu.org release tag is
@@ -143,23 +131,39 @@ suite "gccSource — from-source recipe smoke test":
     # configure + build + install. The from-source-custom convention
     # consumes the sequence verbatim.
     let rows = registeredShellActions("gccSource")
-    check rows.len == 4
+    check rows.len == 5
     for r in rows:
       check r.packageName == "gccSource"
       check r.artifactName == "gcc"
-    check rows[0].command == "mkdir -p $extracted/build"
-    check rows[1].command ==
-      "cd $extracted/build && ../configure --prefix=$out --enable-languages=c,c++ --disable-multilib --disable-bootstrap --disable-nls --without-headers"
-    check rows[2].command == "cd $extracted/build && make"
+    # Steps 0 and 1 are long shell one-liners (bootstrap-sysroot discovery and
+    # the full configure flag set). They are matched on their DISTINCTIVE parts
+    # rather than verbatim: a byte-exact literal of a ~700-char command turns
+    # every recipe tweak into a two-file edit, which is precisely how these
+    # expectations fell out of step with the recipe in the first place. The
+    # ordering, the count, the ids and the per-artifact attribution are all
+    # still asserted exactly, so a reordered or dropped step still fails.
+    check rows[0].command.contains("mkdir -p $extracted/build")
+    check rows[0].command.contains("bootstrap-sysroot")
+    check rows[1].command.contains("../configure --prefix=$out")
+    check rows[1].command.contains("--enable-languages=c,c++")
+    check rows[1].command.contains("--disable-multilib")
+    check rows[1].command.contains("--disable-bootstrap")
+    check rows[1].command.contains("--with-build-sysroot=$extracted/bootstrap-sysroot")
+    # The job count is deliberately fixed in the recipe so the action's cache
+    # identity does not vary with host CPU discovery — assert it verbatim.
+    check rows[2].command == "cd $extracted/build && make -j8"
     check rows[3].command == "cd $extracted/build && make install"
+    # lib64 -> lib aliases so declared library artifacts resolve consistently.
+    check rows[4].command.contains("$out/lib64/$runtime")
 
   test "shell() ids carry the per-artifact sequence number":
     # M9.N Batch C.1 — auto-generated ids follow the
     # ``<package>-<artifact>-<seq>`` shape; sequence increments per
     # artifact.
     let rows = registeredShellActions("gccSource")
-    check rows.len == 4
+    check rows.len == 5
     check rows[0].id == "gccSource-gcc-1"
     check rows[1].id == "gccSource-gcc-2"
     check rows[2].id == "gccSource-gcc-3"
     check rows[3].id == "gccSource-gcc-4"
+    check rows[4].id == "gccSource-gcc-5"

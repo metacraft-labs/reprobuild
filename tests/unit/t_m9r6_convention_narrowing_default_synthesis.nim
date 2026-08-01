@@ -107,6 +107,18 @@ package m9r6CustomFixture:
   nativeBuildDeps:
     "sh"
     "perl"
+  ## A package-level ``build:`` is what the package macro classifies as
+  ## ``soM4Build``; without it, a custom-convention recipe (shell-driver-only
+  ## ``nativeBuildDeps``) raises ``raiseCustomBuildRequired`` at DECLARATION
+  ## time and takes this whole test binary down before any test runs.
+  ##
+  ## The three custom-convention assertions are unaffected by its presence:
+  ## ``defaultBuildConventionFor`` reads the dep tokens, and both
+  ## ``shouldSynthesizeDefaultBuild`` and ``raiseCustomBuildRequired`` are
+  ## exercised by passing their arguments directly rather than by inspecting
+  ## this fixture.
+  build:
+    shell "true"
   executable customWidget:
     discard
 

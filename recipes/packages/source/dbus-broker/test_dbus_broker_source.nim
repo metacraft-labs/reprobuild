@@ -24,10 +24,10 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "https://github.com/bus1/dbus-broker/archive/refs/tags/v36.tar.gz"
+  "https://github.com/bus1/dbus-broker/releases/download/v36/dbus-broker-36.tar.xz"
 
 const ExpectedHash =
-  "5058a81eea8086636ef09a670d103e35e650a6f0200aadc2f59f3fb6e76c37b8"
+  "d333d99bd2688135b6d6961e7ad1360099d186078781c87102230910ea4e162b"
 
 const ExpectedMesonOptions = @[
   "-Daudit=false",
@@ -103,5 +103,5 @@ suite "dbusBrokerSource — from-source recipe smoke test":
     check vs[0].version == "36"
     check vs[0].sourceRevision == "refs/tags/v36"
     check vs[0].sourceUrl ==
-      "https://github.com/bus1/dbus-broker/archive/refs/tags/v36.tar.gz"
+      "https://github.com/bus1/dbus-broker/releases/download/v36/dbus-broker-36.tar.xz"
     check vs[0].sourceRepository == "https://github.com/bus1/dbus-broker"
