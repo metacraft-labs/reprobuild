@@ -159,6 +159,7 @@ const reproosImageRootfsDeps = @[
   "libcap",
   "libcap-ng",
   "openssl",
+  "curl",
   "libdrm",
   "libevdev",
   "expat",
@@ -168,6 +169,7 @@ const reproosImageRootfsDeps = @[
   "freetype",
   "gcc",
   "glib2",
+  "gdk-pixbuf",
   "gmp",
   "harfbuzz",
   "libinput",
@@ -182,7 +184,9 @@ const reproosImageRootfsDeps = @[
   "libpciaccess",
   "pcre2",
   "pixman",
+  "libjpeg",
   "libpng",
+  "libtiff",
   "readline",
   "libseccomp",
   "sqlite",
@@ -288,6 +292,7 @@ package reproosImage:
     "libcap"
     "libcap-ng"
     "openssl"
+    "curl"
     "libdrm"
     "libevdev"
     "expat"
@@ -297,6 +302,7 @@ package reproosImage:
     "freetype"
     "gcc"
     "glib2"
+    "gdk-pixbuf"
     "gmp"
     "harfbuzz"
     "libinput"
@@ -311,7 +317,9 @@ package reproosImage:
     "libpciaccess"
     "pcre2"
     "pixman"
+    "libjpeg"
     "libpng"
+    "libtiff"
     "readline"
     "libseccomp"
     "sqlite"
