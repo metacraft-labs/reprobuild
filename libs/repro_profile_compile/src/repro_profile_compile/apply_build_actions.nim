@@ -185,8 +185,36 @@ proc applyBuildActionsEngineConfig*(cacheRoot: string;
   ## ``mkInfraApplyBrokerSpawn(ctx)``) packages the request into a
   ## ``pokInlineExecCall`` ``PrivilegedOperation`` and dispatches via
   ## ``repro_elevation.dispatchOperation``.
+  ## ``rebuildMissingOutputsOnCacheHit = true`` makes a cache hit whose
+  ## declared outputs are already on disk a no-op: the engine serves it
+  ## from the whole-graph fast no-op scan (``asCacheHit``) or, failing
+  ## that, the per-action outputs-present branch (``asUpToDate``), and
+  ## leaves the files untouched either way. With the default
+  ## (``false``) the engine instead calls ``restoreOutputs``, which
+  ## rewrites every declared output via a temp-file + ``removeFile`` +
+  ## ``moveFile`` dance — even when the bytes on disk are already the
+  ## bytes the cache would write.
+  ##
+  ## That rewrite is destructive rather than merely wasteful. When a
+  ## declared output is an executable image that some other process on
+  ## the host currently has mapped, the platform can refuse to unlink
+  ## it, ``restoreOutputs`` raises, and the exception escapes ``runBuild``
+  ## and fails the whole dispatch (see the ``engineFailedAll`` path
+  ## below). Every other engine consumer in the tree already sets this
+  ## flag; the apply driver was the lone caller still taking the
+  ## rewrite-on-hit path.
+  ##
+  ## Trade-off, stated explicitly: the outputs-present short-circuit
+  ## tests output *presence*, not output *content*. The always-restore
+  ## path therefore had an incidental self-healing property — it would
+  ## overwrite an output that had been corrupted or truncated in place
+  ## by something outside the build. That property is not preserved
+  ## here. It is the same contract every other consumer already runs
+  ## under, and re-running with ``--force-rebuild`` still repairs a
+  ## damaged tree.
   result = defaultBuildEngineConfig(cacheRoot)
   result.maxParallelism = 1
+  result.rebuildMissingOutputsOnCacheHit = true
   result.deferLocalOutputBlobs = false
   result.bypassRunQuota = true
   result.suppressTrace = true
@@ -304,7 +332,24 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
           for r in runRes.results: byId.add(r)
         except CatchableError as err:
           engineFailedAll = true
-          engineFailDetail = "build engine raised " & $err.name & ": " & err.msg
+          # ATTRIBUTION: when runBuild raises, the engine returns no
+          # per-action results at all, so there is genuinely nothing to
+          # attribute this failure to a specific edge with. A single
+          # edge's exception aborts the whole dispatch and every edge in
+          # the batch is then reported with this same text.
+          #
+          # Say that explicitly. The unqualified per-edge phrasing this
+          # replaced made N identical diagnostics look like N
+          # independent faults — which reads as a systemic failure (bad
+          # permissions, broken host) and sends diagnosis in exactly the
+          # wrong direction. The wording below is the only honest
+          # statement available at this layer; see the note above
+          # ``engineFailedAll``'s use below for the real fix.
+          engineFailDetail =
+            "build engine aborted the whole batch of " & $toBuild.len &
+            " action edge(s) before reporting per-edge results; this " &
+            "edge is not necessarily the one that failed. Underlying " &
+            "error: " & $err.name & ": " & err.msg
 
       # ---- Assemble the per-edge outcomes in INPUT order. ----
       for a in actions:
@@ -312,6 +357,14 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
           result.add(substituted[a.id])
           continue
         if engineFailedAll:
+          # NOT-FIXED-HERE: real per-edge attribution requires the engine
+          # to stop letting one action's exception escape the scheduler
+          # loop. The fix belongs in repro_build_engine's per-action
+          # handling (mark that action asFailed and continue) rather than
+          # in this caller, which by construction has no per-action data
+          # once runBuild has raised. Deliberately left out of this
+          # change: it alters shared engine semantics for every consumer
+          # and wants its own review.
           result.add(BuildActionApplyOutcome(
             id: a.id, address: a.id, ok: false,
             requiresElevation: a.requiresElevation,
