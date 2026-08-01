@@ -2761,6 +2761,11 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
   ## can replace the runtime selected by an executable's own RPATH. Keep the
   ## directories available to the linker, but never inject them into a process
   ## runtime search path.
+  # Compiler bootstrap prefixes can carry libc startup files even when the
+  # owning package is GCC rather than glibc. Detect the runtime by content so
+  # federated catalogs and staged compiler package names remain safe.
+  if fileExists(path / "libc.so.6"):
+    return true
   let normalized = path.replace('\\', '/')
   const sourceMarker = "/packages/source/"
   let sourceIndex = normalized.find(sourceMarker)
