@@ -15890,6 +15890,8 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "commandStatsId": action.commandStatsId,
     "cacheable": action.cacheable,
     "weakFingerprint": digestHex(action.weakFingerprint),
+    "publishToBinaryCache": action.publishToBinaryCache,
+    "binaryCacheKey": deriveActionCacheKeyHex(action),
     "actionCachePolicy": $action.actionCachePolicy,
     "depfile": action.depfile,
     "dynamicDepsFile": action.dynamicDepsFile,
