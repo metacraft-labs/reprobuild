@@ -2621,6 +2621,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       "openssl",
       "pcre-config",
       "pkg-config",
+      "pkgconf",
       "playwright",
       "pnpm",
       "pyproject-hooks",
