@@ -153,7 +153,15 @@ const reproosImageRootfsDeps = @[
   "libx11",
   "libxau",
   "libxfont2",
+  "libattr",
   "libacl",
+  "cairo",
+  "libcap",
+  "libcap-ng",
+  "openssl",
+  "libdrm",
+  "libevdev",
+  "expat",
   "libaio",
   "audit",
   "libbsd",
@@ -231,7 +239,15 @@ package reproosImage:
     "libx11"
     "libxau"
     "libxfont2"
+    "libattr"
     "libacl"
+    "cairo"
+    "libcap"
+    "libcap-ng"
+    "openssl"
+    "libdrm"
+    "libevdev"
+    "expat"
     "libaio"
     "audit"
     "libbsd"
