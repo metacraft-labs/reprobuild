@@ -109,6 +109,31 @@ suite "federated provisioning contributions":
     expect ValueError:
       discard toProjectInterface(consumer, packages, @[bad])
 
+  test "interface fingerprint selects among duplicate package names":
+    let packages = registeredPackages()
+    let consumer = findPackage("contributionConsumer")
+    let first = findPackage("contributedTool")
+    var alternative = first
+    alternative.executables = @[
+      ExecutableDef(exportName: "alternative", binaryName: "alternative")]
+    let candidates = packages & @[alternative]
+    let wanted = canonicalPackageInterfaceFingerprint(alternative, candidates)
+    let pinned = ProvisioningContributionDef(
+      targetPackage: "contributedTool",
+      targetInterfaceFingerprint: wanted,
+      contributor: "github:example/pinned-catalog",
+      nixProvisioning: @[NixPackageProvisioningDef(
+        selector: "nixpkgs#hello", executablePath: "bin/hello")])
+    let projected = toProjectInterface(consumer, candidates, @[pinned])
+    check projected.provisioningContributions[0].targetInterfaceFingerprint ==
+      wanted
+
+    var developing = pinned
+    developing.targetInterfaceFingerprint = ""
+    developing.developInterface = true
+    expect ValueError:
+      discard toProjectInterface(consumer, candidates, @[developing])
+
   test "ambiguous contributors require an explicit selection":
     let old = getEnv("REPRO_PROVISIONING_CONTRIBUTOR")
     defer:

@@ -1432,29 +1432,41 @@ proc toProjectInterface*(pkg: PackageDef;
     for contribution in contributions:
       var targetFound = false
       var targetFingerprint = ""
+      var activeFingerprints: seq[string] = @[]
+      let pinnedFingerprint = normalizedInterfaceFingerprint(
+        contribution.targetInterfaceFingerprint)
       for targetPkg in packages:
         if targetPkg.packageName == contribution.targetPackage:
           targetFound = true
           let targetInterface = toProjectInterface(targetPkg, packages, [])
-          targetFingerprint = toHex(
+          let candidateFingerprint = toHex(
             interfaceFingerprint(targetInterface).bytes).toLowerAscii()
-          break
+          if activeFingerprints.find(candidateFingerprint) < 0:
+            activeFingerprints.add(candidateFingerprint)
+          if contribution.developInterface:
+            if targetFingerprint.len == 0:
+              targetFingerprint = candidateFingerprint
+          elif candidateFingerprint == pinnedFingerprint:
+            targetFingerprint = candidateFingerprint
       if not targetFound:
         # A thin catalog may be inspected before its target repository is
         # materialized. Preserve the pinned identity; the consuming resolver
         # validates it once the canonical package interface is present.
-        targetFingerprint = normalizedInterfaceFingerprint(
-          contribution.targetInterfaceFingerprint)
-      elif contribution.developInterface:
-        discard
-      elif normalizedInterfaceFingerprint(
-          contribution.targetInterfaceFingerprint) != targetFingerprint:
+        targetFingerprint = pinnedFingerprint
+      elif contribution.developInterface and activeFingerprints.len > 1:
+        raise newException(ValueError,
+          "ambiguous package interface for development contribution \"" &
+          contribution.targetPackage & "\" from \"" &
+          contribution.contributor & "\": active fingerprints " &
+          activeFingerprints.join(", ") &
+          "; publish an explicit interfaceFingerprint")
+      elif not contribution.developInterface and targetFingerprint.len == 0:
         raise newException(ValueError,
           "provisioning contribution interface mismatch for package \"" &
           contribution.targetPackage & "\" from \"" &
           contribution.contributor & "\": expected " &
           contribution.targetInterfaceFingerprint & ", active " &
-          targetFingerprint)
+          activeFingerprints.join(", "))
       let projected = toInterfaceProvisioningContribution(contribution,
         targetFingerprint)
       result.provisioningContributions.add(projected)
