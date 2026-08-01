@@ -4604,12 +4604,14 @@ proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(useDef.executableName)
     payload.addCacheField(useDef.policyPath.join("/"))
     for nix in useDef.nixProvisioning:
+      payload.addCacheField(nix.contributor)
       payload.addCacheField(nix.selector)
       payload.addCacheField(nix.executablePath)
       payload.addCacheField(nix.expressionFile)
       payload.addCacheField(nix.packageId)
       payload.addCacheField(nix.lockIdentity)
     for tarball in useDef.tarballProvisioning:
+      payload.addCacheField(tarball.contributor)
       payload.addCacheField(tarball.url)
       payload.addCacheField(tarball.mirrors.join("\n"))
       payload.addCacheField(tarball.sha256)
@@ -4619,6 +4621,7 @@ proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
       payload.addCacheField(tarball.packageId)
       payload.addCacheField(tarball.lockIdentity)
     for scoop in useDef.scoopProvisioning:
+      payload.addCacheField(scoop.contributor)
       payload.addCacheField(scoop.bucket)
       payload.addCacheField(scoop.app)
       payload.addCacheField(scoop.version)

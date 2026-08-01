@@ -767,13 +767,48 @@ proc effectiveNixSelector(selected: InterfaceNixProvisioning): string =
       selected.nixpkgsNarHash) & "#" & selected.selector["nixpkgs#".len .. ^1]
   selected.selector
 
+proc requestedProvisioningContributor(): string =
+  getEnv("REPRO_PROVISIONING_CONTRIBUTOR").strip()
+
+proc contributorLabel(value: string): string =
+  if value.len > 0: value else: "canonical-package"
+
+proc contributorLockIdentity(contributor, realizationIdentity: string): string =
+  if contributor.len == 0:
+    realizationIdentity
+  else:
+    "contributor:" & contributor & "\n" & realizationIdentity
+
+proc selectNixProvisioning(useDef: InterfaceToolUse):
+    InterfaceNixProvisioning =
+  let requested = requestedProvisioningContributor()
+  var contributors: seq[string] = @[]
+  for candidate in useDef.nixProvisioning:
+    if requested.len > 0 and candidate.contributor != requested:
+      continue
+    if candidate.contributor notin contributors:
+      contributors.add(candidate.contributor)
+    if result.selector.len == 0:
+      result = candidate
+  if result.selector.len == 0:
+    raise newException(ValueError,
+      "tool-resolution failed: provisioning contributor \"" & requested &
+      "\" has no nix realization for package \"" &
+      useDef.packageSelector & "\"")
+  if requested.len == 0 and contributors.len > 1:
+    raise newException(ValueError,
+      "tool-resolution failed: ambiguous nix provisioning for package \"" &
+      useDef.packageSelector & "\"; eligible contributors: " &
+      contributors.mapIt(contributorLabel(it)).join(", ") &
+      "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
+
 proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
   if useDef.nixProvisioning.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
       "\" does not declare provisioning: nixPackage metadata")
-  let selected = useDef.nixProvisioning[0]
+  let selected = selectNixProvisioning(useDef)
   if selected.selector.len == 0 or selected.executablePath.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: incomplete nixPackage metadata for package \"" &
@@ -800,7 +835,7 @@ proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
     nixpkgsRef: selected.nixpkgsRef,
     nixpkgsRev: selected.nixpkgsRev,
     nixpkgsNarHash: selected.nixpkgsNarHash,
-    lockIdentity: lockIdentity)
+    lockIdentity: contributorLockIdentity(selected.contributor, lockIdentity))
 
 proc unsafeRelativePath(value: string): bool =
   let normalized = value.replace('\\', '/')
@@ -1545,9 +1580,25 @@ proc selectTarballProvisioning(useDef: InterfaceToolUse):
   ## act as a catch-all when no per-platform slice is supplied. Entries
   ## are walked in declaration order so author intent is preserved
   ## (early entries beat later catch-alls).
+  let requested = requestedProvisioningContributor()
+  var contributors: seq[string] = @[]
+  var candidates: seq[InterfaceTarballProvisioning] = @[]
   for provisioning in useDef.tarballProvisioning:
-    if matchesHostPlatform(provisioning):
-      return provisioning
+    if not matchesHostPlatform(provisioning):
+      continue
+    if requested.len > 0 and provisioning.contributor != requested:
+      continue
+    candidates.add(provisioning)
+    if provisioning.contributor notin contributors:
+      contributors.add(provisioning.contributor)
+  if requested.len == 0 and contributors.len > 1:
+    raise newException(ValueError,
+      "tool-resolution failed: ambiguous tarball provisioning for package \"" &
+      useDef.packageSelector & "\"; eligible contributors: " &
+      contributors.mapIt(contributorLabel(it)).join(", ") &
+      "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
+  if candidates.len > 0:
+    return candidates[0]
   raise newException(ValueError,
     "tool-resolution failed: no tarball provisioning entry for package \"" &
     useDef.packageSelector & "\" matches host cpu=" & hostCpuToken() &
@@ -1581,10 +1632,11 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
     0: selected.archiveType else: "tar.gz",
     declaredExecutablePath: selected.executablePath,
     stripComponents: selected.stripComponents,
-    lockIdentity: if selected.lockIdentity.len > 0:
+    lockIdentity: contributorLockIdentity(selected.contributor,
+      if selected.lockIdentity.len > 0:
         selected.lockIdentity
       else:
-        "sha256:" & sha256)
+        "sha256:" & sha256))
 
 proc downloadUrlToFile(url, destination: string) =
   createDir(extendedPath(parentDir(destination)))
@@ -2545,7 +2597,27 @@ proc scoopAcquisitionPlan*(useDef: InterfaceToolUse): ScoopAcquisitionPlan =
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
       "\" does not declare provisioning: scoopApp metadata")
-  let selected = useDef.scoopProvisioning[0]
+  let requested = requestedProvisioningContributor()
+  var contributors: seq[string] = @[]
+  var candidates: seq[InterfaceScoopProvisioning] = @[]
+  for candidate in useDef.scoopProvisioning:
+    if requested.len > 0 and candidate.contributor != requested:
+      continue
+    candidates.add(candidate)
+    if candidate.contributor notin contributors:
+      contributors.add(candidate.contributor)
+  if candidates.len == 0:
+    raise newException(ValueError,
+      "tool-resolution failed: provisioning contributor \"" & requested &
+      "\" has no scoop realization for package \"" &
+      useDef.packageSelector & "\"")
+  if requested.len == 0 and contributors.len > 1:
+    raise newException(ValueError,
+      "tool-resolution failed: ambiguous scoop provisioning for package \"" &
+      useDef.packageSelector & "\"; eligible contributors: " &
+      contributors.mapIt(contributorLabel(it)).join(", ") &
+      "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
+  let selected = candidates[0]
   if selected.bucket.len == 0 or selected.app.len == 0 or
       selected.executablePath.len == 0:
     raise newException(ValueError,
@@ -2577,7 +2649,7 @@ proc scoopAcquisitionPlan*(useDef: InterfaceToolUse): ScoopAcquisitionPlan =
     declaredExecutablePath: selected.executablePath,
     requiresExecutionProfileChecksum:
       selected.requiresExecutionProfileChecksum,
-    lockIdentity: lockIdentity)
+    lockIdentity: contributorLockIdentity(selected.contributor, lockIdentity))
 
 proc resolveScoopRoot(scoopOverride: string): string =
   let explicit = getEnv("SCOOP")

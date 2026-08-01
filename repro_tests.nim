@@ -7782,6 +7782,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_provisioning_contributions.nim",
+    binary: "build/test-bin/t_provisioning_contributions",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_rp1_provider_compile_edge_materializes.nim",
     binary: "build/test-bin/t_rp1_provider_compile_edge_materializes",
     defines: @[],

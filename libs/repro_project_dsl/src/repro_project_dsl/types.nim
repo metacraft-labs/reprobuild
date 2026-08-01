@@ -288,6 +288,21 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  ProvisioningContributionDef* = object
+    ## A realization supplied independently of the package that owns the
+    ## public interface. ``targetInterfaceFingerprint`` pins the contribution
+    ## to that interface; ``developInterface`` resolves the active package
+    ## fingerprint during local development and is not suitable for locks.
+    targetPackage*: string
+    targetInterfaceFingerprint*: string
+    contributor*: string
+    developInterface*: bool
+    nixProvisioning*: seq[NixPackageProvisioningDef]
+    tarballProvisioning*: seq[TarballProvisioningDef]
+    scoopProvisioning*: seq[ScoopProvisioningDef]
+    sourceFile*: string
+    sourceLine*: int
+
   VariantDecl* = object
     ## Spec-Implementation M1: one entry per variant declared in a
     ## package ``config:`` block. Both spellings — ``variant: T =

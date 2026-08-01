@@ -3317,6 +3317,114 @@ macro resourceModule*(modulePath: static string; body: untyped = nil): untyped =
   discard body
   newEmptyNode()
 
+proc provisioningContributionLiteral(
+    contribution: ProvisioningContributionDef): string =
+  result = "ProvisioningContributionDef(targetPackage: " &
+    escForCode(contribution.targetPackage) &
+    ", targetInterfaceFingerprint: " &
+    escForCode(contribution.targetInterfaceFingerprint) &
+    ", contributor: " & escForCode(contribution.contributor) &
+    ", developInterface: " & $contribution.developInterface &
+    ", nixProvisioning: @["
+  for i, provisioning in contribution.nixProvisioning:
+    if i > 0: result.add(", ")
+    result.add("NixPackageProvisioningDef(selector: " &
+      escForCode(provisioning.selector) &
+      ", executablePath: " & escForCode(provisioning.executablePath) &
+      ", expressionFile: " & escForCode(provisioning.expressionFile) &
+      ", nixpkgsRef: " & escForCode(provisioning.nixpkgsRef) &
+      ", nixpkgsRev: " & escForCode(provisioning.nixpkgsRev) &
+      ", nixpkgsNarHash: " & escForCode(provisioning.nixpkgsNarHash) &
+      ", packageId: " & escForCode(provisioning.packageId) &
+      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+      ", sourceFile: " & escForCode(provisioning.sourceFile) &
+      ", sourceLine: " & $provisioning.sourceLine & ")")
+  result.add("], tarballProvisioning: @[")
+  for i, provisioning in contribution.tarballProvisioning:
+    if i > 0: result.add(", ")
+    result.add("TarballProvisioningDef(url: " &
+      escForCode(provisioning.url) & ", mirrors: @[")
+    for j, mirror in provisioning.mirrors:
+      if j > 0: result.add(", ")
+      result.add(escForCode(mirror))
+    result.add("], sha256: " & escForCode(provisioning.sha256) &
+      ", archiveType: " & escForCode(provisioning.archiveType) &
+      ", executablePath: " & escForCode(provisioning.executablePath) &
+      ", stripComponents: " & $provisioning.stripComponents &
+      ", packageId: " & escForCode(provisioning.packageId) &
+      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+      ", cpu: " & escForCode(provisioning.cpu) &
+      ", os: " & escForCode(provisioning.os) &
+      ", sourceFile: " & escForCode(provisioning.sourceFile) &
+      ", sourceLine: " & $provisioning.sourceLine & ")")
+  result.add("], scoopProvisioning: @[")
+  for i, provisioning in contribution.scoopProvisioning:
+    if i > 0: result.add(", ")
+    result.add("ScoopProvisioningDef(bucket: " &
+      escForCode(provisioning.bucket) &
+      ", app: " & escForCode(provisioning.app) &
+      ", version: " & escForCode(provisioning.version) &
+      ", preferredVersion: " & escForCode(provisioning.preferredVersion) &
+      ", manifestChecksum: " & escForCode(provisioning.manifestChecksum) &
+      ", manifestUrl: " & escForCode(provisioning.manifestUrl) &
+      ", executablePath: " & escForCode(provisioning.executablePath) &
+      ", requiresExecutionProfileChecksum: " &
+        $provisioning.requiresExecutionProfileChecksum &
+      ", packageId: " & escForCode(provisioning.packageId) &
+      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+      ", sourceFile: " & escForCode(provisioning.sourceFile) &
+      ", sourceLine: " & $provisioning.sourceLine & ")")
+  result.add("], sourceFile: " & escForCode(contribution.sourceFile) &
+    ", sourceLine: " & $contribution.sourceLine & ")")
+
+macro provisioningFor*(target: untyped; body: untyped): untyped =
+  ## Publish realization metadata for a package interface owned by another
+  ## module. The contribution is ordinary static registry data, so interface
+  ## extraction can carry it without executing a provider at resolution time.
+  var contribution = ProvisioningContributionDef(
+    targetPackage: stringLiteral(target),
+    sourceFile: target.lineInfoObj().filename,
+    sourceLine: target.lineInfoObj().line)
+  let statements = if body.kind == nnkStmtList: body else: newStmtList(body)
+  for stmt in statements:
+    let rawName =
+      if stmt.kind in {nnkIdent, nnkSym}: $stmt
+      else: calleeName(stmt)
+    let name = rawName.normalize
+    case name
+    of "interfacefingerprint":
+      if stmt.len != 2:
+        error("interfaceFingerprint expects exactly one string literal", stmt)
+      contribution.targetInterfaceFingerprint = stringLiteral(stmt[1])
+    of "contributor":
+      if stmt.len != 2:
+        error("contributor expects exactly one string literal", stmt)
+      contribution.contributor = stringLiteral(stmt[1])
+    of "developinterface":
+      contribution.developInterface = true
+    of "nixpackage":
+      contribution.nixProvisioning.add(parseNixPackageProvisioning(stmt))
+    of "tarball":
+      contribution.tarballProvisioning.add(parseTarballProvisioning(stmt))
+    of "scoopapp", "scooppackage":
+      contribution.scoopProvisioning.add(parseScoopProvisioning(stmt))
+    else:
+      error("unsupported provisioningFor entry: " & rawName, stmt)
+  if contribution.targetPackage.len == 0:
+    error("provisioningFor requires a non-empty package name", target)
+  if contribution.contributor.len == 0:
+    error("provisioningFor requires contributor \"...\"", target)
+  if contribution.targetInterfaceFingerprint.len == 0 and
+      not contribution.developInterface:
+    error("provisioningFor requires interfaceFingerprint or developInterface",
+      target)
+  if contribution.nixProvisioning.len == 0 and
+      contribution.tarballProvisioning.len == 0 and
+      contribution.scoopProvisioning.len == 0:
+    error("provisioningFor requires at least one realization", target)
+  parseStmt("registerProvisioningContributionDef(" &
+    provisioningContributionLiteral(contribution) & ")")
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##

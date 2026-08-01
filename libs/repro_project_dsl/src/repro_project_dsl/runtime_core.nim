@@ -1,4 +1,5 @@
 var registry: seq[PackageDef] = @[]
+var provisioningContributionRegistry: seq[ProvisioningContributionDef] = @[]
 var buildActionRegistry: seq[BuildActionDef] = @[]
 var buildTargetRegistry: seq[BuildTargetDef] = @[]
   ## Pre-M5 single ``BuildTargetDef`` registry. After the M5 split this
@@ -326,6 +327,17 @@ proc registerPackageDef*(pkg: PackageDef) {.dynOrStatic.} =
 
 proc registeredPackages*(): seq[PackageDef] {.dynOrStatic.} =
   registry
+
+proc resetProvisioningContributionRegistry*() {.dynOrStatic.} =
+  provisioningContributionRegistry.setLen(0)
+
+proc registerProvisioningContributionDef*(
+    contribution: ProvisioningContributionDef) {.dynOrStatic.} =
+  provisioningContributionRegistry.add(contribution)
+
+proc registeredProvisioningContributions*():
+    seq[ProvisioningContributionDef] {.dynOrStatic.} =
+  provisioningContributionRegistry
 
 var resourceTypeInterfaceRegistry: seq[ResourceTypeInterfaceDef] = @[]
   ## RP4 (Provider-Runtime-Protocol-v1 §5): module-global set of resource
