@@ -220,6 +220,45 @@ proc raiseCustomBuildRequired*(packageName: string) =
       "``recipes/packages/source/cmake/repro.nim`` for a production " &
       "example.")
 
+# ---------------------------------------------------------------------------
+# Owning-package scoping for synthesised builds
+# ---------------------------------------------------------------------------
+#
+# The tool constructors below (``meson_package`` etc.) register IMPLICIT target
+# exports — a target literally named ``build`` — while they run. Without an
+# owning-package override those exports are attributed to the TOOL package
+# (``meson`` / ``cmake``), while their action ids are derived from the CALL's
+# arguments (srcDir, prefix, ...). Two different recipes synthesised in one
+# process therefore produce the same implicit name under the same owner with
+# DIFFERENT action ids, which ``registerTargetExportEntry`` treats as a genuine
+# duplicate and refuses:
+#
+#   duplicate implicit target name 'build' within package 'meson'
+#
+# That made synthesis effectively once-per-process per convention — a real
+# limit, since the from-source corpus holds many meson and cmake recipes.
+#
+# Scoping the registration to the CONSUMING package is what the export table
+# already expects: ``setCurrentOwningPackageOverride`` exists for exactly this
+# ("set the active per-edge owningPackage while a package's buildProc is
+# running"), and the synthesis path simply never set it because it does not run
+# through ``buildPackageFragment``. With it set, the implicit target reads
+# ``<recipe>:build`` — the name a user would address — and a collision once
+# again means what it says.
+template withOwningPackage(packageName: string; body: untyped): untyped =
+  ## Scope implicit target exports emitted by ``body`` to ``packageName``.
+  ## Restores the previous override rather than clearing unconditionally, so a
+  ## nested synthesis cannot strand an outer scope.
+  let previousOwner = currentOwningPackage()
+  setCurrentOwningPackageOverride(packageName)
+  try:
+    body
+  finally:
+    if previousOwner.len > 0:
+      setCurrentOwningPackageOverride(previousOwner)
+    else:
+      clearCurrentOwningPackageOverride()
+
 proc synthesizeMesonPackage*(packageName, srcDir: string): MesonPackageResult =
   ## Drive ``meson_package(srcDir = <fetched/extracted dir>)`` with no
   ## options argument. Recipes that need per-tool options provide an
@@ -227,14 +266,14 @@ proc synthesizeMesonPackage*(packageName, srcDir: string): MesonPackageResult =
   ## with the option seq inlined as the ``configureOptions`` argument;
   ## the synthesis path covers only recipes that have no options to
   ## thread (M9.R.6.1 narrowing).
-  discard packageName
-  meson_package(srcDir = srcDir)
+  withOwningPackage(packageName):
+    result = meson_package(srcDir = srcDir)
 
 proc synthesizeCmakePackage*(packageName, srcDir: string): CmakePackageResult =
   ## Drive ``cmake_package(srcDir = ...)`` with no cache vars. See
   ## ``synthesizeMesonPackage`` for the M9.R.6.1 narrowing rationale.
-  discard packageName
-  cmake_package(srcDir = srcDir)
+  withOwningPackage(packageName):
+    result = cmake_package(srcDir = srcDir)
 
 proc synthesizeAutotoolsPackage*(packageName, srcDir: string):
     AutotoolsPackageResult =
@@ -243,5 +282,5 @@ proc synthesizeAutotoolsPackage*(packageName, srcDir: string):
   ## autotools_package constructor handles them via its ``make`` step
   ## (configure is a no-op for projects without a real ``./configure``
   ## script when the flags seq is empty).
-  discard packageName
-  autotools_package(srcDir = srcDir)
+  withOwningPackage(packageName):
+    result = autotools_package(srcDir = srcDir)
