@@ -84,6 +84,8 @@ suite "ReproOS source bridge inventory":
     check "REPROOS_SOURCE_RECIPES" in stageScript
     check "source_recipe_selected" in stageScript
     check "reproosImageRootfsDeps.join(\" \")" in imageRecipe
+    check "task \"boot-vm\"" in imageRecipe
+    check "vm-harness boot --backend auto" in imageRecipe
     check "required source mirror missing: $recipe" in stageScript
     check "required iproute2 ss binary missing" in stageScript
     check "$STAGE_DIR/usr/bin/ss" in stageScript
@@ -123,8 +125,7 @@ suite "ReproOS source bridge inventory":
     check "setRegisteredActionDeclaredOutputs" in quickControlsRecipe
     check "setRegisteredActionPublish" in quickControlsRecipe
     check "qt6QuickControls2Source.publish_interface" in quickControlsRecipe
-    check "activeProviderProjectRoot() & \"/.repro/output/install\"" in
-      quickControlsRecipe
+    check "currentPackageInstallMirrorRoot()" in quickControlsRecipe
     check "$STAGE_DIR/usr/lib/modules" in stageScript
     check "usr/lib|/usr/lib" in stageScript
     check "unsupported /lib symlink target" in stageScript

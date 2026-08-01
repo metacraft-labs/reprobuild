@@ -239,6 +239,11 @@ const reproosImageRootfsDeps = @[
 package reproosImage:
   defaultToolProvisioning "path"
 
+  devEnv:
+    task "boot-vm",
+      command = "vm-harness boot --backend auto --source-image .repro/output/install --kind qcow2 --keep",
+      description = "Boot the newest built ReproOS image in a transient VM"
+
   uses:
     # M9.R.53: the recipe's operational tool set is now declared
     # ONLY in ``runtimeDeps:`` below.  The M9.R.53 fold in
