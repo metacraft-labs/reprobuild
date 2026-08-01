@@ -4349,7 +4349,8 @@ proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
       id: action.id,
       status: asFailed,
       cacheDecision: cdNotCacheable,
-      reason: "materialized-binary-cache-publish")
+      reason: "materialized-binary-cache-publish key=" &
+        deriveActionCacheKeyHex(action))
     let prefix =
       if action.declaredOutputs.len == 1:
         action.declaredOutputs[0]
@@ -4389,7 +4390,8 @@ proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
           error: "binary-cache publisher raised: " & e.msg)
     if publishResult.ok:
       item.status = asUpToDate
-      item.reason = "materialized-binary-cache-published"
+      item.reason = "materialized-binary-cache-published key=" &
+        deriveActionCacheKeyHex(action)
     else:
       item.exitCode = publishResult.statusCode
       item.stderr = publishResult.error
