@@ -186,3 +186,22 @@ suite "M9.Q from-source provisioning resolver":
       else: delEnv(FromSourceRootEnvVar)
 
     check fromSourceRecipeRoot() == sourceRoot
+
+  test "test_m9q_product_app_composes_with_federated_catalog":
+    let scratch = createTempDir("repro-m9q-federated-app-", "")
+    defer: removeDir(scratch)
+    let productRoot = scratch / "reproos"
+    let appRoot = productRoot / "apps" / "reproos-installer"
+    let sourceRoot = scratch / "reprobuild-packages" / "packages" / "source"
+    createDir(appRoot)
+    createDir(sourceRoot)
+    writeFile(appRoot / "repro.nim", "discard\n")
+
+    let savedCwd = getCurrentDir()
+    setCurrentDir(productRoot)
+    defer: setCurrentDir(savedCwd)
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("reproos-installer"), sourceRoot)
+    check outcome.kind == rrNeedsBuild
+    check outcome.recipeDir == appRoot

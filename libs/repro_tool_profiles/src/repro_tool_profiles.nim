@@ -4351,6 +4351,21 @@ proc m9r14fResolveRecipeDir(useDef: InterfaceToolUse;
       if fileExists(extendedPath(recipeDir / "repro.nim")):
         return recipeDir
 
+  # Federated package catalogs are siblings of product repositories rather
+  # than descendants of them. Product-owned applications still satisfy
+  # package dependencies through the local apps/<selector> convention.
+  var productRoot = getCurrentDir()
+  for _ in 0 .. 4:
+    let appsRoot = productRoot / "apps"
+    for candidate in candidates:
+      let recipeDir = appsRoot / candidate
+      if fileExists(extendedPath(recipeDir / "repro.nim")):
+        return recipeDir
+    let parent = parentDir(productRoot)
+    if parent == productRoot:
+      break
+    productRoot = parent
+
   let fallbackName =
     if useDef.executableName.len > 0: useDef.executableName
     elif candidates.len > 0: candidates[0]
