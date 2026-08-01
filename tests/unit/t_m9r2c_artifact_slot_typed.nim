@@ -132,8 +132,23 @@ package m9r2cCLibConstructor:
     libfooM9r2cE = c_library(into = "libfooM9r2cE",
                              sources = @["src/foo.c"])
 
+# ---------------------------------------------------------------------------
+# Fixture 8 — Nim-style package/artifact identifier collision.
+# ---------------------------------------------------------------------------
+
+package libxml2:
+  library libXml2:
+    discard
+
 
 suite "DSL-port M9.R.2c — artifact slot typing":
+
+  test "artifact differing only by Nim style does not shadow package const":
+    check typeof(libxml2) is Libxml2Package
+    let artifacts = registeredArtifacts("libxml2")
+    check artifacts.len == 1
+    check artifacts[0].artifactName == "libXml2"
+    check artifacts[0].kind == dakLibrary
 
   test "library slot is typed Library":
     # The slot's declared type must be ``Library``; ``typeof`` resolves

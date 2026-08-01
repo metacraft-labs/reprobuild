@@ -1043,7 +1043,8 @@ proc emitM9R2cArtifactSlots(packageName: string;
       if parsed.isIdentForm: packageValueIdent(parsed.artifactName)
       else: ""
     let wouldCollideWithLegacyConst =
-      parsed.isIdentForm and artifactValueIdent == pkgValueIdent
+      parsed.isIdentForm and
+      artifactValueIdent.normalize == pkgValueIdent.normalize
     if parsed.isIdentForm and parsed.identNode != nil and
        parsed.identNode.kind in {nnkIdent, nnkAccQuoted} and
        not wouldCollideWithLegacyConst:
