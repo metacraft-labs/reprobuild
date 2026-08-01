@@ -40086,9 +40086,16 @@ proc executeAdd(parsed: AddArgs): AddReport =
     # Develop membership: record the remote, the repo fragment, and the
     # `includes` edge so the dependency participates in the workspace.
     # Reuse a declared remote that already serves this URL for this repo
-    # name; only fall back to a per-repo remote when none can. (`repro add`
+    # name; only fall back to a per-repo remote when none can. `repro add`
     # keeps `[repo].name == target` because the develop-set `depends` edges
-    # key off that name, so a plan that would rename the repo is declined.)
+    # it writes name the target, and the closure keys off `[repo].name` — a
+    # fragment named after its server-side path would leave those edges
+    # dangling. So the plan is asked to PRESERVE the name (`repro workspace
+    # project repo add`, which writes no `depends` edges, takes the
+    # unrestricted plan and may put a server-side path in `name`), and a plan
+    # that would still rename the repo — a bare `…/<repo>.git` directory URL,
+    # where the name can only come out as `<repo>.git` — is declined in favour
+    # of a per-repo remote that keeps the fragment's identity intact.
     var remoteName = ""
     var remoteFetch = parsed.remoteUrl
     try:
@@ -40099,7 +40106,7 @@ proc executeAdd(parsed: AddArgs): AddReport =
         else:
           ""
       let plan = planRepoRemote(declared.remote, defaultRemote,
-        parsed.target, parsed.remoteUrl)
+        parsed.target, parsed.remoteUrl, preserveRepoName = true)
       if plan.error.len == 0 and plan.repoName == parsed.target:
         remoteName = plan.remoteName
         remoteFetch = plan.mintedFetch
@@ -40114,9 +40121,13 @@ proc executeAdd(parsed: AddArgs): AddReport =
     createDir(manifestsRoot / "repos")
     let fragmentRel = "repos/" & parsed.target & ".toml"
     let fragmentAbs = manifestsRoot / "repos" / (parsed.target & ".toml")
-    # Pin `revision` only when it is NOT identical to what the fragment
-    # would inherit from the project's `default_revision`; a redundant pin
-    # freezes the repo the day it is added.
+    # Omit `revision` when the fragment would inherit exactly the same value
+    # from the project's `default_revision`; a redundant pin freezes the repo
+    # on the day it was added and silently stops tracking the project's
+    # branch. The key is written only when the caller asked for a specific
+    # revision (`--revision` is an explicit pin, even if it happens to name
+    # the current default) or when there is no `default_revision` to inherit
+    # and `revision` therefore has to be stated.
     let pinRevision =
       parsed.revision.len > 0 or resolved.defaultRevision.len == 0
     if not fileExists(fragmentAbs):

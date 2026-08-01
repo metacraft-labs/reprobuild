@@ -1,7 +1,8 @@
 ## `repro workspace project repo add` writes manifest entries that match the
-## hand-written ones: it REUSES a declared `[[remote]]` that already serves the
-## requested URL, mints at most ONE reusable org-named remote when none does,
-## and never guesses a `revision`.
+## hand-written ones: it REUSES the MOST SPECIFIC declared `[[remote]]` base
+## that prefixes the requested URL (putting whatever path remains in
+## `[repo].name`), mints at most ONE reusable org-named remote when no declared
+## base does, and never guesses a `revision`.
 ##
 ## Regression origin: adding `nim-shm-lease` to the `reprobuild` project (whose
 ## manifest already declares `metacraft-labs` → `https://github.com/metacraft-labs`
@@ -13,6 +14,12 @@
 ## where its hand-written siblings (`repos/nim-shm-queue.toml`,
 ## `repos/nim-shm-gset.toml`) carry `remote = "metacraft-labs"` and no
 ## `revision` at all. Both defects are asserted below.
+##
+## The same reuse rule has to reproduce the THIRD-PARTY shape as well —
+## `repos/llvm-project.toml` carries `remote = "github"` (the generic
+## `https://github.com` base) with the full server-side path
+## `llvm/llvm-project` as its `name` — so that case is asserted alongside,
+## against the same project manifest that declares both bases.
 ##
 ## MOCKS: none. The test drives the real `repro` binary against a real git
 ## manifest repo on a real filesystem, and reads the results back through the
@@ -88,6 +95,22 @@ path = "nim-shm-queue"
 remote = "metacraft-labs"
 """
 
+# The hand-written THIRD-PARTY shape (`repos/llvm-project.toml`,
+# `repos/0install.toml`, `repos/BuildXL.toml` in this repo's own manifest set):
+# the project declares no `llvm` org base, so the repo goes through the generic
+# `github` base and the org segment travels in `[repo].name` — the server-side
+# path — while `path` stays the local checkout dir. Identical to the real file
+# except for its nested `path` (which `project repo add` derives from the
+# `<repo>` argument) and its pinned `revision` (this project has a
+# `default_revision` to inherit).
+const thirdPartyFragment = """schema = "reprobuild.workspace.repo.v1"
+
+[repo]
+name = "llvm/llvm-project"
+path = "llvm-project"
+remote = "github"
+"""
+
 type Fixture = object
   scratch: string
   reproBin: string
@@ -135,6 +158,16 @@ proc fetchUrlOf(projectFile, repoName: string): string =
     if repo.name == repoName: return repo.fetchUrl
   ""
 
+proc checkoutPathOf(projectFile, repoName: string): string =
+  for repo in resolveProject(projectFile).repos:
+    if repo.name == repoName: return repo.path
+  ""
+
+proc remoteOf(projectFile, repoName: string): string =
+  for repo in resolveProject(projectFile).repos:
+    if repo.name == repoName: return repo.projectRemote
+  ""
+
 suite "repro workspace project repo add — remote reuse and revision inheritance":
 
   test "test_repo_add_reuses_matching_org_remote_and_omits_revision":
@@ -172,6 +205,13 @@ suite "repro workspace project repo add — remote reuse and revision inheritanc
       # the org-named remote wins deterministically.
       check generated.contains("remote = \"metacraft-labs\"")
 
+      # The generic `github` base ALSO serves this URL (it prefixes it), but
+      # it is less specific: picking it would have written
+      # `name = "metacraft-labs/nim-shm-lease"`, which is not how the
+      # first-party siblings are written. The most specific base wins.
+      check generated.contains("name = \"nim-shm-lease\"")
+      check not generated.contains("metacraft-labs/nim-shm-lease")
+
       # DEFECT 2: with no `revision` key the repo inherits `default_revision`,
       # and the composed clone URL is the one that was requested.
       check revisionOf(fx.projectFile, "nim-shm-lease") == "dev"
@@ -183,6 +223,49 @@ suite "repro workspace project repo add — remote reuse and revision inheritanc
       check res.output.contains("repos/nim-shm-lease.md")
       check not fileExists(fx.workspaceRoot / "repos" / "nim-shm-lease.md")
 
+  test "test_repo_add_reuses_the_generic_host_base_and_keeps_the_org_in_name":
+    # The third-party family: no `llvm` org base is declared, but `github` →
+    # `https://github.com` is, and it prefixes the URL. The convention (and
+    # the hand-written `repos/llvm-project.toml`) is to use that base and put
+    # the remaining server-side path — `llvm/llvm-project` — in `[repo].name`,
+    # NOT to mint a new `llvm` remote next to the two github ones the project
+    # already declares.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "hostbase")
+      defer: removeDir(fx.scratch)
+
+      let remotesBefore = countRemotes(fx.projectFile)
+      let res = addRepo(fx, @["reprobuild", "llvm-project",
+        "--remote=https://github.com/llvm/llvm-project.git"])
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      check readFile(fx.workspaceRoot / "repos" / "llvm-project.toml") ==
+        thirdPartyFragment
+
+      # Nothing was appended to the shared remote table: no `llvm` org remote,
+      # no single-use `llvm-project-origin`.
+      let projectText = readFile(fx.projectFile)
+      check countRemotes(fx.projectFile) == remotesBefore
+      check not projectText.contains("name = \"llvm\"")
+      check not projectText.contains("llvm-project-origin")
+      check projectText.contains("\"repos/llvm-project.toml\"")
+      check res.output.contains("(reused)")
+
+      # Round-trip through the real resolver: the composed clone URL is the
+      # one that was requested, the checkout dir is still the `<repo>`
+      # argument, and the revision is inherited rather than pinned.
+      check remoteOf(fx.projectFile, "llvm/llvm-project") == "github"
+      check fetchUrlOf(fx.projectFile, "llvm/llvm-project") ==
+        "https://github.com/llvm/llvm-project"
+      check checkoutPathOf(fx.projectFile, "llvm/llvm-project") ==
+        "llvm-project"
+      check revisionOf(fx.projectFile, "llvm/llvm-project") == "dev"
+
   test "test_repo_add_mints_one_org_named_remote_that_the_next_repo_reuses":
     let gitBin = findExe("git")
     if gitBin.len == 0:
@@ -191,6 +274,9 @@ suite "repro workspace project repo add — remote reuse and revision inheritanc
       let fx = setupFixture(gitBin, "mint")
       defer: removeDir(fx.scratch)
 
+      # A host the project declares NO base for — neither `https://github.com`
+      # nor the org base prefixes this URL — so reuse cannot apply and exactly
+      # one new remote is minted.
       let remotesBefore = countRemotes(fx.projectFile)
       let first = addRepo(fx, @["reprobuild", "first-lib",
         "--remote=https://git.example.invalid/acme/first-lib.git",

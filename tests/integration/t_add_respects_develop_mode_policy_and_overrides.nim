@@ -19,12 +19,37 @@
 ##   3. develop-org repo, ``--binary``  → binary (override; NO checkout).
 ##   4. third-party repo, ``--develop`` → develop (override; checkout present).
 ##   5. ``--no-membership``             → clones but NO depends edge / membership.
+##   6. no ``default_revision``         → the fragment PINS the revision it was
+##      cloned at, because there is nothing to inherit.
+##
+## Two properties of the fragment written by case 1 are asserted there rather
+## than left to inspection, because both are load-bearing and silent when they
+## break:
+##
+##   * ``[repo].name`` is the ADDED REPO'S NAME, never the URL's server-side
+##     leaf. The bare origins here are ``…/orglib.git`` directories, so the
+##     remote planner's most-specific-base reuse would name the fragment
+##     ``orglib.git``; ``repro add`` declines any plan that renames the repo
+##     and falls back to a per-repo ``<repo>-origin`` remote, because the
+##     develop-set ``depends`` edge it writes names the target and the closure
+##     keys off ``[repo].name``. A rename would leave that edge dangling and
+##     quietly shrink every pre-push dependency closure.
+##   * No ``revision`` key is written when it would merely restate the
+##     project's ``default_revision`` — a redundant pin freezes the repo on the
+##     day it was added while still resolving to the same value, so nothing
+##     fails until the project's default moves and this repo silently does not.
 ##
 ## Skip rule: ``git`` missing on PATH (same convention as the RA suites).
+##
+## MOCKS: none. The compiled ``repro`` binary runs against real local git
+## origins on a real filesystem, and the resulting manifest is read back
+## through the real resolver (``resolveProject``) rather than by
+## re-implementing its inheritance rules here.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
 
@@ -74,11 +99,11 @@ remote = "app-origin"
 revision = "main"
 """
 
-proc projectToml(appUrl: string): string =
+proc projectToml(appUrl: string; withDefaultRevision = true): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"demo\"\n" &
-  "default_revision = \"main\"\n" &
+  (if withDefaultRevision: "default_revision = \"main\"\n" else: "") &
   "trunk = \"main\"\n\n" &
   "[[remote]]\nname = \"app-origin\"\nfetch = \"" & appUrl & "\"\n\n" &
   "includes = [\n" &
@@ -96,7 +121,7 @@ type
     orgRepoUrl: string        ## a repo UNDER the org prefix.
     thirdPartyUrl: string     ## a repo NOT under the org prefix.
 
-proc setupFixture(gitBin, slug: string): Fixture =
+proc setupFixture(gitBin, slug: string; withDefaultRevision = true): Fixture =
   result.scratch = createTempDir("repro-ra22-add-" & slug & "-", "")
   result.reproBin = reproBinary()
 
@@ -125,7 +150,8 @@ proc setupFixture(gitBin, slug: string): Fixture =
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   result.projectFile = manifestsRoot / "projects" / "demo.toml"
-  writeFile(result.projectFile, projectToml(fileUrl(appOrigin)))
+  writeFile(result.projectFile,
+    projectToml(fileUrl(appOrigin), withDefaultRevision))
   result.appFragment = manifestsRoot / "repos" / "app.toml"
   writeFile(result.appFragment, rootFragmentToml)
 
@@ -163,6 +189,18 @@ proc parseReport(output: string): JsonNode =
 proc appDependsContains(fx: Fixture; dep: string): bool =
   readFile(fx.appFragment).contains("\"" & dep & "\"")
 
+proc fragmentOf(fx: Fixture; repo: string): string =
+  readFile(fx.workspaceRoot / "repos" / (repo & ".toml"))
+
+proc resolvedRepo(fx: Fixture; name: string): ResolvedRepo =
+  for repo in resolveProject(fx.projectFile).repos:
+    if repo.name == name: return repo
+  raise newException(ValueError, "no resolved repo named '" & name & "'")
+
+proc countRemotes(projectFile: string): int =
+  for line in readFile(projectFile).splitLines():
+    if line.strip() == "[[remote]]": inc result
+
 suite "RA-22 — repro add develop-mode policy and overrides":
 
   test "test_ra22_develop_org_repo_defaults_to_develop_checkout_and_edge":
@@ -173,6 +211,7 @@ suite "RA-22 — repro add develop-mode policy and overrides":
       let fx = setupFixture(gitBin, "org-develop")
       defer: removeDir(fx.scratch)
 
+      let remotesBefore = countRemotes(fx.projectFile)
       let res = invokeAdd(fx,
         @["orglib", "--remote=" & fx.orgRepoUrl, "--depends-of=app"])
       if res.code != 0:
@@ -190,6 +229,37 @@ suite "RA-22 — repro add develop-mode policy and overrides":
       # The depends edge was recorded on the root repo.
       check rep["dependsEdgeOn"].getStr() == "app"
       check appDependsContains(fx, "orglib")
+
+      # The fragment keeps the ADDED REPO'S NAME. The origin is a bare
+      # `…/orglib.git` DIRECTORY, so the only way to reuse the surrounding
+      # `file://…/org` base would be to name the repo `orglib.git`; that plan
+      # is declined and a per-repo `orglib-origin` remote carrying the full
+      # URL is used instead, leaving `[repo].name` — which the `depends` edge
+      # above keys off — intact. No `revision` is written either: it would
+      # only restate the project's `default_revision`.
+      check fragmentOf(fx, "orglib") ==
+        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "[repo]\n" &
+        "name = \"orglib\"\n" &
+        "path = \"orglib\"\n" &
+        "remote = \"orglib-origin\"\n"
+
+      # The declined plan minted nothing shared: the org base never becomes a
+      # `[[remote]]`, only the per-repo entry is added.
+      let projectText = readFile(fx.projectFile)
+      check countRemotes(fx.projectFile) == remotesBefore + 1
+      check projectText.contains("name = \"orglib-origin\"")
+      check projectText.contains("fetch = \"" & fx.orgRepoUrl & "\"")
+      check not projectText.contains("name = \"org\"")
+
+      # Read back through the real resolver: the `depends` edge resolves to a
+      # repo that exists (it names the fragment's `[repo].name`), the omitted
+      # `revision` is inherited from `default_revision`, and the per-repo
+      # remote composes back to the requested clone URL.
+      let resolvedOrglib = resolvedRepo(fx, "orglib")
+      check resolvedOrglib.revision == "main"
+      check resolvedOrglib.fetchUrl == fx.orgRepoUrl
+      check resolvedRepo(fx, "app").depends == @["orglib"]
 
   test "test_ra22_third_party_repo_defaults_to_binary_no_checkout":
     let gitBin = findExe("git")
@@ -279,3 +349,24 @@ suite "RA-22 — repro add develop-mode policy and overrides":
       check dirExists(fx.workspaceRoot / "orglib")
       check not readFile(fx.projectFile).contains("repos/orglib.toml")
       check not appDependsContains(fx, "orglib")
+
+  test "test_ra22_pins_revision_only_when_there_is_nothing_to_inherit":
+    # The counterpart to the omission asserted in the first case: the same add
+    # against a project WITHOUT `default_revision` must write the `revision`
+    # key, because nothing would supply it otherwise. Omission is therefore
+    # conditional on the inherited value being identical, not unconditional.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "no-default-revision",
+        withDefaultRevision = false)
+      defer: removeDir(fx.scratch)
+
+      check not readFile(fx.projectFile).contains("default_revision")
+      let res = invokeAdd(fx, @["orglib", "--remote=" & fx.orgRepoUrl])
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+      check fragmentOf(fx, "orglib").contains("revision = \"main\"\n")
+      check resolvedRepo(fx, "orglib").revision == "main"
