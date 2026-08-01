@@ -1452,6 +1452,28 @@ proc cmdExeShellEscape(value: string): string =
   ## cmd.exe quoting: wrap in double quotes; escape embedded double quotes.
   "\"" & value.replace("\"", "\\\"") & "\""
 
+proc powerShellSingleQuote(value: string): string =
+  "'" & value.replace("'", "''") & "'"
+
+proc powerShellRunCommandScript*(command: openArray[string];
+    sinkPath: string): string =
+  ## Materialise a long argv as a PowerShell array so Windows does not route
+  ## the child command through cmd.exe's ~8191-character command-line limit.
+  if command.len == 0:
+    raise newException(ValueError, "PowerShell command script requires argv")
+  result = "$ErrorActionPreference = 'Stop'\r\n"
+  result.add("$exe = " & powerShellSingleQuote(command[0]) & "\r\n")
+  result.add("$argv = @(\r\n")
+  for i in 1 ..< command.len:
+    result.add("  " & powerShellSingleQuote(command[i]))
+    if i + 1 < command.len:
+      result.add(",")
+    result.add("\r\n")
+  result.add(")\r\n")
+  result.add("& $exe @argv > " & powerShellSingleQuote(sinkPath) &
+    " 2>&1\r\n")
+  result.add("exit $LASTEXITCODE\r\n")
+
 proc runCommand(command: openArray[string];
     cwd = ""): ProviderCompileExecutionResult =
   if command.len == 0:
@@ -1473,59 +1495,59 @@ proc runCommand(command: openArray[string];
       $int64(epochTime() * 1_000_000.0)
     let sinkPath = sinkDir / ("repro-runcommand-" & nonce & ".log")
     let scriptPath = sinkDir / ("repro-runcommand-" & nonce & ".cmd")
+    let psScriptPath = sinkDir / ("repro-runcommand-" & nonce & ".ps1")
     # cmd.exe truncates any single command line past ~8191 chars, so a
     # large `nim c` invocation (60+ --path: entries) silently produces an
     # empty sink and we report `command failed` with no stderr. Fall back
-    # to a Nim @response-file when the assembled arg list would overflow.
-    # Nim natively parses `@file` as "read further arguments from file";
-    # every other tool that accepts @-files (gcc via -Wl, node, etc.) does
-    # too, but we only rewrite when the target executable is nim (the only
-    # producer of these blowups in practice) so we don't guess wrong for a
-    # command whose semantics we don't own.
+    # to a PowerShell script when the assembled arg list would overflow:
+    # the pwsh.exe command line remains short, while the script invokes the
+    # real child with an argv array and file redirection. This keeps us out
+    # of unsupported Nim @-file semantics and preserves exact arguments.
     let assembledLen = command.mapIt(cmdExeShellEscape(it)).join(" ").len +
       cmdExeShellEscape(sinkPath).len + " > 2>&1\r\n@echo off\r\n".len
-    let exeName = splitFile(command[0]).name.toLowerAscii()
-    let useResponseFile = assembledLen > 6000 and exeName == "nim"
-    var responseFilePath = ""
-    var effectiveCommand: seq[string]
-    if useResponseFile:
-      responseFilePath = sinkDir /
-        ("repro-runcommand-" & nonce & ".rsp")
-      # Nim's @-file parser treats each whitespace-separated token as one
-      # argument, with double quotes escaping whitespace. Emit one arg per
-      # line, quoting anything that isn't already a bare identifier.
-      var rspLines = newSeqOfCap[string](command.len - 1)
-      for i in 1 ..< command.len:
-        let a = command[i]
-        if a.len == 0:
-          rspLines.add "\"\""
-        elif a.contains(' ') or a.contains('"') or a.contains('\t'):
-          rspLines.add "\"" & a.replace("\"", "\\\"") & "\""
+    let usePowerShellScript = assembledLen > 6000
+    var process: Process
+    if usePowerShellScript:
+      writeFile(extendedPath(psScriptPath),
+        powerShellRunCommandScript(command, sinkPath))
+      let powerShellExe = block:
+        let pwsh = findExe("pwsh")
+        if pwsh.len > 0:
+          pwsh
         else:
-          rspLines.add a
-      writeFile(extendedPath(responseFilePath),
-        rspLines.join("\r\n") & "\r\n")
-      effectiveCommand = @[command[0], "@" & responseFilePath]
+          let windowsPowerShell = findExe("powershell")
+          if windowsPowerShell.len > 0:
+            windowsPowerShell
+          else:
+            raise newException(OSError,
+              "pwsh/powershell required for long Windows command")
+      process = startProcess(powerShellExe,
+        args = @[
+          "-NoLogo",
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          psScriptPath],
+        workingDir = cwd, options = {poUsePath})
     else:
-      effectiveCommand = @command
-    let scriptBody = "@echo off\r\n" &
-      effectiveCommand.mapIt(cmdExeShellEscape(it)).join(" ") &
-      " > " & cmdExeShellEscape(sinkPath) & " 2>&1\r\n"
-    writeFile(extendedPath(scriptPath), scriptBody)
-    var process = startProcess("cmd.exe",
-      args = @["/c", scriptPath],
-      workingDir = cwd, options = {poUsePath})
+      let scriptBody = "@echo off\r\n" &
+        command.mapIt(cmdExeShellEscape(it)).join(" ") &
+        " > " & cmdExeShellEscape(sinkPath) & " 2>&1\r\n"
+      writeFile(extendedPath(scriptPath), scriptBody)
+      process = startProcess("cmd.exe",
+        args = @["/c", scriptPath],
+        workingDir = cwd, options = {poUsePath})
     let exitCode = process.waitForExit()
     process.close()
     try:
       removeFile(extendedPath(scriptPath))
     except CatchableError:
       discard
-    if responseFilePath.len > 0:
-      try:
-        removeFile(extendedPath(responseFilePath))
-      except CatchableError:
-        discard
+    try:
+      removeFile(extendedPath(psScriptPath))
+    except CatchableError:
+      discard
     var output = ""
     if fileExists(extendedPath(sinkPath)):
       try:
