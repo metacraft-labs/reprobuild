@@ -67,6 +67,8 @@ package xorgServerSource:
         "systemd_logind=true",
         "udev=true",
         "suid_wrapper=false",
+        "default_font_path=/usr/share/fonts/X11/misc,/usr/share/fonts/X11/TTF,/usr/share/fonts/X11/OTF,/usr/share/fonts/X11/Type1,/usr/share/fonts/X11/100dpi,/usr/share/fonts/X11/75dpi",
+        "xkb_bin_dir=/usr/bin",
         "xkb_dir=/usr/share/X11/xkb",
         "xkb_default_rules=evdev",
         "xkb_default_model=pc105",
