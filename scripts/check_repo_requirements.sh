@@ -19,11 +19,25 @@ require_dir() {
 require_symlink() {
   local path="$1"
   local target="$2"
-  if [ ! -L "${path}" ]; then
-    fail "missing symlink ${path}"
+  if [ -L "${path}" ]; then
+    [ "$(readlink "${path}")" = "${target}" ] || fail "${path} must point to ${target}"
     return
   fi
-  [ "$(readlink "${path}")" = "${target}" ] || fail "${path} must point to ${target}"
+
+  # Git checks symlinks out as files containing their targets when the Windows
+  # filesystem or checkout has core.symlinks disabled. Accept only that exact
+  # representation of an index entry that is still recorded as a symlink.
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if [ -f "${path}" ] &&
+         [ "$(git ls-files -s -- "${path}" | awk '{print $1}')" = "120000" ] &&
+         [ "$(cat "${path}")" = "${target}" ]; then
+        return
+      fi
+      ;;
+  esac
+
+  fail "missing symlink ${path}"
 }
 
 require_contains() {
@@ -115,7 +129,7 @@ for forbidden in .github/sibling-pins .github/sibling-pins.json .github/rr-backe
   [ ! -e "${forbidden}" ] || fail "forbidden workspace pin file present: ${forbidden}"
 done
 
-while read -r lib _; do
+while IFS=$' \t\r' read -r lib _; do
   case "${lib}" in
     ""|\#*) continue ;;
   esac
@@ -125,7 +139,7 @@ while read -r lib _; do
   require_file "libs/${lib}/src/${lib}.nim"
 done < libs/libraries.txt
 
-while read -r name path _; do
+while IFS=$' \t\r' read -r name path _; do
   case "${name}" in
     ""|\#*) continue ;;
   esac
