@@ -4390,6 +4390,39 @@ proc m9r14fLoadInterfaceToolUses*(recipeDir: string): seq[InterfaceToolUse] =
   except CatchableError:
     discard
 
+proc readPathOnlyBuildIdentity*(path: string): PathOnlyBuildIdentity
+
+proc mergeRecordedSourceProviderProfiles(profile: var PathOnlyToolProfile;
+                                         recipeDir: string) =
+  ## A source-built tool can itself rely on a non-source bootstrap adapter.
+  ## Carry those exact recorded profiles into consumers of the source tool.
+  ## Source profiles are recomputed from their install mirrors by the regular
+  ## transitive walk, so only non-source profiles are inherited here.
+  let identityPath = recipeDir / ".repro" / "build" / "repro" /
+    "from-source-tool-identities.rbtp"
+  if not fileExists(extendedPath(identityPath)):
+    return
+  try:
+    let identity = readPathOnlyBuildIdentity(identityPath)
+    for inherited in identity.profiles:
+      if inherited.installMethod == "from-source":
+        continue
+      for path in inherited.realizedStorePaths:
+        if path.len > 0 and path notin profile.realizedStorePaths:
+          profile.realizedStorePaths.add(path)
+      for path in inherited.pathSearchList:
+        addUniquePath(profile.pathSearchList, path)
+      for path in inherited.pkgConfigSearchList:
+        addUniquePath(profile.pkgConfigSearchList, path)
+      for path in inherited.cmakePrefixList:
+        addUniquePath(profile.cmakePrefixList, path)
+      for path in inherited.cpathList:
+        addUniquePath(profile.cpathList, path)
+      for path in inherited.libraryPathList:
+        addUniquePath(profile.libraryPathList, path)
+  except CatchableError:
+    discard
+
 proc populateFromSourceSearchPathsImpl(profile: var PathOnlyToolProfile;
                                        recipeDir: string;
                                        recipeRoot: string;
@@ -4458,6 +4491,7 @@ proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
   var visited: HashSet[string] = initHashSet[string]()
   populateFromSourceSearchPathsImpl(profile, recipeDir, effectiveRoot,
     visited, 0)
+  mergeRecordedSourceProviderProfiles(profile, recipeDir)
 
 proc fromSourceSearchPathsCurrent*(profile: PathOnlyToolProfile): bool =
   ## Return whether a cached from-source profile still describes the
