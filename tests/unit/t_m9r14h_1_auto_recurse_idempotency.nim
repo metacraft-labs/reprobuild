@@ -168,6 +168,24 @@ suite "DSL-port M9.R.14h.1 — auto-recurse idempotency":
     check outcome.kind == rrNeedsBuild
     check outcome.recipeDir == absolutePath(sourceRoot / "dual-recipe")
 
+  test "test_m9r14h_1_resolver_maps_library_to_owning_source_recipe":
+    # Consumers name the ABI they link while the corpus recipe follows the
+    # upstream project name.
+    let scratch = createTempDir("repro-m9r14h-library-alias-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "libxcrypt")
+    let libDir = scratch / "libxcrypt" / ".repro" / "output" /
+      "install" / "usr" / "lib"
+    createDir(libDir)
+    let expected = libDir / "libcrypt.so.2"
+    writeFile(expected, "synthetic libcrypt")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("libcrypt"), recipeRoot = scratch)
+
+    check outcome.kind == rrResolved
+    check outcome.profile.resolvedExecutablePath == absolutePath(expected)
+
   test "test_m9r14h_1_resolved_recipes_cache_is_consulted":
     # Belt-and-braces pin on the in-process cache.  After the dispatcher
     # marks a sibling recipe dir as resolved, a repeat probe (without

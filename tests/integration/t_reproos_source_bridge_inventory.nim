@@ -79,6 +79,9 @@ suite "ReproOS source bridge inventory":
     check "ln -s usr/bin \"$ROOTFS_DIR/bin\"" in baseScript
     check "ln -s bash \"$ROOTFS_DIR/usr/bin/sh\"" in baseScript
     check "tar --same-permissions" in stageScript
+    check "REPROOS_SOURCE_RECIPES" in stageScript
+    check "source_recipe_selected" in stageScript
+    check "reproosImageRootfsDeps.join(\" \")" in imageRecipe
     check "required source mirror missing: $recipe" in stageScript
     check "required iproute2 ss binary missing" in stageScript
     check "$STAGE_DIR/usr/bin/ss" in stageScript

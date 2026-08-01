@@ -4220,6 +4220,7 @@ const FromSourceRecipeAliases* = [
   (dependency: "pkg-config", recipe: "pkgconf"),
   (dependency: "libudev", recipe: "systemd"),
   (dependency: "libsystemd", recipe: "systemd"),
+  (dependency: "libcrypt", recipe: "libxcrypt"),
 ]
   ## Source packages can publish independently consumed libraries whose
   ## ABI name differs from the upstream source-package name. Keep these

@@ -43,6 +43,8 @@
 ##     ``recipes/reproos-image/.repro/output/install/<sha256>-
 ##     reproos-installed.qcow2``.
 
+import std/strutils
+
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
 
@@ -148,6 +150,17 @@ const reproosImageRootfsDeps = @[
   "xkeyboard-config",
   "libxkbfile",
   "xkbcomp",
+  "libx11",
+  "libxau",
+  "libxfont2",
+  "libacl",
+  "libaio",
+  "audit",
+  "libbsd",
+  "mesa",
+  "qt6-base",
+  "qt6-declarative",
+  "qt6-quickcontrols2",
   "adwaita-icon-theme",
   "dejavu-fonts",
   "xorg-server",
@@ -164,6 +177,7 @@ const reproosImageRootfsDeps = @[
   "musl",
   "busybox",
   "ca-certificates",
+  "libxcrypt",
   "reproos-installer",
 ]
 
@@ -214,6 +228,17 @@ package reproosImage:
     "xkeyboard-config"
     "libxkbfile"
     "xkbcomp"
+    "libx11"
+    "libxau"
+    "libxfont2"
+    "libacl"
+    "libaio"
+    "audit"
+    "libbsd"
+    "mesa"
+    "qt6-base"
+    "qt6-declarative"
+    "qt6-quickcontrols2"
     "adwaita-icon-theme"
     "dejavu-fonts"
     "xorg-server"
@@ -230,6 +255,7 @@ package reproosImage:
     "musl"
     "busybox"
     "ca-certificates"
+    "libxcrypt"
     "reproos-installer"
 
   runtimeDeps:
@@ -304,6 +330,8 @@ package reproosImage:
       command = ("set -euo pipefail; " &
                  "mkdir -p build; " &
                  "SOURCE_DATE_EPOCH=1735689600 LC_ALL=C TZ=UTC " &
+                 "REPROOS_SOURCE_RECIPES=\"" &
+                 reproosImageRootfsDeps.join(" ") & "\" " &
                  "REPRO_AUTO_CONFIG=\"${REPRO_AUTO_CONFIG:-../../tests/fixtures/auto-config-minimal.toml}\" " &
                  "REPRO_QCOW2_SEED=\"${REPRO_QCOW2_SEED:-deadbeefcafebabe}\" " &
                  "LD_LIBRARY_PATH= PATH=/run/current-system/sw/bin:$PATH " &
