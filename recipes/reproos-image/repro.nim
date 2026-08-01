@@ -198,6 +198,11 @@ const reproosImageRootfsDeps = @[
   "libxcvt",
   "libxkbcommon",
   "libxml2",
+  "libxdmcp",
+  "libdisplay-info",
+  "fribidi",
+  "mtdev",
+  "libseat",
   "zlib",
   "zstd",
   "libaio",
@@ -322,6 +327,11 @@ package reproosImage:
     "libxcvt"
     "libxkbcommon"
     "libxml2"
+    "libxdmcp"
+    "libdisplay-info"
+    "fribidi"
+    "mtdev"
+    "libseat"
     "zlib"
     "zstd"
     "libaio"
