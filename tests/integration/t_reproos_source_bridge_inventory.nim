@@ -122,7 +122,9 @@ suite "ReproOS source bridge inventory":
     check "source kernel module tree is contaminated" in stageScript
     check "setRegisteredActionDeclaredOutputs" in quickControlsRecipe
     check "setRegisteredActionPublish" in quickControlsRecipe
-    check "\".repro/output/install\"" in quickControlsRecipe
+    check "qt6QuickControls2Source.publish_interface" in quickControlsRecipe
+    check "activeProviderProjectRoot() & \"/.repro/output/install\"" in
+      quickControlsRecipe
     check "$STAGE_DIR/usr/lib/modules" in stageScript
     check "usr/lib|/usr/lib" in stageScript
     check "unsupported /lib symlink target" in stageScript

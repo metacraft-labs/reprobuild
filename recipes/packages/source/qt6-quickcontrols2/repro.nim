@@ -67,6 +67,7 @@ import std/[options, strutils]
 
 import repro_project_dsl
 import repro_project_dsl/source_cache_identity
+import repro_dsl_stdlib/fs
 import repro_dsl_stdlib/packages/sh
 
 # ---------------------------------------------------------------------------
@@ -168,9 +169,18 @@ package qt6QuickControls2Source:
       extraOutputs = @[
         ".repro/output/install/usr/lib/cmake/Qt6QuickControls2/Qt6QuickControls2Config.cmake",
       ])
-    setRegisteredActionDeclaredOutputs(stageAction.id,
-      @[".repro/output/install"])
-    setRegisteredActionPublish(stageAction.id, true,
+    let publishAction = fs.stamp(
+      ".repro/output/qt6-quickcontrols2-source-interface.stamp",
+      "qt6-quickcontrols2 source interface",
+      entries = @["6.8.1", "qt6-declarative"],
+      inputs = @[
+        ".repro/output/install/usr/lib/cmake/Qt6QuickControls2/Qt6QuickControls2Config.cmake",
+      ],
+      actionId = "qt6QuickControls2Source.publish_interface",
+      after = @[stageAction])
+    setRegisteredActionDeclaredOutputs(publishAction.id,
+      @[activeProviderProjectRoot() & "/.repro/output/install"])
+    setRegisteredActionPublish(publishAction.id, true,
       some(sourceCacheEntryIdentity(
         activeProviderProjectRoot(),
         "qt6QuickControls2Source",
