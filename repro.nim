@@ -18,11 +18,12 @@
 ##   ``apps/entrypoints.txt``. The Nim-identifier names are camelCase
 ##   stand-ins for the hyphenated binary names; ``name: "<bin>"``
 ##   inside each ``executable`` body pins the on-disk artifact.
-## * Wraps the existing ``scripts/build_apps.sh`` byte-for-byte in a
-##   single ``build:`` action so today's build behaviour is preserved.
-##   This is the option-(A) cut described in the repo packaging memo —
-##   coarse-grained, opaque, but immediately consistent with what
-##   ``just build`` / ``flake.nix`` already do. Option (B) — one
+## * (HISTORICAL, retired in B5) Wrapped ``scripts/build_apps.sh``
+##   byte-for-byte in a single ``build:`` action. That was the option-(A)
+##   cut described in the repo packaging memo — coarse-grained and opaque,
+##   but immediately consistent with ``just build``. Every artifact it
+##   produced now has its own edge, and the wrapper is gone; the script
+##   remains only as the ``just bootstrap`` path. Option (B) — one
 ##   ``nim c`` per entrypoint via the DSL's per-entry ``buildAction``
 ##   primitive — is deferred to a follow-on milestone.
 ##
@@ -41,6 +42,7 @@ import std/[os, osproc, strutils]
               # test-fixtures monitor-shim build edge below.
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
+import repro_dsl_stdlib/fs as dslfs
 import repro_dsl_stdlib/types
 
 proc sanitizeStaticExec(val: string): string =
@@ -640,11 +642,11 @@ package reprobuild:
     # syntax disambiguates per the Named-Targets M3 rules in
     # CLI/build.md §"Target Selection".)
     #
-    # The option-(A) ``shell(command = "bash scripts/build_apps.sh", ...)``
-    # wrapper below stays in place for one transition milestone (B5
-    # retires it). B1 ships both paths in parallel so consumers can
-    # cut over incrementally; the per-app edges are the supported path
-    # going forward.
+    # B1 shipped these edges alongside the option-(A)
+    # ``shell(command = "bash scripts/build_apps.sh", ...)`` wrapper so
+    # consumers could cut over incrementally. B5 has since deleted that
+    # wrapper: these edges are now the only path, and ``.#release`` is the
+    # collection the release workflow builds.
     var reprobuildAppsActions: seq[BuildActionDef] = @[]
 
     reprobuildAppsActions.add(nim.c(
@@ -798,6 +800,99 @@ package reprobuild:
        extraOutputs = @[
          "build/bin/reprobuild-nix-daemon",
        ]))
+
+    # B5: Windows runtime-DLL staging, previously ~200 lines of shell inside the
+    # wrapper. Every non-system library reprobuild uses on Windows is dlopen'd
+    # by leaf name, and Win32 searches the .exe's own directory first, so these
+    # have to sit in build/bin next to the binaries.
+    #
+    # The interesting part is WHERE the resolution happens. The shell version
+    # probed PATH at run time inside an opaque action; here the probing is
+    # ordinary Nim executed while the graph is being constructed, and what
+    # reaches the graph is a declarative `fs.copyFile` edge with a concrete
+    # source and a declared output. The engine can therefore see the dependency
+    # instead of watching a shell script for side effects.
+    #
+    # Not cacheable: the source is a machine-specific absolute path outside the
+    # repo (a provisioned toolchain), so its content is not addressed by
+    # anything in the action key.
+    #
+    # An unresolved library emits NO edge rather than failing graph
+    # construction — graph evaluation runs for every `repro` command, including
+    # ones that build none of this, and a missing optional DLL must not make the
+    # whole project unloadable. The gates stay where they were: scripts/build_apps.sh
+    # still hard-errors on a missing clingo for `just bootstrap`, and
+    # scripts/verify_release.sh fails any archive whose bin/ is incomplete.
+    when defined(windows):
+      proc firstExistingDll(candidates: openArray[string]): string =
+        for candidate in candidates:
+          if candidate.len > 0 and fileExists(candidate):
+            return candidate
+        ""
+
+      proc siblingOf(exeName, dllName: string): string =
+        let exe = findExe(exeName)
+        if exe.len == 0: "" else: exe.parentDir / dllName
+
+      # clingo — dlopen'd at MODULE INIT by repro_solver, so a repro.exe
+      # without it beside the binary has no working subcommand at all.
+      let clingoDir = getEnv("REPRO_WINDOWS_CLINGO_DIR")
+      let clingoSrc = firstExistingDll([
+        (if clingoDir.len > 0: clingoDir / "clingo.dll" else: ""),
+        siblingOf("clingo", "clingo.dll")])
+      if clingoSrc.len > 0:
+        reprobuildAppsActions.add(dslfs.copyFile(clingoSrc,
+          "build/bin/clingo.dll", cacheable = false,
+          actionId = "reprobuild.apps.stage_clingo_dll"))
+
+      # libzstd — lazily loaded by `repro cache substitute`. Two upstream
+      # layouts: MSYS2 co-locates the DLL with zstd.exe; the facebook/zstd
+      # win64 release puts it under a sibling dll/ directory.
+      let zstdExe = findExe("zstd")
+      let zstdDir = if zstdExe.len == 0: "" else: zstdExe.parentDir
+      let zstdSrc = firstExistingDll([
+        (if zstdDir.len > 0: zstdDir / "libzstd.dll" else: ""),
+        (if zstdDir.len > 0: zstdDir / "dll" / "libzstd.dll" else: "")])
+      if zstdSrc.len > 0:
+        reprobuildAppsActions.add(dslfs.copyFile(zstdSrc,
+          "build/bin/libzstd.dll", cacheable = false,
+          actionId = "reprobuild.apps.stage_libzstd_dll"))
+
+      # sqlite3 — repro_local_store's dynlib. The Windows Nim distribution
+      # ships it inside its own tree; probe the layouts Nim has used, then the
+      # bare DLL on PATH. Staged under BOTH names because the Nim binding's
+      # candidate list tries `sqlite3_64.dll` and `sqlite3.dll`.
+      let nimExe = findExe("nim")
+      let nimBinDir = if nimExe.len == 0: "" else: nimExe.parentDir
+      let nimRootDir = if nimBinDir.len == 0: "" else: nimBinDir.parentDir
+      let sqliteSrc = firstExistingDll([
+        (if nimBinDir.len > 0: nimBinDir / "sqlite3_64.dll" else: ""),
+        (if nimRootDir.len > 0: nimRootDir / "dist" / "sqlite3_64.dll" else: ""),
+        (if nimRootDir.len > 0: nimRootDir / "dlls" / "sqlite3_64.dll" else: ""),
+        (if nimRootDir.len > 0: nimRootDir / "bin" / "sqlite3_64.dll" else: ""),
+        findExe("sqlite3_64.dll")])
+      if sqliteSrc.len > 0:
+        reprobuildAppsActions.add(dslfs.copyFile(sqliteSrc,
+          "build/bin/sqlite3_64.dll", cacheable = false,
+          actionId = "reprobuild.apps.stage_sqlite3_64_dll"))
+        reprobuildAppsActions.add(dslfs.copyFile(sqliteSrc,
+          "build/bin/sqlite3.dll", cacheable = false,
+          actionId = "reprobuild.apps.stage_sqlite3_dll"))
+
+      # OpenSSL — the --define:ssl entry points dlopen these. release.yml also
+      # stages them with a recursive PowerShell scavenge of Program Files,
+      # which reaches installs this narrow probe does not. Both are kept on
+      # purpose: this edge covers the ordinary dev machine, and because an
+      # unresolved probe emits no edge at all, the workflow's scavenge remains
+      # the fallback rather than being contradicted by an empty copy.
+      for opensslDll in ["libcrypto-3-x64.dll", "libssl-3-x64.dll"]:
+        let opensslSrc = firstExistingDll([
+          siblingOf("openssl", opensslDll), findExe(opensslDll)])
+        if opensslSrc.len > 0:
+          reprobuildAppsActions.add(dslfs.copyFile(opensslSrc,
+            "build/bin/" & opensslDll, cacheable = false,
+            actionId = "reprobuild.apps.stage_" &
+              opensslDll.replace("-", "_").replace(".dll", "")))
 
     discard collect("apps", reprobuildAppsActions)
 
@@ -973,6 +1068,15 @@ package reprobuild:
     # / IAT-patch DLL), so the host arm is the correct (and only) target.
     var reprobuildTestFixturesActions: seq[BuildActionDef] = @[]
 
+    # B5: the two artifacts under ``build/lib`` that a RELEASE ships — the
+    # monitor shim and the shared DSL runtime library. They live in
+    # ``test-fixtures`` for historical reasons (the shim arrived as a test
+    # fixture), but the release tarball packages ``build/lib/*``, so they are
+    # also collected here and exposed through the ``release`` collection below.
+    # Same BuildActionDef in both collections: one action, one actionId, one
+    # graph node — collecting it twice groups it, it does not duplicate it.
+    var reprobuildLibActions: seq[BuildActionDef] = @[]
+
     # M76 shell-hook tests need a small counting shim to assert whether prompt
     # evaluation spawned ``repro dev-env export``. Keep that executable in the
     # build graph so tests never invoke ``nim c`` at runtime.
@@ -1039,6 +1143,7 @@ package reprobuild:
         cacheable = false,
         dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
+      reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
     elif defined(windows):
       # The Windows shim imports the stackable-hooks framework primitives;
       # the path list + ``--mm:orc`` / ``--cc:gcc`` mirror the Windows arm
@@ -1053,6 +1158,7 @@ package reprobuild:
         cacheable = false,
         dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
+      reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
     else:
       # The Linux shim exports a version-scripted, interposed ``dlsym``
       # (``.symver …,dlsym@GLIBC_2.2.5`` / ``@GLIBC_2.34`` in
@@ -1074,49 +1180,32 @@ package reprobuild:
         cacheable = false,
         dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
+      reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
 
-    discard collect("test-fixtures", reprobuildTestFixturesActions)
 
-    # Option (A) from the repo packaging memo: wrap scripts/build_apps.sh
-    # byte-for-byte so the action's behaviour is identical to ``just
-    # build`` today. The action declares the union of source roots the
-    # script reads (apps/, libs/, config.nims, reprobuild.nimble) as
-    # extra inputs.
+    # B5 DONE: the ``shell(command = "bash scripts/build_apps.sh")`` wrapper
+    # that used to sit here is GONE.
     #
-    # Bootstrap-And-Self-Build B1: the wrapper no longer declares the
-    # 14 ``build/bin/<name>`` app binaries as ``extraOutputs`` — the
-    # per-app ``nim.c(...)`` edges above own those artifacts now and
-    # the engine rejects duplicate owned-effect claims on the same
-    # output path. The wrapper retains its monitor-shim and DSL-runtime
-    # DLL outputs (which the per-app edges don't produce) so that
-    # ``bash scripts/build_apps.sh`` remains a complete drop-in for
-    # ``just build`` during the transition. B5 retires the wrapper
-    # entirely.
+    # It was "Option (A) from the repo packaging memo" — wrap the shell build
+    # byte-for-byte as one opaque action while the graph grew native edges for
+    # its contents. Every piece now has one: the per-app ``nim.c`` edges above,
+    # the three B5 entrypoints, the Windows runtime-DLL ``fs.copyFile`` edges,
+    # the monitor shim, and the shared DSL runtime library.
     #
-    # Env vars (BLAKE3_PREFIX / XXHASH_PREFIX / SQLITE_PREFIX /
-    # NIMCRYPTO_SRC / RUNQUOTA_SRC / REPROBUILD_USE_SYSTEM_HASH_LIBS)
-    # are inherited from the caller. Both the flake.nix and the new
-    # nixpkgs-format package.nix at nix/pkgs/by-name/re/reprobuild/
-    # set them before invoking this script.
-    # ``REPRO_DEFER_SHIM_PUBLISH=1``: this action is monitor-wrapped, and the
-    # script it runs rebuilds ``build/lib/librepro_monitor_shim.<ext>`` — the
-    # very library the engine injects into this action's own children via
-    # REPRO_MONITOR_SHIM_LIB. Swapping it in-band replaces the monitor out from
-    # under the compilers still to be spawned; the shim edge above already
-    # documents the resulting "host compiler ICEs". The script therefore only
-    # STAGES the shim under ``build/lib/tmp/`` here, and the publish edge below
-    # copies it into place once this action has finished spawning anything.
-    shell(
-      command = "REPRO_DEFER_SHIM_PUBLISH=1 bash scripts/build_apps.sh",
-      actionId = "reprobuild.build_apps",
-      extraInputs = @[
-        "apps/entrypoints.txt",
-        "apps",
-        "libs",
-        "config.nims",
-        "reprobuild.nimble",
-        "scripts/build_apps.sh",
-      ])
+    # Removing it is what actually fixes the macOS release. A ``shell()`` action
+    # takes ``automaticMonitorPolicy()``, so the wrapper ran the ENTIRE build —
+    # every nim compile, every clang link — as children under the io-mon shim,
+    # and on macOS those children die producing no output (empty ``uname``,
+    # silent clang). The replacement edges are ``nim.c`` with
+    # ``cacheable = false``, which resolves to ``makeDepfilePolicy``: real
+    # dependency evidence from the compiler's own depfiles, and no monitor
+    # wrapping. That is the sanctioned route — NOT the ``declaredOnly`` policy
+    # removed in runtime_core.nim as an unapproved soundness hole.
+    #
+    # ``scripts/build_apps.sh`` itself stays and remains a complete standalone
+    # build: it is what ``just bootstrap`` runs to produce the engine in the
+    # first place, so it cannot be expressed as engine edges without a
+    # chicken-and-egg. What is gone is the engine ACTION that re-ran it.
 
     # B5: the shared DSL runtime library (Tier 1 in
     # reprobuild-specs/Provider-Compile-Tiering.md). Per-project provider
@@ -1147,6 +1236,7 @@ package reprobuild:
       nimcache = "build/nimcache/repro-project-dsl-runtime-dll",
       cacheable = false,
       actionId = "reprobuild.test_fixtures.project_dsl_runtime_dll"))
+    reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
 
     # No publish edge is added here on purpose. ``build/lib/librepro_monitor_shim.<ext>``
     # is ALREADY an owned output of the ``reprobuild.test_fixtures.monitor_shim``
@@ -1156,8 +1246,21 @@ package reprobuild:
     # monitor-wrapped, and writing the live shim from an unmonitored edge is
     # exactly the property that makes it safe.
     #
-    # So the split is: the monitored wrapper stages only, and the unmonitored nim
-    # edge remains the sole producer of the live shim. A standalone
-    # ``just bootstrap`` still publishes inline (REPRO_DEFER_SHIM_PUBLISH unset),
-    # which is what puts the shim in place before an engine build starts
-    # monitoring anything.
+    # The unmonitored nim edge is the sole producer of the live shim. A
+    # standalone ``just bootstrap`` publishes it inline instead
+    # (REPRO_DEFER_SHIM_PUBLISH unset), which is what puts the shim in place
+    # before an engine build starts monitoring anything.
+
+    # Collected LAST, once every fixture edge above has been appended.
+    # ``collect`` takes the seq by value, so a collect placed mid-block silently
+    # omits everything added after it.
+    discard collect("test-fixtures", reprobuildTestFixturesActions)
+
+    # B5: what a release actually ships — every ``build/bin`` artifact plus the
+    # two ``build/lib`` libraries the tarball packages. This is the target that
+    # replaces ``.#reprobuild.build_apps`` in .github/workflows/release.yml.
+    #
+    # The lib actions are the SAME BuildActionDef objects already collected into
+    # ``test-fixtures``; collecting an action twice groups it under both names,
+    # it does not create a second graph node or a second owner of its output.
+    discard collect("release", reprobuildAppsActions & reprobuildLibActions)

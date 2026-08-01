@@ -142,14 +142,16 @@ SHM_QUEUE_SRC="${shm_queue_src}" \
 # comment on the shim edge already names the hazard: "Running that compiler
 # process under the same preload shim can trigger host compiler ICEs."
 #
-# So the build and the publish are now separate steps, per the house pattern for
-# this class of problem: build the binary in one location, copy it into the live
-# location in a FOLLOW-UP edge, once nothing is spawning children against it.
-# ``REPRO_DEFER_SHIM_PUBLISH=1`` (set by the engine action in repro.nim, which
-# then runs ``reprobuild.build_apps.publish_monitor_shim`` afterwards) stops this
-# script from doing the swap in-band. Standalone runs (``just bootstrap`` /
-# ``just build``) are not monitored and keep publishing inline, so local
-# workflows are unchanged.
+# B5 has since removed the monitored wrapper entirely: repro.nim no longer has a
+# ``shell(command = "bash scripts/build_apps.sh")`` action, and the live shim is
+# produced by the unmonitored ``reprobuild.test_fixtures.monitor_shim`` nim edge.
+# This script is now only ever run DIRECTLY (``just bootstrap`` / ``just build``),
+# where nothing is monitoring it, so the inline publish below is the normal path.
+#
+# ``REPRO_DEFER_SHIM_PUBLISH=1`` is kept as a guard rather than deleted: it is the
+# switch that makes this script safe to invoke from inside a monitored action
+# again, should anyone reintroduce one. With it unset the script publishes
+# inline, which is what puts the shim in place before an engine build begins.
 staged_shim="build/lib/tmp/librepro_monitor_shim.${dll_ext}"
 if [ ! -f "${staged_shim}" ]; then
   echo "error: io-mon shim builder did not produce ${staged_shim}" >&2
