@@ -177,13 +177,19 @@ package libseatSource:
     ## pkg-config is required by libseat's meson probe for libsystemd
     ## (activated by M9.R.57.5's libseat-logind=systemd flip). Matches
     ## the same fix M9.R.57.2b landed on wlroots.
-    "pkg-config"
+    "pkgconf >=1.8"
+    ## Seat management compiles directly against evdev, hidraw, DRM,
+    ## ioctl, and errno definitions from the Linux UAPI.
+    "linux-headers >=4.19"
 
   buildDeps:
     ## libseat's builtin backend uses evdev for input device
     ## enumeration; it links against libudev to walk /dev/input and
     ## reserve device fds for the seat0 owner.
     "libudev >=232"
+    ## libsystemd/libudev pkg-config metadata requires libcap when
+    ## generating the complete compile and link flags.
+    "libcap >=2.60"
     ## libsystemd is required for the systemd-logind backend so libseat
     ## can delegate seat / VT / DRM device management to logind when
     ## the process is launched under a logind user session (SDDM +
@@ -256,6 +262,9 @@ package libseatSource:
         # (wlroots' pkg-config probe searches lib/pkgconfig on every
         # sibling install-mirror path).
         "libdir=lib",
+        # Upstream defaults werror=true, but current glibc and Linux
+        # UAPI headers use extensions that trigger -Wpedantic.
+        "werror=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libseat")

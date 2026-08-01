@@ -77,6 +77,8 @@ import ../packages/automake as automake_module
 import ../packages/libtool as libtool_module
 import ../packages/m4 as m4_module
 import ../packages/perl as perl_module
+import ../packages/fontforge as fontforge_module
+import ../packages/libacl as libacl_module
 # M9.R.14d.3 — also auto-import gcc + pkg-config so application
 # recipes that consume autotools_package pick up those stdlib
 # provisioning channels for the cycle-break fall-through. libxml2
@@ -156,9 +158,11 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
+  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
   var script = "set -e; "
-  script.add("mkdir -p \"" & escapedExtracted & "\"; ")
-  # Download (curl) → hash-verify → extract → touch stamp. ``file://``
+  script.add("rm -rf \"" & escapedStaged & "\"; ")
+  script.add("mkdir -p \"" & escapedStaged & "\"; ")
+  # Download (curl) → hash-verify → extract → write stamp. ``file://``
   # URLs are handled by curl natively for the vendored-tarball case.
   script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
   script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" & escapedUrl &
@@ -189,9 +193,15 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   # accept it but does not need it either, so gating on Windows keeps the
   # emitted script minimal and portable across all three host tar flavours.
   let tarForceLocal = when defined(windows): "--force-local " else: ""
-  script.add("tar " & tarForceLocal & "-xf \"" & escapedTarball & "\" -C \"" &
-    escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
-  script.add("touch \"" & escapedStamp & "\"")
+  if spec.kind == dfkDataFile:
+    script.add("cp \"" & escapedTarball & "\" \"" &
+      escapedStaged & "/source\"; ")
+  else:
+    script.add("tar " & tarForceLocal & "-xf \"" & escapedTarball & "\" -C \"" &
+      escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
+  script.add("rm -rf \"" & escapedExtracted & "\"; ")
+  script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
+  script.add(": > \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
   # The fetch action is a pure source-acquisition step
   # (download → verify → extract): it has NO monitorable file-dependency
@@ -231,8 +241,11 @@ proc autotools_package*(srcDir: string;
                         configureScriptName = "configure";
                         prefixFlagFormat = "--prefix=";
                         patchHardcodedFile = false;
+                        allowSourceWrites = false;
                         skipConfigure = false;
-                        installMakeVars: seq[string] = @[]):
+                        installMakeVars: seq[string] = @[];
+                        srcPatches: seq[string] = @[];
+                        extraEnv: seq[(string, string)] = @[]):
                         AutotoolsPackageResult =
   ## Configure → build → install pipeline for an upstream autotools
   ## project. The configure step is emitted via ``inlineExecCall`` so
@@ -245,6 +258,10 @@ proc autotools_package*(srcDir: string;
   ## fetch action is auto-emitted and the configure action gains a dep
   ## on its stamp so the configure step doesn't run before the source
   ## tree is extracted.
+  ##
+  ## ``extraEnv`` supplies recipe-specific environment overrides to the
+  ## configure, compile, and install actions. The values are kept outside
+  ## the typed call identity, matching the other package constructors.
   # M9.R.15a.3 — accept a custom prefix flag format (openssl's
   # ``./Configure`` uses ``--prefix=`` like autotools, but Configure
   # also accepts ``--openssldir=`` etc. via the same channel; we keep
@@ -298,7 +315,9 @@ proc autotools_package*(srcDir: string;
         parentWalk.add("../")
     parentWalk & relSrc
 
-  let shellBuildDir = buildDir.replace("\\", "/")
+  let relSrcDir = recipeRelativeShellPath(srcDir)
+  let relBuildDir = recipeRelativeShellPath(buildDir)
+  let shellBuildDir = relBuildDir
   let srcFromBuild = sourcePathFromBuildDir(srcDir, buildDir)
   # M9.R.15a.3 — ``configureScriptName`` defaults to ``configure`` for
   # vanilla autotools; openssl-style projects pass ``"Configure"``
@@ -342,10 +361,68 @@ proc autotools_package*(srcDir: string;
       "    if [ -d \"$ad\" ]; then aclocal_dirs=\"$ad:$aclocal_dirs\"; fi; " &
       "  fi; " &
       "done; " &
+      "for bin_dir in $(printf '%s' \"$PATH\" | tr ':' '\\n'); do " &
+      "  ad=\"$bin_dir/../share/aclocal\"; " &
+      "  if [ -d \"$ad\" ]; then aclocal_dirs=\"$ad:$aclocal_dirs\"; fi; " &
+      "done; " &
       "for sp in /nix/store/*-pkg-config-*/share/aclocal /nix/store/*-libtool-*/share/aclocal /nix/store/*-gtk-doc-*/share/aclocal /nix/store/*-libgcrypt-*-dev/share/aclocal /nix/store/*-libgpg-error-*-dev/share/aclocal; do " &
       "  if [ -d \"$sp\" ]; then aclocal_dirs=\"$sp:$aclocal_dirs\"; fi; " &
       "done; " &
       "export ACLOCAL_PATH=\"$aclocal_dirs\"; " &
+      "perl_bin=$(which perl 2>/dev/null); " &
+      "if [ -n \"$perl_bin\" ]; then " &
+      "  perl_prefix=$(dirname \"$(dirname \"$perl_bin\")\"); " &
+      "  perl_lib=\"$perl_prefix/lib/perl5\"; " &
+      "  if [ -d \"$perl_lib\" ]; then " &
+      "    export PERL5LIB=\"$perl_lib${PERL5LIB:+:$PERL5LIB}\"; " &
+      "  fi; " &
+      "  autoconf_bin=$(which autoconf 2>/dev/null); " &
+      "  if [ -n \"$autoconf_bin\" ]; then " &
+      "    autoconf_prefix=$(dirname \"$(dirname \"$autoconf_bin\")\"); " &
+      "    autoconf_share=\"$autoconf_prefix/share/autoconf\"; " &
+      "    if [ -d \"$autoconf_share\" ]; then " &
+      "      export autom4te_perllibdir=\"$autoconf_share\"; " &
+      "      export autom4te_buildauxdir=\"$autoconf_share/build-aux\"; " &
+      "      export AC_MACRODIR=\"$autoconf_share\"; " &
+      "      relocated_autom4te_cfg=$(mktemp); " &
+      "      sed \"s|/usr/share/autoconf|$autoconf_share|g\" \"$autoconf_share/autom4te.cfg\" > \"$relocated_autom4te_cfg\"; " &
+      "      export AUTOM4TE_CFG=\"$relocated_autom4te_cfg\"; " &
+      "      export trailer_m4=\"$autoconf_share/autoconf/trailer.m4\"; " &
+      "      export PERL5LIB=\"$autoconf_share${PERL5LIB:+:$PERL5LIB}\"; " &
+      "    fi; " &
+      "  fi; " &
+      "  automake_bin=$(which automake 2>/dev/null); " &
+      "  if [ -n \"$automake_bin\" ]; then " &
+      "    automake_prefix=$(dirname \"$(dirname \"$automake_bin\")\"); " &
+      "    automake_share=$(find \"$automake_prefix/share\" -maxdepth 1 -type d -name 'automake-*' 2>/dev/null | head -n 1); " &
+      "    aclocal_share=$(find \"$automake_prefix/share\" -maxdepth 1 -type d -name 'aclocal-*' 2>/dev/null | head -n 1); " &
+      "    if [ -n \"$automake_share\" ]; then " &
+      "      export AUTOMAKE_LIBDIR=\"$automake_share\"; " &
+      "      export PERL5LIB=\"$automake_share${PERL5LIB:+:$PERL5LIB}\"; " &
+      "    fi; " &
+      "    if [ -n \"$aclocal_share\" ]; then " &
+      "      export ACLOCAL_AUTOMAKE_DIR=\"$aclocal_share\"; " &
+      "      export ACLOCAL_PATH=\"$aclocal_share:$ACLOCAL_PATH\"; " &
+      "    fi; " &
+      "    system_aclocal=\"$automake_prefix/share/aclocal\"; " &
+      "    if [ -d \"$system_aclocal\" ]; then " &
+      "      export ACLOCAL=\"aclocal --system-acdir=$system_aclocal${aclocal_share:+ --automake-acdir=$aclocal_share}\"; " &
+      "    fi; " &
+      "  fi; " &
+      "  perl_tool_dir=$(mktemp -d); " &
+      "  for perl_tool in autoreconf autoconf autoheader autom4te autoscan autoupdate ifnames aclocal automake; do " &
+      "    real_perl_tool=$(which \"$perl_tool\" 2>/dev/null); " &
+      "    if [ -n \"$real_perl_tool\" ]; then " &
+      "      printf '#!/bin/sh\\nexec \"%s\" \"%s\" \"$@\"\\n' \"$perl_bin\" \"$real_perl_tool\" > \"$perl_tool_dir/$perl_tool\"; " &
+      "      chmod +x \"$perl_tool_dir/$perl_tool\"; " &
+      "    fi; " &
+      "  done; " &
+      "  export PATH=\"$perl_tool_dir:$PATH\"; " &
+      "  export AUTOCONF=autoconf; " &
+      "  export AUTOHEADER=autoheader; " &
+      "  export AUTOM4TE=autom4te; " &
+      "  export AUTOMAKE=automake; " &
+      "fi; " &
       "if ! command -v gtkdocize >/dev/null 2>&1; then " &
       "  mkdir -p gtkdoc && [ -f gtkdoc/gtk-doc.make ] || echo 'EXTRA_DIST =' > gtkdoc/gtk-doc.make; " &
       "  stubdir=$(mktemp -d); " &
@@ -370,15 +447,44 @@ proc autotools_package*(srcDir: string;
   ## script does pre-cd), so the copy source is ``srcDir`` verbatim
   ## (e.g. ``src/`` -- NOT ``../src/`` which is the path from inside
   ## buildDir that the configure path uses).
+  var patchPrefix = ""
+  if srcPatches.len > 0:
+    patchPrefix = "set -e; "
+    for patchCommand in srcPatches:
+      patchPrefix.add(patchCommand & "; ")
+  # A configure action runs only on a cache miss. Reset its out-of-tree
+  # output first so a changed source archive cannot reuse generated files
+  # or objects from the previous source identity. In-source builds keep the
+  # extracted source tree intact.
+  let cleanBuildPrefix =
+    if relBuildDir == relSrcDir:
+      "set -e; "
+    else:
+      "set -e; rm -rf -- " & quoteShell(buildDir) & "; "
+  # Autoconf projects that compile helper programs for the build machine
+  # consult the *_FOR_BUILD variables instead of the ordinary toolchain
+  # flags. Default those variables from the source toolchain environment so
+  # native probes retain its sysroot headers and libraries. Recipes can still
+  # provide explicit build-machine values through extraEnv.
+  let nativeBuildEnvPrefix =
+    "export CC_FOR_BUILD=\"${CC_FOR_BUILD:-gcc}\"; " &
+    "export CFLAGS_FOR_BUILD=\"${CFLAGS_FOR_BUILD:-${CFLAGS:-}}\"; " &
+    "export CPPFLAGS_FOR_BUILD=\"${CPPFLAGS_FOR_BUILD:-${CPPFLAGS:-}}\"; " &
+    "export LDFLAGS_FOR_BUILD=\"${LDFLAGS_FOR_BUILD:-${LDFLAGS:-}}\"; " &
+    "export BUILD_CC=\"${BUILD_CC:-${CC_FOR_BUILD}}\"; " &
+    "export BUILD_CFLAGS=\"${BUILD_CFLAGS:-${CFLAGS_FOR_BUILD}}\"; " &
+    "export BUILD_CPPFLAGS=\"${BUILD_CPPFLAGS:-${CPPFLAGS_FOR_BUILD}}\"; " &
+    "export BUILD_LDFLAGS=\"${BUILD_LDFLAGS:-${LDFLAGS_FOR_BUILD}}\"; "
   let configureScript =
     if skipConfigure:
-      bootstrapPrefix &
-      "set -e; mkdir -p " & shellBuildDir & " && cp -aL " &
-        srcDir.replace("\\", "/") & "/. " & shellBuildDir & "/"
+      patchPrefix & bootstrapPrefix &
+      cleanBuildPrefix & "mkdir -p " & shellBuildDir & " && cp -aL " &
+        relSrcDir & "/. " & shellBuildDir & "/"
     else:
-      bootstrapPrefix &
-      "mkdir -p " & shellBuildDir & " && cd " & shellBuildDir & " && " &
-      srcFromBuild & "/" & configureScriptName & " " & configureArgs.join(" ")
+      patchPrefix & bootstrapPrefix &
+      cleanBuildPrefix & "mkdir -p " & shellBuildDir & " && cd " &
+        shellBuildDir & " && " & nativeBuildEnvPrefix & srcFromBuild & "/" &
+        configureScriptName & " " & configureArgs.join(" ")
   let configureArgv = @["sh", "-c", configureScript]
   let call = inlineExecCall(configureArgv)
   let actionId = defaultToolActionId(call)
@@ -410,6 +516,10 @@ proc autotools_package*(srcDir: string;
   # legitimately mutable so we skip the readOnlyRoots declaration.
   # (The regen writes are the exception R6 line 268 documents as
   # "action explicitly owns the target location".)
+  # ``allowSourceWrites`` covers configure scripts that legitimately
+  # refresh generated files under srcDir despite running out-of-tree.
+  # It must be requested explicitly so ordinary source trees remain
+  # protected by R6.
   let m9r79ConfBuildDirAbs =
     if projectRoot.len > 0: projectRoot / buildDir
     else: buildDir
@@ -417,7 +527,9 @@ proc autotools_package*(srcDir: string;
     if projectRoot.len > 0: projectRoot / srcDir
     else: srcDir
   var m9r79ConfReadOnly: seq[string] = @[]
-  if not patchHardcodedFile:
+  if not patchHardcodedFile and not allowSourceWrites and
+      srcPatches.len == 0 and
+      relBuildDir != relSrcDir:
     m9r79ConfReadOnly.add(m9r79ConfSrcDirAbs)
   let configureEdge = buildAction(
     id = actionId,
@@ -428,6 +540,7 @@ proc autotools_package*(srcDir: string;
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.configure",
     toolIdentityRefs = @["sh"],
+    env = extraEnv,
     declaredOutputs = @[m9r79ConfBuildDirAbs],
     readOnlyRoots = m9r79ConfReadOnly)
   # M9.R.13b.5 — thread the configure edge as a sequencing dep through
@@ -478,13 +591,16 @@ proc autotools_package*(srcDir: string;
   if skipConfigure:
     for o in configureOptions:
       buildVars.add(o)
+  var buildEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
+  for envVar in extraEnv:
+    buildEnv.add(envVar)
   let buildActionId = "autotools-make-build-" &
     sanitizedPackageName(pkgName) & "-" & sanitizedPackageName(buildDir)
   var buildEdge = make(workDir = "", vars = buildVars, targets = @[],
     actionId = buildActionId,
     after = @[configureEdge],
     extraInputs = @[m9r79ConfBuildDirAbs],
-    extraEnv = @[("MAKEFLAGS", makeflags)])
+    extraEnv = buildEnv)
   # M9.R.84 — run make from the configured build directory instead of
   # running from the recipe root with ``make -C <buildDir>``. GNU make
   # and recursive libtool children then report relative writes such as
@@ -536,6 +652,8 @@ proc autotools_package*(srcDir: string;
   let providerProjectRoot = activeProviderProjectRoot()
   var installVars: seq[string] = @[]
   var installEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
+  for envVar in extraEnv:
+    installEnv.add(envVar)
   let installDestdir =
     if providerProjectRoot.len > 0:
       providerProjectRoot / buildDir / destdir
@@ -624,15 +742,21 @@ proc autotools_package*(srcDir: string;
           ch == '~' or ch == '^':
         return value[0 ..< i]
     return value
-  var depRefs: seq[string] = @[]
+  var nativeRefs: seq[string] = @[]
   for raw in registeredNativeBuildDeps(pkgName):
-    depRefs.add(stripConstraint(raw))
+    nativeRefs.add(stripConstraint(raw))
+  var buildRefs: seq[string] = @[]
   for raw in registeredBuildDeps(pkgName):
-    depRefs.add(stripConstraint(raw))
+    buildRefs.add(stripConstraint(raw))
+  let depRefs = nativeRefs & buildRefs
   appendRegisteredActionToolIdentityRefs(configureEdge.id, depRefs)
   appendRegisteredActionToolIdentityRefs(buildEdge.id, depRefs)
   appendRegisteredActionToolIdentityRefs(installEdge.id, depRefs)
   appendRegisteredActionToolIdentityRefs(laCleanupEdge.id, depRefs)
+  classifyRegisteredActionToolIdentityRefs(configureEdge.id, buildRefs)
+  classifyRegisteredActionToolIdentityRefs(buildEdge.id, buildRefs)
+  classifyRegisteredActionToolIdentityRefs(installEdge.id, buildRefs)
+  classifyRegisteredActionToolIdentityRefs(laCleanupEdge.id, buildRefs)
   AutotoolsPackageResult(
     buildEdge: configureEdge,
     compileEdge: buildEdge,

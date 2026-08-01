@@ -176,6 +176,11 @@ package plasmaFrameworkSource:
     "kguiaddons >=6.0"
     "kiconthemes >=6.0"
     "kio >=6.0"
+    ## KIOWidgets carries POSIX ACL support. Its DT_NEEDED closure
+    ## includes libacl and libattr, which ld must resolve while linking
+    ## PlasmaQuick against the KIO shared libraries.
+    "libacl >=2.3"
+    "libattr >=2.5"
     "kwindowsystem >=6.0"
     "kpackage >=6.0"
     "kirigami >=6.0"
@@ -244,7 +249,8 @@ package plasmaFrameworkSource:
         # (only the optional X11 link surface). Tracked separately as
         # M9.R.15q.3.5 (from-source X11 recipes pending).
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true)
       discard pkg.library("libPlasma")
     finally:
       clearCurrentOwningPackageOverride()

@@ -105,10 +105,15 @@ type
     src*: string
     dest*: string
 
+  RepoRemoteEntry* = object
+    name*: string
+    remote*: string
+
   RepoBody* = object
     name*: string
     path*: string
     remote*: Option[string]
+    remotes*: seq[RepoRemoteEntry]
     revision*: Option[string]
     vcs*: Option[string]
     stability*: Option[string]
@@ -314,7 +319,7 @@ type
     feature_started*: Option[bool]
       ## M16 — when ``true``, the current ``branch`` value names a
       ## feature branch the operator deliberately started via
-      ## ``repro workspace start <branch>``. The M10 sync planner
+      ## ``repro branch <name> --checkout``. The M10 sync planner
       ## reads this flag and no-ops "clean fast-forwardable" repos
       ## that happen to sit on the marked branch even when the lock
       ## pins a different SHA on it. ``none`` means "not marked"

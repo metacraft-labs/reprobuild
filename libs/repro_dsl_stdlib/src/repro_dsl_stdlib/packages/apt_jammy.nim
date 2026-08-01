@@ -48,7 +48,7 @@
 ## migration story when the DSL gains user-extensible ``files``-output
 ## procs.
 
-import std/[algorithm, hashes, os, osproc, sequtils, sets, strutils]
+import std/[algorithm, hashes, os, osproc, sequtils, sets, strtabs, strutils]
 
 import nimcrypto/sha2 as nc_sha2
 
@@ -258,11 +258,89 @@ proc tarFlagFor(memberName: string): string =
   of "data.tar.gz":  "-xzf"
   of "data.tar.xz":  "-xJf"
   of "data.tar.bz2": "-xjf"
-  of "data.tar.zst":
-    # GNU tar 1.32+ supports --zstd. We treat the flag as "filter +
-    # extract from stdin". The caller pipes via a temp file.
-    "--zstd -xf"
   else: ""
+
+proc newChildEnvTable(): StringTableRef =
+  when defined(windows):
+    result = newStringTable(modeCaseInsensitive)
+  else:
+    result = newStringTable(modeCaseSensitive)
+
+proc pathListSep(): string =
+  when defined(windows): ";"
+  else: ":"
+
+proc prependPathValue(existing, dir: string): string =
+  if dir.len == 0:
+    return existing
+  if existing.len == 0:
+    return dir
+  dir & pathListSep() & existing
+
+proc zstdChildEnv(prependZstdLib, stripLoaderVars: bool): StringTableRef =
+  ## Build a child environment for zstd. Some dev shells carry a
+  ## ``LD_LIBRARY_PATH`` whose first ``libzstd.so`` does not match the
+  ## zstd binary. Prefer the test-runner/dev-shell ``ZSTD_LIB`` hint
+  ## when present, and otherwise allow a clean-loader retry so Nix
+  ## binaries resolve through their embedded rpath.
+  result = newChildEnvTable()
+  for k, v in envPairs():
+    if stripLoaderVars and k in [
+      "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+      "LD_PRELOAD", "DYLD_INSERT_LIBRARIES"]:
+      discard
+    else:
+      result[k] = v
+  let zstdLib = getEnv("ZSTD_LIB")
+  if prependZstdLib and zstdLib.len > 0:
+    result["LD_LIBRARY_PATH"] =
+      prependPathValue(result.getOrDefault("LD_LIBRARY_PATH"), zstdLib)
+    result["DYLD_LIBRARY_PATH"] =
+      prependPathValue(result.getOrDefault("DYLD_LIBRARY_PATH"), zstdLib)
+    result["DYLD_FALLBACK_LIBRARY_PATH"] =
+      prependPathValue(result.getOrDefault("DYLD_FALLBACK_LIBRARY_PATH"),
+        zstdLib)
+
+proc findZstdDecompressor(): string =
+  result = findExe("zstd", followSymlinks = false)
+  if result.len == 0:
+    result = findExe("unzstd", followSymlinks = false)
+
+proc zstdDecompressCommand(zstd, src, dest: string): string =
+  let leaf = zstd.extractFilename.toLowerAscii()
+  let modeFlag = if leaf == "unzstd": "" else: " -d"
+  quoteShell(zstd) & modeFlag & " -f -q -o " & quoteShell(dest) &
+    " " & quoteShell(src)
+
+proc decompressZstdToFile(src, dest: string):
+    tuple[ok: bool; command: string; exitCode: int; output: string] =
+  let zstd = findZstdDecompressor()
+  if zstd.len == 0:
+    return (ok: false, command: "zstd", exitCode: -1,
+      output: "no zstd/unzstd decompressor on PATH")
+  let cmd = zstdDecompressCommand(zstd, src, dest)
+  let attempts =
+    if getEnv("ZSTD_LIB").len > 0:
+      @[
+        zstdChildEnv(prependZstdLib = true, stripLoaderVars = false),
+        zstdChildEnv(prependZstdLib = true, stripLoaderVars = true),
+        zstdChildEnv(prependZstdLib = false, stripLoaderVars = true)
+      ]
+    else:
+      @[
+        zstdChildEnv(prependZstdLib = false, stripLoaderVars = true),
+        zstdChildEnv(prependZstdLib = false, stripLoaderVars = false)
+      ]
+  for env in attempts:
+    try:
+      if fileExists(dest): removeFile(dest)
+    except OSError:
+      discard
+    let res = execCmdEx(cmd, env = env)
+    result = (ok: res.exitCode == 0, command: cmd,
+      exitCode: res.exitCode, output: res.output)
+    if result.ok:
+      return
 
 # ---------------------------------------------------------------------------
 # Public: extractAptDeb (spec §2)
@@ -311,7 +389,26 @@ proc tarExtractDataMember(debPath, debBytes, memberName: string;
   defer:
     try: removeFile(tmpData)
     except OSError: discard
-  let flag = tarFlagFor(memberName)
+  var tarInput = tmpData
+  var scratchTar = ""
+  defer:
+    if scratchTar.len > 0:
+      try: removeFile(scratchTar)
+      except OSError: discard
+  if memberName == "data.tar.zst":
+    scratchTar = outDir / ("__apt_jammy_data_" & memberName & ".tar")
+    let zstdRes = decompressZstdToFile(tmpData, scratchTar)
+    if not zstdRes.ok:
+      var e = newException(AptExtractError,
+        "zstd decompression failed (exit " & $zstdRes.exitCode & "): " &
+        zstdRes.output)
+      e.debPath = debPath
+      e.command = zstdRes.command
+      e.exitCode = zstdRes.exitCode
+      e.stderrText = zstdRes.output
+      raise e
+    tarInput = scratchTar
+  let flag = if memberName == "data.tar.zst": "-xf" else: tarFlagFor(memberName)
   if flag.len == 0:
     var e = newException(AptExtractError,
       "unsupported data.tar variant: " & memberName)
@@ -321,7 +418,7 @@ proc tarExtractDataMember(debPath, debBytes, memberName: string;
   # entry (canonicalisation strips ./). We pass -C to chdir.
   # Use osproc to run tar; failure surfaces as a non-zero exit and we
   # collect stderr for the diagnostic.
-  let cmd = "tar " & flag & " " & quoteShell(tmpData) &
+  let cmd = "tar " & flag & " " & quoteShell(tarInput) &
             " -C " & quoteShell(outDir)
   let res = execCmdEx(cmd)
   if res.exitCode != 0:

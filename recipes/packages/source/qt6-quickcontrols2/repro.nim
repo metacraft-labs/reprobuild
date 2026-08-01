@@ -63,7 +63,11 @@
 ## ``uses`` / ``buildDeps`` topological-order pre-resolves qt6-
 ## declarative before this recipe.
 
+import std/options
+
 import repro_project_dsl
+import repro_project_dsl/source_cache_identity
+import repro_dsl_stdlib/fs
 import repro_dsl_stdlib/packages/sh
 
 # ---------------------------------------------------------------------------
@@ -158,7 +162,7 @@ package qt6QuickControls2Source:
         "  exit 66; " &
         "}; " &
         "echo \"[qt6-quickcontrols2 shim] staged from $SRC -> $DST\""
-      shell(
+      let stageAction = shell(
         command = cmd,
         actionId = "qt6QuickControls2Source.shim_stage",
         extraInputs = @[
@@ -170,5 +174,22 @@ package qt6QuickControls2Source:
         extraOutputs = @[
           selfMirrorRoot & "/usr/lib/cmake/Qt6QuickControls2/Qt6QuickControls2Config.cmake",
         ])
+      let publishAction = fs.stamp(
+        ".repro/output/qt6-quickcontrols2-source-interface.stamp",
+        "qt6-quickcontrols2 source interface",
+        entries = @["6.8.1", "qt6-declarative"],
+        inputs = @[
+          selfMirrorRoot &
+            "/usr/lib/cmake/Qt6QuickControls2/Qt6QuickControls2Config.cmake",
+        ],
+        actionId = "qt6QuickControls2Source.publish_interface",
+        after = @[stageAction])
+      setRegisteredActionDeclaredOutputs(publishAction.id, @[selfMirrorRoot])
+      setRegisteredActionPublish(publishAction.id, true,
+        some(sourceCacheEntryIdentity(
+          activeProviderProjectRoot(),
+          "qt6QuickControls2Source",
+          "6.8.1",
+          "custom")))
     finally:
       clearCurrentOwningPackageOverride()

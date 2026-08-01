@@ -3,9 +3,11 @@
 ## `repro prompt` is recomputed on EVERY shell render, so it must be (a)
 ## SILENT and exit 0 outside a workspace — safe to drop into any prompt with
 ## no guards — and (b) FAST: it reads only CHEAP CACHED workspace state
-## (``.repo/workspace.toml``, the cached ``.repro/workspace/sync-report.json``,
-## and the develop-overrides file), never fanning out a ``git`` subprocess per
-## repo.
+## (``.repro/workspace.toml``, the purpose-built
+## ``.repro/build/prompt-cache.json``, and the develop-overrides file), never
+## fanning out a ``git`` subprocess per repo. The cache is deliberately NOT a
+## report: a report records one invocation and is never read back, and it has
+## no staleness model to render.
 ##
 ## This suite is hermetic + black-box: it builds and runs ``build/bin/repro``
 ## against fresh tempdirs only; nothing touches ``$HOME`` or any shared cache,
@@ -73,23 +75,25 @@ proc bestPromptMs(reproBin: string; cwd: string;
       result = m
 
 proc seedWorkspace(root: string) =
-  ## A minimal initialized workspace: the RA-10 marker (``.repo/workspace.toml``
-  ## with an active branch) plus a cached sync report recording three repos,
-  ## one of which sits on a different branch (a drift signal). All cheap cached
-  ## state — NO git repos are created.
-  createDir(root / ".repo")
-  writeFile(root / ".repo" / "workspace.toml",
+  ## A minimal initialized workspace: the RA-10 marker (``.repro/workspace.toml``
+  ## with an active branch) plus a prompt cache recording three repos, one of
+  ## which sits on a different branch (a drift signal). All cheap cached state
+  ## — NO git repos are created. The cache is written AFTER the marker so its
+  ## mtime is the newer of the two and the segment renders as fresh.
+  createDir(root / ".repro")
+  writeFile(root / ".repro" / "workspace.toml",
     "schema = \"reprobuild.workspace.local.v1\"\n" &
     "[workspace]\n" &
     "project = \"demo\"\n" &
     "branch = \"feat-x\"\n")
-  createDir(root / ".repro" / "workspace")
-  writeFile(root / ".repro" / "workspace" / "sync-report.json",
-    """{ "repos": [
-      {"name":"a","path":"a","branch":"feat-x"},
-      {"name":"b","path":"b","branch":"other"},
-      {"name":"c","path":"c","branch":"feat-x"}
-    ] }""")
+  createDir(root / ".repro" / "build")
+  writeFile(root / ".repro" / "build" / "prompt-cache.json",
+    "{ \"schema\": \"reprobuild.prompt-cache.v1\",\n" &
+    "  \"writtenAtUnix\": " & $getTime().toUnix & ",\n" &
+    "  \"writtenBy\": \"sync\",\n" &
+    "  \"branch\": \"feat-x\",\n" &
+    "  \"repoCount\": 3,\n" &
+    "  \"driftRepos\": 1 }")
 
 # ---- the suite -------------------------------------------------------------
 
@@ -102,7 +106,7 @@ suite "RA-26 — repro prompt is fast and silent outside a workspace":
 
     # ========================================================================
     # Part 1 — OUTSIDE a workspace: silent + exit 0. A plain temp dir with no
-    # ``.repo/`` anywhere above it. The prompt must print NOTHING so it is safe
+    # ``.repro/`` anywhere above it. The prompt must print NOTHING so it is safe
     # to drop unconditionally into any shell prompt.
     # ========================================================================
     let plainDir = scratch / "not-a-workspace"
@@ -167,8 +171,8 @@ suite "RA-26 — repro prompt is fast and silent outside a workspace":
     check parsed.kind == JObject
     check parsed["inWorkspace"].getBool()
     check parsed["branch"].getStr() == "feat-x"
-    # Three repos in the cached sync report, one of them drifted (branch
-    # "other" != workspace branch "feat-x").
+    # Three repos in the prompt cache, one of them drifted (the seeded cache
+    # counted a repo on branch "other" against workspace branch "feat-x").
     check parsed["repoCount"].getInt() == 3
     check parsed["driftRepos"].getInt() == 1
 

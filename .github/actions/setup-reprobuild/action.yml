@@ -15,6 +15,26 @@ inputs:
     description: GitHub token (CI App token) for cloning private metacraft-labs repos and Nix flake inputs.
     required: false
     default: ""
+  substituters:
+    description: Space-separated Nix substituter URLs to trust in addition to cache.nixos.org.
+    required: false
+    default: ""
+  trusted-public-keys:
+    description: Space-separated signing public keys for the extra Nix substituters.
+    required: false
+    default: ""
+  attic-token:
+    description: Attic token used to upload newly built store paths.
+    required: false
+    default: ""
+  attic-cache:
+    description: Attic cache name to upload newly built store paths to.
+    required: false
+    default: ""
+  attic-endpoint:
+    description: Attic server endpoint.
+    required: false
+    default: "https://cache.metacraft-labs.com/"
   repro-build-pin:
     description: >
       Git ref (branch, tag, or SHA) of `metacraft-labs/reprobuild` to build the
@@ -25,7 +45,38 @@ inputs:
 runs:
   using: composite
   steps:
+    # Idempotency probe: if a `repro` CLI is already on PATH (e.g. baked into
+    # the runner image, or installed by an earlier invocation of this action in
+    # the same job), skip the clone + Nix install + build entirely. This makes
+    # the action a cheap no-op on hosts that already ship `repro` — the whole
+    # point of distributing `repro` as a self-contained portable binary. When
+    # `repro` is NOT found, `already-present` stays "false" and every existing
+    # step below runs exactly as before.
+    - name: Detect pre-installed repro CLI
+      id: probe
+      shell: bash
+      run: |
+        set -euo pipefail
+        # `command -v` finds `repro` on Linux/macOS and, under the bash shell
+        # Git-for-Windows provides, also resolves `repro.exe` via PATHEXT.
+        # Probe the Windows name explicitly too so a `.exe`-only install counts.
+        if command -v repro >/dev/null 2>&1 || command -v repro.exe >/dev/null 2>&1; then
+          resolved="$(command -v repro 2>/dev/null || command -v repro.exe 2>/dev/null || true)"
+          echo "repro already on PATH at: ${resolved}"
+          echo "already-present=true" >> "$GITHUB_OUTPUT"
+          # Keep it on PATH for subsequent workflow steps (its dir may only be
+          # on PATH for this action's shell, not the job-wide $GITHUB_PATH).
+          if [ -n "${resolved}" ]; then
+            dir="$(dirname "${resolved}")"
+            echo "${dir}" >> "$GITHUB_PATH"
+          fi
+        else
+          echo "no repro CLI on PATH; will clone + build"
+          echo "already-present=false" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Clone reprobuild source
+      if: ${{ steps.probe.outputs.already-present != 'true' }}
       shell: bash
       env:
         REPRO_BUILD_PIN: ${{ inputs.repro-build-pin }}
@@ -44,13 +95,18 @@ runs:
         fi
 
     - name: Install Nix (Linux/macOS, to build repro)
-      if: ${{ runner.os != 'Windows' }}
+      if: ${{ steps.probe.outputs.already-present != 'true' && runner.os != 'Windows' }}
       uses: metacraft-labs/metacraft-github-actions/setup-nix@main
       with:
         gh-token: ${{ inputs.gh-token }}
+        substituters: ${{ inputs.substituters }}
+        trusted-public-keys: ${{ inputs.trusted-public-keys }}
+        attic-token: ${{ inputs.attic-token }}
+        attic-cache: ${{ inputs.attic-cache }}
+        attic-endpoint: ${{ inputs.attic-endpoint }}
 
     - name: Build repro CLI (Linux/macOS)
-      if: ${{ runner.os != 'Windows' }}
+      if: ${{ steps.probe.outputs.already-present != 'true' && runner.os != 'Windows' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -69,12 +125,27 @@ runs:
             : "${GITHUB_ENV:?GitHub Actions did not set GITHUB_ENV}"
             echo "NIMCRYPTO_SRC=${NIMCRYPTO_SRC}" >> "${GITHUB_ENV}"
             echo "BEARSSL_SRC=${BEARSSL_SRC}" >> "${GITHUB_ENV}"
+            # `repro` dlopens solver/cache libraries by leaf name. The dev
+            # shell provides the clingo/zstd runtime paths while building the
+            # CLI; persist them so later workflow steps can launch that CLI
+            # outside `nix develop`.
+            runtime_library_path="${LD_LIBRARY_PATH:-}"
+            dyld_library_path="${DYLD_LIBRARY_PATH:-}"
+            if [ -z "${dyld_library_path}" ] && [ "$(uname -s)" = "Darwin" ]; then
+              dyld_library_path="${runtime_library_path}"
+            fi
+            if [ -n "${runtime_library_path}" ]; then
+              echo "LD_LIBRARY_PATH=${runtime_library_path}" >> "${GITHUB_ENV}"
+            fi
+            if [ -n "${dyld_library_path}" ]; then
+              echo "DYLD_LIBRARY_PATH=${dyld_library_path}" >> "${GITHUB_ENV}"
+            fi
           '
         # `just build` writes to ./build/bin/repro. Surface it on PATH.
         echo "${PWD}/build/bin" >> "$GITHUB_PATH"
 
     - name: Relocate reprobuild + build repro CLI (Windows)
-      if: ${{ runner.os == 'Windows' }}
+      if: ${{ steps.probe.outputs.already-present != 'true' && runner.os == 'Windows' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -92,7 +163,7 @@ runs:
         fi
 
     - name: Build repro CLI (Windows)
-      if: ${{ runner.os == 'Windows' }}
+      if: ${{ steps.probe.outputs.already-present != 'true' && runner.os == 'Windows' }}
       shell: pwsh
       run: |
         # Windows-side: replay reprobuild's own DIY contract. Source its env.ps1

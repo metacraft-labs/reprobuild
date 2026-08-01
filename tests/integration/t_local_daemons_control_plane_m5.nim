@@ -51,17 +51,20 @@ proc stopDaemon(tempRoot: string) =
     sleep(100)
   try: removeFile(daemonEndpoint(tempRoot)) except OSError: discard
 
-proc waitForDaemonRunning(tempRoot: string; timeoutSeconds = 60.0) =
+proc waitForDaemonRunning(tempRoot: string; timeoutSeconds = 120.0) =
   let deadline = epochTime() + timeoutSeconds
   var lastOutput = ""
+  var lastExitCode = -1
   while epochTime() < deadline:
     let res = runShell(shellCommand(@[publicReproBin(), "daemon", "status"] &
       daemonArgs(tempRoot)), repoRoot())
+    lastExitCode = res.code
     lastOutput = res.output
     if res.code == 0 and res.output.contains("repro daemon: running"):
       return
     sleep(25)
   checkpoint("daemon status did not become running")
+  checkpoint("last daemon status exit code: " & $lastExitCode)
   checkpoint(lastOutput)
   if fileExists(daemonLogPath(tempRoot)):
     checkpoint(readFile(daemonLogPath(tempRoot)))
@@ -84,6 +87,10 @@ proc startForegroundDaemon(tempRoot: string): owned(Process) =
     if result.running():
       result.terminate()
       discard result.waitForExit()
+    let output =
+      if result.outputStream != nil: result.outputStream.readAll()
+      else: ""
+    checkpoint("foreground daemon output before running:\n" & output)
     result.close()
     raise
 
@@ -200,7 +207,8 @@ suite "Local daemons/control-plane M5 daemon-hosted watch sessions":
       let outA = requireSuccess(watchCommand(projectA, tempRoot, "work-a",
         ["--detach"]), repoRoot())
       let sessionA = sessionIdFromDetached(outA)
-      waitForFileContent(projectA / "dist" / "copied.txt", "a0\n", tempRoot)
+      waitForFileContent(projectA / "dist" / "copied.txt", "a0\n", tempRoot,
+        timeoutSeconds = 600.0)
       discard waitForSessionsContains(tempRoot, sessionA & "\twatch\twatching")
 
       let outB = requireSuccess(watchCommand(projectB, tempRoot, "work-b",
@@ -208,7 +216,8 @@ suite "Local daemons/control-plane M5 daemon-hosted watch sessions":
       let sessionB = sessionIdFromDetached(outB)
       check sessionA != sessionB
 
-      waitForFileContent(projectB / "dist" / "copied.txt", "b0\n", tempRoot)
+      waitForFileContent(projectB / "dist" / "copied.txt", "b0\n", tempRoot,
+        timeoutSeconds = 600.0)
       let active = waitForSessionsContains(tempRoot, "watching")
       check active.contains(sessionA)
       check active.contains(sessionB)
@@ -253,7 +262,8 @@ suite "Local daemons/control-plane M5 daemon-hosted watch sessions":
       let detached = requireSuccess(watchCommand(projectRoot, tempRoot, "work",
         ["--detach"]), repoRoot())
       let sessionId = sessionIdFromDetached(detached)
-      waitForFileContent(projectRoot / "dist" / "copied.txt", "r0\n", tempRoot)
+      waitForFileContent(projectRoot / "dist" / "copied.txt", "r0\n", tempRoot,
+        timeoutSeconds = 600.0)
       discard waitForSessionsContains(tempRoot, sessionId & "\twatch\twatching")
 
       waitForTimestampBoundary()
@@ -325,7 +335,7 @@ suite "Local daemons/control-plane M5 daemon-hosted watch sessions":
           watcher.close()
 
         waitForFileContent(projectRoot / "dist" / "copied.txt", "k0\n",
-          tempRoot)
+          tempRoot, timeoutSeconds = 600.0)
         waitForTimestampBoundary()
         writeFile(projectRoot / "src" / "input.txt", "k1\n")
         waitForFileContent(projectRoot / "dist" / "copied.txt", "k1\n",

@@ -85,14 +85,15 @@ suite "pkgconfSource — from-source recipe smoke test":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "configureFlags does not leak into the make channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
-  test "artifacts register one executable + one library mixed-kind":
+  test "artifacts register commands and the shared library":
     # M3 artifact registry: pkgconf tagged ``dakExecutable``;
     # libpkgconf tagged ``dakLibrary``. The unique coverage of THIS
     # recipe vs the xz precedent is the THREE-flag configure channel
     # paired with the (1, 1) mixed cardinality.
     let arts = registeredArtifacts("pkgconfSource")
-    check arts.len == 2
+    check arts.len == 3
     var seenPkgconf = false
+    var seenPkgConfig = false
     var seenLibpkgconf = false
     for art in arts:
       check art.packageName == "pkgconfSource"
@@ -100,12 +101,16 @@ suite "pkgconfSource — from-source recipe smoke test":
       of "pkgconf":
         seenPkgconf = true
         check art.kind == dakExecutable
+      of "pkgConfig":
+        seenPkgConfig = true
+        check art.kind == dakExecutable
       of "libpkgconf":
         seenLibpkgconf = true
         check art.kind == dakLibrary
       else:
         discard
     check seenPkgconf
+    check seenPkgConfig
     check seenLibpkgconf
 
   test "versions block records the upstream tag + URL + repository":

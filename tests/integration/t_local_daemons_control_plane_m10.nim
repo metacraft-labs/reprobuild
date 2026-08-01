@@ -1,5 +1,7 @@
 import std/[os, osproc, strutils, tempfiles, times, unittest]
 
+import repro_daemon_core/runtime
+
 when defined(posix):
   import std/posix
 
@@ -156,7 +158,7 @@ proc buildCommand(projectRoot, tempRoot, workName: string;
     "--action-cache-root=" & tempRoot / "action-cache",
     "--progress=quiet",
     "--log=quiet",
-    "--report=none",
+    "--measure=none",
     "--no-runquota"
   ] & @extra, daemonEnv(tempRoot))
 
@@ -176,6 +178,47 @@ proc waitForStatsStore(projectRoot: string; timeoutSeconds = 20.0) =
   raise newException(IOError, "timed out waiting for stats store")
 
 suite "Local daemons/control-plane M10 development self-restart":
+  test "launchd ownership environment is absent unless runner supplied it":
+    const OwnerTokenEnv = "REPRO_TEST_RUNNER_OWNER_TOKEN"
+    let hadOwnerToken = existsEnv(OwnerTokenEnv)
+    let priorOwnerToken = getEnv(OwnerTokenEnv)
+    defer:
+      if hadOwnerToken:
+        putEnv(OwnerTokenEnv, priorOwnerToken)
+      else:
+        delEnv(OwnerTokenEnv)
+    delEnv(OwnerTokenEnv)
+
+    let config = UserDaemonConfig(
+      endpoint: "/tmp/repro-owner-plist.sock",
+      stateDir: "/tmp/repro-owner-plist-state",
+      logPath: "/tmp/repro-owner-plist-state/daemon.log")
+    let plist = renderLaunchdUserAgentPlist("/tmp/repro", config)
+    check not plist.contains("<key>EnvironmentVariables</key>")
+    check not plist.contains("<key>" & OwnerTokenEnv & "</key>")
+
+  test "launchd ownership environment is exact and XML escaped":
+    const OwnerTokenEnv = "REPRO_TEST_RUNNER_OWNER_TOKEN"
+    let hadOwnerToken = existsEnv(OwnerTokenEnv)
+    let priorOwnerToken = getEnv(OwnerTokenEnv)
+    defer:
+      if hadOwnerToken:
+        putEnv(OwnerTokenEnv, priorOwnerToken)
+      else:
+        delEnv(OwnerTokenEnv)
+    putEnv(OwnerTokenEnv, "<owner&\"'token>")
+
+    let config = UserDaemonConfig(
+      endpoint: "/tmp/repro-owner-plist.sock",
+      stateDir: "/tmp/repro-owner-plist-state",
+      logPath: "/tmp/repro-owner-plist-state/daemon.log")
+    let plist = renderLaunchdUserAgentPlist("/tmp/repro", config)
+    check plist.count("<key>EnvironmentVariables</key>") == 1
+    check plist.count("<key>" & OwnerTokenEnv & "</key>") == 1
+    check plist.contains(
+      "<string>&lt;owner&amp;&quot;&apos;token&gt;</string>")
+    check not plist.contains("<owner&\"'token>")
+
   test "integration_daemon_dev_restart_posix":
     when defined(posix):
       let tempRoot = createTempDir("repro-daemon-m10-posix", "")
@@ -191,6 +234,9 @@ suite "Local daemons/control-plane M10 development self-restart":
       check fieldValue(started, "source-hash").len > 0
       check fieldValue(started, "source-hash") ==
         fieldValue(started, "running-hash")
+      check dirExists(fieldValue(started, "staged-generation-dir"))
+      check not fileExists(fieldValue(started, "staged-generation-dir") /
+        addFileExt("repro-full", ExeExt))
       check fieldValue(started, "protocol-generation") == "1.1"
       check fieldValue(started, "reconnect-limitations").contains(
         "watch sessions can be reattached")
@@ -229,7 +275,7 @@ suite "Local daemons/control-plane M10 development self-restart":
       writeCopyProject(projectRoot, "daemonM10State")
 
       discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
-        ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
+        ["--stats-groups=timing,cache,runquota,deps,sessions"]), repoRoot())
       waitForStatsStore(projectRoot)
       let sessionsBefore = requireSuccess(shellCommand(@[
         publicReproBin(), "daemon", "sessions"

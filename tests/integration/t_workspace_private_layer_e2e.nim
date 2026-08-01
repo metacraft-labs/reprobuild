@@ -202,7 +202,7 @@ type
 proc writeWorkspaceToml(workspaceRoot: string;
                         publicManifestUrl, privateManifestUrl: string):
                           string =
-  let dotRepo = workspaceRoot / ".repo"
+  let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
   result = dotRepo / "workspace.toml"
   let body =
@@ -266,11 +266,23 @@ proc setupFixture(gitBin, slug: string;
     fileUrl(result.publicManifestBare),
     fileUrl(result.privateManifestBare))
 
+proc cleanupScratch(path: string) =
+  for attempt in 0 .. 4:
+    if not dirExists(path):
+      return
+    try:
+      removeDir(path)
+      return
+    except OSError, IOError:
+      if attempt == 4:
+        raise
+      sleep(100)
+
 # ---- helpers --------------------------------------------------------------
 
 proc invokeInit(fx: Fixture; extraArgs: openArray[string] = []): CmdResult =
   var argv = @[
-    fx.reproBin, "workspace", "init", "myproject",
+    fx.reproBin, "workspace", "init", "--write-report", "myproject",
     "--workspace-root=" & fx.workspaceRoot,
   ]
   for arg in extraArgs:
@@ -279,12 +291,12 @@ proc invokeInit(fx: Fixture; extraArgs: openArray[string] = []): CmdResult =
 
 proc invokeLock(fx: Fixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "lock",
+    fx.reproBin, "workspace", "lock", "--write-report",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc readInitReport(fx: Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "init-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
@@ -300,7 +312,7 @@ suite "M25 — private manifest layering integrated end-to-end":
     else:
       let fx = setupFixture(gitBin, "full-access",
                             privateManifestReachable = true)
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let res = invokeInit(fx)
       if res.code != 0:
@@ -337,7 +349,7 @@ suite "M25 — private manifest layering integrated end-to-end":
     else:
       let fx = setupFixture(gitBin, "no-private-access",
                             privateManifestReachable = false)
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let res = invokeInit(fx)
       # Without ``--allow-missing-layers`` the unreachable private
@@ -365,7 +377,7 @@ suite "M25 — private manifest layering integrated end-to-end":
     else:
       let fx = setupFixture(gitBin, "lock-round-trip",
                             privateManifestReachable = true)
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let initRes = invokeInit(fx)
       if initRes.code != 0:
@@ -382,7 +394,7 @@ suite "M25 — private manifest layering integrated end-to-end":
         checkpoint("lock output: " & lockRes.output)
       check lockRes.code == 0
 
-      let lockReportPath = fx.workspaceRoot / ".repro" / "workspace" /
+      let lockReportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
         "lock-report.json"
       check fileExists(lockReportPath)
       let lockReport = parseFile(lockReportPath)
@@ -425,7 +437,7 @@ suite "M25 — private manifest layering integrated end-to-end":
     else:
       let fx = setupFixture(gitBin, "public-only-skip",
                             privateManifestReachable = false)
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let res = invokeInit(fx, @["--allow-missing-layers"])
       if res.code != 0:

@@ -86,7 +86,12 @@ suite "A3 P2 — CLI substitute / publish / lookup":
     check fileExists(CliBinary)
     let (code, outp) = runCli(["--help"])
     check code == 0
-    check outp.contains("repro-binary-cache-client")
+    # The standalone ``repro-binary-cache-client`` banner was retired; the
+    # toolset now ships as ``repro cache <subcommand>`` (Binary-Caches.md
+    # §"Client CLI Surface"). The test driver forwards the bare verb into
+    # the same shared ``runCacheSubcommand`` dispatch, whose usage banner
+    # reads ``repro cache``.
+    check outp.contains("repro cache")
 
   test "publish + lookup + substitute round-trip":
     let port = pickPort()
@@ -191,10 +196,16 @@ suite "A3 P2 — CLI substitute / publish / lookup":
     check hitCode == 0
     check hitOut.contains("hit")
 
-    # 4. substitute into outDir
+    # 4. substitute into outDir.
+    # Reprobuild-Binary-Cache-Fleet R1 — substitute is now default-
+    # untrusted: it only materialises from a cache whose producer key
+    # is trusted. Passing REPRO_BINARY_CACHE_CERT_PATH folds the
+    # producer pubkey in as the env cache's trust anchor (single-
+    # producer back-compat), so this legacy round-trip keeps working.
     let (subCode, subOut) = runCli(
       ["substitute", entryHex, outDir],
       env = @[("REPRO_BINARY_CACHE_URL", url),
+              ("REPRO_BINARY_CACHE_CERT_PATH", certPath),
               ("REPRO_LOCAL_STORE", clientStore)])
     if subCode != 0:
       echo "substitute unexpected exit: ", subOut
@@ -307,6 +318,7 @@ suite "A3 P2 — CLI substitute / publish / lookup":
     let (subCode, subOut) = runCli(
       ["substitute", entryHex, outDir],
       env = @[("REPRO_BINARY_CACHE_URL", url),
+              ("REPRO_BINARY_CACHE_CERT_PATH", certPath),
               ("REPRO_LOCAL_STORE", clientStore)])
     if subCode != 0:
       echo "multi-file substitute failed (code=", subCode, "): ", subOut

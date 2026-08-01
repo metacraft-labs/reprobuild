@@ -477,7 +477,8 @@ proc parseSyntheticResources*(homeDir: string): DesiredSet =
         continue
       var r = Resource(kind: rkEnvUserVariable, address: address,
         lifecyclePolicy: resourcePolicy,
-        envVarName: parts[0])
+        envVarName: parts[0],
+        envVarHostFilePath: defaultUserPathHostFile(homeDir))
       try:
         let rvk = registryValueKindFromString(parts[1])
         r.envVarPayload.kind = rvk
@@ -712,7 +713,8 @@ proc resourceFromEntry(profilePath, homeDir: string;
       let t = e.strip()
       if t.len > 0: clean.add(t)
     result = Resource(kind: rkEnvUserPath, address: address,
-      lifecyclePolicy: lpDefault, pathEntries: clean)
+      lifecyclePolicy: lpDefault, pathEntries: clean,
+      pathHostFilePath: defaultUserPathHostFile(homeDir))
   of "fs.managedBlock":
     var hostFile = requireAttr(profilePath, entry, "hostFile")
     if hostFile.startsWith("~"):
@@ -737,7 +739,8 @@ proc resourceFromEntry(profilePath, homeDir: string;
       else: "string"
     var r = Resource(kind: rkEnvUserVariable, address: address,
       lifecyclePolicy: lpDefault,
-      envVarName: requireAttr(profilePath, entry, "name"))
+      envVarName: requireAttr(profilePath, entry, "name"),
+      envVarHostFilePath: defaultUserPathHostFile(homeDir))
     var rvk: RegistryValueKind
     try:
       rvk = registryValueKindFromString(valueKindStr)
@@ -1544,9 +1547,10 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
             rb.realWorldIdentity[0 ..< bs],
             rb.realWorldIdentity[bs + 1 .. ^1])
       of rkEnvUserVariable:
-        let bs = rb.realWorldIdentity.rfind('\\')
-        if bs > 0:
-          live = observeUserVariable(rb.realWorldIdentity[bs + 1 .. ^1])
+        let name = userVariableNameFromIdentity(rb.realWorldIdentity)
+        if name.len > 0:
+          live = observeUserVariable(name,
+            userVariableHostFromIdentity(rb.realWorldIdentity))
       of rkEnvUserPath:
         let entries = parseRecordedPathEntries(rb.payloadBytes)
         live = observeUserPath(entries,
@@ -2412,7 +2416,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # (remote-apply bundle build) so the bundle stays focused on
       # generated files per 17e43c7's intent.
       if not opts.recordOnlyGeneratedFiles:
-        let envBindingPlan = planEnvBindings(realized)
+        let envBindingPlan = planEnvBindings(realized, opts.homeDir)
         for synthRes in envBindingPlan.resources:
           if synthRes.address notin desiredResources.resources:
             desiredResources.resources[synthRes.address] = synthRes
@@ -2565,7 +2569,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             payloadKindStr = $desired.registryPayload.kind
           of rkEnvUserVariable:
             postWriteBytes = applyUserVariableCreate(desired.envVarName,
-              desired.envVarPayload)
+              desired.envVarPayload, desired.envVarHostFilePath)
             payloadKindStr = $desired.envVarPayload.kind
           of rkEnvUserPath:
             var priorEntries: seq[string] = @[]
@@ -2715,9 +2719,9 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
                 deleteRegistryValue(subkey, name)
           of rkEnvUserVariable:
             preWrite = observeRecorded(action.address, prev)
-            let bs = prev.resourceId.rfind('\\')
-            if bs > 0:
-              applyUserVariableDestroy(prev.resourceId[bs + 1 .. ^1])
+            applyUserVariableDestroy(
+              userVariableNameFromIdentity(prev.resourceId),
+              userVariableHostFromIdentity(prev.resourceId))
           of rkEnvUserPath:
             let priorEntries = parseRecordedPathEntries(prev.payloadBytes)
             let hostFile = userPathHostFromIdentity(prev.resourceId)

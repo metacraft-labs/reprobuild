@@ -36,6 +36,7 @@
 import std/[os, strutils, unittest]
 
 import repro_cli_support
+from repro_test_support import executableFromEnvOrPath
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -43,17 +44,29 @@ import repro_cli_support
 
 proc resetEnv() =
   putEnv("RUNQUOTAD_BIN", "")
+  putEnv("RUNQUOTA_BIN", "")
   putEnv("REPROBUILD_NO_RUNQUOTA", "")
   putEnv("REPROBUILD_AUTO_RUNQUOTA", "")
   putEnv("RUNQUOTA_SOCKET", "")
 
 proc makeTempDaemonFile(): string =
-  ## Lay down an executable-like sentinel file the discovery helper can
-  ## find. We only check existence + path correctness — no actual
-  ## process spawn here.
+  ## Lay down an executable sentinel file the discovery helper can find. We
+  ## check executable resolution + path correctness; no actual process spawn
+  ## happens here.
   let temp = getTempDir() / "m9r11-runquotad-sentinel.exe"
   writeFile(temp, "#!/bin/sh\necho synthetic runquotad\n")
+  when defined(posix):
+    setFilePermissions(temp, {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
   result = temp
+
+when defined(posix):
+  proc makeTempNonExecutableFile(name: string): string =
+    let temp = getTempDir() / name
+    writeFile(temp, "#!/bin/sh\necho should-not-run\n")
+    setFilePermissions(temp, {fpUserRead, fpUserWrite, fpGroupRead,
+      fpOthersRead})
+    result = temp
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -101,6 +114,27 @@ suite "DSL-port M9.R.11 — runquota daemon discovery + recovery":
     let discovered = findRunQuotaDaemonBin()
     # The bogus path is not returned (it doesn't exist).
     check discovered != (getTempDir() / "this-path-does-not-exist-m9r11.exe")
+
+  when defined(posix):
+    test "non-executable RUNQUOTAD_BIN is rejected":
+      let sentinel = makeTempNonExecutableFile("m9r11-runquotad-nonexec")
+      putEnv("RUNQUOTAD_BIN", sentinel)
+      try:
+        expect OSError:
+          discard findRunQuotaDaemonBin()
+      finally:
+        removeFile(sentinel)
+
+    test "non-executable RUNQUOTA_BIN is rejected by shared test support":
+      let sentinel = makeTempNonExecutableFile("m9r11-runquota-nonexec")
+      putEnv("RUNQUOTA_BIN", sentinel)
+      try:
+        expect OSError:
+          discard executableFromEnvOrPath("RUNQUOTA_BIN",
+            addFileExt("runquota", ExeExt))
+      finally:
+        putEnv("RUNQUOTA_BIN", "")
+        removeFile(sentinel)
 
   test "discovery helper does not raise when no daemon is found":
     # Total function contract: even with all signals empty, the helper

@@ -422,44 +422,62 @@ proc canonicalCapabilityDesired*(wantInstalled: bool): string =
   if wantInstalled: "capability:installed" else: "capability:absent"
 
 proc renderRecoveryDigestPart(actions: seq[ServiceRecoveryActionObservation];
-                              resetSeconds: int): string =
-  result = ":recovery="
-  for i, a in actions:
-    if i > 0:
-      result.add(',')
-    result.add(a.action)
-    result.add('/')
-    result.add($a.delayMs)
-  result.add(":reset=")
-  result.add($resetSeconds)
+                              resetSeconds: int;
+                              includeActions, includeReset: bool): string =
+  ## Render only the recovery halves the operator actually manages.
+  ## `recoveryActions` and `recoveryResetSeconds` are documented as
+  ## independent and additive, so declaring one must not drag the other
+  ## into the drift comparison: a service that pins only the reset
+  ## window would otherwise compare its (undeclared) live action list
+  ## against an empty desired list and could never report a no-op.
+  result = ""
+  if includeActions:
+    result.add(":recovery=")
+    for i, a in actions:
+      if i > 0:
+        result.add(',')
+      result.add(a.action)
+      result.add('/')
+      result.add($a.delayMs)
+  if includeReset:
+    result.add(":reset=")
+    result.add($resetSeconds)
 
 proc canonicalServiceState*(obs: ServiceObservation;
                             wantDisplayName = "";
                             wantBinPath = "";
-                            includeRecovery = false): string =
+                            wantRecoveryActions:
+                              seq[ServiceRecoveryActionObservation] = @[];
+                            wantRecoveryResetSeconds = 0): string =
   ## Stable canonical rendering used for the broker's drift-digest.
-  ## The legacy two-argument call (`canonicalServiceState(obs)`) stays
-  ## backward-compatible by leaving the Phase B fields at their empty
-  ## defaults — the digest then matches the legacy three-field digest
-  ## byte-for-byte. When the Phase B fields are non-empty the digest
-  ## extends with their values so a drift on any of them triggers an
-  ## apply.
+  ##
+  ## The parameter list is deliberately IDENTICAL to
+  ## `canonicalServiceDesired`'s (which takes the desired start-type and
+  ## runtime state instead of an observation): both procs project onto
+  ## exactly the fields the operator declared, so a converged service
+  ## renders the same canonical string on both sides and the planner
+  ## reports a genuine no-op.
+  ##
+  ## The legacy single-argument call (`canonicalServiceState(obs)`)
+  ## stays backward-compatible by leaving every optional field at its
+  ## unmanaged default — the digest then matches the legacy three-field
+  ## digest byte-for-byte.
   if not obs.present:
     return "service:absent"
   result = "service:" & obs.startType & ":" &
     (if obs.running: "running" else: "stopped")
-  # Only include displayName / binPath when the operation declared a
-  # non-empty desired value — a profile that doesn't manage these
-  # fields stays on the legacy digest.
+  # Only include a field when the operation declared a desired value —
+  # a profile that doesn't manage it stays on the legacy digest.
   if wantDisplayName.len > 0:
     result.add(":displayName=")
     result.add(obs.displayName)
   if wantBinPath.len > 0:
     result.add(":binPath=")
     result.add(obs.binPath)
-  if includeRecovery:
-    result.add(renderRecoveryDigestPart(obs.recoveryActions,
-      obs.recoveryResetSeconds))
+  result.add(renderRecoveryDigestPart(obs.recoveryActions,
+    obs.recoveryResetSeconds,
+    includeActions = wantRecoveryActions.len > 0,
+    includeReset = wantRecoveryResetSeconds > 0))
 
 # ===========================================================================
 # windows.scheduledTask — `Get-ScheduledTask` parsing + drift comparator.
@@ -691,9 +709,10 @@ proc canonicalServiceDesired*(wantStartType: string;
   if wantBinPath.len > 0:
     result.add(":binPath=")
     result.add(wantBinPath)
-  if wantRecoveryActions.len > 0 or wantRecoveryResetSeconds > 0:
-    result.add(renderRecoveryDigestPart(wantRecoveryActions,
-      wantRecoveryResetSeconds))
+  result.add(renderRecoveryDigestPart(wantRecoveryActions,
+    wantRecoveryResetSeconds,
+    includeActions = wantRecoveryActions.len > 0,
+    includeReset = wantRecoveryResetSeconds > 0))
 
 # ===========================================================================
 # windows.firewallRule — `Get-NetFirewallRule` parsing.

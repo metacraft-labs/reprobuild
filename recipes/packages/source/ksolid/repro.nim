@@ -173,7 +173,8 @@ package ksolidSource:
         # install-mirror onto the cmake search path; CMake's
         # find_package(UDev) ECM module then resolves to it.
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true)
       discard pkg.library("libKF6Solid")
     finally:
       clearCurrentOwningPackageOverride()

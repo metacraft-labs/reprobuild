@@ -17,3 +17,14 @@ suite "ktexteditorSource — from-source recipe smoke test":
     let arts = registeredArtifacts("ktexteditorSource")
     check arts.len == 1
     check arts[0].artifactName == "libKF6TextEditor"
+
+  test "declares direct Qt Qml and speech dependencies":
+    let deps = registeredBuildDeps("ktexteditorSource")
+    check "qt6-declarative >=6.8" in deps
+    check "qt6-multimedia >=6.8" in deps
+    check "qt6-speech >=6.8" in deps
+    check "kbookmarks >=6.0" in deps
+    check "kservice >=6.0" in deps
+    check "kcodecs >=6.0" in deps
+    check "kglobalaccel >=6.0" in deps
+    check "kauth >=6.0" in deps

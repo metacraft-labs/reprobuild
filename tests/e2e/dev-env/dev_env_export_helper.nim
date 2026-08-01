@@ -89,10 +89,33 @@ proc prepareCase*(prefix: string): M74Case =
 proc envFor*(c: M74Case): StringTableRef =
   result = newStringTable(modeCaseSensitive)
   for key, value in envPairs():
+    if key.startsWith("__REPRO_"):
+      continue
     result[key] = value
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
+  result["REPRO_DEV_ENV_AUTO_ALLOW"] = "1"
+  result["HOME"] = c.tempRoot
+  result["XDG_CONFIG_HOME"] = c.tempRoot / "xdg-config"
+  result["REPROBUILD_ACTION_CACHE_ROOT"] = c.tempRoot / "action-cache"
+  result["REPRO_ACTION_CACHE_SHM"] = "0"
+  result["REPRO_DAEMON"] = "off"
+  result["REPRO_DAEMON_ENDPOINT"] =
+    daemonSocketEndpoint("repro-m74-" & $getCurrentProcessId() & "-" &
+      c.tempRoot.extractFilename)
+  result["REPRO_DAEMON_STATE_DIR"] = c.tempRoot / "daemon-state"
+  result["__REPRO_APPLIED"] = ""
+  result["__REPRO_WARNED"] = ""
+  result["__REPRO_PROJECT_ROOT"] = ""
+  result["__REPRO_ACTIVE_MANIFEST"] = ""
+  createDir(result["XDG_CONFIG_HOME"])
+  createDir(result["REPROBUILD_ACTION_CACHE_ROOT"])
+  createDir(result["REPRO_DAEMON_STATE_DIR"])
   if c.shim.len > 0:
     result["REPRO_MONITOR_SHIM_LIB"] = c.shim
+
+proc envEntries*(env: StringTableRef): seq[tuple[name, value: string]] =
+  for key, value in env:
+    result.add((name: key, value: value))
 
 proc runReproExport*(c: M74Case; shell: string): CommandOutcome =
   ## Spawn ``repro dev-env export <shell> --project-root <fixture>``
@@ -104,20 +127,14 @@ proc runReproExport*(c: M74Case; shell: string): CommandOutcome =
   ## CLI resolves ``fixture_provider.nim`` because we set its module
   ## path via the selector below.
   ##
-  var process = startProcess(c.reproBin,
-    args = @[
-      "dev-env", "export", shell,
-      "--project-root", c.projectRoot
-    ],
-    workingDir = c.repoRoot,
-    env = c.envFor(),
-    options = {poUsePath})
-  let outStream = process.outputStream
-  let errStream = process.errorStream
-  result.stdout = if outStream != nil: outStream.readAll() else: ""
-  result.stderr = if errStream != nil: errStream.readAll() else: ""
-  result.exitCode = process.waitForExit()
-  process.close()
+  let res = runShell(shellCommand(@[
+    c.reproBin,
+    "dev-env", "export", shell,
+    "--project-root", c.projectRoot
+  ], c.envFor().envEntries), c.repoRoot)
+  result.exitCode = res.code
+  result.stdout = res.output
+  result.stderr = ""
 
 proc shellAvailable*(name: string): bool =
   findExe(name).len > 0

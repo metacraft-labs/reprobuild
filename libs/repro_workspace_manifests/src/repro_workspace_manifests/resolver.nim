@@ -76,10 +76,21 @@ type
     wvTeam
     wvPersonal
 
+  ResolvedRemote* = object
+    ## One git remote of a checkout, after the project manifest's
+    ## `[[remote]]` table has been applied to the fragment's declaration.
+    ##
+    ## The two name fields are DIFFERENT namespaces and must not be
+    ## confused: `localName` lives in the checkout's `.git/config`,
+    ## `projectRemote` lives in the project manifest.
+    localName*: string     ## Git remote name inside the checkout (e.g. "origin", "upstream")
+    projectRemote*: string ## Key into the project manifest's `[[remote]]` table (e.g. "metacraft-labs", "github")
+    fetchUrl*: string      ## Full constructed fetch URL
+
   ResolvedRepo* = object
     ## Post-resolution facts for a single repo.
     ##
-    ## The five load-bearing fields (`name`, `path`, `remoteName`,
+    ## The five load-bearing fields (`name`, `path`, `projectRemote`,
     ## `fetchUrl`, `revision`) are exactly the tuple the milestone names
     ## ("(name, path, fetch-url, revision)"); the `vcs` and `stability`
     ## fields carry the fragment's optional values with the documented
@@ -94,8 +105,25 @@ type
     ## attached at the single-project resolution boundary.
     name*: string
     path*: string
-    remoteName*: string
+    ## Which entry of the project manifest's `[[remote]]` table this repo
+    ## resolves through (e.g. "metacraft-labs"). NOT the git remote name
+    ## in the checkout — that is `ResolvedRemote.localName`, and
+    ## `gitRemoteNameFor` is the mapping between the two.
+    ##
+    ## One documented exception, preserved from the pre-rename behaviour:
+    ## when a fragment declares a `remotes` list but omits the scalar
+    ## `repo.remote`, this field holds the FIRST resolved remote's
+    ## `localName` instead of a `[[remote]]` key. Note this is NOT because
+    ## no key is available — the project's `default_remote` has already
+    ## been assigned here, and `remotes[0].remote` is a key too; the
+    ## `remotes`-list branch simply overwrites it with the local name.
+    ## Both `gitRemoteNameFor` and `cloneUrlFor` handle that case
+    ## explicitly; nothing else may assume this field is always a
+    ## `[[remote]]` key. Applies to `resolveProject` and `resolveVariant`
+    ## alike (the two branches are textually identical).
+    projectRemote*: string
     fetchUrl*: string
+    remotes*: seq[ResolvedRemote]
     revision*: string
     vcs*: string
     stability*: string
@@ -304,6 +332,268 @@ proc normalizeIncludePath(projectFile, raw: string): string =
         "include path escapes the manifest root via '..': '" & raw & "'")
   result = manifestRoot / raw.replace('/', DirSep)
 
+# ---- fetch-URL construction -----------------------------------------------
+
+proc isVerbatimFetchBase*(fetch: string): bool =
+  ## `true` when `getFetchUrl` uses this `fetch` VERBATIM instead of appending
+  ## a repo name — i.e. it already points at one repository rather than at a
+  ## base other repos hang off. Manifest AUTHORING has to make the same
+  ## distinction (such a `fetch` can serve exactly one URL and can never be
+  ## reused), so the predicate lives here and both sides call it.
+  ##
+  ## Takes the RAW `fetch` string: `canonicalGitUrl` strips the `.git` from
+  ## network URLs, and a canonicalized base can no longer be told apart from a
+  ## composable one.
+  fetch.endsWith(".git") or fetch.endsWith(".git/")
+
+proc getFetchUrl*(fetchBase, repoName: string): string =
+  ## Build a repo's clone URL from its remote's `fetch` base and the repo's
+  ## server-side `name`, following Android-`repo` manifest semantics: the
+  ## clone URL is `<remote fetch>/<project name>` (the `name` attribute, NOT
+  ## the local checkout `path`). A `fetch` base that already points at a full
+  ## repo (ends in `.git`) is used verbatim; otherwise the `name` is appended.
+  ##
+  ## Exported because manifest AUTHORING (`repro workspace project repo add`)
+  ## has to invert this function: given a requested clone URL it must find the
+  ## declared remote that already composes to it. Authoring and resolution
+  ## must never drift apart, so both sides call this one proc.
+  if fetchBase.len == 0:
+    ""
+  elif isVerbatimFetchBase(fetchBase):
+    fetchBase
+  else:
+    fetchBase & "/" & repoName
+
+# ---- remote planning (manifest authoring) ---------------------------------
+#
+# `repro workspace project repo add <project> <repo> --remote=URL` has to turn
+# a clone URL into a `repos/<repo>.toml` fragment plus, at most, one new
+# `[[remote]]` entry in `projects/<project>.toml`. The rules below are the
+# inverse of `getFetchUrl`:
+#
+#   1. REUSE THE MOST SPECIFIC DECLARED BASE — of every declared `fetch` base
+#      that can serve the URL, take the LONGEST, and put whatever path remains
+#      into the fragment's `name` (Android-`repo` semantics: `name` is the
+#      server-side path, `path` is the local checkout dir). Nothing is added
+#      to the project's remote table. This single rule reproduces both
+#      hand-written families in the pilot manifests, which declare `github` →
+#      `https://github.com` AND `metacraft-labs` → `https://github.com/metacraft-labs`:
+#
+#        https://github.com/metacraft-labs/nim-shm-queue
+#          → remote = "metacraft-labs", name = "nim-shm-queue"
+#            (the longer base wins; the name stays bare, as in
+#             `repos/nim-shm-queue.toml`)
+#        https://github.com/llvm/llvm-project
+#          → remote = "github", name = "llvm/llvm-project"
+#            (no `llvm` base is declared, so the generic host base serves it
+#             and the org travels in `name`, as in `repos/llvm-project.toml`)
+#
+#      A `fetch` that already points at ONE repo (ends in `.git`) is used
+#      verbatim by `getFetchUrl`, so it is not a base anything can be appended
+#      to: it serves a URL only by BEING it, and then the requested name is
+#      kept as-is.
+#   2. MINT — no declared base prefixes the URL: add exactly ONE entry, named
+#      after the org (or the host when the URL has no org segment) and carrying
+#      the org base as `fetch`, so the NEXT repo from the same org hits rule 1
+#      and adds nothing.
+#
+# A per-repo remote (`<repo>-origin` with the full URL as `fetch`) is never
+# PLANNED here: it grows the project's shared remote table by one entry per
+# repo and can never be reused, because a `fetch` ending in `.git` is used
+# verbatim. A caller may still fall back to one when it cannot use the plan it
+# got — see `preserveRepoName` below.
+#
+# `preserveRepoName` is for callers that cannot accept a server-side name:
+# `repro add` records develop-set `depends` edges that key off `[repo].name`,
+# so a fragment whose `name` is not the added repo's own name would leave those
+# edges dangling. Such a caller asks for a plan that keeps the name, which
+# restricts rule 1 to bases that compose to the URL with the requested name
+# unchanged. (`repro workspace project repo add` writes no `depends` edges and
+# so takes the unrestricted, convention-matching plan.)
+
+type
+  RepoRemotePlan* = object
+    ## The outcome of planning a repo fragment's remote against a project's
+    ## existing `[[remote]]` table.
+    remoteName*: string
+      ## The `[repo].remote` value the fragment should carry.
+    repoName*: string
+      ## The `[repo].name` value the fragment should carry. Equal to the
+      ## requested repo name except when the URL's server-side path differs
+      ## from the local checkout dir (`llvm/llvm-project` checked out as
+      ## `llvm-project`, or a bare-repo URL whose last segment keeps its
+      ## `.git`).
+    mintedFetch*: string
+      ## When non-empty, the `fetch` base of a NEW `[[remote]]` entry that the
+      ## caller must append to the project manifest under `remoteName`. Empty
+      ## means an existing declared remote was reused — add nothing.
+    error*: string
+      ## Non-empty when the URL cannot be turned into a manifest entry at all
+      ## (e.g. it carries no path segment to use as a repo name).
+
+proc isLocalGitUrl(url: string): bool =
+  ## `true` for URLs that name a directory on a filesystem (`file://…`, an
+  ## absolute path, a Windows drive path). For those the trailing `.git` is
+  ## part of the DIRECTORY NAME and must never be stripped — `file:///srv/x`
+  ## and `file:///srv/x.git` are two different places. Every network git host
+  ## in practice serves `…/repo` and `…/repo.git` as the same repository, so
+  ## the suffix is optional there and safe to normalize away.
+  url.startsWith("file://") or url.startsWith("/") or url.startsWith("\\\\") or
+    (url.len >= 3 and url[1] == ':' and (url[2] == '/' or url[2] == '\\'))
+
+proc canonicalGitUrl*(url: string): string =
+  ## Normalize a clone URL for comparison: drop a trailing `/`, then drop a
+  ## trailing `.git` (network URLs only — see `isLocalGitUrl`).
+  result = url
+  while result.len > 1 and result.endsWith("/"):
+    result.setLen(result.len - 1)
+  if not isLocalGitUrl(result) and result.endsWith(".git"):
+    result.setLen(result.len - ".git".len)
+    while result.len > 1 and result.endsWith("/"):
+      result.setLen(result.len - 1)
+
+proc splitLastSegment(url: string): tuple[base, leaf: string] =
+  ## Split a canonical URL into everything before the final `/` and the final
+  ## segment itself. Returns an empty `base` when there is no separator.
+  let idx = url.rfind('/')
+  if idx <= 0:
+    ("", url)
+  else:
+    (url[0 ..< idx], url[idx + 1 .. ^1])
+
+proc orgLabelFor(base: string): string =
+  ## The name to give a newly minted remote: the org segment of the base
+  ## (`https://github.com/metacraft-labs` → `metacraft-labs`), or — when the
+  ## base is just a host — the host's first label (`https://github.com` →
+  ## `github`, matching the hand-written `github` remote in the pilot
+  ## manifests).
+  var rest = base
+  let scheme = rest.find("://")
+  var hostOnly = false
+  if scheme >= 0:
+    rest = rest[scheme + 3 .. ^1]
+    hostOnly = '/' notin rest
+  elif ':' in rest:
+    # scp-style `git@host:org/repo`.
+    rest = rest[rest.find(':') + 1 .. ^1]
+    hostOnly = rest.len == 0
+  if hostOnly or rest.len == 0:
+    # Host (possibly `user@host:port`) — take its first DNS label.
+    var host = if scheme >= 0: rest else: base
+    let at = host.rfind('@')
+    if at >= 0: host = host[at + 1 .. ^1]
+    let colon = host.find(':')
+    if colon >= 0: host = host[0 ..< colon]
+    let dot = host.find('.')
+    result = if dot > 0: host[0 ..< dot] else: host
+  else:
+    let idx = rest.rfind('/')
+    result = if idx >= 0: rest[idx + 1 .. ^1] else: rest
+  # A remote name is a TOML key-ish identifier in practice; keep it tame.
+  if result.endsWith(".git"):
+    result.setLen(result.len - ".git".len)
+
+proc hostLabelFor(base: string): string =
+  ## The host's first DNS label, used to disambiguate a minted remote name
+  ## that collides with an existing, differently-pointed remote.
+  var rest = base
+  let scheme = rest.find("://")
+  if scheme >= 0:
+    rest = rest[scheme + 3 .. ^1]
+  let at = rest.rfind('@')
+  if at >= 0 and (rest.find('/') < 0 or at < rest.find('/')):
+    rest = rest[at + 1 .. ^1]
+  var host = rest
+  for sep in ['/', ':']:
+    let idx = host.find(sep)
+    if idx >= 0: host = host[0 ..< idx]
+  let dot = host.find('.')
+  result = if dot > 0: host[0 ..< dot] else: host
+
+proc planRepoRemote*(remotes: openArray[RemoteEntry];
+                     defaultRemote: string;
+                     repoName, requestedUrl: string;
+                     preserveRepoName = false): RepoRemotePlan =
+  ## Plan the `[repo].remote` / `[repo].name` of a fragment for `repoName`
+  ## cloned from `requestedUrl`, against a project's declared `remotes`.
+  ## See the rules documented above this type.
+  result.repoName = repoName
+  if requestedUrl.len == 0:
+    result.error = "remote URL is empty"
+    return
+  let wanted = canonicalGitUrl(requestedUrl)
+
+  # Rule 1 — reuse the MOST SPECIFIC declared base that can serve the URL.
+  # Primary key: the length of the matched base, so `metacraft-labs` beats the
+  # generic `github` for a repo under that org and the fragment's `name` stays
+  # bare. Tie-break when several bases are equally specific (a project may
+  # declare two names for one org): the project's `default_remote` first, then
+  # a remote named after the org segment of its own base (`metacraft-labs`
+  # beats a generic `origin` alias), then declaration order.
+  var bestLen = -1
+  var bestRank = high(int)
+  var bestRepoName = ""
+  for idx, r in remotes.pairs:
+    if r.fetch.len == 0: continue
+    let rBase = canonicalGitUrl(r.fetch)
+    if rBase.len == 0: continue
+    var candidateName = ""
+    if isVerbatimFetchBase(r.fetch):
+      # Not a base: `getFetchUrl` ignores the name, so this remote serves the
+      # URL only by being it, and the requested name is kept.
+      if rBase != wanted: continue
+      candidateName = repoName
+    elif wanted.startsWith(rBase & "/"):
+      candidateName = wanted[rBase.len + 1 .. ^1]
+    else:
+      continue
+    if candidateName.len == 0: continue
+    if preserveRepoName and candidateName != repoName: continue
+    var rank = idx
+    if r.name == orgLabelFor(rBase): rank -= 1_000
+    if defaultRemote.len > 0 and r.name == defaultRemote: rank -= 1_000_000
+    if rBase.len > bestLen or (rBase.len == bestLen and rank < bestRank):
+      bestLen = rBase.len
+      bestRank = rank
+      result.remoteName = r.name
+      bestRepoName = candidateName
+  if result.remoteName.len > 0:
+    result.repoName = bestRepoName
+    return
+
+  let (base, leaf) = splitLastSegment(wanted)
+  if base.len == 0 or leaf.len == 0:
+    result.error = "remote URL '" & requestedUrl &
+      "' has no repository path segment to compose a manifest entry from"
+    return
+
+  # Rule 2 — mint ONE org-named remote carrying the org base, so the next
+  # repo from the same org reuses it via rule 1.
+  result.repoName = leaf
+  var candidate = orgLabelFor(base)
+  if candidate.len == 0: candidate = hostLabelFor(base)
+  if candidate.len == 0: candidate = "origin"
+  var taken = initTable[string, string]()
+  for r in remotes:
+    taken[r.name] = canonicalGitUrl(r.fetch)
+  var name = candidate
+  var attempt = 0
+  while taken.hasKey(name):
+    if taken[name] == base:
+      # Same base under a different name — reuse it rather than duplicating.
+      result.remoteName = name
+      result.mintedFetch = ""
+      return
+    inc attempt
+    name =
+      if attempt == 1 and hostLabelFor(base).len > 0 and
+          hostLabelFor(base) != candidate:
+        hostLabelFor(base) & "-" & candidate
+      else:
+        candidate & "-" & $(attempt + 1)
+  result.remoteName = name
+  result.mintedFetch = base
+
 # ---- on-disk entry point --------------------------------------------------
 
 proc resolveProject*(projectFile: string): ResolvedProject =
@@ -342,7 +632,7 @@ proc resolveProject*(projectFile: string): ResolvedProject =
     else:
       ""
 
-  # Track `(name, path, remoteName)` triples to detect genuine duplicates.
+  # Track `(name, path, projectRemote)` triples to detect genuine duplicates.
   # Two distinct fragments with the same `repo.name` but different `path`
   # and/or `remote` (the accounting / accounting-blocksense pattern) MUST
   # be allowed through; only an identical triple is a duplicate.
@@ -372,9 +662,9 @@ proc resolveProject*(projectFile: string): ResolvedProject =
       if fragment.repo.remote.isSome: fragment.repo.remote.get()
       else: ""
     if fragmentRemote.len > 0:
-      resolved.remoteName = fragmentRemote
+      resolved.projectRemote = fragmentRemote
     elif defaultRemoteName.len > 0:
-      resolved.remoteName = defaultRemoteName
+      resolved.projectRemote = defaultRemoteName
     else:
       raiseManifestError(absProject,
         "includes[" & $incIdx & "]",
@@ -382,13 +672,40 @@ proc resolveProject*(projectFile: string): ResolvedProject =
         "fragment '" & rawInclude &
           "' omits `repo.remote` and the project has no `default_remote`")
 
-    if resolved.remoteName notin remotes:
-      raiseManifestError(absProject,
-        "includes[" & $incIdx & "]",
-        schemaProjectManifestV1, schemaProjectManifestV1,
-        "fragment '" & rawInclude & "' references unknown remote '" &
-          resolved.remoteName & "' (not declared in the project's [[remote]] table)")
-    resolved.fetchUrl = remotes[resolved.remoteName]
+    var resolvedRemotes = newSeq[ResolvedRemote]()
+    if fragment.repo.remotes.len > 0:
+      for r in fragment.repo.remotes:
+        if r.remote notin remotes:
+          raiseManifestError(absProject,
+            "includes[" & $incIdx & "]",
+            schemaProjectManifestV1, schemaProjectManifestV1,
+            "fragment '" & rawInclude & "' references unknown remote '" &
+              r.remote & "' (not declared in the project's [[remote]] table)")
+        let fullUrl = getFetchUrl(remotes[r.remote], fragment.repo.name)
+        resolvedRemotes.add(ResolvedRemote(localName: r.name, projectRemote: r.remote, fetchUrl: fullUrl))
+
+      let primaryName = if fragmentRemote.len > 0: fragmentRemote else: resolvedRemotes[0].localName
+      resolved.projectRemote = primaryName
+      var primaryProjectRemote = ""
+      for r in resolvedRemotes:
+        if r.localName == primaryName:
+          primaryProjectRemote = r.projectRemote
+          break
+      if primaryProjectRemote.len == 0:
+        primaryProjectRemote = resolvedRemotes[0].projectRemote
+      resolved.fetchUrl = getFetchUrl(remotes[primaryProjectRemote], fragment.repo.name)
+    else:
+      if resolved.projectRemote notin remotes:
+        raiseManifestError(absProject,
+          "includes[" & $incIdx & "]",
+          schemaProjectManifestV1, schemaProjectManifestV1,
+          "fragment '" & rawInclude & "' references unknown remote '" &
+            resolved.projectRemote & "' (not declared in the project's [[remote]] table)")
+      let fullUrl = getFetchUrl(remotes[resolved.projectRemote], fragment.repo.name)
+      resolved.fetchUrl = fullUrl
+      resolvedRemotes.add(ResolvedRemote(localName: "origin", projectRemote: resolved.projectRemote, fetchUrl: fullUrl))
+
+    resolved.remotes = resolvedRemotes
 
     # Resolve revision: fragment's explicit value wins; otherwise the
     # project's `default_revision`. If neither is set we leave the field
@@ -437,17 +754,17 @@ proc resolveProject*(projectFile: string): ResolvedProject =
     # RA-21 — carry the develop-set dependency edges through verbatim.
     resolved.depends = fragment.repo.depends
 
-    # Duplicate check on the `(name, path, remoteName)` triple. We use
+    # Duplicate check on the `(name, path, projectRemote)` triple. We use
     # a tab-joined key because none of the three components legally
     # contains a tab character (repo names are file-system-safe; paths
     # use forward slashes; remote names are TOML identifiers).
-    let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.remoteName
+    let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.projectRemote
     if triple in seen:
       raiseManifestError(absProject,
         "includes[" & $incIdx & "]",
         schemaProjectManifestV1, schemaProjectManifestV1,
         "duplicate repo (name='" & resolved.name & "', path='" & resolved.path &
-          "', remote='" & resolved.remoteName & "') first declared at includes[" &
+          "', remote='" & resolved.projectRemote & "') first declared at includes[" &
           $seen[triple] & "]")
     seen[triple] = incIdx
 
@@ -592,10 +909,10 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
   #
   # Build the duplicate-detection set seeded from the base's resolved
   # repos so any extra include that collides with a base repo is
-  # rejected with the same `(name, path, remoteName)` rule M6 uses.
+  # rejected with the same `(name, path, projectRemote)` rule M6 uses.
   var seen = initTable[string, int]()
   for i, r in result.repos:
-    let triple = r.name & "\t" & r.path & "\t" & r.remoteName
+    let triple = r.name & "\t" & r.path & "\t" & r.projectRemote
     seen[triple] = i
 
   for incIdx, rawInclude in variant.includes:
@@ -621,9 +938,9 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
       if fragment.repo.remote.isSome: fragment.repo.remote.get()
       else: ""
     if fragmentRemote.len > 0:
-      resolved.remoteName = fragmentRemote
+      resolved.projectRemote = fragmentRemote
     elif defaultRemoteName.len > 0:
-      resolved.remoteName = defaultRemoteName
+      resolved.projectRemote = defaultRemoteName
     else:
       raiseManifestError(absVariant,
         "includes[" & $incIdx & "]",
@@ -631,14 +948,40 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
         "fragment '" & rawInclude &
           "' omits `repo.remote` and the base project has no `default_remote`")
 
-    if resolved.remoteName notin remotes:
-      raiseManifestError(absVariant,
-        "includes[" & $incIdx & "]",
-        schemaVariantManifestV1, schemaVariantManifestV1,
-        "fragment '" & rawInclude & "' references unknown remote '" &
-          resolved.remoteName &
-          "' (not declared in the base project's [[remote]] table)")
-    resolved.fetchUrl = remotes[resolved.remoteName]
+    var resolvedRemotes = newSeq[ResolvedRemote]()
+    if fragment.repo.remotes.len > 0:
+      for r in fragment.repo.remotes:
+        if r.remote notin remotes:
+          raiseManifestError(absVariant,
+            "includes[" & $incIdx & "]",
+            schemaVariantManifestV1, schemaVariantManifestV1,
+            "fragment '" & rawInclude & "' references unknown remote '" &
+              r.remote & "' (not declared in the base project's [[remote]] table)")
+        let fullUrl = getFetchUrl(remotes[r.remote], fragment.repo.name)
+        resolvedRemotes.add(ResolvedRemote(localName: r.name, projectRemote: r.remote, fetchUrl: fullUrl))
+      
+      let primaryName = if fragmentRemote.len > 0: fragmentRemote else: resolvedRemotes[0].localName
+      resolved.projectRemote = primaryName
+      var primaryProjectRemote = ""
+      for r in resolvedRemotes:
+        if r.localName == primaryName:
+          primaryProjectRemote = r.projectRemote
+          break
+      if primaryProjectRemote.len == 0:
+        primaryProjectRemote = resolvedRemotes[0].projectRemote
+      resolved.fetchUrl = getFetchUrl(remotes[primaryProjectRemote], fragment.repo.name)
+    else:
+      if resolved.projectRemote notin remotes:
+        raiseManifestError(absVariant,
+          "includes[" & $incIdx & "]",
+          schemaVariantManifestV1, schemaVariantManifestV1,
+          "fragment '" & rawInclude & "' references unknown remote '" &
+            resolved.projectRemote & "' (not declared in the base project's [[remote]] table)")
+      let fullUrl = getFetchUrl(remotes[resolved.projectRemote], fragment.repo.name)
+      resolved.fetchUrl = fullUrl
+      resolvedRemotes.add(ResolvedRemote(localName: "origin", projectRemote: resolved.projectRemote, fetchUrl: fullUrl))
+
+    resolved.remotes = resolvedRemotes
 
     let fragmentRevision =
       if fragment.repo.revision.isSome: fragment.repo.revision.get()
@@ -681,13 +1024,13 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
     # RA-21 — carry the develop-set dependency edges through verbatim.
     resolved.depends = fragment.repo.depends
 
-    let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.remoteName
+    let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.projectRemote
     if triple in seen:
       raiseManifestError(absVariant,
         "includes[" & $incIdx & "]",
         schemaVariantManifestV1, schemaVariantManifestV1,
         "duplicate repo (name='" & resolved.name & "', path='" & resolved.path &
-          "', remote='" & resolved.remoteName &
+          "', remote='" & resolved.projectRemote &
           "') already present from earlier resolution at index " &
           $seen[triple])
     seen[triple] = result.repos.len
@@ -725,8 +1068,23 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
           schemaVariantManifestV1, schemaVariantManifestV1,
           "override sets remote '" & newRemote &
             "' which is not declared in the base project's [[remote]] table")
-      result.repos[matchedIdx].remoteName = newRemote
-      result.repos[matchedIdx].fetchUrl = remotes[newRemote]
+      let fullUrl = getFetchUrl(remotes[newRemote], result.repos[matchedIdx].name)
+      result.repos[matchedIdx].projectRemote = newRemote
+      result.repos[matchedIdx].fetchUrl = fullUrl
+
+      # Sync the remotes list
+      if result.repos[matchedIdx].remotes.len > 0:
+        var found = false
+        for idx, r in result.repos[matchedIdx].remotes:
+          if r.localName == newRemote or r.localName == "origin":
+            result.repos[matchedIdx].remotes[idx].projectRemote = newRemote
+            result.repos[matchedIdx].remotes[idx].fetchUrl = fullUrl
+            found = true
+            break
+        if not found:
+          result.repos[matchedIdx].remotes.add(ResolvedRemote(localName: "origin", projectRemote: newRemote, fetchUrl: fullUrl))
+      else:
+        result.repos[matchedIdx].remotes = @[ResolvedRemote(localName: "origin", projectRemote: newRemote, fetchUrl: fullUrl)]
     if ov.path.isSome:
       result.repos[matchedIdx].path = ov.path.get()
 
@@ -738,14 +1096,14 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
   var finalSeen = initTable[string, int]()
   for i in 0 ..< result.repos.len:
     let r = result.repos[i]
-    let triple = r.name & "\t" & r.path & "\t" & r.remoteName
+    let triple = r.name & "\t" & r.path & "\t" & r.projectRemote
     if triple in finalSeen:
       raiseManifestError(absVariant,
         "override",
         schemaVariantManifestV1, schemaVariantManifestV1,
         "after applying overrides, repos at indices " & $finalSeen[triple] &
           " and " & $i & " share the same (name='" & r.name &
-          "', path='" & r.path & "', remote='" & r.remoteName &
+          "', path='" & r.path & "', remote='" & r.projectRemote &
           "') triple")
     finalSeen[triple] = i
 

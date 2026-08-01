@@ -1,0 +1,342 @@
+## RP8 (LSP mode) — interface-extraction backs an editor TYPECHECK and
+## GO-TO-DEFINITION over a consumer ``repro.nim`` that ``uses:`` a producer
+## declaring resource/executable types.
+##
+## Spec: ``Project-Provider-Runtime-Protocol.milestones.org`` §RP8. This is the
+## FINAL Provider-Runtime-Protocol milestone: the whole interface-extraction
+## stack (TI1 cached lift, TI2 driver-free accessor splice, TI3 fingerprint
+## split, RP4/RP5a resource contracts) exists so a consumer resolves a
+## producer's PUBLIC symbols WITHOUT compiling the producer's driver/impl
+## closure. RP8 exposes that same extraction as the two capabilities an editor
+## language-server needs. This is a focused, TESTED capability (typecheck-
+## without-impl + a go-to-definition resolver returning the producer's public-
+## decl source location), NOT a socket LSP server — which the RP8 gate accepts.
+##
+## It proves two properties:
+##
+##   1. **TYPECHECK resolves cross-project symbols, NO impl compile.** A
+##      producer declares a ``resourceType``; a consumer ``uses:`` it and
+##      references ``container(...)``. A ``nim check`` pass
+##      (``typecheckConsumerAgainstInterface``) succeeds resolving the symbol
+##      via the driver-free accessor. ``nim check`` CANNOT run ``staticExec``,
+##      so a green check PROVES the exec-free interface path (TI2's VM read of
+##      the cached accessor), not a full producer compile. The accessor and the
+##      consumer's generated C closure carry NONE of this fixture's uniquely
+##      named private driver symbols — interface extraction, not full compile.
+##      The generic ``repro_resources`` runtime may itself carry the public
+##      ``registerResourceProvider`` API; that is not the producer's module-init
+##      registration or its implementation closure.
+##      A reference to a NON-existent public symbol fails the check
+##      (falsifiability).
+##
+##   2. **GO-TO-DEFINITION.** ``gotoDefinitionForProducerSymbol`` /
+##      ``gotoDefinitionInProducerContract``, given ``container`` (the resource
+##      wrapper) and ``cpus`` (an attribute), return the producer's
+##      ``resources.nim`` source location — the FILE is the producer's resource
+##      module and the LINE points at the real public declaration (computed from
+##      the producer fixture). A PRIVATE driver helper
+##      (``rp8PrivateIdentity``) and an unknown name do NOT resolve
+##      (``gdskNotFound``) — the interface only exposes the public surface, so a
+##      private symbol has no location.
+
+import std/[os, osproc, strutils, unittest]
+
+import repro_cli_support
+import repro_interface_artifacts
+
+const repoRoot = currentSourcePath().parentDir.parentDir.parentDir
+
+# ---------------------------------------------------------------------------
+# The producer's SEPARATE resource module — a ``resourceType`` block plus its
+# driver. The ``rp8Private*`` procs are PRIVATE impl helpers: they must NOT
+# resolve via go-to-definition (they never cross the interface). The public
+# surface is the ``resourceType`` wrapper ``container`` and its ``attr``s.
+# ---------------------------------------------------------------------------
+
+const resourcesModule = """
+import repro_project_dsl
+import repro_resources
+import std/options
+
+type
+  ContainerAttrs = object
+    image*: string
+    cpus*: int
+
+proc rp8PrivateIdentity(inst: ResourceInstance): string {.nimcall.} =
+  "container:" & inst.address
+
+proc rp8PrivateDigest(inst: ResourceInstance): Digest256 {.nimcall.} =
+  digestString(inst.address)
+
+proc rp8PrivateObserve(inst: ResourceInstance;
+                       recorded: Option[ResourceBinding]): ObservedState
+    {.nimcall.} =
+  result.present = false
+
+proc rp8PrivateApply(inst: ResourceInstance; action: ResourceActionKind;
+                     observed: ObservedState): ResourceBinding {.nimcall.} =
+  ResourceBinding(address: inst.address, typeId: inst.typeId,
+    resourceId: rp8PrivateIdentity(inst), present: true)
+
+let rp8PrivateContainerDriver = ResourceProviderDriver(
+  identity: rp8PrivateIdentity, digest: rp8PrivateDigest,
+  observe: rp8PrivateObserve, apply: rp8PrivateApply)
+
+resourceType "vm_harness.container":
+  attrs: ContainerAttrs
+  wrapper: container
+  determinism: rdVolatile
+  driver: rp8PrivateContainerDriver
+  attr image: string
+  attr cpus: int
+"""
+
+const producerDriverClosureMarkers = [
+  "rp8PrivateIdentity",
+  "rp8PrivateDigest",
+  "rp8PrivateObserve",
+  "rp8PrivateApply",
+  "rp8PrivateContainerDriver"
+]
+
+# The producer ``repro.nim`` names the SEPARATE module via a ``resourceModule``
+# surface entry (the RP5c2 vm-harness shape) and imports ONLY
+# ``repro_project_dsl`` (never the resources module), so the producer core stays
+# driver-free.
+const producerRepro = """
+import repro_project_dsl
+
+resourceModule "repro/resources.nim":
+  path "."
+
+package producer:
+  executable placeholder:
+    discard
+"""
+
+proc consumerRepro(producerSelector, bindStmt: string): string =
+  ## A consumer ``repro.nim`` that ``uses: "producer"`` (so ``usesImportCode``
+  ## splices the producer's driver-free resource surface) and binds the typed
+  ## ``container`` wrapper in a proc body. A green typecheck means the contract
+  ## crossed AND the bind resolves via interface extraction.
+  ("""
+import repro_project_dsl
+
+package theconsumer:
+  defaultToolProvisioning "path"
+
+  uses:
+    "$1"
+
+  build:
+    discard
+
+proc useContainer() =
+""" % [producerSelector]) & bindStmt & "\n"
+
+proc writeProducer(producerDir: string) =
+  createDir(producerDir)
+  createDir(producerDir / "repro")
+  writeFile(producerDir / "repro.nim", producerRepro)
+  writeFile(producerDir / "repro" / "resources.nim", resourcesModule)
+
+proc lineOfDecl(src, needle: string): int =
+  ## The 1-based line number of the first line whose stripped content STARTS
+  ## with ``needle`` in ``src`` — used to compute the expected go-to-def line
+  ## from the producer fixture text (so the assertion tracks the real source).
+  var n = 0
+  for line in src.splitLines:
+    inc n
+    if line.strip.startsWith(needle):
+      return n
+  -1
+
+suite "RP8: LSP typecheck + go-to-definition via interface extraction":
+
+  test "t_rp8_typecheck_resolves_symbol_no_impl_compile":
+    # A per-run fixture tree UNDER the repo (so the consumer/producer resolve the
+    # repo config.nims --path set), in a PRIVATE nimcache; cleaned on exit.
+    let base = repoRoot / "build" / "nimcache" /
+      ("rp8-typecheck-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base)
+    defer: removeDir(base)
+
+    # Protocol cases from this and the TI3 binary may run in separate worker
+    # processes. Give this case a process-unique producer selector so their
+    # cold-cache setup cannot delete another case's live accessor cache.
+    let producerSelector = "producer_rp8_typecheck_" &
+      $getCurrentProcessId()
+    let accCache = repoRoot / "build" / "nimcache" / "ti2-resource-accessors" /
+      producerSelector
+    removeDir(accCache)
+    defer: removeDir(accCache)
+
+    writeProducer(base / producerSelector)
+
+    # ---- (a) A consumer that references ``container(...)`` type-checks. ----
+    # First materialise the cached accessor via a ``nim c`` cold pass (nim check
+    # cannot run the generator), then prove the typecheck capability sees the
+    # spliced ``container`` wrapper on the exec-free path.
+    let witnessPath = base / "accessor-generation.log"
+    let hadWitnessOverride = existsEnv("REPRO_TI2_ACCESSOR_WITNESS")
+    let oldWitnessOverride = getEnv("REPRO_TI2_ACCESSOR_WITNESS")
+    putEnv("REPRO_TI2_ACCESSOR_WITNESS", witnessPath)
+    defer:
+      if hadWitnessOverride:
+        putEnv("REPRO_TI2_ACCESSOR_WITNESS", oldWitnessOverride)
+      else:
+        delEnv("REPRO_TI2_ACCESSOR_WITNESS")
+    let coldDir = base / "consumer_cold"
+    createDir(coldDir)
+    writeFile(coldDir / "repro.nim",
+      consumerRepro(producerSelector,
+        "  discard container(\"web\", image = \"nginx\", cpus = 2)"))
+    let nimExe = findExe("nim")
+    doAssert nimExe.len > 0, "nim compiler not on PATH"
+    let coldCache = base / "nc_cold"
+    let coldCmd =
+      nimExe & " c --compileOnly --hints:off --warnings:off -o:" &
+      quoteShell(coldCache / "consumer_bin") &
+      " --nimcache:" & quoteShell(coldCache) &
+      " " & quoteShell(coldDir / "repro.nim")
+    let (coldOut, coldCode) =
+      execCmdEx("cd " & quoteShell(repoRoot) & " && " & coldCmd)
+    if coldCode != 0:
+      checkpoint(coldOut)
+    check coldCode == 0
+
+    # The materialized accessor is the public contract and nothing else. Bind
+    # the private-marker oracle to the fixture source so renaming/removing a
+    # marker cannot silently make the generated-C closure check vacuous.
+    let accessorPath = accCache / (producerSelector & ".accessors.nim")
+    check fileExists(accessorPath)
+    let accessorBefore = readFile(accessorPath)
+    check accessorBefore.contains("proc container*")
+    check accessorBefore.contains("\"vm_harness.container\"")
+    check accessorBefore.contains("image: string")
+    check accessorBefore.contains("cpus: int")
+    check not accessorBefore.contains("registerResourceProvider")
+    for marker in producerDriverClosureMarkers:
+      check resourcesModule.contains(marker)
+      check not accessorBefore.contains(marker)
+
+    # Exactly one cold accessor generation occurred. The subsequent ``nim
+    # check`` must consume this same cached accessor without rewriting it or
+    # running the generator again.
+    check fileExists(witnessPath)
+    let witnessBefore = readFile(witnessPath)
+    check witnessBefore.strip == "gen " & producerSelector
+
+    # The RP8 TYPECHECK capability: a ``nim check`` (NO staticExec) resolves the
+    # ``container`` bind through the driver-free interface accessor.
+    let goodDir = base / "consumer_good"
+    createDir(goodDir)
+    writeFile(goodDir / "repro.nim",
+      consumerRepro(producerSelector,
+        "  discard container(\"api\", image = \"redis\", cpus = 4)"))
+    let good = typecheckConsumerAgainstInterface(
+      goodDir / "repro.nim", repoRoot, base / "nc_good")
+    if not good.ok:
+      checkpoint(good.output)
+    check good.ok                        # cross-project symbol resolved
+    check readFile(accessorPath) == accessorBefore
+    check readFile(witnessPath) == witnessBefore
+
+    # ---- (b) NO impl compile: the consumer's generated C closure carries none
+    #          of the producer fixture's uniquely named private driver symbols.
+    #          The cold ``nim c`` above emitted C into ``coldCache``; grep it.
+    #          Do not reject the generic ``registerResourceProvider`` API from
+    #          ``repro_resources``: later runtime graph support legitimately
+    #          includes that public API without importing this producer. ----
+    var sawContainerWrapper = false
+    var driverClosureMatches: seq[string] = @[]
+    for path in walkDirRec(coldCache):
+      if not path.endsWith(".c"): continue
+      let c = readFile(path)
+      if c.contains("container"): sawContainerWrapper = true
+      for marker in producerDriverClosureMarkers:
+        if c.contains(marker):
+          driverClosureMatches.add(path & ": " & marker)
+    check sawContainerWrapper            # the wrapper crossed (interface)
+    if driverClosureMatches.len > 0:
+      checkpoint(driverClosureMatches.join("\n"))
+    check driverClosureMatches.len == 0  # the driver/impl did NOT (extraction)
+
+    # ---- (c) FALSIFIABILITY: a reference to a NON-existent public symbol
+    #          fails the typecheck. ----
+    let badDir = base / "consumer_bad"
+    createDir(badDir)
+    writeFile(badDir / "repro.nim",
+      consumerRepro(producerSelector,
+        "  discard nonexistent_wrapper(\"x\", foo = 1)"))
+    let bad = typecheckConsumerAgainstInterface(
+      badDir / "repro.nim", repoRoot, base / "nc_bad")
+    check not bad.ok                     # unknown symbol does not resolve
+
+  test "t_rp8_goto_definition_resolves_public_rejects_private":
+    # Hermetic go-to-def over ``resolveProducerTypedContract`` directly. Fixtures
+    # under the repo build tree (a private scratch under /home), NOT /tmp.
+    let scratch = repoRoot / "build" / "nimcache" /
+      ("rp8-goto-" & $getCurrentProcessId())
+    removeDir(scratch)
+    createDir(scratch)
+    defer: removeDir(scratch)
+
+    let workspace = absolutePath(scratch / "consumer")
+    createDir(workspace)
+    let producerSelector = "producer_rp8_goto_" & $getCurrentProcessId()
+    let producerDir = absolutePath(scratch / producerSelector)
+    writeProducer(producerDir)
+
+    let resourcesPath = producerDir / "repro" / "resources.nim"
+
+    # ---- Go-to-def on the resource WRAPPER ``container`` → the resourceType
+    #      block's decl location in the producer's resources.nim. ----
+    let hitContainer =
+      gotoDefinitionForProducerSymbol(producerSelector, workspace, "container")
+    check hitContainer.kind == gdskResourceType
+    check hitContainer.typeId == "vm_harness.container"
+    # The returned FILE is the producer's resource module.
+    check sameFile(hitContainer.location.file, resourcesPath)
+    # The returned LINE points at the real ``resourceType`` public declaration.
+    let expectedResLine =
+      lineOfDecl(resourcesModule, "resourceType \"vm_harness.container\"")
+    check expectedResLine > 0
+    check hitContainer.location.line == expectedResLine
+    # Read back the producer source at that line and confirm the content.
+    let resSrcLines = readFile(resourcesPath).splitLines
+    check resSrcLines[hitContainer.location.line - 1].strip
+      .startsWith("resourceType \"vm_harness.container\"")
+
+    # The full typeId also resolves to the same decl.
+    let hitByTypeId = gotoDefinitionForProducerSymbol(
+      producerSelector, workspace, "vm_harness.container")
+    check hitByTypeId.kind == gdskResourceType
+    check hitByTypeId.location.line == expectedResLine
+
+    # ---- Go-to-def on a resource ATTRIBUTE ``cpus`` → the attr's decl line. ----
+    let hitAttr =
+      gotoDefinitionForProducerSymbol(producerSelector, workspace, "cpus")
+    check hitAttr.kind == gdskResourceAttr
+    check hitAttr.typeId == "vm_harness.container"
+    check sameFile(hitAttr.location.file, resourcesPath)
+    let expectedAttrLine = lineOfDecl(resourcesModule, "attr cpus: int")
+    check expectedAttrLine > 0
+    check hitAttr.location.line == expectedAttrLine
+    check resSrcLines[hitAttr.location.line - 1].strip == "attr cpus: int"
+
+    # ---- REJECTION: a PRIVATE driver helper (``rp8PrivateIdentity``) does NOT
+    #      resolve — it never crossed the interface, so there is no public
+    #      location. ----
+    let priv = gotoDefinitionForProducerSymbol(producerSelector, workspace,
+      "rp8PrivateIdentity")
+    check priv.kind == gdskNotFound
+    check priv.location.line == 0
+
+    # An UNKNOWN name likewise does not resolve.
+    let unknown =
+      gotoDefinitionForProducerSymbol(producerSelector, workspace,
+        "no_such_symbol")
+    check unknown.kind == gdskNotFound

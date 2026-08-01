@@ -8,7 +8,7 @@
 ## `resources:` block. The apply runs in a tempdir-isolated state +
 ## store; nothing in `$HOME` is touched.
 
-import std/[os, strutils, tables, tempfiles, unittest]
+import std/[os, osproc, strutils, tables, tempfiles, unittest]
 
 import repro_home_apply
 import repro_home_intent
@@ -30,6 +30,10 @@ proc makeIntent(): ProfileIntent =
   result.activities.add(ActivityIntent(name: "default",
     body: @[ActivityElement(kind: aekPackageRef,
       pkgName: "smoke-noop-pkg")]))
+
+proc makeEmptyIntent(): ProfileIntent =
+  result = ProfileIntent(name: "phaseD-smoke")
+  result.activities.add(ActivityIntent(name: "default"))
 
 # We need a Store inside the tempdir so the apply pipeline can stage
 # generated files via the CAS protocol. Existing apply tests provide
@@ -59,6 +63,76 @@ proc setupApplyEnv(tempRoot: string):
     "smoke-noop-pkg=" & result.profilePath)
 
 suite "M83 Phase D: home apply via preLoadedProfile":
+
+  test "explicit fake HOME owns synthesized fish config and removes exactly":
+    when defined(windows):
+      check true
+    else:
+      let fish = findExe("fish")
+      check fish.len > 0
+      if fish.len > 0:
+        let tempRoot = createTempDir("repro-m83-d-fish-home-", "")
+        defer:
+          try: removeDir(tempRoot) except OSError: discard
+        let f = setupApplyEnv(tempRoot)
+        let fakeConfig = f.homeDir / ".config" / "fish" / "config.fish"
+        createDir(fakeConfig.parentDir())
+        const InitialFakeConfig = "# pre-existing fake-home config\n"
+        writeFile(fakeConfig, InitialFakeConfig)
+
+        # This is observation-only: the regression must never create or edit
+        # the invoking user's real fish configuration.
+        let realConfig = getHomeDir() / ".config" / "fish" / "config.fish"
+        let realExisted = fileExists(realConfig)
+        let realBefore = if realExisted: readFile(realConfig) else: ""
+        let priorShell = getEnv("SHELL")
+        let priorOverride = getEnv("REPRO_HOME_POSIX_PATH_RC")
+        putEnv("SHELL", fish)
+        delEnv("REPRO_HOME_POSIX_PATH_RC")
+        defer:
+          if priorShell.len > 0: putEnv("SHELL", priorShell)
+          else: delEnv("SHELL")
+          if priorOverride.len > 0:
+            putEnv("REPRO_HOME_POSIX_PATH_RC", priorOverride)
+          else:
+            delEnv("REPRO_HOME_POSIX_PATH_RC")
+
+        var opts: ApplyOptions
+        opts.profileDir = f.profileDir
+        opts.profilePath = f.profilePath
+        opts.stateDir = f.stateDir
+        opts.storeRoot = f.storeRoot
+        opts.homeDir = f.homeDir
+        opts.host = "phaseD-host"
+        opts.preLoadedProfile = profileIntentToHomeProfile(
+          makeIntent(), f.profilePath)
+        let applied = runApply(opts)
+        check applied.kind == aokFreshApplied
+        check fileExists(fakeConfig)
+        let managed = readFile(fakeConfig)
+        check InitialFakeConfig in managed
+        check "set -gx PATH " in managed
+        check "export PATH=" notin managed
+
+        let syntax = execCmdEx(quoteShell(fish) & " -n " &
+          quoteShell(fakeConfig), options = {poStdErrToStdOut, poUsePath})
+        if syntax.exitCode != 0: checkpoint(syntax.output)
+        check syntax.exitCode == 0
+        let startup = execCmdEx("env HOME=" & quoteShell(f.homeDir) &
+          " SHELL=" & quoteShell(fish) & " " & quoteShell(fish) &
+          " -i -c true",
+          options = {poStdErrToStdOut, poUsePath})
+        if startup.exitCode != 0: checkpoint(startup.output)
+        check startup.exitCode == 0
+
+        opts.preLoadedProfile = profileIntentToHomeProfile(
+          makeEmptyIntent(), f.profilePath)
+        let removed = runApply(opts)
+        check removed.kind == aokFreshApplied
+        check readFile(fakeConfig) == InitialFakeConfig
+        check fileExists(realConfig) == realExisted
+        if realExisted:
+          check readFile(realConfig) == realBefore
 
   test "apply with preLoadedProfile commits a generation":
     let tempRoot = createTempDir("repro-m83-d-apply-", "")

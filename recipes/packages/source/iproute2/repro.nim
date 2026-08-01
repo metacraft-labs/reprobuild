@@ -102,6 +102,11 @@
 ##                             A future eBPF-edition variant would flip
 ##                             ``--with-libelf`` and add the libelf
 ##                             ``uses:`` entry.
+##
+## The current upstream configure script does not implement those libelf
+## switches. The production build instead passes ``--libbpf_force=off``;
+## undeclared optional libraries stay absent from the provisioned build
+## environment, and the output audit expects only the libc family.
 
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
@@ -164,8 +169,8 @@ package iproute2Source:
     "gcc >=11"
     ## pkg-config is invoked by the hand-rolled ``./configure`` wrapper
     ## to probe for libmnl / libbsd / libcap / SELinux availability;
-    ## even with ``--without-libelf`` pinned the pkg-config probes for
-    ## the always-on dependencies (libmnl) need to succeed.
+    ## undeclared optional libraries remain unavailable in the provisioned
+    ## build environment.
     "pkg-config"
     ## bison + flex are required by iproute2's ``tc`` build for the
     ## traffic-control rule-syntax parser (``tc/emp_ematch.y`` +
@@ -208,13 +213,26 @@ package iproute2Source:
     discard
 
   build:
-    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
     setCurrentOwningPackageOverride("iproute2Source")
     try:
-      let opts = @[
-        "--without-libelf",
+      # iproute2's configure script is hand-written and assumes it runs in
+      # the source tree. Configure there first, then let skipConfigure copy
+      # the prepared tree into the isolated build directory.
+      let makeVars = @[
+        "PREFIX=/usr",
+        "SBINDIR=/usr/sbin",
+        "CBUILD_CFLAGS=$(CPPFLAGS) $(CFLAGS)",
+        "HOSTCC=$(CC) $(LDFLAGS)",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let patches = @[
+        "sed -i 's|\\$CC -I\\$INCLUDE|\\$CC \\$CPPFLAGS \\$CFLAGS -I\\$INCLUDE \\$LDFLAGS|g' src/configure",
+        "(cd src && ./configure --prefix=/usr --libdir=/usr/lib --libbpf_force=off)",
+      ]
+      let pkg = autotools_package(srcDir = "./src",
+                                  configureOptions = makeVars,
+                                  prefixFlagFormat = "",
+                                  skipConfigure = true,
+                                  srcPatches = patches)
       discard pkg.executable("ip")
       discard pkg.executable("tc")
       discard pkg.executable("ss")

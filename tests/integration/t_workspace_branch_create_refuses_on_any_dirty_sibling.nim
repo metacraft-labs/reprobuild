@@ -183,7 +183,7 @@ proc setupFixture(gitBin, slug: string): M14Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -215,17 +215,17 @@ proc seedMetadataBranch(fx: M14Fixture; branch: string) =
 proc invokeBranch(fx: M14Fixture; name: string): CmdResult =
   if name.len == 0:
     runShell(shellCommand(@[
-      fx.reproBin, "branch",
+      fx.reproBin, "branch", "--write-report",
       "--workspace-root=" & fx.workspaceRoot,
     ]))
   else:
     runShell(shellCommand(@[
-      fx.reproBin, "branch", name,
+      fx.reproBin, "branch", "--write-report", name,
       "--workspace-root=" & fx.workspaceRoot,
     ]))
 
 proc readReport(fx: M14Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "branch-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
@@ -246,7 +246,7 @@ suite "M14 — repro branch <name> refuses on any dirty sibling":
       skip()
     else:
       let fx = setupFixture(gitBin, "clean")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -289,7 +289,7 @@ suite "M14 — repro branch <name> refuses on any dirty sibling":
       skip()
     else:
       let fx = setupFixture(gitBin, "dirty")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -317,6 +317,13 @@ suite "M14 — repro branch <name> refuses on any dirty sibling":
       check entryA["outcome"].getStr() == "ready"
       check entryC["outcome"].getStr() == "ready"
 
+      # Human-facing text MUST make the atomic abort unmistakable — a list of
+      # `ready` lines is not "success". The summary names the abort and the
+      # blocking repo so `ready` cannot be misread as "branch created".
+      check "ABORTED" in res.output
+      check "no branch 'feature-y' was created" in res.output
+      check "lib-b=dirty_refused" in res.output
+
       # No repo was actually mutated: the new branch must NOT exist
       # in any repo.
       for name in ["lib-a", "lib-b", "lib-c"]:
@@ -338,7 +345,7 @@ suite "M14 — repro branch <name> refuses on any dirty sibling":
       skip()
     else:
       let fx = setupFixture(gitBin, "collision-diff")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -401,7 +408,7 @@ suite "M14 — repro branch <name> refuses on any dirty sibling":
       skip()
     else:
       let fx = setupFixture(gitBin, "collision-head")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")

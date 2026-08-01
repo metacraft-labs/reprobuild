@@ -1,0 +1,240 @@
+name: Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-release:
+    name: ${{ matrix.os-name }} (${{ matrix.arch }}) Release Build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os-name: linux
+            runner: eph-linux-x64  # CIP-5: nix release build → eph-linux-x64
+            env-flavor: nix
+            platform: linux
+            arch: x86_64
+            archive_ext: tar.gz
+          - os-name: macos
+            runner: eph-macos-arm64  # CIP-5: nix release build → eph-macos-arm64
+            env-flavor: nix
+            platform: darwin
+            arch: aarch64
+            archive_ext: tar.gz
+          # Single label, not an array. `runs-on: [a, b]` is an AND over labels
+          # -- it demands ONE runner carrying BOTH -- not a choice between two
+          # classes. `eph-win-x64` and `eph-win-arm64` are separate pools on
+          # separate hosts (a libvirt Windows 11 VM on high-mem-server vs a
+          # QEMU/HVF Windows-ARM VM on m3; see infra's
+          # services/ephemeral-runner-host/darwin.nix and
+          # services/garm-incus-runners.nix), so no runner ever matched and this
+          # job was never scheduled: every release since v0.1.0 ended with
+          # "exceeded the maximum execution time while awaiting a runner for
+          # 24h0m0s". The ephemeral-fleet runbook documents the single-value
+          # form as the way these classes compose in a matrix.
+          #
+          # No ARM64 Windows row: conda-forge publishes clingo for win-64 only
+          # (windows/ensure-clingo.ps1 rejects arm64 rather than install an x64
+          # DLL a native ARM64 repro.exe cannot load), and the staged runtime
+          # DLLs are x64-specific by name (libcrypto-3-x64.dll). Adding the row
+          # before those exist would just add a permanently-red release leg.
+          - os-name: windows
+            runner: eph-win-x64  # CIP-5: windows-diy release build → eph-win-x64
+            env-flavor: windows-diy
+            platform: windows
+            arch: x86_64
+            archive_ext: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Mint a GitHub App installation token via the CI Token Provider
+      # app so the setup-dev-env / clone-siblings actions can clone private
+      # metacraft-labs repos (codetracer, runquota, etc.).
+      - name: Mint installation token for cross-repo sibling clones
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      # Setup dev environment using the shared composite workflow.
+      # Automatically clones all sibling repos defined in .github/sibling-repos.
+      - name: Setup dev environment
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+        with:
+          env-flavor: ${{ matrix.env-flavor }}
+          gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+          flake-override-inputs: |
+            runquota-src=../runquota
+            io-mon-src=../io-mon
+            nim-shm-queue-src=../nim-shm-queue
+            stackable-hooks-src=../nim-stackable-hooks
+            reprobuild-test-adapters-src=../reprobuild-test-adapters
+
+
+      # Clone status-im/nim-bearssl manually on Windows (since it belongs to a
+      # foreign organization and is not resolvable by metacraft-labs clone-siblings).
+      - name: Clone nim-bearssl (Windows)
+        if: matrix.os-name == 'windows'
+        shell: pwsh
+        run: |
+          if (Test-Path -Path ../nim-bearssl) { Remove-Item -Recurse -Force ../nim-bearssl }
+          git clone --depth 1 --recurse-submodules https://github.com/status-im/nim-bearssl.git ../nim-bearssl
+
+      # Enable the repro binary-cache publish for THIS per-platform build so its
+      # `repro build` outputs land in the fleet cache (repro-cache.metacraft-labs.com),
+      # giving Windows/macOS/ARM machines cache hits when provisioning from source.
+      # The composite action writes the signing key/cert to $RUNNER_TEMP and exports
+      # the REPRO_BINARY_CACHE_* env vars picked up by the build steps below; it is a
+      # no-op when the secrets are empty (fork PRs) and publish failures are non-fatal
+      # (see .github/actions/setup-repro-publish). It selects bash vs pwsh by
+      # runner.os, so it covers every matrix leg — including any currently-missing
+      # os x arch runner added later (linux-arm64, macos-x64, windows-arm64), which
+      # only need a matrix row + runner, not a change here.
+      - name: Configure repro binary-cache publish
+        uses: ./.github/actions/setup-repro-publish
+        with:
+          publish-key: ${{ secrets.REPRO_PUBLISH_KEY }}
+          publish-cert: ${{ secrets.REPRO_PUBLISH_CERT }}
+
+      # Build all release applications and monitor shims using repro.nim/repro.lock.
+      # The build inherits REPRO_BINARY_CACHE_* from $GITHUB_ENV (set by the step
+      # above) so reprobuild's engine publisher signs and POSTs the outputs.
+      - name: Bootstrap and Build (POSIX)
+        if: matrix.os-name != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dev-exec just bootstrap
+          dev-exec ./build/bin/repro build --tool-provisioning=path --daemon=off --no-runquota .#reprobuild.build_apps
+
+      - name: Bootstrap and Build (Windows)
+        if: matrix.os-name == 'windows'
+        shell: pwsh
+        env:
+          # Promote scripts/build_apps.sh's runtime-DLL staging warnings to hard
+          # errors. A dev build missing libzstd/sqlite3 is merely degraded; a
+          # RELEASE missing them is broken for every user who unpacks it, and
+          # the failure surfaces far from the cause. clingo is fatal regardless
+          # (module-init dlopen), so it does not depend on this flag.
+          REPRO_REQUIRE_WINDOWS_RUNTIME_DLLS: "1"
+        run: |
+          # env.ps1 from setup-dev-env is already sourced in GITHUB_ENV/PATH.
+          # That is what provisions the pinned conda-forge clingo via
+          # windows/ensure-clingo.ps1 and exports REPRO_WINDOWS_CLINGO_DIR,
+          # which build_apps.sh stages into build/bin. Before that provisioner
+          # existed, clingo.dll was picked up only if the runner happened to
+          # carry a hand-provisioned C:\clingo on its machine PATH.
+          Push-Location ../runquota
+          just build
+          Pop-Location
+          $runquotaRoot = (Resolve-Path ../runquota).Path
+          $runquotaBin = Join-Path $runquotaRoot "build\bin"
+          Add-Content -Path $env:GITHUB_PATH -Value $runquotaBin
+          $env:Path = $runquotaBin + [IO.Path]::PathSeparator + $env:Path
+          just bootstrap
+
+          # Find and stage required dynamic libraries (OpenSSL & Zstd) so repro.exe can run and be packaged
+          $opensslDll = Get-ChildItem -Path "C:\Program Files", "C:\Program Files (x86)" -Filter "libcrypto-3-x64.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -ne $opensslDll) {
+            $dllDir = Split-Path -Parent $opensslDll.FullName
+            Copy-Item -Path (Join-Path $dllDir "libcrypto-3-x64.dll") -Destination "build\bin\" -Force
+            Copy-Item -Path (Join-Path $dllDir "libssl-3-x64.dll") -Destination "build\bin\" -Force
+            Write-Host "Staged OpenSSL DLLs from $dllDir"
+          } else {
+            # Hard error, not a warning: the archive is published from whatever
+            # build\bin holds at packaging time, so a warning here becomes a
+            # broken download rather than a failed build.
+            throw "libcrypto-3-x64.dll not found on system; cannot produce a self-contained release archive"
+          }
+
+          $zstdSearchPaths = @()
+          if ($env:WINDOWS_DIY_INSTALL_ROOT) {
+            $zstdSearchPaths += Join-Path $env:WINDOWS_DIY_INSTALL_ROOT "msys2"
+          }
+          $zstdSearchPaths += "C:\Program Files", "C:\Program Files (x86)"
+          $zstdDll = Get-ChildItem -Path $zstdSearchPaths -Filter "libzstd.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -ne $zstdDll) {
+            $dllDir = Split-Path -Parent $zstdDll.FullName
+            Copy-Item -Path (Join-Path $dllDir "libzstd.dll") -Destination "build\bin\" -Force
+            Write-Host "Staged libzstd.dll from $dllDir"
+          } else {
+            throw "libzstd.dll not found on system; cannot produce a self-contained release archive"
+          }
+
+          .\build\bin\repro.exe build --tool-provisioning=path --daemon=off --no-runquota .#reprobuild.build_apps
+
+
+      # Package the artifacts preserving the bin/ and lib/ structures
+      - name: Package release assets (POSIX)
+        if: matrix.os-name != 'windows'
+        shell: bash
+        run: |
+          dev-exec bash -c '
+            set -euo pipefail
+            version=$(grep "^version\s*=" reprobuild.nimble | sed -E "s/version\s*=\s*\"([^\"]+)\"/\1/")
+            pkg_name="reprobuild-${version}-${{ matrix.platform }}-${{ matrix.arch }}"
+
+            mkdir -p "${pkg_name}/bin" "${pkg_name}/lib"
+            cp -a build/bin/* "${pkg_name}/bin/"
+            cp -a build/lib/* "${pkg_name}/lib/"
+
+            tar -czf "${pkg_name}.tar.gz" "${pkg_name}"
+            echo "ASSET_PATH=${pkg_name}.tar.gz" >> "$GITHUB_ENV"
+          '
+
+      - name: Package release assets (Windows)
+        if: matrix.os-name == 'windows'
+        shell: pwsh
+        run: |
+          $version = (Get-Content reprobuild.nimble | Select-String -Pattern 'version\s*=\s*"([^"]+)"').Matches.Groups[1].Value
+          $pkg_name = "reprobuild-${version}-${{ matrix.platform }}-${{ matrix.arch }}"
+
+          New-Item -ItemType Directory -Force -Path "${pkg_name}\bin"
+          New-Item -ItemType Directory -Force -Path "${pkg_name}\lib"
+          Copy-Item -Path "build\bin\*" -Destination "${pkg_name}\bin\" -Recurse
+          Copy-Item -Path "build\lib\*" -Destination "${pkg_name}\lib\" -Recurse
+
+          Compress-Archive -Path "${pkg_name}" -DestinationPath "${pkg_name}.zip" -Force
+          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_PATH=${pkg_name}.zip"
+
+      # Smoke-tests the PACKAGED archive, not the build tree: on Windows it
+      # asserts the runtime-DLL manifest and runs the binary with PATH scrubbed
+      # to the system directories, so the build host cannot satisfy a dlopen
+      # the archive omits.
+      #
+      # The Linux leg's multi-distro glibc sweep needs Docker, which the
+      # `eph-linux-x64` class does not have -- it is skipped loudly rather than
+      # failing the job (that `docker: command not found` was aborting every
+      # release before the tarball could be uploaded). To restore the sweep,
+      # move the linux matrix row to `eph-linux-x64-nested` (nested Docker) and
+      # set REPRO_VERIFY_REQUIRE_DOCKER=1 here so a future regression is loud.
+      - name: Verify release assets
+        shell: bash
+        run: |
+          bash scripts/verify_release.sh "${{ env.ASSET_PATH }}"
+
+      # Upload to GitHub Releases when a version tag is pushed
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: ${{ env.ASSET_PATH }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

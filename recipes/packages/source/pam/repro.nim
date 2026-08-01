@@ -183,7 +183,7 @@ package pamSource:
     ## hash passwords. Without it the link step short-fails:
     ##   undefined reference to `crypt'
     ## at ``modules/pam_pwhistory/opasswd.c:139``.
-    "libcrypt"
+    "libxcrypt"
 
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.

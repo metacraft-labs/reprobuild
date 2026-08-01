@@ -28,7 +28,7 @@ type
 # ``BuildActionDef`` (which is what the M1 wiring suffix attaches the
 # ``targetNames`` to).
 
-package tEngineHookTool:
+package `t_engine_hook_tool`:
   uses:
     "nim >=2.2 <3.0"
   executable cmakeBuild:
@@ -47,11 +47,11 @@ package tEngineHookTool:
 
 # A consumer package that calls the typed-tool wrapper from a
 # ``build:`` body. The wrapper proc — defined inside
-# ``tEngineHookTool`` — returns a ``BuildActionDef`` (because
+# ``t_engine_hook_tool`` — returns a ``BuildActionDef`` (because
 # ``recordActions = true`` was emitted there) and the M1 wiring
 # suffix populates ``targetNames`` and the export rows.
 
-package tEngineHookConsumer:
+package `t_engine_hook_consumer`:
   uses:
     "nim >=2.2 <3.0"
   build:

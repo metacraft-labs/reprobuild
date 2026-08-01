@@ -214,9 +214,13 @@ package fontconfigSource:
       let opts = @[
         "--disable-static",
         "--disable-docs",
+        "--disable-nls",
         "--enable-libxml2",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let pkg = autotools_package(
+        srcDir = "./src",
+        configureOptions = opts,
+        allowSourceWrites = true)
       discard pkg.library("libFontconfig")
     finally:
       clearCurrentOwningPackageOverride()

@@ -15,7 +15,7 @@
 ##
 ##   A. Config resolves: a config with `[manifest] url/branch` and
 ##      `[projects] default = ["myproject"]`, NO `--manifest-url`, NO positional
-##      project → init bootstraps `.repo/manifests` from the config's URL and
+##      project → init bootstraps `.repro/manifests` from the config's URL and
 ##      clones the participating repo. (Proves the config feeds the manifest
 ##      URL/branch AND the default project selection.)
 ##
@@ -185,7 +185,7 @@ suite "RA-8 — host bootstrap config; no hardcoded org defaults":
 
         let workspaceRoot = scratch / "ws-a"
         createDir(workspaceRoot)
-        check not dirExists(workspaceRoot / ".repo" / "manifests")
+        check not dirExists(workspaceRoot / ".repro" / "manifests")
 
         # No --manifest-url, no positional project name: both come from config.
         let init = runShell(shellCommand(@[
@@ -202,7 +202,7 @@ suite "RA-8 — host bootstrap config; no hardcoded org defaults":
         # Bootstrapped from the config's manifest URL.
         check dirExists(manifestCachePath(manifestCacheRoot,
           fileUrl(manifestBare)))
-        check fileExists(workspaceRoot / ".repo" / "manifests" / "projects" /
+        check fileExists(workspaceRoot / ".repro" / "manifests" / "projects" /
           "myproject.toml")
         # The default project's participating repo was cloned.
         check dirExists(workspaceRoot / "lib-a" / ".git")
@@ -210,7 +210,7 @@ suite "RA-8 — host bootstrap config; no hardcoded org defaults":
         # in and materialised into the parallel private cache + checkout.
         check dirExists(manifestCachePath(
           manifestCacheRoot & "-private", fileUrl(privateBare)))
-        check dirExists(workspaceRoot / ".repo" / "manifests-private")
+        check dirExists(workspaceRoot / ".repro" / "manifests-private")
 
       # ---- Case B: explicit --manifest-url beats the config ----------------
       block caseB:
@@ -238,7 +238,7 @@ suite "RA-8 — host bootstrap config; no hardcoded org defaults":
         # Resolution used the FLAG's manifest (which carries myproject.toml).
         # If the config had won, the wrong bare lacks myproject.toml and
         # resolution would have failed.
-        check fileExists(workspaceRoot / ".repo" / "manifests" / "projects" /
+        check fileExists(workspaceRoot / ".repro" / "manifests" / "projects" /
           "myproject.toml")
         check dirExists(workspaceRoot / "lib-a" / ".git")
 
@@ -247,15 +247,21 @@ suite "RA-8 — host bootstrap config; no hardcoded org defaults":
         let workspaceRoot = scratch / "ws-c"
         createDir(workspaceRoot)  # plain dir, NOT a git repo: no origin.
 
-        # No REPRO_WORKSPACE_CONFIG, no --manifest-url, no positional project.
+        # Point REPRO_WORKSPACE_CONFIG at a missing file to suppress config
+        # ancestor discovery; an empty value means "discover normally".
+        # Constrain Git discovery too: when TMPDIR lives under a developer
+        # workspace, `git -C <scratch>` would otherwise walk up to that host
+        # repo's origin and mask the no-manifest case this block exercises.
         let init = runShell(shellCommand(@[
           reproBin, "workspace", "init",
           "--workspace-root=" & workspaceRoot,
         ], env = @[
+          (name: "GIT_CEILING_DIRECTORIES", value: scratch),
           (name: "REPRO_MANIFEST_CACHE", value: manifestCacheRoot),
-          (name: "REPRO_WORKSPACE_CONFIG", value: ""),
+          (name: "REPRO_WORKSPACE_CONFIG",
+            value: scratch / "missing-bootstrap-config.toml"),
         ]))
         check init.code != 0
         check "no manifest configured" in init.output
         # And NO manifest checkout was materialised from a baked-in default.
-        check not dirExists(workspaceRoot / ".repo" / "manifests")
+        check not dirExists(workspaceRoot / ".repro" / "manifests")

@@ -58,6 +58,23 @@ proc fetchManifestRaw(pool: HttpPool;
       "GET " & url & " failed: HTTP " & $statusCode)
   return body
 
+proc isTrustedSigner(endpoint: SubstituteEndpoint;
+                     m: BinaryCacheManifest): bool =
+  ## Reprobuild-Binary-Cache-Fleet R1 — per-cache trust anchor check.
+  ## The cryptographic signature has ALREADY been verified by
+  ## ``decodeAndVerify``; this asserts the signing producer key is one
+  ## the config trusts FOR THIS cache. Default-untrusted: when
+  ## ``enforceTrust`` is set, an empty trusted-signer list trusts
+  ## NOBODY (a MISS). Pre-R1 callers leave ``enforceTrust = false`` so
+  ## an empty list keeps the legacy "trust the verified producer"
+  ## behaviour.
+  if endpoint.trustedSigners.len == 0:
+    return not endpoint.enforceTrust
+  for ts in endpoint.trustedSigners:
+    if ts == m.producerPubKey:
+      return true
+  return false
+
 proc fetchAndVerifyManifest*(ctx: ClientContext;
                              pool: HttpPool;
                              endpoint: SubstituteEndpoint;
@@ -72,6 +89,16 @@ proc fetchAndVerifyManifest*(ctx: ClientContext;
       raise newException(ClosureWalkError,
         "manifest " & entryKeyHex & " from " & endpoint.baseUrl &
         ": " & e.msg)
+  # Default-untrusted trust-anchor gate: reject a manifest whose
+  # (signature-verified) producer key is not trusted for this cache.
+  # This fires BEFORE the closure is walked so an untrusted root never
+  # even enumerates its dep graph, and the endpoint falls through to
+  # the next configured cache.
+  if not isTrustedSigner(endpoint, m):
+    raise newException(ClosureWalkError,
+      "manifest " & entryKeyHex & " from " & endpoint.baseUrl &
+      ": producer key not trusted for this cache " &
+      "(default-untrusted): rejected")
   ctx.manifestCache[entryKeyHex] = m
   return m
 

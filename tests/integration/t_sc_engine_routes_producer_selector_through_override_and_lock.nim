@@ -42,7 +42,7 @@
 ## Hermetic: the consumer workspace + the sibling checkout live in a fresh
 ## tempdir; nothing touches $HOME and no network / git is required.
 
-import std/[options, os, unittest]
+import std/[json, options, os, unittest]
 
 import repro_cli_support
 import repro_lock
@@ -88,7 +88,38 @@ proc writeOverride(workspaceRoot, siblingCheckout: string) =
     created_at: "2026-07-01T00:00:00Z"))
   writeDevelopOverridesFile(workspaceRoot, file)
 
+proc writeLegacyOverride(workspaceRoot, siblingCheckout: string) =
+  let metadataDir = workspaceRoot / ".git" / "reprobuild"
+  createDir(metadataDir)
+  writeFile(metadataDir / "develop-overrides.json", pretty(%*{
+    "schemaId": "reprobuild.develop-overrides.v1",
+    "projectRoot": workspaceRoot,
+    "overrides": [{
+      "node": producerName,
+      "path": siblingCheckout
+    }]
+  }) & "\n")
+
 suite "SC-1: engine routes producer selector through override + lock":
+
+  test "legacy checkout override declares a producer edge":
+    let scratch = getTempDir() / "sc1-legacy-" & $getCurrentProcessId()
+    removeDir(scratch)
+    createDir(scratch)
+    defer: removeDir(scratch)
+
+    let workspace = absolutePath(scratch / "consumer")
+    let siblingCheckout = absolutePath(scratch / "prod")
+    createDir(workspace)
+    createDir(siblingCheckout)
+    writeFile(siblingCheckout / "repro.nim", "package prod:\n  discard\n")
+    writeLegacyOverride(workspace, siblingCheckout)
+
+    let binding = resolveProducerBinding(producerName, workspace)
+    check binding.kind == pbkDevelopOverride
+    check binding.localPathAbsolute == normalizedPath(siblingCheckout)
+    check binding.contentIdentity.len > 0
+    check binding.overrideBinding.kind == rpbkOverride
 
   test "t_sc_engine_routes_producer_selector_through_override_and_lock":
     let scratch = getTempDir() / "sc1-" & $getCurrentProcessId()
@@ -142,11 +173,26 @@ suite "SC-1: engine routes producer selector through override + lock":
     check hostBinding.kind == pbkNotProducer
     check hostBinding.selector == "gcc"
 
-    # A workspace that pins NO producer at all resolves every ref to
-    # ``pbkNotProducer`` (the additive / byte-identical guarantee): rewrite the
-    # lock with no deps and re-check the producer selector itself.
+    # With neither an override nor a lock pin, a selector whose checkout is
+    # present as an on-disk workspace sibling (``../prod/repro.nim`` — created
+    # above at ``siblingCheckout``) resolves as a develop-mode ON-DISK-SIBLING
+    # producer (``pbkOnDiskSibling``), NOT ``pbkNotProducer``: the same on-disk
+    # sibling ``discoverProducerSourceRoot`` already trusts for the SC-8
+    # compile-time typed-contract discovery is now honored at the build-time
+    # resolution seam, so a develop-mode consumer with sibling checkouts but no
+    # lock/override still materializes its producers (rather than falling through
+    # to PATH tool resolution and failing "not found in PATH").
     writeLock(workspace, withProducerDep = false)
-    let noProducer = resolveProducerBinding(producerName, workspace)
+    let siblingProducer = resolveProducerBinding(producerName, workspace)
+    check siblingProducer.kind == pbkOnDiskSibling
+    check siblingProducer.selector == producerName
+    check parentDir(siblingProducer.siblingProjectFile) ==
+      normalizedPath(siblingCheckout)
+
+    # A ref with NEITHER a lock/override NOR an on-disk sibling still resolves to
+    # ``pbkNotProducer`` (the additive / byte-identical guarantee for genuine
+    # host tools): ``gcc`` has no ``../gcc`` sibling in the scratch workspace.
+    let noProducer = resolveProducerBinding("gcc", workspace)
     check noProducer.kind == pbkNotProducer
 
     # ---- (4) the seam is wired into the engine-facing resolver closure, not

@@ -25,6 +25,7 @@ proc providerText(modeValue: string): string =
   "import std/strutils\n" &
     "import repro_project_dsl\n\n" &
     "package fixture:\n" &
+    "  defaultToolProvisioning \"path\"\n" &
     "  uses:\n" &
     "    \"nim >=2.2 <3.0\"\n" &
     "  devEnv:\n" &
@@ -89,6 +90,8 @@ proc prepareCase(prefix: string): M6Case =
 proc envFor(c: M6Case): StringTableRef =
   result = newStringTable(modeCaseSensitive)
   for key, value in envPairs():
+    if key.startsWith("__REPRO_"):
+      continue
     result[key] = value
   result["HOME"] = c.homeDir
   result["USERPROFILE"] = c.homeDir
@@ -97,9 +100,20 @@ proc envFor(c: M6Case): StringTableRef =
   result["XDG_CACHE_HOME"] = c.tempRoot / "xdg-cache"
   result["XDG_DATA_HOME"] = c.tempRoot / "xdg-data"
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
+  result["REPROBUILD_ACTION_CACHE_ROOT"] = c.tempRoot / "action-cache"
+  result["REPRO_DEV_ENV_AUTO_ALLOW"] = "1"
+  result["REPRO_DAEMON"] = "off"
+  result["REPRO_DAEMON_ENDPOINT"] =
+    daemonSocketEndpoint("repro-m6-native-shell-hooks-" &
+      $getCurrentProcessId() & "-" & c.tempRoot.extractFilename)
+  result["REPRO_DAEMON_STATE_DIR"] = c.tempRoot / "daemon-state"
   result["REPROBUILD_REPRO"] = c.reproBin
   result["REPRO_MONITOR_SHIM_LIB"] = c.shim
   result["PATH"] = parentDir(c.reproBin) & $PathSep & getEnv("PATH")
+  createDir(result["XDG_CACHE_HOME"])
+  createDir(result["XDG_DATA_HOME"])
+  createDir(result["REPROBUILD_ACTION_CACHE_ROOT"])
+  createDir(result["REPRO_DAEMON_STATE_DIR"])
 
 proc runProgram(program: string; args: openArray[string]; cwd: string;
                 env: StringTableRef = nil): tuple[exitCode: int; output: string] =
@@ -158,7 +172,10 @@ when isNixSupported:
 proc requireShellValue(output, prefix, expected: string) =
   for line in output.splitLines():
     if line.startsWith(prefix):
-      check line == expected
+      if line != expected:
+        raise newException(OSError,
+          "unexpected shell marker " & prefix & "\nexpected: " & expected &
+            "\nactual: " & line & "\noutput:\n" & output)
       return
   raise newException(OSError,
     "missing shell marker " & prefix & " in output:\n" & output)
@@ -224,8 +241,9 @@ proc requireBashHook(c: M6Case) =
   env["REPRO_NATIVE_SHELL_STATS"] = statsPath
   env["REPROBUILD_REPRO"] = reproPathWithSpaces(c)
   let res = runProgram(findExe("bash"), @[
-    "--rcfile", c.homeDir / ".bashrc", "-i", "-c",
-    posixProbeScript(c.projectA, c.projectB)
+    "--noprofile", "--norc", "-c",
+    "source " & q(c.homeDir / ".bashrc") & "\n" &
+      posixProbeScript(c.projectA, c.projectB)
   ], c.tempRoot, env)
   check res.exitCode == 0
   requireShellValue(res.output, "A:",
@@ -246,8 +264,9 @@ proc requireZshHook(c: M6Case) =
   let statsPath = c.tempRoot / "zsh-native-stats.json"
   env["REPRO_NATIVE_SHELL_STATS"] = statsPath
   env["REPROBUILD_REPRO"] = reproPathWithSpaces(c)
-  let res = runProgram(zsh, @["-i", "-c", posixProbeScript(c.projectA,
-    c.projectB)], c.tempRoot, env)
+  let res = runProgram(zsh, @["-f", "-c",
+    "source " & q(c.homeDir / ".zshrc") & "\n" &
+      posixProbeScript(c.projectA, c.projectB)], c.tempRoot, env)
   check res.exitCode == 0
   requireShellValue(res.output, "A:",
     "A:alpha|one|" & c.projectA & "|tool:alpha:one")
@@ -262,8 +281,9 @@ proc requireFishHook(c: M6Case; fish: string) =
   let env = c.envFor()
   let statsPath = c.tempRoot / "fish-native-stats.json"
   env["REPRO_NATIVE_SHELL_STATS"] = statsPath
-  let res = runProgram(fish, @["-i", "-c", fishProbeScript(c.projectA,
-    c.projectB)], c.tempRoot, env)
+  let res = runProgram(fish, @["--no-config", "-c",
+    "source " & q(c.xdgConfig / "fish" / "config.fish") & "\n" &
+      fishProbeScript(c.projectA, c.projectB)], c.tempRoot, env)
   check res.exitCode == 0
   requireShellValue(res.output, "A:",
     "A:alpha|one|" & c.projectA & "|tool:alpha:one")

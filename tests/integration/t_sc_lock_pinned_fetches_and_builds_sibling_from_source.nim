@@ -342,7 +342,7 @@ suite "SC-6: lock-pinned fetches and builds sibling from source":
       createDir(cacheRoot)
       let buildCmd = q(reproAbs) & " build " & q(consumerRoot / "repro.nim") &
         " --tool-provisioning=path --daemon=off --log=quiet" &
-        " --progress=quiet --report=none" &
+        " --progress=quiet --measure=none" &
         " --action-cache-root=" & q(cacheRoot)
 
       # ---- (1) Build the consumer. The SC-6 pre-pass must FETCH both producers
@@ -432,7 +432,7 @@ suite "SC-6: lock-pinned fetches and builds sibling from source":
         let tamperCmd = q(reproAbs) & " build " &
           q(tamperRoot / "repro.nim") &
           " --tool-provisioning=path --daemon=off --log=quiet" &
-          " --progress=quiet --report=none" &
+          " --progress=quiet --measure=none" &
           " --action-cache-root=" & q(tamperCache)
         checkpoint("running (tamper): " & tamperCmd)
         let (tcode, toutput) = run(tamperCmd, repoRoot)
@@ -469,7 +469,7 @@ suite "SC-6: lock-pinned fetches and builds sibling from source":
         let missCmd = q(reproAbs) & " build " &
           q(missRoot / "repro.nim") &
           " --tool-provisioning=path --daemon=off --log=quiet" &
-          " --progress=quiet --report=none" &
+          " --progress=quiet --measure=none" &
           " --action-cache-root=" & q(missCache)
         checkpoint("running (missing exeprod LockedDep): " & missCmd)
         let (mcode, moutput) = run(missCmd, repoRoot)

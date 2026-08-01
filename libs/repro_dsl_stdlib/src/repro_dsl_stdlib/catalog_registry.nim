@@ -110,6 +110,9 @@ import ./packages/lessmsi
 # flattens the inner ``mingw64/`` subtree to the prefix root. Dependency
 # resolution stays the operator's responsibility — list every required
 # MSYS2 package in home.nim (e.g. flexdll, gmp).
+import ./packages/autoconf
+import ./packages/automake
+import ./packages/libtool
 import ./packages/ocaml
 # M7 (Realize-Closure-And-Catalog-Expansion spec) — GitHub Releases
 # harvester source. ``alire`` (Ada toolchain manager) is the first
@@ -148,6 +151,7 @@ import ./packages/foundry
 import ./packages/rustc
 import ./packages/rustfmt
 import ./packages/solc
+import ./packages/create_dmg
 
 export packages_schema
 
@@ -207,6 +211,10 @@ const RegisteredTools* = [
   "lessmsi",
   # M6 (Realize-Closure-And-Catalog-Expansion spec) — first MSYS2-
   # harvested catalog tool.
+  "autoconf",
+  "automake",
+  "libtool",
+  "libtoolize",
   "ocaml",
   # M7 (Realize-Closure-And-Catalog-Expansion spec) — first
   # GitHub-Releases-harvested catalog tool. Ada toolchain manager.
@@ -231,6 +239,7 @@ const RegisteredTools* = [
   "rustc",
   "rustfmt",
   "solc",
+  "create-dmg",
 ]
 
 proc getCatalog*(toolName: string):
@@ -286,6 +295,10 @@ proc getCatalog*(toolName: string):
   of "innounp":    selectIfNonEmpty(innounpCatalog)
   of "lessmsi":    selectIfNonEmpty(lessmsiCatalog)
   # M6 (Realize-Closure-And-Catalog-Expansion spec) — MSYS2-harvested.
+  of "autoconf":   selectIfNonEmpty(autoconfCatalog)
+  of "automake":   selectIfNonEmpty(automakeCatalog)
+  of "libtool":    selectIfNonEmpty(libtoolCatalog)
+  of "libtoolize": selectIfNonEmpty(libtoolizeCatalog)
   of "ocaml":      selectIfNonEmpty(ocamlCatalog)
   # M7 (Realize-Closure-And-Catalog-Expansion spec) — GitHub-Releases-harvested.
   of "alire":      selectIfNonEmpty(alireCatalog)
@@ -304,6 +317,7 @@ proc getCatalog*(toolName: string):
   of "rustc":       selectIfNonEmpty(rustcCatalog)
   of "rustfmt":     selectIfNonEmpty(rustfmtCatalog)
   of "solc":        selectIfNonEmpty(solcCatalog)
+  of "create-dmg":  selectIfNonEmpty(create_dmgCatalog)
   else:
     none(seq[VersionedProvisioning])
 

@@ -122,3 +122,37 @@ suite "DSL-port M9.R.14c.1 — autotools_package parallel-make wiring":
       check pkg.compileEdge.id != pkg.installEdge.id
     finally:
       clearCurrentOwningPackageOverride()
+
+  test "recipe environment overrides reach every autotools edge":
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("autotoolsEnvPkg")
+    try:
+      let expected = ("NIX_HARDENING_ENABLE", "bindnow relro")
+      let pkg = autotools_package(
+        srcDir = "./src",
+        extraEnv = @[expected])
+      check expected in pkg.buildEdge.env
+      check expected in pkg.compileEdge.env
+      check expected in pkg.installMakeEdge.env
+    finally:
+      clearCurrentOwningPackageOverride()
+
+  test "configure resets only out-of-tree build outputs":
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("autotoolsCleanBuildPkg")
+    try:
+      let outOfTree = autotools_package(srcDir = "./src")
+      var outOfTreeArgv = ""
+      for arg in outOfTree.buildEdge.call.arguments:
+        if arg.name == "argv":
+          outOfTreeArgv = arg.encodedValue
+      check outOfTreeArgv.contains("rm -rf --")
+
+      let inTree = autotools_package(srcDir = "./src", buildDir = "src")
+      var inTreeArgv = ""
+      for arg in inTree.buildEdge.call.arguments:
+        if arg.name == "argv":
+          inTreeArgv = arg.encodedValue
+      check not inTreeArgv.contains("rm -rf --")
+    finally:
+      clearCurrentOwningPackageOverride()

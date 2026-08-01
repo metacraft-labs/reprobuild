@@ -11,7 +11,7 @@
 ##      workspace uses composer mode (``[[manifest]]`` ``url``) so the
 ##      manifest repo itself is a refreshable layer.
 ##   2. The layer is pre-cloned into the workspace's
-##      ``.repo/manifests-0-<sanitized>`` directory at the FIRST manifest
+##      ``.repro/manifests-0-<sanitized>`` directory at the FIRST manifest
 ##      commit.
 ##   3. The bare manifest-host is then advanced by a SECOND commit. So
 ##      when ``pull`` runs, its manifest-refresh step fast-forwards the
@@ -110,7 +110,7 @@ proc seedBareWithFiles(gitBin, scratch, barePath: string;
     q(barePath))
 
 proc writeWorkspaceTomlWithLayer(workspaceRoot, layerUrl: string) =
-  let dotRepo = workspaceRoot / ".repo"
+  let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
   let body =
     "schema = \"reprobuild.workspace.local.v1\"\n\n" &
@@ -149,26 +149,27 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
       createDir(workspaceRoot)
       writeWorkspaceTomlWithLayer(workspaceRoot, layerUrl)
       # The composer/refresh naming for layer 0 is
-      # ``manifests-0-<sanitized-url>``; recover it from a probe by asking
-      # git where the in-tree checkout would live. We mirror the sanitizer
-      # by cloning into a deterministic directory and pointing the
-      # workspace.toml at it — but the production code derives the dir from
-      # the URL. Use the same convention: clone into the dir refresh
-      # reports. Easiest hermetic route: clone into every plausible name is
-      # fragile, so instead drive the FIRST pull to materialise the layer,
-      # then advance, then the SECOND pull does the advance+fail.
+      # ``manifests-0-<sanitized-url>`` under the tool-owned ``.repro``
+      # directory. Drive the FIRST pull to materialise the layer, then read
+      # the reported layer path instead of duplicating the sanitizer here.
       #
       # First pull: materialises the layer at commit#1 (composer clones it),
       # and fails on the unreachable lib-x clone.
       let firstPull = runShell(shellCommand(@[
-        reproBin, "workspace", "pull",
+        reproBin, "workspace", "pull", "--write-report",
         "--workspace-root=" & workspaceRoot,
       ]))
-      # The layer now exists in .repo/manifests-0-*. Locate it.
+      # The layer now exists in .repro/manifests-0-*; locate it from the
+      # structured report emitted by the command under test.
       var layerDir = ""
-      for kind, path in walkDir(workspaceRoot / ".repo"):
-        if kind == pcDir and path.lastPathPart.startsWith("manifests-0-"):
-          layerDir = path
+      let firstReportPath = workspaceRoot / ".repro" / "build" / "reports" /
+        "pull-report.json"
+      check fileExists(firstReportPath)
+      if fileExists(firstReportPath):
+        let firstReport = parseFile(firstReportPath)
+        for layer in firstReport["manifestLayers"]:
+          if layer["index"].getInt() == 0:
+            layerDir = layer["layerPath"].getStr()
       check layerDir.len > 0
       let commit1 = headSha(gitBin, layerDir)
 
@@ -194,7 +195,7 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
       #    commit#2, then the lib-x clone fails. The manifest MUST stay at
       #    commit#2 (no rollback).
       let secondPull = runShell(shellCommand(@[
-        reproBin, "workspace", "pull",
+        reproBin, "workspace", "pull", "--write-report",
         "--workspace-root=" & workspaceRoot,
       ]))
       check secondPull.code != 0  # a later step failed
@@ -202,7 +203,7 @@ suite "RA-11 — partial manifest advance is reported, never rolled back":
       # The manifest layer was ADVANCED and NOT rolled back.
       check headSha(gitBin, layerDir) == commit2
 
-      let reportPath = workspaceRoot / ".repro" / "workspace" /
+      let reportPath = workspaceRoot / ".repro" / "build" / "reports" /
         "pull-report.json"
       check fileExists(reportPath)
       let report = parseFile(reportPath)

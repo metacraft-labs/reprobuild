@@ -53,7 +53,7 @@ Write-Host ""
 
 # To enable individual repro build invocations to emit a stats record we
 # also need them to actually populate their internal BuildStats — i.e. run
-# with --stats=text. The bench harness sets this via REPROBUILD_DEFAULT_STATS
+# with --measure=timing. The bench harness sets this via REPROBUILD_MEASURE
 # but vanilla CMake invocations don't, so the metrics array on each record
 # will be empty until we add a knob for that. The wall-time + fastPath
 # fields are populated regardless.

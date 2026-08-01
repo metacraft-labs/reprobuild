@@ -47,7 +47,11 @@ package libxfont2Source:
     setCurrentOwningPackageOverride("libxfont2Source")
     try:
       let opts = @["--disable-static", "--enable-shared"]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let patches = @[
+        "grep -qF '#include \"config.h\"' src/test/utils/font-test-utils.h || sed -i '1i#include \"config.h\"' src/test/utils/font-test-utils.h",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
+                                  srcPatches = patches)
       discard pkg.library("libXfont2")
     finally:
       clearCurrentOwningPackageOverride()

@@ -181,21 +181,16 @@ package mesaSource:
     extractStrip: 1
 
   nativeBuildDeps:
+    ## Mesa's configure and code-generation scripts require Mako. Keep the
+    ## module-bearing source Python first so transitive bare Python profiles
+    ## from Meson cannot shadow it.
+    "python3-with-modules"
     ## meson is the build-system driver.
     "meson >=1.3"
     ## ninja is meson's default backend.
     "ninja >=1.10"
     ## pkg-config is used by meson to discover dependencies.
     "pkg-config"
-    ## python3-with-modules drives mesa's many GLSL/GL spec code
-    ## generators (over a dozen .py scripts in src/). Mesa hard-requires
-    ## the ``mako`` template module (src/meson.build:958 errors with
-    ## "Python (3.x) mako module >= 0.8.0 required to build mesa" if
-    ## the bare python3 is used). We consume the
-    ## python3-with-modules stub (which bundles setuptools + mako +
-    ## markdown via nixpkgs' ``python3.withPackages``) to satisfy the
-    ## probe.
-    "python3-with-modules"
     ## bison generates the GLSL preprocessor parser
     ## (src/compiler/glsl/glcpp/glcpp-parse.y).
     "bison"
@@ -267,7 +262,8 @@ package mesaSource:
         "tools=",
         "microsoft-clc=disabled",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts,
+        extraEnv = @[("PYTHONDONTWRITEBYTECODE", "1")])
       discard pkg.library("libEGL")
       discard pkg.library("libGLESv2")
       discard pkg.library("libGbm")

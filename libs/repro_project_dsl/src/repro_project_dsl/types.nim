@@ -1,5 +1,70 @@
+import std/[tables]
+
+import ./attr_ssz
+
+type
+  ExtensionBox* = ref object of RootRef
+    typeId*: string
+
+  TypedExtensionBox*[T] = ref object of ExtensionBox
+    val*: T
+
+  RawExtensionBox* = ref object of ExtensionBox
+    ## Typed-Extension-Interfaces M2 (opaque attr pass-through): carries a
+    ## resource's attribute record OPAQUELY — the base ``typeId`` plus the
+    ## already-marshalled envelope bytes (``raw``, a byte-per-char string,
+    ## the exact output of ``marshalAttrs``) — WITHOUT a registered codec.
+    ##
+    ## The ``repro`` CLI is only a ROUTER for an out-of-tree provider's
+    ## resources: it decodes the resource graph, hands the members to the
+    ## provider SESSION (which HAS the codec), and stores the opaque
+    ## ``attrsJson`` in the state store. It must NOT need the attrs codec
+    ## in-process. ``unmarshalAttrsOrRaw`` produces this box for an
+    ## unregistered ``typeId``; ``marshalAttrs`` re-serializes it VERBATIM
+    ## (identity round-trip), so the bytes reaching the session / store are
+    ## byte-for-byte what was decoded. A process that DOES have the codec
+    ## (the provider) still gets the typed ``TypedExtensionBox[T]``.
+    raw*: string
+
+  ExtensionMarshaler* = object
+    ## Typed-Extension-Interfaces M1: the marshaller round-trips the
+    ## attribute record through a versioned SSZ envelope
+    ## (``attr_ssz.encodeAttrEnvelope`` / ``decodeAttrEnvelope``) — NOT
+    ## ``std/json``. ``marshal`` returns the envelope bytes carried as a
+    ## byte-per-char string; ``unmarshal`` takes that same byte string.
+    ## The parameter is named ``payload`` (was ``jsonStr``) to reflect
+    ## the binary payload.
+    marshal*: proc(box: ExtensionBox): string {.nimcall.}
+    unmarshal*: proc(payload: string): ExtensionBox {.nimcall.}
+
+  NimPackageExtension* = object
+    name*: string
+    srcDir*: string
+
+  GeneratedFileExtension* = object
+    destPath*: string
+    content*: string
+
+var extensionRegistry* {.threadvar.}: Table[string, ExtensionMarshaler]
+
+template registerExtension*[T](id: string) =
+  ## Register the versioned-SSZ-envelope marshaller for attribute record
+  ## ``T`` under ``id``. ``marshal`` emits ``[u16le version][ssz(val)]``
+  ## carried as a byte-per-char string; ``unmarshal`` reads the version
+  ## then SSZ-decodes ``T``. No ``std/json`` on this path.
+  block:
+    let m = ExtensionMarshaler(
+      marshal: proc(box: ExtensionBox): string =
+        bytesToByteString(encodeAttrEnvelope(TypedExtensionBox[T](box).val)),
+      unmarshal: proc(payload: string): ExtensionBox =
+        let val = decodeAttrEnvelope[T](byteStringToBytes(payload))
+        return TypedExtensionBox[T](typeId: id, val: val)
+    )
+    extensionRegistry[id] = m
+
 type
   BuildActionPayloadError* = object of CatchableError
+
 
   Tool*[name: static string] = object
 
@@ -116,6 +181,40 @@ type
   LibraryDef* = object
     name*: string
     kind*: LibraryKind
+    exportedPath*: string
+      ## Cross-Repo-Source-Consumption SC-11 (§4.2a.4): the producer-relative
+      ## directory a Nim library-consumer threads onto its ``nim c --path:``.
+      ## Empty means the convention default ``"src"`` (resolved at the splice
+      ## seam), so an existing bare ``library foo`` exports ``<root>/src``
+      ## unchanged; a non-standard layout sets it explicitly.
+    sourceFile*: string
+    sourceLine*: int
+
+  ResourceAttrDef* = object
+    ## RP4: one ``attr <name>: <type>`` declaration inside a
+    ## ``resourceType`` block — the typed-wrapper parameter surface the
+    ## interface lifting turns into an ``InterfaceResourceAttr``.
+    name*: string
+    nimType*: string
+    sourceFile*: string
+    sourceLine*: int
+
+  ResourceTypeInterfaceDef* = object
+    ## RP4 (Provider-Runtime-Protocol-v1 §5): the compile-time record a
+    ## ``resourceType`` block lowers to for interface lifting. Mirrors
+    ## ``ExecutableDef`` / ``LibraryDef``: a self-contained, codec-free
+    ## value the interface extractor projects into an
+    ## ``InterfaceResource``. ``determinism`` is stored as the ordinal of
+    ## the generic-lane ``ResourceDeterminism`` (rdStrong=0 … rdVolatile=3)
+    ## so this module stays free of the home-resources import.
+    typeId*: string
+    determinismOrd*: int
+    attributes*: seq[ResourceAttrDef]
+    identityEntrypoint*: string
+    digestEntrypoint*: string
+    observeEntrypoint*: string
+    planEntrypoint*: string
+    applyEntrypoint*: string
     sourceFile*: string
     sourceLine*: int
 
@@ -400,6 +499,14 @@ type
                      ## resolved path is taken from
                      ## ``BuildActionDef.cwdCustomPath``.
 
+  ToolIdentityRefKind* = enum
+    ## Platform role for an action's tool-identity reference. Values match
+    ## ``repro_build_engine/platform.DepKind`` and are mapped explicitly by
+    ## the CLI when the provider graph is lowered.
+    tirkBuild = 0'u8
+    tirkNative = 1'u8
+    tirkRuntime = 2'u8
+
   BuildActionDef* = object
     id*: string
     call*: PublicCliCall
@@ -495,6 +602,12 @@ type
       ## the engine resolves them at fork time, and PATH is
       ## populated with the resolved store paths so the bare tool
       ## name finds the right binary.
+    toolIdentityRefKinds*: seq[ToolIdentityRefKind]
+      ## Platform role parallel to ``toolIdentityRefs``. An empty or
+      ## mismatched list preserves the legacy ``tirkBuild`` default.
+      ## Constructor-generated actions populate this list so native tools
+      ## retain PATH priority while target dependency headers and libraries
+      ## can precede a native toolchain's transitive sysroot.
     requiresElevation*: bool
       ## Windows-System-Resources Phase E: marks an action edge as
       ## one whose execution must cross the privileged-operation
@@ -614,6 +727,7 @@ type
       ## codec v22+.
     sourceFile*: string
     sourceLine*: int
+    extensions*: seq[ExtensionBox]
 
   BuildTargetKind* = enum
     ## Spec-Implementation M5: discriminator on ``BuildTargetDef`` so the
@@ -640,6 +754,7 @@ type
       ## payloads decode with no ``kind`` field; promoting the zero value
       ## to ``btkAggregate`` keeps backward-compat with the v1 record
       ## shape.
+    extensions*: seq[ExtensionBox]
 
   BuildPoolDef* = object
     name*: string
@@ -659,6 +774,43 @@ type
     tekExplicit   ## Declared via ``target "name", handle`` in the DSL.
     tekAggregate  ## Declared via ``aggregate("name", ...)`` (M0 surface).
     tekCollection ## Declared via ``collect("name", ...)`` (M0 + M5 split).
+    tekRunEdge    ## Declared via ``run "name", build = <handle>, ...``
+                  ## (Named-Runnable-Edges N0). A named run-edge is a
+                  ## build target whose action is an *execution* rather
+                  ## than an artifact-producing edge; the row additionally
+                  ## carries the run-edge ``runArgs`` + ``consumes`` lease
+                  ## list so N1 (CLI routing) and N2 (lease bridge) can
+                  ## resolve + reconcile it. A dedicated kind (rather than
+                  ## a flag on ``tekExplicit``) follows the M5 grain where
+                  ## each new authoring surface gets its own discriminator
+                  ## byte, so ``classifyBuildSelector`` / the resolver can
+                  ## branch on it directly.
+
+  RunEdgeLeaseKind* = enum
+    ## Named-Runnable-Edges N0: the DSL-layer mirror of
+    ## ``repro_resources/lease.nim``'s ``LeaseKind``. The DSL sits BELOW
+    ## ``repro_resources`` in the dependency order (``repro_resources``
+    ## imports the DSL, not the reverse), so ``TargetExportEntry`` cannot
+    ## name ``LeaseKind``/``LeasedDep`` directly. ``repro_resources``'s
+    ## run-edge surface converts each ``LeasedDep`` into a
+    ## ``RunEdgeLease`` (primitives only) on the way in and back on the
+    ## way out, so the lease policy round-trips through the target-export
+    ## table codec without redefining the lease *value* type. The enum
+    ## ordinals MUST match ``LeaseKind`` (keep/immediate/delayed) so the
+    ## conversion is a plain ``ord`` cast.
+    relKeep       ## mirrors ``lkKeep`` — never auto-reap
+    relImmediate  ## mirrors ``lkImmediate`` — reapable when the consume finishes
+    relDelayed    ## mirrors ``lkDelayed`` — keep ``ttlSeconds`` after last use
+
+  RunEdgeLease* = object
+    ## Named-Runnable-Edges N0: the serializable projection of a
+    ## ``repro_resources`` ``LeasedDep`` attached to a run-edge's
+    ## ``consumes``. Primitives only (no ``Duration``/``Option``) so the
+    ## DSL can carry + serialize it without importing ``repro_resources``.
+    address*: string        ## the leased state's resource address / ``stateGroup`` name
+    consumerId*: string     ## the holder id (defaults to ``address``)
+    policyKind*: RunEdgeLeaseKind
+    ttlSeconds*: int64      ## meaningful only for ``relDelayed`` (else 0)
 
   TargetExportEntry* = object
     ## Named-Targets M1: one row in the project-scoped target-export
@@ -679,6 +831,21 @@ type
       ## collisions.
     sourceFile*: string
     sourceLine*: int
+    runArgs*: seq[string]
+      ## Named-Runnable-Edges N0: the ``args = @[...]`` list of a
+      ## ``run "name", ...`` run-target — forwarded to the execution by
+      ## N1's ``repro run`` executor. Empty for every non-run-edge row
+      ## (``tekImplicit``/``tekExplicit``/``tekAggregate``/
+      ## ``tekCollection``), so pre-N0 rows and recipes that use none of
+      ## the new surfaces round-trip byte-identically (the v3 codec writes
+      ## these trailing fields only when they are non-empty on a
+      ## ``tekRunEdge`` row; v1/v2 payloads decode them empty).
+    consumes*: seq[RunEdgeLease]
+      ## Named-Runnable-Edges N0: the run-edge's leased-state consumption
+      ## list — the serializable projection of ``repro_resources``'s
+      ## ``seq[LeasedDep]`` (see ``RunEdgeLease``). N2's lease bridge reads
+      ## this back to reconcile + renew the named ``stateGroup`` around the
+      ## exec. Empty for non-run-edge rows.
 
   TargetExportAmbiguity* = object
     ## Named-Targets M1: cross-package ambiguity record. When two or
@@ -693,3 +860,33 @@ type
   TargetExportTable* = object
     entries*: seq[TargetExportEntry]
     ambiguities*: seq[TargetExportAmbiguity]
+
+  StateGroupDef* = object
+    ## Named-Runnable-Edges N0 (spec §3.3): a named resource subgraph —
+    ## the leasable/reapable unit. ``members`` are the resource addresses
+    ## declared inside the ``stateGroup "name":`` block, in declaration
+    ## order. The group name resolves to exactly these addresses so N2's
+    ## lease bridge can reconcile the subgraph; the L1 state store still
+    ## keys per-resource — this record is only the ergonomic grouping
+    ## layered over member addresses (it does not change the store).
+    name*: string
+    members*: seq[string]
+    sourceFile*: string
+    sourceLine*: int
+
+proc exposesDevEnvIntrospection*(pkg: PackageDef): bool =
+  ## Windows-dev-env M1: a package exposes a ``gpkDevEnvIntrospection``
+  ## entry point — so ``repro exec`` / ``repro shell`` / the direnv hook
+  ## can resolve a dev environment — in either of two cases:
+  ##
+  ## * it declared an explicit ``devEnv:`` block (``hasDevEnv``), which
+  ##   contributes shell ops / tasks / services / extra tool requirements
+  ##   on top of the floor; OR
+  ## * it declares a non-empty ``uses:`` toolchain floor (even with no
+  ##   ``devEnv:`` block). The IMPLICIT dev-env is just the floor: the
+  ##   PATH/env contributions of the ``uses:`` tools, with no extra tasks
+  ##   or env. ``buildPackageDevEnv`` already appends ``pkg.toolUses`` to
+  ##   the dev-env result's tool requirements for BOTH cases, so the
+  ##   implicit case reuses the exact same derivation with an empty
+  ##   "extra" dev-env body.
+  pkg.hasDevEnv or pkg.toolUses.len > 0

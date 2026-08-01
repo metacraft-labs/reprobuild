@@ -34,9 +34,18 @@ type
     ##     manifest whose ``producerPubKey`` is not on the list (and
     ##     whose signature wouldn't verify against any listed key) is
     ##     rejected before any payload byte is fetched.
+    ##   * ``enforceTrust`` (Reprobuild-Binary-Cache-Fleet R1) turns on
+    ##     the default-untrusted model: when ``true``, an endpoint with
+    ##     an EMPTY ``trustedSigners`` list is NEVER substituted from —
+    ##     the manifest is rejected (a MISS), not silently trusted. The
+    ##     config loader sets it on every configured cache. It defaults
+    ##     to ``false`` so pre-R1 call sites that pass an explicit
+    ##     ``trustedSigners`` list keep their existing semantics
+    ##     (empty list == "trust the signature-verified producer").
     baseUrl*: string
     trustedSigners*: seq[bcsTypes.PublicKeyBytes]
     priority*: int32
+    enforceTrust*: bool
 
   ClientConfig* = object
     ## Knobs the daemon (or single-user wrapper) sets at context init.

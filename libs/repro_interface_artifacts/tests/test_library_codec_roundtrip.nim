@@ -15,6 +15,38 @@ import std/[os, unittest]
 import repro_interface_artifacts
 import repro_project_dsl
 import repro_core
+import repro_hash
+
+proc addU16Le(outp: var seq[byte]; value: uint16) =
+  outp.add(byte(value and 0xff'u16))
+  outp.add(byte((value shr 8) and 0xff'u16))
+
+proc addU32Le(outp: var seq[byte]; value: uint32) =
+  outp.add(byte(value and 0xff'u32))
+  outp.add(byte((value shr 8) and 0xff'u32))
+  outp.add(byte((value shr 16) and 0xff'u32))
+  outp.add(byte((value shr 24) and 0xff'u32))
+
+proc encodeV10ProjectInterfaceArtifact(pi: ProjectInterface): seq[byte] =
+  ## A v10 envelope (no ``exportedPath`` — that field arrives at v11) written by
+  ## the CURRENT codec: the on-disk payload keeps real locations, while the
+  ## InterfaceFingerprint is computed over the location-normalized payload
+  ## (``forFingerprint = true``), matching what ``decodeProjectInterfaceArtifact``
+  ## recomputes. Reprobuild has no pre-release on-disk artifacts to keep
+  ## compatible, so this exercises version-gated FIELD decoding, not a legacy
+  ## fingerprint shape.
+  var payload = encodeInterfacePayload(pi, 10'u16)
+  let fingerprint = blake3DomainDigest(
+    encodeInterfacePayload(pi, 10'u16, forFingerprint = true), hdMetadataEnvelope)
+  payload.add(byte(ord(fingerprint.algorithm)))
+  payload.add(byte(ord(fingerprint.domain)))
+  payload.add(fingerprint.bytes)
+  payload.add(if pi.standardBuildEligible: 1'u8 else: 0'u8)
+  result.add([byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))])
+  result.addU16Le(10'u16)
+  result.addU16Le(101'u16)
+  result.addU32Le(uint32(payload.len))
+  result.add(payload)
 
 suite "interface-artifact codec M12 (v9)":
 
@@ -90,6 +122,20 @@ suite "interface-artifact codec M12 (v9)":
       location: SourceLocation(file: "rb.nim", line: 1)))
     check artifactFor(piA).interfaceFingerprint !=
       artifactFor(piB).interfaceFingerprint
+
+  test "v10-layout envelope decodes (exportedPath defaults empty)":
+    var pi: ProjectInterface
+    pi.projectName = "v10Lib"
+    pi.packageName = "v10Lib"
+    pi.publicLibraries.add(InterfaceLibrary(
+      name: "legacy",
+      kind: lkStatic,
+      location: SourceLocation(file: "rb.nim", line: 3)))
+    let decoded = decodeProjectInterfaceArtifact(
+      encodeV10ProjectInterfaceArtifact(pi))
+    check decoded.projectInterface.publicLibraries.len == 1
+    check decoded.projectInterface.publicLibraries[0].name == "legacy"
+    check decoded.projectInterface.publicLibraries[0].exportedPath == ""
 
   test "empty publicLibraries round-trips":
     var pi: ProjectInterface

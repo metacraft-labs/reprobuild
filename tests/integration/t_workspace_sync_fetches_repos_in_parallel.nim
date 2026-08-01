@@ -197,7 +197,7 @@ suite "RA-5c — repro workspace sync fetches repos in parallel":
       var seedWork: seq[string]
       let workspaceRoot = scratch / "workspace"
       createDir(workspaceRoot)
-      let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+      let manifestsRoot = workspaceRoot
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
 

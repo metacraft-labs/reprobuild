@@ -2,8 +2,10 @@ import std/[options, os, strutils]
 
 import repro_build_engine
 import repro_core
+import repro_dev_env_engine/cache_key as devEnvCacheKey
 import repro_hash
 import repro_interface_artifacts
+import repro_tool_profiles
 
 type
   DevEnvEdgeError* = object of CatchableError
@@ -37,6 +39,7 @@ type
     activity*: string
     lockSliceId*: string
     developOverridesPath*: string
+    toolProvisioning*: ToolProvisioningMode
     renderShell*: bool
     statsEnabled*: bool
 
@@ -84,13 +87,13 @@ proc providerCompileFailure(run: BuildRunResult): string =
 
 proc providerCompileBuildAction(plan: ProviderCompilePlan;
                                 modulePath, interfacePath, artifactPath,
-                                publicCliPath, workDir: string;
+                                helperCliPath, workDir: string;
                                 scratchDir = ""): BuildAction =
   var inputs = plan.inputSources
   if inputs.find(interfacePath) < 0:
     inputs.add(interfacePath)
   var command = @[
-    publicCliPath,
+    helperCliPath,
     "__repro-compile-provider",
     "--module", modulePath,
     "--out", plan.outputBinaryPath,
@@ -101,8 +104,14 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
   if scratchDir.len > 0:
     command.add("--scratch-dir")
     command.add(scratchDir)
+  let compilerCwd =
+    if scratchDir.len > 0:
+      scratchDir
+    else:
+      parentDir(plan.outputBinaryPath)
+  createDir(extendedPath(compilerCwd))
   action("__repro_provider_compile", command,
-    cwd = workDir,
+    cwd = compilerCwd,
     inputs = inputs,
     outputs = @[plan.outputBinaryPath, artifactPath],
     commandStatsId = "repro provider compile edge",
@@ -110,12 +119,26 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     weakFingerprint = plan.compileEdge.actionFingerprint,
     dependencyPolicy = automaticMonitorGatheringPolicy())
 
+proc providerCompileCliPath(config: DevEnvEdgeConfig): string =
+  ## Dev-env tests may call this library from a test binary, so
+  ## ``getAppFilename()`` is not a reliable repro helper path here. Since the
+  ## single-`repro` consolidation there is no ``repro-full`` companion, so the
+  ## monitor/public CLI path is already the full ``repro`` image to run the
+  ## monitored provider-compile edge with. When the monitor is the consolidated
+  ## ``repro internal io monitor`` driver, reuse its image; otherwise fall back
+  ## to the public CLI path.
+  let internalMonitorArgs = @["internal", "io", "monitor"]
+  if config.monitorCliArgs == internalMonitorArgs and
+      config.monitorCliPath.len > 0:
+    return os.normalizedPath(config.monitorCliPath)
+  config.publicCliPath
+
 proc invalidateStaleProviderCompileArtifact(plan: ProviderCompilePlan;
                                             artifactPath: string) =
   if artifactPath.len == 0 or not fileExists(extendedPath(artifactPath)):
     return
   if providerCompileArtifactFresh(artifactPath, plan.outputBinaryPath,
-      plan.interfaceFingerprint, plan.providerFingerprint):
+      plan.interfaceFingerprint, plan.providerFingerprint, plan.workDir):
     return
   removeFile(extendedPath(artifactPath))
 
@@ -150,6 +173,34 @@ proc commonMonitorEnv(config: DevEnvEdgeConfig): seq[string] =
   if config.developOverridesPath.len > 0:
     result.add("REPRO_DEVELOP_OVERRIDES_FILE=" &
       config.developOverridesPath)
+
+proc parseDevEnvToolProvisioning(value: string): ToolProvisioningMode =
+  case value.normalize()
+  of "path":
+    tpmPathOnly
+  of "nix":
+    tpmNix
+  of "tarball":
+    tpmTarball
+  of "scoop":
+    tpmScoop
+  of "fromsource", "source":
+    tpmFromSource
+  else:
+    raiseDevEnvEdge("unsupported dev-env tool provisioning mode: " & value)
+
+proc effectiveToolProvisioning(config: DevEnvEdgeConfig;
+                               artifact: ProjectInterfaceArtifact):
+    ToolProvisioningMode =
+  if config.toolProvisioning != tpmUnspecified:
+    return config.toolProvisioning
+  let envMode = getEnv("REPRO_TOOL_PROVISIONING").strip()
+  if envMode.len > 0:
+    return parseDevEnvToolProvisioning(envMode)
+  let defaultMode = artifact.projectInterface.defaultToolProvisioning.strip()
+  if defaultMode.len > 0:
+    return parseDevEnvToolProvisioning(defaultMode)
+  tpmUnspecified
 
 proc fingerprintText(parts: openArray[string]): ContentDigest =
   weakFingerprintFromText(parts.join("\n"))
@@ -239,42 +290,8 @@ proc envVarPart(name: string): string =
 
 proc computeDevEnvEdgeCacheKey*(config: DevEnvEdgeConfig): string =
   ## See module-level note. Returns a 32-char lowercase hex digest.
-  let projectFile = canonicalProjectFilePath(config.projectRoot)
-  let projectFilePart =
-    if projectFile.len == 0:
-      config.projectRoot & "\n<no project file>"
-    else:
-      fileFingerprintPart(projectFile)
-  let activity =
-    if config.activity.len > 0: config.activity else: "default"
-  let parts = @[
-    CacheKeySchema,
-    "projectRoot=" & config.projectRoot,
-    "projectFile=" & projectFilePart,
-    "activity=" & activity,
-    "lockSliceId=" & config.lockSliceId,
-    "lockSliceFile=" & lockSliceFilePart(config.projectRoot),
-    "developOverrides=" & fileFingerprintPart(config.developOverridesPath),
-    # ``REPRO_DEVELOP_OVERRIDES_FILE`` is the only edge-consumed env
-    # variable that materially changes the activation — overriding the
-    # overrides file path swaps the develop-overrides resolution. The
-    # rest (``REPRO_MONITOR_SHIM_LIB`` and monitor CLI selection) are
-    # infrastructure for the build engine and do not change the
-    # dev-env contract; including them would burn cache-key matches
-    # whenever the user wraps ``repro`` under a custom monitor or runs from a
-    # different host with a different shim path.
-    envVarPart("REPRO_DEVELOP_OVERRIDES_FILE")
-  ]
-  let digest = weakFingerprintFromText(parts.join("\n"))
-  result = newStringOfCap(32)
-  # 16-byte prefix is plenty for cache-key equality at this layer; full
-  # 32-byte digest would only add bytes to the env block without
-  # narrowing the false-collision probability into anything the user
-  # can observe (a hypothetical 2^-64 collision triggers a stale env at
-  # the next prompt and is corrected on the prompt after that when the
-  # full walk runs).
-  for i in 0 ..< 16:
-    result.add(toHex(int(digest.bytes[i]), 2).toLowerAscii())
+  devEnvCacheKey.computeDevEnvEdgeCacheKey(config.projectRoot, config.activity,
+    config.lockSliceId, config.developOverridesPath)
 
 proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
                                provider: ProviderCompileArtifact;
@@ -362,6 +379,16 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if config.monitorCliPath.len == 0:
     raiseDevEnvEdge("monitorCliPath is required")
 
+  let candidateKey = devEnvCacheKey.computeDevEnvEdgeCacheKey(
+    config.projectRoot, config.activity, config.lockSliceId, config.developOverridesPath
+  )
+
+  result.artifactPath = config.outDir / "dev-env.rbde"
+  result.shellFragmentPath = config.outDir / "dev-env.env"
+  result.shellNavigatorStatsPath = config.outDir / "dev-env.env.navigator.json"
+
+  let cacheKeyPath = config.outDir / "dev-env.rbde.cache-key"
+
   createDir(extendedPath(config.outDir))
   let workDir =
     if config.workDir.len > 0: config.workDir else: getCurrentDir()
@@ -371,19 +398,60 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
 
   let interfacePath = active.outDir / "project-interface.rbsz"
   let stubPath = active.outDir / "project-interface.nim"
-  let interfaceArtifact = extractInterfaceFromModule(active.modulePath,
-    interfacePath, stubPath, workDir, compileScratchDir)
+
+  var interfaceArtifact: ProjectInterfaceArtifact
+  var useCachedInterface = false
+  if fileExists(extendedPath(interfacePath)) and
+     fileExists(extendedPath(cacheKeyPath)):
+    try:
+      let cachedKey = readFile(extendedPath(cacheKeyPath)).strip()
+      if cachedKey == candidateKey:
+        interfaceArtifact = readInterfaceArtifact(interfacePath)
+        useCachedInterface = true
+    except CatchableError:
+      discard
+
+  if not useCachedInterface:
+    interfaceArtifact = extractInterfaceFromModule(active.modulePath,
+      interfacePath, stubPath, workDir, compileScratchDir)
+  let effectiveProvisioning =
+    active.effectiveToolProvisioning(interfaceArtifact)
 
   result.providerBinaryPath = active.outDir / "provider" / "project-provider"
   result.providerArtifactPath = active.outDir / "provider-compile.rbsz"
-  result.artifactPath = active.outDir / "dev-env.rbde"
-  result.shellFragmentPath = active.outDir / "dev-env.env"
-  result.shellNavigatorStatsPath = active.outDir / "dev-env.env.navigator.json"
+
+  # Construct bakForeignProvision actions for Nix tool uses
+  var provisioningActions: seq[BuildAction] = @[]
+  var provisioningReceipts: seq[string] = @[]
+  for useDef in interfaceArtifact.projectInterface.toolUses:
+    if effectiveProvisioning in {tpmUnspecified, tpmNix} and
+        useDef.nixProvisioning.len > 0:
+      let plan = nixAcquisitionPlan(useDef)
+      let receiptDir = active.outDir / "tool-store" / "nix-provision"
+      let receiptFile = receiptDir / (safeStoreSegment(useDef.packageSelector, "nix-package") & ".receipt")
+
+      let provAction = BuildAction(
+        kind: bakForeignProvision,
+        id: "nix-provision." & useDef.packageSelector,
+        argv: @["nix", plan.nixSelector],
+        outputs: @[receiptFile],
+        cwd: workDir,
+        commandStatsId: "repro dev-env nix provision edge",
+        cacheable: true,
+        weakFingerprint: fingerprintText([
+          "reprobuild.dev-env.nix-provision.v1",
+          useDef.packageSelector,
+          plan.nixSelector
+        ]),
+        dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor)
+      )
+      provisioningActions.add(provAction)
+      provisioningReceipts.add(receiptFile)
 
   var provider: ProviderCompileArtifact
   let cachedProvider = readFreshProviderCompileArtifact(
     result.providerArtifactPath, active.modulePath, result.providerBinaryPath,
-    interfaceArtifact.interfaceFingerprint)
+    interfaceArtifact.interfaceFingerprint, workDir)
   if cachedProvider.isSome:
     provider = cachedProvider.get()
     result.stats.providerBuildSkippedFresh = true
@@ -393,11 +461,17 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
       compileScratchDir)
     invalidateStaleProviderCompileArtifact(providerPlan,
       result.providerArtifactPath)
-    let providerAction = providerCompileBuildAction(providerPlan,
+    var providerAction = providerCompileBuildAction(providerPlan,
       active.modulePath, interfacePath, result.providerArtifactPath,
-      active.publicCliPath, workDir, compileScratchDir)
+      providerCompileCliPath(active), workDir, compileScratchDir)
+
+    # Wire the provisioning receipts as inputs to the compiler action
+    for receipt in provisioningReceipts:
+      if providerAction.inputs.find(receipt) < 0:
+        providerAction.inputs.add(receipt)
+
     var compileConfig = active.engineConfig()
-    result.providerCompileResult = runBuild(graph([providerAction]),
+    result.providerCompileResult = runBuild(graph(@[providerAction] & provisioningActions),
       compileConfig)
     result.providerCompileAction = result.providerCompileResult.actionById(
       "__repro_provider_compile")
@@ -413,19 +487,32 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
     provider = readProviderCompileArtifact(result.providerArtifactPath)
     if not providerCompileArtifactFresh(result.providerArtifactPath,
         providerPlan.outputBinaryPath, providerPlan.interfaceFingerprint,
-        providerPlan.providerFingerprint):
+        providerPlan.providerFingerprint, providerPlan.workDir):
       raiseDevEnvEdge("provider compile artifact is stale after edge execution")
 
   result.providerBinaryPath = provider.outputBinaryPath
   result.providerArtifactId = hexDigest(provider.providerFingerprint)
 
-  var actions = @[active.devEnvIntrospectionAction(provider,
-    result.providerArtifactPath, result.providerArtifactId, result.artifactPath)]
+  var introspectionAction = active.devEnvIntrospectionAction(provider,
+    result.providerArtifactPath, result.providerArtifactId, result.artifactPath)
+
+  # Wire the provisioning receipts as inputs to the introspection action
+  for receipt in provisioningReceipts:
+    if introspectionAction.inputs.find(receipt) < 0:
+      introspectionAction.inputs.add(receipt)
+
+  var actions = @[introspectionAction]
   if active.renderShell:
-    actions.add(active.shellRenderAction(result.artifactPath,
-      result.shellFragmentPath, result.shellNavigatorStatsPath))
+    var renderAction = active.shellRenderAction(result.artifactPath,
+      result.shellFragmentPath, result.shellNavigatorStatsPath)
+    # Wire the provisioning receipts as inputs to the shell render action
+    for receipt in provisioningReceipts:
+      if renderAction.inputs.find(receipt) < 0:
+        renderAction.inputs.add(receipt)
+    actions.add(renderAction)
+
   var devEnvConfig = active.engineConfig()
-  result.devEnvResult = runBuild(graph(actions), devEnvConfig)
+  result.devEnvResult = runBuild(graph(actions & provisioningActions), devEnvConfig)
   result.introspectionAction = result.devEnvResult.actionById(
     "__repro_dev_env_introspection")
   result.shellRenderAction = result.devEnvResult.actionById(
@@ -454,3 +541,8 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if not fileExists(extendedPath(result.artifactPath)):
     raiseDevEnvEdge("dev-env edge did not write artifact: " &
       result.artifactPath)
+
+  try:
+    writeFile(extendedPath(cacheKeyPath), candidateKey & "\n")
+  except CatchableError:
+    discard

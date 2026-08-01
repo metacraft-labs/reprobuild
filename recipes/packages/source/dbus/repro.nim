@@ -201,6 +201,7 @@ package dbusSource:
     ## XML layer + the bus-config file parser. Sibling from-source
     ## ``expatSource`` recipe pins ``>=2.6``.
     "expat >=2.6"
+    "systemd >=240"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
@@ -241,6 +242,10 @@ package dbusSource:
         "doxygen_docs=disabled",
         "xml_docs=disabled",
         "ducktype_docs=disabled",
+        "systemd=enabled",
+        "systemd_system_unitdir=/usr/lib/systemd/system",
+        "systemd_user_unitdir=/usr/lib/systemd/user",
+        "user_session=true",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("dbusDaemon")
@@ -249,8 +254,4 @@ package dbusSource:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
-    ## DT_NEEDED inspection of the linked artifacts. Empty until
-    ## the M9.R.5b per-recipe pass populates per-output ELF
-    ## interrogation.
-    discard
+    "systemd >=240"

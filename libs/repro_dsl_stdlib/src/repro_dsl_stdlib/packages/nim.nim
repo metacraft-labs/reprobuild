@@ -28,10 +28,22 @@
 ## Linux build targets glibc 2.17+ (the prebuilt is statically linked
 ## against the c runtime where feasible).
 
-import std/tables
+import std/[options, os, sets, strutils, tables]
 import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
 export packages_schema
+
+# L3 PUBLISH-SCOPE (public-interface publishing for hand-authored
+# ``build:`` blocks). ``blake3`` composes the recipe-revision digest;
+# ``repro_core`` resolves the recipe file bytes. ``repro_project_dsl``
+# re-exports the ``CacheEntryIdentity`` shape + ``publicInterfaceIdentity``
+# (cache_key) + the ``registeredVersions`` / ``activeProviderProjectRoot`` /
+# ``currentBuild*`` context surface used below.
+import blake3
+import repro_core
+
+var reproNimPathsEnabled {.threadvar.}: bool
+var reproConfigNimsFile {.threadvar.}: string
 
 # ---------------------------------------------------------------------------
 # Pre-existing M21 DSL declaration (CLI surface + Nix provisioning).
@@ -109,7 +121,16 @@ package nim:
         flag mm is string,
           alias = "--mm:",
           format = concat
+        flag cc is string,
+          alias = "--cc:",
+          format = concat
+        flag gccExe is string,
+          alias = "--gcc.exe:",
+          format = concat
         boolFlag threadsOn is bool, alias = "--threads:on"
+        flag parallelBuild is int,
+          alias = "--parallelBuild:",
+          format = concat
         # Test-Fixtures-In-Build-Graph M2: ``--app:lib`` produces a shared
         # library (``.so`` / ``.dylib`` / ``.dll``) rather than an
         # executable. The monitor shim (``repro_monitor_shim``) is built
@@ -226,28 +247,211 @@ package nim:
 # subsume this alias.
 # ---------------------------------------------------------------------------
 
+proc defaultNimcacheDir(binary: string): string =
+  let outputName = splitFile(binary).name
+  if outputName.len > 0:
+    result = "build" / "nimcache" / outputName
+  else:
+    result = "build" / "nimcache" / "nim-output"
+
+proc usesSslDefine(defines: openArray[string]): bool =
+  for define in defines:
+    if define == "ssl" or define == "-d:ssl" or define == "--define:ssl":
+      return true
+
+proc opensslPassLForSsl(defines: openArray[string]): seq[string] =
+  if not usesSslDefine(defines):
+    return
+  for token in getEnv("NIX_LDFLAGS").splitWhitespace:
+    if token.startsWith("-L") and token.contains("openssl"):
+      result.add(token)
+      result.add("-lssl")
+      result.add("-lcrypto")
+      return
+
+proc compileDependencyPolicy(cacheDir: string;
+                             cacheable: bool;
+                             policy: BuildActionDependencyPolicy):
+    BuildActionDependencyPolicy =
+  if policy.kind != bdpDefault:
+    return policy
+  if cacheable:
+    return defaultDependencyPolicy()
+  makeDepfilePolicy(cacheDir / "nim-compile.d")
+
+# ---------------------------------------------------------------------------
+# L3 PUBLISH-SCOPE — public-interface publishing for hand-authored
+# ``build:`` blocks.
+#
+# The from-source + Nim/Crystal AUTO conventions tag their final
+# materialising action with ``publishToBinaryCache = true`` and a
+# ``cacheEntryIdentity`` so the engine's binary-cache publisher hook
+# fires. Hand-authored recipes drive their build through the ``nim.c``
+# alias (below) inside an artifact-scoped ``build:`` block:
+#
+#   package ct:
+#     executable ct:
+#       build:
+#         nim.c(source = "src/ct.nim", binary = "ct")
+#
+# The ``build:`` macro pushes an active-context frame carrying the
+# owning ``(package, artifact)`` while the body runs. When the ``nim.c``
+# output IS the artifact — i.e. the artifact is a declared
+# ``executable``/``library`` (the package's PUBLIC INTERFACE) — the
+# alias AUTO-TAGS the link action: the same ``publishToBinaryCache`` +
+# ``cacheEntryIdentity`` the conventions stamp, with the identity
+# composed off the shared ``publicInterfaceIdentity`` helper so the key
+# matches a Nim-convention build of the same member byte-for-byte.
+#
+# A recipe can also opt in/out explicitly:
+#   * ``publish = false`` — suppress the auto-tag even inside a declared
+#     artifact (e.g. a scratch helper edge that happens to run there).
+#   * ``publishAs = "<member>"`` — publish under a specific declared
+#     member's identity (used for package-level ``build:`` blocks, or
+#     when the binary basename differs from the member name).
+# The default is AUTOMATIC: no recipe change is needed for the common
+# case where the artifact name IS the public-interface member.
+
+proc nimRecipeRevisionHex(projectRoot: string): string =
+  ## BLAKE3 of the recipe file bytes, truncated to 32 hex chars — the
+  ## exact ``providerRevision`` shape ``from_source_identity.
+  ## providerRevisionHex`` produces, so a build-block publish and a
+  ## Nim-convention publish of the same member derive an identical key.
+  let match = resolveProjectFile(projectRoot)
+  if match.path.len == 0:
+    return ""
+  let bodyStr =
+    try: readFile(extendedPath(match.path))
+    except CatchableError: ""
+  if bodyStr.len == 0:
+    return ""
+  let dig = blake3.digest(bodyStr)
+  let full = blake3.toHex(dig)
+  if full.len >= 32: full[0 ..< 32] else: full
+
+proc nimMemberIsPublicInterface(packageName, memberName: string): bool =
+  ## True when ``memberName`` is a declared ``executable``/``library`` of
+  ## ``packageName`` — i.e. part of the package's PUBLIC INTERFACE. The
+  ## artifact registry is populated by the ``package`` macro's M3
+  ## ``executable:``/``library:`` lowering; ``files:`` artifacts are NOT
+  ## public interface and are excluded.
+  if packageName.len == 0 or memberName.len == 0:
+    return false
+  for artifact in registeredArtifacts(packageName):
+    if artifact.artifactName == memberName and
+        artifact.kind in {dakExecutable, dakLibrary}:
+      return true
+  false
+
+proc nimPublicInterfaceIdentity(packageName, memberName: string):
+    CacheEntryIdentity =
+  ## Compose the publish identity for one declared public-interface
+  ## member. ``packageName`` here is the MEMBER name (the granularity the
+  ## Nim convention uses — each member materialises a distinct reusable
+  ## artefact into the store), the toolchain tag is ``"nim"``, and the
+  ## version is the recipe's last ``versions:`` entry (empty when the
+  ## recipe carries no ``versions:`` block).
+  let versionStr = block:
+    var v = ""
+    let vs = registeredVersions(packageName)
+    if vs.len > 0:
+      v = vs[^1].version
+    v
+  publicInterfaceIdentity(
+    packageName = memberName,
+    packageVersion = versionStr,
+    toolchainName = "nim",
+    providerRevision = nimRecipeRevisionHex(activeProviderProjectRoot()))
+
+proc maybeTagPublicInterface(action: BuildActionDef;
+                             publish: Option[bool]; publishAs: string) =
+  ## Decide + apply the L3 publish tag for a ``nim.c`` edge, in place on
+  ## the just-registered action. ``publish``/``publishAs`` are the
+  ## explicit overrides; when unset the alias auto-associates the active
+  ## artifact frame with a declared public-interface member.
+  if publish.isSome and not publish.get():
+    return   # explicit opt-out.
+  let explicit = publish.isSome and publish.get()
+  let frame = currentBuildContextFrame()
+  let pkg = frame.packageName
+  # Which member does this edge materialise?  Explicit ``publishAs`` wins;
+  # otherwise the active artifact frame (the ``executable``/``library``
+  # the ``build:`` block is nested inside).
+  let member = if publishAs.len > 0: publishAs else: frame.artifactName
+  if pkg.len == 0 or member.len == 0:
+    # No active package/artifact context (e.g. a bare ``nim.c`` outside
+    # any artifact ``build:`` block, with no ``publishAs``). Nothing to
+    # attribute the publish to — stay inert.
+    return
+  # AUTO path: only tag when the member is genuinely part of the
+  # package's declared public interface. EXPLICIT ``publish = true`` (or
+  # a caller-named ``publishAs``) trusts the recipe author and publishes
+  # under that member's identity regardless.
+  if not explicit and publishAs.len == 0 and
+      not nimMemberIsPublicInterface(pkg, member):
+    return
+  setRegisteredActionPublish(action.id, true,
+    some(nimPublicInterfaceIdentity(pkg, member)))
+
 proc c*(pkg: NimPackage; source: string; binary: string;
         defines: seq[string] = @[];
         paths: seq[string] = @[];
         imports: seq[string] = @[];
+        cc = "";
+        gccExe = "";
+        mm = "";
         passC: seq[string] = @[];
         passL: seq[string] = @[];
+        nimcache = "";
         appLib = false;
         threadsOn = false;
+        parallelBuild = 0;
         actionId = "";
         deps: openArray[string] = [];
-        after: openArray[BuildActionDef] = []): BuildActionDef
+        after: openArray[BuildActionDef] = [];
+        extraInputs: openArray[string] = [];
+        extraOutputs: openArray[string] = [];
+        extraEnv: openArray[(string, string)] = [];
+        depfile = "";
+        cacheable = true;
+        publish = none(bool);
+        publishAs = "";
+        dependencyPolicy = defaultDependencyPolicy();
+        actionCachePolicy = defaultActionCachePolicy();
+        commandStatsId = ""): BuildActionDef
     {.discardable.} =
   ## Test-Fixtures-In-Build-Graph M2: ``appLib`` / ``threadsOn`` were
   ## added to the convenience alias so the monitor-shim fixture edge in
   ## ``repro.nim`` can express ``nim c --app:lib --threads:on`` and
   ## backend ``--passC:`` / ``--passL:`` flags through the
   ## ``binary``-shorthand surface the rest of the build block uses.
+  ##
+  ## L3 PUBLISH-SCOPE: ``publish`` / ``publishAs`` control binary-cache
+  ## publication of the resulting artifact (see the block comment above).
+  ## By default (``publish`` unset) the alias auto-tags the edge when it
+  ## runs inside a declared ``executable``/``library`` ``build:`` block,
+  ## so a hand-authored recipe's public-interface binaries publish with
+  ## no extra ceremony.
   discard imports
-  c(pkg = pkg, source = source, output = binary, defines = defines,
-    paths = paths, passC = passC, passL = passL, appLib = appLib,
-    threadsOn = threadsOn, actionId = actionId, deps = deps,
-    after = after)
+  let cacheDir = if nimcache.len > 0: nimcache else: defaultNimcacheDir(binary)
+  let effectivePassL = passL & opensslPassLForSsl(defines)
+  var inputs = @extraInputs
+  if reproNimPathsEnabled and reproConfigNimsFile.len > 0:
+    inputs.add(reproConfigNimsFile)
+
+  result = c(pkg = pkg, source = source, output = binary, defines = defines,
+    cc = cc, gccExe = gccExe, mm = mm,
+    paths = paths, passC = passC, passL = effectivePassL, nimcache = cacheDir,
+    appLib = appLib, threadsOn = threadsOn, parallelBuild = parallelBuild,
+    actionId = actionId,
+    deps = deps, after = after, extraInputs = inputs,
+    extraOutputs = extraOutputs, extraEnv = extraEnv,
+    depfile = depfile, cacheable = cacheable,
+    dependencyPolicy = compileDependencyPolicy(
+      cacheDir, cacheable, dependencyPolicy),
+    actionCachePolicy = actionCachePolicy,
+    commandStatsId = commandStatsId)
+  maybeTagPublicInterface(result, publish, publishAs)
 
 # ---------------------------------------------------------------------------
 # M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).
@@ -275,3 +479,113 @@ let nimCatalog* = @[
     bootstrap_argv: @[],
     env: initTable[string, string]())
 ]
+
+
+# NOTE: named ``nimPackage`` (not ``package``) on purpose. A recipe that does
+# ``import repro_dsl_stdlib/packages/nim as nim_pkg`` still brings this module's
+# exported symbols into scope UNQUALIFIED (Nim's ``as`` only renames the
+# qualified path, it does not hide unqualified access). A bare ``package`` proc
+# here therefore shadow-collides with the core ``package`` MACRO from
+# ``repro_project_dsl``: on ``package <name>:`` Nim eagerly typechecks this
+# proc's ``NimPackage`` first argument against the bare identifier and fails
+# with "undeclared identifier: '<name>'". Keeping a distinct name avoids the
+# collision for every recipe that imports this module.
+proc nimPackage*(pkg: NimPackage; name: string; srcDir = "src"): BuildTargetDef {.discardable.} =
+  result = target(name, actions = @[])
+  let absSrcDir = absolutePath(srcDir).replace('\\', '/')
+  registerBuildTargetExtension(name, NimPackageExtension(
+    name: name,
+    srcDir: absSrcDir
+  ))
+
+proc resolveNimPackagePaths(): seq[string] =
+  let activePkg = currentOwningPackage()
+  var depNames = initHashSet[string]()
+  if activePkg.len > 0:
+    for edge in registeredWorkspaceDeps():
+      if cmpIgnoreCase(edge.package, activePkg) == 0:
+        depNames.incl(edge.dependency)
+    for pkg in registeredPackages():
+      if cmpIgnoreCase(pkg.packageName, activePkg) == 0:
+        for u in pkg.toolUses:
+          depNames.incl(u.packageSelector)
+        for u in pkg.nativeBuildDeps:
+          depNames.incl(u.packageSelector)
+        for u in pkg.runtimeDeps:
+          depNames.incl(u.packageSelector)
+  
+  var seenPaths = initHashSet[string]()
+  for target in registeredBuildTargets():
+    let ext = retrieveExtension[NimPackageExtension](target)
+    if ext.isSome:
+      let pkgExt = ext.get()
+      if depNames.contains(pkgExt.name) or depNames.contains(target.name):
+        if not seenPaths.contains(pkgExt.srcDir):
+          seenPaths.incl(pkgExt.srcDir)
+          result.add(pkgExt.srcDir)
+  for target in registeredCollections():
+    let ext = retrieveExtension[NimPackageExtension](target)
+    if ext.isSome:
+      let pkgExt = ext.get()
+      if depNames.contains(pkgExt.name) or depNames.contains(target.name):
+        if not seenPaths.contains(pkgExt.srcDir):
+          seenPaths.incl(pkgExt.srcDir)
+          result.add(pkgExt.srcDir)
+
+  # Check physical sibling directories next to the current project
+  let parent = getCurrentDir().parentDir()
+  for dep in depNames:
+    let siblingDir = parent / dep
+    if dirExists(siblingDir):
+      let srcDir = (siblingDir / "src").replace('\\', '/')
+      if dirExists(srcDir):
+        if not seenPaths.contains(srcDir):
+          seenPaths.incl(srcDir)
+          result.add(srcDir)
+      else:
+        let rootDir = siblingDir.replace('\\', '/')
+        if not seenPaths.contains(rootDir):
+          seenPaths.incl(rootDir)
+          result.add(rootDir)
+
+proc nimRepropathsConfig*(pkg: NimPackage;
+                           reproPathsFile = "repro.paths";
+                           gitignoreFile = ".gitignore";
+                           configNimsFile = "config.nims"): seq[BuildActionDef] {.discardable.} =
+  discard pkg
+  reproNimPathsEnabled = true
+  reproConfigNimsFile = configNimsFile
+  
+  let paths = resolveNimPackagePaths()
+  var lines: seq[string] = @[]
+  for p in paths:
+    lines.add("switch(\"path\", \"" & p & "\")")
+  let pathsContent = lines.join("\n") & "\n"
+  
+  let writePathsAction = fs.writeText(reproPathsFile, pathsContent,
+    actionId = "generate_nim_paths_" & currentOwningPackage())
+  result.add(writePathsAction)
+  
+  var ignoreFile = gitignoreFile
+  if dirExists(getCurrentDir() / ".hg"):
+    ignoreFile = ".hgignore"
+  let ignoreAction = fs.ensureLine(ignoreFile, reproPathsFile,
+    actionId = "ensure_ignore_nim_paths_" & currentOwningPackage())
+  result.add(ignoreAction)
+  
+  let label = "repro-paths-bootstrap"
+  let version = "1"
+  let openSentinel = "# >>> repro:project:" & currentOwningPackage() & ":" & label & ":v" & version & " >>>"
+  let closeSentinel = "# <<< repro:project:" & currentOwningPackage() & ":" & label & ":v" & version & " <<<"
+  let openSearch = "# >>> repro:project:" & currentOwningPackage() & ":" & label & ":v"
+  let closeSearch = "# <<< repro:project:" & currentOwningPackage() & ":" & label & ":v"
+  let snippet = "when withDir(thisDir(), system.fileExists(\"" & reproPathsFile & "\")):\n  include \"" & reproPathsFile & "\""
+  
+  let snippetAction = fs.ensureSnippet(configNimsFile,
+    openSentinel = openSentinel,
+    closeSentinel = closeSentinel,
+    openSearch = openSearch,
+    closeSearch = closeSearch,
+    snippet = snippet,
+    actionId = "ensure_snippet_config_nims_" & currentOwningPackage())
+  result.add(snippetAction)

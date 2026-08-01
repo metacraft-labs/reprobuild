@@ -174,7 +174,7 @@ proc setupFixture(gitBin: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
@@ -188,12 +188,12 @@ proc setupFixture(gitBin: string): Fixture =
 
 proc invokeSync(fx: Fixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "sync", "myproject",
+    fx.reproBin, "workspace", "sync", "--write-report", "myproject",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc readReport(fx: Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "sync-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

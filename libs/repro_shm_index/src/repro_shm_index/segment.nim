@@ -206,6 +206,14 @@ proc writeSlot*(t: var SegmentTable; digest: openArray[byte];
     if seq0 == 0:
       writeSlotRaw(t, idx, digest, rec)     # empty slot: fresh insert
       return swsWritten
+    if (seq0 and 1) != 0:
+      # A prior sole writer may have died after publishing the odd seqlock but
+      # before completing this slot. There cannot be a live concurrent writer
+      # on this single-writer API; overwrite the abandoned slot in place. The
+      # daemon keeps the corresponding ring head unacknowledged until apply
+      # completes, so takeover replays the exact record idempotently here.
+      writeSlotRaw(t, idx, digest, rec)
+      return swsWritten
     if (seq0 and 1) == 0 and digestEq(digest, base, sb + SegSlotOffDigest):
       writeSlotRaw(t, idx, digest, rec)     # same key: in-place update
       return swsWritten

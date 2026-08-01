@@ -9,17 +9,19 @@
 ## reached the manifest repo.
 ##
 ## This test sets up a single-repo workspace whose manifest layer
-## (``.repo/manifests``) IS a real git checkout WITH an upstream (so the
-## gate genuinely attempts to publish), then makes the publish PUSH fail by
+## (``.repro/manifests``) IS a real git checkout WITH an upstream (so the
+## gate genuinely attempts to publish), then makes the immutable upstream
+## FETCH prerequisite fail by
 ## removing the upstream bare after the tracking branch is configured.
 ## ``@{u}`` still resolves from local config, the lock is written and
-## committed, but ``git push`` errors — driving ``publishWorkspaceLock`` to
+## committed, but ``git fetch`` errors — driving ``publishWorkspaceLock`` to
 ## ``lpoFailed``.
 ##
 ## Assertions:
 ##   - The pre-push gate exits NON-ZERO (the push is refused).
 ##   - The report carries a ``lock-publish-failure`` failure whose evidence
-##     names the publish cause (the failed ``git push``).
+##     names the publish cause (the failed immutable upstream fetch) without
+##     echoing the remote location.
 ##   - The underlying gate checks themselves PASSED (the sibling was clean
 ##     and published and the lock current/created) — proving the refusal is
 ##     specifically the publish failure, not an ordinary gate refusal.
@@ -121,7 +123,7 @@ type
 
 proc seedManifestGitLayer(gitBin, manifestsRoot, bare, projectToml: string;
                           branch = "main") =
-  ## Make ``.repo/manifests`` a real git checkout that TRACKS a bare
+  ## Make ``.repro/manifests`` a real git checkout that TRACKS a bare
   ## upstream — so the pre-push gate genuinely attempts a publish push.
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " & q(bare))
   discard requireGit(q(gitBin) & " init -b " & branch & " " & q(manifestsRoot))
@@ -150,7 +152,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot / ".repro" / "manifests"
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -171,7 +173,7 @@ proc writeRefsFile(path: string; localSha: string) =
 
 proc invokeCheckPrePush(fx: Fixture; refsFile: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "check", "--mode=pre-push",
+    fx.reproBin, "check", "--mode=pre-push", "--write-report",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & (fx.workspaceRoot / "lib-a"),
     "--pushed-refs=" & refsFile,
@@ -179,7 +181,7 @@ proc invokeCheckPrePush(fx: Fixture; refsFile: string): CmdResult =
   ]))
 
 proc readReport(fx: Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "check-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
@@ -203,10 +205,10 @@ suite "RA-21 — pre-push refuses when lock publication fails":
       let refsFile = fx.scratch / "pushed-refs.txt"
       writeRefsFile(refsFile, fx.libASha)
 
-      # ---- Force the publish PUSH to fail -------------------------------
+      # ---- Force immutable upstream discovery to fail ------------------
       # The manifest checkout still has its tracking branch configured, so
       # ``@{u}`` resolves and the lock is written + committed; but removing
-      # the bare upstream makes the publish ``git push`` error out.
+      # the bare upstream makes the required immutable fetch fail.
       removeDir(fx.manifestBare)
 
       let res = invokeCheckPrePush(fx, refsFile)
@@ -219,8 +221,14 @@ suite "RA-21 — pre-push refuses when lock publication fails":
       check report["exitCode"].getInt() != 0
       let pubFail = publishFailureFailure(report)
       check pubFail != nil
-      # The diagnostic names the publish cause (the failed push).
-      check pubFail["evidence"].getStr().toLowerAscii().contains("push")
+      # Recovery starts by fetching one immutable upstream tip. With the bare
+      # removed, that precise prerequisite fails before any push is attempted.
+      let evidence = pubFail["evidence"].getStr().toLowerAscii()
+      check evidence.contains("git fetch origin main failed")
+      check evidence.contains("connectivity and credentials")
+      # Raw transport output and the configured remote location are withheld:
+      # a credential-bearing URL must never be copied into a gate report.
+      check not evidence.contains(fx.manifestBare.toLowerAscii())
       # Exactly the publish failure gates it: the sibling-cleanliness /
       # publication / lock stages all PASSED, so lib-a is NOT named as a
       # dirty/unpublished offender — the only failure is the publish one.

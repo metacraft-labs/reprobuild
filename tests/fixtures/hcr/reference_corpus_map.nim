@@ -4,6 +4,9 @@ type
     family*: string
     availabilityMode*: string
     localCheckout*: string
+    fixtureSourceRoot*: string
+    fixtureCommit*: string
+    fixtureProvenance*: string
     upstreamUrl*: string
     pinnedCommit*: string
     sourcePaths*: seq[string]
@@ -33,8 +36,16 @@ proc hcrReferenceCorpus*(): HcrReferenceCorpus =
       HcrReferenceEntry(
         id: "mold",
         family: "high-performance-elf-linker",
-        availabilityMode: "manifest-repo",
-        localCheckout: "references/mold",
+        availabilityMode: "checked-in-minimal-fixture",
+        localCheckout: "build/hcr-reference-corpus/mold",
+        fixtureSourceRoot: "tests/fixtures/hcr/reference-corpus/mold",
+        fixtureCommit: "c2a4c43dfec85a80d6c4831fde438b2049b436d8",
+        fixtureProvenance: (
+          "Hermetic minimal path map for https://github.com/rui314/mold " &
+          "at pinned upstream commit " &
+          "45970e661d462fd664e7249a4bfc20ca4d0c6f39; it preserves the " &
+          "HCR-relevant source/documentation paths without requiring the " &
+          "full upstream checkout in CI."),
         upstreamUrl: "https://github.com/rui314/mold",
         pinnedCommit: "45970e661d462fd664e7249a4bfc20ca4d0c6f39",
         sourcePaths: @[
@@ -70,8 +81,16 @@ proc hcrReferenceCorpus*(): HcrReferenceCorpus =
       HcrReferenceEntry(
         id: "wild",
         family: "incremental-elf-linker",
-        availabilityMode: "manifest-repo",
-        localCheckout: "references/wild",
+        availabilityMode: "checked-in-minimal-fixture",
+        localCheckout: "build/hcr-reference-corpus/wild",
+        fixtureSourceRoot: "tests/fixtures/hcr/reference-corpus/wild",
+        fixtureCommit: "513626e85eb656f6f885ff25aaacc1fd3e589ac8",
+        fixtureProvenance: (
+          "Hermetic minimal path map for " &
+          "https://github.com/davidlattimore/wild at pinned upstream " &
+          "commit 58f3e1033a8b05ee2f8ea18f9abd8e6adacd1470; it preserves " &
+          "the HCR-relevant source/documentation paths without requiring " &
+          "the full upstream checkout in CI."),
         upstreamUrl: "https://github.com/davidlattimore/wild",
         pinnedCommit: "58f3e1033a8b05ee2f8ea18f9abd8e6adacd1470",
         sourcePaths: @[
@@ -107,8 +126,16 @@ proc hcrReferenceCorpus*(): HcrReferenceCorpus =
       HcrReferenceEntry(
         id: "llvm-jitlink-lld",
         family: "in-memory-linker-and-system-linker",
-        availabilityMode: "manifest-repo",
-        localCheckout: "references/llvm-project",
+        availabilityMode: "checked-in-minimal-fixture",
+        localCheckout: "build/hcr-reference-corpus/llvm-project",
+        fixtureSourceRoot: "tests/fixtures/hcr/reference-corpus/llvm-project",
+        fixtureCommit: "fcce3fa7a928492d9a7d2c21d7ba1906b7036b6b",
+        fixtureProvenance: (
+          "Hermetic minimal path map for " &
+          "https://github.com/llvm/llvm-project at pinned upstream commit " &
+          "07f6bc4883b2a0ee1f7f999b25774003b75f9bc1; it preserves the " &
+          "HCR-relevant source/documentation paths without requiring the " &
+          "full upstream checkout in CI."),
         upstreamUrl: "https://github.com/llvm/llvm-project",
         pinnedCommit: "07f6bc4883b2a0ee1f7f999b25774003b75f9bc1",
         sourcePaths: @[
@@ -148,6 +175,9 @@ proc hcrReferenceCorpus*(): HcrReferenceCorpus =
         family: "coff-pe-incremental-linker-documentation",
         availabilityMode: "pinned-map",
         localCheckout: "",
+        fixtureSourceRoot: "",
+        fixtureCommit: "",
+        fixtureProvenance: "",
         upstreamUrl: "https://learn.microsoft.com/en-us/cpp/build/reference/",
         pinnedCommit: "",
         sourcePaths: @[],

@@ -58,55 +58,31 @@ proc readFingerprint(script: string): string =
 
 proc runExport(c: ShellHookCase; extraEnv: openArray[(string, string)] = []):
     tuple[stdout: string; exitCode: int] =
-  var env = newStringTable(modeCaseSensitive)
-  for k, v in envPairs():
-    if k.startsWith("__REPRO_"):
-      continue
-    env[k] = v
-  env["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
-  env["HOME"] = c.tempRoot
+  var env = c.baselineEnvForBash()
   for (k, v) in extraEnv:
     env[k] = v
-  var p = startProcess(c.reproBin,
-    args = @["dev-env", "export", "bash",
-      "--project-root", c.projectRoot],
-    workingDir = c.repoRoot,
-    env = env,
-    options = {poUsePath})
-  let outStream = p.outputStream
-  let outText = if outStream != nil: outStream.readAll() else: ""
-  let code = p.waitForExit()
-  p.close()
-  (stdout: outText, exitCode: code)
+  let res = runShell(shellCommand(@[
+    c.reproBin, "dev-env", "export", "bash",
+    "--project-root", c.projectRoot
+  ], env.envEntries), c.repoRoot)
+  (stdout: res.output, exitCode: res.code)
 
 proc runExportUnderMonitor(c: ShellHookCase; fingerprint, depfilePath: string):
     tuple[stdout: string; exitCode: int] =
   ## Wrap the export call under ``repro internal io monitor`` so the monitor shim
   ## records every file read into ``depfilePath`` (RMDF format).
-  var env = newStringTable(modeCaseSensitive)
-  for k, v in envPairs():
-    if k.startsWith("__REPRO_"):
-      continue
-    env[k] = v
-  env["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
-  env["HOME"] = c.tempRoot
+  var env = c.baselineEnvForBash()
   env["REPRO_MONITOR_SHIM_LIB"] = c.monitorShim
   env["__REPRO_APPLIED"] = fingerprint
-  var p = startProcess(c.monitorCliPath,
-    args = c.monitorCliArgs & @[
-      "--depfile", depfilePath,
-      "--",
-      c.reproBin, "dev-env", "export", "bash",
-        "--project-root", c.projectRoot
-    ],
-    workingDir = c.repoRoot,
-    env = env,
-    options = {poUsePath, poStdErrToStdOut})
-  let outStream = p.outputStream
-  let outText = if outStream != nil: outStream.readAll() else: ""
-  let code = p.waitForExit()
-  p.close()
-  (stdout: outText, exitCode: code)
+  let res = runShell(shellCommand(@[
+    c.monitorCliPath
+  ] & c.monitorCliArgs & @[
+    "--depfile", depfilePath,
+    "--",
+    c.reproBin, "dev-env", "export", "bash",
+    "--project-root", c.projectRoot
+  ], env.envEntries), c.repoRoot)
+  (stdout: res.output, exitCode: res.code)
 
 suite "e2e_shell_hook_noop_io_bounded":
 

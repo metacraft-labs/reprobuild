@@ -26,7 +26,7 @@
 ##     with >N ready actions never runs more than N concurrently (the local
 ##     gate is the SOLE enforcement there, since there is no RunQuota).
 
-import std/[algorithm, json, os, strutils, tempfiles, times, unittest]
+import std/[algorithm, json, os, strutils, tempfiles, unittest]
 
 import repro_build_engine
 import repro_cli_support
@@ -37,18 +37,20 @@ proc fixtureWrite(path, content: string) =
   createDir(path.splitPath.head)
   writeFile(path, content)
 
-proc fixtureMain(args: seq[string]) =
-  if args.len < 2: quit 64
-  case args[1]
-  of "pool":
-    if args.len != 5: quit 64
-    let logPath = args[3]
-    let outputPath = args[4]
-    fixtureWrite(logPath & "." & args[2] & ".start", $epochTime())
-    sleep(200)
-    fixtureWrite(logPath & "." & args[2] & ".end", $epochTime())
-    fixtureWrite(outputPath, "pool " & args[2] & "\n")
-  else: quit 64
+proc writePoolFixture(path: string) =
+  fixtureWrite(path, """#!/bin/sh
+set -eu
+idx="$1"
+log="$2"
+out="$3"
+mkdir -p "$(dirname "$log.$idx.start")" "$(dirname "$out")"
+date +%s.%N > "$log.$idx.start"
+sleep 0.2
+date +%s.%N > "$log.$idx.end"
+printf 'pool %s\n' "$idx" > "$out"
+""")
+  setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
+    fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
 when defined(macosx) or defined(linux):
   var cachedMonitorTools: MonitorTools
@@ -69,8 +71,8 @@ proc maxPoolConcurrency(tempRoot, prefix: string; count: int): int =
     if not fileExists(startPath) or not fileExists(endPath):
       checkpoint("missing pool log for index " & $i)
       return count + 1
-    events.add((t: parseFloat(readFile(startPath)), delta: 1))
-    events.add((t: parseFloat(readFile(endPath)), delta: -1))
+    events.add((t: parseFloat(readFile(startPath).strip()), delta: 1))
+    events.add((t: parseFloat(readFile(endPath).strip()), delta: -1))
   events.sort(proc(a, b: tuple[t: float, delta: int]): int =
     result = cmp(a.t, b.t)
     if result == 0: result = cmp(a.delta, b.delta))
@@ -78,12 +80,6 @@ proc maxPoolConcurrency(tempRoot, prefix: string; count: int): int =
   for event in events:
     current += event.delta
     result = max(result, current)
-
-when isMainModule:
-  let params = commandLineParams()
-  if params.len > 0 and params[0] == "fixture-action":
-    fixtureMain(params)
-    quit 0
 
 suite "RA-13 runquota bypass surfaced in build header + report":
 
@@ -117,13 +113,15 @@ suite "RA-13 runquota bypass surfaced in build header + report":
       defer: removeDir(tempRoot)
 
       let app = getAppFilename()
+      let fixture = tempRoot / "pool-fixture.sh"
+      writePoolFixture(fixture)
       let workRoot = tempRoot / "work"
       let cacheRoot = tempRoot / ".repro-cache"
       createDir(workRoot)
 
       var actions: seq[BuildAction] = @[]
       for i in 0 ..< 6:
-        actions.add action("link-" & $i, [app, "fixture-action", "pool", $i,
+        actions.add action("link-" & $i, [fixture, $i,
           tempRoot / "link-log", workRoot / "link" / ($i & ".txt")],
           cwd = workRoot, outputs = ["link/" & $i & ".txt"],
           pool = "link", poolUnits = 1'u32, commandStatsId = "link-" & $i)
@@ -148,7 +146,12 @@ suite "RA-13 runquota bypass surfaced in build header + report":
         raise newException(ValueError, "missing result " & id)
 
       for i in 0 ..< 6:
-        check byId("link-" & $i).status == asSucceeded
+        let item = byId("link-" & $i)
+        if item.status != asSucceeded:
+          checkpoint("failed action " & item.id & " exit=" & $item.exitCode &
+            " backend=" & item.runQuotaBackend & "\nstdout:\n" &
+            item.stdout & "\nstderr:\n" & item.stderr)
+        check item.status == asSucceeded
 
       # The bypass state is surfaced on the engine result (drives header+report).
       check buildResult.runQuotaBypassed

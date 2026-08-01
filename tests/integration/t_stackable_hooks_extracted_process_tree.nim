@@ -191,6 +191,9 @@ import std/[os, strutils]
 
 import io_mon/hooks/linux_preload_runtime
 
+proc repro_linux_sig_safe_flush() {.exportc, dynlib, cdecl, raises: [].} =
+  discard
+
 proc appendLine(line: string) {.raises: [].} =
   try:
     let logPath = getEnv("REPRO_STACKABLE_HOOK_LOG")
@@ -267,10 +270,13 @@ int main(int argc, char **argv) {
         let fromEnv = getEnv("STACKABLE_HOOKS_SRC")
         if fromEnv.len > 0: fromEnv
         else: root.parentDir / "nim-stackable-hooks" / "src"
+      let versionScript =
+        ioMonSrc / "io_mon" / "hooks" / "linux_preload_versions.map"
       let command =
         "nim c --app:lib --threads:on " &
         "--path:" & quoteShell(ioMonSrc) & " " &
         "--path:" & quoteShell(stackableHooksSrc) & " " &
+        "--passL:" & quoteShell("-Wl,--version-script=" & versionScript) & " " &
         "--nimcache:" & quoteShell(root / "build/nimcache/integration-linux-stackable-runtime") & " " &
         "--out:" & quoteShell(outPath) & " " &
         quoteShell(sourcePath)
@@ -355,6 +361,8 @@ int main(int argc, char **argv) {
       discard finalizeMonitorFragments(fragmentDir, depfile)
       let dep = readMonitorDepFile(depfile)
       let records = dep.records
+      let canonicalParentInput = expandFilename(parentInput)
+      let canonicalChildInput = expandFilename(childInput)
 
       check readFile(depfile)[0 .. 3] == "RMDF"
       check records.len > 0
@@ -363,9 +371,9 @@ int main(int argc, char **argv) {
       check hasRecord(records, proc(record: MonitorRecord): bool =
         record.kind == mrProcessSpawn and record.childOsPid != 0)
       check hasRecord(records, proc(record: MonitorRecord): bool =
-        record.kind == mrFileRead and record.path == parentInput)
+        record.kind == mrFileRead and record.path == canonicalParentInput)
       check hasRecord(records, proc(record: MonitorRecord): bool =
-        record.kind == mrFileRead and record.path == childInput)
+        record.kind == mrFileRead and record.path == canonicalChildInput)
       check hasRecord(records, proc(record: MonitorRecord): bool =
         record.kind == mrPathProbe and record.path.contains("missing-parent-probe"))
       check hasRecord(records, proc(record: MonitorRecord): bool =

@@ -30,12 +30,12 @@ import repro_dsl_stdlib/types
 # this same binary) don't leak into the assertions below.
 resetPackageRegistry()
 
-package multiArtifactGreet:
+package `multi_artifact_greet`:
   uses:
     "nim >=2.2 <3.0"
   library greet
 
-package multiArtifactHello:
+package `multi_artifact_hello`:
   uses:
     "nim >=2.2 <3.0"
   executable hello:
@@ -51,8 +51,8 @@ suite "ProjectInterfaceArtifact multi-package merge":
     let artifact = artifactFromRegisteredDsl()
     let pi = artifact.projectInterface
     # The first package in source order seeds the envelope's identity.
-    check pi.projectName == "multiArtifactGreet"
-    check pi.packageName == "multiArtifactGreet"
+    check pi.projectName == "multi_artifact_greet"
+    check pi.packageName == "multi_artifact_greet"
     # ...but both packages contribute their members.
     check pi.publicLibraries.len == 1
     check pi.publicLibraries[0].name == "greet"

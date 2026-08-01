@@ -1,0 +1,103 @@
+name: Configure repro binary-cache publish
+description: >
+  Enable reprobuild's engine publisher to push `repro build` action outputs to
+  the fleet binary cache (https://repro-cache.metacraft-labs.com). Writes the
+  signing key/cert from the repo secrets to $RUNNER_TEMP and exports the three
+  REPRO_BINARY_CACHE_* env vars to $GITHUB_ENV, so any subsequent `repro build`
+  step in the same job publishes its per-platform outputs to the cache.
+
+  This is the release.yml analogue of the inline publish snippet the ci.yml
+  "Build codetracer ct" step already uses (write key/cert to a temp file, export
+  REPRO_BINARY_CACHE_URL / _KEY_PATH / _CERT_PATH). Factoring it into a composite
+  action lets every per-platform release build reuse ONE implementation instead
+  of duplicating a bash + a pwsh snippet per matrix leg.
+
+  Best-effort by design, matching the engine's "key-empty disables" behavior:
+    - When either secret is empty (fork PRs receive no secrets), NO env vars are
+      exported and reprobuild's publisher stays disabled, so a missing key never
+      fails the build.
+    - A publish POST failure at runtime (e.g. a runner not on the NetBird VPN
+      that fronts the cache) is likewise non-fatal — the engine publisher POSTs
+      best-effort and the build proceeds.
+
+  Cross-platform: a bash step handles Linux/macOS runners and a pwsh step handles
+  Windows runners (selected via runner.os), so the identical wiring activates on
+  every {linux,macos,windows} x {x64,arm64} runner the matrix schedules — the
+  moment a matrix leg for a currently-missing os x arch runner is added, its
+  build publishes too, with no further change here.
+
+inputs:
+  publish-key:
+    description: >
+      PEM signing key for the CI publisher (repo secret REPRO_PUBLISH_KEY).
+      Empty disables publishing (best-effort no-op).
+    required: false
+    default: ""
+  publish-cert:
+    description: >
+      Signing cert for the CI publisher (repo secret REPRO_PUBLISH_CERT).
+      Empty disables publishing (best-effort no-op).
+    required: false
+    default: ""
+  cache-url:
+    description: Binary-cache publish endpoint.
+    required: false
+    default: "https://repro-cache.metacraft-labs.com"
+
+runs:
+  using: composite
+  steps:
+    - name: Configure repro binary-cache publish (Linux/macOS)
+      if: ${{ runner.os != 'Windows' }}
+      shell: bash
+      env:
+        REPRO_PUBLISH_KEY: ${{ inputs.publish-key }}
+        REPRO_PUBLISH_CERT: ${{ inputs.publish-cert }}
+        REPRO_BINARY_CACHE_URL: ${{ inputs.cache-url }}
+      run: |
+        set -euo pipefail
+        # Mirror ci.yml's "Build codetracer ct" publish gate exactly: only enable
+        # when BOTH the key and cert are present; otherwise leave the publisher
+        # disabled (fork PRs get no secrets -> empty -> no publish, build stays green).
+        if [ -n "${REPRO_PUBLISH_KEY:-}" ] && [ -n "${REPRO_PUBLISH_CERT:-}" ]; then
+          umask 077
+          key_path="$RUNNER_TEMP/repro-publish.key"
+          cert_path="$RUNNER_TEMP/repro-publish.cert"
+          printf '%s' "$REPRO_PUBLISH_KEY" > "$key_path"
+          printf '%s' "$REPRO_PUBLISH_CERT" > "$cert_path"
+          {
+            echo "REPRO_BINARY_CACHE_URL=${REPRO_BINARY_CACHE_URL}"
+            echo "REPRO_BINARY_CACHE_KEY_PATH=${key_path}"
+            echo "REPRO_BINARY_CACHE_CERT_PATH=${cert_path}"
+          } >> "$GITHUB_ENV"
+          echo "repro binary-cache publish ENABLED -> ${REPRO_BINARY_CACHE_URL}"
+        else
+          echo "no REPRO_PUBLISH_KEY/_CERT; binary-cache publish disabled"
+        fi
+
+    - name: Configure repro binary-cache publish (Windows)
+      if: ${{ runner.os == 'Windows' }}
+      shell: pwsh
+      env:
+        REPRO_PUBLISH_KEY: ${{ inputs.publish-key }}
+        REPRO_PUBLISH_CERT: ${{ inputs.publish-cert }}
+        REPRO_BINARY_CACHE_URL: ${{ inputs.cache-url }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        # Same gate as the POSIX leg: both secrets required, else publish stays off.
+        if (-not [string]::IsNullOrEmpty($env:REPRO_PUBLISH_KEY) -and `
+            -not [string]::IsNullOrEmpty($env:REPRO_PUBLISH_CERT)) {
+          $keyPath  = Join-Path $env:RUNNER_TEMP 'repro-publish.key'
+          $certPath = Join-Path $env:RUNNER_TEMP 'repro-publish.cert'
+          # Write the PEM bytes verbatim: no BOM and no appended newline, so the
+          # key/cert parse byte-exact (Set-Content/Out-File would add a BOM/EOL).
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText($keyPath,  $env:REPRO_PUBLISH_KEY,  $utf8NoBom)
+          [System.IO.File]::WriteAllText($certPath, $env:REPRO_PUBLISH_CERT, $utf8NoBom)
+          Add-Content -Path $env:GITHUB_ENV -Value "REPRO_BINARY_CACHE_URL=$env:REPRO_BINARY_CACHE_URL"
+          Add-Content -Path $env:GITHUB_ENV -Value "REPRO_BINARY_CACHE_KEY_PATH=$keyPath"
+          Add-Content -Path $env:GITHUB_ENV -Value "REPRO_BINARY_CACHE_CERT_PATH=$certPath"
+          Write-Host "repro binary-cache publish ENABLED -> $env:REPRO_BINARY_CACHE_URL"
+        } else {
+          Write-Host "no REPRO_PUBLISH_KEY/_CERT; binary-cache publish disabled"
+        }

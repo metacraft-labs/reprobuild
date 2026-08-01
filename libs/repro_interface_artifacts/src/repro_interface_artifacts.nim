@@ -1,5 +1,5 @@
 import std/[algorithm, options, os, osproc, sequtils, sets, streams, strutils,
-            tables, times]
+            tables, tempfiles, times]
 
 import cbor
 import repro_core
@@ -8,11 +8,17 @@ import repro_domain_types
 import repro_hash
 import repro_project_dsl
 
-const BuiltNimCompilerPath = staticExec("command -v nim").strip()
-const BuiltCCompilerPath =
-  staticExec("command -v cc || command -v gcc || true").strip()
+proc sanitizeStaticExec(val: string): string =
+  var cleanLines: seq[string] = @[]
+  for line in val.splitLines:
+    let s = line.strip()
+    if s.len > 0 and not s.startsWith("io-mon:"):
+      cleanLines.add(s)
+  if cleanLines.len > 0: cleanLines[^1] else: ""
 
-var interfaceTempNonce = uint64(getCurrentProcessId())
+const BuiltNimCompilerPath = sanitizeStaticExec(staticExec("command -v nim"))
+const BuiltCCompilerPath =
+  sanitizeStaticExec(staticExec("command -v cc || command -v gcc || true"))
 
 type
   InterfaceEnvelopeKind* = enum
@@ -51,6 +57,64 @@ type
   InterfaceLibrary* = object
     name*: string
     kind*: LibraryKind
+    exportedPath*: string
+      ## Cross-Repo-Source-Consumption SC-11 (§4.2a.4): the producer-relative
+      ## Nim library source root a consumer threads onto its ``nim c --path:``.
+      ## Empty ( = convention default ``"src"``) so existing producers work
+      ## unchanged; carried across lock-pinned fetches on the interface so a
+      ## non-standard layout is known from the fetched interface alone.
+    location*: SourceLocation
+
+  InterfaceResourceDeterminism* = enum
+    ## RP4: the determinism class carried on an ``InterfaceResource``,
+    ## a self-contained mirror (by ordinal) of
+    ## ``repro_home_resources``'s ``ResourceDeterminism`` so the codec
+    ## does not pull the home-resources / blake3 closure into the
+    ## interface-artifacts library. The ``resourceType`` DSL macro maps
+    ## the generic-lane ``ResourceDeterminism`` onto this enum at
+    ## interface-lifting time. Ordinals MUST stay aligned with
+    ## ``ResourceDeterminism`` (rdStrong=0 … rdVolatile=3).
+    irdStrong        ## bytewise reproducible; cross-machine substitutable
+    irdWeak          ## reproducible up to declared noise
+    irdHostBound     ## realization is machine-specific
+    irdVolatile      ## inherently non-reproducible
+
+  InterfaceResourceAttr* = object
+    ## RP4: one typed attribute of a resource contract — the field name
+    ## and its Nim type, as declared by an ``attr <name>: <type>`` line
+    ## in the ``resourceType`` block. Mirrors ``InterfaceParam`` in
+    ## spirit: it is the typed-wrapper parameter surface a consumer
+    ## binds against, so renaming a field (or changing its type) SHIFTS
+    ## the exported schema and the interface fingerprint.
+    name*: string
+    nimType*: string
+    location*: SourceLocation
+
+  InterfaceResourceEntrypoints* = object
+    ## RP4: the driver ops a resource provider exposes as protocol entry
+    ## points (v1 §5). Each is the ``providerEntrypointId`` a consumer's
+    ## resource op lowers to an ``InvokeEntryPoint`` against. ``plan`` is
+    ## carried as a first-class protocol op even though the generic
+    ## native driver folds planning into ``reconcileResources`` — the
+    ## contract shape is the protocol surface, not the native vtable.
+    identity*: string
+    digest*: string
+    observe*: string
+    plan*: string
+    apply*: string
+
+  InterfaceResource* = object
+    ## RP4 (Provider-Runtime-Protocol-v1 §5): a resource type crossing
+    ## the interface boundary as a typed contract, alongside
+    ## ``InterfaceExecutable`` / ``InterfaceLibrary``. Carries the stable
+    ## ``typeId``, the determinism class (part of the contract so a
+    ## consumer can reason about a resource edge WITHOUT invoking the
+    ## driver), the typed attribute schema, and the entry-point
+    ## descriptors for the driver ops.
+    typeId*: string
+    determinism*: InterfaceResourceDeterminism
+    attributes*: seq[InterfaceResourceAttr]
+    entrypoints*: InterfaceResourceEntrypoints
     location*: SourceLocation
 
   InterfaceNixProvisioning* = object
@@ -109,6 +173,11 @@ type
     defaultToolProvisioning*: string
     publicExecutables*: seq[InterfaceExecutable]
     publicLibraries*: seq[InterfaceLibrary]
+    publicResources*: seq[InterfaceResource]
+      ## RP4 (Provider-Runtime-Protocol-v1 §5): resource types this
+      ## package exposes as typed contracts, lifted from ``resourceType``
+      ## declarations. Encoded in the v12 codec AFTER ``publicLibraries``
+      ## and BEFORE ``toolUses``; v<12 readers treat it as empty.
     toolUses*: seq[InterfaceToolUse]
     publicSignatureDependencies*: seq[string]
     location*: SourceLocation
@@ -142,6 +211,15 @@ type
     compileEdge*: ProviderCompileEdge
     interfaceFingerprint*: ContentDigest
     providerFingerprint*: ContentDigest
+    providerArtifactId*: ContentDigest
+      ## RP1: the Provider-Runtime-Protocol v1 ``ProviderArtifactId`` — the
+      ## content-addressed identity two consumers of the same dependency
+      ## version converge on (the sharing key). See
+      ## ``computeProviderArtifactId``.
+    providerCompileActionKey*: ContentDigest
+      ## RP1: the v1 ``ProviderCompileActionKey`` used as the engine edge's
+      ## action key. See ``computeProviderCompileActionKey``.
+    workDir*: string
 
   ProviderCompileArtifact* = object
     inputSources*: seq[string]
@@ -152,6 +230,35 @@ type
     providerFingerprint*: ContentDigest
     outputBinaryFingerprint*: ContentDigest
     executionResult*: ProviderCompileExecutionResult
+
+  InterfaceLiftEdge* = object
+    ## TI1: the engine build-edge that LIFTS a producer's interface once into
+    ## a cached, content-addressed ``ProjectInterfaceArtifact``. Mirrors
+    ## ``ProviderCompileEdge`` — a declared-input/-output edge whose action key
+    ## is the ``InterfaceLiftActionKey`` (canonical source inputs + compiler
+    ## identity + interface format version), so a rebuild with an unchanged
+    ## lift input set is a cache HIT (the lift is not re-run per consumer).
+    actionSpec*: ActionSpec
+    declaredInputs*: seq[string]
+    declaredOutputs*: seq[string]
+    actionFingerprint*: ContentDigest
+
+  InterfaceLiftPlan* = object
+    ## TI1: the plan for a producer's interface-lift edge. Analogous to
+    ## ``ProviderCompilePlan``. ``interfaceLiftActionKey`` decides the engine
+    ## action-cache HIT/re-run (input-keyed like the RP1
+    ## ``ProviderCompileActionKey``); ``interfaceFingerprint`` is the OUTPUT
+    ## identity — the hash of the resulting ``ProjectInterface``'s PUBLIC
+    ## surface only, which is what re-keys downstream consumers (TI2/TI3).
+    modulePath*: string
+    resourceModule*: string
+    extraPaths*: seq[string]
+    artifactPath*: string
+    stubPath*: string
+    inputSources*: seq[string]
+    liftEdge*: InterfaceLiftEdge
+    interfaceLiftActionKey*: ContentDigest
+    workDir*: string
 
   FileStampKind = enum
     fskMissing
@@ -181,11 +288,14 @@ type
 
   ProviderFreshnessCacheRecord = object
     modulePath: string
+    workDir: string
     outputBinaryPath: string
     sourceStamps: seq[FileStamp]
+    reproLibStamps: seq[FileStamp]
     outputBinaryStamp: FileStamp
     interfaceFingerprint: ContentDigest
     providerFingerprint: ContentDigest
+    reproLibFingerprint: string
     outputBinaryFingerprint: ContentDigest
 
   InterfaceArtifactWarmStats* = object
@@ -208,8 +318,30 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 10'u16
-    ## v10 (current): adds ``InterfaceTarballProvisioning.cpu`` /
+  EnvelopeVersion = 12'u16
+    ## v12 (current): RP4 (Provider-Runtime-Protocol-v1 §5) adds
+    ##                ``ProjectInterface.publicResources`` — resource
+    ##                types lifted from ``resourceType`` declarations.
+    ##                Encoded as a ``u32`` count + per-entry
+    ##                ``InterfaceResource`` rows appended to the interface
+    ##                payload AFTER the ``publicLibraries`` block and
+    ##                BEFORE the ``toolUses`` block, matching the source
+    ##                field order. v11 readers reject v12 envelopes (the
+    ##                ``version > EnvelopeVersion`` check); v12 readers
+    ##                accept v<12 by treating ``publicResources`` as an
+    ##                empty seq (``decodeInterfacePayload`` gates the read
+    ##                on ``version >= 12``), mirroring the v8→v9
+    ##                ``publicLibraries`` precedent.
+    ## v11: Cross-Repo-Source-Consumption SC-11 (§4.2a.4) adds
+    ##                ``InterfaceLibrary.exportedPath`` — the producer-relative
+    ##                Nim library source root threaded onto a consumer's
+    ##                ``nim c --path:``. Encoded as one string appended AFTER
+    ##                ``kind`` and BEFORE ``location`` in ``writeLibrary``. v10
+    ##                (and earlier) payloads decode with an empty
+    ##                ``exportedPath`` ( = convention default ``"src"``), so
+    ##                existing producers round-trip unchanged; ``readLibrary``
+    ##                gates the read on ``version >= 11``.
+    ## v10: adds ``InterfaceTarballProvisioning.cpu`` /
     ##                ``InterfaceTarballProvisioning.os`` per-platform
     ##                target fields. Encoded as two strings appended
     ##                AFTER ``lockIdentity`` and BEFORE ``location`` in
@@ -230,7 +362,7 @@ const
   InterfaceExtractionCacheRecordMagic =
     "reprobuild.interfaceExtractionCache.v2"
   ProviderFreshnessCacheRecordMagic =
-    "reprobuild.providerFreshnessCache.v1"
+    "reprobuild.providerFreshnessCache.v2"
 
 var cachedNimCompilerPath = ""
 var processWarmInterfaceMetadata =
@@ -380,21 +512,36 @@ proc providerCompileEdge*(inputSources: openArray[string];
     declaredOutputs: declaredOutputs,
     actionFingerprint: fingerprint)
 
-proc writeLocation(outp: var seq[byte]; loc: SourceLocation) =
-  outp.writeString(loc.file)
-  outp.writeU32Le(uint32(max(loc.line, 0)))
+proc writeLocation(outp: var seq[byte]; loc: SourceLocation;
+                   forFingerprint = false) =
+  ## Serialises a ``SourceLocation``. When ``forFingerprint`` is true the
+  ## location is normalised to a fixed sentinel (empty file, line 0) so the
+  ## InterfaceFingerprint depends only on the SEMANTIC public contract and is
+  ## invariant to WHERE a public decl is written. A private-impl edit that
+  ## shifts line numbers (a longer driver body, a comment before a
+  ## ``resourceType`` block) must not change the fingerprint. The artifact
+  ## round-trip path (``encodeProjectInterfaceArtifact``) keeps
+  ## ``forFingerprint = false`` so real locations are preserved for
+  ## diagnostics.
+  if forFingerprint:
+    outp.writeString("")
+    outp.writeU32Le(0'u32)
+  else:
+    outp.writeString(loc.file)
+    outp.writeU32Le(uint32(max(loc.line, 0)))
 
 proc readLocation(bytes: openArray[byte]; pos: var int): SourceLocation =
   SourceLocation(file: readString(bytes, pos), line: int(readU32Le(bytes, pos)))
 
-proc writeParam(outp: var seq[byte]; param: InterfaceParam) =
+proc writeParam(outp: var seq[byte]; param: InterfaceParam;
+                forFingerprint = false) =
   outp.writeString(param.name)
   outp.writeString(param.nimType)
   outp.writeByte(byte(ord(param.kind)))
   outp.writeU32Le(uint32(param.position))
   outp.writeString(param.alias)
   outp.writeByte(if param.required: 1'u8 else: 0'u8)
-  outp.writeLocation(param.location)
+  outp.writeLocation(param.location, forFingerprint)
 
 proc readParam(bytes: openArray[byte]; pos: var int): InterfaceParam =
   result.name = readString(bytes, pos)
@@ -408,13 +555,14 @@ proc readParam(bytes: openArray[byte]; pos: var int): InterfaceParam =
   result.required = readByte(bytes, pos) == 1'u8
   result.location = readLocation(bytes, pos)
 
-proc writeCommand(outp: var seq[byte]; cmd: InterfaceCommand) =
+proc writeCommand(outp: var seq[byte]; cmd: InterfaceCommand;
+                  forFingerprint = false) =
   outp.writeString(cmd.name)
   outp.writeString(cmd.providerEntrypointId)
-  outp.writeLocation(cmd.location)
+  outp.writeLocation(cmd.location, forFingerprint)
   outp.writeU32Le(uint32(cmd.params.len))
   for param in cmd.params:
-    outp.writeParam(param)
+    outp.writeParam(param, forFingerprint)
 
 proc readCommand(bytes: openArray[byte]; pos: var int): InterfaceCommand =
   result.name = readString(bytes, pos)
@@ -425,13 +573,14 @@ proc readCommand(bytes: openArray[byte]; pos: var int): InterfaceCommand =
   for i in 0 ..< count:
     result.params[i] = readParam(bytes, pos)
 
-proc writeExecutable(outp: var seq[byte]; exe: InterfaceExecutable) =
+proc writeExecutable(outp: var seq[byte]; exe: InterfaceExecutable;
+                     forFingerprint = false) =
   outp.writeString(exe.exportName)
   outp.writeString(exe.binaryName)
-  outp.writeLocation(exe.location)
+  outp.writeLocation(exe.location, forFingerprint)
   outp.writeU32Le(uint32(exe.commands.len))
   for cmd in exe.commands:
-    outp.writeCommand(cmd)
+    outp.writeCommand(cmd, forFingerprint)
 
 proc readExecutable(bytes: openArray[byte]; pos: var int): InterfaceExecutable =
   result.exportName = readString(bytes, pos)
@@ -442,21 +591,68 @@ proc readExecutable(bytes: openArray[byte]; pos: var int): InterfaceExecutable =
   for i in 0 ..< count:
     result.commands[i] = readCommand(bytes, pos)
 
-proc writeLibrary(outp: var seq[byte]; lib: InterfaceLibrary) =
+proc writeLibrary(outp: var seq[byte]; lib: InterfaceLibrary;
+                  version = EnvelopeVersion; forFingerprint = false) =
   outp.writeString(lib.name)
   outp.writeByte(byte(ord(lib.kind)))
-  outp.writeLocation(lib.location)
+  # v11 (SC-11): ``exportedPath`` appended AFTER ``kind`` and BEFORE
+  # ``location``; v<11 readers never reach it (gated on ``version >= 11``).
+  if version >= 11'u16:
+    outp.writeString(lib.exportedPath)
+  outp.writeLocation(lib.location, forFingerprint)
 
-proc readLibrary(bytes: openArray[byte]; pos: var int): InterfaceLibrary =
+proc readLibrary(bytes: openArray[byte]; pos: var int;
+                 version = EnvelopeVersion): InterfaceLibrary =
   result.name = readString(bytes, pos)
   let kind = readByte(bytes, pos)
   if kind > byte(ord(lkHeaderOnly)):
     raiseEnvelopeError(eeMalformed, "invalid interface library kind")
   result.kind = LibraryKind(kind)
+  # v11 (SC-11): ``exportedPath``. v<11 envelopes have no such field — leave
+  # it empty (the splice seam then applies the ``"src"`` convention default).
+  if version >= 11'u16:
+    result.exportedPath = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
+proc writeResource(outp: var seq[byte]; res: InterfaceResource;
+                   forFingerprint = false) =
+  outp.writeString(res.typeId)
+  outp.writeByte(byte(ord(res.determinism)))
+  outp.writeString(res.entrypoints.identity)
+  outp.writeString(res.entrypoints.digest)
+  outp.writeString(res.entrypoints.observe)
+  outp.writeString(res.entrypoints.plan)
+  outp.writeString(res.entrypoints.apply)
+  outp.writeLocation(res.location, forFingerprint)
+  outp.writeU32Le(uint32(res.attributes.len))
+  for attr in res.attributes:
+    outp.writeString(attr.name)
+    outp.writeString(attr.nimType)
+    outp.writeLocation(attr.location, forFingerprint)
+
+proc readResource(bytes: openArray[byte]; pos: var int): InterfaceResource =
+  result.typeId = readString(bytes, pos)
+  let determinism = readByte(bytes, pos)
+  if determinism > byte(ord(irdVolatile)):
+    raiseEnvelopeError(eeMalformed, "invalid interface resource determinism")
+  result.determinism = InterfaceResourceDeterminism(determinism)
+  result.entrypoints.identity = readString(bytes, pos)
+  result.entrypoints.digest = readString(bytes, pos)
+  result.entrypoints.observe = readString(bytes, pos)
+  result.entrypoints.plan = readString(bytes, pos)
+  result.entrypoints.apply = readString(bytes, pos)
+  result.location = readLocation(bytes, pos)
+  let attrCount = int(readU32Le(bytes, pos))
+  result.attributes = newSeq[InterfaceResourceAttr](attrCount)
+  for i in 0 ..< attrCount:
+    result.attributes[i] = InterfaceResourceAttr(
+      name: readString(bytes, pos),
+      nimType: readString(bytes, pos),
+      location: readLocation(bytes, pos))
+
 proc writeNixProvisioning(outp: var seq[byte];
-                          provisioning: InterfaceNixProvisioning) =
+                          provisioning: InterfaceNixProvisioning;
+                          forFingerprint = false) =
   outp.writeString(provisioning.packageName)
   outp.writeString(provisioning.selector)
   outp.writeString(provisioning.executablePath)
@@ -466,7 +662,7 @@ proc writeNixProvisioning(outp: var seq[byte];
   outp.writeString(provisioning.nixpkgsNarHash)
   outp.writeString(provisioning.packageId)
   outp.writeString(provisioning.lockIdentity)
-  outp.writeLocation(provisioning.location)
+  outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
                          version: uint16): InterfaceNixProvisioning =
@@ -484,7 +680,8 @@ proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
   result.location = readLocation(bytes, pos)
 
 proc writeTarballProvisioning(outp: var seq[byte];
-                              provisioning: InterfaceTarballProvisioning) =
+                              provisioning: InterfaceTarballProvisioning;
+                              forFingerprint = false) =
   outp.writeString(provisioning.packageName)
   outp.writeString(provisioning.url)
   outp.writeStringSeq(provisioning.mirrors)
@@ -496,7 +693,7 @@ proc writeTarballProvisioning(outp: var seq[byte];
   outp.writeString(provisioning.lockIdentity)
   outp.writeString(provisioning.cpu)
   outp.writeString(provisioning.os)
-  outp.writeLocation(provisioning.location)
+  outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
                              version: uint16): InterfaceTarballProvisioning =
@@ -518,7 +715,8 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
   result.location = readLocation(bytes, pos)
 
 proc writeScoopProvisioning(outp: var seq[byte];
-                            provisioning: InterfaceScoopProvisioning) =
+                            provisioning: InterfaceScoopProvisioning;
+                            forFingerprint = false) =
   outp.writeString(provisioning.packageName)
   outp.writeString(provisioning.bucket)
   outp.writeString(provisioning.app)
@@ -530,7 +728,7 @@ proc writeScoopProvisioning(outp: var seq[byte];
   outp.writeByte(byte(ord(provisioning.requiresExecutionProfileChecksum)))
   outp.writeString(provisioning.packageId)
   outp.writeString(provisioning.lockIdentity)
-  outp.writeLocation(provisioning.location)
+  outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readScoopProvisioning(bytes: openArray[byte]; pos: var int):
     InterfaceScoopProvisioning =
@@ -547,21 +745,22 @@ proc readScoopProvisioning(bytes: openArray[byte]; pos: var int):
   result.lockIdentity = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
-proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse) =
+proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
+                  forFingerprint = false) =
   outp.writeString(useDef.rawConstraint)
   outp.writeString(useDef.packageSelector)
   outp.writeString(useDef.executableName)
   outp.writeStringSeq(useDef.policyPath)
   outp.writeU32Le(uint32(useDef.nixProvisioning.len))
   for provisioning in useDef.nixProvisioning:
-    outp.writeNixProvisioning(provisioning)
+    outp.writeNixProvisioning(provisioning, forFingerprint)
   outp.writeU32Le(uint32(useDef.tarballProvisioning.len))
   for provisioning in useDef.tarballProvisioning:
-    outp.writeTarballProvisioning(provisioning)
+    outp.writeTarballProvisioning(provisioning, forFingerprint)
   outp.writeU32Le(uint32(useDef.scoopProvisioning.len))
   for provisioning in useDef.scoopProvisioning:
-    outp.writeScoopProvisioning(provisioning)
-  outp.writeLocation(useDef.location)
+    outp.writeScoopProvisioning(provisioning, forFingerprint)
+  outp.writeLocation(useDef.location, forFingerprint)
 
 proc readToolUse(bytes: openArray[byte]; pos: var int;
                  version: uint16): InterfaceToolUse =
@@ -589,8 +788,17 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
       result.scoopProvisioning[i] = readScoopProvisioning(bytes, pos)
   result.location = readLocation(bytes, pos)
 
-proc encodeInterfacePayload*(value: ProjectInterface): seq[byte] =
+proc encodeInterfacePayload*(value: ProjectInterface;
+                             version = EnvelopeVersion;
+                             forFingerprint = false): seq[byte] =
   ## Encodes the fingerprinted portion of the project-interface payload.
+  ##
+  ## When ``forFingerprint`` is true every ``SourceLocation`` is normalised to
+  ## a fixed sentinel (see ``writeLocation``) so the InterfaceFingerprint is
+  ## invariant to WHERE the public surface is written — a private-impl edit
+  ## that only shifts line numbers must not change the fingerprint. The
+  ## on-disk artifact round-trip path leaves ``forFingerprint = false`` so real
+  ## locations are preserved for diagnostics and decode.
   ## ``standardBuildEligible`` is deliberately NOT serialised here so it
   ## does NOT contribute to ``interfaceFingerprint``: the flag is a
   ## function of the DSL source's structural shape (presence of a
@@ -603,22 +811,32 @@ proc encodeInterfacePayload*(value: ProjectInterface): seq[byte] =
   result.writeString(value.packageName)
   result.writeString(value.defaultToolProvisioning)
   result.writeStringSeq(value.publicSignatureDependencies)
-  result.writeLocation(value.location)
+  result.writeLocation(value.location, forFingerprint)
   result.writeU32Le(uint32(value.publicExecutables.len))
   for exe in value.publicExecutables:
-    result.writeExecutable(exe)
+    result.writeExecutable(exe, forFingerprint)
   # v9: publicLibraries are encoded AFTER publicExecutables and BEFORE
   # toolUses so the field order matches the source-of-truth in the
   # ``ProjectInterface`` object literal above. v8 envelopes encode no
   # libraries block at all; ``decodeInterfacePayload`` gates this read
   # on ``version >= 9'u16`` so v8 on-disk artifacts load cleanly under
   # the v9 reader.
-  result.writeU32Le(uint32(value.publicLibraries.len))
-  for lib in value.publicLibraries:
-    result.writeLibrary(lib)
+  if version >= 9'u16:
+    result.writeU32Le(uint32(value.publicLibraries.len))
+    for lib in value.publicLibraries:
+      result.writeLibrary(lib, version, forFingerprint)
+  # v12 (RP4): publicResources are encoded AFTER publicLibraries and
+  # BEFORE toolUses so the field order matches the ``ProjectInterface``
+  # object literal. v<12 envelopes encode no resources block at all;
+  # ``decodeInterfacePayload`` gates this read on ``version >= 12'u16``
+  # so v11 on-disk artifacts load cleanly under the v12 reader.
+  if version >= 12'u16:
+    result.writeU32Le(uint32(value.publicResources.len))
+    for res in value.publicResources:
+      result.writeResource(res, forFingerprint)
   result.writeU32Le(uint32(value.toolUses.len))
   for useDef in value.toolUses:
-    result.writeToolUse(useDef)
+    result.writeToolUse(useDef, forFingerprint)
 
 proc decodeInterfacePayload*(bytes: openArray[byte];
                              version = EnvelopeVersion): ProjectInterface =
@@ -639,7 +857,14 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
     let libCount = int(readU32Le(bytes, pos))
     result.publicLibraries = newSeq[InterfaceLibrary](libCount)
     for i in 0 ..< libCount:
-      result.publicLibraries[i] = readLibrary(bytes, pos)
+      result.publicLibraries[i] = readLibrary(bytes, pos, version)
+  # v12 added publicResources between libraries and toolUses. v<12
+  # envelopes have no resource block — leave the seq empty.
+  if version >= 12'u16:
+    let resCount = int(readU32Le(bytes, pos))
+    result.publicResources = newSeq[InterfaceResource](resCount)
+    for i in 0 ..< resCount:
+      result.publicResources[i] = readResource(bytes, pos)
   let useCount = int(readU32Le(bytes, pos))
   result.toolUses = newSeq[InterfaceToolUse](useCount)
   for i in 0 ..< useCount:
@@ -647,8 +872,20 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
   if pos != bytes.len:
     raiseEnvelopeError(eeMalformed, "trailing interface payload bytes")
 
+proc interfaceFingerprint(value: ProjectInterface;
+                          version: uint16): ContentDigest =
+  # TI3: the InterfaceFingerprint is a projection over the SEMANTIC public
+  # contract only. ``forFingerprint = true`` normalises every SourceLocation
+  # to a fixed sentinel so a private-impl edit that merely shifts line numbers
+  # (a longer driver body, a comment before a ``resourceType`` block) leaves
+  # the fingerprint UNCHANGED. The on-disk artifact serialisation
+  # (``encodeProjectInterfaceArtifact``) keeps real locations for diagnostics.
+  blake3DomainDigest(
+    encodeInterfacePayload(value, version, forFingerprint = true),
+    hdMetadataEnvelope)
+
 proc interfaceFingerprint*(value: ProjectInterface): ContentDigest =
-  blake3DomainDigest(encodeInterfacePayload(value), hdMetadataEnvelope)
+  interfaceFingerprint(value, EnvelopeVersion)
 
 proc artifactFor*(value: ProjectInterface): ProjectInterfaceArtifact =
   ProjectInterfaceArtifact(
@@ -698,13 +935,26 @@ proc decodeProjectInterfaceArtifact*(bytes: openArray[
   let interfacePayloadLen = payloadLength - 34 - standardBuildEligibleBytes
   if interfacePayloadLen < 0:
     raiseEnvelopeError(eeMalformed, "truncated interface fingerprint")
+  let interfacePayloadStart = pos
   result.projectInterface =
     decodeInterfacePayload(bytes.toOpenArray(pos, pos + interfacePayloadLen - 1),
       version)
   pos += interfacePayloadLen
   result.interfaceFingerprint = readDigest(bytes, pos)
-  if result.interfaceFingerprint != interfaceFingerprint(
-      result.projectInterface):
+  let semanticFingerprint = interfaceFingerprint(result.projectInterface, version)
+  # TI3 made interface fingerprints location-independent without changing the
+  # v12 wire version. Artifacts written before TI3 therefore carry the digest
+  # of the exact (location-bearing) interface payload, while current artifacts
+  # carry the normalized semantic digest. Accept either authentic shape so
+  # existing caches remain readable; a digest matching neither still fails
+  # closed. Hashing the original payload bytes (rather than a re-encoding) also
+  # preserves compatibility with every older supported envelope version.
+  let legacyWireFingerprint = blake3DomainDigest(
+    bytes.toOpenArray(interfacePayloadStart,
+      interfacePayloadStart + interfacePayloadLen - 1),
+    hdMetadataEnvelope)
+  if result.interfaceFingerprint != semanticFingerprint and
+      result.interfaceFingerprint != legacyWireFingerprint:
     raiseEnvelopeError(eeMalformed, "interface fingerprint mismatch")
   if version >= 8'u16:
     result.projectInterface.standardBuildEligible =
@@ -862,11 +1112,14 @@ proc encodeProviderFreshnessCacheRecord(
     record: ProviderFreshnessCacheRecord): seq[byte] =
   result.writeString(ProviderFreshnessCacheRecordMagic)
   result.writeString(record.modulePath)
+  result.writeString(record.workDir)
   result.writeString(record.outputBinaryPath)
   result.writeFileStamps(record.sourceStamps)
+  result.writeFileStamps(record.reproLibStamps)
   result.writeFileStamp(record.outputBinaryStamp)
   result.writeDigest(record.interfaceFingerprint)
   result.writeDigest(record.providerFingerprint)
+  result.writeString(record.reproLibFingerprint)
   result.writeDigest(record.outputBinaryFingerprint)
 
 proc decodeProviderFreshnessCacheRecord(bytes: openArray[byte]):
@@ -876,11 +1129,14 @@ proc decodeProviderFreshnessCacheRecord(bytes: openArray[byte]):
   if magic != ProviderFreshnessCacheRecordMagic:
     raiseEnvelopeError(eeUnknownType, "not a provider freshness cache record")
   result.modulePath = readString(bytes, pos)
+  result.workDir = readString(bytes, pos)
   result.outputBinaryPath = readString(bytes, pos)
   result.sourceStamps = readFileStamps(bytes, pos)
+  result.reproLibStamps = readFileStamps(bytes, pos)
   result.outputBinaryStamp = readFileStamp(bytes, pos)
   result.interfaceFingerprint = readDigest(bytes, pos)
   result.providerFingerprint = readDigest(bytes, pos)
+  result.reproLibFingerprint = readString(bytes, pos)
   result.outputBinaryFingerprint = readDigest(bytes, pos)
   if pos != bytes.len:
     raiseEnvelopeError(eeMalformed, "trailing provider freshness cache bytes")
@@ -1011,7 +1267,34 @@ proc toProjectInterface*(pkg: PackageDef;
     result.publicLibraries.add(InterfaceLibrary(
       name: lib.name,
       kind: lib.kind,
+      exportedPath: lib.exportedPath,
       location: SourceLocation(file: lib.sourceFile, line: lib.sourceLine)))
+  # RP4 (Provider-Runtime-Protocol-v1 §5): fold every ``resourceType``
+  # declaration into the interface. Resource types are declared at
+  # module scope (like ``registerResourceProvider``), not lexically
+  # inside a ``package`` block, so they live in a module-global registry
+  # rather than on ``PackageDef``; the extractor attributes the whole
+  # set to the (single) project being lifted. ``determinismOrd`` maps
+  # ordinal-for-ordinal onto ``InterfaceResourceDeterminism`` (both
+  # enums share the rdStrong=0 … rdVolatile=3 ordering).
+  for rt in registeredResourceTypeInterfaces():
+    var res = InterfaceResource(
+      typeId: rt.typeId,
+      determinism: InterfaceResourceDeterminism(rt.determinismOrd),
+      entrypoints: InterfaceResourceEntrypoints(
+        identity: rt.identityEntrypoint,
+        digest: rt.digestEntrypoint,
+        observe: rt.observeEntrypoint,
+        plan: rt.planEntrypoint,
+        apply: rt.applyEntrypoint),
+      location: SourceLocation(file: rt.sourceFile, line: rt.sourceLine))
+    for attr in rt.attributes:
+      res.attributes.add(InterfaceResourceAttr(
+        name: attr.name,
+        nimType: attr.nimType,
+        location: SourceLocation(file: attr.sourceFile,
+          line: attr.sourceLine)))
+    result.publicResources.add(res)
 
 proc sameSourceFile(a, b: string): bool =
   if a.len == 0 or b.len == 0:
@@ -1386,9 +1669,98 @@ proc commandProcName(cmdName: string): string =
     else:
       result.add("_" & toHex(ord(ch), 2).toLowerAscii())
 
+proc liftedAttrsTypeName(typeId: string): string =
+  ## M1b: the generated name of the consumer-importable attribute record type
+  ## for a lifted ``resourceType``. The producer's OWN attrs type name never
+  ## crosses the boundary (it is private to the producer module); the consumer
+  ## imports THIS regenerated type, whose field set (name + type, in
+  ## declaration order) is a structural mirror of the producer's — enough for
+  ## the ``attr_ssz`` codec, which is purely field-shaped. Derived from the
+  ## stable ``typeId`` so two producers of the same resource type converge on
+  ## the same generated name and a consumer can name it deterministically.
+  result = ""
+  for ch in typeId:
+    if ch.isAlphaNumeric():
+      result.add(if result.len == 0: ch.toUpperAscii() else: ch)
+    elif result.len > 0 and result[^1] != '_':
+      result.add('_')
+  if result.len == 0 or not (result[0].isAlphaAscii() or result[0] == '_'):
+    result = "R" & result
+  result.add("Attrs")
+
+proc regenerableAttrType(nimType: string): string =
+  ## M1b: the consumer-side field type to regenerate for a lifted attribute,
+  ## or ``""`` when the declared type cannot be reconstructed structurally from
+  ## the interface schema alone. Only the flat SSZ-clean field kinds the
+  ## ``attr_ssz`` envelope supports AND whose spelling is self-contained
+  ## (needs no producer-private type definition) round-trip here: ``string``,
+  ## ``seq[string]``, and the integer / ``bool`` scalars. An ``enum`` attribute
+  ## names a producer-private enum type, so it is NOT regenerable in the
+  ## consumer (its type name is undefined there) — such a resource is lifted as
+  ## a typed CONTRACT (schema in ``publicResources``) but no consumer-side codec
+  ## is emitted for it.
+  case nimType.normalize
+  of "string": "string"
+  of "seq[string]": "seq[string]"
+  of "bool": "bool"
+  of "int", "int8", "int16", "int32", "int64",
+     "uint", "uint8", "uint16", "uint32", "uint64": nimType.strip()
+  else: ""
+
+proc emitLiftedExtensionTypes(code: var string;
+                              resources: seq[InterfaceResource]) =
+  ## M1b (Typed-Extension-Interfaces §2 capstone unblock): for each lifted
+  ## ``resourceType``, emit into the consumer stub (a) a regenerated attribute
+  ## record type whose fields mirror the producer's, and (b) a module-init
+  ## ``registerExtension[<T>](typeId)`` so the CONSUMING compilation installs
+  ## the SSZ codec (M1a) in its OWN process WITHOUT linking the producer's
+  ## provider/driver module. This is what lets ``unmarshalAttrs`` re-hydrate an
+  ## out-of-tree provider's attrs box: the marshaller now exists because the
+  ## attrs TYPE crossed the interface boundary (like a typed tool), not the
+  ## implementation. A resource with a non-regenerable attribute (e.g. an
+  ## ``enum`` naming a producer-private type) is skipped — it still ships as a
+  ## typed contract in the artifact, just without a consumer-side codec.
+  var typeBlock = ""
+  var regBody = ""
+  for res in resources:
+    var fields = ""
+    var regenerable = true
+    for attr in res.attributes:
+      let fieldType = regenerableAttrType(attr.nimType)
+      if fieldType.len == 0 or not validGeneratedIdent(attr.name):
+        regenerable = false
+        break
+      fields.add("    " & attr.name & "*: " & fieldType & "\n")
+    if not regenerable:
+      continue
+    let attrsName = liftedAttrsTypeName(res.typeId)
+    typeBlock.add("  " & attrsName & "* = object\n")
+    if fields.len == 0:
+      typeBlock.add("    discard\n")
+    else:
+      typeBlock.add(fields)
+    regBody.add("  registerExtension[" & attrsName & "](" &
+      escForCode(res.typeId) & ")\n")
+  if typeBlock.len == 0:
+    return
+  code.add("type\n" & typeBlock & "\n")
+  code.add("proc registerLiftedExtensions*() =\n")
+  code.add("  ## M1b: install the SSZ codecs for this dependency's lifted\n")
+  code.add("  ## resource attribute types in the CONSUMING compilation, so\n")
+  code.add("  ## ``unmarshalAttrs`` can round-trip their attrs boxes without\n")
+  code.add("  ## linking the producer's provider module.\n")
+  code.add(regBody)
+  # Run once at module init so a mere ``import`` of the lifted interface is
+  # enough to make the dependency's resource attrs marshallable — matching how
+  # importing the producer module used to run its ``registerExtension`` side
+  # effect. The explicit proc above is also exported for callers that register
+  # into a freshly-cleared registry (e.g. per-test isolation).
+  code.add("\nregisterLiftedExtensions()\n\n")
+
 proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
   let pkg = artifact.projectInterface
   var code = "import repro_project_dsl\n\n"
+  emitLiftedExtensionTypes(code, pkg.publicResources)
   let typeName = titleIdent(pkg.packageName)
   let exeTypeName = typeName & "Executable"
   code.add("type\n  " & typeName & "* = object\n")
@@ -1444,6 +1816,38 @@ proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
         "\", @[" & argCalls.join(", ") & "])\n\n")
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path), code)
+
+when compileOption("threads"):
+  import std/locks
+
+  var spawnWorkingDirLock: Lock
+  spawnWorkingDirLock.initLock()
+
+template withSpawnWorkingDir(body: untyped) =
+  ## Serialise `startProcess(workingDir = ...)` against itself.
+  ##
+  ## On POSIX, `osproc.startProcess` applies `workingDir` by calling
+  ## `setCurrentDir` in the PARENT, spawning, and then restoring the old
+  ## directory (`startProcessAuxSpawn`; the posix_spawn path has no
+  ## per-spawn chdir file action). The current directory is a
+  ## process-global, so two threads spawning concurrently with different
+  ## `workingDir` values race: whichever chdir lands last wins for BOTH
+  ## children, and the second spawn's child silently inherits the first
+  ## one's directory.
+  ##
+  ## `compileProviderBinary` allocates a private compiler CWD per provider
+  ## compile precisely because `nim` writes its linker response files
+  ## (`*_linkerArgs.txt`) relative to the current directory — two compiles
+  ## landing in one directory clobber each other's response file. Holding
+  ## this lock across the whole `startProcess` call keeps the chdir /
+  ## spawn / restore triple atomic, so the private CWD is exclusive in
+  ## fact and not merely by luck. Only the spawn itself is serialised;
+  ## the compiles that follow still run concurrently.
+  when compileOption("threads"):
+    withLock spawnWorkingDirLock:
+      body
+  else:
+    body
 
 proc shellQuote(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
@@ -1521,23 +1925,25 @@ proc runCommand(command: openArray[string];
           else:
             raise newException(OSError,
               "pwsh/powershell required for long Windows command")
-      process = startProcess(powerShellExe,
-        args = @[
-          "-NoLogo",
-          "-NoProfile",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-File",
-          psScriptPath],
-        workingDir = cwd, options = {poUsePath})
+      withSpawnWorkingDir:
+        process = startProcess(powerShellExe,
+          args = @[
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            psScriptPath],
+          workingDir = cwd, options = {poUsePath})
     else:
       let scriptBody = "@echo off\r\n" &
         command.mapIt(cmdExeShellEscape(it)).join(" ") &
         " > " & cmdExeShellEscape(sinkPath) & " 2>&1\r\n"
       writeFile(extendedPath(scriptPath), scriptBody)
-      process = startProcess("cmd.exe",
-        args = @["/c", scriptPath],
-        workingDir = cwd, options = {poUsePath})
+      withSpawnWorkingDir:
+        process = startProcess("cmd.exe",
+          args = @["/c", scriptPath],
+          workingDir = cwd, options = {poUsePath})
     let exitCode = process.waitForExit()
     process.close()
     try:
@@ -1562,10 +1968,12 @@ proc runCommand(command: openArray[string];
       exitCode: exitCode,
       output: output)
   else:
-    let process = startProcess(command[0],
-      args = command[1 .. ^1],
-      workingDir = cwd,
-      options = {poUsePath, poStdErrToStdOut})
+    var process: Process
+    withSpawnWorkingDir:
+      process = startProcess(command[0],
+        args = command[1 .. ^1],
+        workingDir = cwd,
+        options = {poUsePath, poStdErrToStdOut})
     var output = ""
     if process.outputStream != nil:
       output = process.outputStream.readAll()
@@ -1659,6 +2067,11 @@ proc hostCCompilerPath(): string =
   let ccEnv = getEnv("CC")
   if ccEnv.len > 0 and isAbsolute(ccEnv):
     return ccEnv
+  when not defined(windows):
+    let runtimeCC = findExe("cc")
+    if runtimeCC.len > 0 and isAbsolute(runtimeCC) and
+        fileExists(extendedPath(runtimeCC)):
+      return runtimeCC
   if BuiltCCompilerPath.len > 0 and fileExists(extendedPath(BuiltCCompilerPath)):
     return BuiltCCompilerPath
   ""
@@ -1778,6 +2191,39 @@ proc siblingReprobuildLibsRoot(workDir: string): string =
     return candidate
   ""
 
+proc workDirIsReprobuildTree(workDir: string): bool =
+  ## True when ``workDir`` IS itself a reprobuild source checkout — its own
+  ## ``libs/`` is the authoritative copy of the reprobuild libs the harness
+  ## compiles against, so no EXTERNAL root is consulted.
+  fileExists(extendedPath(
+    workDir / "libs" / "repro_project_dsl" / "src" / "repro_project_dsl.nim"))
+
+proc reprobuildExternalLibsRoot(workDir: string): string =
+  ## The reprobuild ``libs/`` root a NON-reprobuild consumer compiles its
+  ## provider/interface recipes against, resolved EXACTLY as
+  ## ``reproLibPathFlags`` does: ``$REPROBUILD_LIBS_DIR`` /
+  ## ``$REPROBUILD_REPO_ROOT`` → the running ``repro`` binary's own checkout →
+  ## a sibling ``../reprobuild/`` checkout. Empty when ``workDir`` IS itself a
+  ## reprobuild tree (its ``libs/`` is already the authoritative copy) or when
+  ## no external root is found.
+  ##
+  ## This is the single source of truth for "which reprobuild libs does the
+  ## harness use", consumed BOTH by ``reproLibPathFlags`` (to build the
+  ## ``--path:`` flags) AND by ``reproLibSources`` (to fold those libs into the
+  ## provider-nimcache freshness key). Without the latter, an out-of-tree
+  ## reprobuild lib edit would NOT change the nimcache key — the shared
+  ## nimcache would then reuse a STALE compiled ``repro_interface_artifacts``,
+  ## and the harness would emit interface artifacts the freshly-built ``repro``
+  ## binary cannot validate (an interface/provider fingerprint skew across the
+  ## harness↔binary boundary).
+  if workDirIsReprobuildTree(workDir):
+    return ""
+  result = reprobuildLibsRootFromEnv()
+  if result.len == 0:
+    result = reprobuildLibsRootFromBinaryLocation()
+  if result.len == 0:
+    result = siblingReprobuildLibsRoot(workDir)
+
 proc resolveBootstrapPackagePath*(envName: string;
                                   candidates: openArray[string];
                                   marker: string): string =
@@ -1859,6 +2305,9 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
     candidates: seq[string]
     marker: string
   let specs: seq[SiblingSpec] = @[
+    ("REPRO_TEST_ADAPTERS_SRC", anchored([
+      ".." / "reprobuild-test-adapters" / "src",
+    ]), "repro_test_adapters" / "test_runner.nim"),
     ("FASTSTREAMS_SRC", anchored([
       "libs" / "nim-faststreams" / "src",
       ".." / "codetracer" / "libs" / "nim-faststreams",
@@ -1916,6 +2365,28 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
     ("VM_HARNESS_SRC", anchored([
       ".." / "vm-harness" / "src",
     ]), "vm_harness.nim"),
+    # SHM-QUEUE-MIGRATE: ``libs/repro_shm_index`` (``repro_shm_index/layout``)
+    # imports ``shm_queue/segment`` from the ``nim-shm-queue`` sibling — the
+    # extracted single MPSC ring. ``config.nims:373`` registers it via
+    # ``addPackagePath("SHM_QUEUE_SRC", …, useDevShellFallback = true)``, so it
+    # is on the NORMAL build ``--path`` but was absent here — any producer whose
+    # ``repro.nim`` transitively pulls ``repro_shm_index`` (e.g. via
+    # ``import repro_resources``) failed to interface-extract with
+    # ``cannot open file: shm_queue/segment``. Mirror config.nims so the
+    # extractor's path set matches the build's: prefer ``$SHM_QUEUE_SRC``, then
+    # the sibling checkout.
+    ("SHM_QUEUE_SRC", anchored([
+      ".." / "nim-shm-queue" / "src",
+    ]), "shm_queue.nim"),
+    # io-mon's writer now imports ``shm_gset/transport`` from the
+    # ``nim-shm-gset`` sibling (the grow-only shared-memory set, io-mon's Linux
+    # dependency-capture channel). Any producer whose ``repro.nim`` transitively
+    # pulls ``io_mon`` fails to interface-extract with ``cannot open file:
+    # shm_gset/transport`` unless nim-shm-gset is on the extractor's ``--path``.
+    # Mirror config.nims (SHM_GSET_SRC), exactly as SHM_QUEUE_SRC above.
+    ("SHM_GSET_SRC", anchored([
+      ".." / "nim-shm-gset" / "src",
+    ]), "shm_gset.nim"),
     ("REPRO_TEST_ADAPTERS_SRC", anchored([
       ".." / "reprobuild-test-adapters" / "src",
     ]), "repro_test_adapters" / "test_runner.nim"),
@@ -1969,20 +2440,16 @@ proc reproLibPathFlags(workDir: string): seq[string] =
   # pinned to a different branch), silently compiling the recipe against
   # stale stdlib sources. So only consult the external reprobuild root
   # when the consumer does not already provide the reprobuild libs itself.
-  let workDirIsReprobuildTree = fileExists(extendedPath(
-    workDir / "libs" / "repro_project_dsl" / "src" / "repro_project_dsl.nim"))
-
   var reprobuildLibsRoot = ""
-  if workDirIsReprobuildTree:
+  if workDirIsReprobuildTree(workDir):
     # In-tree: anchor the MR14 sibling source-only flags at the working
     # tree; the working-tree libs are already on ``paths`` above.
     reprobuildLibsRoot = workDir / "libs"
   else:
-    reprobuildLibsRoot = reprobuildLibsRootFromEnv()
-    if reprobuildLibsRoot.len == 0:
-      reprobuildLibsRoot = reprobuildLibsRootFromBinaryLocation()
-    if reprobuildLibsRoot.len == 0:
-      reprobuildLibsRoot = siblingReprobuildLibsRoot(workDir)
+    # Out-of-tree: the SAME external root ``reproLibSources`` folds into the
+    # provider-nimcache key, so ``--path:`` and the freshness key never
+    # diverge (that divergence is the harness↔binary fingerprint skew).
+    reprobuildLibsRoot = reprobuildExternalLibsRoot(workDir)
     if reprobuildLibsRoot.len > 0:
       walkLibSrcPathsInto(reprobuildLibsRoot, paths)
 
@@ -2084,6 +2551,32 @@ proc localNimModulePath(currentFile, projectRoot, spec: string): string =
       return module
   ""
 
+proc nimModulePathInRoot(currentFile, searchRoot, spec: string): string =
+  ## TI2 residual fix (b) — resolve a bare/relative import ``spec`` against an
+  ## EXTRA search root (an ``extraPaths`` ``--path`` dir), mirroring
+  ## ``localNimModulePath`` but anchored at ``searchRoot`` instead of the
+  ## module's own project root. Used so a resource module's cross-directory
+  ## dependency reachable ONLY via ``extraPaths`` enters the lift source
+  ## closure (and thus the ``InterfaceLiftActionKey``), so a content change in
+  ## that file re-keys the lift instead of serving a stale artifact.
+  if spec.len == 0 or spec.startsWith("std/") or spec == "std" or
+      spec.startsWith("pkg/") or spec == "pkg":
+    return ""
+  # Relative/absolute specs are already resolved by ``localNimModulePath``;
+  # here we only resolve the bare ``import somemod`` / ``import a/b`` form that
+  # ``--path`` search satisfies.
+  if spec.startsWith("./") or spec.startsWith("../") or spec.isAbsolute:
+    return ""
+  var module = normalizedStampPath(searchRoot) / spec
+  if not module.endsWith(".nim") and not module.endsWith(".nims"):
+    module.add(".nim")
+  module = normalizedStampPath(module)
+  let normalizedRoot = normalizedStampPath(searchRoot)
+  if (module == normalizedRoot or module.startsWith(normalizedRoot & "/")) and
+      fileExists(extendedPath(module)):
+    return module
+  ""
+
 proc nimImportSpecs(line: string): seq[string] =
   let stripped = stripNimLineComment(line).strip()
   if stripped.startsWith("import "):
@@ -2096,7 +2589,8 @@ proc nimImportSpecs(line: string): seq[string] =
     if pos > 0:
       return @[rest[0 ..< pos].strip()]
 
-proc discoverNimSources*(rootModulePath: string): seq[string] =
+proc discoverNimSources*(rootModulePath: string;
+                         extraRoots: openArray[string] = []): seq[string] =
   ## Enumerate the provider compile's input source set.
   ##
   ## Imports reachable from ``rootModulePath`` are included transitively
@@ -2109,7 +2603,21 @@ proc discoverNimSources*(rootModulePath: string): seq[string] =
   ## eligible imports. Sibling enumeration is intentionally
   ## non-recursive — subdirectory sources only enter the set through an
   ## explicit import edge.
+  ##
+  ## TI2 residual fix (b): ``extraRoots`` are additional ``--path`` search
+  ## roots (the lift's ``extraPaths``). A bare ``import somemod`` that resolves
+  ## into one of these roots is followed transitively (bounded to that root),
+  ## so a resource module's cross-directory dependency reachable ONLY via
+  ## ``extraPaths`` enters the source closure — and thus the content-addressed
+  ## ``InterfaceLiftActionKey``. A change to such a file then re-keys the lift
+  ## instead of serving a stale artifact.
   let projectRoot = normalizedStampPath(parentDir(rootModulePath))
+  var normalizedExtraRoots: seq[string] = @[]
+  for root in extraRoots:
+    if root.len > 0:
+      let normalized = normalizedStampPath(root)
+      if normalized notin normalizedExtraRoots:
+        normalizedExtraRoots.add(normalized)
   var pending = @[normalizedStampPath(rootModulePath)]
   var seen = initHashSet[string]()
   while pending.len > 0:
@@ -2120,12 +2628,25 @@ proc discoverNimSources*(rootModulePath: string): seq[string] =
     result.add(path)
     if not fileExists(extendedPath(path)):
       continue
+    # The dir the CURRENT file lives in is itself a resolution root for its
+    # bare/relative imports (mirrors Nim's own file-relative search), so a
+    # module pulled in via ``extraRoots`` can pull its own siblings.
+    let currentDir = normalizedStampPath(parentDir(path))
     for line in readFile(extendedPath(path)).splitLines:
       for spec in nimImportSpecs(line):
         for expanded in expandImportSpec(spec):
           let localPath = localNimModulePath(path, projectRoot, expanded)
           if localPath.len > 0 and localPath notin seen:
             pending.add(localPath)
+            continue
+          # Resolve against the current file's own directory and every extra
+          # ``--path`` root, following the bare/relative import out of the
+          # project root when (and only when) it lands under one of them.
+          for searchRoot in currentDir & normalizedExtraRoots:
+            let extraPath = nimModulePathInRoot(path, searchRoot, expanded)
+            if extraPath.len > 0 and extraPath notin seen:
+              pending.add(extraPath)
+              break
   if dirExists(extendedPath(projectRoot)):
     for kind, child in walkDir(projectRoot):
       if kind notin {pcFile, pcLinkToFile}:
@@ -2138,8 +2659,8 @@ proc discoverNimSources*(rootModulePath: string): seq[string] =
         result.add(normalized)
   result.sort(system.cmp[string])
 
-proc reproLibSources(workDir: string): seq[string] =
-  let libsRoot = workDir / "libs"
+proc walkLibSourcesInto(libsRoot: string; sink: var seq[string];
+                        seen: var HashSet[string]) =
   if not dirExists(extendedPath(libsRoot)):
     return
   # NOTE: pass the *non*-extended ``libsRoot`` to ``walkDirRec`` here.
@@ -2151,7 +2672,26 @@ proc reproLibSources(workDir: string): seq[string] =
   # well under MAX_PATH so the raw form is safe.
   for path in walkDirRec(libsRoot):
     if path.endsWith(".nim") or path.endsWith(".nims"):
-      result.add(normalizedStampPath(path))
+      let normalized = normalizedStampPath(path)
+      if not seen.containsOrIncl(normalized):
+        sink.add(normalized)
+
+proc reproLibSources(workDir: string): seq[string] =
+  var seen = initHashSet[string]()
+  walkLibSourcesInto(workDir / "libs", result, seen)
+  # Out-of-tree consumers compile their provider/interface recipes against an
+  # EXTERNAL reprobuild libs root (``reproLibPathFlags`` resolves the same
+  # root). Fold those sources into the fingerprint so an edit to reprobuild's
+  # own libs (e.g. the interface-artifact codec) invalidates the shared
+  # provider-nimcache — otherwise the harness reuses a stale compiled
+  # ``repro_interface_artifacts`` and emits artifacts the freshly-built
+  # ``repro`` binary cannot validate (the harness↔binary fingerprint skew).
+  # In-tree (workDir IS reprobuild) this root is empty: the working-tree libs
+  # are already covered by the ``workDir / "libs"`` walk above, so reprobuild's
+  # own provider compiles are unchanged.
+  let externalRoot = reprobuildExternalLibsRoot(workDir)
+  if externalRoot.len > 0:
+    walkLibSourcesInto(externalRoot, result, seen)
   result.sort(system.cmp[string])
 
 proc reproLibSourceFingerprint(workDir: string): string =
@@ -2221,31 +2761,69 @@ proc reproLibStampsForCache(workDir: string): seq[FileStamp] =
     return @[]
   fileStamps(reproLibSources(workDir))
 
+proc interfaceLiftSources(modulePath, resourceModule: string;
+                          extraPaths: openArray[string] = []): seq[string] =
+  ## The full source closure a lift compiles: the producer's own module
+  ## closure plus, when a producer declares a separate resource module (TI1),
+  ## that module's closure. Both feed the extraction fingerprint so a
+  ## resource-module edit re-keys the lift.
+  ##
+  ## TI2 residual fix (b): ``extraPaths`` are threaded into the source-closure
+  ## walk so a resource module's cross-directory dependency reachable ONLY via
+  ## an extra ``--path`` is discovered (with its CONTENT), not just named by
+  ## basename. A change to such a file re-keys the lift.
+  result = discoverNimSources(modulePath, extraPaths).mapIt(
+    normalizedStampPath(it))
+  if resourceModule.len > 0:
+    for src in discoverNimSources(resourceModule, extraPaths):
+      let normalized = normalizedStampPath(src)
+      if normalized notin result:
+        result.add(normalized)
+
 proc interfaceExtractionContext(modulePath: string;
                                 workDir = getCurrentDir();
-                                includeReproLibFingerprint = true):
+                                includeReproLibFingerprint = true;
+                                resourceModule = "";
+                                extraPaths: openArray[string] = []):
     InterfaceExtractionContext =
-  let sources = discoverNimSources(modulePath).mapIt(normalizedStampPath(it))
+  let sources = interfaceLiftSources(modulePath, resourceModule, extraPaths)
+  var libPathFlags = reproLibPathFlags(workDir)
+  # TI1: the producer's declared resource module + extra ``--path``s are part
+  # of the lift's input identity — a change to the extra path set re-keys the
+  # extraction (a different resource module resolves a different closure).
+  if resourceModule.len > 0:
+    libPathFlags.add("--resource-module:" & normalizedStampPath(resourceModule))
+  for extra in extraPaths:
+    if extra.len > 0:
+      libPathFlags.add("--path:" & normalizedStampPath(extra))
   InterfaceExtractionContext(
     modulePath: normalizedStampPath(modulePath),
     workDir: normalizedStampPath(workDir),
     nimCompiler: nimCompilerPath(),
-    libPathFlags: reproLibPathFlags(workDir),
+    libPathFlags: libPathFlags,
     reproLibFingerprint:
       if includeReproLibFingerprint: reproLibSourceFingerprint(workDir)
       else: "",
     sources: sources)
 
 proc interfaceExtractionCacheContext(modulePath: string;
-                                     workDir = getCurrentDir()):
+                                     workDir = getCurrentDir();
+                                     resourceModule = "";
+                                     extraPaths: openArray[string] = []):
     InterfaceExtractionContext =
+  var libPathFlags =
+    if immutableStorePath(workDir): @[]
+    else: reproLibPathFlags(workDir)
+  if resourceModule.len > 0:
+    libPathFlags.add("--resource-module:" & normalizedStampPath(resourceModule))
+  for extra in extraPaths:
+    if extra.len > 0:
+      libPathFlags.add("--path:" & normalizedStampPath(extra))
   InterfaceExtractionContext(
     modulePath: normalizedStampPath(modulePath),
     workDir: normalizedStampPath(workDir),
     nimCompiler: nimCompilerPath(),
-    libPathFlags:
-      if immutableStorePath(workDir): @[]
-      else: reproLibPathFlags(workDir),
+    libPathFlags: libPathFlags,
     reproLibFingerprint: "",
     sources: @[])
 
@@ -2281,6 +2859,12 @@ proc interfaceExtractionCachePath(artifactPath: string): string =
 proc interfaceExtractionMetadataPath(artifactPath: string): string =
   artifactPath & ".inputs.meta"
 
+proc interfaceLiftActionKeyPath*(artifactPath: string): string =
+  ## TI1: the sidecar recording the ``InterfaceLiftActionKey`` an artifact was
+  ## materialized under, so a second lift with an unchanged input closure is a
+  ## cache HIT without re-running the lift edge.
+  artifactPath & ".liftkey"
+
 proc writeInterfaceExtractionCacheRecord(artifactPath: string;
     context: InterfaceExtractionContext; fingerprint: ContentDigest) =
   let record = InterfaceExtractionCacheRecord(
@@ -2302,15 +2886,16 @@ proc writeInterfaceExtractionCacheRecord(artifactPath: string;
     discard
 
 proc readInterfaceExtractionCacheRecord(path: string):
-    Option[InterfaceExtractionCacheRecord] =
+    tuple[record: Option[InterfaceExtractionCacheRecord];
+          warmHitAccounted: bool] =
   let evidence = fileStamp(path)
   if evidence.kind == fskMissing:
-    return none(InterfaceExtractionCacheRecord)
+    return (none(InterfaceExtractionCacheRecord), false)
   if processWarmInterfaceMetadata.hasKey(path):
     let warm = processWarmInterfaceMetadata[path]
     if cacheableWarmEvidence(evidence) and warm.evidence == evidence:
       inc processWarmInterfaceStats.metadataWarmHits
-      return some(warm.record)
+      return (some(warm.record), true)
     inc processWarmInterfaceStats.metadataWarmMisses
   else:
     inc processWarmInterfaceStats.metadataColdReads
@@ -2322,9 +2907,9 @@ proc readInterfaceExtractionCacheRecord(path: string):
         WarmInterfaceExtractionCacheRecord(
           evidence: evidence,
           record: record)
-    return some(record)
+    return (some(record), false)
   except CatchableError:
-    return none(InterfaceExtractionCacheRecord)
+    return (none(InterfaceExtractionCacheRecord), false)
 
 proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
                                        context: InterfaceExtractionContext;
@@ -2334,11 +2919,11 @@ proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
     return none(ProjectInterfaceArtifact)
   if requireStub and not fileExists(extendedPath(stubPath)):
     return none(ProjectInterfaceArtifact)
-  let record = readInterfaceExtractionCacheRecord(
+  let lookup = readInterfaceExtractionCacheRecord(
     interfaceExtractionMetadataPath(artifactPath))
-  if record.isNone:
+  if lookup.record.isNone:
     return none(ProjectInterfaceArtifact)
-  let cached = record.get()
+  let cached = lookup.record.get()
   if not interfaceContextsMatchForCache(cached.context, context):
     return none(ProjectInterfaceArtifact)
   processWarmInterfaceStats.metadataRevalidatedSources +=
@@ -2353,6 +2938,8 @@ proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
     let artifact = readInterfaceArtifactWithWarm(artifactPath)
     if artifact.interfaceFingerprint != cached.inputFingerprint:
       return none(ProjectInterfaceArtifact)
+    if not lookup.warmHitAccounted:
+      inc processWarmInterfaceStats.metadataWarmHits
     return some(artifact)
   except CatchableError:
     return none(ProjectInterfaceArtifact)
@@ -2369,7 +2956,9 @@ proc cachedInterfaceArtifactByFingerprint(artifactPath, stubPath: string;
   if readFile(extendedPath(cachePath)).strip() != toHex(fingerprint.bytes):
     return none(ProjectInterfaceArtifact)
   try:
-    return some(readInterfaceArtifactWithWarm(artifactPath))
+    let artifact = readInterfaceArtifactWithWarm(artifactPath)
+    inc processWarmInterfaceStats.metadataWarmHits
+    return some(artifact)
   except CatchableError:
     return none(ProjectInterfaceArtifact)
 
@@ -2420,6 +3009,63 @@ proc nixPrefix(namePattern, header: string;
     for libraryName in libraryNames:
       if firstExistingPrefix([path], header, [libraryName]).len > 0:
         return path
+  ""
+
+const InterfaceLibSubdirs = [
+  "lib",
+  "lib64",
+  "lib/x86_64-linux-gnu",
+  "lib/aarch64-linux-gnu",
+]
+  ## Mirror of `config.nims`'s `LibSubdirs`: the standard lib subdirectories
+  ## a `-L` search must probe (plain `lib`, `lib64`, Debian-multiarch triples)
+  ## so a bare prefix like `/usr` resolves regardless of host layout.
+
+proc firstExistingPrefixLibDir(prefix: string;
+                               dylibNames: openArray[string]): string =
+  ## Mirror of `config.nims`'s `firstExistingPrefixLibDir`: return the
+  ## absolute libdir under `prefix` that holds one of `dylibNames`, or "".
+  for libSub in InterfaceLibSubdirs:
+    let candidate = prefix / libSub
+    for dylibName in dylibNames:
+      if fileExists(extendedPath(candidate / dylibName)):
+        return candidate
+  ""
+
+proc firstExistingLibDir(candidates: openArray[string];
+                         dylibNames: openArray[string]): string =
+  ## Mirror of `config.nims`'s `firstExistingLibDir`: probe each candidate
+  ## directly (it may already be a libdir like `/usr/lib64`) and then walk
+  ## the standard lib subdirectories so a candidate like `/usr` resolves on
+  ## `/usr/lib`, `/usr/lib64`, or a Debian-multiarch host.
+  for candidate in candidates:
+    let path = candidate.strip()
+    if path.len == 0:
+      continue
+    for dylibName in dylibNames:
+      if fileExists(extendedPath(path / dylibName)):
+        return path
+    let resolved = firstExistingPrefixLibDir(path, dylibNames)
+    if resolved.len > 0:
+      return resolved
+  ""
+
+proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
+  ## Mirror of `config.nims`'s `nixLibDir`: scan `/nix/store` for a store
+  ## path matching `namePattern` whose libdir holds one of `dylibNames`.
+  if not dirExists(extendedPath("/nix/store")):
+    return ""
+  let needle = namePattern.replace("*", "")
+  for kind, path in walkDir("/nix/store"):
+    if kind != pcDir:
+      continue
+    let tail = splitPath(path).tail
+    if needle.len > 0 and tail.find(needle) < 0:
+      continue
+    let libDir = firstExistingLibDir([path], dylibNames)
+    if libDir.len > 0:
+      return libDir
+  ""
 
 proc addExternalPackagePath(flags: var seq[string]; workDir, envName: string;
                             candidates: openArray[string]; marker: string) =
@@ -2468,6 +3114,9 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
   let ctRunnerAdapter = resolveCtTestRunnerAdapterPath(workDir)
   if ctRunnerAdapter.len > 0:
     result.add("--path:" & ctRunnerAdapter)
+  result.addExternalPackagePath(workDir, "REPRO_TEST_ADAPTERS_SRC", [
+    ".." / "reprobuild-test-adapters" / "src",
+  ], "repro_test_adapters" / "test_runner.nim")
   result.addExternalPackagePath(workDir, "FASTSTREAMS_SRC", [
     "libs" / "nim-faststreams" / "src",
     ".." / "codetracer" / "libs" / "nim-faststreams",
@@ -2520,6 +3169,106 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
     ".." / "reprobuild-test-adapters" / "src",
   ], "repro_test_adapters" / "test_runner.nim")
 
+type RuntimeLinkTarget* = enum
+  rltWindows
+  rltLinux
+  rltDarwin
+  rltOtherPosix
+
+proc runtimeRpathCompilerFlags*(runtimeDirs: openArray[string];
+                                target: RuntimeLinkTarget): seq[string] =
+  ## Build linker flags for binaries compiled by reprobuild itself after
+  ## installation. Keep this target-parameterized so a Linux test can verify
+  ## Darwin argv shape: ld64 requires one LC_RPATH option per directory,
+  ## whereas GNU ld accepts a colon-delimited DT_RPATH value.
+  var uniqueDirs: seq[string] = @[]
+  for libDir in runtimeDirs:
+    if libDir.len > 0 and libDir notin uniqueDirs:
+      uniqueDirs.add(libDir)
+  case target
+  of rltWindows:
+    discard
+  of rltLinux:
+    if uniqueDirs.len > 0:
+      result.add("--passL:-Wl,--disable-new-dtags")
+      result.add("--passL:-Wl,-rpath," & uniqueDirs.join(":"))
+  of rltDarwin, rltOtherPosix:
+    for libDir in uniqueDirs:
+      result.add("--passL:-Wl,-rpath," & libDir)
+
+proc hostRuntimeLinkTarget(): RuntimeLinkTarget =
+  when defined(windows):
+    rltWindows
+  elif defined(linux):
+    rltLinux
+  elif defined(macosx):
+    rltDarwin
+  else:
+    rltOtherPosix
+
+proc stageHostDynlibsBesideBinary*(destDir: string): seq[string]
+    {.discardable.} =
+  ## Windows: copy the dynlibs sitting next to the RUNNING reprobuild
+  ## executable into ``destDir``, so a binary reprobuild compiled for itself
+  ## into a scratch directory can load them.
+  ##
+  ## Every non-system library reprobuild uses on Windows is dlopen'd by leaf
+  ## name (``clingo.dll``, ``libzstd.dll``, ``sqlite3_64.dll``, the OpenSSL
+  ## pair) rather than linked through the import table. Win32's LoadLibrary
+  ## searches the .exe's OWN directory first and PATH last — and the .exe here
+  ## is not ``repro.exe`` but the helper reprobuild just compiled into a temp
+  ## or scratch tree, whose directory contains no DLLs at all. So the loader
+  ## falls through to PATH, and the helper starts only on hosts that happen to
+  ## carry clingo there.
+  ##
+  ## That "happens to" is the bug this closes: ``repro_solver``'s clingo
+  ## binding is resolved at MODULE INIT, before ``main``, so on a host without
+  ## clingo on PATH the helper aborts with ``could not load: clingo.dll``
+  ## before running a single line of its own code — which is what an installed
+  ## repro looks like to a user who never provisioned a dev environment.
+  ##
+  ## Copying rather than prepending the app dir to the child's ``PATH`` is
+  ## deliberate. Reprobuild goes out of its way NOT to leak its own library
+  ## directories into the environment of the actions it runs (see the
+  ## ``LD_LIBRARY_PATH`` / ``DYLD_*`` reasoning in ``externalHashFlags`` and
+  ## ``repro_provider_runtime/runtime.nim``); a PATH edit would put reprobuild's
+  ## OpenSSL and sqlite ahead of whatever the user's own build actions resolve,
+  ## which is exactly the kind of ambient influence hermeticity forbids. A copy
+  ## is scoped to the one directory that needs it.
+  ##
+  ## Returns the leaf names staged, so callers and tests can assert coverage.
+  ## Failures to copy an individual DLL are non-fatal: the loader error the
+  ## helper raises later is more specific than anything we could report here.
+  when defined(windows):
+    let appDir = parentDir(getAppFilename())
+    if appDir.len == 0 or destDir.len == 0:
+      return @[]
+    # Nothing to do when the helper already lives beside the app's DLLs;
+    # copyFile onto itself would truncate the source.
+    if cmpPaths(absolutePath(appDir), absolutePath(destDir)) == 0:
+      return @[]
+    for kind, path in walkDir(appDir):
+      if kind != pcFile or not path.toLowerAscii.endsWith(".dll"):
+        continue
+      let leaf = extractFilename(path)
+      let dest = destDir / leaf
+      try:
+        # Skip an already-staged copy of the same size. The provider scratch
+        # dir persists across builds, so re-copying ~12 MB of DLLs on every
+        # provider compile would be pure overhead.
+        if fileExists(extendedPath(dest)) and
+           getFileSize(extendedPath(dest)) == getFileSize(extendedPath(path)):
+          result.add(leaf)
+          continue
+        copyFile(path, dest)
+        result.add(leaf)
+      except CatchableError:
+        discard
+  else:
+    # POSIX resolves these through DT_RUNPATH / LC_RPATH baked in at link time
+    # by `runtimeRpathCompilerFlags`, so there is nothing to stage.
+    discard
+
 proc externalHashFlags(workDir = ""): seq[string] =
   # Windows: there is no homebrew/nix prefix that ships libblake3 or libxxhash.
   # The reprobuild repo vendors portable C sources for both inside the
@@ -2530,6 +3279,15 @@ proc externalHashFlags(workDir = ""): seq[string] =
   # propagate the same define/include flags here. The vendored sources live
   # alongside the reprobuild library tree, so resolve the include dirs relative
   # to workDir (which is the reprobuildLibraryWorkDir).
+  # Installed wrappers publish this build-time-only search path. It is never
+  # assigned to LD_LIBRARY_PATH/DYLD_*: those variables would leak package
+  # libraries into arbitrary user actions. Instead, bake the package's
+  # complete runtime closure into the two binaries reprobuild compiles for
+  # itself after installation (the interface runner and project provider).
+  result.add(runtimeRpathCompilerFlags(
+    getEnv("REPROBUILD_RUNTIME_LIBRARY_PATH").split(PathSep),
+    hostRuntimeLinkTarget()))
+
   when defined(windows):
     # M9.R.13b.1 — propagate `--define:reproVendoredHash` so the vendored
     # path in `blake3.nim` / `xxh3.nim` (a `when defined(reproVendoredHash):
@@ -2580,8 +3338,8 @@ proc externalHashFlags(workDir = ""): seq[string] =
       nixPrefix("*-libblake3-*", "include/blake3.h",
         ["libblake3.dylib", "libblake3.so", "libblake3.a"])
   if blake3Prefix.len > 0:
-    result.add("--passC:-I" & blake3Prefix / "include")
-    result.add("--passL:-L" & blake3Prefix / "lib")
+    result.add("--passC:-I" & (blake3Prefix / "include"))
+    result.add("--passL:-L" & (blake3Prefix / "lib"))
     result.add("--passL:-lblake3")
 
   let xxhashPrefix = block:
@@ -2596,8 +3354,8 @@ proc externalHashFlags(workDir = ""): seq[string] =
       nixPrefix("*-xxHash-*", "include/xxhash.h",
         ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
   if xxhashPrefix.len > 0:
-    result.add("--passC:-I" & xxhashPrefix / "include")
-    result.add("--passL:-L" & xxhashPrefix / "lib")
+    result.add("--passC:-I" & (xxhashPrefix / "include"))
+    result.add("--passL:-L" & (xxhashPrefix / "lib"))
     result.add("--passL:-lxxhash")
 
   # repro's own ASP solver (repro_solver) dlopens libclingo at module-init
@@ -2623,8 +3381,40 @@ proc externalHashFlags(workDir = ""): seq[string] =
       nixPrefix("*-clingo-*", "include/clingo.h",
         ["libclingo.dylib", "libclingo.so"])
   if clingoPrefix.len > 0:
-    result.add("--passL:-L" & clingoPrefix / "lib")
-    result.add("--passL:-Wl,-rpath," & clingoPrefix / "lib")
+    result.add("--passL:-L" & (clingoPrefix / "lib"))
+    result.add("--passL:-Wl,-rpath," & (clingoPrefix / "lib"))
+
+  # sqlite: `config.nims`'s non-Windows/non-macOS block links `-lsqlite3`
+  # (pulled in transitively by the cas / lock store deps that
+  # `repro_project_dsl` drags in) and adds the resolving `-L` + `-rpath`.
+  # The provider-compile / interface-extract edge emits the `-lsqlite3`
+  # via those transitive deps but, before this block, added no `-L`, so the
+  # link failed with `ld: cannot find -lsqlite3` (RP5c1). Mirror config.nims's
+  # exact resolution (SQLITE_LIBDIR / SQLITE_PREFIX / standard system libdirs /
+  # nix store) so any provider the normal build links, this edge links too.
+  # The Windows branch above has already returned; guard only macOS, which
+  # ships libsqlite3 in the SDK and needs no explicit `-L` (matching
+  # config.nims's `when not defined(windows) and not defined(macosx)`).
+  when not defined(macosx):
+    let sqliteLibDir = block:
+      let direct = firstExistingLibDir(
+        [
+          getEnv("SQLITE_LIBDIR"),
+          getEnv("SQLITE_PREFIX"),
+          "/usr",
+          "/usr/local",
+          "/usr/lib",
+          "/usr/lib64",
+          "/usr/lib/x86_64-linux-gnu",
+        ],
+        ["libsqlite3.so", "libsqlite3.a"])
+      if direct.len > 0:
+        direct
+      else:
+        nixLibDir("*-sqlite-*", ["libsqlite3.so", "libsqlite3.a"])
+    if sqliteLibDir.len > 0:
+      result.add("--passL:-L" & sqliteLibDir)
+      result.add("--passL:-Wl,-rpath," & sqliteLibDir)
 
 proc consumerCompilePathFlags*(workDir = getCurrentDir()): seq[string] =
   ## ``--path:`` / ``--passC:`` / ``--passL:`` flags a downstream module
@@ -2778,15 +3568,30 @@ proc buildScratchRoot(workDir, scratchDir: string): string =
 proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
                                  workDir = getCurrentDir();
                                  scratchDir = "";
-                                 requireStub = true): ProjectInterfaceArtifact =
-  let extractionContext = interfaceExtractionCacheContext(modulePath, workDir)
+                                 requireStub = true;
+                                 resourceModule = "";
+                                 extraPaths: openArray[string] = []):
+    ProjectInterfaceArtifact =
+  ## TI1 (Project-Provider-Runtime-Protocol.milestones.org) — a producer may
+  ## declare a RESOURCE MODULE (e.g. vm-harness's ``src/vm_harness/repro/
+  ## resources.nim``) that carries its ``resourceType`` blocks, plus the extra
+  ## ``--path``s that module's imports need. When ``resourceModule`` is given
+  ## the extraction runner ALSO imports that module so its module-init
+  ## ``registerResourceTypeInterface`` side effects run before the interface is
+  ## projected — so ``publicResources`` reflects the producer's REAL resource
+  ## types, not a stub. The resource-module driver closure is producer-side
+  ## only (compiled once, here, at lift time). ``extraPaths`` are appended as
+  ## ``--path:`` flags for the runner compile.
+  let extractionContext = interfaceExtractionCacheContext(modulePath, workDir,
+    resourceModule, extraPaths)
   let metadataCached = cachedInterfaceArtifactByMetadata(artifactPath,
     stubPath, extractionContext, requireStub)
   if metadataCached.isSome:
     return metadataCached.get()
 
   let fingerprintContext = interfaceExtractionContext(modulePath, workDir,
-    includeReproLibFingerprint = true)
+    includeReproLibFingerprint = true, resourceModule = resourceModule,
+    extraPaths = extraPaths)
   let inputFingerprint = interfaceExtractionFingerprint(fingerprintContext)
   let cached = cachedInterfaceArtifactByFingerprint(artifactPath, stubPath,
     inputFingerprint, requireStub)
@@ -2802,19 +3607,21 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # …extract_runner.nim`. CMake TryCompile workdirs nested inside the
   # generator's per-build worktree blow past that limit, so prefer the
   # system temp dir for the runner scratch tree on Windows.
-  let tempParent =
+  let tempParent = absolutePath(
     when defined(windows):
       getTempDir() / "repro-interface-extract"
     else:
-      buildScratchRoot(workDir, scratchDir) / "m7-temp"
+      buildScratchRoot(workDir, scratchDir) / "m7-temp")
   createDir(extendedPath(tempParent))
-  inc interfaceTempNonce
-  let now = getTime()
-  let tempRoot = tempParent / ("repro-interface-extract-" &
-    $getCurrentProcessId() & "-" & $now.toUnix & "-" & $now.nanosecond &
-    "-" & $interfaceTempNonce)
-  createDir(extendedPath(tempRoot))
-  defer: removeDir(extendedPath(tempRoot))
+  # createTempDir uses an atomic create-and-retry loop. PID/timestamp names can
+  # collide between threads in one process and make compilers share response
+  # files; each extraction instead owns an exclusive writable directory.
+  let tempRoot = createTempDir("repro-interface-extract-", "", tempParent)
+  defer:
+    try:
+      removeDir(extendedPath(tempRoot))
+    except OSError:
+      discard
   let runnerPath = tempRoot / "extract_runner.nim"
   # M9.R.14b.2: Pin the recipe import to its absolute path so that
   # ``import repro`` does not resolve through Nim's search path. The
@@ -2838,10 +3645,23 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # reference; the per-module symbol scope still gives us the
   # ``registeredPackages()`` set as expected by ``artifactFromRegisteredDsl``.
   let absoluteModulePath = absolutePath(modulePath).replace('\\', '/')
+  # TI1: when a producer declares a separate RESOURCE MODULE, import it BEFORE
+  # the producer's own module so its ``resourceType`` module-init registrations
+  # run and ``artifactFromRegisteredDsl`` sees the real resource types. The
+  # ``resourceType`` macro emits a module-init proc calling
+  # ``registerResourceTypeInterface``; that side effect only executes if the
+  # module is actually imported into the extraction runner's compilation unit.
+  var resourceImport = ""
+  if resourceModule.len > 0:
+    let absoluteResourceModule =
+      absolutePath(resourceModule).replace('\\', '/')
+    resourceImport = "import \"" & absoluteResourceModule & "\"\n"
   writeFile(extendedPath(runnerPath),
     "import std/os\n" &
     "import repro_interface_artifacts\n" &
     "import repro_project_dsl\n" &
+    "import repro_dsl_stdlib/constructors\n" &
+    resourceImport &
     "import \"" & absoluteModulePath & "\"\n\n" &
     "let artifact = artifactFromRegisteredDsl(paramStr(3))\n" &
     "writeInterfaceArtifact(paramStr(1), artifact)\n" &
@@ -2885,7 +3705,31 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   command.insert(externalHashFlags(workDir), 2)
   command.insert(reproPackagePathFlags(workDir), 2)
   command.insert(libFlags, 4)
-  let compileExecution = runCommand(command, cwd = workDir)
+  # TI2 residual fix (a) — ``--path`` ORDER: the producer-declared resource
+  # module dir + its extra ``--path``s MUST come AFTER the reprobuild lib flags
+  # (``libFlags``, inserted at index 4 above), never before. Nim's module
+  # resolution does NOT reliably prefer the first ``--path`` entry when the same
+  # logical module name exists under two roots, so a producer whose src tree
+  # (or an ``extraPaths`` dir) happens to contain a module colliding with a
+  # reprobuild lib module (e.g. a stray ``repro_*`` leaf) could SHADOW the
+  # reprobuild copy and silently lift against the wrong sources. Appending the
+  # producer paths AFTER ``libFlags`` guarantees the reprobuild libs win on any
+  # ambiguity. (Before TI2 these were inserted at the SAME index 4, which put
+  # them BEFORE ``libFlags`` — the shadowing hazard TI1 flagged as residual.)
+  var producerPathFlags: seq[string] = @[]
+  if resourceModule.len > 0:
+    producerPathFlags.add("--path:" & parentDir(absolutePath(resourceModule)))
+  for extra in extraPaths:
+    if extra.len > 0:
+      producerPathFlags.add("--path:" & absolutePath(extra))
+  if producerPathFlags.len > 0:
+    command.insert(producerPathFlags, 4 + libFlags.len)
+  # `workDir` is the reprobuild library lookup/fingerprint root. Installed Nix
+  # packages deliberately point it at their immutable source closure, so it is
+  # not a valid compiler working directory: Nim writes relative linker response
+  # files (for example `extract_runner_linkerArgs.txt`) into its process CWD.
+  # The runner scratch directory already owns every generated extractor file.
+  let compileExecution = runCommand(command, cwd = tempRoot)
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):
     # `runCommand` already raises on non-zero exit, so reaching this branch
@@ -2907,9 +3751,16 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
         ", compiler reported success but produced no binary): " &
         runnerExe & "\ncompiler output:\n" & compileExecution.output &
         "\ndirectory listing of " & runnerExeDir & ":\n" & listing)
+  # Windows: the runner dlopens clingo/sqlite/zstd/OpenSSL by leaf name and
+  # lives in a temp tree with no DLLs of its own. See the proc's docstring.
+  stageHostDynlibsBesideBinary(parentDir(runnerExe))
   ensureExecutable(runnerExe)
-  let execution = runCommand(@[runnerExe, artifactPath, stubPath, modulePath],
-    cwd = workDir)
+  let execution = runCommand(@[
+    runnerExe,
+    absolutePath(artifactPath),
+    absolutePath(stubPath),
+    absoluteModulePath
+  ], cwd = tempRoot)
   if not fileExists(extendedPath(artifactPath)):
     raise newException(IOError,
       "interface extraction did not write artifact: " & artifactPath &
@@ -2921,9 +3772,12 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     inputFingerprint)
 
 proc providerFingerprintFor*(inputSources: openArray[string];
-                             interfaceFingerprint: ContentDigest): ContentDigest =
+                             interfaceFingerprint: ContentDigest;
+                             workDir = getCurrentDir()): ContentDigest =
   var payload: seq[byte] = @[]
+  payload.writeString("reprobuild.providerSources.v2")
   payload.writeDigest(interfaceFingerprint)
+  payload.writeString(reproLibSourceFingerprint(workDir))
   for path in inputSources:
     payload.writeString(path)
     let content = toBytes(readFile(extendedPath(path)))
@@ -2931,18 +3785,204 @@ proc providerFingerprintFor*(inputSources: openArray[string];
     payload.add(content)
   blake3DomainDigest(payload, hdActionFingerprint)
 
+# ---------------------------------------------------------------------
+# RP1 — Provider-Runtime-Protocol v1 first-class identities.
+#
+# ``Provider-Runtime-Protocol-v1.md`` §1 pins the exact structure of the
+# two provider-edge identities. The pre-RP1 code already hashed a
+# ``providerFingerprint`` (source-based) and an ``actionFingerprint``
+# (compile-command-based) — those remain the on-disk artifact/freshness
+# key and are UNCHANGED here so existing artifacts keep round-tripping.
+#
+# RP1 layers the *named* v1 identities ON TOP:
+#
+#   ProviderArtifactId = hash(
+#     providerProtocolVersion, frontendRuntimeIdentity,
+#     projectSourceSemanticIdentity, generatedEntryPointIds+bodyHashes,
+#     providerImplementationImports, publicDependencyInterfaceFingerprints,
+#     providerCompileOptions)
+#
+#   ProviderCompileActionKey = hash(
+#     "compile-provider", ProviderArtifactId, nimCompilerIdentity,
+#     canonicalSourceInputPaths, declaredProviderCompileInputs)
+#
+# The ProviderCompileActionKey becomes the engine edge's action key so a
+# rebuild with an unchanged key is a cache HIT and — crucially — two
+# consumers whose lock resolves the SAME dependency version compute the
+# SAME ProviderArtifactId (because ``publicDependencyInterfaceFingerprints``
+# and the source semantic identity coincide) and therefore bind the SAME
+# cached binary. The interface-vs-provider fingerprint SPLIT (a private
+# impl edit NOT re-keying downstream) is deferred to RP6; v1 includes
+# ``publicDependencyInterfaceFingerprints`` in the key but does not yet
+# split private-impl edits out of ``projectSourceSemanticIdentity``.
+
+const
+  ProviderProtocolVersionV1* = 1'u32
+    ## Mirrors ``repro_provider_runtime/types.nim``'s
+    ## ``ProviderProtocolVersion``. Held as a local const so the identity
+    ## layer does not take a build-graph dependency on the runtime library
+    ## (which would form a cycle once RP2 wires the session launcher). Kept
+    ## in sync manually; a divergence would only change every
+    ## ProviderArtifactId uniformly (a full cache miss, never a correctness
+    ## bug).
+
+var cachedNimCompilerIdentity = ""
+
+proc nimCompilerIdentity*(): string =
+  ## Canonical identity of the Nim frontend used to compile providers:
+  ## the resolved compiler path plus its ``--version`` banner. Feeds
+  ## ``ProviderCompileActionKey`` so a compiler swap re-keys the compile
+  ## edge. Cached per process — the compiler does not change mid-run.
+  if cachedNimCompilerIdentity.len > 0:
+    return cachedNimCompilerIdentity
+  let path = nimCompilerPath()
+  var banner = ""
+  try:
+    banner = runCommand(@[path, "--version"]).output.splitLines()[0].strip()
+  except CatchableError:
+    banner = ""
+  cachedNimCompilerIdentity = path & "\n" & banner
+  cachedNimCompilerIdentity
+
+proc frontendRuntimeIdentity*(workDir = getCurrentDir()): string =
+  ## Identity of the frontend/runtime the provider binary links against —
+  ## the reprobuild DSL runtime source set. A change to the runtime
+  ## re-materializes every provider. Reuses the existing lib-source
+  ## fingerprint so it stays consistent with ``providerFingerprintFor``.
+  reproLibSourceFingerprint(workDir)
+
+proc commonSourceRoot(paths: openArray[string]): string =
+  ## The longest shared directory prefix of the given normalized source
+  ## paths. Used to make ``projectSourceSemanticIdentity`` content- and
+  ## LAYOUT-addressed rather than absolute-path-addressed, so two consumers
+  ## in different directories whose source closures are byte-identical and
+  ## laid out identically converge on the same semantic identity (the RP1
+  ## sharing property).
+  if paths.len == 0:
+    return ""
+  var prefix = parentDir(normalizedStampPath(paths[0]))
+  for i in 1 ..< paths.len:
+    let dir = parentDir(normalizedStampPath(paths[i]))
+    while prefix.len > 0 and not (dir == prefix or
+        dir.startsWith(prefix & "/")):
+      let up = parentDir(prefix)
+      if up == prefix:
+        prefix = ""
+        break
+      prefix = up
+  prefix
+
+proc projectSourceSemanticIdentity*(inputSources: openArray[string]):
+    ContentDigest =
+  ## The semantic identity of the project's own provider source closure:
+  ## the ordered (root-relative path, content) set of the ``.nim`` sources
+  ## compiled into the provider. Paths are made relative to the closure's
+  ## common root so the identity is content-addressed, not tied to a
+  ## consumer's absolute working directory — this is what lets two
+  ## consumers of the same dependency version converge on the same
+  ## ``ProviderArtifactId`` (the RP1 sharing property). In v1 this is the
+  ## whole source closure; RP6 will split the private-impl portion out so
+  ## it does not re-key downstream.
+  var normalized: seq[string] = @[]
+  for path in inputSources:
+    normalized.add(normalizedStampPath(path))
+  let root = commonSourceRoot(normalized)
+  var payload: seq[byte] = @[]
+  payload.writeString("reprobuild.projectSourceSemanticIdentity.v1")
+  for path in normalized:
+    let relPath =
+      if root.len > 0 and path == root: extractFilename(path)
+      elif root.len > 0 and path.startsWith(root & "/"):
+        path[root.len + 1 .. ^1]
+      else: extractFilename(path)
+    payload.writeString(relPath)
+    let content = toBytes(readFile(extendedPath(path)))
+    payload.writeU64Le(uint64(content.len))
+    payload.add(content)
+  blake3DomainDigest(payload, hdActionFingerprint)
+
+proc computeProviderArtifactId*(
+    inputSources: openArray[string];
+    interfaceFingerprint: ContentDigest;
+    generatedEntryPointIds: openArray[string] = [];
+    entryPointBodyHashes: openArray[string] = [];
+    providerImplementationImports: openArray[string] = [];
+    publicDependencyInterfaceFingerprints: openArray[string] = [];
+    providerCompileOptions: openArray[string] = [];
+    workDir = getCurrentDir()): ContentDigest =
+  ## The v1 ``ProviderArtifactId`` (Provider-Runtime-Protocol-v1.md §1).
+  ##
+  ## ``publicDependencyInterfaceFingerprints`` is the SHARING key: two
+  ## consumers whose lock resolves the same dependency version pass the
+  ## same fingerprints here and — with identical source semantic identity —
+  ## compute the same id, hence bind the same cached artifact.
+  var payload: seq[byte] = @[]
+  payload.writeString("reprobuild.providerArtifactId.v1")
+  payload.writeU32Le(ProviderProtocolVersionV1)
+  payload.writeString(frontendRuntimeIdentity(workDir))
+  payload.writeDigest(projectSourceSemanticIdentity(inputSources))
+  # The interface fingerprint is the project's own public-signature
+  # identity; carried so an interface-only change re-keys the artifact.
+  payload.writeDigest(interfaceFingerprint)
+  var entryIds = @generatedEntryPointIds
+  entryIds.sort(system.cmp[string])
+  payload.writeStringSeq(entryIds)
+  var bodyHashes = @entryPointBodyHashes
+  bodyHashes.sort(system.cmp[string])
+  payload.writeStringSeq(bodyHashes)
+  var imports = @providerImplementationImports
+  imports.sort(system.cmp[string])
+  payload.writeStringSeq(imports)
+  # Public dependency interface fingerprints are order-normalized so two
+  # consumers that list the same deps in different orders still converge.
+  var depFingerprints = @publicDependencyInterfaceFingerprints
+  depFingerprints.sort(system.cmp[string])
+  payload.writeStringSeq(depFingerprints)
+  var compileOptions = @providerCompileOptions
+  compileOptions.sort(system.cmp[string])
+  payload.writeStringSeq(compileOptions)
+  blake3DomainDigest(payload, hdActionFingerprint)
+
+proc computeProviderCompileActionKey*(
+    providerArtifactId: ContentDigest;
+    canonicalSourceInputPaths: openArray[string];
+    declaredProviderCompileInputs: openArray[string] = []): ContentDigest =
+  ## The v1 ``ProviderCompileActionKey`` (Provider-Runtime-Protocol-v1.md
+  ## §1) — the engine edge's action key. Keyed by ``nimCompilerIdentity``
+  ## so a compiler swap forces a recompile even when the artifact id is
+  ## unchanged.
+  var payload: seq[byte] = @[]
+  payload.writeString("compile-provider")
+  payload.writeDigest(providerArtifactId)
+  payload.writeString(nimCompilerIdentity())
+  var sourcePaths: seq[string] = @[]
+  for path in canonicalSourceInputPaths:
+    sourcePaths.add(normalizedStampPath(path))
+  sourcePaths.sort(system.cmp[string])
+  payload.writeStringSeq(sourcePaths)
+  var declared: seq[string] = @[]
+  for path in declaredProviderCompileInputs:
+    declared.add(normalizedStampPath(path))
+  declared.sort(system.cmp[string])
+  payload.writeStringSeq(declared)
+  blake3DomainDigest(payload, hdActionFingerprint)
+
 proc providerFreshnessCachePath(artifactPath: string): string =
   artifactPath & ".inputs"
 
 proc writeProviderFreshnessCacheRecord(artifactPath, modulePath: string;
+                                       workDir: string;
                                        artifact: ProviderCompileArtifact) =
   let record = ProviderFreshnessCacheRecord(
     modulePath: normalizedStampPath(modulePath),
+    workDir: normalizedStampPath(workDir),
     outputBinaryPath: normalizedStampPath(artifact.outputBinaryPath),
     sourceStamps: fileStamps(artifact.inputSources),
+    reproLibStamps: reproLibStampsForCache(workDir),
     outputBinaryStamp: fileStamp(artifact.outputBinaryPath),
     interfaceFingerprint: artifact.interfaceFingerprint,
     providerFingerprint: artifact.providerFingerprint,
+    reproLibFingerprint: reproLibSourceFingerprint(workDir),
     outputBinaryFingerprint: artifact.outputBinaryFingerprint)
   try:
     writeFile(extendedPath(providerFreshnessCachePath(artifactPath)),
@@ -2961,20 +4001,25 @@ proc readProviderFreshnessCacheRecord(path: string):
 
 proc providerFreshnessRecordMatches(record: ProviderFreshnessCacheRecord;
                                     modulePath, outputBinaryPath: string;
+                                    workDir: string;
                                     inputSources: openArray[string];
                                     interfaceFingerprint,
                                     providerFingerprint,
                                     outputBinaryFingerprint: ContentDigest): bool =
   (modulePath.len == 0 or record.modulePath == normalizedStampPath(modulePath)) and
+    record.workDir == normalizedStampPath(workDir) and
     record.outputBinaryPath == normalizedStampPath(outputBinaryPath) and
     record.interfaceFingerprint == interfaceFingerprint and
     record.providerFingerprint == providerFingerprint and
+    record.reproLibFingerprint.len > 0 and
     record.outputBinaryFingerprint == outputBinaryFingerprint and
     record.sourceStamps == fileStamps(inputSources) and
+    record.reproLibStamps == reproLibStampsForCache(workDir) and
     record.outputBinaryStamp == fileStamp(outputBinaryPath)
 
 proc cachedProviderFreshnessByMetadata(artifactPath, modulePath,
                                        outputBinaryPath: string;
+                                       workDir: string;
                                        inputSources: openArray[string];
                                        cached: ProviderCompileArtifact):
     bool =
@@ -2983,7 +4028,7 @@ proc cachedProviderFreshnessByMetadata(artifactPath, modulePath,
   if record.isNone:
     return false
   providerFreshnessRecordMatches(record.get(), modulePath, outputBinaryPath,
-    inputSources, cached.interfaceFingerprint, cached.providerFingerprint,
+    workDir, inputSources, cached.interfaceFingerprint, cached.providerFingerprint,
     cached.outputBinaryFingerprint)
 
 proc normalizedProviderOutputPath*(outputBinaryPath: string): string =
@@ -2998,6 +4043,36 @@ proc normalizedProviderOutputPath*(outputBinaryPath: string): string =
       outputBinaryPath & "." & ExeExt
   else:
     outputBinaryPath
+
+type
+  ReproRtlMode* = enum
+    ## Typed-Extension-Interfaces M4c — the RTL mode of a provider-LIBRARY
+    ## build (§4.4). It is part of the library edge's action key: a
+    ## nimRtl-shared artifact and a standalone C-ABI artifact are DISTINCT
+    ## cache entries and never confused. Rendered as SEMANTIC compiler
+    ## ``--define``s, so it flows into ``providerCompileOptions`` →
+    ## ``ProviderArtifactId`` → ``ProviderCompileActionKey`` automatically.
+    rtlStandaloneCAbi   ## ``--app:lib`` only — the portable C-ABI boundary,
+                        ## no nimRtl coupling; interoperates with ANY host.
+    rtlNimRtlShared     ## ``--app:lib -d:useNimRtl -d:reproNimRtlShared`` —
+                        ## the Nim-native fast path; sound ONLY when host +
+                        ## library share one pinned ``nimrtl`` (matched Nim
+                        ## version + ORC). Emits the ``*_direct`` no-marshal
+                        ## entry points + the ``SymRtlProbe`` presence symbol.
+
+proc rtlModeDefines*(mode: ReproRtlMode): seq[string] =
+  ## The extra compiler flags that render an ``ReproRtlMode`` as a LIBRARY
+  ## build. Both modes are ``--app:lib``; nimRtl-shared additionally shares the
+  ## runtime and emits the fast-path surface. These are semantic compile
+  ## options (they change the emitted symbols), so appending them re-keys the
+  ## provider-compile action deterministically.
+  case mode
+  of rtlStandaloneCAbi: @["--app:lib"]
+  of rtlNimRtlShared:   @["--app:lib", "--define:useNimRtl",
+                          # mirrors ``library_abi.ReproRtlSharedDefine``; held
+                          # as a local literal so this identity layer takes no
+                          # build-graph dependency on ``repro_resources``.
+                          "--define:reproNimRtlShared"]
 
 proc providerCompileCommand*(modulePath, outputBinaryPath: string;
                              workDir = getCurrentDir();
@@ -3054,6 +4129,11 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
       nimcacheRoot / sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
   result = @[
     nimCompilerPath(), "c",
+    # Provider compiles are often nested inside latency-sensitive graph
+    # construction paths. Keep Nim's C backend serial so one provider edge
+    # cannot fan out into a burst of host C compiler jobs; this also avoids
+    # observed GCC 15 vregs ICEs during concurrent generated-C compilation.
+    "--parallelBuild:1",
     "--define:reproProviderMode",
     "--path:" & parentDir(modulePath),
     "--nimcache:" & nimcache,
@@ -3096,28 +4176,101 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
     for flag in dynamicFlags:
       result.insert(flag, 2)
 
+proc providerLibraryCompileCommand*(modulePath, outputBinaryPath: string;
+                                    mode: ReproRtlMode;
+                                    workDir = getCurrentDir();
+                                    scratchDir = ""): seq[string] =
+  ## The provider-LIBRARY compile command (M4c). Same base as
+  ## ``providerCompileCommand`` (full repro ``--path`` set + host flags +
+  ## ``-d:reproProviderMode``), rendered as a shared library in the requested
+  ## ``ReproRtlMode``. The RTL-mode ``--define``s are inserted BEFORE the
+  ## trailing module-path argument (flags after it are treated as run args),
+  ## so they land in ``providerCompileOptions`` and re-key the compile action
+  ## per mode — a nimRtl-shared artifact and a standalone C-ABI artifact are
+  ## DISTINCT cache entries (§4.4).
+  result = providerCompileCommand(modulePath, outputBinaryPath, workDir,
+    scratchDir)
+  for flag in rtlModeDefines(mode):
+    result.insert(flag, result.len - 1)
+
+proc providerLibraryCompileActionKey*(modulePath, outputBinaryPath: string;
+                                      interfaceFingerprint: ContentDigest;
+                                      mode: ReproRtlMode;
+                                      workDir = getCurrentDir();
+                                      scratchDir = ""): ContentDigest =
+  ## The action key for a provider-LIBRARY build in a given ``ReproRtlMode``
+  ## (M4c). Reuses the RP1 ``ProviderArtifactId`` machinery — the RTL-mode
+  ## ``--define``s enter ``providerCompileOptions``, so the two modes yield
+  ## DISTINCT keys by construction. This lets an engine cache/reuse the
+  ## nimRtl-shared and standalone C-ABI builds independently before the full
+  ## §4.3 library build-edge lands.
+  let absoluteModulePath = absolutePath(modulePath)
+  let normalizedOutputPath = absolutePath(
+    normalizedProviderOutputPath(outputBinaryPath))
+  let sources = discoverNimSources(absoluteModulePath)
+  let command = providerLibraryCompileCommand(absoluteModulePath,
+    normalizedOutputPath, mode, workDir, scratchDir)
+  var compileOptions: seq[string] = @[]
+  for i in 1 ..< command.len:
+    let arg = command[i]
+    if arg.startsWith("--out:") or arg.startsWith("--nimcache:") or
+        arg == normalizedOutputPath or arg == absoluteModulePath:
+      continue
+    compileOptions.add(arg)
+  let providerArtifactId = computeProviderArtifactId(
+    sources, interfaceFingerprint,
+    providerCompileOptions = compileOptions, workDir = workDir)
+  computeProviderCompileActionKey(providerArtifactId, sources, sources)
+
 proc providerCompilePlan*(modulePath, outputBinaryPath: string;
                           interfaceFingerprint: ContentDigest;
                           workDir = getCurrentDir();
                           scratchDir = ""): ProviderCompilePlan =
-  let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
-  let sources = discoverNimSources(modulePath)
-  let providerFingerprint = providerFingerprintFor(sources, interfaceFingerprint)
-  let command = providerCompileCommand(modulePath, normalizedOutputPath, workDir,
-    scratchDir)
+  # The compiler runs in an exclusive scratch CWD, so every path that belongs
+  # to the provider itself must be independent of that CWD.
+  let absoluteModulePath = absolutePath(modulePath)
+  let normalizedOutputPath = absolutePath(
+    normalizedProviderOutputPath(outputBinaryPath))
+  let sources = discoverNimSources(absoluteModulePath)
+  let providerFingerprint = providerFingerprintFor(sources, interfaceFingerprint,
+    workDir)
+  let command = providerCompileCommand(absoluteModulePath,
+    normalizedOutputPath, workDir, scratchDir)
+  # RP1: derive the v1-named identities. The ``providerCompileOptions`` set is
+  # the compiler command minus the compiler path and the ``--out:``/nimcache
+  # intermediate flags (which are output-location noise, not semantic inputs).
+  var compileOptions: seq[string] = @[]
+  for i in 1 ..< command.len:
+    let arg = command[i]
+    if arg.startsWith("--out:") or arg.startsWith("--nimcache:") or
+        arg == normalizedOutputPath or arg == absoluteModulePath:
+      continue
+    compileOptions.add(arg)
+  let providerArtifactId = computeProviderArtifactId(
+    sources, interfaceFingerprint,
+    providerCompileOptions = compileOptions, workDir = workDir)
+  let providerCompileActionKey = computeProviderCompileActionKey(
+    providerArtifactId, sources, sources)
+  # The engine edge is keyed by the v1 ProviderCompileActionKey so the
+  # action-cache HIT/rebuild decision follows the v1 identity exactly.
   let edge = providerCompileEdge(sources, normalizedOutputPath, command,
-    interfaceFingerprint, providerFingerprint, workDir = workDir)
+    interfaceFingerprint, providerFingerprint, workDir = workDir,
+    knownActionFingerprint = some(providerCompileActionKey))
   ProviderCompilePlan(
     inputSources: sources,
     outputBinaryPath: normalizedOutputPath,
     compilerCommand: command,
     compileEdge: edge,
     interfaceFingerprint: interfaceFingerprint,
-    providerFingerprint: providerFingerprint)
+    providerFingerprint: providerFingerprint,
+    providerArtifactId: providerArtifactId,
+    providerCompileActionKey: providerCompileActionKey,
+    workDir: workDir)
 
 proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
                                    interfaceFingerprint,
-                                   providerFingerprint: ContentDigest): bool =
+                                   providerFingerprint: ContentDigest;
+                                   workDir = getCurrentDir()): bool =
   let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
   if not (fileExists(extendedPath(artifactPath)) and fileExists(extendedPath(normalizedOutputPath))):
     return false
@@ -3130,7 +4283,7 @@ proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
     if cached.outputBinaryPath != normalizedOutputPath:
       return false
     if cachedProviderFreshnessByMetadata(artifactPath, "", normalizedOutputPath,
-        cached.inputSources, cached):
+        workDir, cached.inputSources, cached):
       return true
     if cached.outputBinaryFingerprint != casDigest(toBytes(readFile(
         extendedPath(normalizedOutputPath)))):
@@ -3141,7 +4294,8 @@ proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
 
 proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
                                        outputBinaryPath: string;
-                                       interfaceFingerprint: ContentDigest):
+                                       interfaceFingerprint: ContentDigest;
+                                       workDir = getCurrentDir()):
     Option[ProviderCompileArtifact] =
   let normalizedOutputPath = normalizedProviderOutputPath(outputBinaryPath)
   if not (fileExists(extendedPath(artifactPath)) and fileExists(extendedPath(normalizedOutputPath))):
@@ -3154,16 +4308,16 @@ proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
       return none(ProviderCompileArtifact)
     let sources = discoverNimSources(modulePath)
     if cachedProviderFreshnessByMetadata(artifactPath, modulePath,
-        normalizedOutputPath, sources, cached):
+        normalizedOutputPath, workDir, sources, cached):
       return some(cached)
     let providerFingerprint = providerFingerprintFor(sources,
-      interfaceFingerprint)
+      interfaceFingerprint, workDir)
     if cached.providerFingerprint != providerFingerprint:
       return none(ProviderCompileArtifact)
     if cached.outputBinaryFingerprint != casDigest(toBytes(readFile(
         extendedPath(normalizedOutputPath)))):
       return none(ProviderCompileArtifact)
-    writeProviderFreshnessCacheRecord(artifactPath, modulePath, cached)
+    writeProviderFreshnessCacheRecord(artifactPath, modulePath, workDir, cached)
     return some(cached)
   except CatchableError:
     return none(ProviderCompileArtifact)
@@ -3176,14 +4330,42 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
   let plan = providerCompilePlan(modulePath, outputBinaryPath,
     interfaceFingerprint, workDir, scratchDir)
   if artifactPath.len > 0 and providerCompileArtifactFresh(artifactPath,
-      plan.outputBinaryPath, interfaceFingerprint, plan.providerFingerprint):
+      plan.outputBinaryPath, interfaceFingerprint, plan.providerFingerprint,
+      plan.workDir):
     return readProviderCompileArtifact(artifactPath)
   createDir(extendedPath(parentDir(plan.outputBinaryPath)))
-  let execution = runCommand(plan.compilerCommand, cwd = workDir)
+  let compilerCwdRoot =
+    if scratchDir.len > 0:
+      absolutePath(scratchDir)
+    else:
+      absolutePath(parentDir(plan.outputBinaryPath))
+  createDir(extendedPath(compilerCwdRoot))
+  # Nim writes linker response files relative to CWD. Allocate that CWD with
+  # an atomic create-and-retry operation so concurrent compiles in the same
+  # process cannot collide even when their clocks and PID are identical.
+  let compilerCwd = createTempDir("provider-compiler-cwd-", "",
+    compilerCwdRoot)
+  defer:
+    try:
+      removeDir(extendedPath(compilerCwd))
+    except OSError:
+      discard
+  # Keep the immutable library lookup root (`workDir`) out of the write path.
+  # Nim emits relative linker response files in CWD even though `--nimcache`
+  # and `--out` are absolute.
+  let execution = runCommand(plan.compilerCommand, cwd = compilerCwd)
   if not fileExists(extendedPath(plan.outputBinaryPath)):
     raise newException(IOError,
       "provider compilation did not write binary: " & plan.outputBinaryPath &
         "\n" & execution.output)
+  # Windows: the provider binary links repro's DSL, which pulls in
+  # `repro_solver` and its module-init clingo dlopen — the same requirement the
+  # interface-extract runner has. The provider is spawned directly from its own
+  # scratch directory (`repro_provider_runtime/runtime.nim`), so LoadLibrary
+  # searches THAT directory, not repro's bin. Without this the provider aborts
+  # at startup with `could not load: clingo.dll` on any host that does not
+  # carry clingo on PATH.
+  stageHostDynlibsBesideBinary(parentDir(plan.outputBinaryPath))
   result = ProviderCompileArtifact(
     inputSources: plan.inputSources,
     outputBinaryPath: plan.outputBinaryPath,
@@ -3196,4 +4378,175 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
     executionResult: execution)
   if artifactPath.len > 0:
     writeProviderCompileArtifact(artifactPath, result)
-    writeProviderFreshnessCacheRecord(artifactPath, modulePath, result)
+    writeProviderFreshnessCacheRecord(artifactPath, modulePath, workDir, result)
+
+# ---------------------------------------------------------------------
+# TI1 — the interface-lift EDGE.
+#
+# Project-Interface-Artifacts-And-Import-Modes.md §"Automatic Interface
+# Lifting" makes the interface artifact a first-class build product. TI1
+# turns the LIFT into a cached, content-addressed engine build edge —
+# mirroring RP1's provider-compile edge — so a producer's interface is
+# lifted ONCE and read from cache, not re-extracted per consumer (the
+# RP5a ``staticExec``-per-consumer workaround this replaces).
+#
+# Two identities, exactly parallel to RP1's (artifact-id vs action-key):
+#
+#   InterfaceLiftActionKey = hash(
+#     "lift-interface", interfaceFormatVersion, nimCompilerIdentity,
+#     canonicalSourceInputPaths+content (producer closure + resource
+#     module closure), resource-module identity, extra-path set)
+#     — the engine edge's action key. Input-keyed: any source edit (public
+#       OR private) re-keys the LIFT so the edge re-runs. This is correct:
+#       a private edit must still re-run the lift to CONFIRM the public
+#       surface is unchanged; the confirmation is cheap and the RESULT is
+#       the InterfaceFingerprint, which is what actually gates downstream.
+#
+#   InterfaceFingerprint = hash(ProjectInterface public surface only)
+#     — the OUTPUT identity (``interfaceFingerprint`` above). Excludes
+#       ``build:``/driver bodies + private helpers by CONSTRUCTION: it
+#       hashes the projected ``ProjectInterface`` (public exec/lib/resource
+#       decls + signatures), never the source closure. So a private/driver
+#       edit re-runs the lift but yields the SAME InterfaceFingerprint —
+#       the load-bearing TI3-readiness property established here.
+
+const
+  InterfaceFormatVersion* = EnvelopeVersion
+    ## The "relevant frontend/interface format version" the spec's
+    ## ``InterfaceFingerprint`` names — reuses the codec envelope version so a
+    ## format bump re-keys every lift.
+
+proc interfaceLiftActionKey*(
+    canonicalSourceInputPaths: openArray[string];
+    resourceModule = "";
+    extraPaths: openArray[string] = [];
+    workDir = getCurrentDir()): ContentDigest =
+  ## The TI1 ``InterfaceLiftActionKey`` — the engine edge's action key,
+  ## analogous to RP1's ``ProviderCompileActionKey``. Keyed by the canonical
+  ## (root-relative path, content) source set, the resource-module identity,
+  ## the extra ``--path`` set, the Nim frontend identity, and the interface
+  ## format version. Content-addressed (paths made relative to the source
+  ## closure root, like ``projectSourceSemanticIdentity``) so two consumers
+  ## whose lift inputs are byte-identical converge on the same key.
+  var normalized: seq[string] = @[]
+  for path in canonicalSourceInputPaths:
+    normalized.add(normalizedStampPath(path))
+  let root = commonSourceRoot(normalized)
+  var payload: seq[byte] = @[]
+  payload.writeString("lift-interface")
+  payload.writeU32Le(uint32(InterfaceFormatVersion))
+  payload.writeString(nimCompilerIdentity())
+  payload.writeString(frontendRuntimeIdentity(workDir))
+  for path in normalized:
+    let relPath =
+      if root.len > 0 and path == root: extractFilename(path)
+      elif root.len > 0 and path.startsWith(root & "/"):
+        path[root.len + 1 .. ^1]
+      else: extractFilename(path)
+    payload.writeString(relPath)
+    let content =
+      if fileExists(extendedPath(path)): toBytes(readFile(extendedPath(path)))
+      else: @[]
+    payload.writeU64Le(uint64(content.len))
+    payload.add(content)
+  payload.writeString(
+    if resourceModule.len > 0: extractFilename(normalizedStampPath(resourceModule))
+    else: "")
+  var extras: seq[string] = @[]
+  for extra in extraPaths:
+    if extra.len > 0:
+      extras.add(extractFilename(normalizedStampPath(extra)))
+  extras.sort(system.cmp[string])
+  payload.writeStringSeq(extras)
+  blake3DomainDigest(payload, hdActionFingerprint)
+
+proc interfaceLiftMetadata(declaredInputs, declaredOutputs: openArray[string];
+                           interfaceLiftActionKey: ContentDigest): DynamicValue =
+  var inputValues: seq[DynamicValue] = @[]
+  for value in declaredInputs:
+    inputValues.add(cborText(value))
+  var outputValues: seq[DynamicValue] = @[]
+  for value in declaredOutputs:
+    outputValues.add(cborText(value))
+  cborMap([
+    entry("kind", cborText("interfaceLift")),
+    entry("schema", cborUInt(1)),
+    entry("declaredInputs", cborArray(inputValues)),
+    entry("declaredOutputs", cborArray(outputValues)),
+    entry("interfaceLiftActionKey", digestHexValue(interfaceLiftActionKey))
+  ])
+
+proc interfaceLiftPlan*(modulePath, artifactPath, stubPath: string;
+                        resourceModule = "";
+                        extraPaths: openArray[string] = [];
+                        workDir = getCurrentDir()): InterfaceLiftPlan =
+  ## TI1: build the interface-lift edge plan for a producer. The declared
+  ## inputs are the producer's source closure (plus the resource-module
+  ## closure when declared); the declared outputs are the interface artifact +
+  ## stub. The engine edge is keyed by the ``InterfaceLiftActionKey``.
+  let sources = interfaceLiftSources(modulePath, resourceModule, extraPaths)
+  let actionKey = interfaceLiftActionKey(sources, resourceModule, extraPaths,
+    workDir)
+  let declaredInputs = sources
+  var declaredOutputs = @[artifactPath]
+  if stubPath.len > 0:
+    declaredOutputs.add(stubPath)
+  let process = directProcess(corepaths.normalizedPath(nimCompilerPath()), [],
+    corepaths.normalizedPath(workDir))
+  let edge = InterfaceLiftEdge(
+    actionSpec: ActionSpec(
+      actionId: stableIdFromDigest(actionKey),
+      process: process,
+      dependencyPolicy: automaticMonitorGatheringPolicy(),
+      metadata: interfaceLiftMetadata(declaredInputs, declaredOutputs,
+        actionKey)),
+    declaredInputs: declaredInputs,
+    declaredOutputs: declaredOutputs,
+    actionFingerprint: actionKey)
+  InterfaceLiftPlan(
+    modulePath: modulePath,
+    resourceModule: resourceModule,
+    extraPaths: @extraPaths,
+    artifactPath: artifactPath,
+    stubPath: stubPath,
+    inputSources: sources,
+    liftEdge: edge,
+    interfaceLiftActionKey: actionKey,
+    workDir: workDir)
+
+proc interfaceArtifactFresh*(plan: InterfaceLiftPlan): bool =
+  ## TI1: is the on-disk interface artifact a cache HIT for this plan? Fresh
+  ## iff the artifact exists AND the recomputed ``InterfaceLiftActionKey`` is
+  ## unchanged (the extraction cache record already gates the underlying
+  ## extractor on the same input closure). A stale artifact returns false and
+  ## the lift edge re-runs.
+  if plan.artifactPath.len == 0 or
+      not fileExists(extendedPath(plan.artifactPath)):
+    return false
+  try:
+    let sidecar = interfaceLiftActionKeyPath(plan.artifactPath)
+    if not fileExists(extendedPath(sidecar)):
+      return false
+    let stored = readFile(extendedPath(sidecar)).strip()
+    stored == toHex(plan.interfaceLiftActionKey.bytes)
+  except CatchableError:
+    false
+
+proc liftInterfaceArtifact*(plan: InterfaceLiftPlan): ProjectInterfaceArtifact =
+  ## TI1: MATERIALIZE the interface-lift edge — run the lift once and cache
+  ## the ``ProjectInterfaceArtifact`` keyed by the ``InterfaceLiftActionKey``.
+  ## A second call with an unchanged input closure is a cache HIT (the
+  ## underlying ``extractInterfaceFromModule`` short-circuits on its own
+  ## extraction cache; here we additionally short-circuit on the action-key
+  ## sidecar so the lift edge is not re-run). The persisted artifact round-
+  ## trips through the existing ``ProjectInterfaceArtifact`` codec.
+  if interfaceArtifactFresh(plan):
+    return readInterfaceArtifactWithWarm(plan.artifactPath)
+  result = extractInterfaceFromModule(plan.modulePath, plan.artifactPath,
+    plan.stubPath, plan.workDir, requireStub = plan.stubPath.len > 0,
+    resourceModule = plan.resourceModule, extraPaths = plan.extraPaths)
+  try:
+    writeFile(extendedPath(interfaceLiftActionKeyPath(plan.artifactPath)),
+      toHex(plan.interfaceLiftActionKey.bytes))
+  except CatchableError:
+    discard

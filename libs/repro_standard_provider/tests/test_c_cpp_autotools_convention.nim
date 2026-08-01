@@ -35,6 +35,7 @@
 ##       compile actions depend on the configure action.
 
 import std/[os, strutils, unittest]
+import repro_test_support
 
 import repro_core
 import repro_provider_runtime
@@ -42,9 +43,9 @@ import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/c_cpp_autotools as autotools_convention
 
-const
+let
   ReprobuildRoot = currentSourcePath.parentDir.parentDir.parentDir.parentDir
-  MetacraftRoot = ReprobuildRoot.parentDir
+  MetacraftRoot = workspaceRootForRepo(ReprobuildRoot)
   HelloBinaryFixture =
     MetacraftRoot / "reprobuild-examples" / "c-cpp-autotools" / "hello-binary"
 

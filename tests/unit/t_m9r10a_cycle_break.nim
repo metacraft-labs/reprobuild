@@ -48,6 +48,15 @@ proc makeRecipeFile(root, name: string) =
   createDir(recipeDir)
   writeFile(recipeDir / "repro.nim", "## synthetic " & name & " recipe\n")
 
+proc makeExecutable(path: string) =
+  createDir(parentDir(path))
+  writeFile(path, "#!/bin/sh\nexit 0\n")
+  when not defined(windows):
+    setFilePermissions(path, {
+      fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec,
+      fpOthersRead, fpOthersExec})
+
 suite "M9.R.10a cycle break + stdlib fall-through":
 
   test "test_m9r10a_cycle_broken_set_is_addressable_and_mutable":
@@ -133,6 +142,39 @@ suite "M9.R.10a cycle break + stdlib fall-through":
       # The error, if any, must come from the stdlib provisioning
       # resolver (e.g. tarball download failing on a bogus file:// URL).
       # That's the gate we're proving is reached.
+
+  test "test_m9r10a_completed_source_mirror_precedes_cycle_break":
+    # A bootstrap tool can be built earlier in the same source migration.
+    # Once its complete install mirror exists, consumers must use that
+    # mirror instead of requiring a stdlib provisioning channel.
+    let scratch = createTempDir("repro-m9r10a-source-mirror-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "pkgconf")
+    let mirror = scratch / "pkgconf" / ".repro" / "output" / "install" /
+      "usr" / "bin" / "pkgconf"
+    makeExecutable(mirror)
+
+    let savedSet = fromSourceCycleBrokenTools
+    defer: fromSourceCycleBrokenTools = savedSet
+    fromSourceCycleBrokenTools = initHashSet[string]()
+    fromSourceCycleBrokenTools.incl("pkgconf")
+
+    let artifact = ProjectInterfaceArtifact(
+      projectInterface: ProjectInterface(
+        projectName: "t_m9r10a_completed_source_mirror",
+        toolUses: @[syntheticUseDef("pkgconf")]))
+    let savedRoot = getEnv(FromSourceRootEnvVar)
+    putEnv(FromSourceRootEnvVar, scratch)
+    defer:
+      if savedRoot.len > 0: putEnv(FromSourceRootEnvVar, savedRoot)
+      else: delEnv(FromSourceRootEnvVar)
+
+    let identity = toolBuildIdentity(artifact, tpmFromSource,
+      storeRoot = scratch / "tool-store")
+    check identity.profiles.len == 1
+    check identity.profiles[0].installMethod == "from-source"
+    check identity.profiles[0].resolvedExecutablePath ==
+      absolutePath(mirror)
 
   test "test_m9r10a_cycle_break_raises_when_no_stdlib_provisioning":
     # The terminal case: cycle detected AND no stdlib provisioning

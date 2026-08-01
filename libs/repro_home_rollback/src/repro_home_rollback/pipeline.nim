@@ -573,21 +573,10 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
                 deleteRegistryValue(subkey,
                   rec.realWorldIdentity[bs + 1 .. ^1])
           of rkEnvUserVariable:
-            # Windows: identity is `HKCU\Environment\<name>` —
-            # split on the trailing `\` to recover `<name>`.
-            # POSIX: identity is the variable name verbatim (the
-            # M69 emitter uses `home.package.<pkg>.env.<name>` as
-            # the resource address but materializes the registry
-            # identity as `\Environment\<name>` on Windows, while
-            # the POSIX arm writes a managed block keyed by `<name>`
-            # alone). Both arms below call `applyUserVariableDestroy`,
-            # whose POSIX arm removes the per-variable managed block.
-            let bs = rec.realWorldIdentity.rfind('\\')
-            let name =
-              if bs >= 0: rec.realWorldIdentity[bs + 1 .. ^1]
-              else: rec.realWorldIdentity
+            let name = userVariableNameFromIdentity(rec.realWorldIdentity)
             if name.len > 0:
-              applyUserVariableDestroy(name)
+              applyUserVariableDestroy(name,
+                userVariableHostFromIdentity(rec.realWorldIdentity))
           of rkEnvUserPath:
             let entries = parseRecordedPathEntries(rec.payloadBytes)
             removeUserPathContribution(entries,
@@ -642,6 +631,16 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
                 writeRegistryValue(EnvironmentSubkey, name, regType,
                   rec.payloadBytes)
                 broadcastEnvironmentChange()
+            else:
+              let name = userVariableNameFromIdentity(rec.realWorldIdentity)
+              let host =
+                userVariableHostFromIdentity(rec.realWorldIdentity)
+              if name.len > 0 and host.len > 0:
+                var content = newString(rec.payloadBytes.len)
+                for i, b in rec.payloadBytes:
+                  content[i] = char(b)
+                discard applyManagedBlockResource(host,
+                  userVariableBlockId(name), content)
           of rkEnvUserPath:
             let entries = parseRecordedPathEntries(rec.payloadBytes)
             # Subtract the CURRENT generation's contribution first

@@ -31,6 +31,8 @@
 ##   6. Recipes with no project-interface.rbsz on disk fall back to
 ##      filesystem enumeration with ``makUnknown`` and still resolve
 ##      via the suffix-probe order.
+##   7. A bundled library dependency can resolve through an explicit
+##      source-package alias without changing the requested ABI name.
 
 import std/[os, strutils, tables, tempfiles, unittest]
 
@@ -150,6 +152,65 @@ suite "DSL-port M9.R.14d.1 — library-use-kind resolution":
     check outcome.profile.pathSearchList.len == 1
     check outcome.profile.pathSearchList[0] ==
       parentDir(absolutePath(artefact))
+
+  test "resolves_bundled_library_from_aliased_source_recipe":
+    let scratch = createTempDir("repro-m9r14d-alias-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "libtool")
+    let artefact = makeLibraryArtefact(scratch, "libtool", "libltdl")
+    writeSyntheticInterface(scratch, "libtool",
+      executables = @["libtool", "libtoolize"], libraries = @["libltdl"])
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("libltdl"), recipeRoot = scratch)
+    check outcome.kind == rrResolved
+    check outcome.profile.resolvedExecutablePath == absolutePath(artefact)
+    check outcome.profile.packageSelector == "libltdl"
+    check outcome.profile.selectedStorePath == absolutePath(scratch / "libtool")
+
+  test "resolves_compatibility_executable_from_aliased_source_recipe":
+    let scratch = createTempDir("repro-m9r14d-exe-alias-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "pkgconf")
+    let binDir = scratch / "pkgconf" / ".repro" / "output" / "install" /
+      "usr" / "bin"
+    createDir(binDir)
+    let artefact = binDir / "pkg-config"
+    writeFile(artefact, "#!/bin/sh\necho synth\n")
+    when not defined(windows):
+      setFilePermissions(artefact, {fpUserExec, fpUserRead, fpUserWrite,
+        fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+    writeSyntheticInterface(scratch, "pkgconf",
+      executables = @["pkgconf", "pkg-config"], libraries = @["libpkgconf"])
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("pkg-config"), recipeRoot = scratch)
+    check outcome.kind == rrResolved
+    check outcome.profile.resolvedExecutablePath == absolutePath(artefact)
+    check outcome.profile.packageSelector == "pkg-config"
+    check outcome.profile.selectedStorePath == absolutePath(scratch / "pkgconf")
+
+  test "resolves systemd bundled libraries from source aliases":
+    let scratch = createTempDir("repro-m9r14d-systemd-alias-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "systemd")
+    let udevArtefact = makeLibraryArtefact(scratch, "systemd", "libUdev")
+    let systemdArtefact =
+      makeLibraryArtefact(scratch, "systemd", "libSystemd")
+    writeSyntheticInterface(scratch, "systemd",
+      executables = @["systemdInit", "systemctl"],
+      libraries = @["libUdev", "libSystemd"])
+
+    for (dependency, expected) in [
+        ("libudev", udevArtefact),
+        ("libsystemd", systemdArtefact)]:
+      let outcome = tryResolveFromSourceTool(
+        syntheticUseDef(dependency), recipeRoot = scratch)
+      check outcome.kind == rrResolved
+      check outcome.profile.resolvedExecutablePath == absolutePath(expected)
+      check outcome.profile.packageSelector == dependency
+      check outcome.profile.selectedStorePath ==
+        absolutePath(scratch / "systemd")
 
   test "resolves_executable_artefact_when_recipe_declares_executable":
     let scratch = createTempDir("repro-m9r14d-exe-", "")

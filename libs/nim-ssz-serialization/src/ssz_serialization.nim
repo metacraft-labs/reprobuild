@@ -13,7 +13,7 @@
 import
   std/typetraits,
   results,
-  stew/[endians2, leb128, objects, ptrops],
+  stew/[endians2, leb128, objects],
   serialization, serialization/[case_objects, testing/tracing],
   ./ssz_serialization/[codec, bitseqs, types]
 
@@ -48,6 +48,14 @@ func init*(T: type SszReader,
            stream: InputStream): T =
   T(stream: stream)
 
+proc writeBulkCopy[T](s: var (OutputStream|WriteCursor),
+                      value: openArray[T]) {.raises: [IOError].} =
+  # Use Nim primitives here because compatible stew releases expose their
+  # pointer helpers from different modules.
+  if value.len > 0:
+    let bytes = cast[ptr UncheckedArray[byte]](unsafeAddr value[0])
+    s.write bytes.toOpenArray(0, value.len * sizeof(T) - 1)
+
 proc writeFixedSized(s: var (OutputStream|WriteCursor), x: auto) {.raises: [IOError].} =
   mixin toSszType
 
@@ -64,8 +72,7 @@ proc writeFixedSized(s: var (OutputStream|WriteCursor), x: auto) {.raises: [IOEr
     type ET = ElemType(type x)
     when supportsBulkCopy(ET) or ET is bool:
       trs "APPENDING FIXED SIZE BYTES: ", x
-      let p = cast[ptr byte](baseAddr x)
-      s.write makeOpenArray(p, x.len * sizeof(x[0]))
+      s.writeBulkCopy x
     else:
       for elem in x:
         trs "WRITING FIXED SIZE ARRAY ELEMENT"
@@ -128,8 +135,7 @@ proc writeElements[T](w: var SszWriter, value: openArray[T])
   mixin toSszType
   when supportsBulkCopy(T):
     trs "BULK COPYING ELEMENTS"
-    let p = cast[ptr byte](baseAddr value)
-    w.stream.write makeOpenArray(p, sizeof(T) * value.len)
+    w.stream.writeBulkCopy value
     trs "DONE"
   elif isFixedSize(T):
     trs "WRITING LIST WITH FIXED SIZE ELEMENTS"

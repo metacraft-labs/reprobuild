@@ -57,9 +57,9 @@ suite "Local daemons/control-plane M0 current-state gates":
         "repro build: error: unsupported --daemon=invalid")
 
       let statsCapture = requireReproFailure([
-        "build", "--stats-capture=invalid"])
+        "build", "--stats-groups=invalid"])
       check statsCapture.contains(
-        "repro build: error: unsupported --stats-capture=invalid")
+        "repro build: error: unsupported --stats-groups=invalid")
 
       let stats = requireSuccess(shellCommand([
         publicReproBin(), "stats", "status", "--project-root=" & tempRoot

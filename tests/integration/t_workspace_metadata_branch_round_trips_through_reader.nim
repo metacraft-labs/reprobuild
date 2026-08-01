@@ -2,11 +2,11 @@
 ##
 ## Round-trip test for the new ``workspace_branch`` module: the
 ## ``writeWorkspaceBranch`` helper records the active workspace branch
-## into ``<workspaceRoot>/.repo/workspace.toml`` under
+## into ``<workspaceRoot>/.repro/workspace.toml`` under
 ## ``[workspace].branch``, and ``readWorkspaceBranch`` reads it back
 ## through the M5 strict reader. Three checkpoints:
 ##
-##   1. Writing a fresh ``.repo/workspace.toml`` in single-project
+##   1. Writing a fresh ``.repro/workspace.toml`` in single-project
 ##      mode (no manifest layers) and reading the branch back yields
 ##      the value that was written.
 ##   2. Reading a workspace.toml that has no ``[workspace].branch``
@@ -70,8 +70,8 @@ suite "M13 — workspace branch round-trips through reader":
 
     # Hand-roll a workspace.toml that has ``[workspace] project`` but
     # NO ``branch`` key — the shape M9 init wrote before M13 landed.
-    createDir(workspaceRoot / ".repo")
-    let tomlPath = workspaceRoot / ".repo" / "workspace.toml"
+    createDir(workspaceRoot / ".repro")
+    let tomlPath = workspaceRoot / ".repro" / "workspace.toml"
     writeFile(tomlPath,
       "schema = \"reprobuild.workspace.local.v1\"\n\n" &
       "[workspace]\n" &
@@ -121,8 +121,8 @@ suite "M13 — workspace branch round-trips through reader":
     # layers. M13's writer must keep them intact when it updates the
     # branch field — otherwise re-running init on a composed workspace
     # would silently drop the user's manifest configuration.
-    createDir(workspaceRoot / ".repo")
-    let tomlPath = workspaceRoot / ".repo" / "workspace.toml"
+    createDir(workspaceRoot / ".repro")
+    let tomlPath = workspaceRoot / ".repro" / "workspace.toml"
     writeFile(tomlPath,
       "schema = \"reprobuild.workspace.local.v1\"\n\n" &
       "[workspace]\n" &
@@ -133,7 +133,7 @@ suite "M13 — workspace branch round-trips through reader":
       "visibility = \"public\"\n" &
       "branch = \"main\"\n\n" &
       "[[manifest]]\n" &
-      "local_path = \".repo/manifests-personal\"\n" &
+      "local_path = \".repro/manifests-personal\"\n" &
       "visibility = \"personal\"\n")
 
     check isCompositionalWorkspaceToml(workspaceRoot) == true
@@ -154,6 +154,6 @@ suite "M13 — workspace branch round-trips through reader":
     check parsed.manifest[0].branch.isSome
     check parsed.manifest[0].branch.get() == "main"
     check parsed.manifest[1].local_path.isSome
-    check parsed.manifest[1].local_path.get() == ".repo/manifests-personal"
+    check parsed.manifest[1].local_path.get() == ".repro/manifests-personal"
     check parsed.manifest[1].visibility == "personal"
     check isCompositionalWorkspaceToml(workspaceRoot) == true

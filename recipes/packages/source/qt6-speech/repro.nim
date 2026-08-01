@@ -24,6 +24,7 @@ package qt6SpeechSource:
     extractStrip: 1
 
   nativeBuildDeps:
+    "bash >=5.2"
     "cmake >=3.21"
     "ninja >=1.10"
     "gcc >=11"
@@ -34,6 +35,7 @@ package qt6SpeechSource:
 
   buildDeps:
     "qt6-base >=6.8"
+    "qt6-declarative >=6.8"
     ## M9.R.15q.10.5 — qt6-speech REQUIREs Qt6::Multimedia (returns early
     ## from its CMakeLists when the target is missing). Sibling
     ## qt6-multimedia recipe at the matching 6.8.1 pin.
@@ -55,10 +57,13 @@ package qt6SpeechSource:
         "QT_BUILD_EXAMPLES=OFF",
         "QT_GENERATE_SBOM=OFF",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", generator = "Ninja",
+        cacheVars = opts, allowSourceWrites = true)
       discard pkg.library("libQt6TextToSpeech")
     finally:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    discard
+    "qt6-base >=6.8"
+    "qt6-declarative >=6.8"
+    "qt6-multimedia >=6.8"

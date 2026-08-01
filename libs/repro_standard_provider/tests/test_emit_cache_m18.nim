@@ -12,15 +12,16 @@
 ## case is skipped — the emit-cache helper tests still run.
 
 import std/[os, strutils, unittest]
+import repro_test_support
 
 import repro_provider_runtime
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/emit_cache
 import repro_standard_provider/conventions/nim as nim_convention
 
-const
+let
   ReprobuildRoot = currentSourcePath.parentDir.parentDir.parentDir.parentDir
-  MetacraftRoot = ReprobuildRoot.parentDir
+  MetacraftRoot = workspaceRootForRepo(ReprobuildRoot)
   FixtureRoot = MetacraftRoot / "reprobuild-examples" / "nim" / "binary"
   FixtureEntry = "nim_binary_example"
 

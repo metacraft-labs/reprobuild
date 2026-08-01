@@ -152,7 +152,7 @@ proc sha256Bytes(buf: openArray[byte]): array[32, byte] =
   var ctx: bsslHashAbi.Sha256Context
   bsslHashAbi.sha256Init(ctx)
   if buf.len > 0:
-    bsslHashAbi.sha256Update(ctx, unsafeAddr buf[0], csize_t(buf.len))
+    bsslHashAbi.sha224Update(ctx, unsafeAddr buf[0], uint(buf.len))
   bsslHashAbi.sha256Out(ctx, addr result[0])
 
 # ---------------------------------------------------------------------------

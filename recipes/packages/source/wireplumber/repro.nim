@@ -96,17 +96,17 @@
 ## v1 ships NO configurables — the meson options are hardcoded to the
 ## modern-desktop baseline per the task brief:
 ##
-##   * ``documentation=disabled`` — skip the documentation build
-##                                    (heavy hotdoc dependency surface,
-##                                    not needed at runtime).
+##   * ``doc=disabled`` — skip the documentation build (heavy Sphinx
+##                          dependency surface, not needed at runtime).
 ##   * ``introspection=disabled`` — skip GObject Introspection
 ##                                    (drops the g-ir-scanner toolchain
 ##                                    dep; matches glib2 +
 ##                                    plasma-workspace precedents).
-##   * ``system-lua=true``         — use system lua (Lua 5.4 from the
-##                                    glibc dependency tree) instead of
-##                                    building wireplumber's vendored
-##                                    Lua sub-project.
+##   * ``system-lua=false`` — build the bundled Lua subproject from the
+##                              pinned WirePlumber source archive instead
+##                              of introducing a Nix-provisioned Lua.
+##   * ``systemd=enabled`` — require the declared source-built systemd
+##                             dependency and install the user service.
 ##   * ``tests=false``             — skip the upstream test suite.
 ##   * ``--buildtype=release``     — release-mode optimisation; matches
 ##                                    the sibling from-source recipes.
@@ -186,7 +186,7 @@ package wireplumberSource:
     ## glib2 supplies ``libglib-2.0`` + ``libgobject-2.0`` +
     ## ``libgio-2.0`` — the WirePlumber object model is GObject-based
     ## and the session-manager main loop integrates with GMainLoop.
-    "glib2 >=2.62"
+    "glib2 >=2.68"
     ## systemd supplies ``libsystemd`` for the sd-bus integration
     ## that drives wireplumber's portal-bus bridge + the sd-notify
     ## integration with the user-session systemd unit.
@@ -199,10 +199,7 @@ package wireplumberSource:
     ## ``/usr/bin/wireplumber`` — the session manager daemon that runs
     ## alongside pipewire and owns the Lua-scripted policy layer.
     ## Started by ``wireplumber.service`` (user-session systemd unit)
-    ## on every login, after ``pipewire.service`` comes up. v1
-    ## records the artifact only; the per-artifact build body lands
-    ## in M9.L when the convention's ninja-spawn + install-glue
-    ## closes.
+    ## on every login, after ``pipewire.service`` comes up.
     discard
 
   library libWireplumber:
@@ -213,7 +210,7 @@ package wireplumberSource:
     ## ``/etc/wireplumber/main.lua.d/``). The SONAME's version suffix
     ## ``-0.5`` is stripped in the artifact identifier (matching the
     ## libPipewire / libGlib2 precedent of stripping version
-    ## suffixes). v1 records the artifact only.
+    ## suffixes).
     discard
 
   build:
@@ -221,20 +218,36 @@ package wireplumberSource:
     setCurrentOwningPackageOverride("wireplumberSource")
     try:
       let opts = @[
-        "documentation=disabled",
+        "doc=disabled",
         "introspection=disabled",
-        "system-lua=true",
+        "system-lua=false",
+        "systemd=enabled",
         "tests=false",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      let patches = @[
+        # Seed Meson's offline wrap cache with the exact Lua source and
+        # WrapDB build patch pinned by upstream's subprojects/lua.wrap.
+        "mkdir -p src/subprojects/packagecache",
+        "cp vendor/lua-5.5.0.tar.gz src/subprojects/packagecache/",
+        "cp vendor/lua_5.5.0-1_patch.zip src/subprojects/packagecache/",
+        # Upstream 0.5.14 declares a build-tree conf.pot output but writes
+        # it into the source tree. Keep generated translations in Meson's
+        # build directory so monitored builds leave sources immutable.
+        "rm -f src/po/conf.pot",
+        "sed -i \"s|'@CURRENT_SOURCE_DIR@/conf.pot'|'@OUTPUT@'|; /capture: true,/d\" src/po/meson.build",
+      ]
+      let pkg = meson_package(
+        srcDir = "./src",
+        configureOptions = opts,
+        srcPatches = patches)
       discard pkg.executable("wireplumber")
       discard pkg.library("libWireplumber")
     finally:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
-    ## DT_NEEDED inspection of the linked artifacts. Empty until
-    ## the M9.R.5b per-recipe pass populates per-output ELF
-    ## interrogation.
-    discard
+    ## Verified across the daemon, command-line tools, shared library,
+    ## and plugin modules. Bundled Lua is linked statically.
+    "pipewire >=1.0"
+    "glib2 >=2.68"
+    "systemd >=240"

@@ -14,12 +14,11 @@
 ## append ``reprobuild-examples`` to land at the sibling checkout.
 
 import std/[os, strutils, unittest]
+import repro_test_support
 
-const
-  ## ``parentDir`` five times from
-  ## ``libs/repro_standard_provider/tests/test_examples_layout.nim``:
-  ## tests → repro_standard_provider → libs → reprobuild → metacraft.
-  MetacraftRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir.parentDir
+let
+  ReprobuildRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
+  MetacraftRoot = workspaceRootForRepo(ReprobuildRoot)
   ExamplesRoot = MetacraftRoot / "reprobuild-examples"
 
 const PopulatedExamples = [

@@ -41,6 +41,18 @@ proc runCmd(command: string; cwd = ""): tuple[code: int; output: string] =
   let res = execCmdEx(command, workingDir = cwd)
   (code: res.exitCode, output: res.output)
 
+proc removeDirEventually(path: string) =
+  for attempt in 0 ..< 20:
+    if not dirExists(path):
+      return
+    try:
+      removeDir(path)
+      return
+    except OSError:
+      if attempt == 19:
+        raise
+      sleep(100)
+
 proc requireGit(command: string; cwd = ""): string =
   let res = runCmd(command, cwd)
   if res.code != 0:
@@ -222,7 +234,7 @@ proc setupFixture(gitBin, slug: string): M15Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -255,12 +267,12 @@ proc invokeCheckout(fx: M15Fixture; name: string): CmdResult =
   # post-confirmation switch outcomes, so they opt out with ``--yes``;
   # the dedicated RA-9 suite covers the non-TTY refuse path.
   runShell(shellCommand(@[
-    fx.reproBin, "checkout", name, "--yes",
+    fx.reproBin, "checkout", "--write-report", name, "--yes",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc readReport(fx: M15Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "checkout-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
@@ -281,7 +293,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       skip()
     else:
       let fx = setupFixture(gitBin, "all-local")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -323,7 +335,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       skip()
     else:
       let fx = setupFixture(gitBin, "fetch-and-track")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       # Seed ``feature-remote`` on the lib-b origin BEFORE cloning so
       # the clones pick up only ``main`` (DWIM-able remote-only ref
@@ -380,7 +392,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       skip()
     else:
       let fx = setupFixture(gitBin, "missing-branch")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -431,7 +443,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       skip()
     else:
       let fx = setupFixture(gitBin, "dirty")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -480,7 +492,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       skip()
     else:
       let fx = setupFixture(gitBin, "metadata")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -501,7 +513,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       # The on-disk workspace.toml carries the new value under
       # ``[workspace].branch`` (still a metadata-only file — we did
       # not promote it to composer mode).
-      let tomlPath = fx.workspaceRoot / ".repo" / "workspace.toml"
+      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
       let parsed = readWorkspaceLocal(tomlPath)
       check parsed.workspace.project == "lib-a"
       check parsed.workspace.branch.isSome
@@ -521,7 +533,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       skip()
     else:
       let fx = setupFixture(gitBin, "idempotent")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")

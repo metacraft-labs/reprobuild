@@ -102,6 +102,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
   let kindTag = case spec.kind
     of dfkTarball: "tarball"
     of dfkGitArchive: "git"
+    of dfkDataFile: "data-file"
   let shExe = findExe("sh")
   let escapedUrl = spec.url.replace("\"", "\\\"")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
@@ -110,12 +111,15 @@ proc emitFetchAction*(projectRoot, packageName: string;
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted =
     extracted.replace("\\", "/").replace("\"", "\\\"")
+  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
   let escapedRev = spec.gitRevision.replace("\"", "\\\"")
   var argv: seq[string]
   if shExe.len > 0:
     var script = "set -e; "
-    script.add("mkdir -p \"")
-    script.add(escapedExtracted)
+    script.add("rm -rf \"")
+    script.add(escapedStaged)
+    script.add("\"; mkdir -p \"")
+    script.add(escapedStaged)
     script.add("\"; ")
     case spec.kind
     of dfkTarball:
@@ -136,7 +140,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
         script.add("echo \"" & escapedHash & "  " & escapedTarball &
           "\" | blake3sum -c -; ")
       script.add("tar -xf \"" & escapedTarball & "\" -C \"" &
-        escapedExtracted & "\" --strip-components=" & $spec.extractStrip &
+        escapedStaged & "\" --strip-components=" & $spec.extractStrip &
         "; ")
     of dfkGitArchive:
       # Shallow clone + archive. The git rev is verified by extracting
@@ -160,8 +164,25 @@ proc emitFetchAction*(projectRoot, packageName: string;
         script.add("echo \"" & escapedHash & "  " & escapedTarball &
           "\" | blake3sum -c -; ")
       script.add("tar -xf \"" & escapedTarball & "\" -C \"" &
-        escapedExtracted & "\" --strip-components=" & $spec.extractStrip &
+        escapedStaged & "\" --strip-components=" & $spec.extractStrip &
         "; ")
+    of dfkDataFile:
+      script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
+      script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" &
+        escapedUrl & "\"; fi; ")
+      case spec.hashAlg
+      of dshaSha256:
+        script.add("echo \"" & escapedHash & "  " & escapedTarball &
+          "\" | sha256sum -c -; ")
+      of dshaBlake3:
+        script.add("echo \"" & escapedHash & "  " & escapedTarball &
+          "\" | b2sum -a blake3 -c - || ")
+        script.add("echo \"" & escapedHash & "  " & escapedTarball &
+          "\" | blake3sum -c -; ")
+      script.add("cp \"" & escapedTarball & "\" \"" &
+        escapedStaged & "/source\"; ")
+    script.add("rm -rf \"" & escapedExtracted & "\"; ")
+    script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
     script.add("touch \"" & escapedStamp & "\"")
     argv = @[shExe, "-c", script]
   else:

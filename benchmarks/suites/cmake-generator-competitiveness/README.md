@@ -47,8 +47,8 @@ Ninja build scenarios collect Ninja's native `-d stats` diagnostics by default.
 In `cmake-driver` mode the benchmark passes these through CMake as native
 build-tool arguments: `cmake --build <dir> ... -- -d stats`. In `direct` mode
 the same diagnostics are passed directly to Ninja. Reprobuild build scenarios
-collect `repro build --stats` diagnostics by default via `REPROBUILD_STATS=1`;
-direct mode also passes `--stats` explicitly. The report metadata records the
+collect `repro build --show=timing` diagnostics by default via
+`REPROBUILD_SHOW=timing`; direct mode also passes `--show=timing` explicitly. The report metadata records the
 selected diagnostics modes, and each build scenario includes parsed
 `ninjaDiagnostics.metrics` or `reprobuildDiagnostics.metrics` entries with the
 metric name, count, average microseconds, and total milliseconds.

@@ -71,6 +71,9 @@ suite "lessSource — from-source recipe smoke test":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "configureFlags does not leak into the make channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
+  test "ncurses is registered as the terminal capability build dependency":
+    check registeredBuildDeps("lessSource") == @["ncurses >=6.0"]
+
   test "artifacts register a single less executable tagged dakExecutable":
     # M3 artifact registry: ``less`` is tagged ``dakExecutable``.
     # less's autotools build emits a single load-bearing binary (the

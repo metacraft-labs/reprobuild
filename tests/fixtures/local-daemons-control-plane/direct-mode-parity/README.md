@@ -14,7 +14,7 @@ Current behavior:
   calls the same direct build path and then waits on the platform filesystem
   watcher unless `--max-cycles` ends the loop first.
 - `repro daemon`, `repro build --daemon=auto|require|off`,
-  `repro build --stats-capture=...`, and `repro stats` are intentionally absent
+  `repro build --stats-groups=...`, and `repro stats` are intentionally absent
   in M0.
 - `repro store daemon` / `reprostored` are a separate store-daemon lifecycle
   surface from the user/watch daemon surface owned by `repro daemon`.

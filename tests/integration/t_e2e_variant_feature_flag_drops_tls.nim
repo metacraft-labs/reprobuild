@@ -19,7 +19,7 @@
 ##      variant emits BOTH the basic test edge and the TLS test edge.
 ##
 ## Subprocess assertion:
-##   4. Compiles a probe that re-imports the fixture under
+##   4. Runs the graph-built probe that re-imports the fixture under
 ##      ``REPRO_VARIANTS=enableTLS=false`` and asserts (a) the
 ##      solver resolves the variant to ``false``, (b) the build proc
 ##      emits ONLY the basic test edge (the TLS edge is dropped by
@@ -27,40 +27,11 @@
 
 import std/[os, osproc, strutils, tables, unittest]
 
+import repro_test_support
 import repro_dsl_stdlib/configurables
 import repro_project_dsl
 
 import "../fixtures/spec-examples/variant-feature-flag/repro" as fixture
-
-const ProbeSrcTemplate = """
-import std/[os, strutils, tables]
-import repro_dsl_stdlib/configurables
-import repro_project_dsl
-import "@ROOT@/tests/fixtures/spec-examples/variant-feature-flag/repro" as fixture
-
-if not hasSolverSolution():
-  quit "no solver solution"
-let sol = lastSolverSolution()
-let resolved = sol.variants.getOrDefault("enableTLS", "")
-if resolved != "false":
-  quit "enableTLS resolved to '" & resolved & "' but expected 'false'"
-resetBuildActionRegistry()
-fixture.buildVariantFeatureFlagPackage()
-let edges = registeredBuildActions()
-var tlsCount = 0
-for e in edges:
-  if "t_tls" in e.id:
-    inc tlsCount
-  for o in e.outputs:
-    if "t_tls" in o:
-      inc tlsCount
-      break
-if tlsCount != 0:
-  quit "expected 0 TLS edges with enableTLS=false but got " & $tlsCount
-if edges.len < 1:
-  quit "expected at least one build edge but got 0"
-quit 0
-"""
 
 proc reproRoot(): string =
   # Walk up from the test source file (this .nim) rather than the
@@ -115,22 +86,21 @@ suite "Spec-Implementation M2d: variant-feature-flag fixture e2e":
 
   test "REPRO_VARIANTS=enableTLS=false drops the TLS edge":
     let root = reproRoot()
-    let cacheDir = root / "build" / "nimcache" / "variant_feature_flag_probe"
-    let probeSrc = root / "build" / "variant_feature_flag_probe.nim"
-    let probeBin = root / "build" / "test-bin" / "variant_feature_flag_probe"
-    createDir(cacheDir)
-    createDir(root / "build" / "test-bin")
-    writeFile(probeSrc, ProbeSrcTemplate.replace("@ROOT@", root))
-    let nimcmd = "nim c --hints:off --warnings:off --nimcache:" & cacheDir &
-      " --out:" & probeBin & " " & probeSrc
-    let buildResult = execCmdEx(nimcmd)
-    if buildResult.exitCode != 0:
-      echo "PROBE BUILD FAILED:"
-      echo buildResult.output
-    check buildResult.exitCode == 0
+    let probeBin = requireBinary(
+      root / "build" / "test-bin" /
+        addFileExt("variant_feature_flag_probe", ExeExt),
+      "reprobuild.test_fixtures.variant_feature_flag_probe")
+    let hadVariants = existsEnv("REPRO_VARIANTS")
+    let oldVariants = getEnv("REPRO_VARIANTS")
     putEnv("REPRO_VARIANTS", "enableTLS=false")
-    let runResult = execCmdEx(probeBin)
-    delEnv("REPRO_VARIANTS")
+    var runResult: tuple[output: string, exitCode: int]
+    try:
+      runResult = execCmdEx(quoteShell(probeBin))
+    finally:
+      if hadVariants:
+        putEnv("REPRO_VARIANTS", oldVariants)
+      else:
+        delEnv("REPRO_VARIANTS")
     if runResult.exitCode != 0:
       echo "PROBE RUN FAILED with exit " & $runResult.exitCode & ":"
       echo runResult.output

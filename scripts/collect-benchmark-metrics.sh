@@ -22,7 +22,7 @@ rows_html="${tmp_dir}/benchmark-rows.html"
 : >"${results_jsonl}"
 : >"${rows_html}"
 
-benchmark_suites="${REPROBUILD_BENCH_SUITES:-m0,m23,cmake}"
+benchmark_suites="${REPROBUILD_BENCH_SUITES:-m0,m23,cmake,rp1,rp2,rp3,rp5b,ti1,ti3}"
 
 suite_enabled() {
   local suite="$1"
@@ -181,6 +181,32 @@ if kind == "m23":
                 1000.0 / value,
                 extra + f"; original={value} actions/sec",
             )
+elif kind in ("rp1", "rp2", "rp3", "rp5b", "ti1", "ti3"):
+    # RP1, RP2, RP3, RP5b, TI1 and TI3 share the same metric-array JSON shape
+    # (suite/name/unit/value/direction). RP2 adds the provider-session
+    # round-trip (warm/cold) metrics; RP3 adds the cold-vs-warm consumer-build
+    # ("build once, share") metrics; RP5b adds the resource-op (observe/apply)
+    # round-trip (warm/cold) metrics; TI1 adds the interface-lift-time (cold
+    # materialize vs cache HIT) metrics; the loop below is agnostic to which
+    # suite emitted them.
+    metadata = data.get("metadata", {})
+    quick_value = metadata.get("quick", mode == "quick")
+    quick = str(quick_value).lower() if isinstance(quick_value, bool) else str(quick_value)
+    provider_artifact_id = metadata.get("providerArtifactId", "unknown")
+    for metric in data.get("metrics", []):
+        direction = metric.get("direction", "lower-is-better")
+        unit = metric.get("unit", "ms")
+        suite = metric.get("suite", "rp1")
+        metric_name = metric.get("name", "unnamed metric")
+        value = as_float(metric.get("value"))
+        if value is None:
+            continue
+        extra = (
+            f"quick={quick}; suite={suite}; direction={direction}; "
+            f"status={metric.get('status', 'unknown')}; "
+            f"providerArtifactId={provider_artifact_id}; source={source_name}"
+        )
+        append_metric(f"Reprobuild {suite}: {metric_name}", unit, value, extra)
 elif kind == "cmake":
     profile = data.get("profile", mode)
     metadata = data.get("metadata", {})
@@ -359,6 +385,161 @@ run_cmake_suite() {
   append_benchmark_metrics "${output}" cmake "${profile}"
 }
 
+run_rp1_suite() {
+  # RP1 (Project-Provider-Runtime-Protocol) — provider-binary compile-time
+  # metric. Establishes the customSmallerIsBetter regression gate the later
+  # composition milestones (RP4/RP7) build on. The harness performs one cold
+  # provider compile and emits the metric JSON.
+  local harness_bin="build/test-bin/rp1_provider_compile_bench"
+  local output="bench-results/rp1-provider-compile.json"
+  local quick_flag=()
+  if [ "${quick}" = true ]; then
+    quick_flag+=(--quick)
+  fi
+
+  echo "running Reprobuild RP1 provider-compile benchmark suite (quick=${quick})" >&2
+  mkdir -p build/test-bin build/nimcache
+  nim c \
+    -d:release \
+    --hints:off \
+    --warnings:off \
+    --nimcache:build/nimcache/rp1-provider-compile-bench \
+    --out:"${harness_bin}" \
+    benchmarks/lib/rp1_provider_compile_bench.nim >&2
+  "./${harness_bin}" "${quick_flag[@]}" --out "${output}" >&2
+  append_benchmark_metrics "${output}" rp1 "${quick}"
+}
+
+run_rp2_suite() {
+  # RP2 (Project-Provider-Runtime-Protocol) — provider-session round-trip
+  # latency metric (warm reused-session invoke vs cold launch+handshake+invoke).
+  # The harness materializes the provider once (RP1 edge), then times the
+  # stdio session round-trips.
+  local harness_bin="build/test-bin/rp2_provider_session_bench"
+  local output="bench-results/rp2-provider-session.json"
+  local quick_flag=()
+  if [ "${quick}" = true ]; then
+    quick_flag+=(--quick)
+  fi
+
+  echo "running Reprobuild RP2 provider-session benchmark suite (quick=${quick})" >&2
+  mkdir -p build/test-bin build/nimcache
+  nim c \
+    -d:release \
+    --hints:off \
+    --warnings:off \
+    --nimcache:build/nimcache/rp2-provider-session-bench \
+    --out:"${harness_bin}" \
+    benchmarks/lib/rp2_provider_session_bench.nim >&2
+  "./${harness_bin}" "${quick_flag[@]}" --out "${output}" >&2
+  append_benchmark_metrics "${output}" rp2 "${quick}"
+}
+
+run_rp3_suite() {
+  # RP3 (Project-Provider-Runtime-Protocol) — cold-vs-warm consumer-build
+  # metric (first consumer materializes+launches the shared dependency
+  # provider vs a second consumer reusing it: the "build once, share" win).
+  # The harness materializes the consumer + dependency providers once (RP1
+  # edge), then times the bind-deps + invoke consumer builds.
+  local harness_bin="build/test-bin/rp3_consumer_build_bench"
+  local output="bench-results/rp3-consumer-build.json"
+  local quick_flag=()
+  if [ "${quick}" = true ]; then
+    quick_flag+=(--quick)
+  fi
+
+  echo "running Reprobuild RP3 consumer-build benchmark suite (quick=${quick})" >&2
+  mkdir -p build/test-bin build/nimcache
+  nim c \
+    -d:release \
+    --hints:off \
+    --warnings:off \
+    --nimcache:build/nimcache/rp3-consumer-build-bench \
+    --out:"${harness_bin}" \
+    benchmarks/lib/rp3_consumer_build_bench.nim >&2
+  "./${harness_bin}" "${quick_flag[@]}" --out "${output}" >&2
+  append_benchmark_metrics "${output}" rp3 "${quick}"
+}
+
+run_rp5b_suite() {
+  # RP5b (Project-Provider-Runtime-Protocol) — resource-op round-trip metric
+  # (running a resource driver op — observe/apply — as a protocol
+  # InvokeEntryPoint on a launched provider session: warm reused-session vs
+  # cold launch+handshake). The harness materializes the provider once (RP1
+  # edge), then times the resource-op round-trips over the session.
+  local harness_bin="build/test-bin/rp5b_resource_op_bench"
+  local output="bench-results/rp5b-resource-op.json"
+  local quick_flag=()
+  if [ "${quick}" = true ]; then
+    quick_flag+=(--quick)
+  fi
+
+  echo "running Reprobuild RP5b resource-op benchmark suite (quick=${quick})" >&2
+  mkdir -p build/test-bin build/nimcache
+  nim c \
+    -d:release \
+    --hints:off \
+    --warnings:off \
+    --nimcache:build/nimcache/rp5b-resource-op-bench \
+    --out:"${harness_bin}" \
+    benchmarks/lib/rp5b_resource_op_bench.nim >&2
+  "./${harness_bin}" "${quick_flag[@]}" --out "${output}" >&2
+  append_benchmark_metrics "${output}" rp5b "${quick}"
+}
+
+run_ti1_suite() {
+  # TI1 (Production Thin Interface Mode) — interface-lift-time metric (cold
+  # materialization of the cached interface-artifact edge vs a cache-HIT lift
+  # that is NOT re-run). The harness lifts a producer's interface twice and
+  # emits the two metrics.
+  local harness_bin="build/test-bin/ti1_interface_lift_bench"
+  local output="bench-results/ti1-interface-lift.json"
+  local quick_flag=()
+  if [ "${quick}" = true ]; then
+    quick_flag+=(--quick)
+  fi
+
+  echo "running Reprobuild TI1 interface-lift benchmark suite (quick=${quick})" >&2
+  mkdir -p build/test-bin build/nimcache
+  nim c \
+    -d:release \
+    --hints:off \
+    --warnings:off \
+    --nimcache:build/nimcache/ti1-interface-lift-bench \
+    --out:"${harness_bin}" \
+    benchmarks/lib/ti1_interface_lift_bench.nim >&2
+  "./${harness_bin}" "${quick_flag[@]}" --out "${output}" >&2
+  append_benchmark_metrics "${output}" ti1 "${quick}"
+}
+
+run_ti3_suite() {
+  # TI3 (interface/provider fingerprint split) — the downstream-invalidation
+  # ASYMMETRY metric: a private-impl edit forces ZERO downstream consumer
+  # regenerations (the impl-EXCLUDING InterfaceFingerprint is unchanged →
+  # accessor reused in place), while a public-signature edit forces ONE (the
+  # fingerprint moved → accessor regenerated). The harness lifts the producer's
+  # interface under each edit and emits the regeneration-count + decision-time
+  # metrics.
+  local harness_bin="build/test-bin/ti3_fingerprint_split_bench"
+  local output="bench-results/ti3-fingerprint-split.json"
+  local quick_flag=()
+  if [ "${quick}" = true ]; then
+    quick_flag+=(--quick)
+  fi
+
+  echo "running Reprobuild TI3 fingerprint-split benchmark suite (quick=${quick})" >&2
+  mkdir -p build/test-bin build/nimcache
+  nim c \
+    -d:release \
+    --hints:off \
+    --warnings:off \
+    --nimcache:build/nimcache/ti3-fingerprint-split-bench \
+    --out:"${harness_bin}" \
+    benchmarks/lib/ti3_fingerprint_split_bench.nim >&2
+  "./${harness_bin}" "${quick_flag[@]}" --out "${output}" >&2
+  append_benchmark_metrics "${output}" ti3 "${quick}"
+}
+
 if suite_enabled m0; then
   run_m0_suite
 fi
@@ -369,6 +550,30 @@ fi
 
 if suite_enabled cmake; then
   run_cmake_suite
+fi
+
+if suite_enabled rp1; then
+  run_rp1_suite
+fi
+
+if suite_enabled rp2; then
+  run_rp2_suite
+fi
+
+if suite_enabled rp3; then
+  run_rp3_suite
+fi
+
+if suite_enabled rp5b; then
+  run_rp5b_suite
+fi
+
+if suite_enabled ti1; then
+  run_ti1_suite
+fi
+
+if suite_enabled ti3; then
+  run_ti3_suite
 fi
 
 json_results="$(emit_json)"

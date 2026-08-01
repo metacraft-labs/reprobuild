@@ -221,6 +221,42 @@ proc requestUserDaemonSessions*(endpoint = defaultUserDaemonEndpoint()):
   raise newException(UserDaemonClientError,
     "unexpected user-daemon sessions frame: " & $frame.kind)
 
+proc requestUserDaemonLeaseRenew*(request: DaemonLeaseRenewRequest;
+                                  endpoint = defaultUserDaemonEndpoint()):
+    DaemonLeaseRenewResponse =
+  ## Ephemeral-State-Leases L4 (§4.2): send a lease RENEW to the running
+  ## daemon and return its ack. Raises ``UserDaemonClientError`` if the
+  ## daemon is unreachable or answers with ``udkError`` — callers that want
+  ## the best-effort, no-daemon-tolerant behaviour use
+  ## ``renewLeaseBestEffort`` below.
+  var socket = connectUserDaemon(endpoint, commandMode = "lease-renew",
+    requiredFeatures = ["lease-registry"])
+  defer: socket.closeIpcConn()
+  socket.writeFrame(udkLeaseRenew, leaseRenewRequestBody(request))
+  let frame = socket.readFrame()
+  if frame.kind == udkLeaseRenewAck:
+    return parseLeaseRenewResponseBody(frame.body)
+  if frame.kind == udkError:
+    raise newException(UserDaemonClientError, parseErrorBody(frame.body))
+  raise newException(UserDaemonClientError,
+    "unexpected user-daemon lease-renew frame: " & $frame.kind)
+
+proc renewLeaseBestEffort*(request: DaemonLeaseRenewRequest;
+                           endpoint = defaultUserDaemonEndpoint()):
+    tuple[sent: bool; response: DaemonLeaseRenewResponse] =
+  ## The seam a ``repro`` reconcile that consumes a leased state calls after
+  ## its in-process L1 store write: forward the renew to the daemon-hosted
+  ## registry IF one is reachable. This NEVER regresses the no-daemon path —
+  ## if the daemon is absent / unreachable / does not advertise the
+  ## ``lease-registry`` feature, ``sent`` is false and the reconcile's own
+  ## store write (L2) remains the source of truth. It never raises.
+  try:
+    let response = requestUserDaemonLeaseRenew(request, endpoint)
+    (sent: true, response: response)
+  except CatchableError:
+    (sent: false, response: DaemonLeaseRenewResponse(ok: false,
+      reason: "daemon unreachable", effectiveDeadlineUnix: LeaseRenewKeepSentinel))
+
 proc requestUserDaemonBuild*(request: UserDaemonBuildRequest;
                              endpoint = defaultUserDaemonEndpoint();
                              onEvent: proc(event: UserDaemonBuildEvent) = nil):

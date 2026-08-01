@@ -43,6 +43,8 @@
 ##     ``recipes/reproos-image/.repro/output/install/<sha256>-
 ##     reproos-installed.qcow2``.
 
+import std/strutils
+
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
 
@@ -117,6 +119,123 @@ const reproosImageRuntimeTools = @[
   "tail",
 ]
 
+const reproosImageRootfsDeps = @[
+  "sway",
+  "sddm",
+  "systemd",
+  "util-linux",
+  "kmod",
+  "dbus",
+  "sudo",
+  "e2fsprogs",
+  "dosfstools",
+  "btrfs-progs",
+  "shadow-utils",
+  "iana-tzdata",
+  "parted",
+  "lvm2",
+  "popt",
+  "gdisk",
+  "libgpg-error",
+  "libgcrypt",
+  "json-c",
+  "cryptsetup",
+  "less",
+  "procps",
+  "rsync",
+  "strace",
+  "iputils",
+  "nano",
+  "iproute2",
+  "xkeyboard-config",
+  "libxkbfile",
+  "xkbcomp",
+  "libx11",
+  "libxau",
+  "libxfont2",
+  "libattr",
+  "libacl",
+  "cairo",
+  "libcap",
+  "libcap-ng",
+  "openssl",
+  "curl",
+  "libdrm",
+  "libevdev",
+  "expat",
+  "libffi",
+  "fontconfig",
+  "libfontenc",
+  "freetype",
+  "gcc",
+  "glib2",
+  "gdk-pixbuf",
+  "gmp",
+  "harfbuzz",
+  "libinput",
+  "lzo",
+  "libmd",
+  "mpc",
+  "mpfr",
+  "ncurses",
+  "nettle",
+  "pam",
+  "pango",
+  "libpciaccess",
+  "pcre2",
+  "pixman",
+  "libjpeg",
+  "libpng",
+  "libtiff",
+  "readline",
+  "libseccomp",
+  "sqlite",
+  "wayland",
+  "wlroots",
+  "libxcb",
+  "xcb-util",
+  "xcb-util-cursor",
+  "xcb-util-image",
+  "xcb-util-keysyms",
+  "xcb-util-renderutil",
+  "xcb-util-wm",
+  "libxcvt",
+  "libxkbcommon",
+  "libxml2",
+  "libxdmcp",
+  "libdisplay-info",
+  "fribidi",
+  "mtdev",
+  "libseat",
+  "zlib",
+  "zstd",
+  "libaio",
+  "audit",
+  "libbsd",
+  "mesa",
+  "qt6-base",
+  "qt6-declarative",
+  "qt6-quickcontrols2",
+  "adwaita-icon-theme",
+  "dejavu-fonts",
+  "xorg-server",
+  "xz",
+  "tar",
+  "bash",
+  "gawk",
+  "perl",
+  "python3",
+  "glibc",
+  "coreutils",
+  "grub",
+  "kernel",
+  "musl",
+  "busybox",
+  "ca-certificates",
+  "libxcrypt",
+  "reproos-installer",
+]
+
 package reproosImage:
   defaultToolProvisioning "path"
 
@@ -132,6 +251,122 @@ package reproosImage:
     # semantic slot.
     "sh"
     "bash"
+
+  buildDeps:
+    "sway"
+    "sddm"
+    "systemd"
+    "util-linux"
+    "kmod"
+    "dbus"
+    "sudo"
+    "e2fsprogs"
+    "dosfstools"
+    "btrfs-progs"
+    "shadow-utils"
+    "iana-tzdata"
+    "parted"
+    "lvm2"
+    "popt"
+    "gdisk"
+    "libgpg-error"
+    "libgcrypt"
+    "json-c"
+    "cryptsetup"
+    "less"
+    "procps"
+    "rsync"
+    "strace"
+    "iputils"
+    "nano"
+    "iproute2"
+    "xkeyboard-config"
+    "libxkbfile"
+    "xkbcomp"
+    "libx11"
+    "libxau"
+    "libxfont2"
+    "libattr"
+    "libacl"
+    "cairo"
+    "libcap"
+    "libcap-ng"
+    "openssl"
+    "curl"
+    "libdrm"
+    "libevdev"
+    "expat"
+    "libffi"
+    "fontconfig"
+    "libfontenc"
+    "freetype"
+    "gcc"
+    "glib2"
+    "gdk-pixbuf"
+    "gmp"
+    "harfbuzz"
+    "libinput"
+    "lzo"
+    "libmd"
+    "mpc"
+    "mpfr"
+    "ncurses"
+    "nettle"
+    "pam"
+    "pango"
+    "libpciaccess"
+    "pcre2"
+    "pixman"
+    "libjpeg"
+    "libpng"
+    "libtiff"
+    "readline"
+    "libseccomp"
+    "sqlite"
+    "wayland"
+    "wlroots"
+    "libxcb"
+    "xcb-util"
+    "xcb-util-cursor"
+    "xcb-util-image"
+    "xcb-util-keysyms"
+    "xcb-util-renderutil"
+    "xcb-util-wm"
+    "libxcvt"
+    "libxkbcommon"
+    "libxml2"
+    "libxdmcp"
+    "libdisplay-info"
+    "fribidi"
+    "mtdev"
+    "libseat"
+    "zlib"
+    "zstd"
+    "libaio"
+    "audit"
+    "libbsd"
+    "mesa"
+    "qt6-base"
+    "qt6-declarative"
+    "qt6-quickcontrols2"
+    "adwaita-icon-theme"
+    "dejavu-fonts"
+    "xorg-server"
+    "xz"
+    "tar"
+    "bash"
+    "gawk"
+    "perl"
+    "python3"
+    "glibc"
+    "coreutils"
+    "grub"
+    "kernel"
+    "musl"
+    "busybox"
+    "ca-certificates"
+    "libxcrypt"
+    "reproos-installer"
 
   runtimeDeps:
     # M9.R.53: enumerate every bare-name host tool
@@ -203,11 +438,16 @@ package reproosImage:
     # volume-serials are deterministic.
     let buildImageAction = shell(
       command = ("set -euo pipefail; " &
+                 "mkdir -p build; " &
                  "SOURCE_DATE_EPOCH=1735689600 LC_ALL=C TZ=UTC " &
+                 "REPROOS_SOURCE_RECIPES=\"" &
+                 reproosImageRootfsDeps.join(" ") & "\" " &
                  "REPRO_AUTO_CONFIG=\"${REPRO_AUTO_CONFIG:-../../tests/fixtures/auto-config-minimal.toml}\" " &
                  "REPRO_QCOW2_SEED=\"${REPRO_QCOW2_SEED:-deadbeefcafebabe}\" " &
+                 "LD_LIBRARY_PATH= PATH=/run/current-system/sw/bin:$PATH " &
                  "bash scripts/build-reproos-image.sh " &
-                 "build/reproos-installed.qcow2"),
+                 "build/reproos-installed.qcow2 " &
+                 ">build/reproos-image-build.log 2>&1"),
       actionId = "reproosImage.build_image",
       # extraInputs are resolved relative to the action's cwd (the
       # recipe directory).  The build script + the smoke fixture +
@@ -216,12 +456,14 @@ package reproosImage:
       # them changes.
       extraInputs = @[
         "scripts/build-reproos-image.sh",
+        "scripts/repro-sway-diag",
         "../../tests/fixtures/auto-config-minimal.toml",
         # Reuse the iso recipe's staging + relocation scripts; both
         # are content-stable and the engine refingerprints when
         # they change.
         "../reproos-iso/scripts/stage-de-rootfs.sh",
         "../reproos-iso/scripts/relocate-nix-to-repro.sh",
+        "../reproos-iso/scripts/normalize-source-runtime.sh",
         "../reproos-iso/scripts/build-base-rootfs.sh",
       ],
       extraOutputs = @[
@@ -235,4 +477,4 @@ package reproosImage:
     # entirely (the ``recordToolInvocation`` seam does not
     # auto-populate the slot from the package-level ``uses:`` block).
     appendRegisteredActionToolIdentityRefs(buildImageAction.id,
-      reproosImageRuntimeTools)
+      reproosImageRuntimeTools & reproosImageRootfsDeps)

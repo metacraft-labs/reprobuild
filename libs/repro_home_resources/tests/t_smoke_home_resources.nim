@@ -2014,6 +2014,21 @@ suite "Recipe-Val side-finding: POSIX env.userVariable arm":
     let rendered = renderUserVariableBlockContent("X", payload)
     check rendered.contains("it'\"'\"'s fine")
 
+  test "fish variable and PATH blocks are native syntax and reversible":
+    let fishConfig = "/tmp/fake-home/.config/fish/config.fish"
+    var payload = RegistryValuePayload(kind: rvkString)
+    payload.bytes = encodeString("it's \\ literal")
+    let variable = renderUserVariableBlockContent(
+      "REPRO_FISH_VALUE", payload, fishConfig)
+    check variable == "set -gx REPRO_FISH_VALUE 'it\\'s \\\\ literal'\n"
+    check "export " notin variable
+    let pathBlock = posixPathBlockContent(
+      @["/one path/bin", "/apostrophe's/bin"], fishConfig)
+    check pathBlock ==
+      "set -gx PATH '/one path/bin' '/apostrophe\\'s/bin' $PATH\n"
+    check parsePosixPathBlockEntries(pathBlock, fishConfig) ==
+      @["/one path/bin", "/apostrophe's/bin"]
+
   test "userVariableBlockId is name-derived and stable":
     check userVariableBlockId("JAVA_HOME") == "repro-home-env-JAVA_HOME"
     check userVariableBlockId("MAVEN_HOME") == "repro-home-env-MAVEN_HOME"

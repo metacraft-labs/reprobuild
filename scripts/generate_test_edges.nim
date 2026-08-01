@@ -226,7 +226,11 @@ proc detectReproBinaryUsage(repoRoot, rel: string): bool =
   try:
     let content = readFile(abs)
     return ("build/bin/repro" in content) or
-           ("build\\bin\\repro" in content)
+           ("build\\bin\\repro" in content) or
+           ("reproBin" in content and (
+             "execCmdEx" in content or
+             "runShell" in content or
+             "runWithRunquotaOnPath" in content))
   except IOError, OSError:
     return false
 

@@ -70,9 +70,13 @@ when shmIndexSupported:
       cacheRoot*: string
       store: ActionCache            ## Tier-1 per-edge disk store (persist/warm).
       owns*: bool                   ## true once this process won the election.
+      owner*: OwnerIdentity         ## exact (pid, nonce) ownership generation.
+      gateToken: uint64             ## exact writer/takeover gate token.
       applied*: uint64              ## records applied to the table (dedup-net).
       persisted*: uint64            ## records flushed to Tier-1.
       grown*: uint64                ## CAS-resize generations committed.
+      lastDrainBudget*: uint64      ## captured tickets in the last drain pass.
+      lastDrainTickets*: uint64     ## retired tickets in the last drain pass.
       dirty: Table[string, ContentDigest]
         ## weak digests applied since the last persist (dedup key → full digest).
       retiring: seq[RetiringSegment]  ## segments awaiting the RCU grace period.
@@ -82,74 +86,151 @@ when shmIndexSupported:
       gen: uint32
       path: string
 
+    DaemonMutationHook* = proc () {.closure.}
+      ## Deterministic seam at a named mutation boundary. Production leaves it
+      ## nil; tests use it to pause/transfer/terminate at the exact boundary.
+
   # --- single-owner election (control-region pid/heartbeat) ---------------
 
-  proc nowSeconds(): uint64 {.inline.} = uint64(epochTime())
-
-  proc pidIsAlive(pid: uint64): bool =
-    ## Whether a process with `pid` currently exists (POSIX `kill(pid, 0)`; ESRCH
-    ## => dead). A daemon that was SIGKILLed leaves a RECENT heartbeat, so pid
-    ## liveness — not just the TTL — is what makes takeover prompt after a hard
-    ## crash (mirrors the runquotad stale-owner probe). A false positive (pid
-    ## reused by an unrelated process) only DELAYS takeover to the TTL, never
-    ## corrupts state, because the CAS still elects exactly one owner.
-    if pid == 0: return false
-    kill(Pid(pid), cint(0)) == 0
-
-  proc heartbeatAgeSeconds(idx: ShmIndex): float =
-    ## Seconds since the current owner last beat. A large value (or a never-set
-    ## heartbeat) means the owner is presumed dead.
-    let hb = loadU64Acquire(idx.ctl.base, CtlOffDaemonHeartbeat)
-    if hb == 0: return 1e18
-    let now = epochTime()
-    max(0.0, now - float(hb))
-
-  proc ownershipIsStale*(idx: ShmIndex): bool =
-    ## True when no live owner holds the control region: pid is unclaimed, the
-    ## owning process is DEAD (SIGKILL/crash — prompt takeover), OR the heartbeat
-    ## TTL elapsed (owner wedged without clearing pid).
-    if not idx.available: return false
-    let pid = loadU64Acquire(idx.ctl.base, CtlOffDaemonPid)
-    if pid == 0: return true
-    if not pidIsAlive(pid): return true
-    heartbeatAgeSeconds(idx) > HeartbeatTtlSeconds
+  proc ownershipIsStale*(idx: ShmIndex; now = 0'u64;
+      probe: ProcessLivenessProbe = nil): bool =
+    idx.ownerLooksStale(now, probe)
 
   proc currentOwnerPid*(idx: ShmIndex): uint64 =
-    if not idx.available: return 0
-    loadU64Acquire(idx.ctl.base, CtlOffDaemonPid)
+    idx.rawOwnerPid()
 
-  proc beat(d: var CacheDaemon) =
-    ## Publish a fresh heartbeat (release). Called on every drain loop turn.
-    if d.owns:
-      storeU64Release(d.idx.ctl.base, CtlOffDaemonHeartbeat, nowSeconds())
-
-  proc tryClaimOwnership*(d: var CacheDaemon): bool =
-    ## Attempt to become THE daemon for the cache root. Wins iff the slot is
-    ## unclaimed (pid==0) OR the current owner's heartbeat is stale (crash).
-    ## The `daemonPid` CAS is the election's linearization point: exactly one
-    ## candidate transitions it from the observed value to our pid.
-    if not d.idx.available: return false
-    let base = d.idx.ctl.base
-    let observed = loadU64Acquire(base, CtlOffDaemonPid)
-    if observed != 0 and pidIsAlive(observed) and
-        heartbeatAgeSeconds(d.idx) <= HeartbeatTtlSeconds:
-      return false                       # a live owner holds it
-    var expected = observed
-    let me = uint64(getCurrentProcessId())
-    if casU64(base, CtlOffDaemonPid, expected, me):
-      # Publish an immediate heartbeat so a racing candidate sees us live.
-      storeU64Release(base, CtlOffDaemonHeartbeat, nowSeconds())
-      d.owns = true
-      return true
-    false
-
-  proc releaseOwnership(d: var CacheDaemon) =
-    ## Clean shutdown: clear pid (only if still ours) so the next daemon can
-    ## claim immediately without waiting out the TTL.
-    if d.owns and d.idx.available:
-      var mine = uint64(getCurrentProcessId())
-      discard casU64(d.idx.ctl.base, CtlOffDaemonPid, mine, 0'u64)
+  proc stillOwns*(d: var CacheDaemon): bool {.inline.} =
+    ## Local preflight only. Every mutation additionally acquires the shared
+    ## writer gate and revalidates this exact pair while holding it.
+    if not d.owns or not d.idx.available:
       d.owns = false
+      return false
+    if d.idx.currentOwnerIdentity() != d.owner:
+      d.owns = false
+      return false
+    true
+
+  proc ownerMatchesLocked(d: CacheDaemon): bool {.inline.} =
+    d.owns and d.owner.nonce != 0 and
+      d.idx.currentOwnerIdentity() == d.owner
+
+  proc acquireOwnedGate(d: var CacheDaemon): bool =
+    if not d.stillOwns(): return false
+    if not d.idx.tryAcquireWriterGate(d.gateToken): return false
+    if not d.ownerMatchesLocked():
+      discard d.idx.releaseWriterGate(d.gateToken)
+      d.owns = false
+      return false
+    if not d.idx.followLiveGeneration():
+      discard d.idx.releaseWriterGate(d.gateToken)
+      return false
+    true
+
+  proc releaseOwnedGate(d: CacheDaemon) {.inline.} =
+    discard d.idx.releaseWriterGate(d.gateToken)
+
+  proc rebuildDirtyFromLiveTableLocked(d: var CacheDaemon)
+
+  proc beat*(d: var CacheDaemon; atSeconds = 0'u64): bool =
+    ## Heartbeat is a shared mutation and therefore uses the same exact gate as
+    ## table writes/takeover. Origin/dev sees the high-bit tagged value as fresh.
+    if not d.acquireOwnedGate(): return false
+    d.idx.publishCapableHeartbeat(atSeconds)
+    d.releaseOwnedGate()
+    true
+
+  proc tryClaimOwnership*(d: var CacheDaemon; atSeconds = 0'u64;
+      probe: ProcessLivenessProbe = nil): bool =
+    ## Claim/takeover is serialized by the exact writer gate. A capable stale
+    ## owner may be replaced only while outside that gate; a legacy owner is
+    ## replaceable only after definite ESRCH, never merely because its TTL
+    ## elapsed. Freshness is published before the legacy PID CAS, eliminating
+    ## the historical stale-heartbeat claim window.
+    if not d.idx.available: return false
+    if d.gateToken == 0:
+      d.gateToken = d.idx.makeCoordToken()
+    if not d.idx.tryAcquireWriterGate(d.gateToken, probe, atSeconds):
+      return false
+    defer: discard d.idx.releaseWriterGate(d.gateToken)
+
+    let base = d.idx.ctl.base
+    let observed = d.idx.rawOwnerPid()
+    let current = d.idx.currentOwnerIdentity()
+    if current.nonce != 0 and d.owns and current == d.owner:
+      return true
+
+    var eligible = observed == 0
+    if observed != 0:
+      if current.nonce != 0:
+        # Freshness is always checked first. A daemon candidate normally is
+        # spawned only after an outstanding-work probe has established death;
+        # repeat the definitive ESRCH check here so a recent hard crash can be
+        # claimed without waiting out the heartbeat TTL. Alive/EPERM stays put.
+        eligible = not d.idx.heartbeatIsFresh(atSeconds) or
+          d.idx.probeProcess(current, probe) == plDead
+      else:
+        let taggedTransition =
+          heartbeatIsCapable(d.idx.rawOwnerHeartbeat())
+        # A tagged heartbeat with no matching exact identity is a capable
+        # claimant's narrow PID-CAS -> identity-publication transition. If it
+        # dies in that window, definitive ESRCH recovers immediately even
+        # though the heartbeat is fresh. A true legacy owner never emits the
+        # tag and is never TTL-stolen: it must be both stale and definitely
+        # dead.
+        eligible =
+          if taggedTransition:
+            d.idx.probeProcess(OwnerIdentity(pid: observed), probe) == plDead
+          else:
+            not d.idx.heartbeatIsFresh(atSeconds) and
+              d.idx.probeProcess(OwnerIdentity(pid: observed), probe) == plDead
+    if not eligible:
+      return false
+
+    if not d.idx.followLiveGeneration():
+      return false
+    let me = uint64(getCurrentProcessId())
+    let candidate = d.idx.coordIdentity(d.gateToken)
+    if candidate.pid != me or candidate.nonce == 0:
+      return false
+
+    # Fence origin/dev before changing daemonPid. It sees this tagged heartbeat
+    # as fresh if our CAS wins, and still races safely on the same legacy CAS if
+    # it observed an unclaimed/dead owner first.
+    d.idx.publishCapableHeartbeat(atSeconds)
+    var expected = observed
+    if not casU64(base, CtlOffDaemonPid, expected, me):
+      return false
+    if d.idx.writerGateToken() != d.gateToken or
+        d.idx.coordIdentity(d.gateToken) != candidate:
+      var mine = me
+      discard casU64(base, CtlOffDaemonPid, mine, observed)
+      return false
+    let previousOwner = current
+    d.owner = candidate
+    d.idx.publishOwnerIdentity(d.owner)
+    d.idx.publishCapableHeartbeat(atSeconds)
+    if d.idx.writerGateToken() != d.gateToken or
+        d.idx.coordIdentity(d.gateToken) != candidate or
+        d.idx.currentOwnerIdentity() != candidate:
+      if d.idx.writerGateToken() == d.gateToken:
+        discard d.idx.clearOwnerIdentity(candidate)
+      d.owner = OwnerIdentity()
+      return false
+    d.owns = true
+    d.idx.noteOwnerClaim()
+    d.rebuildDirtyFromLiveTableLocked()
+    if previousOwner.nonce != 0 and previousOwner.nonce != d.owner.nonce:
+      discard d.idx.releaseCoordToken(previousOwner.nonce)
+    true
+
+  proc releaseOwnership*(d: var CacheDaemon): bool =
+    ## Exact clean release under the writer gate. Clearing capability before
+    ## daemonPid=0 makes a racing origin/dev claimant unambiguously legacy.
+    if not d.acquireOwnedGate(): return false
+    result = d.idx.clearOwnerIdentity(d.owner)
+    d.releaseOwnedGate()
+    d.owns = false
+    d.owner = OwnerIdentity()
 
   # --- open / close -------------------------------------------------------
 
@@ -160,6 +241,7 @@ when shmIndexSupported:
     ## Tier-1 store (warm-start is lazy — §4.7).
     result.cacheRoot = cacheRoot
     result.idx = openShmIndex(cacheRoot, slotCap)
+    result.gateToken = result.idx.makeCoordToken()
     # The daemon is the SOLE shm writer: it opens its Tier-1 store WITHOUT the
     # engine-side shm accelerator (`attachShm = false`) so it neither
     # auto-spawns itself nor submits its own persisted records back into the
@@ -168,10 +250,13 @@ when shmIndexSupported:
     result.dirty = initTable[string, ContentDigest]()
 
   proc close*(d: var CacheDaemon) =
-    releaseOwnership(d)
+    discard releaseOwnership(d)
     for r in d.retiring.mitems:
       if r.seg.isValid: r.seg.detach()
     d.retiring.setLen(0)
+    if d.gateToken != 0:
+      discard d.idx.releaseCoordToken(d.gateToken)
+      d.gateToken = 0
     d.idx.close()
 
   # --- dedup / apply / evict ----------------------------------------------
@@ -189,6 +274,18 @@ when shmIndexSupported:
       (true, rec.weakFingerprint)
     except CatchableError:
       (false, ContentDigest())
+
+  proc rebuildDirtyFromLiveTableLocked(d: var CacheDaemon) =
+    ## A predecessor may die after publishing a slot but before recording or
+    ## flushing its process-local dirty table. Every exact ownership generation
+    ## reconstructs that persistence obligation from the bounded live table.
+    ## Rewrites are idempotent (Tier-1 merges by strong fingerprint).
+    d.dirty = initTable[string, ContentDigest]()
+    if not d.idx.liveSeg.isValid: return
+    for snap in d.idx.liveSeg.liveSlots():
+      let (ok, weak) = weakFromRecord(snap.rec)
+      if ok:
+        d.dirty[dirtyKey(snap.digest)] = weak
 
   proc evictLruInWindow(seg: var SegmentTable; digest: openArray[byte]) =
     ## LRU-within-window eviction POLICY over the AC-2a `evictSlot` MECHANISM:
@@ -208,16 +305,16 @@ when shmIndexSupported:
     if victim >= 0:
       seg.evictSlot(victim)
 
-  proc growIfNeeded*(d: var CacheDaemon): bool  # fwd: interleaved into drain
+  proc growIfNeededLocked(d: var CacheDaemon): bool
 
-  proc applyRecord(d: var CacheDaemon; digest: array[KeyDigestLen, byte];
+  proc applyRecordLocked(d: var CacheDaemon; digest: array[KeyDigestLen, byte];
       recBytes: seq[byte]): bool =
     ## Apply ONE drained record to the live segment. Dedup is trivial (single
     ## writer: `writeSlot` updates the same-key slot in place). On a full probe
     ## run it evicts the coldest slot in the window and retries once. Records
     ## whose metadata exceeds the inline cap are dropped (they fall through to
     ## Tier-1 on the engine side — §4.2). Returns true if the table changed.
-    if not d.idx.liveSeg.isValid: return false
+    if not d.ownerMatchesLocked() or not d.idx.liveSeg.isValid: return false
     var st = d.idx.liveSeg.writeSlot(digest, recBytes)
     if st == swsProbeFull:
       evictLruInWindow(d.idx.liveSeg, digest)
@@ -230,9 +327,14 @@ when shmIndexSupported:
       d.dirty[dirtyKey(digest)] = weak
     true
 
-  proc drainOnce*(d: var CacheDaemon): int =
-    ## Drain every currently-ready ring record into the table. Returns the count
-    ## applied. Single consumer (§4.5) — only the daemon calls this.
+  proc drainOnce*(d: var CacheDaemon;
+      afterFenceBeforeApply: DaemonMutationHook = nil;
+      afterApplyBeforeAck: DaemonMutationHook = nil;
+      beforeStableAck: DaemonMutationHook = nil;
+      afterEveryAck: DaemonMutationHook = nil): int =
+    ## Drain at most the tickets reserved at entry. Returns the count applied.
+    ## The captured tail is a logical bound of at most `RingCap`; continuous
+    ## producers therefore cannot make one service or shutdown pass unbounded.
     ##
     ## Growth is INTERLEAVED with the drain: the load-factor threshold is checked
     ## BEFORE each apply and a CAS-resize is committed the moment it is crossed,
@@ -240,12 +342,80 @@ when shmIndexSupported:
     ## first rather than thrashing it with LRU evictions. (Eviction is the
     ## bounded backstop for a genuinely-at-capacity generation, not the primary
     ## capacity mechanism.)
-    if not d.idx.available: return 0
-    var rr: RingRecord
-    while d.idx.ringView.tryDrainOne(rr):
-      discard d.growIfNeeded()
-      if d.applyRecord(rr.digest, rr.rec):
-        inc result
+    var ranFenceHook = false
+    var ranApplyHook = false
+    var ranAckHook = false
+    let startHead = d.idx.ringView.headTicket()
+    let budgetTail = d.idx.ringView.tailTicket()
+    d.lastDrainBudget = budgetTail - startHead
+    d.lastDrainTickets = 0
+    while d.idx.ringView.headTicket() < budgetTail:
+      if not d.acquireOwnedGate():
+        break
+      if d.idx.ringView.headTicket() >= budgetTail:
+        d.releaseOwnedGate()
+        break
+      var peeked: PeekedRingRecord
+      let peekStatus = d.idx.ringView.peekOne(peeked)
+      case peekStatus
+      of rpsRecord:
+        if afterFenceBeforeApply != nil and not ranFenceHook:
+          ranFenceHook = true
+          afterFenceBeforeApply()
+        if not d.ownerMatchesLocked():
+          d.releaseOwnedGate()
+          d.owns = false
+          break
+        discard d.growIfNeededLocked()
+        let applied = d.applyRecordLocked(peeked.record.digest,
+          peeked.record.rec)
+        if applied:
+          inc result
+        if afterApplyBeforeAck != nil and not ranApplyHook:
+          ranApplyHook = true
+          afterApplyBeforeAck()
+        # Apply precedes the exact head CAS. A crash before this point replays
+        # the same idempotent record; a stale owner cannot ack after takeover
+        # because takeover needs this same gate.
+        if d.idx.ringView.ackPeek(peeked.ticket):
+          inc d.lastDrainTickets
+        d.idx.publishCapableHeartbeat()
+        d.releaseOwnedGate()
+        if afterEveryAck != nil:
+          afterEveryAck()
+      of rpsMalformed:
+        # A malformed published blob is not a usable cache record, but retaining
+        # it forever would wedge all later Tier-1-backed work. Retire exactly
+        # this ticket under the owner gate; no false cache hit is introduced.
+        if d.idx.ringView.ackPeek(peeked.ticket):
+          inc d.lastDrainTickets
+        d.releaseOwnedGate()
+        if afterEveryAck != nil:
+          afterEveryAck()
+      of rpsUnpublished:
+        # A producer killed after tail reservation is not compatibly recoverable
+        # from the unchanged embedded-ring layout. Leave head untouched and
+        # return after one observation; Tier-1 remains authoritative.
+        d.releaseOwnedGate()
+        break
+      of rpsEmpty:
+        d.releaseOwnedGate()
+        break
+
+    # Acknowledge only a stable, truly empty ring. Work published beyond the
+    # captured budget remains outstanding for the next bounded pass.
+    if d.acquireOwnedGate():
+      let observedSequence = d.idx.workSequence()
+      if beforeStableAck != nil and not ranAckHook:
+        ranAckHook = true
+        beforeStableAck()
+      if d.idx.ringView.pendingCount() == 0:
+        d.idx.acknowledgeWorkThrough(observedSequence)
+        let stable = d.idx.workSequence() == observedSequence and
+          d.idx.ringView.pendingCount() == 0
+        if stable:
+          discard d.idx.acknowledgeDaemonLaunchLease()
+      d.releaseOwnedGate()
 
   # --- growth: single-writer CAS-resize + RCU reclamation -----------------
 
@@ -259,7 +429,7 @@ when shmIndexSupported:
       if e != 0 and e < result:
         result = e
 
-  proc reclaimRetired(d: var CacheDaemon) =
+  proc reclaimRetiredLocked(d: var CacheDaemon) =
     ## RCU reclamation: unmap + unlink each retired segment whose generation no
     ## active reader can still be reading (its epoch has advanced past it). A
     ## reader that published `gen` for the OLD generation still pins it; only
@@ -280,6 +450,14 @@ when shmIndexSupported:
         keep.add(r)
     d.retiring = keep
 
+  proc reclaimRetired*(d: var CacheDaemon): bool =
+    ## Segment unlink/reclaim is a shared mutation and is rejected for a fenced
+    ## former owner just like slot/growth/persistence mutations.
+    if not d.acquireOwnedGate(): return false
+    d.reclaimRetiredLocked()
+    d.releaseOwnedGate()
+    true
+
   proc loadFactorCrossed*(d: CacheDaemon): bool =
     ## True when the live segment's load factor has crossed the growth
     ## threshold (liveSlots * den >= slotCap * num).
@@ -287,7 +465,7 @@ when shmIndexSupported:
     let live = d.idx.liveSeg.liveSlotCount()
     live * GrowthLoadDen >= d.idx.liveSeg.slotCap * GrowthLoadNum
 
-  proc growIfNeeded*(d: var CacheDaemon): bool =
+  proc growIfNeededLocked(d: var CacheDaemon): bool =
     ## Single-writer CAS-resize. When the load factor is crossed: allocate a
     ## larger next-generation segment, REHASH every live record into it, then
     ## `casCurrentGeneration(old, new)` — the commit/linearization point. A
@@ -295,7 +473,7 @@ when shmIndexSupported:
     ## stays live+complete); a crash AFTER leaves the fully-migrated new one
     ## live. The old segment is queued for RCU reclamation. Returns true if a
     ## generation was committed.
-    if not d.idx.available or not d.idx.liveSeg.isValid: return false
+    if not d.ownerMatchesLocked() or not d.idx.liveSeg.isValid: return false
     if not d.loadFactorCrossed(): return false
     let oldGen = d.idx.liveSeg.generation
     let newGen = oldGen + 1
@@ -340,8 +518,13 @@ when shmIndexSupported:
       path: segPath(d.cacheRoot, oldGen)))
     d.idx.liveSeg = newSeg
     inc d.grown
-    reclaimRetired(d)
+    d.reclaimRetiredLocked()
     true
+
+  proc growIfNeeded*(d: var CacheDaemon): bool =
+    if not d.acquireOwnedGate(): return false
+    result = d.growIfNeededLocked()
+    d.releaseOwnedGate()
 
   # --- persist + lazy warm-start ------------------------------------------
 
@@ -350,19 +533,25 @@ when shmIndexSupported:
     ## (the durable backstop; shm is volatile). The table slot holds the newest
     ## metadata record for the edge; we read it back (seqlock) and merge it into
     ## the Tier-1 file via `writePerEdgeRecords`. Returns the count persisted.
-    if not d.idx.available: return 0
+    if not d.acquireOwnedGate(): return 0
+    defer: d.releaseOwnedGate()
     if d.dirty.len == 0: return 0
-    var pending = d.dirty
-    d.dirty = initTable[string, ContentDigest]()
-    for _, weak in pending:
+    var pending: seq[tuple[key: string, weak: ContentDigest]] = @[]
+    for key, weak in d.dirty:
+      pending.add((key: key, weak: weak))
+    for item in pending:
+      let key = item.key
+      let weak = item.weak
       var snap: SlotSnapshot
       let st = d.idx.liveSeg.lookupSlot(weak.bytes, snap)
       if st != srsHit:
+        d.dirty.del(key)
         continue
       var rec: ActionResultRecord
       try:
         rec = decodeActionResultRecord(snap.rec)
       except CatchableError:
+        d.dirty.del(key)
         continue
       # Merge into the edge's bounded set (dedup by strong fingerprint), keyed
       # by the record's own weak fingerprint (the authoritative Tier-1 key).
@@ -373,6 +562,7 @@ when shmIndexSupported:
           merged.add(e)
       merged.add(rec)
       d.store.writePerEdgeRecords(rec.weakFingerprint, merged)
+      d.dirty.del(key)
       inc d.persisted
       inc result
 
@@ -381,7 +571,9 @@ when shmIndexSupported:
     ## (`readHotRecord` — an O(1) single-file open, NEVER a whole-store scan)
     ## and, if present, apply the metadata record to the shm table so future
     ## engine lookups hit in shared memory. Returns true if a slot was warmed.
-    if not d.idx.available or not d.idx.liveSeg.isValid: return false
+    if not d.acquireOwnedGate(): return false
+    defer: d.releaseOwnedGate()
+    if not d.idx.liveSeg.isValid: return false
     let hit = d.store.readHotRecord(weak)
     if not hit.found: return false
     let enc = encodeActionResultRecord(hit.record)
@@ -399,11 +591,22 @@ when shmIndexSupported:
     DaemonStopFn* = proc (): bool {.closure, gcsafe.}
       ## Returns true when the daemon should stop (test harness / signal).
 
+    DaemonLifecycleHook* = proc () {.closure.}
+      ## Optional deterministic lifecycle seam used by ownership-handoff
+      ## regression tests. Production callers leave both hooks nil.
+
   proc runDaemonLoop*(d: var CacheDaemon; stop: DaemonStopFn;
-      pollMs = 5; persistEveryMs = 200) =
+      pollMs = 5; persistEveryMs = 200;
+      afterFinalDrain: DaemonLifecycleHook = nil;
+      afterRelinquish: DaemonLifecycleHook = nil;
+      afterEveryShutdownAck: DaemonLifecycleHook = nil) =
     ## The daemon's main loop: claim ownership, then drain → grow → beat, and
-    ## persist at a cadence, until `stop()`. On a clean stop it persists once
-    ## more and releases ownership. Single-writer throughout.
+    ## persist at a cadence, until `stop()`. A clean stop uses an ownership
+    ## handoff: final-drain + persist while still owner, relinquish, then inspect
+    ## the ring. If a producer published across that boundary, this daemon may
+    ## drain again ONLY after winning ownership back. A different candidate may
+    ## win instead; the old owner then exits without consuming. This closes the
+    ## append-vs-release race while preserving the single-consumer invariant.
     if not d.owns:
       discard d.tryClaimOwnership()
     var lastPersist = epochTime()
@@ -415,20 +618,36 @@ when shmIndexSupported:
         if not d.owns:
           sleep(pollMs)
           continue
-      d.beat()
+      discard d.beat()
       discard d.drainOnce()
       discard d.growIfNeeded()
-      reclaimRetired(d)
+      discard d.reclaimRetired()
       let now = epochTime()
       if (now - lastPersist) * 1000.0 >= float(persistEveryMs):
         discard d.persist()
         lastPersist = now
       sleep(pollMs)
-    # Clean shutdown: final drain + persist + release.
-    if d.owns:
-      discard d.drainOnce()
+
+    # Clean-shutdown ownership handoff. At most ONE release/reacquire pass is
+    # attempted. If the reserved head is unpublished (producer died between
+    # tail CAS and ready publication), the compatible ring has no information
+    # with which to finish or skip that record; exit boundedly and retain the
+    # Tier-1 backstop instead of release/reacquire spinning forever.
+    if d.stillOwns():
+      discard d.drainOnce(afterEveryAck = afterEveryShutdownAck)
+      d.idx.noteShutdownDrainPass(d.lastDrainTickets)
       discard d.persist()
-    releaseOwnership(d)
+      if afterFinalDrain != nil:
+        afterFinalDrain()
+      discard d.releaseOwnership()
+      if afterRelinquish != nil:
+        afterRelinquish()
+
+    if d.idx.ringView.pendingCount() != 0 and d.tryClaimOwnership():
+      discard d.drainOnce(afterEveryAck = afterEveryShutdownAck)
+      d.idx.noteShutdownDrainPass(d.lastDrainTickets)
+      discard d.persist()
+      discard d.releaseOwnership()
 
 else:
   # Non-POSIX: the daemon is unavailable; callers use the Tier-1 disk-only path
@@ -443,3 +662,13 @@ else:
 
   proc close*(d: var CacheDaemon) = discard
   proc tryClaimOwnership*(d: var CacheDaemon): bool = false
+
+  type
+    DaemonStopFn* = proc (): bool {.closure, gcsafe.}
+    DaemonLifecycleHook* = proc () {.closure.}
+
+  proc runDaemonLoop*(d: var CacheDaemon; stop: DaemonStopFn;
+      pollMs = 5; persistEveryMs = 200;
+      afterFinalDrain: DaemonLifecycleHook = nil;
+      afterRelinquish: DaemonLifecycleHook = nil;
+      afterEveryShutdownAck: DaemonLifecycleHook = nil) = discard

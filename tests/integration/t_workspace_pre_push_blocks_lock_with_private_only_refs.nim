@@ -4,7 +4,7 @@
 ##
 ## The sixth pre-push stage activates when:
 ##   - ``--current-repo`` is one of the manifest-layer repos declared
-##     in ``.repo/workspace.toml``,
+##     in ``.repro/workspace.toml``,
 ##   - that layer's ``visibility = "public"``,
 ##   - the pushed refs introduce or modify at least one
 ##     ``locks/<project>/<file>.toml`` path in the layer repo.
@@ -233,7 +233,7 @@ proc seedManifestLayerRepo(gitBin, layerPath: string;
 
 proc writeWorkspaceToml(workspaceRoot, publicLayerPath,
                         privateLayerPath: string): string =
-  let dotRepo = workspaceRoot / ".repo"
+  let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
   result = dotRepo / "workspace.toml"
   # Use ``local_path`` layers so the M26 stage's per-layer on-disk
@@ -399,7 +399,7 @@ proc currentLayerHead(gitBin, layerPath: string): string =
 proc invokeCheckPrePush(fx: M26Fixture; currentRepo, refsFile: string):
     CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "check", "--mode=pre-push",
+    fx.reproBin, "check", "--mode=pre-push", "--write-report",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & currentRepo,
     "--pushed-refs=" & refsFile,
@@ -407,7 +407,7 @@ proc invokeCheckPrePush(fx: M26Fixture; currentRepo, refsFile: string):
   ]))
 
 proc readReport(fx: M26Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "check-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

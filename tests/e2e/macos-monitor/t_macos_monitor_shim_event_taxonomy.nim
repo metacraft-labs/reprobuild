@@ -242,6 +242,8 @@ int main(int argc, char **argv) {
       check readFile(depfile)[0 .. 3] == "RMDF"
       let dep = readMonitorDepFile(depfile)
       let records = dep.records
+      let canonicalInputPath = expandFilename(inputPath)
+      let canonicalChildInputPath = expandFilename(childInputPath)
       check dep.completeness == mcComplete
       check dep.backendFamily == mbfMacosHooks
       check records.len > 0
@@ -252,9 +254,9 @@ int main(int argc, char **argv) {
       check supportProfile.evidenceComplete
       check mcapEndpointSecurity notin supportProfile.supportedCapabilities
       check mcapHybrid notin supportProfile.supportedCapabilities
+      check mcapLibraryLoad in supportProfile.supportedCapabilities
       check hasGap(supportProfile, mcapEndpointSecurity, false)
       check hasGap(supportProfile, mcapHybrid, false)
-      check hasGap(supportProfile, mcapLibraryLoad, false)
       check hasGap(supportProfile, mcapAuthorizationEnforcement, false)
 
       check hasRecord(records, proc(record: MonitorRecord): bool =
@@ -264,9 +266,9 @@ int main(int argc, char **argv) {
         record.kind == mrCapabilityGap and record.path == "endpoint-security")
 
       check hasRecord(records, proc(record: MonitorRecord): bool =
-        record.kind == mrFileRead and record.path == inputPath)
+        record.kind == mrFileRead and record.path == canonicalInputPath)
       check hasRecord(records, proc(record: MonitorRecord): bool =
-        record.kind == mrFileRead and record.path == childInputPath)
+        record.kind == mrFileRead and record.path == canonicalChildInputPath)
       check hasRecord(records, proc(record: MonitorRecord): bool =
         record.kind == mrPathProbe and
           record.probeResult == prAbsent and
@@ -348,7 +350,7 @@ int main(int argc, char **argv) {
       check rendered["format"].getStr() == "RMDF"
       check rendered["backendFamily"].getStr() == "macos-interpose-hooks"
       check rendered["backendProfile"]["evidenceComplete"].getBool()
-      check rendered["capabilityGaps"].len >= 4
+      check rendered["capabilityGaps"].len >= 3
 
 when not defined(macosx):
   suite "e2e_macos_monitor_shim_event_taxonomy":

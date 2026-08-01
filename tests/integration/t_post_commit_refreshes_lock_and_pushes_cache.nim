@@ -94,7 +94,7 @@ suite "RA-4 — post-commit refreshes lock and pushes cache ref":
       createDir(workspaceRoot)
       let wsName = extractFilename(workspaceRoot)
 
-      let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+      let manifestsRoot = workspaceRoot
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -160,7 +160,7 @@ suite "RA-4 — post-commit refreshes lock and pushes cache ref":
       check report["outcome"].getStr() == "ok"
       check report["triggerSha"].getStr() == newSha
       let lockPath = report["lockFilePath"].getStr()
-      check lockPath == workspaceRoot / ".repo" / "manifests" / "locks" /
+      check lockPath == workspaceRoot / ".repro" / "manifests" / "locks" /
         "lib-a" / "lib-a" / (newSha & ".toml")
       check fileExists(lockPath)
 

@@ -15,9 +15,9 @@
 ##   * If `add --default` auto-layered without the env var, the
 ##     no-auto-layer assertion fails.
 ##
-## Hermetic: a tempdir workspace with a hand-authored `.repo/manifests`
+## Hermetic: a tempdir workspace with hand-authored root `projects/`
 ## (two project files); no network, no git clone — `projects add` /
-## `projects list` only read/write `.repo/workspace.toml`.
+## `projects list` only read/write `.repro/workspace.toml`.
 
 import std/[os, strutils, tempfiles, unittest]
 
@@ -43,7 +43,7 @@ proc setupWorkspace(slug: string; projectNames: openArray[string]): string =
   ## projects. Returns the workspace root.
   let scratch = createTempDir("repro-ra6-default-" & slug & "-", "")
   let workspaceRoot = scratch / "workspace"
-  let projectsDir = workspaceRoot / ".repo" / "manifests" / "projects"
+  let projectsDir = workspaceRoot / "projects"
   createDir(projectsDir)
   for name in projectNames:
     writeFile(projectsDir / (name & ".toml"), projectStub(name))

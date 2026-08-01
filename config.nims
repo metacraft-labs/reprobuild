@@ -2,6 +2,11 @@ import std/[os, strutils]
 
 switch("styleCheck", "hint")
 
+if defined(windows):
+  switch("define", "sslVersion=3-x64")
+
+
+
 # M9.R.47.2 — undefine ``nixbuild`` so Nim's ``{.dynlib: <const>.}`` pragma
 # does NOT bake an absolute ``/nix/store/<hash>-<pkg>/lib/<lib>.so`` path
 # into the binary's ``.rodata`` at compile time.
@@ -145,6 +150,9 @@ for libName in [
   # home-profile rollback contract into system scope.
   "repro_system_rollback",
   "repro_home_resources",
+  # Composable-Resource-Types slice 2: the generic external-provider
+  # resource lane (ResourceInstance + provider registry + reconciler).
+  "repro_resources",
   "repro_homebrew_adapter",
   "repro_elevation",
   "repro_infra",
@@ -237,15 +245,40 @@ for libName in [
 # Nim sibling. Prefer ``$IO_MON_SRC``, then the sibling checkout.
 let ioMonSrc = block:
   let fromEnv = getEnv("IO_MON_SRC")
-  if fromEnv.len > 0:
+  if fromEnv.len > 0 and fileExists(fromEnv / "io_mon.nim"):
     fromEnv
+  elif fromEnv.len > 0 and fileExists(fromEnv / "src" / "io_mon.nim"):
+    fromEnv / "src"
   else:
     ".." / "io-mon" / "src"
 if fileExists(ioMonSrc / "io_mon.nim"):
   switch("path", ioMonSrc)
 
+proc nixDevShellSourcePath(envName, marker: string): string =
+  when defined(windows):
+    ""
+  else:
+    if not fileExists("flake.nix"):
+      return ""
+    let systemResult =
+      gorgeEx("nix eval --raw --impure --expr 'builtins.currentSystem' 2>/dev/null")
+    if systemResult.exitCode != 0:
+      return ""
+    let system = systemResult.output.strip()
+    if system.len == 0:
+      return ""
+    let valueResult = gorgeEx(
+      "nix eval --raw '.#devShells." & system & ".default." & envName &
+      "' 2>/dev/null")
+    if valueResult.exitCode != 0:
+      return ""
+    let candidate = valueResult.output.strip()
+    if candidate.len > 0 and fileExists(candidate / marker):
+      return candidate
+    ""
+
 proc addPackagePath(envName: string; candidates: openArray[string];
-                    marker: string) =
+                    marker: string; useDevShellFallback = false) =
   let envPath = getEnv(envName)
   if envPath.len > 0 and fileExists(envPath / marker):
     switch("path", envPath)
@@ -253,6 +286,11 @@ proc addPackagePath(envName: string; candidates: openArray[string];
   for candidate in candidates:
     if fileExists(candidate / marker):
       switch("path", candidate)
+      return
+  if useDevShellFallback:
+    let flakePath = nixDevShellSourcePath(envName, marker)
+    if flakePath.len > 0:
+      switch("path", flakePath)
       return
 
 # M2 dev-env artifacts use status-im/nim-ssz-serialization for their canonical
@@ -324,6 +362,38 @@ addPackagePath("STINT_SRC", [
 addPackagePath("STACKABLE_HOOKS_SRC", [
   ".." / "nim-stackable-hooks" / "src",
 ], "stackable_hooks.nim")
+
+# SHM-QUEUE-MIGRATE / io-mon LOSSLESS M1: reprobuild's action-cache submission
+# ring (libs/repro_shm_index) AND the io-mon sibling's dependency queue BOTH sit
+# on nim-shm-queue's Layer-1 MPSC ring; the io-mon sibling ALSO sits on
+# nim-shm-gset (``shm_gset/transport``). Because config.nims compiles the io-mon
+# SIBLING in-tree (the io-mon block above prefers ``../io-mon`` over $IO_MON_SRC),
+# these shm packages MUST resolve to their co-developed siblings too — otherwise
+# a newer io-mon is compiled against an older $SHM_QUEUE_SRC pin or a
+# missing nim-shm-gset, which is exactly the version skew that breaks the build.
+# These libraries retain their own sibling-first policy, then the env pin
+# ($SHM_QUEUE_SRC / $SHM_GSET_SRC), then the devshell fallback.
+proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
+  if fileExists(sibling / marker):
+    switch("path", sibling)
+    return
+  addPackagePath(envName, [], marker, useDevShellFallback = true)
+
+addSiblingFirstPackagePath(".." / "nim-shm-queue" / "src", "SHM_QUEUE_SRC",
+  "shm_queue.nim")
+addSiblingFirstPackagePath(".." / "nim-shm-gset" / "src", "SHM_GSET_SRC",
+  "shm_gset.nim")
+
+# SHM-GSET: io-mon's Linux dependency-capture channel is the grow-only
+# shared-memory set ``shm_gset`` (nim-shm-gset — Candidate C of the Lossless
+# Event Capture campaign; dedup-at-source over file-backed shards). reprobuild
+# does not import it directly, but io_mon's fs_snoop.nim / writer.nim do, so the
+# io-mon compile that flows in through ``import io_mon`` needs ``shm_gset`` on the
+# --path. Resolve it like every other Nim sibling: prefer ``$SHM_GSET_SRC``, then
+# the sibling checkout.
+addPackagePath("SHM_GSET_SRC", [
+  ".." / "nim-shm-gset" / "src",
+], "shm_gset.nim", useDevShellFallback = true)
 
 # R2: vm-harness lives in the sibling ``D:/metacraft/vm-harness/`` repo
 # (see ReproOS-MVP R0 status). The R2 boot integration test
@@ -461,8 +531,10 @@ proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
       return libDir
   ""
 
-let useSystemHashLibs = getEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS").toLowerAscii() in
-  ["1", "true", "yes", "on"]
+let useSystemHashLibs =
+  not defined(reproVendoredHash) and
+  getEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS").toLowerAscii() in
+    ["1", "true", "yes", "on"]
 
 if not useSystemHashLibs:
   switch("define", "reproVendoredHash")

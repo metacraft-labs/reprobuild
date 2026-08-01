@@ -22,6 +22,7 @@
 ## bounded.
 
 import ./bc
+import ./binutils
 import ./bison
 import ./file
 import ./flex
@@ -55,7 +56,17 @@ import ./libelf
 # recipes/packages/source/libevdev/. The stdlib nix-stub is retired.
 import ./libudev
 import ./libgpg_error
+import ./libusb
+import ./gusb
+import ./libxslt
+import ./libpthread_stubs
+import ./nasm
+import ./libmd
+import ./libbsd
+import ./libaio
+import ./lzo
 import ./libacl
+import ./libattr
 import ./libcrypt
 import ./libxcrypt
 import ./libfontenc
@@ -78,6 +89,7 @@ import ./linux_headers
 import ./python3
 import ./llvm_config
 import ./runquotad
+import ./host_system_tools
 # M9.R.15b.5 — gtk-update-icon-cache is referenced by adwaita-icon-theme
 # (and any other icon-theme recipe) as a native build dep at meson-setup
 # time. Routed through gtk3's bin/ for v1 (gtk4 not yet from-source).
@@ -165,6 +177,7 @@ import ./xorgproto
 # M9.R.15q.4.3 — libxau ships libXau.so + xau.pc; libxcb's xcb.pc has
 # Requires.private: xau so any pkg-config probe through xcb needs it.
 import ./libxau
+import ./xcb_proto
 # M9.R.15q.4.6 — libxdmcp ships xdmcp.pc; xcb.pc has
 # Requires.private: xau xdmcp so probes through xcb need it.
 import ./libxdmcp
@@ -189,6 +202,7 @@ import ./libxcvt
 import ./mesa_gl_headers
 
 export bc
+export binutils
 export bison
 export file
 export flex
@@ -212,7 +226,17 @@ export libelf
 # M9.R.26.2 — libevdev promoted to from-source recipe; stdlib stub retired.
 export libudev
 export libgpg_error
+export libusb
+export gusb
+export libxslt
+export libpthread_stubs
+export nasm
+export libmd
+export libbsd
+export libaio
+export lzo
 export libacl
+export libattr
 export libcrypt
 export libltdl
 export libseccomp
@@ -227,6 +251,7 @@ export linux_headers
 export python3
 export llvm_config
 export runquotad
+export host_system_tools
 export gtk_update_icon_cache
 export sassc
 export libegl_headers
@@ -259,6 +284,7 @@ export libxfixes
 export libxrender
 export xorgproto
 export libxau
+export xcb_proto
 export libxdmcp
 export libcanberra
 export libepoxy

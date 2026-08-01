@@ -212,6 +212,9 @@ package sddmSource:
     ## pam is the authentication-stack library sddm's greeter consumes
     ## to authenticate logins against ``/etc/pam.d/sddm``.
     "pam >=1.5"
+    ## Session helpers link libsystemd for logind integration even when
+    ## journald logging is disabled.
+    "systemd"
     ## M9.R.15q.8.1 — libxau supplies `xau.pc` which sddm's
     ## `pkg_check_modules(LIBXAU REQUIRED "xau")` probe consumes for
     ## the X11 authentication cookie generation in the greeter's
@@ -269,7 +272,8 @@ package sddmSource:
     ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `cmake_package(...)` constructor.
     setCurrentOwningPackageOverride("sddmSource")
     try:
-      let opts = @[
+      let providerRoot = activeProviderProjectRoot()
+      var opts = @[
         # M9.R.15q.8.1 — sddm 0.21.0's top-level CMakeLists declares
         # `cmake_minimum_required(VERSION 3.0.2)`. CMake 4.x (the cache's
         # cmake-4.1.2) removed compatibility with CMake < 3.5 and
@@ -286,9 +290,33 @@ package sddmSource:
         "BUILD_WITH_QT6=ON",
         "BUILD_TESTING=OFF",
         "BUILD_MAN_PAGES=OFF",
+        # Upstream installs the distro-appropriate policy through DESTDIR.
+        "INSTALL_PAM_CONFIGURATION=ON",
         "ENABLE_JOURNALD=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
+      # Upstream's data destinations are absolute. Pin them to the
+      # staged install prefix so stale CMake caches cannot write to the
+      # build host when cmake --install runs.
+      if providerRoot.len > 0:
+        opts.add("SYSTEMD_SYSTEM_UNIT_DIR=" & providerRoot / "build" / "out" /
+          "usr" / "lib" / "systemd" / "system")
+        opts.add("SYSTEMD_SYSUSERS_DIR=" & providerRoot / "build" / "out" /
+          "usr" / "lib" / "sysusers.d")
+        opts.add("SYSTEMD_TMPFILES_DIR=" & providerRoot / "build" / "out" /
+          "usr" / "lib" / "tmpfiles.d")
+        opts.add("DBUS_CONFIG_DIR=" & providerRoot / "build" / "out" /
+          "usr" / "share" / "dbus-1" / "system.d")
+        let stagedData = providerRoot / "build" / "out" / "usr" /
+          "share" / "sddm"
+        opts.add("DATA_INSTALL_DIR=" & stagedData)
+        opts.add("COMPONENTS_TRANSLATION_DIR=" & stagedData /
+          "translations-qt6")
+        opts.add("SESSION_COMMAND=" & stagedData / "scripts" / "Xsession")
+        opts.add("WAYLAND_SESSION_COMMAND=" & stagedData / "scripts" /
+          "wayland-session")
+        opts.add("SYSTEM_CONFIG_DIR=" & providerRoot / "build" / "out" /
+          "usr" / "lib" / "sddm" / "sddm.conf.d")
       # M9.R.15q.8.2 — explicit PKG_CONFIG_PATH plumbing. sddm's
       # CMakeLists declares `pkg_check_modules(LIBXAU REQUIRED "xau")`
       # which consults pkg-config at configure time. The M9.R.14e
@@ -304,8 +332,21 @@ package sddmSource:
       # recipe install mirrors + glob /nix/store for libxau / libxcb /
       # libxkbcommon dev outputs supplied by the stdlib stubs.
       var pkgCfgDirs: seq[string] = @[]
-      let recipeRoot = getEnv("REPROBUILD_RECIPE_ROOT",
-        "/opt/repro/reprobuild/recipes/packages/source")
+      let recipeRoot =
+        if providerRoot.len > 0: parentDir(providerRoot)
+        else: getEnv("REPROBUILD_RECIPE_ROOT",
+          "/opt/repro/reprobuild/recipes/packages/source")
+      # SDDM's bundled FindPAM module does not consistently honor the
+      # action's CMAKE_PREFIX_PATH when PAM uses a lib64 layout. Pin the
+      # two cache entries to the realized sibling mirror.
+      let pamPrefix = recipeRoot / "pam" / ".repro" / "output" /
+        "install" / "usr"
+      let pamInclude = pamPrefix / "include"
+      let pamLibrary = pamPrefix / "lib64" / "libpam.so"
+      if fileExists(pamInclude / "security" / "pam_appl.h"):
+        opts.add("PAM_INCLUDE_DIR=" & pamInclude)
+      if fileExists(pamLibrary):
+        opts.add("PAM_LIBRARY=" & pamLibrary)
       # Sibling from-source pkg-config dirs.
       for sib in walkDir(recipeRoot, relative = false):
         if sib.kind == pcDir:
@@ -375,8 +416,34 @@ package sddmSource:
         ("PKG_CONFIG_PATH_FOR_TARGET", pkgCfgPath),
         ("PKG_CONFIG_PATH", pkgCfgPath),
       ]
+      # SDDM reuses absolute install destinations as runtime constants.
+      # Keep installation staged, but compile target-rooted paths that
+      # remain valid after the mirror is copied into ReproOS.
+      var runtimePathPatches = @[
+        "sed -i 's|@CMAKE_INSTALL_FULL_BINDIR@|/usr/bin|g' src/src/common/Constants.h.in",
+        "sed -i 's|@CMAKE_INSTALL_FULL_LIBEXECDIR@|/usr/libexec|g' src/src/common/Constants.h.in",
+        "sed -i 's|@DATA_INSTALL_DIR@|/usr/share/sddm|g' src/src/common/Constants.h.in",
+        "sed -i 's|@COMPONENTS_TRANSLATION_DIR@|/usr/share/sddm/translations-qt6|g' src/src/common/Constants.h.in",
+        "sed -i 's|@SESSION_COMMAND@|/usr/share/sddm/scripts/Xsession|g' src/src/common/Constants.h.in",
+        "sed -i 's|@WAYLAND_SESSION_COMMAND@|/usr/share/sddm/scripts/wayland-session|g' src/src/common/Constants.h.in",
+        "sed -i 's|@SYSTEM_CONFIG_DIR@|/usr/lib/sddm/sddm.conf.d|g' src/src/common/Constants.h.in",
+        "sed -i 's|@CMAKE_INSTALL_FULL_BINDIR@/sddm|/usr/bin/sddm|g' src/services/sddm.service.in",
+        # CMake selects PAM policy by inspecting the build host. ReproOS is a
+        # Debian target even when the recipe runs on NixOS, so make every
+        # selection path use SDDM's upstream Debian policy.
+        "cp src/services/debian.sddm.pam src/services/sddm.pam",
+        "cp src/services/debian.sddm-autologin.pam src/services/sddm-autologin.pam",
+        "cp src/services/debian.sddm-autologin.pam src/services/sddm-autologin-tally2.pam",
+        "cp src/services/debian.sddm-greeter.pam src/services/sddm-greeter.pam.in",
+      ]
+      if providerRoot.len > 0:
+        runtimePathPatches.add(
+          "sed -i 's|${CMAKE_INSTALL_FULL_SYSCONFDIR}/pam.d|" &
+          providerRoot / "build" / "out" / "etc" / "pam.d" &
+          "|g' src/services/CMakeLists.txt")
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
-                              extraEnv = env)
+                              extraEnv = env,
+                              srcPatches = runtimePathPatches)
       discard pkg.executable("sddm")
       discard pkg.executable("sddm-greeter-qt6")
     finally:

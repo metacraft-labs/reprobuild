@@ -128,11 +128,12 @@ proc runBuildApps(reproBin, repoRoot: string; withReport: bool):
   # named-target table rather than treat ``apps`` as the on-disk
   # ``apps/`` directory.
   #
-  # ``withReport=false`` swaps ``--report=full`` for ``--report=none``
+  # ``withReport=false`` swaps ``--write-report`` for ``--measure=none``
   # on the first (warm-up) invocation. The report write itself is
-  # cheap; the expensive part is per-action ``collectEvidence`` which
-  # runs regardless of the report mode. We still skip the report on
-  # the warm-up because the test only reads it on the SECOND
+  # cheap; the expensive part is per-action ``collectEvidence``, which
+  # runs for every action that EXECUTES regardless of any flag — it is
+  # inherent measurement, not a ``--measure`` category. We still skip the
+  # report on the warm-up because the test only reads it on the SECOND
   # invocation and the engine writes a multi-MB JSON document.
   let args = @[
     reproBin.quoteShell,
@@ -140,7 +141,7 @@ proc runBuildApps(reproBin, repoRoot: string; withReport: bool):
     ".#apps",
     "--tool-provisioning=path",
     "--daemon=off",
-    "--report=" & (if withReport: "full" else: "none"),
+    (if withReport: "--write-report" else: "--measure=none"),
     "--log=actions",
     "--progress=quiet",
   ]
@@ -199,7 +200,7 @@ suite "Bootstrap-And-Self-Build B1: apps action cache hits on second run":
             checkpoint("no buildReport: line in second-run output:")
             checkpoint(secondOut)
             checkpoint("skipped — engine did not emit a build report " &
-              "path (``--report=full`` may not be honoured by this " &
+              "path (``--write-report`` may not be honoured by this " &
               "build mode).")
             skip()
           elif not fileExists(reportPath):

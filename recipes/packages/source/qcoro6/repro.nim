@@ -211,14 +211,14 @@ package qcoro6Source:
         "QCORO_WITH_QTTEST=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true)
       discard pkg.library("libQCoro6Core")
     finally:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
-    ## DT_NEEDED inspection of the linked artifacts. Empty until
-    ## the M9.R.5b per-recipe pass populates per-output ELF
-    ## interrogation.
-    discard
+    ## libQCoro6Core, libQCoro6DBus, and libQCoro6Network link to the
+    ## corresponding Qt6 Base modules. The C++ runtime is supplied by
+    ## the host toolchain.
+    "qt6-base >=6.6"

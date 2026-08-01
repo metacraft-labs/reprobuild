@@ -56,7 +56,8 @@ package kguiaddonsSource:
         # legacy WMs; v1 is Wayland-only.
         "WITH_X11=OFF",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true)
       discard pkg.library("libKF6GuiAddons")
     finally:
       clearCurrentOwningPackageOverride()

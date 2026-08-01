@@ -25,9 +25,10 @@
 ## See [[file:Reprobuild-Standard-Library.md][Reprobuild-Standard-Library]]
 ## §"Multi-artifact result types" for the cross-tool contract.
 
-import std/[os, strutils, tables]
+import std/[options, os, strutils, tables]
 
 import repro_project_dsl
+import repro_project_dsl/source_cache_identity
 import ./library
 import ./executable
 import ./install_mirror_resolver
@@ -164,7 +165,8 @@ proc componentPath(components: Table[string, string]; name: string): string =
 proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
                             buildDir, destdir, packageName, kind, name: string)
 proc emitInstallTreeMirror*(installEdge: BuildActionDef;
-                            buildDir, destdir, packageName: string)
+                            buildDir, destdir, packageName,
+                            conventionTag: string)
 proc emitStageCopyAlias(installEdge: BuildActionDef;
                         buildDir, destdir, packageName, aliasName,
                         sourceName: string)
@@ -190,7 +192,7 @@ proc executable*(r: MesonPackageResult; name: string): Executable =
   # ``.pc`` / ``include`` / ``lib`` tree at a layout-stable location.
   # Idempotent (one mirror per package) — see ``emitInstallTreeMirror``.
   emitInstallTreeMirror(r.installEdge, "", r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "meson")
   newExecutable(
     install = r.installEdge,
     executableName = name,
@@ -209,7 +211,7 @@ proc library*(r: MesonPackageResult; name: string): Library =
     currentOwningPackage(), "library", name)
   # M9.R.14e.2 — install-tree mirror (see executable() above).
   emitInstallTreeMirror(r.installEdge, "", r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "meson")
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))
@@ -259,7 +261,7 @@ proc installTreeMirror*(r: MesonPackageResult) =
   ## pure-header packages). See the AutotoolsPackageResult variant for
   ## the rationale.
   emitInstallTreeMirror(r.installEdge, "", r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "meson")
 
 # ---------------------------------------------------------------------------
 # Slicing methods — CmakePackageResult
@@ -277,7 +279,7 @@ proc executable*(r: CmakePackageResult; name: string): Executable =
   emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
     currentOwningPackage(), "executable", name)
   emitInstallTreeMirror(r.installEdge, "", r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "cmake")
   newExecutable(
     install = r.installEdge,
     executableName = name,
@@ -294,7 +296,7 @@ proc library*(r: CmakePackageResult; name: string): Library =
   emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
     currentOwningPackage(), "library", name)
   emitInstallTreeMirror(r.installEdge, "", r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "cmake")
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))
@@ -302,6 +304,12 @@ proc library*(r: CmakePackageResult; name: string): Library =
 proc files*(r: CmakePackageResult; name: string): BuildActionDef =
   discard componentPath(r.components, name)
   r.installEdge
+
+proc installTreeMirror*(r: CmakePackageResult) =
+  ## Emit the complete install tree for CMake packages that produce no
+  ## executable or library slice, such as module and header collections.
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "cmake")
 
 # ---------------------------------------------------------------------------
 # Stage-copy emission (M9.R.14c.5)
@@ -462,6 +470,20 @@ proc m9r30CollectDepPropagatedManifestPaths*(projectRoot, packageName: string):
     appendManifestPath(result, raw)
   for raw in registeredBuildDeps(packageName):
     appendManifestPath(result, raw)
+
+proc m9r30ReadPropagatedLibDirs*(manifestPaths: openArray[string]):
+    seq[string] =
+  ## Read already-materialized propagated-library manifests for use by
+  ## configure and link actions. Missing manifests are expected during a
+  ## bottom-up bootstrap and contribute no entries. Preserve declaration and
+  ## line order while removing blanks and duplicates.
+  for manifestPath in manifestPaths:
+    if manifestPath.len == 0 or not fileExists(manifestPath):
+      continue
+    for raw in readFile(manifestPath).splitLines():
+      let libDir = raw.strip()
+      if libDir.len > 0 and libDir notin result:
+        result.add(libDir)
 
 # ---------------------------------------------------------------------------
 # M9.R.15i.1 — Qt6 component CMake-config dir threading.
@@ -1095,7 +1117,8 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
                                  ownManifestPath: string = "";
                                  packageName: string = ""): string =
   ## DSL-port M9.R.14f.2 — emit a POSIX shell snippet that walks every
-  ## ELF under ``<mirror>/lib`` + ``<mirror>/lib64`` + ``<mirror>/bin``
+  ## ELF under ``<mirror>/lib`` + ``<mirror>/lib64`` + ``<mirror>/bin`` +
+  ## ``<mirror>/sbin``
   ## and runs ``patchelf --set-rpath`` on each. RPATH layout:
   ## ``$ORIGIN:$ORIGIN/../lib:$ORIGIN/../lib64:<dep1>:<dep2>:...``.
   ##
@@ -1148,13 +1171,14 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   # loader silently skips it at run time, masking the resolution gap
   # until something later trips a missing-SONAME error.
   #
-  # In ADDITION to the existence-check, fold every directory present
-  # in ``$LD_LIBRARY_PATH`` into the rpath. The engine's
+  # In ADDITION to the existence-check, inspect directories present
+  # in ``$LD_LIBRARY_PATH`` for unresolved DT_NEEDED SONAMEs. The engine's
   # ``applyResolvedAuxPaths`` populates ``LD_LIBRARY_PATH`` from each
   # tool-identity-ref's ``libraryPathList`` (nix-store lib dirs for
   # nix-stub deps; sibling install-mirror lib dirs for from-source
   # deps). This is the load-bearing channel that carries the nix-store
-  # paths the install-mirror script has no other way to discover.
+  # paths the install-mirror script has no other way to discover. Build-only
+  # directories are excluded from the installed RPATH.
   script.add("rpath=$(printf '%s' '$ORIGIN'")
   script.add("; printf ':%s' '$ORIGIN/../lib'")
   script.add("; printf ':%s' '$ORIGIN/../lib64'")
@@ -1187,21 +1211,57 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     script.add("if [ -f \"" & escapedManifest & "\" ]; then ")
     script.add("while IFS= read -r line || [ -n \"$line\" ]; do ")
     script.add("if [ -z \"$line\" ] || ! [ -d \"$line\" ]; then continue; fi; ")
+    # A dependency's Nix runtime dirs belong on that dependency's ELFs, not
+    # on every downstream consumer. The stage closure walks every ELF, so
+    # propagating these paths only multiplies unrelated store outputs.
+    script.add("case \"$line\" in /nix/store/*|/repro/store/*) continue;; esac; ")
     script.add("case \":$rpath:\" in *\":$line:\"*) ;; ")
     script.add("*) rpath=\"$rpath:$line\";; esac; ")
     script.add("done < \"" & escapedManifest & "\"; ")
     script.add("fi; ")
-  # Append every directory present in ``$LD_LIBRARY_PATH``. Splits on
-  # ``:`` via IFS; existence-check via ``[ -d ... ]`` so empty
-  # segments + stale entries don't pollute the embedded RPATH.
+  # Collect the SONAMEs actually needed by this package's output. Tool
+  # provisioning can put hundreds of build-only directories on
+  # LD_LIBRARY_PATH; only a directory that resolves an otherwise missing
+  # DT_NEEDED entry belongs in the installed RPATH.
+  script.add("needed_sonames=$(for d in \"" & escapedDstUsr &
+    "/lib\" \"" & escapedDstUsr & "/lib64\" \"" & escapedDstUsr &
+    "/bin\" \"" & escapedDstUsr & "/sbin\"; do ")
+  script.add("if [ -d \"$d\" ]; then ")
+  script.add("find \"$d\" -type f \\( -name '*.so' -o -name '*.so.*' -o -perm -u+x \\) 2>/dev/null | ")
+  script.add("while IFS= read -r f; do ")
+  script.add("magic=$(head -c 4 \"$f\" 2>/dev/null | od -An -c | head -1 | tr -d ' '); ")
+  script.add("case \"$magic\" in 177ELF*) patchelf --print-needed \"$f\" 2>/dev/null || true;; esac; ")
+  script.add("done; fi; done | sort -u); ")
+
+  # Return success when a SONAME already exists in the package itself or in
+  # the RPATH assembled from source dependency mirrors.
+  script.add("m9r14f_soname_resolved() { m9r14f_so=$1; ")
+  script.add("for own in \"" & escapedDstUsr & "/lib/$m9r14f_so\" \"")
+  script.add(escapedDstUsr & "/lib64/$m9r14f_so\" \"")
+  script.add(escapedDstUsr & "/lib\"/*/\"$m9r14f_so\" \"")
+  script.add(escapedDstUsr & "/lib64\"/*/\"$m9r14f_so\"; do ")
+  script.add("if [ -e \"$own\" ]; then return 0; fi; done; ")
+  script.add("m9r14f_old_ifs=$IFS; IFS=':'; ")
+  script.add("for rp in $rpath; do case \"$rp\" in '$ORIGIN'*) continue;; esac; ")
+  script.add("if [ -e \"$rp/$m9r14f_so\" ]; then IFS=$m9r14f_old_ifs; return 0; fi; ")
+  script.add("done; IFS=$m9r14f_old_ifs; return 1; }; ")
+
+  # Append only LD_LIBRARY_PATH entries that satisfy an unresolved SONAME.
+  # Parse the colon-separated list without changing IFS around the SONAME
+  # loop and without clobbering the action's positional parameters.
   script.add("if [ -n \"$LD_LIBRARY_PATH\" ]; then ")
-  script.add("OLD_IFS=$IFS; IFS=':'; ")
-  script.add("for ldp in $LD_LIBRARY_PATH; do ")
-  script.add("if [ -n \"$ldp\" ] && [ -d \"$ldp\" ]; then ")
-  script.add("rpath=\"$rpath:$ldp\"; ")
-  script.add("fi; ")
+  script.add("m9r14f_ldpaths=$LD_LIBRARY_PATH; ")
+  script.add("while [ -n \"$m9r14f_ldpaths\" ]; do ")
+  script.add("ldp=${m9r14f_ldpaths%%:*}; ")
+  script.add("if [ \"$m9r14f_ldpaths\" = \"$ldp\" ]; then m9r14f_ldpaths=; ")
+  script.add("else m9r14f_ldpaths=${m9r14f_ldpaths#*:}; fi; ")
+  script.add("if [ -z \"$ldp\" ] || ! [ -d \"$ldp\" ]; then continue; fi; ")
+  script.add("case \":$rpath:\" in *\":$ldp:\"*) continue;; esac; ")
+  script.add("m9r14f_use_ldp=0; for so in $needed_sonames; do ")
+  script.add("if ! m9r14f_soname_resolved \"$so\" && [ -e \"$ldp/$so\" ]; then ")
+  script.add("m9r14f_use_ldp=1; break; fi; done; ")
+  script.add("if [ \"$m9r14f_use_ldp\" = 1 ]; then rpath=\"$rpath:$ldp\"; fi; ")
   script.add("done; ")
-  script.add("IFS=$OLD_IFS; ")
   script.add("fi; ")
   # DSL-port M9.R.15h.14.4 — preserve the toolchain libstdc++ / libgcc_s
   # path. Without a from-source gcc recipe, the C++ compiler is the
@@ -1219,12 +1279,13 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   # which echoes the absolute path of the named library file even when
   # the compiler isn't on PATH. The directory of that path is what we
   # want on rpath.
-  script.add(
-    "stdcxx_dir=$(gcc -print-file-name=libstdc++.so.6 2>/dev/null); ")
-  script.add("if [ -n \"$stdcxx_dir\" ] && [ \"$stdcxx_dir\" != " &
-    "\"libstdc++.so.6\" ]; then ")
-  script.add("rpath=\"$rpath:$(dirname \"$stdcxx_dir\")\"; ")
-  script.add("fi; ")
+  script.add("if printf '%s\\n' \"$needed_sonames\" | grep -qx 'libstdc++.so.6' && ")
+  script.add("! m9r14f_soname_resolved 'libstdc++.so.6'; then ")
+  script.add("stdcxx_file=$(gcc -print-file-name=libstdc++.so.6 2>/dev/null); ")
+  script.add("if [ -n \"$stdcxx_file\" ] && [ \"$stdcxx_file\" != \"libstdc++.so.6\" ]; then ")
+  script.add("stdcxx_dir=$(dirname \"$stdcxx_file\"); ")
+  script.add("case \":$rpath:\" in *\":$stdcxx_dir:\"*) ;; *) rpath=\"$rpath:$stdcxx_dir\";; esac; ")
+  script.add("fi; fi; ")
   # DSL-port M9.R.26.5 — discover the recipe's OWN internal versioned
   # subdirs under lib/ + lib64/ (e.g. mutter-15/, qt6/plugins/, etc.)
   # and append each as an absolute path to the rpath. Without this,
@@ -1281,14 +1342,25 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     script.add("case \"$rp\" in /*) ;; *) continue;; esac; ")
     script.add("printf '%s\\n' \"$rp\" >> \"" & escapedManifest & "\"; ")
     script.add("done; IFS=$OLD_IFS; ")
+  # Nix compiler wrappers may inject a self-RPATH into runtime loaders while
+  # linking them. glibc rejects DT_RUNPATH on ld.so at startup, so normalize
+  # glibc and musl loader names before the general ELF patch pass below.
+  script.add("for loader in \"" & escapedDstUsr & "/lib\"/ld-*.so* \"")
+  script.add(escapedDstUsr & "/lib64\"/ld-*.so*; do ")
+  script.add("if [ -f \"$loader\" ]; then ")
+  script.add("patchelf --remove-rpath \"$loader\"; ")
+  script.add("fi; done; ")
   # Walk lib/ + lib64/ for .so* files (the SONAME-versioned chain).
-  # Walk bin/ for executables.
+  # Walk bin/ + sbin/ for executables.
   script.add("for d in \"" & escapedDstUsr & "/lib\" \"" & escapedDstUsr &
-    "/lib64\" \"" & escapedDstUsr & "/bin\"; do ")
+    "/lib64\" \"" & escapedDstUsr & "/bin\" \"" & escapedDstUsr & "/sbin\"; do ")
   script.add("if [ -d \"$d\" ]; then ")
-  script.add("find \"$d\" -maxdepth 2 -type f \\( ")
+  script.add("find \"$d\" -type f \\( ")
   script.add("-name '*.so' -o -name '*.so.*' -o -perm -u+x ")
   script.add("\\) 2>/dev/null | while IFS= read -r f; do ")
+  # Runtime loaders reject a DT_RUNPATH on their own ELF. This covers glibc
+  # (ld-linux-*.so.*, ld-2.*.so) and musl (ld-musl-*.so.*) conventions.
+  script.add("case \"$(basename \"$f\")\" in ld-*.so*) continue;; esac; ")
   # ``patchelf --set-rpath`` is no-op for non-ELF files (it errors with
   # ``not an ELF executable``); guard with file-magic check via ``head``
   # before patching so non-ELF executables (shell scripts, etc.) don't
@@ -1300,7 +1372,7 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("done; ")
   script.add("fi; done; ")
   # DSL-port M9.R.30.3 — NEEDED safety net. After patching every ELF,
-  # re-walk lib/ + lib64/ + bin/ and run ``patchelf --print-needed``
+  # re-walk lib/ + lib64/ + bin/ + sbin/ and run ``patchelf --print-needed``
   # on each ELF. For every NEEDED SONAME, verify the file is found
   # under one of the RPATH dirs (split $rpath on ``:`` and probe
   # ``$dir/$soname``). If any NEEDED is unresolved, FAIL the build
@@ -1328,9 +1400,9 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     script.add("m9r30_unresolved_log=\"" & escapedManifest & ".m9r30_unresolved\"; ")
     script.add(": > \"$m9r30_unresolved_log\"; ")
     script.add("for d in \"" & escapedDstUsr & "/lib\" \"" & escapedDstUsr &
-      "/lib64\" \"" & escapedDstUsr & "/bin\"; do ")
+      "/lib64\" \"" & escapedDstUsr & "/bin\" \"" & escapedDstUsr & "/sbin\"; do ")
     script.add("if [ -d \"$d\" ]; then ")
-    script.add("find \"$d\" -maxdepth 2 -type f \\( ")
+    script.add("find \"$d\" -type f \\( ")
     script.add("-name '*.so' -o -name '*.so.*' -o -perm -u+x ")
     script.add("\\) 2>/dev/null | while IFS= read -r f; do ")
     script.add("magic=$(head -c 4 \"$f\" 2>/dev/null | od -An -c | head -1 | tr -d ' '); ")
@@ -1374,8 +1446,40 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("fi; ")
   script
 
+proc m9r14e2ResetBareFhsMirrorScript*(dstRoot: string): string =
+  ## Remove bare FHS trees before replacing them from a staged install.
+  ## This is required for overlay-backed mirrors where protected files in
+  ## the lower layer cannot be overwritten in place.
+  for bareSubdir in ["etc", "sbin", "bin"]:
+    let escapedDst = (dstRoot / bareSubdir).
+      replace("\\", "/").replace("\"", "\\\"")
+    result.add("rm -rf \"" & escapedDst & "\"; ")
+
+proc m9r14e2NormalizeGlibcMirrorScript*(dstUsr: string): string =
+  ## Glibc installs runtime libraries under bare /lib64 and emits linker
+  ## scripts with absolute /lib64 and /usr/lib64 references. The canonical
+  ## mirror folds those files into usr/lib64, so make its symlinks and linker
+  ## scripts relative to that final directory.
+  let escapedLib64 = (dstUsr / "lib64").
+    replace("\\", "/").replace("\"", "\\\"")
+  result.add("if [ -d \"" & escapedLib64 & "\" ]; then ")
+  result.add("for link in \"" & escapedLib64 & "\"/*; do ")
+  result.add("if [ -L \"$link\" ]; then ")
+  result.add("target=\"$(readlink \"$link\")\"; ")
+  result.add("case \"$target\" in ../../lib64/*) ")
+  result.add("ln -sfn \"$(basename \"$target\")\" \"$link\" ;; esac; ")
+  result.add("fi; done; ")
+  result.add("for linker_script in libc.so libm.so libm.a; do ")
+  result.add("linker_script_path=\"" & escapedLib64 &
+    "/$linker_script\"; ")
+  result.add("if [ -f \"$linker_script_path\" ]; then ")
+  result.add("sed -i -e 's|/usr/lib64/||g' -e 's|/lib64/||g' " &
+    "\"$linker_script_path\"; ")
+  result.add("fi; done; fi; ")
+
 proc emitInstallTreeMirror*(installEdge: BuildActionDef;
-                            buildDir, destdir, packageName: string) =
+                            buildDir, destdir, packageName,
+                            conventionTag: string) =
   ## DSL-port M9.R.14e.2 — mirror the recipe's DESTDIR install tree
   ## (``<recipeRoot>/<buildDir>/<destdir>/usr/``) to the canonical
   ## stable location at ``<recipeRoot>/.repro/output/install/usr/`` so
@@ -1431,6 +1535,7 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   # we own; no user data lives under ``.repro/output/install/usr``.
   script.add("rm -rf \"" & escapedDstUsr & "\"; ")
   script.add("mkdir -p \"" & escapedDstUsrRoot & "\"; ")
+  script.add(m9r14e2ResetBareFhsMirrorScript(dstUsrRoot))
   # ``cp -a`` preserves symlinks, modes, timestamps. The ``--`` guards
   # against a future ``destdir`` whose value starts with ``-`` from
   # being interpreted as a flag.
@@ -1477,6 +1582,8 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
       script.add("mkdir -p \"" & escapedDstBare & "\"; ")
       script.add("cp -a -- \"" & escapedSrcBare & "\"/. \"" & escapedDstBare & "/\"; ")
       script.add("fi; ")
+  if packageName == "glibcSource":
+    script.add(m9r14e2NormalizeGlibcMirrorScript(dstUsr))
   # M9.R.14e.8 — rewrite the .pc files' ``prefix=`` line to point at the
   # absolute path of the mirrored ``usr/`` tree so consumers that consult
   # ``pkg-config --variable=...`` or ``pkg-config --cflags`` see real
@@ -1550,6 +1657,11 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   script.add(emitInstallMirrorReadOnlyEnforcement(dstUsrRoot))
   let argv = @["sh", "-c", script]
   let stageId = "install-mirror-" & sanitizeStageCopyName(packageName)
+  let packageVersion = block:
+    let versions = registeredVersions(packageName)
+    if versions.len > 0: versions[^1].version else: ""
+  let cacheIdentity = sourceCacheEntryIdentity(
+    projectRoot, packageName, packageVersion, conventionTag)
   # M9.R.15q.5.1 — thread every declared dep onto the install-mirror's
   # tool-identity-ref list so the engine populates ``LD_LIBRARY_PATH``
   # (and the rest of the auxiliary search-path channels) from each
@@ -1578,7 +1690,10 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.install_mirror",
-    toolIdentityRefs = mirrorToolRefs)
+    toolIdentityRefs = mirrorToolRefs,
+    publishToBinaryCache = true,
+    cacheEntryIdentity = some(cacheIdentity),
+    declaredOutputs = @[dstUsrRoot])
 
 proc m9r14dPascalToKebab*(value: string): string =
   ## DSL-port M9.R.14d.7c — convert ``libwaylandClient`` → ``libwayland-client``.
@@ -1685,6 +1800,21 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     #   4. <name>.so             (no lib- prefix, exact-case)
     #   5. <lowerName>.so        (no lib- prefix, case-folded)
     #   6. lib<name>.a / lib<lowerName>.a (static archive fallbacks)
+    const isMac = defined(macosx)
+    const libExt = when isMac: ".dylib" else: ".so"
+
+    proc dashGlob(dir, stem: string): string =
+      dir & "/lib" & stem & "\"-*" & libExt
+
+    proc bareDashGlob(dir, stem: string): string =
+      dir & "/" & stem & "\"-*" & libExt
+
+    proc dotGlob(dir, stem: string): string =
+      if isMac:
+        dir & "/lib" & stem & ".\"*\"" & libExt & "\""
+      else:
+        dir & "/lib" & stem & ".so.\"*"
+
     let escapedLowerName = name.toLowerAscii.replace("\"", "\\\"")
     let kebabName = m9r14dPascalToKebab(name).replace("\"", "\\\"")
     let kebabDigitsName =
@@ -1709,23 +1839,23 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     let strippedKebabDigits = m9r14dPascalToKebabWithDigits(stripLibPrefix(name)).replace("\"", "\\\"")
     let strippedSnake = m9r14fPascalToSnake(stripLibPrefix(name)).replace("\"", "\\\"")
     script.add("for candidate in ")
-    script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".so\" ")
-    script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".so\" ")
-    script.add("\"" & escapedSrcDir & "/" & kebabName & ".so\" ")
-    script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & ".so\" ")
-    script.add("\"" & escapedSrcDir & "/" & snakeName & ".so\" ")
-    script.add("\"" & escapedSrcDir & "/" & escapedName & ".so\" ")
-    script.add("\"" & escapedSrcDir & "/" & escapedLowerName & ".so\" ")
+    script.add("\"" & escapedSrcDir & "/lib" & escapedName & libExt & "\" ")
+    script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & libExt & "\" ")
+    script.add("\"" & escapedSrcDir & "/" & kebabName & libExt & "\" ")
+    script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & libExt & "\" ")
+    script.add("\"" & escapedSrcDir & "/" & snakeName & libExt & "\" ")
+    script.add("\"" & escapedSrcDir & "/" & escapedName & libExt & "\" ")
+    script.add("\"" & escapedSrcDir & "/" & escapedLowerName & libExt & "\" ")
     # M9.R.14g.7 — stripped-prefix variants for ``library libFoo:`` shapes.
     if strippedName != name:
-      script.add("\"" & escapedSrcDir & "/lib" & strippedName & ".so\" ")
-      script.add("\"" & escapedSrcDir & "/lib" & strippedLowerName & ".so\" ")
+      script.add("\"" & escapedSrcDir & "/lib" & strippedName & libExt & "\" ")
+      script.add("\"" & escapedSrcDir & "/lib" & strippedLowerName & libExt & "\" ")
       # M9.R.14h.8 — kebab + snake variants on the stripped form so
       # ``libJsonC`` -> ``lib<json-c>.so`` and ``libGdkPixbuf`` ->
       # ``lib<gdk_pixbuf>.so`` resolve as plain ``.so`` shapes (the
       # version-suffix glob below handles the ``-N.M.so`` variants).
       if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
-        script.add("\"" & escapedSrcDir & "/lib" & strippedKebab & ".so\" ")
+        script.add("\"" & escapedSrcDir & "/lib" & strippedKebab & libExt & "\" ")
       # M9.R.15e.2 — kebab-with-digits stripped variant so PascalCase
       # names with trailing digits resolve to the upstream SONAME shape.
       # ``libGtk4`` -> stripped ``Gtk4`` -> kebabDigits ``gtk-4`` ->
@@ -1733,10 +1863,10 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       if strippedKebabDigits.len > 0 and
           strippedKebabDigits != strippedLowerName and
           strippedKebabDigits != strippedKebab:
-        script.add("\"" & escapedSrcDir & "/lib" & strippedKebabDigits & ".so\" ")
+        script.add("\"" & escapedSrcDir & "/lib" & strippedKebabDigits & libExt & "\" ")
       if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
           strippedSnake != strippedKebab:
-        script.add("\"" & escapedSrcDir & "/lib" & strippedSnake & ".so\" ")
+        script.add("\"" & escapedSrcDir & "/lib" & strippedSnake & libExt & "\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabName & ".a\" ")
@@ -1750,9 +1880,9 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # `.so.<X>` suffix. We sort `LC_ALL=C` and take the FIRST match to
     # stay deterministic; multiple matches in the same directory would
     # be a packaging anomaly we'd surface in the upstream recipe.
-    script.add("first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); ")
-    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
-    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/" & kebabName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    script.add("first=$(ls -1 \"" & dashGlob(escapedSrcDir, escapedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); ")
+    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(escapedSrcDir, escapedLowerName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & bareDashGlob(escapedSrcDir, kebabName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     # M9.R.15q.11.5 — dot-versioned SONAME fallback. The DASH-version
     # globs above match ``lib<name>-2.0.so`` (meson soversion +
     # libfoo-2.0 family) but the canonical Linux SONAME convention is
@@ -1764,8 +1894,8 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # Prefer the shortest (typically the major-version symlink, e.g.
     # ``libKGlobalAccelD.so.6``) for the staged copy. We use ``-V`` for
     # version-sort so ``so.10`` doesn't sort before ``so.2``.
-    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedName & ".so.\"* 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
-    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedLowerName & ".so.\"* 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
+    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dotGlob(escapedSrcDir, escapedName) & " 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
+    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dotGlob(escapedSrcDir, escapedLowerName) & " 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
     # M9.R.15q.11.6 — dot-versioned strippedName variant. The recipe
     # spells the artifact ``libKGlobalAccelD`` (with the ``lib`` prefix)
     # which combined with the literal ``lib`` prefix in
@@ -1775,12 +1905,12 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # so the glob becomes ``libKGlobalAccelD.so.*`` and matches the
     # real install.
     if strippedName != name:
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedName & ".so.\"* 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedLowerName & ".so.\"* 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dotGlob(escapedSrcDir, strippedName) & " 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dotGlob(escapedSrcDir, strippedLowerName) & " 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
     # M9.R.14g.7 — stripped-prefix glob variants (libgmodule-2.0.so etc.)
     if strippedName != name:
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(escapedSrcDir, strippedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(escapedSrcDir, strippedLowerName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     # M9.R.14g.8 — letters-only glob. ``libGlib2`` -> ``glib`` (strip
     # ``lib`` + drop trailing digits) -> glob ``libglib-*.so`` matches
     # upstream ``libglib-2.0.so`` where the soversion ``2.0`` contains a
@@ -1793,7 +1923,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
           result.add(chr(ord(ch) - ord('A') + ord('a')))
     let lettersOnly = lettersOnlyLower(stripLibPrefix(name))
     if lettersOnly.len > 0 and lettersOnly != strippedLowerName:
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & lettersOnly & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(escapedSrcDir, lettersOnly) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     # M9.R.14h.7 — snake-case version-suffix glob for libraries like
     # ``libgdk_pixbuf-2.0.so`` whose upstream SONAME uses an underscore
     # between the project segments while the DSL writes the artifact as
@@ -1801,13 +1931,13 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # only tries ``libgdkPixbuf-*.so`` / ``libgdkpixbuf-*.so`` and
     # misses ``libgdk_pixbuf-2.0.so`` outright.
     if strippedSnake.len > 0 and strippedSnake != strippedLowerName:
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedSnake & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(escapedSrcDir, strippedSnake) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     # M9.R.14h.8 — kebab stripped version-suffix glob for libraries like
     # ``libjson-c.so`` where the recipe writes ``libJsonC`` -> stripped
     # ``JsonC`` -> kebab ``json-c`` -> glob ``libjson-c-*.so``.
     if strippedKebab.len > 0 and strippedKebab != strippedLowerName and
         strippedKebab != strippedSnake:
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(escapedSrcDir, strippedKebab) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     # M9.R.15e.2 — kebab-with-digits stripped version-suffix glob for
     # PascalCase names whose digit suffix is the SOVERSION separator.
     # ``libGtk4`` -> stripped ``Gtk4`` -> kebabDigits ``gtk-4`` ->
@@ -1818,7 +1948,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
         strippedKebabDigits != strippedLowerName and
         strippedKebabDigits != strippedKebab and
         strippedKebabDigits != strippedSnake:
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedKebabDigits & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(escapedSrcDir, strippedKebabDigits) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     # M9.R.14g.7 — many recipes write ``library libGModule:`` but the
     # upstream library lives under ``lib/x86_64-linux-gnu/`` or
@@ -1829,46 +1959,44 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     let lib64Dir = escapedSrcDir.replace("/usr/lib", "/usr/lib64")
     if lib64Dir != escapedSrcDir:
       script.add("for candidate in ")
-      script.add("\"" & lib64Dir & "/lib" & escapedName & ".so\" ")
-      script.add("\"" & lib64Dir & "/lib" & escapedLowerName & ".so\" ")
+      script.add("\"" & lib64Dir & "/lib" & escapedName & libExt & "\" ")
+      script.add("\"" & lib64Dir & "/lib" & escapedLowerName & libExt & "\" ")
       # M9.R.14h.8 — kebab+snake stripped variants on lib64 too.
       if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
-        script.add("\"" & lib64Dir & "/lib" & strippedKebab & ".so\" ")
+        script.add("\"" & lib64Dir & "/lib" & strippedKebab & libExt & "\" ")
       # M9.R.15e.2 — kebab-with-digits stripped variant on lib64 (gtk4).
       if strippedKebabDigits.len > 0 and
           strippedKebabDigits != strippedLowerName and
           strippedKebabDigits != strippedKebab:
-        script.add("\"" & lib64Dir & "/lib" & strippedKebabDigits & ".so\" ")
+        script.add("\"" & lib64Dir & "/lib" & strippedKebabDigits & libExt & "\" ")
       if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
           strippedSnake != strippedKebab:
-        script.add("\"" & lib64Dir & "/lib" & strippedSnake & ".so\" ")
+        script.add("\"" & lib64Dir & "/lib" & strippedSnake & libExt & "\" ")
       if strippedName != name:
-        script.add("\"" & lib64Dir & "/lib" & strippedName & ".so\" ")
-        script.add("\"" & lib64Dir & "/lib" & strippedLowerName & ".so\"; ")
+        script.add("\"" & lib64Dir & "/lib" & strippedName & libExt & "\" ")
+        script.add("\"" & lib64Dir & "/lib" & strippedLowerName & libExt & "\"; ")
       else:
-        script.add("\"" & lib64Dir & "/lib" & escapedLowerName & ".so\"; ")
+        script.add("\"" & lib64Dir & "/lib" & escapedLowerName & libExt & "\"; ")
       script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" & escapedOut & "\"; exit 0; fi; done; ")
-      script.add("first=$(ls -1 \"" & lib64Dir & "/lib" & escapedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); ")
-      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & escapedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("first=$(ls -1 \"" & dashGlob(lib64Dir, escapedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, escapedLowerName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       if strippedName != name:
-        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
-        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
-      # Keep the usr/lib64 fallback in parity with usr/lib for GLib-style
-      # versioned SONAME stems: libGlib2 -> libglib-2.0.so.
-      if lettersOnly.len > 0 and lettersOnly != strippedLowerName:
-        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & lettersOnly & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, strippedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, strippedLowerName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       # M9.R.14h.8 — kebab + snake stripped version-suffix globs on lib64.
       if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
-        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, strippedKebab) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       # M9.R.15e.2 — kebab-with-digits stripped version-suffix glob on lib64.
       if strippedKebabDigits.len > 0 and
           strippedKebabDigits != strippedLowerName and
           strippedKebabDigits != strippedKebab and
           strippedKebabDigits != strippedSnake:
-        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedKebabDigits & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, strippedKebabDigits) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
           strippedSnake != strippedKebab:
-        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedSnake & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, strippedSnake) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      if lettersOnly.len > 0 and lettersOnly != strippedLowerName:
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(lib64Dir, lettersOnly) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     # M9.R.15e.9 — some autotools projects (Linux-PAM, glibc, util-linux's
     # libuuid path) hardcode ``libdir=/lib64`` in their configure.ac
@@ -1888,41 +2016,41 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
         let dirPath = destdirRoot & bareDir
         # Plain candidates.
         script.add("for candidate in ")
-        script.add("\"" & dirPath & "/lib" & escapedName & ".so\" ")
-        script.add("\"" & dirPath & "/lib" & escapedLowerName & ".so\" ")
+        script.add("\"" & dirPath & "/lib" & escapedName & libExt & "\" ")
+        script.add("\"" & dirPath & "/lib" & escapedLowerName & libExt & "\" ")
         if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
-          script.add("\"" & dirPath & "/lib" & strippedKebab & ".so\" ")
+          script.add("\"" & dirPath & "/lib" & strippedKebab & libExt & "\" ")
         if strippedKebabDigits.len > 0 and
             strippedKebabDigits != strippedLowerName and
             strippedKebabDigits != strippedKebab:
-          script.add("\"" & dirPath & "/lib" & strippedKebabDigits & ".so\" ")
+          script.add("\"" & dirPath & "/lib" & strippedKebabDigits & libExt & "\" ")
         if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
             strippedSnake != strippedKebab:
-          script.add("\"" & dirPath & "/lib" & strippedSnake & ".so\" ")
+          script.add("\"" & dirPath & "/lib" & strippedSnake & libExt & "\" ")
         if strippedName != name:
-          script.add("\"" & dirPath & "/lib" & strippedName & ".so\" ")
-          script.add("\"" & dirPath & "/lib" & strippedLowerName & ".so\"; ")
+          script.add("\"" & dirPath & "/lib" & strippedName & libExt & "\" ")
+          script.add("\"" & dirPath & "/lib" & strippedLowerName & libExt & "\"; ")
         else:
-          script.add("\"" & dirPath & "/lib" & escapedLowerName & ".so\"; ")
+          script.add("\"" & dirPath & "/lib" & escapedLowerName & libExt & "\"; ")
         script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" & escapedOut & "\"; exit 0; fi; done; ")
         # Version-suffix glob.
-        script.add("first=$(ls -1 \"" & dirPath & "/lib" & escapedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); ")
-        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & escapedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("first=$(ls -1 \"" & dashGlob(dirPath, escapedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, escapedLowerName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         if strippedName != name:
-          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
-          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
-        if lettersOnly.len > 0 and lettersOnly != strippedLowerName:
-          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & lettersOnly & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, strippedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, strippedLowerName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
-          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, strippedKebab) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         if strippedKebabDigits.len > 0 and
             strippedKebabDigits != strippedLowerName and
             strippedKebabDigits != strippedKebab and
             strippedKebabDigits != strippedSnake:
-          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedKebabDigits & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, strippedKebabDigits) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
             strippedSnake != strippedKebab:
-          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedSnake & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, strippedSnake) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        if lettersOnly.len > 0 and lettersOnly != strippedLowerName:
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(dirPath, lettersOnly) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     script.add("echo \"autotools_package stage-copy: no library candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1")
   else:
@@ -1948,7 +2076,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # M9.R.15q.12.5 — also strip ``Daemon`` so ``pipewireDaemon``
     # probes for the bare ``pipewire`` binary name (same renaming
     # convention as systemdInit).
-    for suffix in ["Bin", "CLI", "Cmd", "Tool", "Exe", "Init", "Daemon"]:
+    for suffix in ["Bin", "CLI", "Cli", "Cmd", "Tool", "Exe", "Init", "Daemon"]:
       if strippedName.endsWith(suffix) and strippedName.len > suffix.len:
         strippedName = strippedName[0 ..< (strippedName.len - suffix.len)]
         break
@@ -1963,6 +2091,11 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # we already used ``installPrefix = effectiveDestRoot & "/usr/bin"``
     # above, so derive ``sbinSrcDir`` parallel to it here.
     let sbinSrcDir = (effectiveDestRoot & "/usr/sbin").replace("\\", "/").replace("\"", "\\\"")
+    # Some upstream autotools projects deliberately install essential
+    # boot utilities into DESTDIR /bin and /sbin even with --prefix=/usr.
+    # util-linux is the canonical example.
+    let rootBinSrcDir = (effectiveDestRoot & "/bin").replace("\\", "/").replace("\"", "\\\"")
+    let rootSbinSrcDir = (effectiveDestRoot & "/sbin").replace("\\", "/").replace("\"", "\\\"")
     # M9.R.15q.11.4 — KDE Plasma daemons (kglobalacceld, kactivitymanagerd,
     # etc.) install under ``$libdir/libexec/`` per Qt6's INSTALL_LIBEXECDIR
     # convention; some upstreams use ``$prefix/libexec/`` directly. Probe
@@ -1987,7 +2120,9 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # /usr/lib/polkit-1/polkitd + /usr/lib/polkit-1/polkit-agent-helper-1.
     # Probe this AFTER the canonical $bindir + $sbindir + $libexec dirs.
     let libPolkit1SrcDir = (effectiveDestRoot & "/usr/lib/polkit-1").replace("\\", "/").replace("\"", "\\\"")
-    let candidateDirs = @[escapedSrcDir, sbinSrcDir, libexecSrcDir, libLibexecSrcDir, libSystemdSrcDir, libPolkit1SrcDir]
+    let candidateDirs = @[escapedSrcDir, sbinSrcDir, rootBinSrcDir,
+      rootSbinSrcDir, libexecSrcDir, libLibexecSrcDir, libSystemdSrcDir,
+      libPolkit1SrcDir]
     # M9.R.15q.7.9 — also probe snake_case form. The kebab probe
     # covers ``kwinWayland`` → ``kwin-wayland`` but kwin upstream
     # installs ``kwin_wayland`` (snake_case underscore). The library
@@ -2016,7 +2151,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       script.add("elif [ -f \"" & dir & "/" & escapedName & ".exe\" ]; then ")
       script.add("cp -fL \"" & dir & "/" & escapedName & ".exe\" \"" & escapedOut & ".exe\"; ")
       first = false
-    script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & " or " & sbinSrcDir & " or " & libexecSrcDir & " or " & libLibexecSrcDir & " or " & libSystemdSrcDir & " or " & libPolkit1SrcDir & "\" >&2; exit 1; fi")
+    script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & " or " & sbinSrcDir & " or " & rootBinSrcDir & " or " & rootSbinSrcDir & " or " & libexecSrcDir & " or " & libLibexecSrcDir & " or " & libSystemdSrcDir & " or " & libPolkit1SrcDir & "\" >&2; exit 1; fi")
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-" & kind & "-" & sanitizeStageCopyName(packageName) &
     "-" & sanitizeStageCopyName(name)
@@ -2070,19 +2205,35 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
   # them and forced recipes to over-specify install paths.
   let bin = (effectiveDestRoot & "/usr/bin").replace("\\", "/").replace("\"", "\\\"")
   let sbin = (effectiveDestRoot & "/usr/sbin").replace("\\", "/").replace("\"", "\\\"")
+  let rootBin = (effectiveDestRoot & "/bin").replace("\\", "/").replace("\"", "\\\"")
+  let rootSbin = (effectiveDestRoot & "/sbin").replace("\\", "/").replace("\"", "\\\"")
   let libexec = (effectiveDestRoot & "/usr/libexec").replace("\\", "/").replace("\"", "\\\"")
   let libLibexec = (effectiveDestRoot & "/usr/lib/libexec").replace("\\", "/").replace("\"", "\\\"")
-  let candidateDirs = [bin, sbin, libexec, libLibexec]
+  let candidateDirs = [bin, sbin, rootBin, rootSbin, libexec, libLibexec]
+  let launchPrefix =
+    if sourceName == "g-ir-scanner": "exec env -u PYTHONPATH "
+    else: "exec "
   var script = "set -e; mkdir -p \"" & escapedOutDir & "\"; "
   var firstClause = true
-  for dir in candidateDirs:
+  for index, dir in candidateDirs:
     let leader = (if firstClause: "if" else: "elif")
     script.add(leader & " [ -f \"" & dir & "/" & escapedSrc & "\" ]; then ")
-    script.add("cp -fL \"" & dir & "/" & escapedSrc & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+    let installSubdir = ["usr/bin", "usr/sbin", "bin", "sbin",
+      "usr/libexec", "usr/lib/libexec"][index]
+    script.add("printf '%s\\n' '#!/bin/sh' '" & launchPrefix &
+      "\"$(dirname \"$0\")/../install/" &
+      installSubdir & "/" & escapedSrc & "\" \"$@\"' > \"" & escapedOut &
+      "\"; chmod +x \"" & escapedOut & "\"; ")
     script.add("elif [ -f \"" & dir & "/" & escapedSrc & ".exe\" ]; then ")
     script.add("cp -fL \"" & dir & "/" & escapedSrc & ".exe\" \"" & escapedOut & ".exe\"; ")
     firstClause = false
-  script.add("else echo \"executableAlias stage-copy: no source binary " & escapedSrc & " under " & bin & " or " & sbin & " or " & libexec & " or " & libLibexec & "\" >&2; exit 1; fi")
+  script.add("else echo \"executableAlias stage-copy: no source binary " & escapedSrc & " under " & bin & " or " & sbin & " or " & rootBin & " or " & rootSbin & " or " & libexec & " or " & libLibexec & "\" >&2; exit 1; fi")
+  var aliasOutputs = @[outputPath]
+  if sourceName != aliasName:
+    let sourceOutput = outputDir / sourceName
+    let escapedSourceOutput = sourceOutput.replace("\\", "/").replace("\"", "\\\"")
+    script.add("; ln -sfn \"" & aliasName & "\" \"" & escapedSourceOutput & "\"")
+    aliasOutputs.add(sourceOutput)
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-alias-" & sanitizeStageCopyName(packageName) &
     "-" & sanitizeStageCopyName(aliasName)
@@ -2091,7 +2242,7 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
     call = inlineExecCall(argv),
     deps = @[installEdge.id],
     inputs = installEdge.outputs,
-    outputs = @[outputPath],
+    outputs = aliasOutputs,
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.stage.executable_alias",
@@ -2112,7 +2263,7 @@ proc executable*(r: AutotoolsPackageResult; name: string): Executable =
   # M9.R.14e.2 — install-tree mirror at the canonical layout-stable
   # location ``.repro/output/install/usr/`` (see ``emitInstallTreeMirror``).
   emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "autotools")
   newExecutable(
     install = r.installEdge,
     executableName = name,
@@ -2133,7 +2284,7 @@ proc executableAlias*(r: AutotoolsPackageResult; aliasName, sourceName: string):
   emitStageCopyAlias(r.installEdge, r.buildDir, r.destdir,
     currentOwningPackage(), aliasName, sourceName)
   emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "autotools")
   newExecutable(
     install = r.installEdge,
     executableName = aliasName,
@@ -2143,7 +2294,7 @@ proc library*(r: AutotoolsPackageResult; name: string): Library =
   emitAutotoolsStageCopy(r.installEdge, r.buildDir, r.destdir,
     currentOwningPackage(), "library", name)
   emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "autotools")
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))
@@ -2161,4 +2312,4 @@ proc installTreeMirror*(r: AutotoolsPackageResult) =
   ## ``.repro/output/install/usr/`` and consumer recipes' M9.R.28.4
   ## pkgconfig-only-package fast-path can't see the .pc / .h files.
   emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage())
+    currentOwningPackage(), "autotools")

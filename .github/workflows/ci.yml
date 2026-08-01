@@ -5,6 +5,10 @@ on:
     branches: [main, dev]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 # CI replays the project's deterministic dev environment via the
 # shared `metacraft-github-actions` composite actions. Per the
 # `ci-shared-dev-env` policy, this workflow:
@@ -23,7 +27,7 @@ on:
 jobs:
   lint:
     name: Lint
-    runs-on: [self-hosted, nixos]
+    runs-on: eph-linux-x64  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
       - uses: actions/checkout@v4
       # Mint a GitHub App installation token via the CI Token Provider
@@ -38,10 +42,54 @@ jobs:
           app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
+          # Keep this closure aligned with .github/sibling-repos plus the
+          # flake and CodeTracer submodule inputs reached by setup-dev-env.
+          repositories: |
+            codetracer
+            codetracer-design-system
+            codetracer-example-recordings
+            codetracer-trace-format-nim
+            ethereum.nix
+            io-mon
+            isonim
+            isonim-gpui
+            isonim-tui
+            nim-acp
+            nim-agent-harbor
+            nim-agents
+            nim-chronicles
+            nim-confutils
+            nim-everywhere
+            nim-json-serialization
+            nim-pty
+            nim-shm-gset
+            nim-shm-queue
+            nim-stackable-hooks
+            nim-termctl
+            nixos-modules
+            repo-workspaces
+            reprobuild-ct-test-runner
+            reprobuild-test-adapters
+            runquota
+            tree-sitter-aiken
+            tree-sitter-cadence
+            tree-sitter-cairo
+            tree-sitter-masm
+            tree-sitter-move-on-aptos
+            tree-sitter-nim
+            tree-sitter-sway
+            tree-sitter-tolk
+            codetracer-native-recorder
+          permission-contents: read
       - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: nix
           gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
       - name: just lint
         run: dev-exec just lint
       - name: Upload logs
@@ -50,7 +98,61 @@ jobs:
         with:
           name: lint-logs
           path: test-logs/
-          retention-days: 30
+          retention-days: 1
+      - name: Mirror logs to S3 (non-blocking)
+        if: always()
+        continue-on-error: true
+        uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@main
+        with:
+          path: test-logs/
+          prefix: lint-logs/${{ github.run_id }}
+          endpoint: ${{ vars.MCL_S3_ARTIFACTS_ENDPOINT }}
+          bucket: ${{ vars.MCL_S3_ARTIFACTS_BUCKET }}
+          region: ${{ vars.MCL_S3_ARTIFACTS_REGION }}
+          access-key-id: ${{ secrets.MCL_S3_ARTIFACTS_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MCL_S3_ARTIFACTS_SECRET_ACCESS_KEY }}
+
+  windows-expand-archive-boundary:
+    name: Windows expandArchive boundary
+    # M3f is an execution-boundary contract, not a cross-compiled unit test.
+    # Keeping this as its own required PR job means an unavailable Windows
+    # service leaves the gate queued/pending; there is no skip-as-pass branch.
+    runs-on: eph-win-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mint installation token for Windows dev environment
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      - name: Setup Windows dev environment
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+        with:
+          env-flavor: windows-diy
+          gh-token: ${{ steps.ci_token.outputs.token }}
+
+      - name: Run real PowerShell/filesystem execution-boundary gate
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/test-bin | Out-Null
+          New-Item -ItemType Directory -Force build/nimcache/windows-expand-archive-boundary | Out-Null
+          $nimArgs = @(
+            'c', '-r',
+            '--threads:on',
+            '--hints:off',
+            '--warnings:off',
+            '--nimcache:build/nimcache/windows-expand-archive-boundary',
+            '--out:build/test-bin/windows_expand_archive_execution_boundary.exe',
+            'tests/windows/windows_expand_archive_execution_boundary.nim'
+          )
+          & nim @nimArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows expandArchive execution-boundary gate failed with exit code $LASTEXITCODE"
+          }
 
   test:
     name: Test
@@ -58,11 +160,15 @@ jobs:
     # too small (4 vCPU / 16 GB) — the parallel nim c phase trips OOM
     # and the test runner hits an fd race at higher concurrency. The
     # metacraft-labs bare-metal pool has nixos hosts with plenty of
-    # cores + RAM; lift the parallelism caps below for them.
+    # cores + RAM. Twelve concurrent engine actions keep the full graph
+    # within its CI budget without the tail stalls observed at sixteen.
+    # EXEMPTION (CIP-5): bare-metal runner — the parallel `nim c` phase OOMs on
+    # small ephemeral runners; kept on the persistent big-iron nixos bare-metal
+    # pool rather than the eph-linux-x64 class.
     runs-on: [self-hosted, Linux, X64, bare-metal, nixos]
     env:
-      REPROBUILD_MAX_PARALLELISM: "16"
-      REPROBUILD_TEST_THREADS: "4"
+      REPROBUILD_MAX_PARALLELISM: "12"
+      REPROBUILD_TEST_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -76,6 +182,48 @@ jobs:
           app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
+          # setup-dev-env uses the lint closure; the test job also clones the
+          # three repositories appended below explicitly.
+          repositories: |
+            codetracer
+            codetracer-design-system
+            codetracer-example-recordings
+            codetracer-trace-format-nim
+            ethereum.nix
+            io-mon
+            isonim
+            isonim-gpui
+            isonim-tui
+            nim-acp
+            nim-agent-harbor
+            nim-agents
+            nim-chronicles
+            nim-confutils
+            nim-everywhere
+            nim-json-serialization
+            nim-pty
+            nim-shm-gset
+            nim-shm-queue
+            nim-stackable-hooks
+            nim-termctl
+            nixos-modules
+            repo-workspaces
+            reprobuild-ct-test-runner
+            reprobuild-test-adapters
+            runquota
+            tree-sitter-aiken
+            tree-sitter-cadence
+            tree-sitter-cairo
+            tree-sitter-masm
+            tree-sitter-move-on-aptos
+            tree-sitter-nim
+            tree-sitter-sway
+            tree-sitter-tolk
+            codetracer-native-recorder
+            reprobuild-cmake
+            reprobuild-examples
+            vm-harness
+          permission-contents: read
 
       # Sibling clones: setup-dev-env clones the CodeTracer sibling declared in
       # .github/sibling-repos, and scripts/run_tests.sh builds ../runquota.
@@ -162,30 +310,49 @@ jobs:
         with:
           env-flavor: nix
           gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
           flake-override-inputs: |
             runquota-src=../runquota
 
-      # Build codetracer's `ct` binary that the ct_incremental_adapter execs
-      # (`ct test --incremental --watch-decide|--watch-record`; resolved from
-      # $CT_BIN). We build ONLY the `ct` target with reprobuild itself —
-      # codetracer ships a `reprobuild.nim` recipe and its build-once.sh drives
-      # `repro build <target>` (target from CODETRACER_REPROBUILD_TARGET), so
-      # this avoids tup/FUSE and the full-product frontend build, and the
-      # reprobuild content-addressed cache (persistent /nix/store + repro's own
-      # cache on the self-hosted runners) makes rebuilds fast once warm.
-      - name: Build codetracer ct (via reprobuild)
+      # Installation tokens expire after one hour. Mint replacements immediately
+      # before each long phase and expose them only to that step environment and
+      # its descendants. The bootstrap needs only the private native-recorder
+      # flake input; public GitHub fetches continue to use github.token.
+      - name: Refresh installation token for Reprobuild bootstrap
+        id: ci_token_bootstrap
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+          repositories: codetracer-native-recorder
+          permission-contents: read
+
+      - name: Bootstrap Reprobuild
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_TERMINAL_PROMPT: '0'
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token_bootstrap.outputs.token }}@github.com/metacraft-labs/codetracer-native-recorder.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/codetracer-native-recorder
+          NIX_CONFIG: >-
+            access-tokens = github.com=${{ github.token }}
+            github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_bootstrap.outputs.token }}
         run: |
           set -euo pipefail
           repro_root="${{ github.workspace }}"
-          ct_root="$(cd "$repro_root/../codetracer" && pwd)"
-          # 1. Materialise reprobuild's own `repro` binary (idempotent bootstrap).
-          dev-exec just bootstrap
           repro_bin="$repro_root/build/bin/repro"
-          test -x "$repro_bin" || { echo "repro not bootstrapped at $repro_bin" >&2; exit 1; }
+          # Materialise reprobuild's own `repro` binary (idempotent bootstrap).
+          dev-exec just bootstrap
           # The bootstrapped `repro` carries bare dlopen()s for its runtime
           # libraries (libclingo.so is lazy; libzstd.so.1 loads at module init for
           # the binary-cache client) because build_apps.sh strips rpath per the
-          # .rodata-bake guard, relying on a runtime LD_LIBRARY_PATH. Step 2 below
+          # .rodata-bake guard, relying on a runtime LD_LIBRARY_PATH. The build below
           # runs it inside CODETRACER's dev shell, which does not carry those libs,
           # so bake reprobuild's own dev-shell library dirs into repro's RPATH.
           # Mirrors the flake's zstd DT_RPATH postFixup for the package build.
@@ -204,7 +371,116 @@ jobs:
           else
             echo "ct-build: WARNING dev-shell LD_LIBRARY_PATH empty; cannot bake RPATH" >&2
           fi
-          # 2. Build only the `ct` target via codetracer's reprobuild.nim recipe.
+
+      # Reconcile the public lock-pinned source siblings after preparing the
+      # freshly bootstrapped binaries, without inheriting the setup action's
+      # persistent Git credentials.
+      - name: Reconcile CodeTracer source dependencies
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_TERMINAL_PROMPT: '0'
+        run: |
+          set -euo pipefail
+          repro_root="${{ github.workspace }}"
+          repro_bin="$repro_root/build/bin/repro"
+          ct_root="$(cd "$repro_root/../codetracer" && pwd)"
+          test -x "$repro_bin" || { echo "repro not bootstrapped at $repro_bin" >&2; exit 1; }
+          # setup-dev-env's inherited checkout token may leave a broad rewrite
+          # in CodeTracer's local config. Remove that exact entry silently and
+          # restore the canonical origin before syncing submodule URLs. Global
+          # and system configuration remain masked for this public-only phase.
+          git -C "$ct_root" config --local --unset-all \
+            "url.https://x-access-token:${{ steps.ci_token.outputs.token }}@github.com/.insteadOf" \
+            >/dev/null 2>&1 || true
+          if git -C "$ct_root" remote get-url origin >/dev/null 2>&1; then
+            git -C "$ct_root" remote set-url origin \
+              https://github.com/metacraft-labs/codetracer.git
+          fi
+          git -C "$ct_root" submodule sync --recursive
+          # L2 (CI-PROVISION-FROM-LOCK): provision codetracer's dependency
+          # siblings FROM THE LOCK, not from a hard-coded name list. codetracer
+          # ships a committed `repro.lock` enumerating its from-source deps
+          # (isonim + the nim-* libs it `uses:`) at pinned revisions; a single
+          # `repro develop --all` resolves that set over the solved graph and
+          # records the develop-mode override map so reprobuild splices each
+          # sibling's Nim source into the ct consumer graph. The sibling
+          # checkouts already sit adjacent to $ct_root (cloned by setup-dev-env
+          # from reprobuild's .github/sibling-repos), so `develop --all` ADOPTS
+          # them in place when they match the locked revision; --into=<siblings>
+          # names that adjacency explicitly. Fails loud if the lock is missing.
+          #
+          # --reset: the siblings were pre-cloned by clone-siblings at their
+          # `=dev` BRANCH TIPS, which in general differ from the revisions
+          # codetracer's committed repro.lock pins. Without --reset, `develop
+          # --all` REFUSES to overwrite a checkout that drifted off the lock
+          # (the fleet-safe default). --reset makes `develop --all` reconcile
+          # each drifted sibling back to its locked revision (re-clone + hard
+          # reset at the locked SHA) so the ct build consumes the EXACT
+          # lock-pinned sources, not the moving `=dev` tips. This is the crux
+          # that keeps this step green as the sibling `dev` tips advance.
+          siblings_root="$(cd "$ct_root/.." && pwd)"
+          ( cd "$ct_root" && "$repro_bin" develop --all --reset --into="$siblings_root" )
+
+      # CodeTracer's Nix graph reads native-recorder, while its submodule graph
+      # also reads tree-sitter-nim. Mint exactly that repository set immediately
+      # before entering CodeTracer's direnv environment.
+      - name: Refresh installation token for the CodeTracer build
+        id: ci_token_build
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+          repositories: |
+            codetracer-native-recorder
+            tree-sitter-nim
+          permission-contents: read
+
+      # Build codetracer's `ct` binary that the ct_incremental_adapter execs
+      # (`ct test --incremental --watch-decide|--watch-record`; resolved from
+      # $CT_BIN). We build ONLY the `ct` target with reprobuild itself —
+      # codetracer ships a `reprobuild.nim` recipe and its build-once.sh drives
+      # `repro build <target>` (target from CODETRACER_REPROBUILD_TARGET), so
+      # this avoids tup/FUSE and the full-product frontend build, and the
+      # reprobuild content-addressed cache (persistent /nix/store + repro's own
+      # cache on the self-hosted runners) makes rebuilds fast once warm.
+      - name: Build codetracer ct (via reprobuild)
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_TERMINAL_PROMPT: '0'
+          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token_build.outputs.token }}@github.com/metacraft-labs/codetracer-native-recorder.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/codetracer-native-recorder
+          GIT_CONFIG_KEY_1: url.https://x-access-token:${{ steps.ci_token_build.outputs.token }}@github.com/metacraft-labs/tree-sitter-nim.git.insteadOf
+          GIT_CONFIG_VALUE_1: https://github.com/metacraft-labs/tree-sitter-nim.git
+          NIX_CONFIG: >-
+            access-tokens = github.com=${{ github.token }}
+            github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_build.outputs.token }}
+          REPRO_PUBLISH_KEY: ${{ secrets.REPRO_PUBLISH_KEY }}
+          REPRO_PUBLISH_CERT: ${{ secrets.REPRO_PUBLISH_CERT }}
+        run: |
+          set -euo pipefail
+          repro_root="${{ github.workspace }}"
+          ct_root="$(cd "$repro_root/../codetracer" && pwd)"
+          # R4: when a CI publisher key is configured (repo/org secret), publish
+          # the `repro build` action outputs to the fleet binary cache so other
+          # machines get cache hits. Fork PRs receive no secrets -> the vars stay
+          # empty -> reprobuild's engine publisher stays disabled (no publish).
+          if [ -n "${REPRO_PUBLISH_KEY:-}" ] && [ -n "${REPRO_PUBLISH_CERT:-}" ]; then
+            umask 077
+            printf '%s' "$REPRO_PUBLISH_KEY" > "$RUNNER_TEMP/repro-publish.key"
+            printf '%s' "$REPRO_PUBLISH_CERT" > "$RUNNER_TEMP/repro-publish.cert"
+            export REPRO_BINARY_CACHE_URL="https://repro-cache.metacraft-labs.com"
+            export REPRO_BINARY_CACHE_KEY_PATH="$RUNNER_TEMP/repro-publish.key"
+            export REPRO_BINARY_CACHE_CERT_PATH="$RUNNER_TEMP/repro-publish.cert"
+            echo "ct-build: repro binary-cache publish ENABLED -> $REPRO_BINARY_CACHE_URL"
+          else
+            echo "ct-build: no REPRO_PUBLISH_KEY; binary-cache publish disabled"
+          fi
+          repro_bin="$repro_root/build/bin/repro"
+          # Build only the `ct` target via codetracer's reprobuild.nim recipe.
           #    build-once.sh's reprobuild path (CODETRACER_REPROBUILD_LINUX=1)
           #    runs `repro build "$CODETRACER_REPROBUILD_TARGET"`; codetracer's
           #    toolchain comes from its dev shell (direnv).
@@ -213,15 +489,38 @@ jobs:
             CODETRACER_REPROBUILD_LINUX=1 \
             CODETRACER_REPROBUILD_TARGET=ct \
             CODETRACER_REPROBUILD_REPO_PATH="$repro_root" \
+            REPROBUILD_NIX_DAEMON_BIN="$repro_root/tools/reprobuild-nix-daemon/reprobuild-nix-daemon" \
             REPROBUILD_BIN="$repro_bin" \
+            REPRO_BINARY_CACHE_URL="${REPRO_BINARY_CACHE_URL:-}" \
+            REPRO_BINARY_CACHE_KEY_PATH="${REPRO_BINARY_CACHE_KEY_PATH:-}" \
+            REPRO_BINARY_CACHE_CERT_PATH="${REPRO_BINARY_CACHE_CERT_PATH:-}" \
             direnv exec "$ct_root" just build-once )
           ct_bin="$ct_root/src/build-debug-repro/bin/ct"
           test -x "$ct_bin" || { echo "ct not built at $ct_bin" >&2; exit 1; }
           echo "CT_BIN=$ct_bin" >> "$GITHUB_ENV"
 
+      - name: Refresh installation token for tests
+        id: ci_token_test
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+          repositories: codetracer-native-recorder
+          permission-contents: read
+
       - name: just test
         env:
           CT_BIN: ${{ env.CT_BIN }}
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_TERMINAL_PROMPT: '0'
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token_test.outputs.token }}@github.com/metacraft-labs/codetracer-native-recorder.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/codetracer-native-recorder
+          NIX_CONFIG: >-
+            access-tokens = github.com=${{ github.token }}
+            github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_test.outputs.token }}
         run: dev-exec just test
       - name: Upload logs
         if: always()
@@ -229,11 +528,23 @@ jobs:
         with:
           name: test-logs
           path: test-logs/
-          retention-days: 30
+          retention-days: 1
+      - name: Mirror logs to S3 (non-blocking)
+        if: always()
+        continue-on-error: true
+        uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@main
+        with:
+          path: test-logs/
+          prefix: test-logs/${{ github.run_id }}
+          endpoint: ${{ vars.MCL_S3_ARTIFACTS_ENDPOINT }}
+          bucket: ${{ vars.MCL_S3_ARTIFACTS_BUCKET }}
+          region: ${{ vars.MCL_S3_ARTIFACTS_REGION }}
+          access-key-id: ${{ secrets.MCL_S3_ARTIFACTS_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MCL_S3_ARTIFACTS_SECRET_ACCESS_KEY }}
 
   nix-build:
     name: Nix Build
-    runs-on: [self-hosted, nixos]
+    runs-on: eph-linux-x64  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
       - uses: actions/checkout@v4
       - name: Mint installation token for cross-repo sibling access
@@ -243,10 +554,53 @@ jobs:
           app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
+          # Keep this closure aligned with the lint setup-dev-env closure.
+          repositories: |
+            codetracer
+            codetracer-design-system
+            codetracer-example-recordings
+            codetracer-trace-format-nim
+            ethereum.nix
+            io-mon
+            isonim
+            isonim-gpui
+            isonim-tui
+            nim-acp
+            nim-agent-harbor
+            nim-agents
+            nim-chronicles
+            nim-confutils
+            nim-everywhere
+            nim-json-serialization
+            nim-pty
+            nim-shm-gset
+            nim-shm-queue
+            nim-stackable-hooks
+            nim-termctl
+            nixos-modules
+            repo-workspaces
+            reprobuild-ct-test-runner
+            reprobuild-test-adapters
+            runquota
+            tree-sitter-aiken
+            tree-sitter-cadence
+            tree-sitter-cairo
+            tree-sitter-masm
+            tree-sitter-move-on-aptos
+            tree-sitter-nim
+            tree-sitter-sway
+            tree-sitter-tolk
+            codetracer-native-recorder
+          permission-contents: read
       - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: nix
           gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
       - name: nix build
         run: dev-exec nix build .#default
       - name: Upload logs
@@ -255,4 +609,16 @@ jobs:
         with:
           name: build-logs
           path: test-logs/
-          retention-days: 30
+          retention-days: 1
+      - name: Mirror logs to S3 (non-blocking)
+        if: always()
+        continue-on-error: true
+        uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@main
+        with:
+          path: test-logs/
+          prefix: build-logs/${{ github.run_id }}
+          endpoint: ${{ vars.MCL_S3_ARTIFACTS_ENDPOINT }}
+          bucket: ${{ vars.MCL_S3_ARTIFACTS_BUCKET }}
+          region: ${{ vars.MCL_S3_ARTIFACTS_REGION }}
+          access-key-id: ${{ secrets.MCL_S3_ARTIFACTS_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MCL_S3_ARTIFACTS_SECRET_ACCESS_KEY }}

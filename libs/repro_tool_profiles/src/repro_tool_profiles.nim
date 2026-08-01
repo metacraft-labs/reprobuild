@@ -1,4 +1,4 @@
-import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, times]
+import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, times, net]
 
 import blake3
 import cbor
@@ -254,7 +254,7 @@ const
   # so the engine can thread them onto per-action env vars at fork time.
   ArtifactVersion = 7'u16
   NixMaterializationMagic = [byte(ord('R')), byte(ord('B')), byte(ord('N')), byte(ord('M'))]
-  NixMaterializationVersion = 1'u16
+  NixMaterializationVersion = 3'u16
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -858,7 +858,7 @@ proc executableInStorePath(storePath, declaredExecutablePath: string;
     return absolutePath(candidate)
   return ""
 
-proc safeStoreSegment(value, fallback: string): string =
+proc safeStoreSegment*(value, fallback: string): string =
   for ch in value:
     if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
         ch in {'-', '_', '.'}:
@@ -1098,6 +1098,9 @@ proc decodeNixMaterializationProfile(bytes: openArray[byte]):
     raiseEnvelopeError(eeMalformed,
       "trailing nix materialization receipt bytes")
 
+proc expandNixPropagatedStorePaths*(paths: var seq[string])
+proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile)
+
 proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
                                   plan: NixAcquisitionPlan):
     tuple[hit: bool; profile: PathOnlyToolProfile] =
@@ -1108,10 +1111,11 @@ proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
   if not fileExists(extendedPath(path)):
     return
   try:
-    let profile = decodeNixMaterializationProfile(
+    var profile = decodeNixMaterializationProfile(
       fromByteString(readFile(extendedPath(path))))
     if not profile.nixMaterializationProfileMatches(useDef, plan):
       return
+    expandNixProfilePropagatedPaths(profile)
     return (hit: true, profile: profile)
   except CatchableError:
     return
@@ -1132,150 +1136,295 @@ proc addUniquePath*(dst: var seq[string]; value: string)
   ## further down. Resolved here so ``resolveNixTool`` can reuse the
   ## same dedup/exists-probe helper for nix-store aux-path population.
 
-proc resolveNixTool*(useDef: InterfaceToolUse;
-                     storeRoot = "";
-                     writerMode = "direct"): PathOnlyToolProfile =
-  let plan = nixAcquisitionPlan(useDef)
-  let selector = plan.nixSelector
-  let cached = readCachedNixMaterialization(storeRoot, useDef, plan)
-  if cached.hit:
-    return cached.profile
+proc expandNixPropagatedStorePaths*(paths: var seq[string]) =
+  ## Include split-output runtime and development dependencies declared
+  ## by Nix outputs. Their lib/include/pkg-config directories must feed
+  ## the same action environment as the selected output.
+  var index = 0
+  while index < paths.len:
+    let supportDir = paths[index] / "nix-support"
+    for manifestName in ["propagated-build-inputs",
+                         "propagated-native-build-inputs"]:
+      let manifest = supportDir / manifestName
+      if not fileExists(extendedPath(manifest)):
+        continue
+      for candidate in readFile(extendedPath(manifest)).splitWhitespace:
+        if not dirExists(extendedPath(candidate)) or candidate in paths:
+          continue
+        paths.add(candidate)
+    inc index
 
-  var nixArgs = @["nix", "build", "--no-link", "--print-out-paths"]
-  if plan.nixExpressionFile.len > 0:
-    nixArgs.add("--file")
-    nixArgs.add(plan.nixExpressionFile)
-  else:
-    # DSL-port M9.R.14h.5 — nixpkgs's multi-output packages (libjpeg,
-    # libtiff, libpng, ...) split runtime libraries into the ``.out``
-    # output and headers into ``.dev``.  ``nix build`` without an
-    # explicit output selector only realizes + prints
-    # ``meta.outputsToInstall`` (typically ``bin`` and ``man``), so a
-    # consumer asking for ``lib/libjpeg.so`` resolves zero outputs even
-    # though nix's libjpeg ships the .so under
-    # ``<...>-libjpeg-turbo-3.1.2/lib/libjpeg.so``.  Append ``^*`` so
-    # every output is realized and printed; the downstream loop already
-    # walks every line searching for ``declaredExecutablePath``.
-    var selectorWithAllOutputs = selector
-    if not selectorWithAllOutputs.contains("^"):
-      selectorWithAllOutputs.add("^*")
-    nixArgs.add(selectorWithAllOutputs)
-  let res = execCmdEx(shellCommand(nixArgs))
-  if res.exitCode != 0:
-    raise newException(OSError,
-      "tool-resolution failed: nix build for " & selector & " exited " &
-      $res.exitCode & "\n" & res.output)
-
-  var realized: seq[string] = @[]
-  for line in res.output.splitLines:
-    let stripped = line.strip()
-    if stripped.startsWith("/nix/store/"):
-      realized.add(stripped)
-  if realized.len == 0:
-    raise newException(OSError,
-      "tool-resolution failed: nix build for " & selector &
-      " did not print any /nix/store outputs")
-
-  var selectedStorePath = ""
-  var resolved = ""
-  for storePath in realized:
-    let candidate = executableInStorePath(storePath,
-      plan.declaredExecutablePath)
-    if candidate.len > 0:
-      selectedStorePath = storePath
-      resolved = candidate
-      break
-  if resolved.len == 0:
-    raise newException(OSError,
-      "tool-resolution failed: nix build for " & selector &
-      " realized outputs without " & plan.declaredExecutablePath)
-
-  result = PathOnlyToolProfile(
-    installMethod: "nix",
-    packageSelector: useDef.packageSelector,
-    packageId: plan.packageId,
-    nixSelector: selector,
-    declaredExecutablePath: plan.declaredExecutablePath,
-    nixExpressionFile: plan.nixExpressionFile,
-    realizedStorePaths: realized,
-    selectedStorePath: selectedStorePath,
-    lockIdentity: plan.lockIdentity,
-    realizationBoundary: selectedStorePath,
-    executableName: useDef.executableName,
-    pathSearchList: @[selectedStorePath / "bin"],
-    resolvedExecutablePath: resolved,
-    adapterStrength: asStrong,
-    cachePortability: cpPortable)
-
-  # M9.R.14e.7 + M9.R.14f.10 — populate the same four auxiliary
-  # search-path channels the from-source resolver populates, but
-  # anchored at the nix store output. Many nix packages (e.g.
-  # wayland-protocols, libxml2-dev) ship ``.pc`` files at
-  # ``<store>/share/pkgconfig/`` and headers at ``<store>/include/``;
-  # the engine threads these onto ``PKG_CONFIG_PATH`` /
-  # ``CMAKE_PREFIX_PATH`` / ``CPATH`` / ``LIBRARY_PATH`` at fork time
-  # so a meson/cmake recipe consuming the dep finds its pc files /
-  # headers without having to declare a special-case ``env:`` block.
-  #
-  # M9.R.14f.10: multi-output nix packages ship the .pc / headers /
-  # libraries in DIFFERENT outputs. systemd's libudev.pc lives in the
-  # ``dev`` output, not ``out``. Walk every realized store path so
-  # consumers find them.
-  for storePath in realized:
-    addUniquePath(result.cmakePrefixList, storePath)
-    addUniquePath(result.pkgConfigSearchList,
+proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile) =
+  ## Repair cached Nix profiles as well as fresh resolutions. Split
+  ## development outputs commonly propagate the runtime output that
+  ## owns their shared libraries; omitting it leaves LD_LIBRARY_PATH
+  ## and embedded RPATHs pointed at an empty ``-dev/lib`` directory.
+  expandNixPropagatedStorePaths(profile.realizedStorePaths)
+  for storePath in profile.realizedStorePaths:
+    addUniquePath(profile.cmakePrefixList, storePath)
+    addUniquePath(profile.pkgConfigSearchList,
       storePath / "lib" / "pkgconfig")
-    addUniquePath(result.pkgConfigSearchList,
+    addUniquePath(profile.pkgConfigSearchList,
       storePath / "lib64" / "pkgconfig")
-    addUniquePath(result.pkgConfigSearchList,
+    addUniquePath(profile.pkgConfigSearchList,
       storePath / "share" / "pkgconfig")
-    addUniquePath(result.cpathList, storePath / "include")
-    addUniquePath(result.libraryPathList, storePath / "lib")
-    addUniquePath(result.libraryPathList, storePath / "lib64")
+    addUniquePath(profile.cpathList, storePath / "include")
+    addUniquePath(profile.libraryPathList, storePath / "lib")
+    addUniquePath(profile.libraryPathList, storePath / "lib64")
+  profile.profileFingerprint = profileFingerprintFor(profile)
 
-  result.probes = collectConfiguredProbes(resolved,
-    useDef.packageSelector, useDef.executableName)
+when defined(windows):
+  proc resolveNixTool*(useDef: InterfaceToolUse;
+                       storeRoot = "";
+                       writerMode = "direct"): PathOnlyToolProfile =
+    raise newException(OSError, "resolveNixTool is not supported on Windows")
+else:
+  proc resolveNixTool*(useDef: InterfaceToolUse;
+                       storeRoot = "";
+                       writerMode = "direct"): PathOnlyToolProfile =
+    let plan = nixAcquisitionPlan(useDef)
+    let selector = plan.nixSelector
+    let cached = readCachedNixMaterialization(storeRoot, useDef, plan)
+    if cached.hit:
+      return cached.profile
 
-  if storeRoot.len > 0:
-    # M56 — record the Nix realization in the unified index. The Nix
-    # store keeps the actual files at `/nix/store/...`; the unified
-    # prefix is a small marker directory whose receipt records the
-    # /nix/store path as adapter-specific provenance so a subsequent
-    # `repro store gc` knows which Nix outputs the user holds live.
-    let nixPackageName = safeStoreSegment("nix." & plan.packageId,
-      "nix-package")
-    let nixVersion =
-      if versionFromPackageSelector(plan.packageSelector).len > 0:
-        versionFromPackageSelector(plan.packageSelector)
-      else:
-        # Use the last path segment of the /nix/store derivation as
-        # version; it usually carries the upstream version string.
-        let segment = selectedStorePath.extractFilename
-        let dash = segment.find('-')
-        if dash >= 0 and dash + 1 < segment.len:
-          segment[dash + 1 .. ^1]
+    # Connect to the in-repo Python Nix evaluation daemon and query evaluation.
+    let socketPath = "/tmp/reprobuild-nix-daemon-" & getEnv("USER", "default") & ".sock"
+    var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
+    var connected = false
+    try:
+      sock.connectUnix(socketPath)
+      connected = true
+    except CatchableError:
+      # Spawn daemon process detached
+      let envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN")
+      let localBin = getCurrentDir() / "build" / "reprobuild-nix-daemon"
+      let localTool = getCurrentDir() / "tools" / "reprobuild-nix-daemon" /
+        "reprobuild-nix-daemon"
+      let localBin2 = getCurrentDir().parentDir / "reprobuild-nix-daemon" /
+        "build" / "reprobuild-nix-daemon"
+      # When resolving toolchains for a FOREIGN build (the cwd is the foreign
+      # repo, not reprobuild), the candidates above miss the daemon that ships
+      # in reprobuild's own tree. Anchor on reprobuild's source root too —
+      # mirrors resolveMonitorShim. REPROBUILD_SOURCE_ROOT is exported by
+      # codetracer's build-once.sh; getAppFilename() covers direct builds.
+      let sourceRoot = block:
+        let env = getEnv("REPROBUILD_SOURCE_ROOT")
+        if env.len > 0: env
         else:
-          segment
-    let unified = unifiedPrefixPath(storeRoot, nixPackageName,
-      nixVersion, "nix", plan.lockIdentity,
-      plan.declaredExecutablePath, "nix://" & plan.nixSelector,
-      selectedStorePath, realized)
-    createDir(extendedPath(unified.absolutePath))
-    writeFile(extendedPath(unified.absolutePath / "nix-store-path.txt"),
-      selectedStorePath & "\n")
-    discard registerInUnifiedStore(storeRoot, nixPackageName,
-      nixVersion, "nix", plan.lockIdentity,
-      plan.declaredExecutablePath, "nix://" & plan.nixSelector,
-      selectedStorePath, "nix-store-pointer", realized,
-      unified.absolutePath, [plan.declaredExecutablePath],
-      writerMode = writerMode)
-    # Update the path-only profile to advertise the unified store
-    # path alongside the /nix/store realization so callers can record
-    # both for downstream tooling.
-    result.realizedStorePaths.add(unified.absolutePath)
+          let exe = getAppFilename()
+          if exe.len > 0: exe.parentDir.parentDir else: ""
+      let rootTool =
+        if sourceRoot.len > 0:
+          sourceRoot / "tools" / "reprobuild-nix-daemon" /
+            "reprobuild-nix-daemon"
+        else: ""
+      let rootBuild =
+        if sourceRoot.len > 0:
+          sourceRoot / "build" / "reprobuild-nix-daemon"
+        else: ""
+      proc executableFile(path: string): bool =
+        if path.len == 0 or not fileExists(path):
+          return false
+        when defined(posix):
+          let perms = getFilePermissions(path)
+          result = fpUserExec in perms or fpGroupExec in perms or
+            fpOthersExec in perms
+        else:
+          result = true
+      proc requireExecutableCandidate(path, label: string): bool =
+        if path.len == 0 or not fileExists(path):
+          return false
+        if not executableFile(path):
+          raise newException(OSError,
+            label & " exists but is not executable: " & path)
+        true
+      let daemonExe = if envBin.len > 0:
+                        if not requireExecutableCandidate(envBin,
+                            "REPROBUILD_NIX_DAEMON_BIN"):
+                          raise newException(OSError,
+                            "REPROBUILD_NIX_DAEMON_BIN does not exist: " &
+                            envBin)
+                        envBin
+                      elif requireExecutableCandidate(localBin,
+                          "local reprobuild-nix-daemon"):
+                        localBin
+                      elif requireExecutableCandidate(localTool,
+                          "local tools reprobuild-nix-daemon"):
+                        localTool
+                      elif requireExecutableCandidate(localBin2,
+                          "sibling reprobuild-nix-daemon"):
+                        localBin2
+                      elif requireExecutableCandidate(rootTool,
+                          "source-root tools reprobuild-nix-daemon"):
+                        rootTool
+                      elif requireExecutableCandidate(rootBuild,
+                          "source-root build reprobuild-nix-daemon"):
+                        rootBuild
+                      else:
+                        "reprobuild-nix-daemon"
+      discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"], options = {})
+      for i in 0 .. 40:
+        sleep(50)
+        try:
+          sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
+          sock.connectUnix(socketPath)
+          connected = true
+          break
+        except CatchableError:
+          discard
 
-  result.profileFingerprint = profileFingerprintFor(result)
-  writeCachedNixMaterialization(storeRoot, useDef, plan, result)
+    if not connected:
+      raise newException(OSError, "Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
+
+    let req = %*{
+      "action": "resolve",
+      "selector": selector,
+      "expressionFile": plan.nixExpressionFile,
+      "workspaceRoot": getCurrentDir(),
+      "evaluateOnly": true
+    }
+    sock.send($req & "\n")
+    var respLine = ""
+    sock.readLine(respLine)
+    sock.close()
+
+    if respLine.len == 0:
+      raise newException(OSError, "Received empty response from reprobuild-nix-daemon during tool resolution")
+
+    let resp = parseJson(respLine)
+    if resp.getOrDefault("status").getStr() != "success":
+      raise newException(OSError, "Daemon resolution error: " & resp.getOrDefault("error").getStr())
+
+    let paths = resp.getOrDefault("paths")
+    if paths.len == 0:
+      raise newException(OSError, "Daemon returned no materialized paths for selector: " & selector)
+
+    var realized: seq[string] = @[]
+    for path in paths:
+      let realizedPath = path.getStr()
+      if realizedPath.len > 0:
+        realized.add(realizedPath)
+    if realized.len == 0:
+      raise newException(OSError,
+        "Daemon returned no materialized paths for selector: " & selector)
+
+    var selectedStorePath = ""
+    var resolved = ""
+    for storePath in realized:
+      if dirExists(extendedPath(storePath)):
+        let candidate = executableInStorePath(storePath,
+          plan.declaredExecutablePath)
+        if candidate.len > 0:
+          selectedStorePath = storePath
+          resolved = candidate
+          break
+      elif selectedStorePath.len == 0:
+        selectedStorePath = storePath
+        resolved = storePath / plan.declaredExecutablePath
+    if resolved.len == 0:
+      var nixArgs = @["nix", "build", "--no-link", "--print-out-paths"]
+      if plan.nixExpressionFile.len > 0:
+        nixArgs.add("--file")
+        nixArgs.add(plan.nixExpressionFile)
+      else:
+        let selector =
+          if '^' in plan.nixSelector: plan.nixSelector
+          else: plan.nixSelector & "^*"
+        nixArgs.add(selector)
+      let direct = execCmdEx(shellCommand(nixArgs))
+      if direct.exitCode != 0:
+        raise newException(OSError,
+          "tool-resolution failed: nix package realized outputs without " &
+          plan.declaredExecutablePath & "; direct nix build exited " &
+          $direct.exitCode & "\n" & direct.output)
+
+      realized.setLen(0)
+      for line in direct.output.splitLines:
+        let realizedPath = line.strip()
+        if realizedPath.startsWith("/nix/store/"):
+          realized.add(realizedPath)
+      selectedStorePath = ""
+      resolved = ""
+      for storePath in realized:
+        if dirExists(extendedPath(storePath)):
+          let candidate = executableInStorePath(storePath,
+            plan.declaredExecutablePath)
+          if candidate.len > 0:
+            selectedStorePath = storePath
+            resolved = candidate
+            break
+      if resolved.len == 0:
+        raise newException(OSError,
+          "tool-resolution failed: nix package realized outputs without " &
+          plan.declaredExecutablePath & ": " & realized.join(", "))
+
+    expandNixPropagatedStorePaths(realized)
+
+    result = PathOnlyToolProfile(
+      installMethod: "nix",
+      packageSelector: useDef.packageSelector,
+      packageId: plan.packageId,
+      nixSelector: selector,
+      declaredExecutablePath: plan.declaredExecutablePath,
+      nixExpressionFile: plan.nixExpressionFile,
+      realizedStorePaths: realized,
+      selectedStorePath: selectedStorePath,
+      lockIdentity: plan.lockIdentity,
+      realizationBoundary: selectedStorePath,
+      executableName: useDef.executableName,
+      pathSearchList: @[selectedStorePath / "bin"],
+      resolvedExecutablePath: resolved,
+      adapterStrength: asStrong,
+      cachePortability: cpPortable)
+
+    for storePath in realized:
+      addUniquePath(result.cmakePrefixList, storePath)
+      addUniquePath(result.pkgConfigSearchList,
+        storePath / "lib" / "pkgconfig")
+      addUniquePath(result.pkgConfigSearchList,
+        storePath / "lib64" / "pkgconfig")
+      addUniquePath(result.pkgConfigSearchList,
+        storePath / "share" / "pkgconfig")
+      addUniquePath(result.cpathList, storePath / "include")
+      addUniquePath(result.libraryPathList, storePath / "lib")
+      addUniquePath(result.libraryPathList, storePath / "lib64")
+
+    # Only collect probes if the output directory exists
+    if dirExists(extendedPath(selectedStorePath)):
+      result.probes = collectConfiguredProbes(resolved,
+        useDef.packageSelector, useDef.executableName)
+
+    if storeRoot.len > 0 and dirExists(extendedPath(selectedStorePath)):
+      let nixPackageName = safeStoreSegment("nix." & plan.packageId,
+        "nix-package")
+      let nixVersion =
+        if versionFromPackageSelector(plan.packageSelector).len > 0:
+          versionFromPackageSelector(plan.packageSelector)
+        else:
+          let segment = selectedStorePath.extractFilename
+          let dash = segment.find('-')
+          if dash >= 0 and dash + 1 < segment.len:
+            segment[dash + 1 .. ^1]
+          else:
+            segment
+      let unified = unifiedPrefixPath(storeRoot, nixPackageName,
+        nixVersion, "nix", plan.lockIdentity,
+        plan.declaredExecutablePath, "nix://" & plan.nixSelector,
+        selectedStorePath, realized)
+      createDir(extendedPath(unified.absolutePath))
+      writeFile(extendedPath(unified.absolutePath / "nix-store-path.txt"),
+        selectedStorePath & "\n")
+      discard registerInUnifiedStore(storeRoot, nixPackageName,
+        nixVersion, "nix", plan.lockIdentity,
+        plan.declaredExecutablePath, "nix://" & plan.nixSelector,
+        selectedStorePath, "nix-store-pointer", realized,
+        unified.absolutePath, [plan.declaredExecutablePath],
+        writerMode = writerMode)
+      result.realizedStorePaths.add(unified.absolutePath)
+      writeCachedNixMaterialization(storeRoot, useDef, plan, result)
+
+    result.profileFingerprint = profileFingerprintFor(result)
 
 proc normalizedSha256(value: string): string =
   result = value.strip().toLowerAscii()
@@ -1799,14 +1948,14 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     let command =
       case extractor.kind
       of "powershell":
-        # `Expand-Archive` over PowerShell handles both `\\` and `/`
-        # separator archives correctly. We pipe via -Command + -File
-        # would require an on-disk script; -Command + a one-line
-        # expression keeps the call self-contained.
+        let tempZip = getTempDir() / ($getCurrentProcessId() & "-" & $getTime().toUnix & ".zip")
         quoteShell(extractor.exe) &
           " -NoProfile -ExecutionPolicy Bypass -Command " &
-          quoteShell("Expand-Archive -Path " & quoteShell(archivePath) &
-            " -DestinationPath " & quoteShell(destination) & " -Force")
+          quoteShell(
+            "Copy-Item -LiteralPath " & quoteShell(archivePath) & " -Destination " & quoteShell(tempZip) & "; " &
+            "Expand-Archive -LiteralPath " & quoteShell(tempZip) & " -DestinationPath " & quoteShell(destination) & " -Force; " &
+            "Remove-Item -LiteralPath " & quoteShell(tempZip)
+          )
       of "unzip":
         quoteShell(extractor.exe) & " -q -o " & quoteShell(archivePath) &
           " -d " & quoteShell(destination)
@@ -2203,7 +2352,7 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
   ## nim falls back to the PATH lookup that picks up FPC's 1999-era
   ## i386-target gcc 2.95 — failing the C compile of e.g. `blake3/capi.c`
   ## with `stddef.h: Invalid argument`.
-  if mode != tpmTarball:
+  if mode != tpmTarball and mode != tpmFromSource:
     return
   let effectiveStoreRoot =
     if storeRoot.len > 0: storeRoot
@@ -3419,6 +3568,17 @@ var fromSourceCycleBrokenTools*: HashSet[string] = initHashSet[string]()
   ## Windows, tarball anywhere); the rest of the chain still builds from
   ## source. Exported for test introspection.
 
+var fromSourceDryRunPlannedRecipes*: HashSet[string] = initHashSet[string]()
+  ## DSL-port M9.R.9 dry-run bridge. During a top-level
+  ## ``--tool-provisioning=from-source --dry-run`` build, the auto-recurse
+  ## dispatcher dry-runs sibling recipes instead of materializing their
+  ## install trees. The resolver still needs a profile so the parent can
+  ## finish graph planning, so successfully dry-run-recursed recipe dirs are
+  ## recorded here and ``toolProfileFor(tpmFromSource, ...)`` synthesizes a
+  ## local-only profile for their expected artifact path. ``repro_cli_support``
+  ## clears this set at top-level dry-run entry/exit so a later real build
+  ## never treats a missing artifact as resolved.
+
 const BootstrapCycleBreakTools* = @[
   ## M9.R.14c.2 / .8 — pre-seeded cycle-break taxonomy for the
   ## bootstrap tool chain. The dispatcher's reactive cycle break
@@ -3857,6 +4017,35 @@ proc m9r14hProbeInstallMirrorLibrary*(recipeDir, depName: string): string =
             return absolutePath(path)
   return ""
 
+proc m9r14hProbeInstallMirrorExecutable*(recipeDir, depName: string): string =
+  ## Check the install-mirror for a compiled executable artifact.
+  ## Probes `<recipeDir>/.repro/output/install/usr/bin/<depName>`
+  ## (or with `.exe` on Windows).
+  let binDir = recipeDir / ".repro" / "output" / "install" / "usr" / "bin"
+  if not dirExists(extendedPath(binDir)):
+    return ""
+  let bareCandidate = binDir / depName
+  if fileExists(extendedPath(bareCandidate)):
+    return absolutePath(bareCandidate)
+  let exeCandidate = bareCandidate & ".exe"
+  if fileExists(extendedPath(exeCandidate)):
+    return absolutePath(exeCandidate)
+  return ""
+
+proc m9r14hInstallMirrorHasExecutable(recipeDir: string): bool =
+  ## Package selectors do not always name a real executable. For example,
+  ## the ``binutils`` package exposes ``ld``, ``as``, and related tools.
+  ## A populated final install-mirror bin directory is sufficient evidence
+  ## that such a bootstrap package completed.
+  let binDir = recipeDir / ".repro" / "output" / "install" / "usr" / "bin"
+  if not dirExists(extendedPath(binDir)):
+    return false
+  for kind, unusedPath in walkDir(extendedPath(binDir)):
+    discard unusedPath
+    if kind in {pcFile, pcLinkToFile}:
+      return true
+  false
+
 type
   FromSourceResolveKind* = enum
     ## DSL-port M9.R.9 — discriminated outcome for from-source
@@ -3966,7 +4155,7 @@ proc populateFromSourceSearchPathsLocal(profile: var PathOnlyToolProfile;
           case child.toLowerAscii()
           of "stdbool.h", "stdio.h", "stddef.h", "stdlib.h",
              "stdint.h", "string.h", "stdarg.h", "assert.h",
-             "errno.h", "ctype.h", "math.h", "time.h", "limits.h",
+             "errno.h", "err.h", "ctype.h", "math.h", "time.h", "limits.h",
              "float.h", "locale.h", "setjmp.h", "signal.h",
              "wchar.h", "wctype.h", "iso646.h", "stdalign.h",
              "stdnoreturn.h", "stdatomic.h", "uchar.h",
@@ -4026,6 +4215,70 @@ proc m9r14fDepRecipeName(useDef: InterfaceToolUse): string =
     return m9r14fStripConstraint(useDef.rawConstraint)
   ""
 
+const FromSourceRecipeAliases* = [
+  (dependency: "libltdl", recipe: "libtool"),
+  (dependency: "pkg-config", recipe: "pkgconf"),
+  (dependency: "libudev", recipe: "systemd"),
+  (dependency: "libsystemd", recipe: "systemd"),
+  (dependency: "libcrypt", recipe: "libxcrypt"),
+]
+  ## Source packages can publish independently consumed libraries whose
+  ## ABI name differs from the upstream source-package name. Keep these
+  ## aliases explicit so a dependency still names the interface it consumes
+  ## while the resolver builds the source package that actually provides it.
+
+proc m9r14fDepRecipeNames(useDef: InterfaceToolUse): seq[string] =
+  ## Return every plausible sibling-recipe name for a dependency.
+  ## Library packages commonly provision a concrete artifact name
+  ## (for example ``libblkid.so``) while their source recipe is named
+  ## after the package selector (``util-linux``). Bundled-library aliases
+  ## append the owning source package after the direct candidates.
+  for candidate in [
+      m9r14fDepRecipeName(useDef),
+      m9r14fStripConstraint(useDef.packageSelector),
+      m9r14fStripConstraint(useDef.rawConstraint)]:
+    if candidate.len == 0 or candidate in result:
+      continue
+    result.add(candidate)
+  let directCandidates = result
+  for candidate in directCandidates:
+    for alias in FromSourceRecipeAliases:
+      if candidate.cmpIgnoreCase(alias.dependency) == 0 and
+          alias.recipe notin result:
+        result.add(alias.recipe)
+
+proc m9r14fResolveRecipeDir(useDef: InterfaceToolUse;
+                            recipeRoot: string): string =
+  ## Resolve a dependency to its source recipe. Corpus recipes remain the
+  ## primary convention. When the conventional root is the repository's
+  ## ``recipes/packages/source`` tree, also admit a same-named in-tree
+  ## application recipe under ``apps/``. This lets system images depend on
+  ## applications through the regular from-source auto-recurse path without
+  ## duplicating application recipes in the package corpus.
+  let candidates = m9r14fDepRecipeNames(useDef)
+  for candidate in candidates:
+    let recipeDir = recipeRoot / candidate
+    if fileExists(extendedPath(recipeDir / "repro.nim")):
+      return recipeDir
+
+  let sourceRoot = absolutePath(recipeRoot)
+  let packagesRoot = parentDir(sourceRoot)
+  let recipesRoot = parentDir(packagesRoot)
+  if lastPathPart(sourceRoot).cmpIgnoreCase("source") == 0 and
+      lastPathPart(packagesRoot).cmpIgnoreCase("packages") == 0 and
+      lastPathPart(recipesRoot).cmpIgnoreCase("recipes") == 0:
+    let appsRoot = parentDir(recipesRoot) / "apps"
+    for candidate in candidates:
+      let recipeDir = appsRoot / candidate
+      if fileExists(extendedPath(recipeDir / "repro.nim")):
+        return recipeDir
+
+  let fallbackName =
+    if useDef.executableName.len > 0: useDef.executableName
+    elif candidates.len > 0: candidates[0]
+    else: m9r14fDepRecipeName(useDef)
+  recipeRoot / fallbackName
+
 proc m9r14fLoadInterfaceToolUses*(recipeDir: string): seq[InterfaceToolUse] =
   ## DSL-port M9.R.14f.1 — read the sibling recipe's
   ## ``project-interface.rbsz`` and return its ``toolUses`` (which carry
@@ -4060,18 +4313,21 @@ proc populateFromSourceSearchPathsImpl(profile: var PathOnlyToolProfile;
   visited.incl(key)
   populateFromSourceSearchPathsLocal(profile, recipeDir)
   # Walk the recipe's declared deps and recurse for each from-source
-  # sibling. Tools without a sibling recipe (gcc / meson / ninja / ...)
-  # are silently skipped — they don't contribute install-tree search
-  # paths anyway.
+  # sibling. An unresolved cycle-break tool is skipped, while a completed
+  # source mirror remains part of the search-path closure.
   for useDef in m9r14fLoadInterfaceToolUses(recipeDir):
-    let depName = m9r14fDepRecipeName(useDef)
-    if depName.len == 0: continue
-    if depName in fromSourceCycleBrokenTools: continue
-    let depDir = recipeRoot / depName
-    if not fileExists(extendedPath(depDir / "repro.nim")):
-      continue
-    populateFromSourceSearchPathsImpl(profile, depDir, recipeRoot,
-      visited, depth + 1)
+    for depName in m9r14fDepRecipeNames(useDef):
+      let depDir = recipeRoot / depName
+      if not fileExists(extendedPath(depDir / "repro.nim")):
+        continue
+      if depName in fromSourceCycleBrokenTools and
+          m9r14hProbeInstallMirrorExecutable(
+            depDir, useDef.executableName).len == 0 and
+          not m9r14hInstallMirrorHasExecutable(depDir):
+        continue
+      populateFromSourceSearchPathsImpl(profile, depDir, recipeRoot,
+        visited, depth + 1)
+      break
 
 proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
                                     recipeDir: string;
@@ -4090,9 +4346,9 @@ proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
   ## discover the dep's own deps and recurses into each from-source
   ## sibling. The visited-set prevents infinite recursion on accidental
   ## cycles; depth is capped at ``M9R14fMaxTransitiveDepth`` as a
-  ## sanity bound. Tools in ``fromSourceCycleBrokenTools`` (gcc, meson,
-  ## ninja, ...) are skipped — they're stdlib-provisioned and don't
-  ## contribute install-tree search paths.
+  ## sanity bound. Unresolved tools in ``fromSourceCycleBrokenTools`` are
+  ## skipped because they are stdlib-provisioned. Completed source mirrors
+  ## still contribute their install-tree search paths.
   ##
   ## The autotools_package / meson_package constructors stage the
   ## upstream's ``make install DESTDIR=<recipe>/build/out`` (or
@@ -4109,6 +4365,58 @@ proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
   var visited: HashSet[string] = initHashSet[string]()
   populateFromSourceSearchPathsImpl(profile, recipeDir, effectiveRoot,
     visited, 0)
+
+proc fromSourceSearchPathsCurrent*(profile: PathOnlyToolProfile): bool =
+  ## Return whether a cached from-source profile still describes the
+  ## auxiliary paths currently exposed by its recipe closure. Source
+  ## packages can be rebuilt into a different FHS layout (most commonly
+  ## ``lib`` changing to ``lib64``) without changing the consumer's project
+  ## interface. Reusing the old identity in that case leaves pkg-config and
+  ## the linker pointed at directories that no longer contain the dependency.
+  if profile.installMethod != "from-source":
+    return true
+  if profile.selectedStorePath.len == 0 or
+      profile.resolvedExecutablePath.len == 0:
+    return false
+
+  var current = PathOnlyToolProfile(
+    pathSearchList: @[parentDir(profile.resolvedExecutablePath)])
+  populateFromSourceSearchPaths(current, profile.selectedStorePath)
+  current.pathSearchList == profile.pathSearchList and
+    current.pkgConfigSearchList == profile.pkgConfigSearchList and
+    current.cmakePrefixList == profile.cmakePrefixList and
+    current.cpathList == profile.cpathList and
+    current.libraryPathList == profile.libraryPathList
+
+proc dryRunPlannedFromSourceProfile(useDef: InterfaceToolUse;
+                                    recipeDir, expectedArtifact: string):
+    PathOnlyToolProfile =
+  let name = useDef.executableName
+  let absolute =
+    when defined(windows):
+      addFileExt(expectedArtifact, ExeExt)
+    else:
+      expectedArtifact
+  let absoluteArtifact = absolutePath(absolute)
+  result = PathOnlyToolProfile(
+    installMethod: "from-source",
+    packageSelector: useDef.packageSelector,
+    packageId:
+      if useDef.packageSelector.len > 0: useDef.packageSelector
+      else: name & "@from-source",
+    declaredExecutablePath: name,
+    executableName: name,
+    pathSearchList: @[parentDir(absoluteArtifact)],
+    resolvedExecutablePath: absoluteArtifact,
+    realizedStorePaths: @[absolutePath(recipeDir)],
+    selectedStorePath: absolutePath(recipeDir),
+    realizationBoundary: absolutePath(recipeDir),
+    lockIdentity: "from-source:" & name & ":recipe:" &
+      absolutePath(recipeDir) & ":dry-run",
+    adapterStrength: asStrong,
+    cachePortability: cpLocalOnly,
+    practicalHardening: phNone)
+  result.profileFingerprint = profileFingerprintFor(result)
 
 proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
                                recipeRoot = ""): FromSourceResolveResult =
@@ -4140,8 +4448,15 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
       "tool-resolution failed: from-source mode requires a non-empty " &
       "executableName on the tool use (package \"" &
       useDef.packageSelector & "\")")
-  let recipeDir = root / name
+  let recipeDir = m9r14fResolveRecipeDir(useDef, root)
   let recipeManifest = recipeDir / "repro.nim"
+  try:
+    let msg = "[RESOLVER] tryResolveFromSourceTool: name=" & name & " root=" & root & " manifest=" & recipeManifest & " exists=" & $fileExists(extendedPath(recipeManifest)) & "\n"
+    let f = open("/tmp/resolver-debug.txt", fmAppend)
+    f.write(msg)
+    f.close()
+  except:
+    discard
   if not fileExists(extendedPath(recipeManifest)):
     return FromSourceResolveResult(kind: rrSiblingMissing,
       attemptedRecipeManifest: recipeManifest,
@@ -4157,10 +4472,17 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
   # candidates can be enumerated (the recipe's `.repro/output/` tree
   # is empty / missing) so existing tests + the executable-style probe
   # for tools like ``meson`` keep working unchanged.
-  let baseCandidate = fromSourceArtifactCandidate(root, name, name)
+  let baseCandidate = recipeDir / ".repro" / "output" / name / name
   var candidates = m9r14dEnumerateArtifacts(recipeDir)
   var resolved = ""
-  if candidates.len > 0:
+  # Prefer the complete install mirror for executable tools. Its ELF RPATH
+  # normalization has already run and its sibling data/library tree is intact.
+  # The per-artifact copy can retain a build-only RPATH, which makes otherwise
+  # valid source tools such as xz fail before the action receives aux paths.
+  let mirrorExecutable = m9r14hProbeInstallMirrorExecutable(recipeDir, name)
+  if mirrorExecutable.len > 0:
+    resolved = mirrorExecutable
+  elif candidates.len > 0:
     let pickIdx = m9r14dPickBestMatch(candidates, name)
     if pickIdx >= 0 and candidates[pickIdx].resolvedPath.len > 0:
       resolved = candidates[pickIdx].resolvedPath
@@ -4198,6 +4520,10 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     let mirrorHit = m9r14hProbeInstallMirrorLibrary(recipeDir, name)
     if mirrorHit.len > 0:
       resolved = mirrorHit
+    else:
+      let mirrorExeHit = m9r14hProbeInstallMirrorExecutable(recipeDir, name)
+      if mirrorExeHit.len > 0:
+        resolved = mirrorExeHit
   if resolved.len == 0:
     # DSL-port M9.R.15h.14 — share-only-package fast-path.
     #
@@ -4289,6 +4615,70 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
             if entry.endsWith(".pc"):
               resolved = absolutePath(entry)
               break pcWalk
+  if resolved.len == 0:
+    # Data-only packages such as IANA tzdata intentionally publish no
+    # executable, library, pkg-config file, or CMake config. A regular
+    # file in the realized share tree is sufficient build evidence.
+    block sharedDataWalk:
+      for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+        let shareRoot = recipeDir / prefixSubdir / "share"
+        if not dirExists(extendedPath(shareRoot)):
+          continue
+        for entry in walkDirRec(extendedPath(shareRoot)):
+          if fileExists(extendedPath(entry)):
+            resolved = absolutePath(entry)
+            break sharedDataWalk
+  if resolved.len == 0:
+    # Configuration-only packages can publish exclusively below etc/.
+    # ca-certificates is the canonical case: its completed artifact is
+    # etc/ssl/certs/ca-certificates.crt rather than an executable or
+    # library. Treat a regular staged configuration file as build evidence.
+    block configurationDataWalk:
+      for etcSubdir in [".repro/output/install/etc", "build/out/etc"]:
+        let etcRoot = recipeDir / etcSubdir
+        if not dirExists(extendedPath(etcRoot)):
+          continue
+        for entry in walkDirRec(extendedPath(etcRoot)):
+          if fileExists(extendedPath(entry)):
+            resolved = absolutePath(entry)
+            break configurationDataWalk
+  if resolved.len == 0:
+    # Some non-executable system payloads live under a package-specific
+    # lib directory instead of share/. The Linux kernel, for example,
+    # publishes vmlinuz, System.map, and its module tree below
+    # usr/lib/reproos-kernel. Restrict this fallback to directories whose
+    # basename matches the dependency at a hyphen boundary so an unrelated
+    # library file cannot satisfy a missing package.
+    let depName = name.toLowerAscii
+    block packageLibDataWalk:
+      for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+        let prefixRoot = recipeDir / prefixSubdir
+        for libSubdir in ["lib", "lib64"]:
+          let libRoot = prefixRoot / libSubdir
+          if not dirExists(extendedPath(libRoot)):
+            continue
+          for kindPc, walked in walkDir(extendedPath(libRoot)):
+            if kindPc != pcDir and kindPc != pcLinkToDir:
+              continue
+            let dirName = lastPathPart(walked).toLowerAscii
+            if dirName != depName and
+                not dirName.startsWith(depName & "-") and
+                not dirName.endsWith("-" & depName):
+              continue
+            for entry in walkDirRec(extendedPath(walked)):
+              if fileExists(extendedPath(entry)):
+                resolved = absolutePath(entry)
+                break packageLibDataWalk
+  if resolved.len == 0:
+    # Aggregate packages do not necessarily ship an artifact named after the
+    # package selector. shadow-utils, for example, installs useradd, login,
+    # passwd, and libsubid, but no "shadow-utils" binary or library. The
+    # install-mirror stamp is written only after the complete prefix has been
+    # staged, so it is the package-level completion evidence for this shape.
+    let mirrorStamp = recipeDir / ".repro" / "output" / "install" /
+      ".m9r14e_2_install_mirror.stamp"
+    if fileExists(extendedPath(mirrorStamp)):
+      resolved = absolutePath(mirrorStamp)
   if resolved.len == 0:
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,
@@ -4513,15 +4903,17 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     # in the normal path (and surface a clean OSError if we do, with
     # the M9.Q operator hint preserved).
     #
-    # DSL-port M9.R.10a — cycle-break override. The auto-recurse
-    # dispatcher (``executeBuildTarget``) marks the closing-edge tool of
-    # a recursion cycle in ``fromSourceCycleBrokenTools`` and falls
-    # through to the stdlib provisioning channels HERE instead of
-    # raising a cycle diagnostic. Bootstrap tools (gcc, binutils, make,
-    # autoconf, automake, libtool, pkg-config) thereby come from stdlib
-    # provisioning at cycle-break time; everything else still builds
-    # from source. When the stdlib has NO provisioning the cycle is
+    # DSL-port M9.R.10a — cycle-break override. Completed source mirrors
+    # take precedence, including for bootstrap tools. If no completed
+    # mirror exists, the auto-recurse dispatcher marks the closing-edge
+    # tool of a recursion cycle in ``fromSourceCycleBrokenTools`` and
+    # falls through to stdlib provisioning HERE instead of raising a
+    # cycle diagnostic. When the stdlib has NO provisioning the cycle is
     # genuinely unrecoverable and we surface the original diagnostic.
+    let outcome = tryResolveFromSourceTool(useDef)
+    if outcome.kind == rrResolved:
+      result = outcome.profile
+      return
     if useDef.executableName.len > 0 and
         useDef.executableName in fromSourceCycleBrokenTools:
       var fallProfile: PathOnlyToolProfile
@@ -4537,11 +4929,14 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
         "provisioning block in the stdlib package definition for \"" &
         useDef.executableName & "\" OR break the cycle by editing one " &
         "of the recipes' nativeBuildDeps lists.")
-    let outcome = tryResolveFromSourceTool(useDef)
     case outcome.kind
     of rrResolved:
       result = outcome.profile
     of rrNeedsBuild:
+      if absolutePath(outcome.recipeDir) in fromSourceDryRunPlannedRecipes:
+        result = dryRunPlannedFromSourceProfile(useDef, outcome.recipeDir,
+          outcome.expectedArtifact)
+        return
       raise newException(OSError,
         "tool-resolution failed: --tool-provisioning=from-source requested " &
         "for \"" & outcome.toolName & "\" but its sibling recipe at " &

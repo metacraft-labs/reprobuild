@@ -115,6 +115,7 @@ type
     ckVcs = "vcs"
     ckStore = "store"
     ckRegistry = "registry"
+    ckForeign = "foreign"
 
   Coordinates* = object
     ## What you hand the source to OBTAIN a dependency — a sum over source
@@ -131,6 +132,10 @@ type
     of ckRegistry:
       registryName*: string
       registryVersion*: string
+    of ckForeign:
+      provisioner*: string          ## The name of the foreign provisioner, e.g. "nix", "scoop"
+      foreignCoordinates*: string   ## The foreign coordinate identifier string
+
 
   LockedDep* = object
     ## One pinned dependency in the unified model. Workspace repos and solved
@@ -571,6 +576,7 @@ proc coordKindString(k: CoordKind): string =
   of ckVcs: "vcs"
   of ckStore: "store"
   of ckRegistry: "registry"
+  of ckForeign: "foreign"
 
 proc serializeDepInline(d: LockedDep): string =
   ## One ``{ ... }`` inline table for a ``LockedDep``. Key order is FIXED so
@@ -589,6 +595,9 @@ proc serializeDepInline(d: LockedDep): string =
     result.add(", reg_name = \"" & tomlEscape(d.coordinates.registryName) & "\"")
     result.add(", reg_version = \"" &
       tomlEscape(d.coordinates.registryVersion) & "\"")
+  of ckForeign:
+    result.add(", provisioner = \"" & tomlEscape(d.coordinates.provisioner) & "\"")
+    result.add(", foreign_coords = \"" & tomlEscape(d.coordinates.foreignCoordinates) & "\"")
   result.add(", integrity = \"" & tomlEscape(d.integrity) & "\"")
   result.add(", version = \"" & tomlEscape(d.version) & "\"")
   result.add(", visibility = \"" & tomlEscape(d.visibility) & "\"")
@@ -663,6 +672,10 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
         coords = Coordinates(kind: ckRegistry,
           registryName: f.getOrDefault("reg_name", ""),
           registryVersion: f.getOrDefault("reg_version", ""))
+      of "foreign":
+        coords = Coordinates(kind: ckForeign,
+          provisioner: f.getOrDefault("provisioner", ""),
+          foreignCoordinates: f.getOrDefault("foreign_coords", ""))
       else:
         coords = Coordinates(kind: ckVcs,
           url: f.getOrDefault("url", ""),

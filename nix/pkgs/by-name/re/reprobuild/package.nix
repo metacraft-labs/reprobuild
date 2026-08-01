@@ -44,6 +44,14 @@ let
     hash = "sha256-Z6oaGzRiai/hLdudDb/VP6euoiEKG6T4sivucfmdFyM=";
   };
 
+  bearsslSrc = fetchFromGitHub {
+    owner = "status-im";
+    repo = "nim-bearssl";
+    rev = "9a4eed052abbded2d94feaf3f5bbd95a30ec4671";
+    hash = "sha256-igLvQSJWDL6Gq+pXGrNMDhEl+srXfW0vyLFVh8r9GuY=";
+    fetchSubmodules = true;
+  };
+
   runquotaSrc = fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
@@ -97,6 +105,7 @@ stdenv.mkDerivation (finalAttrs: {
   # lookups regardless of which entry point the consumer used.
   env = {
     BLAKE3_PREFIX = "${blake3Prefix}";
+    BEARSSL_SRC = "${bearsslSrc}";
     NIMCRYPTO_SRC = "${nimcryptoSrc}";
     REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
     RUNQUOTA_SRC = "${runquotaSrc}";

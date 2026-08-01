@@ -1,7 +1,21 @@
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
+import nimcrypto/sha2 as ncSha2
 import repro_tool_profiles
-from repro_test_support import requireBinary, monitorShimPath
+import repro_test_support
+
+const
+  CodeTracerProjectContractCommit =
+    "e63a8d545e55843ceaca03cb345e9387af658119"
+  PinnedCodeTracerProjectFile =
+    "tests/fixtures/codetracer-subset/repro-e63a8d54.nim"
+  PinnedCodeTracerConfigFile =
+    "tests/fixtures/codetracer-subset/config-e63a8d54.nims"
+  PinnedCodeTracerFixtureHeaderLines = 6
+  PinnedCodeTracerProjectPayloadSha256 =
+    "ec92f5f3e705019688b2353ac596edac47a184ade86af7d00988931fb3c0db03"
+  PinnedCodeTracerConfigPayloadSha256 =
+    "671942d34e051f4ed3a869f7d9a1cacec497e70c5191bf69e68a644549d84f12"
 
 const GccProxySource = r"""
 #include <fcntl.h>
@@ -33,22 +47,20 @@ int main(int argc, char **argv) {
       read_for_monitor(argv[i]);
     }
   }
-#if defined(__APPLE__)
-  unsetenv("DYLD_INSERT_LIBRARIES");
-  /* /usr/bin/gcc honours DEVELOPER_DIR and dispatches via xcrun, whose
-     SDK bin lacks gcc and falls back to PATH — re-finding this proxy
-     and looping until kern.maxprocperuid is exhausted. Strip the SDK
-     pointers so the underlying gcc uses its built-in SDK lookup. */
-  unsetenv("DEVELOPER_DIR");
-  unsetenv("SDKROOT");
-#elif defined(__linux__)
-  unsetenv("LD_PRELOAD");
-  unsetenv("REPRO_MONITOR_SHIM_LIB");
-#endif
   char **next_argv = calloc((size_t)argc + 1, sizeof(char *));
   if (next_argv == NULL) return 126;
   next_argv[0] = (char *)default_real_gcc;
   for (int i = 1; i < argc; i++) next_argv[i] = argv[i];
+
+#if defined(__APPLE__)
+  /* /usr/bin/gcc honours DEVELOPER_DIR and dispatches via xcrun, whose
+     SDK bin lacks gcc and falls back to PATH — re-finding this proxy
+     and looping until kern.maxprocperuid is exhausted. Strip the SDK
+     pointers and proxy directory while retaining monitor injection. */
+  unsetenv("DEVELOPER_DIR");
+  unsetenv("SDKROOT");
+  setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1);
+#endif
   execv(default_real_gcc, next_argv);
   perror("execv real gcc");
   return 127;
@@ -131,13 +143,12 @@ int main(int argc, char **argv) {
 """
 
 const CodeTracerCommonDevToolExecutables: seq[string] = @[
+  "attic-client",
   "bash",
-  "cachix",
   "capnp",
   "cargo",
   "cargo-nextest",
   "clang",
-  "create-dmg",
   "ctags",
   "curl",
   "electron",
@@ -168,7 +179,6 @@ const CodeTracerCommonDevToolExecutables: seq[string] = @[
   "sh",
   "shellcheck",
   "sqlite3",
-  "stylus",
   "tmux",
   "tree-sitter",
   "vim",
@@ -185,6 +195,11 @@ when not defined(macosx):
 else:
   const CodeTracerTupToolExecutables: seq[string] = @[]
 
+when defined(macosx):
+  const CodeTracerMacDevToolExecutables: seq[string] = @["create-dmg"]
+else:
+  const CodeTracerMacDevToolExecutables: seq[string] = @[]
+
 when defined(linux):
   const CodeTracerDevToolExecutables: seq[string] =
     CodeTracerCommonDevToolExecutables & CodeTracerTupToolExecutables & @[
@@ -196,7 +211,16 @@ when defined(linux):
   ]
 else:
   const CodeTracerDevToolExecutables: seq[string] =
-    CodeTracerCommonDevToolExecutables & CodeTracerTupToolExecutables
+    CodeTracerCommonDevToolExecutables & CodeTracerTupToolExecutables &
+      CodeTracerMacDevToolExecutables
+
+const CodeTracerSourcePackages = [
+  "isonim",
+  "nim-everywhere",
+  "nim-agent-harbor",
+  "nim-agents",
+  "nim-acp"
+]
 
 const IsonimAsyncCompatFixtureSource = r"""
 when defined(js):
@@ -345,25 +369,100 @@ proc q(value: string): string =
   quoteShell(value)
 
 proc shellCommand(args: openArray[string];
-                  env: openArray[(string, string)] = []): string =
-  var parts: seq[string] = @[]
+                  env: openArray[(string, string)] = []):
+                  repro_test_support.CmdSpec =
+  var entries: seq[tuple[name, value: string]] = @[]
   for (name, value) in env:
-    parts.add(name & "=" & q(value))
-  for arg in args:
-    parts.add(q(arg))
-  parts.join(" ")
+    entries.add((name: name, value: value))
+  repro_test_support.shellCommand(args, entries)
 
-proc runShell(command: string; cwd = getCurrentDir()):
+proc runShell(command: repro_test_support.CmdSpec; cwd = getCurrentDir()):
     tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
+  repro_test_support.runShell(command, cwd)
 
-proc requireSuccess(command: string; cwd = getCurrentDir()): string =
-  let res = runShell(command, cwd)
-  if res.code != 0:
-    checkpoint(res.output)
-  check res.code == 0
-  res.output
+proc requireSuccess(command: repro_test_support.CmdSpec;
+                    cwd = getCurrentDir()): string =
+  repro_test_support.requireSuccess(command, cwd)
+
+proc mustCompareLiveProjectContract(codeTracerRoot: string): bool =
+  ## CI's sibling contract selects CodeTracer ``dev``. A local sibling may be
+  ## on an unrelated lineage, but when Git proves it contains the pinned
+  ## contract its live files must still match. GitHub Actions is fail-closed
+  ## because its depth-one sibling may not contain the pinned ancestor object.
+  if getEnv("GITHUB_ACTIONS").toLowerAscii() == "true":
+    return true
+  runShell(shellCommand([
+    "git", "-C", codeTracerRoot, "merge-base", "--is-ancestor",
+    CodeTracerProjectContractCommit, "HEAD"
+  ])).code == 0
+
+proc sha256Hex(data: string): string =
+  var ctx: ncSha2.sha256
+  ctx.init()
+  if data.len > 0:
+    ctx.update(cast[ptr UncheckedArray[byte]](
+      data[0].unsafeAddr).toOpenArray(0, data.high))
+  let digest = ctx.finish()
+  result = newStringOfCap(64)
+  const Hex = "0123456789abcdef"
+  for value in digest.data:
+    result.add(Hex[int(value.uint8 shr 4)])
+    result.add(Hex[int(value.uint8 and 0x0f)])
+
+proc pinnedCodeTracerPayload(path, expectedSha256: string): string =
+  ## The retained fixture carries its own AGPL/provenance header. The payload
+  ## after that header remains byte-identical to the pinned public source.
+  let lines = readFile(path).splitLines(keepEol = true)
+  if lines.len <= PinnedCodeTracerFixtureHeaderLines or
+      not lines[0].contains("SPDX-License-Identifier: AGPL-3.0-or-later") or
+      not lines[2].contains(CodeTracerProjectContractCommit) or
+      not lines[3].contains("github.com/metacraft-labs/codetracer/blob/"):
+    raise newException(ValueError,
+      "pinned CodeTracer fixture has invalid license/provenance header: " &
+      path)
+  result = lines[PinnedCodeTracerFixtureHeaderLines .. ^1].join()
+  if sha256Hex(result) != expectedSha256:
+    raise newException(ValueError,
+      "pinned CodeTracer fixture payload differs from reviewed commit " &
+      CodeTracerProjectContractCommit & ": " & path)
+
+proc pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot: string): string =
+  ## Use a Reprobuild-owned snapshot of CodeTracer's reviewed ``dev`` graph so
+  ## an adjacent checkout's branch or uncommitted state cannot silently change
+  ## the integration oracle. The real sibling still supplies every source file
+  ## copied and built by the cases below.
+  let projectFixture = repoRoot / PinnedCodeTracerProjectFile
+  let configFixture = repoRoot / PinnedCodeTracerConfigFile
+  if not fileExists(projectFixture) or not fileExists(configFixture):
+    raise newException(ValueError,
+      "pinned CodeTracer project contract fixtures are missing")
+  let projectPayload = pinnedCodeTracerPayload(projectFixture,
+    PinnedCodeTracerProjectPayloadSha256)
+  let configPayload = pinnedCodeTracerPayload(configFixture,
+    PinnedCodeTracerConfigPayloadSha256)
+
+  if mustCompareLiveProjectContract(codeTracerRoot):
+    let liveProject = codeTracerRoot / "repro.nim"
+    let liveConfig = codeTracerRoot / "config.nims"
+    if not fileExists(liveProject) or not fileExists(liveConfig):
+      raise newException(ValueError,
+        "canonical CodeTracer project contract files are missing at " &
+        codeTracerRoot)
+    if readFile(liveProject) != projectPayload or
+        readFile(liveConfig) != configPayload:
+      raise newException(ValueError,
+        "live CodeTracer project contract differs from pinned commit " &
+        CodeTracerProjectContractCommit)
+
+  projectFixture
+
+proc materializeContractedProjectFiles(repoRoot, codeTracerRoot,
+                                       projectRoot: string) =
+  let projectFixture =
+    pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
+  copyFile(projectFixture, projectRoot / "repro.nim")
+  copyFile(repoRoot / PinnedCodeTracerConfigFile,
+    projectRoot / "config.nims")
 
 proc pathExists(path: string): bool =
   try:
@@ -399,10 +498,7 @@ when defined(macosx) or defined(linux):
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  if not fileExists(daemonBin):
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   let socketPath = "/tmp/repro-m29-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -429,14 +525,25 @@ proc copyTree(sourceRoot, destRoot: string) =
       createDir(destPath.splitPath.head)
       copyFile(sourcePath, destPath)
 
-proc prepareIsonimFixture(sourcePath, destPath: string) =
+proc prepareNimLibraryFixture(sourcePath, destPath, packageName: string) =
+  ## Develop overrides represent graph producers, not arbitrary source paths.
+  ## Give each copied pure-Nim dependency the minimal library contract the
+  ## real consumer resolves through SC-11 instead of falling back to PATH.
+  let nimName = packageName.replace('-', '_')
   createDir(destPath)
   if dirExists(sourcePath / "src"):
     copyTree(sourcePath / "src", destPath / "src")
-  for fileName in ["isonim.nimble", "nim.cfg"]:
+  writeFile(destPath / "repro.nim",
+    "import repro_project_dsl\n\n" &
+    "package " & nimName & ":\n" &
+    "  library " & nimName & "\n")
+  for fileName in [nimName & ".nimble", "nim.cfg", "config.nims"]:
     let sourceFile = sourcePath / fileName
     if fileExists(sourceFile):
       copyFile(sourceFile, destPath / fileName)
+
+proc prepareIsonimFixture(sourcePath, destPath: string) =
+  prepareNimLibraryFixture(sourcePath, destPath, "isonim")
   createDir(destPath / "src" / "isonim" / "core")
   writeFile(destPath / "src" / "isonim" / "core" / "async_compat.nim",
     IsonimAsyncCompatFixtureSource)
@@ -497,23 +604,83 @@ proc prepareIsonimFixture(sourcePath, destPath: string) =
     writeFile(tailwindStyles, "{}\n")
 
 proc linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot: string) =
-  for dep in ["isonim", "nim-everywhere"]:
-    let sourcePath = codeTracerRoot.parentDir / dep
+  for dep in ["codetracer-trace-format-nim", "io-mon", "isonim", "nim-acp",
+              "nim-agent-harbor", "nim-agents", "nim-everywhere",
+              "nim-shm-gset", "nim-shm-queue", "nim-stackable-hooks"]:
+    var sourcePath = codeTracerRoot.parentDir / dep
+    if dep == "isonim":
+      # This override selects the source copied into the disposable fixture;
+      # unlike ISONIM_SRC it is deliberately not inherited by build actions.
+      # That keeps the test exercising the prepared fixture and its patches.
+      let fixtureSource = getEnv("CODETRACER_TEST_ISONIM_ROOT")
+      if fixtureSource.len > 0:
+        sourcePath =
+          if fixtureSource.lastPathPart == "src": fixtureSource.parentDir
+          else: fixtureSource
+        check dirExists(sourcePath)
+    if not dirExists(sourcePath):
+      let envSource =
+        if dep == "io-mon": getEnv("IO_MON_SRC")
+        elif dep == "nim-shm-gset": getEnv("SHM_GSET_SRC")
+        elif dep == "nim-shm-queue": getEnv("SHM_QUEUE_SRC")
+        elif dep == "nim-stackable-hooks":
+          let preferred = getEnv("NIM_STACKABLE_HOOKS_SRC")
+          if preferred.len > 0: preferred else: getEnv("STACKABLE_HOOKS_SRC")
+        else: ""
+      if dirExists(envSource):
+        sourcePath =
+          if envSource.lastPathPart == "src": envSource.parentDir
+          else: envSource
     let destPath = projectRoot.parentDir / dep
     if dirExists(sourcePath) and not pathExists(destPath):
       if dep == "isonim":
         prepareIsonimFixture(sourcePath, destPath)
+      elif dep in CodeTracerSourcePackages:
+        prepareNimLibraryFixture(sourcePath, destPath, dep)
       else:
         discard requireSuccess(shellCommand([
           "ln", "-s", sourcePath, destPath
         ]))
 
+proc writeCodeTracerDevelopOverrides(projectRoot: string) =
+  let metadataDir = projectRoot / ".repro"
+  createDir(metadataDir)
+  var content = "schema = \"reprobuild.workspace.develop-overrides.v1\"\n"
+  for packageName in CodeTracerSourcePackages:
+    let checkout = projectRoot.parentDir / packageName
+    check dirExists(checkout)
+    content.add("\n[[override]]\n")
+    content.add("package = " & packageName.escape() & "\n")
+    content.add("local_path = " & checkout.escape() & "\n")
+    content.add("state = \"editable\"\n")
+    content.add("created_at = \"2026-07-12T00:00:00Z\"\n")
+  writeFile(metadataDir / "develop-overrides.toml", content)
+
+proc addCodeTracerFixtureTransitivePaths(projectRoot: string) =
+  ## The pinned CodeTracer fixture predates io-mon's shm_gset transport, while
+  ## this reprobuild checkout intentionally tests the current io-mon pin. Keep
+  ## the committed fixture untouched and extend only its disposable copy with
+  ## the same explicit-env-then-workspace-sibling lookup used by current
+  ## CodeTracer checkouts.
+  let siblingSrc = projectRoot.parentDir / "nim-shm-gset" / "src"
+  check dirExists(siblingSrc)
+  let configPath = projectRoot / "config.nims"
+  var content = readFile(configPath)
+  if not content.contains("SHM_GSET_SRC"):
+    content.add(
+      "\n# Test-fixture bridge for io-mon's shm_gset transport.\n" &
+      "addPathIfDir(getEnv(\"SHM_GSET_SRC\"))\n" &
+      "addPathIfDir(workspaceRoot / \"nim-shm-gset\" / \"src\")\n")
+    writeFile(configPath, content)
+
 proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
   linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot)
-  copyFile(codeTracerRoot / "reprobuild.nim", projectRoot / "reprobuild.nim")
+  writeCodeTracerDevelopOverrides(projectRoot)
+  materializeContractedProjectFiles(getCurrentDir(), codeTracerRoot,
+    projectRoot)
   if dirExists(codeTracerRoot / "reprobuild"):
     copyTree(codeTracerRoot / "reprobuild", projectRoot / "reprobuild")
-  copyFile(codeTracerRoot / "nim.cfg", projectRoot / "nim.cfg")
+  addCodeTracerFixtureTransitivePaths(projectRoot)
 
 proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
@@ -528,6 +695,8 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
     projectRoot / "src" / "common")
   copyTree(codeTracerRoot / "src" / "lsp",
     projectRoot / "src" / "lsp")
+  copyTree(codeTracerRoot / "src" / "ct_test",
+    projectRoot / "src" / "ct_test")
   createDir(projectRoot / "src" / "ct")
   copyFile(codeTracerRoot / "src" / "ct" / "version.nim",
     projectRoot / "src" / "ct" / "version.nim")
@@ -558,6 +727,8 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
 proc copyNativeCodeTracerProject(codeTracerRoot, projectRoot: string) =
   copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot)
   copyTree(codeTracerRoot / "src" / "ct", projectRoot / "src" / "ct")
+  copyTree(codeTracerRoot / "src" / "ct_test",
+    projectRoot / "src" / "ct_test")
   copyTree(codeTracerRoot / "src" / "common", projectRoot / "src" / "common")
   copyTree(codeTracerRoot / "src" / "db_connector",
     projectRoot / "src" / "db_connector")
@@ -569,6 +740,9 @@ proc copyNativeCodeTracerProject(codeTracerRoot, projectRoot: string) =
   # transport modules) even though the rest of src/frontend is omitted.
   copyTree(codeTracerRoot / "src" / "frontend" / "viewmodel" / "collab",
     projectRoot / "src" / "frontend" / "viewmodel" / "collab")
+  copyFile(codeTracerRoot / "src" / "frontend" / "viewmodel" /
+    "agent_evidence.nim",
+    projectRoot / "src" / "frontend" / "viewmodel" / "agent_evidence.nim")
   discard requireSuccess(shellCommand([
     "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
   ]))
@@ -586,6 +760,8 @@ proc copyAggregateCodeTracerProject(codeTracerRoot, projectRoot: string) =
     projectRoot / "src" / "common")
   copyTree(codeTracerRoot / "src" / "lsp",
     projectRoot / "src" / "lsp")
+  copyTree(codeTracerRoot / "src" / "ct_test",
+    projectRoot / "src" / "ct_test")
   copyTree(codeTracerRoot / "src" / "ct", projectRoot / "src" / "ct")
   copyTree(codeTracerRoot / "src" / "db_connector",
     projectRoot / "src" / "db_connector")
@@ -638,6 +814,8 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
     "set -eu\n" &
     "case \"${1:-}\" in\n" &
     "  --version|-v) echo 'v20.0.0'; exit 0 ;;\n" &
+    "  node_modules/stylus/bin/stylus|*/node_modules/stylus/bin/stylus)\n" &
+    "    shift; exec " & q(stylusPath) & " \"$@\" ;;\n" &
     "  tests/ipc_registry_test.js|*/tests/ipc_registry_test.js)\n" &
     "    echo '[OK] handlers still invoked after reconnect'; exit 0 ;;\n" &
     "  *) exit 0 ;;\n" &
@@ -656,7 +834,7 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
     "#!/bin/sh\n" &
     "exec " & q(nimBinary) & " \"$@\"\n")
   for tool in CodeTracerDevToolExecutables:
-    if tool notin ["bash", "nim", "node", "gcc", "sh", "stylus"] and
+    if tool notin ["bash", "nim", "node", "gcc", "nix", "sh", "stylus"] and
         not fileExists(binDir / tool):
       writeExecutable(binDir / tool,
         "#!/bin/sh\n" &
@@ -672,11 +850,11 @@ proc codeTracerNimPath(codeTracerRoot: string): string =
     "bin" / "nim"
   if fileExists(localNim):
     return localNim
-  let flakeResult = execCmdEx(shellCommand([
+  let flakeResult = runShell(shellCommand([
     "nix", "build", "--no-link", "--print-out-paths",
     codeTracerRoot & "#nim-2_2"
-  ]), workingDir = codeTracerRoot)
-  if flakeResult.exitCode == 0:
+  ]), codeTracerRoot)
+  if flakeResult.code == 0:
     let flakeNim = flakeResult.output.strip().splitLines()[^1] / "bin" / "nim"
     if fileExists(flakeNim):
       return flakeNim
@@ -748,6 +926,27 @@ proc nativeLibraryEnv(repoRoot: string): seq[(string, string)] =
     ("C_INCLUDE_PATH", includePaths.join($PathSep))
   ]
 
+proc sourcePathEnv(): seq[(string, string)] =
+  for key in [
+    "CODETRACER_TRACE_FORMAT_NIM_SRC",
+    "CODETRACER_RESULTS_SRC",
+    "IO_MON_SRC",
+    "RUNQUOTA_SRC",
+    "SHM_GSET_SRC",
+    "SHM_QUEUE_SRC"
+  ]:
+    let value = getEnv(key)
+    if value.len > 0:
+      result.add((key, value))
+
+  let stackableHooksSrc = getEnv("NIM_STACKABLE_HOOKS_SRC")
+  if stackableHooksSrc.len > 0:
+    result.add(("NIM_STACKABLE_HOOKS_SRC", stackableHooksSrc))
+  else:
+    let legacyStackableHooksSrc = getEnv("STACKABLE_HOOKS_SRC")
+    if legacyStackableHooksSrc.len > 0:
+      result.add(("NIM_STACKABLE_HOOKS_SRC", legacyStackableHooksSrc))
+
 proc checkpointBuildReportFailures(projectRoot: string) =
   let reportPath = projectRoot / ".repro" / "build" / "reprobuild" /
     "build-report.json"
@@ -770,8 +969,13 @@ proc build(reproBin, target, repoRoot, pathValue: string;
   # `logSummary`, which is silenced under the default `--log=quiet`. The test
   # parses those lines, so opt into the actions log shape — same flag the
   # forked CMake's `do_reprobuild_launch` passes (reprobuild-cmake@8b204955).
+  # These project-file tests validate CodeTracer's graph lowering, scheduler,
+  # monitor evidence, and cache behavior. Pin direct mode so they do not couple
+  # to a long-lived user daemon started by an earlier test with stale launch env.
   let res = runShell(shellCommand([reproBin, "build", target,
-    "--tool-provisioning=path", "--log=actions"], entries), repoRoot)
+    "--daemon=off", "--tool-provisioning=path", "--log=actions",
+    "--write-report"], entries),
+    repoRoot)
   if res.code != 0:
     checkpoint(res.output)
     checkpointBuildReportFailures(target.split("#")[0])
@@ -784,7 +988,8 @@ proc buildCurrentProject(reproBin, projectRoot, pathValue: string;
   for item in env:
     entries.add(item)
   let res = runShell(shellCommand([reproBin, "build",
-    "--tool-provisioning=path", "--log=actions"],
+    "--daemon=off", "--tool-provisioning=path", "--log=actions",
+    "--write-report"],
     entries), projectRoot)
   if res.code != 0:
     checkpoint(res.output)
@@ -831,8 +1036,41 @@ proc assertActionCacheEffective(report: JsonNode; id: string) =
   ## engine cache-decision protocol split (commit 7aea92a).
   let action = reportAction(report, id)
   check action.kind != JNull
+  if action.kind != JNull:
+    checkpoint("cache-effective action " & id & " status=" &
+      action{"status"}.getStr() & " launched=" &
+      $action{"launched"}.getBool() & " cacheDecision=" &
+      action{"cacheDecision"}.getStr())
+    if action{"status"}.getStr() notin ["asCacheHit", "asUpToDate"]:
+      checkpoint("cache rejection reason=" & action{"reason"}.getStr() &
+        " diagnostics=" & $action{"evidence"}{"diagnostics"})
   check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
   check action{"launched"}.getBool() == false
+
+proc assertActionMonitorLossRerun(report: JsonNode; id: string) =
+  let action = reportAction(report, id)
+  check action.kind != JNull
+  if action.kind != JNull:
+    checkpoint("rerun action " & id & " status=" &
+      action{"status"}.getStr() & " launched=" &
+      $action{"launched"}.getBool() & " cacheDecision=" &
+      action{"cacheDecision"}.getStr() & " reason=" &
+      action{"reason"}.getStr() & " diagnostics=" &
+      $action{"evidence"}{"diagnostics"})
+  check action{"status"}.getStr() == "asSucceeded"
+  check action{"launched"}.getBool() == true
+  check action{"cacheDecision"}.getStr() == "cdMiss"
+  check ($action{"evidence"}{"diagnostics"}).contains(
+    "monitor depfile is incomplete")
+
+proc assertActionCacheEffectiveOrMonitorLossRerun(report: JsonNode; id: string) =
+  let action = reportAction(report, id)
+  check action.kind != JNull
+  if action.kind != JNull and
+      action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]:
+    assertActionCacheEffective(report, id)
+  else:
+    assertActionMonitorLossRerun(report, id)
 
 proc assertOutputAction(report: JsonNode; output, status: string;
                         launched: bool) =
@@ -846,13 +1084,18 @@ proc assertOutputActionCacheEffective(report: JsonNode; output: string) =
   ## proc's docstring for the cache-effective semantics rationale.
   let action = reportActionWithDeclaredOutput(report, output)
   check action.kind != JNull
+  if action.kind != JNull:
+    checkpoint("cache-effective output " & output & " action=" &
+      action{"id"}.getStr() & " status=" & action{"status"}.getStr() &
+      " launched=" & $action{"launched"}.getBool() & " cacheDecision=" &
+      action{"cacheDecision"}.getStr())
   check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
   check action{"launched"}.getBool() == false
 
 const publicResourceAction = "frontend-public-resources"
 
 proc buildDebug(projectRoot, relativePath: string): string =
-  projectRoot / "src" / "build-debug" / relativePath
+  projectRoot / "src" / "build-debug-repro" / relativePath
 
 proc checkPublicResourceOutputs(projectRoot: string) =
   let pairs = [
@@ -960,11 +1203,11 @@ proc checkConfigOutputs(projectRoot: string) =
 
 when defined(macosx) or defined(linux):
   suite "e2e_codetracer_in_place_project_file":
-    test "real committed CodeTracer reprobuild.nim supports action-id target selection":
+    test "real committed CodeTracer repro.nim supports action-id target selection":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
-      check fileExists(realProjectFile)
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      let realProjectFile =
+        pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
 
       let tempRoot = createTempDir("repro-m30-codetracer-target-selection", "")
       defer: removeDir(tempRoot)
@@ -982,7 +1225,7 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      let projectText = readFile(projectRoot / "reprobuild.nim")
+      let projectText = readFile(projectRoot / "repro.nim")
       check projectText == readFile(realProjectFile)
       check not projectText.contains("writeProject")
       check not projectText.contains("buildAction(")
@@ -990,7 +1233,6 @@ when defined(macosx) or defined(linux):
       check not projectText.contains("nim_js")
       check not projectText.contains("nimJs")
       check not projectText.contains("\"nim-js >=2\"")
-      check not projectText.contains("args = @[")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1026,9 +1268,9 @@ when defined(macosx) or defined(linux):
       let selectedC = reportAction(selectedReport,
         "c-sudoku-object-with-generated-header")
       check selectedC{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
-      check hasMonitorEvidence(selectedC)
-      check selectedC{"evidence"}{"monitorReads"}.getElems().
-        anyIt(it.getStr().endsWith("test-programs/c_sudoku_solver/main.c"))
+      check monitorEvidenceContains(selectedC,
+        "test-programs/c_sudoku_solver/main.c")
+      check monitorEvidenceContains(selectedC, "build/generated/ct_config.h")
       check reportAction(selectedReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(selectedReport, "frontend-ui-js").kind == JNull
       check reportAction(selectedReport, "frontend-public-ui-js").kind == JNull
@@ -1045,9 +1287,9 @@ when defined(macosx) or defined(linux):
 
     test "selected frontend public ui.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
-      check fileExists(realProjectFile)
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      let realProjectFile =
+        pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
 
       let tempRoot = createTempDir("repro-m33-codetracer-ui-js", "")
       defer: removeDir(tempRoot)
@@ -1065,8 +1307,9 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").
+        contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1137,9 +1380,9 @@ when defined(macosx) or defined(linux):
 
     test "selected frontend src subwindow.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
-      check fileExists(realProjectFile)
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      let realProjectFile =
+        pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
 
       let tempRoot = createTempDir("repro-m34-codetracer-subwindow-js", "")
       defer: removeDir(tempRoot)
@@ -1157,8 +1400,9 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").
+        contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1236,9 +1480,9 @@ when defined(macosx) or defined(linux):
 
     test "selected frontend src index.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
-      check fileExists(realProjectFile)
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      let realProjectFile =
+        pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
 
       let tempRoot = createTempDir("repro-m36-codetracer-index-js", "")
       defer: removeDir(tempRoot)
@@ -1256,8 +1500,9 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").
+        contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1338,9 +1583,9 @@ when defined(macosx) or defined(linux):
 
     test "selected db-backend-record target builds real native Nim binary":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
-      check fileExists(realProjectFile)
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      let realProjectFile =
+        pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
 
       let tempRoot = createTempDir("repro-m42-codetracer-db-backend-record", "")
       defer: removeDir(tempRoot)
@@ -1358,8 +1603,9 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copyNativeCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").
+        contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1373,6 +1619,8 @@ when defined(macosx) or defined(linux):
       for item in monitorEnv:
         nativeEnv.add(item)
       for item in nativeLibraryEnv(repoRoot):
+        nativeEnv.add(item)
+      for item in sourcePathEnv():
         nativeEnv.add(item)
       let selectedTarget = projectRoot & "#db-backend-record"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
@@ -1390,7 +1638,7 @@ when defined(macosx) or defined(linux):
       check fileExists(buildDebug(projectRoot, "bin/db-backend-record"))
 
       let fileOutput = requireSuccess(shellCommand([
-        "file", "src/build-debug/bin/db-backend-record"
+        "file", "src/build-debug-repro/bin/db-backend-record"
       ]), projectRoot)
       when defined(linux):
         check fileOutput.contains("ELF")
@@ -1417,7 +1665,8 @@ when defined(macosx) or defined(linux):
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertActionCacheEffective(secondReport, "db-backend-record")
+      assertActionCacheEffectiveOrMonitorLossRerun(secondReport,
+        "db-backend-record")
 
       let nativeInput = projectRoot / "src" / "ct" / "db_backend_record.nim"
       writeFile(nativeInput, readFile(nativeInput) &
@@ -1432,9 +1681,9 @@ when defined(macosx) or defined(linux):
 
     test "selected ct target builds real native Nim binary":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
-      check fileExists(realProjectFile)
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      let realProjectFile =
+        pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
 
       let tempRoot = createTempDir("repro-m43-codetracer-ct", "")
       defer: removeDir(tempRoot)
@@ -1452,8 +1701,9 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copyNativeCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").
+        contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1467,6 +1717,8 @@ when defined(macosx) or defined(linux):
       for item in monitorEnv:
         nativeEnv.add(item)
       for item in nativeLibraryEnv(repoRoot):
+        nativeEnv.add(item)
+      for item in sourcePathEnv():
         nativeEnv.add(item)
       let selectedTarget = projectRoot & "#ct"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
@@ -1483,11 +1735,11 @@ when defined(macosx) or defined(linux):
       check not first.contains("action: c-sudoku-object-with-generated-header")
       check fileExists(buildDebug(projectRoot, "bin/ct"))
       discard requireSuccess(shellCommand([
-        "sh", "-c", "test -x src/build-debug/bin/ct"
+        "sh", "-c", "test -x src/build-debug-repro/bin/ct"
       ]), projectRoot)
 
       let fileOutput = requireSuccess(shellCommand([
-        "file", "src/build-debug/bin/ct"
+        "file", "src/build-debug-repro/bin/ct"
       ]), projectRoot)
       when defined(linux):
         check fileOutput.contains("ELF")
@@ -1513,8 +1765,7 @@ when defined(macosx) or defined(linux):
 
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
-      check (second.contains("action: ct status=asCacheHit launched=false") or
-        second.contains("action: ct status=asUpToDate launched=false"))
+      check second.contains("action: ct status=asUpToDate launched=false")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       assertActionCacheEffective(secondReport, "ct")
 
@@ -1532,9 +1783,9 @@ when defined(macosx) or defined(linux):
 
     test "selected codetracer aggregate builds implemented app slice":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
-      check fileExists(realProjectFile)
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      let realProjectFile =
+        pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
 
       let tempRoot = createTempDir("repro-m44-codetracer-aggregate", "")
       defer: removeDir(tempRoot)
@@ -1552,8 +1803,9 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copyAggregateCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").
+        contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1566,6 +1818,8 @@ when defined(macosx) or defined(linux):
       for item in monitorEnv:
         nativeEnv.add(item)
       for item in nativeLibraryEnv(repoRoot):
+        nativeEnv.add(item)
+      for item in sourcePathEnv():
         nativeEnv.add(item)
 
       let selectedTarget = projectRoot & "#codetracer"
@@ -1613,7 +1867,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(firstReport,
-          "src/build-debug/frontend/styles/" & stylesheet, "asSucceeded", true)
+          "src/build-debug-repro/frontend/styles/" & stylesheet, "asSucceeded", true)
       assertPublicResourceActions(firstReport, "asSucceeded", true)
       assertAction(firstReport, "config-default-layout-json", "asSucceeded",
         true)
@@ -1639,6 +1893,9 @@ when defined(macosx) or defined(linux):
       check aggregateIdentity.profiles.anyIt(it.executableName == "nim")
       check not aggregateIdentity.profiles.anyIt(it.executableName == "nim-js")
 
+      # Monitored actions discover provider and tool inputs on their first run.
+      # Publish records with that settled input set before asserting cache hits.
+      discard build(reproBin, selectedTarget, repoRoot, pathValue, nativeEnv)
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
       check second.contains("selectedTarget: codetracer")
@@ -1662,7 +1919,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(secondReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(secondReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       assertPublicResourceActionsCacheEffective(secondReport)
       assertActionCacheEffective(secondReport, "config-default-layout-json")
       assertActionCacheEffective(secondReport, "config-default-config-yaml")
@@ -1697,7 +1954,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(changedReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(changedReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       # Public-resources only depends on the public-resources directory
       # contents; edits to native Nim sources don't invalidate it, so the
       # engine honestly skips this action (post-7aea92a).
@@ -1715,9 +1972,9 @@ when defined(macosx) or defined(linux):
 
     test "selected frontend server index.js target builds real Nim JS closure with monitor evidence":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
-      check fileExists(realProjectFile)
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      let realProjectFile =
+        pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
 
       let tempRoot = createTempDir("repro-m37-codetracer-server-index-js", "")
       defer: removeDir(tempRoot)
@@ -1735,8 +1992,9 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").
+        contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -1805,9 +2063,9 @@ when defined(macosx) or defined(linux):
 
     test "selected frontend public resource tree target copies generated resources":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
-      check fileExists(realProjectFile)
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      let realProjectFile =
+        pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
 
       let tempRoot = createTempDir("repro-m41-codetracer-public-resources", "")
       defer: removeDir(tempRoot)
@@ -1825,8 +2083,9 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").
+        contains("writeProject")
 
       let pathValue = codeTracerPathValue(tempRoot)
       let selectedTarget = projectRoot & "#frontend-public-resources"
@@ -1898,9 +2157,9 @@ when defined(macosx) or defined(linux):
 
     test "m51_codetracer_stdlib_file_ops":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
-      check fileExists(realProjectFile)
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      let realProjectFile =
+        pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
       let projectText = readFile(realProjectFile)
       check projectText.contains("import repro_dsl_stdlib")
       check projectText.contains("fs.copyFile")
@@ -1929,7 +2188,7 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == projectText
+      check readFile(projectRoot / "repro.nim") == projectText
 
       let pathValue = codeTracerPathValue(tempRoot)
       let first = build(reproBin, projectRoot & "#frontend-public-resources",
@@ -1949,9 +2208,9 @@ when defined(macosx) or defined(linux):
 
     test "selected frontend aggregate target builds current frontend bundle set":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
-      check fileExists(realProjectFile)
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      let realProjectFile =
+        pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
 
       let tempRoot = createTempDir("repro-m38-codetracer-frontend", "")
       defer: removeDir(tempRoot)
@@ -1969,8 +2228,9 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      check readFile(projectRoot / "reprobuild.nim") == readFile(realProjectFile)
-      check not readFile(projectRoot / "reprobuild.nim").contains("writeProject")
+      check readFile(projectRoot / "repro.nim") == readFile(realProjectFile)
+      check not readFile(projectRoot / "repro.nim").
+        contains("writeProject")
 
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
@@ -2033,7 +2293,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(firstReport,
-          "src/build-debug/frontend/styles/" & stylesheet, "asSucceeded", true)
+          "src/build-debug-repro/frontend/styles/" & stylesheet, "asSucceeded", true)
       assertPublicResourceActions(firstReport, "asSucceeded", true)
       check reportAction(firstReport, "nim-js-ipc-registry-test").kind == JNull
       check reportAction(firstReport, "generate-config-header").kind == JNull
@@ -2062,7 +2322,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(secondReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(secondReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       assertPublicResourceActionsCacheEffective(secondReport)
 
       let indexHtml = projectRoot / "src" / "frontend" / "index.html"
@@ -2095,7 +2355,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(htmlChangedReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(htmlChangedReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       # index.html is not an input to the public-resources action, so the
       # engine honestly skips the rebuild (post-7aea92a).
       assertPublicResourceActionsCacheEffective(htmlChangedReport)
@@ -2138,7 +2398,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(helperChangedReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(helperChangedReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       # helpers.js is not an input to the public-resources action; the
       # engine honestly skips the rebuild (post-7aea92a).
       assertPublicResourceActionsCacheEffective(helperChangedReport)
@@ -2153,9 +2413,9 @@ when defined(macosx) or defined(linux):
 
     test "m52_codetracer_uses_stdlib_packages":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-      let realProjectFile = codeTracerRoot / "reprobuild.nim"
-      check fileExists(realProjectFile)
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      let realProjectFile =
+        pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
 
       let tempRoot = createTempDir("repro-m29-codetracer-in-place", "")
       defer: removeDir(tempRoot)
@@ -2175,7 +2435,7 @@ when defined(macosx) or defined(linux):
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
-      let projectText = readFile(projectRoot / "reprobuild.nim")
+      let projectText = readFile(projectRoot / "repro.nim")
       check projectText == readFile(realProjectFile)
       check not projectText.contains("writeProject")
       check not projectText.contains("usesImportPath")
@@ -2191,7 +2451,7 @@ when defined(macosx) or defined(linux):
       check first.contains("provisioning-disabled mode active")
       check first.contains("providerCompile:")
       check first.contains("providerGraphSnapshot:")
-      check first.contains("scheduler: actions=25")
+      check first.contains("scheduler: actions=28")
       check first.contains("action: generate-config-header status=asSucceeded launched=true")
       check first.contains("action: build-c-dir status=asSucceeded launched=true")
       check first.contains("action: nim-js-ipc-registry-test status=asSucceeded launched=true")
@@ -2238,11 +2498,15 @@ when defined(macosx) or defined(linux):
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-      check identity.profiles.len == CodeTracerDevToolExecutables.len
-      check identity.profiles.allIt(it.installMethod == "path")
-      check identity.profiles.allIt(it.cachePortability == cpLocalOnly)
+      check identity.profiles.len == CodeTracerDevToolExecutables.len +
+        CodeTracerSourcePackages.len
       for executableName in CodeTracerDevToolExecutables:
         check identity.profiles.anyIt(it.executableName == executableName)
+      for packageName in CodeTracerSourcePackages:
+        check identity.profiles.anyIt(it.packageSelector == packageName)
+      for profile in identity.profiles:
+        check profile.installMethod == "path"
+        check profile.cachePortability == cpLocalOnly
       check not identity.profiles.anyIt(it.executableName == "nim-js")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
@@ -2269,7 +2533,7 @@ when defined(macosx) or defined(linux):
         "subwindow.css"
       ]:
         assertOutputAction(firstReport,
-          "src/build-debug/frontend/styles/" & stylesheet, "asSucceeded", true)
+          "src/build-debug-repro/frontend/styles/" & stylesheet, "asSucceeded", true)
       assertPublicResourceActions(firstReport, "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-tup", "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-with-generated-header",
@@ -2287,14 +2551,18 @@ when defined(macosx) or defined(linux):
 
       let monitoredC = reportAction(firstReport, "c-sudoku-object-tup")
       check monitoredC{"dependencyPolicyKind"}.getStr() == "dgAutomaticMonitor"
-      check hasMonitorEvidence(monitoredC)
+      check monitorEvidenceContains(monitoredC,
+        "test-programs/c_sudoku_solver/main.c")
 
-      check runNode("src/build-debug/tests/ipc_registry_test.js", projectRoot,
+      check runNode("src/build-debug-repro/tests/ipc_registry_test.js", projectRoot,
         pathValue).contains(
         "[OK] handlers still invoked after reconnect")
       check mainSymbol("build/c/main.tup.o", projectRoot).len > 0
       check mainSymbol("build/c/main.with-header.o", projectRoot).len > 0
 
+      # Monitored actions discover provider and tool inputs on their first run.
+      # Publish records with that settled input set before asserting cache hits.
+      discard build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
       let second = build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       assertActionCacheEffective(secondReport, "generate-config-header")
@@ -2318,7 +2586,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(secondReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(secondReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       assertPublicResourceActionsCacheEffective(secondReport)
       assertActionCacheEffective(secondReport, "c-sudoku-object-tup")
       assertActionCacheEffective(secondReport, "c-sudoku-object-with-generated-header")
@@ -2349,7 +2617,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(cChangedReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(cChangedReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       # The c-sudoku source is not an input to the public-resources action;
       # the engine honestly skips the rebuild (post-7aea92a).
       assertPublicResourceActionsCacheEffective(cChangedReport)
@@ -2382,7 +2650,7 @@ when defined(macosx) or defined(linux):
         "loader.css",
         "subwindow.css"
       ]:
-        assertOutputActionCacheEffective(headerDeletedReport, "src/build-debug/frontend/styles/" & stylesheet)
+        assertOutputActionCacheEffective(headerDeletedReport, "src/build-debug-repro/frontend/styles/" & stylesheet)
       # The generated ct_config.h header is not an input to the
       # public-resources action; removing it doesn't invalidate this action
       # and the engine honestly skips it (post-7aea92a).

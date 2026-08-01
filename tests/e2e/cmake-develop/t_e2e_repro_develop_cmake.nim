@@ -24,20 +24,37 @@ proc lastValueAfter(output, prefix: string): string =
     if line.startsWith(prefix):
       result = line[prefix.len .. ^1].strip()
 
+proc profileSidecarPath(buildDir, executableName: string): string =
+  buildDir / "CMakeFiles" / "reprobuild" / "bin" /
+    (executableName & ".repro-tool-profile")
+
+proc sidecarValue(contents, key: string): string =
+  let prefix = key & "="
+  for line in contents.splitLines:
+    if line.startsWith(prefix):
+      return line[prefix.len .. ^1].strip()
+  ""
+
+proc readProfileSidecar(buildDir, executableName: string): string =
+  let path = profileSidecarPath(buildDir, executableName)
+  check fileExists(path)
+  if fileExists(path):
+    readFile(path)
+  else:
+    ""
+
+proc generatedProviderDeclaresToolUse(buildDir, toolRef: string): bool =
+  let providerPath = buildDir / "reprobuild.nim"
+  check fileExists(providerPath)
+  if not fileExists(providerPath):
+    return false
+  let provider = readFile(providerPath)
+  provider.contains("uses:") and
+    provider.contains("\"" & toolRef & " >=1.0 <2.0\"")
+
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" /
-    addFileExt("runquotad", ExeExt)
-  if not fileExists(daemonBin):
-    # The test harness (scripts/run_tests.sh) is responsible for
-    # building the sibling runquota before invoking the suite — see
-    # the prerequisite-build block at the top of that script. A
-    # missing binary here is a harness configuration error, not
-    # something the test should attempt to recover from in-band.
-    raise newException(OSError,
-      "runquotad binary missing at " & daemonBin & "; build it via " &
-      "the test harness (scripts/run_tests.sh)")
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   # The socket path needs platform-specific shape:
   #   Windows: a named pipe (\\.\pipe\...); the runquota daemon's --socket
   #            argument auto-detects this prefix and switches to pipe mode.
@@ -76,7 +93,7 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     raise newException(OSError, "runquotad socket did not appear")
 
 proc repoCMakeRoot(repoRoot: string): string =
-  repoRoot.parentDir / "reprobuild-cmake"
+  workspaceRootForRepo(repoRoot) / "reprobuild-cmake"
 
 proc findForkedCMake(repoRoot: string): string =
   let explicit = getEnv("REPROBUILD_FORKED_CMAKE")
@@ -242,12 +259,16 @@ suite "e2e_repro_develop_cmake":
             removeFile(daemon.socket)
 
         let pathValue = parentDir(forkedCMake) & $PathSep & getEnv("PATH")
+        let buildDir = tempRoot / "build-path"
         let result = developConfigureBuild(reproBin, forkedCMake, projectRoot,
-          tempRoot / "build-path", "path", pathValue)
-        check result.output.contains("action: m9 status=asSucceeded")
+          buildDir, "path", pathValue)
+        check result.output.contains("action: link-m9 status=asSucceeded")
         check fileExists(tempRoot / "build-path" / "m9")
-        check result.buildIdentity.profileFor("reprobuild-cmake-cc").
-          cachePortability == cpLocalOnly
+        check result.buildIdentity.profileFor("cc").cachePortability ==
+          cpLocalOnly
+        let ccSidecar = readProfileSidecar(buildDir, "reprobuild-cmake-cc")
+        check ccSidecar.sidecarValue("cachePortability") == "local-only"
+        check generatedProviderDeclaresToolUse(buildDir, "reprobuild-cmake-cc")
 
     test "e2e_repro_develop_cmake_tool_identity_changes_cache_key":
       let repoRoot = getCurrentDir()
@@ -280,17 +301,29 @@ suite "e2e_repro_develop_cmake":
           $PathSep & getEnv("PATH")
         let pathB = parentDir(forkedCMake) & $PathSep & parentDir(nixCc) &
           $PathSep & getEnv("PATH")
+        let firstBuildDir = tempRoot / "build-a"
+        let secondBuildDir = tempRoot / "build-b"
         let first = developConfigureBuild(reproBin, forkedCMake, projectRoot,
-          tempRoot / "build-a", "path", pathA,
+          firstBuildDir, "path", pathA,
           extraEnv = [("SDKROOT", "")]).buildIdentity
         let second = developConfigureBuild(reproBin, forkedCMake, projectRoot,
-          tempRoot / "build-b", "path", pathB).buildIdentity
-        let firstCc = first.actionFor("reprobuild-cmake-cc")
-        let secondCc = second.actionFor("reprobuild-cmake-cc")
+          secondBuildDir, "path", pathB).buildIdentity
+        let firstCc = first.actionFor("cc")
+        let secondCc = second.actionFor("cc")
         check firstCc.resolvedExecutablePath != secondCc.resolvedExecutablePath
         check firstCc.actionFingerprint != secondCc.actionFingerprint
-        check first.profileFor("reprobuild-cmake-cc").profileFingerprint !=
-          second.profileFor("reprobuild-cmake-cc").profileFingerprint
+        check first.profileFor("cc").profileFingerprint !=
+          second.profileFor("cc").profileFingerprint
+        let firstSidecar = readProfileSidecar(firstBuildDir,
+          "reprobuild-cmake-cc")
+        let secondSidecar = readProfileSidecar(secondBuildDir,
+          "reprobuild-cmake-cc")
+        check firstSidecar.sidecarValue("resolvedExecutablePath") !=
+          secondSidecar.sidecarValue("resolvedExecutablePath")
+        check generatedProviderDeclaresToolUse(firstBuildDir,
+          "reprobuild-cmake-cc")
+        check generatedProviderDeclaresToolUse(secondBuildDir,
+          "reprobuild-cmake-cc")
 
     test "e2e_repro_develop_cmake_path_vs_nix_portability":
       let repoRoot = getCurrentDir()
@@ -316,25 +349,31 @@ suite "e2e_repro_develop_cmake":
             removeFile(daemon.socket)
 
         let pathValue = parentDir(forkedCMake) & $PathSep & getEnv("PATH")
+        let pathBuildDir = tempRoot / "build-path-portability"
         let pathIdentity = developConfigureBuild(reproBin, forkedCMake,
           pathProject,
-          tempRoot / "build-path-portability", "path", pathValue).buildIdentity
-        check pathIdentity.profileFor("reprobuild-cmake-cc").adapterStrength ==
+          pathBuildDir, "path", pathValue).buildIdentity
+        check pathIdentity.profileFor("cc").adapterStrength ==
           asWeak
-        check pathIdentity.profileFor("reprobuild-cmake-cc").cachePortability ==
+        check pathIdentity.profileFor("cc").cachePortability ==
           cpLocalOnly
+        let pathSidecar = readProfileSidecar(pathBuildDir,
+          "reprobuild-cmake-cc")
+        check pathSidecar.sidecarValue("adapterStrength") == "weak"
+        check pathSidecar.sidecarValue("cachePortability") == "local-only"
 
+        let nixBuildDir = tempRoot / "build-nix-portability"
         let nixOutput = runShell(shellCommand([
           reproBin, "develop", "--cmake", nixProject,
           "--tool-provisioning=nix",
           "--cmake-binary=" & forkedCMake,
           "--", "sh", "-c",
           "repro-cmake-configure -S . -B " &
-          q(tempRoot / "build-nix-portability") &
+          q(nixBuildDir) &
           " && REPROBUILD_REPRO=" & q(reproBin) &
           " REPROBUILD_SOURCE_ROOT=" & q(repoRoot) &
           " " & q(forkedCMake) & " --build " &
-          q(tempRoot / "build-nix-portability")
+          q(nixBuildDir)
         ], env = [("PATH", pathValue)]), repoRoot)
         if nixOutput.code != 0:
           checkpoint(nixOutput.output)
@@ -344,9 +383,18 @@ suite "e2e_repro_develop_cmake":
           let identityPath = lastValueAfter(nixOutput.output, "toolIdentity:")
           check fileExists(identityPath)
           let nixIdentity = readPathOnlyBuildIdentity(identityPath)
-          let profile = nixIdentity.profileFor("reprobuild-cmake-cc")
+          let profile = nixIdentity.profileFor("cc")
           check profile.installMethod == "nix"
           check profile.adapterStrength == asStrong
           check profile.cachePortability == cpPortable
           check profile.selectedStorePath.startsWith("/nix/store/")
-          check nixOutput.output.contains("action: m9 status=asSucceeded")
+          let nixSidecar = readProfileSidecar(nixBuildDir,
+            "reprobuild-cmake-cc")
+          check nixSidecar.sidecarValue("installMethod") == "nix"
+          check nixSidecar.sidecarValue("adapterStrength") == "strong"
+          check nixSidecar.sidecarValue("cachePortability") == "portable"
+          check nixSidecar.sidecarValue("selectedStorePath").startsWith(
+            "/nix/store/")
+          check generatedProviderDeclaresToolUse(nixBuildDir,
+            "reprobuild-cmake-cc")
+          check nixOutput.output.contains("action: link-m9 status=asSucceeded")

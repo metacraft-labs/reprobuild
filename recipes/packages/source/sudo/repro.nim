@@ -19,7 +19,11 @@
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
 import repro_dsl_stdlib/types/package_result
-import posix
+when defined(windows):
+  proc getuid(): int = 1000
+  proc getgid(): int = 1000
+else:
+  import posix
 
 package sudoSource:
   versions:

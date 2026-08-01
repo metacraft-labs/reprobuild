@@ -72,7 +72,7 @@ proc writeProjectManifest(workspaceRoot, project: string;
   ## `enumerateParticipatingRepos` resolves: one `projects/<p>.toml` with a
   ## `[[remote]]` per repo and an `includes` list pointing at per-repo
   ## fragments under `repos/`.
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   var project_toml = "schema = \"reprobuild.workspace.project.v1\"\n\n" &

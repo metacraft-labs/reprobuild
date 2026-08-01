@@ -51,6 +51,7 @@
 
 import std/[os, strutils, unittest]
 from repro_core/paths import extendedPath
+import repro_test_support
 
 import repro_dsl_stdlib/catalog_registry
 import repro_dsl_stdlib/packages_schema
@@ -59,16 +60,12 @@ import repro_home_apply/plan
 import repro_home_apply/realize
 import repro_home_apply/package_catalog
 
-const
+let
   FixtureRoot = "build/test-tmp/t-preview-chain"
+  ReprobuildRoot = currentSourcePath().parentDir().parentDir().parentDir().parentDir()
   M71ReferenceHome =
-    currentSourcePath().parentDir().parentDir().parentDir().parentDir()
-      .parentDir() /
-      "reprobuild-examples" / "m71-home-profile-walkthrough" / "home.nim"
-    ## ``D:/metacraft/reprobuild/libs/repro_home_apply/tests/t_preview_chain.nim``
-    ## → walk up 5 parentDir() calls:
-    ##   tests → repro_home_apply → libs → reprobuild → metacraft.
-    ## Then into the ``reprobuild-examples`` sibling at ``D:/metacraft``.
+    workspaceRootForRepo(ReprobuildRoot) / "reprobuild-examples" /
+      "m71-home-profile-walkthrough" / "home.nim"
 
 # ---------------------------------------------------------------------------
 # Helpers

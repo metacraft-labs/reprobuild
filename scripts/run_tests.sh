@@ -1,27 +1,87 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Bootstrap-And-Self-Build B5: the legacy shell loop is compressed to
+# project-DSL graph steps. ``.#apps`` builds binaries, ``.#test-helpers``
+# builds helpers, and ``.#test-builds`` compiles every test with the HCR
+# flags baked into the edges. The runquota sibling build and final test runner
+# stay shell-shaped until typed-tool resolver coverage reaches those helpers.
+mkdir -p build build/nimcache test-logs
+# Protocol evidence describes one execution, never a reusable build artifact.
+rm -rf test-logs/results test-logs/parallel-run.json
+mkdir -p test-logs/results
+repo_root="$(pwd -P)"
+# Keep large suite scratch off /tmp and outside the checkout; some tests build
+# "outside workspace" fixtures and scan ancestors for repo markers.
+cache_home="${XDG_CACHE_HOME:-${HOME:-}/.cache}"
+[[ -n "${cache_home}" && "${cache_home}" != "/.cache" ]] || cache_home="${repo_root}/../.cache"
+test_tmp_parent="${REPROBUILD_TEST_TMPDIR:-${cache_home}/reprobuild-test-tmp}"
+[[ -n "${test_tmp_parent}" && "${test_tmp_parent}" != "/" ]] || {
+  echo "refusing unsafe REPROBUILD_TEST_TMPDIR: ${test_tmp_parent}" >&2
+  exit 1
+}
+test_tmp_parent="$(mkdir -p "${test_tmp_parent}" && cd "${test_tmp_parent}" && pwd -P)"
+if [[ "${test_tmp_parent}" == "${repo_root}" || "${test_tmp_parent}" == "${repo_root}"/* ]]; then
+  echo "refusing REPROBUILD_TEST_TMPDIR inside checkout: ${test_tmp_parent}" >&2
+  exit 1
+fi
+test_tmp_root="${test_tmp_parent%/}/current"
+rm -rf "${test_tmp_root}"
+mkdir -p "${test_tmp_root}"
+export TMPDIR="${test_tmp_root}" TMP="${test_tmp_root}" TEMP="${test_tmp_root}"
 
-# Bootstrap-And-Self-Build B5: the original 6-step shell loop
-# (build_apps + build_sibling + build_test_helper x 3 + repro build
-# test + macOS-arm64 HCR rebuild + ct-test-runner) has been compressed
-# to 4 steps. Steps 1, 3, 4, and 5 from the original now flow through
-# the project DSL: ``.#apps`` builds the binaries (B1), ``.#test-helpers``
-# builds the helpers (B2), and ``.#test-builds`` compiles every test
-# (B3) with the macOS-arm64 HCR ``extraPassC`` / ``extraPassL`` flags
-# baked into the build edges (B4) so the standalone HCR re-compile
-# loop is no longer needed. The cross-project runquota build and the
-# test-execute runner stay shell-shaped until the engine's tool-
-# resolver gap closes for ``ct_test_nim_unittest.buildNimUnittest`` and
-# ``python_unittest_runner.pythonUnittest`` — see B4 outcome.
+if [[ "${REPROBUILD_TEST_WARM_REUSE:-0}" != "1" ]]; then
+  rm -rf build/test-bin
+fi
+mkdir -p build/test-bin
+# shellcheck source=scripts/source_paths.sh
+source scripts/source_paths.sh
+# shellcheck source=scripts/monitor_shim_probe.sh
+source scripts/monitor_shim_probe.sh
+# shellcheck source=scripts/test_parallelism.sh
+source scripts/test_parallelism.sh
+# Test runs exercise user-facing CLI latency gates, so the app bootstrap and
+# graph-owned app rebuilds must use optimized binaries by default. Developers
+# can still opt into debug apps explicitly with REPROBUILD_BUILD_MODE=debug.
+export REPROBUILD_BUILD_MODE="${REPROBUILD_BUILD_MODE:-release}"
 
-mkdir -p build/test-bin build/nimcache test-logs
+# Tests must not depend on the developer's persistent action cache. Large or
+# stale user-level metadata can dominate memory use in daemon-hosted cache-hit
+# evidence reconstruction, so give this run a clean, reproducible cache root.
+export REPROBUILD_ACTION_CACHE_ROOT="$(pwd)/build/test-action-cache"
+if [[ "${REPROBUILD_TEST_WARM_REUSE:-0}" != "1" ]]; then
+  rm -rf "${REPROBUILD_ACTION_CACHE_ROOT}"
+fi
+mkdir -p "${REPROBUILD_ACTION_CACHE_ROOT}"
 
-# Provision the NDE0-A jammy .deb fixtures (sha-pinned download, no
-# binaries vendored into git) so t_nde0a_apt_jammy has its inputs. The
-# step is idempotent, Linux-only, and best-effort — a network failure
-# warns and continues; the test stays the loud gate if a fixture is
-# absent.
-bash recipes/reproos-mvp-config/fetch-test-fixtures.sh || true
+# Use only dev-shell runtime libraries; never scan stale /nix/store closures.
+runtime_lib_dirs=()
+for candidate in ${CLINGO_LIB:-} ${ZSTD_LIB:-}; do
+  if [[ -d "${candidate}" ]]; then
+    runtime_lib_dirs+=("${candidate}")
+  fi
+done
+if [[ ${#runtime_lib_dirs[@]} -gt 0 ]]; then
+  runtime_lib_path="$(IFS=:; printf '%s' "${runtime_lib_dirs[*]}")"
+  export DYLD_LIBRARY_PATH="${runtime_lib_path}:${DYLD_LIBRARY_PATH:-}"
+  export DYLD_FALLBACK_LIBRARY_PATH="${runtime_lib_path}:${DYLD_FALLBACK_LIBRARY_PATH:-}"
+  export LD_LIBRARY_PATH="${runtime_lib_path}:${LD_LIBRARY_PATH:-}"
+fi
+if [[ -z "${REPRO_TEST_ADAPTERS_SRC:-}" &&
+      -f "../reprobuild-test-adapters/src/repro_test_adapters/test_runner.nim" ]]; then
+  export REPRO_TEST_ADAPTERS_SRC="$(cd ../reprobuild-test-adapters/src && pwd)"
+fi
+if [[ -z "${REPRO_CT_TEST_RUNNER_SRC:-}" &&
+      -f "../reprobuild-ct-test-runner/libs/ct_test_runner_adapter/src/ct_test_runner_adapter.nim" ]]; then
+  export REPRO_CT_TEST_RUNNER_SRC="$(cd ../reprobuild-ct-test-runner && pwd)"
+fi
+if [[ -z "${BEARSSL_SRC:-}" ]]; then
+  BEARSSL_SRC="$(find /nix/store -maxdepth 1 -type d -name '*nim-bearssl-*' -print -quit 2>/dev/null || true)"
+  if [[ -n "${BEARSSL_SRC}" ]]; then
+    export BEARSSL_SRC
+  fi
+fi
+shm_queue_src="$(resolve_shm_queue_src)"
+export SHM_QUEUE_SRC="${shm_queue_src}"
 
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
@@ -32,19 +92,8 @@ case "$(uname -s)" in
     ;;
 esac
 
-# Controlled, throwaway repro-daemon for the whole test run.
-#
-# The spec mandates that `repro build` auto-launches the per-user daemon
-# and keeps it alive across invocations. That is correct for real use,
-# but a CI / local test run that lets daemon-hosted tests fall through to
-# the default per-user endpoint (`~/.local/state/repro/daemon`) leaves a
-# live daemon behind after the suite finishes — it accumulates across
-# runs and on a shared host shows up as a leaked, sometimes busy, daemon
-# process. Point the whole run at an isolated endpoint + state dir so any
-# daemon a test auto-launches is OUR throwaway instance, then stop it and
-# remove its state on exit. Tests that drive their own daemon lifecycle
-# (the daemon control-plane / watch / dev-session suites) set their own
-# REPRO_DAEMON_ENDPOINT per invocation and are unaffected.
+# Use an isolated daemon endpoint/state dir so auto-launched daemons do not
+# leak into the developer's per-user daemon across test runs.
 REPRO_TEST_DAEMON_DIR="$(mktemp -d "${TMPDIR:-/tmp}/repro-test-daemon.XXXXXX")"
 export REPRO_DAEMON_STATE_DIR="${REPRO_TEST_DAEMON_DIR}/state"
 mkdir -p "${REPRO_DAEMON_STATE_DIR}"
@@ -57,8 +106,6 @@ case "$(uname -s)" in
     ;;
 esac
 _repro_test_daemon_cleanup() {
-  # Best-effort: stop the controlled daemon (no-op if none was launched)
-  # then drop its isolated state dir. Never fail the run on cleanup.
   if [[ -x "build/bin/repro${exe_ext}" ]]; then
     "build/bin/repro${exe_ext}" daemon stop >/dev/null 2>&1 || true
   fi
@@ -70,135 +117,164 @@ trap _repro_test_daemon_cleanup EXIT
 # Idempotent — the recipe no-ops when the binary already exists.
 just bootstrap
 
-# Step 2 (B5): build the runquota sibling so ``runquotad`` is on
-# PATH before the engine starts. The cross-project ``uses: runquota``
-# resolver isn't online yet (B0 outcome), so the daemon still builds
-# via the sibling's own Justfile; reprobuild's repro.nim declares
-# ``uses: "runquotad"`` (B0) which the path-mode resolver checks
-# during the engine's tool-resolution phase. Without runquotad on
-# PATH, Step 3 fails with ``tool-resolution failed: runquotad ...
-# was not found in PATH``. Once the cross-project selector lands,
-# this step folds into Step 3 as another ``.#`` fragment.
-if [[ -d "../runquota" ]]; then
-  if [[ ! -x "../runquota/build/bin/runquotad${exe_ext}" ]]; then
-    printf 'Building prerequisite sibling: ../runquota\n' >&2
-    (cd ../runquota && just build) > test-logs/runquota-build.log 2>&1 || {
-      echo "runquota build failed; see test-logs/runquota-build.log" >&2
-      exit 1
-    }
+# Seed the io-monitor shim for provider compilation on warm checkouts; the
+# graph-owned ``.#test-fixtures`` edge verifies the canonical artifact later.
+bootstrap_monitor_shim() {
+  local io_mon_src="${IO_MON_SRC:-../io-mon}"
+  case "${io_mon_src}" in
+    */src) io_mon_src="${io_mon_src%/src}" ;;
+    *\\src) io_mon_src="${io_mon_src%\\src}" ;;
+  esac
+  if [[ ! -x "${io_mon_src}/scripts/build_shim.sh" ]]; then
+    echo "missing io-mon shim builder at ${io_mon_src}/scripts/build_shim.sh; set IO_MON_SRC" >&2
+    return 2
   fi
-  # Prepend ../runquota/build/bin so the path-mode resolver finds
-  # runquotad during the engine pass below.
-  RUNQUOTA_BIN_ABS="$(cd ../runquota/build/bin && pwd)"
-  export PATH="${RUNQUOTA_BIN_ABS}:${PATH}"
+  IO_MON_SHIM_OUT_DIR="$(pwd)/build/lib" \
+  IO_MON_SHIM_NIMCACHE_DIR="$(pwd)/build/nimcache/io-mon-shim" \
+  IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
+  SHM_QUEUE_SRC="${shm_queue_src}" \
+    bash "${io_mon_src}/scripts/build_shim.sh"
+}
+printf 'Bootstrapping monitor shim for provider compilation\n' >&2
+if [[ "${REPROBUILD_TEST_WARM_REUSE:-0}" == "1" ]] &&
+    repro_monitor_shim_available "build/lib"; then
+  printf 'Reusing warm monitor shim\n' >&2
+else
+  bootstrap_monitor_shim > test-logs/monitor-shim-bootstrap.log 2>&1 || {
+    echo "monitor shim bootstrap failed; see test-logs/monitor-shim-bootstrap.log" >&2
+    exit 1
+  }
 fi
 
-# Step 2b: build the reprobuild-cmake fork so the cmake-develop e2e tests
-# (tests/e2e/cmake-develop/) have their forked ``cmake`` carrying the
-# Reprobuild generator. Those tests hard-require it (``check
-# forkedCMake.len > 0`` — no graceful skip), so the fork is a real test
-# prerequisite, not a benchmark-only artifact. Mirror the runquota
-# prerequisite above; idempotent — skip when already built (warm
-# self-hosted checkout). The CMake self-build is heavy, so cap parallelism
-# on shared runners.
+# Fail fast when the Nim toolchain cannot complete a compile under the monitor
+# shim. Every test that builds anything goes through a monitored provider
+# compile, so a toolchain library missing from the loader search path takes the
+# entire suite down; without this probe the first symptom is an opaque
+# "__repro_provider_compile asFailed" hundreds of lines into the run.
+bash scripts/check_toolchain_dlopen.sh build/lib
+
+# Step 2: build sibling prerequisites that path-mode tool resolution needs.
+runquotad_bin="${RUNQUOTAD_BIN:-}"
+runquota_bin="${RUNQUOTA_BIN:-}"
+if [[ -z "${runquotad_bin}" ]]; then
+  runquotad_bin="$(command -v "runquotad${exe_ext}" 2>/dev/null || true)"
+fi
+if [[ -z "${runquota_bin}" ]]; then
+  runquota_bin="$(command -v "runquota${exe_ext}" 2>/dev/null || true)"
+fi
+if [[ -x "${runquotad_bin}" && -x "${runquota_bin}" ]]; then
+  runquotad_dir="$(cd "$(dirname "${runquotad_bin}")" && pwd)"
+  runquota_dir="$(cd "$(dirname "${runquota_bin}")" && pwd)"
+  export RUNQUOTAD_BIN="${runquotad_bin}"
+  export RUNQUOTA_BIN="${runquota_bin}"
+  export PATH="${runquotad_dir}:${runquota_dir}:${PATH}"
+else
+  runquota_src="${RUNQUOTA_SRC:-}"
+  if [[ -d "../runquota" &&
+        ( -z "${runquota_src}" || "${runquota_src}" == /nix/store/* ) ]]; then
+    runquota_src="../runquota"
+  fi
+  if [[ -n "${runquota_src}" && -d "${runquota_src}" ]]; then
+    runquota_src_abs="$(cd "${runquota_src}" && pwd)"
+    export RUNQUOTA_SRC="${runquota_src_abs}"
+    if [[ ! -x "${runquota_src_abs}/build/bin/runquotad${exe_ext}" ||
+          ! -x "${runquota_src_abs}/build/bin/runquota${exe_ext}" ]]; then
+      if [[ "${runquota_src_abs}" == /nix/store/* ]]; then
+        echo "RUNQUOTA_SRC points to source-only Nix store path ${runquota_src_abs}; set RUNQUOTAD_BIN/RUNQUOTA_BIN or use a built runquota checkout" >&2
+        exit 1
+      fi
+      printf 'Building prerequisite sibling: %s\n' "${runquota_src_abs}" >&2
+      (cd "${runquota_src_abs}" && just build) > test-logs/runquota-build.log 2>&1 || {
+        echo "runquota build failed; see test-logs/runquota-build.log" >&2
+        exit 1
+      }
+    fi
+    RUNQUOTA_BIN_ABS="$(cd "${runquota_src_abs}/build/bin" && pwd)"
+    export RUNQUOTAD_BIN="${RUNQUOTA_BIN_ABS}/runquotad${exe_ext}"
+    export RUNQUOTA_BIN="${RUNQUOTA_BIN_ABS}/runquota${exe_ext}"
+    export PATH="${RUNQUOTA_BIN_ABS}:${PATH}"
+  fi
+fi
+
 if [[ -d "../reprobuild-cmake" ]]; then
-  if [[ ! -x "../reprobuild-cmake/build/bin/cmake${exe_ext}" ]]; then
-    printf 'Building prerequisite sibling: ../reprobuild-cmake (CMake fork)\n' >&2
-    cmake_jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
-    if (( cmake_jobs > 16 )); then cmake_jobs=16; fi
-    (cd ../reprobuild-cmake \
-        && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-        && cmake --build build --target cmake --parallel "${cmake_jobs}") \
-        > test-logs/reprobuild-cmake-build.log 2>&1 || {
-      echo "reprobuild-cmake build failed; see test-logs/reprobuild-cmake-build.log" >&2
-      exit 1
-    }
-  fi
+  bash scripts/build_reprobuild_cmake_prereq.sh "${exe_ext}"
 fi
 
-# Step 3 (B5): build the apps, test helpers, and test binaries through
-# the engine. Replaces steps 1 (build_apps.sh) + 3 (build_test_helper
-# x 3) + 4 (./build/bin/repro build test) + 5 (HCR rebuild loop) of
-# the legacy script. Cap parallelism for memory-constrained CI runners
-# (same logic as the legacy script: ~300-500 MB peak per nim c).
+# Step 3: build the apps, helpers, fixtures, and test binaries through
+# the engine. Cap parallelism for memory-constrained CI runners.
 if [[ -z "${REPROBUILD_MAX_PARALLELISM:-}" ]]; then
   available_cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
-  cap=$(( available_cores / 2 ))
-  if (( cap < 1 )); then cap=1; fi
-  if (( cap > 4 )); then cap=4; fi
-  export REPROBUILD_MAX_PARALLELISM="${cap}"
+  export REPROBUILD_MAX_PARALLELISM="$(
+    reprobuild_default_test_build_parallelism "${available_cores}"
+  )"
 fi
 printf 'Building apps + test-helpers + test-builds via repro (REPROBUILD_MAX_PARALLELISM=%s)\n' \
   "${REPROBUILD_MAX_PARALLELISM}" >&2
+# A cold action cache has to compile every test binary from scratch, which
+# exceeds 90m on CI hardware (an observed cold run reached 969/1168 before
+# timing out). Match the runner's 4h backstop; a warm cache finishes far
+# sooner, so this only raises the ceiling for the cold case.
+BUILD_TIMEOUT="${REPROBUILD_BUILD_TIMEOUT:-4h}"
 
-# Build each collection in its own invocation. The engine's M3
-# selector parser rejects multiple path/fragment selectors in a
-# single command ("multiple path / fragment selectors are not
-# supported in M3"); name-shaped selectors may follow a single
-# path anchor but ``.#apps``/``.#test-helpers``/``.#test-builds``
-# are all fragment-shaped and disambiguated against the on-disk
-# ``apps/`` directory. Looping is the M3 workaround; a future
-# milestone that grows multi-fragment selector support folds the
-# three invocations back into one.
+# M3 accepts one fragment selector per invocation; loop over collections.
 repro_build_collection() {
   local collection="$1"
-  if ! ./build/bin/repro build --tool-provisioning=path --daemon=off "${collection}"; then
+  # Suite setup uses the local pool gate; dedicated tests cover RunQuota itself.
+  local repro_exe="./build/bin/repro${exe_ext}"
+  if [[ -n "${exe_ext}" ]]; then
+    cp -f "./build/bin/repro${exe_ext}" "./build/bin/repro_run${exe_ext}"
+    repro_exe="./build/bin/repro_run${exe_ext}"
+  fi
+  local build_status=0
+  # ``--write-report`` keeps the full record for the CI artefact. The FAILURE
+  # report below needs no flag: a failed build writes it unasked, which is the
+  # whole point of the outcome-dependent persist default.
+  timeout --kill-after=30s "${BUILD_TIMEOUT}" \
+    "${repro_exe}" build --tool-provisioning=path --daemon=off --no-runquota \
+    --write-report "${collection}" \
+    || build_status=$?
+  if (( build_status != 0 )); then
+    if (( build_status == 124 )); then
+      printf 'Timed out building %s after %s\n' "${collection}" "${BUILD_TIMEOUT}" >&2
+    fi
+
+    failure_report_path=".repro/build/repro/build-failure-report.json"
     report_path=".repro/build/repro/build-report.json"
-    if [[ -f "${report_path}" ]]; then
-      printf '\n=== Failed actions for %s (from %s) ===\n' "${collection}" "${report_path}" >&2
+    if [[ -f "${failure_report_path}" ]]; then
+      printf '\n=== Failed actions for %s (from %s) ===\n' "${collection}" "${failure_report_path}" >&2
       if command -v jq >/dev/null 2>&1; then
-        jq '.actions[] | select(.exitCode != 0 and .exitCode != null) | {id, exitCode, executable, args, stdout, stderr, evidence}' "${report_path}" >&2 || true
+        jq '{counts, failedActions, blockedActions}' "${failure_report_path}" >&2 || true
       else
-        printf '(jq not available; copying full report to test-logs/build-report.json)\n' >&2
+        cat "${failure_report_path}" >&2 || true
       fi
+      mkdir -p test-logs
+      cp "${failure_report_path}" "test-logs/build-failure-report-${collection//[^a-zA-Z0-9]/_}.json" 2>/dev/null || true
+    fi
+    if [[ -f "${report_path}" ]]; then
       mkdir -p test-logs
       cp "${report_path}" "test-logs/build-report-${collection//[^a-zA-Z0-9]/_}.json" 2>/dev/null || true
     fi
-    return 1
+    return "${build_status}"
   fi
 }
 repro_build_collection ".#apps" || exit 1
 repro_build_collection ".#test-helpers" || exit 1
-# Test-Fixtures-In-Build-Graph M2: build the monitor-shim fixture
-# (``build/lib/librepro_monitor_shim.<ext>``) through the graph before
-# the tests run. ``prepareMonitorTools`` and the three self-shim outlier
-# tests now ``requireBinary`` this artifact instead of compiling it per
-# test. ``just bootstrap`` only runs ``build_apps.sh`` (which also
-# produces the shim) when ``build/bin/repro`` is MISSING, so on a warm
-# checkout the shim would otherwise never be built — this explicit
-# fixture build closes that gap.
+# M2: build canonical test fixtures, including the io-monitor shim.
 repro_build_collection ".#test-fixtures" || exit 1
 repro_build_collection ".#test-builds" || exit 1
 
-# Step 4 (B5): Python tests + test-binary execution. The Python loop runs
-# before the Nim suite so a Python regression surfaces fast and doesn't get
-# buried in the Nim output. The Nim suite is driven by ct-test-runner (Tier-1
-# Standard --list-json/--run protocol) when installed, with the M3 internal
-# runner as the documented fallback. Execution stays shell-shaped until the
-# engine's typed-tool resolver grows profiles for ``buildNimUnittest`` /
-# ``python_unittest_runner`` — once that lands, ``repro test`` replaces both
-# halves of this step.
+REPROBUILD_BIN_ABS="$(cd build/bin && pwd)"
+export PATH="${REPROBUILD_BIN_ABS}:${PATH}"
+
+# Step 4 (B5): run Python tests first, then the Nim binaries via
+# ct-test-runner when available or the M3 fallback runner.
 while IFS= read -r -d '' test_file; do
   python3 "${test_file}"
 done < <(
   find tests -type f -name 'test_*.py' -print0
 )
 
-# D6 lands a per-test ``--test-timeout=N`` flag on the M3 internal
-# runner. Default below is 600 seconds (10 minutes) per test — well
-# above any normal test on CI, but low enough that a single hung test
-# fails with a clear TIMEOUT signature in the build report while the
-# rest of the suite continues instead of starving every queue slot
-# behind it.
-#
-# The shell ``timeout`` wrapper stays as a very high wall-clock
-# backstop (default 4h) in case the runner itself wedges before any
-# per-test deadline fires (e.g. fd-race tear-down during spawn, signal
-# handler stuck). On CI a clean 500-test sweep at 4 threads completes
-# in ~45-60 min, so 4h is far above the normal envelope.
-# ``--kill-after=30s`` sends SIGKILL 30 seconds after SIGTERM in case
-# the runner is stuck in uninterruptible waits. CI surfaces the
-# SIGTERM via exit code 124.
+# D6 per-test timeout plus an outer wall-clock backstop for runner wedges.
 RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-4h}"
 TEST_TIMEOUT="${REPROBUILD_TEST_TIMEOUT:-600}"
 
@@ -228,16 +304,10 @@ else
       --out:"${runner_bin}" \
       tools/test-runner/repro_test_runner.nim
   fi
-  # ``--no-build`` skips the runner's own build step (the engine
-  # already produced every binary in build/test-bin via Step 2).
-  # Thread count capped at 2 to dodge the runner's known fd-race;
-  # callers can lift via REPROBUILD_TEST_THREADS once the runner fix
-  # lands. ct-test-runner is unaffected and is the preferred path.
-  # ``--test-timeout`` is the D6 per-test SIGKILL deadline; the outer
-  # ``timeout`` is the runner-phase wall-clock backstop.
+  # Default to one worker for heavy nested builds unless explicitly overridden.
   timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${runner_bin}" \
     --no-build \
-    --threads=${REPROBUILD_TEST_THREADS:-2} \
+    --threads=${REPROBUILD_TEST_THREADS:-1} \
     --test-timeout=${TEST_TIMEOUT} \
     --bin-dir=build/test-bin \
     --summary-json=test-logs/parallel-run.json \

@@ -37,6 +37,7 @@
 ##     wired onto the C++ link argv.
 
 import std/[os, strutils, unittest]
+import repro_test_support
 
 import repro_core
 import repro_provider_runtime
@@ -44,11 +45,11 @@ import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/ada_direct as ada_direct_convention
 
-const
+let
   ## ``parentDir`` four times lands at the ``reprobuild/`` repo root.
   ## The fixture lives under the sibling ``reprobuild-examples``.
   ReprobuildRoot = currentSourcePath.parentDir.parentDir.parentDir.parentDir
-  MetacraftRoot = ReprobuildRoot.parentDir
+  MetacraftRoot = workspaceRootForRepo(ReprobuildRoot)
   Mode3Fixture =
     MetacraftRoot / "reprobuild-examples" / "ada-mode3" /
       "binary-with-library"

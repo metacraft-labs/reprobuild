@@ -30,8 +30,9 @@
 ##      ... ]`` shell test so nix-stub deps' nonexistent paths are
 ##      silently skipped instead of baking a dangling entry into the
 ##      ELF.
-##   2. The emitted script ALSO folds every existing dir in
-##      ``$LD_LIBRARY_PATH`` onto the rpath at install-mirror time.
+##   2. The emitted script folds an existing dir in
+##      ``$LD_LIBRARY_PATH`` onto the rpath only when it resolves an
+##      otherwise-missing ``DT_NEEDED`` SONAME.
 ##      That env var is populated by the engine from each dep's
 ##      ``libraryPathList`` (nix-store lib dirs for nix-stub deps;
 ##      sibling install-mirror lib dirs for from-source deps) when the
@@ -64,13 +65,15 @@ suite "DSL-port M9.R.15q.5.1 — RPATH resolution for nix-stub deps":
     for dep in deps:
       check script.contains("[ -d \"" & dep & "\" ]")
 
-  test "emitted_script_folds_ld_library_path_into_rpath":
+  test "emitted_script_filters_ld_library_path_by_needed_soname":
     # ``$LD_LIBRARY_PATH`` is populated by the engine from each dep's
     # ``libraryPathList`` at fork time. For a nix-stub dep this is the
     # only channel through which the install-mirror script can learn
     # the dep's actual ``/nix/store/...`` lib dir.
     let script = m9r14fEmitRpathPatchScript("/tmp/mirror/usr", @[])
     check script.contains("$LD_LIBRARY_PATH")
+    check script.contains("needed_sonames")
+    check script.contains("m9r14f_soname_resolved")
     # Every entry in $LD_LIBRARY_PATH MUST be existence-checked too —
     # the engine may thread non-existent dirs for half-resolved deps.
     check script.contains("[ -d \"$ldp\" ]")
@@ -134,7 +137,11 @@ suite "DSL-port M9.R.15q.5.1 — RPATH resolution for nix-stub deps":
         # should pick up the real dir, skip the dangling one, AND fold
         # in the LD_LIBRARY_PATH entry pointing at the real dir.
         let realDir = scratch / "nix-store-fake/lib"
+        let unrelatedDir = scratch / "nix-store-unrelated/lib"
         createDir(realDir)
+        createDir(unrelatedDir)
+        moveFile(scratch / "libfoo.so", realDir / "libfoo.so")
+        writeFile(unrelatedDir / "libnotneeded.so", "unrelated")
         let danglingDir = scratch / "recipes/libltdl/.repro/output/install/usr/lib"
         let mirrorUsr = scratch / "mirror/usr"
         createDir(mirrorUsr / "lib")
@@ -150,7 +157,7 @@ suite "DSL-port M9.R.15q.5.1 — RPATH resolution for nix-stub deps":
         # Drive the script with LD_LIBRARY_PATH set to the real
         # nix-store-style dir.
         let oldLdp = getEnv("LD_LIBRARY_PATH")
-        putEnv("LD_LIBRARY_PATH", realDir)
+        putEnv("LD_LIBRARY_PATH", unrelatedDir & ":" & realDir)
         defer: putEnv("LD_LIBRARY_PATH", oldLdp)
 
         let sh = startProcess("/bin/sh",
@@ -171,6 +178,9 @@ suite "DSL-port M9.R.15q.5.1 — RPATH resolution for nix-stub deps":
         # The real nix-store-style dir MUST be present — folded in via
         # $LD_LIBRARY_PATH.
         check probeOutput.contains(realDir)
+        # Build-only library directories must not leak into the installed
+        # RPATH when none of their SONAMEs are needed by the output.
+        check not probeOutput.contains(unrelatedDir)
         # $ORIGIN family must still be intact.
         check probeOutput.contains("$ORIGIN")
 

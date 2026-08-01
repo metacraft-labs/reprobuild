@@ -61,7 +61,8 @@ proc prefixBinDirs*(record: RealizedRecord): seq[string] =
       seen.incl(dir)
       result.add(dir)
 
-proc envUserPathResource*(packageId: string; binDirs: seq[string]):
+proc envUserPathResource*(packageId: string; binDirs: seq[string];
+    homeDir = ""):
     Resource =
   ## Build an ``env.userPath`` resource contributing ``binDirs`` to
   ## the user PATH. The address encodes the package id so a re-apply
@@ -79,10 +80,11 @@ proc envUserPathResource*(packageId: string; binDirs: seq[string]):
     address: address,
     lifecyclePolicy: lpDefault,
     pathEntries: binDirs,
-    pathHostFilePath: defaultUserPathHostFile(),
+    pathHostFilePath: defaultUserPathHostFile(homeDir),
     pathBlockId: "repro-home-userpath:" & address)
 
-proc envUserVariableResource*(packageId, varName, value: string):
+proc envUserVariableResource*(packageId, varName, value: string;
+    homeDir = ""):
     Resource =
   ## Build an ``env.userVariable`` resource for one per-tool env entry
   ## (e.g. ``JAVA_HOME = <prefix>``). The address embeds the package
@@ -99,9 +101,11 @@ proc envUserVariableResource*(packageId, varName, value: string):
     address: "home.package." & packageId & ".env." & varName,
     lifecyclePolicy: lpDefault,
     envVarName: varName,
-    envVarPayload: payload)
+    envVarPayload: payload,
+    envVarHostFilePath: defaultUserPathHostFile(homeDir))
 
-proc planEnvBindings*(realized: seq[RealizedRecord]): EnvBindingPlan =
+proc planEnvBindings*(realized: seq[RealizedRecord];
+    homeDir = ""): EnvBindingPlan =
   ## Synthesize the M69 PATH + env var resources from a realized-
   ## package sequence. The returned ``resources`` list is in a stable
   ## order: per-package PATH resource first, then the per-package env
@@ -110,10 +114,10 @@ proc planEnvBindings*(realized: seq[RealizedRecord]): EnvBindingPlan =
   for r in realized:
     let binDirs = prefixBinDirs(r)
     if binDirs.len > 0:
-      result.resources.add(envUserPathResource(r.packageId, binDirs))
+      result.resources.add(envUserPathResource(r.packageId, binDirs, homeDir))
       for d in binDirs:
         result.binDirs.add(d)
     for binding in r.envBindings:
       result.resources.add(envUserVariableResource(r.packageId,
-        binding.name, binding.value))
+        binding.name, binding.value, homeDir))
       result.envVariables.add(binding)

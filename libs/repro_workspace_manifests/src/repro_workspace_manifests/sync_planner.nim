@@ -57,6 +57,7 @@ type
     scLocallyUnpublished
     scDivergentFeatureBranch
     scMissingCheckout
+    scForcePushRebase
 
   SyncActionKind* = enum
     ## Discriminator for what the dispatcher should do for a given repo
@@ -67,6 +68,7 @@ type
     saFetchFastForward
     saAttachBranch
     saClone
+    saForcePushRebase
 
   RepoSyncObservation* = object
     ## Everything the planner needs to know about ONE local checkout.
@@ -96,21 +98,14 @@ type
     ##                          tracking ref (``git log @{u}..HEAD`` is
     ##                          non-empty, or the published-evidence
     ##                          query says ``isPublished=false``).
-    ## - ``workspaceFeatureStarted`` — M16 flag from the metadata.
-    ##                          When ``true`` AND the current checkout
-    ##                          is on the workspace's marked feature
-    ##                          branch, the planner switches the
-    ##                          "clean fast-forwardable" arm to
-    ##                          ``scDivergentFeatureBranch`` so sync
-    ##                          NO-OPS the working tree instead of
-    ##                          reconciling it to the lock's tip.
-    ## - ``workspaceBranch``   — the workspace's recorded branch
-    ##                          (M13). Empty when no metadata is
-    ##                          present. The planner uses this to gate
-    ##                          the started-mark policy to repos that
-    ##                          are actually on the marked branch — a
-    ##                          repo that happens to be on some OTHER
-    ##                          branch keeps the M10 baseline semantics.
+    ##
+    ## The observation deliberately carries NO workspace-wide metadata. It
+    ## used to also carry the M16 ``feature_started`` mark and the recorded
+    ## workspace branch, which together suppressed the fast-forward arm on the
+    ## marked branch. Both are gone: a repo's sync decision is a function of
+    ## that repo's own git state and the manifest's pin for it, and nothing
+    ## else. Whether the operator declared a feature "started" cannot make a
+    ## teammate's pushed commit unwanted.
     exists*: bool
     headSha*: string
     isClean*: bool
@@ -119,8 +114,8 @@ type
     remoteBranchTip*: string
     lockedRevisionTip*: string
     hasUnpublishedCommits*: bool
-    workspaceFeatureStarted*: bool
-    workspaceBranch*: string
+    hasForcePushedCommits*: bool
+    forcePushedBaseSha*: string
 
   RepoSyncDecision* = object
     ## One repo's classification + chosen mutating action. The
@@ -137,6 +132,7 @@ type
     branch*: string
     message*: string
     refusalReason*: string
+    forcePushedBaseSha*: string
 
   SyncPlan* = object
     ## The mutating actions the dispatcher must enqueue. Position in
@@ -163,6 +159,7 @@ proc syncCaseTag*(syncCase: SyncCase): string =
   of scLocallyUnpublished: "locally_unpublished"
   of scDivergentFeatureBranch: "divergent_feature_branch"
   of scMissingCheckout: "missing_checkout"
+  of scForcePushRebase: "force_push_rebase"
 
 proc syncActionTag*(action: SyncActionKind): string =
   ## Stable identifier for the planner's action enum, used as the JSON
@@ -173,6 +170,7 @@ proc syncActionTag*(action: SyncActionKind): string =
   of saFetchFastForward: "fetch_fast_forward"
   of saAttachBranch: "attach_branch"
   of saClone: "clone"
+  of saForcePushRebase: "force_push_rebase"
 
 proc sameSha(a, b: string): bool =
   ## SHA equality that tolerates an abbreviated prefix on either side.
@@ -187,7 +185,8 @@ proc sameSha(a, b: string): bool =
   a.startsWith(b) or b.startsWith(a)
 
 proc classifyRepoState*(resolved: ResolvedRepo;
-                        observation: RepoSyncObservation): RepoSyncDecision =
+                        observation: RepoSyncObservation;
+                        rebaseOnForcePush: bool = true): RepoSyncDecision =
   ## Map ``(resolved, observation)`` to one of the seven canonical
   ## cases. The decision logic deliberately runs in a fixed priority
   ## order:
@@ -231,6 +230,20 @@ proc classifyRepoState*(resolved: ResolvedRepo;
     result.message = "refusing to sync dirty checkout at '" & resolved.path & "'"
     return
 
+  if observation.hasForcePushedCommits:
+    result.syncCase = scForcePushRebase
+    if not rebaseOnForcePush:
+      result.action = saNone
+      result.refusalReason = "remote branch was force-pushed; refused — " &
+        "run 'repro sync --rebase-on-force-push' to rebase your local commits " &
+        "on the new history, or 'repro sync --force-sync' to discard local changes"
+      result.message = "refusing to sync force-pushed checkout at '" & resolved.path & "'"
+    else:
+      result.action = saForcePushRebase
+      result.forcePushedBaseSha = observation.forcePushedBaseSha
+      result.message = "cherry-picking locally authored commits on top of force-pushed branch at '" & resolved.path & "'"
+    return
+
   # Locally-unpublished commits beat the fast-forward / divergence
   # check: even a clean tree that's strictly ahead of the lock and the
   # remote tracking branch is a refusal — the operator owns work that
@@ -255,6 +268,39 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   # straight to the divergent-feature-branch arm.
   let lockedTip = observation.lockedRevisionTip
 
+  # Fast-forwardable: HEAD is behind its OWN upstream (``<remote>/<current
+  # branch>``). Syncing the trunk and syncing a feature branch are the SAME
+  # operation — only which ref is upstream differs — so both take this one path.
+  #
+  # This previously also required ``remoteBranchTip == lockedTip`` (the
+  # MANIFEST's pinned revision). That holds only when the checked-out branch IS
+  # the manifest's branch, so a feature branch could never fast-forward from its
+  # own upstream and a teammate's pushed commits never arrived. The M16
+  # ``feature_started`` mark then suppressed this arm outright on the marked
+  # branch, which made the collaboration case worse rather than better. Both are
+  # gone: the sync target is simply the current branch's upstream.
+  #
+  # ``hasUnpublishedCommits = false`` is the observation pipeline's signal that
+  # HEAD is strictly BEHIND its upstream rather than diverged, which is what
+  # makes the fast-forward sound.
+  #
+  # This arm is deliberately checked BEFORE the "clean at locked revision" arm
+  # below. A feature branch freshly cut from the trunk has ``headSha ==
+  # lockedTip`` on its very first day, so testing the manifest pin first would
+  # declare the checkout finished and swallow every commit a teammate pushed to
+  # that branch — the same manifest-pin-shadows-the-branch mistake in a
+  # different place. When the current branch IS at its own upstream tip this
+  # guard is false and control falls through to the pin comparison unchanged.
+  if observation.currentBranch.len > 0 and
+      observation.remoteBranchTip.len > 0 and
+      not observation.hasUnpublishedCommits and
+      not sameSha(observation.headSha, observation.remoteBranchTip):
+    result.syncCase = scCleanFastForwardable
+    result.action = saFetchFastForward
+    result.message = "fast-forwarding '" & resolved.path & "' on branch " &
+      observation.currentBranch & " → " & observation.remoteBranchTip
+    return
+
   if lockedTip.len > 0 and sameSha(observation.headSha, lockedTip):
     if observation.currentBranch.len == 0:
       # Detached HEAD that happens to point at the locked revision.
@@ -271,40 +317,6 @@ proc classifyRepoState*(resolved: ResolvedRepo;
       lockedTip
     return
 
-  # Fast-forwardable: we're on a branch whose tip matches the locked
-  # tip via plain fast-forward — i.e. the locked tip is downstream of
-  # what's already in the working tree's branch. The simplest sound
-  # test is "the locked tip IS the remote tracking branch's tip and
-  # HEAD is reachable from it" — but in the local-only fixture the
-  # remote tracking ref and the locked tip are typically the same SHA
-  # the manifest pinned, so an exact SHA match on
-  # ``remoteBranchTip == lockedTip`` is the load-bearing signal here.
-  # The caller's observation pipeline supplies ``hasUnpublishedCommits
-  # = false`` whenever HEAD is strictly behind ``origin/<branch>``,
-  # which means a fast-forward is safe.
-  if observation.currentBranch.len > 0 and lockedTip.len > 0 and
-      observation.remoteBranchTip.len > 0 and
-      sameSha(observation.remoteBranchTip, lockedTip):
-    # M16 — the workspace's feature-started mark amplifies this case:
-    # if the workspace is marked AND the current branch is the marked
-    # feature branch, the operator is mid-feature and sync should NOT
-    # reconcile the working tree to the lock's tip. Treat as a
-    # divergent-feature-branch report-only outcome instead.
-    if observation.workspaceFeatureStarted and
-        observation.workspaceBranch.len > 0 and
-        observation.currentBranch == observation.workspaceBranch:
-      result.syncCase = scDivergentFeatureBranch
-      result.action = saNone
-      result.message = "feature branch '" & observation.currentBranch &
-        "' at '" & resolved.path &
-        "' is the workspace's marked started branch; sync preserves it"
-      return
-    result.syncCase = scCleanFastForwardable
-    result.action = saFetchFastForward
-    result.message = "fast-forwarding '" & resolved.path & "' on branch " &
-      observation.currentBranch & " → " & lockedTip
-    return
-
   # Everything else: the working tree is clean, has nothing
   # unpublished, but its HEAD does not match the locked tip and the
   # current branch is not a candidate for an unattended fast-forward.
@@ -318,7 +330,8 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   return
 
 proc planSync*(resolved: openArray[ResolvedRepo];
-               observations: openArray[RepoSyncObservation]):
+               observations: openArray[RepoSyncObservation];
+               rebaseOnForcePush: bool = true):
               tuple[plan: SyncPlan; report: SyncReport] =
   ## Drive ``classifyRepoState`` over every (resolved, observation)
   ## pair. ``resolved.len`` MUST equal ``observations.len`` — the
@@ -330,6 +343,6 @@ proc planSync*(resolved: openArray[ResolvedRepo];
       "planSync requires one observation per resolved repo (got " &
         $resolved.len & " repos and " & $observations.len & " observations)")
   for i, repo in resolved:
-    let decision = classifyRepoState(repo, observations[i])
+    let decision = classifyRepoState(repo, observations[i], rebaseOnForcePush)
     result.plan.decisions.add(decision)
     result.report.decisions.add(decision)

@@ -192,7 +192,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
@@ -207,12 +207,12 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
 proc invokeSync(fx: Fixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "workspace", "sync", "myproject",
+    fx.reproBin, "workspace", "sync", "--write-report", "myproject",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc readReport(fx: Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "sync-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
@@ -297,3 +297,105 @@ suite "RA-3 — sync fast-forwards each repo's own upstream":
         ["divergent_feature_branch", "locally_unpublished"]
       check dEntry["action"].getStr() == "none"
       check dEntry["executionStatus"].getStr() in ["noop", "refused"]
+
+  test "t_sync_updates_submodules_after_fast_forward":
+    ## Regression: after fast-forwarding a superproject whose submodule gitlink
+    ## moved upstream, sync must bring the submodule working tree in line so the
+    ## superproject does NOT end up dirty (`M <submodule>`) — a stale gitlink
+    ## otherwise blocks `repro branch` and misreports the repo as dirty.
+    ##
+    ## Falsifiability: without the post-ff `git submodule update`, the
+    ## superproject's `git status --porcelain` is non-empty (`M sub`) and the
+    ## submodule HEAD is still the OLD commit.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let scratch = createTempDir("repro-ra3sub-", "")
+      defer: removeDir(scratch)
+      let reproBin = reproBinary()
+      let afa = " -c protocol.file.allow=always "  # allow file:// submodules
+
+      # A `sub` origin (the submodule) with two commits on `main`.
+      let subOrigin = scratch / "origin-sub.git"
+      let subSeed = scratch / "seed-sub"
+      let subSha1 = seedGitOrigin(gitBin, subOrigin, subSeed, "main")
+      let subSha2 = seedSecondCommit(gitBin, subOrigin, subSeed, "main")
+      check subSha1 != subSha2
+
+      # A `super` origin embedding `sub` as a submodule, pinned at subSha1.
+      let superOrigin = scratch / "origin-super.git"
+      let superSeed = scratch / "seed-super"
+      discard requireGit(q(gitBin) & " init --bare -b main " & q(superOrigin))
+      discard requireGit(q(gitBin) & " init -b main " & q(superSeed))
+      discard requireGit(q(gitBin) & " -C " & q(superSeed) &
+        " config user.email t@t")
+      discard requireGit(q(gitBin) & " -C " & q(superSeed) &
+        " config user.name t")
+      discard requireGit(q(gitBin) & " -C " & q(superSeed) &
+        " config protocol.file.allow always")
+      writeFile(superSeed / "README.md", "super\n")
+      discard requireGit(q(gitBin) & " -C " & q(superSeed) & " add README.md")
+      discard requireGit(q(gitBin) & afa & " -C " & q(superSeed) &
+        " submodule add " & q(fileUrl(subOrigin)) & " sub")
+      discard requireGit(q(gitBin) & " -C " & q(superSeed) & " -C sub checkout " &
+        subSha1)
+      discard requireGit(q(gitBin) & " -C " & q(superSeed) & " add sub .gitmodules")
+      discard requireGit(q(gitBin) & " -C " & q(superSeed) &
+        " commit -m \"super with sub@1\"")
+      discard requireGit(q(gitBin) & " -C " & q(superSeed) &
+        " remote add origin " & q(superOrigin))
+      discard requireGit(q(gitBin) & " -C " & q(superSeed) & " push origin main")
+
+      # Single-repo workspace manifest for `super`. Native layout: the
+      # membership manifest (projects/ + repos/) lives at the workspace
+      # ROOT, matching setupFixture above — reprobuild resolves membership
+      # from the root, not a legacy `.repo/manifests` checkout.
+      let workspaceRoot = scratch / "workspace"
+      createDir(workspaceRoot)
+      let manifestsRoot = workspaceRoot
+      createDir(manifestsRoot / "projects")
+      createDir(manifestsRoot / "repos")
+      writeFile(manifestsRoot / "projects" / "myproject.toml",
+        "schema = \"reprobuild.workspace.project.v1\"\n\n" &
+        "[project]\nname = \"myproject\"\ndefault_revision = \"main\"\n" &
+        "trunk = \"main\"\n\n" &
+        "[[remote]]\nname = \"super-origin\"\nfetch = \"" &
+        fileUrl(superOrigin) & "\"\n\nincludes = [\n  \"repos/super.toml\",\n]\n")
+      writeFile(manifestsRoot / "repos" / "super.toml",
+        "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" &
+        "name = \"super\"\npath = \"super\"\nremote = \"super-origin\"\n" &
+        "revision = \"main\"\n")
+
+      # Clone super WITH its submodule (checked out at subSha1); allow file://
+      # submodule fetches for the later `git submodule update`.
+      discard requireGit(q(gitBin) & afa & " clone --recurse-submodules " &
+        q(fileUrl(superOrigin)) & " " & q(workspaceRoot / "super"))
+      discard requireGit(q(gitBin) & " -C " & q(workspaceRoot / "super") &
+        " config protocol.file.allow always")
+      check requireGit(q(gitBin) & " -C " & q(workspaceRoot / "super") &
+        " status --porcelain").strip().len == 0
+
+      # Advance super's upstream: bump the submodule gitlink to subSha2.
+      discard requireGit(q(gitBin) & " -C " & q(superSeed) & " -C sub fetch origin")
+      discard requireGit(q(gitBin) & " -C " & q(superSeed) & " -C sub checkout " &
+        subSha2)
+      discard requireGit(q(gitBin) & " -C " & q(superSeed) & " add sub")
+      discard requireGit(q(gitBin) & " -C " & q(superSeed) &
+        " commit -m \"bump sub@2\"")
+      discard requireGit(q(gitBin) & " -C " & q(superSeed) & " push origin main")
+
+      # Sync fast-forwards super AND must update its submodule.
+      let res = runShell(shellCommand(@[
+        reproBin, "workspace", "sync", "--write-report", "myproject",
+        "--workspace-root=" & workspaceRoot]))
+      if res.code notin [0, 2]:
+        checkpoint("sync output: " & res.output)
+      check res.code in [0, 2]
+
+      # Superproject is CLEAN (submodule updated) — pre-fix it is `M sub`.
+      check requireGit(q(gitBin) & " -C " & q(workspaceRoot / "super") &
+        " status --porcelain").strip().len == 0
+      # And the submodule working tree is at the new gitlink commit.
+      check requireGit(q(gitBin) & " -C " & q(workspaceRoot / "super" / "sub") &
+        " rev-parse HEAD").strip() == subSha2

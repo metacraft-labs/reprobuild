@@ -50,6 +50,7 @@ import nimcrypto/sha2 as ncSha2
 import repro_binary_cache_client/cache_key
 import repro_binary_cache_server/types as bcsTypes
 import repro_project_dsl/install_mirror_resolver
+import repro_project_dsl/source_cache_identity
 export cache_key, bcsTypes, install_mirror_resolver
 
 proc extendedPath(path: string): string =
@@ -57,11 +58,12 @@ proc extendedPath(path: string): string =
     if path.len == 0 or path.startsWith("\\\\"):
       path
     else:
-      "\\\\?\\" & absolutePath(path).replace('/', '\\')
+      "\\\\?\\" & normalizedPath(absolutePath(path)).replace('/', '\\')
   else:
     path
 
 when defined(reproProviderMode):
+  import std/streams
   import repro_provider_runtime
   export repro_provider_runtime
 

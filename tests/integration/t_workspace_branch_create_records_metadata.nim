@@ -5,7 +5,7 @@
 ## forms:
 ##
 ##   1. A successful ``repro branch <name>`` writes ``<name>`` into
-##      ``[workspace].branch`` of ``.repo/workspace.toml``. The bytes
+##      ``[workspace].branch`` of ``.repro/workspace.toml``. The bytes
 ##      land via the M13 ``writeWorkspaceBranch`` writer; a re-read
 ##      through ``readWorkspaceBranch`` returns the new value.
 ##   2. After the create form, the show form (``repro branch`` with
@@ -47,6 +47,22 @@ proc repoRoot(): string =
 proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
+
+proc removeDirEventually(path: string) =
+  ## Git may still be closing files from a just-finished branch/create flow.
+  ## Retry teardown, but still fail if the workspace remains non-empty.
+  if not dirExists(path):
+    return
+  var lastMsg = ""
+  for _ in 0 ..< 40:
+    try:
+      removeDir(path)
+      return
+    except OSError as e:
+      lastMsg = e.msg
+      sleep(50)
+  checkpoint("cleanup still failed for " & path & ": " & lastMsg)
+  removeDir(path)
 
 # ---- bare-repo seed fixture ----------------------------------------------
 
@@ -131,7 +147,7 @@ proc setupFixture(gitBin, slug: string): M14MetaFixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
@@ -150,18 +166,18 @@ proc runInit(fx: M14MetaFixture): CmdResult =
 
 proc runBranchShow(fx: M14MetaFixture): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "branch",
+    fx.reproBin, "branch", "--write-report",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc runBranchCreate(fx: M14MetaFixture; name: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "branch", name,
+    fx.reproBin, "branch", "--write-report", name,
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc readReport(fx: M14MetaFixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "branch-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
@@ -176,7 +192,7 @@ suite "M14 — repro branch records metadata round-trip":
       skip()
     else:
       let fx = setupFixture(gitBin, "create-writes")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       # Init clones both repos and records ``main`` (the resolver's
       # trunk) as the active branch.
@@ -202,7 +218,7 @@ suite "M14 — repro branch records metadata round-trip":
       # form. The file is still a metadata-only workspace.toml (no
       # ``[[manifest]]`` entries) because we initialised in
       # single-project mode.
-      let tomlPath = fx.workspaceRoot / ".repo" / "workspace.toml"
+      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
       let parsed = readWorkspaceLocal(tomlPath)
       check parsed.workspace.project == "myproject"
       check parsed.workspace.branch.isSome
@@ -224,7 +240,7 @@ suite "M14 — repro branch records metadata round-trip":
       skip()
     else:
       let fx = setupFixture(gitBin, "show-after-create")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       check runInit(fx).code == 0
       check runBranchCreate(fx, "feature-show").code == 0
@@ -252,7 +268,7 @@ suite "M14 — repro branch records metadata round-trip":
       skip()
     else:
       let fx = setupFixture(gitBin, "show-after-init")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       # ``workspace init`` records the resolver's ``trunk`` (``main``
       # in this fixture) as the active branch. ``repro branch``

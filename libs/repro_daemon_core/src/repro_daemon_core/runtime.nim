@@ -6,6 +6,12 @@ import blake3
 import ./client
 import ./protocol
 import ./stats_store
+import ./lease_registry
+
+const ReproTestRunnerOwnerTokenEnv =
+  "REPRO_TEST_RUNNER_OWNER_TOKEN"
+  ## Private process-ownership marker installed by ``repro_test_runner``.
+  ## It is carried only across daemon process launch/restart boundaries.
 
 when defined(posix):
   import std/posix except Time
@@ -49,6 +55,18 @@ type
     stagedGenerationDir*: string
     previousStagedGenerationDir*: string
     restartRunId*: string
+    systemScope*: bool
+      ## Ephemeral-State-Leases L4 (§4.1): when true the daemon serves the
+      ## SYSTEM lease scope — its lease reaper tick sweeps the system state
+      ## store (``/var/lib/repro/state``) instead of the per-user one. Set by
+      ## ``repro daemon serve --system`` (the system reaper unit).
+    leaseStoreRoot*: string
+      ## Explicit lease state-store root override (``--state-root``). Empty
+      ## => derived from ``systemScope`` via ``leaseStoreRootForScope``. A
+      ## hermetic test points this at a throwaway dir under ``$HOME``.
+    processOwnerToken: string
+      ## Internal launch-only copy of ``ReproTestRunnerOwnerTokenEnv``. Never
+      ## serialize or log this field, or include it in action environments.
 
   UserDaemonBuildEmit* = proc(kind: UserDaemonBuildEventKind;
                               message: string;
@@ -217,19 +235,76 @@ proc absoluteNormalized(path: string): string =
   else:
     os.normalizedPath(getCurrentDir() / path)
 
+proc companionFullCliPath(imagePath: string): string =
+  ## After the single-`repro` consolidation there is no separate `repro-full`
+  ## companion image — `repro` IS the full CLI. Return "" so the image digest
+  ## and daemon-staleness checks track only the one binary (`imagePath`), and so
+  ## a stale `repro-full` lingering on PATH is never adopted as a companion.
+  discard imagePath
+  ""
+
+proc imageDigestHex*(imagePath: string): string =
+  ## Digest a daemon image. Exported so identity regressions can be tested
+  ## without spawning a platform service manager.
+  let primary = fileDigestHex(imagePath)
+  if primary.len == 0:
+    return ""
+  let companion = companionFullCliPath(imagePath)
+  if companion.len == 0:
+    return primary
+  let companionDigest = fileDigestHex(companion)
+  if companionDigest.len == 0:
+    return primary
+  let hasher = initHasher()
+  defer: hasher.close()
+  hasher.update("repro-dev-image-v1\n")
+  hasher.update("primary=" & primary & "\n")
+  hasher.update("companion=" & companionDigest & "\n")
+  "blake3-256:" & hasher.finalize().toHex()
+
+proc expectedDaemonRunningDigestHex(sourceExe: string; devMode: bool): string =
+  if sourceExe.len == 0 or not isAbsolute(sourceExe) or
+      not fileExists(sourceExe):
+    return ""
+  if devMode:
+    return imageDigestHex(sourceExe)
+  let companion = companionFullCliPath(sourceExe)
+  if companion.len > 0:
+    let companionDigest = fileDigestHex(companion)
+    if companionDigest.len > 0:
+      return companionDigest
+  fileDigestHex(sourceExe)
+
+proc stageFullCliCompanion(sourceExe, generationDir: string) =
+  ## No-op after the single-`repro` consolidation: there is no `repro-full`
+  ## companion image to stage alongside the primary daemon image.
+  discard sourceExe
+  discard generationDir
+
 proc reconnectLimitationsText(): string =
   "watch sessions can be reattached by run id/session id; completed build " &
     "session diagnostics and stats persist; attached build event streams are " &
     "not replayed after a dev self-restart"
+
+proc runningDevImagePath(config: UserDaemonConfig): string =
+  if config.stagedGenerationDir.len > 0:
+    let staged = config.stagedGenerationDir / addFileExt("repro-daemon", ExeExt)
+    if fileExists(staged):
+      return absoluteNormalized(staged)
+  if config.devMode and config.sourceExe.len > 0:
+    let source = absoluteNormalized(config.sourceExe)
+    if fileExists(source):
+      return source
+  absoluteNormalized(getAppFilename())
 
 proc initDevRestartState(config: UserDaemonConfig): DevRestartState =
   result.enabled = config.devMode
   result.sourceImagePath =
     if config.sourceExe.len > 0: absoluteNormalized(config.sourceExe)
     else: absoluteNormalized(getAppFilename())
-  result.runningImagePath = absoluteNormalized(getAppFilename())
-  result.sourceHash = fileDigestHex(result.sourceImagePath)
-  result.runningHash = fileDigestHex(result.runningImagePath)
+  result.runningImagePath = runningDevImagePath(config)
+  result.sourceHash = imageDigestHex(result.sourceImagePath)
+  result.runningHash = imageDigestHex(result.runningImagePath)
   result.protocolGeneration = $UserDaemonProtocolMajor & "." &
     $UserDaemonProtocolMinor
   result.restartRunId =
@@ -245,7 +320,7 @@ proc stageDevDaemonBinary*(sourceExe: string; config: UserDaemonConfig;
                            restartRunId = ""):
     tuple[imagePath: string; generationDir: string; runId: string;
           sourceHash: string] =
-  result.sourceHash = fileDigestHex(sourceExe)
+  result.sourceHash = imageDigestHex(sourceExe)
   if result.sourceHash.len == 0:
     raise newException(UserDaemonRuntimeError,
       "cannot stage missing repro-daemon source executable: " & sourceExe)
@@ -259,6 +334,7 @@ proc stageDevDaemonBinary*(sourceExe: string; config: UserDaemonConfig;
   createDir(result.generationDir)
   result.imagePath = result.generationDir / addFileExt("repro-daemon", ExeExt)
   copyFile(sourceExe, result.imagePath)
+  stageFullCliCompanion(sourceExe, result.generationDir)
   try:
     setFilePermissions(result.imagePath, {fpUserRead, fpUserWrite,
       fpUserExec, fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
@@ -449,9 +525,18 @@ proc expandRecordSeq(value: string): seq[string] =
   for item in value.split('\t'):
     result.add(expandRecordValue(item.replace("\\t", "\t")))
 
+proc atomicWriteTextFile(path, content: string) =
+  let tmpPath = path & ".tmp." & $getCurrentProcessId()
+  writeFile(tmpPath, content)
+  try:
+    moveFile(tmpPath, path)
+  except CatchableError:
+    try: removeFile(tmpPath) except OSError: discard
+    raise
+
 proc writeSessionRecord(config: UserDaemonConfig; session: UserDaemonSession) =
   createDir(sessionRecordsDir(config))
-  writeFile(sessionRecordPath(config, session.sessionId),
+  atomicWriteTextFile(sessionRecordPath(config, session.sessionId),
     "sessionId=" & flattenRecordValue(session.sessionId) & "\n" &
     "projectRoot=" & flattenRecordValue(session.projectRoot) & "\n" &
     "mode=" & flattenRecordValue(session.mode) & "\n" &
@@ -622,6 +707,36 @@ proc writeStatusFile(config: UserDaemonConfig; status: UserDaemonStatus) =
       status.previousStagedGenerationDir & "\n" &
     "featureFlags=" & status.featureFlags & "\n")
 
+proc daemonLeaseScope(config: UserDaemonConfig): DaemonLeaseScope =
+  ## L4 (§4.1): a ``--system`` daemon serves the system lease scope; every
+  ## other daemon serves the per-user scope.
+  if config.systemScope: dlsSystem else: dlsUser
+
+proc daemonLeaseStoreRoot(config: UserDaemonConfig): string =
+  ## The state-store root this daemon's lease registry + reaper tick operate
+  ## on: an explicit ``--state-root`` wins, otherwise it is derived from the
+  ## daemon's scope (§4.1 routing).
+  leaseStoreRootForScope(daemonLeaseScope(config), config.leaseStoreRoot)
+
+proc handleLeaseRenew(socket: IpcConn; config: UserDaemonConfig;
+                      request: DaemonLeaseRenewRequest) =
+  ## L4 (§4.2) renew handler: advance the holder's lease in the scoped
+  ## store. The request's own ``scope`` selects the store root (a mismatched
+  ## scope is honoured verbatim so a client can address either registry);
+  ## the daemon's ``--state-root`` override still wins for a hermetic test.
+  let response =
+    try:
+      applyLeaseRenew(request, overrideRoot = config.leaseStoreRoot)
+    except CatchableError as err:
+      DaemonLeaseRenewResponse(ok: false,
+        reason: "lease renew raised: " & err.msg,
+        effectiveDeadlineUnix: LeaseRenewKeepSentinel)
+  socket.writeFrame(udkLeaseRenewAck, leaseRenewResponseBody(response))
+  logLine(config.logPath, "lease renew address=" & request.address &
+    " consumer=" & request.consumerId & " ttlSeconds=" &
+    $request.ttlSeconds & " ok=" & $response.ok & " hadRecord=" &
+    $response.hadRecord)
+
 proc handleHello(socket: IpcConn; config: UserDaemonConfig; generation: string;
                  frameBody: openArray[byte]): bool =
   let hello = parseHello(frameBody)
@@ -757,6 +872,15 @@ proc updateSessionState(config: UserDaemonConfig; session: var UserDaemonSession
     session.endedAtUnix = getTime().toUnix
   writeSessionRecord(config, session)
 
+proc setSessionState(session: var UserDaemonSession; state: string;
+                     exitCode = -1; message = "") =
+  session.state = state
+  session.exitCode = exitCode
+  if message.len > 0:
+    session.message = message
+  if state notin ["accepted", "running", "cancelling", "watching", "idle"]:
+    session.endedAtUnix = getTime().toUnix
+
 proc buildResponseDelayMs(): int =
   let raw = getEnv("REPRO_DAEMON_M3_BUILD_RESPONSE_DELAY_MS", "")
   if raw.len == 0:
@@ -842,20 +966,12 @@ proc runBuildRequestWorker(socket: IpcConn; config: UserDaemonConfig;
   proc cancelCheck(): bool =
     request.attached and request.cancelOnDisconnect and socket.clientDisconnected()
 
-  when defined(posix):
-    # Prewarm in the worker, not the daemon parent. This warms the on-disk
-    # action / file-metadata caches the build below reads, but does so in this
-    # short-lived forked process so its (potentially multi-GB) build-graph and
-    # provider-compile allocations are reclaimed on `quit` instead of
-    # accumulating in the long-lived daemon. Best-effort: a prewarm failure
-    # (e.g. tool-resolution not yet satisfiable) must never abort the build —
-    # the executor below re-derives everything authoritatively.
-    if userDaemonBuildPrewarmer != nil:
-      try:
-        userDaemonBuildPrewarmer(request)
-      except CatchableError as err:
-        logLine(config.logPath, "build prewarm skipped session=" &
-          sessionId & " error=" & err.msg)
+  # Do not run the optional build prewarmer here. It duplicates the graph /
+  # provider-compile path that the executor below runs authoritatively, but it
+  # happens before any terminal build event and cannot observe
+  # cancel-on-disconnect while inside heavyweight project inspection. CMake
+  # generated projects made that duplication visible as detached workers
+  # consuming multi-GB RSS after the attached client was gone.
 
   try:
     updateSessionState(config, session, "running",
@@ -912,6 +1028,11 @@ proc runBuildRequestWorker(socket: IpcConn; config: UserDaemonConfig;
 proc handleBuildRequest(socket: IpcConn; config: UserDaemonConfig;
                         request: UserDaemonBuildRequest;
                         sessions: var seq[UserDaemonSession]) =
+  var workerRequest = request
+  # Sanitize immediately before the detached worker fork as defense in depth
+  # for direct runtime callers that bypass the wire codec.
+  workerRequest.environment =
+    sanitizeUserDaemonRequestEnvironment(request.environment)
   let started = getTime()
   let sessionId =
     if request.runId.len > 0:
@@ -942,25 +1063,15 @@ proc handleBuildRequest(socket: IpcConn; config: UserDaemonConfig;
         updateSessionState(config, session, "cancelled", 130,
           "daemon-hosted build cancelled before scheduling")
         return
-    # NOTE: the prewarm step (build-graph inspection + file-metadata cache
-    # warming) is intentionally NOT run here in the long-lived daemon parent.
-    # It used to be, but `prepareBuildGraphInspection` does heavyweight work
-    # (interface extraction, tool-identity resolution, and a nested
-    # provider-compile `runBuild`); running it in the single-threaded parent
-    # serialised every incoming build request behind a multi-minute warm-up
-    # and — because the parent never exits — leaked its large graph/ORC
-    # allocations into the daemon, growing RSS without bound across requests
-    # (observed wedging the `develop --cmake` inner-build path for tens of
-    # minutes with a multi-GB daemon). The worker repeats the same inspection
-    # anyway, so prewarming there is sufficient: it still warms the on-disk
-    # caches the build reads, runs in a short-lived process that frees
-    # everything on exit, and keeps the parent free to fork the next request
-    # immediately. See `runBuildRequestWorker`.
+    # The worker runs the authoritative build entrypoint directly. Earlier
+    # versions ran a speculative graph/file-metadata prewarm before the real
+    # executor, but that duplicated provider inspection, happened before any
+    # terminal event, and could outlive an attached client disconnect.
     when defined(posix):
       spawnDetachedDaemonWorker(config, "build worker", sessionId, socket):
-        runBuildRequestWorker(socket, config, request, session)
+        runBuildRequestWorker(socket, config, workerRequest, session)
     else:
-      runBuildRequestWorker(socket, config, request, session)
+      runBuildRequestWorker(socket, config, workerRequest, session)
   finally:
     sessions.removeSession(sessionId)
 
@@ -1009,11 +1120,17 @@ proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
       sessionRef[].state = "watching"
     if message.len > 0:
       sessionRef[].message = message
-    writeSessionRecord(config, sessionRef[])
     let event = nextWatchEvent(request.runId, sessionId, projectRoot, eventId,
       kind, message, terminal = terminal, exitCode = exitCode,
       severity = severity, payloadJson = payloadJson)
-    appendWatchEventRecord(config, sessionId, event)
+    if terminal:
+      # Attach streams must observe the terminal event before the session
+      # record moves to a terminal state, otherwise they can close early.
+      appendWatchEventRecord(config, sessionId, event)
+      writeSessionRecord(config, sessionRef[])
+    else:
+      writeSessionRecord(config, sessionRef[])
+      appendWatchEventRecord(config, sessionId, event)
     if streamToSocket:
       socket.writeFrame(udkWatchEvent, buildEventBody(event))
 
@@ -1045,8 +1162,8 @@ proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
       if stopped: "daemon-hosted watch stopped"
       elif exitCode == 0: "daemon-hosted watch finished"
       else: "daemon-hosted watch failed"
-    updateSessionState(config, sessionRef[], state, exitCode, message)
     if not terminalSent:
+      setSessionState(sessionRef[], state, exitCode, message)
       # Mirror the Named-Targets M2 ``runBuildRequestWorker`` guard: the
       # executor may have already emitted its own terminal event (e.g.
       # the M3 ``unknown_target`` / ``target_ambiguous`` translation in
@@ -1059,6 +1176,8 @@ proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
         "{\"executor\":\"direct-watch-entrypoint\"}",
         sessionRef[].watchedPaths,
         "exitCode=" & $exitCode)
+    else:
+      updateSessionState(config, sessionRef[], state, exitCode, message)
     try: socket.closeIpcConn() except CatchableError: discard
     flushStatsAfterTerminal(config, sessionRef[].sessionId)
     logLine(config.logPath, "watch request finished session=" &
@@ -1071,8 +1190,8 @@ proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
     let message =
       if cancelled: "daemon-hosted watch stopped"
       else: "daemon-hosted watch failed: " & err.msg
-    updateSessionState(config, sessionRef[], state, code, message)
     if not terminalSent:
+      setSessionState(sessionRef[], state, code, message)
       try:
         emitEvent(kind, message, true, code,
           if cancelled: "warning" else: "error",
@@ -1080,7 +1199,10 @@ proc runWatchRequestWorker(socket: IpcConn; config: UserDaemonConfig;
           sessionRef[].watchedPaths,
           "exitCode=" & $code)
       except CatchableError:
+        writeSessionRecord(config, sessionRef[])
         discard
+    else:
+      updateSessionState(config, sessionRef[], state, code, message)
     logLine(config.logPath, "watch request " & state & " session=" &
       sessionRef[].sessionId & " message=" & message)
 
@@ -1110,6 +1232,11 @@ proc streamWatchSession(socket: IpcConn; config: UserDaemonConfig;
 proc handleWatchStart(socket: IpcConn; config: UserDaemonConfig;
                       request: UserDaemonWatchRequest;
                       sessions: var seq[UserDaemonSession]) =
+  var workerRequest = request
+  # Keep the build/watch spawn boundaries identical. Detached watch workers
+  # must not receive a private launch marker through an in-process request.
+  workerRequest.environment =
+    sanitizeUserDaemonRequestEnvironment(request.environment)
   let started = getTime()
   let sessionId =
     if request.runId.len > 0:
@@ -1137,10 +1264,10 @@ proc handleWatchStart(socket: IpcConn; config: UserDaemonConfig;
   socket.writeFrame(udkWatchEvent, buildEventBody(accepted))
   when defined(posix):
     spawnDetachedDaemonWorker(config, "watch worker", sessionId, socket):
-      runWatchRequestWorker(socket, config, request, session,
+      runWatchRequestWorker(socket, config, workerRequest, session,
         streamToSocket = request.attached and not request.detached)
   else:
-    runWatchRequestWorker(socket, config, request, session,
+    runWatchRequestWorker(socket, config, workerRequest, session,
       streamToSocket = request.attached and not request.detached)
   sessions.removeSession(sessionId)
 
@@ -1276,6 +1403,15 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
       " ok=" & $response.ok & " plan=" & $response.plan.len &
       " realized=" & $response.realizedCasPaths.len &
       " bytes=" & $response.totalBytesFetched)
+  of udkLeaseRenew:
+    let request =
+      try:
+        parseLeaseRenewRequestBody(frame.body)
+      except CatchableError as err:
+        socket.writeFrame(udkError, errorBody(
+          "malformed udkLeaseRenew body: " & err.msg))
+        return
+    handleLeaseRenew(socket, config, request)
   else:
     socket.writeFrame(udkError, errorBody(
       "unsupported user-daemon message in lifecycle server: " &
@@ -1302,7 +1438,7 @@ proc restartCandidateReady(config: UserDaemonConfig;
   if nowMs - state.lastCheckMs < devRestartPollIntervalMs():
     return false
   state.lastCheckMs = nowMs
-  let currentHash = fileDigestHex(state.sourceImagePath)
+  let currentHash = imageDigestHex(state.sourceImagePath)
   if currentHash.len == 0 or currentHash == state.runningHash:
     state.candidateHash = ""
     state.candidateSinceMs = 0
@@ -1361,7 +1497,32 @@ proc performDevSelfRestart(config: UserDaemonConfig;
   logLine(config.logPath, "dev restart old process exiting runId=" & runId)
   true
 
-proc runUserDaemonForeground*(config: UserDaemonConfig): int =
+proc runScopedLeaseReapTick(config: UserDaemonConfig) =
+  ## Ephemeral-State-Leases L4 (§4.2): run ONE wall-clock reap sweep against
+  ## this daemon's scoped lease store. Best-effort — a reap must never wedge
+  ## the event loop or crash the daemon, so all errors are logged + swallowed.
+  ## The store is on disk, so this is correct on the FIRST tick after a
+  ## restart (an expired record left by a prior instance is reaped here).
+  try:
+    let report = runLeaseReapTick(daemonLeaseScope(config),
+      overrideRoot = config.leaseStoreRoot)
+    if report.reaped.len > 0:
+      logLine(config.logPath, "lease reap tick reaped=" & $report.reaped.len &
+        " kept=" & $report.skipped.len & " scope=" &
+        (if config.systemScope: "system" else: "user"))
+  except CatchableError as err:
+    logLine(config.logPath, "lease reap tick error: " & err.msg)
+
+proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
+  var config = initialConfig
+  config.processOwnerToken = getEnv(ReproTestRunnerOwnerTokenEnv)
+  # The OS keeps the exec-time environment used by the test runner to identify
+  # this process. Remove the live entry before handling requests so daemon
+  # actions cannot inherit a runner-private implementation detail. Dev
+  # self-restarts use only the private config copy above.
+  if existsEnv(ReproTestRunnerOwnerTokenEnv):
+    delEnv(ReproTestRunnerOwnerTokenEnv)
+
   # Named-pipe endpoints live under the kernel ``\\.\pipe\`` namespace
   # which is NOT a filesystem directory; ``createDir`` on its
   # parent would raise. Filesystem endpoints (AF_UNIX socket paths)
@@ -1415,6 +1576,21 @@ proc runUserDaemonForeground*(config: UserDaemonConfig): int =
     devRestart.sourceImagePath & " running=" & devRestart.runningImagePath &
     " restartRunId=" & devRestart.restartRunId)
 
+  # L4 (§4.2): the wall-clock reaper tick. The event loop is otherwise
+  # event-driven (it only wakes on a client or the dev-restart poll); the
+  # tick is the one new capability. We cap the poll timeout at the reap
+  # cadence so a lapsed lease is swept promptly even with NO client traffic,
+  # and run the sweep BETWEEN accepts so socket handling is never stalled by
+  # a reap (a reap is a bounded store scan; it runs on the loop thread only
+  # when no client is waiting, so it cannot wedge an in-flight client).
+  let leaseReapMs = leaseReapIntervalMs()
+  var lastLeaseReapMs = nowUnixMs()
+  # Run an initial sweep at startup so a restart resumes reaping immediately
+  # (an expired record left by a crashed/stopped prior instance is reaped on
+  # the first pass rather than after a full interval).
+  if leaseReapMs > 0:
+    runScopedLeaseReapTick(config)
+
   var shuttingDown = false
   while not shuttingDown:
     if restartCandidateReady(config, devRestart):
@@ -1423,7 +1599,13 @@ proc runUserDaemonForeground*(config: UserDaemonConfig): int =
       if performDevSelfRestart(config, listener, daemonLock, devRestart):
         selfRestarting = true
         return 0
-    if not listener.waitForClient(int(devRestartPollIntervalMs())):
+    if leaseReapMs > 0 and nowUnixMs() - lastLeaseReapMs >= leaseReapMs:
+      runScopedLeaseReapTick(config)
+      lastLeaseReapMs = nowUnixMs()
+    var pollMs = int(devRestartPollIntervalMs())
+    if leaseReapMs > 0 and leaseReapMs < pollMs:
+      pollMs = leaseReapMs           # wake in time for the next reap tick
+    if not listener.waitForClient(pollMs):
       continue
     var client = listener.acceptIpc()
     try:
@@ -1479,6 +1661,11 @@ proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
   if config.restartRunId.len > 0:
     result.add("--restart-run-id")
     result.add(config.restartRunId)
+  if config.systemScope:
+    result.add("--system")
+  if config.leaseStoreRoot.len > 0:
+    result.add("--state-root")
+    result.add(config.leaseStoreRoot)
 
 proc launchdLabel(config: UserDaemonConfig): string =
   "org.reprobuild.repro-daemon." &
@@ -1486,6 +1673,12 @@ proc launchdLabel(config: UserDaemonConfig): string =
 
 proc launchdPlistPath(config: UserDaemonConfig): string =
   config.stateDir / "launchd" / (launchdLabel(config) & ".plist")
+
+proc processOwnerTokenForLaunch(config: UserDaemonConfig): string =
+  if config.processOwnerToken.len > 0:
+    config.processOwnerToken
+  else:
+    getEnv(ReproTestRunnerOwnerTokenEnv)
 
 proc renderLaunchdUserAgentPlist*(exe: string; config: UserDaemonConfig):
     string =
@@ -1499,7 +1692,15 @@ proc renderLaunchdUserAgentPlist*(exe: string; config: UserDaemonConfig):
     "  <key>ProgramArguments</key>\n  <array>\n"
   for arg in args:
     result.add("    <string>" & xmlEscape(arg) & "</string>\n")
-  result.add("  </array>\n" &
+  result.add("  </array>\n")
+  let processOwnerToken = processOwnerTokenForLaunch(config)
+  if processOwnerToken.len > 0:
+    result.add("  <key>EnvironmentVariables</key>\n" &
+      "  <dict>\n" &
+      "    <key>" & ReproTestRunnerOwnerTokenEnv & "</key>\n" &
+      "    <string>" & xmlEscape(processOwnerToken) & "</string>\n" &
+      "  </dict>\n")
+  result.add(
     "  <key>RunAtLoad</key>\n  <true/>\n" &
     "  <key>KeepAlive</key>\n  <false/>\n" &
     "  <key>StandardOutPath</key>\n  <string>" &
@@ -1518,8 +1719,17 @@ proc launchWithLaunchd(exe: string; config: UserDaemonConfig): bool =
   when defined(macosx):
     try:
       createDir(parentDir(launchdPlistPath(config)))
-      writeFile(launchdPlistPath(config), renderLaunchdUserAgentPlist(exe,
-        config))
+      let plistPath = launchdPlistPath(config)
+      writeFile(plistPath, renderLaunchdUserAgentPlist(exe, config))
+      setFilePermissions(plistPath, {fpUserRead, fpUserWrite})
+      # launchd snapshots the job definition during bootstrap. Remove the
+      # token-bearing source plist on every return path; the registered job
+      # remains available for status/bootout through its label.
+      defer:
+        try:
+          removeFile(plistPath)
+        except OSError:
+          discard
       let serviceTarget = "gui/" & $currentUid()
       # Boot out any prior registration of this label BEFORE bootstrapping the
       # fresh plist. A ``RunAtLoad=true`` / ``KeepAlive=false`` agent runs once
@@ -1538,7 +1748,7 @@ proc launchWithLaunchd(exe: string; config: UserDaemonConfig): bool =
       discard execCmdEx(quoteCommand(["launchctl", "bootout",
         serviceTarget & "/" & launchdLabel(config)]))
       let bootstrap = execCmdEx(quoteCommand(["launchctl", "bootstrap",
-        serviceTarget, launchdPlistPath(config)]))
+        serviceTarget, plistPath]))
       if bootstrap.exitCode == 0:
         logLine(config.logPath, "launch requested backend=launchd label=" &
           launchdLabel(config))
@@ -1575,8 +1785,13 @@ proc launchWithSystemdUser(exe: string; config: UserDaemonConfig): bool =
       # active as long as any process in the cgroup is alive, so the
       # replacement keeps running and can bind the endpoint.
       var args = @["systemd-run", "--user", "--unit=" & systemdUnitName(config),
-        "--collect", "--quiet", "-p", "ExitType=cgroup",
-        exe] & daemonProcessArgs(config)
+        "--collect", "--quiet", "-p", "ExitType=cgroup"]
+      let processOwnerToken = processOwnerTokenForLaunch(config)
+      if processOwnerToken.len > 0:
+        args.add("--setenv=" & ReproTestRunnerOwnerTokenEnv & "=" &
+          processOwnerToken)
+      args.add(exe)
+      args.add(daemonProcessArgs(config))
       let res = execCmdEx(quoteCommand(args))
       if res.exitCode == 0:
         logLine(config.logPath, "launch requested backend=systemd-user unit=" &
@@ -1595,6 +1810,14 @@ proc launchWithFork(exe: string; config: UserDaemonConfig) =
   when defined(posix):
     let argv = @[exe] & daemonProcessArgs(config)
     let cargv = allocCStringArray(argv)
+    var environment: seq[string] = @[]
+    for key, value in envPairs():
+      if key != ReproTestRunnerOwnerTokenEnv:
+        environment.add(key & "=" & value)
+    let processOwnerToken = processOwnerTokenForLaunch(config)
+    if processOwnerToken.len > 0:
+      environment.add(ReproTestRunnerOwnerTokenEnv & "=" & processOwnerToken)
+    let cenv = allocCStringArray(environment)
     let exeCString = cstring(exe)
     let logPathCString = cstring(config.logPath)
     let pid = fork()
@@ -1613,16 +1836,20 @@ proc launchWithFork(exe: string; config: UserDaemonConfig) =
         discard dup2(logFd, 2)
       for fd in 3.cint .. 255.cint:
         discard posix.close(fd)
-      discard execv(exeCString, cargv)
+      discard execve(exeCString, cargv, cenv)
       quit(127)
     logLine(config.logPath, "launch requested backend=posix-fork pid=" &
       $pid)
 
 proc cleanupPlatformBackgroundRegistration*(config: UserDaemonConfig) =
   when defined(macosx):
+    discard execCmdEx(quoteCommand(["launchctl", "bootout",
+      "gui/" & $currentUid() & "/" & launchdLabel(config)]))
     if fileExists(launchdPlistPath(config)):
-      discard execCmdEx(quoteCommand(["launchctl", "bootout",
-        "gui/" & $currentUid() & "/" & launchdLabel(config)]))
+      try:
+        removeFile(launchdPlistPath(config))
+      except OSError:
+        discard
   elif defined(linux):
     discard execCmdEx(quoteCommand(["systemctl", "--user", "stop",
       systemdUnitName(config)]))
@@ -1659,16 +1886,11 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
     # payload decoder (`unsupported build target payload version`), a progress
     # encoding the new client renders as raw `progress:` lines, and so on.
     # Detect that by comparing the daemon-reported running-image hash to the
-    # on-disk hash of the sibling daemon binary, and restart the daemon so it
-    # always tracks the current `repro`. The dev-mode self-restart only covers
-    # daemons already running the new image; this covers the hand-off from an
-    # older daemon. If either hash is unavailable we cannot prove staleness, so
-    # we leave the daemon running (fail safe).
-    let expectedHash =
-      if isAbsolute(sourceExe) and fileExists(sourceExe):
-        fileDigestHex(sourceExe)
-      else:
-        ""
+    # on-disk image that daemon startup will actually execute. `repro` is a
+    # single full-CLI image (no thin wrapper / `repro-full` companion), so the
+    # digest tracks that one binary. If either hash is unavailable we cannot
+    # prove staleness, so we leave the daemon running (fail safe).
+    let expectedHash = expectedDaemonRunningDigestHex(sourceExe, config.devMode)
     if expectedHash.len == 0 or existing.runningHash.len == 0 or
         existing.runningHash == expectedHash:
       return existing
@@ -1701,6 +1923,7 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
         publicCliPath & " and on PATH as 'repro-daemon'); set " &
         "REPRO_DAEMON=off or install/build repro-daemon next to repro")
   var launchConfig = config
+  launchConfig.processOwnerToken = getEnv(ReproTestRunnerOwnerTokenEnv)
   var exe = sourceExe
   if config.devMode:
     let staged = stageDevDaemonBinary(sourceExe, config,
@@ -1740,7 +1963,10 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
   else:
     var env = newStringTable()
     for key, value in envPairs():
-      env[key] = value
+      if key != ReproTestRunnerOwnerTokenEnv:
+        env[key] = value
+    if launchConfig.processOwnerToken.len > 0:
+      env[ReproTestRunnerOwnerTokenEnv] = launchConfig.processOwnerToken
     env["REPRO_DAEMON_ENDPOINT"] = launchConfig.endpoint
     env["REPRO_DAEMON_STATE_DIR"] = launchConfig.stateDir
     let process = startProcess(exe,
@@ -1848,6 +2074,10 @@ proc parseUserDaemonConfigFlags*(args: seq[string];
     elif raw == "--log" or raw.startsWith("--log="):
       result.config.logPath = valueFor("--log")
       explicitLog = true
+    elif raw == "--system":
+      result.config.systemScope = true
+    elif raw == "--state-root" or raw.startsWith("--state-root="):
+      result.config.leaseStoreRoot = valueFor("--state-root")
     else:
       result.rest.add(raw)
     inc i
@@ -1856,8 +2086,8 @@ proc parseUserDaemonConfigFlags*(args: seq[string];
       "repro-daemon.log"
 
 proc userDaemonUsage*(): string =
-  "usage: repro-daemon [--foreground] [--dev] [--endpoint PATH] " &
-    "[--state-dir PATH] [--log PATH]"
+  "usage: repro-daemon [--foreground] [--dev] [--system] [--endpoint PATH] " &
+    "[--state-dir PATH] [--log PATH] [--state-root PATH]"
 
 proc runUserDaemonCommand*(args: seq[string]): int =
   if args.len == 1 and args[0] in ["--help", "-h"]:

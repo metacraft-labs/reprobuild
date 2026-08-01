@@ -11,12 +11,7 @@ proc pathExists(path: string): bool =
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  if not fileExists(daemonBin):
-    raise newException(OSError,
-      "runquotad binary missing at " & daemonBin & "; build it via " &
-      "the test harness (scripts/run_tests.sh)")
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   let socketPath = "/tmp/repro-m51-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -62,7 +57,8 @@ proc build(reproBin, target, repoRoot: string): string =
   # in the m51 surface this test guards. Direct mode covers the same
   # build-engine code path, just without the daemon hop.
   requireSuccess(shellCommand([reproBin, "build", target,
-    "--daemon=off", "--tool-provisioning=path", "--log=actions"]),
+    "--daemon=off", "--tool-provisioning=path", "--log=actions",
+    "--write-report"]),
     repoRoot)
 
 proc valueAfter(output, prefix: string): string =

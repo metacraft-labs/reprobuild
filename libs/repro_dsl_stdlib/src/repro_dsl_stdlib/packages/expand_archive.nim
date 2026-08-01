@@ -142,14 +142,38 @@ proc tarCompressionFlag*(fmt: ExpandArchiveFormat): string =
     raise newException(ValueError,
       "tarCompressionFlag: not a tar-family format: " & $fmt)
 
+proc powershellSingleQuotedLiteral*(value: string): string =
+  ## Serialize an arbitrary path as a PowerShell single-quoted literal.
+  ## PowerShell performs no variable or escape-sequence expansion inside
+  ## single quotes; an embedded apostrophe is represented by two apostrophes.
+  "'" & value.replace("'", "''") & "'"
+
 proc buildZipArgvWindows*(archive, destination: string): seq[string] =
-  ## PowerShell ``Expand-Archive`` invocation. ``-Force`` overwrites
-  ## existing files in the destination (matches Linux/macOS ``unzip
-  ## -o``); ``-NoProfile`` skips the operator's PowerShell profile
-  ## so a slow / failing ``$PROFILE`` does not stall the apply.
-  @["powershell", "-NoProfile", "-Command",
-    "Expand-Archive -Path \"" & archive &
-    "\" -DestinationPath \"" & destination & "\" -Force"]
+  ## Deterministic PowerShell ``Expand-Archive`` invocation. Action argv is
+  ## part of the cache identity, so scratch uniqueness is deferred to the
+  ## executing PowerShell process through the literal runtime ``$PID`` rather
+  ## than selected while the profile is being compiled.
+  ##
+  ## ``$ErrorActionPreference = 'Stop'`` makes copy/extraction failures
+  ## terminating. The ``finally`` block removes scratch on success and every
+  ## failure path; ``-ErrorAction Stop`` means cleanup failure also fails the
+  ## action. ``-Force`` preserves the Phase-F overwrite behavior and
+  ## ``-NoProfile`` keeps operator profiles out of the execution boundary.
+  let command =
+    "$ErrorActionPreference = 'Stop'; " &
+    "$scratch = Join-Path $env:TEMP " &
+      "('repro-expand-archive-' + $PID + '.zip'); " &
+    "try { " &
+      "Copy-Item -LiteralPath " & powershellSingleQuotedLiteral(archive) &
+        " -Destination $scratch -Force; " &
+      "Expand-Archive -LiteralPath $scratch -DestinationPath " &
+        powershellSingleQuotedLiteral(destination) & " -Force " &
+    "} finally { " &
+      "if (Test-Path -LiteralPath $scratch) { " &
+        "Remove-Item -LiteralPath $scratch -Force -ErrorAction Stop " &
+      "} " &
+    "}"
+  @["powershell", "-NoProfile", "-Command", command]
 
 proc buildZipArgvPosix*(archive, destination: string): seq[string] =
   ## InfoZIP invocation. ``-q`` quiets the per-file output;

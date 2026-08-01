@@ -51,6 +51,27 @@ proc fakeMismatch(endpoint: string): string =
 
 suite "Local daemons/control-plane M1 user-daemon lifecycle":
   when isNixSupported:
+    test "single CLI identity ignores stale repro-full on PATH":
+      let tempRoot = createTempDir("repro-daemon-m1-image-identity", "")
+      defer: removeDir(tempRoot)
+      let primaryName = addFileExt("repro", ExeExt)
+      let fullName = addFileExt("repro-full", ExeExt)
+      let primary = tempRoot / primaryName
+      let shadowDir = tempRoot / "shadow"
+      createDir(shadowDir)
+      writeFile(primary, "current-single-cli")
+      writeFile(shadowDir / fullName, "stale-retired-full-cli")
+
+      let originalPath = getEnv("PATH")
+      defer: putEnv("PATH", originalPath)
+      putEnv("PATH", "")
+      let directDigest = imageDigestHex(primary)
+      putEnv("PATH", shadowDir)
+      let shadowedDigest = imageDigestHex(primary)
+
+      check directDigest.len > 0
+      check shadowedDigest == directDigest
+
     test "integration_user_daemon_lifecycle_common":
       let tempRoot = createTempDir("repro-daemon-m1-lifecycle", "")
       defer:

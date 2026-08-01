@@ -11,7 +11,7 @@
 ## This test verifies the dirty-skip arm end-to-end:
 ##
 ##   1. Bare manifest-host seeded; one TOML commit on ``main``.
-##   2. Layer cloned into the canonical ``.repo/manifests-0-<...>/``
+##   2. Layer cloned into the canonical ``.repro/manifests-0-<...>/``
 ##      directory by a probe ``refreshManifestLayers`` call.
 ##   3. Bare advanced by a second commit (would normally trigger a
 ##      fast-forward).
@@ -128,7 +128,7 @@ revision = "main"
 """
 
 proc writeWorkspaceTomlWithLayer(workspaceRoot, layerUrl: string) =
-  let dotRepo = workspaceRoot / ".repo"
+  let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
   let body =
     "schema = \"reprobuild.workspace.local.v1\"\n\n" &

@@ -10,6 +10,7 @@
 ## directory layout.
 
 import repro_binary_cache_client/types
+import repro_binary_cache_client/caches_config
 import repro_binary_cache_client/http_pool
 import repro_binary_cache_client/manifest_codec
 import repro_binary_cache_client/decompress
@@ -24,6 +25,7 @@ import repro_binary_cache_client/cache_key
 import repro_binary_cache_client/sentinel_policy
 
 export types
+export caches_config
 export http_pool
 export manifest_codec
 export decompress

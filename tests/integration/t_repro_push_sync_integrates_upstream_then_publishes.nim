@@ -163,7 +163,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot / ".repro" / "manifests"
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "app.toml",
@@ -177,18 +177,26 @@ proc setupFixture(gitBin, slug: string): Fixture =
   cloneInto(gitBin, result.libOrigin, workspaceRoot / "lib")
   result.workspaceRoot = workspaceRoot
   writeWorkspaceBranch(workspaceRoot, project = "app", branch = "main")
+  for path in [workspaceRoot, manifestsRoot]:
+    let installed = runShell(shellCommand(@[result.reproBin, "hooks", "ensure",
+      "--vcs", "--workspace-root=" & path]))
+    if installed.code != 0:
+      stderr.writeLine("hook installation failed for " & path & ":\n" &
+        installed.output)
+      quit 1
 
 proc invokePush(fx: Fixture; extra: openArray[string]): CmdResult =
-  var argv = @[fx.reproBin, "push"]
+  var argv = @[fx.reproBin, "push", "--write-report"]
   for e in extra: argv.add(e)
   argv.add("--no-certify")
   argv.add("--workspace-root=" & fx.workspaceRoot)
   argv.add("--current-repo=" & (fx.workspaceRoot / "app"))
   argv.add("--json")
-  runShell(shellCommand(argv))
+  runShell(shellCommand(argv,
+    @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
 
 proc readReport(fx: Fixture): JsonNode =
-  let p = fx.workspaceRoot / ".repro" / "workspace" / "push-report.json"
+  let p = fx.workspaceRoot / ".repro" / "build" / "reports" / "push-report.json"
   check fileExists(p)
   parseFile(p)
 

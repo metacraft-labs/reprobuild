@@ -256,12 +256,14 @@ suite "e2e_debug_io_monitor_reads_monitor_depfile":
     check monitorOutput.contains("fixture-child-stderr")
 
     let dep = readMonitorDepFile(depfile)
+    let canonicalInputPath = expandFilename(inputPath)
+    let canonicalChildInputPath = expandFilename(childInputPath)
     check readFile(depfile)[0 .. 3] == "RMDF"
     check dep.records.len > 0
     check hasRecord(dep.records, proc(record: MonitorRecord): bool =
-      record.kind == mrFileRead and record.path == inputPath)
+      record.kind == mrFileRead and record.path == canonicalInputPath)
     check hasRecord(dep.records, proc(record: MonitorRecord): bool =
-      record.kind == mrFileRead and record.path == childInputPath)
+      record.kind == mrFileRead and record.path == canonicalChildInputPath)
     check hasRecord(dep.records, proc(record: MonitorRecord): bool =
       record.kind == mrPathProbe and record.path.contains("missing-parent-probe"))
     check hasRecord(dep.records, proc(record: MonitorRecord): bool =

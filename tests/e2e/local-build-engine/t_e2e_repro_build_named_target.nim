@@ -25,11 +25,7 @@ proc pathExists(path: string): bool =
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  if not fileExists(daemonBin):
-    raise newException(OSError,
-      "runquotad binary missing at " & daemonBin)
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   let socketPath = "/tmp/repro-m2-named-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)

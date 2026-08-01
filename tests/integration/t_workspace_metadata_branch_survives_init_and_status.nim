@@ -4,7 +4,7 @@
 ## project. Asserts:
 ##
 ##   1. ``repro workspace init`` writes the active branch into
-##      ``.repo/workspace.toml`` under ``[workspace].branch``. The
+##      ``.repro/workspace.toml`` under ``[workspace].branch``. The
 ##      branch value is the resolver's ``trunk`` field (the manifest's
 ##      documented default branch — ``main`` in this fixture).
 ##   2. ``repro workspace status`` (without a positional project)
@@ -133,7 +133,7 @@ proc setupFixture(gitBin, slug: string): M13Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
@@ -143,6 +143,18 @@ proc setupFixture(gitBin, slug: string): M13Fixture =
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
   result.workspaceRoot = workspaceRoot
+
+proc cleanupScratch(path: string) =
+  for attempt in 0 .. 4:
+    if not dirExists(path):
+      return
+    try:
+      removeDir(path)
+      return
+    except OSError, IOError:
+      if attempt == 4:
+        raise
+      sleep(100)
 
 # ---- the suite -------------------------------------------------------------
 
@@ -154,7 +166,7 @@ suite "M13 — workspace branch survives init and status":
       skip()
     else:
       let fx = setupFixture(gitBin, "init-records")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let res = runShell(shellCommand(@[
         fx.reproBin, "workspace", "init", "myproject",
@@ -166,7 +178,7 @@ suite "M13 — workspace branch survives init and status":
 
       # The metadata-only workspace.toml must now exist with the
       # resolver's trunk recorded as the active branch.
-      let tomlPath = fx.workspaceRoot / ".repo" / "workspace.toml"
+      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
       check fileExists(tomlPath)
 
       let recorded = readWorkspaceBranch(fx.workspaceRoot)
@@ -191,7 +203,7 @@ suite "M13 — workspace branch survives init and status":
       skip()
     else:
       let fx = setupFixture(gitBin, "status-reads")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       # Step 1: init creates the workspace and records the branch.
       let initRes = runShell(shellCommand(@[
@@ -205,16 +217,15 @@ suite "M13 — workspace branch survives init and status":
       # and the activeBranch field reflects M13's stored value
       # rather than the M12 live-HEAD heuristic.
       let statusRes = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "status",
+        fx.reproBin, "workspace", "status", "--write-report",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       if statusRes.code != 0:
         checkpoint("status output: " & statusRes.output)
       check statusRes.code == 0
 
-      let reportPath = fx.workspaceRoot / ".repo" / ".." / ".repro" /
-        "workspace" / "status-report.json"
-      let normReportPath = fx.workspaceRoot / ".repro" / "workspace" /
+      let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" / "status-report.json"
+      let normReportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
         "status-report.json"
       check fileExists(normReportPath)
       let report = parseFile(normReportPath)
@@ -230,7 +241,7 @@ suite "M13 — workspace branch survives init and status":
         project = "myproject", branch = "synthetic-branch-not-on-disk")
 
       let statusRes2 = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "status",
+        fx.reproBin, "workspace", "status", "--write-report",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       check statusRes2.code == 0
@@ -243,7 +254,7 @@ suite "M13 — workspace branch survives init and status":
       skip()
     else:
       let fx = setupFixture(gitBin, "idempotent")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let res1 = runShell(shellCommand(@[
         fx.reproBin, "workspace", "init", "myproject",
@@ -251,7 +262,7 @@ suite "M13 — workspace branch survives init and status":
       ]))
       check res1.code == 0
       let firstBytes = readFile(
-        fx.workspaceRoot / ".repo" / "workspace.toml")
+        fx.workspaceRoot / ".repro" / "workspace.toml")
 
       # Second invocation must NOT clobber the metadata. The
       # workspace.toml bytes round-trip identically when the
@@ -263,5 +274,5 @@ suite "M13 — workspace branch survives init and status":
       ]))
       check res2.code == 0
       let secondBytes = readFile(
-        fx.workspaceRoot / ".repo" / "workspace.toml")
+        fx.workspaceRoot / ".repro" / "workspace.toml")
       check firstBytes == secondBytes

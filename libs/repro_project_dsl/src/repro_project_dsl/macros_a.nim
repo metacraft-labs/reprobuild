@@ -654,6 +654,21 @@ proc parseLibrary(packageName: string; node: NimNode): LibraryDef =
       while valueNode.kind == nnkStmtList and valueNode.len == 1:
         valueNode = valueNode[0]
       result.kind = libraryKindLiteral(valueNode, result.kind)
+    of "exportedpath":
+      # Cross-Repo-Source-Consumption SC-11 (§4.2a.4): the optional
+      # ``exportedPath: "<dir>"`` setter names the producer-relative Nim
+      # library source root a consumer threads onto its ``nim c --path:``.
+      # Defaults (empty) to the convention ``"src"`` at the splice seam.
+      # ``exportedPath: "lib"`` parses to ``Call(exportedPath,
+      # StmtList(<lit>))``; walk to the leaf string literal.
+      if stmt.len < 2:
+        error("library exportedPath: requires a string value", stmt)
+      var pathNode = stmt[1]
+      while pathNode.kind == nnkStmtList and pathNode.len == 1:
+        pathNode = pathNode[0]
+      if pathNode.kind != nnkStrLit:
+        error("library exportedPath: requires a string literal", pathNode)
+      result.exportedPath = pathNode.strVal
     of "discard":
       discard
     else:
@@ -1419,6 +1434,24 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
   # See ``m9r15pAutoInjectQt6Transitive`` for the architectural
   # rationale + dedup semantics. Inert for non-qt6 recipes.
   m9r15pAutoInjectQt6Transitive(result)
+  # Windows-dev-env M1: a recipe with a non-empty ``uses:`` toolchain
+  # floor but NO explicit ``devEnv:`` block still exposes dev-env
+  # introspection (see ``exposesDevEnvIntrospection`` /
+  # ``runtime_provider.providerManifest``). Give that implicit entry a
+  # deterministic, content-derived ``devEnvBodyHash`` computed from the
+  # floor itself so the manifest entry has a stable, floor-derived body
+  # hash that re-keys when the floor changes. Explicit ``devEnv:`` blocks
+  # already set ``devEnvBodyHash`` above (and ``hasDevEnv``), so this only
+  # fires for the implicit case. Runs after ``m9r15pAutoInjectQt6Transitive``
+  # so any auto-injected floor entries are folded into the hash.
+  if not result.hasDevEnv and result.toolUses.len > 0:
+    var floorRepr = result.packageName & ".dev-env.implicit-floor.v1\n"
+    for useDef in result.toolUses:
+      floorRepr.add(useDef.rawConstraint & "\x1f" & useDef.packageSelector &
+        "\x1f" & useDef.executableName & "\x1f" &
+        useDef.policyPath.join("/") & "\x1f" & useDef.gateVariant & "\x1f" &
+        useDef.gateValue & "\n")
+    result.devEnvBodyHash = stableHashHex(floorRepr)
 
 proc escForCode(text: string): string =
   text.escape()
@@ -2022,6 +2055,8 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     formals.add("cacheable = true")
     formals.add("actionCachePolicy = defaultActionCachePolicy()")
     formals.add("commandStatsId = \"\"")
+    formals.add("dependencyPolicy = " &
+      dependencyPolicyCode(cmd.dependencyPolicy))
     let typedReturn = cmd.typedOutputs.len > 0
     let returnType =
       if typedReturn: buildEdgeSubtypeName(exe.exportName, cmd.name)
@@ -2049,8 +2084,7 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
       "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
       "extraEnv = extraEnv, " &
-      "dependencyPolicy = " &
-      dependencyPolicyCode(cmd.dependencyPolicy) & ")\n")
+      "dependencyPolicy = dependencyPolicy)\n")
     # Typed-Outputs M1: bind each typed-output field by evaluating its
     # ``pathExpr`` in the call-site flag scope. The shared
     # ``emitTypedOutputBindings`` helper handles both the typed-handle
@@ -2213,16 +2247,319 @@ proc workspaceProducerModule(selector, consumerSourceFile: string): string =
   let anchorDir = consumerSourceFile.parentDir
   if anchorDir.len == 0:
     return ""
-  let siblingDir = anchorDir.parentDir / selector
-  if not dirExists(siblingDir):
-    return ""
-  for base in ["repro.nim", "reprobuild.nim"]:
-    let candidate = siblingDir / base
-    if fileExists(candidate):
-      # Return the extension-stripped path so the emitted
-      # ``import "<path>" as <alias>`` resolves the module by file path.
-      return candidate[0 ..< candidate.len - ".nim".len].replace('\\', '/')
+  # Walk UP the directory chain from the consumer, probing ``<ancestor>/<selector>``
+  # at each level. The first level (``anchorDir.parentDir / selector``) is the
+  # direct-sibling convention the SC-9/RP5a/TI2 reference tests rely on
+  # (``../<selector>`` next to the consumer); the walk-up EXTENDS that to the
+  # WORKSPACE-ROOT sibling convention so a DEEP out-of-tree consumer (e.g. an
+  # ``infra/tests/rp5c2/recipe.nim`` several dirs below the workspace root) can
+  # still bind a producer checked out as a top-level workspace sibling
+  # (``<workspace>/vm-harness``) — the RP5c2 shape. It is purely additive: a
+  # direct sibling is still found at the first level, so no existing discovery
+  # changes; only the previously-unresolvable deeper case now resolves. The
+  # nearest ancestor that owns a ``<selector>`` project wins, so a same-named
+  # closer sibling always shadows a farther workspace-root one.
+  var dir = anchorDir
+  for _ in 0 ..< 16:
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    let siblingDir = parent / selector
+    if dirExists(siblingDir):
+      for base in ["repro.nim", "reprobuild.nim"]:
+        let candidate = siblingDir / base
+        if fileExists(candidate):
+          # Return the extension-stripped path so the emitted
+          # ``import "<path>" as <alias>`` resolves the module by file path.
+          return candidate[0 ..< candidate.len - ".nim".len].replace('\\', '/')
+    dir = parent
   ""
+
+type
+  ProducerResourceModuleDecl* = object
+    ## TI2 — a producer's ``resourceModule "<path>": path "<dir>" …`` surface
+    ## declaration, parsed from its ``repro.nim`` TEXTUALLY (no import). Empty
+    ## ``resourceModule`` means the producer declares no separate resource module
+    ## (either an inline ``resourceType`` producer, or a non-resource producer).
+    resourceModule*: string        ## absolute path to the declared module, or ""
+    extraPaths*: seq[string]       ## absolute extra ``--path`` roots
+
+proc parseResourceModuleDecl*(reproSource, projectRoot: string):
+    ProducerResourceModuleDecl =
+  ## Parse a producer ``repro.nim``'s ``resourceModule`` surface entry
+  ## (macros_b's ``resourceModule`` marker macro) purely textually — the same
+  ## file-inspection grain the cross-repo detection already uses, so it is legal
+  ## in the Nim VM at CONSUMER macro-expansion and never imports the producer.
+  ##
+  ## Grammar (indentation-delimited, matching the marker macro):
+  ##   resourceModule "src/vm_harness/repro/resources.nim":
+  ##     path "src"
+  ##     path "vendor/foo"
+  ##
+  ## The module path + each ``path`` are resolved RELATIVE to ``projectRoot``
+  ## (the producer's ``repro.nim`` dir) into absolute paths. A bare
+  ## ``resourceModule "<path>"`` with no body declares the module with no extra
+  ## ``--path``s.
+  proc unquote(fragment: string): string =
+    let f = fragment.strip()
+    if f.len >= 2 and f[0] == '"' and f[^1] == '"':
+      f[1 ..< f.len - 1]
+    else:
+      ""
+  let lines = reproSource.splitLines()
+  var i = 0
+  while i < lines.len:
+    let raw = lines[i]
+    let line = raw.strip()
+    if line.startsWith("resourceModule\"") or
+        line.startsWith("resourceModule \"") or
+        line.startsWith("resourceModule("):
+      # Extract the first string literal on the ``resourceModule`` line.
+      let q0 = raw.find('"')
+      if q0 < 0:
+        inc i
+        continue
+      let q1 = raw.find('"', q0 + 1)
+      if q1 < 0:
+        inc i
+        continue
+      let rel = raw[q0 + 1 ..< q1]
+      if rel.len == 0:
+        inc i
+        continue
+      # ``projectRoot`` is already absolute (the producer dir, derived from the
+      # consumer's absolute ``lineInfoObj`` source path at macro-expansion), so
+      # ``normalizedPath`` — NOT ``absolutePath`` (which calls ``getcwd``, illegal
+      # in the Nim VM) — turns the join into a canonical absolute path.
+      result.resourceModule = normalizedPath(projectRoot / rel)
+      # Body: subsequent MORE-INDENTED lines carrying ``path "<dir>"`` entries.
+      let baseIndent = raw.len - raw.strip(trailing = false).len
+      var j = i + 1
+      while j < lines.len:
+        let braw = lines[j]
+        let bstripped = braw.strip()
+        if bstripped.len == 0:
+          inc j
+          continue
+        let bindent = braw.len - braw.strip(trailing = false).len
+        if bindent <= baseIndent:
+          break
+        if bstripped.startsWith("path\"") or bstripped.startsWith("path \"") or
+            bstripped.startsWith("path("):
+          let pq0 = braw.find('"')
+          if pq0 >= 0:
+            let pq1 = braw.find('"', pq0 + 1)
+            if pq1 > pq0:
+              let pathRel = braw[pq0 + 1 ..< pq1]
+              if pathRel.len > 0:
+                let abs = normalizedPath(projectRoot / pathRel)
+                if abs notin result.extraPaths:
+                  result.extraPaths.add(abs)
+        inc j
+      return
+    inc i
+
+proc producerResourceModuleFor*(selector, consumerSourceFile: string):
+    ProducerResourceModuleDecl =
+  ## Resolve a workspace producer selector to its declared resource module +
+  ## extra paths (empty when the selector names no on-disk producer or the
+  ## producer declares no ``resourceModule`` surface entry).
+  let modulePath = workspaceProducerModule(selector, consumerSourceFile)
+  if modulePath.len == 0:
+    return
+  let sourcePath = modulePath & ".nim"
+  if not fileExists(sourcePath):
+    return
+  parseResourceModuleDecl(readFile(sourcePath), sourcePath.parentDir)
+
+proc workspaceProducerDeclaresResourceType(selector,
+                                           consumerSourceFile: string): bool =
+  ## RP5a — compile-time detection of whether a ``uses:`` selector names a
+  ## workspace sibling that declares a ``resourceType`` (RP4) block. A resource
+  ## producer cannot cross the boundary via SC-9's wholesale ``import`` of the
+  ## producer ``repro.nim``: the ``resourceType`` macro emits a module-init
+  ## ``registerResourceProvider(... driver: <driver>)`` referencing the
+  ## producer's DRIVER, and module-init side effects are NOT dead-code
+  ## eliminated — importing it whole would drag the driver / implementation
+  ## closure into the consumer, exactly what the RP5a gate forbids. So the
+  ## caller routes a resource-declaring sibling through the ACCESSOR-EMISSION
+  ## branch (``emitResourceContractAccessors`` off the extracted contract, which
+  ## carries no driver) instead of the module-import branch.
+  ##
+  ## The detection is a hermetic macro-time scan of the sibling's ``repro.nim``
+  ## for a top-level ``resourceType`` declaration — the same file-inspection
+  ## grain ``workspaceProducerModule`` above already uses. It is deliberately
+  ## conservative: any line whose first token is ``resourceType`` counts.
+  ##
+  ## TI2 (separate-module producer — the RP5c2 vm-harness shape): a producer that
+  ## keeps its ``resourceType`` blocks in a SEPARATE module (e.g.
+  ## ``src/vm_harness/repro/resources.nim``) and NAMES it via a
+  ## ``resourceModule "<path>"`` surface entry in ``repro.nim`` is ALSO detected
+  ## here — its ``repro.nim`` has no inline ``resourceType`` line, so without
+  ## this branch it would fall to SC-9's wholesale module import (dragging the
+  ## driver closure). We additionally scan the DECLARED resource module for a
+  ## ``resourceType`` block so a producer that names an empty / non-resource
+  ## module is not mis-routed.
+  let modulePath = workspaceProducerModule(selector, consumerSourceFile)
+  if modulePath.len == 0:
+    return false
+  let sourcePath = modulePath & ".nim"
+  if not fileExists(sourcePath):
+    return false
+  proc scanForResourceType(source: string): bool =
+    for rawLine in source.splitLines():
+      let line = rawLine.strip()
+      if line.startsWith("resourceType\"") or line == "resourceType" or
+          line.startsWith("resourceType ") or line.startsWith("resourceType("):
+        return true
+    false
+  let reproSource = readFile(sourcePath)
+  if scanForResourceType(reproSource):
+    return true
+  # Separate-module producer: a ``resourceModule`` surface entry pointing at a
+  # module that carries the ``resourceType`` blocks.
+  let decl = parseResourceModuleDecl(reproSource, sourcePath.parentDir)
+  if decl.resourceModule.len > 0 and fileExists(decl.resourceModule) and
+      scanForResourceType(readFile(decl.resourceModule)):
+    return true
+  false
+
+proc stampImportSpecs(line: string): seq[string] =
+  ## VM-safe extraction of module names from a single ``import``/``include``
+  ## line — a small mirror of ``repro_interface_artifacts``'s ``nimImportSpecs``
+  ## (which lives in a lib ``repro_project_dsl`` cannot import back). Handles the
+  ## common ``import a, b/c``, ``import "abs/path"``, and ``import x as y`` forms;
+  ## std/pkg specs are filtered by the caller's on-disk resolution (a spec that
+  ## resolves to no local file simply does not enter the closure).
+  let s = line.strip()
+  var head = ""
+  if s.startsWith("import "): head = s[7 .. ^1]
+  elif s.startsWith("from "):
+    let rest = s[5 .. ^1]
+    let idx = rest.find(" import ")
+    head = if idx >= 0: rest[0 ..< idx] else: rest
+  elif s.startsWith("include "): head = s[8 .. ^1]
+  else: return
+  # Drop a trailing comment.
+  let hashIdx = head.find('#')
+  if hashIdx >= 0: head = head[0 ..< hashIdx]
+  for part in head.split(','):
+    var name = part.strip()
+    # ``x as y`` — keep the module spelling.
+    let asIdx = name.find(" as ")
+    if asIdx >= 0: name = name[0 ..< asIdx].strip()
+    # ``import a/[b, c]`` bracket groups: expand each leaf against the prefix.
+    let br = name.find('[')
+    if br >= 0 and name.endsWith("]"):
+      let prefix = name[0 ..< br].strip().strip(chars = {'/'})
+      let inner = name[br + 1 ..< name.len - 1]
+      for leaf in inner.split(','):
+        let l = leaf.strip()
+        if l.len > 0:
+          result.add(if prefix.len > 0: prefix & "/" & l else: l)
+      continue
+    name = name.strip(chars = {'"'})
+    if name.len > 0:
+      result.add(name)
+
+proc producerSourceStamp(producerReproPath: string;
+                         decl: ProducerResourceModuleDecl): string =
+  ## TI2 — a VM-safe freshness stamp over a resource producer's FULL source
+  ## closure, computed AT CONSUMER MACRO-EXPANSION (legal in the Nim VM: pure
+  ## file reads, no subprocess, no ``unsafeAddr``). It hashes, with FNV-1a, every
+  ## ``.nim``/``.nims`` file the lift would compile:
+  ##
+  ##   * every source directly in the producer's project root (mirrors
+  ##     ``discoverNimSources``' sibling enumeration — adding a root sibling a
+  ##     later ``repro.nim`` might import must re-key), PLUS
+  ##   * the producer's declared RESOURCE MODULE (``decl.resourceModule``) and
+  ##     its transitive import closure — followed here recursively, resolving
+  ##     bare/relative imports against the current file's dir AND every declared
+  ##     extra ``--path`` root (``decl.extraPaths``), exactly the roots the lift
+  ##     compiles with. So editing a SUBDIRECTORY resource module's public schema
+  ##     (``cpus`` → ``vcpus``) — which a non-recursive root-only stamp missed —
+  ##     changes the stamp and invalidates the cached accessor.
+  ##
+  ## COHERENCE WITH TI1's ``InterfaceLiftActionKey`` (why recursion, not
+  ## key-off-the-action-key): the action key is computed in
+  ## ``repro_interface_artifacts``, which imports ``repro_project_dsl`` — so this
+  ## module (part of ``repro_project_dsl``) CANNOT call it without a hard import
+  ## cycle. Instead the stamp's coverage is a SUPERSET of the lift's declared
+  ## input closure (same root-sibling grain + same resource-module + extra-path
+  ## recursion the lift's ``interfaceLiftSources``/``discoverNimSources`` uses),
+  ## so the two cannot disagree in the load-bearing direction: any file whose
+  ## change re-keys the lift also changes this stamp → the cache-HIT decision
+  ## never serves an accessor staler than the lift's own identity. On a stamp
+  ## MISS the generator re-runs and consults the authoritative action key.
+  var h = 1469598103934665603'u64          # FNV-1a 64-bit offset basis
+  proc mix(s: string) =
+    for c in s:
+      h = h xor uint64(ord(c))
+      h = h * 1099511628211'u64
+  var seen: seq[string] = @[]
+  proc hashFile(path: string) =
+    let norm = path
+    if norm in seen:
+      return
+    seen.add(norm)
+    mix(norm.extractFilename)
+    if fileExists(norm):
+      mix(readFile(norm))
+
+  # Root-sibling grain: every ``.nim``/``.nims`` directly in the project root.
+  let projectRoot = producerReproPath.parentDir
+  var rootFiles: seq[string] = @[]
+  if dirExists(projectRoot):
+    for kind, child in walkDir(projectRoot):
+      if kind notin {pcFile, pcLinkToFile}:
+        continue
+      if child.endsWith(".nim") or child.endsWith(".nims"):
+        rootFiles.add(child)
+  rootFiles.sort(system.cmp[string])
+  for f in rootFiles:
+    hashFile(f)
+
+  # Resource-module closure: follow imports transitively, resolving bare/relative
+  # specs against the CURRENT file's dir and every declared extra ``--path`` root.
+  if decl.resourceModule.len > 0:
+    let searchRoots = decl.extraPaths
+    var pending: seq[string] = @[decl.resourceModule]
+    var visited: seq[string] = @[]
+    while pending.len > 0:
+      let path = pending.pop()
+      if path in visited:
+        continue
+      visited.add(path)
+      hashFile(path)
+      if not fileExists(path):
+        continue
+      let currentDir = path.parentDir
+      for line in readFile(path).splitLines:
+        for spec in stampImportSpecs(line):
+          # Candidate resolutions, in the order Nim's own search would try:
+          # absolute-path import; relative to the importing file's dir; then
+          # each declared extra ``--path`` root. First on-disk hit wins.
+          var candidates: seq[string] = @[]
+          if isAbsolute(spec):
+            candidates.add(spec & ".nim")
+          else:
+            # ``currentDir`` / ``searchRoots`` are already absolute (the resource
+            # module path is absolute; each extra ``--path`` is absolutized in
+            # ``parseResourceModuleDecl``), so ``normalizedPath`` — never
+            # ``absolutePath`` (``getcwd``, VM-illegal) — canonicalizes the join.
+            candidates.add(normalizedPath(currentDir / (spec & ".nim")))
+            for root in searchRoots:
+              candidates.add(normalizedPath(root / (spec & ".nim")))
+          for cand in candidates:
+            if fileExists(cand) and cand notin visited:
+              pending.add(cand)
+              break
+
+  var hex = ""
+  const Hex = "0123456789abcdef"
+  for shift in countdown(60, 0, 4):
+    hex.add(Hex[int((h shr shift) and 0xF'u64)])
+  hex
 
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   proc isBundledStdlibSelector(selector: string): bool =
@@ -2350,7 +2687,8 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   for modulePath in modules:
     let moduleName = modulePath.split('/')[^1]
     let moduleAlias = moduleName & "_module"
-    result.add("import " & modulePath & " as " & moduleAlias & "\n")
+    result.add("import " & modulePath & " as " & moduleAlias &
+      " except package\n")
     result.add("when compiles(" & moduleAlias &
       ".reprobuildPackageMarker()):\n")
     result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")
@@ -2369,7 +2707,19 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # compiles-check) but sourced from the resolved sibling project root rather
   # than the bundled catalog. MODE-AGNOSTIC — it fixes non-develop typed
   # consumption too.
-  var producerModules: seq[(string, string)] = @[]  # (alias, module path)
+  var producerModules: seq[(string, string, string)] = @[]
+    # (alias, selector, absolute sibling repro module path WITH .nim)
+  # RP5a — the RESOURCE-CONSUMER-IMPORT branch. A ``uses:`` selector naming a
+  # sibling that declares a ``resourceType`` (RP4) is routed HERE instead of
+  # the wholesale-module-import branch below: importing a resource producer's
+  # ``repro.nim`` would drag its ``registerResourceProvider(... driver: …)``
+  # module-init closure into the consumer (the driver / implementation), which
+  # the RP5a gate forbids. Instead we splice the driver-free typed surface
+  # emitted FROM THE EXTRACTED ``InterfaceResource`` schema
+  # (``emitResourceContractAccessors(resolveProducerTypedContract(...))`` in
+  # ``repro_cli_support``) — the contract-only projection, no driver by
+  # construction. Collected here (selector) and emitted after the module loop.
+  var resourceProducerSelectors: seq[string] = @[]
   for useDef in pkg.toolUses:
     let selector = useDef.packageSelector
     if isBundledStdlibSelector(selector):
@@ -2377,19 +2727,343 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
     let producerModule = workspaceProducerModule(selector, consumerSourceFile)
     if producerModule.len == 0:
       continue
+    if workspaceProducerDeclaresResourceType(selector, consumerSourceFile):
+      # RP5a: resource producer — DO NOT import its module (driver closure).
+      # Route to the accessor-emission branch; skip the module-import path.
+      if resourceProducerSelectors.find(selector) < 0:
+        resourceProducerSelectors.add(selector)
+      continue
     let moduleAlias = selectorModuleName(selector) & "_workspace_module"
     var seen = false
-    for (existingAlias, _) in producerModules:
+    for (existingAlias, _, _) in producerModules:
       if existingAlias == moduleAlias:
         seen = true
         break
     if not seen:
-      producerModules.add((moduleAlias, producerModule))
-  for (moduleAlias, producerModule) in producerModules:
-    result.add("import \"" & producerModule & "\" as " & moduleAlias & "\n")
-    result.add("when compiles(" & moduleAlias &
-      ".reprobuildPackageMarker()):\n")
-    result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")
+      # ``workspaceProducerModule`` returns the module path WITHOUT its
+      # ``.nim`` extension (Nim's ``import "<path>"`` form). Re-attach it
+      # so the per-sibling shim below can ``include`` the real file.
+      producerModules.add((moduleAlias, selector, producerModule & ".nim"))
+  # Multi-Sibling interface-extraction object-collision fix.
+  #
+  # ``usesImportCode`` used to emit a direct ``import "<sibling>/repro"`` per
+  # consumed workspace producer. When a consumer ``uses:`` TWO OR MORE
+  # siblings that require interface extraction, the extract-runner ``nim c``
+  # compiles every ``../<sib>/repro.nim`` into ONE shared nimcache. The Nim
+  # backend derives each module's C-object basename from ``mangleModuleName``,
+  # which picks the SHORTEST path relative to the project / any ``--path`` /
+  # nimble search root but DROPS which root it chose. The consumer's own
+  # ``config.nims`` puts each sibling's ``src`` dir on the search path
+  # (``switch("path", "../<sib>/src")``), so every sibling's ``repro.nim``
+  # collapses to the identical ``../repro.nim`` -> ``@p..@srepro.nim.c.o``.
+  # The second sibling's object overwrites the first on disk, the extract
+  # link then lists the same object twice (multiple-definition on the shared
+  # ``composeBinding*`` / ``atpdotdotatsreprodotnim_Init000`` symbols) AND
+  # the clobbered sibling's ``composeBindingStorage_<name>_test*Actions``
+  # symbols go undefined.
+  #
+  # Give each consumed sibling a DISTINCT compiled-object identity: instead
+  # of importing ``../<sib>/repro`` directly, materialise a per-sibling shim
+  # module ``repro_sib_<selector>.nim`` in a consumer-keyed scratch dir whose
+  # ONLY statement ``include``s the sibling's real ``repro.nim`` by absolute
+  # path. The shim's uniquely-named basename mangles to a distinct object
+  # (``@…@srepro_sib_<selector>.nim.c.o``) that cannot collapse against any
+  # search root, so N siblings never collide. ``include`` (not ``import``)
+  # keeps the sibling's own per-line file info pointing at the REAL file, so
+  # the sibling's OWN ``usesImportCode`` / ``paths`` anchoring (which reads
+  # ``lineInfoObj().filename``) still resolves against the sibling's own
+  # directory — the shim is transparent to the sibling's expansion.
+  if producerModules.len > 0:
+    # ``usesImportCode`` runs only at macro-expansion time (compile time), so
+    # the shim materialisation below uses the Nim VM's ``std/os`` file ops.
+    # Consumer-keyed scratch dir under the system temp so concurrent
+    # extractions for different consumers never share shim files and the
+    # consumer's own source tree stays clean. The key is a filesystem-safe
+    # rendering of the consumer's absolute source path (unique per consumer
+    # ``repro.nim``) plus its length as a light collision guard.
+    var h = 2166136261u32
+    for c in consumerSourceFile:
+      h = h xor ord(c).uint32
+      h = h * 16777619u32
+    var baseName = ""
+    for i in countdown(consumerSourceFile.len - 1, 0):
+      let ch = consumerSourceFile[i]
+      if ch.isAlphaNumeric():
+        baseName.add(ch)
+      elif baseName.len > 0 and baseName[^1] != '_':
+        baseName.add('_')
+      if baseName.len >= 30:
+        break
+    var revBase = ""
+    for i in countdown(baseName.len - 1, 0):
+      revBase.add(baseName[i])
+    let consumerKey = "c_" & $h & "_" & revBase
+    let shimDir = getTempDir() / "repro-sibling-shims" / consumerKey
+    if not dirExists(shimDir):
+      createDir(shimDir)
+    for (moduleAlias, selector, siblingReproPath) in producerModules:
+      let shimStem = "repro_sib_" & selectorModuleName(selector)
+      let shimPath = shimDir / (shimStem & ".nim")
+      let shimContent = "include \"" & siblingReproPath.replace('\\', '/') & "\"\n"
+      # Rewrite only when content differs so an unchanged sibling set does
+      # not needlessly invalidate the shim's incremental-compile stamp.
+      if (not fileExists(shimPath)) or readFile(shimPath) != shimContent:
+        writeFile(shimPath, shimContent)
+      when defined(reproDebugProducerImports):
+        echo "[producer-import] alias=", moduleAlias, " selector=", selector,
+          " shim=", shimPath, " -> ", siblingReproPath
+      let shimModule = shimDir / shimStem
+      result.add("import \"" & shimModule.replace('\\', '/') & "\" as " &
+        moduleAlias & " except package\n")
+      result.add("when compiles(" & moduleAlias &
+        ".reprobuildPackageMarker()):\n")
+      result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")
+
+  # TI2 (Thin Interface Mode consumer) — emit the RESOURCE-CONTRACT accessors
+  # for every resource-declaring sibling collected above, compiling the consumer
+  # against the producer's CACHED interface artifact instead of re-extracting per
+  # consumer. The producer's driver never crosses: the emitted source is the
+  # driver-free typed wrapper + contract synthesised from the producer's lifted
+  # ``InterfaceResource`` schema.
+  #
+  # THE FAST PATH (the TI2 production win). ``emitResourceContractAccessors`` /
+  # ``resolveProducerTypedContract`` live in ``repro_cli_support`` (which imports
+  # ``repro_project_dsl``, so this module cannot import them back), and lifting a
+  # producer's interface ultimately SPAWNS ``nim c`` — illegal in the Nim VM. In
+  # RP5a EVERY consumer ran a ``nim c -r`` generator at macro-expansion
+  # (~2m/consumer). Under TI2 the emitted accessor source is CACHED next to a
+  # content stamp keyed by the producer's source closure. At consumer
+  # macro-expansion we recompute that stamp (pure VM file reads —
+  # ``producerSourceStamp``) and:
+  #
+  #   * CACHE HIT (stamp matches the cached ``.stamp``): read the cached accessor
+  #     ``.nim`` directly in the VM and splice it — NO subprocess, NO ``nim c``.
+  #     This is the fast path a 2nd (and every subsequent) consumer of the same
+  #     producer takes; the lift ran ONCE and is shared. The witness log is NOT
+  #     touched, so a test can prove no generator ran.
+  #
+  #   * CACHE MISS (cold / producer changed): run the generator ONCE via
+  #     ``staticExec``. It calls ``resolveProducerTypedContract`` — now backed by
+  #     TI1's cached ``interfaceLiftPlan`` + ``liftInterfaceArtifact`` edge, so
+  #     even the cold materialization is the shared, content-addressed lift, not a
+  #     throwaway per-consumer extract — writes the emitted accessor source to the
+  #     cache + the stamp, and appends one line to the witness log. Subsequent
+  #     consumers hit the cache above.
+  #
+  # Nothing here imports the producer module, so its ``registerResourceProvider(
+  # ... driver: …)`` module-init closure never crosses (RP5a/TI2: no closure).
+  #
+  # FOLLOW-UP (exec/lib unification — deferred). A sibling that declares BOTH a
+  # ``resourceType`` AND an ``executable``/``library`` is routed here and the
+  # ``continue`` above SKIPS the SC-9 wholesale-module import, so its exec/lib
+  # typed wrappers do NOT cross alongside its resource contract. Acceptable for
+  # the resource-only gate (and vm-harness, whose providers are resource-shaped);
+  # unifying the exec/lib SC-9 path onto the same cached-artifact read is a TI2
+  # follow-up (emit BOTH the accessor splice AND the module import for such a
+  # sibling).
+  if resourceProducerSelectors.len > 0:
+    # Locate the reprobuild repo root by walking up from the consumer's source
+    # file until a ``config.nims`` (next to ``reprobuild.nimble``) is found —
+    # the dir whose ``config.nims`` wires the lib ``--path`` set the generator
+    # compile needs. ``consumerSourceFile`` is absolute (``lineInfoObj``), so no
+    # ``getCurrentDir`` is required.
+    var repoRoot = ""
+    block findRepoRoot:
+      var dir = consumerSourceFile.parentDir
+      for _ in 0 ..< 12:
+        if dir.len == 0:
+          break
+        if fileExists(dir / "config.nims") and
+            fileExists(dir / "reprobuild.nimble"):
+          repoRoot = dir
+          break findRepoRoot
+        let parent = dir.parentDir
+        if parent == dir:
+          break
+        dir = parent
+      # OUT-OF-TREE consumer fallback (the RP5c2 shape): a consumer whose source
+      # tree is NOT under the reprobuild checkout (e.g. an infra recipe) cannot
+      # reach reprobuild's ``config.nims`` by walking up. Honour the standard
+      # ``$REPROBUILD_REPO_ROOT`` override the interface-artifact / profile-compile
+      # edges already use for out-of-tree lib-path resolution, so the generator
+      # ``nim c -r`` below runs with ``cd <repoRoot>`` and resolves
+      # ``import repro_cli_support`` via reprobuild's own ``config.nims``. This is
+      # NOT the obsolete ``REPRO_ACCESSOR_*`` knob (removed): it reuses the single
+      # repo-root env the rest of reprobuild's out-of-tree machinery keys off.
+      if repoRoot.len == 0 and existsEnv("REPROBUILD_REPO_ROOT"):
+        let envRoot = getEnv("REPROBUILD_REPO_ROOT")
+        if envRoot.len > 0 and fileExists(envRoot / "config.nims") and
+            fileExists(envRoot / "reprobuild.nimble"):
+          repoRoot = envRoot
+    # The emitted-accessor cache is keyed by the PRODUCER, not the consumer, so
+    # every consumer of the same producer shares ONE lift + ONE cached splice.
+    # Anchor it under ``<repoRoot>/build/nimcache`` (Nim's config walk keys off
+    # the compiled generator file's directory chain, so it must live under the
+    # reprobuild tree to resolve ``import repro_cli_support``); fall back to
+    # $TMPDIR only when the repo root could not be located (best effort).
+    let cacheBase =
+      if repoRoot.len > 0:
+        repoRoot / "build" / "nimcache" / "ti2-resource-accessors"
+      else:
+        getTempDir() / "repro-resource-accessors"
+    # A test may redirect the witness log to observe whether the generator ran.
+    let witnessOverride =
+      if existsEnv("REPRO_TI2_ACCESSOR_WITNESS"):
+        getEnv("REPRO_TI2_ACCESSOR_WITNESS")
+      else:
+        ""
+    # Anchor the consumer's workspace root at its own source dir so the sibling
+    # ``../<selector>`` discovery in ``resolveProducerTypedContract`` finds the
+    # producer (mirrors ``findSiblingProjectFile``).
+    let workspaceRoot = consumerSourceFile.parentDir
+    # The emitted accessors use bare ``resource(...)`` / ``ResourceRef`` from
+    # ``repro_resources`` (which ``repro_project_dsl`` does NOT re-export), so
+    # bring it into the consumer's scope. This is the resource RUNTIME surface,
+    # NOT the producer's driver — importing it does not pull any producer
+    # implementation.
+    result.add("import repro_resources\n")
+    for selector in resourceProducerSelectors:
+      let producerModule = workspaceProducerModule(selector, consumerSourceFile)
+      let producerRepro =
+        if producerModule.len > 0: producerModule & ".nim" else: ""
+      # TI2 (separate-module producer): fold the producer's DECLARED resource
+      # module + its extra ``--path`` closure into the freshness stamp, so a
+      # subdirectory resource-module schema edit invalidates the cached accessor
+      # (a root-only stamp would miss it → serve a stale splice).
+      let producerDecl = producerResourceModuleFor(selector, consumerSourceFile)
+      let stamp =
+        if producerRepro.len > 0:
+          producerSourceStamp(producerRepro, producerDecl)
+        else: ""
+      let selectorKey = selectorModuleName(selector)
+      let accDir = cacheBase / selectorKey
+      if not dirExists(accDir):
+        createDir(accDir)
+      let accessorCachePath = accDir / (selectorKey & ".accessors.nim")
+      let stampPath = accDir / (selectorKey & ".stamp")
+      # TI3: the InterfaceFingerprint (impl-EXCLUDING — TI1) the cached accessor
+      # was generated against, recorded next to the accessor + stamp. It is the
+      # Level-2 discriminant between a private-impl edit (fingerprint unchanged →
+      # reuse the cached accessor IN PLACE) and a public-signature edit
+      # (fingerprint changed → regenerate).
+      let ifpPath = accDir / (selectorKey & ".ifp")
+      let witnessPath =
+        if witnessOverride.len > 0: witnessOverride
+        else: accDir / (selectorKey & ".genlog")
+
+      # ==== TI3 two-level accessor-cache freshness keying =====================
+      # Level 1 (cheap, VM-safe, NO subprocess) — the TI2 warm fast path,
+      #   unchanged: if the producer's cheap source stamp is UNCHANGED vs the
+      #   sidecar AND the accessor exists → HIT, read the cached accessor. The
+      #   common no-change case stays subprocess-free.
+      # Level 2 (only when the source stamp CHANGED) — the producer's source
+      #   genuinely changed, but it may be IMPL-ONLY. Run the generator (which
+      #   drives TI1's CACHED interface-lift edge — the cheap cached lift, not a
+      #   provider/impl compile) and read back its InterfaceFingerprint:
+      #     * fingerprint UNCHANGED vs the ``.ifp`` sidecar → private-impl edit:
+      #       the accessor content is provably identical → REUSE the existing
+      #       cached accessor file WITHOUT rewriting its bytes/mtime (downstream
+      #       sees NO input change → no recompile) and refresh ONLY the stamp
+      #       sidecar so the next check is a Level-1 fast HIT. This is the TI3 win.
+      #     * fingerprint CHANGED → public-signature edit: rewrite the accessor
+      #       (new content) + record the new fingerprint + refresh the stamp →
+      #       downstream recompiles.
+      # ========================================================================
+
+      # ---- Level 1: FAST PATH — cache HIT, read the cached accessor in-VM. ----
+      var accessorSrc = ""
+      var cacheHit = false
+      if stamp.len > 0 and fileExists(accessorCachePath) and
+          fileExists(stampPath) and readFile(stampPath).strip() == stamp:
+        accessorSrc = readFile(accessorCachePath)
+        cacheHit = true
+
+      # ---- Level 2 / COLD: run the generator (drives the cached lift). ----
+      if not cacheHit:
+        let genPath = accDir / ("ti2_gen_" & selectorKey & ".nim")
+        # The generator emits a framed output: a leading ``IFP:<hex>`` line
+        # carrying the producer's InterfaceFingerprint (from TI1's cached lift),
+        # then the driver-free accessor source. The VM reads the fingerprint to
+        # decide reuse-in-place vs regenerate WITHOUT a second lift.
+        let genSrc =
+          "import repro_cli_support\n" &
+          "let c = resolveProducerTypedContract(" & escape(selector) & ", " &
+          escape(workspaceRoot) & ")\n" &
+          "stdout.write(\"IFP:\" & c.interfaceFingerprint & \"\\n\")\n" &
+          "stdout.write(emitResourceContractAccessors(c))\n"
+        writeFile(genPath, genSrc)
+        # ``staticExec`` runs a real process out of the macro VM, so the
+        # generator's ``nim c`` extractor subprocess + ``getCurrentDir`` are
+        # fine. It has no working-dir parameter, so embed a ``cd`` into the
+        # command to run with CWD = repoRoot (its ``config.nims`` supplies the
+        # lib ``--path`` the generator compile needs).
+        let nimCmd =
+          "nim c -r --hints:off --warnings:off " &
+          "--nimcache:" & quoteShell(accDir / ("nc_" & selectorKey)) &
+          " " & quoteShell(genPath)
+        let genCmd =
+          if repoRoot.len > 0: "cd " & quoteShell(repoRoot) & " && " & nimCmd
+          else: nimCmd
+        let genOut = staticExec(genCmd)
+        # Split the framed output: first ``IFP:<hex>`` line, then the accessor
+        # source. A generator that failed / was killed returns empty/partial
+        # output (``staticExec`` swallows the failure) — then ``newFingerprint``
+        # stays empty and the guards below refuse to cache, so the next consumer
+        # retries instead of caching a poisoned/empty result.
+        var newFingerprint = ""
+        if genOut.len > 0:
+          let nl = genOut.find('\n')
+          if nl >= 0 and genOut.startsWith("IFP:"):
+            newFingerprint = genOut[4 ..< nl].strip()
+            accessorSrc = genOut[nl + 1 .. ^1]
+          else:
+            # No frame (older/edge output shape) — treat the whole thing as the
+            # accessor source; TI3's reuse-in-place simply doesn't engage and we
+            # fall back to TI2 behavior (regenerate on any source-stamp change).
+            accessorSrc = genOut
+
+        # TI3 Level-2 reuse-in-place: the producer's source changed (stamp miss)
+        # but if the InterfaceFingerprint matches the ``.ifp`` sidecar the edit
+        # was private-impl-only — the freshly emitted accessor is byte-identical
+        # to the cached one. Do NOT rewrite the accessor file (that would bump its
+        # mtime and force downstream recompiles); reuse it in place and refresh
+        # ONLY the stamp so the next check is a Level-1 HIT.
+        var reusedInPlace = false
+        if newFingerprint.len > 0 and fileExists(accessorCachePath) and
+            fileExists(ifpPath) and
+            readFile(ifpPath).strip() == newFingerprint:
+          accessorSrc = readFile(accessorCachePath)
+          if stamp.len > 0:
+            writeFile(stampPath, stamp)
+          reusedInPlace = true
+
+        # Persist the emitted source + the freshness stamp + the fingerprint so
+        # the NEXT consumer of this producer takes the fast path above — but ONLY
+        # when the generator actually produced accessors AND we did not reuse in
+        # place. Guard on a non-empty result so a transient generation failure
+        # (e.g. an OOM/timeout kill under heavy load) is retried on the next
+        # consumer instead of being cached as an empty (poisoning) result.
+        if not reusedInPlace and accessorSrc.strip.len > 0:
+          writeFile(accessorCachePath, accessorSrc)
+          if stamp.len > 0:
+            writeFile(stampPath, stamp)
+          if newFingerprint.len > 0:
+            writeFile(ifpPath, newFingerprint)
+          # Record one witness line so a test can assert how many cold
+          # generations (accessor REWRITES) ran. A Level-2 reuse-in-place does
+          # NOT witness — the accessor was not regenerated — which is exactly
+          # what the TI3 private-impl test asserts.
+          var log = ""
+          if fileExists(witnessPath):
+            log = readFile(witnessPath)
+          writeFile(witnessPath, log & "gen " & selector & "\n")
+
+      when defined(reproDebugProducerImports):
+        result.add("# [resource-import] selector=" & selector &
+          (if cacheHit: " (cache-hit)" else: " (cold)") & "\n")
+      # Splice the driver-free typed surface inline.
+      result.add(accessorSrc)
+      result.add("\n")
 
 proc parseInterfaceParam(node: NimNode;
                          defaultPlacement = capAfterSubcommand): CliParamDef =
@@ -2695,6 +3369,8 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
     formals.add("cacheable = true")
     formals.add("actionCachePolicy = defaultActionCachePolicy()")
     formals.add("commandStatsId = \"\"")
+    formals.add("dependencyPolicy = " &
+      dependencyPolicyCode(command.dependencyPolicy))
     let typedReturn = command.typedOutputs.len > 0
     let returnType =
       if typedReturn: buildEdgeSubtypeName(toolSymbol, command.name)
@@ -2719,8 +3395,7 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
       "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
       "extraEnv = extraEnv, " &
-      "dependencyPolicy = " &
-      dependencyPolicyCode(command.dependencyPolicy) & ")\n")
+      "dependencyPolicy = dependencyPolicy)\n")
     # Typed-Outputs M1: bind typed fields against the call-site flag
     # values via the shared helper (the ``package``-block wrapper uses
     # the same one).

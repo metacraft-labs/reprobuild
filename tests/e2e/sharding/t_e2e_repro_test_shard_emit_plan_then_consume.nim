@@ -96,7 +96,7 @@ suite "CI-Sharding M2 — emit-plan-then-consume":
         "--shard", $k & "/" & $ShardCount,
         "--fixture-from=" & fixturePath,
         "--plan-from=" & planPath,
-        "--report=" & reportPath],
+        "--write-report=" & reportPath],
         workspace)
       if res.code != 0:
         checkpoint(res.output)

@@ -4,22 +4,24 @@
 ## two concurrent publishers write DISJOINT paths — append-only, no shared
 ## mutable file (Workspace-And-Develop-Mode.md §"Locks are commit-addressed,
 ## so concurrent publication does not collide"). When the manifest tip
-## advances under a publisher (another agent published first), its push is
+## advances under a publisher (another agent published a disjoint lock first),
+## its push is
 ## rejected non-fast-forward; RA-29 RE-FETCHES the tip, RE-APPLIES this
 ## publisher's lock commit on top (disjoint path ⇒ conflict-free, NOT a
 ## force-push), and RE-PUSHES — so the race is INVISIBLE to the user and
 ## NEITHER lock is lost. A genuine (non-retryable) publish failure stays
 ## LOUD (RA-21 preserved).
 ##
-## Deterministic & hermetic construction: rather than racing two live
-## publishers, we ADVANCE the manifest upstream OUT-OF-BAND (push an
-## unrelated commit to the bare from a second clone) BEFORE the publisher
-## pushes, so the publisher's local manifest branch is behind and its push
-## is guaranteed non-fast-forward. The publisher is ``repro check
+## Deterministic & hermetic construction: rather than scheduling two live
+## publishers nondeterministically, a real third-party ``pre-push`` hook on the
+## manifest checkout publishes a valid, disjoint lock-only commit from a second
+## clone after Git has advertised the old remote tip but before the publisher's
+## receive-pack updates it. The publisher's push is therefore guaranteed to
+## lose a real compare-and-swap race. The publisher is ``repro check
 ## --mode=pre-push`` (which writes + commits + publishes the lock via the
 ## RA-7/RA-21 path). We assert:
 ##   - the publisher exits 0 (no user-visible failure) — RA-29 retried;
-##   - the manifest upstream tip ends with BOTH the out-of-band commit AND
+##   - the manifest upstream tip ends with BOTH the out-of-band lock AND
 ##     this publisher's lock file present (neither overwritten/lost);
 ##   - a genuinely failing publish (unwritable upstream — the bare removed)
 ##     still fails LOUDLY with a non-zero exit (RA-21 preserved).
@@ -27,7 +29,7 @@
 ## Falsifiable: with NO non-ff retry the publisher's push stays rejected and
 ## ``repro check`` exits non-zero (RA-21 loud-on-failure) — the exit-0
 ## assertion fails; with a FORCE-push "retry" the out-of-band commit would
-## be clobbered — the "out-of-band commit survives" assertion fails.
+## be clobbered — the "out-of-band lock survives" assertion fails.
 ##
 ## Skip rule: ``git`` missing on PATH.
 
@@ -118,7 +120,7 @@ type
 
 proc seedManifestGitLayer(gitBin, manifestsRoot, bare, projectToml: string;
                           branch = "main") =
-  ## ``.repo/manifests`` is a real git checkout tracking a bare upstream so
+  ## ``.repro/manifests`` is a real git checkout tracking a bare upstream so
   ## the publish path genuinely commits + pushes.
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " & q(bare))
   discard requireGit(q(gitBin) & " init -b " & branch & " " & q(manifestsRoot))
@@ -145,7 +147,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot / ".repro" / "manifests"
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -166,29 +168,44 @@ proc writeRefsFile(path: string; localSha: string) =
 
 proc invokeCheckPrePush(fx: Fixture; refsFile: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "check", "--mode=pre-push",
+    fx.reproBin, "check", "--mode=pre-push", "--write-report",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & (fx.workspaceRoot / "lib-a"),
     "--pushed-refs=" & refsFile,
     "--json",
   ]))
 
-proc advanceUpstreamOutOfBand(gitBin: string; fx: Fixture;
-                              marker: string): string =
-  ## Simulate ANOTHER publisher advancing the manifest upstream first:
-  ## clone the bare, add an unrelated commit, push it. The publisher's
-  ## local manifest branch is now behind → its later push is non-ff.
-  ## Returns the file path (manifest-relative) we created upstream so the
+proc raceUpstreamOnNextPush(gitBin: string; fx: Fixture;
+                            marker: string): string =
+  ## Simulate ANOTHER publisher winning after this publisher's initial fetch:
+  ## prepare a disjoint canonical lock record in a second clone, then install a
+  ## real one-shot third-party pre-push hook which publishes that clone while
+  ## the original Git child is between advertisement and ref update.
+  ## Returns the lock path (manifest-relative) we created upstream so the
   ## caller can assert it survives.
   let sidecar = fx.scratch / "manifest-sidecar"
   cloneInto(gitBin, fx.manifestBare, sidecar)
-  let relPath = "out-of-band-" & marker & ".txt"
-  writeFile(sidecar / relPath, "another publisher was here: " & marker & "\n")
+  let relPath = "locks/lib-a/sidecar-" & marker & "/" & fx.libASha & ".toml"
+  createDir((sidecar / relPath).parentDir)
+  writeFile(sidecar / relPath,
+    "[[repo]]\nname = \"sidecar-" & marker & "\"\n" &
+      "path = \"sidecar-" & marker & "\"\nrevision = \"" &
+      fx.libASha & "\"\n")
   discard requireGit(q(gitBin) & " -C " & q(sidecar) & " add " & q(relPath))
   discard requireGit(q(gitBin) & " -C " & q(sidecar) &
     " commit -m \"out-of-band publish " & marker & "\"")
-  discard requireGit(q(gitBin) & " -C " & q(sidecar) & " push origin main")
-  removeDir(sidecar)
+  let hookDir = fx.manifestsRoot / ".git" / "hooks"
+  createDir(hookDir)
+  let hook = hookDir / "pre-push"
+  let fired = fx.scratch / ("race-fired-" & marker)
+  writeFile(hook,
+    "#!/bin/sh\nset -eu\n" &
+    "if [ ! -e " & q(fired) & " ]; then\n" &
+    "  : > " & q(fired) & "\n" &
+    "  " & q(gitBin) & " -C " & q(sidecar) &
+      " push origin main >/dev/null 2>&1\n" &
+    "fi\n")
+  setFilePermissions(hook, {fpUserRead, fpUserWrite, fpUserExec})
   relPath
 
 proc upstreamFiles(gitBin, bare: string): string =
@@ -211,9 +228,9 @@ suite "RA-29 — concurrent lock publishes retry without user-visible failure":
       let refsFile = fx.scratch / "pushed-refs.txt"
       writeRefsFile(refsFile, fx.libASha)
 
-      # Advance the manifest upstream out-of-band so the publisher's local
-      # manifest branch is behind → its publish push is non-fast-forward.
-      let oobRel = advanceUpstreamOutOfBand(gitBin, fx, "first")
+      # Arrange for the manifest upstream to advance only after publication's
+      # immutable initial fetch, producing a genuine last-moment push race.
+      let oobRel = raceUpstreamOnNextPush(gitBin, fx, "first")
 
       let res = invokeCheckPrePush(fx, refsFile)
       checkpoint("retry output: " & res.output)
@@ -221,7 +238,7 @@ suite "RA-29 — concurrent lock publishes retry without user-visible failure":
       # succeeded. (Falsifiable: no retry → RA-21 loud-on-failure → non-zero.)
       check res.code == 0
 
-      let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+      let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
         "check-report.json"
       check fileExists(reportPath)
       let report = parseFile(reportPath)
@@ -230,9 +247,9 @@ suite "RA-29 — concurrent lock publishes retry without user-visible failure":
       for f in report["failures"]:
         check f["property"].getStr() != "lock-publish-failure"
 
-      # BOTH survive on the upstream tip: the out-of-band commit's file AND
+      # BOTH survive on the upstream tip: the out-of-band lock record AND
       # this publisher's lock file. (Falsifiable: a force-push "retry" would
-      # clobber the out-of-band file.)
+      # clobber the out-of-band lock.)
       let files = upstreamFiles(gitBin, fx.manifestBare)
       check files.contains(oobRel)
       check files.contains("locks/lib-a/lib-a/")
@@ -250,7 +267,7 @@ suite "RA-29 — concurrent lock publishes retry without user-visible failure":
       let loud = invokeCheckPrePush(fx2, refsFile2)
       checkpoint("loud output: " & loud.output)
       check loud.code != 0
-      let report2 = parseFile(fx2.workspaceRoot / ".repro" / "workspace" /
+      let report2 = parseFile(fx2.workspaceRoot / ".repro" / "build" / "reports" /
         "check-report.json")
       check report2["exitCode"].getInt() != 0
       var sawPublishFailure = false

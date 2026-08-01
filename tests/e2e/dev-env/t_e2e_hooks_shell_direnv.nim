@@ -17,6 +17,7 @@ proc providerText(modeValue: string): string =
   "import std/strutils\n" &
     "import repro_project_dsl\n\n" &
     "package fixture:\n" &
+    "  defaultToolProvisioning \"path\"\n" &
     "  uses:\n" &
     "    \"nim >=2.2 <3.0\"\n" &
     "  devEnv:\n" &
@@ -66,6 +67,8 @@ proc prepareCase(prefix: string): M5Case =
   # /tmp/... form, treats the file as un-allowed, and refuses to run.
   result.tempRoot = expandFilename(createTempDir(prefix, ""))
   result.projectRoot = result.tempRoot / "project"
+  for dir in ["home", "xdg-config", "xdg-cache", "xdg-data"]:
+    createDir(result.tempRoot / dir)
   writeFixture(result.projectRoot)
   result.reproBin = reproBinary(result.repoRoot)
   result.direnvBin = requireDirenv()
@@ -78,6 +81,9 @@ proc envFor(c: M5Case): StringTableRef =
   result = newStringTable(modeCaseSensitive)
   for key, value in envPairs():
     result[key] = value
+  for key in ["DIRENV_DIR", "DIRENV_FILE", "DIRENV_DIFF", "DIRENV_WATCHES",
+      "DIRENV_LAYOUT", "REPRO_DIRENV_ACTIVATING"]:
+    result.del(key)
   result["HOME"] = c.tempRoot / "home"
   result["XDG_CONFIG_HOME"] = c.tempRoot / "xdg-config"
   result["XDG_CACHE_HOME"] = c.tempRoot / "xdg-cache"

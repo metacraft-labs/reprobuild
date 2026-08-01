@@ -70,7 +70,8 @@ suite "MO-8: integrity is VCS-native hash else own-file-hash, both multihash":
     if gitBin.len == 0 or not fileExists(reproBinary):
       skip()
     else:
-      let scratch = getTempDir() / "mo8-integrity-" & $getCurrentProcessId()
+      let scratch = getCurrentDir() / "build" / "test-tmp" /
+        ("mo8-integrity-" & $getCurrentProcessId())
       removeDir(scratch)
       createDir(scratch)
       defer: removeDir(scratch)

@@ -60,6 +60,12 @@ const
     "reprobuild.workspace-vcs.merge-ff-receipt.v1"
   ForceResetReceiptHeader* =
     "reprobuild.workspace-vcs.force-reset-receipt.v1"
+  ForkBranchReceiptHeader* =
+    "reprobuild.workspace-vcs.fork-branch-receipt.v1"
+  RefreshBareReceiptHeader* =
+    "reprobuild.workspace-vcs.refresh-bare-receipt.v1"
+  ForcePushRebaseReceiptHeader* =
+    "reprobuild.workspace-vcs.force-push-rebase-receipt.v1"
 
 type
   GitVcsOp* = enum
@@ -69,6 +75,9 @@ type
     gvoBranchCreate
     gvoMergeFf
     gvoForceReset
+    gvoForcePushRebase
+    gvoForkBranch
+    gvoRefreshBare
 
   GitVcsPayload* = object
     ## Compact per-action payload encoded into ``builtinText`` so the
@@ -119,11 +128,13 @@ type
       ## remote head (the ``repo sync -c`` equivalent). EXCLUDED from the
       ## fingerprint: the resolved tree at the pin is unchanged; only the
       ## set of remote-tracking refs differs.
+    baseSha*: string
 
   GitQueryKind* = enum
     gqkHeadSha
     gqkIsClean
     gqkIsPublished
+    gqkExtendedStatus
 
   GitQueryAction* = object
     ## Observation-only descriptor for the read-only query operations
@@ -133,10 +144,27 @@ type
     kind*: GitQueryKind
     repoPath*: string
     remoteName*: string
+    trunkBranch*: string
+    queryStashes*: bool
+    queryFiles*: bool
+    queryAheadBehind*: bool
+    queryUnmerged*: bool
+    queryFileDetails*: bool
 
   GitQueryStatus* = enum
     gqsOk
     gqsFailed
+
+  FileStatusEntry* = object
+    ## One changed path from ``git status --porcelain`` (v1). ``code`` is
+    ## the raw two-column ``XY`` status (index column X, worktree column
+    ## Y) — e.g. ``"M "`` (staged modification), ``" M"`` (unstaged),
+    ## ``"MM"`` (both), ``"A "`` (added), ``"??"`` (untracked), ``"UU"``
+    ## (conflict). ``path`` is the pathspec (for renames/copies the raw
+    ## ``ORIG -> DEST`` form is preserved). This is the per-file detail
+    ## behind the coarse ``modifiedCount`` / ``untrackedCount`` tallies.
+    code*: string
+    path*: string
 
   GitQueryResult* = object
     status*: GitQueryStatus
@@ -144,6 +172,14 @@ type
     isClean*: bool
     isPublished*: bool
     diagnostic*: string
+    stashCount*: int
+    aheadCount*: int
+    behindCount*: int
+    untrackedCount*: int
+    modifiedCount*: int
+    unmergedBranches*: seq[string]
+    fileDetails*: seq[FileStatusEntry]
+
 
 const PayloadVersion* = "reprobuild.workspace-vcs.payload.v1"
   ## First-line magic of a git-flavored payload encoded into
@@ -164,6 +200,9 @@ proc opTag(op: GitVcsOp): string =
   of gvoBranchCreate: "branch-create"
   of gvoMergeFf: "merge-ff"
   of gvoForceReset: "force-reset"
+  of gvoForcePushRebase: "force-push-rebase"
+  of gvoForkBranch: "fork-branch"
+  of gvoRefreshBare: "refresh-bare"
 
 proc parseOpTag(tag: string): GitVcsOp =
   case tag
@@ -173,6 +212,9 @@ proc parseOpTag(tag: string): GitVcsOp =
   of "branch-create": gvoBranchCreate
   of "merge-ff": gvoMergeFf
   of "force-reset": gvoForceReset
+  of "force-push-rebase": gvoForcePushRebase
+  of "fork-branch": gvoForkBranch
+  of "refresh-bare": gvoRefreshBare
   else:
     raise newException(ValueError,
       "unknown workspace-vcs operation tag: " & tag)
@@ -204,6 +246,7 @@ proc encodePayload(payload: GitVcsPayload): string =
   result.add("clone-filter=" & esc(payload.cloneFilter) & "\n")
   result.add("depth=" & $payload.depth & "\n")
   result.add("single-branch=" & (if payload.singleBranch: "1" else: "0") & "\n")
+  result.add("base-sha=" & esc(payload.baseSha) & "\n")
 
 proc decodePayload(text: string): GitVcsPayload =
   proc unesc(value: string): string =
@@ -254,6 +297,7 @@ proc decodePayload(text: string): GitVcsPayload =
       try: result.depth = parseInt(value.strip())
       except ValueError: result.depth = 0
     of "single-branch": result.singleBranch = value.strip() == "1"
+    of "base-sha": result.baseSha = value
     else:
       # Forward-compatible: ignore unknown keys so a payload written
       # by a newer M2.x build still decodes.
@@ -288,8 +332,11 @@ proc fingerprintPayload(payload: GitVcsPayload): seq[byte] =
   case payload.op
   of gvoClone:
     discard
-  of gvoFetch, gvoSwitch, gvoBranchCreate, gvoMergeFf, gvoForceReset:
+  of gvoFetch, gvoSwitch, gvoBranchCreate, gvoMergeFf, gvoForceReset,
+      gvoForcePushRebase, gvoForkBranch, gvoRefreshBare:
     result.writeString(payload.repoPath)
+    if payload.op == gvoForcePushRebase:
+      result.writeString(payload.baseSha)
 
 proc actionFingerprint*(payload: GitVcsPayload): ContentDigest =
   blake3DomainDigest(fingerprintPayload(payload), hdActionFingerprint)
@@ -362,27 +409,74 @@ proc workingTreeIsClean(payload: GitVcsPayload; repoPath: string): tuple[ok: boo
   (ok: true, clean: res.output.strip.len == 0, diagnostic: "")
 
 proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string): tuple[ok: bool; published: bool; diagnostic: string] =
+  ## Is HEAD contained in a remote-tracking branch?
+  ##
+  ## ``remote`` scopes the answer to one remote's refs (``<remote>/…``). Pass
+  ## an EMPTY string to accept ANY remote-tracking branch — the right question
+  ## when the caller has no configured expectation of which remote a repo
+  ## should be published to, and the one the "not on any remote-tracking
+  ## branch" diagnostic has always claimed to be asking.
+  ##
+  ## Scoping applies only when the named remote is actually configured in the
+  ## worktree. A name that is not a real remote is a caller's guess, so it
+  ## degrades to the any-remote answer rather than a confident falsehood; see
+  ## the comment on the lookup below.
+  ##
+  ## The distinction is not academic: a repo checked out by the `repo` tool
+  ## names its remote after the org (``metacraft-labs``), not ``origin``. A
+  ## caller that hardcoded ``origin`` against such a worktree saw every commit
+  ## as unpublished, including commits sitting on the remote's own default
+  ## branch, and blocked pushes on that basis.
   let lookup = runGit(payload,
     ["-C", repoPath, "branch", "-r", "--contains", "HEAD"])
   if lookup.exitCode != 0:
     return (ok: false, published: false,
       diagnostic: "git branch -r --contains HEAD failed (" &
         $lookup.exitCode & "): " & lookup.output.trimmed)
+  # A named remote that this checkout does not actually have is a GUESS, not a
+  # constraint. `gitRemoteNameFor` falls back to "origin" whenever the manifest
+  # entry carries no remote name, so callers routinely arrive here asking about
+  # a remote that does not exist in the worktree — and in a `repo`-tool
+  # workspace it never does, because the remotes are named after the org. Left
+  # as-is that guess answers "unpublished" for commits sitting on the remote's
+  # own default branch. Scoping is worth keeping when the caller names a remote
+  # that IS configured; when it names one that is not, fall back to accepting
+  # any remote-tracking branch rather than reporting a confident falsehood.
+  var anyRemote = remote.len == 0
+  if not anyRemote:
+    let remotes = runGit(payload, ["-C", repoPath, "remote"])
+    if remotes.exitCode == 0:
+      var found = false
+      for raw in remotes.output.splitLines:
+        if raw.strip() == remote:
+          found = true
+          break
+      if not found:
+        anyRemote = true
   let needle = remote & "/"
+  proc matches(candidate: string): bool =
+    if anyRemote:
+      # Any ``<remote>/<branch>`` line qualifies. Require the separator so a
+      # malformed bare line cannot be mistaken for a tracking ref.
+      candidate.len > 0 and '/' in candidate
+    else:
+      candidate.startsWith(needle)
   for raw in lookup.output.splitLines:
     let line = raw.strip()
     if line.len == 0:
       continue
     # Lines look like ``  origin/main`` or ``* origin/HEAD -> origin/main``.
     let normalized = line.replace("* ", "").strip()
-    if normalized.startsWith(needle):
-      return (ok: true, published: true, diagnostic: "")
-    # ``HEAD -> origin/main`` form: split on " -> " and re-check.
+    # ``HEAD -> origin/main`` form: prefer the target of the arrow, since the
+    # left side is a symbolic name rather than a branch that contains HEAD.
     let arrowIndex = normalized.find(" -> ")
     if arrowIndex >= 0:
       let tail = normalized[arrowIndex + 4 .. ^1].strip()
-      if tail.startsWith(needle):
+      if matches(tail):
         return (ok: true, published: true, diagnostic: "")
+      continue
+    if matches(normalized):
+      return (ok: true, published: true, diagnostic: "")
   (ok: true, published: false, diagnostic: "")
 
 proc writeReceipt(receiptPath, content: string) =
@@ -440,6 +534,24 @@ proc renderBranchCreateReceipt(payload: GitVcsPayload;
   result.add("git-version\t" & payload.identityVersion & "\n")
   result.add("git-identity\t" & payload.identityDigestHex & "\n")
 
+proc renderForkBranchReceipt(payload: GitVcsPayload;
+                             targetSha, outcome: string): string =
+  ## ``outcome`` is one of ``created`` (the branch was created at the
+  ## requested SHA and checked out), ``already-at-sha`` (an idempotent
+  ## re-run — the branch already pointed at the SHA; the checkout is
+  ## still asserted) or ``fetched-then-created`` (the SHA was absent and
+  ## had to be fetched from the source checkout first).
+  result = ForkBranchReceiptHeader & "\n"
+  result.add("kind\t" & WorkspaceVcsKind & "\n")
+  result.add("operation\tfork-branch\n")
+  result.add("branch\t" & payload.branchName & "\n")
+  result.add("repo-path\t" & payload.repoPath & "\n")
+  result.add("source\t" & payload.remoteUrl & "\n")
+  result.add("target-sha\t" & targetSha & "\n")
+  result.add("outcome\t" & outcome & "\n")
+  result.add("git-version\t" & payload.identityVersion & "\n")
+  result.add("git-identity\t" & payload.identityDigestHex & "\n")
+
 proc renderMergeFfReceipt(payload: GitVcsPayload; headSha: string): string =
   result = MergeFfReceiptHeader & "\n"
   result.add("kind\t" & WorkspaceVcsKind & "\n")
@@ -456,6 +568,17 @@ proc renderForceResetReceipt(payload: GitVcsPayload; headSha: string): string =
   result.add("kind\t" & WorkspaceVcsKind & "\n")
   result.add("operation\tforce-reset\n")
   result.add("revision\t" & payload.revision & "\n")
+  result.add("repo-path\t" & payload.repoPath & "\n")
+  result.add("head-sha\t" & headSha & "\n")
+  result.add("git-version\t" & payload.identityVersion & "\n")
+  result.add("git-identity\t" & payload.identityDigestHex & "\n")
+
+proc renderForcePushRebaseReceipt(payload: GitVcsPayload; headSha: string): string =
+  result = ForcePushRebaseReceiptHeader & "\n"
+  result.add("kind\t" & WorkspaceVcsKind & "\n")
+  result.add("operation\tforce-push-rebase\n")
+  result.add("revision\t" & payload.revision & "\n")
+  result.add("base-sha\t" & payload.baseSha & "\n")
   result.add("repo-path\t" & payload.repoPath & "\n")
   result.add("head-sha\t" & headSha & "\n")
   result.add("git-version\t" & payload.identityVersion & "\n")
@@ -684,6 +807,131 @@ proc executeBranchCreate(payload: GitVcsPayload;
   writeReceipt(receiptPath, receipt)
   succeeded()
 
+proc executeForkBranch(payload: GitVcsPayload;
+                       cwd, receiptPath: string): ActionResult =
+  ## M27 — create ``branchName`` at an EXPLICIT ``revision`` (the source
+  ## workspace's committed HEAD) and check it out, fetching that object
+  ## from the source checkout (``remoteUrl``, a local path) when the
+  ## freshly cloned repo does not carry it yet.
+  ##
+  ## This is the fork counterpart to ``gvoBranchCreate``: that one always
+  ## branches from the target repo's OWN HEAD and never switches, which
+  ## cannot express "branch at the SHA another checkout is sitting on" —
+  ## including a commit that exists only locally and was never pushed.
+  ##
+  ## Idempotent, so a partially completed fork is finished by re-running
+  ## the identical action: a branch already at the requested SHA is
+  ## accepted and only the checkout is asserted. A branch of the same name
+  ## at a DIFFERENT SHA is a collision and fails loudly rather than
+  ## silently moving the operator's ref.
+  let target = absoluteRepoPath(payload, cwd)
+  if not dirExists(target / ".git"):
+    return failed("fork-branch-target-missing",
+      "fork-branch target is not a git working tree: " & target)
+  let wanted = payload.revision.strip()
+  if wanted.len == 0:
+    return failed("fork-branch-no-revision",
+      "fork-branch requires the source revision to branch at")
+
+  # Ensure the object is present. A fresh clone of the shared remote has
+  # every PUBLISHED commit, so this only fires for local-only work.
+  var outcome = "created"
+  let present = runGit(payload,
+    ["-C", target, "cat-file", "-e", wanted & "^{commit}"])
+  if present.exitCode != 0:
+    if payload.remoteUrl.len == 0:
+      return failed("fork-branch-source-missing",
+        "commit " & wanted & " is absent from " & target &
+          " and no source checkout was supplied to fetch it from")
+    let fetched = runGit(payload,
+      ["-C", target, "fetch", "--no-tags", payload.remoteUrl, wanted])
+    if fetched.exitCode != 0:
+      return failed("fork-branch-fetch-failed",
+        "could not fetch " & wanted & " from " & payload.remoteUrl &
+          " (" & $fetched.exitCode & "): " & fetched.output.trimmed)
+    let recheck = runGit(payload,
+      ["-C", target, "cat-file", "-e", wanted & "^{commit}"])
+    if recheck.exitCode != 0:
+      return failed("fork-branch-fetch-incomplete",
+        "commit " & wanted & " still absent after fetching from " &
+          payload.remoteUrl)
+    outcome = "fetched-then-created"
+
+  let existing = resolveBranchSha(payload, target, payload.branchName)
+  if existing.diagnostic.len > 0:
+    return failed("fork-branch-probe-failed", existing.diagnostic)
+  if existing.exists:
+    if existing.sha != wanted:
+      return failed("branch-collision",
+        "branch '" & payload.branchName & "' already exists at " &
+          existing.sha & " (≠ requested " & wanted & ") in " & target)
+    outcome = "already-at-sha"
+    # Idempotent re-run: the branch is right, but HEAD may not be on it
+    # yet (a run interrupted between create and checkout). Assert it.
+    let current = runGit(payload,
+      ["-C", target, "symbolic-ref", "--short", "-q", "HEAD"])
+    if current.exitCode != 0 or current.output.trimmed != payload.branchName:
+      let sw = runGit(payload, ["-C", target, "checkout", payload.branchName])
+      if sw.exitCode != 0:
+        return failed("fork-branch-checkout-failed",
+          "git checkout " & payload.branchName & " exited " & $sw.exitCode &
+            ": " & sw.output.trimmed)
+  else:
+    let created = runGit(payload,
+      ["-C", target, "checkout", "-b", payload.branchName, wanted])
+    if created.exitCode != 0:
+      return failed("fork-branch-create-failed",
+        "git checkout -b " & payload.branchName & " " & wanted & " exited " &
+          $created.exitCode & ": " & created.output.trimmed)
+
+  writeReceipt(receiptPath, renderForkBranchReceipt(payload, wanted, outcome))
+  succeeded()
+
+proc executeRefreshBare(payload: GitVcsPayload;
+                        cwd, receiptPath: string): ActionResult =
+  ## RA-27 — clone-if-missing / fetch-if-present the RA-5 shared bare for
+  ## ``remoteUrl`` at ``repoPath``. Scheduling this as an engine action (rather
+  ## than the serial in-line loop it replaces) is safe because each unique URL
+  ## maps to its OWN bare directory: the race the serial loop guarded against is
+  ## per-bare, and distinct bares share no state. The caller deduplicates by
+  ## URL, so two actions never target the same directory.
+  let bare = payload.repoPath
+  var outcome = "fetched"
+  if dirExists(bare / "objects") or dirExists(bare / ".git"):
+    let res = runGit(payload,
+      ["-C", bare, "fetch", "--all", "--prune", "--quiet"])
+    if res.exitCode != 0:
+      return failed("refresh-bare-fetch-failed",
+        "git fetch in shared bare failed (" & $res.exitCode & "): " &
+          res.output.trimmed)
+  else:
+    let parent = bare.splitPath.head
+    if parent.len > 0:
+      try: createDir(parent)
+      except OSError as e:
+        return failed("refresh-bare-parent-failed",
+          "could not create cache parent " & parent & ": " & e.msg)
+    let res = runGit(payload,
+      ["clone", "--bare", "--quiet", payload.remoteUrl, bare])
+    if res.exitCode != 0:
+      # Leave no half-populated bare behind so the next attempt re-clones.
+      if dirExists(bare):
+        try: removeDir(bare)
+        except OSError: discard
+      return failed("refresh-bare-clone-failed",
+        "git clone --bare into shared cache failed (" & $res.exitCode & "): " &
+          res.output.trimmed)
+    outcome = "cloned"
+  var receipt = RefreshBareReceiptHeader & "\n"
+  receipt.add("kind\t" & WorkspaceVcsKind & "\n")
+  receipt.add("operation\trefresh-bare\n")
+  receipt.add("remote-url\t" & payload.remoteUrl & "\n")
+  receipt.add("bare-path\t" & bare & "\n")
+  receipt.add("outcome\t" & outcome & "\n")
+  receipt.add("git-version\t" & payload.identityVersion & "\n")
+  writeReceipt(receiptPath, receipt)
+  succeeded()
+
 proc executeMergeFf(payload: GitVcsPayload;
                     cwd, receiptPath: string): ActionResult =
   ## RA-5c — fast-forward the working tree onto its tracked remote
@@ -715,6 +963,18 @@ proc executeMergeFf(payload: GitVcsPayload;
     return failed("merge-ff-failed",
       "git merge --ff-only exited " & $res.exitCode & ": " &
         res.output.trimmed)
+  # After the fast-forward the superproject's submodule gitlinks may point at
+  # new commits. Bring already-checked-out submodules in line so the
+  # superproject does not end up dirty with a stale ``M <submodule>`` gitlink
+  # (which would, e.g., block ``repro branch``). Only touches submodules that
+  # are already initialized (no ``--init``), so it never materializes a checkout
+  # the operator did not ask for; a no-op when there are no submodules. Best
+  # effort — a submodule-update failure must NOT fail the fast-forward itself
+  # (the superproject IS fast-forwarded), mirroring how ``git pull`` treats
+  # submodule recursion.
+  if fileExists(target / ".gitmodules"):
+    discard runGit(payload,
+      ["-C", target, "submodule", "update", "--recursive"])
   let headRes = resolveHeadSha(payload, target)
   if not headRes.ok:
     return failed("merge-ff-head-probe-failed", headRes.diagnostic)
@@ -761,6 +1021,60 @@ proc executeForceReset(payload: GitVcsPayload;
   if not headRes.ok:
     return failed("force-reset-head-probe-failed", headRes.diagnostic)
   let receipt = renderForceResetReceipt(payload, headRes.sha)
+  writeReceipt(receiptPath, receipt)
+  succeeded()
+
+proc executeForcePushRebase(payload: GitVcsPayload;
+                            cwd, receiptPath: string): ActionResult =
+  ## Cherry-pick locally authored commits since the force-pushed base Sha
+  ## onto the new remote tip.
+  let target = absoluteRepoPath(payload, cwd)
+  if not dirExists(target / ".git"):
+    return failed("force-push-rebase-target-missing",
+      "force-push-rebase target is not a git working tree: " & target)
+  if payload.baseSha.len == 0:
+    return failed("force-push-rebase-no-base-sha",
+      "force-push-rebase requires a force-pushed base SHA")
+  
+  let cleanRes = workingTreeIsClean(payload, target)
+  if not cleanRes.ok:
+    return failed("force-push-rebase-status-probe-failed", cleanRes.diagnostic)
+  if not cleanRes.clean:
+    return failed("dirty",
+      "git force-push-rebase refused: working tree is dirty at " & target)
+
+  # 1. Retrieve the list of commits in the range <baseSha>..HEAD in chronological order (oldest first)
+  let listRes = runGit(payload,
+    ["-C", target, "log", "--format=%H", "--reverse", payload.baseSha & "..HEAD"])
+  if listRes.exitCode != 0:
+    return failed("force-push-rebase-log-failed",
+      "git log failed to find commits: " & listRes.output.trimmed)
+  
+  let commitsToCherryPick = listRes.output.strip().splitLines()
+
+  # 2. Reset the branch to the remote tracking tip
+  let rName = if payload.remoteName.len > 0: payload.remoteName else: "origin"
+  let remoteRef = "refs/remotes/" & rName & "/" & payload.branchName
+  let resetRes = runGit(payload,
+    ["-C", target, "reset", "--hard", remoteRef])
+  if resetRes.exitCode != 0:
+    return failed("force-push-rebase-reset-failed",
+      "git reset --hard " & remoteRef & " failed: " & resetRes.output.trimmed)
+
+  # 3. Cherry-pick each of the local commits in order
+  for rawCommit in commitsToCherryPick:
+    let commit = rawCommit.strip()
+    if commit.len == 0: continue
+    let cpRes = runGit(payload, ["-C", target, "cherry-pick", commit])
+    if cpRes.exitCode != 0:
+      discard runGit(payload, ["-C", target, "cherry-pick", "--abort"])
+      return failed("cherry-pick-failed",
+        "git cherry-pick " & commit & " failed: " & cpRes.output.trimmed)
+
+  let headRes = resolveHeadSha(payload, target)
+  if not headRes.ok:
+    return failed("force-push-rebase-head-probe-failed", headRes.diagnostic)
+  let receipt = renderForcePushRebaseReceipt(payload, headRes.sha)
   writeReceipt(receiptPath, receipt)
   succeeded()
 
@@ -863,6 +1177,12 @@ proc executeWorkspaceVcsAction(action: BuildAction): ActionResult {.gcsafe.} =
     result = executeMergeFf(payload, action.cwd, receiptPath)
   of gvoForceReset:
     result = executeForceReset(payload, action.cwd, receiptPath)
+  of gvoForcePushRebase:
+    result = executeForcePushRebase(payload, action.cwd, receiptPath)
+  of gvoForkBranch:
+    result = executeForkBranch(payload, action.cwd, receiptPath)
+  of gvoRefreshBare:
+    result = executeRefreshBare(payload, action.cwd, receiptPath)
   result.id = action.id
   # ``executeBuiltinAction`` wraps the returned ``ActionResult`` and
   # re-sets ``dependencyPolicyKind`` from the action's declared
@@ -883,7 +1203,8 @@ proc buildPayload(identity: GitToolIdentity; op: GitVcsOp;
                   remoteUrl, remoteName, branchName, revision,
                   repoPath, receiptPath: string;
                   referencePath = "";
-                  cloneFilter = ""; depth = 0; singleBranch = false): GitVcsPayload =
+                  cloneFilter = ""; depth = 0; singleBranch = false;
+                  baseSha = ""): GitVcsPayload =
   GitVcsPayload(
     op: op,
     remoteUrl: remoteUrl,
@@ -898,7 +1219,8 @@ proc buildPayload(identity: GitToolIdentity; op: GitVcsOp;
     referencePath: referencePath,
     cloneFilter: cloneFilter,
     depth: depth,
-    singleBranch: singleBranch)
+    singleBranch: singleBranch,
+    baseSha: baseSha)
 
 proc gitCloneAction*(id: string; identity: GitToolIdentity;
                      remoteUrl, repoPath, receiptPath: string;
@@ -960,10 +1282,21 @@ proc gitFetchAction*(id: string; identity: GitToolIdentity;
 proc gitSwitchAction*(id: string; identity: GitToolIdentity;
                       branchName, repoPath, receiptPath: string;
                       cwd = ""; deps: openArray[string] = [];
-                      cacheable = true): BuildAction =
-  ## Construct a cacheable switch action. The executor refuses on a
-  ## dirty working tree and surfaces ``reason = "dirty"`` via the
-  ## ``ActionResult`` (per M2 design rule 4).
+                      cacheable = false): BuildAction =
+  ## Construct a switch action. The executor refuses on a dirty working
+  ## tree and surfaces ``reason = "dirty"`` via the ``ActionResult`` (per
+  ## M2 design rule 4).
+  ##
+  ## ``cacheable`` defaults to ``false`` (like ``gitMergeFfAction`` and
+  ## ``gitForceResetAction``): ``git switch`` mutates a working tree whose
+  ## precondition — the LIVE current HEAD — is observed at run time, not a
+  ## deterministic function of the declared inputs (branch + repo). Caching
+  ## its receipt is unsound: once a switch to branch ``B`` succeeded, a
+  ## later switch to ``B`` from a DIFFERENT branch would be served as a
+  ## cache hit and skip the actual ``git switch``, so ``repro checkout``
+  ## would report ``switched`` while HEAD never moved. ``git switch`` is
+  ## idempotent (already-on-branch is a safe no-op), so always executing is
+  ## both correct and cheap.
   let payload = buildPayload(identity, gvoSwitch, "", "", branchName,
     "", repoPath, receiptPath)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
@@ -986,6 +1319,44 @@ proc gitBranchCreate*(id: string; identity: GitToolIdentity;
   ## with ``reason = "branch-collision"``.
   let payload = buildPayload(identity, gvoBranchCreate, "", "", branchName,
     "", repoPath, receiptPath)
+  result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
+    deps = deps, outputs = @[receiptPath], cacheable = cacheable,
+    weakFingerprint = actionFingerprint(payload),
+    text = encodePayload(payload))
+
+proc gitForkBranchAction*(id: string; identity: GitToolIdentity;
+                          branchName, sourceRepoPath, targetSha,
+                          repoPath, receiptPath: string;
+                          cwd = ""; deps: openArray[string] = [];
+                          cacheable = false): BuildAction =
+  ## Construct the M27 fork-branch action used by
+  ## ``repro branch <name> <path>``: create ``branchName`` at
+  ## ``targetSha`` (the source workspace's committed HEAD for this repo)
+  ## and check it out, fetching the commit from ``sourceRepoPath`` when
+  ## the freshly cloned repo does not already carry it.
+  ##
+  ## ``cacheable`` defaults to ``false`` for the same reason as
+  ## ``gitSwitchAction``: the action mutates a working tree whose
+  ## precondition is the LIVE state of the target checkout, not a
+  ## deterministic function of the declared inputs. The executor is
+  ## idempotent, so always executing is both correct and cheap.
+  let payload = buildPayload(identity, gvoForkBranch, sourceRepoPath, "",
+    branchName, targetSha, repoPath, receiptPath)
+  result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
+    deps = deps, outputs = @[receiptPath], cacheable = cacheable,
+    weakFingerprint = actionFingerprint(payload),
+    text = encodePayload(payload))
+
+proc gitRefreshBareAction*(id: string; identity: GitToolIdentity;
+                           remoteUrl, barePath, receiptPath: string;
+                           cwd = ""; deps: openArray[string] = [];
+                           cacheable = false): BuildAction =
+  ## RA-27 — engine action for the RA-5 shared-bare warm-up, so the per-URL
+  ## network work runs on the ``vcs/fetch`` pool instead of a serial loop.
+  ## ``cacheable = false``: the bare's freshness is live remote state, not a
+  ## function of the declared inputs.
+  let payload = buildPayload(identity, gvoRefreshBare, remoteUrl, "", "",
+    "", barePath, receiptPath)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
@@ -1036,6 +1407,21 @@ proc gitForceResetAction*(id: string; identity: GitToolIdentity;
     weakFingerprint = actionFingerprint(payload),
     text = encodePayload(payload))
 
+proc gitForcePushRebaseAction*(id: string; identity: GitToolIdentity;
+                              branchName, baseSha, repoPath, receiptPath: string;
+                              remoteName: string = "origin";
+                              cwd = ""; deps: openArray[string] = [];
+                              cacheable = false): BuildAction =
+  ## Construct a force-push rebase action. The executor runs
+  ## executeForcePushRebase, which resets the branch to the remote branch tip
+  ## and cherry-picks the locally authored commits since `baseSha`.
+  let payload = buildPayload(identity, gvoForcePushRebase, "", remoteName,
+    branchName, "", repoPath, receiptPath, baseSha = baseSha)
+  result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
+    deps = deps, outputs = @[receiptPath], cacheable = cacheable,
+    weakFingerprint = actionFingerprint(payload),
+    text = encodePayload(payload))
+
 # ---- Query operations (observation-only, per M2 design rule 3) ----
 
 proc headShaQuery*(repoPath: string): GitQueryAction =
@@ -1047,6 +1433,16 @@ proc isCleanQuery*(repoPath: string): GitQueryAction =
 proc isPublishedQuery*(repoPath, remoteName: string): GitQueryAction =
   GitQueryAction(kind: gqkIsPublished, repoPath: repoPath,
     remoteName: remoteName)
+
+proc extendedStatusQuery*(repoPath, trunkBranch: string;
+                          queryStashes, queryFiles, queryAheadBehind,
+                          queryUnmerged: bool;
+                          queryFileDetails = false): GitQueryAction =
+  GitQueryAction(kind: gqkExtendedStatus, repoPath: repoPath,
+    remoteName: "origin", trunkBranch: trunkBranch,
+    queryStashes: queryStashes, queryFiles: queryFiles,
+    queryAheadBehind: queryAheadBehind, queryUnmerged: queryUnmerged,
+    queryFileDetails: queryFileDetails)
 
 proc queryGitState*(query: GitQueryAction;
                     identity: GitToolIdentity): GitQueryResult =
@@ -1082,3 +1478,121 @@ proc queryGitState*(query: GitQueryAction;
     else:
       result = GitQueryResult(status: gqsFailed,
         diagnostic: res.diagnostic)
+  of gqkExtendedStatus:
+    var headSha = ""
+    var isClean = true
+    var isPublished = true
+    var stashCount = 0
+    var aheadCount = 0
+    var behindCount = 0
+    var untrackedCount = 0
+    var modifiedCount = 0
+    var unmergedBranches: seq[string] = @[]
+    var fileDetails: seq[FileStatusEntry] = @[]
+    var diagnostic = ""
+
+    # 1. HEAD SHA
+    let headRes = resolveHeadSha(payload, query.repoPath)
+    if headRes.ok:
+      headSha = headRes.sha
+    else:
+      diagnostic.add("failed to resolve HEAD SHA: " & headRes.diagnostic)
+
+    # 2. File Status
+    if query.queryFiles:
+      let statusRes = runGit(payload, ["-C", query.repoPath, "status", "--porcelain"])
+      if statusRes.exitCode == 0:
+        isClean = true
+        for rawLine in statusRes.output.splitLines():
+          if rawLine.strip().len == 0: continue
+          isClean = false
+          # Porcelain v1: the two status columns (index X, worktree Y) are at
+          # positions 0-1; the path follows at position 3. The leading columns
+          # are SIGNIFICANT (a leading space means "unstaged"), so read them from
+          # the RAW line — never `strip()` — to preserve staged/unstaged.
+          let xy = if rawLine.len >= 2: rawLine[0 ..< 2] else: rawLine
+          let path = if rawLine.len >= 3: rawLine[3 .. ^1] else: ""
+          if xy == "??":
+            inc untrackedCount
+          else:
+            inc modifiedCount
+          if query.queryFileDetails:
+            fileDetails.add(FileStatusEntry(code: xy, path: path))
+      else:
+        diagnostic.add("; git status failed: " & statusRes.output.trimmed)
+    else:
+      # If files aren't queried, fall back to simple clean check
+      let cleanRes = workingTreeIsClean(payload, query.repoPath)
+      if cleanRes.ok:
+        isClean = cleanRes.clean
+      else:
+        diagnostic.add("; clean check failed: " & cleanRes.diagnostic)
+
+    # 3. Published Check
+    let pubRes = remoteBranchContainsHead(payload, query.repoPath, query.remoteName)
+    if pubRes.ok:
+      isPublished = pubRes.published
+    else:
+      diagnostic.add("; published check failed: " & pubRes.diagnostic)
+
+    # 4. Stashes
+    if query.queryStashes:
+      let stashRes = runGit(payload, ["-C", query.repoPath, "stash", "list"])
+      if stashRes.exitCode == 0:
+        for line in stashRes.output.splitLines():
+          if line.strip().len > 0:
+            inc stashCount
+
+    # 5. Ahead / Behind
+    if query.queryAheadBehind:
+      let upstreamRes = runGit(payload, ["-C", query.repoPath, "rev-parse", "--abbrev-ref", "@{u}"])
+      if upstreamRes.exitCode == 0:
+        let upstream = upstreamRes.output.strip()
+        let revListRes = runGit(payload, ["-C", query.repoPath, "rev-list", "--count", "--left-right", upstream & "...HEAD"])
+        if revListRes.exitCode == 0:
+          try:
+            let parts = revListRes.output.strip().splitWhitespace()
+            if parts.len >= 2:
+              behindCount = parseInt(parts[0])
+              aheadCount = parseInt(parts[1])
+          except CatchableError:
+            discard
+
+    # 6. Unmerged Branches
+    if query.queryUnmerged:
+      let trunkBranch = if query.trunkBranch.len > 0: query.trunkBranch else: "main"
+      let unmergedRes = runGit(payload, ["-C", query.repoPath, "branch", "--no-merged", trunkBranch])
+      if unmergedRes.exitCode == 0:
+        for rawLine in unmergedRes.output.splitLines():
+          var line = rawLine.strip()
+          # Strip git's current-branch ("* ") / worktree ("+ ") markers.
+          if line.startsWith("* ") or line.startsWith("+ "):
+            line = line[2 .. ^1].strip()
+          # `git branch --no-merged` prints one branch name per line, but runGit
+          # merges stderr into stdout (execCmdEx), so a git diagnostic can land
+          # here — e.g. "warning: refname '<trunk>' is ambiguous." emitted when
+          # the trunk name resolves ambiguously (a repo whose branch is literally
+          # named `heads/main` makes bare `main` ambiguous). A real branch name
+          # contains no whitespace or ':' and never starts with '(' (the
+          # detached-HEAD note), so reject anything else as non-branch noise.
+          if line.len == 0 or line == trunkBranch: continue
+          if line.startsWith("(") or line.contains(' ') or
+             line.contains('\t') or line.contains(':'):
+            continue
+          unmergedBranches.add(line)
+
+    result = GitQueryResult(
+      status: if diagnostic.len == 0: gqsOk else: gqsFailed,
+      headSha: headSha,
+      isClean: isClean,
+      isPublished: isPublished,
+      diagnostic: if diagnostic.startsWith("; "): diagnostic[2..^1] else: diagnostic,
+      stashCount: stashCount,
+      aheadCount: aheadCount,
+      behindCount: behindCount,
+      untrackedCount: untrackedCount,
+      modifiedCount: modifiedCount,
+      unmergedBranches: unmergedBranches,
+      fileDetails: fileDetails
+    )
+

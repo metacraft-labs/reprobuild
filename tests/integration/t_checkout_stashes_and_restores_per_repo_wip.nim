@@ -150,7 +150,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -162,12 +162,12 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
 proc invokeCheckout(fx: Fixture; name: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "checkout", name, "--yes",
+    fx.reproBin, "checkout", "--write-report", name, "--yes",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc readReport(fx: Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "checkout-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

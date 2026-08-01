@@ -122,7 +122,7 @@ proc repoFragment(name, remote: string): string =
   "revision = \"main\"\n"
 
 proc readReport(ws: string): JsonNode =
-  parseFile(ws / ".repro" / "workspace" / "check-report.json")
+  parseFile(ws / ".repro" / "build" / "reports" / "check-report.json")
 
 suite "HL-2 — pre-push currency read routes per backend":
 
@@ -141,7 +141,7 @@ suite "HL-2 — pre-push currency read routes per backend":
 
       let ws = scratch / "workspace"
       createDir(ws)
-      let manifestsRoot = ws / ".repo" / "manifests"
+      let manifestsRoot = ws
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "mix.toml",
@@ -195,13 +195,13 @@ suite "HL-2 — pre-push currency read routes per backend":
       check fileExists(teamManifest / "locks" / "mix" / "core" /
         (coreSha & ".toml"))
       check fileExists(db / ("lock_mix_secret_" & secretSha))
-      check not dirExists(manifestsRoot / "locks")
+      check not dirExists(ws / ".repro" / "manifests" / "locks")
 
       # ---- (1) clean gate reads each repo from its backend → current ---
       let refsFile = scratch / "pushed-refs.txt"
       writeFile(refsFile, "refs/heads/main " & coreSha &
         " refs/heads/main 0000000000000000000000000000000000000000\n")
-      let gate1 = run(reproBinary & " check --mode=pre-push" &
+      let gate1 = run(reproBinary & " check --mode=pre-push --write-report" &
         " --workspace-root=" & q(ws) &
         " --current-repo=" & q(ws / "core") &
         " --pushed-refs=" & q(refsFile) & " --json")
@@ -228,7 +228,7 @@ suite "HL-2 — pre-push currency read routes per backend":
       discard requireGit(q(gitBin) & " -C " & q(teamManifest) &
         " commit -m tamper")
 
-      let gate2 = run(reproBinary & " check --mode=pre-push" &
+      let gate2 = run(reproBinary & " check --mode=pre-push --write-report" &
         " --workspace-root=" & q(ws) &
         " --current-repo=" & q(ws / "core") &
         " --pushed-refs=" & q(refsFile) & " --json")

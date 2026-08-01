@@ -208,8 +208,8 @@ package libcanberraSource:
     ## M9.R.15p.2.1 — libltdl is the dynamic-module loader libcanberra's
     ## configure script REQUIRES (configure.ac:144
     ## ``AC_CHECK_LIB([ltdl], [lt_dladvise_init])`` + immediate abort).
-    ## The stdlib stub points at nixpkgs#libtool^* which ships
-    ## libltdl.so + ltdl.h in the ``lib`` output.
+    ## The from-source resolver maps this bundled-library ABI to the
+    ## ``libtool`` source recipe, which ships libltdl.so + ltdl.h.
     "libltdl"
     ## M9.R.15p.2.2 — libvorbis is libcanberra's MANDATORY vorbisfile
     ## back-end (configure.ac:586 ``PKG_CHECK_MODULES(VORBIS,

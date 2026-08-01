@@ -24,9 +24,11 @@
 ##          executable + the source path,
 ##      (c) the test exits 0,
 ##      (d) the build report records the action with
-##          ``status == "asSucceeded"`` and ``launched == true``.
+##          ``status == "asSucceeded"``, ``launched == true``, and
+##          ``cacheDecision == "cdNotCacheable"``.
 
 import std/[json, os, osproc, strtabs, strutils, unittest]
+import repro_test_support
 
 const RepoMarker = "repro.nim"
 
@@ -53,11 +55,15 @@ proc findRepoRoot(): string =
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
-  let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
+  let runquota = requireRunQuotaCliBin(repoRoot)
+  let runquotad = requireRunQuotaDaemonBin(repoRoot)
+  let runquotaBin = runquota.parentDir
   var env = newStringTable()
   for k, v in envPairs():
     env[k] = v
   let oldPath = env.getOrDefault("PATH")
+  env["RUNQUOTA_BIN"] = runquota
+  env["RUNQUOTAD_BIN"] = runquotad
   env["PATH"] = runquotaBin & $PathSep & oldPath
   execCmdEx(cmd, env = env, workingDir = repoRoot)
 
@@ -104,6 +110,7 @@ suite "Deferred-Item D1: pythonUnittest resolves in path mode":
     let wrapperText = readFile(wrapper)
     check "packageName = \"python3\"" in wrapperText
     check "executableName = \"python3\"" in wrapperText
+    check "cacheable = false" in wrapperText
 
     checkpoint("D1 python structural assertion: OK")
 
@@ -111,18 +118,11 @@ suite "Deferred-Item D1: pythonUnittest resolves in path mode":
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /
       addFileExt("repro", ExeExt)
-    let runquotad = repoRoot.parentDir / "runquota" / "build" / "bin" /
-      addFileExt("runquotad", ExeExt)
+    let runquotad = requireRunQuotaDaemonBin(repoRoot)
 
-    if not fileExists(reproBin):
-      checkpoint("skipped — " & reproBin &
-        " is missing; run `just build` first")
-      skip()
-    elif not fileExists(runquotad):
-      checkpoint("skipped — " & runquotad &
-        " is missing; build runquota first")
-      skip()
-    else:
+    check fileExists(reproBin)
+    check fileExists(runquotad)
+    if fileExists(reproBin) and fileExists(runquotad):
       let selector = ".#" & ExecuteActionId
       let cmd = @[
         reproBin.quoteShell,
@@ -130,7 +130,7 @@ suite "Deferred-Item D1: pythonUnittest resolves in path mode":
         selector,
         "--tool-provisioning=path",
         "--daemon=off",
-        "--report=full",
+        "--write-report",
         "--log=actions",
         "--progress=quiet"].join(" ")
       checkpoint("running: " & cmd)
@@ -158,9 +158,12 @@ suite "Deferred-Item D1: pythonUnittest resolves in path mode":
       if pyAction != nil:
         let status = pyAction{"status"}.getStr()
         let launched = pyAction{"launched"}.getBool()
+        let cache = pyAction{"cacheDecision"}.getStr()
         let reason = pyAction{"reason"}.getStr()
         checkpoint(ExecuteActionId & " status=" & status &
-          " launched=" & $launched & " reason=" & reason)
+          " launched=" & $launched & " cacheDecision=" & cache &
+          " reason=" & reason)
         check status == "asSucceeded"
         check launched
+        check cache == "cdNotCacheable"
         check "exit=0" in reason

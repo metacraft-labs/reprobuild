@@ -30,7 +30,7 @@
 ##
 ## Fixture pattern mirrors the other M18 pre-push tests: one bare
 ## origin per repo, a workspace clone, a metadata-only
-## ``.repo/workspace.toml`` selecting the active branch. The develop
+## ``.repro/workspace.toml`` selecting the active branch. The develop
 ## override always points at ``<workspace>/develop/lib-a`` so the
 ## fifth stage has something to check; the sibling-repo set
 ## (``lib-a``, ``lib-b``, ``lib-c``) is kept clean and published so
@@ -188,7 +188,7 @@ proc setupFixture(gitBin, slug: string): M23Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -218,7 +218,7 @@ proc writeRefsFile(path: string; localRef, localSha: string) =
 proc invokeCheckPrePush(fx: M23Fixture; currentRepo, refsFile: string):
     CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "check", "--mode=pre-push",
+    fx.reproBin, "check", "--mode=pre-push", "--write-report",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & currentRepo,
     "--pushed-refs=" & refsFile,
@@ -226,7 +226,7 @@ proc invokeCheckPrePush(fx: M23Fixture; currentRepo, refsFile: string):
   ]))
 
 proc readReport(fx: M23Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "check-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

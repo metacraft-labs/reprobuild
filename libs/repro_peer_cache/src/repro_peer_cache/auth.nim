@@ -55,11 +55,12 @@
 
 import std/[hashes, os, sets, strutils]
 
-import bearssl/[rand, ec, hash as bsslHash]
+import bearssl/[ec, hash as bsslHash]
 import bearssl/abi/bearssl_ec as bsslEcAbi
 import bearssl/abi/bearssl_hash as bsslHashAbi
 
 import blake3
+import nimcrypto/sysrand
 
 import ./types
 import ./key_types
@@ -78,6 +79,11 @@ export key_types
 
 const
   P256Curve    = cint(bsslEcAbi.EC_secp256r1)
+  P256Order    = [
+    byte 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84,
+    0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51]
 
 type
   TrustAnchors* = ref object
@@ -151,7 +157,7 @@ proc sha256Digest(msg: openArray[byte]): array[32, byte] =
   var ctx: bsslHashAbi.Sha256Context
   bsslHashAbi.sha256Init(ctx)
   if msg.len > 0:
-    bsslHashAbi.sha256Update(ctx, unsafeAddr msg[0], csize_t(msg.len))
+    bsslHashAbi.sha224Update(ctx, unsafeAddr msg[0], uint(msg.len))
   bsslHashAbi.sha256Out(ctx, addr result[0])
 
 proc derivePublicKey*(privateKey: PrivateKeyBytes): PublicKeyBytes =
@@ -180,25 +186,41 @@ proc derivePublicKey*(privateKey: PrivateKeyBytes): PublicKeyBytes =
   for i in 0 ..< P256PubLen:
     result[i] = pkBuf[i]
 
+proc isZeroScalar(value: PrivateKeyBytes): bool =
+  for b in value:
+    if b != 0:
+      return false
+  true
+
+proc scalarLessThanP256Order(value: PrivateKeyBytes): bool =
+  for i in 0 ..< P256PrivLen:
+    if value[i] < P256Order[i]:
+      return true
+    if value[i] > P256Order[i]:
+      return false
+  false
+
+proc randomP256Scalar(): PrivateKeyBytes =
+  ## Generate a uniformly distributed P-256 private scalar in [1, n-1] from OS
+  ## entropy. `nim-bearssl`'s optional `bearssl/rand` convenience module is not
+  ## present in every packaged checkout, so keep the RNG dependency local and
+  ## explicit while still using BearSSL for EC math and ECDSA.
+  while true:
+    let read = randomBytes(addr result[0], P256PrivLen)
+    if read != P256PrivLen:
+      raise newException(AuthError,
+        "OS random source returned " & $read & " bytes, expected " &
+        $P256PrivLen)
+    if not result.isZeroScalar and result.scalarLessThanP256Order:
+      return
+
 proc generateKeypair*(): PeerKeypair =
-  ## Fresh random ECDSA-P256 keypair. Uses BearSSL's HMAC-DRBG seeded by
-  ## OS entropy for the keygen step; the public key is then derived via
+  ## Fresh random ECDSA-P256 keypair. Uses OS entropy to sample a valid P-256
+  ## private scalar; the public key is then derived via
   ## `ecComputePub`. The 32-byte scalar and 65-byte uncompressed point
   ## are copied into fixed-size arrays so the BearSSL ABI buffers can
   ## be released immediately.
-  let rng = HmacDrbgContext.new()
-  let ecImpl = bsslEcAbi.ecGetDefault()
-  var skBuf: array[bsslEcAbi.EC_KBUF_PRIV_MAX_SIZE, byte]
-  var sk: bsslEcAbi.EcPrivateKey
-  let skLen = bsslEcAbi.ecKeygen(
-    PrngClassPointerConst(addr rng.vtable), ecImpl,
-    addr sk, addr skBuf[0], P256Curve)
-  if skLen == 0 or sk.xlen != uint(P256PrivLen):
-    raise newException(AuthError,
-      "BearSSL ecKeygen failed (skLen=" & $skLen & ")")
-  # Copy the raw 32-byte scalar out of skBuf.
-  for i in 0 ..< P256PrivLen:
-    result.privateKey[i] = skBuf[i]
+  result.privateKey = randomP256Scalar()
   result.publicKey = derivePublicKey(result.privateKey)
 
 proc signMessage*(kp: PeerKeypair; msg: openArray[byte]): SignatureBytes =

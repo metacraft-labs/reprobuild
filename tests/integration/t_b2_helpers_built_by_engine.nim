@@ -119,7 +119,7 @@ suite "Bootstrap-And-Self-Build B2: test-helpers built by engine":
         "--daemon=off",
         "--log=quiet",
         "--progress=quiet",
-        "--report=none",
+        "--measure=none",
       ]
       let cmd = args.join(" ")
       checkpoint("running: " & cmd)

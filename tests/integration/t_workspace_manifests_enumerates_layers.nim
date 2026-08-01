@@ -5,24 +5,24 @@
 ## routes ``repro workspace manifests`` to
 ## ``runWorkspaceManifestsCommand``, which:
 ##
-##   1. Reads ``<workspaceRoot>/.repo/workspace.toml`` (M5 surface). A
+##   1. Reads ``<workspaceRoot>/.repro/workspace.toml`` (M5 surface). A
 ##      missing workspace.toml is treated as "no layered workspace" —
 ##      the report's ``hasLayeredWorkspace`` flag is false and the
-##      renderer prints a single info line; exit 0.
+##      renderer prints a single "no workspace metadata" info line; exit 0.
 ##   2. For each declared ``[[manifest]]`` layer, computes the layer's
 ##      provenance string (URL or local_path), visibility tier, and
 ##      on-disk checkout path that the M8 composer would have
 ##      materialised at.
 ##   3. Composes the layers via M8 to learn which composed repos each
 ##      layer ultimately contributed to (post-shadow-merge).
-##   4. Emits ``<workspaceRoot>/.repro/workspace/manifests-report.json``
+##   4. Emits ``<workspaceRoot>/.repro/build/reports/manifests-report.json``
 ##      and exits 0 on success, 1 on malformed workspace.toml.
 ##
 ## Fixture pattern: hermetic bare-repo "manifest hosts" containing
 ## TOML files (mirrors the M8 composer test
 ## ``t_workspace_manifests_private_override_shadows_public``). The
 ## composer clones from ``file://`` URLs into the workspace's
-## ``.repo/manifests-<i>-<sanitized>/`` directories on first
+## ``.repro/manifests-<i>-<sanitized>/`` directories on first
 ## composition; this test confirms the manifests subcommand reads back
 ## the same per-layer metadata.
 ##
@@ -158,7 +158,7 @@ revision = "main"
 # ---- helpers --------------------------------------------------------------
 
 proc writeWorkspaceToml(workspaceRoot, body: string): string =
-  let dotRepo = workspaceRoot / ".repo"
+  let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
   result = dotRepo / "workspace.toml"
   writeFile(result, body)
@@ -166,17 +166,27 @@ proc writeWorkspaceToml(workspaceRoot, body: string): string =
 proc invokeManifests(reproBin, workspaceRoot: string;
                      extra: openArray[string] = []): CmdResult =
   var argv = @[
-    reproBin, "workspace", "manifests",
+    reproBin, "workspace", "manifests", "--write-report",
     "--workspace-root=" & workspaceRoot,
   ]
   for x in extra: argv.add(x)
   runShell(shellCommand(argv))
 
 proc readReport(workspaceRoot: string): JsonNode =
-  let reportPath = workspaceRoot / ".repro" / "workspace" /
+  let reportPath = workspaceRoot / ".repro" / "build" / "reports" /
     "manifests-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
+
+proc canonical(path: string): string =
+  try:
+    normalizedPath(expandFilename(path))
+  except OSError, CatchableError:
+    let parent = path.parentDir
+    if parent.len > 0 and parent != path:
+      canonical(parent) / path.lastPathPart
+    else:
+      normalizedPath(absolutePath(path))
 
 proc findLayerByProvenance(layers: JsonNode; provenance: string): JsonNode =
   for entry in layers:
@@ -266,28 +276,28 @@ suite "M12 — repro workspace manifests (enumerates layers)":
 
       # The layer's on-disk checkout path must follow the composer's
       # ``manifests-<i>-<sanitized>`` convention.
-      check publicLayer["layerCheckoutPath"].getStr().startsWith(
-        workspaceRoot / ".repo" / "manifests-0-")
-      check privateLayer["layerCheckoutPath"].getStr().startsWith(
-        workspaceRoot / ".repo" / "manifests-1-")
+      check canonical(publicLayer["layerCheckoutPath"].getStr()).startsWith(
+        canonical(workspaceRoot / ".repro" / "manifests-0-"))
+      check canonical(privateLayer["layerCheckoutPath"].getStr()).startsWith(
+        canonical(workspaceRoot / ".repro" / "manifests-1-"))
 
-  test "test_m12_manifests_no_workspace_toml_prints_no_layered_line":
+  test "test_m12_manifests_no_workspace_toml_reports_missing_metadata":
     # No workspace.toml in this fixture; the subcommand should not
     # blow up — it should report ``hasLayeredWorkspace = false`` and
     # exit 0 cleanly. We use a fresh scratch directory without any
-    # ``.repo/workspace.toml``.
+    # ``.repro/workspace.toml``.
     let scratch = createTempDir("repro-m12-manifests-bare-", "")
     defer: removeDir(scratch)
     let reproBin = reproBinary()
     let workspaceRoot = scratch / "workspace"
     createDir(workspaceRoot)
-    createDir(workspaceRoot / ".repo")  # empty .repo dir
+    createDir(workspaceRoot / ".repro")  # empty .repro dir
 
     let res = invokeManifests(reproBin, workspaceRoot)
     if res.code != 0:
       checkpoint("output: " & res.output)
     check res.code == 0
-    check res.output.contains("no layered workspace")
+    check res.output.contains("no workspace metadata")
 
     let report = readReport(workspaceRoot)
     check report["hasLayeredWorkspace"].getBool() == false
@@ -315,7 +325,7 @@ suite "M12 — repro workspace manifests (enumerates layers)":
 
       # Pre-populate an in-tree local-path manifest layer alongside
       # the URL layer so the JSON shape covers both kinds of entry.
-      let localManifestRel = ".repo/manifests-personal"
+      let localManifestRel = ".repro/manifests-personal"
       let localManifestAbs = workspaceRoot / localManifestRel
       createDir(localManifestAbs / "projects")
       createDir(localManifestAbs / "repos")

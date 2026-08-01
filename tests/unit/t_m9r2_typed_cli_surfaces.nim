@@ -79,7 +79,7 @@ suite "DSL-port M9.R.2 — meson typed CLI surface":
   test "meson.setup records buildDir + srcDir positionals + flags":
     let action = meson.setup(srcDir = "./src", buildDir = "./b",
       prefix = "/usr", buildtype = "release",
-      options = @["foo=bar", "baz=qux"])
+      options = @["foo=bar", "baz=qux"], wrapMode = "nodownload")
     check action.call.packageName == "meson"
     check action.call.executableName == "mesonBin"
     check action.call.subcommand == "setup"
@@ -108,6 +108,10 @@ suite "DSL-port M9.R.2 — meson typed CLI surface":
     check optsArg.alias == "-D"
     check optsArg.format == cafConcat
     check optsArg.repeated
+    let wrapModeArg = action.argByName("wrapMode")
+    check wrapModeArg.alias == "--wrap-mode="
+    check wrapModeArg.format == cafConcat
+    check wrapModeArg.encodedValue == "nodownload"
     # The outputs wiring records ``buildDir`` as the canonical implicit
     # target slot (the actual name derivation depends on the engine's
     # path-canonicalisation pass and isn't asserted here; the

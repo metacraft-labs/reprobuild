@@ -16,11 +16,7 @@ proc pathExists(path: string): bool =
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  if not fileExists(daemonBin):
-    raise newException(OSError,
-      "runquotad binary missing at " & daemonBin)
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   let socketPath = "/tmp/repro-m2-multi-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -179,7 +175,7 @@ suite "t_e2e_repro_build_multiple_named_targets":
     let output = requireSuccess(shellCommand([
       reproBin, "build", "alpha", "beta", "gamma",
       "--daemon=off",
-      "--tool-provisioning=path", "--log=actions"
+      "--tool-provisioning=path", "--log=actions", "--write-report"
     ], [("PATH", pathValue)]), projectRoot)
 
     # Single engine pass: exactly one ``scheduler:`` line is emitted by

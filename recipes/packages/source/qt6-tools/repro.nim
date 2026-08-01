@@ -230,7 +230,8 @@ package qt6ToolsSource:
         # find <file> to compute its checksum". Disable SBOM gen for v1.
         "QT_GENERATE_SBOM=OFF",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", generator = "Ninja",
+        cacheVars = opts, allowSourceWrites = true)
       discard pkg.executable("lupdate")
       discard pkg.executable("lrelease")
     finally:

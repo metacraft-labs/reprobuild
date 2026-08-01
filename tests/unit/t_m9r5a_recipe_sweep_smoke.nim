@@ -44,6 +44,7 @@ import repro_interface_artifacts
 import "../../recipes/packages/source/dbus-broker/repro"
 import "../../recipes/packages/source/cmake/repro"
 import "../../recipes/packages/source/coreutils/repro"
+import "../../recipes/packages/source/networkmanager/repro"
 import "../../recipes/packages/source/kernel/repro"
 
 # Convention-bridge fixture: a synthetic package whose ONLY dep
@@ -67,9 +68,9 @@ suite "DSL-port M9.R.5a — 84-recipe sweep smoke":
     check "gcc >=11" in native
     # M9.R.15r.6 — dbus-broker's ``src/meson.build:75`` declares
     # ``dependency('expat')`` (the bus-configuration XML parser), so the
-    # recipe carries a single library ``buildDeps`` entry on the sibling
-    # expat from-source recipe.
-    check registeredBuildDeps("dbusBrokerSource") == @["expat"]
+    # recipe carries its XML and sd-bus library closure as ``buildDeps``.
+    check registeredBuildDeps("dbusBrokerSource") ==
+      @["expat", "systemd >=240"]
 
   test "cmake (from-source-custom recipe) populates nativeBuildDeps for toolchain":
     # cmake's uses: was just gcc + make — both classified as
@@ -91,23 +92,80 @@ suite "DSL-port M9.R.5a — 84-recipe sweep smoke":
     check "perl >=5.32" in native
 
   test "kernel (make recipe) mixes nativeBuildDeps + buildDeps":
-    # kernel uses: had a long list — gcc / binutils / make / bison /
-    # flex / perl (all nativeBuildDeps) AND libelf / libssl / bc /
-    # kmod / rsync (categorised buildDeps by the lib*-prefix +
-    # default-bucket heuristic).
+    # The kernel is the reference two-bucket recipe: BUILD-platform
+    # tools land in nativeBuildDeps, linked/consumed libraries and
+    # data-driven helpers land in buildDeps.
     let native = registeredNativeBuildDeps("kernelSource")
     let build = registeredBuildDeps("kernelSource")
     check "gcc >=12" in native
-    check "binutils >=2.39" in native
     check "make >=4.3" in native
     check "bison >=3.6" in native
     check "flex >=2.6" in native
     check "perl >=5.32" in native
     check "libelf >=0.187" in build
-    # The kernel recipe lists ``openssl >=3.0`` (the recipe name)
-    # rather than the legacy ``libssl`` library spelling — matches the
-    # sibling source recipe at ``recipes/packages/source/openssl``.
-    check "openssl >=3.0" in build
+    check "bc" in build
+    # Both buckets must stay populated — that split is what this case
+    # exists to pin.
+    check native.len > 0
+    check build.len > 0
+    # binutils is NOT declared here. It travels with the C toolchain:
+    # across the whole from-source tree only ``gcc`` and ``glibc``
+    # (which bootstrap that toolchain) name binutils explicitly, and
+    # the kernel recipe was normalised onto that convention when it
+    # became a real build.
+    check "binutils >=2.39" notin native
+    # openssl / kmod / rsync are likewise absent, because the recipe's
+    # ``build:`` block disables MODULE_SIG + SYSTEM_TRUSTED_KEYS +
+    # SYSTEM_REVOCATION_KEYS (so ``scripts/sign-file`` never links
+    # libssl), passes ``DEPMOD=true`` to ``modules_install`` (so
+    # ``depmod`` is never spawned), and does not run
+    # ``make headers_install`` (the only rsync consumer). A recipe that
+    # re-enables any of those must re-declare the matching dependency.
+    check "openssl >=3.0" notin build
+    check "kmod" notin build
+    check "rsync" notin build
+
+  test "nettle declares GMP for libhogweed":
+    check registeredBuildDeps("nettleSource") == @["gmp >=6.2"]
+    check registeredRuntimeDeps("nettleSource") == @["gmp >=6.2"]
+
+  test "GMP source recipe declares its native build tools":
+    let native = registeredNativeBuildDeps("gmpSource")
+    check "make" in native
+    check "gcc >=11" in native
+    check "m4" in native
+    check registeredBuildDeps("gmpSource").len == 0
+    check registeredRuntimeDeps("gmpSource").len == 0
+
+  test "gnutls declares its linked library closure":
+    let expected = @["nettle >=3.7", "gmp >=6.2"]
+    check registeredBuildDeps("gnutlsSource") == expected
+    check registeredRuntimeDeps("gnutlsSource") == expected
+
+  test "readline declares its split terminfo closure":
+    check registeredBuildDeps("readlineSource") == @["ncurses >=6.0"]
+    check registeredRuntimeDeps("readlineSource") == @["ncurses >=6.0"]
+
+  test "NetworkManager declares its source runtime closure":
+    check registeredBuildDeps("networkManagerSource") == @[
+      "glib2 >=2.62",
+      "util-linux >=2.36",
+      "dbus >=1.12",
+      "libndp >=1.8",
+      "gnutls >=3.7",
+      "systemd >=240",
+      "polkit >=0.120",
+      "readline >=8.0",
+    ]
+    check registeredRuntimeDeps("networkManagerSource") == @[
+      "glib2 >=2.62",
+      "libndp >=1.8",
+      "gnutls >=3.7",
+      "systemd >=240",
+      "dbus >=1.12",
+      "polkit >=0.120",
+      "readline >=8.0",
+    ]
 
   test "convention bridge: nativeBuildDeps fold into projectInterface.toolUses":
     # The M9.R.5a bridge lives in ``packageLiteral`` —
@@ -160,13 +218,11 @@ suite "DSL-port M9.R.5a — 84-recipe sweep smoke":
     check "meson" in seen
     check "ninja" in seen
 
-  test "runtimeDeps stays empty by default for sampled recipes":
-    # The sweep emits a ``runtimeDeps: discard`` TODO stub per
-    # recipe; the M9.R.1 ``registeredRuntimeDeps`` accessor must
-    # return an empty seq because no constraint strings were
-    # registered. Sampled across our four upstream-build-system
-    # representatives.
-    check registeredRuntimeDeps("dbusBrokerSource").len == 0
+  test "runtimeDeps records declared closure and stays empty by default":
+    # dbus-broker now explicitly declares the two libraries its installed
+    # executables require. The other sampled recipes retain the empty default.
+    check registeredRuntimeDeps("dbusBrokerSource") ==
+      @["expat", "systemd >=240"]
     check registeredRuntimeDeps("cmakeSource").len == 0
     check registeredRuntimeDeps("coreutilsSource").len == 0
     check registeredRuntimeDeps("kernelSource").len == 0

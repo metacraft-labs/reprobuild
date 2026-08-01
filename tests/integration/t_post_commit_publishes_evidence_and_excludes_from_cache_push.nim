@@ -141,7 +141,7 @@ suite "HL-6 — post-commit publishes evidence and excludes from cache push":
       let ws = scratch / "workspace"
       createDir(ws)
       let wsName = extractFilename(ws)
-      let manifestsRoot = ws / ".repo" / "manifests"
+      let manifestsRoot = ws
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "hl6.toml",

@@ -143,7 +143,8 @@ package kglobalaccelSource:
         # M9.R.15i.3 — XLib not in v1.
         "WITH_X11=OFF",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true)
       discard pkg.library("libKF6GlobalAccel")
     finally:
       clearCurrentOwningPackageOverride()

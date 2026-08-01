@@ -25,9 +25,15 @@ suite "t_m9r79_constructors_compile":
     # the constructor's compile would fail this file's build.
     check true
 
+  test "cmake runtime paths exclude propagated Nix glibc":
+    let glibcLib = "/nix/store/0123456789abcdefghijklmnopqrstuv-glibc-2.40/lib"
+    let dependencyLib = "/nix/store/vutsrqponmlkjihgfedcba9876543210-libfoo-1.0/lib"
+    check cmakeRuntimeLibraryDirs(@[glibcLib, dependencyLib]) ==
+      @[dependencyLib]
+
   test "registry mutators are exported":
-    # Compile-time gate: registry mutators must be reachable from
-    # downstream constructor modules.  Call each proc
+    # Compile-time gate: registry mutators must be
+    # reachable from downstream constructor modules.  Call each proc
     # with a fake action id so ``dynOrStatic`` mode-lowered symbols get
     # actually referenced (a bare reference to the proc value trips
     # ``illegal discard proc``).  The mutators no-op when the id is not

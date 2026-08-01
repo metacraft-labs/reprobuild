@@ -1,7 +1,7 @@
 ## RA-11 — bootstrap manifest cache: ``repro workspace init`` works
 ## OUTSIDE an existing workspace (no sibling manifest checkout yet) by
 ## cloning the manifest repo into a tool-managed cache and materialising
-## ``.repo/manifests`` from it.
+## ``.repro/manifests`` from it.
 ##
 ## Two halves:
 ##
@@ -12,13 +12,13 @@
 ##      PARALLEL ``…/manifests-private`` tree.
 ##
 ##   B. End-to-end ``init --manifest-url=<bare> --private-manifest-url=…``
-##      in a workspace dir that has NO ``.repo/manifests``. Assert init
+##      in a workspace dir that has NO ``.repro/manifests``. Assert init
 ##      populated the bootstrap cache (under the injected
-##      ``REPRO_MANIFEST_CACHE``), materialised ``.repo/manifests`` with
+##      ``REPRO_MANIFEST_CACHE``), materialised ``.repro/manifests`` with
 ##      the project TOML, and resolved/cloned the participating repo.
 ##
 ## Falsifiability:
-##   - If init required a pre-existing ``.repo/manifests`` it would fail
+##   - If init required a pre-existing ``.repro/manifests`` it would fail
 ##     to resolve the project (init exits non-zero / no cloned repo).
 ##   - If the private companion shared the public cache slug namespace,
 ##     the two caches would collide; we assert distinct cache roots.
@@ -147,7 +147,7 @@ suite "RA-11 — bootstrap manifest cache":
       skip()
     else:
       let scratch = createTempDir("repro-ra11-bootstrap-", "")
-      defer: removeDir(scratch)
+      defer: removeDirEventually(scratch)
       let reproBin = reproBinary()
 
       # Participating repo origin.
@@ -175,13 +175,13 @@ suite "RA-11 — bootstrap manifest cache":
       # Hermetic cache root: an injected REPRO_MANIFEST_CACHE under scratch.
       let manifestCacheRoot = scratch / "manifest-cache"
 
-      # The workspace dir starts EMPTY — no .repo/manifests sibling.
+      # The workspace dir starts EMPTY — no .repro/manifests sibling.
       let workspaceRoot = scratch / "workspace"
       createDir(workspaceRoot)
-      check not dirExists(workspaceRoot / ".repo" / "manifests")
+      check not dirExists(workspaceRoot / ".repro" / "manifests")
 
       let init = runShell(shellCommand(@[
-        reproBin, "workspace", "init", "myproject",
+        reproBin, "workspace", "init", "--write-report", "myproject",
         "--workspace-root=" & workspaceRoot,
         "--manifest-url=" & fileUrl(manifestBare),
         "--manifest-branch=main",
@@ -199,17 +199,17 @@ suite "RA-11 — bootstrap manifest cache":
         manifestCacheRoot & "-private", fileUrl(privateBare))
       check dirExists(privateCachePath)
 
-      # ``.repo/manifests`` materialised from the cache and carries the
+      # ``.repro/manifests`` materialised from the cache and carries the
       # project TOML — proving init resolved the project WITHOUT a
       # pre-existing sibling manifest checkout.
-      check fileExists(workspaceRoot / ".repo" / "manifests" / "projects" /
+      check fileExists(workspaceRoot / ".repro" / "manifests" / "projects" /
         "myproject.toml")
-      check dirExists(workspaceRoot / ".repo" / "manifests-private")
+      check dirExists(workspaceRoot / ".repro" / "manifests-private")
 
       # The participating repo was cloned by init.
       check dirExists(workspaceRoot / "lib-a" / ".git")
 
-      let reportPath = workspaceRoot / ".repro" / "workspace" /
+      let reportPath = workspaceRoot / ".repro" / "build" / "reports" /
         "init-report.json"
       check fileExists(reportPath)
       let report = parseFile(reportPath)

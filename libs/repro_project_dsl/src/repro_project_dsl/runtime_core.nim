@@ -60,6 +60,13 @@ type
 
 var workspaceDepRegistry: seq[WorkspaceDepEdge] = @[]
 
+var stateGroupRegistry: seq[StateGroupDef] = @[]
+  ## Named-Runnable-Edges N0: named resource subgraphs declared via
+  ## ``stateGroup "name":`` (spec §3.3). Collected in declaration order;
+  ## the ``repro_resources`` run-edge surface fills ``members`` from the
+  ## resource addresses added inside the block so N2's lease bridge can
+  ## resolve the group name to exactly its member addresses.
+
 # ---------------------------------------------------------------------------
 # Project-DSL-Composition M5 — Approach B active-build-context handle.
 #
@@ -170,7 +177,11 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 22'u16
+  BuildActionPayloadVersion = 23'u16
+    ## v23: appends the platform role parallel to each tool-identity
+    ## reference. v22-and-earlier payloads decode with an empty list and
+    ## retain the legacy build-dependency default.
+    ##
     ## v22: M9.R.75 — R6 (source-write reject) + R7 (double-write
     ## reject) per-action write-scope declaration. Appends two
     ## length-prefixed string seqs: ``declaredOutputs`` (write roots
@@ -264,7 +275,7 @@ const
     ## with an empty ``targetNames`` list.
   BuildTargetPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')),
     byte(ord('P'))]
-  BuildTargetPayloadVersion = 3'u16
+  BuildTargetPayloadVersion = 4'u16
     ## v3: Spec-Implementation M5 — appends the ``kind`` byte distinguishing
     ## ``btkAggregate`` (0) from ``btkCollection`` (1) so the registry
     ## split is preserved when payloads round-trip through the engine
@@ -284,7 +295,7 @@ const
     byte(ord('E')), byte(ord('T'))]
     ## Named-Targets M1: tag for the project-scoped target-export table
     ## payload carried as a metadata node on the GraphFragment.
-  TargetExportTablePayloadVersion = 2'u16
+  TargetExportTablePayloadVersion = 3'u16
     ## Spec-Implementation M5: schema bump per
     ## Build-Graph-Collections.md §"Persistence and the Target-Export
     ## Table". v2 expands the per-row ``kind`` enumeration from
@@ -296,6 +307,16 @@ const
     ## ``reprobuild.target-export-table.v1`` for v1 emissions and
     ## ``reprobuild.target-export-table.v2`` for v2 emissions; the
     ## aggregator at ``aggregateTargetExportTable`` recognises both.
+    ##
+    ## Named-Runnable-Edges N0: v3 adds the ``tekRunEdge`` discriminator
+    ## byte (4) plus two trailing per-row fields — ``runArgs`` and the
+    ## ``consumes`` ``RunEdgeLease`` list — that only ``run "name", ...``
+    ## rows populate. v3 writes those trailing fields for EVERY row; a
+    ## row that is not a run-edge emits two empty seqs, so a table that
+    ## uses none of the N0 surfaces encodes to the same logical shape it
+    ## did at v2 (only the version word + the empty trailers differ).
+    ## v1/v2 payloads still decode through the same reader — the trailing
+    ## fields default to empty when the on-disk version is < 3.
 
 proc resetPackageRegistry*() {.dynOrStatic.} =
   registry.setLen(0)
@@ -305,6 +326,32 @@ proc registerPackageDef*(pkg: PackageDef) {.dynOrStatic.} =
 
 proc registeredPackages*(): seq[PackageDef] {.dynOrStatic.} =
   registry
+
+var resourceTypeInterfaceRegistry: seq[ResourceTypeInterfaceDef] = @[]
+  ## RP4 (Provider-Runtime-Protocol-v1 §5): module-global set of resource
+  ## types declared via the ``resourceType`` macro, collected for
+  ## interface lifting. A plain global (mirror of ``registry``), NOT a
+  ## threadvar: the DSL body evaluates on one thread and the interface
+  ## extractor reads it on the same thread. Resource types are declared
+  ## at module scope (like ``registerResourceProvider``), not lexically
+  ## inside a ``package`` block, so the interface extractor folds the
+  ## whole registry into the enclosing project's interface.
+
+proc resetResourceTypeInterfaceRegistry*() {.dynOrStatic.} =
+  resourceTypeInterfaceRegistry.setLen(0)
+
+proc registerResourceTypeInterface*(def: ResourceTypeInterfaceDef)
+    {.dynOrStatic.} =
+  ## Append one resource-type interface record. Emitted by the
+  ## ``resourceType`` macro alongside the ``registerResourceProvider`` /
+  ## ``registerExtension`` / typed-wrapper emissions.
+  resourceTypeInterfaceRegistry.add(def)
+
+proc registeredResourceTypeInterfaces*(): seq[ResourceTypeInterfaceDef]
+    {.dynOrStatic.} =
+  ## The resource-type interface records collected so far, in
+  ## declaration order. Consumed by ``toProjectInterface``.
+  resourceTypeInterfaceRegistry
 
 proc resetWorkspaceDepRegistry*() {.dynOrStatic.} =
   ## Reset the Mode 3 ``depends_on`` registry. Test helpers call this
@@ -1097,6 +1144,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   publishToBinaryCache = false;
                   cacheEntryIdentity = none(CacheEntryIdentity);
                   toolIdentityRefs: openArray[string] = [];
+                  toolIdentityRefKinds:
+                    openArray[ToolIdentityRefKind] = [];
                   requiresElevation = false;
                   cwdKind = acwdRecipeRoot;
                   cwdCustomPath = "";
@@ -1163,6 +1212,7 @@ proc buildAction*(id: string; call: PublicCliCall;
     publishToBinaryCache: publishToBinaryCache,
     cacheEntryIdentity: cacheEntryIdentity,
     toolIdentityRefs: @toolIdentityRefs,
+    toolIdentityRefKinds: @toolIdentityRefKinds,
     requiresElevation: requiresElevation,
     recipeRevisionFingerprint: recipeRevisionFingerprint,
     cwdKind: cwdKind,
@@ -1589,6 +1639,94 @@ proc registerExplicitTargetExport*(target: BuildTargetDef;
     sourceFile: target.sourceFile,
     sourceLine: target.sourceLine))
 
+proc registerRunEdgeExport*(name, owningPackage, actionId: string;
+                            runArgs: openArray[string] = [];
+                            consumes: openArray[RunEdgeLease] = [];
+                            sourceFile = "";
+                            sourceLine = 0) {.dynOrStatic.} =
+  ## Named-Runnable-Edges N0: register a ``run "name", ...`` run-target as
+  ## a ``tekRunEdge`` row in the project-scoped target-export table,
+  ## reusing the Named-Targets M1 collision/ambiguity machinery
+  ## (``registerTargetExportEntry``). ``actionId`` is the build handle
+  ## whose closure produces the runnable artifact (the ``build =`` edge);
+  ## ``runArgs`` + ``consumes`` are carried on the row so N1 (CLI routing)
+  ## and N2 (lease bridge) can read them back without re-parsing the DSL.
+  ##
+  ## ``repro_resources``'s ``run`` surface calls this after converting its
+  ## ``seq[LeasedDep]`` into ``seq[RunEdgeLease]`` (the DSL-layer
+  ## projection). The owning-package override applied to implicit exports
+  ## applies here too so a run-edge authored in one package but declared
+  ## from another's ``build:`` body attributes correctly.
+  if name.len == 0:
+    return
+  let effectiveOwner =
+    if currentOwningPackageOverride.len > 0:
+      currentOwningPackageOverride
+    else:
+      owningPackage
+  registerTargetExportEntry(TargetExportEntry(
+    name: name,
+    kind: tekRunEdge,
+    owningPackage: effectiveOwner,
+    actionId: actionId,
+    sourceFile: sourceFile,
+    sourceLine: sourceLine,
+    runArgs: @runArgs,
+    consumes: @consumes))
+
+proc resetStateGroupRegistry*() {.dynOrStatic.} =
+  ## Named-Runnable-Edges N0: test / re-evaluation seam — clear the
+  ## collected named resource subgraphs.
+  stateGroupRegistry.setLen(0)
+
+proc registerStateGroup*(group: StateGroupDef) {.dynOrStatic.} =
+  ## Named-Runnable-Edges N0: append one ``stateGroup "name":`` record.
+  ## Called by ``repro_resources``'s ``stateGroup`` surface after it has
+  ## captured the member resource addresses declared inside the block.
+  stateGroupRegistry.add(group)
+
+proc registeredStateGroups*(): seq[StateGroupDef] {.dynOrStatic.} =
+  ## Named-Runnable-Edges N0: the named resource subgraphs collected so
+  ## far, in declaration order.
+  stateGroupRegistry
+
+proc stateGroupMembers*(name: string): seq[string] {.dynOrStatic.} =
+  ## Named-Runnable-Edges N0: resolve a ``stateGroup`` name to exactly its
+  ## member resource addresses (declaration order). Empty seq when the
+  ## name is unknown — the resolver seam N2 consults for reconcile.
+  for group in stateGroupRegistry:
+    if group.name == name:
+      return group.members
+  @[]
+
+# Named-Runnable-Edges N2: the resource-lane graph the CLI's leased-consumes
+# bridge reconciles lives ONLY in the recipe-evaluation process (the provider
+# child) — ``collectedResources()`` + ``registeredStateGroups()`` are populated
+# while ``buildProc()`` runs, and the provider fragment the CLI reads back
+# carries only build-lane nodes. To carry the ``stateGroup`` resource subgraph
+# to the CLI, ``buildPackageFragment`` emits it as a ``gnkMetadata`` node — but
+# ``repro_project_dsl`` cannot import ``repro_resources`` (the layering runs the
+# other way, see ``run_edge.nim``). This hook inverts the dependency: at module
+# init ``repro_resources`` registers an encoder that serializes the collected
+# resource graph + state-group membership; the fragment builder invokes it (if
+# set) and attaches the returned payload. Unset (a project that links no
+# ``repro_resources``) ⇒ empty payload ⇒ no node ⇒ byte-identical to pre-N2.
+var resourceGraphHarvestHook: proc(): string {.gcsafe.} = nil
+
+proc setResourceGraphHarvestHook*(hook: proc(): string {.gcsafe.}) =
+  ## Named-Runnable-Edges N2: install the resource-graph encoder
+  ## ``repro_resources`` provides (``encodeCollectedResourceGraphPayload``).
+  ## Idempotent — the last writer wins; ``repro_resources`` sets it once at
+  ## module init.
+  resourceGraphHarvestHook = hook
+
+proc harvestResourceGraphPayload*(): string =
+  ## Named-Runnable-Edges N2: the encoded resource-lane graph payload for the
+  ## current package's ``buildProc()`` evaluation, or ``""`` when no
+  ## ``repro_resources`` encoder is linked / no resources were declared.
+  if resourceGraphHarvestHook == nil: ""
+  else: resourceGraphHarvestHook()
+
 proc recordCommandAction*(id: string; call: PublicCliCall;
                           deps: openArray[string] = [];
                           extraInputs: openArray[string] = [];
@@ -1667,6 +1805,34 @@ proc appendRegisteredActionToolIdentityRefs*(actionId: string;
           buildActionRegistry[i].toolIdentityRefs.add(refName)
       return
 
+proc classifyRegisteredActionToolIdentityRefs*(
+    actionId: string;
+    buildRefs: openArray[string];
+    runtimeRefs: openArray[string] = []) {.dynOrStatic.} =
+  ## Populate the platform-role list parallel to an already-registered
+  ## action's tool refs. Typed-tool refs and native build dependencies are
+  ## BUILD-platform tools; explicit build/runtime dependencies target the
+  ## HOST platform. Build classification wins when a selector appears in
+  ## both lists because its headers and libraries must precede the native
+  ## toolchain's transitive sysroot.
+  proc containsRef(refs: openArray[string]; name: string): bool =
+    for candidate in refs:
+      if candidate == name:
+        return true
+
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id != actionId:
+      continue
+    buildActionRegistry[i].toolIdentityRefKinds.setLen(0)
+    for refName in buildActionRegistry[i].toolIdentityRefs:
+      if containsRef(buildRefs, refName):
+        buildActionRegistry[i].toolIdentityRefKinds.add(tirkBuild)
+      elif containsRef(runtimeRefs, refName):
+        buildActionRegistry[i].toolIdentityRefKinds.add(tirkRuntime)
+      else:
+        buildActionRegistry[i].toolIdentityRefKinds.add(tirkNative)
+    return
+
 proc appendRegisteredActionTypedOutput*(actionId: string;
                                         fieldName: string;
                                         types: openArray[string];
@@ -1706,6 +1872,33 @@ proc setRegisteredActionDeclaredOutputs*(actionId: string;
   for i in 0 ..< buildActionRegistry.len:
     if buildActionRegistry[i].id == actionId:
       buildActionRegistry[i].declaredOutputs = @outputs
+      return
+
+proc setRegisteredActionPublish*(actionId: string;
+                                 publishToBinaryCache: bool;
+                                 cacheEntryIdentity: Option[CacheEntryIdentity])
+    {.dynOrStatic.} =
+  ## L3 PUBLISH-SCOPE (public-interface tagging for hand-authored
+  ## ``build:`` blocks). Stamp the binary-cache publish tag +
+  ## ``cacheEntryIdentity`` onto an already-registered action IN PLACE.
+  ##
+  ## The typed-tool wrapper procs (e.g. ``nim.c``) register their
+  ## ``BuildActionDef`` through ``recordToolInvocation`` /
+  ## ``recordCommandAction``, neither of which forwards the publish
+  ## fields (only the from-source conventions, which call ``buildAction``
+  ## directly, do). Rather than thread two more params through the whole
+  ## macro-generated typed-tool surface, the ``nim.c`` alias records the
+  ## action first, then calls this helper to tag the artifact whose
+  ## output IS a declared public-interface member of the package.
+  ##
+  ## Mirrors the ``setRegisteredAction*`` family: walk the registry in
+  ## registration order, update the first entry whose id matches, no-op
+  ## when the id is absent (defensive — the alias always calls this
+  ## immediately after the wrapper registered the action).
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      buildActionRegistry[i].publishToBinaryCache = publishToBinaryCache
+      buildActionRegistry[i].cacheEntryIdentity = cacheEntryIdentity
       return
 
 proc setRegisteredActionReadOnlyRoots*(actionId: string;
@@ -2042,6 +2235,17 @@ proc readU32Le(bytes: openArray[byte]; pos: var int): uint32 =
     result = result or (uint32(bytes[pos + i]) shl (8 * i))
   pos += 4
 
+proc writeU64Le(outp: var seq[byte]; value: uint64) =
+  for i in 0 ..< 8:
+    outp.add(byte((value shr (8 * i)) and 0xff'u64))
+
+proc readU64Le(bytes: openArray[byte]; pos: var int): uint64 =
+  if pos + 8 > bytes.len:
+    raisePayload("truncated uint64 in build action payload")
+  for i in 0 ..< 8:
+    result = result or (uint64(bytes[pos + i]) shl (8 * i))
+  pos += 8
+
 proc writeString(outp: var seq[byte]; value: string) =
   outp.writeU32Le(uint32(value.len))
   for ch in value:
@@ -2312,6 +2516,12 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
   # behaviour byte-for-byte.
   payload.writeStringSeq(action.declaredOutputs)
   payload.writeStringSeq(action.readOnlyRoots)
+  # v23: one strict enum byte per tool-identity ref. The decoder accepts
+  # an empty list for legacy/manual actions and the engine applies its
+  # historical build-dependency default in that case.
+  payload.writeU32Le(uint32(action.toolIdentityRefKinds.len))
+  for kind in action.toolIdentityRefKinds:
+    payload.writeByte(byte(ord(kind)))
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -2328,7 +2538,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
       9'u16, 10'u16, 11'u16, 12'u16, 13'u16, 14'u16, 15'u16, 16'u16,
-      17'u16, 18'u16, 19'u16, 20'u16, 21'u16, BuildActionPayloadVersion}:
+      17'u16, 18'u16, 19'u16, 20'u16, 21'u16, 22'u16,
+      BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -2479,6 +2690,18 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # no-op for them.
     result.declaredOutputs = @[]
     result.readOnlyRoots = @[]
+  if version >= 23'u16:
+    let refKindCount = int(readU32Le(bytes, pos))
+    result.toolIdentityRefKinds =
+      newSeq[ToolIdentityRefKind](refKindCount)
+    for i in 0 ..< refKindCount:
+      let rawKind = readByte(bytes, pos)
+      if rawKind > byte(ord(high(ToolIdentityRefKind))):
+        raisePayload(
+          "invalid toolIdentityRefKind ordinal in build action payload")
+      result.toolIdentityRefKinds[i] = ToolIdentityRefKind(rawKind)
+  else:
+    result.toolIdentityRefKinds = @[]
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 
@@ -2495,6 +2718,13 @@ proc encodeBuildTargetPayload*(target: BuildTargetDef): seq[byte] {.dynOrStatic.
   # Spec-Implementation M5: v3 ``kind`` discriminator.
   payload.writeByte(byte(ord(target.kind)))
 
+  # Version 4: extensions serialization
+  payload.writeU32Le(uint32(target.extensions.len))
+  for box in target.extensions:
+    payload.writeString(box.typeId)
+    let jsonStr = extensionRegistry[box.typeId].marshal(box)
+    payload.writeString(jsonStr)
+
   result.add(BuildTargetPayloadMagic)
   result.writeU16Le(BuildTargetPayloadVersion)
   result.writeU32Le(uint32(payload.len))
@@ -2508,7 +2738,7 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
       raisePayload("unknown build target payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, 2'u16, BuildTargetPayloadVersion}:
+  if version notin {1'u16, 2'u16, 3'u16, BuildTargetPayloadVersion}:
     raisePayload("unsupported build target payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -2528,6 +2758,16 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
     if kindByte > byte(ord(btkCollection)):
       raisePayload("invalid build target kind in build target payload")
     result.kind = BuildTargetKind(kindByte)
+  if version >= 4'u16:
+    let extLen = int(readU32Le(bytes, pos))
+    for _ in 0 ..< extLen:
+      let typeId = readString(bytes, pos)
+      let jsonStr = readString(bytes, pos)
+      if extensionRegistry.contains(typeId):
+        let box = extensionRegistry[typeId].unmarshal(jsonStr)
+        result.extensions.add(box)
+      else:
+        discard
   if pos != bytes.len:
     raisePayload("trailing build target payload bytes")
 
@@ -2565,6 +2805,21 @@ proc decodeBuildPoolPayload*(bytes: openArray[byte]): BuildPoolDef {.dynOrStatic
 proc poolPayload*(pool: BuildPoolDef): string {.dynOrStatic.} =
   fromBytes(encodeBuildPoolPayload(pool))
 
+proc writeRunEdgeLease(outp: var seq[byte]; lease: RunEdgeLease) =
+  outp.writeString(lease.address)
+  outp.writeString(lease.consumerId)
+  outp.writeByte(byte(ord(lease.policyKind)))
+  outp.writeU64Le(cast[uint64](lease.ttlSeconds))
+
+proc readRunEdgeLease(bytes: openArray[byte]; pos: var int): RunEdgeLease =
+  result.address = readString(bytes, pos)
+  result.consumerId = readString(bytes, pos)
+  let kindByte = readByte(bytes, pos)
+  if kindByte > byte(ord(relDelayed)):
+    raisePayload("invalid run-edge lease policy kind")
+  result.policyKind = RunEdgeLeaseKind(kindByte)
+  result.ttlSeconds = cast[int64](readU64Le(bytes, pos))
+
 proc writeTargetExportEntry(outp: var seq[byte]; entry: TargetExportEntry) =
   outp.writeString(entry.name)
   outp.writeByte(byte(ord(entry.kind)))
@@ -2572,6 +2827,13 @@ proc writeTargetExportEntry(outp: var seq[byte]; entry: TargetExportEntry) =
   outp.writeString(entry.actionId)
   outp.writeString(entry.sourceFile)
   outp.writeU32Le(uint32(max(entry.sourceLine, 0)))
+  # Named-Runnable-Edges N0 (v3): trailing run-edge fields. Non-run-edge
+  # rows carry two empty seqs, so a table with no ``run "name", ...`` row
+  # encodes the same logical shape it did at v2.
+  outp.writeStringSeq(entry.runArgs)
+  outp.writeU32Le(uint32(entry.consumes.len))
+  for lease in entry.consumes:
+    outp.writeRunEdgeLease(lease)
 
 proc readTargetExportEntry(bytes: openArray[byte]; pos: var int;
                            version: uint16):
@@ -2579,7 +2841,8 @@ proc readTargetExportEntry(bytes: openArray[byte]; pos: var int;
   result.name = readString(bytes, pos)
   let kindByte = readByte(bytes, pos)
   let maxKind =
-    if version >= 2'u16: byte(ord(tekCollection))
+    if version >= 3'u16: byte(ord(tekRunEdge))
+    elif version >= 2'u16: byte(ord(tekCollection))
     else: byte(ord(tekExplicit))
   if kindByte > maxKind:
     raisePayload("invalid target export entry kind")
@@ -2588,6 +2851,14 @@ proc readTargetExportEntry(bytes: openArray[byte]; pos: var int;
   result.actionId = readString(bytes, pos)
   result.sourceFile = readString(bytes, pos)
   result.sourceLine = int(readU32Le(bytes, pos))
+  # v1/v2 payloads have no run-edge trailers — leave the fields empty so
+  # legacy artifacts decode byte-compatibly.
+  if version >= 3'u16:
+    result.runArgs = readStringSeq(bytes, pos)
+    let consumeCount = int(readU32Le(bytes, pos))
+    result.consumes = newSeq[RunEdgeLease](consumeCount)
+    for i in 0 ..< consumeCount:
+      result.consumes[i] = readRunEdgeLease(bytes, pos)
 
 proc writeTargetExportAmbiguity(outp: var seq[byte];
                                 ambiguity: TargetExportAmbiguity) =
@@ -2635,7 +2906,7 @@ proc decodeTargetExportTablePayload*(bytes: openArray[byte]):
       raisePayload("unknown target export table payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, TargetExportTablePayloadVersion}:
+  if version notin {1'u16, 2'u16, TargetExportTablePayloadVersion}:
     raisePayload("unsupported target export table payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -2689,3 +2960,121 @@ proc defaultToolActionId*(call: PublicCliCall): string {.dynOrStatic.} =
   if call.subcommand.len > 0:
     base.add("-" & actionIdPart(call.subcommand))
   base & "-" & stableHashHex(callIdentity(call))
+
+# --- Graph Extensions API ---
+
+proc extensionTypeId*[T](): string =
+  when T is NimPackageExtension:
+    "NimPackageExtension"
+  elif T is GeneratedFileExtension:
+    "GeneratedFileExtension"
+  else:
+    {.error: "Type is not registered as a graph extension".}
+
+proc storeExtension*[T](obj: var BuildActionDef; val: T) =
+  let id = extensionTypeId[T]()
+  var found = false
+  for box in obj.extensions:
+    if box.typeId == id:
+      cast[TypedExtensionBox[T]](box).val = val
+      found = true
+      break
+  if not found:
+    obj.extensions.add(TypedExtensionBox[T](typeId: id, val: val))
+
+proc retrieveExtension*[T](obj: BuildActionDef): Option[T] =
+  let id = extensionTypeId[T]()
+  for box in obj.extensions:
+    if box.typeId == id:
+      return some(cast[TypedExtensionBox[T]](box).val)
+  return none[T]()
+
+proc storeExtension*[T](obj: var BuildTargetDef; val: T) =
+  let id = extensionTypeId[T]()
+  var found = false
+  for box in obj.extensions:
+    if box.typeId == id:
+      cast[TypedExtensionBox[T]](box).val = val
+      found = true
+      break
+  if not found:
+    obj.extensions.add(TypedExtensionBox[T](typeId: id, val: val))
+
+proc retrieveExtension*[T](obj: BuildTargetDef): Option[T] =
+  let id = extensionTypeId[T]()
+  for box in obj.extensions:
+    if box.typeId == id:
+      return some(cast[TypedExtensionBox[T]](box).val)
+  return none[T]()
+
+
+
+proc registerBuildTargetExtension*[T](targetName: string; val: T) =
+  var found = false
+  for i in 0 ..< buildTargetRegistry.len:
+    if buildTargetRegistry[i].name == targetName:
+      buildTargetRegistry[i].storeExtension(val)
+      found = true
+      break
+  if not found:
+    for i in 0 ..< collectionRegistry.len:
+      if collectionRegistry[i].name == targetName:
+        collectionRegistry[i].storeExtension(val)
+        found = true
+        break
+
+
+proc getBuildTargetDef*(name: string): Option[BuildTargetDef] {.dynOrStatic.} =
+  for target in buildTargetRegistry:
+    if target.name == name:
+      return some(target)
+  for target in collectionRegistry:
+    if target.name == name:
+      return some(target)
+  return none(BuildTargetDef)
+
+# --- Builtin fs additions ---
+
+proc ensureLine*(tool: ReproFs; output, line: string; actionId = "";
+                 deps: openArray[string] = [];
+                 after: openArray[BuildActionDef] = [];
+                 cacheable = true; commandStatsId = "";
+                 actionCachePolicy = defaultActionCachePolicy()):
+    BuildActionDef {.discardable, dynOrStatic.} =
+  discard tool
+  let call = builtinFsCall("ensureLine", [
+    outputArg("output", output),
+    cliArg("line", line)
+  ])
+  let selectedActionId =
+    if actionId.len > 0: actionId else: defaultBuiltinActionId("ensureLine", output)
+  recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
+    cacheable = cacheable, commandStatsId = commandStatsId,
+    dependencyPolicy = automaticMonitorPolicy(),
+    actionCachePolicy = actionCachePolicy)
+
+proc ensureSnippet*(tool: ReproFs; output, openSentinel, closeSentinel, openSearch, closeSearch, snippet: string; actionId = "";
+                    deps: openArray[string] = [];
+                    after: openArray[BuildActionDef] = [];
+                    cacheable = true; commandStatsId = "";
+                    actionCachePolicy = defaultActionCachePolicy()):
+    BuildActionDef {.discardable, dynOrStatic.} =
+  discard tool
+  let call = builtinFsCall("ensureSnippet", [
+    outputArg("output", output),
+    cliArg("openSentinel", openSentinel),
+    cliArg("closeSentinel", closeSentinel),
+    cliArg("openSearch", openSearch),
+    cliArg("closeSearch", closeSearch),
+    cliArg("snippet", snippet)
+  ])
+  let selectedActionId =
+    if actionId.len > 0: actionId else: defaultBuiltinActionId("ensureSnippet", output)
+  recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
+    cacheable = cacheable, commandStatsId = commandStatsId,
+    dependencyPolicy = automaticMonitorPolicy(),
+    actionCachePolicy = actionCachePolicy)
+
+# Registration
+registerExtension[NimPackageExtension]("NimPackageExtension")
+registerExtension[GeneratedFileExtension]("GeneratedFileExtension")

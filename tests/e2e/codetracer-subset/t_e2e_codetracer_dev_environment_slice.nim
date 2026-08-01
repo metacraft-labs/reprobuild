@@ -23,12 +23,7 @@ proc reproBinary(): string =
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  if not fileExists(daemonBin):
-    raise newException(OSError,
-      "runquotad binary missing at " & daemonBin & "; build it via " &
-      "the test harness (scripts/run_tests.sh)")
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   let socketPath = "/tmp/repro-m21-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -182,7 +177,7 @@ suite "e2e_codetracer_dev_environment_slice":
   when isNixSupported:
     test "m53_nix_provisioning_from_package_metadata":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       check fileExists(codeTracerRoot / "src" / "frontend" / "tests" /
         "ipc_registry_test.nim")
       check fileExists(codeTracerRoot / "test-programs" / "c_sudoku_solver" /
@@ -271,7 +266,7 @@ suite "e2e_codetracer_dev_environment_slice":
       # emits the `progress: bpkActionCompleted ...` markers and the
       # `scheduler:` / `providerInvocations:` / `buildReport:` headers.
       let build = requireSuccess(shellCommand([reproBin, "build", target,
-        "--tool-provisioning=nix", "--log=actions"]), repoRoot)
+        "--daemon=off", "--tool-provisioning=nix", "--log=actions"]), repoRoot)
       check build.contains("tool-provisioning=nix")
       check build.contains("action: record-nix-sh status=asSucceeded launched=true")
       let buildIdentity = readPathOnlyBuildIdentity(valueAfter(build,

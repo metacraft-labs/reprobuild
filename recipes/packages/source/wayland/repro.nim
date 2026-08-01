@@ -163,6 +163,12 @@ package waylandSource:
     ## ninja is meson's default backend — the compile action invokes
     ## ``ninja`` against the meson build directory.
     "ninja >=1.10"
+    ## pkgconf exposes the pkg-config interface Meson uses to locate
+    ## the source-built libffi dependency.
+    "pkgconf >=1.8"
+    ## glibc's public limits.h delegates Linux ABI constants to
+    ## linux/limits.h, so compiler feature probes need kernel headers.
+    "linux-headers >=4.19"
     ## gcc is the host C toolchain — Wayland is plain C11 with no
     ## C++ component, so the C compiler is sufficient.
     "gcc >=7"

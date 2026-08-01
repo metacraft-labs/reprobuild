@@ -441,13 +441,28 @@ suite "M83 Phase A e2e: compile + run user profiles":
     check zipEdge{"callPackage"}.getStr() == "reprobuild.builtin"
     check zipEdge{"callExecutable"}.getStr() == "exec"
     check zipEdge{"commandStatsId"}.getStr() == "expandArchive.eafZip"
+    # M3f serializes the Windows intent explicitly on every host. Pin the
+    # complete argv so literal runtime `$PID`, fail-closed cleanup, and the
+    # absence of a compiler-selected scratch path survive the fixture boundary.
+    let windowsZipArgv = doc{"windowsZipArgv"}
+    check windowsZipArgv == %*[
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "$ErrorActionPreference = 'Stop'; " &
+        "$scratch = Join-Path $env:TEMP " &
+          "('repro-expand-archive-' + $PID + '.zip'); " &
+        "try { Copy-Item -LiteralPath " &
+          "'C:\\actions-runner-cache\\runner.zip' " &
+          "-Destination $scratch -Force; " &
+          "Expand-Archive -LiteralPath $scratch " &
+          "-DestinationPath 'C:\\actions-runner' -Force " &
+        "} finally { if (Test-Path -LiteralPath $scratch) { " &
+          "Remove-Item -LiteralPath $scratch -Force -ErrorAction Stop " &
+        "} }"]
     let zipArgv = zipEdge{"argv"}
     if host == "windows":
-      check zipArgv.elems[0].getStr() == "powershell"
-      check zipArgv.elems[1].getStr() == "-NoProfile"
-      check zipArgv.elems[2].getStr() == "-Command"
-      check zipArgv.elems[3].getStr().contains("Expand-Archive")
-      check zipArgv.elems[3].getStr().contains("-Force")
+      check zipArgv == windowsZipArgv
     else:
       check zipArgv.elems[0].getStr() == "unzip"
       check zipArgv.elems[1].getStr() == "-q"

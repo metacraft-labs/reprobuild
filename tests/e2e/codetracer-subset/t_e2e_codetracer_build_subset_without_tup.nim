@@ -6,8 +6,17 @@ import repro_test_support
 const
   NimFirstFlag = "-d:asyncBackend=asyncdispatch"
   NimSubcmdProc = "subcmd_2d_d_3a_asyncBackend_3d_asyncdispatch"
-  NimJsSemanticsHash = "a7cf3ce1b73f8bfa"
+  # CodeTracer 04d6aff3 restored ``-d:nimOldCaseObjects`` to the canonical
+  # ``dev``-branch Tup compiler flags. Keep the full-command fingerprint
+  # pinned to that corrected command, and assert the flag explicitly below so
+  # a future hash refresh cannot accidentally hide its removal.
+  NimJsSemanticsHash = "e64dd35563bfa374"
+  NimJsWithoutOldCaseObjectsHash = "a7cf3ce1b73f8bfa"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
+  CodeTracerTupSemanticsCommit =
+    "04d6aff3d012b3e768dbebba186c950637e0c2b3"
+  PinnedTupSemanticsFixture =
+    "tests/fixtures/codetracer-subset/Tuprules-04d6aff3.tup"
 
 type
   TupRules = object
@@ -64,15 +73,23 @@ proc pathExists(path: string): bool =
   except OSError:
     false
 
+proc mustCompareLiveTupSemantics(codeTracerRoot: string): bool =
+  ## The normal CI sibling is CodeTracer ``dev``, which contains the reviewed
+  ## command-semantics commit. A local sibling may intentionally be on another
+  ## lineage, so compare its moving Tuprules oracle when Git proves it contains
+  ## the pinned contract. GitHub Actions is fail-closed: the checked-in sibling
+  ## contract selects ``codetracer=dev``, and a shallow clone must not silently
+  ## bypass the comparison merely because the pinned ancestor is absent.
+  if getEnv("GITHUB_ACTIONS").toLowerAscii() == "true":
+    return true
+  result = runShell(shellCommand(@[
+    "git", "-C", codeTracerRoot, "merge-base", "--is-ancestor",
+    CodeTracerTupSemanticsCommit, "HEAD"
+  ])).code == 0
+
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  if not fileExists(daemonBin):
-    raise newException(OSError,
-      "runquotad binary missing at " & daemonBin & "; build it via " &
-      "the test harness (scripts/run_tests.sh) — the test code must not " &
-      "spawn `just build` for the sibling repo")
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   let socketPath = "/tmp/repro-m20-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -125,10 +142,9 @@ proc loadTupRules(path: string): TupRules =
   # lines), and both files live in the same `src/` directory (the tup variant
   # root, marked by `src/Tupfile.ini`). For a Tuprules included by a Tupfile
   # in its own directory `$(TUP_CWD)` is therefore `.`, so codetracer's
-  # `ROOT = $(TUP_CWD)/../../` resolves relative to `src/`. The repo's real
-  # library search path comes from `nim.cfg` (replayed here by
-  # `withNimConfigPathContext`); the `$(ROOT)`-based `--path:` flags are the
-  # committed Tuprules text and are modeled verbatim.
+  # `ROOT = $(TUP_CWD)/../../` resolves relative to `src/`. The committed
+  # `NIM_REPO_PATH_FLAGS` carry the real library search path, so those
+  # `$(ROOT)`-based `--path:` flags are modeled verbatim.
   result.variables["TUP_CWD"] = "."
   for line in logicalTupLines(path):
     let eq = line.find('=')
@@ -206,23 +222,6 @@ proc tupCommand(rules: TupRules; name, sourcePath, outputPath: string): seq[stri
   for token in tupCommandTemplate(rules, name):
     result.add(replaceTupPlaceholders(token, sourcePath, outputPath))
 
-proc nimCfgPathArgs(codeTracerRoot: string): seq[string] =
-  for line in readFile(codeTracerRoot / "nim.cfg").splitLines:
-    let stripped = line.strip()
-    if stripped.startsWith("path:\"") and stripped.endsWith("\""):
-      let relativePath = stripped["path:\"".len .. ^2]
-      result.add("--path:" & codeTracerRoot / relativePath)
-
-proc withNimConfigPathContext(command: openArray[string];
-                              codeTracerRoot: string): seq[string] =
-  for item in command:
-    result.add(item)
-  let jsIndex = result.find("js")
-  if jsIndex < 0:
-    raise newException(ValueError, "!nim_js command has no js subcommand")
-  for index, pathArg in nimCfgPathArgs(codeTracerRoot):
-    result.insert(pathArg, jsIndex + index)
-
 proc stableHash64(text: string): string =
   var hash = 0xcbf29ce484222325'u64
   for ch in text:
@@ -239,11 +238,31 @@ proc assertCommittedTupSemantics(rules: TupRules) =
   check tupOutputPatterns(rules, "!nim_js") == @["%B.js"]
   check tupOutputPatterns(rules, "!trace_object_file") == @["%o"]
   check tupCommandTemplate(rules, "!nim_js")[0 .. 1] == @["nim", NimFirstFlag]
+  check "-d:nimOldCaseObjects" in tupCommandTemplate(rules, "!nim_js")
   check tupCommandTemplate(rules, "!trace_object_file")[0 .. 3] ==
     @["gcc", "-fPIC", "-g3", "-c"]
   check tupSemanticsHash(rules, "!nim_js") == NimJsSemanticsHash
   check tupSemanticsHash(rules, "!trace_object_file") ==
     TraceObjectFileSemanticsHash
+
+proc assertCompilerFlagChangesSemanticsHash(fixturePath: string;
+                                            rules: TupRules) =
+  ## Keep the full-command fingerprint load-bearing: removing a compiler
+  ## semantic input must deterministically produce a different hash.
+  let pinnedHash = tupSemanticsHash(rules, "!nim_js")
+  check pinnedHash == NimJsSemanticsHash
+
+  var withoutOldCaseObjects = loadTupRules(fixturePath)
+  let commonFlags = withoutOldCaseObjects.variables["NIM_COMMON_FLAGS"]
+  check "-d:nimOldCaseObjects" in commonFlags
+  withoutOldCaseObjects.variables["NIM_COMMON_FLAGS"] =
+    commonFlags.replace("-d:nimOldCaseObjects ", "")
+
+  check "-d:nimOldCaseObjects" notin
+    tupCommandTemplate(withoutOldCaseObjects, "!nim_js")
+  let changedHash = tupSemanticsHash(withoutOldCaseObjects, "!nim_js")
+  check changedHash == NimJsWithoutOldCaseObjectsHash
+  check changedHash != pinnedHash
 
 proc actionArgs(command: openArray[string]): seq[string] =
   if command.len < 2:
@@ -268,11 +287,18 @@ proc generatedHeaderCCommand(traceCommand: openArray[string];
   if not inserted:
     raise newException(ValueError, "trace_object_file command has no -o flag")
 
+proc withMakeDepfile(command: openArray[string]; depfilePath: string): seq[string] =
+  result = @command
+  result.add("-MMD")
+  result.add("-MF")
+  result.add(depfilePath)
+
 proc copySelectedCodeTracerFiles(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "src" / "frontend" / "tests")
   createDir(projectRoot / "src" / "frontend" / "index")
   createDir(projectRoot / "src" / "frontend" / "lib")
   createDir(projectRoot / "src" / "c")
+  createDir(projectRoot / "build" / "c")
   copyFile(codeTracerRoot / "src" / "frontend" / "tests" /
     "ipc_registry_test.nim",
     projectRoot / "src" / "frontend" / "tests" / "ipc_registry_test.nim")
@@ -281,22 +307,19 @@ proc copySelectedCodeTracerFiles(codeTracerRoot, projectRoot: string) =
     projectRoot / "src" / "frontend" / "index" / "ipc_registry.nim")
   copyFile(codeTracerRoot / "src" / "frontend" / "lib" / "jslib.nim",
     projectRoot / "src" / "frontend" / "lib" / "jslib.nim")
+  copyFile(codeTracerRoot / "src" / "frontend" / "kdom.nim",
+    projectRoot / "src" / "frontend" / "lib" / "kdom.nim")
   copyFile(codeTracerRoot / "test-programs" / "c_sudoku_solver" / "main.c",
     projectRoot / "src" / "c" / "main.c")
 
 proc writeProject(path: string; nimJsCommand, traceObjectCommand,
                   generatedHeaderCCommand: openArray[string]) =
   createDir(path.splitPath.head)
-  let headerScript =
-    "set -eu\n" &
-    "out=$1\n" &
-    "mkdir -p \"$(dirname \"$out\")\" build/c\n" &
-    "cat > \"$out\" <<'EOF'\n" &
+  let headerText =
     "#ifndef REPROBUILD_CT_SUBSET_CONFIG_H\n" &
     "#define REPROBUILD_CT_SUBSET_CONFIG_H\n" &
     "#define REPROBUILD_CT_SUBSET_GENERATED 1\n" &
-    "#endif\n" &
-    "EOF\n"
+    "#endif\n"
   writeFile(path,
     "import repro_project_dsl\n\n" &
     "package codeTracerSubset:\n" &
@@ -321,32 +344,40 @@ proc writeProject(path: string; nimJsCommand, traceObjectCommand,
     "      subcmd \"-fPIC\":\n" &
     "        pos args, seq[string], position = 0\n\n" &
     "    build:\n" &
-    "      discard buildAction(\"generate-config-header\",\n" &
-    "        codeTracerSubset.executable(\"sh\").subcmd_2d_c(\n" &
-    "          args = @[" & nimString(headerScript) & ", " &
-      nimString("sh") & ", " & nimString("build/generated/ct_config.h") & "]),\n" &
-    "        outputs = @[" & nimString("build/generated/ct_config.h") & "])\n" &
+    "      discard fs.writeText(\n" &
+    "        actionId = \"generate-config-header\",\n" &
+    "        output = \"build/generated/ct_config.h\",\n" &
+    "        text = " & nimString(headerText) & ")\n" &
     "      discard buildAction(\"nim-js-ipc-registry-test\",\n" &
     "        codeTracerSubset.executable(\"nim\")." & NimSubcmdProc & "(\n" &
     "          args = " & nimSeq(actionArgs(nimJsCommand)) & "),\n" &
     "        inputs = @[" &
       nimString("src/frontend/tests/ipc_registry_test.nim") & ", " &
       nimString("src/frontend/index/ipc_registry.nim") & ", " &
-      nimString("src/frontend/lib/jslib.nim") & "],\n" &
+      nimString("src/frontend/lib/jslib.nim") & ", " &
+      nimString("src/frontend/lib/kdom.nim") & "],\n" &
     "        outputs = @[" & nimString("tests/ipc_registry_test.js") & "])\n" &
+    "      let cSudokuTupDepfile = " & nimString("build/c/main.tup.d") & "\n" &
+    "      let cSudokuGeneratedHeaderDepfile = " &
+      nimString("build/c/main.with-header.d") & "\n" &
     "      discard buildAction(\"c-sudoku-object-tup\",\n" &
     "        codeTracerSubset.executable(\"gcc\").subcmd_2d_fPIC(\n" &
-    "          args = " & nimSeq(actionArgs(traceObjectCommand)) & "),\n" &
+    "          args = " & nimSeq(actionArgs(withMakeDepfile(
+      traceObjectCommand, "build/c/main.tup.d"))) & "),\n" &
     "        inputs = @[" & nimString("src/c/main.c") & "],\n" &
-    "        outputs = @[" & nimString("build/c/main.tup.o") & "])\n" &
+    "        outputs = @[" & nimString("build/c/main.tup.o") & "],\n" &
+    "        dependencyPolicy = makeDepfilePolicy(cSudokuTupDepfile))\n" &
     "      discard buildAction(\"c-sudoku-object-with-generated-header\",\n" &
     "        codeTracerSubset.executable(\"gcc\").subcmd_2d_fPIC(\n" &
-    "          args = " & nimSeq(actionArgs(generatedHeaderCCommand)) & "),\n" &
+    "          args = " & nimSeq(actionArgs(withMakeDepfile(
+      generatedHeaderCCommand, "build/c/main.with-header.d"))) & "),\n" &
     "        deps = @[" & nimString("generate-config-header") & "],\n" &
     "        inputs = @[" &
       nimString("src/c/main.c") & ", " &
       nimString("build/generated/ct_config.h") & "],\n" &
-    "        outputs = @[" & nimString("build/c/main.with-header.o") & "])\n")
+    "        outputs = @[" & nimString("build/c/main.with-header.o") & "],\n" &
+    "        dependencyPolicy = makeDepfilePolicy(" &
+      "cSudokuGeneratedHeaderDepfile))\n")
 
 proc build(reproBin, target, repoRoot, pathValue: string): string =
   # Pass `--log=actions` so the per-action `action: ID status=... ` evidence
@@ -354,9 +385,13 @@ proc build(reproBin, target, repoRoot, pathValue: string): string =
   # `progress: bpkActionCompleted ...` markers plus the `scheduler:` /
   # `providerInvocations:` / `buildReport:` headers; the assertions below
   # that key on the per-action shape need the action-level log.
+  let cacheRoot = repoRoot / ".repro" / "fixture-action-cache"
   requireSuccess(shellCommand(@[reproBin, "build", target,
-    "--tool-provisioning=path", "--log=actions"],
-    @[(name: "PATH", value: pathValue)]), repoRoot)
+    "--daemon=off", "--tool-provisioning=path", "--log=actions",
+    "--write-report"],
+    @[(name: "PATH", value: pathValue),
+      (name: "REPROBUILD_ACTION_CACHE_ROOT", value: cacheRoot),
+      (name: "REPRO_CACHE_DISABLE", value: "1")]), repoRoot)
 
 proc valueAfter(output, prefix: string): string =
   for line in output.splitLines:
@@ -389,6 +424,12 @@ proc assertActionCacheEffective(report: JsonNode; id: string) =
   ## the May-2026 engine cache-decision protocol split.
   let action = reportAction(report, id)
   check action.kind != JNull
+  if action.kind != JNull:
+    checkpoint("cache-effective action " & id & " status=" &
+      action{"status"}.getStr() & " launched=" &
+      $action{"launched"}.getBool() & " cacheDecision=" &
+      action{"cacheDecision"}.getStr() & " reason=" &
+      action{"reason"}.getStr())
   check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
   check action{"launched"}.getBool() == false
 
@@ -422,19 +463,35 @@ suite "e2e_codetracer_build_subset_without_tup":
   when isNixSupported:
     test "real CodeTracer sources build through DSL, provider, RunQuota, cache, and committed Tup command semantics":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
-      let tupRulesPath = codeTracerRoot / "src" / "Tuprules.tup"
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      # CI's sibling contract pins ``codetracer=dev``. A developer's adjacent
+      # checkout can legitimately be on another branch or contain unrelated
+      # work, so source the command oracle from the reviewed CodeTracer commit
+      # instead of silently changing the accepted hash with host state. The
+      # real sibling still supplies the source slice built below.
+      let tupRulesPath = repoRoot / PinnedTupSemanticsFixture
       check fileExists(tupRulesPath)
       let tupRules = loadTupRules(tupRulesPath)
       assertCommittedTupSemantics(tupRules)
-      let nimJsActionCommand = withNimConfigPathContext(
-        tupCommand(tupRules, "!nim_js",
-          "src/frontend/tests/ipc_registry_test.nim", "tests/ipc_registry_test.js"),
-        codeTracerRoot)
-      let nimJsOracleCommand = withNimConfigPathContext(
-        tupCommand(tupRules, "!nim_js",
-          "src/frontend/tests/ipc_registry_test.nim", "oracle/ipc_registry_test.js"),
-        codeTracerRoot)
+      assertCompilerFlagChangesSemanticsHash(tupRulesPath, tupRules)
+
+      # Preserve live integration-drift detection on the contracted CodeTracer
+      # lineage. This catches both committed and working-tree Tuprules changes
+      # in CI's ``codetracer=dev`` checkout, while an unrelated local branch
+      # cannot redefine the pinned Reprobuild test oracle.
+      if mustCompareLiveTupSemantics(codeTracerRoot):
+        let liveTupRulesPath = codeTracerRoot / "src" / "Tuprules.tup"
+        check fileExists(liveTupRulesPath)
+        let liveTupRules = loadTupRules(liveTupRulesPath)
+        assertCommittedTupSemantics(liveTupRules)
+        check tupSemanticsHash(liveTupRules, "!nim_js") ==
+          tupSemanticsHash(tupRules, "!nim_js")
+        check tupSemanticsHash(liveTupRules, "!trace_object_file") ==
+          tupSemanticsHash(tupRules, "!trace_object_file")
+      let nimJsActionCommand = tupCommand(tupRules, "!nim_js",
+        "src/frontend/tests/ipc_registry_test.nim", "tests/ipc_registry_test.js")
+      let nimJsOracleCommand = tupCommand(tupRules, "!nim_js",
+        "src/frontend/tests/ipc_registry_test.nim", "oracle/ipc_registry_test.js")
       let traceObjectActionCommand = tupCommand(tupRules, "!trace_object_file",
         "src/c/main.c", "build/c/main.tup.o")
       let traceObjectOracleCommand = tupCommand(tupRules, "!trace_object_file",
@@ -547,5 +604,6 @@ suite "e2e_codetracer_build_subset_without_tup":
       assertAction(headerDeletedReport, "c-sudoku-object-with-generated-header",
         "asSucceeded", true)
 
-      let noFlag = requireFailure(shellCommand([reproBin, "build", target]), repoRoot)
+      let noFlag = requireFailure(shellCommand([reproBin, "build", target,
+        "--daemon=off"]), repoRoot)
       check noFlag.contains("refusing implicit PATH fallback")

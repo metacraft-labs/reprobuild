@@ -50,12 +50,9 @@
 #   /usr/share/wayland-sessions/*.desktop          # session definitions
 #   /etc/systemd/system/default.target -> ...      # autologin wiring
 #
-# The `build-base-rootfs.sh` companion now ships only the minimum
-# Debian base that has no from-source recipe yet (kernel modules,
-# core util-linux not-yet-stripped, gawk/grep/coreutils stand-ins
-# until those recipes' install-mirrors are wired into the ISO).
-# The DE stack and KF6/Qt6/Wayland/GL stack are sourced exclusively
-# from the from-source install-mirrors.
+# The `build-base-rootfs.sh` companion ships only deterministic FHS
+# directories and machine-independent configuration. The kernel, modules,
+# shell, core utilities, and desktop stack are supplied by source mirrors.
 #
 # Invocation (from the reproos-iso recipe directory — engine cwd):
 #   bash scripts/stage-de-rootfs.sh <stage-dir>
@@ -81,7 +78,7 @@ if [ "$REPRO_BASE_ROOTFS_DISABLE" != "1" ]; then
   SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1735689600}" \
     bash "$SCRIPT_DIR_SELF/build-base-rootfs.sh" "$base_tar"
   echo "[stage-de-rootfs] extracting base userspace into $STAGE_DIR"
-  tar -C "$STAGE_DIR" -xf "$base_tar"
+  tar --same-permissions -C "$STAGE_DIR" -xf "$base_tar"
   rm -f "$base_tar"
 fi
 
@@ -93,6 +90,17 @@ fi
 # ---------------------------------------------------------------------------
 
 SRC_RECIPES_ROOT="$REPO_ROOT/recipes/packages/source"
+REPROOS_SOURCE_RECIPES="${REPROOS_SOURCE_RECIPES:-}"
+
+source_recipe_selected() {
+  recipe_name="$1"
+  [ -z "$REPROOS_SOURCE_RECIPES" ] && return 0
+  case " $REPROOS_SOURCE_RECIPES " in
+    *" $recipe_name "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # The from-source mirror prefix on the ISO is the SAME absolute path
 # the recipes use on the build host.  Without this fidelity, every
 # embedded RPATH like
@@ -106,6 +114,8 @@ staged_bytes=0
 echo "[stage-de-rootfs] staging from-source install-mirrors at $SRC_RECIPES_ROOT"
 for recipe_dir in "$SRC_RECIPES_ROOT"/*; do
   [ -d "$recipe_dir" ] || continue
+  recipe_name="$(basename "$recipe_dir")"
+  source_recipe_selected "$recipe_name" || continue
   install_dir="$recipe_dir/.repro/output/install"
   [ -d "$install_dir" ] || continue
   # Skip recipes whose install dir is empty (recipe is registered but
@@ -114,7 +124,6 @@ for recipe_dir in "$SRC_RECIPES_ROOT"/*; do
   if [ -z "$(find "$install_dir" -maxdepth 4 -type f -print -quit 2>/dev/null)" ]; then
     continue
   fi
-  recipe_name="$(basename "$recipe_dir")"
   dst_dir="$ISO_SRC_MIRROR_ROOT/$recipe_name/.repro/output/install"
   mkdir -p "$(dirname "$dst_dir")"
   # cp -a preserves symlinks + permissions + timestamps.  We do NOT
@@ -124,6 +133,48 @@ for recipe_dir in "$SRC_RECIPES_ROOT"/*; do
   staged_recipes=$((staged_recipes + 1))
 done
 echo "[stage-de-rootfs] staged $staged_recipes from-source install-mirrors"
+
+# Source-built packages use the ABI supplied by the glibc source
+# recipe. Record its final rootfs path before computing the bootstrap closure:
+# compatible Nix PT_INTERP entries are replaced with this loader during final
+# staging and therefore must not pull a duplicate Nix glibc into the image.
+SOURCE_GLIBC_INSTALL_ROOT="$ISO_SRC_MIRROR_ROOT/glibc/.repro/output/install"
+SOURCE_GLIBC_LOADER_STAGED="$(find "$SOURCE_GLIBC_INSTALL_ROOT" -type f \
+  -name 'ld-linux-x86-64.so.2' -print -quit 2>/dev/null)"
+if [ -z "$SOURCE_GLIBC_LOADER_STAGED" ]; then
+  echo "[stage-de-rootfs] required source glibc loader missing" >&2
+  exit 67
+fi
+SOURCE_GLIBC_RUNTIME_DIR_STAGED="$(dirname "$SOURCE_GLIBC_LOADER_STAGED")"
+if [ ! -e "$SOURCE_GLIBC_RUNTIME_DIR_STAGED/libc.so.6" ]; then
+  echo "[stage-de-rootfs] source glibc loader has no matching libc.so.6" >&2
+  exit 67
+fi
+SOURCE_GLIBC_LOADER="${SOURCE_GLIBC_LOADER_STAGED#$STAGE_DIR}"
+SOURCE_GLIBC_RUNTIME_DIR="${SOURCE_GLIBC_RUNTIME_DIR_STAGED#$STAGE_DIR}"
+SOURCE_GLIBC_VERSION="$("$SOURCE_GLIBC_LOADER_STAGED" --version 2>&1 | \
+  sed -nE 's/.*version ([0-9]+\.[0-9]+).*/\1/p' | head -n1)"
+if [ -z "$SOURCE_GLIBC_VERSION" ]; then
+  echo "[stage-de-rootfs] could not determine source glibc version" >&2
+  exit 67
+fi
+
+# Install the source glibc runtime at the conventional loader path as well as
+# its mirrored recipe path. Some runtime helpers, notably systemd-executor,
+# are copied into the FHS tree and retain /lib64 as their interpreter until
+# the final normalization pass.
+mkdir -p "$STAGE_DIR/usr/lib64"
+cp -a "$SOURCE_GLIBC_RUNTIME_DIR_STAGED/." "$STAGE_DIR/usr/lib64/"
+SOURCE_GLIBC_LOADER="/lib64/$(basename "$SOURCE_GLIBC_LOADER_STAGED")"
+SOURCE_GLIBC_RUNTIME_DIR="/lib64"
+if [ ! -x "$STAGE_DIR$SOURCE_GLIBC_LOADER" ] || \
+   [ ! -e "$STAGE_DIR$SOURCE_GLIBC_RUNTIME_DIR/libc.so.6" ]; then
+  echo "[stage-de-rootfs] canonical source glibc runtime is incomplete" >&2
+  exit 67
+fi
+
+export SOURCE_GLIBC_VERSION
+echo "[stage-de-rootfs] source glibc runtime: $SOURCE_GLIBC_RUNTIME_DIR"
 
 # ---------------------------------------------------------------------------
 # Phase 1b (M9.R.56.6): overlay every from-source recipe's ``etc/`` subtree
@@ -145,7 +196,7 @@ echo "[stage-de-rootfs] staged $staged_recipes from-source install-mirrors"
 # cannot render its greeter.
 #
 # Overlay rule: cp -an (archive + no-clobber) so existing ``/etc/``
-# files (Debian base config, live-ISO overlays we write later in
+# files (rootfs skeleton config, live-ISO overlays we write later in
 # this script) win over from-source defaults.  This makes the
 # overlay additive-only, matching the ``pkg-config --variable=sysconfdir``
 # discipline every mainstream distro follows.
@@ -154,13 +205,14 @@ echo "[stage-de-rootfs] staged $staged_recipes from-source install-mirrors"
 etc_overlay_count=0
 for recipe_dir in "$SRC_RECIPES_ROOT"/*; do
   [ -d "$recipe_dir" ] || continue
+  recipe_name="$(basename "$recipe_dir")"
+  source_recipe_selected "$recipe_name" || continue
   install_etc="$recipe_dir/.repro/output/install/etc"
   [ -d "$install_etc" ] || continue
   # Skip empty etc dirs.
   if [ -z "$(find "$install_etc" -mindepth 1 -maxdepth 4 -print -quit 2>/dev/null)" ]; then
     continue
   fi
-  recipe_name="$(basename "$recipe_dir")"
   # cp -an: archive (preserve mode/ownership/symlinks/timestamps) + no-clobber
   # (don't overwrite files already present under $STAGE_DIR/etc).
   # -R is implicit in -a; -n makes it additive.  We copy directory-by-directory
@@ -194,17 +246,44 @@ fi
 nix_prefixes_file="$(mktemp -t reproos-iso-nix-prefixes-XXXXXX)"
 trap 'rm -f "$nix_prefixes_file"' EXIT
 
+is_compatible_bootstrap_glibc_interpreter() {
+  local interp="$1"
+  local bootstrap_version oldest_version
+  if [[ "$interp" =~ ^/nix/store/[^/]+-glibc-([0-9]+\.[0-9]+)(-[^/]*)?/lib[^/]*/ld-linux[^/]*\.so ]]; then
+    bootstrap_version="${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
+  oldest_version="$(printf '%s\n%s\n' \
+    "$bootstrap_version" "$SOURCE_GLIBC_VERSION" | sort -V | head -n1)"
+  [ "$oldest_version" = "$bootstrap_version" ]
+}
+export -f is_compatible_bootstrap_glibc_interpreter
+
 extract_nix_prefixes_from_elf() {
   local elf="$1"
-  local rp interp
+  local rp interp source_runtime_elf=0
   rp="$($patchelf_bin --print-rpath "$elf" 2>/dev/null || true)"
   interp="$($patchelf_bin --print-interpreter "$elf" 2>/dev/null || true)"
+  case "$elf" in
+    "$ISO_SRC_MIRROR_ROOT"/*/.repro/output/install/*|"$SOURCE_RUNTIME_INSTALLER_BIN")
+      source_runtime_elf=1
+      ;;
+  esac
   # Split rp on ':' and emit each /nix/store/<hash>-<pkg>/ prefix.
   printf '%s\n' "$rp" | tr ':' '\n' | \
     sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
-  printf '%s\n' "$interp" | \
-    sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
+  # Compatible bootstrap interpreters are normalized to SOURCE_GLIBC_LOADER
+  # below, so retaining a duplicate glibc solely for PT_INTERP would be a
+  # runtime fallback.
+  if [ "$source_runtime_elf" = 1 ] && \
+     is_compatible_bootstrap_glibc_interpreter "$interp"; then
+    return
+  fi
+  printf '%s\n' "$interp" | sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
 }
+SOURCE_RUNTIME_INSTALLER_BIN="${REPROOS_INSTALLER_BIN:-$REPO_ROOT/apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer}"
+export ISO_SRC_MIRROR_ROOT SOURCE_RUNTIME_INSTALLER_BIN
 export -f extract_nix_prefixes_from_elf
 
 # Walk the staged source mirror + the reproos-installer + repro CLI.
@@ -214,19 +293,49 @@ export -f extract_nix_prefixes_from_elf
 {
   find "$ISO_SRC_MIRROR_ROOT" -type f \
     \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) 2>/dev/null
-  if [ -x "$REPO_ROOT/apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer" ]; then
-    echo "$REPO_ROOT/apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer"
+  if [ -x "$SOURCE_RUNTIME_INSTALLER_BIN" ]; then
+    echo "$SOURCE_RUNTIME_INSTALLER_BIN"
   fi
   if [ -x "$REPO_ROOT/build/bin/repro" ]; then
     echo "$REPO_ROOT/build/bin/repro"
   fi
 } | while IFS= read -r elf; do
   # Cheap ELF-magic check before patchelf invocation.
-  magic=$(head -c 4 "$elf" 2>/dev/null | od -An -c | tr -d ' \n' || true)
+  magic=""
+  IFS= read -r -N 4 magic 2>/dev/null < "$elf" || true
   case "$magic" in
-    177ELF*) extract_nix_prefixes_from_elf "$elf" ;;
+    $'\177ELF') extract_nix_prefixes_from_elf "$elf" ;;
   esac
 done | sort -u > "$nix_prefixes_file"
+
+# Expand split-output runtime propagation before copying any store
+# prefixes. Reading the host prefixes here avoids depending on a later
+# staged-tree iteration and ensures dev-only RPATH entries still bring
+# along the output that owns the shared library.
+propagation_iter=0
+while :; do
+  propagation_iter=$((propagation_iter + 1))
+  propagated_prefixes_file="$(mktemp -t reproos-iso-nix-propagated-XXXXXX)"
+  while IFS= read -r prefix; do
+    [ -z "$prefix" ] && continue
+    propagated="$prefix/nix-support/propagated-build-inputs"
+    [ -f "$propagated" ] || continue
+    tr '[:space:]' '\n' < "$propagated" | \
+      sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
+  done < "$nix_prefixes_file" | sort -u > "$propagated_prefixes_file"
+  to_add=$(comm -23 "$propagated_prefixes_file" "$nix_prefixes_file" 2>/dev/null || true)
+  if [ -z "$to_add" ]; then
+    rm -f "$propagated_prefixes_file"
+    break
+  fi
+  cat "$nix_prefixes_file" "$propagated_prefixes_file" | sort -u > "$nix_prefixes_file.next"
+  mv "$nix_prefixes_file.next" "$nix_prefixes_file"
+  rm -f "$propagated_prefixes_file"
+  if [ "$propagation_iter" -ge 10 ]; then
+    echo "[stage-de-rootfs] propagated nix-store closure didn't converge" >&2
+    exit 75
+  fi
+done
 
 nix_closure_count=$(wc -l < "$nix_prefixes_file")
 echo "[stage-de-rootfs] discovered $nix_closure_count unique /nix/store/ prefixes"
@@ -270,9 +379,10 @@ while :; do
     find "$staged_prefix" -type f \
       \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) 2>/dev/null | \
       while IFS= read -r elf; do
-        magic=$(head -c 4 "$elf" 2>/dev/null | od -An -c | tr -d ' \n' || true)
+        magic=""
+        IFS= read -r -N 4 magic 2>/dev/null < "$elf" || true
         case "$magic" in
-          177ELF*) extract_nix_prefixes_from_elf "$elf" ;;
+          $'\177ELF') extract_nix_prefixes_from_elf "$elf" ;;
         esac
       done
     # M9.R.29.19 — also walk symlink targets that point into
@@ -289,6 +399,15 @@ while :; do
     # shell fork (breeze-icons alone has 24k+ symlinks).
     find "$staged_prefix" -type l -lname '/nix/store/*' -printf '%l\n' 2>/dev/null | \
       sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
+    # Split Nix development outputs declare their runtime library
+    # outputs through nix-support propagation manifests. Those paths
+    # may not appear in an ELF RPATH when pkg-config points at the dev
+    # output, but they are still part of the runtime closure.
+    for propagated in "$staged_prefix/nix-support/propagated-build-inputs"; do
+      [ -f "$propagated" ] || continue
+      tr '[:space:]' '\n' < "$propagated" | \
+        sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
+    done
   done < "$nix_prefixes_file" | sort -u > "$new_prefixes_file"
 
   # Filter out prefixes we already mirrored.
@@ -355,6 +474,48 @@ link_entry kwin kwin_wayland_wrapper
 link_entry mutter mutter
 link_entry sddm sddm
 link_entry sddm sddm-greeter-qt6
+
+SDDM_INSTALL_ROOT="$ISO_SRC_MIRROR_ROOT/sddm/.repro/output/install"
+if [ ! -f "$SDDM_INSTALL_ROOT/usr/lib/systemd/system/sddm.service" ] || \
+   [ ! -f "$SDDM_INSTALL_ROOT/usr/lib/sysusers.d/sddm.conf" ] || \
+   [ ! -f "$SDDM_INSTALL_ROOT/usr/lib/tmpfiles.d/sddm.conf" ] || \
+   [ ! -f "$SDDM_INSTALL_ROOT/usr/share/dbus-1/system.d/org.freedesktop.DisplayManager.conf" ] || \
+   [ ! -x "$SDDM_INSTALL_ROOT/usr/share/sddm/scripts/wayland-session" ] || \
+   [ ! -f "$SDDM_INSTALL_ROOT/etc/pam.d/sddm" ] || \
+   [ ! -f "$SDDM_INSTALL_ROOT/etc/pam.d/sddm-autologin" ]; then
+  echo "[stage-de-rootfs] required source SDDM runtime files missing" >&2
+  exit 1
+fi
+mkdir -p "$STAGE_DIR/usr/lib/systemd/system" \
+  "$STAGE_DIR/usr/lib/sysusers.d" \
+  "$STAGE_DIR/usr/lib/tmpfiles.d" \
+  "$STAGE_DIR/usr/share/dbus-1/system.d" \
+  "$STAGE_DIR/usr/share/sddm" \
+  "$STAGE_DIR/etc/pam.d"
+cp "$SDDM_INSTALL_ROOT/usr/lib/systemd/system/sddm.service" \
+  "$STAGE_DIR/usr/lib/systemd/system/sddm.service"
+cp "$SDDM_INSTALL_ROOT/usr/lib/sysusers.d/sddm.conf" \
+  "$STAGE_DIR/usr/lib/sysusers.d/sddm.conf"
+cp "$SDDM_INSTALL_ROOT/usr/lib/tmpfiles.d/sddm.conf" \
+  "$STAGE_DIR/usr/lib/tmpfiles.d/sddm.conf"
+cp "$SDDM_INSTALL_ROOT/usr/share/dbus-1/system.d/org.freedesktop.DisplayManager.conf" \
+  "$STAGE_DIR/usr/share/dbus-1/system.d/org.freedesktop.DisplayManager.conf"
+cp -a "$SDDM_INSTALL_ROOT/usr/share/sddm/scripts" \
+  "$STAGE_DIR/usr/share/sddm/scripts"
+cp "$SDDM_INSTALL_ROOT/etc/pam.d/sddm" "$STAGE_DIR/etc/pam.d/sddm"
+cp "$SDDM_INSTALL_ROOT/etc/pam.d/sddm-autologin" \
+  "$STAGE_DIR/etc/pam.d/sddm-autologin"
+cp "$SDDM_INSTALL_ROOT/etc/pam.d/sddm-greeter" \
+  "$STAGE_DIR/etc/pam.d/sddm-greeter"
+mkdir -p "$STAGE_DIR/etc/systemd/system/sddm.service.d"
+cat > "$STAGE_DIR/etc/systemd/system/sddm.service.d/reproos.conf" <<'EOF'
+[Unit]
+After=seatd.service
+StartLimitIntervalSec=0
+
+[Service]
+RestartSec=1s
+EOF
 link_entry plasma-workspace plasmashell
 link_entry plasma-workspace startplasma-wayland
 link_entry plasma-workspace startplasma-x11
@@ -368,25 +529,20 @@ link_entry gdm gdm
 # install-mirror into the squashfs at the absolute path the build host
 # uses (e.g. /opt/repro/reprobuild/recipes/packages/source/systemd/
 # .repro/output/install/usr/bin/systemctl).  What's missing is the
-# /usr/{bin,sbin}/<name> shadow link so PID 1 / login shell / agetty
-# find these binaries via PATH; without it the Debian apt entries in
-# build-base-rootfs.sh's PKG_LIST shadow the from-source equivalents
-# for ever.
+# /usr/{bin,sbin}/<name> shadow link so PID 1, login shells, and agetty
+# find these binaries through the standard FHS PATH.
 #
 # This loop walks every recipe in BASE_USERSPACE_RECIPES and emits an
 # absolute /usr/bin or /usr/sbin symlink for every regular file under
 # the install-mirror's bin/ + sbin/ subtrees (matching the link_entry
-# helper above's pattern).  M9.R.33.4..12 then drop the corresponding
-# apt entries from build-base-rootfs.sh's PKG_LIST one commit at a
-# time, verified by rebuilding the base-rootfs + confirming the from-
-# source binary is the one resolved at PATH lookup time on the staged
-# ISO.
+# helper above's pattern).
 #
-# The list mirrors the 9 FS:done entries documented in the M9.R.32.4
-# audit annotations of build-base-rootfs.sh PKG_LIST (systemd,
-# util-linux, kmod, dbus, sudo, e2fsprogs, btrfs-progs, shadow-utils,
-# iana-tzdata).  iana-tzdata ships /usr/share/zoneinfo + a small
-# /usr/bin tzdata helper; the rest ship pure executables.
+# The list is the boot and installer userspace required at conventional FHS
+# paths. Every entry must have a populated source install mirror.
+# iproute2 supplies network utilities; iana-tzdata supplies /usr/share/zoneinfo.
+# popt, libgpg-error, libgcrypt, and json-c are library-only; the remaining
+# recipes expose binaries and their runtime libraries from source install
+# mirrors.
 
 BASE_USERSPACE_RECIPES=(
   systemd
@@ -398,6 +554,40 @@ BASE_USERSPACE_RECIPES=(
   btrfs-progs
   shadow-utils
   iana-tzdata
+  parted
+  dosfstools
+  lvm2
+  popt
+  gdisk
+  libgpg-error
+  libgcrypt
+  json-c
+  cryptsetup
+  less
+  procps
+  rsync
+  strace
+  iputils
+  nano
+  iproute2
+  xkeyboard-config
+  libxkbfile
+  xkbcomp
+  adwaita-icon-theme
+  dejavu-fonts
+  xorg-server
+  xz
+  tar
+  bash
+  gawk
+  perl
+  python3
+  glibc
+  coreutils
+  grub
+  kernel
+  musl
+  busybox
 )
 
 link_base_recipe_binaries() {
@@ -406,8 +596,8 @@ link_base_recipe_binaries() {
   local install_usr="$install_root/usr"
   if [ ! -d "$install_usr" ] && [ ! -d "$install_root/bin" ] && \
      [ ! -d "$install_root/sbin" ]; then
-    echo "[stage-de-rootfs] base-userspace mirror missing: $recipe (recipe not built; skipped)" >&2
-    return 0
+    echo "[stage-de-rootfs] required source mirror missing: $recipe" >&2
+    return 1
   fi
   local sub
   local linked=0
@@ -450,6 +640,324 @@ link_base_recipe_binaries() {
       done
     done
   done
+  # Upstream installs the whole suite under SBINDIR, while Debian exposes
+  # the unprivileged socket-inspection command as /usr/bin/ss.
+  if [ "$recipe" = "iproute2" ]; then
+    local ss_src="$install_usr/sbin/ss"
+    if [ ! -x "$ss_src" ]; then
+      echo "[stage-de-rootfs] required iproute2 ss binary missing" >&2
+      return 1
+    fi
+    local ss_link_target="${ss_src#$STAGE_DIR}"
+    mkdir -p "$STAGE_DIR/usr/bin"
+    ln -sf "$ss_link_target" "$STAGE_DIR/usr/bin/ss"
+  fi
+  if [ "$recipe" = "xkbcomp" ]; then
+    local xkbcomp_src="$install_usr/bin/xkbcomp"
+    if [ ! -x "$xkbcomp_src" ]; then
+      echo "[stage-de-rootfs] required source xkbcomp binary missing" >&2
+      return 1
+    fi
+  fi
+  # xkeyboard-config is data-only. Replace Debian's XKB tree with the
+  # source mirror consumed by libxkbcommon, Xwayland, and compositors.
+  if [ "$recipe" = "xkeyboard-config" ]; then
+    local xkb_src="$install_usr/share/X11/xkb"
+    if [ ! -d "$xkb_src" ]; then
+      echo "[stage-de-rootfs] required xkeyboard-config data missing" >&2
+      return 1
+    fi
+    local xkb_link_target="${xkb_src#$STAGE_DIR}"
+    mkdir -p "$STAGE_DIR/usr/share/X11"
+    rm -rf "$STAGE_DIR/usr/share/X11/xkb"
+    ln -sf "$xkb_link_target" "$STAGE_DIR/usr/share/X11/xkb"
+  fi
+  # Adwaita is data-only. Expose the source-built icon tree at GTK's
+  # standard fallback-theme path instead of leaving it under the mirror.
+  if [ "$recipe" = "adwaita-icon-theme" ]; then
+    local adwaita_src="$install_usr/share/icons/Adwaita"
+    if [ ! -f "$adwaita_src/index.theme" ]; then
+      echo "[stage-de-rootfs] required Adwaita icon data missing" >&2
+      return 1
+    fi
+    local adwaita_link_target="${adwaita_src#$STAGE_DIR}"
+    mkdir -p "$STAGE_DIR/usr/share/icons"
+    rm -rf "$STAGE_DIR/usr/share/icons/Adwaita"
+    ln -sf "$adwaita_link_target" "$STAGE_DIR/usr/share/icons/Adwaita"
+  fi
+  # DejaVu is data-only. Expose the FontForge-generated TTFs at the
+  # standard fontconfig search path.
+  if [ "$recipe" = "dejavu-fonts" ]; then
+    local dejavu_src="$install_usr/share/fonts/truetype/dejavu"
+    if [ ! -f "$dejavu_src/DejaVuSans.ttf" ]; then
+      echo "[stage-de-rootfs] required source DejaVu fonts missing" >&2
+      return 1
+    fi
+    local dejavu_link_target="${dejavu_src#$STAGE_DIR}"
+    mkdir -p "$STAGE_DIR/usr/share/fonts/truetype"
+    rm -rf "$STAGE_DIR/usr/share/fonts/truetype/dejavu"
+    ln -sf "$dejavu_link_target" \
+      "$STAGE_DIR/usr/share/fonts/truetype/dejavu"
+  fi
+  # Xorg loads video/input modules through its compiled FHS module path rather
+  # than through the dynamic linker. Point that path at the source install
+  # mirror so the built-in modesetting driver is available to SDDM.
+  if [ "$recipe" = "xorg-server" ]; then
+    local xorg_modules="$install_usr/lib64/xorg/modules"
+    if [ ! -f "$xorg_modules/drivers/modesetting_drv.so" ]; then
+      echo "[stage-de-rootfs] required source Xorg modesetting module missing" >&2
+      return 1
+    fi
+    local xorg_modules_target="${xorg_modules#$STAGE_DIR}"
+    mkdir -p "$STAGE_DIR/usr/lib64/xorg"
+    rm -rf "$STAGE_DIR/usr/lib64/xorg/modules"
+    ln -sf "$xorg_modules_target" "$STAGE_DIR/usr/lib64/xorg/modules"
+  fi
+  if [ "$recipe" = "xz" ]; then
+    if [ ! -x "$install_usr/bin/xz" ]; then
+      echo "[stage-de-rootfs] required source xz binary missing" >&2
+      return 1
+    fi
+    if [ ! -e "$install_usr/lib/liblzma.so.5" ]; then
+      echo "[stage-de-rootfs] required source liblzma SONAME missing" >&2
+      return 1
+    fi
+    local xz_source_lib="${install_usr/lib#$STAGE_DIR}"
+    local xz_rpath
+    xz_rpath="$($patchelf_bin --print-rpath "$install_usr/bin/xz" 2>/dev/null || true)"
+    case ":$xz_rpath:" in
+      *":$xz_source_lib:"*) ;;
+      *)
+        local xz_new_rpath="$xz_source_lib"
+        [ -z "$xz_rpath" ] || xz_new_rpath="$xz_new_rpath:$xz_rpath"
+        if ! $patchelf_bin --set-rpath "$xz_new_rpath" "$install_usr/bin/xz"; then
+          echo "[stage-de-rootfs] failed to set source liblzma RPATH" >&2
+          return 1
+        fi
+        ;;
+    esac
+  fi
+  if [ "$recipe" = "tar" ] && [ ! -x "$install_usr/bin/tar" ]; then
+    echo "[stage-de-rootfs] required source tar binary missing" >&2
+    return 1
+  fi
+  if [ "$recipe" = "bash" ]; then
+    if [ ! -x "$install_usr/bin/bash" ]; then
+      echo "[stage-de-rootfs] required source bash binary missing" >&2
+      return 1
+    fi
+    ln -sfn bash "$STAGE_DIR/usr/bin/sh"
+    ln -sfn bash "$STAGE_DIR/usr/bin/rbash"
+  fi
+  if [ "$recipe" = "gawk" ] && [ ! -x "$install_usr/bin/gawk" ]; then
+    echo "[stage-de-rootfs] required source gawk binary missing" >&2
+    return 1
+  fi
+  if [ "$recipe" = "perl" ]; then
+    local perl_core
+    perl_core="$(find "$install_usr/lib/perl5" -path '*/CORE/libperl.so' \
+      -type f -print -quit 2>/dev/null)"
+    if [ ! -x "$install_usr/bin/perl" ] || [ -z "$perl_core" ]; then
+      echo "[stage-de-rootfs] required source Perl runtime missing" >&2
+      return 1
+    fi
+    mkdir -p "$STAGE_DIR/usr/lib"
+    rm -rf "$STAGE_DIR/usr/lib/perl5"
+    ln -s "${install_usr#"$STAGE_DIR"}/lib/perl5" \
+      "$STAGE_DIR/usr/lib/perl5"
+  fi
+  if [ "$recipe" = "python3" ]; then
+    local python_stdlib="$install_usr/lib/python3.13"
+    if [ ! -x "$install_usr/bin/python3" ] || \
+       [ ! -f "$install_usr/lib/libpython3.13.so.1.0" ] || \
+       [ ! -f "$python_stdlib/os.py" ]; then
+      echo "[stage-de-rootfs] required source Python runtime missing" >&2
+      return 1
+    fi
+    mkdir -p "$STAGE_DIR/usr/lib"
+    rm -rf "$STAGE_DIR/usr/lib/python3.13"
+    ln -s "${python_stdlib#"$STAGE_DIR"}" "$STAGE_DIR/usr/lib/python3.13"
+    ln -sfn python3 "$STAGE_DIR/usr/bin/python"
+  fi
+  if [ "$recipe" = "glibc" ]; then
+    local glibc_ldconfig=""
+    local candidate
+    for candidate in "$install_usr/sbin/ldconfig" \
+                     "$install_root/sbin/ldconfig"; do
+      if [ -x "$candidate" ]; then
+        glibc_ldconfig="$candidate"
+        break
+      fi
+    done
+    if [ -z "$glibc_ldconfig" ]; then
+      echo "[stage-de-rootfs] required source glibc ldconfig missing" >&2
+      return 1
+    fi
+    if [ -z "$(find "$install_root" -type f -name 'libc.so.6' -print -quit)" ] || \
+       [ -z "$(find "$install_root" -type f -name 'ld-linux-*.so.*' -print -quit)" ]; then
+      echo "[stage-de-rootfs] required source glibc runtime missing" >&2
+      return 1
+    fi
+  fi
+  if [ "$recipe" = "coreutils" ]; then
+    local coreutils_bin
+    for coreutils_bin in ls cp mv rm cat; do
+      if [ ! -x "$install_usr/bin/$coreutils_bin" ]; then
+        echo "[stage-de-rootfs] required source coreutils binary missing: $coreutils_bin" >&2
+        return 1
+      fi
+    done
+  fi
+  if [ "$recipe" = "grub" ]; then
+    local grub_modules="$install_usr/lib/grub/x86_64-efi"
+    if [ ! -x "$install_usr/sbin/grub-install" ] || \
+       [ ! -x "$install_usr/sbin/grub-mkconfig" ] || \
+       [ ! -f "$grub_modules/kernel.img" ]; then
+      echo "[stage-de-rootfs] required source GRUB UEFI surface missing" >&2
+      return 1
+    fi
+
+    mkdir -p "$STAGE_DIR/usr/lib" "$STAGE_DIR/usr/share" "$STAGE_DIR/etc"
+    rm -rf "$STAGE_DIR/usr/lib/grub"
+    ln -s "${install_usr#$STAGE_DIR}/lib/grub" "$STAGE_DIR/usr/lib/grub"
+    if [ -d "$install_usr/share/grub" ]; then
+      rm -rf "$STAGE_DIR/usr/share/grub"
+      ln -s "${install_usr#$STAGE_DIR}/share/grub" "$STAGE_DIR/usr/share/grub"
+    fi
+    if [ -d "$install_usr/etc/grub.d" ]; then
+      rm -rf "$STAGE_DIR/etc/grub.d"
+      ln -s "${install_usr#$STAGE_DIR}/etc/grub.d" "$STAGE_DIR/etc/grub.d"
+    fi
+  fi
+  if [ "$recipe" = "kernel" ]; then
+    local kernel_payload="$install_usr/lib/reproos-kernel"
+    local kernel_release
+    kernel_release="$(cat "$kernel_payload/kernel.release")"
+    local kernel_modules="$install_usr/lib/modules/$kernel_release"
+    if [ ! -s "$kernel_payload/vmlinuz" ] || [ ! -d "$kernel_modules" ]; then
+      echo "[stage-de-rootfs] required source kernel payload missing" >&2
+      return 1
+    fi
+    if [ -e "$install_usr/lib/modules/modules" ] || \
+       [ -L "$install_usr/lib/modules/modules" ]; then
+      echo "[stage-de-rootfs] source kernel module tree is contaminated" >&2
+      return 1
+    fi
+    mkdir -p "$STAGE_DIR/usr/lib"
+    rm -rf "$STAGE_DIR/usr/lib/modules"
+    ln -s "${install_usr#$STAGE_DIR}/lib/modules" "$STAGE_DIR/usr/lib/modules"
+    # On merged-/usr roots, /lib already resolves to /usr/lib. Creating a
+    # second /lib/modules link would follow /usr/lib/modules into the source
+    # module directory and try to create a nested "modules" entry there.
+    if [ -L "$STAGE_DIR/lib" ]; then
+      case "$(readlink "$STAGE_DIR/lib")" in
+        usr/lib|/usr/lib) ;;
+        *)
+          echo "[stage-de-rootfs] unsupported /lib symlink target" >&2
+          return 1
+          ;;
+      esac
+    else
+      mkdir -p "$STAGE_DIR/lib"
+      rm -rf "$STAGE_DIR/lib/modules"
+      ln -s /usr/lib/modules "$STAGE_DIR/lib/modules"
+    fi
+  fi
+  if [ "$recipe" = "dbus" ]; then
+    local dbus_system_units="$install_usr/lib/systemd/system"
+    local dbus_user_units="$install_usr/lib/systemd/user"
+    local dbus_sysusers="$install_usr/lib/sysusers.d/dbus.conf"
+    if [ ! -f "$dbus_system_units/dbus.service" ] || \
+       [ ! -f "$dbus_system_units/dbus.socket" ] || \
+       [ ! -f "$dbus_user_units/dbus.service" ] || \
+       [ ! -f "$dbus_user_units/dbus.socket" ] || [ ! -f "$dbus_sysusers" ]; then
+      echo "[stage-de-rootfs] required source D-Bus systemd units missing" >&2
+      return 1
+    fi
+
+    mkdir -p "$STAGE_DIR/usr/lib/systemd/system/multi-user.target.wants" \
+      "$STAGE_DIR/usr/lib/systemd/system/sockets.target.wants" \
+      "$STAGE_DIR/usr/lib/systemd/user/sockets.target.wants" \
+      "$STAGE_DIR/usr/lib/sysusers.d" "$STAGE_DIR/var/lib/dbus"
+    ln -sfn "${dbus_system_units#$STAGE_DIR}/dbus.service" \
+      "$STAGE_DIR/usr/lib/systemd/system/dbus.service"
+    ln -sfn "${dbus_system_units#$STAGE_DIR}/dbus.socket" \
+      "$STAGE_DIR/usr/lib/systemd/system/dbus.socket"
+    ln -sfn "${dbus_user_units#$STAGE_DIR}/dbus.service" \
+      "$STAGE_DIR/usr/lib/systemd/user/dbus.service"
+    ln -sfn "${dbus_user_units#$STAGE_DIR}/dbus.socket" \
+      "$STAGE_DIR/usr/lib/systemd/user/dbus.socket"
+    ln -sfn ../dbus.service \
+      "$STAGE_DIR/usr/lib/systemd/system/multi-user.target.wants/dbus.service"
+    ln -sfn ../dbus.socket \
+      "$STAGE_DIR/usr/lib/systemd/system/sockets.target.wants/dbus.socket"
+    ln -sfn ../dbus.socket \
+      "$STAGE_DIR/usr/lib/systemd/user/sockets.target.wants/dbus.socket"
+    ln -sfn "${dbus_sysusers#$STAGE_DIR}" \
+      "$STAGE_DIR/usr/lib/sysusers.d/dbus.conf"
+    if [ ! -e "$STAGE_DIR/etc/machine-id" ]; then
+      : > "$STAGE_DIR/etc/machine-id"
+    fi
+    ln -sfn /etc/machine-id "$STAGE_DIR/var/lib/dbus/machine-id"
+  fi
+  if [ "$recipe" = "systemd" ]; then
+    local systemd_lib="$install_usr/lib/systemd"
+    local udev_lib="$install_usr/lib/udev"
+    local pam_systemd_src=""
+    for pam_systemd_src in "$install_usr/lib64/security/pam_systemd.so" \
+      "$install_usr/lib/security/pam_systemd.so"; do
+      [ -f "$pam_systemd_src" ] && break
+    done
+    if [ ! -x "$install_usr/bin/udevadm" ] || \
+       [ ! -e "$systemd_lib/systemd-udevd" ] || [ ! -d "$udev_lib/rules.d" ] || \
+       [ ! -f "$pam_systemd_src" ]; then
+      echo "[stage-de-rootfs] required source systemd udev surface missing" >&2
+      return 1
+    fi
+
+    mkdir -p "$STAGE_DIR/usr/lib/systemd" "$STAGE_DIR/usr/lib/systemd/system" \
+      "$STAGE_DIR/usr/lib/systemd/system/sysinit.target.wants" \
+      "$STAGE_DIR/usr/lib/systemd/system/sockets.target.wants" "$STAGE_DIR/usr/lib"
+    cp -a "$systemd_lib"/. "$STAGE_DIR/usr/lib/systemd/"
+    ln -sfn "${systemd_lib#$STAGE_DIR}/systemd-udevd" \
+      "$STAGE_DIR/usr/lib/systemd/systemd-udevd"
+    rm -rf "$STAGE_DIR/usr/lib/udev"
+    ln -s "${udev_lib#$STAGE_DIR}" "$STAGE_DIR/usr/lib/udev"
+
+    local udev_unit
+    for udev_unit in systemd-udevd.service systemd-udev-trigger.service \
+      systemd-udev-settle.service systemd-udevd-control.socket \
+      systemd-udevd-kernel.socket; do
+      if [ -e "$systemd_lib/system/$udev_unit" ]; then
+        ln -sfn "${systemd_lib#$STAGE_DIR}/system/$udev_unit" \
+          "$STAGE_DIR/usr/lib/systemd/system/$udev_unit"
+      fi
+    done
+    ln -sfn ../systemd-udevd.service \
+      "$STAGE_DIR/usr/lib/systemd/system/sysinit.target.wants/systemd-udevd.service"
+    ln -sfn ../systemd-udev-trigger.service \
+      "$STAGE_DIR/usr/lib/systemd/system/sysinit.target.wants/systemd-udev-trigger.service"
+    ln -sfn ../systemd-udevd-control.socket \
+      "$STAGE_DIR/usr/lib/systemd/system/sockets.target.wants/systemd-udevd-control.socket"
+    ln -sfn ../systemd-udevd-kernel.socket \
+      "$STAGE_DIR/usr/lib/systemd/system/sockets.target.wants/systemd-udevd-kernel.socket"
+
+    local pam_systemd_target="${pam_systemd_src#$STAGE_DIR}"
+    mkdir -p "$STAGE_DIR/usr/lib64/security" \
+      "$STAGE_DIR/usr/lib/x86_64-linux-gnu/security"
+    ln -sfn "$pam_systemd_target" "$STAGE_DIR/usr/lib64/security/pam_systemd.so"
+    ln -sfn "$pam_systemd_target" \
+      "$STAGE_DIR/usr/lib/x86_64-linux-gnu/security/pam_systemd.so"
+
+    local pam_policy
+    for pam_policy in common-session common-session-noninteractive; do
+      local pam_policy_path="$STAGE_DIR/etc/pam.d/$pam_policy"
+      if ! grep -q '^[[:space:]]*session[[:space:]].*pam_systemd\.so' \
+          "$pam_policy_path"; then
+        printf '%s\n' 'session optional pam_systemd.so' >> "$pam_policy_path"
+      fi
+    done
+  fi
   # iana-tzdata: also stage /usr/share/zoneinfo from the recipe's
   # install-mirror.  Other base-userspace recipes ship usr/share/
   # files (man pages, locale, ...) that the apt-installed equivalents
@@ -475,6 +983,17 @@ echo "[stage-de-rootfs] staging base-userspace shadow links"
 for base_recipe in "${BASE_USERSPACE_RECIPES[@]}"; do
   link_base_recipe_binaries "$base_recipe"
 done
+
+# Install the source-built Mozilla CA bundle at the conventional system paths.
+CA_CERTIFICATES_ROOT="$ISO_SRC_MIRROR_ROOT/ca-certificates/.repro/output/install"
+CA_CERTIFICATES_BUNDLE="$CA_CERTIFICATES_ROOT/etc/ssl/certs/ca-certificates.crt"
+if [ ! -f "$CA_CERTIFICATES_BUNDLE" ]; then
+  echo "[stage-de-rootfs] required source CA bundle missing: $CA_CERTIFICATES_BUNDLE" >&2
+  exit 1
+fi
+mkdir -p "$STAGE_DIR/etc/ssl/certs" "$STAGE_DIR/etc/pki/tls"
+cp "$CA_CERTIFICATES_BUNDLE" "$STAGE_DIR/etc/ssl/certs/ca-certificates.crt"
+ln -sfn ../../ssl/certs/ca-certificates.crt "$STAGE_DIR/etc/pki/tls/cert.pem"
 
 # Stage /etc/wayland-sessions/ session files for SDDM/GDM to enumerate.
 cat > "$STAGE_DIR/usr/share/wayland-sessions/sway.desktop" <<EOF
@@ -530,38 +1049,32 @@ fi
 
 # M9.R.36.1 — build a TARGETED LD_LIBRARY_PATH for the installer's
 # QProcess children (libclingo / libsqlite3 dlopen via Nim
-# {.dynlib: const-string.}).  Skip glibc dirs to avoid shadowing the
-# Debian-installed libc.so.6 with a foreign nix-store glibc (which
-# would break every Debian binary in the chain).
-_repro_nix_dirs=""
-# M9.R.37.2 — use a subshell for the glob-existence test so the
-# script's positional parameters ($@) are not clobbered.  This GUI
-# launcher doesn't pass $@ to the installer (it execs sway, then sway
-# execs the installer via SWAY_INIT), but the hygiene fix matches the
-# sister-launcher fix in the ``.sh`` variant and prevents future
-# regressions.
-#
-# M9.R.46 — store dirs live at /repro/store (was /nix/store before the
-# stage-time prefix-swap relocate).  The same-hash relocation guarantees
-# every binary's RPATH points here.
-for d in /repro/store/*/lib; do
+# {.dynlib: const-string.}). The ELF normalizer also records these paths
+# in the consuming binaries' RPATHs, while this environment keeps the
+# kiosk launcher's child-process behavior explicit.
+_repro_source_dirs=""
+if [ ! -e /opt/repro/reprobuild/recipes/packages/source/clingo/.repro/output/install/usr/lib/libclingo.so ] || \
+   [ ! -e /opt/repro/reprobuild/recipes/packages/source/sqlite/.repro/output/install/usr/lib/libsqlite3.so ]; then
+  echo "required source clingo/sqlite runtime libraries missing" >&2
+  exit 127
+fi
+for d in \
+  /opt/repro/reprobuild/recipes/packages/source/clingo/.repro/output/install/usr/lib \
+  /opt/repro/reprobuild/recipes/packages/source/sqlite/.repro/output/install/usr/lib; do
   [ -d "$d" ] || continue
-  case "$d" in
-    /repro/store/*-glibc-*/lib) continue ;;
-  esac
   if ! ( set -- "$d"/*.so*; [ -e "$1" ] ); then
     continue
   fi
-  if [ -z "$_repro_nix_dirs" ]; then
-    _repro_nix_dirs="$d"
+  if [ -z "$_repro_source_dirs" ]; then
+    _repro_source_dirs="$d"
   else
-    _repro_nix_dirs="$_repro_nix_dirs:$d"
+    _repro_source_dirs="$_repro_source_dirs:$d"
   fi
 done
 if [ -n "${LD_LIBRARY_PATH:-}" ]; then
-  LD_LIBRARY_PATH="$_repro_nix_dirs:$LD_LIBRARY_PATH"
+  LD_LIBRARY_PATH="$_repro_source_dirs:$LD_LIBRARY_PATH"
 else
-  LD_LIBRARY_PATH="$_repro_nix_dirs"
+  LD_LIBRARY_PATH="$_repro_source_dirs"
 fi
 export LD_LIBRARY_PATH
 
@@ -773,10 +1286,15 @@ cat > "$STAGE_DIR/usr/bin/reproos-installer-launcher.sh" <<'EOF'
 #                              ``QT_QPA_PLATFORM=offscreen`` env var
 #                              the installer respects resolves the
 #                              ``libqoffscreen.so`` plugin.
-_repro_nix_libs=""
+_repro_source_libs=""
 _repro_qt_plugins=""
 _repro_qml_imports=""
 _repro_qpa_plugins=""
+if [ ! -e /opt/repro/reprobuild/recipes/packages/source/clingo/.repro/output/install/usr/lib/libclingo.so ] || \
+   [ ! -e /opt/repro/reprobuild/recipes/packages/source/sqlite/.repro/output/install/usr/lib/libsqlite3.so ]; then
+  echo "required source clingo/sqlite runtime libraries missing" >&2
+  exit 127
+fi
 # M9.R.37.2 — DO NOT use ``set -- "$d"/*.so*`` to test for the glob
 # existence: ``set --`` overwrites the script's positional parameters
 # ($@), which is what we ultimately pass to ``reproos-installer``.
@@ -804,38 +1322,11 @@ _repro_qpa_plugins=""
 # This dramatically narrows LD_LIBRARY_PATH from ~600 entries to
 # a handful, slashing each dlopen()'s syscall cost from ~600 ENOENT
 # probes to ~5.
-# M9.R.46 — store dirs live at /repro/store (was /nix/store before the
-# stage-time prefix-swap relocate).
-for d in /repro/store/*/lib; do
+# Source clingo and sqlite provide the two bare-name dlopen targets.
+for d in \
+  /opt/repro/reprobuild/recipes/packages/source/clingo/.repro/output/install/usr/lib \
+  /opt/repro/reprobuild/recipes/packages/source/sqlite/.repro/output/install/usr/lib; do
   [ -d "$d" ] || continue
-  # Skip glibc dirs — Debian system glibc must remain canonical so
-  # every Debian binary in the live ISO chain keeps working.
-  case "$d" in
-    /repro/store/*-glibc-*/lib) continue ;;
-  esac
-  # M9.R.38.3 — skip ANY content-addressed Qt6 prefix.  The installer is
-  # compiled + RPATH'd against ``/opt/repro/.../qt6-base/.repro/
-  # output/install/usr/lib/libQt6Core.so.6.8.1``, but the de-rootfs
-  # mirror also ships an UNRELATED ``zp6r9bxds...-qtbase-6.10.1/lib/``
-  # tree pulled in as a transitive of layer-shell-qt-6.5.3 (which is
-  # in the DE closure).  Without this skip the launcher's qt-6/plugins
-  # / qt-6/qml walk below picks up the 6.10.1 plugin tree as well, and
-  # the Qt 6.8.1 binary loading a 6.10.1 ``libqoffscreen.so`` /
-  # ``QtQuick.Controls`` plugin trips C++ ABI mismatch -> heap
-  # corruption -> ``munmap_chunk(): invalid pointer`` on init, SIGABRT
-  # before Phase 1.  The qt6-base + qt6-declarative + qt6-quickcontrols2
-  # the installer needs live at /opt/repro/... paths the RPATH already
-  # covers; no /repro/store Qt6 mirror is required.
-  case "$d" in
-    /repro/store/*-qtbase-*/lib | \
-    /repro/store/*-qtdeclarative-*/lib | \
-    /repro/store/*-qt5compat-*/lib | \
-    /repro/store/*-layer-shell-qt-*/lib | \
-    /repro/store/*-kquickcharts-*/lib | \
-    /repro/store/*-qtquickcontrols*/lib | \
-    /repro/store/*-qttools-*/lib | \
-    /repro/store/*-qtwayland-*/lib) continue ;;
-  esac
   # M9.R.37.5: include ONLY dirs that ship a library the ``repro``
   # binary's Nim {.dynlib: "..."} pragma resolves by bare leaf name:
   #   * libclingo.so      (libs/repro_solver/.../clingo_bindings.nim)
@@ -844,33 +1335,10 @@ for d in /repro/store/*/lib; do
   # variants on Windows only; libsqlite3.so covers POSIX).
   if [ -e "$d/libclingo.so" ] || [ -e "$d/libsqlite3.so" ] || \
      [ -e "$d/libsqlite3.so.0" ]; then
-    if [ -z "$_repro_nix_libs" ]; then
-      _repro_nix_libs="$d"
+    if [ -z "$_repro_source_libs" ]; then
+      _repro_source_libs="$d"
     else
-      _repro_nix_libs="$_repro_nix_libs:$d"
-    fi
-  fi
-  # Qt6 plugin dirs ship under ``<prefix>/lib/qt-6/plugins/``.
-  if [ -d "$d/qt-6/plugins" ]; then
-    if [ -z "$_repro_qt_plugins" ]; then
-      _repro_qt_plugins="$d/qt-6/plugins"
-    else
-      _repro_qt_plugins="$_repro_qt_plugins:$d/qt-6/plugins"
-    fi
-    if [ -d "$d/qt-6/plugins/platforms" ]; then
-      if [ -z "$_repro_qpa_plugins" ]; then
-        _repro_qpa_plugins="$d/qt-6/plugins/platforms"
-      else
-        _repro_qpa_plugins="$_repro_qpa_plugins:$d/qt-6/plugins/platforms"
-      fi
-    fi
-  fi
-  # Qt6 QML modules ship under ``<prefix>/lib/qt-6/qml/``.
-  if [ -d "$d/qt-6/qml" ]; then
-    if [ -z "$_repro_qml_imports" ]; then
-      _repro_qml_imports="$d/qt-6/qml"
-    else
-      _repro_qml_imports="$_repro_qml_imports:$d/qt-6/qml"
+      _repro_source_libs="$_repro_source_libs:$d"
     fi
   fi
 done
@@ -905,47 +1373,26 @@ done
 # ``munmap_chunk(): invalid pointer`` on Qt static-init heap
 # allocations.
 #
-# Discovery: scan the installer binary's first 4096 bytes for the
-# PT_INTERP nix-store glibc path.  ELF's PT_INTERP segment is a
-# nul-terminated string under the PHDR table, normally near the
-# beginning.  ``grep -aoE`` on a fixed-size head is the simplest
-# portable extraction.  Fallback to the most recent nix-store glibc
-# if extraction fails (shouldn't, given the binary is RPATH-laced
-# with /nix/store paths).
-_repro_installer_bin=/usr/bin/reproos-installer
-_repro_glibc_dir=""
-if [ -x "$_repro_installer_bin" ]; then
-  # M9.R.46 — the installer's PT_INTERP is patched to /repro/store at
-  # stage time by relocate-nix-to-repro.sh.  Match the new prefix.
-  _repro_glibc_interp="$(head -c 4096 "$_repro_installer_bin" 2>/dev/null \
-    | tr -c '[:print:]' '\n' \
-    | grep -oE '/repro/store/[a-z0-9]+-glibc-[^/]+/lib/ld-linux-x86-64\.so\.2' \
-    | head -1)"
-  if [ -n "$_repro_glibc_interp" ]; then
-    _repro_glibc_dir="${_repro_glibc_interp%/ld-linux-x86-64.so.2}"
-  fi
+# The stage-time normalizer gives the installer this same source-built
+# glibc as PT_INTERP. Invoking it directly here preserves the diagnostic
+# launcher's explicit --library-path behavior without a bootstrap store.
+_repro_glibc_dir="@SOURCE_GLIBC_RUNTIME_DIR@"
+if [ ! -x "$_repro_glibc_dir/ld-linux-x86-64.so.2" ]; then
+  echo "source glibc loader missing: $_repro_glibc_dir" >&2
+  exit 127
 fi
-if [ -z "$_repro_glibc_dir" ]; then
-  # Fallback: latest content-addressed glibc on disk.
-  _repro_glibc_dir="$(ls -d /repro/store/*-glibc-*/lib 2>/dev/null \
-    | grep -vE -- '-bin|-locales|-dev|-debug|-doc|-static|-loop|-i686' \
-    | head -1)"
-fi
-# Prepend the PT_INTERP glibc dir to LD_LIBRARY_PATH so the loader
-# resolves ALL glibc subsystems via the SAME nix glibc instance.
-if [ -n "$_repro_glibc_dir" ] && [ -d "$_repro_glibc_dir" ]; then
-  if [ -n "$_repro_nix_libs" ]; then
-    _repro_nix_libs="$_repro_glibc_dir:$_repro_nix_libs"
-  else
-    _repro_nix_libs="$_repro_glibc_dir"
-  fi
+# Keep every glibc subsystem on the same source-built runtime.
+if [ -n "$_repro_source_libs" ]; then
+  _repro_source_libs="$_repro_glibc_dir:$_repro_source_libs"
+else
+  _repro_source_libs="$_repro_glibc_dir"
 fi
 
 # Append caller-supplied paths last so any operator override wins.
 if [ -n "${LD_LIBRARY_PATH:-}" ]; then
-  _repro_ldpath="$_repro_nix_libs:$LD_LIBRARY_PATH"
+  _repro_ldpath="$_repro_source_libs:$LD_LIBRARY_PATH"
 else
-  _repro_ldpath="$_repro_nix_libs"
+  _repro_ldpath="$_repro_source_libs"
 fi
 
 # M9.R.37.1 / M9.R.39.1 — diagnostic mode.  When ``REPRO_INSTALLER_DIAG=1``
@@ -1172,6 +1619,8 @@ QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-}${QT_QPA_PLATFORM_P
     --library-path "$_repro_ldpath" \
     /usr/bin/reproos-installer "$@"
 EOF
+sed -i "s|@SOURCE_GLIBC_RUNTIME_DIR@|$SOURCE_GLIBC_RUNTIME_DIR|g" \
+  "$STAGE_DIR/usr/bin/reproos-installer-launcher.sh"
 chmod 0755 "$STAGE_DIR/usr/bin/reproos-installer-launcher.sh"
 
 # Profile hook to auto-launch the installer on root login (tty1 only).
@@ -1300,35 +1749,72 @@ chmod +x "$STAGE_DIR/usr/bin/repro"
 echo "[stage-de-rootfs] overlayed repro CLI (bytes=$(stat -c %s "$STAGE_DIR/usr/bin/repro"))"
 
 # ---------------------------------------------------------------------------
-# Phase 6b (M9.R.46): relocate /nix/store/<hash>-<pkg>/ -> /repro/store/
-# at the same hash, and rewrite every from-source ELF's RPATH + PT_INTERP
-# (+ every cross-prefix symlink + every #!/nix/store/ shebang) so the
-# live ISO + installed system carry NO /nix/store directory at all.
+# Phase 6b: replace bootstrap runtime paths with source recipe providers.
 #
-# This closes the M9.R.25 architectural debt: the spec said all
-# content-addressed paths live at /repro/store/<hash>-<name>/, but the
-# combination of nix-stubbed deps + M9.R.30's transitive RPATH walker
-# + M9.R.31.2's bootstrap propagation left ~1.3 GiB of /nix/store
-# referenced from-source on every ISO.  The relocate script does a
-# same-hash prefix swap (nix's hash IS a content hash) so the address
-# semantics survive intact while the directory layout matches the spec.
+# The bootstrap closure mirrored above is temporary evidence used to
+# translate legacy RPATH entries, including dlopen-only paths that do not
+# appear in DT_NEEDED. normalize-source-runtime.sh first verifies that every
+# direct ELF dependency has a staged source provider. It then rewrites
+# RPATHs and PT_INTERP to those providers and the source glibc.
 #
-# The script is HARD-FAIL: any remaining /nix/store reference in any
-# ELF RPATH/INTERP, symlink target, or filesystem subtree under
-# $STAGE_DIR/nix/ exits 75 and aborts the ISO build per the M9.R.46
-# no-fallback-to-/nix/store rule.
+# Only after that audit succeeds do we delete both bootstrap store trees.
+# The installed image therefore has no Nix-derived runtime fallback under
+# either /nix/store or /repro/store.
 # ---------------------------------------------------------------------------
 
-echo "[stage-de-rootfs] M9.R.46 relocate-nix-to-repro starting"
-bash "$SCRIPT_DIR_SELF/relocate-nix-to-repro.sh" "$STAGE_DIR"
-echo "[stage-de-rootfs] M9.R.46 relocate-nix-to-repro complete"
+# Final split-output audit over the staged store itself. A prefix can
+# enter through a later ELF/symlink closure iteration after the initial
+# host-side expansion, so walk every staged propagation manifest to a
+# fixed point before relocation.
+propagated_mirrored=0
+for propagation_iter in 1 2 3 4 5 6 7 8 9 10; do
+  added=0
+  while IFS= read -r prefix; do
+    [ -d "$prefix" ] || continue
+    dst="$STAGE_DIR$prefix"
+    [ -e "$dst" ] && continue
+    mkdir -p "$(dirname "$dst")"
+    cp -a "$prefix" "$dst"
+    added=$((added + 1))
+    propagated_mirrored=$((propagated_mirrored + 1))
+  done < <(
+    find "$STAGE_DIR/nix/store" -path '*/nix-support/propagated-build-inputs' \
+      -type f -exec cat {} + 2>/dev/null | tr '[:space:]' '\n' | \
+      sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p' | sort -u
+  )
+  [ "$added" -gt 0 ] || break
+  if [ "$propagation_iter" -eq 10 ]; then
+    echo "[stage-de-rootfs] staged propagated closure didn't converge" >&2
+    exit 75
+  fi
+done
+echo "[stage-de-rootfs] mirrored $propagated_mirrored propagated runtime prefixes"
+
+echo "[stage-de-rootfs] normalizing source-only runtime closure"
+bash "$SCRIPT_DIR_SELF/normalize-source-runtime.sh" \
+  "$STAGE_DIR" "$ISO_SRC_MIRROR_ROOT" "$SOURCE_GLIBC_LOADER" \
+  "$STAGE_DIR/usr/bin/reproos-installer" "$STAGE_DIR/usr/bin/repro"
+
+for bootstrap_store in "$STAGE_DIR/nix" "$STAGE_DIR/repro/store"; do
+  [ -e "$bootstrap_store" ] || continue
+  chmod -R u+w "$bootstrap_store" 2>/dev/null || true
+  rm -rf "$bootstrap_store"
+done
+
+if { [ -d "$STAGE_DIR/nix" ] && \
+     find "$STAGE_DIR/nix" -mindepth 1 -print -quit | grep -q .; } || \
+   { [ -d "$STAGE_DIR/repro/store" ] && \
+     find "$STAGE_DIR/repro/store" -mindepth 1 -print -quit | grep -q .; }; then
+  echo "[stage-de-rootfs] bootstrap runtime store residue remains" >&2
+  exit 75
+fi
+echo "[stage-de-rootfs] source-only runtime closure verified"
 
 # ---------------------------------------------------------------------------
 # Phase 7: rebuild ld.so.cache so dlopen(bare-name) calls inside DE
 # binaries find shared libs that aren't reachable via embedded RPATH.
-# We feed every nix-store-mirrored /lib dir + every from-source
-# install-mirror /lib + /lib64 into /etc/ld.so.conf.d/ and let
-# /sbin/ldconfig under chroot do the rest.
+# We feed every from-source install-mirror /lib + /lib64 into
+# /etc/ld.so.conf.d/ and let /sbin/ldconfig process the staged root.
 # ---------------------------------------------------------------------------
 
 mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
@@ -1348,59 +1834,10 @@ mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
   # libmutter-15.so.0 + the internal mutter-15/libmutter-*-15.so libs
   # all carry the right RPATH entry.  No more ld.so.conf fall-through
   # needed — pure embedded RPATH does the job.
-  # M9.R.46 — content-addressed store /lib dirs (formerly /nix/store/*/lib;
-  # the relocate-nix-to-repro.sh script in Phase 6b same-hash-prefix-swaps
-  # the whole tree to /repro/store).
-  for d in "$STAGE_DIR"/repro/store/*/lib; do
-    if [ -d "$d" ]; then
-      echo "${d#$STAGE_DIR}"
-    fi
-  done
   # Standard fallbacks for the slim Debian base.
   echo "/usr/lib"
   echo "/usr/lib64"
 } > "$STAGE_DIR/etc/ld.so.conf.d/zz-reproos-overlay.conf"
-
-# M9.R.37.4 — symlink every glibc's hard-coded ``etc/ld.so.cache`` path
-# to ``/etc/ld.so.cache`` so the from-source-built binaries' PT_INTERPs
-# find the cache the Debian system loader writes.  Without this, every
-# binary with PT_INTERP ``/repro/store/<hash>-glibc-X.Y/lib/ld-linux-x86-64
-# .so.2`` reads ``/repro/store/<hash>-glibc-X.Y/etc/ld.so.cache`` (the
-# /nix/store path is baked into ld-linux at compile time -- the M9.R.46
-# relocate script's patchelf --set-interpreter swap doesn't change THAT
-# string, because ld.so reads it from its own .rodata + concatenates the
-# unchanged hard-coded cache-relative suffix).  We DO still ship the
-# glibc layout under /repro/store/<hash>-glibc-X.Y/etc/ on the ISO (the
-# M9.R.46 relocate moved it from /nix/store to /repro/store at the
-# SAME hash), and ld.so reads its hard-coded cache path from compile
-# time -- the cache lookup path inside the glibc package's etc/ resolves
-# against the /repro/store/ runtime location because the relocate kept
-# the trailing subpath identical.  Conclusion: the symlink is what
-# matters; the leading prefix is /repro/store after M9.R.46.
-#
-# Concretely: ``mkfs.ext4`` failed at exec-time with ``libext2fs.so.2:
-# cannot open shared object file`` because its PT_INTERP pointed at the
-# ``xx7cm72...-glibc-2.40-66`` ld-linux which reads
-# ``<store>/xx7cm72.../etc/ld.so.cache`` (ENOENT), bypassing the
-# Debian system cache at ``/etc/ld.so.cache``.
-#
-# Fix: for each glibc dir on the stage, ``chmod u+w`` its ``etc/``
-# subdir then drop a relative symlink at ``etc/ld.so.cache ->
-# /etc/ld.so.cache``.  Now every loader -- from-source or Debian --
-# reads the SAME cache the system ldconfig wrote.
-for glibc_etc in "$STAGE_DIR"/repro/store/*-glibc-*/etc; do
-  [ -d "$glibc_etc" ] || continue
-  glibc_dir="$(dirname "$glibc_etc")"
-  chmod u+w "$glibc_etc" 2>/dev/null || true
-  if [ -e "$glibc_etc/ld.so.cache" ] && [ ! -L "$glibc_etc/ld.so.cache" ]; then
-    rm -f "$glibc_etc/ld.so.cache"
-  fi
-  if [ ! -L "$glibc_etc/ld.so.cache" ]; then
-    ln -s /etc/ld.so.cache "$glibc_etc/ld.so.cache"
-  fi
-  echo "[stage-de-rootfs] linked $glibc_etc/ld.so.cache -> /etc/ld.so.cache"
-
-done
 
 chroot_ldconfig="$STAGE_DIR/sbin/ldconfig"
 if [ -x "$chroot_ldconfig" ]; then
@@ -1421,15 +1858,29 @@ if [ -x "$chroot_ldconfig" ]; then
   # investigation as a "silent installer wedge after Qt init".
   #
   # ``ldconfig -r <root>`` does what chroot+ldconfig does but WITHOUT
-  # requiring chroot privilege — it pretends ``<root>`` is "/" for
+  # requiring chroot privilege -- it pretends ``<root>`` is "/" for
   # all path resolution + writes the cache at ``<root>/etc/ld.so.cache``.
   # This is the canonical unprivileged-build replacement Debian's
   # debootstrap + Arch's pacstrap both use.
-  "$chroot_ldconfig" -r "$STAGE_DIR" 2>&1 | \
-    grep -vE 'is not a symbolic link|file format not recognized' || true
+  ldconfig_log="$STAGE_DIR/tmp/reproos-ldconfig.log"
+  mkdir -p "$(dirname "$ldconfig_log")"
+  if ! "$chroot_ldconfig" -r "$STAGE_DIR" >"$ldconfig_log" 2>&1; then
+    cat "$ldconfig_log" >&2
+    rm -f "$ldconfig_log"
+    echo "[stage-de-rootfs] source ldconfig failed" >&2
+    exit 1
+  fi
+  grep -vE 'is not a symbolic link|file format not recognized' \
+    "$ldconfig_log" || true
+  rm -f "$ldconfig_log"
+  if [ ! -s "$STAGE_DIR/etc/ld.so.cache" ]; then
+    echo "[stage-de-rootfs] source ldconfig did not create ld.so.cache" >&2
+    exit 1
+  fi
   echo "[stage-de-rootfs] rebuilt ld.so.cache via /sbin/ldconfig -r $STAGE_DIR (size: $(stat -c %s "$STAGE_DIR/etc/ld.so.cache" 2>/dev/null || echo missing))"
 else
-  echo "[stage-de-rootfs] no $chroot_ldconfig; dlopen() bare-name libs may fail" >&2
+  echo "[stage-de-rootfs] no source ldconfig at $chroot_ldconfig" >&2
+  exit 1
 fi
 
 echo "[stage-de-rootfs] stage-dir bytes=$(du -sb "$STAGE_DIR" | awk '{print $1}')"

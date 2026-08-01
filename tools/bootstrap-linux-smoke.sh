@@ -344,10 +344,9 @@ checkout_repo_optional() {
 # ----- Step 3: Cache connectivity verification -----------------------------
 
 # The repro-cache distro is provisioned separately. From inside eli-wsl the
-# cache server is reachable via 127.0.0.1:7878 because WSL2 distros share
-# the host's eth0 namespace. If the cache server isn't running, the operator
-# has to ``wsl.exe -d repro-cache -- systemctl status repro-binary-cache``
-# from the Windows side (we can't reach into a sibling distro from here).
+# cache server is reachable via 127.0.0.1:7878 because WSL2 distros share the
+# virtual network stack. Provisioning registers a Windows logon task that
+# keeps repro-cache alive; this Linux script cannot start a sibling distro.
 step_3_cache_connectivity() {
   log "step 3: cache connectivity probe (${REPRO_BINARY_CACHE_URL})"
   local code
@@ -357,8 +356,8 @@ step_3_cache_connectivity() {
     log "step 3: ok (healthz=200)"
   else
     log "step 3: WARN cache /healthz returned ${code:-no-response}; smoke will skip publish"
-    log "  -> start the cache distro from the Windows host:"
-    log "     wsl.exe -d repro-cache --user root -- systemctl status repro-binary-cache"
+    log "  -> start the cache keeper from the Windows host:"
+    log "     pwsh recipes/cache/start-repro-cache.ps1"
   fi
 }
 

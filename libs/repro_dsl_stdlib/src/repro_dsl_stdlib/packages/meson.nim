@@ -115,6 +115,9 @@ package meson:
         flag nativeFile is string,
           alias = "--native-file=",
           format = concat
+        flag wrapMode is string,
+          alias = "--wrap-mode=",
+          format = concat
         pos buildDir is string,
           position = 0,
           role = output

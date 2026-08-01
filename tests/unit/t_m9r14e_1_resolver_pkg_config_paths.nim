@@ -127,6 +127,19 @@ suite "DSL-port M9.R.14e.1 — resolver populates pkg-config / cmake / CPATH / l
       check p.endsWith("include")
     removeDir(scratch)
 
+  test "nested include dirs cannot shadow system err.h":
+    let scratch = createTempDir("repro_m9r14e_1_", "")
+    let includeRoot =
+      scratch / "openssl" / "build" / "out" / "usr" / "include"
+    createDir(includeRoot / "openssl")
+    writeFile(includeRoot / "openssl" / "err.h",
+      "/* synthetic OpenSSL header */\n")
+    var profile = PathOnlyToolProfile(installMethod: "from-source")
+    populateFromSourceSearchPaths(profile, scratch / "openssl")
+    check absolutePath(includeRoot) in profile.cpathList
+    check absolutePath(includeRoot / "openssl") notin profile.cpathList
+    removeDir(scratch)
+
   test "populator returns non-empty libraryPathList when lib/ exists":
     let scratch = createTempDir("repro_m9r14e_1_", "")
     layStagedTree(scratch, "libbaz",
@@ -179,6 +192,33 @@ suite "DSL-port M9.R.14e.1 — resolver populates pkg-config / cmake / CPATH / l
     check first.cmakePrefixList == second.cmakePrefixList
     check first.cpathList == second.cpathList
     check first.libraryPathList == second.libraryPathList
+    removeDir(scratch)
+
+  test "cached profile detects a newly available lib64 search path":
+    let scratch = createTempDir("repro_m9r14e_1_", "")
+    createDir(scratch / "libfresh")
+    writeFile(scratch / "libfresh" / "repro.nim",
+      "## synthetic libfresh recipe\n")
+    let outDir = scratch / "libfresh" / ".repro" / "output" / "libfresh"
+    createDir(outDir)
+    writeFile(outDir / ("libfresh" & PlatformLibSuffix),
+      "\x7fELF\x02\x01\x01\x00")
+    layStagedTree(scratch, "libfresh",
+      pcNames = ["fresh.pc"], headerNames = ["fresh.h"],
+      libBareNames = ["fresh"])
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("libfresh"), scratch)
+    check outcome.kind == rrResolved
+    check outcome.profile.fromSourceSearchPathsCurrent()
+
+    let prefix = scratch / "libfresh" / "build" / "out" / "usr"
+    createDir(prefix / "lib64" / "pkgconfig")
+    writeFile(prefix / "lib64" / "pkgconfig" / "fresh64.pc",
+      "# newly materialized pc\n")
+    writeFile(prefix / "lib64" / ("libfresh64" & PlatformLibSuffix),
+      "\x7fELF\x02\x01\x01\x00")
+    check not outcome.profile.fromSourceSearchPathsCurrent()
     removeDir(scratch)
 
   test "tryResolveFromSourceTool emits the search-path channels":

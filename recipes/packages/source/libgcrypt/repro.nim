@@ -166,14 +166,13 @@ package libgcryptSource:
     ## gcc is the host C toolchain — libgcrypt is C99 with assembly
     ## fast-paths for the AES / SHA / RSA / ECC primitives.
     "gcc >=11"
+    "file"
 
   buildDeps:
     ## libgpg-error is libgcrypt's helper library for the canonical
     ## GnuPG error-code namespace. The upstream ``./configure`` probes
-    ## for it through ``gpg-error-config``; the ``uses:`` entry pins
-    ## the probe-time availability. (We do NOT yet ship a separate
-    ## ``libgpgErrorSource`` recipe; the system provider is assumed
-    ## until the v1 desktop story closes that gap.)
+    ## for it through ``gpg-error-config``. The source recipe provides
+    ## both the helper and shared library to this build.
     "libgpg-error"
 
   config:
@@ -201,7 +200,11 @@ package libgcryptSource:
         "--disable-doc",
         "--disable-padlock-support",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let patches = @[
+        "sed -i 's|/usr/bin/file|file|g' src/configure",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
+                                  srcPatches = patches)
       discard pkg.library("libGcrypt")
     finally:
       clearCurrentOwningPackageOverride()

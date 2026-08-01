@@ -33,7 +33,7 @@
 ##   7. Empty input lists are a no-op (no env entries injected).
 ##   8. The order of channels is deterministic.
 
-import std/[strtabs, strutils, unittest]
+import std/[options, strtabs, strutils, unittest]
 
 import repro_build_engine
 
@@ -130,6 +130,22 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     check table["LIBRARY_PATH"].startsWith("/synth/proto/lib")
     check table["LD_LIBRARY_PATH"].startsWith("/synth/proto/lib")
 
+  test "source Perl module roots reach both action launch paths":
+    let perlLib =
+      "/workspace/recipes/packages/source/perl/.repro/output/install/usr/lib"
+    let moduleRoot = perlLib & "/perl5"
+    let paths = ResolvedAuxPaths(libDirs: @[perlLib, "/synth/other/lib"])
+
+    let argvResult = applyResolvedAuxPathsArgv(
+      @["PERL5LIB=/inherited/perl"], paths)
+    check envValue(argvResult, "PERL5LIB") ==
+      moduleRoot & Sep & "/inherited/perl"
+
+    let table = newStringTable(modeCaseSensitive)
+    table["PERL5LIB"] = "/inherited/perl"
+    applyResolvedAuxPathsTable(table, paths)
+    check table["PERL5LIB"] == moduleRoot & Sep & "/inherited/perl"
+
   test "empty paths leave env untouched":
     let env = @["PATH=/usr/bin", "USER=alice"]
     let paths = ResolvedAuxPaths()  # all four lists empty
@@ -147,6 +163,55 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     let r2 = applyResolvedAuxPathsArgv(env, paths)
     check r1 == r2
 
+  when defined(posix):
+    test "shell actions export runtime paths after interpreter startup":
+      let argv = @["/nix/store/bash/bin/sh", "-c", "printf ready"]
+      let env = @[
+        "PATH=/usr/bin",
+        "LD_LIBRARY_PATH=/source/readline/lib:/host/lib",
+        "OTHER=value"]
+      let deferred = deferRuntimeLibraryEnvForShell(argv, env)
+      check envValue(deferred.env, "LD_LIBRARY_PATH") == ""
+      check envValue(deferred.env, "OTHER") == "value"
+      check deferred.argv[0] == argv[0]
+      check deferred.argv[2].startsWith(
+        "export LD_LIBRARY_PATH=/source/readline/lib:/host/lib; ")
+      check deferred.argv[2].endsWith("printf ready")
+
+    test "monitor-wrapped shell actions defer runtime paths":
+      let argv = @[
+        "/opt/repro/bin/repro", "internal", "io", "monitor",
+        "--depfile", "/tmp/action.rdep", "--",
+        "/nix/store/bash/bin/bash", "-lc", "run-build"]
+      let env = @[
+        "LD_LIBRARY_PATH=/source/lib",
+        "DYLD_LIBRARY_PATH=/source/macos/lib"]
+      let deferred = deferRuntimeLibraryEnvForShell(argv, env)
+      check deferred.env.len == 0
+      check deferred.argv[9].startsWith(
+        "export LD_LIBRARY_PATH=/source/lib; " &
+        "export DYLD_LIBRARY_PATH=/source/macos/lib; ")
+      check deferred.argv[9].endsWith("run-build")
+
+    test "non-shell actions retain runtime paths in their environment":
+      let argv = @["/usr/bin/cc", "input.c"]
+      let env = @["LD_LIBRARY_PATH=/source/lib"]
+      let deferred = deferRuntimeLibraryEnvForShell(argv, env)
+      check deferred.argv == argv
+      check deferred.env == env
+
+    test "StringTable launcher defers shell runtime paths":
+      let argv = @["/bin/sh", "-c", "run-build"]
+      let table = newStringTable(modeCaseSensitive)
+      table["PATH"] = "/usr/bin"
+      table["LD_LIBRARY_PATH"] = "/source/lib"
+      let deferredArgv = deferRuntimeLibraryEnvForShell(argv, table)
+      check not table.hasKey("LD_LIBRARY_PATH")
+      check table["PATH"] == "/usr/bin"
+      check deferredArgv[2].startsWith(
+        "export LD_LIBRARY_PATH=/source/lib; ")
+      check deferredArgv[2].endsWith("run-build")
+
   test "multiple deps' paths concatenate in order":
     # Two distinct from-source deps each contribute a pkgconfig dir.
     # The order matches the ``toolIdentityRefs`` order — first ref
@@ -160,6 +225,128 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     let v = envValue(result, "PKG_CONFIG_PATH")
     check v.startsWith("/synth/wayland/lib/pkgconfig" & Sep &
       "/synth/expat/lib/pkgconfig")
+
+  test "host dependency paths precede native toolchain paths":
+    let action = BuildAction(
+      toolIdentityRefs: @["gcc", "libdrm", "wayland"],
+      toolIdentityRefKinds: @[dkNative, dkBuild, dkBuild])
+    let resolver: ToolIdentityResolver =
+      proc(name: string; kind: DepKind):
+          Option[ResolvedToolIdentity] {.gcsafe, closure.} =
+        case name
+        of "gcc":
+          check kind == dkNative
+          some(ResolvedToolIdentity(
+            includeDirs: @["/sysroot/include", "/sysroot/include/drm"],
+            libDirs: @["/sysroot/lib"]))
+        of "libdrm":
+          check kind == dkBuild
+          some(ResolvedToolIdentity(
+            includeDirs: @["/libdrm/include", "/libdrm/include/libdrm"],
+            libDirs: @["/libdrm/lib"]))
+        of "wayland":
+          check kind == dkBuild
+          some(ResolvedToolIdentity(includeDirs: @["/wayland/include"]))
+        else:
+          none(ResolvedToolIdentity)
+
+    let paths = collectResolvedAuxPaths(action, resolver)
+    check paths.includeDirs == @["/libdrm/include",
+      "/libdrm/include/libdrm", "/wayland/include",
+      "/sysroot/include", "/sysroot/include/drm"]
+    check paths.libDirs == @["/libdrm/lib", "/sysroot/lib"]
+
+  test "source toolchain headers use ordered compiler system flags":
+    let glibcRoot =
+      "/workspace/recipes/packages/source/glibc/.repro/output/install/usr/include"
+    let linuxRoot =
+      "/workspace/recipes/packages/source/linux-headers/.repro/output/install/usr/include"
+    let paths = ResolvedAuxPaths(includeDirs: @[
+      linuxRoot,
+      "/workspace/recipes/packages/source/gcc/.repro/output/install/usr/include/c++/14.2.0",
+      glibcRoot & "/x86_64-linux-gnu",
+      "/workspace/recipes/packages/source/libdrm/.repro/output/install/usr/include/libdrm",
+      glibcRoot])
+    let env = @[
+      "CPATH=/inherited/include",
+      "CPPFLAGS=-D_FILE_OFFSET_BITS=64",
+      "CFLAGS=-O2",
+      "CXXFLAGS=-O3",
+      "HOSTCFLAGS=-Os",
+      "HOSTCXXFLAGS=-Oz",
+      "CPPFLAGS_FOR_BUILD=-DBUILD_HELPER",
+      "CFLAGS_FOR_BUILD=-Og",
+      "CXXFLAGS_FOR_BUILD=-O0"]
+    let result = applyResolvedAuxPathsArgv(env, paths)
+    let systemFlags =
+      "-idirafter " & glibcRoot & " -idirafter " & linuxRoot
+    check envValue(result, "CPATH") ==
+      "/workspace/recipes/packages/source/libdrm/.repro/output/install/usr/include/libdrm" &
+      Sep & "/inherited/include"
+    check envValue(result, "CPPFLAGS") ==
+      systemFlags & " -D_FILE_OFFSET_BITS=64"
+    check envValue(result, "CFLAGS") == systemFlags & " -O2"
+    check envValue(result, "CXXFLAGS") == systemFlags & " -O3"
+    check envValue(result, "HOSTCFLAGS") == systemFlags & " -Os"
+    check envValue(result, "HOSTCXXFLAGS") == systemFlags & " -Oz"
+    check envValue(result, "CPPFLAGS_FOR_BUILD") ==
+      systemFlags & " -DBUILD_HELPER"
+    check envValue(result, "CFLAGS_FOR_BUILD") == systemFlags & " -Og"
+    check envValue(result, "CXXFLAGS_FOR_BUILD") == systemFlags & " -O0"
+
+  test "StringTable source system-header projection mirrors argv env":
+    let glibcRoot =
+      "/workspace/recipes/packages/source/glibc/.repro/output/install/usr/include"
+    let linuxRoot =
+      "/workspace/recipes/packages/source/linux-headers/.repro/output/install/usr/include"
+    let paths = ResolvedAuxPaths(includeDirs: @[
+      "/workspace/recipes/packages/source/gcc/.repro/output/install/usr/include",
+      linuxRoot,
+      "/ordinary/include",
+      glibcRoot])
+    let table = newStringTable(modeCaseSensitive)
+    table["CPATH"] = "/inherited/include"
+    table["CPPFLAGS"] = "-DTEST"
+    table["CFLAGS"] = "-O1"
+    table["CXXFLAGS"] = "-O2"
+    table["HOSTCFLAGS"] = "-Os"
+    table["HOSTCXXFLAGS"] = "-Oz"
+    table["CPPFLAGS_FOR_BUILD"] = "-DBUILD"
+    table["CFLAGS_FOR_BUILD"] = "-Og"
+    table["CXXFLAGS_FOR_BUILD"] = "-O0"
+    applyResolvedAuxPathsTable(table, paths)
+    let systemFlags =
+      "-idirafter " & glibcRoot & " -idirafter " & linuxRoot
+    check table["CPATH"] == "/ordinary/include" & Sep & "/inherited/include"
+    check table["CPPFLAGS"] == systemFlags & " -DTEST"
+    check table["CFLAGS"] == systemFlags & " -O1"
+    check table["CXXFLAGS"] == systemFlags & " -O2"
+    check table["HOSTCFLAGS"] == systemFlags & " -Os"
+    check table["HOSTCXXFLAGS"] == systemFlags & " -Oz"
+    check table["CPPFLAGS_FOR_BUILD"] == systemFlags & " -DBUILD"
+    check table["CFLAGS_FOR_BUILD"] == systemFlags & " -Og"
+    check table["CXXFLAGS_FOR_BUILD"] == systemFlags & " -O0"
+
+  test "direct GCC-family compiler actions receive system includes":
+    let glibcRoot = "/source/glibc/usr/include"
+    let linuxRoot = "/source/linux/usr/include"
+    let argv = @[
+      "/opt/repro/bin/repro", "internal", "io", "monitor",
+      "--depfile", "/tmp/action.rdep", "--",
+      "/source/gcc/bin/x86_64-linux-gnu-g++-14", "-c", "input.cc"]
+    let result = applyCompilerSystemIncludeArgs(argv,
+      @[glibcRoot, linuxRoot])
+    check result == @[
+      "/opt/repro/bin/repro", "internal", "io", "monitor",
+      "--depfile", "/tmp/action.rdep", "--",
+      "/source/gcc/bin/x86_64-linux-gnu-g++-14",
+      "-idirafter", glibcRoot, "-idirafter", linuxRoot,
+      "-c", "input.cc"]
+
+  test "non-compiler argv ignores system include projection":
+    let argv = @["meson", "compile", "-C", "build"]
+    check applyCompilerSystemIncludeArgs(argv,
+      @["/source/glibc/usr/include"]) == argv
 
 # ===========================================================================
 # DSL-port M9.R.15q.3.3 — env-var dedup against ARG_MAX explosion.

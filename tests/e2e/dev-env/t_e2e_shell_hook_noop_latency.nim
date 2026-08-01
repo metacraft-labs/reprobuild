@@ -71,6 +71,11 @@ import std/[algorithm, monotimes, os, osproc, streams, strtabs,
 import repro_test_support
 import shell_hook_helper
 
+when defined(windows):
+  import std/winlean
+else:
+  import std/posix
+
 const
   WarmupIters = 100
   MeasuredIters = 500
@@ -112,34 +117,101 @@ proc readFingerprint(script: string): string =
     raise newException(ValueError, "unterminated __REPRO_APPLIED quote")
   rest[0 ..< e]
 
-proc captureExportOutput(c: ShellHookCase; extraEnv: openArray[(string, string)] = []):
+proc exportBaseEnv(c: ShellHookCase): StringTableRef =
+  ## Build the stable environment block once. The latency gate is about
+  ## child process startup + the no-op fast path; rebuilding this table in
+  ## every measured iteration would time parent-side allocation/GC noise too.
+  let daemonStateDir = c.tempRoot / "daemon-state"
+  let actionCacheRoot = c.tempRoot / "action-cache"
+  let xdgConfigHome = c.tempRoot / "xdg-config"
+  createDir(daemonStateDir)
+  createDir(actionCacheRoot)
+  createDir(xdgConfigHome)
+  result = newStringTable(modeCaseSensitive)
+  for k, v in envPairs():
+    if k.startsWith("__REPRO_"):
+      result[k] = ""
+      continue
+    result[k] = v
+  result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
+  result["REPRO_DEV_ENV_AUTO_ALLOW"] = "1"
+  result["XDG_CONFIG_HOME"] = xdgConfigHome
+  result["REPROBUILD_ACTION_CACHE_ROOT"] = actionCacheRoot
+  result["REPRO_ACTION_CACHE_SHM"] = "0"
+  result["REPRO_DAEMON"] = "off"
+  result["REPRO_DAEMON_ENDPOINT"] =
+    daemonSocketEndpoint("repro-m77-noop-latency-" & $getCurrentProcessId())
+  result["REPRO_DAEMON_STATE_DIR"] = daemonStateDir
+  result["HOME"] = c.tempRoot
+
+proc captureExportOutput(c: ShellHookCase; env: StringTableRef):
     tuple[stdout: string; stderr: string; exitCode: int] =
   ## Spawn ``c.reproBin dev-env export bash --project-root <fixture>``
   ## and capture stdout. Goes through ``c.reproBin`` directly (no
   ## shim) so the latency we measure is the raw process spawn + fast
   ## path, not the shim's overhead.
-  var env = newStringTable(modeCaseSensitive)
-  for k, v in envPairs():
-    if k.startsWith("__REPRO_"):
-      continue
-    env[k] = v
-  env["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
-  env["HOME"] = c.tempRoot
-  for (k, v) in extraEnv:
-    env[k] = v
   var p = startProcess(c.reproBin,
     args = @["dev-env", "export", "bash",
       "--project-root", c.projectRoot],
     workingDir = c.repoRoot,
     env = env,
-    options = {poUsePath})
-  let outStream = p.outputStream
-  let errStream = p.errorStream
-  let outText = if outStream != nil: outStream.readAll() else: ""
-  let errText = if errStream != nil: errStream.readAll() else: ""
-  let code = p.waitForExit()
-  p.close()
-  (stdout: outText, stderr: errText, exitCode: code)
+    options = {poUsePath, poStdErrToStdOut})
+  defer: p.close()
+
+  when defined(windows):
+    const PollSleepMs = 1
+    let outHandle = Handle(p.outputHandle)
+    var buf {.noinit.}: array[4096, char]
+    while true:
+      var bytesAvail: int32 = 0
+      let peeked = peekNamedPipe(outHandle, lpTotalBytesAvail = addr bytesAvail)
+      if peeked and bytesAvail > 0:
+        var bytesRead: int32 = 0
+        let toRead = min(int(bytesAvail), buf.len).int32
+        let ok = readFile(outHandle, addr buf[0], toRead, addr bytesRead, nil)
+        if ok != 0 and bytesRead > 0:
+          let prev = result.stdout.len
+          result.stdout.setLen(prev + bytesRead)
+          copyMem(addr result.stdout[prev], addr buf[0], bytesRead)
+          continue
+      result.exitCode = p.peekExitCode()
+      if result.exitCode != -1:
+        break
+      sleep(PollSleepMs)
+  else:
+    const PollSleepMs = 1
+    let fd = cint(p.outputHandle)
+    let prevFlags = fcntl(fd, F_GETFL)
+    if prevFlags != -1:
+      discard fcntl(fd, F_SETFL, prevFlags or O_NONBLOCK)
+
+    proc drainAvailable(fd: cint; sink: var string): bool =
+      var buf {.noinit.}: array[4096, char]
+      while true:
+        let n = read(fd, addr buf[0], buf.len)
+        if n > 0:
+          let prev = sink.len
+          sink.setLen(prev + n)
+          copyMem(addr sink[prev], addr buf[0], n)
+        elif n == 0:
+          return true
+        else:
+          if errno == EINTR:
+            continue
+          return false
+
+    while true:
+      let eof = drainAvailable(fd, result.stdout)
+      result.exitCode = p.peekExitCode()
+      if result.exitCode != -1:
+        discard drainAvailable(fd, result.stdout)
+        break
+      if eof:
+        result.exitCode = p.waitForExit()
+        break
+      sleep(PollSleepMs)
+
+  result.stderr = ""
 
 proc percentile(samples: seq[float]; q: float): float =
   ## Linear-interpolation percentile against a SORTED ``samples`` seq
@@ -162,18 +234,25 @@ suite "e2e_shell_hook_noop_latency":
       try: removeDir(c.tempRoot)
       except CatchableError: discard
 
+    let activationEnv = exportBaseEnv(c)
+    let fastPathEnv = exportBaseEnv(c)
+
     # Warm: run one activation to discover the fingerprint we want
     # subsequent invocations to short-circuit against.
-    let initial = captureExportOutput(c)
+    let initial = captureExportOutput(c, activationEnv)
+    if initial.exitCode != 0:
+      echo "=== initial stdout/stderr ===\n", initial.stdout
     check initial.exitCode == 0
     let fingerprint = readFingerprint(initial.stdout)
+    if fingerprint.len == 0:
+      echo "=== initial stdout/stderr ===\n", initial.stdout
     check fingerprint.len > 0
+    fastPathEnv["__REPRO_APPLIED"] = fingerprint
 
     # Sanity check: a SECOND invocation with __REPRO_APPLIED=<fp> must
     # emit the no-op script (proves the fast path is reachable before
     # we measure it).
-    let probe = captureExportOutput(c,
-      [("__REPRO_APPLIED", fingerprint)])
+    let probe = captureExportOutput(c, fastPathEnv)
     check probe.exitCode == 0
     if not probe.stdout.contains(FastPathExpectedSubstring):
       echo "=== probe stdout ===\n", probe.stdout
@@ -185,8 +264,7 @@ suite "e2e_shell_hook_noop_latency":
     # cache, and (on Windows) the kernel's loader fast path all reach
     # steady state.
     for i in 0 ..< WarmupIters:
-      let r = captureExportOutput(c,
-        [("__REPRO_APPLIED", fingerprint)])
+      let r = captureExportOutput(c, fastPathEnv)
       check r.exitCode == 0
       check r.stdout.contains(FastPathExpectedSubstring)
 
@@ -197,8 +275,7 @@ suite "e2e_shell_hook_noop_latency":
     var samples = newSeq[float](MeasuredIters)
     for i in 0 ..< MeasuredIters:
       let t0 = getMonoTime()
-      let r = captureExportOutput(c,
-        [("__REPRO_APPLIED", fingerprint)])
+      let r = captureExportOutput(c, fastPathEnv)
       let elapsed = getMonoTime() - t0
       let dt = float(inNanoseconds(elapsed)) / 1_000_000.0
       samples[i] = dt

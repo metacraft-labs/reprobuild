@@ -88,6 +88,12 @@ suite "dbusBrokerSource — from-source recipe smoke test":
     check seenBroker
     check seenLaunch
 
+  test "declares the linked library closure":
+    check registeredBuildDeps("dbusBrokerSource") ==
+      @["expat", "systemd >=240"]
+    check registeredRuntimeDeps("dbusBrokerSource") ==
+      @["expat", "systemd >=240"]
+
   test "versions block records the upstream tag + URL":
     # M2 versions registry: the upstream GitHub tag is recorded for
     # ``repro update-source`` even though the live fetch points at the

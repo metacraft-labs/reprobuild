@@ -71,7 +71,8 @@ package plasmaWaylandProtocolsSource:
         "BUILD_TESTING=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
-      discard cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      pkg.installTreeMirror()
     finally:
       clearCurrentOwningPackageOverride()
 

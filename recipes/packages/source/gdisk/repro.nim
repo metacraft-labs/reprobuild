@@ -55,9 +55,41 @@ package gdiskSource:
   build:
     setCurrentOwningPackageOverride("gdiskSource")
     try:
+      let sourceRoot = "/opt/repro/reprobuild/recipes/packages/source"
+      let utilLinux = sourceRoot & "/util-linux/.repro/output/install/usr"
+      let popt = sourceRoot & "/popt/.repro/output/install/usr"
+      let ncurses = sourceRoot & "/ncurses/.repro/output/install/usr"
+      let sourceRpath =
+        utilLinux & "/lib:" & popt & "/lib:" & ncurses & "/lib"
+      let opts = @[
+        "CXXFLAGS=-O2 -Wall -D_FILE_OFFSET_BITS=64" &
+          " -I" & utilLinux & "/include" &
+          " -I" & popt & "/include" &
+          " -I" & ncurses & "/include",
+        "LDFLAGS=-L" & utilLinux & "/lib" &
+          " -L" & popt & "/lib" &
+          " -L" & ncurses & "/lib" &
+          " -Wl,-rpath," & utilLinux & "/lib" &
+          " -Wl,-rpath," & popt & "/lib" &
+          " -Wl,-rpath," & ncurses & "/lib",
+        "LDLIBS=-luuid",
+        "SGDISK_LDLIBS=-lpopt",
+        "CGDISK_LDLIBS=-lncursesw -ltinfow",
+      ]
       let pkg = autotools_package(srcDir = "./src",
-                                  configureOptions = @[],
-                                  skipConfigure = true)
+                                  configureOptions = opts,
+                                  skipConfigure = true,
+                                  srcPatches = @[
+        # Our wide-character ncurses build installs the portable header as
+        # /usr/include/ncurses.h while retaining the ncursesw library ABI.
+        "sed -i 's|<ncursesw/ncurses.h>|<ncurses.h>|' ./src/gptcurses.cc",
+        "printf '\ninstall: all\n\tmkdir -p $(DESTDIR)/usr/sbin\n" &
+          "\tfor binary in gdisk sgdisk cgdisk fixparts; do " &
+          "old=$$(patchelf --print-rpath $$binary); " &
+          "patchelf --set-rpath " & sourceRpath & ":$$old $$binary; done\n" &
+          "\tcp -f gdisk sgdisk cgdisk fixparts $(DESTDIR)/usr/sbin/\n' " &
+          ">> ./src/Makefile",
+      ])
       discard pkg.executable("gdisk")
       discard pkg.executable("sgdisk")
       discard pkg.executable("cgdisk")

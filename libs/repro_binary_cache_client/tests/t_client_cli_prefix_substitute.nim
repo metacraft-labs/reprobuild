@@ -6,7 +6,7 @@
 ## it drives the SHIPPED client CLI (``repro_binary_cache_client_cli``) end
 ## to end over two real processes on a real TCP socket, and asserts the
 ## materialised tree is byte-identical to the source AND that the rbcarc-v1
-## ``fileModeOctal`` exec-bit normalisation round-trips correctly.
+## permission field round-trips exactly on POSIX.
 ##
 ## Concretely it:
 ##
@@ -20,11 +20,9 @@
 ##   3. ``substitute``s the entry into a FRESH, EMPTY store + out dir.
 ##   4. Asserts, for every file: it exists at the same relative path and its
 ##      bytes are IDENTICAL to the source (binary read, NUL-safe compare).
-##   5. Asserts exec-bit normalisation: on POSIX the ``.exe``-like file comes
-##      back EXECUTABLE (mode 0o755 in the archive → exec bits restored) and
-##      the ``.dll``-like file comes back NON-executable (mode 0o644). On
-##      Windows there is no exec bit, so the assertion is that both files
-##      materialise byte-identical (the mode field is normalised away).
+##   5. Asserts exact POSIX permissions, including a read/execute-only 0o555
+##      file. On Windows there is no equivalent mode metadata, so the
+##      assertion is byte identity.
 ##
 ## This is a real two-process, real-socket, byte-identity gate — not a stub,
 ## not exit-code-only. It shares the A3 P2 CLI test's process plumbing but is
@@ -91,7 +89,7 @@ proc isExecutable(path: string): bool =
   let perms = getFilePermissions(path)
   (perms * {fpUserExec, fpGroupExec, fpOthersExec}).len > 0
 
-suite "M3a — client CLI prefix substitute (byte-identity + exec-bit)":
+suite "M3a — client CLI prefix substitute (bytes + permissions)":
 
   test "t_client_cli_prefix_substitute":
     check fileExists(ServerBinary)
@@ -137,16 +135,13 @@ suite "M3a — client CLI prefix substitute (byte-identity + exec-bit)":
       libBytes[i] = char(i mod 256)
     writeFile(prefixDir / libRel, libBytes)
 
-    # Set the exec bit on the .exe-like file ONLY (POSIX). On Windows the
-    # exec bit is meaningless; rbcarc-v1 fileModeOctal keys off the .exe
-    # extension there, so the archive still records 0o755 for it.
+    # Use a read/execute-only mode that exposes lossy 0o755 normalisation.
+    # Windows has no equivalent permission metadata and uses the extension.
     when not defined(windows):
-      var exePerms = getFilePermissions(prefixDir / exeRel)
-      exePerms.incl(fpUserExec); exePerms.incl(fpGroupExec)
-      exePerms.incl(fpOthersExec)
+      let exePerms = {fpUserRead, fpUserExec, fpGroupRead, fpGroupExec,
+                      fpOthersRead, fpOthersExec}
       setFilePermissions(prefixDir / exeRel, exePerms)
-      # Ensure the dll-like + lib payloads are NON-executable so the
-      # normalisation-away assertion is meaningful.
+      # Ensure the dll-like + lib payloads are non-executable.
       for r in [dllRel, libRel]:
         var p = getFilePermissions(prefixDir / r)
         p.excl(fpUserExec); p.excl(fpGroupExec); p.excl(fpOthersExec)
@@ -209,10 +204,16 @@ suite "M3a — client CLI prefix substitute (byte-identity + exec-bit)":
     check pubOut.contains(entryHex)
 
     # ---- Substitute into a FRESH, EMPTY out dir over the real socket. ----
+    # Reprobuild-Binary-Cache-Fleet R1 — substitute is default-untrusted:
+    # it only materialises from a cache whose producer key is trusted.
+    # Passing REPRO_BINARY_CACHE_CERT_PATH folds the producer pubkey in
+    # as the env cache's trust anchor (single-producer back-compat), so
+    # this legacy round-trip keeps working.
     check not dirExists(outDir)
     let (subCode, subOut) = runCli(
       ["substitute", entryHex, outDir],
       env = @[("REPRO_BINARY_CACHE_URL", url),
+              ("REPRO_BINARY_CACHE_CERT_PATH", certPath),
               ("REPRO_LOCAL_STORE", clientStore)])
     if subCode != 0:
       echo "substitute failed (code=", subCode, "): ", subOut
@@ -224,16 +225,18 @@ suite "M3a — client CLI prefix substitute (byte-identity + exec-bit)":
       check fileExists(outDir / rel)
       check readFile(outDir / rel) == want
 
-    # ---- Exec-bit normalisation (the rbcarc-v1 fileModeOctal path). ----
+    # ---- Permission preservation (the rbcarc-v1 mode field). ----
     when defined(windows):
       # No exec bit on Windows; the guarantee is byte-identity (asserted
       # above). Nothing further to check.
       discard
     else:
-      # The .exe-like file was published executable → archive mode 0o755 →
-      # extract restores the exec bits.
+      check getFilePermissions(outDir / exeRel) ==
+        getFilePermissions(prefixDir / exeRel)
+      check getFilePermissions(outDir / dllRel) ==
+        getFilePermissions(prefixDir / dllRel)
+      check getFilePermissions(outDir / libRel) ==
+        getFilePermissions(prefixDir / libRel)
       check isExecutable(outDir / exeRel)
-      # The .dll-like + lib payloads were non-executable → archive mode
-      # 0o644 → extract must NOT set exec bits.
       check not isExecutable(outDir / dllRel)
       check not isExecutable(outDir / libRel)

@@ -36,6 +36,77 @@ when defined(windows):
 else:
   import std/posix
 
+type
+  LoopbackSshLogin = object
+    ## Outcome of the loopback-SSH login-shell capability probe.
+    ## Deliberately NOT exported: the only supported way to consult it is
+    ## ``requireLoopbackSshLogin``, which fails closed. An exported
+    ## boolean predicate invites the ``if not available(): skip()`` shape
+    ## that started this — and ``skip()`` does not return (the stdlib
+    ## docstring says verbatim "The test code is still executed"), so the
+    ## guarded body ran anyway and hard-failed with sshd's opaque
+    ## "This account is currently not available".
+    available: bool
+    user: string
+    shell: string
+
+proc loopbackSshLogin(): LoopbackSshLogin =
+  ## OpenSSH executes remote commands through the account's passwd shell.
+  ## Self-hosted service accounts commonly use nologin/false, which makes a
+  ## loopback sshd accept authentication but reject every command.
+  result = LoopbackSshLogin(available: true, user: "", shell: "")
+  when defined(posix):
+    result.user = getEnv("USER")
+    if result.user.len == 0:
+      return
+    let probe = execCmdEx("getent passwd " & quoteShell(result.user))
+    if probe.exitCode != 0:
+      return
+    let fields = probe.output.strip().split(':')
+    if fields.len < 7:
+      return
+    result.shell = fields[^1].strip()
+    result.available = not (result.shell.endsWith("/nologin") or
+      result.shell.endsWith("/false"))
+
+proc requireLoopbackSshLogin*(gate: string) =
+  ## Fail-closed preflight for the gates that drive a REAL user-owned
+  ## loopback ``sshd`` (M71 phases C/D/E).
+  ##
+  ## A usable login shell is a HARD PREREQUISITE of these gates, in the
+  ## same class as ``ssh`` / ``sshd`` / ``ssh-keygen`` being installed —
+  ## which the same tests already treat as ``doAssert false`` blockers.
+  ## The subject under test IS the SSH transport (bundle streaming,
+  ## remote activation, ``enable --host --now``); there is no residual
+  ## assertion worth making once the transport cannot run, so degrading
+  ## to a partial run would be a green light over an unexercised gate.
+  ##
+  ## It therefore reports a deterministic FAILURE, never a skip: M0's
+  ## exit gate requires a full-suite run with zero skips, so a
+  ## ``[SKIPPED]`` is itself a gate failure. The message names the
+  ## account, its shell, and the remedy, so the failure is actionable
+  ## from the CI log alone instead of surfacing as sshd's opaque
+  ## "This account is currently not available" 6 seconds into a probe
+  ## loop.
+  let probe = loopbackSshLogin()
+  if probe.available:
+    return
+  doAssert false,
+    gate & " blocker: this gate drives a real user-owned loopback sshd, " &
+    "and OpenSSH runs every remote command through the account's passwd " &
+    "login shell. Account '" & probe.user & "' has login shell '" &
+    probe.shell & "', so sshd authenticates the connection and then " &
+    "rejects every command with \"This account is currently not " &
+    "available\".\n" &
+    "  This is an environment defect, and it is deliberately NOT " &
+    "skippable: M0's exit gate requires a full-suite run with zero " &
+    "skips, so the gate fails hard rather than reporting a green or " &
+    "skipped result over an SSH transport that never ran.\n" &
+    "  Remedy: run the suite as an account with a real login shell, or " &
+    "give this one a shell (e.g. `usermod -s /bin/sh " & probe.user &
+    "`). Note the probe keys off $USER, so $USER must name the account " &
+    "the suite actually runs as."
+
 const
   isNixSupported* = defined(linux) or defined(macosx)
     ## True on platforms where `nix` / `nix build` is a realistic
@@ -254,6 +325,39 @@ proc requireFailure*(cmd: CmdSpec; cwd = getCurrentDir()): string =
   check res.code != 0
   res.output
 
+proc isTransientDirectoryNotEmpty(e: ref OSError): bool =
+  ## Nim's OSError does not expose the failing errno portably. Keep this
+  ## deliberately narrow: retry only the ENOTEMPTY-shaped cleanup race the
+  ## full suite has observed, and re-raise every other cleanup failure.
+  let msg = e.msg.toLowerAscii()
+  msg.contains("directory not empty") or msg.contains("directory is not empty")
+
+proc removeDirEventually*(path: string; attempts = 25; sleepMs = 40) =
+  ## Remove a test scratch directory, tolerating only transient ENOTEMPTY.
+  ##
+  ## Some production paths briefly leave background filesystem activity in
+  ## `.repro` / `.git` trees after all test assertions have passed. A plain
+  ## `removeDir` can lose that race and fail with "Directory not empty". This
+  ## helper gives that narrow condition a bounded chance to settle, then
+  ## re-raises the final OSError so cleanup regressions stay visible.
+  if path.len == 0 or not dirExists(path):
+    return
+  var last: ref OSError
+  for attempt in 0 ..< attempts:
+    try:
+      removeDir(path)
+      return
+    except OSError as e:
+      if not isTransientDirectoryNotEmpty(e):
+        raise
+      if not dirExists(path):
+        return
+      last = e
+      if attempt + 1 < attempts:
+        sleep(sleepMs)
+  if last != nil:
+    raise last
+
 proc registryRootEnv*(scratchDir: string): tuple[k, v: string] =
   ## Env-var entry that redirects HKCU registry writes made by a
   ## `repro home apply` subprocess into a per-test fake hive under
@@ -338,6 +442,176 @@ proc runquotaEndpointReachable*(endpoint: string): bool =
     endpoint.startsWith(r"\\.\pipe\") or endpoint.startsWith(r"\\?\pipe\")
   else:
     fileExists(endpoint)
+
+proc executableFile*(path: string): bool =
+  if path.len == 0 or not fileExists(path):
+    return false
+  when defined(posix):
+    let perms = getFilePermissions(path)
+    result = fpUserExec in perms or fpGroupExec in perms or fpOthersExec in perms
+  else:
+    result = true
+
+proc executableFromEnvOrPath*(envName, exeName: string): string =
+  ## Resolve a test fixture executable from an explicit environment variable
+  ## first, then PATH. Returns the empty string when neither location works.
+  let fromEnv = getEnv(envName)
+  if fromEnv.len > 0:
+    if fileExists(fromEnv) and not executableFile(fromEnv):
+      raise newException(OSError, envName & " is not executable: " & fromEnv)
+    if executableFile(fromEnv):
+      return normalizedPath(fromEnv)
+  let fromPath = findExe(exeName)
+  if fromPath.len > 0:
+    return normalizedPath(fromPath)
+  ""
+
+proc runquotaSourceRoot*(repoRoot: string): string =
+  ## Locate a built runquota checkout for tests that need to spawn their own
+  ## daemon. The full test harness may run from a temporary reprobuild
+  ## worktree, so ``repoRoot.parentDir / "runquota"`` is not always valid.
+  let fromEnv = getEnv("RUNQUOTA_SRC")
+  let sibling = repoRoot.parentDir / "runquota"
+  if fromEnv.len > 0 and dirExists(fromEnv):
+    let normalized = normalizedPath(fromEnv)
+    let envDaemon = normalized / "build" / "bin" /
+      addFileExt("runquotad", ExeExt)
+    if not normalized.startsWith("/nix/store/") or fileExists(envDaemon):
+      return normalized
+  if dirExists(sibling):
+    return normalizedPath(sibling)
+  if fromEnv.len > 0 and dirExists(fromEnv):
+    return normalizedPath(fromEnv)
+  ""
+
+proc absoluteCandidate(base, path: string): string =
+  if path.len == 0:
+    return ""
+  if path.isAbsolute:
+    normalizedPath(path)
+  else:
+    normalizedPath(base / path)
+
+proc isCodeTracerSourceRoot(path: string): bool =
+  path.len > 0 and
+    fileExists(path / "src" / "frontend" / "tests" /
+      "ipc_registry_test.nim") and
+    fileExists(path / "test-programs" / "c_sudoku_solver" / "main.c")
+
+proc gitCommonDir(repoRoot: string): string =
+  try:
+    let process = startProcess("git", workingDir = repoRoot,
+      args = ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      options = {poUsePath, poStdErrToStdOut})
+    defer: process.close()
+    let output =
+      if process.outputStream != nil: process.outputStream.readAll()
+      else: ""
+    if process.waitForExit() == 0:
+      result = output.strip()
+  except OSError:
+    discard
+
+proc hasKnownWorkspaceSibling(path: string): bool =
+  dirExists(path / "reprobuild-examples") or
+    dirExists(path / "reprobuild-cmake") or
+    dirExists(path / "runquota") or
+    isCodeTracerSourceRoot(path / "codetracer")
+
+proc repoManagedWorkspace(commonDir: string): string =
+  ## Android ``repo`` keeps project Git directories below
+  ## ``<workspace>/.repo/projects`` (or ``project-objects``). A linked
+  ## worktree's common dir therefore cannot use the ordinary
+  ## ``<repo>/.git -> <workspace>`` parent walk.
+  let portable = commonDir.replace('\\', '/')
+  for marker in ["/.repo/projects/", "/.repo/project-objects/"]:
+    let markerPos = portable.find(marker)
+    if markerPos > 0:
+      return normalizedPath(commonDir[0 ..< markerPos])
+
+proc workspaceRootForRepo*(repoRoot: string): string =
+  ## Locate the workspace root that owns ``repoRoot`` and its sibling repos.
+  ## A temporary Git worktree may live outside the repo-managed workspace; in
+  ## that case ``repoRoot.parentDir`` is only the temp parent. Follow the Git
+  ## common dir back to the primary checkout and use its parent as the
+  ## workspace root.
+  let direct = repoRoot.parentDir
+  if hasKnownWorkspaceSibling(direct):
+    return normalizedPath(direct)
+
+  let commonDir = gitCommonDir(repoRoot)
+  if commonDir.len > 0:
+    let repoWorkspace = repoManagedWorkspace(commonDir)
+    if repoWorkspace.len > 0 and dirExists(repoWorkspace):
+      return repoWorkspace
+    let workspace = commonDir.parentDir.parentDir
+    if hasKnownWorkspaceSibling(workspace):
+      return normalizedPath(workspace)
+
+  normalizedPath(direct)
+
+proc codeTracerSourceRoot*(repoRoot: string): string =
+  ## Locate a Codetracer checkout for integration tests that copy a small,
+  ## real source subset. Tests may run from a temporary reprobuild worktree, so
+  ## the normal sibling checkout is not always adjacent to ``repoRoot``.
+  var candidates: seq[string]
+
+  let envRoot = getEnv("CODETRACER_ROOT")
+  if envRoot.len > 0:
+    candidates.add(absoluteCandidate(repoRoot, envRoot))
+
+  let envSrc = getEnv("CODETRACER_SRC")
+  if envSrc.len > 0:
+    let sourcePath = absoluteCandidate(repoRoot, envSrc)
+    candidates.add(sourcePath)
+    candidates.add(sourcePath.parentDir)
+
+  candidates.add(repoRoot.parentDir / "codetracer")
+  candidates.add(workspaceRootForRepo(repoRoot) / "codetracer")
+
+  let commonDir = gitCommonDir(repoRoot)
+  if commonDir.len > 0:
+    candidates.add(commonDir.parentDir.parentDir / "codetracer")
+
+  for candidate in candidates:
+    if isCodeTracerSourceRoot(candidate):
+      return normalizedPath(candidate)
+
+proc requireCodeTracerSourceRoot*(repoRoot: string): string =
+  result = codeTracerSourceRoot(repoRoot)
+  if result.len == 0:
+    raise newException(OSError,
+      "Codetracer checkout missing; set CODETRACER_ROOT to the checkout " &
+      "root or CODETRACER_SRC to its src directory")
+
+proc resolveRunQuotaExecutable*(repoRoot, envName, exeName: string): string =
+  ## Resolve runquota tools from env/PATH first, then a built source checkout.
+  let executableName = addFileExt(exeName, ExeExt)
+  result = executableFromEnvOrPath(envName, executableName)
+  if result.len > 0:
+    return
+  let src = runquotaSourceRoot(repoRoot)
+  if src.len > 0:
+    let candidate = src / "build" / "bin" / executableName
+    if fileExists(candidate) and not executableFile(candidate):
+      raise newException(OSError,
+        "runquota source candidate is not executable: " & candidate)
+    if executableFile(candidate):
+      return normalizedPath(candidate)
+
+proc requireRunQuotaDaemonBin*(repoRoot: string): string =
+  result = resolveRunQuotaExecutable(repoRoot, "RUNQUOTAD_BIN", "runquotad")
+  if result.len == 0:
+    raise newException(OSError,
+      "runquotad binary missing; set RUNQUOTAD_BIN, put runquotad on PATH, " &
+      "or set RUNQUOTA_SRC to a built runquota checkout")
+
+proc requireRunQuotaCliBin*(repoRoot: string): string =
+  result = resolveRunQuotaExecutable(repoRoot, "RUNQUOTA_BIN", "runquota")
+  if result.len == 0:
+    raise newException(OSError,
+      "runquota binary missing; set RUNQUOTA_BIN, put runquota on PATH, " &
+      "or set RUNQUOTA_SRC to a built runquota checkout")
 
 type
   MonitorTools* = object

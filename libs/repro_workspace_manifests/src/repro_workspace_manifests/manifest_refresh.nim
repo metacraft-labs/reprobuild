@@ -45,6 +45,7 @@ import reader
 import repro_build_engine
 import git_tool
 import git_actions
+import workspace_branch
 
 type
   ManifestLayerRefreshStatus* = enum
@@ -285,7 +286,7 @@ proc refreshOneLocalLayer(layerIdx: int;
 proc refreshManifestLayers*(workspaceRoot: string):
     ManifestRefreshReport =
   ## Refresh every ``url``-backed manifest layer declared in
-  ## ``<workspaceRoot>/.repo/workspace.toml``. Returns a per-layer
+  ## ``<workspaceRoot>/.repro/workspace.toml``. Returns a per-layer
   ## report. Raises ``WorkspaceManifestParseError`` if the workspace
   ## TOML itself is missing or malformed; per-layer failures are
   ## reported in the result, NOT raised (sync should continue even if
@@ -294,7 +295,8 @@ proc refreshManifestLayers*(workspaceRoot: string):
     if isAbsolute(workspaceRoot): workspaceRoot
     else: absolutePath(workspaceRoot)
   result.workspaceRoot = absRoot
-  let workspaceTomlPath = absRoot / ".repo" / "workspace.toml"
+  let workspaceTomlPath = workspaceTomlPath(absRoot)
+  let dotRepo = absRoot / ".repro"
   result.workspaceTomlPath = workspaceTomlPath
   if not fileExists(workspaceTomlPath):
     # No workspace.toml means M6/M7 single-project mode: nothing to
@@ -305,7 +307,6 @@ proc refreshManifestLayers*(workspaceRoot: string):
   if workspaceLocal.manifest.len == 0:
     return
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
-  let dotRepo = absRoot / ".repo"
   for layerIdx, entry in workspaceLocal.manifest:
     let hasUrl = entry.url.isSome and entry.url.get().len > 0
     if hasUrl:

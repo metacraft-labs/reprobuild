@@ -6,6 +6,17 @@
     nixpkgs.follows = "nixos-modules/nixpkgs-unstable";
     flake-parts.follows = "nixos-modules/flake-parts";
     git-hooks.follows = "nixos-modules/git-hooks-nix";
+    # `bundlers` is the official NixOS bundler collection (the same set
+    # `nix bundle --bundler github:NixOS/bundlers#toArx` reaches for). We
+    # only consume its `toArx` bundler (nix-community/nix-bundle under the
+    # hood) to package the full `reprobuild` store closure into ONE
+    # self-extracting, relocatable executable (see `packages.repro-portable`
+    # below). Follow our nixpkgs so the bundler's arx/nix-user-chroot helper
+    # tools share the fleet's package set rather than pulling a second one.
+    bundlers = {
+      url = "github:NixOS/bundlers";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     runquota-src = {
       # runquota's mainline is ``dev``; ``main`` is stale and lacks the
       # bounded grant-stream API (``pollNextGrantBounded`` / ``GrantPollResult``)
@@ -25,7 +36,48 @@
       #
       # Pinned to the hardened io-mon revision validated for this retirement
       # campaign.
-      url = "github:metacraft-labs/io-mon/9c9ea35365047df0fbec5f76268d6f403225d5b0";
+      #
+      # Bumped to the Lossless-Event-Capture dev tip: io-mon's Linux dependency
+      # channel is now the grow-only shared-memory set ``nim-shm-gset`` (Candidate
+      # C — dedup-at-source, no orphan spill), NOT the ``shm_queue`` ring, which
+      # io-mon no longer imports at all. fs_snoop.nim / writer.nim now
+      # ``import shm_gset`` + ``shm_gset/transport``, so this pin requires the
+      # nim-shm-gset-src input below and its SHM_GSET_SRC wiring.
+      url = "github:metacraft-labs/io-mon/8b6d0b9b91ee8fb907b5cb99ce8f535b7cacb9d8";
+      flake = false;
+    };
+    nim-shm-gset-src = {
+      # nim-shm-gset ships the ``shm_gset`` package: a lock-free grow-only set
+      # (G-Set / join-semilattice CRDT over opaque byte blobs — idempotent
+      # slot-claim CAS, no deletion, file-backed shards, app-id-scoped reaper).
+      # It is io-mon's PRIMARY Linux dependency-capture transport (Candidate C of
+      # the Lossless Event Capture campaign): dedup-at-source so ``configure`` /
+      # ``cmake`` probe storms collapse to the *distinct* dependency set. io-mon's
+      # config.nims reads SHM_GSET_SRC (then falls back to a ``../nim-shm-gset``
+      # sibling); the sandboxed package build + override-free CI jobs have no
+      # sibling, so seed it from here — exactly like nim-shm-queue-src.
+      # reprobuild does not import shm_gset directly; it flows in transitively
+      # through io_mon (fs_snoop / writer), so config.nims still adds it to Nim's
+      # --path for the io-mon compile to resolve.
+      #
+      # Pinned to the nim-shm-gset dev tip matching the io-mon pin above (ShmGSet
+      # API rename landed).
+      url = "github:metacraft-labs/nim-shm-gset/360bfc15cadab1ff583e6d1cbc20b389d5d6825f";
+      flake = false;
+    };
+    nim-shm-queue-src = {
+      # nim-shm-queue ships the ``shm_queue`` package: the extracted, single
+      # lock-free MPSC ring (Layer 1 ``shm_queue/ring`` + ``segment``, over
+      # byte blobs; Layer 2 ``typed_queue``). repro_shm_index's action-cache
+      # submission ring and io-mon's dependency queue BOTH sit on it, so exactly
+      # one MPSC implementation exists. config.nims reads SHM_QUEUE_SRC (then
+      # falls back to a ``../nim-shm-queue`` sibling); the sandboxed package
+      # build + override-free CI jobs have no sibling, so seed it from here.
+      # repro_shm_index consumes ONLY Layer 1 (pure std/posix, no serialization).
+      #
+      # Pinned to the nim-shm-queue rev that adds the Layer-1 EmbeddedRing
+      # (repro_shm_index's action-cache ring embeds it in the control region).
+      url = "github:metacraft-labs/nim-shm-queue/5a8e43b52fa202859658692c9f8432967f3971ea";
       flake = false;
     };
     nimcrypto-src = {
@@ -51,7 +103,20 @@
       # io-mon's ``linux_preload_runtime.nim`` failed with "cannot open file:
       # stackable_hooks/platform/linux_preload" in both the sandboxed package
       # build and ``just bootstrap``.
-      url = "github:metacraft-labs/nim-stackable-hooks/c6cf6ad1ac95201288825970b6ca53f630ea8996";
+      #
+      # Bumped to the rev that additionally carries the Linux x86_64
+      # syscall-scanner rel32 guard (``looksLikeLinuxX8664Syscall`` /
+      # ``visitLinuxX8664SyscallMemory`` reject a ``0f 05`` sitting inside a
+      # ``call``/``jmp rel32`` displacement). Without it the monitor shim's
+      # INT3 syscall-trap patcher corrupted the ``call rmdir@plt`` displacement
+      # in glibc/Nim ``removeDir`` (``e8 0f 05 fa ff``) and SIGILL'd every test
+      # that removes a directory (e.g. isonim-tui
+      # ``test_snapshot_six_formats_recorded``). The dev shell exports this
+      # source as ``STACKABLE_HOOKS_SRC`` and ``build_shim.sh`` honors it, so
+      # the store pin — not the sibling — is what ``just build`` (and CI)
+      # actually compiles the shim from; the old pin therefore produced a
+      # crashing shim even though the local sibling was already hardened.
+      url = "github:metacraft-labs/nim-stackable-hooks/30f69b6ca69c7f06c9a9946b77a85a09f6e3881d";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -93,6 +158,47 @@
       url = "git+https://github.com/metacraft-labs/codetracer-native-recorder?ref=stable";
       flake = false;
     };
+
+    # ── reprobuild Nim toolchain: the metacraft-labs/nim fork ──────────────
+    # The fork (codetracer-nim, Nim 2.3.1 devel) replaces nixpkgs'
+    # nim-unwrapped-2.2.4. It carries a compiler effect-inference fix (so
+    # `std/streams`/`std/json` compile under `--mm:orc -d:useNimRtl`, which stock
+    # 2.2.x rejects) plus CodeTracer's column-aware tracer. Built koch-boot-free
+    # by nix/nim-fork.nix. The fork uses the ``git+https`` clone form (its
+    # codeload tarball 404s, same as codetracer-native-recorder above); the
+    # compiler itself imports the three vendored deps below (trace/stew/results).
+    nim-fork-src = {
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=6d14bb1d22dd8d27ddfe331c73a50085568adb71";
+      flake = false;
+    };
+    nim-csources-src = {
+      url = "github:nim-lang/csources_v3/eeab3ac46e93f10efda8e58c4db02b9438319d71";
+      flake = false;
+    };
+    ct-trace-format-src = {
+      url = "github:metacraft-labs/codetracer-trace-format-nim/c2f3dfc3bcb423a939ff4d6eab42f848957f7048";
+      flake = false;
+    };
+    nim-stew-src = {
+      url = "github:status-im/nim-stew/83eb1157963b7f49351dbdd858355fa990bbe23c";
+      flake = false;
+    };
+    nim-results-src = {
+      url = "github:metacraft-labs/nim-result/df8113dda4c2d74d460a8fa98252b0b771bf1f27";
+      flake = false;
+    };
+    # nim devel bundles `checksums` (md5/sha1, split out of the stdlib) into
+    # dist/; the compiler imports it. Pinned to koch's ChecksumsStableCommit.
+    nim-checksums-src = {
+      url = "github:nim-lang/checksums/0b8e46379c5bc1bf73d8b3011908389c60fb9b98";
+      flake = false;
+    };
+    # nim devel's compiler imports nimony/src/lib/treemangler; koch bundles it
+    # into dist/ non-recursively. Pinned to koch's NimonyStableCommit.
+    nim-nimony-src = {
+      url = "github:nim-lang/nimony/bbfb21529845567c55b67d176354daef0e7d6c29";
+      flake = false;
+    };
   };
 
   outputs =
@@ -107,6 +213,16 @@
       codetracer-native-recorder,
       runquota-src,
       io-mon-src,
+      nim-shm-gset-src,
+      nim-shm-queue-src,
+      nim-fork-src,
+      nim-csources-src,
+      ct-trace-format-src,
+      nim-stew-src,
+      nim-results-src,
+      nim-checksums-src,
+      nim-nimony-src,
+      bundlers,
       ...
     }:
     flake-parts.lib.mkFlake { inherit inputs; } {
@@ -139,6 +255,19 @@
               pkgs.libblake3.out
             ];
           };
+          # The reprobuild Nim toolchain: the metacraft-labs/nim fork (Nim 2.3.1
+          # devel), built from source (nix/nim-fork.nix). Used everywhere the
+          # flake previously used `pkgs.nim2` (nixpkgs nim-unwrapped-2.2.4).
+          nimFork = import ./nix/nim-fork.nix {
+            inherit pkgs;
+            forkSrc = nim-fork-src;
+            csourcesSrc = nim-csources-src;
+            traceFormatSrc = ct-trace-format-src;
+            stewSrc = nim-stew-src;
+            resultsSrc = nim-results-src;
+            checksumsSrc = nim-checksums-src;
+            nimonySrc = nim-nimony-src;
+          };
           # CT_INTERPOSE_SRC points at the directory that *contains* the
           # ``ct_interpose`` package (config.nims validates it by probing
           # ``<dir>/ct_interpose/hook_registry.nim``), which is
@@ -162,7 +291,7 @@
               pkgs.bash
               pkgs.coreutils
               pkgs.just
-              pkgs.nim2
+              nimFork
             ];
             buildPhase = ''
               runHook preBuild
@@ -190,7 +319,7 @@
                     pkgs.coreutils
                     pkgs.gnugrep
                     pkgs.just
-                    pkgs.nim2
+                    nimFork
                   ]
                 }:$PATH
                 export BLAKE3_PREFIX=${blake3Prefix}
@@ -198,6 +327,8 @@
                 export BEARSSL_SRC=${bearssl-src}
                 export STACKABLE_HOOKS_SRC=${stackable-hooks-src}/src
                 export IO_MON_SRC=${io-mon-src}/src
+                export SHM_GSET_SRC=${nim-shm-gset-src}/src
+                export SHM_QUEUE_SRC=${nim-shm-queue-src}/src
                 export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
                 export CT_INTERPOSE_SRC=${ctInterposeSrc}
@@ -210,17 +341,28 @@
               pass_filenames = false;
             };
           };
+          reprobuildSource = ./.;
+          runtimeLibraries = [
+            blake3Prefix
+            pkgs.xxHash
+            pkgs.sqlite.out
+            pkgs.openssl.out
+            pkgs.zstd.out
+            pkgs.clingo
+          ];
+          runtimeLibraryPath = pkgs.lib.makeLibraryPath runtimeLibraries;
           reprobuild = pkgs.stdenv.mkDerivation {
             pname = "reprobuild";
             inherit version;
-            src = ./.;
+            src = reprobuildSource;
 
             strictDeps = true;
             dontConfigure = true;
 
             nativeBuildInputs = [
               pkgs.just
-              pkgs.nim2
+              pkgs.makeWrapper
+              nimFork
               # Spec-Implementation M2a: clingo is the ASP solver
               # reprobuild's repro_solver lib binds against. The CLI
               # tool is used by smoke tests and the C library
@@ -230,6 +372,17 @@
               # `just build`; the buildInputs entry below pulls the
               # shared library into the runtime closure.
               pkgs.clingo
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              # Rewrites Mach-O install IDs and internal dependency paths
+              # before postFixup adds the complete package LC_RPATH set. The
+              # signing hook is a postFixupHooks entry: stdenv runs the
+              # derivation's postFixup body first, so it signs only after our
+              # per-slice mutation and universal-image reassembly.
+              pkgs.fixDarwinDylibNames
+              pkgs.darwin.autoSignDarwinBinariesHook
+              pkgs.coreutils
+              pkgs.file
             ];
 
             buildInputs = [
@@ -250,6 +403,8 @@
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
             IO_MON_SRC = "${io-mon-src}/src";
+            SHM_GSET_SRC = "${nim-shm-gset-src}/src";
+            SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;
@@ -277,35 +432,67 @@
               runHook postInstall
             '';
 
-            # The binary-cache client streaming path dlopen()s libzstd.so.1 at
-            # runtime (zstd frame decompress on substitute). Because it is
-            # dlopen'd it is NOT a DT_NEEDED dep, so the default fixupPhase
-            # (`patchelf --shrink-rpath`) strips any rpath entry pointing at
-            # zstd — which is why adding it in installPhase silently vanished.
-            # Re-add it in postFixup (runs AFTER the shrink) as a forced DT_RPATH
-            # (glibc reliably searches DT_RPATH — not always DT_RUNPATH — for a
-            # binary's own dlopen calls). Without this, repro-binary-cache /
-            # repro-binary-cache-crosshost fail at the first payload transfer
-            # with "could not load: libzstd.so.1" (M1's healthz/cache-info gate
-            # never transferred a payload, so it only surfaced under the M2
-            # cross-host substitute test).
-            #
-            # clingo is the same story: repro_solver's Nim bindings dlopen()
-            # libclingo.so by bare leaf name at runtime (see build_apps.sh's
-            # .rodata-bake guard that clears NIX_LDFLAGS/LD_LIBRARY_PATH), so it
-            # is not DT_NEEDED and the shrink strips any clingo rpath too.
-            # Append clingo's lib dir alongside zstd so every reprobuild binary
-            # (repro, repro-binary-cache, repro-binary-cache-client — the latter
-            # two are overrideAttrs of this derivation and inherit this
-            # postFixup) resolves its clingo dlopen via its own DT_RPATH, with no
-            # external LD_LIBRARY_PATH. This lets the nixos-modules
-            # `mcl-repro-deploy-agent` unit drop its LD_LIBRARY_PATH workaround.
+            # Installed entry points span ordinary linked libraries and bare
+            # leaf-name dlopen()s (notably zstd and clingo). Normal fixup only
+            # retains paths visible from link dependencies, so restore the full
+            # runtime family for every installed ELF/Mach-O role. Linux uses a
+            # transitive DT_RPATH; Darwin needs one LC_RPATH load command per
+            # directory and valid install IDs for every installed dylib.
             postFixup = ''
+              ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+                for b in "$out"/bin/* "$out"/lib/*; do
+                  if orig=$(${pkgs.patchelf}/bin/patchelf --print-rpath "$b" 2>/dev/null); then
+                    ${pkgs.patchelf}/bin/patchelf --force-rpath \
+                      --set-rpath "$orig''${orig:+:}${runtimeLibraryPath}" "$b"
+                  fi
+                done
+              ''}
+
+              ${pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+                # fixDarwinDylibNames is a fixupOutputHook and has already run.
+                # Copy thin images or extract universal slices, mutate each
+                # architecture independently, then reassemble universal images.
+                # autoSignDarwinBinariesHook is registered in
+                # postFixupHooks, which stdenv invokes after this implicit
+                # postFixup body, so arm64/arm64e signatures cover final bytes.
+                FILE=${pkgs.file}/bin/file \
+                STAT=${pkgs.coreutils}/bin/stat \
+                CP=${pkgs.coreutils}/bin/cp \
+                MV=${pkgs.coreutils}/bin/mv \
+                ${pkgs.bash}/bin/bash ${./scripts/fixup_macho_runtime.sh} "$out" \
+                  ${pkgs.lib.concatStringsSep " " (map (library: "${library}/lib") runtimeLibraries)}
+              ''}
+
+              # Provider/interface compilation happens after installation, in
+              # the caller's project. Keep the package's exact source inputs in
+              # its runtime closure and expose them as defaults to every entry
+              # point. `--set-default` preserves explicit development/source
+              # overrides while making an ordinary installed package
+              # independent of sibling checkouts and the build-time dev shell.
+              # REPROBUILD_RUNTIME_LIBRARY_PATH is compiler input, not a loader
+              # variable: generated interface/provider binaries bake these dirs
+              # into their own RPATH. In particular, do not inject LD_LIBRARY_PATH
+              # or DYLD_* into wrappers because arbitrary user build actions
+              # inherit the wrapper environment.
               for b in "$out"/bin/*; do
-                if orig=$(${pkgs.patchelf}/bin/patchelf --print-rpath "$b" 2>/dev/null); then
-                  ${pkgs.patchelf}/bin/patchelf --force-rpath \
-                    --set-rpath "$orig''${orig:+:}${pkgs.zstd.out}/lib:${pkgs.clingo}/lib" "$b"
-                fi
+                wrapProgram "$b" \
+                  --set-default REPROBUILD_RUNTIME_LIBRARY_PATH ${runtimeLibraryPath} \
+                  --set-default REPROBUILD_SOURCE_ROOT ${reprobuildSource} \
+                  --set-default BLAKE3_PREFIX ${blake3Prefix} \
+                  --set-default NIMCRYPTO_SRC ${nimcrypto-src} \
+                  --set-default BEARSSL_SRC ${bearssl-src} \
+                  --set-default STACKABLE_HOOKS_SRC ${stackable-hooks-src}/src \
+                  --set-default IO_MON_SRC ${io-mon-src}/src \
+                  --set-default SHM_GSET_SRC ${nim-shm-gset-src}/src \
+                  --set-default SHM_QUEUE_SRC ${nim-shm-queue-src}/src \
+                  --set-default REPRO_CT_TEST_RUNNER_SRC ${reprobuild-ct-test-runner-src} \
+                  --set-default REPRO_TEST_ADAPTERS_SRC ${reprobuild-test-adapters-src}/src \
+                  --set-default CT_INTERPOSE_SRC ${ctInterposeSrc} \
+                  --set-default REPROBUILD_USE_SYSTEM_HASH_LIBS 1 \
+                  --set-default RUNQUOTA_SRC ${runquota-src} \
+                  --set-default SQLITE_PREFIX ${pkgs.sqlite.out} \
+                  --set-default XXHASH_PREFIX ${pkgs.xxHash} \
+                  --set-default CLINGO_PREFIX ${pkgs.clingo}
               done
             '';
 
@@ -322,6 +509,334 @@
               ];
             };
           };
+          reprobuildClosure = pkgs.closureInfo {
+            rootPaths = [ reprobuild ];
+          };
+          packagedRuntimeCompileCheck =
+            pkgs.runCommand "reprobuild-packaged-runtime-compile"
+              {
+                nativeBuildInputs = [
+                  pkgs.bash
+                  pkgs.coreutils
+                  pkgs.findutils
+                  pkgs.gcc
+                  pkgs.gnugrep
+                ]
+                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.patchelf ]
+                ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+                  pkgs.binutils
+                  pkgs.cctools
+                  pkgs.darwin.sigtool
+                ];
+              }
+              ''
+                                    export HOME="$TMPDIR/home"
+                                    export TMPDIR="$TMPDIR/tmp"
+                                    mkdir -p "$HOME" "$TMPDIR" "$TMPDIR/direct/project"
+
+                                    daemonEndpoint="$TMPDIR/packaged-repro-daemon.sock"
+                                    daemonState="$TMPDIR/packaged-daemon-state"
+                                    daemonRuntime="$TMPDIR/packaged-daemon-runtime"
+                                    runtimePath=${
+                                      pkgs.lib.makeBinPath [
+                                        pkgs.bash
+                                        pkgs.coreutils
+                                        pkgs.gcc
+                                        pkgs.gnugrep
+                                      ]
+                                    }
+
+                                    runDaemonControl() {
+                                      ${pkgs.coreutils}/bin/env -i \
+                                        HOME="$HOME" TMPDIR="$TMPDIR" PATH="$runtimePath" \
+                                        REPRO_DAEMON_RUNTIME_DIR="$daemonRuntime" \
+                                        ${reprobuild}/bin/repro daemon "$1" \
+                                          --endpoint "$daemonEndpoint" \
+                                          --state-dir "$daemonState" \
+                                          --log "$daemonState/logs/repro-daemon.log"
+                                    }
+                                    cleanupDaemon() {
+                                      runDaemonControl stop >/dev/null 2>&1 || true
+                                      rm -f "$daemonEndpoint"
+                                    }
+                                    showFailureLogs() {
+                                      status=$?
+                                      for log in \
+                                        "$TMPDIR/direct-build.log" \
+                                        "$TMPDIR/daemon-build.log" \
+                                        "$TMPDIR/daemon-status.log" \
+                                        "$TMPDIR/explicit-override.log"; do
+                                        if test -f "$log"; then
+                                          echo "--- tail of $log ---" >&2
+                                          tail -n 200 "$log" >&2
+                                        fi
+                                      done
+                                      exit "$status"
+                                    }
+                                    trap cleanupDaemon EXIT
+                                    trap showFailureLogs ERR
+
+                                    assertColdActionLog() {
+                                      log="$1"
+                                      test "$(grep -Ec '^providerCompileAction: ' "$log")" -eq 1
+                                      test "$(grep -Ec '^action: ' "$log")" -eq 3
+                                      test "$(grep -Ec '^providerCompileAction: __repro_provider_compile status=asSucceeded launched=true( |$)' "$log")" -eq 1
+                                      for actionName in build-dir compile-hello run-hello; do
+                                        test "$(grep -Ec "^action: $actionName status=asSucceeded launched=true( |$)" "$log")" -eq 1
+                                      done
+                                      if grep -Eq '^(providerCompileAction|action): .*status=(asFailed|asBlocked|asSkipped|asUpToDate|asCacheHit)' "$log"; then
+                                        echo "cold package gate accepted a non-launched action" >&2
+                                        return 1
+                                      fi
+                                    }
+
+                                    # Every public entry point must be a wrapper paired with one
+                                    # hidden target. Enumerate rather than hard-code the current
+                                    # binaries so newly installed helpers (including scripts)
+                                    # cannot bypass the packaged defaults.
+                                    wrapperCount=0
+                                    for wrapper in ${reprobuild}/bin/*; do
+                                      name=$(basename "$wrapper")
+                                      hidden=${reprobuild}/bin/.$name-wrapped
+                                      test -f "$hidden"
+                                      grep -Fq "$hidden" "$wrapper"
+                                      if grep -Eq 'LD_LIBRARY_PATH|DYLD_(LIBRARY_PATH|FALLBACK_LIBRARY_PATH)' "$wrapper"; then
+                                        echo "loader search path leaked through wrapper: $wrapper" >&2
+                                        exit 1
+                                      fi
+                                      while IFS='|' read -r variable expected; do
+                                        grep -Fq "$variable" "$wrapper"
+                                        grep -Fq "$expected" "$wrapper"
+                                      done <<DEFAULTS
+                REPROBUILD_RUNTIME_LIBRARY_PATH|${runtimeLibraryPath}
+                REPROBUILD_SOURCE_ROOT|${reprobuildSource}
+                BLAKE3_PREFIX|${blake3Prefix}
+                NIMCRYPTO_SRC|${nimcrypto-src}
+                BEARSSL_SRC|${bearssl-src}
+                STACKABLE_HOOKS_SRC|${stackable-hooks-src}/src
+                IO_MON_SRC|${io-mon-src}/src
+                SHM_GSET_SRC|${nim-shm-gset-src}/src
+                SHM_QUEUE_SRC|${nim-shm-queue-src}/src
+                REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
+                REPRO_TEST_ADAPTERS_SRC|${reprobuild-test-adapters-src}/src
+                CT_INTERPOSE_SRC|${ctInterposeSrc}
+                REPROBUILD_USE_SYSTEM_HASH_LIBS|1
+                RUNQUOTA_SRC|${runquota-src}
+                SQLITE_PREFIX|${pkgs.sqlite.out}
+                XXHASH_PREFIX|${pkgs.xxHash}
+                CLINGO_PREFIX|${pkgs.clingo}
+                DEFAULTS
+                                      wrapperCount=$((wrapperCount + 1))
+                                    done
+                                    test "$wrapperCount" -gt 0
+                                    for hidden in ${reprobuild}/bin/.*-wrapped; do
+                                      name=$(basename "$hidden")
+                                      publicName=$(printf '%s' "$name" | sed -e 's/^\.//' -e 's/-wrapped$//')
+                                      test -f "${reprobuild}/bin/$publicName"
+                                    done
+
+                                    ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+                                      # Every installed ELF role, including hidden wrapper
+                                      # targets and .old libraries, carries all six package
+                                      # runtime dirs as distinct DT_RPATH entries.
+                                      elfCount=0
+                                      for candidate in ${reprobuild}/bin/* ${reprobuild}/bin/.*-wrapped ${reprobuild}/lib/*; do
+                                        if rpath=$(${pkgs.patchelf}/bin/patchelf --print-rpath "$candidate" 2>/dev/null); then
+                                          elfCount=$((elfCount + 1))
+                                          for requiredRpath in \
+                                            ${blake3Prefix}/lib \
+                                            ${pkgs.xxHash}/lib \
+                                            ${pkgs.sqlite.out}/lib \
+                                            ${pkgs.openssl.out}/lib \
+                                            ${pkgs.zstd.out}/lib \
+                                            ${pkgs.clingo}/lib; do
+                                            case ":$rpath:" in
+                                              *":$requiredRpath:"*) ;;
+                                              *) echo "incomplete RPATH on $candidate: $rpath" >&2; exit 1 ;;
+                                            esac
+                                          done
+                                        else
+                                          case "$candidate" in
+                                            ${reprobuild}/lib/*|${reprobuild}/bin/.*-wrapped)
+                                              echo "non-ELF installed binary/library role: $candidate" >&2
+                                              exit 1
+                                              ;;
+                                          esac
+                                        fi
+                                      done
+                                      test "$elfCount" -gt 0
+                                    ''}
+
+                                    ${pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+                                      # Use the same strict per-slice audit exercised by the
+                                      # Linux-hosted behavioral fixture. It resolves dependency
+                                      # tokens against each architecture's own LC_RPATH list and
+                                      # verifies final arm signatures after postFixup mutation.
+                                      ${pkgs.bash}/bin/bash ${./scripts/audit_macho_runtime.sh} \
+                                        ${reprobuild} \
+                                        ${blake3Prefix}/lib \
+                                        ${pkgs.xxHash}/lib \
+                                        ${pkgs.sqlite.out}/lib \
+                                        ${pkgs.openssl.out}/lib \
+                                        ${pkgs.zstd.out}/lib \
+                                        ${pkgs.clingo}/lib
+
+                                      # Prove the installed program bytes use LC_RPATH-aware
+                                      # dlopen names, not bare leaf names. The pure target helper
+                                      # tests pin the same constants on Linux before this gate.
+                                      zstdLoaderCount=0
+                                      clingoLoaderCount=0
+                                      for candidate in ${reprobuild}/bin/.*-wrapped ${reprobuild}/lib/*; do
+                                        if lipo -archs "$candidate" >/dev/null 2>&1; then
+                                          loaderStrings=$(strings "$candidate")
+                                          if printf '%s\n' "$loaderStrings" | grep -Fxq '@rpath/libzstd.1.dylib'; then
+                                            zstdLoaderCount=$((zstdLoaderCount + 1))
+                                          fi
+                                          if printf '%s\n' "$loaderStrings" | grep -Fxq '@rpath/libclingo.dylib'; then
+                                            clingoLoaderCount=$((clingoLoaderCount + 1))
+                                          fi
+                                          if printf '%s\n' "$loaderStrings" | grep -Fxq 'libzstd.1.dylib'; then
+                                            echo "bare zstd Darwin loader name in $candidate" >&2
+                                            exit 1
+                                          fi
+                                          if printf '%s\n' "$loaderStrings" | grep -Fxq 'libclingo.dylib'; then
+                                            echo "bare clingo Darwin loader name in $candidate" >&2
+                                            exit 1
+                                          fi
+                                        fi
+                                      done
+                                      test "$zstdLoaderCount" -gt 0
+                                      test "$clingoLoaderCount" -gt 0
+                                    ''}
+
+                                    cp -R ${./tests/fixtures/packaged-runtime-compile}/. \
+                                      "$TMPDIR/direct/project/"
+                                    chmod -R u+w "$TMPDIR/direct/project"
+
+                                    # A source-looking sibling must not shadow the package's pinned
+                                    # adapter. The file is intentionally uncompilable: reaching it
+                                    # makes the positive real-execution gate fail hard.
+                                    hostile="$TMPDIR/direct/reprobuild-test-adapters/src/repro_test_adapters"
+                                    mkdir -p "$hostile"
+                                    printf '%s\n' '{.error: "HOSTILE_SIBLING_ADAPTER_WAS_USED".}' \
+                                      > "$hostile/test_runner.nim"
+
+                                    # Direct cold build: env -i deliberately omits the source root
+                                    # and every package prefix so the wrapper defaults are exercised.
+                                    (
+                                      cd "$TMPDIR/direct/project"
+                                      ${pkgs.coreutils}/bin/env -i \
+                                        HOME="$HOME" TMPDIR="$TMPDIR" PATH="$runtimePath" \
+                                        REPROBUILD_STORE_ROOT="$TMPDIR/direct-store" \
+                                        REPROBUILD_ACTION_CACHE_ROOT="$TMPDIR/direct-action-cache" \
+                                        ${reprobuild}/bin/repro build . \
+                                          --daemon=off --no-runquota \
+                                          --tool-provisioning=path --progress=none --log=actions
+                                    ) > "$TMPDIR/direct-build.log" 2>&1
+                                    assertColdActionLog "$TMPDIR/direct-build.log"
+                                    test "$(cat "$TMPDIR/direct/project/build/hello-output.txt")" = \
+                                      "reprobuild packaged runtime: hello"
+                                    if grep -Fq HOSTILE_SIBLING_ADAPTER_WAS_USED "$TMPDIR/direct-build.log"; then
+                                      echo "packaged build selected the hostile sibling adapter" >&2
+                                      exit 1
+                                    fi
+
+                                    # CodeTracer-style positive override: a writable source copy
+                                    # with spaces and shell metacharacters, while every external
+                                    # source/prefix remains the installed wrapper default. Start a
+                                    # real isolated daemon first so --daemon=require cannot fall
+                                    # back to direct execution.
+                                    sourceOverride="$TMPDIR/CodeTracer source [override] #1;copy"
+                                    daemonProject="$TMPDIR/daemon project [override] #1"
+                                    mkdir -p "$sourceOverride" "$daemonProject"
+                                    cp -R ${reprobuildSource}/. "$sourceOverride/"
+                                    cp -R ${./tests/fixtures/packaged-runtime-compile}/. "$daemonProject/"
+                                    chmod -R u+w "$sourceOverride" "$daemonProject"
+                                    runDaemonControl start > "$TMPDIR/daemon-start.log" 2>&1
+                                    runDaemonControl status > "$TMPDIR/daemon-status.log" 2>&1
+                                    grep -Fq 'repro daemon: running' "$TMPDIR/daemon-status.log"
+                                    (
+                                      cd "$daemonProject"
+                                      ${pkgs.coreutils}/bin/env -i \
+                                        HOME="$HOME" TMPDIR="$TMPDIR" PATH="$runtimePath" \
+                                        REPRO_DAEMON_ENDPOINT="$daemonEndpoint" \
+                                        REPRO_DAEMON_STATE_DIR="$daemonState" \
+                                        REPRO_DAEMON_RUNTIME_DIR="$daemonRuntime" \
+                                        REPROBUILD_SOURCE_ROOT="$sourceOverride" \
+                                        REPROBUILD_STORE_ROOT="$TMPDIR/daemon-store" \
+                                        REPROBUILD_ACTION_CACHE_ROOT="$TMPDIR/daemon-action-cache" \
+                                        ${reprobuild}/bin/repro build . \
+                                          --daemon=require --no-runquota \
+                                          --tool-provisioning=path --progress=none --log=actions
+                                    ) > "$TMPDIR/daemon-build.log" 2>&1
+                                    assertColdActionLog "$TMPDIR/daemon-build.log"
+                                    test "$(cat "$daemonProject/build/hello-output.txt")" = \
+                                      "reprobuild packaged runtime: hello"
+                                    runDaemonControl status > "$TMPDIR/daemon-status.log" 2>&1
+                                    grep -Fq 'active-sessions: 0' "$TMPDIR/daemon-status.log"
+                                    runDaemonControl stop > "$TMPDIR/daemon-stop.log" 2>&1
+                                    runDaemonControl status > "$TMPDIR/daemon-after-stop.log" 2>&1
+                                    grep -Fq 'repro daemon: not-running' "$TMPDIR/daemon-after-stop.log"
+                                    test ! -e "$daemonEndpoint"
+
+                                    # makeWrapper defaults must preserve explicit overrides. A
+                                    # deliberately broken adapter must be selected, not masked.
+                                    mkdir -p "$TMPDIR/explicit-adapter/src/repro_test_adapters" \
+                                      "$TMPDIR/override-project"
+                                    cp -R ${./tests/fixtures/packaged-runtime-compile}/. \
+                                      "$TMPDIR/override-project/"
+                                    chmod -R u+w "$TMPDIR/override-project"
+                                    printf '%s\n' '{.error: "EXPLICIT_ADAPTER_OVERRIDE_WAS_USED".}' \
+                                      > "$TMPDIR/explicit-adapter/src/repro_test_adapters/test_runner.nim"
+                                    if (
+                                      cd "$TMPDIR/override-project"
+                                      ${pkgs.coreutils}/bin/env -i \
+                                        HOME="$HOME" TMPDIR="$TMPDIR" PATH="$runtimePath" \
+                                        REPRO_TEST_ADAPTERS_SRC="$TMPDIR/explicit-adapter/src" \
+                                        REPROBUILD_STORE_ROOT="$TMPDIR/override-store" \
+                                        REPROBUILD_ACTION_CACHE_ROOT="$TMPDIR/override-action-cache" \
+                                        ${reprobuild}/bin/repro build . \
+                                          --daemon=off --no-runquota \
+                                          --tool-provisioning=path --progress=none --log=actions
+                                    ) > "$TMPDIR/explicit-override.log" 2>&1; then
+                                      echo "packaged wrapper masked an explicit adapter override" >&2
+                                      exit 1
+                                    fi
+                                    grep -Fq EXPLICIT_ADAPTER_OVERRIDE_WAS_USED \
+                                      "$TMPDIR/explicit-override.log"
+
+                                    # Every source/prefix used as an installed-runtime default must be
+                                    # a real member of the package closure, not an ambient store path.
+                                    cp ${reprobuildClosure}/store-paths "$TMPDIR/package-closure"
+                                    for required in \
+                                      ${reprobuildSource} \
+                                      ${nimcrypto-src} \
+                                      ${bearssl-src} \
+                                      ${stackable-hooks-src} \
+                                      ${io-mon-src} \
+                                      ${nim-shm-gset-src} \
+                                      ${nim-shm-queue-src} \
+                                      ${reprobuild-ct-test-runner-src} \
+                                      ${reprobuild-test-adapters-src} \
+                                      ${codetracer-native-recorder} \
+                                      ${runquota-src} \
+                                      ${blake3Prefix} \
+                                      ${pkgs.sqlite.out} \
+                                      ${pkgs.xxHash} \
+                                      ${pkgs.openssl.out} \
+                                      ${pkgs.zstd.out} \
+                                      ${pkgs.clingo}; do
+                                      if ! grep -Fxq "$required" "$TMPDIR/package-closure"; then
+                                        echo "missing packaged runtime closure path: $required" >&2
+                                        exit 1
+                                      fi
+                                    done
+
+                                    mkdir -p "$out"
+                                    cp "$TMPDIR/direct-build.log" "$out/"
+                                    cp "$TMPDIR/daemon-build.log" "$out/"
+                                    cp "$TMPDIR/package-closure" "$out/"
+              '';
           reproApp = {
             type = "app";
             program = "${reprobuild}/bin/repro";
@@ -344,43 +859,62 @@
             type = "app";
             program = "${reproBinaryCache}/bin/repro-binary-cache";
           };
-          # Windows-Runner-Binary-Cache-Deploy M3a — expose the binary-cache
-          # client CLI as its own package so the Windows runner deploy path (and
-          # the nixos-modules integration tests) have a runnable artifact to
-          # reference. Same `just build` closure as `reprobuild` (the
-          # installPhase copies every build/bin/* entrypoint, including the
-          # newly-added build/bin/repro-binary-cache-client); we only
-          # retarget `meta.mainProgram` so `lib.getExe` resolves the CLI. It
-          # inherits the zstd `postFixup` DT_RPATH for free — the streaming
-          # substitute path dlopen()s libzstd.so.1, so without that rpath the
-          # CLI would fail at the first payload transfer, exactly like the
-          # daemon did under the M2 cross-host substitute gate.
-          reproBinaryCacheClient = reprobuild.overrideAttrs (old: {
-            pname = "repro-binary-cache-client";
-            meta = (old.meta or { }) // {
-              description = "Reprobuild binary-cache client CLI (publish/substitute/lookup)";
-              mainProgram = "repro-binary-cache-client";
-            };
-          });
-          reproBinaryCacheClientApp = {
-            type = "app";
-            program = "${reproBinaryCacheClient}/bin/repro-binary-cache-client";
-          };
+          # Binary-Caches.md §"Client CLI Surface (`repro cache`)" — the
+          # standalone `repro-binary-cache-client` package/app was RETIRED. Its
+          # toolset (publish/substitute/lookup/derive-key/gen-key) was folded
+          # into the `repro cache <subcommand>` dispatch shipped by the main
+          # `reprobuild` package (`bin/repro`). Callers that used
+          # `packages.repro-binary-cache-client` now use `packages.reprobuild`
+          # and invoke `repro cache …`.
+          # Portable/self-contained `repro`: package the ENTIRE `reprobuild`
+          # store closure into one self-extracting, relocatable executable so
+          # the CLI runs on a plain host (e.g. an im2-debian-cloud GitHub
+          # Actions runner image, or a developer workstation) that has NO
+          # /nix/store present.
+          #
+          # Why a bundle and NOT a static (musl/`--passL:-static`) build:
+          #  * The single `repro` CLI links OpenSSL (`--define:ssl`) and, at
+          #    MODULE-INIT time (Nim `{.dynlib.}`
+          #    `DatInit`, before `main`), dlopens `libclingo.so` by the
+          #    absolute path the Nim compiler baked into `.rodata`
+          #    (libs/repro_solver/.../clingo_bindings.nim documents this eager
+          #    load). A dlopen-by-baked-abs-path solver cannot be statically
+          #    linked, and clingo/openssl/blake3/sqlite would all have to be
+          #    static too. So a true static binary is infeasible here.
+          #  * The `toArx` bundler embeds the whole closure and, at run time,
+          #    uses `nix-user-chroot` to expose the extracted store at the
+          #    real `/nix/store` inside a user namespace. That makes every
+          #    baked `/nix/store/...` rpath, PT_INTERP, and the clingo dlopen
+          #    path resolve WITHOUT a real `/nix/store` on the host. It
+          #    requires unprivileged user namespaces (default on the target
+          #    Debian image).
+          #
+          # This is the same machinery as `nix bundle --bundler
+          # github:NixOS/bundlers#toArx .#reprobuild`, wired as a first-class
+          # package output so callers can just `nix build .#repro-portable`.
+          # The bundler keys off `meta.mainProgram` ("repro"), so the produced
+          # executable launches the single `repro` image from the extracted
+          # closure. It ADDS to — and does not
+          # disturb — `packages.default`/`packages.reprobuild` or `just build`.
+          reproPortable = bundlers.bundlers.${system}.toArx reprobuild;
         in
         {
           apps.default = reproApp;
           apps.repro = reproApp;
           apps.repro-binary-cache = reproBinaryCacheApp;
-          apps.repro-binary-cache-client = reproBinaryCacheClientApp;
 
           packages.default = reprobuild;
           packages.reprobuild = reprobuild;
+          # The Nim fork toolchain, exposed for standalone build/verification.
+          packages.nim-fork = nimFork;
           packages.repro-binary-cache = reproBinaryCache;
-          packages.repro-binary-cache-client = reproBinaryCacheClient;
+          # Self-contained, /nix/store-free `repro` (see `reproPortable`).
+          packages.repro-portable = reproPortable;
 
           checks = {
             inherit pre-commit-check;
             package-build = reprobuild;
+            packaged-runtime-compile = packagedRuntimeCompileCheck;
             repo-requirements =
               pkgs.runCommand "reprobuild-repo-requirements" { nativeBuildInputs = [ pkgs.just ]; }
                 ''
@@ -393,6 +927,7 @@
           };
 
           devShells.default = pkgs.mkShell {
+            inputsFrom = [ pkgs.nix ];
             # repro_solver's clingo bindings dlopen libclingo.so at module init.
             # build_apps.sh clears NIX_LDFLAGS + LD_LIBRARY_PATH for every `nim c`
             # (the .rodata-bake guard) so the binaries carry a bare
@@ -404,12 +939,43 @@
             # package build's binaries, not the `just bootstrap` binaries the
             # ct build and `just test` run), so add it here too — otherwise a
             # bootstrapped `repro` aborts with "could not load: libzstd.so.1".
-            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.clingo pkgs.zstd ];
+            # openssl is likewise dlopen'd: binaries built `--define:ssl` (e.g.
+            # repro-harvest-apt's HTTPS fetch via std/net) carry a bare
+            # `dlopen("libcrypto.so.3")`, so a bootstrapped `repro` aborts with
+            # "could not load: libcrypto.so" in the bare dev shell without it.
+            #
+            # pcre is here for a DIFFERENT reason, and the distinction matters
+            # for anyone tempted to "fix" it in `nix/nim-fork.nix` instead. The
+            # Nim toolchain IS self-contained: `nix/nim-fork.nix` already lists
+            # pcre in `buildInputs` and patchelfs the pcre lib dir into
+            # `bin/nim`'s RUNPATH, and a bare `nim --version` loads
+            # `libpcre.so.1` fine. What breaks is monitored execution. The
+            # provider-compile edge runs `nim c` under automatic monitoring,
+            # which LD_PRELOADs `librepro_monitor_shim.so`; the shim interposes
+            # `dlopen`, so the forwarded call is issued from the shim's own DSO
+            # and the monitored binary's DT_RUNPATH stops governing the lookup:
+            # `LD_PRELOAD=<shim> nim --version` fails with "could not load:
+            # libpcre.so(.3|.1|)" while the identical command without the shim
+            # succeeds. LD_LIBRARY_PATH is process-global — consulted before
+            # any DT_RUNPATH and independent of which DSO issued the call — so
+            # listing pcre here restores resolution under interposition. The
+            # durable fix is in io-mon's dlopen hook, which should resolve
+            # against the calling binary's link map; that lives in io-mon's
+            # repo, not this one. `scripts/check_toolchain_dlopen.sh` guards
+            # this whole class (see `just check-toolchain-dlopen`).
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.clingo
+              pkgs.zstd
+              pkgs.openssl
+              pkgs.pcre
+            ];
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
             IO_MON_SRC = "${io-mon-src}/src";
+            SHM_GSET_SRC = "${nim-shm-gset-src}/src";
+            SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;
@@ -420,12 +986,20 @@
             packages = [
               runquotaTools
               pkgs.just
-              pkgs.nim2
+              nimFork
               # Used by the ct-build CI step to bake reprobuild's runtime library
               # dirs (clingo + zstd) into the bootstrapped `repro`'s RPATH, so it
               # resolves its dlopen()s when run inside CodeTracer's dev shell.
               pkgs.patchelf
               pkgs.cmake
+              pkgs.pkg-config
+              pkgs.nix
+              pkgs.libsodium
+              pkgs.boost
+              pkgs.libgit2
+              pkgs.libarchive
+              pkgs.nlohmann_json
+              pkgs.pcre2
               pkgs.ninja
               pkgs.clang
               pkgs.curl

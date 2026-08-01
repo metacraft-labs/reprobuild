@@ -37,7 +37,45 @@ proc foreachParts(stmt: NimNode): tuple[matched: bool; iteratorName: string;
   result.body = stmt[2]
   result.matched = true
 
-proc collectBuildStatements(pkgBody: NimNode): NimNode =
+proc artifactBuildBodyName(nameNode: NimNode): string =
+  ## Extract the artifact member name from an ``executable <name>:`` /
+  ## ``library <name>:`` head node. Mirrors ``m3ArtifactNameNode`` (which
+  ## is declared further down) so the flattened build body can carry the
+  ## owning member for the L3 per-artifact ``beginBuildContext`` push.
+  ## Returns ``""`` for unrecognised name shapes.
+  case nameNode.kind
+  of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+    nameNode.strVal
+  of nnkIdent, nnkSym, nnkAccQuoted:
+    identText(nameNode)
+  else:
+    ""
+
+proc wrapArtifactBuildBody(packageName, memberName: string;
+                           stmts: NimNode): NimNode =
+  ## Wrap one artifact's flattened ``build:`` statements in a
+  ## ``beginBuildContext(package, member) / try body finally
+  ## endBuildContext()`` block. This restores the M4 per-artifact
+  ## context frame around the artifact body in PROVIDER MODE — where the
+  ## M4 emitters gate their body splice off and ``buildXxxPackage``
+  ## (fed by this flattened list) is the sole executor. With the frame
+  ## present, ``nim.c``'s ``maybeTagPublicInterface`` can attribute the
+  ## edge to the owning ``(package, member)`` and tag declared
+  ## ``executable``/``library`` members for binary-cache publication.
+  ## The top-level (package-scoped) ``build:`` block is NOT wrapped —
+  ## it carries no owning member, so its edges stay untagged (correct:
+  ## they are not the package's declared public interface).
+  let pkgLit = newLit(packageName)
+  let memberLit = newLit(memberName)
+  result = quote do:
+    block:
+      beginBuildContext(`pkgLit`, `memberLit`)
+      try:
+        `stmts`
+      finally:
+        endBuildContext()
+
+proc collectBuildStatements(pkgBody: NimNode; packageName = ""): NimNode =
   ## Aggregate every ``build:`` block in the package body — both the
   ## top-level ``build:`` and any per-artifact ``build:`` nested inside
   ## an ``executable`` or ``library`` member — into a single flat
@@ -52,6 +90,14 @@ proc collectBuildStatements(pkgBody: NimNode): NimNode =
   ## evaluation that briefly touched the body); the provider mode
   ## emitted no graph fragment and crashed with "provider did not write
   ## a response file".
+  ##
+  ## L3 PUBLISH-SCOPE: when ``packageName`` is supplied, each
+  ## per-artifact ``build:`` body is wrapped in a
+  ## ``beginBuildContext``/``endBuildContext`` pair carrying the owning
+  ## ``(package, member)`` so provider-mode execution restores the M4
+  ## frame and public-interface tagging fires (see
+  ## ``wrapArtifactBuildBody``). Callers that only need the emptiness
+  ## check omit ``packageName`` and get the raw (unwrapped) flattening.
   result = newStmtList()
   for stmt in pkgBody:
     if calleeName(stmt).normalize == "build":
@@ -59,10 +105,17 @@ proc collectBuildStatements(pkgBody: NimNode): NimNode =
         result.add(buildStmt)
     elif calleeName(stmt).normalize == "executable":
       let exeBody = stmt[2]
+      let member = artifactBuildBodyName(stmt[1])
+      var artifactStmts = newStmtList()
       for exeStmt in exeBody:
         if calleeName(exeStmt).normalize == "build":
           for buildStmt in exeStmt[1]:
-            result.add(buildStmt)
+            artifactStmts.add(buildStmt)
+      if artifactStmts.len > 0:
+        if packageName.len > 0 and member.len > 0:
+          result.add(wrapArtifactBuildBody(packageName, member, artifactStmts))
+        else:
+          for s in artifactStmts: result.add(s)
     elif calleeName(stmt).normalize == "library":
       # ``library X:`` with a body has the same shape as ``executable X:``
       # — a Call/Command node whose third child is the body StmtList. A
@@ -71,10 +124,17 @@ proc collectBuildStatements(pkgBody: NimNode): NimNode =
       if stmt.len < 3:
         continue
       let libBody = stmt[2]
+      let member = artifactBuildBodyName(stmt[1])
+      var artifactStmts = newStmtList()
       for libStmt in libBody:
         if calleeName(libStmt).normalize == "build":
           for buildStmt in libStmt[1]:
-            result.add(buildStmt)
+            artifactStmts.add(buildStmt)
+      if artifactStmts.len > 0:
+        if packageName.len > 0 and member.len > 0:
+          result.add(wrapArtifactBuildBody(packageName, member, artifactStmts))
+        else:
+          for s in artifactStmts: result.add(s)
     elif calleeName(stmt).normalize == "files":
       # M9.R.59.1: data-only ``files X:`` follows the same shape as
       # ``executable X:`` / ``library X:`` — a Call/Command node whose
@@ -173,7 +233,7 @@ proc foreachDispatchCode(pkg: PackageDef; dispatchName: string;
   parseStmt(code)
 
 proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
-  let buildBody = collectBuildStatements(body)
+  let buildBody = collectBuildStatements(body, pkg.packageName)
   let devEnvBody = collectDevEnvStatements(body)
   if buildBody.len == 0 and devEnvBody.len == 0:
     return newStmtList()
@@ -2378,6 +2438,7 @@ proc emitM9GBootloader*(packageName: string;
 #   * ``extractedRoot`` defaults to "" when not declared.
 #   * ``gitRevision`` defaults to "" when not declared (only meaningful
 #     for ``gitUrl`` mode).
+#   * ``dataFile`` defaults to false.
 #
 # Precedence:
 #   * If both ``sha256`` and ``blake3`` appear in the same body, the
@@ -2417,7 +2478,7 @@ proc emitM9HFetch*(packageName: string;
   ##                     <gitRevision-expr>,
   ##                     <dshaSha256 | dshaBlake3>,
   ##                     <hashHex-expr>,
-  ##                     <dfkTarball | dfkGitArchive>,
+  ##                     <dfkTarball | dfkGitArchive | dfkDataFile>,
   ##                     <extractStrip-expr>,
   ##                     <extractedRoot-expr>)
   ##
@@ -2450,6 +2511,7 @@ proc emitM9HFetch*(packageName: string;
     var blake3Node: NimNode = nil
     var extractStripNode: NimNode = nil
     var extractedRootNode: NimNode = nil
+    var dataFile = false
     for setterStmt in body:
       let head = m9gSetterHeadName(setterStmt)
       if head.len == 0:
@@ -2465,6 +2527,11 @@ proc emitM9HFetch*(packageName: string;
       of "blake3": blake3Node = valueNode
       of "extractstrip": extractStripNode = valueNode
       of "extractedroot": extractedRootNode = valueNode
+      of "datafile":
+        let parsed = m9gExtractBoolLit(setterStmt[1])
+        if not parsed.matched:
+          error("fetch: dataFile must be a bool literal", setterStmt)
+        dataFile = parsed.value
       else: discard
     # Validate.
     if urlNode == nil and gitUrlNode == nil:
@@ -2473,12 +2540,16 @@ proc emitM9HFetch*(packageName: string;
     if urlNode != nil and gitUrlNode != nil:
       error("fetch: block declares both url: and gitUrl: — pick one " &
             "(package " & packageName & ")", stmt)
+    if dataFile and gitUrlNode != nil:
+      error("fetch: dataFile cannot be combined with gitUrl: " &
+            "(package " & packageName & ")", stmt)
     if sha256Node == nil and blake3Node == nil:
       error("fetch: block must specify either sha256: or blake3: " &
             "(package " & packageName & ")", stmt)
     # Resolve kind + final URL.
     let kindIdent =
-      if gitUrlNode != nil: ident("dfkGitArchive")
+      if dataFile: ident("dfkDataFile")
+      elif gitUrlNode != nil: ident("dfkGitArchive")
       else: ident("dfkTarball")
     let finalUrlNode =
       if gitUrlNode != nil: gitUrlNode
@@ -3217,6 +3288,35 @@ proc emitM9R3LibraryApis*(packageName: string;
         `apiSym`.exports = `exportsSym`
         registerLibraryApi(`pkgLit`, `libLit`, `apiSym`))
 
+macro resourceModule*(modulePath: static string; body: untyped = nil): untyped =
+  ## TI2 producer-surface declaration: a producer's ``repro.nim`` NAMES the
+  ## separate module carrying its ``resourceType`` blocks (the RP5c2 vm-harness
+  ## shape — ``src/vm_harness/repro/resources.nim`` — NOT inline in
+  ## ``repro.nim``), plus any extra ``--path`` search roots that module's imports
+  ## need, WITHOUT importing it into the core build:
+  ##
+  ## .. code-block:: nim
+  ##   resourceModule "src/vm_harness/repro/resources.nim":
+  ##     path "src"
+  ##
+  ## This is a PURE MARKER. It expands to nothing, so a producer's core
+  ## ``just build`` (which compiles ``repro.nim`` but imports only
+  ## ``repro_project_dsl``) never pulls in the resource module's driver closure
+  ## — the module stays outside the core build (RP5c1 invariant).
+  ##
+  ## The declaration is consumed at CONSUMER macro-expansion by a TEXTUAL scan of
+  ## the producer's ``repro.nim`` (``producerDeclaredResourceModule`` in
+  ## ``macros_a``), NOT by importing this module — so detection
+  ## (``workspaceProducerDeclaresResourceType``), the accessor-cache freshness
+  ## stamp (``producerSourceStamp``), and the interface-lift resolve
+  ## (``resolveProducerTypedContract`` → ``interfaceLiftPlan`` with
+  ## ``resourceModule``/``extraPaths``) all read the SAME declared module +
+  ## extra paths. The body's ``path "<dir>"`` entries name extra ``--path``
+  ## roots relative to the producer root.
+  discard modulePath
+  discard body
+  newEmptyNode()
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##
@@ -3417,6 +3517,51 @@ macro package*(name: untyped; body: untyped): untyped =
   # the partitioned section walk; the runtime registry is the
   # diagnostic surface tests use today).
   result.add(m3ArtifactEmission)
+  # ── DSL-port M9.R.1: per-package dep-block registration emission.
+  # ``parsePackageDef`` already collected every constraint string into
+  # the three seqs ``pkg.toolUses`` (the ``uses:`` / ``buildDeps:``
+  # synonym pair), ``pkg.nativeBuildDeps``, and ``pkg.runtimeDeps``.
+  # We emit one ``registerPackageDep(...)`` call per entry so the
+  # in-memory accessors (``registeredBuildDeps`` /
+  # ``registeredNativeBuildDeps`` / ``registeredRuntimeDeps``) return
+  # the declared constraint strings at run / test time. The legacy
+  # solver path (``registerSolverDependency`` emitted by
+  # ``emitVariantDeclarations``) is UNCHANGED — this milestone
+  # ADDITIVELY widens the surface so M9.R.2 / M9.R.5 callers have a
+  # stable diagnostic registry to query.
+  #
+  # ORDERING (must stay ABOVE the M4 ``build:`` lowering below). The
+  # Layer-1 constructors a ``build:`` body calls (``cmake_package`` /
+  # ``meson_package`` / ``autotools_package``) query this registry
+  # WHILE THE BODY RUNS — the declared deps decide auto-threaded cache
+  # vars, link-library dirs and CMake module paths. Emitting the
+  # registrations after the body left the FIRST module-init pass
+  # reading an EMPTY dep list (so the auto-threading silently did
+  # nothing) while any later pass in the same process read the rows the
+  # first pass had left behind. A recipe reachable twice in one process
+  # — the per-consumer sibling shims materialise one module instance
+  # per consumer, so a diamond in the source dep closure instantiates a
+  # shared recipe several times — therefore produced TWO DIFFERENT
+  # configure actions for one package and tripped the Named-Targets
+  # within-package collision check. Registering first makes every pass
+  # read the same declared dep list, so the lowered graph is a pure
+  # function of the recipe.
+  let pkgLitForDeps = newLit(packageName)
+  let buildKindLit = newLit("build")
+  let nativeKindLit = newLit("native")
+  let runtimeKindLit = newLit("runtime")
+  for useDef in pkg.toolUses:
+    let constraintLit = newLit(useDef.rawConstraint)
+    result.add(quote do:
+      registerPackageDep(`pkgLitForDeps`, `buildKindLit`, `constraintLit`))
+  for useDef in pkg.nativeBuildDeps:
+    let constraintLit = newLit(useDef.rawConstraint)
+    result.add(quote do:
+      registerPackageDep(`pkgLitForDeps`, `nativeKindLit`, `constraintLit`))
+  for useDef in pkg.runtimeDeps:
+    let constraintLit = newLit(useDef.rawConstraint)
+    result.add(quote do:
+      registerPackageDep(`pkgLitForDeps`, `runtimeKindLit`, `constraintLit`))
   # ── DSL-port M4: ``build:`` block lowering (package-level +
   # artifact-scoped). Both emitters walk the SAME classified seq
   # M3's emitter consumed (no second classification pass) and emit
@@ -3529,34 +3674,10 @@ macro package*(name: untyped; body: untyped): untyped =
   # falls through the ``classifySectionStmt`` arms to the legacy
   # parser which silently discards unknown sections (see the
   # comment on the ``else`` arm in ``cross_project.nim``).
-  # ── DSL-port M9.R.1: per-package dep-block registration emission.
-  # ``parsePackageDef`` already collected every constraint string into
-  # the three seqs ``pkg.toolUses`` (the ``uses:`` / ``buildDeps:``
-  # synonym pair), ``pkg.nativeBuildDeps``, and ``pkg.runtimeDeps``.
-  # We emit one ``registerPackageDep(...)`` call per entry so the
-  # in-memory accessors (``registeredBuildDeps`` /
-  # ``registeredNativeBuildDeps`` / ``registeredRuntimeDeps``) return
-  # the declared constraint strings at run / test time. The legacy
-  # solver path (``registerSolverDependency`` emitted by
-  # ``emitVariantDeclarations``) is UNCHANGED — this milestone
-  # ADDITIVELY widens the surface so M9.R.2 / M9.R.5 callers have a
-  # stable diagnostic registry to query.
-  let pkgLitForDeps = newLit(packageName)
-  let buildKindLit = newLit("build")
-  let nativeKindLit = newLit("native")
-  let runtimeKindLit = newLit("runtime")
-  for useDef in pkg.toolUses:
-    let constraintLit = newLit(useDef.rawConstraint)
-    result.add(quote do:
-      registerPackageDep(`pkgLitForDeps`, `buildKindLit`, `constraintLit`))
-  for useDef in pkg.nativeBuildDeps:
-    let constraintLit = newLit(useDef.rawConstraint)
-    result.add(quote do:
-      registerPackageDep(`pkgLitForDeps`, `nativeKindLit`, `constraintLit`))
-  for useDef in pkg.runtimeDeps:
-    let constraintLit = newLit(useDef.rawConstraint)
-    result.add(quote do:
-      registerPackageDep(`pkgLitForDeps`, `runtimeKindLit`, `constraintLit`))
+  # ── DSL-port M9.R.1: the dep-block registration emission USED to sit
+  # here. It now runs BEFORE the M4 ``build:`` lowering (see the
+  # emission site above ``m4BuildActionEmission``) because the Layer-1
+  # package constructors read the dep registry while the body executes.
   # ── DSL-port M9.R.3: per-library ``api:`` block registration emission.
   # ``emitM9R3LibraryApis`` walks the M3 ``soM3LibraryArtifact`` entries,
   # finds nested ``api:`` blocks, and emits one runtime block per match

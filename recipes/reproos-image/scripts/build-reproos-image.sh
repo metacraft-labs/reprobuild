@@ -60,6 +60,7 @@ OUT_QCOW2="$1"
 # The recipe engine sets cwd to recipes/reproos-image; the repo
 # root is two levels up.
 REPO_ROOT="$(cd ../.. && pwd)"
+SOURCE_RECIPES_ROOT="$REPO_ROOT/recipes/packages/source"
 RECIPE_DIR="$(pwd)"
 SCRIPT_DIR_SELF="$(cd "$(dirname "$0")" && pwd)"
 ISO_SCRIPTS_DIR="$REPO_ROOT/recipes/reproos-iso/scripts"
@@ -109,18 +110,52 @@ if [ -z "$SUDO" ]; then
 fi
 echo "[build-reproos-image] sudo: $SUDO"
 
+# Filesystem operations must use the host system's util-linux/coreutils
+# binaries.  The from-source tool profile can put target binaries first on
+# PATH; those binaries intentionally depend on the staged runtime and cannot
+# mount the host's NBD devices.
+resolve_host_tool() {
+  local tool="$1"
+  local candidate
+  for candidate in \
+    "/run/current-system/sw/bin/$tool" \
+    "/usr/bin/$tool" \
+    "/bin/$tool" \
+    "/sbin/$tool"; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo "[build-reproos-image] required host tool missing: $tool" >&2
+  return 1
+}
+
+HOST_MOUNT_BIN="$(resolve_host_tool mount)"
+HOST_UMOUNT_BIN="$(resolve_host_tool umount)"
+HOST_MOUNTPOINT_BIN="$(resolve_host_tool mountpoint)"
+HOST_SYNC_BIN="$(resolve_host_tool sync)"
+
 # Required host tools.  Fail loudly if any are missing -- the recipe
 # orchestrator already provisions these in the dev shell via the
 # runtimeDeps: declaration on reproos-image (M9.R.53).  This local
 # defence-in-depth loop catches any resolver bypass (e.g. direct
 # invocation of build-reproos-image.sh outside the repro build
 # harness) with the same clear diagnostic.
-for tool in qemu-img qemu-nbd parted sgdisk mkfs.ext4 mkfs.vfat rsync grub-install grub-mkconfig mountpoint; do
+for tool in qemu-img qemu-nbd parted partprobe sgdisk mkfs.ext4 mkfs.vfat rsync grub-install grub-mkconfig modprobe mountpoint; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "[build-reproos-image] required tool missing: $tool" >&2
     exit 65
   fi
 done
+
+# sudo applies its host secure_path, which intentionally excludes Repro's
+# provisioned tool profile. Preserve the resolved binaries across that
+# boundary by invoking the commands through their absolute paths.
+QEMU_IMG_BIN="$(command -v qemu-img)"
+QEMU_NBD_BIN="$(command -v qemu-nbd)"
+PARTPROBE_BIN="$(command -v partprobe)"
+MODPROBE_BIN="$(command -v modprobe)"
 
 # Locate the `repro` binary.  Probe order:
 #   1. $REPRO_BIN env (caller override).
@@ -169,12 +204,14 @@ cleanup() {
   local rc=$?
   set +e
   for p in "${MOUNTED_PATHS[@]}"; do
-    if mountpoint -q "$p"; then
-      "$SUDO" umount "$p" 2>/dev/null || "$SUDO" umount -l "$p" 2>/dev/null
+    if /usr/bin/env LD_LIBRARY_PATH= "$HOST_MOUNTPOINT_BIN" -q "$p"; then
+      "$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$HOST_UMOUNT_BIN" "$p" 2>/dev/null \
+        || "$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$HOST_UMOUNT_BIN" -l "$p" 2>/dev/null
     fi
   done
   if [ -n "$NBD_DEV" ] && [ "$NBD_CONNECTED" = "1" ]; then
-    "$SUDO" qemu-nbd --disconnect "$NBD_DEV" 2>/dev/null || true
+    "$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$QEMU_NBD_BIN" \
+      --disconnect "$NBD_DEV" 2>/dev/null || true
   fi
   exit $rc
 }
@@ -264,7 +301,24 @@ echo "[build-reproos-image] staging rootfs at $STAGE_DIR"
 # ~5 min cold.  Reuse a healthy existing stage when the marker file
 # is present (set REPRO_FORCE_RESTAGE=1 to bypass).
 STAGE_MARKER="$STAGE_DIR/.repro-stage-complete"
-if [ "${REPRO_FORCE_RESTAGE:-0}" = "1" ] || [ ! -f "$STAGE_MARKER" ]; then
+STAGE_STALE=0
+for stage_input in \
+  "$REPO_ROOT/recipes/reproos-iso/scripts/build-base-rootfs.sh" \
+  "$REPO_ROOT/recipes/reproos-iso/scripts/stage-de-rootfs.sh" \
+  "$REPO_ROOT/recipes/reproos-iso/scripts/relocate-nix-to-repro.sh"; do
+  if [ -f "$STAGE_MARKER" ] && [ "$stage_input" -nt "$STAGE_MARKER" ]; then
+    STAGE_STALE=1
+    break
+  fi
+done
+if [ -f "$STAGE_MARKER" ] && \
+   find "$REPO_ROOT/recipes/packages/source" \
+     -path '*/.repro/output/install/*' -newer "$STAGE_MARKER" \
+     -print -quit | grep -q .; then
+  STAGE_STALE=1
+fi
+if [ "${REPRO_FORCE_RESTAGE:-0}" = "1" ] || \
+   [ ! -f "$STAGE_MARKER" ] || [ "$STAGE_STALE" = "1" ]; then
   if [ -d "$STAGE_DIR" ] && [ -n "$(ls -A "$STAGE_DIR" 2>/dev/null || true)" ]; then
     chmod -R u+w "$STAGE_DIR" 2>/dev/null || true
     rm -rf "$STAGE_DIR"
@@ -283,45 +337,42 @@ echo "[build-reproos-image] stage done; size: $(du -sh "$STAGE_DIR" | awk '{prin
 # ---------------------------------------------------------------
 # Phase 2.5: seed /boot in the staged tree with kernel + initrd.
 #
-# The stage-de-rootfs tree carries no kernel (the live ISO ships a
-# vendored Debian netinst kernel + a live-init initramfs from the
-# iso recipe).  For a build-time image we need the same vmlinuz +
+# The stage-de-rootfs tree carries the source-built kernel payload and
+# modules under /usr/lib. For a build-time image we also need vmlinuz +
 # a boot-from-disk initramfs in the staged tree so install-root's
 # copyLiveKernelAndInitrd finds them in candidate path
 # "<source>/boot/vmlinuz" / "<source>/boot/initrd.img".
 #
-# Source vmlinuz: extracted on-the-fly from the linux-image deb
-# that build-initramfs.sh already downloaded + cached at
-# /var/cache/reprobuild/initramfs/.
-#
-# Source initrd: re-use the iso recipe's vendored
-# initrd.img-live (live-boot initramfs from build-initramfs.sh).
-# It probes for /live/filesystem.squashfs; on the installed disk
-# it won't find one and falls through to a rescue shell -- which
-# means the boot smoke can SSH-style verify the kernel reached
-# userspace + the rootfs is intact, even if the system doesn't
-# auto-progress to multi-user.target.  A follow-up M9.R.50.x
-# milestone will replace this with a real "boot-from-disk"
-# initramfs (initramfs-tools / dracut) that pivots into
-# /dev/disk/by-label/reproos-root.
-VENDORED_KERNEL="$REPO_ROOT/recipes/reproos-iso/vendor/vmlinuz-debian-netinst"
+# The initramfs is generated from the same source kernel release and its
+# module tree. Keep the derived archive in this recipe's writable build
+# directory; host-global cache directories may be root-owned.
+SOURCE_KERNEL_ROOT="$REPO_ROOT/recipes/packages/source/kernel/.repro/output/install"
+SOURCE_KERNEL_PAYLOAD="$SOURCE_KERNEL_ROOT/usr/lib/reproos-kernel"
+SOURCE_KERNEL_RELEASE="$(cat "$SOURCE_KERNEL_PAYLOAD/kernel.release")"
+SOURCE_KERNEL="$SOURCE_KERNEL_PAYLOAD/vmlinuz"
+SOURCE_BUSYBOX="$REPO_ROOT/recipes/packages/source/busybox/.repro/output/install/usr/bin/busybox"
+if [ ! -s "$SOURCE_KERNEL" ] || [ ! -x "$SOURCE_BUSYBOX" ]; then
+  echo "[build-reproos-image] source kernel or BusyBox payload missing" >&2
+  exit 67
+fi
+SOURCE_KERNEL_SHA256="$(sha256sum "$SOURCE_KERNEL" | awk '{print $1}')"
+SOURCE_BUSYBOX_SHA256="$(sha256sum "$SOURCE_BUSYBOX" | awk '{print $1}')"
+BOOT_INPUT_ID="$SOURCE_KERNEL_RELEASE-${SOURCE_KERNEL_SHA256:0:16}-${SOURCE_BUSYBOX_SHA256:0:16}"
 # M9.R.51: generate a boot-from-disk initramfs (init-disk variant of
 # the live-init) instead of reusing the ISO's live-boot initrd (which
 # probes for /live/filesystem.squashfs and drops to rescue on an
 # installed disk).  We invoke reproos-iso/scripts/build-initramfs.sh
 # with REPRO_INITRAMFS_INIT=init-disk so the same busybox+modules
 # staging pipeline packs the boot-from-disk /init instead.
-DISK_INITRD_CACHE="${REPRO_DISK_INITRD_CACHE:-/var/cache/reprobuild/reproos-image/initrd.img-disk}"
+DISK_INITRD_CACHE="${REPRO_DISK_INITRD_CACHE:-$RECIPE_DIR/build/initrd.img-disk-$BOOT_INPUT_ID}"
 STAGE_BOOT_MARKER="$STAGE_DIR/.repro-boot-seeded"
-if [ ! -f "$STAGE_BOOT_MARKER" ]; then
+if [ "$(cat "$STAGE_BOOT_MARKER" 2>/dev/null || true)" != "$BOOT_INPUT_ID" ] || \
+   [ ! -s "$STAGE_DIR/boot/vmlinuz" ] || \
+   [ ! -s "$STAGE_DIR/boot/initrd.img" ]; then
   echo "[build-reproos-image] seeding $STAGE_DIR/boot with kernel + boot-from-disk initrd"
   mkdir -p "$STAGE_DIR/boot"
-  if [ -f "$VENDORED_KERNEL" ]; then
-    cp "$VENDORED_KERNEL" "$STAGE_DIR/boot/vmlinuz"
-    echo "[build-reproos-image] vmlinuz: $(ls -la "$STAGE_DIR/boot/vmlinuz" | awk '{print $5}') bytes (from iso recipe vendor)"
-  else
-    echo "[build-reproos-image] WARNING: $VENDORED_KERNEL missing; run \`pwsh recipes/reproos-iso/vendor/fetch.ps1\` first" >&2
-  fi
+  cp "$SOURCE_KERNEL" "$STAGE_DIR/boot/vmlinuz"
+  echo "[build-reproos-image] vmlinuz: $(ls -la "$STAGE_DIR/boot/vmlinuz" | awk '{print $5}') bytes (from kernelSource)"
   if [ ! -f "$DISK_INITRD_CACHE" ]; then
     echo "[build-reproos-image] generating boot-from-disk initrd via build-initramfs.sh (REPRO_INITRAMFS_INIT=init-disk)"
     mkdir -p "$(dirname "$DISK_INITRD_CACHE")"
@@ -332,7 +383,7 @@ if [ ! -f "$STAGE_BOOT_MARKER" ]; then
   fi
   cp "$DISK_INITRD_CACHE" "$STAGE_DIR/boot/initrd.img"
   echo "[build-reproos-image] initrd.img (boot-from-disk): $(ls -la "$STAGE_DIR/boot/initrd.img" | awk '{print $5}') bytes"
-  touch "$STAGE_BOOT_MARKER"
+  printf '%s\n' "$BOOT_INPUT_ID" > "$STAGE_BOOT_MARKER"
 else
   echo "[build-reproos-image] /boot already seeded (marker present)"
 fi
@@ -409,7 +460,7 @@ echo "[build-reproos-image] disko json: $DISKO_JSON"
 # ---------------------------------------------------------------
 TMP_QCOW2="$WORK/reproos-installed.qcow2"
 rm -f "$TMP_QCOW2"
-qemu-img create -f qcow2 "$TMP_QCOW2" "${DISK_SIZE_GB}G" \
+LD_LIBRARY_PATH= "$QEMU_IMG_BIN" create -f qcow2 "$TMP_QCOW2" "${DISK_SIZE_GB}G" \
   || { echo "[build-reproos-image] qemu-img create failed" >&2; exit 68; }
 echo "[build-reproos-image] qcow2 created: $TMP_QCOW2 (${DISK_SIZE_GB}G)"
 
@@ -418,7 +469,7 @@ echo "[build-reproos-image] qcow2 created: $TMP_QCOW2 (${DISK_SIZE_GB}G)"
 # ---------------------------------------------------------------
 if ! lsmod 2>/dev/null | grep -q '^nbd '; then
   echo "[build-reproos-image] modprobe nbd max_part=16"
-  "$SUDO" modprobe nbd max_part=16 \
+  "$SUDO" "$MODPROBE_BIN" nbd max_part=16 \
     || { echo "[build-reproos-image] modprobe nbd failed" >&2; exit 68; }
 fi
 # Find a free /dev/nbdN.
@@ -436,7 +487,8 @@ if [ -z "$NBD_DEV" ]; then
   exit 68
 fi
 echo "[build-reproos-image] qemu-nbd --connect=$NBD_DEV $TMP_QCOW2"
-"$SUDO" qemu-nbd --connect="$NBD_DEV" "$TMP_QCOW2" \
+"$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$QEMU_NBD_BIN" \
+  --connect="$NBD_DEV" "$TMP_QCOW2" \
   || { echo "[build-reproos-image] qemu-nbd connect failed" >&2; exit 68; }
 NBD_CONNECTED=1
 
@@ -444,7 +496,7 @@ NBD_CONNECTED=1
 sed -i "s|/dev/nbd0|$NBD_DEV|g" "$DISKO_JSON"
 
 # Wait for the kernel to scan the (empty) partition table.
-"$SUDO" partprobe "$NBD_DEV" 2>/dev/null || true
+"$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$PARTPROBE_BIN" "$NBD_DEV" 2>/dev/null || true
 sleep 2
 
 # ---------------------------------------------------------------
@@ -458,11 +510,21 @@ sleep 2
 # only the var we ask for.
 # ---------------------------------------------------------------
 echo "[build-reproos-image] repro disk apply --device $NBD_DEV --confirm $DISKO_JSON"
-"$SUDO" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$REPRO_BIN" disk apply --device "$NBD_DEV" --confirm "$DISKO_JSON" \
+DISK_APPLY_PATH="$PATH"
+E2FSPROGS_SBIN="$REPO_ROOT/recipes/packages/source/e2fsprogs/.repro/output/install/usr/sbin"
+DISK_APPLY_LD="$REPO_ROOT/recipes/packages/source/e2fsprogs/.repro/output/install/usr/lib"
+DISK_APPLY_LD="$DISK_APPLY_LD:$REPO_ROOT/recipes/packages/source/parted/.repro/output/install/usr/lib"
+DISK_APPLY_LD="$DISK_APPLY_LD:$REPO_ROOT/recipes/packages/source/util-linux/.repro/output/install/usr/lib"
+DISK_APPLY_LD="$DISK_APPLY_LD:${LD_LIBRARY_PATH:-}"
+if [ -x "$E2FSPROGS_SBIN/mkfs.ext4" ]; then
+  DISK_APPLY_PATH="$E2FSPROGS_SBIN:$DISK_APPLY_PATH"
+fi
+"$SUDO" PATH="$DISK_APPLY_PATH" LD_LIBRARY_PATH="$DISK_APPLY_LD" \
+  "$REPRO_BIN" disk apply --device "$NBD_DEV" --confirm "$DISKO_JSON" \
   || { echo "[build-reproos-image] disk apply failed" >&2; exit 69; }
 
 # Re-scan the partition table.
-"$SUDO" partprobe "$NBD_DEV" 2>/dev/null || true
+"$SUDO" "$PARTPROBE_BIN" "$NBD_DEV" 2>/dev/null || true
 sleep 2
 
 # ---------------------------------------------------------------
@@ -484,11 +546,11 @@ if [ ! -b "$ROOT_DEV" ] || [ ! -b "$ESP_DEV" ]; then
   exit 69
 fi
 
-"$SUDO" mount "$ROOT_DEV" "$MNT_DIR" \
+"$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$HOST_MOUNT_BIN" "$ROOT_DEV" "$MNT_DIR" \
   || { echo "[build-reproos-image] mount root failed" >&2; exit 69; }
 MOUNTED_PATHS+=("$MNT_DIR")
 "$SUDO" mkdir -p "$MNT_DIR/boot"
-"$SUDO" mount "$ESP_DEV" "$MNT_DIR/boot" \
+"$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$HOST_MOUNT_BIN" "$ESP_DEV" "$MNT_DIR/boot" \
   || { echo "[build-reproos-image] mount esp failed" >&2; exit 69; }
 MOUNTED_PATHS+=("$MNT_DIR/boot")
 
@@ -814,7 +876,7 @@ DBUS_DROPIN_EOF
   # the from-source install-mirror so ExecStart's fork() finds it at
   # /usr/libexec/dbus-daemon-launch-helper.
   mkdir -p '$MNT_DIR/usr/libexec'
-  ln -sfn /opt/repro/reprobuild/recipes/packages/source/dbus/.repro/output/install/usr/libexec/dbus-daemon-launch-helper \\
+  ln -sfn '$SOURCE_RECIPES_ROOT/dbus/.repro/output/install/usr/libexec/dbus-daemon-launch-helper' \\
     '$MNT_DIR/usr/libexec/dbus-daemon-launch-helper'
 
   # Blocker 5 (M9.R.56.5) --- the from-source dbus 1.16.0 recipe does
@@ -1024,7 +1086,7 @@ echo "[build-reproos-image] Phase 10.8: shim compiled-in /usr/local sddm paths +
   # belongs in M9.R.57+ with the sddm-recipe CMAKE_INSTALL_PREFIX
   # fix.
   mkdir -p '$MNT_DIR/usr/local/libexec'
-  SDDM_INSTALL_LIBEXEC=/opt/repro/reprobuild/recipes/packages/source/sddm/.repro/output/install/usr/libexec
+  SDDM_INSTALL_LIBEXEC='$SOURCE_RECIPES_ROOT/sddm/.repro/output/install/usr/libexec'
   for helper in sddm-helper sddm-helper-start-wayland sddm-helper-start-x11user; do
     ln -sfn \"\$SDDM_INSTALL_LIBEXEC/\$helper\" \"$MNT_DIR/usr/local/libexec/\$helper\"
   done
@@ -1054,9 +1116,9 @@ echo "[build-reproos-image] Phase 10.8: shim compiled-in /usr/local sddm paths +
   # link_base_recipe_binaries, so pointing at the install-mirror
   # is equivalent and avoids a two-hop symlink).
   mkdir -p '$MNT_DIR/usr/local/bin'
-  ln -sfn /opt/repro/reprobuild/recipes/packages/source/sddm/.repro/output/install/usr/bin/sddm-greeter-qt6 \\
+  ln -sfn '$SOURCE_RECIPES_ROOT/sddm/.repro/output/install/usr/bin/sddm-greeter-qt6' \\
     '$MNT_DIR/usr/local/bin/sddm-greeter-qt6'
-  ln -sfn /opt/repro/reprobuild/recipes/packages/source/sddm/.repro/output/install/usr/bin/sddm \\
+  ln -sfn '$SOURCE_RECIPES_ROOT/sddm/.repro/output/install/usr/bin/sddm' \\
     '$MNT_DIR/usr/local/bin/sddm'
 
   # M9.R.56.8.3: shim /lib/security -> from-source pam's install-
@@ -1075,7 +1137,7 @@ echo "[build-reproos-image] Phase 10.8: shim compiled-in /usr/local sddm paths +
   # We link the whole /lib/security dir at the pam install-
   # mirror's usr/lib/security subtree.
   mkdir -p '$MNT_DIR/lib'
-  ln -sfn /opt/repro/reprobuild/recipes/packages/source/pam/.repro/output/install/usr/lib/security \\
+  ln -sfn '$SOURCE_RECIPES_ROOT/pam/.repro/output/install/usr/lib/security' \\
     '$MNT_DIR/lib/security'
 
   # M9.R.56.8.4: strip pam_selinux.so references from the sddm
@@ -1244,6 +1306,40 @@ PAM_OTHER_EOF
   # this build script's bash -c wrapper.
   mkdir -p '$MNT_DIR/usr/local/bin'
   install -m 0755 '$SCRIPT_DIR_SELF/repro-sway-diag' '$MNT_DIR/usr/local/bin/repro-sway-diag'
+  sed -i 's|@REPRO_SOURCE_RECIPES_ROOT@|$SOURCE_RECIPES_ROOT|g' \
+    '$MNT_DIR/usr/local/bin/repro-sway-diag'
+
+  # Keep the installed session independent of Debian's optional sway
+  # companion packages.  swaynag is built beside sway in the from-source
+  # output and gives the smoke test a stable, visible readiness signal.
+  ln -sfn '$SOURCE_RECIPES_ROOT/sway/.repro/output/install/usr/bin/swaynag' \
+    '$MNT_DIR/usr/bin/swaynag'
+  mkdir -p '$MNT_DIR/etc/sway'
+  cat > '$MNT_DIR/etc/sway/config' <<'SWAY_CONFIG_EOF'
+font pango:monospace 12
+swaybg_command -
+exec swaynag --message 'ReproOS is ready' --dismiss-button 'Running' --font 'DejaVu Sans 48' --message-padding 80 --button-padding 32 --border-bottom-size 6 --background ffffffff --border ffffffff --border-bottom 43a047ff --text 111111ff --button-background ffffffff --button-text 111111ff
+SWAY_CONFIG_EOF
+
+  # systemd invokes module helpers through /sbin, while the from-source kmod
+  # recipe installs its applets under /usr/bin.  Expose modprobe at the
+  # conventional system path so early module units do not fail with ENOENT.
+  mkdir -p '$MNT_DIR/usr/sbin'
+  ln -sfn '$SOURCE_RECIPES_ROOT/kmod/.repro/output/install/usr/bin/modprobe' \
+    '$MNT_DIR/usr/sbin/modprobe'
+
+  # The source fontconfig build uses prefix=/usr, so its compiled default
+  # configuration path is /usr/etc/fonts rather than Debian's /etc/fonts.
+  # Keep both locations available to source and distribution consumers.
+  mkdir -p '$MNT_DIR/usr/etc' '$MNT_DIR/etc'
+  if [ ! -e '$MNT_DIR/usr/etc/fonts' ]; then
+    ln -s '$SOURCE_RECIPES_ROOT/fontconfig/.repro/output/install/usr/etc/fonts' \
+      '$MNT_DIR/usr/etc/fonts'
+  fi
+  if [ ! -e '$MNT_DIR/etc/fonts' ]; then
+    ln -s '$SOURCE_RECIPES_ROOT/fontconfig/.repro/output/install/usr/etc/fonts' \
+      '$MNT_DIR/etc/fonts'
+  fi
 
   # Ensure /var/log/m9r71_sway.log is world-writable (repro user
   # will append after setuid) — create it at boot via tmpfiles.d.
@@ -1364,8 +1460,9 @@ ENVD_EOF
 
   # /usr/local/lib/sddm/sddm.conf.d -> /etc/sddm.conf.d so the
   # daemon's SYSTEM_CONFIG_DIR probe finds any drop-ins.
-  mkdir -p '$MNT_DIR/usr/local/lib/sddm'
+  mkdir -p '$MNT_DIR/usr/local/lib/sddm' '$MNT_DIR/usr/lib/sddm'
   ln -sfn /etc/sddm.conf.d '$MNT_DIR/usr/local/lib/sddm/sddm.conf.d'
+  ln -sfn /etc/sddm.conf.d '$MNT_DIR/usr/lib/sddm/sddm.conf.d'
 
   # --- Config-file overrides (belt-and-suspenders) ---
   # If a future sddm rebuild moves to CMAKE_INSTALL_PREFIX=/usr
@@ -1494,7 +1591,7 @@ echo "[build-reproos-image] Phase 10.9: install + enable seatd system service (l
   # <install>/usr/bin, so those should already be linked.  Belt-
   # and-suspenders: force-link them here in case the recipe layout
   # changes.
-  LIBSEAT_INSTALL=/opt/repro/reprobuild/recipes/packages/source/libseat/.repro/output/install/usr/bin
+  LIBSEAT_INSTALL='$SOURCE_RECIPES_ROOT/libseat/.repro/output/install/usr/bin'
   if [ -x \"\$LIBSEAT_INSTALL/seatd\" ]; then
     ln -sfn \"\$LIBSEAT_INSTALL/seatd\" '$MNT_DIR/usr/bin/seatd'
   else
@@ -1519,7 +1616,7 @@ echo "[build-reproos-image] Phase 10.9: install + enable seatd system service (l
   # every future clean rebuild patches the RPATH deterministically.
   PATCHELF=\$(command -v patchelf 2>/dev/null || true)
   if [ -n \"\$PATCHELF\" ]; then
-    LIBSEAT_INSTALL_ROOT='$MNT_DIR/opt/repro/reprobuild/recipes/packages/source/libseat/.repro/output/install'
+    LIBSEAT_INSTALL_ROOT='$MNT_DIR$SOURCE_RECIPES_ROOT/libseat/.repro/output/install'
     for target in \\
       \"\$LIBSEAT_INSTALL_ROOT/usr/bin/seatd\" \\
       \"\$LIBSEAT_INSTALL_ROOT/usr/bin/seatd-launch\" \\
@@ -1617,22 +1714,22 @@ echo "  mnt esp:       $MNT_DIR/boot ($(df -h "$MNT_DIR/boot" 2>/dev/null | tail
 # Cleanup trap handles errors; on success we unmount cleanly so
 # the qcow2 is fully flushed before we move it.
 # ---------------------------------------------------------------
-"$SUDO" sync
+"$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$HOST_SYNC_BIN"
 sleep 2
 # Unmount in reverse order (esp before root) so we don't try to
 # unmount the parent while a child is still mounted.  Use lazy
 # umount as fallback for stubbornly-busy mounts.
 for ((i=${#MOUNTED_PATHS[@]}-1; i>=0; i--)); do
   p="${MOUNTED_PATHS[$i]}"
-  "$SUDO" umount "$p" 2>/dev/null \
-    || "$SUDO" umount -l "$p" 2>/dev/null \
+  "$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$HOST_UMOUNT_BIN" "$p" 2>/dev/null \
+    || "$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$HOST_UMOUNT_BIN" -l "$p" 2>/dev/null \
     || { echo "[build-reproos-image] WARNING: failed to unmount $p" >&2; }
 done
-"$SUDO" sync
+"$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$HOST_SYNC_BIN"
 sleep 1
 MOUNTED_PATHS=()
 
-"$SUDO" qemu-nbd --disconnect "$NBD_DEV"
+"$SUDO" /usr/bin/env LD_LIBRARY_PATH= "$QEMU_NBD_BIN" --disconnect "$NBD_DEV"
 NBD_CONNECTED=0
 
 # ---------------------------------------------------------------

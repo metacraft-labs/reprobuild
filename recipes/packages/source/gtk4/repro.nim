@@ -65,10 +65,8 @@
 ##
 ## v1 ships NO configurables — meson options are pinned:
 ##
-##   * ``introspection=disabled`` — drop the .gir emission (gjs/pygobject
-##                                   not in v1 closure; the
-##                                   gobject-introspection build dep is
-##                                   still pulled in for the .pc check).
+##   * ``introspection=enabled``  — emit the GIRs and typelibs consumed
+##                                   by GNOME Shell and its JavaScript.
 ##   * ``documentation=false``   — drop the gi-docgen HTML reference.
 ##   * ``man-pages=false``       — drop the manpage build.
 ##   * ``build-tests=false``     — skip the upstream tests subtree.
@@ -118,31 +116,30 @@ package gtk4Source:
     extractStrip: 1
 
   nativeBuildDeps:
+    "gobject-introspection"
     "meson >=1.2"
     "ninja >=1.10"
     "gcc >=11"
     ## python3 runs gtk4's meson build scripts + the icon-cache
     ## generator + the GResource bundler.
-    "python3"
+    "python3-with-modules"
     ## gettext provides msgfmt for the translation catalog build.
     "gettext"
     ## sassc compiles the Sass stylesheets bundled with the default
     ## theme (Adwaita-dark / Adwaita-light / HighContrast).
     "sassc"
-    ## M9.R.15b — gobject-introspection's g-ir-scanner is referenced
-    ## by gtk4's ``gnome.generate_gir()`` calls but the calls are
-    ## gated on ``-Dintrospection=enabled`` at the meson layer; with
-    ## ``introspection=disabled`` (our v1 pin) the dep edge is dead
-    ## at compile time. Dropping the nativeBuildDep from this recipe
-    ## keeps gtk4's auto-recurse closure from pulling
-    ## gobject-introspection (whose from-source build needs
-    ## python3-with-setuptools — not yet provisioned). The gtk4
+    ## gobject-introspection's g-ir-scanner is referenced by GTK's
+    ## ``gnome.generate_gir()`` calls. Keep it as a native build
+    ## dependency so clean from-source builds emit the metadata that
+    ## GNOME Shell consumes. The gtk4
     ## recipe surfaces this exact gap as the M9.R.15c handoff.
     ## libxml2 ships xmllint, consumed by gtk4's GResource compile
     ## step to validate the XML bundle manifests.
     "libxml2"
 
   buildDeps:
+    "gobject-introspection"
+    "glib2-introspection"
     ## glib2 is gtk4's foundation library (GObject, GIO, GSettings,
     ## GResource).
     "glib2 >=2.76"
@@ -214,7 +211,7 @@ package gtk4Source:
         # M9.R.15b — pin to gtk4 4.18.5's option schema. Feature-type
         # options use the enabled/disabled/auto trichotomy; boolean
         # types stay true/false.
-        "introspection=disabled",
+        "introspection=enabled",
         "documentation=false",
         "man-pages=false",
         "screenshots=false",
@@ -250,7 +247,22 @@ package gtk4Source:
         "cloudproviders=disabled",
         "accesskit=disabled",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      let pkg = meson_package(
+        srcDir = "./src",
+        configureOptions = opts,
+        extraEnv = @[
+          ("GI_GIR_PATH",
+          "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share/gir-1.0:" &
+          "/opt/repro/reprobuild/recipes/packages/source/harfbuzz/.repro/output/install/usr/share/gir-1.0:" &
+          "/opt/repro/reprobuild/recipes/packages/source/gdk-pixbuf/.repro/output/install/usr/share/gir-1.0:" &
+          "/opt/repro/reprobuild/recipes/packages/source/pango/.repro/output/install/usr/share/gir-1.0:" &
+          "/opt/repro/reprobuild/recipes/packages/source/graphene/.repro/output/install/usr/share/gir-1.0"),
+          ("LIBRARY_PATH",
+          "/opt/repro/reprobuild/recipes/packages/source/freetype/.repro/output/install/usr/lib"),
+          ("LD_LIBRARY_PATH",
+          "/opt/repro/reprobuild/recipes/packages/source/freetype/.repro/output/install/usr/lib"),
+          ("CPATH",
+          "/opt/repro/reprobuild/recipes/packages/source/wayland/.repro/output/install/usr/include")])
       discard pkg.library("libGtk4")
       discard pkg.executable("gtk4Launch")
       discard pkg.executable("gtk4UpdateIconCache")

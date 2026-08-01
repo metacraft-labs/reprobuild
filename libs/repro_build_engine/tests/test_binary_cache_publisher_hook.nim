@@ -85,7 +85,8 @@ proc fingerprintForPayload(payload: string): ContentDigest =
 proc oneAction(outputPath, payload: string;
                publish: bool;
                identity: Option[CacheEntryIdentity];
-               fingerprintToken = "default"): BuildGraph =
+               fingerprintToken = "default";
+               publishPrefix = ""): BuildGraph =
   let action = BuildAction(
     kind: bakWriteText,
     id: "t-bcp-write",
@@ -97,7 +98,9 @@ proc oneAction(outputPath, payload: string;
     weakFingerprint: fingerprintForPayload(payload & "|" & fingerprintToken),
     builtinText: payload,
     publishToBinaryCache: publish,
-    cacheEntryIdentity: identity)
+    cacheEntryIdentity: identity,
+    declaredOutputs:
+      if publishPrefix.len > 0: @[publishPrefix] else: @[])
   graph(@[action], newSeq[BuildPool]())
 
 proc producerCfg(cacheRoot: string; recorder: Recorder): BuildEngineConfig =
@@ -127,7 +130,8 @@ suite "M9.L.4-refactor Step A — engine binary-cache publisher hook":
       outputPath, payload,
       publish = true,
       identity = some(identity),
-      fingerprintToken = "fires")
+      fingerprintToken = "fires",
+      publishPrefix = absolutePath(TmpDir / "outputs-fires"))
     let res = runBuild(g, producerCfg(cacheRoot, recorder))
     check res.results.len == 1
     check res.results[0].status == asSucceeded
@@ -138,9 +142,108 @@ suite "M9.L.4-refactor Step A — engine binary-cache publisher hook":
     check req.identity.packageName == "test-pkg"
     check req.identity.packageVersion == "1.0.0"
     check req.identity.providerRevision == "rev-fires"
+    check req.publishPrefix == absolutePath(TmpDir / "outputs-fires")
     check req.declaredOutputs == @[outputPath]
     check req.recordOutputs.len == 1
     check req.recordOutputs[0] == outputPath
+
+  test "cache hits are not published by default":
+    resetTmp()
+    let cacheRoot = TmpDir / "cache-hit-default"
+    let outputPath = absolutePath(TmpDir / "outputs-hit-default" / "hit.txt")
+    createDir(cacheRoot)
+    createDir(splitPath(outputPath).head)
+    let identity = stubIdentity("test-pkg", "1.0.0", "rev-hit-default")
+    let g = oneAction(outputPath, "cached payload\n", publish = true,
+      identity = some(identity), fingerprintToken = "hit-default")
+
+    let initialRecorder = newRecorder()
+    discard runBuild(g, producerCfg(cacheRoot, initialRecorder))
+    check initialRecorder.invocations.len == 1
+
+    let hitRecorder = newRecorder()
+    let hit = runBuild(g, producerCfg(cacheRoot, hitRecorder))
+    check hit.results.len == 1
+    check hit.results[0].status == asCacheHit
+    check hitRecorder.invocations.len == 0
+
+  test "opt-in publishes a validated metadata-only cache hit":
+    resetTmp()
+    let cacheRoot = TmpDir / "cache-hit-backfill"
+    let outputPath = absolutePath(TmpDir / "outputs-hit-backfill" / "hit.txt")
+    createDir(cacheRoot)
+    createDir(splitPath(outputPath).head)
+    let identity = stubIdentity("test-pkg", "1.0.0", "rev-hit-backfill")
+    let g = oneAction(outputPath, "backfill payload\n", publish = true,
+      identity = some(identity), fingerprintToken = "hit-backfill")
+
+    var initialCfg = defaultBuildEngineConfig(cacheRoot)
+    initialCfg.maxParallelism = 1
+    initialCfg.deferLocalOutputBlobs = true
+    initialCfg.rebuildMissingOutputsOnCacheHit = true
+    let initial = runBuild(g, initialCfg)
+    check initial.results.len == 1
+    check initial.results[0].status == asSucceeded
+
+    let recorder = newRecorder()
+    var backfillCfg = defaultBuildEngineConfig(cacheRoot)
+    backfillCfg.maxParallelism = 1
+    backfillCfg.deferLocalOutputBlobs = true
+    backfillCfg.rebuildMissingOutputsOnCacheHit = true
+    backfillCfg.binaryCachePublisher = makePublisher(recorder)
+    backfillCfg.publishCachedResults = true
+    let backfill = runBuild(g, backfillCfg)
+    check backfill.results.len == 1
+    check backfill.results[0].status == asUpToDate
+    check recorder.invocations.len == 1
+    check recorder.invocations[0].declaredOutputs == @[outputPath]
+
+  test "materialized backfill publishes without launching the action":
+    resetTmp()
+    let prefix = absolutePath(TmpDir / "materialized-prefix")
+    let outputPath = prefix / "artifact.txt"
+    createDir(prefix)
+    writeFile(outputPath, "already built\n")
+    let recorder = newRecorder()
+    let identity = stubIdentity("materialized-pkg", "2.0", "materialized-rev")
+    let g = oneAction(
+      outputPath, "would overwrite this\n",
+      publish = true,
+      identity = some(identity),
+      fingerprintToken = "materialized",
+      publishPrefix = prefix)
+
+    let backfill = publishMaterializedBinaryCacheEntries(
+      g, makePublisher(recorder))
+    check backfill.results.len == 1
+    check backfill.results[0].status == asUpToDate
+    check not backfill.results[0].launched
+    check backfill.results[0].reason ==
+      "materialized-binary-cache-published key=" &
+        deriveActionCacheKeyHex(g.actions[0])
+    check readFile(outputPath) == "already built\n"
+    check recorder.invocations.len == 1
+    check recorder.invocations[0].publishPrefix == prefix
+    check recorder.invocations[0].identity.packageName == "materialized-pkg"
+
+  test "materialized backfill fails when the graph has no tagged entries":
+    resetTmp()
+    let outputPath = absolutePath(TmpDir / "untagged" / "artifact.txt")
+    let recorder = newRecorder()
+    let identity = stubIdentity("untagged-pkg", "1.0", "untagged-rev")
+    let g = oneAction(
+      outputPath, "not published\n",
+      publish = false,
+      identity = some(identity),
+      fingerprintToken = "untagged")
+
+    let backfill = publishMaterializedBinaryCacheEntries(
+      g, makePublisher(recorder))
+    check backfill.results.len == 1
+    check backfill.results[0].status == asFailed
+    check backfill.results[0].reason ==
+      "materialized-binary-cache-no-entries"
+    check recorder.invocations.len == 0
 
   test "publisher is NOT invoked when publishToBinaryCache = false":
     resetTmp()

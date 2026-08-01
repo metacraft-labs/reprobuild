@@ -53,10 +53,14 @@ proc collectViolations(): seq[string] =
         result.add(manifest & ":" & $lineNo &
           ": --buildtype belongs as a typed flag, not in opts seq (" &
           stripped & ")")
+      elif stripped.startsWith("\"wrap_mode="):
+        result.add(manifest & ":" & $lineNo &
+          ": wrap_mode belongs as a typed flag, not in opts seq (" &
+          stripped & ")")
 
 suite "DSL-port M9.R.14d.6 — meson options sanity":
 
-  test "no source recipe pre-prefixes options with -D or includes --buildtype":
+  test "source recipes keep Meson built-ins out of project options":
     let violations = collectViolations()
     if violations.len > 0:
       echo "BUG: ", violations.len, " meson option violation(s):"

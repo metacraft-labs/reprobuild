@@ -3448,6 +3448,8 @@ proc registeredBootloaderConfig*(packageName: string): DslBootloaderConfig =
 ## via a new ``fetch:`` block whose body recognises six setters:
 ##
 ##   * ``url: "string"`` — tarball URL (kind == ``dfkTarball``).
+##   * ``dataFile: true`` — download and verify a single file without
+##     archive extraction (kind == ``dfkDataFile``).
 ##   * ``gitUrl: "string"`` — git clone URL (kind == ``dfkGitArchive``).
 ##   * ``gitRevision: "string"`` — git ref/tag (only meaningful for
 ##     ``dfkGitArchive``).
@@ -3477,7 +3479,7 @@ proc registeredBootloaderConfig*(packageName: string): DslBootloaderConfig =
 
 type
   DslFetchKind* = enum
-    ## Discriminant for the fetch source kind. M9.H ships two kinds;
+    ## Discriminant for the fetch source kind.
     ## future milestones widen the enum (``dfkGitFull`` for a full clone,
     ## ``dfkLocal`` for an in-tree path) WITHOUT breaking the registry
     ## API because every consumer dispatches on this discriminant.
@@ -3489,6 +3491,9 @@ type
       ## payload comparable in size to a release tarball while still
       ## pinning a tag / commit not present in any upstream release
       ## archive.
+    dfkDataFile
+      ## Download a single file from ``url`` and place it at
+      ## ``<extractedRoot>/source`` without archive extraction.
 
   DslSourceHashAlg* = enum
     ## Hash algorithm used to verify the fetched source. Both sha256 and
@@ -3505,7 +3510,7 @@ type
     packageName*: string
     kind*: DslFetchKind
     url*: string
-      ## Tarball URL (``dfkTarball``) or git URL (``dfkGitArchive``).
+      ## Tarball/data URL or git URL, according to ``kind``.
     gitRevision*: string
       ## Tag / commit / branch the shallow-clone resolves. Empty for
       ## ``dfkTarball``.
@@ -3723,12 +3728,28 @@ proc registerPackageDep*(packageName, kind, constraint: string) =
   ## block, in source-declaration order. Multiple blocks of the same
   ## kind on one package APPEND to the registered seq (matches M9.I's
   ## ``mesonOptions:`` append semantics).
+  ##
+  ## The append is SET-like: re-registering a ``(packageName, kind,
+  ## constraint)`` triple that is already present is a no-op. A
+  ## package's dep list is a set of constraints, so a repeat carries no
+  ## information — but it is NOT harmless to record it. One recipe
+  ## module can be instantiated several times in a single process (the
+  ## per-consumer sibling shims give each consumer its own module
+  ## instance, so a diamond in the source dep closure re-runs a shared
+  ## recipe's module init once per path to it), and every instance
+  ## replays the same registration calls. Appending blindly made the
+  ## registered list grow with the number of instantiations, and the
+  ## Layer-1 package constructors read that list to auto-thread cache
+  ## vars / link dirs / CMake module paths — so the lowered graph
+  ## stopped being a pure function of the recipe. Collapsing the repeat
+  ## keeps every instantiation observing the declared list verbatim.
   case kind
   of "build", "native", "runtime":
     let key = m9r1PackageDepsKey(packageName, kind)
     if key notin dslPortPackageDeps:
       dslPortPackageDeps[key] = @[]
-    dslPortPackageDeps[key].add(constraint)
+    if constraint notin dslPortPackageDeps[key]:
+      dslPortPackageDeps[key].add(constraint)
   else:
     discard
 
@@ -3990,8 +4011,10 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
+  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
   var script = "set -e; "
-  script.add("mkdir -p \"" & escapedExtracted & "\"; ")
+  script.add("rm -rf \"" & escapedStaged & "\"; ")
+  script.add("mkdir -p \"" & escapedStaged & "\"; ")
   script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
   script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" & escapedUrl &
     "\"; fi; ")
@@ -4004,8 +4027,14 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
       "\" | b2sum -a blake3 -c - || ")
     script.add("echo \"" & escapedHash & "  " & escapedTarball &
       "\" | blake3sum -c -; ")
-  script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
-    escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
+  if spec.kind == dfkDataFile:
+    script.add("cp \"" & escapedTarball & "\" \"" &
+      escapedStaged & "/source\"; ")
+  else:
+    script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
+      escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
+  script.add("rm -rf \"" & escapedExtracted & "\"; ")
+  script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
   script.add("touch \"" & escapedStamp & "\"")
   script
 
@@ -4031,6 +4060,32 @@ proc dslPortSanitizeIdPart(value: string): string =
 proc dslPortInstallMirrorPublishVersion(packageName: string): string =
   result = latestRegisteredPackageVersion(packageName)
 
+const customMirrorFallbackSubdirs* = [
+  "lib", "lib64", "libexec", "include", "bin", "share"
+]
+
+proc dslPortStripDepConstraint(value: string): string =
+  for i, ch in value:
+    if ch == ' ' or ch == '>' or ch == '<' or ch == '=' or
+        ch == '~' or ch == '^':
+      return value[0 ..< i]
+  value
+
+proc dslPortCustomShellToolIdentityRefs*(packageName: string):
+    seq[string] {.dynOrStatic.} =
+  ## Attach every declared dependency profile to custom shell actions.
+  ## This supplies PATH and the auxiliary CPATH/LIBRARY_PATH channels
+  ## while preserving the shell as the command interpreter identity.
+  result = @["sh"]
+  for raw in registeredNativeBuildDeps(packageName):
+    let dep = dslPortStripDepConstraint(raw)
+    if dep.len > 0 and dep notin result:
+      result.add(dep)
+  for raw in registeredBuildDeps(packageName):
+    let dep = dslPortStripDepConstraint(raw)
+    if dep.len > 0 and dep notin result:
+      result.add(dep)
+
 proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
   ## M9.R.15q.2.1 — translate ``registeredShellActions(packageName)``
   ## (and the package's ``registeredFetchSpec``) into ``BuildActionDef``
@@ -4049,6 +4104,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
   let rows = registeredShellActions(packageName)
   if rows.len == 0:
     return
+  let shellToolRefs = dslPortCustomShellToolIdentityRefs(packageName)
   let projectRoot = activeProviderProjectRoot()
   if projectRoot.len == 0:
     # Outside provider mode (test fixtures importing the recipe) the
@@ -4105,6 +4161,9 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
     let escapedStampDir = stampDir.replace("\\", "/").
       replace("\"", "\\\"")
+    let outMirrorRoot = (projectRoot / ".repro" / "output" / "install").
+      replace("\\", "/")
+    let shellEnv = @[("OUT_MIRROR", outMirrorRoot)]
     let script = "set -e; mkdir -p \"" & escapedExtracted &
       "\"; mkdir -p \"" & escapedOut & "\"; mkdir -p \"" &
       escapedStampDir & "\"; cd \"" & escapedExtracted & "\"; " &
@@ -4126,7 +4185,8 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       pool = "compile",
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "from-source-custom.shell",
-      toolIdentityRefs = @["sh"])
+      env = shellEnv,
+      toolIdentityRefs = shellToolRefs)
     prevId = actionId
     prevStamp = stamp
 
@@ -4174,20 +4234,41 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     script.add("if [ -d \"" & escapedOutPath & "/install/usr\" ]; then ")
     script.add("cp -a -- \"" & escapedOutPath & "/install/usr\" \"" &
       escapedMirrorRoot & "/\"; ")
+    script.add("elif [ -d \"" & escapedOutPath & "/usr\" ]; then ")
+    script.add("cp -a -- \"" & escapedOutPath & "/usr\" \"" &
+      escapedMirrorRoot & "/\"; ")
     script.add("else ")
     # Fallback: bare $out/lib + $out/include + $out/bin (recipes that
     # didn't relocate to install/usr/). Compose a synthetic usr/ tree.
     script.add("mkdir -p \"" & escapedMirrorUsr & "\"; ")
-    for sub in ["lib", "lib64", "include", "bin", "share"]:
+    for sub in customMirrorFallbackSubdirs:
       script.add("if [ -d \"" & escapedOutPath & "/" & sub &
         "\" ]; then cp -a -- \"" & escapedOutPath & "/" & sub &
         "\" \"" & escapedMirrorUsr & "/\"; fi; ")
     script.add("fi; ")
+    script.add("for pcdir in \"" & escapedMirrorUsr & "/lib/pkgconfig\" \"" &
+      escapedMirrorUsr & "/lib64/pkgconfig\" \"" & escapedMirrorUsr &
+      "/share/pkgconfig\"; do ")
+    script.add("if [ -d \"$pcdir\" ]; then for pc in \"$pcdir\"/*.pc; do ")
+    script.add("if [ -f \"$pc\" ]; then sed -i ")
+    script.add("'1,/^prefix=/{ s|^prefix=.*$|prefix=" & escapedMirrorUsr & "|; } ")
+    script.add("; s|^exec_prefix=/usr|exec_prefix=" & escapedMirrorUsr & "| ")
+    script.add("; s|^libdir=/usr/lib64|libdir=" & escapedMirrorUsr & "/lib64| ")
+    script.add("; s|^libdir=/usr/lib|libdir=" & escapedMirrorUsr & "/lib| ")
+    script.add("; s|^includedir=/usr/include|includedir=" & escapedMirrorUsr & "/include| ")
+    script.add("; s|^datadir=/usr/share|datadir=" & escapedMirrorUsr & "/share| ")
+    script.add("; s|^datarootdir=/usr/share|datarootdir=" & escapedMirrorUsr & "/share|' ")
+    script.add("\"$pc\"; fi; done; fi; done; ")
     script.add("touch \"" & escapedMirrorStamp & "\"; ")
     script.add(emitInstallMirrorStorePublish(recipesRoot, packageName,
       publishVersion, mirrorRoot))
     let mirrorActionId = "from-source-custom-mirror-" &
       dslPortSanitizeIdPart(packageName)
+    let packageVersion = block:
+      let versions = registeredVersions(packageName)
+      if versions.len > 0: versions[^1].version else: ""
+    let cacheIdentity = sourceCacheEntryIdentity(
+      projectRoot, packageName, packageVersion, "custom")
     discard buildAction(
       id = mirrorActionId,
       call = inlineExecCall(@["sh", "-c", script], projectRoot),
@@ -4197,7 +4278,10 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       pool = "compile",
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "from-source-custom.mirror",
-      toolIdentityRefs = @["sh", InstallMirrorPublishToolName])
+      publishToBinaryCache = true,
+      cacheEntryIdentity = some(cacheIdentity),
+      toolIdentityRefs = @["sh", InstallMirrorPublishToolName],
+      declaredOutputs = @[mirrorRoot])
 
 # ---------------------------------------------------------------------------
 # DSL-port M9.R.3 — ``library <name>: api:`` block surface.

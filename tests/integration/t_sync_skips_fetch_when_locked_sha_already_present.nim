@@ -174,7 +174,7 @@ suite "RA-14 — sync skips fetch when locked SHA already present":
 
       let workspaceRoot = scratch / "workspace"
       createDir(workspaceRoot)
-      let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+      let manifestsRoot = workspaceRoot
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
 
@@ -204,7 +204,8 @@ suite "RA-14 — sync skips fetch when locked SHA already present":
 
       # Lock: ``present`` at the SHA the workspace already has (→ skip),
       # ``behind`` at the advanced upstream SHA (→ must fetch).
-      let lockDir = manifestsRoot / "locks" / "myproject" / "present"
+      let lockDir = workspaceRoot / ".repro" / "manifests" / "locks" /
+        "myproject" / "present"
       createDir(lockDir)
       writeFile(lockDir / (presentSha & ".toml"),
         lockToml("myproject", @[

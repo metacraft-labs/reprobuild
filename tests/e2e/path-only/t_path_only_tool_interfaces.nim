@@ -27,6 +27,10 @@ proc requireFailure(command: openArray[string]; cwd = getCurrentDir();
   check res.code != 0
   res.output
 
+proc markExecutable(path: string) =
+  setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
+    fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+
 proc valueAfter(output, prefix: string): string =
   for line in output.splitLines:
     if line.startsWith(prefix):
@@ -73,7 +77,6 @@ suite "e2e_path_only_tool_interfaces":
       discard requireSuccess(@["nim", "c", "--verbosity:0", "--hints:off",
         "--nimcache:" & (tempRoot / "nimcache-repro"),
         "--out:" & reproBin, repoRoot / "apps" / "repro" / "repro.nim"])
-
       let binDir = tempRoot / "bin"
       writeFixtureTool(binDir)
       let pathValue = binDir & $PathSep & getEnv("PATH")

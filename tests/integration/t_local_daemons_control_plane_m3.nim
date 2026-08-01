@@ -77,7 +77,7 @@ suite "Local daemons/control-plane M3 build routing":
       let tempRoot = createTempDir("repro-daemon-m3-matrix", "")
       defer:
         stopDaemon(tempRoot)
-        removeDir(tempRoot)
+        removeDirEventually(tempRoot)
 
       let directProject = tempRoot / "direct-project"
       copyFixtureProject(directProject)
@@ -144,7 +144,8 @@ suite "Local daemons/control-plane M3 build routing":
 
         putEnv("REPRO_DAEMON_M3_BUILD_RESPONSE_DELAY_MS", "10000")
         let daemon = startProcess(publicReproBin(),
-          args = @["daemon", "start", "--foreground"] & daemonArgs(tempRoot),
+          args = @["daemon", "start", "--foreground", "--dev",
+            "--source-exe", publicReproBin()] & daemonArgs(tempRoot),
           workingDir = repoRoot(),
           options = {poUsePath, poStdErrToStdOut})
         delEnv("REPRO_DAEMON_M3_BUILD_RESPONSE_DELAY_MS")

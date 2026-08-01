@@ -88,10 +88,10 @@ if (Test-Path -LiteralPath $cmakeOutput) {
 }
 
 Write-Host ""
-Write-Host "5. Per-repro-build-invocation --stats output:"
+Write-Host "5. Per-repro-build-invocation --show=timing output:"
 Write-Host "   Each TryCompile spawns its own 'repro build' process. Those processes were"
-Write-Host "   launched WITHOUT --stats by CMake, so no per-invocation tables exist on disk."
-Write-Host "   To capture them we'd have to set REPROBUILD_DEFAULT_STATS=text or similar."
+Write-Host "   launched WITHOUT --show=timing by CMake, so no per-invocation tables exist on disk."
+Write-Host "   To capture them we'd have to set REPROBUILD_MEASURE=timing."
 
 Write-Host ""
 Write-Host "==> What we are MISSING for a precise breakdown"

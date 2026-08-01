@@ -34,6 +34,14 @@
   smoke metrics and the Reprobuild/RunQuota production benchmark; it also runs
   the CMake Reprobuild-vs-Ninja quick benchmark when
   `../reprobuild-cmake/build/bin/cmake` is available.
+- It also runs the composition suites (`rp1`,`rp2`,`rp3`,`rp5b`,`ti1`,`ti3`)
+  that emit the provider-runtime / thin-interface gate metrics:
+  provider-compile-time (interface mode vs full mode), provider-session
+  round-trip (warm/cold), cold-vs-warm consumer build, resource-op round-trip
+  (warm/cold), interface-lift (cold materialize vs cache HIT), and the
+  fingerprint-split downstream-invalidation asymmetry. The default suite set is
+  `m0,m23,cmake,rp1,rp2,rp3,rp5b,ti1,ti3`; override with `REPROBUILD_BENCH_SUITES`.
+  All composition suites are self-contained (no external incus/network).
 - CMake benchmark targets require sibling checkouts of `../runquota` and
   `../reprobuild-cmake`; benchmark CI checks out and builds those siblings.
 

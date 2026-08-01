@@ -1,33 +1,22 @@
-## RA-7 — managed-hook re-entry guard.
+## Managed post-commit recursion context — legacy sentinel cannot bypass.
 ##
-## Lock publication PUSHES the manifest repo, and that repo carries the
-## same managed VCS hooks, so a publish-push would re-fire the dispatcher
-## and recurse (the nested push would publish again, …). The managed-hook
-## dispatcher template sets a sentinel env var (``REPROBUILD_HOOK_ACTIVE``)
-## on first entry; a nested invocation that sees it already set
-## short-circuits with ``exit 0`` BEFORE re-running any hook body.
+## The real installed dispatcher always runs the preserved user hook after
+## scrubbing the legacy sentinel and private context. A user-supplied sentinel
+## plus forged context must still run the managed post-commit body and produce
+## its report. Only Reprobuild's exact typed lock-commit context suppresses the
+## best-effort managed refresh that would otherwise recurse after an internal
+## manifest lock commit; the preserved hook still runs and sees no internal
+## values. The fixture is one real Git repo in a one-repo workspace.
 ##
-## This test installs the real dispatcher via ``repro hooks ensure --vcs``,
-## then replaces the managed body (``<hook>.repro-managed``) with a body
-## whose only effect is to append a marker line to a file (a stand-in for
-## "the body ran, which would trigger another publish-push"). It then runs
-## the dispatcher twice:
-##
-##   * with ``REPROBUILD_HOOK_ACTIVE=1`` already in the environment (the
-##     nested-invocation case): the dispatcher must short-circuit, exit 0,
-##     and the body's side effect must NOT happen — no marker line.
-##   * without the sentinel (the first-entry case): the dispatcher runs the
-##     body and the marker line DOES appear.
-##
-## Falsifiable: the two runs differ only by the sentinel env var; if the
-## guard were absent, the first run would also append the marker and the
-## "must not run" assertion would fail. Hermetic: a single local ``git
-## init`` repo + a metadata-only workspace under one ``createTempDir``; no
-## network. Skip only when ``git`` is missing.
+## Falsifiable: accepting the retired sentinel removes the first report;
+## forwarding either internal value contaminates the preserved log; failing to
+## recognize the exact internal context creates the second report. The test is
+## hermetic on every platform with Git's hook shell and mocks no hook process.
 
-import std/[os, osproc, strutils, tempfiles, unittest]
+import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_cli_support/push_hook_protocol
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -51,7 +40,7 @@ proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
-suite "RA-7 — managed-hook re-entry guard prevents recursive publish":
+suite "managed post-commit recursion context":
 
   test "t_managed_hook_reentry_guard_prevents_recursive_publish":
     let gitBin = findExe("git")
@@ -68,8 +57,16 @@ suite "RA-7 — managed-hook re-entry guard prevents recursive publish":
       let workspaceRoot = scratch / "workspace"
       let repoPath = workspaceRoot / "lib-a"
       discard requireGit(q(gitBin) & " init -b main " & q(repoPath))
+      discard requireGit(q(gitBin) & " -C " & q(repoPath) &
+        " config user.email tester@example.invalid")
+      discard requireGit(q(gitBin) & " -C " & q(repoPath) &
+        " config user.name 'Post-commit Context Tester'")
+      writeFile(repoPath / "README.md", "seed\n")
+      discard requireGit(q(gitBin) & " -C " & q(repoPath) & " add README.md")
+      discard requireGit(q(gitBin) & " -C " & q(repoPath) &
+        " commit -m seed")
 
-      let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+      let manifestsRoot = workspaceRoot
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -85,7 +82,19 @@ suite "RA-7 — managed-hook re-entry guard prevents recursive publish":
         "remote = \"lib-a-origin\"\nrevision = \"main\"\n")
       writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
 
-      # ---- Install the real dispatcher ---------------------------------
+      # Install a real preserved hook before the canonical dispatcher wraps it.
+      let preservedLog = scratch / "preserved.log"
+      let originalHook = repoPath / ".git" / "hooks" / "post-commit"
+      writeFile(originalHook,
+        "#!/usr/bin/env sh\n" &
+        "printf 'legacy=%s context=%s\\n' \"${" & LegacyHookSentinelEnv &
+        ":-}\" \"${" & InternalHookContextEnv & ":-}\" >> " &
+        q(preservedLog) & "\nexit 0\n")
+      var originalPerms = getFilePermissions(originalHook)
+      originalPerms.incl({fpUserExec, fpGroupExec, fpOthersExec})
+      setFilePermissions(originalHook, originalPerms)
+
+      # ---- Install the real dispatcher and managed body ----------------
       let res = runShell(shellCommand(@[
         reproBin, "hooks", "ensure", "--vcs",
         "--workspace-root", workspaceRoot, workspaceRoot]))
@@ -99,37 +108,31 @@ suite "RA-7 — managed-hook re-entry guard prevents recursive publish":
       check fileExists(dispatcher)
       check fileExists(managed)
 
-      # The dispatcher carries the RA-7 re-entry guard.
+      # The legacy name remains only so the dispatcher can scrub it.
       check readFile(dispatcher).contains("REPROBUILD_HOOK_ACTIVE")
+      check readFile(managed).contains(InternalLockCommitContext)
 
-      # ---- Replace the managed body with an observable side effect -----
-      # The body appends one line to BODY_RAN each time it runs. A nested
-      # invocation (sentinel already set) must NOT reach this body.
-      let bodyRan = scratch / "body-ran.txt"
-      var body = "#!/usr/bin/env sh\n"
-      body.add("# reprobuild managed post-commit hook\n")
-      body.add("printf 'BODY-RAN\\n' >> " & q(bodyRan) & "\n")
-      body.add("exit 0\n")
-      writeFile(managed, body)
-      var perms = getFilePermissions(managed)
-      perms.incl({fpUserExec, fpGroupExec, fpOthersExec})
-      setFilePermissions(managed, perms)
+      let report = workspaceRoot / ".repro" / "workspace" /
+        "post-commit-report.json"
+      if fileExists(report): removeFile(report)
 
-      proc bodyRunCount(): int =
-        if not fileExists(bodyRan): return 0
-        result = 0
-        for line in readFile(bodyRan).splitLines():
-          if line.strip() == "BODY-RAN": inc result
+      # A fixed legacy marker and arbitrary context are not authorization.
+      let forged = runCmd("env REPROBUILD_REPRO=" & q(reproBin) & " " &
+        LegacyHookSentinelEnv & "=1 " & InternalHookContextEnv &
+        "=forged " & q(dispatcher), repoPath)
+      if forged.code != 0: checkpoint(forged.output)
+      check forged.code == 0
+      check fileExists(report)
 
-      # ---- (A) nested invocation: sentinel set → short-circuit ---------
-      let nested = runCmd("env REPROBUILD_HOOK_ACTIVE=1 " & q(dispatcher),
-        repoPath)
-      check nested.code == 0
-      # The body did NOT run — the guard short-circuited before it.
-      check bodyRunCount() == 0
+      removeFile(report)
+      let internal = runCmd("env REPROBUILD_REPRO=" & q(reproBin) & " " &
+        InternalHookContextEnv & "=" & InternalLockCommitContext & " " &
+        q(dispatcher), repoPath)
+      if internal.code != 0: checkpoint(internal.output)
+      check internal.code == 0
+      check not fileExists(report)
 
-      # ---- (B) first entry: no sentinel → body runs (falsifiable) ------
-      let firstEntry = runCmd(q(dispatcher), repoPath)
-      check firstEntry.code == 0
-      # The body DID run exactly once.
-      check bodyRunCount() == 1
+      let preserved = readFile(preservedLog).splitLines().filterIt(it.len > 0)
+      check preserved.len == 2
+      for line in preserved:
+        check line == "legacy= context="

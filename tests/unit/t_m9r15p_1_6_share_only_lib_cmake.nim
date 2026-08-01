@@ -107,3 +107,19 @@ suite "DSL-port M9.R.15p.1.6 — share-only fast-path lib/cmake widening":
     let useDef = syntheticUseDef("empty-pkg")
     let outcome = tryResolveFromSourceTool(useDef, recipeRoot = scratch)
     check outcome.kind == rrNeedsBuild
+
+  test "data-only share tree resolves without a synthetic executable":
+    let scratch = createTempDir("repro-share-data-only-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "iana-tzdata")
+    let zoneinfo = scratch / "iana-tzdata" / ".repro" / "output" /
+      "install" / "usr" / "share" / "zoneinfo" / "Etc"
+    createDir(zoneinfo)
+    writeFile(zoneinfo / "UTC", "synthetic timezone data\n")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("iana-tzdata"), recipeRoot = scratch)
+
+    check outcome.kind == rrResolved
+    check outcome.profile.resolvedExecutablePath.endsWith(
+      "zoneinfo" / "Etc" / "UTC")

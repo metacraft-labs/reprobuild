@@ -217,12 +217,9 @@ package ncursesSource:
 
   library libTinfow:
     ## ``libtinfow.so`` — the terminfo-only library split out via
-    ## ``--with-termlib`` so terminfo-only consumers (less, vim's
-    ## terminfo lookup path, gdb's terminal-capability probe) can link
-    ## against terminfo without dragging in the full curses windowing
-    ## surface. The upstream SONAME ``tinfow`` is PascalCased to
-    ## ``libTinfow`` per the libCap / libExpat / libGlib2 precedent.
-    ## v1 records the artifact only.
+    ## ``--with-termlib`` so terminfo-only consumers can link against
+    ## terminal capability lookup without dragging in the full curses
+    ## windowing surface.
     discard
 
   executable tic:

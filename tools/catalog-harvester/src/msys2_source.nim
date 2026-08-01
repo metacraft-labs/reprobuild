@@ -41,7 +41,7 @@
 ## so the realize hook's ``flattenExtractPath`` materializes
 ## ``bin/ocaml.exe`` at the prefix root.
 
-import std/[algorithm, httpclient, os, osproc, strutils]
+import std/[algorithm, httpclient, os, osproc, strtabs, strutils]
 import repro_dsl_stdlib/packages_schema
 
 # SHA-256 is computed by shelling out to the host hasher (sha256sum on
@@ -85,7 +85,10 @@ type
 # ---------------------------------------------------------------------------
 
 proc envBaseUrl*(env: Msys2Env): string =
-  "https://repo.msys2.org/mingw/" & $env & "/"
+  if env == meMsys:
+    "https://repo.msys2.org/msys/x86_64/"
+  else:
+    "https://repo.msys2.org/mingw/" & $env & "/"
 
 proc envPackagePrefix*(env: Msys2Env): string =
   ## The mingw-w64 package-name prefix the env uses. Operators can pass
@@ -107,7 +110,7 @@ proc envExtractRoot*(env: Msys2Env): string =
   of meUcrt64: "ucrt64"
   of meClang64: "clang64"
   of meMingw32: "mingw32"
-  of meMsys: ""  # base env files land at the root already
+  of meMsys: "usr"
 
 # ---------------------------------------------------------------------------
 # SHA-256 of a downloaded file
@@ -390,11 +393,101 @@ proc resolveLatestPackage*(env: Msys2Env; packageHint: string;
 #   (b) the .PKGINFO ``depend =`` lines (informational);
 #   (c) the list of ``<env>/bin/*`` entries to populate bin_relpath.
 #
-# .pkg.tar.zst is a zstd-compressed tar. We shell out to ``tar --zstd``
-# (Git for Windows ships this) OR to a host ``zstd | tar`` pipe — both
-# are exclusively used at HARVEST time so the runtime ``afTarZst``
-# discovery (which probes for a catalog 7z) is independent. The
-# harvester is a maintainer tool; needing host tar+zstd is acceptable.
+# .pkg.tar.zst is a zstd-compressed tar. Prefer an explicit zstd
+# decompression step into a scratch .tar, then let tar read the plain
+# archive. This avoids ``tar --zstd`` discovering a zstd binary through
+# a polluted loader path. We still fall back to tar's built-in/auto
+# detection paths for hosts that have bsdtar/libarchive support but no
+# separate zstd CLI.
+
+proc isGnuTar*(tar: string): bool =
+  try:
+    execCmdEx(quoteShell(tar) & " --version").output.contains("GNU tar")
+  except CatchableError:
+    false
+
+proc newChildEnvTable(): StringTableRef =
+  when defined(windows):
+    result = newStringTable(modeCaseInsensitive)
+  else:
+    result = newStringTable(modeCaseSensitive)
+
+proc pathListSep(): string =
+  when defined(windows): ";"
+  else: ":"
+
+proc prependPathValue(existing, dir: string): string =
+  if dir.len == 0:
+    return existing
+  if existing.len == 0:
+    return dir
+  dir & pathListSep() & existing
+
+proc zstdChildEnv(prependZstdLib, stripLoaderVars: bool): StringTableRef =
+  result = newChildEnvTable()
+  for k, v in envPairs():
+    if stripLoaderVars and k in [
+      "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+      "LD_PRELOAD", "DYLD_INSERT_LIBRARIES"]:
+      discard
+    else:
+      result[k] = v
+  let zstdLib = getEnv("ZSTD_LIB")
+  if prependZstdLib and zstdLib.len > 0:
+    result["LD_LIBRARY_PATH"] =
+      prependPathValue(result.getOrDefault("LD_LIBRARY_PATH"), zstdLib)
+    result["DYLD_LIBRARY_PATH"] =
+      prependPathValue(result.getOrDefault("DYLD_LIBRARY_PATH"), zstdLib)
+    result["DYLD_FALLBACK_LIBRARY_PATH"] =
+      prependPathValue(result.getOrDefault("DYLD_FALLBACK_LIBRARY_PATH"),
+        zstdLib)
+
+proc findZstdDecompressor(): string =
+  result = findExe("zstd", followSymlinks = false)
+  if result.len == 0:
+    result = findExe("unzstd", followSymlinks = false)
+
+proc zstdDecompressCommand(zstd, src, dest: string): string =
+  let leaf = zstd.extractFilename.toLowerAscii()
+  let modeFlag = if leaf == "unzstd": "" else: " -d"
+  quoteShell(zstd) & modeFlag & " -f -q -o " & quoteShell(dest) &
+    " " & quoteShell(src)
+
+proc decompressZstdToFile(src, dest: string):
+    tuple[ok: bool; command: string; exitCode: int; output: string] =
+  let zstd = findZstdDecompressor()
+  if zstd.len == 0:
+    return (ok: false, command: "zstd", exitCode: -1,
+      output: "no zstd/unzstd decompressor on PATH")
+  let cmd = zstdDecompressCommand(zstd, src, dest)
+  let attempts =
+    if getEnv("ZSTD_LIB").len > 0:
+      @[
+        zstdChildEnv(prependZstdLib = true, stripLoaderVars = false),
+        zstdChildEnv(prependZstdLib = true, stripLoaderVars = true),
+        zstdChildEnv(prependZstdLib = false, stripLoaderVars = true)
+      ]
+    else:
+      @[
+        zstdChildEnv(prependZstdLib = false, stripLoaderVars = true),
+        zstdChildEnv(prependZstdLib = false, stripLoaderVars = false)
+      ]
+  for env in attempts:
+    try:
+      if fileExists(dest): removeFile(dest)
+    except OSError:
+      discard
+    let res = execCmdEx(cmd, env = env)
+    result = (ok: res.exitCode == 0, command: cmd,
+      exitCode: res.exitCode, output: res.output)
+    if result.ok:
+      return
+
+proc collectTarListOutput(output: string): seq[string] =
+  for line in output.splitLines:
+    let s = line.strip(chars = {'\n', '\r', ' '})
+    if s.len > 0:
+      result.add(s)
 
 proc tarListEntries*(archivePath: string): seq[string] =
   ## Return every entry path in the .tar.zst archive (file + directory).
@@ -409,60 +502,46 @@ proc tarListEntries*(archivePath: string): seq[string] =
   # Windows: GNU tar parses ``host:path`` as a remote, so a literal
   # ``C:\Users\…\foo.tar.zst`` argument errors out with "Cannot
   # connect to C: resolve failed". Pass ``--force-local`` so the
-  # argument is always treated as a local path. bsdtar tolerates the
-  # flag too (it ignores unknown long options) so we always pass it.
-  const ForceLocalFlag = when defined(windows): " --force-local" else: ""
-  # Try the --zstd filter first (GNU tar).
-  let cmd1 = quoteShell(tar) & ForceLocalFlag &
+  # argument is always treated as a local path. bsdtar does NOT tolerate the
+  # flag on some versions, so we only pass it for GNU tar.
+  let isGnu = isGnuTar(tar)
+  let forceLocalFlag = if isGnu: " --force-local" else: ""
+  var zstdOutput = ""
+  let scratchTar = getTempDir() / ("msys2-tarlist-" &
+    $getCurrentProcessId() & "-" & archivePath.extractFilename & ".tar")
+  try:
+    let zstdRes = decompressZstdToFile(archivePath, scratchTar)
+    if zstdRes.ok:
+      let cmdList = quoteShell(tar) & forceLocalFlag &
+        " -tf " & quoteShell(scratchTar)
+      let resList = execCmdEx(cmdList)
+      if resList.exitCode == 0:
+        return collectTarListOutput(resList.output)
+      zstdOutput = "zstd ok; tar -tf scratch failed (exit " &
+        $resList.exitCode & "): " & resList.output
+    else:
+      zstdOutput = "zstd failed (exit " & $zstdRes.exitCode & "): " &
+        zstdRes.output
+  finally:
+    try: removeFile(scratchTar) except OSError: discard
+
+  # Fallback A: GNU tar's --zstd filter.
+  let cmd1 = quoteShell(tar) & forceLocalFlag &
     " --zstd -tf " & quoteShell(archivePath)
   let res1 = execCmdEx(cmd1)
   if res1.exitCode == 0:
-    for line in res1.output.splitLines:
-      let s = line.strip(chars = {'\n', '\r', ' '})
-      if s.len > 0: result.add(s)
-    return
-  # Fallback A: bsdtar auto-detect via bare ``-tf``.
-  let cmdAuto = quoteShell(tar) & ForceLocalFlag &
+    return collectTarListOutput(res1.output)
+  # Fallback B: bsdtar auto-detect via bare ``-tf``.
+  let cmdAuto = quoteShell(tar) & forceLocalFlag &
     " -tf " & quoteShell(archivePath)
   let resAuto = execCmdEx(cmdAuto)
   if resAuto.exitCode == 0:
-    for line in resAuto.output.splitLines:
-      let s = line.strip(chars = {'\n', '\r', ' '})
-      if s.len > 0: result.add(s)
-    return
-  # Fallback B: decompress to a temp .tar then list. We previously
-  # relied on a shell pipeline (``zstd -dc … | tar -tf -``) but
-  # ``cmd.exe`` on Windows mis-quotes the pipe when ``quoteShell``
-  # double-quotes both sides — zstd ends up seeing the literal ``|``
-  # and the downstream tar path as arguments. A two-step
-  # decompress-then-list avoids any shell-pipe interpretation and
-  # behaves identically on POSIX and Windows.
-  let zstd = findExe("zstd")
-  if zstd.len == 0:
-    raise newException(Msys2HarvestError,
-      "tar --zstd failed and no 'zstd' on PATH for fallback (tar " &
-      "output: " & res1.output & ")")
-  let scratchTar = getTempDir() / ("msys2-tarlist-" &
-    $getCurrentProcessId() & "-" & archivePath.extractFilename & ".tar")
-  defer:
-    try: removeFile(scratchTar) except OSError: discard
-  let cmdDecompress = quoteShell(zstd) & " -dc -o " &
-    quoteShell(scratchTar) & " " & quoteShell(archivePath)
-  let resDecompress = execCmdEx(cmdDecompress)
-  if resDecompress.exitCode != 0:
-    raise newException(Msys2HarvestError,
-      "zstd decompress failed (exit " & $resDecompress.exitCode &
-      "): " & resDecompress.output)
-  let cmdList = quoteShell(tar) & ForceLocalFlag &
-    " -tf " & quoteShell(scratchTar)
-  let res2 = execCmdEx(cmdList)
-  if res2.exitCode != 0:
-    raise newException(Msys2HarvestError,
-      "tar -tf on decompressed scratch failed (exit " & $res2.exitCode &
-      "): " & res2.output)
-  for line in res2.output.splitLines:
-    let s = line.strip(chars = {'\n', '\r', ' '})
-    if s.len > 0: result.add(s)
+    return collectTarListOutput(resAuto.output)
+  raise newException(Msys2HarvestError,
+    "unable to list MSYS2 .pkg.tar.zst archive " & archivePath &
+    "\nexplicit zstd path: " & zstdOutput &
+    "\ntar --zstd output: " & res1.output &
+    "\ntar auto-detect output: " & resAuto.output)
 
 proc tarExtractMember*(archivePath, member, destFile: string): bool =
   ## Extract a single member from the .tar.zst archive to ``destFile``.
@@ -484,36 +563,33 @@ proc tarExtractMember*(archivePath, member, destFile: string): bool =
     except OSError: discard
   # ``--force-local`` keeps GNU tar from reading ``C:\path`` as
   # ``host:path`` on Windows; same rationale as in ``tarListEntries``.
-  const ForceLocalFlag = when defined(windows): " --force-local" else: ""
-  let cmd1 = quoteShell(tar) & ForceLocalFlag &
-    " --zstd -xf " & quoteShell(archivePath) &
-    " -C " & quoteShell(scratch) & " " & quoteShell(member)
-  let res1 = execCmdEx(cmd1)
-  if res1.exitCode != 0:
-    # Fallback A: bsdtar auto-detect.
-    let cmdAuto = quoteShell(tar) & ForceLocalFlag &
+  let isGnu = isGnuTar(tar)
+  let forceLocalFlag = if isGnu: " --force-local" else: ""
+  var extractedOk = false
+  let scratchTar = scratch / "archive.tar"
+  let zstdRes = decompressZstdToFile(archivePath, scratchTar)
+  if zstdRes.ok:
+    let cmdScratch = quoteShell(tar) & forceLocalFlag &
+      " -xf " & quoteShell(scratchTar) &
+      " -C " & quoteShell(scratch) & " " & quoteShell(member)
+    let resScratch = execCmdEx(cmdScratch)
+    extractedOk = resScratch.exitCode == 0
+  if not extractedOk:
+    # Fallback A: GNU tar's --zstd filter.
+    let cmd1 = quoteShell(tar) & forceLocalFlag &
+      " --zstd -xf " & quoteShell(archivePath) &
+      " -C " & quoteShell(scratch) & " " & quoteShell(member)
+    let res1 = execCmdEx(cmd1)
+    extractedOk = res1.exitCode == 0
+  if not extractedOk:
+    # Fallback B: bsdtar auto-detect.
+    let cmdAuto = quoteShell(tar) & forceLocalFlag &
       " -xf " & quoteShell(archivePath) &
       " -C " & quoteShell(scratch) & " " & quoteShell(member)
     let resAuto = execCmdEx(cmdAuto)
-    if resAuto.exitCode != 0:
-      # Fallback B: decompress to a scratch .tar then extract from
-      # it (see ``tarListEntries`` for the rationale — cmd.exe
-      # garbles the original shell-pipe form).
-      let zstd = findExe("zstd")
-      if zstd.len == 0:
-        return false
-      let scratchTar = scratch / "archive.tar"
-      let cmdDecompress = quoteShell(zstd) & " -dc -o " &
-        quoteShell(scratchTar) & " " & quoteShell(archivePath)
-      let resDecompress = execCmdEx(cmdDecompress)
-      if resDecompress.exitCode != 0:
-        return false
-      let cmd2 = quoteShell(tar) & ForceLocalFlag &
-        " -xf " & quoteShell(scratchTar) &
-        " -C " & quoteShell(scratch) & " " & quoteShell(member)
-      let res2 = execCmdEx(cmd2)
-      if res2.exitCode != 0:
-        return false
+    extractedOk = resAuto.exitCode == 0
+  if not extractedOk:
+    return false
   let extracted = scratch / member
   if not fileExists(extracted):
     return false

@@ -110,7 +110,7 @@ proc buildCommand(projectRoot, tempRoot, workName: string;
     "--action-cache-root=" & tempRoot / "action-cache",
     "--progress=quiet",
     "--log=quiet",
-    "--report=none",
+    "--measure=none",
     "--no-runquota"
   ] & @extra, daemonEnv(tempRoot, envExtra))
 
@@ -150,11 +150,11 @@ suite "Local daemons/control-plane M7 stats capture":
         "--daemon=off",
         "--tool-provisioning=path",
         "--work-root=" & tempRoot / "direct-work",
-        "--stats-capture=timing",
+        "--stats-groups=timing",
         "--no-runquota"
       ], daemonEnv(tempRoot)), repoRoot())
       check directCapture.contains(
-        "--stats-capture requires daemon-hosted build; direct-mode persistent " &
+        "--write-stats requires daemon-hosted build; direct-mode persistent " &
           "capture is not implemented")
 
       discard requireSuccess(buildCommand(projectRoot, tempRoot, "work"),
@@ -168,7 +168,7 @@ suite "Local daemons/control-plane M7 stats capture":
       check statusBefore.contains("flushed: 0")
 
       discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
-        ["--stats-capture=timing,cache,runquota,deps,sessions"]), repoRoot())
+        ["--stats-groups=timing,cache,runquota,deps,sessions"]), repoRoot())
       waitForStatsStore(projectRoot)
 
       let statusAfter = requireSuccess(shellCommand([
@@ -194,9 +194,9 @@ suite "Local daemons/control-plane M7 stats capture":
         publicReproBin(), "build", projectRoot,
         "--daemon=require",
         "--tool-provisioning=path",
-        "--stats-capture=invalid"
+        "--stats-groups=invalid"
       ], daemonEnv(tempRoot)), repoRoot())
-      check invalid.contains("unsupported --stats-capture=invalid")
+      check invalid.contains("unsupported --stats-groups=invalid")
 
     test "integration_stats_flush_not_in_build_hot_path":
       let tempRoot = createTempDir("repro-daemon-m7-hot-path", "")
@@ -210,7 +210,7 @@ suite "Local daemons/control-plane M7 stats capture":
       writeCopyProject(projectRoot, "daemonM7HotPath", 1)
 
       discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
-        ["--stats-capture=timing,cache,runquota,deps,sessions"],
+        ["--stats-groups=timing,cache,runquota,deps,sessions"],
         [("REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS", "8000")]), repoRoot())
       check not fileExists(statsStorePath(projectRoot))
       waitForStatsStore(projectRoot, timeoutSeconds = 20.0)

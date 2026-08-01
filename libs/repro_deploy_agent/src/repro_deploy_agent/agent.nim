@@ -36,6 +36,7 @@ import std/[algorithm, httpclient, os, strutils, uri]
 
 when defined(ssl):
   import std/net
+  import wrappers/openssl
 
 import ./manifest
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
@@ -59,6 +60,13 @@ import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 # std/httpclient), so this file still compiles without -d:ssl.
 when defined(ssl):
   var gAgentTlsCtx: SslContext = nil
+  var gAgentOpenSslInitialized = false
+
+  proc ensureAgentOpenSslInitialized() {.gcsafe.} =
+    {.cast(gcsafe).}:
+      if not gAgentOpenSslInitialized:
+        discard SSL_library_init()
+        gAgentOpenSslInitialized = true
 
   proc agentTlsContext(): SslContext {.gcsafe.} =
     # The context is process-global and resolved once (the agent tick runs
@@ -67,6 +75,7 @@ when defined(ssl):
     {.cast(gcsafe).}:
       if gAgentTlsCtx != nil:
         return gAgentTlsCtx
+      ensureAgentOpenSslInitialized()
       let caFile = getEnv("REPRO_BINARY_CACHE_CA_FILE", "")
       let insecure = getEnv("REPRO_BINARY_CACHE_TLS_INSECURE", "") in
         ["1", "true", "yes"]

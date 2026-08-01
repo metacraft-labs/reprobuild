@@ -21,7 +21,7 @@
 ##          path (exit 2, mode ``refused``);
 ##        - otherwise persists the new entry via M20's
 ##          ``addOverride`` + ``writeDevelopOverridesFile``.
-##   5. Emits ``<workspaceRoot>/.repro/workspace/develop-report.json``.
+##   5. Emits ``<workspaceRoot>/.repro/build/reports/develop-report.json``.
 ##
 ## Fixture: hermetic local bare git repos following the same pattern as
 ## ``t_workspace_init_clones_missing_and_reports_existing`` (M9). One
@@ -133,7 +133,7 @@ proc setupFixture(gitBin, slug: string): M22Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
@@ -142,7 +142,7 @@ proc setupFixture(gitBin, slug: string): M22Fixture =
   result.workspaceRoot = workspaceRoot
 
 proc readReport(fixture: M22Fixture): JsonNode =
-  let reportPath = fixture.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fixture.workspaceRoot / ".repro" / "build" / "reports" /
     "develop-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
@@ -162,7 +162,7 @@ suite "M22 — repro develop <pkg> (workspace-overlay)":
       # No --source: dispatcher must clone ``lib-a`` into
       # ``<workspace>/develop/lib-a`` and register the override.
       let res = runShell(shellCommand(@[
-        fx.reproBin, "develop", "lib-a",
+        fx.reproBin, "develop", "--write-report", "lib-a",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       if res.code != 0:
@@ -216,7 +216,7 @@ suite "M22 — repro develop <pkg> (workspace-overlay)":
       writeFile(standin / "README.md", "operator's checkout\n")
 
       let res = runShell(shellCommand(@[
-        fx.reproBin, "develop", "lib-a",
+        fx.reproBin, "develop", "--write-report", "lib-a",
         "--source=" & standin,
         "--workspace-root=" & fx.workspaceRoot,
       ]))
@@ -254,7 +254,7 @@ suite "M22 — repro develop <pkg> (workspace-overlay)":
 
       # First invocation: registers the override.
       let res1 = runShell(shellCommand(@[
-        fx.reproBin, "develop", "lib-a",
+        fx.reproBin, "develop", "--write-report", "lib-a",
         "--source=" & standin,
         "--workspace-root=" & fx.workspaceRoot,
       ]))
@@ -266,7 +266,7 @@ suite "M22 — repro develop <pkg> (workspace-overlay)":
       # byte-idempotent; we re-emit on idempotent so the path is the
       # same shape every time).
       let res2 = runShell(shellCommand(@[
-        fx.reproBin, "develop", "lib-a",
+        fx.reproBin, "develop", "--write-report", "lib-a",
         "--source=" & standin,
         "--workspace-root=" & fx.workspaceRoot,
       ]))
@@ -292,7 +292,7 @@ suite "M22 — repro develop <pkg> (workspace-overlay)":
       let firstSrc = fx.scratch / "local-checkouts" / "first"
       createDir(firstSrc)
       let res1 = runShell(shellCommand(@[
-        fx.reproBin, "develop", "lib-a",
+        fx.reproBin, "develop", "--write-report", "lib-a",
         "--source=" & firstSrc,
         "--workspace-root=" & fx.workspaceRoot,
       ]))
@@ -304,7 +304,7 @@ suite "M22 — repro develop <pkg> (workspace-overlay)":
       let secondSrc = fx.scratch / "local-checkouts" / "second"
       createDir(secondSrc)
       let res2 = runShell(shellCommand(@[
-        fx.reproBin, "develop", "lib-a",
+        fx.reproBin, "develop", "--write-report", "lib-a",
         "--source=" & secondSrc,
         "--workspace-root=" & fx.workspaceRoot,
       ]))
@@ -334,7 +334,7 @@ suite "M22 — repro develop <pkg> (workspace-overlay)":
       # and the project file path must appear in the diagnostic so the
       # operator knows where to look for the canonical package set.
       let res = runShell(shellCommand(@[
-        fx.reproBin, "develop", "does-not-exist",
+        fx.reproBin, "develop", "--write-report", "does-not-exist",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       check res.code == 1

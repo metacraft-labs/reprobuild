@@ -28,6 +28,14 @@
 ##      by ``manifest_codec.decodeAndVerify``; this gate enforces the
 ##      additional "is this signer authorised to publish for THIS
 ##      cache" policy.)
+##
+##      Reprobuild-Binary-Cache-Fleet R1 — DEFAULT-UNTRUSTED. When the
+##      endpoint sets ``enforceTrust`` (every config-loaded cache
+##      does), an EMPTY ``trustedSigners`` list REJECTS the manifest:
+##      a cache with no explicit trusted key is a MISS, never a silent
+##      trust. Pre-R1 callers that leave ``enforceTrust = false`` keep
+##      the legacy behaviour where an empty list trusts the
+##      signature-verified producer.
 
 import ./types
 import ./decompress
@@ -69,7 +77,8 @@ proc detectLocalPlatform*(storeDir: string): LocalPlatform =
 
 proc checkCompat*(manifest: BinaryCacheManifest;
                   local: LocalPlatform;
-                  trustedSigners: seq[PublicKeyBytes]): tuple[ok: bool; reason: string] =
+                  trustedSigners: seq[PublicKeyBytes];
+                  enforceTrust = false): tuple[ok: bool; reason: string] =
   if manifest.formatVersion != bcsTypes.BinaryCacheFormatVersion:
     return (false, "manifest format version mismatch: " &
       $manifest.formatVersion & " vs local " &
@@ -97,7 +106,15 @@ proc checkCompat*(manifest: BinaryCacheManifest;
     # caller's reason string; the actual storeDir comparison runs
     # at materialize time in ``payload_sink``.
     discard
-  if trustedSigners.len > 0:
+  if trustedSigners.len == 0:
+    if enforceTrust:
+      # Default-untrusted: a cache with no explicit trusted key is
+      # never substituted from. Treated as a MISS by the caller.
+      return (false, "cache has no trusted-public-keys configured " &
+        "(default-untrusted): manifest rejected")
+    # Legacy (pre-R1) callers: an empty list trusts the
+    # signature-verified producer.
+  else:
     var trusted = false
     for ts in trustedSigners:
       if ts == manifest.producerPubKey:

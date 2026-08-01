@@ -135,14 +135,8 @@ proc writeProject(path, packageName, actionId, helperPath, stampPath, gatePath,
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string; cli: string] =
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  let cliBin = runquotaRoot / "build" / "bin" / addFileExt("runquota", ExeExt)
-  if not fileExists(daemonBin) or not fileExists(cliBin):
-    raise newException(OSError,
-      "runquotad/runquota binaries missing under " & runquotaRoot &
-      "/build/bin; build them via the test harness " &
-      "(scripts/run_tests.sh)")
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
+  let cliBin = requireRunQuotaCliBin(repoRoot)
   let socketPath = "/tmp/repro-m22-rq-" & $getCurrentProcessId() & ".sock"
   if pathExists(socketPath):
     removeFile(socketPath)
@@ -228,7 +222,7 @@ suite "integration_reprobuild_sessions_share_runquota":
   when isNixSupported:
     test "two repro build sessions serialize default 1000 milliCPU actions through one daemon":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = absolutePath(repoRoot / ".." / "codetracer")
+      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
       check fileExists(codeTracerRoot / "src" / "frontend" / "tests" /
         "ipc_registry_test.nim")
       check fileExists(codeTracerRoot / "test-programs" / "c_sudoku_solver" /
@@ -296,7 +290,7 @@ suite "integration_reprobuild_sessions_share_runquota":
       # ``t_e2e_repro_build_multiple_named_targets`` (86be3f1).
       let codeBuild = startProcess(reproBin, workingDir = repoRoot,
         args = ["build", codeProject, "--daemon=off",
-          "--tool-provisioning=path", "--log=actions", "--report=full"],
+          "--tool-provisioning=path", "--log=actions", "--write-report"],
         options = {poUsePath, poStdErrToStdOut})
       let codeStartStamp = stampsDir / "codetracer.stamp.start"
       # Wait for the first session's action to actually start (its helper
@@ -313,7 +307,7 @@ suite "integration_reprobuild_sessions_share_runquota":
 
       let fixtureBuild = startProcess(reproBin, workingDir = repoRoot,
         args = ["build", fixtureProject, "--daemon=off",
-          "--tool-provisioning=path", "--log=actions", "--report=full"],
+          "--tool-provisioning=path", "--log=actions", "--write-report"],
         options = {poUsePath, poStdErrToStdOut})
       let launchEnd = nowMillis()
       check launchEnd - launchStart < 150000

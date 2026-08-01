@@ -78,11 +78,13 @@ package libevdevSource:
     extractStrip: 1
 
   nativeBuildDeps:
-    "autoconf"
-    "automake"
-    "libtool"
-    "make"
+    "meson >=0.59"
+    "ninja >=1.10"
     "gcc >=11"
+    ## Meson uses pkg-config for dependency and feature detection.
+    "pkgconf >=1.8"
+    ## libevdev compiles directly against the Linux input UAPI.
+    "linux-headers >=4.19"
     ## libevdev's autogen step runs Python to parse the kernel's
     ## ``input-event-codes.h`` into the libevdev event-name tables.
     "python3"
@@ -101,13 +103,11 @@ package libevdevSource:
     setCurrentOwningPackageOverride("libevdevSource")
     try:
       let opts = @[
-        "--disable-static",
-        "--enable-shared",
-        # Skip the test suite (depends on libcheck which is not in
-        # our from-source closure and not needed at runtime).
-        "--disable-tests",
+        "tests=disabled",
+        "tools=disabled",
+        "documentation=disabled",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libEvdev")
     finally:
       clearCurrentOwningPackageOverride()

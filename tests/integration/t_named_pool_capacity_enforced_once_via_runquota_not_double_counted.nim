@@ -60,20 +60,7 @@ proc requireSuccess(command: string; cwd = getCurrentDir()): string =
 proc startLinkPoolDaemon(repoRoot: string; linkCap: int):
     tuple[process: owned(Process), socket: string] =
   ## Real ``runquotad`` whose ``link`` pool admits ``linkCap`` units.
-  let runquotaRoot = repoRoot.parentDir / "runquota"
-  var daemonBin = getEnv("RUNQUOTAD_BIN")
-  if daemonBin.len == 0:
-    daemonBin = findExe("runquotad")
-  let siblingBin = runquotaRoot / "build" / "bin" /
-    addFileExt("runquotad", ExeExt)
-  if daemonBin.len == 0:
-    daemonBin = siblingBin
-  if not fileExists(daemonBin) and daemonBin == siblingBin:
-    discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
-  if not fileExists(daemonBin):
-    raise newException(OSError,
-      "runquotad binary missing at " & daemonBin &
-      "; set RUNQUOTAD_BIN or use direnv exec so runquotad is on PATH")
+  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   let socketPath = "/tmp/repro-ra13-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)

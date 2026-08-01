@@ -33,6 +33,7 @@ package xkbcompSource:
 
   buildDeps:
     "xorgproto"
+    "libx11"
     "libxkbfile"
 
   config:

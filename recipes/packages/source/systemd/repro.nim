@@ -220,6 +220,8 @@ package systemdSource:
     ## libseccomp supplies the seccomp BPF filter library systemd's
     ## per-unit SystemCallFilter= directive compiles against.
     "libseccomp >=2.5"
+    ## Linux-PAM enables pam_systemd.so for desktop login sessions.
+    "pam >=1.4"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
@@ -294,6 +296,7 @@ package systemdSource:
         "importd=false",
         "portabled=false",
         "polkit=false",
+        "pam=true",
         # M9.R.56.1 — explicitly pin the runtime paths systemd bakes
         # into libsystemd-core-257.so for its .mount / .automount /
         # .service unit machinery.  Without these, meson's
@@ -322,6 +325,9 @@ package systemdSource:
         "quotaon-path=/usr/sbin/quotaon",
         "quotacheck-path=/usr/sbin/quotacheck",
       ]
+      let env = @[
+        ("PYTHONDONTWRITEBYTECODE", "1"),
+      ]
       # M9.R.15q.12.3 — patch systemd's vendored
       # ``src/basic/linux/input-event-codes.h`` to add KEY_LINK_PHONE.
       # systemd v257 ships its own linux/* kernel header shims at
@@ -342,7 +348,7 @@ package systemdSource:
         "sed -i 's|^#define KEY_HANGUP_PHONE\\t0x1be.*|&\\n#define KEY_LINK_PHONE\\t\\t0x1bf\\t/* AL Phone Syncing */|' src/src/basic/linux/input-event-codes.h",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts,
-                              srcPatches = patches)
+                              extraEnv = env, srcPatches = patches)
       discard pkg.executable("systemdInit")
       discard pkg.executable("systemctl")
       discard pkg.executable("journalctl")
@@ -353,8 +359,4 @@ package systemdSource:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
-    ## DT_NEEDED inspection of the linked artifacts. Empty until
-    ## the M9.R.5b per-recipe pass populates per-output ELF
-    ## interrogation.
-    discard
+    "pam >=1.4"

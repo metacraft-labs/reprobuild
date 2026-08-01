@@ -35,11 +35,12 @@ import repro_project_dsl
 # artifacts under ``glibcSource`` at module init time.
 import ./repro
 
+# Keep this fixture aligned with the source runtime used by the image.
 const ExpectedUrl =
-  "https://ftp.gnu.org/gnu/glibc/glibc-2.40.tar.xz"
+  "https://ftp.gnu.org/gnu/glibc/glibc-2.42.tar.xz"
 
 const ExpectedHash =
-  "19a890175e9263d748f627993de6f4b1af9cd21e03f080e4bfb3a1fac10205a2"
+  "d1775e32e4628e64ef930f435b67bb63af7599acb6be2b335b9f19f16509f17f"
 
 const ExpectedConfigureFlags = @[
   "--disable-werror",
@@ -51,16 +52,14 @@ const ExpectedConfigureFlags = @[
 
 suite "glibcSource — from-source recipe smoke test":
 
-  test "fetch spec carries the vendored URL verbatim":
+  test "fetch spec carries the upstream URL verbatim":
     # M9.H registry round-trip — URL is recorded exactly as declared.
     let spec = registeredFetchSpec("glibcSource")
     check spec.packageName == "glibcSource"
     check spec.url == ExpectedUrl
 
   test "fetch spec hash is a 64-char sha256 hex string":
-    # sha256 over the vendored 18,752,204-byte tarball; length check
-    # guards against a future bump that forgets to widen the hash
-    # alongside the URL.
+    # The release tarball hash must move in lockstep with its URL.
     let spec = registeredFetchSpec("glibcSource")
     check spec.hashHex.len == 64
     check spec.hashHex == ExpectedHash
@@ -135,15 +134,14 @@ suite "glibcSource — from-source recipe smoke test":
 
   test "versions block records the upstream tag + URL + repository":
     # M2 versions registry: the upstream ftp.gnu.org release tag is
-    # recorded for ``repro update-source`` even though the live fetch
-    # points at the vendored copy. The repository points at the
+    # recorded for ``repro update-source``. The repository points at the
     # canonical sourceware.org git mirror that hosts the glibc source
     # tree.
     let vs = registeredVersions("glibcSource")
     check vs.len == 1
-    check vs[0].version == "2.40"
-    check vs[0].sourceRevision == "glibc-2.40"
+    check vs[0].version == "2.42"
+    check vs[0].sourceRevision == "glibc-2.42"
     check vs[0].sourceUrl ==
-      "https://ftp.gnu.org/gnu/glibc/glibc-2.40.tar.xz"
+      "https://ftp.gnu.org/gnu/glibc/glibc-2.42.tar.xz"
     check vs[0].sourceRepository ==
       "https://sourceware.org/git/glibc.git"

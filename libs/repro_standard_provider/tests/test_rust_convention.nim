@@ -48,6 +48,7 @@
 ## that gap by exercising the full path against a real toolchain.
 
 import std/[os, strutils, tables, unittest]
+import repro_test_support
 
 import repro_core
 import repro_provider_runtime
@@ -55,14 +56,14 @@ import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/rust as rust_convention
 
-const
+let
   ## ``parentDir`` four times from
   ## ``libs/repro_standard_provider/tests/test_rust_convention.nim``
   ## lands at the ``reprobuild/`` repo root. The fixture lives in the
   ## sibling ``reprobuild-examples`` checkout under ``D:/metacraft/``,
   ## so we take one more parent.
   ReprobuildRoot = currentSourcePath.parentDir.parentDir.parentDir.parentDir
-  MetacraftRoot = ReprobuildRoot.parentDir
+  MetacraftRoot = workspaceRootForRepo(ReprobuildRoot)
   FixtureRoot = MetacraftRoot / "reprobuild-examples" / "rust" / "binary"
   FixtureCrateName = "rust_binary_example"
   TestFixtureRoot =

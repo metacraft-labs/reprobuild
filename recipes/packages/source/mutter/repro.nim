@@ -384,7 +384,7 @@ package mutterSource:
         # for mutter (debug-mode is selected via the global buildtype
         # which `meson_package` pins to `release`); drop the no-op
         # `debug=false`.
-        "introspection=false",
+        "introspection=true",
         "profiler=false",
         "tests=disabled",
         "native_backend=true",
@@ -413,7 +413,35 @@ package mutterSource:
         "clutter_tests=false",
         "mutter_tests=false",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts,
+        extraEnv = @[
+          ("CPPFLAGS",
+            "-I/opt/repro/reprobuild/recipes/packages/source/glib2/.repro/output/install/usr/include/glib-2.0 " &
+            "-I/opt/repro/reprobuild/recipes/packages/source/graphene/.repro/output/install/usr/include/graphene-1.0 " &
+            "-I/opt/repro/reprobuild/recipes/packages/source/cairo/.repro/output/install/usr/include/cairo " &
+            "-I/opt/repro/reprobuild/recipes/packages/source/wayland/.repro/output/install/usr/include " &
+            "-I/opt/repro/reprobuild/recipes/packages/source/libxkbcommon/.repro/output/install/usr/include " &
+            "-I/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/include " &
+            "-I/opt/repro/reprobuild/recipes/packages/source/libglvnd/.repro/output/install/usr/include"),
+          ("GI_GIR_PATH",
+            "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share/gir-1.0:" &
+            "/opt/repro/reprobuild/recipes/packages/source/graphene/.repro/output/install/usr/share/gir-1.0:" &
+            "/opt/repro/reprobuild/recipes/packages/source/cairo/.repro/output/install/usr/share/gir-1.0:" &
+            "/opt/repro/reprobuild/recipes/packages/source/pango/.repro/output/install/usr/share/gir-1.0:" &
+            "/opt/repro/reprobuild/recipes/packages/source/gdk-pixbuf/.repro/output/install/usr/share/gir-1.0:" &
+            "/opt/repro/reprobuild/recipes/packages/source/harfbuzz/.repro/output/install/usr/share/gir-1.0:" &
+            "/opt/repro/reprobuild/recipes/packages/source/at-spi2-core/.repro/output/install/usr/share/gir-1.0:" &
+            "/opt/repro/reprobuild/recipes/packages/source/gsettings-desktop-schemas/.repro/output/install/usr/share/gir-1.0"),
+          ("XDG_DATA_DIRS",
+            "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share:" &
+            "/opt/repro/reprobuild/recipes/packages/source/graphene/.repro/output/install/usr/share:" &
+            "/opt/repro/reprobuild/recipes/packages/source/cairo/.repro/output/install/usr/share:" &
+            "/opt/repro/reprobuild/recipes/packages/source/pango/.repro/output/install/usr/share:" &
+            "/opt/repro/reprobuild/recipes/packages/source/gdk-pixbuf/.repro/output/install/usr/share:" &
+            "/opt/repro/reprobuild/recipes/packages/source/harfbuzz/.repro/output/install/usr/share:" &
+            "/opt/repro/reprobuild/recipes/packages/source/at-spi2-core/.repro/output/install/usr/share:" &
+            "/opt/repro/reprobuild/recipes/packages/source/gsettings-desktop-schemas/.repro/output/install/usr/share"),
+        ])
       discard pkg.library("libMutter")
       discard pkg.executable("mutterBin")
     finally:

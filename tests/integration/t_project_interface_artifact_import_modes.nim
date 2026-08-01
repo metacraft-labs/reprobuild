@@ -17,7 +17,7 @@ const ExpectedNimCompiler =
   when defined(windows):
     staticExec("where nim").splitLines()[0].strip()
   else:
-    staticExec("command -v nim").strip()
+    staticExec("command -v nim").splitLines().filterIt(it.strip().len > 0)[^1].strip()
 
 type
   ThinConsumerEdge = object

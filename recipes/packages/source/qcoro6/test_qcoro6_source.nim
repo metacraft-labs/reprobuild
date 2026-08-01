@@ -4,7 +4,7 @@
 ## "QCoro6 not found" fresh-configure trip documented in
 ## ``recipes/reproos-iso/run-evidence/m9r32_complete.txt`` G5.
 ##
-## Coverage (7 check assertions across 5 tests):
+## Coverage (8 check assertions across 6 tests):
 ##
 ##   * ``fetch:`` block round-trip (M9.H) --- URL + sha256 length +
 ##     algorithm + kind discriminant + extractStrip.
@@ -12,6 +12,8 @@
 ##     ``dakLibrary``.
 ##   * ``versions:`` block round-trip (M2) --- upstream tag + URL +
 ##     repository for ``repro update-source``.
+##   * Runtime closure records the Qt6 Base dependency used by every
+##     installed shared library.
 
 import std/[unittest]
 
@@ -78,3 +80,6 @@ suite "qcoro6Source --- from-source recipe smoke test":
       "https://github.com/qcoro/qcoro/archive/refs/tags/v0.12.0.tar.gz"
     check vs[0].sourceRepository ==
       "https://github.com/danvratil/qcoro"
+
+  test "runtime closure includes Qt6 Base":
+    check registeredRuntimeDeps("qcoro6Source") == @["qt6-base >=6.6"]

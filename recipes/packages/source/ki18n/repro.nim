@@ -165,7 +165,8 @@ package ki18nSource:
         # kirigami, plasma-framework) depend on the QML surface.
         "BUILD_WITH_QML=ON",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true)
       discard pkg.library("libKF6I18n")
     finally:
       clearCurrentOwningPackageOverride()

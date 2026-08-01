@@ -42,7 +42,7 @@ cache_repro_binary_cache_client_bin() {
   if [[ ! -x "$bin" && ! -f "$bin" ]]; then
     printf 'cache-helper.sh: CLI binary missing; build it with:\n' >&2
     printf '  nim c -o:build/test-bin/repro_binary_cache_client_cli.exe \\\n' >&2
-    printf '    apps/repro-binary-cache-client/repro_binary_cache_client_cli.nim\n' >&2
+    printf '    libs/repro_binary_cache_client/tests/repro_binary_cache_client_cli.nim\n' >&2
     return 1
   fi
   printf '%s\n' "$bin"

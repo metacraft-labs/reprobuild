@@ -129,8 +129,8 @@ suite "M6 — resolveProject against a metacraft-shaped fixture":
     # ---- fragment 1: explicit everything, including revision override ----
     let r0 = resolved.repos[0]
     check r0.path == "reprobuild"
-    check r0.remoteName == "metacraft-labs"
-    check r0.fetchUrl == "https://github.com/metacraft-labs"
+    check r0.projectRemote == "metacraft-labs"
+    check r0.fetchUrl == "https://github.com/metacraft-labs/reprobuild"
     check r0.revision == "phase-2"  # override, NOT the project default
     check r0.vcs == "git"
     check r0.stability == "tracked"
@@ -139,8 +139,8 @@ suite "M6 — resolveProject against a metacraft-shaped fixture":
     # ---- fragment 2: relies on every default the project provides ----
     let r1 = resolved.repos[1]
     check r1.path == "runquota"
-    check r1.remoteName == "metacraft-labs"  # project default
-    check r1.fetchUrl == "https://github.com/metacraft-labs"
+    check r1.projectRemote == "metacraft-labs"  # project default
+    check r1.fetchUrl == "https://github.com/metacraft-labs/runquota"
     check r1.revision == "main"  # project default
     check r1.vcs == "git"  # resolver default
     check r1.stability == "tracked"  # resolver default
@@ -149,8 +149,8 @@ suite "M6 — resolveProject against a metacraft-shaped fixture":
     # ---- fragment 3: explicit remote (not the default), default revision ----
     let r2 = resolved.repos[2]
     check r2.path == "reprobuild-cmake"
-    check r2.remoteName == "github"  # explicit, overriding the default
-    check r2.fetchUrl == "https://github.com"
+    check r2.projectRemote == "github"  # explicit, overriding the default
+    check r2.fetchUrl == "https://github.com/reprobuild-cmake"
     check r2.revision == "main"  # project default
     check r2.vcs == "git"
     check r2.stability == "tracked"

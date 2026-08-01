@@ -101,6 +101,11 @@
 ##                                  X11 clipboard probe at startup;
 ##                                  v1 desktop uses Wayland and the
 ##                                  clipboard is handled by wl-clipboard).
+##   * ``--with-tlib=ncursesw`` — select the wide-character terminal
+##                                  ABI provided by the source-built
+##                                  ncurses package.
+##   * ``--with-compiledby=ReproOS`` — keep the version banner stable
+##                                       across build users and hosts.
 ##   * ``--disable-gpm``         — skip the GPM (general-purpose-mouse)
 ##                                  Linux-console mouse-driver
 ##                                  integration (v1 desktop doesn't
@@ -128,6 +133,9 @@
 ##                                  Neovim separately for Lua-bound
 ##                                  plugins (treesitter, telescope) and
 ##                                  vim stays minimal.
+##   * ``--disable-libsodium`` / ``--disable-acl`` — prevent optional
+##                                  host-library probes from capturing
+##                                  undeclared Nix dependencies.
 
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
@@ -244,13 +252,31 @@ package vimSource:
       let opts = @[
         "--enable-gui=no",
         "--without-x",
+        "--with-tlib=ncursesw",
+        "--with-compiledby=ReproOS",
+        "--disable-darwin",
         "--disable-gpm",
         "--disable-perlinterp",
         "--disable-pythoninterp",
         "--disable-rubyinterp",
         "--disable-luainterp",
+        "--disable-libsodium",
+        "--disable-acl",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let patches = @[
+        # The source-built ncurses output splits terminal symbols into
+        # libtinfow. Modern linkers require that DSO explicitly instead
+        # of copying it from libncursesw's dependency list.
+        "sed -i 's|LIBS=\"$LIBS -l$with_tlib\"|LIBS=\"$LIBS -l$with_tlib -ltinfow\"|' src/src/configure.ac src/src/auto/configure",
+        # Vim's alias install rules use plain ln -s and fail when a
+        # forced rebuild reuses an existing DESTDIR staging tree.
+        "sed -i 's|ln -s $(VIMTARGET)|ln -sf $(VIMTARGET)|g' src/src/Makefile",
+      ]
+      let pkg = autotools_package(
+        srcDir = "./src",
+        buildDir = "src",
+        configureOptions = opts,
+        srcPatches = patches)
       discard pkg.executable("vim")
       discard pkg.executable("vimdiff")
       discard pkg.executable("vimtutor")
@@ -258,8 +284,6 @@ package vimSource:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
-    ## DT_NEEDED inspection of the linked artifacts. Empty until
-    ## the M9.R.5b per-recipe pass populates per-output ELF
-    ## interrogation.
-    discard
+    ## Verified from the installed vim executable. libtinfow is part
+    ## of the same source-built ncurses output.
+    "ncurses"

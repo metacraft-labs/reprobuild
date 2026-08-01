@@ -17,6 +17,7 @@
 ## the CLI plumbing.
 
 import std/[json, os, osproc, strutils, tables, unittest]
+import repro_test_support
 
 const ReproBinaryRel = "build/bin/repro.exe"
 
@@ -40,7 +41,7 @@ proc findPilotFixture(): string =
   ## lives as a sibling checkout under ``../reprobuild-examples``.
   var dir = getCurrentDir()
   while dir.len > 0:
-    let candidate = parentDir(dir) / "reprobuild-examples" / "nim" /
+    let candidate = workspaceRootForRepo(dir) / "reprobuild-examples" / "nim" /
       "mode3-pilot"
     if fileExists(candidate / "repro.nim"):
       return candidate

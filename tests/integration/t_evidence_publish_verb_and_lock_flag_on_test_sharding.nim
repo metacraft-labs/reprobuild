@@ -168,7 +168,7 @@ suite "MO-13: evidence-publish verb + --lock on test sharding + gate integrity":
         let res = runRepro(@["test", "--shard", "1/1",
           "--fixture-from=" & fixturePath,
           "--lock=" & lockPath,
-          "--report=" & reportPath], proj)
+          "--write-report=" & reportPath], proj)
         checkpoint(res.output)
         check res.code == 0
 

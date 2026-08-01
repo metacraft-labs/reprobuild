@@ -1,7 +1,7 @@
 ## Named-Targets M1 verification: two packages in one project each
 ## emit an edge whose implicit name is ``cli``. The normalized graph
-## artifact records both qualified forms (``ambigPkgA:cli`` and
-## ``ambigPkgB:cli``) AND records the unqualified ``cli`` as
+## artifact records both qualified forms (``ambig_pkg_a:cli`` and
+## ``ambig_pkg_b:cli``) AND records the unqualified ``cli`` as
 ## ambiguous on a sentinel row in the table's ``ambiguities`` list.
 ## The M2 CLI resolver consumes this row to surface a
 ## ``target_ambiguous`` diagnostic.
@@ -73,10 +73,10 @@ suite "t_engine_target_export_table_records_ambiguity":
     resetBuildPoolRegistry()
     resetDefaultBuildActionRegistry()
     resetTargetExportRegistry()
-    setCurrentOwningPackageOverride("ambigPkgA")
+    setCurrentOwningPackageOverride("ambig_pkg_a")
     buildAmbigPkgAPackage()
     clearCurrentOwningPackageOverride()
-    setCurrentOwningPackageOverride("ambigPkgB")
+    setCurrentOwningPackageOverride("ambig_pkg_b")
     buildAmbigPkgBPackage()
     clearCurrentOwningPackageOverride()
 
@@ -90,8 +90,8 @@ suite "t_engine_target_export_table_records_ambiguity":
       if entry.name == "cli":
         qualifiedSeen.add(entry.owningPackage & ":" & entry.name)
     check qualifiedSeen.len == 2
-    check "ambigPkgA:cli" in qualifiedSeen
-    check "ambigPkgB:cli" in qualifiedSeen
+    check "ambig_pkg_a:cli" in qualifiedSeen
+    check "ambig_pkg_b:cli" in qualifiedSeen
 
     # And the unqualified ``cli`` lookup must be ambiguous: a single
     # sentinel row in the ambiguities list, with both qualified
@@ -105,19 +105,19 @@ suite "t_engine_target_export_table_records_ambiguity":
         break
     check ambiguityFound
     check ambiguityRow.candidates.len == 2
-    check "ambigPkgA:cli" in ambiguityRow.candidates
-    check "ambigPkgB:cli" in ambiguityRow.candidates
+    check "ambig_pkg_a:cli" in ambiguityRow.candidates
+    check "ambig_pkg_b:cli" in ambiguityRow.candidates
 
     # The same-name-within-package rule did NOT fire — the two rows
     # belong to different packages. As a regression guard, also
     # confirm that re-running the SAME package's build with the same
     # ``actionId`` (which would re-register an identical row) does
     # NOT raise. The existing entry is preserved unchanged.
-    setCurrentOwningPackageOverride("ambigPkgA")
+    setCurrentOwningPackageOverride("ambig_pkg_a")
     try:
       # Re-running buildAmbigPkgAPackage() adds an action to the
       # global registry (second instance with the same id). The
-      # implicit-name registration sees ``owningPackage == ambigPkgA``
+      # implicit-name registration sees ``owningPackage == ambig_pkg_a``
       # and ``actionId == cli-a`` — identical to the existing entry,
       # so it's a duplicate registration and no collision raises.
       buildAmbigPkgAPackage()

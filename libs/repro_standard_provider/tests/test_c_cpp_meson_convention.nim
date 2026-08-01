@@ -27,6 +27,7 @@
 ##       carries ``meson compile -C <scratch> hello``.
 
 import std/[os, strutils, unittest]
+import repro_test_support
 
 import repro_core
 import repro_provider_runtime
@@ -34,13 +35,13 @@ import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/c_cpp_meson as meson_convention
 
-const
+let
   ## parentDir four times from
   ## ``libs/repro_standard_provider/tests/test_c_cpp_meson_convention.nim``
   ## lands at the ``reprobuild/`` repo root; one more parent gets to the
   ## sibling ``reprobuild-examples`` checkout.
   ReprobuildRoot = currentSourcePath.parentDir.parentDir.parentDir.parentDir
-  MetacraftRoot = ReprobuildRoot.parentDir
+  MetacraftRoot = workspaceRootForRepo(ReprobuildRoot)
   HelloBinaryFixture =
     MetacraftRoot / "reprobuild-examples" / "c-cpp-meson" / "hello-binary"
 

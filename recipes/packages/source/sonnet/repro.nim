@@ -63,7 +63,8 @@ package sonnetSource:
         # land in a follow-up milestone.
         "SONNET_NO_BACKENDS=ON",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true)
       discard pkg.library("libKF6SonnetCore")
       discard pkg.library("libKF6SonnetUi")
     finally:

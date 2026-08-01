@@ -572,7 +572,7 @@ package kwinSource:
         ("CMAKE_BUILD_PARALLEL_LEVEL", "8"),
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
-                              extraEnv = env)
+                              extraEnv = env, allowSourceWrites = true)
       discard pkg.executable("kwinWayland")
       discard pkg.library("libKWin")
     finally:

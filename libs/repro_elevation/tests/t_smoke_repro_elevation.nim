@@ -2034,10 +2034,16 @@ BinPath=C:\Windows\System32\OpenSSH\sshd.exe
       recoveryActions: @[
         ServiceRecoveryActionObservation(action: "restart", delayMs: 5000)],
       recoveryResetSeconds: 3600)
+    # `canonicalServiceState` now takes the SAME managed-field
+    # parameters `canonicalServiceDesired` does (the former
+    # `includeRecovery` boolean is implied by a non-empty declared
+    # recovery policy), so both sides project onto identical fields.
     let digest = canonicalServiceState(obs,
       wantDisplayName = "OpenSSH SSH Server",
       wantBinPath = "C:\\bin\\sshd.exe",
-      includeRecovery = true)
+      wantRecoveryActions = @[
+        ServiceRecoveryActionObservation(action: "restart", delayMs: 5000)],
+      wantRecoveryResetSeconds = 3600)
     check digest.contains("displayName=OpenSSH SSH Server")
     check digest.contains("binPath=C:\\bin\\sshd.exe")
     check digest.contains("restart/5000")
@@ -2055,6 +2061,281 @@ BinPath=C:\Windows\System32\OpenSSH\sshd.exe
   test "windows.service still requires elevation":
     # Sanity: the predicate is unchanged by the Phase B extension.
     check requiresElevation(pokWindowsService)
+
+# ===========================================================================
+# Observed / desired digest symmetry.
+#
+# `repro infra apply` decides applied-vs-no-op by comparing the digest
+# of the OBSERVED live state against the digest of the DESIRED state.
+# If the two sides canonicalise DIFFERENT strings the comparison can
+# never succeed, so a resource that already matches its declaration is
+# still reported `applied` on every apply — operators lose the ability
+# to tell "converged" from "drifting" and each apply redoes work that
+# changes nothing.
+#
+# These tests pin the symmetry from both directions: a resource whose
+# live state matches its declaration MUST digest equal (=> no-op), and
+# one that genuinely differs MUST digest unequal (=> applied). The
+# second half matters just as much — a "fix" that made every resource
+# compare equal would be worse than the original defect.
+#
+# The observed side is reconstructed from the SAME pure canonical
+# renderers the (Windows-only) `observe*` drivers feed their live probe
+# output into, so the contract is checked on every host.
+# ===========================================================================
+
+suite "repro_elevation: observed / desired digest symmetry":
+
+  proc observedDirDigest(op: PrivilegedOperation;
+                         liveEntries: seq[string];
+                         liveInheritanceDisabled: bool): string =
+    ## Exactly what `observeFsSystemDirectory` hashes for a directory
+    ## that exists and whose live DACL is `liveEntries`.
+    posixDigestHexOfText("fs.systemDirectory:present|" &
+      canonicalDirAclObserved(true, op.fsdAclOwner, op.fsdAclEntries,
+        liveEntries, liveInheritanceDisabled, op.fsdAclInheritance))
+
+  proc aclDirOp(): PrivilegedOperation =
+    PrivilegedOperation(kind: pokFsSystemDirectory,
+      address: "token-dir",
+      fsdPath: "C:\\service-tokens",
+      fsdAclPresent: true,
+      fsdAclOwner: "SYSTEM",
+      fsdAclEntries: @["SYSTEM:(F)", "BUILTIN\\Administrators:(F)"],
+      fsdAclInheritance: "protected-clear-inherited",
+      fsdDestroy: false)
+
+  test "fs.systemDirectory: converged ACL digests equal on both sides":
+    let op = aclDirOp()
+    # Live DACL carries every declared ACE (plus a local addition the
+    # additive-only contract ignores) and has inheritance pinned.
+    check posixSystemDesiredDigestHex(op) ==
+      observedDirDigest(op,
+        liveEntries = @["SYSTEM:(F)", "BUILTIN\\Administrators:(F)",
+                        "NetworkService:(RX)"],
+        liveInheritanceDisabled = true)
+
+  test "fs.systemDirectory: a missing declared ACE digests unequal":
+    let op = aclDirOp()
+    check posixSystemDesiredDigestHex(op) !=
+      observedDirDigest(op,
+        liveEntries = @["SYSTEM:(F)"],
+        liveInheritanceDisabled = true)
+
+  test "fs.systemDirectory: unpinned inheritance digests unequal":
+    let op = aclDirOp()
+    check posixSystemDesiredDigestHex(op) !=
+      observedDirDigest(op,
+        liveEntries = @["SYSTEM:(F)", "BUILTIN\\Administrators:(F)"],
+        liveInheritanceDisabled = false)
+
+  test "fs.systemDirectory: a different declared ACL digests unequal":
+    # Two declarations that differ only in their ACL must not collide —
+    # the desired digest genuinely carries the ACL.
+    var other = aclDirOp()
+    other.fsdAclEntries = @["SYSTEM:(F)", "Everyone:(F)"]
+    check posixSystemDesiredDigestHex(aclDirOp()) !=
+      posixSystemDesiredDigestHex(other)
+
+  test "fs.systemDirectory: no declared ACL keeps the bare sentinel":
+    # Back-compat: an ACL-unmanaged directory still digests the bare
+    # `"fs.systemDirectory:present"` payload on BOTH sides, so existing
+    # profiles keep their digests and still converge.
+    let op = PrivilegedOperation(kind: pokFsSystemDirectory,
+      address: "plain-dir", fsdPath: "/etc/myapp.d",
+      fsdAclPresent: false, fsdDestroy: false)
+    check posixSystemDesiredDigestHex(op) ==
+      posixDigestHexOfText("fs.systemDirectory:present")
+    # ... which is also what the observer emits for a live directory.
+    check posixSystemDesiredDigestHex(op) ==
+      posixDigestHexOfText(fsSystemDirectoryDigestPayload(true, false,
+        "", @[], ""))
+
+  proc observedServiceDigest(op: PrivilegedOperation;
+                             obs: ServiceObservation): string =
+    ## Exactly what `observeWindowsService` hashes for a live service
+    ## whose probe parsed to `obs`.
+    digestHexOfText(canonicalServiceState(obs,
+      wantDisplayName = op.serviceDisplayName,
+      wantBinPath = op.serviceBinPath,
+      wantRecoveryActions = desiredServiceRecoverySlots(op),
+      wantRecoveryResetSeconds = op.serviceRecoveryResetSeconds))
+
+  proc fullServiceOp(): PrivilegedOperation =
+    PrivilegedOperation(kind: pokWindowsService,
+      address: "runner-service",
+      serviceName: "example.runner.service",
+      serviceStartType: "Automatic", serviceRunning: true,
+      serviceDisplayName: "Example Runner",
+      serviceBinPath: "C:\\runner\\Runner.Listener.exe",
+      serviceRecoveryActions: @[
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 5000),
+        WindowsServiceRecoverySpec(action: wsrakReboot, delayMs: 60000)],
+      serviceRecoveryResetSeconds: 86400)
+
+  proc convergedServiceObs(): ServiceObservation =
+    ServiceObservation(present: true, startType: "Automatic",
+      running: true,
+      displayName: "Example Runner",
+      binPath: "C:\\runner\\Runner.Listener.exe",
+      recoveryActions: @[
+        ServiceRecoveryActionObservation(action: "restart", delayMs: 5000),
+        ServiceRecoveryActionObservation(action: "reboot", delayMs: 60000)],
+      recoveryResetSeconds: 86400)
+
+  test "windows.service: a converged service digests equal on both sides":
+    let op = fullServiceOp()
+    check systemDesiredDigestHex(op) ==
+      observedServiceDigest(op, convergedServiceObs())
+
+  test "windows.service: a drifted binPath digests unequal":
+    let op = fullServiceOp()
+    var obs = convergedServiceObs()
+    obs.binPath = "C:\\stale\\Runner.Listener.exe"
+    check systemDesiredDigestHex(op) != observedServiceDigest(op, obs)
+
+  test "windows.service: a drifted displayName digests unequal":
+    let op = fullServiceOp()
+    var obs = convergedServiceObs()
+    obs.displayName = "Some Other Name"
+    check systemDesiredDigestHex(op) != observedServiceDigest(op, obs)
+
+  test "windows.service: a drifted recovery policy digests unequal":
+    let op = fullServiceOp()
+    var obs = convergedServiceObs()
+    obs.recoveryActions = @[
+      ServiceRecoveryActionObservation(action: "none", delayMs: 0)]
+    check systemDesiredDigestHex(op) != observedServiceDigest(op, obs)
+    var resetDrift = convergedServiceObs()
+    resetDrift.recoveryResetSeconds = 3600
+    check systemDesiredDigestHex(op) !=
+      observedServiceDigest(op, resetDrift)
+
+  test "windows.service: a drifted start-type / run-state digests unequal":
+    let op = fullServiceOp()
+    var startDrift = convergedServiceObs()
+    startDrift.startType = "Manual"
+    check systemDesiredDigestHex(op) !=
+      observedServiceDigest(op, startDrift)
+    var runDrift = convergedServiceObs()
+    runDrift.running = false
+    check systemDesiredDigestHex(op) != observedServiceDigest(op, runDrift)
+
+  test "windows.service: unmanaged descriptor fields stay out of both sides":
+    # Back-compat: a profile that declares only startType + state keeps
+    # the bare `service:<startType>:<running>` digest, and a live
+    # service whose (undeclared) displayName / binPath / recovery
+    # policy differ still converges — those fields are unmanaged.
+    let op = PrivilegedOperation(kind: pokWindowsService,
+      address: "bare-service", serviceName: "example.bare",
+      serviceStartType: "Automatic", serviceRunning: true)
+    check systemDesiredDigestHex(op) ==
+      digestHexOfText("service:Automatic:running")
+    check systemDesiredDigestHex(op) ==
+      observedServiceDigest(op, convergedServiceObs())
+
+  test "windows.service: recovery halves are independently managed":
+    # `recoveryActions` and `recoveryResetSeconds` are documented as
+    # independent and additive. A profile that pins only ONE of them
+    # must converge regardless of the other's live value — otherwise
+    # the undeclared half is compared against a default the apply path
+    # never writes and the resource re-applies forever.
+    var resetOnly = fullServiceOp()
+    resetOnly.serviceRecoveryActions = @[]
+    var liveActionsDiffer = convergedServiceObs()
+    liveActionsDiffer.recoveryActions = @[
+      ServiceRecoveryActionObservation(action: "none", delayMs: 0)]
+    check systemDesiredDigestHex(resetOnly) ==
+      observedServiceDigest(resetOnly, liveActionsDiffer)
+    # ... but the half it DOES manage still drives drift.
+    var liveResetDiffers = convergedServiceObs()
+    liveResetDiffers.recoveryResetSeconds = 3600
+    check systemDesiredDigestHex(resetOnly) !=
+      observedServiceDigest(resetOnly, liveResetDiffers)
+
+    var actionsOnly = fullServiceOp()
+    actionsOnly.serviceRecoveryResetSeconds = 0
+    check systemDesiredDigestHex(actionsOnly) ==
+      observedServiceDigest(actionsOnly, liveResetDiffers)
+    check systemDesiredDigestHex(actionsOnly) !=
+      observedServiceDigest(actionsOnly, liveActionsDiffer)
+
+  proc observedUserDigest(op: PrivilegedOperation;
+                          live: PasswdUserObservation): string =
+    ## Exactly what `observePasswdUser` hashes for a live account whose
+    ## `getent passwd` / `id` probe parsed to `live`.
+    posixDigestHexOfText(canonicalPasswdUserStateMaskedBy(live,
+      PasswdUserDesired(name: op.puName, homeDir: op.puHome,
+        shell: op.puShell, groups: op.puGroups)))
+
+  test "passwd.user: an account matching its declaration digests equal":
+    # The resource cannot pin a uid, and leaves home unpinned here.
+    # Both are wildcards on the desired side, so the observation has to
+    # mask them too — otherwise a real uid is compared against `*` and
+    # the account is reported applied on every single apply.
+    let op = PrivilegedOperation(kind: pokPasswdUser, address: "svc-user",
+      puName: "deploy", puShell: "/bin/bash", puGroups: @["docker"])
+    check posixSystemDesiredDigestHex(op) ==
+      observedUserDigest(op, PasswdUserObservation(present: true,
+        uid: "1001", primaryGroup: "deploy",
+        homeDir: "/home/deploy", shell: "/bin/bash",
+        groups: @["docker"]))
+
+  test "passwd.user: a drifted pinned attribute digests unequal":
+    let op = PrivilegedOperation(kind: pokPasswdUser, address: "svc-user",
+      puName: "deploy", puShell: "/bin/bash", puGroups: @["docker"])
+    # Pinned shell differs.
+    check posixSystemDesiredDigestHex(op) !=
+      observedUserDigest(op, PasswdUserObservation(present: true,
+        uid: "1001", primaryGroup: "deploy",
+        homeDir: "/home/deploy", shell: "/bin/sh",
+        groups: @["docker"]))
+    # A declared supplementary group is missing.
+    check posixSystemDesiredDigestHex(op) !=
+      observedUserDigest(op, PasswdUserObservation(present: true,
+        uid: "1001", primaryGroup: "deploy",
+        homeDir: "/home/deploy", shell: "/bin/bash", groups: @[]))
+
+  test "passwd.user: an existing local account observes as a no-op":
+    # Real-boundary check — no mocking. This drives the driver's own
+    # probes (`getent passwd` / `id`, or the macOS `dscl` equivalents)
+    # against an account that genuinely exists on the host and asserts
+    # that the digest the planner would OBSERVE equals the digest it
+    # would DESIRE for a declaration that pins nothing but the name.
+    # That is the definition of a converged resource: it has to decide
+    # `no-op`. Digesting the raw observed uid / home / shell instead
+    # made this comparison impossible to satisfy.
+    when defined(linux) or defined(macosx):
+      let op = PrivilegedOperation(kind: pokPasswdUser,
+        address: "existing-account", puName: "root")
+      let obs = observePasswdUser(op)
+      # `root` exists on every Linux / macOS host; if the probe tools
+      # are unavailable the observation reports absent and there is
+      # nothing to compare.
+      if obs.present:
+        check obs.digestHex == posixSystemDesiredDigestHex(op)
+        # ... and a declaration that pins an attribute the live
+        # account does NOT have must still register as drift.
+        let drifted = PrivilegedOperation(kind: pokPasswdUser,
+          address: "existing-account", puName: "root",
+          puShell: "/nonexistent/definitely-not-a-login-shell")
+        check observePasswdUser(drifted).digestHex !=
+          posixSystemDesiredDigestHex(drifted)
+
+  test "passwd.user: a pinned home is still compared verbatim":
+    # Masking must only cover what the resource left unpinned — a
+    # declared homeDir still has to match the live account.
+    let op = PrivilegedOperation(kind: pokPasswdUser, address: "svc-user",
+      puName: "deploy", puHome: "/srv/deploy", puShell: "/bin/bash",
+      puGroups: @["docker"])
+    check posixSystemDesiredDigestHex(op) ==
+      observedUserDigest(op, PasswdUserObservation(present: true,
+        uid: "1001", primaryGroup: "deploy", homeDir: "/srv/deploy",
+        shell: "/bin/bash", groups: @["docker"]))
+    check posixSystemDesiredDigestHex(op) !=
+      observedUserDigest(op, PasswdUserObservation(present: true,
+        uid: "1001", primaryGroup: "deploy", homeDir: "/home/deploy",
+        shell: "/bin/bash", groups: @["docker"]))
 
 # ===========================================================================
 # os.timezone — pure parse + drift logic. The shell-out side of the

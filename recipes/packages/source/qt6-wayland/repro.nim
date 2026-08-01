@@ -132,6 +132,7 @@ package qt6WaylandSource:
     extractStrip: 1
 
   nativeBuildDeps:
+    "bash >=5.2"
     ## cmake is the build-system driver — qt6-wayland 6.8.x requires
     ## cmake 3.16 floor (matches the broader Qt6 6.8.1 cmake floor).
     "cmake >=3.16"
@@ -227,7 +228,8 @@ package qt6WaylandSource:
         # gen for v1.
         "QT_GENERATE_SBOM=OFF",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", generator = "Ninja",
+        cacheVars = opts, allowSourceWrites = true)
       discard pkg.library("libQt6WaylandClient")
       discard pkg.library("libQt6WaylandCompositor")
       discard pkg.library("libQt6WaylandEglClientHwIntegration")

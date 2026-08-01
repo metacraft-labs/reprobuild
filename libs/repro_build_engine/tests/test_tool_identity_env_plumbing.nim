@@ -21,10 +21,11 @@
 ## ``ToolIdentityResolver`` / ``BuildEngineConfig.toolIdentityResolver``
 ## for the seam under test.
 
-import std/[options, os, strutils, tables, unittest]
+import std/[options, os, strtabs, strutils, tables, unittest]
 
 import repro_build_engine
 import repro_core
+import repro_depfile
 import repro_hash
 import repro_local_store
 import io_mon/writer
@@ -39,6 +40,12 @@ proc resetTmp() =
 proc pathSeparator(): string =
   when defined(windows): ";"
   else: ":"
+
+proc envValue(env: openArray[string]; name: string): string =
+  for entry in env:
+    let prefix = name & "="
+    if entry.startsWith(prefix):
+      return entry[prefix.len .. ^1]
 
 proc stubArgv(): seq[string] =
   ## Build a platform-appropriate shell argv that prints ``$PATH``
@@ -201,11 +208,62 @@ proc runnerCfg(cacheRoot: string;
   result.monitorCliPath = passthroughMonitorCli(cacheRoot)
   result.toolIdentityResolver = resolver
 
+proc makeDepfilePolicy(path: string): DependencyGatheringPolicy =
+  DependencyGatheringPolicy(
+    kind: dgRecognizedFormat,
+    completeness: decComplete,
+    recognizedReports: @[
+      RecognizedDependencyReportSpec(
+        formatName: DependencyFormatName(MakeDepfileFormatName),
+        outputs: @[
+          ExpectedDependencyFile(
+            logicalName: "deps",
+            path: path,
+            required: false)
+        ],
+        completeness: decComplete)
+    ])
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 suite "M9.N Batch B — engine tool-identity env plumbing":
+
+  test "core runtimes stay linkable without entering loader paths":
+    let nixGlibcLib =
+      "/nix/store/0123456789abcdefghijklmnopqrstuv-glibc-2.40/lib"
+    let sourceGlibcLib =
+      "/work/recipes/packages/source/glibc/.repro/output/install/usr/lib64"
+    let nixPythonLib =
+      "/nix/store/abcdefghijklmnopqrstuvwxyz012345-python3-3.13.9/lib"
+    let sourcePythonLib =
+      "/work/recipes/packages/source/python3/.repro/output/install/usr/lib"
+    let sourcePythonBundleLib =
+      "/work/recipes/packages/source/python3-with-modules/.repro/output/install/usr/lib"
+    let dependencyLib = "/nix/store/vutsrqponmlkjihgfedcba9876543210-libfoo-1.0/lib"
+    let paths = ResolvedAuxPaths(
+      libDirs: @[nixGlibcLib, sourceGlibcLib, nixPythonLib,
+        sourcePythonLib, sourcePythonBundleLib, dependencyLib])
+
+    let argvEnv = applyResolvedAuxPathsArgv(
+      @["LIBRARY_PATH=/existing/link", "LD_LIBRARY_PATH=/existing/runtime"],
+      paths)
+    check envValue(argvEnv, "LIBRARY_PATH").split(pathSeparator()) ==
+      @[nixGlibcLib, sourceGlibcLib, nixPythonLib, sourcePythonLib,
+        sourcePythonBundleLib, dependencyLib, "/existing/link"]
+    check envValue(argvEnv, "LD_LIBRARY_PATH").split(pathSeparator()) ==
+      @[dependencyLib, "/existing/runtime"]
+
+    let tableEnv = newStringTable(modeCaseSensitive)
+    tableEnv["LIBRARY_PATH"] = "/existing/link"
+    tableEnv["LD_LIBRARY_PATH"] = "/existing/runtime"
+    applyResolvedAuxPathsTable(tableEnv, paths)
+    check tableEnv["LIBRARY_PATH"].split(pathSeparator()) ==
+      @[nixGlibcLib, sourceGlibcLib, nixPythonLib, sourcePythonLib,
+        sourcePythonBundleLib, dependencyLib, "/existing/link"]
+    check tableEnv["LD_LIBRARY_PATH"].split(pathSeparator()) ==
+      @[dependencyLib, "/existing/runtime"]
 
   test "PATH is prepended with the resolved bin dir when ref + resolver are set":
     resetTmp()
@@ -306,6 +364,40 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     # The boundary between the two is the platform separator.
     check captured.contains(mesonBin & sep & gccBin)
 
+  test "explicit tool bins precede transitive bins from earlier refs":
+    resetTmp()
+    let cacheRoot = TmpDir / "cache-direct-before-transitive"
+    createDir(cacheRoot)
+
+    let mesonBin = absolutePath(TmpDir / "mock-store" / "meson" / "bin")
+    let basePythonBin =
+      absolutePath(TmpDir / "mock-store" / "python3" / "bin")
+    let modulePythonBin =
+      absolutePath(TmpDir / "mock-store" / "python3-modules" / "bin")
+    for path in [mesonBin, basePythonBin, modulePythonBin]:
+      createDir(path)
+    let executableSuffix = when defined(windows): ".exe" else: ""
+    var table = initTable[string, ResolvedToolIdentity]()
+    table["meson"] = mockedIdentity(@[mesonBin, basePythonBin],
+      resolvedExe = mesonBin / ("meson" & executableSuffix))
+    table["python3-with-modules"] =
+      mockedIdentity(@[modulePythonBin, basePythonBin],
+        resolvedExe = modulePythonBin /
+          ("python3-with-modules" & executableSuffix))
+    let resolver = makeResolver(table)
+
+    let g = oneAction("direct-before-transitive",
+      @["meson", "python3-with-modules"],
+      fingerprintToken = "direct-before-transitive")
+    let res = runBuild(g, runnerCfg(cacheRoot, resolver))
+    check res.results.len == 1
+    check res.results[0].status == asSucceeded
+    let captured = stripPathPrefix(
+      readBypassStdout(cacheRoot, "direct-before-transitive"))
+    let entries = captured.split(pathSeparator())
+    check entries.len >= 3
+    check entries[0 .. 2] == @[mesonBin, modulePythonBin, basePythonBin]
+
   test "An unresolved ref is silently skipped, others still contribute":
     resetTmp()
     let cacheRoot = TmpDir / "cache-skip"
@@ -329,3 +421,25 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     # ``nonexistent`` ref contributed nothing but did NOT block the
     # other refs from contributing.
     check captured.startsWith(mesonBin)
+
+  test "non-cacheable recognized-report actions execute even when outputs exist":
+    resetTmp()
+    let cacheRoot = TmpDir / "cache-noncacheable-recognized"
+    createDir(cacheRoot)
+    let depfilePath = TmpDir / "missing-optional.d"
+    let act = action("noncacheable-recognized",
+      stubArgv(),
+      cwd = getCurrentDir(),
+      cacheable = false,
+      dependencyPolicy = makeDepfilePolicy(depfilePath))
+    let g = graph(@[act], newSeq[BuildPool]())
+
+    let first = runBuild(g, runnerCfg(cacheRoot, nil))
+    check first.results.len == 1
+    check first.results[0].status == asSucceeded
+    check first.results[0].launched
+
+    let second = runBuild(g, runnerCfg(cacheRoot, nil))
+    check second.results.len == 1
+    check second.results[0].status == asSucceeded
+    check second.results[0].launched

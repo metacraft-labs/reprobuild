@@ -98,6 +98,7 @@ package qt6SvgSource:
     extractStrip: 1
 
   nativeBuildDeps:
+    "bash >=5.2"
     "cmake >=3.21"
     "ninja >=1.10"
     "gcc >=11"
@@ -137,7 +138,8 @@ package qt6SvgSource:
         # SBOM gen for v1.
         "QT_GENERATE_SBOM=OFF",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", generator = "Ninja",
+        cacheVars = opts, allowSourceWrites = true)
       discard pkg.library("libQt6Svg")
     finally:
       clearCurrentOwningPackageOverride()

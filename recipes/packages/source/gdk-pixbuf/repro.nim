@@ -106,6 +106,8 @@
 ## variants need different strategies (e.g. a developer variant that
 ## flips introspection on for GNOME-shell developer bundles).
 
+import std/os
+
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
 import repro_dsl_stdlib/types/package_result
@@ -153,6 +155,7 @@ package gdkPixbufSource:
     extractStrip: 1
 
   nativeBuildDeps:
+    "gobject-introspection"
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``. gdk-pixbuf 2.42
     ## requires meson 0.62 for the upstream build's option semantics.
@@ -170,6 +173,8 @@ package gdkPixbufSource:
     "python3"
 
   buildDeps:
+    "gobject-introspection"
+    "glib2-introspection"
     ## glib2 provides GObject + GIO that gdk-pixbuf's loader objects
     ## subclass; gdk-pixbuf is a GObject library at heart. Recipe name
     ## ``glib2`` matches the sibling source recipe.
@@ -203,9 +208,14 @@ package gdkPixbufSource:
         "tests=false",
         "man=false",
         "gtk_doc=false",
-        "introspection=disabled",
+        "introspection=enabled",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      let recipeRoot = getEnv("REPROBUILD_RECIPE_ROOT",
+        parentDir(getCurrentDir()))
+      let girPath = recipeRoot / "glib2-introspection" / ".repro" /
+        "output" / "install" / "usr" / "share" / "gir-1.0"
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts,
+        extraEnv = @[("GI_GIR_PATH", girPath)])
       discard pkg.library("libgdkPixbuf")
     finally:
       clearCurrentOwningPackageOverride()

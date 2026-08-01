@@ -3,7 +3,7 @@
 ##
 ## Two packages in one project each emit an edge whose implicit name
 ## is ``cli``. The M1 wiring records both qualified forms
-## (``ambigPkgA:cli`` and ``ambigPkgB:cli``) and a single ambiguity
+## (``ambig_pkg_a:cli`` and ``ambig_pkg_b:cli``) and a single ambiguity
 ## row on the unqualified ``cli`` listing the candidate qualified
 ## forms. The unqualified-name lookup that M2 will implement consumes
 ## this row.
@@ -21,14 +21,14 @@ defineCliInterface ambigNimC, "test-ambig-nimC":
       position = 0
     outputs output
 
-package ambigPkgA:
+package `ambig_pkg_a`:
   uses:
     "nim >=2.2 <3.0"
   build:
     discard ambigNimC.c(source = "src/cli.nim", output = "bin/cli",
       actionId = "cli-a")
 
-package ambigPkgB:
+package `ambig_pkg_b`:
   uses:
     "nim >=2.2 <3.0"
   build:

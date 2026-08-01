@@ -24,7 +24,7 @@
 ##      iteration's accumulator is fed into exactly one collection /
 ##      aggregate registration.
 ##   3. When the engine is invokable in this environment, run
-##      ``repro build test --dry-run --report=full`` and assert the
+##      ``repro build test --dry-run --write-report`` and assert the
 ##      resulting ``build-report.json`` enumerates ≥ N test-edge
 ##      actions (action ids matching the ``ct_test_nim_unittest``
 ##      typed-tool prefix). When the engine surface is missing — e.g.,
@@ -127,7 +127,7 @@ suite "t_repro_build_test_aggregate_builds_every_test":
         "test",
         ".",
         "--dry-run",
-        "--report=full",
+        "--write-report",
         "--no-runquota",
         # Match scripts/run_tests.sh: the explicit weak local profile is
         # the engine entry path that doesn't require a populated tool

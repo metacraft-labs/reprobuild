@@ -96,8 +96,10 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
+  let escapedStaged = escapedExtracted & ".repro-extract-" & escapedHash
   var script = "set -e; "
-  script.add("mkdir -p \"" & escapedExtracted & "\"; ")
+  script.add("rm -rf \"" & escapedStaged & "\"; ")
+  script.add("mkdir -p \"" & escapedStaged & "\"; ")
   script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
   script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" & escapedUrl &
     "\"; fi; ")
@@ -113,9 +115,15 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   # M9.R.13b.4 — ``--force-local`` so Windows tar (MSYS2 / Git-for-
   # Windows) doesn't interpret ``D:/...`` as a ``host:`` rsh path. See
   # the matching fix in ``autotools_package.nim`` for the full rationale.
-  script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
-    escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
-  script.add("touch \"" & escapedStamp & "\"")
+  if spec.kind == dfkDataFile:
+    script.add("cp \"" & escapedTarball & "\" \"" &
+      escapedStaged & "/source\"; ")
+  else:
+    script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
+      escapedStaged & "\" --strip-components=" & $spec.extractStrip & "; ")
+  script.add("rm -rf \"" & escapedExtracted & "\"; ")
+  script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
+  script.add(": > \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
   let act = buildAction(
     id = mesonFetchActionId(packageName),
@@ -159,12 +167,15 @@ proc m9r14eThreadRecipeDepsAsToolRefs(actionId, pkgName: string) =
   ## mutating the wrapper's return value doesn't affect the registry
   ## entry the engine sees later. ``appendRegisteredActionToolIdentityRefs``
   ## (in ``repro_project_dsl``) updates the registry in place.
-  var refs: seq[string] = @[]
+  var nativeRefs: seq[string] = @[]
   for raw in registeredNativeBuildDeps(pkgName):
-    refs.add(m9r14eStripConstraint(raw))
+    nativeRefs.add(m9r14eStripConstraint(raw))
+  var buildRefs: seq[string] = @[]
   for raw in registeredBuildDeps(pkgName):
-    refs.add(m9r14eStripConstraint(raw))
+    buildRefs.add(m9r14eStripConstraint(raw))
+  let refs = nativeRefs & buildRefs
   appendRegisteredActionToolIdentityRefs(actionId, refs)
+  classifyRegisteredActionToolIdentityRefs(actionId, buildRefs)
 
 proc meson_package*(srcDir: string;
                     buildDir = "build";
@@ -174,6 +185,8 @@ proc meson_package*(srcDir: string;
                     configureOptions: seq[string] = @[];
                     crossFile = "";
                     nativeFile = "";
+                    wrapMode = "nodownload";
+                    extraEnv: seq[(string, string)] = @[];
                     srcPatches: seq[string] = @[]): MesonPackageResult =
   ## Configure → build → install pipeline for an upstream meson
   ## project. v1 ignores ``--tags`` filtering at install time — the
@@ -194,6 +207,10 @@ proc meson_package*(srcDir: string;
   ## the v6.10-rc1 shim systemd v257 ships). Mirrors the cmake_package
   ## srcPatches channel (M9.R.15q.10.5) so meson recipes have the same
   ## per-recipe escape hatch the cmake recipes do.
+  ##
+  ## ``extraEnv`` applies per-edge environment overrides to setup,
+  ## compile, and install. This matches ``cmake_package`` and keeps
+  ## package-specific process controls scoped to the recipe pipeline.
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
   let extractedRel = block:
@@ -217,7 +234,7 @@ proc meson_package*(srcDir: string;
       # ``sed -i 's/X/Y/' src/foo.txt``). Append in declaration order
       # so subsequent patches see prior edits.
       script.add(sedExpr & "; ")
-    script.add("touch \"" & escapedStamp & "\"")
+    script.add(": > \"" & escapedStamp & "\"")
     var patchDeps: seq[string] = @[]
     var patchInputs: seq[string] = @[]
     if fetchActOpt.isSome:
@@ -235,6 +252,29 @@ proc meson_package*(srcDir: string;
       commandStatsId = "meson_package.patch",
       toolIdentityRefs = @["sh"])
     setupAfter.add(patchEdge)
+  if projectRoot.len > 0:
+    let cleanStamp = projectRoot / ".repro" / "build" / "meson-clean.stamp"
+    let buildDirAbs = projectRoot / buildDir
+    let cleanScript = "set -e; rm -rf \"" &
+      buildDirAbs.replace("\"", "\\\"") & "\"; : > \"" &
+      cleanStamp.replace("\"", "\\\"") & "\""
+    var cleanDeps: seq[string] = @[]
+    var cleanInputs: seq[string] = @[]
+    for predecessor in setupAfter:
+      cleanDeps.add(predecessor.id)
+      for output in predecessor.outputs:
+        cleanInputs.add(output)
+    let cleanEdge = buildAction(
+      id = "meson-clean-build-dir-" & pkgName,
+      call = inlineExecCall(@["sh", "-c", cleanScript]),
+      deps = cleanDeps,
+      inputs = cleanInputs,
+      outputs = @[cleanStamp],
+      cacheable = false,
+      dependencyPolicy = automaticMonitorPolicy(),
+      commandStatsId = "meson_package.clean_build_dir",
+      toolIdentityRefs = @["sh"])
+    setupAfter = @[cleanEdge]
   let setup = meson.setup(
     srcDir = srcDir,
     buildDir = buildDir,
@@ -243,7 +283,9 @@ proc meson_package*(srcDir: string;
     options = configureOptions,
     crossFile = crossFile,
     nativeFile = nativeFile,
-    after = setupAfter)
+    wrapMode = wrapMode,
+    after = setupAfter,
+    extraEnv = extraEnv)
   # M9.R.14e.5 — thread every nativeBuildDeps + buildDeps name onto the
   # setup action's ``toolIdentityRefs`` so the M9.R.14e.1 env-prepend
   # pass at fork time threads each from-source dep's
@@ -278,7 +320,20 @@ proc meson_package*(srcDir: string;
   # below; the automatic-monitor evidence on ``meson setup`` may not
   # land before the scheduler dispatches ``meson compile``, races the
   # build.ninja file write, and breaks vendored-subproject builds.
-  let compileEdge = meson.compile(workDir = buildDir, after = @[setup])
+  let buildNinja = m9r79BuildDirAbs / "build.ninja"
+  let refreshGeneratedMtime = buildAction(
+    id = "meson-refresh-generated-mtime-" & pkgName,
+    call = inlineExecCall(@["sh", "-c", "touch \"" &
+      buildNinja.replace("\"", "\\\"") & "\""]),
+    deps = @[setup.id],
+    inputs = setup.outputs,
+    outputs = @[buildNinja],
+    cacheable = false,
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "meson_package.refresh_generated_mtime",
+    toolIdentityRefs = @["sh"])
+  let compileEdge = meson.compile(workDir = buildDir,
+    after = @[refreshGeneratedMtime], extraEnv = extraEnv)
   m9r14eThreadRecipeDepsAsToolRefs(compileEdge.id, pkgName)
   # M9.R.79.2 — compile continues writing to buildDir; source stays
   # read-only.  Sequential edge via ``after = @[setup]`` — R7 dep-chain
@@ -311,7 +366,8 @@ proc meson_package*(srcDir: string;
     workDir = buildDir,
     destdir = effectiveDestdir,
     tags = @[],
-    after = @[compileEdge])
+    after = @[compileEdge],
+    extraEnv = extraEnv)
   m9r14eThreadRecipeDepsAsToolRefs(installEdge.id, pkgName)
   # M9.R.79.2 — install writes the DESTDIR-staged tree at
   # ``effectiveDestdir``; source stays read-only.  The install-mirror

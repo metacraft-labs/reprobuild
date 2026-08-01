@@ -26,7 +26,7 @@
 ##
 ## Fixture pattern mirrors M9 / M10 / M11 / M14 / M15: three local bare
 ## origins stand in for remote URLs, a workspace tree carries
-## ``.repo/manifests/projects/<name>.toml`` plus three repo fragments,
+## ``projects/<name>.toml`` plus three repo fragments,
 ## and every repo is cloned into the workspace before the command runs.
 ##
 ## Skip rule: ``git`` missing on PATH (same convention as M9–M16).
@@ -34,6 +34,7 @@
 import std/[json, os, osproc, strutils, tables, tempfiles, unittest]
 
 import repro_test_support
+import repro_workspace_manifests
 
 # ---- repro binary build ---------------------------------------------------
 
@@ -179,7 +180,7 @@ proc setupFixture(gitBin, slug: string): M17Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -199,20 +200,31 @@ proc cloneAll(gitBin: string; fx: M17Fixture) =
 
 proc invokeEnsure(fx: M17Fixture; json = false): CmdResult =
   var argv = @[
-    fx.reproBin, "hooks", "ensure", "--vcs",
+    fx.reproBin, "hooks", "ensure", "--write-report", "--vcs",
     "--workspace-root=" & fx.workspaceRoot,
   ]
   if json: argv.add("--json")
   runShell(shellCommand(argv))
 
 proc invokeDispatch(fx: M17Fixture; hookName: string): CmdResult =
+  if hookName == "pre-push":
+    let refsFile = fx.scratch / "dispatch-noop-refs.txt"
+    writeFile(refsFile, "refs/heads/main " & fx.libA.sha &
+      " refs/heads/main " & fx.libA.sha & "\n")
+    return runShell(shellCommand(@[
+      fx.reproBin, "hooks", "dispatch", hookName,
+      "--protocol=2",
+      "--repo-root", fx.workspaceRoot / "lib-a",
+      "--refs-file", refsFile,
+      "--", "origin", fileUrl(fx.libA.origin),
+    ]))
   runShell(shellCommand(@[
     fx.reproBin, "hooks", "dispatch", hookName,
     "--repo-root", fx.workspaceRoot / "lib-a", "--",
   ]))
 
 proc readReport(fx: M17Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repo" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "hooks-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
@@ -437,6 +449,7 @@ suite "M17 — repro hooks ensure --vcs (workspace-aware)":
       let fx = setupFixture(gitBin, "dispatch-noop")
       defer: removeDir(fx.scratch)
       cloneAll(gitBin, fx)
+      writeWorkspaceBranch(fx.workspaceRoot, project = "lib-a", branch = "main")
 
       # ``dispatch`` is the entry point the installed hook scripts
       # call. With no body registered (M17 ground state) every known

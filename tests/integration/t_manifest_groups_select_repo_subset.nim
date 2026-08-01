@@ -137,7 +137,7 @@ proc setupFixture(gitBin: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
@@ -150,14 +150,14 @@ proc setupFixture(gitBin: string): Fixture =
 proc syncPaths(fx: Fixture; groupsArg: string): HashSet[string] =
   ## Run sync (optionally with a ``--groups=...`` flag) and return the set
   ## of repo paths the report classified — i.e. the selected subset.
-  var argv = @[fx.reproBin, "workspace", "sync", "myproject",
+  var argv = @[fx.reproBin, "workspace", "sync", "--write-report", "myproject",
     "--workspace-root=" & fx.workspaceRoot]
   if groupsArg.len > 0:
     argv.add("--groups=" & groupsArg)
   let res = runShell(shellCommand(argv))
   if res.code notin {0, 2}:
     checkpoint("sync output: " & res.output)
-  let report = parseFile(fx.workspaceRoot / ".repro" / "workspace" /
+  let report = parseFile(fx.workspaceRoot / ".repro" / "build" / "reports" /
     "sync-report.json")
   result = initHashSet[string]()
   for entry in report["repos"]:

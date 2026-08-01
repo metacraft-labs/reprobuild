@@ -94,7 +94,8 @@ package breezeSource:
       # + build + install + install-mirror chain runs and publishes
       # the install-tree under .repro/output/install/ for downstream
       # plasma-workspace consumption.
-      discard cmake_package(srcDir = "./src", cacheVars = opts)
+      discard cmake_package(srcDir = "./src", cacheVars = opts,
+                            allowSourceWrites = true)
     finally:
       clearCurrentOwningPackageOverride()
 

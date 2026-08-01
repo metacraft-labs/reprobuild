@@ -250,8 +250,15 @@ package opensslSource:
     ## tarball and trips the build with ``No such file or directory``).
     setCurrentOwningPackageOverride("opensslSource")
     try:
+      let target =
+        if hostOS == "macosx":
+          if hostCPU == "arm64": "darwin64-arm64-cc"
+          else: "darwin64-x86_64-cc"
+        else:
+          if hostCPU == "arm64" or hostCPU == "aarch64": "linux-aarch64"
+          else: "linux-x86_64"
       let opts = @[
-        "linux-x86_64",
+        target,
         "shared",
         "no-tests",
         "no-docs",

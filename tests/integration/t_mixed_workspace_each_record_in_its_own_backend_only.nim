@@ -144,7 +144,7 @@ suite "HL-2 — mixed workspace: each record in its own backend only":
       # ---- workspace + manifest ----------------------------------------
       let ws = scratch / "workspace"
       createDir(ws)
-      let manifestsRoot = ws / ".repo" / "manifests"
+      let manifestsRoot = ws
       createDir(manifestsRoot / "projects")
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "mix.toml",
@@ -187,7 +187,7 @@ suite "HL-2 — mixed workspace: each record in its own backend only":
         "{ visibility = \"public\", backend = \"committed-file\", " &
         "path = \"committed-store\", repos = [\"pub\"] }, " &
         "{ visibility = \"team\", backend = \"git-checkout\", " &
-        "path = \".repo/manifests\", repos = [\"core\"] }, " &
+        "path = \".repro/manifests\", repos = [\"core\"] }, " &
         "{ visibility = \"personal\", backend = \"external-cli\", " &
         "program = \"" & stub & "\", repos = [\"secret\"] }]\n")
 
@@ -220,20 +220,20 @@ suite "HL-2 — mixed workspace: each record in its own backend only":
       check gateRes.code == 0
 
       # ---- (1) the TEAM repo's SHA is in the manifest, nowhere else ----
-      let teamLock = manifestsRoot / "locks" / "mix" / "core" /
+      let teamLock = ws / ".repro" / "manifests" / "locks" / "mix" / "core" /
         (coreSha & ".toml")
       check fileExists(teamLock)
 
       # ---- (2) the PERSONAL repo's SHA is in the DB, nowhere else ------
       check fileExists(db / ("lock_mix_secret_" & secretSha))
       # Absent from the manifest.
-      check not fileExists(manifestsRoot / "locks" / "mix" / "secret" /
+      check not fileExists(ws / ".repro" / "manifests" / "locks" / "mix" / "secret" /
         (secretSha & ".toml"))
 
       # ---- (3) the PUBLIC repo's SHA is in committed-file, nowhere else-
       check fileExists(committedStoreDir / "locks" / "mix" / "pub" /
         (pubSha & ".rec"))
-      check not fileExists(manifestsRoot / "locks" / "mix" / "pub" /
+      check not fileExists(ws / ".repro" / "manifests" / "locks" / "mix" / "pub" /
         (pubSha & ".toml"))
       check not fileExists(db / ("lock_mix_pub_" & pubSha))
       check not fileExists(db / ("lock_mix_core_" & coreSha))
@@ -242,7 +242,7 @@ suite "HL-2 — mixed workspace: each record in its own backend only":
       # Every ``locks/`` TOML in the manifest must mention ONLY the team repo's
       # path ("core") — never "secret" or "pub". The pre-HL-2 monolithic write
       # would have dropped all three paths into one TOML here.
-      let manifestLocks = manifestsRoot / "locks" / "mix"
+      let manifestLocks = ws / ".repro" / "manifests" / "locks" / "mix"
       for pathStr in walkDirRec(manifestLocks):
         if pathStr.endsWith(".toml"):
           let body = readFile(pathStr)

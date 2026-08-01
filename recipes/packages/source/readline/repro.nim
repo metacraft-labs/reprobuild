@@ -203,15 +203,19 @@ package readlineSource:
         "--disable-static",
         "--enable-shared",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let patches = @[
+        "sed -i 's|^SHLIB_XLDFLAGS = @LDFLAGS@ @SHLIB_XLDFLAGS@$|SHLIB_XLDFLAGS = @LDFLAGS@ @SHLIB_XLDFLAGS@ -Wl,--no-as-needed /opt/repro/reprobuild/recipes/packages/source/ncurses/.repro/output/install/usr/lib/libtinfow.so.6 -Wl,--as-needed|' src/shlib/Makefile.in",
+      ]
+      let pkg = autotools_package(
+        srcDir = "./src",
+        configureOptions = opts,
+        srcPatches = patches)
       discard pkg.library("libReadline")
       discard pkg.library("libHistory")
     finally:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
-    ## DT_NEEDED inspection of the linked artifacts. Empty until
-    ## the M9.R.5b per-recipe pass populates per-output ELF
-    ## interrogation.
-    discard
+    ## libreadline records its split terminfo implementation as a
+    ## direct shared-library dependency.
+    "ncurses >=6.0"

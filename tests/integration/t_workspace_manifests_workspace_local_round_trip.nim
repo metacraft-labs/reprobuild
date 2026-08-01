@@ -22,7 +22,7 @@ visibility = "org"
 branch = "main"
 
 [[manifest]]
-local_path = ".repo/manifests-personal"
+local_path = ".repro/manifests-personal"
 visibility = "personal"
 """
 
@@ -81,7 +81,7 @@ suite "M5 — WorkspaceLocal round-trip":
     check wl.manifest[0].branch.get() == "main"
     check wl.manifest[2].url.isNone
     check wl.manifest[2].local_path.isSome
-    check wl.manifest[2].local_path.get() == ".repo/manifests-personal"
+    check wl.manifest[2].local_path.get() == ".repro/manifests-personal"
     check wl.manifest[2].visibility == "personal"
 
   test "unknown top-level key is rejected":

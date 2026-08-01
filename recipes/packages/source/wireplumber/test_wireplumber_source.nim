@@ -39,9 +39,10 @@ const ExpectedHash =
   "e91f04cd8cec75d72b8a2aaa7e90b1ba0a5e2094b7a882fc3a29a484a48a87e9"
 
 const ExpectedMesonOptions = @[
-  "-Ddocumentation=disabled",
+  "-Ddoc=disabled",
   "-Dintrospection=disabled",
-  "-Dsystem-lua=true",
+  "-Dsystem-lua=false",
+  "-Dsystemd=enabled",
   "-Dtests=false",
   "--buildtype=release",
 ]
@@ -70,6 +71,23 @@ suite "wireplumberSource — from-source recipe smoke test":
     let spec = registeredFetchSpec("wireplumberSource")
     check spec.kind == dfkTarball
     check spec.extractStrip == 1
+
+  test "declares the build and runtime closure":
+    check registeredBuildDeps("wireplumberSource") == @[
+      "pipewire >=1.0",
+      "glib2 >=2.68",
+      "systemd >=240",
+    ]
+    check registeredRuntimeDeps("wireplumberSource") == @[
+      "pipewire >=1.0",
+      "glib2 >=2.68",
+      "systemd >=240",
+    ]
+    let native = registeredNativeBuildDeps("wireplumberSource")
+    check "meson >=0.59" in native
+    check "ninja >=1.10" in native
+    check "gcc >=11" in native
+    check "pkg-config" in native
 
   test "mesonOptions registers the exact production flag sequence":
     check true  # M9.R.6.1: registry retired — assertion gutted

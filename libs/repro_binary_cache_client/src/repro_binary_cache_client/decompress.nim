@@ -36,6 +36,7 @@
 import std/[strutils, dynlib]
 
 import ../../../repro_binary_cache_server/src/repro_binary_cache_server/types
+import ./dynlib_names
 
 type
   DecompressError* = object of CatchableError
@@ -63,11 +64,7 @@ type
 # libzstd thin binding — loaded lazily via dynlib
 # ---------------------------------------------------------------------------
 
-const
-  ZstdDynLib =
-    when defined(windows): "libzstd.dll"
-    elif defined(macosx): "libzstd.1.dylib"
-    else: "libzstd.so.1"
+const ZstdDynLib = zstdDynlibName(HostZstdDynlibTarget)
 
 type
   ZSTD_inBuffer = object

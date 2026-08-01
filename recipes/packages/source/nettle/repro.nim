@@ -183,6 +183,11 @@ package nettleSource:
     ## preprocessor.
     "m4"
 
+  buildDeps:
+    ## Hogweed's public-key primitives use GMP integers. Without this
+    ## dependency, configure succeeds but silently omits libhogweed.
+    "gmp >=6.2"
+
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
     discard
@@ -219,15 +224,16 @@ package nettleSource:
         "--disable-documentation",
         "--enable-shared",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let patches = @[
+        "sed -i 's|$(CC_FOR_BUILD) $< -lm -o $@|$(CC_FOR_BUILD) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -lm -o $@|' src/Makefile.in",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
+                                  srcPatches = patches)
       discard pkg.library("libNettle")
       discard pkg.library("libHogweed")
     finally:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
-    ## DT_NEEDED inspection of the linked artifacts. Empty until
-    ## the M9.R.5b per-recipe pass populates per-output ELF
-    ## interrogation.
-    discard
+    ## libhogweed has a direct DT_NEEDED edge on GMP.
+    "gmp >=6.2"

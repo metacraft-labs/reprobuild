@@ -205,11 +205,17 @@ proc benchActionPolicy(): DependencyGatheringPolicy =
   automaticMonitorGatheringPolicy()
 
 proc benchmarkEngineConfig(cacheRoot, app: string;
-                           rebuildMissingOutputsOnCacheHit = false):
+                           rebuildMissingOutputsOnCacheHit = true):
     BuildEngineConfig =
+  let monitorCli = parentDir(app) / addFileExt("repro", ExeExt)
+  if not fileExists(monitorCli):
+    raise newException(OSError,
+      "missing repro monitor CLI; run scripts/run-m23-benchmark.sh")
   BuildEngineConfig(
     cacheRoot: cacheRoot,
     runQuotaCliPath: app,
+    monitorCliPath: monitorCli,
+    monitorCliArgs: @["internal", "io", "monitor"],
     maxParallelism: 8'u32,
     stdoutLimit: 16 * 1024,
     stderrLimit: 16 * 1024,
@@ -241,12 +247,16 @@ proc runNoopWorkload(app, workRoot, cacheRoot: string; count: int):
       outputs = ["noop/" & $i & ".txt"], cpuMilli = 100'u32,
       memoryBytes = 4'u64 * 1024'u64 * 1024'u64,
       commandStatsId = "m23-noop-" & $i,
+      cacheable = true,
+      weakFingerprint = weak("noop-" & $i),
       dependencyPolicy = benchActionPolicy())
   discard runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   let start = epochTime()
   result.result = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   result.millis = elapsedMillis(start)
-  requireAll(result.result, {asUpToDate})
+  # A warm action may be reported as up-to-date or as a cache hit depending on
+  # whether the engine verifies the existing output or rematerializes it.
+  requireAll(result.result, {asUpToDate, asCacheHit})
 
 proc runCacheRestoreWorkload(app, workRoot, cacheRoot: string; count: int):
     tuple[result: BuildRunResult; millis: float] =
@@ -464,10 +474,11 @@ proc main() =
   let noop = runNoopWorkload(app, workRoot / "noop", cacheRoot, cacheCount)
   metrics.addMetric("cache-consultation-latency", "warm no-op build wall time",
     "ms", noop.millis, tdLessOrEqual, 30_000.0,
-    "outputs-present warm run through real build-engine dirty checking",
+    "outputs-present warm run through real build-engine action-cache lookup",
     ["repro_build_engine", "repro_local_store"])
   metrics.addMetric("cache-consultation-latency", "warm no-op actions",
-    "count", float(noop.result.successful({asUpToDate})), tdGreaterOrEqual,
+    "count", float(noop.result.successful({asUpToDate, asCacheHit})),
+    tdGreaterOrEqual,
     float(cacheCount),
     "up-to-date actions verified without launching child processes",
     ["repro_build_engine", "repro_local_store"])

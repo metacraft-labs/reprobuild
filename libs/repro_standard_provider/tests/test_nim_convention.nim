@@ -32,6 +32,7 @@
 ## fragment assertions instead of failing them.
 
 import std/[os, strutils, unittest]
+import repro_test_support
 
 import repro_core
 import repro_provider_runtime
@@ -39,14 +40,14 @@ import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/nim as nim_convention
 
-const
+let
   ## ``parentDir`` four times from
   ## ``libs/repro_standard_provider/tests/test_nim_convention.nim``
   ## lands at the ``reprobuild/`` repo root. The fixture lives in the
   ## sibling ``reprobuild-examples`` checkout under ``D:/metacraft/``,
   ## so we take one more parent.
   ReprobuildRoot = currentSourcePath.parentDir.parentDir.parentDir.parentDir
-  MetacraftRoot = ReprobuildRoot.parentDir
+  MetacraftRoot = workspaceRootForRepo(ReprobuildRoot)
   FixtureRoot = MetacraftRoot / "reprobuild-examples" / "nim" / "binary"
   FixtureEntry = "nim_binary_example"
   TestFixtureRoot =
@@ -296,7 +297,7 @@ suite "nim convention M3":
 #   * single-package fixtures (no ``depends_on``) are unaffected.
 # ---------------------------------------------------------------------------
 
-const
+let
   ## ``nim/mode3-pilot`` carries the canonical two-package shape: one
   ## library package (``mode3PilotGreet``), one executable package
   ## (``mode3PilotHello``), and a scanner-emitted ``depends_on`` edge.
@@ -463,7 +464,7 @@ suite "nim convention Mode 3 depends_on":
 #     observes no archive path change.
 # ---------------------------------------------------------------------------
 
-const
+let
   MixedFixtureRoot =
     MetacraftRoot / "reprobuild-examples" / "mixed" / "nim-uses-cpp-lib"
 
@@ -604,7 +605,7 @@ package nimapp:
 #     the archive action's id added to ``deps``.
 # ---------------------------------------------------------------------------
 
-const
+let
   ReverseMixedFixtureRoot =
     MetacraftRoot / "reprobuild-examples" / "mixed" / "cpp-uses-nim-lib"
 
@@ -750,7 +751,7 @@ suite "nim convention cross-language reverse (Mode 3 mixed workspace, C++ -> Nim
 #     gcc-mingw linker (Nim archive uses MinGW gcc-compiled obj files).
 # ---------------------------------------------------------------------------
 
-const
+let
   RustForwardMixedFixtureRoot =
     MetacraftRoot / "reprobuild-examples" / "mixed" / "nim-uses-rust-lib"
   RustReverseMixedFixtureRoot =

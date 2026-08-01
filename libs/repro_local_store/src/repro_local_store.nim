@@ -484,6 +484,23 @@ proc fingerprintMetadata(path: string;
   cache[].entries[path] = result
   processWarmFileMetadataEntries[path] = result
 
+proc fingerprintRecordedMetadata(path: string; recorded: FileMetadata;
+                                 cache: ptr FileMetadataCache): FileMetadata =
+  if cache.isNil:
+    return fingerprintMetadata(path)
+  if cache[].entries.hasKey(path):
+    inc cache[].stats.currentRunHits
+    return cache[].entries[path]
+  inc cache[].stats.warmEntries
+  inc cache[].stats.warmRevalidated
+  result = fingerprintMetadata(path)
+  if result == recorded:
+    inc cache[].stats.warmUnchanged
+  else:
+    inc cache[].stats.warmChanged
+  cache[].entries[path] = result
+  processWarmFileMetadataEntries[path] = result
+
 proc fileBytesForHash(path: string; metadata: FileMetadata): seq[byte] =
   if metadata.kind != ffkRegular:
     return @[]
@@ -1145,6 +1162,24 @@ proc migrateLegacyFile(cache: ActionCache; weak: ContentDigest) =
     cache.writeRecFileAtomically(dirPath,
       recFileNameForStrong(recs[0].strongFingerprint), recs)
 
+type
+  CacheDaemonSpawnHook* = proc (root: string; args: seq[string]): bool
+    {.closure, gcsafe.}
+    ## Optional deterministic spawn seam. Nil launches the real detached
+    ## daemon; production never installs this hook.
+
+  CacheDaemonLaunchHook* = proc () {.closure.}
+    ## Deterministic seam at a launch state-machine boundary. Production leaves
+    ## it nil.
+
+proc ensureCacheDaemon*(root: string; idx: ShmIndex;
+    livenessProbe: ProcessLivenessProbe = nil;
+    spawnHook: CacheDaemonSpawnHook = nil;
+    force = false; atSeconds = 0'u64;
+    ackWaitMs = WorkAckProbeGraceMs;
+    afterLeaseReserved: CacheDaemonLaunchHook = nil;
+    afterAuthorizationBeforeSpawn: CacheDaemonLaunchHook = nil): bool
+
 proc submitToShm(cache: ActionCache; record: ActionResultRecord) =
   ## AC-2c engine WRITE path (§4.4): submit `record`'s METADATA-ONLY encoding to
   ## the MPSC ring so the single-writer daemon publishes it to the shared table
@@ -1162,7 +1197,13 @@ proc submitToShm(cache: ActionCache; record: ActionResultRecord) =
   ## exceeds the inline slot cap are simply not shm-cached (Tier-1-only).
   if cache.shm == nil or not cache.shm.enabled: return
   let enc = encodeActionResultRecord(record)
-  discard cache.shm.idx.submitRecord(record.weakFingerprint.bytes, enc)
+  let submitted = cache.shm.idx.submitRecord(record.weakFingerprint.bytes, enc)
+  # The daemon self-reaps or may hard-crash while this handle remains live.
+  # Every successful append increments a shared work generation. Exactly one
+  # full-width launch-lease winner checks/starts the daemon for that generation;
+  # a healthy daemon acknowledges the exact generation after a stable drain.
+  if submitted:
+    discard ensureCacheDaemon(cache.root, cache.shm.idx)
 
 proc writePerEdgeRecord(cache: ActionCache; record: ActionResultRecord) =
   ## Publish ONE path-set's record into its edge directory
@@ -1237,7 +1278,8 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
           record.policy == probe.policy:
         for input in record.inputs:
           inc checkedInputs
-          if fingerprintMetadata(input.path, metadataCache) != input.metadata:
+          if fingerprintRecordedMetadata(input.path, input.metadata,
+              metadataCache) != input.metadata:
             return HotMetadataScan(status: hmssInputChanged,
               recordCount: totalRecords, checkedInputCount: checkedInputs)
   HotMetadataScan(status: hmssHit, recordCount: totalRecords,
@@ -1420,32 +1462,152 @@ proc cacheDaemonBinPath(): string =
     discard
   ""
 
-proc ensureCacheDaemon(root: string; idx: ShmIndex) =
-  ## Best-effort: if no live daemon owns the shm control region for `root`,
-  ## spawn `repro-cache-daemon` DETACHED for it. The control-region
-  ## pid/heartbeat election makes a redundant spawn harmless (only one wins), so
-  ## we never coordinate — we just spawn when the region looks unowned. A failed
-  ## spawn is swallowed: the engine's reads/submits still work (a co-running
-  ## engine may have spawned the owner) and, worst case, records stay Tier-1.
+proc ensureCacheDaemon*(root: string; idx: ShmIndex;
+    livenessProbe: ProcessLivenessProbe = nil;
+    spawnHook: CacheDaemonSpawnHook = nil;
+    force = false; atSeconds = 0'u64;
+    ackWaitMs = WorkAckProbeGraceMs;
+    afterLeaseReserved: CacheDaemonLaunchHook = nil;
+    afterAuthorizationBeforeSpawn: CacheDaemonLaunchHook = nil): bool =
+  ## Best-effort, cross-process bounded daemon launch. A full-width exact lease
+  ## elects one responsible producer for an unacknowledged work generation (or
+  ## the initial force-on-open). Healthy heartbeat freshness is checked before
+  ## any kill(2). A first fresh notification remains syscall-free; a second
+  ## generation arriving while the first is still unacknowledged (or one whose
+  ## full-width age passed the grace) authorizes one elected liveness probe.
+  ## Thus sequential submit/drain cycles perform zero OS probes while the next
+  ## submission after a crash-with-outstanding-work recovers promptly.
   when shmIndexSupported:
-    if not idx.available: return
-    if not ownerLooksStale(idx): return        # a live owner already runs
-    let bin = cacheDaemonBinPath()
-    if bin.len == 0: return
+    if not idx.available: return false
+    let targetSequence = idx.workSequence()
+    if not force and idx.workAckSequence() == targetSequence:
+      return false
+    let launchToken = idx.tryAcquireDaemonLaunchLease(atSeconds,
+      probe = livenessProbe)
+    if launchToken == 0: return false
+    if afterLeaseReserved != nil:
+      afterLeaseReserved()
+
+    # Reassignment, final authorization, and the external side effect share one
+    # exact gate. A successor cannot expire/reassign the lease after this check
+    # and before `startProcess`/the hook executes.
+    if not idx.tryAcquireWriterGate(launchToken, livenessProbe, atSeconds):
+      discard idx.releaseDaemonLaunchLease(launchToken)
+      discard idx.releaseCoordToken(launchToken)
+      return false
+
+    template abandonLaunch(): untyped =
+      discard idx.releaseDaemonLaunchLease(launchToken)
+      discard idx.releaseWriterGate(launchToken)
+      discard idx.releaseCoordToken(launchToken)
+
+    template retainLaunch(): untyped =
+      discard idx.releaseWriterGate(launchToken)
+
+    # A predecessor may have drained while we won the election.
+    if not force and idx.workAckSequence() == targetSequence:
+      abandonLaunch()
+      return false
+    if idx.daemonLaunchLease() != launchToken:
+      discard idx.releaseWriterGate(launchToken)
+      discard idx.releaseCoordToken(launchToken)
+      return false
+
+    let pid = idx.rawOwnerPid()
+    if pid != 0 and idx.heartbeatIsFresh(atSeconds):
+      if force or idx.workAckSequence() == targetSequence:
+        abandonLaunch()
+        return false
+      let association = idx.workAssociation(targetSequence)
+      let nowMs =
+        if atSeconds == 0: uint64(epochTime() * 1000.0)
+        else: atSeconds * 1000'u64
+      let hadOutstanding = association.sequence == targetSequence and
+        association.ackAtStart != association.previousSequence
+      let aged = ackWaitMs == 0 or (association.startedMs != 0 and
+        nowMs > association.startedMs + ackWaitMs)
+      if not hadOutstanding and not aged:
+        # First fresh notification: the polling daemon will see it without a
+        # syscall. Retain responsibility through the stable drain so concurrent
+        # followers also remain probe-free.
+        retainLaunch()
+        return false
+      # This is the only healthy-looking path that probes, specifically to
+      # distinguish a recent hard crash with already-outstanding work.
+      let ownerIdentity = idx.currentOwnerIdentity()
+      let identity =
+        if ownerIdentity.nonce != 0: ownerIdentity
+        else: OwnerIdentity(pid: pid)
+      if idx.probeProcess(identity, livenessProbe) != plDead:
+        # Keep one responsibility lease until the live owner acknowledges the
+        # generation (drain clears it under the writer gate), bounding a burst
+        # to one exceptional liveness probe.
+        retainLaunch()
+        return false
+    elif pid != 0:
+      let capable = idx.isCapableOwner()
+      if not capable and
+          idx.probeProcess(OwnerIdentity(pid: pid), livenessProbe) != plDead:
+        # A stale legacy heartbeat never authorizes takeover by itself.
+        retainLaunch()
+        return false
+      # A stale capable owner is replaceable only by a daemon candidate that
+      # later acquires the same writer gate. If it is paused inside the gate,
+      # that candidate cannot claim and cannot mutate.
+
     var args = @["--action-cache-root=" & root]
     let idleMs = getEnv(CacheDaemonIdleEnv, "")
     if idleMs.len > 0:
       args.add("--idle-exit-ms=" & idleMs)
+    if spawnHook != nil:
+      discard idx.setCoordFlags(launchToken, 1)
+      if afterAuthorizationBeforeSpawn != nil:
+        afterAuthorizationBeforeSpawn()
+      if idx.daemonLaunchLease() != launchToken:
+        discard idx.releaseWriterGate(launchToken)
+        discard idx.releaseCoordToken(launchToken)
+        return false
+      try:
+        idx.noteDaemonSpawnAttempt()
+        result = spawnHook(root, args)
+      except CatchableError:
+        result = false
+      if result:
+        discard idx.setCoordFlags(launchToken, 2)
+        retainLaunch()
+      else:
+        abandonLaunch()
+      return
+    let bin = cacheDaemonBinPath()
+    if bin.len == 0:
+      abandonLaunch()
+      return false
+    if idx.daemonLaunchLease() != launchToken:
+      discard idx.releaseWriterGate(launchToken)
+      discard idx.releaseCoordToken(launchToken)
+      return false
+    discard idx.setCoordFlags(launchToken, 1)
+    if afterAuthorizationBeforeSpawn != nil:
+      afterAuthorizationBeforeSpawn()
+    if idx.daemonLaunchLease() != launchToken:
+      discard idx.releaseWriterGate(launchToken)
+      discard idx.releaseCoordToken(launchToken)
+      return false
     try:
+      idx.noteDaemonSpawnAttempt()
       let p = startProcess(bin, args = args,
         options = {poDaemon, poStdErrToStdOut})
       # Detach: we do not wait on it. `poDaemon` puts it in its own session so
       # it outlives this engine (and services other concurrent builds).
       close(p)
+      result = true
+      discard idx.setCoordFlags(launchToken, 2)
+      retainLaunch()
     except CatchableError, OSError:
-      discard
+      result = false
+      abandonLaunch()
   else:
-    discard
+    false
 
 proc attachShmTier(root: string): ShmTier =
   ## Attach the shm index for `root` and ensure a daemon owns it. Best-effort:
@@ -1460,7 +1622,7 @@ proc attachShmTier(root: string): ShmTier =
     result.idx = idx
     result.readerSlot = readerSlotForPid()
     result.enabled = true
-    ensureCacheDaemon(root, idx)
+    discard ensureCacheDaemon(root, idx, force = true)
 
 proc openActionCache*(root: string; attachShm = true): ActionCache =
   ## Open the per-edge Tier-1 store for `root`. When `attachShm` (the default,
@@ -1537,7 +1699,8 @@ proc hotMetadataRecordInputsUnchanged*(records: openArray[ActionResultRecord];
       if seen.contains(inputKey):
         continue
       seen.incl(inputKey)
-      if fingerprintMetadata(input.path, metadataCache) != input.metadata:
+      if fingerprintRecordedMetadata(input.path, input.metadata,
+          metadataCache) != input.metadata:
         return false
   true
 
@@ -1566,7 +1729,11 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
     when defined(windows):
       let perms: set[FilePermission] = {}
     else:
-      let perms = getFilePermissions(extendedPath(source))
+      let perms =
+        try:
+          getFilePermissions(extendedPath(source))
+        except OSError:
+          set[FilePermission]({})
     let blob =
       if storeOutputBlobs:
         if sourceMetadata.kind == ffkRegular and isDirectRegularFile(source):
@@ -1625,7 +1792,8 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
                            reusedRecordedInputs: bool] =
   result.reusedRecordedInputs = true
   for i, recorded in record.inputs:
-    let currentMetadata = fingerprintMetadata(recorded.path, metadataCache)
+    let currentMetadata = fingerprintRecordedMetadata(recorded.path,
+      recorded.metadata, metadataCache)
     case recorded.policy
     of ffpTimestamp:
       if currentMetadata != recorded.metadata:
@@ -1699,7 +1867,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
       var changed = false
       var changedInput = ""
       for input in hot.record.inputs:
-        if fingerprintMetadata(input.path, metadataCache) != input.metadata:
+        if fingerprintRecordedMetadata(input.path, input.metadata,
+            metadataCache) != input.metadata:
           changed = true
           changedInput = input.path
           break

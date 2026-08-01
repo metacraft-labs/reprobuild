@@ -240,6 +240,57 @@ suite "M9.R.13a provider-compile cache sharing":
     else:
       check nimcacheA.contains("nimcache-provider")
 
+  test "test_provider_compile_command_serializes_nim_backend":
+    ## Provider compile is already one build-engine action; the Nim command
+    ## itself must not spawn a parallel host-C compile wave inside that edge.
+    let scratch = getTempDir() / "repro-provider-compile-serial"
+    let command = providerCompileCommand(
+      modulePath = scratch / "repro.nim",
+      outputBinaryPath = scratch / "out" / "provider",
+      workDir = scratch,
+      scratchDir = scratch / "scratch")
+    let hasParallelLimit = command.anyIt(it == "--parallelBuild:1")
+    if not hasParallelLimit:
+      checkpoint("command: " & command.join(" "))
+    check hasParallelLimit
+
+  test "test_provider_compile_command_prefers_runtime_cc_on_posix":
+    ## A warm repro binary can outlive the direnv compiler wrapper it was built
+    ## under. On POSIX, provider compiles should follow the current shell's
+    ## absolute `cc` after explicit bootstrap/absolute-CC overrides, instead of
+    ## pinning a stale build-time path.
+    when defined(windows):
+      skip()
+    else:
+      let runtimeCc = findExe("cc")
+      check runtimeCc.len > 0
+      let priorBootstrapSet = existsEnv("REPRO_BOOTSTRAP_CC")
+      let priorBootstrap = getEnv("REPRO_BOOTSTRAP_CC")
+      let priorCcSet = existsEnv("CC")
+      let priorCc = getEnv("CC")
+      try:
+        delEnv("REPRO_BOOTSTRAP_CC")
+        putEnv("CC", "gcc")
+        let scratch = getTempDir() / "repro-provider-runtime-cc"
+        let command = providerCompileCommand(
+          modulePath = scratch / "repro.nim",
+          outputBinaryPath = scratch / "out" / "provider",
+          workDir = scratch,
+          scratchDir = scratch / "scratch")
+        if not command.anyIt(it == "--gcc.exe:" & runtimeCc):
+          checkpoint("command: " & command.join(" "))
+        check command.anyIt(it == "--gcc.exe:" & runtimeCc)
+        check command.anyIt(it == "--clang.exe:" & runtimeCc)
+      finally:
+        if priorBootstrapSet:
+          putEnv("REPRO_BOOTSTRAP_CC", priorBootstrap)
+        else:
+          delEnv("REPRO_BOOTSTRAP_CC")
+        if priorCcSet:
+          putEnv("CC", priorCc)
+        else:
+          delEnv("CC")
+
   test "test_m9r13a_session_env_var_replaces_pid_in_cache_key":
     ## Arm 2: the cache key is driven by
     ## ``$REPRO_PROVIDER_NIMCACHE_SESSION``, NOT by the current pid.

@@ -114,7 +114,7 @@ type
     daemonKey: string
 
 proc writeProjectManifest(fx: Fixture; certificatesTable: string) =
-  let manifestsRoot = fx.workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = fx.workspaceRoot
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
     projectToml(fileUrl(fx.libAOrigin), certificatesTable))
 
@@ -127,7 +127,7 @@ proc setupFixture(gitBin, slug, certificatesTable: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
@@ -189,7 +189,7 @@ proc issueRealCert(fx: Fixture; fixtureJson: string): CmdResult =
 
 proc invokeCheckPrePush(fx: Fixture; refsFile: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "check", "--mode=pre-push",
+    fx.reproBin, "check", "--mode=pre-push", "--write-report",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & fx.libAPath,
     "--pushed-refs=" & refsFile,
@@ -201,7 +201,7 @@ proc writeRefsFile(path, localSha: string) =
     zeroSha & "\n")
 
 proc readReport(fx: Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "check-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

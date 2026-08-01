@@ -107,7 +107,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
 
@@ -143,7 +143,8 @@ proc setupFixture(gitBin, slug: string): Fixture =
   for i, n in repoNames:
     cloneInto(gitBin, origins[i], workspaceRoot / n)
 
-  writeFile(workspaceRoot / ".repo" / "workspace.toml",
+  createDir(workspaceRoot / ".repro")
+  writeFile(workspaceRoot / ".repro" / "workspace.toml",
     "schema = \"reprobuild.workspace.local.v1\"\n\n" &
     "[workspace]\nproject = \"demo\"\nbranch = \"main\"\n")
   result.workspaceRoot = workspaceRoot

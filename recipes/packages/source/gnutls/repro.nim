@@ -78,8 +78,7 @@
 ## ## Configurables
 ##
 ## v1 ships NO configurables — the configure flags are hardcoded to
-## the modern-desktop baseline per the task brief. SIX-flag set is
-## the LARGEST production configure-flag set in the corpus, pinning
+## the modern-desktop baseline per the task brief. This flag set pins
 ## the per-channel handling of a larger-cardinality flag sequence
 ## against a regression that truncated mid-sequence:
 ##
@@ -102,6 +101,14 @@
 ##                               runtime). Matches the openssl
 ##                               ``no-tests`` + the expat
 ##                               ``--without-tests`` precedent.
+##   * ``--with-included-libtasn1`` — build the ASN.1 parser from the
+##                               source bundled in the release tarball.
+##   * ``--with-included-unistring`` — build Unicode helpers from the
+##                               bundled source instead of requiring a
+##                               separate host library.
+##   * ``--without-idn``    — leave IDNA hostname conversion to callers,
+##                               avoiding an undeclared libidn2 runtime
+##                               edge.
 
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
@@ -116,7 +123,7 @@ package gnutlsSource:
   ## CLOSING recipe in the crypto-and-FFI batch (libffi + nettle +
   ## libgcrypt + gnutls). Single library artifact recipe driven by
   ## autotools with the LARGEST production configure-flag set in the
-  ## corpus (six flags) — pins the per-channel handling of a larger-
+  ## corpus — pins the per-channel handling of a larger-
   ## cardinality flag sequence against a regression that truncated
   ## mid-sequence.
   ##
@@ -179,18 +186,16 @@ package gnutlsSource:
     ## fast-paths for the AES-NI / SHA-NI primitives.
     "gcc >=11"
     ## pkg-config is used by the autotools configure step to probe for
-    ## nettle + libgcrypt + libtasn1 + libunistring + zlib.
+    ## nettle, GMP, and the remaining optional libraries.
     "pkg-config"
 
   buildDeps:
     ## nettle is gnutls's symmetric-cipher + hash backend (sibling
     ## ``nettleSource`` recipe 52 vendors a compatible version).
     "nettle >=3.7"
-    ## libgcrypt provides the alternative cipher backend (sibling
-    ## ``libgcryptSource`` recipe 53 vendors a compatible version);
-    ## gnutls's configure picks one of nettle / libgcrypt based on the
-    ## upstream's ``--with-libgcrypt`` knob (default: nettle).
-    "libgcrypt >=1.10"
+    ## GnuTLS and Nettle's Hogweed primitives require GMP integers.
+    ## Configure fails early when this direct dependency is omitted.
+    "gmp >=6.2"
 
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
@@ -221,6 +226,9 @@ package gnutlsSource:
         "--disable-tools",
         "--disable-cxx",
         "--disable-tests",
+        "--with-included-libtasn1",
+        "--with-included-unistring",
+        "--without-idn",
       ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libGnutls")
@@ -228,8 +236,7 @@ package gnutlsSource:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
-    ## DT_NEEDED inspection of the linked artifacts. Empty until
-    ## the M9.R.5b per-recipe pass populates per-output ELF
-    ## interrogation.
-    discard
+    ## Verified from libgnutls.so's DT_NEEDED entries. libtasn1 and
+    ## libunistring are compiled from the bundled source above.
+    "nettle >=3.7"
+    "gmp >=6.2"

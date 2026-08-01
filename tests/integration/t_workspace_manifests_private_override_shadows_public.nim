@@ -1,12 +1,12 @@
 ## M8 — Manifest-layer composition.
 ##
-## The composer reads `<workspaceRoot>/.repo/workspace.toml` (M5
+## The composer reads `<workspaceRoot>/.repro/workspace.toml` (M5
 ## surface), acquires each manifest layer (via M2 `bakWorkspaceVcs`
 ## clone for `url`-backed layers, in-tree for `local_path`-backed
 ## layers), resolves each layer's `projects/<project>.toml` via M6's
 ## `resolveProject`, and merges the per-layer `ResolvedProject` values
 ## into one flat `ResolvedProject`. Later layers shadow earlier ones on
-## the `(name, path, remoteName)` triple; non-matching repos APPEND.
+## the `(name, path, projectRemote)` triple; non-matching repos APPEND.
 ##
 ## Fixture: hermetic local bare git repos stand in for the public and
 ## private manifest URLs. Each bare repo is built by committing a real
@@ -211,7 +211,7 @@ revision = "main"
 # ---- helpers --------------------------------------------------------------
 
 proc writeWorkspaceToml(workspaceRoot, body: string): string =
-  let dotRepo = workspaceRoot / ".repo"
+  let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
   result = dotRepo / "workspace.toml"
   writeFile(result, body)
@@ -322,7 +322,7 @@ suite "M8 — manifest-layer composition":
 
       # Pre-populate an in-tree local manifest directory containing the
       # private project + repo fragments.
-      let localManifestRel = ".repo/manifests-personal"
+      let localManifestRel = ".repro/manifests-personal"
       let localManifestAbs = workspaceRoot / localManifestRel
       createDir(localManifestAbs / "projects")
       createDir(localManifestAbs / "repos")
@@ -439,7 +439,7 @@ includes = []
 
       # The public layer is well-formed (single repo). The private
       # layer deliberately lists two fragments with the SAME
-      # (name, path, remoteName) triple, which M6's per-layer
+      # (name, path, projectRemote) triple, which M6's per-layer
       # resolveProject rejects with a duplicate diagnostic. The
       # composer wraps that error with the layer's provenance so the
       # caller knows WHICH layer's project file the rejection

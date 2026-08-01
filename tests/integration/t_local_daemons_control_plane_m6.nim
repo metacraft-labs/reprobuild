@@ -107,9 +107,9 @@ proc buildCommand(projectRoot, tempRoot, workName, benchmarkPath: string;
     "--action-cache-root=" & tempRoot / "action-cache",
     "--progress=quiet",
     "--log=quiet",
-    "--report=none",
+    "--measure=none",
     "--no-runquota",
-    "--benchmark=" & benchmarkPath
+    "--write-benchmark=" & benchmarkPath
   ] & @extra, daemonEnv(tempRoot))
 
 proc executedActions(path: string): int =

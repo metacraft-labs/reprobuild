@@ -22,7 +22,11 @@
 ## a thin wrapper that builds a ``PublishInProcessRequest`` from CLI
 ## flags and forwards.
 
-import std/[algorithm, httpclient, httpcore, net, os, random, strutils, times]
+import std/[algorithm, asyncdispatch, httpclient, httpcore, net, os, random,
+            sequtils, strutils, times]
+
+when defined(ssl):
+  import wrappers/openssl
 
 import blake3
 
@@ -98,10 +102,21 @@ type
 
 const
   ArchiveMagic = "RBCA"
-  ArchiveVersion = 1'u32
+  ArchiveVersion = 2'u32
+  ArchiveVersionV1 = 1'u32
+
+type
+  ArchiveEntryKind = enum
+    aekFile = 0
+    aekDirectory = 1
+    aekSymlink = 2
+
+  ArchiveEntry = object
+    path: string
+    kind: ArchiveEntryKind
 
 # ---------------------------------------------------------------------------
-# Archive writer (mirror of the CLI's deterministic ``rbcarc-v1`` writer).
+# Archive writer (the shared deterministic ``rbcarc-v2`` writer).
 #
 # Kept in the library so engine-side callers don't pay the cost of
 # shelling out to the CLI; the CLI's local copy delegates here.
@@ -118,17 +133,54 @@ proc writeU64LE(buf: var seq[byte]; v: uint64) =
 proc normaliseSep(p: string): string =
   result = p.replace('\\', '/')
 
-proc walkPrefix(prefix: string): seq[string] =
+proc collectPrefixEntries(current, relativeBase: string;
+                          entries: var seq[ArchiveEntry]) =
+  for component, path in walkDir(current, skipSpecial = true):
+    let name = extractFilename(path)
+    let relativePath =
+      if relativeBase.len == 0: name else: relativeBase / name
+    case component
+    of pcFile:
+      entries.add(ArchiveEntry(
+        path: normaliseSep(relativePath), kind: aekFile))
+    of pcDir:
+      entries.add(ArchiveEntry(
+        path: normaliseSep(relativePath), kind: aekDirectory))
+      collectPrefixEntries(path, relativePath, entries)
+    of pcLinkToFile, pcLinkToDir:
+      entries.add(ArchiveEntry(
+        path: normaliseSep(relativePath), kind: aekSymlink))
+
+proc walkPrefix(prefix: string): seq[ArchiveEntry] =
   let prefixAbs = absolutePath(prefix)
-  for path in walkDirRec(prefixAbs, yieldFilter = {pcFile, pcLinkToFile},
-                         relative = true):
-    result.add(normaliseSep(path))
-  result.sort(cmp)
+  collectPrefixEntries(prefixAbs, "", result)
+  result.sort(proc(a, b: ArchiveEntry): int = cmp(a.path, b.path))
+
+proc filePermissionsMode*(permissions: set[FilePermission]): uint32 =
+  if fpUserRead in permissions: result = result or 0o400'u32
+  if fpUserWrite in permissions: result = result or 0o200'u32
+  if fpUserExec in permissions: result = result or 0o100'u32
+  if fpGroupRead in permissions: result = result or 0o040'u32
+  if fpGroupWrite in permissions: result = result or 0o020'u32
+  if fpGroupExec in permissions: result = result or 0o010'u32
+  if fpOthersRead in permissions: result = result or 0o004'u32
+  if fpOthersWrite in permissions: result = result or 0o002'u32
+  if fpOthersExec in permissions: result = result or 0o001'u32
+
+proc modeFilePermissions*(mode: uint32): set[FilePermission] =
+  if (mode and 0o400'u32) != 0: result.incl(fpUserRead)
+  if (mode and 0o200'u32) != 0: result.incl(fpUserWrite)
+  if (mode and 0o100'u32) != 0: result.incl(fpUserExec)
+  if (mode and 0o040'u32) != 0: result.incl(fpGroupRead)
+  if (mode and 0o020'u32) != 0: result.incl(fpGroupWrite)
+  if (mode and 0o010'u32) != 0: result.incl(fpGroupExec)
+  if (mode and 0o004'u32) != 0: result.incl(fpOthersRead)
+  if (mode and 0o002'u32) != 0: result.incl(fpOthersWrite)
+  if (mode and 0o001'u32) != 0: result.incl(fpOthersExec)
 
 proc fileModeOctal*(path: string): uint32 =
-  ## Returns 0o755 if the file is executable, 0o644 otherwise. Public
-  ## so the CLI's tests can re-use it via the re-exported in_process
-  ## module surface.
+  ## Preserves POSIX permission bits. Windows has no equivalent metadata,
+  ## so executable-looking extensions retain the portable 0o755 fallback.
   when defined(windows):
     let lower = path.toLowerAscii()
     if lower.endsWith(".exe") or lower.endsWith(".com") or
@@ -137,14 +189,11 @@ proc fileModeOctal*(path: string): uint32 =
       return 0o755'u32
     return 0o644'u32
   else:
-    let info = getFileInfo(path)
-    if (info.permissions * {fpUserExec, fpGroupExec, fpOthersExec}).len > 0:
-      return 0o755'u32
-    return 0o644'u32
+    filePermissionsMode(getFilePermissions(path))
 
 proc packPrefix*(prefix: string): seq[byte] =
   ## Builds the deterministic archive bytes for the prefix tree. Same
-  ## ``rbcarc-v1`` layout the CLI documents at the top of
+  ## ``rbcarc-v2`` layout the CLI documents at the top of
   ## ``repro_binary_cache_client_cli.nim``.
   let entries = walkPrefix(prefix)
   result = newSeqOfCap[byte](4096)
@@ -152,14 +201,20 @@ proc packPrefix*(prefix: string): seq[byte] =
     result.add(byte(ch))
   writeU32LE(result, ArchiveVersion)
   writeU32LE(result, uint32(entries.len))
-  for rel in entries:
-    let absPath = prefix / rel
-    let mode = fileModeOctal(absPath)
-    let pathBytes = rel
-    let payload = readFile(absPath)
+  for entry in entries:
+    let absPath = prefix / entry.path
+    let mode =
+      if entry.kind == aekSymlink: 0'u32 else: fileModeOctal(absPath)
+    let pathBytes = entry.path
+    let payload =
+      case entry.kind
+      of aekFile: readFile(absPath)
+      of aekDirectory: ""
+      of aekSymlink: expandSymlink(absPath)
     writeU32LE(result, uint32(pathBytes.len))
     for ch in pathBytes:
       result.add(byte(ch))
+    result.add(byte(ord(entry.kind)))
     writeU32LE(result, mode)
     writeU64LE(result, uint64(payload.len))
     for ch in payload:
@@ -178,6 +233,7 @@ proc packSingleFilePrefix*(prefixPath: string): seq[byte] =
   writeU32LE(result, 1'u32)
   writeU32LE(result, uint32(name.len))
   for ch in name: result.add(byte(ch))
+  result.add(byte(ord(aekFile)))
   writeU32LE(result, fileModeOctal(pref))
   let body = readFile(pref)
   writeU64LE(result, uint64(body.len))
@@ -190,10 +246,9 @@ proc packSingleFilePrefix*(prefixPath: string): seq[byte] =
 # substitute path (``repro_profile_compile.apply_build_actions``) needs
 # to MATERIALISE a substituted prefix archive from CAS back into a
 # target directory, byte-identically, the same way the CLI's
-# ``substitute`` command does. Lifting the reader into the library (next
-# to ``packPrefix``) lets the apply dispatcher share the exact
-# extraction logic without shelling out to the CLI. The CLI keeps its
-# own copy for now; both agree on the ``rbcarc-v1`` layout.
+# ``substitute`` command does. Keeping the reader in the library next to
+# ``packPrefix`` lets every verifier and apply dispatcher share the exact
+# version-aware extraction logic without shelling out to the CLI.
 # ---------------------------------------------------------------------------
 
 proc readU32LE(buf: openArray[byte]; pos: var int): uint32 =
@@ -209,10 +264,10 @@ proc readU64LE(buf: openArray[byte]; pos: var int): uint64 =
     inc pos
 
 proc extractPrefix*(archive: openArray[byte]; outDir: string) =
-  ## Extract an ``rbcarc-v1`` archive into ``outDir``. Byte-identical
-  ## reader to the CLI's ``extractPrefix``: same magic / version guard,
-  ## same unsafe-path rejection, same POSIX exec-bit restore for entries
-  ## whose recorded mode carries the 0o100 owner-exec bit. Raises
+  ## Extract an ``rbcarc-v1`` or ``rbcarc-v2`` archive into ``outDir``.
+  ## v2 preserves regular files, directory entries, and symbolic links;
+  ## v1 remains accepted so already-published cache entries keep working.
+  ## Raises
   ## ``IOError`` on a malformed / truncated archive.
   if archive.len < 4 + 4 + 4:
     raise newException(IOError, "rbcarc too short: " & $archive.len)
@@ -221,10 +276,11 @@ proc extractPrefix*(archive: openArray[byte]; outDir: string) =
       raise newException(IOError, "rbcarc magic mismatch at byte " & $i)
   var pos = 4
   let ver = readU32LE(archive, pos)
-  if ver != ArchiveVersion:
+  if ver notin {ArchiveVersionV1, ArchiveVersion}:
     raise newException(IOError, "rbcarc version mismatch: got " & $ver)
   let count = readU32LE(archive, pos)
   createDir(outDir)
+  var directoryModes: seq[(string, uint32)] = @[]
   for _ in 0 ..< count:
     let pathLen = int(readU32LE(archive, pos))
     if pos + pathLen > archive.len:
@@ -233,8 +289,21 @@ proc extractPrefix*(archive: openArray[byte]; outDir: string) =
     for i in 0 ..< pathLen:
       rel[i] = char(archive[pos + i])
     inc pos, pathLen
-    if rel.contains("..") or rel.startsWith("/"):
+    let normalizedRel = normaliseSep(rel)
+    if normalizedRel.len == 0 or normalizedRel.startsWith("/") or
+        normalizedRel.split('/').anyIt(it.len == 0 or it == "." or it == ".."):
       raise newException(IOError, "rbcarc rejected unsafe path: " & rel)
+    let entryKind =
+      if ver == ArchiveVersionV1:
+        aekFile
+      else:
+        if pos >= archive.len:
+          raise newException(IOError, "rbcarc truncated reading entry kind")
+        let rawKind = archive[pos]
+        inc pos
+        if rawKind > byte(ord(high(ArchiveEntryKind))):
+          raise newException(IOError, "rbcarc invalid entry kind: " & $rawKind)
+        ArchiveEntryKind(rawKind)
     let mode = readU32LE(archive, pos)
     let size = readU64LE(archive, pos)
     if pos + int(size) > archive.len:
@@ -246,14 +315,27 @@ proc extractPrefix*(archive: openArray[byte]; outDir: string) =
     for i in 0 ..< int(size):
       data[i] = char(archive[pos + i])
     inc pos, int(size)
-    writeFile(absOut, data)
-    when not defined(windows):
-      if (mode and 0o100'u32) != 0:
-        var perms = getFilePermissions(absOut)
-        perms.incl(fpUserExec)
-        perms.incl(fpGroupExec)
-        perms.incl(fpOthersExec)
-        setFilePermissions(absOut, perms)
+    case entryKind
+    of aekFile:
+      writeFile(absOut, data)
+      when not defined(windows):
+        setFilePermissions(absOut, modeFilePermissions(mode))
+    of aekDirectory:
+      if data.len != 0:
+        raise newException(IOError,
+          "rbcarc directory entry has a non-empty payload: " & rel)
+      createDir(absOut)
+      directoryModes.add((absOut, mode))
+    of aekSymlink:
+      if data.len == 0:
+        raise newException(IOError,
+          "rbcarc symlink entry has an empty target: " & rel)
+      createSymlink(data, absOut)
+  when not defined(windows):
+    if directoryModes.len > 0:
+      for i in countdown(directoryModes.high, 0):
+        setFilePermissions(
+          directoryModes[i][0], modeFilePermissions(directoryModes[i][1]))
 
 # ---------------------------------------------------------------------------
 # Multipart body builder.
@@ -345,7 +427,7 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
   ##      compare against ``entryKeyHex``; hard-fail on mismatch.
   ##      Without this gate, a stale baked-in hex on the caller side
   ##      would silently publish under the wrong key.
-  ##   2. Pack the prefix (directory → ``rbcarc-v1`` archive; single
+  ##   2. Pack the prefix (directory → ``rbcarc-v2`` archive; single
   ##      file → one-entry archive). Determinism mirrors the CLI's
   ##      ``packPrefix``.
   ##   3. BLAKE3-256 the archive bytes; populate the ``PayloadObject``
@@ -430,6 +512,11 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
   # (REPRO_BINARY_CACHE_CA_FILE / REPRO_BINARY_CACHE_TLS_INSECURE);
   # otherwise std/httpclient's getDefaultSSL() would reject verification
   # of a self-signed server cert.
+  when defined(ssl):
+    var openSslInitialized {.global.} = false
+    if not openSslInitialized:
+      discard SSL_library_init()
+      openSslInitialized = true
   let client =
     when defined(ssl):
       if baseUrl.toLowerAscii().startsWith("https://"):
@@ -440,20 +527,29 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
           if insecure: newContext(verifyMode = CVerifyNone)
           elif caFile.len > 0: newContext(verifyMode = CVerifyPeer, caFile = caFile)
           else: newContext(verifyMode = CVerifyPeer)
-        newHttpClient(timeout = 60_000, sslContext = ctx)
+        newAsyncHttpClient(sslContext = ctx)
       else:
-        newHttpClient(timeout = 60_000)
+        newAsyncHttpClient(sslContext = nil)
     else:
-      newHttpClient(timeout = 60_000)
+      newAsyncHttpClient()
   defer: client.close()
   client.headers["Content-Type"] = "multipart/form-data; boundary=" & boundary
   result.bytesUploaded = body.len
   try:
-    let resp = client.request(url, HttpPost, body)
+    let requestFuture = client.request(url, HttpPost, body)
+    if not waitFor requestFuture.withTimeout(60_000):
+      result.error = "publish failed: request timed out after 60000 ms"
+      return
+    let resp = requestFuture.read()
     result.statusCode = int(resp.code)
-    result.responseBody = resp.body
+    let bodyFuture = resp.body
+    if not waitFor bodyFuture.withTimeout(60_000):
+      result.error = "publish failed: response body timed out after 60000 ms"
+      return
+    result.responseBody = bodyFuture.read()
     if result.statusCode >= 300:
-      result.error = "publish failed: HTTP " & $resp.code & " " & resp.body
+      result.error = "publish failed: HTTP " & $resp.code & " " &
+        result.responseBody
       return
     result.ok = true
   except CatchableError as e:

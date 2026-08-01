@@ -61,7 +61,9 @@ type
   WorkspaceLockEntry* = object
     ## One per locked repo. Mirrors the ``LockedRepo`` schema record
     ## but uses the field names the rest of M11 callers already
-    ## carry (``remoteName`` matches ``ResolvedRepo.remoteName``,
+    ## carry (``remoteName`` holds the project-manifest remote key —
+    ## i.e. ``ResolvedRepo.projectRemote`` — and is serialized as the
+    ## lock TOML's ``remote`` key,
     ## ``branch`` is the advisory current branch from the live
     ## observation when known).
     name*: string
@@ -214,7 +216,7 @@ proc buildLockFromLiveState*(
     var entry = WorkspaceLockEntry(
       name: repo.name,
       path: repo.path,
-      remoteName: repo.remoteName,
+      remoteName: repo.projectRemote,
       revision: headShasByPath[repo.path])
     if repo.path in currentBranchesByPath:
       entry.branch = currentBranchesByPath[repo.path]

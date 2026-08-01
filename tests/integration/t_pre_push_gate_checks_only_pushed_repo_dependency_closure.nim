@@ -180,7 +180,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -216,7 +216,7 @@ proc invokeWorkspaceLock(fx: Fixture): CmdResult =
 proc invokeCheckPrePush(fx: Fixture; currentRepo, refsFile: string):
     CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "check", "--mode=pre-push",
+    fx.reproBin, "check", "--mode=pre-push", "--write-report",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & currentRepo,
     "--pushed-refs=" & refsFile,
@@ -224,7 +224,7 @@ proc invokeCheckPrePush(fx: Fixture; currentRepo, refsFile: string):
   ]))
 
 proc readReport(fx: Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "check-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

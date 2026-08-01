@@ -98,7 +98,8 @@ proc executeSubstituteAction*(ctx: ClientContext;
   # Compat check.
   let local = detectLocalPlatform(ctx.config.storeRoot)
   let (compatOk, compatReason) =
-    checkCompat(manifest, local, request.endpoint.trustedSigners)
+    checkCompat(manifest, local, request.endpoint.trustedSigners,
+                request.endpoint.enforceTrust)
   if not compatOk:
     result.reason = "compat rejected: " & compatReason
     result.wallclockMillis = int64(epochTime() * 1000.0 - startMs)

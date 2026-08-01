@@ -70,6 +70,8 @@ suite "libcanberraSource — from-source recipe smoke test":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "configureFlags does not leak into the cmake channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
+  test "build dependencies name the bundled libltdl ABI":
+    check "libltdl" in registeredBuildDeps("libcanberraSource")
   test "artifacts register a single library":
     # M3 artifact registry: ``libCanberra`` is the only artifact and
     # must be tagged ``dakLibrary``. libcanberra's autotools build emits

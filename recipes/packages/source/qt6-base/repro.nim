@@ -426,7 +426,8 @@ package qt6BaseSource:
         "FEATURE_brotli=OFF",
         "FEATURE_gssapi=OFF",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", generator = "Ninja",
+        cacheVars = opts, allowSourceWrites = true)
       discard pkg.library("libQt6Core")
       discard pkg.library("libQt6Gui")
       discard pkg.library("libQt6Widgets")

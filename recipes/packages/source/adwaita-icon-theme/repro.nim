@@ -102,7 +102,7 @@ package adwaitaIconThemeSource:
     setCurrentOwningPackageOverride("adwaitaIconThemeSource")
     try:
       let pkg = meson_package(srcDir = "./src", configureOptions = @[])
-      discard pkg.files("iconAssets")
+      pkg.installTreeMirror()
     finally:
       clearCurrentOwningPackageOverride()
 

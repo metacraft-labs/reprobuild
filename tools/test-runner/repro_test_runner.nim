@@ -36,8 +36,8 @@
 ##   REPRO_TEST_THREADS=N     override default worker count
 ##
 
-import std/[algorithm, json, locks, os, osproc, parseopt, streams,
-            strtabs, strutils, times]
+import std/[algorithm, atomics, json, locks, os, osproc, parseopt, streams,
+            strtabs, strutils, tempfiles, times]
 
 when defined(posix):
   import std/posix
@@ -54,6 +54,66 @@ const
   ## minimum the spec lets us hard-code; M4 retires it.
   ExcludeStems = [
     "repro_test_runner",
+  ]
+
+  ## These tests intentionally drive self-hosted ``repro build`` actions
+  ## against shared workspace state. The B0/D2 cases mutate the sibling
+  ## ``../runquota/build/bin/runquotad`` prerequisite; the B1/D5 cases rebuild
+  ## or probe shared ``build/bin`` app artifacts, including the single public
+  ## ``repro`` CLI; the B2/B3 cases inspect
+  ## the global ``.repro/build/.../build-report.json`` emitted by those builds.
+  ## Run the cluster with no other test active so shared prerequisites,
+  ## app binaries, and report files are not removed or overwritten under
+  ## another test's feet. D1 is in the same family: it drives a self-hosted
+  ## Python test edge and reads the shared full build report for the
+  ## resulting action.
+  ##
+  ## The M7 HTTPS cache gate starts a real TLS cache daemon and relies on
+  ## process-local TLS context setup. Run it alone so other cache daemon tests
+  ## cannot starve its listener startup under clean-cold load.
+  ## The M77 no-op latency gate is also exclusive: it is a subprocess-spawn
+  ## microbenchmark, so running it beside clean-cold compiler/linker tests
+  ## measures runner contention instead of the shell-hook fast path.
+  ##
+  ## The dev-session e2e test starts foreground services, a file watcher, and an
+  ## HTTP/SSE control plane, then waits for readiness transitions. Running it
+  ## beside the heavier e2e cluster can starve the session startup path enough
+  ## that the test measures host load instead of dev-session behavior.
+  ##
+  ## The binary-cache streaming checks run a loopback server in the same test
+  ## process and deliberately enforce a 30-second receive/throughput budget.
+  ## Under nested compiler load the server thread can be starved for the entire
+  ## budget even though the transfer completes in under a second when the test
+  ## owns the host. Likewise, the comprehensive local-build e2e case performs
+  ## many nested Nim compiler invocations; concurrent nested builds have been
+  ## observed to make Nim report SuccessX without materializing its requested
+  ## extractor binary. The native-shell gate performs the same nested provider
+  ## extraction for Bash, Zsh, and Fish and must own the host for the same
+  ## reason. Keep these resource-sensitive checks fully enabled but execute
+  ## them without competing test processes. The SC-7 capstone and SC-11
+  ## cross-repo library test also perform repeated nested interface extraction;
+  ## under contention Nim can report SuccessX without materializing the
+  ## requested extractor binary, so they require the same scheduling boundary.
+  ExclusiveStems = [
+    "t_a2_5_p3_streaming_sink",
+    "t_a2_5_p8_throughput_bench",
+    "t_b0_repro_build_runquota_daemon",
+    "t_b1_apps_action_cache_hit",
+    "t_b1_repro_build_apps_byte_equivalent",
+    "t_b1_repro_build_apps_collection",
+    "t_b2_helper_invalidation",
+    "t_b3_test_execute_edge_cache_hit",
+    "t_b3_test_invalidation_rebuilds_repro",
+    "t_cross_repo_nim_library_src_threaded_onto_consumer_path",
+    "t_d1_pythonunittest_resolves_in_path_mode",
+    "t_d2_cross_project_selector_recognised",
+    "t_d5_collection_member_selector",
+    "t_e2e_local_reprobuild_project_build",
+    "t_e2e_native_shell_hooks",
+    "t_e2e_repro_dev_sessions",
+    "t_e2e_shell_hook_noop_latency",
+    "t_repro_https_cache_end_to_end",
+    "t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes",
   ]
 
 type
@@ -101,6 +161,13 @@ type
     ## "two workers race on ``putEnv``" hazard called out in the
     ## Test-Edges-And-Parallel-Runner milestones.
     baseEnv: ptr seq[tuple[key, value: string]]
+
+  TestProcess = object
+    process: Process
+    when defined(posix):
+      processGroup: int
+      ownerToken: string
+      statusPath: string
 
 proc ensureDir(dir: string) =
   if dir.len > 0 and not dirExists(dir):
@@ -258,26 +325,640 @@ proc qualifyName(binaryStem, suite, name: string): string =
 var spawnLock: Lock
 initLock(spawnLock)
 
-proc spawnedProcess(binary: string; args: openArray[string];
-                    env: StringTableRef): Process =
-  acquire(spawnLock)
-  try:
-    result = startProcess(
-      binary, args = args, env = env,
-      options = {poStdErrToStdOut, poUsePath})
-  finally:
-    release(spawnLock)
-
-## Sentinel exit code returned by ``drainAndWaitWithTimeout`` when the
-## child was killed after exceeding the per-test deadline. Chosen to be
-## well outside the conventional 0/1/2 PASS/FAIL/SKIP range and outside
-## the POSIX 128+signal range that ``waitForExit`` would normally return
-## for a signal-killed child (e.g. 137 for SIGKILL, 143 for SIGTERM), so
-## a reader can distinguish "we killed it because it ran too long" from
-## "the OS killed it for other reasons" by exit code alone.
 const TimeoutExitCode = -42
 const TimeoutPollIntervalMs = 100
 const TimeoutKillGraceSec = 5
+const PostKillVerificationSec = 5
+
+proc drainAvailable(p: Process; output: var string): int
+proc finalDrainNonBlocking(p: Process; output: var string)
+
+when defined(posix):
+  const
+    ProcessGroupWrapperFlag = "--internal-test-process-group"
+    ProcessGroupReadyMarker = "REPRO_TEST_RUNNER_GROUP_READY_V1"
+    GroupSupervisorPollIntervalMs = 10
+    TestOwnerEnv = "REPRO_TEST_RUNNER_OWNER_TOKEN"
+    CleanupTraceEnv = "REPRO_TEST_RUNNER_CLEANUP_TRACE"
+
+  type
+    ActiveProcessGroup = ref object
+      processGroup: int
+      anchorPid: int
+      ownerToken: string
+      anchorReaped: bool
+
+  var
+    activeProcessGroupsLock: Lock
+    activeProcessGroups: seq[ActiveProcessGroup] = @[]
+    nextProcessGroupToken = 0
+    processGroupStateDir = ""
+    cleanupTracePath = ""
+    interruptedSignal: Atomic[int]
+    interruptSignalSet: Sigset
+
+  initLock(activeProcessGroupsLock)
+
+  proc appendCleanupTrace(event: string) =
+    ## Optional production-path observability used by the real process-tree
+    ## integration regression. Cleanup correctness never depends on this file:
+    ## a missing/unwritable trace must not prevent owned processes from being
+    ## terminated.
+    if cleanupTracePath.len == 0:
+      return
+    try:
+      let trace = open(cleanupTracePath, fmAppend)
+      trace.writeLine(event)
+      trace.close()
+    except CatchableError:
+      discard
+
+  var wrapperTerminationSignal {.global, volatile.}: Sig_atomic
+
+  proc recordWrapperTermination(sig: cint) {.noconv, gcsafe, raises: [].} =
+    ## The internal group supervisor must survive the graceful TERM phase so
+    ## its PID continues to reserve the process-group identity until the
+    ## parent sends SIGKILL. A custom handler (rather than SIG_IGN) is
+    ## deliberate: handled dispositions reset to default across exec, while an
+    ## ignored SIGTERM would be inherited by the actual test executable.
+    wrapperTerminationSignal = Sig_atomic(sig)
+
+  proc unblockWrapperSignals() =
+    var signals, oldSignals: Sigset
+    discard sigemptyset(signals)
+    discard sigaddset(signals, SIGINT)
+    discard sigaddset(signals, SIGTERM)
+    discard sigaddset(signals, SIGHUP)
+    discard pthread_sigmask(SIG_UNBLOCK, signals, oldSignals)
+
+  proc writeGroupStatus(path: string; exitCode: int) =
+    let pendingPath = path & ".pending"
+    writeFile(pendingPath, $exitCode & "\n")
+    moveFile(pendingPath, path)
+
+  proc processGroupWrapperMain(params: seq[string]): int =
+    ## Hidden, shell-free supervisor used only by the parent runner. It creates
+    ## the process group from inside the child, before the real test is
+    ## launched, so Linux's fork-based osproc path and macOS's posix_spawn path
+    ## have identical ownership semantics.
+    if params.len < 2:
+      stderr.writeLine(
+        "repro_test_runner: internal process-group wrapper arguments missing")
+      return 125
+    let statusPath = params[0]
+    let binary = params[1]
+    let binaryArgs =
+      if params.len > 2: params[2 .. ^1]
+      else: @[]
+
+    if setpgid(Pid(0), Pid(0)) != 0:
+      stderr.writeLine(
+        "repro_test_runner: internal process-group setup failed: " &
+        osErrorMsg(osLastError()))
+      return 125
+
+    signal(SIGINT, recordWrapperTermination)
+    signal(SIGTERM, recordWrapperTermination)
+    signal(SIGHUP, recordWrapperTermination)
+    unblockWrapperSignals()
+
+    # The parent consumes this private first line before returning the spawn to
+    # a worker. Since the real child is launched only afterwards, arbitrary
+    # test output can never race ahead of the readiness record.
+    stdout.writeLine(ProcessGroupReadyMarker)
+    stdout.flushFile()
+
+    var child: Process
+    var exitCode = 125
+    try:
+      child = startProcess(binary, args = binaryArgs,
+        options = {poParentStreams})
+      exitCode = child.waitForExit()
+      close(child)
+    except OSError as e:
+      stderr.writeLine(
+        "repro_test_runner: internal process-group child spawn failed: " &
+        e.msg)
+    except IOError as e:
+      stderr.writeLine(
+        "repro_test_runner: internal process-group child wait failed: " &
+        e.msg)
+
+    try:
+      writeGroupStatus(statusPath, exitCode)
+    except CatchableError as e:
+      stderr.writeLine(
+        "repro_test_runner: internal process-group status failed: " & e.msg)
+      return 125
+
+    # Stay alive as the group anchor even after the direct test child exits.
+    # Every completion path TERM/KILLs all exact-token descendants and this
+    # complete group before it reports the result. Keeping the anchor until
+    # SIGKILL prevents its PGID from being reused during that cleanup window.
+    while true:
+      sleep(GroupSupervisorPollIntervalMs)
+    exitCode
+
+  proc removeActiveProcessGroupUnlocked(processGroup: int) =
+    for i, current in activeProcessGroups:
+      if current.processGroup == processGroup:
+        activeProcessGroups.delete(i)
+        return
+
+  proc findActiveProcessGroupUnlocked(processGroup: int):
+      tuple[found: bool; group: ActiveProcessGroup] =
+    for current in activeProcessGroups:
+      if current.processGroup == processGroup:
+        return (true, current)
+
+  proc registerActiveProcessGroup(processGroup: int; ownerToken: string) =
+    acquire(activeProcessGroupsLock)
+    activeProcessGroups.add(ActiveProcessGroup(
+      processGroup: processGroup,
+      anchorPid: processGroup,
+      ownerToken: ownerToken))
+    release(activeProcessGroupsLock)
+
+  proc signalProcessGroup(active: ActiveProcessGroup; sig: cint) =
+    ## Revalidate the exact supervisor anchor still leads its recorded group
+    ## immediately before using a negative-PID signal; a dead/reused PID must
+    ## never redirect cleanup to an unrelated group.
+    ##
+    ## ``anchorReaped`` is monotonic state on the registered group object, not
+    ## per-cleanup-call state. A bounded owner-token verification can fail
+    ## after this invocation has already reaped the supervisor; a later final
+    ## reaper/interrupt retry must then remain token-only even if the kernel
+    ## has reused the old PID/PGID.
+    if active.isNil or active.anchorReaped:
+      return
+    appendCleanupTrace(
+      "group-signal-attempt group=" & $active.processGroup &
+      " signal=" & $sig)
+    if active.anchorPid > 0 and active.processGroup > 0 and
+        getpgid(Pid(active.anchorPid)) == Pid(active.processGroup):
+      discard kill(Pid(-active.processGroup), sig)
+
+  when defined(linux):
+    proc processHasOwnerToken(pid: int; ownerToken: string): bool =
+      if pid <= 0 or ownerToken.len == 0:
+        return false
+      try:
+        let environment = readFile("/proc" / $pid / "environ")
+        let expected = TestOwnerEnv & "=" & ownerToken
+        for entry in environment.split('\0'):
+          if entry == expected:
+            return true
+      except CatchableError:
+        discard
+
+    proc ownedProcessIds(ownerToken: string): seq[int] =
+      if ownerToken.len == 0 or not dirExists("/proc"):
+        return
+      for kind, path in walkDir("/proc"):
+        if kind != pcDir:
+          continue
+        var pid = 0
+        try:
+          pid = parseInt(path.lastPathPart)
+        except ValueError:
+          continue
+        if pid != getCurrentProcessId() and
+            processHasOwnerToken(pid, ownerToken):
+          result.add(pid)
+
+  elif defined(macosx):
+    const
+      ProcAllPids = 1'u32
+      PidGrowthMargin = 64
+
+    type DarwinPid = int32
+
+    proc procListPids(kind, kindInfo: uint32; buffer: pointer;
+                      bufferSize: cint): cint {.
+      importc: "proc_listpids", header: "<libproc.h>".}
+
+    {.emit: """
+      #include <stdlib.h>
+      #include <string.h>
+      #include <sys/sysctl.h>
+
+      static int repro_process_has_exact_env_entry(
+          int pid, const char *expected) {
+        int mib[3] = {CTL_KERN, KERN_PROCARGS2, pid};
+        size_t size = 0;
+        if (sysctl(mib, 3, NULL, &size, NULL, 0) != 0 || size == 0) {
+          return 0;
+        }
+        char *buffer = (char *)malloc(size);
+        if (buffer == NULL) return 0;
+        if (sysctl(mib, 3, buffer, &size, NULL, 0) != 0) {
+          free(buffer);
+          return 0;
+        }
+        if (size < sizeof(int)) {
+          free(buffer);
+          return 0;
+        }
+
+        int argc = 0;
+        memcpy(&argc, buffer, sizeof(argc));
+        if (argc < 0) {
+          free(buffer);
+          return 0;
+        }
+
+        /*
+         * KERN_PROCARGS2 is:
+         *
+         *   argc, executable path, NUL padding, argv[0..argc-1],
+         *   NUL padding, environment entries
+         *
+         * Do not scan the complete buffer. An unrelated process may carry a
+         * literal argv element that happens to equal our owner-token entry;
+         * only the environment segment establishes ownership.
+         */
+        size_t cursor = sizeof(int);
+        while (cursor < size && buffer[cursor] != '\0') ++cursor;
+        if (cursor >= size) {
+          free(buffer);
+          return 0;
+        }
+        while (cursor < size && buffer[cursor] == '\0') ++cursor;
+
+        for (int arg = 0; arg < argc; ++arg) {
+          if (cursor >= size) {
+            free(buffer);
+            return 0;
+          }
+          while (cursor < size && buffer[cursor] != '\0') ++cursor;
+          if (cursor >= size) {
+            free(buffer);
+            return 0;
+          }
+          ++cursor;
+        }
+        while (cursor < size && buffer[cursor] == '\0') ++cursor;
+
+        const size_t expected_len = strlen(expected);
+        int found = 0;
+        while (cursor < size) {
+          size_t end = cursor;
+          while (end < size && buffer[end] != '\0') ++end;
+          if (end - cursor == expected_len &&
+              memcmp(buffer + cursor, expected, expected_len) == 0) {
+            found = 1;
+            break;
+          }
+          if (end >= size) break;
+          cursor = end + 1;
+        }
+        free(buffer);
+        return found;
+      }
+    """.}
+
+    proc macProcessHasExactEnvEntry(pid: cint; expected: cstring): cint {.
+      importc: "repro_process_has_exact_env_entry", nodecl.}
+
+    proc processHasOwnerToken(pid: int; ownerToken: string): bool =
+      if pid <= 0 or ownerToken.len == 0:
+        return false
+      let expected = TestOwnerEnv & "=" & ownerToken
+      macProcessHasExactEnvEntry(cint(pid), expected.cstring) != 0
+
+    proc ownedProcessIds(ownerToken: string): seq[int] =
+      if ownerToken.len == 0:
+        return
+      let queriedBytes = procListPids(ProcAllPids, 0'u32, nil, 0.cint)
+      if queriedBytes <= 0:
+        return
+      let pidBytes = sizeof(DarwinPid)
+      var capacity =
+        (int(queriedBytes) + pidBytes - 1) div pidBytes + PidGrowthMargin
+      for _ in 0 ..< 3:
+        var pids = newSeq[DarwinPid](capacity)
+        let returnedBytes = procListPids(
+          ProcAllPids, 0'u32, addr pids[0], cint(pids.len * pidBytes))
+        if returnedBytes < 0:
+          return
+        if int(returnedBytes) < pids.len * pidBytes:
+          let returnedCount = int(returnedBytes) div pidBytes
+          for i in 0 ..< returnedCount:
+            let pid = int(pids[i])
+            if pid > 0 and pid != getCurrentProcessId() and
+                processHasOwnerToken(pid, ownerToken):
+              result.add(pid)
+          return
+        capacity *= 2
+
+  else:
+    proc processHasOwnerToken(pid: int; ownerToken: string): bool =
+      discard pid
+      discard ownerToken
+      false
+
+    proc ownedProcessIds(ownerToken: string): seq[int] =
+      discard ownerToken
+      @[]
+
+  proc signalOwnedProcesses(active: ActiveProcessGroup; sig: cint;
+                            exceptPid = 0) =
+    ## The exact per-test environment token survives fork/exec and setsid.
+    ## Revalidate every enumerated PID immediately before signalling it. The
+    ## enumeration-to-kill window can contain PID reuse; an unrelated
+    ## replacement PID cannot carry the private token.
+    let ownerPids = ownedProcessIds(active.ownerToken)
+    appendCleanupTrace(
+      "owner-snapshot group=" & $active.processGroup &
+      " signal=" & $sig & " count=" & $ownerPids.len)
+    for pid in ownerPids:
+      if pid != exceptPid and
+          processHasOwnerToken(pid, active.ownerToken):
+        appendCleanupTrace(
+          "owner-signal-attempt group=" & $active.processGroup &
+          " pid=" & $pid & " signal=" & $sig)
+        discard kill(Pid(pid), sig)
+
+  proc ownedProcessesRemain(ownerToken: string; exceptPid = 0): bool =
+    for pid in ownedProcessIds(ownerToken):
+      if pid != exceptPid:
+        return true
+
+  proc killAndVerifyOwnedProcesses(
+      activeGroups: openArray[ActiveProcessGroup]): bool =
+    ## SIGKILL closes the graceful phase, but a single process snapshot is not
+    ## a cleanup barrier: a detached token-bearing descendant can fork between
+    ## enumeration and signal delivery. Re-enumerate, revalidate, and retry for
+    ## a bounded interval. Success means an exact post-KILL enumeration found no
+    ## owner token; callers must not unregister or publish PASS otherwise.
+    ##
+    ## Group and token cleanup are deliberately separate phases. The recorded
+    ## process group is signalled exactly once while its unreaped supervisor
+    ## still reserves the PGID. Only after every supervisor has been reaped do
+    ## we enter the retryable token-owner phase. It is therefore structurally
+    ## impossible for a later retry to target a reused anchor PID/PGID.
+    let deadline = epochTime() + PostKillVerificationSec.float
+    # This is the only process-group signal in the function. No control-flow
+    # edge from the token-owner retry phase below returns here.
+    for active in activeGroups:
+      signalProcessGroup(active, SIGKILL)
+
+    # Reap every exact supervisor before allowing the cleanup to proceed using
+    # only token ownership. A setsid/poDaemon descendant can intentionally
+    # remain alive here; it cannot reserve or authenticate the recorded PGID.
+    while true:
+      var anchorsRemain = false
+      for active in activeGroups:
+        if not active.anchorReaped:
+          var status: cint
+          while true:
+            let reaped = waitpid(Pid(active.anchorPid), status, WNOHANG)
+            if reaped == Pid(active.anchorPid):
+              # Persist retirement on the exact registry object before any
+              # retry can release/reacquire the registry lock. From this point
+              # onward no group-signal entry point may target this PID/PGID.
+              active.anchorReaped = true
+              appendCleanupTrace(
+                "anchor-reaped group=" & $active.processGroup)
+              break
+            if reaped < 0 and errno == EINTR:
+              continue
+            if reaped < 0 and errno == ECHILD:
+              # ECHILD means this runner no longer owns a waitable child at
+              # the recorded PID. Treat the group identity as permanently
+              # retired: signalling it can only be less safe than continuing
+              # with exact-token ownership.
+              active.anchorReaped = true
+              appendCleanupTrace(
+                "anchor-already-reaped group=" & $active.processGroup)
+            break
+        if not active.anchorReaped:
+          anchorsRemain = true
+      if not anchorsRemain:
+        break
+      if epochTime() >= deadline:
+        return false
+      sleep(GroupSupervisorPollIntervalMs)
+
+    # Detached exact-token descendants are killed and verified only after all
+    # anchors are reaped. Every retry is PID-safe: enumeration and immediate
+    # pre-signal revalidation both require the exact private token.
+    while true:
+      var ownersRemain = false
+      for active in activeGroups:
+        if ownedProcessesRemain(active.ownerToken,
+                                exceptPid = active.anchorPid):
+          ownersRemain = true
+          break
+      if not ownersRemain:
+        return true
+      for active in activeGroups:
+        signalOwnedProcesses(active, SIGKILL,
+          exceptPid = active.anchorPid)
+      if epochTime() >= deadline:
+        return false
+      sleep(TimeoutPollIntervalMs)
+
+  proc terminateProcessGroupLocked(active: ActiveProcessGroup): bool =
+    ## Caller holds activeProcessGroupsLock, which keeps this registered group
+    ## anchored until escalation completes and prevents concurrent normal
+    ## release from making the PGID available for reuse. The environment-token
+    ## pass also reaches test-owned grandchildren that deliberately escaped the
+    ## group with setsid/poDaemon.
+    signalProcessGroup(active, SIGTERM)
+    signalOwnedProcesses(active, SIGTERM,
+      exceptPid = active.anchorPid)
+    let killDeadline = epochTime() + TimeoutKillGraceSec.float
+    while ownedProcessesRemain(active.ownerToken,
+                               exceptPid = active.anchorPid) and
+        epochTime() < killDeadline:
+      sleep(TimeoutPollIntervalMs)
+    killAndVerifyOwnedProcesses([active])
+
+  proc terminateOwnedProcessGroup(processGroup: int): bool =
+    acquire(activeProcessGroupsLock)
+    let active = findActiveProcessGroupUnlocked(processGroup)
+    if active.found:
+      result = terminateProcessGroupLocked(active.group)
+    else:
+      result = true
+    release(activeProcessGroupsLock)
+
+  proc terminateAllActiveProcessGroups(): bool =
+    ## Holding the registry serializes cleanup against concurrent release.
+    ## Unreaped entries retain a live or reserved supervisor anchor through
+    ## process-group signalling and reap; retired entries are token-only, and
+    ## signalProcessGroup is a no-op for them.
+    acquire(activeProcessGroupsLock)
+    if activeProcessGroups.len == 0:
+      release(activeProcessGroupsLock)
+      return true
+    for active in activeProcessGroups:
+      signalProcessGroup(active, SIGTERM)
+      signalOwnedProcesses(active, SIGTERM,
+        exceptPid = active.anchorPid)
+    let killDeadline = epochTime() + TimeoutKillGraceSec.float
+    var descendantsRemain = true
+    while descendantsRemain and epochTime() < killDeadline:
+      descendantsRemain = false
+      for active in activeProcessGroups:
+        if ownedProcessesRemain(active.ownerToken,
+                                exceptPid = active.anchorPid):
+          descendantsRemain = true
+          break
+      if descendantsRemain:
+        sleep(TimeoutPollIntervalMs)
+    result = killAndVerifyOwnedProcesses(activeProcessGroups)
+    release(activeProcessGroupsLock)
+
+  proc reapResidualActiveProcessGroups(): bool =
+    ## Worker joins are the normal reap barrier. This final invariant is a
+    ## fail-closed backstop: a signal exit is never allowed to return while a
+    ## registered supervisor remains, even if a worker aborted unexpectedly.
+    ## Workers are already joined when this runs, so the registry cannot gain
+    ## new entries. Retry any incomplete worker/signal cleanup, but retain the
+    ## anchor registrations and refuse summary emission if an exact owner still
+    ## survives the bounded verification interval.
+    if not terminateAllActiveProcessGroups():
+      return false
+    acquire(activeProcessGroupsLock)
+    activeProcessGroups.setLen(0)
+    release(activeProcessGroupsLock)
+    true
+
+  proc interruptWaiter(signalSet: ptr Sigset) {.thread.} =
+    var received: cint
+    if sigwait(signalSet[], received) == 0:
+      interruptedSignal.store(int(received), moRelease)
+      {.cast(gcsafe).}:
+        # The registry is protected by activeProcessGroupsLock; the cast only
+        # tells Nim's thread-effect checker about that explicit synchronization.
+        discard terminateAllActiveProcessGroups()
+
+  proc startInterruptWaiter(): Thread[ptr Sigset] =
+    ## Blocking before worker creation makes every worker inherit the mask.
+    ## A dedicated sigwait thread can then take ordinary locks and perform the
+    ## bounded two-phase cleanup without running non-signal-safe Nim code from
+    ## an asynchronous signal handler.
+    var oldSignals: Sigset
+    discard sigemptyset(interruptSignalSet)
+    discard sigaddset(interruptSignalSet, SIGINT)
+    discard sigaddset(interruptSignalSet, SIGTERM)
+    discard sigaddset(interruptSignalSet, SIGHUP)
+    if pthread_sigmask(SIG_BLOCK, interruptSignalSet, oldSignals) != 0:
+      raise newException(OSError,
+        "repro_test_runner: could not block interrupt signals")
+    createThread(result, interruptWaiter, addr interruptSignalSet)
+
+  proc newProcessGroupPaths():
+      tuple[statusPath, ownerToken: string] =
+    if processGroupStateDir.len == 0:
+      raise newException(IOError,
+        "repro_test_runner: process-group state directory is not initialized")
+    inc nextProcessGroupToken
+    let token = $getCurrentProcessId() & "-" & $nextProcessGroupToken
+    result.statusPath = processGroupStateDir / (token & ".status")
+    result.ownerToken = processGroupStateDir.lastPathPart & "-" & token
+
+  proc cleanupProcessGroupPaths(testProcess: TestProcess) =
+    for path in [
+      testProcess.statusPath,
+      testProcess.statusPath & ".pending",
+    ]:
+      if fileExists(path):
+        try:
+          removeFile(path)
+        except CatchableError:
+          discard
+
+  proc cleanupProcessGroupStateDir() =
+    if processGroupStateDir.len > 0 and dirExists(processGroupStateDir):
+      try:
+        removeDir(processGroupStateDir)
+      except CatchableError:
+        discard
+    processGroupStateDir = ""
+
+  proc finishInterruptedTestProcess(testProcess: TestProcess;
+                                    output: var string): bool =
+    ## The sigwait thread has already completed group-wide TERM/KILL and
+    ## synchronously reaped the supervisor before it releases
+    ## activeProcessGroupsLock. Remove the registry entry only after the same
+    ## exact-owner check succeeds.
+    acquire(activeProcessGroupsLock)
+    try:
+      if findActiveProcessGroupUnlocked(testProcess.processGroup).found:
+        if not ownedProcessesRemain(testProcess.ownerToken,
+                                    exceptPid = testProcess.processGroup):
+          removeActiveProcessGroupUnlocked(testProcess.processGroup)
+          result = true
+    finally:
+      release(activeProcessGroupsLock)
+    if result:
+      finalDrainNonBlocking(testProcess.process, output)
+      close(testProcess.process)
+      cleanupProcessGroupPaths(testProcess)
+    else:
+      output.add(
+        "\nrepro_test_runner: interrupt cleanup left exact owner-token " &
+        "processes; refusing to unregister the process group.\n")
+
+proc spawnedProcess(binary: string; args: openArray[string];
+                    env: StringTableRef): TestProcess =
+  when defined(posix):
+    if interruptedSignal.load(moAcquire) != 0:
+      raise newException(IOError,
+        "runner interrupted before test process spawn")
+  acquire(spawnLock)
+  try:
+    when defined(posix):
+      let paths = newProcessGroupPaths()
+      let wrapperArgs =
+        @[ProcessGroupWrapperFlag, paths.statusPath, binary] & @args
+      env[TestOwnerEnv] = paths.ownerToken
+      let process = startProcess(
+        getAppFilename(), args = wrapperArgs, env = env,
+        options = {poStdErrToStdOut})
+      var readyLine = ""
+      if not process.outputStream.readLine(readyLine) or
+          readyLine != ProcessGroupReadyMarker:
+        try:
+          process.kill()
+          discard process.waitForExit()
+        except CatchableError:
+          discard
+        close(process)
+        raise newException(IOError,
+          "test process-group supervisor did not become ready: " & readyLine)
+      let processGroup = process.processID
+      if processGroup <= 0 or
+          getpgid(Pid(processGroup)) != Pid(processGroup):
+        try:
+          process.kill()
+          discard process.waitForExit()
+        except CatchableError:
+          discard
+        close(process)
+        raise newException(IOError,
+          "test process-group supervisor did not own its expected group")
+      result = TestProcess(
+        process: process,
+        processGroup: processGroup,
+        ownerToken: paths.ownerToken,
+        statusPath: paths.statusPath)
+      registerActiveProcessGroup(processGroup, paths.ownerToken)
+    else:
+      result.process = startProcess(
+        binary, args = args, env = env,
+        options = {poStdErrToStdOut, poUsePath})
+  finally:
+    release(spawnLock)
+
+  when defined(posix):
+    # Close the registration race with an interrupt that acquired the active
+    # registry while this spawn was establishing its child-side group.
+    if interruptedSignal.load(moAcquire) != 0:
+      discard terminateOwnedProcessGroup(result.processGroup)
 
 const AbsoluteTimeoutMultiplier = 4
   ## The per-test ``--test-timeout`` is interpreted as an *idle*
@@ -290,11 +971,51 @@ const AbsoluteTimeoutMultiplier = 4
   ## this caps any single test at 40 min, well inside the 4 h runner-
   ## phase backstop.
 
-proc drainAndWait(p: Process): tuple[output: string; exitCode: int] =
+proc drainAndWait(testProcess: TestProcess):
+    tuple[output: string; exitCode: int] =
   ## Drain the merged stdout/stderr stream to EOF, then collect the
   ## child's exit code and free its handles. Reading the stream to EOF
   ## first guarantees ``waitForExit`` won't deadlock on a child that
   ## blocks waiting for the parent to consume its pipe buffer.
+  let p = testProcess.process
+  when defined(posix):
+    # The POSIX group supervisor remains alive after the direct test child
+    # exits, so completion is reported through its private status file rather
+    # than pipe EOF. This polling path is also used when timeouts are disabled.
+    var groupOutput = ""
+    while not fileExists(testProcess.statusPath):
+      if interruptedSignal.load(moAcquire) != 0:
+        groupOutput.add(
+          "\nrepro_test_runner: interrupted; owned process group killed.\n")
+        discard finishInterruptedTestProcess(testProcess, groupOutput)
+        return (groupOutput, TimeoutExitCode)
+      discard drainAvailable(p, groupOutput)
+      sleep(GroupSupervisorPollIntervalMs)
+    let groupExitCode = parseInt(readFile(testProcess.statusPath).strip())
+    finalDrainNonBlocking(p, groupOutput)
+
+    acquire(activeProcessGroupsLock)
+    var cleanupComplete = true
+    try:
+      let active = findActiveProcessGroupUnlocked(testProcess.processGroup)
+      if active.found:
+        # The direct test is complete, but any group member or setsid/poDaemon
+        # sidecar carrying this test's private token is still runner-owned.
+        # Tear those down before reporting completion to the next test.
+        cleanupComplete = terminateProcessGroupLocked(active.group)
+      if cleanupComplete:
+        removeActiveProcessGroupUnlocked(testProcess.processGroup)
+    finally:
+      release(activeProcessGroupsLock)
+    if not cleanupComplete:
+      groupOutput.add(
+        "\nrepro_test_runner: exact owner-token processes survived " &
+        "bounded cleanup; refusing to unregister or report PASS.\n")
+      raise newException(IOError, groupOutput)
+    close(p)
+    cleanupProcessGroupPaths(testProcess)
+    return (groupOutput, groupExitCode)
+
   var output = ""
   let outp = p.outputStream
   var line = newStringOfCap(120)
@@ -424,19 +1145,12 @@ proc finalDrainNonBlocking(p: Process; output: var string) =
   ## waiting for the pipe's EOF.
   ##
   ## Why this replaces the EOF-blocking ``drainToEofBounded`` at the
-  ## post-exit sites: a ``repro build`` / ``repro develop`` / ``repro
-  ## watch`` test legitimately auto-starts a long-lived daemon
-  ## (``repro-daemon`` / ``runquotad`` / dev-session supervisor). Those
-  ## daemons are *meant* to outlive the test, and although they redirect
-  ## their own stdio to a log/devnull, a transiently-inherited copy of the
-  ## write end of *this* pipe can keep the pipe from reaching EOF for the
-  ## daemon's whole lifetime. Blocking for EOF here (even bounded to 10s)
-  ## then stalls the runner for the full grace window and, on an
-  ## oversubscribed shared box, that 10s stall is itself surfaced as the
-  ## ``gave up draining stdout`` note that turned a cleanly-passing test
-  ## into a confusing FAIL-shaped record. A test that has already produced
-  ## its exit code is done; we must not penalise it for a detached
-  ## grandchild still holding an inherited pipe.
+  ## post-exit sites: a failed ``repro build`` / ``repro develop`` /
+  ## ``repro watch`` test can leave a daemon holding a transiently-inherited
+  ## copy of this pipe's write end. Blocking for EOF here (even bounded to
+  ## 10s) stalls the runner before the ownership cleanup can terminate that
+  ## daemon. A test that has produced its exit code is ready for cleanup; the
+  ## final drain only captures bytes already in flight.
   ##
   ## The D6 silent-hang guard is unaffected: that guard fires *before* we
   ## ever reach a final drain — a test that goes silent trips the idle
@@ -454,8 +1168,9 @@ proc finalDrainNonBlocking(p: Process; output: var string) =
     # If bytes are still flowing we keep looping the fixed number of
     # passes; we never extend the loop based on EOF.
 
-proc drainAndWaitWithTimeout(p: Process; timeoutSec: int):
-    tuple[output: string; exitCode: int; timedOut: bool] =
+proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
+    tuple[output: string; exitCode: int; timedOut: bool;
+          timeoutDescription: string] =
   ## Deadline-aware variant of ``drainAndWait``. When ``timeoutSec <= 0``
   ## the call delegates to ``drainAndWait`` (preserving M3 behaviour).
   ##
@@ -491,29 +1206,64 @@ proc drainAndWaitWithTimeout(p: Process; timeoutSec: int):
   ## drain, idle clock never resets) — acceptable since Windows is not a
   ## supported runner host today.
   if timeoutSec <= 0:
-    let (output, exitCode) = drainAndWait(p)
-    return (output, exitCode, false)
+    let (output, exitCode) = drainAndWait(testProcess)
+    return (output, exitCode, false, "")
 
+  let p = testProcess.process
   var output = ""
   let start = epochTime()
   var lastProgress = start
   let absoluteDeadlineSec = timeoutSec.float * AbsoluteTimeoutMultiplier.float
   var timedOut = false
+  var timeoutDescription = ""
   while true:
-    let code = p.peekExitCode()
-    if code != -1:
-      # Child exited on its own. The test produced its own exit code, so
-      # it is DONE — collect whatever trailing output is buffered with a
-      # quick non-blocking drain and walk away. We deliberately do NOT
-      # block waiting for the pipe's EOF: a ``repro build``/``develop``/
-      # ``watch`` test legitimately leaves a detached daemon alive, and
-      # that daemon can hold a copy of this pipe's write end open for its
-      # whole lifetime. Blocking for EOF here would stall the runner for
-      # the grace window and falsely decorate a cleanly-passing test with
-      # a "gave up draining stdout" note (the observed contention FAIL).
-      finalDrainNonBlocking(p, output)
-      close(p)
-      return (output, code, false)
+    when defined(posix):
+      if interruptedSignal.load(moAcquire) != 0:
+        output.add(
+          "\nrepro_test_runner: interrupted; owned process group killed.\n")
+        discard finishInterruptedTestProcess(testProcess, output)
+        return (output, TimeoutExitCode, true, "INTERRUPTED")
+    when defined(posix):
+      var code = -1
+      var childComplete = false
+      if fileExists(testProcess.statusPath):
+        try:
+          code = parseInt(readFile(testProcess.statusPath).strip())
+          childComplete = true
+        except ValueError, IOError:
+          discard
+    else:
+      let code = p.peekExitCode()
+      let childComplete = code != -1
+    if childComplete:
+      # Child exited on its own. Collect whatever trailing output is buffered
+      # without waiting for pipe EOF, then terminate every same-group or
+      # exact-token sidecar before reporting the result. A detached child can
+      # keep the pipe open until that ownership cleanup runs.
+      when defined(posix):
+        finalDrainNonBlocking(p, output)
+        acquire(activeProcessGroupsLock)
+        var cleanupComplete = true
+        try:
+          let active =
+            findActiveProcessGroupUnlocked(testProcess.processGroup)
+          if active.found:
+            cleanupComplete = terminateProcessGroupLocked(active.group)
+          if cleanupComplete:
+            removeActiveProcessGroupUnlocked(testProcess.processGroup)
+        finally:
+          release(activeProcessGroupsLock)
+        if not cleanupComplete:
+          output.add(
+            "\nrepro_test_runner: exact owner-token processes survived " &
+            "bounded cleanup; refusing to unregister or report PASS.\n")
+          raise newException(IOError, output)
+        close(p)
+        cleanupProcessGroupPaths(testProcess)
+      else:
+        finalDrainNonBlocking(p, output)
+        close(p)
+      return (output, code, false, "")
     # Drain whatever the live child has emitted since the last poll.
     # Non-blocking, so this never parks on a silent test. Any new bytes
     # are forward progress and reset the idle clock.
@@ -524,6 +1274,8 @@ proc drainAndWaitWithTimeout(p: Process; timeoutSec: int):
       output.add("\nrepro_test_runner: no output for " & $timeoutSec &
         "s (idle deadline); treating as hung.\n")
       timedOut = true
+      timeoutDescription =
+        "IDLE TIMEOUT after " & $timeoutSec & "s without output"
       break
     if (now - start) > absoluteDeadlineSec:
       output.add("\nrepro_test_runner: exceeded absolute ceiling of " &
@@ -531,39 +1283,63 @@ proc drainAndWaitWithTimeout(p: Process; timeoutSec: int):
         "x the idle deadline) while still producing output; treating " &
         "as stuck.\n")
       timedOut = true
+      timeoutDescription =
+        "ABSOLUTE TIMEOUT after " & $absoluteDeadlineSec.int & "s"
       break
     sleep(TimeoutPollIntervalMs)
 
-  # Deadline expired. SIGTERM, grace, SIGKILL.
-  try:
-    p.terminate()
-  except OSError, Exception:
-    discard
-  let killDeadline = epochTime() + TimeoutKillGraceSec.float
-  while epochTime() < killDeadline:
-    if p.peekExitCode() != -1:
-      break
-    sleep(TimeoutPollIntervalMs)
-  if p.peekExitCode() == -1:
+  # Deadline expired. POSIX keeps the supervisor anchor registered and alive
+  # through TERM -> grace -> KILL; other platforms retain leader cleanup.
+  when defined(posix):
+    acquire(activeProcessGroupsLock)
+    var cleanupComplete = true
     try:
-      p.kill()
+      let active = findActiveProcessGroupUnlocked(testProcess.processGroup)
+      if active.found:
+        cleanupComplete = terminateProcessGroupLocked(active.group)
+      if cleanupComplete:
+        removeActiveProcessGroupUnlocked(testProcess.processGroup)
+    finally:
+      release(activeProcessGroupsLock)
+    if not cleanupComplete:
+      output.add(
+        "\nrepro_test_runner: exact owner-token processes survived " &
+        "bounded cleanup; refusing to unregister or report a terminal " &
+        "test result.\n")
+      raise newException(IOError, output)
+  else:
+    try:
+      p.terminate()
     except OSError, Exception:
       discard
-    # Block on waitForExit only after the SIGKILL has been delivered;
-    # the kernel must reap the zombie before peekExitCode returns a
-    # real code, but the wait window is bounded by the kill itself.
-    discard p.waitForExit()
+    let killDeadline = epochTime() + TimeoutKillGraceSec.float
+    while epochTime() < killDeadline:
+      if p.peekExitCode() != -1:
+        break
+      sleep(TimeoutPollIntervalMs)
+    if p.peekExitCode() == -1:
+      try:
+        p.kill()
+      except OSError, Exception:
+        discard
+      # Block on waitForExit only after the SIGKILL has been delivered;
+      # the kernel must reap the zombie before peekExitCode returns a
+      # real code, but the wait window is bounded by the kill itself.
+      discard p.waitForExit()
   # The child has been killed and reaped; collect any trailing buffered
-  # output without blocking for EOF (same reasoning as the clean-exit
-  # path: a leaked/detached daemon may hold an inherited copy of this
-  # pipe's write end indefinitely, and we must not stall the runner on
-  # it). The timeout itself — already recorded in ``timedOut`` — is what
-  # makes this a FAIL; the drain only gathers diagnostics.
+  # output without blocking for EOF. Exact-token cleanup above has already
+  # killed detached descendants, but their inherited descriptors can still be
+  # closing while the pipe is drained. The timeout itself — already recorded
+  # in ``timedOut`` — is what makes this a FAIL; the drain only gathers
+  # diagnostics.
   finalDrainNonBlocking(p, output)
   close(p)
-  result = (output, TimeoutExitCode, timedOut)
+  when defined(posix):
+    cleanupProcessGroupPaths(testProcess)
+  result = (output, TimeoutExitCode, timedOut, timeoutDescription)
 
 proc runWholeBinary(tc: TestCase; resultsDir: string;
+                    baseEnv: seq[tuple[key, value: string]];
                     testTimeoutSec: int): TestResult =
   result.testCase = tc
   result.status = tsFail
@@ -576,14 +1352,17 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
   # child runs, so the test is genuinely "did not produce a result"
   # — failing the test is the right exit-code behaviour for the run.
   try:
-    let p = spawnedProcess(tc.binary, args = [], env = nil)
-    let (output, exitCode, timedOut) =
+    var childEnv = newStringTable(modeCaseSensitive)
+    for (k, v) in baseEnv:
+      childEnv[k] = v
+    let p = spawnedProcess(tc.binary, args = [], env = childEnv)
+    let (output, exitCode, timedOut, timeoutDescription) =
       drainAndWaitWithTimeout(p, testTimeoutSec)
     if timedOut:
       result.status = tsFail
       result.stdout =
-        "repro_test_runner: TIMEOUT after " & $testTimeoutSec &
-        "s; SIGKILLed\n" & output
+        "repro_test_runner: " & timeoutDescription &
+        "; SIGKILLed\n" & output
     else:
       result.stdout = output
       case exitCode
@@ -628,10 +1407,11 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   var exitCode = 1
   var spawnFailed = false
   var timedOut = false
+  var timeoutDescription = ""
   try:
     let p = spawnedProcess(
       tc.binary, args = ["--run", tc.qualifiedName], env = childEnv)
-    (output, exitCode, timedOut) =
+    (output, exitCode, timedOut, timeoutDescription) =
       drainAndWaitWithTimeout(p, testTimeoutSec)
   except OSError as e:
     spawnFailed = true
@@ -642,8 +1422,8 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   result.durationMs = int((epochTime() - t0) * 1000)
   if timedOut:
     result.stdout =
-      "repro_test_runner: TIMEOUT after " & $testTimeoutSec &
-      "s; SIGKILLed\n" & output
+      "repro_test_runner: " & timeoutDescription &
+      "; SIGKILLed\n" & output
   else:
     result.stdout = output
   if spawnFailed:
@@ -666,6 +1446,9 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
 
 proc nextCase(queue: ptr Queue; failFast: bool;
               out_case: var TestCase): bool =
+  when defined(posix):
+    if interruptedSignal.load(moAcquire) != 0:
+      return false
   acquire(queue.lock)
   defer: release(queue.lock)
   if failFast and queue.failFastTriggered:
@@ -710,7 +1493,8 @@ proc workerLoop(args: WorkerArgs) =
         res = runOneProtocol(tc, args.resultsDir, args.baseEnv[],
           args.testTimeoutSec)
       else:
-        res = runWholeBinary(tc, args.resultsDir, args.testTimeoutSec)
+        res = runWholeBinary(tc, args.resultsDir, args.baseEnv[],
+          args.testTimeoutSec)
     except CatchableError as e:
       res = TestResult(
         testCase: tc,
@@ -749,7 +1533,7 @@ proc writeSummary(summaryPath: string; results: seq[TestResult];
     node["result_file"] = %r.resultFile
     # Include the captured merged stdout/stderr for FAIL entries so
     # the build report carries the failure context (e.g. D6's
-    # ``TIMEOUT after Ns; SIGKILLed`` prefix). PASS entries are kept
+    # ``IDLE TIMEOUT after Ns without output; SIGKILLed`` prefix). PASS entries are kept
     # lightweight — their stdout would otherwise blow up the summary
     # file on a 500-test sweep.
     if r.status != tsPass and r.stdout.len > 0:
@@ -836,7 +1620,8 @@ proc parseArgs(): RunnerOpts =
         echo "  --results-dir DIR   per-test JSON result file dir"
         echo "  --filter GLOB       only run binaries whose stem matches"
         echo "  --quiet             suppress per-test progress lines"
-        echo "  --test-timeout=N    per-test timeout in seconds (0=off)"
+        echo "  --test-timeout=N    per-test idle timeout; output resets it; " &
+          "hard ceiling 4xN (seconds, 0=off)"
         quit(0)
       else:
         stderr.writeLine "repro_test_runner: unknown option --" & p.key
@@ -847,6 +1632,11 @@ proc parseArgs(): RunnerOpts =
       quit(2)
   if result.threads <= 0:
     result.threads = 1
+  # Child tests routinely invoke ``git -C`` or change their process working
+  # directory. Keep both GIT_CONFIG_GLOBAL and protocol result-file paths
+  # stable across those operations by resolving the shared results directory
+  # once, before any child environment is constructed.
+  result.resultsDir = absolutePath(result.resultsDir)
 
 proc matchesFilter(stem: string; filters: seq[string]): bool =
   if filters.len == 0:
@@ -856,10 +1646,139 @@ proc matchesFilter(stem: string; filters: seq[string]): bool =
       return true
   false
 
+proc requiresExclusiveExecution(tc: TestCase): bool =
+  tc.binaryStem in ExclusiveStems
+
+proc exclusiveRank(tc: TestCase): int =
+  ## Latency-sensitive microbenchmarks must run before the heavyweight
+  ## self-hosted build cluster. They are exclusive because concurrent load would
+  ## pollute the measurement; running them after the build cluster can also
+  ## inherit unrelated post-build host settling and daemon cleanup noise.
+  if tc.binaryStem == "t_e2e_shell_hook_noop_latency":
+    return 0
+  result = 10
+
+proc cmpExclusiveTestCase(a, b: TestCase): int =
+  result = cmp(exclusiveRank(a), exclusiveRank(b))
+  if result == 0:
+    result = cmp(a.binaryStem, b.binaryStem)
+
 # Worker threads need plain pointers, not closures, so we use a top-
 # level thread proc that receives a ``WorkerArgs`` value.
 proc workerMain(args: WorkerArgs) {.thread.} =
-  workerLoop(args)
+  {.cast(gcsafe).}:
+    # Test-process registration is synchronized explicitly by
+    # activeProcessGroupsLock on POSIX.
+    workerLoop(args)
+
+proc findNixStoreLibDir(nameFragment: string; libraryNames: openArray[string]): string =
+  ## Return the first already-realized /nix/store library directory whose
+  ## basename contains `nameFragment` and that actually contains one of
+  ## `libraryNames`. This deliberately avoids picking split `-dev`/`-bin`
+  ## outputs that match the package name but cannot satisfy dyld/ld.so.
+  if not dirExists("/nix/store"):
+    return ""
+  for kind, path in walkDir("/nix/store"):
+    if kind != pcDir:
+      continue
+    if path.lastPathPart.contains(nameFragment):
+      let libDir = path / "lib"
+      if not dirExists(libDir):
+        continue
+      for libraryName in libraryNames:
+        if fileExists(libDir / libraryName):
+          return libDir
+  ""
+
+proc findLibDirOnEnvPath(pathEnv: string; libraryNames: openArray[string]): string =
+  ## Prefer the active dev-shell loader path before scanning /nix/store.
+  ## Long-lived workstations often retain older zstd closures; choosing a
+  ## random store match can make a newer zstd binary load an older libzstd.
+  for dir in pathEnv.split($PathSep):
+    if dir.len == 0 or not dirExists(dir):
+      continue
+    for libraryName in libraryNames:
+      if fileExists(dir / libraryName):
+        return dir
+  ""
+
+proc prependEnvPath(name: string; entries: openArray[string]) =
+  var prefix: seq[string]
+  for entry in entries:
+    if entry.len > 0 and dirExists(entry):
+      prefix.add(entry)
+  if prefix.len == 0:
+    return
+  let existing = getEnv(name)
+  let sep = $PathSep
+  if existing.len > 0:
+    putEnv(name, prefix.join(sep) & sep & existing)
+  else:
+    putEnv(name, prefix.join(sep))
+
+proc ensureNixRuntimeLibraryEnv() =
+  let clingoLib =
+    if getEnv("CLINGO_LIB").len > 0: getEnv("CLINGO_LIB")
+    else:
+      let fromEnv = findLibDirOnEnvPath(getEnv("LD_LIBRARY_PATH") & $PathSep &
+        getEnv("DYLD_LIBRARY_PATH") & $PathSep &
+        getEnv("DYLD_FALLBACK_LIBRARY_PATH"),
+        ["libclingo.dylib", "libclingo.so"])
+      if fromEnv.len > 0: fromEnv
+      else: findNixStoreLibDir("clingo-5.", ["libclingo.dylib", "libclingo.so"])
+  let zstdLib =
+    if getEnv("ZSTD_LIB").len > 0: getEnv("ZSTD_LIB")
+    else:
+      let fromEnv = findLibDirOnEnvPath(getEnv("LD_LIBRARY_PATH") & $PathSep &
+        getEnv("DYLD_LIBRARY_PATH") & $PathSep &
+        getEnv("DYLD_FALLBACK_LIBRARY_PATH"),
+        ["libzstd.dylib", "libzstd.so.1", "libzstd.so"])
+      if fromEnv.len > 0: fromEnv
+      else: findNixStoreLibDir("zstd-1.", ["libzstd.dylib", "libzstd.so.1", "libzstd.so"])
+  if clingoLib.len > 0:
+    putEnv("CLINGO_LIB", clingoLib)
+  if zstdLib.len > 0:
+    putEnv("ZSTD_LIB", zstdLib)
+  when defined(posix):
+    prependEnvPath("DYLD_LIBRARY_PATH", [clingoLib, zstdLib])
+    prependEnvPath("DYLD_FALLBACK_LIBRARY_PATH", [clingoLib, zstdLib])
+    prependEnvPath("LD_LIBRARY_PATH", [clingoLib, zstdLib])
+
+proc putEnvIfUnsetDir(name, path: string) =
+  if getEnv(name).len == 0 and dirExists(path):
+    putEnv(name, path)
+
+proc findNixStoreSourceDir(namePart, marker: string): string =
+  when defined(posix):
+    let storeRoot = "/nix/store"
+    if dirExists(storeRoot):
+      for kind, path in walkDir(storeRoot):
+        if kind == pcDir and namePart in path.lastPathPart and
+            fileExists(path / marker):
+          return path
+  ""
+
+proc ensureWorkspaceSourceEnv(repoRoot: string) =
+  ## Nested repro builds compile provider/interface helpers from scratch
+  ## projects, often against a /nix/store source snapshot. In that context
+  ## config.nims cannot discover developer sibling checkouts via "../...".
+  ## Seed the same source-package env vars the dev shell normally carries so
+  ## child tests can compile out-of-tree providers without depending on the
+  ## runner's launch shell.
+  let parent = repoRoot.parentDir
+  putEnvIfUnsetDir("REPROBUILD_SOURCE_ROOT", repoRoot)
+  putEnvIfUnsetDir("REPRO_TEST_ADAPTERS_SRC",
+    parent / "reprobuild-test-adapters" / "src")
+  putEnvIfUnsetDir("REPRO_CT_TEST_RUNNER_SRC",
+    parent / "reprobuild-ct-test-runner")
+  putEnvIfUnsetDir("CODETRACER_SRC", parent / "codetracer" / "src")
+  putEnvIfUnsetDir("STACKABLE_HOOKS_SRC",
+    parent / "nim-stackable-hooks" / "src")
+  putEnvIfUnsetDir("BEARSSL_SRC", parent / "nim-bearssl")
+  if getEnv("BEARSSL_SRC").len == 0:
+    let bearssl = findNixStoreSourceDir("nim-bearssl-", "bearssl.nim")
+    if bearssl.len > 0:
+      putEnv("BEARSSL_SRC", bearssl)
 
 proc main() =
   let opts = parseArgs()
@@ -970,13 +1889,78 @@ proc main() =
     putEnv("GIT_CONFIG_GLOBAL", hermeticGitConfigFile)
     putEnv("GIT_CONFIG_NOSYSTEM", "1")
 
+  ensureNixRuntimeLibraryEnv()
+  ensureWorkspaceSourceEnv(cwd)
+
+  var exclusiveItems: seq[TestCase] = @[]
+  var parallelItems: seq[TestCase] = @[]
+  for tc in queue.items:
+    if requiresExclusiveExecution(tc):
+      exclusiveItems.add(tc)
+    else:
+      parallelItems.add(tc)
+  exclusiveItems.sort(cmpExclusiveTestCase)
+  queue.items = parallelItems
+
+  if exclusiveItems.len > 0:
+    stderr.writeLine "repro_test_runner: " & $exclusiveItems.len &
+      " cases require exclusive execution"
+
   # Snapshot the process environment exactly once, on the main thread,
   # before any worker is created. From this point on no code in this
   # process touches the global ``environ`` — workers compose per-child
   # env tables by cloning this seq and overriding ``NIMTEST_RESULT_FILE``.
+  when defined(posix):
+    cleanupTracePath = getEnv(CleanupTraceEnv)
   var baseEnv: seq[tuple[key, value: string]] = @[]
   for (k, v) in envPairs():
-    baseEnv.add((k, v))
+    when defined(posix):
+      # The optional cleanup trace is runner-only observability. Do not let a
+      # test fixture forge the production cleanup events asserted by the
+      # integration regression.
+      if k != CleanupTraceEnv:
+        baseEnv.add((k, v))
+    else:
+      baseEnv.add((k, v))
+
+  when defined(posix):
+    # mkdtemp-backed 0700 namespace prevents stale files from a crashed prior
+    # runner (including a reused PID) from impersonating child completion or
+    # release records in this invocation.
+    processGroupStateDir =
+      createTempDir("repro-test-runner-process-groups-", "")
+    setFilePermissions(processGroupStateDir,
+      {fpUserRead, fpUserWrite, fpUserExec})
+    var interruptThread = startInterruptWaiter()
+
+  let wallT0 = epochTime()
+  var exclusiveFailed = false
+
+  if exclusiveItems.len > 0 and not (failFast and queue.failFastTriggered):
+    for tc in exclusiveItems:
+      when defined(posix):
+        if interruptedSignal.load(moAcquire) != 0:
+          break
+      var res: TestResult
+      try:
+        if tc.protocolAware:
+          res = runOneProtocol(tc, opts.resultsDir, baseEnv,
+            opts.testTimeoutSec)
+        else:
+          res = runWholeBinary(tc, opts.resultsDir, baseEnv,
+            opts.testTimeoutSec)
+      except CatchableError as e:
+        res = TestResult(
+          testCase: tc,
+          status: tsFail,
+          durationMs: 0,
+          stdout: "repro_test_runner: exclusive worker exception: " &
+            e.msg & "\n")
+      results.add(res)
+      emitProgress(opts.quiet, res)
+      if failFast and res.status == tsFail:
+        exclusiveFailed = true
+        break
 
   let args = WorkerArgs(
     queue: addr queue,
@@ -989,12 +1973,31 @@ proc main() =
     activeCount: addr activeCount,
     baseEnv: addr baseEnv)
 
-  let nThreads = min(opts.threads, max(1, queue.items.len))
+  let nThreads =
+    if queue.items.len == 0 or (failFast and exclusiveFailed):
+      0
+    else:
+      min(opts.threads, queue.items.len)
   var threads = newSeq[Thread[WorkerArgs]](nThreads)
-  let wallT0 = epochTime()
   for i in 0 ..< nThreads:
     createThread(threads[i], workerMain, args)
   joinThreads(threads)
+
+  when defined(posix):
+    # `interruptedSignal` is stored before the waiter starts cleanup. Retaining
+    # and joining its handle is the explicit cleanup-complete barrier: the
+    # runner cannot publish a summary or return 129/130/143 while TERM/KILL of
+    # the registered groups is still in flight.
+    if interruptedSignal.load(moAcquire) != 0:
+      joinThread(interruptThread)
+    # Every normal worker path reaps and unregisters its supervisor. Keep a
+    # fail-closed final drain in case a worker aborted between those steps.
+    if not reapResidualActiveProcessGroups():
+      stderr.writeLine(
+        "repro_test_runner: fatal: exact owner-token processes survived " &
+        "final bounded cleanup; refusing to emit a summary")
+      exitnow(1)
+
   let wallMs = int((epochTime() - wallT0) * 1000)
 
   writeSummary(opts.summaryPath, results, wallMs, nThreads)
@@ -1013,8 +2016,22 @@ proc main() =
     " fail=" & $failed & " skip=" & $skipped &
     " (summary at " & opts.summaryPath & ")"
 
+  when defined(posix):
+    cleanupProcessGroupStateDir()
+    let receivedSignal = interruptedSignal.load(moAcquire)
+    if receivedSignal != 0:
+      # Nim's quit() clamps values above 127; use the POSIX primitive so the
+      # caller observes the conventional 128+signal status (130/143).
+      exitnow(cint(128 + receivedSignal))
+
   if failed > 0:
     quit(1)
   quit(0)
+
+when defined(posix):
+  let internalParams = commandLineParams()
+  if internalParams.len > 0 and
+      internalParams[0] == ProcessGroupWrapperFlag:
+    quit(processGroupWrapperMain(internalParams[1 .. ^1]))
 
 main()

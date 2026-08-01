@@ -297,6 +297,14 @@ proc graphResponse*(manifest: ProviderManifest; fragment: GraphFragment;
   ProviderGraphResponse(kind: pskGraphResult, manifest: manifest,
     fragment: fragment, diagnostics: @diagnostics)
 
+proc effectKey*(claim: OwnedEffectClaim): string =
+  ## Stable identity of an owned effect, used both to diff previous vs new
+  ## fragments (see `recordReplacement`) and to detect whether a stale effect is
+  ## still claimed by a surviving fragment (the shared-ownership guard in the
+  ## output-cleanup executor). Kind is part of the key so a file and a directory
+  ## with the same path are distinct effects.
+  $claim.kind & "|" & claim.identity & "|" & claim.stableName
+
 proc devEnvResponse*(manifest: ProviderManifest; devEnv: DevEnvResult;
                      diagnostics: openArray[string] = []): ProviderGraphResponse =
   ProviderGraphResponse(kind: pskDevEnvResult, manifest: manifest,

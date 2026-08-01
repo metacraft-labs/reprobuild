@@ -123,7 +123,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -133,6 +133,11 @@ proc setupFixture(gitBin, slug: string): Fixture =
   result.libAPath = workspaceRoot / "lib-a"
   cloneInto(gitBin, result.libAOrigin, result.libAPath)
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
+  let installed = runShell(shellCommand(@[result.reproBin, "hooks", "ensure",
+    "--vcs", "--workspace-root=" & workspaceRoot]))
+  if installed.code != 0:
+    stderr.writeLine("hook installation failed:\n" & installed.output)
+    quit 1
   # TC-5: issuance signs the cert — provide + register a daemon key.
   if findExe("ssh-keygen").len > 0:
     let key = genEd25519Key(result.scratch / "daemon-keys", "tc2-key", tc2KeyId)
@@ -187,11 +192,11 @@ proc invokePush(fx: Fixture): CmdResult =
   ## ``--no-certify`` so the push's own certify slot stays a no-op; the
   ## certificate transport (carry the attached notes) runs regardless.
   runShell(shellCommand(@[
-    fx.reproBin, "push",
+    fx.reproBin, "push", "--write-report",
     "--no-certify",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & fx.libAPath,
-    "--json"]))
+    "--json"], @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
 
 proc clonedUpstreamCerts(gitBin, originPath, commit, scratch, slug: string):
     seq[TestCertificate] =
@@ -262,7 +267,7 @@ suite "TC-2 — certificates travel with the pushed commit":
       checkpoint("push output: " & pushed.output)
       check pushed.code == 0
       let report = parseFile(
-        fx.workspaceRoot / ".repro" / "workspace" / "push-report.json")
+        fx.workspaceRoot / ".repro" / "build" / "reports" / "push-report.json")
       check report["exitCode"].getInt() == 0
       # The push report records that the cert notes were carried for lib-a.
       var carried: seq[string]

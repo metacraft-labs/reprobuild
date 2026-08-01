@@ -11,7 +11,7 @@
 ##      are inspected via the M2 observation-only ``headShaQuery`` and
 ##      classified as ``up-to-date`` or ``divergence``.
 ##   3. Emits a structured stdout report AND writes
-##      ``<workspaceRoot>/.repro/workspace/init-report.json``.
+##      ``<workspaceRoot>/.repro/build/reports/init-report.json``.
 ##   4. Returns one of three exit codes — 0 (no divergences AND all
 ##      clones succeeded), 1 (at least one clone failed), 2 (there
 ##      were divergences and we deliberately did NOT auto-modify them).
@@ -180,7 +180,7 @@ proc setupFixture(gitBin, slug: string): M9Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
@@ -192,10 +192,22 @@ proc setupFixture(gitBin, slug: string): M9Fixture =
   result.workspaceRoot = workspaceRoot
 
 proc readReport(fixture: M9Fixture): JsonNode =
-  let reportPath = fixture.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fixture.workspaceRoot / ".repro" / "build" / "reports" /
     "init-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
+
+proc cleanupScratch(path: string) =
+  for attempt in 0 .. 4:
+    if not dirExists(path):
+      return
+    try:
+      removeDir(path)
+      return
+    except OSError, IOError:
+      if attempt == 4:
+        raise
+      sleep(100)
 
 # ---- the suite -------------------------------------------------------------
 
@@ -207,10 +219,10 @@ suite "M9 — repro workspace init":
       skip()
     else:
       let fx = setupFixture(gitBin, "clone-missing")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let res = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "init", "myproject",
+        fx.reproBin, "workspace", "init", "--write-report", "myproject",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       if res.code != 0:
@@ -245,13 +257,13 @@ suite "M9 — repro workspace init":
       skip()
     else:
       let fx = setupFixture(gitBin, "existing-uptodate")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       cloneInto(gitBin, fx.libAOrigin, fx.workspaceRoot / "lib-a")
       cloneInto(gitBin, fx.libBOrigin, fx.workspaceRoot / "lib-b")
 
       let res = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "init", "myproject",
+        fx.reproBin, "workspace", "init", "--write-report", "myproject",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       if res.code != 0:
@@ -275,7 +287,7 @@ suite "M9 — repro workspace init":
       skip()
     else:
       let fx = setupFixture(gitBin, "divergence")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       cloneInto(gitBin, fx.libAOrigin, fx.workspaceRoot / "lib-a")
       cloneInto(gitBin, fx.libBOrigin, fx.workspaceRoot / "lib-b")
@@ -285,7 +297,7 @@ suite "M9 — repro workspace init":
         fx.workspaceRoot / "lib-a")
 
       let res = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "init", "myproject",
+        fx.reproBin, "workspace", "init", "--write-report", "myproject",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       check res.code == 2
@@ -316,10 +328,10 @@ suite "M9 — repro workspace init":
       skip()
     else:
       let fx = setupFixture(gitBin, "unknown")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       let res = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "init", "nonexistent",
+        fx.reproBin, "workspace", "init", "--write-report", "nonexistent",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       check res.code == 1
@@ -335,12 +347,12 @@ suite "M9 — repro workspace init":
       skip()
     else:
       let fx = setupFixture(gitBin, "cwd-default")
-      defer: removeDir(fx.scratch)
+      defer: cleanupScratch(fx.scratch)
 
       # Drop the explicit --workspace-root and rely on the dispatcher's
       # ``getCurrentDir()`` fallback.
       let res = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "init", "myproject",
+        fx.reproBin, "workspace", "init", "--write-report", "myproject",
       ]), cwd = fx.workspaceRoot)
       if res.code != 0:
         checkpoint("output: " & res.output)

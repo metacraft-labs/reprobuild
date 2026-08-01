@@ -62,10 +62,8 @@
 ## block and the M9.I ``configureFlags:`` block off this package's
 ## registries and lowers them into fetch + ``./configure`` + ``make``
 ## BuildActions; the per-artifact build body + install glue lands in
-## M9.L; the recipe records the three executable + one library
-## artifacts via the ``executable`` + ``library`` blocks so the M9.K
-## artifact registry already knows what binaries + shared object to
-## expect.
+## M9.L; the recipe records three executable artifacts so the M9.K
+## artifact registry already knows what binaries to expect.
 ##
 ## ## Artifacts
 ##
@@ -85,10 +83,6 @@
 ##                      strings from C / C++ / Python / Glade source
 ##                      files into a ``.pot`` template. Invoked at
 ##                      every upstream's ``make pot`` target.
-##   * ``libIntl``   — ``libintl.so`` (PascalCased from the upstream
-##                      SONAME ``intl``), the runtime NLS lookup
-##                      library every translated GNOME / Plasma /
-##                      Xfce app links against.
 ##
 ## ## Configurables
 ##
@@ -106,6 +100,14 @@
 ##                                       layer (heavy mono dependency
 ##                                       surface; no v1 desktop
 ##                                       consumer reaches for it).
+##   * ``--disable-acl``              — skip ACL-preserving file-copy
+##                                       helpers. ReproOS uses gettext
+##                                       only to compile catalogs, so
+##                                       this avoids a libacl/libattr
+##                                       runtime edge in build tools.
+##   * ``--disable-xattr``            — skip extended-attribute copy
+##                                       support for the same catalog-
+##                                       compiler-only build profile.
 ##   * ``--without-emacs``            — skip the emacs lisp bindings
 ##                                       (the v1 desktop's interactive
 ##                                       editor target is vim, not
@@ -118,7 +120,7 @@
 ##                                       2.39+ the NLS machinery is
 ##                                       in-tree but the full feature
 ##                                       set still ships via this
-##                                       package's libintl.so.
+##                                       system libc.
 
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
@@ -141,11 +143,7 @@ package gettextSource:
   ## and the ``configureFlags:`` block (registered via
   ## ``registeredBuildFlags`` on the ``"configure"`` channel) and
   ## lowers them into fetch + configure BuildActions wired with the
-  ## right URL + hash + flags. Three-executable + one-library mixed-kind
-  ## artifact recipe — the FIRST source recipe in the corpus to ship a
-  ## three-executable + one-library mixed shape from a single autotools
-  ## ``./configure`` + ``make`` invocation (prior precedents capped at
-  ## two-of-each).
+  ## right URL + hash + flags. Three-executable artifact recipe.
 
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
@@ -203,20 +201,6 @@ package gettextSource:
     ## emits XML-formatted message catalogs for the (deprecated)
     ## glade / qt-linguist consumers.
     "libxml2 >=2.9"
-    ## M9.R.31.1 — gettext's autotools configure unconditionally probes
-    ## for ``libacl`` and links it into ``libgettextlib`` when present
-    ## (used for ACL preservation in file-copy helpers + Mac-OS-X
-    ## resource-fork compat shims; gettext upstream provides no
-    ## ``--without-acl`` opt-out). The previous build inherited the
-    ## libacl link via the host nix-shell's ambient
-    ## ``LD_LIBRARY_PATH``; when M9.R.30's batch rebuild ran without
-    ## that path, msgfmt's ``DT_NEEDED libacl.so.1`` no longer
-    ## resolved at runtime. Declaring libacl as a direct buildDep
-    ## threads its lib dir onto LIBRARY_PATH + LD_LIBRARY_PATH at
-    ## link time AND onto msgfmt's baked RPATH via M9.R.14f's walker
-    ## — closing the DE-rebuild trip surfaced by M9.R.31 Phase B
-    ## (mutter's i18n step short-fails with msgfmt → libacl gap).
-    "libacl"
 
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
@@ -244,18 +228,6 @@ package gettextSource:
     ## ``make pot`` target.
     discard
 
-  library libIntl:
-    ## ``libintl.so`` — the runtime NLS lookup library every translated
-    ## GNOME / Plasma / Xfce app links against; provides the
-    ## ``gettext("key")`` / ``dgettext("domain", "key")`` /
-    ## ``bind_textdomain_codeset(...)`` API. The upstream SONAME
-    ## ``intl`` is PascalCased to ``libIntl`` per the libCrypto /
-    ## libExpat / libGlib2 / libGnutls / libLzma / libReadline
-    ## precedent of preserving the canonical ``lib`` prefix while
-    ## PascalCasing the SONAME body. v1 records the artifact only;
-    ## the per-artifact build body lands in M9.L.
-    discard
-
   build:
     ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
     setCurrentOwningPackageOverride("gettextSource")
@@ -264,14 +236,18 @@ package gettextSource:
         "--disable-static",
         "--disable-java",
         "--disable-csharp",
+        "--disable-acl",
+        "--disable-xattr",
         "--without-emacs",
         "--without-included-libintl",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let pkg = autotools_package(
+        srcDir = "./src",
+        configureOptions = opts,
+        allowSourceWrites = true)
       discard pkg.executable("msgfmt")
       discard pkg.executable("msgmerge")
       discard pkg.executable("xgettext")
-      discard pkg.library("libIntl")
     finally:
       clearCurrentOwningPackageOverride()
 

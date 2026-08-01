@@ -148,7 +148,7 @@ type
     aTip, bTip: string
 
 proc writeManifest(workspaceRoot, aOrigin, bOrigin: string) =
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
@@ -170,12 +170,12 @@ proc setupFixture(gitBin, slug: string): Fixture =
   writeManifest(result.workspaceRoot, result.aOrigin, result.bOrigin)
 
 proc readPullReport(workspaceRoot: string): JsonNode =
-  let reportPath = workspaceRoot / ".repro" / "workspace" / "pull-report.json"
+  let reportPath = workspaceRoot / ".repro" / "build" / "reports" / "pull-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
 proc readSyncReport(workspaceRoot: string): JsonNode =
-  let reportPath = workspaceRoot / ".repro" / "workspace" / "sync-report.json"
+  let reportPath = workspaceRoot / ".repro" / "build" / "reports" / "sync-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
@@ -215,7 +215,7 @@ suite "RA-11 — pull converges to manifest revision on a tracking branch":
 
       # ---- pull ----
       let pull = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "pull", "myproject",
+        fx.reproBin, "workspace", "pull", "--write-report", "myproject",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       if pull.code != 0:
@@ -254,7 +254,7 @@ suite "RA-11 — pull converges to manifest revision on a tracking branch":
       cloneInto(gitBin, fx.bOrigin, fx.workspaceRoot / "lib-b")
 
       let sync = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "sync", "myproject",
+        fx.reproBin, "workspace", "sync", "--write-report", "myproject",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       check sync.code in [0, 2]

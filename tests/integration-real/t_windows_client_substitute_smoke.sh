@@ -39,9 +39,11 @@
 #   REPRO_GUEST_SSH_PORT default 22
 #   REPRO_GUEST_SSH_KEY  default /var/lib/github-runner-windows-windows-runner-001/id_ed25519
 #   REPRO_HOST_IP        default 192.168.122.1     (host IP the guest sees)
-#   REPRO_CLIENT_SEED_EXE  path to the Windows client seed .exe
+#   REPRO_CLIENT_SEED_EXE  path to the Windows client seed .exe (repro.exe;
+#                          the `repro-binary-cache-client` binary was retired —
+#                          the client toolset is now `repro cache <verb>`)
 #   REPRO_CLIENT_SEED_DLL  path to the matching libzstd.dll
-#   REPRO_LINUX_CLIENT     path to the Linux repro-binary-cache-client
+#   REPRO_LINUX_CLIENT     path to the Linux `repro` binary (drives `repro cache`)
 #   REPRO_LINUX_SERVER     path to the Linux repro-binary-cache daemon
 #   SSH_WRAP               optional wrapper prefix for ssh/scp (e.g. "sudo")
 
@@ -60,7 +62,7 @@ CLIENT_SEED_DLL="${REPRO_CLIENT_SEED_DLL:?set REPRO_CLIENT_SEED_DLL to the match
 # (sqlite3_64|sqlite3|sqlite3_32).dll). Ship sqlite3_64.dll in the seed
 # so the exe is self-contained on a scoped PATH.
 CLIENT_SEED_SQLITE="${REPRO_CLIENT_SEED_SQLITE:?set REPRO_CLIENT_SEED_SQLITE to sqlite3_64.dll}"
-LINUX_CLIENT="${REPRO_LINUX_CLIENT:?set REPRO_LINUX_CLIENT to the Linux repro-binary-cache-client}"
+LINUX_CLIENT="${REPRO_LINUX_CLIENT:?set REPRO_LINUX_CLIENT to the Linux repro binary (drives repro cache <verb>)}"
 LINUX_SERVER="${REPRO_LINUX_SERVER:?set REPRO_LINUX_SERVER to the Linux repro-binary-cache daemon}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -76,7 +78,7 @@ RUN_ID="$(date +%s)-$$"
 GUEST_SEED_DIR="C:\\Temp\\m3b-smoke-${RUN_ID}\\seed"
 GUEST_OUT_DIR="C:\\Temp\\m3b-smoke-${RUN_ID}\\out"
 GUEST_ROOT="C:\\Temp\\m3b-smoke-${RUN_ID}"
-GUEST_SEED_EXE="${GUEST_SEED_DIR}\\repro-binary-cache-client.exe"
+GUEST_SEED_EXE="${GUEST_SEED_DIR}\\repro.exe"
 # Forward-slash form for scp SOURCE paths — Windows OpenSSH's scp
 # mangles backslashes in a remote source spec, so fetch-back uses `/`.
 GUEST_OUT_DIR_FWD="C:/Temp/m3b-smoke-${RUN_ID}/out"
@@ -138,12 +140,12 @@ ok "cache server up on ${BASE_URL}"
 
 # producer keypair for publish
 REPRO_BINARY_CACHE_KEY_PATH="$KEY_PATH" REPRO_BINARY_CACHE_CERT_PATH="$CERT_PATH" \
-  "$LINUX_CLIENT" gen-key >/dev/null
+  "$LINUX_CLIENT" cache gen-key >/dev/null
 [[ -f "$KEY_PATH" && -f "$CERT_PATH" ]] || fail "producer keypair not generated"
 
 IDENTITY=(--package-name=m3b-smoke --package-version="${RUN_ID}"
           --platform-cpu=x86_64 --platform-os=windows)
-ENTRY_KEY="$("$LINUX_CLIENT" derive-key "${IDENTITY[@]}" | tail -1 | tr -d '[:space:]')"
+ENTRY_KEY="$("$LINUX_CLIENT" cache derive-key "${IDENTITY[@]}" | tail -1 | tr -d '[:space:]')"
 [[ ${#ENTRY_KEY} -eq 64 ]] || fail "derive-key produced bad key: '$ENTRY_KEY'"
 echo "entry-key=$ENTRY_KEY"
 
@@ -151,7 +153,7 @@ echo "entry-key=$ENTRY_KEY"
 REPRO_BINARY_CACHE_URL="http://127.0.0.1:${PORT}" \
 REPRO_BINARY_CACHE_KEY_PATH="$KEY_PATH" \
 REPRO_BINARY_CACHE_CERT_PATH="$CERT_PATH" \
-  "$LINUX_CLIENT" publish "$ENTRY_KEY" "$PREFIX" "${IDENTITY[@]}" \
+  "$LINUX_CLIENT" cache publish "$ENTRY_KEY" "$PREFIX" "${IDENTITY[@]}" \
   || fail "Linux-side publish failed"
 ok "published bin/-shaped prefix under $ENTRY_KEY"
 
@@ -164,7 +166,7 @@ ok "seeded client + libzstd.dll + sqlite3_64.dll into ${GUEST_SEED_DIR}"
 
 # Confirm the guest can actually reach the cache (a MISS on a random key
 # is a 404, which is still a successful round-trip — proves network).
-gssh "cmd /c \"set REPRO_BINARY_CACHE_URL=${BASE_URL}&& ${GUEST_SEED_EXE} lookup ${ENTRY_KEY}\"" \
+gssh "cmd /c \"set REPRO_BINARY_CACHE_URL=${BASE_URL}&& ${GUEST_SEED_EXE} cache lookup ${ENTRY_KEY}\"" \
   && LOOKUP_RC=0 || LOOKUP_RC=$?
 [[ "$LOOKUP_RC" -eq 0 ]] || fail "guest lookup of the published key did not hit (rc=$LOOKUP_RC)"
 ok "guest reached the cache and the key HITS on lookup"
@@ -189,7 +191,7 @@ Set-Location '${GUEST_ROOT}'
 \$nim = Get-Command nim.exe -ErrorAction SilentlyContinue
 if (\$nim) { Write-Host "NIM_ON_PATH \$(\$nim.Source)"; exit 90 } else { Write-Host 'NIM_NOT_ON_PATH' }
 \$sw = [System.Diagnostics.Stopwatch]::StartNew()
-& '${GUEST_SEED_EXE}' substitute '${ENTRY_KEY}' '${GUEST_OUT_DIR}'
+& '${GUEST_SEED_EXE}' cache substitute '${ENTRY_KEY}' '${GUEST_OUT_DIR}'
 \$rc = \$LASTEXITCODE
 \$sw.Stop()
 Write-Host "SUBSTITUTE_RC \$rc"

@@ -3,7 +3,7 @@
 ## M13 — Workspace metadata for the active branch.
 ##
 ## The active workspace branch is recorded in
-## ``<workspaceRoot>/.repo/workspace.toml`` under ``[workspace].branch``.
+## ``<workspaceRoot>/.repro/workspace.toml`` under ``[workspace].branch``.
 ## The schema is documented in
 ## ``reprobuild-specs/Workspace-Manifests.md`` §"Workspace Composition
 ## Layers" — the same TOML the M8 composer reads. The ``branch`` key was
@@ -12,13 +12,13 @@
 ##
 ## Two operating modes:
 ##
-##   1. **Composer mode** — ``.repo/workspace.toml`` already exists with
+##   1. **Composer mode** — ``.repro/workspace.toml`` already exists with
 ##      one or more ``[[manifest]]`` entries. The writer reads the file
 ##      via the M5 strict reader, updates ``workspace.branch``, and
 ##      re-emits the canonical TOML preserving the declared manifest
 ##      layers in source order.
 ##
-##   2. **Single-project mode** — no ``.repo/workspace.toml`` exists.
+##   2. **Single-project mode** — no ``.repro/workspace.toml`` exists.
 ##      The writer creates a *metadata-only* workspace.toml carrying
 ##      ``[workspace] project = "<name>"`` and ``branch = "<name>"`` and
 ##      no ``[[manifest]]`` entries. Dispatch sites that distinguish
@@ -68,8 +68,29 @@ template emitKvBool(buf: var string; key: string; value: bool) =
   buf.add("\n")
 
 proc workspaceTomlPath*(workspaceRoot: string): string =
-  ## Canonical absolute path of the workspace metadata file.
-  workspaceRoot / ".repo" / "workspace.toml"
+  ## Canonical absolute path of the workspace metadata file
+  ## (``<workspaceRoot>/.repro/workspace.toml``). Native layout only — the
+  ## legacy Google-``repo`` ``.repo/`` location is not consulted.
+  workspaceRoot / ".repro" / "workspace.toml"
+
+proc reproDir*(workspaceRoot: string): string =
+  ## Directory where the workspace-local metadata is stored (``.repro``).
+  workspaceRoot / ".repro"
+
+proc manifestsRoot*(workspaceRoot: string): string =
+  ## Directory containing the workspace's membership manifests (``projects/``
+  ## and ``repos/``). Native layout: prefer the flat workspace root (the
+  ## ``<org>/repro-workspace`` repo's ``projects/``/``repos/``); fall back to a
+  ## materialized manifest checkout under ``.repro/manifests`` — e.g. an
+  ## ``init --manifest-url`` shared-cache symlink, or the git-checkout store
+  ## backend that also carries membership for the repos it covers. Both are
+  ## native ``.repro/`` locations; the legacy ``.repo/`` tree is never consulted.
+  if dirExists(workspaceRoot / "projects") or dirExists(workspaceRoot / "repos"):
+    return workspaceRoot
+  let reproManifests = workspaceRoot / ".repro" / "manifests"
+  if dirExists(reproManifests / "projects") or dirExists(reproManifests / "repos"):
+    return reproManifests
+  workspaceRoot
 
 # ---- serializer -----------------------------------------------------------
 
@@ -147,7 +168,7 @@ proc serializeWorkspaceLocalToToml*(local: WorkspaceLocal): string =
 # ---- reader ---------------------------------------------------------------
 
 proc isCompositionalWorkspaceToml*(workspaceRoot: string): bool =
-  ## True iff a ``.repo/workspace.toml`` exists at ``workspaceRoot`` AND
+  ## True iff a ``.repro/workspace.toml`` exists at ``workspaceRoot`` AND
   ## declares at least one ``[[manifest]]`` layer. CLI dispatch helpers
   ## use this to decide between the M8 composer path and the M6/M7
   ## single-project path: a metadata-only workspace.toml (zero manifest
@@ -169,13 +190,10 @@ proc isCompositionalWorkspaceToml*(workspaceRoot: string): bool =
     return false
 
 proc hasResolvedManifestCheckout*(workspaceRoot: string): bool =
-  ## True iff ``<workspaceRoot>/.repo/manifests`` carries at least one
-  ## resolved project manifest (a ``projects/*.toml`` or a
-  ## ``variants/*.toml``). A bare ``.repo/manifests`` directory with no
-  ## project/variant file present is NOT a resolved checkout — it is the
-  ## half-bootstrapped state ``repo init`` leaves behind before the
-  ## manifest repo is actually checked out.
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  ## True iff the workspace root carries at least one resolved membership
+  ## manifest (a ``projects/*.toml`` or a ``variants/*.toml``). An empty
+  ## ``projects/``/``variants/`` is NOT a resolved checkout.
+  let manifestsRoot = manifestsRoot(workspaceRoot)
   for sub in ["projects", "variants"]:
     let dir = manifestsRoot / sub
     if dirExists(dir):
@@ -207,25 +225,22 @@ proc hasCommittedLockWorkspaceMarker*(workspaceRoot: string): bool =
 
 proc isInitializedWorkspace*(workspaceRoot: string): bool =
   ## RA-10 canonical "initialized workspace" marker. A directory counts
-  ## as an initialized workspace only when its ``.repo/`` shell carries a
-  ## *resolved manifest checkout* — NOT merely a bare ``.repo/``/
+  ## as an initialized workspace only when its ``.repro/`` shell carries a
+  ## *resolved manifest checkout* — NOT merely a bare
   ## ``.repro/`` directory left behind by a half-finished bootstrap — OR
   ## (MO-2) when it carries a committed ``repro.lock`` (the manifest-
   ## optional reproducibility artifact).
   ##
   ## Concretely, the marker is present when ANY of:
   ##
-  ##   * ``<workspaceRoot>/.repo/workspace.toml`` exists (the metadata
+  ##   * ``<workspaceRoot>/.repro/workspace.toml`` exists (the metadata
   ##     file ``repro workspace init`` writes once the workspace shell is
   ##     established — single-project or compositional), OR
-  ##   * ``<workspaceRoot>/.repo/manifests`` holds at least one resolved
-  ##     project/variant manifest (``projects/*.toml`` /
-  ##     ``variants/*.toml``), OR
   ##   * (MO-2) ``<workspaceRoot>/repro.lock`` exists — a committed-lock-
   ##     only repo with no manifest repo is a manifest-optional workspace,
   ##     so the hooks/gate must enforce there too.
   ##
-  ## A bare ``.repo/`` (or ``.repro/``) with none of those is treated
+  ## A bare ``.repro/`` with none of those is treated
   ## as "not an initialized workspace": the shared predicate the hook
   ## bodies and any init-skip logic consult so a managed hook installed
   ## under a half-bootstrapped or non-workspace parent no-ops with
@@ -242,7 +257,7 @@ proc readWorkspaceFeatureStarted*(workspaceRoot: string): bool =
   ## M16 — Return ``true`` iff the workspace metadata records that the
   ## current ``[workspace].branch`` value names a feature branch
   ## the operator deliberately started via
-  ## ``repro workspace start <branch>``. Returns ``false`` when the
+  ## ``repro branch <name> --checkout``. Returns ``false`` when the
   ## file is missing, the key is absent, or the key is present and
   ## ``false``. A malformed workspace.toml propagates as
   ## ``WorkspaceManifestParseError`` so the caller sees the same

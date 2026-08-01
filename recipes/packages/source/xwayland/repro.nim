@@ -29,17 +29,12 @@
 ## Wayland compositor spawns as a child process whenever an X11 client
 ## connects to the compositor's X11 socket.
 ##
-## ## Honest deferral on leaf deps
+## ## Source closure status
 ##
-## xwayland's full from-source closure pulls in a long chain of
-## historically-orphaned x.org leaf libraries (libxshmfence,
-## libxfont2, libxkbfile, libtirpc, xkeyboard-config, xorgproto,
-## xkbcomp). All of those are declared as buildDeps below; their
-## resolution at build time still goes through the stdlib nix-stub
-## fall-through when no sibling from-source recipe exists, which is
-## the M9.R.25 inherited posture. The xwayland recipe SHAPE closes
-## the gap at the DSL surface; full-from-source closure of the long
-## tail is M9.R.27 work.
+## Xwayland and its mandatory libX11 and libxcvt dependencies are built
+## from source. The remaining XCB and legacy X.org leaf libraries still
+## use the stdlib Nix fallback when no sibling source recipe exists; those
+## dependencies are kept explicit below so later closure work is visible.
 
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
@@ -75,6 +70,14 @@ package xwaylandSource:
     "pixman >=0.42"
     "wayland >=1.22"
     "wayland-protocols >=1.31"
+    ## Xwayland uses Xlib utilities during server setup.
+    "libx11 >=1.8"
+    ## VESA modeline generation is mandatory in Xwayland 24.1.
+    "libxcvt >=0.1.1"
+    ## Glamor uses libepoxy for GL/EGL dispatch.
+    "libepoxy >=1.5"
+    ## Xwayland's authentication hashes use the source-built Nettle ABI.
+    "nettle >=3.7"
     ## libxcb is a transitive of every X11 client; the sibling
     ## libxkbcommon recipe declares it too.
     "libxcb"
@@ -117,6 +120,16 @@ package xwaylandSource:
         # Pure-Wayland posture: drop the X11 server's TCP listener
         # and DRI2 (legacy direct rendering, superseded by DRI3).
         "listen_tcp=false",
+        # Xwayland is spawned for the local compositor session. Remote XDMCP
+        # discovery and its legacy authentication transports are not used.
+        "xdmcp=false",
+        "xdm-auth-1=false",
+        "secure-rpc=false",
+        # Source Mesa currently exposes EGL/GLES/GBM without libGL/GLX.
+        # Keep accelerated Wayland presentation through glamor below while
+        # omitting the unavailable desktop-GL compatibility extension.
+        "glx=false",
+        "sha1=libnettle",
         # Glamor: GL-accelerated rendering. Enable so X11 clients
         # under a Wayland compositor can use OpenGL.
         "glamor=true",
@@ -131,9 +144,25 @@ package xwaylandSource:
         "xkb_default_layout=us",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
-      discard pkg.executable("xwaylandBin")
+      ## The alias slice does not emit a mirror on its own. Publish the
+      ## installed server tree as the package's cacheable public output.
+      pkg.installTreeMirror()
+      discard pkg.executableAlias("xwaylandBin", sourceName = "Xwayland")
     finally:
       clearCurrentOwningPackageOverride()
 
   runtimeDeps:
-    discard
+    ## Direct DT_NEEDED providers for the compositor-hosted server.
+    "pixman >=0.42"
+    "libxfont2"
+    "wayland >=1.22"
+    "libxcvt >=0.1.1"
+    "libxshmfence"
+    "libdrm >=2.4.110"
+    "libepoxy >=1.5"
+    "mesa"
+    "nettle >=3.7"
+    "libxau"
+    ## Xwayland invokes xkbcomp and reads the shared keymap archive.
+    "xkbcomp"
+    "xkeyboard-config"

@@ -186,7 +186,11 @@ package jsonCSource:
         "BUILD_APPS=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let patches = @[
+        "sed -i 's|exec_prefix=@exec_prefix@|exec_prefix=${prefix}|; s|libdir=@libdir@|libdir=${exec_prefix}/@CMAKE_INSTALL_LIBDIR@|; s|includedir=@includedir@|includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@|' src/json-c.pc.in",
+      ]
+      let pkg = cmake_package(srcDir = "./src", generator = "Ninja",
+        cacheVars = opts, allowSourceWrites = true, srcPatches = patches)
       discard pkg.library("libJsonC")
     finally:
       clearCurrentOwningPackageOverride()

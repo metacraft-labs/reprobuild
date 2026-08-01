@@ -1,8 +1,10 @@
-import std/[algorithm, json, options, os, osproc, sets, streams, strtabs,
+import std/[algorithm, json, options, os, osproc, net, nativesockets, sets, streams, strtabs,
     strutils, tables, times]
 
 when defined(windows):
   import std/winlean
+elif defined(posix):
+  from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid
 
 import repro_core
 import repro_depfile
@@ -77,6 +79,8 @@ type
     bakWriteText
     bakStamp
     bakPreserveTree
+    bakEnsureLine
+    bakEnsureSnippet
     # M2 (Workspace-Management): a typed VCS operation (clone / fetch /
     # switch) dispatched through a registered executor so the engine
     # does not depend on the ``repro_workspace_vcs`` library. The
@@ -95,6 +99,8 @@ type
     # ``bakBinaryCacheSubstitute`` action per closure member and the
     # engine's pool/parallelism semantics drive them.
     bakBinaryCacheSubstitute
+    # Provisioning task delegating to Nix Evaluation Daemon or other foreign provisioners
+    bakForeignProvision
 
   EngineTypedOutput* = object
     ## Typed-Outputs M1: engine-side mirror of
@@ -353,6 +359,22 @@ type
       ## stats but does NOT abort the build. ``nil`` keeps the engine
       ## pure-local (legacy behaviour) — the publish hook becomes a
       ## no-op for every action regardless of the per-action flag.
+    binaryCacheIntermediateScope*: bool
+      ## L3 PUBLISH-SCOPE. When ``true`` the target binary cache is an
+      ## INTERMEDIATE cache: EVERY successful cacheable action's store
+      ## outputs are published (not just the public-interface members
+      ## tagged ``publishToBinaryCache``). When ``false`` (the default,
+      ## and the safe default for a RELEASE cache) only tagged
+      ## public-interface actions publish — untagged intermediate
+      ## artefacts stay local. The CLI sets this from the effective
+      ## cache scope (``REPRO_BINARY_CACHE_SCOPE`` / caches.conf
+      ## ``scope``). Ignored when ``binaryCachePublisher == nil``.
+    publishCachedResults*: bool
+      ## When true, eligible binary-cache outputs are published after a
+      ## validated local action-cache hit as well as after execution. This is
+      ## opt-in so ordinary no-op builds never perform network writes. Cached
+      ## metadata-only records are safe here because the engine requires the
+      ## declared outputs to be materialized before invoking the publisher.
     toolIdentityResolver*: ToolIdentityResolver
       ## M9.N Batch B. Optional tool-identity resolver closure.
       ## When non-nil AND ``BuildAction.toolIdentityRefs.len > 0``,
@@ -595,6 +617,9 @@ type
     weakFingerprint*: ContentDigest
     identity*: CacheEntryIdentity
     cwd*: string
+    publishPrefix*: string
+      ## Explicit public-interface root to package. Empty preserves the
+      ## legacy first-declared-output fallback in the publisher.
     declaredOutputs*: seq[string]
     recordOutputs*: seq[string]
 
@@ -729,6 +754,14 @@ type
     cmakePrefixDirs*: seq[string]
     includeDirs*: seq[string]
     libDirs*: seq[string]
+    nimPathDirs*: seq[string]
+      ## Cross-Repo-Source-Consumption SC-11 (§4.2a) — the PARALLEL Nim
+      ## language channel. Each dir is a sibling Nim ``library``'s importable
+      ## source root; the engine prepends a ``--path:<dir>`` compiler FLAG onto
+      ## the consumer's ``nim c`` argv for each (see ``applyNimPathArgs``),
+      ## rather than an env var as for the C/C++ channels above. The from-source
+      ## resolver populates it per-ref; every other resolver leaves it empty
+      ## (their imports resolve through nim.cfg / the standard layout).
     cachePlatformTag*: string
       ## DSL-port M9.R.7. The platform-tag the materialization cache
       ## lookup keyed against (``"native"`` on a native build;
@@ -790,6 +823,8 @@ type
     queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
     inlineFailure: ActionResult
     resultPath: string
+    when defined(posix):
+      processGroupPid: int
     when defined(windows):
       # Synchronize-only HANDLE duplicate of the child process, opened on
       # first wait-loop entry via OpenProcess(SYNCHRONIZE, pid). Used as a
@@ -1241,7 +1276,7 @@ proc pathExists(path: string): bool =
 
 proc outputPathReady(action: BuildAction; path: string): bool =
   # M2: bakWorkspaceVcs receipts are plain files, same readiness rule.
-  if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakWorkspaceVcs} and
+  if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakWorkspaceVcs, bakForeignProvision} and
       symlinkExists(extendedPath(path)):
     return false
   path.pathExists()
@@ -1457,6 +1492,8 @@ proc monitorEvidenceRequired(action: BuildAction): bool =
 
 proc needsExecutionForPolicy(action: BuildAction): bool =
   action.dependencyPolicy.kind in MonitorPolicyKinds or
+    (not action.cacheable and
+      action.dependencyPolicy.kind in RecognizedPolicyKinds) or
     action.kind == bakPreserveTree
 
 type
@@ -2198,19 +2235,12 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   # from reprobuild's former repro_monitor_shim / repro_monitor_depfile libs).
   # The same io-monitor driver is used as on macOS — only the underlying
   # injection mechanism differs.
-  # Monitor-Hook-Shim.md:501 — when monitoring cannot be performed (no
-  # monitor wired, or an unsupported platform), the failure semantics are
-  # "fail the monitored action OR make it non-cacheable, depending on
-  # policy". A NON-CACHEABLE action is the "make it non-cacheable" branch:
-  # it is always re-executed, so no cache entry's soundness depends on its
-  # monitor evidence and there is nothing to gather. Run it unmonitored
-  # (leave ``monitorDepfile`` empty so ``monitorEvidenceRequired`` stays
-  # false) rather than failing it. This is the sanctioned home for pure
-  # network actions with no monitorable file evidence — e.g. ``workspace
-  # sync``'s ``git fetch`` (cacheable = false) — which must still run on a
-  # host without the monitor driver wired (the hermetic workspace/VCS
-  # integration tests). A CACHEABLE action still fails: caching it without
-  # complete evidence would be the removed declared-only soundness hole.
+  # Monitor-Hook-Shim.md:501 — when monitoring cannot be performed, the
+  # failure semantics are "fail the monitored action OR make it non-cacheable,
+  # depending on policy". A non-cacheable action may run without monitor
+  # evidence only when the monitor is unavailable; when a monitor driver is
+  # configured, still gather evidence so integration tests and build reports
+  # can inspect the real runtime reads/writes.
   when not (defined(macosx) or defined(linux) or defined(windows)):
     if not action.cacheable:
       return
@@ -2253,6 +2283,71 @@ proc envTableFromArgvStyle(env: openArray[string]): StringTableRef =
     if eq <= 0:
       continue
     result[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
+
+when defined(posix):
+  proc assignProcessGroup(process: Process): int =
+    ## Best-effort process-group isolation for externally launched actions.
+    ## It lets cancellation tear down shell wrappers together with their
+    ## children instead of only signalling the top-level monitor/helper.
+    let pid = processID(process)
+    if pid <= 0:
+      return 0
+    if setpgid(Pid(pid), Pid(pid)) == 0:
+      pid
+    else:
+      0
+
+  when defined(linux):
+    proc childPids(pid: int): seq[int] =
+      let path = "/proc" / $pid / "task" / $pid / "children"
+      if not fileExists(path):
+        return @[]
+      for token in readFile(path).splitWhitespace:
+        try:
+          result.add(parseInt(token))
+        except ValueError:
+          discard
+
+    proc collectDescendants(pid: int; seen: var HashSet[int];
+                            descendants: var seq[int]) =
+      for child in childPids(pid):
+        if seen.contains(child):
+          continue
+        seen.incl(child)
+        collectDescendants(child, seen, descendants)
+        descendants.add(child)
+
+    proc signalDescendants(pid: int; sig: cint) =
+      var seen = initHashSet[int]()
+      var descendants: seq[int] = @[]
+      collectDescendants(pid, seen, descendants)
+      for child in descendants:
+        discard kill(Pid(child), sig)
+
+  proc signalRunningAction(item: RunningAction; sig: cint) =
+    let pid = processID(item.process)
+    if pid <= 0:
+      return
+    when defined(linux):
+      signalDescendants(pid, sig)
+    if item.processGroupPid > 0:
+      discard kill(Pid(-item.processGroupPid), sig)
+    else:
+      discard kill(Pid(pid), sig)
+
+  proc terminateRunningAction(item: var RunningAction) =
+    if item.process.running():
+      item.signalRunningAction(SIGTERM)
+      for _ in 0 ..< 20:
+        if not item.process.running():
+          break
+        sleep(10)
+    item.signalRunningAction(SIGKILL)
+
+else:
+  proc terminateRunningAction(item: var RunningAction) =
+    if item.process.running():
+      item.process.terminate()
 
 when defined(windows):
   proc ensureRunningProcessHandle(item: var RunningAction): Handle =
@@ -2339,8 +2434,6 @@ proc prependPathDirsToArgvEnv(env: seq[string];
   ## spawn path (which carries env as ``seq[string]`` rather than a
   ## ``StringTableRef``) so the same M9.N Batch B behaviour applies
   ## to the daemon-backed launch as well as the bypass launch.
-  if binDirs.len == 0:
-    return env
   let sep =
     when defined(windows): ";"
     else: ":"
@@ -2360,6 +2453,11 @@ proc prependPathDirsToArgvEnv(env: seq[string];
       pathSeen = true
     else:
       result.add(entry)
+  # RunQuota action children inherit from runquotad, not from the invoking
+  # `repro build`; when action env overrides are present, materialise PATH
+  # even when there is nothing to prepend.
+  if binDirs.len == 0 and env.len == 0:
+    return env
   # M9.R.15q.3.3 — dedup the final PATH list so the env stays under
   # ARG_MAX even when 25+ buildDeps + a host PATH with overlapping
   # nix-shell entries pile up.
@@ -2535,6 +2633,11 @@ proc resolvedToolBinDirs(action: BuildAction;
   ## the catalog signals "no contribution for this ref" by returning
   ## ``none`` and the engine then leaves PATH untouched for that ref.
   ##
+  ## Each declared ref's resolved executable directory is promoted before
+  ## any transitive bin directories. A later explicit tool can therefore
+  ## override an earlier ref's transitive dependency without changing the
+  ## direct tools' declaration order.
+  ##
   ## M9.R.7: the resolver receives a per-ref ``DepKind`` so it can
   ## route the materialization cache lookup against the correct
   ## platform-tagged cache key. On a native build the choice is
@@ -2548,13 +2651,24 @@ proc resolvedToolBinDirs(action: BuildAction;
   if action.toolIdentityRefs.len == 0 or resolver == nil:
     return @[]
   result = @[]
+  var resolvedIdentities: seq[ResolvedToolIdentity] = @[]
   for i, refName in action.toolIdentityRefs:
     let kind = kindForRef(action, i)
     let resolved = resolver(refName, kind)
     if resolved.isNone:
       continue
-    for binDir in resolved.get().binDirs:
-      if binDir.len > 0:
+    resolvedIdentities.add(resolved.get())
+  var promotedDirs = initHashSet[string]()
+  for resolved in resolvedIdentities:
+    if resolved.resolvedExecutablePath.len == 0:
+      continue
+    let directDir = parentDir(resolved.resolvedExecutablePath)
+    if directDir.len > 0 and directDir notin promotedDirs:
+      promotedDirs.incl(directDir)
+      result.add(directDir)
+  for resolved in resolvedIdentities:
+    for binDir in resolved.binDirs:
+      if binDir.len > 0 and binDir notin promotedDirs:
         result.add(binDir)
 
 type
@@ -2570,9 +2684,15 @@ type
     cmakePrefixDirs*: seq[string]
     includeDirs*: seq[string]
     libDirs*: seq[string]
+    nimPathDirs*: seq[string]
+      ## Cross-Repo-Source-Consumption SC-11 (§4.2a.3) — the accumulated Nim
+      ## library source roots. Unlike the four C/C++ lists above (each threaded
+      ## onto a dedicated env var), these are projected onto the action's
+      ## ``nim c`` argv as ``--path:<dir>`` compiler flags via
+      ## ``applyNimPathArgs`` at launch, through the SAME aux-projection seam.
 
-proc collectResolvedAuxPaths(action: BuildAction;
-                             resolver: ToolIdentityResolver):
+proc collectResolvedAuxPaths*(action: BuildAction;
+                              resolver: ToolIdentityResolver):
     ResolvedAuxPaths =
   ## Walk every ``toolIdentityRefs`` entry through the resolver and
   ## accumulate the in-order union of each ref's aux-path lists. Same
@@ -2597,28 +2717,217 @@ proc collectResolvedAuxPaths(action: BuildAction;
   var seenCmakePrefix: HashSet[string] = initHashSet[string]()
   var seenInclude: HashSet[string] = initHashSet[string]()
   var seenLib: HashSet[string] = initHashSet[string]()
-  for i, refName in action.toolIdentityRefs:
-    let kind = kindForRef(action, i)
-    let resolved = resolver(refName, kind)
-    if resolved.isNone:
+  var seenNimPath: HashSet[string] = initHashSet[string]()
+  # Target libraries and headers must precede the native toolchain's
+  # transitive sysroot. Otherwise a compiler profile can expose a kernel
+  # UAPI header before the matching userspace library header (for example
+  # linux/drm.h before libdrm's drm.h). Keep each dependency class stable,
+  # but collect host-side channels before build-machine tools.
+  for priorityKind in [dkBuild, dkRuntime, dkNative]:
+    for i, refName in action.toolIdentityRefs:
+      let kind = kindForRef(action, i)
+      if kind != priorityKind:
+        continue
+      let resolved = resolver(refName, kind)
+      if resolved.isNone:
+        continue
+      let r = resolved.get()
+      for d in r.pkgConfigDirs:
+        if d.len > 0 and d notin seenPkgConfig:
+          seenPkgConfig.incl(d)
+          result.pkgConfigDirs.add(d)
+      for d in r.cmakePrefixDirs:
+        if d.len > 0 and d notin seenCmakePrefix:
+          seenCmakePrefix.incl(d)
+          result.cmakePrefixDirs.add(d)
+      for d in r.includeDirs:
+        if d.len > 0 and d notin seenInclude:
+          seenInclude.incl(d)
+          result.includeDirs.add(d)
+      for d in r.libDirs:
+        if d.len > 0 and d notin seenLib:
+          seenLib.incl(d)
+          result.libDirs.add(d)
+      # SC-11 (§4.2a.3): accumulate the Nim library source roots in-order,
+      # deduped, exactly as the four C/C++ lists above.
+      for d in r.nimPathDirs:
+        if d.len > 0 and d notin seenNimPath:
+          seenNimPath.incl(d)
+          result.nimPathDirs.add(d)
+
+proc isUnsafeRuntimeLibDir(path: string): bool =
+  ## Dependency profiles may propagate libc or language-runtime libraries
+  ## alongside ordinary libraries. Globally interposing one of those runtimes
+  ## can replace the runtime selected by an executable's own RPATH. Keep the
+  ## directories available to the linker, but never inject them into a process
+  ## runtime search path.
+  let normalized = path.replace('\\', '/')
+  const sourceMarker = "/recipes/packages/source/"
+  let sourceIndex = normalized.find(sourceMarker)
+  if sourceIndex >= 0:
+    let packageStart = sourceIndex + sourceMarker.len
+    let packageEnd = normalized.find('/', packageStart)
+    let packageName =
+      if packageEnd < 0: normalized[packageStart .. ^1]
+      else: normalized[packageStart ..< packageEnd]
+    if packageName == "glibc" or packageName == "python3" or
+        packageName.startsWith("python3-"):
+      return true
+  const storePrefix = "/nix/store/"
+  if not normalized.startsWith(storePrefix):
+    return false
+  let relative = normalized[storePrefix.len .. ^1]
+  let slash = relative.find('/')
+  if slash <= 0:
+    return false
+  let storeEntry = relative[0 ..< slash]
+  let hashSeparator = storeEntry.find('-')
+  if hashSeparator < 0 or hashSeparator + 1 >= storeEntry.len:
+    return false
+  let packageName = storeEntry[hashSeparator + 1 .. ^1]
+  packageName == "glibc" or packageName.startsWith("glibc-") or
+    packageName == "python3" or packageName.startsWith("python3-")
+
+proc runtimeSafeLibDirs(paths: ResolvedAuxPaths): seq[string] =
+  for path in paths.libDirs:
+    if not isUnsafeRuntimeLibDir(path):
+      result.add(path)
+
+type
+  CompilerIncludePaths = object
+    regularDirs: seq[string]
+    systemDirs: seq[string]
+
+proc partitionCompilerIncludePaths(paths: ResolvedAuxPaths):
+    CompilerIncludePaths =
+  ## GCC's C++ forwarding headers use ``#include_next`` to reach libc.
+  ## Putting a source libc in CPATH makes it appear before GCC's intrinsic
+  ## C++ headers, so include_next cannot find it. Keep package headers in
+  ## CPATH, but place source libc and kernel UAPI roots after GCC's intrinsic
+  ## headers with ``-idirafter``. GCC's own propagated include tree is omitted
+  ## because the selected compiler already contributes it intrinsically.
+  const sourceMarker = "/recipes/packages/source/"
+  var glibcRoots: seq[string] = @[]
+  var linuxRoots: seq[string] = @[]
+  for path in paths.includeDirs:
+    var normalized = path.replace('\\', '/')
+    while normalized.len > 1 and normalized.endsWith("/"):
+      normalized.setLen(normalized.len - 1)
+    let marker = normalized.find(sourceMarker)
+    if marker < 0:
+      result.regularDirs.add(path)
       continue
-    let r = resolved.get()
-    for d in r.pkgConfigDirs:
-      if d.len > 0 and d notin seenPkgConfig:
-        seenPkgConfig.incl(d)
-        result.pkgConfigDirs.add(d)
-    for d in r.cmakePrefixDirs:
-      if d.len > 0 and d notin seenCmakePrefix:
-        seenCmakePrefix.incl(d)
-        result.cmakePrefixDirs.add(d)
-    for d in r.includeDirs:
-      if d.len > 0 and d notin seenInclude:
-        seenInclude.incl(d)
-        result.includeDirs.add(d)
-    for d in r.libDirs:
-      if d.len > 0 and d notin seenLib:
-        seenLib.incl(d)
-        result.libDirs.add(d)
+    let packageStart = marker + sourceMarker.len
+    let packageEnd = normalized.find('/', packageStart)
+    let packageName =
+      if packageEnd < 0: normalized[packageStart .. ^1]
+      else: normalized[packageStart ..< packageEnd]
+    case packageName
+    of "gcc":
+      discard
+    of "glibc":
+      if normalized.endsWith("/usr/include") and
+          normalized notin glibcRoots:
+        glibcRoots.add(normalized)
+    of "linux-headers":
+      if normalized.endsWith("/usr/include") and
+          normalized notin linuxRoots:
+        linuxRoots.add(normalized)
+    else:
+      result.regularDirs.add(path)
+  result.systemDirs = glibcRoots
+  result.systemDirs.add(linuxRoots)
+
+proc compilerSystemIncludeFlags(systemDirs: openArray[string]): seq[string] =
+  for path in systemDirs:
+    if path.len > 0:
+      result.add("-idirafter")
+      result.add(path)
+
+proc prependEnvFlags(table: StringTableRef; varName: string;
+                     flags: openArray[string]) =
+  if table == nil or flags.len == 0:
+    return
+  let prefix = @flags.join(" ")
+  let inherited =
+    if table.hasKey(varName): table[varName]
+    else: getEnv(varName)
+  table[varName] =
+    if inherited.len > 0: prefix & " " & inherited
+    else: prefix
+
+proc prependEnvFlagsToArgvEnv(env: seq[string]; varName: string;
+                              flags: openArray[string]): seq[string] =
+  if flags.len == 0:
+    return env
+  var inherited = getEnv(varName)
+  result = newSeqOfCap[string](env.len + 1)
+  for entry in env:
+    let equals = entry.find('=')
+    if equals > 0 and entry[0 ..< equals] == varName:
+      inherited = entry[equals + 1 .. ^1]
+    else:
+      result.add(entry)
+  let prefix = @flags.join(" ")
+  result.add(varName & "=" &
+    (if inherited.len > 0: prefix & " " & inherited else: prefix))
+
+proc compilerStemWithoutVersion(stem: string): string =
+  result = stem.toLowerAscii
+  let separator = result.rfind('-')
+  if separator < 0 or separator + 1 >= result.len:
+    return
+  var isVersion = true
+  for ch in result[separator + 1 .. ^1]:
+    if ch notin {'0'..'9', '.'}:
+      isVersion = false
+      break
+  if isVersion:
+    result.setLen(separator)
+
+proc isGccFamilyCompiler(stem: string): bool =
+  let candidate = compilerStemWithoutVersion(stem)
+  for compiler in ["gcc", "g++", "cc", "c++", "cpp"]:
+    if candidate == compiler or candidate.endsWith("-" & compiler):
+      return true
+
+proc applyCompilerSystemIncludeArgs*(argv: openArray[string];
+                                     systemDirs: openArray[string]):
+    seq[string] =
+  ## Environment flags cover build-system compiler launches. Mirror them onto
+  ## direct GCC-family actions, including io-monitor-wrapped commands.
+  result = @argv
+  if systemDirs.len == 0 or argv.len == 0:
+    return
+  var base = 0
+  for i in countdown(argv.len - 1, 0):
+    if argv[i] == "--":
+      base = i + 1
+      break
+  if base >= argv.len or not isGccFamilyCompiler(extractFilename(argv[base])):
+    return
+  let flags = compilerSystemIncludeFlags(systemDirs)
+  if flags.len == 0:
+    return
+  result = @[]
+  for i in 0 .. base:
+    result.add(argv[i])
+  result.add(flags)
+  for i in base + 1 ..< argv.len:
+    result.add(argv[i])
+
+proc sourcePerlModuleDirs(libDirs: openArray[string]): seq[string] =
+  ## A relocated source Perl keeps core modules under usr/lib/perl5, while
+  ## its compiled-in @INC still names the original host prefix.
+  var seen = initHashSet[string]()
+  const sourcePerlMarker = "/recipes/packages/source/perl/"
+  for libDir in libDirs:
+    if sourcePerlMarker notin libDir.replace('\\', '/'):
+      continue
+    let moduleDir = libDir / "perl5"
+    if moduleDir notin seen:
+      seen.incl(moduleDir)
+      result.add(moduleDir)
 
 proc applyResolvedAuxPathsTable*(env: StringTableRef;
                                  paths: ResolvedAuxPaths) =
@@ -2634,15 +2943,44 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   ## reads ``PKG_CONFIG_PATH``) and the nix wrapper.
   if env == nil:
     return
-  prependEnvDirs(env, "PKG_CONFIG_PATH", paths.pkgConfigDirs)
+  var pkgConfigCompatDirs = paths.pkgConfigDirs
+  let pathSep =
+    when defined(windows): ';'
+    else: ':'
+  for varName in ["PKG_CONFIG_PATH_FOR_TARGET", "PKG_CONFIG_PATH_FOR_BUILD"]:
+    let inherited =
+      if env.hasKey(varName): env[varName]
+      else: getEnv(varName)
+    for entry in inherited.split(pathSep):
+      if entry.len > 0:
+        pkgConfigCompatDirs.add(entry)
+  prependEnvDirs(env, "PKG_CONFIG_PATH", pkgConfigCompatDirs)
   prependEnvDirs(env, "PKG_CONFIG_PATH_FOR_TARGET", paths.pkgConfigDirs)
   prependEnvDirs(env, "PKG_CONFIG_PATH_FOR_BUILD", paths.pkgConfigDirs)
   prependEnvDirs(env, "CMAKE_PREFIX_PATH", paths.cmakePrefixDirs)
-  prependEnvDirs(env, "CPATH", paths.includeDirs)
+  let includePaths = partitionCompilerIncludePaths(paths)
+  prependEnvDirs(env, "CPATH", includePaths.regularDirs)
+  let systemFlags = compilerSystemIncludeFlags(includePaths.systemDirs)
+  # Build-machine helper programs need the same source sysroot as target
+  # objects. Several Autotools projects compile those helpers through the
+  # *_FOR_BUILD variables during a later make action.
+  for varName in ["CPPFLAGS", "CFLAGS", "CXXFLAGS",
+                  "HOSTCFLAGS", "HOSTCXXFLAGS",
+                  "CPPFLAGS_FOR_BUILD", "CFLAGS_FOR_BUILD",
+                  "CXXFLAGS_FOR_BUILD"]:
+    prependEnvFlags(env, varName, systemFlags)
   prependEnvDirs(env, "LIBRARY_PATH", paths.libDirs)
   # LD_LIBRARY_PATH covers run-time test execution; LIBRARY_PATH covers
-  # link-time. Same set of dirs feeds both.
-  prependEnvDirs(env, "LD_LIBRARY_PATH", paths.libDirs)
+  # link-time. Glibc outputs are link-only: loading an arbitrary dependency's
+  # libc into the action process can cross GLIBC_PRIVATE ABIs.
+  let runtimeLibDirs = runtimeSafeLibDirs(paths)
+  prependEnvDirs(env, "LD_LIBRARY_PATH", runtimeLibDirs)
+  prependEnvDirs(env, "PERL5LIB", sourcePerlModuleDirs(paths.libDirs))
+  prependEnvDirs(env, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
+  when defined(macosx):
+    # macOS' dynamic loader ignores LD_LIBRARY_PATH; DYLD_LIBRARY_PATH is the
+    # run-time counterpart needed by tools that dlopen libraries by leaf name.
+    prependEnvDirs(env, "DYLD_LIBRARY_PATH", runtimeLibDirs)
 
 proc applyResolvedAuxPathsArgv*(env: seq[string];
                                 paths: ResolvedAuxPaths): seq[string] =
@@ -2650,15 +2988,211 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   ## inline-runquota paths. See ``applyResolvedAuxPathsTable`` for
   ## the rationale on ``PKG_CONFIG_PATH_FOR_{TARGET,BUILD}``.
   result = env
-  result = prependEnvDirsToArgvEnv(result, "PKG_CONFIG_PATH", paths.pkgConfigDirs)
+  var pkgConfigCompatDirs = paths.pkgConfigDirs
+  let pathSep =
+    when defined(windows): ';'
+    else: ':'
+  for varName in ["PKG_CONFIG_PATH_FOR_TARGET", "PKG_CONFIG_PATH_FOR_BUILD"]:
+    var inherited = getEnv(varName)
+    for item in env:
+      let equals = item.find('=')
+      if equals > 0 and item[0 ..< equals] == varName:
+        inherited = item[equals + 1 .. ^1]
+    for entry in inherited.split(pathSep):
+      if entry.len > 0:
+        pkgConfigCompatDirs.add(entry)
+  result = prependEnvDirsToArgvEnv(result, "PKG_CONFIG_PATH",
+    pkgConfigCompatDirs)
   result = prependEnvDirsToArgvEnv(result, "PKG_CONFIG_PATH_FOR_TARGET",
     paths.pkgConfigDirs)
   result = prependEnvDirsToArgvEnv(result, "PKG_CONFIG_PATH_FOR_BUILD",
     paths.pkgConfigDirs)
   result = prependEnvDirsToArgvEnv(result, "CMAKE_PREFIX_PATH", paths.cmakePrefixDirs)
-  result = prependEnvDirsToArgvEnv(result, "CPATH", paths.includeDirs)
+  let includePaths = partitionCompilerIncludePaths(paths)
+  result = prependEnvDirsToArgvEnv(result, "CPATH",
+    includePaths.regularDirs)
+  let systemFlags = compilerSystemIncludeFlags(includePaths.systemDirs)
+  for varName in ["CPPFLAGS", "CFLAGS", "CXXFLAGS",
+                  "HOSTCFLAGS", "HOSTCXXFLAGS",
+                  "CPPFLAGS_FOR_BUILD", "CFLAGS_FOR_BUILD",
+                  "CXXFLAGS_FOR_BUILD"]:
+    result = prependEnvFlagsToArgvEnv(result, varName, systemFlags)
   result = prependEnvDirsToArgvEnv(result, "LIBRARY_PATH", paths.libDirs)
-  result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", paths.libDirs)
+  let runtimeLibDirs = runtimeSafeLibDirs(paths)
+  result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", runtimeLibDirs)
+  result = prependEnvDirsToArgvEnv(result, "PERL5LIB",
+    sourcePerlModuleDirs(paths.libDirs))
+  result = prependEnvDirsToArgvEnv(result, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
+  when defined(macosx):
+    result = prependEnvDirsToArgvEnv(result, "DYLD_LIBRARY_PATH", runtimeLibDirs)
+
+proc shellScriptArgIndex(argv: openArray[string]): int =
+  ## Return the script argument consumed by a POSIX shell's ``-c`` option.
+  ## Monitored actions carry ``repro internal io monitor ... --`` before the
+  ## real command, so use the same last-separator rule as ``applyNimPathArgs``.
+  if argv.len < 3:
+    return -1
+  var base = 0
+  for i in countdown(argv.len - 1, 0):
+    if argv[i] == "--":
+      base = i + 1
+      break
+  if base >= argv.len - 1:
+    return -1
+  var stem = extractFilename(argv[base]).toLowerAscii
+  when defined(windows):
+    if stem.endsWith(".exe"):
+      stem.setLen(stem.len - 4)
+  const shells = ["sh", "bash", "dash", "ash", "ksh", "mksh", "zsh"]
+  if stem notin shells:
+    return -1
+  for i in base + 1 ..< argv.len - 1:
+    let option = argv[i]
+    if option == "-c" or
+        (option.len > 2 and option[0] == '-' and option[1] != '-' and
+         'c' in option[1 .. ^1]):
+      return i + 1
+  -1
+
+proc isRuntimeLibraryEnv(name: string): bool {.inline.} =
+  name == "LD_LIBRARY_PATH" or name == "DYLD_LIBRARY_PATH"
+
+proc deferRuntimeLibraryEnvForShell*(argv, env: seq[string]):
+    tuple[argv: seq[string], env: seq[string]] =
+  ## A dependency's runtime library directory may contain a SONAME also used
+  ## by the shell itself. Starting a Nix shell with a source-built readline
+  ## directory in ``LD_LIBRARY_PATH``, for example, can make the dynamic
+  ## loader pair Bash with an incompatible readline before ``-c`` runs.
+  ##
+  ## Shell actions do not need these variables until their program begins.
+  ## Move explicit loader-path entries from the process environment into
+  ## exports at the start of that program. The monitor and interpreter then
+  ## start against their own libraries, while every command run by the action
+  ## receives the same loader paths. Non-shell argv is unchanged.
+  result.argv = @[]
+  for arg in argv:
+    result.argv.add(arg)
+  result.env = @[]
+  for entry in env:
+    result.env.add(entry)
+  when defined(posix):
+    let scriptIndex = shellScriptArgIndex(argv)
+    if scriptIndex < 0:
+      return
+    var values: array[2, string]
+    var found: array[2, bool]
+    const names = ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"]
+    for entry in env:
+      let eq = entry.find('=')
+      if eq <= 0:
+        continue
+      let name = entry[0 ..< eq]
+      for i, candidate in names:
+        if name == candidate:
+          values[i] = entry[eq + 1 .. ^1]
+          found[i] = true
+    if not found[0] and not found[1]:
+      return
+    result.env.setLen(0)
+    for entry in env:
+      let eq = entry.find('=')
+      if eq <= 0 or not isRuntimeLibraryEnv(entry[0 ..< eq]):
+        result.env.add(entry)
+    var prefix = ""
+    for i, name in names:
+      if found[i]:
+        prefix.add("export " & name & "=" & quoteShell(values[i]) & "; ")
+    result.argv[scriptIndex] = prefix & result.argv[scriptIndex]
+
+proc deferRuntimeLibraryEnvForShell*(argv: seq[string];
+                                     env: StringTableRef): seq[string] =
+  ## StringTable counterpart for the direct RunQuota-bypass launcher.
+  result = @[]
+  for arg in argv:
+    result.add(arg)
+  when defined(posix):
+    let scriptIndex = shellScriptArgIndex(argv)
+    if scriptIndex < 0 or env == nil:
+      return
+    const names = ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"]
+    var prefix = ""
+    for name in names:
+      if env.hasKey(name):
+        prefix.add("export " & name & "=" & quoteShell(env[name]) & "; ")
+        env.del(name)
+    if prefix.len > 0:
+      result[scriptIndex] = prefix & result[scriptIndex]
+
+proc applyNimPathArgs*(argv: openArray[string];
+                       nimPathDirs: openArray[string]): seq[string] =
+  ## Cross-Repo-Source-Consumption SC-11 (§4.2a.3) — the Nim library-source
+  ## channel's argv projection. Where the C/C++ channels prepend an ENV VAR,
+  ## the Nim channel prepends a compiler FLAG: for each sibling Nim library
+  ## source root in ``nimPathDirs`` it inserts a ``--path:<dir>`` argument onto
+  ## the consumer's ``nim c`` invocation so ``import <sibmod>`` resolves
+  ## through the threaded search path — the same aux-projection seam, driven
+  ## off the same ``ProducerAuxPaths.nimPathDirs``.
+  ##
+  ## The insert is gated on the argv being a Nim compile: the command token
+  ## (``argv[base]``) has basename ``nim`` (the standard ``nim c ...`` /
+  ## ``buildNimUnittest`` shape) and a compile subcommand token (``c``/``cc``/
+  ## ``compile``/``compileToC``/``c++``/``cpp``/``js``/``e``) appears at
+  ## ``argv[base+1]``. The flags are inserted immediately AFTER that subcommand
+  ## token (Nim accepts options anywhere after the command, so this is
+  ## order-safe against the trailing ``--out:``/positional source). An empty
+  ## ``nimPathDirs`` or a non-Nim argv is the identity transform, so every
+  ## non-Nim-library-consumer action is byte-for-byte unchanged.
+  ##
+  ## The engine wraps a monitored action's argv in an io-monitor prefix
+  ## (``<repro> internal io monitor --depfile <f> -- <real argv>``,
+  ## ``maybeWrapWithMonitor``). ``base`` is the index just past that ``--``
+  ## separator when present, so the Nim compile is recognised whether or not
+  ## the action was monitor-wrapped; the ``--path:`` flags are always inserted
+  ## into the REAL ``nim c`` argv, never into the monitor prefix.
+  result = @[]
+  for a in argv: result.add(a)
+  if nimPathDirs.len == 0 or argv.len < 2:
+    return
+  # Locate the real command start, skipping a leading io-monitor wrapper by
+  # finding the LAST ``--`` argument separator (the monitor CLI ends its own
+  # options with ``--``; a plain ``nim c`` argv has none). ``base`` is the
+  # first token after it, else 0.
+  var base = 0
+  for i in countdown(argv.len - 1, 0):
+    if argv[i] == "--":
+      base = i + 1
+      break
+  if base >= argv.len - 1:
+    return
+  let exeBase = extractFilename(argv[base])
+  let stem =
+    when defined(windows):
+      (if exeBase.toLowerAscii.endsWith(".exe"):
+        exeBase[0 ..< exeBase.len - 4] else: exeBase).toLowerAscii
+    else:
+      exeBase
+  if stem != "nim":
+    return
+  const compileSubcommands = ["c", "cc", "compile", "compiletoc",
+    "c++", "cpp", "js", "e"]
+  if argv[base + 1].toLowerAscii notin compileSubcommands:
+    return
+  var flags: seq[string] = @[]
+  for d in nimPathDirs:
+    if d.len > 0:
+      flags.add("--path:" & d)
+  if flags.len == 0:
+    return
+  # Insert the ``--path:`` flags right after the subcommand token
+  # (``base + 1``), preserving the monitor prefix (if any) and the trailing
+  # ``--out:``/positional source.
+  result = @[]
+  for i in 0 .. base + 1:
+    result.add(argv[i])
+  for f in flags:
+    result.add(f)
+  for i in base + 2 ..< argv.len:
+    result.add(argv[i])
 
 proc launchChildEnv(action: BuildAction;
                     config: BuildEngineConfig): seq[string] =
@@ -2689,7 +3223,7 @@ proc launchChildEnv(action: BuildAction;
   ## inert for the ~99% of actions (plain ``nim c`` compiles) whose children
   ## never invoke ``repro``. Any explicit ``action.env`` entry wins (appended
   ## after).
-  result = @["REPROBUILD_NO_RUNQUOTA=1"]
+  result = @["REPROBUILD_NO_RUNQUOTA=1", "IO_MON_MUTE=1"]
   # M9.R.13c.2 — **shim-library env seed**. Inject
   # ``REPRO_MONITOR_SHIM_LIB`` at launch time so the daemon-spawned
   # ``repro internal io monitor`` subprocess deterministically locates
@@ -2873,7 +3407,15 @@ proc umaskWrappedArgv*(argv: openArray[string]): seq[string] =
     for i, a in argv:
       if i > 0: quoted.add(" ")
       quoted.add(quoteShell(a))
-    result.add("/bin/sh")
+    var shell = "/bin/sh"
+    when defined(macosx):
+      # RunQuota launches this argv directly. Using SIP-protected /bin/sh here
+      # strips DYLD_* before the monitored command starts, so daemon-hosted
+      # macOS actions lose both monitor injection and loader search paths.
+      let nonSipShell = resolveNonSipShell()
+      if nonSipShell.len > 0:
+        shell = nonSipShell
+    result.add(shell)
     result.add("-c")
     result.add("umask 022 && " & quoted)
   else:
@@ -2932,7 +3474,7 @@ proc startBypassRunQuotaProcess(action: BuildAction;
   let binDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   let hasAuxPaths = auxPaths.pkgConfigDirs.len + auxPaths.cmakePrefixDirs.len +
-    auxPaths.includeDirs.len + auxPaths.libDirs.len > 0
+    auxPaths.includeDirs.len + auxPaths.libDirs.len + auxPaths.nimPathDirs.len > 0
   if binDirs.len > 0 or hasAuxPaths:
     if env == nil:
       env = newStringTable(modeCaseSensitive)
@@ -2956,8 +3498,16 @@ proc startBypassRunQuotaProcess(action: BuildAction;
   # element per the host platform's shell rules; both branches end up
   # with one redirected-output pipeline that ``cmd`` / ``sh`` will
   # tokenize back into argv before exec'ing the real tool.
+  # SC-11 (§4.2a.3): thread the resolved Nim library source roots onto a
+  # ``nim c`` argv as ``--path:<dir>`` flags before quoting (identity for a
+  # non-Nim argv or when no cross-repo Nim library producer was resolved).
+  let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
+  let includePaths = partitionCompilerIncludePaths(auxPaths)
+  var adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
+    includePaths.systemDirs)
+  adjustedArgv = deferRuntimeLibraryEnvForShell(adjustedArgv, env)
   var quotedArgv = ""
-  for i, a in action.argv:
+  for i, a in adjustedArgv:
     if i > 0: quotedArgv.add(" ")
     quotedArgv.add(quoteShell(a))
   let redirectedArgv =
@@ -2969,22 +3519,38 @@ proc startBypassRunQuotaProcess(action: BuildAction;
     # environment; ``/C`` runs the command and terminates. Path lookup
     # for the real tool is delegated to ``cmd`` rather than ``startProcess``
     # because the wrapped command line itself contains the tool name.
-    result = startProcess("cmd.exe",
-      args = @["/D", "/C", redirectedArgv],
-      env = env,
+    let cmdExe = getEnv("SystemRoot") / "System32" / "cmd.exe"
+    let cmdLine = "\"" & cmdExe & "\" /D /C \"" & redirectedArgv & "\""
+    result = startProcess(command = cmdLine,
       workingDir = cwd,
-      options = {poUsePath})
+      env = env,
+      options = {poEvalCommand})
   else:
     # POSIX wrapper shell. On Linux ``/bin/sh`` is not SIP-protected so it is
-    # used directly. On macOS a MONITORED action (one the engine wrapped with
-    # the io-mon monitor — ``action.monitorDepfile.len > 0``) MUST NOT be routed
-    # through the SIP-protected ``/bin/sh`` (B1): that strips
-    # ``DYLD_INSERT_LIBRARIES`` at the top of the tree and degrades injection.
+    # used directly. On macOS we prefer a non-SIP shell when one is available:
+    # a SIP-protected ``/bin/sh`` strips ``DYLD_*`` at the top of the tree,
+    # which breaks both monitored io-mon injection and unmonitored actions that
+    # need DYLD_LIBRARY_PATH for dlopen-only libraries.
     var wrapperShell = "/bin/sh"
     when defined(macosx):
-      if action.monitorDepfile.len > 0:
-        wrapperShell = resolveNonSipShell()
-        if wrapperShell.len == 0:
+      # SIP-protected /bin/sh strips all DYLD_* variables, not only
+      # DYLD_INSERT_LIBRARIES. The action environment may receive those
+      # variables after the daemon process itself started, so testing only
+      # getEnv("DYLD_LIBRARY_PATH") here misses daemon-hosted builds. Prefer the
+      # non-SIP shell whenever it exists; require it when correctness depends on
+      # preserving monitor injection or DYLD loader paths.
+      let nonSipShell = resolveNonSipShell()
+      if nonSipShell.len > 0:
+        wrapperShell = nonSipShell
+      else:
+        let needsDyldEnv =
+          getEnv("DYLD_LIBRARY_PATH").len > 0 or
+          getEnv("DYLD_FALLBACK_LIBRARY_PATH").len > 0 or
+          (env != nil and (
+            env.hasKey("DYLD_LIBRARY_PATH") or
+            env.hasKey("DYLD_FALLBACK_LIBRARY_PATH") or
+            env.hasKey("DYLD_INSERT_LIBRARIES")))
+        if action.monitorDepfile.len > 0 or needsDyldEnv:
           # Monitor-Hook-Shim.md:501 fail-safe: monitoring is required for this
           # action but no injectable (non-SIP) wrapper shell is available, so we
           # cannot launch it without losing shim injection on macOS. Running it
@@ -2994,12 +3560,18 @@ proc startBypassRunQuotaProcess(action: BuildAction;
           # failure" hazard the spec forbids. Fail the launch conservatively
           # instead; ``runBuild`` surfaces this as an action failure (and the
           # action is therefore never published to the cache).
+          let reason =
+            if action.monitorDepfile.len > 0:
+              "monitor injection"
+            else:
+              "DYLD_* loader path propagation"
           raiseEngine(
-            "monitored action " & action.id & " cannot be launched SIP-safely " &
-            "on macOS: no non-SIP shell found (set CT_SANDBOX_TOOLS_DIR to a " &
+            "action " & action.id & " cannot be launched SIP-safely for " &
+            reason & " on macOS: no non-SIP shell found " &
+            "(set CT_SANDBOX_TOOLS_DIR to a " &
             "drop-in bundle or provide a non-SIP sh on PATH). Refusing to run " &
-            "under SIP /bin/sh, which would strip DYLD_INSERT_LIBRARIES and " &
-            "produce incomplete, non-cacheable monitor evidence.")
+            "under SIP /bin/sh, which would strip DYLD_* loader variables and " &
+            "break either monitor injection or dlopen-only runtime libraries.")
     # M9.R.35.1 — pin the action's umask to a deterministic 022 so every
     # spawned tool creates files with the canonical ``rw-r--r--``
     # (0644) / ``rwxr-xr-x`` (0755) permissions. Without this pin, the
@@ -3058,16 +3630,23 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
   threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
+  let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
+  let includePaths = partitionCompilerIncludePaths(auxPaths)
+  let adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
+    includePaths.systemDirs)
+  let deferred = deferRuntimeLibraryEnvForShell(adjustedArgv, threadedEnv)
   # M9.R.36.3 — same umask-022 pin we apply on the bypass path. The
   # runquota helper forwards ``command.argv`` straight through to its
   # ``launchProcess`` call site, so without this wrap the daemon-mode
   # build inherits whatever umask the runquotad daemon's parent shell
   # had — recreating the qmlcachegen mode-corruption channel that
   # M9.R.35.1 closed on the ``bypassRunQuota`` path.
+  # SC-11 (§4.2a.3): thread resolved Nim library source roots onto a ``nim c``
+  # argv as ``--path:<dir>`` flags before the umask wrap (identity otherwise).
   let command = ReproCommandSpec(
-    argv: umaskWrappedArgv(action.argv),
+    argv: umaskWrappedArgv(deferred.argv),
     cwd: action.cwd,
-    env: threadedEnv,
+    env: deferred.env,
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
   let helper = if config.runQuotaCliPath.len > 0: config.runQuotaCliPath
@@ -3094,15 +3673,22 @@ proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
   threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
+  let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
+  let includePaths = partitionCompilerIncludePaths(auxPaths)
+  let adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
+    includePaths.systemDirs)
+  let deferred = deferRuntimeLibraryEnvForShell(adjustedArgv, threadedEnv)
   # M9.R.36.3 — apply the same umask-022 wrap the helper-spawn and
   # bypass paths use. The inline-runquota path likewise forwards
   # ``command.argv`` to ``launchProcess`` inside the helper / inline
   # batch, so an unwrapped argv would resurrect the qmlcachegen mode
   # drift.
+  # SC-11 (§4.2a.3): thread resolved Nim library source roots onto a ``nim c``
+  # argv as ``--path:<dir>`` flags before the umask wrap (identity otherwise).
   ReproCommandSpec(
-    argv: umaskWrappedArgv(action.argv),
+    argv: umaskWrappedArgv(deferred.argv),
     cwd: action.cwd,
-    env: threadedEnv,
+    env: deferred.env,
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
 
@@ -3182,11 +3768,22 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
     # build/reprobuild/build-engine-cache/runquota-results/1.json. Without
     # the \\?\ prefix, parseFile() raises "cannot read from file" even when
     # the prior fileExists() check (which DOES use extendedPath) saw it.
-    let node = parseFile(extendedPath(resultPath))
+    var node: JsonNode
+    var attempts = 0
+    while true:
+      try:
+        node = parseFile(extendedPath(resultPath))
+        break
+      except IOError as e:
+        attempts += 1
+        if attempts >= 20:
+          raise e
+        sleep(5)
+
     result.leaseId = node{"lease_id"}.getBiggestInt(0).uint64
     result.exitCode = node{"exit_code"}.getInt(1)
     result.stdout = node{"stdout"}.getStr("")
-    result.stderr = node{"stderr"}.getStr("")
+    result.stderr = stripMonitorBanner(node{"stderr"}.getStr(""))
     let runnerError = node{"runner_error"}.getStr("")
     if runnerError.len > 0:
       if result.stderr.len > 0:
@@ -3217,7 +3814,7 @@ proc finishInlineRunQuotaProcess(id: string;
     result.leaseId = execution.leaseId
     result.exitCode = execution.exitCode
     result.stdout = execution.stdout
-    result.stderr = execution.stderr
+    result.stderr = stripMonitorBanner(execution.stderr)
     result.runQuotaBackend = execution.backendName
     result.runQuotaSocket = getEnv("RUNQUOTA_SOCKET", "")
     result.status =
@@ -3380,7 +3977,7 @@ proc parsePreserveTreeEntry(entry: string): PreserveTreeEntry =
       target: fields[2])
   PreserveTreeEntry(kind: ptekFile, relative: normalized)
 
-proc executeBuiltinAction(action: BuildAction): ActionResult =
+proc executeBuiltinAction*(action: BuildAction): ActionResult =
   result = ActionResult(
     id: action.id,
     launched: true,
@@ -3410,9 +4007,82 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
       if action.outputs.len != 1:
         raiseEngine("writeText action requires exactly one output: " & action.id)
       let destination = action.builtinPath(action.outputs[0])
-      createDir(extendedPath(destination.splitPath.head))
-      prepareBuiltinFileOutput(destination)
-      writeFile(extendedPath(destination), action.builtinText)
+      let destExt = extendedPath(destination)
+      let text = action.builtinText
+      if fileExists(destExt) and readFile(destExt) == text:
+        discard
+      else:
+        createDir(extendedPath(destination.splitPath.head))
+        prepareBuiltinFileOutput(destination)
+        writeFile(destExt, text)
+    of bakEnsureLine:
+      if action.outputs.len != 1:
+        raiseEngine("ensureLine action requires exactly one output: " & action.id)
+      let destination = action.builtinPath(action.outputs[0])
+      let destExt = extendedPath(destination)
+      let lineToEnsure = action.builtinText
+      var content = ""
+      var linesList: seq[string] = @[]
+      if fileExists(destExt):
+        content = readFile(destExt)
+        linesList = content.splitLines()
+      var found = false
+      let lineToEnsureStrip = lineToEnsure.strip()
+      for l in linesList:
+        if l.strip() == lineToEnsureStrip:
+          found = true
+          break
+      if not found:
+        createDir(destExt.splitPath.head)
+        prepareBuiltinFileOutput(destination)
+        var newContent = content
+        if newContent.len > 0 and not newContent.endsWith("\n") and not newContent.endsWith("\r"):
+          newContent.add("\n")
+        newContent.add(lineToEnsure)
+        newContent.add("\n")
+        writeFile(destExt, newContent)
+    of bakEnsureSnippet:
+      if action.outputs.len != 1:
+        raiseEngine("ensureSnippet action requires exactly one output: " & action.id)
+      if action.builtinEntries.len < 5:
+        raiseEngine("ensureSnippet action requires openSentinel, closeSentinel, openSearch, closeSearch, and snippet")
+      let destination = action.builtinPath(action.outputs[0])
+      let destExt = extendedPath(destination)
+      let openSentinel = action.builtinEntries[0]
+      let closeSentinel = action.builtinEntries[1]
+      let openSearch = action.builtinEntries[2]
+      let closeSearch = action.builtinEntries[3]
+      let snippet = action.builtinEntries[4]
+      var content = ""
+      if fileExists(destExt):
+        content = readFile(destExt)
+      let newBlock = openSentinel & "\n" & snippet & "\n" & closeSentinel
+      var startIdx = -1
+      var endIdx = -1
+      let linesList = content.splitLines()
+      for i, l in linesList:
+        if l.strip().startsWith(openSearch):
+          startIdx = i
+        elif l.strip().startsWith(closeSearch) and startIdx != -1:
+          endIdx = i
+          break
+      var newLinesList: seq[string] = @[]
+      if startIdx != -1 and endIdx != -1:
+        for i in 0 ..< startIdx:
+          newLinesList.add(linesList[i])
+        newLinesList.add(newBlock)
+        for i in (endIdx + 1) ..< linesList.len:
+          newLinesList.add(linesList[i])
+      else:
+        newLinesList = linesList
+        if newLinesList.len > 0 and newLinesList[^1].strip().len > 0:
+          newLinesList.add("")
+        newLinesList.add(newBlock)
+      let newContent = newLinesList.join("\n") & "\n"
+      if content != newContent:
+        createDir(destExt.splitPath.head)
+        prepareBuiltinFileOutput(destination)
+        writeFile(destExt, newContent)
     of bakStamp:
       if action.outputs.len != 1:
         raiseEngine("stamp action requires exactly one output: " & action.id)
@@ -3511,6 +4181,150 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
       result.runQuotaBackend = if subRes.runQuotaBackend.len > 0:
         subRes.runQuotaBackend else: "binary-cache-substitute"
       return
+    of bakForeignProvision:
+      when defined(windows):
+        raiseEngine("bakForeignProvision is not supported on Windows")
+      else:
+        # Nix evaluation daemon or scoop provisioning action
+        let provisioner = if action.argv.len > 0: action.argv[0] else: ""
+        let selector = if action.argv.len > 1: action.argv[1] else: ""
+        if provisioner.len == 0 or selector.len == 0:
+          raiseEngine("bakForeignProvision action requires provisioner and selector in argv: " & action.id)
+        if action.outputs.len != 1:
+          raiseEngine("bakForeignProvision action requires exactly one output receipt: " & action.id)
+        
+        let receiptPath = action.builtinPath(action.outputs[0])
+        if provisioner != "nix":
+          raiseEngine("Unsupported provisioner: " & provisioner)
+        
+        let socketPath = "/tmp/reprobuild-nix-daemon-" & getEnv("USER", "default") & ".sock"
+        var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
+        var connected = false
+        try:
+          sock.connectUnix(socketPath)
+          connected = true
+        except CatchableError:
+          # Spawn daemon process detached
+          let envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN")
+          let localBin = action.cwd / "build" / "reprobuild-nix-daemon"
+          let localTool = action.cwd / "tools" / "reprobuild-nix-daemon" /
+            "reprobuild-nix-daemon"
+          let localBin2 = action.cwd.parentDir / "reprobuild-nix-daemon" /
+            "build" / "reprobuild-nix-daemon"
+          # When repro builds a FOREIGN target (e.g. codetracer's `ct`),
+          # `action.cwd` is the foreign repo, so the candidates above never find
+          # the daemon that ships in reprobuild's own tree. Anchor on
+          # reprobuild's source root instead — mirrors how the monitor shim is
+          # resolved (see repro_cli_support.resolveMonitorShim). REPROBUILD_
+          # SOURCE_ROOT is exported by codetracer's build-once.sh and forwarded
+          # by the daemon; getAppFilename() covers direct (non-daemon) builds.
+          let sourceRoot = block:
+            let env = getEnv("REPROBUILD_SOURCE_ROOT")
+            if env.len > 0: env
+            else:
+              let exe = getAppFilename()
+              if exe.len > 0: exe.parentDir.parentDir else: ""
+          let rootTool =
+            if sourceRoot.len > 0:
+              sourceRoot / "tools" / "reprobuild-nix-daemon" /
+                "reprobuild-nix-daemon"
+            else: ""
+          let rootBuild =
+            if sourceRoot.len > 0:
+              sourceRoot / "build" / "reprobuild-nix-daemon"
+            else: ""
+          proc executableFile(path: string): bool =
+            if path.len == 0 or not fileExists(path):
+              return false
+            when defined(posix):
+              let perms = getFilePermissions(path)
+              result = fpUserExec in perms or fpGroupExec in perms or
+                fpOthersExec in perms
+            else:
+              result = true
+          proc requireExecutableCandidate(path, label: string): bool =
+            if path.len == 0 or not fileExists(path):
+              return false
+            if not executableFile(path):
+              raiseEngine(label & " exists but is not executable: " & path)
+            true
+          let daemonExe = if envBin.len > 0:
+                            if not requireExecutableCandidate(envBin,
+                                "REPROBUILD_NIX_DAEMON_BIN"):
+                              raiseEngine("REPROBUILD_NIX_DAEMON_BIN does not exist: " & envBin)
+                            envBin
+                          elif requireExecutableCandidate(localBin,
+                              "local reprobuild-nix-daemon"):
+                            localBin
+                          elif requireExecutableCandidate(localTool,
+                              "local tools reprobuild-nix-daemon"):
+                            localTool
+                          elif requireExecutableCandidate(localBin2,
+                              "sibling reprobuild-nix-daemon"):
+                            localBin2
+                          elif requireExecutableCandidate(rootTool,
+                              "source-root tools reprobuild-nix-daemon"):
+                            rootTool
+                          elif requireExecutableCandidate(rootBuild,
+                              "source-root build reprobuild-nix-daemon"):
+                            rootBuild
+                          else:
+                            "reprobuild-nix-daemon"
+          discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
+            options = {poDaemon, poUsePath})
+          for i in 0 .. 40:
+            sleep(50)
+            try:
+              sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
+              sock.connectUnix(socketPath)
+              connected = true
+              break
+            except CatchableError:
+              discard
+        if not connected:
+          raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
+        
+        let req = %*{
+          "action": "resolve",
+          "selector": selector,
+          "workspaceRoot": action.cwd
+        }
+        sock.send($req & "\n")
+        var respLine = ""
+        sock.readLine(respLine)
+        sock.close()
+        
+        if respLine.len == 0:
+          raiseEngine("Received empty response from reprobuild-nix-daemon")
+        
+        let resp = parseJson(respLine)
+        if resp.getOrDefault("status").getStr() != "success":
+          raiseEngine("Daemon resolution error: " & resp.getOrDefault("error").getStr())
+        
+        let paths = resp.getOrDefault("paths")
+        if paths.len == 0:
+          raiseEngine("Daemon returned no materialized paths for selector: " & selector)
+        
+        let outPath = paths[0].getStr()
+        createDir(extendedPath(receiptPath.splitPath.head))
+        prepareBuiltinFileOutput(receiptPath)
+        writeFile(extendedPath(receiptPath), outPath)
+        
+        var observedReads: seq[string] = @[]
+        if resp.hasKey("dependencies"):
+          for depNode in resp["dependencies"]:
+            let depPath = depNode.getOrDefault("path").getStr()
+            if depPath.len > 0:
+              observedReads.add(relativePath(depPath, action.cwd))
+              
+        result.status = asSucceeded
+        result.exitCode = 0
+        result.evidence = PathSetEvidence(
+          declaredInputs: action.inputs,
+          declaredOutputs: action.outputs,
+          monitorReads: observedReads
+        )
+        return
     of bakProcess:
       raiseEngine("process action cannot be executed as a built-in: " & action.id)
     result.status = asSucceeded
@@ -3551,14 +4365,85 @@ proc actionCacheDurableEvidence(root: string): string =
   # (and its `createDir` work) for the same root within a process.
   durableEvidence(root / "hot-records")
 
-proc warmActionCacheFor(root: string): WarmActionCache =
+proc warmActionCacheFor(root: string; attachShm = true): WarmActionCache =
+  let key = root & "\0" & (if attachShm: "shm" else: "disk")
   let evidence = actionCacheDurableEvidence(root)
-  if processWarmActionCaches.hasKey(root):
-    let warm = processWarmActionCaches[root]
+  if processWarmActionCaches.hasKey(key):
+    let warm = processWarmActionCaches[key]
     if warm.evidence == evidence:
       return warm
-  result = WarmActionCache(cache: openActionCache(root), evidence: evidence)
-  processWarmActionCaches[root] = result
+  result = WarmActionCache(
+    cache: openActionCache(root, attachShm = attachShm),
+    evidence: evidence)
+  processWarmActionCaches[key] = result
+
+proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
+    publisher: BinaryCachePublisher): BuildRunResult =
+  ## Publish tagged public-interface roots that are already materialized,
+  ## without scheduling or launching build actions. This is an explicit
+  ## operator backfill path: graph identities still select the cache keys,
+  ## while the existing filesystem trees provide the payloads.
+  for action in g.actions:
+    if not action.publishToBinaryCache or action.cacheEntryIdentity.isNone:
+      continue
+    var item = ActionResult(
+      id: action.id,
+      status: asFailed,
+      cacheDecision: cdNotCacheable,
+      reason: "materialized-binary-cache-publish key=" &
+        deriveActionCacheKeyHex(action))
+    let prefix =
+      if action.declaredOutputs.len == 1:
+        action.declaredOutputs[0]
+      elif action.outputs.len > 0:
+        action.outputs[0]
+      else:
+        ""
+    if publisher == nil:
+      item.stderr = "binary-cache publisher is not configured"
+      result.results.add(item)
+      continue
+    if prefix.len == 0 or
+        (not fileExists(prefix) and not dirExists(prefix)):
+      item.stderr = "materialized binary-cache prefix does not exist: " &
+        (if prefix.len > 0: prefix else: "<empty>")
+      result.results.add(item)
+      continue
+    var identity = action.cacheEntryIdentity.get()
+    let platformTag =
+      if action.cachePlatformTag.len == 0: NativeTriple
+      else: action.cachePlatformTag
+    identity.addOption(CachePlatformTagOptionKey, platformTag)
+    let request = BinaryCachePublishRequest(
+      actionId: action.id,
+      weakFingerprint: action.weakFingerprint,
+      identity: identity,
+      cwd: action.cwd,
+      publishPrefix: prefix,
+      declaredOutputs: action.outputs,
+      recordOutputs: @[])
+    let publishResult =
+      try: publisher(request)
+      except CatchableError as e:
+        BinaryCachePublishResult(
+          ok: false,
+          statusCode: 0,
+          error: "binary-cache publisher raised: " & e.msg)
+    if publishResult.ok:
+      item.status = asUpToDate
+      item.reason = "materialized-binary-cache-published key=" &
+        deriveActionCacheKeyHex(action)
+    else:
+      item.exitCode = publishResult.statusCode
+      item.stderr = publishResult.error
+    result.results.add(item)
+  if result.results.len == 0:
+    result.results.add(ActionResult(
+      id: "binary-cache-materialized",
+      status: asFailed,
+      cacheDecision: cdNotCacheable,
+      reason: "materialized-binary-cache-no-entries",
+      stderr: "no tagged materialized binary-cache entries in selected graph"))
 
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var stats: BuildStats
@@ -3627,7 +4512,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # The CAS and action-cache live under the shared user-level
   # `actionCacheRoot` when set (Provider-Compile-Tiering.md §"Cache Scope"
   # Phase 1). When empty (legacy / unmigrated callers, tests), they fall
-  # back to `cacheRoot` so the single-root layout still works.
+  # back to `cacheRoot` so the single-root layout still works. Only the
+  # explicit shared root attaches the shm hot tier: local/workspace scratch
+  # roots must stay fully synchronous Tier-1 stores so no detached cache daemon
+  # can outlive the command and write back into a directory the caller is
+  # immediately deleting.
   let sharedRoot = if config.actionCacheRoot.len > 0:
       config.actionCacheRoot
     else:
@@ -3636,7 +4525,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var cas = openCasStore(sharedRoot)
   finishStat("repro cas open", casOpenStart)
   let actionCacheOpenStart = statStart()
-  let warmCache = warmActionCacheFor(sharedRoot / "action-cache")
+  let attachActionCacheShm = config.actionCacheRoot.len > 0
+  let warmCache = warmActionCacheFor(sharedRoot / "action-cache",
+    attachShm = attachActionCacheShm)
   var cache = warmCache.cache
   finishStat("repro action cache open", actionCacheOpenStart)
   defer:
@@ -3689,7 +4580,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     finishStat("repro peer-cache publish", publishStart)
 
   proc publishBinaryCacheBundle(action: BuildAction;
-                                record: ActionResultRecord) =
+                                record: ActionResultRecord;
+                                allowMaterializedOutputs = false) =
     ## M9.L.4-refactor Step A binary-cache publisher hook. Soft-fail
     ## like ``publishPeerCacheBundle``: a failed publish is logged
     ## into stats but does NOT abort the build.
@@ -3705,17 +4597,29 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ##   * ``action.cacheEntryIdentity.isNone`` — no identity tuple
     ##     to derive the entry-key from. Hard requirement; without
     ##     the identity the publisher cannot run its drift-guard.
-    ##   * ``record.outputPayloadKind != opkCasBlobs`` — the cache
-    ##     record didn't capture output payloads (metadata-only
-    ##     mode), so the publisher has nothing to ship. Mirrors the
-    ##     same guard in ``publishPeerCacheBundle``.
+    ##   * ``record.outputPayloadKind != opkCasBlobs`` — unless the caller
+    ##     explicitly verified that the outputs are currently materialized.
+    ##     The binary-cache publisher packages declared filesystem outputs;
+    ##     unlike the peer-cache publisher it does not read local CAS blobs.
     if config.binaryCachePublisher == nil:
       return
-    if not action.publishToBinaryCache:
+    # L3 PUBLISH-SCOPE — per-(action, cache) publish decision:
+    #   publish IF (cache scope == intermediate)
+    #          OR (action produces a public-interface artifact — i.e. it
+    #              carries ``publishToBinaryCache = true`` + an identity).
+    #
+    # RELEASE cache (default): only tagged public-interface members ship.
+    # INTERMEDIATE cache: EVERY successful cacheable action with CAS
+    # blobs ships, including untagged intermediate artefacts — the
+    # engine synthesises a per-action identity for those (keyed on the
+    # action id + weak fingerprint so intermediate entries are stable
+    # and distinct without a recipe-declared identity).
+    let isPublicInterface =
+      action.publishToBinaryCache and action.cacheEntryIdentity.isSome
+    if not isPublicInterface and not config.binaryCacheIntermediateScope:
       return
-    if action.cacheEntryIdentity.isNone:
-      return
-    if record.outputPayloadKind != opkCasBlobs:
+    if record.outputPayloadKind != opkCasBlobs and
+        not allowMaterializedOutputs:
       return
     let publishStart = statStart()
     var recordOutputs: seq[string] = @[]
@@ -3729,7 +4633,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # two distinct entry-key hexes for the same recipe (and a
     # ``"native"``-tagged action produces a stable hex across recipes
     # that don't declare ``targetTriple`` at all).
-    var folded = action.cacheEntryIdentity.get()
+    var folded =
+      if isPublicInterface:
+        action.cacheEntryIdentity.get()
+      else:
+        # Intermediate, untagged action: synthesise a stable identity
+        # from the action id + weak fingerprint. Toolchain tag
+        # ``"intermediate"`` keeps these keys namespaced away from
+        # release (public-interface) entries so the two scopes never
+        # collide on the same cache.
+        publicInterfaceIdentity(
+          packageName = "intermediate:" & action.id,
+          packageVersion = "",
+          toolchainName = "intermediate",
+          providerRevision = toHex(action.weakFingerprint.bytes))
     let foldedTag =
       if action.cachePlatformTag.len == 0: NativeTriple
       else: action.cachePlatformTag
@@ -3739,6 +4656,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       weakFingerprint: action.weakFingerprint,
       identity: folded,
       cwd: action.cwd,
+      publishPrefix:
+        if action.publishToBinaryCache and action.declaredOutputs.len == 1:
+          action.declaredOutputs[0]
+        else:
+          "",
       declaredOutputs: action.outputs,
       recordOutputs: recordOutputs)
     let res =
@@ -3755,6 +4677,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     finishStat("repro binary-cache publish", publishStart)
 
   proc tryFastNoopCacheHits(): Option[BuildRunResult] =
+    # Backfill needs each full action-cache record so it can publish the
+    # validated, materialized output. The regular scheduler already performs
+    # that lookup and keeps publish failures soft.
+    if config.publishCachedResults:
+      return none(BuildRunResult)
     if not config.rebuildMissingOutputsOnCacheHit:
       return none(BuildRunResult)
     if config.progressCallback != nil:
@@ -3814,22 +4741,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       finishStat("repro hot record lookup", hotRecordLookupStart)
       if hotRecord.isNone:
         return none(BuildRunResult)
-      if not config.skipCacheHitEvidence:
-        hotRecords.add(hotRecord.get())
+      hotRecords.add(hotRecord.get())
     let lookupStart = statStart()
     let inputScanStart = statStart()
     let inputsUnchanged =
-      if buildGraph.actions.len == cache.hotMetadataRecordCount():
-        cache.hotMetadataInputsUnchanged(addr metadataCache)
-      else:
-        if config.skipCacheHitEvidence:
-          var selectedHotRecords: seq[ActionResultRecord] = @[]
-          for action in buildGraph.actions:
-            selectedHotRecords.add(cache.lookupHotMetadataRecord(
-              action.weakFingerprint, action.actionCachePolicy).get())
-          hotMetadataRecordInputsUnchanged(selectedHotRecords, addr metadataCache)
-        else:
-          hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache)
+      hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache)
     finishStat("repro hot input scan", inputScanStart)
     finishStat("repro cache lookup", lookupStart)
     if not inputsUnchanged:
@@ -4402,7 +5318,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             dependencyLaunched = true
             break
         if dependencyLaunched:
-          runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+          runResult.results[idToIndex.resultIndex(id)].cacheDecision =
+            if action.cacheable: cdMiss else: cdNotCacheable
           runResult.results[idToIndex.resultIndex(id)].reason =
             "dependency-launched"
           runResult.trace(id, "cache-skipped", "dependency-launched")
@@ -4480,6 +5397,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if config.rebuildMissingOutputsOnCacheHit and outputsPresent:
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
+              if config.publishCachedResults:
+                publishBinaryCacheBundle(action, lookup.record,
+                  allowMaterializedOutputs = true)
               completeSuccess(id, asUpToDate, cdHit, false, "outputs-present")
               inc completed
               launchedAny = true
@@ -4496,6 +5416,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               finishStat("repro cache restore", restoreStart)
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
+              if config.publishCachedResults:
+                publishBinaryCacheBundle(action, lookup.record,
+                  allowMaterializedOutputs = true)
               completeSuccess(id, asCacheHit, cdHit, false, "restored")
               inc completed
               launchedAny = true
@@ -4507,6 +5430,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if config.rebuildMissingOutputsOnCacheHit and outputsPresent:
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
+              if config.publishCachedResults:
+                publishBinaryCacheBundle(action, lookup.record,
+                  allowMaterializedOutputs = true)
               completeSuccess(id, asUpToDate, cdHybridCutoff, false,
                 "outputs-present")
               inc completed
@@ -4524,6 +5450,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               finishStat("repro cache restore", restoreStart)
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
+              if config.publishCachedResults:
+                publishBinaryCacheBundle(action, lookup.record,
+                  allowMaterializedOutputs = true)
               completeSuccess(id, asCacheHit, cdHybridCutoff, false, "restored")
               inc completed
               launchedAny = true
@@ -4700,9 +5629,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if action.cacheable and not evidence.disableCacheHits:
               let recordStart = statStart()
               let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
-                config.peerCacheActionPublisher != nil or
-                (config.binaryCachePublisher != nil and
-                  action.publishToBinaryCache)
+              config.peerCacheActionPublisher != nil or
+              (config.binaryCachePublisher != nil and
+                (action.publishToBinaryCache or
+                 config.binaryCacheIntermediateScope))
               let record = cache.recordActionResult(cas.inner,
                 action.weakFingerprint,
                 action.actionCachePolicy,
@@ -4819,8 +5749,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
                 config.peerCacheActionPublisher != nil or
                 (config.binaryCachePublisher != nil and
-                  plan.action.publishToBinaryCache)
-              let record = cache.recordActionResult(cas.inner, plan.action.weakFingerprint,
+                  (plan.action.publishToBinaryCache or
+                   config.binaryCacheIntermediateScope))
+              let record = cache.recordActionResult(cas.inner,
+                plan.action.weakFingerprint,
                 plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
                 plan.action.outputs, plan.action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
@@ -4921,7 +5853,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           completed = terminalCount()
           launchedAny = true
           continue
-        running.add(RunningAction(
+        var runningAction = RunningAction(
           id: id,
           pool: poolName,
           poolUnits: units,
@@ -4929,7 +5861,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           processKind: processKind,
           process: process,
           resultPath: resultPath
-        ))
+        )
+        when defined(posix):
+          runningAction.processGroupPid = assignProcessGroup(process)
+        running.add(runningAction)
         runResult.trace(id, startEvent, startDetail)
         emitProgress(bpkActionStarted, id)
         launchedAny = true
@@ -5019,17 +5954,61 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if running.len == 0:
         if ready.len > 0 and not launchedAny:
           raiseEngine("ready queue is blocked by pool capacity")
+        # The graph can advance no further: nothing is running, ready, or
+        # launchable, yet ``completed < total``. Historically this raised
+        # with ONLY the ``asPending`` ids — but when the stall is caused by
+        # a failed action whose dependents were cascaded to ``asBlocked``
+        # (e.g. a dev-env provisioning/activation action whose tool couldn't
+        # be resolved), none of the survivors are ``asPending``, so the list
+        # was EMPTY and hid the real cause. Reconstruct the terminal
+        # failures — the failed actions with their reason/stderr and the
+        # blocked actions with their blocker — so the diagnostic names what
+        # actually went wrong. The message keeps the historical
+        # "build graph made no progress" prefix and a "pending actions:"
+        # segment so existing prefix/substring consumers still match.
         var pending: seq[string] = @[]
+        var failedActions: seq[string] = @[]
+        var blockedActions: seq[string] = @[]
         for action in buildGraph.actions:
-          if statuses[action.id] == asPending:
+          case statuses[action.id]
+          of asPending:
             pending.add(action.id)
-        raiseEngine("build graph made no progress; pending actions: " & pending.join(", "))
+          of asFailed:
+            let res = runResult.results[idToIndex.resultIndex(action.id)]
+            var detail = res.stderr.strip()
+            if detail.len == 0:
+              detail = res.reason.strip()
+            if detail.len == 0:
+              detail = "exit " & $res.exitCode
+            failedActions.add(action.id & " (" & detail & ")")
+          of asBlocked:
+            let res = runResult.results[idToIndex.resultIndex(action.id)]
+            if res.blockedBy.len > 0 and res.blockedBy != action.id:
+              blockedActions.add(action.id & " (blocked by " &
+                res.blockedBy & ")")
+            else:
+              blockedActions.add(action.id)
+          else:
+            discard
+        var segments: seq[string] = @[]
+        if failedActions.len > 0:
+          segments.add("failed actions: " & failedActions.join("; "))
+        if blockedActions.len > 0:
+          segments.add("blocked actions: " & blockedActions.join(", "))
+        segments.add("pending actions: " & pending.join(", "))
+        raiseEngine("build graph made no progress; " & segments.join("; "))
 
       var runIndex = -1
       let waitStart = statStart()
       var nextGrantPoll = 0.0
+      var lastTickTime = epochTime()
       while runIndex < 0:
         raiseIfCancelled()
+        let now = epochTime()
+        if now - lastTickTime >= 0.1:
+          lastTickTime = now
+          for item in running:
+            emitProgress(bpkActionStarted, item.id)
         if hasPendingInlineRunQuota() and epochTime() >= nextGrantPoll:
           runIndex = pollInlineRunQuotaGrants()
           nextGrantPoll = epochTime() + 0.025
@@ -5070,7 +6049,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         let timeoutMs =
           if hasPendingInlineRunQuota(): 25
           elif anyInlineRunQuotaProcess(): 50
-          else: 250
+          else:
+            let nextTickInMs = int((lastTickTime + 0.1 - epochTime()) * 1000.0)
+            max(10, min(250, nextTickInMs))
         when defined(windows):
           let signaled = waitAnyProcessExitWindows(running, timeoutMs)
           if signaled >= 0:
@@ -5187,7 +6168,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
             config.peerCacheActionPublisher != nil or
             (config.binaryCachePublisher != nil and
-              action.publishToBinaryCache)
+              (action.publishToBinaryCache or
+               config.binaryCacheIntermediateScope))
           let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
             action.actionCachePolicy, action.cacheInputPaths(evidence.evidence),
             action.outputs, action.cwd,
@@ -5227,8 +6209,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       of rpkInlineRunQuotaFailed:
         discard
       of rpkHelperProcess, rpkBypassProcess:
-        if item.process.running():
-          item.process.terminate()
+        terminateRunningAction(item)
         item.process.close()
     if inlineRunQuotaSessionOpen:
       inlineRunQuotaSession.close()

@@ -203,7 +203,8 @@ package qt6DeclarativeSource:
         "CMAKE_DISABLE_FIND_PACKAGE_Clang=TRUE",
         "CMAKE_DISABLE_FIND_PACKAGE_LLVM=TRUE",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", generator = "Ninja",
+        cacheVars = opts, allowSourceWrites = true)
       discard pkg.library("libQt6Qml")
       discard pkg.library("libQt6Quick")
       discard pkg.library("libQt6QuickControls2")

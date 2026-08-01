@@ -56,6 +56,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
   ## chatter on stderr and the profile binary's stdout JSON on stdout.
   ## Raises `CompileFailure` if either step exits non-zero.
   let nimExe = requireNimOnPath()
+  let repoRootAbs = absolutePath(repoRoot)
   createDir(extendedPath(nimcacheDir))
   createDir(extendedPath(outBinary.parentDir))
 
@@ -67,7 +68,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
   # repro_project_dsl -> nimcrypto/sha2 fail with "cannot open file".
   let profileDir = profileRoot.parentDir
   let stagedConfig = profileDir / "config.nims"
-  let upstreamConfig = repoRoot / "config.nims"
+  let upstreamConfig = repoRootAbs / "config.nims"
   var didStageConfig = false
   if fileExists(extendedPath(upstreamConfig)) and
      not fileExists(extendedPath(stagedConfig)):
@@ -78,7 +79,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
   var compileCmd = quoteShell(nimExe) & " c --hints:off --warnings:off" &
     " --nimcache:" & quoteShell(nimcacheDir) &
     " --out:" & quoteShell(outBinary)
-  for path in profileNimPaths(repoRoot):
+  for path in profileNimPaths(repoRootAbs):
     compileCmd.add " --path:" & quoteShell(path)
   compileCmd.add " " & quoteShell(profileRoot)
   if verbose:
@@ -106,22 +107,30 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
     var childEnv = newStringTable(modeStyleInsensitive)
     for k, v in envPairs():
       childEnv[k] = v
-    proc setSiblingEnv(envName, siblingDir: string) =
-      let abs = repoRoot / siblingDir
-      if dirExists(abs) and getEnv(envName).len == 0:
-        childEnv[envName] = abs
     # Mirrors the addPackagePath calls in reprobuild's config.nims —
     # absolute paths pointing at the operator's existing sibling
     # checkouts under <repoRoot>'s parent. (install-reprobuild.ps1
     # clones every sibling under <LOCALAPPDATA>/dev-deps/reprobuild/,
     # so they are siblings of ``src/``.)
-    let dd = repoRoot.parentDir  # <dev-deps>/reprobuild
-    if dirExists(dd / "nimcrypto"):
-      if getEnv("NIMCRYPTO_SRC").len == 0:
-        childEnv["NIMCRYPTO_SRC"] = dd / "nimcrypto"
-    if dirExists(dd / "nim-bearssl"):
-      if getEnv("BEARSSL_SRC").len == 0:
-        childEnv["BEARSSL_SRC"] = dd / "nim-bearssl"
+    proc setPackageEnv(envName: string; candidates: openArray[string];
+                       marker: string) =
+      if getEnv(envName).len > 0:
+        return
+      for candidate in candidates:
+        if fileExists(candidate / marker):
+          childEnv[envName] = candidate
+          return
+
+    let dd = repoRootAbs.parentDir  # <dev-deps>/reprobuild
+    setPackageEnv("NIMCRYPTO_SRC", [
+      repoRootAbs / "libs" / "nimcrypto",
+      dd / "codetracer" / "libs" / "nimcrypto",
+      dd / "nimcrypto",
+    ], "nimcrypto" / "hash.nim")
+    setPackageEnv("BEARSSL_SRC", [
+      dd / "nim-bearssl",
+      repoRootAbs / "libs" / "nim-bearssl",
+    ], "bearssl.nim")
     if dirExists(dd / "io-mon" / "src"):
       if getEnv("IO_MON_SRC").len == 0:
         childEnv["IO_MON_SRC"] = dd / "io-mon" / "src"
@@ -148,7 +157,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
         childEnv["REPRO_TEST_ADAPTERS_SRC"] = dd / "reprobuild-test-adapters" / "src"
 
     let nimArgv = parseCmdLine(compileCmd)
-    var p = startProcess(nimArgv[0], workingDir = repoRoot,
+    var p = startProcess(nimArgv[0], workingDir = repoRootAbs,
                          args = nimArgv[1 .. ^1],
                          env = childEnv,
                          options = {poUsePath, poStdErrToStdOut})

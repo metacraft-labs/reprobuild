@@ -36,12 +36,8 @@ package lvm2Source:
   buildDeps:
     ## udev (libudev) for device hotplug integration.
     "libudev"
-    ## readline for the lvm shell.
-    "readline"
     ## util-linux for libblkid + libuuid.
     "util-linux"
-    ## ncurses for the termcap library that readline links against.
-    "ncurses"
     ## libaio for the bcache async-I/O fast path.
     "libaio"
 
@@ -68,14 +64,26 @@ package lvm2Source:
       let opts = @[
         "--disable-static",
         "--enable-shared",
-        "--enable-readline",
+        # ReproOS invokes the LVM commands non-interactively. Disabling the
+        # optional shell removes its readline/termcap dependency.
+        "--disable-readline",
         "--enable-udev_sync",
         "--enable-udev_rules",
         "--enable-pkgconfig",
         "--disable-selinux",
         "--disable-nls",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      # LVM's symbol-export generator invokes CC as a preprocessor but omits
+      # the standard compiler flag variables, so staged libc headers are not
+      # visible even though ordinary object compilation is configured.
+      let patches = @[
+        "sed -i " &
+          "'s|$(CC) -E -P $(INCLUDES) $(DEFS)|" &
+          "$(CC) -E -P $(CPPFLAGS) $(CFLAGS) $(INCLUDES) $(DEFS)|' " &
+          "src/make.tmpl.in src/libdm/make.tmpl.in",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
+                                  srcPatches = patches)
       discard pkg.executable("lvm")
       discard pkg.executable("lvcreate")
       discard pkg.executable("vgcreate")

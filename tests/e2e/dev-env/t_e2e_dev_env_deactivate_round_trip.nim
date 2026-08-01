@@ -371,17 +371,15 @@ suite "e2e_dev_env_deactivate_round_trip_bash":
 
       # Activation.
       var exportEnv = c.envFor()
-      var actProcess = startProcess(c.reproBin,
-        args = @["dev-env", "export", "bash",
-          "--project-root", c.projectRoot,
-          "--pre-activation-env", preEnvFile],
-        workingDir = c.repoRoot,
-        env = exportEnv,
-        options = {poUsePath})
-      let actStdout = actProcess.outputStream.readAll()
-      let actStderr = actProcess.errorStream.readAll()
-      let actCode = actProcess.waitForExit()
-      actProcess.close()
+      let actRes = runShell(shellCommand(@[
+        c.reproBin,
+        "dev-env", "export", "bash",
+        "--project-root", c.projectRoot,
+        "--pre-activation-env", preEnvFile
+      ], exportEnv.envEntries), c.repoRoot)
+      let actStdout = actRes.output
+      let actStderr = ""
+      let actCode = actRes.code
       if actCode != 0:
         echo "activation stdout:\n", actStdout
         echo "activation stderr:\n", actStderr
@@ -398,16 +396,14 @@ suite "e2e_dev_env_deactivate_round_trip_bash":
       check fileExists(manifestPath)
 
       # Deactivation.
-      var deactProcess = startProcess(c.reproBin,
-        args = @["dev-env", "deactivate", manifestPath,
-          "--shell", "bash"],
-        workingDir = c.repoRoot,
-        env = exportEnv,
-        options = {poUsePath})
-      let deactStdout = deactProcess.outputStream.readAll()
-      let deactStderr = deactProcess.errorStream.readAll()
-      let deactCode = deactProcess.waitForExit()
-      deactProcess.close()
+      let deactRes = runShell(shellCommand(@[
+        c.reproBin,
+        "dev-env", "deactivate", manifestPath,
+        "--shell", "bash"
+      ], exportEnv.envEntries), c.repoRoot)
+      let deactStdout = deactRes.output
+      let deactStderr = ""
+      let deactCode = deactRes.code
       if deactCode != 0:
         echo "deactivation stdout:\n", deactStdout
         echo "deactivation stderr:\n", deactStderr

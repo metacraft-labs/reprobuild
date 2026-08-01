@@ -1,28 +1,19 @@
 #!/usr/bin/env bash
-# M9.R.25.3 -- minimum base userspace tarball for the reproos-iso live
-# DE rootfs.
+# Build the deterministic, package-free filesystem seed used by ReproOS.
 #
-# Architectural model (revised M9.R.25): this script ships ONLY the
-# pieces of the live ISO base that have no from-source recipe yet --
-# kernel modules, bootloader tools, kernel-loader stub, the SDDM
-# systemd .service glue when sddm is the autologin target, and the
-# bare-minimum coreutils/util-linux needed to bootstrap PID 1 until
-# the from-source equivalents (M9.R.15q.12 systemd, M9.R.15e.8 pam,
-# from-source glibc + util-linux) take over.
+# Executables, libraries, units, firmware, and desktop data are supplied by
+# source recipe install mirrors in stage-de-rootfs.sh. This script owns only
+# FHS directories and machine-independent configuration that no package build
+# should own.
 #
-# The DE stack -- sway, kwin-wayland, mutter, plasma-workspace,
-# gnome-session, KF6, Qt6, Wayland, GL, mesa, fontconfig, libdrm,
-# libinput, libxkbcommon -- is NO LONGER apt-installed.  Those live
-# under recipes/packages/source/ as from-source recipes and the
-# `stage-de-rootfs.sh` companion mirrors their full install-mirror
-# trees onto the ISO at the absolute paths their RPATHs reference
-# (Nix-pattern path preservation).
+# Input:
+#   $1 = absolute output path for the rootfs tar.xz
 #
-# Inputs:
-#   $1 = absolute path to write the output tarball (tar.xz)
+# Required environment:
+#   SOURCE_DATE_EPOCH
 #
-# Required env: SOURCE_DATE_EPOCH.
-# Dependencies in PATH: docker, xz, tar, sha256sum.
+# Required host tools:
+#   bash, chmod, ln, mkdir, mktemp, mv, rm, sha256sum, stat, tar, xz
 
 set -euo pipefail
 
@@ -34,303 +25,320 @@ OUT_TAR="$1"
 
 : "${SOURCE_DATE_EPOCH:?SOURCE_DATE_EPOCH must be set}"
 
-for tool in docker xz tar sha256sum; do
+for tool in chmod ln mkdir mktemp mv rm sha256sum stat tar xz; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "build-base-rootfs.sh: required tool missing: $tool" >&2
     exit 66
   fi
 done
 
-CACHE_DIR="${REPRO_BASE_ROOTFS_CACHE:-/var/cache/reprobuild/base-rootfs}"
-mkdir -p "$CACHE_DIR"
+WORK_DIR="$(mktemp -d -t reproos-base-rootfs-XXXXXX)"
+ROOTFS_DIR="$WORK_DIR/rootfs"
+TMP_TAR="$WORK_DIR/rootfs.tar"
+cleanup() {
+  rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT
 
-# Cache key: image tag + package list digest.
-BASE_IMAGE='debian:trixie-slim'
-#
-# Package selection -- the M9.R.25 minimum.
-#
-# NOT INCLUDED (handled by from-source install-mirrors in stage-de-rootfs.sh):
-#   - sway, kwin-wayland, mutter, plasma-workspace, gnome-session
-#   - sddm (the BINARY is from-source; the systemd unit + PAM glue
-#     stay in the apt set below until the from-source recipe lands
-#     the unit files itself)
-#   - kf6 frameworks, qt6, qt6-wayland
-#   - libqt6gui6, libqt6widgets6, libqt6quick6, libqt6qml6, ...
-#   - mesa-vulkan-drivers, libgl1, libegl1, libglx-mesa0, libgles2
-#   - libwayland-server0, libwayland-client0, libxkbcommon0,
-#     libxcursor1, libxext6, libxrandr2, libxi6, libpipewire-0.3-0
-#   - fontconfig, fonts-dejavu-core (from-source recipes)
-#   - libpam0g, libpam-runtime, libpam-systemd (from-source pam recipe)
-#   - polkitd (genuinely absent from-source recipe -- TODO M9.R.26)
-#   - xwayland (genuinely absent from-source recipe -- TODO M9.R.26)
-#   - libsqlite3-0, libclingo (handled by nix-store closure mirroring
-#     in stage-de-rootfs.sh)
-#
-# STILL INCLUDED (no from-source recipe yet):
-#   - kernel + initrd tools (the live ISO ships a Debian kernel/initrd
-#     until the from-source linux kernel recipe lands)
-#   - busybox-style bootstrap utilities that PID 1 calls before
-#     switch_root into the full systemd
-#   - disk-apply / bootloader installer tools the reproos-installer
-#     shells out to via libs/repro_profile (these run on the live ISO
-#     against the QEMU virtio-blk target; they have no from-source
-#     equivalents in this milestone)
-#   - tzdata + locales (data-only packages, no build cost; no recipe)
-#   - keyboard data (xkb-data, console-data) -- data packages
-#   - CA certificate bundle (data package)
-#
-## M9.R.32.4 -- per-entry from-source audit (user's "no apt" principle).
-##
-## Each line of PKG_LIST below carries an audit annotation:
-##   FS:done|partial|none -- from-source recipe state:
-##     done    -- recipe exists AND has a populated install-mirror
-##     partial -- recipe exists but install-mirror is empty/incomplete
-##     none    -- no from-source recipe authored yet
-##   STAGE:yes|no -- whether stage-de-rootfs.sh currently mirrors the
-##     from-source artifacts into the live ISO (the architectural piece
-##     gating apt removal: even with FS:done, removing the apt entry
-##     breaks the live ISO when STAGE:no).
-##
-## DROP-CRITERION (when both hold the apt entry is removable):
-##   1. FS:done -- the from-source recipe has a real install mirror.
-##   2. STAGE:yes -- stage-de-rootfs.sh mirrors that install-mirror
-##                   tree onto the live ISO.
-##
-## At M9.R.32 NO entry satisfies BOTH criteria simultaneously: every
-## from-source replacement that exists (FS:done) is NOT mirrored by
-## stage-de-rootfs.sh (STAGE:no, because the script only mirrors the
-## DE entry-point binaries -- sway/kwin/mutter/sddm/plasma-workspace/
-## gdm -- not the base userspace).  The honest M9.R.33 work shape is:
-##   * Extend stage-de-rootfs.sh with a per-recipe base-mirror loop
-##     that walks every PKG_LIST entry's from-source equivalent and
-##     mirrors install/usr/{bin,sbin,lib,lib64,share} into the rootfs.
-##   * Once that lands, this PKG_LIST shrinks to ONLY the FS:none
-##     entries (data packages + recipes not yet authored).
-##
-## The annotations below were measured 2026-06-24 by checking each
-## ``recipes/packages/source/<recipe>/.repro/output/install/`` tree.
-##
-PKG_LIST=(
-  # PID 1 / dbus -- core init stack.
-  #
-  # M9.R.33.4 dropped: ``systemd`` + ``systemd-sysv`` -- the FS:done
-  # systemd recipe ships /usr/sbin/init + /usr/sbin/{halt,poweroff,
-  # reboot,shutdown,telinit,runlevel} + /usr/lib/systemd/systemd; the
-  # M9.R.33.3 stage-de-rootfs.sh Phase 4b shadow-link loop emits the
-  # /usr/{bin,sbin}/<name> symlinks at staging time.  Note that
-  # ``systemd-sysv`` is dropped alongside systemd because it's an
-  # alias-only Debian package (provides the /sbin/init -> systemd
-  # symlink) which our recipe already covers.
-  #
-  #   libpam-systemd   FS:partial STAGE:no  (`pam` recipe install dir
-  #                                          exists but no usr/bin yet)
-  #
-  # M9.R.33.7 dropped: ``dbus`` -- FS:done recipe ships 9 binaries in
-  # usr/bin (dbus-daemon, dbus-launch, dbus-monitor, dbus-send,
-  # dbus-cleanup-sockets, dbus-uuidgen, dbus-update-activation-environment,
-  # dbus-test-tool, dbus-run-session); the Phase 4b shadow-link loop
-  # covers them.
-  #
-  #   dbus-user-session FS:partial STAGE:no  (uses dbus recipe; user
-  #                                           session unit files aren't
-  #                                           shipped by from-source)
-  libpam-systemd dbus-user-session
-  # Essential userspace.
-  #
-  # M9.R.33.5 dropped: ``util-linux`` -- FS:done recipe ships 63
-  # binaries in usr/bin + 9 in usr/sbin (mount/umount/fdisk/blkid/
-  # lsblk/findmnt/...).  ``mount`` apt entry is also dropped since
-  # mount(8) ships from the same util-linux source.  The Phase 4b
-  # shadow-link loop emits /usr/{bin,sbin}/<name> symlinks at staging
-  # time.
-  #
-  # M9.R.33.6 dropped: ``kmod`` -- FS:done recipe ships 7 binaries
-  # in usr/bin (kmod, depmod, insmod, lsmod, modinfo, modprobe, rmmod);
-  # the Phase 4b shadow-link loop covers them.
-  #
-  #   udev             FS:none    STAGE:no  (eudev recipe exists but
-  #                                          install-mirror is empty)
-  # M9.R.33.12 dropped: ``tzdata`` -- FS:done iana-tzdata recipe
-  # ships usr/share/zoneinfo + 2 binaries in usr/bin (zdump, zic) +
-  # 1 in usr/sbin (zic alias).  The Phase 4b shadow-link loop emits
-  # the bin/sbin shadow + special-cases /usr/share/zoneinfo to a
-  # symlink at the iana-tzdata recipe's install-mirror.  Both date(1)
-  # + systemd-timesyncd probe /usr/share/zoneinfo at process start;
-  # the symlink keeps them happy.
-  #
-  # M9.R.33.11 dropped: ``passwd`` + ``login`` -- both ship via the
-  # FS:done from-source shadow-utils recipe (11 binaries in usr/bin
-  # incl. passwd + login + chsh + chage + 19 in usr/sbin incl.
-  # useradd + userdel + usermod + groupadd + groupdel + groupmod);
-  # the Phase 4b shadow-link loop covers them.
-  #
-  #   procps           FS:partial STAGE:no  (recipe exists; install dir
-  #                                          missing)
-  #   less             FS:done    STAGE:no
-  #   nano             FS:none    STAGE:no  (not in from-source corpus;
-  #                                          editor convenience, no
-  #                                          runtime dep)
-  udev procps less nano
-  # Locale data (no build cost; pure data).
-  #   locales          FS:none    STAGE:no  (glibc recipe exists but
-  #                                          locale-gen is a runtime
-  #                                          glibc helper; locale data
-  #                                          generation needs the
-  #                                          glibc install-mirror's
-  #                                          localedef + locales
-  #                                          source tree)
-  locales
-  # Keyboard + console data.
-  #   xkb-data         FS:partial STAGE:no  (xkeyboard-config recipe
-  #                                          exists; not built)
-  #   console-data     FS:none    STAGE:no
-  #   console-setup    FS:none    STAGE:no
-  #   keyboard-configuration FS:none STAGE:no
-  xkb-data console-data console-setup keyboard-configuration
-  # Network / CA / users.
-  #   ca-certificates  FS:partial STAGE:no  (recipe exists but install
-  #                                          dir empty; needs upstream
-  #                                          ca-cert-bundle staging)
-  #   iputils-ping     FS:none    STAGE:no
-  #   iproute2         FS:partial STAGE:no  (recipe exists; not built)
-  #
-  # M9.R.33.8 dropped: ``sudo`` -- FS:done recipe ships 4 binaries
-  # in usr/bin (sudo, sudoedit, sudoreplay, visudo) and 3 in usr/sbin;
-  # the Phase 4b shadow-link loop covers them.
-  ca-certificates iputils-ping iproute2
-  # SDDM systemd unit + PAM glue.  The BINARY is shadowed by the
-  # from-source recipe in stage-de-rootfs.sh (Phase 4); we keep the
-  # apt entry to pick up the .service file + /etc/pam.d/sddm policy.
-  #   sddm             FS:done    STAGE:partial (binary staged; service
-  #                                              + PAM files NOT staged)
-  sddm
-  # M9.R.24.2 -- disko apply tools the installer's Phase 2 driver
-  # shells out to.  These are the on-target install-time utilities;
-  # the from-source equivalents are part of a longer-tail recipe
-  # campaign (TODO M9.R.33).
-  #   gdisk            FS:partial STAGE:no
-  #   parted           FS:partial STAGE:no
-  #
-  # M9.R.33.9 dropped: ``e2fsprogs`` -- FS:done recipe ships 4 binaries
-  # in usr/bin (chattr, lsattr, ...) + 24 in usr/sbin (mke2fs, tune2fs,
-  # fsck.ext2/3/4, dumpe2fs, debugfs, ...); the Phase 4b shadow-link
-  # loop covers them.
-  #
-  #   dosfstools       FS:partial STAGE:no
-  #
-  # M9.R.33.10 dropped: ``btrfs-progs`` -- FS:done recipe ships 9
-  # binaries in usr/bin (btrfs, btrfs-convert, btrfs-find-root,
-  # btrfs-image, btrfs-map-logical, btrfs-select-super, btrfstune,
-  # fsck.btrfs, mkfs.btrfs); the Phase 4b shadow-link loop covers them.
-  #
-  #   cryptsetup       FS:partial STAGE:no
-  #   lvm2             FS:partial STAGE:no
-  gdisk parted dosfstools cryptsetup lvm2
-  # Bootloader tools the installer's Phase 5 (system apply) shells
-  # out to.  GRUB has no from-source recipe yet (TODO M9.R.33).
-  #   grub-efi-amd64-bin     FS:none STAGE:no
-  #   grub-pc-bin            FS:none STAGE:no
-  #   grub-common            FS:none STAGE:no
-  #   grub2-common           FS:none STAGE:no
-  grub-efi-amd64-bin grub-pc-bin grub-common grub2-common
-  # M9.R.37.1 — diagnostic tools the installer's REPRO_INSTALLER_DIAG=1
-  # mode invokes to characterise the silent-wedge gap M9.R.36 left
-  # open.  ``strace`` traces every syscall the installer + its children
-  # make; ``gdb`` is for post-wedge core dumps.  Both are FS:none.
-  strace gdb
-  # M9.R.41 — ``repro infra install-root`` (Phase 5 root-mirror) shells
-  # out to ``rsync -aHAX --numeric-ids --one-file-system`` to mirror
-  # the live ISO root onto /mnt.  ``rsync`` has no from-source recipe
-  # yet (TODO future M9.R milestone); the apt entry is the bridge.
-  #   rsync           FS:none STAGE:no
-  rsync
-)
+umask 022
+mkdir -p "$ROOTFS_DIR"
+mkdir -p \
+  "$ROOTFS_DIR/boot" \
+  "$ROOTFS_DIR/dev/pts" \
+  "$ROOTFS_DIR/dev/shm" \
+  "$ROOTFS_DIR/etc/default" \
+  "$ROOTFS_DIR/etc/ld.so.conf.d" \
+  "$ROOTFS_DIR/etc/pam.d" \
+  "$ROOTFS_DIR/etc/profile.d" \
+  "$ROOTFS_DIR/etc/security" \
+  "$ROOTFS_DIR/etc/skel" \
+  "$ROOTFS_DIR/etc/systemd/system/getty@tty1.service.d" \
+  "$ROOTFS_DIR/etc/systemd/system/serial-getty@ttyS0.service.d" \
+  "$ROOTFS_DIR/home/live" \
+  "$ROOTFS_DIR/media" \
+  "$ROOTFS_DIR/mnt" \
+  "$ROOTFS_DIR/opt" \
+  "$ROOTFS_DIR/proc" \
+  "$ROOTFS_DIR/root" \
+  "$ROOTFS_DIR/run/lock" \
+  "$ROOTFS_DIR/srv" \
+  "$ROOTFS_DIR/sys" \
+  "$ROOTFS_DIR/tmp" \
+  "$ROOTFS_DIR/usr/bin" \
+  "$ROOTFS_DIR/usr/lib" \
+  "$ROOTFS_DIR/usr/lib64" \
+  "$ROOTFS_DIR/usr/libexec" \
+  "$ROOTFS_DIR/usr/local/bin" \
+  "$ROOTFS_DIR/usr/local/lib" \
+  "$ROOTFS_DIR/usr/local/sbin" \
+  "$ROOTFS_DIR/usr/sbin" \
+  "$ROOTFS_DIR/usr/share" \
+  "$ROOTFS_DIR/var/backups" \
+  "$ROOTFS_DIR/var/cache" \
+  "$ROOTFS_DIR/var/lib/dbus" \
+  "$ROOTFS_DIR/var/local" \
+  "$ROOTFS_DIR/var/log" \
+  "$ROOTFS_DIR/var/mail" \
+  "$ROOTFS_DIR/var/opt" \
+  "$ROOTFS_DIR/var/spool" \
+  "$ROOTFS_DIR/var/tmp"
 
-PKG_DIGEST="$(printf '%s\n' "${PKG_LIST[@]}" | LC_ALL=C sort | sha256sum | awk '{print $1}')"
-## M9.R.29.17 — also hash the script body so shadow / autologin /
-## serial-getty changes invalidate the cache. Without this the cache
-## key only changes when PKG_LIST changes, and post-debootstrap
-## customisations silently stick from a stale tarball.
-SCRIPT_DIGEST="$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')"
-CACHE_KEY="trixie-slim-${PKG_DIGEST:0:8}-${SCRIPT_DIGEST:0:8}"
-CACHED_TAR="$CACHE_DIR/$CACHE_KEY.tar.xz"
+chmod 0700 "$ROOTFS_DIR/root" "$ROOTFS_DIR/home/live"
+chmod 1777 "$ROOTFS_DIR/tmp" "$ROOTFS_DIR/var/tmp"
 
-if [ -f "$CACHED_TAR" ]; then
-  echo "[base-rootfs] cache-hit $CACHED_TAR"
-  cp "$CACHED_TAR" "$OUT_TAR"
-  bytes="$(stat -c %s "$OUT_TAR")"
-  sha="$(sha256sum "$OUT_TAR" | awk '{print $1}')"
-  echo "[base-rootfs] OK $OUT_TAR bytes=$bytes sha256=$sha (cached)"
-  exit 0
+# ReproOS uses a merged-/usr layout. The source bridge populates the targets
+# after this skeleton is extracted.
+ln -s usr/bin "$ROOTFS_DIR/bin"
+ln -s usr/sbin "$ROOTFS_DIR/sbin"
+ln -s usr/lib "$ROOTFS_DIR/lib"
+ln -s usr/lib64 "$ROOTFS_DIR/lib64"
+ln -s bash "$ROOTFS_DIR/usr/bin/sh"
+ln -s bash "$ROOTFS_DIR/usr/bin/rbash"
+ln -s /proc/mounts "$ROOTFS_DIR/etc/mtab"
+ln -s /run "$ROOTFS_DIR/var/run"
+ln -s /run/lock "$ROOTFS_DIR/var/lock"
+ln -s /etc/machine-id "$ROOTFS_DIR/var/lib/dbus/machine-id"
+ln -s /usr/share/zoneinfo/UTC "$ROOTFS_DIR/etc/localtime"
+ln -s ../../etc/os-release "$ROOTFS_DIR/usr/lib/os-release"
+
+cat > "$ROOTFS_DIR/etc/os-release" <<'EOF'
+NAME="ReproOS"
+PRETTY_NAME="ReproOS"
+ID=reproos
+ID_LIKE=linux
+VERSION_ID="0"
+VERSION="source"
+HOME_URL="https://metacraft-labs.com/"
+EOF
+
+cat > "$ROOTFS_DIR/etc/passwd" <<'EOF'
+root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+bin:x:2:2:bin:/bin:/usr/sbin/nologin
+sys:x:3:3:sys:/dev:/usr/sbin/nologin
+nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin
+live:x:1000:1002:ReproOS Live User:/home/live:/bin/bash
+EOF
+
+cat > "$ROOTFS_DIR/etc/group" <<'EOF'
+root:x:0:
+daemon:x:1:
+bin:x:2:
+sys:x:3:
+adm:x:4:live
+tty:x:5:
+disk:x:6:
+sudo:x:27:live
+audio:x:29:live
+video:x:44:live
+plugdev:x:46:live
+users:x:100:
+input:x:104:live
+netdev:x:105:live
+live:x:1002:
+nogroup:x:65534:
+EOF
+
+cat > "$ROOTFS_DIR/etc/shadow" <<'EOF'
+root:$6$reproo123$KJGP/pyxIdKyCZBeNLmdzO1b0H3n5klR49gRuog3Qel19.safRMX6YDVU9U2O098qGJMp6pp.NDp.7YcKXFnz/:19000:0:99999:7:::
+daemon:*:19000:0:99999:7:::
+bin:*:19000:0:99999:7:::
+sys:*:19000:0:99999:7:::
+nobody:*:19000:0:99999:7:::
+live:$6$reproo123$KJGP/pyxIdKyCZBeNLmdzO1b0H3n5klR49gRuog3Qel19.safRMX6YDVU9U2O098qGJMp6pp.NDp.7YcKXFnz/:19000:0:99999:7:::
+EOF
+
+cat > "$ROOTFS_DIR/etc/gshadow" <<'EOF'
+root:*::
+daemon:*::
+bin:*::
+sys:*::
+adm:*::live
+tty:*::
+disk:*::
+sudo:*::live
+audio:*::live
+video:*::live
+plugdev:*::live
+users:*::
+input:*::live
+netdev:*::live
+live:!::
+nogroup:*::
+EOF
+chmod 0640 "$ROOTFS_DIR/etc/shadow" "$ROOTFS_DIR/etc/gshadow"
+
+cat > "$ROOTFS_DIR/etc/nsswitch.conf" <<'EOF'
+passwd: files
+group: files
+shadow: files
+gshadow: files
+hosts: files dns
+networks: files
+protocols: files
+services: files
+ethers: files
+rpc: files
+EOF
+
+cat > "$ROOTFS_DIR/etc/hosts" <<'EOF'
+127.0.0.1 localhost
+127.0.1.1 reproos
+::1 localhost ip6-localhost ip6-loopback
+EOF
+: > "$ROOTFS_DIR/etc/resolv.conf"
+printf '%s\n' 'reproos' > "$ROOTFS_DIR/etc/hostname"
+printf '%s\n' 'UTC' > "$ROOTFS_DIR/etc/timezone"
+printf '%s\n' 'LANG=C.UTF-8' > "$ROOTFS_DIR/etc/default/locale"
+printf '%s\n' 'LANG=C.UTF-8' > "$ROOTFS_DIR/etc/locale.conf"
+: > "$ROOTFS_DIR/etc/machine-id"
+: > "$ROOTFS_DIR/etc/environment"
+
+cat > "$ROOTFS_DIR/etc/ld.so.conf" <<'EOF'
+include /etc/ld.so.conf.d/*.conf
+EOF
+cat > "$ROOTFS_DIR/etc/ld.so.conf.d/reproos.conf" <<'EOF'
+/usr/local/lib
+/usr/lib
+/usr/lib64
+EOF
+
+cat > "$ROOTFS_DIR/etc/shells" <<'EOF'
+/bin/sh
+/usr/bin/sh
+/bin/bash
+/usr/bin/bash
+/bin/rbash
+/usr/bin/rbash
+EOF
+
+cat > "$ROOTFS_DIR/etc/login.defs" <<'EOF'
+MAIL_DIR /var/mail
+ENV_SUPATH PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV_PATH PATH=/usr/local/bin:/usr/bin:/bin
+HOME_MODE 0700
+PASS_MAX_DAYS 99999
+PASS_MIN_DAYS 0
+PASS_WARN_AGE 7
+UID_MIN 1000
+UID_MAX 60000
+GID_MIN 1000
+GID_MAX 60000
+ENCRYPT_METHOD SHA512
+DEFAULT_HOME yes
+USERGROUPS_ENAB yes
+EOF
+
+cat > "$ROOTFS_DIR/etc/pam.d/common-auth" <<'EOF'
+auth required pam_unix.so nullok
+EOF
+cat > "$ROOTFS_DIR/etc/pam.d/common-account" <<'EOF'
+account required pam_unix.so
+EOF
+cat > "$ROOTFS_DIR/etc/pam.d/common-password" <<'EOF'
+password required pam_unix.so sha512 shadow
+EOF
+cat > "$ROOTFS_DIR/etc/pam.d/common-session" <<'EOF'
+session required pam_unix.so
+EOF
+cat > "$ROOTFS_DIR/etc/pam.d/common-session-noninteractive" <<'EOF'
+session required pam_unix.so
+EOF
+cat > "$ROOTFS_DIR/etc/pam.d/login" <<'EOF'
+auth requisite pam_nologin.so
+auth include common-auth
+account include common-account
+password include common-password
+session required pam_loginuid.so
+session optional pam_keyinit.so force revoke
+session required pam_limits.so
+session include common-session
+EOF
+cat > "$ROOTFS_DIR/etc/pam.d/su" <<'EOF'
+auth sufficient pam_rootok.so
+auth include common-auth
+account include common-account
+session include common-session
+EOF
+cat > "$ROOTFS_DIR/etc/pam.d/passwd" <<'EOF'
+password include common-password
+EOF
+cat > "$ROOTFS_DIR/etc/pam.d/other" <<'EOF'
+auth required pam_deny.so
+account required pam_deny.so
+password required pam_deny.so
+session required pam_deny.so
+EOF
+: > "$ROOTFS_DIR/etc/pam.conf"
+: > "$ROOTFS_DIR/etc/security/limits.conf"
+: > "$ROOTFS_DIR/etc/security/pam_env.conf"
+
+cat > "$ROOTFS_DIR/etc/profile" <<'EOF'
+if [ "$(id -u)" -eq 0 ]; then
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+else
+  PATH=/usr/local/bin:/usr/bin:/bin
 fi
+export PATH
 
-echo "[base-rootfs] building $CACHE_KEY"
-echo "[base-rootfs] pulling $BASE_IMAGE"
-docker pull "$BASE_IMAGE"
-
-CTR_NAME="reproos-base-build-$$"
-trap 'docker rm -f "$CTR_NAME" >/dev/null 2>&1 || true' EXIT
-
-docker run --network host --name "$CTR_NAME" "$BASE_IMAGE" bash -c "
-set -e
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends ${PKG_LIST[*]}
-rm -rf /var/lib/apt/lists/*
-if [ -f /etc/locale.gen ]; then
-  sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen
-  locale-gen >/dev/null 2>&1 || true
+if [ -n "${BASH_VERSION:-}" ] && [ -r /etc/bash.bashrc ]; then
+  . /etc/bash.bashrc
 fi
-systemctl set-default graphical.target 2>/dev/null || true
-for g in audio video input plugdev netdev sudo; do
-  groupadd -f \"\$g\" 2>/dev/null || true
+for profile_script in /etc/profile.d/*.sh; do
+  [ -r "$profile_script" ] && . "$profile_script"
 done
-useradd --create-home --shell /bin/bash --uid 1000 --groups audio,video,input,plugdev,netdev,sudo live
-## M9.R.29.16 — previous hash used a 7-char salt 'reproos' which is
-## invalid (modern crypt(3) requires 8-16 chars for SHA-512), and the
-## live-ISO 'login: ... Login incorrect' was a real auth failure, not
-## a missing-password issue. Regenerate with a valid 9-char salt
-## 'reproo123'; password is still 'reproos'.
-LIVE_HASH='\$6\$reproo123\$KJGP/pyxIdKyCZBeNLmdzO1b0H3n5klR49gRuog3Qel19.safRMX6YDVU9U2O098qGJMp6pp.NDp.7YcKXFnz/'
-ROOT_HASH='\$6\$reproo123\$KJGP/pyxIdKyCZBeNLmdzO1b0H3n5klR49gRuog3Qel19.safRMX6YDVU9U2O098qGJMp6pp.NDp.7YcKXFnz/'
-usermod -p \"\$LIVE_HASH\" live 2>/dev/null || true
-usermod -p \"\$ROOT_HASH\" root 2>/dev/null || true
-passwd -u live 2>/dev/null || true
-passwd -u root 2>/dev/null || true
-echo 'reproos' > /etc/hostname
-if [ -f /etc/os-release ]; then
-  sed -i 's/^PRETTY_NAME=.*/PRETTY_NAME=\"ReproOS\"/' /etc/os-release
-fi
-mkdir -p /etc/systemd/system/getty@tty1.service.d
-cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<EOF2
+unset profile_script
+EOF
+
+cat > "$ROOTFS_DIR/etc/bash.bashrc" <<'EOF'
+[ -z "${PS1:-}" ] && return
+shopt -s checkwinsize
+PS1='\u@\h:\w\$ '
+EOF
+
+cat > "$ROOTFS_DIR/etc/skel/.profile" <<'EOF'
+[ -r /etc/profile ] && . /etc/profile
+EOF
+cat > "$ROOTFS_DIR/etc/skel/.bashrc" <<'EOF'
+[ -r /etc/bash.bashrc ] && . /etc/bash.bashrc
+EOF
+cat > "$ROOTFS_DIR/root/.profile" <<'EOF'
+[ -r /etc/profile ] && . /etc/profile
+EOF
+cat > "$ROOTFS_DIR/home/live/.profile" <<'EOF'
+[ -r /etc/profile ] && . /etc/profile
+EOF
+
+cat > "$ROOTFS_DIR/etc/issue" <<'EOF'
+ReproOS \n \l
+EOF
+
+cat > "$ROOTFS_DIR/etc/systemd/system/getty@tty1.service.d/autologin.conf" <<'EOF'
 [Service]
 ExecStart=
-ExecStart=-/sbin/agetty --autologin root --noclear %I \\\$TERM
-EOF2
-## M9.R.29.17 — serial-console autologin for QEMU -nographic boots
-## (the M9.R.28 smoke ran into 'localhost login: Login incorrect'
-## because tty1's autologin doesn't help when the kernel cmdline
-## sends console=ttyS0). Enable serial-getty@ttyS0 with autologin
-## root, mirroring the tty1 override.
-mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
-cat > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf <<EOF2
+ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
+EOF
+cat > "$ROOTFS_DIR/etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf" <<'EOF'
 [Service]
 ExecStart=
-ExecStart=-/sbin/agetty --autologin root --keep-baud 115200,38400,9600 %I \\\$TERM
-EOF2
-systemctl enable serial-getty@ttyS0.service 2>/dev/null || true
-"
+ExecStart=-/sbin/agetty --autologin root --keep-baud 115200,38400,9600 %I $TERM
+EOF
 
-TMP_TAR="$(mktemp -t reproos-base-XXXXXX.tar)"
-trap 'rm -f "$TMP_TAR"; docker rm -f "$CTR_NAME" >/dev/null 2>&1 || true' EXIT
-docker export "$CTR_NAME" -o "$TMP_TAR"
-
-mkdir -p "$(dirname "$CACHED_TAR")"
-xz -1 -c < "$TMP_TAR" > "$CACHED_TAR.tmp"
-mv "$CACHED_TAR.tmp" "$CACHED_TAR"
-cp "$CACHED_TAR" "$OUT_TAR"
-rm -f "$TMP_TAR"
+mkdir -p "$(dirname "$OUT_TAR")"
+tar \
+  --sort=name \
+  --format=gnu \
+  --mtime="@${SOURCE_DATE_EPOCH}" \
+  --clamp-mtime \
+  --numeric-owner \
+  --owner=0 \
+  --group=0 \
+  -cf "$TMP_TAR" \
+  -C "$ROOTFS_DIR" .
+xz --threads=1 --check=crc64 -9e -c "$TMP_TAR" > "$OUT_TAR.tmp"
+mv "$OUT_TAR.tmp" "$OUT_TAR"
 
 bytes="$(stat -c %s "$OUT_TAR")"
-sha="$(sha256sum "$OUT_TAR" | awk '{print $1}')"
+sha="$(sha256sum "$OUT_TAR")"
+sha="${sha%% *}"
 echo "[base-rootfs] OK $OUT_TAR bytes=$bytes sha256=$sha"

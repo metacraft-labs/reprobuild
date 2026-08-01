@@ -60,7 +60,8 @@ package kprisonSource:
         # multimedia plumbing we don't ship from-source.
         "WITH_MULTIMEDIA=OFF",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              allowSourceWrites = true)
       discard pkg.library("libKF6Prison")
     finally:
       clearCurrentOwningPackageOverride()

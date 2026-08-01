@@ -39,7 +39,7 @@ type
     allEnabled*: proc(): seq[string]
       ## Lists every feature name the adapter considers enabled.
       ## Useful for diagnostic dumps and for the "list active
-      ## features" surface of ``repro build --report``.
+      ## features" surface of ``repro build --write-report``.
 
 proc newFeatureSet*(
     name: string;

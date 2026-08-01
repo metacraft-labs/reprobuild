@@ -195,8 +195,8 @@ suite "M7 — resolveVariant against a metacraft-shaped fixture":
     # ---- fragment 1: untouched by the override ----
     let r0 = resolved.repos[0]
     check r0.path == "reprobuild"
-    check r0.remoteName == "metacraft-labs"
-    check r0.fetchUrl == "https://github.com/metacraft-labs"
+    check r0.projectRemote == "metacraft-labs"
+    check r0.fetchUrl == "https://github.com/metacraft-labs/reprobuild"
     check r0.revision == "main"  # base's default
     check r0.vcs == "git"
     check r0.stability == "tracked"
@@ -205,16 +205,16 @@ suite "M7 — resolveVariant against a metacraft-shaped fixture":
     # ---- fragment 2: untouched by the override ----
     let r1 = resolved.repos[1]
     check r1.path == "runquota"
-    check r1.remoteName == "metacraft-labs"  # project default
-    check r1.fetchUrl == "https://github.com/metacraft-labs"
+    check r1.projectRemote == "metacraft-labs"  # project default
+    check r1.fetchUrl == "https://github.com/metacraft-labs/runquota"
     check r1.revision == "main"
     check r1.fragmentPath == root / "repos" / "runquota.toml"
 
     # ---- fragment 3: revision REWRITTEN by the override ----
     let r2 = resolved.repos[2]
     check r2.path == "nim-everywhere"
-    check r2.remoteName == "metacraft-labs"  # unchanged
-    check r2.fetchUrl == "https://github.com/metacraft-labs"
+    check r2.projectRemote == "metacraft-labs"  # unchanged
+    check r2.fetchUrl == "https://github.com/metacraft-labs/nim-everywhere"
     check r2.revision == "devel"  # OVERRIDE applied; was "main" pre-variant
     check r2.fragmentPath == root / "repos" / "nim-everywhere.toml"
 
@@ -242,8 +242,8 @@ suite "M7 — resolveVariant against a metacraft-shaped fixture":
     # The extra include uses `remote = "github"`. That remote name is
     # declared in the BASE project's [[remote]] table, so the fetch URL
     # MUST be resolved from there.
-    check extra.remoteName == "github"
-    check extra.fetchUrl == "https://github.com"
+    check extra.projectRemote == "github"
+    check extra.fetchUrl == "https://github.com/extra-component"
     check extra.revision == "main"  # base's default
     check extra.vcs == "git"
     check extra.stability == "tracked"
@@ -332,7 +332,7 @@ suite "M7 — resolveVariant against a metacraft-shaped fixture":
     for i in 0 ..< asProject.repos.len:
       check asProject.repos[i].name == asVariant.repos[i].name
       check asProject.repos[i].path == asVariant.repos[i].path
-      check asProject.repos[i].remoteName == asVariant.repos[i].remoteName
+      check asProject.repos[i].projectRemote == asVariant.repos[i].projectRemote
       check asProject.repos[i].fetchUrl == asVariant.repos[i].fetchUrl
       check asProject.repos[i].revision == asVariant.repos[i].revision
       check asProject.repos[i].vcs == asVariant.repos[i].vcs

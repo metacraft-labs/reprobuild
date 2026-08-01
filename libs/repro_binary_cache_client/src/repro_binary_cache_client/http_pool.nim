@@ -30,6 +30,9 @@
 
 import std/[net, os, parseutils, strutils, times, uri]
 
+when defined(ssl):
+  import wrappers/openssl
+
 # Windows-Runner-Binary-Cache-Deploy M6 — HTTPS support. TLS is compiled
 # in only under ``-d:ssl`` (OpenSSL); without it, an https:// URL raises a
 # clear error at ``parseTarget`` and plain HTTP is unaffected. The CA /
@@ -42,10 +45,17 @@ import std/[net, os, parseutils, strutils, times, uri]
 #     the end-to-end trust boundary, so this only relaxes transport auth.
 when defined(ssl):
   var gTlsCtx: SslContext = nil
+  var gOpenSslInitialized = false
+
+  proc ensureOpenSslInitialized() =
+    if not gOpenSslInitialized:
+      discard SSL_library_init()
+      gOpenSslInitialized = true
 
   proc tlsContext(): SslContext =
     if gTlsCtx != nil:
       return gTlsCtx
+    ensureOpenSslInitialized()
     let caFile = getEnv("REPRO_BINARY_CACHE_CA_FILE", "")
     let insecure = getEnv("REPRO_BINARY_CACHE_TLS_INSECURE", "") in ["1", "true", "yes"]
     if insecure:

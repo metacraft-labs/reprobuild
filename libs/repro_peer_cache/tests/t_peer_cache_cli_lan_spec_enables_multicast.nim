@@ -83,7 +83,7 @@ suite "peer-cache CLI lan:// spec enables multicast":
         @[
           "--shard", "1/1",
           "--fixture-from=" & fixturePath,
-          "--report=" & reportPath,
+          "--write-report=" & reportPath,
           "--peer-cache=lan://127.0.0.0/8:17656"
         ],
         "")

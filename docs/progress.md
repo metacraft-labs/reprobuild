@@ -126,10 +126,10 @@ Quiet progress can be combined with diagnostics output when detailed build
 information is needed without terminal chatter:
 
 ```sh
-repro build --progress=quiet --diagnostics=.repro/build/reprobuild/diagnostics.log
+repro build --progress=quiet --write-diagnostics=.repro/build/reprobuild/diagnostics.log
 ```
 
-`--diagnostics=PATH` writes the detailed provider, scheduler, and action summary
+`--write-diagnostics=PATH` writes the detailed provider, scheduler, and action summary
 that verbose terminal output would otherwise expose. `--log=quiet` suppresses
 action-summary terminal logs; `--log=summary` and `--log=actions` are intended
 for debugging and CI diagnostics.

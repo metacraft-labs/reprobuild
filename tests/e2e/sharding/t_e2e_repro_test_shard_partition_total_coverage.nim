@@ -63,7 +63,7 @@ suite "CI-Sharding M2 — partition total coverage":
       let res = runRepro(@["test",
         "--shard", $k & "/" & $ShardCount,
         "--fixture-from=" & fixturePath,
-        "--report=" & reportPath],
+        "--write-report=" & reportPath],
         workspace)
       if res.code != 0:
         checkpoint(res.output)

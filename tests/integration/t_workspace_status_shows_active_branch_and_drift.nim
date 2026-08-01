@@ -6,7 +6,7 @@
 ## which:
 ##
 ##   1. Resolves the named project / variant via the M6 surface (or
-##      composes layers via M8 when ``.repo/workspace.toml`` is
+##      composes layers via M8 when ``.repro/workspace.toml`` is
 ##      present). The single-project / M6 path is exercised here.
 ##   2. For every declared repo, gathers the live M4 evidence triple
 ##      (head-sha, is-clean, is-published).
@@ -14,12 +14,12 @@
 ##      subtree (RA-1; no index) and compares each live HEAD against the
 ##      most-recently-locked SHA — ``at-lock``, ``drifted-from-lock``,
 ##      or ``no-lock-recorded``.
-##   4. Emits ``<workspaceRoot>/.repro/workspace/status-report.json``
+##   4. Emits ``<workspaceRoot>/.repro/build/reports/status-report.json``
 ##      plus a structured stdout summary; exits 0.
 ##
 ## Fixture pattern matches M9 / M10 / M11: hermetic local bare git
 ## repos stand in for the manifest's remote URLs, the workspace tree
-## holds the ``.repo/manifests/`` TOMLs, and the test compiles ``repro``
+## holds the ``projects/`` / ``repos/`` TOMLs, and the test compiles ``repro``
 ## once per ``setupFixture`` into the scratch directory.
 ##
 ## Skip rule: only when ``git`` is missing from PATH (same convention
@@ -190,7 +190,7 @@ proc setupFixture(gitBin, slug: string): M12Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
@@ -216,14 +216,14 @@ proc invokeLock(fx: M12Fixture): CmdResult =
 
 proc invokeStatus(fx: M12Fixture; extra: openArray[string] = []): CmdResult =
   var argv = @[
-    fx.reproBin, "workspace", "status", "lib-a",
+    fx.reproBin, "workspace", "status", "--write-report", "lib-a",
     "--workspace-root=" & fx.workspaceRoot,
   ]
   for x in extra: argv.add(x)
   runShell(shellCommand(argv))
 
 proc readReport(fx: M12Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "status-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
@@ -393,3 +393,209 @@ suite "M12 — repro workspace status (active branch + drift)":
       for entry in report["repos"]:
         check entry["lockState"].getStr() == "no-lock-recorded"
         check entry["lockedRevision"].getStr().len == 0
+
+  test "test_m12_status_extended_queries":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "extended-queries")
+      defer: removeDir(fx.scratch)
+
+      cloneAll(gitBin, fx)
+      check invokeLock(fx).code == 0
+
+      # 1. Create a stash in lib-b
+      writeFile(fx.workspaceRoot / "lib-b" / "stash.txt", "stash-me\n")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " add stash.txt")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " stash")
+
+      # 2. Ahead commit on main in lib-b
+      writeFile(fx.workspaceRoot / "lib-b" / "ahead.txt", "ahead-content\n")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " add ahead.txt")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " commit -m ahead")
+
+      # 3. Behind commit on origin in lib-b
+      writeFile(fx.scratch / "seed-lib-b" / "behind.txt", "behind-content\n")
+      discard requireGit(q(gitBin) & " -C " & q(fx.scratch / "seed-lib-b") & " add behind.txt")
+      discard requireGit(q(gitBin) & " -C " & q(fx.scratch / "seed-lib-b") & " commit -m behind")
+      discard requireGit(q(gitBin) & " -C " & q(fx.scratch / "seed-lib-b") & " push origin main")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " fetch")
+
+      # 4. Unmerged branch in lib-b
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " checkout -b feature")
+      writeFile(fx.workspaceRoot / "lib-b" & "/feature.txt", "feature-content\n")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " add feature.txt")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " commit -m feature")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-b") & " checkout main")
+
+      # 5. Untracked and modified files in lib-b
+      writeFile(fx.workspaceRoot / "lib-b" & "/untracked.txt", "untracked-content\n")
+      writeFile(fx.workspaceRoot / "lib-b" & "/README.md", "README modified\n")
+
+      # Run full status
+      let res = invokeStatus(fx)
+      check res.code == 0
+      
+      # Verify text output fields are present
+      check "modified=1 untracked=1" in res.output
+      check "stashes=1" in res.output
+      check "ahead=1 behind=1" in res.output
+      check "unmerged=feature" in res.output
+
+      # Verify JSON output
+      let report = readReport(fx)
+      let libBEntry = findRepo(report, "lib-b")
+      check not libBEntry.isNil
+      check libBEntry["modifiedCount"].getInt() == 1
+      check libBEntry["untrackedCount"].getInt() == 1
+      check libBEntry["stashCount"].getInt() == 1
+      check libBEntry["aheadCount"].getInt() == 1
+      check libBEntry["behindCount"].getInt() == 1
+      check libBEntry["unmergedBranches"].len == 1
+      check libBEntry["unmergedBranches"][0].getStr() == "feature"
+
+      # Run with selective flag (only stashes)
+      let resStashes = invokeStatus(fx, ["--stashes"])
+      check resStashes.code == 0
+      check "stashes=1" in resStashes.output
+      check "modified=" notin resStashes.output
+      check "ahead=" notin resStashes.output
+      check "unmerged=" notin resStashes.output
+
+      # Verify JSON output under selective flag
+      let reportStashes = readReport(fx)
+      let libBStashEntry = findRepo(reportStashes, "lib-b")
+      check libBStashEntry["stashCount"].getInt() == 1
+      check libBStashEntry["modifiedCount"].getInt() == 0
+      check libBStashEntry["aheadCount"].getInt() == 0
+      check libBStashEntry["unmergedBranches"].len == 0
+
+  test "test_m12_status_ambiguous_trunk_ref_does_not_leak_git_warning":
+    ## Regression: when the trunk ref name resolves ambiguously — e.g. a repo
+    ## that also has a *tag* named `main` alongside the `main` branch — then
+    ## `git branch --no-merged main` prints
+    ##   "warning: refname 'main' is ambiguous."
+    ## on stderr. runGit merges stderr into stdout (execCmdEx), so that
+    ## diagnostic previously leaked into `unmergedBranches` and surfaced as a
+    ## bogus `unmerged=warning: refname 'main' is ambiguous.` field. The parser
+    ## must reject the diagnostic (a real branch name has no whitespace/':')
+    ## while still reporting the genuine unmerged branch.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      # NB: keep "ambiguous" out of the fixture slug — it lands in the temp
+      # workspace path, which appears in status output and would false-match.
+      let fx = setupFixture(gitBin, "tag-shadows-trunk")
+      defer: removeDir(fx.scratch)
+
+      cloneAll(gitBin, fx)
+      check invokeLock(fx).code == 0
+
+      let libB = fx.workspaceRoot / "lib-b"
+      # A genuine unmerged branch that MUST still be reported.
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " checkout -b feature")
+      writeFile(libB / "feature.txt", "feature-content\n")
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " add feature.txt")
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " commit -m feature")
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " checkout main")
+      # Make bare `main` ambiguous: a tag named `main` next to the branch.
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " tag main")
+
+      let res = invokeStatus(fx)
+      check res.code == 0
+
+      # The genuine branch survives; the git "refname ... is ambiguous" warning
+      # must NOT leak into the unmerged field (the pre-fix symptom was
+      # `unmerged=warning: refname 'main' is ambiguous.`).
+      check "unmerged=feature" in res.output
+      check "unmerged=warning" notin res.output
+
+      let report = readReport(fx)
+      let libBEntry = findRepo(report, "lib-b")
+      check not libBEntry.isNil
+      check libBEntry["unmergedBranches"].len == 1
+      for b in libBEntry["unmergedBranches"]:
+        let s = b.getStr()
+        check s == "feature"
+        check ' ' notin s
+        check ':' notin s
+
+  test "test_m12_status_active_branch_is_trunk_when_repos_diverge":
+    ## Regression: with no recorded `[workspace].branch` and repos on DIFFERENT
+    ## branches, the active-branch header must NOT report an arbitrary (first)
+    ## repo's branch. A mixed-branch workspace has no single active branch (and
+    ## `repro branch` would say `<none recorded>`), so the heuristic defers to
+    ## the manifest trunk instead of the first repo's divergent branch.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "divergent-branches")
+      defer: removeDir(fx.scratch)
+
+      cloneAll(gitBin, fx)
+      # Put the FIRST repo (lib-a) on a non-trunk branch; lib-b/lib-c stay on
+      # `main`. Pre-fix, the heuristic returned lib-a's branch (`feature-x`);
+      # post-fix, divergence defers to the trunk (`main`).
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib-a") &
+        " checkout -b feature-x")
+
+      let res = invokeStatus(fx)
+      check res.code == 0
+
+      let report = readReport(fx)
+      check report["activeBranch"].getStr() == "main"
+      # The header (first line) carries the workspace-level branch.
+      check "project=lib-a branch=main" in res.output
+      # ...while lib-a's own per-repo line still honestly shows its branch.
+      check "lib-a clean branch=feature-x" in res.output
+
+  test "test_m12_status_file_details_lists_paths_with_xy_codes":
+    ## `--file-details` surfaces each changed path with its porcelain `XY`
+    ## status (the staged-vs-unstaged granularity `repo status` has, which the
+    ## coarse modified/untracked counts lack). It is additive: an opt-in that
+    ## augments — the default fields stay — rather than narrowing the output.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "file-details")
+      defer: removeDir(fx.scratch)
+      cloneAll(gitBin, fx)
+      check invokeLock(fx).code == 0
+
+      let libB = fx.workspaceRoot / "lib-b"
+      # Staged addition (X=A), unstaged modification (Y=M), and an untracked
+      # file (??) — three distinct porcelain codes the counts cannot express.
+      writeFile(libB / "added.txt", "new\n")
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " add added.txt")
+      writeFile(libB / "README.md", "changed\n")   # committed file, NOT staged
+      writeFile(libB / "untracked.txt", "loose\n")
+
+      # Default status: file details are NOT included (opt-in).
+      check invokeStatus(fx).code == 0
+      check findRepo(readReport(fx), "lib-b")["fileDetails"].len == 0
+
+      # With --file-details: the per-file XY list appears AND the default
+      # fields remain present (additive, not narrowing).
+      let res = invokeStatus(fx, ["--file-details"])
+      check res.code == 0
+      check "modified=2 untracked=1" in res.output   # coarse counts still there
+      check "A  added.txt" in res.output             # staged add
+      check " M README.md" in res.output             # unstaged modification
+      check "?? untracked.txt" in res.output         # untracked
+
+      let libBEntry = findRepo(readReport(fx), "lib-b")
+      check libBEntry["fileDetails"].len == 3
+      var codes, paths: seq[string]
+      for fd in libBEntry["fileDetails"]:
+        codes.add(fd["code"].getStr())
+        paths.add(fd["path"].getStr())
+      check "A " in codes    # staged add (X column)
+      check " M" in codes    # unstaged modification (leading space preserved)
+      check "??" in codes    # untracked
+      check "added.txt" in paths
+      check "README.md" in paths
+      check "untracked.txt" in paths

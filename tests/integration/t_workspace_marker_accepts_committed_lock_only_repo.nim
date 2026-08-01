@@ -4,7 +4,7 @@
 ## ``isInitializedWorkspace`` is the shared predicate the managed hooks and
 ## the pre-push gate consult to decide whether there is anything to enforce.
 ## Before MO-2 it recognised ONLY a resolved manifest checkout
-## (``.repo/workspace.toml`` or ``.repo/manifests/projects/*.toml``). MO-2
+## (``.repro/workspace.toml`` or ``projects/*.toml``). MO-2
 ## extends it so a repo carrying a committed ``repro.lock`` (the manifest-
 ## optional reproducibility artifact) ALSO counts as an initialized
 ## workspace — otherwise an all-public, single-repo workspace would slip
@@ -16,9 +16,9 @@
 ## is present the gate proceeds and never prints that diagnostic. The suite
 ## asserts:
 ##
-##   * A repo with a committed ``repro.lock`` and NO ``.repo/`` → marker
+##   * A repo with a committed ``repro.lock`` and NO ``.repro/`` → marker
 ##     TRUE: the gate does NOT print "not a workspace".
-##   * A bare git repo with NO lock and NO ``.repo/`` → marker FALSE: the
+##   * A bare git repo with NO lock and NO ``.repro/`` → marker FALSE: the
 ##     gate prints "not a workspace" and no-ops with success.
 ##
 ## Falsifiability: revert the committed-lock branch of
@@ -83,8 +83,8 @@ suite "MO-2: workspace marker accepts a committed-lock-only repo":
       check fileExists(lockRepo / "repro.lock")
       check git(gitBin, lockRepo, "add repro.solver repro.lock").code == 0
       check git(gitBin, lockRepo, "commit -m lock").code == 0
-      # No `.repo/` of any kind — the committed lock is the only marker.
-      check not dirExists(lockRepo / ".repo")
+      # No `.repro/` of any kind — the committed lock is the only marker.
+      check not dirExists(lockRepo / ".repro")
 
       let lockChk = checkPrePush(lockRepo)
       # The marker is TRUE → the gate proceeds; it never prints the no-op
@@ -94,11 +94,11 @@ suite "MO-2: workspace marker accepts a committed-lock-only repo":
       # operate-from-lock suite.)
       check "not a workspace" notin lockChk.output
 
-      # ---- Marker FALSE: a bare git repo with no lock and no `.repo/`. ----
+      # ---- Marker FALSE: a bare git repo with no lock and no `.repro/`. ----
       let bareRepo = scratch / "bare-repo"
       initRepo(gitBin, bareRepo)
       check not fileExists(bareRepo / "repro.lock")
-      check not dirExists(bareRepo / ".repo")
+      check not dirExists(bareRepo / ".repro")
 
       let bareChk = checkPrePush(bareRepo)
       # The marker is FALSE → the gate no-ops with success and the clear

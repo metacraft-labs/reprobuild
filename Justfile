@@ -51,8 +51,7 @@ integration-stackable-hooks:
 
 # NDE0-A apt-jammy adapter unit tests.
 # Exercises spec'd extractAptDeb / installAptDeb / installSystemdUnit
-# against pre-fetched jammy .deb fixtures under
-# recipes/reproos-mvp-config/vendored-archives/linux/.
+# against deterministic, locally assembled minimal .deb fixtures.
 unit_nde0a_apt_jammy:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
@@ -788,6 +787,24 @@ integration_provider_fragment_refresh_and_pruning:
         --out:build/test-bin/integration_provider_fragment_refresh_and_pruning \
         tests/integration/t_integration_provider_fragment_refresh_and_pruning.nim \
         2>&1 | tee test-logs/integration_provider_fragment_refresh_and_pruning.log
+
+integration_output_cleanup_executor:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_output_cleanup_executor \
+        --out:build/test-bin/integration_output_cleanup_executor \
+        tests/integration/t_output_cleanup_executor.nim \
+        2>&1 | tee test-logs/integration_output_cleanup_executor.log
+
+integration_provider_file_driven_fanout_cleanup:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_provider_file_driven_fanout_cleanup \
+        --out:build/test-bin/integration_provider_file_driven_fanout_cleanup \
+        tests/integration/t_provider_file_driven_fanout_cleanup.nim \
+        2>&1 | tee test-logs/integration_provider_file_driven_fanout_cleanup.log
 
 integration_configurable_system_basic_resolution:
     mkdir -p test-logs build/test-bin build/nimcache
@@ -1761,3 +1778,9 @@ repomix *args:
 
 check-repo-requirements:
     bash ./scripts/check_repo_requirements.sh
+
+# Verify the Nim toolchain can complete a compile while the io-monitor shim is
+# interposed. Requires a built shim (`just test` bootstraps one); this is the
+# same probe `scripts/run_tests.sh` runs before the suite.
+check-toolchain-dlopen lib_dir="build/lib":
+    bash ./scripts/check_toolchain_dlopen.sh {{lib_dir}}

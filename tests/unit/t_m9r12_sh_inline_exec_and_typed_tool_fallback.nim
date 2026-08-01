@@ -203,6 +203,75 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
     finally:
       clearCurrentOwningPackageOverride()
 
+  test "configure defaults native build probes to source toolchain flags":
+    let pkg = autotools_package(srcDir = "./src")
+    let script = pkg.buildEdge.argByName("argv").encodedValue.split("\x1f")[2]
+    check "export CC_FOR_BUILD=\"${CC_FOR_BUILD:-gcc}\"" in script
+    check "export CFLAGS_FOR_BUILD=\"${CFLAGS_FOR_BUILD:-${CFLAGS:-}}\"" in script
+    check "export CPPFLAGS_FOR_BUILD=\"${CPPFLAGS_FOR_BUILD:-${CPPFLAGS:-}}\"" in script
+    check "export LDFLAGS_FOR_BUILD=\"${LDFLAGS_FOR_BUILD:-${LDFLAGS:-}}\"" in script
+    check "export BUILD_CC=\"${BUILD_CC:-${CC_FOR_BUILD}}\"" in script
+    check "export BUILD_CFLAGS=\"${BUILD_CFLAGS:-${CFLAGS_FOR_BUILD}}\"" in script
+    check "export BUILD_CPPFLAGS=\"${BUILD_CPPFLAGS:-${CPPFLAGS_FOR_BUILD}}\"" in script
+    check "export BUILD_LDFLAGS=\"${BUILD_LDFLAGS:-${LDFLAGS_FOR_BUILD}}\"" in script
+    check script.find("export CC_FOR_BUILD=") < script.find("../src/configure")
+
+  test "autoreconf uses modules from the resolved source Perl":
+    let pkg = autotools_package(
+      srcDir = "./src",
+      patchHardcodedFile = true)
+    let script = pkg.buildEdge.argByName("argv").encodedValue.split("\x1f")[2]
+    check "perl_bin=$(which perl 2>/dev/null)" in script
+    check "perl_lib=\"$perl_prefix/lib/perl5\"" in script
+    check "export PERL5LIB=\"$perl_lib${PERL5LIB:+:$PERL5LIB}\"" in script
+    check "export autom4te_perllibdir=\"$autoconf_share\"" in script
+    check "relocated_autom4te_cfg=$(mktemp)" in script
+    check "export AUTOMAKE_LIBDIR=\"$automake_share\"" in script
+    check "export ACLOCAL_AUTOMAKE_DIR=\"$aclocal_share\"" in script
+    check "export ACLOCAL=\"aclocal --system-acdir=$system_aclocal" in script
+    check "for perl_tool in autoreconf autoconf autoheader autom4te" in script
+    check "export PATH=\"$perl_tool_dir:$PATH\"" in script
+    check "export AUTOM4TE=autom4te" in script
+    check "ad=\"$bin_dir/../share/aclocal\"" in script
+    check script.find("export PERL5LIB=") < script.find("autoreconf -fi")
+
+  test "source patches run before configure":
+    let pkg = autotools_package(
+      srcDir = "./src",
+      srcPatches = @["sed -i 's/old/new/' src/example.c"])
+    let argvArg = pkg.buildEdge.argByName("argv")
+    let script = argvArg.encodedValue.split("\x1f")[2]
+    let patchPos = script.find("sed -i 's/old/new/' src/example.c")
+    let configurePos = script.find("../src/configure")
+    check patchPos >= 0
+    check configurePos > patchPos
+
+  test "explicit source writes omit the configure read-only scope":
+    let pkg = autotools_package(
+      srcDir = "./src",
+      allowSourceWrites = true)
+    check pkg.buildEdge.readOnlyRoots.len == 0
+
+  test "cmake source-write opt-in applies to every pipeline edge":
+    let defaultPkg = cmake_package(srcDir = "./src")
+    var defaultConfigureRoots = -1
+    for action in registeredBuildActions():
+      if action.id == defaultPkg.buildEdge.id:
+        defaultConfigureRoots = action.readOnlyRoots.len
+    check defaultConfigureRoots == 1
+    check defaultPkg.compileEdge.readOnlyRoots.len == 1
+    check defaultPkg.installEdge.readOnlyRoots.len == 1
+
+    let mutablePkg = cmake_package(srcDir = "./src",
+      buildDir = "mutable-build", allowSourceWrites = true)
+    var mutableConfigureRoots = -1
+    for action in registeredBuildActions():
+      if action.id == mutablePkg.buildEdge.id:
+        mutableConfigureRoots = action.readOnlyRoots.len
+    check mutableConfigureRoots == 0
+    check mutablePkg.compileEdge.readOnlyRoots.len == 0
+    check mutablePkg.installEdge.readOnlyRoots.len == 0
+
   test "configure action id is deterministic across calls with same args":
     let a = autotools_package(srcDir = "./src",
       configureOptions = @["--enable-gold"])

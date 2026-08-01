@@ -1122,6 +1122,85 @@ suite "repro_infra: planner action decision + partition":
     check decideAction(ResourceObservation(present: true,
       observedDigestHex: "ff"), "ff", destroy = true) == "destroy"
 
+  test "a converged fs.systemDirectory decides no-op, a drifted one updates":
+    # End-to-end at the planner's altitude: parse a `system.nim`
+    # stanza, take the desired digest the planner would compute, and
+    # feed it the digest the observer would produce for a live
+    # directory. A directory that already matches its declaration must
+    # decide `no-op`; when the two sides canonicalise different strings
+    # it can only ever decide `update`, so the resource is reported
+    # applied on every apply forever even though nothing changes.
+    let profile = parseSystemProfile("""
+fs.systemDirectory {
+  path = "C:\service-tokens"
+  aclOwner = "SYSTEM"
+  aclEntries = ["SYSTEM:(F)", "BUILTIN\Administrators:(F)"]
+  aclInheritance = "protected-clear-inherited"
+}
+""")
+    check profile.resources.len == 1
+    let op = toPrivilegedOperation(profile.resources[0])
+    let desired = desiredDigestForKind(op)
+    # Exactly what `observeFsSystemDirectory` hashes for a directory
+    # that exists with the given live DACL.
+    let convergedHex = posixDigestHexOfText(
+      "fs.systemDirectory:present|" &
+      canonicalDirAclObserved(true, op.fsdAclOwner, op.fsdAclEntries,
+        @["SYSTEM:(F)", "BUILTIN\\Administrators:(F)"], true,
+        op.fsdAclInheritance))
+    check decideAction(ResourceObservation(present: true,
+      observedDigestHex: convergedHex), desired,
+      destroy = false) == "no-op"
+    let driftedHex = posixDigestHexOfText(
+      "fs.systemDirectory:present|" &
+      canonicalDirAclObserved(true, op.fsdAclOwner, op.fsdAclEntries,
+        @["SYSTEM:(F)"], true, op.fsdAclInheritance))
+    check decideAction(ResourceObservation(present: true,
+      observedDigestHex: driftedHex), desired,
+      destroy = false) == "update"
+
+  test "a converged windows.service decides no-op, a drifted one updates":
+    let profile = parseSystemProfile("""
+windows.service {
+  name = "example.runner.service"
+  startType = Automatic
+  state = Running
+  displayName = "Example Runner"
+  binPath = "C:\runner\Runner.Listener.exe"
+  recoveryActions = ["restart:5000", "reboot:60000"]
+  recoveryResetSeconds = 86400
+}
+""")
+    check profile.resources.len == 1
+    let op = toPrivilegedOperation(profile.resources[0])
+    let desired = desiredDigestForKind(op)
+    var obs = ServiceObservation(present: true, startType: "Automatic",
+      running: true, displayName: "Example Runner",
+      binPath: "C:\\runner\\Runner.Listener.exe",
+      recoveryActions: @[
+        ServiceRecoveryActionObservation(action: "restart", delayMs: 5000),
+        ServiceRecoveryActionObservation(action: "reboot", delayMs: 60000)],
+      recoveryResetSeconds: 86400)
+    # Exactly what `observeWindowsService` hashes for a live service
+    # whose probe parsed to `obs`.
+    let convergedHex = digestHexOfText(canonicalServiceState(obs,
+      wantDisplayName = op.serviceDisplayName,
+      wantBinPath = op.serviceBinPath,
+      wantRecoveryActions = desiredServiceRecoverySlots(op),
+      wantRecoveryResetSeconds = op.serviceRecoveryResetSeconds))
+    check decideAction(ResourceObservation(present: true,
+      observedDigestHex: convergedHex), desired,
+      destroy = false) == "no-op"
+    obs.binPath = "C:\\stale\\Runner.Listener.exe"
+    let driftedHex = digestHexOfText(canonicalServiceState(obs,
+      wantDisplayName = op.serviceDisplayName,
+      wantBinPath = op.serviceBinPath,
+      wantRecoveryActions = desiredServiceRecoverySlots(op),
+      wantRecoveryResetSeconds = op.serviceRecoveryResetSeconds))
+    check decideAction(ResourceObservation(present: true,
+      observedDigestHex: driftedHex), desired,
+      destroy = false) == "update"
+
   test "every Windows system resource partitions as privileged":
     let profile = parseSystemProfile("""
 windows.optionalFeature { name = "Hyper-V" }
@@ -1170,6 +1249,52 @@ suite "repro_infra: system state dir":
     check planPath(sd, "pid").endsWith("pid.rbip")
     check applyLogPath(sd, "gid").endsWith("apply.log")
     check applyLockPath(sd).endsWith("apply.lock")
+
+suite "repro_infra: the apply lock is reclaimable":
+  ## An apply lock whose owner died must NOT wedge the host forever: an
+  ## interrupted apply on a Windows runner once left a dead PID in the
+  ## lock and blocked every subsequent apply for three weeks.
+
+  setup:
+    let sd = createTempDir("repro-applylock-", "")
+    ensureSystemStateDir(sd)
+
+  teardown:
+    removeDir(sd)
+
+  test "a live owner keeps the lock held":
+    check acquireApplyLock(sd)
+    check applyLockOwner(sd) == getCurrentProcessId()
+    # A DIFFERENT live owner is refused. PID 1 (init/systemd) and PID 4
+    # (Windows "System") always exist; both are owned by another user, so
+    # this also exercises the probe's "exists but access denied ⇒ alive"
+    # path, which must NOT be mistaken for "dead".
+    let liveOther = when defined(windows): 4 else: 1
+    writeFile(applyLockPath(sd), $liveOther)
+    check not acquireApplyLock(sd)
+    check applyLockOwner(sd) == liveOther
+    releaseApplyLock(sd)
+    check not fileExists(applyLockPath(sd))
+
+  test "a lock owned by a dead process is reclaimed":
+    # PID 0 is never a live user process on either platform, but use a
+    # definitely-dead pid: spawn nothing and pick an implausible id.
+    writeFile(applyLockPath(sd), "2147483646")
+    check acquireApplyLock(sd)
+    check applyLockOwner(sd) == getCurrentProcessId()
+    releaseApplyLock(sd)
+
+  test "an empty or malformed lock is reclaimed rather than wedging":
+    for junk in ["", "   ", "not-a-pid", "12x34"]:
+      writeFile(applyLockPath(sd), junk)
+      check applyLockOwner(sd) == 0
+      check acquireApplyLock(sd)
+      check applyLockOwner(sd) == getCurrentProcessId()
+      releaseApplyLock(sd)
+
+  test "releasing a lock that is already gone is a no-op":
+    releaseApplyLock(sd)
+    check not fileExists(applyLockPath(sd))
 
 # ===========================================================================
 # M69 Phase B — windows.vsInstaller profile parsing, the structural

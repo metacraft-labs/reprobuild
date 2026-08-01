@@ -6,12 +6,12 @@
 ## which:
 ##
 ##   1. Resolves the named project / variant via the M6 surface (or
-##      composes layers via M8 when ``.repo/workspace.toml`` is
+##      composes layers via M8 when ``.repro/workspace.toml`` is
 ##      present). Single-project / M6 path exercised here.
 ##   2. Walks the resulting ``ResolvedProject.repos`` and emits the
 ##      declared (name, path, remote, revision) tuples plus the
 ##      ``manifestLayer`` / ``visibility`` fields M8 stamps.
-##   3. Emits ``<workspaceRoot>/.repro/workspace/list-report.json``;
+##   3. Emits ``<workspaceRoot>/.repro/build/reports/list-report.json``;
 ##      exits 0 on success, 1 on resolver failure.
 ##
 ## Unlike ``status``, list does NO live VCS observation — the repos
@@ -103,7 +103,7 @@ proc setupFixture(slug: string): M12ListFixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let manifestsRoot = workspaceRoot
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "myproject.toml",
@@ -120,14 +120,14 @@ proc invokeList(fx: M12ListFixture;
                 project = "myproject";
                 extra: openArray[string] = []): CmdResult =
   var argv = @[
-    fx.reproBin, "workspace", "list", project,
+    fx.reproBin, "workspace", "list", "--write-report", project,
     "--workspace-root=" & fx.workspaceRoot,
   ]
   for x in extra: argv.add(x)
   runShell(shellCommand(argv))
 
 proc readReport(fx: M12ListFixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "list-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

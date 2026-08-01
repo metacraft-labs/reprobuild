@@ -10,7 +10,7 @@
 ## the personal backend + ``repro lock refresh`` — the push proceeds.
 ##
 ## Case B (manifest-LESS publish — carries deliverable 3). A workspace with NO
-## ``.repo/manifests`` checkout at all, routing its personal repo to a HEALTHY
+## ``.repro/manifests`` checkout at all, routing its personal repo to a HEALTHY
 ## git-checkout backend on its own remote, must STILL publish that personal
 ## backend at pre-push. This proves HL-3 lifted HL-2's ``manifestLayerRoot.len >
 ## 0`` gate on the per-backend publish: the routed personal backend's bare
@@ -162,7 +162,7 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
 
         let ws = scratch / "workspace"
         createDir(ws)
-        let manifestsRoot = ws / ".repo" / "manifests"
+        let manifestsRoot = ws / ".repro" / "manifests"
         createDir(manifestsRoot / "projects")
         createDir(manifestsRoot / "repos")
         writeFile(manifestsRoot / "projects" / "solo.toml",
@@ -198,7 +198,7 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
         let refsFile = scratch / "pushed-refs.txt"
         writeFile(refsFile, "refs/heads/main " & coreSha &
           " refs/heads/main 0000000000000000000000000000000000000000\n")
-        let gateRes = run(reproBinary & " check --mode=pre-push" &
+        let gateRes = run(reproBinary & " check --mode=pre-push --write-report" &
           " --workspace-root=" & q(ws) &
           " --current-repo=" & q(ws / "core") &
           " --pushed-refs=" & q(refsFile) & " --json")
@@ -207,7 +207,7 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
         # ALLOW: the push proceeds (exit 0) even though the personal backend
         # is unreachable.
         check gateRes.code == 0
-        let reportPath = ws / ".repro" / "workspace" / "check-report.json"
+        let reportPath = ws / ".repro" / "build" / "reports" / "check-report.json"
         check fileExists(reportPath)
         let report = parseFile(reportPath)
         check report["exitCode"].getInt() == 0
@@ -229,7 +229,7 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
 
         # A GENUINELY manifest-LESS workspace: a single committed-lock git repo
         # (its ``repro.lock`` is the reproducibility artifact) with NO
-        # ``.repo/manifests`` directory at all — so the gate's
+        # ``.repro/manifests`` directory at all — so the gate's
         # ``manifestLayerRoot`` resolves EMPTY and the manifest publish path is
         # skipped entirely. The ONLY way the routed personal backend can be
         # published is the per-backend publish loop, whose ``manifestLayerRoot >
@@ -288,14 +288,14 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
         let refsFile = scratch / "pushed-refs.txt"
         writeFile(refsFile, "refs/heads/main " & headSha &
           " refs/heads/main 0000000000000000000000000000000000000000\n")
-        let gateRes = run(reproBinary & " check --mode=pre-push" &
+        let gateRes = run(reproBinary & " check --mode=pre-push --write-report" &
           " --workspace-root=" & q(ws) &
           " --pushed-refs=" & q(refsFile) & " --json")
         checkpoint("manifest-less gate output: " & gateRes.output)
 
         # The clean gate passes (exit 0).
         check gateRes.code == 0
-        let reportPath = ws / ".repro" / "workspace" / "check-report.json"
+        let reportPath = ws / ".repro" / "build" / "reports" / "check-report.json"
         check fileExists(reportPath)
         let report = parseFile(reportPath)
         check report["exitCode"].getInt() == 0
