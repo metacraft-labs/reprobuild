@@ -164,6 +164,7 @@ const reproosImageRootfsDeps = @[
   "musl",
   "busybox",
   "ca-certificates",
+  "reproos-installer",
 ]
 
 package reproosImage:
@@ -229,6 +230,7 @@ package reproosImage:
     "musl"
     "busybox"
     "ca-certificates"
+    "reproos-installer"
 
   runtimeDeps:
     # M9.R.53: enumerate every bare-name host tool

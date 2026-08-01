@@ -4246,6 +4246,38 @@ proc m9r14fDepRecipeNames(useDef: InterfaceToolUse): seq[string] =
           alias.recipe notin result:
         result.add(alias.recipe)
 
+proc m9r14fResolveRecipeDir(useDef: InterfaceToolUse;
+                            recipeRoot: string): string =
+  ## Resolve a dependency to its source recipe. Corpus recipes remain the
+  ## primary convention. When the conventional root is the repository's
+  ## ``recipes/packages/source`` tree, also admit a same-named in-tree
+  ## application recipe under ``apps/``. This lets system images depend on
+  ## applications through the regular from-source auto-recurse path without
+  ## duplicating application recipes in the package corpus.
+  let candidates = m9r14fDepRecipeNames(useDef)
+  for candidate in candidates:
+    let recipeDir = recipeRoot / candidate
+    if fileExists(extendedPath(recipeDir / "repro.nim")):
+      return recipeDir
+
+  let sourceRoot = absolutePath(recipeRoot)
+  let packagesRoot = parentDir(sourceRoot)
+  let recipesRoot = parentDir(packagesRoot)
+  if lastPathPart(sourceRoot).cmpIgnoreCase("source") == 0 and
+      lastPathPart(packagesRoot).cmpIgnoreCase("packages") == 0 and
+      lastPathPart(recipesRoot).cmpIgnoreCase("recipes") == 0:
+    let appsRoot = parentDir(recipesRoot) / "apps"
+    for candidate in candidates:
+      let recipeDir = appsRoot / candidate
+      if fileExists(extendedPath(recipeDir / "repro.nim")):
+        return recipeDir
+
+  let fallbackName =
+    if useDef.executableName.len > 0: useDef.executableName
+    elif candidates.len > 0: candidates[0]
+    else: m9r14fDepRecipeName(useDef)
+  recipeRoot / fallbackName
+
 proc m9r14fLoadInterfaceToolUses*(recipeDir: string): seq[InterfaceToolUse] =
   ## DSL-port M9.R.14f.1 — read the sibling recipe's
   ## ``project-interface.rbsz`` and return its ``toolUses`` (which carry
@@ -4415,12 +4447,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
       "tool-resolution failed: from-source mode requires a non-empty " &
       "executableName on the tool use (package \"" &
       useDef.packageSelector & "\")")
-  var recipeName = name
-  for candidate in m9r14fDepRecipeNames(useDef):
-    if fileExists(extendedPath(root / candidate / "repro.nim")):
-      recipeName = candidate
-      break
-  let recipeDir = root / recipeName
+  let recipeDir = m9r14fResolveRecipeDir(useDef, root)
   let recipeManifest = recipeDir / "repro.nim"
   try:
     let msg = "[RESOLVER] tryResolveFromSourceTool: name=" & name & " root=" & root & " manifest=" & recipeManifest & " exists=" & $fileExists(extendedPath(recipeManifest)) & "\n"
@@ -4444,7 +4471,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
   # candidates can be enumerated (the recipe's `.repro/output/` tree
   # is empty / missing) so existing tests + the executable-style probe
   # for tools like ``meson`` keep working unchanged.
-  let baseCandidate = fromSourceArtifactCandidate(root, recipeName, name)
+  let baseCandidate = recipeDir / ".repro" / "output" / name / name
   var candidates = m9r14dEnumerateArtifacts(recipeDir)
   var resolved = ""
   # Prefer the complete install mirror for executable tools. Its ELF RPATH

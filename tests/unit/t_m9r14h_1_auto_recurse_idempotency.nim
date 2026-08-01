@@ -134,6 +134,40 @@ suite "DSL-port M9.R.14h.1 — auto-recurse idempotency":
     let outcome = tryResolveFromSourceTool(useDef, recipeRoot = scratch)
     check outcome.kind == rrNeedsBuild
 
+  test "test_m9r14h_1_resolver_discovers_in_tree_application_recipe":
+    # An image can consume an application built in the same repository
+    # without duplicating its recipe under recipes/packages/source.
+    let projectRoot = createTempDir("repro-m9r14h-in-tree-app-", "")
+    defer: removeDir(projectRoot)
+    let sourceRoot = projectRoot / "recipes" / "packages" / "source"
+    createDir(sourceRoot)
+    makeRecipeFile(projectRoot / "apps", "reproos-installer")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("reproos-installer"), recipeRoot = sourceRoot)
+
+    check outcome.kind == rrNeedsBuild
+    check outcome.recipeDir ==
+      absolutePath(projectRoot / "apps" / "reproos-installer")
+    check outcome.expectedArtifact.endsWith(
+      "apps/reproos-installer/.repro/output/reproos-installer/" &
+        "reproos-installer")
+
+  test "test_m9r14h_1_corpus_recipe_precedes_in_tree_application":
+    # A package corpus recipe remains authoritative when both layouts exist.
+    let projectRoot = createTempDir("repro-m9r14h-corpus-first-", "")
+    defer: removeDir(projectRoot)
+    let sourceRoot = projectRoot / "recipes" / "packages" / "source"
+    createDir(sourceRoot)
+    makeRecipeFile(sourceRoot, "dual-recipe")
+    makeRecipeFile(projectRoot / "apps", "dual-recipe")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("dual-recipe"), recipeRoot = sourceRoot)
+
+    check outcome.kind == rrNeedsBuild
+    check outcome.recipeDir == absolutePath(sourceRoot / "dual-recipe")
+
   test "test_m9r14h_1_resolved_recipes_cache_is_consulted":
     # Belt-and-braces pin on the in-process cache.  After the dispatcher
     # marks a sibling recipe dir as resolved, a repeat probe (without
