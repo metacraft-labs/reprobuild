@@ -41,3 +41,17 @@ suite "sqlite_binding_smoke":
     check dirExists(extendedPath(s.gcPendingRoot))
     check fileExists(extendedPath(s.indexPath))
     check s.db.userVersion() == StoreSchemaVersion
+
+  test "streamed file blobs close handles exactly once":
+    let dir = createTempDir("repro-store-file-blob-", "")
+    defer:
+      try: removeDir(extendedPath(dir)) except OSError: discard
+    let source = dir / "payload.bin"
+    let payload = "streamed CAS payload"
+    writeFile(extendedPath(source), payload)
+    var s = openStore(dir / "store")
+    defer: s.close()
+    let first = s.storeCasFileBlob(source, uint64(payload.len))
+    let second = s.storeCasFileBlob(source, uint64(payload.len))
+    check first == second
+    check s.readCasBlob(first).len == payload.len

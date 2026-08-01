@@ -719,6 +719,8 @@ proc storeCasFileBlob*(s: var Store; path: string;
   createDir(extendedPath(parentDir(stagePath)))
   var input = open(extendedPath(path), fmRead)
   var output = open(extendedPath(stagePath), fmWrite)
+  var inputOpen = true
+  var outputOpen = true
   var staged = false
   var total = 0'u64
   var hasher = blake3.initHasher()
@@ -738,7 +740,9 @@ proc storeCasFileBlob*(s: var Store; path: string;
       raise newException(IOError, "file changed while hashing: " & path)
     result = hasher.finalize()
     output.close()
+    outputOpen = false
     input.close()
+    inputOpen = false
     let finalPath = s.casPath(result)
     if fileExists(extendedPath(finalPath)):
       removeFile(extendedPath(stagePath))
@@ -756,8 +760,10 @@ proc storeCasFileBlob*(s: var Store; path: string;
         raise
   finally:
     try: hasher.close() except CatchableError: discard
-    try: input.close() except CatchableError: discard
-    try: output.close() except CatchableError: discard
+    if inputOpen:
+      try: input.close() except CatchableError: discard
+    if outputOpen:
+      try: output.close() except CatchableError: discard
     if not staged and fileExists(extendedPath(stagePath)):
       try: removeFile(extendedPath(stagePath)) except OSError: discard
 
