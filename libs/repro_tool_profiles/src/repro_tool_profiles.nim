@@ -3736,14 +3736,20 @@ proc seedBootstrapCycleBreakTools*() =
 
 proc fromSourceRecipeRoot*(): string =
   ## Resolve the from-source recipe anchor. Honours
-  ## ``REPRO_FROM_SOURCE_ROOT`` first; falls back to
-  ## ``getCurrentDir() / "recipes" / "packages" / "source"`` so an
-  ## operator invoking ``repro build`` from a reprobuild checkout finds
-  ## the recipes that ship in-tree.
+  ## ``REPRO_FROM_SOURCE_ROOT`` first. The legacy in-tree catalog remains
+  ## the first automatic candidate, followed by the federated sibling
+  ## ``reprobuild-packages/packages/source`` checkout.
   let override = getEnv(FromSourceRootEnvVar)
   if override.len > 0:
     return override
-  getCurrentDir() / "recipes" / "packages" / "source"
+  let inTree = getCurrentDir() / "recipes" / "packages" / "source"
+  if dirExists(inTree):
+    return inTree
+  let federated = parentDir(getCurrentDir()) / "reprobuild-packages" /
+    "packages" / "source"
+  if dirExists(federated):
+    return federated
+  inTree
 
 proc fromSourceArtifactCandidate*(recipeRoot, packageName,
                                   executableName: string): string =
