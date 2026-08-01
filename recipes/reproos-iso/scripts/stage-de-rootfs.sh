@@ -158,6 +158,21 @@ if [ -z "$SOURCE_GLIBC_VERSION" ]; then
   echo "[stage-de-rootfs] could not determine source glibc version" >&2
   exit 67
 fi
+
+# Install the source glibc runtime at the conventional loader path as well as
+# its mirrored recipe path. Some runtime helpers, notably systemd-executor,
+# are copied into the FHS tree and retain /lib64 as their interpreter until
+# the final normalization pass.
+mkdir -p "$STAGE_DIR/usr/lib64"
+cp -a "$SOURCE_GLIBC_RUNTIME_DIR_STAGED/." "$STAGE_DIR/usr/lib64/"
+SOURCE_GLIBC_LOADER="/lib64/$(basename "$SOURCE_GLIBC_LOADER_STAGED")"
+SOURCE_GLIBC_RUNTIME_DIR="/lib64"
+if [ ! -x "$STAGE_DIR$SOURCE_GLIBC_LOADER" ] || \
+   [ ! -e "$STAGE_DIR$SOURCE_GLIBC_RUNTIME_DIR/libc.so.6" ]; then
+  echo "[stage-de-rootfs] canonical source glibc runtime is incomplete" >&2
+  exit 67
+fi
+
 export SOURCE_GLIBC_VERSION
 echo "[stage-de-rootfs] source glibc runtime: $SOURCE_GLIBC_RUNTIME_DIR"
 

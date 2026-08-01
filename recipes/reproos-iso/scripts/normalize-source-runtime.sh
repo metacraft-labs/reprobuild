@@ -66,8 +66,9 @@ leaks_file="$(mktemp -t reproos-source-runtime-leaks-XXXXXX)"
 shebang_plan_file="$(mktemp -t reproos-source-runtime-shebang-plan-XXXXXX)"
 trap 'rm -f "$candidates_file" "$missing_file" "$leaks_file" "$shebang_plan_file"' EXIT
 
-find "$source_root" -type f \
-  \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) \
+find "$stage_dir" \
+  \( -path "$stage_dir/nix" -o -path "$stage_dir/repro/store" \) -prune -o \
+  -type f \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) \
   -print 2>/dev/null > "$candidates_file"
 for extra_elf in "${extra_elfs[@]}"; do
   [ -f "$extra_elf" ] && printf '%s\n' "$extra_elf" >> "$candidates_file"
