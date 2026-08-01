@@ -3057,6 +3057,30 @@ proc shellScriptArgIndex(argv: openArray[string]): int =
 proc isRuntimeLibraryEnv(name: string): bool {.inline.} =
   name == "LD_LIBRARY_PATH" or name == "DYLD_LIBRARY_PATH"
 
+proc monitorPayloadArgIndex(argv: openArray[string]): int =
+  ## Return the first argument of an io-monitor payload, or -1 when argv is
+  ## not the canonical ``repro internal io monitor ... -- <command>`` shape.
+  if argv.len < 8 or argv[1] != "internal" or argv[2] != "io" or
+      argv[3] != "monitor":
+    return -1
+  for i in countdown(argv.len - 1, 4):
+    if argv[i] == "--" and i + 1 < argv.len:
+      return i + 1
+  -1
+
+proc wrapMonitoredPayloadWithRuntimeEnv(argv: openArray[string];
+                                        payloadIndex: int;
+                                        exportPrefix: string): seq[string] =
+  result = newSeqOfCap[string](argv.len + 4)
+  for i in 0 ..< payloadIndex:
+    result.add(argv[i])
+  result.add("/bin/sh")
+  result.add("-c")
+  result.add(exportPrefix & "exec \"$@\"")
+  result.add("sh")
+  for i in payloadIndex ..< argv.len:
+    result.add(argv[i])
+
 proc deferRuntimeLibraryEnvForShell*(argv, env: seq[string]):
     tuple[argv: seq[string], env: seq[string]] =
   ## A dependency's runtime library directory may contain a SONAME also used
@@ -3068,7 +3092,9 @@ proc deferRuntimeLibraryEnvForShell*(argv, env: seq[string]):
   ## Move explicit loader-path entries from the process environment into
   ## exports at the start of that program. The monitor and interpreter then
   ## start against their own libraries, while every command run by the action
-  ## receives the same loader paths. Non-shell argv is unchanged.
+  ## receives the same loader paths. A monitor-wrapped direct command is
+  ## replaced by a tiny shell payload that exports the paths only after the
+  ## monitor has started; an ordinary non-shell argv remains unchanged.
   result.argv = @[]
   for arg in argv:
     result.argv.add(arg)
@@ -3077,7 +3103,8 @@ proc deferRuntimeLibraryEnvForShell*(argv, env: seq[string]):
     result.env.add(entry)
   when defined(posix):
     let scriptIndex = shellScriptArgIndex(argv)
-    if scriptIndex < 0:
+    let payloadIndex = monitorPayloadArgIndex(argv)
+    if scriptIndex < 0 and payloadIndex < 0:
       return
     var values: array[2, string]
     var found: array[2, bool]
@@ -3102,7 +3129,11 @@ proc deferRuntimeLibraryEnvForShell*(argv, env: seq[string]):
     for i, name in names:
       if found[i]:
         prefix.add("export " & name & "=" & quoteShell(values[i]) & "; ")
-    result.argv[scriptIndex] = prefix & result.argv[scriptIndex]
+    if scriptIndex >= 0:
+      result.argv[scriptIndex] = prefix & result.argv[scriptIndex]
+    else:
+      result.argv = wrapMonitoredPayloadWithRuntimeEnv(argv, payloadIndex,
+        prefix)
 
 proc deferRuntimeLibraryEnvForShell*(argv: seq[string];
                                      env: StringTableRef): seq[string] =
@@ -3112,7 +3143,8 @@ proc deferRuntimeLibraryEnvForShell*(argv: seq[string];
     result.add(arg)
   when defined(posix):
     let scriptIndex = shellScriptArgIndex(argv)
-    if scriptIndex < 0 or env == nil:
+    let payloadIndex = monitorPayloadArgIndex(argv)
+    if (scriptIndex < 0 and payloadIndex < 0) or env == nil:
       return
     const names = ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"]
     var prefix = ""
@@ -3121,7 +3153,11 @@ proc deferRuntimeLibraryEnvForShell*(argv: seq[string];
         prefix.add("export " & name & "=" & quoteShell(env[name]) & "; ")
         env.del(name)
     if prefix.len > 0:
-      result[scriptIndex] = prefix & result[scriptIndex]
+      if scriptIndex >= 0:
+        result[scriptIndex] = prefix & result[scriptIndex]
+      else:
+        result = wrapMonitoredPayloadWithRuntimeEnv(argv, payloadIndex,
+          prefix)
 
 proc applyNimPathArgs*(argv: openArray[string];
                        nimPathDirs: openArray[string]): seq[string] =
