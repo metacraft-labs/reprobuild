@@ -2484,6 +2484,75 @@ proc lowerMaterializedProviderSnapshot(snapshot: ProviderGraphSnapshot;
         result.pools.add(
           repro_build_engine.pool(poolDef.name, poolDef.capacity))
 
+proc materializedCachePrefix(action: BuildAction): string =
+  let raw =
+    if action.declaredOutputs.len == 1:
+      action.declaredOutputs[0]
+    elif action.outputs.len > 0:
+      action.outputs[0]
+    else:
+      ""
+  if raw.len == 0 or raw.isAbsolute:
+    return raw
+  action.cwd / raw
+
+proc removeMaterializedPath(path: string) =
+  if dirExists(path):
+    removeDir(path)
+  elif fileExists(path) or symlinkExists(path):
+    removeFile(path)
+
+proc substituteMaterializedBinaryCacheEntries(g: BuildGraph):
+    BuildRunResult =
+  ## Restore tagged public-interface roots before source auto-recurse builds
+  ## their tool dependencies. A miss is represented as a failed action so the
+  ## caller can fall back to the unchanged source-build path.
+  for action in g.actions:
+    if not action.publishToBinaryCache or action.cacheEntryIdentity.isNone:
+      continue
+    let key = deriveActionCacheKeyHex(action)
+    let prefix = materializedCachePrefix(action)
+    var item = ActionResult(
+      id: action.id,
+      status: asFailed,
+      cacheDecision: cdMiss,
+      reason: "materialized-binary-cache-substitute key=" & key)
+    if prefix.len == 0:
+      item.stderr = "materialized binary-cache prefix is empty"
+      result.results.add(item)
+      continue
+    let staged = prefix & ".repro-cache-substitute-" &
+      $getCurrentProcessId()
+    removeMaterializedPath(staged)
+    createDir(parentDir(staged))
+    let rc = bcCliDispatch.runCacheSubcommand(
+      @["substitute", key, staged])
+    if rc == 0:
+      removeMaterializedPath(prefix)
+      moveDir(staged, prefix)
+      item.status = asCacheHit
+      item.cacheDecision = cdHit
+      item.reason = "materialized-binary-cache-substituted key=" & key
+    else:
+      removeMaterializedPath(staged)
+      item.stderr = "trusted binary-cache miss for " & key
+    result.results.add(item)
+  if result.results.len == 0:
+    result.results.add(ActionResult(
+      id: "binary-cache-materialized",
+      status: asFailed,
+      cacheDecision: cdMiss,
+      reason: "materialized-binary-cache-no-entries",
+      stderr: "no tagged materialized binary-cache entries in selected graph"))
+
+proc materializedSubstitutionConfigured(): bool =
+  if getEnv("REPRO_CACHE_DISABLE", "") in ["1", "true", "yes"]:
+    return false
+  try:
+    bcCachesConfig.loadEndpoints().len > 0
+  except CatchableError:
+    false
+
 proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
                             identity: PathOnlyBuildIdentity;
                             projectRoot: string;
@@ -6392,6 +6461,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         noOutputCleanup = false;
                         publishCacheHits = false;
                         publishMaterialized = false;
+                        substituteMaterialized = false;
                         skipCmakeRegeneration = false;
                         bypassRunQuotaExplicit = false;
                         benchmarkPath = "";
@@ -6424,6 +6494,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   discard consumeInterfaceArtifactWarmStats()
   let buildTotalStart = statStart(statsEnabled)
   let invocationWallStart = epochTime()
+  let materializedOnly =
+    publishMaterialized or substituteMaterialized
   var progressRenderer = newBuildProgressRenderer(progressMode,
     progressBarStyle)
   progressRenderer.renderPhase("preparing build")
@@ -6752,7 +6824,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
       let scheduledGraph = graph(scheduledActions, lowered.pools)
-      if publishMaterialized:
+      if substituteMaterialized:
+        buildResult = substituteMaterializedBinaryCacheEntries(scheduledGraph)
+      elif publishMaterialized:
         buildResult = publishMaterializedBinaryCacheEntries(
           scheduledGraph, engineConfig.binaryCachePublisher)
       else:
@@ -7041,7 +7115,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       artifact.projectInterface.defaultToolProvisioning)
     fallbackToRunQuotaBypass = effectiveMode in {tpmPathOnly, tpmScoop}
 
-  if not publishMaterialized and
+  if not materializedOnly and
       artifact.projectInterface.toolUses.len > 0 and
       effectiveMode == tpmUnspecified:
     raise newException(ValueError,
@@ -7068,7 +7142,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   #   3. ``FromSourceMaxRecursionDepth`` — sanity ceiling. Production
   #      recipe chains stay below 10; the ceiling exists to crash
   #      cleanly on a runaway pattern rather than blow the stack.
-  if effectiveMode == tpmFromSource and not publishMaterialized:
+  if effectiveMode == tpmFromSource and not materializedOnly:
     # M9.R.14c.2 — proactively seed the bootstrap tool chain so the
     # auto-recurse loop short-circuits gcc / make / binutils (and
     # binutils sub-binaries: ld, ar, ranlib, strip, nm, objdump,
@@ -7136,6 +7210,35 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "stay well below it; investigate the call chain for an " &
           "accidental fan-out.")
       let siblingManifest = siblingRecipeDir / "repro.nim"
+      if materializedSubstitutionConfigured() and
+          not prepareOnly and not dryRun and not forceRebuild:
+        let substituteOutcome = executeBuildTarget(
+          siblingManifest, effectiveMode, publicCliPath,
+          selectDefaultAction = true,
+          workRoot = workRoot,
+          progressMode = bpmQuiet,
+          progressBarStyle = progressBarStyle,
+          showSet = {},
+          measureSet = {},
+          reportPersistence = BuildReportPersistence(suppressed: true),
+          logMode = blmSummary,
+          diagnosticsPath = "",
+          prepareOnly = false,
+          dryRun = false,
+          forceRebuild = false,
+          noOutputCleanup = true,
+          publishCacheHits = false,
+          publishMaterialized = false,
+          substituteMaterialized = true,
+          skipCmakeRegeneration = skipCmakeRegeneration,
+          bypassRunQuotaExplicit = bypassRunQuotaExplicit,
+          eventSink = eventSink,
+          cancelCheck = cancelCheck)
+        if substituteOutcome.exitCode == 0:
+          logSummary("from-source cache substitute: restored \"" &
+            outcome.toolName & "\" at " & siblingRecipeDir)
+          fromSourceResolvedRecipes.incl(siblingRecipeDir)
+          continue
       logSummary("from-source auto-recurse: building \"" & outcome.toolName &
         "\" at " & siblingRecipeDir)
       fromSourceBuildStack.add(siblingRecipeDir)
@@ -7156,6 +7259,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           forceRebuild = forceRebuild,
           publishCacheHits = publishCacheHits,
           publishMaterialized = publishMaterialized,
+          substituteMaterialized = substituteMaterialized,
           skipCmakeRegeneration = skipCmakeRegeneration,
           bypassRunQuotaExplicit = bypassRunQuotaExplicit,
           eventSink = eventSink,
@@ -7207,7 +7311,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # is intentionally left to the existing host/PATH behavior. Every other
   # selector (host / nix / tarball / scoop / corpus-recipe) is untouched, so a
   # build that consumes no cross-repo producer is byte-identical to today.
-  if not publishMaterialized and not prepareOnly and
+  if not materializedOnly and not prepareOnly and
       result.projectRoot.len > 0:
     for useDef in artifact.projectInterface.toolUses:
       let selector = useDef.packageSelector
@@ -7375,6 +7479,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             forceRebuild = forceRebuild,
             publishCacheHits = publishCacheHits,
             publishMaterialized = publishMaterialized,
+            substituteMaterialized = substituteMaterialized,
             skipCmakeRegeneration = skipCmakeRegeneration,
             bypassRunQuotaExplicit = bypassRunQuotaExplicit,
             eventSink = eventSink,
@@ -7655,7 +7760,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         if extra.len > 0 and selectorList.find(extra) < 0:
           selectorList.add(extra)
       let lowered =
-        if publishMaterialized:
+        if materializedOnly:
           lowerMaterializedProviderSnapshot(
             refresh.snapshot, result.projectRoot)
         elif selectorList.len == 0:
@@ -7675,7 +7780,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   if shouldEnterBuildPipeline(effectiveMode):
     let identityStart = statStart(statsEnabled)
     let resolved =
-      if publishMaterialized:
+      if materializedOnly:
         progressRenderer.renderPhase(
           "skipping tool provisioning for materialized publication")
         (identity: PathOnlyBuildIdentity(
@@ -7700,20 +7805,21 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # root so the resolver closure routes cross-repo producer refs through the
     # develop-override + committed-``LockedDep`` seam.
     pendingToolIdentityResolver =
-      if publishMaterialized: nil
+      if materializedOnly: nil
       else: mkToolIdentityResolver(identity, result.projectRoot)
-    if publishMaterialized:
-      logSummary("repro build: materialized publication active " &
-        "(tool provisioning skipped)")
+    if materializedOnly:
+      logSummary("repro build: materialized " &
+        (if substituteMaterialized: "substitution" else: "publication") &
+        " active (tool provisioning skipped)")
     else:
       logSummary("repro build: tool provisioning active " &
         "(tool-provisioning=" & effectiveMode.modeName & ")")
-    if not publishMaterialized and effectiveMode == tpmPathOnly:
+    if not materializedOnly and effectiveMode == tpmPathOnly:
       logSummary("repro build: provisioning-disabled mode active (tool-provisioning=path)")
     logSummary("project: " & artifact.projectInterface.projectName)
     logSummary("interface: " & interfacePath)
-    if publishMaterialized:
-      logSummary("toolIdentity: skipped for materialized publication")
+    if materializedOnly:
+      logSummary("toolIdentity: skipped for materialized operation")
     else:
       logSummary("toolIdentity: " & resolved.identityPath)
       logSummary("inspection: " & resolved.inspectionPath)
@@ -7974,7 +8080,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let graphCacheReadStart = statStart(statsEnabled)
     progressRenderer.renderPhase("reading lowered graph cache")
     let cachedLowered =
-      if forceRebuild or multiTarget or publishMaterialized:
+      if forceRebuild or multiTarget or materializedOnly:
         none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
       else:
         warmReadFreshLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
@@ -7989,7 +8095,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         let graphLowerStart = statStart(statsEnabled)
         progressRenderer.renderPhase("lowering project graph")
         let computed =
-          if publishMaterialized:
+          if materializedOnly:
             lowerMaterializedProviderSnapshot(refresh.snapshot, projectRoot)
           elif selectorList.len == 0:
             lowerProviderSnapshot(refresh.snapshot, identity,
@@ -7999,7 +8105,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
               projectRoot, selectorList)
         finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
         let cacheWriteStart = statStart(statsEnabled)
-        if not multiTarget and not publishMaterialized:
+        if not multiTarget and not materializedOnly:
           writeLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
             modulePath, projectRoot, selectedActionId, pathEnv, graphCacheKey,
             computed)
@@ -8135,7 +8241,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
       let scheduledGraph = graph(scheduledActions, lowered.pools)
-      if publishMaterialized:
+      if substituteMaterialized:
+        buildResult = substituteMaterializedBinaryCacheEntries(scheduledGraph)
+      elif publishMaterialized:
         buildResult = publishMaterializedBinaryCacheEntries(
           scheduledGraph, engineConfig.binaryCachePublisher)
       else:

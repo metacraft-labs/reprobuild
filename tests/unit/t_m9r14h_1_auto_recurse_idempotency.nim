@@ -277,3 +277,22 @@ suite "DSL-port M9.R.14h.1 — auto-recurse idempotency":
 
     check outcome.kind == rrResolved
     check outcome.profile.resolvedExecutablePath == absolutePath(expected)
+
+  test "test_m9r14h_1_resolver_accepts_completed_aggregate_package":
+    # Aggregate packages can expose several tools without shipping one named
+    # after the package selector. A completed install mirror is sufficient
+    # package-level evidence after all stronger artifact probes miss.
+    let scratch = createTempDir("repro-m9r14h-aggregate-payload-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "shadow-utils")
+    let mirrorDir = scratch / "shadow-utils" / ".repro" / "output" /
+      "install"
+    makeExecutable(mirrorDir / "usr" / "sbin" / "useradd")
+    let stamp = mirrorDir / ".m9r14e_2_install_mirror.stamp"
+    writeFile(stamp, "complete\n")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("shadow-utils"), recipeRoot = scratch)
+
+    check outcome.kind == rrResolved
+    check outcome.profile.resolvedExecutablePath == absolutePath(stamp)

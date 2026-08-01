@@ -4670,6 +4670,16 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
                 resolved = absolutePath(entry)
                 break packageLibDataWalk
   if resolved.len == 0:
+    # Aggregate packages do not necessarily ship an artifact named after the
+    # package selector. shadow-utils, for example, installs useradd, login,
+    # passwd, and libsubid, but no "shadow-utils" binary or library. The
+    # install-mirror stamp is written only after the complete prefix has been
+    # staged, so it is the package-level completion evidence for this shape.
+    let mirrorStamp = recipeDir / ".repro" / "output" / "install" /
+      ".m9r14e_2_install_mirror.stamp"
+    if fileExists(extendedPath(mirrorStamp)):
+      resolved = absolutePath(mirrorStamp)
+  if resolved.len == 0:
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,
       expectedArtifact: baseCandidate,
