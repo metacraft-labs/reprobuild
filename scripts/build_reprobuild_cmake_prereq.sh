@@ -8,8 +8,33 @@ if [[ ! -d "${cmake_root}" ]]; then
   exit 0
 fi
 
-if [[ -x "${cmake_root}/build/bin/cmake${exe_ext}" ]]; then
-  exit 0
+# A previously-built binary is NOT evidence that it is current. This guard used
+# to `exit 0` whenever build/bin/cmake existed, so no change to the fork's
+# sources was ever compiled again: consumers silently kept exercising a stale
+# binary. That is how a fix to the Reprobuild generator's CLI flags reached the
+# repository but never reached the tests — the binary was four days older than
+# the fix, and test-logs/reprobuild-cmake-build.log was itself a stale artefact
+# from that same date, so even the evidence of building looked convincing.
+#
+# When a configured build tree already exists, delegate staleness to the
+# generator, which does correct incremental dependency tracking. An up-to-date
+# tree relinks nothing and costs about a second; a changed source recompiles
+# exactly what it must. The expensive cold configure below still runs only when
+# there is no build tree to reuse.
+if [[ -x "${cmake_root}/build/bin/cmake${exe_ext}" && -f "${cmake_root}/build/CMakeCache.txt" ]]; then
+  mkdir -p test-logs
+  printf 'Refreshing prerequisite sibling: ../reprobuild-cmake (incremental)\n' >&2
+  cmake_jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+  if (( cmake_jobs > 16 )); then cmake_jobs=16; fi
+  if (cd "${cmake_root}" && cmake --build build --target cmake \
+        --parallel "${cmake_jobs}") >> test-logs/reprobuild-cmake-build.log 2>&1; then
+    exit 0
+  fi
+  # An incremental refresh can legitimately fail when the cached configuration
+  # no longer matches (a moved toolchain, a changed generator). Fall through to
+  # the full configure below, which reconfigures from scratch, rather than
+  # failing the caller with a stale tree.
+  printf 'Incremental refresh failed; reconfiguring from scratch\n' >&2
 fi
 
 mkdir -p test-logs
