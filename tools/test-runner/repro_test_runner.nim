@@ -430,20 +430,47 @@ when defined(posix):
 
     var child: Process
     var exitCode = 125
-    try:
-      child = startProcess(binary, args = binaryArgs,
-        options = {poParentStreams})
-      exitCode = child.waitForExit()
-      close(child)
-    except OSError as e:
+    # A spawn failure is the HARNESS failing to start the test, not the test
+    # failing. Observed in practice as EACCES against a mode-0755 binary that
+    # runs fine standalone — an exec racing the build that wrote it, or a
+    # transient fork/exec resource condition under concurrent workers. Both are
+    # self-clearing, so retry a bounded number of times with a short backoff
+    # before giving up. `waitForExit` is deliberately NOT retried: once the
+    # child is running its exit status is the test's answer, whatever it is.
+    const
+      SpawnAttempts = 4
+      SpawnRetryDelayMs = 250
+    var spawnError = ""
+    for attempt in 1 .. SpawnAttempts:
+      spawnError = ""
+      try:
+        child = startProcess(binary, args = binaryArgs,
+          options = {poParentStreams})
+      except OSError as e:
+        spawnError = e.msg
+        if attempt < SpawnAttempts:
+          stderr.writeLine(
+            "repro_test_runner: spawn attempt " & $attempt & " of " &
+            $SpawnAttempts & " failed (" & e.msg & "); retrying")
+          sleep(SpawnRetryDelayMs * attempt)
+          continue
+        break
+      try:
+        exitCode = child.waitForExit()
+        close(child)
+      except IOError as e:
+        stderr.writeLine(
+          "repro_test_runner: internal process-group child wait failed: " &
+          e.msg)
+      break
+    if spawnError.len > 0:
+      # Exit 126 ("command found but not executable") distinguishes a harness
+      # spawn failure from any status the test itself could return, so a suite
+      # summary can separate "the code is broken" from "we could not run it".
+      exitCode = 126
       stderr.writeLine(
-        "repro_test_runner: internal process-group child spawn failed: " &
-        e.msg)
-    except IOError as e:
-      stderr.writeLine(
-        "repro_test_runner: internal process-group child wait failed: " &
-        e.msg)
-
+        "repro_test_runner: HARNESS ERROR — child spawn failed after " &
+        $SpawnAttempts & " attempts: " & spawnError)
     try:
       writeGroupStatus(statusPath, exitCode)
     except CatchableError as e:
