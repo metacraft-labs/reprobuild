@@ -194,7 +194,10 @@ suite "Local daemons/control-plane M10 development self-restart":
       stateDir: "/tmp/repro-owner-plist-state",
       logPath: "/tmp/repro-owner-plist-state/daemon.log")
     let plist = renderLaunchdUserAgentPlist("/tmp/repro", config)
-    check not plist.contains("<key>EnvironmentVariables</key>")
+    # The dict itself is expected: reprobuild's own runtime configuration
+    # (PATH, REPROBUILD_*, *_SRC, *_PREFIX) is propagated so a launchd-started
+    # daemon keeps the settings an installed `repro` wrapper injects. What must
+    # stay absent without a runner-supplied token is the ownership marker.
     check not plist.contains("<key>" & OwnerTokenEnv & "</key>")
 
   test "launchd ownership environment is exact and XML escaped":
@@ -218,6 +221,43 @@ suite "Local daemons/control-plane M10 development self-restart":
     check plist.contains(
       "<string>&lt;owner&amp;&quot;&apos;token&gt;</string>")
     check not plist.contains("<owner&\"'token>")
+
+  test "launchd plist propagates reprobuild runtime configuration only":
+    # Regression: a launchd user agent starts from launchd's default
+    # environment, so the daemon lost every `--set-default` variable an
+    # installed `repro` wrapper injects. Losing REPROBUILD_SOURCE_ROOT meant the
+    # daemon could not find `tools/reprobuild-nix-daemon` (shipped only in the
+    # source root), and every `tool-provisioning=nix` build failed with
+    # "Failed to connect or spawn reprobuild-nix-daemon".
+    const SourceRootEnv = "REPROBUILD_SOURCE_ROOT"
+    const PrefixEnv = "CLINGO_PREFIX"
+    const UnrelatedEnv = "T_M10_UNRELATED_USER_SECRET"
+    let priors = [
+      (SourceRootEnv, existsEnv(SourceRootEnv), getEnv(SourceRootEnv)),
+      (PrefixEnv, existsEnv(PrefixEnv), getEnv(PrefixEnv)),
+      (UnrelatedEnv, existsEnv(UnrelatedEnv), getEnv(UnrelatedEnv))]
+    defer:
+      for (key, had, value) in priors:
+        if had: putEnv(key, value) else: delEnv(key)
+    putEnv(SourceRootEnv, "/nix/store/fake-source&root")
+    putEnv(PrefixEnv, "/nix/store/fake-clingo")
+    putEnv(UnrelatedEnv, "super-secret-token")
+
+    let config = UserDaemonConfig(
+      endpoint: "/tmp/repro-env-plist.sock",
+      stateDir: "/tmp/repro-env-plist-state",
+      logPath: "/tmp/repro-env-plist-state/daemon.log")
+    let plist = renderLaunchdUserAgentPlist("/tmp/repro", config)
+
+    check plist.count("<key>EnvironmentVariables</key>") == 1
+    # Reprobuild's own configuration crosses over, XML-escaped.
+    check plist.contains("<key>" & SourceRootEnv & "</key>")
+    check plist.contains("<string>/nix/store/fake-source&amp;root</string>")
+    check plist.contains("<key>" & PrefixEnv & "</key>")
+    check plist.contains("<key>PATH</key>")
+    # Unrelated caller environment must NOT be serialised to disk.
+    check not plist.contains(UnrelatedEnv)
+    check not plist.contains("super-secret-token")
 
   test "integration_daemon_dev_restart_posix":
     when defined(posix):

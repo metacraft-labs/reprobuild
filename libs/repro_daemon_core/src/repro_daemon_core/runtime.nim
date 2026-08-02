@@ -1,4 +1,4 @@
-import std/[net, os, osproc, strtabs, strutils, times]
+import std/[algorithm, net, os, osproc, strtabs, strutils, times]
 
 import repro_core
 import blake3
@@ -1680,6 +1680,32 @@ proc processOwnerTokenForLaunch(config: UserDaemonConfig): string =
   else:
     getEnv(ReproTestRunnerOwnerTokenEnv)
 
+proc isReprobuildRuntimeEnvKey(key: string): bool =
+  ## Is ``key`` part of reprobuild's OWN runtime configuration, and therefore
+  ## required by a daemon image that launchd starts?
+  ##
+  ## ``launchWithFork`` hands the daemon a copy of the parent environment, but a
+  ## launchd user agent instead starts from launchd's default environment —
+  ## ``PATH=/usr/bin:/bin:/usr/sbin:/sbin`` and nothing else. An installed
+  ## ``repro`` is a makeWrapper script that injects its runtime configuration
+  ## (``REPROBUILD_SOURCE_ROOT``, ``CLINGO_PREFIX``, the ``*_SRC`` source roots,
+  ## …) as ``--set-default`` variables, and the daemon image it spawns is the
+  ## inner *unwrapped* binary, so without propagation the daemon loses all of
+  ## it. Concretely: ``reprobuild-nix-daemon`` ships only under
+  ## ``$REPROBUILD_SOURCE_ROOT/tools`` (the package installs just ``bin/`` and
+  ## ``lib/``), so a launchd-started daemon could never locate it and every
+  ## ``tool-provisioning=nix`` build died with
+  ## "Failed to connect or spawn reprobuild-nix-daemon".
+  ##
+  ## Propagation is CURATED rather than the wholesale copy ``launchWithFork``
+  ## performs, because the plist is serialised to disk for ``launchctl`` to
+  ## read: copying the caller's entire environment would persist unrelated user
+  ## secrets (credentials, API tokens) into a file. Restricting it to
+  ## reprobuild's own namespace plus ``PATH`` keeps the daemon correct without
+  ## widening that exposure.
+  key == "PATH" or key.startsWith("REPRO") or key.endsWith("_SRC") or
+    key.endsWith("_PREFIX")
+
 proc renderLaunchdUserAgentPlist*(exe: string; config: UserDaemonConfig):
     string =
   var args = @[exe] & daemonProcessArgs(config)
@@ -1693,13 +1719,26 @@ proc renderLaunchdUserAgentPlist*(exe: string; config: UserDaemonConfig):
   for arg in args:
     result.add("    <string>" & xmlEscape(arg) & "</string>\n")
   result.add("  </array>\n")
+  # Reprobuild's own runtime configuration must survive the launchd launch —
+  # see isReprobuildRuntimeEnvKey. Sorted so the rendered plist is byte-stable
+  # for a given environment (envPairs' iteration order is unspecified).
+  var envEntries: seq[(string, string)] = @[]
+  for key, value in envPairs():
+    if key != ReproTestRunnerOwnerTokenEnv and isReprobuildRuntimeEnvKey(key):
+      envEntries.add((key, value))
+  envEntries.sort()
+  # The ownership marker is launch-time state rather than inherited
+  # environment, so it is appended from the config, never copied from the
+  # parent (protocol.sanitizeUserDaemonRequestEnvironment strips it elsewhere).
   let processOwnerToken = processOwnerTokenForLaunch(config)
   if processOwnerToken.len > 0:
-    result.add("  <key>EnvironmentVariables</key>\n" &
-      "  <dict>\n" &
-      "    <key>" & ReproTestRunnerOwnerTokenEnv & "</key>\n" &
-      "    <string>" & xmlEscape(processOwnerToken) & "</string>\n" &
-      "  </dict>\n")
+    envEntries.add((ReproTestRunnerOwnerTokenEnv, processOwnerToken))
+  if envEntries.len > 0:
+    result.add("  <key>EnvironmentVariables</key>\n  <dict>\n")
+    for (key, value) in envEntries:
+      result.add("    <key>" & xmlEscape(key) & "</key>\n" &
+        "    <string>" & xmlEscape(value) & "</string>\n")
+    result.add("  </dict>\n")
   result.add(
     "  <key>RunAtLoad</key>\n  <true/>\n" &
     "  <key>KeepAlive</key>\n  <false/>\n" &
