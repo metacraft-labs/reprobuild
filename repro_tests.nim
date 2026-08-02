@@ -982,6 +982,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_elevation/tests/t_windows_service_recovery_digest.nim",
+    binary: "build/test-bin/t_windows_service_recovery_digest",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_home_apply/tests/t_adapter_chain.nim",
     binary: "build/test-bin/t_adapter_chain",
     defines: @[],
