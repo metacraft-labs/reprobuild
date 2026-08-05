@@ -783,14 +783,21 @@ proc selectNixProvisioning(useDef: InterfaceToolUse):
     InterfaceNixProvisioning =
   let requested = requestedProvisioningContributor()
   var contributors: seq[string] = @[]
+  # ``result.selector`` is NOT a usable "nothing chosen yet" sentinel: an entry
+  # whose selector is empty is still an ELIGIBLE entry with incomplete
+  # metadata, and treating it as unchosen reported "no nix realization" for a
+  # package that declares one. ``nixAcquisitionPlan`` owns the completeness
+  # diagnostic; selection only decides WHICH entry.
+  var chosen = false
   for candidate in useDef.nixProvisioning:
     if requested.len > 0 and candidate.contributor != requested:
       continue
     if candidate.contributor notin contributors:
       contributors.add(candidate.contributor)
-    if result.selector.len == 0:
+    if not chosen:
       result = candidate
-  if result.selector.len == 0:
+      chosen = true
+  if not chosen:
     raise newException(ValueError,
       "tool-resolution failed: provisioning contributor \"" & requested &
       "\" has no nix realization for package \"" &
