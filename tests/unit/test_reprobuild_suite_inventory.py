@@ -290,7 +290,7 @@ test "incomplete name" and:
             "libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim": 4,
             "tests/integration/t_d6_runner_test_timeout.nim": 3,
             "tests/integration/t_extension_type_lifted_and_consumed.nim": 1,
-            "tests/integration/t_local_daemons_control_plane_m10.nim": 5,
+            "tests/integration/t_local_daemons_control_plane_m10.nim": 6,
             "tests/integration/t_pre_push_protocol_v2_ref_validation.nim": 3,
             "tests/integration/"
             "t_repro_test_runner_process_group_cleanup.nim": 8,
@@ -449,14 +449,11 @@ test "incomplete name" and:
         # or substituted enrollment cannot be absorbed by the case totals.
         #
         # Recomputed from the inventory module, not bumped arithmetically.
-        # This change adds +1 spec / +8 nim cases: the new suite
-        # libs/repro_infra/tests/t_windows_service_recovery_digest.nim,
-        # plus the extra cases added to the existing repro_infra smoke
-        # suite. Measured on the rebase base (dev at the merge of the
-        # build-action audit change) the inventory module reports
-        # 1197 specs / 6745 nim cases / 6776 total / 1201 entries, and
-        # with this change applied it reports 1198 / 6753 / 6784 / 1202.
-        # No pre-existing drift is folded in here: the base was green.
+        # Pure pin refresh: no test is added or removed by this change.
+        # t_local_daemons_control_plane_m10.nim gained a sixth case
+        # without its per-source pin being refreshed, so that pin moves
+        # 5 -> 6 above and the case totals move +1 (6753 -> 6754 nim,
+        # 6784 -> 6785 overall). The spec counts are untouched.
         self.assertEqual(len(nim_specs), 1198)
         self.assertEqual(len(python_specs), 4)
 
@@ -505,9 +502,9 @@ test "incomplete name" and:
         )
         # Language totals and the overall total. These are the aggregate
         # backstop for the per-source pins above, not a substitute for them.
-        self.assertEqual(nim_total, 6753)
+        self.assertEqual(nim_total, 6754)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6784)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6785)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
