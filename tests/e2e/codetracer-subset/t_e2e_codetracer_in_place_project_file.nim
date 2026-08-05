@@ -6,14 +6,14 @@ import repro_test_support
 
 const
   CodeTracerProjectContractCommit =
-    "e65f09dfa0979817592973d4de378f4d8d3c439c"
+    "879d1b226765130c4b5e7e8e5b38825fe647802d"
   PinnedCodeTracerProjectFile =
-    "tests/fixtures/codetracer-subset/repro-e65f09df.nim"
+    "tests/fixtures/codetracer-subset/repro-879d1b22.nim"
   PinnedCodeTracerConfigFile =
-    "tests/fixtures/codetracer-subset/config-e65f09df.nims"
+    "tests/fixtures/codetracer-subset/config-879d1b22.nims"
   PinnedCodeTracerFixtureHeaderLines = 6
   PinnedCodeTracerProjectPayloadSha256 =
-    "ec92f5f3e705019688b2353ac596edac47a184ade86af7d00988931fb3c0db03"
+    "6f91be25039952dedaf5a145ce17bee3a0843fc0b59b5ec5d2dd55c2f5dd2582"
   PinnedCodeTracerConfigPayloadSha256 =
     "3ce6cff73a75c6bfed6e3ed9d0fe1128dff8bca2ef5ef0e23caa5450305d299e"
 
