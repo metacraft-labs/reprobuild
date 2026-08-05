@@ -5750,6 +5750,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/e2e/m83/t_e2e_profile_compile_nim_path_closure.nim",
+    binary: "build/test-bin/t_e2e_profile_compile_nim_path_closure",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/e2e/m83/t_e2e_profile_modules.nim",
     binary: "build/test-bin/t_e2e_profile_modules",
     defines: @[],
