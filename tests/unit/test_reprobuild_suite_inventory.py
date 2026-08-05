@@ -449,13 +449,19 @@ test "incomplete name" and:
         # or substituted enrollment cannot be absorbed by the case totals.
         #
         # Recomputed from the inventory module, not bumped arithmetically.
-        # This change adds +1 spec / +5 nim cases: the new suite
-        # libs/repro_project_dsl/tests/dsl_port/
-        # t_dsl_self_hosting_tool_dep_name_collision.nim, the regression
-        # test for the DSL artifact-vs-tool-dependency name collision.
-        # Counts move 1198 -> 1199 specs, 6754 -> 6759 nim cases,
-        # 6785 -> 6790 overall, 1202 -> 1203 entries.
-        self.assertEqual(len(nim_specs), 1199)
+        # This change adds +3 specs / +4 nim cases: three suites that
+        # already existed on disk but were missing from repro_tests.nim,
+        # so the suite never built or ran them:
+        #
+        #   tests/integration/t_pkgconf_bootstrap_provisioning.nim  (1)
+        #   tests/integration/t_pre_push_membership_repo_scopes_to_
+        #     touched_fragments.nim                                 (2)
+        #   tests/integration/t_pre_push_public_only_writes_no_
+        #     manifest_lock.nim                                     (1)
+        #
+        # Counts move 1199 -> 1202 specs, 6759 -> 6763 nim cases,
+        # 6790 -> 6794 overall, 1203 -> 1206 entries.
+        self.assertEqual(len(nim_specs), 1202)
         self.assertEqual(len(python_specs), 4)
 
         nim_total = sum(
@@ -503,9 +509,9 @@ test "incomplete name" and:
         )
         # Language totals and the overall total. These are the aggregate
         # backstop for the per-source pins above, not a substitute for them.
-        self.assertEqual(nim_total, 6759)
+        self.assertEqual(nim_total, 6763)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6790)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6794)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -771,9 +777,9 @@ test "incomplete name" and:
         # repro_tests.nim. This is an independent reading of the same
         # generated file as the parse_repro_tests pins above, so a dropped,
         # duplicated, or hand-edited specification fails here too.
-        # Same +1 spec movement as the parse_repro_tests pin above; see
+        # Same +3 spec movement as the parse_repro_tests pin above; see
         # the comment there.
-        self.assertEqual(declared_nim_count, 1199)
+        self.assertEqual(declared_nim_count, 1202)
         self.assertEqual(declared_python_count, 4)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -804,7 +810,7 @@ test "incomplete name" and:
             data["static"]["testEntryCount"],
             declared_nim_count + declared_python_count,
         )
-        self.assertEqual(data["static"]["testEntryCount"], 1203)
+        self.assertEqual(data["static"]["testEntryCount"], 1206)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),

@@ -7430,6 +7430,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_pkgconf_bootstrap_provisioning.nim",
+    binary: "build/test-bin/t_pkgconf_bootstrap_provisioning",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_post_commit_cache_push_propagates_objects_to_sibling_workspace.nim",
     binary: "build/test-bin/t_post_commit_cache_push_propagates_objects_to_sibling_workspace",
     defines: @[],
@@ -7494,6 +7502,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_pre_push_membership_repo_scopes_to_touched_fragments.nim",
+    binary: "build/test-bin/t_pre_push_membership_repo_scopes_to_touched_fragments",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_pre_push_passes_on_heterogeneous_branches.nim",
     binary: "build/test-bin/t_pre_push_passes_on_heterogeneous_branches",
     defines: @[],
@@ -7512,6 +7528,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_pre_push_protocol_v2_ref_validation.nim",
     binary: "build/test-bin/t_pre_push_protocol_v2_ref_validation",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_pre_push_public_only_writes_no_manifest_lock.nim",
+    binary: "build/test-bin/t_pre_push_public_only_writes_no_manifest_lock",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -7670,6 +7694,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_provisioning_contributions.nim",
+    binary: "build/test-bin/t_provisioning_contributions",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim",
     binary: "build/test-bin/t_public_committed_team_manifest_personal_db_mixed",
     defines: @[],
@@ -7816,14 +7848,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_reproos_source_bridge_inventory.nim",
     binary: "build/test-bin/t_reproos_source_bridge_inventory",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "tests/integration/t_provisioning_contributions.nim",
-    binary: "build/test-bin/t_provisioning_contributions",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
