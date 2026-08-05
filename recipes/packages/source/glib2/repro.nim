@@ -247,14 +247,18 @@ package glib2Source:
         "documentation=false",
         "man-pages=disabled",
         "introspection=disabled",
-        "sysprof=disabled",
         "nls=disabled",
         "xattr=false",
         # Keep Meson setup from cloning fallback subprojects under ./src.
         "sysprof=disabled",
-        "wrap_mode=nofallback",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      # ``wrap_mode`` is a Meson BUILT-IN, so it travels on the typed
+      # ``wrapMode`` flag (``--wrap-mode=``) rather than in the project
+      # options seq — otherwise meson_package's default
+      # ``--wrap-mode=nodownload`` and a ``-Dwrap_mode=nofallback``
+      # project option would both reach the same setup invocation.
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts,
+        wrapMode = "nofallback")
       discard pkg.library("libGlib2")
       discard pkg.library("libGObject")
       discard pkg.library("libGio")

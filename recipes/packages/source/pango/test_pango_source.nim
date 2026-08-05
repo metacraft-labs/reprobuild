@@ -28,7 +28,7 @@
 ##     repository for ``repro update-source`` and the exact tool/library
 ##     constraints required by the pinned upstream release.
 
-import std/[strutils, unittest]
+import std/[os, strutils, unittest]
 
 import repro_project_dsl
 
@@ -46,16 +46,40 @@ const ExpectedHash =
   "17065e2fcc5f5a5bdbffc884c956bfc7c451a96e8c4fb2f8ad837c6413cb5a01"
 
 const ExpectedMesonOptions = @[
+  # ``meson_package`` prepends ``libdir=lib`` whenever the recipe does
+  # not pin a libdir of its own, so the package result and the install
+  # mirror both expose libraries from ``usr/lib`` regardless of Meson's
+  # host-dependent ``lib/<multiarch>`` default.
+  "libdir=lib",
   "introspection=enabled",
   "documentation=false",
   "build-testsuite=false",
 ]
 
+## The recipe root the ``GI_GIR_PATH`` expectation below is pinned
+## against. The recipe reads it from ``$REPROBUILD_RECIPE_ROOT``, so the
+## test can fix it and assert the exact resulting string.
+const PinnedRecipeRoot = "/opt/repro/reprobuild/recipes/packages/source"
+
 const ExpectedMesonExtraEnv = @[
   ("GI_GIR_PATH",
-    "/opt/repro/reprobuild/recipes/packages/source/glib2-introspection/.repro/output/install/usr/share/gir-1.0:" &
-    "/opt/repro/reprobuild/recipes/packages/source/harfbuzz/.repro/output/install/usr/share/gir-1.0"),
+    PinnedRecipeRoot & "/glib2-introspection/.repro/output/install/usr/share/gir-1.0:" &
+    PinnedRecipeRoot & "/harfbuzz/.repro/output/install/usr/share/gir-1.0"),
 ]
+
+const RecipeRootEnv = "REPROBUILD_RECIPE_ROOT"
+
+template withRecipeRootEnv(body: untyped) =
+  let oldSet = existsEnv(RecipeRootEnv)
+  let oldValue = getEnv(RecipeRootEnv)
+  putEnv(RecipeRootEnv, PinnedRecipeRoot)
+  try:
+    body
+  finally:
+    if oldSet:
+      putEnv(RecipeRootEnv, oldValue)
+    else:
+      delEnv(RecipeRootEnv)
 
 const ExpectedNativeBuildDeps = @[
   "gobject-introspection",
@@ -105,23 +129,44 @@ suite "pangoSource — from-source recipe smoke test":
     # M9.R.6.1 moved recipe options from the retired build-flags
     # registry into the explicit package-level build body. Inspect the
     # resulting typed action rather than treating the source as text.
-    let expectedEncoded = ExpectedMesonOptions.join("\x1f")
-    var matchingSetupActions = 0
-    for action in registeredBuildActions():
-      if action.call.providerEntrypointId != "meson.mesonBin.setup":
-        continue
-      var optionArguments = 0
-      var hasExactOptions = false
-      for argument in action.call.arguments:
-        if argument.name == "options":
-          inc optionArguments
-          if argument.encodedValue == expectedEncoded:
-            hasExactOptions = true
-      if hasExactOptions:
-        inc matchingSetupActions
-        check optionArguments == 1
-        check action.env == ExpectedMesonExtraEnv
-    check matchingSetupActions == 1
+    #
+    # The recipe derives ``GI_GIR_PATH`` from ``$REPROBUILD_RECIPE_ROOT``
+    # (falling back to the parent of the process cwd), so the registry is
+    # rebuilt here under a pinned recipe root. That keeps the expected
+    # value an exact literal instead of a value that silently tracks
+    # whatever directory the test binary happens to run from.
+    withRecipeRootEnv:
+      resetBuildActionRegistry()
+      buildPangoSourcePackage()
+
+      let expectedEncoded = ExpectedMesonOptions.join("\x1f")
+      var matchingSetupActions = 0
+      for action in registeredBuildActions():
+        if action.call.providerEntrypointId != "meson.mesonBin.setup":
+          continue
+        var optionArguments = 0
+        var hasExactOptions = false
+        for argument in action.call.arguments:
+          if argument.name == "options":
+            inc optionArguments
+            if argument.encodedValue == expectedEncoded:
+              hasExactOptions = true
+        if hasExactOptions:
+          inc matchingSetupActions
+          check optionArguments == 1
+          # ``action.env`` also carries the ``OUT_MIRROR`` +
+          # ``DEP_<NAME>_ROOT`` entries ``meson_package`` threads on from
+          # the declared native/build deps, so pin the recipe's own
+          # ``extraEnv`` contribution by key rather than comparing the
+          # whole table.
+          for (key, value) in ExpectedMesonExtraEnv:
+            var occurrences = 0
+            for (actualKey, actualValue) in action.env:
+              if actualKey == key:
+                inc occurrences
+                check actualValue == value
+            check occurrences == 1
+      check matchingSetupActions == 1
 
   test "retired build-flags registry cannot shadow explicit options":
     check not compiles((proc (): seq[string] =

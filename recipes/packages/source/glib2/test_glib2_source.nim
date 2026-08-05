@@ -42,6 +42,11 @@ const ExpectedHash =
   "05c2031f9bdf6b5aba7a06ca84f0b4aced28b19bf1b50c6ab25cc675277cbc3f"
 
 const ExpectedMesonConfigureOptions = @[
+  # ``meson_package`` prepends ``libdir=lib`` whenever the recipe does
+  # not pin a libdir of its own, so the package result and the install
+  # mirror both expose libraries from ``usr/lib`` regardless of Meson's
+  # host-dependent ``lib/<multiarch>`` default.
+  "libdir=lib",
   "tests=false",
   "documentation=false",
   "man-pages=disabled",
@@ -49,8 +54,11 @@ const ExpectedMesonConfigureOptions = @[
   "nls=disabled",
   "xattr=false",
   "sysprof=disabled",
-  "wrap_mode=nofallback",
 ]
+
+## ``wrap_mode`` is a Meson built-in and rides the typed ``wrapMode``
+## flag, not the project options seq.
+const ExpectedMesonWrapMode = "nofallback"
 
 proc argByName(action: BuildActionDef; name: string): PublicCliArg =
   for arg in action.call.arguments:
@@ -155,7 +163,9 @@ suite "glib2Source — from-source recipe smoke test":
     buildGlib2SourcePackage()
     let setupAction = findMesonSetupAction()
     let opts = setupAction.argByName("options").encodedValues()
-    check "wrap_mode=nofallback" in opts
+    check setupAction.argByName("wrapMode").encodedValues() ==
+      @[ExpectedMesonWrapMode]
+    check "wrap_mode=nofallback" notin opts
     check "sysprof=disabled" in opts
     check setupAction.readOnlyRoots == @["./src"]
     check "./src" notin setupAction.declaredOutputs
