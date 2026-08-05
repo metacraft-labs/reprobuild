@@ -1,6 +1,7 @@
 import std/[os, strutils]
 
 import repro_project_dsl/install_mirror_resolver
+import repro_project_dsl/install_mirror_publish
 
 proc usage(): string =
   "usage: repro-install-mirror-publish --recipes-root <dir> " &

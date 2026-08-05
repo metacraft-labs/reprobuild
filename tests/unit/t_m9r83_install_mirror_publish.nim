@@ -10,6 +10,7 @@ import std/[algorithm, envvars, os, osproc, streams, strutils, tempfiles,
 
 import repro_local_store
 import repro_project_dsl/install_mirror_resolver
+import repro_project_dsl/install_mirror_publish
 
 import "../../apps/repro-install-mirror-publish/repro_install_mirror_publish"
 

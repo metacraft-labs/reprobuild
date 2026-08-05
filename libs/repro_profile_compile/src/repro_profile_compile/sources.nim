@@ -57,6 +57,15 @@ const ProfileNimPathLibs* = [
   # don't directly reference any action-edge templates — the import
   # chain reaches it transitively from every ``import repro_profile``.
   "repro_project_dsl",
+  # ``repro_project_dsl`` re-exports ``install_mirror_resolver``, which
+  # imports ``repro_local_store/prefix_paths`` for the store-prefix path
+  # helpers (``PrefixIdBytes`` / ``prefixRelativePath``). Without this
+  # ``--path:`` entry every profile compile dies with ``cannot open
+  # file: repro_local_store/prefix_paths`` the moment the import chain
+  # reaches the resolver. Only the dependency-free ``prefix_paths``
+  # submodule is reachable from here — the store runtime (SQLite binding,
+  # shm index) stays out of the profile-compile closure.
+  "repro_local_store",
   # ``repro_project_dsl`` imports
   # ``repro_binary_cache_client/cache_key`` and
   # ``repro_binary_cache_server/types`` (cache-key parity between the

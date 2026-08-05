@@ -26,6 +26,16 @@ import std/[algorithm, os, strutils, tables, times]
 import blake3
 import repro_core
 
+import ./prefix_paths
+export prefix_paths
+# The pure path-arithmetic half of the store (``PrefixIdBytes``,
+# ``prefixRelativePath``, ``casBlobRelative``, ...) lives in its own
+# dependency-free module so non-store callers — notably
+# ``repro_project_dsl/install_mirror_resolver``, which sits in the import
+# closure of every profile compile — can use the naming contract without
+# pulling in SQLite and the shm index. Re-exported here so every existing
+# ``repro_local_store`` consumer is unaffected.
+
 import ./sqlite3_binding
 # We use the binding's public symbols unqualified throughout. They are
 # all `sqlite3_*` named or prefixed (`SqliteOk`, `Database`, ...) so
@@ -58,10 +68,6 @@ type
     ## The realization-hash recorded in a prefix's `.repro-receipt` does
     ## not match the prefix's directory name. Quarantined to
     ## `gc/pending-deletion/`.
-
-  PrefixIdBytes* = array[32, byte]
-    ## A BLAKE3-256 realization hash, the canonical primary key for the
-    ## `prefixes` table.
 
   AdapterName* = enum
     ## The on-disk `adapter` column is a free-form text so future
@@ -281,61 +287,10 @@ proc toForwardSlash(value: string): string =
     if result[i] == '\\':
       result[i] = '/'
 
-proc safePathSegment*(value, fallback: string): string =
-  ## Restricts an arbitrary string to a portable filesystem segment. We
-  ## allow alphanumerics, `-`, `_`, `.` and pass everything else through
-  ## an underscore. Empty input falls back to `fallback`.
-  for ch in value:
-    if ch in {'a' .. 'z'} or ch in {'A' .. 'Z'} or ch in {'0' .. '9'} or
-        ch in {'-', '_', '.'}:
-      result.add(ch)
-    else:
-      result.add('_')
-  if result.len == 0:
-    result = fallback
-
-proc hexOf*(bytes: openArray[byte]): string =
-  ## Lower-case hex of the supplied byte sequence.
-  for b in bytes:
-    result.add(toHex(int(b), 2).toLowerAscii())
-
-proc prefixIdHex*(p: PrefixIdBytes): string = hexOf(p)
-
-proc realizationDirName*(version: string; prefixId: PrefixIdBytes): string =
-  ## Directory name `<version>-<hash-prefix>`. We use the first 16 hex
-  ## chars (64 bits) of the realization hash — enough to be collision
-  ## resistant in a personal store while remaining human readable.
-  let cleanVersion = safePathSegment(version, "v0")
-  cleanVersion & "-" & hexOf(prefixId)[0 ..< 16]
-
-proc prefixRelativePath*(packageName, version: string;
-                        prefixId: PrefixIdBytes;
-                        outputName = ""): string =
-  ## Returns the canonical relative path under `prefixes/` for the
-  ## supplied identity. Always forward-slashed so the SQLite column is
-  ## portable across hosts.
-  ##
-  ## Recipe-Val M8: ``outputName`` selects which Nix-style package
-  ## output the prefix belongs to. An empty value (the default)
-  ## preserves the legacy single-output layout
-  ## ``prefixes/<package>/<version>-<hash>/``. A non-empty value
-  ## inserts an output-name segment to give Nix-style
-  ## ``prefixes/<package>-<output>/<version>-<hash>/`` partitioning
-  ## — the package + output pair drives a fresh directory tree so
-  ## each output's prefix is independently content-addressable and
-  ## a downstream consumer can refer to one without dragging in the
-  ## siblings.
-  let pkgSegment =
-    if outputName.len == 0 or outputName == "out":
-      safePathSegment(packageName, "pkg")
-    else:
-      safePathSegment(packageName, "pkg") & "-" &
-        safePathSegment(outputName, "out")
-  "prefixes/" & pkgSegment & "/" & realizationDirName(version, prefixId)
-
-proc casBlobRelative*(digest: PrefixIdBytes): string =
-  let hex = hexOf(digest)
-  "cas/blake3/" & hex[0 ..< 2] & "/" & hex
+# ``safePathSegment`` / ``hexOf`` / ``prefixIdHex`` / ``realizationDirName``
+# / ``prefixRelativePath`` / ``casBlobRelative`` moved to
+# ``./prefix_paths`` (re-exported above) so the naming contract is usable
+# without the store runtime.
 
 # ---------------------------------------------------------------------------
 # Receipt envelope (binary)
