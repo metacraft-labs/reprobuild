@@ -90,8 +90,9 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # the u32 outputTag string length + the u32 env count + the
     # publishToBinaryCache sentinel byte + the hasIdentity sentinel
     # byte + the u32 toolIdentityRefs count + the requiresElevation
-    # sentinel byte (all zero for an empty action), so 19 trailing
-    # bytes need trimming to reach v11's wire shape.
+    # sentinel byte and everything v20..v23 appended after it (all zero
+    # for an empty action). See ``trimBytes`` below for the running
+    # total that reaches v11's wire shape.
     let action = BuildActionDef(
       id: "legacy",
       call: publicCliCall("pkg", "exe", "build",
@@ -107,7 +108,7 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # to 11 and re-encode the payload length so the framing self-
     # consistency check stays valid.
     # Magic is bytes 0..3; version is bytes 4..5; length is bytes 6..9.
-    # Truncate 36 trailing bytes: 4 for the empty typedOutputs count
+    # Truncate 40 trailing bytes: 4 for the empty typedOutputs count
     # (the v12 addition) + 4 for the empty outputTag string length
     # (the v13 addition) + 4 for the empty env count (the v14
     # addition) + 1 for the publishToBinaryCache sentinel byte + 1
@@ -119,9 +120,16 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # zero-length string round-trips as four zero bytes) + 1 for the
     # cwdKind byte + 4 for the empty cwdCustomPath string length (the
     # v21 addition) + 4 for the empty declaredOutputs count + 4 for the
-    # empty readOnlyRoots count (the v22 addition). All ten fields are
-    # absent at v11.
-    let trimBytes = 36
+    # empty readOnlyRoots count (the v22 addition) + 4 for the empty
+    # toolIdentityRefKinds count (the v23 addition). All of these
+    # fields are absent at v11.
+    #
+    # This count MUST be kept in step with ``encodeBuildActionPayload``
+    # whenever a new trailing field bumps ``BuildActionPayloadVersion``:
+    # trimming too few bytes leaves the forged payload with trailing
+    # bytes the v11 decoder never consumes, and the decode fails with
+    # ``trailing build action payload bytes``.
+    let trimBytes = 40
     let oldLen = int(uint32(payload[6]) or
       (uint32(payload[7]) shl 8) or
       (uint32(payload[8]) shl 16) or
@@ -146,15 +154,19 @@ suite "t_engine_typed_output_payload_codec_round_trip":
   test "older v16 payload decodes with empty toolIdentityRefs (M9.N Batch B)":
     # Forge a v16 payload by encoding the current-version action with
     # no toolIdentityRefs and no requiresElevation, then patching the
-    # version field down to 16 and trimming the trailing 22 bytes (4
+    # version field down to 16 and trimming the trailing 26 bytes (4
     # for the v17 toolIdentityRefs length-prefix + 1 for the v19
     # Windows-System-Resources Phase E requiresElevation sentinel byte
     # + 4 for the M9.R.34 v20 empty recipeRevisionFingerprint string
     # length + 1 for the v21 cwdKind byte + 4 for the empty v21
     # cwdCustomPath string + 4 for the empty v22 declaredOutputs seq +
-    # 4 for the empty v22 readOnlyRoots seq). v16-and-earlier payloads
-    # MUST decode with all newer fields at their inert defaults so
-    # legacy artefacts keep working.
+    # 4 for the empty v22 readOnlyRoots seq + 4 for the empty v23
+    # toolIdentityRefKinds count). v16-and-earlier payloads MUST decode
+    # with all newer fields at their inert defaults so legacy artefacts
+    # keep working.
+    #
+    # As above, this count tracks ``encodeBuildActionPayload``'s
+    # trailing-field list and must grow with every version bump.
     let action = BuildActionDef(
       id: "v16-legacy",
       call: publicCliCall("pkg", "exe", "build",
@@ -165,7 +177,7 @@ suite "t_engine_typed_output_payload_codec_round_trip":
       actionCachePolicy: defaultActionCachePolicy())
 
     var payload = encodeBuildActionPayload(action)
-    let trimBytes = 22
+    let trimBytes = 26
     let oldLen = int(uint32(payload[6]) or
       (uint32(payload[7]) shl 8) or
       (uint32(payload[8]) shl 16) or
