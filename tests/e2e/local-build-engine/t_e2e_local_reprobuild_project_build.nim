@@ -1288,6 +1288,9 @@ suite "e2e_local_reprobuild_project_build":
         "libs/repro_binary_cache_client/src",
         "libs/repro_binary_cache_server/src",
         "libs/repro_core/src",
+        # ``repro_project_dsl`` re-exports ``install_mirror_resolver``, which
+        # uses the local store's prefix-path helpers.
+        "libs/repro_local_store/src",
         "libs/blake3/src",
         "libs/nimcrypto",
         "libs/nim-faststreams/src",
