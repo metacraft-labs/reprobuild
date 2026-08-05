@@ -78,23 +78,39 @@ suite "a nested lock store is not publishable":
         q(origin))
       discard requireGit(q(gitBin) & " -C " & q(seed) & " push origin main")
 
-      # ---- the native-layout workspace repo -----------------------------
+      # ---- the workspace repo whose `.repro/manifests` is the store ------
+      # Membership lives in `.repro/manifests/` (declared as the workspace's
+      # manifest layer) and `.repro/` is gitignored by the enclosing workspace
+      # repo — exactly the shape that makes the store a nested, non-publishable
+      # directory rather than its own checkout.
+      #
+      # Since Unified-Locking-And-Hooks.md §10 ("No implicit team route") the
+      # gate no longer synthesizes `<workspace>/.repro/manifests` from the bare
+      # path, so the layer has to be DECLARED — which is also the only way an
+      # operator can now reach this scenario.
       let workspaceRoot = scratch / "workspace"
-      createDir(workspaceRoot / "projects")
-      createDir(workspaceRoot / "repos")
-      writeFile(workspaceRoot / "repos" / "lib.toml",
+      let manifestsRoot = workspaceRoot / ".repro" / "manifests"
+      createDir(manifestsRoot / "projects")
+      createDir(manifestsRoot / "repos")
+      writeFile(manifestsRoot / "repos" / "lib.toml",
         "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
         "[repo]\nname = \"lib\"\npath = \"lib\"\nremote = \"lib-origin\"\n" &
         "revision = \"main\"\n")
-      writeFile(workspaceRoot / "projects" / "demo.toml",
+      writeFile(manifestsRoot / "projects" / "demo.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
         "[project]\nname = \"demo\"\ndefault_revision = \"main\"\n" &
         "trunk = \"main\"\n\n" &
         "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & fileUrl(scratch) &
         "\"\n\nincludes = [\n  \"repos/lib.toml\",\n]\n")
+      writeFile(workspaceRoot / ".repro" / "workspace.toml",
+        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+        "[workspace]\nproject = \"demo\"\n\n" &
+        "[[manifest]]\nlocal_path = \".repro/manifests\"\n" &
+        "visibility = \"team\"\n")
       # `.repro/` is local state in this layout — exactly the ignore rule that
       # makes the nested store unpublishable.
       writeFile(workspaceRoot / ".gitignore", ".repro/\n")
+      writeFile(workspaceRoot / "README.md", "nested store workspace\n")
 
       discard requireGit(q(gitBin) & " init -b main " & q(workspaceRoot))
       discard requireGit(q(gitBin) & " -C " & q(workspaceRoot) &
@@ -107,10 +123,6 @@ suite "a nested lock store is not publishable":
 
       discard requireGit(q(gitBin) & " clone " & q(fileUrl(origin)) & " " &
         q(workspaceRoot / "lib"))
-      createDir(workspaceRoot / ".repro")
-      writeFile(workspaceRoot / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-        "[workspace]\nproject = \"demo\"\n")
 
       let res = runShell(shellCommand(@[reproBin, "check", "--mode=pre-push",
         "--workspace-root=" & workspaceRoot,
@@ -121,7 +133,9 @@ suite "a nested lock store is not publishable":
       # The nested store is a benign skip, not a failure that refuses a push.
       check res.code == 0
       check res.output.contains("lock publish skipped")
-      check res.output.contains("is not its own git checkout")
+      # The store is a plain directory nested inside the workspace checkout —
+      # the diagnostic has to name that, not merely "no repository here".
+      check res.output.contains("is a plain directory inside the Git worktree")
       check not res.output.contains("lock-publish-failure")
       check not res.output.contains("git add locks failed")
 
@@ -133,6 +147,6 @@ suite "a nested lock store is not publishable":
       # ...and the gate still recorded its lock on disk (the skip is about
       # PUBLISHING it, not about writing it).
       var lockCount = 0
-      for path in walkDirRec(workspaceRoot / ".repro" / "manifests"):
+      for path in walkDirRec(manifestsRoot):
         if path.endsWith(".toml"): inc lockCount
       check lockCount > 0

@@ -29450,10 +29450,16 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     # The manifest layer is a plain directory, not a publishable git
     # checkout — this workspace simply has no manifest remote to publish
     # to. That is a benign skip, not a publish-attempt failure (RA-21).
+    #
+    # Carry the discovery diagnostic: it distinguishes "no repository here at
+    # all" from the far more confusing "a plain directory nested inside
+    # someone else's checkout", which is what the default
+    # ``<workspace>/.repro/manifests`` layer looks like in the native layout.
     result.outcome = lpoNotPublishable
     result.diagnostic =
       "manifest repo root '" & manifestRepoRoot &
-        "' is not a git checkout; cannot publish lock"
+        "' is not a git checkout; cannot publish lock (" &
+        worktree.diagnostic & ")"
     return
 
   # ...and being INSIDE someone else's checkout is not the same as BEING one.

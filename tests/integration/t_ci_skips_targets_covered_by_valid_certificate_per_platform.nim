@@ -158,6 +158,7 @@ proc setupFixture(gitBin: string): Fixture =
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   result.workspaceRoot = workspaceRoot
+  seedManifestLockStore(gitBin, workspaceRoot)
   result.libAPath = workspaceRoot / "lib-a"
   cloneInto(gitBin, result.libAOrigin, result.libAPath)
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
