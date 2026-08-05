@@ -2174,6 +2174,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_self_hosting_tool_dep_name_collision.nim",
+    binary: "build/test-bin/t_dsl_self_hosting_tool_dep_name_collision",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_args.nim",
     binary: "build/test-bin/t_dsl_service_args",
     defines: @[],

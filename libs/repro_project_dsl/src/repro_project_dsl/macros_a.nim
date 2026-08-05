@@ -2711,10 +2711,26 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # provisioning) but not the typed command surface. Every package exports a
   # selector-specific marker, so selective imports avoid both command-symbol
   # leakage and ambiguity between the generic marker names.
+  #
+  # The ``as <name>_dep_module`` alias is LOAD-BEARING, not cosmetic. A bare
+  # ``from a/b/make import marker`` still binds the MODULE symbol ``make``
+  # into the importing scope (Nim keeps the module name available as a
+  # qualifier even for selective ``from`` imports). A recipe that declares an
+  # artifact with the same name as one of its own tool deps — the
+  # self-hosting-tool shape: ``package makeSource:`` with ``executable make:``
+  # and ``nativeBuildDeps: "make >=4"``, and likewise cmake-builds-cmake — then
+  # hits ``Error: redefinition of 'make'`` between that implicit module symbol
+  # and the M9.R.2c artifact slot ``var make {.inject, used.}: Executable``
+  # emitted by ``emitM9R2cArtifactSlots`` (``macros_b.nim``). Renaming the
+  # module binding moves it out of the artifact namespace entirely, so the two
+  # can never collide. The full-import loop above already does the equivalent
+  # via ``as <name>_module``; this keeps the two paths symmetric.
   for modulePath in dependencyModules:
     let moduleName = modulePath.split('/')[^1]
     let markerName = packageMarkerName(moduleName)
-    result.add("from " & modulePath & " import " & markerName & "\n")
+    let dependencyAlias = moduleName & "_dep_module"
+    result.add("from " & modulePath & " as " & dependencyAlias &
+      " import " & markerName & "\n")
     result.add(markerName & "()\n")
   # Cross-Repo-Source-Consumption SC-9 — import a WORKSPACE PROJECT's exported
   # CLI schema. For a ``uses:`` selector that is NEITHER a bundled-stdlib
