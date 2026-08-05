@@ -126,10 +126,11 @@ suite "gccSource — from-source recipe smoke test":
       "https://gcc.gnu.org/git/gcc.git"
 
   test "shell() action registry records the gcc mkdir-configure-build-install pipeline":
-    # M9.N Batch C.1 — the recipe's ``build:`` block records four
-    # shell actions: ``mkdir -p $extracted/build`` + out-of-tree
-    # configure + build + install. The from-source-custom convention
-    # consumes the sequence verbatim.
+    # M9.N Batch C.1 — the recipe's ``build:`` block records five
+    # shell actions: bootstrap-sysroot setup (which also does the
+    # ``mkdir -p $extracted/build``) + out-of-tree configure + build +
+    # install + the lib64->lib alias pass. The from-source-custom
+    # convention consumes the sequence verbatim.
     let rows = registeredShellActions("gccSource")
     check rows.len == 5
     for r in rows:
@@ -149,10 +150,30 @@ suite "gccSource — from-source recipe smoke test":
     check rows[1].command.contains("--disable-multilib")
     check rows[1].command.contains("--disable-bootstrap")
     check rows[1].command.contains("--with-build-sysroot=$extracted/bootstrap-sysroot")
-    # The job count is deliberately fixed in the recipe so the action's cache
-    # identity does not vary with host CPU discovery — assert it verbatim.
-    check rows[2].command == "cd $extracted/build && make -j8"
-    check rows[3].command == "cd $extracted/build && make install"
+    # Steps 2 and 3 stay byte-exact. They are short enough for a literal to
+    # stay readable, and every token in them is load-bearing:
+    #
+    #  * ``source_libs`` puts the three source-built arbitrary-precision
+    #    libraries (mpc / mpfr / gmp) on ``LD_LIBRARY_PATH`` so the freshly
+    #    linked ``cc1`` binaries can run their build-time self-tests, and so
+    #    ``make install`` can re-run them. Both steps carry the same prelude;
+    #    it is shared here so the two asserts cannot drift apart.
+    #  * ``NIX_HARDENING_ENABLE=`` (build step only) disables the Nix compiler
+    #    wrapper's format hardening, which would otherwise turn libcpp's
+    #    deliberate format-string forwarding into errors independently of the
+    #    recipe's ``--disable-werror``.
+    #  * the job count is deliberately FIXED in the recipe so the action's
+    #    cache identity does not vary with host CPU discovery — ``-j8`` is
+    #    asserted verbatim, never as a pattern.
+    const sourceLibsPrelude =
+      "source_libs=$extracted/../../mpc/.repro/output/install/usr/lib:" &
+      "$extracted/../../mpfr/.repro/output/install/usr/lib:" &
+      "$extracted/../../gmp/.repro/output/install/usr/lib; "
+    check rows[2].command == sourceLibsPrelude &
+      "cd $extracted/build && LD_LIBRARY_PATH=$source_libs " &
+      "NIX_HARDENING_ENABLE= make -j8"
+    check rows[3].command == sourceLibsPrelude &
+      "cd $extracted/build && LD_LIBRARY_PATH=$source_libs make install"
     # lib64 -> lib aliases so declared library artifacts resolve consistently.
     check rows[4].command.contains("$out/lib64/$runtime")
 
