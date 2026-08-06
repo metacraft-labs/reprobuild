@@ -97,10 +97,22 @@
 ##                                         depending on host probe; v1
 ##                                         pins single-arch ``lib/`` for
 ##                                         deterministic install paths).
+##   * ``--disable-dependency-tracking``   â€” prevent Automake's
+##                                         ``config.status depfiles``
+##                                         helper from transiently
+##                                         creating ``src/.deps/*.Plo``
+##                                         in the fetched source tree
+##                                         during configure. The final
+##                                         out-of-tree build keeps
+##                                         depfiles under ``buildDir``,
+##                                         but R6 correctly rejects even
+##                                         transient source writes.
 
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
 import repro_dsl_stdlib/types/package_result
+
+const LibffiAutotoolsBuildDir = ".repro/build/libffi-autotools"
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -194,11 +206,11 @@ package libffiSource:
         "--disable-static",
         "--disable-docs",
         "--disable-multi-os-directory",
+        "--disable-dependency-tracking",
       ]
-      let pkg = autotools_package(
-        srcDir = "./src",
-        configureOptions = opts,
-        allowSourceWrites = true)
+      let pkg = autotools_package(srcDir = "./src",
+                                  buildDir = LibffiAutotoolsBuildDir,
+                                  configureOptions = opts)
       discard pkg.library("libFfi")
     finally:
       clearCurrentOwningPackageOverride()

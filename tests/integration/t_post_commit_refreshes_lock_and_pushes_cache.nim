@@ -110,6 +110,20 @@ suite "RA-4 — post-commit refreshes lock and pushes cache ref":
         "remote = \"lib-a-origin\"\nrevision = \"main\"\n")
       writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
 
+      # This test asserts post-commit refreshes a manifest lock RECORD, which
+      # exists only where a manifest-backed route is DECLARED
+      # (Unified-Locking-And-Hooks.md §10, "No implicit team route"). Make
+      # `.repro/manifests` a real git checkout so the route is declared rather
+      # than inferred from a path.
+      let lockStore = workspaceRoot / ".repro" / "manifests"
+      createDir(lockStore)
+      discard requireGit(q(gitBin) & " init -b main " & q(lockStore))
+      configIdentity(gitBin, lockStore)
+      writeFile(lockStore / ".gitkeep", "")
+      discard requireGit(q(gitBin) & " -C " & q(lockStore) & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(lockStore) &
+        " commit -m \"seed lock store\"")
+
       # ---- shared bare (RA-5) pinned via REPRO_WORKSPACE_CLONES --------
       let cacheRoot = scratch / "clones-cache"
       putEnv("REPRO_WORKSPACE_CLONES", cacheRoot)

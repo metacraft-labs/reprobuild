@@ -31,7 +31,7 @@ package busyboxSource:
     setCurrentOwningPackageOverride("busyboxSource")
     try:
       let opts = @[
-        "CC=/opt/repro/reprobuild/recipes/packages/source/musl/.repro/output/install/usr/bin/musl-gcc",
+        "CC=musl-gcc",
         "KCONFIG_NOTIMESTAMP=1",
       ]
       let patches = @[

@@ -702,6 +702,9 @@ proc selectorModuleName(selector: string): string =
   if result.len == 0:
     result = "package"
 
+proc packageMarkerName(packageName: string): string =
+  "reprobuildPackageMarker_" & selectorModuleName(packageName)
+
 proc normalizedImportBase(path: string): string =
   result = path.replace('\\', '/').strip()
   while result.endsWith("/") and result.len > 0:
@@ -2019,6 +2022,8 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
   result.add(
     "when not declared(reprobuildPackageMarker):\n" &
     "  proc reprobuildPackageMarker*() = discard\n")
+  result.add("proc " & packageMarkerName(pkg.packageName) &
+    "*() = discard\n")
   if pkg.executables.len != 1:
     return
   let exe = pkg.executables[0]
@@ -2157,6 +2162,7 @@ proc wrapperCode(pkg: PackageDef; recordActions = false): string =
     # ``toolActionWrapperCode`` for the matching guard).
     "when not declared(reprobuildPackageMarker):\n" &
     "  proc reprobuildPackageMarker*() = discard\n" &
+    "proc " & packageMarkerName(pkg.packageName) & "*() = discard\n" &
     "proc executable*(pkg: " & typeName & "; name: string): " &
       exeTypeName & " =\n" &
     "  discard pkg\n" &
@@ -2271,7 +2277,7 @@ proc workspaceProducerModule(selector, consumerSourceFile: string): string =
         if fileExists(candidate):
           # Return the extension-stripped path so the emitted
           # ``import "<path>" as <alias>`` resolves the module by file path.
-          return candidate[0 ..< candidate.len - ".nim".len]
+          return candidate[0 ..< candidate.len - ".nim".len].replace('\\', '/')
     dir = parent
   ""
 
@@ -2621,6 +2627,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       "openssl",
       "pcre-config",
       "pkg-config",
+      "pkgconf",
       "playwright",
       "pnpm",
       "pyproject-hooks",
@@ -2675,6 +2682,14 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         selectorModuleName(useDef.packageSelector)
       if modules.find(modulePath) < 0:
         modules.add(modulePath)
+  var dependencyModules: seq[string] = @[]
+  for useDef in pkg.nativeBuildDeps & pkg.runtimeDeps:
+    if isBundledStdlibSelector(useDef.packageSelector):
+      let modulePath = "repro_dsl_stdlib/packages/" &
+        selectorModuleName(useDef.packageSelector)
+      if modules.find(modulePath) < 0 and
+          dependencyModules.find(modulePath) < 0:
+        dependencyModules.add(modulePath)
   for base in pkg.usesImportPaths:
     let normalizedBase = normalizedImportBase(base)
     if normalizedBase.len == 0:
@@ -2692,6 +2707,31 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
     result.add("when compiles(" & moduleAlias &
       ".reprobuildPackageMarker()):\n")
     result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")
+  # Dependency-only imports need module initialization (to register package
+  # provisioning) but not the typed command surface. Every package exports a
+  # selector-specific marker, so selective imports avoid both command-symbol
+  # leakage and ambiguity between the generic marker names.
+  #
+  # The ``as <name>_dep_module`` alias is LOAD-BEARING, not cosmetic. A bare
+  # ``from a/b/make import marker`` still binds the MODULE symbol ``make``
+  # into the importing scope (Nim keeps the module name available as a
+  # qualifier even for selective ``from`` imports). A recipe that declares an
+  # artifact with the same name as one of its own tool deps — the
+  # self-hosting-tool shape: ``package makeSource:`` with ``executable make:``
+  # and ``nativeBuildDeps: "make >=4"``, and likewise cmake-builds-cmake — then
+  # hits ``Error: redefinition of 'make'`` between that implicit module symbol
+  # and the M9.R.2c artifact slot ``var make {.inject, used.}: Executable``
+  # emitted by ``emitM9R2cArtifactSlots`` (``macros_b.nim``). Renaming the
+  # module binding moves it out of the artifact namespace entirely, so the two
+  # can never collide. The full-import loop above already does the equivalent
+  # via ``as <name>_module``; this keeps the two paths symmetric.
+  for modulePath in dependencyModules:
+    let moduleName = modulePath.split('/')[^1]
+    let markerName = packageMarkerName(moduleName)
+    let dependencyAlias = moduleName & "_dep_module"
+    result.add("from " & modulePath & " as " & dependencyAlias &
+      " import " & markerName & "\n")
+    result.add(markerName & "()\n")
   # Cross-Repo-Source-Consumption SC-9 — import a WORKSPACE PROJECT's exported
   # CLI schema. For a ``uses:`` selector that is NEITHER a bundled-stdlib
   # selector NOR covered by an explicit ``usesImportPath`` (both handled
@@ -3340,6 +3380,7 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
   result.add(
     "when not declared(reprobuildPackageMarker):\n" &
     "  proc reprobuildPackageMarker*() = discard\n")
+  result.add("proc " & packageMarkerName(toolId) & "*() = discard\n")
   # Typed-Outputs M1 (unification): if any command declares typed
   # outputs, emit the same ``BuildEdge`` subtype shape the package-
   # block wrapper uses so ``defineCliInterface``-driven typed-tool

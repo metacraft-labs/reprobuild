@@ -231,27 +231,36 @@ proc makeDepfilePolicy(path: string): DependencyGatheringPolicy =
 suite "M9.N Batch B — engine tool-identity env plumbing":
 
   test "core runtimes stay linkable without entering loader paths":
+    resetTmp()
     let nixGlibcLib =
       "/nix/store/0123456789abcdefghijklmnopqrstuv-glibc-2.40/lib"
     let sourceGlibcLib =
       "/work/recipes/packages/source/glibc/.repro/output/install/usr/lib64"
+    let federatedGlibcLib =
+      "/work/reprobuild-packages/packages/source/glibc/.repro/output/install/usr/lib64"
     let nixPythonLib =
       "/nix/store/abcdefghijklmnopqrstuvwxyz012345-python3-3.13.9/lib"
     let sourcePythonLib =
       "/work/recipes/packages/source/python3/.repro/output/install/usr/lib"
     let sourcePythonBundleLib =
       "/work/recipes/packages/source/python3-with-modules/.repro/output/install/usr/lib"
+    let compilerBootstrapLib = absolutePath(TmpDir / "compiler-bootstrap-lib")
+    createDir(compilerBootstrapLib)
+    writeFile(compilerBootstrapLib / "libc.so.6", "synthetic bootstrap libc")
     let dependencyLib = "/nix/store/vutsrqponmlkjihgfedcba9876543210-libfoo-1.0/lib"
     let paths = ResolvedAuxPaths(
-      libDirs: @[nixGlibcLib, sourceGlibcLib, nixPythonLib,
-        sourcePythonLib, sourcePythonBundleLib, dependencyLib])
+      libDirs: @[nixGlibcLib, sourceGlibcLib, federatedGlibcLib, nixPythonLib,
+        sourcePythonLib, sourcePythonBundleLib, compilerBootstrapLib,
+        dependencyLib])
 
     let argvEnv = applyResolvedAuxPathsArgv(
       @["LIBRARY_PATH=/existing/link", "LD_LIBRARY_PATH=/existing/runtime"],
       paths)
     check envValue(argvEnv, "LIBRARY_PATH").split(pathSeparator()) ==
-      @[nixGlibcLib, sourceGlibcLib, nixPythonLib, sourcePythonLib,
-        sourcePythonBundleLib, dependencyLib, "/existing/link"]
+      @[nixGlibcLib, sourceGlibcLib, federatedGlibcLib, nixPythonLib,
+        sourcePythonLib,
+        sourcePythonBundleLib, compilerBootstrapLib, dependencyLib,
+        "/existing/link"]
     check envValue(argvEnv, "LD_LIBRARY_PATH").split(pathSeparator()) ==
       @[dependencyLib, "/existing/runtime"]
 
@@ -260,8 +269,10 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     tableEnv["LD_LIBRARY_PATH"] = "/existing/runtime"
     applyResolvedAuxPathsTable(tableEnv, paths)
     check tableEnv["LIBRARY_PATH"].split(pathSeparator()) ==
-      @[nixGlibcLib, sourceGlibcLib, nixPythonLib, sourcePythonLib,
-        sourcePythonBundleLib, dependencyLib, "/existing/link"]
+      @[nixGlibcLib, sourceGlibcLib, federatedGlibcLib, nixPythonLib,
+        sourcePythonLib,
+        sourcePythonBundleLib, compilerBootstrapLib, dependencyLib,
+        "/existing/link"]
     check tableEnv["LD_LIBRARY_PATH"].split(pathSeparator()) ==
       @[dependencyLib, "/existing/runtime"]
 

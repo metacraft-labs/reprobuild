@@ -221,8 +221,11 @@ package iproute2Source:
       let makeVars = @[
         "PREFIX=/usr",
         "SBINDIR=/usr/sbin",
+        "CBUILD_CFLAGS=$(CPPFLAGS) $(CFLAGS)",
+        "HOSTCC=$(CC) $(LDFLAGS)",
       ]
       let patches = @[
+        "sed -i 's|\\$CC -I\\$INCLUDE|\\$CC \\$CPPFLAGS \\$CFLAGS -I\\$INCLUDE \\$LDFLAGS|g' src/configure",
         "(cd src && ./configure --prefix=/usr --libdir=/usr/lib --libbpf_force=off)",
       ]
       let pkg = autotools_package(srcDir = "./src",

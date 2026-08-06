@@ -2484,6 +2484,75 @@ proc lowerMaterializedProviderSnapshot(snapshot: ProviderGraphSnapshot;
         result.pools.add(
           repro_build_engine.pool(poolDef.name, poolDef.capacity))
 
+proc materializedCachePrefix(action: BuildAction): string =
+  let raw =
+    if action.declaredOutputs.len == 1:
+      action.declaredOutputs[0]
+    elif action.outputs.len > 0:
+      action.outputs[0]
+    else:
+      ""
+  if raw.len == 0 or raw.isAbsolute:
+    return raw
+  action.cwd / raw
+
+proc removeMaterializedPath(path: string) =
+  if dirExists(path):
+    removeDir(path)
+  elif fileExists(path) or symlinkExists(path):
+    removeFile(path)
+
+proc substituteMaterializedBinaryCacheEntries(g: BuildGraph):
+    BuildRunResult =
+  ## Restore tagged public-interface roots before source auto-recurse builds
+  ## their tool dependencies. A miss is represented as a failed action so the
+  ## caller can fall back to the unchanged source-build path.
+  for action in g.actions:
+    if not action.publishToBinaryCache or action.cacheEntryIdentity.isNone:
+      continue
+    let key = deriveActionCacheKeyHex(action)
+    let prefix = materializedCachePrefix(action)
+    var item = ActionResult(
+      id: action.id,
+      status: asFailed,
+      cacheDecision: cdMiss,
+      reason: "materialized-binary-cache-substitute key=" & key)
+    if prefix.len == 0:
+      item.stderr = "materialized binary-cache prefix is empty"
+      result.results.add(item)
+      continue
+    let staged = prefix & ".repro-cache-substitute-" &
+      $getCurrentProcessId()
+    removeMaterializedPath(staged)
+    createDir(parentDir(staged))
+    let rc = bcCliDispatch.runCacheSubcommand(
+      @["substitute", key, staged])
+    if rc == 0:
+      removeMaterializedPath(prefix)
+      moveDir(staged, prefix)
+      item.status = asCacheHit
+      item.cacheDecision = cdHit
+      item.reason = "materialized-binary-cache-substituted key=" & key
+    else:
+      removeMaterializedPath(staged)
+      item.stderr = "trusted binary-cache miss for " & key
+    result.results.add(item)
+  if result.results.len == 0:
+    result.results.add(ActionResult(
+      id: "binary-cache-materialized",
+      status: asFailed,
+      cacheDecision: cdMiss,
+      reason: "materialized-binary-cache-no-entries",
+      stderr: "no tagged materialized binary-cache entries in selected graph"))
+
+proc materializedSubstitutionConfigured(): bool =
+  if getEnv("REPRO_CACHE_DISABLE", "") in ["1", "true", "yes"]:
+    return false
+  try:
+    bcCachesConfig.loadEndpoints().len > 0
+  except CatchableError:
+    false
+
 proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
                             identity: PathOnlyBuildIdentity;
                             projectRoot: string;
@@ -4535,12 +4604,14 @@ proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(useDef.executableName)
     payload.addCacheField(useDef.policyPath.join("/"))
     for nix in useDef.nixProvisioning:
+      payload.addCacheField(nix.contributor)
       payload.addCacheField(nix.selector)
       payload.addCacheField(nix.executablePath)
       payload.addCacheField(nix.expressionFile)
       payload.addCacheField(nix.packageId)
       payload.addCacheField(nix.lockIdentity)
     for tarball in useDef.tarballProvisioning:
+      payload.addCacheField(tarball.contributor)
       payload.addCacheField(tarball.url)
       payload.addCacheField(tarball.mirrors.join("\n"))
       payload.addCacheField(tarball.sha256)
@@ -4550,6 +4621,7 @@ proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
       payload.addCacheField(tarball.packageId)
       payload.addCacheField(tarball.lockIdentity)
     for scoop in useDef.scoopProvisioning:
+      payload.addCacheField(scoop.contributor)
       payload.addCacheField(scoop.bucket)
       payload.addCacheField(scoop.app)
       payload.addCacheField(scoop.version)
@@ -6392,6 +6464,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         noOutputCleanup = false;
                         publishCacheHits = false;
                         publishMaterialized = false;
+                        substituteMaterialized = false;
                         skipCmakeRegeneration = false;
                         bypassRunQuotaExplicit = false;
                         benchmarkPath = "";
@@ -6424,6 +6497,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   discard consumeInterfaceArtifactWarmStats()
   let buildTotalStart = statStart(statsEnabled)
   let invocationWallStart = epochTime()
+  let materializedOnly =
+    publishMaterialized or substituteMaterialized
   var progressRenderer = newBuildProgressRenderer(progressMode,
     progressBarStyle)
   progressRenderer.renderPhase("preparing build")
@@ -6752,7 +6827,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
       let scheduledGraph = graph(scheduledActions, lowered.pools)
-      if publishMaterialized:
+      if substituteMaterialized:
+        buildResult = substituteMaterializedBinaryCacheEntries(scheduledGraph)
+      elif publishMaterialized:
         buildResult = publishMaterializedBinaryCacheEntries(
           scheduledGraph, engineConfig.binaryCachePublisher)
       else:
@@ -7041,7 +7118,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       artifact.projectInterface.defaultToolProvisioning)
     fallbackToRunQuotaBypass = effectiveMode in {tpmPathOnly, tpmScoop}
 
-  if not publishMaterialized and
+  if not materializedOnly and
       artifact.projectInterface.toolUses.len > 0 and
       effectiveMode == tpmUnspecified:
     raise newException(ValueError,
@@ -7068,7 +7145,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   #   3. ``FromSourceMaxRecursionDepth`` — sanity ceiling. Production
   #      recipe chains stay below 10; the ceiling exists to crash
   #      cleanly on a runaway pattern rather than blow the stack.
-  if effectiveMode == tpmFromSource and not publishMaterialized:
+  if effectiveMode == tpmFromSource and not materializedOnly:
     # M9.R.14c.2 — proactively seed the bootstrap tool chain so the
     # auto-recurse loop short-circuits gcc / make / binutils (and
     # binutils sub-binaries: ld, ar, ranlib, strip, nm, objdump,
@@ -7136,6 +7213,35 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "stay well below it; investigate the call chain for an " &
           "accidental fan-out.")
       let siblingManifest = siblingRecipeDir / "repro.nim"
+      if materializedSubstitutionConfigured() and
+          not prepareOnly and not dryRun and not forceRebuild:
+        let substituteOutcome = executeBuildTarget(
+          siblingManifest, effectiveMode, publicCliPath,
+          selectDefaultAction = true,
+          workRoot = workRoot,
+          progressMode = bpmQuiet,
+          progressBarStyle = progressBarStyle,
+          showSet = {},
+          measureSet = {},
+          reportPersistence = BuildReportPersistence(suppressed: true),
+          logMode = blmSummary,
+          diagnosticsPath = "",
+          prepareOnly = false,
+          dryRun = false,
+          forceRebuild = false,
+          noOutputCleanup = true,
+          publishCacheHits = false,
+          publishMaterialized = false,
+          substituteMaterialized = true,
+          skipCmakeRegeneration = skipCmakeRegeneration,
+          bypassRunQuotaExplicit = bypassRunQuotaExplicit,
+          eventSink = eventSink,
+          cancelCheck = cancelCheck)
+        if substituteOutcome.exitCode == 0:
+          logSummary("from-source cache substitute: restored \"" &
+            outcome.toolName & "\" at " & siblingRecipeDir)
+          fromSourceResolvedRecipes.incl(siblingRecipeDir)
+          continue
       logSummary("from-source auto-recurse: building \"" & outcome.toolName &
         "\" at " & siblingRecipeDir)
       fromSourceBuildStack.add(siblingRecipeDir)
@@ -7156,6 +7262,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           forceRebuild = forceRebuild,
           publishCacheHits = publishCacheHits,
           publishMaterialized = publishMaterialized,
+          substituteMaterialized = substituteMaterialized,
           skipCmakeRegeneration = skipCmakeRegeneration,
           bypassRunQuotaExplicit = bypassRunQuotaExplicit,
           eventSink = eventSink,
@@ -7207,7 +7314,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # is intentionally left to the existing host/PATH behavior. Every other
   # selector (host / nix / tarball / scoop / corpus-recipe) is untouched, so a
   # build that consumes no cross-repo producer is byte-identical to today.
-  if not publishMaterialized and not prepareOnly and
+  if not materializedOnly and not prepareOnly and
       result.projectRoot.len > 0:
     for useDef in artifact.projectInterface.toolUses:
       let selector = useDef.packageSelector
@@ -7375,6 +7482,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             forceRebuild = forceRebuild,
             publishCacheHits = publishCacheHits,
             publishMaterialized = publishMaterialized,
+            substituteMaterialized = substituteMaterialized,
             skipCmakeRegeneration = skipCmakeRegeneration,
             bypassRunQuotaExplicit = bypassRunQuotaExplicit,
             eventSink = eventSink,
@@ -7655,7 +7763,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         if extra.len > 0 and selectorList.find(extra) < 0:
           selectorList.add(extra)
       let lowered =
-        if publishMaterialized:
+        if materializedOnly:
           lowerMaterializedProviderSnapshot(
             refresh.snapshot, result.projectRoot)
         elif selectorList.len == 0:
@@ -7675,7 +7783,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   if shouldEnterBuildPipeline(effectiveMode):
     let identityStart = statStart(statsEnabled)
     let resolved =
-      if publishMaterialized:
+      if materializedOnly:
         progressRenderer.renderPhase(
           "skipping tool provisioning for materialized publication")
         (identity: PathOnlyBuildIdentity(
@@ -7700,20 +7808,21 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # root so the resolver closure routes cross-repo producer refs through the
     # develop-override + committed-``LockedDep`` seam.
     pendingToolIdentityResolver =
-      if publishMaterialized: nil
+      if materializedOnly: nil
       else: mkToolIdentityResolver(identity, result.projectRoot)
-    if publishMaterialized:
-      logSummary("repro build: materialized publication active " &
-        "(tool provisioning skipped)")
+    if materializedOnly:
+      logSummary("repro build: materialized " &
+        (if substituteMaterialized: "substitution" else: "publication") &
+        " active (tool provisioning skipped)")
     else:
       logSummary("repro build: tool provisioning active " &
         "(tool-provisioning=" & effectiveMode.modeName & ")")
-    if not publishMaterialized and effectiveMode == tpmPathOnly:
+    if not materializedOnly and effectiveMode == tpmPathOnly:
       logSummary("repro build: provisioning-disabled mode active (tool-provisioning=path)")
     logSummary("project: " & artifact.projectInterface.projectName)
     logSummary("interface: " & interfacePath)
-    if publishMaterialized:
-      logSummary("toolIdentity: skipped for materialized publication")
+    if materializedOnly:
+      logSummary("toolIdentity: skipped for materialized operation")
     else:
       logSummary("toolIdentity: " & resolved.identityPath)
       logSummary("inspection: " & resolved.inspectionPath)
@@ -7974,7 +8083,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let graphCacheReadStart = statStart(statsEnabled)
     progressRenderer.renderPhase("reading lowered graph cache")
     let cachedLowered =
-      if forceRebuild or multiTarget or publishMaterialized:
+      if forceRebuild or multiTarget or materializedOnly:
         none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
       else:
         warmReadFreshLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
@@ -7989,7 +8098,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         let graphLowerStart = statStart(statsEnabled)
         progressRenderer.renderPhase("lowering project graph")
         let computed =
-          if publishMaterialized:
+          if materializedOnly:
             lowerMaterializedProviderSnapshot(refresh.snapshot, projectRoot)
           elif selectorList.len == 0:
             lowerProviderSnapshot(refresh.snapshot, identity,
@@ -7999,7 +8108,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
               projectRoot, selectorList)
         finishStat(buildStats, statsEnabled, "repro graph lower", graphLowerStart)
         let cacheWriteStart = statStart(statsEnabled)
-        if not multiTarget and not publishMaterialized:
+        if not multiTarget and not materializedOnly:
           writeLoweredGraphCache(loweredGraphCachePath(outDir, selectedActionId),
             modulePath, projectRoot, selectedActionId, pathEnv, graphCacheKey,
             computed)
@@ -8135,7 +8244,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
       let scheduledGraph = graph(scheduledActions, lowered.pools)
-      if publishMaterialized:
+      if substituteMaterialized:
+        buildResult = substituteMaterializedBinaryCacheEntries(scheduledGraph)
+      elif publishMaterialized:
         buildResult = publishMaterializedBinaryCacheEntries(
           scheduledGraph, engineConfig.binaryCachePublisher)
       else:
@@ -15890,6 +16001,8 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "commandStatsId": action.commandStatsId,
     "cacheable": action.cacheable,
     "weakFingerprint": digestHex(action.weakFingerprint),
+    "publishToBinaryCache": action.publishToBinaryCache,
+    "binaryCacheKey": deriveActionCacheKeyHex(action),
     "actionCachePolicy": $action.actionCachePolicy,
     "depfile": action.depfile,
     "dynamicDepsFile": action.dynamicDepsFile,
@@ -24238,6 +24351,17 @@ proc canonicalDiscoveredGitPath(repoRoot, value: string): string =
   except OSError:
     os.normalizedPath(absolutePath(candidate))
 
+proc samePathIdentity(a, b: string): bool =
+  ## Do two paths name the same directory? Compared through the same
+  ## canonicalization ``discoverGitWorktree`` applies to what Git reports, so a
+  ## symlinked or non-normalized spelling of one side does not read as a
+  ## different directory. ``sameFile`` is not used because it raises when
+  ## either side does not exist, and callers ask this question about paths Git
+  ## merely *reported*.
+  if a.len == 0 or b.len == 0:
+    return false
+  canonicalDiscoveredGitPath(a, a) == canonicalDiscoveredGitPath(b, b)
+
 proc discoverGitWorktree(identity: GitToolIdentity;
     candidate: string): GitWorktreeDiscovery =
   ## Publication code must ask Git whether a path IS a worktree ROOT. In a
@@ -28212,7 +28336,24 @@ proc pickManifestLayerRoot(parsed: WorkspaceLockArgs;
   # NOT the membership root. Membership (projects/repos) lives at the workspace
   # root (or a `.repro/manifests` checkout); the lock store is always the
   # `.repro/manifests` DB, separate from where membership resolves.
-  parsed.workspaceRoot / ".repro" / "manifests"
+  #
+  # ...but ONLY when that store actually exists as a git checkout. Returning the
+  # path unconditionally infers a team route from a path that may never have been
+  # declared, which Unified-Locking-And-Hooks.md §10 ("No implicit team route")
+  # forbids: "The route is EXPLICIT, not inferred from the manifest's presence. A
+  # workspace that never declares a team route is public-only and writes only
+  # `repro.lock`." The unconditional return also made every downstream
+  # `manifestLayerRoot.len > 0` guard permanently true — including the HL-3 guard
+  # on the RA-7/RA-21 manifest publish, documented as firing "ONLY when a
+  # `.repro/manifests` git-checkout is present". An all-public workspace would
+  # then materialize a lock under a gitignored, non-git directory and report
+  # "cannot publish lock" for a publish that should never have been attempted.
+  # Empty means "no manifest-backed route declared"; the committed in-tree
+  # `repro.lock` is the whole story (spec §8.2 public row).
+  let nativeStore = parsed.workspaceRoot / ".repro" / "manifests"
+  if dirExists(nativeStore / ".git") or fileExists(nativeStore / ".git"):
+    return nativeStore
+  ""
 
 proc pickTriggerRepo(resolved: ResolvedProject;
                      explicit: string): ResolvedRepo =
@@ -28388,7 +28529,14 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # team git-checkout backend included, at its own ``locks/<p>/<repo>/<sha>``
   # path), so the trigger-keyed monolithic file is redundant AND would drop a
   # cross-tier mix keyed on a possibly-non-team trigger repo. We skip it.
-  if not composed.hasExplicitRoutes:
+  #
+  # ``manifestLayerRoot`` is EMPTY when no manifest-backed route is declared
+  # (§10 "No implicit team route"): there is no git-checkout store to write a
+  # trigger-keyed record into, and the committed in-tree ``repro.lock`` is the
+  # whole publication story. Writing anyway would resolve ``lockPath`` relative
+  # to the process CWD and scatter a ``locks/`` tree wherever the gate happened
+  # to run. Public-only workspaces write no manifest lock at all.
+  if not composed.hasExplicitRoutes and manifestLayerRoot.len > 0:
     if lockAlreadyExisted:
       # The path is content-addressed by the exact trigger commit and lock
       # publication accepts canonical additions only. Re-running a gate must
@@ -29297,14 +29445,41 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
   ## comment above for the full contract.
   result.outcome = lpoFailed
 
-  if not discoverGitWorktree(identity, manifestRepoRoot).ok:
+  let worktree = discoverGitWorktree(identity, manifestRepoRoot)
+  if not worktree.ok:
     # The manifest layer is a plain directory, not a publishable git
     # checkout — this workspace simply has no manifest remote to publish
     # to. That is a benign skip, not a publish-attempt failure (RA-21).
+    #
+    # Carry the discovery diagnostic: it distinguishes "no repository here at
+    # all" from the far more confusing "a plain directory nested inside
+    # someone else's checkout", which is what the default
+    # ``<workspace>/.repro/manifests`` layer looks like in the native layout.
     result.outcome = lpoNotPublishable
     result.diagnostic =
       "manifest repo root '" & manifestRepoRoot &
-        "' is not a git checkout; cannot publish lock"
+        "' is not a git checkout; cannot publish lock (" &
+        worktree.diagnostic & ")"
+    return
+
+  # ...and being INSIDE someone else's checkout is not the same as BEING one.
+  # The default store path (`<workspace>/.repro/manifests`) sits inside the
+  # workspace's own repo, so `rev-parse` answers for that enclosing repo and
+  # the check above passes for a directory that is merely a local-state dir —
+  # one the enclosing repo typically gitignores (`.repro/`), which makes the
+  # subsequent `git add locks` fail and turns a workspace with NO lock store
+  # into one that cannot push at all. A store DB is its own checkout by
+  # construction (that is what makes it publishable to a remote), so require
+  # the path to be the worktree ROOT and otherwise take the same benign
+  # not-publishable skip.
+  if not samePathIdentity(worktree.worktreeRoot, manifestRepoRoot):
+    result.outcome = lpoNotPublishable
+    result.diagnostic =
+      "manifest repo root '" & manifestRepoRoot &
+        "' is not its own git checkout (it lives inside '" &
+        worktree.worktreeRoot &
+        "'); no lock store is configured for this workspace, so there is " &
+        "nothing to publish to"
     return
 
   # Stage only the locks subtree. ``git add`` of a non-existent path errors;
@@ -30584,18 +30759,26 @@ proc renderCheckTextLines*(report: CheckReport): seq[string] =
     result.add(line)
   for notice in report.notices:
     result.add("repro check: " & notice)
+  # A public-only workspace declares no manifest-backed route, so no manifest
+  # lock record exists to name (§10 "No implicit team route"): the lock-store
+  # path is empty and these lines would read "lock created at " with nothing
+  # after it. Report the state only when there is a real record to point at —
+  # the in-tree ``repro.lock`` is reported by its own advisory.
   case report.lockUpdate.kind
   of cluNone:
     discard
   of cluAlreadyCurrent:
-    result.add("repro check: lock already current at " &
-      report.lockUpdate.lockFilePath)
+    if report.lockUpdate.lockFilePath.len > 0:
+      result.add("repro check: lock already current at " &
+        report.lockUpdate.lockFilePath)
   of cluCreated:
-    result.add("repro check: lock created at " &
-      report.lockUpdate.lockFilePath)
+    if report.lockUpdate.lockFilePath.len > 0:
+      result.add("repro check: lock created at " &
+        report.lockUpdate.lockFilePath)
   of cluRefreshed:
-    result.add("repro check: lock refreshed at " &
-      report.lockUpdate.lockFilePath)
+    if report.lockUpdate.lockFilePath.len > 0:
+      result.add("repro check: lock refreshed at " &
+        report.lockUpdate.lockFilePath)
   of cluFailed:
     result.add("repro check: lock update FAILED: " &
       report.lockUpdate.diagnostic)
@@ -32695,15 +32878,112 @@ proc developSetClosure(repos: seq[ResolvedRepo];
         if dep.len > 0 and dep notin result:
           pending.add(dep)
 
+proc repoNameForFragment(identity: GitToolIdentity; membershipRoot, relPath,
+    newTip, oldTip: string): string =
+  ## Resolve a changed ``repos/<file>.toml`` fragment to the repo NAME it
+  ## declares. The file's basename is NOT the name: a fragment may declare a
+  ## different one (``repos/accounting-blocksense.toml`` declares
+  ## ``name = "accounting"``), so read the fragment's own ``[repo] name``. The
+  ## blob is read from the pushed tip, falling back to the pre-push tip for a
+  ## fragment the commit DELETED (removing a repo from the workspace is exactly
+  ## the kind of membership change the scope must cover). Basename is the last
+  ## resort so an unreadable blob narrows the scope rather than dropping it.
+  for tip in [newTip, oldTip]:
+    if tip.len == 0:
+      continue
+    let show = gitRunPlain(identity,
+      ["-C", membershipRoot, "show", tip & ":" & relPath])
+    if show.code != 0:
+      continue
+    for rawLine in show.output.splitLines():
+      let line = rawLine.strip()
+      if line.startsWith("name") and '=' in line:
+        let value = line[line.find('=') + 1 .. ^1].strip()
+        let unquoted = value.strip(chars = {'"', '\''})
+        if unquoted.len > 0:
+          return unquoted
+  relPath.extractFilename.changeFileExt("")
+
+proc membershipPushScope(identity: GitToolIdentity; resolved: ResolvedProject;
+    membershipRoot, newTip, oldTip: string): HashSet[string] =
+  ## Workspace-And-Develop-Mode.md §"Gate scope when the pushed repo is the
+  ## membership repo" — the repos whose manifest fragments the pushed commit
+  ## range actually modifies. A manifest commit can only break a teammate on a
+  ## repo whose pin or membership IT changes (a revision re-pinned to a SHA
+  ## nobody pushed, a repo added that nobody can clone); a repo the commit does
+  ## not mention cannot be broken by it. An empty result is a real answer —
+  ## "this commit touches no fragment" — and scopes the gate to the membership
+  ## repo's own cleanliness/publication, NOT to the whole workspace.
+  result = initHashSet[string]()
+  if newTip.len == 0:
+    return
+  # Prefer the exact pushed range. A brand-new remote branch has no old tip, so
+  # fall back to the tip commit's own first-parent diff: still a well-defined
+  # "what this push introduces" for the common single-commit case, and far
+  # narrower than widening to every repo in the workspace.
+  var diff = gitRunPlain(identity,
+    ["-C", membershipRoot, "diff", "--name-only", oldTip & ".." & newTip])
+  if oldTip.len == 0 or diff.code != 0:
+    diff = gitRunPlain(identity,
+      ["-C", membershipRoot, "diff", "--name-only", newTip & "^", newTip])
+  if diff.code != 0:
+    return
+  var byName = initTable[string, ResolvedRepo]()
+  for repo in resolved.repos:
+    byName[repo.name] = repo
+  for rawPath in diff.output.splitLines():
+    let relPath = rawPath.strip()
+    if relPath.len == 0 or not relPath.endsWith(".toml"):
+      continue
+    if relPath.startsWith("repos/"):
+      let name = repoNameForFragment(identity, membershipRoot, relPath,
+        newTip, oldTip)
+      if name.len > 0 and name in byName:
+        result.incl(name)
+    elif relPath.startsWith("projects/"):
+      # A project manifest changed: its membership as a whole is what moved, so
+      # the repos that project declares are in scope. Only repos that actually
+      # participate in the resolved workspace can be observed, so intersect.
+      let projectName = relPath.extractFilename.changeFileExt("")
+      if projectName == resolved.projectName:
+        for repo in resolved.repos:
+          result.incl(repo.name)
+      else:
+        let projectFile = membershipRoot / "projects" / (projectName & ".toml")
+        if fileExists(projectFile):
+          try:
+            for repo in resolveProject(projectFile).repos:
+              if repo.name in byName:
+                result.incl(repo.name)
+          except CatchableError:
+            # A project manifest we cannot resolve (malformed, or referencing
+            # fragments this workspace does not carry) contributes nothing
+            # rather than failing the gate on a parse error.
+            discard
+
 proc prePushScope(resolved: ResolvedProject; currentRepoName: string;
-    currentLayer: Option[ManifestLayerLocation]):
+    currentLayer: Option[ManifestLayerLocation];
+    membershipScope: Option[HashSet[string]] = none(HashSet[string])):
       tuple[names: HashSet[string]; wholeWorkspace: bool] =
   ## Normal repo pushes use RA-21's develop-set closure. Manifest-layer pushes
   ## are not project repos, so the old empty-closure fallback would widen them
   ## to the whole composed workspace and make private layers block public-layer
   ## publication. Use the current layer's declarations instead.
+  ##
+  ## A push of the MEMBERSHIP repo (the ``repro-workspace`` repo carrying
+  ## ``projects/``/``repos/``) is neither: it declares no ``depends`` edges, so
+  ## its closure is empty, and in the flat native layout it is not a
+  ## ``[[manifest]]`` layer either — which is how it used to fall through to the
+  ## whole-workspace fallback and let an unrelated dirty sibling block a
+  ## one-line manifest edit. ``membershipScope`` carries the touched-fragment
+  ## answer (``membershipPushScope``); when present it is authoritative, INCLUDING
+  ## when it is empty.
   result.names = developSetClosure(resolved.repos, currentRepoName)
   if result.names.len > 0:
+    result.wholeWorkspace = false
+    return
+  if membershipScope.isSome:
+    result.names = membershipScope.get()
     result.wholeWorkspace = false
     return
   if currentLayer.isSome:
@@ -33015,7 +33295,28 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # ``depends`` edges). When ``--current-repo`` does not resolve to a
   # declared repo (the closure is empty), we fall back to the whole
   # workspace so the gate can never silently under-check.
-  let scope = prePushScope(resolved, currentRepoName, currentManifestLayer)
+  #
+  # ...except for the MEMBERSHIP repo, which is never a declared repo and would
+  # therefore always take that fallback. Its scope is the repos whose manifest
+  # fragments the pushed range modifies (Workspace-And-Develop-Mode.md §"Gate
+  # scope when the pushed repo is the membership repo").
+  var membershipScope = none(HashSet[string])
+  if currentRepoName.len == 0 and parsed.currentRepo.len > 0:
+    let membershipRoot = manifestsRoot(parsed.workspaceRoot)
+    if sameFilesystemPath(absolutePath(membershipRoot), parsed.currentRepo) and
+        discoverGitWorktree(identity, membershipRoot).ok:
+      let newTip =
+        if outgoing.headOid.len > 0: outgoing.headOid
+        else: gitRunPlain(identity,
+          ["-C", membershipRoot, "rev-parse", "HEAD"]).output.strip()
+      let oldTip =
+        if outgoing.remoteOldOid.len > 0 and not isZeroOid(outgoing.remoteOldOid):
+          outgoing.remoteOldOid
+        else: ""
+      membershipScope = some(membershipPushScope(
+        identity, resolved, membershipRoot, newTip, oldTip))
+  let scope = prePushScope(resolved, currentRepoName, currentManifestLayer,
+    membershipScope)
   let scopeClosure = scope.names
   let scopeIsWholeWorkspace = scope.wholeWorkspace
   proc repoInScope(name: string): bool =
@@ -39944,9 +40245,16 @@ proc executeAdd(parsed: AddArgs): AddReport =
     # Develop membership: record the remote, the repo fragment, and the
     # `includes` edge so the dependency participates in the workspace.
     # Reuse a declared remote that already serves this URL for this repo
-    # name; only fall back to a per-repo remote when none can. (`repro add`
+    # name; only fall back to a per-repo remote when none can. `repro add`
     # keeps `[repo].name == target` because the develop-set `depends` edges
-    # key off that name, so a plan that would rename the repo is declined.)
+    # it writes name the target, and the closure keys off `[repo].name` — a
+    # fragment named after its server-side path would leave those edges
+    # dangling. So the plan is asked to PRESERVE the name (`repro workspace
+    # project repo add`, which writes no `depends` edges, takes the
+    # unrestricted plan and may put a server-side path in `name`), and a plan
+    # that would still rename the repo — a bare `…/<repo>.git` directory URL,
+    # where the name can only come out as `<repo>.git` — is declined in favour
+    # of a per-repo remote that keeps the fragment's identity intact.
     var remoteName = ""
     var remoteFetch = parsed.remoteUrl
     try:
@@ -39957,7 +40265,7 @@ proc executeAdd(parsed: AddArgs): AddReport =
         else:
           ""
       let plan = planRepoRemote(declared.remote, defaultRemote,
-        parsed.target, parsed.remoteUrl)
+        parsed.target, parsed.remoteUrl, preserveRepoName = true)
       if plan.error.len == 0 and plan.repoName == parsed.target:
         remoteName = plan.remoteName
         remoteFetch = plan.mintedFetch
@@ -39972,9 +40280,13 @@ proc executeAdd(parsed: AddArgs): AddReport =
     createDir(manifestsRoot / "repos")
     let fragmentRel = "repos/" & parsed.target & ".toml"
     let fragmentAbs = manifestsRoot / "repos" / (parsed.target & ".toml")
-    # Pin `revision` only when it is NOT identical to what the fragment
-    # would inherit from the project's `default_revision`; a redundant pin
-    # freezes the repo the day it is added.
+    # Omit `revision` when the fragment would inherit exactly the same value
+    # from the project's `default_revision`; a redundant pin freezes the repo
+    # on the day it was added and silently stops tracking the project's
+    # branch. The key is written only when the caller asked for a specific
+    # revision (`--revision` is an explicit pin, even if it happens to name
+    # the current default) or when there is no `default_revision` to inherit
+    # and `revision` therefore has to be stated.
     let pinRevision =
       parsed.revision.len > 0 or resolved.defaultRevision.len == 0
     if not fileExists(fragmentAbs):
@@ -41197,7 +41509,7 @@ proc newBuildPeerCacheWiring*(reader: PeerCacheActionCacheReader;
   result.reader = reader
   # `cas` and `cache` are retained for API stability but the active
   # install path uses the engine-supplied handles (the engine pushes
-  # its own `LocalCas` and `ptr ActionCache` into the installer
+  # its own `CasStore` and `ptr ActionCache` into the installer
   # closure). Earlier drafts of this helper closed over them locally;
   # we keep the parameters so existing callers don't break.
   discard cas
@@ -41210,7 +41522,7 @@ proc newBuildPeerCacheWiring*(reader: PeerCacheActionCacheReader;
     readerRef.readActionOutput(key)
   result.installer = proc(weakFingerprint: ContentDigest;
                           bundleBytes: seq[byte];
-                          engineCas: LocalCas;
+                          engineCas: var CasStore;
                           engineCache: ptr ActionCache):
                           tuple[ok: bool; reason: string]
       {.gcsafe, closure.} =
@@ -41314,7 +41626,7 @@ proc buildPeerCacheWiringFor*(spec: string): BuildPeerCacheWiring =
       readerRef.readActionOutput(key)
     result.installer = proc(weakFingerprint: ContentDigest;
                             bundleBytes: seq[byte];
-                            engineCas: LocalCas;
+                            engineCas: var CasStore;
                             engineCache: ptr ActionCache):
                             tuple[ok: bool; reason: string]
         {.gcsafe, closure.} =

@@ -90,6 +90,12 @@ proc argByName(action: BuildActionDef; name: string): PublicCliArg =
     "' in call to " & action.call.packageName & "." &
     action.call.executableName & "." & action.call.subcommand)
 
+proc hasArg(action: BuildActionDef; name: string): bool =
+  for arg in action.call.arguments:
+    if arg.name == name:
+      return true
+  false
+
 suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecCall":
 
   test "configure edge uses reprobuild.builtin.exec call":
@@ -114,8 +120,8 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
     # M9.R.14b.3: the script now executes the canonical out-of-tree
     # autotools pattern (``mkdir -p <buildDir> && cd <buildDir> &&
     # ../<srcDir>/configure ...``) so the generated ``Makefile`` lands
-    # under ``<buildDir>/`` where the downstream ``make -C <buildDir>``
-    # actions look for it. Pre-M9.R.14b.3 the script ran
+    # under ``<buildDir>/`` where the downstream make actions run.
+    # Pre-M9.R.14b.3 the script ran
     # ``./src/configure`` from the recipe root, which wrote
     # ``Makefile`` into the recipe root and broke the ``make -C build``
     # invocation with ``build: No such file or directory``.
@@ -137,6 +143,66 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
     check "--enable-gold" in argvParts[2]
     check "--disable-werror" in argvParts[2]
 
+  test "nested buildDir computes configure path from build dir depth":
+    let pkg = autotools_package(
+      srcDir = "./src",
+      buildDir = ".repro/build/libffi-autotools",
+      configureOptions = @["--disable-static"])
+    let argvArg = pkg.buildEdge.argByName("argv")
+    let argvParts = argvArg.encodedValue.split("\x1f")
+    check argvParts.len == 3
+    check "mkdir -p .repro/build/libffi-autotools" in argvParts[2]
+    check "cd .repro/build/libffi-autotools" in argvParts[2]
+    check "../../../src/configure" in argvParts[2]
+    check "--disable-static" in argvParts[2]
+
+  test "make edges run with buildDir as canonical cwd":
+    let pkg = autotools_package(
+      srcDir = "./src",
+      buildDir = ".repro/build/libffi-autotools",
+      configureOptions = @["--disable-static"])
+
+    check pkg.compileEdge.cwdKind == acwdBuild
+    check pkg.compileEdge.cwdCustomPath == ".repro/build/libffi-autotools"
+    check not pkg.compileEdge.hasArg("workDir")
+    check ".repro/build/libffi-autotools" in pkg.compileEdge.inputs
+
+    check pkg.installMakeEdge.cwdKind == acwdBuild
+    check pkg.installMakeEdge.cwdCustomPath == ".repro/build/libffi-autotools"
+    check not pkg.installMakeEdge.hasArg("workDir")
+    check ".repro/build/libffi-autotools" in pkg.installMakeEdge.inputs
+
+  test "make action ids are deterministic and scoped by package/buildDir":
+    resetDslPortFetchState()
+    var packageABuildId = ""
+    var packageAInstallId = ""
+    setCurrentOwningPackageOverride("m9r84PkgA")
+    try:
+      let first = autotools_package(srcDir = "./src", buildDir = "build-a")
+      let repeat = autotools_package(srcDir = "./src", buildDir = "build-a")
+      let otherBuildDir = autotools_package(srcDir = "./src",
+        buildDir = "build-b")
+      packageABuildId = first.compileEdge.id
+      packageAInstallId = first.installMakeEdge.id
+
+      check first.compileEdge.id == repeat.compileEdge.id
+      check first.installMakeEdge.id == repeat.installMakeEdge.id
+      check first.compileEdge.id != first.installMakeEdge.id
+      check first.compileEdge.id != otherBuildDir.compileEdge.id
+      check first.installMakeEdge.id != otherBuildDir.installMakeEdge.id
+    finally:
+      clearCurrentOwningPackageOverride()
+
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("m9r84PkgB")
+    try:
+      let otherPackage = autotools_package(srcDir = "./src",
+        buildDir = "build-a")
+      check otherPackage.compileEdge.id != packageABuildId
+      check otherPackage.installMakeEdge.id != packageAInstallId
+    finally:
+      clearCurrentOwningPackageOverride()
+
   test "configure defaults native build probes to source toolchain flags":
     let pkg = autotools_package(srcDir = "./src")
     let script = pkg.buildEdge.argByName("argv").encodedValue.split("\x1f")[2]
@@ -144,7 +210,30 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
     check "export CFLAGS_FOR_BUILD=\"${CFLAGS_FOR_BUILD:-${CFLAGS:-}}\"" in script
     check "export CPPFLAGS_FOR_BUILD=\"${CPPFLAGS_FOR_BUILD:-${CPPFLAGS:-}}\"" in script
     check "export LDFLAGS_FOR_BUILD=\"${LDFLAGS_FOR_BUILD:-${LDFLAGS:-}}\"" in script
+    check "export BUILD_CC=\"${BUILD_CC:-${CC_FOR_BUILD}}\"" in script
+    check "export BUILD_CFLAGS=\"${BUILD_CFLAGS:-${CFLAGS_FOR_BUILD}}\"" in script
+    check "export BUILD_CPPFLAGS=\"${BUILD_CPPFLAGS:-${CPPFLAGS_FOR_BUILD}}\"" in script
+    check "export BUILD_LDFLAGS=\"${BUILD_LDFLAGS:-${LDFLAGS_FOR_BUILD}}\"" in script
     check script.find("export CC_FOR_BUILD=") < script.find("../src/configure")
+
+  test "autoreconf uses modules from the resolved source Perl":
+    let pkg = autotools_package(
+      srcDir = "./src",
+      patchHardcodedFile = true)
+    let script = pkg.buildEdge.argByName("argv").encodedValue.split("\x1f")[2]
+    check "perl_bin=$(which perl 2>/dev/null)" in script
+    check "perl_lib=\"$perl_prefix/lib/perl5\"" in script
+    check "export PERL5LIB=\"$perl_lib${PERL5LIB:+:$PERL5LIB}\"" in script
+    check "export autom4te_perllibdir=\"$autoconf_share\"" in script
+    check "relocated_autom4te_cfg=$(mktemp)" in script
+    check "export AUTOMAKE_LIBDIR=\"$automake_share\"" in script
+    check "export ACLOCAL_AUTOMAKE_DIR=\"$aclocal_share\"" in script
+    check "export ACLOCAL=\"aclocal --system-acdir=$system_aclocal" in script
+    check "for perl_tool in autoreconf autoconf autoheader autom4te" in script
+    check "export PATH=\"$perl_tool_dir:$PATH\"" in script
+    check "export AUTOM4TE=autom4te" in script
+    check "ad=\"$bin_dir/../share/aclocal\"" in script
+    check script.find("export PERL5LIB=") < script.find("autoreconf -fi")
 
   test "source patches run before configure":
     let pkg = autotools_package(

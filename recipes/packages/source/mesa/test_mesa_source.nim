@@ -17,7 +17,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[strutils, unittest]
 
 import repro_project_dsl
 
@@ -31,6 +31,17 @@ const ExpectedUrl =
 
 const ExpectedHash =
   "51aa686ca4060e38711a9e8f60c8f1efaa516baf411946ed7f2c265cd582ca4c"
+
+proc argByName(action: BuildActionDef; name: string): PublicCliArg =
+  for arg in action.call.arguments:
+    if arg.name == name:
+      return arg
+  raise newException(ValueError, "no argument named '" & name & "'")
+
+proc encodedValues(arg: PublicCliArg): seq[string] =
+  if arg.encodedValue.len == 0:
+    return @[]
+  arg.encodedValue.split("\x1f")
 
 suite "mesaSource — from-source recipe smoke test":
 
@@ -71,6 +82,29 @@ suite "mesaSource — from-source recipe smoke test":
     check seenEGL
     check seenGLESv2
     check seenGbm
+
+  test "M9.R.80 enables LLVM-backed llvmpipe":
+    let native = registeredNativeBuildDeps("mesaSource")
+    check "llvm-config" in native
+
+    resetBuildActionRegistry()
+    buildMesaSourcePackage()
+    var setupAction: BuildActionDef
+    var foundSetup = false
+    for action in registeredBuildActions():
+      if action.call.packageName == "meson" and
+          action.call.executableName == "mesonBin" and
+          action.call.subcommand == "setup":
+        setupAction = action
+        foundSetup = true
+        break
+    check foundSetup
+    if foundSetup:
+      let opts = setupAction.argByName("options").encodedValues()
+      check "llvm=enabled" in opts
+      check "shared-llvm=enabled" in opts
+      check not ("llvm=disabled" in opts)
+      check not ("shared-llvm=disabled" in opts)
 
   test "versions block records the upstream tag + URL + repository":
     let vs = registeredVersions("mesaSource")

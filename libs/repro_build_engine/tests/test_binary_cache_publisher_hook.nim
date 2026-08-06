@@ -218,6 +218,9 @@ suite "M9.L.4-refactor Step A — engine binary-cache publisher hook":
     check backfill.results.len == 1
     check backfill.results[0].status == asUpToDate
     check not backfill.results[0].launched
+    check backfill.results[0].reason ==
+      "materialized-binary-cache-published key=" &
+        deriveActionCacheKeyHex(g.actions[0])
     check readFile(outputPath) == "already built\n"
     check recorder.invocations.len == 1
     check recorder.invocations[0].publishPrefix == prefix

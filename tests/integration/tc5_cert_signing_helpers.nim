@@ -44,3 +44,43 @@ proc writeRegistry*(workspaceRoot: string; entries: openArray[RegisteredKey]) =
   var store: RegisteredKeyStore
   for e in entries: store.keys.add(e)
   writeRegisteredKeyStore(store, registeredKeyStorePath(workspaceRoot))
+
+proc seedManifestLockStore*(gitBin, workspaceRoot: string;
+                            reproBin = ""; upstreamBare = "") =
+  ## Make ``<workspaceRoot>/.repro/manifests`` a real git checkout.
+  ##
+  ## Certificate issuance binds a run to a COMMITTED manifest lock, which only
+  ## exists in a workspace that DECLARES a manifest-backed route
+  ## (Unified-Locking-And-Hooks.md §10, "No implicit team route": a workspace
+  ## that never declares one is public-only and writes only ``repro.lock``).
+  ## The gate used to synthesize the store from the mere path, so these
+  ## fixtures got a lock record they had never asked for; now the route has to
+  ## be declared, and for a flat native-layout fixture that means the store DB
+  ## is its own checkout.
+  proc git(args: string) =
+    let res = execCmdEx(quoteShell(gitBin) & " " & args)
+    doAssert res.exitCode == 0, "git " & args & " failed: " & res.output
+  let lockStore = workspaceRoot / ".repro" / "manifests"
+  if not dirExists(lockStore): createDir(lockStore)
+  git("init -b main " & quoteShell(lockStore))
+  git("-C " & quoteShell(lockStore) & " config user.email tester@example.invalid")
+  git("-C " & quoteShell(lockStore) & " config user.name \"Lock Store Tester\"")
+  writeFile(lockStore / ".gitkeep", "")
+  git("-C " & quoteShell(lockStore) & " add -A")
+  git("-C " & quoteShell(lockStore) & " commit -m \"seed lock store\"")
+  if upstreamBare.len > 0:
+    # A store the gate can actually PUBLISH to: a local bare origin plus the
+    # tracking branch ``publishWorkspaceLock`` resolves through ``@{u}``.
+    git("init --bare -b main " & quoteShell(upstreamBare))
+    git("-C " & quoteShell(lockStore) & " remote add origin " &
+      quoteShell(upstreamBare))
+    git("-C " & quoteShell(lockStore) & " push -u origin main")
+  if reproBin.len > 0:
+    # ``repro push`` preflights every routed lock backend and refuses when the
+    # backend checkout is missing the Reprobuild pre-push hook. Fixtures that
+    # drive the real push have to install it, exactly as the printed remedy
+    # (``repro hooks ensure --vcs <store>``) tells an operator to.
+    let res = execCmdEx(quoteShellCommand(
+      @[reproBin, "hooks", "ensure", "--vcs", lockStore]))
+    doAssert res.exitCode == 0,
+      "repro hooks ensure on the lock store failed: " & res.output

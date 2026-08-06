@@ -30,6 +30,7 @@
 import std/[options, os, strutils, tables, unittest]
 
 import repro_build_engine
+import repro_cas_store
 import repro_hash
 import repro_local_store
 import repro_peer_cache
@@ -115,7 +116,7 @@ proc newFetcher(peer: PeerTable): PeerCacheActionFetcher =
 proc newInstaller(): PeerCacheActionBundleInstaller =
   result = proc(weakFingerprint: ContentDigest;
                 bundleBytes: seq[byte];
-                cas: LocalCas;
+                cas: var CasStore;
                 cache: ptr ActionCache):
                 tuple[ok: bool; reason: string] {.gcsafe, closure.} =
     let bundle =
@@ -154,8 +155,8 @@ suite "LDRV-M5 peer-cache action-bundle build wiring":
     let sourceRoot = TmpDir / "source"
     let targetRoot = TmpDir / "target"
     # ``ActionResultRecord.outputs[i].path`` is recorded byte-for-byte
-    # and `restoreOutputs` restores to that exact path (it doesn't
-    # rebase to a per-host root). For the test to demonstrate a peer-
+    # and the R11 materialization helper restores to that exact path
+    # (it doesn't rebase to a per-host root). For the test to demonstrate a peer-
     # cache hit on the consumer side, producer + consumer must share
     # the same declared output path; we put the file in a shared
     # ``outputs/`` sub-dir under TmpDir and delete the producer's

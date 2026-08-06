@@ -107,6 +107,18 @@ package m9r6CustomFixture:
   nativeBuildDeps:
     "sh"
     "perl"
+  ## A package-level ``build:`` is what the package macro classifies as
+  ## ``soM4Build``; without it, a custom-convention recipe (shell-driver-only
+  ## ``nativeBuildDeps``) raises ``raiseCustomBuildRequired`` at DECLARATION
+  ## time and takes this whole test binary down before any test runs.
+  ##
+  ## The three custom-convention assertions are unaffected by its presence:
+  ## ``defaultBuildConventionFor`` reads the dep tokens, and both
+  ## ``shouldSynthesizeDefaultBuild`` and ``raiseCustomBuildRequired`` are
+  ## exercised by passing their arguments directly rather than by inspecting
+  ## this fixture.
+  build:
+    shell "true"
   executable customWidget:
     discard
 
@@ -205,8 +217,16 @@ suite "DSL-port M9.R.6 — convention narrowing + default-build synthesis":
     check caughtMessage.contains("shell(")
 
   test "synthesizeMesonPackage: returns MesonPackageResult (no options arg)":
+    # A name DISTINCT from the module-init fixtures. Those recipes are
+    # auto-synthesised once at module init, and synthesis registers an implicit
+    # target named ``build`` scoped to the consuming package; calling it again
+    # for the SAME package with a different srcDir is a genuine duplicate and is
+    # correctly refused. The entry point does not require the name to be a
+    # registered package — it uses it only to scope those implicit exports — so
+    # a distinct name exercises the same return-shape contract without
+    # colliding with the fixture's own synthesis.
     let result = synthesizeMesonPackage(
-      packageName = "m9r6MesonFixture",
+      packageName = "m9r6MesonDirectCall",
       srcDir = "/tmp/m9r6-meson-fixture")
     # MesonPackageResult has destdir / installEdge / etc; we don't pin
     # the action shape (M9.R.2b owns that) but we do check the result
@@ -214,8 +234,16 @@ suite "DSL-port M9.R.6 — convention narrowing + default-build synthesis":
     check result.destdir.len > 0
 
   test "synthesizeCmakePackage: returns CmakePackageResult (no options arg)":
+    # A name DISTINCT from the module-init fixtures. Those recipes are
+    # auto-synthesised once at module init, and synthesis registers an implicit
+    # target named ``build`` scoped to the consuming package; calling it again
+    # for the SAME package with a different srcDir is a genuine duplicate and is
+    # correctly refused. The entry point does not require the name to be a
+    # registered package — it uses it only to scope those implicit exports — so
+    # a distinct name exercises the same return-shape contract without
+    # colliding with the fixture's own synthesis.
     let result = synthesizeCmakePackage(
-      packageName = "m9r6CmakeFixture",
+      packageName = "m9r6CmakeDirectCall",
       srcDir = "/tmp/m9r6-cmake-fixture")
     check result.destdir.len > 0
 

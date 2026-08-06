@@ -369,9 +369,10 @@ proc emitShellActions(projectRoot, packageName, extractedPath, outPath,
     # across every shell action in the chain because the mirror root
     # is a per-recipe property.  See the M9.R.79 Phase F recipe
     # migration for the first live consumer (hwdata).
-    let outMirrorRoot = (projectRoot / ".repro" / "output" / "install").
-      replace("\\", "/")
-    let shellEnv = @[("OUT_MIRROR", outMirrorRoot)]
+    let outMirrorRoot = packageInstallMirrorStagingRoot(parentDir(projectRoot),
+      extractFilename(projectRoot))
+    let shellEnv = @[("OUT_MIRROR", outMirrorRoot)] &
+      packageDependencyRootEnvEntries(packageName, projectRoot)
     let action = buildAction(
       id = actionId,
       call = inlineExecCall(argv, projectRoot),
@@ -511,6 +512,60 @@ proc emitStageCopyAction(projectRoot, outPath, lastShellStamp,
     # under the same scope (they legitimately write there earlier
     # in the dep chain).
     declaredOutputs = @[outDir])
+
+proc emitInstallMirrorPublishAction(projectRoot, dslPackageName, outPath,
+                                    lastShellStamp, lastShellId: string):
+                                      BuildActionDef =
+  ## Publish the install mirror produced by the custom shell chain.
+  ## Some recipes write ``${OUT_MIRROR}`` directly; others only leave a
+  ## DESTDIR-style tree under ``$out``. Preserve an existing canonical
+  ## mirror and synthesize it from ``$out`` only when it is absent.
+  let recipesRoot = parentDir(projectRoot)
+  let recipeName = extractFilename(projectRoot)
+  let mirrorRoot = recipesRoot / recipeName / ".repro" / "output" /
+    "install"
+  let mirrorUsr = mirrorRoot / "usr"
+  createDir(extendedPath(mirrorRoot))
+  let mirrorStamp = mirrorRoot / ".from-source-custom-install-mirror.stamp"
+  let sidecar = realizationInfoPath(recipesRoot, recipeName)
+  let escapedMirrorRoot = mirrorRoot.replace("\\", "/").replace("\"", "\\\"")
+  let escapedMirrorUsr = mirrorUsr.replace("\\", "/").replace("\"", "\\\"")
+  let escapedMirrorStamp = mirrorStamp.replace("\\", "/").replace("\"", "\\\"")
+  let escapedOutPath = outPath.replace("\\", "/").replace("\"", "\\\"")
+  let publishVersion = latestRegisteredPackageVersion(dslPackageName)
+  var script = "set -e; "
+  script.add("mkdir -p \"" & escapedMirrorRoot & "\"; ")
+  script.add("if [ ! -d \"" & escapedMirrorUsr & "\" ]; then ")
+  script.add("if [ -d \"" & escapedOutPath & "/install/usr\" ]; then ")
+  script.add("rm -rf \"" & escapedMirrorUsr & "\"; ")
+  script.add("cp -a -- \"" & escapedOutPath & "/install/usr\" \"" &
+    escapedMirrorRoot & "/\"; ")
+  script.add("elif [ -d \"" & escapedOutPath & "/usr\" ]; then ")
+  script.add("rm -rf \"" & escapedMirrorUsr & "\"; ")
+  script.add("cp -a -- \"" & escapedOutPath & "/usr\" \"" &
+    escapedMirrorRoot & "/\"; ")
+  script.add("else ")
+  script.add("mkdir -p \"" & escapedMirrorUsr & "\"; ")
+  for sub in ["lib", "lib64", "include", "bin", "share"]:
+    script.add("if [ -d \"" & escapedOutPath & "/" & sub &
+      "\" ]; then cp -a -- \"" & escapedOutPath & "/" & sub &
+      "\" \"" & escapedMirrorUsr & "/\"; fi; ")
+  script.add("fi; ")
+  script.add("fi; ")
+  script.add("touch \"" & escapedMirrorStamp & "\"; ")
+  script.add(emitInstallMirrorStorePublish(recipesRoot, recipeName,
+    publishVersion, mirrorRoot))
+  buildAction(
+    id = "from-source-custom-mirror-" & sanitizeNamePart(dslPackageName),
+    call = inlineExecCall(@["sh", "-c", script], projectRoot),
+    deps = @[lastShellId],
+    inputs = @[lastShellStamp],
+    outputs = @[mirrorStamp, sidecar],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "from-source-custom.mirror",
+    toolIdentityRefs = @["sh", InstallMirrorPublishToolName],
+    declaredOutputs = @[mirrorRoot, sidecar])
 
 # ---------------------------------------------------------------------------
 # Convention entry
@@ -685,6 +740,10 @@ proc fromSourceCustomEmitFragment(projectRoot: string;
         let stageAct = emitStageCopyAction(projectRoot, outPath,
           shellOutcome.lastStamp, shellOutcome.lastId, member, identity)
         allActions.add(stageAct)
+      if shellOutcome.lastId.len > 0:
+        allActions.add(emitInstallMirrorPublishAction(projectRoot,
+          dslPackageName, outPath, shellOutcome.lastStamp,
+          shellOutcome.lastId))
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

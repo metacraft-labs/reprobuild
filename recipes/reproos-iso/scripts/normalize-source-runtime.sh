@@ -66,8 +66,9 @@ leaks_file="$(mktemp -t reproos-source-runtime-leaks-XXXXXX)"
 shebang_plan_file="$(mktemp -t reproos-source-runtime-shebang-plan-XXXXXX)"
 trap 'rm -f "$candidates_file" "$missing_file" "$leaks_file" "$shebang_plan_file"' EXIT
 
-find "$source_root" -type f \
-  \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) \
+find "$stage_dir" \
+  \( -path "$stage_dir/nix" -o -path "$stage_dir/repro/store" \) -prune -o \
+  -type f \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) \
   -print 2>/dev/null > "$candidates_file"
 for extra_elf in "${extra_elfs[@]}"; do
   [ -f "$extra_elf" ] && printf '%s\n' "$extra_elf" >> "$candidates_file"
@@ -190,7 +191,11 @@ plan_runtime_shebangs "$shebang_plan_file" "$missing_file"
 
 if [ -s "$missing_file" ]; then
   missing_count="$(wc -l < "$missing_file")"
+  missing_name_count="$(cut -f1 "$missing_file" | sort -u | wc -l)"
   echo "[normalize-source-runtime] missing $missing_count source runtime edges:" >&2
+  echo "[normalize-source-runtime] missing $missing_name_count unique runtime names:" >&2
+  cut -f1 "$missing_file" | sort -u >&2
+  echo "[normalize-source-runtime] first 100 missing runtime edges:" >&2
   sort -u "$missing_file" | sed -n '1,100p' >&2
   exit 75
 fi

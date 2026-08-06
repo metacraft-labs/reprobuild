@@ -10,6 +10,7 @@ import repro_core
 import repro_depfile
 import repro_hash
 import repro_local_store
+import repro_cas_store
 # Incremental-Test-Runner M7: the build engine consumes the shared ``io-mon``
 # library (a byte-identical wire-format + ABI relocation of reprobuild's former
 # ``repro_monitor_depfile`` io-monitor stack) for its monitor-evidence dependency
@@ -568,7 +569,7 @@ type
 
   PeerCacheActionBundleInstaller* = proc(weakFingerprint: ContentDigest;
                                           bundleBytes: seq[byte];
-                                          cas: LocalCas;
+                                          cas: var CasStore;
                                           cache: ptr ActionCache):
                                           tuple[ok: bool; reason: string]
     {.gcsafe, closure.}
@@ -890,6 +891,38 @@ proc deriveActionCacheKeyHex*(action: BuildAction): string =
     action.cacheEntryIdentity.get(), action.cachePlatformTag)
   deriveCacheEntryKeyHex(folded)
 
+proc actionOutputPath(outputRoot, path: string): string =
+  if path.isAbsolute or outputRoot.len == 0:
+    path
+  else:
+    outputRoot / path
+
+proc contentHashForActionBlob(blob: CasBlobRef): ContentHash =
+  if blob.digest.algorithm != haBlake3_256:
+    raise newException(CacheIntegrityError,
+      "unsupported CAS digest algorithm for " & digestHex(blob.digest))
+  toContentHash(blob.digest.bytes)
+
+proc materializeActionCacheOutputs*(cas: CasStore;
+                                    record: ActionResultRecord;
+                                    outputRoot = "") =
+  ## R11 action-cache restore helper shared by normal hits and hybrid-cutoff
+  ## hits. It translates stable RBAR output records into Layer-1
+  ## ``CasMaterialization`` requests; ``casMaterialize`` verifies every blob
+  ## before touching destinations, so missing/corrupt later blobs cannot leave
+  ## earlier outputs partially restored.
+  if record.outputPayloadKind != opkCasBlobs:
+    raise newException(CacheIntegrityError,
+      "cache record does not contain output payloads")
+  var entries: seq[CasMaterialization] = @[]
+  for output in record.outputs:
+    entries.add(CasMaterialization(
+      hash: contentHashForActionBlob(output.blob),
+      destination: actionOutputPath(outputRoot, output.path),
+      applyPermissions: true,
+      permissions: output.permissions))
+  cas.casMaterialize(entries)
+
 proc defaultBuildEngineConfig*(cacheRoot: string;
                                actionCacheRoot: string = ""): BuildEngineConfig =
   BuildEngineConfig(
@@ -1076,6 +1109,14 @@ proc writeRootsOverlap(a, b: string): bool =
     return b.startsWith(a & "/")
   return a.startsWith(b & "/")
 
+proc pathAtOrUnderRoot(path, root: string): bool =
+  ## Directional containment predicate for R6: ``path`` must be equal
+  ## to ``root`` or be a descendant of it. A write to a parent of the
+  ## read-only root is not a source write.
+  if path.len == 0 or root.len == 0:
+    return false
+  path == root or path.startsWith(root & "/")
+
 proc detectSourceWrites*(readOnlyRoots, monitorWrites: openArray[string]):
     seq[tuple[write: string; root: string]] =
   ## M9.R.75 — R6 (source-write reject) detection helper. Given the
@@ -1104,7 +1145,7 @@ proc detectSourceWrites*(readOnlyRoots, monitorWrites: openArray[string]):
     if write.len == 0:
       continue
     for root in normalizedRoots:
-      if write == root or write.startsWith(root & "/"):
+      if pathAtOrUnderRoot(write, root):
         result.add((write: write, root: root))
         break
 
@@ -2720,8 +2761,13 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
   ## can replace the runtime selected by an executable's own RPATH. Keep the
   ## directories available to the linker, but never inject them into a process
   ## runtime search path.
+  # Compiler bootstrap prefixes can carry libc startup files even when the
+  # owning package is GCC rather than glibc. Detect the runtime by content so
+  # federated catalogs and staged compiler package names remain safe.
+  if fileExists(path / "libc.so.6"):
+    return true
   let normalized = path.replace('\\', '/')
-  const sourceMarker = "/recipes/packages/source/"
+  const sourceMarker = "/packages/source/"
   let sourceIndex = normalized.find(sourceMarker)
   if sourceIndex >= 0:
     let packageStart = sourceIndex + sourceMarker.len
@@ -2765,7 +2811,7 @@ proc partitionCompilerIncludePaths(paths: ResolvedAuxPaths):
   ## CPATH, but place source libc and kernel UAPI roots after GCC's intrinsic
   ## headers with ``-idirafter``. GCC's own propagated include tree is omitted
   ## because the selected compiler already contributes it intrinsically.
-  const sourceMarker = "/recipes/packages/source/"
+  const sourceMarker = "/packages/source/"
   var glibcRoots: seq[string] = @[]
   var linuxRoots: seq[string] = @[]
   for path in paths.includeDirs:
@@ -2875,6 +2921,19 @@ proc applyCompilerSystemIncludeArgs*(argv: openArray[string];
   for i in base + 1 ..< argv.len:
     result.add(argv[i])
 
+proc sourcePerlModuleDirs(libDirs: openArray[string]): seq[string] =
+  ## A relocated source Perl keeps core modules under usr/lib/perl5, while
+  ## its compiled-in @INC still names the original host prefix.
+  var seen = initHashSet[string]()
+  const sourcePerlMarker = "/packages/source/perl/"
+  for libDir in libDirs:
+    if sourcePerlMarker notin libDir.replace('\\', '/'):
+      continue
+    let moduleDir = libDir / "perl5"
+    if moduleDir notin seen:
+      seen.incl(moduleDir)
+      result.add(moduleDir)
+
 proc applyResolvedAuxPathsTable*(env: StringTableRef;
                                  paths: ResolvedAuxPaths) =
   ## StringTable-style env mutator. Used by the bypass-spawn path. Each
@@ -2911,6 +2970,7 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   # objects. Several Autotools projects compile those helpers through the
   # *_FOR_BUILD variables during a later make action.
   for varName in ["CPPFLAGS", "CFLAGS", "CXXFLAGS",
+                  "HOSTCFLAGS", "HOSTCXXFLAGS",
                   "CPPFLAGS_FOR_BUILD", "CFLAGS_FOR_BUILD",
                   "CXXFLAGS_FOR_BUILD"]:
     prependEnvFlags(env, varName, systemFlags)
@@ -2920,6 +2980,7 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   # libc into the action process can cross GLIBC_PRIVATE ABIs.
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   prependEnvDirs(env, "LD_LIBRARY_PATH", runtimeLibDirs)
+  prependEnvDirs(env, "PERL5LIB", sourcePerlModuleDirs(paths.libDirs))
   prependEnvDirs(env, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
   when defined(macosx):
     # macOS' dynamic loader ignores LD_LIBRARY_PATH; DYLD_LIBRARY_PATH is the
@@ -2957,12 +3018,15 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
     includePaths.regularDirs)
   let systemFlags = compilerSystemIncludeFlags(includePaths.systemDirs)
   for varName in ["CPPFLAGS", "CFLAGS", "CXXFLAGS",
+                  "HOSTCFLAGS", "HOSTCXXFLAGS",
                   "CPPFLAGS_FOR_BUILD", "CFLAGS_FOR_BUILD",
                   "CXXFLAGS_FOR_BUILD"]:
     result = prependEnvFlagsToArgvEnv(result, varName, systemFlags)
   result = prependEnvDirsToArgvEnv(result, "LIBRARY_PATH", paths.libDirs)
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", runtimeLibDirs)
+  result = prependEnvDirsToArgvEnv(result, "PERL5LIB",
+    sourcePerlModuleDirs(paths.libDirs))
   result = prependEnvDirsToArgvEnv(result, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
   when defined(macosx):
     result = prependEnvDirsToArgvEnv(result, "DYLD_LIBRARY_PATH", runtimeLibDirs)
@@ -2998,6 +3062,30 @@ proc shellScriptArgIndex(argv: openArray[string]): int =
 proc isRuntimeLibraryEnv(name: string): bool {.inline.} =
   name == "LD_LIBRARY_PATH" or name == "DYLD_LIBRARY_PATH"
 
+proc monitorPayloadArgIndex(argv: openArray[string]): int =
+  ## Return the first argument of an io-monitor payload, or -1 when argv is
+  ## not the canonical ``repro internal io monitor ... -- <command>`` shape.
+  if argv.len < 8 or argv[1] != "internal" or argv[2] != "io" or
+      argv[3] != "monitor":
+    return -1
+  for i in countdown(argv.len - 1, 4):
+    if argv[i] == "--" and i + 1 < argv.len:
+      return i + 1
+  -1
+
+proc wrapMonitoredPayloadWithRuntimeEnv(argv: openArray[string];
+                                        payloadIndex: int;
+                                        exportPrefix: string): seq[string] =
+  result = newSeqOfCap[string](argv.len + 4)
+  for i in 0 ..< payloadIndex:
+    result.add(argv[i])
+  result.add("/bin/sh")
+  result.add("-c")
+  result.add(exportPrefix & "exec \"$@\"")
+  result.add("sh")
+  for i in payloadIndex ..< argv.len:
+    result.add(argv[i])
+
 proc deferRuntimeLibraryEnvForShell*(argv, env: seq[string]):
     tuple[argv: seq[string], env: seq[string]] =
   ## A dependency's runtime library directory may contain a SONAME also used
@@ -3009,7 +3097,9 @@ proc deferRuntimeLibraryEnvForShell*(argv, env: seq[string]):
   ## Move explicit loader-path entries from the process environment into
   ## exports at the start of that program. The monitor and interpreter then
   ## start against their own libraries, while every command run by the action
-  ## receives the same loader paths. Non-shell argv is unchanged.
+  ## receives the same loader paths. A monitor-wrapped direct command is
+  ## replaced by a tiny shell payload that exports the paths only after the
+  ## monitor has started; an ordinary non-shell argv remains unchanged.
   result.argv = @[]
   for arg in argv:
     result.argv.add(arg)
@@ -3018,7 +3108,8 @@ proc deferRuntimeLibraryEnvForShell*(argv, env: seq[string]):
     result.env.add(entry)
   when defined(posix):
     let scriptIndex = shellScriptArgIndex(argv)
-    if scriptIndex < 0:
+    let payloadIndex = monitorPayloadArgIndex(argv)
+    if scriptIndex < 0 and payloadIndex < 0:
       return
     var values: array[2, string]
     var found: array[2, bool]
@@ -3043,7 +3134,11 @@ proc deferRuntimeLibraryEnvForShell*(argv, env: seq[string]):
     for i, name in names:
       if found[i]:
         prefix.add("export " & name & "=" & quoteShell(values[i]) & "; ")
-    result.argv[scriptIndex] = prefix & result.argv[scriptIndex]
+    if scriptIndex >= 0:
+      result.argv[scriptIndex] = prefix & result.argv[scriptIndex]
+    else:
+      result.argv = wrapMonitoredPayloadWithRuntimeEnv(argv, payloadIndex,
+        prefix)
 
 proc deferRuntimeLibraryEnvForShell*(argv: seq[string];
                                      env: StringTableRef): seq[string] =
@@ -3053,7 +3148,8 @@ proc deferRuntimeLibraryEnvForShell*(argv: seq[string];
     result.add(arg)
   when defined(posix):
     let scriptIndex = shellScriptArgIndex(argv)
-    if scriptIndex < 0 or env == nil:
+    let payloadIndex = monitorPayloadArgIndex(argv)
+    if (scriptIndex < 0 and payloadIndex < 0) or env == nil:
       return
     const names = ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"]
     var prefix = ""
@@ -3062,7 +3158,11 @@ proc deferRuntimeLibraryEnvForShell*(argv: seq[string];
         prefix.add("export " & name & "=" & quoteShell(env[name]) & "; ")
         env.del(name)
     if prefix.len > 0:
-      result[scriptIndex] = prefix & result[scriptIndex]
+      if scriptIndex >= 0:
+        result[scriptIndex] = prefix & result[scriptIndex]
+      else:
+        result = wrapMonitoredPayloadWithRuntimeEnv(argv, payloadIndex,
+          prefix)
 
 proc applyNimPathArgs*(argv: openArray[string];
                        nimPathDirs: openArray[string]): seq[string] =
@@ -4331,7 +4431,8 @@ proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
       id: action.id,
       status: asFailed,
       cacheDecision: cdNotCacheable,
-      reason: "materialized-binary-cache-publish")
+      reason: "materialized-binary-cache-publish key=" &
+        deriveActionCacheKeyHex(action))
     let prefix =
       if action.declaredOutputs.len == 1:
         action.declaredOutputs[0]
@@ -4371,7 +4472,8 @@ proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
           error: "binary-cache publisher raised: " & e.msg)
     if publishResult.ok:
       item.status = asUpToDate
-      item.reason = "materialized-binary-cache-published"
+      item.reason = "materialized-binary-cache-published key=" &
+        deriveActionCacheKeyHex(action)
     else:
       item.exitCode = publishResult.statusCode
       item.stderr = publishResult.error
@@ -4461,7 +4563,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     else:
       cacheRoot
   let casOpenStart = statStart()
-  let cas = openLocalCas(sharedRoot / "cas")
+  var cas = openCasStore(sharedRoot)
   finishStat("repro cas open", casOpenStart)
   let actionCacheOpenStart = statStart()
   let attachActionCacheShm = config.actionCacheRoot.len > 0
@@ -4470,6 +4572,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var cache = warmCache.cache
   finishStat("repro action cache open", actionCacheOpenStart)
   defer:
+    cas.close()
     cache.flushHotIndex()
     warmCache.cache = cache
     warmCache.evidence = actionCacheDurableEvidence(sharedRoot / "action-cache")
@@ -4508,7 +4611,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for b in recordBytes: bundleBytes.add(b)
     bundleBytes.writeU32Le(uint32(record.outputs.len))
     for output in record.outputs:
-      let payload = cas.readBlob(output.blob)
+      let payload = cas.casGet(contentHashForActionBlob(output.blob))
+      if uint64(payload.len) != output.blob.sizeBytes:
+        raise newException(CacheIntegrityError, "CAS size mismatch for " &
+          digestHex(output.blob.digest))
       bundleBytes.writeU32Le(uint32(payload.len))
       for b in payload: bundleBytes.add(b)
     config.peerCacheActionPublisher(weakFingerprint, bundleBytes)
@@ -5283,7 +5389,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             outputsPresentKnown = true
             finishStat("repro output stat", outputStatStart)
           let lookupStart = statStart()
-          var lookup = cache.lookupActionResult(cas, action.weakFingerprint,
+          var lookup = cache.lookupActionResult(cas.inner, action.weakFingerprint,
             action.actionCachePolicy,
             verifyOutputBlobs = not outputsPresentBeforeLookup,
             allowMetadataOnlyHit = config.rebuildMissingOutputsOnCacheHit and
@@ -5312,7 +5418,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               finishStat("repro peer-cache install", installStart)
               if install.ok:
                 let retryStart = statStart()
-                lookup = cache.lookupActionResult(cas, action.weakFingerprint,
+                lookup = cache.lookupActionResult(cas.inner, action.weakFingerprint,
                   action.actionCachePolicy,
                   verifyOutputBlobs = not outputsPresentBeforeLookup,
                   allowMetadataOnlyHit =
@@ -5346,7 +5452,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               runResult.trace(id, "cache-skipped", "missing-output")
             else:
               let restoreStart = statStart()
-              cas.restoreOutputs(lookup.record, action.cwd)
+              cas.materializeActionCacheOutputs(lookup.record, action.cwd)
               fileMetadataCache.clear()
               finishStat("repro cache restore", restoreStart)
               runResult.results[idToIndex.resultIndex(id)].evidence =
@@ -5380,7 +5486,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               runResult.trace(id, "cache-skipped", "missing-output")
             else:
               let restoreStart = statStart()
-              cas.restoreOutputs(lookup.record, action.cwd)
+              cas.materializeActionCacheOutputs(lookup.record, action.cwd)
               fileMetadataCache.clear()
               finishStat("repro cache restore", restoreStart)
               runResult.results[idToIndex.resultIndex(id)].evidence =
@@ -5564,11 +5670,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if action.cacheable and not evidence.disableCacheHits:
               let recordStart = statStart()
               let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
-                config.peerCacheActionPublisher != nil or
-                (config.binaryCachePublisher != nil and
-                  (action.publishToBinaryCache or
-                   config.binaryCacheIntermediateScope))
-              let record = cache.recordActionResult(cas,
+              config.peerCacheActionPublisher != nil or
+              (config.binaryCachePublisher != nil and
+                (action.publishToBinaryCache or
+                 config.binaryCacheIntermediateScope))
+              let record = cache.recordActionResult(cas.inner,
                 action.weakFingerprint,
                 action.actionCachePolicy,
                 action.cacheInputPaths(evidence.evidence),
@@ -5686,7 +5792,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 (config.binaryCachePublisher != nil and
                   (plan.action.publishToBinaryCache or
                    config.binaryCacheIntermediateScope))
-              let record = cache.recordActionResult(cas, plan.action.weakFingerprint,
+              let record = cache.recordActionResult(cas.inner,
+                plan.action.weakFingerprint,
                 plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
                 plan.action.outputs, plan.action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
@@ -6104,7 +6211,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             (config.binaryCachePublisher != nil and
               (action.publishToBinaryCache or
                config.binaryCacheIntermediateScope))
-          let record = cache.recordActionResult(cas, action.weakFingerprint,
+          let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
             action.actionCachePolicy, action.cacheInputPaths(evidence.evidence),
             action.outputs, action.cwd,
             storeOutputBlobs = storeOutputBlobs,

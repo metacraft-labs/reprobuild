@@ -164,6 +164,24 @@ suite "HL-2 — mixed workspace: each record in its own backend only":
       # Metadata branch so the single-project resolver knows the project.
       writeWorkspaceBranch(ws, project = "mix", branch = "main")
 
+      # The team route below names `.repro/manifests` as its git-checkout
+      # backend, so the store has to BE a git checkout. A workspace that never
+      # declares a manifest-backed route is public-only
+      # (Unified-Locking-And-Hooks.md §10, "No implicit team route"); the gate
+      # used to synthesize the store from the bare path, which let this fixture
+      # get away with an unseeded directory.
+      let teamStore = ws / ".repro" / "manifests"
+      createDir(teamStore)
+      discard run(q(gitBin) & " init -b main " & q(teamStore))
+      discard run(q(gitBin) & " -C " & q(teamStore) &
+        " config user.email tester@example.invalid")
+      discard run(q(gitBin) & " -C " & q(teamStore) &
+        " config user.name \"Lock Store Tester\"")
+      writeFile(teamStore / ".gitkeep", "")
+      discard run(q(gitBin) & " -C " & q(teamStore) & " add -A")
+      discard run(q(gitBin) & " -C " & q(teamStore) &
+        " commit -m \"seed lock store\"")
+
       # ---- the personal external-cli DB stub ---------------------------
       let db = scratch / "personal-db"
       createDir(db)

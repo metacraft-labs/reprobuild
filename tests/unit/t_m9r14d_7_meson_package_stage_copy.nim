@@ -28,7 +28,7 @@
 ##      action; provider mode emits exactly one per (package,
 ##      kind, name) triple, idempotent on repeated calls).
 
-import std/[unittest]
+import std/[strutils, unittest]
 
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
@@ -37,6 +37,28 @@ import repro_dsl_stdlib/types/executable
 import repro_dsl_stdlib/types/library
 
 suite "DSL-port M9.R.14d.7 — meson_package stage-copy emission":
+
+  proc optionValues(action: BuildActionDef): seq[string] =
+    for arg in action.call.arguments:
+      if arg.name == "options" and arg.encodedValue.len > 0:
+        return arg.encodedValue.split("\x1f")
+
+  test "meson packages default to the portable library directory":
+    setCurrentOwningPackageOverride("mesonDefaultLibdirTestPkg")
+    try:
+      let pkg = meson_package(srcDir = "./src", configureOptions = @[])
+      check pkg.buildEdge.optionValues() == @["libdir=lib"]
+    finally:
+      clearCurrentOwningPackageOverride()
+
+  test "an explicit meson library directory overrides the default":
+    setCurrentOwningPackageOverride("mesonExplicitLibdirTestPkg")
+    try:
+      let pkg = meson_package(srcDir = "./src",
+        configureOptions = @["libdir=lib64"])
+      check pkg.buildEdge.optionValues() == @["libdir=lib64"]
+    finally:
+      clearCurrentOwningPackageOverride()
 
   test "meson executable slicing returns the legacy Executable shape":
     setCurrentOwningPackageOverride("mesonStageExeTestPkg")

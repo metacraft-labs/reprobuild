@@ -43,3 +43,18 @@ _m9r50_boot_smoke.sh
 Boots the artifact via OVMF UEFI, autologins as the configured user,
 runs `--version` checks on every DE binary, and asserts the system
 reaches `multi-user.target`.
+
+## Boot a development VM
+
+With the `vm-harness` CLI on `PATH`, the recipe exposes a task that selects
+the newest content-addressed QCOW2 output and leaves a transient VM running:
+
+```sh
+cd recipes/reproos-image
+repro run boot-vm
+```
+
+The same task uses Hyper-V on Windows and libvirt/QEMU on Linux. Hyper-V
+requires an elevated shell and `qemu-img`; vm-harness converts the QCOW2 to a
+temporary VHDX before attaching it. Additional vm-harness arguments can be
+forwarded after `--`.

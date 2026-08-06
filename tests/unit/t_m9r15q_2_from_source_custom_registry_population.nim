@@ -41,7 +41,7 @@
 ##
 ## See ``From-Source-DSL-Realignment.milestones.org`` §M9.R.15q.2.1.
 
-import std/[unittest, strutils]
+import std/unittest
 
 import repro_project_dsl
 
@@ -150,18 +150,13 @@ suite "DSL-port M9.R.15q.2.1 — from-source-custom registry population":
   test "synthesizeCustomShellBuildActions emits BuildActionDef rows":
     # The runtime helper translates shell rows into BuildActionDef rows
     # via ``buildAction(...)``. Without an active provider project root
-    # the helper is a no-op (test fixture path). Set the override
-    # directly so the helper sees a non-empty root and emits actions
-    # against ``buildActionRegistry``.
+    # the helper is a no-op (test fixture path). Provider-mode action
+    # shape coverage for this helper lives in
+    # tests/unit/t_m9r83_install_mirror_action_shapes.nim; this
+    # macro-based fixture becomes a provider protocol binary under
+    # -d:reproProviderMode and cannot also run unittest cases.
     resetBuildActionRegistry()
     when defined(reproProviderMode):
-      # In provider mode ``activeProviderProjectRoot`` returns
-      # ``currentProviderProjectRoot`` which the runtime sets from the
-      # request. For this test we don't have a real request so we use
-      # the macro-emitted init-call's body path -- but it's a no-op
-      # here for the same reason. Skip the assertion under provider
-      # mode (the boost / ninja / etc. recipes exercise the real
-      # provider path end-to-end via ``repro build``).
       discard
     else:
       # Outside provider mode ``activeProviderProjectRoot`` returns ""

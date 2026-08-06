@@ -19,12 +19,10 @@
 ## The action cache fingerprint (``BuildAction.weakFingerprint``) is
 ## derived from the action's ``id`` only (see
 ## ``weakFingerprintFromText`` in ``repro_build_engine``). The action
-## id for the typed ``make()`` call comes from
-## ``defaultToolActionId(call)`` which feeds ``callIdentity(call)`` —
-## that includes the package + executable + subcommand + per-argument
-## encoded values. Crucially: ``extraEnv`` rides as the separate
-## ``env`` field on ``BuildActionDef``; it does NOT enter
-## ``callIdentity`` and so does NOT enter the fingerprint.
+## ids for the autotools ``make()`` calls are explicit and scoped by
+## package + buildDir. Crucially: ``extraEnv`` rides as the separate
+## ``env`` field on ``BuildActionDef``; it does NOT enter the explicit
+## id and so does NOT enter the fingerprint.
 ##
 ## This pins the contract:
 ##
@@ -37,8 +35,8 @@
 ##      saturate even cold caches).
 ##   4. The action ids are STABLE across hosts: regardless of how
 ##      many cores are available, the recipe + source produce the
-##      same ``id``. (Implementation: we derive the ids from a
-##      synthetic call that doesn't touch ``MAKEFLAGS``.)
+##      same ``id``. (Implementation: the ids are package/buildDir-
+##      scoped and don't touch ``MAKEFLAGS``.)
 
 import std/[strutils, unittest]
 
@@ -110,9 +108,9 @@ suite "DSL-port M9.R.14c.1 — autotools_package parallel-make wiring":
   test "compile + install action ids are stable across host core counts":
     # The action id derivation must not depend on the host's core
     # count. The actual stability is proved by the choice to inject
-    # parallelism via ``extraEnv`` (which does not enter
-    # ``callIdentity``) rather than via the typed ``jobs`` flag
-    # (which would). Both edges produce nonempty ids and a distinct
+    # parallelism via ``extraEnv`` (which does not enter the explicit
+    # package/buildDir-scoped id) rather than via the typed ``jobs``
+    # flag. Both edges produce nonempty ids and a distinct
     # compile vs install pair (``installEdge`` is the terminal
     # .la-cleanup node, a distinct action from the compile ``make``).
     resetDslPortFetchState()

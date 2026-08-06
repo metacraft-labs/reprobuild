@@ -276,7 +276,7 @@ proc autotools_package*(srcDir: string;
   # M9.R.14b.3: out-of-tree autotools pattern. The previous shape ran
   # ``./src/configure`` from the recipe root, which wrote ``Makefile``
   # directly into the recipe root, NOT into the ``buildDir`` subdir
-  # the downstream ``make -C build`` actions expect. On Linux this
+  # where the downstream make actions execute. On Linux this
   # surfaced as ``make: *** build: No such file or directory.  Stop.``
   # — the ``-C build`` flag pointed at a directory that ``configure``
   # had never created. (Pre-M9.R.14b the issue was hidden because the
@@ -286,28 +286,39 @@ proc autotools_package*(srcDir: string;
   # buildDir, cd into it, run ``../src/configure`` (relative path
   # adjusts srcDir from a buildDir vantage point), so the generated
   # ``Makefile`` lands under ``buildDir/`` exactly where the downstream
-  # ``make -C buildDir`` actions look for it. This mirrors the gcc
+  # make actions run. This mirrors the gcc
   # recipe's ``from-source-custom`` four-shell-action sequence (mkdir
   # / cd / configure / make) but keeps it inline so the higher-level
   # ``autotools_package`` constructor stays a single fire-and-forget
   # call site for recipes.
   #
   # ``srcDir`` is treated as a recipe-root-relative path; from the
-  # buildDir vantage point we prepend ``../`` so e.g. ``./src``
-  # becomes ``../src``. We strip a leading ``./`` from ``srcDir``
-  # to keep the prepend clean.
-  var relSrcDir = srcDir
-  if relSrcDir.startsWith("./"):
-    relSrcDir = relSrcDir[2 .. ^1]
-  elif relSrcDir.startsWith("/"):
-    # Absolute path: leave as-is.
-    discard
-  var relBuildDir = buildDir
-  if relBuildDir.startsWith("./"):
-    relBuildDir = relBuildDir[2 .. ^1]
-  let srcFromBuild =
-    if relSrcDir.len > 0 and relSrcDir[0] == '/': relSrcDir
-    else: "../" & relSrcDir
+  # buildDir vantage point we walk back to the recipe root, then down
+  # into ``srcDir``. A one-level ``build`` dir therefore still yields
+  # ``../src``, while nested scratch dirs such as
+  # ``.repro/build/<pkg>`` yield ``../../../src``.
+  proc recipeRelativeShellPath(value: string): string =
+    result = value.replace("\\", "/")
+    while result.startsWith("./"):
+      result = result[2 .. ^1]
+
+  proc sourcePathFromBuildDir(srcDir, buildDir: string): string =
+    let relSrc = recipeRelativeShellPath(srcDir)
+    if relSrc.len > 0 and relSrc[0] == '/':
+      return relSrc
+    let relBuild = recipeRelativeShellPath(buildDir)
+    var parentWalk = ""
+    if relBuild.len > 0 and relBuild != ".":
+      for part in relBuild.split('/'):
+        if part.len == 0 or part == ".":
+          continue
+        parentWalk.add("../")
+    parentWalk & relSrc
+
+  let relSrcDir = recipeRelativeShellPath(srcDir)
+  let relBuildDir = recipeRelativeShellPath(buildDir)
+  let shellBuildDir = relBuildDir
+  let srcFromBuild = sourcePathFromBuildDir(srcDir, buildDir)
   # M9.R.15a.3 — ``configureScriptName`` defaults to ``configure`` for
   # vanilla autotools; openssl-style projects pass ``"Configure"``
   # (uppercase, Perl-driven). The shape stays out-of-tree.
@@ -350,10 +361,68 @@ proc autotools_package*(srcDir: string;
       "    if [ -d \"$ad\" ]; then aclocal_dirs=\"$ad:$aclocal_dirs\"; fi; " &
       "  fi; " &
       "done; " &
+      "for bin_dir in $(printf '%s' \"$PATH\" | tr ':' '\\n'); do " &
+      "  ad=\"$bin_dir/../share/aclocal\"; " &
+      "  if [ -d \"$ad\" ]; then aclocal_dirs=\"$ad:$aclocal_dirs\"; fi; " &
+      "done; " &
       "for sp in /nix/store/*-pkg-config-*/share/aclocal /nix/store/*-libtool-*/share/aclocal /nix/store/*-gtk-doc-*/share/aclocal /nix/store/*-libgcrypt-*-dev/share/aclocal /nix/store/*-libgpg-error-*-dev/share/aclocal; do " &
       "  if [ -d \"$sp\" ]; then aclocal_dirs=\"$sp:$aclocal_dirs\"; fi; " &
       "done; " &
       "export ACLOCAL_PATH=\"$aclocal_dirs\"; " &
+      "perl_bin=$(which perl 2>/dev/null); " &
+      "if [ -n \"$perl_bin\" ]; then " &
+      "  perl_prefix=$(dirname \"$(dirname \"$perl_bin\")\"); " &
+      "  perl_lib=\"$perl_prefix/lib/perl5\"; " &
+      "  if [ -d \"$perl_lib\" ]; then " &
+      "    export PERL5LIB=\"$perl_lib${PERL5LIB:+:$PERL5LIB}\"; " &
+      "  fi; " &
+      "  autoconf_bin=$(which autoconf 2>/dev/null); " &
+      "  if [ -n \"$autoconf_bin\" ]; then " &
+      "    autoconf_prefix=$(dirname \"$(dirname \"$autoconf_bin\")\"); " &
+      "    autoconf_share=\"$autoconf_prefix/share/autoconf\"; " &
+      "    if [ -d \"$autoconf_share\" ]; then " &
+      "      export autom4te_perllibdir=\"$autoconf_share\"; " &
+      "      export autom4te_buildauxdir=\"$autoconf_share/build-aux\"; " &
+      "      export AC_MACRODIR=\"$autoconf_share\"; " &
+      "      relocated_autom4te_cfg=$(mktemp); " &
+      "      sed \"s|/usr/share/autoconf|$autoconf_share|g\" \"$autoconf_share/autom4te.cfg\" > \"$relocated_autom4te_cfg\"; " &
+      "      export AUTOM4TE_CFG=\"$relocated_autom4te_cfg\"; " &
+      "      export trailer_m4=\"$autoconf_share/autoconf/trailer.m4\"; " &
+      "      export PERL5LIB=\"$autoconf_share${PERL5LIB:+:$PERL5LIB}\"; " &
+      "    fi; " &
+      "  fi; " &
+      "  automake_bin=$(which automake 2>/dev/null); " &
+      "  if [ -n \"$automake_bin\" ]; then " &
+      "    automake_prefix=$(dirname \"$(dirname \"$automake_bin\")\"); " &
+      "    automake_share=$(find \"$automake_prefix/share\" -maxdepth 1 -type d -name 'automake-*' 2>/dev/null | head -n 1); " &
+      "    aclocal_share=$(find \"$automake_prefix/share\" -maxdepth 1 -type d -name 'aclocal-*' 2>/dev/null | head -n 1); " &
+      "    if [ -n \"$automake_share\" ]; then " &
+      "      export AUTOMAKE_LIBDIR=\"$automake_share\"; " &
+      "      export PERL5LIB=\"$automake_share${PERL5LIB:+:$PERL5LIB}\"; " &
+      "    fi; " &
+      "    if [ -n \"$aclocal_share\" ]; then " &
+      "      export ACLOCAL_AUTOMAKE_DIR=\"$aclocal_share\"; " &
+      "      export ACLOCAL_PATH=\"$aclocal_share:$ACLOCAL_PATH\"; " &
+      "    fi; " &
+      "    system_aclocal=\"$automake_prefix/share/aclocal\"; " &
+      "    if [ -d \"$system_aclocal\" ]; then " &
+      "      export ACLOCAL=\"aclocal --system-acdir=$system_aclocal${aclocal_share:+ --automake-acdir=$aclocal_share}\"; " &
+      "    fi; " &
+      "  fi; " &
+      "  perl_tool_dir=$(mktemp -d); " &
+      "  for perl_tool in autoreconf autoconf autoheader autom4te autoscan autoupdate ifnames aclocal automake; do " &
+      "    real_perl_tool=$(which \"$perl_tool\" 2>/dev/null); " &
+      "    if [ -n \"$real_perl_tool\" ]; then " &
+      "      printf '#!/bin/sh\\nexec \"%s\" \"%s\" \"$@\"\\n' \"$perl_bin\" \"$real_perl_tool\" > \"$perl_tool_dir/$perl_tool\"; " &
+      "      chmod +x \"$perl_tool_dir/$perl_tool\"; " &
+      "    fi; " &
+      "  done; " &
+      "  export PATH=\"$perl_tool_dir:$PATH\"; " &
+      "  export AUTOCONF=autoconf; " &
+      "  export AUTOHEADER=autoheader; " &
+      "  export AUTOM4TE=autom4te; " &
+      "  export AUTOMAKE=automake; " &
+      "fi; " &
       "if ! command -v gtkdocize >/dev/null 2>&1; then " &
       "  mkdir -p gtkdoc && [ -f gtkdoc/gtk-doc.make ] || echo 'EXTRA_DIST =' > gtkdoc/gtk-doc.make; " &
       "  stubdir=$(mktemp -d); " &
@@ -368,8 +437,8 @@ proc autotools_package*(srcDir: string;
   # (libcap, linux-kernel, busybox etc.) that ship NO ``configure``
   # script but DO use ``make`` against a Makefile in the source tree
   # itself. The configure edge becomes a stamp-only ``mkdir -p buildDir
-  ## && cp -r src/* buildDir/`` so the downstream ``make -C buildDir``
-  ## sees the source-tree Makefile in-place; configureOptions are then
+  ## && cp -r src/* buildDir/`` so the downstream make actions use the
+  ## source-tree Makefile in-place; configureOptions are then
   ## passed as ``make`` command-line ``VAR=VALUE`` overrides via the
   ## downstream build/install action's ``vars`` slot (recipe sets them
   ## via ``configureOptions`` which we forward).
@@ -401,17 +470,21 @@ proc autotools_package*(srcDir: string;
     "export CC_FOR_BUILD=\"${CC_FOR_BUILD:-gcc}\"; " &
     "export CFLAGS_FOR_BUILD=\"${CFLAGS_FOR_BUILD:-${CFLAGS:-}}\"; " &
     "export CPPFLAGS_FOR_BUILD=\"${CPPFLAGS_FOR_BUILD:-${CPPFLAGS:-}}\"; " &
-    "export LDFLAGS_FOR_BUILD=\"${LDFLAGS_FOR_BUILD:-${LDFLAGS:-}}\"; "
+    "export LDFLAGS_FOR_BUILD=\"${LDFLAGS_FOR_BUILD:-${LDFLAGS:-}}\"; " &
+    "export BUILD_CC=\"${BUILD_CC:-${CC_FOR_BUILD}}\"; " &
+    "export BUILD_CFLAGS=\"${BUILD_CFLAGS:-${CFLAGS_FOR_BUILD}}\"; " &
+    "export BUILD_CPPFLAGS=\"${BUILD_CPPFLAGS:-${CPPFLAGS_FOR_BUILD}}\"; " &
+    "export BUILD_LDFLAGS=\"${BUILD_LDFLAGS:-${LDFLAGS_FOR_BUILD}}\"; "
   let configureScript =
     if skipConfigure:
       patchPrefix & bootstrapPrefix &
-      cleanBuildPrefix & "mkdir -p " & buildDir & " && cp -aL " & srcDir &
-        "/. " & buildDir & "/"
+      cleanBuildPrefix & "mkdir -p " & shellBuildDir & " && cp -aL " &
+        relSrcDir & "/. " & shellBuildDir & "/"
     else:
       patchPrefix & bootstrapPrefix &
-      cleanBuildPrefix & "mkdir -p " & buildDir & " && cd " & buildDir & " && " &
-      nativeBuildEnvPrefix & srcFromBuild & "/" & configureScriptName & " " &
-      configureArgs.join(" ")
+      cleanBuildPrefix & "mkdir -p " & shellBuildDir & " && cd " &
+        shellBuildDir & " && " & nativeBuildEnvPrefix & srcFromBuild & "/" &
+        configureScriptName & " " & configureArgs.join(" ")
   let configureArgv = @["sh", "-c", configureScript]
   let call = inlineExecCall(configureArgv)
   let actionId = defaultToolActionId(call)
@@ -482,7 +555,7 @@ proc autotools_package*(srcDir: string;
   # build action declares ``buildDir`` as an input, so
   # ``inferDeclaredActionDeps`` (M5 / Recipe-Val M8) auto-wires the
   # edge via the output-producer table. The make typed CLI doesn't
-  # carry a ``-C buildDir`` output slot so we have to wire it
+  # carry a buildDir output slot so we have to wire it
   # explicitly via the ``after:`` parameter the typed-tool macro
   # generator emits on every typed-tool call site.
   #
@@ -497,17 +570,16 @@ proc autotools_package*(srcDir: string;
   # **Determinism guard.** The action's cache fingerprint
   # (``BuildAction.weakFingerprint``) is derived from the action ``id``
   # via ``weakFingerprintFromText(id)`` in ``repro_build_engine``. The
-  # ``id`` here is derived from ``defaultToolActionId(call)``, whose
-  # input is ``callIdentity(call)`` — the package name + executable
-  # name + subcommand + per-argument encoded values. Neither
-  # ``extraEnv`` nor the spawned-process ``BuildAction.env`` enters
-  # the fingerprint. So passing ``MAKEFLAGS=-j N`` via ``extraEnv``
-  # keeps the cache key BYTE-IDENTICAL across hosts with different
-  # core counts. Same recipe + same source → same cache key.
+  # autotools make ids are explicit and scoped by package + buildDir.
+  # Neither ``extraEnv`` nor the spawned-process ``BuildAction.env``
+  # enters the fingerprint. So passing ``MAKEFLAGS=-j N`` via
+  # ``extraEnv`` keeps the cache key BYTE-IDENTICAL across hosts with
+  # different core counts. Same package + buildDir + source -> same
+  # cache key.
   #
   # We deliberately do NOT pass ``-j N`` via the typed ``jobs`` flag
-  # because that would land in ``callIdentity`` and the action id
-  # would vary with N — defeating determinism.
+  # because that would put host-local parallelism into the typed CLI
+  # surface even though the explicit action id ignores it.
   let jobs = max(1, min(countProcessors(), 8))
   let makeflags = "-j" & $jobs
   # M9.R.15q.11.4 — when ``skipConfigure`` is true, ``configureOptions``
@@ -522,9 +594,21 @@ proc autotools_package*(srcDir: string;
   var buildEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
   for envVar in extraEnv:
     buildEnv.add(envVar)
-  let buildEdge = make(workDir = buildDir, vars = buildVars, targets = @[],
+  let buildActionId = "autotools-make-build-" &
+    sanitizedPackageName(pkgName) & "-" & sanitizedPackageName(buildDir)
+  var buildEdge = make(workDir = "", vars = buildVars, targets = @[],
+    actionId = buildActionId,
     after = @[configureEdge],
+    extraInputs = @[m9r79ConfBuildDirAbs],
     extraEnv = buildEnv)
+  # M9.R.84 — run make from the configured build directory instead of
+  # running from the recipe root with ``make -C <buildDir>``. GNU make
+  # and recursive libtool children then report relative writes such as
+  # ``src/types.lo`` relative to the build tree, matching where libffi's
+  # generated Makefile actually writes them.
+  buildEdge.cwdKind = acwdBuild
+  buildEdge.cwdCustomPath = buildDir
+  setRegisteredActionCwd(buildEdge.id, acwdBuild, buildDir)
   # M9.R.79.3 — compile continues writing to buildDir; source stays
   # read-only.  Sequential edge via ``after = @[configureEdge]`` — R7
   # dep-chain relaxation permits the shared write root.
@@ -561,12 +645,10 @@ proc autotools_package*(srcDir: string;
   # fix is to pass ``DESTDIR=...`` on the make command line — GNU
   # make's command-line overrides ALWAYS win over Makefile
   # assignments, regardless of any ``-e`` switch. Adding it via
-  # ``vars`` (positional args) routes through the typed CLI and
-  # therefore enters ``callIdentity`` — but since the install step
-  # already used host-specific absolute paths in the typed
-  # ``workDir`` slot pre-M9.R.15a, the cache fingerprint was already
-  # host-bound. So spelling DESTDIR on cmdline doesn't make the cache
-  # any less portable than it already was.
+  # ``vars`` (positional args) routes through the typed CLI. M9.R.84
+  # gives these make edges explicit package/buildDir-scoped ids and
+  # moves the execution directory into cwd metadata, so spelling
+  # DESTDIR on the command line no longer affects the action id.
   let providerProjectRoot = activeProviderProjectRoot()
   var installVars: seq[string] = @[]
   var installEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
@@ -594,12 +676,19 @@ proc autotools_package*(srcDir: string;
   # assignments which beat any Makefile-level default.
   for v in installMakeVars:
     installVars.add(v)
-  let installEdge = make(
-    workDir = buildDir,
+  let installActionId = "autotools-make-install-" &
+    sanitizedPackageName(pkgName) & "-" & sanitizedPackageName(buildDir)
+  var installEdge = make(
+    workDir = "",
     targets = @[installTarget],
     vars = installVars,
+    actionId = installActionId,
     after = @[configureEdge, buildEdge],
+    extraInputs = @[m9r79ConfBuildDirAbs],
     extraEnv = installEnv)
+  installEdge.cwdKind = acwdBuild
+  installEdge.cwdCustomPath = buildDir
+  setRegisteredActionCwd(installEdge.id, acwdBuild, buildDir)
   # M9.R.79.3 — install writes the DESTDIR-staged tree at
   # ``installDestdir``; source stays read-only.  The install-mirror
   # emit stage that runs downstream (see

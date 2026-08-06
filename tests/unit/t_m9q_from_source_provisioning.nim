@@ -167,3 +167,41 @@ suite "M9.Q from-source provisioning resolver":
     let profile = resolveFromSourceTool(useDef)
     check profile.resolvedExecutablePath == absolutePath(artefact)
     check fromSourceRecipeRoot() == scratch
+
+  test "test_m9q_federated_sibling_catalog_is_discovered":
+    let scratch = createTempDir("repro-m9q-federated-", "")
+    defer: removeDir(scratch)
+    let productRoot = scratch / "reproos"
+    let sourceRoot = scratch / "reprobuild-packages" / "packages" / "source"
+    createDir(productRoot)
+    createDir(sourceRoot)
+
+    let savedCwd = getCurrentDir()
+    let savedRoot = getEnv(FromSourceRootEnvVar)
+    delEnv(FromSourceRootEnvVar)
+    setCurrentDir(productRoot)
+    defer:
+      setCurrentDir(savedCwd)
+      if savedRoot.len > 0: putEnv(FromSourceRootEnvVar, savedRoot)
+      else: delEnv(FromSourceRootEnvVar)
+
+    check fromSourceRecipeRoot() == sourceRoot
+
+  test "test_m9q_product_app_composes_with_federated_catalog":
+    let scratch = createTempDir("repro-m9q-federated-app-", "")
+    defer: removeDir(scratch)
+    let productRoot = scratch / "reproos"
+    let appRoot = productRoot / "apps" / "reproos-installer"
+    let sourceRoot = scratch / "reprobuild-packages" / "packages" / "source"
+    createDir(appRoot)
+    createDir(sourceRoot)
+    writeFile(appRoot / "repro.nim", "discard\n")
+
+    let savedCwd = getCurrentDir()
+    setCurrentDir(productRoot)
+    defer: setCurrentDir(savedCwd)
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("reproos-installer"), sourceRoot)
+    check outcome.kind == rrNeedsBuild
+    check outcome.recipeDir == appRoot

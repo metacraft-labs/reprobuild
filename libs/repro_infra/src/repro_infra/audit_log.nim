@@ -37,6 +37,27 @@
 ##   6. preDigestHex     length-prefixed UTF-8
 ##   7. postDigestHex    length-prefixed UTF-8
 ##   8. restartNeeded    u8 bool
+##
+## Schema version 2 appends two fields AFTER `restartNeeded`:
+##
+##   9. recordClass      length-prefixed UTF-8
+##  10. fingerprintHex   length-prefixed UTF-8
+##
+## `recordClass` is the load-bearing discriminator between the TWO
+## populations an apply converges (see `AuditClass*` below). Before v2
+## the log carried only the live-state population, so the build-action
+## half of an apply — which `repro infra apply` counts in its
+## applied / no-op summary — was invisible to the audit trail: a
+## generation's log accounted for a strict SUBSET of the resources the
+## summary counted, and a benign build-fingerprint change could not be
+## told apart from a live-state convergence regression.
+##
+## Backward compatibility: the writer always emits v2, the reader
+## accepts v1 AND v2. A v1 record decodes with `recordClass` defaulted
+## to `AuditClassLiveState` (correct — v1 could only describe live
+## state) and an empty `fingerprintHex`, so previously-written
+## generations under `<state-dir>/generations/` stay readable by
+## `repro system audit` and by the planner's drift baseline.
 
 import std/[os]
 
@@ -47,9 +68,26 @@ import ./errors
 
 const
   AuditMagic* = "RBSL"
-  AuditSchemaVersion*: uint16 = 1
+  AuditSchemaVersion*: uint16 = 2
+    ## The version the writer emits. See `AuditMinReadableVersion`.
+  AuditMinReadableVersion*: uint16 = 1
+    ## The oldest version the reader accepts. v1 logs written by an
+    ## earlier `repro infra apply` remain readable.
   AuditHeaderSize = 4 + 2 + 4
   AuditTrailerSize = 32
+
+  AuditClassLiveState* = "live-state"
+    ## A record describing a live-state system resource: the thing the
+    ## planner observes, the driver converges, and whose pre/post
+    ## observed-state digests are meaningful.
+  AuditClassBuildAction* = "build-action"
+    ## A record describing a build-action EDGE. An edge is a cache
+    ## decision (hit / substitute / local build), NOT a state
+    ## transition, so it carries NO pre/post observed-state digest —
+    ## those fields are empty by construction and must not be read as
+    ## "the digest did not change". Its diagnosable identity is
+    ## `resourceAddress` (the build-graph action id) plus
+    ## `fingerprintHex`.
 
 type
   AuditRecord* = object
@@ -59,8 +97,36 @@ type
     outcome*: string                 ## "applied" | "no-op" | "drift" | ...
     diagnostic*: string
     preDigestHex*: string
+      ## Live-state only. ALWAYS empty for `AuditClassBuildAction` —
+      ## a build edge has no observed pre-state, and synthesising one
+      ## would blur the two populations this field set exists to keep
+      ## apart.
     postDigestHex*: string
+      ## Live-state only; see `preDigestHex`.
     restartNeeded*: bool
+    recordClass*: string
+      ## `AuditClassLiveState` | `AuditClassBuildAction`. The explicit
+      ## discriminator between the two populations an apply converges.
+      ## Empty on decode ONLY if a future version writes it empty; a
+      ## v1 record decodes as `AuditClassLiveState`.
+    fingerprintHex*: string
+      ## `AuditClassBuildAction` only: the edge's cache fingerprint
+      ## (hex). Empty for live-state records. This is what makes a
+      ## PERMANENTLY-missing edge diagnosable — comparing the value
+      ## across consecutive generations' logs shows whether the edge
+      ## re-keys every apply (fingerprint churn) or keys stably and
+      ## misses for another reason.
+
+proc isBuildActionRecord*(rec: AuditRecord): bool =
+  ## True for the build-action-edge population. Readers that reason
+  ## about OBSERVED SYSTEM STATE (drift baselines, pre/post digest
+  ## comparisons) must exclude these — an edge has no observed state.
+  rec.recordClass == AuditClassBuildAction
+
+proc isLiveStateRecord*(rec: AuditRecord): bool =
+  ## True for the live-state population. A v1 record (no class on the
+  ## wire) is live-state, so the default answer is the safe one.
+  not rec.isBuildActionRecord()
 
 # ---------------------------------------------------------------------------
 # Single-record encode / decode.
@@ -76,6 +142,12 @@ proc encodeAuditRecord*(rec: AuditRecord): seq[byte] =
   body.writeString(rec.preDigestHex)
   body.writeString(rec.postDigestHex)
   body.add(if rec.restartNeeded: 1'u8 else: 0'u8)
+  # v2 tail. An empty `recordClass` normalises to live-state so a
+  # caller that builds an AuditRecord without naming the class keeps
+  # the pre-v2 meaning instead of writing an unclassified record.
+  body.writeString(
+    if rec.recordClass.len > 0: rec.recordClass else: AuditClassLiveState)
+  body.writeString(rec.fingerprintHex)
   result = newSeqOfCap[byte](AuditHeaderSize + body.len + AuditTrailerSize)
   for ch in AuditMagic:
     result.add(byte(ord(ch)))
@@ -101,7 +173,7 @@ proc decodeAuditRecordAt*(bytes: openArray[byte]; start: int):
         "expected '" & AuditMagic & "' at offset " & $start)
   var pos = start + 4
   let version = readU16Le(bytes, pos)
-  if version != AuditSchemaVersion:
+  if version < AuditMinReadableVersion or version > AuditSchemaVersion:
     raiseAuditLogCorrupt("schemaVersion",
       "unsupported RBSL version " & $version)
   let bodyLen = int(readU32Le(bytes, pos))
@@ -129,6 +201,14 @@ proc decodeAuditRecordAt*(bytes: openArray[byte]; start: int):
     raiseAuditLogCorrupt("restartNeeded", "truncated record")
   rec.restartNeeded = bytes[pos] != 0
   inc pos
+  if version >= 2:
+    rec.recordClass = readString(bytes, pos)
+    rec.fingerprintHex = readString(bytes, pos)
+  else:
+    # A v1 record predates the build-action half of the audit trail;
+    # every v1 record describes live state.
+    rec.recordClass = AuditClassLiveState
+    rec.fingerprintHex = ""
   if pos != bodyEnd:
     raiseAuditLogCorrupt("body",
       "trailing bytes after the audited field set in the record at " &
@@ -191,7 +271,7 @@ proc readAuditLog*(logPath: string): AuditReadResult =
     # present before attempting a strict decode.
     var peek = pos + 4
     let version = readU16Le(bytes, peek)
-    if version != AuditSchemaVersion:
+    if version < AuditMinReadableVersion or version > AuditSchemaVersion:
       raiseAuditLogCorrupt("schemaVersion",
         "unsupported RBSL version " & $version & " at offset " & $pos)
     let bodyLen = int(readU32Le(bytes, peek))

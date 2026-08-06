@@ -408,6 +408,37 @@ suite "DSL-port M9.R.14f.1 — transitive libDirs union":
     check profile.pkgConfigSearchList.len >= 1
     check profile.cpathList.len >= 1
 
+  test "source provider inherits its recorded bootstrap profile":
+    let scratch = createTempDir("repro-m9r14f-1-bootstrap-", "")
+    defer: removeDir(scratch)
+
+    writeRecipeManifest(scratch, "gcc")
+    discard writeInstallMirrorExecutable(scratch, "gcc", "gcc")
+    writeSyntheticInterface(scratch, "gcc", deps = @[])
+
+    let bootstrapRoot = scratch / "bootstrap-binutils"
+    let bootstrapBin = bootstrapRoot / "bin"
+    let bootstrapLib = bootstrapRoot / "lib"
+    createDir(bootstrapBin)
+    createDir(bootstrapLib)
+    let identity = PathOnlyBuildIdentity(
+      projectName: "gccSource",
+      profiles: @[PathOnlyToolProfile(
+        installMethod: "nix",
+        packageSelector: "binutils",
+        realizedStorePaths: @[bootstrapRoot],
+        pathSearchList: @[bootstrapBin],
+        libraryPathList: @[bootstrapLib])])
+    let identityPath = scratch / "gcc" / ".repro" / "build" / "repro" /
+      "from-source-tool-identities.rbtp"
+    writePathOnlyBuildIdentity(identityPath, identity)
+
+    var profile = PathOnlyToolProfile(installMethod: "from-source")
+    populateFromSourceSearchPaths(profile, scratch / "gcc", scratch)
+    check absolutePath(bootstrapRoot) in profile.realizedStorePaths
+    check absolutePath(bootstrapBin) in profile.pathSearchList
+    check absolutePath(bootstrapLib) in profile.libraryPathList
+
   test "no_interface_artifact_falls_back_gracefully":
     # When the dep has NOT been built yet (no project-interface.rbsz),
     # the walk treats it as a leaf (returns its own install tree only).

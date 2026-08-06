@@ -206,6 +206,24 @@ proc setupFixture(gitBin, slug: string): M11Fixture =
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-c.toml", libCFragmentToml)
+  # This suite asserts a manifest lock RECORD exists, which only happens in a
+  # workspace that declares a manifest-backed route (Unified-Locking-And-Hooks.md
+  # §10, "No implicit team route": a workspace that never declares one is
+  # public-only and writes only `repro.lock`). Make `.repro/manifests` a real git
+  # checkout so the route is DECLARED rather than inferred from a path — the gate
+  # previously synthesized the store unconditionally, handing this fixture a lock
+  # record it had never asked for.
+  let lockStore = workspaceRoot / ".repro" / "manifests"
+  createDir(lockStore)
+  discard requireGit(q(gitBin) & " init -b main " & q(lockStore))
+  discard requireGit(q(gitBin) & " -C " & q(lockStore) &
+    " config user.email tester@example.invalid")
+  discard requireGit(q(gitBin) & " -C " & q(lockStore) &
+    " config user.name \"Lock Store Tester\"")
+  writeFile(lockStore / ".gitkeep", "")
+  discard requireGit(q(gitBin) & " -C " & q(lockStore) & " add -A")
+  discard requireGit(q(gitBin) & " -C " & q(lockStore) &
+    " commit -m \"seed lock store\"")
   result.workspaceRoot = workspaceRoot
 
 proc cloneAll(gitBin: string; fx: M11Fixture) =

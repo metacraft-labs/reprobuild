@@ -80,7 +80,7 @@ package cryptsetupSource:
         "--enable-internal-argon2",
       ]
       let patches = @[
-        "export gettext_datadir=/opt/repro/reprobuild/recipes/packages/source/gettext/.repro/output/install/usr/share/gettext",
+        "export gettext_datadir=\"${REPROBUILD_RECIPE_ROOT:-$(dirname \"$PWD\")}/gettext/.repro/output/install/usr/share/gettext\"",
         "grep -qF 'AM_CPPFLAGS += $(JSON_C_CFLAGS)' src/Makefile.am || sed -i '/EXTERNAL_LUKS2_TOKENS_PATH/a AM_CPPFLAGS += $(JSON_C_CFLAGS)' src/Makefile.am",
       ]
       # These administrative executables install under usr/sbin. The shared

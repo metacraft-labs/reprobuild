@@ -115,13 +115,23 @@ jobs:
       # Build all release applications and monitor shims using repro.nim/repro.lock.
       # The build inherits REPRO_BINARY_CACHE_* from $GITHUB_ENV (set by the step
       # above) so reprobuild's engine publisher signs and POSTs the outputs.
+      # `.#release` (B5) replaced `.#reprobuild.build_apps`. That wrapper ran the
+      # whole build inside ONE shell() action, which takes the automatic-monitor
+      # policy, so every nim compile and clang link executed as a child under the
+      # io-mon shim — where, on macOS, children die producing no output. The
+      # `release` collection is per-artifact `nim.c` / `fs.copyFile` edges, which
+      # are depfile-policied and unmonitored, and it covers both `build/bin` and
+      # the `build/lib` libraries the tarball packages.
+      #
+      # `just bootstrap` still runs scripts/build_apps.sh directly — unmonitored,
+      # and the only way to get an engine binary in the first place.
       - name: Bootstrap and Build (POSIX)
         if: matrix.os-name != 'windows'
         shell: bash
         run: |
           set -euo pipefail
           dev-exec just bootstrap
-          dev-exec ./build/bin/repro build --tool-provisioning=path --daemon=off --no-runquota .#reprobuild.build_apps
+          dev-exec ./build/bin/repro build --tool-provisioning=path --daemon=off --no-runquota .#release
 
       - name: Bootstrap and Build (Windows)
         if: matrix.os-name == 'windows'
@@ -177,7 +187,7 @@ jobs:
             throw "libzstd.dll not found on system; cannot produce a self-contained release archive"
           }
 
-          .\build\bin\repro.exe build --tool-provisioning=path --daemon=off --no-runquota .#reprobuild.build_apps
+          .\build\bin\repro.exe build --tool-provisioning=path --daemon=off --no-runquota .#release
 
 
       # Package the artifacts preserving the bin/ and lib/ structures

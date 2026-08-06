@@ -119,6 +119,7 @@ type
 
   InterfaceNixProvisioning* = object
     packageName*: string
+    contributor*: string
     selector*: string
     executablePath*: string
     expressionFile*: string
@@ -131,6 +132,7 @@ type
 
   InterfaceTarballProvisioning* = object
     packageName*: string
+    contributor*: string
     url*: string
     mirrors*: seq[string]
     sha256*: string
@@ -145,6 +147,7 @@ type
 
   InterfaceScoopProvisioning* = object
     packageName*: string
+    contributor*: string
     bucket*: string
     app*: string
     version*: string
@@ -167,6 +170,16 @@ type
     scoopProvisioning*: seq[InterfaceScoopProvisioning]
     location*: SourceLocation
 
+  InterfaceProvisioningContribution* = object
+    targetPackage*: string
+    targetInterfaceFingerprint*: string
+    contributor*: string
+    developInterface*: bool
+    nixProvisioning*: seq[InterfaceNixProvisioning]
+    tarballProvisioning*: seq[InterfaceTarballProvisioning]
+    scoopProvisioning*: seq[InterfaceScoopProvisioning]
+    location*: SourceLocation
+
   ProjectInterface* = object
     projectName*: string
     packageName*: string
@@ -179,6 +192,7 @@ type
       ## declarations. Encoded in the v12 codec AFTER ``publicLibraries``
       ## and BEFORE ``toolUses``; v<12 readers treat it as empty.
     toolUses*: seq[InterfaceToolUse]
+    provisioningContributions*: seq[InterfaceProvisioningContribution]
     publicSignatureDependencies*: seq[string]
     location*: SourceLocation
     standardBuildEligible*: bool
@@ -318,8 +332,14 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 12'u16
-    ## v12 (current): RP4 (Provider-Runtime-Protocol-v1 §5) adds
+  EnvelopeVersion = 13'u16
+    ## v13 (current): adds fingerprint-bound provisioning contributions and
+    ##                contributor identity on Nix/tarball/Scoop records. The
+    ##                contribution block follows ``toolUses``. Provisioning
+    ##                payloads remain serialized but are omitted from the
+    ##                target project's semantic fingerprint, so realization
+    ##                amendments do not masquerade as public API changes.
+    ## v12: RP4 (Provider-Runtime-Protocol-v1 §5) adds
     ##                ``ProjectInterface.publicResources`` — resource
     ##                types lifted from ``resourceType`` declarations.
     ##                Encoded as a ``u32`` count + per-entry
@@ -652,8 +672,11 @@ proc readResource(bytes: openArray[byte]; pos: var int): InterfaceResource =
 
 proc writeNixProvisioning(outp: var seq[byte];
                           provisioning: InterfaceNixProvisioning;
+                          version = EnvelopeVersion;
                           forFingerprint = false) =
   outp.writeString(provisioning.packageName)
+  if version >= 13'u16:
+    outp.writeString(provisioning.contributor)
   outp.writeString(provisioning.selector)
   outp.writeString(provisioning.executablePath)
   outp.writeString(provisioning.expressionFile)
@@ -667,6 +690,8 @@ proc writeNixProvisioning(outp: var seq[byte];
 proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
                          version: uint16): InterfaceNixProvisioning =
   result.packageName = readString(bytes, pos)
+  if version >= 13'u16:
+    result.contributor = readString(bytes, pos)
   result.selector = readString(bytes, pos)
   result.executablePath = readString(bytes, pos)
   if version >= 3'u16:
@@ -681,8 +706,11 @@ proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
 
 proc writeTarballProvisioning(outp: var seq[byte];
                               provisioning: InterfaceTarballProvisioning;
+                              version = EnvelopeVersion;
                               forFingerprint = false) =
   outp.writeString(provisioning.packageName)
+  if version >= 13'u16:
+    outp.writeString(provisioning.contributor)
   outp.writeString(provisioning.url)
   outp.writeStringSeq(provisioning.mirrors)
   outp.writeString(provisioning.sha256)
@@ -698,6 +726,8 @@ proc writeTarballProvisioning(outp: var seq[byte];
 proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
                              version: uint16): InterfaceTarballProvisioning =
   result.packageName = readString(bytes, pos)
+  if version >= 13'u16:
+    result.contributor = readString(bytes, pos)
   result.url = readString(bytes, pos)
   result.mirrors = readStringSeq(bytes, pos)
   result.sha256 = readString(bytes, pos)
@@ -716,8 +746,11 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
 
 proc writeScoopProvisioning(outp: var seq[byte];
                             provisioning: InterfaceScoopProvisioning;
+                            version = EnvelopeVersion;
                             forFingerprint = false) =
   outp.writeString(provisioning.packageName)
+  if version >= 13'u16:
+    outp.writeString(provisioning.contributor)
   outp.writeString(provisioning.bucket)
   outp.writeString(provisioning.app)
   outp.writeString(provisioning.version)
@@ -730,9 +763,12 @@ proc writeScoopProvisioning(outp: var seq[byte];
   outp.writeString(provisioning.lockIdentity)
   outp.writeLocation(provisioning.location, forFingerprint)
 
-proc readScoopProvisioning(bytes: openArray[byte]; pos: var int):
+proc readScoopProvisioning(bytes: openArray[byte]; pos: var int;
+                           version: uint16):
     InterfaceScoopProvisioning =
   result.packageName = readString(bytes, pos)
+  if version >= 13'u16:
+    result.contributor = readString(bytes, pos)
   result.bucket = readString(bytes, pos)
   result.app = readString(bytes, pos)
   result.version = readString(bytes, pos)
@@ -746,20 +782,28 @@ proc readScoopProvisioning(bytes: openArray[byte]; pos: var int):
   result.location = readLocation(bytes, pos)
 
 proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
+                  version = EnvelopeVersion;
                   forFingerprint = false) =
   outp.writeString(useDef.rawConstraint)
   outp.writeString(useDef.packageSelector)
   outp.writeString(useDef.executableName)
   outp.writeStringSeq(useDef.policyPath)
-  outp.writeU32Le(uint32(useDef.nixProvisioning.len))
-  for provisioning in useDef.nixProvisioning:
-    outp.writeNixProvisioning(provisioning, forFingerprint)
-  outp.writeU32Le(uint32(useDef.tarballProvisioning.len))
-  for provisioning in useDef.tarballProvisioning:
-    outp.writeTarballProvisioning(provisioning, forFingerprint)
-  outp.writeU32Le(uint32(useDef.scoopProvisioning.len))
-  for provisioning in useDef.scoopProvisioning:
-    outp.writeScoopProvisioning(provisioning, forFingerprint)
+  let omitRealizations = forFingerprint and version >= 13'u16
+  outp.writeU32Le(uint32(if omitRealizations: 0 else:
+    useDef.nixProvisioning.len))
+  if not omitRealizations:
+    for provisioning in useDef.nixProvisioning:
+      outp.writeNixProvisioning(provisioning, version, forFingerprint)
+  outp.writeU32Le(uint32(if omitRealizations: 0 else:
+    useDef.tarballProvisioning.len))
+  if not omitRealizations:
+    for provisioning in useDef.tarballProvisioning:
+      outp.writeTarballProvisioning(provisioning, version, forFingerprint)
+  outp.writeU32Le(uint32(if omitRealizations: 0 else:
+    useDef.scoopProvisioning.len))
+  if not omitRealizations:
+    for provisioning in useDef.scoopProvisioning:
+      outp.writeScoopProvisioning(provisioning, version, forFingerprint)
   outp.writeLocation(useDef.location, forFingerprint)
 
 proc readToolUse(bytes: openArray[byte]; pos: var int;
@@ -785,8 +829,49 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
     let scoopCount = int(readU32Le(bytes, pos))
     result.scoopProvisioning = newSeq[InterfaceScoopProvisioning](scoopCount)
     for i in 0 ..< scoopCount:
-      result.scoopProvisioning[i] = readScoopProvisioning(bytes, pos)
+      result.scoopProvisioning[i] = readScoopProvisioning(bytes, pos, version)
   result.location = readLocation(bytes, pos)
+
+proc writeProvisioningContribution(outp: var seq[byte];
+    contribution: InterfaceProvisioningContribution;
+    version = EnvelopeVersion; forFingerprint = false) =
+  outp.writeString(contribution.targetPackage)
+  outp.writeString(contribution.targetInterfaceFingerprint)
+  outp.writeString(contribution.contributor)
+  outp.writeByte(byte(ord(contribution.developInterface)))
+  outp.writeLocation(contribution.location, forFingerprint)
+  outp.writeU32Le(uint32(contribution.nixProvisioning.len))
+  for provisioning in contribution.nixProvisioning:
+    outp.writeNixProvisioning(provisioning, version, forFingerprint)
+  outp.writeU32Le(uint32(contribution.tarballProvisioning.len))
+  for provisioning in contribution.tarballProvisioning:
+    outp.writeTarballProvisioning(provisioning, version, forFingerprint)
+  outp.writeU32Le(uint32(contribution.scoopProvisioning.len))
+  for provisioning in contribution.scoopProvisioning:
+    outp.writeScoopProvisioning(provisioning, version, forFingerprint)
+
+proc readProvisioningContribution(bytes: openArray[byte]; pos: var int;
+    version: uint16): InterfaceProvisioningContribution =
+  result.targetPackage = readString(bytes, pos)
+  result.targetInterfaceFingerprint = readString(bytes, pos)
+  result.contributor = readString(bytes, pos)
+  result.developInterface = readByte(bytes, pos) != 0
+  result.location = readLocation(bytes, pos)
+  let nixCount = int(readU32Le(bytes, pos))
+  result.nixProvisioning = newSeq[InterfaceNixProvisioning](nixCount)
+  for i in 0 ..< nixCount:
+    result.nixProvisioning[i] = readNixProvisioning(bytes, pos, version)
+  let tarballCount = int(readU32Le(bytes, pos))
+  result.tarballProvisioning =
+    newSeq[InterfaceTarballProvisioning](tarballCount)
+  for i in 0 ..< tarballCount:
+    result.tarballProvisioning[i] =
+      readTarballProvisioning(bytes, pos, version)
+  let scoopCount = int(readU32Le(bytes, pos))
+  result.scoopProvisioning = newSeq[InterfaceScoopProvisioning](scoopCount)
+  for i in 0 ..< scoopCount:
+    result.scoopProvisioning[i] =
+      readScoopProvisioning(bytes, pos, version)
 
 proc encodeInterfacePayload*(value: ProjectInterface;
                              version = EnvelopeVersion;
@@ -809,7 +894,8 @@ proc encodeInterfacePayload*(value: ProjectInterface;
   ## fingerprints match what ``interfaceFingerprint`` recomputes.
   result.writeString(value.projectName)
   result.writeString(value.packageName)
-  result.writeString(value.defaultToolProvisioning)
+  result.writeString(if forFingerprint and version >= 13'u16: "" else:
+    value.defaultToolProvisioning)
   result.writeStringSeq(value.publicSignatureDependencies)
   result.writeLocation(value.location, forFingerprint)
   result.writeU32Le(uint32(value.publicExecutables.len))
@@ -836,7 +922,12 @@ proc encodeInterfacePayload*(value: ProjectInterface;
       result.writeResource(res, forFingerprint)
   result.writeU32Le(uint32(value.toolUses.len))
   for useDef in value.toolUses:
-    result.writeToolUse(useDef, forFingerprint)
+    result.writeToolUse(useDef, version, forFingerprint)
+  if version >= 13'u16:
+    result.writeU32Le(uint32(value.provisioningContributions.len))
+    for contribution in value.provisioningContributions:
+      result.writeProvisioningContribution(contribution, version,
+        forFingerprint)
 
 proc decodeInterfacePayload*(bytes: openArray[byte];
                              version = EnvelopeVersion): ProjectInterface =
@@ -869,6 +960,13 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
   result.toolUses = newSeq[InterfaceToolUse](useCount)
   for i in 0 ..< useCount:
     result.toolUses[i] = readToolUse(bytes, pos, version)
+  if version >= 13'u16:
+    let contributionCount = int(readU32Le(bytes, pos))
+    result.provisioningContributions =
+      newSeq[InterfaceProvisioningContribution](contributionCount)
+    for i in 0 ..< contributionCount:
+      result.provisioningContributions[i] =
+        readProvisioningContribution(bytes, pos, version)
   if pos != bytes.len:
     raiseEnvelopeError(eeMalformed, "trailing interface payload bytes")
 
@@ -1152,10 +1250,12 @@ proc toInterfaceParam(param: CliParamDef): InterfaceParam =
     location: SourceLocation(file: param.sourceFile, line: param.sourceLine))
 
 proc toInterfaceNixProvisioning(packageName: string;
-                                provisioning: NixPackageProvisioningDef):
+                                provisioning: NixPackageProvisioningDef;
+                                contributor = ""):
     InterfaceNixProvisioning =
   InterfaceNixProvisioning(
     packageName: packageName,
+    contributor: contributor,
     selector: provisioning.selector,
     executablePath: provisioning.executablePath,
     expressionFile: provisioning.expressionFile,
@@ -1168,10 +1268,12 @@ proc toInterfaceNixProvisioning(packageName: string;
       line: provisioning.sourceLine))
 
 proc toInterfaceTarballProvisioning(packageName: string;
-                                    provisioning: TarballProvisioningDef):
+                                    provisioning: TarballProvisioningDef;
+                                    contributor = ""):
     InterfaceTarballProvisioning =
   InterfaceTarballProvisioning(
     packageName: packageName,
+    contributor: contributor,
     url: provisioning.url,
     mirrors: provisioning.mirrors,
     sha256: provisioning.sha256,
@@ -1186,10 +1288,12 @@ proc toInterfaceTarballProvisioning(packageName: string;
       line: provisioning.sourceLine))
 
 proc toInterfaceScoopProvisioning(packageName: string;
-                                  provisioning: ScoopProvisioningDef):
+                                  provisioning: ScoopProvisioningDef;
+                                  contributor = ""):
     InterfaceScoopProvisioning =
   InterfaceScoopProvisioning(
     packageName: packageName,
+    contributor: contributor,
     bucket: provisioning.bucket,
     app: provisioning.app,
     version: provisioning.version,
@@ -1239,8 +1343,36 @@ proc toInterfaceToolUse(useDef: PackageUseDef;
           result.executableName = exe.binaryName
           break
 
+proc normalizedInterfaceFingerprint(value: string): string =
+  result = value.strip().toLowerAscii()
+  for prefix in ["blake3-256:", "blake3:", "b3:"]:
+    if result.startsWith(prefix):
+      return result[prefix.len .. ^1]
+
+proc toInterfaceProvisioningContribution(contribution:
+    ProvisioningContributionDef; targetFingerprint: string):
+    InterfaceProvisioningContribution =
+  result = InterfaceProvisioningContribution(
+    targetPackage: contribution.targetPackage,
+    targetInterfaceFingerprint: targetFingerprint,
+    contributor: contribution.contributor,
+    developInterface: contribution.developInterface,
+    location: SourceLocation(file: contribution.sourceFile,
+      line: contribution.sourceLine))
+  for provisioning in contribution.nixProvisioning:
+    result.nixProvisioning.add(toInterfaceNixProvisioning(
+      contribution.targetPackage, provisioning, contribution.contributor))
+  for provisioning in contribution.tarballProvisioning:
+    result.tarballProvisioning.add(toInterfaceTarballProvisioning(
+      contribution.targetPackage, provisioning, contribution.contributor))
+  for provisioning in contribution.scoopProvisioning:
+    result.scoopProvisioning.add(toInterfaceScoopProvisioning(
+      contribution.targetPackage, provisioning, contribution.contributor))
+
 proc toProjectInterface*(pkg: PackageDef;
-                         packages: openArray[PackageDef] = []):
+                         packages: openArray[PackageDef] = [];
+                         contributions:
+                           openArray[ProvisioningContributionDef] = []):
     ProjectInterface =
   result.projectName = pkg.packageName
   result.packageName = pkg.packageName
@@ -1295,6 +1427,60 @@ proc toProjectInterface*(pkg: PackageDef;
         location: SourceLocation(file: attr.sourceFile,
           line: attr.sourceLine)))
     result.publicResources.add(res)
+
+  if contributions.len > 0:
+    for contribution in contributions:
+      var targetFound = false
+      var targetFingerprint = ""
+      var activeFingerprints: seq[string] = @[]
+      let pinnedFingerprint = normalizedInterfaceFingerprint(
+        contribution.targetInterfaceFingerprint)
+      for targetPkg in packages:
+        if targetPkg.packageName == contribution.targetPackage:
+          targetFound = true
+          let targetInterface = toProjectInterface(targetPkg, packages, [])
+          let candidateFingerprint = toHex(
+            interfaceFingerprint(targetInterface).bytes).toLowerAscii()
+          if activeFingerprints.find(candidateFingerprint) < 0:
+            activeFingerprints.add(candidateFingerprint)
+          if contribution.developInterface:
+            if targetFingerprint.len == 0:
+              targetFingerprint = candidateFingerprint
+          elif candidateFingerprint == pinnedFingerprint:
+            targetFingerprint = candidateFingerprint
+      if not targetFound:
+        # A thin catalog may be inspected before its target repository is
+        # materialized. Preserve the pinned identity; the consuming resolver
+        # validates it once the canonical package interface is present.
+        targetFingerprint = pinnedFingerprint
+      elif contribution.developInterface and activeFingerprints.len > 1:
+        raise newException(ValueError,
+          "ambiguous package interface for development contribution \"" &
+          contribution.targetPackage & "\" from \"" &
+          contribution.contributor & "\": active fingerprints " &
+          activeFingerprints.join(", ") &
+          "; publish an explicit interfaceFingerprint")
+      elif not contribution.developInterface and targetFingerprint.len == 0:
+        raise newException(ValueError,
+          "provisioning contribution interface mismatch for package \"" &
+          contribution.targetPackage & "\" from \"" &
+          contribution.contributor & "\": expected " &
+          contribution.targetInterfaceFingerprint & ", active " &
+          activeFingerprints.join(", "))
+      let projected = toInterfaceProvisioningContribution(contribution,
+        targetFingerprint)
+      result.provisioningContributions.add(projected)
+      for useDef in result.toolUses.mitems:
+        if useDef.packageSelector != contribution.targetPackage:
+          continue
+        useDef.nixProvisioning.add(projected.nixProvisioning)
+        useDef.tarballProvisioning.add(projected.tarballProvisioning)
+        useDef.scoopProvisioning.add(projected.scoopProvisioning)
+
+proc canonicalPackageInterfaceFingerprint*(pkg: PackageDef;
+    packages: openArray[PackageDef] = []): string =
+  toHex(interfaceFingerprint(toProjectInterface(pkg, packages, [])).bytes).
+    toLowerAscii()
 
 proc sameSourceFile(a, b: string): bool =
   if a.len == 0 or b.len == 0:
@@ -1488,7 +1674,10 @@ proc detectStandardBuildEligible(sourceFile: string;
   usesIncludesRegisteredConvention(sourceFile)
 
 proc mergeProjectInterfaces(matches: openArray[PackageDef];
-                            packages: openArray[PackageDef]): ProjectInterface =
+                            packages: openArray[PackageDef];
+                            contributions:
+                              openArray[ProvisioningContributionDef] = []):
+    ProjectInterface =
   ## Combine the ``ProjectInterface`` projections of every package
   ## declared in the same Nim project file into a single envelope.
   ##
@@ -1532,7 +1721,9 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
   var seenToolUses: seq[string] = @[]
   var seenSigDeps: seq[string] = @[]
   for pkg in matches:
-    let projection = toProjectInterface(pkg, packages)
+    let projection = toProjectInterface(pkg, packages, contributions)
+    if result.provisioningContributions.len == 0:
+      result.provisioningContributions = projection.provisioningContributions
     for exe in projection.publicExecutables:
       result.publicExecutables.add(exe)
     for lib in projection.publicLibraries:
@@ -1558,13 +1749,14 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
 
 proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
   let packages = registeredPackages()
+  let contributions = registeredProvisioningContributions()
   if rootSourceFile.len > 0:
     var matches: seq[PackageDef] = @[]
     for pkg in packages:
       if sameSourceFile(pkg.sourceFile, rootSourceFile):
         matches.add(pkg)
     if matches.len == 1:
-      var pi = toProjectInterface(matches[0], packages)
+      var pi = toProjectInterface(matches[0], packages, contributions)
       pi.standardBuildEligible =
         detectStandardBuildEligible(rootSourceFile, matches[0])
       return artifactFor(pi)
@@ -1576,7 +1768,7 @@ proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
       # ``libs/repro_project_dsl/src/repro_project_dsl/macros_a.nim``;
       # the merge logic here is the artifact-layer side of the same
       # change.
-      var pi = mergeProjectInterfaces(matches, packages)
+      var pi = mergeProjectInterfaces(matches, packages, contributions)
       var allEligible = true
       for pkg in matches:
         if not detectStandardBuildEligible(rootSourceFile, pkg):
@@ -1591,7 +1783,7 @@ proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
     # ``mergeProjectInterfaces`` reproduces the legacy
     # ``toProjectInterface`` output), so this branch only kicks in when
     # two or more packages were registered without an explicit root.
-    var pi = mergeProjectInterfaces(packages, packages)
+    var pi = mergeProjectInterfaces(packages, packages, contributions)
     var allEligible = true
     for pkg in packages:
       if not detectStandardBuildEligible(pkg.sourceFile, pkg):
@@ -1599,7 +1791,7 @@ proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
         break
     pi.standardBuildEligible = allEligible
     return artifactFor(pi)
-  var pi = toProjectInterface(packages[0], packages)
+  var pi = toProjectInterface(packages[0], packages, contributions)
   pi.standardBuildEligible =
     detectStandardBuildEligible(packages[0].sourceFile, packages[0])
   artifactFor(pi)
@@ -1757,10 +1949,76 @@ proc emitLiftedExtensionTypes(code: var string;
   # into a freshly-cleared registry (e.g. per-test isolation).
   code.add("\nregisterLiftedExtensions()\n\n")
 
+proc emitProvisioningContributionRegistrations(code: var string;
+    contributions: seq[InterfaceProvisioningContribution]) =
+  for contribution in contributions:
+    code.add("registerProvisioningContributionDef(" &
+      "ProvisioningContributionDef(targetPackage: " &
+      escForCode(contribution.targetPackage) &
+      ", targetInterfaceFingerprint: " &
+      escForCode(contribution.targetInterfaceFingerprint) &
+      ", contributor: " & escForCode(contribution.contributor) &
+      ", developInterface: " & $contribution.developInterface &
+      ", nixProvisioning: @[")
+    for i, provisioning in contribution.nixProvisioning:
+      if i > 0: code.add(", ")
+      code.add("NixPackageProvisioningDef(selector: " &
+        escForCode(provisioning.selector) &
+        ", executablePath: " & escForCode(provisioning.executablePath) &
+        ", expressionFile: " & escForCode(provisioning.expressionFile) &
+        ", nixpkgsRef: " & escForCode(provisioning.nixpkgsRef) &
+        ", nixpkgsRev: " & escForCode(provisioning.nixpkgsRev) &
+        ", nixpkgsNarHash: " & escForCode(provisioning.nixpkgsNarHash) &
+        ", packageId: " & escForCode(provisioning.packageId) &
+        ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+        ", sourceFile: " & escForCode(provisioning.location.file) &
+        ", sourceLine: " & $provisioning.location.line & ")")
+    code.add("], tarballProvisioning: @[")
+    for i, provisioning in contribution.tarballProvisioning:
+      if i > 0: code.add(", ")
+      code.add("TarballProvisioningDef(url: " & escForCode(provisioning.url) &
+        ", mirrors: @[")
+      for j, mirror in provisioning.mirrors:
+        if j > 0: code.add(", ")
+        code.add(escForCode(mirror))
+      code.add("], sha256: " & escForCode(provisioning.sha256) &
+        ", archiveType: " & escForCode(provisioning.archiveType) &
+        ", executablePath: " & escForCode(provisioning.executablePath) &
+        ", stripComponents: " & $provisioning.stripComponents &
+        ", packageId: " & escForCode(provisioning.packageId) &
+        ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+        ", cpu: " & escForCode(provisioning.cpu) &
+        ", os: " & escForCode(provisioning.os) &
+        ", sourceFile: " & escForCode(provisioning.location.file) &
+        ", sourceLine: " & $provisioning.location.line & ")")
+    code.add("], scoopProvisioning: @[")
+    for i, provisioning in contribution.scoopProvisioning:
+      if i > 0: code.add(", ")
+      code.add("ScoopProvisioningDef(bucket: " &
+        escForCode(provisioning.bucket) &
+        ", app: " & escForCode(provisioning.app) &
+        ", version: " & escForCode(provisioning.version) &
+        ", preferredVersion: " & escForCode(provisioning.preferredVersion) &
+        ", manifestChecksum: " & escForCode(provisioning.manifestChecksum) &
+        ", manifestUrl: " & escForCode(provisioning.manifestUrl) &
+        ", executablePath: " & escForCode(provisioning.executablePath) &
+        ", requiresExecutionProfileChecksum: " &
+        $provisioning.requiresExecutionProfileChecksum &
+        ", packageId: " & escForCode(provisioning.packageId) &
+        ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+        ", sourceFile: " & escForCode(provisioning.location.file) &
+        ", sourceLine: " & $provisioning.location.line & ")")
+    code.add("], sourceFile: " & escForCode(contribution.location.file) &
+      ", sourceLine: " & $contribution.location.line & "))\n")
+  if contributions.len > 0:
+    code.add("\n")
+
 proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
   let pkg = artifact.projectInterface
   var code = "import repro_project_dsl\n\n"
   emitLiftedExtensionTypes(code, pkg.publicResources)
+  emitProvisioningContributionRegistrations(code,
+    pkg.provisioningContributions)
   let typeName = titleIdent(pkg.packageName)
   let exeTypeName = typeName & "Executable"
   code.add("type\n  " & typeName & "* = object\n")
@@ -1856,6 +2114,28 @@ proc cmdExeShellEscape(value: string): string =
   ## cmd.exe quoting: wrap in double quotes; escape embedded double quotes.
   "\"" & value.replace("\"", "\\\"") & "\""
 
+proc powerShellSingleQuote(value: string): string =
+  "'" & value.replace("'", "''") & "'"
+
+proc powerShellRunCommandScript*(command: openArray[string];
+    sinkPath: string): string =
+  ## Materialise a long argv as a PowerShell array so Windows does not route
+  ## the child command through cmd.exe's ~8191-character command-line limit.
+  if command.len == 0:
+    raise newException(ValueError, "PowerShell command script requires argv")
+  result = "$ErrorActionPreference = 'Stop'\r\n"
+  result.add("$exe = " & powerShellSingleQuote(command[0]) & "\r\n")
+  result.add("$argv = @(\r\n")
+  for i in 1 ..< command.len:
+    result.add("  " & powerShellSingleQuote(command[i]))
+    if i + 1 < command.len:
+      result.add(",")
+    result.add("\r\n")
+  result.add(")\r\n")
+  result.add("& $exe @argv > " & powerShellSingleQuote(sinkPath) &
+    " 2>&1\r\n")
+  result.add("exit $LASTEXITCODE\r\n")
+
 proc runCommand(command: openArray[string];
     cwd = ""): ProviderCompileExecutionResult =
   if command.len == 0:
@@ -1877,63 +2157,61 @@ proc runCommand(command: openArray[string];
       $int64(epochTime() * 1_000_000.0)
     let sinkPath = sinkDir / ("repro-runcommand-" & nonce & ".log")
     let scriptPath = sinkDir / ("repro-runcommand-" & nonce & ".cmd")
+    let psScriptPath = sinkDir / ("repro-runcommand-" & nonce & ".ps1")
     # cmd.exe truncates any single command line past ~8191 chars, so a
     # large `nim c` invocation (60+ --path: entries) silently produces an
     # empty sink and we report `command failed` with no stderr. Fall back
-    # to a project-local `nim.cfg` when the assembled arg list would overflow.
-    # Nim's command-line parser does not support `@response-file` syntax,
-    # but it automatically loads `nim.cfg` from the compiled project's
-    # directory. So we write the options there and run `nim c target.nim`.
+    # to a PowerShell script when the assembled arg list would overflow:
+    # the pwsh.exe command line remains short, while the script invokes the
+    # real child with an argv array and file redirection. This keeps us out
+    # of unsupported Nim @-file semantics and preserves exact arguments.
     let assembledLen = command.mapIt(cmdExeShellEscape(it)).join(" ").len +
       cmdExeShellEscape(sinkPath).len + " > 2>&1\r\n@echo off\r\n".len
-    let exeName = splitFile(command[0]).name.toLowerAscii()
-    let useResponseFile = exeName == "nim" and cwd.len > 0
-    var responseFilePath = ""
-    var effectiveCommand: seq[string]
-    if useResponseFile:
-      responseFilePath = parentDir(command[command.len - 1]) / "nim.cfg"
-      var cfgLines = newSeqOfCap[string](command.len - 2)
-      for i in 2 ..< command.len - 1:
-        let a = command[i]
-        if a.len == 0:
-          cfgLines.add "\"\""
-        elif a.contains(' ') or a.contains('"') or a.contains('\t') or a.contains('\\') or a.contains(':'):
-          let normalized = a.replace("\\", "/")
-          if normalized.contains('='):
-            let parts = normalized.split('=', 1)
-            cfgLines.add parts[0] & ":\"" & parts[1].replace("\"", "\\\"") & "\""
-          elif normalized.contains(':'):
-            let parts = normalized.split(':', 1)
-            cfgLines.add parts[0] & ":\"" & parts[1].replace("\"", "\\\"") & "\""
-          else:
-            cfgLines.add "\"" & normalized.replace("\"", "\\\"") & "\""
-        else:
-          cfgLines.add a
-      writeFile(extendedPath(responseFilePath),
-        cfgLines.join("\r\n") & "\r\n")
-      effectiveCommand = @[command[0], command[1], command[command.len - 1]]
-    else:
-      effectiveCommand = @command
-    let scriptBody = "@echo off\r\n" &
-      effectiveCommand.mapIt(cmdExeShellEscape(it)).join(" ") &
-      " > " & cmdExeShellEscape(sinkPath) & " 2>&1\r\n"
-    writeFile(extendedPath(scriptPath), scriptBody)
+    let usePowerShellScript = assembledLen > 6000
     var process: Process
-    withSpawnWorkingDir:
-      process = startProcess("cmd.exe",
-        args = @["/c", scriptPath],
-        workingDir = cwd, options = {poUsePath})
+    if usePowerShellScript:
+      writeFile(extendedPath(psScriptPath),
+        powerShellRunCommandScript(command, sinkPath))
+      let powerShellExe = block:
+        let pwsh = findExe("pwsh")
+        if pwsh.len > 0:
+          pwsh
+        else:
+          let windowsPowerShell = findExe("powershell")
+          if windowsPowerShell.len > 0:
+            windowsPowerShell
+          else:
+            raise newException(OSError,
+              "pwsh/powershell required for long Windows command")
+      withSpawnWorkingDir:
+        process = startProcess(powerShellExe,
+          args = @[
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            psScriptPath],
+          workingDir = cwd, options = {poUsePath})
+    else:
+      let scriptBody = "@echo off\r\n" &
+        command.mapIt(cmdExeShellEscape(it)).join(" ") &
+        " > " & cmdExeShellEscape(sinkPath) & " 2>&1\r\n"
+      writeFile(extendedPath(scriptPath), scriptBody)
+      withSpawnWorkingDir:
+        process = startProcess("cmd.exe",
+          args = @["/c", scriptPath],
+          workingDir = cwd, options = {poUsePath})
     let exitCode = process.waitForExit()
     process.close()
     try:
       removeFile(extendedPath(scriptPath))
     except CatchableError:
       discard
-    if responseFilePath.len > 0:
-      try:
-        removeFile(extendedPath(responseFilePath))
-      except CatchableError:
-        discard
+    try:
+      removeFile(extendedPath(psScriptPath))
+    except CatchableError:
+      discard
     var output = ""
     if fileExists(extendedPath(sinkPath)):
       try:

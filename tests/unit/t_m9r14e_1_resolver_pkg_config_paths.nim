@@ -127,6 +127,19 @@ suite "DSL-port M9.R.14e.1 — resolver populates pkg-config / cmake / CPATH / l
       check p.endsWith("include")
     removeDir(scratch)
 
+  test "nested include dirs cannot shadow system err.h":
+    let scratch = createTempDir("repro_m9r14e_1_", "")
+    let includeRoot =
+      scratch / "openssl" / "build" / "out" / "usr" / "include"
+    createDir(includeRoot / "openssl")
+    writeFile(includeRoot / "openssl" / "err.h",
+      "/* synthetic OpenSSL header */\n")
+    var profile = PathOnlyToolProfile(installMethod: "from-source")
+    populateFromSourceSearchPaths(profile, scratch / "openssl")
+    check absolutePath(includeRoot) in profile.cpathList
+    check absolutePath(includeRoot / "openssl") notin profile.cpathList
+    removeDir(scratch)
+
   test "populator returns non-empty libraryPathList when lib/ exists":
     let scratch = createTempDir("repro_m9r14e_1_", "")
     layStagedTree(scratch, "libbaz",

@@ -134,6 +134,58 @@ suite "DSL-port M9.R.14h.1 — auto-recurse idempotency":
     let outcome = tryResolveFromSourceTool(useDef, recipeRoot = scratch)
     check outcome.kind == rrNeedsBuild
 
+  test "test_m9r14h_1_resolver_discovers_in_tree_application_recipe":
+    # An image can consume an application built in the same repository
+    # without duplicating its recipe under recipes/packages/source.
+    let projectRoot = createTempDir("repro-m9r14h-in-tree-app-", "")
+    defer: removeDir(projectRoot)
+    let sourceRoot = projectRoot / "recipes" / "packages" / "source"
+    createDir(sourceRoot)
+    makeRecipeFile(projectRoot / "apps", "reproos-installer")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("reproos-installer"), recipeRoot = sourceRoot)
+
+    check outcome.kind == rrNeedsBuild
+    check outcome.recipeDir ==
+      absolutePath(projectRoot / "apps" / "reproos-installer")
+    check outcome.expectedArtifact.endsWith(
+      "apps/reproos-installer/.repro/output/reproos-installer/" &
+        "reproos-installer")
+
+  test "test_m9r14h_1_corpus_recipe_precedes_in_tree_application":
+    # A package corpus recipe remains authoritative when both layouts exist.
+    let projectRoot = createTempDir("repro-m9r14h-corpus-first-", "")
+    defer: removeDir(projectRoot)
+    let sourceRoot = projectRoot / "recipes" / "packages" / "source"
+    createDir(sourceRoot)
+    makeRecipeFile(sourceRoot, "dual-recipe")
+    makeRecipeFile(projectRoot / "apps", "dual-recipe")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("dual-recipe"), recipeRoot = sourceRoot)
+
+    check outcome.kind == rrNeedsBuild
+    check outcome.recipeDir == absolutePath(sourceRoot / "dual-recipe")
+
+  test "test_m9r14h_1_resolver_maps_library_to_owning_source_recipe":
+    # Consumers name the ABI they link while the corpus recipe follows the
+    # upstream project name.
+    let scratch = createTempDir("repro-m9r14h-library-alias-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "libxcrypt")
+    let libDir = scratch / "libxcrypt" / ".repro" / "output" /
+      "install" / "usr" / "lib"
+    createDir(libDir)
+    let expected = libDir / "libcrypt.so.2"
+    writeFile(expected, "synthetic libcrypt")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("libcrypt"), recipeRoot = scratch)
+
+    check outcome.kind == rrResolved
+    check outcome.profile.resolvedExecutablePath == absolutePath(expected)
+
   test "test_m9r14h_1_resolved_recipes_cache_is_consulted":
     # Belt-and-braces pin on the in-process cache.  After the dispatcher
     # marks a sibling recipe dir as resolved, a repeat probe (without
@@ -171,3 +223,76 @@ suite "DSL-port M9.R.14h.1 — auto-recurse idempotency":
     writeFile(expected, "ELF synthetic")
     let hit = m9r14hProbeInstallMirrorLibrary(scratch / "cairo", "cairo")
     check hit == absolutePath(expected)
+
+  test "test_m9r14h_1_resolver_accepts_package_named_lib_payload":
+    # Non-executable system payloads can live under a package-specific
+    # lib directory. The kernel install mirror uses this shape and must
+    # count as a completed source build without a synthetic /usr/bin tool.
+    let scratch = createTempDir("repro-m9r14h-lib-payload-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "kernel")
+    let payloadDir = scratch / "kernel" / ".repro" / "output" /
+      "install" / "usr" / "lib" / "reproos-kernel"
+    createDir(payloadDir)
+    let expected = payloadDir / "vmlinuz"
+    writeFile(expected, "synthetic kernel image")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("kernel"), recipeRoot = scratch)
+
+    check outcome.kind == rrResolved
+    check outcome.profile.resolvedExecutablePath == absolutePath(expected)
+
+  test "test_m9r14h_1_resolver_rejects_unrelated_lib_payload":
+    # A random directory under usr/lib is not evidence for the requested
+    # package; the package-name boundary is the guard on this fallback.
+    let scratch = createTempDir("repro-m9r14h-unrelated-payload-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "kernel")
+    let unrelatedDir = scratch / "kernel" / ".repro" / "output" /
+      "install" / "usr" / "lib" / "firmware"
+    createDir(unrelatedDir)
+    writeFile(unrelatedDir / "blob.bin", "synthetic firmware")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("kernel"), recipeRoot = scratch)
+
+    check outcome.kind == rrNeedsBuild
+
+  test "test_m9r14h_1_resolver_accepts_configuration_only_payload":
+    # ca-certificates publishes only an etc/ssl bundle. A completed
+    # configuration-only mirror must not recurse forever looking for a
+    # synthetic executable named after the package.
+    let scratch = createTempDir("repro-m9r14h-etc-payload-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "ca-certificates")
+    let certDir = scratch / "ca-certificates" / ".repro" / "output" /
+      "install" / "etc" / "ssl" / "certs"
+    createDir(certDir)
+    let expected = certDir / "ca-certificates.crt"
+    writeFile(expected, "synthetic certificate bundle")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("ca-certificates"), recipeRoot = scratch)
+
+    check outcome.kind == rrResolved
+    check outcome.profile.resolvedExecutablePath == absolutePath(expected)
+
+  test "test_m9r14h_1_resolver_accepts_completed_aggregate_package":
+    # Aggregate packages can expose several tools without shipping one named
+    # after the package selector. A completed install mirror is sufficient
+    # package-level evidence after all stronger artifact probes miss.
+    let scratch = createTempDir("repro-m9r14h-aggregate-payload-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "shadow-utils")
+    let mirrorDir = scratch / "shadow-utils" / ".repro" / "output" /
+      "install"
+    makeExecutable(mirrorDir / "usr" / "sbin" / "useradd")
+    let stamp = mirrorDir / ".m9r14e_2_install_mirror.stamp"
+    writeFile(stamp, "complete\n")
+
+    let outcome = tryResolveFromSourceTool(
+      syntheticUseDef("shadow-utils"), recipeRoot = scratch)
+
+    check outcome.kind == rrResolved
+    check outcome.profile.resolvedExecutablePath == absolutePath(stamp)

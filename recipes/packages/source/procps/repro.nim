@@ -253,8 +253,6 @@ package procpsSource:
         "--disable-static",
         "--disable-nls",
         "--with-systemd=no",
-        "CPPFLAGS=-I/opt/repro/reprobuild/recipes/packages/source/ncurses/.repro/output/install/usr/include",
-        "LDFLAGS=-L/opt/repro/reprobuild/recipes/packages/source/ncurses/.repro/output/install/usr/lib",
         "LIBS=-ltinfow",
         "NCURSES_CFLAGS=-I/opt/repro/reprobuild/recipes/packages/source/ncurses/.repro/output/install/usr/include",
         "NCURSES_LIBS=-lncursesw",

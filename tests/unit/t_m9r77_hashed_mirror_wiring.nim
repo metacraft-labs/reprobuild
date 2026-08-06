@@ -11,9 +11,8 @@
 ##   5. ``readRealizationInfoFile`` returns zeros when the sidecar is
 ##      missing / malformed / partial.
 ##   6. ``hashedDepMirrorRoot`` returns "" when no sidecar exists.
-##   7. ``hashedDepMirrorRoot`` returns
-##      ``<store-root>/prefixes/<name>/<version>-<hash>/`` when the
-##      sidecar is present and well-formed.
+##   7. ``hashedDepMirrorRoot`` returns the store-registered relative
+##      prefix path when the sidecar is present and well-formed.
 ##   8. ``packageInstallMirrorRoot`` in ``immHashed`` mode routes
 ##      through the sidecar and returns the hashed path.
 ##   9. ``packageInstallMirrorRoot`` in ``immHashedWithLegacyFallback``
@@ -61,6 +60,8 @@ suite "M9.R.77.3 — realization-info sidecar":
     let raw = readFile(sidecar)
     check "version=" & Version in raw
     check "realization-hash=" & Hash64 in raw
+    check "store-relative-path=" &
+      installMirrorStoreRelativePath(DepName, Version, Hash64) in raw
 
   test "writeRealizationInfoFile is idempotent (no rewrite on repeat)":
     let recipes = createTempDir("m9r77-idem-", "")
@@ -129,7 +130,7 @@ suite "M9.R.77.3 — hashedDepMirrorRoot (CAS-backed lookup)":
       try: removeDir(recipes) except OSError: discard
     check hashedDepMirrorRoot(recipes, DepName) == ""
 
-  test "returns <store-root>/prefixes/<dep>/<version>-<hash> when sidecar present":
+  test "returns <store-root>/<registered-relative-path> when sidecar present":
     let recipes = createTempDir("m9r77-hres-", "")
     defer:
       try: removeDir(recipes) except OSError: discard
@@ -138,8 +139,8 @@ suite "M9.R.77.3 — hashedDepMirrorRoot (CAS-backed lookup)":
     try:
       writeRealizationInfoFile(recipes, DepName, Version, Hash64)
       let resolved = hashedDepMirrorRoot(recipes, DepName)
-      check resolved == storeRoot & "/prefixes/" & DepName & "/" &
-        Version & "-" & Hash64
+      check resolved == storeRoot & "/" &
+        installMirrorStoreRelativePath(DepName, Version, Hash64)
     finally:
       delEnv(StoreRootEnvVar)
 
@@ -155,8 +156,8 @@ suite "M9.R.77.3 — packageInstallMirrorRoot (mode-routed)":
     try:
       writeRealizationInfoFile(recipes, DepName, Version, Hash64)
       let root = packageInstallMirrorRoot(recipes, DepName)
-      check root == storeRoot & "/prefixes/" & DepName & "/" &
-        Version & "-" & Hash64
+      check root == storeRoot & "/" &
+        installMirrorStoreRelativePath(DepName, Version, Hash64)
     finally:
       delEnv(InstallMirrorModeEnvVar)
       delEnv(StoreRootEnvVar)
@@ -200,8 +201,8 @@ suite "M9.R.77.3 — packageInstallMirrorRoot (mode-routed)":
     putEnv(InstallMirrorModeEnvVar, "hashed-with-legacy-fallback")
     try:
       writeRealizationInfoFile(recipes, DepName, Version, Hash64)
-      let expected = storeRoot & "/prefixes/" & DepName & "/" &
-        Version & "-" & Hash64
+      let expected = storeRoot & "/" &
+        installMirrorStoreRelativePath(DepName, Version, Hash64)
       createDir(expected)
       let root = packageInstallMirrorRoot(recipes, DepName)
       # Normalise both to forward slashes for comparison since the

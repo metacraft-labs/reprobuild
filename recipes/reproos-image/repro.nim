@@ -43,6 +43,8 @@
 ##     ``recipes/reproos-image/.repro/output/install/<sha256>-
 ##     reproos-installed.qcow2``.
 
+import std/strutils
+
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
 
@@ -126,14 +128,94 @@ const reproosImageRootfsDeps = @[
   "dbus",
   "sudo",
   "e2fsprogs",
+  "dosfstools",
   "btrfs-progs",
   "shadow-utils",
   "iana-tzdata",
+  "parted",
+  "lvm2",
+  "popt",
+  "gdisk",
+  "libgpg-error",
+  "libgcrypt",
+  "json-c",
   "cryptsetup",
+  "less",
+  "procps",
+  "rsync",
+  "strace",
+  "iputils",
+  "nano",
   "iproute2",
   "xkeyboard-config",
   "libxkbfile",
   "xkbcomp",
+  "libx11",
+  "libxau",
+  "libxfont2",
+  "libattr",
+  "libacl",
+  "cairo",
+  "libcap",
+  "libcap-ng",
+  "openssl",
+  "curl",
+  "libdrm",
+  "libevdev",
+  "expat",
+  "libffi",
+  "fontconfig",
+  "libfontenc",
+  "freetype",
+  "gcc",
+  "glib2",
+  "gdk-pixbuf",
+  "gmp",
+  "harfbuzz",
+  "libinput",
+  "lzo",
+  "libmd",
+  "mpc",
+  "mpfr",
+  "ncurses",
+  "nettle",
+  "pam",
+  "pango",
+  "libpciaccess",
+  "pcre2",
+  "pixman",
+  "libjpeg",
+  "libpng",
+  "libtiff",
+  "readline",
+  "libseccomp",
+  "sqlite",
+  "wayland",
+  "wlroots",
+  "libxcb",
+  "xcb-util",
+  "xcb-util-cursor",
+  "xcb-util-image",
+  "xcb-util-keysyms",
+  "xcb-util-renderutil",
+  "xcb-util-wm",
+  "libxcvt",
+  "libxkbcommon",
+  "libxml2",
+  "libxdmcp",
+  "libdisplay-info",
+  "fribidi",
+  "mtdev",
+  "libseat",
+  "zlib",
+  "zstd",
+  "libaio",
+  "audit",
+  "libbsd",
+  "mesa",
+  "qt6-base",
+  "qt6-declarative",
+  "qt6-quickcontrols2",
   "adwaita-icon-theme",
   "dejavu-fonts",
   "xorg-server",
@@ -147,11 +229,20 @@ const reproosImageRootfsDeps = @[
   "coreutils",
   "grub",
   "kernel",
+  "musl",
   "busybox",
+  "ca-certificates",
+  "libxcrypt",
+  "reproos-installer",
 ]
 
 package reproosImage:
   defaultToolProvisioning "path"
+
+  devEnv:
+    task "boot-vm",
+      command = "vm-harness boot --backend auto --source-image .repro/output/install --kind qcow2 --keep",
+      description = "Boot the newest built ReproOS image in a transient VM"
 
   uses:
     # M9.R.53: the recipe's operational tool set is now declared
@@ -175,14 +266,94 @@ package reproosImage:
     "dbus"
     "sudo"
     "e2fsprogs"
+    "dosfstools"
     "btrfs-progs"
     "shadow-utils"
     "iana-tzdata"
+    "parted"
+    "lvm2"
+    "popt"
+    "gdisk"
+    "libgpg-error"
+    "libgcrypt"
+    "json-c"
     "cryptsetup"
+    "less"
+    "procps"
+    "rsync"
+    "strace"
+    "iputils"
+    "nano"
     "iproute2"
     "xkeyboard-config"
     "libxkbfile"
     "xkbcomp"
+    "libx11"
+    "libxau"
+    "libxfont2"
+    "libattr"
+    "libacl"
+    "cairo"
+    "libcap"
+    "libcap-ng"
+    "openssl"
+    "curl"
+    "libdrm"
+    "libevdev"
+    "expat"
+    "libffi"
+    "fontconfig"
+    "libfontenc"
+    "freetype"
+    "gcc"
+    "glib2"
+    "gdk-pixbuf"
+    "gmp"
+    "harfbuzz"
+    "libinput"
+    "lzo"
+    "libmd"
+    "mpc"
+    "mpfr"
+    "ncurses"
+    "nettle"
+    "pam"
+    "pango"
+    "libpciaccess"
+    "pcre2"
+    "pixman"
+    "libjpeg"
+    "libpng"
+    "libtiff"
+    "readline"
+    "libseccomp"
+    "sqlite"
+    "wayland"
+    "wlroots"
+    "libxcb"
+    "xcb-util"
+    "xcb-util-cursor"
+    "xcb-util-image"
+    "xcb-util-keysyms"
+    "xcb-util-renderutil"
+    "xcb-util-wm"
+    "libxcvt"
+    "libxkbcommon"
+    "libxml2"
+    "libxdmcp"
+    "libdisplay-info"
+    "fribidi"
+    "mtdev"
+    "libseat"
+    "zlib"
+    "zstd"
+    "libaio"
+    "audit"
+    "libbsd"
+    "mesa"
+    "qt6-base"
+    "qt6-declarative"
+    "qt6-quickcontrols2"
     "adwaita-icon-theme"
     "dejavu-fonts"
     "xorg-server"
@@ -195,6 +366,12 @@ package reproosImage:
     "glibc"
     "coreutils"
     "grub"
+    "kernel"
+    "musl"
+    "busybox"
+    "ca-certificates"
+    "libxcrypt"
+    "reproos-installer"
 
   runtimeDeps:
     # M9.R.53: enumerate every bare-name host tool
@@ -266,7 +443,10 @@ package reproosImage:
     # volume-serials are deterministic.
     let buildImageAction = shell(
       command = ("set -euo pipefail; " &
+                 "mkdir -p build; " &
                  "SOURCE_DATE_EPOCH=1735689600 LC_ALL=C TZ=UTC " &
+                 "REPROOS_SOURCE_RECIPES=\"" &
+                 reproosImageRootfsDeps.join(" ") & "\" " &
                  "REPRO_AUTO_CONFIG=\"${REPRO_AUTO_CONFIG:-../../tests/fixtures/auto-config-minimal.toml}\" " &
                  "REPRO_QCOW2_SEED=\"${REPRO_QCOW2_SEED:-deadbeefcafebabe}\" " &
                  "LD_LIBRARY_PATH= PATH=/run/current-system/sw/bin:$PATH " &

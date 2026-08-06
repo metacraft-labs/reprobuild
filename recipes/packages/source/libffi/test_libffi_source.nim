@@ -24,6 +24,10 @@
 
 import std/[unittest]
 
+when defined(reproProviderMode):
+  import std/[os, strutils]
+  import repro_build_engine
+  import repro_core
 import repro_project_dsl
 
 # Side-effect import: triggers the package macro which registers
@@ -37,11 +41,85 @@ const ExpectedUrl =
 const ExpectedHash =
   "b0dea9df23c863a7a50e825440f3ebffabd65df1497108e5d437747843895a4e"
 
+const ExpectedBuildDir = ".repro/build/libffi-autotools"
+
 const ExpectedConfigureFlags = @[
   "--disable-static",
   "--disable-docs",
   "--disable-multi-os-directory",
+  "--disable-dependency-tracking",
 ]
+
+const ExpectedConfigureCommand =
+  "../../../src/configure --prefix=/usr --disable-static --disable-docs " &
+    "--disable-multi-os-directory --disable-dependency-tracking"
+
+const ExpectedConfigureScript =
+  "mkdir -p " & ExpectedBuildDir & " && cd " & ExpectedBuildDir & " && " &
+    ExpectedConfigureCommand
+
+when defined(reproProviderMode):
+  proc dummyRequest(projectRoot: string): ProviderGraphRequest =
+    ProviderGraphRequest(
+      kind: prkGraphInvocation,
+      providerArtifactId: "test-provider",
+      entryPointId: "libffiSource.root",
+      entryPointBodyHash: "test-body",
+      reason: girExplicitUserRequest,
+      arguments: projectRoot,
+      namespace: "project")
+
+  proc extractActions(fragment: GraphFragment): seq[BuildActionDef] =
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      result.add(decodeBuildActionPayload(toBytes(node.payload)))
+
+  proc findByCommandStatsId(actions: seq[BuildActionDef];
+                            commandStatsId: string): BuildActionDef =
+    for action in actions:
+      if action.commandStatsId == commandStatsId:
+        return action
+    raise newException(ValueError,
+      "action not found by commandStatsId: " & commandStatsId)
+
+  proc findById(actions: seq[BuildActionDef]; id: string): BuildActionDef =
+    for action in actions:
+      if action.id == id:
+        return action
+    raise newException(ValueError, "action not found: " & id)
+
+  proc argValues(action: BuildActionDef; name: string): seq[string] =
+    for arg in action.call.arguments:
+      if arg.name == name:
+        if arg.encodedValue.len == 0:
+          return @[]
+        return arg.encodedValue.split("\x1f")
+    @[]
+
+  proc hasArg(action: BuildActionDef; name: string): bool =
+    for arg in action.call.arguments:
+      if arg.name == name:
+        return true
+    false
+
+  proc inlineScriptOf(action: BuildActionDef): string =
+    let argv = action.argValues("argv")
+    if argv.len >= 3:
+      return argv[2]
+    ""
+
+  proc findMakeAction(actions: seq[BuildActionDef];
+                      wantsInstall: bool): BuildActionDef =
+    for action in actions:
+      if action.call.packageName != "make" or
+          action.call.executableName != "makeBin":
+        continue
+      let targets = action.argValues("targets")
+      let isInstall = "install" in targets
+      if isInstall == wantsInstall:
+        return action
+    raise newException(ValueError, "make action not found")
 
 suite "libffiSource — from-source recipe smoke test":
 
@@ -103,3 +181,75 @@ suite "libffiSource — from-source recipe smoke test":
       "https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz"
     check vs[0].sourceRepository ==
       "https://github.com/libffi/libffi"
+
+  when defined(reproProviderMode):
+    test "provider actions keep libffi build artifacts out of fetched src":
+      let projectRoot = currentSourcePath.parentDir
+      let pkg = PackageDef(
+        packageName: "libffiSource",
+        sourceFile: projectRoot / "repro.nim",
+        hasDevEnv: false,
+        devEnvBodyHash: "",
+        toolUses: @[])
+      let fragment = buildPackageFragment(pkg, dummyRequest(projectRoot),
+        proc() = buildLibffiSourcePackage(),
+        includeDefault = false)
+      let actions = extractActions(fragment)
+
+      let configure = findByCommandStatsId(actions,
+        "autotools_package.configure")
+      let build = findMakeAction(actions, wantsInstall = false)
+      let install = findMakeAction(actions, wantsInstall = true)
+      let cleanup = findById(actions, "autotools-la-cleanup-libffiSource")
+
+      let expectedBuildRoot = projectRoot / ExpectedBuildDir
+      let expectedInstallRoot = expectedBuildRoot / "out"
+      let expectedSrcRoot = projectRoot / "src"
+      let configureScript = configure.inlineScriptOf()
+
+      check "mkdir -p " & ExpectedBuildDir in configureScript
+      check "cd " & ExpectedBuildDir in configureScript
+      check "../../../src/configure" in configureScript
+      check configureScript == ExpectedConfigureScript
+      for flag in ExpectedConfigureFlags:
+        check flag in configureScript
+      check configure.declaredOutputs == @[expectedBuildRoot]
+      check configure.readOnlyRoots == @[expectedSrcRoot]
+
+      check build.cwdKind == acwdBuild
+      check build.cwdCustomPath == ExpectedBuildDir
+      check not build.hasArg("workDir")
+      check expectedBuildRoot in build.inputs
+      check build.declaredOutputs == @[expectedBuildRoot]
+      check build.readOnlyRoots == @[expectedSrcRoot]
+
+      check install.cwdKind == acwdBuild
+      check install.cwdCustomPath == ExpectedBuildDir
+      check not install.hasArg("workDir")
+      check expectedBuildRoot in install.inputs
+      check install.declaredOutputs == @[expectedInstallRoot]
+      check install.readOnlyRoots == @[expectedSrcRoot]
+
+      check cleanup.declaredOutputs == @[expectedInstallRoot]
+      check expectedSrcRoot notin configure.declaredOutputs
+      check expectedSrcRoot notin build.declaredOutputs
+      check expectedSrcRoot notin install.declaredOutputs
+
+      let libffiRelativeWrites = @[
+        "src/.dirstamp",
+        "src/.deps/.dirstamp",
+        "src/x86/.dirstamp",
+        "src/x86/unix64.loT",
+        "src/types.lo",
+        "src/raw_api.lo",
+      ]
+      var foldedAgainstBuildCwd: seq[string] = @[]
+      var foldedAgainstRecipeRoot: seq[string] = @[]
+      for rel in libffiRelativeWrites:
+        foldedAgainstBuildCwd.add(expectedBuildRoot / rel)
+        foldedAgainstRecipeRoot.add(projectRoot / rel)
+
+      check detectSourceWrites(build.readOnlyRoots,
+        foldedAgainstBuildCwd).len == 0
+      check detectSourceWrites(build.readOnlyRoots,
+        foldedAgainstRecipeRoot).len == libffiRelativeWrites.len

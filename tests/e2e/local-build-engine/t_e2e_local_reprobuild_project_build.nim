@@ -1288,6 +1288,9 @@ suite "e2e_local_reprobuild_project_build":
         "libs/repro_binary_cache_client/src",
         "libs/repro_binary_cache_server/src",
         "libs/repro_core/src",
+        # ``repro_project_dsl`` re-exports ``install_mirror_resolver``, which
+        # uses the local store's prefix-path helpers.
+        "libs/repro_local_store/src",
         "libs/blake3/src",
         "libs/nimcrypto",
         "libs/nim-faststreams/src",
@@ -1605,6 +1608,10 @@ suite "e2e_local_reprobuild_project_build":
       check graphJson{"selectedActionId"}.getStr() == "stamp"
       check graphJson{"actions"}.getElems().anyIt(
         it{"id"}.getStr() == "copy-file")
+      let copyFileJson = graphJson{"actions"}.getElems().filterIt(
+        it{"id"}.getStr() == "copy-file")[0]
+      check not copyFileJson{"publishToBinaryCache"}.getBool()
+      check copyFileJson{"binaryCacheKey"}.getStr() == ""
       let loweredGraphCachePath = graphJson{"loweredGraphCachePath"}.getStr()
       check fileExists(loweredGraphCachePath)
 

@@ -8,14 +8,14 @@
 ## higher level; here we just want a fast tripwire that a future
 ## refactor doesn't accidentally break the M9.R.79 threading.
 
-import std/[unittest]
+import std/[os, tempfiles, unittest]
 
 import repro_dsl_stdlib/constructors/meson_package
 import repro_dsl_stdlib/constructors/autotools_package
 import repro_dsl_stdlib/constructors/cmake_package
 
-# ``repro_project_dsl`` exports the two M9.R.79 registry mutators
-# ``meson_package`` / ``autotools_package`` / ``cmake_package`` use.
+# ``repro_project_dsl`` exports the registry mutators the constructor
+# modules use.
 import repro_project_dsl
 
 suite "t_m9r79_constructors_compile":
@@ -31,8 +31,16 @@ suite "t_m9r79_constructors_compile":
     check cmakeRuntimeLibraryDirs(@[glibcLib, dependencyLib]) ==
       @[dependencyLib]
 
-  test "setRegisteredActionDeclaredOutputs + setRegisteredActionReadOnlyRoots exported":
-    # Compile-time gate: the two M9.R.79.2 registry mutators must be
+  test "cmake runtime paths exclude federated compiler bootstrap libc":
+    let scratch = createTempDir("repro-cmake-bootstrap-libc-", "")
+    defer: removeDir(scratch)
+    writeFile(scratch / "libc.so.6", "synthetic bootstrap libc")
+    let dependencyLib = scratch & "-dependency"
+    check cmakeRuntimeLibraryDirs(@[scratch, dependencyLib]) ==
+      @[dependencyLib]
+
+  test "registry mutators are exported":
+    # Compile-time gate: registry mutators must be
     # reachable from downstream constructor modules.  Call each proc
     # with a fake action id so ``dynOrStatic`` mode-lowered symbols get
     # actually referenced (a bare reference to the proc value trips
@@ -42,4 +50,5 @@ suite "t_m9r79_constructors_compile":
     # id is safe.
     setRegisteredActionDeclaredOutputs("m9r79-fake-id", @["/tmp/x"])
     setRegisteredActionReadOnlyRoots("m9r79-fake-id", @["/tmp/y"])
+    setRegisteredActionCwd("m9r84-fake-id", acwdBuild, "/tmp/build")
     check true

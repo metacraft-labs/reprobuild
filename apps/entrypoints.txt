@@ -37,6 +37,10 @@ repro-binary-cache-crosshost apps/repro-binary-cache-crosshost/repro_binary_cach
 # `repro` binary (which already carries `--define:ssl` above for the same
 # HTTPS substitute/publish path). Callers migrate
 # `repro-binary-cache-client <cmd>` -> `repro cache <cmd>`.
+# Hashed install-mirror publisher. From-source producer actions call this
+# after composing their legacy staging mirror so the Layer-2 store writes
+# receipts/index rows and the recipe sidecar points at the registered prefix.
+repro-install-mirror-publish apps/repro-install-mirror-publish/repro_install_mirror_publish.nim
 # Action-Cache-Per-Edge-Store AC-2c: the single-writer shared-memory
 # action-cache daemon. A build engine auto-spawns this (detached) the first
 # time it opens a cache root whose shm control region has no live owner; the

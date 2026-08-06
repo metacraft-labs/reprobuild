@@ -14,7 +14,9 @@ trap 'rm -rf "$stage"' EXIT
 source_root="$stage/opt/repro/reprobuild/recipes/packages/source"
 source_glibc_dir="$source_root/glibc/.repro/output/install/usr/lib64"
 source_app_dir="$source_root/fixture/.repro/output/install/usr/bin"
-mkdir -p "$source_glibc_dir" "$source_app_dir" "$stage/usr/bin"
+runtime_helper="$stage/usr/lib/systemd/systemd-executor"
+mkdir -p "$source_glibc_dir" "$source_app_dir" "$stage/usr/bin" \
+  "$(dirname "$runtime_helper")"
 
 cp -L "$host_loader" "$source_glibc_dir/ld-linux-x86-64.so.2"
 cp -L "$host_glibc_dir/libc.so.6" "$source_glibc_dir/libc.so.6"
@@ -31,6 +33,8 @@ done < <(
 )
 cp "$true_bin" "$source_app_dir/fixture"
 chmod u+w "$source_app_dir/fixture"
+cp "$true_bin" "$runtime_helper"
+chmod u+w "$runtime_helper"
 
 for interpreter in bash sh perl python3 gawk; do
   printf '%s\n' '#!/bin/sh' 'exit 0' > "$stage/usr/bin/$interpreter"
@@ -50,6 +54,7 @@ chmod +x "$source_app_dir"/*-script
 bootstrap_loader=/nix/store/test-glibc-2.1/lib/ld-linux-x86-64.so.2
 source_loader=/opt/repro/reprobuild/recipes/packages/source/glibc/.repro/output/install/usr/lib64/ld-linux-x86-64.so.2
 "$patchelf_bin" --set-interpreter "$bootstrap_loader" "$source_app_dir/fixture"
+"$patchelf_bin" --set-interpreter "$bootstrap_loader" "$runtime_helper"
 
 # An unknown store interpreter must fail the complete preflight without
 # modifying an otherwise valid ELF or script.
@@ -62,6 +67,8 @@ if bash "$normalizer" "$stage" "$source_root" "$source_loader"; then
 fi
 test "$("$patchelf_bin" --print-interpreter "$source_app_dir/fixture")" = \
   "$bootstrap_loader"
+test "$("$patchelf_bin" --print-interpreter "$runtime_helper")" = \
+  "$bootstrap_loader"
 test "$(head -n1 "$source_app_dir/bash-script")" = \
   '#!/nix/store/test-bash/bin/bash'
 
@@ -69,6 +76,8 @@ rm "$source_app_dir/unknown-script"
 bash "$normalizer" "$stage" "$source_root" "$source_loader"
 
 test "$("$patchelf_bin" --print-interpreter "$source_app_dir/fixture")" = \
+  "$source_loader"
+test "$("$patchelf_bin" --print-interpreter "$runtime_helper")" = \
   "$source_loader"
 test "$(head -n1 "$source_app_dir/bash-script")" = '#!/usr/bin/bash'
 test "$(head -n1 "$source_app_dir/perl-script")" = '#!/usr/bin/perl -w'

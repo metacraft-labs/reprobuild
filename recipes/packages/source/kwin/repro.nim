@@ -420,9 +420,12 @@ package kwinSource:
       # plumbing the include via CMAKE_{C,CXX}_FLAGS is a stop-gap that
       # threads the include path globally without touching the recipe-eval
       # vendored source tree.
-      let waylandInc = "/opt/repro/reprobuild/recipes/packages/source/wayland/.repro/output/install/usr/include"
-      let qt6CoreInc = "/opt/repro/reprobuild/recipes/packages/source/qt6-base/.repro/output/install/usr/include"
-      let qt6DeclInc = "/opt/repro/reprobuild/recipes/packages/source/qt6-declarative/.repro/output/install/usr/include"
+      let waylandInc = dependencyInstallMirrorRoot("wayland") &
+        "/usr/include"
+      let qt6CoreInc = dependencyInstallMirrorRoot("qt6-base") &
+        "/usr/include"
+      let qt6DeclInc = dependencyInstallMirrorRoot("qt6-declarative") &
+        "/usr/include"
       # M9.R.15q.7.5 — kwin's src/cursor.cpp:33 unconditionally
       # ``#include <xcb/xcb_cursor.h>`` (NOT gated on KWIN_BUILD_X11).
       # xcb-util-cursor's tool stub IS resolved but its include dir

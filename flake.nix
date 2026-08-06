@@ -429,6 +429,34 @@
                 [ -e "$lib" ] || continue
                 install -m755 "$lib" "$out/lib/$(basename "$lib")"
               done
+
+              # `reprobuild-nix-daemon` is the helper that `tool-provisioning=nix`
+              # resolutions talk to. It used to be reachable only through
+              # $REPROBUILD_SOURCE_ROOT/tools, i.e. an unpatched source checkout,
+              # so its `#!/usr/bin/env python3` picked up whatever interpreter
+              # happened to be on PATH. Under launchd's default environment that
+              # is macOS's system python3 (3.9), which cannot parse the script's
+              # PEP 604 `X | None` annotations — the child died instantly and its
+              # stderr went to an unread pipe, surfacing only as the opaque
+              # "Failed to connect or spawn reprobuild-nix-daemon".
+              #
+              # Installing it here pins an absolute, known-good interpreter so
+              # the helper no longer depends on the ambient PATH. libexec (not
+              # bin) keeps it out of the wrapProgram loop below, which is for
+              # CLI entry points.
+              #
+              # The interpreter is substituted explicitly rather than via
+              # patchShebangs: bare patchShebangs resolves against HOST_PATH,
+              # whereas a nativeBuildInputs python3 lands on the build PATH, so
+              # it silently left `env python3` in place. --replace-fail also
+              # turns a future upstream shebang change into a build error
+              # instead of silently restoring the ambient-PATH behaviour.
+              mkdir -p "$out/libexec"
+              install -m755 tools/reprobuild-nix-daemon/reprobuild-nix-daemon \
+                "$out/libexec/reprobuild-nix-daemon"
+              substituteInPlace "$out/libexec/reprobuild-nix-daemon" \
+                --replace-fail '#!/usr/bin/env python3' \
+                  '#!${pkgs.python3}/bin/python3'
               runHook postInstall
             '';
 
@@ -489,6 +517,7 @@
                   --set-default REPRO_TEST_ADAPTERS_SRC ${reprobuild-test-adapters-src}/src \
                   --set-default CT_INTERPOSE_SRC ${ctInterposeSrc} \
                   --set-default REPROBUILD_USE_SYSTEM_HASH_LIBS 1 \
+                  --set-default REPROBUILD_NIX_DAEMON_BIN "$out/libexec/reprobuild-nix-daemon" \
                   --set-default RUNQUOTA_SRC ${runquota-src} \
                   --set-default SQLITE_PREFIX ${pkgs.sqlite.out} \
                   --set-default XXHASH_PREFIX ${pkgs.xxHash} \

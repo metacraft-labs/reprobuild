@@ -288,6 +288,21 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  ProvisioningContributionDef* = object
+    ## A realization supplied independently of the package that owns the
+    ## public interface. ``targetInterfaceFingerprint`` pins the contribution
+    ## to that interface; ``developInterface`` resolves the active package
+    ## fingerprint during local development and is not suitable for locks.
+    targetPackage*: string
+    targetInterfaceFingerprint*: string
+    contributor*: string
+    developInterface*: bool
+    nixProvisioning*: seq[NixPackageProvisioningDef]
+    tarballProvisioning*: seq[TarballProvisioningDef]
+    scoopProvisioning*: seq[ScoopProvisioningDef]
+    sourceFile*: string
+    sourceLine*: int
+
   VariantDecl* = object
     ## Spec-Implementation M1: one entry per variant declared in a
     ## package ``config:`` block. Both spellings — ``variant: T =
@@ -666,14 +681,15 @@ type
       ##
       ## Payload codec v21+.
     cwdCustomPath*: string
-      ## Companion to ``cwdKind == acwdCustom``: the caller-supplied
-      ## absolute or recipe-relative path to run the action under.
-      ## Ignored for every other ``cwdKind`` value. Empty (the
-      ## default) is legal for ``acwdCustom`` and reduces to
-      ## ``acwdRecipeRoot`` at resolve time — matching the pre-M9.R.74
-      ## behaviour of the ``inlineExecCall(argv, cwd = "")`` overload
-      ## whose CLI-support fallback was ``projectRoot``. Payload
-      ## codec v21+.
+      ## Companion path for cwd declarations that need a concrete
+      ## directory. For ``acwdSource`` / ``acwdBuild`` / ``acwdInstall``
+      ## the convention emitter records the resolved recipe-relative
+      ## path (for example ``build`` or ``.repro/build/pkg``). For
+      ## ``acwdCustom`` this is the caller-supplied absolute or
+      ## recipe-relative path. Empty reduces to ``acwdRecipeRoot`` at
+      ## resolve time — matching the pre-M9.R.74 behaviour of the
+      ## ``inlineExecCall(argv, cwd = "")`` overload whose CLI-support
+      ## fallback was ``projectRoot``. Payload codec v21+.
     declaredOutputs*: seq[string]
       ## M9.R.75 — R7 (double-write reject) per-action write-root
       ## declaration. Spec cite: Filesystem-Policy-And-Observed-

@@ -290,7 +290,7 @@ test "incomplete name" and:
             "libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim": 4,
             "tests/integration/t_d6_runner_test_timeout.nim": 3,
             "tests/integration/t_extension_type_lifted_and_consumed.nim": 1,
-            "tests/integration/t_local_daemons_control_plane_m10.nim": 5,
+            "tests/integration/t_local_daemons_control_plane_m10.nim": 6,
             "tests/integration/t_pre_push_protocol_v2_ref_validation.nim": 3,
             "tests/integration/"
             "t_repro_test_runner_process_group_cleanup.nim": 8,
@@ -447,7 +447,38 @@ test "incomplete name" and:
 
         # Exact generated-graph specification counts. An omitted, duplicated,
         # or substituted enrollment cannot be absorbed by the case totals.
-        self.assertEqual(len(nim_specs), 1186)
+        #
+        # Recomputed from the inventory module, not bumped arithmetically.
+        # Refreshed at the merge of metacraft-labs/dev into this branch.
+        # Both sides of the merge added suites and neither removed any, so
+        # the merged counts are exactly additive over the merge base
+        # (dev @ 65de08ff: 1198 specs / 6754 nim cases / 6785 total /
+        # 1202 entries):
+        #
+        #   upstream side (+1 spec / +5 nim cases)
+        #     tests/e2e/m83/t_e2e_profile_compile_nim_path_closure.nim  (5)
+        #
+        #   this branch (+4 specs / +9 nim cases)
+        #     libs/repro_project_dsl/tests/dsl_port/
+        #       t_dsl_self_hosting_tool_dep_name_collision.nim          (5)
+        #     tests/integration/t_pkgconf_bootstrap_provisioning.nim    (1)
+        #     tests/integration/t_pre_push_membership_repo_scopes_to_
+        #       touched_fragments.nim                                   (2)
+        #     tests/integration/t_pre_push_public_only_writes_no_
+        #       manifest_lock.nim                                       (1)
+        #
+        # 1198+5 = 1203 specs, 6754+14 = 6768 nim cases, 6785+14 = 6799
+        # overall, 1202+5 = 1207 entries. No source common to both parents
+        # changed its case count, so there is no unexplained residue.
+        #
+        # The long-standing +1 that an earlier refresh absorbed without
+        # investigating it is NOT re-absorbed here: it was root-caused to
+        # t_local_daemons_control_plane_m10.nim gaining a sixth case, and
+        # its per-source pin above reads 6 accordingly. Resolving the merge
+        # in favour of the upstream file reverted that pin to 5 while
+        # keeping the aggregates that already counted the sixth case; this
+        # restores it, so the per-source pins and the totals agree again.
+        self.assertEqual(len(nim_specs), 1203)
         self.assertEqual(len(python_specs), 4)
 
         nim_total = sum(
@@ -495,9 +526,9 @@ test "incomplete name" and:
         )
         # Language totals and the overall total. These are the aggregate
         # backstop for the per-source pins above, not a substitute for them.
-        self.assertEqual(nim_total, 6666)
+        self.assertEqual(nim_total, 6768)
         self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6697)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6799)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -763,7 +794,9 @@ test "incomplete name" and:
         # repro_tests.nim. This is an independent reading of the same
         # generated file as the parse_repro_tests pins above, so a dropped,
         # duplicated, or hand-edited specification fails here too.
-        self.assertEqual(declared_nim_count, 1186)
+        # Same +1 (upstream) / +4 (this branch) split as the
+        # parse_repro_tests pin above; see the comment there.
+        self.assertEqual(declared_nim_count, 1203)
         self.assertEqual(declared_python_count, 4)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -794,7 +827,7 @@ test "incomplete name" and:
             data["static"]["testEntryCount"],
             declared_nim_count + declared_python_count,
         )
-        self.assertEqual(data["static"]["testEntryCount"], 1190)
+        self.assertEqual(data["static"]["testEntryCount"], 1207)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),

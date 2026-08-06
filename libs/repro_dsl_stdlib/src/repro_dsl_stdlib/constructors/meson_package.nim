@@ -213,6 +213,16 @@ proc meson_package*(srcDir: string;
   ## package-specific process controls scoped to the recipe pipeline.
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
+  var effectiveConfigureOptions = configureOptions
+  var hasExplicitLibdir = false
+  for option in configureOptions:
+    if option.startsWith("libdir=") or option.startsWith("--libdir="):
+      hasExplicitLibdir = true
+      break
+  if not hasExplicitLibdir:
+    # Meson's host-dependent default may be lib/<multiarch>, while the
+    # package result and install mirror expose libraries from usr/lib.
+    effectiveConfigureOptions.insert("libdir=lib", 0)
   let extractedRel = block:
     let raw = registeredFetchSpec(pkgName).extractedRoot
     if raw.len > 0: raw else: "src"
@@ -280,7 +290,7 @@ proc meson_package*(srcDir: string;
     buildDir = buildDir,
     prefix = prefix,
     buildtype = buildtype,
-    options = configureOptions,
+    options = effectiveConfigureOptions,
     crossFile = crossFile,
     nativeFile = nativeFile,
     wrapMode = wrapMode,

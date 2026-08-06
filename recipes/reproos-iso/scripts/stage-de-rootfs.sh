@@ -90,6 +90,17 @@ fi
 # ---------------------------------------------------------------------------
 
 SRC_RECIPES_ROOT="$REPO_ROOT/recipes/packages/source"
+REPROOS_SOURCE_RECIPES="${REPROOS_SOURCE_RECIPES:-}"
+
+source_recipe_selected() {
+  recipe_name="$1"
+  [ -z "$REPROOS_SOURCE_RECIPES" ] && return 0
+  case " $REPROOS_SOURCE_RECIPES " in
+    *" $recipe_name "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # The from-source mirror prefix on the ISO is the SAME absolute path
 # the recipes use on the build host.  Without this fidelity, every
 # embedded RPATH like
@@ -103,6 +114,8 @@ staged_bytes=0
 echo "[stage-de-rootfs] staging from-source install-mirrors at $SRC_RECIPES_ROOT"
 for recipe_dir in "$SRC_RECIPES_ROOT"/*; do
   [ -d "$recipe_dir" ] || continue
+  recipe_name="$(basename "$recipe_dir")"
+  source_recipe_selected "$recipe_name" || continue
   install_dir="$recipe_dir/.repro/output/install"
   [ -d "$install_dir" ] || continue
   # Skip recipes whose install dir is empty (recipe is registered but
@@ -111,7 +124,6 @@ for recipe_dir in "$SRC_RECIPES_ROOT"/*; do
   if [ -z "$(find "$install_dir" -maxdepth 4 -type f -print -quit 2>/dev/null)" ]; then
     continue
   fi
-  recipe_name="$(basename "$recipe_dir")"
   dst_dir="$ISO_SRC_MIRROR_ROOT/$recipe_name/.repro/output/install"
   mkdir -p "$(dirname "$dst_dir")"
   # cp -a preserves symlinks + permissions + timestamps.  We do NOT
@@ -146,6 +158,21 @@ if [ -z "$SOURCE_GLIBC_VERSION" ]; then
   echo "[stage-de-rootfs] could not determine source glibc version" >&2
   exit 67
 fi
+
+# Install the source glibc runtime at the conventional loader path as well as
+# its mirrored recipe path. Some runtime helpers, notably systemd-executor,
+# are copied into the FHS tree and retain /lib64 as their interpreter until
+# the final normalization pass.
+mkdir -p "$STAGE_DIR/usr/lib64"
+cp -a "$SOURCE_GLIBC_RUNTIME_DIR_STAGED/." "$STAGE_DIR/usr/lib64/"
+SOURCE_GLIBC_LOADER="/lib64/$(basename "$SOURCE_GLIBC_LOADER_STAGED")"
+SOURCE_GLIBC_RUNTIME_DIR="/lib64"
+if [ ! -x "$STAGE_DIR$SOURCE_GLIBC_LOADER" ] || \
+   [ ! -e "$STAGE_DIR$SOURCE_GLIBC_RUNTIME_DIR/libc.so.6" ]; then
+  echo "[stage-de-rootfs] canonical source glibc runtime is incomplete" >&2
+  exit 67
+fi
+
 export SOURCE_GLIBC_VERSION
 echo "[stage-de-rootfs] source glibc runtime: $SOURCE_GLIBC_RUNTIME_DIR"
 
@@ -178,13 +205,14 @@ echo "[stage-de-rootfs] source glibc runtime: $SOURCE_GLIBC_RUNTIME_DIR"
 etc_overlay_count=0
 for recipe_dir in "$SRC_RECIPES_ROOT"/*; do
   [ -d "$recipe_dir" ] || continue
+  recipe_name="$(basename "$recipe_dir")"
+  source_recipe_selected "$recipe_name" || continue
   install_etc="$recipe_dir/.repro/output/install/etc"
   [ -d "$install_etc" ] || continue
   # Skip empty etc dirs.
   if [ -z "$(find "$install_etc" -mindepth 1 -maxdepth 4 -print -quit 2>/dev/null)" ]; then
     continue
   fi
-  recipe_name="$(basename "$recipe_dir")"
   # cp -an: archive (preserve mode/ownership/symlinks/timestamps) + no-clobber
   # (don't overwrite files already present under $STAGE_DIR/etc).
   # -R is implicit in -a; -n makes it additive.  We copy directory-by-directory

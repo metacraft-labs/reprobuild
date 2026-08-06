@@ -6,16 +6,16 @@ import repro_test_support
 
 const
   CodeTracerProjectContractCommit =
-    "e63a8d545e55843ceaca03cb345e9387af658119"
+    "879d1b226765130c4b5e7e8e5b38825fe647802d"
   PinnedCodeTracerProjectFile =
-    "tests/fixtures/codetracer-subset/repro-e63a8d54.nim"
+    "tests/fixtures/codetracer-subset/repro-879d1b22.nim"
   PinnedCodeTracerConfigFile =
-    "tests/fixtures/codetracer-subset/config-e63a8d54.nims"
+    "tests/fixtures/codetracer-subset/config-879d1b22.nims"
   PinnedCodeTracerFixtureHeaderLines = 6
   PinnedCodeTracerProjectPayloadSha256 =
-    "ec92f5f3e705019688b2353ac596edac47a184ade86af7d00988931fb3c0db03"
+    "6f91be25039952dedaf5a145ce17bee3a0843fc0b59b5ec5d2dd55c2f5dd2582"
   PinnedCodeTracerConfigPayloadSha256 =
-    "671942d34e051f4ed3a869f7d9a1cacec497e70c5191bf69e68a644549d84f12"
+    "3ce6cff73a75c6bfed6e3ed9d0fe1128dff8bca2ef5ef0e23caa5450305d299e"
 
 const GccProxySource = r"""
 #include <fcntl.h>

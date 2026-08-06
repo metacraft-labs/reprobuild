@@ -25,12 +25,10 @@
 ##     blobBytes blobLen bytes — raw CAS payload, digest validated by
 ##                        the reader on decode
 
-import std/options
-
 import repro_hash
 import repro_local_store
+import repro_cas_store
 
-import ./engine_seam
 import ./types
 
 type
@@ -149,6 +147,9 @@ proc actionBundleKey*(weakFingerprint: ContentDigest): BlobDigest =
   ## `repro_tool_profiles.actionFingerprintFor`).
   blobDigestFromBytes(weakFingerprint.bytes)
 
+proc contentHashForBundleBlob(blob: CasBlobRef): ContentHash =
+  toContentHash(blob.digest.bytes)
+
 proc materializeActionBundle*(cas: LocalCas;
                               record: ActionResultRecord): ActionBundle =
   ## Reads every output blob payload referenced by `record` from the
@@ -160,6 +161,22 @@ proc materializeActionBundle*(cas: LocalCas;
     return
   for output in record.outputs:
     result.blobs.add(cas.readBlob(output.blob))
+
+proc materializeActionBundle*(cas: CasStore;
+                              record: ActionResultRecord): ActionBundle =
+  ## R11 CAS-backed variant used by the build engine after M9.R.82. The
+  ## ActionResultRecord shape is unchanged: its CasBlobRef digest bytes are the
+  ## raw BLAKE3 key used by repro_cas_store.
+  result.record = record
+  result.blobs = @[]
+  if record.outputPayloadKind != opkCasBlobs:
+    return
+  for output in record.outputs:
+    let payload = cas.casGet(contentHashForBundleBlob(output.blob))
+    if uint64(payload.len) != output.blob.sizeBytes:
+      raise newException(CacheIntegrityError,
+        "CAS size mismatch for " & digestHex(output.blob.digest))
+    result.blobs.add(payload)
 
 proc installActionBundle*(cas: LocalCas; cache: var ActionCache;
                           bundle: ActionBundle):
@@ -182,6 +199,30 @@ proc installActionBundle*(cas: LocalCas; cache: var ActionCache;
           "bundle blob digest mismatch for output " &
           bundle.record.outputs[i].path)
       if stored.sizeBytes != bundle.record.outputs[i].blob.sizeBytes:
+        return (false,
+          "bundle blob size mismatch for output " &
+          bundle.record.outputs[i].path)
+  cache.appendActionResultRecord(bundle.record)
+  (true, "")
+
+proc installActionBundle*(cas: var CasStore; cache: var ActionCache;
+                          bundle: ActionBundle):
+                          tuple[ok: bool; reason: string] {.gcsafe.} =
+  ## R11 CAS-backed install path. Writes decoded bundle payloads into the same
+  ## ``cas/blake3`` layout that action-cache lookup verification and restore
+  ## use, then appends the record only after every payload has matched.
+  if bundle.record.outputPayloadKind == opkCasBlobs:
+    if bundle.blobs.len != bundle.record.outputs.len:
+      return (false,
+        "bundle blob count " & $bundle.blobs.len &
+        " does not match record outputs " & $bundle.record.outputs.len)
+    for i, payload in bundle.blobs:
+      let stored = cas.casPut(payload)
+      if stored != contentHashForBundleBlob(bundle.record.outputs[i].blob):
+        return (false,
+          "bundle blob digest mismatch for output " &
+          bundle.record.outputs[i].path)
+      if uint64(payload.len) != bundle.record.outputs[i].blob.sizeBytes:
         return (false,
           "bundle blob size mismatch for output " &
           bundle.record.outputs[i].path)

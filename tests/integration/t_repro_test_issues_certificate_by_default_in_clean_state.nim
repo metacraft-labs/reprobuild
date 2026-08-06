@@ -125,6 +125,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
     projectToml(fileUrl(result.libAOrigin)))
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   result.workspaceRoot = workspaceRoot
+  seedManifestLockStore(gitBin, workspaceRoot)
   cloneInto(gitBin, result.libAOrigin, workspaceRoot / "lib-a")
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
   # TC-5: the daemon signs issuance — provide a key and register its public

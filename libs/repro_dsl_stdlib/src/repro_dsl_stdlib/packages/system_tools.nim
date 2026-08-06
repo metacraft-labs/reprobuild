@@ -87,6 +87,7 @@ import ./wayland_protocols
 import ./wayland_scanner
 import ./linux_headers
 import ./python3
+import ./llvm_config
 import ./runquotad
 import ./host_system_tools
 # M9.R.15b.5 — gtk-update-icon-cache is referenced by adwaita-icon-theme
@@ -248,6 +249,7 @@ export wayland_protocols
 export wayland_scanner
 export linux_headers
 export python3
+export llvm_config
 export runquotad
 export host_system_tools
 export gtk_update_icon_cache

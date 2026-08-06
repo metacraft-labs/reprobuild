@@ -1,4 +1,5 @@
 var registry: seq[PackageDef] = @[]
+var provisioningContributionRegistry: seq[ProvisioningContributionDef] = @[]
 var buildActionRegistry: seq[BuildActionDef] = @[]
 var buildTargetRegistry: seq[BuildTargetDef] = @[]
   ## Pre-M5 single ``BuildTargetDef`` registry. After the M5 split this
@@ -327,6 +328,17 @@ proc registerPackageDef*(pkg: PackageDef) {.dynOrStatic.} =
 proc registeredPackages*(): seq[PackageDef] {.dynOrStatic.} =
   registry
 
+proc resetProvisioningContributionRegistry*() {.dynOrStatic.} =
+  provisioningContributionRegistry.setLen(0)
+
+proc registerProvisioningContributionDef*(
+    contribution: ProvisioningContributionDef) {.dynOrStatic.} =
+  provisioningContributionRegistry.add(contribution)
+
+proc registeredProvisioningContributions*():
+    seq[ProvisioningContributionDef] {.dynOrStatic.} =
+  provisioningContributionRegistry
+
 var resourceTypeInterfaceRegistry: seq[ResourceTypeInterfaceDef] = @[]
   ## RP4 (Provider-Runtime-Protocol-v1 §5): module-global set of resource
   ## types declared via the ``resourceType`` macro, collected for
@@ -464,6 +476,180 @@ proc activeProviderProjectRoot*(): string {.dynOrStatic.} =
     currentProviderProjectRoot
   else:
     ""
+
+proc dependencyNameFromConstraint*(value: string): string {.dynOrStatic.} =
+  ## M9.R.81: strip a package constraint down to the dependency selector
+  ## used by install-mirror resolution. Mirrors the existing from-source
+  ## tool-ref stripping convention: ``"qt6-base >=6.6"`` becomes
+  ## ``"qt6-base"``.
+  let stripped = value.strip()
+  for i, ch in stripped:
+    if ch in {' ', '\t', '>', '<', '=', '~', '^', '!', ',', ';'}:
+      return stripped[0 ..< i]
+  stripped
+
+proc dependencyRootEnvVarName*(depName: string): string {.dynOrStatic.} =
+  ## M9.R.81: deterministic ``DEP_<name>_ROOT`` spelling. The package
+  ## selector is uppercased and every non-alphanumeric byte maps to
+  ## ``_`` so ``qt6-declarative`` becomes ``DEP_QT6_DECLARATIVE_ROOT``.
+  var body = ""
+  for ch in depName:
+    if ch in {'a' .. 'z'}:
+      body.add(toUpperAscii(ch))
+    elif ch in {'A' .. 'Z', '0' .. '9'}:
+      body.add(ch)
+    else:
+      body.add('_')
+  if body.len == 0:
+    body = "X"
+  "DEP_" & body & "_ROOT"
+
+proc dependencyRootEnvEntries*(recipesRoot: string;
+                               depConstraints: openArray[string]):
+    seq[(string, string)] {.dynOrStatic.} =
+  ## M9.R.81: produce resolver-backed per-dependency install-mirror env
+  ## entries in caller-supplied declaration order. Duplicate env var
+  ## names are collapsed first-wins so action envs are deterministic
+  ## even if two constraint strings select the same dependency.
+  if recipesRoot.len == 0:
+    return
+  var seenEnvNames: seq[string] = @[]
+  for raw in depConstraints:
+    let depName = dependencyNameFromConstraint(raw)
+    if depName.len == 0:
+      continue
+    let envName = dependencyRootEnvVarName(depName)
+    if envName in seenEnvNames:
+      continue
+    let root = packageInstallMirrorRoot(recipesRoot, depName)
+    if root.len == 0:
+      continue
+    seenEnvNames.add(envName)
+    result.add((envName, root))
+
+proc packageProjectRoot*(packageName: string): string {.dynOrStatic.} =
+  ## Return the recipe project root for ``packageName``. Provider mode
+  ## supplies the live project root; test/module-init mode falls back to
+  ## the parsed package source file so registry tests observe the same
+  ## path shape without requiring a provider process.
+  let providerRoot = activeProviderProjectRoot()
+  if providerRoot.len > 0 and packageName == currentOwningPackage():
+    return providerRoot
+  if packageName.len == 0:
+    return ""
+  for pkg in registry:
+    if pkg.packageName == packageName and pkg.sourceFile.len > 0:
+      return parentDir(pkg.sourceFile).replace("\\", "/")
+  ""
+
+proc currentPackageInstallMirrorRoot*(): string {.dynOrStatic.} =
+  ## Resolver-backed install-mirror root for the active package's own
+  ## recipe directory. Intended for recipe declarations that need a
+  ## consumer view. Producer shell/action envs should use
+  ## ``currentPackageInstallMirrorStagingRoot`` via ``$OUT_MIRROR``.
+  let projectRoot = packageProjectRoot(currentOwningPackage())
+  if projectRoot.len == 0:
+    return ""
+  packageInstallMirrorRoot(parentDir(projectRoot), extractFilename(projectRoot))
+
+proc currentPackageInstallMirrorStagingRoot*(): string {.dynOrStatic.} =
+  ## Mutable producer staging root for the active package's own install
+  ## mirror. This always resolves to ``<projectRoot>/.repro/output/install``
+  ## even when the consumer resolver would follow a hashed sidecar.
+  let projectRoot = packageProjectRoot(currentOwningPackage())
+  if projectRoot.len == 0:
+    return ""
+  packageInstallMirrorStagingRoot(parentDir(projectRoot),
+    extractFilename(projectRoot))
+
+proc dependencyInstallMirrorRoot*(depName: string;
+                                  packageName = currentOwningPackage()):
+    string {.dynOrStatic.} =
+  ## Resolver-backed install-mirror root for ``depName`` relative to
+  ## ``packageName``'s sibling recipe container.
+  let projectRoot = packageProjectRoot(packageName)
+  if projectRoot.len == 0 or depName.len == 0:
+    return ""
+  packageInstallMirrorRoot(parentDir(projectRoot), depName)
+
+type
+  M9R81IndexedDep = object
+    raw: string
+    sourceLine: int
+    index: int
+
+proc packageDeclaredDependencyConstraints(pkg: PackageDef): seq[string] =
+  ## Combine all package-level dependency declarations in source order.
+  ## At runtime ``PackageDef.toolUses`` is already the macro-emitted
+  ## union of ``uses:``/``buildDeps:``, ``nativeBuildDeps:``, and
+  ## ``runtimeDeps:`` (see ``packageLiteral``). Source line metadata
+  ## recovers source declaration order across those sections; entries
+  ## without a real declaration site are macro-injected defaults and
+  ## sort after user-declared entries.
+  var indexed: seq[M9R81IndexedDep] = @[]
+  var idx = 0
+  for use in pkg.toolUses:
+    indexed.add(M9R81IndexedDep(
+      raw: use.rawConstraint,
+      sourceLine: if use.sourceLine <= pkg.sourceLine: high(int)
+                  else: use.sourceLine,
+      index: idx))
+    inc idx
+  indexed.sort(proc(a, b: M9R81IndexedDep): int =
+    result = cmp(a.sourceLine, b.sourceLine)
+    if result == 0:
+      result = cmp(a.index, b.index))
+  for item in indexed:
+    result.add(item.raw)
+
+proc packageDependencyRootEnvEntries*(packageName, projectRoot: string):
+    seq[(string, string)] {.dynOrStatic.} =
+  ## M9.R.81: resolver-backed ``DEP_<name>_ROOT`` entries for all deps
+  ## declared by ``packageName``. ``projectRoot`` is the package recipe
+  ## directory; when omitted, callers should use ``packageProjectRoot``.
+  if packageName.len == 0 or projectRoot.len == 0:
+    return
+  for pkg in registry:
+    if pkg.packageName != packageName:
+      continue
+    return dependencyRootEnvEntries(
+      parentDir(projectRoot),
+      packageDeclaredDependencyConstraints(pkg))
+  return @[]
+
+proc currentPackageDependencyRootEnvEntries*(): seq[(string, string)]
+    {.dynOrStatic.} =
+  let pkgName = currentOwningPackage()
+  if pkgName.len == 0:
+    return @[]
+  packageDependencyRootEnvEntries(pkgName, packageProjectRoot(pkgName))
+
+proc currentPackageActionEnvEntries*(): seq[(string, string)]
+    {.dynOrStatic.} =
+  ## Common package-root env entries injected into every action emitted
+  ## while a package build body is active. ``OUT_MIRROR`` keeps typed
+  ## shell actions on the mutable producer staging root; DEP_* roots
+  ## remain resolver-backed and follow declared dependency order.
+  let outMirror = currentPackageInstallMirrorStagingRoot()
+  if outMirror.len > 0:
+    result.add(("OUT_MIRROR", outMirror))
+  for entry in currentPackageDependencyRootEnvEntries():
+    result.add(entry)
+
+proc mergePackageActionEnv(packageActionEnv, explicitEnv:
+    openArray[(string, string)]): seq[(string, string)] {.dynOrStatic.} =
+  ## Package defaults are injected ahead of explicit env values, but
+  ## an explicit env key owns that name. This keeps action.env free of
+  ## duplicate names while preserving the previous "explicit wins"
+  ## launch semantics for callers that intentionally override a default.
+  var explicitNames: seq[string] = @[]
+  for (key, _) in explicitEnv:
+    explicitNames.add(key)
+  for entry in packageActionEnv:
+    if entry[0] notin explicitNames:
+      result.add(entry)
+  for entry in explicitEnv:
+    result.add(entry)
 
 # M9.R.34: recipe-revision fingerprint cache.
 #
@@ -1017,6 +1203,8 @@ proc buildAction*(id: string; call: PublicCliCall;
   # encoding aside from the new sentinel byte the v20 codec adds.
   let recipeRevisionFingerprint = computeRecipeRevisionFingerprint(
     activeProviderProjectRoot())
+  let packageActionEnv = currentPackageActionEnvEntries()
+  let actionEnv = mergePackageActionEnv(packageActionEnv, env)
   result = BuildActionDef(
     id: id,
     call: call,
@@ -1032,7 +1220,7 @@ proc buildAction*(id: string; call: PublicCliCall;
     dependencyPolicy: dependencyPolicy,
     actionCachePolicy: actionCachePolicy,
     outputTag: outputTag,
-    env: @env,
+    env: actionEnv,
     publishToBinaryCache: publishToBinaryCache,
     cacheEntryIdentity: cacheEntryIdentity,
     toolIdentityRefs: @toolIdentityRefs,
@@ -1743,6 +1931,20 @@ proc setRegisteredActionReadOnlyRoots*(actionId: string;
   for i in 0 ..< buildActionRegistry.len:
     if buildActionRegistry[i].id == actionId:
       buildActionRegistry[i].readOnlyRoots = @roots
+      return
+
+proc setRegisteredActionCwd*(actionId: string; kind: ActionCwdKind;
+                             customPath: string) {.dynOrStatic.} =
+  ## M9.R.84 — set the registry entry's canonical execution root in
+  ## place. Used by higher-level constructors when a typed tool's argv
+  ## has a build-directory concept but monitor evidence must be folded
+  ## against the actual process cwd. Mirrors the write-scope mutators
+  ## above: generated typed-tool wrappers register the action first,
+  ## then constructors stamp the more precise policy fields.
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      buildActionRegistry[i].cwdKind = kind
+      buildActionRegistry[i].cwdCustomPath = customPath
       return
 
 proc recordToolInvocation*(id: string; call: PublicCliCall;

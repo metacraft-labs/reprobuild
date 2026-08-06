@@ -334,6 +334,18 @@ proc normalizeIncludePath(projectFile, raw: string): string =
 
 # ---- fetch-URL construction -----------------------------------------------
 
+proc isVerbatimFetchBase*(fetch: string): bool =
+  ## `true` when `getFetchUrl` uses this `fetch` VERBATIM instead of appending
+  ## a repo name — i.e. it already points at one repository rather than at a
+  ## base other repos hang off. Manifest AUTHORING has to make the same
+  ## distinction (such a `fetch` can serve exactly one URL and can never be
+  ## reused), so the predicate lives here and both sides call it.
+  ##
+  ## Takes the RAW `fetch` string: `canonicalGitUrl` strips the `.git` from
+  ## network URLs, and a canonicalized base can no longer be told apart from a
+  ## composable one.
+  fetch.endsWith(".git") or fetch.endsWith(".git/")
+
 proc getFetchUrl*(fetchBase, repoName: string): string =
   ## Build a repo's clone URL from its remote's `fetch` base and the repo's
   ## server-side `name`, following Android-`repo` manifest semantics: the
@@ -347,7 +359,7 @@ proc getFetchUrl*(fetchBase, repoName: string): string =
   ## must never drift apart, so both sides call this one proc.
   if fetchBase.len == 0:
     ""
-  elif fetchBase.endsWith(".git") or fetchBase.endsWith(".git/"):
+  elif isVerbatimFetchBase(fetchBase):
     fetchBase
   else:
     fetchBase & "/" & repoName
@@ -359,23 +371,45 @@ proc getFetchUrl*(fetchBase, repoName: string): string =
 # `[[remote]]` entry in `projects/<project>.toml`. The rules below are the
 # inverse of `getFetchUrl`:
 #
-#   1. REUSE — a declared remote whose `fetch` base, composed with the repo's
-#      name, already reproduces the requested URL. Nothing is added to the
-#      project's remote table.
-#   2. REUSE WITH A SERVER-SIDE NAME — only when the URL's last segment is not
-#      the repo name (e.g. `…/llvm/llvm-project` added as `llvm-project`): a
-#      declared base is a prefix of the URL, so the fragment carries the
-#      remaining path as its `name` (Android-`repo` semantics: `name` is the
-#      server-side path, `path` is the local checkout dir). This is how the
-#      hand-written `repos/llvm-project.toml` is shaped.
-#   3. MINT — no declared remote can produce the URL: add exactly ONE entry,
-#      named after the org (or the host when the URL has no org segment) and
-#      carrying the org base as `fetch`, so the NEXT repo from the same org
-#      hits rule 1 and adds nothing.
+#   1. REUSE THE MOST SPECIFIC DECLARED BASE — of every declared `fetch` base
+#      that can serve the URL, take the LONGEST, and put whatever path remains
+#      into the fragment's `name` (Android-`repo` semantics: `name` is the
+#      server-side path, `path` is the local checkout dir). Nothing is added
+#      to the project's remote table. This single rule reproduces both
+#      hand-written families in the pilot manifests, which declare `github` →
+#      `https://github.com` AND `metacraft-labs` → `https://github.com/metacraft-labs`:
+#
+#        https://github.com/metacraft-labs/nim-shm-queue
+#          → remote = "metacraft-labs", name = "nim-shm-queue"
+#            (the longer base wins; the name stays bare, as in
+#             `repos/nim-shm-queue.toml`)
+#        https://github.com/llvm/llvm-project
+#          → remote = "github", name = "llvm/llvm-project"
+#            (no `llvm` base is declared, so the generic host base serves it
+#             and the org travels in `name`, as in `repos/llvm-project.toml`)
+#
+#      A `fetch` that already points at ONE repo (ends in `.git`) is used
+#      verbatim by `getFetchUrl`, so it is not a base anything can be appended
+#      to: it serves a URL only by BEING it, and then the requested name is
+#      kept as-is.
+#   2. MINT — no declared base prefixes the URL: add exactly ONE entry, named
+#      after the org (or the host when the URL has no org segment) and carrying
+#      the org base as `fetch`, so the NEXT repo from the same org hits rule 1
+#      and adds nothing.
 #
 # A per-repo remote (`<repo>-origin` with the full URL as `fetch`) is never
-# minted: it grows the project's shared remote table by one entry per repo and
-# can never be reused, because a `fetch` ending in `.git` is used verbatim.
+# PLANNED here: it grows the project's shared remote table by one entry per
+# repo and can never be reused, because a `fetch` ending in `.git` is used
+# verbatim. A caller may still fall back to one when it cannot use the plan it
+# got — see `preserveRepoName` below.
+#
+# `preserveRepoName` is for callers that cannot accept a server-side name:
+# `repro add` records develop-set `depends` edges that key off `[repo].name`,
+# so a fragment whose `name` is not the added repo's own name would leave those
+# edges dangling. Such a caller asks for a plan that keeps the name, which
+# restricts rule 1 to bases that compose to the URL with the requested name
+# unchanged. (`repro workspace project repo add` writes no `depends` edges and
+# so takes the unrestricted, convention-matching plan.)
 
 type
   RepoRemotePlan* = object
@@ -386,8 +420,9 @@ type
     repoName*: string
       ## The `[repo].name` value the fragment should carry. Equal to the
       ## requested repo name except when the URL's server-side path differs
-      ## from the local checkout dir (rule 2 / a bare-repo URL whose last
-      ## segment keeps its `.git`).
+      ## from the local checkout dir (`llvm/llvm-project` checked out as
+      ## `llvm-project`, or a bare-repo URL whose last segment keeps its
+      ## `.git`).
     mintedFetch*: string
       ## When non-empty, the `fetch` base of a NEW `[[remote]]` entry that the
       ## caller must append to the project manifest under `remoteName`. Empty
@@ -477,7 +512,8 @@ proc hostLabelFor(base: string): string =
 
 proc planRepoRemote*(remotes: openArray[RemoteEntry];
                      defaultRemote: string;
-                     repoName, requestedUrl: string): RepoRemotePlan =
+                     repoName, requestedUrl: string;
+                     preserveRepoName = false): RepoRemotePlan =
   ## Plan the `[repo].remote` / `[repo].name` of a fragment for `repoName`
   ## cloned from `requestedUrl`, against a project's declared `remotes`.
   ## See the rules documented above this type.
@@ -487,22 +523,42 @@ proc planRepoRemote*(remotes: openArray[RemoteEntry];
     return
   let wanted = canonicalGitUrl(requestedUrl)
 
-  # Rule 1 — a declared remote already composes to the requested URL for this
-  # repo name. Deterministic pick when several do (a project may declare two
-  # names for one org): the project's `default_remote` first, then a remote
-  # named after the org segment of its own base (`metacraft-labs` beats a
-  # generic `origin` alias), then declaration order.
+  # Rule 1 — reuse the MOST SPECIFIC declared base that can serve the URL.
+  # Primary key: the length of the matched base, so `metacraft-labs` beats the
+  # generic `github` for a repo under that org and the fragment's `name` stays
+  # bare. Tie-break when several bases are equally specific (a project may
+  # declare two names for one org): the project's `default_remote` first, then
+  # a remote named after the org segment of its own base (`metacraft-labs`
+  # beats a generic `origin` alias), then declaration order.
+  var bestLen = -1
   var bestRank = high(int)
+  var bestRepoName = ""
   for idx, r in remotes.pairs:
     if r.fetch.len == 0: continue
-    if canonicalGitUrl(getFetchUrl(r.fetch, repoName)) != wanted: continue
+    let rBase = canonicalGitUrl(r.fetch)
+    if rBase.len == 0: continue
+    var candidateName = ""
+    if isVerbatimFetchBase(r.fetch):
+      # Not a base: `getFetchUrl` ignores the name, so this remote serves the
+      # URL only by being it, and the requested name is kept.
+      if rBase != wanted: continue
+      candidateName = repoName
+    elif wanted.startsWith(rBase & "/"):
+      candidateName = wanted[rBase.len + 1 .. ^1]
+    else:
+      continue
+    if candidateName.len == 0: continue
+    if preserveRepoName and candidateName != repoName: continue
     var rank = idx
-    if r.name == orgLabelFor(canonicalGitUrl(r.fetch)): rank -= 1_000
+    if r.name == orgLabelFor(rBase): rank -= 1_000
     if defaultRemote.len > 0 and r.name == defaultRemote: rank -= 1_000_000
-    if rank < bestRank:
+    if rBase.len > bestLen or (rBase.len == bestLen and rank < bestRank):
+      bestLen = rBase.len
       bestRank = rank
       result.remoteName = r.name
+      bestRepoName = candidateName
   if result.remoteName.len > 0:
+    result.repoName = bestRepoName
     return
 
   let (base, leaf) = splitLastSegment(wanted)
@@ -511,25 +567,7 @@ proc planRepoRemote*(remotes: openArray[RemoteEntry];
       "' has no repository path segment to compose a manifest entry from"
     return
 
-  # Rule 2 — the URL's server-side name differs from the local checkout name
-  # (`llvm/llvm-project` checked out as `llvm-project`, or a bare `…/x.git`
-  # directory). A declared base that PREFIXES the URL can still serve it; the
-  # fragment carries the remaining path as its `name`.
-  if leaf != repoName:
-    var bestBaseLen = -1
-    for r in remotes:
-      if r.fetch.len == 0: continue
-      let rBase = canonicalGitUrl(r.fetch)
-      if rBase.endsWith(".git"): continue   # verbatim, single-repo base
-      if not wanted.startsWith(rBase & "/"): continue
-      if rBase.len > bestBaseLen:
-        bestBaseLen = rBase.len
-        result.remoteName = r.name
-        result.repoName = wanted[rBase.len + 1 .. ^1]
-    if result.remoteName.len > 0:
-      return
-
-  # Rule 3 — mint ONE org-named remote carrying the org base, so the next
+  # Rule 2 — mint ONE org-named remote carrying the org base, so the next
   # repo from the same org reuses it via rule 1.
   result.repoName = leaf
   var candidate = orgLabelFor(base)

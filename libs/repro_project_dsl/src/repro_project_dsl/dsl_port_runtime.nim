@@ -494,6 +494,18 @@ proc registeredVersions*(packageName: string): seq[DslVersionInfo] =
     return dslPortVersionRegistry[packageName]
   return @[]
 
+proc latestRegisteredPackageVersion*(packageName: string): string =
+  ## Return the last non-empty version registered for ``packageName``.
+  ## Empty means the package did not declare a publishable version; emit
+  ## paths must then skip store publication instead of inventing one.
+  let versions = registeredVersions(packageName)
+  if versions.len == 0:
+    return ""
+  for i in countdown(versions.high, 0):
+    if versions[i].version.len > 0:
+      return versions[i].version
+  ""
+
 # ---------------------------------------------------------------------------
 # DSL-port M3 — artifact registry for ``executable``, ``library``, ``files``.
 # ---------------------------------------------------------------------------
@@ -4045,6 +4057,9 @@ proc dslPortSanitizeIdPart(value: string): string =
   if result.len == 0:
     result = "x"
 
+proc dslPortInstallMirrorPublishVersion(packageName: string): string =
+  result = latestRegisteredPackageVersion(packageName)
+
 const customMirrorFallbackSubdirs* = [
   "lib", "lib64", "libexec", "include", "bin", "share"
 ]
@@ -4208,6 +4223,8 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       replace("\"", "\\\"")
     let escapedOutPath = outPath.replace("\\", "/").
       replace("\"", "\\\"")
+    let recipesRoot = parentDir(projectRoot)
+    let publishVersion = dslPortInstallMirrorPublishVersion(packageName)
     var script = "set -e; "
     script.add("rm -rf \"" & escapedMirrorUsr & "\"; ")
     script.add("mkdir -p \"" & escapedMirrorRoot & "\"; ")
@@ -4242,7 +4259,9 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     script.add("; s|^datadir=/usr/share|datadir=" & escapedMirrorUsr & "/share| ")
     script.add("; s|^datarootdir=/usr/share|datarootdir=" & escapedMirrorUsr & "/share|' ")
     script.add("\"$pc\"; fi; done; fi; done; ")
-    script.add("touch \"" & escapedMirrorStamp & "\"")
+    script.add("touch \"" & escapedMirrorStamp & "\"; ")
+    script.add(emitInstallMirrorStorePublish(recipesRoot, packageName,
+      publishVersion, mirrorRoot))
     let mirrorActionId = "from-source-custom-mirror-" &
       dslPortSanitizeIdPart(packageName)
     let packageVersion = block:
@@ -4255,13 +4274,13 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       call = inlineExecCall(@["sh", "-c", script], projectRoot),
       deps = @[prevId],
       inputs = @[prevStamp],
-      outputs = @[mirrorStamp],
+      outputs = @[mirrorStamp, realizationInfoPath(recipesRoot, packageName)],
       pool = "compile",
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "from-source-custom.mirror",
       publishToBinaryCache = true,
       cacheEntryIdentity = some(cacheIdentity),
-      toolIdentityRefs = @["sh"],
+      toolIdentityRefs = @["sh", InstallMirrorPublishToolName],
       declaredOutputs = @[mirrorRoot])
 
 # ---------------------------------------------------------------------------

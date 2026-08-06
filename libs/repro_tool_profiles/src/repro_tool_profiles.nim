@@ -767,13 +767,55 @@ proc effectiveNixSelector(selected: InterfaceNixProvisioning): string =
       selected.nixpkgsNarHash) & "#" & selected.selector["nixpkgs#".len .. ^1]
   selected.selector
 
+proc requestedProvisioningContributor(): string =
+  getEnv("REPRO_PROVISIONING_CONTRIBUTOR").strip()
+
+proc contributorLabel(value: string): string =
+  if value.len > 0: value else: "canonical-package"
+
+proc contributorLockIdentity(contributor, realizationIdentity: string): string =
+  if contributor.len == 0:
+    realizationIdentity
+  else:
+    "contributor:" & contributor & "\n" & realizationIdentity
+
+proc selectNixProvisioning(useDef: InterfaceToolUse):
+    InterfaceNixProvisioning =
+  let requested = requestedProvisioningContributor()
+  var contributors: seq[string] = @[]
+  # ``result.selector`` is NOT a usable "nothing chosen yet" sentinel: an entry
+  # whose selector is empty is still an ELIGIBLE entry with incomplete
+  # metadata, and treating it as unchosen reported "no nix realization" for a
+  # package that declares one. ``nixAcquisitionPlan`` owns the completeness
+  # diagnostic; selection only decides WHICH entry.
+  var chosen = false
+  for candidate in useDef.nixProvisioning:
+    if requested.len > 0 and candidate.contributor != requested:
+      continue
+    if candidate.contributor notin contributors:
+      contributors.add(candidate.contributor)
+    if not chosen:
+      result = candidate
+      chosen = true
+  if not chosen:
+    raise newException(ValueError,
+      "tool-resolution failed: provisioning contributor \"" & requested &
+      "\" has no nix realization for package \"" &
+      useDef.packageSelector & "\"")
+  if requested.len == 0 and contributors.len > 1:
+    raise newException(ValueError,
+      "tool-resolution failed: ambiguous nix provisioning for package \"" &
+      useDef.packageSelector & "\"; eligible contributors: " &
+      contributors.mapIt(contributorLabel(it)).join(", ") &
+      "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
+
 proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
   if useDef.nixProvisioning.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
       "\" does not declare provisioning: nixPackage metadata")
-  let selected = useDef.nixProvisioning[0]
+  let selected = selectNixProvisioning(useDef)
   if selected.selector.len == 0 or selected.executablePath.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: incomplete nixPackage metadata for package \"" &
@@ -800,7 +842,7 @@ proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
     nixpkgsRef: selected.nixpkgsRef,
     nixpkgsRev: selected.nixpkgsRev,
     nixpkgsNarHash: selected.nixpkgsNarHash,
-    lockIdentity: lockIdentity)
+    lockIdentity: contributorLockIdentity(selected.contributor, lockIdentity))
 
 proc unsafeRelativePath(value: string): bool =
   let normalized = value.replace('\\', '/')
@@ -1545,9 +1587,25 @@ proc selectTarballProvisioning(useDef: InterfaceToolUse):
   ## act as a catch-all when no per-platform slice is supplied. Entries
   ## are walked in declaration order so author intent is preserved
   ## (early entries beat later catch-alls).
+  let requested = requestedProvisioningContributor()
+  var contributors: seq[string] = @[]
+  var candidates: seq[InterfaceTarballProvisioning] = @[]
   for provisioning in useDef.tarballProvisioning:
-    if matchesHostPlatform(provisioning):
-      return provisioning
+    if not matchesHostPlatform(provisioning):
+      continue
+    if requested.len > 0 and provisioning.contributor != requested:
+      continue
+    candidates.add(provisioning)
+    if provisioning.contributor notin contributors:
+      contributors.add(provisioning.contributor)
+  if requested.len == 0 and contributors.len > 1:
+    raise newException(ValueError,
+      "tool-resolution failed: ambiguous tarball provisioning for package \"" &
+      useDef.packageSelector & "\"; eligible contributors: " &
+      contributors.mapIt(contributorLabel(it)).join(", ") &
+      "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
+  if candidates.len > 0:
+    return candidates[0]
   raise newException(ValueError,
     "tool-resolution failed: no tarball provisioning entry for package \"" &
     useDef.packageSelector & "\" matches host cpu=" & hostCpuToken() &
@@ -1581,10 +1639,11 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
     0: selected.archiveType else: "tar.gz",
     declaredExecutablePath: selected.executablePath,
     stripComponents: selected.stripComponents,
-    lockIdentity: if selected.lockIdentity.len > 0:
+    lockIdentity: contributorLockIdentity(selected.contributor,
+      if selected.lockIdentity.len > 0:
         selected.lockIdentity
       else:
-        "sha256:" & sha256)
+        "sha256:" & sha256))
 
 proc downloadUrlToFile(url, destination: string) =
   createDir(extendedPath(parentDir(destination)))
@@ -2545,7 +2604,27 @@ proc scoopAcquisitionPlan*(useDef: InterfaceToolUse): ScoopAcquisitionPlan =
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
       "\" does not declare provisioning: scoopApp metadata")
-  let selected = useDef.scoopProvisioning[0]
+  let requested = requestedProvisioningContributor()
+  var contributors: seq[string] = @[]
+  var candidates: seq[InterfaceScoopProvisioning] = @[]
+  for candidate in useDef.scoopProvisioning:
+    if requested.len > 0 and candidate.contributor != requested:
+      continue
+    candidates.add(candidate)
+    if candidate.contributor notin contributors:
+      contributors.add(candidate.contributor)
+  if candidates.len == 0:
+    raise newException(ValueError,
+      "tool-resolution failed: provisioning contributor \"" & requested &
+      "\" has no scoop realization for package \"" &
+      useDef.packageSelector & "\"")
+  if requested.len == 0 and contributors.len > 1:
+    raise newException(ValueError,
+      "tool-resolution failed: ambiguous scoop provisioning for package \"" &
+      useDef.packageSelector & "\"; eligible contributors: " &
+      contributors.mapIt(contributorLabel(it)).join(", ") &
+      "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
+  let selected = candidates[0]
   if selected.bucket.len == 0 or selected.app.len == 0 or
       selected.executablePath.len == 0:
     raise newException(ValueError,
@@ -2577,7 +2656,7 @@ proc scoopAcquisitionPlan*(useDef: InterfaceToolUse): ScoopAcquisitionPlan =
     declaredExecutablePath: selected.executablePath,
     requiresExecutionProfileChecksum:
       selected.requiresExecutionProfileChecksum,
-    lockIdentity: lockIdentity)
+    lockIdentity: contributorLockIdentity(selected.contributor, lockIdentity))
 
 proc resolveScoopRoot(scoopOverride: string): string =
   let explicit = getEnv("SCOOP")
@@ -3664,14 +3743,20 @@ proc seedBootstrapCycleBreakTools*() =
 
 proc fromSourceRecipeRoot*(): string =
   ## Resolve the from-source recipe anchor. Honours
-  ## ``REPRO_FROM_SOURCE_ROOT`` first; falls back to
-  ## ``getCurrentDir() / "recipes" / "packages" / "source"`` so an
-  ## operator invoking ``repro build`` from a reprobuild checkout finds
-  ## the recipes that ship in-tree.
+  ## ``REPRO_FROM_SOURCE_ROOT`` first. The legacy in-tree catalog remains
+  ## the first automatic candidate, followed by the federated sibling
+  ## ``reprobuild-packages/packages/source`` checkout.
   let override = getEnv(FromSourceRootEnvVar)
   if override.len > 0:
     return override
-  getCurrentDir() / "recipes" / "packages" / "source"
+  let inTree = getCurrentDir() / "recipes" / "packages" / "source"
+  if dirExists(inTree):
+    return inTree
+  let federated = parentDir(getCurrentDir()) / "reprobuild-packages" /
+    "packages" / "source"
+  if dirExists(federated):
+    return federated
+  inTree
 
 proc fromSourceArtifactCandidate*(recipeRoot, packageName,
                                   executableName: string): string =
@@ -4155,7 +4240,7 @@ proc populateFromSourceSearchPathsLocal(profile: var PathOnlyToolProfile;
           case child.toLowerAscii()
           of "stdbool.h", "stdio.h", "stddef.h", "stdlib.h",
              "stdint.h", "string.h", "stdarg.h", "assert.h",
-             "errno.h", "ctype.h", "math.h", "time.h", "limits.h",
+             "errno.h", "err.h", "ctype.h", "math.h", "time.h", "limits.h",
              "float.h", "locale.h", "setjmp.h", "signal.h",
              "wchar.h", "wctype.h", "iso646.h", "stdalign.h",
              "stdnoreturn.h", "stdatomic.h", "uchar.h",
@@ -4220,6 +4305,7 @@ const FromSourceRecipeAliases* = [
   (dependency: "pkg-config", recipe: "pkgconf"),
   (dependency: "libudev", recipe: "systemd"),
   (dependency: "libsystemd", recipe: "systemd"),
+  (dependency: "libcrypt", recipe: "libxcrypt"),
 ]
   ## Source packages can publish independently consumed libraries whose
   ## ABI name differs from the upstream source-package name. Keep these
@@ -4246,6 +4332,53 @@ proc m9r14fDepRecipeNames(useDef: InterfaceToolUse): seq[string] =
           alias.recipe notin result:
         result.add(alias.recipe)
 
+proc m9r14fResolveRecipeDir(useDef: InterfaceToolUse;
+                            recipeRoot: string): string =
+  ## Resolve a dependency to its source recipe. Corpus recipes remain the
+  ## primary convention. When the conventional root is the repository's
+  ## ``recipes/packages/source`` tree, also admit a same-named in-tree
+  ## application recipe under ``apps/``. This lets system images depend on
+  ## applications through the regular from-source auto-recurse path without
+  ## duplicating application recipes in the package corpus.
+  let candidates = m9r14fDepRecipeNames(useDef)
+  for candidate in candidates:
+    let recipeDir = recipeRoot / candidate
+    if fileExists(extendedPath(recipeDir / "repro.nim")):
+      return recipeDir
+
+  let sourceRoot = absolutePath(recipeRoot)
+  let packagesRoot = parentDir(sourceRoot)
+  let recipesRoot = parentDir(packagesRoot)
+  if lastPathPart(sourceRoot).cmpIgnoreCase("source") == 0 and
+      lastPathPart(packagesRoot).cmpIgnoreCase("packages") == 0 and
+      lastPathPart(recipesRoot).cmpIgnoreCase("recipes") == 0:
+    let appsRoot = parentDir(recipesRoot) / "apps"
+    for candidate in candidates:
+      let recipeDir = appsRoot / candidate
+      if fileExists(extendedPath(recipeDir / "repro.nim")):
+        return recipeDir
+
+  # Federated package catalogs are siblings of product repositories rather
+  # than descendants of them. Product-owned applications still satisfy
+  # package dependencies through the local apps/<selector> convention.
+  var productRoot = getCurrentDir()
+  for _ in 0 .. 4:
+    let appsRoot = productRoot / "apps"
+    for candidate in candidates:
+      let recipeDir = appsRoot / candidate
+      if fileExists(extendedPath(recipeDir / "repro.nim")):
+        return recipeDir
+    let parent = parentDir(productRoot)
+    if parent == productRoot:
+      break
+    productRoot = parent
+
+  let fallbackName =
+    if useDef.executableName.len > 0: useDef.executableName
+    elif candidates.len > 0: candidates[0]
+    else: m9r14fDepRecipeName(useDef)
+  recipeRoot / fallbackName
+
 proc m9r14fLoadInterfaceToolUses*(recipeDir: string): seq[InterfaceToolUse] =
   ## DSL-port M9.R.14f.1 — read the sibling recipe's
   ## ``project-interface.rbsz`` and return its ``toolUses`` (which carry
@@ -4261,6 +4394,39 @@ proc m9r14fLoadInterfaceToolUses*(recipeDir: string): seq[InterfaceToolUse] =
   try:
     let artifact = readInterfaceArtifact(interfacePath)
     result = artifact.projectInterface.toolUses
+  except CatchableError:
+    discard
+
+proc readPathOnlyBuildIdentity*(path: string): PathOnlyBuildIdentity
+
+proc mergeRecordedSourceProviderProfiles(profile: var PathOnlyToolProfile;
+                                         recipeDir: string) =
+  ## A source-built tool can itself rely on a non-source bootstrap adapter.
+  ## Carry those exact recorded profiles into consumers of the source tool.
+  ## Source profiles are recomputed from their install mirrors by the regular
+  ## transitive walk, so only non-source profiles are inherited here.
+  let identityPath = recipeDir / ".repro" / "build" / "repro" /
+    "from-source-tool-identities.rbtp"
+  if not fileExists(extendedPath(identityPath)):
+    return
+  try:
+    let identity = readPathOnlyBuildIdentity(identityPath)
+    for inherited in identity.profiles:
+      if inherited.installMethod == "from-source":
+        continue
+      for path in inherited.realizedStorePaths:
+        if path.len > 0 and path notin profile.realizedStorePaths:
+          profile.realizedStorePaths.add(path)
+      for path in inherited.pathSearchList:
+        addUniquePath(profile.pathSearchList, path)
+      for path in inherited.pkgConfigSearchList:
+        addUniquePath(profile.pkgConfigSearchList, path)
+      for path in inherited.cmakePrefixList:
+        addUniquePath(profile.cmakePrefixList, path)
+      for path in inherited.cpathList:
+        addUniquePath(profile.cpathList, path)
+      for path in inherited.libraryPathList:
+        addUniquePath(profile.libraryPathList, path)
   except CatchableError:
     discard
 
@@ -4332,6 +4498,7 @@ proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
   var visited: HashSet[string] = initHashSet[string]()
   populateFromSourceSearchPathsImpl(profile, recipeDir, effectiveRoot,
     visited, 0)
+  mergeRecordedSourceProviderProfiles(profile, recipeDir)
 
 proc fromSourceSearchPathsCurrent*(profile: PathOnlyToolProfile): bool =
   ## Return whether a cached from-source profile still describes the
@@ -4415,12 +4582,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
       "tool-resolution failed: from-source mode requires a non-empty " &
       "executableName on the tool use (package \"" &
       useDef.packageSelector & "\")")
-  var recipeName = name
-  for candidate in m9r14fDepRecipeNames(useDef):
-    if fileExists(extendedPath(root / candidate / "repro.nim")):
-      recipeName = candidate
-      break
-  let recipeDir = root / recipeName
+  let recipeDir = m9r14fResolveRecipeDir(useDef, root)
   let recipeManifest = recipeDir / "repro.nim"
   try:
     let msg = "[RESOLVER] tryResolveFromSourceTool: name=" & name & " root=" & root & " manifest=" & recipeManifest & " exists=" & $fileExists(extendedPath(recipeManifest)) & "\n"
@@ -4444,7 +4606,7 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
   # candidates can be enumerated (the recipe's `.repro/output/` tree
   # is empty / missing) so existing tests + the executable-style probe
   # for tools like ``meson`` keep working unchanged.
-  let baseCandidate = fromSourceArtifactCandidate(root, recipeName, name)
+  let baseCandidate = recipeDir / ".repro" / "output" / name / name
   var candidates = m9r14dEnumerateArtifacts(recipeDir)
   var resolved = ""
   # Prefer the complete install mirror for executable tools. Its ELF RPATH
@@ -4600,6 +4762,57 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
           if fileExists(extendedPath(entry)):
             resolved = absolutePath(entry)
             break sharedDataWalk
+  if resolved.len == 0:
+    # Configuration-only packages can publish exclusively below etc/.
+    # ca-certificates is the canonical case: its completed artifact is
+    # etc/ssl/certs/ca-certificates.crt rather than an executable or
+    # library. Treat a regular staged configuration file as build evidence.
+    block configurationDataWalk:
+      for etcSubdir in [".repro/output/install/etc", "build/out/etc"]:
+        let etcRoot = recipeDir / etcSubdir
+        if not dirExists(extendedPath(etcRoot)):
+          continue
+        for entry in walkDirRec(extendedPath(etcRoot)):
+          if fileExists(extendedPath(entry)):
+            resolved = absolutePath(entry)
+            break configurationDataWalk
+  if resolved.len == 0:
+    # Some non-executable system payloads live under a package-specific
+    # lib directory instead of share/. The Linux kernel, for example,
+    # publishes vmlinuz, System.map, and its module tree below
+    # usr/lib/reproos-kernel. Restrict this fallback to directories whose
+    # basename matches the dependency at a hyphen boundary so an unrelated
+    # library file cannot satisfy a missing package.
+    let depName = name.toLowerAscii
+    block packageLibDataWalk:
+      for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+        let prefixRoot = recipeDir / prefixSubdir
+        for libSubdir in ["lib", "lib64"]:
+          let libRoot = prefixRoot / libSubdir
+          if not dirExists(extendedPath(libRoot)):
+            continue
+          for kindPc, walked in walkDir(extendedPath(libRoot)):
+            if kindPc != pcDir and kindPc != pcLinkToDir:
+              continue
+            let dirName = lastPathPart(walked).toLowerAscii
+            if dirName != depName and
+                not dirName.startsWith(depName & "-") and
+                not dirName.endsWith("-" & depName):
+              continue
+            for entry in walkDirRec(extendedPath(walked)):
+              if fileExists(extendedPath(entry)):
+                resolved = absolutePath(entry)
+                break packageLibDataWalk
+  if resolved.len == 0:
+    # Aggregate packages do not necessarily ship an artifact named after the
+    # package selector. shadow-utils, for example, installs useradd, login,
+    # passwd, and libsubid, but no "shadow-utils" binary or library. The
+    # install-mirror stamp is written only after the complete prefix has been
+    # staged, so it is the package-level completion evidence for this shape.
+    let mirrorStamp = recipeDir / ".repro" / "output" / "install" /
+      ".m9r14e_2_install_mirror.stamp"
+    if fileExists(extendedPath(mirrorStamp)):
+      resolved = absolutePath(mirrorStamp)
   if resolved.len == 0:
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,

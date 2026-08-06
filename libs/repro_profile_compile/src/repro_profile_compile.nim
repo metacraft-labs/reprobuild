@@ -32,7 +32,7 @@ import ./repro_profile_compile/apply_build_actions
 # Source-discovery + digest + paths.
 export sources.CompiledRepoRoot
 export sources.RepoRootEnvVar
-export sources.ProfileNimPathLibs
+export sources.LibsDirName
 export sources.HomeProfileAnchor
 export sources.SystemProfileAnchor
 export sources.ProfileCacheDirName
@@ -91,3 +91,4 @@ export apply_build_actions.profileBuildActionToBuildAction
 export apply_build_actions.buildActionsToBuildGraph
 export apply_build_actions.applyBuildActionsEngineConfig
 export apply_build_actions.mkBuildActionDispatcher
+export apply_build_actions.buildActionFingerprintHex

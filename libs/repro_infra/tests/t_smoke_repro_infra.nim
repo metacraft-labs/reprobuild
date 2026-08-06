@@ -1201,6 +1201,69 @@ windows.service {
       observedDigestHex: driftedHex), desired,
       destroy = false) == "update"
 
+  test "a windows.service at its declared recovery policy decides no-op":
+    # Same decision as the test above, but the observation is parsed
+    # from VERBATIM `sc.exe qfailure` text captured on a live Windows
+    # host (generic names substituted — this repo is public) instead of
+    # being hand-built. That is the link the digest-symmetry tests do
+    # not cover: the action vocabulary the parser emits has to be the
+    # vocabulary the typed enum renders, or the desired state is
+    # unreachable and the resource re-applies forever.
+    let profile = parseSystemProfile("""
+windows.service {
+  name = "example.runner.service"
+  startType = Automatic
+  state = Running
+  displayName = "Example Runner Service"
+  binPath = "C:\example-runner\bin\RunnerService.exe"
+  recoveryActions = ["restart:60000", "restart:60000", "restart:60000"]
+  recoveryResetSeconds = 3600
+}
+""")
+    check profile.resources.len == 1
+    let op = toPrivilegedOperation(profile.resources[0])
+    let desired = desiredDigestForKind(op)
+    const liveProbe = """StartType=Automatic
+Status=Running
+DisplayName=Example Runner Service
+BinPath=C:\example-runner\bin\RunnerService.exe
+"""
+    const liveQfailure = """[SC] QueryServiceConfig2 SUCCESS
+
+SERVICE_NAME: example.runner.service
+        RESET_PERIOD (in seconds)    : 3600
+        REBOOT_MESSAGE               :
+        COMMAND_LINE                 :
+        FAILURE_ACTIONS              : RESTART -- Delay = 60000 milliseconds.
+                                       RESTART -- Delay = 60000 milliseconds.
+                                       RESTART -- Delay = 60000 milliseconds.
+"""
+    proc observedHex(qfailureText: string): string =
+      var obs = parseServiceQuery(liveProbe)
+      let qf = parseScQfailureOutput(qfailureText)
+      obs.recoveryActions = qf.actions
+      obs.recoveryResetSeconds = qf.resetSeconds
+      digestHexOfText(canonicalServiceState(obs,
+        wantDisplayName = op.serviceDisplayName,
+        wantBinPath = op.serviceBinPath,
+        wantRecoveryActions = desiredServiceRecoverySlots(op),
+        wantRecoveryResetSeconds = op.serviceRecoveryResetSeconds))
+    check decideAction(ResourceObservation(present: true,
+      observedDigestHex: observedHex(liveQfailure)), desired,
+      destroy = false) == "no-op"
+    # Genuine drift — the SCM has no recovery policy at all.
+    const noPolicy = """[SC] QueryServiceConfig2 SUCCESS
+
+SERVICE_NAME: example.runner.service
+        RESET_PERIOD (in seconds)    : 0
+        REBOOT_MESSAGE               :
+        COMMAND_LINE                 :
+        FAILURE_ACTIONS              :
+"""
+    check decideAction(ResourceObservation(present: true,
+      observedDigestHex: observedHex(noPolicy)), desired,
+      destroy = false) == "update"
+
   test "every Windows system resource partitions as privileged":
     let profile = parseSystemProfile("""
 windows.optionalFeature { name = "Hyper-V" }
