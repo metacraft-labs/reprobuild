@@ -147,7 +147,14 @@ audit_slice() {
   "$otool_cmd" -arch "$arch" -h "$image" >/dev/null
   rpaths=$(slice_rpaths "$image" "$arch")
   for required in "${required_rpaths[@]}"; do
-    if ! printf '%s\n' "$rpaths" | grep -Fxq "$required"; then
+    # Read from a here-string rather than a pipe.  Under `set -o pipefail`,
+    # `printf ... | grep -Fxq` reports the pipeline as failed whenever grep
+    # matches early and exits while printf is still writing: printf takes
+    # SIGPIPE, the pipeline status becomes 141, and a *present* LC_RPATH is
+    # misreported as missing.  That race is load-dependent, which made it a
+    # nondeterministic audit failure.  A here-string has no second process to
+    # race with, and matches how audit_dependency already reads $rpaths.
+    if ! grep -Fxq "$required" <<<"$rpaths"; then
       fail "$image [$arch] missing LC_RPATH: $required"
       return
     fi
