@@ -2243,7 +2243,8 @@ proc resolveCtTestRunnerAdapterPath(anchorRoot: string): string =
       return candidate
   ""
 
-proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
+proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string;
+                                      consumerParent = ""): seq[string] =
   ## MR14 — produce the ``--path:`` flags for the source-only sibling
   ## dependencies that ``reprobuild/config.nims`` lines 126-192 register
   ## via ``addPackagePath``. The list MUST stay in sync with config.nims
@@ -2260,6 +2261,15 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
   if reprobuildRoot.len == 0:
     return
   let reprobuildParent = reprobuildRoot.parentDir
+  # The workspace the CLI was invoked in. ``workDir`` is NOT a reliable
+  # consumer anchor here: the cross-repo producer path extracts with
+  # ``reprobuildLibraryWorkDir()``, which resolves through
+  # ``currentSourcePath()`` and so points at reprobuild's OWN root -- in a
+  # dev shell that is the flake-pinned /nix/store snapshot, whose parent is
+  # /nix/store. The process's working directory is the consumer repo for
+  # every ``repro build`` invocation, so it anchors the sibling lookup even
+  # when the caller had no consumer path to pass.
+  let cwdParent = getCurrentDir().parentDir
   proc anchored(candidates: openArray[string]): seq[string] =
     for c in candidates:
       if isAbsolute(c):
@@ -2277,6 +2287,19 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
         elif rest.startsWith("..\\"):
           rest = rest[3 .. ^1]
         result.add(if rest.len > 0: reprobuildParent / rest else: reprobuildParent)
+        # ...and again anchored at the CONSUMER's workspace, when that is a
+        # different tree. In a dev shell reprobuild's libs are a flake-pinned
+        # /nix/store snapshot, so ``reprobuildParent`` is /nix/store and a
+        # sibling candidate can never resolve there. config.nims papers over
+        # this with per-package env vars ($REPRO_TEST_ADAPTERS_SRC, ...)
+        # "seeded by the flake input", but a consumer's dev shell does not
+        # seed them -- which is why every codetracer graph evaluation failed
+        # with ``cannot open file: repro_test_adapters/test_runner`` while the
+        # package sat checked out in the workspace all along.
+        for extraAnchor in [consumerParent, cwdParent]:
+          if extraAnchor.len > 0 and extraAnchor != reprobuildParent:
+            result.add(
+              if rest.len > 0: extraAnchor / rest else: extraAnchor)
       else:
         result.add(reprobuildRoot / c)
 
@@ -2380,6 +2403,64 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
   if ctRunnerAdapter.len > 0:
     result.add("--path:" & ctRunnerAdapter)
 
+proc declaredPackageDeps*(workDir: string): seq[string] =
+  ## The package dependencies a project's ``repro.nim`` declares with a
+  ## nested ``uses "<name>"`` entry, in declaration order, deduplicated.
+  ##
+  ## Read TEXTUALLY, on purpose. The declarations live INSIDE the recipe,
+  ## but the ``--path:`` flags they imply are needed to COMPILE that recipe
+  ## — so nothing may depend on having evaluated it first. This is the same
+  ## bootstrap technique ``discoverNimSources`` already uses to build the
+  ## provider-compile source closure without a semantic pass.
+  ##
+  ## Only the nested ``uses "<x>"`` form is a package dependency. Bare
+  ## strings inside a ``uses:`` block (``"nim >=2.0"``, ``"ffmpeg >=7.0"``)
+  ## are tool/version requirements and name no Nim package; treating them
+  ## as one would try to put ``ffmpeg`` on the Nim path.
+  let recipe = workDir / "repro.nim"
+  if not fileExists(extendedPath(recipe)):
+    return
+  var seen = initHashSet[string]()
+  for rawLine in lines(extendedPath(recipe)):
+    # Comment-strip inline rather than via ``stripNimLineComment``: that
+    # helper is defined further down this module, and these two procs must
+    # sit above ``reproLibPathFlags``, which calls them.
+    let hashPos = rawLine.find('#')
+    let uncommented = if hashPos >= 0: rawLine[0 ..< hashPos] else: rawLine
+    let line = uncommented.strip()
+    if not line.startsWith("uses"):
+      continue
+    # ``uses "x"`` / ``uses: "x"`` -- and NOT a bare ``uses:`` block head,
+    # whose own body lines are handled by their own iterations.
+    var rest = line["uses".len .. ^1].strip()
+    if rest.startsWith(":"):
+      rest = rest[1 .. ^1].strip()
+    if rest.len < 2 or rest[0] != '"':
+      continue
+    let closing = rest.find('"', 1)
+    if closing <= 1:
+      continue
+    let name = rest[1 ..< closing]
+    # A version constraint is a requirement, not a package name.
+    if name.contains('>') or name.contains('<') or name.contains('='):
+      continue
+    if ' ' in name:
+      continue
+    if not seen.containsOrIncl(name):
+      result.add(name)
+
+proc declaredPackageRoots*(workDir: string): seq[string] =
+  ## Resolve ``declaredPackageDeps`` to sibling checkouts next to the
+  ## consumer. A declared dependency that is not checked out is SKIPPED
+  ## rather than failing here: the recipe compile that follows reports the
+  ## unresolved import with a real file and line, which is a far better
+  ## diagnostic than a path-assembly error naming a directory.
+  let siblingsRoot = workDir.parentDir
+  for name in declaredPackageDeps(workDir):
+    let candidate = siblingsRoot / name
+    if dirExists(extendedPath(candidate)):
+      result.add(os.normalizedPath(candidate).replace('\\', '/'))
+
 proc reproLibPathFlags(workDir: string): seq[string] =
   ## Build the ``--path:`` flags the engine passes to ``nim c`` when
   ## compiling a project's provider library. Includes:
@@ -2449,9 +2530,29 @@ proc reproLibPathFlags(workDir: string): seq[string] =
   # repo root the candidate lists are anchored at.
   if reprobuildLibsRoot.len > 0:
     let siblingFlags = bootstrapSiblingPackagePathFlags(
-      reprobuildLibsRoot.parentDir)
+      reprobuildLibsRoot.parentDir, workDir.parentDir)
     for flag in siblingFlags:
       result.add(flag)
+
+  # Declared package dependencies (``uses "<name>"``). Appended LAST so the
+  # reprobuild stdlib still wins on ambiguity -- a third-party package must
+  # not be able to shadow ``repro_project_dsl`` by shipping a module of the
+  # same name.
+  #
+  # Both the package root and its ``src`` go on the path: the root so the
+  # dependency's own ``repro.nim`` -- which is its DSL export surface, the
+  # standard Nim way -- can be imported, and ``src`` so the modules that
+  # recipe imports resolve too.
+  #
+  # This is what makes a DSL package usable WITHOUT being vendored into
+  # reprobuild's ``libs/``. Before it, the only ways in were to be copied
+  # into reprobuild's tree or symlinked there, which privileges the stdlib
+  # over third-party packages.
+  for depRoot in declaredPackageRoots(workDir):
+    result.add("--path:" & depRoot)
+    let depSrc = depRoot / "src"
+    if dirExists(extendedPath(depSrc)):
+      result.add("--path:" & depSrc)
 
 proc normalizedStampPath(path: string): string =
   os.normalizedPath(path).replace('\\', '/')
@@ -2672,6 +2773,28 @@ proc reproLibSources(workDir: string): seq[string] =
   let externalRoot = reprobuildExternalLibsRoot(workDir)
   if externalRoot.len > 0:
     walkLibSourcesInto(externalRoot, result, seen)
+
+  # Declared package dependencies contribute ``--path:`` entries (see
+  # ``reproLibPathFlags``), so their sources MUST fold into this key too.
+  # The two are required to stay in lockstep: if a dependency's DSL exports
+  # can be imported but editing them does not re-key the provider nimcache,
+  # the harness serves a stale compiled recipe -- and that surfaces as the
+  # harness<->binary fingerprint skew described above rather than as
+  # "my constructor change had no effect".
+  #
+  # Only the dependency's own ``repro.nim`` and its ``src`` tree are
+  # folded in -- not its tests or build outputs, which cannot change what
+  # the recipe compiles to.
+  for depRoot in declaredPackageRoots(workDir):
+    let depRecipe = depRoot / "repro.nim"
+    if fileExists(extendedPath(depRecipe)):
+      let normalized = normalizedStampPath(depRecipe)
+      if not seen.containsOrIncl(normalized):
+        result.add(normalized)
+    let depSrc = depRoot / "src"
+    if dirExists(extendedPath(depSrc)):
+      walkLibSourcesInto(depSrc, result, seen)
+
   result.sort(system.cmp[string])
 
 proc reproLibSourceFingerprint(workDir: string): string =
