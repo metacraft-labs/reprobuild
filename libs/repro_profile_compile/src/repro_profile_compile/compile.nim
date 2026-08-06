@@ -131,6 +131,25 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
       dd / "nim-bearssl",
       repoRootAbs / "libs" / "nim-bearssl",
     ], "bearssl.nim")
+    # ``repro_local_store`` imports ``repro_shm_index``, whose ``layout.nim``
+    # / ``ring.nim`` import ``shm_queue/...`` from the ``nim-shm-queue``
+    # sibling (and ``shm_gset`` from ``nim-shm-gset``). Neither package
+    # lives under ``libs/*/src``, so ``profileNimPaths`` cannot supply them.
+    # config.nims resolves both through ``$SHM_QUEUE_SRC`` / ``$SHM_GSET_SRC``
+    # first, then a relative sibling probe, then a nix-devshell fallback —
+    # but the relative probe runs from the PROFILE directory (see the
+    # NimScript note above), and the devshell fallback is compiled out on
+    # Windows (``when defined(windows): ""``). Without the env pin the
+    # profile compile therefore fails on Windows with
+    # ``cannot open file: shm_queue/segment``; on Linux the devshell
+    # fallback happens to mask it. Pin the env vars like every other
+    # sibling package.
+    setPackageEnv("SHM_QUEUE_SRC", [
+      dd / "nim-shm-queue" / "src",
+    ], "shm_queue.nim")
+    setPackageEnv("SHM_GSET_SRC", [
+      dd / "nim-shm-gset" / "src",
+    ], "shm_gset.nim")
     if dirExists(dd / "io-mon" / "src"):
       if getEnv("IO_MON_SRC").len == 0:
         childEnv["IO_MON_SRC"] = dd / "io-mon" / "src"

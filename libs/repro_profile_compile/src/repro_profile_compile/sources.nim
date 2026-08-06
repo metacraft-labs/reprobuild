@@ -32,67 +32,9 @@ const
     parentDir.parentDir
   RepoRootEnvVar* = "REPROBUILD_REPO_ROOT"
 
-## Lib names whose `src` directories must appear on `--path:` for a profile
-## compile. Mirrors the list in `config.nims`; we intentionally only include
-## the libraries a profile could legitimately import (the profile macro
-## library + its dependencies). The same list is reused by the internal
-## `__repro-compile-profile` helper to construct the Nim command line.
-const ProfileNimPathLibs* = [
-  "repro_core",
-  "repro_platform",
-  "repro_diagnostics",
-  "blake3",
-  "xxh3",
-  "gxhash",
-  "repro_hash",
-  "cbor",
-  "repro_domain_types",
-  "repro_profile",
-  "repro_profile_intent",
-  # Phase G: ``repro_profile`` now hosts ``build_actions.nim``, which
-  # imports ``repro_project_dsl`` to decode the typed-tool argv shape
-  # the macro lifts into ``ResourceIntent``. Without ``repro_project_dsl``
-  # on the profile-compile child's ``--path`` the macro expansion fails
-  # with ``cannot open file: repro_project_dsl`` even on profiles that
-  # don't directly reference any action-edge templates — the import
-  # chain reaches it transitively from every ``import repro_profile``.
-  "repro_project_dsl",
-  # ``repro_project_dsl`` re-exports ``install_mirror_resolver``, which
-  # imports ``repro_local_store/prefix_paths`` for the store-prefix path
-  # helpers (``PrefixIdBytes`` / ``prefixRelativePath``). Without this
-  # ``--path:`` entry every profile compile dies with ``cannot open
-  # file: repro_local_store/prefix_paths`` the moment the import chain
-  # reaches the resolver. Only the dependency-free ``prefix_paths``
-  # submodule is reachable from here — the store runtime (SQLite binding,
-  # shm index) stays out of the profile-compile closure.
-  "repro_local_store",
-  # ``repro_project_dsl`` imports
-  # ``repro_binary_cache_client/cache_key`` and
-  # ``repro_binary_cache_server/types`` (cache-key parity between the
-  # profile-side intent and the binary-cache RPC layer). Both live under
-  # ``libs/`` and need their own ``--path:`` entries — PR #13's wrapper
-  # config.nims only unlocks sibling-repo paths (env-var driven), not
-  # local ``libs/`` packages.
-  "repro_binary_cache_client",
-  "repro_binary_cache_server",
-  # Production profiles typically import package definitions from
-  # ``repro_dsl_stdlib/packages/<name>`` (e.g. ``expand_archive`` for
-  # zip-fetch action edges). It is a libs/ package like the others, so
-  # has to land on the profile-compile child's ``--path:``.
-  "repro_dsl_stdlib",
-  # ``repro_project_dsl/types`` imports its SSZ attribute codec. Profile
-  # compilation happens from the user's profile directory, so the wrapper
-  # config.nims cannot discover these repo-local packages through paths
-  # relative to the Reprobuild checkout. Keep the complete vendored SSZ
-  # dependency closure on the child's explicit ``--path:`` instead.
-  "nim-faststreams",
-  "nim-stew",
-  "nim-serialization",
-  "nim-json-serialization",
-  "nim-ssz-serialization",
-  "results",
-  "stint",
-]
+const LibsDirName* = "libs"
+  ## Directory under the repo root that holds every importable Nim package
+  ## (`<repoRoot>/libs/<name>/src`). `profileNimPaths` enumerates it.
 
 proc reprobuildRepoRoot*(): string =
   ## Locate the reprobuild repo root. Precedence:
@@ -109,10 +51,58 @@ proc reprobuildRepoRoot*(): string =
   CompiledRepoRoot
 
 proc profileNimPaths*(repoRoot: string): seq[string] =
-  ## The list of `<libs>/<name>/src` directories that must be passed via
-  ## `--path:` for a profile compile. Caller is responsible for any quoting.
-  for libName in ProfileNimPathLibs:
-    result.add repoRoot / "libs" / libName / "src"
+  ## Every `<repoRoot>/libs/<name>/src` directory that exists, lex-sorted by
+  ## lib name. These are passed via `--path:` for a profile compile; the
+  ## caller is responsible for any quoting.
+  ##
+  ## DERIVED, NOT HAND-MAINTAINED. This used to be a literal
+  ## `ProfileNimPathLibs` array listing "the libraries a profile could
+  ## legitimately import". That premise does not survive contact with a
+  ## transitive import graph: a profile's `import repro_profile` reaches
+  ## `repro_profile/build_actions` -> `repro_project_dsl` ->
+  ## `repro_project_dsl/install_mirror_resolver` -> `repro_local_store` ->
+  ## `repro_shm_index`, and further into `repro_peer_cache`,
+  ## `repro_provider_runtime`, `repro_solver` and `repro_system_apply`. Any
+  ## commit that adds an `import` anywhere in that closure silently widened
+  ## the requirement without touching this file, so the list drifted; the
+  ## repo history shows three separate "add <lib> to ProfileNimPathLibs"
+  ## fix commits, each one entry behind the actual graph. Enumerating the
+  ## directory removes the class of bug rather than its latest instance.
+  ##
+  ## Over-inclusion is safe. Command-line `--path:` entries are appended at
+  ## LOWER precedence than the `switch("path", ...)` entries the wrapper
+  ## `config.nims` contributes, so a lib that is already resolved correctly
+  ## cannot be hijacked by an entry added here; these only supply modules
+  ## that would otherwise not resolve at all. Nim compiles only what is
+  ## actually imported, so unreferenced entries cost a path-probe, not a
+  ## compile. There are no cross-lib collisions among the top-level module
+  ## names exposed by `libs/*/src` (each lib exposes only `<name>.nim` and
+  ## `<name>/`), so an extra entry cannot shadow another lib's module.
+  ##
+  ## NOT covered here, by design: packages that live outside `libs/*/src`
+  ## (`libs/nimcrypto`, whose `--path:` root is the package dir itself, and
+  ## the sibling checkouts such as `nim-shm-queue`). Those are resolved
+  ## through the env-var handshake with `config.nims` that `compile.nim`
+  ## sets up.
+  let libsRoot = repoRoot / LibsDirName
+  if not dirExists(extendedPath(libsRoot)):
+    return @[]
+  var libNames: seq[string]
+  for kind, path in walkDir(extendedPath(libsRoot)):
+    if kind notin {pcDir, pcLinkToDir}:
+      continue
+    let libName = path.lastPathPart
+    if libName.len == 0:
+      continue
+    if not dirExists(extendedPath(libsRoot / libName / "src")):
+      continue
+    libNames.add libName
+  # Sort so the emitted command line is deterministic across filesystems
+  # with different readdir orders — the argv is part of the profile-compile
+  # BuildAction, and a reordered argv is a needless cache miss.
+  libNames.sort()
+  for libName in libNames:
+    result.add libsRoot / libName / "src"
 
 # ---------------------------------------------------------------------------
 # Profile-root resolution.

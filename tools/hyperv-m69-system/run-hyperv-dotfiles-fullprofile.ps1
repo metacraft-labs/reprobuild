@@ -59,15 +59,18 @@ $ReproBinHost  = 'D:\metacraft\reprobuild\build\bin'
 $ReproFiles    = @('repro.exe','sqlite3_64.dll','repro-launcher.exe')
 
 # Reprobuild lib source tree needed for `nim c` to find `repro_profile`
-# during apply (Phase F3 compile-then-apply path). The list MUST match
-# `ProfileNimPathLibs` in libs/repro_profile_compile/src/repro_profile_compile/sources.nim
-# -- both sides reference the same closure of libraries a profile can
-# legitimately import.
+# during apply (Phase F3 compile-then-apply path). This must cover the same
+# set `profileNimPaths` puts on the child's `--path:` (see
+# libs/repro_profile_compile/src/repro_profile_compile/sources.nim), so it is
+# DERIVED from the tree for exactly the same reason that proc is: a
+# hand-copied list silently falls behind the transitive import graph. This
+# array was such a copy, and had drifted several libraries behind.
 $ReproRepoRoot = 'D:\metacraft\reprobuild'
 $ReproProfileLibs = @(
-  'repro_core', 'repro_platform', 'repro_diagnostics', 'blake3', 'xxh3',
-  'gxhash', 'repro_hash', 'cbor', 'repro_domain_types',
-  'repro_profile', 'repro_profile_intent'
+  Get-ChildItem -LiteralPath (Join-Path $ReproRepoRoot 'libs') -Directory -Force |
+    Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'src') -PathType Container } |
+    ForEach-Object { $_.Name } |
+    Sort-Object
 )
 
 # Guest paths
@@ -314,9 +317,9 @@ Info ("  zip built: $entryCount entries, source $totalBytes b, zip $zipBytes b, 
 Record 'stageA0_zip_build' "OK ($entryCount entries, $zipBytes bytes in ${zipBuildSec}s)"
 
 # Build the reprobuild-libs zip alongside the dotfiles zip. Only the
-# `libs/<name>/src` subtrees from `$ReproProfileLibs` are included; tests/
-# and other non-imported tree are excluded to keep the staged archive
-# small (~2 MB end-to-end vs ~30+ MB for the full libs tree).
+# `libs/<name>/src` subtrees are included; tests/ and other non-imported
+# tree are excluded to keep the staged archive small (the src-only filter,
+# not the lib-name filter, is what does the bulk of that reduction).
 $HostReproLibsZip = Join-Path $StageDir 'reprobuild-libs.zip'
 Info "building reprobuild-libs zip at $HostReproLibsZip"
 $libsZipStart = Get-Date
@@ -478,8 +481,9 @@ try {
   # `import repro_profile` inside the dotfiles' home.nim / system.nim.
   # reproot resolves either $REPROBUILD_REPO_ROOT (operator override) OR
   # a compile-time-baked anchor, which on the host points at the
-  # reprobuild build dir -- nonsense inside the VM. We stage the closure
-  # of `ProfileNimPathLibs` and point the env var at the staged root.
+  # reprobuild build dir -- nonsense inside the VM. We stage every
+  # `libs/<name>/src` subtree (the same set `profileNimPaths` derives) and
+  # point the env var at the staged root.
   Info "Copy-VMFile: staging reprobuild-libs zip into $VmReproLibsZip"
   $libsCopyStart = Get-Date
   Copy-VMFile -Name $VmName -SourcePath $HostReproLibsZip -DestinationPath $VmReproLibsZip `
