@@ -8886,6 +8886,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_infra_apply_lock_hung_owner.nim",
+    binary: "build/test-bin/t_infra_apply_lock_hung_owner",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_m9q_from_source_provisioning.nim",
     binary: "build/test-bin/t_m9q_from_source_provisioning",
     defines: @[],

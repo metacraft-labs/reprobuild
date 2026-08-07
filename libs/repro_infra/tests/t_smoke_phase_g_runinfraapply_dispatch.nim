@@ -49,7 +49,8 @@ proc newCapture(): DispatchCapture =
     raiseOnDispatch: false)
 
 proc mkRecordingDispatcher(capture: DispatchCapture): BuildActionDispatcher =
-  result = proc(actions: seq[ProfileBuildAction]):
+  result = proc(actions: seq[ProfileBuildAction];
+                onProgress: ApplyProgressHook):
       seq[BuildActionApplyOutcome] {.gcsafe.} =
     {.cast(gcsafe).}:
       inc capture.invocationCount
@@ -286,7 +287,9 @@ suite "Windows-System-Resources Phase G — runInfraApply action-edge dispatch":
       except CatchableError: discard
     let capture = newCapture()
     var generationDirExistsAtDispatch = false
-    let recordingDisp: BuildActionDispatcher = proc(actions: seq[ProfileBuildAction]):
+    let recordingDisp: BuildActionDispatcher = proc(
+        actions: seq[ProfileBuildAction];
+        onProgress: ApplyProgressHook):
         seq[BuildActionApplyOutcome] {.gcsafe.} =
       {.cast(gcsafe).}:
         # The apply has NOT yet derived a generationId at this point
@@ -314,3 +317,56 @@ suite "Windows-System-Resources Phase G — runInfraApply action-edge dispatch":
     # The live-state half ran AFTER (no resources -> empty
     # operations, but the generation pointer is committed).
     check res.generationId.len > 0
+
+suite "Windows-System-Resources Phase G — action edges beat the apply lock":
+  ## The action-edge half is ONE dispatcher call across every edge in
+  ## the profile. If the apply lock only beat around that call, a
+  ## profile whose edges extract a large archive and run a
+  ## configuration script would go silent for the whole dispatch and
+  ## read as HUNG to the next acquirer, which could then reclaim the
+  ## lock out from under a working apply.
+  ##
+  ## So `runInfraApply` hands the dispatcher a per-edge progress hook
+  ## and the dispatcher must fire it per edge. These tests pin both
+  ## halves of that contract: the hook is supplied, and each firing
+  ## lands on the lock this process holds.
+
+  test "runInfraApply supplies a progress hook that beats per edge":
+    let tmp = createTempDir("phaseG-apply-beat-", "")
+    defer:
+      try: removeDir(tmp)
+      except CatchableError: discard
+    ensureSystemStateDir(tmp)
+    check acquireApplyLock(tmp)
+    let beatsBefore = readApplyLockRecord(tmp).beats
+    var hookWasSupplied = false
+    var beatsSeen: seq[int]
+    let beatingDisp: BuildActionDispatcher = proc(
+        actions: seq[ProfileBuildAction];
+        onProgress: ApplyProgressHook):
+        seq[BuildActionApplyOutcome] {.gcsafe.} =
+      {.cast(gcsafe).}:
+        hookWasSupplied = onProgress != nil
+        for a in actions:
+          if onProgress != nil:
+            onProgress()
+          # Read the lock back from disk: this asserts the hook really
+          # reaches the lock, not merely that something was called.
+          beatsSeen.add(readApplyLockRecord(tmp).beats)
+          result.add(BuildActionApplyOutcome(
+            id: a.id, address: a.id, ok: true))
+    var opts = mkApplyOptions(tmp)
+    opts.buildActions = @[
+      ProfileBuildAction(id: "edgeA", argv: @["/bin/true"], cacheable: true),
+      ProfileBuildAction(id: "edgeB", argv: @["/bin/true"], cacheable: true),
+      ProfileBuildAction(id: "edgeC", argv: @["/bin/true"], cacheable: true)]
+    opts.buildActionDispatcher = beatingDisp
+    discard runInfraApply(EmptyProfileText, opts)
+    check hookWasSupplied
+    check beatsSeen.len == 3
+    # Strictly increasing BETWEEN edges — a beat that only fired around
+    # the whole dispatch would leave these three readings equal.
+    check beatsSeen[0] > beatsBefore
+    check beatsSeen[1] > beatsSeen[0]
+    check beatsSeen[2] > beatsSeen[1]
+    releaseApplyLock(tmp)

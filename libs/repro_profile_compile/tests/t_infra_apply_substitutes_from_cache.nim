@@ -157,7 +157,7 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
       let ctx1 = FixtureContext(filePrefix: tmpRoot / "ctx1")
       let disp1 = mkBuildActionDispatcher(cacheRoot1, ctx1)
       let pba1 = witnessShellAction("m4-edge", cwd1)
-      let out1 = disp1(@[pba1])
+      let out1 = disp1(@[pba1], nil)
 
       check out1.len == 1
       if not out1[0].ok:
@@ -185,7 +185,7 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
       let ctx2 = FixtureContext(filePrefix: tmpRoot / "ctx2")
       let disp2 = mkBuildActionDispatcher(cacheRoot2, ctx2)
       let pba2 = witnessShellAction("m4-edge", cwd2)
-      let out2 = disp2(@[pba2])
+      let out2 = disp2(@[pba2], nil)
 
       check out2.len == 1
       check out2[0].ok
@@ -211,7 +211,7 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
       let ctx3 = FixtureContext(filePrefix: tmpRoot / "ctx3")
       let disp3 = mkBuildActionDispatcher(cacheRoot3, ctx3)
       let pba3 = witnessShellAction("m4-edge", cwd3)
-      let out3 = disp3(@[pba3])
+      let out3 = disp3(@[pba3], nil)
 
       check out3.len == 1
       check out3[0].ok

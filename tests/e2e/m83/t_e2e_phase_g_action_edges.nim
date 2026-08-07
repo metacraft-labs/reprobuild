@@ -154,7 +154,8 @@ suite "Windows-System-Resources Phase G e2e: production-profile-shaped fixture":
     var receivedArgvs: seq[seq[string]]
     var receivedElevations: seq[bool]
     let mockDispatcher: BuildActionDispatcher = proc(
-        actions: seq[ProfileBuildAction]):
+        actions: seq[ProfileBuildAction];
+        onProgress: ApplyProgressHook):
         seq[BuildActionApplyOutcome] {.gcsafe.} =
       {.cast(gcsafe).}:
         for a in actions:

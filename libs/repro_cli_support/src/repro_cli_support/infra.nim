@@ -183,6 +183,12 @@ type
     acceptFeatureDestroy: bool
     acceptPasswdDestroy: bool
     reconcileDrift: bool                  ## also set by `--accept-drift`
+    forceUnlock: bool
+      ## `--force-unlock`: the operator escape hatch for a wedged apply
+      ## lock. Takes `<state-dir>/locks/apply.lock` regardless of who
+      ## owns it, so a hung owner can be displaced deliberately instead
+      ## of the operator deleting the lock file by hand. The displaced
+      ## process is NOT terminated — see `repro_infra/apply_lock.nim`.
     acceptDrift: bool
       ## M82 Phase C: a plan-time flag. When the planner detects
       ## external drift since the previously-applied generation,
@@ -238,6 +244,8 @@ proc parseInfraFlags(args: openArray[string]):
       result.flags.acceptFeatureDestroy = true
     elif a == "--accept-passwd-destroy":
       result.flags.acceptPasswdDestroy = true
+    elif a == "--force-unlock":
+      result.flags.forceUnlock = true
     elif a == "--reconcile-drift":
       # M82 Phase C: at plan time `--reconcile-drift` is an alias for
       # `--accept-drift` — the planner records "operator acknowledged
@@ -332,6 +340,41 @@ proc reproExePath(): string =
   ## executable's own path.
   getAppFilename()
 
+proc takeInfraApplyLock(stateDir, command: string;
+                        flags: InfraCliFlags): bool =
+  ## Acquire the per-host apply lock for a mutating `repro infra` /
+  ## `repro system` command, and TELL THE OPERATOR what happened.
+  ##
+  ## A refusal names the holder, how long it has held the lock and when
+  ## it last made progress, so "another apply is in progress" is
+  ## actionable rather than a dead end. A reclaim that displaced a
+  ## still-running process says so loudly: the lock moved, the process
+  ## did not, and the operator must confirm it is gone.
+  var policy = defaultApplyLockPolicy()
+  policy.forceUnlock = flags.forceUnlock
+  let acq = tryAcquireApplyLock(stateDir, policy)
+  if not acq.acquired:
+    stderr.writeLine(command & ": another system apply is in progress (" &
+      describeApplyLockHolder(stateDir, acq) & ").")
+    stderr.writeLine("  The owner is alive and not provably stalled, so " &
+      "the lock stays with it. If you are certain it is hung, stop it " &
+      "and re-run with --force-unlock.")
+    return false
+  if acq.reclaim in ReclaimedFromLiveOwner:
+    stderr.writeLine(command & ": reclaimed the apply lock from pid " &
+      $acq.previousOwner & " (" & $acq.reclaim & "; held for " &
+      $acq.heldForSeconds & "s, last progress " &
+      $acq.sinceHeartbeatSeconds & "s ago).")
+    stderr.writeLine("  That process was NOT terminated. Verify it is " &
+      "gone before trusting this apply — two concurrent applies would " &
+      "both mutate system state.")
+  elif acq.reclaim == alrDeadOwner:
+    stderr.writeLine(command & ": reclaimed a stale apply lock left by " &
+      "dead pid " & $acq.previousOwner & ".")
+  elif acq.reclaim == alrMalformed:
+    stderr.writeLine(command & ": reclaimed an unreadable apply lock.")
+  true
+
 proc runInfraApply(args: openArray[string]): int =
   let (flags, positional) = parseInfraFlags(args)
   let stateDir = (if flags.stateDir.len > 0: flags.stateDir
@@ -363,9 +406,7 @@ proc runInfraApply(args: openArray[string]): int =
       "--no-preview to compute and apply a fresh plan without preview.")
     return 2
 
-  if not acquireApplyLock(stateDir):
-    stderr.writeLine("repro infra apply: another system apply is in " &
-      "progress (lock held at " & applyLockPath(stateDir) & ").")
+  if not takeInfraApplyLock(stateDir, "repro infra apply", flags):
     return 1
   defer: releaseApplyLock(stateDir)
 
@@ -652,9 +693,7 @@ proc runSystemSync(args: openArray[string]): int =
       outBuildActions = addr profileBuildActions):
     return 1
   let host = hostIdentity(flags.host)
-  if not acquireApplyLock(stateDir):
-    stderr.writeLine("repro system sync: another system apply is in " &
-      "progress (lock held at " & applyLockPath(stateDir) & ").")
+  if not takeInfraApplyLock(stateDir, "repro system sync", flags):
     return 1
   defer: releaseApplyLock(stateDir)
   # M82 Phase C: surface plan-time drift BEFORE the apply runs. `sync`
@@ -748,9 +787,7 @@ proc runSystemRollbackCmd(args: openArray[string]): int =
   var targetId = flags.generationId
   if targetId.len == 0 and positional.len > 0:
     targetId = positional[0]
-  if not acquireApplyLock(stateDir):
-    stderr.writeLine("repro system rollback: another system apply is in " &
-      "progress (lock held at " & applyLockPath(stateDir) & ").")
+  if not takeInfraApplyLock(stateDir, "repro system rollback", flags):
     return 1
   defer: releaseApplyLock(stateDir)
   var opts: SystemRollbackOptions
