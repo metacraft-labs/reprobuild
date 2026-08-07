@@ -33,6 +33,45 @@
 ## * Tests that ``import std/unittest`` directly (without going through
 ##   this library) are completely unaffected — the protocol surface
 ##   only attaches to binaries that explicitly link this module.
+##
+## Coexistence with the protocol-carrying ``std/unittest``
+## ------------------------------------------------------
+##
+## Since the codetracer-nim fork landed the same Tier-1 protocol inside
+## ``std/unittest`` itself, this shim is no longer the only thing in the
+## process that answers ``--list`` / ``--list-json``. ``std/unittest``'s
+## own ``suite`` template calls its ``ensureProtocolExitProc``, so the
+## moment a shim-linked binary expands ONE suite the stdlib installs an
+## exit hook that will emit a catalog of everything IT registered.
+##
+## The two implementations must therefore not both emit. Because the
+## shim's ``test`` override registers only into ``gRegistry``, the
+## stdlib's registry stays empty, and an unguarded run printed an empty
+## stdlib catalog followed by the shim's populated one — two JSON
+## documents on stdout, which no consumer can parse, and which silently
+## demoted every shim-linked binary to whole-binary execution in
+## ``repro_test_runner``.
+##
+## The shim stays the single emitter, and it wins by *registration
+## order*. ``std/exitprocs`` runs hooks LIFO, and ``quit`` from inside a
+## hook terminates the process without running the ones still queued
+## behind it. ``std/unittest`` installs its hook from inside its
+## ``suite`` template, i.e. before the suite body expands; the shim
+## therefore defers its own ``addExitProc`` to the first ``test``
+## expansion — which is inside that body, hence strictly later, hence
+## strictly first to run. It emits the catalog and quits, and the
+## stdlib hook never fires.
+##
+## Delegating listing to ``std/unittest`` instead is NOT equivalent:
+## its ``test`` template resolves ``instantiationInfo`` at its own
+## expansion site, so forwarding to it from inside the shim's ``test``
+## template records every case as living in this file rather than in
+## the test source, losing the ``file``/``line`` fidelity the catalog
+## exists to carry.
+##
+## ``--run`` needs no such care: it is the shim's hook that writes
+## ``$NIMTEST_RESULT_FILE`` and picks the 0/1/2 exit code, and quitting
+## first only makes that more certain.
 
 import std/[exitprocs, json, os, strutils, times]
 import std/unittest as stdUnittest
@@ -80,6 +119,7 @@ var
   gRunFilter {.threadvar.}: string
   gCapturedResult {.threadvar.}: CapturedResult
   gProtocolInitialized {.threadvar.}: bool
+  gProtocolExitHookQueued {.threadvar.}: bool
 
 proc currentProtocolMode*(): ProtocolMode =
   ## Return the active protocol mode for the current process. Resolved
@@ -207,6 +247,11 @@ proc statusToExitCode(s: stdUnittest.TestStatus): int =
 proc handleProtocolExit() {.noconv.} =
   ## Exit hook installed for every protocol mode. Dispatches to the
   ## per-mode output emission and quits with the right code.
+  ##
+  ## Every branch ends in ``quit``. That is load-bearing, not just
+  ## tidy: it is what stops the protocol-carrying ``std/unittest``'s
+  ## own exit hook — queued behind this one — from appending a second
+  ## payload. See the module header.
   case gProtocolMode
   of pmDefault:
     discard
@@ -239,6 +284,26 @@ proc handleProtocolExit() {.noconv.} =
                       captured.exception, skipReason)
     quit(statusToExitCode(captured.status))
 
+proc queueProtocolExitHook*() =
+  ## Install ``handleProtocolExit`` — but deliberately LATE, on the
+  ## first ``test`` expansion rather than at module init.
+  ##
+  ## ``std/exitprocs`` runs hooks LIFO, and the protocol-carrying
+  ## ``std/unittest`` installs its own hook from inside its ``suite``
+  ## template, i.e. before the suite body expands. Registering here —
+  ## from inside that body — therefore puts this hook *after* the
+  ## stdlib's in registration order and *before* it in execution order,
+  ## which is what lets ``handleProtocolExit``'s ``quit`` stop the
+  ## stdlib from appending a second payload.
+  ##
+  ## Registering at module-init time instead would invert the order and
+  ## reintroduce the double emission. Idempotent; a no-op outside a
+  ## protocol mode.
+  if gProtocolMode == pmDefault or gProtocolExitHookQueued:
+    return
+  gProtocolExitHookQueued = true
+  addExitProc(handleProtocolExit)
+
 proc initProtocol*() =
   ## Initialize the protocol shim. Runs once at module-init time.
   ## Safe to call multiple times.
@@ -261,12 +326,10 @@ proc initProtocol*() =
     stdUnittest.disableParamFiltering()
     stdUnittest.resetOutputFormatters()
     stdUnittest.addOutputFormatter(SilentFormatter())
-    addExitProc(handleProtocolExit)
   of pmRunOne:
     stdUnittest.disableParamFiltering()
     stdUnittest.resetOutputFormatters()
     stdUnittest.addOutputFormatter(ProtocolFormatter())
-    addExitProc(handleProtocolExit)
 
 # Initialize protocol mode as soon as the module is loaded. Module
 # init runs before any ``suite``/``test`` top-level blocks in importing
@@ -293,8 +356,12 @@ template test*(testName, body: untyped) =
   ## then delegates to ``std/unittest.test`` in the modes where the
   ## body should actually run.
   bind gRegistry, gProtocolMode, gRunFilter,
-       gCapturedResult, TestEntry, ProtocolMode
+       gCapturedResult, TestEntry, ProtocolMode, queueProtocolExitHook
   block:
+    # Must run before anything else in the expansion: it is the
+    # relative registration order against std/unittest's own exit hook
+    # that decides which implementation gets to emit.
+    queueProtocolExitHook()
     let ctpInfo = instantiationInfo()
     let ctpSuite = when declared(testSuiteName): testSuiteName else: ""
     gRegistry.add(TestEntry(
