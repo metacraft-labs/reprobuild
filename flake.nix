@@ -168,7 +168,7 @@
     # codeload tarball 404s, same as codetracer-native-recorder above); the
     # compiler itself imports the three vendored deps below (trace/stew/results).
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=6d14bb1d22dd8d27ddfe331c73a50085568adb71";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=362d42954ecc4becf19b50ae898bc59538bd3b46";
       flake = false;
     };
     nim-csources-src = {

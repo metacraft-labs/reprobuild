@@ -32,8 +32,13 @@
 ##
 ## Environment::
 ##
-##   REPRO_TEST_FAIL_FAST=1   stop scheduling new tests after first FAIL
-##   REPRO_TEST_THREADS=N     override default worker count
+##   REPRO_TEST_FAIL_FAST=1     stop scheduling new tests after first FAIL
+##   REPRO_TEST_THREADS=N       override default worker count
+##   REPRO_TEST_PROBE_TIMEOUT=N wall-clock bound, in seconds, on a single
+##                              ``--list-json`` discovery probe (default
+##                              ``DefaultProbeTimeoutSec``). Expiry
+##                              downgrades the binary to whole-binary
+##                              execution; it is never a failure.
 ##
 
 import std/[algorithm, atomics, json, locks, os, osproc, parseopt, streams,
@@ -201,15 +206,42 @@ proc scanTestBinaries(binDir: string): seq[string] =
     result.add(path.absolutePath)
   result.sort()
 
+const ProtocolMarkers = [
+  # (1) reprobuild's own ``ct_test_unittest_parallel`` shim. The literal
+  #     is the module's stderr-prefix string; a binary that links the
+  #     shim always carries it.
+  "ct_test_unittest_parallel",
+  # (2) the codetracer-nim ``std/unittest`` fork, which carries the same
+  #     protocol in the standard library itself, so a binary that merely
+  #     does ``import std/unittest`` speaks it without linking any shim.
+  #     The literal is the ``--run`` parse-error message from
+  #     ``parseProtocolArgs``. That proc is unconditional runtime argv
+  #     parsing reached before any test runs, so no optimisation level
+  #     can elide the string (verified present under ``-d:release``,
+  #     ``-d:danger``, ``--mm:orc -d:release`` and ``--opt:size``), and
+  #     the sentence is specific enough that it cannot occur by accident
+  #     in an unpatched binary.
+  "unittest: --run requires a test name",
+]
+
 proc looksProtocolAwareByStrings(binary: string): bool =
   ## Cheap text-scan over the binary: a binary is protocol-aware iff it
-  ## links the ``ct_test_unittest_parallel`` shim, which embeds the
-  ## marker string "ct_test_unittest_parallel" (the module's own
-  ## stderr-prefix literal). This avoids spending a full ``--list-json``
-  ## execution on every ``std/unittest`` binary just to discover that
-  ## it ignores the flag and runs its whole suite.
-  const Marker = "ct_test_unittest_parallel"
+  ## embeds one of ``ProtocolMarkers`` — i.e. it either links the
+  ## ``ct_test_unittest_parallel`` shim or was compiled against the
+  ## protocol-carrying ``std/unittest``. This avoids spending a full
+  ## ``--list-json`` execution on every ``std/unittest`` binary just to
+  ## discover that it ignores the flag and runs its whole suite.
+  ##
+  ## A marker hit is a *candidate* signal only: ``probeBinary`` still
+  ## has to get a well-formed catalog out of ``--list-json`` before the
+  ## binary is treated as protocol-aware, so a binary that merely
+  ## mentions one of these strings (the runner's own tests do) costs one
+  ## probe and is then classified opaque.
   const ChunkSize = 64 * 1024
+  var maxMarkerLen = 0
+  for marker in ProtocolMarkers:
+    if marker.len > maxMarkerLen:
+      maxMarkerLen = marker.len
   try:
     let f = open(binary, fmRead)
     defer: f.close()
@@ -220,30 +252,131 @@ proc looksProtocolAwareByStrings(binary: string): bool =
       if n <= 0:
         break
       let chunk = carry & buf[0 ..< n]
-      if chunk.contains(Marker):
-        return true
-      # Keep the last len(Marker)-1 bytes so the marker isn't split
+      for marker in ProtocolMarkers:
+        if chunk.contains(marker):
+          return true
+      # Keep the last maxMarkerLen-1 bytes so no marker can be split
       # across chunk boundaries.
-      if chunk.len > Marker.len - 1:
-        carry = chunk[chunk.len - Marker.len + 1 .. ^1]
+      if chunk.len > maxMarkerLen - 1:
+        carry = chunk[chunk.len - maxMarkerLen + 1 .. ^1]
       else:
         carry = chunk
     return false
   except CatchableError:
     return false
 
+const DefaultProbeTimeoutSec = 300
+  ## Wall-clock ceiling for a single ``--list-json`` probe.
+  ##
+  ## Probe cost is dominated by the binary's *module initialisation*,
+  ## not by cataloguing: the ``recipes/packages/source/*`` tests run
+  ## their package macro at module init, which is why their probes are
+  ## seconds rather than the ~9 ms median seen elsewhere. Measured p95
+  ## in that family is ~25 s, with two outliers (``test_kwin_source``,
+  ## ``test_plasma_workspace_source``) above 120 s. 300 s is ~12x the
+  ## p95 and >2x the slowest observed legitimate probe, so no real probe
+  ## is downgraded, while a genuinely hung binary can no longer park
+  ## discovery indefinitely — discovery is a single sequential pass, so
+  ## an unbounded probe stalls the entire run, not just one worker.
+  ## The bound is also small next to the per-test timeout (1800 s) and
+  ## the runner-phase backstop (6 h).
+  ##
+  ## Expiry is deliberately *not* a failure: the binary falls back to
+  ## whole-binary execution, exactly as if it had never carried a
+  ## marker, and the per-test timeout governs it from there.
+
+proc probeTimeoutSec(): int =
+  let raw = getEnv("REPRO_TEST_PROBE_TIMEOUT")
+  if raw.len == 0:
+    return DefaultProbeTimeoutSec
+  try:
+    let parsed = parseInt(raw.strip())
+    if parsed > 0: parsed else: DefaultProbeTimeoutSec
+  except ValueError:
+    DefaultProbeTimeoutSec
+
+const ProbePollIntervalMs = 50
+
+proc runListJson(binary: string): tuple[output: string; exitCode: int;
+                                        timedOut: bool] =
+  ## Execute ``<binary> --list-json`` under a wall-clock bound.
+  ##
+  ## Output is redirected to a temp file by the shell rather than piped,
+  ## so the poll loop never has to drain a pipe and a chatty probe can
+  ## not deadlock against a full pipe buffer while we are waiting on the
+  ## clock. ``stdin`` is ``/dev/null`` so a probe that reads stdin fails
+  ## fast instead of inheriting the runner's terminal.
+  result = (output: "", exitCode: -1, timedOut: false)
+  var tmpPath = ""
+  try:
+    let (tmpFile, path) = createTempFile("repro_probe_", ".json")
+    tmpFile.close()
+    tmpPath = path
+  except CatchableError:
+    return
+  defer:
+    if tmpPath.len > 0:
+      try: removeFile(tmpPath)
+      except CatchableError: discard
+
+  let shellCmd = "exec " & quoteShell(binary) & " --list-json > " &
+    quoteShell(tmpPath) & " 2>&1 < /dev/null"
+  var p: Process
+  try:
+    p = startProcess("/bin/sh", args = ["-c", shellCmd], env = nil,
+                     options = {poParentStreams})
+  except CatchableError:
+    return
+
+  let deadline = epochTime() + probeTimeoutSec().float
+  var exitCode = -1
+  try:
+    while true:
+      if not p.running():
+        exitCode = p.waitForExit()
+        break
+      if epochTime() >= deadline:
+        result.timedOut = true
+        try:
+          p.kill()
+          discard p.waitForExit()
+        except CatchableError:
+          discard
+        break
+      sleep(ProbePollIntervalMs)
+  finally:
+    try: p.close()
+    except CatchableError: discard
+
+  if result.timedOut:
+    return
+  result.exitCode = exitCode
+  try:
+    result.output = readFile(tmpPath)
+  except CatchableError:
+    result.output = ""
+
 proc probeBinary(binary: string): tuple[protocol: bool;
                                         catalog: seq[(string, string)]] =
   ## Decide whether the binary speaks the protocol and return its test
-  ## catalog when so. Two stages: (1) cheap byte-scan for the
-  ## ``ct_test_unittest_parallel`` marker — if absent, the binary is
-  ## treated as opaque without running it. (2) when the marker is
-  ## present, invoke ``--list-json`` and parse the JSON catalog.
+  ## catalog when so. Two stages: (1) cheap byte-scan for one of
+  ## ``ProtocolMarkers`` — if none is present, the binary is treated as
+  ## opaque without running it. (2) when a marker is present, invoke
+  ## ``--list-json`` under a wall-clock bound and parse the JSON
+  ## catalog. Anything short of a well-formed catalog — non-zero exit,
+  ## non-JSON output, or the probe timing out — leaves the binary
+  ## classified opaque, i.e. run whole. That is a degradation in
+  ## granularity, never a failure.
   result.protocol = false
   result.catalog = @[]
   if not looksProtocolAwareByStrings(binary):
     return
-  let (output, exitCode) = execCmdEx(quoteShell(binary) & " --list-json")
+  let (output, exitCode, timedOut) = runListJson(binary)
+  if timedOut:
+    stderr.writeLine "repro_test_runner: --list-json probe of " &
+      splitFile(binary).name & " exceeded " & $probeTimeoutSec() &
+      "s; treating the binary as opaque (whole-binary execution)"
+    return
   if exitCode != 0:
     return
   let trimmed = output.strip()
