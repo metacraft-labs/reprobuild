@@ -227,6 +227,18 @@ proc applyBuildActionsEngineConfig*(cacheRoot: string;
   ## here. It is the same contract every other consumer already runs
   ## under, and re-running with ``--force-rebuild`` still repairs a
   ## damaged tree.
+  ##
+  ## THROUGHPUT NOTE: the flag above enables the engine's whole-graph
+  ## fast no-op cache-hit scan (``tryFastNoopCacheHits``), but that scan
+  ## bails out whenever a ``progressCallback`` is installed. The apply
+  ## lock's progress heartbeat installs one (see ``mkBuildActionDispatcher``
+  ## below and ``repro_infra/apply_lock.nim``), so an apply that beats the
+  ## lock walks the regular scheduler even when every edge is a hit. That
+  ## costs a per-action cache lookup on large graphs. It is a deliberate
+  ## trade: without a per-action beat the lock cannot tell a long apply
+  ## from a hung one. The no-rewrite protection this flag exists for is
+  ## NOT lost — the per-action ``aclHit`` branch short-circuits to
+  ## ``asUpToDate``/"outputs-present" without calling ``restoreOutputs``.
   result = defaultBuildEngineConfig(cacheRoot)
   result.maxParallelism = 1
   result.rebuildMissingOutputsOnCacheHit = true
@@ -294,11 +306,21 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
   let capturedCacheRoot = cacheRoot
   let capturedMonitorCliPath = monitorCliPath
   let capturedMonitorCliArgs = @monitorCliArgs
-  result = proc(actions: seq[ProfileBuildAction]):
+  result = proc(actions: seq[ProfileBuildAction];
+                onProgress: ApplyProgressHook):
       seq[BuildActionApplyOutcome] {.gcsafe.} =
     {.cast(gcsafe).}:
       if actions.len == 0:
         return @[]
+      # `onProgress` is the apply lock's progress heartbeat (see
+      # ``repro_infra/apply_lock.nim``). It has to fire per EDGE, not
+      # once around the whole dispatch: extracting a runner archive or
+      # running a configuration script is exactly the kind of edge that
+      # takes long enough for a whole-dispatch silence to read as a
+      # hung apply to the next acquirer.
+      template beat() =
+        if onProgress != nil:
+          onProgress()
 
       # ---- M4: binary-cache substitute-first / publish-on-miss. ----
       # When ``REPRO_BINARY_CACHE_URL`` is set we PREFER fetching each
@@ -323,6 +345,14 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
         if cacheCfg.configured:
           let attempt = trySubstituteBuildAction(
             a, cacheCfg, m4ScratchRoot / sanitizeForPath(a.id))
+          # Beat on the ATTEMPT, not just on the hit. A substitution
+          # attempt is a completed unit of work either way, and each one
+          # is a network round-trip. Beating only on hits would leave a
+          # profile whose binary cache is configured but unreachable
+          # silent for (number of edges x per-edge timeout) — which for a
+          # large profile can exceed the staleness window and make a
+          # perfectly healthy apply look hung to the next acquirer.
+          beat()
           if attempt.hit:
             substituted[a.id] = BuildActionApplyOutcome(
               id: a.id,
@@ -342,8 +372,29 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
       var engineFailDetail = ""
       if toBuild.len > 0:
         let g = buildActionsToBuildGraph(toBuild)
-        let cfg = applyBuildActionsEngineConfig(capturedCacheRoot, spawner,
+        var cfg = applyBuildActionsEngineConfig(capturedCacheRoot, spawner,
           capturedMonitorCliPath, capturedMonitorCliArgs)
+        # `runBuild` is itself one opaque call across every edge, so the
+        # beat has to come from INSIDE it. The engine's per-action
+        # progress events are that seam.
+        #
+        # Installing the callback DOES cost something: `tryFastNoopCacheHits`
+        # bails out whenever `progressCallback != nil`, so an all-cache-hit
+        # apply gives up the whole-graph fast scan and walks the regular
+        # scheduler instead. That is a throughput trade, not a semantic one
+        # — and specifically it does NOT undo the reason this config sets
+        # `rebuildMissingOutputsOnCacheHit = true` (never rewrite outputs
+        # that are already present, because `restoreOutputs` can fail on a
+        # mapped executable and abort the batch). That protection also lives
+        # in the per-action `aclHit` branch, which short-circuits to
+        # `asUpToDate`/"outputs-present" without restoring, and which beats
+        # via `completeSuccess`. `projectActionResult` maps `asCacheHit` and
+        # `asUpToDate` identically, so the per-edge outcomes are unchanged
+        # either way; only the scan is skipped.
+        if onProgress != nil:
+          cfg.progressCallback = proc(event: BuildProgressEvent) =
+            {.cast(gcsafe).}:
+              onProgress()
         try:
           let runRes = runBuild(g, cfg)
           for r in runRes.results: byId.add(r)
@@ -370,6 +421,7 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
 
       # ---- Assemble the per-edge outcomes in INPUT order. ----
       for a in actions:
+        beat()
         if substituted.hasKey(a.id):
           result.add(substituted[a.id])
           continue

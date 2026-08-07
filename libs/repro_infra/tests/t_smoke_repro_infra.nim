@@ -7,7 +7,7 @@
 ## Windows-only real driver / broker path is exercised by the M69
 ## integration gates.
 
-import std/[os, strutils, tables, tempfiles, unittest]
+import std/[os, strutils, tables, tempfiles, times, unittest]
 
 import repro_elevation
 import repro_infra
@@ -1358,6 +1358,246 @@ suite "repro_infra: the apply lock is reclaimable":
   test "releasing a lock that is already gone is a no-op":
     releaseApplyLock(sd)
     check not fileExists(applyLockPath(sd))
+
+suite "repro_infra: the apply lock survives a HUNG owner":
+  ## Dead-owner reclaim is necessary but NOT sufficient. The wedges seen
+  ## in practice had owners that were ALIVE but hung: a long-running
+  ## apply on a Windows host held the lock for four hours while burning
+  ## roughly seven seconds of CPU in total and none at all across a
+  ## twenty-second sample. `processAlive` correctly calls that ALIVE, so
+  ## a liveness-only rule refuses every apply forever.
+  ##
+  ## The progress heartbeat is what separates "hung" from "slow": a
+  ## healthy apply keeps beating, and a lock that is still beating is
+  ## NEVER reclaimed no matter how long it has been held.
+
+  setup:
+    let sd = createTempDir("repro-applyhb-", "")
+    ensureSystemStateDir(sd)
+    # PID 1 (init/systemd) and PID 4 (Windows "System") always exist and
+    # are owned by another user, so every case below probes a genuinely
+    # LIVE foreign owner.
+    let liveOther = when defined(windows): 4 else: 1
+    let now = getTime().toUnix()
+    proc writeLock(pid: int; ageSeconds, sinceBeatSeconds: int64;
+                   beats = 0) =
+      writeFile(applyLockPath(sd), renderApplyLockRecord(ApplyLockRecord(
+        pid: pid,
+        acquiredAt: now - ageSeconds,
+        heartbeatAt: now - sinceBeatSeconds,
+        beats: beats)))
+
+  teardown:
+    removeDir(sd)
+
+  test "the lock record round-trips and still reads a legacy bare PID":
+    let rec = ApplyLockRecord(pid: 1234, acquiredAt: 111, heartbeatAt: 222,
+      beats: 9, reclaimedFrom: 77)
+    let back = parseApplyLockRecord(renderApplyLockRecord(rec))
+    check back.pid == 1234
+    check back.acquiredAt == 111
+    check back.heartbeatAt == 222
+    check back.beats == 9
+    check back.reclaimedFrom == 77
+    check not back.legacy
+    # A lock written by an older `repro` is a bare decimal PID.
+    let legacy = parseApplyLockRecord("  4321\n")
+    check legacy.pid == 4321
+    check legacy.legacy
+    check legacy.heartbeatAt == 0
+    # Anything unparseable — including a half-parsed record — yields
+    # "nobody can prove ownership".
+    for junk in ["", "   ", "not-a-pid", "12x34", "pid=oops\nbeats=3"]:
+      check parseApplyLockRecord(junk).pid == 0
+
+  test "a live owner whose heartbeat went stale is reclaimed":
+    writeLock(liveOther, ageSeconds = 20_000, sinceBeatSeconds = 20_000,
+      beats = 7)
+    let acq = tryAcquireApplyLock(sd, ApplyLockPolicy(
+      heartbeatStaleSeconds: 60, maxAgeSeconds: 0, reclaimConfirmMs: 0))
+    check acq.acquired
+    check acq.reclaim == alrStaleHeartbeat
+    check acq.previousOwner == liveOther
+    check acq.sinceHeartbeatSeconds >= 20_000
+    check applyLockOwner(sd) == getCurrentProcessId()
+    # The displaced pid is recorded: the process was NOT terminated and
+    # the operator needs to know who to check on.
+    check readApplyLockRecord(sd).reclaimedFrom == liveOther
+    releaseApplyLock(sd)
+
+  test "an owner that is still beating keeps the lock however long it runs":
+    # Held for five and a half hours — far past any threshold — but it
+    # beat one second ago, so it is progressing, not hung.
+    writeLock(liveOther, ageSeconds = 20_000, sinceBeatSeconds = 1,
+      beats = 4242)
+    check not acquireApplyLock(sd, ApplyLockPolicy(
+      heartbeatStaleSeconds: 60, maxAgeSeconds: 0, reclaimConfirmMs: 0))
+    check applyLockOwner(sd) == liveOther
+    check readApplyLockRecord(sd).beats == 4242
+
+  test "a legacy bare-PID lock from a live owner is never reclaimed on a hunch":
+    # There is no heartbeat to judge progress by, so the conservative
+    # answer is the only answer: a live owner keeps the lock, even under
+    # the most aggressive policy. `--force-unlock` is the way out.
+    writeFile(applyLockPath(sd), $liveOther)
+    let rec = readApplyLockRecord(sd)
+    check rec.legacy
+    check rec.heartbeatAt == 0
+    check not acquireApplyLock(sd, ApplyLockPolicy(
+      heartbeatStaleSeconds: 1, maxAgeSeconds: 1, reclaimConfirmMs: 0))
+    check applyLockOwner(sd) == liveOther
+
+  test "the age-out is off by default and reclaims only when configured":
+    # A beating owner, five and a half hours in. With the shipped policy
+    # (age-out disabled) it keeps the lock; an operator who has set an
+    # explicit hard cap gets it reclaimed.
+    writeLock(liveOther, ageSeconds = 20_000, sinceBeatSeconds = 0,
+      beats = 99)
+    check DefaultMaxLockAgeSeconds == 0
+    check not acquireApplyLock(sd, ApplyLockPolicy(
+      heartbeatStaleSeconds: 0, maxAgeSeconds: 0, reclaimConfirmMs: 0))
+    let acq = tryAcquireApplyLock(sd, ApplyLockPolicy(
+      heartbeatStaleSeconds: 0, maxAgeSeconds: 3600, reclaimConfirmMs: 0))
+    check acq.acquired
+    check acq.reclaim == alrAgedOut
+    check acq.previousOwner == liveOther
+    releaseApplyLock(sd)
+
+  test "--force-unlock takes the lock from a live, beating owner":
+    writeLock(liveOther, ageSeconds = 5, sinceBeatSeconds = 0, beats = 3)
+    # The escape hatch is the ONLY thing that gets past a healthy owner.
+    check not acquireApplyLock(sd, ApplyLockPolicy(
+      heartbeatStaleSeconds: 60, maxAgeSeconds: 0, reclaimConfirmMs: 0))
+    var forced = defaultApplyLockPolicy()
+    forced.forceUnlock = true
+    let acq = tryAcquireApplyLock(sd, forced)
+    check acq.acquired
+    check acq.reclaim == alrForced
+    check acq.previousOwner == liveOther
+    check readApplyLockRecord(sd).reclaimedFrom == liveOther
+    releaseApplyLock(sd)
+
+  test "the heartbeat advances only for a lock this process owns":
+    check acquireApplyLock(sd)
+    let before = readApplyLockRecord(sd)
+    check before.pid == getCurrentProcessId()
+    check refreshApplyLock(sd)
+    let after = readApplyLockRecord(sd)
+    check after.beats == before.beats + 1
+    check after.heartbeatAt >= before.heartbeatAt
+    check after.acquiredAt == before.acquiredAt
+    # Somebody else's lock is never touched — beating on their behalf
+    # would keep a hung apply alive forever.
+    writeLock(liveOther, ageSeconds = 1, sinceBeatSeconds = 1, beats = 5)
+    check not refreshApplyLock(sd)
+    check readApplyLockRecord(sd).beats == 5
+    check readApplyLockRecord(sd).pid == liveOther
+    releaseApplyLock(sd)
+    # No lock at all: nothing to beat.
+    check not refreshApplyLock(sd)
+
+  test "the privileged dispatch beats once per completed operation":
+    ## Step 3 of the apply — the privileged set — is the longest
+    ## unbounded stretch there is: a profile that installs a Visual
+    ## Studio workload plus its siblings runs for hours inside a single
+    ## call. Beating only at the phase boundary would leave that whole
+    ## stretch silent, and a healthy apply would be indistinguishable
+    ## from a hung one. So the dispatch reports per COMPLETED operation,
+    ## which bounds the silence to ONE operation.
+    ##
+    ## The operations below are Windows resources; on a POSIX host each
+    ## dispatch fails with "not implemented on platform" rather than
+    ## touching anything. That is deliberate — reaching a VERDICT on an
+    ## operation is forward progress whatever the verdict, and it lets
+    ## this run everywhere without mutating a real system.
+    let profile = parseSystemProfile("""
+windows.registryValue {
+  key = "HKLM\SOFTWARE\Reprobuild-Tests\beat"
+  name = "One"
+  kind = string
+  value = "1"
+}
+windows.capability {
+  name = "OpenSSH.Server~~~~0.0.1.0"
+}
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+}
+""")
+    var planned: seq[PlannedOperation]
+    for r in profile.resources:
+      planned.add(PlannedOperation(operation: toPrivilegedOperation(r)))
+    check planned.len == 3
+    check acquireApplyLock(sd)
+    let beatsBefore = readApplyLockRecord(sd).beats
+    var hookCalls = 0
+    let hook: ApplyProgressHook = proc() {.gcsafe.} =
+      {.cast(gcsafe).}:
+        inc hookCalls
+        discard refreshApplyLock(sd)
+    let outcome = applyPrivilegedSetInProcess(
+      FixtureContext(), planned, onProgress = hook)
+    check outcome.results.len == 3
+    check hookCalls == 3
+    check readApplyLockRecord(sd).beats == beatsBefore + 3
+    releaseApplyLock(sd)
+
+  test "runInfraApply beats the lock once per privileged operation":
+    ## End-to-end wiring, not just the seam: `runInfraApply` must hand
+    ## its step-3 dispatch the progress hook. Driven through
+    ## `--no-elevate`, which walks the same per-operation loop and
+    ## reaches a "skipped" verdict for each — the one step-3 path that
+    ## runs unprivileged on any host.
+    let profileText = """
+windows.registryValue {
+  key = "HKLM\SOFTWARE\Reprobuild-Tests\wiring"
+  name = "One"
+  kind = string
+  value = "1"
+}
+windows.capability {
+  name = "OpenSSH.Server~~~~0.0.1.0"
+}
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+}
+"""
+    check acquireApplyLock(sd)
+    let beatsBefore = readApplyLockRecord(sd).beats
+    var opts: ApplyOptions
+    opts.stateDir = sd
+    opts.hostIdentity = "beat-wiring-host"
+    opts.reproExe = "/usr/bin/false"   # never spawned: --no-elevate
+    opts.planId = ""
+    opts.elevationMode = emNoElevate
+    opts.noPreview = true
+    let res = runInfraApply(profileText, opts)
+    check res.skippedCount == 3
+    let beatsAfter = readApplyLockRecord(sd).beats
+    # Four step boundaries plus one beat per privileged operation. The
+    # per-operation beats are the load-bearing part: without them a
+    # profile with a large privileged set goes silent for the whole
+    # phase.
+    check beatsAfter >= beatsBefore + 3 + 4
+    releaseApplyLock(sd)
+
+  test "re-entry by the current process keeps its own acquire time and beats":
+    check acquireApplyLock(sd)
+    check refreshApplyLock(sd)
+    check refreshApplyLock(sd)
+    let held = readApplyLockRecord(sd)
+    check held.beats == 2
+    let acq = tryAcquireApplyLock(sd)
+    check acq.acquired
+    check acq.reclaim == alrNone
+    let again = readApplyLockRecord(sd)
+    check again.beats == held.beats
+    check again.acquiredAt == held.acquiredAt
+    releaseApplyLock(sd)
 
 # ===========================================================================
 # M69 Phase B — windows.vsInstaller profile parsing, the structural

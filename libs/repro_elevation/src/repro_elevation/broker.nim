@@ -380,14 +380,40 @@ else:
 # Parent: drive the broker over the authenticated channel.
 # ===========================================================================
 
+type
+  ApplyProgressHook* = proc() {.gcsafe.}
+    ## Optional "one more unit of work finished" callback. The privileged
+    ## apply paths below invoke it once per COMPLETED operation, and the
+    ## build-action dispatcher (`repro_infra`) once per completed action
+    ## edge.
+    ##
+    ## The caller decides what to do with it. `repro infra apply` uses it
+    ## to refresh the per-host apply lock's progress heartbeat, so the
+    ## lock keeps proving the apply is moving while a long privileged set
+    ## runs. Without a per-unit hook the only heartbeats would sit at the
+    ## phase boundaries, and a healthy apply grinding through a big
+    ## privileged set would look identical to a hung one.
+    ##
+    ## `nil` (the default) means "nobody is watching" — every call site
+    ## must tolerate it.
+
+template notifyProgress(hook: ApplyProgressHook) =
+  if hook != nil:
+    hook()
+
 proc driveBrokerApply*(ch: var ElevationChannel; nonce: string;
-                       planned: openArray[PlannedOperation]):
+                       planned: openArray[PlannedOperation];
+                       onProgress: ApplyProgressHook = nil):
     PrivilegedApplyOutcome =
   ## PARENT side of the RBEB conversation. Performs the
   ## `Hello`/`HelloAck` handshake (sending the nonce), streams each
   ## planned operation, collects its `ApplyLogRecord` + the
   ## `OperationResult`, then sends `Done`. The broker exits on
   ## `Done`.
+  ##
+  ## `onProgress` fires each time the broker reports an operation
+  ## finished — the one point in this loop where forward progress is
+  ## unambiguous.
   ch.sendFrame(encodeHello(HelloFrame(
     protocolVersion: BrokerProtocolVersion, nonce: nonce)))
   let ackFrame = ch.recvFrame()
@@ -417,6 +443,7 @@ proc driveBrokerApply*(ch: var ElevationChannel; nonce: string;
       else:
         raiseProtocol("unexpected frame type " & $frame.messageType &
           " while awaiting an operation result")
+    notifyProgress(onProgress)
   ch.sendFrame(encodeDone())
   summarize(result)
 
@@ -436,7 +463,9 @@ type
 
 proc launchAndDriveBroker*(reproExe: string;
                            planned: openArray[PlannedOperation];
-                           filePrefix = ""): BrokerApplyResult =
+                           filePrefix = "";
+                           onProgress: ApplyProgressHook = nil):
+    BrokerApplyResult =
   ## PARENT: the complete one-broker apply.
   ##
   ##   1. mint a nonce and create the authenticated named pipe
@@ -462,7 +491,7 @@ proc launchAndDriveBroker*(reproExe: string;
   inc brokerLaunchCounter
   result.brokerPid = brokerProcessId(proc0)
   acceptAuthenticatedClient(ch)
-  result.outcome = driveBrokerApply(ch, nonce, planned)
+  result.outcome = driveBrokerApply(ch, nonce, planned, onProgress)
   ch.close()
   channelClosed = true
   result.brokerExitCode = waitForExit(proc0)
@@ -579,13 +608,18 @@ proc runBrokerSession*(nonce: string; ctx: FixtureContext): int =
 # ===========================================================================
 
 proc applyPrivilegedSetInProcess*(ctx: FixtureContext;
-                                  planned: openArray[PlannedOperation]):
+                                  planned: openArray[PlannedOperation];
+                                  onProgress: ApplyProgressHook = nil):
     PrivilegedApplyOutcome =
   ## The already-elevated fast path (deliverable 2). `repro` already
   ## holds an elevated token, so the privileged set runs in-process
   ## through the SAME `dispatchOperation` the broker uses — no
   ## broker, no channel, no prompt. Drift and closed-set checks are
   ## identical.
+  ##
+  ## `onProgress` fires once per operation — including one that failed
+  ## or drifted, because reaching a verdict on an operation IS forward
+  ## progress even when the verdict is bad.
   for plannedOp in planned:
     var dr: DispatchResult
     try:
@@ -609,18 +643,25 @@ proc applyPrivilegedSetInProcess*(ctx: FixtureContext;
       result.results.add(OperationResultFrame(
         operationAddress: plannedOp.operation.address,
         ok: false, driftDetected: false, diagnostic: e.msg))
+    notifyProgress(onProgress)
   summarize(result)
 
 # ===========================================================================
 # --no-elevate / declined-prompt: report every privileged op skipped.
 # ===========================================================================
 
-proc reportPrivilegedSetSkipped*(planned: openArray[PlannedOperation]):
+proc reportPrivilegedSetSkipped*(planned: openArray[PlannedOperation];
+                                 onProgress: ApplyProgressHook = nil):
     PrivilegedApplyOutcome =
   ## `--no-elevate` (deliverable 6) and the user-declined-prompt path
   ## (which the spec makes equivalent): the non-privileged subset is
   ## applied elsewhere; here every privileged operation is reported
   ## skipped with `EElevationRequired` context. Nothing is mutated.
+  ##
+  ## `onProgress` fires per operation here too — "skipped" is a verdict,
+  ## and reaching a verdict is forward progress. It keeps the three
+  ## step-3 dispatch paths uniform, so none of them can be the one that
+  ## quietly stops reporting.
   for plannedOp in planned:
     let op = plannedOp.operation
     result.results.add(OperationResultFrame(
@@ -633,6 +674,7 @@ proc reportPrivilegedSetSkipped*(planned: openArray[PlannedOperation]):
       operationKind: $op.kind,
       outcome: "skipped",
       detail: "privileged operation skipped (no elevation)"))
+    notifyProgress(onProgress)
   result.allApplied = false
 
 # ===========================================================================

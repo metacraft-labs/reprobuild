@@ -179,7 +179,7 @@ suite "Windows-System-Resources Phase G — action-edge dispatcher integration":
 
       let ctx = FixtureContext(filePrefix: tmpRoot)
       let dispatcher = mkBuildActionDispatcher(cacheRoot, ctx)
-      let outcomes = dispatcher(@[pba])
+      let outcomes = dispatcher(@[pba], nil)
 
       check outcomes.len == 1
       let o = outcomes[0]
@@ -218,7 +218,7 @@ suite "Windows-System-Resources Phase G — action-edge dispatcher integration":
       let ctx = FixtureContext(filePrefix: tmpRoot)
       let dispatcher = mkBuildActionDispatcher(cacheRoot, ctx,
         passthroughMonitorCli(cacheRoot))
-      let outcomes = dispatcher(@[pba])
+      let outcomes = dispatcher(@[pba], nil)
 
       check outcomes.len == 1
       check outcomes[0].ok
@@ -248,7 +248,7 @@ suite "Windows-System-Resources Phase G — action-edge dispatcher integration":
 
       let ctx = FixtureContext(filePrefix: tmpRoot)
       let dispatcher = mkBuildActionDispatcher(cacheRoot, ctx)
-      let outcomes = dispatcher(@[pba])
+      let outcomes = dispatcher(@[pba], nil)
 
       check outcomes.len == 1
       check not outcomes[0].ok
@@ -274,7 +274,7 @@ suite "Windows-System-Resources Phase G — action-edge dispatcher integration":
       let dispatcher = mkBuildActionDispatcher(cacheRoot, ctx)
 
       # First run: fresh execution.
-      let first = dispatcher(@[pba])
+      let first = dispatcher(@[pba], nil)
       check first.len == 1
       check first[0].ok
       check not first[0].cacheHit
@@ -283,7 +283,7 @@ suite "Windows-System-Resources Phase G — action-edge dispatcher integration":
 
       # Second run: identical fingerprint, identical outputs → engine
       # short-circuits the launch. The dispatcher reports cacheHit.
-      let second = dispatcher(@[pba])
+      let second = dispatcher(@[pba], nil)
       check second.len == 1
       check second[0].ok
       check second[0].cacheHit
@@ -366,3 +366,67 @@ suite "Windows-System-Resources Phase G — action-edge dispatcher integration":
     # toolIdentityRefs carries the resolved tool name so the engine
     # prepends its bin dir to PATH at fork time.
     check target[0].toolIdentityRefs.len == 1
+
+suite "Phase G — the real dispatcher reports progress per edge":
+  ## `runInfraApply` refreshes the apply lock's progress heartbeat from
+  ## the hook it hands the dispatcher. That only bounds the silence if
+  ## the PRODUCTION dispatcher fires it per edge rather than once around
+  ## the whole dispatch — otherwise a profile whose edges extract a
+  ## large archive and run a configuration script goes quiet for the
+  ## entire action-edge half and reads as a hung apply to the next
+  ## acquirer. This pins the real `mkBuildActionDispatcher`, including
+  ## the beats that have to come from inside `runBuild`.
+
+  test "mkBuildActionDispatcher fires onProgress for every edge":
+    when defined(linux) or defined(macosx):
+      let tmpRoot = createTempDir("phaseG-disp-progress-", "")
+      defer:
+        try: removeDir(tmpRoot)
+        except CatchableError: discard
+      let cacheRoot = tmpRoot / "build-cache"
+      let outputDir = tmpRoot / "outputs"
+      createDir(cacheRoot)
+      createDir(outputDir)
+      let edges = @[
+        shellWriteProfileBuildAction("progressA",
+          outputDir / "a.out", "a", requiresElevation = false),
+        shellWriteProfileBuildAction("progressB",
+          outputDir / "b.out", "b", requiresElevation = false),
+        shellWriteProfileBuildAction("progressC",
+          outputDir / "c.out", "c", requiresElevation = false)]
+      var beats = 0
+      let hook: ApplyProgressHook = proc() {.gcsafe.} =
+        {.cast(gcsafe).}:
+          inc beats
+      let ctx = FixtureContext(filePrefix: tmpRoot)
+      let dispatcher = mkBuildActionDispatcher(cacheRoot, ctx,
+        passthroughMonitorCli(cacheRoot))
+      let outcomes = dispatcher(edges, hook)
+      check outcomes.len == 3
+      for o in outcomes:
+        check o.ok
+      # The outcome-assembly loop alone would report exactly once per
+      # edge, and it only runs AFTER the build. The engine's own
+      # per-action progress events push the count well past that, which
+      # is what proves the beat also comes from INSIDE ``runBuild`` —
+      # the part of the dispatch that actually takes the time.
+      check beats >= 2 * edges.len
+
+  test "a nil progress hook is tolerated":
+    when defined(linux) or defined(macosx):
+      let tmpRoot = createTempDir("phaseG-disp-nilhook-", "")
+      defer:
+        try: removeDir(tmpRoot)
+        except CatchableError: discard
+      let cacheRoot = tmpRoot / "build-cache"
+      let outputDir = tmpRoot / "outputs"
+      createDir(cacheRoot)
+      createDir(outputDir)
+      let pba = shellWriteProfileBuildAction("progressNil",
+        outputDir / "n.out", "n", requiresElevation = false)
+      let ctx = FixtureContext(filePrefix: tmpRoot)
+      let dispatcher = mkBuildActionDispatcher(cacheRoot, ctx,
+        passthroughMonitorCli(cacheRoot))
+      let outcomes = dispatcher(@[pba], nil)
+      check outcomes.len == 1
+      check outcomes[0].ok
