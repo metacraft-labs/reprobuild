@@ -111,6 +111,7 @@ tests/integration/foreign_packages/lib/dnf_fixture_build
 tests/integration/foreign_packages/lib/fixture_build
 tests/integration/foreign_packages/lib/pacman_fixture_build
 tests/unit/t_config_nims_lib_resolution
+tests/unit/t_infra_apply_lock_hung_owner
 
 # Local backups created by tooling (e.g. pre-commit / migration scripts).
 *.local-backup
