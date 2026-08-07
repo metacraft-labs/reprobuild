@@ -38,12 +38,15 @@
 
 import std/[options, os, strutils, unittest]
 from repro_core/paths import extendedPath
+from repro_test_support import testCaseScratchSlug
 
 import repro_dsl_stdlib/catalog_registry
 
 import repro_home_apply/package_catalog
 
-const FixtureRoot = "build/test-tmp/t-adapter-chain"
+# Every test in the suite resets this tree, so it has to be private to
+# the process running one case — see ``testCaseScratchSlug``.
+let FixtureRoot = "build/test-tmp/t-adapter-chain-" & testCaseScratchSlug()
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -8,18 +8,29 @@
 
 import std/[json, os, osproc, strutils]
 import std/unittest
+from repro_test_support import testCaseScratchSlug
 
 const fixtureSource = currentSourcePath().parentDir() /
   "fixtures" / "fixture_protocol_three_tests.nim"
 
+# Both cases in this suite — and every case of
+# ``t_test_binary_run_one_writes_result_file`` — build this same
+# fixture. Under per-case execution those are concurrent processes, so
+# a single shared output path and nimcache means one ``nim c`` relinks
+# the binary another case is in the middle of running. Give each case
+# its own. Building under ``build/test-tmp`` rather than
+# ``build/test-bin`` also keeps a deliberately-failing fixture out of
+# the directory the runner scans.
+let fixtureScratch = "build" / "test-tmp" / "ct-test-unittest-parallel" /
+  testCaseScratchSlug()
+
 proc nimcacheDir(): string =
   result = getEnv("CT_TEST_PARALLEL_NIMCACHE")
   if result.len == 0:
-    result = "build" / "nimcache" / "ct_test_unittest_parallel" /
-      "fixture_protocol_three_tests"
+    result = fixtureScratch / "nimcache"
 
 proc buildFixture(): string =
-  let outputPath = "build" / "test-bin" /
+  let outputPath = fixtureScratch /
     "ct_test_unittest_parallel_fixture_three_tests"
   createDir(outputPath.parentDir())
   createDir(nimcacheDir())

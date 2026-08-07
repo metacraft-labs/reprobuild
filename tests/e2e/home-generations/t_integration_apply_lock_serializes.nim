@@ -13,10 +13,17 @@
 import std/[os, osproc, streams, strutils, unittest]
 
 import repro_home_generations
+from repro_test_support import testCaseScratchSlug
 
 const ProjectRoot = currentSourcePath().parentDir().parentDir().parentDir()
   .parentDir()
-const FixtureDir = "build/test-tmp/m62-gate3"
+# The lock under test is per-state-dir. Two cases sharing one state dir
+# contend ACROSS cases once they run as concurrent processes, which is
+# not what either case is measuring: the "acquirable again" case would
+# see the other case's holder and read EApplyBusy as a real failure.
+# The contention each case does measure is between its own two child
+# processes, and that is preserved. See ``testCaseScratchSlug``.
+let FixtureDir = "build/test-tmp/m62-gate3-" & testCaseScratchSlug()
 
 proc resetDir(path: string) =
   if dirExists(path):
