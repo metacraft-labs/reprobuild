@@ -7,7 +7,7 @@
 ## switch that ``start`` used to bundle.)
 ##
 ## Combines M14 ``repro branch <name>`` (create when missing) with M15
-## ``repro checkout <branch>`` (switch when present) and ALSO sets the
+## ``repro switch <branch>`` (switch when present) and ALSO sets the
 ## ``[workspace].feature_started = true`` mark in
 ## ``<workspaceRoot>/.repro/workspace.toml`` — see
 ## ``reprobuild-specs/Workspace-And-Develop-Mode.md`` §"Branch
@@ -18,7 +18,7 @@
 ## repo behind its OWN upstream fast-forwards whether or not the operator
 ## declared a feature started (declaring one cannot make a teammate's pushed
 ## commit unwanted). The mark is now workspace metadata that `repro branch` /
-## `repro checkout` write, preserve and report, with no planner consumer. What
+## `repro switch` write, preserve and report, with no planner consumer. What
 ## keeps the sub-cases below at rest is that a workspace-wide feature branch
 ## created locally has no published upstream yet, so there is nothing to
 ## fast-forward from.
@@ -26,16 +26,16 @@
 ## Sub-cases:
 ##
 ##   1. ``test_m16_start_creates_branch_when_missing`` — the branch is
-##      absent on every repo. ``branch --checkout`` creates the branch
+##      absent on every repo. ``switch -b`` creates the branch
 ##      across the workspace via the M14 path, switches every repo to
 ##      it via the M15 path, and writes the started mark. Exit 0,
 ##      ``feature_started = true``, every repo on the new branch.
 ##   2. ``test_m16_start_switches_when_branch_already_exists`` — the
-##      branch is present locally on every repo. ``branch --checkout``
+##      branch is present locally on every repo. ``switch -b``
 ##      delegates to the M15 ``checkout`` switch path and sets the
 ##      started mark. Exit 0, ``feature_started = true``.
 ##   3. ``test_m16_start_refuses_when_any_repo_dirty`` — one dirty
-##      sibling. ``branch --checkout`` refuses with exit 2; no repo is
+##      sibling. ``switch -b`` refuses with exit 2; no repo is
 ##      mutated; the metadata is left exactly as it was (no mark
 ##      written, no branch field updated).
 ##   4. ``test_m16_start_marks_metadata_so_sync_preserves_branch`` —
@@ -266,8 +266,9 @@ proc seedMetadataBranch(fx: M16Fixture; branch: string) =
     project = "lib-a", branch = branch)
 
 proc invokeStart(fx: M16Fixture; name: string): CmdResult =
+  # WV-5 — create-and-switch in place is `repro switch -b <name>`.
   runShell(shellCommand(@[
-    fx.reproBin, "branch", "--write-report", name, "--checkout",
+    fx.reproBin, "switch", "--write-report", name, "-b",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
@@ -279,7 +280,7 @@ proc invokeSync(fx: M16Fixture): CmdResult =
 
 proc readReport(fx: M16Fixture): JsonNode =
   let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
-    "branch-report.json"
+    "switch-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
@@ -297,7 +298,7 @@ proc repoEntryByName(report: JsonNode; name: string): JsonNode =
 
 # ---- the suite -------------------------------------------------------------
 
-suite "M28 — repro branch <name> --checkout marks feature branch":
+suite "M28/WV-5 — repro switch -b <name> marks feature branch":
 
   test "test_m28_start_creates_branch_when_missing":
     let gitBin = findExe("git")
@@ -392,7 +393,7 @@ suite "M28 — repro branch <name> --checkout marks feature branch":
       check recorded.get() == "feature-switch"
 
   test "test_m28_start_converges_mixed_local_matrix":
-    ## An earlier ``branch --checkout`` interrupted mid-create leaves the
+    ## An earlier ``switch -b`` interrupted mid-create leaves the
     ## feature branch present (locally, at HEAD) on SOME repos and absent on
     ## the rest, with no remote branch involved. Re-running the identical
     ## command must CONVERGE that partial matrix — create the branch on the

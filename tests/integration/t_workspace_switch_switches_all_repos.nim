@@ -1,27 +1,27 @@
-## M15 — ``repro checkout <branch>`` workspace-wide switch.
+## M15 — ``repro switch <branch>`` workspace-wide switch.
 ##
 ## Drives the compiled ``repro`` binary against a hermetic three-repo
 ## workspace. Sub-cases (every one is its own ``test_m15_*`` block):
 ##
-##   1. ``test_m15_checkout_switches_all_repos_to_existing_local_branch``
+##   1. ``test_m15_switch_switches_all_repos_to_existing_local_branch``
 ##      Every repo has the branch locally — all three switch to it, the
 ##      M13 metadata's ``[workspace].branch`` is updated to the new
 ##      name, exit 0.
-##   2. ``test_m15_checkout_creates_tracking_branch_when_missing_locally``
+##   2. ``test_m15_switch_creates_tracking_branch_when_missing_locally``
 ##      One repo has the branch only on ``origin`` — the fetch +
 ##      tracking + switch chain runs and that repo lands on the branch
 ##      alongside the others, exit 0.
-##   3. ``test_m15_checkout_refuses_when_branch_missing_in_any_repo``
+##   3. ``test_m15_switch_refuses_when_branch_missing_in_any_repo``
 ##      One repo's working tree lacks the branch locally AND remotely
 ##      — exit 2, no mutation, M13 metadata untouched.
-##   4. ``test_m15_checkout_refuses_when_any_repo_dirty``
+##   4. ``test_m15_switch_refuses_when_any_repo_dirty``
 ##      One dirty sibling — exit 2, no repo mutated, dirty file
 ##      preserved, M13 metadata untouched.
-##   5. ``test_m15_checkout_records_new_branch_in_metadata``
+##   5. ``test_m15_switch_records_new_branch_in_metadata``
 ##      Verifies ``[workspace].branch`` is updated after a successful
 ##      checkout, both via the M13 reader and the on-disk
 ##      ``workspace.toml``.
-##   6. ``test_m15_checkout_idempotent_when_already_on_branch``
+##   6. ``test_m15_switch_idempotent_when_already_on_branch``
 ##      Running checkout to the branch every repo is already on is a
 ##      no-op success, exit 0, no actions scheduled.
 ##
@@ -267,13 +267,13 @@ proc invokeCheckout(fx: M15Fixture; name: string): CmdResult =
   # post-confirmation switch outcomes, so they opt out with ``--yes``;
   # the dedicated RA-9 suite covers the non-TTY refuse path.
   runShell(shellCommand(@[
-    fx.reproBin, "checkout", "--write-report", name, "--yes",
+    fx.reproBin, "switch", "--write-report", name, "--yes",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc readReport(fx: M15Fixture): JsonNode =
   let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
-    "checkout-report.json"
+    "switch-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
@@ -285,9 +285,9 @@ proc repoEntryByName(report: JsonNode; name: string): JsonNode =
 
 # ---- the suite -------------------------------------------------------------
 
-suite "M15 — repro checkout <branch> switches all repos":
+suite "M15/WV-5 — repro switch <branch> switches all repos":
 
-  test "test_m15_checkout_switches_all_repos_to_existing_local_branch":
+  test "test_m15_switch_switches_all_repos_to_existing_local_branch":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -329,7 +329,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       check recorded.isSome
       check recorded.get() == "feature-x"
 
-  test "test_m15_checkout_creates_tracking_branch_when_missing_locally":
+  test "test_m15_switch_creates_tracking_branch_when_missing_locally":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -386,7 +386,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       check recorded.isSome
       check recorded.get() == "feature-remote"
 
-  test "test_m15_checkout_refuses_when_branch_missing_in_any_repo":
+  test "test_m15_switch_refuses_when_branch_missing_in_any_repo":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -432,8 +432,8 @@ suite "M15 — repro checkout <branch> switches all repos":
       check recorded.isSome
       check recorded.get() == "main"
 
-  test "test_m15_checkout_stashes_dirty_repo_and_switches":
-    # RA-29 reconciliation: ``repro checkout`` no longer REFUSES on a dirty
+  test "test_m15_switch_stashes_dirty_repo_and_switches":
+    # RA-29 reconciliation: ``repro switch`` no longer REFUSES on a dirty
     # repo. The dirty repo's WIP is stashed-on-leave (keyed by the branch
     # being left) and the workspace switches; the clean siblings switch
     # normally. The dedicated RA-29 round-trip test
@@ -486,7 +486,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       check recorded.isSome
       check recorded.get() == "feature-y"
 
-  test "test_m15_checkout_records_new_branch_in_metadata":
+  test "test_m15_switch_records_new_branch_in_metadata":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -527,7 +527,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       check report["recordedBranch"].getStr() == "feature-meta"
       check report["exitCode"].getInt() == 0
 
-  test "test_m15_checkout_idempotent_when_already_on_branch":
+  test "test_m15_switch_idempotent_when_already_on_branch":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -538,7 +538,7 @@ suite "M15 — repro checkout <branch> switches all repos":
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
       # No new branch is created — every repo stays on ``main``.
-      # ``repro checkout main`` should be a clean no-op.
+      # ``repro switch main`` should be a clean no-op.
 
       let res = invokeCheckout(fx, "main")
       if res.code != 0:

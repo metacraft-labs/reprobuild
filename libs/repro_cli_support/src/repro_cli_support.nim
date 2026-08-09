@@ -248,9 +248,9 @@ proc renderUsage*(programName: string): string =
           programName &
       " push [<project>] [--sync] [--merge|--rebase] [--certify|--no-certify] [--workspace-root=PATH] [--current-repo=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
           programName &
-      " branch [<name>] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
+      " branch [<path>] [--branch=NAME] [--existing-branch] [--include-changes] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
           programName &
-      " checkout <branch> [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
+      " switch <branch> [-b|--new-branch] [--yes] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
           programName &
       " watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...]\n       " &
           programName &
@@ -296,12 +296,16 @@ proc renderUsage*(programName: string): string =
           programName &
       " completion bash|zsh|fish\n       " &
           programName &
-      " workspace {bootstrap [<dir>] | projects [list|add [--default]] | " &
-      "project new <name> [-m DESC] | project repo add <project> <repo> " &
-      "--remote=URL} [--workspace-root=PATH]\n\n" &
+      " workspace|ws {bootstrap [<dir>] | enable <project>... [--default] " &
+      "[--no-sync] | disable <project>... [--keep-checkouts] [--force] | " &
+      "projects {list [--enabled|--disabled] | add <name> [-m DESC] | " &
+      "remove <name>} | repos {list [--project=NAME] | add <repo> " &
+      "--remote=URL [--project=NAME]... | remove <repo>} | new <path> " &
+      "[--branch=NAME] [--existing-branch] | switch <branch> [-b]} " &
+      "[--workspace-root=PATH]\n\n" &
       "workspace reports: the workspace verbs (init, sync, pull, lock, " &
       "status, list, manifests, shared-clones, forall, develop, hooks " &
-      "ensure, check, push, branch, checkout) write a JSON report file " &
+      "ensure, check, push, branch, switch) write a JSON report file " &
       "ONLY when --write-report is given: --write-report writes " &
       "<workspaceRoot>/.repro/build/reports/<verb>-report.json, " &
       "--write-report=PATH writes exactly PATH. --json prints the same " &
@@ -22646,7 +22650,7 @@ proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs):
     (parsed.projectName & ".toml")
   # An EXPLICIT ``repro workspace init <project>`` names one project and
   # initializes exactly that one; the active project set is materialized by
-  # ``repro sync`` / ``repro workspace projects add`` instead. (The
+  # ``repro sync`` / ``repro workspace enable`` instead. (The
   # compositional branch above has no explicit-name semantics — membership
   # there comes from workspace.toml — so it does extend.)
   if fileExists(projectFile):
@@ -23421,7 +23425,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
 
   # M13: record the active workspace branch in .repo/workspace.toml so
   # downstream commands (``repro workspace status``, M14 ``repro branch``,
-  # M15 ``repro checkout``) can read it back as a single source of truth.
+  # M15 ``repro switch``) can read it back as a single source of truth.
   # The branch value is the resolver's ``trunk`` (the manifest's
   # documented default branch); when ``trunk`` is empty we fall back to
   # ``defaultRevision``. We only write when we have a meaningful value
@@ -38359,7 +38363,7 @@ proc runWorkspaceForallCommand*(args: openArray[string]): int =
 # Per ``reprobuild-specs/CLI/branch.md`` and Phase 4 of
 # ``reprobuild-specs/Workspace-Management.milestones.org``. Unlike the
 # M9–M12 family this is a TOP-LEVEL subcommand (``repro branch``, not
-# ``repro workspace branch``) — branch operations are the most frequent
+# ``repro workspace new``) — branch operations are the most frequent
 # workspace coordination commands and earn a short alias.
 #
 # Two forms:
@@ -38526,23 +38530,45 @@ type
     workspaceRoot: string
     projectName: string
     branchName: string
-    forkPath: string        ## M27: optional 2nd positional — fork destination.
+    forkPath: string        ## WV-6: the positional — the fork destination.
     includeChanges: bool    ## M27: also copy the source's uncommitted work.
+    existingBranch: bool    ## WV-6: adopt an existing branch instead of cutting one.
+    destinationRefusal: string
+      ## WV-6 — a destination guard that fired during parsing. Carried rather
+      ## than raised so the command reports it as an ordinary refusal (exit 2,
+      ## nothing created) instead of as a usage error.
     checkout: bool          ## M28: create AND switch every repo onto the branch.
     json: bool
     toolProvisioning: ToolProvisioningMode
     report: ReportSpec      ## Opt-in ``--write-report[=PATH]`` artifact.
 
-proc parseBranchArgs*(args: openArray[string]): BranchArgs =
-  ## ``repro branch [<name>] [--workspace-root=PATH]
+proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
+                      requirePath = false): BranchArgs =
+  ## ``repro branch [<path>] [--branch=NAME] [--existing-branch]
+  ## [--include-changes] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
-  ## The positional, when present, is the new branch name. ``project``
-  ## is intentionally NOT a positional here — the M14 spec is a single
-  ## ``<name>`` slot, and the active project is recovered either from
-  ## a composer-mode ``.repo/workspace.toml`` or from a metadata-only
-  ## workspace.toml's ``[workspace].project`` field (the M13 schema).
+  ##
+  ## WV-6 — the positional, when present, is the fork DESTINATION PATH, and
+  ## the branch name defaults to its basename. A workspace branch is a set of
+  ## coordinated branches across every participating repo, and what the
+  ## operator wants when they start one is somewhere to put it; making the
+  ## argument a path means the directory name and the branch name stop being
+  ## two things to keep in sync. ``--branch=NAME`` covers the case where they
+  ## should differ.
+  ##
+  ## ``project`` is intentionally NOT a positional here — the active project is
+  ## recovered either from a composer-mode workspace.toml or from a
+  ## metadata-only workspace.toml's ``[workspace].project`` field (M13).
+  ##
+  ## ``verb`` is the spelling the operator actually typed, so a diagnostic
+  ## names the command they ran rather than its sibling. ``requirePath`` is set
+  ## by ``repro workspace new``, whose whole job is to produce a workspace: the
+  ## no-argument show form belongs to ``repro branch`` alone, and a ``new``
+  ## that quietly answered a question instead of creating anything would be the
+  ## same class of surprise the verb split exists to remove.
   result.workspaceRoot = ""
   result.toolProvisioning = tpmPathOnly
+  var explicitBranch = ""
   var i = 0
   while i < args.len:
     let arg = args[i]
@@ -38552,39 +38578,68 @@ proc parseBranchArgs*(args: openArray[string]): BranchArgs =
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
         valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--branch" or arg.startsWith("--branch="):
+      explicitBranch = valueFromFlag(args, i, "--branch")
+    elif arg == "--existing-branch":
+      result.existingBranch = true
     elif arg == "--include-changes":
       result.includeChanges = true
-    elif arg == "--checkout":
-      result.checkout = true
     elif arg == "--json":
       result.json = true
     elif consumeReportFlag(arg, result.report):
       discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
-        "unsupported `repro branch` flag: " & arg)
-    elif result.branchName.len == 0:
-      result.branchName = arg
+        "unsupported `" & verb & "` flag: " & arg)
     elif result.forkPath.len == 0:
       result.forkPath = arg
     else:
       raise newException(ValueError,
-        "unexpected positional argument to `repro branch`: " & arg)
+        "unexpected positional argument to `" & verb & "`: " & arg &
+          " (the single positional is the destination PATH; use " &
+          "`--branch=NAME` to name the branch something else)")
     inc i
-  if result.includeChanges and result.forkPath.len == 0:
-    # In place there is nothing to copy INTO — the changes are already here.
-    raise newException(ValueError,
-      "`--include-changes` requires the fork form " &
-        "`repro branch <name> <path>`; in place the working trees already " &
-        "carry their changes")
-  if result.forkPath.len > 0 and result.branchName.len == 0:
-    raise newException(ValueError,
-      "`repro branch <name> <path>` requires the branch name")
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
-  if result.forkPath.len > 0:
-    result.forkPath = absolutePath(result.forkPath)
+  if result.forkPath.len == 0:
+    if requirePath:
+      raise newException(ValueError,
+        "`" & verb & "` requires the destination <path> of the new " &
+          "workspace, e.g. `" & verb & " ../my-feature`. To ask which " &
+          "branch this workspace is on, run `repro branch`")
+    # The read-only show form. Every flag below only means something for a
+    # destination, so accepting them here would silently do nothing.
+    if explicitBranch.len > 0 or result.existingBranch or result.includeChanges:
+      raise newException(ValueError,
+        "`--branch` / `--existing-branch` / `--include-changes` require a " &
+          "destination path (`" & verb & " <path>`); with no path " &
+          "`repro branch` only reports the current workspace branch")
+    return
+  let destination = absolutePath(result.forkPath)
+  # A destination INSIDE this workspace is refused. Nesting a workspace inside
+  # a workspace is always wrong — the inner tree gets swept up by the outer
+  # one's repo enumeration, hooks and locks — and a bare single-segment name
+  # (`repro branch my-feature`) lands here, which is exactly the argument most
+  # likely to be typed by accident. Failing loudly beats producing a nested
+  # workspace that only misbehaves later.
+  if destination == result.workspaceRoot or
+      destination.startsWith(result.workspaceRoot & DirSep):
+    result.destinationRefusal =
+      "'" & result.forkPath & "' is inside the current workspace (" &
+      result.workspaceRoot & ").\n" &
+      "  To create a branch and switch this workspace onto it:  " &
+      "repro switch -b " & lastPathPart(result.forkPath) & "\n" &
+      "  To fork into a new workspace directory:                " &
+      verb & " ../" & lastPathPart(result.forkPath)
+  result.forkPath = destination
+  result.branchName =
+    if explicitBranch.len > 0: explicitBranch
+    else: lastPathPart(destination)
+  if result.branchName.len == 0:
+    raise newException(ValueError,
+      "cannot derive a branch name from '" & result.forkPath &
+        "'; pass `--branch=NAME`")
 
 proc resolveBranchProject(parsed: BranchArgs):
     tuple[resolved: ResolvedProject;
@@ -38961,12 +39016,12 @@ proc executeBranchCreate(parsed: BranchArgs): BranchReport =
   result.exitCode = 0
 
 proc executeBranchCreateAndCheckout(parsed: BranchArgs): BranchReport
-  ## M28 forward declaration — defined after ``executeCheckout``, which it
+  ## M28 forward declaration — defined after ``executeWorkspaceSwitch``, which it
   ## delegates the switch pass to.
 
 proc executeBranchFork(parsed: BranchArgs): BranchReport
   ## M27 forward declaration — the fork engine is defined further down,
-  ## after ``resolveCheckoutProject`` (which it reuses so the fork resolves
+  ## after ``resolveSwitchProject`` (which it reuses so the fork resolves
   ## the participating repo set exactly like ``checkout``/``start`` do).
 
 proc branchReportRoot(report: BranchReport): string =
@@ -38985,10 +39040,14 @@ proc writeBranchReport(report: BranchReport; destination: string) =
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
-proc runBranchCommand*(args: openArray[string]): int =
-  ## ``repro branch [<name>] [<path>] [--include-changes]
-  ## [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop]
-  ## [--json]``.
+proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
+                       requirePath = false): int =
+  ## ``repro branch [<path>] [--branch=NAME] [--existing-branch]
+  ## [--include-changes] [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ##
+  ## ``repro workspace new <path>`` is the same command under the workspace
+  ## namespace, invoked with ``requirePath = true`` — see ``parseBranchArgs``.
   ##
   ## See the M14 block comment above for the contract. With
   ## ``--write-report`` it writes a ``branch-report.json`` artifact under
@@ -38997,20 +39056,25 @@ proc runBranchCommand*(args: openArray[string]): int =
   ## what happened, in addition to the stdout-formatted text lines.
   ## Without ``--write-report`` nothing is written to disk.
   ##
-  ## M27 — when the optional ``<path>`` positional is present the command
+  ## M27 / WV-6 — when the ``<path>`` positional is present the command
   ## FORKS: it materializes a new workspace there with every repo (and the
-  ## workspace root repo) on a freshly created ``<name>``, cut from THIS
-  ## workspace's committed HEADs, leaving the current workspace untouched.
-  let parsed = parseBranchArgs(args)
+  ## workspace root repo) on the branch, cut from THIS workspace's committed
+  ## HEADs, leaving the current workspace untouched.
+  let parsed = parseBranchArgs(args, verb, requirePath)
+  # WV-6 — two forms only: a destination path forks, no argument shows. The
+  # in-place create forms are `repro switch -b`, which reaches
+  # ``executeBranchCreateAndCheckout`` on its own.
+  if parsed.destinationRefusal.len > 0:
+    # A guard that fired before anything was resolved. Reported as a refusal —
+    # exit 2, nothing created — not as a usage error, because the operator's
+    # command was well-formed and the destination is the thing at fault.
+    stderr.writeLine(verb & ": " & parsed.destinationRefusal)
+    return 2
   let report =
     if parsed.forkPath.len > 0:
       executeBranchFork(parsed)
-    elif parsed.branchName.len == 0:
-      executeBranchShow(parsed)
-    elif parsed.checkout:
-      executeBranchCreateAndCheckout(parsed)
     else:
-      executeBranchCreate(parsed)
+      executeBranchShow(parsed)
   writeBranchReport(report,
     reportDestination(parsed.report, branchReportRoot(report), "branch"))
   stageFailureReport(parsed.report, branchReportRoot(report), "branch",
@@ -39034,10 +39098,10 @@ proc runBranchCommand*(args: openArray[string]): int =
 #
 # CLI/checkout.md's V1 surface "requires a clean workspace — commit, stash,
 # or discard changes first". RA-29 makes the *stash* path automatic and
-# COHERENT across the workspace: when ``repro checkout`` leaves a branch
+# COHERENT across the workspace: when ``repro switch`` leaves a branch
 # with uncommitted work in some repos, each dirty repo's WIP is stashed
 # (per-repo, independently) keyed by the branch being LEFT; when a later
-# ``repro checkout`` RETURNS to that branch, the matching stash is restored
+# ``repro switch`` RETURNS to that branch, the matching stash is restored
 # in each repo. WIP is never lost on a task-switch
 # (Workspace-And-Develop-Mode.md — switching tasks is the steady-state loop).
 #
@@ -39111,7 +39175,7 @@ proc restoreRepoWipOnReturn(identity: GitToolIdentity;
       " failed: " & res.output.strip())
   (restored: true, diagnostic: "")
 
-# --- M15: `repro checkout <branch>` ---------------------------------------
+# --- M15 / WV-5: `repro switch <branch>` ---------------------------------
 #
 # Top-level subcommand per ``reprobuild-specs/CLI/checkout.md``. Same
 # convention deviation flagged by M9—M14: the milestone description hints
@@ -39163,12 +39227,12 @@ proc restoreRepoWipOnReturn(identity: GitToolIdentity;
 #   2 — operator-visible refuse (any dirty repo, OR the requested
 #       branch is missing in any repo locally and remotely).
 #
-# The JSON report at ``<workspaceRoot>/.repro/build/reports/checkout-report.json``
+# The JSON report at ``<workspaceRoot>/.repro/build/reports/switch-report.json``
 # carries the per-repo classification, previous branch, new branch, and
 # the post-command ``recordedBranch`` (the M13 metadata value).
 
 type
-  CheckoutRepoOutcome* = enum
+  SwitchRepoOutcome* = enum
     croSwitched           ## Local branch existed; ``git switch`` ran.
     croFetchedAndSwitched ## Remote-only branch; fetched + tracked.
     croAlreadyOnBranch    ## Already on the requested branch (no-op).
@@ -39180,7 +39244,7 @@ type
     croConfirmRefused     ## RA-9 confirmation refused (non-TTY/declined).
     croStashFailed        ## RA-29 leave-stash failed; nothing scheduled.
 
-  CheckoutRepoEntry* = object
+  SwitchRepoEntry* = object
     ## Per-repo line in the JSON report. ``previousBranch`` is the
     ## branch the repo was on going into the command (empty when
     ## detached); ``newBranch`` is what it is on after — typically the
@@ -39199,8 +39263,8 @@ type
     stashedOnLeave*: bool   ## RA-29: WIP was stashed leaving the old branch.
     restoredOnReturn*: bool ## RA-29: a prior stash was restored on return.
 
-  CheckoutReport* = object
-    ## Structured outcome of one ``repro checkout`` invocation.
+  SwitchReport* = object
+    ## Structured outcome of one ``repro switch`` invocation.
     ## ``branch`` is the requested branch; ``recordedBranch`` is what
     ## ``[workspace].branch`` carries AFTER the command finished (the
     ## new branch on success, the pre-existing value on refuse).
@@ -39208,10 +39272,10 @@ type
     workspaceRoot*: string
     branch*: string
     recordedBranch*: string
-    repos*: seq[CheckoutRepoEntry]
+    repos*: seq[SwitchRepoEntry]
     exitCode*: int
 
-proc checkoutOutcomeTag(outcome: CheckoutRepoOutcome): string =
+proc switchOutcomeTag(outcome: SwitchRepoOutcome): string =
   case outcome
   of croSwitched: "switched"
   of croFetchedAndSwitched: "fetched_and_switched"
@@ -39223,7 +39287,7 @@ proc checkoutOutcomeTag(outcome: CheckoutRepoOutcome): string =
   of croConfirmRefused: "confirm_refused"
   of croStashFailed: "stash_failed"
 
-proc toJsonNode*(report: CheckoutReport): JsonNode =
+proc toJsonNode*(report: SwitchReport): JsonNode =
   result = newJObject()
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
@@ -39248,7 +39312,7 @@ proc toJsonNode*(report: CheckoutReport): JsonNode =
   result["repos"] = repos
   result["exitCode"] = %report.exitCode
 
-proc renderCheckoutTextLines*(report: CheckoutReport): seq[string] =
+proc renderSwitchTextLines*(report: SwitchReport): seq[string] =
   for entry in report.repos:
     var line = "workspace checkout: " & entry.path & " " & entry.outcome
     if entry.previousBranch.len > 0 and entry.newBranch.len > 0 and
@@ -39271,20 +39335,21 @@ proc renderCheckoutTextLines*(report: CheckoutReport): seq[string] =
       " repos; metadata=" & report.recordedBranch)
 
 type
-  CheckoutArgs = object
+  SwitchArgs = object
     workspaceRoot: string
     projectName: string
     branchName: string
+    newBranch: bool      ## WV-5 ``-b``: create the branch before switching.
     json: bool
     assumeYes: bool      ## RA-9 ``--yes``: skip the per-repo confirmation.
     toolProvisioning: ToolProvisioningMode
     report: ReportSpec   ## Opt-in ``--write-report[=PATH]`` artifact.
 
-proc parseCheckoutArgs*(args: openArray[string]): CheckoutArgs =
-  ## ``repro checkout <branch> [--workspace-root=PATH]
+proc parseSwitchArgs*(args: openArray[string]): SwitchArgs =
+  ## ``repro switch <branch> [-b|--new-branch] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``. The
   ## positional ``<branch>`` is REQUIRED — unlike ``repro branch`` the
-  ## argument-less form is not a defined surface for M15.
+  ## argument-less form is not a defined surface.
   result.workspaceRoot = ""
   result.toolProvisioning = tpmPathOnly
   var i = 0
@@ -39296,6 +39361,8 @@ proc parseCheckoutArgs*(args: openArray[string]): CheckoutArgs =
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
         valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "-b" or arg == "--new-branch":
+      result.newBranch = true
     elif arg == "--json":
       result.json = true
     elif arg == "--yes" or arg == "--force":
@@ -39304,21 +39371,21 @@ proc parseCheckoutArgs*(args: openArray[string]): CheckoutArgs =
       discard
     elif arg.startsWith("-"):
       raise newException(ValueError,
-        "unsupported `repro checkout` flag: " & arg)
+        "unsupported `repro switch` flag: " & arg)
     elif result.branchName.len == 0:
       result.branchName = arg
     else:
       raise newException(ValueError,
-        "unexpected positional argument to `repro checkout`: " & arg)
+        "unexpected positional argument to `repro switch`: " & arg)
     inc i
   if result.branchName.len == 0:
     raise newException(ValueError,
-      "`repro checkout` requires a branch name positional argument")
+      "`repro switch` requires a branch name positional argument")
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
-proc resolveCheckoutProject(parsed: CheckoutArgs):
+proc resolveSwitchProject(parsed: SwitchArgs):
     tuple[resolved: ResolvedProject;
           workspaceLocal: Option[WorkspaceLocal]] =
   ## Same dispatch rule as M14 ``resolveBranchProject``: composer mode
@@ -39334,7 +39401,7 @@ proc resolveCheckoutProject(parsed: CheckoutArgs):
       composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml))
     return (resolved, some(workspaceLocal))
   var projectName = parsed.projectName
-  # PS-2 — ``repro checkout`` switches the WHOLE workspace, so with no
+  # PS-2 — ``repro switch`` switches the WHOLE workspace, so with no
   # explicit project argument every repo of the active project set switches.
   let membershipFromMetadata = parsed.projectName.len == 0
   if projectName.len == 0 and fileExists(workspaceToml):
@@ -39347,7 +39414,7 @@ proc resolveCheckoutProject(parsed: CheckoutArgs):
       discard
   if projectName.len == 0:
     raise newException(ValueError,
-      "`repro checkout <branch>` requires either `.repro/workspace.toml` " &
+      "`repro switch <branch>` requires either `.repro/workspace.toml` " &
         "or a project name recoverable from one; neither was present at " &
         parsed.workspaceRoot)
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
@@ -39366,11 +39433,11 @@ proc resolveCheckoutProject(parsed: CheckoutArgs):
       "' found under '" & manifestsRoot &
       "' (looked for '" & projectFile & "' and '" & variantFile & "')")
 
-proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
+proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   result.workspaceRoot = parsed.workspaceRoot
   result.branch = parsed.branchName
 
-  let (resolved, _) = resolveCheckoutProject(parsed)
+  let (resolved, _) = resolveSwitchProject(parsed)
   result.project = resolved.projectName
 
   let identity = ensureGitToolResolvable(
@@ -39510,7 +39577,7 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
     # report ``ready_*`` (the work was scheduled-then-cancelled by the
     # decision pass) rather than the post-success tag.
     for state in states:
-      var entry = CheckoutRepoEntry(
+      var entry = SwitchRepoEntry(
         name: state.repo.name,
         path: state.repo.path,
         headSha: state.headSha,
@@ -39519,18 +39586,18 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
         localHadBranch: state.localHadBranch)
       case state.kind
       of rsAlreadyOnBranch:
-        entry.outcome = checkoutOutcomeTag(croAlreadyOnBranch)
+        entry.outcome = switchOutcomeTag(croAlreadyOnBranch)
         entry.newBranch = parsed.branchName
       of rsDirty:
-        entry.outcome = checkoutOutcomeTag(croDirtyRefused)
+        entry.outcome = switchOutcomeTag(croDirtyRefused)
         entry.dirtyReason = state.reason
         entry.newBranch = state.previousBranch
       of rsBranchMissing:
-        entry.outcome = checkoutOutcomeTag(croBranchMissingRefused)
+        entry.outcome = switchOutcomeTag(croBranchMissingRefused)
         entry.diagnostic = state.reason
         entry.newBranch = state.previousBranch
       of rsProbeFailed:
-        entry.outcome = checkoutOutcomeTag(croProbeFailed)
+        entry.outcome = switchOutcomeTag(croProbeFailed)
         entry.diagnostic = state.reason
         entry.newBranch = state.previousBranch
       of rsReadyLocal:
@@ -39567,7 +39634,7 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
         (if state.kind == rsReadyFetchAndTrack: " (fetch+track)" else: "") &
         (if state.needsStash: " (stash WIP)" else: ""))
   if switchPreview.len > 0:
-    stderr.writeLine("repro checkout will switch " & $switchPreview.len &
+    stderr.writeLine("repro switch will switch " & $switchPreview.len &
       " repo(s) to '" & parsed.branchName & "':")
     for line in switchPreview:
       stderr.writeLine(line)
@@ -39585,7 +39652,7 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
       # Refuse-and-report: mutate nothing, surface the per-repo
       # classification just like the dirty/missing refuse path above.
       for state in states:
-        var entry = CheckoutRepoEntry(
+        var entry = SwitchRepoEntry(
           name: state.repo.name,
           path: state.repo.path,
           headSha: state.headSha,
@@ -39595,10 +39662,10 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
           localHadBranch: state.localHadBranch)
         case state.kind
         of rsAlreadyOnBranch:
-          entry.outcome = checkoutOutcomeTag(croAlreadyOnBranch)
+          entry.outcome = switchOutcomeTag(croAlreadyOnBranch)
           entry.newBranch = parsed.branchName
         of rsReadyLocal, rsReadyFetchAndTrack:
-          entry.outcome = checkoutOutcomeTag(croConfirmRefused)
+          entry.outcome = switchOutcomeTag(croConfirmRefused)
           # RA-28 Principle 2: the per-repo diagnostic must NAME the offender
           # (this repo + the working-tree switch that requires confirmation,
           # plus the WIP-stash it would trigger when dirty) AND a concrete,
@@ -39619,7 +39686,7 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
             "refused: switching repo '" & state.repo.path & "' from '" &
             from0 & "' to '" & parsed.branchName & "'" & stashNote &
             " requires confirmation (" & cause &
-            ") — re-run 'repro checkout " & parsed.branchName &
+            ") — re-run 'repro switch " & parsed.branchName &
             " --yes' to confirm"
         else:
           entry.outcome = "internal_unexpected_state"
@@ -39710,7 +39777,7 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
     else:
       discard
 
-  var perRepoOutcome = initTable[int, tuple[outcome: CheckoutRepoOutcome;
+  var perRepoOutcome = initTable[int, tuple[outcome: SwitchRepoOutcome;
                                             diagnostic: string]]()
   if actions.len > 0:
     let cacheRoot = parsed.workspaceRoot / ".repro" / "workspace" /
@@ -39763,7 +39830,7 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
 
   var actionFailures = 0
   for idx, state in states:
-    var entry = CheckoutRepoEntry(
+    var entry = SwitchRepoEntry(
       name: state.repo.name,
       path: state.repo.path,
       headSha: state.headSha,
@@ -39774,14 +39841,14 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
       restoredOnReturn: restoredOnReturn.getOrDefault(idx, false))
     case state.kind
     of rsAlreadyOnBranch:
-      entry.outcome = checkoutOutcomeTag(croAlreadyOnBranch)
+      entry.outcome = switchOutcomeTag(croAlreadyOnBranch)
       entry.newBranch = parsed.branchName
     of rsReadyLocal, rsReadyFetchAndTrack:
       if stashFailure.hasKey(idx):
         # RA-29: the leave-stash failed; this repo did not switch. WIP is
         # still in place (we never touched the tree), but the operator must
         # resolve it. Refuse this repo with a non-zero exit.
-        entry.outcome = checkoutOutcomeTag(croStashFailed)
+        entry.outcome = switchOutcomeTag(croStashFailed)
         entry.dirtyReason =
           "could not stash WIP before leaving '" & state.previousBranch &
           "': " & stashFailure[idx]
@@ -39791,7 +39858,7 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
         let r = perRepoOutcome.getOrDefault(idx,
           (outcome: croActionFailed,
            diagnostic: "internal: missing action outcome"))
-        entry.outcome = checkoutOutcomeTag(r.outcome)
+        entry.outcome = switchOutcomeTag(r.outcome)
         entry.diagnostic = r.diagnostic
         entry.newBranch =
           if r.outcome == croActionFailed: state.previousBranch
@@ -39833,45 +39900,79 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
   except WorkspaceManifestParseError as err:
     result.exitCode = 1
     result.recordedBranch = ""
-    result.repos.add(CheckoutRepoEntry(
+    result.repos.add(SwitchRepoEntry(
       outcome: "metadata_write_failed",
       diagnostic: err.msg))
     return
 
   result.exitCode = 0
 
-proc writeCheckoutReport(report: CheckoutReport; destination: string) =
+proc writeSwitchReport(report: SwitchReport; destination: string) =
   ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
   if destination.len == 0:
     return
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
-proc runCheckoutCommand*(args: openArray[string]): int =
-  ## ``repro checkout <branch> [--workspace-root=PATH]
+proc runSwitchCommand*(args: openArray[string]): int =
+  ## ``repro switch <branch> [-b|--new-branch] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
   ##
   ## See the M15 block comment above for the contract. With ``--write-report``
-  ## it writes a ``checkout-report.json`` artifact under
+  ## it writes a ``switch-report.json`` artifact under
   ## ``<workspaceRoot>/.repro/workspace/`` (or the explicit
   ## ``--write-report=PATH``) so a script consumer has a parseable record of
   ## what happened, in addition to the stdout-formatted text lines.
   ## Without ``--write-report`` nothing is written to disk.
-  let parsed = parseCheckoutArgs(args)
-  let report = executeCheckout(parsed)
-  writeCheckoutReport(report,
-    reportDestination(parsed.report, report.workspaceRoot, "checkout"))
-  stageFailureReport(parsed.report, report.workspaceRoot, "checkout",
+  let parsed = parseSwitchArgs(args)
+
+  # WV-5 ``-b`` — create the branch across every participating repo, then
+  # switch onto it. The create-then-switch engine is M28's: one operation, one
+  # decision tree, so ``-b`` cannot drift from what the fork form does about
+  # dirty repos, collisions, and the M16 feature mark. The BranchReport it
+  # returns is written under THIS verb's name, because the run the operator
+  # asked for is a switch.
+  if parsed.newBranch:
+    let branchParsed = BranchArgs(
+      workspaceRoot: parsed.workspaceRoot,
+      projectName: parsed.projectName,
+      branchName: parsed.branchName,
+      checkout: true,
+      json: parsed.json,
+      toolProvisioning: parsed.toolProvisioning,
+      report: parsed.report)
+    var created = executeBranchCreateAndCheckout(branchParsed)
+    created.form = "create_and_switch"
+    writeBranchReport(created,
+      reportDestination(parsed.report, branchReportRoot(created), "switch"))
+    stageFailureReport(parsed.report, branchReportRoot(created), "switch",
+      created.toJsonNode())
+    if created.repos.len > 0:
+      var branches: seq[string]
+      for _ in created.repos:
+        branches.add(created.recordedBranch)
+      writePromptCache(branchReportRoot(created), "switch", branches)
+    if parsed.json:
+      stdout.writeLine(pretty(created.toJsonNode(), indent = 2))
+    else:
+      for line in renderBranchTextLines(created):
+        stdout.writeLine(line)
+    return created.exitCode
+
+  let report = executeWorkspaceSwitch(parsed)
+  writeSwitchReport(report,
+    reportDestination(parsed.report, report.workspaceRoot, "switch"))
+  stageFailureReport(parsed.report, report.workspaceRoot, "switch",
     report.toJsonNode())
   block:
     var branches: seq[string]
     for entry in report.repos:
       branches.add(entry.newBranch)
-    writePromptCache(report.workspaceRoot, "checkout", branches)
+    writePromptCache(report.workspaceRoot, "switch", branches)
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
-    for line in renderCheckoutTextLines(report):
+    for line in renderSwitchTextLines(report):
       stdout.writeLine(line)
   report.exitCode
 
@@ -40250,7 +40351,7 @@ proc executeAdd(parsed: AddArgs): AddReport =
     # it writes name the target, and the closure keys off `[repo].name` — a
     # fragment named after its server-side path would leave those edges
     # dangling. So the plan is asked to PRESERVE the name (`repro workspace
-    # project repo add`, which writes no `depends` edges, takes the
+    # repos add`, which writes no `depends` edges, takes the
     # unrestricted plan and may put a server-side path in `name`), and a plan
     # that would still rename the repo — a bare `…/<repo>.git` directory URL,
     # where the name can only come out as `<repo>.git` — is declined in favour
@@ -40767,23 +40868,24 @@ proc copyWorkingTreeChanges(identity: GitToolIdentity;
   (ok: true, changed: anyChange, diagnostic: "")
 
 proc executeBranchCreateAndCheckout(parsed: BranchArgs): BranchReport =
-  ## M28 — ``repro branch <name> --checkout``: create the branch across every
-  ## participating repo AND leave them all switched onto it. This is the
-  ## in-place feature-branch flow that used to need the separate
-  ## ``repro branch --checkout`` flag.
+  ## M28 / WV-5 — the engine behind ``repro switch -b <name>``: create the
+  ## branch across every participating repo AND leave them all switched onto
+  ## it. This is the in-place feature-branch flow.
   ##
   ## The create pass runs first and is authoritative for refusals (dirty repos,
-  ## probe failures). With ``--checkout`` a branch that already exists is NOT a
-  ## collision — it is simply a switch target — so this also covers the
+  ## probe failures). Because the caller asserts "put me on this branch" rather
+  ## than "create this branch here", a branch that already exists locally is NOT
+  ## a collision — it is simply a switch target — so this also covers the
   ## "branch already exists everywhere" and the interrupted-midway-through
   ## mixed cases without a separate decision tree.
   # A branch that already exists on a REMOTE is not ours to create: creating a
   # local branch at HEAD would silently diverge from it. Adopting a remote
-  # branch is `repro checkout`'s job (it fetch-and-tracks a remote-only branch),
-  # so refuse and name that remedy — the same rule the fork form applies.
+  # branch is plain `repro switch`'s job (it fetch-and-tracks a remote-only
+  # branch), so refuse and name that remedy — the same rule the fork form
+  # applies.
   let identity = ensureGitToolResolvable(
     parsed.toolProvisioning, getEnv("PATH"))
-  let (resolvedForProbe, _) = resolveCheckoutProject(CheckoutArgs(
+  let (resolvedForProbe, _) = resolveSwitchProject(SwitchArgs(
     workspaceRoot: parsed.workspaceRoot,
     projectName: parsed.projectName,
     branchName: parsed.branchName,
@@ -40814,9 +40916,9 @@ proc executeBranchCreateAndCheckout(parsed: BranchArgs): BranchReport =
         path: path,
         outcome: "branch_exists_on_remote",
         diagnostic: "branch '" & parsed.branchName &
-          "' already exists on this repo's remote; `repro branch --checkout` " &
+          "' already exists on this repo's remote; `repro switch -b` " &
           "creates a NEW branch — to work on the existing one run " &
-          "`repro checkout " & parsed.branchName & "`, which fetches and " &
+          "`repro switch " & parsed.branchName & "`, which fetches and " &
           "tracks a remote-only branch"))
     result.exitCode = 2
     let recorded = readWorkspaceBranch(parsed.workspaceRoot)
@@ -40827,18 +40929,18 @@ proc executeBranchCreateAndCheckout(parsed: BranchArgs): BranchReport =
   result = executeBranchCreate(parsed)
   if result.exitCode != 0:
     return
-  let checkoutArgs = CheckoutArgs(
+  let switchArgs = SwitchArgs(
     workspaceRoot: parsed.workspaceRoot,
     projectName: parsed.projectName,
     branchName: parsed.branchName,
     assumeYes: true,          # the create pass already confirmed the plan
     toolProvisioning: parsed.toolProvisioning)
-  let switched = executeCheckout(checkoutArgs)
+  let switched = executeWorkspaceSwitch(switchArgs)
   # Fold the switch outcome into the per-repo lines so one report describes the
   # whole operation. The switch outcome REPLACES the create one: it names the
   # repo's END state (``switched`` / ``already_on_branch``), which is what the
   # operator and any script consumer care about, and it keeps this report's
-  # vocabulary identical to `repro checkout`'s rather than inventing a
+  # vocabulary identical to `repro switch`'s rather than inventing a
   # compound ``created+switched`` tag nothing else emits.
   for centry in switched.repos:
     for i in 0 ..< result.repos.len:
@@ -40851,7 +40953,7 @@ proc executeBranchCreateAndCheckout(parsed: BranchArgs): BranchReport =
   if switched.exitCode != 0:
     result.exitCode = switched.exitCode
     return
-  # ``executeCheckout`` rewrites the metadata; re-assert the M16 mark so the
+  # ``executeWorkspaceSwitch`` rewrites the metadata; re-assert the M16 mark so the
   # created feature branch stays protected from `repro sync`.
   try:
     writeWorkspaceBranchWithStarted(parsed.workspaceRoot,
@@ -40865,10 +40967,14 @@ proc executeBranchCreateAndCheckout(parsed: BranchArgs): BranchReport =
       outcome: "metadata_write_failed", diagnostic: err.msg))
 
 proc executeBranchFork(parsed: BranchArgs): BranchReport =
-  ## M27 — ``repro branch <name> <path>``: materialize a NEW
-  ## workspace at ``parsed.forkPath`` and start ``<branch>`` in it, cut from
-  ## THIS workspace's committed HEADs. The source workspace is never modified,
-  ## switched or stashed.
+  ## M27 / WV-6 — ``repro branch <path>`` (a.k.a. ``repro workspace new``):
+  ## materialize a NEW workspace at ``parsed.forkPath`` on a branch named after
+  ## the destination's basename, cut from THIS workspace's committed HEADs. The
+  ## source workspace is never modified, switched or stashed.
+  ##
+  ## ``--existing-branch`` inverts the branch assertion: the named branch must
+  ## already exist and the new workspace is checked out onto it rather than
+  ## cutting a new one.
   ##
   ## Cutting from committed HEADs (not the remote tips, not the recorded lock)
   ## is the point of the command: "branch off exactly what I have right now",
@@ -40886,13 +40992,13 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   result.workspaceRoot = parsed.forkPath
   result.includeChanges = parsed.includeChanges
 
-  let parsedCheckout = CheckoutArgs(
+  let parsedSwitch = SwitchArgs(
     workspaceRoot: parsed.workspaceRoot,
     projectName: parsed.projectName,
     branchName: parsed.branchName,
     assumeYes: true,
     toolProvisioning: parsed.toolProvisioning)
-  let (resolved, _) = resolveCheckoutProject(parsedCheckout)
+  let (resolved, _) = resolveSwitchProject(parsedSwitch)
   result.project = resolved.projectName
 
   let identity = ensureGitToolResolvable(
@@ -40957,6 +41063,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   var states: seq[ForkSourceState]
   var anyProbeFailed = false
   var remoteCollisions: seq[string]
+  var missingBranch: seq[string]   ## WV-6 ``--existing-branch``: repos lacking it.
   for repo in resolved.repos:
     var state: ForkSourceState
     state.repo = repo
@@ -40980,17 +41087,30 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     let cleanRes = queryGitState(isCleanQuery(state.srcPath), identity)
     if cleanRes.status == gqsOk:
       state.isClean = cleanRes.isClean
-    # `start` starts something NEW. A branch that already exists upstream is
-    # a resume, and adopting it into a fresh directory is init + checkout.
+    # The default form starts something NEW, so a branch that already exists
+    # upstream is a refusal. ``--existing-branch`` inverts the assertion to
+    # "put a workspace on this branch", where the SAME probe answers the
+    # opposite question: a branch that exists nowhere is the refusal. One probe,
+    # two mirror-image guards, so neither flag can silently do the other's job.
     let rName = gitRemoteNameFor(repo)
     let remoteProbe = gitRunPlain(identity,
       ["-C", state.srcPath, "ls-remote", "--heads", rName, parsed.branchName])
     if remoteProbe.code == 0 and remoteProbe.output.strip().len > 0:
       state.remoteHasBranch = true
+    if parsed.existingBranch:
+      var found = state.remoteHasBranch
+      if not found:
+        let localProbe = gitRunPlain(identity,
+          ["-C", state.srcPath, "rev-parse", "--verify", "--quiet",
+           "refs/heads/" & parsed.branchName])
+        found = localProbe.code == 0 and localProbe.output.strip().len > 0
+      if not found:
+        missingBranch.add(repo.path)
+    elif state.remoteHasBranch:
       remoteCollisions.add(repo.path)
     states.add(state)
 
-  if anyProbeFailed or remoteCollisions.len > 0:
+  if anyProbeFailed or remoteCollisions.len > 0 or missingBranch.len > 0:
     for state in states:
       var entry = BranchRepoEntry(
         name: state.repo.name,
@@ -40999,13 +41119,18 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       if state.probeFailed:
         entry.outcome = "probe_failed"
         entry.diagnostic = state.probeReason
-      elif state.remoteHasBranch:
+      elif parsed.existingBranch and state.repo.path in missingBranch:
+        entry.outcome = "branch_missing"
+        entry.diagnostic = "branch '" & parsed.branchName &
+          "' exists neither locally nor on remote '" &
+          gitRemoteNameFor(state.repo) & "'; `--existing-branch` adopts an " &
+          "EXISTING branch — drop the flag to cut a new one"
+      elif not parsed.existingBranch and state.remoteHasBranch:
         entry.outcome = "branch_exists_on_remote"
         entry.diagnostic = "branch '" & parsed.branchName &
           "' already exists on remote '" & gitRemoteNameFor(state.repo) &
-          "'; `start` creates a NEW branch — to work on the existing one " &
-          "use `repro workspace init <url> " & parsed.forkPath &
-          "` then `repro checkout " & parsed.branchName & "`"
+          "'; this creates a NEW branch — pass `--existing-branch` to check " &
+          "the existing one out into " & parsed.forkPath & " instead"
       else:
         entry.outcome = "ready"
       result.repos.add(entry)
@@ -41061,16 +41186,37 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       diagnostic: "head-sha probe failed on the workspace root: " &
         rootHead.diagnostic))
     return
-  var rootAction = gitForkBranchAction(rootActionId, identity,
-    branchName = parsed.branchName,
-    sourceRepoPath = parsed.workspaceRoot,
-    targetSha = rootHead.headSha,
-    repoPath = ".",
-    receiptPath = ".repro" / "workspace" / "receipts" /
-      "start-fork-root.receipt")
-  rootAction.cwd = parsed.forkPath
-  actions.add(rootAction)
-  actionRepoIndex[rootActionId] = RootEntryIndex
+  # WV-6 — the ROOT repo carries the membership manifests. Under
+  # ``--existing-branch`` the branch belongs to somebody else's feature and the
+  # root repo usually has no such branch, so it is switched only when the
+  # branch is actually there and otherwise left on its default branch. Cutting
+  # a new root branch to match would invent a membership line of history the
+  # operator did not ask for.
+  var rootParticipates = true
+  if parsed.existingBranch:
+    let rootProbe = gitRunPlain(identity,
+      ["-C", parsed.workspaceRoot, "rev-parse", "--verify", "--quiet",
+       "refs/heads/" & parsed.branchName])
+    rootParticipates = rootProbe.code == 0 and rootProbe.output.strip().len > 0
+  if rootParticipates:
+    var rootAction =
+      if parsed.existingBranch:
+        gitSwitchAction(rootActionId, identity,
+          branchName = parsed.branchName,
+          repoPath = ".",
+          receiptPath = ".repro" / "workspace" / "receipts" /
+            "start-fork-root.receipt")
+      else:
+        gitForkBranchAction(rootActionId, identity,
+          branchName = parsed.branchName,
+          sourceRepoPath = parsed.workspaceRoot,
+          targetSha = rootHead.headSha,
+          repoPath = ".",
+          receiptPath = ".repro" / "workspace" / "receipts" /
+            "start-fork-root.receipt")
+    rootAction.cwd = parsed.forkPath
+    actions.add(rootAction)
+    actionRepoIndex[rootActionId] = RootEntryIndex
 
   for idx, state in states:
     let receiptRel = ".repro" / "workspace" / "receipts" /
@@ -41078,12 +41224,23 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
        ".receipt")
     let actionId = "workspace-start-fork-" &
       safeRepoIdSegment(state.repo.name) & "-" & $idx
-    var action = gitForkBranchAction(actionId, identity,
-      branchName = parsed.branchName,
-      sourceRepoPath = state.srcPath,
-      targetSha = state.headSha,
-      repoPath = state.repo.path,
-      receiptPath = receiptRel)
+    var action =
+      if parsed.existingBranch:
+        # The repo was just cloned, so the branch is reachable as a
+        # remote-tracking ref; `git switch <name>` DWIMs the tracking branch
+        # off ``refs/remotes/origin/<name>`` — the same path `repro switch`
+        # relies on for a remote-only branch.
+        gitSwitchAction(actionId, identity,
+          branchName = parsed.branchName,
+          repoPath = state.repo.path,
+          receiptPath = receiptRel)
+      else:
+        gitForkBranchAction(actionId, identity,
+          branchName = parsed.branchName,
+          sourceRepoPath = state.srcPath,
+          targetSha = state.headSha,
+          repoPath = state.repo.path,
+          receiptPath = receiptRel)
     action.cwd = parsed.forkPath
     action.pool = "vcs/fetch"
     action.poolUnits = 1'u32
@@ -44575,6 +44732,26 @@ proc normalizeInternalArgs(args: seq[string]): seq[string] =
   else:
     result = args
 
+proc normalizeWorkspaceNamespaceAlias*(args: seq[string]): seq[string] =
+  ## WV-1 — accept ``repro ws <verb>`` as ``repro workspace <verb>``.
+  ##
+  ## The alias is resolved HERE, once, before any subcommand routing, rather
+  ## than by teaching each ``args[0] == "workspace"`` dispatch arm about a
+  ## second spelling. That is the difference between an alias and a fork in the
+  ## surface: every workspace verb that exists today and every one added later
+  ## inherits it with no per-verb work, and no arm can drift by recognizing one
+  ## spelling and not the other.
+  ##
+  ## Only the leading token is rewritten. ``ws`` in any later position is an
+  ## ordinary argument — a project named ``ws``, a path, a forall command body —
+  ## and must survive untouched.
+  if args.len >= 1 and args[0] == "ws":
+    result = @["workspace"]
+    if args.len > 1:
+      result.add(args[1 .. ^1])
+  else:
+    result = args
+
 # ---- RA-6: host-ergonomics verbs -------------------------------------------
 #
 # RA-6 adopts the host-ergonomics surface the repo-workspaces pilot grew that
@@ -44585,14 +44762,14 @@ proc normalizeInternalArgs(args: seq[string]): seq[string] =
 #     (``.envrc`` / ``AGENTS.md`` / ``workspace-projects.md``). Idempotent:
 #     a re-run never clobbers an existing file; it reports each as written
 #     or skipped.
-#   * ``repro workspace projects [list|add]`` — inspect / grow the active
-#     PROJECT SET. ``add --default`` auto-layers the set from
-#     ``REPRO_DEFAULT_PROJECTS`` (then the RA-8 ``[projects] default``) when
-#     the user has not chosen an explicit set.
+#   * ``repro workspace enable`` / ``disable`` — activate or deactivate
+#     projects in THIS workspace. ``enable --default`` auto-layers the set
+#     from ``REPRO_DEFAULT_PROJECTS`` (then the RA-8 ``[projects] default``)
+#     when the user has not chosen an explicit set.
 #   * ``repro completion <shell>`` — emit a shell completion script
 #     (RA-26 ``prompt init`` style: print a snippet, mutate nothing).
-#   * ``repro project new`` / ``repro project repo add`` — manifest-authoring
-#     verbs that write + commit + push to the manifest repo.
+#   * ``repro workspace projects`` / ``repos`` — manifest-authoring verbs that
+#     write + commit + push project and repo DEFINITIONS to the manifest repo.
 
 const
   bootstrapEnvrcContent = """# shellcheck shell=bash
@@ -44615,8 +44792,9 @@ This is a multi-repo reprobuild workspace. Sibling repos are cloned
 side-by-side and coordinated through the workspace manifest. Read
 @workspace-projects.md for the active project set and per-repo descriptions.
 
-When you add a project or a repo to this workspace, use
-`repro workspace project new` / `repro workspace project repo add`; the
+To activate a project in this workspace use `repro ws enable <project>`
+(and `repro ws disable <project>` to drop it). To DEFINE a new project or
+repo for everyone, use `repro ws projects add` / `repro ws repos add`; the
 manifest is the workspace bill of materials. `workspace-projects.md` is
 generated from the manifest — do not edit it by hand.
 """
@@ -44626,8 +44804,9 @@ generated from the manifest — do not edit it by hand.
 This file is generated from the workspace manifest. It lists the projects
 layered into this workspace and the repos each project contributes.
 
-Run `repro workspace projects list` to see the active project set, and
-`repro workspace projects add <project>` to layer another project in.
+Run `repro workspace projects list` to see every defined project and
+whether it is enabled here, and `repro workspace enable <project>` to layer
+another one in.
 """
 
   bootstrapGitignoreContent = """# reprobuild local workspace state
@@ -44843,7 +45022,7 @@ proc runWorkspaceProvisionCommand*(args: openArray[string]): int =
       "ensure the toolchain via windowsProvisioningPlan)")
     return 0
 
-# ---- RA-6: `repro workspace projects [list|add]` ---------------------------
+# ---- RA-6: workspace-root + default-set helpers ----------------------------
 
 proc parseProjectsWorkspaceRoot(args: openArray[string]): string =
   result = getCurrentDir()
@@ -44859,7 +45038,7 @@ proc parseProjectsWorkspaceRoot(args: openArray[string]): string =
   result = absolutePath(result)
 
 proc readDefaultProjectsFromHostConfig(workspaceRoot: string): seq[string] =
-  ## RA-8 fallback source for ``projects add --default``: the host bootstrap
+  ## RA-8 fallback source for ``enable --default``: the host bootstrap
   ## config's ``[projects] default`` set. Best-effort — a missing/malformed
   ## config yields an empty set (the env var is the primary source).
   let configPath = findBootstrapConfigPath(workspaceRoot)
@@ -44871,150 +45050,393 @@ proc readDefaultProjectsFromHostConfig(workspaceRoot: string): seq[string] =
   except CatchableError:
     return @[]
 
-proc projectSetRepoPathsMissingOnDisk(workspaceRoot: string;
-                                      names: openArray[string]): seq[string] =
-  ## PS-3 — the checkout paths the named projects declare that are NOT on disk
-  ## yet. ``projects add`` materializes only when this is non-empty, so adding
-  ## projects whose repos are all present (or which declare no repos at all)
-  ## stays a pure metadata operation and never reaches for the network.
+# ---- WV-2: `repro workspace enable` / `disable` -----------------------------
+#
+# The MEMBERSHIP axis: which projects are active in THIS workspace. The
+# DEFINITION axis (which projects and repos exist at all) is the manifest-
+# authoring `projects` / `repos` verbs further down. See
+# `reprobuild-specs/CLI/workspace.md` §"The Two Axes".
+
+proc definedProjectNames*(workspaceRoot: string): seq[string] =
+  ## Every project (and variant) the workspace's manifests root DEFINES, sorted.
+  ##
+  ## This is the definition axis's view of the world and it is deliberately a
+  ## directory listing rather than a resolve: a project whose manifest is
+  ## malformed still EXISTS, and reporting it as undefined would send the
+  ## operator to `projects add` to create a file that is already there.
+  let manifests = manifestsRoot(workspaceRoot)
+  var seen: seq[string]
+  for sub in ["projects", "variants"]:
+    let dir = manifests / sub
+    if not dirExists(dir):
+      continue
+    for kind, path in walkDir(dir):
+      if kind notin {pcFile, pcLinkToFile}:
+        continue
+      if path.splitFile.ext != ".toml":
+        continue
+      let name = path.splitFile.name
+      if name notin seen:
+        seen.add(name)
+  sort(seen)
+  seen
+
+proc manifestDefinitionsAreVisible*(workspaceRoot: string): bool =
+  ## Whether this workspace can tell a defined project from an undefined one.
+  ##
+  ## It cannot during the RA-6 fresh-clone bootstrap: `enable --default` runs
+  ## before any manifest checkout exists, so EVERY name looks undefined. Guards
+  ## that refuse unknown names must consult this first and stay silent when the
+  ## answer is "no manifests yet" — the PS-4 lesson, which learned the same
+  ## thing the hard way about conflict refusal.
+  let manifests = manifestsRoot(workspaceRoot)
+  dirExists(manifests / "projects") or dirExists(manifests / "variants")
+
+proc projectSetRepoPaths(workspaceRoot: string;
+                         names: openArray[string]): seq[string] =
+  ## Checkout paths the named project set declares. An empty set declares
+  ## nothing (rather than raising, which is what `resolveProjectSet` does for
+  ## an empty name list) — "the remaining set after disabling everything" is a
+  ## legitimate question with the answer "no repos".
+  if names.len == 0:
+    return @[]
   let resolved = resolveProjectSet(workspaceRoot, names)
   for repo in resolved.repos:
-    if not dirExists(workspaceRoot / repo.path / ".git"):
-      result.add(repo.path)
+    result.add(repo.path)
 
-proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
-  ## ``repro workspace projects [list|add ...]`` — inspect or grow the active
-  ## PROJECT SET recorded in ``.repro/workspace.toml``.
+proc projectSetRepoPathsMissingOnDisk(workspaceRoot: string;
+                                      names: openArray[string]): seq[string] =
+  ## WV-2 — the checkout paths the named projects declare that are NOT on disk
+  ## yet. `enable` materializes only when this is non-empty, so enabling
+  ## projects whose repos are all present (or which declare no repos at all)
+  ## stays a pure metadata operation and never reaches for the network.
+  for path in projectSetRepoPaths(workspaceRoot, names):
+    if not dirExists(workspaceRoot / path / ".git"):
+      result.add(path)
+
+proc parseMembershipProjects(rest: openArray[string]): seq[string] =
+  ## Positional project names from a membership verb's argv.
+  for arg in rest:
+    if not arg.startsWith("-"):
+      result.add(arg)
+
+proc defaultProjectsToEnable(workspaceRoot: string): seq[string] =
+  ## The `--default` set: `REPRO_DEFAULT_PROJECTS` (primary), then the RA-8
+  ## host config. With NEITHER set the result is empty and the caller no-ops —
+  ## no env var means no auto-layer, not an error.
+  let envRaw = getEnv("REPRO_DEFAULT_PROJECTS")
+  if envRaw.len > 0:
+    for tok in envRaw.split({':', ';', ',', ' ', '\t', '\n'}):
+      let t = tok.strip()
+      if t.len > 0 and t notin result:
+        result.add(t)
+  if result.len == 0:
+    result = readDefaultProjectsFromHostConfig(workspaceRoot)
+
+proc runWorkspaceEnableCommand*(args: openArray[string]): int =
+  ## ``repro workspace enable <project>... [--default] [--no-sync]`` — activate
+  ## already-DEFINED projects in this workspace.
   ##
-  ##   * ``list`` (default) — print the active set, one per line.
-  ##   * ``add <project>...`` — layer the named projects into the set AND
-  ##     check out the repos the enlarged set introduces (PS-3). Membership
-  ##     without working trees is not a state any other command can act on,
-  ##     so recording and materializing are one operation.
-  ##   * ``add ... --no-sync`` — record membership only.
-  ##   * ``add --default`` — auto-layer the set from ``REPRO_DEFAULT_PROJECTS``
-  ##     (a path-separator / comma / whitespace-delimited list), falling back
-  ##     to the RA-8 host config ``[projects] default``. Does NOTHING when
-  ##     neither source provides any project (no env var → no auto-layer).
-  let sub = if args.len > 0 and not args[0].startsWith("-"): args[0] else: "list"
-  let rest = if args.len > 0 and not args[0].startsWith("-"): args[1 .. ^1]
-             else: @(args)
+  ## Recording and materializing are ONE operation: membership without working
+  ## trees is not a state any other command can act on, so the repos the
+  ## enlarged set introduces are checked out through the ordinary sync path.
+  ## Membership itself stays idempotent, while the clone phase still creates
+  ## anything missing — which makes a re-run the repair path for a partially
+  ## cloned workspace.
   let workspaceRoot = parseProjectsWorkspaceRoot(args)
-
-  case sub
-  of "list":
-    let active = readWorkspaceProjects(workspaceRoot)
-    for p in active:
-      stdout.writeLine(p)
-    return 0
-  of "add":
-    var explicit: seq[string]
-    var useDefault = false
-    var noSync = false
-    for arg in rest:
-      if arg == "--default":
-        useDefault = true
-      elif arg == "--no-sync":
-        noSync = true
-      elif arg.startsWith("--workspace-root="):
-        discard
-      elif not arg.startsWith("-"):
-        explicit.add(arg)
-
-    var toAdd: seq[string]
-    if useDefault:
-      # RA-6 auto-layer: source the default set from REPRO_DEFAULT_PROJECTS
-      # (primary), then the RA-8 host config. With NEITHER set, no auto-layer
-      # happens — the active set is left unchanged.
-      let envRaw = getEnv("REPRO_DEFAULT_PROJECTS")
-      if envRaw.len > 0:
-        for tok in envRaw.split({':', ';', ',', ' ', '\t', '\n'}):
-          let t = tok.strip()
-          if t.len > 0:
-            toAdd.add(t)
-      if toAdd.len == 0:
-        toAdd = readDefaultProjectsFromHostConfig(workspaceRoot)
-    for p in explicit:
-      if p notin toAdd:
-        toAdd.add(p)
-
-    if toAdd.len == 0:
-      if useDefault:
-        # No env var, no host-config default: a deliberate no-op (exit 0).
-        # The active set is untouched — there is no default to layer.
-        stdout.writeLine(
-          "repro workspace projects: no default project set " &
-          "(REPRO_DEFAULT_PROJECTS unset and no host config [projects] " &
-          "default); nothing added")
-        return 0
-      stderr.writeLine("repro workspace projects add: no project named " &
-        "(pass one or more <project> names, or --default)")
+  var explicit = parseMembershipProjects(args)
+  var useDefault = false
+  var noSync = false
+  for arg in args:
+    if arg == "--default":
+      useDefault = true
+    elif arg == "--no-sync":
+      noSync = true
+    elif arg.startsWith("--workspace-root="):
+      discard
+    elif arg.startsWith("-"):
+      stderr.writeLine("repro workspace enable: unknown flag " & arg)
       return 2
 
-    let existing = readWorkspaceProjects(workspaceRoot)
-    var merged = existing
-    for p in toAdd:
-      if p notin merged:
-        merged.add(p)
+  var toAdd: seq[string]
+  if useDefault:
+    toAdd = defaultProjectsToEnable(workspaceRoot)
+  for p in explicit:
+    if p notin toAdd:
+      toAdd.add(p)
 
-    # PS-4 — validate the PROSPECTIVE set before touching anything. Two
-    # projects that declare one checkout path with different facts refuse the
-    # whole command: no metadata is written and no working tree is touched,
-    # so a refused `add` leaves the workspace exactly as it was.
-    #
-    # Any OTHER resolution failure is not a refusal. A workspace whose
-    # manifest checkout has not landed yet (the RA-6 fresh-clone bootstrap
-    # runs `projects add --default` before any manifest is materialized) can
-    # still record membership; it just has nothing to materialize yet, so the
-    # clone phase is skipped and the reason is reported.
-    var missing: seq[string]
-    var unresolved = ""
-    try:
-      discard resolveProjectSet(workspaceRoot, merged)
-      missing = projectSetRepoPathsMissingOnDisk(workspaceRoot, toAdd)
-    except WorkspaceProjectSetConflictError as err:
-      stderr.writeLine("repro workspace projects add: refusing to record " &
-        "the project set — " & err.msg)
-      stderr.writeLine("  active set unchanged: " &
-        (if existing.len > 0: existing.join(", ") else: "<empty>"))
-      return 1
-    except CatchableError as err:
-      unresolved = err.msg
-
-    writeWorkspaceProjects(workspaceRoot, merged)
-    for p in readWorkspaceProjects(workspaceRoot):
-      stdout.writeLine(p)
-
-    # PS-3 — materialize what was just recorded. Only the repos the named
-    # projects introduce are missing-checkout candidates; everything already
-    # on disk is left untouched by the sync policy, which also makes a
-    # re-`add` of an already-active project the repair path for a partially
-    # cloned workspace.
-    if unresolved.len > 0:
-      stderr.writeLine("repro workspace projects add: recorded membership " &
-        "but could not resolve the manifest yet, so nothing was checked " &
-        "out — " & unresolved)
-      stderr.writeLine("  run `repro workspace sync` once the manifest is " &
-        "available")
+  if toAdd.len == 0:
+    if useDefault:
+      # No env var, no host-config default: a deliberate no-op (exit 0). The
+      # active set is untouched — there is no default to layer.
+      stdout.writeLine(
+        "repro workspace enable: no default project set " &
+        "(REPRO_DEFAULT_PROJECTS unset and no host config [projects] " &
+        "default); nothing enabled")
       return 0
-    if noSync or missing.len == 0:
-      return 0
-    stdout.writeLine("repro workspace projects add: checking out " &
-      $missing.len & " repo(s) introduced by " & toAdd.join(", "))
-    var syncArgs = @(toAdd)
-    syncArgs.add("--workspace-root=" & workspaceRoot)
-    return runWorkspaceSyncCommand(syncArgs)
-  else:
-    stderr.writeLine("repro workspace projects: unknown subcommand '" & sub &
-      "' (expected: list, add)")
+    stderr.writeLine("repro workspace enable: no project named " &
+      "(pass one or more <project> names, or --default)")
     return 2
+
+  # An UNDEFINED name is refused rather than recorded. Membership that no
+  # manifest layer can resolve breaks every later workspace command, and the
+  # operator's real intent is one of two other verbs. Skipped entirely when the
+  # workspace cannot yet see its manifests — see
+  # `manifestDefinitionsAreVisible`.
+  if manifestDefinitionsAreVisible(workspaceRoot):
+    let defined = definedProjectNames(workspaceRoot)
+    var undefined: seq[string]
+    for p in toAdd:
+      if p notin defined:
+        undefined.add(p)
+    if undefined.len > 0:
+      stderr.writeLine("repro workspace enable: no such project: " &
+        undefined.join(", "))
+      stderr.writeLine("  defined projects: " &
+        (if defined.len > 0: defined.join(", ") else: "<none>"))
+      stderr.writeLine("  `repro ws projects list` shows them all; " &
+        "`repro ws projects add <name>` defines a new one")
+      return 2
+
+  let existing = readWorkspaceProjects(workspaceRoot)
+  var merged = existing
+  for p in toAdd:
+    if p notin merged:
+      merged.add(p)
+
+  # PS-4 — validate the PROSPECTIVE set before touching anything. Two projects
+  # that declare one checkout path with different facts refuse the whole
+  # command: no metadata is written and no working tree is touched, so a
+  # refused `enable` leaves the workspace exactly as it was.
+  #
+  # Any OTHER resolution failure is not a refusal. A workspace whose manifest
+  # checkout has not landed yet can still record membership; it just has
+  # nothing to materialize yet, so the clone phase is skipped and the reason is
+  # reported.
+  var missing: seq[string]
+  var unresolved = ""
+  try:
+    discard resolveProjectSet(workspaceRoot, merged)
+    missing = projectSetRepoPathsMissingOnDisk(workspaceRoot, toAdd)
+  except WorkspaceProjectSetConflictError as err:
+    stderr.writeLine("repro workspace enable: refusing to record " &
+      "the project set — " & err.msg)
+    stderr.writeLine("  active set unchanged: " &
+      (if existing.len > 0: existing.join(", ") else: "<empty>"))
+    return 1
+  except CatchableError as err:
+    unresolved = err.msg
+
+  writeWorkspaceProjects(workspaceRoot, merged)
+  for p in readWorkspaceProjects(workspaceRoot):
+    stdout.writeLine(p)
+
+  # PS-3 — materialize what was just recorded. Only the repos the named
+  # projects introduce are missing-checkout candidates; everything already on
+  # disk is left untouched by the sync policy.
+  if unresolved.len > 0:
+    stderr.writeLine("repro workspace enable: recorded membership " &
+      "but could not resolve the manifest yet, so nothing was checked " &
+      "out — " & unresolved)
+    stderr.writeLine("  run `repro workspace sync` once the manifest is " &
+      "available")
+    return 0
+  if noSync or missing.len == 0:
+    return 0
+  stdout.writeLine("repro workspace enable: checking out " &
+    $missing.len & " repo(s) introduced by " & toAdd.join(", "))
+  var syncArgs = @(toAdd)
+  syncArgs.add("--workspace-root=" & workspaceRoot)
+  return runWorkspaceSyncCommand(syncArgs)
+
+proc repoRemovalBlockers(identity: GitToolIdentity;
+                         repoDir: string): seq[string] =
+  ## Reasons this checkout must not be deleted without an explicit override.
+  ##
+  ## Each reason names work that exists ONLY here: uncommitted changes, commits
+  ## on a local branch that no remote carries, and stash entries. A checkout
+  ## with none of them is reconstructible from its remote, which is what makes
+  ## deleting it a cheap, reversible act rather than data loss.
+  ##
+  ## A probe that FAILS is itself a blocker. "We could not tell" and "there is
+  ## nothing there" must not collapse into the same answer when the consequence
+  ## is an `rm -rf`.
+  if not dirExists(repoDir):
+    return @[]
+  if not dirExists(repoDir / ".git"):
+    # Occupied, but not a checkout we can reason about. Its contents are not
+    # reconstructible from any remote and no probe below applies, so it is a
+    # blocker by construction: "we cannot tell" must never collapse into "there
+    # is nothing there" when the consequence is a recursive delete.
+    var entries = 0
+    for _ in walkDir(repoDir):
+      inc entries
+      break
+    if entries > 0:
+      return @["not a git checkout, and not empty"]
+    return @[]
+  let status = gitRunPlain(identity, ["-C", repoDir, "status", "--porcelain"])
+  if status.code != 0:
+    result.add("could not read git status: " & status.output.strip())
+  elif status.output.strip().len > 0:
+    let changed = status.output.strip().splitLines().len
+    result.add($changed & " uncommitted change(s)")
+  # `rev-list --branches --not --remotes` is every commit reachable from some
+  # local branch and from no remote-tracking ref — exactly "work that would be
+  # gone". Counting is enough; naming the branches is the report's job.
+  let unpushed = gitRunPlain(identity,
+    ["-C", repoDir, "rev-list", "--count", "--branches", "--not", "--remotes"])
+  if unpushed.code != 0:
+    result.add("could not check for unpushed commits: " &
+      unpushed.output.strip())
+  else:
+    try:
+      let n = parseInt(unpushed.output.strip())
+      if n > 0:
+        result.add($n & " unpushed commit(s)")
+    except ValueError:
+      result.add("could not check for unpushed commits: unexpected output '" &
+        unpushed.output.strip() & "'")
+  let stash = gitRunPlain(identity, ["-C", repoDir, "stash", "list"])
+  if stash.code != 0:
+    result.add("could not read the stash list: " & stash.output.strip())
+  elif stash.output.strip().len > 0:
+    result.add($stash.output.strip().splitLines().len & " stash entr(ies)")
+
+proc runWorkspaceDisableCommand*(args: openArray[string]): int =
+  ## ``repro workspace disable <project>... [--keep-checkouts] [--force]`` —
+  ## deactivate projects in this workspace and remove the working trees that
+  ## ONLY they declared.
+  ##
+  ## A repo any still-enabled project also declares is left exactly where it
+  ## is: disabling narrows the active set, it does not ask to delete shared
+  ## infrastructure. The union rule that makes two projects share one checkout
+  ## path (`project_set.nim`) is the same rule that decides what survives here.
+  let workspaceRoot = parseProjectsWorkspaceRoot(args)
+  var toRemove = parseMembershipProjects(args)
+  var keepCheckouts = false
+  var force = false
+  for arg in args:
+    if arg == "--keep-checkouts":
+      keepCheckouts = true
+    elif arg == "--force":
+      force = true
+    elif arg.startsWith("--workspace-root="):
+      discard
+    elif arg.startsWith("-"):
+      stderr.writeLine("repro workspace disable: unknown flag " & arg)
+      return 2
+  if toRemove.len == 0:
+    stderr.writeLine("repro workspace disable: no project named " &
+      "(pass one or more <project> names)")
+    return 2
+
+  let existing = readWorkspaceProjects(workspaceRoot)
+  var actuallyLeaving: seq[string]
+  for p in toRemove:
+    if p in existing and p notin actuallyLeaving:
+      actuallyLeaving.add(p)
+  if actuallyLeaving.len == 0:
+    stdout.writeLine("repro workspace disable: not enabled: " &
+      toRemove.join(", ") & "; active set unchanged")
+    return 0
+
+  var remaining: seq[string]
+  for p in existing:
+    if p notin actuallyLeaving:
+      remaining.add(p)
+
+  # Which checkouts become unreferenced. Resolution failures here are fatal
+  # BEFORE any deletion: a set we cannot resolve is a set whose unique repos we
+  # cannot compute, and guessing would delete the wrong tree.
+  var orphaned: seq[string]
+  if not keepCheckouts:
+    try:
+      let leavingPaths = projectSetRepoPaths(workspaceRoot, actuallyLeaving)
+      let remainingPaths = projectSetRepoPaths(workspaceRoot, remaining)
+      for path in leavingPaths:
+        if path notin remainingPaths and path notin orphaned:
+          orphaned.add(path)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace disable: cannot determine which " &
+        "checkouts are unique to " & actuallyLeaving.join(", ") & " — " &
+        err.msg)
+      stderr.writeLine("  nothing was removed and the active set is " &
+        "unchanged; `--keep-checkouts` records the membership change without " &
+        "touching disk")
+      return 1
+
+  # The work-loss gate. Deleting a checkout is the one irreversible thing this
+  # verb does, so it is decided for EVERY repo before the first one is touched:
+  # a refusal leaves the workspace exactly as it was, rather than half-disabled
+  # with some trees already gone.
+  if orphaned.len > 0 and not force:
+    let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+    var blocked: seq[string]
+    for path in orphaned:
+      let blockers = repoRemovalBlockers(identity, workspaceRoot / path)
+      if blockers.len > 0:
+        blocked.add("  " & path & ": " & blockers.join(", "))
+    if blocked.len > 0:
+      stderr.writeLine("repro workspace disable: refusing to remove " &
+        $blocked.len & " checkout(s) carrying work that exists nowhere else:")
+      for line in blocked:
+        stderr.writeLine(line)
+      stderr.writeLine("  active set unchanged. Push or discard the work, " &
+        "or pass --keep-checkouts to drop membership and leave the " &
+        "checkouts, or --force to remove them anyway")
+      return 2
+
+  writeWorkspaceProjects(workspaceRoot, remaining)
+
+  var removed = 0
+  var removalFailures = 0
+  for path in orphaned:
+    # A checkout path that is empty, absolute, or escapes the workspace would
+    # turn this into a recursive delete of the workspace or something outside
+    # it. Manifest data is not trusted with that: refuse the individual removal
+    # and say so, rather than resolving the path and hoping.
+    let normalized = path.strip()
+    if normalized.len == 0 or normalized == "." or isAbsolute(normalized) or
+        ".." in normalized.split({'/', DirSep}):
+      inc removalFailures
+      stderr.writeLine("repro workspace disable: refusing to remove the " &
+        "declared checkout path '" & path & "' — it is not a plain " &
+        "workspace-relative directory")
+      continue
+    let dir = workspaceRoot / normalized
+    if not dirExists(dir):
+      continue
+    try:
+      removeDir(dir)
+      inc removed
+      stdout.writeLine("repro workspace disable: removed " & path)
+    except CatchableError as err:
+      inc removalFailures
+      stderr.writeLine("repro workspace disable: failed to remove " & path &
+        ": " & err.msg)
+
+  stdout.writeLine("repro workspace disable: disabled " &
+    actuallyLeaving.join(", ") & "; active set: " &
+    (if remaining.len > 0: remaining.join(", ") else: "<empty>"))
+  if keepCheckouts:
+    stdout.writeLine("repro workspace disable: --keep-checkouts — every " &
+      "working tree left on disk")
+  elif orphaned.len == 0:
+    stdout.writeLine("repro workspace disable: every checkout is also " &
+      "declared by a still-enabled project; none removed")
+  else:
+    stdout.writeLine("repro workspace disable: removed " & $removed &
+      " checkout(s) unique to the disabled project(s)")
+  if removalFailures > 0: 1 else: 0
 
 # ---- RA-6: `repro completion <shell>` --------------------------------------
 
 const reproTopLevelCommands = [
   "build", "watch", "develop", "add", "remove", "push", "sync", "pull",
   "branch",
-  "checkout", "hooks", "check", "workspace", "prompt", "completion", "store",
+  "switch", "hooks", "check", "workspace", "ws", "prompt", "completion",
+  "store",
   # M9.R.77.5 — ``repro cas <sub>`` is the R11 Layer-1 CLI. It exposes
   # a narrow view of the CAS (blob-level put/get/verify/path/gc) that
   # doesn't touch the Layer-2 prefix / roots / receipts surface
@@ -45255,8 +45677,10 @@ proc runWorkspacePublishEvidenceCommand*(args: openArray[string]): int =
   if failed > 0: 1 else: 0
 
 const reproWorkspaceSubcommands = [
-  "init", "sync", "pull", "lock", "status", "list", "branch", "manifests",
-  "shared-clones", "forall", "bootstrap", "provision", "projects", "project",
+  "init", "sync", "pull", "lock", "status", "list", "manifests",
+  "shared-clones", "forall", "bootstrap", "provision",
+  # WV-2..WV-6 — membership, definition, and the two branch-family verbs.
+  "enable", "disable", "projects", "repos", "new", "switch",
   "publish-evidence",
 ]
 
@@ -45282,7 +45706,7 @@ proc renderCompletionSnippet(shell, reproBin: string): string =
     "    COMPREPLY=( $(compgen -W \"" & topCmds & "\" -- \"$cur\") )\n" &
     "    return\n" &
     "  fi\n" &
-    "  if [[ ${COMP_WORDS[1]} == workspace && $COMP_CWORD -eq 2 ]]; then\n" &
+    "  if [[ ( ${COMP_WORDS[1]} == workspace || ${COMP_WORDS[1]} == ws ) && $COMP_CWORD -eq 2 ]]; then\n" &
     "    COMPREPLY=( $(compgen -W \"" & wsSubs & "\" -- \"$cur\") )\n" &
     "    return\n" &
     "  fi\n" &
@@ -45306,7 +45730,7 @@ proc renderCompletionSnippet(shell, reproBin: string): string =
     "  cachecmds=(" & cacheSubs & ")\n" &
     "  if (( CURRENT == 2 )); then\n" &
     "    compadd -- $cmds\n" &
-    "  elif [[ ${words[2]} == workspace && CURRENT == 3 ]]; then\n" &
+    "  elif [[ ( ${words[2]} == workspace || ${words[2]} == ws ) && CURRENT == 3 ]]; then\n" &
     "    compadd -- $wscmds\n" &
     "  elif [[ ${words[2]} == locking && CURRENT == 3 ]]; then\n" &
     "    compadd -- $lockingcmds\n" &
@@ -45320,7 +45744,7 @@ proc renderCompletionSnippet(shell, reproBin: string): string =
     "#   repro completion fish | source\n" &
     "complete -c repro -f\n" &
     "complete -c repro -n \"__fish_use_subcommand\" -a \"" & topCmds & "\"\n" &
-    "complete -c repro -n \"__fish_seen_subcommand_from workspace\" -a \"" &
+    "complete -c repro -n \"__fish_seen_subcommand_from workspace ws\" -a \"" &
       wsSubs & "\"\n" &
     "complete -c repro -n \"__fish_seen_subcommand_from locking\" -a \"" &
       lockingSubs & "\"\n" &
@@ -45349,7 +45773,7 @@ proc runCompletionCommand*(programName: string; args: openArray[string];
   stdout.write(snippet)
   0
 
-# ---- RA-6: `repro workspace project new` / `project repo add` ---------------
+# ---- WV-3 / WV-4: `repro workspace projects|repos <list|add|remove>` --------
 
 proc gitOutput(gitBin, repoRoot: string; sub: openArray[string]): tuple[
     code: int; output: string] =
@@ -45361,7 +45785,7 @@ proc gitOutput(gitBin, repoRoot: string; sub: openArray[string]): tuple[
 proc manifestRepoRootFor(workspaceRoot: string): string =
   ## The membership manifest repo carrying ``projects/*.toml`` — the native
   ## ``<org>/repro-workspace`` repo at the workspace root, where
-  ## ``repro workspace project new`` / ``project repo add`` write and commit new
+  ## ``repro workspace projects add`` / ``repos add`` write and commit new
   ## membership. (The lock-store DB is a separate concern under ``.repro/``.)
   workspaceRoot
 
@@ -45407,7 +45831,7 @@ proc projectManifestStub(project: string): string =
   ## a bare `includes = [ … ]` written directly under `[project]` is read as
   ## a key OF that table and the manifest stops parsing (the pilot manifests
   ## only work because their `[[remote]]` blocks sit between the two). The
-  ## array is created by `project repo add` once the file has a `[[remote]]`
+  ## array is created by `repos add` once the file has a `[[remote]]`
   ## table for it to follow, which is the layout every hand-written manifest
   ## in the pilot has.
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
@@ -45469,64 +45893,191 @@ proc commitAndPushManifest(identity: GitToolIdentity;
     return (code: push.code, diagnostic: "git push failed: " & push.output)
   (code: 0, diagnostic: "committed and pushed to " & upstream)
 
-proc runWorkspaceProjectCommand*(args: openArray[string]): int =
-  ## ``repro workspace project new <name> [-m DESC]`` and
-  ## ``repro workspace project repo add <project> <repo> --remote=URL``.
-  ## Manifest-authoring verbs: write the manifest TOML, commit, and push to
-  ## the manifest repo's upstream (best-effort push — the commit always lands).
-  if args.len == 0 or args[0] in ["--help", "-h", "help"]:
-    echo "repro workspace project new <name> [-m DESC] [--workspace-root=PATH]"
-    echo "repro workspace project repo add <project> <repo> --remote=URL " &
-      "[-m DESC] [--revision=REV] [--workspace-root=PATH]"
-    echo "  --remote=URL   reuses the project's matching [[remote]] when one " &
-      "already serves that URL; otherwise adds one org-named remote."
-    echo "  --revision=REV pins the fragment (validated against the remote). " &
-      "Omitted, the repo inherits the project's default_revision."
-    echo "  -m DESC        writes repos/<repo>.md, the source of the " &
-      "generated project docs."
-    return (if args.len == 0: 2 else: 0)
+proc removeFragmentInclude(projectFile, includePath: string): bool =
+  ## Drop ``"<includePath>",`` from the project's ``includes = [ … ]`` array.
+  ## Returns true when an entry was removed; false when none was present
+  ## (idempotent, the mirror of ``appendFragmentInclude``).
+  let content = readFile(projectFile)
+  let quoted = "\"" & includePath & "\""
+  if quoted notin content:
+    return false
+  var outLines: seq[string]
+  var removed = false
+  for line in content.splitLines():
+    if line.strip().startsWith(quoted):
+      removed = true
+      continue
+    outLines.add(line)
+  if not removed:
+    return false
+  writeFile(projectFile, outLines.join("\n"))
+  true
 
+proc projectFilesUnder(manifestRoot: string): seq[string] =
+  ## Absolute paths of every ``projects/*.toml`` under the manifest root,
+  ## sorted by project name.
+  let dir = manifestRoot / "projects"
+  if not dirExists(dir):
+    return @[]
+  for kind, path in walkDir(dir):
+    if kind in {pcFile, pcLinkToFile} and path.splitFile.ext == ".toml":
+      result.add(path)
+  sort(result)
+
+proc projectsIncludingFragment(manifestRoot, fragmentRel: string): seq[string] =
+  ## Which projects carry an ``includes`` edge to ``fragmentRel``. This is the
+  ## authority for "is this fragment still referenced" — the question both
+  ## `projects remove --prune-orphan-repos` and `repos remove
+  ## --delete-fragment` have to answer before deleting a shared declaration.
+  for file in projectFilesUnder(manifestRoot):
+    var manifest: ProjectManifest
+    try:
+      manifest = readProjectManifest(file)
+    except CatchableError:
+      # An unreadable manifest cannot be proven NOT to reference the fragment,
+      # so fall back to a textual probe rather than reporting a false orphan.
+      if ("\"" & fragmentRel & "\"") in readFile(file):
+        result.add(file.splitFile.name)
+      continue
+    if fragmentRel in manifest.includes:
+      result.add(file.splitFile.name)
+
+proc validateFragmentPath(value: string): string =
+  ## Diagnostic for a rejected ``--path``, or "" when it is usable. The value
+  ## places a working tree on every machine that later syncs the project, so it
+  ## is checked here rather than at sync time on someone else's laptop.
+  if value.len == 0:
+    return "--path may not be empty"
+  if isAbsolute(value) or (value.len >= 2 and value[1] == ':'):
+    return "--path must be relative, got '" & value & "'"
+  if '\\' in value:
+    return "--path must use forward slashes, got '" & value & "'"
+  for segment in value.split('/'):
+    if segment == "..":
+      return "--path may not contain a '..' segment, got '" & value & "'"
+  ""
+
+proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
+  ## ``repro workspace projects list|add|remove`` — the DEFINITION axis for
+  ## projects. `add` / `remove` write, commit and push to the manifest repo;
+  ## `list` is read-only.
+  ##
+  ## Activating a project in this workspace is `enable` / `disable`; see
+  ## `reprobuild-specs/CLI/workspace.md` §"The Two Axes".
+  if args.len > 0 and args[0] in ["--help", "-h", "help"]:
+    echo "repro workspace projects list [--enabled|--disabled|--all] [--json]"
+    echo "repro workspace projects add <name> [-m DESC]"
+    echo "repro workspace projects remove <name> [--prune-orphan-repos]"
+    echo "  list   every DEFINED project, marked enabled/disabled for this " &
+      "workspace."
+    echo "  add    define a NEW project in the manifest repo. To activate an " &
+      "existing one, use `repro ws enable <name>`."
+    echo "  remove delete the definition. Disable it here first."
+    return 0
+  let sub = if args.len > 0 and not args[0].startsWith("-"): args[0] else: "list"
+  let rest = if args.len > 0 and not args[0].startsWith("-"): args[1 .. ^1]
+             else: @(args)
   let workspaceRoot = parseProjectsWorkspaceRoot(args)
+
+  if sub == "list":
+    var wantEnabled = false
+    var wantDisabled = false
+    var asJson = false
+    for arg in rest:
+      case arg
+      of "--enabled": wantEnabled = true
+      of "--disabled": wantDisabled = true
+      of "--all": wantEnabled = false; wantDisabled = false
+      of "--json": asJson = true
+      else:
+        if arg.startsWith("--workspace-root="):
+          discard
+        elif arg.startsWith("-"):
+          stderr.writeLine("repro workspace projects list: unknown flag " & arg)
+          return 2
+    let active = readWorkspaceProjects(workspaceRoot)
+    let defined = definedProjectNames(workspaceRoot)
+    # Ordering is meaning, not cosmetics: the primary project answers "what am
+    # I working on" and is the one every single-project resolver falls back to,
+    # so it leads, followed by the rest of the active set in membership order,
+    # then everything else alphabetically.
+    var ordered: seq[string]
+    for p in active:
+      if p notin ordered:
+        ordered.add(p)
+    for p in defined:
+      if p notin ordered:
+        ordered.add(p)
+    var rows: seq[tuple[name: string; enabled: bool; defined: bool]]
+    for name in ordered:
+      let enabled = name in active
+      if wantEnabled and not enabled: continue
+      if wantDisabled and enabled: continue
+      rows.add((name: name, enabled: enabled, defined: name in defined))
+    if asJson:
+      var arr = newJArray()
+      for r in rows:
+        arr.add(%*{"name": r.name, "enabled": r.enabled, "defined": r.defined})
+      echo (%*{"schema": "reprobuild.workspace-projects-list.v1",
+               "workspaceRoot": workspaceRoot,
+               "primary": (if active.len > 0: active[0] else: ""),
+               "projects": arr}).pretty
+      return 0
+    for r in rows:
+      var line = r.name & "\t" & (if r.enabled: "enabled" else: "disabled")
+      # A name in the active set that no manifest layer defines is a broken
+      # membership record, not a project. Say so on its own row rather than
+      # letting it read as an ordinary enabled project.
+      if not r.defined:
+        line.add("\tUNDEFINED (no manifest declares it)")
+      stdout.writeLine(line)
+    return 0
+
   let manifestRoot = manifestRepoRootFor(workspaceRoot)
   if not dirExists(manifestRoot):
-    stderr.writeLine("repro workspace project: no manifest repo at " &
+    stderr.writeLine("repro workspace projects: no manifest repo at " &
       manifestRoot & " (run `repro workspace init` first)")
     return 1
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   let gitBin = identity.binaryPath
 
-  let sub = args[0]
   case sub
-  of "new":
+  of "add":
     var name = ""
     var desc = ""
-    var i = 1
-    while i < args.len:
-      let a = args[i]
+    var i = 0
+    while i < rest.len:
+      let a = rest[i]
       if a == "-m" or a == "--message":
-        if i + 1 < args.len:
-          desc = args[i + 1]; inc i
+        if i + 1 < rest.len:
+          desc = rest[i + 1]; inc i
       elif a.startsWith("--message="):
         desc = a["--message=".len .. ^1]
       elif a.startsWith("--workspace-root="):
         discard
-      elif not a.startsWith("-"):
+      elif a.startsWith("-"):
+        stderr.writeLine("repro workspace projects add: unknown flag " & a)
+        return 2
+      else:
         name = a
       inc i
     if name.len == 0:
-      stderr.writeLine("repro workspace project new: missing <name>")
+      stderr.writeLine("repro workspace projects add: missing <name>")
       return 2
     createDir(manifestRoot / "projects")
     let projectFileRel = "projects/" & name & ".toml"
     let projectFileAbs = manifestRoot / "projects" / (name & ".toml")
     if fileExists(projectFileAbs):
-      stderr.writeLine("repro workspace project new: project '" & name &
+      # The one guard the axis split needs. This spelling did not disappear, it
+      # changed meaning, so it cannot fail as an unknown subcommand — and an
+      # operator reaching for the old "activate this project" sense lands here.
+      stderr.writeLine("repro workspace projects add: project '" & name &
         "' already exists at " & projectFileAbs)
+      stderr.writeLine("  `projects add` DEFINES a new project. To activate " &
+        "this one in this workspace: repro ws enable " & name)
       return 1
     writeFile(projectFileAbs, projectManifestStub(name))
     var paths = @[projectFileRel]
-    # Optionally record the description as a sibling Markdown stub, matching
-    # the pilot's `projects/<name>.md` convention.
     if desc.len > 0:
       let docRel = "projects/" & name & ".md"
       writeFile(manifestRoot / "projects" / (name & ".md"),
@@ -45535,121 +46086,377 @@ proc runWorkspaceProjectCommand*(args: openArray[string]): int =
     let msg = "Add project " & name &
       (if desc.len > 0: " (" & desc & ")" else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
-    stdout.writeLine("repro workspace project new: " & name & " — " &
+    stdout.writeLine("repro workspace projects add: " & name & " — " &
       res.diagnostic)
+    stdout.writeLine("repro workspace projects add: defined, not enabled — " &
+      "`repro ws repos add <repo> --project=" & name & "` to give it repos, " &
+      "`repro ws enable " & name & "` to activate it here")
     return res.code
-  of "repo":
-    if args.len < 2 or args[1] != "add":
-      stderr.writeLine("repro workspace project repo: expected `add`")
-      return 2
-    var project = ""
-    var repo = ""
-    var remote = ""
-    var revision = ""
-    var desc = ""
-    var i = 2
-    var positional: seq[string]
-    while i < args.len:
-      let a = args[i]
-      if a.startsWith("--remote="):
-        remote = a["--remote=".len .. ^1]
-      elif a.startsWith("--revision="):
-        revision = a["--revision=".len .. ^1]
-      elif a == "-m" or a == "--message":
-        if i + 1 < args.len:
-          desc = args[i + 1]; inc i
-      elif a.startsWith("--message="):
-        desc = a["--message=".len .. ^1]
+  of "remove":
+    var name = ""
+    var pruneOrphans = false
+    for a in rest:
+      if a == "--prune-orphan-repos":
+        pruneOrphans = true
       elif a.startsWith("--workspace-root="):
         discard
-      elif not a.startsWith("-"):
-        positional.add(a)
-      inc i
-    if positional.len >= 2:
-      project = positional[0]
-      repo = positional[1]
-    if project.len == 0 or repo.len == 0:
-      stderr.writeLine("repro workspace project repo add: usage: " &
-        "<project> <repo> --remote=URL")
+      elif a.startsWith("-"):
+        stderr.writeLine("repro workspace projects remove: unknown flag " & a)
+        return 2
+      else:
+        name = a
+    if name.len == 0:
+      stderr.writeLine("repro workspace projects remove: missing <name>")
       return 2
-    if remote.len == 0:
-      stderr.writeLine("repro workspace project repo add: --remote=URL is " &
-        "required")
-      return 2
-    let projectFileAbs = manifestRoot / "projects" / (project & ".toml")
+    let projectFileAbs = manifestRoot / "projects" / (name & ".toml")
     if not fileExists(projectFileAbs):
-      stderr.writeLine("repro workspace project repo add: project '" &
-        project & "' does not exist (" & projectFileAbs & ")")
+      stderr.writeLine("repro workspace projects remove: project '" & name &
+        "' does not exist (" & projectFileAbs & ")")
       return 1
-    # Plan the fragment's remote against what the project ALREADY declares,
-    # so a repo from an org the project knows reuses that org's remote
-    # instead of growing the shared `[[remote]]` table with a single-use
-    # `<repo>-origin` entry. See `planRepoRemote` for the rules.
+    # Removing the definition under a live membership record leaves a set entry
+    # no manifest layer can resolve, which breaks every subsequent workspace
+    # command. The operator has to sequence it; we will not silently disable on
+    # their behalf, because that would delete checkouts as a side effect of a
+    # manifest edit.
+    if name in readWorkspaceProjects(workspaceRoot):
+      stderr.writeLine("repro workspace projects remove: '" & name &
+        "' is enabled in this workspace")
+      stderr.writeLine("  run `repro ws disable " & name & "` first, then " &
+        "remove the definition")
+      return 2
     var manifest: ProjectManifest
+    var includedFragments: seq[string]
     try:
       manifest = readProjectManifest(projectFileAbs)
+      includedFragments = manifest.includes
     except CatchableError as exc:
-      stderr.writeLine("repro workspace project repo add: cannot read " &
-        projectFileAbs & ": " & exc.msg)
-      return 1
-    let defaultRemote =
-      if manifest.project.default_remote.isSome:
-        manifest.project.default_remote.get()
+      stderr.writeLine("repro workspace projects remove: warning: cannot " &
+        "read " & projectFileAbs & " (" & exc.msg & "); removing it without " &
+        "an orphan report")
+    var paths = @["projects/" & name & ".toml"]
+    removeFile(projectFileAbs)
+    let docAbs = manifestRoot / "projects" / (name & ".md")
+    if fileExists(docAbs):
+      removeFile(docAbs)
+      paths.add("projects/" & name & ".md")
+    # Now that the definition is gone, anything it alone referenced is an
+    # orphan. A fragment is a REUSABLE declaration, so the default is to leave
+    # it: another project may adopt it tomorrow, and deleting it would make
+    # that a re-authoring job rather than one include line.
+    var orphans: seq[string]
+    for fragmentRel in includedFragments:
+      if projectsIncludingFragment(manifestRoot, fragmentRel).len == 0:
+        orphans.add(fragmentRel)
+    if pruneOrphans:
+      for fragmentRel in orphans:
+        let abs = manifestRoot / fragmentRel
+        if fileExists(abs):
+          removeFile(abs)
+          paths.add(fragmentRel)
+        let docRel = fragmentRel.changeFileExt("md")
+        if fileExists(manifestRoot / docRel):
+          removeFile(manifestRoot / docRel)
+          paths.add(docRel)
+    let msg = "Remove project " & name &
+      (if pruneOrphans and orphans.len > 0:
+         " (and " & $orphans.len & " orphaned repo fragment(s))"
+       else: "")
+    let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
+    stdout.writeLine("repro workspace projects remove: " & name & " — " &
+      res.diagnostic)
+    if orphans.len > 0:
+      if pruneOrphans:
+        stdout.writeLine("repro workspace projects remove: pruned " &
+          $orphans.len & " orphaned fragment(s): " & orphans.join(", "))
       else:
-        ""
-    let defaultRevision =
-      if manifest.project.default_revision.isSome:
-        manifest.project.default_revision.get()
-      else:
-        ""
-    let plan = planRepoRemote(manifest.remote, defaultRemote, repo, remote)
-    if plan.error.len > 0:
-      stderr.writeLine("repro workspace project repo add: " & plan.error)
-      return 1
-    # The revision is NEVER guessed. Without `--revision` the fragment omits
-    # the key entirely and inherits the project's `default_revision` — a
-    # guessed `main` pins the repo to a branch that need not exist, and the
-    # failure only surfaces later, at sync time, for everyone.
-    let effectiveRevision =
-      if revision.len > 0: revision else: defaultRevision
-    if revision.len > 0:
-      # An explicit pin is VALIDATED, not trusted: a manifest that pins a
-      # branch the remote does not have authors cleanly and then fails for
-      # every consumer at sync time. Only this branch talks to the network —
-      # the default (inherit `default_revision`) keeps manifest authoring an
-      # offline operation, and writes nothing that could be wrong.
-      let check = remoteRevisionState(gitBin, remote, revision)
-      if check.state == rrsMissing:
-        stderr.writeLine("repro workspace project repo add: revision '" &
-          revision & "' does not exist on " & remote &
-          " (no matching branch or tag). Omit --revision to inherit the " &
-          "project's default_revision" &
-          (if defaultRevision.len > 0: " (" & defaultRevision & ")" else: "") &
-          ".")
+        stdout.writeLine("repro workspace projects remove: " & $orphans.len &
+          " fragment(s) are now unreferenced and were KEPT: " &
+          orphans.join(", "))
+        stdout.writeLine("  pass --prune-orphan-repos to delete them too")
+    return res.code
+  else:
+    stderr.writeLine("repro workspace projects: unknown subcommand '" & sub &
+      "' (expected: list, add, remove)")
+    return 2
+
+proc runWorkspaceReposCommand*(args: openArray[string]): int =
+  ## ``repro workspace repos list|add|remove`` — the DEFINITION axis for repos:
+  ## the fragments under ``repos/`` and the ``includes`` edges that wire them
+  ## into projects.
+  ##
+  ## A repo fragment is declared ONCE and included by any number of projects,
+  ## which is precisely what keeps two projects from conflicting over a
+  ## checkout path (`project_set.nim`). That is why the project is a repeatable
+  ## flag here rather than a positional implying exactly one.
+  if args.len > 0 and args[0] in ["--help", "-h", "help"]:
+    echo "repro workspace repos list [--project=NAME] " &
+      "[--enabled|--disabled|--all] [--json]"
+    echo "repro workspace repos add <repo> --remote=URL [--project=NAME]... " &
+      "[--revision=REV] [--path=DIR] [-m DESC]"
+    echo "repro workspace repos remove <repo> [--project=NAME]... " &
+      "[--delete-fragment]"
+    echo "  --project      repeatable; defaults to this workspace's primary " &
+      "project."
+    echo "  --remote=URL   reuses the project's matching [[remote]] when one " &
+      "already serves that URL; otherwise adds one org-named remote."
+    echo "  --revision=REV pins the fragment (validated against the remote). " &
+      "Omitted, the repo inherits the project's default_revision."
+    echo "  --path=DIR     checkout directory; defaults to <repo>."
+    echo "  -m DESC        writes repos/<repo>.md, the source of the " &
+      "generated project docs."
+    return 0
+  let sub = if args.len > 0 and not args[0].startsWith("-"): args[0] else: "list"
+  let rest = if args.len > 0 and not args[0].startsWith("-"): args[1 .. ^1]
+             else: @(args)
+  let workspaceRoot = parseProjectsWorkspaceRoot(args)
+  let manifestRoot = manifestRepoRootFor(workspaceRoot)
+  if not dirExists(manifestRoot):
+    stderr.writeLine("repro workspace repos: no manifest repo at " &
+      manifestRoot & " (run `repro workspace init` first)")
+    return 1
+
+  if sub == "list":
+    var scopeProject = ""
+    var wantEnabled = false
+    var wantDisabled = false
+    var asJson = false
+    for arg in rest:
+      if arg.startsWith("--project="):
+        scopeProject = arg["--project=".len .. ^1]
+      elif arg == "--enabled": wantEnabled = true
+      elif arg == "--disabled": wantDisabled = true
+      elif arg == "--all": wantEnabled = false; wantDisabled = false
+      elif arg == "--json": asJson = true
+      elif arg.startsWith("--workspace-root="):
+        discard
+      elif arg.startsWith("-"):
+        stderr.writeLine("repro workspace repos list: unknown flag " & arg)
+        return 2
+    let active = readWorkspaceProjects(workspaceRoot)
+    # "enabled" for a repo means "declared by at least one enabled project" —
+    # i.e. it is part of this workspace's participating set. Computed from the
+    # resolved set rather than from the fragment, because a fragment says
+    # nothing about who includes it.
+    var enabledPaths: seq[string]
+    if active.len > 0:
+      try:
+        enabledPaths = projectSetRepoPaths(workspaceRoot, active)
+      except CatchableError:
+        discard
+    var scopePaths: seq[string]
+    if scopeProject.len > 0:
+      try:
+        scopePaths = projectSetRepoPaths(workspaceRoot, @[scopeProject])
+      except CatchableError as err:
+        stderr.writeLine("repro workspace repos list: cannot resolve " &
+          "project '" & scopeProject & "': " & err.msg)
         return 1
-      elif check.state == rrsUnknown:
-        stderr.writeLine("repro workspace project repo add: warning: could " &
-          "not verify revision '" & revision & "' on " & remote & ": " &
-          check.diagnostic)
-    createDir(manifestRoot / "repos")
-    let fragmentRel = "repos/" & repo & ".toml"
-    let fragmentAbs = manifestRoot / "repos" / (repo & ".toml")
-    if not fileExists(fragmentAbs):
-      writeFile(fragmentAbs,
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-        "[repo]\n" &
-        "name = \"" & plan.repoName & "\"\n" &
-        "path = \"" & repo & "\"\n" &
-        "remote = \"" & plan.remoteName & "\"\n" &
-        (if revision.len > 0: "revision = \"" & revision & "\"\n" else: ""))
-    if plan.mintedFetch.len > 0:
-      ensureRemoteEntry(projectFileAbs, plan.remoteName, plan.mintedFetch)
-    discard appendFragmentInclude(projectFileAbs, fragmentRel)
-    var paths = @["projects/" & project & ".toml", fragmentRel]
-    # `repos/<repo>.md` is where a repo's one-paragraph description lives —
-    # `workspace-projects.md` (and the agent-facing project docs) are
-    # generated from those files, so a repo added without one is invisible
-    # in the generated docs. Write it when `-m` is given; otherwise say so.
+    let reposDir = manifestRoot / "repos"
+    var files: seq[string]
+    if dirExists(reposDir):
+      for kind, path in walkDir(reposDir):
+        if kind in {pcFile, pcLinkToFile} and path.splitFile.ext == ".toml":
+          files.add(path)
+    sort(files)
+    var arr = newJArray()
+    var lines: seq[string]
+    for file in files:
+      let fragmentName = file.splitFile.name
+      var repoPath = fragmentName
+      var remote = ""
+      var revision = ""
+      try:
+        let m = readRepoFragment(file)
+        repoPath = m.repo.path
+        remote = m.repo.remote.get("")
+        revision = m.repo.revision.get("")
+      except CatchableError:
+        discard
+      if scopeProject.len > 0 and repoPath notin scopePaths:
+        continue
+      let enabled = repoPath in enabledPaths
+      if wantEnabled and not enabled: continue
+      if wantDisabled and enabled: continue
+      if asJson:
+        arr.add(%*{"repo": fragmentName, "path": repoPath, "remote": remote,
+                   "revision": revision, "enabled": enabled})
+      else:
+        lines.add(fragmentName & "\t" & repoPath & "\t" &
+          (if remote.len > 0: remote else: "-") & "\t" &
+          (if revision.len > 0: revision else: "(inherited)") & "\t" &
+          (if enabled: "enabled" else: "disabled"))
+    if asJson:
+      echo (%*{"schema": "reprobuild.workspace-repos-list.v1",
+               "workspaceRoot": workspaceRoot,
+               "project": scopeProject,
+               "repos": arr}).pretty
+    else:
+      for line in lines:
+        stdout.writeLine(line)
+    return 0
+
+  let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  let gitBin = identity.binaryPath
+
+  var repo = ""
+  var projects: seq[string]
+  var remote = ""
+  var revision = ""
+  var checkoutPath = ""
+  var desc = ""
+  var deleteFragment = false
+  var i = 0
+  while i < rest.len:
+    let a = rest[i]
+    if a.startsWith("--project="):
+      let p = a["--project=".len .. ^1]
+      if p notin projects: projects.add(p)
+    elif a.startsWith("--remote="):
+      remote = a["--remote=".len .. ^1]
+    elif a.startsWith("--revision="):
+      revision = a["--revision=".len .. ^1]
+    elif a.startsWith("--path="):
+      checkoutPath = a["--path=".len .. ^1]
+    elif a == "--delete-fragment":
+      deleteFragment = true
+    elif a == "-m" or a == "--message":
+      if i + 1 < rest.len:
+        desc = rest[i + 1]; inc i
+    elif a.startsWith("--message="):
+      desc = a["--message=".len .. ^1]
+    elif a.startsWith("--workspace-root="):
+      discard
+    elif a.startsWith("-"):
+      stderr.writeLine("repro workspace repos " & sub & ": unknown flag " & a)
+      return 2
+    else:
+      repo = a
+    inc i
+  if repo.len == 0:
+    stderr.writeLine("repro workspace repos " & sub & ": missing <repo>")
+    return 2
+
+  let fragmentRel = "repos/" & repo & ".toml"
+  let fragmentAbs = manifestRoot / "repos" / (repo & ".toml")
+
+  case sub
+  of "add":
+    if remote.len == 0:
+      stderr.writeLine("repro workspace repos add: --remote=URL is required")
+      return 2
+    if checkoutPath.len > 0:
+      let pathError = validateFragmentPath(checkoutPath)
+      if pathError.len > 0:
+        stderr.writeLine("repro workspace repos add: " & pathError)
+        return 2
+    if projects.len == 0:
+      # Default to the workspace's PRIMARY project — the same project every
+      # other single-project verb falls back to, so `repos add` in a
+      # single-project workspace needs no flag at all.
+      let active = readWorkspaceProjects(workspaceRoot)
+      if active.len == 0:
+        stderr.writeLine("repro workspace repos add: no --project given and " &
+          "this workspace has no active project to default to")
+        stderr.writeLine("  pass --project=<name> (repeatable)")
+        return 2
+      projects.add(active[0])
+    for project in projects:
+      if not fileExists(manifestRoot / "projects" / (project & ".toml")):
+        stderr.writeLine("repro workspace repos add: project '" & project &
+          "' does not exist (" &
+          (manifestRoot / "projects" / (project & ".toml")) & ")")
+        return 1
+
+    let effectivePath = if checkoutPath.len > 0: checkoutPath else: repo
+    # An EXISTING fragment is reused, never rewritten: other projects already
+    # depend on its facts, and silently re-pointing a shared repo from a
+    # command that reads like "add" is exactly the class of surprise the axis
+    # split exists to remove.
+    var fragmentExisted = fileExists(fragmentAbs)
+    if fragmentExisted:
+      var existing: RepoFragment
+      try:
+        existing = readRepoFragment(fragmentAbs)
+      except CatchableError as exc:
+        stderr.writeLine("repro workspace repos add: cannot read existing " &
+          fragmentAbs & ": " & exc.msg)
+        return 1
+      var conflicts: seq[string]
+      if checkoutPath.len > 0 and existing.repo.path != checkoutPath:
+        conflicts.add("path (" & existing.repo.path & " vs " & checkoutPath & ")")
+      if revision.len > 0 and existing.repo.revision.get("") != revision:
+        conflicts.add("revision (" & existing.repo.revision.get("(inherited)") &
+          " vs " & revision & ")")
+      if conflicts.len > 0:
+        stderr.writeLine("repro workspace repos add: '" & repo &
+          "' is already declared with different " & conflicts.join(", "))
+        stderr.writeLine("  the fragment is shared; edit " & fragmentRel &
+          " directly if the declaration itself should change")
+        return 1
+
+    var paths: seq[string]
+    var remoteNames: seq[string]
+    for project in projects:
+      let projectFileAbs = manifestRoot / "projects" / (project & ".toml")
+      var manifest: ProjectManifest
+      try:
+        manifest = readProjectManifest(projectFileAbs)
+      except CatchableError as exc:
+        stderr.writeLine("repro workspace repos add: cannot read " &
+          projectFileAbs & ": " & exc.msg)
+        return 1
+      let defaultRemote =
+        if manifest.project.default_remote.isSome:
+          manifest.project.default_remote.get()
+        else:
+          ""
+      let defaultRevision =
+        if manifest.project.default_revision.isSome:
+          manifest.project.default_revision.get()
+        else:
+          ""
+      let plan = planRepoRemote(manifest.remote, defaultRemote, repo, remote)
+      if plan.error.len > 0:
+        stderr.writeLine("repro workspace repos add: " & project & ": " &
+          plan.error)
+        return 1
+      # The revision is NEVER guessed. Without `--revision` the fragment omits
+      # the key and inherits the project's `default_revision`; a guessed value
+      # pins the repo to a branch that need not exist, and the failure only
+      # surfaces later, at sync time, for everyone.
+      if revision.len > 0 and not fragmentExisted:
+        let check = remoteRevisionState(gitBin, remote, revision)
+        if check.state == rrsMissing:
+          stderr.writeLine("repro workspace repos add: revision '" &
+            revision & "' does not exist on " & remote &
+            " (no matching branch or tag). Omit --revision to inherit the " &
+            "project's default_revision" &
+            (if defaultRevision.len > 0: " (" & defaultRevision & ")" else: "") &
+            ".")
+          return 1
+        elif check.state == rrsUnknown:
+          stderr.writeLine("repro workspace repos add: warning: could " &
+            "not verify revision '" & revision & "' on " & remote & ": " &
+            check.diagnostic)
+      if not fragmentExisted:
+        createDir(manifestRoot / "repos")
+        writeFile(fragmentAbs,
+          "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+          "[repo]\n" &
+          "name = \"" & plan.repoName & "\"\n" &
+          "path = \"" & effectivePath & "\"\n" &
+          "remote = \"" & plan.remoteName & "\"\n" &
+          (if revision.len > 0: "revision = \"" & revision & "\"\n" else: ""))
+        paths.add(fragmentRel)
+        fragmentExisted = true
+      if plan.mintedFetch.len > 0:
+        ensureRemoteEntry(projectFileAbs, plan.remoteName, plan.mintedFetch)
+      discard appendFragmentInclude(projectFileAbs, fragmentRel)
+      paths.add("projects/" & project & ".toml")
+      remoteNames.add(project & "=" & plan.remoteName &
+        (if plan.mintedFetch.len > 0: " (new, fetch " & plan.mintedFetch & ")"
+         else: " (reused)"))
+
     let docRel = "repos/" & repo & ".md"
     let docAbs = manifestRoot / "repos" / (repo & ".md")
     if desc.len > 0:
@@ -45657,25 +46464,81 @@ proc runWorkspaceProjectCommand*(args: openArray[string]): int =
         writeFile(docAbs, desc.strip() & "\n")
       paths.add(docRel)
     elif not fileExists(docAbs):
-      stderr.writeLine("repro workspace project repo add: note: no " &
-        docRel & " description written (pass -m \"<description>\"); the " &
-        "generated project docs will have no entry for " & repo)
-    let msg = "Add repo " & repo & " to project " & project &
+      stderr.writeLine("repro workspace repos add: note: no " & docRel &
+        " description written (pass -m \"<description>\"); the generated " &
+        "project docs will have no entry for " & repo)
+    let msg = "Add repo " & repo & " to project" &
+      (if projects.len > 1: "s " else: " ") & projects.join(", ") &
       (if desc.len > 0: " (" & desc.strip().splitLines()[0] & ")" else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
-    stdout.writeLine("repro workspace project repo add: " & repo & " -> " &
-      project & " — remote " & plan.remoteName &
-      (if plan.mintedFetch.len > 0: " (new, fetch " & plan.mintedFetch & ")"
-       else: " (reused)") &
-      ", revision " &
-      (if revision.len > 0: revision & " (pinned)"
-       elif effectiveRevision.len > 0: effectiveRevision & " (inherited)"
-       else: "(unset)") &
+    stdout.writeLine("repro workspace repos add: " & repo & " -> " &
+      projects.join(", ") & " — path " & effectivePath & ", remote " &
+      remoteNames.join(" ") & ", revision " &
+      (if revision.len > 0: revision & " (pinned)" else: "(inherited)") &
       " — " & res.diagnostic)
     return res.code
+  of "remove":
+    let including = projectsIncludingFragment(manifestRoot, fragmentRel)
+    if projects.len == 0:
+      # No --project means "stop declaring this repo anywhere". Narrowing the
+      # default to the primary project would leave the repo half-declared and
+      # is never what "remove this repo" reads as.
+      projects = including
+    if projects.len == 0 and not deleteFragment:
+      stdout.writeLine("repro workspace repos remove: no project includes " &
+        fragmentRel & "; nothing to do")
+      return 0
+    var paths: seq[string]
+    var droppedFrom: seq[string]
+    for project in projects:
+      let projectFileAbs = manifestRoot / "projects" / (project & ".toml")
+      if not fileExists(projectFileAbs):
+        stderr.writeLine("repro workspace repos remove: project '" & project &
+          "' does not exist (" & projectFileAbs & ")")
+        return 1
+      if removeFragmentInclude(projectFileAbs, fragmentRel):
+        droppedFrom.add(project)
+        paths.add("projects/" & project & ".toml")
+    if deleteFragment:
+      let stillIncluding = projectsIncludingFragment(manifestRoot, fragmentRel)
+      if stillIncluding.len > 0:
+        stderr.writeLine("repro workspace repos remove: refusing " &
+          "--delete-fragment: " & fragmentRel & " is still included by " &
+          stillIncluding.join(", "))
+        stderr.writeLine("  the include edges above were dropped; re-run " &
+          "with --delete-fragment once no project references it")
+        if paths.len > 0:
+          discard commitAndPushManifest(identity, gitBin, manifestRoot,
+            "Remove repo " & repo & " from " & droppedFrom.join(", "), paths)
+        return 2
+      if fileExists(fragmentAbs):
+        removeFile(fragmentAbs)
+        paths.add(fragmentRel)
+      let docRel = "repos/" & repo & ".md"
+      if fileExists(manifestRoot / docRel):
+        removeFile(manifestRoot / docRel)
+        paths.add(docRel)
+    if paths.len == 0:
+      stdout.writeLine("repro workspace repos remove: " & repo &
+        " was not included by " & projects.join(", ") & "; nothing to do")
+      return 0
+    let msg = "Remove repo " & repo &
+      (if droppedFrom.len > 0: " from " & droppedFrom.join(", ") else: "") &
+      (if deleteFragment: " (fragment deleted)" else: "")
+    let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
+    stdout.writeLine("repro workspace repos remove: " & repo & " — " &
+      res.diagnostic)
+    if not deleteFragment and droppedFrom.len > 0:
+      stdout.writeLine("repro workspace repos remove: " & fragmentRel &
+        " kept (reusable declaration); pass --delete-fragment to remove it")
+    # This edits DECLARATIONS, not this machine. Say so, rather than leaving
+    # the operator to discover a checkout that is no longer declared.
+    stdout.writeLine("repro workspace repos remove: any existing checkout " &
+      "was left on disk")
+    return res.code
   else:
-    stderr.writeLine("repro workspace project: unknown subcommand '" & sub &
-      "' (expected: new, repo)")
+    stderr.writeLine("repro workspace repos: unknown subcommand '" & sub &
+      "' (expected: list, add, remove)")
     return 2
 
 proc runThinAppDispatch(programName: string): int =
@@ -45698,7 +46561,8 @@ proc runThinAppDispatch(programName: string): int =
         putEnv("PATH", appDir & ";" & pathEnv)
       else:
         putEnv("PATH", appDir)
-  let args = normalizeInternalArgs(commandLineParams())
+  let args = normalizeWorkspaceNamespaceAlias(
+    normalizeInternalArgs(commandLineParams()))
   let publicCliPath = stablePublicCliPath()
   if programName == "repro" and args.len > 0 and
       args[0] == BrokerModeFlag:
@@ -46459,20 +47323,34 @@ proc runThinAppDispatch(programName: string): int =
       stderr.writeLine("repro workspace list: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "branch":
-    # M27 — `repro workspace branch` is the workspace-namespaced spelling of
-    # the top-level `repro branch`, pairing the two surfaces on one verb (the
-    # same top-level ↔ namespace pairing the CLI spec's command table uses).
-    # Identical behaviour, including the fork form `<name> <path>`.
+      args[1] == "new":
+    # WV-6 — `repro workspace new <path>` is the workspace-namespaced spelling
+    # of the top-level `repro branch <path>`, pairing the two surfaces on one
+    # implementation. The namespaced verb names what it PRODUCES (a new
+    # workspace) rather than repeating the top-level verb.
     try:
       let branchArgs =
         if args.len > 2:
           args[2 .. ^1]
         else:
           @[]
-      return runBranchCommand(branchArgs)
+      return runBranchCommand(branchArgs, verb = "repro workspace new",
+        requirePath = true)
     except CatchableError as err:
-      stderr.writeLine("repro workspace branch: error: " & err.msg)
+      stderr.writeLine("repro workspace new: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "switch":
+    # WV-5 — the workspace-namespaced spelling of the top-level `repro switch`.
+    try:
+      let switchArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runSwitchCommand(switchArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace switch: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "publish-evidence":
@@ -46564,10 +47442,37 @@ proc runThinAppDispatch(programName: string): int =
       stderr.writeLine("repro workspace provision: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "enable":
+    # WV-2 — `repro workspace enable <project>...`. MEMBERSHIP: record the
+    # named projects in the active set AND materialize the repos the enlarged
+    # set introduces. `--default` auto-layers from REPRO_DEFAULT_PROJECTS
+    # (then the RA-8 host config).
+    try:
+      let pArgs =
+        if args.len > 2: args[2 .. ^1]
+        else: @[]
+      return runWorkspaceEnableCommand(pArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace enable: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "disable":
+    # WV-2 — `repro workspace disable <project>...`. MEMBERSHIP: drop the
+    # named projects from the active set and remove the checkouts only they
+    # declared, gated on work that exists nowhere else.
+    try:
+      let pArgs =
+        if args.len > 2: args[2 .. ^1]
+        else: @[]
+      return runWorkspaceDisableCommand(pArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace disable: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "projects":
-    # RA-6 — `repro workspace projects [list|add]`. Inspect / grow the
-    # active PROJECT SET; `add --default` auto-layers from
-    # REPRO_DEFAULT_PROJECTS (then the RA-8 host config).
+    # WV-3 — `repro workspace projects list|add|remove`. DEFINITION: inspect
+    # or author project definitions in the manifest repo. Activating one in
+    # this workspace is `enable`.
     try:
       let pArgs =
         if args.len > 2: args[2 .. ^1]
@@ -46577,17 +47482,16 @@ proc runThinAppDispatch(programName: string): int =
       stderr.writeLine("repro workspace projects: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "project":
-    # RA-6 — `repro workspace project new` / `project repo add`.
-    # Manifest-authoring: write the project/repo manifest TOML, commit, and
-    # push to the manifest repo's upstream (best-effort push).
+      args[1] == "repos":
+    # WV-4 — `repro workspace repos list|add|remove`. DEFINITION: inspect or
+    # author repo fragments and the `includes` edges wiring them into projects.
     try:
       let pArgs =
         if args.len > 2: args[2 .. ^1]
         else: @[]
-      return runWorkspaceProjectCommand(pArgs)
+      return runWorkspaceReposCommand(pArgs)
     except CatchableError as err:
-      stderr.writeLine("repro workspace project: error: " & err.msg)
+      stderr.writeLine("repro workspace repos: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "completion":
     # RA-6 — `repro completion <shell>`. Emit a shell completion script
@@ -46601,7 +47505,7 @@ proc runThinAppDispatch(programName: string): int =
       stderr.writeLine("repro completion: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "branch":
-    # M14 — `repro branch [<name>]`. Top-level subcommand per
+    # M14 / WV-6 — `repro branch [<path>]`. Top-level subcommand per
     # ``reprobuild-specs/CLI/branch.md``: NOT under ``repro workspace``.
     # Same convention deviation as M9–M12: the milestone spec names a
     # planner path but the implementation lives in ``repro_cli_support``
@@ -46616,20 +47520,21 @@ proc runThinAppDispatch(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro branch: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and
-      (args[0] == "checkout" or args[0] == "co"):
-    # M15 — `repro checkout <branch>` (and the `co` alias per
-    # CLI/checkout.md). Top-level subcommand: switches every
-    # participating repo to the named branch and updates M13 metadata.
+  if programName == "repro" and args.len > 0 and args[0] == "switch":
+    # WV-5 — `repro switch <branch> [-b]`. Top-level subcommand per
+    # ``reprobuild-specs/CLI/switch.md``: switches every participating repo to
+    # the named branch (creating it first under ``-b``) and updates the M13
+    # metadata. ``checkout`` / ``co`` are RETIRED spellings and deliberately
+    # absent — they fail as unknown subcommands (see Retired-Names.md).
     try:
-      let checkoutArgs =
+      let switchArgs =
         if args.len > 1:
           args[1 .. ^1]
         else:
           @[]
-      return runCheckoutCommand(checkoutArgs)
+      return runSwitchCommand(switchArgs)
     except CatchableError as err:
-      stderr.writeLine("repro " & args[0] & ": error: " & err.msg)
+      stderr.writeLine("repro switch: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "add":
     # RA-22 — `repro add <repo>` (workspace membership / develop-mode policy
@@ -46682,7 +47587,7 @@ proc runThinAppDispatch(programName: string): int =
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "sync":
     # Top-level `repro sync [<project>]` shortcut per CLI/sync.md. Mirrors
-    # the `repro checkout`/`push` top-level arms above: routes to the same
+    # the `repro switch`/`push` top-level arms above: routes to the same
     # handler `repro workspace sync` uses (``runWorkspaceSyncCommand``),
     # forwarding the remaining args unchanged so every flag (scoped
     # ``<project>``, ``--jobs*``, ``--groups``, ``--force-sync``,

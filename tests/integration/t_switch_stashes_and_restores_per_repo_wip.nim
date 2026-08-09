@@ -1,4 +1,4 @@
-## RA-29 — ``repro checkout`` per-repo stash-on-leave + restore-on-return.
+## RA-29 — ``repro switch`` per-repo stash-on-leave + restore-on-return.
 ##
 ## CLI/checkout.md's V1 surface "requires a clean workspace — commit,
 ## stash, or discard changes first". RA-29 makes the *stash* path automatic
@@ -11,9 +11,9 @@
 ## Scenario (two repos, each with its OWN independent WIP):
 ##   - Workspace on branch ``main``; ``feature`` exists locally in every
 ##     repo. lib-a and lib-b each get a distinct uncommitted edit.
-##   - ``repro checkout feature`` → both repos switch; each dirty repo's WIP
+##   - ``repro switch feature`` → both repos switch; each dirty repo's WIP
 ##     is stashed (working tree clean on ``feature``; the WIP files are gone).
-##   - ``repro checkout main`` (return) → each repo's branch-keyed stash is
+##   - ``repro switch main`` (return) → each repo's branch-keyed stash is
 ##     popped; the EXACT uncommitted content reappears in each repo.
 ##
 ## Assertions:
@@ -162,13 +162,13 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
 proc invokeCheckout(fx: Fixture; name: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "checkout", "--write-report", name, "--yes",
+    fx.reproBin, "switch", "--write-report", name, "--yes",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
 proc readReport(fx: Fixture): JsonNode =
   let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
-    "checkout-report.json"
+    "switch-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
@@ -178,9 +178,9 @@ proc repoEntryByName(report: JsonNode; name: string): JsonNode =
       return entry
   newJNull()
 
-suite "RA-29 — checkout stashes and restores per-repo WIP":
+suite "RA-29 — switch stashes and restores per-repo WIP":
 
-  test "t_checkout_stashes_and_restores_per_repo_wip":
+  test "t_switch_stashes_and_restores_per_repo_wip":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()

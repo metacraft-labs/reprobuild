@@ -223,7 +223,11 @@ proc setupFixture(gitBin, slug: string): M27Fixture =
 
 proc invokeFork(fx: M27Fixture; branch, path: string;
                 extra: seq[string] = @[]; cwd = ""): CmdResult =
-  var argv = @[fx.reproBin, "branch", "--write-report", branch, path,
+  # WV-6 — the positional is the destination PATH and the branch name comes
+  # from `--branch=` (the fixtures name their branches independently of the
+  # directory, which is exactly what the flag is for).
+  var argv = @[fx.reproBin, "branch", "--write-report", path,
+               "--branch=" & branch,
                "--workspace-root=" & fx.workspaceRoot]
   for e in extra:
     argv.add(e)
@@ -243,7 +247,7 @@ proc entryByPath(report: JsonNode; path: string): JsonNode =
       return entry
   newJNull()
 
-suite "M27 — repro branch <name> <path> forks a new workspace":
+suite "M27/WV-6 — repro branch <path> forks a new workspace":
 
   test "test_m27_fork_materializes_new_workspace_on_branch":
     let gitBin = findExe("git")
@@ -462,8 +466,8 @@ suite "M27 — repro branch <name> <path> forks a new workspace":
       check report["exitCode"].getInt() == 2
       let entry = entryByPath(report, "lib-a")
       check entry["outcome"].getStr() == "branch_exists_on_remote"
-      # The remedy names the init + checkout path.
-      check entry["diagnostic"].getStr().contains("repro checkout")
+      # The remedy names the flag that adopts the existing branch instead.
+      check entry["diagnostic"].getStr().contains("--existing-branch")
 
   test "test_m27_fork_rerun_is_idempotent":
     let gitBin = findExe("git")
@@ -501,7 +505,8 @@ suite "M27 — repro branch <name> <path> forks a new workspace":
       let forkPath = fx.scratch / "feature-workspace"
       # The namespaced spelling must behave exactly like the top-level verb.
       let res = runShell(shellCommand(@[
-        fx.reproBin, "workspace", "branch", "--write-report", "feature-alias", forkPath,
+        fx.reproBin, "workspace", "new", "--write-report", forkPath,
+        "--branch=feature-alias",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       if res.code != 0:
@@ -520,11 +525,119 @@ suite "M27 — repro branch <name> <path> forks a new workspace":
       let fx = setupFixture(gitBin, "usage")
       defer: removeDirEventually(fx.scratch)
 
-      # No <path> → in place, where there is nothing to copy INTO.
+      # No <path> → the read-only show form, where there is nothing to copy
+      # INTO and no destination for the other fork-only flags either.
       let res = runShell(shellCommand(@[
-        fx.reproBin, "branch", "--write-report", "feature-x",
+        fx.reproBin, "branch", "--write-report",
         "--include-changes",
         "--workspace-root=" & fx.workspaceRoot,
       ]))
       check res.code != 0
       check res.output.contains("--include-changes")
+
+  test "t_workspace_new_derives_branch_from_basename":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "basename")
+      defer: removeDirEventually(fx.scratch)
+
+      # WV-6 — the single positional is a PATH and the branch name comes from
+      # its basename, so the directory name and the branch name stop being two
+      # things to keep in sync.
+      let forkPath = fx.scratch / "fix-flaky-tests"
+      let res = runShell(shellCommand(@[
+        fx.reproBin, "workspace", "new", "--write-report", forkPath,
+        "--workspace-root=" & fx.workspaceRoot,
+      ]))
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+      check currentBranch(gitBin, forkPath / "lib-a") == "fix-flaky-tests"
+      check currentBranch(gitBin, forkPath) == "fix-flaky-tests"
+
+  test "t_branch_refuses_destination_inside_workspace":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "nested")
+      defer: removeDirEventually(fx.scratch)
+
+      # A bare single-segment argument names a destination INSIDE the current
+      # workspace. Nesting a workspace inside a workspace is always wrong, and
+      # this is the argument most likely to be typed by accident, so it fails
+      # loudly and names both plausible intents.
+      # Run from INSIDE the workspace, which is where an operator typing a
+      # bare name actually stands. A relative destination resolves against the
+      # current directory, like every other path argument.
+      let res = runShell(shellCommand(@[
+        fx.reproBin, "branch", "my-feature",
+        "--workspace-root=" & fx.workspaceRoot,
+      ]), cwd = fx.workspaceRoot)
+      check res.code == 2
+      check res.output.contains("repro switch -b my-feature")
+      check res.output.contains("repro branch ../my-feature")
+      check not dirExists(fx.workspaceRoot / "my-feature")
+
+  test "t_workspace_new_existing_branch_checks_out":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "adopt")
+      defer: removeDirEventually(fx.scratch)
+
+      # Publish a branch on every member repo's origin — somebody else's
+      # feature, which `--existing-branch` adopts into a second directory
+      # instead of refusing as a collision.
+      for name in ["lib-a", "lib-b"]:
+        let src = fx.workspaceRoot / name
+        discard requireGit(q(gitBin) & " -C " & q(src) &
+          " checkout -b review-me")
+        discard requireGit(q(gitBin) & " -C " & q(src) &
+          " push -u origin review-me")
+        discard requireGit(q(gitBin) & " -C " & q(src) & " checkout main")
+
+      let forkPath = fx.scratch / "review-me"
+      let res = runShell(shellCommand(@[
+        fx.reproBin, "branch", "--write-report", forkPath, "--existing-branch",
+        "--workspace-root=" & fx.workspaceRoot,
+      ]))
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+      check currentBranch(gitBin, forkPath / "lib-a") == "review-me"
+      check currentBranch(gitBin, forkPath / "lib-b") == "review-me"
+
+      # The mirror-image refusal: a branch that exists nowhere cannot be
+      # adopted, so neither flag can silently do the other's job.
+      let missing = runShell(shellCommand(@[
+        fx.reproBin, "branch", "--write-report",
+        fx.scratch / "never-existed", "--existing-branch",
+        "--workspace-root=" & fx.workspaceRoot,
+      ]))
+      check missing.code == 2
+      check missing.output.contains("--existing-branch")
+
+  test "t_workspace_new_requires_a_destination_path":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "needspath")
+      defer: removeDirEventually(fx.scratch)
+
+      # `new` exists to PRODUCE a workspace. The no-argument show form belongs
+      # to `repro branch` alone — a `new` that quietly answered a question
+      # instead of creating anything is the surprise the verb split removes.
+      let res = runShell(shellCommand(@[
+        fx.reproBin, "workspace", "new",
+        "--workspace-root=" & fx.workspaceRoot,
+      ]))
+      check res.code != 0
+      check res.output.contains("requires the destination <path>")
+      # ...and the diagnostic names the verb the operator actually typed.
+      check res.output.contains("repro workspace new ../my-feature")
+      check res.output.contains("repro branch")

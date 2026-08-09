@@ -1293,7 +1293,7 @@ proc gitSwitchAction*(id: string; identity: GitToolIdentity;
   ## deterministic function of the declared inputs (branch + repo). Caching
   ## its receipt is unsound: once a switch to branch ``B`` succeeded, a
   ## later switch to ``B`` from a DIFFERENT branch would be served as a
-  ## cache hit and skip the actual ``git switch``, so ``repro checkout``
+  ## cache hit and skip the actual ``git switch``, so ``repro switch``
   ## would report ``switched`` while HEAD never moved. ``git switch`` is
   ## idempotent (already-on-branch is a safe no-op), so always executing is
   ## both correct and cheap.
@@ -1312,7 +1312,7 @@ proc gitBranchCreate*(id: string; identity: GitToolIdentity;
   ## (``repro branch <name>``). The executor invokes
   ## ``git branch <name> <HEAD-sha>`` in the named working tree —
   ## the branch is created from the current HEAD and the working tree
-  ## is NOT switched to it (M15 ``repro checkout`` is the switching
+  ## is NOT switched to it (M15 ``repro switch`` is the switching
   ## form). Idempotent: a pre-existing branch by the same name at
   ## the same HEAD short-circuits to ``outcome = already-at-head``
   ## in the receipt; a branch by that name at a different SHA fails

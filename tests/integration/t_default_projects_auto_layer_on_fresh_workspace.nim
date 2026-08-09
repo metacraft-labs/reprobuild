@@ -1,10 +1,10 @@
-## RA-6 — `repro workspace projects add --default` auto-layers the project
+## RA-6 — `repro workspace enable --default` auto-layers the project
 ## set from `REPRO_DEFAULT_PROJECTS` on a fresh workspace.
 ##
 ## A fresh workspace with `REPRO_DEFAULT_PROJECTS` set to >= 2 project names
 ## that exist in a hermetic manifest → the FIRST `projects add --default`
 ## populates exactly that project set with NO explicit `add <project>`.
-## `projects list` then reports exactly the env-specified set.
+## `projects list --enabled` then reports exactly the env-specified set.
 ##
 ## Without the env var, `add --default` is a deliberate no-op (no host config
 ## either) — no auto-layer happens and the active set stays empty.
@@ -51,19 +51,21 @@ proc setupWorkspace(slug: string; projectNames: openArray[string]): string =
 
 proc projectsList(reproBin, workspaceRoot: string;
                   env: openArray[tuple[name, value: string]] = []): CmdResult =
-  runShell(shellCommand(@[reproBin, "workspace", "projects", "list",
+  runShell(shellCommand(@[reproBin, "workspace", "projects", "list", "--enabled",
     "--workspace-root=" & workspaceRoot], env))
 
 proc projectsAddDefault(reproBin, workspaceRoot: string;
                         env: openArray[tuple[name, value: string]] = []): CmdResult =
-  runShell(shellCommand(@[reproBin, "workspace", "projects", "add", "--default",
+  runShell(shellCommand(@[reproBin, "workspace", "enable", "--default",
     "--workspace-root=" & workspaceRoot], env))
 
 proc activeSet(output: string): seq[string] =
+  # `projects list --enabled` emits `<name>\t<state>`; the active set is the
+  # name column.
   for line in output.splitLines():
     let t = line.strip()
     if t.len > 0:
-      result.add(t)
+      result.add(t.split('\t')[0])
 
 suite "RA-6 — default projects auto-layer on fresh workspace":
 

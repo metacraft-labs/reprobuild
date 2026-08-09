@@ -353,7 +353,7 @@ proc getFetchUrl*(fetchBase, repoName: string): string =
   ## the local checkout `path`). A `fetch` base that already points at a full
   ## repo (ends in `.git`) is used verbatim; otherwise the `name` is appended.
   ##
-  ## Exported because manifest AUTHORING (`repro workspace project repo add`)
+  ## Exported because manifest AUTHORING (`repro workspace repos add`)
   ## has to invert this function: given a requested clone URL it must find the
   ## declared remote that already composes to it. Authoring and resolution
   ## must never drift apart, so both sides call this one proc.
@@ -366,7 +366,7 @@ proc getFetchUrl*(fetchBase, repoName: string): string =
 
 # ---- remote planning (manifest authoring) ---------------------------------
 #
-# `repro workspace project repo add <project> <repo> --remote=URL` has to turn
+# `repro workspace repos add <repo> --project=<p> --remote=URL` has to turn
 # a clone URL into a `repos/<repo>.toml` fragment plus, at most, one new
 # `[[remote]]` entry in `projects/<project>.toml`. The rules below are the
 # inverse of `getFetchUrl`:
@@ -408,7 +408,7 @@ proc getFetchUrl*(fetchBase, repoName: string): string =
 # so a fragment whose `name` is not the added repo's own name would leave those
 # edges dangling. Such a caller asks for a plan that keeps the name, which
 # restricts rule 1 to bases that compose to the URL with the requested name
-# unchanged. (`repro workspace project repo add` writes no `depends` edges and
+# unchanged. (`repro workspace repos add` writes no `depends` edges and
 # so takes the unrestricted, convention-matching plan.)
 
 type
