@@ -29,8 +29,35 @@ import repro_depfile
 import repro_hash
 import repro_local_store
 import io_mon/writer
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/test_tool_identity_env_plumbing"
+# One scratch root PER CASE, not per binary.
+#
+# Every case here calls ``resetTmp()``, which is ``removeDir`` +
+# ``createDir`` on this path. As a module-level constant that path was
+# shared mutable state the moment the runner began executing this binary
+# once per case: eight sibling processes then raced on one directory, and
+# a completed 6825-case run recorded exactly the two shapes that race
+# produces —
+#
+#   Unhandled exception: Directory not empty
+#     Additional info: build/test-tmp/test_tool_identity_env_plumbing/cache-skip
+#   Unhandled exception: sqlite3_exec failed (10): disk I/O error
+#     (SQL: PRAGMA journal_mode = WAL)
+#
+# — the first from one case's ``removeDir`` walking a tree another case
+# was repopulating, the second from a case's local store being deleted
+# out from under an open sqlite handle. All four affected cases pass
+# standalone and at ``--threads=1``, which is the signature of shared
+# state rather than a logic defect.
+#
+# ``testCaseScratchSlug`` keys on the ``--run`` name, so the directory
+# set stays bounded and stable across runs and whole-binary execution
+# (one process, cases strictly sequential) keeps the single shared
+# directory it always had. Same remedy as commit 4b82e936 applied to
+# t_adapter_chain and its siblings; this binary was missed there.
+let TmpDir = "build" / "test-tmp" / "test_tool_identity_env_plumbing" /
+  testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):

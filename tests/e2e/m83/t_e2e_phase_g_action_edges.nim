@@ -26,14 +26,36 @@ import repro_elevation
 import repro_infra
 import repro_profile
 import repro_profile_compile
+from repro_test_support import testCaseScratchSlug
 
 const
   fixturesDir = currentSourcePath.parentDir.parentDir.parentDir /
     "fixtures" / "m83"
-  buildBinDir = currentSourcePath.parentDir.parentDir.parentDir.parentDir /
-    "build" / "test-bin" / "m83"
-  buildCacheDir = currentSourcePath.parentDir.parentDir.parentDir.parentDir /
-    "build" / "nimcache" / "m83"
+  repoRootDir = currentSourcePath.parentDir.parentDir.parentDir.parentDir
+
+# Per-CASE fixture output + nimcache.
+#
+# Both cases in this suite compile and then execute the SAME fixture. As
+# module-level constants these two paths were one output binary shared by
+# concurrent processes, so one case's ``nim c --out:<path>`` rewrote the
+# image another case was in the middle of running. A completed 6825-case
+# run caught it exactly there:
+#
+#   Phase G fixture run failed: system_action_edges_phase_g.nim
+#   /bin/sh: line 1: …/build/test-bin/m83/system_action_edges_phase_g.exe:
+#   Text file busy
+#
+# ETXTBSY is unambiguous — it is the kernel refusing to open a running
+# image for writing — and it is also why the failure MOVED between the
+# suite's two cases from one run to the next: whichever case loses the
+# race reports it. Writing under ``build/test-tmp`` rather than
+# ``build/test-bin`` additionally keeps these fixture binaries out of the
+# directory the test runner scans for test binaries.
+let
+  buildBinDir = repoRootDir / "build" / "test-tmp" / "m83" /
+    testCaseScratchSlug()
+  buildCacheDir = repoRootDir / "build" / "test-tmp" / "m83" /
+    testCaseScratchSlug() / "nimcache"
 
 proc compileAndRun(fixtureName: string): string =
   createDir(buildBinDir)
