@@ -7830,6 +7830,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_repro_test_runner_consumes_result_document.nim",
+    binary: "build/test-bin/t_repro_test_runner_consumes_result_document",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_repro_test_runner_parallel_n_workers.nim",
     binary: "build/test-bin/t_repro_test_runner_parallel_n_workers",
     defines: @[],
@@ -7848,6 +7856,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_repro_test_runner_relative_results_git_config.nim",
     binary: "build/test-bin/t_repro_test_runner_relative_results_git_config",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_repro_test_runner_reporting_contract.nim",
+    binary: "build/test-bin/t_repro_test_runner_reporting_contract",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_repro_test_runner_suiteless_case_round_trip.nim",
+    binary: "build/test-bin/t_repro_test_runner_suiteless_case_round_trip",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -8832,6 +8856,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim",
     binary: "build/test-bin/t_ct_test_nim_unittest_path_mm_pool",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_declared_package_deps_from_recipe.nim",
+    binary: "build/test-bin/t_declared_package_deps_from_recipe",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

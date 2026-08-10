@@ -261,17 +261,64 @@ test "incomplete name" and:
         self, data
     ):
         by_source = {item["source"]: item for item in data["tests"]}
-        expected_multiline_counts = {
+
+        # ``sourceCaseCount`` is now the BUILT BINARY's own case count, read
+        # from ``--list-json`` (spec §3.2/§6.5). ``staticCaseCount`` retains
+        # the old source-text scan alongside it. The two pin blocks below are
+        # therefore separate on purpose:
+        #
+        #  * ``expected_static_multiline_counts`` keeps this file's original
+        #    coverage of the lexer, which must not count ``test "..."`` text
+        #    appearing inside triple-quoted fixture strings or comments. That
+        #    property lives in ``count_nim_cases`` and is still worth pinning
+        #    even though it no longer decides the inventory's number.
+        #  * ``expected_catalog_multiline_counts`` pins the authoritative
+        #    number for the same sources.
+        #
+        # Where the two disagree, the static scanner is wrong by construction
+        # (it sums every ``when``/``else`` branch when only one registers, and
+        # it cannot see cases declared through a wrapper template), which is
+        # exactly why the binary is now the authority.
+        expected_static_multiline_counts = {
             "libs/repro_cli_support/tests/test_engine_publisher_wiring.nim": 5,
             "libs/repro_profile_compile/tests/t_template_in_template_named_args.nim": 2,
+            # 1, not 71: the cases are registered by a `for` loop over a
+            # 71-element const seq (`for example in PopulatedExamples: test
+            # "example " & example & ...`), so there is exactly one literal
+            # `test` declaration in the source text.
             "libs/repro_standard_provider/tests/test_examples_layout.nim": 1,
             "tests/e2e/m72/t_integration_stow_non_destructive_over_existing.nim": 4,
+            # 8, not 4: this file gained a second ``when`` branch declaring
+            # the SAME four case names, and the scanner sums both branches.
+            # The static number moved; the real case count did not.
+            "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim": 8,
+            "tests/e2e/m79/t_integration_shell_integration_replan_idempotent.nim": 1,
+            "tests/e2e/m83/t_e2e_profile_modules.nim": 6,
+        }
+        for source, expected in expected_static_multiline_counts.items():
+            with self.subTest(static_source=source):
+                self.assertEqual(by_source[source]["staticCaseCount"], expected)
+
+        expected_catalog_multiline_counts = {
+            "libs/repro_cli_support/tests/test_engine_publisher_wiring.nim": 5,
+            "libs/repro_profile_compile/tests/t_template_in_template_named_args.nim": 2,
+            # 71, not the static 1: catalog-sourced. A `for` loop registers
+            # one case per element of a 71-element const seq; a static
+            # scanner would have to evaluate the loop to see them.
+            "libs/repro_standard_provider/tests/test_examples_layout.nim": 71,
+            # 1, not the static 4: catalog-sourced. Only one ``when`` branch
+            # registers on this platform.
+            "tests/e2e/m72/t_integration_stow_non_destructive_over_existing.nim": 1,
+            # 4, unchanged in value but no longer coincidental: the static
+            # scanner now says 8 for this file (two branches x four names),
+            # and it was this disagreement that exposed the whole defect.
             "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim": 4,
             "tests/e2e/m79/t_integration_shell_integration_replan_idempotent.nim": 1,
             "tests/e2e/m83/t_e2e_profile_modules.nim": 6,
         }
-        for source, expected in expected_multiline_counts.items():
-            with self.subTest(source=source):
+        for source, expected in expected_catalog_multiline_counts.items():
+            with self.subTest(catalog_source=source):
+                self.assertEqual(by_source[source]["countSource"], "catalog")
                 self.assertEqual(by_source[source]["sourceCaseCount"], expected)
 
         # The three test files added while this scanner change was in review
@@ -279,6 +326,9 @@ test "incomplete name" and:
         # change contributes one more case in its existing source. Pin each
         # source independently so aggregate drift cannot be accepted by merely
         # updating the totals below.
+        #
+        # Every value in this block is unchanged by the move to catalog
+        # counting: the binary and the scanner agree on all nine sources.
         expected_rebased_source_counts = {
             # 6, not 5: the automatic-build-memory-capacity change added a
             # sixth case here without bumping this pin, which is exactly the
@@ -297,6 +347,23 @@ test "incomplete name" and:
         }
         for source, expected in expected_rebased_source_counts.items():
             with self.subTest(source=source):
+                self.assertEqual(by_source[source]["sourceCaseCount"], expected)
+
+        # M2 step 2 adds exactly three new test sources. Pin each one by
+        # source path, count provenance and exact case count so a new file
+        # can never be absorbed silently into the aggregate totals below.
+        expected_m2_step2_sources = {
+            "tests/integration/"
+            "t_repro_test_runner_consumes_result_document.nim": 2,
+            "tests/integration/"
+            "t_repro_test_runner_suiteless_case_round_trip.nim": 1,
+            "tests/unit/t_declared_package_deps_from_recipe.nim": 6,
+        }
+        for source, expected in expected_m2_step2_sources.items():
+            with self.subTest(m2_source=source):
+                self.assertTrue((REPO_ROOT / source).is_file())
+                self.assertIn(source, by_source)
+                self.assertEqual(by_source[source]["countSource"], "catalog")
                 self.assertEqual(by_source[source]["sourceCaseCount"], expected)
 
         # The opaque out-of-tree resource regression landed after the scanner
@@ -501,7 +568,80 @@ test "incomplete name" and:
         # t_windows_dynlib_staging.nim) are NOT counted here: dev enrolled
         # them independently in 62a08fcb, so they are already in the 1203
         # baseline. They remain in the enrollment spot-checks above.
-        self.assertEqual(len(nim_specs), 1204)
+        #
+        # ---------------------------------------------------------------
+        # M2 step 2 update. Two independent things moved; they are kept
+        # separate here so neither can absorb the other.
+        #
+        # (a) SPEC COUNT 1204 -> 1207. Exactly three new test sources, each
+        #     pinned individually in `expected_m2_step2_sources` above:
+        #       tests/integration/
+        #         t_repro_test_runner_consumes_result_document.nim      (2)
+        #       tests/integration/
+        #         t_repro_test_runner_suiteless_case_round_trip.nim     (1)
+        #       tests/unit/t_declared_package_deps_from_recipe.nim      (6)
+        #     +9 cases from new files.
+        #
+        # (b) COUNT MECHANISM. `sourceCaseCount` is no longer the static
+        #     source scan; it is the built binary's own `--list-json`
+        #     catalog. This is a change of authority, not a change to the
+        #     suite: 58 sources had a static count that disagreed with what
+        #     their binary actually registers — 44 static over-counts from
+        #     summed `when`/`else` branches, and 14 static under-counts, of
+        #     which 13 come from a `gatedTest` wrapper template the scanner
+        #     cannot expand and one (test_examples_layout.nim) from a `for`
+        #     loop over a const seq the scanner cannot evaluate. The static
+        #     scan is retained per entry as `staticCaseCount`.
+        #
+        # Reconciliation of the Nim case total, computed rather than
+        # bumped:
+        #     6786  previous pin (static scan, 1204 specs)
+        #      -54  net effect of the M2 step-2 edits on the STATIC count
+        #           of already-enrolled files (the modified e2e/m69 and
+        #           stow files); static total on this tree is 6741 over
+        #           1207 specs, of which +9 are the three new files, so
+        #           the pre-existing files' static total moved 6786 -> 6732
+        #      + 9  the three new files
+        #     ----
+        #     6741  static total on this tree (= sum of staticCaseCount)
+        #      +80  net catalog-vs-static correction across the 58
+        #           disagreeing sources
+        #     ----
+        #     6821  first catalog total on this tree
+        #       -1  the quarantined source no longer contributes its
+        #           static count. t_n7_multicast_windows_smoke.nim wraps
+        #           its whole body in `when defined(windows)` with
+        #           `else: discard`, so it registers 0 cases on Linux; the
+        #           static scanner sees 1 and that 1 was being added.
+        #           That single fallback was the last `when`-branch
+        #           over-count in the total, which is precisely what the
+        #           binary-as-authority rework exists to remove.
+        #     ----
+        #     6820  catalog total on this tree — and exactly the number the
+        #           independent `--list` cross-check produces, which is why
+        #           the two agree only after this correction.
+        #
+        # The +80 is pinned structurally below (per-source equality against
+        # each binary's own `--list`), not asserted as a bare number.
+        #
+        # ---------------------------------------------------------------
+        # Runner reporting-contract update. Exactly one new Nim source and
+        # one new Python test method; both deltas are fully attributed and
+        # nothing else in the tree moved.
+        #
+        #   SPECS 1207 -> 1208, NIM CASES 6820 -> 6824
+        #     tests/integration/
+        #       t_repro_test_runner_reporting_contract.nim            (+4)
+        #   Its static and catalog counts agree (4 = 4), so the nim
+        #   staticCaseCount aggregate moves by the same +4: 6741 -> 6745,
+        #   and `countSourceCounts["catalog"]` 1206 -> 1207.
+        #
+        #   PYTHON CASES 42 -> 43
+        #     test_runner_summary_names_every_case_and_splits_harness_errors
+        #   in this file — the consumer half of the same contract.
+        #
+        #   STATIC TOTAL 6862 -> 6867 = +4 nim +1 python.
+        self.assertEqual(len(nim_specs), 1208)
         self.assertEqual(len(python_specs), 4)
 
         nim_total = sum(
@@ -549,11 +689,68 @@ test "incomplete name" and:
         )
         # Language totals and the overall total. These are the aggregate
         # backstop for the per-source pins above, not a substitute for them.
-        self.assertEqual(nim_total, 6786)
-        self.assertEqual(python_total, 31)
-        self.assertEqual(data["static"]["sourceCaseCount"], 6817)
+        #
+        # 6786 -> 6820 nim: reconciled line by line in the comment above
+        # (static effect of the M2 step-2 edits, +9 for three new files,
+        # +80 for the static-vs-catalog correction, -1 for dropping the
+        # quarantined source's static fallback). Python keeps the static
+        # `unittest` scan because Python files have no built binary.
+        self.assertEqual(nim_total, 6824)
+        # Independently: the total is the sum of what the BINARIES report,
+        # with nothing imputed for a binary that could not report. Stated
+        # as its own equality so a future re-introduction of the static
+        # fallback fails here even if someone also bumps the pin above.
+        self.assertEqual(
+            nim_total,
+            sum(
+                len(item.get("catalogCases", []))
+                for item in data["tests"]
+                if item["language"] == "nim"
+                and item["countSource"] == "catalog"
+            ),
+        )
+        # 31 -> 35: this file is itself one of the four enumerated Python
+        # test files, and the catalog rework added four test methods to it:
+        #   test_catalog_counts_match_each_binary_list_surface
+        #   test_catalog_quarantine_is_pinned_by_size_and_membership
+        #   test_static_fallback_is_labelled_when_a_binary_is_absent
+        #   test_tracked_artifact_is_path_stable_and_carries_no_body_hashes
+        #
+        # 35 -> 41: the probe-gate and artifact-stability fixes add six
+        # more (one of the four above was renamed, not added):
+        #   test_catalog_index_memo_is_keyed_by_the_spec_set
+        #   test_only_successful_probes_are_ever_cached
+        #   test_environmental_probe_failure_aborts_instead_of_quarantining
+        #   test_probe_never_runs_a_test_binary_inside_the_repository
+        #   test_no_cache_flag_exists_and_reaches_the_catalog_index
+        #   test_absolute_paths_are_redacted_to_their_basename
+        # (`test_static_fallback_is_labelled_when_a_binary_is_absent` became
+        #  `test_missing_binary_is_its_own_label_not_plain_static`.)
+        #
+        # 41 -> 42: holding the TRACKED MARKDOWN to the same stability rule
+        # as the tracked JSON adds one more:
+        #   test_tracked_markdown_report_is_stable_across_hosts_and_builds
+        #
+        # Python files have no built binary, so this number still comes from
+        # the static `unittest` scan.
+        self.assertEqual(python_total, 43)
+        # 6856 -> 6862: -1 from the quarantined source no longer imputing a
+        # static count, +7 from the new Python cases above.
+        self.assertEqual(data["static"]["sourceCaseCount"], 6867)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
+        )
+        # The static scan is retained per entry and pinned in aggregate too,
+        # so a change in the SCANNER can still be told apart from a change
+        # in the SUITE: if this number moves while `nim_total` holds, the
+        # lexer regressed, not the tests.
+        self.assertEqual(
+            sum(
+                item["staticCaseCount"]
+                for item in data["tests"]
+                if item["language"] == "nim"
+            ),
+            6745,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
@@ -695,7 +892,29 @@ test "incomplete name" and:
             "t_repro_test_runner_process_group_cleanup.nim"
         )
         self.assertIn(cleanup_source, explicit_sources)
-        self.assertEqual(len(explicit_sources), 48)
+        # 48 -> 50. Unrelated to the catalog rework (which does not touch
+        # compiler-flow detection at all): M2 step 2 adds two new test
+        # sources that each drive a real compiler, and both are new files
+        # rather than changes to an already-counted source. Recomputed
+        # against the HEAD content of every changed file: the HEAD-state
+        # explicit set is exactly 48, the working-tree set is exactly 50,
+        # the difference is exactly these two, and nothing left the set.
+        #
+        # 50 -> 51: the runner reporting-contract test compiles its own
+        # fixtures with a real `nim c`, exactly as the two sources above
+        # do. One new file, no already-counted source changed, and the
+        # explicit/api intersection below is untouched.
+        for added in (
+            "tests/integration/"
+            "t_repro_test_runner_consumes_result_document.nim",
+            "tests/integration/"
+            "t_repro_test_runner_suiteless_case_round_trip.nim",
+            "tests/integration/"
+            "t_repro_test_runner_reporting_contract.nim",
+        ):
+            with self.subTest(added_explicit_source=added):
+                self.assertIn(added, explicit_sources)
+        self.assertEqual(len(explicit_sources), 51)
         self.assertEqual(len(api_sources), 21)
         self.assertEqual(
             explicit_sources & api_sources,
@@ -708,7 +927,11 @@ test "incomplete name" and:
             },
         )
         derived_total = len(explicit_sources | api_sources)
-        self.assertEqual(derived_total, 66)
+        # 66 -> 68: the same two new M2 step-2 sources. The three-source
+        # explicit/api intersection pinned above is unchanged, so the union
+        # moves by exactly the two added explicit sources. 68 -> 69 for
+        # the reporting-contract source, by the same argument.
+        self.assertEqual(derived_total, 69)
         self.assertEqual(len(flows), derived_total)
         self.assertFalse(data["runtimeCompilerFlowDetection"]["exhaustive"])
         self.assertEqual(
@@ -791,8 +1014,1076 @@ test "incomplete name" and:
                 )
                 self.assertEqual(int(output.strip()), expected)
 
+    # -----------------------------------------------------------------
+    # Catalog enumeration gates
+    # -----------------------------------------------------------------
+    #
+    # `sourceCaseCount` is now taken from each built binary's `--list-json`
+    # catalog, so the inventory's number has to be checked against the
+    # binary itself and not merely against a previous copy of the same
+    # number. `--list` is a different code path in the same binary from
+    # `--list-json`, which makes it a genuine cross-check rather than a
+    # restatement.
+    #
+    # Cost note: a cold cross-check runs every test binary once (a handful
+    # of `recipes/packages/source/*` binaries do heavy module-init work
+    # before argv parsing; one takes almost four minutes on its own), so
+    # results are cached under build/ keyed by each binary's size and
+    # mtime. A rebuild re-probes exactly the binaries that changed.
+
+    LIST_CROSSCHECK_CACHE = Path("build/reprobuild-suite-list-crosscheck.json")
+    LIST_CROSSCHECK_VERSION = 1
+
+    _INVENTORY = None
+
+    @classmethod
+    def inventory_data(cls):
+        """One `build_inventory` result shared by every test in this class.
+
+        `build_inventory` walks the whole source tree for the fingerprint,
+        runs `du` over build/, and probes every test binary. Four tests need
+        it, and it is a pure function of the tree, so building it once keeps
+        the suite honest without paying that cost four times.
+        """
+        if cls._INVENTORY is None:
+            cls._INVENTORY = inventory.build_inventory(REPO_ROOT, None)
+        return cls._INVENTORY
+
+    @classmethod
+    def _list_names(cls, binary_path, env, cwd, timeout=None):
+        """Case names as reported by the binary's `--list` surface.
+
+        `cwd` is a scratch directory, never the repo root: this helper runs
+        every test binary in the tree, and `source_fingerprint` hashes
+        untracked files, so a binary that drops a stray file into its
+        working directory would otherwise change the fingerprint the same
+        run is recording. Same reason as `catalog_index`'s probe.
+
+        The timeout defaults to the probe's own bound so the two surfaces
+        cannot disagree merely because one of them was given less time on a
+        loaded host.
+        """
+        if timeout is None:
+            timeout = inventory.CATALOG_PROBE_TIMEOUT_SECONDS
+        try:
+            completed = subprocess.run(
+                [str(binary_path), "--list"],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=timeout,
+                cwd=str(cwd),
+                env=env,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        if completed.returncode != 0:
+            return None
+        return [line for line in completed.stdout.splitlines() if line.strip()]
+
+    def test_catalog_counts_match_each_binary_list_surface(self):
+        """Every catalog-counted source equals its binary's own `--list`.
+
+        This is the assertion that makes the catalog rework load-bearing: if
+        a binary's registered case set drifts from what the inventory
+        records, or a binary silently stops answering the protocol, the
+        inventory can no longer quietly keep a stale number.
+        """
+        data = self.inventory_data()
+        catalog_entries = [
+            item
+            for item in data["tests"]
+            if item.get("countSource") == "catalog"
+        ]
+        self.assertGreater(len(catalog_entries), 1000)
+
+        env = inventory.catalog_probe_env()
+        cache_path = REPO_ROOT / self.LIST_CROSSCHECK_CACHE
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            cached = (
+                payload.get("entries", {})
+                if payload.get("version") == self.LIST_CROSSCHECK_VERSION
+                else {}
+            )
+        except (OSError, ValueError):
+            cached = {}
+
+        pending = []
+        resolved = {}
+        for item in catalog_entries:
+            binary_path = REPO_ROOT / item["binary"]
+            key = inventory.binary_cache_key(binary_path)
+            self.assertIsNotNone(
+                key, f"catalog-counted binary is missing: {item['binary']}"
+            )
+            entry = cached.get(item["source"])
+            # Only a POSITIVE entry may be reused. A cached `None` is a
+            # cached failure, and a failure recorded on a loaded host is
+            # not a fact about the binary — the same rule `catalog_index`
+            # applies to its own cache.
+            if (
+                isinstance(entry, dict)
+                and entry.get("key") == key
+                and entry.get("names") is not None
+            ):
+                resolved[item["source"]] = entry.get("names")
+            else:
+                pending.append((item["source"], binary_path, key))
+
+        if pending:
+            from concurrent.futures import ThreadPoolExecutor
+
+            scratch = tempfile.TemporaryDirectory(prefix="repro-list-check-")
+            self.addCleanup(scratch.cleanup)
+
+            def run_one(job):
+                source, binary_path, key = job
+                return source, key, self._list_names(
+                    binary_path, env, scratch.name
+                )
+
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                for source, key, names in pool.map(run_one, pending):
+                    resolved[source] = names
+                    if names is None:
+                        # Never persist a negative result.
+                        cached.pop(source, None)
+                    else:
+                        cached[source] = {"key": key, "names": names}
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(
+                    json.dumps(
+                        {
+                            "version": self.LIST_CROSSCHECK_VERSION,
+                            "entries": cached,
+                        },
+                        sort_keys=True,
+                    ),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+
+        mismatches = []
+        for item in catalog_entries:
+            names = resolved.get(item["source"])
+            if names is None:
+                mismatches.append(
+                    f"{item['source']}: --list did not produce a case list, "
+                    "but the inventory counted it from the catalog"
+                )
+                continue
+            catalog_names = [case["name"] for case in item["catalogCases"]]
+            if catalog_names != names:
+                mismatches.append(
+                    f"{item['source']}: catalog {len(catalog_names)} cases != "
+                    f"--list {len(names)} cases"
+                )
+            elif item["sourceCaseCount"] != len(names):
+                mismatches.append(
+                    f"{item['source']}: sourceCaseCount "
+                    f"{item['sourceCaseCount']} != --list {len(names)}"
+                )
+        self.assertEqual(mismatches, [], "\n".join(mismatches[:40]))
+
+        # Spot pins for the three sources that motivated this rework. Each
+        # is a case the static scanner got wrong in a different way, so a
+        # regression to static counting fails here explicitly rather than
+        # only in the aggregate.
+        by_source = {item["source"]: item for item in data["tests"]}
+        for source, expected in (
+            # wrapper template: static scanner counted 0
+            ("tests/e2e/m69/t_e2e_windows_vs_installer.nim", 16),
+            # wrapper template: static scanner counted 0
+            ("tests/e2e/m69/t_e2e_repro_infra_plan_apply_convergent.nim", 7),
+            # summed when/else branches: static scanner counted 8
+            (
+                "tests/e2e/m76/"
+                "t_integration_stow_byte_identical_target_is_cache_hit.nim",
+                4,
+            ),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(by_source[source]["countSource"], "catalog")
+                self.assertEqual(by_source[source]["sourceCaseCount"], expected)
+                self.assertEqual(len(resolved[source]), expected)
+
+    def test_catalog_quarantine_is_pinned_by_size_and_membership(self):
+        """The quarantine list is exhaustive, enumerated and pinned.
+
+        A binary that silently loses protocol support must fail this test
+        rather than quietly fall back to a static count. Membership is
+        pinned, not just the size, so one binary dropping out and another
+        dropping in cannot cancel out.
+        """
+        data = self.inventory_data()
+        catalog = data["catalogEnumeration"]
+
+        # Exactly one binary in the tree cannot enumerate. Everything in
+        # `libs/repro_peer_cache/tests/t_n7_multicast_windows_smoke.nim` is
+        # inside `when defined(windows)` with `else: discard`, so on Linux
+        # the binary registers no cases at all and never links the protocol
+        # — it emits nothing for `--list-json`.
+        #
+        # It is labelled `quarantined` and contributes 0 cases. The static
+        # scanner says 1 for this file (it counts the `when`-branch
+        # declaration it cannot evaluate), and that 1 used to be added to
+        # the authoritative total — making the pinned Nim total 6821 while
+        # the binaries actually register 6820. The one place the static
+        # fallback was still used was the exact over-count this rework
+        # exists to eliminate. `staticCaseCount` keeps the number visible;
+        # it no longer votes.
+        expected_quarantine = {
+            "libs/repro_peer_cache/tests/"
+            "t_n7_multicast_windows_smoke.nim": "no-protocol-support",
+        }
+        actual_quarantine = {
+            item["source"]: item["reason"] for item in catalog["quarantine"]
+        }
+        self.assertEqual(actual_quarantine, expected_quarantine)
+        self.assertEqual(catalog["quarantineCount"], len(expected_quarantine))
+        self.assertEqual(
+            catalog["quarantineReasonCounts"], {"no-protocol-support": 1}
+        )
+
+        # Every quarantine entry carries a machine-readable reason drawn
+        # from the declared taxonomy, and every quarantined reason must be
+        # INTRINSIC: an environmental failure aborts the run rather than
+        # joining this set, so its presence here would be a defect in
+        # `catalog_index`, not a fact about the tree.
+        for item in catalog["quarantine"]:
+            with self.subTest(quarantined=item["source"]):
+                self.assertIn(
+                    item["reason"],
+                    inventory.QUARANTINE_REASON_DESCRIPTIONS,
+                )
+                self.assertIn(
+                    item["reason"], inventory.INTRINSIC_QUARANTINE_REASONS
+                )
+                self.assertNotIn(
+                    item["reason"],
+                    inventory.ENVIRONMENTAL_QUARANTINE_REASONS,
+                )
+                self.assertTrue(item["reasonDescription"])
+                self.assertIsInstance(item["staticCaseCount"], int)
+                entry = next(
+                    test
+                    for test in data["tests"]
+                    if test["source"] == item["source"]
+                )
+                self.assertEqual(entry["countSource"], "quarantined")
+                # The authoritative count is 0, NOT the static fallback.
+                self.assertEqual(entry["sourceCaseCount"], 0)
+                self.assertEqual(
+                    entry["staticCaseCount"], item["staticCaseCount"]
+                )
+        # The one quarantined source is the phantom `when`-branch file, and
+        # its static count really is the non-zero one that used to leak
+        # into the total. Pinned explicitly so "0 cases contributed" cannot
+        # be satisfied by the static scan quietly also becoming 0.
+        self.assertEqual(catalog["quarantine"][0]["staticCaseCount"], 1)
+        self.assertTrue(catalog["quarantinedCasesExcludedFromTotal"])
+
+        # The taxonomy partitions every declared reason. A reason belonging
+        # to neither set (or both) would silently pick up whichever default
+        # the code happened to apply.
+        declared = set(inventory.QUARANTINE_REASON_DESCRIPTIONS)
+        intrinsic = set(inventory.INTRINSIC_QUARANTINE_REASONS)
+        environmental = set(inventory.ENVIRONMENTAL_QUARANTINE_REASONS)
+        self.assertEqual(intrinsic | environmental, declared)
+        self.assertEqual(intrinsic & environmental, set())
+        # `timeout` is the reason that motivated the split: it is a fact
+        # about how busy the host was, never about the test.
+        self.assertIn("timeout", environmental)
+        self.assertIn("dynamic-link-failure", environmental)
+        self.assertIn("no-protocol-support", intrinsic)
+
+        # A dynamic-link failure is an environment defect, not a coverage
+        # fact. Probed correctly (inside the nix dev shell) there are none;
+        # if this ever trips, the inventory was generated without the
+        # dev-shell runtime library path and its counts are not evidence.
+        self.assertEqual(catalog["dynamicLinkFailureCount"], 0)
+        self.assertFalse(catalog["environmentDegraded"])
+
+        # Count-provenance census. Every Nim entry is catalog-counted except
+        # the single quarantined one; the four `static` entries are the
+        # Python files, which have no built binary. `missing-binary` is a
+        # distinct label from `static` and is absent here because every Nim
+        # source in the tree currently has a built binary — if a build gap
+        # appeared it would show up as its own bucket instead of hiding
+        # among the Python files.
+        self.assertEqual(
+            catalog["countSourceCounts"],
+            {"catalog": 1207, "quarantined": 1, "static": 4},
+        )
+        self.assertNotIn("missing-binary", catalog["countSourceCounts"])
+        self.assertEqual(
+            sum(catalog["countSourceCounts"].values()),
+            data["static"]["testEntryCount"],
+        )
+
+        # Field completeness of the retained catalog. M2 deliverable 2
+        # requires `bodyHash`, `group`, `threadsRequired`, `xfail`, `tags`
+        # and `deterministic` to survive into this inventory, so the sources
+        # that do NOT supply them are pinned rather than left implicit.
+        #
+        # Exactly one does: reprobuild's own `ct_test_unittest_parallel`
+        # shim implements a narrower `--list-json` than the codetracer-nim
+        # `std/unittest` fork — it emits `name`, `suite`, `file` and `line`
+        # only. Its two cases therefore carry null for the rich fields. This
+        # is a real gap in the shim, not in the inventory; when the shim is
+        # brought up to the fork's catalog, this pin drops to zero and the
+        # assertion below is what will say so.
+        incomplete = sorted(
+            {
+                item["source"]
+                for item in data["tests"]
+                for case in item.get("catalogCases", [])
+                if case.get("bodyHash") is None
+            }
+        )
+        self.assertEqual(
+            incomplete,
+            [
+                "libs/ct_test_unittest_parallel/tests/"
+                "t_smoke_ct_test_unittest_parallel.nim"
+            ],
+        )
+        # Every other catalog-counted case carries the full field set.
+        for item in data["tests"]:
+            if item["source"] in incomplete:
+                continue
+            for case in item.get("catalogCases", []):
+                self.assertIsNotNone(case["bodyHash"])
+                self.assertIsNotNone(case["group"])
+                self.assertIsNotNone(case["threadsRequired"])
+                self.assertIsNotNone(case["deterministic"])
+                self.assertIsInstance(case["tags"], list)
+
+    def test_tracked_artifact_is_path_stable_and_carries_no_body_hashes(self):
+        """The TRACKED inventory must be reproducible across checkout paths.
+
+        `bodyHash` is a function of the project's absolute path (campaign
+        defect #52): any construct expanding to a string literal that
+        carries the absolute source path is hashed verbatim by the
+        compiler's `hashBodyTree`. Tracking 6,800+ such hashes would rewrite
+        the whole artifact for every developer and CI runner whose checkout
+        lives elsewhere — churn with no signal, and exactly the byte-level
+        comparability that spec §16.4 protects when it forbids an embedded
+        `compiled_at`.
+
+        So the per-case detail goes to a build-local artifact instead, and
+        this test is what keeps it there.
+
+        The same argument disqualifies every other host-dependent field,
+        and this test now checks all of them rather than naming a property
+        it only partly enforced: no absolute path of ANY kind (not just the
+        repo root), no timestamp, and no `footprint` / `host` / `tools` /
+        `environment` / checkout-path block.
+        """
+        data = self.inventory_data()
+        tracked, detail = inventory.split_case_catalog(
+            data, inventory.DEFAULT_CASE_CATALOG
+        )
+
+        # No per-case payload survives into the tracked half.
+        for item in tracked["tests"]:
+            with self.subTest(source=item["source"]):
+                self.assertNotIn("catalogCases", item)
+
+        serialized = json.dumps(tracked, sort_keys=True)
+        # `bodyHash` may appear as a FIELD NAME (retainedCaseFields) and in
+        # the explanatory reason string, but never as a hash value. Real
+        # hashes emitted by the protocol start with `__`.
+        self.assertNotIn('"bodyHash": "__', serialized)
+        for case in (
+            case
+            for item in data["tests"]
+            for case in item.get("catalogCases", [])
+            if case.get("bodyHash")
+        ):
+            self.assertNotIn(case["bodyHash"], serialized)
+
+        # ---- the property this test is NAMED for -------------------------
+        # "path-stable" previously meant one thing: `str(REPO_ROOT)` is
+        # absent. That checked one of four channels. `/nix/store/...` is
+        # not under REPO_ROOT, so seven absolute store paths in
+        # `metadata.runtime.environment` sailed through, as did the
+        # absolute `.so` path inside a loader-failure `quarantine[].detail`
+        # and the absolute sibling-checkout paths in `sourceCheckouts`.
+        #
+        # The property asserted now is the real one: NO absolute path of
+        # any kind, anywhere in the tracked document.
+        self.assertNotIn(str(REPO_ROOT), serialized)
+        absolute_paths = sorted(
+            set(re.findall(r"(?<![\w:/])((?:/[A-Za-z0-9._+~@%-]+){2,})", serialized))
+        )
+        self.assertEqual(
+            absolute_paths,
+            [],
+            "tracked inventory carries absolute host paths: "
+            + ", ".join(absolute_paths[:10]),
+        )
+
+        # No timestamp, and no absolute repo root.
+        self.assertNotIn("generatedAt", tracked["metadata"])
+        self.assertEqual(tracked["metadata"]["repoRoot"], ".")
+
+        # The host-dependent block is GONE from the tracked half, not
+        # merely sanitized in place. Each of these changes on every build
+        # or every host, which is the same defect as an embedded
+        # timestamp.
+        self.assertNotIn("footprint", tracked)
+        self.assertNotIn("runtime", tracked["metadata"])
+        self.assertIsNotNone(detail["footprint"])
+        self.assertTrue(detail["footprint"]["entries"])
+        runtime = detail["runtime"]
+        for moved in ("environment", "host", "tools", "sourceCheckouts"):
+            with self.subTest(moved=moved):
+                self.assertIn(moved, runtime)
+        for leaked in ("argv", "cwd", "pythonExecutable"):
+            with self.subTest(field=leaked):
+                self.assertNotIn(leaked, runtime)
+
+        # What survives is the part that is a fact about the INPUTS rather
+        # than the host: each external checkout's revision, keyed by name,
+        # carrying no path.
+        revisions = tracked["metadata"]["sourceCheckoutRevisions"]
+        self.assertIsInstance(revisions, dict)
+        self.assertEqual(
+            set(revisions),
+            set(runtime.get("sourceCheckouts", {})),
+        )
+        for name, entry in revisions.items():
+            with self.subTest(checkout=name):
+                self.assertEqual(set(entry), {"head", "branch", "dirty"})
+        self.assertFalse(tracked["metadata"]["runtimeDetailTracked"])
+        self.assertTrue(tracked["metadata"]["runtimeDetailPath"])
+        for pointer in (
+            tracked["metadata"]["runtimeDetailPath"],
+            tracked["metadata"]["environmentReportPath"],
+            tracked["catalogEnumeration"]["caseDetailPath"],
+        ):
+            with self.subTest(pointer=pointer):
+                self.assertFalse(Path(pointer).is_absolute())
+
+        # The gate-relevant, path-stable data is retained.
+        for item in tracked["tests"]:
+            with self.subTest(source=item["source"]):
+                self.assertIn("sourceCaseCount", item)
+                self.assertIn("staticCaseCount", item)
+                self.assertIn("countSource", item)
+        self.assertIn("quarantine", tracked["catalogEnumeration"])
+        self.assertFalse(tracked["catalogEnumeration"]["caseDetailTracked"])
+
+        # The detail half is complete: every catalog-counted source, with
+        # its full case list, is present and its counts agree with the
+        # tracked half. The split must lose nothing.
+        catalog_sources = {
+            item["source"]
+            for item in data["tests"]
+            if item.get("countSource") == "catalog"
+        }
+        self.assertEqual(set(detail["sources"]), catalog_sources)
+        self.assertEqual(detail["sourceCount"], len(catalog_sources))
+        tracked_by_source = {item["source"]: item for item in tracked["tests"]}
+        for source, entry in detail["sources"].items():
+            with self.subTest(detail_source=source):
+                self.assertEqual(
+                    entry["caseCount"],
+                    tracked_by_source[source]["sourceCaseCount"],
+                )
+                self.assertEqual(len(entry["cases"]), entry["caseCount"])
+        self.assertEqual(
+            detail["caseCount"],
+            sum(
+                item["sourceCaseCount"]
+                for item in tracked["tests"]
+                if item.get("countSource") == "catalog"
+            ),
+        )
+        self.assertFalse(detail["tracked"])
+
+    def test_tracked_markdown_report_is_stable_across_hosts_and_builds(self):
+        """The TRACKED markdown is held to the same rule as the tracked JSON.
+
+        `benchmarks/reports/reprobuild-suite-m0-baseline.md` is checked into
+        git, and it used to render four host-dependent things: the recorded
+        environment (absolute `/nix/store` values), the host's kernel and
+        glibc version, the git/nim/nix/python versions, and a `du` over
+        `build/` — `build/nimcache` alone is multi-GiB and moves whenever
+        anything is compiled. So regenerating the report rewrote a tracked
+        file even when nothing about the suite had changed, which is the
+        same defect spec §16.4 forbids for an embedded build timestamp.
+
+        The information is relocated, not deleted: this test asserts BOTH
+        halves — absent from the tracked report, present in the build-local
+        one — so a future "simplification" cannot satisfy it by dropping
+        the data on the floor.
+        """
+        data = self.inventory_data()
+        tracked, detail = inventory.split_case_catalog(
+            data, inventory.DEFAULT_CASE_CATALOG
+        )
+        report = inventory.render_report(
+            tracked, inventory.DEFAULT_JSON.as_posix(), detail
+        )
+        environment_report = inventory.render_environment_report(data, detail)
+
+        # (1) No absolute path of any kind, same property as the JSON.
+        absolute_paths = sorted(
+            set(re.findall(r"(?<![\w:/])((?:/[A-Za-z0-9._+~@%-]+){2,})", report))
+        )
+        self.assertEqual(
+            absolute_paths,
+            [],
+            "tracked markdown carries absolute host paths: "
+            + ", ".join(absolute_paths[:10]),
+        )
+        self.assertNotIn(str(REPO_ROOT), report)
+        self.assertNotIn("/nix/store", report)
+
+        # (2) No host identity, no tool versions, no recorded environment.
+        # Every value is read from the LIVE runtime block, so this cannot
+        # pass by accident on a machine whose strings happen to differ.
+        #
+        # Checked as whole rendered rows rather than as bare substrings:
+        # `logicalCpuCount` is "32" and so is more than one legitimate
+        # count elsewhere in the report, and an assertion that trips on
+        # that is noise. The distinctive values are additionally checked
+        # as substrings below, which is where the real leak would show.
+        runtime = detail["runtime"]
+        volatile_rows = [
+            f"| {key} | {block[key]} |"
+            for block in (
+                runtime["host"],
+                runtime["tools"],
+                runtime["environment"],
+            )
+            for key in sorted(block)
+        ]
+        self.assertTrue(volatile_rows)
+        for rendered in volatile_rows:
+            with self.subTest(volatile_row=rendered):
+                self.assertNotIn(rendered, report)
+
+        volatile = [
+            str(value)
+            for block in (
+                runtime["host"],
+                runtime["tools"],
+                runtime["environment"],
+            )
+            for value in block.values()
+            # A bare integer is not an identifying string; the row check
+            # above already covers it.
+            if len(str(value)) > 4 and not str(value).isdigit()
+        ]
+        self.assertTrue(volatile)
+        for value in volatile:
+            with self.subTest(volatile=value):
+                self.assertNotIn(value, report)
+
+        # (3) No footprint SIZES. Which paths are measured is a property
+        # of the script and stays; how big they are is a property of the
+        # last build and goes. The whole rendered row is checked, not a
+        # bare number: "| 15 |" legitimately occurs in the classification
+        # table, and an assertion that trips on that would be noise
+        # rather than signal.
+        def footprint_row(entry):
+            kib = entry["kib"]
+            mib = "not present" if kib is None else f"{kib / 1024.0:.1f} MiB"
+            exe = (
+                "n/a"
+                if entry["executableFiles"] is None
+                else str(entry["executableFiles"])
+            )
+            return f"| {entry['path']} | {mib} | {exe} |"
+
+        for entry in detail["footprint"]["entries"]:
+            with self.subTest(footprint=entry["path"]):
+                # The path is named — the reader still learns what is
+                # measured.
+                self.assertIn(entry["path"], report)
+                self.assertNotIn(footprint_row(entry), report)
+                if entry["kib"]:
+                    self.assertNotIn(
+                        f"{entry['kib'] / 1024.0:.1f} MiB", report
+                    )
+
+        # (4) The tracked report points at the build-local one, by a
+        # relative path.
+        pointer = tracked["metadata"]["environmentReportPath"]
+        self.assertFalse(Path(pointer).is_absolute())
+        self.assertIn(pointer, report)
+
+        # (5) And the build-local report actually carries what was moved,
+        # un-redacted. Relocation, not deletion — a future
+        # "simplification" must not be able to satisfy (2) by dropping the
+        # data on the floor.
+        for rendered in volatile_rows:
+            with self.subTest(relocated_row=rendered):
+                self.assertIn(rendered, environment_report)
+        for value in volatile:
+            with self.subTest(relocated=value):
+                self.assertIn(value, environment_report)
+        for entry in detail["footprint"]["entries"]:
+            with self.subTest(relocated_footprint=entry["path"]):
+                self.assertIn(footprint_row(entry), environment_report)
+
+    def test_missing_binary_is_its_own_label_not_plain_static(self):
+        """A Nim source with no built binary gets a DISTINCT label.
+
+        Every Nim source in the tree currently has a built binary, so this
+        path has no natural example; it is exercised with a spec pointing at
+        a binary that does not exist.
+
+        `missing-binary` used to degrade to `countSource: "static"`, which
+        made a BUILD GAP indistinguishable from a Python file that
+        legitimately has no binary. Both said "static", so a Nim binary
+        silently failing to build read as a language property.
+        """
+        missing = inventory.TestSpec(
+            source="tests/unit/t_declared_package_deps_from_recipe.nim",
+            binary="build/test-bin/definitely_not_built_binary",
+            defines=[],
+            requires_repro_binary=False,
+            target_os="soAny",
+        )
+        index = inventory.catalog_index(
+            REPO_ROOT, [missing], use_cache=False
+        )
+        self.assertEqual(index[missing.source]["status"], "missing-binary")
+        # The label is what the inventory writes, and it is not "static".
+        self.assertEqual(
+            inventory.catalog_count_source(index[missing.source]),
+            "missing-binary",
+        )
+        self.assertEqual(
+            inventory.catalog_count_source({"status": "ok", "cases": []}),
+            "catalog",
+        )
+        self.assertEqual(
+            inventory.catalog_count_source({"status": "no-protocol-support"}),
+            "quarantined",
+        )
+        # No probe attempted at all (`--no-catalog`) is the only `static`.
+        self.assertEqual(inventory.catalog_count_source(None), "static")
+
+    def test_catalog_index_memo_is_keyed_by_the_spec_set(self):
+        """A one-spec index must never satisfy a full-tree request.
+
+        `_CATALOG_INDEX_MEMO` was keyed by
+        `(root, timeout, workers, use_cache)` and IGNORED its `specs`
+        argument. Only one caller passed `use_cache=False`, so nothing
+        collided by luck. The moment `--no-cache` exists, a full-specs call
+        and a one-spec call share a key: the first result wins, every real
+        source degrades to `missing-binary`, and the whole inventory
+        silently reverts to the static scan the catalog rework replaced.
+
+        This reproduces the collision through the public entry point.
+        """
+        one = inventory.TestSpec(
+            source="tests/unit/t_declared_package_deps_from_recipe.nim",
+            binary="build/test-bin/definitely_not_built_binary",
+            defines=[],
+            requires_repro_binary=False,
+            target_os="soAny",
+        )
+        other = inventory.TestSpec(
+            source="tests/unit/t_declared_package_deps_from_recipe.nim",
+            binary="build/test-bin/t_declared_package_deps_from_recipe",
+            defines=[],
+            requires_repro_binary=False,
+            target_os="soAny",
+        )
+        first = inventory.catalog_index(REPO_ROOT, [one], use_cache=False)
+        second = inventory.catalog_index(REPO_ROOT, [other], use_cache=False)
+        # Same root, same timeout, same workers, same use_cache — different
+        # specs. The second call must reflect ITS OWN specs.
+        self.assertEqual(first[one.source]["status"], "missing-binary")
+        self.assertEqual(second[other.source]["status"], "ok")
+        self.assertNotEqual(
+            inventory.specs_digest([one]), inventory.specs_digest([other])
+        )
+        # And the memo still memoizes: an identical request is the same
+        # object, so the fix did not simply disable caching.
+        self.assertIs(
+            inventory.catalog_index(REPO_ROOT, [other], use_cache=False),
+            second,
+        )
+
+    def test_only_successful_probes_are_ever_cached(self):
+        """A failed probe must not survive the condition that produced it.
+
+        The on-disk cache is keyed by each binary's `size:mtime_ns`, and it
+        used to store EVERY result. A `timeout` recorded on a loaded host
+        was therefore replayed by every later run on that machine, forever,
+        with no flag to bypass it — the observed failure that motivated
+        this change (`plasma-workspace` needs ~230 s and the probe budget
+        was 300 s).
+        """
+        source = "tests/unit/t_declared_package_deps_from_recipe.nim"
+        binary = "build/test-bin/t_declared_package_deps_from_recipe"
+        # An isolated cache file inside the repo, so the code under test
+        # exercises its real `root / CATALOG_CACHE_PATH` join without
+        # touching the suite's own cache.
+        scratch_cache = Path("build") / "t-cache-policy-probe.json"
+        cache_path = REPO_ROOT / scratch_cache
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(cache_path.unlink, missing_ok=True)
+
+        key = inventory.binary_cache_key(REPO_ROOT / binary)
+        self.assertIsNotNone(key)
+        # A hand-written cache holding a negative entry, exactly the shape
+        # the old code produced and replayed.
+        cache_path.write_text(
+            json.dumps(
+                {
+                    "version": inventory.CATALOG_CACHE_VERSION,
+                    "entries": {
+                        source: {
+                            "key": key,
+                            "result": {
+                                "status": "timeout",
+                                "detail": "--list-json exceeded 300s",
+                            },
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        spec = inventory.TestSpec(
+            source=source,
+            binary=binary,
+            defines=[],
+            requires_repro_binary=False,
+            target_os="soAny",
+        )
+        with mock.patch.object(
+            inventory, "CATALOG_CACHE_PATH", scratch_cache
+        ), mock.patch.dict(inventory._CATALOG_INDEX_MEMO, {}, clear=True):
+            index = inventory.catalog_index(REPO_ROOT, [spec], use_cache=True)
+        # The negative entry was NOT replayed: the binary was re-probed and
+        # answered. Under the old code this asserted "timeout" forever.
+        self.assertEqual(index[spec.source]["status"], "ok")
+
+        # The `ok` result from that run WAS persisted — the cache still
+        # does its job.
+        written = inventory.load_catalog_cache(cache_path)
+        self.assertEqual(written[source]["result"]["status"], "ok")
+
+        # The READ-side guard, isolated. The assertion above would also be
+        # satisfied by the serial retry alone (an environmental reason is
+        # re-probed even if it was replayed from cache), so it does not on
+        # its own prove that the reader refuses a cached failure. An
+        # INTRINSIC cached failure is never retried, so replaying one would
+        # survive to the result — which is exactly what this catches.
+        cache_path.write_text(
+            json.dumps(
+                {
+                    "version": inventory.CATALOG_CACHE_VERSION,
+                    "entries": {
+                        source: {
+                            "key": key,
+                            "result": {
+                                "status": "no-protocol-support",
+                                "detail": "stale negative entry",
+                            },
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch.object(
+            inventory, "CATALOG_CACHE_PATH", scratch_cache
+        ), mock.patch.dict(inventory._CATALOG_INDEX_MEMO, {}, clear=True):
+            index = inventory.catalog_index(REPO_ROOT, [spec], use_cache=True)
+        self.assertEqual(index[spec.source]["status"], "ok")
+
+        # And the write side refuses to persist a non-ok result, including
+        # an INTRINSIC one. Nothing about a failed probe is cacheable: the
+        # cache key is size+mtime, so re-probing an unchanged binary is
+        # cheap next to replaying a wrong answer.
+        def never_enumerates(binary_path, cwd, env, timeout_seconds):
+            return {
+                "status": "no-protocol-support",
+                "detail": "no protocol marker string present in the binary",
+            }
+
+        # Start from an empty cache so the probe actually runs (the `ok`
+        # entry just written would otherwise be reused, correctly).
+        cache_path.unlink()
+        with mock.patch.object(
+            inventory, "CATALOG_CACHE_PATH", scratch_cache
+        ), mock.patch.object(
+            inventory, "probe_binary_catalog", never_enumerates
+        ), mock.patch.dict(inventory._CATALOG_INDEX_MEMO, {}, clear=True):
+            index = inventory.catalog_index(REPO_ROOT, [spec], use_cache=True)
+        self.assertEqual(index[spec.source]["status"], "no-protocol-support")
+        written = inventory.load_catalog_cache(cache_path)
+        self.assertNotIn(source, written)
+        for cached_source, entry in written.items():
+            with self.subTest(cached=cached_source):
+                self.assertEqual(entry["result"]["status"], "ok")
+
+    def test_environmental_probe_failure_aborts_instead_of_quarantining(self):
+        """A timeout is not a fact about a test, so it may not become one.
+
+        Before this change a probe `timeout` was cached AND recorded as a
+        quarantine entry, which meant a busy afternoon permanently mutated
+        the pinned quarantine set and the case totals derived from it.
+
+        The required behaviour: retry serially with a longer budget, and if
+        the retry also fails, ABORT with an explicit environment error.
+        """
+        spec = inventory.TestSpec(
+            source="tests/unit/t_declared_package_deps_from_recipe.nim",
+            binary="build/test-bin/t_declared_package_deps_from_recipe",
+            defines=[],
+            requires_repro_binary=False,
+            target_os="soAny",
+        )
+        budgets: list[int] = []
+
+        def always_times_out(binary_path, cwd, env, timeout_seconds):
+            budgets.append(timeout_seconds)
+            return {
+                "status": "timeout",
+                "detail": f"--list-json exceeded {timeout_seconds}s",
+            }
+
+        with mock.patch.object(
+            inventory, "probe_binary_catalog", always_times_out
+        ), mock.patch.dict(inventory._CATALOG_INDEX_MEMO, {}, clear=True):
+            with self.assertRaises(inventory.CatalogEnvironmentError) as caught:
+                inventory.catalog_index(REPO_ROOT, [spec], use_cache=False)
+        message = str(caught.exception)
+        self.assertIn("timeout", message)
+        self.assertIn(spec.source, message)
+        # It was retried, and the retry budget was LARGER than the
+        # parallel-pass budget: a contended parallel pass is the dominant
+        # cause of these failures, so re-measuring with the same bound
+        # would prove nothing.
+        self.assertEqual(len(budgets), 2)
+        self.assertGreater(budgets[1], budgets[0])
+        self.assertEqual(budgets[0], inventory.CATALOG_PROBE_TIMEOUT_SECONDS)
+        self.assertEqual(
+            budgets[1], inventory.CATALOG_PROBE_RETRY_TIMEOUT_SECONDS
+        )
+
+        # A transient failure that clears on the retry is NOT an abort and
+        # NOT a quarantine: the serial pass is believed.
+        attempts: list[int] = []
+
+        def times_out_once(binary_path, cwd, env, timeout_seconds):
+            attempts.append(timeout_seconds)
+            if len(attempts) == 1:
+                return {"status": "timeout", "detail": "transient"}
+            return {"status": "ok", "cases": []}
+
+        with mock.patch.object(
+            inventory, "probe_binary_catalog", times_out_once
+        ), mock.patch.dict(inventory._CATALOG_INDEX_MEMO, {}, clear=True):
+            index = inventory.catalog_index(REPO_ROOT, [spec], use_cache=False)
+        self.assertEqual(index[spec.source]["status"], "ok")
+        self.assertEqual(len(attempts), 2)
+
+        # Defence in depth on the timeout constant itself. The slowest
+        # binary in the tree needs ~230 s at idle and the suite was
+        # observed inflating ~7x under load (703 s against a ~104 s
+        # baseline), so a bound below ~1610 s is a bound that load alone
+        # can cross.
+        self.assertGreaterEqual(inventory.CATALOG_PROBE_TIMEOUT_SECONDS, 1610)
+
+    def test_probe_never_runs_a_test_binary_inside_the_repository(self):
+        """The probe must not be able to change the fingerprint it records.
+
+        `source_fingerprint` hashes `git ls-files --others
+        --exclude-standard`, i.e. untracked files. The probe executes 1206
+        test binaries 16 at a time; a recipe binary was observed dropping
+        `test_kglobalaccel_source_linkerArgs.txt` into its working
+        directory. With `cwd` at the repo root that stray file is an
+        untracked file, so the measurement perturbed its own input.
+        """
+        seen: list[Path] = []
+
+        def record_cwd(binary_path, cwd, env, timeout_seconds):
+            seen.append(Path(cwd))
+            return {"status": "ok", "cases": []}
+
+        spec = inventory.TestSpec(
+            source="tests/unit/t_declared_package_deps_from_recipe.nim",
+            binary="build/test-bin/t_declared_package_deps_from_recipe",
+            defines=[],
+            requires_repro_binary=False,
+            target_os="soAny",
+        )
+        with mock.patch.object(
+            inventory, "probe_binary_catalog", record_cwd
+        ), mock.patch.dict(inventory._CATALOG_INDEX_MEMO, {}, clear=True):
+            inventory.catalog_index(REPO_ROOT, [spec], use_cache=False)
+        self.assertEqual(len(seen), 1)
+        probe_cwd = seen[0].resolve()
+        self.assertNotEqual(probe_cwd, REPO_ROOT.resolve())
+        self.assertNotIn(REPO_ROOT.resolve(), probe_cwd.parents)
+
+    def test_no_cache_flag_exists_and_reaches_the_catalog_index(self):
+        """`--no-catalog` was the only escape hatch, and it is the wrong one.
+
+        A poisoned cache could previously be cleared only by deleting the
+        file by hand: `--no-catalog` disables probing altogether and falls
+        back to the static scan, which is the known-broken counter. A
+        cache bypass must keep the binary as the enumeration authority.
+        """
+        args = inventory.parse_args([])
+        self.assertFalse(args.no_cache)
+        args = inventory.parse_args(["--no-cache"])
+        self.assertTrue(args.no_cache)
+        # `--no-cache` is not `--no-catalog`: probing stays on.
+        self.assertFalse(args.no_catalog)
+
+        captured: dict[str, object] = {}
+
+        def fake_index(root, specs, **kwargs):
+            captured.update(kwargs)
+            return {}
+
+        with mock.patch.object(inventory, "catalog_index", fake_index):
+            inventory.build_inventory(REPO_ROOT, None, use_catalog_cache=False)
+        self.assertIs(captured.get("use_cache"), False)
+
+    def test_absolute_paths_are_redacted_to_their_basename(self):
+        """The sanitizer keeps the signal and drops the host."""
+        self.assertEqual(
+            inventory.redact_absolute_paths(
+                "error while loading shared libraries: "
+                "/nix/store/abc-clingo/lib/libclingo.so.4"
+            ),
+            "error while loading shared libraries: <abs>/libclingo.so.4",
+        )
+        # Relative paths and URLs are untouched: over-redaction would
+        # destroy the parts of the artifact that are legitimately stable.
+        for kept in (
+            "build/test-bin/t_thing",
+            "libs/repro_peer_cache/tests/t_n7_multicast_windows_smoke.nim",
+            "https://example.invalid/a/b/c",
+        ):
+            with self.subTest(kept=kept):
+                self.assertEqual(inventory.redact_absolute_paths(kept), kept)
+
+    def test_runner_summary_names_every_case_and_splits_harness_errors(self):
+        """The consumer side of the runner's reporting contract.
+
+        Two properties of ``test-logs/parallel-run.json`` that gates depend
+        on, asserted here because this is the function every gate goes
+        through:
+
+        1. every entry is nameable from the artifact alone — an entry with
+           a missing or blank ``name`` pushes verification back to grepping
+           the console log, which is the practice that let a false "zero
+           skips" conclusion survive three consecutive runs that each
+           carried 176 skips; and
+        2. ``ERROR`` (the harness could not run the case) is reported
+           separately from ``FAIL`` (the case ran and failed). Merging them
+           in the consumer would undo the split the runner makes, and the
+           two demand different responses: one is a defect in the tree, the
+           other is a defect in the run.
+        """
+        doc = {
+            "summary": {
+                "total": 4,
+                "passed": 1,
+                "failed": 1,
+                "skipped": 1,
+                "harness_errors": 1,
+                "status_disagreements": 0,
+            },
+            "tests": [
+                {
+                    "binary_stem": "t_alpha",
+                    "name": "passes",
+                    "suite": "alpha",
+                    "qualified_name": "alpha::passes",
+                    "run_name": "alpha::passes",
+                    "protocol_aware": True,
+                    "status": "PASS",
+                    "duration_ms": 5,
+                },
+                {
+                    "binary_stem": "t_alpha",
+                    "name": "fails",
+                    "suite": "alpha",
+                    "qualified_name": "alpha::fails",
+                    "run_name": "alpha::fails",
+                    "protocol_aware": True,
+                    "status": "FAIL",
+                    "duration_ms": 6,
+                },
+                {
+                    "binary_stem": "t_alpha",
+                    "name": "skips",
+                    "suite": "alpha",
+                    "qualified_name": "alpha::skips",
+                    "run_name": "alpha::skips",
+                    "protocol_aware": True,
+                    "status": "SKIP",
+                    "duration_ms": 0,
+                },
+                {
+                    "binary_stem": "t_alpha",
+                    "name": "never started",
+                    "suite": "alpha",
+                    "qualified_name": "alpha::never started",
+                    "run_name": "alpha::never started",
+                    "protocol_aware": True,
+                    "status": "ERROR",
+                    "harness_error": "spawn failed: Bad file descriptor",
+                    "duration_ms": 83,
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "parallel-run.json"
+            path.write_text(json.dumps(doc), encoding="utf-8")
+            report = inventory.summarize_runner(path)
+
+        self.assertIsNotNone(report)
+        self.assertEqual(report["unnamedCaseCount"], 0)
+        self.assertEqual([t["name"] for t in report["failedTests"]], ["fails"])
+        self.assertEqual(
+            [t["name"] for t in report["harnessErrorTests"]], ["never started"]
+        )
+        self.assertEqual(
+            report["harnessErrorTests"][0]["harness_error"],
+            "spawn failed: Bad file descriptor",
+        )
+        self.assertEqual(report["unrecognizedStatusTests"], [])
+
+        # And the detection side: a nameless entry must be counted, not
+        # quietly tolerated. This is the regression the artifact had —
+        # every entry carried only ``qualified_name`` and consumers
+        # reading ``name`` saw ``None`` across the whole run.
+        damaged = json.loads(json.dumps(doc))
+        del damaged["tests"][0]["name"]
+        damaged["tests"][1]["name"] = "   "
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "parallel-run.json"
+            path.write_text(json.dumps(damaged), encoding="utf-8")
+            report = inventory.summarize_runner(path)
+        self.assertEqual(report["unnamedCaseCount"], 2)
+        self.assertEqual(
+            [t["qualified_name"] for t in report["unnamedCases"]],
+            ["alpha::passes", "alpha::fails"],
+        )
+
     def test_static_inventory_covers_every_declared_test(self):
-        data = inventory.build_inventory(REPO_ROOT, None)
+        data = self.inventory_data()
         self.assert_nim_case_counter_lexes_declarations_not_fixture_text()
         self.assert_nim_case_counter_accepts_compiler_backed_statement_forms()
         self.assert_nim_case_counter_resolves_only_imported_unittest_receivers()
@@ -819,7 +2110,9 @@ test "incomplete name" and:
         # duplicated, or hand-edited specification fails here too.
         # Same +1 (upstream) / +4 (this branch) split as the
         # parse_repro_tests pin above; see the comment there.
-        self.assertEqual(declared_nim_count, 1204)
+        # 1204 -> 1207 for M2 step 2's three new test sources, each pinned
+        # individually in `expected_m2_step2_sources`.
+        self.assertEqual(declared_nim_count, 1208)
         self.assertEqual(declared_python_count, 4)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -850,7 +2143,8 @@ test "incomplete name" and:
             data["static"]["testEntryCount"],
             declared_nim_count + declared_python_count,
         )
-        self.assertEqual(data["static"]["testEntryCount"], 1208)
+        # 1211 -> 1212: the one new Nim spec above (1208 nim + 4 python).
+        self.assertEqual(data["static"]["testEntryCount"], 1212)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),
@@ -1387,7 +2681,7 @@ compileProfileBinary()
         self.assertIsNone(inventory.completed_clean_attempt(timing))
 
     def test_missing_warm_summary_never_completes_slow_review_gate(self):
-        data = inventory.build_inventory(REPO_ROOT, None)
+        data = self.inventory_data()
         self.assertFalse(data["timing"]["complete"])
         self.assertEqual(data["runnerSummaries"], [])
         self.assertEqual(data["slowTestReview"]["candidateCount"], 0)
@@ -1466,6 +2760,42 @@ compileProfileBinary()
             self.assertEqual(
                 metadata["environment"]["CODETRACER_TEST_ISONIM_ROOT"],
                 str(workspace / "isonim"),
+            )
+
+            # Where those values END UP. `runtime_metadata` still records
+            # the exact revisions and the exact environment — that is what
+            # the assertions above pin and it is unchanged. What changed is
+            # the destination: the absolute paths (`environment` values,
+            # `sourceCheckouts[*].path`) are build-local, while the
+            # revisions survive into the tracked artifact WITHOUT paths.
+            #
+            # Asserted here rather than left to the split's own test,
+            # because this is the test that knows what the values are.
+            document = {
+                "metadata": {"runtime": metadata},
+                "tests": [],
+                "catalogEnumeration": {},
+            }
+            tracked, detail = inventory.split_case_catalog(
+                document, inventory.DEFAULT_CASE_CATALOG
+            )
+            self.assertEqual(
+                detail["runtime"]["environment"]["CODETRACER_ROOT"],
+                str(workspace / "codetracer"),
+            )
+            self.assertEqual(
+                detail["runtime"]["sourceCheckouts"]["codetracer"]["head"],
+                expected["codetracer"],
+            )
+            self.assertNotIn("runtime", tracked["metadata"])
+            revisions = tracked["metadata"]["sourceCheckoutRevisions"]
+            for name in ("codetracer", "isonim", "nim-shm-gset",
+                         "nim-stackable-hooks"):
+                with self.subTest(revision=name):
+                    self.assertEqual(revisions[name]["head"], expected[name])
+                    self.assertNotIn("path", revisions[name])
+            self.assertNotIn(
+                str(workspace), json.dumps(tracked, sort_keys=True)
             )
 
 

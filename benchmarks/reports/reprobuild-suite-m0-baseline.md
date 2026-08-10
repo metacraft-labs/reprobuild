@@ -26,30 +26,56 @@ REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/
 
 | Field | Value |
 | --- | --- |
-| Generated at | 2026-08-06T13:50:14Z |
-| HEAD | c1ee595c58fe0dfd49a6f1742fb18c15d0cd4f76 |
-| HEAD short | c1ee595c |
+| HEAD | e6e8372fd1c8c0565277553a8091602c2e5a73fc |
+| HEAD short | e6e8372f |
 | Branch | repro-fixes |
-| Source fingerprint | 5627fb857d66587b6c790f92fe1cacd926ae82a3bf2694ea920100bf62392c3a |
-| Runtime argv | scripts/reprobuild_suite_inventory.py |
-| Runtime env | {"IO_MON_SRC": "/nix/store/gl11s2nhx88xqb7msngcn27gxfq1lp2y-source/src", "NIX_BUILD_CORES": "32", "REPRO_CT_TEST_RUNNER_SRC": "/nix/store/1wi731x4pkwmbgyddnd2xhfzbxgiqzcj-source", "REPRO_TEST_ADAPTERS_SRC": "/nix/store/ci66n6j19lj1ww8xfjha6k640i1ckvdq-source/src", "RUNQUOTA_SRC": "/nix/store/cs5z04x7vxl3cb8cfq2nhcan93k71926-source", "SHM_GSET_SRC": "/nix/store/680mzqbgffmfza88v9zm9h47d607h9pg-source/src", "SHM_QUEUE_SRC": "/nix/store/4xlba8v4g2pdinv3r9xqkrwzjicfkzlq-source/src", "STACKABLE_HOOKS_SRC": "/nix/store/2z8n2x8ifccgg2jlaaf4h7ycwf3gbp9p-source/src"} |
-| External source checkouts | {} |
-| Host | {"logicalCpuCount": 32, "machine": "x86_64", "platform": "Linux-6.12.85-x86_64-with-glibc2.42"} |
-| Tool versions | {"git": "git version 2.50.1", "nim": "Nim Compiler Version 2.3.1 [Linux: amd64]", "nix": "nix (Nix) 2.34.6", "python": "Python 3.13.12"} |
+| Source fingerprint | b113ad34a05deb6f48fb0fa8e0ab2c5622c1bd58f119ec6db869c57ca83902a4 |
+| External source revisions | {} |
 | Inventory JSON | benchmarks/reports/reprobuild-suite-m0-inventory.json |
+| Per-case protocol detail | build/reprobuild-suite-case-catalog.json |
+| Measurement environment | build/reprobuild-suite-m0-environment.md |
+
+The measurement environment — host kernel and glibc, tool versions, the recorded environment variables, the sibling checkout paths and the build-artifact footprint — is in `build/reprobuild-suite-m0-environment.md`. It is build-local and **deliberately untracked**: every one of those values changes per host or per build, so carrying them here would rewrite this tracked report each time it is regenerated even when nothing about the suite changed.
 
 ## Counts
 
 | Metric | Value |
 | --- | --- |
-| Test entries | 1207 |
-| Nim test binaries | 1203 |
+| Test entries | 1212 |
+| Nim test binaries | 1208 |
 | Python test files | 4 |
-| Source-level cases | 6799 |
+| Case count (catalog-authoritative) | 6867 |
 | Measured protocol-aware cases | not measured (requires runner summary) |
 | Graph-owned helper/fixture artifacts | 14 |
-| Tests with statically detected runtime compiler flows | 66 |
-| Pure-unit consolidation groups | 40 |
+| Tests with statically detected runtime compiler flows | 69 |
+| Pure-unit consolidation groups | 41 |
+
+## Case Enumeration Provenance
+
+Case counts come from each built binary's `--list-json` catalog (spec §3.2/§6.5). The static source scan is a labelled fallback only: it sums every `when`/`else` branch and cannot see cases declared through wrapper templates.
+
+| Count source | Test entries | Meaning |
+| --- | --- | --- |
+| catalog | 1207 | authoritative: enumerated from the built binary |
+| static | 4 | Python file, or probing disabled; counted by source scan |
+| missing-binary | 0 | Nim source with no built binary; counted by source scan |
+| quarantined | 1 | binary exists but could not enumerate; contributes 0 cases to the total |
+
+Retained per-case protocol fields: `suite`, `name`, `test`, `file`, `line`, `column`, `kind`, `group`, `threadsRequired`, `xfail`, `tags`, `bodyHash`, `deterministic`.
+
+Per-case detail is written to `build/reprobuild-suite-case-catalog.json`, which is build-local and **deliberately untracked**: bodyHash is a function of the project's absolute path (campaign defect #52), so tracking per-case detail would rewrite every hash per checkout path and defeat byte-level catalog diffing. This report and the tracked inventory keep only path-stable counts.
+
+### Quarantined binaries (1)
+
+A quarantined binary contributes **0** cases to the authoritative total. Its static scan is shown for visibility only: substituting it is exactly the `when`/`else` over-count that made the binary the enumeration authority in the first place.
+
+| Source | Reason | Static count (excluded) | Detail |
+| --- | --- | --- | --- |
+| `libs/repro_peer_cache/tests/t_n7_multicast_windows_smoke.nim` | `no-protocol-support` | 1 | no protocol marker string present in the binary |
+
+Reason codes:
+
+- `no-protocol-support` (1): the binary carries no protocol marker string, so it does not implement --list-json at all
 
 ## Evidence Status
 
@@ -59,7 +85,7 @@ Earlier contended or rejected timing attempts are diagnostic only and are intent
 
 ## Theoretical Performance Assessment
 
-The current graph contains 1203 Nim test binaries, 624 statically classified pure-unit entries in 40 compatible consolidation groups, and 66 tests with statically detected runtime compiler flows. These are structural counts, not timing results or an exhaustive semantic proof.
+The current graph contains 1208 Nim test binaries, 625 statically classified pure-unit entries in 41 compatible consolidation groups, and 69 tests with statically detected runtime compiler flows. These are structural counts, not timing results or an exhaustive semantic proof.
 
 - Parallel execution can reduce the serial execution component, but the exclusive lane and longest dependency chain bound the achievable wall-time reduction.
 - Consolidating compatible pure-unit groups should reduce repeated Nim compilation, link, and process-start overhead while preserving logical case identity.
@@ -81,23 +107,16 @@ No runner summary is available, so failed-test details are not measured.
 
 ## Build Artifact Footprint
 
-| Path | Size | Executable files |
-| --- | --- | --- |
-| build/bin | 15.8 MiB | 14 |
-| build/test-bin | 831.5 MiB | 1217 |
-| build/nimcache | 5270.2 MiB | 0 |
-| build/lib | 2.3 MiB | 4 |
-| .repro | 43.5 MiB | 0 |
-| test-logs/results | 0.0 MiB | 0 |
+The following paths are measured on every run: `build/bin`, `build/test-bin`, `build/nimcache`, `build/lib`, `.repro`, `test-logs/results`. Their measured sizes and executable-file counts change on every build and are therefore recorded in `build/reprobuild-suite-m0-environment.md`, not here.
 
 ## Classification
 
 | Class | Count |
 | --- | --- |
 | graph-fixture | 16 |
-| integration | 478 |
+| integration | 482 |
 | platform/destructive | 89 |
-| pure unit | 624 |
+| pure unit | 625 |
 
 Every test entry and its class is recorded in the JSON inventory.
 
@@ -110,8 +129,8 @@ This static audit combines explicit compiler-command data flow with trusted Repr
 | libs/ct_test_unittest_parallel/tests/t_backward_compat_std_unittest_test_runs_unchanged.nim | graph-fixture | 36 | nim-c | let cmd = "nim c --hints:off --warnings:off --nimcache:" & |
 | libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim | integration | 39 | nim-c | let cmd = "nim c --threads:on --hints:off --warnings:off " & |
 | libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim | graph-fixture | 40 | nim-c | let cmd = "nim c --threads:on --hints:off --warnings:off " & |
-| libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protocol.nim | graph-fixture | 26 | nim-c | let cmd = "nim c --hints:off --warnings:off --nimcache:" & |
-| libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim | graph-fixture | 28 | nim-c | let cmd = "nim c --hints:off --warnings:off --nimcache:" & |
+| libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protocol.nim | graph-fixture | 37 | nim-c | let cmd = "nim c --hints:off --warnings:off --nimcache:" & |
+| libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim | graph-fixture | 39 | nim-c | let cmd = "nim c --hints:off --warnings:off --nimcache:" & |
 | libs/repro_home_apply/tests/t_builtin_adapter_installer.nim | graph-fixture | 222 | wix-candle | let candleCmd = quoteShell(candle) & " -nologo -out " & |
 | libs/repro_home_apply/tests/t_builtin_adapter_installer_innosetup_fpc.nim | graph-fixture | 117 | inno-iscc | let isccCmd = quoteShell(iscc) & " /Q " & quoteShell(issPath) |
 | libs/repro_home_apply/tests/test_m25_adapter_preference_text_macro_parity.nim | graph-fixture | 98 | nim-c | let compileCmd = "nim c --hints:off --warnings:off " & |
@@ -119,7 +138,7 @@ This static audit combines explicit compiler-command data flow with trusted Repr
 | libs/repro_profile_compile/tests/t_smoke_module_imports.nim | graph-fixture | 63 | repro-compile-profile-binary | let res = compileProfileBinary(profile, nimcache, bin, ProjectRoot) |
 | libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim | graph-fixture | 297 | repro-compile-profile-edge | let artifact = compileProfileToRbpi(root, opts) |
 | libs/repro_profile_compile/tests/t_template_in_template_named_args.nim | graph-fixture | 163 | repro-compile-profile-binary | let res = compileProfileBinary( |
-| tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim | integration | 800 | gcc | let gccPath = binDir / "gcc" |
+| tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim | integration | 808 | gcc | let gccPath = binDir / "gcc" |
 | tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim | integration | 40 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath, |
 | tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim | integration | 35 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath, |
 | tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim | integration | 69 | clang | "clang", "-c", "-arch", "arm64", "-g", asmPath, "-o", objPath |
@@ -127,10 +146,10 @@ This static audit combines explicit compiler-command data flow with trusted Repr
 | tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim | integration | 111 | gcc | let gccPath = binDir / "gcc" |
 | tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim | platform/destructive | 167 | gcc | let gccPath = binDir / "gcc" |
 | tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim | platform/destructive | 156 | gcc | let gccPath = binDir / "gcc" |
-| tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim | integration | 191 | cc | discard requireSuccess(shellCommand(["cc", "-pthread", sourcePath, "-o", outputPath])) |
-| tests/e2e/launcher-isolation/t_e2e_windows_launcher_isolation.nim | platform/destructive | 55 | nim-c | let res = execCmdEx("nim c --hints:off --verbosity:0 --nimcache:" & |
+| tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim | integration | 198 | cc | discard requireSuccess(shellCommand(["cc", "-pthread", sourcePath, "-o", outputPath])) |
+| tests/e2e/launcher-isolation/t_e2e_windows_launcher_isolation.nim | platform/destructive | 48 | nim-c | let res = execCmdEx("nim c --hints:off --verbosity:0 --nimcache:" & |
 | tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim | integration | 310 | cc | discard requireSuccess(shellCommand(["cc", sourcePath, "-o", toolPath])) |
-| tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim | platform/destructive | 285 | repro-compile-home-profile | let compiled = cli_home.compileAndAdaptHomeProfile(profilePath, |
+| tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim | platform/destructive | 311 | repro-compile-home-profile | let compiled = cli_home.compileAndAdaptHomeProfile(profilePath, |
 | tests/e2e/m83/t_e2e_phase_g_action_edges.nim | integration | 45 | nim-c | let compileCmd = "nim c --hints:off --warnings:off " & |
 | tests/e2e/m83/t_e2e_profile_modules.nim | integration | 162 | repro-compile-profile-edge | let artifact = compileProfileToRbpi(profileSrcDir / "home.nim", |
 | tests/e2e/m83/t_e2e_repro_profile_compile.nim | platform/destructive | 34 | nim-c | let compileCmd = "nim c --hints:off --warnings:off " & |
@@ -154,8 +173,11 @@ This static audit combines explicit compiler-command data flow with trusted Repr
 | tests/integration/t_provider_file_driven_fanout_cleanup.nim | integration | 108 | nim-argv | discard requireNimSuccess(@["nim", "c", "--verbosity:0", "--hints:off", |
 | tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim | integration | 280 | nim-variable-argv | let cmd = @[nimBin, "c", "-d:createNimRtl", "-d:release", "--mm:orc", |
 | tests/integration/t_repro_test_runner_aggregate_exit_code.nim | integration | 91 | nim-c | let cmd = "nim c --threads:on --hints:off --warnings:off " & |
+| tests/integration/t_repro_test_runner_consumes_result_document.nim | integration | 137 | nim-c | let cmd = "nim c --threads:on --hints:off --warnings:off " & |
 | tests/integration/t_repro_test_runner_parallel_n_workers.nim | integration | 95 | nim-c | var cmd = "nim c --threads:on --hints:off --warnings:off " & |
 | tests/integration/t_repro_test_runner_process_group_cleanup.nim | platform/destructive | 415 | nim-c | let command = "nim c --threads:on --hints:off --warnings:off" & |
+| tests/integration/t_repro_test_runner_reporting_contract.nim | integration | 271 | nim-c | let cmd = "nim c --threads:on --hints:off --warnings:off " & |
+| tests/integration/t_repro_test_runner_suiteless_case_round_trip.nim | integration | 69 | nim-c | let cmd = "nim c --threads:on --hints:off --warnings:off " & |
 | tests/integration/t_rp1_provider_compile_edge_materializes.nim | integration | 51 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, |
 | tests/integration/t_rp2_provider_session_invoke.nim | integration | 113 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, |
 | tests/integration/t_rp3_bind_deps_and_sharing.nim | integration | 135 | repro-extract-interface | let artifact = extractInterfaceFromModule(modulePath, interfacePath, |
@@ -203,12 +225,12 @@ This static audit combines explicit compiler-command data flow with trusted Repr
 | libs/repro_build_engine | repro_build_engine, repro_hash, repro_local_store | 2 | 10 | libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim, libs/repro_build_engine/tests/test_no_progress_diagnostic.nim |
 | libs/repro_build_engine | repro_core, repro_project_dsl | 6 | 6 | libs/repro_build_engine/tests/t_engine_implicit_target_name_basename_rule.nim, libs/repro_build_engine/tests/t_engine_implicit_target_name_hook_overrides_canonical.nim, libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_emits_execution_edge.nim, libs/repro_build_engine/tests/t_engine_multiple_outputs_produce_multiple_names.nim, libs/repro_build_engine/tests/t_engine_target_export_table_records_ambiguity.nim, libs/repro_build_engine/tests/t_engine_typed_output_recorded_in_normalized_graph.nim |
 | libs/repro_cli_support | repro_cli_support | 8 | 54 | libs/repro_cli_support/tests/t_action_cache_root_resolution.nim, libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim, libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim, libs/repro_cli_support/tests/t_partition_planner_degrades_gracefully_on_cold_cache.nim, libs/repro_cli_support/tests/t_partition_planner_reads_runquota_estimates.nim, libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim, libs/repro_cli_support/tests/test_m2_env_ps1_migration_clean.nim, libs/repro_cli_support/tests/test_m70_migrate_from_env_scripts.nim |
-| libs/repro_core | repro_core | 2 | 54 | libs/repro_core/tests/t_convention_attribution.nim, libs/repro_core/tests/t_smoke_repro_core.nim |
+| libs/repro_core | repro_core | 2 | 48 | libs/repro_core/tests/t_convention_attribution.nim, libs/repro_core/tests/t_smoke_repro_core.nim |
 | libs/repro_core | repro_core, repro_project_dsl | 7 | 102 | libs/repro_core/tests/t_cpp_dep_scanner.nim, libs/repro_core/tests/t_go_dep_scanner.nim, libs/repro_core/tests/t_jsts_dep_scanner.nim, libs/repro_core/tests/t_nim_dep_scanner.nim, libs/repro_core/tests/t_python_dep_scanner.nim, libs/repro_core/tests/t_rust_dep_scanner.nim, libs/repro_core/tests/t_show_conventions_manual_deps.nim |
 | libs/repro_dsl_stdlib | repro_dsl_stdlib | 11 | 101 | libs/repro_dsl_stdlib/tests/t_c1_catalog_round_trip.nim, libs/repro_dsl_stdlib/tests/t_c1_dsl_realize_hash.nim, libs/repro_dsl_stdlib/tests/t_c2_apt_index.nim, libs/repro_dsl_stdlib/tests/t_c2_recursive_identity.nim, libs/repro_dsl_stdlib/tests/t_catalog_claude_code.nim, libs/repro_dsl_stdlib/tests/t_d2_dnf_index.nim, libs/repro_dsl_stdlib/tests/t_d2_pacman_index.nim, libs/repro_dsl_stdlib/tests/t_m67_bulk_catalog.nim ... |
 | libs/repro_dsl_stdlib | repro_dsl_stdlib, repro_project_dsl | 11 | 206 | libs/repro_dsl_stdlib/tests/t_m68_baseline_catalog.nim, libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim, libs/repro_dsl_stdlib/tests/t_nde0d_dbus_broker.nim, libs/repro_dsl_stdlib/tests/t_nde0g_graphics_stack.nim, libs/repro_dsl_stdlib/tests/t_nde0k_kernel.nim, libs/repro_dsl_stdlib/tests/t_nde0s_systemd_session.nim, libs/repro_dsl_stdlib/tests/t_nde_g1_gnome.nim, libs/repro_dsl_stdlib/tests/t_nde_h1_sway.nim ... |
-| libs/repro_home_apply | repro_core, repro_dsl_stdlib, repro_home_apply | 2 | 18 | libs/repro_home_apply/tests/t_adapter_chain.nim, libs/repro_home_apply/tests/t_builtin_adapter_pre_install_runner.nim |
 | libs/repro_home_apply | repro_core, repro_dsl_stdlib, repro_home_apply, repro_local_store | 4 | 15 | libs/repro_home_apply/tests/t_builtin_adapter_launcher_emit_composer.nim, libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim, libs/repro_home_apply/tests/t_realize_honors_adapter_preference.nim, libs/repro_home_apply/tests/t_realize_honors_requested_version.nim |
+| libs/repro_home_apply | repro_core, repro_dsl_stdlib, repro_home_apply, repro_test_support | 2 | 14 | libs/repro_home_apply/tests/t_adapter_chain.nim, libs/repro_home_apply/tests/t_preview_chain.nim |
 | libs/repro_home_apply | repro_dsl_stdlib, repro_home_apply | 2 | 16 | libs/repro_home_apply/tests/test_m1_fpc_resolves.nim, libs/repro_home_apply/tests/test_m69_catalog_lookup.nim |
 | libs/repro_home_apply | repro_home_apply, repro_home_resources | 2 | 15 | libs/repro_home_apply/tests/test_m69_env_export.nim, libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim |
 | libs/repro_home_resources | repro_home_resources | 2 | 17 | libs/repro_home_resources/tests/t_registry_root_override.nim, libs/repro_home_resources/tests/t_resource_type_registry.nim |
@@ -233,10 +255,10 @@ This static audit combines explicit compiler-command data flow with trusted Repr
 | tests/unit | repro_dsl_stdlib, repro_project_dsl | 23 | 178 | tests/unit/t_fribidi_dev_stub.nim, tests/unit/t_m9r10b_synthesis_wiring.nim, tests/unit/t_m9r11_stub_provisioning_widening.nim, tests/unit/t_m9r12_4_autotools_emits_fetch.nim, tests/unit/t_m9r14c_5_autotools_stage_copy.nim, tests/unit/t_m9r14d_7_meson_package_stage_copy.nim, tests/unit/t_m9r14e_2_install_tree_mirror.nim, tests/unit/t_m9r15d_1_libegl_headers_stub.nim ... |
 | tests/unit | repro_hcr_agent | 2 | 12 | tests/unit/t_hcr_agent_protocol.nim, tests/unit/t_hcr_agent_runtime.nim |
 | tests/unit | repro_hcr_agent, repro_hcr_test | 3 | 8 | tests/unit/t_hcr_agent_coordinator.nim, tests/unit/t_hcr_agent_endpoint.nim, tests/unit/t_hcr_agent_ipc.nim |
+| tests/unit | repro_interface_artifacts | 2 | 10 | tests/unit/t_declared_package_deps_from_recipe.nim, tests/unit/t_m9r13b_1_toolchain_pin.nim |
 | tests/unit | repro_interface_artifacts, repro_project_dsl, repro_tool_profiles | 3 | 38 | tests/unit/t_m9r14d_1_library_use_kind_resolution.nim, tests/unit/t_m9r14e_1_resolver_pkg_config_paths.nim, tests/unit/t_m9r14f_1_transitive_lib_dirs.nim |
 | tests/unit | repro_profile | 13 | 65 | tests/unit/t_m9r20_1_system_macro_basic.nim, tests/unit/t_m9r20_2_activity_macro_system_scope.nim, tests/unit/t_m9r20_3_hardware_macro_basic.nim, tests/unit/t_m9r20_4_reproos_desktop_via_system_macro.nim, tests/unit/t_m9r20_5_installer_output_parses.nim, tests/unit/t_m9r21_1_stable_system_id.nim, tests/unit/t_m9r21_2_probe_driver.nim, tests/unit/t_m9r22_1_disko_btrfs_subvols.nim ... |
 | tests/unit | repro_project_dsl | 5 | 34 | tests/unit/t_m9r15p_0_qt6_transitive_auto_inject.nim, tests/unit/t_m9r15q_2_from_source_custom_registry_population.nim, tests/unit/t_m9r1_deps_package_level.nim, tests/unit/t_m9r34_recipe_edit_invalidates_local_cache.nim, tests/unit/t_m9r81_dep_root_env_vars.nim |
-| tools/catalog-harvester | repro_dsl_stdlib | 6 | 77 | tools/catalog-harvester/tests/test_gh_releases_source.nim, tools/catalog-harvester/tests/test_harvester_history.nim, tools/catalog-harvester/tests/test_harvester_idempotent.nim, tools/catalog-harvester/tests/test_harvester_verify.nim, tools/catalog-harvester/tests/test_manifest_parser.nim, tools/catalog-harvester/tests/test_msys2_source.nim |
 
 ## M0 Completion Note
 
