@@ -3569,7 +3569,25 @@ def fmt_ms(value: int | float | None) -> str:
 
 
 def failure_excerpt(item: dict[str, Any], max_len: int = 220) -> str:
-    output = item.get("stdout") or item.get("stderr") or ""
+    # Order matters: prefer the case's OWN account over free-form output.
+    #
+    # A per-case child runs `<binary> --run "<case>"`, which puts the
+    # unittest fork into pmRun -- a mode that registers no console
+    # formatter -- so the child prints nothing and `stdout` is empty for
+    # every ordinary assertion failure. Reading only stdout/stderr
+    # therefore rendered a BLANK excerpt for exactly the failures a
+    # reader opens this report to understand, while still filling in for
+    # the runner-synthesised harness-fault text. `checkpoints`,
+    # `exception` and `harness_error` come from the result document and
+    # are the only channels a per-case failure has.
+    parts = [
+        "\n".join(item.get("checkpoints") or []),
+        item.get("exception") or "",
+        item.get("harness_error") or "",
+        item.get("stdout") or "",
+        item.get("stderr") or "",
+    ]
+    output = "\n".join(part for part in parts if part)
     if not output:
         return ""
     lines = [line.strip() for line in output.splitlines() if line.strip()]
@@ -3587,6 +3605,81 @@ def failure_excerpt(item: dict[str, Any], max_len: int = 220) -> str:
     if len(excerpt) > max_len:
         excerpt = excerpt[: max_len - 3] + "..."
     return excerpt.replace("|", "\\|")
+
+
+FAILURE_SECTION_GROUPS = (
+    ("failedTests", "Tests that ran and failed."),
+    (
+        "harnessErrorTests",
+        "Cases the harness could not run (ERROR). These are statements "
+        "about the run, not about the tree; each one still fails the run.",
+    ),
+    (
+        "unrecognizedStatusTests",
+        "Cases reporting a status this runner does not recognise "
+        "(a protocol violation in the test binary).",
+    ),
+)
+
+
+def render_failed_tests_section(
+    latest_runner: dict[str, Any] | None,
+) -> list[str]:
+    """Render "## Failed Tests" covering EVERY non-passing outcome.
+
+    `summarize_runner` deliberately splits the runner's three non-passing
+    outcomes -- FAIL (the case ran and failed), ERROR (the harness could
+    not obtain a verdict) and an unrecognized status (a protocol
+    violation) -- because they demand different responses. This section
+    used to render `failedTests` alone, so a run that exited NON-ZERO
+    purely on harness errors printed "No failed tests were reported" into
+    the tracked baseline, and `harnessErrorTests` /
+    `unrecognizedStatusTests` rendered nowhere at all. The split closed a
+    hole in the runner and opened the same green-over-red hole one layer
+    up, in the artifact a reader actually reads.
+
+    The "nothing to report" sentence is now owed to all three groups
+    being empty, so a green sentence can never outrank a red run.
+
+    Split out of `render_report` so this rule can be asserted directly
+    rather than through a full inventory build.
+    """
+    lines: list[str] = ["## Failed Tests", ""]
+    if not latest_runner:
+        lines.append(
+            "No runner summary is available, so failed-test details are "
+            "not measured."
+        )
+        return lines
+    rendered_any = False
+    for key, caption in FAILURE_SECTION_GROUPS:
+        items = latest_runner.get(key) or []
+        if not items:
+            continue
+        rendered_any = True
+        lines.append(caption)
+        lines.append("")
+        rows = []
+        for item in items:
+            rows.append(
+                [
+                    item.get("qualified_name", ""),
+                    item.get("binary_stem", ""),
+                    fmt_ms(item.get("duration_ms")),
+                    item.get("status", ""),
+                    failure_excerpt(item),
+                ]
+            )
+        lines.extend(
+            md_table(["Test", "Binary", "Duration", "Status", "Excerpt"], rows)
+        )
+        lines.append("")
+    if not rendered_any:
+        lines.append(
+            "No failed tests, harness errors or unrecognized statuses were "
+            "reported in the latest runner summary."
+        )
+    return lines
 
 
 def split_case_catalog(
@@ -4234,27 +4327,7 @@ def render_report(
         else:
             lines.append("No tests exceeded the 20-second warm-run review threshold in the latest summary.")
     lines.append("")
-    lines.append("## Failed Tests")
-    lines.append("")
-    if not latest_runner:
-        lines.append("No runner summary is available, so failed-test details are not measured.")
-    else:
-        failed = latest_runner.get("failedTests", [])
-        if not failed:
-            lines.append("No failed tests were reported in the latest runner summary.")
-        else:
-            rows = []
-            for item in failed:
-                rows.append(
-                    [
-                        item.get("qualified_name", ""),
-                        item.get("binary_stem", ""),
-                        fmt_ms(item.get("duration_ms")),
-                        item.get("status", ""),
-                        failure_excerpt(item),
-                    ]
-                )
-            lines.extend(md_table(["Test", "Binary", "Duration", "Status", "Excerpt"], rows))
+    lines.extend(render_failed_tests_section(latest_runner))
     lines.append("")
     lines.append("## Build Artifact Footprint")
     lines.append("")

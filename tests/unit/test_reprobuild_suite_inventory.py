@@ -1992,6 +1992,19 @@ test "incomplete name" and:
             with self.subTest(kept=kept):
                 self.assertEqual(inventory.redact_absolute_paths(kept), kept)
 
+    def render_failed_tests_section(self, doc: dict) -> str:
+        """Summarize a runner document and render its failure section.
+
+        Goes through the real `summarize_runner` -> `render_failed_tests_section`
+        path, so an assertion here covers the producer and the renderer
+        together rather than a hand-built intermediate.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "parallel-run.json"
+            path.write_text(json.dumps(doc), encoding="utf-8")
+            summary = inventory.summarize_runner(path)
+        return "\n".join(inventory.render_failed_tests_section(summary))
+
     def test_runner_summary_names_every_case_and_splits_harness_errors(self):
         """The consumer side of the runner's reporting contract.
 
@@ -2096,6 +2109,60 @@ test "incomplete name" and:
             [t["qualified_name"] for t in report["unnamedCases"]],
             ["alpha::passes", "alpha::fails"],
         )
+
+        # ---- and the RENDERED half of the same contract ----------------
+        # Splitting ERROR out of FAIL in `summarize_runner` closed a hole
+        # in the runner and opened the same hole one layer up: the
+        # "## Failed Tests" section rendered `failedTests` only, so a run
+        # that exited NON-ZERO purely on harness errors printed a green
+        # "No failed tests were reported" sentence into the tracked
+        # baseline. `harnessErrorTests` and `unrecognizedStatusTests`
+        # rendered nowhere at all.
+        rendered = self.render_failed_tests_section(doc)
+        # Every non-passing outcome is named.
+        self.assertIn("alpha::fails", rendered)
+        self.assertIn("alpha::never started", rendered)
+        # ...and the ERROR carries its reason, not just its name.
+        self.assertIn("spawn failed: Bad file descriptor", rendered)
+        # The green sentence must not appear while anything is red.
+        self.assertNotIn("No failed tests", rendered)
+
+        # A run whose ONLY non-passing outcome is a harness error is the
+        # exact shape that used to render green. Assert it directly:
+        # zero FAILs must not buy a clean report.
+        errors_only = json.loads(json.dumps(doc))
+        errors_only["tests"] = [
+            t for t in errors_only["tests"] if t["status"] != "FAIL"
+        ]
+        rendered_errors_only = self.render_failed_tests_section(errors_only)
+        self.assertIn("alpha::never started", rendered_errors_only)
+        self.assertNotIn("No failed tests", rendered_errors_only)
+
+        # An unrecognized status is a protocol violation and must also
+        # reach the page rather than being silently dropped.
+        weird = json.loads(json.dumps(doc))
+        weird["tests"][1]["status"] = "BANANA"
+        rendered_weird = self.render_failed_tests_section(weird)
+        self.assertIn("alpha::fails", rendered_weird)
+        self.assertIn("BANANA", rendered_weird)
+
+        # Only an entirely clean run may say so.
+        clean = json.loads(json.dumps(doc))
+        clean["tests"] = [t for t in clean["tests"] if t["status"] == "PASS"]
+        self.assertIn("No failed tests", self.render_failed_tests_section(clean))
+
+        # The excerpt column must survive a per-case failure, whose
+        # `stdout` is empty by construction (a `--run` child registers no
+        # console formatter, so it prints nothing). Before this, the
+        # column rendered blank for exactly those failures.
+        per_case = {
+            "status": "FAIL",
+            "qualified_name": "alpha::fails",
+            "checkpoints": ["t_x.nim(9, 12): Check failed: 1 == 2", "1 was 1"],
+            "exception": None,
+            "stdout": "",
+        }
+        self.assertIn("Check failed: 1 == 2", inventory.failure_excerpt(per_case))
 
     def test_static_inventory_covers_every_declared_test(self):
         data = self.inventory_data()
