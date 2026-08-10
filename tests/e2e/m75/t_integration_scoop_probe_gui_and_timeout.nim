@@ -37,12 +37,6 @@
 ##   * Case console/normal: a normal console fixture app still probes
 ##     and verifies as before — realization succeeds, the probe ran.
 
-when not defined(windows):
-  {.warning[UnreachableCode]: off.}
-  echo "[platform N/A] integration_scoop_probe_gui_and_timeout: " &
-    "this gate requires Windows and a real Scoop install"
-  quit(0)
-
 import std/[json, os, osproc, strutils, tempfiles, times, unittest]
 
 import repro_tool_profiles
@@ -112,11 +106,16 @@ proc pidIsAlive(pid: int): bool =
     let res = execCmdEx("kill -0 " & $pid & " 2>/dev/null")
     result = res.exitCode == 0
 
+const PlatformSkipReason =
+  "[platform N/A] integration_scoop_probe_gui_and_timeout: " &
+    "this gate requires Windows and a real Scoop install"
+
 when not defined(windows):
   suite "integration_scoop_probe_gui_and_timeout":
-    test "platform N/A":
-      echo "[platform N/A] t_integration_scoop_probe_gui_and_timeout: requires Windows and a real Scoop install"
-      check true
+    test "integration_scoop_probe_gui_and_timeout":
+      # Registered, not silently absent: the run counts this case
+      # and the skip census shows why it did not execute.
+      skip(PlatformSkipReason)
 else:
   suite "integration_scoop_probe_gui_and_timeout":
     test "integration_scoop_probe_gui_and_timeout":

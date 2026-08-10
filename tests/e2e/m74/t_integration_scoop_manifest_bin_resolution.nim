@@ -27,12 +27,6 @@
 ## `LaunchPlan.executablePath = rec.resolvedExecutablePath`), so a
 ## strong assertion on that field is a strong assertion on the launcher.
 
-when not defined(windows):
-  {.warning[UnreachableCode]: off.}
-  echo "[platform N/A] integration_scoop_manifest_bin_resolution: " &
-    "this gate requires Windows and a real Scoop install"
-  quit(0)
-
 import std/[json, os, strutils, tempfiles, unittest]
 
 import repro_tool_profiles
@@ -97,11 +91,16 @@ proc stageManifestBinApp(sandbox: ScoopSandbox; app, version: string;
   ManifestBinFixture(name: app, version: version, versionDir: versionDir,
     bucketManifestPath: bucketManifestPath)
 
+const PlatformSkipReason =
+  "[platform N/A] integration_scoop_manifest_bin_resolution: " &
+    "this gate requires Windows and a real Scoop install"
+
 when not defined(windows):
   suite "integration_scoop_manifest_bin_resolution":
-    test "platform N/A":
-      echo "[platform N/A] t_integration_scoop_manifest_bin_resolution: requires Windows and a real Scoop install"
-      check true
+    test "integration_scoop_manifest_bin_resolution":
+      # Registered, not silently absent: the run counts this case
+      # and the skip census shows why it did not execute.
+      skip(PlatformSkipReason)
 else:
   suite "integration_scoop_manifest_bin_resolution":
     test "integration_scoop_manifest_bin_resolution":

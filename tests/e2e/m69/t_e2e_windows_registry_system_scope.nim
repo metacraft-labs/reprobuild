@@ -18,11 +18,6 @@
 ##
 ## No `skip`, no `xfail`.
 
-when not defined(windows):
-  echo "[platform N/A] t_e2e_windows_registry_system_scope: HKLM " &
-    "registry writes are Windows-only"
-  quit(0)
-
 import std/[os, strutils, tempfiles, unittest]
 
 import repro_elevation
@@ -71,15 +66,42 @@ proc observe(): ObservedOperationState =
     hklmValueKind: srvkString,
     hklmValueLiteral: ""))
 
+const HostRunsGate = defined(windows)
+  ## This gate needs a real Windows host. It used to be enforced by an
+  ## ``echo`` + ``quit(0)`` at module init, before any ``test`` template
+  ## expanded: the binary emitted no catalog, stayed an opaque
+  ## whole-binary exit-0 PASS, and its declared cases were invisible to
+  ## every gate -- not counted as passes, not as skips, not at all.
+
+const PlatformSkipReason =
+  "[platform N/A] t_e2e_windows_registry_system_scope: HKLM " &
+    "registry writes are Windows-only"
+
+template gatedTest(name: string; body: untyped) =
+  ## Register the case unconditionally, and on a host that cannot run it
+  ## record a skip whose reason is visible in the run summary and the
+  ## skip census.
+  ##
+  ## The guard is a runtime ``if`` on a compile-time constant rather than
+  ## a ``when``, deliberately: ``when`` would stop type-checking the
+  ## Windows-only body on Linux, and that compile coverage is exactly
+  ## what the previous module-init gate already gave us. Nim folds the
+  ## constant, so the dead branch still costs nothing at runtime.
+  test name:
+    if HostRunsGate:
+      body
+    else:
+      skip(PlatformSkipReason)
+
 suite "e2e_windows_registry_system_scope":
 
-  test "the host is already elevated (gate precondition)":
+  gatedTest "the host is already elevated (gate precondition)":
     # The gate writes HKLM, so it must run elevated. The
     # REPRO_FORCE_BROKER seam then exercises the broker path without
     # an interactive prompt.
     check isProcessElevated()
 
-  test "elevated apply writes a typed HKLM value via the broker":
+  gatedTest "elevated apply writes a typed HKLM value via the broker":
     cleanupSandbox()
     let stateDir = createTempDir("repro-m69-reg-", "")
     defer:
@@ -114,7 +136,7 @@ suite "e2e_windows_registry_system_scope":
     check audit.records[0].outcome == "applied"
     check audit.records[0].operationKind == "windows.registryValue"
 
-  test "a re-apply of the same value is a broker-side no-op (convergent)":
+  gatedTest "a re-apply of the same value is a broker-side no-op (convergent)":
     cleanupSandbox()
     let stateDir = createTempDir("repro-m69-reg-noop-", "")
     defer:
@@ -143,7 +165,7 @@ suite "e2e_windows_registry_system_scope":
     check second.appliedCount == 0
     check second.noOpCount >= 1
 
-  test "--no-elevate skips the HKLM write, touching no registry key":
+  gatedTest "--no-elevate skips the HKLM write, touching no registry key":
     cleanupSandbox()
     let stateDir = createTempDir("repro-m69-reg-ne-", "")
     defer:
@@ -167,7 +189,7 @@ suite "e2e_windows_registry_system_scope":
     # NOTHING was written to the registry.
     check not observe().present
 
-  test "the already-elevated fast path writes in-process, no broker":
+  gatedTest "the already-elevated fast path writes in-process, no broker":
     cleanupSandbox()
     let stateDir = createTempDir("repro-m69-reg-fast-", "")
     defer:
@@ -191,7 +213,7 @@ suite "e2e_windows_registry_system_scope":
     check r.appliedCount == 1
     check observe().present
 
-  test "rollback direction: a destroy op deletes the recorded value":
+  gatedTest "rollback direction: a destroy op deletes the recorded value":
     cleanupSandbox()
     let stateDir = createTempDir("repro-m69-reg-rb-", "")
     defer:
@@ -228,6 +250,6 @@ suite "e2e_windows_registry_system_scope":
     # The value is gone.
     check not observe().present
 
-  test "the isolated HKLM test subtree is left clean":
+  gatedTest "the isolated HKLM test subtree is left clean":
     cleanupSandbox()
     check not observe().present

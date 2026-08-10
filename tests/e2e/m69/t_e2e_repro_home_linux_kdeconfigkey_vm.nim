@@ -8,12 +8,21 @@
 ##
 ## Gated by `defined(linux)` AND `REPRO_M69_KDE_CONFIG_KEY_VM=1`.
 
-import std/[os, strutils, osproc]
+import std/[os, strutils, osproc, unittest]
 
 import repro_home_resources
 
 const SentinelDefault = "/tmp/repro-vm-test/sentinels.txt"
 const GateName = "linux.kdeConfigKey"
+const GateEnv = "REPRO_M69_KDE_CONFIG_KEY_VM"
+  ## Sandbox gate. The disposable-VM harness sets this; on an
+  ## ordinary developer or CI host it is unset and the case
+  ## below registers as a skip carrying GateSkipReason, so the
+  ## run counts it and the skip census says why. It used to
+  ## ``echo`` and ``quit(0)`` at module init instead, which made
+  ## the binary an opaque exit-0 PASS that no gate could see.
+const GateSkipReason =
+  "[sandbox-gated] REPRO_M69_KDE_CONFIG_KEY_VM not set."
 
 proc writeLineSentinel(text: string) =
   let path = getEnv("REPRO_M69_VM_SENTINEL_FILE", SentinelDefault)
@@ -40,20 +49,19 @@ proc pickKdeVersion(): int =
     return 6
   return 0
 
-proc main() =
-  let sandboxMode =
-    defined(linux) and getEnv("REPRO_M69_KDE_CONFIG_KEY_VM") == "1"
-  if not sandboxMode:
-    echo "  [sandbox-gated] REPRO_M69_KDE_CONFIG_KEY_VM not set."
-    quit(0)
-
+proc main(): string =
+  ## Returns "" when the scenario ran, or a skip reason when a
+  ## secondary in-VM prerequisite is missing.
   when defined(linux):
     let version = pickKdeVersion()
     if version == 0:
-      echo "  [SKIP] " & GateName & ": kwriteconfig5/6 not installed"
       writeLineSentinel("SKIP: " & GateName &
         " (kwriteconfig5/6 missing)")
-      quit(0)
+      # Returning the reason (rather than ``quit(0)``) keeps the case a
+      # reported SKIP. A bare ``quit`` from inside a test body exits
+      # before the protocol result document is written, so the runner
+      # would have to fall back to the exit code and call it a PASS.
+      return GateName & ": kwriteconfig5/6 not installed"
 
     # Configure HOME to a writable path; the gate runs as root so
     # /root is fine, but kwriteconfig may fail if XDG_CONFIG_HOME is
@@ -93,4 +101,11 @@ proc main() =
   else:
     discard
 
-main()
+suite "e2e_repro_home_linux_kdeconfigkey_vm":
+  test "linux.kdeConfigKey disposable-VM lifecycle":
+    if defined(linux) and getEnv(GateEnv) == "1":
+      let secondaryGate = main()
+      if secondaryGate.len > 0:
+        skip(secondaryGate)
+    else:
+      skip(GateSkipReason)
