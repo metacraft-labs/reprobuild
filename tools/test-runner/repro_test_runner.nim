@@ -232,6 +232,17 @@ type
       ## broken" from "we could not run it" without grepping a console
       ## log — the distinction the exit-126 convention introduced but
       ## never surfaced anywhere a consumer could see.
+    runnerDiagnosis: string
+      ## A diagnosis SYNTHESISED by the runner because the case produced
+      ## none — today, exactly the "your result document is not there"
+      ## account (see ``missingDocumentDiagnostic``). Kept apart from
+      ## ``checkpoints`` on purpose: those are the case's own first-hand
+      ## lines and folding runner-authored text into them would inflate
+      ## ``checkpoint_count`` and misattribute the text to the case.
+      ##
+      ## It rides in ``stdout`` for the summary and is printed by
+      ## ``emitProgress`` for the console, so neither channel is left with
+      ## a bare ``[FAIL] … (5ms)`` line.
     statusDisagreement: string
       ## Non-empty when the result document's ``status`` contradicts the
       ## verdict implied by the child's exit code. That is a protocol
@@ -1930,6 +1941,79 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
   result.durationMs = int((epochTime() - t0) * 1000)
   result.stderr = ""
 
+proc signalName(sig: int): string =
+  ## Name for a signal number, or "" when it is not one this runner can
+  ## name. The numbers are read from the platform's own headers through
+  ## ``std/posix`` rather than hard-coded, because they differ between
+  ## Linux and macOS (SIGBUS is 7 on one and 10 on the other) — a
+  ## hard-coded table would confidently print the wrong name on one host.
+  when defined(posix):
+    let s = cint(sig)
+    if s == SIGHUP: "SIGHUP"
+    elif s == SIGINT: "SIGINT"
+    elif s == SIGQUIT: "SIGQUIT"
+    elif s == SIGILL: "SIGILL"
+    elif s == SIGTRAP: "SIGTRAP"
+    elif s == SIGABRT: "SIGABRT"
+    elif s == SIGBUS: "SIGBUS"
+    elif s == SIGFPE: "SIGFPE"
+    elif s == SIGKILL: "SIGKILL"
+    elif s == SIGSEGV: "SIGSEGV"
+    elif s == SIGPIPE: "SIGPIPE"
+    elif s == SIGALRM: "SIGALRM"
+    elif s == SIGTERM: "SIGTERM"
+    else: ""
+  else:
+    ""
+
+proc describeChildExit(exitCode: int): string =
+  ## Render a per-case child's exit code, naming the signal when the code
+  ## carries one.
+  ##
+  ## The code comes from ``processGroupWrapperMain``'s own
+  ## ``waitForExit``, which follows the shell convention: a child killed by
+  ## signal N is reported as 128+N. That is the only signal evidence the
+  ## runner has — the wrapper records a status integer, not a raw
+  ## ``wait`` status word — so the signal is named as an INFERENCE from the
+  ## convention rather than asserted as fact. A test that calls
+  ## ``quit(139)`` deliberately would be described the same way, and saying
+  ## "consistent with" instead of "was" is the difference between a
+  ## diagnosis and a fabrication.
+  if exitCode > 128 and exitCode <= 128 + 64:
+    let sig = exitCode - 128
+    let named = signalName(sig)
+    let name = if named.len > 0: " (" & named & ")" else: ""
+    result = "exit code " & $exitCode & " (128+" & $sig &
+      ", consistent with termination by signal " & $sig & name & ")"
+  else:
+    result = "exit code " & $exitCode
+
+proc missingDocumentDiagnostic(resultFile: string; exitCode: int;
+                               present: bool): string =
+  ## The diagnosis owed to a non-PASS case whose result document cannot be
+  ## read — see the call site for why the runner must synthesise one.
+  let whatHappened =
+    if present:
+      "exists but could not be read as a protocol document"
+    else:
+      "was never written"
+  "repro_test_runner: no readable result document for this case.\n" &
+    "  expected at: " & resultFile & "\n" &
+    "  document:    " & whatHappened & "\n" &
+    "  child:       started, and finished with " &
+      describeChildExit(exitCode) & "\n" &
+    # Hard-wrapped: this text is printed to the console per failing case,
+    # where one 300-column line is not a diagnosis anyone reads.
+    "  meaning:     the fork writes this document from testEnded, so a " &
+      "case that dies\n" &
+    "               first (quit() in the case body, a fatal signal, an " &
+      "abort in a\n" &
+    "               destructor) leaves no first-hand account. The verdict " &
+      "above comes\n" &
+    "               from the exit code alone; re-run this one case " &
+      "directly to see\n" &
+    "               what the child was doing.\n"
+
 proc runOneProtocol(tc: TestCase; resultsDir: string;
                     baseEnv: seq[tuple[key, value: string]];
                     testTimeoutSec: int): TestResult =
@@ -2074,8 +2158,10 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   # group, and letting that document overturn the refusal would restore
   # exactly the fail-open the refusal exists to prevent (and would also
   # manufacture a bogus ``status_disagreement``).
+  let documentPresent = fileExists(resultFile)
+  var documentUnreadable = false
   if not spawnFailed and not timedOut and not groupRefused and
-      result.status != tsHarnessError and fileExists(resultFile):
+      result.status != tsHarnessError and documentPresent:
     try:
       let doc = parseJson(readFile(resultFile))
       if doc.hasKey("duration_ms"):
@@ -2126,9 +2212,40 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     except CatchableError as e:
       # A malformed or unreadable document is also a protocol fault.
       # The exit-code verdict stands.
+      documentUnreadable = true
       result.statusDisagreement =
         "result file could not be read as a protocol document (" &
         e.msg & "); keeping exit-code verdict " & $exitDerivedStatus
+  # ---- the child left no readable account of itself --------------------
+  #
+  # Everything above reads the case's own document. When there is no
+  # readable document, every diagnostic field stays empty — and for a
+  # child that CRASHED before ``testEnded`` that produced the worst
+  # possible report: ``status = FAIL`` with checkpoints, exception,
+  # harness_error and stdout all absent, and a ``result_file`` path
+  # naming a file that does not exist. The blanket "no non-PASS entry may
+  # be diagnostically empty" invariant was asserted by the suite but not
+  # guaranteed by the runner, and triage was left with a case name.
+  #
+  # So say what IS known, and only that: where the document was expected,
+  # that it is not readable there, and how the child finished. The status
+  # is deliberately NOT touched. A child that ran and exited non-zero is
+  # a FAIL — the harness DID obtain a verdict about the code under test,
+  # and a crash mid-case is a defect in the tree, which is precisely what
+  # ``failed`` counts. That is a different thing from ``tsHarnessError``,
+  # which means no verdict was obtainable at all (spawn faults, collect
+  # faults, the wrapper's exit 126); relabelling a crash as ERROR would
+  # move a real defect out of the count a gate reads.
+  #
+  # Scoped to exactly the branch that would have read the document, so a
+  # timeout, a refusal and a spawn fault — each of which already writes
+  # its own account — are untouched.
+  if not spawnFailed and not timedOut and not groupRefused and
+      result.status != tsHarnessError and result.status != tsPass and
+      (not documentPresent or documentUnreadable):
+    result.runnerDiagnosis =
+      missingDocumentDiagnostic(resultFile, exitCode, documentPresent)
+    result.stdout.add(result.runnerDiagnosis)
   if result.statusDisagreement.len > 0:
     result.stdout.add("\nrepro_test_runner: protocol disagreement: " &
       result.statusDisagreement & "\n")
@@ -2208,6 +2325,14 @@ proc emitProgress(quiet: bool; res: TestResult) =
         msg.add("  | " & line & "\n")
     if res.exception.len > 0:
       for line in res.exception.strip(leading = false).splitLines():
+        msg.add("  | " & line & "\n")
+    # A runner-synthesised diagnosis is the ONLY diagnostic material a
+    # case that died before writing its document ever has, so it must
+    # reach the console too — otherwise the log still says nothing but
+    # ``[FAIL] … (5ms)`` and points at a result document that does not
+    # exist.
+    if res.runnerDiagnosis.len > 0:
+      for line in res.runnerDiagnosis.strip(leading = false).splitLines():
         msg.add("  | " & line & "\n")
     # Always name the artifact holding the full account, so a reader who
     # needs more than the budget above knows where to look without

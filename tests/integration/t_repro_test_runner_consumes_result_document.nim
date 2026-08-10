@@ -140,6 +140,28 @@ proc main() =
 main()
 """
 
+const CrashingFixtureSource = """
+## A real ``std/unittest`` binary whose cases die before ``testEnded``, so
+## the protocol's result document is never written. No mock: the toolchain,
+## the protocol and the runner are all the production ones — the only thing
+## arranged is that the child does not survive its own test body.
+import std/[os, unittest]
+when defined(posix):
+  import std/posix
+
+suite "crash":
+  test "hard exit before testEnded":
+    quit(1)
+  test "fatal signal before testEnded":
+    when defined(posix):
+      discard kill(Pid(getCurrentProcessId()), SIGKILL)
+      # Unreachable; present so the case still has a body if the signal
+      # were ever delivered late.
+      sleep(60_000)
+    else:
+      quit(3)
+"""
+
 proc compileFixture(workRoot, source, binary: string): bool =
   let cmd = "nim c --threads:on --hints:off --warnings:off " &
     "--nimcache:" & quoteShell(workRoot / "nimcache") & " " &
@@ -300,6 +322,145 @@ suite "repro_test_runner consumes the whole result document":
     # be able to produce a passing suite.
     check exitCode != 0
     check exitCode == 1
+
+  test "a child that dies before writing its document still reports why":
+    # The gap this closes, reproduced verbatim before the fix:
+    #
+    #   status      = FAIL
+    #   checkpoints = None ; exception = None ; stdout = None
+    #   harness_error = None
+    #   result_file = '…/t_crash_fixture__crash__hard_exit.json'
+    #                 (file does not exist)
+    #
+    # Every diagnostic channel empty, and the one field that IS populated
+    # points at a file that was never created. The blanket invariant in
+    # the test above ("no non-PASS entry may be diagnostically empty") was
+    # therefore asserted by the suite but not GUARANTEED by the runner: a
+    # per-case child that dies before ``testEnded`` — ``quit()`` in the
+    # case body, a fatal signal, an abort in a destructor — leaves the
+    # document reader nothing at all, and the reader stayed silent about
+    # it.
+    #
+    # The runner now synthesises the diagnosis it can honestly make: where
+    # the document was expected, that it is not there, and how the child
+    # finished (including the signal, when the exit code carries one).
+    #
+    # WHAT IS DELIBERATELY NOT DONE: the status is not changed. A child
+    # that ran and exited non-zero is FAIL — the harness DID obtain a
+    # verdict about the code under test, and a crash mid-case is a defect
+    # in the tree, which is exactly what ``failed`` counts. ``ERROR``
+    # means the opposite (no verdict was obtainable: spawn faults, collect
+    # faults, the wrapper's exit 126), and relabelling a crash as ERROR
+    # would move a real defect out of the count a gate reads. Both halves
+    # are asserted below.
+    let repoRoot = findRepoRoot()
+    let runner = repoRoot / "build" / "bin" /
+      addFileExt("repro_test_runner", ExeExt)
+    check fileExists(runner)
+    if not fileExists(runner):
+      return
+
+    let tempRoot = createTempDir("repro-m2-crash-", "")
+    defer: removeDir(tempRoot)
+    let binDir = tempRoot / "bin"
+    createDir(binDir)
+
+    const Stem = "t_crash_fixture"
+    let src = tempRoot / (Stem & ".nim")
+    writeFile(src, CrashingFixtureSource)
+    let compiled =
+      compileFixture(tempRoot, src, binDir / addFileExt(Stem, ExeExt))
+    check compiled
+    if not compiled:
+      return
+
+    let summary = tempRoot / "summary.json"
+    let (exitCode, console) =
+      runRunner(runner, binDir, summary, tempRoot / "results", quiet = false)
+    checkpoint("runner exit=" & $exitCode)
+    check fileExists(summary)
+    if not fileExists(summary):
+      checkpoint(console)
+      return
+    let doc = parseJson(readFile(summary))
+
+    # Both cases died; both are defects in the tree, not harness faults.
+    check doc{"summary"}{"total"}.getInt(-1) == 2
+    check doc{"summary"}{"failed"}.getInt(-1) == 2
+    check doc{"summary"}{"passed"}.getInt(-1) == 0
+    check doc{"summary"}{"harness_errors"}.getInt(-1) == 0
+    check exitCode == 1
+
+    # ---- the invariant, now GUARANTEED and not merely asserted --------
+    for entry in doc["tests"]:
+      if entry{"status"}.getStr() in ["PASS", "SKIP"]:
+        continue
+      let hasCheckpoints =
+        entry.hasKey("checkpoints") and
+        entry["checkpoints"].kind == JArray and
+        entry["checkpoints"].len > 0
+      let hasException = entry{"exception"}.getStr("").len > 0
+      let hasStdout = entry{"stdout"}.getStr("").len > 0
+      let hasHarnessError = entry{"harness_error"}.getStr("").len > 0
+      checkpoint("entry " & entry{"qualified_name"}.getStr() &
+        " status=" & entry{"status"}.getStr() &
+        " checkpoints=" & $hasCheckpoints &
+        " exception=" & $hasException &
+        " stdout=" & $hasStdout &
+        " harness_error=" & $hasHarnessError)
+      check (hasCheckpoints or hasException or hasStdout or hasHarnessError)
+
+    # ---- the material is actionable, not a placeholder ----------------
+    let quitCase = entryFor(doc, "crash::hard exit before testEnded")
+    check quitCase.kind != JNull
+    if quitCase.kind == JNull:
+      return
+    check quitCase{"status"}.getStr() == "FAIL"
+    # NOT ERROR: a verdict was obtained.
+    check not quitCase.hasKey("harness_error")
+    let quitStdout = quitCase{"stdout"}.getStr("")
+    checkpoint("quit-case stdout: " & quitStdout)
+    # It names the artifact it could not read — the same path the entry
+    # advertises, so a reader is not sent looking for a second file …
+    let quitDocument = quitCase{"result_file"}.getStr("")
+    check quitDocument.len > 0
+    check quitStdout.contains(quitDocument)
+    # … says that path holds nothing (the recorded run's `result_file`
+    # pointed at a file that does not exist and said nothing about it) …
+    check not fileExists(quitDocument)
+    check quitStdout.contains("no readable result document")
+    # … and reports how the child finished, which is the only other fact
+    # the runner actually observed.
+    check quitStdout.contains("exit code 1")
+
+    # ---- a signal death is named as a signal --------------------------
+    let signalCase = entryFor(doc, "crash::fatal signal before testEnded")
+    check signalCase.kind != JNull
+    if signalCase.kind == JNull:
+      return
+    check signalCase{"status"}.getStr() == "FAIL"
+    let signalStdout = signalCase{"stdout"}.getStr("")
+    checkpoint("signal-case stdout: " & signalStdout)
+    check signalStdout.contains("no readable result document")
+    when defined(posix):
+      # 137 = 128+9: the shell convention the supervisor's own
+      # ``waitForExit`` reports. "exit code 137" alone is a number a
+      # reader has to decode; the runner decodes it.
+      check signalStdout.contains("137")
+      check signalStdout.contains("SIGKILL")
+
+    # ---- the console carries it too -----------------------------------
+    # Same argument as the case above: the console log is where a reader
+    # looks first, and a summary-only fix leaves `[FAIL] … (5ms)` as the
+    # whole story there.
+    checkpoint("console: " & console)
+    check console.contains("no readable result document")
+
+    # ---- nothing was fabricated ---------------------------------------
+    # No document was read, so no channel disagreed with another.
+    for entry in doc["tests"]:
+      check not entry.hasKey("status_disagreement")
+    check doc{"summary"}{"status_disagreements"}.getInt(-1) == 0
 
   test "a failing case's report carries the diagnosis, not just a count":
     # The regression this pins, observed on a completed 6825-case run:
