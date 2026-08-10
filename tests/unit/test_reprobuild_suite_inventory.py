@@ -354,7 +354,7 @@ test "incomplete name" and:
         # can never be absorbed silently into the aggregate totals below.
         expected_m2_step2_sources = {
             "tests/integration/"
-            "t_repro_test_runner_consumes_result_document.nim": 2,
+            "t_repro_test_runner_consumes_result_document.nim": 3,
             "tests/integration/"
             "t_repro_test_runner_suiteless_case_round_trip.nim": 1,
             "tests/unit/t_declared_package_deps_from_recipe.nim": 6,
@@ -641,6 +641,21 @@ test "incomplete name" and:
         #   in this file — the consumer half of the same contract.
         #
         #   STATIC TOTAL 6862 -> 6867 = +4 nim +1 python.
+        #
+        # ---------------------------------------------------------------
+        # Per-case failure diagnostics. Exactly one new Nim case, in an
+        # EXISTING source, so the spec count does not move:
+        #
+        #   NIM CASES 6824 -> 6825, SPECS 1208 (unchanged)
+        #     tests/integration/
+        #       t_repro_test_runner_consumes_result_document.nim      (+1)
+        #         "a failing case's report carries the diagnosis, not
+        #          just a count"
+        #   Its static and catalog counts agree (3 = 3), so the nim
+        #   staticCaseCount aggregate moves by the same +1: 6745 -> 6746.
+        #
+        #   PYTHON CASES 43 (unchanged).
+        #   STATIC TOTAL 6867 -> 6868 = +1 nim.
         self.assertEqual(len(nim_specs), 1208)
         self.assertEqual(len(python_specs), 4)
 
@@ -695,7 +710,7 @@ test "incomplete name" and:
         # +80 for the static-vs-catalog correction, -1 for dropping the
         # quarantined source's static fallback). Python keeps the static
         # `unittest` scan because Python files have no built binary.
-        self.assertEqual(nim_total, 6824)
+        self.assertEqual(nim_total, 6825)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
         # as its own equality so a future re-introduction of the static
@@ -736,7 +751,7 @@ test "incomplete name" and:
         self.assertEqual(python_total, 43)
         # 6856 -> 6862: -1 from the quarantined source no longer imputing a
         # static count, +7 from the new Python cases above.
-        self.assertEqual(data["static"]["sourceCaseCount"], 6867)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6868)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -750,7 +765,7 @@ test "incomplete name" and:
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6745,
+            6746,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):

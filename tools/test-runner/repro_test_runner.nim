@@ -200,6 +200,27 @@ type
       ## Number of ``checkpoints`` entries in the result document.
       ## Recorded so a consumer can tell "no diagnostics were captured"
       ## from "the document was never read".
+    checkpoints: seq[string]
+      ## The ``checkpoints`` entries themselves — the failed ``check``
+      ## expressions, their evaluated operands, and any ``checkpoint()``
+      ## the case wrote.
+      ##
+      ## WHY THE COUNT ALONE WAS NOT ENOUGH. A per-case child runs with
+      ## ``--run``, which puts the fork's ``unittest`` into ``pmRun``;
+      ## ``ensureInitialized`` registers NO console formatter in that mode
+      ## (see ``lib/pure/unittest.nim``: ``protocolMode notin {… pmRun …}``).
+      ## So a failing per-case child prints NOTHING — its stdout is empty
+      ## by construction, and the result document is the only channel that
+      ## ever carries the diagnosis. Recording just the count therefore
+      ## made a per-case FAIL strictly LESS informative than the
+      ## whole-binary FAIL it replaced: a whole-binary run is ``pmDefault``,
+      ## keeps its console formatter, and its checkpoints reach the summary
+      ## inside ``stdout``. That asymmetry is also why a harness fault
+      ## looked "capturable" while an ordinary assertion did not — the
+      ## harness-fault text is synthesised by this runner, not by the child.
+      ##
+      ## Kept out of PASS entries: on a 6800-case sweep the passing
+      ## checkpoints are noise and would bloat the summary.
     harnessError: string
       ## Non-empty exactly when ``status == tsHarnessError``: the reason
       ## the harness could not run the case, verbatim (e.g. the OS error
@@ -2061,6 +2082,12 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
         result.durationMs = doc["duration_ms"].getInt(result.durationMs)
       if doc.hasKey("checkpoints") and doc["checkpoints"].kind == JArray:
         result.checkpointCount = doc["checkpoints"].len
+        # Keep the text, not just the tally. This is the only place the
+        # failed ``check`` expression and its operands exist for a
+        # per-case child (see ``TestResult.checkpoints``).
+        for entry in doc["checkpoints"]:
+          if entry.kind == JString:
+            result.checkpoints.add(entry.getStr())
       # ``exception`` is JSON ``null`` when the case raised nothing;
       # ``getStr`` on a non-string node yields the default.
       result.exception = doc{"exception"}.getStr("")
@@ -2126,6 +2153,12 @@ proc markFailFast(queue: ptr Queue) =
   queue.failFastTriggered = true
   release(queue.lock)
 
+const
+  ConsoleCheckpointBudget = 20
+    ## Console-only cap on checkpoint lines per case. The summary JSON and
+    ## the case's own result document keep every line; this bound exists
+    ## so one pathological case cannot bury the other 6800 in the log.
+
 proc emitProgress(quiet: bool; res: TestResult) =
   if quiet:
     return
@@ -2143,11 +2176,46 @@ proc emitProgress(quiet: bool; res: TestResult) =
       " — " & res.skipReason
     else:
       ""
-  stderr.writeLine label & " " & name & " (" & $res.durationMs & "ms)" &
-    reason
+  # ONE buffer, ONE write. Progress is emitted outside the results lock
+  # from every worker thread, so a diagnosis printed as N separate
+  # ``writeLine`` calls would interleave with other workers' lines at
+  # ``--threads=8`` and stop being readable as a unit — which is the same
+  # way the diagnosis gets lost that this block exists to prevent.
+  var msg = label & " " & name & " (" & $res.durationMs & "ms)" &
+    reason & "\n"
   if res.statusDisagreement.len > 0:
-    stderr.writeLine "  ! protocol disagreement: " &
-      res.statusDisagreement
+    msg.add("  ! protocol disagreement: " & res.statusDisagreement & "\n")
+  # The diagnosis, inline, for anything that did not pass.
+  #
+  # A per-case child is run with ``--run``, and the fork's ``unittest``
+  # registers no console formatter in that mode, so the child prints
+  # nothing at all: before this, a per-case FAIL reached the log as one
+  # bare ``[FAIL] … (5ms)`` line with the reason existing only inside a
+  # result document whose path was not printed either. The console is
+  # where a reader looks first; making them re-run the case by hand to
+  # learn what it asserted defeats the whole per-case cutover.
+  if res.status in {tsFail, tsHarnessError}:
+    if res.harnessError.len > 0:
+      msg.add("  ! harness error: " & res.harnessError & "\n")
+    for i, cp in res.checkpoints:
+      if i >= ConsoleCheckpointBudget:
+        msg.add("  … " & $(res.checkpoints.len - ConsoleCheckpointBudget) &
+          " more checkpoint line(s) in the result document\n")
+        break
+      # Checkpoints are multi-line (a stack trace rides in one entry), so
+      # indent every physical line rather than only the first.
+      for line in cp.splitLines():
+        msg.add("  | " & line & "\n")
+    if res.exception.len > 0:
+      for line in res.exception.strip(leading = false).splitLines():
+        msg.add("  | " & line & "\n")
+    # Always name the artifact holding the full account, so a reader who
+    # needs more than the budget above knows where to look without
+    # reconstructing the path from the case name.
+    if res.resultFile.len > 0:
+      msg.add("  → result document: " & res.resultFile & "\n")
+  stderr.write(msg)
+  stderr.flushFile()
 
 proc workerLoop(args: WorkerArgs) =
   while true:
@@ -2246,6 +2314,16 @@ proc writeSummary(summaryPath: string; results: seq[TestResult];
       node["exception"] = %r.exception
     if r.checkpointCount > 0:
       node["checkpoint_count"] = %r.checkpointCount
+    # The diagnosis itself, for anything that did not pass. A per-case
+    # child writes no console output at all (``pmRun`` registers no
+    # formatter), so without this the summary recorded that a case failed
+    # and nothing whatsoever about WHY — the count said "4 checkpoints
+    # exist" and pointed at no channel that carried them.
+    if r.status != tsPass and r.checkpoints.len > 0:
+      var cps = newJArray()
+      for c in r.checkpoints:
+        cps.add(%c)
+      node["checkpoints"] = cps
     # Why the harness could not run this case. Present iff status is
     # ERROR, so a consumer never has to infer the distinction between a
     # failing assertion and a harness fault from free-form stdout.

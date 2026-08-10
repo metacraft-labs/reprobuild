@@ -27,6 +27,13 @@
 ## by the document, and the contradiction is recorded verbatim in
 ## ``status_disagreement`` rather than being silently reconciled away.
 ##
+## Case 4: a FAIL must arrive with its diagnosis attached, in the summary
+## and on the console. ``checkpoint_count`` alone reports that diagnostics
+## exist while naming no channel that carries them, and a per-case child
+## cannot supply them through ``stdout``: ``--run`` selects ``pmRun``, in
+## which the fork registers no console formatter, so the child prints
+## nothing at all. The result document is the only channel there is.
+##
 ## Case 3 (the load-bearing one): that contradiction must also FAIL THE
 ## RUN. Recording a disagreement and then exiting 0 is a fail-open. The
 ## fork writes the result document from ``testEnded``, i.e. before the
@@ -48,7 +55,7 @@
 ## toolchain cannot, by construction, produce one. The fixture is not
 ## standing in for a component; it is the fault being detected.
 
-import std/[json, os, osproc, strutils, tempfiles, unittest]
+import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 const RepoRootMarker = "repro.nim"
 
@@ -139,10 +146,13 @@ proc compileFixture(workRoot, source, binary: string): bool =
     "--out:" & quoteShell(binary) & " " & quoteShell(source)
   execCmd(cmd) == 0
 
-proc runRunner(runner, binDir, summary, resultsDir: string):
-    tuple[exitCode: int; output: string] =
+proc runRunner(runner, binDir, summary, resultsDir: string;
+               quiet = true): tuple[exitCode: int; output: string] =
+  ## ``quiet = false`` keeps the runner's per-case progress lines, which is
+  ## the only way to assert on the CONSOLE channel. ``execCmdEx`` merges
+  ## stderr into stdout, and the runner writes progress to stderr.
   let cmd = quoteShell(runner) &
-    " --no-build --threads=1 --quiet" &
+    " --no-build --threads=1" & (if quiet: " --quiet" else: "") &
     " --bin-dir=" & quoteShell(binDir) &
     " --summary-json=" & quoteShell(summary) &
     " --results-dir=" & quoteShell(resultsDir)
@@ -290,3 +300,116 @@ suite "repro_test_runner consumes the whole result document":
     # be able to produce a passing suite.
     check exitCode != 0
     check exitCode == 1
+
+  test "a failing case's report carries the diagnosis, not just a count":
+    # The regression this pins, observed on a completed 6825-case run:
+    # four cases were reported ``FAIL`` and NO artifact said why. Their
+    # summary entries had no ``stdout``, the console log had one bare
+    # ``[FAIL] … (5ms)`` line each, and the only field about the failure
+    # was ``checkpoint_count`` — a number that asserts diagnostics EXIST
+    # while pointing at no channel that carries them. Triage had to
+    # re-run every case by hand, which makes a per-case FAIL strictly
+    # less informative than the whole-binary FAIL it replaced.
+    #
+    # WHY THE COUNT WAS ALL THERE WAS. A per-case child runs ``--run``,
+    # which puts the fork's ``unittest`` in ``pmRun``, and
+    # ``ensureInitialized`` registers NO console formatter in that mode.
+    # The child prints nothing at all, so ``stdout`` is empty BY
+    # CONSTRUCTION and the result document is the only channel that can
+    # ever carry the diagnosis. (This is also why the recorded run's
+    # harness faults did carry text and its assertion failures did not:
+    # harness-fault text is synthesised by the runner, not by the child.)
+    # Any fix that waits for the child to print is therefore a fix that
+    # cannot work.
+    let repoRoot = findRepoRoot()
+    let runner = repoRoot / "build" / "bin" /
+      addFileExt("repro_test_runner", ExeExt)
+    check fileExists(runner)
+    if not fileExists(runner):
+      return
+
+    let tempRoot = createTempDir("repro-m2-diagnostics-", "")
+    defer: removeDir(tempRoot)
+    let binDir = tempRoot / "bin"
+    createDir(binDir)
+
+    const Stem = "t_outcomes_fixture"
+    let src = tempRoot / (Stem & ".nim")
+    writeFile(src, OutcomesFixtureSource.replace("$REASON", SkipReasonText))
+    let compiled =
+      compileFixture(tempRoot, src, binDir / addFileExt(Stem, ExeExt))
+    check compiled
+    if not compiled:
+      return
+
+    let summary = tempRoot / "summary.json"
+    # Not quiet: the console channel is half of what is asserted here.
+    let (exitCode, console) =
+      runRunner(runner, binDir, summary, tempRoot / "results", quiet = false)
+    checkpoint("runner exit=" & $exitCode)
+    check fileExists(summary)
+    if not fileExists(summary):
+      checkpoint(console)
+      return
+    let doc = parseJson(readFile(summary))
+
+    # ---- (a) the blanket invariant -----------------------------------
+    # No entry that did not pass may be diagnostically empty. This is the
+    # assertion that would have caught the recorded run: it is a property
+    # of EVERY non-passing entry, not of one known-bad case, so a future
+    # reporting path that drops the diagnosis for some other outcome
+    # fails here too.
+    for entry in doc["tests"]:
+      if entry{"status"}.getStr() in ["PASS", "SKIP"]:
+        continue
+      let hasCheckpoints =
+        entry.hasKey("checkpoints") and
+        entry["checkpoints"].kind == JArray and
+        entry["checkpoints"].len > 0
+      let hasException = entry{"exception"}.getStr("").len > 0
+      let hasStdout = entry{"stdout"}.getStr("").len > 0
+      let hasHarnessError = entry{"harness_error"}.getStr("").len > 0
+      checkpoint("entry " & entry{"qualified_name"}.getStr() &
+        " status=" & entry{"status"}.getStr() &
+        " checkpoints=" & $hasCheckpoints &
+        " exception=" & $hasException &
+        " stdout=" & $hasStdout &
+        " harness_error=" & $hasHarnessError)
+      check (hasCheckpoints or hasException or hasStdout or hasHarnessError)
+
+    # ---- (b) the material is the real diagnosis, not a placeholder ----
+    let failing = entryFor(doc, "outcomes::failing case")
+    check failing.kind != JNull
+    if failing.kind == JNull:
+      return
+    check failing.hasKey("checkpoints")
+    if not failing.hasKey("checkpoints"):
+      return
+    check failing["checkpoints"].kind == JArray
+    let joined = failing["checkpoints"].getElems().mapIt(it.getStr()).join("\n")
+    checkpoint("summary checkpoints: " & joined)
+    # The failed expression …
+    check joined.contains("Check failed: 1 == 2")
+    # … and the source location that produced it.
+    check joined.contains(Stem & ".nim")
+    # ``checkpoint_count`` must still agree with what it counts; the
+    # count is kept, but it is no longer the only thing reported.
+    check failing{"checkpoint_count"}.getInt(-1) == failing["checkpoints"].len
+
+    # ---- (c) the same diagnosis on the console ------------------------
+    # The console log is where a reader looks first. A summary-only fix
+    # still leaves ``[FAIL] … (5ms)`` as the whole story in the log.
+    checkpoint("console: " & console)
+    check console.contains("Check failed: 1 == 2")
+    # And the console must name the artifact holding the full account, so
+    # a reader who needs more than the console budget does not have to
+    # reconstruct the path from the case name.
+    check console.contains("result document: ")
+
+    # ---- (d) passing entries stay lightweight -------------------------
+    # 6530 passing entries carrying their checkpoints would bloat the
+    # summary past usefulness; the diagnosis is only owed for failures.
+    let passing = entryFor(doc, "outcomes::passing case")
+    check passing.kind != JNull
+    if passing.kind != JNull:
+      check not passing.hasKey("checkpoints")
