@@ -270,6 +270,39 @@ type
       ownerToken: string
       statusPath: string
 
+  ProcessGroupRefusal = object of CatchableError
+    ## The runner reached a verdict and is REFUSING to report a passing or
+    ## terminal one, because processes carrying this case's exact owner
+    ## token were still alive after bounded TERM -> grace -> KILL cleanup.
+    ##
+    ## THIS IS A TEST FAILURE, NOT A HARNESS FAULT, and it is the one
+    ## distinction this type exists to carry.
+    ##
+    ## ``tsHarnessError`` means "the harness could not obtain a verdict;
+    ## nothing about the code under test was observed" — a spawn that never
+    ## produced a child, a child that could not be reached afterwards, exit
+    ## 126. None of that applies here: by the time these sites raise, the
+    ## child has run, its group exit status has been read off disk, and the
+    ## runner has directly OBSERVED that the case leaked processes which
+    ## outlived a bounded kill. That is an observation about the code under
+    ## test, and a leaked process group is precisely the defect the
+    ## process-group ownership work exists to detect.
+    ##
+    ## These sites used to raise a bare ``IOError``, which the drivers
+    ## caught alongside genuine collection faults and — once harness faults
+    ## gained their own outcome — relabelled ERROR. That silently moved the
+    ## leak out of ``summary.failed``, and
+    ## ``t_repro_test_runner_process_group_cleanup`` (which asserts
+    ## ``failed == 1``) went red without any test changing: same binary,
+    ## same host, pre-change runner PASS, post-change runner FAIL.
+    ##
+    ## It deliberately does NOT inherit from ``IOError`` or ``OSError``, so
+    ## the drivers' harness-fault handlers cannot re-absorb it by accident;
+    ## each driver names it explicitly. It is still ``CatchableError``, so
+    ## ``workerLoop``'s backstop keeps the run alive if a future path
+    ## forgets to name it — that backstop reports ERROR, which is loud and
+    ## fails the run rather than losing it.
+
 proc ensureDir(dir: string) =
   if dir.len > 0 and not dirExists(dir):
     createDir(dir)
@@ -1484,7 +1517,9 @@ proc drainAndWait(testProcess: TestProcess):
       groupOutput.add(
         "\nrepro_test_runner: exact owner-token processes survived " &
         "bounded cleanup; refusing to unregister or report PASS.\n")
-      raise newException(IOError, groupOutput)
+      # A leaked process group is an observation about the case, so it is
+      # raised as a REFUSAL and reported FAIL — never as a harness fault.
+      raise newException(ProcessGroupRefusal, groupOutput)
     close(p)
     cleanupProcessGroupPaths(testProcess)
     return (groupOutput, groupExitCode)
@@ -1730,7 +1765,7 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
           output.add(
             "\nrepro_test_runner: exact owner-token processes survived " &
             "bounded cleanup; refusing to unregister or report PASS.\n")
-          raise newException(IOError, output)
+          raise newException(ProcessGroupRefusal, output)
         close(p)
         cleanupProcessGroupPaths(testProcess)
       else:
@@ -1779,7 +1814,7 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
         "\nrepro_test_runner: exact owner-token processes survived " &
         "bounded cleanup; refusing to unregister or report a terminal " &
         "test result.\n")
-      raise newException(IOError, output)
+      raise newException(ProcessGroupRefusal, output)
   else:
     try:
       p.terminate()
@@ -1853,6 +1888,13 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
           "child reported harness exit " & $HarnessErrorExitCode &
           " (could not start the test)"
       else: result.status = tsFail
+  except ProcessGroupRefusal as e:
+    # A verdict WAS reached: the case leaked processes that outlived
+    # bounded cleanup. That is a defect in the tree, so it is FAIL and it
+    # lands in ``summary.failed`` where a gate looks for defects — not in
+    # ``harness_errors``, which is a statement about the run.
+    result.status = tsFail
+    result.stdout = e.msg
   except OSError as e:
     # NOT a test failure: nothing was observed about the code under test.
     # See ``TestStatus.tsHarnessError``.
@@ -1900,6 +1942,12 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     ## runner has no trustworthy verdict for this case.
   var timedOut = false
   var timeoutDescription = ""
+  var groupRefused = false
+    ## The runner reached a verdict and refused it: this case left
+    ## exact-owner-token processes alive after bounded cleanup. Tracked
+    ## apart from ``spawnFailed`` because the two have OPPOSITE meanings —
+    ## ``spawnFailed`` is "no verdict obtainable" (ERROR), this is "verdict
+    ## obtained and it is bad" (FAIL).
   # The spawn and the collect-the-answer phase are caught SEPARATELY.
   #
   # They used to share one ``try``, so every fault in the whole span was
@@ -1928,6 +1976,11 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     try:
       (output, exitCode, timedOut, timeoutDescription) =
         drainAndWaitWithTimeout(p, testTimeoutSec)
+    except ProcessGroupRefusal as e:
+      # Named before the harness-fault handlers so a leaked process group
+      # can never be re-absorbed into ERROR.
+      groupRefused = true
+      output = e.msg
     except OSError as e:
       spawnFailed = true
       phase = "child started but its result could not be collected: " & e.msg
@@ -1955,6 +2008,11 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     # which is exactly how a transient ``Bad file descriptor`` at
     # ``--threads=8`` reached a suite report as a test failure.
     result.status = tsHarnessError
+  elif groupRefused:
+    # The mirror image of the branch above: a verdict WAS observed — the
+    # case leaked processes past a bounded kill — so this is a defect in
+    # the tree and belongs in ``failed``.
+    result.status = tsFail
   elif timedOut:
     result.status = tsFail
   else:
@@ -1989,7 +2047,13 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   # verdict would let a runner that lost track of a child still vouch
   # for it, and the runner cannot tell that document apart from a stale
   # one. ERROR is the honest label; it costs one re-run and it is loud.
-  if not spawnFailed and not timedOut and
+  #
+  # A refused case is excluded for the same reason as a timed-out one: the
+  # child may well have written ``{"status":"PASS"}`` before leaking the
+  # group, and letting that document overturn the refusal would restore
+  # exactly the fail-open the refusal exists to prevent (and would also
+  # manufacture a bogus ``status_disagreement``).
+  if not spawnFailed and not timedOut and not groupRefused and
       result.status != tsHarnessError and fileExists(resultFile):
     try:
       let doc = parseJson(readFile(resultFile))
