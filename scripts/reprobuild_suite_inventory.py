@@ -3763,6 +3763,14 @@ def split_case_catalog(
         }
         for name, entry in sorted(checkouts.items())
     }
+    # ``git status --short`` names every dirty path in the checkout that
+    # generated the run. This repository is public and this artifact is
+    # tracked, so a regeneration from a working tree would publish local
+    # scratch filenames verbatim. Only the fact of dirtiness is a property of
+    # the run worth recording; the file list is not. Same reduction the
+    # sibling checkouts above already get.
+    repo_status = metadata.pop("status", "")
+    metadata["dirty"] = repo_status not in ("", "unknown")
     metadata["runtimeDetailPath"] = case_catalog_path.as_posix()
     metadata["environmentReportPath"] = environment_report_path.as_posix()
     metadata["runtimeDetailTracked"] = False
