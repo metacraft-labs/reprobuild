@@ -795,6 +795,7 @@ const PostKillVerificationSec = 5
 
 proc drainAvailable(p: Process; output: var string): int
 proc finalDrainNonBlocking(p: Process; output: var string)
+proc describeChildExit(exitCode: int): string
 
 when defined(posix):
   const
@@ -1436,16 +1437,96 @@ proc spawnGroupSupervisor(binary: string; args: openArray[string];
         getAppFilename(), args = wrapperArgs, env = env,
         options = {poStdErrToStdOut})
       var readyLine = ""
-      if not process.outputStream.readLine(readyLine) or
-          readyLine != ProcessGroupReadyMarker:
+      let waitStart = epochTime()
+      let gotLine = process.outputStream.readLine(readyLine)
+      let waitedMs = int((epochTime() - waitStart) * 1000.0)
+      if not gotLine or readyLine != ProcessGroupReadyMarker:
+        # Collect the evidence BEFORE tearing the supervisor down — every
+        # fact below used to be discarded, which is why this failure could
+        # only ever report the phase and never the cause. The supervisor's
+        # exit status in particular is the difference between "it refused"
+        # (125, its own setpgid/arguments guard), "it was killed" (128+N),
+        # and "it never got as far as running" (a loader/runtime failure).
+        var supervisorExit = -1
+        var weKilledIt = false
+        var trailing = ""
+        # Reap on its OWN terms first. A supervisor that is failing this
+        # handshake is already on its way out, so give it a short grace
+        # window and take the status it chose. Killing first and reporting
+        # what came back would attribute OUR SIGKILL to the supervisor —
+        # the message would say "exit code 137 (consistent with termination
+        # by signal 9)" about a process that was about to exit 125 on its
+        # own, which is worse than saying nothing.
+        let reapDeadline = epochTime() + 0.25
         try:
-          process.kill()
-          discard process.waitForExit()
+          while epochTime() < reapDeadline:
+            supervisorExit = process.peekExitCode()
+            if supervisorExit >= 0:
+              break
+            sleep(GroupSupervisorPollIntervalMs)
+          if supervisorExit < 0:
+            weKilledIt = true
+            process.kill()
+            discard process.waitForExit()
+        except CatchableError:
+          discard
+        # Anything the supervisor managed to write after (or instead of) the
+        # marker: its own stderr guards are merged onto this pipe by
+        # ``poStdErrToStdOut``, so this is where a real refusal message lands.
+        try:
+          finalDrainNonBlocking(process, trailing)
         except CatchableError:
           discard
         close(process)
+        let observed =
+          if not gotLine:
+            "end of stream — the supervisor's stdout closed without " &
+              "delivering a single line"
+          elif readyLine.len == 0:
+            "an empty line (the stream was open, but the first line " &
+              "carried no bytes)"
+          else:
+            "a different first line: " & readyLine.escape()
+        let exitText =
+          if supervisorExit >= 0:
+            describeChildExit(supervisorExit)
+          elif weKilledIt:
+            "still running 250ms after the handshake failed; the runner " &
+              "killed it, so it has no exit status of its own to report"
+          else:
+            "not reported (the supervisor could not be reaped)"
+        let trailingText =
+          if trailing.strip().len == 0: "(none)"
+          else: trailing.strip().escape()
         raise newException(IOError,
-          "test process-group supervisor did not become ready: " & readyLine)
+          "test process-group supervisor did not become ready.\n" &
+          "  waiting for: the readiness marker " &
+            ProcessGroupReadyMarker.escape() &
+            " as the first line of the supervisor's merged stdout+stderr\n" &
+          "  waited:      " & $waitedMs & "ms (a blocking read with no " &
+            "deadline; it returns as soon as the line or EOF arrives)\n" &
+          "  observed:    " & observed & "\n" &
+          "  supervisor:  " & exitText & "\n" &
+          "  also wrote:  " & trailingText & "\n" &
+          "  test binary: " & binary & "\n" &
+          # Hard-wrapped: this is printed to the console per affected case,
+          # where one 300-column line is not a diagnosis anyone reads.
+          "  meaning:     the supervisor is a re-exec of THIS runner that " &
+            "writes the marker only after\n" &
+          "               setpgid() succeeds and its signal handlers are " &
+            "installed, and before it\n" &
+          "               spawns the test binary — so nothing here has run " &
+            "the test yet, and this is\n" &
+          "               a harness fault, never a verdict about the code " &
+            "under test. Read it as:\n" &
+          "               exit 125 is the wrapper refusing on purpose and " &
+            "the reason is on the\n" &
+          "               'also wrote' line; 128+N is something killing it; " &
+            "no exit status at all\n" &
+          "               means the re-exec never reached Nim's main " &
+            "(loader failure, fd\n" &
+          "               exhaustion, or the image being replaced " &
+            "mid-spawn).")
       let processGroup = process.processID
       if processGroup <= 0 or
           getpgid(Pid(processGroup)) != Pid(processGroup):
