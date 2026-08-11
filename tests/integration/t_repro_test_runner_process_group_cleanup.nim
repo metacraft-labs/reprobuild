@@ -1,9 +1,9 @@
 ## Real process-tree isolation regression for repro_test_runner.
 ##
-## This test compiles one real fixture executable and drives the production
-## runner against it. The fixture can form root -> child -> grandchild in the
+## This test compiles real fixture executables and drives the production
+## runner against them. The fixture can form root -> child -> grandchild in the
 ## runner-owned process group, or detach a setsid sidecar. Every long-lived
-## level ignores SIGTERM and the leaf owns a real loopback TCP listener. Six
+## level ignores SIGTERM and the leaf owns a real loopback TCP listener. The
 ## controller scenarios prove:
 ##
 ## * an idle timeout sends TERM and escalates to KILL for the complete nested
@@ -16,8 +16,13 @@
 ## * a detached sidecar that responds to TERM by spawning a token-bearing
 ##   replacement cannot outrun the post-KILL ownership barrier;
 ## * on macOS, an unrelated process carrying the exact token only as an argv
-##   element is not mistaken for an environment-token owner; and
-## * SIGTERM performs the same bounded cleanup before the runner returns 143.
+##   element is not mistaken for an environment-token owner;
+## * SIGTERM performs the same bounded cleanup before the runner returns 143;
+##   and
+## * a PER-CASE child that writes ``{"status":"PASS"}`` into its result
+##   document and THEN leaks exact-token processes past bounded cleanup is
+##   reported FAIL — the document is not read at all, so it cannot overturn
+##   the refusal and cannot manufacture a status disagreement against it.
 ##
 ## The signal/timeout scenarios also start the same fixture as an unrelated
 ## sentinel that moves itself into a distinct process group and owns a second
@@ -400,6 +405,140 @@ else:
   waitForever()
 """
 
+  const ProtocolRefusalFixtureSource = """
+## Protocol-aware fixture for the refusal-outranks-document scenario.
+##
+## Its ``--run`` case is a CONFORMING one right up to the leak: it writes a
+## complete ``{"status":"PASS"}`` result document from the same place the
+## std/unittest fork writes it (before process exit) and then exits 0. The
+## defect is that exact-owner-token processes are still alive afterwards, which
+## the controller arranges from outside with the same replenishing churner the
+## post-reap-retry scenario uses.
+##
+## Hand-rolled rather than compiled from std/unittest because a conforming
+## toolchain cannot, by construction, produce a case that both passes and
+## leaks: the fault being detected IS the fixture.
+import std/[json, net, os, osproc, posix, strutils, times]
+
+const
+  # One of repro_test_runner's ProtocolMarkers, on the ordinary argv-error
+  # path so no optimisation level can elide it.
+  Marker = "unittest: --run requires a test name"
+  CaseName = "refusal::passes then leaks its group"
+  DocumentDurationMs = 4242
+
+proc appendRecord(role, label: string; port = 0) =
+  let path = getEnv("REPRO_TREE_RECORD")
+  if path.len == 0:
+    quit(91)
+  let file = open(path, fmAppend)
+  file.writeLine(role & "," & label & "," & $getCurrentProcessId() & "," &
+    $getpgrp() & "," & $port)
+  file.close()
+
+proc ignoreTermination() =
+  signal(SIGTERM, SIG_IGN)
+
+proc listenOnLoopback(): tuple[socket: Socket; port: int] =
+  result.socket = newSocket()
+  result.socket.bindAddr(Port(0), "127.0.0.1")
+  result.socket.listen()
+  let (_, assignedPort) = result.socket.getLocalAddr()
+  result.port = int(assignedPort)
+
+proc waitForever() =
+  while true:
+    sleep(1000)
+
+proc emitCatalog() =
+  var node = newJObject()
+  node["name"] = %CaseName
+  node["suite"] = %"refusal"
+  node["file"] = %"protocol_refusal_fixture.nim"
+  node["line"] = %1
+  var tests = newJArray()
+  tests.add(node)
+  var doc = newJObject()
+  doc["tests"] = tests
+  var summary = newJObject()
+  summary["total"] = %1
+  doc["summary"] = summary
+  echo doc.pretty()
+
+let params = commandLineParams()
+let label = getAppFilename().lastPathPart
+if params.len == 0:
+  stderr.writeLine Marker
+  quit(2)
+elif params[0] == "--list-json":
+  emitCatalog()
+  quit(0)
+elif params[0] == "--forged-owner":
+  ignoreTermination()
+  let listener = listenOnLoopback()
+  appendRecord("forged-owner", label, listener.port)
+  waitForever()
+elif params.len > 2 and params[0] == "--token-churner":
+  # Identical mechanism to the post-reap-retry scenario: an unrelated
+  # controller, outside the runner-owned group and without the token in its
+  # own environment, keeps exactly one token-bearing child alive at a time
+  # for long enough to outlast the runner's bounded TERM/KILL/verify window.
+  if setpgid(Pid(0), Pid(0)) != 0:
+    quit(107)
+  ignoreTermination()
+  delEnv("REPRO_TEST_RUNNER_OWNER_TOKEN")
+  let listener = listenOnLoopback()
+  appendRecord("churner", label, listener.port)
+  let ownerToken = params[1]
+  let churnUntil = epochTime() + parseFloat(params[2])
+  var owner: Process
+  while epochTime() < churnUntil:
+    if owner.isNil or owner.peekExitCode() != -1:
+      if not owner.isNil:
+        discard owner.waitForExit()
+        close(owner)
+      putEnv("REPRO_TEST_RUNNER_OWNER_TOKEN", ownerToken)
+      owner = startProcess(getAppFilename(), args = ["--forged-owner"],
+        options = {poParentStreams})
+      delEnv("REPRO_TEST_RUNNER_OWNER_TOKEN")
+    sleep(10)
+  if not owner.isNil:
+    discard owner.waitForExit()
+    close(owner)
+  waitForever()
+elif params[0] == "--run" and params.len >= 2:
+  if params[1] != CaseName:
+    stderr.writeLine "unknown case " & params[1]
+    quit(1)
+  appendRecord("root", label)
+  writeFile(getEnv("REPRO_TREE_TOKEN_FILE"),
+    getEnv("REPRO_TEST_RUNNER_OWNER_TOKEN"))
+  let continuePath = getEnv("REPRO_TREE_CONTINUE_FILE")
+  var released = false
+  for _ in 0 ..< 3000:
+    if fileExists(continuePath):
+      released = true
+      break
+    sleep(10)
+  if not released:
+    quit(98)
+  let resultPath = getEnv("NIMTEST_RESULT_FILE")
+  if resultPath.len == 0:
+    quit(99)
+  var doc = newJObject()
+  doc["status"] = %"PASS"
+  doc["duration_ms"] = %DocumentDurationMs
+  doc["checkpoints"] = newJArray()
+  doc["exception"] = newJNull()
+  writeFile(resultPath, doc.pretty())
+  # A complete, conforming PASS document followed by a clean exit 0. Only
+  # the leaked exact-token processes make this case a defect.
+  quit(0)
+else:
+  stderr.writeLine Marker
+  quit(2)
+"""
+
   proc repoRoot(): string =
     var candidate = currentSourcePath().parentDir
     while candidate.parentDir != candidate:
@@ -409,9 +548,10 @@ else:
       candidate = candidate.parentDir
     raise newException(IOError, "cannot find reprobuild repository root")
 
-  proc compileFixture(root, scratch, binary: string) =
-    let source = scratch / "t_timeout_process_tree.nim"
-    writeFile(source, FixtureSource)
+  proc compileFixtureSource(root, scratch, sourceName, sourceText,
+                            binary: string) =
+    let source = scratch / sourceName
+    writeFile(source, sourceText)
     let command = "nim c --threads:on --hints:off --warnings:off" &
       " --nimcache:" & quoteShell(scratch / "nimcache") &
       " --out:" & quoteShell(binary) & " " & quoteShell(source)
@@ -420,6 +560,10 @@ else:
       checkpoint(compilation.output)
     require compilation.exitCode == 0
     require fileExists(binary)
+
+  proc compileFixture(root, scratch, binary: string) =
+    compileFixtureSource(root, scratch, "t_timeout_process_tree.nim",
+      FixtureSource, binary)
 
   proc parseRecords(path: string): seq[ProcessRecord] =
     if not fileExists(path):
@@ -1021,6 +1165,151 @@ else:
       check report{"summary"}{"skipped"}.getInt(-1) == 0
       check ownerToken notin $report
       check ownerToken notin readFile(cleanupTracePath)
+
+    test "a refused per-case PASS document never overturns the refusal":
+      # The guard this pins lives in ``runOneProtocol``: a refused case is
+      # excluded from the result-document read entirely.
+      #
+      # Why it cannot be left to the exit code. This fixture is a
+      # CONFORMING case up to the leak — it writes a complete
+      # ``{"status":"PASS"}`` document (which is what the std/unittest fork
+      # does, from ``testEnded``, i.e. before the process exits) and then
+      # exits 0. If that document were read, it would win, and the case
+      # would be reported PASS: precisely the fail-open the refusal exists
+      # to prevent, since a run whose test leaked live processes past a
+      # bounded kill would go green.
+      #
+      # The second half is just as load-bearing. On a refusal the runner
+      # never collected an exit code, so ``exitCode`` still holds its
+      # initial 1 while the refusal branch has already set the verdict to
+      # FAIL. Reading the document there does not merely overturn the
+      # verdict — it also fabricates a ``status_disagreement`` between a
+      # PASS document and an exit code that was never observed, i.e. a
+      # protocol-violation report against a binary that violated nothing.
+      # So this test asserts BOTH: the refusal stands, and it invents no
+      # disagreement.
+      #
+      # The whole-binary path (``runWholeBinary``) cannot cover any of
+      # this: it has no result-document read at all, which is why the
+      # other scenarios in this file leave the guard untested.
+      let root = repoRoot()
+      let runner = root / "build" / "bin" / "repro_test_runner"
+      require fileExists(runner)
+
+      let scratch = createTempDir("runner-refusal-document-", "")
+      defer: removeDir(scratch)
+      let binDir = scratch / "bin"
+      createDir(binDir)
+      let fixture = binDir / "t_refusal_result_document"
+      compileFixtureSource(root, scratch, "t_refusal_result_document.nim",
+        ProtocolRefusalFixtureSource, fixture)
+
+      let treePath = scratch / "tree.csv"
+      let tokenPath = scratch / "owner-token"
+      let continuePath = scratch / "continue"
+      putEnv("REPRO_TREE_RECORD", treePath)
+      putEnv("REPRO_TREE_TOKEN_FILE", tokenPath)
+      putEnv("REPRO_TREE_CONTINUE_FILE", continuePath)
+      defer:
+        delEnv("REPRO_TREE_RECORD")
+        delEnv("REPRO_TREE_TOKEN_FILE")
+        delEnv("REPRO_TREE_CONTINUE_FILE")
+
+      let summary = scratch / "summary.json"
+      let runnerProcess = startProcess(runner,
+        workingDir = root,
+        args = runnerArgs(binDir, summary, scratch / "results", 60),
+        options = {poStdErrToStdOut})
+      defer:
+        if runnerProcess.peekExitCode() == -1:
+          try:
+            runnerProcess.kill()
+            discard runnerProcess.waitForExit()
+          except CatchableError:
+            discard
+        close(runnerProcess)
+
+      let tokenDeadline = epochTime() + 60.0
+      while epochTime() < tokenDeadline and not fileExists(tokenPath):
+        sleep(20)
+      ensureCleanupSafe(fileExists(tokenPath),
+        "refusal fixture did not publish its owner token")
+      let ownerToken = readFile(tokenPath)
+      ensureCleanupSafe(ownerToken.len > 20,
+        "refusal fixture published an invalid owner token")
+
+      # Same replenishing churner as the post-reap-retry scenario: real
+      # exact-token owners, outside the runner-owned group, alive past the
+      # runner's bounded TERM grace and post-KILL verification window.
+      let churner = startTokenChurner(fixture, treePath, ownerToken, 12.5)
+      let churnerPid = churner.processID
+      var churnerCleanupPending = true
+      defer:
+        if churnerCleanupPending:
+          stopExactFixtureProcess(churner, churnerPid)
+      let ready = waitForRoles(treePath, ["root", "churner"])
+      ensureCleanupSafe(ready.anyIt(it.role == "root"),
+        "refusal fixture case did not become ready")
+      ensureCleanupSafe(ready.anyIt(it.role == "churner"),
+        "refusal churner did not become ready")
+      let rootRecord = recordFor(ready, "root")
+      let churnerRecord = recordFor(ready, "churner")
+      check churnerRecord.processGroup == churnerRecord.pid
+      check churnerRecord.processGroup != rootRecord.processGroup
+
+      # Release the case: it writes its PASS document and exits 0 while the
+      # churner is still replenishing owners.
+      writeFile(continuePath, "continue\n")
+      var exitCode = -1
+      let deadline = epochTime() + 60.0
+      while epochTime() < deadline:
+        exitCode = runnerProcess.peekExitCode()
+        if exitCode != -1:
+          break
+        sleep(20)
+      check exitCode == 1
+
+      let allRecords = parseRecords(treePath)
+      let forgedOwners = allRecords.filterIt(it.role == "forged-owner")
+      check forgedOwners.len > 0
+      check waitForProcessesGone(forgedOwners)
+      check processExists(churnerRecord.pid)
+      stopExactFixtureProcess(churner, churnerPid)
+      churnerCleanupPending = false
+
+      require fileExists(summary)
+      let report = parseFile(summary)
+      let entry = report{"tests"}[0]
+      # The verdict: FAIL, and counted where a gate looks for defects.
+      check entry{"status"}.getStr("") == "FAIL"
+      check report{"summary"}{"total"}.getInt(-1) == 1
+      check report{"summary"}{"passed"}.getInt(-1) == 0
+      check report{"summary"}{"failed"}.getInt(-1) == 1
+      check report{"summary"}{"skipped"}.getInt(-1) == 0
+      check report{"summary"}{"harness_errors"}.getInt(-1) == 0
+      # A refusal is not a protocol violation by the binary. Nothing may be
+      # reported as a disagreement — per case or in the aggregate.
+      check not entry.hasKey("status_disagreement")
+      check report{"summary"}{"status_disagreements"}.getInt(-1) == 0
+      # The reason, on the record.
+      check "exact owner-token processes survived bounded cleanup" in
+        entry{"stdout"}.getStr("")
+
+      # The document really was written, really says PASS, and really was
+      # NOT consumed. Without these three the test could pass for the
+      # trivial reason that the fixture never produced a document at all.
+      let documentPath = entry{"result_file"}.getStr("")
+      check documentPath.len > 0
+      require fileExists(documentPath)
+      let document = parseFile(documentPath)
+      check document{"status"}.getStr("") == "PASS"
+      check document{"duration_ms"}.getInt(-1) == 4242
+      # The runner's own clock, never the document's field: reading the
+      # document would have adopted 4242 here.
+      check entry{"duration_ms"}.getInt(-1) != 4242
+      # Nor did any other field of that document reach the report.
+      check not entry.hasKey("checkpoints")
+      check not entry.hasKey("skip_reason")
 
     test "TERM-spawned detached replacement is gone before reporting PASS":
       let root = repoRoot()

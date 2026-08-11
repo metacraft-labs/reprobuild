@@ -342,8 +342,13 @@ test "incomplete name" and:
             "tests/integration/t_extension_type_lifted_and_consumed.nim": 1,
             "tests/integration/t_local_daemons_control_plane_m10.nim": 6,
             "tests/integration/t_pre_push_protocol_v2_ref_validation.nim": 3,
+            # 9, not 8: the refusal-outranks-document regression adds
+            # "a refused per-case PASS document never overturns the
+            # refusal" to this file's existing suite. Counted from the
+            # rebuilt binary's own `--list-json` (9) and cross-checked
+            # against the static scan (9), which agree.
             "tests/integration/"
-            "t_repro_test_runner_process_group_cleanup.nim": 8,
+            "t_repro_test_runner_process_group_cleanup.nim": 9,
         }
         for source, expected in expected_rebased_source_counts.items():
             with self.subTest(source=source):
@@ -680,6 +685,26 @@ test "incomplete name" and:
         #   PYTHON CASES 43 (unchanged) — the regression adds no Python
         #   test.
         #   STATIC TOTAL 6868 -> 6869 = +1 nim.
+        #
+        # ---------------------------------------------------------------
+        # Refusal outranks a passing document. Exactly one new Nim case,
+        # again in an ALREADY-ENROLLED source, so the spec count still
+        # does not move:
+        #
+        #   NIM CASES 6826 -> 6827, SPECS 1208 (unchanged)
+        #     tests/integration/
+        #       t_repro_test_runner_process_group_cleanup.nim        (+1)
+        #         "a refused per-case PASS document never overturns the
+        #          refusal"
+        #   Recomputed, not bumped: the binary was rebuilt and its own
+        #   `--list-json` counted (9, pinned per source above), and the
+        #   source's static scan was counted separately and agrees (9).
+        #   The delta is therefore +1 on BOTH the catalog aggregate and
+        #   the staticCaseCount aggregate: 6747 -> 6748.
+        #
+        #   PYTHON CASES 43 (unchanged) — the regression adds no Python
+        #   test.
+        #   STATIC TOTAL 6869 -> 6870 = +1 nim.
         self.assertEqual(len(nim_specs), 1208)
         self.assertEqual(len(python_specs), 4)
 
@@ -734,7 +759,7 @@ test "incomplete name" and:
         # +80 for the static-vs-catalog correction, -1 for dropping the
         # quarantined source's static fallback). Python keeps the static
         # `unittest` scan because Python files have no built binary.
-        self.assertEqual(nim_total, 6826)
+        self.assertEqual(nim_total, 6827)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
         # as its own equality so a future re-introduction of the static
@@ -775,7 +800,7 @@ test "incomplete name" and:
         self.assertEqual(python_total, 43)
         # 6856 -> 6862: -1 from the quarantined source no longer imputing a
         # static count, +7 from the new Python cases above.
-        self.assertEqual(data["static"]["sourceCaseCount"], 6869)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6870)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -789,7 +814,7 @@ test "incomplete name" and:
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6747,
+            6748,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
