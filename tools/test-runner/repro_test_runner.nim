@@ -145,6 +145,55 @@ const
   ]
 
 type
+  CatalogEntry = object
+    ## One row of a binary's ``--list-json`` catalog.
+    ##
+    ## RETENTION RULE. Every field the protocol emits is kept here and
+    ## carried to the summary verbatim. The runner used to keep exactly
+    ## ``suite`` and ``name`` and drop the rest at the parse site, which
+    ## made the whole ``--list-json`` surface — file, line, column, kind,
+    ## group, threadsRequired, xfail, tags, bodyHash, deterministic —
+    ## unobservable downstream: a consumer reading the run artifact could
+    ## not tell where a case lives, whether it is expected to fail, or
+    ## whether its body changed. Dropping a field at the parse site is
+    ## indistinguishable, downstream, from the producer never emitting it.
+    ##
+    ## HONEST LABELLING OF WHAT IS REAL. Of the retained fields only
+    ## ``suite``/``name``/``file``/``line``/``column`` and ``bodyHash``
+    ## carry information today. ``kind``, ``group``, ``threadsRequired``,
+    ## ``xfail``, ``tags`` and ``deterministic`` are emitted by the
+    ## codetracer-nim fork as fixed literals (see that fork's
+    ## ``lib/pure/unittest.nim``: ``"in-process"``, ``"@global"``, ``1``,
+    ## ``null``, ``[]``, ``true``) and are therefore constants, not
+    ## measurements. They are retained because the contract says to retain
+    ## them and because the day the producer starts varying them the
+    ## consumer must already be carrying them — but NO scheduling,
+    ## selection or reporting decision in this runner may be built on them
+    ## while they are constants. Only ``bodyHash`` is load-bearing.
+    suite: string    ## the ``suite`` field, verbatim
+    bare: string     ## display name: ``name`` with any ``suite::`` prefix cut
+    runName: string  ## the ``name`` field, verbatim — the ``--run`` argument
+    file: string             ## ``file``: source file the case was declared in
+    line: int                ## ``line``: 1-based declaration line; 0 if absent
+    column: int              ## ``column``: declaration column; 0 if absent
+    kind: string             ## ``kind``: today always ``"in-process"``
+    group: string            ## ``group``: today always ``"@global"``
+    threadsRequired: int     ## ``threadsRequired``: today always 1
+    xfail: string
+      ## ``xfail`` rendered as text: ``""`` for JSON ``null`` (the only
+      ## value the fork emits today), otherwise the reason string or the
+      ## literal ``"true"``/``"false"``. Kept as text rather than a
+      ## ``bool`` so "the producer said nothing" stays distinguishable
+      ## from "the producer said false".
+    tags: seq[string]        ## ``tags``: today always empty
+    bodyHash: string
+      ## ``bodyHash``: the compiler-computed digest of the case's body.
+      ## The ONE field here that is a measurement, and the one selection
+      ## is built on. Empty when the producer emitted none — which is a
+      ## fail-closed signal, never a match.
+    deterministic: bool      ## ``deterministic``: today always true
+
+type
   TestCase = object
     binary: string          ## absolute path to the compiled test binary
     binaryStem: string      ## file basename without extension
@@ -162,6 +211,16 @@ type
       ## yields the bare ``testname``, which that binary's ``--run``
       ## matcher rejects with "test not found" (exit 1, reported FAIL).
       ## Empty for whole-binary cases, which take no ``--run``.
+    meta: CatalogEntry
+      ## The case's ``--list-json`` row, retained whole. See
+      ## ``CatalogEntry`` for the retention rule and for which of its
+      ## fields are measurements and which are producer constants.
+      ##
+      ## Default-initialised (every field empty/zero/false) for a
+      ## whole-binary case, which has no catalog row by construction. A
+      ## consumer must therefore read ``protocolAware`` before reading any
+      ## of these: an empty ``bodyHash`` on a whole-binary entry means
+      ## "there is no such row", not "the producer emitted no hash".
 
   TestStatus = enum
     tsPass = "PASS"
@@ -640,13 +699,6 @@ proc extractCatalogDocument(text: string): JsonNode =
         discard
     idx = trimmed.find(Marker, idx + 1)
 
-type
-  CatalogEntry = object
-    ## One row of a binary's ``--list-json`` catalog.
-    suite: string    ## the ``suite`` field, verbatim
-    bare: string     ## display name: ``name`` with any ``suite::`` prefix cut
-    runName: string  ## the ``name`` field, verbatim — the ``--run`` argument
-
 proc probeBinary(binary: string): tuple[protocol: bool;
                                         catalog: seq[CatalogEntry]] =
   ## Decide whether the binary speaks the protocol and return its test
@@ -713,7 +765,38 @@ proc probeBinary(binary: string): tuple[protocol: bool;
         bare = name[suite.len + 2 .. ^1]
       elif suite.len == 0 and name.startsWith("::"):
         bare = name[2 .. ^1]
-      cat.add(CatalogEntry(suite: suite, bare: bare, runName: name))
+      # Retention, not interpretation: each field is copied out with the
+      # producer's own value and a neutral default when the key is
+      # absent. ``xfail`` is deliberately rendered to text here so JSON
+      # ``null`` (say nothing) and JSON ``false`` (say "not expected to
+      # fail") do not collapse into the same Nim value.
+      var xfail = ""
+      let xfailNode = entry{"xfail"}
+      if xfailNode != nil:
+        case xfailNode.kind
+        of JNull: xfail = ""
+        of JString: xfail = xfailNode.getStr("")
+        of JBool: xfail = (if xfailNode.getBool(): "true" else: "false")
+        else: xfail = $xfailNode
+      var tags: seq[string] = @[]
+      let tagsNode = entry{"tags"}
+      if tagsNode != nil and tagsNode.kind == JArray:
+        for t in tagsNode:
+          tags.add(if t.kind == JString: t.getStr("") else: $t)
+      cat.add(CatalogEntry(
+        suite: suite,
+        bare: bare,
+        runName: name,
+        file: entry{"file"}.getStr(""),
+        line: entry{"line"}.getInt(0),
+        column: entry{"column"}.getInt(0),
+        kind: entry{"kind"}.getStr(""),
+        group: entry{"group"}.getStr(""),
+        threadsRequired: entry{"threadsRequired"}.getInt(0),
+        xfail: xfail,
+        tags: tags,
+        bodyHash: entry{"bodyHash"}.getStr(""),
+        deterministic: entry{"deterministic"}.getBool(false)))
     result.protocol = true
     result.catalog = cat
   except JsonParsingError:
@@ -2508,6 +2591,32 @@ proc writeSummary(summaryPath: string; results: seq[TestResult];
     node["suite"] = %r.testCase.suite
     node["qualified_name"] = %r.testCase.qualifiedName
     node["run_name"] = %r.testCase.runName
+    # The rest of the case's ``--list-json`` row, verbatim. Emitted only
+    # for protocol-aware cases: a whole-binary entry has no catalog row,
+    # and synthesising zeroed fields for it would state as fact
+    # ("threadsRequired: 0") something the producer never said.
+    #
+    # Which of these are measurements and which are producer constants is
+    # documented once, on ``CatalogEntry``. They are written here because
+    # dropping a field at the parse site is indistinguishable, to a
+    # consumer of this artifact, from the producer never emitting it.
+    if r.testCase.protocolAware:
+      node["file"] = %r.testCase.meta.file
+      node["line"] = %r.testCase.meta.line
+      node["column"] = %r.testCase.meta.column
+      node["kind"] = %r.testCase.meta.kind
+      node["group"] = %r.testCase.meta.group
+      node["threads_required"] = %r.testCase.meta.threadsRequired
+      # ``xfail`` absent means the producer said nothing (JSON null),
+      # which is not the same claim as "false". Absence is preserved.
+      if r.testCase.meta.xfail.len > 0:
+        node["xfail"] = %r.testCase.meta.xfail
+      var tagsNode = newJArray()
+      for t in r.testCase.meta.tags:
+        tagsNode.add(%t)
+      node["tags"] = tagsNode
+      node["body_hash"] = %r.testCase.meta.bodyHash
+      node["deterministic"] = %r.testCase.meta.deterministic
     node["status"] = %($r.status)
     node["duration_ms"] = %r.durationMs
     node["result_file"] = %r.resultFile
@@ -2847,7 +2956,9 @@ proc main() =
           # Display/report identity is derived; the execution argument
           # never is. See ``TestCase.runName``.
           qualifiedName: qualifyName(stem, entry.suite, entry.bare),
-          runName: entry.runName)
+          runName: entry.runName,
+          # The catalog row rides along whole. See ``TestCase.meta``.
+          meta: entry)
         queue.items.add(tc)
         inc totalCases
     else:
