@@ -1124,32 +1124,20 @@
               # so `ct-test test discover|run` is available in the dev shell
               # without a hand build. Nothing in reprobuild's own build or test
               # path consumes it yet; wiring it into scripts/run_tests.sh is a
-              # separate, later step. Two things to know before relying on it:
+              # separate, later step. One thing to know before relying on it:
+              # it is whatever ``codetracer-src`` is pinned to, not whatever is
+              # in a sibling checkout. Changes made in a local codetracer tree
+              # reach this binary only once they are pushed and the pin is
+              # bumped (or the input is overridden for the session).
               #
-              #   * It is whatever ``codetracer-src`` is pinned to, not whatever
-              #     is in a sibling checkout. Changes made in a local codetracer
-              #     tree reach this binary only once they are pushed and the pin
-              #     is bumped (or the input is overridden for the session).
-              #   * ``test run`` in the pinned revision aborts during teardown,
-              #     after the summary is written, once a run uses 21 or more
-              #     workers. The cause is a heap-lifetime bug in CodeTracer's
-              #     ``run_orchestration.runUnits`` — worker-allocated results
-              #     were freed after their threads had already exited — and it
-              #     is fixed there, by that module's ``ResultHandoff``. Bumping
-              #     ``codetracer-src`` past that fix retires this caveat: delete
-              #     it, and any ``--threads`` cap anyone set because of it.
-              #
-              #     Until the pin moves, do not read a low ``--threads`` as a
-              #     safe workaround. 21 is merely where the bug turns fatal:
-              #     glibc's default 40 MiB stack cache holds exactly 20 retired
-              #     2 MiB Nim thread stacks, so the 21st worker's thread-local
-              #     allocator region is unmapped by the time the results are
-              #     freed. It has nothing to do with core count. Below that
-              #     boundary the identical illegal write lands in a retired but
-              #     still-mapped region and corrupts silently instead. Treat
-              #     ``test run`` from the pinned build as unreliable at every
-              #     thread count; ``test discover`` is single-threaded and is
-              #     genuinely unaffected.
+              # ``test run`` is safe at any ``--threads`` value on this pin. An
+              # earlier pin aborted during teardown once a run used 21 or more
+              # workers — a heap-lifetime bug in CodeTracer's
+              # ``run_orchestration.runUnits``, where worker-allocated results
+              # were freed after their threads had exited. It is fixed at the
+              # source by that module's ``ResultHandoff``, and the pin is now
+              # past the fix. Any ``--threads`` cap set because of it can go;
+              # such a cap never made anything safe in the first place.
               ctTestTools
               pkgs.just
               nimFork
