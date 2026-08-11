@@ -34,12 +34,23 @@ that the selected source slice resolves the same checked-in libraries.
 
 The in-place project-file tests use exact `repro.nim` and `config.nims`
 payloads pinned from reviewed CodeTracer `dev` commit
-`879d1b226765130c4b5e7e8e5b38825fe647802d`. The files retain CodeTracer's
+`602e7bb728311c230c9a42fa7fd8aab546b6467a`. The files retain CodeTracer's
 `AGPL-3.0-or-later` license in explicit SPDX/provenance headers. Every byte
 after those headers is identical to the corresponding public source:
 
-- `https://github.com/metacraft-labs/codetracer/blob/879d1b226765130c4b5e7e8e5b38825fe647802d/repro.nim`
-- `https://github.com/metacraft-labs/codetracer/blob/879d1b226765130c4b5e7e8e5b38825fe647802d/config.nims`
+- `https://github.com/metacraft-labs/codetracer/blob/602e7bb728311c230c9a42fa7fd8aab546b6467a/repro.nim`
+- `https://github.com/metacraft-labs/codetracer/blob/602e7bb728311c230c9a42fa7fd8aab546b6467a/config.nims`
+
+This pin advances the contract from `879d1b22`, whose `repro.nim` scoped every
+build's Nim object cache to a single hardcoded `/tmp/ct-nim-cache`. That made
+every checkout, worktree and sandboxed build on a host share one object
+directory keyed only by target name, so two builds of the same target from
+different source roots overwrote each other's `.o` files and the `ct` and
+`codetracer` aggregate cases failed with undefined-reference link errors.
+`602e7bb7` derives that root from the ambient temporary directory instead, so a
+caller that already scopes its own `$TMPDIR` scopes the object cache with it.
+`config.nims` is unchanged between the two commits; its payload digest is
+therefore identical to the one this file previously recorded.
 
 The real sibling still supplies every source file copied and built by the
 tests. Using Reprobuild-owned graph/config fixtures keeps an unrelated local
