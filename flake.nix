@@ -158,6 +158,36 @@
       url = "git+https://github.com/metacraft-labs/codetracer-native-recorder?ref=stable";
       flake = false;
     };
+    codetracer-src = {
+      # CodeTracer owns the cross-language test driver ``ct-test``
+      # (``src/ct_test/ct_test.nim``): TestCatalog v1 discovery over the
+      # provider registry plus the partitioned parallel runner, declared as
+      # the ``ct-test`` target in codetracer's ``repro.nim``. ``ctTestTools``
+      # below builds that binary from this input and the dev shell puts it on
+      # PATH, exactly as ``runquotaTools`` does for ``runquota-src`` — so the
+      # shipped tool tracks a pinned/overridable source instead of whatever
+      # someone hand-compiled into a sibling checkout.
+      #
+      # Pinned to ``dev``, CodeTracer's active branch, mirroring the
+      # ``runquota/dev`` pin above and for the same reason: the repo's default
+      # branch is ``stable``, a release pointer that can sit behind ``dev``.
+      # (At this pin ``stable`` and ``dev`` happen to name the same commit, and
+      # that commit is a strict descendant of ``main``; all three carry
+      # ``src/ct_test``.)
+      #
+      # ``flake = false`` — we want the source tree only. CodeTracer's own
+      # flake drags in the Electron/frontend/db-backend toolchain, none of
+      # which ``ct-test`` needs (its only non-stdlib dependency is runquota;
+      # see ctTestTools). The ``.envrc`` auto-override
+      # (NIX_FLAKE_OVERRIDE_AUTO + the ``-src`` suffix convention) names this
+      # input for a ``../codetracer`` sibling when one exists. Be aware of what
+      # that costs before leaning on it: overriding a source input to a plain
+      # path copies the whole directory into the store, and a working
+      # CodeTracer checkout is several gigabytes. An override-free shell builds
+      # the pin, which is the cheap and reproducible default.
+      url = "github:metacraft-labs/codetracer/dev";
+      flake = false;
+    };
 
     # ── reprobuild Nim toolchain: the metacraft-labs/nim fork ──────────────
     # The fork (codetracer-nim, Nim 2.3.1 devel) replaces nixpkgs'
@@ -211,6 +241,7 @@
       reprobuild-ct-test-runner-src,
       reprobuild-test-adapters-src,
       codetracer-native-recorder,
+      codetracer-src,
       runquota-src,
       io-mon-src,
       nim-shm-gset-src,
@@ -304,6 +335,81 @@
               mkdir -p "$out/bin"
               install -m755 build/bin/runquota "$out/bin/runquota"
               install -m755 build/bin/runquotad "$out/bin/runquotad"
+              runHook postInstall
+            '';
+          };
+          # Build CodeTracer's standalone cross-language test driver ``ct-test``
+          # from the ``codetracer-src`` input and put it on the dev-shell PATH.
+          # Same shape and same motivation as ``runquotaTools`` above: the tool
+          # tracks a pinned, overridable source rather than a hand-built binary
+          # in someone's sibling checkout, so
+          # ``--override-input codetracer-src path:../codetracer`` (which the
+          # ``.envrc`` auto-override does for you when the sibling exists)
+          # yields a ``ct-test`` built from the local tree with no push.
+          #
+          # Dependency surface: ``ct-test`` compiles from ``src/ct_test/**``,
+          # the Nim stdlib, and runquota's ``runquota_process`` /
+          # ``runquota_core`` / ``runquota_host*`` packages — and nothing else.
+          # (Verified against the Nim compilation cache of a full build: no
+          # vendored ``libs/`` tree, no Electron/frontend stack, no db-backend,
+          # no io-mon, no codetracer-trace-format-nim.) That is why this
+          # derivation is cheap despite CodeTracer being a large repo, why a
+          # submodule-less source input suffices, and why ``RUNQUOTA_SRC`` is
+          # the only source path it has to thread through: codetracer's
+          # repo-root ``config.nims`` reads that variable and adds the runquota
+          # library paths, the sandbox having no ``../runquota`` sibling.
+          ctTestTools = pkgs.stdenv.mkDerivation {
+            pname = "ct-test";
+            version = "0.1.0";
+            src = codetracer-src;
+            strictDeps = true;
+            dontConfigure = true;
+            nativeBuildInputs = [
+              pkgs.bash
+              pkgs.coreutils
+              nimFork
+            ];
+            RUNQUOTA_SRC = runquota-src;
+            # The compile is spelled out here rather than delegated to a script
+            # in the codetracer checkout (which is how ``runquotaTools`` calls
+            # ``scripts/build_apps.sh``) for one concrete reason: codetracer has
+            # no such script, and adding one would make this derivation
+            # unbuildable at the pinned revision until that script is pushed —
+            # i.e. an override-free ``nix develop`` would break. Keeping the
+            # invocation self-contained means this input can be pinned to any
+            # codetracer revision that carries ``src/ct_test``.
+            #
+            # It intentionally mirrors the ``ct-test`` target in codetracer's
+            # ``repro.nim``, which stays the graph's declaration of this binary.
+            # The two are not flag-identical — the graph target additionally
+            # asks for debug info, line/stack traces and bound checks, and this
+            # one does not — so treat the graph as authoritative for the shipped
+            # product and this as the dev-shell convenience build.
+            #
+            # They do agree on the one flag that changes what the binary can do:
+            # ``--mm:orc``. It is spelled out below rather than left to the
+            # compiler's default because ``test run`` drives a worker pool whose
+            # threads share the discovered sequences, which refc's per-thread
+            # heaps cannot support; a refc build of these sources therefore
+            # either refuses ``run`` outright (newer sources, which carry an
+            # explicit guard) or crashes in the worker loop (older ones). Either
+            # way, silently inheriting a changed default would turn this from a
+            # runner into a discover-only tool, so the flag is stated.
+            buildPhase = ''
+              runHook preBuild
+              mkdir -p build/bin build/nimcache
+              nim c \
+                --threads:on \
+                --mm:orc \
+                --nimcache:build/nimcache/ct-test \
+                --out:build/bin/ct-test \
+                src/ct_test/ct_test.nim
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out/bin"
+              install -m755 build/bin/ct-test "$out/bin/ct-test"
               runHook postInstall
             '';
           };
@@ -1014,6 +1120,23 @@
             XXHASH_PREFIX = pkgs.xxHash;
             packages = [
               runquotaTools
+              # ``ct-test`` — CodeTracer's cross-language test driver. On PATH
+              # so `ct-test test discover|run` is available in the dev shell
+              # without a hand build. Nothing in reprobuild's own build or test
+              # path consumes it yet; wiring it into scripts/run_tests.sh is a
+              # separate, later step. Two things to know before relying on it:
+              #
+              #   * It is whatever ``codetracer-src`` is pinned to, not whatever
+              #     is in a sibling checkout. Changes made in a local codetracer
+              #     tree reach this binary only once they are pushed and the pin
+              #     is bumped (or the input is overridden for the session).
+              #   * ``test run`` currently aborts during teardown, after the
+              #     summary is written, once the worker count gets high — around
+              #     24 workers on a 32-core host, which the default (one worker
+              #     per CPU) exceeds. Pass ``--threads`` below that until the
+              #     runner's teardown is fixed upstream; ``test discover`` is
+              #     unaffected.
+              ctTestTools
               pkgs.just
               nimFork
               # Used by the ct-build CI step to bake reprobuild's runtime library
