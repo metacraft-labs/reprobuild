@@ -523,6 +523,18 @@ test "incomplete name" and:
                 "sourceCaseCount": 4,
                 "class": "platform/destructive",
             },
+            # The daemon accept-loop survival gate. Starts a real daemon
+            # process and drives it over a real unix socket, so it
+            # classifies as integration rather than pure unit.
+            "tests/integration/"
+            "t_daemon_accept_loop_survives_probe.nim": {
+                "binary": "build/test-bin/"
+                "t_daemon_accept_loop_survives_probe",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 3,
+                "class": "integration",
+            },
         }
         for source, expected in expected_enrollments.items():
             with self.subTest(enrolled_source=source):
@@ -705,7 +717,25 @@ test "incomplete name" and:
         #   PYTHON CASES 43 (unchanged) — the regression adds no Python
         #   test.
         #   STATIC TOTAL 6869 -> 6870 = +1 nim.
-        self.assertEqual(len(nim_specs), 1208)
+        #
+        # ---------------------------------------------------------------
+        # Daemon accept-loop survival. Exactly one NEW Nim source, so this
+        # is the first delta in a while that moves the spec count too:
+        #
+        #   SPECS 1208 -> 1209, NIM CASES 6827 -> 6830
+        #     tests/integration/
+        #       t_daemon_accept_loop_survives_probe.nim               (+3)
+        #   Recomputed, not bumped: the binary's own `--list-json` reports
+        #   3 cases in 1 suite (pinned per source in
+        #   `expected_enrollments` above), and the source's static scan was
+        #   counted separately and agrees (3). The delta is therefore +3 on
+        #   BOTH the catalog aggregate and the staticCaseCount aggregate:
+        #   6748 -> 6751, and `countSourceCounts["catalog"]` 1207 -> 1208.
+        #
+        #   PYTHON CASES 43 (unchanged) — the regression adds no Python
+        #   test.
+        #   STATIC TOTAL 6870 -> 6873 = +3 nim.
+        self.assertEqual(len(nim_specs), 1209)
         self.assertEqual(len(python_specs), 4)
 
         nim_total = sum(
@@ -759,7 +789,7 @@ test "incomplete name" and:
         # +80 for the static-vs-catalog correction, -1 for dropping the
         # quarantined source's static fallback). Python keeps the static
         # `unittest` scan because Python files have no built binary.
-        self.assertEqual(nim_total, 6827)
+        self.assertEqual(nim_total, 6830)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
         # as its own equality so a future re-introduction of the static
@@ -800,7 +830,7 @@ test "incomplete name" and:
         self.assertEqual(python_total, 43)
         # 6856 -> 6862: -1 from the quarantined source no longer imputing a
         # static count, +7 from the new Python cases above.
-        self.assertEqual(data["static"]["sourceCaseCount"], 6870)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6873)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -814,7 +844,7 @@ test "incomplete name" and:
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6748,
+            6751,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
@@ -1380,7 +1410,7 @@ test "incomplete name" and:
         # among the Python files.
         self.assertEqual(
             catalog["countSourceCounts"],
-            {"catalog": 1207, "quarantined": 1, "static": 4},
+            {"catalog": 1208, "quarantined": 1, "static": 4},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         self.assertEqual(
@@ -2243,7 +2273,9 @@ test "incomplete name" and:
         # parse_repro_tests pin above; see the comment there.
         # 1204 -> 1207 for M2 step 2's three new test sources, each pinned
         # individually in `expected_m2_step2_sources`.
-        self.assertEqual(declared_nim_count, 1208)
+        # 1208 -> 1209 for the daemon accept-loop survival regression,
+        # pinned individually in `expected_enrollments`.
+        self.assertEqual(declared_nim_count, 1209)
         self.assertEqual(declared_python_count, 4)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -2275,7 +2307,9 @@ test "incomplete name" and:
             declared_nim_count + declared_python_count,
         )
         # 1211 -> 1212: the one new Nim spec above (1208 nim + 4 python).
-        self.assertEqual(data["static"]["testEntryCount"], 1212)
+        # 1212 -> 1213: the daemon accept-loop survival regression
+        # (1209 nim + 4 python).
+        self.assertEqual(data["static"]["testEntryCount"], 1213)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),

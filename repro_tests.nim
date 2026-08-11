@@ -6502,6 +6502,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_daemon_accept_loop_survives_probe.nim",
+    binary: "build/test-bin/t_daemon_accept_loop_survives_probe",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_default_projects_auto_layer_on_fresh_workspace.nim",
     binary: "build/test-bin/t_default_projects_auto_layer_on_fresh_workspace",
     defines: @[],
