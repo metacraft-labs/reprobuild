@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import ast
 import dataclasses
-import datetime as dt
 import hashlib
 import json
 import os
@@ -29,6 +28,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -38,6 +38,25 @@ from typing import Any
 DEFAULT_JSON = Path("benchmarks/reports/reprobuild-suite-m0-inventory.json")
 DEFAULT_REPORT = Path("benchmarks/reports/reprobuild-suite-m0-baseline.md")
 DEFAULT_SLOW_REVIEWS = Path("benchmarks/reports/reprobuild-suite-m0-slow-reviews.json")
+
+# The human-readable half of the measurement environment. Build-local and
+# untracked, for the same reason its JSON counterpart is: a `du` over a
+# multi-GiB nimcache, a kernel/glibc version and a set of nix-store paths
+# rewrite the document on every build and on every host. The TRACKED
+# report keeps only what is stable and points here.
+DEFAULT_ENVIRONMENT_REPORT = Path("build/reprobuild-suite-m0-environment.md")
+
+# Paths measured by ``footprint``. Hoisted to a constant because the
+# TRACKED report names them (which is stable) without their sizes (which
+# are not).
+FOOTPRINT_PATHS = (
+    "build/bin",
+    "build/test-bin",
+    "build/nimcache",
+    "build/lib",
+    ".repro",
+    "test-logs/results",
+)
 GENERATED_RESULTS_DIR = Path("bench-results/reprobuild-suite-m0")
 SOURCE_FINGERPRINT_EXCLUDES = {
     DEFAULT_JSON.as_posix(),
@@ -187,8 +206,53 @@ def rel(path: Path, root: Path) -> str:
         return path.as_posix()
 
 
-def now_utc() -> str:
-    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+# An absolute POSIX path of at least two components, not preceded by a word
+# character, ``:`` or ``/`` so that ``https://host/path`` and ``a/b/c`` are
+# left alone.
+ABSOLUTE_PATH_RE = re.compile(r"(?<![\w:/])((?:/[A-Za-z0-9._+~@%-]+){2,})")
+
+
+def redact_absolute_paths(text: str) -> str:
+    """Replace absolute host paths with ``<abs>/<basename>``.
+
+    The tracked inventory must be byte-identical across checkouts. An
+    absolute path defeats that for exactly the same reason an embedded
+    timestamp does (spec §16.4), and ``$REPO_ROOT`` is not the only source
+    of them: ``/nix/store/...`` entries in the recorded environment and the
+    ``.so`` path in a loader-failure message are absolute and live outside
+    the repository, so a guard that only looks for the repo root sees
+    nothing wrong.
+
+    The final component is kept because it is the part that carries signal
+    (*which* library failed to load), and it is not host-specific.
+    """
+    return ABSOLUTE_PATH_RE.sub(
+        lambda match: "<abs>/" + match.group(1).rsplit("/", 1)[-1], text
+    )
+
+
+def redact_absolute_paths_deep(value: Any) -> Any:
+    """Apply :func:`redact_absolute_paths` to every string in a JSON tree.
+
+    Keys are left alone; they are field names, never paths. This runs as the
+    last step before the tracked artifact is written, so the no-absolute-path
+    property is enforced by construction rather than by remembering to
+    sanitize each new field that someone adds later.
+    """
+    if isinstance(value, str):
+        return redact_absolute_paths(value)
+    if isinstance(value, dict):
+        return {key: redact_absolute_paths_deep(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_absolute_paths_deep(item) for item in value]
+    return value
+
+
+# A ``now_utc()`` helper used to live here and stamped ``metadata.generatedAt``
+# into the tracked inventory. It was removed rather than left unused: spec
+# §16.4 forbids an embedded build timestamp because it makes the artifact
+# differ on every regeneration even when nothing changed, and keeping a
+# ready-made timestamp helper around invites exactly that regression.
 
 
 def git_value(root: Path, *args: str) -> str:
@@ -385,10 +449,14 @@ def runtime_metadata(
             tools[name] = output.splitlines()[0].strip()
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             tools[name] = "unavailable"
+    # ``argv``, ``cwd`` and ``pythonExecutable`` are deliberately absent.
+    # They are absolute host paths (a scratch job directory, a nix store
+    # interpreter path) that differ per developer and per invocation while
+    # carrying no information about the suite. Recording them rewrote the
+    # tracked artifact on every regeneration, which is the same defect
+    # spec §16.4 forbids for an embedded build timestamp: it defeats
+    # byte-level comparison of the artifact.
     return {
-        "argv": sys.argv,
-        "cwd": str(Path.cwd()),
-        "pythonExecutable": sys.executable,
         "pythonVersion": platform.python_version(),
         "host": {
             "platform": platform.platform(),
@@ -1269,6 +1337,605 @@ def count_python_cases(path: Path) -> dict[str, Any]:
     return {"suiteCount": 1 if count else 0, "caseCount": count, "suites": [path.stem] if count else []}
 
 
+# ---------------------------------------------------------------------------
+# Built-binary case catalog (spec §3.2 / §6.5 ``--list-json``, §16.4 catalog)
+# ---------------------------------------------------------------------------
+#
+# The static ``count_nim_cases`` scanner above counts ``test "..."``
+# declarations in source text. That model does not match runtime
+# registration and cannot be repaired with better heuristics. To be correct
+# it would have to:
+#
+#   * evaluate ``when`` conditions — the scanner sums every branch, but
+#     only one registers (44 sources over-counted on this tree);
+#   * expand user-defined wrapper templates such as
+#     ``template gatedTest(name: string; body: untyped) = test name:`` —
+#     the scanner sees no ``test`` declaration at all and counts zero
+#     (13 sources under-counted);
+#   * evaluate loops that register a case per element, e.g.
+#     ``for example in PopulatedExamples: test "example " & example`` —
+#     one literal declaration, 71 registered cases.
+#
+# All three require being a Nim compiler.
+#
+# The built binary already knows the answer, so it is the authority here.
+# ``--list-json`` is the only surface that carries the per-case protocol
+# fields (``bodyHash``, ``group``, ``threadsRequired``, ``xfail``, ``tags``,
+# ``deterministic``); ``--catalog`` emits only ``{name: bodyHash}``. Those
+# fields are retained verbatim in the JSON inventory, which makes this the
+# first consumer of M1's catalog artifacts.
+#
+# A binary that cannot enumerate is never silently recorded as zero cases.
+# It lands in an enumerated quarantine list with a machine-readable reason,
+# so the failure stays visible and shrinkable instead of masquerading as a
+# coverage fact. Its static count is retained as `staticCaseCount` for
+# visibility but is EXCLUDED from the authoritative total: the static scan
+# sums every `when`/`else` branch, which is the very over-count this
+# rework exists to remove, so importing it here would reintroduce the bug
+# at exactly the point where the binary went silent.
+
+# Per-case protocol detail is written HERE, not into the tracked inventory.
+#
+# This artifact is deliberately UNTRACKED (build/ is gitignored) and must
+# stay that way until campaign defect #52 is fixed. `bodyHash` is a function
+# of the project's ABSOLUTE PATH: any construct that expands to a string
+# literal carrying the absolute source path (`check` via
+# `newStrLitNode(checked.lineInfo)`, `doAssert` via `instantiationInfo`) is
+# hashed verbatim by the compiler's `hashBodyTree`, so catalog hashes are
+# comparable only within one fixed project path.
+#
+# Checking these in would therefore rewrite every hash for every developer
+# and CI runner whose checkout lives at a different path — churn that
+# carries no signal and that defeats the byte-level catalog diffing spec
+# §16.4 protects when it forbids an embedded `compiled_at`.
+#
+# Once #52 is fixed and hashes are path-stable, this artifact becomes the
+# input to M6's cross-host catalog diffing. Do not "helpfully" track it
+# before then.
+DEFAULT_CASE_CATALOG = Path("build/reprobuild-suite-case-catalog.json")
+CASE_CATALOG_SCHEMA = "reprobuild-suite-case-catalog/1"
+
+CATALOG_CACHE_PATH = Path("build/reprobuild-suite-catalog-cache.json")
+# Version 2 refuses to read a version-1 cache. Version 1 stored NEGATIVE
+# results (a `timeout`, a `dynamic-link-failure`) keyed by the binary's
+# size and mtime, so one loaded host permanently pinned an environmental
+# failure into every later run on that machine. Any v1 file on disk is
+# therefore assumed poisoned and ignored rather than migrated.
+CATALOG_CACHE_VERSION = 2
+
+# Per-binary wall-clock bound for the PARALLEL probe pass.
+#
+# Sized from measurement, not taste. The slowest binary in the tree,
+# `recipes/packages/source/plasma-workspace/test_plasma_workspace_source.nim`,
+# needs ~230 s to answer `--list-json` on an idle host (it runs heavy
+# module-init work before argv parsing). The inventory suite as a whole was
+# observed taking 703 s against a ~104 s idle baseline on a contended host —
+# a ~7x inflation — which puts the contended worst case near 1,610 s. The
+# parallel bound is set above that.
+#
+# This is defence in depth ONLY. The bound existing at all is what turns a
+# slow host into a wrong answer, so the real fix is the environmental-reason
+# handling below: a `timeout` is never cached, is retried serially, and then
+# aborts the run instead of quietly joining the pinned quarantine set.
+CATALOG_PROBE_TIMEOUT_SECONDS = 1800
+# Retry bound for the SERIAL second pass. The retry runs one binary at a
+# time with the parallel pool already drained, so the host is far closer to
+# idle; the larger budget exists so that a genuinely slow binary cannot be
+# condemned twice by the same transient load.
+CATALOG_PROBE_RETRY_TIMEOUT_SECONDS = 3600
+CATALOG_PROBE_WORKERS = 16
+
+# Per-case protocol fields retained verbatim from ``--list-json``.
+CATALOG_CASE_FIELDS = (
+    "suite",
+    "name",
+    "test",
+    "file",
+    "line",
+    "column",
+    "kind",
+    "group",
+    "threadsRequired",
+    "xfail",
+    "tags",
+    "bodyHash",
+    "deterministic",
+)
+
+# Byte-scan markers mirroring ``looksProtocolAwareByStrings`` in
+# tools/test-runner/repro_test_runner.nim. A binary carrying neither marker
+# does not implement the protocol at all, which is a different fact from a
+# binary that implements it and then failed.
+CATALOG_PROTOCOL_MARKERS = (
+    b"ct_test_unittest_parallel",
+    b"unittest: --run requires a test name",
+)
+
+# Dynamic-loader failure signatures. These are ENVIRONMENT defects (the
+# binary never reached its own main), not properties of the test, and must
+# never be conflated with a missing protocol.
+DYNAMIC_LINK_MARKERS = (
+    "could not load:",                       # Nim dlopen shim
+    "error while loading shared libraries",  # glibc ld.so
+    "cannot open shared object file",        # glibc ld.so detail line
+    "Library not loaded:",                   # macOS dyld
+    "image not found",                       # macOS dyld detail line
+)
+
+QUARANTINE_REASON_DESCRIPTIONS = {
+    "dynamic-link-failure": (
+        "the dynamic loader could not resolve a shared library, so the "
+        "binary never reached its own entry point (environment defect)"
+    ),
+    "no-protocol-support": (
+        "the binary carries no protocol marker string, so it does not "
+        "implement --list-json at all"
+    ),
+    "empty-output": "--list-json exited zero but wrote nothing to stdout",
+    "nonzero-exit": "--list-json exited non-zero",
+    "timeout": "--list-json exceeded the per-binary wall-clock bound",
+    "unparseable-json": "--list-json stdout contained no decodable catalog document",
+    "malformed-catalog": "the catalog document has no `tests` array",
+}
+
+# Probe-failure taxonomy, split by WHAT THE FAILURE IS A FACT ABOUT. This
+# split is the whole point of the quarantine mechanism and every other rule
+# in this module derives from it.
+#
+# INTRINSIC — a property of the binary's own content, reproducible on any
+# host from the same bytes. It may be cached, and it may legitimately be a
+# member of the pinned quarantine set: the set is then a statement about the
+# tree, which is what a pin is for.
+INTRINSIC_QUARANTINE_REASONS = frozenset(
+    {
+        # No protocol marker in the image at all: nothing to enumerate.
+        "no-protocol-support",
+        # The binary answered and its answer is not a catalog. That is the
+        # binary's output, not the host's.
+        "unparseable-json",
+        "malformed-catalog",
+    }
+)
+
+# ENVIRONMENTAL — a property of THIS HOST or THIS RUN, not of the test. A
+# timeout is not a fact about a test; neither is a missing shared library,
+# an OOM kill surfacing as a non-zero exit, or a truncated stdout.
+#
+# Three rules, all enforced below:
+#   1. never cached — caching one makes a transient load permanent;
+#   2. always retried serially with a longer budget, because the parallel
+#      pass is exactly the condition that produces them;
+#   3. if the retry also fails, the run ABORTS with an explicit environment
+#      error. It must never silently mutate the pinned quarantine set,
+#      because that converts "this host was busy" into "this test lost
+#      coverage".
+ENVIRONMENTAL_QUARANTINE_REASONS = frozenset(
+    {
+        "timeout",
+        "dynamic-link-failure",
+        "empty-output",
+        # Ambiguous by nature (a genuinely broken binary also exits
+        # non-zero), and deliberately classified as environmental: the
+        # consequence of misclassifying it that way is a loud abort that a
+        # human resolves, while the consequence of the other choice is a
+        # silent coverage loss. Fail towards the noisy option.
+        "nonzero-exit",
+    }
+)
+
+
+class CatalogEnvironmentError(RuntimeError):
+    """A probe failed for a reason that is a fact about the host, not the tree.
+
+    Raised only after the serial retry pass has also failed. Aborting is the
+    designed outcome: the alternative is emitting an inventory whose case
+    counts silently encode how busy the machine happened to be.
+    """
+
+
+def catalog_probe_env() -> dict[str, str]:
+    """Environment for probing test binaries.
+
+    Mirrors the runtime library-path construction in scripts/run_tests.sh so
+    a probe sees exactly what the suite runner sees. Note that in the current
+    nix dev shell ``CLINGO_LIB``/``ZSTD_LIB`` are empty and the working
+    mechanism is the dev shell's own ``LD_LIBRARY_PATH``; this construction is
+    kept for parity with run_tests.sh on hosts that do set them.
+    """
+    env = dict(os.environ)
+    runtime_lib_dirs = [
+        candidate
+        for candidate in (env.get("CLINGO_LIB", ""), env.get("ZSTD_LIB", ""))
+        if candidate and Path(candidate).is_dir()
+    ]
+    if runtime_lib_dirs:
+        joined = ":".join(runtime_lib_dirs)
+        for var in (
+            "LD_LIBRARY_PATH",
+            "DYLD_LIBRARY_PATH",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+        ):
+            existing = env.get(var, "")
+            env[var] = f"{joined}:{existing}" if existing else joined
+    return env
+
+
+def binary_has_protocol_marker(path: Path) -> bool:
+    """Cheap byte-scan for a protocol marker, chunked with overlap."""
+    max_marker = max(len(marker) for marker in CATALOG_PROTOCOL_MARKERS)
+    chunk_size = 64 * 1024
+    tail = b""
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    return False
+                window = tail + chunk
+                if any(marker in window for marker in CATALOG_PROTOCOL_MARKERS):
+                    return True
+                tail = window[-max_marker:] if len(window) >= max_marker else window
+    except OSError:
+        return False
+
+
+def first_line(text: str, limit: int = 200) -> str:
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:limit]
+    return ""
+
+
+def extract_catalog_document(stdout: str) -> dict[str, Any] | None:
+    """Decode the ``--list-json`` payload out of a possibly polluted stream.
+
+    Campaign spec A-2 finding 4 (re-confirmed and unfixed) records that
+    ``--list=``/``--list-json``/``--catalog -`` are corruptible by ordinary
+    stdout: a source with a top-level ``echo`` interleaves its output with
+    the payload. The runner's own probe gives up whenever stdout does not
+    start with ``{``. Three progressively more tolerant strategies are used
+    here so leaked output degrades into a correct parse rather than a
+    spurious quarantine entry.
+    """
+    text = (stdout or "").strip()
+    if not text:
+        return None
+
+    def accept(candidate: Any) -> dict[str, Any] | None:
+        if isinstance(candidate, dict) and isinstance(candidate.get("tests"), list):
+            return candidate
+        return None
+
+    # (1) the clean case: the whole stream is the document.
+    try:
+        found = accept(json.loads(text))
+    except ValueError:
+        found = None
+    if found is not None:
+        return found
+
+    # (2) the payload is one line among leaked lines.
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{") or '"tests"' not in stripped:
+            continue
+        try:
+            found = accept(json.loads(stripped))
+        except ValueError:
+            continue
+        if found is not None:
+            return found
+
+    # (3) the payload is embedded with leading and/or trailing noise.
+    decoder = json.JSONDecoder()
+    marker = '{"tests"'
+    index = text.find(marker)
+    while index >= 0:
+        try:
+            candidate, _ = decoder.raw_decode(text[index:])
+        except ValueError:
+            candidate = None
+        found = accept(candidate) if candidate is not None else None
+        if found is not None:
+            return found
+        index = text.find(marker, index + 1)
+    return None
+
+
+def probe_binary_catalog(
+    binary_path: Path,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Enumerate one built test binary through ``--list-json``."""
+    if not binary_has_protocol_marker(binary_path):
+        return {
+            "status": "no-protocol-support",
+            "detail": "no protocol marker string present in the binary",
+        }
+    try:
+        completed = subprocess.run(
+            [str(binary_path), "--list-json"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout_seconds,
+            cwd=str(cwd),
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "timeout",
+            "detail": f"--list-json exceeded {timeout_seconds}s",
+        }
+    except OSError as exc:
+        return {"status": "nonzero-exit", "detail": f"could not execute: {exc}"}
+
+    stderr = completed.stderr or ""
+    # The loader check comes first: a link failure can surface as any exit
+    # code, and misreading it as "no protocol" is precisely the error this
+    # quarantine taxonomy exists to prevent.
+    if any(marker in stderr for marker in DYNAMIC_LINK_MARKERS):
+        return {"status": "dynamic-link-failure", "detail": first_line(stderr)}
+    # TWO-CHANNEL RULE (shared with tools/test-runner/repro_test_runner.nim;
+    # keep the two in step).
+    #
+    # A component that reads two status channels for the same fact — here
+    # the process exit code and the `--list-json` document on stdout —
+    # must never ABSORB a disagreement between them. It may choose which
+    # channel labels the individual item, but a disagreement has to reach
+    # the aggregate outcome.
+    #
+    # The runner resolves the per-case label towards the result document
+    # (the case's own first-hand account) and now makes any disagreement
+    # force a non-zero aggregate exit. This probe resolves the per-binary
+    # label towards the exit code, because a non-zero exit from a program
+    # asked only to print its catalog means the enumeration itself is
+    # untrustworthy, whatever landed on stdout. The two resolutions differ;
+    # the invariant does not, because `nonzero-exit` is classified
+    # ENVIRONMENTAL and therefore aborts the run rather than degrading the
+    # source to a static count.
+    if completed.returncode != 0:
+        return {
+            "status": "nonzero-exit",
+            "detail": f"exit {completed.returncode}: {first_line(stderr)}".strip(),
+        }
+
+    document = extract_catalog_document(completed.stdout or "")
+    if document is None:
+        if not (completed.stdout or "").strip():
+            return {"status": "empty-output", "detail": first_line(stderr)}
+        return {"status": "unparseable-json", "detail": first_line(completed.stdout)}
+
+    cases: list[dict[str, Any]] = []
+    for entry in document["tests"]:
+        if not isinstance(entry, Mapping):
+            return {"status": "malformed-catalog", "detail": "non-object test entry"}
+        cases.append({field: entry.get(field) for field in CATALOG_CASE_FIELDS})
+    return {"status": "ok", "cases": cases}
+
+
+def binary_cache_key(path: Path) -> str | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return f"{info.st_size}:{info.st_mtime_ns}"
+
+
+def load_catalog_cache(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("version") != CATALOG_CACHE_VERSION:
+        return {}
+    entries = payload.get("entries")
+    return entries if isinstance(entries, dict) else {}
+
+
+def store_catalog_cache(path: Path, entries: dict[str, Any]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {"version": CATALOG_CACHE_VERSION, "entries": entries},
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        # The cache is an optimization only; losing it costs time, not
+        # correctness, so a read-only or full filesystem must not abort the run.
+        pass
+
+
+def specs_digest(specs: list[TestSpec]) -> str:
+    """Identity of the spec set a catalog index was built for.
+
+    Part of the memo key. Without it, ``catalog_index`` returns whatever
+    the FIRST caller in the process asked for: a one-spec probe (the
+    missing-binary regression test) would satisfy a later full-tree call,
+    every real source would degrade to ``missing-binary``, and the whole
+    inventory would silently revert to the static scan the binary-as-
+    authority rework exists to replace.
+    """
+    digest = hashlib.sha256()
+    for spec in specs:
+        digest.update(spec.source.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((spec.binary or "").encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((spec.language or "").encode("utf-8"))
+        digest.update(b"\0\0")
+    return digest.hexdigest()
+
+
+_CATALOG_INDEX_MEMO: dict[tuple[str, str, int, int, bool], dict[str, Any]] = {}
+
+
+def catalog_index(
+    root: Path,
+    specs: list[TestSpec],
+    timeout_seconds: int = CATALOG_PROBE_TIMEOUT_SECONDS,
+    workers: int = CATALOG_PROBE_WORKERS,
+    use_cache: bool = True,
+    retry_timeout_seconds: int = CATALOG_PROBE_RETRY_TIMEOUT_SECONDS,
+) -> dict[str, dict[str, Any]]:
+    """Probe every built test binary, memoized per process and cached on disk.
+
+    Probing 1200+ binaries costs a few minutes of wall time on a cold cache
+    (a handful of ``recipes/packages/source/*`` binaries run heavy module-init
+    work before argv parsing; one takes almost four minutes on its own). The
+    on-disk cache is keyed by each binary's size and mtime, so a rebuild
+    re-probes exactly the binaries that changed and nothing else.
+
+    Three properties this function is required to hold:
+
+    * **Only successful probes are cached.** A cached failure is a lie about
+      the tree that survives the condition that produced it.
+    * **Environmental failures are retried serially** with a longer budget
+      before being believed, because a contended parallel pass is the
+      dominant cause of them.
+    * **A surviving environmental failure aborts** via
+      ``CatalogEnvironmentError``. Degrading to a static count would encode
+      host load as a coverage fact.
+
+    The probe runs each binary with ``cwd`` set to a scratch directory, never
+    the repo root: test binaries have been observed dropping stray files
+    (``test_kglobalaccel_source_linkerArgs.txt``) into their working
+    directory, and ``source_fingerprint`` hashes untracked files, so probing
+    in-tree let the measurement change the fingerprint it was recording.
+    """
+    memo_key = (
+        str(root),
+        specs_digest(specs),
+        timeout_seconds,
+        workers,
+        use_cache,
+    )
+    memoized = _CATALOG_INDEX_MEMO.get(memo_key)
+    if memoized is not None:
+        return memoized
+
+    cache_path = root / CATALOG_CACHE_PATH
+    cached = load_catalog_cache(cache_path) if use_cache else {}
+    env = catalog_probe_env()
+
+    results: dict[str, dict[str, Any]] = {}
+    pending: list[tuple[str, Path]] = []
+    for spec in specs:
+        if spec.language != "nim" or not spec.binary:
+            continue
+        binary_path = root / spec.binary
+        key = binary_cache_key(binary_path)
+        if key is None:
+            results[spec.source] = {
+                "status": "missing-binary",
+                "detail": "no built binary under build/test-bin",
+            }
+            continue
+        entry = cached.get(spec.source)
+        if (
+            use_cache
+            and isinstance(entry, dict)
+            and entry.get("key") == key
+            and isinstance(entry.get("result"), dict)
+            # Defence in depth behind ``store_catalog_cache``: even a cache
+            # written by an older or hand-edited version cannot replay a
+            # failure. Only an ``ok`` entry is ever reused.
+            and entry["result"].get("status") == "ok"
+        ):
+            results[spec.source] = entry["result"]
+            continue
+        pending.append((spec.source, binary_path))
+
+    with tempfile.TemporaryDirectory(prefix="repro-catalog-probe-") as scratch:
+        probe_cwd = Path(scratch)
+        if pending:
+            from concurrent.futures import ThreadPoolExecutor
+
+            def run_one(item: tuple[str, Path]) -> tuple[str, dict[str, Any]]:
+                source, binary_path = item
+                return source, probe_binary_catalog(
+                    binary_path, probe_cwd, env, timeout_seconds
+                )
+
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+                for source, outcome in pool.map(run_one, pending):
+                    results[source] = outcome
+
+        # Serial retry pass. Environmental failures are the ones the
+        # parallel pass itself can manufacture, so they are re-measured
+        # with the pool drained and a longer budget before being believed.
+        retried: dict[str, dict[str, Any]] = {}
+        by_source = {spec.source: spec for spec in specs}
+        for source in sorted(results):
+            outcome = results[source]
+            if outcome.get("status") not in ENVIRONMENTAL_QUARANTINE_REASONS:
+                continue
+            spec = by_source.get(source)
+            if spec is None or not spec.binary:
+                continue
+            print(
+                "reprobuild_suite_inventory: re-probing "
+                f"{source} serially after an environmental failure "
+                f"({outcome.get('status')}); budget {retry_timeout_seconds}s",
+                file=sys.stderr,
+            )
+            second = probe_binary_catalog(
+                root / spec.binary, probe_cwd, env, retry_timeout_seconds
+            )
+            results[source] = second
+            retried[source] = second
+
+    surviving = {
+        source: outcome
+        for source, outcome in retried.items()
+        if outcome.get("status") in ENVIRONMENTAL_QUARANTINE_REASONS
+    }
+    if surviving:
+        details = "; ".join(
+            f"{source}: {outcome.get('status')} "
+            f"({outcome.get('detail', '')})"
+            for source, outcome in sorted(surviving.items())
+        )
+        raise CatalogEnvironmentError(
+            f"{len(surviving)} test binaries failed --list-json for "
+            "environmental reasons on both the parallel and the serial "
+            f"retry pass (retry budget {retry_timeout_seconds}s): {details}. "
+            "These are facts about this host, not about the suite, so the "
+            "inventory refuses to record them as quarantined coverage. "
+            "Re-run on an idle host inside the nix dev shell "
+            "(`direnv exec .`)."
+        )
+
+    if use_cache:
+        refreshed = dict(cached)
+        for spec in specs:
+            if spec.language != "nim" or not spec.binary:
+                continue
+            outcome = results.get(spec.source)
+            key = binary_cache_key(root / spec.binary)
+            if outcome is None or key is None:
+                continue
+            # NEVER cache a non-ok probe. A cached `timeout` replays a
+            # busy afternoon into every future run on the machine, and
+            # there is no way to tell from the cache entry that it was
+            # ever transient. A stale POSITIVE cannot happen: the key is
+            # the binary's size and mtime.
+            if outcome.get("status") != "ok":
+                refreshed.pop(spec.source, None)
+                continue
+            refreshed[spec.source] = {"key": key, "result": outcome}
+        store_catalog_cache(cache_path, refreshed)
+
+    _CATALOG_INDEX_MEMO[memo_key] = results
+    return results
+
+
 def nim_next_token(tokens: list[NimToken], position: int) -> int | None:
     position += 1
     while position < len(tokens) and tokens[position].kind == "newline":
@@ -2008,7 +2675,28 @@ def summarize_runner(summary_path: Path) -> dict[str, Any] | None:
     tests = doc.get("tests", [])
     slowest = sorted(tests, key=lambda item: item.get("duration_ms", 0), reverse=True)[:20]
     protocol_aware = [t for t in tests if t.get("protocol_aware")]
-    failed = [t for t in tests if t.get("status") not in ("PASS", "SKIP")]
+    failed = [t for t in tests if t.get("status") == "FAIL"]
+    # A case the runner could not START is a distinct outcome from a case
+    # that ran and failed (repro_test_runner ``TestStatus.tsHarnessError``
+    # / summary ``harness_errors``). Rolling it into ``failedTests`` here
+    # would re-merge, in the consumer, the distinction the producer just
+    # went to the trouble of making.
+    harness_errors = [t for t in tests if t.get("status") == "ERROR"]
+    other = [
+        t for t in tests
+        if t.get("status") not in ("PASS", "SKIP", "FAIL", "ERROR")
+    ]
+    # EVERY case must be nameable from this artifact alone. The whole
+    # point of a machine-readable summary is that a gate does not have to
+    # grep a console log to learn which case it is looking at; an entry
+    # with no ``name`` silently pushes verification back to log-grepping,
+    # which is how a "zero skips" conclusion once survived three runs
+    # that each carried 176 skips. Surfaced as data rather than raised so
+    # that inspecting a damaged artifact stays possible.
+    unnamed = [
+        t for t in tests
+        if not isinstance(t.get("name"), str) or not t.get("name").strip()
+    ]
     return {
         "path": str(summary_path),
         "summary": doc.get("summary", {}),
@@ -2016,6 +2704,10 @@ def summarize_runner(summary_path: Path) -> dict[str, Any] | None:
         "wholeBinaryCases": len(tests) - len(protocol_aware),
         "slowestTests": slowest,
         "failedTests": failed,
+        "harnessErrorTests": harness_errors,
+        "unrecognizedStatusTests": other,
+        "unnamedCaseCount": len(unnamed),
+        "unnamedCases": unnamed[:20],
         "warmReviewCandidates": [t for t in tests if t.get("duration_ms", 0) > 20_000],
     }
 
@@ -2041,16 +2733,8 @@ def count_executable_files(path: Path) -> int | None:
 
 
 def footprint(root: Path) -> dict[str, Any]:
-    paths = [
-        "build/bin",
-        "build/test-bin",
-        "build/nimcache",
-        "build/lib",
-        ".repro",
-        "test-logs/results",
-    ]
     entries = []
-    for item in paths:
+    for item in FOOTPRINT_PATHS:
         p = root / item
         entries.append({"path": item, "kib": du_kib(p), "executableFiles": count_executable_files(p)})
     total = sum(e["kib"] for e in entries if isinstance(e["kib"], int))
@@ -2421,7 +3105,36 @@ def run_suite(root: Path, warm_runs: int, clean_first: bool, timeout_seconds: in
     }
 
 
-def build_inventory(root: Path, run_data: dict[str, Any] | None) -> dict[str, Any]:
+def catalog_count_source(outcome: dict[str, Any] | None) -> str:
+    """Label the provenance of one Nim source's case count.
+
+    Four distinct labels, deliberately not three:
+
+    ``catalog``        the built binary enumerated itself (authoritative);
+    ``missing-binary`` no binary was built, so nothing could enumerate;
+    ``quarantined``    a binary exists and could not enumerate;
+    ``static``         no probe was attempted at all (``--no-catalog``).
+
+    ``missing-binary`` used to be folded into ``static``, which made it
+    indistinguishable from a Python file that legitimately has no binary —
+    a build gap and a language property reported with the same word.
+    """
+    if outcome is None:
+        return "static"
+    status = outcome.get("status")
+    if status == "ok":
+        return "catalog"
+    if status == "missing-binary":
+        return "missing-binary"
+    return "quarantined"
+
+
+def build_inventory(
+    root: Path,
+    run_data: dict[str, Any] | None,
+    use_catalog: bool = True,
+    use_catalog_cache: bool = True,
+) -> dict[str, Any]:
     nim_specs, py_specs = parse_repro_tests(root)
     all_specs = nim_specs + py_specs
     tests = []
@@ -2429,11 +3142,80 @@ def build_inventory(root: Path, run_data: dict[str, Any] | None) -> dict[str, An
     class_counts: dict[str, int] = {}
     source_case_count = 0
 
+    catalog = (
+        catalog_index(root, nim_specs, use_cache=use_catalog_cache)
+        if use_catalog
+        else {}
+    )
+    quarantine: list[dict[str, Any]] = []
+    count_source_counts: dict[str, int] = {}
+
     for spec in all_specs:
         source_path = root / spec.source
         text = read_text(source_path)
         case_info = count_python_cases(source_path) if spec.language == "python" else count_nim_cases(text)
-        source_case_count += case_info["caseCount"]
+        static_case_count = case_info["caseCount"]
+
+        # Authoritative case count. The built binary wins whenever it can
+        # enumerate; otherwise the static scan is used and the entry is
+        # explicitly labelled so no reader can mistake one mechanism for the
+        # other. A failed probe never silently becomes zero.
+        catalog_cases: list[dict[str, Any]] | None = None
+        catalog_suite_count: int | None = None
+        quarantine_reason = ""
+        if spec.language == "python":
+            count_source = "static"
+        else:
+            outcome = catalog.get(spec.source)
+            count_source = catalog_count_source(outcome)
+            if count_source == "catalog":
+                catalog_cases = outcome["cases"]
+                catalog_suite_count = len(
+                    {case.get("suite") or "" for case in catalog_cases}
+                )
+            elif count_source == "quarantined":
+                quarantine_reason = str(outcome.get("status", "unknown"))
+                quarantine.append(
+                    {
+                        "source": spec.source,
+                        "binary": spec.binary,
+                        "reason": quarantine_reason,
+                        "reasonDescription": QUARANTINE_REASON_DESCRIPTIONS.get(
+                            quarantine_reason, "unclassified probe failure"
+                        ),
+                        # Sanitized: a loader failure's first stderr line
+                        # names an absolute `.so` path, and this record is
+                        # carried into the TRACKED artifact.
+                        "detail": redact_absolute_paths(
+                            str(outcome.get("detail", ""))
+                        ),
+                        "staticCaseCount": static_case_count,
+                    }
+                )
+
+        if catalog_cases is not None:
+            case_count = len(catalog_cases)
+        elif count_source == "quarantined":
+            # A quarantined source contributes NOTHING to the authoritative
+            # total. The binary is the enumeration authority; when it cannot
+            # answer, the honest number is "unknown", and substituting the
+            # static scan is precisely the `when`-branch over-count this
+            # rework exists to remove.
+            #
+            # Concretely: t_n7_multicast_windows_smoke.nim wraps its whole
+            # body in `when defined(windows)` with `else: discard`, so it
+            # registers 0 cases on Linux while the static scanner sees 1.
+            # Feeding that 1 into the total made the pinned Nim total 6821
+            # against a true registered total of 6820 — the number the
+            # independent `--list` cross-check produces. The static count
+            # stays visible
+            # as `staticCaseCount`; it just no longer votes.
+            case_count = 0
+        else:
+            case_count = static_case_count
+        count_source_counts[count_source] = count_source_counts.get(count_source, 0) + 1
+        source_case_count += case_count
+
         compiles = compiler_invocations(spec.source, text)
         category, reason = classify(spec, text, compiles)
         class_counts[category] = class_counts.get(category, 0) + 1
@@ -2445,22 +3227,91 @@ def build_inventory(root: Path, run_data: dict[str, Any] | None) -> dict[str, An
                     "matches": compiles,
                 }
             )
-        tests.append(
-            {
-                "source": spec.source,
-                "binary": spec.binary,
-                "language": spec.language,
-                "owner": spec.owner,
-                "defines": spec.defines,
-                "requiresReproBinary": spec.requires_repro_binary,
-                "targetOs": spec.target_os,
-                "sourceCaseCount": case_info["caseCount"],
-                "sourceSuiteCount": case_info["suiteCount"],
-                "class": category,
-                "classificationReason": reason,
-                "staticallyDetectedRuntimeCompilerFlow": bool(compiles),
-                "localDependencyShape": local_dependency_shape(spec, text),
-            }
+        entry: dict[str, Any] = {
+            "source": spec.source,
+            "binary": spec.binary,
+            "language": spec.language,
+            "owner": spec.owner,
+            "defines": spec.defines,
+            "requiresReproBinary": spec.requires_repro_binary,
+            "targetOs": spec.target_os,
+            "sourceCaseCount": case_count,
+            "countSource": count_source,
+            "staticCaseCount": static_case_count,
+            "sourceSuiteCount": case_info["suiteCount"],
+            "class": category,
+            "classificationReason": reason,
+            "staticallyDetectedRuntimeCompilerFlow": bool(compiles),
+            "localDependencyShape": local_dependency_shape(spec, text),
+        }
+        if quarantine_reason:
+            entry["quarantineReason"] = quarantine_reason
+        if catalog_cases is not None:
+            entry["catalogSuiteCount"] = catalog_suite_count
+            entry["catalogCases"] = catalog_cases
+        tests.append(entry)
+
+    quarantine.sort(key=lambda item: item["source"])
+    quarantine_reason_counts: dict[str, int] = {}
+    for item in quarantine:
+        quarantine_reason_counts[item["reason"]] = (
+            quarantine_reason_counts.get(item["reason"], 0) + 1
+        )
+    # A mass dynamic-link failure means the probe ran outside the nix dev
+    # shell, not that the suite lost coverage. Surfacing it as an ordinary
+    # quarantine would let an environment problem be read as a coverage fact,
+    # which is the same class of error the catalog rework exists to remove.
+    #
+    # This count is now structurally zero: `dynamic-link-failure` is an
+    # ENVIRONMENTAL reason, so `catalog_index` retries it serially and then
+    # raises `CatalogEnvironmentError` rather than returning it. The field
+    # and its note are retained as a second line of defence — if an
+    # environmental reason ever reaches this code again, it is still
+    # reported as an environment defect and never as coverage.
+    dynamic_link_failures = quarantine_reason_counts.get("dynamic-link-failure", 0)
+    catalog_enumeration = {
+        "method": "built binary --list-json (spec §3.2/§6.5)",
+        "retainedCaseFields": list(CATALOG_CASE_FIELDS),
+        "probeTimeoutSeconds": CATALOG_PROBE_TIMEOUT_SECONDS,
+        "probeRetryTimeoutSeconds": CATALOG_PROBE_RETRY_TIMEOUT_SECONDS,
+        "cacheEnabled": use_catalog_cache,
+        # The taxonomy is published in the artifact so a reader can tell,
+        # without reading this script, which quarantine memberships are
+        # claims about the tree and which could never have been recorded.
+        "intrinsicQuarantineReasons": sorted(INTRINSIC_QUARANTINE_REASONS),
+        "environmentalQuarantineReasons": sorted(
+            ENVIRONMENTAL_QUARANTINE_REASONS
+        ),
+        "environmentalReasonPolicy": (
+            "never cached, retried serially with a longer budget, and if "
+            "still failing the run aborts; an environmental failure may not "
+            "join the quarantine set or change any case count"
+        ),
+        "quarantinedCasesExcludedFromTotal": True,
+        "enabled": use_catalog,
+        "countSourceCounts": count_source_counts,
+        "quarantineCount": len(quarantine),
+        "quarantineReasonCounts": quarantine_reason_counts,
+        "quarantine": quarantine,
+        "dynamicLinkFailureCount": dynamic_link_failures,
+        "environmentDegraded": dynamic_link_failures > 0,
+        "environmentNote": (
+            (
+                f"{dynamic_link_failures} binaries could not be dynamically "
+                "linked. This inventory was probed WITHOUT the nix dev-shell "
+                "runtime library path; the affected counts fell back to the "
+                "static scan and are an environment defect, not a coverage "
+                "fact. Re-run under `direnv exec .`."
+            )
+            if dynamic_link_failures
+            else ""
+        ),
+    }
+    if dynamic_link_failures:
+        print(
+            "reprobuild_suite_inventory: WARNING: "
+            + catalog_enumeration["environmentNote"],
+            file=sys.stderr,
         )
 
     consolidation_candidates = []
@@ -2634,9 +3485,15 @@ def build_inventory(root: Path, run_data: dict[str, Any] | None) -> dict[str, An
     }
 
     return {
+        # ``generatedAt`` and an absolute ``repoRoot`` are deliberately
+        # absent. Spec §16.4 forbids an embedded build timestamp precisely
+        # because it makes the document differ on every regeneration even
+        # when nothing changed, defeating byte-level comparison; an absolute
+        # repo root is the same defect keyed on checkout location instead of
+        # wall-clock. ``head``/``branch``/``sourceFingerprint`` below already
+        # identify exactly which tree produced this artifact.
         "metadata": {
-            "generatedAt": now_utc(),
-            "repoRoot": str(root),
+            "repoRoot": ".",
             "head": git_value(root, "rev-parse", "HEAD"),
             "headShort": git_value(root, "rev-parse", "--short", "HEAD"),
             "branch": git_value(root, "branch", "--show-current"),
@@ -2653,6 +3510,7 @@ def build_inventory(root: Path, run_data: dict[str, Any] | None) -> dict[str, An
             "classificationCounts": class_counts,
             "graphOwnedTestArtifacts": parse_graph_owned_artifacts(root),
         },
+        "catalogEnumeration": catalog_enumeration,
         "tests": tests,
         "staticallyDetectedRuntimeCompilerFlows": helper_compiles,
         "runtimeCompilerFlowDetection": {
@@ -2711,7 +3569,25 @@ def fmt_ms(value: int | float | None) -> str:
 
 
 def failure_excerpt(item: dict[str, Any], max_len: int = 220) -> str:
-    output = item.get("stdout") or item.get("stderr") or ""
+    # Order matters: prefer the case's OWN account over free-form output.
+    #
+    # A per-case child runs `<binary> --run "<case>"`, which puts the
+    # unittest fork into pmRun -- a mode that registers no console
+    # formatter -- so the child prints nothing and `stdout` is empty for
+    # every ordinary assertion failure. Reading only stdout/stderr
+    # therefore rendered a BLANK excerpt for exactly the failures a
+    # reader opens this report to understand, while still filling in for
+    # the runner-synthesised harness-fault text. `checkpoints`,
+    # `exception` and `harness_error` come from the result document and
+    # are the only channels a per-case failure has.
+    parts = [
+        "\n".join(item.get("checkpoints") or []),
+        item.get("exception") or "",
+        item.get("harness_error") or "",
+        item.get("stdout") or "",
+        item.get("stderr") or "",
+    ]
+    output = "\n".join(part for part in parts if part)
     if not output:
         return ""
     lines = [line.strip() for line in output.splitlines() if line.strip()]
@@ -2731,9 +3607,468 @@ def failure_excerpt(item: dict[str, Any], max_len: int = 220) -> str:
     return excerpt.replace("|", "\\|")
 
 
-def render_report(data: dict[str, Any], json_path: str) -> str:
+FAILURE_SECTION_GROUPS = (
+    ("failedTests", "Tests that ran and failed."),
+    (
+        "harnessErrorTests",
+        "Cases the harness could not run (ERROR). These are statements "
+        "about the run, not about the tree; each one still fails the run.",
+    ),
+    (
+        "unrecognizedStatusTests",
+        "Cases reporting a status this runner does not recognise "
+        "(a protocol violation in the test binary).",
+    ),
+)
+
+
+def render_failed_tests_section(
+    latest_runner: dict[str, Any] | None,
+) -> list[str]:
+    """Render "## Failed Tests" covering EVERY non-passing outcome.
+
+    `summarize_runner` deliberately splits the runner's three non-passing
+    outcomes -- FAIL (the case ran and failed), ERROR (the harness could
+    not obtain a verdict) and an unrecognized status (a protocol
+    violation) -- because they demand different responses. This section
+    used to render `failedTests` alone, so a run that exited NON-ZERO
+    purely on harness errors printed "No failed tests were reported" into
+    the tracked baseline, and `harnessErrorTests` /
+    `unrecognizedStatusTests` rendered nowhere at all. The split closed a
+    hole in the runner and opened the same green-over-red hole one layer
+    up, in the artifact a reader actually reads.
+
+    The "nothing to report" sentence is now owed to all three groups
+    being empty, so a green sentence can never outrank a red run.
+
+    Split out of `render_report` so this rule can be asserted directly
+    rather than through a full inventory build.
+    """
+    lines: list[str] = ["## Failed Tests", ""]
+    if not latest_runner:
+        lines.append(
+            "No runner summary is available, so failed-test details are "
+            "not measured."
+        )
+        return lines
+    rendered_any = False
+    for key, caption in FAILURE_SECTION_GROUPS:
+        items = latest_runner.get(key) or []
+        if not items:
+            continue
+        rendered_any = True
+        lines.append(caption)
+        lines.append("")
+        rows = []
+        for item in items:
+            rows.append(
+                [
+                    item.get("qualified_name", ""),
+                    item.get("binary_stem", ""),
+                    fmt_ms(item.get("duration_ms")),
+                    item.get("status", ""),
+                    failure_excerpt(item),
+                ]
+            )
+        lines.extend(
+            md_table(["Test", "Binary", "Duration", "Status", "Excerpt"], rows)
+        )
+        lines.append("")
+    if not rendered_any:
+        lines.append(
+            "No failed tests, harness errors or unrecognized statuses were "
+            "reported in the latest runner summary."
+        )
+    return lines
+
+
+def split_case_catalog(
+    data: dict[str, Any],
+    case_catalog_path: Path,
+    environment_report_path: Path = DEFAULT_ENVIRONMENT_REPORT,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Separate the tracked inventory from the build-local case detail.
+
+    Returns ``(tracked, detail)``. The in-memory ``data`` is left untouched
+    so callers that need the full structure (the inventory's own tests,
+    which assert per-case identity against each binary's ``--list``) keep
+    seeing it.
+
+    The tracked half retains everything the suite's gates depend on and that
+    is stable across checkout paths: per-source `sourceCaseCount`,
+    `staticCaseCount`, `countSource`, `catalogSuiteCount`, the enumerated
+    quarantine with reason codes, the classification aggregates and totals.
+
+    The detail half carries the per-case protocol fields — `bodyHash`,
+    `group`, `tags`, `threadsRequired`, `xfail`, `deterministic`, `line`,
+    `column` and the case names. See DEFAULT_CASE_CATALOG for why that half
+    must not be tracked.
+
+    The detail half ALSO carries every measurement that is a property of the
+    machine rather than of the tree, because the tracked artifact claims
+    byte-level reproducibility and these fields silently broke that claim:
+
+    * ``footprint`` — a ``du`` over ``build/bin``, ``build/test-bin`` and
+      ``build/nimcache`` (multi-GiB). It changes on every build, so the
+      tracked artifact changed on every build.
+    * ``metadata.runtime.environment`` — ``/nix/store/...`` values, absolute
+      and per-evaluation. Not under the repo root, so a guard that only
+      looked for ``$REPO_ROOT`` never saw them.
+    * ``metadata.runtime.host`` — kernel and glibc version, CPU count.
+    * ``metadata.runtime.tools`` — git/nim/nix/python versions.
+    * ``metadata.runtime.sourceCheckouts`` — absolute sibling checkout paths
+      and their working-tree status.
+
+    What survives into the tracked half from that block is the part that is
+    a fact about the *inputs* rather than the *host*: each external
+    checkout's revision, keyed by name, with no path.
+    """
+    tracked = dict(data)
+    tracked_tests: list[dict[str, Any]] = []
+    sources: dict[str, Any] = {}
+    for item in data.get("tests", []):
+        entry = dict(item)
+        cases = entry.pop("catalogCases", None)
+        if cases is not None:
+            sources[entry["source"]] = {
+                "binary": entry.get("binary", ""),
+                "caseCount": len(cases),
+                "cases": cases,
+            }
+        tracked_tests.append(entry)
+    tracked["tests"] = tracked_tests
+
+    catalog_enumeration = dict(tracked.get("catalogEnumeration", {}))
+    if catalog_enumeration:
+        catalog_enumeration["caseDetailPath"] = case_catalog_path.as_posix()
+        catalog_enumeration["caseDetailTracked"] = False
+        catalog_enumeration["caseDetailUntrackedReason"] = (
+            "bodyHash is a function of the project's absolute path "
+            "(campaign defect #52), so tracking per-case detail would "
+            "rewrite every hash per checkout path and defeat byte-level "
+            "catalog diffing"
+        )
+        tracked["catalogEnumeration"] = catalog_enumeration
+
+    # --- host-dependent halves move out of the tracked document ----------
+    build_footprint = tracked.pop("footprint", None)
+    metadata = dict(tracked.get("metadata", {}))
+    runtime = dict(metadata.pop("runtime", {}) or {})
+    checkouts = runtime.get("sourceCheckouts", {}) or {}
+    metadata["sourceCheckoutRevisions"] = {
+        name: {
+            "head": entry.get("head", ""),
+            "branch": entry.get("branch", ""),
+            "dirty": bool(entry.get("dirty", False)),
+        }
+        for name, entry in sorted(checkouts.items())
+    }
+    # ``git status --short`` names every dirty path in the checkout that
+    # generated the run. This repository is public and this artifact is
+    # tracked, so a regeneration from a working tree would publish local
+    # scratch filenames verbatim. Only the fact of dirtiness is a property of
+    # the run worth recording; the file list is not. Same reduction the
+    # sibling checkouts above already get.
+    repo_status = metadata.pop("status", "")
+    metadata["dirty"] = repo_status not in ("", "unknown")
+    metadata["runtimeDetailPath"] = case_catalog_path.as_posix()
+    metadata["environmentReportPath"] = environment_report_path.as_posix()
+    metadata["runtimeDetailTracked"] = False
+    metadata["runtimeDetailReason"] = (
+        "footprint, host, tool versions, the recorded environment and the "
+        "sibling-checkout paths are properties of the machine and of the "
+        "moment, not of the tree; keeping them here made the tracked "
+        "artifact differ on every build and every host, which is the defect "
+        "spec §16.4 forbids for an embedded build timestamp"
+    )
+    tracked["metadata"] = metadata
+
+    detail = {
+        "schema": CASE_CATALOG_SCHEMA,
+        "tracked": False,
+        "note": (
+            "Build-local artifact. NOT tracked in git: bodyHash depends on "
+            "the absolute project path (campaign defect #52), so these "
+            "values are comparable only within one fixed checkout path. "
+            "Once #52 is fixed this becomes the input to M6 cross-host "
+            "catalog diffing. This artifact also holds the host-dependent "
+            "measurements (footprint, environment, host, tools, checkout "
+            "paths) that must not enter the tracked inventory."
+        ),
+        "head": data.get("metadata", {}).get("head", ""),
+        "sourceFingerprint": data.get("metadata", {}).get(
+            "sourceFingerprint", ""
+        ),
+        "retainedCaseFields": list(CATALOG_CASE_FIELDS),
+        "sourceCount": len(sources),
+        "caseCount": sum(item["caseCount"] for item in sources.values()),
+        "sources": sources,
+        "runtime": runtime,
+        "footprint": build_footprint,
+    }
+    # Enforced by construction, not by remembering: whatever any future
+    # field carries, the tracked half leaves with no absolute path in it.
+    tracked = redact_absolute_paths_deep(tracked)
+    return tracked, detail
+
+
+def render_catalog_enumeration(data: dict[str, Any]) -> list[str]:
+    """Render the case-enumeration provenance and the quarantine list.
+
+    The quarantine is enumerated in full, never summarized to a number: it is
+    the mechanism by which a binary that cannot enumerate stays visible and
+    shrinkable instead of silently contributing a zero or an unlabelled
+    static count.
+    """
+    catalog = data.get("catalogEnumeration")
+    lines: list[str] = ["## Case Enumeration Provenance", ""]
+    if not catalog:
+        lines.extend(["Not recorded in this inventory.", ""])
+        return lines
+
+    if not catalog.get("enabled", True):
+        lines.append(
+            "Catalog enumeration was DISABLED for this run (`--no-catalog`); "
+            "every count below comes from the static source scan."
+        )
+        lines.append("")
+
+    counts = catalog.get("countSourceCounts", {})
+    lines.append(
+        "Case counts come from each built binary's `--list-json` catalog "
+        "(spec §3.2/§6.5). The static source scan is a labelled fallback only: "
+        "it sums every `when`/`else` branch and cannot see cases declared "
+        "through wrapper templates."
+    )
+    lines.append("")
+    lines.extend(
+        md_table(
+            ["Count source", "Test entries", "Meaning"],
+            [
+                [
+                    "catalog",
+                    str(counts.get("catalog", 0)),
+                    "authoritative: enumerated from the built binary",
+                ],
+                [
+                    "static",
+                    str(counts.get("static", 0)),
+                    "Python file, or probing disabled; counted by source scan",
+                ],
+                [
+                    "missing-binary",
+                    str(counts.get("missing-binary", 0)),
+                    "Nim source with no built binary; counted by source scan",
+                ],
+                [
+                    "quarantined",
+                    str(counts.get("quarantined", 0)),
+                    "binary exists but could not enumerate; contributes 0 "
+                    "cases to the total",
+                ],
+            ],
+        )
+    )
+    lines.append("")
+    lines.append(
+        "Retained per-case protocol fields: "
+        + ", ".join(f"`{field}`" for field in catalog.get("retainedCaseFields", []))
+        + "."
+    )
+    lines.append("")
+    if catalog.get("caseDetailPath"):
+        lines.append(
+            f"Per-case detail is written to `{catalog['caseDetailPath']}`, "
+            "which is build-local and **deliberately untracked**: "
+            + catalog.get("caseDetailUntrackedReason", "")
+            + ". This report and the tracked inventory keep only "
+            "path-stable counts."
+        )
+        lines.append("")
+
+    if catalog.get("environmentDegraded"):
+        lines.append("> [!WARNING]")
+        lines.append("> " + catalog.get("environmentNote", ""))
+        lines.append("")
+
+    quarantine = catalog.get("quarantine", [])
+    lines.append(f"### Quarantined binaries ({len(quarantine)})")
+    lines.append("")
+    if not quarantine:
+        lines.append("None: every built test binary enumerated its cases.")
+        lines.append("")
+        return lines
+    lines.append(
+        "A quarantined binary contributes **0** cases to the authoritative "
+        "total. Its static scan is shown for visibility only: substituting "
+        "it is exactly the `when`/`else` over-count that made the binary the "
+        "enumeration authority in the first place."
+    )
+    lines.append("")
+    lines.extend(
+        md_table(
+            ["Source", "Reason", "Static count (excluded)", "Detail"],
+            [
+                [
+                    f"`{item['source']}`",
+                    f"`{item['reason']}`",
+                    str(item["staticCaseCount"]),
+                    (item.get("detail") or "").replace("|", "\\|")[:120],
+                ]
+                for item in quarantine
+            ],
+        )
+    )
+    lines.append("")
+    lines.append("Reason codes:")
+    lines.append("")
+    for reason in sorted(catalog.get("quarantineReasonCounts", {})):
+        lines.append(
+            f"- `{reason}` ({catalog['quarantineReasonCounts'][reason]}): "
+            + QUARANTINE_REASON_DESCRIPTIONS.get(reason, "unclassified")
+        )
+    lines.append("")
+    return lines
+
+
+def render_environment_report(
+    data: dict[str, Any], build_local: dict[str, Any] | None = None
+) -> str:
+    """The human-readable measurement environment — BUILD-LOCAL, untracked.
+
+    Everything the tracked baseline report used to carry and could not keep
+    stable: the recorded environment (absolute ``/nix/store`` values), the
+    host's kernel and glibc version, the tool versions, the sibling
+    checkout paths, and a ``du`` over ``build/`` — 5.5 GiB of nimcache that
+    changes on every build.
+
+    The information is not lost, it is relocated. A reader who wants to
+    know which machine produced a measurement reads this file; a reader
+    diffing two checkouts byte-for-byte reads the tracked one.
+    """
+    metadata = data.get("metadata", {})
+    runtime = (build_local or {}).get("runtime") or metadata.get("runtime") or {}
+    foot = (build_local or {}).get("footprint")
+    if foot is None:
+        foot = data.get("footprint") or {"entries": []}
+
+    lines: list[str] = ["# Reprobuild Suite M0 — Measurement Environment", ""]
+    lines.append(
+        "Generated by `scripts/reprobuild_suite_inventory.py` alongside "
+        f"`{DEFAULT_REPORT.as_posix()}`."
+    )
+    lines.append("")
+    lines.append("> [!NOTE]")
+    lines.append(
+        "> This file is **build-local and untracked**. Every value below is "
+        "a property of the machine or of the moment — absolute store paths, "
+        "a kernel and glibc version, tool versions, and a `du` over a "
+        "multi-GiB nimcache — so keeping it in git would rewrite the "
+        "artifact on every build and every host. Spec §16.4 forbids an "
+        "embedded build timestamp for exactly that reason; these fields are "
+        "the same defect wearing different clothes."
+    )
+    lines.append("")
+    lines.append("## Tree")
+    lines.append("")
+    lines.extend(
+        md_table(
+            ["Field", "Value"],
+            [
+                ["HEAD", metadata.get("head", "")],
+                ["Branch", metadata.get("branch", "") or "(detached)"],
+                ["Source fingerprint", metadata.get("sourceFingerprint", "")],
+            ],
+        )
+    )
+    lines.append("")
+    lines.append("## Host")
+    lines.append("")
+    host = runtime.get("host", {})
+    lines.extend(
+        md_table(
+            ["Field", "Value"],
+            [[key, str(host[key])] for key in sorted(host)]
+            or [["(not recorded)", ""]],
+        )
+    )
+    lines.append("")
+    lines.append("## Tool versions")
+    lines.append("")
+    tools = runtime.get("tools", {})
+    lines.extend(
+        md_table(
+            ["Tool", "Version"],
+            [[key, str(tools[key])] for key in sorted(tools)]
+            or [["(not recorded)", ""]],
+        )
+    )
+    lines.append("")
+    lines.append("## Recorded environment")
+    lines.append("")
+    environment = runtime.get("environment", {})
+    lines.extend(
+        md_table(
+            ["Variable", "Value"],
+            [[key, str(environment[key])] for key in sorted(environment)]
+            or [["(none recorded)", ""]],
+        )
+    )
+    lines.append("")
+    lines.append("## External source checkouts")
+    lines.append("")
+    checkouts = runtime.get("sourceCheckouts", {})
+    if not checkouts:
+        lines.append("No external source checkouts were recorded.")
+    else:
+        lines.extend(
+            md_table(
+                ["Name", "Path", "HEAD", "Branch", "Dirty"],
+                [
+                    [
+                        name,
+                        str(entry.get("path", "")),
+                        str(entry.get("head", "")),
+                        str(entry.get("branch", "")),
+                        str(entry.get("dirty", "")),
+                    ]
+                    for name, entry in sorted(checkouts.items())
+                ],
+            )
+        )
+    lines.append("")
+    lines.append("## Build artifact footprint")
+    lines.append("")
+    foot_rows = []
+    for entry in foot.get("entries", []):
+        kib = entry["kib"]
+        mib = "not present" if kib is None else f"{kib / 1024.0:.1f} MiB"
+        exe = (
+            "n/a"
+            if entry["executableFiles"] is None
+            else str(entry["executableFiles"])
+        )
+        foot_rows.append([entry["path"], mib, exe])
+    lines.extend(
+        md_table(["Path", "Size", "Executable files"], foot_rows)
+        if foot_rows
+        else ["(not measured)"]
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_report(
+    data: dict[str, Any],
+    json_path: str,
+    build_local: dict[str, Any] | None = None,
+) -> str:
     static = data["static"]
     metadata = data["metadata"]
+    environment_report = (
+        metadata.get("environmentReportPath")
+        or DEFAULT_ENVIRONMENT_REPORT.as_posix()
+    )
     lines: list[str] = []
     lines.append("# Reprobuild Suite M0 Baseline")
     lines.append("")
@@ -2765,19 +4100,45 @@ def render_report(data: dict[str, Any], json_path: str) -> str:
         md_table(
             ["Field", "Value"],
             [
-                ["Generated at", metadata["generatedAt"]],
                 ["HEAD", metadata["head"]],
                 ["HEAD short", metadata["headShort"]],
                 ["Branch", metadata["branch"] or "(detached)"],
                 ["Source fingerprint", metadata["sourceFingerprint"]],
-                ["Runtime argv", " ".join(metadata.get("runtime", {}).get("argv", []))],
-                ["Runtime env", json.dumps(metadata.get("runtime", {}).get("environment", {}), sort_keys=True)],
-                ["External source checkouts", json.dumps(metadata.get("runtime", {}).get("sourceCheckouts", {}), sort_keys=True)],
-                ["Host", json.dumps(metadata.get("runtime", {}).get("host", {}), sort_keys=True)],
-                ["Tool versions", json.dumps(metadata.get("runtime", {}).get("tools", {}), sort_keys=True)],
+                [
+                    "External source revisions",
+                    json.dumps(
+                        metadata.get("sourceCheckoutRevisions", {}),
+                        sort_keys=True,
+                    ),
+                ],
                 ["Inventory JSON", json_path],
+                [
+                    "Per-case protocol detail",
+                    metadata.get("runtimeDetailPath")
+                    or DEFAULT_CASE_CATALOG.as_posix(),
+                ],
+                ["Measurement environment", environment_report],
             ],
         )
+    )
+    lines.append("")
+    # The host block is deliberately absent from this table. `Runtime env`
+    # (absolute /nix/store values), `Host` (kernel + glibc version, CPU
+    # count) and `Tool versions` are properties of the machine, and this
+    # report is TRACKED: a `du` over a 5.5 GiB nimcache or a kernel bump
+    # rewrote it on every regeneration, which is precisely the byte-level
+    # comparability spec §16.4 protects when it forbids an embedded
+    # `compiled_at`. They are rendered in full in the build-local report
+    # named above.
+    lines.append(
+        "The measurement environment — host kernel and glibc, tool "
+        "versions, the recorded environment variables, the sibling "
+        f"checkout paths and the build-artifact footprint — is in "
+        f"`{environment_report}`. It is build-local and **deliberately "
+        "untracked**: every one of those values changes per host or per "
+        "build, so carrying them here would rewrite this tracked report "
+        "each time it is regenerated even when nothing about the suite "
+        "changed."
     )
     lines.append("")
     lines.append("## Counts")
@@ -2792,7 +4153,7 @@ def render_report(data: dict[str, Any], json_path: str) -> str:
                 ["Test entries", str(static["testEntryCount"])],
                 ["Nim test binaries", str(static["nimTestBinaryCount"])],
                 ["Python test files", str(static["pythonTestFileCount"])],
-                ["Source-level cases", str(static["sourceCaseCount"])],
+                ["Case count (catalog-authoritative)", str(static["sourceCaseCount"])],
                 ["Measured protocol-aware cases", protocol_text],
                 ["Graph-owned helper/fixture artifacts", str(len(graph_artifacts))],
                 [
@@ -2804,6 +4165,7 @@ def render_report(data: dict[str, Any], json_path: str) -> str:
         )
     )
     lines.append("")
+    lines.extend(render_catalog_enumeration(data))
     lines.append("## Evidence Status")
     lines.append("")
     assessment = data["performanceAssessment"]
@@ -2973,37 +4335,21 @@ def render_report(data: dict[str, Any], json_path: str) -> str:
         else:
             lines.append("No tests exceeded the 20-second warm-run review threshold in the latest summary.")
     lines.append("")
-    lines.append("## Failed Tests")
-    lines.append("")
-    if not latest_runner:
-        lines.append("No runner summary is available, so failed-test details are not measured.")
-    else:
-        failed = latest_runner.get("failedTests", [])
-        if not failed:
-            lines.append("No failed tests were reported in the latest runner summary.")
-        else:
-            rows = []
-            for item in failed:
-                rows.append(
-                    [
-                        item.get("qualified_name", ""),
-                        item.get("binary_stem", ""),
-                        fmt_ms(item.get("duration_ms")),
-                        item.get("status", ""),
-                        failure_excerpt(item),
-                    ]
-                )
-            lines.extend(md_table(["Test", "Binary", "Duration", "Status", "Excerpt"], rows))
+    lines.extend(render_failed_tests_section(latest_runner))
     lines.append("")
     lines.append("## Build Artifact Footprint")
     lines.append("")
-    foot_rows = []
-    for entry in data["footprint"]["entries"]:
-        kib = entry["kib"]
-        mib = "not present" if kib is None else f"{kib / 1024.0:.1f} MiB"
-        exe = "n/a" if entry["executableFiles"] is None else str(entry["executableFiles"])
-        foot_rows.append([entry["path"], mib, exe])
-    lines.extend(md_table(["Path", "Size", "Executable files"], foot_rows))
+    # Which paths are measured is a property of this script and is stable.
+    # How large they are is a property of the last build — `build/nimcache`
+    # alone is multi-GiB and moves every time anything is compiled — so the
+    # sizes live in the build-local environment report.
+    lines.append(
+        "The following paths are measured on every run: "
+        + ", ".join(f"`{item}`" for item in FOOTPRINT_PATHS)
+        + ". Their measured sizes and executable-file counts change on "
+        "every build and are therefore recorded in "
+        f"`{environment_report}`, not here."
+    )
     lines.append("")
     lines.append("## Classification")
     lines.append("")
@@ -3145,7 +4491,10 @@ def render_report(data: dict[str, Any], json_path: str) -> str:
                 f"log: {latest.get('log', 'n/a')}."
             )
     lines.append("")
-    return "\n".join(lines)
+    # The rendered markdown is tracked alongside the JSON and is held to the
+    # same property. The un-redacted values remain in the build-local
+    # artifact named in the "Detail" row above.
+    return redact_absolute_paths("\n".join(lines))
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -3161,6 +4510,42 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         default=0,
         help="per-suite-run wall timeout; 0 means no timeout",
+    )
+    parser.add_argument(
+        "--case-catalog",
+        default=str(DEFAULT_CASE_CATALOG),
+        help=(
+            "build-local per-case protocol detail output path; deliberately "
+            "untracked (see DEFAULT_CASE_CATALOG / campaign defect #52)"
+        ),
+    )
+    parser.add_argument(
+        "--environment-report",
+        default=str(DEFAULT_ENVIRONMENT_REPORT),
+        help=(
+            "build-local human-readable measurement-environment report "
+            "(host, tool versions, recorded environment, footprint); "
+            "deliberately untracked because every value in it changes per "
+            "host or per build"
+        ),
+    )
+    parser.add_argument(
+        "--no-catalog",
+        action="store_true",
+        help=(
+            "skip the built-binary --list-json probe and count every Nim case "
+            "with the static source scan (diagnostic only: the static scan "
+            "mis-counts when/else branches and wrapper templates)"
+        ),
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help=(
+            "re-probe every test binary instead of reusing "
+            "build/reprobuild-suite-catalog-cache.json; the catalog is still "
+            "used (unlike --no-catalog), it is just measured fresh"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -3188,14 +4573,56 @@ def main(argv: list[str]) -> int:
     else:
         run_data = load_previous_timing(root, json_path, append=True)
 
-    data = build_inventory(root, run_data)
+    try:
+        data = build_inventory(
+            root,
+            run_data,
+            use_catalog=not args.no_catalog,
+            use_catalog_cache=not args.no_cache,
+        )
+    except CatalogEnvironmentError as exc:
+        print(f"reprobuild_suite_inventory: ENVIRONMENT ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    case_catalog_path = Path(args.case_catalog)
+    if not case_catalog_path.is_absolute():
+        case_catalog_path = root / case_catalog_path
+    environment_report_path = Path(args.environment_report)
+    if not environment_report_path.is_absolute():
+        environment_report_path = root / environment_report_path
+    # Always record the ROOT-RELATIVE path. The raw argument used to be
+    # written straight into the tracked artifact, so `--case-catalog
+    # /abs/path` leaked one developer's directory into a file whose whole
+    # purpose is to be identical for everyone. Same for the environment
+    # report's pointer.
+    tracked, case_detail = split_case_catalog(
+        data,
+        Path(rel(case_catalog_path, root)),
+        Path(rel(environment_report_path, root)),
+    )
+
     json_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    report_path.write_text(render_report(data, rel(json_path, root)), encoding="utf-8")
+    case_catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    environment_report_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(tracked, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    case_catalog_path.write_text(
+        json.dumps(case_detail, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    report_path.write_text(
+        render_report(tracked, rel(json_path, root), case_detail),
+        encoding="utf-8",
+    )
+    environment_report_path.write_text(
+        render_environment_report(data, case_detail), encoding="utf-8"
+    )
 
     print(f"wrote {rel(json_path, root)}")
+    print(f"wrote {rel(case_catalog_path, root)} (build-local, untracked)")
     print(f"wrote {rel(report_path, root)}")
+    print(
+        f"wrote {rel(environment_report_path, root)} (build-local, untracked)"
+    )
 
     if args.run_suite:
         failed = [run for run in data["timing"]["runs"] if run.get("exitCode") != 0]

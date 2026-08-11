@@ -11,8 +11,10 @@
 ## * ``--run "<suite>::<test>"`` — run a single test, exit 0/1/2
 ##   (pass/fail/skip)
 ## * ``$NIMTEST_RESULT_FILE`` — if set, write JSON results
-##   (``status``, ``duration_ms``, ``checkpoints``, ``exception``)
-##   before exiting
+##   (``status``, ``duration_ms``, ``checkpoints``, ``exception``, and
+##   ``skipReason`` when a case used the reason-carrying ``skip``)
+##   before exiting. ``skipReason`` is present only when non-empty, so
+##   consumers must tolerate its absence.
 ## * default (no protocol flag) — behave EXACTLY like ``std/unittest``:
 ##   run every registered test sequentially with the standard console
 ##   formatter.
@@ -75,7 +77,13 @@
 
 import std/[exitprocs, json, os, strutils, times]
 import std/unittest as stdUnittest
-export stdUnittest except suite, test
+# ``skip`` joins ``suite``/``test`` as an override rather than a
+# re-export: the shim writes ``$NIMTEST_RESULT_FILE`` from its own
+# formatter, and the reason a case passes to ``skip`` is otherwise
+# recorded in a private ``std/unittest`` threadvar the shim cannot
+# read. Overriding is what lets the shim's result document carry the
+# same ``skipReason`` the protocol-carrying ``std/unittest`` emits.
+export stdUnittest except suite, test, skip
 
 type
   TestEntry* = object
@@ -98,6 +106,10 @@ type
     status: stdUnittest.TestStatus
     checkpoints: seq[string]
     exception: string
+    skipReason: string
+      ## Human-readable reason recorded by ``skip(reason)``. Empty for a
+      ## bare ``skip()`` and for every non-skipped outcome; the result
+      ## file omits the ``skipReason`` key entirely when it is empty.
     durationMs: int
     started: float
     matched: bool
@@ -120,6 +132,33 @@ var
   gCapturedResult {.threadvar.}: CapturedResult
   gProtocolInitialized {.threadvar.}: bool
   gProtocolExitHookQueued {.threadvar.}: bool
+  gSkipReason* {.threadvar.}: string
+    ## Reason recorded by the ``skip`` override below and read back by
+    ## ``testEnded``. It is a module global rather than a formatter
+    ## field because ``skip`` expands inside the *test body*, which has
+    ## no handle on the active formatter. Exported so the template can
+    ## ``bind`` it from a foreign instantiation scope.
+
+template skip*(reason = "") =
+  ## ``std/unittest.skip``, plus capture of the reason.
+  ##
+  ## Signature-compatible with both the stock no-argument ``skip()``
+  ## and the protocol-carrying fork's ``skip(reason = "")``, so every
+  ## existing call site keeps working unchanged. The reason is stashed
+  ## for ``testEnded`` and ends up in the result document, which is what
+  ## makes a skip census say *why* rather than merely *that*.
+  ##
+  ## Status assignment and checkpoint clearing are delegated to
+  ## ``std/unittest`` rather than reimplemented, so this cannot drift
+  ## from the stdlib's notion of what a skip is. The ``compiles``
+  ## branch keeps the shim usable against a stock ``std/unittest``
+  ## whose ``skip`` takes no argument.
+  bind gSkipReason
+  gSkipReason = reason
+  when compiles(stdUnittest.skip(reason)):
+    stdUnittest.skip(reason)
+  else:
+    stdUnittest.skip()
 
 proc currentProtocolMode*(): ProtocolMode =
   ## Return the active protocol mode for the current process. Resolved
@@ -136,12 +175,16 @@ method suiteStarted*(formatter: ProtocolFormatter, suiteName: string) =
   formatter.currentSuite = suiteName
 
 method testStarted*(formatter: ProtocolFormatter, testName: string) =
+  # Clear any reason left by a previously executed case so a bare
+  # ``skip()`` can never inherit an earlier case's reason.
+  gSkipReason = ""
   formatter.current = CapturedResult(
     suite: formatter.currentSuite,
     name: testName,
     status: stdUnittest.TestStatus.OK,
     checkpoints: @[],
     exception: "",
+    skipReason: "",
     started: epochTime(),
     matched: true)
 
@@ -161,6 +204,8 @@ method failureOccurred*(formatter: ProtocolFormatter,
 method testEnded*(formatter: ProtocolFormatter,
                  testResult: stdUnittest.TestResult) =
   formatter.current.status = testResult.status
+  if testResult.status == stdUnittest.TestStatus.SKIPPED:
+    formatter.current.skipReason = gSkipReason
   formatter.current.durationMs =
     int((epochTime() - formatter.current.started) * 1000)
   gCapturedResult = formatter.current
@@ -274,14 +319,13 @@ proc handleProtocolExit() {.noconv.} =
         gRunFilter
       quit(1)
     if resultFile.len > 0:
-      let skipReason =
-        if captured.status == stdUnittest.TestStatus.SKIPPED:
-          "skipped"
-        else:
-          ""
+      # Emit the reason the case itself supplied via ``skip(reason)``.
+      # A bare ``skip()`` carries none, and the writer then omits the
+      # ``skipReason`` key entirely rather than inventing the
+      # content-free placeholder this used to write for every skip.
       writeResultFile(resultFile, statusToString(captured.status),
                       captured.durationMs, captured.checkpoints,
-                      captured.exception, skipReason)
+                      captured.exception, captured.skipReason)
     quit(statusToExitCode(captured.status))
 
 proc queueProtocolExitHook*() =

@@ -18,11 +18,31 @@
 ##     subcommand;
 ##   * no generation was committed to the state dir.
 
-when not defined(windows):
-  echo "[platform N/A] t_e2e_compile_fail_is_hard_error: " &
+const PlatformSkipReason =
+  "[platform N/A] t_e2e_compile_fail_is_hard_error: " &
     "validated on Windows; the apply-path harness uses Windows " &
     "stow / launcher / state-dir layout"
-  quit(0)
+
+when not defined(windows):
+  # The Windows-only branch below cannot be compiled here (its imports
+  # and harness are Windows-shaped), so the cases are re-declared as
+  # skips rather than left undeclared. Previously this branch did
+  # ``echo`` + ``quit(0)`` at module init: the binary emitted no
+  # catalog, stayed an opaque whole-binary exit-0 PASS, and these three
+  # cases were invisible to every gate. The names must stay in step with
+  # the ``else`` branch.
+  import std/unittest
+
+  suite "M83 Phase F3 gate: profile compile failure is a HARD error":
+
+    test "repro home apply hard-errors on a broken Phase A profile":
+      skip(PlatformSkipReason)
+
+    test "repro home apply --plan hard-errors on a broken Phase A profile":
+      skip(PlatformSkipReason)
+
+    test "repro home plan hard-errors on a broken Phase A profile":
+      skip(PlatformSkipReason)
 else:
   import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 

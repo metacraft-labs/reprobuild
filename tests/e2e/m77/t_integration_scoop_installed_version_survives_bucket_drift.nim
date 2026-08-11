@@ -37,12 +37,6 @@
 ## The adapter is exercised through the real `resolveScoopTool` entry
 ## point against a sandboxed Scoop root.
 
-when not defined(windows):
-  {.warning[UnreachableCode]: off.}
-  echo "[platform N/A] t_integration_scoop_installed_version_survives_bucket_drift: " &
-    "requires Windows and a real Scoop install"
-  quit(0)
-
 import std/[json, os, strutils, tempfiles, unittest]
 
 import repro_tool_profiles
@@ -98,8 +92,35 @@ proc writeBucketManifest(sandbox: ScoopSandbox; app, headVersion: string):
   writeFile(bucketManifestPath, writeAppManifestJson(headVersion).pretty())
   blake3HexFile(bucketManifestPath)
 
+const HostRunsGate = defined(windows)
+  ## This gate needs a real Windows host. It used to be enforced by an
+  ## ``echo`` + ``quit(0)`` at module init, before any ``test`` template
+  ## expanded: the binary emitted no catalog, stayed an opaque
+  ## whole-binary exit-0 PASS, and its declared cases were invisible to
+  ## every gate -- not counted as passes, not as skips, not at all.
+
+const PlatformSkipReason =
+  "[platform N/A] t_integration_scoop_installed_version_survives_bucket_drift: " &
+    "requires Windows and a real Scoop install"
+
+template gatedTest(name: string; body: untyped) =
+  ## Register the case unconditionally, and on a host that cannot run it
+  ## record a skip whose reason is visible in the run summary and the
+  ## skip census.
+  ##
+  ## The guard is a runtime ``if`` on a compile-time constant rather than
+  ## a ``when``, deliberately: ``when`` would stop type-checking the
+  ## Windows-only body on Linux, and that compile coverage is exactly
+  ## what the previous module-init gate already gave us. Nim folds the
+  ## constant, so the dead branch still costs nothing at runtime.
+  test name:
+    if HostRunsGate:
+      body
+    else:
+      skip(PlatformSkipReason)
+
 suite "integration_scoop_installed_version_survives_bucket_drift":
-  test "integration_scoop_installed_version_survives_bucket_drift":
+  gatedTest "integration_scoop_installed_version_survives_bucket_drift":
     let scoopBinary = resolveScoopBinary()
     if scoopBinary.len == 0:
       raise newException(OSError,

@@ -3,11 +3,18 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 import io_mon
 from repro_test_support import requireBinary, monitorShimPath
 
-when not (defined(macosx) or defined(linux)):
-  {.warning[UnreachableCode]: off.}
-  echo "[platform N/A] e2e_debug_io_monitor_reads_monitor_depfile: " &
+const HostRunsGate = defined(macosx) or defined(linux)
+  ## This gate needs the preload-hooks monitor backend. It used to be
+  ## enforced by an ``echo`` + ``quit(0)`` at module init, before the
+  ## ``suite`` template expanded: on a host without the backend the
+  ## binary emitted no catalog, stayed an opaque whole-binary exit-0
+  ## PASS, and its declared case was invisible to every gate. On
+  ## macOS/Linux the constant is true and the case runs exactly as
+  ## before.
+
+const PlatformSkipReason =
+  "[platform N/A] e2e_debug_io_monitor_reads_monitor_depfile: " &
     "this gate requires the preload hooks backend"
-  quit(0)
 
 const FixtureSource = r"""
 #include <dirent.h>
@@ -201,8 +208,20 @@ proc countRecordEvents(eventStream: string): int =
     if line.contains("\"record\""):
       inc result
 
+template gatedTest(name: string; body: untyped) =
+  ## Register the case unconditionally, and skip with a visible reason
+  ## on a host that lacks the backend. The guard is a runtime ``if`` on
+  ## a compile-time constant rather than a ``when``, deliberately: it
+  ## keeps the body type-checked on every host, exactly as the previous
+  ## module-init gate did.
+  test name:
+    if HostRunsGate:
+      body
+    else:
+      skip(PlatformSkipReason)
+
 suite "e2e_debug_io_monitor_reads_monitor_depfile":
-  test "internal and debug CLI read finalized monitor depfiles":
+  gatedTest "internal and debug CLI read finalized monitor depfiles":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m11-io-monitor", "")
     defer: removeDir(tempRoot)

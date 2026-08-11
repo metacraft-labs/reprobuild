@@ -93,11 +93,6 @@
 ## original WSL scenario was supposed to cover is now covered by an
 ## equivalent scenario, mostly more explicitly.
 
-when not defined(windows):
-  echo "[platform N/A] t_e2e_windows_optional_feature_and_capability: " &
-    "DISM / capability / service drivers are Windows-only"
-  quit(0)
-
 import std/[os, osproc, strutils, tempfiles, times, unittest]
 
 import repro_elevation
@@ -171,9 +166,36 @@ const RebootFreeFeatureCandidates = [
 # host. These always run.
 # ===========================================================================
 
+const HostRunsGate = defined(windows)
+  ## This gate needs a real Windows host. It used to be enforced by an
+  ## ``echo`` + ``quit(0)`` at module init, before any ``test`` template
+  ## expanded: the binary emitted no catalog, stayed an opaque
+  ## whole-binary exit-0 PASS, and its declared cases were invisible to
+  ## every gate -- not counted as passes, not as skips, not at all.
+
+const PlatformSkipReason =
+  "[platform N/A] t_e2e_windows_optional_feature_and_capability: " &
+    "DISM / capability / service drivers are Windows-only"
+
+template gatedTest(name: string; body: untyped) =
+  ## Register the case unconditionally, and on a host that cannot run it
+  ## record a skip whose reason is visible in the run summary and the
+  ## skip census.
+  ##
+  ## The guard is a runtime ``if`` on a compile-time constant rather than
+  ## a ``when``, deliberately: ``when`` would stop type-checking the
+  ## Windows-only body on Linux, and that compile coverage is exactly
+  ## what the previous module-init gate already gave us. Nim folds the
+  ## constant, so the dead branch still costs nothing at runtime.
+  test name:
+    if HostRunsGate:
+      body
+    else:
+      skip(PlatformSkipReason)
+
 suite "windows.optionalFeature: pure DISM-output logic":
 
-  test "parseOptionalFeatureState reads the State line":
+  gatedTest "parseOptionalFeatureState reads the State line":
     # Captured `Get-WindowsOptionalFeature -Online -FeatureName WSL`
     # output shapes.
     check parseOptionalFeatureState(
@@ -189,13 +211,13 @@ suite "windows.optionalFeature: pure DISM-output logic":
       "Get-WindowsOptionalFeature : Feature name X is unknown.") ==
       ofsAbsent
 
-  test "RestartNeeded is surfaced from DISM apply output":
+  gatedTest "RestartNeeded is surfaced from DISM apply output":
     check optionalFeatureRestartNeeded(
       "Path : C:\\\nOnline : True\nRestartNeeded : True\n")
     check optionalFeatureRestartNeeded("Restart Needed : Yes")
     check not optionalFeatureRestartNeeded("RestartNeeded : False")
 
-  test "a pending state counts as the post-reboot target (no redundant DISM)":
+  gatedTest "a pending state counts as the post-reboot target (no redundant DISM)":
     check optionalFeatureStateMatchesDesired(ofsEnablePending,
       wantEnabled = true)
     check optionalFeatureStateMatchesDesired(ofsDisablePending,
@@ -203,7 +225,7 @@ suite "windows.optionalFeature: pure DISM-output logic":
     check not optionalFeatureStateMatchesDesired(ofsDisabled,
       wantEnabled = true)
 
-  test "canonical state collapses pending to the target (drift digest)":
+  gatedTest "canonical state collapses pending to the target (drift digest)":
     check canonicalOptionalFeatureState(ofsEnablePending) ==
       canonicalOptionalFeatureState(ofsEnabled)
     check canonicalOptionalFeatureDesired(true) ==
@@ -211,7 +233,7 @@ suite "windows.optionalFeature: pure DISM-output logic":
 
 suite "windows.capability: pure capability-output logic":
 
-  test "parseCapabilityState reads Installed / NotPresent / Staged":
+  gatedTest "parseCapabilityState reads Installed / NotPresent / Staged":
     check parseCapabilityState(
       "Name : OpenSSH.Server~~~~0.0.1.0\nState : Installed\n") ==
       capsInstalled
@@ -219,11 +241,11 @@ suite "windows.capability: pure capability-output logic":
     check parseCapabilityState("State : Staged") == capsStaged
     check parseCapabilityState("nothing here") == capsAbsent
 
-  test "capability RestartNeeded is surfaced":
+  gatedTest "capability RestartNeeded is surfaced":
     check capabilityRestartNeeded("RestartNeeded : True")
     check not capabilityRestartNeeded("RestartNeeded : False")
 
-  test "drift comparison matches desired install/uninstall":
+  gatedTest "drift comparison matches desired install/uninstall":
     check capabilityStateMatchesDesired(capsInstalled,
       wantInstalled = true)
     check capabilityStateMatchesDesired(capsNotPresent,
@@ -233,7 +255,7 @@ suite "windows.capability: pure capability-output logic":
 
 suite "windows.service: pure Get-Service-output logic":
 
-  test "parseServiceQuery reads the deterministic key=value probe":
+  gatedTest "parseServiceQuery reads the deterministic key=value probe":
     let running = parseServiceQuery("StartType=Automatic\nStatus=Running\n")
     check running.present
     check running.startType == "Automatic"
@@ -245,7 +267,7 @@ suite "windows.service: pure Get-Service-output logic":
     # A missing service.
     check not parseServiceQuery("Missing=1").present
 
-  test "start-type spellings normalize to the three canonical values":
+  gatedTest "start-type spellings normalize to the three canonical values":
     check normalizeServiceStartType("AUTO_START") == "Automatic"
     check normalizeServiceStartType("Automatic (Delayed Start)") ==
       "Automatic"
@@ -253,7 +275,7 @@ suite "windows.service: pure Get-Service-output logic":
     check normalizeServiceStartType("Manual") == "Manual"
     check normalizeServiceStartType("DISABLED") == "Disabled"
 
-  test "serviceMatchesDesired compares start-type AND runtime state":
+  gatedTest "serviceMatchesDesired compares start-type AND runtime state":
     let obs = ServiceObservation(present: true, startType: "Automatic",
       running: true)
     check serviceMatchesDesired(obs, "Automatic", wantRunning = true)
@@ -262,7 +284,7 @@ suite "windows.service: pure Get-Service-output logic":
 
 suite "windows.optionalFeature/capability: typed-operation wiring":
 
-  test "a system.nim feature/capability/service profile parses + types":
+  gatedTest "a system.nim feature/capability/service profile parses + types":
     let profile = parseSystemProfile("""
 windows.optionalFeature {
   name = "Microsoft-Windows-Subsystem-Linux"
@@ -292,7 +314,7 @@ windows.service {
     let part = partitionApply(ops, nonPrivilegedOperationCount = 0)
     check part.privilegedOperations.len == 3
 
-  test "the rollback direction disables / uninstalls":
+  gatedTest "the rollback direction disables / uninstalls":
     let profile = parseSystemProfile("""
 windows.optionalFeature { name = "Microsoft-Windows-Subsystem-Linux" }
 windows.capability { name = "OpenSSH.Server~~~~0.0.1.0" }
@@ -304,7 +326,7 @@ windows.capability { name = "OpenSSH.Server~~~~0.0.1.0" }
       destroy = true)
     check not capDestroy.capabilityInstall
 
-  test "--accept-feature-destroy gates a feature/capability rollback":
+  gatedTest "--accept-feature-destroy gates a feature/capability rollback":
     let profile = parseSystemProfile("""
 windows.optionalFeature { name = "Microsoft-Windows-Subsystem-Linux" }
 windows.capability { name = "OpenSSH.Server~~~~0.0.1.0" }
@@ -368,7 +390,7 @@ when defined(windows):
 
 suite "windows.optionalFeature: REAL reboot-free lifecycle (VM-only)":
 
-  test "select the reboot-free feature for this run":
+  gatedTest "select the reboot-free feature for this run":
     if not vmMode:
       echo "  [VM-gated] REPRO_M69_FEATURE_VM not set — skipping " &
         "reboot-free Optional-Feature lifecycle. Run inside the M69 " &
@@ -393,7 +415,7 @@ suite "windows.optionalFeature: REAL reboot-free lifecycle (VM-only)":
         # Stash for the next tests through the environment.
         putEnv("REPRO_M69_REBOOT_FREE_FEATURE", picked)
 
-  test "REAL: enable -> observe Enabled, RestartNeeded=False (full lifecycle)":
+  gatedTest "REAL: enable -> observe Enabled, RestartNeeded=False (full lifecycle)":
     if not vmMode:
       echo "  [VM-gated] not run on host"
       check true
@@ -439,7 +461,7 @@ suite "windows.optionalFeature: REAL reboot-free lifecycle (VM-only)":
         reportScenario("rf-feature-enable-lifecycle", true,
           "feature=" & feature & " post=" & postSt)
 
-  test "REAL: out-of-band disable is observed as drift on next plan":
+  gatedTest "REAL: out-of-band disable is observed as drift on next plan":
     if not vmMode:
       echo "  [VM-gated] not run on host"
       check true
@@ -480,7 +502,7 @@ suite "windows.optionalFeature: REAL reboot-free lifecycle (VM-only)":
         reportScenario("rf-feature-drift-detection", true,
           "drift observed and converged: " & driftSt & " -> " & finSt)
 
-  test "REAL: rollback without --accept-feature-destroy refuses; with it disables":
+  gatedTest "REAL: rollback without --accept-feature-destroy refuses; with it disables":
     if not vmMode:
       echo "  [VM-gated] not run on host"
       check true
@@ -588,7 +610,7 @@ suite "windows.optionalFeature: REAL reboot-free lifecycle (VM-only)":
 
 suite "windows.capability + service: REAL apply (VM-only)":
 
-  test "REAL: OpenSSH server capability install + sshd service config":
+  gatedTest "REAL: OpenSSH server capability install + sshd service config":
     if not vmMode:
       echo "  [VM-gated] REPRO_M69_FEATURE_VM not set — skipping " &
         "OpenSSH-server / sshd-service scenario. Run inside the M69 " &
@@ -771,7 +793,7 @@ windows.service {
 
 suite "windows.optionalFeature: REAL RestartNeeded-reporting contract (VM-only)":
 
-  test "REAL: WSL enable surfaces RestartNeeded without claiming Enabled":
+  gatedTest "REAL: WSL enable surfaces RestartNeeded without claiming Enabled":
     if not vmMode:
       echo "  [VM-gated] REPRO_M69_FEATURE_VM not set — skipping " &
         "WSL RestartNeeded-reporting contract. Run inside the M69 " &

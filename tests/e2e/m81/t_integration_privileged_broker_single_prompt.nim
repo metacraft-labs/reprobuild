@@ -50,12 +50,6 @@
 ## additionally unit-tested in
 ## `libs/repro_elevation/tests/t_smoke_repro_elevation.nim`.
 
-when not defined(windows):
-  {.warning[UnreachableCode]: off.}
-  echo "[platform N/A] t_integration_privileged_broker_single_prompt: " &
-    "the broker launch + named-pipe IPC path is Windows-only"
-  quit(0)
-
 import std/[os, strutils, tempfiles, unittest]
 
 import repro_core
@@ -95,16 +89,43 @@ proc planned(op: PrivilegedOperation;
 # runs never collide, and cleanup is unambiguous.
 let regRunId = "gate-" & $getCurrentProcessId()
 
+const HostRunsGate = defined(windows)
+  ## This gate needs a real Windows host. It used to be enforced by an
+  ## ``echo`` + ``quit(0)`` at module init, before any ``test`` template
+  ## expanded: the binary emitted no catalog, stayed an opaque
+  ## whole-binary exit-0 PASS, and its declared cases were invisible to
+  ## every gate -- not counted as passes, not as skips, not at all.
+
+const PlatformSkipReason =
+  "[platform N/A] t_integration_privileged_broker_single_prompt: " &
+    "the broker launch + named-pipe IPC path is Windows-only"
+
+template gatedTest(name: string; body: untyped) =
+  ## Register the case unconditionally, and on a host that cannot run it
+  ## record a skip whose reason is visible in the run summary and the
+  ## skip census.
+  ##
+  ## The guard is a runtime ``if`` on a compile-time constant rather than
+  ## a ``when``, deliberately: ``when`` would stop type-checking the
+  ## Windows-only body on Linux, and that compile coverage is exactly
+  ## what the previous module-init gate already gave us. Nim folds the
+  ## constant, so the dead branch still costs nothing at runtime.
+  test name:
+    if HostRunsGate:
+      body
+    else:
+      skip(PlatformSkipReason)
+
 suite "integration_privileged_broker_single_prompt":
   when isNixSupported:
 
-    test "the host is already elevated (gate precondition)":
+    gatedTest "the host is already elevated (gate precondition)":
       # The M81 gate's allowed_mocks states the gate runs already
       # elevated so the broker launch path is exercised without an
       # interactive UAC prompt. Assert that precondition up front.
       check isProcessElevated()
 
-    test "scenario 2+3: zero privileged ops, and already-elevated fast path":
+    gatedTest "scenario 2+3: zero privileged ops, and already-elevated fast path":
       # --- Zero privileged operations => NO broker. ---
       let emptyPartition = partitionApply([], nonPrivilegedOperationCount = 4)
       check not emptyPartition.hasPrivilegedWork()
@@ -137,7 +158,7 @@ suite "integration_privileged_broker_single_prompt":
       check readFile(prefix / "a.txt") == "fast path content one"
       check readFile(prefix / "sub" / "b.txt") == "fast path content two"
 
-    test "scenario 1+8: several privileged ops => EXACTLY ONE broker, all applied":
+    gatedTest "scenario 1+8: several privileged ops => EXACTLY ONE broker, all applied":
       let prefix = createTempDir("repro-m81-broker-", "")
       defer: removeDir(prefix)
       let regSub = regRunId & "/single-prompt"
@@ -190,7 +211,7 @@ suite "integration_privileged_broker_single_prompt":
       check apply.brokerExitCode == 0
       check not processStillAlive(apply.brokerPid)
 
-    test "scenario 1: broker drives a real HKLM registry mutation, then idempotent":
+    gatedTest "scenario 1: broker drives a real HKLM registry mutation, then idempotent":
       # Confirm the registry fixture driver really wrote under the
       # isolated HKLM subtree, AND a re-apply of the same desired value
       # is a broker-side cache-hit (no-op), proving the broker
@@ -217,7 +238,7 @@ suite "integration_privileged_broker_single_prompt":
       check apply2.outcome.allApplied
       check apply2.outcome.applyLog[0].outcome == "no-op"
 
-    test "scenario 7: drift between plan and broker execution is fail-closed":
+    gatedTest "scenario 7: drift between plan and broker execution is fail-closed":
       let prefix = createTempDir("repro-m81-drift-", "")
       defer: removeDir(prefix)
 
@@ -246,7 +267,7 @@ suite "integration_privileged_broker_single_prompt":
       # The broker still exited (a fail-closed op is not a crash).
       check not processStillAlive(apply.brokerPid)
 
-    test "scenario 6: the broker rejects a non-PrivilegedOperation frame":
+    gatedTest "scenario 6: the broker rejects a non-PrivilegedOperation frame":
       # Stand up the parent half of the channel, launch the broker, do
       # the handshake, then send a frame whose kind tag is NOT in the
       # closed typed operation set. The broker must reject it — it
@@ -291,7 +312,7 @@ suite "integration_privileged_broker_single_prompt":
       check code != 0
       check not processStillAlive(brokerProcessId(proc0))
 
-    test "scenario 5: a peer with the wrong nonce is rejected (auth)":
+    gatedTest "scenario 5: a peer with the wrong nonce is rejected (auth)":
       # The nonce handshake means an unrelated local process cannot
       # connect to the broker's pipe and drive an elevated executor.
       # Launch a broker bound to nonce A, then connect a parent that
@@ -319,7 +340,7 @@ suite "integration_privileged_broker_single_prompt":
       check code == 4
       check not processStillAlive(brokerProcessId(proc0))
 
-    test "scenario 4: --no-elevate applies nothing privileged, reports skipped":
+    gatedTest "scenario 4: --no-elevate applies nothing privileged, reports skipped":
       let prefix = createTempDir("repro-m81-noelevate-", "")
       defer: removeDir(prefix)
       let regSub = regRunId & "/no-elevate"
@@ -345,7 +366,7 @@ suite "integration_privileged_broker_single_prompt":
       check not fileExists(prefix / "should-not-exist.conf")
       check not observeFixtureRegistry(ops[1]).present
 
-    test "a denied prompt is equivalent to --no-elevate (clean partial)":
+    gatedTest "a denied prompt is equivalent to --no-elevate (clean partial)":
       # Per the spec, a user-declined OS prompt is equivalent to
       # `--no-elevate` — a clean partial result, not a crash. The
       # `EElevationDeclined` exception carries that contract; a caller
@@ -362,7 +383,7 @@ suite "integration_privileged_broker_single_prompt":
       check outcome.results.len == 1
       check not outcome.results[0].ok
 
-    test "the isolated HKLM test subtree is left clean":
+    gatedTest "the isolated HKLM test subtree is left clean":
       # The fixture registry driver writes ONLY under
       # HKLM\SOFTWARE\Reprobuild-Tests\; the per-scenario `defer`s
       # already removed each scenario's subtree. Remove this run's

@@ -293,7 +293,14 @@ else
   printf 'ct-test-runner not built; falling back to M3 internal runner (overall timeout %s)\n' \
     "${RUNNER_TIMEOUT}" >&2
   runner_bin="build/bin/repro_test_runner${exe_ext}"
-  if [[ ! -x "${runner_bin}" ]]; then
+  # Rebuild when the binary is missing OR older than its source. Nothing
+  # else in the tree builds this binary — it is not a `repro.nim` target
+  # and not in apps/entrypoints.txt — so an existence-only check let a
+  # stale runner survive every edit to tools/test-runner/, silently
+  # running a 2h suite with reporting behaviour that no longer matches
+  # the source under review.
+  if [[ ! -x "${runner_bin}" ]] ||
+     [[ tools/test-runner/repro_test_runner.nim -nt "${runner_bin}" ]]; then
     printf 'Building M3 fallback runner: %s\n' "${runner_bin}" >&2
     nim c \
       -d:release \

@@ -22,13 +22,6 @@
 ## Allowed mocks: temporary fixture prefixes only. No fake launcher,
 ## no fake DLL probes.
 
-when not defined(windows):
-  ## On non-Windows hosts the gate is a no-op that prints the spec-
-  ## allowed `[platform N/A]` marker, then exits 0.
-  echo "[platform N/A] e2e_windows_launcher_isolation: " &
-    "this gate is Windows-only"
-  quit(0)
-
 import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_launch_plan
@@ -171,9 +164,36 @@ proc stageLauncher(repoRoot, binDir, command, launcher, storeRoot: string;
 # Gate body
 # ---------------------------------------------------------------------------
 
+const HostRunsGate = defined(windows)
+  ## This gate needs a real Windows host. It used to be enforced by an
+  ## ``echo`` + ``quit(0)`` at module init, before any ``test`` template
+  ## expanded: the binary emitted no catalog, stayed an opaque
+  ## whole-binary exit-0 PASS, and its declared cases were invisible to
+  ## every gate -- not counted as passes, not as skips, not at all.
+
+const PlatformSkipReason =
+  "[platform N/A] e2e_windows_launcher_isolation: " &
+    "this gate is Windows-only"
+
+template gatedTest(name: string; body: untyped) =
+  ## Register the case unconditionally, and on a host that cannot run it
+  ## record a skip whose reason is visible in the run summary and the
+  ## skip census.
+  ##
+  ## The guard is a runtime ``if`` on a compile-time constant rather than
+  ## a ``when``, deliberately: ``when`` would stop type-checking the
+  ## Windows-only body on Linux, and that compile coverage is exactly
+  ## what the previous module-init gate already gave us. Nim folds the
+  ## constant, so the dead branch still costs nothing at runtime.
+  test name:
+    if HostRunsGate:
+      body
+    else:
+      skip(PlatformSkipReason)
+
 suite "e2e_windows_launcher_isolation":
 
-  test "side-by-side conflicting DLLs each load from their own prefix":
+  gatedTest "side-by-side conflicting DLLs each load from their own prefix":
     let repoRoot = findRepoRoot()
     check repoRoot.len > 0
 
@@ -257,7 +277,7 @@ suite "e2e_windows_launcher_isolation":
     check "LIBFOO_VERSION=libfoo-pkg-b-v2.0.0" in resBIsolated.output
     check "v1.0.0" notin resBIsolated.output
 
-  test "AddDllDirectory order: first matching dir wins":
+  gatedTest "AddDllDirectory order: first matching dir wins":
     ## The spec specifies AddDllDirectory is called in the order the
     ## entries appear in `runtimeLibraryDirs`. Build a plan whose
     ## runtimeLibraryDirs lists pkg-A first then pkg-B; the launcher
@@ -340,7 +360,7 @@ suite "e2e_windows_launcher_isolation":
     check resBA.exitCode == 0
     check "LIBFOO_VERSION=order-v2" in resBA.output
 
-  test "app-local DLL layout (strategy 2) loads adjacent DLL":
+  gatedTest "app-local DLL layout (strategy 2) loads adjacent DLL":
     ## With binding `lbkWindowsAppLocal`, the realization step has
     ## copied the dependent DLL next to the executable. The
     ## Reprobuild launcher records ZERO entries in `runtimeLibraryDirs`,
@@ -396,7 +416,7 @@ suite "e2e_windows_launcher_isolation":
     check res.exitCode == 0
     check "LIBFOO_VERSION=applocal-v3" in res.output
 
-  test "execution-profile checksum mismatch fails closed":
+  gatedTest "execution-profile checksum mismatch fails closed":
     ## The launcher MUST refuse to spawn the child process if the
     ## sidecar requests execution-profile verification and the plan's
     ## checksum does not match the sidecar's. This is the weak-adapter

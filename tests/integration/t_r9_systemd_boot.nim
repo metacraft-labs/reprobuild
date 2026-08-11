@@ -10,12 +10,23 @@
 ## D:/metacraft/reprobuild/build/r9-build/reproos-r9.iso.
 
 import std/[os, osproc, strutils, tables, times, unittest]
+
+const HostRunsGate = defined(windows)
+  ## The Hyper-V backend needs a Windows host. This used to be enforced
+  ## by an ``echo`` + ``quit(0)`` at module init, before the ``suite``
+  ## template expanded: the binary emitted no catalog, stayed an opaque
+  ## whole-binary exit-0 PASS, and its declared case was invisible to
+  ## every gate. The guard is now inside the case, so the run counts it
+  ## and the skip census says why.
+
+const PlatformSkipReason =
+  "t_r9_systemd_boot: Windows host required (Hyper-V backend)"
+
+const SiblingSkipReason =
+  "t_r9_systemd_boot: vm-harness sibling unavailable"
+
 when defined(vmHarnessAvailable):
   import vm_harness
-
-  when not defined(windows):
-    echo "[skip] t_r9_systemd_boot: Windows host required (Hyper-V backend)"
-    quit(0)
 
   proc isElevated(): bool =
     let cmd = @["powershell.exe", "-NoLogo", "-NoProfile",
@@ -122,29 +133,34 @@ when defined(vmHarnessAvailable):
 
   suite "t_r9_systemd_boot":
     test "R9 ISO boots; systemd 257.9 reaches login prompt":
-      let backend = newHyperVBackend(vmName = "repro-test-boot-r9-placeholder")
-      if not backend.probeAvailability():
-        echo "[skip] Hyper-V not available on this host"
-        skip()
-      elif not isElevated():
-        echo "[skip] Hyper-V cmdlets require admin elevation"
-        skip()
+      if not HostRunsGate:
+        skip(PlatformSkipReason)
       else:
-        let iso = findR9Iso()
-        if iso.len == 0:
-          echo "[skip] R9 reproos-r9.iso not found at default path " &
-               "(D:/metacraft/reprobuild/build/r9-build/reproos-r9.iso); " &
-               "set VMH_REPROOS_R9_ISO=<path>"
-          skip()
+        let backend = newHyperVBackend(
+          vmName = "repro-test-boot-r9-placeholder")
+        if not backend.probeAvailability():
+          skip("Hyper-V not available on this host")
+        elif not isElevated():
+          skip("Hyper-V cmdlets require admin elevation")
         else:
-          let suffix = $(epochTime() * 1000.0).int64.toHex().toLowerAscii()
-          let vmName = "repro-test-boot-r9-" & suffix[suffix.len - 8 .. ^1]
-          let perVmDir = getTempDir() / "vm-harness-e2e-r9-systemd-boot" / vmName
-          echo "[info] booting R9 ISO: ", iso
-          runR9BootScenario(backend, iso, perVmDir, vmName)
+          let iso = findR9Iso()
+          if iso.len == 0:
+            skip("R9 reproos-r9.iso not found at default path " &
+                 "(D:/metacraft/reprobuild/build/r9-build/reproos-r9.iso); " &
+                 "set VMH_REPROOS_R9_ISO=<path>")
+          else:
+            let suffix = $(epochTime() * 1000.0).int64.toHex().toLowerAscii()
+            let vmName = "repro-test-boot-r9-" & suffix[suffix.len - 8 .. ^1]
+            let perVmDir =
+              getTempDir() / "vm-harness-e2e-r9-systemd-boot" / vmName
+            echo "[info] booting R9 ISO: ", iso
+            runR9BootScenario(backend, iso, perVmDir, vmName)
 else:
-  # vm-harness (../vm-harness) is an optional Windows-only sibling. When it is
-  # absent, skip-compile this boot test rather than break the test-build
+  # vm-harness (../vm-harness) is an optional Windows-only sibling. When it
+  # is absent the boot scenario cannot be compiled, so the case is declared
+  # as a skip rather than left undeclared — the previous ``echo`` +
+  # ``quit(0)`` here made the binary an opaque exit-0 PASS
   # (missing optional sibling -> skip, not fatal; RA-23).
-  echo "[skip] t_r9_systemd_boot: vm-harness sibling unavailable"
-  quit(0)
+  suite "t_r9_systemd_boot":
+    test "R9 ISO boots; systemd 257.9 reaches login prompt":
+      skip(SiblingSkipReason)

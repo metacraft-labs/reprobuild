@@ -13,12 +13,21 @@
 ##
 ## Gated by `defined(linux)` AND `REPRO_M69_DCONF_KEY_VM=1`.
 
-import std/[os, strutils, osproc]
+import std/[os, strutils, osproc, unittest]
 
 import repro_home_resources
 
 const SentinelDefault = "/tmp/repro-vm-test/sentinels.txt"
 const GateName = "linux.dconfKey"
+const GateEnv = "REPRO_M69_DCONF_KEY_VM"
+  ## Sandbox gate. The disposable-VM harness sets this; on an
+  ## ordinary developer or CI host it is unset and the case
+  ## below registers as a skip carrying GateSkipReason, so the
+  ## run counts it and the skip census says why. It used to
+  ## ``echo`` and ``quit(0)`` at module init instead, which made
+  ## the binary an opaque exit-0 PASS that no gate could see.
+const GateSkipReason =
+  "[sandbox-gated] REPRO_M69_DCONF_KEY_VM not set."
 
 proc writeLineSentinel(text: string) =
   let path = getEnv("REPRO_M69_VM_SENTINEL_FILE", SentinelDefault)
@@ -37,12 +46,6 @@ proc binaryPresent(name: string): bool =
   result = code == 0 and output.strip().len > 0
 
 proc main() =
-  let sandboxMode =
-    defined(linux) and getEnv("REPRO_M69_DCONF_KEY_VM") == "1"
-  if not sandboxMode:
-    echo "  [sandbox-gated] REPRO_M69_DCONF_KEY_VM not set."
-    quit(0)
-
   when defined(linux):
     # Provisioning prereqs: missing-binary is a HARD failure, not a
     # SKIP — the harness installs both via apt-get in stage A. A
@@ -83,4 +86,9 @@ proc main() =
   else:
     discard
 
-main()
+suite "e2e_repro_home_linux_dconfkey_vm":
+  test "linux.dconfKey disposable-VM lifecycle":
+    if defined(linux) and getEnv(GateEnv) == "1":
+      main()
+    else:
+      skip(GateSkipReason)

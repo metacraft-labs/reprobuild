@@ -20,12 +20,21 @@
 ##
 ## Gated by `defined(linux)` AND `REPRO_M69_SYSTEMD_USER_UNIT_VM=1`.
 
-import std/[os, strutils, osproc]
+import std/[os, strutils, osproc, unittest]
 
 import repro_home_resources
 
 const SentinelDefault = "/tmp/repro-vm-test/sentinels.txt"
 const GateName = "systemd.userUnit"
+const GateEnv = "REPRO_M69_SYSTEMD_USER_UNIT_VM"
+  ## Sandbox gate. The disposable-VM harness sets this; on an
+  ## ordinary developer or CI host it is unset and the case
+  ## below registers as a skip carrying GateSkipReason, so the
+  ## run counts it and the skip census says why. It used to
+  ## ``echo`` and ``quit(0)`` at module init instead, which made
+  ## the binary an opaque exit-0 PASS that no gate could see.
+const GateSkipReason =
+  "[sandbox-gated] REPRO_M69_SYSTEMD_USER_UNIT_VM not set."
 
 proc writeLineSentinel(text: string) =
   let path = getEnv("REPRO_M69_VM_SENTINEL_FILE", SentinelDefault)
@@ -45,20 +54,19 @@ proc systemctlUserLive(): bool =
   let (_, code) = execCmdEx("systemctl --user is-system-running 2>&1")
   result = code == 0
 
-proc main() =
-  let sandboxMode =
-    defined(linux) and getEnv("REPRO_M69_SYSTEMD_USER_UNIT_VM") == "1"
-  if not sandboxMode:
-    echo "  [sandbox-gated] REPRO_M69_SYSTEMD_USER_UNIT_VM not set."
-    quit(0)
-
+proc main(): string =
+  ## Returns "" when the scenario ran, or a skip reason when a
+  ## secondary in-VM prerequisite is missing.
   when defined(linux):
     if not systemctlUserLive():
-      echo "  [SKIP] " & GateName &
-        ": systemctl --user not reachable in WSL (no PID-1 systemd)"
       writeLineSentinel("SKIP: " & GateName &
         " (no systemctl --user / dbus in WSL)")
-      quit(0)
+      # Returning the reason (rather than ``quit(0)``) keeps the case a
+      # reported SKIP. A bare ``quit`` from inside a test body exits
+      # before the protocol result document is written, so the runner
+      # would have to fall back to the exit code and call it a PASS.
+      return GateName &
+        ": systemctl --user not reachable in WSL (no PID-1 systemd)"
 
     let homeDir = getEnv("HOME", "/root")
     let unitName = "repro-m83-vm-" & $getCurrentProcessId() & ".service"
@@ -86,4 +94,11 @@ proc main() =
   else:
     discard
 
-main()
+suite "e2e_repro_home_systemd_user_unit_vm":
+  test "systemd.userUnit disposable-VM lifecycle":
+    if defined(linux) and getEnv(GateEnv) == "1":
+      let secondaryGate = main()
+      if secondaryGate.len > 0:
+        skip(secondaryGate)
+    else:
+      skip(GateSkipReason)

@@ -30,12 +30,23 @@
 ## `REPRO_M69_VM_SENTINEL_FILE` (or `/tmp/repro-vm-test/sentinels.txt`
 ## when unset). The orchestrator greps for the gate's `OK:` line.
 
-import std/[os, strutils]
+import std/[os, strutils, unittest]
 
 import repro_elevation
 
 const SentinelDefault = "/tmp/repro-vm-test/sentinels.txt"
 const GateName = "linux.sysctl"
+const GateEnv = "REPRO_M69_SYSCTL_VM"
+  ## Sandbox gate. The disposable-VM harness sets this; on an
+  ## ordinary developer or CI host it is unset and the case
+  ## below registers as a skip carrying GateSkipReason, so the
+  ## run counts it and the skip census says why. It used to
+  ## ``echo`` and ``quit(0)`` at module init instead, which made
+  ## the binary an opaque exit-0 PASS that no gate could see.
+const GateSkipReason =
+  "[sandbox-gated] REPRO_M69_SYSCTL_VM not set (or not on " &
+    "Linux) — the real /etc/sysctl.d/ write scenario is NOT " &
+    "EXERCISED on this host."
 
 proc writeSentinel(gate: string) =
   let path = getEnv("REPRO_M69_VM_SENTINEL_FILE", SentinelDefault)
@@ -50,14 +61,6 @@ proc writeSentinel(gate: string) =
       close(f)
 
 proc main() =
-  let sandboxMode =
-    defined(linux) and getEnv("REPRO_M69_SYSCTL_VM") == "1"
-  if not sandboxMode:
-    echo "  [sandbox-gated] REPRO_M69_SYSCTL_VM not set (or not on " &
-      "Linux) — the real /etc/sysctl.d/ write scenario is NOT " &
-      "EXERCISED on this host."
-    quit(0)
-
   when defined(linux):
     # PID-scoped filename so concurrent / re-runs do not collide.
     let dropInName = "99-reprobuild-m83-vm-test-" &
@@ -106,4 +109,9 @@ proc main() =
   else:
     discard
 
-main()
+suite "e2e_repro_infra_linux_sysctl_vm":
+  test "linux.sysctl disposable-VM lifecycle":
+    if defined(linux) and getEnv(GateEnv) == "1":
+      main()
+    else:
+      skip(GateSkipReason)

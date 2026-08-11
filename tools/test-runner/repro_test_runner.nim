@@ -25,10 +25,63 @@
 ##   repro_test_runner [--threads N] [--bin-dir DIR] [--build]
 ##                     [--summary-json PATH] [--quiet]
 ##                     [--filter GLOB]... [--test-timeout=N]
+##                     [--catalog-write PATH] [--catalog-read PATH]
+##
+## Incremental selection::
+##
+##   --catalog-write PATH  after probing, record every catalogued case's
+##                         ``bodyHash`` to PATH.
+##   --catalog-read PATH   consult a catalog written earlier and skip
+##                         cases whose ``bodyHash`` it positively
+##                         vouches for.
+##
+## Selection is FAIL-CLOSED and can only ever subtract. A missing,
+## unreadable, malformed, wrongly-versioned catalog — or one written
+## under a different project root or ``--bin-dir`` — is refused with a
+## stated reason on stderr and in ``summary.selection.fell_back_because``,
+## and the run is the full run. So is an unknown binary, an unknown case,
+## or an empty hash on either side. Omitting ``--catalog-read`` is the
+## full run and always remains available. See the "run catalog" section
+## below ``probeBinary`` for the complete rule.
+##
+## WHAT A BODY HASH DOES AND DOES NOT COVER. It is computed by the
+## compiler over the case as compiled, so it moves when the case's own
+## source moves AND when a module it compiles against moves — editing a
+## library a test calls changes that test's hash even though its body
+## text is untouched (measured, not assumed). It does NOT move for
+## anything outside the compiled program: a fixture or data file read at
+## run time, an environment variable, an external tool or a sibling
+## checkout. A case whose behaviour depends on those can be deselected
+## while genuinely failing. That is why ``--catalog-read`` is opt-in, why
+## a selected run is flagged in the summary as ``selected_subset``, and
+## why a gate must read that flag before treating ``total`` as coverage.
 ##
 ## Default ``--bin-dir`` is ``build/test-bin`` relative to the current
 ## working directory. ``--threads`` defaults to ``$NPROC`` or the
 ## platform's countProcessors() value.
+##
+## Aggregate exit code::
+##
+##   0  every case passed or skipped AND both status channels agreed
+##      everywhere AND every case actually ran
+##   1  at least one case FAILED, or at least one case reported a
+##      ``status_disagreement``, or at least one case could not be run
+##      at all (``ERROR`` — see ``TestStatus.tsHarnessError``)
+##
+## ``ERROR`` is deliberately not merged into either of the other two
+## buckets. A case whose child could not be spawned produced no verdict:
+## calling it a FAIL asserts something about the code that was never
+## observed, and calling it a PASS is a fail-open. It is counted
+## separately (``summary.harness_errors``), labelled separately in the
+## console, carries its reason in ``harness_error``, and fails the run.
+##
+## The second clause is not redundant. A case's label comes from its
+## result document, which the ``std/unittest`` fork writes in
+## ``testEnded`` — before the process exits. A case that passes and then
+## dies non-zero in a destructor, a ``defer``, an exit proc or a teardown
+## segfault therefore has a PASS document and a crashing process. Labelling
+## it PASS is defensible; letting the RUN exit 0 is not, and used to be
+## what happened. See ``TestResult.statusDisagreement``.
 ##
 ## Environment::
 ##
@@ -42,7 +95,7 @@
 ##
 
 import std/[algorithm, atomics, json, locks, os, osproc, parseopt, streams,
-            strtabs, strutils, tempfiles, times]
+            strtabs, strutils, tables, tempfiles, times]
 
 when defined(posix):
   import std/posix
@@ -122,6 +175,55 @@ const
   ]
 
 type
+  CatalogEntry = object
+    ## One row of a binary's ``--list-json`` catalog.
+    ##
+    ## RETENTION RULE. Every field the protocol emits is kept here and
+    ## carried to the summary verbatim. The runner used to keep exactly
+    ## ``suite`` and ``name`` and drop the rest at the parse site, which
+    ## made the whole ``--list-json`` surface — file, line, column, kind,
+    ## group, threadsRequired, xfail, tags, bodyHash, deterministic —
+    ## unobservable downstream: a consumer reading the run artifact could
+    ## not tell where a case lives, whether it is expected to fail, or
+    ## whether its body changed. Dropping a field at the parse site is
+    ## indistinguishable, downstream, from the producer never emitting it.
+    ##
+    ## HONEST LABELLING OF WHAT IS REAL. Of the retained fields only
+    ## ``suite``/``name``/``file``/``line``/``column`` and ``bodyHash``
+    ## carry information today. ``kind``, ``group``, ``threadsRequired``,
+    ## ``xfail``, ``tags`` and ``deterministic`` are emitted by the
+    ## codetracer-nim fork as fixed literals (see that fork's
+    ## ``lib/pure/unittest.nim``: ``"in-process"``, ``"@global"``, ``1``,
+    ## ``null``, ``[]``, ``true``) and are therefore constants, not
+    ## measurements. They are retained because the contract says to retain
+    ## them and because the day the producer starts varying them the
+    ## consumer must already be carrying them — but NO scheduling,
+    ## selection or reporting decision in this runner may be built on them
+    ## while they are constants. Only ``bodyHash`` is load-bearing.
+    suite: string    ## the ``suite`` field, verbatim
+    bare: string     ## display name: ``name`` with any ``suite::`` prefix cut
+    runName: string  ## the ``name`` field, verbatim — the ``--run`` argument
+    file: string             ## ``file``: source file the case was declared in
+    line: int                ## ``line``: 1-based declaration line; 0 if absent
+    column: int              ## ``column``: declaration column; 0 if absent
+    kind: string             ## ``kind``: today always ``"in-process"``
+    group: string            ## ``group``: today always ``"@global"``
+    threadsRequired: int     ## ``threadsRequired``: today always 1
+    xfail: string
+      ## ``xfail`` rendered as text: ``""`` for JSON ``null`` (the only
+      ## value the fork emits today), otherwise the reason string or the
+      ## literal ``"true"``/``"false"``. Kept as text rather than a
+      ## ``bool`` so "the producer said nothing" stays distinguishable
+      ## from "the producer said false".
+    tags: seq[string]        ## ``tags``: today always empty
+    bodyHash: string
+      ## ``bodyHash``: the compiler-computed digest of the case's body.
+      ## The ONE field here that is a measurement, and the one selection
+      ## is built on. Empty when the producer emitted none — which is a
+      ## fail-closed signal, never a match.
+    deterministic: bool      ## ``deterministic``: today always true
+
+type
   TestCase = object
     binary: string          ## absolute path to the compiled test binary
     binaryStem: string      ## file basename without extension
@@ -129,11 +231,45 @@ type
     qualifiedName: string   ## ``suite::test``; "" when whole-binary
     suite: string
     name: string
+    runName: string
+      ## The catalog's ``name`` field, kept **verbatim**. This is the
+      ## only string that may be handed to ``--run``: it is the
+      ## binary's own identifier for the case, and reconstructing it
+      ## from ``suite`` + ``name`` is not round-trip safe. A suite-less
+      ## case is catalogued as ``::testname`` by the codetracer-nim
+      ## ``std/unittest`` fork; rebuilding it from an empty suite
+      ## yields the bare ``testname``, which that binary's ``--run``
+      ## matcher rejects with "test not found" (exit 1, reported FAIL).
+      ## Empty for whole-binary cases, which take no ``--run``.
+    meta: CatalogEntry
+      ## The case's ``--list-json`` row, retained whole. See
+      ## ``CatalogEntry`` for the retention rule and for which of its
+      ## fields are measurements and which are producer constants.
+      ##
+      ## Default-initialised (every field empty/zero/false) for a
+      ## whole-binary case, which has no catalog row by construction. A
+      ## consumer must therefore read ``protocolAware`` before reading any
+      ## of these: an empty ``bodyHash`` on a whole-binary entry means
+      ## "there is no such row", not "the producer emitted no hash".
 
   TestStatus = enum
     tsPass = "PASS"
     tsFail = "FAIL"
     tsSkip = "SKIP"
+    tsHarnessError = "ERROR"
+      ## The harness could not obtain a verdict from the case at all —
+      ## the child was never started, or was started and then could not
+      ## be reached. It is NOT a test result: nothing about the code
+      ## under test was observed.
+      ##
+      ## This is the third outcome the two-channel rule requires. The
+      ## runner reads two channels for "did this case pass" (the result
+      ## document and the child's exit code); a spawn fault produces
+      ## NEITHER, and folding that into ``tsFail`` states something the
+      ## runner did not observe. Folding it into ``tsPass`` would be a
+      ## fail-open. So it gets its own label, its own count in the
+      ## summary, and — like ``statusDisagreement`` — it forces a
+      ## non-zero aggregate exit on its own.
 
   TestResult = object
     testCase: TestCase
@@ -142,6 +278,87 @@ type
     resultFile: string
     stdout: string
     stderr: string
+    skipReason: string
+      ## ``skipReason`` from the result document. The protocol emits the
+      ## key only when non-empty, so absence is normal (a bare
+      ## ``skip()``) and must never be read as a missing-key error.
+    exception: string
+      ## ``exception`` from the result document; the protocol writes
+      ## JSON ``null`` when the case raised nothing.
+    checkpointCount: int
+      ## Number of ``checkpoints`` entries in the result document.
+      ## Recorded so a consumer can tell "no diagnostics were captured"
+      ## from "the document was never read".
+    checkpoints: seq[string]
+      ## The ``checkpoints`` entries themselves — the failed ``check``
+      ## expressions, their evaluated operands, and any ``checkpoint()``
+      ## the case wrote.
+      ##
+      ## WHY THE COUNT ALONE WAS NOT ENOUGH. A per-case child runs with
+      ## ``--run``, which puts the fork's ``unittest`` into ``pmRun``;
+      ## ``ensureInitialized`` registers NO console formatter in that mode
+      ## (see ``lib/pure/unittest.nim``: ``protocolMode notin {… pmRun …}``).
+      ## So a failing per-case child prints NOTHING — its stdout is empty
+      ## by construction, and the result document is the only channel that
+      ## ever carries the diagnosis. Recording just the count therefore
+      ## made a per-case FAIL strictly LESS informative than the
+      ## whole-binary FAIL it replaced: a whole-binary run is ``pmDefault``,
+      ## keeps its console formatter, and its checkpoints reach the summary
+      ## inside ``stdout``. That asymmetry is also why a harness fault
+      ## looked "capturable" while an ordinary assertion did not — the
+      ## harness-fault text is synthesised by this runner, not by the child.
+      ##
+      ## Kept out of PASS entries: on a 6800-case sweep the passing
+      ## checkpoints are noise and would bloat the summary.
+    harnessError: string
+      ## Non-empty exactly when ``status == tsHarnessError``: the reason
+      ## the harness could not run the case, verbatim (e.g. the OS error
+      ## text from the failed spawn, or the child-side ``HARNESS ERROR``
+      ## exit 126 written by ``processGroupWrapperMain``).
+      ##
+      ## Rides in the summary as ``harness_error`` so a triage script
+      ## reading only the machine-readable artifact can tell "the code is
+      ## broken" from "we could not run it" without grepping a console
+      ## log — the distinction the exit-126 convention introduced but
+      ## never surfaced anywhere a consumer could see.
+    runnerDiagnosis: string
+      ## A diagnosis SYNTHESISED by the runner because the case produced
+      ## none — today, exactly the "your result document is not there"
+      ## account (see ``missingDocumentDiagnostic``). Kept apart from
+      ## ``checkpoints`` on purpose: those are the case's own first-hand
+      ## lines and folding runner-authored text into them would inflate
+      ## ``checkpoint_count`` and misattribute the text to the case.
+      ##
+      ## It rides in ``stdout`` for the summary and is printed by
+      ## ``emitProgress`` for the console, so neither channel is left with
+      ## a bare ``[FAIL] … (5ms)`` line.
+    statusDisagreement: string
+      ## Non-empty when the result document's ``status`` contradicts the
+      ## verdict implied by the child's exit code. That is a protocol
+      ## bug in the test binary — the two channels are supposed to agree
+      ## — so it is surfaced, never silently reconciled.
+      ##
+      ## TWO-CHANNEL RULE (shared with ``probe_binary_catalog`` in
+      ## scripts/reprobuild_suite_inventory.py; keep the two in step):
+      ##
+      ##   A component reading two status channels for the same fact may
+      ##   choose which channel LABELS the individual item, but it must
+      ##   never ABSORB a disagreement between them. Every disagreement
+      ##   propagates to the aggregate outcome.
+      ##
+      ## Here the per-case label goes to the result document, because it
+      ## is the case's own first-hand account and carries the reason, the
+      ## checkpoints and the exception. The exit code is still evidence:
+      ## the fork's ``testEnded`` writes the document BEFORE the process
+      ## exits, so a case that passes and then dies non-zero in a
+      ## destructor, a ``defer``, an exit proc or a teardown segfault has
+      ## a genuine PASS document and a genuine crash. Believing only the
+      ## document turned that fail-safe into a fail-open: the case counted
+      ## as a pass and the whole run exited 0.
+      ##
+      ## The label stays with the document; the aggregate exit does not.
+      ## ``main`` counts disagreements and exits non-zero on any of them,
+      ## so the crash-after-pass case can no longer leave a green run.
 
   Queue = object
     lock: Lock
@@ -173,6 +390,39 @@ type
       processGroup: int
       ownerToken: string
       statusPath: string
+
+  ProcessGroupRefusal = object of CatchableError
+    ## The runner reached a verdict and is REFUSING to report a passing or
+    ## terminal one, because processes carrying this case's exact owner
+    ## token were still alive after bounded TERM -> grace -> KILL cleanup.
+    ##
+    ## THIS IS A TEST FAILURE, NOT A HARNESS FAULT, and it is the one
+    ## distinction this type exists to carry.
+    ##
+    ## ``tsHarnessError`` means "the harness could not obtain a verdict;
+    ## nothing about the code under test was observed" — a spawn that never
+    ## produced a child, a child that could not be reached afterwards, exit
+    ## 126. None of that applies here: by the time these sites raise, the
+    ## child has run, its group exit status has been read off disk, and the
+    ## runner has directly OBSERVED that the case leaked processes which
+    ## outlived a bounded kill. That is an observation about the code under
+    ## test, and a leaked process group is precisely the defect the
+    ## process-group ownership work exists to detect.
+    ##
+    ## These sites used to raise a bare ``IOError``, which the drivers
+    ## caught alongside genuine collection faults and — once harness faults
+    ## gained their own outcome — relabelled ERROR. That silently moved the
+    ## leak out of ``summary.failed``, and
+    ## ``t_repro_test_runner_process_group_cleanup`` (which asserts
+    ## ``failed == 1``) went red without any test changing: same binary,
+    ## same host, pre-change runner PASS, post-change runner FAIL.
+    ##
+    ## It deliberately does NOT inherit from ``IOError`` or ``OSError``, so
+    ## the drivers' harness-fault handlers cannot re-absorb it by accident;
+    ## each driver names it explicitly. It is still ``CatchableError``, so
+    ## ``workerLoop``'s backstop keeps the run alive if a future path
+    ## forgets to name it — that backstop reports ERROR, which is loud and
+    ## fails the run rather than losing it.
 
 proc ensureDir(dir: string) =
   if dir.len > 0 and not dirExists(dir):
@@ -297,8 +547,8 @@ proc probeTimeoutSec(): int =
 
 const ProbePollIntervalMs = 50
 
-proc runListJson(binary: string): tuple[output: string; exitCode: int;
-                                        timedOut: bool] =
+proc runListJson(binary: string): tuple[output: string; stderrOutput: string;
+                                        exitCode: int; timedOut: bool] =
   ## Execute ``<binary> --list-json`` under a wall-clock bound.
   ##
   ## Output is redirected to a temp file by the shell rather than piped,
@@ -306,21 +556,46 @@ proc runListJson(binary: string): tuple[output: string; exitCode: int;
   ## not deadlock against a full pipe buffer while we are waiting on the
   ## clock. ``stdin`` is ``/dev/null`` so a probe that reads stdin fails
   ## fast instead of inheriting the runner's terminal.
-  result = (output: "", exitCode: -1, timedOut: false)
+  ##
+  ## **stdout and stderr go to separate files.** They used to be merged
+  ## with ``2>&1``, which made this probe corrupt its own input: the
+  ## catalog is a stdout document, and any library that writes to stderr
+  ## during module initialisation prepends noise to it. That is not
+  ## hypothetical — every test binary that links the clingo solver emits
+  ##
+  ##     <block>:22:1-26: info: no atoms over signature occur in program:
+  ##
+  ## on stderr before ``main`` runs. With the streams merged the parse
+  ## check below saw ``<`` instead of ``{`` and silently downgraded the
+  ## binary to whole-binary execution; that alone accounted for 170 of
+  ## the suite's 1207 binaries, i.e. 898 cases that ran but could no
+  ## longer be named, timed or re-run individually. ``subprocess.run`` in
+  ## scripts/reprobuild_suite_inventory.py never merged the streams,
+  ## which is the entire reason the inventory enumerated 1206/1207 while
+  ## the runner enumerated 1037.
+  ##
+  ## stderr is still captured, because it is the useful diagnostic when a
+  ## probe genuinely fails.
+  result = (output: "", stderrOutput: "", exitCode: -1, timedOut: false)
   var tmpPath = ""
+  var errPath = ""
   try:
     let (tmpFile, path) = createTempFile("repro_probe_", ".json")
     tmpFile.close()
     tmpPath = path
+    let (errFile, epath) = createTempFile("repro_probe_", ".err")
+    errFile.close()
+    errPath = epath
   except CatchableError:
     return
   defer:
-    if tmpPath.len > 0:
-      try: removeFile(tmpPath)
-      except CatchableError: discard
+    for path in [tmpPath, errPath]:
+      if path.len > 0:
+        try: removeFile(path)
+        except CatchableError: discard
 
   let shellCmd = "exec " & quoteShell(binary) & " --list-json > " &
-    quoteShell(tmpPath) & " 2>&1 < /dev/null"
+    quoteShell(tmpPath) & " 2> " & quoteShell(errPath) & " < /dev/null"
   var p: Process
   try:
     p = startProcess("/bin/sh", args = ["-c", shellCmd], env = nil,
@@ -355,51 +630,386 @@ proc runListJson(binary: string): tuple[output: string; exitCode: int;
     result.output = readFile(tmpPath)
   except CatchableError:
     result.output = ""
+  try:
+    result.stderrOutput = readFile(errPath)
+  except CatchableError:
+    result.stderrOutput = ""
+
+proc firstNonEmptyLine(text: string; limit = 200): string =
+  for line in text.splitLines():
+    let stripped = line.strip()
+    if stripped.len > 0:
+      return if stripped.len > limit: stripped[0 ..< limit] else: stripped
+  ""
+
+proc objectEndIndex(text: string; start: int): int =
+  ## Index of the ``}`` closing the object that opens at ``text[start]``,
+  ## or -1. Brace counting is string- and escape-aware so a ``}`` inside
+  ## a test name (they contain arbitrary text) cannot end the scan early.
+  if start >= text.len or text[start] != '{':
+    return -1
+  var depth = 0
+  var i = start
+  var inString = false
+  var escaped = false
+  while i < text.len:
+    let c = text[i]
+    if inString:
+      if escaped: escaped = false
+      elif c == '\\': escaped = true
+      elif c == '"': inString = false
+    else:
+      case c
+      of '"': inString = true
+      of '{': inc depth
+      of '}':
+        dec depth
+        if depth == 0:
+          return i
+      else: discard
+    inc i
+  -1
+
+proc extractCatalogDocument(text: string): JsonNode =
+  ## Decode the ``--list-json`` payload out of a possibly polluted stream.
+  ##
+  ## Mirrors ``extract_catalog_document`` in
+  ## scripts/reprobuild_suite_inventory.py — the two probes must agree on
+  ## what counts as a catalog, or the inventory and the runner disagree
+  ## about which binaries are enumerable, which is precisely the drift
+  ## that hid 170 opaque binaries. Keep them in step.
+  ##
+  ## Separating stderr from stdout (see ``runListJson``) removes the
+  ## dominant source of pollution; this stays as defence in depth for the
+  ## recorded case of a source with a top-level ``echo`` interleaving its
+  ## own output with the payload on stdout itself.
+  result = nil
+  let trimmed = text.strip()
+  if trimmed.len == 0:
+    return
+
+  proc accept(node: JsonNode): JsonNode =
+    if node != nil and node.kind == JObject and node.hasKey("tests") and
+        node["tests"].kind == JArray:
+      node
+    else:
+      nil
+
+  # (1) the clean case: the whole stream is the document.
+  try:
+    let whole = accept(parseJson(trimmed))
+    if whole != nil:
+      return whole
+  except CatchableError:
+    discard
+
+  # (2) the payload is one line among leaked lines.
+  for line in trimmed.splitLines():
+    let candidate = line.strip()
+    if not candidate.startsWith("{") or not candidate.contains("\"tests\""):
+      continue
+    try:
+      let parsed = accept(parseJson(candidate))
+      if parsed != nil:
+        return parsed
+    except CatchableError:
+      discard
+
+  # (3) the payload is embedded with leading and/or trailing noise.
+  const Marker = "{\"tests\""
+  var idx = trimmed.find(Marker)
+  while idx >= 0:
+    let stop = objectEndIndex(trimmed, idx)
+    if stop > idx:
+      try:
+        let parsed = accept(parseJson(trimmed[idx .. stop]))
+        if parsed != nil:
+          return parsed
+      except CatchableError:
+        discard
+    idx = trimmed.find(Marker, idx + 1)
 
 proc probeBinary(binary: string): tuple[protocol: bool;
-                                        catalog: seq[(string, string)]] =
+                                        catalog: seq[CatalogEntry]] =
   ## Decide whether the binary speaks the protocol and return its test
   ## catalog when so. Two stages: (1) cheap byte-scan for one of
   ## ``ProtocolMarkers`` — if none is present, the binary is treated as
   ## opaque without running it. (2) when a marker is present, invoke
   ## ``--list-json`` under a wall-clock bound and parse the JSON
-  ## catalog. Anything short of a well-formed catalog — non-zero exit,
-  ## non-JSON output, or the probe timing out — leaves the binary
-  ## classified opaque, i.e. run whole. That is a degradation in
-  ## granularity, never a failure.
+  ## catalog out of the binary's stdout. Anything short of a well-formed
+  ## catalog — non-zero exit, no decodable catalog, or the probe timing
+  ## out — leaves the binary classified opaque, i.e. run whole. That is a
+  ## degradation in granularity, never a failure: the cases still
+  ## execute, they just stop being individually addressable.
+  ##
+  ## Every downgrade is now announced on stderr with its reason. The
+  ## classification is a decision about 1200+ binaries taken silently
+  ## once per run; when it was silent, a stderr-merge bug in the probe
+  ## (see ``runListJson``) mislabelled 170 of them for an entire test
+  ## campaign and nothing in any artifact said so.
   result.protocol = false
   result.catalog = @[]
   if not looksProtocolAwareByStrings(binary):
     return
-  let (output, exitCode, timedOut) = runListJson(binary)
+  let stem = splitFile(binary).name
+  let (output, stderrOutput, exitCode, timedOut) = runListJson(binary)
   if timedOut:
-    stderr.writeLine "repro_test_runner: --list-json probe of " &
-      splitFile(binary).name & " exceeded " & $probeTimeoutSec() &
+    stderr.writeLine "repro_test_runner: --list-json probe of " & stem &
+      " exceeded " & $probeTimeoutSec() &
       "s; treating the binary as opaque (whole-binary execution)"
     return
   if exitCode != 0:
+    stderr.writeLine "repro_test_runner: --list-json probe of " & stem &
+      " exited " & $exitCode & " (" & firstNonEmptyLine(stderrOutput) &
+      "); treating the binary as opaque (whole-binary execution)"
     return
-  let trimmed = output.strip()
-  if trimmed.len == 0 or trimmed[0] != '{':
+  let doc = extractCatalogDocument(output)
+  if doc == nil:
+    # Say so. A silent downgrade here is how 170 binaries lost per-case
+    # addressability for an entire campaign without a single line of
+    # evidence in any log.
+    stderr.writeLine "repro_test_runner: --list-json probe of " & stem &
+      " produced no catalog document (stdout head: " &
+      firstNonEmptyLine(output) & "); treating the binary as opaque " &
+      "(whole-binary execution)"
     return
   try:
-    let doc = parseJson(trimmed)
-    if not doc.hasKey("tests") or doc["tests"].kind != JArray:
-      return
-    var cat: seq[(string, string)] = @[]
+    var cat: seq[CatalogEntry] = @[]
     for entry in doc["tests"]:
       let suite = entry{"suite"}.getStr("")
       let name = entry{"name"}.getStr("")
-      # ``name`` in the JSON catalog is the qualified form
-      # ``suite::test``. Extract the bare test name for the registry.
-      var bareName = name
-      if name.startsWith(suite & "::"):
-        bareName = name[len(suite) + 2 .. ^1]
-      cat.add((suite, bareName))
+      # ``name`` is the binary's own identifier for the case and the
+      # ONLY string its ``--run`` matcher is guaranteed to accept. It is
+      # carried through verbatim as ``runName``; the derived ``bare``
+      # form below exists solely for display/report identity.
+      #
+      # The old code derived the ``--run`` argument by stripping
+      # ``suite & "::"`` and re-joining. For a suite-less case
+      # (``suite`` empty, ``name`` == ``"::testname"``) the guard
+      # degenerated to ``startsWith("::")``, stripped the separator, and
+      # re-emitted the bare ``testname`` — which the emitting binary
+      # then failed to find. Deriving display text is fine; deriving the
+      # execution argument is not.
+      var bare = name
+      if suite.len > 0 and name.startsWith(suite & "::"):
+        bare = name[suite.len + 2 .. ^1]
+      elif suite.len == 0 and name.startsWith("::"):
+        bare = name[2 .. ^1]
+      # Retention, not interpretation: each field is copied out with the
+      # producer's own value and a neutral default when the key is
+      # absent. ``xfail`` is deliberately rendered to text here so JSON
+      # ``null`` (say nothing) and JSON ``false`` (say "not expected to
+      # fail") do not collapse into the same Nim value.
+      var xfail = ""
+      let xfailNode = entry{"xfail"}
+      if xfailNode != nil:
+        case xfailNode.kind
+        of JNull: xfail = ""
+        of JString: xfail = xfailNode.getStr("")
+        of JBool: xfail = (if xfailNode.getBool(): "true" else: "false")
+        else: xfail = $xfailNode
+      var tags: seq[string] = @[]
+      let tagsNode = entry{"tags"}
+      if tagsNode != nil and tagsNode.kind == JArray:
+        for t in tagsNode:
+          tags.add(if t.kind == JString: t.getStr("") else: $t)
+      cat.add(CatalogEntry(
+        suite: suite,
+        bare: bare,
+        runName: name,
+        file: entry{"file"}.getStr(""),
+        line: entry{"line"}.getInt(0),
+        column: entry{"column"}.getInt(0),
+        kind: entry{"kind"}.getStr(""),
+        group: entry{"group"}.getStr(""),
+        threadsRequired: entry{"threadsRequired"}.getInt(0),
+        xfail: xfail,
+        tags: tags,
+        bodyHash: entry{"bodyHash"}.getStr(""),
+        deterministic: entry{"deterministic"}.getBool(false)))
     result.protocol = true
     result.catalog = cat
   except JsonParsingError:
     return
+
+# ---- run catalog: write, read, and hash-difference selection ---------
+#
+# WHAT THIS IS. A *run catalog* is a document the runner writes after
+# probing (``--catalog-write PATH``) and may read back on a later run
+# (``--catalog-read PATH``). It records, per binary, the ``bodyHash`` of
+# every case that binary catalogued. On the later run, a case whose
+# ``bodyHash`` is byte-identical to the recorded one is a candidate for
+# being skipped; anything else runs.
+#
+# WHY IT IS A HINT AND NEVER A SOURCE OF TRUTH. This repository's
+# boundary rules say JSON may be emitted for inspection but must not be
+# an on-disk source of truth. The run catalog obeys that literally: it
+# can only ever *remove* work, it is consulted exactly once at queue
+# construction, and EVERY way of not understanding it — absent,
+# unreadable, malformed, wrong version, written under a different
+# project root or a different ``--bin-dir``, a binary it does not
+# mention, a case it does not mention, an empty hash on either side —
+# resolves to RUN THE CASE. There is no code path in which failing to
+# understand the catalog causes a case to be skipped.
+#
+# WHY FAIL-CLOSED IS THE WHOLE POINT. A selection mechanism that
+# silently under-runs converts a coverage loss into a green run, which is
+# exactly the failure class this campaign exists to remove. So the
+# default is "run", the catalog may only subtract from it, and every
+# subtraction is announced on stderr and counted in the summary. A run
+# with no ``--catalog-read`` is the full run, unchanged, and stays
+# available at all times.
+#
+# WHY THE PROJECT ROOT IS PART OF THE DOCUMENT. ``bodyHash`` is NOT
+# checkout-independent: the codetracer-nim fork's ``check``/``require``/
+# ``expect``/``doAssert`` expansions bake the source file's ABSOLUTE path
+# into a string literal inside the test body, and the compiler's
+# body hash hashes literals verbatim. Two checkouts of identical sources
+# at different absolute paths therefore produce entirely different
+# hashes. A catalog written at one path and read at another would
+# consequently show *every* case as changed — which is safe (it
+# over-runs) — but it would also silently make the mechanism useless
+# while looking like it worked. Recording the root and refusing to use a
+# catalog from a different one turns that from a silent no-op into a
+# stated refusal.
+
+const RunCatalogVersion = 1
+
+type
+  RunCatalog = object
+    ## A previously written run catalog, already validated against the
+    ## current run's identity. Only constructed by ``loadRunCatalog``.
+    projectRoot: string
+    binDir: string
+    hashes: Table[string, Table[string, string]]
+      ## binary stem -> (catalog ``name`` -> ``bodyHash``). A stem that
+      ## was opaque at write time is present with an EMPTY inner table,
+      ## which selects every case of that binary on the read side. The
+      ## distinction between "absent" and "present but empty" is not
+      ## load-bearing today precisely because both resolve to "run".
+
+  SelectionDecision = object
+    ## Why the runner is about to run the case set it is about to run.
+    ## Carried into the summary so a reader of the artifact alone can
+    ## tell a deliberate subset from an accidental one.
+    enabled: bool     ## a ``--catalog-read`` was given at all
+    usable: bool      ## the catalog was understood and applied
+    reason: string    ## why it was not usable; "" when it was
+    path: string      ## the ``--catalog-read`` path, verbatim
+
+proc runCatalogDocument(cwd, binDir: string;
+                        probed: seq[tuple[stem: string;
+                                          protocol: bool;
+                                          catalog: seq[CatalogEntry]]]
+                       ): JsonNode =
+  ## Render the just-probed binary set as a run-catalog document. The
+  ## per-binary shape deliberately mirrors the codetracer-nim
+  ## ``--catalog -`` payload (``{"version":1,"tests":{name: hash}}``) so
+  ## the two are readable with the same eyes; the wrapper adds only the
+  ## identity a *multi-binary* run needs and a single binary cannot know.
+  result = newJObject()
+  result["version"] = %RunCatalogVersion
+  result["projectRoot"] = %cwd
+  result["binDir"] = %binDir
+  var binaries = newJObject()
+  for entry in probed:
+    var node = newJObject()
+    node["protocol"] = %entry.protocol
+    var tests = newJObject()
+    for c in entry.catalog:
+      tests[c.runName] = %c.bodyHash
+    node["tests"] = tests
+    binaries[entry.stem] = node
+  result["binaries"] = binaries
+
+proc loadRunCatalog(path, cwd, binDir: string):
+    tuple[catalog: RunCatalog; usable: bool; reason: string] =
+  ## Read a run catalog and validate it against THIS run's identity.
+  ## Returns ``usable = false`` with a stated reason for every way of not
+  ## understanding it. The caller must then run everything.
+  result.usable = false
+  result.catalog = RunCatalog(hashes: initTable[string, Table[string, string]]())
+  if not fileExists(path):
+    result.reason = "no catalog at " & path
+    return
+  var raw = ""
+  try:
+    raw = readFile(path)
+  except CatchableError as e:
+    result.reason = "catalog at " & path & " could not be read (" & e.msg & ")"
+    return
+  var doc: JsonNode = nil
+  try:
+    doc = parseJson(raw)
+  except CatchableError as e:
+    result.reason = "catalog at " & path & " is not valid JSON (" & e.msg & ")"
+    return
+  if doc == nil or doc.kind != JObject:
+    result.reason = "catalog at " & path & " is not a JSON object"
+    return
+  let version = doc{"version"}.getInt(-1)
+  if version != RunCatalogVersion:
+    result.reason = "catalog at " & path & " is version " & $version &
+      ", this runner writes version " & $RunCatalogVersion
+    return
+  let recordedRoot = doc{"projectRoot"}.getStr("")
+  if recordedRoot != cwd:
+    # See the header note: bodyHash is path-dependent, so a catalog from
+    # another root cannot be compared against this one at all.
+    result.reason = "catalog at " & path & " was written under project root " &
+      (if recordedRoot.len > 0: recordedRoot else: "<unrecorded>") &
+      ", this run is under " & cwd &
+      " (bodyHash is not checkout-independent, so the two are incomparable)"
+    return
+  let recordedBinDir = doc{"binDir"}.getStr("")
+  if recordedBinDir != binDir:
+    result.reason = "catalog at " & path & " was written for --bin-dir " &
+      (if recordedBinDir.len > 0: recordedBinDir else: "<unrecorded>") &
+      ", this run uses " & binDir
+    return
+  let binaries = doc{"binaries"}
+  if binaries == nil or binaries.kind != JObject:
+    result.reason = "catalog at " & path & " carries no \"binaries\" object"
+    return
+  for stem, node in binaries.pairs:
+    var inner = initTable[string, string]()
+    if node != nil and node.kind == JObject:
+      let tests = node{"tests"}
+      if tests != nil and tests.kind == JObject and
+          node{"protocol"}.getBool(false):
+        for name, hashNode in tests.pairs:
+          if hashNode != nil and hashNode.kind == JString:
+            inner[name] = hashNode.getStr("")
+    result.catalog.hashes[stem] = inner
+  result.catalog.projectRoot = recordedRoot
+  result.catalog.binDir = recordedBinDir
+  result.usable = true
+
+proc caseIsUnchanged(catalog: RunCatalog; stem: string;
+                     entry: CatalogEntry): bool =
+  ## True only when the catalog positively vouches for this exact case:
+  ## the binary is named, the case is named under it, both hashes are
+  ## non-empty, and they are byte-identical. Every other combination is
+  ## false, i.e. "run it".
+  if stem notin catalog.hashes:
+    return false
+  let inner = catalog.hashes[stem]
+  if entry.runName notin inner:
+    return false
+  let recorded = inner[entry.runName]
+  # An empty hash on EITHER side means a producer told us nothing, and
+  # two silences are not an agreement. This is not hypothetical: this
+  # repository contains a second, older protocol producer — the vendored
+  # ``libs/ct_test_unittest_parallel`` shim, imported by thirteen test
+  # files — whose ``--list-json`` rows carry ``name``/``suite``/``file``/
+  # ``line`` and no ``bodyHash`` at all. Without this guard, every case in
+  # every shim-built binary would compare "" against "", match, and be
+  # silently deselected forever. The guard is written as one condition on
+  # purpose: split across two statements, one half sat behind the other
+  # and could not be shown to do anything.
+  if entry.bodyHash.len == 0 or recorded.len == 0:
+    return false
+  recorded == entry.bodyHash
 
 proc buildEngine(repoRoot: string): bool =
   ## Drive the engine build of the ``test`` aggregate. Returns true on
@@ -459,12 +1069,25 @@ var spawnLock: Lock
 initLock(spawnLock)
 
 const TimeoutExitCode = -42
+const HarnessErrorExitCode = 126
+  ## Reserved child exit status meaning "the harness could not start the
+  ## test", written by ``processGroupWrapperMain`` after its own spawn
+  ## retries are exhausted. 126 is the shell's "command found but not
+  ## executable", i.e. already a not-a-test-result code by convention.
+  ##
+  ## The convention existed before this change but nothing consumed it:
+  ## the exit-code switch had no 126 arm, so a wrapper-side harness error
+  ## fell through to ``else: tsFail`` and was reported as a failing test.
+  ## It now maps to ``tsHarnessError``. A test that deliberately exits
+  ## 126 is misreported by this rule; that is the accepted cost of having
+  ## a reserved code at all, and no test in the suite does so.
 const TimeoutPollIntervalMs = 100
 const TimeoutKillGraceSec = 5
 const PostKillVerificationSec = 5
 
 proc drainAvailable(p: Process; output: var string): int
 proc finalDrainNonBlocking(p: Process; output: var string)
+proc describeChildExit(exitCode: int): string
 
 when defined(posix):
   const
@@ -1063,8 +1686,34 @@ when defined(posix):
         "\nrepro_test_runner: interrupt cleanup left exact owner-token " &
         "processes; refusing to unregister the process group.\n")
 
-proc spawnedProcess(binary: string; args: openArray[string];
-                    env: StringTableRef): TestProcess =
+const
+  ParentSpawnAttempts = 4
+  ParentSpawnRetryDelayMs = 250
+    ## Bounded retry around the PARENT-side spawn of the process-group
+    ## supervisor.
+    ##
+    ## ``processGroupWrapperMain`` already retries the spawn of the test
+    ## binary *inside* the wrapper, but that covers only the second of the
+    ## two forks in this path. The first fork — the runner spawning the
+    ## wrapper — had no retry at all, which is why a full-suite run at
+    ## ``--threads=8`` recorded ``spawn failed: Bad file descriptor`` as a
+    ## flat test FAILURE with no retry line anywhere in the console log.
+    ##
+    ## ``EBADF`` here comes out of ``startProcessAfterFork``: the forked
+    ## child ``dup2()``s the pipe ends it captured before the fork, and a
+    ## failing ``dup2`` reports its ``errno`` back to the parent through
+    ## the error pipe, where ``osproc`` re-raises it as ``OSError``. It is
+    ## a property of the moment, not of the binary, so a short backoff
+    ## clears it. Retrying is what makes the residual-fork-hazard note on
+    ## ``spawnLock`` actionable instead of merely descriptive.
+    ##
+    ## Retry covers ONLY the spawn. A supervisor that started and then
+    ## failed its readiness/process-group handshake is not retried: at
+    ## that point a child exists, and re-spawning would risk two live
+    ## groups for one case.
+
+proc spawnGroupSupervisor(binary: string; args: openArray[string];
+                          env: StringTableRef): TestProcess =
   when defined(posix):
     if interruptedSignal.load(moAcquire) != 0:
       raise newException(IOError,
@@ -1080,16 +1729,96 @@ proc spawnedProcess(binary: string; args: openArray[string];
         getAppFilename(), args = wrapperArgs, env = env,
         options = {poStdErrToStdOut})
       var readyLine = ""
-      if not process.outputStream.readLine(readyLine) or
-          readyLine != ProcessGroupReadyMarker:
+      let waitStart = epochTime()
+      let gotLine = process.outputStream.readLine(readyLine)
+      let waitedMs = int((epochTime() - waitStart) * 1000.0)
+      if not gotLine or readyLine != ProcessGroupReadyMarker:
+        # Collect the evidence BEFORE tearing the supervisor down — every
+        # fact below used to be discarded, which is why this failure could
+        # only ever report the phase and never the cause. The supervisor's
+        # exit status in particular is the difference between "it refused"
+        # (125, its own setpgid/arguments guard), "it was killed" (128+N),
+        # and "it never got as far as running" (a loader/runtime failure).
+        var supervisorExit = -1
+        var weKilledIt = false
+        var trailing = ""
+        # Reap on its OWN terms first. A supervisor that is failing this
+        # handshake is already on its way out, so give it a short grace
+        # window and take the status it chose. Killing first and reporting
+        # what came back would attribute OUR SIGKILL to the supervisor —
+        # the message would say "exit code 137 (consistent with termination
+        # by signal 9)" about a process that was about to exit 125 on its
+        # own, which is worse than saying nothing.
+        let reapDeadline = epochTime() + 0.25
         try:
-          process.kill()
-          discard process.waitForExit()
+          while epochTime() < reapDeadline:
+            supervisorExit = process.peekExitCode()
+            if supervisorExit >= 0:
+              break
+            sleep(GroupSupervisorPollIntervalMs)
+          if supervisorExit < 0:
+            weKilledIt = true
+            process.kill()
+            discard process.waitForExit()
+        except CatchableError:
+          discard
+        # Anything the supervisor managed to write after (or instead of) the
+        # marker: its own stderr guards are merged onto this pipe by
+        # ``poStdErrToStdOut``, so this is where a real refusal message lands.
+        try:
+          finalDrainNonBlocking(process, trailing)
         except CatchableError:
           discard
         close(process)
+        let observed =
+          if not gotLine:
+            "end of stream — the supervisor's stdout closed without " &
+              "delivering a single line"
+          elif readyLine.len == 0:
+            "an empty line (the stream was open, but the first line " &
+              "carried no bytes)"
+          else:
+            "a different first line: " & readyLine.escape()
+        let exitText =
+          if supervisorExit >= 0:
+            describeChildExit(supervisorExit)
+          elif weKilledIt:
+            "still running 250ms after the handshake failed; the runner " &
+              "killed it, so it has no exit status of its own to report"
+          else:
+            "not reported (the supervisor could not be reaped)"
+        let trailingText =
+          if trailing.strip().len == 0: "(none)"
+          else: trailing.strip().escape()
         raise newException(IOError,
-          "test process-group supervisor did not become ready: " & readyLine)
+          "test process-group supervisor did not become ready.\n" &
+          "  waiting for: the readiness marker " &
+            ProcessGroupReadyMarker.escape() &
+            " as the first line of the supervisor's merged stdout+stderr\n" &
+          "  waited:      " & $waitedMs & "ms (a blocking read with no " &
+            "deadline; it returns as soon as the line or EOF arrives)\n" &
+          "  observed:    " & observed & "\n" &
+          "  supervisor:  " & exitText & "\n" &
+          "  also wrote:  " & trailingText & "\n" &
+          "  test binary: " & binary & "\n" &
+          # Hard-wrapped: this is printed to the console per affected case,
+          # where one 300-column line is not a diagnosis anyone reads.
+          "  meaning:     the supervisor is a re-exec of THIS runner that " &
+            "writes the marker only after\n" &
+          "               setpgid() succeeds and its signal handlers are " &
+            "installed, and before it\n" &
+          "               spawns the test binary — so nothing here has run " &
+            "the test yet, and this is\n" &
+          "               a harness fault, never a verdict about the code " &
+            "under test. Read it as:\n" &
+          "               exit 125 is the wrapper refusing on purpose and " &
+            "the reason is on the\n" &
+          "               'also wrote' line; 128+N is something killing it; " &
+            "no exit status at all\n" &
+          "               means the re-exec never reached Nim's main " &
+            "(loader failure, fd\n" &
+          "               exhaustion, or the image being replaced " &
+            "mid-spawn).")
       let processGroup = process.processID
       if processGroup <= 0 or
           getpgid(Pid(processGroup)) != Pid(processGroup):
@@ -1119,6 +1848,28 @@ proc spawnedProcess(binary: string; args: openArray[string];
     # registry while this spawn was establishing its child-side group.
     if interruptedSignal.load(moAcquire) != 0:
       discard terminateOwnedProcessGroup(result.processGroup)
+
+proc spawnedProcess(binary: string; args: openArray[string];
+                    env: StringTableRef): TestProcess =
+  ## ``spawnGroupSupervisor`` under a bounded retry for the transient
+  ## fork/exec faults documented on ``ParentSpawnRetryDelayMs``. Every
+  ## attempt is announced on stderr so a retried spawn is visible in the
+  ## console log rather than being inferred from a duration; the final
+  ## failure is re-raised unchanged and the caller turns it into a
+  ## ``tsHarnessError``.
+  var lastError: ref OSError = nil
+  for attempt in 1 .. ParentSpawnAttempts:
+    try:
+      return spawnGroupSupervisor(binary, args, env)
+    except OSError as e:
+      lastError = e
+      if attempt >= ParentSpawnAttempts:
+        break
+      stderr.writeLine "repro_test_runner: spawn attempt " & $attempt &
+        " of " & $ParentSpawnAttempts & " for " & splitFile(binary).name &
+        " failed (" & e.msg & "); retrying"
+      sleep(ParentSpawnRetryDelayMs * attempt)
+  raise lastError
 
 const AbsoluteTimeoutMultiplier = 4
   ## The per-test ``--test-timeout`` is interpreted as an *idle*
@@ -1171,7 +1922,9 @@ proc drainAndWait(testProcess: TestProcess):
       groupOutput.add(
         "\nrepro_test_runner: exact owner-token processes survived " &
         "bounded cleanup; refusing to unregister or report PASS.\n")
-      raise newException(IOError, groupOutput)
+      # A leaked process group is an observation about the case, so it is
+      # raised as a REFUSAL and reported FAIL — never as a harness fault.
+      raise newException(ProcessGroupRefusal, groupOutput)
     close(p)
     cleanupProcessGroupPaths(testProcess)
     return (groupOutput, groupExitCode)
@@ -1417,7 +2170,7 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
           output.add(
             "\nrepro_test_runner: exact owner-token processes survived " &
             "bounded cleanup; refusing to unregister or report PASS.\n")
-          raise newException(IOError, output)
+          raise newException(ProcessGroupRefusal, output)
         close(p)
         cleanupProcessGroupPaths(testProcess)
       else:
@@ -1466,7 +2219,7 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int):
         "\nrepro_test_runner: exact owner-token processes survived " &
         "bounded cleanup; refusing to unregister or report a terminal " &
         "test result.\n")
-      raise newException(IOError, output)
+      raise newException(ProcessGroupRefusal, output)
   else:
     try:
       p.terminate()
@@ -1506,16 +2259,22 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
   let t0 = epochTime()
   # Wrap the whole spawn-drain-wait sequence so a sporadic
   # ``Bad file descriptor [OSError]`` from the residual fork hazard
-  # documented above is reported as a test failure instead of tearing
-  # down the worker thread (and silencing every test the queue would
-  # have handed out afterwards). The crash mode happens before the
-  # child runs, so the test is genuinely "did not produce a result"
-  # — failing the test is the right exit-code behaviour for the run.
+  # documented above is reported instead of tearing down the worker
+  # thread (and silencing every test the queue would have handed out
+  # afterwards). The outcome is ``ERROR``, not ``FAIL``: no verdict about
+  # the code under test was produced, and saying otherwise puts a defect
+  # report on a tree that may be perfectly healthy.
+  var whichPhase = "spawn failed"
   try:
     var childEnv = newStringTable(modeCaseSensitive)
     for (k, v) in baseEnv:
       childEnv[k] = v
     let p = spawnedProcess(tc.binary, args = [], env = childEnv)
+    # Past this point the child exists, so a fault is a collection
+    # failure and must not be reported as a spawn failure — mislabelling
+    # the phase is what sent the first investigation of this defect at
+    # the wrong code.
+    whichPhase = "child started but its result could not be collected"
     let (output, exitCode, timedOut, timeoutDescription) =
       drainAndWaitWithTimeout(p, testTimeoutSec)
     if timedOut:
@@ -1528,15 +2287,105 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
       case exitCode
       of 0: result.status = tsPass
       of 2: result.status = tsSkip
+      of HarnessErrorExitCode:
+        result.status = tsHarnessError
+        result.harnessError =
+          "child reported harness exit " & $HarnessErrorExitCode &
+          " (could not start the test)"
       else: result.status = tsFail
+  except ProcessGroupRefusal as e:
+    # A verdict WAS reached: the case leaked processes that outlived
+    # bounded cleanup. That is a defect in the tree, so it is FAIL and it
+    # lands in ``summary.failed`` where a gate looks for defects — not in
+    # ``harness_errors``, which is a statement about the run.
+    result.status = tsFail
+    result.stdout = e.msg
   except OSError as e:
-    result.status = tsFail
-    result.stdout = "repro_test_runner: spawn failed: " & e.msg & "\n"
+    # NOT a test failure: nothing was observed about the code under test.
+    # See ``TestStatus.tsHarnessError``.
+    result.status = tsHarnessError
+    result.harnessError = whichPhase & ": " & e.msg
+    result.stdout = "repro_test_runner: " & whichPhase & ": " & e.msg & "\n"
   except IOError as e:
-    result.status = tsFail
-    result.stdout = "repro_test_runner: i/o failed: " & e.msg & "\n"
+    result.status = tsHarnessError
+    result.harnessError = whichPhase & " (i/o): " & e.msg
+    result.stdout =
+      "repro_test_runner: " & whichPhase & " (i/o): " & e.msg & "\n"
   result.durationMs = int((epochTime() - t0) * 1000)
   result.stderr = ""
+
+proc signalName(sig: int): string =
+  ## Name for a signal number, or "" when it is not one this runner can
+  ## name. The numbers are read from the platform's own headers through
+  ## ``std/posix`` rather than hard-coded, because they differ between
+  ## Linux and macOS (SIGBUS is 7 on one and 10 on the other) — a
+  ## hard-coded table would confidently print the wrong name on one host.
+  when defined(posix):
+    let s = cint(sig)
+    if s == SIGHUP: "SIGHUP"
+    elif s == SIGINT: "SIGINT"
+    elif s == SIGQUIT: "SIGQUIT"
+    elif s == SIGILL: "SIGILL"
+    elif s == SIGTRAP: "SIGTRAP"
+    elif s == SIGABRT: "SIGABRT"
+    elif s == SIGBUS: "SIGBUS"
+    elif s == SIGFPE: "SIGFPE"
+    elif s == SIGKILL: "SIGKILL"
+    elif s == SIGSEGV: "SIGSEGV"
+    elif s == SIGPIPE: "SIGPIPE"
+    elif s == SIGALRM: "SIGALRM"
+    elif s == SIGTERM: "SIGTERM"
+    else: ""
+  else:
+    ""
+
+proc describeChildExit(exitCode: int): string =
+  ## Render a per-case child's exit code, naming the signal when the code
+  ## carries one.
+  ##
+  ## The code comes from ``processGroupWrapperMain``'s own
+  ## ``waitForExit``, which follows the shell convention: a child killed by
+  ## signal N is reported as 128+N. That is the only signal evidence the
+  ## runner has — the wrapper records a status integer, not a raw
+  ## ``wait`` status word — so the signal is named as an INFERENCE from the
+  ## convention rather than asserted as fact. A test that calls
+  ## ``quit(139)`` deliberately would be described the same way, and saying
+  ## "consistent with" instead of "was" is the difference between a
+  ## diagnosis and a fabrication.
+  if exitCode > 128 and exitCode <= 128 + 64:
+    let sig = exitCode - 128
+    let named = signalName(sig)
+    let name = if named.len > 0: " (" & named & ")" else: ""
+    result = "exit code " & $exitCode & " (128+" & $sig &
+      ", consistent with termination by signal " & $sig & name & ")"
+  else:
+    result = "exit code " & $exitCode
+
+proc missingDocumentDiagnostic(resultFile: string; exitCode: int;
+                               present: bool): string =
+  ## The diagnosis owed to a non-PASS case whose result document cannot be
+  ## read — see the call site for why the runner must synthesise one.
+  let whatHappened =
+    if present:
+      "exists but could not be read as a protocol document"
+    else:
+      "was never written"
+  "repro_test_runner: no readable result document for this case.\n" &
+    "  expected at: " & resultFile & "\n" &
+    "  document:    " & whatHappened & "\n" &
+    "  child:       started, and finished with " &
+      describeChildExit(exitCode) & "\n" &
+    # Hard-wrapped: this text is printed to the console per failing case,
+    # where one 300-column line is not a diagnosis anyone reads.
+    "  meaning:     the fork writes this document from testEnded, so a " &
+      "case that dies\n" &
+    "               first (quit() in the case body, a fatal signal, an " &
+      "abort in a\n" &
+    "               destructor) leaves no first-hand account. The verdict " &
+      "above comes\n" &
+    "               from the exit code alone; re-run this one case " &
+      "directly to see\n" &
+    "               what the child was doing.\n"
 
 proc runOneProtocol(tc: TestCase; resultsDir: string;
                     baseEnv: seq[tuple[key, value: string]];
@@ -1566,19 +2415,60 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   var output = ""
   var exitCode = 1
   var spawnFailed = false
+    ## "the harness did not obtain an answer", in either phase. Kept as
+    ## one flag because both phases have the same consequence: the
+    ## runner has no trustworthy verdict for this case.
   var timedOut = false
   var timeoutDescription = ""
+  var groupRefused = false
+    ## The runner reached a verdict and refused it: this case left
+    ## exact-owner-token processes alive after bounded cleanup. Tracked
+    ## apart from ``spawnFailed`` because the two have OPPOSITE meanings —
+    ## ``spawnFailed`` is "no verdict obtainable" (ERROR), this is "verdict
+    ## obtained and it is bad" (FAIL).
+  # The spawn and the collect-the-answer phase are caught SEPARATELY.
+  #
+  # They used to share one ``try``, so every fault in the whole span was
+  # labelled "spawn failed" — including faults that happened after the
+  # child had already run to completion. That mislabel is not cosmetic:
+  # the case in the recorded run whose stdout read
+  # ``spawn failed: Bad file descriptor`` had, at 83 ms, already left a
+  # complete ``{"status":"PASS"}`` result document on disk, so the child
+  # plainly did start. Attributing it to the spawn sent the investigation
+  # (and a retry fix) at the wrong phase.
+  var phase = ""
+  var childStarted = false
+  var p: TestProcess
   try:
-    let p = spawnedProcess(
-      tc.binary, args = ["--run", tc.qualifiedName], env = childEnv)
-    (output, exitCode, timedOut, timeoutDescription) =
-      drainAndWaitWithTimeout(p, testTimeoutSec)
+    # ``runName`` is the catalog's own ``name``, never a reconstruction.
+    p = spawnedProcess(
+      tc.binary, args = ["--run", tc.runName], env = childEnv)
+    childStarted = true
   except OSError as e:
     spawnFailed = true
-    output = "repro_test_runner: spawn failed: " & e.msg & "\n"
+    phase = "spawn failed: " & e.msg
   except IOError as e:
     spawnFailed = true
-    output = "repro_test_runner: i/o failed: " & e.msg & "\n"
+    phase = "spawn failed (i/o): " & e.msg
+  if childStarted:
+    try:
+      (output, exitCode, timedOut, timeoutDescription) =
+        drainAndWaitWithTimeout(p, testTimeoutSec)
+    except ProcessGroupRefusal as e:
+      # Named before the harness-fault handlers so a leaked process group
+      # can never be re-absorbed into ERROR.
+      groupRefused = true
+      output = e.msg
+    except OSError as e:
+      spawnFailed = true
+      phase = "child started but its result could not be collected: " & e.msg
+    except IOError as e:
+      spawnFailed = true
+      phase = "child started but its result could not be collected (i/o): " &
+        e.msg
+  if spawnFailed:
+    result.harnessError = phase
+    output = "repro_test_runner: " & phase & "\n" & output
   result.durationMs = int((epochTime() - t0) * 1000)
   if timedOut:
     result.stdout =
@@ -1586,7 +2476,20 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
       "; SIGKILLed\n" & output
   else:
     result.stdout = output
+  # Exit-code-derived verdict. It stays the fallback: a spawn failure, a
+  # timeout, or a crash before the result document is written leaves no
+  # document to read, and the exit code is then the only signal there is.
   if spawnFailed:
+    # The harness never obtained a verdict. Reporting FAIL here asserted
+    # something about the code under test that nothing observed, and it
+    # is indistinguishable in the summary from a failing assertion —
+    # which is exactly how a transient ``Bad file descriptor`` at
+    # ``--threads=8`` reached a suite report as a test failure.
+    result.status = tsHarnessError
+  elif groupRefused:
+    # The mirror image of the branch above: a verdict WAS observed — the
+    # case leaked processes past a bounded kill — so this is a defect in
+    # the tree and belongs in ``failed``.
     result.status = tsFail
   elif timedOut:
     result.status = tsFail
@@ -1594,15 +2497,131 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     case exitCode
     of 0: result.status = tsPass
     of 2: result.status = tsSkip
+    of HarnessErrorExitCode:
+      result.status = tsHarnessError
+      result.harnessError =
+        "child reported harness exit " & $HarnessErrorExitCode &
+        " (could not start the test)"
     else: result.status = tsFail
-  # Prefer the duration_ms recorded in the result file when present.
-  if fileExists(resultFile):
+  let exitDerivedStatus = result.status
+
+  # Consume the whole result document, not just ``duration_ms``. The
+  # protocol writes ``status``, ``duration_ms``, ``checkpoints``,
+  # ``exception`` and — only when non-empty — ``skipReason``. Reading
+  # just the duration threw away the case's own account of what
+  # happened, which is why a skip's reason never reached any summary.
+  #
+  # A timed-out or harness-errored child is deliberately excluded: its
+  # document, if any, is a stale record from before the kill (or from a
+  # previous run of the same case, since the path is derived from the
+  # case name and nothing else) and must not be allowed to overturn the
+  # runner's own verdict. Reading it would also manufacture a bogus
+  # ``status_disagreement`` between a stale PASS document and a harness
+  # exit code.
+  #
+  # This deliberately costs a real answer in one case: a child that ran
+  # to completion, wrote a valid document, and then hit a harness fault
+  # while its result was being collected. Promoting that document to the
+  # verdict would let a runner that lost track of a child still vouch
+  # for it, and the runner cannot tell that document apart from a stale
+  # one. ERROR is the honest label; it costs one re-run and it is loud.
+  #
+  # A refused case is excluded for the same reason as a timed-out one: the
+  # child may well have written ``{"status":"PASS"}`` before leaking the
+  # group, and letting that document overturn the refusal would restore
+  # exactly the fail-open the refusal exists to prevent (and would also
+  # manufacture a bogus ``status_disagreement``).
+  let documentPresent = fileExists(resultFile)
+  var documentUnreadable = false
+  if not spawnFailed and not timedOut and not groupRefused and
+      result.status != tsHarnessError and documentPresent:
     try:
       let doc = parseJson(readFile(resultFile))
       if doc.hasKey("duration_ms"):
         result.durationMs = doc["duration_ms"].getInt(result.durationMs)
-    except CatchableError:
-      discard
+      if doc.hasKey("checkpoints") and doc["checkpoints"].kind == JArray:
+        result.checkpointCount = doc["checkpoints"].len
+        # Keep the text, not just the tally. This is the only place the
+        # failed ``check`` expression and its operands exist for a
+        # per-case child (see ``TestResult.checkpoints``).
+        for entry in doc["checkpoints"]:
+          if entry.kind == JString:
+            result.checkpoints.add(entry.getStr())
+      # ``exception`` is JSON ``null`` when the case raised nothing;
+      # ``getStr`` on a non-string node yields the default.
+      result.exception = doc{"exception"}.getStr("")
+      # Absent for a bare ``skip()`` and for every non-skip outcome.
+      # ``{}`` returns nil for a missing key and ``getStr`` tolerates
+      # nil, so absence costs nothing and never raises.
+      result.skipReason = doc{"skipReason"}.getStr("")
+      let reported = doc{"status"}.getStr("")
+      if reported.len > 0:
+        var documentStatus = exitDerivedStatus
+        var recognized = true
+        case reported
+        of "PASS": documentStatus = tsPass
+        of "FAIL": documentStatus = tsFail
+        of "SKIP": documentStatus = tsSkip
+        else: recognized = false
+        if not recognized:
+          # An unknown status string is itself a protocol violation.
+          # Keep the exit-code verdict and say so.
+          result.statusDisagreement =
+            "result file reports unrecognized status \"" & reported &
+            "\"; keeping exit-code verdict " & $exitDerivedStatus &
+            " (exit=" & $exitCode & ")"
+        else:
+          # The document is the case's first-hand account, so it wins.
+          # But the two channels are specified to agree, so a
+          # disagreement is a bug in the binary and is recorded rather
+          # than quietly smoothed over.
+          if documentStatus != exitDerivedStatus:
+            result.statusDisagreement =
+              "result file status " & $documentStatus &
+              " contradicts exit code " & $exitCode &
+              " (implies " & $exitDerivedStatus &
+              "); using the result file"
+          result.status = documentStatus
+    except CatchableError as e:
+      # A malformed or unreadable document is also a protocol fault.
+      # The exit-code verdict stands.
+      documentUnreadable = true
+      result.statusDisagreement =
+        "result file could not be read as a protocol document (" &
+        e.msg & "); keeping exit-code verdict " & $exitDerivedStatus
+  # ---- the child left no readable account of itself --------------------
+  #
+  # Everything above reads the case's own document. When there is no
+  # readable document, every diagnostic field stays empty — and for a
+  # child that CRASHED before ``testEnded`` that produced the worst
+  # possible report: ``status = FAIL`` with checkpoints, exception,
+  # harness_error and stdout all absent, and a ``result_file`` path
+  # naming a file that does not exist. The blanket "no non-PASS entry may
+  # be diagnostically empty" invariant was asserted by the suite but not
+  # guaranteed by the runner, and triage was left with a case name.
+  #
+  # So say what IS known, and only that: where the document was expected,
+  # that it is not readable there, and how the child finished. The status
+  # is deliberately NOT touched. A child that ran and exited non-zero is
+  # a FAIL — the harness DID obtain a verdict about the code under test,
+  # and a crash mid-case is a defect in the tree, which is precisely what
+  # ``failed`` counts. That is a different thing from ``tsHarnessError``,
+  # which means no verdict was obtainable at all (spawn faults, collect
+  # faults, the wrapper's exit 126); relabelling a crash as ERROR would
+  # move a real defect out of the count a gate reads.
+  #
+  # Scoped to exactly the branch that would have read the document, so a
+  # timeout, a refusal and a spawn fault — each of which already writes
+  # its own account — are untouched.
+  if not spawnFailed and not timedOut and not groupRefused and
+      result.status != tsHarnessError and result.status != tsPass and
+      (not documentPresent or documentUnreadable):
+    result.runnerDiagnosis =
+      missingDocumentDiagnostic(resultFile, exitCode, documentPresent)
+    result.stdout.add(result.runnerDiagnosis)
+  if result.statusDisagreement.len > 0:
+    result.stdout.add("\nrepro_test_runner: protocol disagreement: " &
+      result.statusDisagreement & "\n")
 
 proc nextCase(queue: ptr Queue; failFast: bool;
               out_case: var TestCase): bool =
@@ -1624,6 +2643,12 @@ proc markFailFast(queue: ptr Queue) =
   queue.failFastTriggered = true
   release(queue.lock)
 
+const
+  ConsoleCheckpointBudget = 20
+    ## Console-only cap on checkpoint lines per case. The summary JSON and
+    ## the case's own result document keep every line; this bound exists
+    ## so one pathological case cannot bury the other 6800 in the log.
+
 proc emitProgress(quiet: bool; res: TestResult) =
   if quiet:
     return
@@ -1633,7 +2658,62 @@ proc emitProgress(quiet: bool; res: TestResult) =
       res.testCase.binaryStem & " " & res.testCase.qualifiedName
     else:
       res.testCase.binaryStem & " (whole-binary)"
-  stderr.writeLine label & " " & name & " (" & $res.durationMs & "ms)"
+  # Show the skip reason inline: the console log is where a reader looks
+  # first, and "SKIP" without a reason is exactly the opaque signal this
+  # change exists to remove.
+  let reason =
+    if res.status == tsSkip and res.skipReason.len > 0:
+      " — " & res.skipReason
+    else:
+      ""
+  # ONE buffer, ONE write. Progress is emitted outside the results lock
+  # from every worker thread, so a diagnosis printed as N separate
+  # ``writeLine`` calls would interleave with other workers' lines at
+  # ``--threads=8`` and stop being readable as a unit — which is the same
+  # way the diagnosis gets lost that this block exists to prevent.
+  var msg = label & " " & name & " (" & $res.durationMs & "ms)" &
+    reason & "\n"
+  if res.statusDisagreement.len > 0:
+    msg.add("  ! protocol disagreement: " & res.statusDisagreement & "\n")
+  # The diagnosis, inline, for anything that did not pass.
+  #
+  # A per-case child is run with ``--run``, and the fork's ``unittest``
+  # registers no console formatter in that mode, so the child prints
+  # nothing at all: before this, a per-case FAIL reached the log as one
+  # bare ``[FAIL] … (5ms)`` line with the reason existing only inside a
+  # result document whose path was not printed either. The console is
+  # where a reader looks first; making them re-run the case by hand to
+  # learn what it asserted defeats the whole per-case cutover.
+  if res.status in {tsFail, tsHarnessError}:
+    if res.harnessError.len > 0:
+      msg.add("  ! harness error: " & res.harnessError & "\n")
+    for i, cp in res.checkpoints:
+      if i >= ConsoleCheckpointBudget:
+        msg.add("  … " & $(res.checkpoints.len - ConsoleCheckpointBudget) &
+          " more checkpoint line(s) in the result document\n")
+        break
+      # Checkpoints are multi-line (a stack trace rides in one entry), so
+      # indent every physical line rather than only the first.
+      for line in cp.splitLines():
+        msg.add("  | " & line & "\n")
+    if res.exception.len > 0:
+      for line in res.exception.strip(leading = false).splitLines():
+        msg.add("  | " & line & "\n")
+    # A runner-synthesised diagnosis is the ONLY diagnostic material a
+    # case that died before writing its document ever has, so it must
+    # reach the console too — otherwise the log still says nothing but
+    # ``[FAIL] … (5ms)`` and points at a result document that does not
+    # exist.
+    if res.runnerDiagnosis.len > 0:
+      for line in res.runnerDiagnosis.strip(leading = false).splitLines():
+        msg.add("  | " & line & "\n")
+    # Always name the artifact holding the full account, so a reader who
+    # needs more than the budget above knows where to look without
+    # reconstructing the path from the case name.
+    if res.resultFile.len > 0:
+      msg.add("  → result document: " & res.resultFile & "\n")
+  stderr.write(msg)
+  stderr.flushFile()
 
 proc workerLoop(args: WorkerArgs) =
   while true:
@@ -1646,8 +2726,10 @@ proc workerLoop(args: WorkerArgs) =
     # catch the spawn-time ``OSError``/``IOError`` paths internally,
     # but any unexpected raise here would otherwise tear down the
     # worker thread and silently lose every test still on the queue.
-    # Convert it to a synthetic FAIL so the run completes and the
-    # summary reflects what happened.
+    # Convert it to a synthetic ERROR so the run completes and the
+    # summary reflects what happened. ERROR rather than FAIL: an
+    # exception escaping the per-case drivers is the harness failing,
+    # not the case.
     try:
       if tc.protocolAware:
         res = runOneProtocol(tc, args.resultsDir, args.baseEnv[],
@@ -1658,8 +2740,9 @@ proc workerLoop(args: WorkerArgs) =
     except CatchableError as e:
       res = TestResult(
         testCase: tc,
-        status: tsFail,
+        status: tsHarnessError,
         durationMs: 0,
+        harnessError: "worker exception: " & e.msg,
         stdout: "repro_test_runner: worker exception: " & e.msg & "\n")
     discard atomicDec(args.activeCount[])
 
@@ -1668,29 +2751,113 @@ proc workerLoop(args: WorkerArgs) =
     release(args.resultsLock[])
 
     emitProgress(args.quiet, res)
-    if args.failFast and res.status == tsFail:
+    # A harness error stops scheduling under fail-fast for the same
+    # reason a failure does: continuing to hand out work while the
+    # harness cannot start children produces a summary that says more
+    # about the host than about the tree.
+    if args.failFast and res.status in {tsFail, tsHarnessError}:
       markFailFast(args.queue)
 
+proc countStatusDisagreements(results: seq[TestResult]): int =
+  ## Single definition of the aggregate's disagreement count, shared by the
+  ## summary document and the exit decision so the two can never drift.
+  for r in results:
+    if r.statusDisagreement.len > 0:
+      inc result
+
 proc writeSummary(summaryPath: string; results: seq[TestResult];
-                  wallTimeMs: int; threadsUsed: int) =
+                  wallTimeMs: int; threadsUsed: int;
+                  selection: SelectionDecision; deselectedCases: int) =
   var total = results.len
   var passed = 0
   var failed = 0
   var skipped = 0
+  var harnessErrors = 0
   var arr = newJArray()
   for r in results:
     case r.status
     of tsPass: inc passed
     of tsFail: inc failed
     of tsSkip: inc skipped
+    of tsHarnessError: inc harnessErrors
     var node = newJObject()
     node["binary"] = %r.testCase.binary
     node["binary_stem"] = %r.testCase.binaryStem
     node["protocol_aware"] = %r.testCase.protocolAware
+    # Identity, spelled out. ``qualified_name`` alone forced every
+    # consumer to re-split ``suite::name`` — and that split is not
+    # round-trip safe (see ``TestCase.runName``), so a gate or triage
+    # script reading only this artifact could not reliably name, group or
+    # re-run a case and fell back to grepping the console log. All four
+    # identity fields are now written verbatim from the catalog:
+    #
+    #   name            the case's own name, never empty
+    #   suite           the case's suite; "" for a suite-less case and
+    #                   for a whole-binary entry
+    #   qualified_name  display identity (``suite::name``, or the stem)
+    #   run_name        the ONLY string that may be passed to ``--run``;
+    #                   "" for a whole-binary entry, which takes none
+    node["name"] = %r.testCase.name
+    node["suite"] = %r.testCase.suite
     node["qualified_name"] = %r.testCase.qualifiedName
+    node["run_name"] = %r.testCase.runName
+    # The rest of the case's ``--list-json`` row, verbatim. Emitted only
+    # for protocol-aware cases: a whole-binary entry has no catalog row,
+    # and synthesising zeroed fields for it would state as fact
+    # ("threadsRequired: 0") something the producer never said.
+    #
+    # Which of these are measurements and which are producer constants is
+    # documented once, on ``CatalogEntry``. They are written here because
+    # dropping a field at the parse site is indistinguishable, to a
+    # consumer of this artifact, from the producer never emitting it.
+    if r.testCase.protocolAware:
+      node["file"] = %r.testCase.meta.file
+      node["line"] = %r.testCase.meta.line
+      node["column"] = %r.testCase.meta.column
+      node["kind"] = %r.testCase.meta.kind
+      node["group"] = %r.testCase.meta.group
+      node["threads_required"] = %r.testCase.meta.threadsRequired
+      # ``xfail`` absent means the producer said nothing (JSON null),
+      # which is not the same claim as "false". Absence is preserved.
+      if r.testCase.meta.xfail.len > 0:
+        node["xfail"] = %r.testCase.meta.xfail
+      var tagsNode = newJArray()
+      for t in r.testCase.meta.tags:
+        tagsNode.add(%t)
+      node["tags"] = tagsNode
+      node["body_hash"] = %r.testCase.meta.bodyHash
+      node["deterministic"] = %r.testCase.meta.deterministic
     node["status"] = %($r.status)
     node["duration_ms"] = %r.durationMs
     node["result_file"] = %r.resultFile
+    # Skip reasons are the whole point of reading the result document:
+    # a skip census that cannot say *why* is not a census. Emitted only
+    # when the case supplied one (a bare ``skip()`` supplies none).
+    if r.skipReason.len > 0:
+      node["skip_reason"] = %r.skipReason
+    if r.exception.len > 0:
+      node["exception"] = %r.exception
+    if r.checkpointCount > 0:
+      node["checkpoint_count"] = %r.checkpointCount
+    # The diagnosis itself, for anything that did not pass. A per-case
+    # child writes no console output at all (``pmRun`` registers no
+    # formatter), so without this the summary recorded that a case failed
+    # and nothing whatsoever about WHY — the count said "4 checkpoints
+    # exist" and pointed at no channel that carried them.
+    if r.status != tsPass and r.checkpoints.len > 0:
+      var cps = newJArray()
+      for c in r.checkpoints:
+        cps.add(%c)
+      node["checkpoints"] = cps
+    # Why the harness could not run this case. Present iff status is
+    # ERROR, so a consumer never has to infer the distinction between a
+    # failing assertion and a harness fault from free-form stdout.
+    if r.harnessError.len > 0:
+      node["harness_error"] = %r.harnessError
+    # A protocol-channel contradiction is a defect signal about the test
+    # binary, so it rides in the summary rather than only in stdout.
+    if r.statusDisagreement.len > 0:
+      node["status_disagreement"] = %r.statusDisagreement
     # Include the captured merged stdout/stderr for FAIL entries so
     # the build report carries the failure context (e.g. D6's
     # ``IDLE TIMEOUT after Ns without output; SIGKILLed`` prefix). PASS entries are kept
@@ -1705,8 +2872,36 @@ proc writeSummary(summaryPath: string; results: seq[TestResult];
   summary["passed"] = %passed
   summary["failed"] = %failed
   summary["skipped"] = %skipped
+  # Cases the harness could not run. Kept out of ``failed`` on purpose:
+  # ``failed`` is a statement about the tree, ``harness_errors`` is a
+  # statement about the run. Merging them makes a flaky host look like a
+  # broken tree, and hiding them makes a run that executed nothing look
+  # green. Like ``status_disagreements`` this count forces a non-zero
+  # aggregate exit.
+  summary["harness_errors"] = %harnessErrors
+  # A protocol disagreement is a first-class aggregate outcome, not a note
+  # in a per-case record. It used to be written per case and influence
+  # nothing at all — the run still exited 0. It now decides the exit code,
+  # so it is counted here where every other exit-relevant number lives.
+  summary["status_disagreements"] = %countStatusDisagreements(results)
   summary["wall_time_ms"] = %wallTimeMs
   summary["threads"] = %threadsUsed
+  # Why this run's case set is the size it is. Without this a reader of
+  # the artifact cannot tell a deliberately selected subset from a run
+  # that lost cases — the two produce the same shape of document and the
+  # same green summary. ``selected_subset`` is the single boolean a gate
+  # should read before treating ``total`` as coverage.
+  var sel = newJObject()
+  sel["requested"] = %selection.enabled
+  sel["applied"] = %(selection.enabled and selection.usable)
+  sel["selected_subset"] = %(selection.enabled and selection.usable and
+                             deselectedCases > 0)
+  sel["deselected_unchanged"] = %deselectedCases
+  if selection.path.len > 0:
+    sel["catalog"] = %selection.path
+  if selection.reason.len > 0:
+    sel["fell_back_because"] = %selection.reason
+  summary["selection"] = sel
   doc["summary"] = summary
   doc["tests"] = arr
   ensureDir(parentDir(summaryPath))
@@ -1724,6 +2919,13 @@ type
     filters: seq[string]
     resultsDir: string
     testTimeoutSec: int
+    catalogWritePath: string
+      ## ``--catalog-write PATH``: after probing, record every case's
+      ## ``bodyHash`` here. Empty means "write nothing".
+    catalogReadPath: string
+      ## ``--catalog-read PATH``: consult this catalog and skip cases
+      ## whose ``bodyHash`` it positively vouches for. Empty means "run
+      ## everything", which is the default and always remains available.
 
 proc defaultThreads(): int =
   let env = getEnv("REPRO_TEST_THREADS")
@@ -1747,6 +2949,8 @@ proc parseArgs(): RunnerOpts =
   result.filters = @[]
   result.resultsDir = DefaultResultsSubdir
   result.testTimeoutSec = 0
+  result.catalogWritePath = ""
+  result.catalogReadPath = ""
   var p = initOptParser(commandLineParams())
   while true:
     p.next()
@@ -1762,6 +2966,16 @@ proc parseArgs(): RunnerOpts =
       of "results-dir": result.resultsDir = p.val
       of "quiet": result.quiet = true
       of "filter": result.filters.add(p.val)
+      of "catalog-write":
+        if p.val.len == 0:
+          stderr.writeLine "repro_test_runner: --catalog-write requires a path"
+          quit(2)
+        result.catalogWritePath = p.val
+      of "catalog-read":
+        if p.val.len == 0:
+          stderr.writeLine "repro_test_runner: --catalog-read requires a path"
+          quit(2)
+        result.catalogReadPath = p.val
       of "test-timeout":
         try:
           result.testTimeoutSec = parseInt(p.val)
@@ -1779,6 +2993,16 @@ proc parseArgs(): RunnerOpts =
         echo "  --summary-json P    write per-run JSON summary to P"
         echo "  --results-dir DIR   per-test JSON result file dir"
         echo "  --filter GLOB       only run binaries whose stem matches"
+        echo "  --catalog-write P   record every case's bodyHash to P"
+        echo "  --catalog-read P    skip cases whose bodyHash P vouches " &
+          "for; any doubt runs them"
+        echo "                      a catalog is only valid for the " &
+          "checkout path and --bin-dir it"
+        echo "                      was written under; used anywhere " &
+          "else it is refused and all run"
+        echo "                      hashes cover compiled sources only, " &
+          "not data files read at run"
+        echo "                      time, env vars or external tools"
         echo "  --quiet             suppress per-test progress lines"
         echo "  --test-timeout=N    per-test idle timeout; output resets it; " &
           "hard ceiling 4xN (seconds, 0=off)"
@@ -1965,29 +3189,74 @@ proc main() =
       filteredBinaries.add(binary)
   stderr.writeLine "repro_test_runner: probing " &
     $filteredBinaries.len & " of " & $binaries.len & " binaries"
+  # Selection is decided BEFORE any case is enqueued, and the decision is
+  # recorded. ``selection.usable`` false — for any reason, including the
+  # ordinary "there is no catalog yet" — means the catalog subtracts
+  # nothing and the run is the full run.
+  var selection = SelectionDecision(
+    enabled: opts.catalogReadPath.len > 0,
+    usable: false,
+    reason: "",
+    path: opts.catalogReadPath)
+  var priorCatalog = RunCatalog(
+    hashes: initTable[string, Table[string, string]]())
+  if selection.enabled:
+    let loaded = loadRunCatalog(opts.catalogReadPath, cwd, opts.binDir)
+    priorCatalog = loaded.catalog
+    selection.usable = loaded.usable
+    selection.reason = loaded.reason
+    if not selection.usable:
+      # Announced, never silent. A selection mechanism that quietly
+      # declines to select is acceptable; one that quietly declines to
+      # RUN is not, and the only way to tell them apart from outside is
+      # for the runner to say which happened.
+      stderr.writeLine "repro_test_runner: --catalog-read not usable — " &
+        selection.reason & "; running every case"
+
   var queue = Queue(items: @[])
   initLock(queue.lock)
   var protocolBinaries = 0
   var opaqueBinaries = 0
   var totalCases = 0
+  var deselectedCases = 0
+  var probed: seq[tuple[stem: string; protocol: bool;
+                        catalog: seq[CatalogEntry]]] = @[]
   for binary in binaries:
     let stem = splitFile(binary).name
     if not matchesFilter(stem, opts.filters):
       continue
     let probe = probeBinary(binary)
+    probed.add((stem: stem, protocol: probe.protocol, catalog: probe.catalog))
     if probe.protocol:
       inc protocolBinaries
-      for (suite, name) in probe.catalog:
+      for entry in probe.catalog:
+        # The one place selection can remove work. Note the asymmetry:
+        # a case is dropped only when the catalog positively vouches for
+        # it (``caseIsUnchanged``); everything else — unknown binary,
+        # unknown case, empty hash on either side, unusable catalog —
+        # falls through to enqueue.
+        if selection.usable and caseIsUnchanged(priorCatalog, stem, entry):
+          inc deselectedCases
+          continue
         var tc = TestCase(
           binary: binary,
           binaryStem: stem,
           protocolAware: true,
-          suite: suite,
-          name: name,
-          qualifiedName: qualifyName(stem, suite, name))
+          suite: entry.suite,
+          name: entry.bare,
+          # Display/report identity is derived; the execution argument
+          # never is. See ``TestCase.runName``.
+          qualifiedName: qualifyName(stem, entry.suite, entry.bare),
+          runName: entry.runName,
+          # The catalog row rides along whole. See ``TestCase.meta``.
+          meta: entry)
         queue.items.add(tc)
         inc totalCases
     else:
+      # A binary the runner cannot enumerate is never deselected: with no
+      # per-case hashes there is nothing to compare, so it runs whole
+      # every time. Under-running here would be the exact silent
+      # coverage loss the fail-closed rule exists to prevent.
       inc opaqueBinaries
       var tc = TestCase(
         binary: binary,
@@ -1995,13 +3264,38 @@ proc main() =
         protocolAware: false,
         suite: "",
         name: stem,
-        qualifiedName: stem)
+        qualifiedName: stem,
+        runName: "")
       queue.items.add(tc)
       inc totalCases
+
+  # Written from what was just probed, so the catalog always describes
+  # the binaries as they are NOW — never as a prior catalog said they
+  # were. Writing happens whether or not reading did, so
+  # ``--catalog-read X --catalog-write X`` refreshes in place.
+  if opts.catalogWritePath.len > 0:
+    let doc = runCatalogDocument(cwd, opts.binDir, probed)
+    try:
+      ensureDir(parentDir(absolutePath(opts.catalogWritePath)))
+      writeFile(opts.catalogWritePath, doc.pretty())
+      stderr.writeLine "repro_test_runner: wrote run catalog for " &
+        $probed.len & " binaries to " & opts.catalogWritePath
+    except CatchableError as e:
+      stderr.writeLine "repro_test_runner: could not write run catalog to " &
+        opts.catalogWritePath & " (" & e.msg & ")"
+      quit(2)
 
   stderr.writeLine "repro_test_runner: " & $protocolBinaries &
     " protocol-aware, " & $opaqueBinaries & " whole-binary, " &
     $totalCases & " test cases, " & $opts.threads & " threads"
+  if selection.enabled:
+    if selection.usable:
+      stderr.writeLine "repro_test_runner: hash-difference selection " &
+        "against " & selection.path & " deselected " & $deselectedCases &
+        " unchanged case(s); " & $totalCases & " selected"
+    else:
+      stderr.writeLine "repro_test_runner: hash-difference selection " &
+        "deselected 0 cases (catalog unusable)"
 
   var resultsLock: Lock
   initLock(resultsLock)
@@ -2112,13 +3406,14 @@ proc main() =
       except CatchableError as e:
         res = TestResult(
           testCase: tc,
-          status: tsFail,
+          status: tsHarnessError,
           durationMs: 0,
+          harnessError: "exclusive worker exception: " & e.msg,
           stdout: "repro_test_runner: exclusive worker exception: " &
             e.msg & "\n")
       results.add(res)
       emitProgress(opts.quiet, res)
-      if failFast and res.status == tsFail:
+      if failFast and res.status in {tsFail, tsHarnessError}:
         exclusiveFailed = true
         break
 
@@ -2160,21 +3455,40 @@ proc main() =
 
   let wallMs = int((epochTime() - wallT0) * 1000)
 
-  writeSummary(opts.summaryPath, results, wallMs, nThreads)
+  writeSummary(opts.summaryPath, results, wallMs, nThreads,
+    selection, deselectedCases)
 
   var passed = 0
   var failed = 0
   var skipped = 0
+  var harnessErrors = 0
   for r in results:
     case r.status
     of tsPass: inc passed
     of tsFail: inc failed
     of tsSkip: inc skipped
+    of tsHarnessError: inc harnessErrors
+  let disagreements = countStatusDisagreements(results)
 
   stderr.writeLine "repro_test_runner: ran " & $results.len &
     " cases in " & $wallMs & "ms — pass=" & $passed &
     " fail=" & $failed & " skip=" & $skipped &
+    " error=" & $harnessErrors &
+    " disagree=" & $disagreements &
     " (summary at " & opts.summaryPath & ")"
+  if harnessErrors > 0:
+    stderr.writeLine "repro_test_runner: " & $harnessErrors &
+      " case(s) could not be RUN (spawn/harness fault, not a test " &
+      "result); the run is FAILED (see harness_error in the summary)"
+    for r in results:
+      if r.status == tsHarnessError:
+        stderr.writeLine "  ! ERROR " & r.testCase.binaryStem & " " &
+          r.testCase.qualifiedName & ": " & r.harnessError
+  if disagreements > 0:
+    stderr.writeLine "repro_test_runner: " & $disagreements &
+      " case(s) reported contradictory status channels; the run is " &
+      "FAILED regardless of the per-case labels (see " &
+      "status_disagreement in the summary)"
 
   when defined(posix):
     cleanupProcessGroupStateDir()
@@ -2184,7 +3498,19 @@ proc main() =
       # caller observes the conventional 128+signal status (130/143).
       exitnow(cint(128 + receivedSignal))
 
-  if failed > 0:
+  # The exit decision takes BOTH channels. ``failed`` alone made the runner
+  # fail-open: the result document is written from ``testEnded``, i.e.
+  # before process exit, so a case that passes and then dies non-zero
+  # afterwards (destructor, ``defer``, exit proc, teardown segfault) was
+  # labelled PASS, never incremented ``failed``, and the aggregate exited 0.
+  # A disagreement is by definition a fault that one of the two channels
+  # observed, so it fails the run on its own.
+  #
+  # A harness error is the same shape of defect from the other end: no
+  # channel produced a verdict. Absorbing it into a green exit would mean
+  # a run in which nothing could be spawned reports success, so it too
+  # fails the run on its own.
+  if failed > 0 or disagreements > 0 or harnessErrors > 0:
     quit(1)
   quit(0)
 

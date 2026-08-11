@@ -13,6 +13,40 @@ const ReproTestRunnerOwnerTokenEnv =
   ## Private process-ownership marker installed by ``repro_test_runner``.
   ## It is carried only across daemon process launch/restart boundaries.
 
+const
+  ServerRequestReadTimeoutMs* = UserDaemonHandshakeTimeoutMs
+    ## Upper bound on how long the ACCEPT LOOP will wait for a freshly
+    ## accepted client to deliver its ``udkHello`` and then its first command
+    ## frame. The loop is single-threaded — it accepts one connection, serves
+    ## it, and only then returns to ``accept`` — so an unbounded read here
+    ## lets ONE client starve every other. Measured: a client that connects
+    ## and then simply stays silent (never sends, never closes) makes every
+    ## concurrent ``repro daemon status`` report ``not-running`` for as long
+    ## as it holds the socket, because each of those clients burns its own
+    ## 10 s handshake budget waiting for a hello-ack the loop is not there to
+    ## send.
+    ##
+    ## The bound is deliberately the SAME constant the client uses for its
+    ## side of the handshake (``UserDaemonHandshakeTimeoutMs``): a client that
+    ## has not managed to put its hello on the wire within that window has
+    ## already given up waiting for our ack, so nothing is lost by dropping
+    ## it, and no healthy client can be affected — every caller in
+    ## ``client.nim`` writes its command frame immediately after
+    ## ``connectUserDaemon`` returns, with no user interaction in between.
+    ## It applies ONLY to the two request-side reads below; the long-lived
+    ## build/watch event streams keep their unbounded reads.
+
+  ServerErrorWriteTimeoutMs* = 5_000
+    ## Upper bound on the accept loop's best-effort "here is why your request
+    ## failed" write. The peer of that write is by definition in an unhappy
+    ## state — frequently it has already gone away (a readiness probe that
+    ## connects and closes) — and the loop must return to ``accept``
+    ## regardless. A dead peer now raises immediately from ``sendByteString``;
+    ## this bound covers the remaining case of a peer that is alive but not
+    ## reading. 5 s is an order of magnitude more than any observed local
+    ## socket write and still far below the 60 s readiness budget the
+    ## integration suites allow for a daemon to come up.
+
 when defined(posix):
   import std/posix except Time
 
@@ -1323,7 +1357,10 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
                   generation: string; shuttingDown: var bool;
                   sessions: var seq[UserDaemonSession];
                   devRestart: DevRestartState) =
-  let helloFrame = socket.readFrame()
+  # Both request-side reads are bounded: the accept loop is single-threaded,
+  # so a client that connects and then goes quiet must not be able to starve
+  # every other client. See ``ServerRequestReadTimeoutMs``.
+  let helloFrame = socket.readFrame(ServerRequestReadTimeoutMs)
   if helloFrame.kind != udkHello:
     socket.writeFrame(udkError, errorBody(
       "first user-daemon message must be hello, got " & $helloFrame.kind))
@@ -1331,7 +1368,7 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
   if not handleHello(socket, config, generation, helloFrame.body):
     return
 
-  let frame = socket.readFrame()
+  let frame = socket.readFrame(ServerRequestReadTimeoutMs)
   case frame.kind
   of udkStatus:
     socket.writeFrame(udkStatusResponse,
@@ -1614,7 +1651,12 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
     except CatchableError as err:
       logLine(config.logPath, "client error: " & err.msg)
       try:
-        client.writeFrame(udkError, errorBody(err.msg))
+        # Bounded: this courtesy reply must never cost the accept loop more
+        # than ``ServerErrorWriteTimeoutMs``. The common trigger for landing
+        # here is a readiness probe that connected and closed without sending
+        # a frame, i.e. the peer is ALREADY gone and the write fails at once.
+        client.writeFrame(udkError, errorBody(err.msg),
+          timeoutMs = ServerErrorWriteTimeoutMs)
       except CatchableError:
         discard
     client.closeIpcConn()
