@@ -25,6 +25,36 @@
 ##   repro_test_runner [--threads N] [--bin-dir DIR] [--build]
 ##                     [--summary-json PATH] [--quiet]
 ##                     [--filter GLOB]... [--test-timeout=N]
+##                     [--catalog-write PATH] [--catalog-read PATH]
+##
+## Incremental selection::
+##
+##   --catalog-write PATH  after probing, record every catalogued case's
+##                         ``bodyHash`` to PATH.
+##   --catalog-read PATH   consult a catalog written earlier and skip
+##                         cases whose ``bodyHash`` it positively
+##                         vouches for.
+##
+## Selection is FAIL-CLOSED and can only ever subtract. A missing,
+## unreadable, malformed, wrongly-versioned catalog — or one written
+## under a different project root or ``--bin-dir`` — is refused with a
+## stated reason on stderr and in ``summary.selection.fell_back_because``,
+## and the run is the full run. So is an unknown binary, an unknown case,
+## or an empty hash on either side. Omitting ``--catalog-read`` is the
+## full run and always remains available. See the "run catalog" section
+## below ``probeBinary`` for the complete rule.
+##
+## WHAT A BODY HASH DOES AND DOES NOT COVER. It is computed by the
+## compiler over the case as compiled, so it moves when the case's own
+## source moves AND when a module it compiles against moves — editing a
+## library a test calls changes that test's hash even though its body
+## text is untouched (measured, not assumed). It does NOT move for
+## anything outside the compiled program: a fixture or data file read at
+## run time, an environment variable, an external tool or a sibling
+## checkout. A case whose behaviour depends on those can be deselected
+## while genuinely failing. That is why ``--catalog-read`` is opt-in, why
+## a selected run is flagged in the summary as ``selected_subset``, and
+## why a gate must read that flag before treating ``total`` as coverage.
 ##
 ## Default ``--bin-dir`` is ``build/test-bin`` relative to the current
 ## working directory. ``--threads`` defaults to ``$NPROC`` or the
@@ -65,7 +95,7 @@
 ##
 
 import std/[algorithm, atomics, json, locks, os, osproc, parseopt, streams,
-            strtabs, strutils, tempfiles, times]
+            strtabs, strutils, tables, tempfiles, times]
 
 when defined(posix):
   import std/posix
@@ -801,6 +831,185 @@ proc probeBinary(binary: string): tuple[protocol: bool;
     result.catalog = cat
   except JsonParsingError:
     return
+
+# ---- run catalog: write, read, and hash-difference selection ---------
+#
+# WHAT THIS IS. A *run catalog* is a document the runner writes after
+# probing (``--catalog-write PATH``) and may read back on a later run
+# (``--catalog-read PATH``). It records, per binary, the ``bodyHash`` of
+# every case that binary catalogued. On the later run, a case whose
+# ``bodyHash`` is byte-identical to the recorded one is a candidate for
+# being skipped; anything else runs.
+#
+# WHY IT IS A HINT AND NEVER A SOURCE OF TRUTH. This repository's
+# boundary rules say JSON may be emitted for inspection but must not be
+# an on-disk source of truth. The run catalog obeys that literally: it
+# can only ever *remove* work, it is consulted exactly once at queue
+# construction, and EVERY way of not understanding it — absent,
+# unreadable, malformed, wrong version, written under a different
+# project root or a different ``--bin-dir``, a binary it does not
+# mention, a case it does not mention, an empty hash on either side —
+# resolves to RUN THE CASE. There is no code path in which failing to
+# understand the catalog causes a case to be skipped.
+#
+# WHY FAIL-CLOSED IS THE WHOLE POINT. A selection mechanism that
+# silently under-runs converts a coverage loss into a green run, which is
+# exactly the failure class this campaign exists to remove. So the
+# default is "run", the catalog may only subtract from it, and every
+# subtraction is announced on stderr and counted in the summary. A run
+# with no ``--catalog-read`` is the full run, unchanged, and stays
+# available at all times.
+#
+# WHY THE PROJECT ROOT IS PART OF THE DOCUMENT. ``bodyHash`` is NOT
+# checkout-independent: the codetracer-nim fork's ``check``/``require``/
+# ``expect``/``doAssert`` expansions bake the source file's ABSOLUTE path
+# into a string literal inside the test body, and the compiler's
+# body hash hashes literals verbatim. Two checkouts of identical sources
+# at different absolute paths therefore produce entirely different
+# hashes. A catalog written at one path and read at another would
+# consequently show *every* case as changed — which is safe (it
+# over-runs) — but it would also silently make the mechanism useless
+# while looking like it worked. Recording the root and refusing to use a
+# catalog from a different one turns that from a silent no-op into a
+# stated refusal.
+
+const RunCatalogVersion = 1
+
+type
+  RunCatalog = object
+    ## A previously written run catalog, already validated against the
+    ## current run's identity. Only constructed by ``loadRunCatalog``.
+    projectRoot: string
+    binDir: string
+    hashes: Table[string, Table[string, string]]
+      ## binary stem -> (catalog ``name`` -> ``bodyHash``). A stem that
+      ## was opaque at write time is present with an EMPTY inner table,
+      ## which selects every case of that binary on the read side. The
+      ## distinction between "absent" and "present but empty" is not
+      ## load-bearing today precisely because both resolve to "run".
+
+  SelectionDecision = object
+    ## Why the runner is about to run the case set it is about to run.
+    ## Carried into the summary so a reader of the artifact alone can
+    ## tell a deliberate subset from an accidental one.
+    enabled: bool     ## a ``--catalog-read`` was given at all
+    usable: bool      ## the catalog was understood and applied
+    reason: string    ## why it was not usable; "" when it was
+    path: string      ## the ``--catalog-read`` path, verbatim
+
+proc runCatalogDocument(cwd, binDir: string;
+                        probed: seq[tuple[stem: string;
+                                          protocol: bool;
+                                          catalog: seq[CatalogEntry]]]
+                       ): JsonNode =
+  ## Render the just-probed binary set as a run-catalog document. The
+  ## per-binary shape deliberately mirrors the codetracer-nim
+  ## ``--catalog -`` payload (``{"version":1,"tests":{name: hash}}``) so
+  ## the two are readable with the same eyes; the wrapper adds only the
+  ## identity a *multi-binary* run needs and a single binary cannot know.
+  result = newJObject()
+  result["version"] = %RunCatalogVersion
+  result["projectRoot"] = %cwd
+  result["binDir"] = %binDir
+  var binaries = newJObject()
+  for entry in probed:
+    var node = newJObject()
+    node["protocol"] = %entry.protocol
+    var tests = newJObject()
+    for c in entry.catalog:
+      tests[c.runName] = %c.bodyHash
+    node["tests"] = tests
+    binaries[entry.stem] = node
+  result["binaries"] = binaries
+
+proc loadRunCatalog(path, cwd, binDir: string):
+    tuple[catalog: RunCatalog; usable: bool; reason: string] =
+  ## Read a run catalog and validate it against THIS run's identity.
+  ## Returns ``usable = false`` with a stated reason for every way of not
+  ## understanding it. The caller must then run everything.
+  result.usable = false
+  result.catalog = RunCatalog(hashes: initTable[string, Table[string, string]]())
+  if not fileExists(path):
+    result.reason = "no catalog at " & path
+    return
+  var raw = ""
+  try:
+    raw = readFile(path)
+  except CatchableError as e:
+    result.reason = "catalog at " & path & " could not be read (" & e.msg & ")"
+    return
+  var doc: JsonNode = nil
+  try:
+    doc = parseJson(raw)
+  except CatchableError as e:
+    result.reason = "catalog at " & path & " is not valid JSON (" & e.msg & ")"
+    return
+  if doc == nil or doc.kind != JObject:
+    result.reason = "catalog at " & path & " is not a JSON object"
+    return
+  let version = doc{"version"}.getInt(-1)
+  if version != RunCatalogVersion:
+    result.reason = "catalog at " & path & " is version " & $version &
+      ", this runner writes version " & $RunCatalogVersion
+    return
+  let recordedRoot = doc{"projectRoot"}.getStr("")
+  if recordedRoot != cwd:
+    # See the header note: bodyHash is path-dependent, so a catalog from
+    # another root cannot be compared against this one at all.
+    result.reason = "catalog at " & path & " was written under project root " &
+      (if recordedRoot.len > 0: recordedRoot else: "<unrecorded>") &
+      ", this run is under " & cwd &
+      " (bodyHash is not checkout-independent, so the two are incomparable)"
+    return
+  let recordedBinDir = doc{"binDir"}.getStr("")
+  if recordedBinDir != binDir:
+    result.reason = "catalog at " & path & " was written for --bin-dir " &
+      (if recordedBinDir.len > 0: recordedBinDir else: "<unrecorded>") &
+      ", this run uses " & binDir
+    return
+  let binaries = doc{"binaries"}
+  if binaries == nil or binaries.kind != JObject:
+    result.reason = "catalog at " & path & " carries no \"binaries\" object"
+    return
+  for stem, node in binaries.pairs:
+    var inner = initTable[string, string]()
+    if node != nil and node.kind == JObject:
+      let tests = node{"tests"}
+      if tests != nil and tests.kind == JObject and
+          node{"protocol"}.getBool(false):
+        for name, hashNode in tests.pairs:
+          if hashNode != nil and hashNode.kind == JString:
+            inner[name] = hashNode.getStr("")
+    result.catalog.hashes[stem] = inner
+  result.catalog.projectRoot = recordedRoot
+  result.catalog.binDir = recordedBinDir
+  result.usable = true
+
+proc caseIsUnchanged(catalog: RunCatalog; stem: string;
+                     entry: CatalogEntry): bool =
+  ## True only when the catalog positively vouches for this exact case:
+  ## the binary is named, the case is named under it, both hashes are
+  ## non-empty, and they are byte-identical. Every other combination is
+  ## false, i.e. "run it".
+  if stem notin catalog.hashes:
+    return false
+  let inner = catalog.hashes[stem]
+  if entry.runName notin inner:
+    return false
+  let recorded = inner[entry.runName]
+  # An empty hash on EITHER side means a producer told us nothing, and
+  # two silences are not an agreement. This is not hypothetical: this
+  # repository contains a second, older protocol producer — the vendored
+  # ``libs/ct_test_unittest_parallel`` shim, imported by thirteen test
+  # files — whose ``--list-json`` rows carry ``name``/``suite``/``file``/
+  # ``line`` and no ``bodyHash`` at all. Without this guard, every case in
+  # every shim-built binary would compare "" against "", match, and be
+  # silently deselected forever. The guard is written as one condition on
+  # purpose: split across two statements, one half sat behind the other
+  # and could not be shown to do anything.
+  if entry.bodyHash.len == 0 or recorded.len == 0:
+    return false
+  recorded == entry.bodyHash
 
 proc buildEngine(repoRoot: string): bool =
   ## Drive the engine build of the ``test`` aggregate. Returns true on
@@ -2557,7 +2766,8 @@ proc countStatusDisagreements(results: seq[TestResult]): int =
       inc result
 
 proc writeSummary(summaryPath: string; results: seq[TestResult];
-                  wallTimeMs: int; threadsUsed: int) =
+                  wallTimeMs: int; threadsUsed: int;
+                  selection: SelectionDecision; deselectedCases: int) =
   var total = results.len
   var passed = 0
   var failed = 0
@@ -2676,6 +2886,22 @@ proc writeSummary(summaryPath: string; results: seq[TestResult];
   summary["status_disagreements"] = %countStatusDisagreements(results)
   summary["wall_time_ms"] = %wallTimeMs
   summary["threads"] = %threadsUsed
+  # Why this run's case set is the size it is. Without this a reader of
+  # the artifact cannot tell a deliberately selected subset from a run
+  # that lost cases — the two produce the same shape of document and the
+  # same green summary. ``selected_subset`` is the single boolean a gate
+  # should read before treating ``total`` as coverage.
+  var sel = newJObject()
+  sel["requested"] = %selection.enabled
+  sel["applied"] = %(selection.enabled and selection.usable)
+  sel["selected_subset"] = %(selection.enabled and selection.usable and
+                             deselectedCases > 0)
+  sel["deselected_unchanged"] = %deselectedCases
+  if selection.path.len > 0:
+    sel["catalog"] = %selection.path
+  if selection.reason.len > 0:
+    sel["fell_back_because"] = %selection.reason
+  summary["selection"] = sel
   doc["summary"] = summary
   doc["tests"] = arr
   ensureDir(parentDir(summaryPath))
@@ -2693,6 +2919,13 @@ type
     filters: seq[string]
     resultsDir: string
     testTimeoutSec: int
+    catalogWritePath: string
+      ## ``--catalog-write PATH``: after probing, record every case's
+      ## ``bodyHash`` here. Empty means "write nothing".
+    catalogReadPath: string
+      ## ``--catalog-read PATH``: consult this catalog and skip cases
+      ## whose ``bodyHash`` it positively vouches for. Empty means "run
+      ## everything", which is the default and always remains available.
 
 proc defaultThreads(): int =
   let env = getEnv("REPRO_TEST_THREADS")
@@ -2716,6 +2949,8 @@ proc parseArgs(): RunnerOpts =
   result.filters = @[]
   result.resultsDir = DefaultResultsSubdir
   result.testTimeoutSec = 0
+  result.catalogWritePath = ""
+  result.catalogReadPath = ""
   var p = initOptParser(commandLineParams())
   while true:
     p.next()
@@ -2731,6 +2966,16 @@ proc parseArgs(): RunnerOpts =
       of "results-dir": result.resultsDir = p.val
       of "quiet": result.quiet = true
       of "filter": result.filters.add(p.val)
+      of "catalog-write":
+        if p.val.len == 0:
+          stderr.writeLine "repro_test_runner: --catalog-write requires a path"
+          quit(2)
+        result.catalogWritePath = p.val
+      of "catalog-read":
+        if p.val.len == 0:
+          stderr.writeLine "repro_test_runner: --catalog-read requires a path"
+          quit(2)
+        result.catalogReadPath = p.val
       of "test-timeout":
         try:
           result.testTimeoutSec = parseInt(p.val)
@@ -2748,6 +2993,16 @@ proc parseArgs(): RunnerOpts =
         echo "  --summary-json P    write per-run JSON summary to P"
         echo "  --results-dir DIR   per-test JSON result file dir"
         echo "  --filter GLOB       only run binaries whose stem matches"
+        echo "  --catalog-write P   record every case's bodyHash to P"
+        echo "  --catalog-read P    skip cases whose bodyHash P vouches " &
+          "for; any doubt runs them"
+        echo "                      a catalog is only valid for the " &
+          "checkout path and --bin-dir it"
+        echo "                      was written under; used anywhere " &
+          "else it is refused and all run"
+        echo "                      hashes cover compiled sources only, " &
+          "not data files read at run"
+        echo "                      time, env vars or external tools"
         echo "  --quiet             suppress per-test progress lines"
         echo "  --test-timeout=N    per-test idle timeout; output resets it; " &
           "hard ceiling 4xN (seconds, 0=off)"
@@ -2934,19 +3189,55 @@ proc main() =
       filteredBinaries.add(binary)
   stderr.writeLine "repro_test_runner: probing " &
     $filteredBinaries.len & " of " & $binaries.len & " binaries"
+  # Selection is decided BEFORE any case is enqueued, and the decision is
+  # recorded. ``selection.usable`` false — for any reason, including the
+  # ordinary "there is no catalog yet" — means the catalog subtracts
+  # nothing and the run is the full run.
+  var selection = SelectionDecision(
+    enabled: opts.catalogReadPath.len > 0,
+    usable: false,
+    reason: "",
+    path: opts.catalogReadPath)
+  var priorCatalog = RunCatalog(
+    hashes: initTable[string, Table[string, string]]())
+  if selection.enabled:
+    let loaded = loadRunCatalog(opts.catalogReadPath, cwd, opts.binDir)
+    priorCatalog = loaded.catalog
+    selection.usable = loaded.usable
+    selection.reason = loaded.reason
+    if not selection.usable:
+      # Announced, never silent. A selection mechanism that quietly
+      # declines to select is acceptable; one that quietly declines to
+      # RUN is not, and the only way to tell them apart from outside is
+      # for the runner to say which happened.
+      stderr.writeLine "repro_test_runner: --catalog-read not usable — " &
+        selection.reason & "; running every case"
+
   var queue = Queue(items: @[])
   initLock(queue.lock)
   var protocolBinaries = 0
   var opaqueBinaries = 0
   var totalCases = 0
+  var deselectedCases = 0
+  var probed: seq[tuple[stem: string; protocol: bool;
+                        catalog: seq[CatalogEntry]]] = @[]
   for binary in binaries:
     let stem = splitFile(binary).name
     if not matchesFilter(stem, opts.filters):
       continue
     let probe = probeBinary(binary)
+    probed.add((stem: stem, protocol: probe.protocol, catalog: probe.catalog))
     if probe.protocol:
       inc protocolBinaries
       for entry in probe.catalog:
+        # The one place selection can remove work. Note the asymmetry:
+        # a case is dropped only when the catalog positively vouches for
+        # it (``caseIsUnchanged``); everything else — unknown binary,
+        # unknown case, empty hash on either side, unusable catalog —
+        # falls through to enqueue.
+        if selection.usable and caseIsUnchanged(priorCatalog, stem, entry):
+          inc deselectedCases
+          continue
         var tc = TestCase(
           binary: binary,
           binaryStem: stem,
@@ -2962,6 +3253,10 @@ proc main() =
         queue.items.add(tc)
         inc totalCases
     else:
+      # A binary the runner cannot enumerate is never deselected: with no
+      # per-case hashes there is nothing to compare, so it runs whole
+      # every time. Under-running here would be the exact silent
+      # coverage loss the fail-closed rule exists to prevent.
       inc opaqueBinaries
       var tc = TestCase(
         binary: binary,
@@ -2974,9 +3269,33 @@ proc main() =
       queue.items.add(tc)
       inc totalCases
 
+  # Written from what was just probed, so the catalog always describes
+  # the binaries as they are NOW — never as a prior catalog said they
+  # were. Writing happens whether or not reading did, so
+  # ``--catalog-read X --catalog-write X`` refreshes in place.
+  if opts.catalogWritePath.len > 0:
+    let doc = runCatalogDocument(cwd, opts.binDir, probed)
+    try:
+      ensureDir(parentDir(absolutePath(opts.catalogWritePath)))
+      writeFile(opts.catalogWritePath, doc.pretty())
+      stderr.writeLine "repro_test_runner: wrote run catalog for " &
+        $probed.len & " binaries to " & opts.catalogWritePath
+    except CatchableError as e:
+      stderr.writeLine "repro_test_runner: could not write run catalog to " &
+        opts.catalogWritePath & " (" & e.msg & ")"
+      quit(2)
+
   stderr.writeLine "repro_test_runner: " & $protocolBinaries &
     " protocol-aware, " & $opaqueBinaries & " whole-binary, " &
     $totalCases & " test cases, " & $opts.threads & " threads"
+  if selection.enabled:
+    if selection.usable:
+      stderr.writeLine "repro_test_runner: hash-difference selection " &
+        "against " & selection.path & " deselected " & $deselectedCases &
+        " unchanged case(s); " & $totalCases & " selected"
+    else:
+      stderr.writeLine "repro_test_runner: hash-difference selection " &
+        "deselected 0 cases (catalog unusable)"
 
   var resultsLock: Lock
   initLock(resultsLock)
@@ -3136,7 +3455,8 @@ proc main() =
 
   let wallMs = int((epochTime() - wallT0) * 1000)
 
-  writeSummary(opts.summaryPath, results, wallMs, nThreads)
+  writeSummary(opts.summaryPath, results, wallMs, nThreads,
+    selection, deselectedCases)
 
   var passed = 0
   var failed = 0

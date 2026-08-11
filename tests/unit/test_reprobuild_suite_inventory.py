@@ -535,6 +535,19 @@ test "incomplete name" and:
                 "sourceCaseCount": 3,
                 "class": "integration",
             },
+            # M2 step 1: catalog fidelity and hash-difference selection.
+            # Compiles real fixture binaries with the real toolchain and
+            # drives the real compiled runner as a subprocess, so it
+            # classifies as integration rather than pure unit.
+            "tests/integration/"
+            "t_repro_test_runner_catalog_selection.nim": {
+                "binary": "build/test-bin/"
+                "t_repro_test_runner_catalog_selection",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 4,
+                "class": "integration",
+            },
         }
         for source, expected in expected_enrollments.items():
             with self.subTest(enrolled_source=source):
@@ -735,7 +748,28 @@ test "incomplete name" and:
         #   PYTHON CASES 43 (unchanged) — the regression adds no Python
         #   test.
         #   STATIC TOTAL 6870 -> 6873 = +3 nim.
-        self.assertEqual(len(nim_specs), 1209)
+        #
+        # ---------------------------------------------------------------
+        # M2 step 1: catalog fidelity and hash-difference selection. One
+        # NEW Nim source, so the spec count moves again:
+        #
+        #   SPECS 1209 -> 1210, NIM CASES 6830 -> 6834
+        #     tests/integration/
+        #       t_repro_test_runner_catalog_selection.nim             (+4)
+        #   Recomputed, not bumped: `repro_tests.nim` was regenerated with
+        #   `scripts/generate_test_edges.nim` (1209 -> 1210 Nim tests, one
+        #   purely additive entry), the binary was built into
+        #   `build/test-bin/`, and its own `--list-json` was counted (4
+        #   cases in 1 suite, pinned per source in `expected_enrollments`
+        #   above). The source's static scan was counted separately and
+        #   agrees (4). The delta is therefore +4 on BOTH the catalog
+        #   aggregate and the staticCaseCount aggregate: 6751 -> 6755, and
+        #   `countSourceCounts["catalog"]` 1208 -> 1209.
+        #
+        #   PYTHON CASES 43 (unchanged) — the regression adds no Python
+        #   test.
+        #   STATIC TOTAL 6873 -> 6877 = +4 nim.
+        self.assertEqual(len(nim_specs), 1210)
         self.assertEqual(len(python_specs), 4)
 
         nim_total = sum(
@@ -789,7 +823,7 @@ test "incomplete name" and:
         # +80 for the static-vs-catalog correction, -1 for dropping the
         # quarantined source's static fallback). Python keeps the static
         # `unittest` scan because Python files have no built binary.
-        self.assertEqual(nim_total, 6830)
+        self.assertEqual(nim_total, 6834)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
         # as its own equality so a future re-introduction of the static
@@ -830,7 +864,7 @@ test "incomplete name" and:
         self.assertEqual(python_total, 43)
         # 6856 -> 6862: -1 from the quarantined source no longer imputing a
         # static count, +7 from the new Python cases above.
-        self.assertEqual(data["static"]["sourceCaseCount"], 6873)
+        self.assertEqual(data["static"]["sourceCaseCount"], 6877)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -844,7 +878,7 @@ test "incomplete name" and:
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6751,
+            6755,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
@@ -998,6 +1032,11 @@ test "incomplete name" and:
         # fixtures with a real `nim c`, exactly as the two sources above
         # do. One new file, no already-counted source changed, and the
         # explicit/api intersection below is untouched.
+        #
+        # 51 -> 52: the M2 step-1 catalog-selection test, by the same
+        # argument again — it compiles its own fixtures with a real
+        # `nim c` (twice, to produce the edited rebuild). One new file, no
+        # already-counted source changed, intersection untouched.
         for added in (
             "tests/integration/"
             "t_repro_test_runner_consumes_result_document.nim",
@@ -1005,10 +1044,12 @@ test "incomplete name" and:
             "t_repro_test_runner_suiteless_case_round_trip.nim",
             "tests/integration/"
             "t_repro_test_runner_reporting_contract.nim",
+            "tests/integration/"
+            "t_repro_test_runner_catalog_selection.nim",
         ):
             with self.subTest(added_explicit_source=added):
                 self.assertIn(added, explicit_sources)
-        self.assertEqual(len(explicit_sources), 51)
+        self.assertEqual(len(explicit_sources), 52)
         self.assertEqual(len(api_sources), 21)
         self.assertEqual(
             explicit_sources & api_sources,
@@ -1024,8 +1065,9 @@ test "incomplete name" and:
         # 66 -> 68: the same two new M2 step-2 sources. The three-source
         # explicit/api intersection pinned above is unchanged, so the union
         # moves by exactly the two added explicit sources. 68 -> 69 for
-        # the reporting-contract source, by the same argument.
-        self.assertEqual(derived_total, 69)
+        # the reporting-contract source, by the same argument, and
+        # 69 -> 70 for the catalog-selection source, likewise.
+        self.assertEqual(derived_total, 70)
         self.assertEqual(len(flows), derived_total)
         self.assertFalse(data["runtimeCompilerFlowDetection"]["exhaustive"])
         self.assertEqual(
@@ -1408,9 +1450,15 @@ test "incomplete name" and:
         # source in the tree currently has a built binary — if a build gap
         # appeared it would show up as its own bucket instead of hiding
         # among the Python files.
+        #
+        # 1208 -> 1209 catalog: the M2 step-1 catalog-selection regression
+        # `tests/integration/t_repro_test_runner_catalog_selection.nim`.
+        # Its binary was built and probed, so it joins the `catalog`
+        # bucket rather than `missing-binary`; recomputed from a live
+        # `build_inventory`, not bumped.
         self.assertEqual(
             catalog["countSourceCounts"],
-            {"catalog": 1208, "quarantined": 1, "static": 4},
+            {"catalog": 1209, "quarantined": 1, "static": 4},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         self.assertEqual(
@@ -2275,7 +2323,9 @@ test "incomplete name" and:
         # individually in `expected_m2_step2_sources`.
         # 1208 -> 1209 for the daemon accept-loop survival regression,
         # pinned individually in `expected_enrollments`.
-        self.assertEqual(declared_nim_count, 1209)
+        # 1209 -> 1210 for the M2 step-1 catalog-selection regression,
+        # pinned individually in `expected_enrollments`.
+        self.assertEqual(declared_nim_count, 1210)
         self.assertEqual(declared_python_count, 4)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -2309,7 +2359,9 @@ test "incomplete name" and:
         # 1211 -> 1212: the one new Nim spec above (1208 nim + 4 python).
         # 1212 -> 1213: the daemon accept-loop survival regression
         # (1209 nim + 4 python).
-        self.assertEqual(data["static"]["testEntryCount"], 1213)
+        # 1213 -> 1214: the M2 step-1 catalog-selection regression
+        # (1210 nim + 4 python).
+        self.assertEqual(data["static"]["testEntryCount"], 1214)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),

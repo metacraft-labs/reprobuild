@@ -7838,6 +7838,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_repro_test_runner_catalog_selection.nim",
+    binary: "build/test-bin/t_repro_test_runner_catalog_selection",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_repro_test_runner_consumes_result_document.nim",
     binary: "build/test-bin/t_repro_test_runner_consumes_result_document",
     defines: @[],
