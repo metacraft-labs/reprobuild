@@ -27,10 +27,23 @@
 ## (status=asCacheHit). Either way, every per-app action must end in a
 ## cache-effective state for the test to pass.
 ##
-## When the engine's named-target resolver hasn't yet rendered the
-## ``apps`` collection (or runquotad isn't on PATH), the same skip-
-## with-documented-limitation pattern as the other B0 / B1 tests
-## applies.
+## No failure classifier. This case used to run its non-zero exit past a
+## ``looksLike…(output)`` predicate that matched the engine's own diagnostic
+## against a needle list and reclassified the failure as a skip on a match.
+## The list covered ordinary engine failures — tool resolution, provisioning,
+## the CLI usage dump — so any NEW failure phrased in those terms disappeared
+## silently, which is a way of manufacturing green rather than a record of an
+## environment limitation. The genuine environment gates (is the sibling
+## checkout present, is ``./build/bin/repro`` built) are unchanged: they are
+## checked BEFORE the work and they still skip. What the engine does once the
+## work starts is now simply asserted.
+##
+## Two further skips are gone with it, for the same reason in a different
+## shape: a second run that emitted no ``buildReport:`` path, and a report
+## carrying no ``reprobuild.apps.*`` actions at all, both used to skip. The
+## first is the engine ignoring ``--write-report``; the second is the exact
+## state in which "every per-app action cache-hit" is vacuously true. Both
+## now fail.
 
 import std/[json, os, osproc, strtabs, strutils, unittest]
 
@@ -48,27 +61,6 @@ proc findRepoRoot(): string =
     dir = parent
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
-
-proc looksLikeProvisioningOrLimitation(output: string): bool =
-  for needle in [
-    "tool-resolution failed",
-    "typed tool provisioning is required",
-    "does not declare provisioning",
-    "PATH-only resolver",
-    "could not locate executable",
-    "is not on PATH",
-    "could not load: libclingo",
-    "extract_runner",
-  ]:
-    if needle in output:
-      return true
-  for needle in [
-    "usage: repro --version",
-    "repro build [target[#name]",
-  ]:
-    if needle in output:
-      return true
-  return false
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
@@ -175,18 +167,11 @@ suite "Bootstrap-And-Self-Build B1: apps action cache hits on second run":
       let (firstOut, firstExit) =
         runBuildApps(reproBin, repoRoot, withReport = false)
       checkpoint("first exit=" & $firstExit)
-      var classifiedSkip = false
       if firstExit != 0:
         checkpoint(firstOut)
-        if looksLikeProvisioningOrLimitation(firstOut):
-          checkpoint("skipped — engine surfaced a known limitation " &
-            "during the cold ``repro build apps`` pass.")
-          skip()
-          classifiedSkip = true
-        else:
-          check firstExit == 0
+        check firstExit == 0
 
-      if not classifiedSkip and firstExit == 0:
+      if firstExit == 0:
         # Second invocation — must be a no-op for every per-app action.
         let (secondOut, secondExit) =
           runBuildApps(reproBin, repoRoot, withReport = true)
@@ -197,12 +182,12 @@ suite "Bootstrap-And-Self-Build B1: apps action cache hits on second run":
         else:
           let reportPath = valueAfter(secondOut, "buildReport:")
           if reportPath.len == 0:
+            # ``--write-report`` was passed, so a missing report path is
+            # the engine failing to honour a flag this case depends on —
+            # a failure of the thing under test, not of the host.
             checkpoint("no buildReport: line in second-run output:")
             checkpoint(secondOut)
-            checkpoint("skipped — engine did not emit a build report " &
-              "path (``--write-report`` may not be honoured by this " &
-              "build mode).")
-            skip()
+            check reportPath.len > 0
           elif not fileExists(reportPath):
             checkpoint("build report at " & reportPath & " not present")
             check fileExists(reportPath)
@@ -217,10 +202,12 @@ suite "Bootstrap-And-Self-Build B1: apps action cache hits on second run":
             checkpoint("found " & $perAppActions.len &
               " reprobuild.apps.* actions in build report")
             if perAppActions.len == 0:
-              checkpoint("no reprobuild.apps.* actions in report — " &
-                "engine may have shortcut the collection; skipping " &
-                "the cache-hit assertion as a documented gap.")
-              skip()
+              # Zero per-app actions in the report is the one state in
+              # which "every per-app action cache-hit" is vacuously true.
+              # This case exists to assert that it is NOT vacuous.
+              checkpoint("no reprobuild.apps.* actions in the report — " &
+                "the cache-hit assertion would be vacuous")
+              check perAppActions.len > 0
             else:
               var rebuilt: seq[string] = @[]
               for action in perAppActions:

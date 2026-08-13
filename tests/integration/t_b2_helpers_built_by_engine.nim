@@ -18,8 +18,18 @@
 ## Skip-when-absent: same pattern as the B0 / B1 tests. If
 ## ``./build/bin/repro`` is missing (no prior ``just build``) or the
 ## sibling ``runquotad`` isn't on PATH, we skip cleanly rather than
-## fail. If the engine surfaces a known provisioning / CLI-rejection
-## diagnostic we skip with the documented-limitation classifier.
+## fail — those are genuine environment gates, checked BEFORE the build.
+##
+## No failure classifier. This case used to run its non-zero exit past a
+## ``looksLike…(output)`` predicate that matched the engine's own diagnostic
+## against a needle list and reclassified the failure as a skip on a match.
+## The list covered ordinary engine failures — tool resolution, provisioning,
+## the CLI usage dump — so any NEW failure phrased in those terms disappeared
+## silently, which is a way of manufacturing green rather than a record of an
+## environment limitation. The genuine environment gates (is the sibling
+## checkout present, is ``./build/bin/repro`` built) are unchanged: they are
+## checked BEFORE the work and they still skip. What the engine does once the
+## work starts is now simply asserted.
 
 import std/[os, osproc, strtabs, strutils, unittest]
 
@@ -43,30 +53,6 @@ proc findRepoRoot(): string =
     dir = parent
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
-
-proc looksLikeProvisioningOrLimitation(output: string): bool =
-  ## Same diagnostic taxonomy as the B0 / B1 tests.
-  for needle in [
-    "tool-resolution failed",
-    "typed tool provisioning is required",
-    "does not declare provisioning",
-    "PATH-only resolver",
-    "could not locate executable",
-    "is not on PATH",
-    "could not load: libclingo",
-    "extract_runner",
-  ]:
-    if needle in output:
-      return true
-  for needle in [
-    "usage: repro --version",
-    "repro build [target[#name]",
-    "repro graph [target[#name]",
-    "repro show-conventions [--project=PATH]",
-  ]:
-    if needle in output:
-      return true
-  return false
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
@@ -128,14 +114,7 @@ suite "Bootstrap-And-Self-Build B2: test-helpers built by engine":
 
       if exitCode != 0:
         checkpoint(output)
-        if looksLikeProvisioningOrLimitation(output):
-          checkpoint("skipped — engine surfaced a known provisioning " &
-            "/ CLI-rejection diagnostic before scheduling the " &
-            "``test-helpers`` collection. A future milestone may flip " &
-            "this arm.")
-          skip()
-        else:
-          check exitCode == 0
+        check exitCode == 0
       else:
         # Engine returned 0 — every helper binary must now exist.
         for name in HelperNames:

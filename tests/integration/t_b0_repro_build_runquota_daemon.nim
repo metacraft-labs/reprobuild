@@ -13,17 +13,19 @@
 ## engine's existing path-with-fragment codepath, treating the sibling
 ## as the project anchor and the RHS as the named-target fragment.
 ##
-## The test self-classifies the engine's response:
+## The engine must return exit 0 and the output binary must exist and be
+## non-empty.
 ##
-##   * If the engine returns exit 0, the assertion is upgraded: the
-##     output binary must exist, be non-empty, and respond to
-##     ``--version``.
-##   * If the engine returns a clear "unknown target" / "no such
-##     project" / "ambiguous target" diagnostic (or a known
-##     tool-resolution / provisioning failure unrelated to the
-##     selector), the test reports ``skip()`` so the regression arm
-##     stays informative on hosts that lack the sibling checkout or a
-##     working tool environment.
+## No failure classifier. This case used to run its non-zero exit past a
+## ``looksLike…(output)`` predicate that matched the engine's own diagnostic
+## against a needle list and reclassified the failure as a skip on a match.
+## The list covered ordinary engine failures — tool resolution, provisioning,
+## the CLI usage dump — so any NEW failure phrased in those terms disappeared
+## silently, which is a way of manufacturing green rather than a record of an
+## environment limitation. The genuine environment gates (is the sibling
+## checkout present, is ``./build/bin/repro`` built) are unchanged: they are
+## checked BEFORE the work and they still skip. What the engine does once the
+## work starts is now simply asserted.
 ##
 ## Skip-when-absent: the sibling ``../runquota/`` may not be present
 ## in every CI environment. Skip cleanly in that case.
@@ -47,51 +49,6 @@ proc findRepoRoot(): string =
 
 proc runquotaRoot(reprobuildRoot: string): string =
   reprobuildRoot.parentDir / "runquota"
-
-proc looksLikeCrossProjectLimitation(output: string): bool =
-  ## A handful of diagnostics indicate the engine simply doesn't yet
-  ## understand the ``runquota:runquotad`` selector. Treat each as a
-  ## known limitation to be lifted in a follow-on milestone rather
-  ## than a hard test failure.
-  for needle in [
-    "unknown target",
-    "unknown_target",
-    "no such project",
-    "no such target",
-    "ambiguous target",
-    "target_ambiguous",
-    "cross-project",
-    "cross project",
-    "is not a registered package",
-    "is not declared",
-    "could not resolve target",
-  ]:
-    if needle in output:
-      return true
-  # The path-mode resolver may also fail to find ``runquotad`` on
-  # PATH if the sibling hasn't been built yet. That's the same class
-  # of limitation from this test's perspective (B0 doesn't yet wire
-  # the sibling build into the engine's prepare phase).
-  if "tool-resolution failed" in output or
-      "typed tool provisioning is required" in output or
-      "does not declare provisioning" in output:
-    return true
-  # The CLI parser may reject the ``<pkg>:<target>`` syntax outright
-  # (no engine-level diagnostic at all) and dump the canonical usage
-  # text. Detect the usage dump via the most stable substrings — the
-  # ``repro --version`` banner line, the literal ``repro build`` /
-  # ``repro graph`` signature lines, and the ``show-conventions``
-  # footer line. These appear in every usage dump but never in a
-  # legitimate engine diagnostic.
-  for needle in [
-    "usage: repro --version",
-    "repro build [target[#name]",
-    "repro graph [target[#name]",
-    "repro show-conventions [--project=PATH]",
-  ]:
-    if needle in output:
-      return true
-  return false
 
 suite "Bootstrap-And-Self-Build B0: repro build runquota:runquotad":
 
@@ -134,16 +91,7 @@ suite "Bootstrap-And-Self-Build B0: repro build runquota:runquotad":
         checkpoint("exit=" & $exitCode)
         if exitCode != 0:
           checkpoint(output)
-          if looksLikeCrossProjectLimitation(output):
-            checkpoint("skipped — engine does not yet accept " &
-              "``<pkg>:<target>`` cross-project selectors — CLI " &
-              "rejected with usage dump (or engine returned a " &
-              "known cross-project / tool-resolution diagnostic). " &
-              "This is the expected B0 outcome; a future milestone " &
-              "flips this arm.")
-            skip()
-          else:
-            check exitCode == 0
+          check exitCode == 0
         else:
           # Engine returned 0 — upgrade to the hard assertion that
           # the cross-project build materialised the binary. The

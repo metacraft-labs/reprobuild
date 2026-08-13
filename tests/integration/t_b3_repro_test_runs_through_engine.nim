@@ -22,9 +22,25 @@
 ##      counterpart to the engine arm below.
 ##
 ##   2. ENGINE — drive ``./build/bin/repro build .#test#<name>``
-##      against the test's execute edge. Skips with the documented
-##      classifier when the engine's typed-tool resolver has not yet
-##      grown a profile for ``ct_test_nim_unittest.buildNimUnittest``.
+##      against the test's execute edge, and require the execute action
+##      to appear in the build report.
+##
+## No failure classifier. This case used to run its non-zero exit past a
+## ``looksLike…(output)`` predicate that matched the engine's own diagnostic
+## against a needle list and reclassified the failure as a skip on a match.
+## The list covered ordinary engine failures — tool resolution, provisioning,
+## the CLI usage dump — so any NEW failure phrased in those terms disappeared
+## silently, which is a way of manufacturing green rather than a record of an
+## environment limitation. The genuine environment gates (is the sibling
+## checkout present, is ``./build/bin/repro`` built) are unchanged: they are
+## checked BEFORE the work and they still skip. What the engine does once the
+## work starts is now simply asserted.
+##
+## The report check lost a classifier too. An absent execute action used to
+## skip — with a long note about the bare-name selector routing to the BUILD
+## edge — which meant the one outcome this case exists to rule out was also
+## the one outcome it tolerated. It now fails, and prints which selector
+## resolved and whether it was the bare-name form.
 ##
 ## Invocation
 ## ----------
@@ -60,33 +76,6 @@ proc findRepoRoot(): string =
     dir = parent
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
-
-proc looksLikeProvisioningOrLimitation(output: string): bool =
-  for needle in [
-    "tool-resolution failed",
-    "typed tool provisioning is required",
-    "does not declare provisioning",
-    "PATH-only resolver",
-    "could not locate executable",
-    "is not on PATH",
-    "could not load: libclingo",
-    "extract_runner",
-    "no named targets in this project",
-    "unknown_target",
-    "ambiguous_target",
-    "no such test",
-    "no test named",
-  ]:
-    if needle in output:
-      return true
-  for needle in [
-    "usage: repro --version",
-    "usage: repro test",
-    "repro build [target[#name]",
-  ]:
-    if needle in output:
-      return true
-  return false
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
@@ -222,31 +211,25 @@ suite "Bootstrap-And-Self-Build B3: repro test runs through engine":
           resolved = true
           resolvedSelector = args[2]
           break
-        # Tolerate selector-resolver gaps between the attempts.
-        if "unknown_target" in output or "ambiguous_target" in output or
-            "no named targets" in output:
-          continue
-        else:
-          break
+        # Every selector form is tried. This used to stop early unless
+        # the diagnostic text matched one of three known strings, which
+        # made "which selectors were tried" depend on how the engine
+        # happened to word a failure.
+        continue
 
       if not resolved:
         checkpoint(lastOutput)
-        if looksLikeProvisioningOrLimitation(lastOutput):
-          checkpoint("skipped — engine surfaced a known limitation " &
-            "for every attempted selector (" &
-            triedSelectors.join(", ") & ").")
-          skip()
-        else:
-          check lastExit == 0
+        checkpoint("no selector resolved: " & triedSelectors.join(", "))
+        check lastExit == 0
       else:
-        # B3 known limitation: the bare-name selector (the engine's
-        # implicit-target-name path) routes to the BUILD edge, not the
-        # EXECUTE edge — the engine's collection-member resolver hasn't
-        # grown a ``.#test#<name>`` shorthand for picking the EXECUTE
-        # half. When the resolved selector is the bare stem, the test
-        # exits 0 (the binary compiled) but the execute action did NOT
-        # run. We classify this as a documented gap rather than a hard
-        # pass.
+        # A selector resolved with exit 0, but exit 0 alone does not say
+        # the EXECUTE edge ran: the bare-name selector (the engine's
+        # implicit-target-name path) routes to the BUILD edge, so the
+        # binary compiles and the run exits 0 with no execute action at
+        # all. That is why the build report is read below and the execute
+        # action required by id — and `routedViaBuildEdge` is carried only
+        # so the failure can SAY which selector was taken, never to excuse
+        # the absence.
         let routedViaBuildEdge = (resolvedSelector == executeStem)
         let executeActionId = "reprobuild.test_execute." & executeStem
         let reportPath = valueAfter(lastOutput, "buildReport:")
@@ -260,24 +243,16 @@ suite "Bootstrap-And-Self-Build B3: repro test runs through engine":
               break
 
         if executeAction.isNil:
-          if routedViaBuildEdge:
-            checkpoint("resolved via bare-name selector '" & executeStem &
-              "' — that routes to the BUILD edge, not the EXECUTE " &
-              "edge. The execute action is registered in the graph " &
-              "(verified structurally by " &
-              "t_b3_test_template_emits_two_edges) but the engine's " &
-              "selector resolver does not yet route a single-test " &
-              "name to its execute half. Skipping with the documented " &
-              "limitation classifier; this lifts in a follow-on once " &
-              "the engine's typed-tool resolver grows a profile for " &
-              "ct_test_nim_unittest.buildNimUnittest.")
-            skip()
-          else:
-            checkpoint("no " & executeActionId & " action in build " &
-              "report; engine may have shortcut the execute edge.")
-            checkpoint("resolved selector: " & resolvedSelector)
-            checkpoint("skipped — execute action not observed.")
-            skip()
+          # This case's whole subject is that the EXECUTE edge runs
+          # through the engine. Without the execute action in the report
+          # there is nothing to assert, so an absent action fails —
+          # whichever selector resolved, and whatever the reason.
+          checkpoint("no " & executeActionId & " action in the build " &
+            "report; the execute edge did not run through the engine")
+          checkpoint("resolved selector: " & resolvedSelector)
+          checkpoint("routed via the bare-name (build) selector: " &
+            $routedViaBuildEdge)
+          check not executeAction.isNil
         else:
           let status = executeAction{"status"}.getStr()
           let cache = executeAction{"cacheDecision"}.getStr()
