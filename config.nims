@@ -43,6 +43,24 @@ switch("undef", "nixbuild")
 # alongside it at the repo root. Adding ``.`` to ``--path`` lets
 # library-local tests in ``libs/*/tests/`` also import the table for
 # the M6 smoke check.
+#
+# It is ALSO the repository's package-root anchor, and that second role is
+# load-bearing in a way the first is not. The compiler renders the source
+# location it plants inside `check` / `require` / `expect` / `assert` — and
+# therefore inside every test's `--list-json` `bodyHash` — relative to the
+# package root, which `canonicalImportAux` finds from the stdlib directories,
+# the `--path:` search roots, or the nearest enclosing `.nimble` file. Every
+# reprobuild test is compiled as its own main module, so with none of those
+# matching the compiler falls back to `projectPath` (the main module's own
+# directory) and each location degrades to a bare basename. Nothing errors
+# when that happens: the hashes stay stable and the suite keeps passing while
+# two same-named test files in different directories quietly become one.
+#
+# `reprobuild.nimble` at the repo root supplies the same anchor and either one
+# alone is sufficient, so this line may look redundant. It is not: it is the
+# anchor that survives the `.nimble` file being moved or renamed. Do not
+# delete either without reading `tests/unit/test_package_root_anchor.py`,
+# which measures the property both of them exist to hold.
 switch("path", ".")
 
 # Test-Edges-And-Parallel-Runner M1: ``repro.nim`` consumes the

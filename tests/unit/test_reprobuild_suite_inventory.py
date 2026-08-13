@@ -769,8 +769,21 @@ test "incomplete name" and:
         #   PYTHON CASES 43 (unchanged) — the regression adds no Python
         #   test.
         #   STATIC TOTAL 6873 -> 6877 = +4 nim.
+        #
+        #   PYTHON FILES 4 -> 5, PYTHON CASES 43 -> 46
+        #     tests/unit/test_package_root_anchor.py                   (+3)
+        #   Recomputed, not bumped: read out of a live `build_inventory`
+        #   (`python_total` 46, `pythonTestFileCount` 5). The file is the
+        #   package-root-anchor guard added alongside the nim-fork bump to
+        #   4e93a8a4; its three cases are
+        #     test_fixtures_are_byte_identical_and_share_a_basename
+        #     test_repository_declares_a_package_root_anchor_deliberately
+        #     test_same_named_sources_in_different_directories_stay_distinct
+        #   Its two Nim fixtures live under `tests/fixtures/`, which
+        #   `generate_test_edges.nim` excludes, so the Nim counts are
+        #   untouched by this change.
         self.assertEqual(len(nim_specs), 1210)
-        self.assertEqual(len(python_specs), 4)
+        self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
             item["sourceCaseCount"]
@@ -859,9 +872,14 @@ test "incomplete name" and:
         # as the tracked JSON adds one more:
         #   test_tracked_markdown_report_is_stable_across_hosts_and_builds
         #
+        # 43 -> 46: `tests/unit/test_package_root_anchor.py` adds three:
+        #   test_fixtures_are_byte_identical_and_share_a_basename
+        #   test_repository_declares_a_package_root_anchor_deliberately
+        #   test_same_named_sources_in_different_directories_stay_distinct
+        #
         # Python files have no built binary, so this number still comes from
         # the static `unittest` scan.
-        self.assertEqual(python_total, 43)
+        self.assertEqual(python_total, 46)
         # 6856 -> 6862: -1 from the quarantined source no longer imputing a
         # static count, +7 from the new Python cases above.
         self.assertEqual(data["static"]["sourceCaseCount"], 6877)
@@ -1444,7 +1462,7 @@ test "incomplete name" and:
         self.assertFalse(catalog["environmentDegraded"])
 
         # Count-provenance census. Every Nim entry is catalog-counted except
-        # the single quarantined one; the four `static` entries are the
+        # the single quarantined one; the five `static` entries are the
         # Python files, which have no built binary. `missing-binary` is a
         # distinct label from `static` and is absent here because every Nim
         # source in the tree currently has a built binary — if a build gap
@@ -1458,7 +1476,7 @@ test "incomplete name" and:
         # `build_inventory`, not bumped.
         self.assertEqual(
             catalog["countSourceCounts"],
-            {"catalog": 1209, "quarantined": 1, "static": 4},
+            {"catalog": 1209, "quarantined": 1, "static": 5},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         self.assertEqual(
@@ -2325,8 +2343,10 @@ test "incomplete name" and:
         # pinned individually in `expected_enrollments`.
         # 1209 -> 1210 for the M2 step-1 catalog-selection regression,
         # pinned individually in `expected_enrollments`.
+        # 4 -> 5: `tests/unit/test_package_root_anchor.py`, the
+        # package-root-anchor guard added with the nim-fork bump to 4e93a8a4.
         self.assertEqual(declared_nim_count, 1210)
-        self.assertEqual(declared_python_count, 4)
+        self.assertEqual(declared_python_count, 5)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
         for enrolled in (
