@@ -663,6 +663,19 @@ test "incomplete name" and:
                 "sourceCaseCount": 4,
                 "class": "integration",
             },
+            # The regression guard for a suite-body `echo` corrupting a
+            # protocol document. Pinned per source so its four cases are the
+            # whole of this change's delta on the aggregates below, rather
+            # than a number the aggregates have to be trusted about.
+            "tests/integration/"
+            "t_protocol_document_survives_suite_body_echo.nim": {
+                "binary": "build/test-bin/"
+                "t_protocol_document_survives_suite_body_echo",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 4,
+                "class": "integration",
+            },
         }
         for source, expected in expected_enrollments.items():
             with self.subTest(enrolled_source=source):
@@ -925,7 +938,57 @@ test "incomplete name" and:
         #   source's own `--list-json` was counted. That is also what empties
         #   the `missing-binary` bucket in `countSourceCounts` below. The
         #   static scan moves by the same +13 and is pinned separately.
-        self.assertEqual(len(nim_specs), 1212)
+        #
+        #   The rebase onto `910cb956` brings a suite change that landed
+        #   without moving these pins, so this commit carries both deltas and
+        #   attributes each separately. `910cb956` is net zero on the spec
+        #   count and -3 on the case count:
+        #     - RETIRED tests/integration/
+        #         t_workspace_branch_create_refuses_on_any_dirty_sibling.nim
+        #       (-1 spec, -4 cases). Its subject — `repro branch <name>` in
+        #       the create-without-switching form — no longer exists.
+        #     + ADDED tests/integration/
+        #         t_sync_clones_commit_pinned_repo.nim  (+1 spec, +2 cases)
+        #     ~ tests/integration/
+        #         t_workspace_branch_create_records_metadata.nim  3 -> 2
+        #       trimmed to the one form still live.
+        #     ~ t_gate_refusals_name_offender_and_remedy_command.nim and
+        #       t_sync_clones_newly_declared_dependency_after_pull.nim were
+        #       edited but their case counts are unchanged (9 and 1).
+        #   1212 specs and 6847 cases -> 1212 specs and 6844 cases.
+        #
+        #   SPECS 1212 -> 1213, NIM CASES 6844 -> 6848
+        #     tests/integration/
+        #       t_protocol_document_survives_suite_body_echo.nim      (+4)
+        #   One added source, and the whole delta on both numbers. It is the
+        #   regression guard for "a stray `echo` in a suite body must not cost
+        #   a binary its identity" — the consumer-side half of the corruptible
+        #   protocol modes. Its four cases are
+        #     the runner keeps every case of a binary that echoes on stdout
+        #     --catalog FILE is immune to the same pollution
+        #     --list has no frame and IS corrupted (upstream defect, pinned)
+        #     the runner and the inventory recover the same document
+        #   and it is pinned individually in `expected_enrollments` above.
+        #   Recomputed, not bumped: read out of a live `build_inventory` with
+        #   the binary rebuilt first, and re-derived again after the rebase
+        #   with `910cb956`'s four changed binaries rebuilt too and the
+        #   retired suite's stale binary deleted (`len(nim_specs)` 1213,
+        #   `nim_total` 6848, `staticCaseCount` sum 6769,
+        #   `testEntryCount` 1218). A count read
+        #   from a stale binary agrees with a stale pin forever, which is how
+        #   the +4 on `t_branch_forks_new_workspace_on_feature_branch.nim`
+        #   above hid.
+        #
+        #   Its fixture, `tests/fixtures/protocol-echo/`, is under
+        #   `tests/fixtures/`, which `generate_test_edges.nim` excludes, so it
+        #   contributes nothing to any of these numbers — the regression test
+        #   compiles it into a scratch directory at run time.
+        #
+        #   PYTHON unchanged (5 files, 46 cases). The 15 other sources this
+        #   change edits — the failure-classifier removals and the VM-gate
+        #   fixes — add and remove no case, so every number below moves by
+        #   exactly the one new file's +1 / +4.
+        self.assertEqual(len(nim_specs), 1213)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -985,7 +1048,11 @@ test "incomplete name" and:
         # added to `t_branch_forks_new_workspace_on_feature_branch.nim`, and
         # 0 for its six renames. All three are pinned per source in
         # `expected_enrollments` above.
-        self.assertEqual(nim_total, 6847)
+        #
+        # 6844 -> 6848: the four cases of
+        # `t_protocol_document_survives_suite_body_echo.nim`, pinned per
+        # source in `expected_enrollments` above.
+        self.assertEqual(nim_total, 6848)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
         # as its own equality so a future re-introduction of the static
@@ -1042,7 +1109,10 @@ test "incomplete name" and:
         # Both halves are pinned separately above (`nim_total`,
         # `python_total`), so this aggregate is a backstop for them rather
         # than a place either delta can hide.
-        self.assertEqual(data["static"]["sourceCaseCount"], 6893)
+        #
+        # 6890 -> 6894 = 6848 nim + 46 python. All +4 is nim; the python
+        # half is untouched by this change.
+        self.assertEqual(data["static"]["sourceCaseCount"], 6894)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -1057,13 +1127,19 @@ test "incomplete name" and:
         # independently, so their agreeing on the decomposition is the check
         # that the `0b9205f7` recomputation above is a fact about the suite
         # rather than about one of the two surfaces.
+        #
+        # 6765 -> 6769 = +4, the same +4 `nim_total` moved by, and the whole
+        # of it is the one new source. The scan reads the SOURCES and
+        # `nim_total` reads the BINARIES, so their agreeing that the new file
+        # holds four cases is what makes that a fact about the suite rather
+        # than about one surface.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6768,
+            6769,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
@@ -1222,6 +1298,13 @@ test "incomplete name" and:
         # argument again — it compiles its own fixtures with a real
         # `nim c` (twice, to produce the edited rebuild). One new file, no
         # already-counted source changed, intersection untouched.
+        #
+        # 52 -> 53: the suite-body-echo protocol regression test, by the
+        # same argument once more — it compiles its `tests/fixtures/
+        # protocol-echo/` fixture with a real `nim c`, and rebuilds
+        # `repro_test_runner` when that binary is older than its source.
+        # One new file, no already-counted source changed, intersection
+        # untouched. Recomputed from a live `build_inventory`, not bumped.
         for added in (
             "tests/integration/"
             "t_repro_test_runner_consumes_result_document.nim",
@@ -1231,10 +1314,12 @@ test "incomplete name" and:
             "t_repro_test_runner_reporting_contract.nim",
             "tests/integration/"
             "t_repro_test_runner_catalog_selection.nim",
+            "tests/integration/"
+            "t_protocol_document_survives_suite_body_echo.nim",
         ):
             with self.subTest(added_explicit_source=added):
                 self.assertIn(added, explicit_sources)
-        self.assertEqual(len(explicit_sources), 52)
+        self.assertEqual(len(explicit_sources), 53)
         self.assertEqual(len(api_sources), 21)
         self.assertEqual(
             explicit_sources & api_sources,
@@ -1251,8 +1336,11 @@ test "incomplete name" and:
         # explicit/api intersection pinned above is unchanged, so the union
         # moves by exactly the two added explicit sources. 68 -> 69 for
         # the reporting-contract source, by the same argument, and
-        # 69 -> 70 for the catalog-selection source, likewise.
-        self.assertEqual(derived_total, 70)
+        # 69 -> 70 for the catalog-selection source, likewise. 70 -> 71
+        # for the suite-body-echo protocol regression test, likewise again:
+        # it is an explicit-compiler source, it is not in the intersection
+        # pinned above, so the union moves by exactly one.
+        self.assertEqual(derived_total, 71)
         self.assertEqual(len(flows), derived_total)
         self.assertFalse(data["runtimeCompilerFlowDetection"]["exhaustive"])
         self.assertEqual(
@@ -1656,9 +1744,15 @@ test "incomplete name" and:
         # anything was wrong with the sources. All eight are built now, the
         # six stale binaries under the pre-rename names are gone, and the
         # bucket is empty again: 1211 = 1212 Nim specs - 1 quarantined.
+        #
+        # 1211 -> 1212 catalog: the one source this change adds,
+        # `t_protocol_document_survives_suite_body_echo.nim`. Its binary is
+        # built and probed, so it joins the `catalog` bucket and the
+        # `missing-binary` bucket stays empty:
+        # 1212 = 1213 Nim specs - 1 quarantined.
         self.assertEqual(
             catalog["countSourceCounts"],
-            {"catalog": 1211, "quarantined": 1, "static": 5},
+            {"catalog": 1212, "quarantined": 1, "static": 5},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         self.assertEqual(
@@ -2531,7 +2625,9 @@ test "incomplete name" and:
         # pinned there too.
         # 4 -> 5: `tests/unit/test_package_root_anchor.py`, the
         # package-root-anchor guard added with the nim-fork bump to 4e93a8a4.
-        self.assertEqual(declared_nim_count, 1212)
+        # 1212 -> 1213: the one source this change adds,
+        # `t_protocol_document_survives_suite_body_echo.nim`.
+        self.assertEqual(declared_nim_count, 1213)
         self.assertEqual(declared_python_count, 5)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -2571,7 +2667,8 @@ test "incomplete name" and:
         # 1214 -> 1217 = 1212 nim + 5 python: +2 nim for the sources
         # `0b9205f7` added (its six renames net to zero), +1 python for the
         # package-root-anchor guard.
-        self.assertEqual(data["static"]["testEntryCount"], 1217)
+        # 1217 -> 1218 = 1213 nim + 5 python: the one new nim source.
+        self.assertEqual(data["static"]["testEntryCount"], 1218)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),
