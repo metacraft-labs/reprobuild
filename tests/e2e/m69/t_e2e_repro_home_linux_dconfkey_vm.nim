@@ -50,15 +50,23 @@ proc main() =
     # Provisioning prereqs: missing-binary is a HARD failure, not a
     # SKIP — the harness installs both via apt-get in stage A. A
     # missing binary here means the harness is broken.
+    #
+    # These three failure paths `raise` rather than `quit(1)`. A bare
+    # `quit` from inside a test body tears the process down before
+    # `testEnded` writes the protocol result document, so the runner has
+    # nothing to read and has to fall back to the exit code — which loses
+    # the message, the checkpoints and the case's identity. Re-raising
+    # lets `unittest` record a FAILED case carrying the diagnostic.
     if not binaryPresent("dconf"):
       echo "  [FAIL] " & GateName & ": dconf binary missing"
       writeLineSentinel("FAIL: " & GateName & " (dconf binary missing)")
-      quit(1)
+      raise newException(IOError, GateName & ": dconf binary missing")
     if not binaryPresent("dbus-run-session"):
       echo "  [FAIL] " & GateName & ": dbus-run-session missing"
       writeLineSentinel("FAIL: " & GateName &
         " (dbus-run-session missing — install dbus-x11)")
-      quit(1)
+      raise newException(IOError, GateName &
+        ": dbus-run-session missing — install dbus-x11")
 
     # Use a namespaced key under /org/reprobuild/m83-vm-test/ so we
     # don't disturb any real GNOME settings (and there is no schema
@@ -82,7 +90,7 @@ proc main() =
       let head = e.msg.splitLines()[0]
       echo "  [FAIL] " & GateName & ": " & head
       writeLineSentinel("FAIL: " & GateName & " (" & head & ")")
-      quit(1)
+      raise
   else:
     discard
 
