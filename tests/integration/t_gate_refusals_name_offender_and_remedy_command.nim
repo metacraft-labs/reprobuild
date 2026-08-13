@@ -362,14 +362,15 @@ suite "RA-28 — refusals name the offender and a remedy command":
       writeFile(fx.manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
       check not dirExists(fx.workspaceRoot / "lib-b")
       let res = invokeSync(fx)
-      # An unreadable NEW repo must NOT make the whole sync fail fatally.
-      check res.code != 1
+      # An unreadable NEW repo does not ABORT the run, but it does FAIL it —
+      # the workspace is missing a declared repo (CLI/sync.md exit `1`).
+      check res.code == 1
       let report = syncReport(fx)
       var entry: JsonNode = nil
       for e in report["repos"]:
         if e["path"].getStr() == "lib-b": entry = e
       check entry != nil
-      check entry["executionStatus"].getStr() == "skipped"
+      check entry["executionStatus"].getStr() == "clone_failed"
       assertNamesOffenderAndRemedy(
         entry["executionDiagnostic"].getStr(), "lib-b")
 

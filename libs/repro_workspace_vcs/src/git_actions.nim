@@ -603,6 +603,16 @@ proc succeeded(): ActionResult =
     launched: true,
     runQuotaBackend: "workspace-vcs")
 
+proc isCommitSha(revision: string): bool =
+  ## Whether ``revision`` is a full 40-hex commit id rather than a branch or
+  ## tag name. This matters because ``git clone --branch`` accepts ONLY a
+  ## branch or tag: handed a commit id it fails with "Remote branch <sha> not
+  ## found in upstream origin", so a SHA-pinned repo fragment could never be
+  ## cloned at all. A pinned commit is reached by cloning, fetching that
+  ## object, and checking it out — the same three steps ``executeForkBranch``
+  ## already uses to land on an arbitrary revision.
+  revision.len == 40 and revision.allCharsInSet(HexDigits)
+
 proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResult =
   let target = absoluteRepoPath(payload, cwd)
   let parent = target.splitPath.head
@@ -631,13 +641,19 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
   # remote heads, ``--filter`` makes a partial (promisor) clone, and
   # ``--depth`` truncates history. They are appended to BOTH the
   # accelerated and the fallback plain-clone command lines.
+  let pinnedCommit = isCommitSha(payload.revision)
   proc accelFlags(): seq[string] =
     result = @[]
     if payload.singleBranch:
       result.add("--single-branch")
     if payload.cloneFilter.len > 0:
       result.add("--filter=" & payload.cloneFilter)
-    if payload.depth > 0:
+    # ``--depth`` is dropped for a commit-id pin. The other accelerators only
+    # narrow what is downloaded and the pinned commit is fetched explicitly
+    # below, but a depth-truncated history cannot be guaranteed to contain an
+    # arbitrary commit, and deepening it afterwards would download more than
+    # the unshallowed clone would have.
+    if payload.depth > 0 and not pinnedCommit:
       result.add("--depth")
       result.add($payload.depth)
 
@@ -659,7 +675,7 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     args.add(f)
   args.add(payload.remoteUrl)
   args.add(target)
-  if payload.revision.len > 0:
+  if payload.revision.len > 0 and not pinnedCommit:
     args.add("--branch")
     args.add(payload.revision)
   var cloneRes = runGit(payload, args)
@@ -675,7 +691,7 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
       plain.add(f)
     plain.add(payload.remoteUrl)
     plain.add(target)
-    if payload.revision.len > 0:
+    if payload.revision.len > 0 and not pinnedCommit:
       plain.add("--branch")
       plain.add(payload.revision)
     cloneRes = runGit(payload, plain)
@@ -683,6 +699,45 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     return failed("clone-failed",
       "git clone exited " & $cloneRes.exitCode & ": " &
         cloneRes.output.trimmed)
+  if pinnedCommit:
+    # The clone landed on the remote's default branch; move to the pinned
+    # commit. Fetch it explicitly first — it need not be a branch tip, and
+    # with ``--single-branch`` or a partial clone it may not be present.
+    #
+    # If we cannot land on the pin, the checkout is REMOVED rather than left
+    # behind. A tree that exists but sits on the default branch is worse than
+    # no tree at all: the next sync classifies it as an existing checkout and
+    # takes the update path, so it never retries the clone and the repo stays
+    # silently at the wrong revision forever.
+    proc discardPartial() =
+      if dirExists(target):
+        try: removeDir(target)
+        except OSError: discard
+    let wanted = payload.revision
+    let present = runGit(payload,
+      ["-C", target, "cat-file", "-e", wanted & "^{commit}"])
+    if present.exitCode != 0:
+      let fetched = runGit(payload,
+        ["-C", target, "fetch", "--no-tags", "origin", wanted])
+      if fetched.exitCode != 0:
+        discardPartial()
+        return failed("clone-revision-fetch-failed",
+          "could not fetch pinned revision " & wanted & " from " &
+            payload.remoteUrl & " (" & $fetched.exitCode & "): " &
+            fetched.output.trimmed)
+      let recheck = runGit(payload,
+        ["-C", target, "cat-file", "-e", wanted & "^{commit}"])
+      if recheck.exitCode != 0:
+        discardPartial()
+        return failed("clone-revision-missing",
+          "pinned revision " & wanted & " is still absent after fetching " &
+            "from " & payload.remoteUrl)
+    let co = runGit(payload, ["-C", target, "checkout", "--detach", wanted])
+    if co.exitCode != 0:
+      discardPartial()
+      return failed("clone-revision-checkout-failed",
+        "git checkout --detach " & wanted & " exited " & $co.exitCode &
+          ": " & co.output.trimmed)
   let headRes = resolveHeadSha(payload, target)
   if not headRes.ok:
     return failed("clone-head-probe-failed", headRes.diagnostic)

@@ -230,13 +230,12 @@ suite "RA-23 — sync clones newly-declared dependencies":
       let bDeclaredSha = headSha(gitBin, fx.bSeed)
 
       let res = invokeSync(fx)
-      if res.code notin [0, 2]:
-        checkpoint("sync output: " & res.output)
-      # An unreadable NEW repo must NOT make the whole sync fail fatally
-      # (exit 1). 0 (all converged) or 2 (an unrelated report-only refusal)
-      # are acceptable; 1 (fatal failure) is NOT.
-      check res.code != 1
-      check res.code in [0, 2]
+      checkpoint("sync output: " & res.output)
+      # An unreadable NEW repo must not ABORT the run — the other repos still
+      # converge, asserted below. It does FAIL the run: the workspace is
+      # missing a declared repo, and a consumer reading only the exit code
+      # would otherwise be told it is complete (CLI/sync.md exit `1`).
+      check res.code == 1
 
       # --- lib-b: the newly-declared dependency was CLONED + converged. ---
       check dirExists(fx.workspaceRoot / "lib-b")
@@ -260,11 +259,12 @@ suite "RA-23 — sync clones newly-declared dependencies":
       check aEntry["action"].getStr() == "fetch_fast_forward"
       check aEntry["executionStatus"].getStr() == "succeeded"
 
-      # --- lib-c: the unreadable new repo is REPORTED + SKIPPED, not fatal. ---
+      # --- lib-c: the unreadable new repo is REPORTED as clone_failed, and
+      # did not abort the run. ---
       check not dirExists(fx.workspaceRoot / "lib-c" / ".git")
       let cEntry = repoEntry(report, "lib-c")
       check cEntry["syncCase"].getStr() == "missing_checkout"
       check cEntry["action"].getStr() == "clone"
-      check cEntry["executionStatus"].getStr() == "skipped"
+      check cEntry["executionStatus"].getStr() == "clone_failed"
       # A reason is attached so the operator knows WHY it was skipped.
       check cEntry["executionDiagnostic"].getStr().len > 0

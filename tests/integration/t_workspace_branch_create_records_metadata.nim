@@ -1,20 +1,22 @@
-## M14 — ``repro branch`` metadata round-trip.
+## M14 / WV-6 — ``repro branch`` (show form) reports the recorded branch.
 ##
-## Verifies the M13 metadata is the single source of truth for the
-## active workspace branch across the ``repro branch`` command's two
-## forms:
+## The M13 metadata is the single source of truth for the active workspace
+## branch, and the no-argument ``repro branch`` is the read-only query over it.
 ##
-##   1. A successful ``repro branch <name>`` writes ``<name>`` into
-##      ``[workspace].branch`` of ``.repro/workspace.toml``. The bytes
-##      land via the M13 ``writeWorkspaceBranch`` writer; a re-read
-##      through ``readWorkspaceBranch`` returns the new value.
-##   2. After the create form, the show form (``repro branch`` with
-##      no positional) returns the new value.
-##   3. On a workspace where ``workspace init`` recorded ``main`` as
-##      the active branch, the show form returns ``main`` before any
-##      ``repro branch <name>`` ever runs.
+##   1. After the branch is created in place (``repro switch -b <name>``, the
+##      verb that performs that operation), ``repro branch`` reports ``<name>``
+##      in both its text line and its report document, with an EMPTY per-repo
+##      array — it is a query, not a plan.
+##   2. On a freshly initialised workspace with no branch recorded, it falls
+##      back to the manifest trunk rather than inventing one.
 ##
-## Skip rule: ``git`` missing on PATH (same convention as M9–M13).
+## The former third case here — ``repro branch <name>`` creating a branch
+## WITHOUT switching onto it — tested a retired verb and is gone. A
+## workspace-wide branch nothing is standing on is not a state any other
+## command can act on, so creating one is now inseparable from switching
+## (``repro switch -b``); that verb's own suite,
+## ``t_switch_new_branch_marks_feature_branch``, covers both the metadata
+## write and the dirty-sibling refusal this file used to assert.
 
 import std/[json, options, os, osproc, strutils, tempfiles, unittest]
 
@@ -171,8 +173,10 @@ proc runBranchShow(fx: M14MetaFixture): CmdResult =
   ]))
 
 proc runBranchCreate(fx: M14MetaFixture; name: string): CmdResult =
+  # WV-5/WV-6: creating a workspace-wide branch in place is `repro switch -b`.
+  # `repro branch` now takes a destination PATH and produces a new workspace.
   runShell(shellCommand(@[
-    fx.reproBin, "branch", "--write-report", name,
+    fx.reproBin, "switch", "--write-report", name, "-b",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
@@ -185,54 +189,6 @@ proc readReport(fx: M14MetaFixture): JsonNode =
 # ---- the suite -------------------------------------------------------------
 
 suite "M14 — repro branch records metadata round-trip":
-
-  test "test_m14_create_writes_branch_into_workspace_toml":
-    let gitBin = findExe("git")
-    if gitBin.len == 0:
-      skip()
-    else:
-      let fx = setupFixture(gitBin, "create-writes")
-      defer: removeDirEventually(fx.scratch)
-
-      # Init clones both repos and records ``main`` (the resolver's
-      # trunk) as the active branch.
-      let initRes = runInit(fx)
-      check initRes.code == 0
-      let initialRecorded = readWorkspaceBranch(fx.workspaceRoot)
-      check initialRecorded.isSome
-      check initialRecorded.get() == "main"
-
-      # Create a new branch across the workspace.
-      let createRes = runBranchCreate(fx, "feature-metadata")
-      if createRes.code != 0:
-        checkpoint("output: " & createRes.output)
-      check createRes.code == 0
-
-      # M13 reader returns the new value.
-      let recorded = readWorkspaceBranch(fx.workspaceRoot)
-      check recorded.isSome
-      check recorded.get() == "feature-metadata"
-
-      # The workspace.toml on disk carries the new value under
-      # ``[workspace].branch``, in the canonical M13 serializer
-      # form. The file is still a metadata-only workspace.toml (no
-      # ``[[manifest]]`` entries) because we initialised in
-      # single-project mode.
-      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
-      let parsed = readWorkspaceLocal(tomlPath)
-      check parsed.workspace.project == "myproject"
-      check parsed.workspace.branch.isSome
-      check parsed.workspace.branch.get() == "feature-metadata"
-      check parsed.manifest.len == 0
-      check isCompositionalWorkspaceToml(fx.workspaceRoot) == false
-
-      # The JSON report exposes the same value via
-      # ``recordedBranch``.
-      let report = readReport(fx)
-      check report["form"].getStr() == "create"
-      check report["branch"].getStr() == "feature-metadata"
-      check report["recordedBranch"].getStr() == "feature-metadata"
-      check report["exitCode"].getInt() == 0
 
   test "test_m14_show_form_returns_new_branch_after_create":
     let gitBin = findExe("git")

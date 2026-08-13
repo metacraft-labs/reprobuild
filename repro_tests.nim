@@ -8350,14 +8350,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "tests/integration/t_workspace_branch_create_refuses_on_any_dirty_sibling.nim",
-    binary: "build/test-bin/t_workspace_branch_create_refuses_on_any_dirty_sibling",
-    defines: @[],
-    requiresReproBinary: true,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
     source: "tests/integration/t_workspace_clone_auto_trusts_per_repo_envrc.nim",
     binary: "build/test-bin/t_workspace_clone_auto_trusts_per_repo_envrc",
     defines: @[],
@@ -8616,6 +8608,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_workspace_membership_enable_disable.nim",
     binary: "build/test-bin/t_workspace_membership_enable_disable",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_sync_clones_commit_pinned_repo.nim",
+    binary: "build/test-bin/t_sync_clones_commit_pinned_repo",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

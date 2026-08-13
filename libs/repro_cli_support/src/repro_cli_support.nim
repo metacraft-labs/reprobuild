@@ -23801,7 +23801,8 @@ type
     cloned*: int      ## a newly-declared repo cloned.
     forceReset*: int  ## ``--force-sync`` overwrote a divergent/dirty repo.
     noop*: int        ## already at the locked revision / nothing to do.
-    skipped*: int     ## reported but not acted on (e.g. unreadable clone).
+    skipped*: int     ## reported but deliberately not acted on.
+    cloneFailed*: int ## a newly-declared repo could not be cloned.
     refused*: int     ## refuse-and-report (dirty / locally unpublished).
     failed*: int      ## a mutating action failed.
 
@@ -23812,6 +23813,7 @@ proc summarize*(report: WorkspaceSyncReport): WorkspaceSyncSummary =
     of "succeeded": inc result.succeeded
     of "cloned": inc result.cloned
     of "skipped": inc result.skipped
+    of "clone_failed": inc result.cloneFailed
     of "refused": inc result.refused
     of "failed": inc result.failed
     of "noop":
@@ -23831,6 +23833,7 @@ proc toJsonNode*(summary: WorkspaceSyncSummary): JsonNode =
   result["forceReset"] = %summary.forceReset
   result["noop"] = %summary.noop
   result["skipped"] = %summary.skipped
+  result["cloneFailed"] = %summary.cloneFailed
   result["refused"] = %summary.refused
   result["failed"] = %summary.failed
 
@@ -23926,7 +23929,9 @@ proc renderSyncSummaryLines*(report: WorkspaceSyncReport): seq[string] =
   result.add("workspace sync summary: " &
     "updated " & $s.succeeded & ", cloned " & $s.cloned &
     ", force-reset " & $s.forceReset & ", up-to-date " & $s.noop &
-    ", skipped " & $s.skipped & ", refused " & $s.refused &
+    ", skipped " & $s.skipped &
+    (if s.cloneFailed > 0: ", CLONE FAILED " & $s.cloneFailed else: "") &
+    ", refused " & $s.refused &
     ", failed " & $s.failed & " (" & $s.total & " repo(s))")
 
 proc renderSyncTextLines*(report: WorkspaceSyncReport;
@@ -27332,13 +27337,13 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
           "' (auth / network) then 're-run 'repro sync', or " &
           "'repro remove " & resolved.repos[repoIdx].name &
           "' to drop the dependency"
-        checkoutStatus[repoIdx] = ("skipped",
-          "clone of newly-declared repo failed (reported, not fatal): " &
+        checkoutStatus[repoIdx] = ("clone_failed",
+          "clone of newly-declared repo failed: " &
           "status=" & $outcome.status & " reason=" & outcome.reason &
           (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "") &
           " — remedy: " & remedy)
-        stderr.writeLine("workspace sync: skipped newly-declared repo '" &
-          offender & "' — clone failed (continuing): " &
+        stderr.writeLine("workspace sync: FAILED to clone newly-declared " &
+          "repo '" & offender & "' (continuing with the other repos): " &
           (if outcome.stderr.len > 0: outcome.stderr.strip()
            else: outcome.reason) & " — remedy: " & remedy)
       else:
@@ -27405,7 +27410,12 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       status = "noop"
     if status == "refused":
       anyRefusal = true
-    elif status == "failed":
+    elif status == "failed" or status == "clone_failed":
+      # A clone failure does not abort the run — the other repos still
+      # converge (RA-23's partial-advance). It DOES fail the run: the
+      # workspace is missing a declared repo, and every consumer that reads
+      # only the exit code would otherwise be told the workspace is complete.
+      # That is how a workspace stays silently incomplete for weeks.
       anyFailure = true
     # RA-16: surface the force-reset overwrite in the report so it is
     # distinguishable from the planner's original report-only decision.
@@ -38542,6 +38552,40 @@ type
     toolProvisioning: ToolProvisioningMode
     report: ReportSpec      ## Opt-in ``--write-report[=PATH]`` artifact.
 
+proc ascendToWorkspaceRoot(startDir: string): string =
+  ## Walk up from ``startDir`` to the nearest directory carrying the RA-10
+  ## ``isInitializedWorkspace`` marker, so the prompt works from any
+  ## subdirectory of a workspace (like ``__git_ps1``). Returns "" when no
+  ## ancestor is an initialized workspace. Pure filesystem stat walk — no
+  ## git, bounded by the path depth.
+  var dir = absolutePath(startDir)
+  while true:
+    if isInitializedWorkspace(dir):
+      return dir
+    let parent = parentDir(dir)
+    if parent.len == 0 or parent == dir:
+      return ""
+    dir = parent
+
+proc resolveInvokedWorkspaceRoot(explicit: string): string =
+  ## The workspace root a workspace-wide verb should act on.
+  ##
+  ## An explicit ``--workspace-root`` wins. Otherwise walk UP from the current
+  ## directory to the nearest initialized workspace, so `repro branch` and
+  ## `repro switch` work from inside a member repo — which is where a developer
+  ## actually stands. Taking the cwd verbatim made them the only workspace-wide
+  ## verbs that had to be run from the root, and the failure was obscure: the
+  ## member repo has no `.repro/workspace.toml`, so the error talked about
+  ## missing metadata rather than about where you were.
+  ##
+  ## Falls back to the cwd when no ancestor is a workspace, preserving the
+  ## previous diagnostic for the genuinely-not-in-a-workspace case.
+  if explicit.len > 0:
+    return absolutePath(explicit)
+  let here = getCurrentDir()
+  let ascended = ascendToWorkspaceRoot(here)
+  if ascended.len > 0: ascended else: absolutePath(here)
+
 proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
                       requirePath = false): BranchArgs =
   ## ``repro branch [<path>] [--branch=NAME] [--existing-branch]
@@ -38599,9 +38643,7 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
           " (the single positional is the destination PATH; use " &
           "`--branch=NAME` to name the branch something else)")
     inc i
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  result.workspaceRoot = resolveInvokedWorkspaceRoot(result.workspaceRoot)
   if result.forkPath.len == 0:
     if requirePath:
       raise newException(ValueError,
@@ -39060,6 +39102,19 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
   ## FORKS: it materializes a new workspace there with every repo (and the
   ## workspace root repo) on the branch, cut from THIS workspace's committed
   ## HEADs, leaving the current workspace untouched.
+  if args.len > 0 and args[0] in ["--help", "-h", "help"]:
+    echo verb & " [<path>] [--branch=NAME] [--existing-branch] " &
+      "[--include-changes] [--workspace-root=PATH] [--json] " &
+      "[--write-report[=PATH]]"
+    echo "  (no argument)     print the current workspace branch"
+    echo "  <path>            fork into a NEW workspace directory at <path>;"
+    echo "                    the branch is named after the path's basename"
+    echo "  --branch=NAME     name the branch something other than the basename"
+    echo "  --existing-branch check out an EXISTING branch instead of creating one"
+    echo "  --include-changes also copy the source's uncommitted work"
+    echo ""
+    echo "  To switch THIS workspace onto a branch, use `repro switch`."
+    return 0
   let parsed = parseBranchArgs(args, verb, requirePath)
   # WV-6 — two forms only: a destination path forks, no argument shows. The
   # in-place create forms are `repro switch -b`, which reaches
@@ -39381,9 +39436,7 @@ proc parseSwitchArgs*(args: openArray[string]): SwitchArgs =
   if result.branchName.len == 0:
     raise newException(ValueError,
       "`repro switch` requires a branch name positional argument")
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  result.workspaceRoot = resolveInvokedWorkspaceRoot(result.workspaceRoot)
 
 proc resolveSwitchProject(parsed: SwitchArgs):
     tuple[resolved: ResolvedProject;
@@ -39414,7 +39467,7 @@ proc resolveSwitchProject(parsed: SwitchArgs):
       discard
   if projectName.len == 0:
     raise newException(ValueError,
-      "`repro switch <branch>` requires either `.repro/workspace.toml` " &
+      "this command requires either `.repro/workspace.toml` " &
         "or a project name recoverable from one; neither was present at " &
         parsed.workspaceRoot)
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
@@ -39924,6 +39977,16 @@ proc runSwitchCommand*(args: openArray[string]): int =
   ## ``--write-report=PATH``) so a script consumer has a parseable record of
   ## what happened, in addition to the stdout-formatted text lines.
   ## Without ``--write-report`` nothing is written to disk.
+  if args.len > 0 and args[0] in ["--help", "-h", "help"]:
+    echo "repro switch <branch> [-b|--new-branch] [--yes] " &
+      "[--workspace-root=PATH] [--json] [--write-report[=PATH]]"
+    echo "  <branch>          switch every participating repo onto <branch>,"
+    echo "                    stashing and restoring per-repo work in progress"
+    echo "  -b, --new-branch  create <branch> across every repo first"
+    echo "  --yes, --force    skip the per-repo confirmation preview"
+    echo ""
+    echo "  To fork a NEW workspace directory instead, use `repro branch`."
+    return 0
   let parsed = parseSwitchArgs(args)
 
   # WV-5 ``-b`` — create the branch across every participating repo, then
@@ -44407,21 +44470,6 @@ type
     cacheAgeSeconds: int64
     cacheWrittenBy: string  ## the verb that last refreshed the cache
 
-proc ascendToWorkspaceRoot(startDir: string): string =
-  ## Walk up from ``startDir`` to the nearest directory carrying the RA-10
-  ## ``isInitializedWorkspace`` marker, so the prompt works from any
-  ## subdirectory of a workspace (like ``__git_ps1``). Returns "" when no
-  ## ancestor is an initialized workspace. Pure filesystem stat walk — no
-  ## git, bounded by the path depth.
-  var dir = absolutePath(startDir)
-  while true:
-    if isInitializedWorkspace(dir):
-      return dir
-    let parent = parentDir(dir)
-    if parent.len == 0 or parent == dir:
-      return ""
-    dir = parent
-
 proc promptCacheStaleness(workspaceRoot, cachePath, cacheBranch,
                           liveBranch: string;
                           writtenAtUnix: int64): tuple[stale: bool;
@@ -45147,6 +45195,10 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
   var explicit = parseMembershipProjects(args)
   var useDefault = false
   var noSync = false
+  # Flags the materialization phase understands are forwarded to it rather
+  # than rejected here: `enable`'s real work IS a sync, so the report and the
+  # JSON digest describing what happened are that sync's.
+  var forwarded: seq[string]
   for arg in args:
     if arg == "--default":
       useDefault = true
@@ -45154,6 +45206,10 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
       noSync = true
     elif arg.startsWith("--workspace-root="):
       discard
+    elif arg == "--json" or arg == "--verbose" or arg == "--dry-run" or
+        arg == "--write-report" or arg.startsWith("--write-report=") or
+        arg.startsWith("--jobs") or arg.startsWith("--groups="):
+      forwarded.add(arg)
     elif arg.startsWith("-"):
       stderr.writeLine("repro workspace enable: unknown flag " & arg)
       return 2
@@ -45247,6 +45303,8 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
     $missing.len & " repo(s) introduced by " & toAdd.join(", "))
   var syncArgs = @(toAdd)
   syncArgs.add("--workspace-root=" & workspaceRoot)
+  for f in forwarded:
+    syncArgs.add(f)
   return runWorkspaceSyncCommand(syncArgs)
 
 proc repoRemovalBlockers(identity: GitToolIdentity;
