@@ -471,13 +471,25 @@ test "incomplete name" and:
                 "sourceCaseCount": 2,
                 "class": "pure unit",
             },
+            # 10 -> 14. The workspace-CLI verb split (`0b9205f7`) added four
+            # cases to this file — `t_workspace_new_derives_branch_from_`
+            # `basename`, `t_branch_refuses_destination_inside_workspace`,
+            # `t_workspace_new_existing_branch_checks_out` and
+            # `t_workspace_new_requires_a_destination_path` — and the pin was
+            # not moved. It kept passing anyway, because the binary in
+            # `build/test-bin/` was never rebuilt after that edit and went on
+            # reporting the ten cases it was compiled from. A count read from
+            # a stale artifact agrees with a stale pin indefinitely, which is
+            # the one way this file's per-source pins can fail silently. The
+            # binary is rebuilt and the source's static scan independently
+            # reads 14, so the two surfaces now agree.
             "tests/integration/"
             "t_branch_forks_new_workspace_on_feature_branch.nim": {
                 "binary": "build/test-bin/"
                 "t_branch_forks_new_workspace_on_feature_branch",
                 "language": "nim",
                 "sourceSuiteCount": 1,
-                "sourceCaseCount": 10,
+                "sourceCaseCount": 14,
                 "class": "integration",
             },
             "recipes/packages/source/grub/test_grub_source.nim": {
@@ -543,6 +555,109 @@ test "incomplete name" and:
             "t_repro_test_runner_catalog_selection.nim": {
                 "binary": "build/test-bin/"
                 "t_repro_test_runner_catalog_selection",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 4,
+                "class": "integration",
+            },
+            # The workspace-CLI verb split (`0b9205f7`). It renamed six
+            # integration sources, added two, and added four cases to the
+            # branch-fork source pinned above — so each of the nine affected
+            # sources is pinned here individually, which is what makes the
+            # aggregate reconciliation below checkable rather than asserted.
+            #
+            # RENAMED (six). A rename is a removal plus an addition, so it
+            # can only be shown to net out by pinning the replacement's case
+            # count against the count its predecessor carried. Each of these
+            # six reports exactly what the pre-rename binary reported —
+            # 2, 5, 7, 1, 2, 6 = 23 cases before and 23 after — so the
+            # renames contribute 0 to both the spec count and the case total.
+            #
+            #   t_project_new_writes_and_pushes_manifest
+            #     -> t_projects_add_writes_and_pushes_manifest       (2)
+            #   t_project_repo_add_reuses_remotes_and_inherits_revision
+            #     -> t_repos_add_reuses_remotes_and_inherits_revision (5)
+            #   t_branch_checkout_marks_feature_branch
+            #     -> t_switch_new_branch_marks_feature_branch        (7)
+            #   t_checkout_stashes_and_restores_per_repo_wip
+            #     -> t_switch_stashes_and_restores_per_repo_wip      (1)
+            #   t_workspace_projects_add_clones_added_repos
+            #     -> t_workspace_enable_materializes_added_projects  (2)
+            #   t_workspace_checkout_switches_all_repos
+            #     -> t_workspace_switch_switches_all_repos           (6)
+            "tests/integration/"
+            "t_projects_add_writes_and_pushes_manifest.nim": {
+                "binary": "build/test-bin/"
+                "t_projects_add_writes_and_pushes_manifest",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 2,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_repos_add_reuses_remotes_and_inherits_revision.nim": {
+                "binary": "build/test-bin/"
+                "t_repos_add_reuses_remotes_and_inherits_revision",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 5,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_switch_new_branch_marks_feature_branch.nim": {
+                "binary": "build/test-bin/"
+                "t_switch_new_branch_marks_feature_branch",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 7,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_switch_stashes_and_restores_per_repo_wip.nim": {
+                "binary": "build/test-bin/"
+                "t_switch_stashes_and_restores_per_repo_wip",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_workspace_enable_materializes_added_projects.nim": {
+                "binary": "build/test-bin/"
+                "t_workspace_enable_materializes_added_projects",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 2,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_workspace_switch_switches_all_repos.nim": {
+                "binary": "build/test-bin/"
+                "t_workspace_switch_switches_all_repos",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 6,
+                "class": "integration",
+            },
+            # ADDED (two). `enable`/`disable` membership and the manifest
+            # definition verbs are new behaviour, not a renaming of old
+            # behaviour, so these two are the entire +2 on the spec count
+            # and +9 of the +13 on the case total; the remaining +4 is the
+            # branch-fork source above. Both drive the real `repro` binary
+            # against real git repositories, hence `integration`.
+            "tests/integration/"
+            "t_workspace_definition_projects_repos.nim": {
+                "binary": "build/test-bin/"
+                "t_workspace_definition_projects_repos",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 5,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_workspace_membership_enable_disable.nim": {
+                "binary": "build/test-bin/"
+                "t_workspace_membership_enable_disable",
                 "language": "nim",
                 "sourceSuiteCount": 1,
                 "sourceCaseCount": 4,
@@ -781,8 +896,36 @@ test "incomplete name" and:
         #     test_same_named_sources_in_different_directories_stay_distinct
         #   Its two Nim fixtures live under `tests/fixtures/`, which
         #   `generate_test_edges.nim` excludes, so the Nim counts are
-        #   untouched by this change.
-        self.assertEqual(len(nim_specs), 1210)
+        #   untouched by that change.
+        #
+        #   SPECS 1210 -> 1212, NIM CASES 6834 -> 6847
+        #     tests/integration/
+        #       t_workspace_definition_projects_repos.nim            (+5)
+        #       t_workspace_membership_enable_disable.nim            (+4)
+        #       t_branch_forks_new_workspace_on_feature_branch.nim   (+4)
+        #   The workspace-CLI verb split (`0b9205f7`) landed without
+        #   recomputing these pins, which is why this assertion has been
+        #   failing on `dev` since. It touched the suite three ways:
+        #     * RENAMED six integration sources. A rename is a removal plus
+        #       an addition, and these net to zero on both numbers: each
+        #       replacement reports exactly the case count its predecessor
+        #       reported (2, 5, 7, 1, 2, 6 = 23 before and 23 after). All
+        #       six are pinned individually in `expected_enrollments` above
+        #       precisely so the netting-out is checked, not assumed.
+        #     * ADDED two sources, +5 and +4 cases: the whole +2 on the
+        #       spec count and +9 of the case delta.
+        #     * ADDED four cases to an existing source, 10 -> 14, the
+        #       remaining +4. That one hid: the pin passed because the
+        #       binary was never rebuilt after the edit, so a stale artifact
+        #       kept agreeing with a stale pin. See the note on its
+        #       enrollment above.
+        #   Recomputed, not bumped: every binary the count needs was built
+        #   into `build/test-bin/` — the eight for the renamed and added
+        #   sources plus every other binary older than its source — and each
+        #   source's own `--list-json` was counted. That is also what empties
+        #   the `missing-binary` bucket in `countSourceCounts` below. The
+        #   static scan moves by the same +13 and is pinned separately.
+        self.assertEqual(len(nim_specs), 1212)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -836,7 +979,13 @@ test "incomplete name" and:
         # +80 for the static-vs-catalog correction, -1 for dropping the
         # quarantined source's static fallback). Python keeps the static
         # `unittest` scan because Python files have no built binary.
-        self.assertEqual(nim_total, 6834)
+        #
+        # 6834 -> 6847: `0b9205f7`, reconciled beside the spec-count pin —
+        # +5 and +4 for the two sources it added, +4 for the four cases it
+        # added to `t_branch_forks_new_workspace_on_feature_branch.nim`, and
+        # 0 for its six renames. All three are pinned per source in
+        # `expected_enrollments` above.
+        self.assertEqual(nim_total, 6847)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
         # as its own equality so a future re-introduction of the static
@@ -882,7 +1031,18 @@ test "incomplete name" and:
         self.assertEqual(python_total, 46)
         # 6856 -> 6862: -1 from the quarantined source no longer imputing a
         # static count, +7 from the new Python cases above.
-        self.assertEqual(data["static"]["sourceCaseCount"], 6877)
+        #
+        # 6877 -> 6893 = 6847 nim + 46 python, and the two contributions are
+        # kept apart deliberately because they come from different changes:
+        #   +13 nim    `0b9205f7`: +5 and +4 for the two sources it added,
+        #              +4 for the cases it added to an existing source; its
+        #              six renames net to zero.
+        #   +3 python  the package-root-anchor guard
+        #              `tests/unit/test_package_root_anchor.py`.
+        # Both halves are pinned separately above (`nim_total`,
+        # `python_total`), so this aggregate is a backstop for them rather
+        # than a place either delta can hide.
+        self.assertEqual(data["static"]["sourceCaseCount"], 6893)
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -890,13 +1050,20 @@ test "incomplete name" and:
         # so a change in the SCANNER can still be told apart from a change
         # in the SUITE: if this number moves while `nim_total` holds, the
         # lexer regressed, not the tests.
+        #
+        # 6755 -> 6768 = +13, the same +13 `nim_total` moved by and split the
+        # same way (+5, +4, +4, and 0 for the six renames). The scan reads the
+        # SOURCES, `nim_total` reads the BINARIES, and they were derived
+        # independently, so their agreeing on the decomposition is the check
+        # that the `0b9205f7` recomputation above is a fact about the suite
+        # rather than about one of the two surfaces.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6755,
+            6768,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
@@ -1474,9 +1641,24 @@ test "incomplete name" and:
         # Its binary was built and probed, so it joins the `catalog`
         # bucket rather than `missing-binary`; recomputed from a live
         # `build_inventory`, not bumped.
+        #
+        # 4 -> 5 static: `tests/unit/test_package_root_anchor.py`, the
+        # package-root-anchor guard. The `static` bucket is exactly the
+        # Python file set, so that key is attributable to it on its own.
+        #
+        # 1209 -> 1211 catalog: the six sources `0b9205f7` renamed and the
+        # two it added. Before this change the six renamed sources and the
+        # two new ones had no binary under their current names, so a live
+        # probe reported `{"catalog": 1203, "missing-binary": 8,
+        # "quarantined": 1, "static": 5}` — the `missing-binary` bucket the
+        # `assertNotIn` below exists to forbid, showing up because the
+        # binaries were never rebuilt after the rename rather than because
+        # anything was wrong with the sources. All eight are built now, the
+        # six stale binaries under the pre-rename names are gone, and the
+        # bucket is empty again: 1211 = 1212 Nim specs - 1 quarantined.
         self.assertEqual(
             catalog["countSourceCounts"],
-            {"catalog": 1209, "quarantined": 1, "static": 5},
+            {"catalog": 1211, "quarantined": 1, "static": 5},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         self.assertEqual(
@@ -2343,9 +2525,13 @@ test "incomplete name" and:
         # pinned individually in `expected_enrollments`.
         # 1209 -> 1210 for the M2 step-1 catalog-selection regression,
         # pinned individually in `expected_enrollments`.
+        # 1210 -> 1212 for the two integration sources the workspace-CLI
+        # verb split (`0b9205f7`) added, each pinned individually in
+        # `expected_enrollments`; its six renames net to zero and are
+        # pinned there too.
         # 4 -> 5: `tests/unit/test_package_root_anchor.py`, the
         # package-root-anchor guard added with the nim-fork bump to 4e93a8a4.
-        self.assertEqual(declared_nim_count, 1210)
+        self.assertEqual(declared_nim_count, 1212)
         self.assertEqual(declared_python_count, 5)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -2381,7 +2567,11 @@ test "incomplete name" and:
         # (1209 nim + 4 python).
         # 1213 -> 1214: the M2 step-1 catalog-selection regression
         # (1210 nim + 4 python).
-        self.assertEqual(data["static"]["testEntryCount"], 1214)
+        #
+        # 1214 -> 1217 = 1212 nim + 5 python: +2 nim for the sources
+        # `0b9205f7` added (its six renames net to zero), +1 python for the
+        # package-root-anchor guard.
+        self.assertEqual(data["static"]["testEntryCount"], 1217)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),
