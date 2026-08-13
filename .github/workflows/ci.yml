@@ -167,8 +167,25 @@ jobs:
     # pool rather than the eph-linux-x64 class.
     runs-on: [self-hosted, Linux, X64, bare-metal, nixos]
     env:
+      # REPROBUILD_MAX_PARALLELISM governs the BUILD phase. Twelve is not a
+      # placeholder and must not be raised to track `nproc`: the bare-metal
+      # host reports 32 logical CPUs but runs twelve GitHub Actions runner
+      # instances side by side, so `nproc` overstates this job's share of the
+      # machine by an order of magnitude. Observed load average on that host
+      # while a single Test job builds is already ~28 of 32.
       REPROBUILD_MAX_PARALLELISM: "12"
-      REPROBUILD_TEST_THREADS: "1"
+      # REPROBUILD_TEST_THREADS governs the EXECUTION phase, which is a
+      # separate resource profile: test processes spend most of their time
+      # waiting on nested builds and subprocesses rather than pinning a core.
+      # One thread cannot finish ~6,800 cases in any plausible budget. The
+      # only full-suite execution measurement available
+      # (test-logs/parallel-run.json) used eight threads and took 2h15m for
+      # 6828 cases, so eight is the value with evidence behind it.
+      #
+      # NB: raising this has never been exercised in CI, because no recent CI
+      # run has reached the execution phase at all -- the build phase
+      # consumes the whole job. See the note above the `just test` step.
+      REPROBUILD_TEST_THREADS: "8"
     steps:
       - uses: actions/checkout@v4
 
@@ -509,6 +526,36 @@ jobs:
           repositories: codetracer-native-recorder
           permission-contents: read
 
+      # BUDGET NOTE (measured on run 31716928161, dev @ 910cb956, and on
+      # run 31724249825, the 6h00m27s ceiling kill):
+      #
+      #   setup + sibling clones + dev-env      ~5m
+      #   Bootstrap Reprobuild                  23m   (58m on a cold host)
+      #   Build codetracer ct                   37m   (1h25m cold)
+      #   just test: prereqs (shim/runquota/cmake) 17m
+      #   just test: .#apps/.#test-helpers/.#test-fixtures  12m
+      #   just test: .#test-builds              3h46m  <-- dominant
+      #   just test: Python inventory           30m
+      #   just test: Nim execution              never reached
+      #
+      # The Nim suite has NOT executed in CI in any recent run; the job is
+      # consumed before it starts, and 910cb956 then failed on a Python
+      # inventory pin (6844 != 6847) at 5h54m rather than on a timeout.
+      #
+      # The 3h46m is not a parallelism problem. Every one of the ~1213
+      # test-compile actions is declared `cacheable = false` at
+      # repro.nim:537, so the content-addressed cache is bypassed for the
+      # single most expensive phase in CI and every run recompiles the whole
+      # test tree from scratch. Confirmed two ways: the runner's persistent
+      # CAS at ~/.cache/repro/action-cache holds zero blobs, and a local
+      # `repro build --dry-run .#test-builds` against a fully warm tree
+      # reports all 1213 actions as cacheDecision=cdNotCacheable /
+      # reason="not-cacheable".
+      #
+      # Until that is addressed the job cannot fit six hours: even with a
+      # warm bootstrap the phases above plus a measured 2h15m execution
+      # phase total ~8h. Raising REPROBUILD_MAX_PARALLELISM is not the
+      # lever -- see the note on that variable in `env:` above.
       - name: just test
         env:
           CT_BIN: ${{ env.CT_BIN }}
