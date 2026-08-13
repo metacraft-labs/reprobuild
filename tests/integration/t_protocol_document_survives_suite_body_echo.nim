@@ -108,31 +108,49 @@ proc buildFixture(repoRoot, outDir: string): string =
     raise newException(IOError, "fixture compile produced no " & binary)
   binary
 
-proc ensureRunner(repoRoot: string): string =
-  ## Build `repro_test_runner` when it is missing or older than its
-  ## source — the same staleness rule `scripts/run_tests.sh` applies, and
-  ## for the same reason: an existence-only check lets a stale runner
-  ## survive every edit to the recovery this test is about.
-  let binary = repoRoot / "build" / "bin" /
+proc ensureRunner(repoRoot, scratch: string): string =
+  ## Resolve a `repro_test_runner` to drive, WITHOUT writing anything into
+  ## the repository.
+  ##
+  ## The repo's own `build/bin/repro_test_runner` is used when it exists and
+  ## is no older than its source — the staleness rule
+  ## `scripts/run_tests.sh` applies, and for the same reason: an
+  ## existence-only check lets a stale runner survive every edit to the
+  ## recovery this test is about. That use is READ-ONLY.
+  ##
+  ## Otherwise a private copy is built into this case's own scratch
+  ## directory. It must not be built into `build/bin`: `run_tests.sh` only
+  ## builds that binary on its fallback path, so on a host with
+  ## `ct-test-runner` installed it is absent — and the suite runs
+  ## process-per-test, so the two cases here that need a runner would race
+  ## two concurrent `nim c` invocations on the same output file and the same
+  ## nimcache. A test may not corrupt a shared build output to run.
+  let shared = repoRoot / "build" / "bin" /
     addFileExt("repro_test_runner", ExeExt)
   let source = repoRoot / "tools" / "test-runner" / "repro_test_runner.nim"
-  var rebuild = not fileExists(binary)
-  if not rebuild:
-    rebuild = getLastModificationTime(source) > getLastModificationTime(binary)
-  if rebuild:
-    let nimExe = findExe("nim")
-    if nimExe.len == 0:
-      raise newException(IOError,
-        "no `nim` on PATH; this suite compiles under `nix develop`")
-    let cmd = @[
-      nimExe.quoteShell, "c", "-d:release", "--threads:on",
-      "--hints:off", "--warnings:off",
-      "--nimcache:build/nimcache/repro_test_runner",
-      "--out:" & binary.quoteShell,
-      source.quoteShell,
-    ].join(" ")
-    discard runOrRaise(cmd, repoRoot, "repro_test_runner build")
-  binary
+  if fileExists(shared) and
+      getLastModificationTime(shared) >= getLastModificationTime(source):
+    return shared
+
+  let nimExe = findExe("nim")
+  if nimExe.len == 0:
+    raise newException(IOError,
+      "no `nim` on PATH; this suite compiles under `nix develop`")
+  ## The private build is a DEBUG build. What is under test is the runner's
+  ## catalog recovery, not its speed, and this test drives it over two
+  ## trivial cases — so an optimised build buys nothing and costs minutes on
+  ## exactly the hosts that need the private path. The suite's CI job already
+  ## runs close to its wall-clock ceiling.
+  let private = scratch / addFileExt("repro_test_runner", ExeExt)
+  let cmd = @[
+    nimExe.quoteShell, "c", "--threads:on",
+    "--hints:off", "--warnings:off",
+    "--nimcache:" & (scratch / "runner-nimcache").quoteShell,
+    "--out:" & private.quoteShell,
+    source.quoteShell,
+  ].join(" ")
+  discard runOrRaise(cmd, repoRoot, "repro_test_runner build")
+  private
 
 proc scratchDir(name: string): string =
   result = getTempDir() / ("repro-protocol-echo-" & name & "-" &
@@ -151,7 +169,7 @@ suite "protocol documents survive a suite-body echo":
     defer: removeDir(work)
     let binDir = work / "bin"
     discard buildFixture(repoRoot, binDir)
-    let runner = ensureRunner(repoRoot)
+    let runner = ensureRunner(repoRoot, work)
 
     # The fixture writes noise on stdout; if the runner could not recover
     # its catalog it would fall back to whole-binary execution, which is
@@ -281,7 +299,7 @@ suite "protocol documents survive a suite-body echo":
     # The Nim side, exercised through the runner exactly as the suite
     # does — the runner only reaches per-case execution when its own
     # extractor decoded this stream.
-    let runner = ensureRunner(repoRoot)
+    let runner = ensureRunner(repoRoot, work)
     let summaryPath = work / "summary.json"
     let runCmd = @[
       runner.quoteShell, "--no-build", "--threads=1",
