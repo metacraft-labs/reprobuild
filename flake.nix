@@ -197,8 +197,20 @@
     # by nix/nim-fork.nix. The fork uses the ``git+https`` clone form (its
     # codeload tarball 404s, same as codetracer-native-recorder above); the
     # compiler itself imports the three vendored deps below (trace/stew/results).
+    #
+    # This revision also renders the source location that `check` / `require` /
+    # `expect` / `assert` plant into the expanded body as a package-anchored
+    # canonical path (`tests/a/t.nim`, `std/tables`) instead of an absolute one.
+    # Those literals are hashed verbatim into every test's `--list-json`
+    # `bodyHash`, so before it the catalog changed with the checkout directory
+    # and the stdlib install path, and two hosts building the same commit
+    # agreed about nothing. The rendering is anchored on the PACKAGE ROOT, which
+    # this repository supplies twice over — see the notes beside
+    # `switch("path", ".")` in `config.nims` and at the top of
+    # `reprobuild.nimble`, and the guard in
+    # `tests/unit/test_package_root_anchor.py`.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=362d42954ecc4becf19b50ae898bc59538bd3b46";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=4e93a8a4230f4d414b34f000b96ca2a849dc719e";
       flake = false;
     };
     nim-csources-src = {
