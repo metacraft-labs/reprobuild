@@ -276,7 +276,24 @@ done < <(
 
 # D6 per-test timeout plus an outer wall-clock backstop for runner wedges.
 RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-4h}"
-TEST_TIMEOUT="${REPROBUILD_TEST_TIMEOUT:-600}"
+# ``--test-timeout`` is an *idle* deadline (no output for N seconds), and the
+# runner also enforces a hard ceiling of AbsoluteTimeoutMultiplier (4) times
+# that value -- see tools/test-runner/repro_test_runner.nim:1874. So this
+# number sets a per-binary wall-clock ceiling of 4x, not of 1x.
+#
+# At the previous 600 that ceiling was 40 minutes, and the slowest binary in
+# the suite needs far longer than that: test-logs/parallel-run.json (a full
+# 8-thread run, 6828 cases) records t_e2e_codetracer_in_place_project_file at
+# 4861s of case time -- about 81 minutes -- with eleven of the suite's twenty
+# five slowest cases inside that one binary. A 40-minute ceiling kills it
+# every time, so the first execution phase that ever completes would report a
+# timeout rather than a result.
+#
+# 1800 gives a 2h ceiling, which clears the measured 81 minutes with margin
+# and still sits inside RUNNER_TIMEOUT above. It also matches the value the
+# runner's own documentation already assumes for the per-test timeout
+# (repro_test_runner.nim:531); 600 was a drift away from that intent.
+TEST_TIMEOUT="${REPROBUILD_TEST_TIMEOUT:-1800}"
 
 ct_test_runner="${CT_TEST_RUNNER:-}"
 if [[ -z "${ct_test_runner}" ]]; then

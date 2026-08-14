@@ -1396,6 +1396,12 @@ test "incomplete name" and:
         bash = subprocess.check_output(
             ["bash", "-c", "command -v bash"], text=True
         ).strip()
+        # The table is the whole of what makes each cap deliberate, so it is
+        # re-derived when the helper's shape changes rather than relaxed into
+        # an inequality. Raising the ceiling to 16 at 32 cores moves exactly
+        # the two rows at or above that size; every row below 32 is unchanged,
+        # which is the check that the new ceiling left the small-host
+        # behaviour — and the cores/2 fraction under it — alone.
         cases = {
             "invalid": 1,
             "0": 1,
@@ -1405,8 +1411,9 @@ test "incomplete name" and:
             "8": 4,
             "23": 4,
             "24": 8,
-            "32": 8,
-            "64": 8,
+            # cores/2 is 16 at 32 and 32 at 64; the 16 ceiling binds at both.
+            "32": 16,
+            "64": 16,
         }
         for cores, expected in cases.items():
             with self.subTest(cores=cores):
