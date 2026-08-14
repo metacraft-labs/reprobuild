@@ -1,4 +1,4 @@
-## Windows-Runner-Binary-Cache-Deploy — RDM1 v2 envelope gate.
+## Deploy agent — RDMF v2 envelope gate.
 ##
 ## `secrets.nim` is proven separately (seal/open, and every way of getting it
 ## wrong). This proves the ENVELOPE integration:
@@ -33,7 +33,7 @@ proc baseManifest(target: string): DeployManifest =
   result.deploymentId = "deployment-abc"
   result.profileText = "profile \"x\":\n  resources:\n    discard\n"
 
-suite "RDM1 v2 envelope":
+suite "RDMF v2 envelope":
 
   test "no secrets encodes as v1 and round-trips":
     let producer = peerAuth.generateKeypair()

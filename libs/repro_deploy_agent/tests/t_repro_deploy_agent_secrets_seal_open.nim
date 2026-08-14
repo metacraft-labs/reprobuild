@@ -1,4 +1,4 @@
-## Windows-Runner-Binary-Cache-Deploy — RDM1 v2 sealed-secrets gate.
+## Deploy agent — RDMF v2 sealed-secrets gate.
 ##
 ## The manifest channel is signed but PUBLIC, so the publisher key and the
 ## hourly registration token a pull-model box needs cannot ride it in the
@@ -31,7 +31,7 @@ let sampleFiles = @[
              content: bytesOf("ecdsa-p256:" & repeat('a', 64))),
 ]
 
-suite "RDM1 v2 sealed secrets":
+suite "RDMF v2 sealed secrets":
 
   test "round-trips to the intended recipient":
     let recipient = peerAuth.generateKeypair()

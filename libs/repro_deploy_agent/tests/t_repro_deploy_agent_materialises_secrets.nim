@@ -1,4 +1,4 @@
-## Windows-Runner-Binary-Cache-Deploy — sealed-secrets agent gate.
+## Deploy agent — sealed-secrets tick gate.
 ##
 ## `secrets.nim` and the v2 envelope are proven separately. This proves the
 ## TICK behaviour, where the ordering matters more than the crypto:
@@ -54,12 +54,12 @@ type Harness = object
   cfg: AgentConfig
 
 proc newHarness(name: string; withKey: bool): Harness =
-  result.root = getTempDir() / ("rdm1-secrets-" & name & "-" &
+  result.root = getTempDir() / ("rdmf-secrets-" & name & "-" &
                                 $getCurrentProcessId())
   removeDir(result.root)
   createDir(result.root)
   result.secretsDir = result.root / "secrets"
-  result.sourcePath = result.root / "latest.rdm1"
+  result.sourcePath = result.root / "latest.rdm"
   result.producer = peerAuth.generateKeypair()
   result.recipient = peerAuth.generateKeypair()
   let keyPath = result.root / "recipient.key"
