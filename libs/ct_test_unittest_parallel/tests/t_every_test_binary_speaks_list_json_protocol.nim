@@ -6,7 +6,7 @@
 ## (three tests across two suites), invoke it with ``--list-json``,
 ## parse the output as JSON, and assert against the expected shape.
 
-import std/[json, os, osproc, strutils]
+import std/[json, os, osproc, streams, strtabs, strutils]
 import std/unittest
 from repro_test_support import testCaseScratchSlug
 
@@ -43,17 +43,43 @@ proc buildFixture(): string =
     raise newException(IOError, "failed to build fixture: " & cmd)
   outputPath
 
+proc runProtocolCommand(binary, argument: string): tuple[output: string;
+    stderrOutput: string; exitCode: int] =
+  ## Keep the protocol document and diagnostics on distinct channels.  The old
+  ## ``execCmdEx`` assertion merged them and therefore accepted a catalog that
+  ## was wholly on stderr — exactly the shape real catalog consumers reject.
+  var childEnv = newStringTable(
+    when defined(windows): modeCaseInsensitive else: modeCaseSensitive)
+  for key, value in envPairs():
+    childEnv[key] = value
+  # Reproduce nested execution under the per-case runner's protocol env.  List
+  # mode must remain stdout-only even when an outer result path is inherited.
+  childEnv["NIMTEST_RESULT_FILE"] = fixtureScratch / "outer-result.json"
+
+  let process = startProcess(binary, args = [argument], env = childEnv,
+    options = {})
+  defer: process.close()
+  let input = process.inputStream
+  if input != nil:
+    input.close()
+  result.output = process.outputStream.readAll()
+  result.stderrOutput = process.errorStream.readAll()
+  result.exitCode = process.waitForExit()
+
 suite "t_every_test_binary_speaks_list_json_protocol":
   test "list_json_returns_valid_catalog":
     let binary = buildFixture()
-    let (output, exitCode) = execCmdEx(binary.quoteShell() & " --list-json")
-    check exitCode == 0
+    let captured = runProtocolCommand(binary, "--list-json")
+    check captured.exitCode == 0
+    check captured.stderrOutput == ""
     var doc: JsonNode = nil
     try:
-      doc = parseJson(output)
+      doc = parseJson(captured.output)
     except JsonParsingError:
       checkpoint "stdout was:"
-      checkpoint output
+      checkpoint captured.output
+      checkpoint "stderr was:"
+      checkpoint captured.stderrOutput
       fail()
     if doc != nil:
       check doc.kind == JObject
@@ -85,9 +111,10 @@ suite "t_every_test_binary_speaks_list_json_protocol":
 
   test "list_plain_returns_one_name_per_line":
     let binary = buildFixture()
-    let (output, exitCode) = execCmdEx(binary.quoteShell() & " --list")
-    check exitCode == 0
-    let lines = output.strip().splitLines()
+    let captured = runProtocolCommand(binary, "--list")
+    check captured.exitCode == 0
+    check captured.stderrOutput == ""
+    let lines = captured.output.strip().splitLines()
     check lines.len == 3
     check "arithmetic::addition" in lines
     check "arithmetic::subtraction_fails" in lines

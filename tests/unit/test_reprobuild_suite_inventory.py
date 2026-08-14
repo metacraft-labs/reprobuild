@@ -2319,6 +2319,50 @@ test "incomplete name" and:
         The required behaviour: retry serially with a longer budget, and if
         the retry also fails, ABORT with an explicit environment error.
         """
+        # Run the real shim binary under the protocol variables supplied by an
+        # outer per-case runner.  Those variables are not themselves the cause:
+        # the codetracer Nim fork redirects descriptor 1 to stderr during
+        # ``std/unittest`` module initialisation, before the shim's own exit hook
+        # writes its catalog.  The old shim therefore returned zero with valid
+        # JSON wholly on stderr and an empty stdout, which this exact consumer
+        # boundary rejected as ``empty-output``.
+        binary = (
+            REPO_ROOT
+            / "build/test-bin/t_smoke_ct_test_unittest_parallel"
+        )
+        self.assertTrue(binary.is_file(), f"missing built test binary: {binary}")
+        with tempfile.TemporaryDirectory(
+            prefix="repro-shim-catalog-"
+        ) as scratch:
+            env = inventory.catalog_probe_env()
+            env.update(
+                {
+                    "NIMTEST_RESULT_FILE": str(Path(scratch) / "outer.json"),
+                    "NIMTEST_OUTPUT_LVL": "PRINT_NONE",
+                    "NIMTEST_COLOR": "never",
+                }
+            )
+            completed = subprocess.run(
+                [str(binary), "--list-json"],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=30,
+                cwd=scratch,
+                env=env,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertNotEqual(completed.stdout.strip(), "")
+            self.assertEqual(completed.stderr, "")
+            document = json.loads(completed.stdout)
+            self.assertEqual(document["summary"]["total"], 2)
+
+            outcome = inventory.probe_binary_catalog(
+                binary, Path(scratch), env, timeout_seconds=30
+            )
+            self.assertEqual(outcome["status"], "ok", outcome)
+            self.assertEqual(len(outcome["cases"]), 2)
+
         # Darwin's nix dev shell publishes its runtime closure through the
         # Linux-named variable only. The inventory must translate that value
         # into the child environment BEFORE subprocess.run starts; mutating

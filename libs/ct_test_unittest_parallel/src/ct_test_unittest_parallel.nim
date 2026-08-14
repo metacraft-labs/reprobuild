@@ -75,6 +75,10 @@
 ## ``$NIMTEST_RESULT_FILE`` and picks the 0/1/2 exit code, and quitting
 ## first only makes that more certain.
 
+# Import this leaf before ``std/unittest``: its module initialiser preserves the
+# real stdout before the protocol-carrying fork redirects descriptor 1.
+from ct_test_unittest_parallel/protocol_output import writeShimProtocolLine
+
 import std/[exitprocs, json, os, strutils, times]
 import std/unittest as stdUnittest
 # ``skip`` joins ``suite``/``test`` as an override rather than a
@@ -237,7 +241,7 @@ proc detectProtocolMode(): ProtocolMode =
 
 proc emitListPlain() =
   for entry in gRegistry:
-    echo entry.suite & "::" & entry.name
+    writeShimProtocolLine(entry.suite & "::" & entry.name)
 
 proc emitListJson() =
   var tests = newJArray()
@@ -253,7 +257,7 @@ proc emitListJson() =
   var summary = newJObject()
   summary["total"] = %gRegistry.len
   doc["summary"] = summary
-  echo doc.pretty()
+  writeShimProtocolLine(doc.pretty())
 
 proc writeResultFile(path: string; status: string;
                      durationMs: int; checkpoints: seq[string];
