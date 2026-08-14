@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import json
 import os
@@ -1996,11 +1997,13 @@ test "incomplete name" and:
         # Every value is read from the LIVE runtime block, so this cannot
         # pass by accident on a machine whose strings happen to differ.
         #
-        # Checked as whole rendered rows rather than as bare substrings:
+        # Live values are checked as whole rendered rows rather than as bare
+        # substrings:
         # `logicalCpuCount` is "32" and so is more than one legitimate
-        # count elsewhere in the report, and an assertion that trips on
-        # that is noise. The distinctive values are additionally checked
-        # as substrings below, which is where the real leak would show.
+        # count elsewhere in the report, while `machine` can be `arm64` and
+        # legitimately occur in compiler arguments and test identities.
+        # A second render with unique sentinels below additionally catches a
+        # value leaked into prose rather than a table row.
         runtime = detail["runtime"]
         volatile_rows = [
             f"| {key} | {block[key]} |"
@@ -2016,22 +2019,52 @@ test "incomplete name" and:
             with self.subTest(volatile_row=rendered):
                 self.assertNotIn(rendered, report)
 
-        volatile = [
-            str(value)
-            for block in (
-                runtime["host"],
-                runtime["tools"],
-                runtime["environment"],
-            )
-            for value in block.values()
-            # A bare integer is not an identifying string; the row check
-            # above already covers it.
-            if len(str(value)) > 4 and not str(value).isdigit()
-        ]
-        self.assertTrue(volatile)
-        for value in volatile:
-            with self.subTest(volatile=value):
-                self.assertNotIn(value, report)
+        # Give one established field in the host and tool blocks, plus one
+        # recorded-environment field, values that cannot legitimately occur
+        # in the inventory. Keeping this as an independent render preserves
+        # the relocation proof for every real live value above and below.
+        sentinel_data = copy.deepcopy(data)
+        runtime_sentinels = {
+            "host": ("machine", "mcl-host-identity-7f3a620bd1b94fa6"),
+            "tools": ("python", "mcl-tool-version-621ad98ce0d04e12"),
+            "environment": (
+                "MCL_TEST_RECORDED_ENVIRONMENT",
+                "mcl-recorded-environment-8d29bf9d13e843e8",
+            ),
+        }
+        sentinel_input_runtime = sentinel_data["metadata"]["runtime"]
+        for block_name, (key, value) in runtime_sentinels.items():
+            sentinel_input_runtime[block_name][key] = value
+        sentinel_tracked, sentinel_detail = inventory.split_case_catalog(
+            sentinel_data, inventory.DEFAULT_CASE_CATALOG
+        )
+        sentinel_report = inventory.render_report(
+            sentinel_tracked,
+            inventory.DEFAULT_JSON.as_posix(),
+            sentinel_detail,
+        )
+        sentinel_environment_report = inventory.render_environment_report(
+            sentinel_data, sentinel_detail
+        )
+
+        def assert_sentinels_are_untracked(candidate_report):
+            for block_name, (key, value) in runtime_sentinels.items():
+                with self.subTest(volatile_sentinel=block_name):
+                    self.assertNotIn(f"| {key} | {value} |", candidate_report)
+                    self.assertNotIn(value, candidate_report)
+
+        assert_sentinels_are_untracked(sentinel_report)
+        # Architecture names are also suite vocabulary.  On an arm64 host,
+        # prove the live machine value has a legitimate tracked occurrence;
+        # this is why checking the bare live value would be a false positive.
+        if runtime["host"].get("machine") == "arm64":
+            self.assertIn('"arm64"', report)
+        for block_name, (key, value) in runtime_sentinels.items():
+            with self.subTest(relocated_sentinel=block_name):
+                self.assertIn(
+                    f"| {key} | {value} |", sentinel_environment_report
+                )
+                self.assertIn(value, sentinel_environment_report)
 
         # (3) No footprint SIZES. Which paths are measured is a property
         # of the script and stays; how big they are is a property of the
@@ -2073,9 +2106,6 @@ test "incomplete name" and:
         for rendered in volatile_rows:
             with self.subTest(relocated_row=rendered):
                 self.assertIn(rendered, environment_report)
-        for value in volatile:
-            with self.subTest(relocated=value):
-                self.assertIn(value, environment_report)
         for entry in detail["footprint"]["entries"]:
             with self.subTest(relocated_footprint=entry["path"]):
                 self.assertIn(footprint_row(entry), environment_report)
