@@ -264,6 +264,23 @@ method storeLocationLabel*(s: LockStore): string {.base.} =
   ## The base returns the empty string; concrete backends override.
   ""
 
+method readabilityDiagnostic*(s: LockStore): string {.base.} =
+  ## DS-3 (CLI/develop.md §"Unreachable backends never narrow the set
+  ## silently") — "" when the backend's medium can be READ at all; otherwise a
+  ## human diagnostic saying why it cannot.
+  ##
+  ## This answers a different question from "does the backend hold a record for
+  ## repo X". A backend that is present and empty legitimately contributes
+  ## nothing; a backend that is *absent* would ALSO contribute nothing, and a
+  ## consumer that cannot tell the two apart silently narrows the set it
+  ## reports. Every distinct backend the develop-set composer folds is probed
+  ## with this before its records are read, so an absent one is named rather
+  ## than quietly dropped.
+  ##
+  ## The probe is deliberately narrow — it asks only whether the medium EXISTS
+  ## (the directory, the program). A present-but-empty medium is reachable.
+  ""
+
 # ---------------------------------------------------------------------------
 # Shared git runner
 # ---------------------------------------------------------------------------
@@ -305,6 +322,12 @@ proc cfRecordPath(s: CommittedFileLockStore; k: StoreLockKey): string =
 method backendId*(s: CommittedFileLockStore): string = "committed-file"
 
 method storeLocationLabel*(s: CommittedFileLockStore): string = s.baseDir
+
+method readabilityDiagnostic*(s: CommittedFileLockStore): string =
+  ## DS-3 — the medium is the ``baseDir`` tree. An ABSENT directory cannot be
+  ## read; an existing-but-empty one is reachable and simply holds no records.
+  if dirExists(s.baseDir): ""
+  else: "committed-file lock store directory does not exist: " & s.baseDir
 
 method putLock*(s: CommittedFileLockStore;
     rec: StoreLockRecord): StorePutResult =
@@ -380,6 +403,12 @@ proc gnEvidenceNotesRef(): string = "refs/notes/reprobuild/lock-evidence"
 method backendId*(s: GitNotesLockStore): string = "git-notes"
 
 method storeLocationLabel*(s: GitNotesLockStore): string = s.repoPath
+
+method readabilityDiagnostic*(s: GitNotesLockStore): string =
+  ## DS-3 — the medium is a notes namespace inside ``repoPath``; an absent
+  ## checkout cannot be read.
+  if dirExists(s.repoPath): ""
+  else: "git-notes lock store repository does not exist: " & s.repoPath
 
 method putLock*(s: GitNotesLockStore; rec: StoreLockRecord): StorePutResult =
   let blob = encodeRecord(rec)
@@ -465,6 +494,12 @@ proc newSeparateBranchLockStore*(gitBin, repoPath: string):
 method backendId*(s: SeparateBranchLockStore): string = "separate-branch"
 
 method storeLocationLabel*(s: SeparateBranchLockStore): string = s.repoPath
+
+method readabilityDiagnostic*(s: SeparateBranchLockStore): string =
+  ## DS-3 — the medium is an orphan branch inside ``repoPath``; an absent
+  ## checkout cannot be read.
+  if dirExists(s.repoPath): ""
+  else: "separate-branch lock store repository does not exist: " & s.repoPath
 
 proc sbHashObject(s: SeparateBranchLockStore; content: string):
     tuple[ok: bool; sha, diag: string] =
@@ -609,6 +644,12 @@ proc newExternalCliLockStore*(program: string): ExternalCliLockStore =
 method backendId*(s: ExternalCliLockStore): string = "external-cli"
 
 method storeLocationLabel*(s: ExternalCliLockStore): string = s.program
+
+method readabilityDiagnostic*(s: ExternalCliLockStore): string =
+  ## DS-3 — the medium is reached ONLY through ``program``; an absent program
+  ## cannot be invoked, so no record can be read.
+  if fileExists(s.program): ""
+  else: "external-cli lock store program does not exist: " & s.program
 
 proc ecPutRaw(s: ExternalCliLockStore; key, value: string): StorePutResult =
   let request = $(%*{
