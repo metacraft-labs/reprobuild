@@ -33,6 +33,10 @@ libs/*/tests/t_*
 !libs/*/tests/t_*.nim
 !libs/*/tests/t_*.nims
 !libs/*/tests/t_*.cfg
+libs/*/tests/test_*
+!libs/*/tests/test_*.nim
+!libs/*/tests/test_*.nims
+!libs/*/tests/test_*.cfg
 
 # Stray Nim build artifacts dropped beside library source files when an
 # implementation module is compiled directly with `nim c` (e.g. `nim c
