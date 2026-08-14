@@ -117,7 +117,13 @@ proc main() =
       let head = e.msg.splitLines()[0]
       echo "  [FAIL] " & GateName & ": " & head
       writeLineSentinel("FAIL: " & GateName & " (" & head & ")")
-      quit(1)
+      # `raise`, not `quit(1)`. A bare `quit` from inside a test body
+      # tears the process down before `testEnded` writes the protocol
+      # result document, so the runner has nothing to read and has to
+      # fall back to the exit code — which loses the message, the
+      # checkpoints and the case's identity. Re-raising lets `unittest`
+      # record a FAILED case carrying the driver's own diagnostic.
+      raise
   else:
     discard
 

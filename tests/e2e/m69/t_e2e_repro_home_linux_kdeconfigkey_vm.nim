@@ -95,9 +95,22 @@ proc main(): string =
       writeLineSentinel("OK: " & GateName)
       echo "  [OK] linux.kdeConfigKey lifecycle (KF" & $version & ")"
     except CatchableError as e:
+      # Whether `kwriteconfig5/6` exists at all is decided ABOVE, before
+      # any work starts. Anything raised from here down is an operational
+      # failure of the apply/observe/destroy lifecycle itself, and it
+      # fails the case.
+      #
+      # This used to write a SKIP sentinel and fall out of the `except`
+      # with no re-raise, so the enclosing case body completed normally
+      # and `unittest` recorded a PASS while the sentinel file said SKIP
+      # and the lifecycle had not run. `doAssert` raises `AssertionDefect`
+      # (a `Defect`), so the assertions above still propagated; what the
+      # swallow hid was exactly the `OSError`/`IOError`/`EResourceDriver`
+      # class this gate exists to detect.
       let head = e.msg.splitLines()[0]
-      echo "  [SKIP] " & GateName & ": " & head
-      writeLineSentinel("SKIP: " & GateName & " (" & head & ")")
+      echo "  [FAIL] " & GateName & ": " & head
+      writeLineSentinel("FAIL: " & GateName & " (" & head & ")")
+      raise
   else:
     discard
 

@@ -21,20 +21,18 @@
 ## ``--tool-provisioning`` must likewise be passed *after* the
 ## ``graph`` subcommand for the parser to bind it.
 ##
-## Soft fallback
-## -------------
-## ``repro graph`` requires the tool resolver to succeed before the
-## graph payload is rendered. When that fails (no ``runquotad`` on
-## PATH, no usable tool catalog), the graph subcommand exits non-zero
-## with a tool-resolution diagnostic. Similarly, when ``libclingo.so``
-## is not on the dynamic-linker search path (i.e. the test was invoked
-## outside ``nix develop``), the engine cannot extract the project
-## interface and exits with a ``command failed (1)`` / ``could not
-## load: libclingo.so`` diagnostic. In either environment we don't
-## have a graph payload to inspect; we treat that as a soft skip
-## rather than a hard fail so the structural intent of B0 (the local
-## sibling is the source-of-truth for runquotad) is still recorded as
-## known-good when the engine is reachable.
+## No soft fallback
+## ----------------
+## ``repro graph`` must render a payload. There used to be two classifiers
+## here — ``looksLikeCliRejection`` and ``looksLikeProvisioningFailure`` —
+## that read the failure's own text and turned a non-zero exit into a skip
+## when it mentioned tool resolution, ``libclingo``, ``PATH``, or looked like
+## the CLI usage dump. Between them they absorbed nearly every way this
+## invocation can fail, including a regression in the very flag placement
+## the note above documents. This suite compiles and runs under
+## ``nix develop``, where the toolchain and ``libclingo`` are present by
+## construction, so a failure here is a fact about the engine and it fails
+## the case.
 ##
 ## Skip-when-absent: the sibling ``../runquota/`` may not be present
 ## in every CI environment. Skip cleanly in that case.
@@ -58,42 +56,6 @@ proc findRepoRoot(): string =
 
 proc runquotaRoot(reprobuildRoot: string): string =
   reprobuildRoot.parentDir / "runquota"
-
-proc looksLikeProvisioningFailure(output: string): bool =
-  for needle in [
-    "tool-resolution failed",
-    "typed tool provisioning is required",
-    "does not declare provisioning",
-    "PATH-only resolver",
-    "could not locate executable",
-    "is not on PATH",
-    # Project-interface extraction needs libclingo on the dynamic
-    # linker path. Outside ``nix develop`` this surfaces as a
-    # ``command failed (1)`` line followed by ``could not load:
-    # libclingo.so``. Same class of "engine not reachable in this
-    # environment" from this test's perspective.
-    "could not load: libclingo",
-    "extract_runner",
-  ]:
-    if needle in output:
-      return true
-  return false
-
-proc looksLikeCliRejection(output: string): bool =
-  ## The CLI parser rejects misplaced flags by dumping the canonical
-  ## usage text. Detect that via stable substrings — the
-  ## ``repro --version`` banner, the literal subcommand signature
-  ## lines, and the ``show-conventions`` footer line. These appear in
-  ## every usage dump but never in legitimate engine output.
-  for needle in [
-    "usage: repro --version",
-    "repro build [target[#name]",
-    "repro graph [target[#name]",
-    "repro show-conventions [--project=PATH]",
-  ]:
-    if needle in output:
-      return true
-  return false
 
 proc graphMentionsRunquotad(payload: JsonNode;
                             runquotaCheckout: string): bool =
@@ -199,24 +161,7 @@ suite "Bootstrap-And-Self-Build B0: develop-mode resolves runquotad":
         checkpoint("exit=" & $exitCode)
         if exitCode != 0:
           checkpoint(output)
-          if looksLikeCliRejection(output):
-            checkpoint("skipped — CLI rejected the ``graph`` " &
-              "invocation with a usage dump. This indicates the " &
-              "parser surface for the chosen flag combination is " &
-              "not yet accepted; a future milestone may flip this.")
-            skip()
-          elif looksLikeProvisioningFailure(output):
-            checkpoint("skipped — tool provisioning (or project-" &
-              "interface extraction) failed before the graph " &
-              "payload could be rendered. This is the expected B0 " &
-              "outcome when ``runquotad`` is not yet on PATH or " &
-              "``libclingo.so`` is not on the dynamic linker path " &
-              "(e.g. running outside ``nix develop``); a future " &
-              "milestone wires the sibling build into the prepare " &
-              "phase.")
-            skip()
-          else:
-            check exitCode == 0
+          check exitCode == 0
         else:
           # JSON payload may be preceded by progress lines; find the
           # first ``{`` character and parse from there.

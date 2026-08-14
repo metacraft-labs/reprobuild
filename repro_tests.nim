@@ -7654,6 +7654,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_protocol_document_survives_suite_body_echo.nim",
+    binary: "build/test-bin/t_protocol_document_survives_suite_body_echo",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_provider_file_driven_fanout_cleanup.nim",
     binary: "build/test-bin/t_provider_file_driven_fanout_cleanup",
     defines: @[],

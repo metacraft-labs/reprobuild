@@ -13,14 +13,32 @@
 ##     something other than what was asked for. The new flags must be
 ##     accepted, and bad category values rejected.
 ##
-##   * **Build layer** (skips with a documented limitation when this host
-##     cannot complete a build). Asserts the ABSENCE of the trace and evidence
+##   * **Build layer**. Asserts the ABSENCE of the trace and evidence
 ##     artifacts under ``--measure=none`` — not merely that the flag parsed —
 ##     that presentation is independent of collection, that ``--write-report``
 ##     and ``--write-report=PATH`` land where they say, and that the
 ##     outcome-dependent persist default holds in both directions: a failing
 ##     build writes its failure report unasked, a succeeding one writes
 ##     nothing.
+##
+## The build layer used to hedge. Every one of its six build steps ran its
+## result past a ``hostCannotBuild(output)`` predicate that matched the
+## build's own output against a needle list — ``"libclingo"``,
+## ``"could not load:"``, ``"tool-resolution failed"``, ``"typed tool
+## provisioning is required"``, ``"could not locate executable"``, ``"is not
+## on PATH"``, and the bare word ``"runquotad"`` — and reclassified a failed
+## build as a skip on a match. Two things were wrong with it. Any NEW build
+## failure whose diagnostic happened to mention ``runquotad`` (this project
+## declares ``runquotad`` in ``uses:``, so a great many of them do) vanished
+## silently, which is a mechanism for manufacturing green rather than a
+## record of an environment limitation. And the last two cases build a
+## DELIBERATELY broken source and require the build to fail — so the
+## predicate was being handed an expected failure and asked whether it
+## counted, which it can never answer.
+##
+## The predicate is gone. A build that does not do what the case needs now
+## fails the case and prints the build's output. If a host genuinely cannot
+## build, that is a broken host and it should say so.
 ##
 ## See ``reprobuild-specs/CLI/README.md`` §"Measurement: Collect, Present,
 ## Persist" and ``reprobuild-specs/CLI/build.md`` §"Measurement Flags".
@@ -53,22 +71,6 @@ proc runRepro(args: openArray[string]; cwd = repoRoot):
     argv.add(quoteShell(arg))
   let res = execCmdEx(argv.join(" "), workingDir = cwd)
   (output: res.output, exitCode: res.exitCode)
-
-proc hostCannotBuild(output: string): bool =
-  ## Environmental limitations that stop a build before any action runs. The
-  ## build-layer assertions are meaningless in that state, so they skip rather
-  ## than pass vacuously.
-  for needle in [
-      "libclingo",
-      "could not load:",
-      "tool-resolution failed",
-      "typed tool provisioning is required",
-      "could not locate executable",
-      "is not on PATH",
-      "runquotad"]:
-    if output.contains(needle):
-      return true
-  false
 
 # ---------------------------------------------------------------------------
 # Parse layer.
@@ -216,12 +218,10 @@ suite "measurement flags: collection, presentation and persistence":
         "echo \"measurement fixture\"\n")
 
       let full = buildIn(project, ["--measure=all", "--write-report"])
-      if full.exitCode != 0 and hostCannotBuild(full.output):
-        checkpoint("skipped — this host cannot complete a build: " &
-          full.output.strip()[0 .. min(200, full.output.strip().high)])
-        skip()
-      else:
-        check full.exitCode == 0
+      if full.exitCode != 0:
+        checkpoint(full.output)
+      check full.exitCode == 0
+      if full.exitCode == 0:
         let reportPath = outDirOf(project) / "build-report.json"
         check fileExists(reportPath)
         let measured = parseJson(readFile(reportPath))
@@ -254,12 +254,11 @@ suite "measurement flags: collection, presentation and persistence":
         "echo \"measurement fixture\"\n")
 
       let collected = buildIn(project, ["--measure=all", "--no-write-report"])
-      if collected.exitCode != 0 and hostCannotBuild(collected.output):
-        checkpoint("skipped — this host cannot complete a build")
-        skip()
-      else:
+      if collected.exitCode != 0:
+        checkpoint(collected.output)
+      check collected.exitCode == 0
+      if collected.exitCode == 0:
         # Measuring everything prints nothing: the terminal is a separate axis.
-        check collected.exitCode == 0
         check not collected.output.contains("metric ")
         check not collected.output.contains("scheduler trace")
 
@@ -281,11 +280,10 @@ suite "measurement flags: collection, presentation and persistence":
         "echo \"measurement fixture\"\n")
 
       let conventional = buildIn(project, ["--write-report"])
-      if conventional.exitCode != 0 and hostCannotBuild(conventional.output):
-        checkpoint("skipped — this host cannot complete a build")
-        skip()
-      else:
-        check conventional.exitCode == 0
+      if conventional.exitCode != 0:
+        checkpoint(conventional.output)
+      check conventional.exitCode == 0
+      if conventional.exitCode == 0:
         check fileExists(outDirOf(project) / "build-report.json")
 
         let exact = scratch / "elsewhere" / "r.json"
@@ -302,11 +300,10 @@ suite "measurement flags: collection, presentation and persistence":
       materializeProject(project, OkProject, "measTool.nim",
         "echo \"measurement fixture\"\n")
       let res = buildIn(project, [])
-      if res.exitCode != 0 and hostCannotBuild(res.output):
-        checkpoint("skipped — this host cannot complete a build")
-        skip()
-      else:
-        check res.exitCode == 0
+      if res.exitCode != 0:
+        checkpoint(res.output)
+      check res.exitCode == 0
+      if res.exitCode == 0:
         check not fileExists(outDirOf(project) / "build-report.json")
         check not fileExists(outDirOf(project) / "build-failure-report.json")
 
@@ -321,9 +318,6 @@ suite "measurement flags: collection, presentation and persistence":
       if res.exitCode == 0:
         checkpoint("unexpected success building a deliberately broken source")
         check res.exitCode != 0
-      elif hostCannotBuild(res.output):
-        checkpoint("skipped — this host cannot complete a build")
-        skip()
       else:
         let failurePath = outDirOf(project) / "build-failure-report.json"
         check fileExists(failurePath)
@@ -344,9 +338,6 @@ suite "measurement flags: collection, presentation and persistence":
       let res = buildIn(project, ["--no-write-report"])
       if res.exitCode == 0:
         check res.exitCode != 0
-      elif hostCannotBuild(res.output):
-        checkpoint("skipped — this host cannot complete a build")
-        skip()
       else:
         check not fileExists(outDirOf(project) / "build-failure-report.json")
         check not fileExists(outDirOf(project) / "build-report.json")
