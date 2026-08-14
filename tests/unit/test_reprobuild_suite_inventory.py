@@ -1052,7 +1052,8 @@ test "incomplete name" and:
         # 6844 -> 6848: the four cases of
         # `t_protocol_document_survives_suite_body_echo.nim`, pinned per
         # source in `expected_enrollments` above.
-        self.assertEqual(nim_total, 6848)
+        expected_nim_total = 6847 if sys.platform == "darwin" else 6848
+        self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
         # as its own equality so a future re-introduction of the static
@@ -1110,9 +1111,12 @@ test "incomplete name" and:
         # `python_total`), so this aggregate is a backstop for them rather
         # than a place either delta can hide.
         #
-        # 6890 -> 6894 = 6848 nim + 46 python. All +4 is nim; the python
-        # half is untouched by this change.
-        self.assertEqual(data["static"]["sourceCaseCount"], 6894)
+        # 6890 -> 6894 on Linux = 6848 nim + 46 python. Darwin catalogs one
+        # fewer Nim case; ``assert_linux_darwin_catalog_delta_is_exact`` pins
+        # every qualified identity on both sides of that exact delta.
+        self.assertEqual(
+            data["static"]["sourceCaseCount"], expected_nim_total + 46
+        )
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
@@ -2620,6 +2624,10 @@ test "incomplete name" and:
 
     def test_static_inventory_covers_every_declared_test(self):
         data = self.inventory_data()
+        self.assert_nde0a_catalog_preserves_real_cross_platform_and_linux_coverage(
+            data
+        )
+        self.assert_linux_darwin_catalog_delta_is_exact(data)
         self.assert_nim_case_counter_lexes_declarations_not_fixture_text()
         self.assert_nim_case_counter_accepts_compiler_backed_statement_forms()
         self.assert_nim_case_counter_resolves_only_imported_unittest_receivers()
@@ -2937,7 +2945,9 @@ compileProfileBinary()
             [],
         )
 
-    def test_nde0a_catalog_preserves_real_cross_platform_and_linux_coverage(self):
+    def assert_nde0a_catalog_preserves_real_cross_platform_and_linux_coverage(
+        self, data
+    ):
         """NDE0-A enumerates real host coverage instead of a zero-case stub.
 
         The Debian archive/layout cases are intentionally Linux-only.  The
@@ -2947,7 +2957,6 @@ compileProfileBinary()
         sentinel, while Linux CI proves all archive cases still build and
         enumerate rather than being traded away to repair the Darwin count.
         """
-        data = self.inventory_data()
         source = "libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim"
         entry = next(item for item in data["tests"] if item["source"] == source)
 
@@ -3000,6 +3009,351 @@ compileProfileBinary()
             source,
             {item["source"] for item in data["catalogEnumeration"]["quarantine"]},
         )
+
+    def platform_gated_test_sources(self, data):
+        """Find enrolled sources whose platform gate owns a real test.
+
+        This uses the inventory's Nim lexer and declaration resolver, so
+        comments, fixture strings, and unrelated platform-specific helpers do
+        not turn into census entries.  A complete ``when``/``elif``/``else``
+        chain is considered because a platform condition can select a test in
+        its fallback branch.
+        """
+
+        def next_non_newline(tokens, position):
+            position += 1
+            while position < len(tokens) and tokens[position].kind == "newline":
+                position += 1
+            return position
+
+        def mentions_linux_or_macos(tokens):
+            for position, token in enumerate(tokens):
+                if not inventory.nim_identifier_matches(token, "defined"):
+                    continue
+                value = next_non_newline(tokens, position)
+                if value < len(tokens) and tokens[value].value == "(":
+                    value = next_non_newline(tokens, value)
+                if value < len(tokens) and (
+                    inventory.nim_identifier_matches(tokens[value], "linux")
+                    or inventory.nim_identifier_matches(tokens[value], "macosx")
+                ):
+                    return True
+            return False
+
+        def branch(tokens, depths, header):
+            base_depth = depths[header]
+            colon = header + 1
+            while colon < len(tokens):
+                if tokens[colon].value == ":" and depths[colon] == base_depth:
+                    break
+                colon += 1
+            if colon == len(tokens):
+                return None
+            body = inventory.nim_next_token(tokens, colon)
+            if body is None:
+                return None
+            end = len(tokens)
+            for position in range(body + 1, len(tokens)):
+                token = tokens[position]
+                if (
+                    token.kind != "newline"
+                    and token.line > tokens[body].line
+                    and token.column <= tokens[header].column
+                    and depths[position] == base_depth
+                ):
+                    end = position
+                    break
+            return colon, body, end
+
+        result = set()
+        for item in data["tests"]:
+            if item["language"] != "nim":
+                continue
+            source = item["source"]
+            tokens = inventory.nim_tokens(
+                (REPO_ROOT / source).read_text(encoding="utf-8", errors="replace")
+            )
+            depths = inventory.nim_outer_depths(tokens)
+            test_tokens = {
+                (declaration.token.line, declaration.token.column)
+                for declaration in inventory.nim_declarations(tokens)
+                if declaration.kind == "test"
+            }
+            for header, token in enumerate(tokens):
+                if not (
+                    inventory.nim_identifier_matches(token, "when")
+                    or inventory.nim_identifier_matches(token, "elif")
+                ):
+                    continue
+                current = branch(tokens, depths, header)
+                if current is None or not mentions_linux_or_macos(
+                    tokens[header + 1 : current[0]]
+                ):
+                    continue
+                chain_has_test = False
+                while current is not None:
+                    _, body, end = current
+                    chain_has_test = chain_has_test or any(
+                        (tokens[position].line, tokens[position].column)
+                        in test_tokens
+                        for position in range(body, end)
+                    )
+                    if end == len(tokens) or not (
+                        inventory.nim_identifier_matches(tokens[end], "elif")
+                        or inventory.nim_identifier_matches(tokens[end], "else")
+                    ):
+                        break
+                    current = branch(tokens, depths, end)
+                if chain_has_test:
+                    result.add(source)
+                    break
+        return result
+
+    def assert_linux_darwin_catalog_delta_is_exact(self, data):
+        """Pin every qualified identity that differs between Linux and Darwin.
+
+        These are the complete source-scoped symmetric differences from real
+        catalogs built at the same revision on both hosts.  Most are honest
+        real-case/sentinel swaps and therefore cardinality-neutral.  The six
+        asymmetric sources explain the aggregate exactly: NDE0-A contributes
+        eleven extra Linux cases; loopback and stackable hooks contribute one
+        each; SIP launch, FHS stubs, and watch contribute four, two, and a net
+        six extra Darwin cases.  The resulting Linux total is exactly one
+        greater -- it is not a stale host-independent pin.
+
+        A lexer-derived census below covers all eighteen enrolled sources in
+        which a Linux/macOS gate owns a real test declaration.  Four gates
+        select the same catalog on both hosts; the remaining fourteen are
+        exactly the keys of ``exclusive``.  This distinction keeps a new
+        gated source from hiding behind a cardinality-neutral catalog swap.
+        """
+        if sys.platform.startswith("linux"):
+            host = "linux"
+        elif sys.platform == "darwin":
+            host = "darwin"
+        else:
+            # This invariant describes the two hosts that publish the exact
+            # suite totals below.  Other hosts retain the aggregate guard and
+            # their own platform-specific catalog assertions.
+            return
+
+        exclusive = {
+            "libs/repro_build_engine/tests/"
+            "t_engine_macos_sip_safe_launch.nim": {
+                "linux": set(),
+                "darwin": {
+                    "Portable-Macos-Sandbox-Tools B1: macOS SIP-safe "
+                    "monitored launch::fail-safe: monitored action fails when "
+                    "no non-SIP shell is resolvable",
+                    "Portable-Macos-Sandbox-Tools B1: macOS SIP-safe "
+                    "monitored launch::positive: monitored action launches "
+                    "via a non-SIP wrapper shell",
+                    "Portable-Macos-Sandbox-Tools B1: macOS SIP-safe "
+                    "monitored launch::resolveNonSipShell never returns a "
+                    "SIP-protected shell",
+                    "Portable-Macos-Sandbox-Tools B1: macOS SIP-safe "
+                    "monitored launch::resolveNonSipShell prefers the "
+                    "CT_SANDBOX_TOOLS_DIR drop-in",
+                },
+            },
+            "libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim": {
+                "linux": {
+                    "NDE0-A apt-jammy adapter::content-addressed store path: "
+                    "different debs → different paths",
+                    "NDE0-A apt-jammy adapter::content-addressed store path: "
+                    "same deb twice → same path",
+                    "NDE0-A apt-jammy adapter::determinism: extract same deb "
+                    "twice into separate roots → byte-identical trees",
+                    "NDE0-A apt-jammy adapter::expectedFiles failure: missing "
+                    "entry raises AptExpectedFileMissing",
+                    "NDE0-A apt-jammy adapter::expectedFiles success: present "
+                    "entry produces output",
+                    "NDE0-A apt-jammy adapter::extractFingerprint: changes "
+                    "with sha256, stable with same sha256",
+                    "NDE0-A apt-jammy adapter::fingerprint composition: "
+                    "install hash changes when snapshot changes",
+                    "NDE0-A apt-jammy adapter::fingerprint composition: "
+                    "install hash is order-independent",
+                    "NDE0-A apt-jammy adapter::installSystemdUnit: normalises "
+                    "lib/systemd/system/ -> usr/lib/systemd/system/",
+                    "NDE0-A apt-jammy adapter::sha256 verification: matching "
+                    "sha succeeds",
+                    "NDE0-A apt-jammy adapter::sha256 verification: wrong sha "
+                    "raises AptVerifyError",
+                },
+                "darwin": set(),
+            },
+            "libs/repro_elevation/tests/t_m2_nixos_darwin_modules.nim": {
+                "linux": {
+                    "Dotfiles-Migration-Completion M2 — "
+                    "macos.darwinSystemModule::observe + apply raise "
+                    "ENotImplementedPlatform off-macOS"
+                },
+                "darwin": {
+                    "Dotfiles-Migration-Completion M2 — "
+                    "linux.nixosSystemModule::observe + apply raise "
+                    "ENotImplementedPlatform off-Linux"
+                },
+            },
+            "libs/repro_elevation/tests/"
+            "t_sandbox_m1_fhssandbox_driver.nim": {
+                "linux": set(),
+                "darwin": {
+                    "Linux-Third-Party-Sandbox-MVP M1 — off-platform "
+                    "stubs::destroy raises ENotImplementedPlatform off-Linux",
+                    "Linux-Third-Party-Sandbox-MVP M1 — off-platform "
+                    "stubs::observe + apply raise ENotImplementedPlatform "
+                    "off-Linux",
+                },
+            },
+            "tests/e2e/hcr-debug-unwind/"
+            "t_e2e_hcr_direct_patch_debug_unwind_replay.nim": {
+                "linux": {
+                    "e2e_hcr_direct_patch_debug_unwind_replay::M28 "
+                    "debug/unwind/replay gate is macOS arm64-only"
+                },
+                "darwin": {
+                    "e2e_hcr_direct_patch_debug_unwind_replay::direct patch "
+                    "registers debugger and unwind metadata and replays IPC "
+                    "bytes"
+                },
+            },
+            "tests/e2e/hcr-direct-linker/"
+            "t_e2e_hcr_in_target_link_and_trampoline.nim": {
+                "linux": {
+                    "e2e_hcr_in_target_link_and_trampoline::M27 real direct "
+                    "trampoline gate is macOS arm64-only"
+                },
+                "darwin": {
+                    "e2e_hcr_in_target_link_and_trampoline::shared direct-HCR "
+                    "transaction applies to fake and real target process"
+                },
+            },
+            "tests/e2e/macos-monitor/"
+            "t_macos_monitor_shim_event_taxonomy.nim": {
+                "linux": {
+                    "e2e_macos_monitor_shim_event_taxonomy::macOS monitor shim "
+                    "event taxonomy is unsupported on non-macOS"
+                },
+                "darwin": {
+                    "e2e_macos_monitor_shim_event_taxonomy::real macOS shim "
+                    "records supported taxonomy and structured gaps"
+                },
+            },
+            "tests/e2e/watch/t_e2e_repro_watch.nim": {
+                "linux": {
+                    "e2e_repro_watch::event-driven watch E2E is macOS "
+                    "kqueue-only in M31"
+                },
+                "darwin": {
+                    "e2e_repro_watch::CodeTracer copied checkout watch builds "
+                    "added frontend public resource",
+                    "e2e_repro_watch::CodeTracer copied checkout watch "
+                    "rebuilds selected C action only",
+                    "e2e_repro_watch::CodeTracer copied checkout watch "
+                    "rebuilds selected app aggregate",
+                    "e2e_repro_watch::CodeTracer copied checkout watch "
+                    "rebuilds selected frontend aggregate",
+                    "e2e_repro_watch::local project no-target watch uses "
+                    "current project default action",
+                    "e2e_repro_watch::local project watch rebuilds selected "
+                    "target from depfile event",
+                    "e2e_repro_watch::local project watch reruns provider root "
+                    "after enumerated directory add",
+                },
+            },
+            "tests/integration/"
+            "t_integration_hcr_linkgraph_relocation_classification.nim": {
+                "linux": {
+                    "integration_hcr_linkgraph_relocation_classification::M26 "
+                    "Mach-O arm64 gate is macOS-only"
+                },
+                "darwin": {
+                    "integration_hcr_linkgraph_relocation_classification::"
+                    "Mach-O arm64 objects produce LinkGraph facts, diffs, "
+                    "relocation classes, and pure plans"
+                },
+            },
+            "tests/integration/t_m9r22b_2_apply_loopback.nim": {
+                "linux": {
+                    "M9.R.22b.2: loopback end-to-end (Linux, --loopback "
+                    "gated)::Test#5 (loopback): simple-ext4 against a 1G image"
+                },
+                "darwin": set(),
+            },
+            "tests/integration/"
+            "t_stackable_hooks_extracted_process_tree.nim": {
+                "linux": {
+                    "integration_stackable_hooks_extracted_process_tree::"
+                    "linux preload runtime dispatches registered hooks in "
+                    "priority order"
+                },
+                "darwin": set(),
+            },
+            "tests/unit/t_hcr_agent_process_target.nim": {
+                "linux": {
+                    "HCR process target runtime::process target runtime is "
+                    "macOS arm64-only"
+                },
+                "darwin": {
+                    "HCR process target runtime::agent runtime patches "
+                    "executable memory in the current process"
+                },
+            },
+            "tests/unit/t_m9r14f_2_rpath_patching.nim": {
+                "linux": {
+                    "DSL-port M9.R.14f.2 — install-mirror RPATH patching::"
+                    "linux_end_to_end_patchelf_against_synthetic_elf"
+                },
+                "darwin": {
+                    "DSL-port M9.R.14f.2 — install-mirror RPATH patching::"
+                    "non_linux_host_documents_runtime_skip"
+                },
+            },
+            "tests/unit/t_m9r15q_5_rpath_nix_stub_deps.nim": {
+                "linux": {
+                    "DSL-port M9.R.15q.5.1 — RPATH resolution for nix-stub "
+                    "deps::linux_end_to_end_rpath_excludes_dangling_includes_real"
+                },
+                "darwin": {
+                    "DSL-port M9.R.15q.5.1 — RPATH resolution for nix-stub "
+                    "deps::non_linux_host_documents_runtime_skip_q5"
+                },
+            },
+        }
+
+        catalog_identical = {
+            "tests/e2e/codetracer-subset/"
+            "t_e2e_codetracer_in_place_project_file.nim",
+            "tests/e2e/local-build-engine/"
+            "t_e2e_local_reprobuild_project_build.nim",
+            "tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim",
+            "tests/integration/"
+            "t_integration_scheduler_dependency_gathering_policies.nim",
+        }
+        gated_sources = self.platform_gated_test_sources(data)
+        self.assertEqual(gated_sources, set(exclusive) | catalog_identical)
+        self.assertEqual(len(exclusive), 14)
+        self.assertEqual(len(catalog_identical), 4)
+
+        by_source = {item["source"]: item for item in data["tests"]}
+        for source, expected_by_host in exclusive.items():
+            all_platform_names = (
+                expected_by_host["linux"] | expected_by_host["darwin"]
+            )
+            actual_names = {
+                case["name"] for case in by_source[source]["catalogCases"]
+            }
+            self.assertEqual(
+                actual_names & all_platform_names,
+                expected_by_host[host],
+                source,
+            )
+
+        linux_only = sum(len(item["linux"]) for item in exclusive.values())
+        darwin_only = sum(len(item["darwin"]) for item in exclusive.values())
+        self.assertEqual((linux_only, darwin_only), (22, 21))
+        self.assertEqual(linux_only - darwin_only, 1)
 
     def test_completed_clean_attempt_requires_one_coherent_three_run_attempt(self):
         fingerprint = "same-source"
