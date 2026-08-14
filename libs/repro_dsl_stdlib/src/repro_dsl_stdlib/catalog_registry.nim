@@ -60,6 +60,12 @@ import ./packages/cmake
 # the `conda` archiveType can realize conda-forge's Windows package; the
 # scaffold sat unimported while that was inexpressible.
 import ./packages/clingo
+# zstd: dlopen'd by `repro cache substitute` to decompress binary-cache
+# payloads. The entry and its Windows slice (facebook/zstd v1.5.6 win64
+# release) already existed but were never imported, so the catalog could not
+# resolve it and repro.nim's Windows staging edge fell back to probing PATH.
+# Wiring it is a prerequisite for that edge consuming a realized prefix instead.
+import ./packages/zstd
 import ./packages/dotnet_sdk
 import ./packages/gcc
 import ./packages/gh
