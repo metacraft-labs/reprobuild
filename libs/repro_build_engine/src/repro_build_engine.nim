@@ -2775,7 +2775,8 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
     let packageName =
       if packageEnd < 0: normalized[packageStart .. ^1]
       else: normalized[packageStart ..< packageEnd]
-    if packageName == "glibc" or packageName == "python3" or
+    if packageName == "glibc" or packageName == "readline" or
+        packageName == "python3" or
         packageName.startsWith("python3-"):
       return true
   const storePrefix = "/nix/store/"
@@ -2791,6 +2792,7 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
     return false
   let packageName = storeEntry[hashSeparator + 1 .. ^1]
   packageName == "glibc" or packageName.startsWith("glibc-") or
+    packageName == "readline" or packageName.startsWith("readline-") or
     packageName == "python3" or packageName.startsWith("python3-")
 
 proc runtimeSafeLibDirs(paths: ResolvedAuxPaths): seq[string] =

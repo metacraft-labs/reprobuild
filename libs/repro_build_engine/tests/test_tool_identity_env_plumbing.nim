@@ -276,6 +276,10 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
       "/work/recipes/packages/source/python3/.repro/output/install/usr/lib"
     let sourcePythonBundleLib =
       "/work/recipes/packages/source/python3-with-modules/.repro/output/install/usr/lib"
+    let sourceReadlineLib =
+      "/work/recipes/packages/source/readline/.repro/output/install/usr/lib"
+    let nixReadlineLib =
+      "/nix/store/0123456789abcdefghijklmnopqrstuv-readline-8.2p13/lib"
     let compilerBootstrapLib = absolutePath(TmpDir / "compiler-bootstrap-lib")
     createDir(compilerBootstrapLib)
     writeFile(compilerBootstrapLib / "libc.so.6", "synthetic bootstrap libc")
@@ -283,7 +287,7 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     let paths = ResolvedAuxPaths(
       libDirs: @[nixGlibcLib, sourceGlibcLib, federatedGlibcLib, nixPythonLib,
         sourcePythonLib, sourcePythonBundleLib, compilerBootstrapLib,
-        dependencyLib])
+        sourceReadlineLib, nixReadlineLib, dependencyLib])
 
     let argvEnv = applyResolvedAuxPathsArgv(
       @["LIBRARY_PATH=/existing/link", "LD_LIBRARY_PATH=/existing/runtime"],
@@ -291,7 +295,8 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     check envValue(argvEnv, "LIBRARY_PATH").split(pathSeparator()) ==
       @[nixGlibcLib, sourceGlibcLib, federatedGlibcLib, nixPythonLib,
         sourcePythonLib,
-        sourcePythonBundleLib, compilerBootstrapLib, dependencyLib,
+        sourcePythonBundleLib, compilerBootstrapLib, sourceReadlineLib,
+        nixReadlineLib, dependencyLib,
         "/existing/link"]
     check envValue(argvEnv, "LD_LIBRARY_PATH").split(pathSeparator()) ==
       @[dependencyLib, "/existing/runtime"]
@@ -303,7 +308,8 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     check tableEnv["LIBRARY_PATH"].split(pathSeparator()) ==
       @[nixGlibcLib, sourceGlibcLib, federatedGlibcLib, nixPythonLib,
         sourcePythonLib,
-        sourcePythonBundleLib, compilerBootstrapLib, dependencyLib,
+        sourcePythonBundleLib, compilerBootstrapLib, sourceReadlineLib,
+        nixReadlineLib, dependencyLib,
         "/existing/link"]
     check tableEnv["LD_LIBRARY_PATH"].split(pathSeparator()) ==
       @[dependencyLib, "/existing/runtime"]
