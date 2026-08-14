@@ -284,7 +284,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " system {add | remove | list | why | sync | history | rollback | audit} ...\n       " &
           programName &
-      " deploy-agent --target <name> --manifest <PATH|URL> --allowed-signers <FILE> ...\n       " &
+      " deploy-agent --target <name> --manifest <PATH|URL> --allowed-signers <FILE> [--secrets-key <FILE> [--secrets-dir <DIR>]] ...\n       " &
           programName &
       " hardware {probe} [--dry-run | --output PATH | --regenerate]\n       " &
           programName &

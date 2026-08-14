@@ -343,6 +343,15 @@ proc readCertFile(path: string): PublicKeyBytes =
       "hex pubkey on its own line.")
   result = parsePubHex(line)
 
+proc loadPrivateKeyFile*(path: string): PrivateKeyBytes =
+  ## Strict read-only load of an `ecdsa-p256:<hex>` private-key file.
+  ##
+  ## Exposed for consumers that must NOT fall back to generating a key when
+  ## the file is absent — the deploy agent's recipient key is one: silently
+  ## minting a fresh keypair there would produce a box that cannot decrypt
+  ## anything addressed to it and reports no reason why.
+  readKeyFile(path)
+
 proc loadOrGenerateKeypair*(certPath, keyPath: string): PeerKeypair =
   ## Loads the peer's keypair from disk, generating + persisting a
   ## fresh one when either file is missing. The cert file holds the

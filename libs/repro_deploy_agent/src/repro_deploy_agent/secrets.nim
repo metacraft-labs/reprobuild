@@ -61,7 +61,7 @@
 ## reach the served bytes. Neither is redundant: the tag is what makes
 ## decryption fail closed, and it is checked BEFORE any plaintext is used.
 
-import std/strutils
+import std/[os, strutils]
 
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
@@ -347,3 +347,46 @@ proc openSecrets*(recipientPrivKey: peerAuth.PrivateKeyBytes;
       "sealed secrets failed authentication for target '" & target &
       "': wrong recipient key, wrong target, or tampered ciphertext")
   decodeSecretFiles(payload)
+
+# ---------------------------------------------------------------------------
+# Materialisation.
+# ---------------------------------------------------------------------------
+
+proc materialiseSecrets*(files: seq[SecretFile]; destDir: string): seq[string] =
+  ## Write the opened secrets under `destDir`, returning the absolute paths.
+  ##
+  ## **Each file is published atomically** — staged alongside, then renamed
+  ## into place. A registration token is read by a separate process
+  ## (`register-runner.ps1`) that polls for it, so a consumer must never be
+  ## able to observe the path existing with partial content. Renaming within
+  ## the same directory is atomic on both NTFS and POSIX.
+  ##
+  ## **Securing `destDir` is the PROFILE's job, not this proc's.** The
+  ## directory carries the DACL and the files inherit it, exactly as
+  ## `C:\actions-runner-tokens` already does (an `fs.systemDirectory` paired
+  ## with a `windows.acl`). Setting per-file ACLs here would mean the agent
+  ## and the profile both assert who may read these bytes, and the profile
+  ## would re-apply forever against whatever the agent last wrote. The POSIX
+  ## mode below is applied only where it is the whole story.
+  createDir(destDir)
+  result = newSeqOfCap[string](files.len)
+  for f in files:
+    validateSecretPath(f.path)
+    let dest = destDir / f.path
+    let parent = parentDir(dest)
+    if parent.len > 0:
+      createDir(parent)
+    let staged = dest & ".staged"
+    var content = newString(f.content.len)
+    for i, b in f.content:
+      content[i] = char(b)
+    writeFile(staged, content)
+    when defined(posix):
+      var perms: set[FilePermission] = {}
+      if (f.mode and 0o400'u32) != 0: perms.incl(fpUserRead)
+      if (f.mode and 0o200'u32) != 0: perms.incl(fpUserWrite)
+      if (f.mode and 0o040'u32) != 0: perms.incl(fpGroupRead)
+      if (f.mode and 0o004'u32) != 0: perms.incl(fpOthersRead)
+      setFilePermissions(staged, perms)
+    moveFile(staged, dest)
+    result.add(dest)
