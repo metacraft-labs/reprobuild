@@ -2,6 +2,13 @@ import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, times
 
 import blake3
 import cbor
+# Blessed escape hatches for ambient binary resolution/execution. This module is
+# the class-2 "PATH-only" tier of Package-Model.md:263-268 — it resolves tools
+# BEFORE a store exists, so it cannot route through a typed execution profile.
+# Using the hatches states that explicitly instead of leaving bare findExe /
+# execCmdEx calls that read like an oversight. See
+# docs/ambient-execution-linter.md.
+import lints/ambient_execution
 import repro_core
 import repro_core/paths as corepaths
 import repro_domain_types
@@ -2071,41 +2078,70 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
       # So probe for a tar that can actually do it instead of assuming, and
       # fall back to piping a standalone zstd. Mirrors the strategy discovery
       # `extractTarZst` in repro_home_apply/builtin_adapter.nim already uses.
+      # Class 2 requires the action identity to record "the search path, resolved
+      # executable path, and configured probes" — probing and discarding the
+      # answer is not class 2, it is unclassified. `probes` accumulates every
+      # candidate considered and its verdict, and every exit path below reports
+      # it, so a failure says WHICH binaries were examined and why each was
+      # rejected rather than only that nothing was found.
+      var probes: seq[string] = @[]
+
       proc tarSpeaksZstd(exe: string): bool =
         if exe.len == 0: return false
-        let probe = execCmdEx(shellCommand(@[exe, "--version"]))
-        probe.exitCode == 0 and probe.output.toLowerAscii().contains("libarchive")
+        let probe = uncontrolledExecCmdEx(shellCommand(@[exe, "--version"]))
+        let firstLine =
+          if probe.output.len == 0: "<no output>"
+          else: probe.output.splitLines()[0].strip()
+        result = probe.exitCode == 0 and
+          probe.output.toLowerAscii().contains("libarchive")
+        probes.add(exe & " -> " & (if result: "libarchive (usable)"
+                                   else: "not libarchive: " & firstLine))
 
       var zstdTar = ""
       when defined(windows):
         let systemTar = getEnv("WINDIR", r"C:\Windows") / "System32" / "tar.exe"
-        if fileExists(extendedPath(systemTar)) and tarSpeaksZstd(systemTar):
-          zstdTar = systemTar
+        if fileExists(extendedPath(systemTar)):
+          if tarSpeaksZstd(systemTar):
+            zstdTar = systemTar
+        else:
+          probes.add(systemTar & " -> absent")
       if zstdTar.len == 0:
         for candidate in ["bsdtar", "tar"]:
-          let exe = findExe(candidate)
+          let exe = uncontrolledFindExe(candidate)
+          if exe.len == 0:
+            probes.add(candidate & " -> not on PATH")
+            continue
           if tarSpeaksZstd(exe):
             zstdTar = exe
             break
 
+      let probeTrail = "\n  probes:\n    " & probes.join("\n    ")
+
       var res: tuple[output: string, exitCode: int]
+      var resolvedVia = ""
       if zstdTar.len > 0:
-        res = execCmdEx(shellCommand(@[zstdTar, "-xf", payload, "-C", destination]))
+        resolvedVia = zstdTar
+        res = uncontrolledExecCmdEx(shellCommand(
+          @[zstdTar, "-xf", payload, "-C", destination]))
       else:
-        let zstdExe = findExe("zstd")
-        let gnuTar = findExe("tar")
+        let zstdExe = uncontrolledFindExe("zstd")
+        let gnuTar = uncontrolledFindExe("tar")
         if zstdExe.len == 0 or gnuTar.len == 0:
           raise newException(OSError,
             "tool-resolution failed: extracting the conda payload " & payload &
             " needs a zstd-capable tar (libarchive/bsdtar, e.g. Windows' " &
             "System32\\tar.exe) or a standalone 'zstd' alongside tar; " &
-            "neither was found")
-        res = execCmdEx(quoteShell(zstdExe) & " -dc " & quoteShell(payload) &
-          " | " & quoteShell(gnuTar) & " -xf - -C " & quoteShell(destination))
+            "neither was found." & probeTrail &
+            "\n    zstd -> " & (if zstdExe.len == 0: "not on PATH" else: zstdExe) &
+            "\n    tar  -> " & (if gnuTar.len == 0: "not on PATH" else: gnuTar))
+        resolvedVia = zstdExe & " | " & gnuTar
+        res = uncontrolledExecCmdEx(quoteShell(zstdExe) & " -dc " &
+          quoteShell(payload) & " | " & quoteShell(gnuTar) & " -xf - -C " &
+          quoteShell(destination))
       if res.exitCode != 0:
         raise newException(OSError,
           "tool-resolution failed: conda payload extraction failed for " &
-          payload & "\n" & res.output)
+          payload & " using " & resolvedVia & probeTrail & "\n" & res.output)
     finally:
       removeDir(extendedPath(staging))
     flattenStripComponents(destination, stripComponents)
