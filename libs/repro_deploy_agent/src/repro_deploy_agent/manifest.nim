@@ -68,6 +68,10 @@
 
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import repro_profile as reproProfile
+import ./secrets as reproSecrets
+
+export reproSecrets.SealedSecrets, reproSecrets.SecretFile,
+       reproSecrets.SecretsError
 
 type
   DeployManifest* = object
@@ -78,6 +82,10 @@ type
     deploymentId*: string
     profileText*: string
     buildActions*: seq[reproProfile.ProfileBuildAction]
+    hasSecrets*: bool
+      ## Whether ``secrets`` carries a sealed section. Only ever true for a
+      ## v2 envelope; see ``DeployManifestFormatVersionV2``.
+    secrets*: reproSecrets.SealedSecrets
     producerPubKey*: peerAuth.PublicKeyBytes
     signature*: peerAuth.SignatureBytes
 
@@ -89,8 +97,30 @@ type
 
 const
   DeployManifestMagic* = "RDM1"
-    ## "Reprobuild Deploy Manifest v1".
-  DeployManifestFormatVersion* = 1'u16
+    ## "Reprobuild Deploy Manifest". The magic is unchanged across format
+    ## versions; the version field below is what discriminates.
+  DeployManifestFormatVersionV1* = 1'u16
+    ## Original envelope: desired state only, entirely plaintext.
+  DeployManifestFormatVersionV2* = 2'u16
+    ## Adds a sealed-secrets section (see ``secrets.nim``) between the build
+    ## actions and the producer public key, INSIDE the signed prefix.
+  DeployManifestFormatVersion* = DeployManifestFormatVersionV1
+    ## Retained for source compatibility with callers that referenced the
+    ## single-version constant. Producers should not read this: the version a
+    ## manifest carries is chosen by content (see ``encodeUnsignedPrefix``).
+
+  # ## Why two versions rather than one bumped version
+  #
+  # A v1 manifest is still exactly right for a target with no secrets, and
+  # `win-ci-vm-001` is served one today. Emitting v2 unconditionally would
+  # invalidate that live manifest for every agent not yet upgraded, for no
+  # gain. So the producer emits the LOWEST version that can express the
+  # content, and a current agent accepts both.
+  #
+  # The asymmetry is deliberate and is the safe direction: an OLD agent shown
+  # a v2 envelope rejects it on the version check and applies nothing, rather
+  # than applying desired state while silently discarding the secrets that
+  # state depends on.
 
 # ---------------------------------------------------------------------------
 # Little-endian primitives (same shape as the cache codec).
@@ -220,13 +250,23 @@ proc decodeBuildAction(buf: openArray[byte]; pos: var int):
 # Whole-manifest encode.
 # ---------------------------------------------------------------------------
 
+proc wireVersion*(m: DeployManifest): uint16 =
+  ## The lowest format version that can express this manifest's content.
+  if m.hasSecrets: DeployManifestFormatVersionV2
+  else: DeployManifestFormatVersionV1
+
 proc encodeUnsignedPrefix(m: DeployManifest): seq[byte] =
   ## Everything up to (but not including) the signature. The bytes the
   ## producer key signs.
+  ##
+  ## The sealed-secrets section sits INSIDE this prefix on purpose: the
+  ## producer's signature then covers the ciphertext, the ephemeral public key
+  ## and the nonce, so none of them can be swapped for another target's
+  ## envelope by anyone who cannot sign.
   result = newSeqOfCap[byte](512)
   for ch in DeployManifestMagic:
     result.add(byte(ch))
-  writeU16LE(result, DeployManifestFormatVersion)
+  writeU16LE(result, m.wireVersion)
   writeU16LE(result, 0'u16)                  # reserved / future flags
   writeString(result, m.target)
   writeU64LE(result, m.sequence)
@@ -235,6 +275,18 @@ proc encodeUnsignedPrefix(m: DeployManifest): seq[byte] =
   writeU32LE(result, uint32(m.buildActions.len))
   for a in m.buildActions:
     encodeBuildAction(result, a)
+  if m.wireVersion >= DeployManifestFormatVersionV2:
+    writeU8(result, if m.hasSecrets: 1'u8 else: 0'u8)
+    if m.hasSecrets:
+      for b in m.secrets.ephemeralPubKey:
+        result.add(b)
+      for b in m.secrets.nonce:
+        result.add(b)
+      for b in m.secrets.tag:
+        result.add(b)
+      writeU32LE(result, uint32(m.secrets.ciphertext.len))
+      for b in m.secrets.ciphertext:
+        result.add(b)
   for b in m.producerPubKey:
     result.add(b)
 
@@ -258,10 +310,12 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
         "deploy manifest magic mismatch at byte " & $i)
   var pos = DeployManifestMagic.len
   result.formatVersion = readU16LE(buf, pos)
-  if result.formatVersion != DeployManifestFormatVersion:
+  if result.formatVersion != DeployManifestFormatVersionV1 and
+     result.formatVersion != DeployManifestFormatVersionV2:
     raise newException(DeployManifestCodecError,
       "deploy manifest format version mismatch: got " &
-      $result.formatVersion & ", expected " & $DeployManifestFormatVersion)
+      $result.formatVersion & ", expected " & $DeployManifestFormatVersionV1 &
+      " or " & $DeployManifestFormatVersionV2)
   discard readU16LE(buf, pos)                # reserved
   result.target = readString(buf, pos)
   result.sequence = readU64LE(buf, pos)
@@ -271,6 +325,28 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
   result.buildActions = newSeqOfCap[reproProfile.ProfileBuildAction](actionCount)
   for _ in 0 ..< actionCount:
     result.buildActions.add(decodeBuildAction(buf, pos))
+  if result.formatVersion >= DeployManifestFormatVersionV2:
+    let flag = readU8(buf, pos)
+    if flag > 1'u8:
+      raise newException(DeployManifestCodecError,
+        "deploy manifest secrets-present flag is " & $flag & ", expected 0 or 1")
+    result.hasSecrets = flag == 1'u8
+    if result.hasSecrets:
+      result.secrets.ephemeralPubKey = readPubKey(buf, pos)
+      ensureBytes(buf.len - pos, reproSecrets.GcmNonceLen, "secrets nonce")
+      for i in 0 ..< reproSecrets.GcmNonceLen:
+        result.secrets.nonce[i] = buf[pos + i]
+      inc pos, reproSecrets.GcmNonceLen
+      ensureBytes(buf.len - pos, reproSecrets.GcmTagLen, "secrets tag")
+      for i in 0 ..< reproSecrets.GcmTagLen:
+        result.secrets.tag[i] = buf[pos + i]
+      inc pos, reproSecrets.GcmTagLen
+      let ctLen = int(readU32LE(buf, pos))
+      ensureBytes(buf.len - pos, ctLen, "secrets ciphertext")
+      result.secrets.ciphertext = newSeq[byte](ctLen)
+      for i in 0 ..< ctLen:
+        result.secrets.ciphertext[i] = buf[pos + i]
+      inc pos, ctLen
   result.producerPubKey = readPubKey(buf, pos)
   result.signature = readSignature(buf, pos)
   if pos != buf.len:
@@ -285,7 +361,13 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
 proc signManifest*(kp: peerAuth.PeerKeypair; m: var DeployManifest) =
   ## Populate ``producerPubKey`` + ``signature`` in place with an
   ## ECDSA-P256 signature over the canonical unsigned prefix.
-  m.formatVersion = DeployManifestFormatVersion
+  ##
+  ## The version is derived from content rather than taken from the caller, so
+  ## a manifest carrying secrets cannot be signed as v1 — which would encode
+  ## the section and then advertise a version whose decoder does not read it,
+  ## leaving the trailing-bytes check as the only thing standing between that
+  ## and a silently truncated apply.
+  m.formatVersion = m.wireVersion
   m.producerPubKey = kp.publicKey
   let prefix = encodeUnsignedPrefix(m)
   m.signature = peerAuth.signMessage(kp, prefix)
