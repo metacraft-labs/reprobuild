@@ -6550,6 +6550,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_develop_ignores_sha_pinned_manifest_without_a_lock_record.nim",
+    binary: "build/test-bin/t_develop_ignores_sha_pinned_manifest_without_a_lock_record",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_develop_public_only_unchanged.nim",
     binary: "build/test-bin/t_develop_public_only_unchanged",
     defines: @[],

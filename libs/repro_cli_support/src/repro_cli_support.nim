@@ -26672,11 +26672,24 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
         continue
       # "A repo is develop-manageable in workspace W if some lock record
       # readable from W NAMES it and PINS IT TO AN EXACT REVISION."
-      # ``lockedDepFromStoreRepo`` falls back to the repo's advisory manifest
-      # revision (typically a branch name) when the backend holds no record;
-      # that is a branch-tip fallback and is refused here — the repo simply
-      # contributes nothing, and says so.
-      if not looksLikeSha(d.coordinates.revision):
+      #
+      # ``lockedDepFromStoreRepo`` falls back to the repo's ADVISORY MANIFEST
+      # revision when the backend holds no record for it. Sniffing the RESULT
+      # for SHA shape is not enough to tell the two apart: it rejects the
+      # common branch-name form (``main`` / ``dev``), but a manifest fragment
+      # may legitimately pin a SHA directly — that is what ``repo manifest -r``
+      # style snapshots emit — and then the advisory revision is indisting-
+      # uishable from a real pin, and the repo would enter the develop set at
+      # the MANIFEST's revision while its backend held no lock record at all.
+      #
+      # So ask the backend directly whether it holds a record, and require the
+      # answer to also be an exact revision. A repo failing either half
+      # contributes nothing, and says so — no branch-tip fallback and no
+      # manifest-advisory fallback.
+      let backendRev =
+        if commitKeyed.hasKey(d.path): commitKeyed[d.path]
+        else: lockedShaFromStore(store, resolved.projectName, d.name, d.path)
+      if backendRev.len == 0 or not looksLikeSha(d.coordinates.revision):
         result.noRecord.add(d.name & " (tier=" & tierLbl & " backend=" &
           kind & ")")
         continue
