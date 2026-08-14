@@ -3373,6 +3373,61 @@ proc firstExistingPrefix(candidates: openArray[string]; header: string;
         return prefix
   ""
 
+proc nixLibFile(prefix, libraryName: string): string =
+  ## The actual library file under ``prefix/lib`` matching ``libraryName``
+  ## (exact, or ``<stem>.*`` for a versioned soname), or "" — mirrors the
+  ## resolution in ``firstExistingPrefix.hasLibrary`` but returns the file.
+  let libDir = prefix / "lib"
+  let exact = libDir / libraryName
+  if fileExists(extendedPath(exact)):
+    return exact
+  let dot = libraryName.find('.')
+  let stem =
+    if dot > 0: libraryName[0 ..< dot]
+    else: libraryName
+  if not dirExists(extendedPath(libDir)):
+    return ""
+  for kind, path in walkDir(extendedPath(libDir)):
+    if kind == pcFile:
+      let tail = splitPath(path).tail
+      if tail == libraryName or tail.startsWith(stem & "."):
+        return path
+  ""
+
+proc soMatchesHostArch(libFile: string): bool =
+  ## Guard ``nixPrefix``'s ``/nix/store`` glob against picking a
+  ## wrong-architecture build. The fleet's shared store holds BOTH x86-64 and
+  ## aarch64 copies of libraries like xxHash under indistinguishable
+  ## ``*-xxHash-*`` store-path names, so a bare glob can return the aarch64
+  ## ``libxxhash.so`` on an x86-64 runner — the extract-runner link then fails
+  ## with ``ld: … libxxhash.so is incompatible with elf64-x86-64``. Reject an
+  ## ELF whose machine differs from the build host. A non-ELF file (macOS
+  ## Mach-O ``.dylib``), a static archive (``.a``), or an unreadable/short file
+  ## is treated as a match — let the platform/linker decide.
+  var f: File
+  if not open(f, extendedPath(libFile)):
+    return true
+  defer: close(f)
+  var hdr: array[20, byte]
+  if readBytes(f, hdr, 0, 20) < 20:
+    return true
+  if not (hdr[0] == 0x7F'u8 and hdr[1] == byte('E') and
+          hdr[2] == byte('L') and hdr[3] == byte('F')):
+    return true                       # not ELF -> not our concern
+  if hdr[5] != 1'u8:                   # EI_DATA: only handle little-endian
+    return true
+  let eMachine = uint16(hdr[18]) or (uint16(hdr[19]) shl 8)
+  const
+    EM_X86_64 = 0x3E'u16
+    EM_AARCH64 = 0xB7'u16
+  let hostMachine =
+    when hostCPU == "amd64": EM_X86_64
+    elif hostCPU == "arm64": EM_AARCH64
+    else: 0'u16
+  if hostMachine == 0'u16:
+    return true                       # unknown host arch -> don't reject
+  eMachine == hostMachine
+
 proc nixPrefix(namePattern, header: string;
                libraryNames: openArray[string]): string =
   if not dirExists(extendedPath("/nix/store")):
@@ -3388,7 +3443,11 @@ proc nixPrefix(namePattern, header: string;
     if not fileExists(extendedPath(path / header)):
       continue
     for libraryName in libraryNames:
-      if firstExistingPrefix([path], header, [libraryName]).len > 0:
+      let lib = nixLibFile(path, libraryName)
+      # Skip a store build whose library is for the wrong architecture — the
+      # shared store holds both x86-64 and aarch64 copies under the same
+      # ``*-xxHash-*`` name and this glob would otherwise pick either one.
+      if lib.len > 0 and soMatchesHostArch(lib):
         return path
   ""
 
