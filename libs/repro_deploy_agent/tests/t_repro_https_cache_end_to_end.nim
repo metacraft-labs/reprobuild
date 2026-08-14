@@ -52,7 +52,8 @@
 ## ``REPRO_BINARY_CACHE_SERVER`` (the ``-d:ssl`` build), falling back to
 ## ``build/test-bin/repro_binary_cache_m6`` for a manual run.
 
-import std/[httpclient, net, os, osproc, strtabs, strutils, tempfiles, unittest]
+import std/[atomics, httpclient, monotimes, net, os, oserrors, osproc,
+            strtabs, strutils, tempfiles, times, unittest]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
@@ -81,8 +82,12 @@ proc pickPort(): int =
 proc genSelfSignedCert(dir, cn: string): tuple[cert, key: string] =
   let cert = dir / "tls-cert.pem"
   let key = dir / "tls-key.pem"
-  let cmd = "openssl req -x509 -newkey ec " &
-    "-pkeyopt ec_paramgen_curve:prime256v1 -nodes " &
+  # Use a broadly interoperable TLS fixture key. On macOS the test client
+  # loads Apple's compatibility OpenSSL while the packaged cache server uses
+  # Nix OpenSSL 3; their default cipher sets do not negotiate with an EC leaf.
+  # RSA-2048 preserves real TLS, CA verification, and wrong-CA rejection while
+  # keeping this cross-runtime integration gate portable.
+  let cmd = "openssl req -x509 -newkey rsa:2048 -nodes " &
     "-keyout " & quoteShell(key) & " -out " & quoteShell(cert) &
     " -days 1 -subj /CN=" & cn & " -addext subjectAltName=IP:127.0.0.1"
   let (outp, rc) = execCmdEx(cmd)
@@ -106,21 +111,13 @@ proc waitForHttpsStatus(url: string; expectedStatus: int;
     sleep(sleepMs)
   false
 
-proc waitForStdHttpsStatus(url, caFile: string; expectedStatus: int;
-                           tries = 300; sleepMs = 100): bool =
-  for _ in 0 ..< tries:
-    try:
-      let ctx = newContext(verifyMode = CVerifyPeer, caFile = caFile)
-      let client = newHttpClient(timeout = 2000, sslContext = ctx)
-      defer: client.close()
-      let resp = client.request(url, HttpGet)
-      if int(resp.code) == expectedStatus:
-        discard resp.body
-        return true
-    except CatchableError:
-      discard
-    sleep(sleepMs)
-  false
+proc stdHttpsStatus(url, caFile: string): int =
+  let ctx = newContext(verifyMode = CVerifyPeer, caFile = caFile)
+  let client = newHttpClient(timeout = 2000, sslContext = ctx)
+  defer: client.close()
+  let resp = client.request(url, HttpGet)
+  discard resp.body
+  int(resp.code)
 
 proc stopProcess(p: Process) =
   try: p.terminate() except CatchableError: discard
@@ -150,47 +147,181 @@ proc processState(p: Process): string =
 # for std/httpclient to read a body.
 # ---------------------------------------------------------------------------
 
-type M5Server = object
-  certFile, keyFile: string
-  port: int
-  body: string
+const M5StartupErrorTextLimit = 384
+
+type
+  M5Server = object
+    certFile, keyFile: string
+    bindPort: int
+    body: string
+
+  M5StartupKind = enum
+    m5StartupReady,
+    m5StartupError
+
+  M5StartupStage = enum
+    m5StageTlsContext,
+    m5StageBindListen
+
+  M5Startup = object
+    kind: M5StartupKind
+    requestedPort: int
+    port: int
+    errorStage: M5StartupStage
+    errorCode: int32
+    errorTextLen: int
+    errorText: array[M5StartupErrorTextLimit, char]
+
+  M5ServerStartupError = object of IOError
+
+  M5ServerHandle = object
+    thread: Thread[void]
+    port: int
+    threadStarted: bool
+    channelsOpen: bool
 
 var gM5: M5Server
-var gM5Stop: bool
+var gM5Startup: Channel[M5Startup]
+var gM5Stop: Atomic[bool]
+
+proc m5StartupFailure(stage: M5StartupStage; requestedPort: int;
+                      message: string; errorCode = 0'i32): M5Startup =
+  result = M5Startup(
+    kind: m5StartupError,
+    requestedPort: requestedPort,
+    errorStage: stage,
+    errorCode: errorCode)
+  result.errorTextLen = min(message.len, M5StartupErrorTextLimit)
+  for i in 0 ..< result.errorTextLen:
+    result.errorText[i] = message[i]
 
 proc m5ServerThread() {.thread.} =
   {.gcsafe.}:
-    let ctx = newContext(certFile = gM5.certFile, keyFile = gM5.keyFile,
-                         verifyMode = CVerifyNone)
-    var listener = newSocket()
-    listener.setSockOpt(OptReuseAddr, true)
-    listener.bindAddr(Port(gM5.port), "127.0.0.1")
-    listener.listen()
-    while not gM5Stop:
-      var client: Socket
+    var listener: Socket
+    var startupSent = false
+    var startupStage = m5StageTlsContext
+    try:
+      let ctx = newContext(certFile = gM5.certFile,
+                           keyFile = gM5.keyFile,
+                           verifyMode = CVerifyNone)
+      startupStage = m5StageBindListen
+      listener = newSocket()
+      listener.setSockOpt(OptReuseAddr, true)
+      listener.bindAddr(Port(gM5.bindPort), "127.0.0.1")
+      listener.listen()
+      let actualPort = int(listener.getLocalAddr()[1])
+      gM5Startup.send(M5Startup(
+        kind: m5StartupReady,
+        requestedPort: gM5.bindPort,
+        port: actualPort))
+      startupSent = true
+
+      while not gM5Stop.load(moAcquire):
+        var client: Socket
+        try:
+          listener.accept(client)
+        except CatchableError:
+          if gM5Stop.load(moAcquire): break
+          continue
+        try:
+          ctx.wrapConnectedSocket(client, handshakeAsServer)
+          # Drain the request line + headers (until blank line). We don't
+          # care about the target — every path returns the same manifest.
+          var line = ""
+          while true:
+            try: client.readLine(line, timeout = 3000)
+            except CatchableError: break
+            # std/net deliberately returns CRLF (not an empty string) for an
+            # empty HTTP line. Waiting for another line here delays the reply
+            # until the 3s server timeout, after the client's 2s timeout.
+            if line.len == 0 or line == "\r\n": break
+          let resp = "HTTP/1.1 200 OK\r\n" &
+            "Content-Type: application/octet-stream\r\n" &
+            "Content-Length: " & $gM5.body.len & "\r\n" &
+            "Connection: close\r\n\r\n" & gM5.body
+          client.send(resp)
+        except CatchableError:
+          discard
+        finally:
+          try: client.close() except CatchableError: discard
+    except OSError as e:
+      if not startupSent:
+        gM5Startup.send(m5StartupFailure(
+          startupStage, gM5.bindPort, e.msg, e.errorCode))
+    except CatchableError as e:
+      if not startupSent:
+        gM5Startup.send(m5StartupFailure(
+          startupStage, gM5.bindPort, e.msg))
+    finally:
+      if not listener.isNil:
+        try: listener.close() except CatchableError: discard
+
+proc awaitM5Startup(timeoutMs: int): M5Startup =
+  let startedAt = getMonoTime()
+  while (getMonoTime() - startedAt).inMilliseconds < int64(timeoutMs):
+    let received = gM5Startup.tryRecv()
+    if received.dataAvailable:
+      return received.msg
+    sleep(5)
+  raise newException(M5ServerStartupError,
+    "M5 HTTPS startup handshake timed out after " & $timeoutMs & "ms")
+
+proc m5StartupErrorMessage(startup: M5Startup): string =
+  let stage = case startup.errorStage
+    of m5StageTlsContext: "create TLS context"
+    of m5StageBindListen:
+      "bind/listen on 127.0.0.1:" & $startup.requestedPort
+  result = "M5 HTTPS startup failed during " & stage
+  if startup.errorTextLen > 0:
+    result.add(": ")
+    for i in 0 ..< startup.errorTextLen:
+      result.add(startup.errorText[i])
+  elif startup.errorCode != 0:
+    result.add(": " & osErrorMsg(OSErrorCode(startup.errorCode)))
+
+proc closeM5Channels(server: var M5ServerHandle) =
+  if server.channelsOpen:
+    gM5Startup.close()
+    server.channelsOpen = false
+
+proc stopM5Server(server: var M5ServerHandle) =
+  if server.threadStarted:
+    gM5Stop.store(true, moRelease)
+    if server.port > 0:
       try:
-        listener.accept(client)
+        let wake = newSocket()
+        try: wake.connect("127.0.0.1", Port(server.port))
+        finally: wake.close()
       except CatchableError:
-        continue
-      try:
-        ctx.wrapConnectedSocket(client, handshakeAsServer)
-        # Drain the request line + headers (until blank line). We don't
-        # care about the target — every path returns the same manifest.
-        var line = ""
-        while true:
-          try: client.readLine(line, timeout = 3000)
-          except CatchableError: break
-          if line.len == 0: break
-        let resp = "HTTP/1.1 200 OK\r\n" &
-          "Content-Type: application/octet-stream\r\n" &
-          "Content-Length: " & $gM5.body.len & "\r\n" &
-          "Connection: close\r\n\r\n" & gM5.body
-        client.send(resp)
-      except CatchableError:
+        # If the worker already stopped after reporting ready, joining it is
+        # still the authoritative reap. A live ready listener accepts this
+        # loopback wakeup and cannot remain blocked in accept().
         discard
-      finally:
-        try: client.close() except CatchableError: discard
-    try: listener.close() except CatchableError: discard
+    joinThread(server.thread)
+    server.threadStarted = false
+  closeM5Channels(server)
+  server.port = 0
+
+proc startM5Server(server: var M5ServerHandle; config: M5Server;
+                   timeoutMs = 2000): M5Startup =
+  gM5Startup.open(maxItems = 1)
+  server.channelsOpen = true
+  gM5Stop.store(false, moRelease)
+  # This configuration is published before createThread and remains immutable
+  # until stopM5Server joins the worker. Only the atomic flag and channel are
+  # mutated concurrently.
+  gM5 = config
+  try:
+    createThread(server.thread, m5ServerThread)
+    server.threadStarted = true
+    result = awaitM5Startup(timeoutMs)
+    if result.kind == m5StartupError:
+      raise newException(M5ServerStartupError,
+        m5StartupErrorMessage(result))
+    server.port = result.port
+  except CatchableError:
+    stopM5Server(server)
+    raise
 
 # ---------------------------------------------------------------------------
 # Build actions (shared by both legs). NUL-laced payloads so a "treat as
@@ -398,17 +529,52 @@ suite "M7 — repro consumes the HTTPS binary cache end-to-end (M4 + M5 over TLS
         let applyCwd = tmpRoot / "m5-target"; createDir(applyCwd)
         let manifest = signedM5Manifest(signer, applyCwd)
 
-        # Bring up the threaded HTTPS static server serving the manifest.
-        let m5Port = pickPort()
-        gM5 = M5Server(certFile: certFile, keyFile: keyFile, port: m5Port,
-                       body: manifestToString(manifest))
-        gM5Stop = false
-        var m5Thread: Thread[void]
-        createThread(m5Thread, m5ServerThread)
+        # An occupied-port startup failure must be returned through the
+        # handshake promptly and specifically. With the old released-port
+        # design this exception escaped the worker thread and terminated the
+        # whole process, bypassing both fixture assertions and teardown.
+        block m5StartupFailure:
+          let occupied = newSocket()
+          defer: occupied.close()
+          occupied.bindAddr(Port(0), "127.0.0.1")
+          occupied.listen()
+          let occupiedPort = int(occupied.getLocalAddr()[1])
+          var failedServer: M5ServerHandle
+          var failureMessage = ""
+          let failureStartedAt = getMonoTime()
+          try:
+            discard startM5Server(failedServer, M5Server(
+              certFile: certFile,
+              keyFile: keyFile,
+              bindPort: occupiedPort,
+              body: manifestToString(manifest)), timeoutMs = 1500)
+          except M5ServerStartupError as e:
+            failureMessage = e.msg
+          let failureElapsedMs =
+            (getMonoTime() - failureStartedAt).inMilliseconds
+          check failureMessage.contains(
+            "M5 HTTPS startup failed during bind/listen on 127.0.0.1:" &
+              $occupiedPort)
+          check failureElapsedMs < 1000
+          check not failedServer.threadStarted
+          check not failedServer.channelsOpen
+
+        # The real server asks the kernel for Port(0). Its worker reports the
+        # actual port only after TLS context creation, bind, and listen all
+        # succeeded; no released-port window or readiness polling remains.
+        var m5Server: M5ServerHandle
+        let startup = startM5Server(m5Server, M5Server(
+          certFile: certFile,
+          keyFile: keyFile,
+          bindPort: 0,
+          body: manifestToString(manifest)))
+        defer: stopM5Server(m5Server)
+        check startup.kind == m5StartupReady
+        check startup.requestedPort == 0
+        check startup.port > 0
+        let m5Port = startup.port
         let manifestUrl = "https://127.0.0.1:" & $m5Port & "/latest.rdm"
-        doAssert waitForStdHttpsStatus(manifestUrl, certFile, 200),
-          "M5 HTTPS manifest server did not become ready on 127.0.0.1:" &
-            $m5Port
+        check stdHttpsStatus(manifestUrl, certFile) == 200
 
         let agentState = tmpRoot / "m5-agent"
         let applyState = tmpRoot / "m5-apply"
@@ -482,12 +648,3 @@ suite "M7 — repro consumes the HTTPS binary cache end-to-end (M4 + M5 over TLS
           # already byte-identity-checked in block m5Positive above; here we
           # only need that the SAME fetch that failed on the wrong CA now
           # SUCCEEDS on the correct CA — proving real peer verification.)
-
-        # Tear down the M5 server thread.
-        gM5Stop = true
-        # Nudge the accept loop so it observes the stop flag and exits.
-        try:
-          let s = newSocket(); s.connect("127.0.0.1", Port(m5Port))
-          s.close()
-        except CatchableError: discard
-        try: joinThread(m5Thread) except CatchableError: discard
