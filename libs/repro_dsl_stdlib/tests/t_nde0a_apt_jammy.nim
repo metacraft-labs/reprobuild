@@ -50,8 +50,10 @@ import "../../../recipes/packages/adapters/apt-jammy/repro" as aptJammyRecipe
 # (systemd unit normalisation and ``usr/share/...`` paths). The fixture
 # builder below emits a valid ``control.tar`` plus a pure-Nim raw-block
 # ``data.tar.zst`` in a deterministic ``ar`` container without consulting
-# the network. The asserted layout is Linux/Debian-only, so the suite is
-# compiled only on Linux; on macOS/Windows there is no meaningful run.
+# the network. The archive and filesystem-layout assertions are
+# Linux/Debian-only, so that suite is compiled only on Linux. The recipe DSL
+# registry contract at the end of this file is host-independent and remains
+# real coverage on every supported platform.
 # ---------------------------------------------------------------------------
 when defined(linux):
   # ---------------------------------------------------------------------------
@@ -434,35 +436,41 @@ Description: deterministic apt adapter fixture
       check hA != hC
       check hA.len == 16
 
-  # ---------------------------------------------------------------------------
-  # NDE-A DSL-surface coverage. Pins that the rewritten
-  # ``recipes/packages/adapters/apt-jammy/repro.nim`` actually exercises
-  # the new DSL surface (M2 ``versions:``) rather than silently keeping the
-  # legacy ``config:``-only shape. Confirms the recipe's version
-  # declaration is wired through ``registerVersion`` and that the recorded
-  # fields round-trip via ``registeredVersions``. The version string must
-  # track ``AptJammyAdapterVersion`` (the spec §3 fingerprint input) so a
-  # stdlib bugfix and a recipe-side bump stay in lockstep.
-  # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# NDE-A DSL-surface coverage. Pins that the rewritten
+# ``recipes/packages/adapters/apt-jammy/repro.nim`` actually exercises
+# the new DSL surface (M2 ``versions:``) rather than silently keeping the
+# legacy ``config:``-only shape. Confirms the recipe's version declaration
+# is wired through ``registerVersion`` and that the recorded fields round-trip
+# via ``registeredVersions``. Unlike the Debian archive/layout assertions
+# above, this is a pure registry contract and is meaningful on every host.
+# Keeping these real cases outside the Linux branch also means a non-Linux
+# binary truthfully implements the test catalog protocol instead of looking
+# like an unexplained zero-case binary.
+#
+# The version string must track ``AptJammyAdapterVersion`` (the spec §3
+# fingerprint input) so a stdlib bugfix and a recipe-side bump stay in
+# lockstep.
+# ---------------------------------------------------------------------------
 
-  suite "NDE0-A apt-jammy DSL surface":
+suite "NDE0-A apt-jammy DSL surface":
 
-    test "recipe registers exactly one version via the DSL versions: block":
-      let vs = registeredVersions("aptJammy")
-      check vs.len == 1
+  test "recipe registers exactly one version via the DSL versions: block":
+    let vs = registeredVersions("aptJammy")
+    check vs.len == 1
 
-    test "recorded version string matches AptJammyAdapterVersion constant":
-      # Tying the recipe-declared version to the stdlib constant is the
-      # whole point of M2's surface — it makes the cache-key contract
-      # auditable from the DSL side.
-      let vs = registeredVersions("aptJammy")
-      check vs[0].version == AptJammyAdapterVersion
+  test "recorded version string matches AptJammyAdapterVersion constant":
+    # Tying the recipe-declared version to the stdlib constant is the whole
+    # point of M2's surface — it makes the cache-key contract auditable from
+    # the DSL side.
+    let vs = registeredVersions("aptJammy")
+    check vs[0].version == AptJammyAdapterVersion
 
-    test "recorded version carries the snapshot pin as sourceRevision":
-      # The recipe pins the snapshot string into ``sourceRevision`` so the
-      # spec §3 fingerprint ingredients (adapter version + snapshot) are
-      # both reachable from the registry without parsing the config: block.
-      let vs = registeredVersions("aptJammy")
-      check vs[0].sourceRevision == "ubuntu/jammy/20260615T000000Z"
-      check vs[0].sourceUrl.startsWith("https://snapshot.ubuntu.com/")
-      check vs[0].sourceRepository == "https://snapshot.ubuntu.com/ubuntu"
+  test "recorded version carries the snapshot pin as sourceRevision":
+    # The recipe pins the snapshot string into ``sourceRevision`` so the
+    # spec §3 fingerprint ingredients (adapter version + snapshot) are
+    # both reachable from the registry without parsing the config: block.
+    let vs = registeredVersions("aptJammy")
+    check vs[0].sourceRevision == "ubuntu/jammy/20260615T000000Z"
+    check vs[0].sourceUrl.startsWith("https://snapshot.ubuntu.com/")
+    check vs[0].sourceRepository == "https://snapshot.ubuntu.com/ubuntu"

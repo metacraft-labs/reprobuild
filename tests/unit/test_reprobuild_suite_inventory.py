@@ -2937,6 +2937,70 @@ compileProfileBinary()
             [],
         )
 
+    def test_nde0a_catalog_preserves_real_cross_platform_and_linux_coverage(self):
+        """NDE0-A enumerates real host coverage instead of a zero-case stub.
+
+        The Debian archive/layout cases are intentionally Linux-only.  The
+        recipe registry assertions are pure DSL behavior and must remain real
+        cases on every supported host.  Pin both sets by exact catalog name:
+        on Darwin this proves the binary did not merely gain a protocol
+        sentinel, while Linux CI proves all archive cases still build and
+        enumerate rather than being traded away to repair the Darwin count.
+        """
+        data = self.inventory_data()
+        source = "libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim"
+        entry = next(item for item in data["tests"] if item["source"] == source)
+
+        dsl_names = {
+            "NDE0-A apt-jammy DSL surface::"
+            "recipe registers exactly one version via the DSL versions: block",
+            "NDE0-A apt-jammy DSL surface::"
+            "recorded version string matches AptJammyAdapterVersion constant",
+            "NDE0-A apt-jammy DSL surface::"
+            "recorded version carries the snapshot pin as sourceRevision",
+        }
+        linux_names = {
+            "NDE0-A apt-jammy adapter::"
+            "sha256 verification: matching sha succeeds",
+            "NDE0-A apt-jammy adapter::"
+            "sha256 verification: wrong sha raises AptVerifyError",
+            "NDE0-A apt-jammy adapter::"
+            "content-addressed store path: different debs → different paths",
+            "NDE0-A apt-jammy adapter::"
+            "content-addressed store path: same deb twice → same path",
+            "NDE0-A apt-jammy adapter::"
+            "expectedFiles failure: missing entry raises AptExpectedFileMissing",
+            "NDE0-A apt-jammy adapter::"
+            "expectedFiles success: present entry produces output",
+            "NDE0-A apt-jammy adapter::"
+            "installSystemdUnit: normalises lib/systemd/system/ -> "
+            "usr/lib/systemd/system/",
+            "NDE0-A apt-jammy adapter::"
+            "determinism: extract same deb twice into separate roots → "
+            "byte-identical trees",
+            "NDE0-A apt-jammy adapter::"
+            "fingerprint composition: install hash is order-independent",
+            "NDE0-A apt-jammy adapter::"
+            "fingerprint composition: install hash changes when snapshot changes",
+            "NDE0-A apt-jammy adapter::"
+            "extractFingerprint: changes with sha256, stable with same sha256",
+        }
+        expected_names = dsl_names | linux_names if sys.platform.startswith(
+            "linux"
+        ) else dsl_names
+
+        self.assertEqual(entry["countSource"], "catalog")
+        self.assertEqual(entry["sourceSuiteCount"], 2)
+        self.assertEqual(entry["staticCaseCount"], 14)
+        self.assertEqual(entry["sourceCaseCount"], len(expected_names))
+        self.assertEqual(
+            {case["name"] for case in entry["catalogCases"]}, expected_names
+        )
+        self.assertNotIn(
+            source,
+            {item["source"] for item in data["catalogEnumeration"]["quarantine"]},
+        )
+
     def test_completed_clean_attempt_requires_one_coherent_three_run_attempt(self):
         fingerprint = "same-source"
         timing = {
