@@ -4,13 +4,15 @@
 ## This library provides the *pure data structures* of the shared-memory hot
 ## tier — NO daemon logic (that is AC-2b) and NO engine wiring (AC-2c):
 ##
-##   * `action-index.ctl`  — the fixed, self-describing control region: header
+##   * `action-index.ctl` (Linux) / `action-index-v2.ctl` (Darwin) — the fixed,
+##     self-describing control region: header
 ##     (magic / formatVersion / creatorBootId), atomic `currentGeneration`,
 ##     daemon pid + heartbeat, a reader-epoch table, and the MPSC submission
 ##     ring. Created/attached with a version+boot guard that recreates the
 ##     region empty on mismatch or corruption.
-##   * `action-index.<gen>.seg` — a fixed open-addressed generation segment with
-##     lock-free seqlock reads and a single-writer slot write.
+##   * `action-index.<gen>.seg` (Linux) /
+##     `action-index-v2.<gen>.seg` (Darwin) — a fixed open-addressed generation
+##     segment with lock-free seqlock reads and a single-writer slot write.
 ##
 ## Primitives (all POSIX atomics + offset-only addressing, NO process-shared
 ## mutex):
@@ -38,6 +40,19 @@ when defined(macosx):
   {.emit: """
     #include <stdint.h>
     #include <libproc.h>
+    #include <sys/sysctl.h>
+    #include <sys/time.h>
+    static uint64_t repro_boot_id(void) {
+      struct timeval boot_time;
+      size_t size = sizeof(boot_time);
+      if (sysctlbyname("kern.boottime", &boot_time, &size, NULL, 0) != 0 ||
+          size != sizeof(boot_time) || boot_time.tv_sec <= 0 ||
+          boot_time.tv_usec < 0 || boot_time.tv_usec >= 1000000) {
+        return 0;
+      }
+      return (((uint64_t)boot_time.tv_sec) << 20) |
+             (uint64_t)boot_time.tv_usec;
+    }
     static uint64_t repro_process_start_token(int pid) {
       struct proc_bsdinfo info;
       int got = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0,
@@ -47,6 +62,8 @@ when defined(macosx):
              (uint64_t)info.pbi_start_tvusec;
     }
   """.}
+  proc macBootId(): uint64
+    {.importc: "repro_boot_id", nodecl.}
   proc macProcessStartToken(pid: cint): uint64
     {.importc: "repro_process_start_token", nodecl.}
 
@@ -142,22 +159,31 @@ type
 
 proc bootId*(): uint64 =
   ## A per-boot identity used to invalidate stale shm regions after a reboot
-  ## (§4.1 creatorBootId). On Linux the kernel boot_id; elsewhere a stable-per-
-  ## boot fallback derived from a monotonic reference. Zero is never returned.
-  when defined(linux):
+  ## (§4.1 creatorBootId). Zero means the platform's authoritative boot identity
+  ## was unavailable; callers must disable the volatile shared-memory tier
+  ## rather than publish a process-local or time-varying substitute.
+  when defined(reproShmIndexTestBootIdUnavailable):
+    # Compile-time-only integration seam. Production builds never define it;
+    # the dedicated gate proves that an unavailable authoritative identity
+    # cannot create any shared-memory namespace files.
+    result = 0
+  elif defined(linux):
     try:
       let raw = readFile("/proc/sys/kernel/random/boot_id")
       var h: uint64 = 1469598103934665603'u64      # FNV-1a offset basis
       for ch in raw:
         if ch != '-' and ch != '\n':
           h = (h xor uint64(ord(ch))) * 1099511628211'u64
-      return (h or 1'u64)
+      result = h or 1'u64
     except CatchableError:
-      discard
-  # Fallback: boot time inferred as (now - uptime) rounded to seconds. Stable
-  # across a single boot, changes across reboots.
-  let secs = uint64(epochTime().int64)
-  (secs or 1'u64)
+      result = 0
+  elif defined(macosx):
+    # `kern.boottime` is one kernel-owned timeval shared by every process for
+    # the lifetime of the boot. Encoding its seconds and microseconds preserves
+    # the full identity without depending on wall-clock time at attachment.
+    result = macBootId()
+  else:
+    result = 0
 
 const
   WorkAckProbeGraceMs* = 100'u64
@@ -185,7 +211,10 @@ when shmIndexSupported:
       ticket: uint32
 
   proc ctlPath*(cacheRoot: string): string =
-    cacheRoot / "action-index.ctl"
+    when LifecycleNamespaceVersion == 2:
+      cacheRoot / "action-index-v2.ctl"
+    else:
+      cacheRoot / "action-index.ctl"
 
   proc headerLooksValid(base: ShmBase; expectBoot: uint64): bool =
     ## The version+boot guard: a region is usable only if the magic + format
@@ -253,6 +282,8 @@ when shmIndexSupported:
     result.cacheRoot = cacheRoot
     result.available = false
     let boot = bootId()
+    if boot == 0:
+      return
     createDir(cacheRoot)
     let cp = ctlPath(cacheRoot)
 

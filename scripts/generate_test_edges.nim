@@ -61,6 +61,9 @@ const
   HcrExtraPassC = "-fpatchable-function-entry=16,0"
   HcrExtraPassL = "-Wl,-segprot,__HCR,rwx,rwx"
 
+  BootIdUnavailableTest =
+    "tests/integration/t_shm_index_boot_id_unavailable_fails_closed.nim"
+
 type
   TargetOs = enum
     ## Bootstrap-And-Self-Build B4: per-test target-OS guard. ``soAny``
@@ -402,6 +405,8 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
     var definesList: seq[string] = @[]
     if edge.needsProviderMode: definesList.add("reproProviderMode")
     if edge.needsSsl: definesList.add("ssl")
+    if edge.source == BootIdUnavailableTest:
+      definesList.add("reproShmIndexTestBootIdUnavailable")
     let definesLit = seqLiteral(definesList)
     let reqLit = if edge.requiresReproBinary: "true" else: "false"
     let targetOsLit = case edge.targetOs

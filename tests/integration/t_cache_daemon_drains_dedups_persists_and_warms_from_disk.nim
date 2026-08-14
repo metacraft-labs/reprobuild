@@ -3,6 +3,7 @@ import std/[os, osproc, streams, strutils, tempfiles, times, unittest]
 import repro_shm_index
 import repro_shm_index/daemon
 import repro_shm_index/atomics_shm
+import repro_shm_index/mapping
 import repro_hash/types
 import repro_local_store
 import repro_test_support
@@ -347,6 +348,116 @@ proc legacyTryClaim(idx: ShmIndex; candidatePid, atSeconds: uint64): bool =
     storeU64Release(idx.ctl.base, CtlOffDaemonHeartbeat, atSeconds)
     return true
   false
+
+proc peerCommand(peer: var Process; command: string): string =
+  peer.inputStream.writeLine(command)
+  peer.inputStream.flush()
+  peer.outputStream.readLine()
+
+template exerciseBidirectionalPeer(peerBinaryStem, peerActionId,
+    tempPrefix: string) =
+  block:
+    let tempRoot = createTempDir(tempPrefix, "")
+    defer: removeDir(tempRoot)
+    let cacheRoot = tempRoot / "action-cache"
+    let legacyPeer = requireBinary(
+      getCurrentDir() / "build" / "test-bin" /
+        addFileExt(peerBinaryStem, ExeExt), peerActionId)
+    var idx = openShmIndex(cacheRoot)
+    require idx.available
+
+    # The owner is a separately compiled old-algorithm daemon. Force its
+    # untagged heartbeat logically stale while leaving its real process alive:
+    # capable code must not TTL-steal a live legacy owner.
+    var legacyOwner = startProcess(legacyPeer,
+      args = @["claim-block", cacheRoot],
+      options = {poStdErrToStdOut})
+    defer:
+      if legacyOwner.running:
+        legacyOwner.terminate()
+        discard legacyOwner.waitForExit()
+      legacyOwner.close()
+    require legacyOwner.outputStream.readLine() == "CLAIMED"
+    let legacyPid = idx.rawOwnerPid()
+    check legacyPid != 0
+    check legacyPid != uint64(getCurrentProcessId())
+    check not heartbeatIsCapable(idx.rawOwnerHeartbeat())
+    storeU64Release(idx.ctl.base, CtlOffDaemonHeartbeat, 1)
+
+    var capable = openCacheDaemon(cacheRoot)
+    check not capable.tryClaimOwnership(atSeconds = 100)
+    check idx.rawOwnerPid() == legacyPid
+    check idx.currentOwnerIdentity().nonce == 0
+
+    # Hard-stop the old daemon, then prove prompt capable-code recovery.
+    legacyOwner.terminate()
+    discard legacyOwner.waitForExit()
+    check capable.tryClaimOwnership(atSeconds = 200)
+    let capableOwner = idx.currentOwnerIdentity()
+    check capableOwner.nonce != 0
+    check capableOwner == capable.owner
+
+    # Old election sees the tagged heartbeat as fresh and rejects its claim.
+    var legacyContender = startProcess(legacyPeer,
+      args = @["try-claim", cacheRoot],
+      options = {poStdErrToStdOut})
+    let contenderCode = legacyContender.waitForExit()
+    let contenderOutput = legacyContender.outputStream.readAll().strip()
+    legacyContender.close()
+    check contenderCode == 0
+    check contenderOutput == "REJECTED"
+    check idx.currentOwnerIdentity() == capableOwner
+
+    # Old producer -> new consumer, with an exact metadata payload check.
+    let oldProducedRecord = recordFor(NumKeys + 425)
+    let oldProducedPayload = encodeActionResultRecord(oldProducedRecord)
+    var oldProducer = startProcess(legacyPeer, args = @[
+      "produce", cacheRoot,
+      bytesHex(oldProducedRecord.weakFingerprint.bytes),
+      bytesHex(oldProducedPayload),
+    ], options = {poStdErrToStdOut})
+    let producerCode = oldProducer.waitForExit()
+    let producerOutput = oldProducer.outputStream.readAll().strip()
+    oldProducer.close()
+    check producerCode == 0
+    check producerOutput == "PRODUCED"
+    check idx.ringView.pendingCount() == 1
+    check capable.drainOnce() == 1
+    var oldProducedSnap: SlotSnapshot
+    check capable.idx.liveSeg.lookupSlot(
+      oldProducedRecord.weakFingerprint.bytes, oldProducedSnap) == srsHit
+    check oldProducedSnap.rec == oldProducedPayload
+
+    # New producer -> old consumer through the complete old daemon module.
+    capable.close()
+    let newProducedRecord = recordFor(NumKeys + 426)
+    let newProducedPayload = encodeActionResultRecord(newProducedRecord)
+    check idx.submitRecord(newProducedRecord.weakFingerprint.bytes,
+      newProducedPayload)
+    var legacyConsumer = startProcess(legacyPeer,
+      args = @["consume", cacheRoot],
+      options = {poStdErrToStdOut})
+    let consumerCode = legacyConsumer.waitForExit()
+    let consumerOutput = legacyConsumer.outputStream.readAll().strip()
+    legacyConsumer.close()
+    check consumerCode == 0
+    check consumerOutput == "CONSUMED " &
+      bytesHex(newProducedRecord.weakFingerprint.bytes) & " " &
+      bytesHex(newProducedPayload)
+    check idx.ringView.pendingCount() == 0
+    check idx.followLiveGeneration()
+    var newProducedSnap: SlotSnapshot
+    check idx.liveSeg.lookupSlot(newProducedRecord.weakFingerprint.bytes,
+      newProducedSnap) == srsHit
+    check newProducedSnap.rec == newProducedPayload
+
+    # A capable successor reclaims and acknowledges the old consumer's notice.
+    var successor = openCacheDaemon(cacheRoot)
+    check successor.tryClaimOwnership()
+    check successor.drainOnce() == 0
+    check not idx.workOutstanding()
+    successor.close()
+    idx.close()
 
 suite "integration_cache_daemon_drains_dedups_persists_and_warms_from_disk":
   when isNixSupported:
@@ -1868,112 +1979,124 @@ suite "integration_cache_daemon_drains_dedups_persists_and_warms_from_disk":
       capable.close()
       idx.close()
 
-    test "pinned origin dev peer interoperates in both directions":
-      let tempRoot = createTempDir("repro-daemon-origin-dev-peer", "")
-      defer: removeDir(tempRoot)
-      let cacheRoot = tempRoot / "action-cache"
-      let legacyPeer = requireBinary(
-        getCurrentDir() / "build" / "test-bin" /
-          addFileExt("legacy_cache_peer_origin_dev", ExeExt),
-        "reprobuild.test_helpers.legacy_cache_peer_origin_dev")
-      var idx = openShmIndex(cacheRoot)
-      require idx.available
+    when defined(linux):
+      test "pinned origin dev peer interoperates in both directions":
+        const pathRoot = "linux-lifecycle-root"
+        check LifecycleNamespaceVersion == 1
+        check ctlPath(pathRoot) == pathRoot / "action-index.ctl"
+        check segPath(pathRoot, 7) == pathRoot / "action-index.7.seg"
+        exerciseBidirectionalPeer(
+          "legacy_cache_peer_origin_dev",
+          "reprobuild.test_helpers.legacy_cache_peer_origin_dev",
+          "repro-daemon-origin-dev-peer")
 
-      # The owner is the separately compiled, byte-pinned origin/dev daemon.
-      # Force its untagged heartbeat logically stale while leaving its real
-      # process alive: new code must not TTL-steal a live legacy owner.
-      var legacyOwner = startProcess(legacyPeer,
-        args = @["claim-block", cacheRoot],
-        options = {poStdErrToStdOut})
-      defer:
-        if legacyOwner.running:
-          legacyOwner.terminate()
-          discard legacyOwner.waitForExit()
-        legacyOwner.close()
-      require legacyOwner.outputStream.readLine() == "CLAIMED"
-      let legacyPid = idx.rawOwnerPid()
-      check legacyPid != 0
-      check legacyPid != uint64(getCurrentProcessId())
-      check not heartbeatIsCapable(idx.rawOwnerHeartbeat())
-      storeU64Release(idx.ctl.base, CtlOffDaemonHeartbeat, 1)
+    test "legacy-wire peer interoperates in both directions":
+      exerciseBidirectionalPeer(
+        "legacy_cache_peer_legacy_wire",
+        "reprobuild.test_helpers.legacy_cache_peer_legacy_wire",
+        "repro-daemon-legacy-wire-peer")
 
-      var capable = openCacheDaemon(cacheRoot)
-      check not capable.tryClaimOwnership(atSeconds = 100)
-      check idx.rawOwnerPid() == legacyPid
-      check idx.currentOwnerIdentity().nonce == 0
+    when defined(macosx):
+      test "Darwin v1 and v2 peers isolate volatile state and share Tier-1":
+        let tempRoot = createTempDir("repro-daemon-darwin-namespaces", "")
+        defer: removeDir(tempRoot)
+        let cacheRoot = tempRoot / "action-cache"
+        let exactPeer = requireBinary(
+          getCurrentDir() / "build" / "test-bin" /
+            addFileExt("legacy_cache_peer_origin_dev", ExeExt),
+          "reprobuild.test_helpers.legacy_cache_peer_origin_dev")
 
-      # Hard-stop the actual old daemon, then prove prompt new-code recovery.
-      legacyOwner.terminate()
-      discard legacyOwner.waitForExit()
-      check capable.tryClaimOwnership(atSeconds = 200)
-      let capableOwner = idx.currentOwnerIdentity()
-      check capableOwner.nonce != 0
-      check capableOwner == capable.owner
+        # Keep the exact-old v1 mapping open. Reopening it later would invoke
+        # its historical time-varying boot identity and obscure the namespace
+        # isolation property under test.
+        var oldPeer = startProcess(exactPeer,
+          args = @["isolation-server", cacheRoot],
+          options = {poStdErrToStdOut})
+        defer:
+          if oldPeer.running:
+            oldPeer.terminate()
+            discard oldPeer.waitForExit()
+          oldPeer.close()
+        require oldPeer.outputStream.readLine() == "CLAIMED"
 
-      # The actual old daemon election sees the new tagged heartbeat as fresh
-      # and rejects its claim. This is the opposite ownership direction.
-      var legacyContender = startProcess(legacyPeer,
-        args = @["try-claim", cacheRoot],
-        options = {poStdErrToStdOut})
-      let contenderCode = legacyContender.waitForExit()
-      let contenderOutput = legacyContender.outputStream.readAll().strip()
-      legacyContender.close()
-      check contenderCode == 0
-      check contenderOutput == "REJECTED"
-      check idx.currentOwnerIdentity() == capableOwner
+        let oldCtlPath = cacheRoot / "action-index.ctl"
+        let oldSegPath = cacheRoot / "action-index.0.seg"
+        require fileExists(oldCtlPath)
+        require fileExists(oldSegPath)
+        var oldCtl = attachRegion(oldCtlPath, CtlRegionSize)
+        require oldCtl.isValid
+        defer: oldCtl.detach()
+        let oldPid = uint64(processID(oldPeer))
+        check loadU64Acquire(oldCtl.base, CtlOffDaemonPid) == oldPid
+        check peerCommand(oldPeer, "state") == "STATE 1 0 0"
 
-      # Old producer -> new consumer, with an exact metadata payload check.
-      let oldProducedRecord = recordFor(NumKeys + 425)
-      let oldProducedPayload = encodeActionResultRecord(oldProducedRecord)
-      var oldProducer = startProcess(legacyPeer, args = @[
-        "produce", cacheRoot,
-        bytesHex(oldProducedRecord.weakFingerprint.bytes),
-        bytesHex(oldProducedPayload),
-      ], options = {poStdErrToStdOut})
-      let producerCode = oldProducer.waitForExit()
-      let producerOutput = oldProducer.outputStream.readAll().strip()
-      oldProducer.close()
-      check producerCode == 0
-      check producerOutput == "PRODUCED"
-      check idx.ringView.pendingCount() == 1
-      check capable.drainOnce() == 1
-      var oldProducedSnap: SlotSnapshot
-      check capable.idx.liveSeg.lookupSlot(
-        oldProducedRecord.weakFingerprint.bytes, oldProducedSnap) == srsHit
-      check oldProducedSnap.rec == oldProducedPayload
+        var capable = openCacheDaemon(cacheRoot)
+        require capable.idx.available
+        require LifecycleNamespaceVersion == 2
+        require FormatVersion == 1
+        let newCtlPath = ctlPath(cacheRoot)
+        let newSegPath = segPath(cacheRoot, 0)
+        check newCtlPath == cacheRoot / "action-index-v2.ctl"
+        check newSegPath == cacheRoot / "action-index-v2.0.seg"
+        check newCtlPath != oldCtlPath
+        check newSegPath != oldSegPath
+        require fileExists(newCtlPath)
+        require fileExists(newSegPath)
+        require capable.tryClaimOwnership()
+        check capable.idx.rawOwnerPid() == uint64(getCurrentProcessId())
+        check capable.idx.rawOwnerPid() != oldPid
+        check loadU64Acquire(oldCtl.base, CtlOffDaemonPid) == oldPid
+        check peerCommand(oldPeer, "state") == "STATE 1 0 0"
 
-      # New producer -> old consumer. The helper's complete pinned daemon
-      # module claims, drains, applies, and releases the compatible mapping.
-      capable.close()
-      let newProducedRecord = recordFor(NumKeys + 426)
-      let newProducedPayload = encodeActionResultRecord(newProducedRecord)
-      check idx.submitRecord(newProducedRecord.weakFingerprint.bytes,
-        newProducedPayload)
-      var legacyConsumer = startProcess(legacyPeer,
-        args = @["consume", cacheRoot],
-        options = {poStdErrToStdOut})
-      let consumerCode = legacyConsumer.waitForExit()
-      let consumerOutput = legacyConsumer.outputStream.readAll().strip()
-      legacyConsumer.close()
-      check consumerCode == 0
-      check consumerOutput == "CONSUMED " &
-        bytesHex(newProducedRecord.weakFingerprint.bytes) & " " &
-        bytesHex(newProducedPayload)
-      check idx.ringView.pendingCount() == 0
-      check idx.followLiveGeneration()
-      var newProducedSnap: SlotSnapshot
-      check idx.liveSeg.lookupSlot(newProducedRecord.weakFingerprint.bytes,
-        newProducedSnap) == srsHit
-      check newProducedSnap.rec == newProducedPayload
+        let oldRecord = recordFor(NumKeys + 427)
+        let oldPayload = encodeActionResultRecord(oldRecord)
+        check peerCommand(oldPeer, "produce " &
+          bytesHex(oldRecord.weakFingerprint.bytes) & " " &
+          bytesHex(oldPayload)) == "PRODUCED"
+        check peerCommand(oldPeer, "state") == "STATE 1 1 0"
+        check capable.idx.ringView.pendingCount() == 0
+        var snapshot: SlotSnapshot
+        check capable.idx.liveSeg.lookupSlot(
+          oldRecord.weakFingerprint.bytes, snapshot) == srsMiss
 
-      # A new capable successor can reclaim ownership and acknowledge the
-      # notification left by the legacy consumer without replaying a ticket.
-      var successor = openCacheDaemon(cacheRoot)
-      check successor.tryClaimOwnership()
-      check successor.drainOnce() == 0
-      check not idx.workOutstanding()
-      successor.close()
-      idx.close()
+        let newRecord = recordFor(NumKeys + 428)
+        let newPayload = encodeActionResultRecord(newRecord)
+        check capable.idx.submitRecord(newRecord.weakFingerprint.bytes,
+          newPayload)
+        check capable.idx.ringView.pendingCount() == 1
+        check peerCommand(oldPeer, "state") == "STATE 1 1 0"
+        check peerCommand(oldPeer, "lookup " &
+          bytesHex(newRecord.weakFingerprint.bytes)) == "MISS"
+
+        # Each daemon drains only its own ring and writes only its own segment.
+        check peerCommand(oldPeer, "drain-persist") ==
+          "DRAINED 1 PERSISTED 1"
+        check capable.idx.ringView.pendingCount() == 1
+        check capable.idx.liveSeg.lookupSlot(
+          oldRecord.weakFingerprint.bytes, snapshot) == srsMiss
+        check peerCommand(oldPeer, "lookup " &
+          bytesHex(oldRecord.weakFingerprint.bytes)) ==
+            "HIT " & bytesHex(oldPayload)
+
+        check capable.drainOnce() == 1
+        check capable.idx.ringView.pendingCount() == 0
+        check capable.idx.liveSeg.lookupSlot(
+          newRecord.weakFingerprint.bytes, snapshot) == srsHit
+        check snapshot.rec == newPayload
+        check peerCommand(oldPeer, "lookup " &
+          bytesHex(newRecord.weakFingerprint.bytes)) == "MISS"
+
+        # Volatile namespaces are isolated, but the durable Tier-1 store is the
+        # intended compatibility bridge. Recover the old record lazily into v2.
+        check capable.warmFromDisk(oldRecord.weakFingerprint)
+        check capable.idx.liveSeg.lookupSlot(
+          oldRecord.weakFingerprint.bytes, snapshot) == srsHit
+        check snapshot.rec == oldPayload
+        check peerCommand(oldPeer, "state") == "STATE 1 0 0"
+        check loadU64Acquire(oldCtl.base, CtlOffDaemonPid) == oldPid
+        check peerCommand(oldPeer, "quit") == "BYE"
+        check oldPeer.waitForExit() == 0
+        capable.close()
 
     test "paused lease initializer is recognizable to 24 real followers":
       let tempRoot = createTempDir("repro-daemon-paused-reservation", "")

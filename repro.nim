@@ -556,16 +556,26 @@ package reprobuild:
       # table rejects the duplicate with a ``duplicate implicit target
       # name`` diagnostic at provider time. The explicit ``actionId``
       # is the selector for the execute edge.
-      let executeEdge =
-        if spec.requiresReproBinary:
-          edge.testBinary.run(
-            requiredBinaries = [reproBinaryPath],
-            actionId = executeActionId,
-            registerImplicitName = false)
-        else:
-          edge.testBinary.run(
-            actionId = executeActionId,
-            registerImplicitName = false)
+      var requiredBinaries: seq[string] = @[]
+      var executeDeps: seq[string] = @[]
+      if spec.requiresReproBinary:
+        requiredBinaries.add(reproBinaryPath)
+      if spec.source ==
+          "tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim":
+        # Both separately compiled compatibility peers are runtime fixtures of
+        # this integration binary. The typed input paths make a focused graph
+        # target build them, while the explicit ids make the ordering contract
+        # unambiguous even though helper declarations occur later in this
+        # project body.
+        requiredBinaries.add("build/test-bin/legacy_cache_peer_origin_dev")
+        requiredBinaries.add("build/test-bin/legacy_cache_peer_legacy_wire")
+        executeDeps.add("reprobuild.test_helpers.legacy_cache_peer_origin_dev")
+        executeDeps.add("reprobuild.test_helpers.legacy_cache_peer_legacy_wire")
+      let executeEdge = edge.testBinary.run(
+        deps = executeDeps,
+        requiredBinaries = requiredBinaries,
+        actionId = executeActionId,
+        registerImplicitName = false)
       reprobuildTestExecuteActions.add(executeEdge)
 
     # Bootstrap-And-Self-Build B4: Python tests join the ``test``
@@ -966,16 +976,56 @@ package reprobuild:
       cacheable = false,
       actionId = "reprobuild.test_helpers.harness_apply_lock_holder"))
 
-    # Cross-version action-cache lifecycle peer. All shared-memory and daemon
-    # implementation files are byte-identical blobs from the pinned origin/dev
-    # commit documented by the fixture README. Keeping the helper in this
-    # collection makes the compatibility gate fully offline and graph-native.
+    # Cross-version action-cache lifecycle peers. The exact peer compiles all
+    # implementation files byte-for-byte from the pinned origin/dev commit.
+    # The legacy-wire peer is generated from those same audited blobs; five
+    # modules remain byte-identical and only the top/segment modules receive
+    # cardinality-checked Darwin boot-id + lifecycle-name substitutions.
+    let legacyWireGeneratedRoot =
+      "build/test-fixtures/cache-daemon-legacy-wire"
+    let legacyWireGeneratedSources = @[
+      legacyWireGeneratedRoot &
+        "/libs/repro_shm_index/src/repro_shm_index.nim",
+      legacyWireGeneratedRoot &
+        "/libs/repro_shm_index/src/repro_shm_index/atomics_shm.nim",
+      legacyWireGeneratedRoot &
+        "/libs/repro_shm_index/src/repro_shm_index/daemon.nim",
+      legacyWireGeneratedRoot &
+        "/libs/repro_shm_index/src/repro_shm_index/layout.nim",
+      legacyWireGeneratedRoot &
+        "/libs/repro_shm_index/src/repro_shm_index/mapping.nim",
+      legacyWireGeneratedRoot &
+        "/libs/repro_shm_index/src/repro_shm_index/ring.nim",
+      legacyWireGeneratedRoot &
+        "/libs/repro_shm_index/src/repro_shm_index/segment.nim",
+    ]
+    let legacyWireOriginSources = @[
+      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index.nim",
+      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/atomics_shm.nim",
+      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/daemon.nim",
+      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/layout.nim",
+      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/mapping.nim",
+      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/ring.nim",
+      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/segment.nim",
+    ]
+    let legacyWireGenerator = sh.shell(
+      command = "python3 tests/fixtures/cache-daemon-origin-dev-9f0a9be/generate_legacy_wire.py --output-root " &
+        legacyWireGeneratedRoot,
+      actionId = "reprobuild.test_helpers.generate_legacy_cache_peer_wire",
+      extraInputs = legacyWireOriginSources & @[
+        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/generate_legacy_wire.py",
+      ],
+      extraOutputs = legacyWireGeneratedSources,
+      cacheable = false)
+    reprobuildTestHelpersActions.add(legacyWireGenerator)
+
     reprobuildTestHelpersActions.add(nim.c(
       source = "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer.nim",
       binary = "build/test-bin/legacy_cache_peer_origin_dev",
       paths = sourceOnlyNimPaths,
       extraInputs = @[
         "tests/fixtures/cache-daemon-origin-dev-9f0a9be/README.md",
+        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_main.nim",
         "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index.nim",
         "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/atomics_shm.nim",
         "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/daemon.nim",
@@ -988,6 +1038,21 @@ package reprobuild:
       nimcache = "build/nimcache/legacy_cache_peer_origin_dev",
       cacheable = false,
       actionId = "reprobuild.test_helpers.legacy_cache_peer_origin_dev"))
+
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_legacy_wire.nim",
+      binary = "build/test-bin/legacy_cache_peer_legacy_wire",
+      paths = sourceOnlyNimPaths,
+      extraInputs = legacyWireGeneratedSources & @[
+        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/README.md",
+        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/generate_legacy_wire.py",
+        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_main.nim",
+      ],
+      after = [legacyWireGenerator],
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/legacy_cache_peer_legacy_wire",
+      cacheable = false,
+      actionId = "reprobuild.test_helpers.legacy_cache_peer_legacy_wire"))
 
     # Binary-cache integration-test subprocess helpers (A2/A2.5/A3/A4).
     #

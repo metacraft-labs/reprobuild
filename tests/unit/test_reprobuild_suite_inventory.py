@@ -738,6 +738,143 @@ test "incomplete name" and:
                 "sourceCaseCount": 1,
                 "class": "integration",
             },
+            # Upstream 3b338d82c/e106faf6e extends two already-enrolled
+            # runtime-loader sources by exactly three catalog cases. Pin both
+            # source-to-binary mappings so the aggregate +3 cannot hide drift.
+            "tests/unit/t_m9r14e_3_action_env_threading.nim": {
+                "binary": "build/test-bin/t_m9r14e_3_action_env_threading",
+                "language": "nim",
+                "sourceSuiteCount": 2,
+                "sourceCaseCount": 29,
+                "class": "pure unit",
+            },
+            "libs/repro_build_engine/tests/"
+            "test_tool_identity_env_plumbing.nim": {
+                "binary": "build/test-bin/test_tool_identity_env_plumbing",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 9,
+                "class": "pure unit",
+            },
+            # Upstream 11cea6789 enrolls six one-case develop-selection
+            # integrations. Pin every source-to-binary mapping so a later
+            # aggregate-preserving replacement cannot hide graph drift.
+            "tests/integration/"
+            "t_develop_dependency_modes_walk_a_real_depends_graph.nim": {
+                "binary": "build/test-bin/"
+                "t_develop_dependency_modes_walk_a_real_depends_graph",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_develop_at_rev_walks_to_nearest_locked_ancestor.nim": {
+                "binary": "build/test-bin/"
+                "t_develop_at_rev_walks_to_nearest_locked_ancestor",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_develop_list_reports_tier_and_backend.nim": {
+                "binary": "build/test-bin/"
+                "t_develop_list_reports_tier_and_backend",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_develop_lock_store_supplies_private_route.nim": {
+                "binary": "build/test-bin/"
+                "t_develop_lock_store_supplies_private_route",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_develop_only_except_refuse_unknown_names.nim": {
+                "binary": "build/test-bin/"
+                "t_develop_only_except_refuse_unknown_names",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_develop_selectors_compose_in_fixed_order.nim": {
+                "binary": "build/test-bin/"
+                "t_develop_selectors_compose_in_fixed_order",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
+            # Four test sources already present at upstream 391a892a4 were
+            # omitted from its checked-in generated graph. Regeneration enrolls
+            # exactly these four; fresh binary catalogs account for all 29
+            # cases (7 + 5 + 14 + 3).
+            "libs/repro_deploy_agent/tests/"
+            "t_repro_deploy_agent_manifest_v2_secrets.nim": {
+                "binary": "build/test-bin/"
+                "t_repro_deploy_agent_manifest_v2_secrets",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 7,
+                "class": "pure unit",
+            },
+            "libs/repro_deploy_agent/tests/"
+            "t_repro_deploy_agent_materialises_secrets.nim": {
+                "binary": "build/test-bin/"
+                "t_repro_deploy_agent_materialises_secrets",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 5,
+                "class": "pure unit",
+            },
+            "libs/repro_deploy_agent/tests/"
+            "t_repro_deploy_agent_secrets_seal_open.nim": {
+                "binary": "build/test-bin/"
+                "t_repro_deploy_agent_secrets_seal_open",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 14,
+                "class": "pure unit",
+            },
+            "tests/integration/t_branch_fork_inherits_project_set.nim": {
+                "binary": "build/test-bin/t_branch_fork_inherits_project_set",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 3,
+                "class": "integration",
+            },
+            # Both Linux and Darwin register 38 cache-daemon cases: Linux keeps
+            # exact-old interop while Darwin substitutes v1/v2 isolation, and
+            # both add legacy-wire interop. The static scan sees both
+            # conditional declarations and therefore reports 39 below.
+            "tests/integration/"
+            "t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim": {
+                "binary": "build/test-bin/"
+                "t_cache_daemon_drains_dedups_persists_and_warms_from_disk",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 38,
+                "class": "integration",
+            },
+            # A separate graph spec carries the compile-time unavailable-ID
+            # seam, so production and test configurations cannot be confused.
+            "tests/integration/"
+            "t_shm_index_boot_id_unavailable_fails_closed.nim": {
+                "binary": "build/test-bin/"
+                "t_shm_index_boot_id_unavailable_fails_closed",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
         }
         for source, expected in expected_enrollments.items():
             with self.subTest(enrolled_source=source):
@@ -762,6 +899,64 @@ test "incomplete name" and:
                 ):
                     with self.subTest(field=field):
                         self.assertEqual(entry[field], expected[field])
+
+        cache_source = (
+            "tests/integration/"
+            "t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim"
+        )
+        fail_closed_source = (
+            "tests/integration/"
+            "t_shm_index_boot_id_unavailable_fails_closed.nim"
+        )
+        self.assertEqual(by_source[cache_source]["staticCaseCount"], 39)
+        self.assertEqual(by_source[fail_closed_source]["staticCaseCount"], 1)
+
+        # Strong graph mappings for both subprocess peers and their generator.
+        # These are action assignments rather than loose substring presence:
+        # dropping, duplicating, or pointing an id at another source fails.
+        repro_graph = (REPO_ROOT / "repro.nim").read_text(encoding="utf-8")
+        expected_helper_actions = {
+            "reprobuild.test_helpers.legacy_cache_peer_origin_dev": (
+                "tests/fixtures/cache-daemon-origin-dev-9f0a9be/"
+                "legacy_cache_peer.nim",
+                "build/test-bin/legacy_cache_peer_origin_dev",
+            ),
+            "reprobuild.test_helpers.legacy_cache_peer_legacy_wire": (
+                "tests/fixtures/cache-daemon-origin-dev-9f0a9be/"
+                "legacy_cache_peer_legacy_wire.nim",
+                "build/test-bin/legacy_cache_peer_legacy_wire",
+            ),
+        }
+        for action_id, (source, binary) in expected_helper_actions.items():
+            pattern = (
+                r"reprobuildTestHelpersActions\.add\(nim\.c\("
+                r"(?:(?!reprobuildTestHelpersActions\.add).)*?"
+                r"source\s*=\s*\"" + re.escape(source) + r"\""
+                r"(?:(?!reprobuildTestHelpersActions\.add).)*?"
+                r"binary\s*=\s*\"" + re.escape(binary) + r"\""
+                r"(?:(?!reprobuildTestHelpersActions\.add).)*?"
+                r"actionId\s*=\s*\"" + re.escape(action_id) + r"\""
+            )
+            self.assertEqual(len(re.findall(pattern, repro_graph, re.S)), 1)
+        self.assertEqual(
+            len(
+                re.findall(
+                    r"actionId\s*=\s*\"reprobuild\.test_helpers\."
+                    r"generate_legacy_cache_peer_wire\"",
+                    repro_graph,
+                )
+            ),
+            1,
+        )
+        for required in (
+            "build/test-bin/legacy_cache_peer_origin_dev",
+            "build/test-bin/legacy_cache_peer_legacy_wire",
+        ):
+            self.assertIn(f'requiredBinaries.add("{required}")', repro_graph)
+        self.assertIn(
+            'defines: @["reproShmIndexTestBootIdUnavailable"]',
+            (REPO_ROOT / "repro_tests.nim").read_text(encoding="utf-8"),
+        )
 
         # Exact generated-graph specification counts. An omitted, duplicated,
         # or substituted enrollment cannot be absorbed by the case totals.
@@ -1079,7 +1274,11 @@ test "incomplete name" and:
         #   The independently attributed static aggregate immediately before
         #   that upstream commit is therefore 6777, so 6777 + 5 = 6782.
         #   Python remains unchanged at five files and 46 cases.
-        self.assertEqual(len(nim_specs), 1225)
+        # Final reconciliation on 273e890f2: four already-present sources are
+        # newly enrolled, the fail-closed gate is new (+5 specs), and upstream
+        # 11cea6789 contributes the six pinned develop-selection specs above.
+        # The e106faf6 runtime-loader edits add cases only, not specs.
+        self.assertEqual(len(nim_specs), 1236)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -1151,7 +1350,11 @@ test "incomplete name" and:
         # same five catalog cases on both hosts, giving 6860/6861. The exact
         # Linux-vs-Darwin delta remains +1 and is independently derived from
         # every platform-exclusive qualified case below.
-        expected_nim_total = 6860 if sys.platform == "darwin" else 6861
+        # e106faf6 adds three pinned runtime-loader cases; the four recovered
+        # enrollments add 29; legacy-wire + fail-closed add two host-visible
+        # cases; 11cea6789 adds six. Darwin/Linux therefore move 6860/6861 to
+        # 6900/6901.
+        expected_nim_total = 6900 if sys.platform == "darwin" else 6901
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -1210,9 +1413,9 @@ test "incomplete name" and:
         # `python_total`), so this aggregate is a backstop for them rather
         # than a place either delta can hide.
         #
-        # 6890 -> 6894 on Linux = 6848 nim + 46 python. Darwin catalogs one
-        # fewer Nim case; ``assert_linux_darwin_catalog_delta_is_exact`` pins
-        # every qualified identity on both sides of that exact delta.
+        # The final aggregate is 6946 on Darwin / 6947 on Linux: 6900/6901
+        # Nim plus 46 Python. ``assert_linux_darwin_catalog_delta_is_exact``
+        # pins every qualified identity on both sides of that exact delta.
         self.assertEqual(
             data["static"]["sourceCaseCount"], expected_nim_total + 46
         )
@@ -1240,14 +1443,17 @@ test "incomplete name" and:
         # 6769 -> 6776 = +7: each added develop source contains one statically
         # visible case, independently matching its binary's one-case catalog.
         # The rebased upstream tree before `391a892a4` independently scans to
-        # 6777; its five new one-case sources then produce the current 6782.
+        # 6777; its five new one-case sources then produce 6782. The recovered
+        # enrollments add 29, e106faf6 adds 3, the migration adds 3 static
+        # declarations (two conditional cache cases plus fail-closed), and
+        # 11cea6789 adds six: 6823.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6782,
+            6823,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
@@ -1875,9 +2081,12 @@ test "incomplete name" and:
         # 1219 -> 1224 catalog: upstream `391a892a4` adds the five one-case
         # sources pinned above. The sole quarantine and five Python-static
         # entries are unchanged, so 1224 = 1225 Nim specs - 1 quarantined.
+        # Four recovered enrollments plus fail-closed bring that bucket to
+        # 1229; upstream 11cea6789 adds six more. The sole quarantine and five
+        # Python-static entries remain.
         self.assertEqual(
             catalog["countSourceCounts"],
-            {"catalog": 1224, "quarantined": 1, "static": 5},
+            {"catalog": 1235, "quarantined": 1, "static": 5},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         self.assertEqual(
@@ -2860,7 +3069,9 @@ test "incomplete name" and:
         # beside the parsed-spec aggregate assertion above.
         # 1220 -> 1225: the five one-case develop regressions from upstream
         # `391a892a4`, pinned individually in `expected_enrollments` above.
-        self.assertEqual(declared_nim_count, 1225)
+        # Four recovered graph enrollments plus fail-closed: 1225 -> 1230;
+        # upstream 11cea6789 then adds six: 1236.
+        self.assertEqual(declared_nim_count, 1236)
         self.assertEqual(declared_python_count, 5)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -2904,7 +3115,10 @@ test "incomplete name" and:
         # 1218 -> 1225 = 1220 nim + 5 python: the seven develop sources above.
         # 1225 -> 1230 = 1225 nim + 5 python: upstream `391a892a4`'s five
         # additional, individually pinned develop sources.
-        self.assertEqual(data["static"]["testEntryCount"], 1230)
+        # The recovered graph enrollments plus fail-closed move 1230 -> 1235;
+        # upstream 11cea6789's six pinned sources move 1235 -> 1241.
+        # Final graph: 1236 Nim + 5 Python = 1241 entries.
+        self.assertEqual(data["static"]["testEntryCount"], 1241)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),
@@ -3316,9 +3530,9 @@ compileProfileBinary()
         six extra Darwin cases.  The resulting Linux total is exactly one
         greater -- it is not a stale host-independent pin.
 
-        A lexer-derived census below covers all eighteen enrolled sources in
+        A lexer-derived census below covers all nineteen enrolled sources in
         which a Linux/macOS gate owns a real test declaration.  Four gates
-        select the same catalog on both hosts; the remaining fourteen are
+        select the same catalog on both hosts; the remaining fifteen are
         exactly the keys of ``exclusive``.  This distinction keeps a new
         gated source from hiding behind a cardinality-neutral catalog swap.
         """
@@ -3485,6 +3699,17 @@ compileProfileBinary()
                 },
                 "darwin": set(),
             },
+            "tests/integration/"
+            "t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim": {
+                "linux": {
+                    "integration_cache_daemon_drains_dedups_persists_and_warms_from_disk::"
+                    "pinned origin dev peer interoperates in both directions"
+                },
+                "darwin": {
+                    "integration_cache_daemon_drains_dedups_persists_and_warms_from_disk::"
+                    "Darwin v1 and v2 peers isolate volatile state and share Tier-1"
+                },
+            },
             "tests/unit/t_hcr_agent_process_target.nim": {
                 "linux": {
                     "HCR process target runtime::process target runtime is "
@@ -3528,7 +3753,7 @@ compileProfileBinary()
         }
         gated_sources = self.platform_gated_test_sources(data)
         self.assertEqual(gated_sources, set(exclusive) | catalog_identical)
-        self.assertEqual(len(exclusive), 14)
+        self.assertEqual(len(exclusive), 15)
         self.assertEqual(len(catalog_identical), 4)
 
         by_source = {item["source"]: item for item in data["tests"]}
@@ -3547,7 +3772,7 @@ compileProfileBinary()
 
         linux_only = sum(len(item["linux"]) for item in exclusive.values())
         darwin_only = sum(len(item["darwin"]) for item in exclusive.values())
-        self.assertEqual((linux_only, darwin_only), (22, 21))
+        self.assertEqual((linux_only, darwin_only), (23, 22))
         self.assertEqual(linux_only - darwin_only, 1)
 
     def test_completed_clean_attempt_requires_one_coherent_three_run_attempt(self):
