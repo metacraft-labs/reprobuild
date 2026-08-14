@@ -188,40 +188,51 @@ type
     ## whether its body changed. Dropping a field at the parse site is
     ## indistinguishable, downstream, from the producer never emitting it.
     ##
-    ## HONEST LABELLING OF WHAT IS REAL. Of the retained fields only
-    ## ``suite``/``name``/``file``/``line``/``column`` and ``bodyHash``
-    ## carry information today. ``kind``, ``group``, ``threadsRequired``,
-    ## ``xfail``, ``tags`` and ``deterministic`` are emitted by the
-    ## codetracer-nim fork as fixed literals (see that fork's
-    ## ``lib/pure/unittest.nim``: ``"in-process"``, ``"@global"``, ``1``,
-    ## ``null``, ``[]``, ``true``) and are therefore constants, not
-    ## measurements. They are retained because the contract says to retain
-    ## them and because the day the producer starts varying them the
-    ## consumer must already be carrying them — but NO scheduling,
-    ## selection or reporting decision in this runner may be built on them
-    ## while they are constants. Only ``bodyHash`` is load-bearing.
+    ## HONEST LABELLING OF WHAT IS REAL. This block used to say that
+    ## ``group``, ``threadsRequired``, ``xfail``, ``tags`` and
+    ## ``deterministic`` were fixed literals in the emitter and therefore
+    ## constants rather than measurements, and that the day the producer
+    ## started varying them the consumer had to already be carrying them.
+    ## That day arrived with the fork bump: a test can now DECLARE each of
+    ## the five, every default is what the field held before, and the
+    ## values reaching this parser vary with what the author wrote.
+    ##
+    ## What has NOT changed is that no scheduling, selection or reporting
+    ## decision in this runner is built on them. Carrying a field and
+    ## acting on it are separate steps, and only the first has been taken;
+    ## ``bodyHash`` remains the one field any behaviour here depends on.
+    ## A consumer must also not read a default as a declaration — the fork's
+    ## conformance contract is explicit that "the producer never mentioned
+    ## this field" and "the author declared the default" are the same state.
+    ##
+    ## ``kind`` is the one that stays constant, and for a stated reason
+    ## rather than by omission: ``unittest`` registers in-process bodies
+    ## and has no other kind of test to register.
     suite: string    ## the ``suite`` field, verbatim
     bare: string     ## display name: ``name`` with any ``suite::`` prefix cut
     runName: string  ## the ``name`` field, verbatim — the ``--run`` argument
     file: string             ## ``file``: source file the case was declared in
     line: int                ## ``line``: 1-based declaration line; 0 if absent
     column: int              ## ``column``: declaration column; 0 if absent
-    kind: string             ## ``kind``: today always ``"in-process"``
-    group: string            ## ``group``: today always ``"@global"``
-    threadsRequired: int     ## ``threadsRequired``: today always 1
+    kind: string             ## ``kind``: always ``"in-process"``; see above
+    group: string
+      ## ``group``: the case's ``group`` option, else its enclosing
+      ## ``testGroup``, else ``"@global"``.
+    threadsRequired: int
+      ## ``threadsRequired``: the declared thread weight, else 1.
     xfail: string
-      ## ``xfail`` rendered as text: ``""`` for JSON ``null`` (the only
-      ## value the fork emits today), otherwise the reason string or the
+      ## ``xfail`` rendered as text: ``""`` for JSON ``null`` (a case that
+      ## declared no expected failure), otherwise the reason string or the
       ## literal ``"true"``/``"false"``. Kept as text rather than a
       ## ``bool`` so "the producer said nothing" stays distinguishable
       ## from "the producer said false".
-    tags: seq[string]        ## ``tags``: today always empty
+    tags: seq[string]        ## ``tags``: the declared tags, else empty
     bodyHash: string
       ## ``bodyHash``: the compiler-computed digest of the case's body.
-      ## The ONE field here that is a measurement, and the one selection
-      ## is built on. Empty when the producer emitted none — which is a
-      ## fail-closed signal, never a match.
-    deterministic: bool      ## ``deterministic``: today always true
+      ## The one field selection is built on. Empty when the producer
+      ## emitted none — which is a fail-closed signal, never a match.
+    deterministic: bool
+      ## ``deterministic``: the declared value, else true.
 
 type
   TestCase = object
