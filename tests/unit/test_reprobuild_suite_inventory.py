@@ -989,7 +989,21 @@ test "incomplete name" and:
         #   change edits — the failure-classifier removals and the VM-gate
         #   fixes — add and remove no case, so every number below moves by
         #   exactly the one new file's +1 / +4.
-        self.assertEqual(len(nim_specs), 1213)
+        #
+        #   SPECS 1213 -> 1220, NIM CASES +7, STATIC NIM CASES +7
+        #   `b2dabbc96` adds six one-case `repro develop` integration sources:
+        #     t_develop_excludes_evidence_only_repos.nim
+        #     t_develop_public_only_unchanged.nim
+        #     t_develop_refuses_cross_backend_revision_conflict.nim
+        #     t_develop_refuses_unreachable_team_backend.nim
+        #     t_develop_set_is_union_of_all_backends.nim
+        #     t_develop_warns_and_names_omitted_personal_repos.nim
+        #   `6b342175e` adds the seventh one-case source:
+        #     t_develop_ignores_sha_pinned_manifest_without_a_lock_record.nim
+        #   Every one of the seven built binaries reports exactly one catalog
+        #   case, and the independent static scan agrees. No Python source or
+        #   case changed.
+        self.assertEqual(len(nim_specs), 1220)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -1053,7 +1067,11 @@ test "incomplete name" and:
         # 6844 -> 6848: the four cases of
         # `t_protocol_document_survives_suite_body_echo.nim`, pinned per
         # source in `expected_enrollments` above.
-        expected_nim_total = 6847 if sys.platform == "darwin" else 6848
+        #
+        # 6847/6848 -> 6854/6855: the seven one-case develop sources listed
+        # beside the spec-count pin. The existing Darwin-vs-other one-case
+        # delta is unchanged; all seven additions are present on both.
+        expected_nim_total = 6854 if sys.platform == "darwin" else 6855
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -1138,13 +1156,16 @@ test "incomplete name" and:
         # `nim_total` reads the BINARIES, so their agreeing that the new file
         # holds four cases is what makes that a fact about the suite rather
         # than about one surface.
+        #
+        # 6769 -> 6776 = +7: each added develop source contains one statically
+        # visible case, independently matching its binary's one-case catalog.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6769,
+            6776,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
@@ -1762,9 +1783,16 @@ test "incomplete name" and:
         # built and probed, so it joins the `catalog` bucket and the
         # `missing-binary` bucket stays empty:
         # 1212 = 1213 Nim specs - 1 quarantined.
+        #
+        # 1212 -> 1219 catalog: `b2dabbc96` and `6b342175e` add the seven
+        # one-case develop sources enumerated by the aggregate-count assertion.
+        # All seven binaries speak the protocol and were probed successfully.
+        # The one source outside this bucket remains the pre-existing
+        # Windows-only multicast smoke test above, so 1219 = 1220 Nim specs -
+        # 1 quarantined; none of the seven additions is outside the catalog.
         self.assertEqual(
             catalog["countSourceCounts"],
-            {"catalog": 1212, "quarantined": 1, "static": 5},
+            {"catalog": 1219, "quarantined": 1, "static": 5},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         self.assertEqual(
@@ -2742,7 +2770,10 @@ test "incomplete name" and:
         # package-root-anchor guard added with the nim-fork bump to 4e93a8a4.
         # 1212 -> 1213: the one source this change adds,
         # `t_protocol_document_survives_suite_body_echo.nim`.
-        self.assertEqual(declared_nim_count, 1213)
+        # 1213 -> 1220: the six one-case develop sources from `b2dabbc96` and
+        # the one-case SHA-pinned-manifest regression from `6b342175e`, listed
+        # beside the parsed-spec aggregate assertion above.
+        self.assertEqual(declared_nim_count, 1220)
         self.assertEqual(declared_python_count, 5)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -2783,7 +2814,8 @@ test "incomplete name" and:
         # `0b9205f7` added (its six renames net to zero), +1 python for the
         # package-root-anchor guard.
         # 1217 -> 1218 = 1213 nim + 5 python: the one new nim source.
-        self.assertEqual(data["static"]["testEntryCount"], 1218)
+        # 1218 -> 1225 = 1220 nim + 5 python: the seven develop sources above.
+        self.assertEqual(data["static"]["testEntryCount"], 1225)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),
