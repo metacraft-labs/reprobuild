@@ -132,10 +132,12 @@ proc makeResolver(table: Table[string, ResolvedToolIdentity]):
       none(ResolvedToolIdentity)
 
 proc mockedIdentity(binDirs: openArray[string];
-                    resolvedExe = ""): ResolvedToolIdentity =
+                    resolvedExe = "";
+                    libDirs: openArray[string] = []): ResolvedToolIdentity =
   ResolvedToolIdentity(
     binDirs: @binDirs,
-    resolvedExecutablePath: resolvedExe)
+    resolvedExecutablePath: resolvedExe,
+    libDirs: @libDirs)
 
 proc fingerprintForToken(token: string): ContentDigest =
   casDigest(token.toOpenArrayByte(0, token.high),
@@ -143,8 +145,10 @@ proc fingerprintForToken(token: string): ContentDigest =
 
 proc oneAction(actionId: string;
                refs: seq[string];
-               fingerprintToken = "default"): BuildGraph =
-  let argv = stubArgv()
+               fingerprintToken = "default";
+               actionEnv: seq[string] = @[];
+               argvOverride: seq[string] = @[]): BuildGraph =
+  let argv = if argvOverride.len > 0: argvOverride else: stubArgv()
   var act = BuildAction(
     kind: bakProcess,
     id: actionId,
@@ -153,6 +157,7 @@ proc oneAction(actionId: string;
     outputs: @[],
     argv: argv,
     cwd: getCurrentDir(),
+    env: actionEnv,
     cacheable: false,
     weakFingerprint: fingerprintForToken(actionId & "|" & fingerprintToken),
     actionCachePolicy: ffpTimestamp,
@@ -302,6 +307,26 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
         "/existing/link"]
     check tableEnv["LD_LIBRARY_PATH"].split(pathSeparator()) ==
       @[dependencyLib, "/existing/runtime"]
+
+  when defined(posix):
+    test "explicit action loader env wins at process launch":
+      resetTmp()
+      let cacheRoot = TmpDir / "cache-loader-override"
+      createDir(cacheRoot)
+      var table = initTable[string, ResolvedToolIdentity]()
+      table["readline"] = mockedIdentity(@[],
+        libDirs = @["/synthetic/source/readline/lib"])
+      let resolver = makeResolver(table)
+      let g = oneAction("loader-override", @["readline"],
+        fingerprintToken = "loader-override",
+        actionEnv = @["LD_LIBRARY_PATH="],
+        argvOverride = @["sh", "-c", "printf %s \"$LD_LIBRARY_PATH\""])
+
+      let res = runBuild(g, runnerCfg(cacheRoot, resolver))
+
+      check res.results.len == 1
+      check res.results[0].status == asSucceeded
+      check readBypassStdout(cacheRoot, "loader-override") == ""
 
   test "PATH is prepended with the resolved bin dir when ref + resolver are set":
     resetTmp()

@@ -3062,6 +3062,40 @@ proc shellScriptArgIndex(argv: openArray[string]): int =
 proc isRuntimeLibraryEnv(name: string): bool {.inline.} =
   name == "LD_LIBRARY_PATH" or name == "DYLD_LIBRARY_PATH"
 
+proc applyExplicitRuntimeLibraryEnvOverrides*(env: seq[string];
+    actionEnv: openArray[string]): seq[string] =
+  ## Runtime search paths assembled from dependency profiles are useful for
+  ## most actions, but they can also make a provisioned tool load a different
+  ## ABI-compatible-by-name library than the one it was built against. Allow a
+  ## recipe to take ownership of the loader environment explicitly. Reapply
+  ## only runtime-library variables here; the other auxiliary channels remain
+  ## dependency-first by design.
+  result = @[]
+  for entry in env:
+    result.add(entry)
+  for entry in actionEnv:
+    let eq = entry.find('=')
+    if eq <= 0 or not isRuntimeLibraryEnv(entry[0 ..< eq]):
+      continue
+    let name = entry[0 ..< eq]
+    var retained = newSeqOfCap[string](result.len)
+    for existing in result:
+      let itemEq = existing.find('=')
+      if itemEq <= 0 or existing[0 ..< itemEq] != name:
+        retained.add(existing)
+    result = retained
+    result.add(entry)
+
+proc applyExplicitRuntimeLibraryEnvOverrides*(env: StringTableRef;
+    actionEnv: openArray[string]) =
+  ## StringTable counterpart for the direct RunQuota-bypass launcher.
+  if env == nil:
+    return
+  for entry in actionEnv:
+    let eq = entry.find('=')
+    if eq > 0 and isRuntimeLibraryEnv(entry[0 ..< eq]):
+      env[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
+
 proc monitorPayloadArgIndex(argv: openArray[string]): int =
   ## Return the first argument of an io-monitor payload, or -1 when argv is
   ## not the canonical ``repro internal io monitor ... -- <command>`` shape.
@@ -3525,6 +3559,7 @@ proc startBypassRunQuotaProcess(action: BuildAction;
       prependPathDirs(env, binDirs)
     if hasAuxPaths:
       applyResolvedAuxPathsTable(env, auxPaths)
+  applyExplicitRuntimeLibraryEnvOverrides(env, action.env)
   let cwd = if action.cwd.len > 0: action.cwd else: getCurrentDir()
   let stdoutLog = bypassActionStdoutLogPath(cacheRoot, action.id)
   let stderrLog = bypassActionStderrLogPath(cacheRoot, action.id)
@@ -3671,6 +3706,8 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
   threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
+  threadedEnv = applyExplicitRuntimeLibraryEnvOverrides(threadedEnv,
+    action.env)
   let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
   let includePaths = partitionCompilerIncludePaths(auxPaths)
   let adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
@@ -3714,6 +3751,8 @@ proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
   threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
+  threadedEnv = applyExplicitRuntimeLibraryEnvOverrides(threadedEnv,
+    action.env)
   let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
   let includePaths = partitionCompilerIncludePaths(auxPaths)
   let adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
