@@ -56,6 +56,10 @@ import ./packages/zig
 # dotnet_sdk are new files. ``python`` and ``dotnet-sdk`` were harvested
 # via --app-alias to satisfy Nim-identifier constraints.
 import ./packages/cmake
+# clingo: the ASP solver repro_solver dlopens at module init. Wired now that
+# the `conda` archiveType can realize conda-forge's Windows package; the
+# scaffold sat unimported while that was inexpressible.
+import ./packages/clingo
 import ./packages/dotnet_sdk
 import ./packages/gcc
 import ./packages/gh

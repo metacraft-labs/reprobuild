@@ -78,13 +78,28 @@ package clingo:
     nixPackage "nixpkgs#clingo", executablePath = "bin/clingo",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
-    # Windows: intentionally absent. A `tarball` entry pointing at
-    # https://anaconda.org/conda-forge/clingo/5.8.0/download/win-64/
-    #   clingo-5.8.0-py312he3f8637_1.conda
-    # (sha256 a9e5eb699dd8de3dcc555c28f47a46ca0b3005f784f76aadf70f47267e5afee9)
-    # would fetch and checksum correctly but unpack to the two inner
-    # `.tar.zst` members rather than to `clingo.dll`, leaving a prefix whose
-    # `executablePath` does not exist. Declaring it would trade a clear
-    # "no Windows source" for a resolver that succeeds and then produces a
-    # broken realization, so the gap stays visible until a source kind can
-    # express it.
+    # Windows: conda-forge, via the `conda` archiveType. When this entry was
+    # first scaffolded the arm did not exist and a `tarball` here would have
+    # unpacked to the two inner `.tar.zst` members rather than to `clingo.dll`
+    # — a resolver that succeeds and then produces a broken realization. The
+    # archiveType now unwraps both layers, so the entry is real.
+    #
+    # conda-forge is the only redistributable source: potassco ships source
+    # tarballs only, and the PyPI wheel statically links the C library into
+    # `_clingo.cp312-win_amd64.pyd`. The `pyXXX` build string is part of the
+    # asset name and therefore part of the pin, but it only affects the bundled
+    # `.pyd` we discard — `clingo.dll` itself is ABI-stable across those
+    # variants.
+    #
+    # No stripComponents: the payload's own `Library/bin` layout is the prefix
+    # shape, and `executablePath` addresses into it. Verified by realizing the
+    # pinned asset by hand — the resulting clingo.dll is sha256 a55d01d3…,
+    # byte-identical to the one in a working install.
+    tarball url = "https://anaconda.org/conda-forge/clingo/5.8.0/download/win-64/clingo-5.8.0-py312he3f8637_1.conda",
+      sha256 = "a9e5eb699dd8de3dcc555c28f47a46ca0b3005f784f76aadf70f47267e5afee9",
+      archiveType = "conda",
+      executablePath = "Library/bin/clingo.exe",
+      packageId = "clingo@5.8.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:clingo@5.8.0:sha256:a9e5eb699dd8de3dcc555c28f47a46ca0b3005f784f76aadf70f47267e5afee9"
