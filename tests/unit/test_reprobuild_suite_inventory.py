@@ -677,6 +677,67 @@ test "incomplete name" and:
                 "sourceCaseCount": 4,
                 "class": "integration",
             },
+            # Upstream `7e503ddd2` adds the fully-qualified-tag regression to
+            # this already-enrolled source (2 -> 3 cases). Pin its exact
+            # source-to-binary mapping and current catalog count so the +1
+            # static reconciliation below cannot be left as an unattributed
+            # aggregate adjustment.
+            "tests/integration/t_sync_clones_commit_pinned_repo.nim": {
+                "binary": "build/test-bin/t_sync_clones_commit_pinned_repo",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 3,
+                "class": "integration",
+            },
+            # Upstream 391a892a4 adds five independently enrolled `develop`
+            # regressions. Pin every source-to-binary mapping and each built
+            # catalog's one case here so the aggregate +5 below cannot hide a
+            # missing enrollment behind an unrelated added case.
+            "tests/integration/"
+            "t_develop_all_clones_into_a_second_placement_root.nim": {
+                "binary": "build/test-bin/"
+                "t_develop_all_clones_into_a_second_placement_root",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_develop_composes_lock_set_without_a_committed_lock.nim": {
+                "binary": "build/test-bin/"
+                "t_develop_composes_lock_set_without_a_committed_lock",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_develop_refuses_inexact_revision_and_leaves_no_checkout.nim": {
+                "binary": "build/test-bin/"
+                "t_develop_refuses_inexact_revision_and_leaves_no_checkout",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_develop_refuses_unreadable_backend_before_membership_degrades.nim": {
+                "binary": "build/test-bin/"
+                "t_develop_refuses_unreadable_backend_before_membership_degrades",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
+            "tests/integration/"
+            "t_develop_refuses_unreadable_backend_of_any_kind.nim": {
+                "binary": "build/test-bin/"
+                "t_develop_refuses_unreadable_backend_of_any_kind",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
         }
         for source, expected in expected_enrollments.items():
             with self.subTest(enrolled_source=source):
@@ -1003,7 +1064,22 @@ test "incomplete name" and:
         #   Every one of the seven built binaries reports exactly one catalog
         #   case, and the independent static scan agrees. No Python source or
         #   case changed.
-        self.assertEqual(len(nim_specs), 1220)
+        #
+        #   STATIC NIM CASES 6776 -> 6777, SPECS unchanged at 1220
+        #   Upstream `7e503ddd2` adds one case to the already-enrolled
+        #   `tests/integration/t_sync_clones_commit_pinned_repo.nim`:
+        #     t_sync_clones_repo_pinned_to_a_fully_qualified_tag     (2 -> 3)
+        #   Its exact mapping and three-case catalog are pinned above. No
+        #   Python source or case changes in this step.
+        #
+        #   SPECS 1220 -> 1225, CATALOG/STATIC NIM CASES +5
+        #   Upstream `391a892a4` adds the five one-case `repro develop`
+        #   integration sources pinned individually above. Their freshly built
+        #   binaries and the static scanner both report exactly one case each.
+        #   The independently attributed static aggregate immediately before
+        #   that upstream commit is therefore 6777, so 6777 + 5 = 6782.
+        #   Python remains unchanged at five files and 46 cases.
+        self.assertEqual(len(nim_specs), 1225)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -1069,9 +1145,13 @@ test "incomplete name" and:
         # source in `expected_enrollments` above.
         #
         # 6847/6848 -> 6854/6855: the seven one-case develop sources listed
-        # beside the spec-count pin. The existing Darwin-vs-other one-case
-        # delta is unchanged; all seven additions are present on both.
-        expected_nim_total = 6854 if sys.platform == "darwin" else 6855
+        # beside the spec-count pin. `7e503ddd2` then adds the third catalog
+        # case to `t_sync_clones_commit_pinned_repo.nim` on both hosts, giving
+        # 6855/6856; its exact mapping is pinned above. `391a892a4` adds the
+        # same five catalog cases on both hosts, giving 6860/6861. The exact
+        # Linux-vs-Darwin delta remains +1 and is independently derived from
+        # every platform-exclusive qualified case below.
+        expected_nim_total = 6860 if sys.platform == "darwin" else 6861
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -1159,13 +1239,15 @@ test "incomplete name" and:
         #
         # 6769 -> 6776 = +7: each added develop source contains one statically
         # visible case, independently matching its binary's one-case catalog.
+        # The rebased upstream tree before `391a892a4` independently scans to
+        # 6777; its five new one-case sources then produce the current 6782.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6776,
+            6782,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
@@ -1790,9 +1872,12 @@ test "incomplete name" and:
         # The one source outside this bucket remains the pre-existing
         # Windows-only multicast smoke test above, so 1219 = 1220 Nim specs -
         # 1 quarantined; none of the seven additions is outside the catalog.
+        # 1219 -> 1224 catalog: upstream `391a892a4` adds the five one-case
+        # sources pinned above. The sole quarantine and five Python-static
+        # entries are unchanged, so 1224 = 1225 Nim specs - 1 quarantined.
         self.assertEqual(
             catalog["countSourceCounts"],
-            {"catalog": 1219, "quarantined": 1, "static": 5},
+            {"catalog": 1224, "quarantined": 1, "static": 5},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         self.assertEqual(
@@ -2773,7 +2858,9 @@ test "incomplete name" and:
         # 1213 -> 1220: the six one-case develop sources from `b2dabbc96` and
         # the one-case SHA-pinned-manifest regression from `6b342175e`, listed
         # beside the parsed-spec aggregate assertion above.
-        self.assertEqual(declared_nim_count, 1220)
+        # 1220 -> 1225: the five one-case develop regressions from upstream
+        # `391a892a4`, pinned individually in `expected_enrollments` above.
+        self.assertEqual(declared_nim_count, 1225)
         self.assertEqual(declared_python_count, 5)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -2815,7 +2902,9 @@ test "incomplete name" and:
         # package-root-anchor guard.
         # 1217 -> 1218 = 1213 nim + 5 python: the one new nim source.
         # 1218 -> 1225 = 1220 nim + 5 python: the seven develop sources above.
-        self.assertEqual(data["static"]["testEntryCount"], 1225)
+        # 1225 -> 1230 = 1225 nim + 5 python: upstream `391a892a4`'s five
+        # additional, individually pinned develop sources.
+        self.assertEqual(data["static"]["testEntryCount"], 1230)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),
