@@ -413,6 +413,7 @@ package reprobuild:
     let reproRuntimePassL = nixRuntimePassLForLibraries(@[
       "libclingo.so", "libclingo.dylib"])
     let testRuntimePassL = nixRuntimePassLForLibraries(@[
+      "libclingo.so", "libclingo.dylib",
       "libzstd.so.1", "libzstd.dylib"])
 
     proc findNixStoreSourceDir(namePart, marker: string): string =
