@@ -426,6 +426,7 @@ lint:
     mkdir -p test-logs
     bash ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log
     bash ./scripts/check_nim_sources.sh 2>&1 | tee -a test-logs/lint.log
+    bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
 
 format:
     bash ./scripts/format_sources.sh
