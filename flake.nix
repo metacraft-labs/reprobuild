@@ -209,8 +209,45 @@
     # `switch("path", ".")` in `config.nims` and at the top of
     # `reprobuild.nimble`, and the guard in
     # `tests/unit/test_package_root_anchor.py`.
+    #
+    # Advanced from 4e93a8a4 to the `codetracer` tip. That is eight commits,
+    # revCount 23089 -> 23097: three changes and their three merges, plus a
+    # documentation commit and its merge that add `doc/intern.md` and touch no
+    # compiler or stdlib source. Nothing else rides along:
+    #
+    #   * The five per-case metadata fields the protocol advertises can now
+    #     take a second value. `xfail`, `tags`, `group`, `threadsRequired` and
+    #     `deterministic` were literals in the emitter, so a consumer could
+    #     carry all five, assert that it had carried them, and be asserting on
+    #     something no input could change. They now have a source — the test
+    #     author — every default is what the field held before, and the module
+    #     gained a written conformance contract for the other producers a
+    #     project may put behind these flags. Before this commit the syntax did
+    #     not compile at all (`unknown named parameter: xfail`).
+    #
+    #   * A body hash no longer depends on the bodies above it. A hygienic
+    #     template local was identified by its gensym name, whose counter
+    #     records how many template expansions preceded it IN THE MODULE, so
+    #     adding an assertion above a test moved that test's `bodyHash`.
+    #     `check`, `require` and `expect` all reach such a local by way of
+    #     `fail`, so this bump rehashes every test body that uses an assertion
+    #     macro, and only those. The hash is the incremental runner's re-run
+    #     signal, so the movement costs one full re-run and then stops costing:
+    #     what it buys is that an edit above a test no longer re-runs it.
+    #
+    #   * The three stdout-bearing protocol modes own descriptor 1. `--list`,
+    #     `--list-json` and `--catalog -` write their document to the same
+    #     channel the program prints on, and a suite body runs during
+    #     REGISTRATION in every mode — so an ordinary `echo` in one could make
+    #     the document unparseable, and on `--list`, which has no framing at
+    #     all, a partial write fused onto the front of a real case name where
+    #     no consumer could undo it. The module now dups the real stdout aside
+    #     at initialisation and points fd 1 at stderr, emitting the document to
+    #     the saved descriptor; the author's output stays readable on stderr.
+    #     Both of this repository's consumers already keep the two streams
+    #     apart, so they see a clean document rather than a merged one.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=4e93a8a4230f4d414b34f000b96ca2a849dc719e";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=0aceda824ebc303ab4ab42704d61420a4d47db59";
       flake = false;
     };
     nim-csources-src = {
