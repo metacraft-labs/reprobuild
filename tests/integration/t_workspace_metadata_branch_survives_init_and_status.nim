@@ -145,16 +145,12 @@ proc setupFixture(gitBin, slug: string): M13Fixture =
   result.workspaceRoot = workspaceRoot
 
 proc cleanupScratch(path: string) =
-  for attempt in 0 .. 4:
-    if not dirExists(path):
-      return
-    try:
-      removeDir(path)
-      return
-    except OSError, IOError:
-      if attempt == 4:
-        raise
-      sleep(100)
+  ## Delegates to ``repro_test_support.removeDirEventually``. The local retry
+  ## loop this replaced could not succeed on Windows: the engine action-cache
+  ## records under a scratch root exceed MAX_PATH, ``FindFirstFileW`` will not
+  ## enumerate them, and the directory therefore never becomes empty no matter
+  ## how long we wait. The shared helper escalates to the ``\\?\`` form.
+  removeDirEventually(path)
 
 # ---- the suite -------------------------------------------------------------
 

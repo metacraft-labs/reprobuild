@@ -306,7 +306,7 @@ suite "M28/WV-5 — repro switch -b <name> marks feature branch":
       skip()
     else:
       let fx = setupFixture(gitBin, "create")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -356,7 +356,7 @@ suite "M28/WV-5 — repro switch -b <name> marks feature branch":
       skip()
     else:
       let fx = setupFixture(gitBin, "switch")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -404,7 +404,7 @@ suite "M28/WV-5 — repro switch -b <name> marks feature branch":
       skip()
     else:
       let fx = setupFixture(gitBin, "converge")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -455,7 +455,7 @@ suite "M28/WV-5 — repro switch -b <name> marks feature branch":
       skip()
     else:
       let fx = setupFixture(gitBin, "converge-remote")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -489,7 +489,7 @@ suite "M28/WV-5 — repro switch -b <name> marks feature branch":
       skip()
     else:
       let fx = setupFixture(gitBin, "dirty")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -531,7 +531,7 @@ suite "M28/WV-5 — repro switch -b <name> marks feature branch":
       skip()
     else:
       let fx = setupFixture(gitBin, "sync-preserves")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -598,7 +598,7 @@ suite "M28/WV-5 — repro switch -b <name> marks feature branch":
       skip()
     else:
       let fx = setupFixture(gitBin, "idempotent")
-      defer: removeDir(fx.scratch)
+      defer: removeDirEventually(fx.scratch)
 
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")

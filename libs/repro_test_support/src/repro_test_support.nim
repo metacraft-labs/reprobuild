@@ -31,6 +31,8 @@
 
 import std/[os, osproc, streams, strtabs, strutils, unittest]
 
+from repro_core/paths import extendedPath
+
 when defined(windows):
   import std/winlean
 else:
@@ -386,6 +388,20 @@ proc removeDirEventually*(path: string; attempts = 25; sleepMs = 40) =
   ## `removeDir` can lose that race and fail with "Directory not empty". This
   ## helper gives that narrow condition a bounded chance to settle, then
   ## re-raises the final OSError so cleanup regressions stay visible.
+  ##
+  ## ENOTEMPTY on Windows has a SECOND cause that no amount of waiting fixes,
+  ## and the two are indistinguishable from the error alone. `removeDir` walks
+  ## with `FindFirstFileW`, which without the `\\?\` prefix cannot enumerate
+  ## entries whose full path exceeds `MAX_PATH` (260). Such entries are not
+  ## reported as an error — they are simply not yielded, so the walk deletes
+  ## nothing, and the following `RemoveDirectory` fails on a directory the
+  ## walk believed was empty. A workspace fork writes engine action-cache
+  ## records at `…/hot-records/0-1-<64 hex>.rbar/<64 hex>.rec`, which is ~277
+  ## characters under a `%TEMP%` fixture root — past the limit — so every fork
+  ## test failed teardown on a host without `LongPathsEnabled` while its
+  ## assertions had all passed. Retrying the extended-length form is what
+  ## actually clears it, so a persistent ENOTEMPTY escalates to that before
+  ## the error is allowed to stand.
   if path.len == 0 or not dirExists(path):
     return
   var last: ref OSError
@@ -401,6 +417,16 @@ proc removeDirEventually*(path: string; attempts = 25; sleepMs = 40) =
       last = e
       if attempt + 1 < attempts:
         sleep(sleepMs)
+  # Waiting did not help: try the long-path form before giving up. Kept as an
+  # escalation rather than the default so the ordinary path stays exercised.
+  when defined(windows):
+    try:
+      removeDir(extendedPath(path))
+      return
+    except OSError:
+      discard
+    if not dirExists(path):
+      return
   if last != nil:
     raise last
 

@@ -248,7 +248,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " push [<project>] [--sync] [--merge|--rebase] [--certify|--no-certify] [--workspace-root=PATH] [--current-repo=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
           programName &
-      " branch [<path>] [--branch=NAME] [--existing-branch] [--include-changes] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
+      " branch [<path>] [--branch=NAME] [--existing-branch] [--include-changes] [--projects=A,B] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
           programName &
       " switch <branch> [-b|--new-branch] [--yes] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
           programName &
@@ -296,12 +296,17 @@ proc renderUsage*(programName: string): string =
           programName &
       " completion bash|zsh|fish\n       " &
           programName &
-      " workspace|ws {bootstrap [<dir>] | enable <project>... [--default] " &
+      " workspace|ws {bootstrap [<dir>] | init <project|url> [<path>] | " &
+      "new <path> [--branch=NAME] [--existing-branch] [--projects=A,B] | " &
+      "sync [<project>...] | pull | switch <branch> [-b] | " &
+      "status [<project>] | lock [<project>] | " &
+      "list | enable <project>... [--default] " &
       "[--no-sync] | disable <project>... [--keep-checkouts] [--force] | " &
       "projects {list [--enabled|--disabled] | add <name> [-m DESC] | " &
       "remove <name>} | repos {list [--project=NAME] | add <repo> " &
-      "--remote=URL [--project=NAME]... | remove <repo>} | new <path> " &
-      "[--branch=NAME] [--existing-branch] | switch <branch> [-b]} " &
+      "--remote=URL [--project=NAME]... | remove <repo>} | " &
+      "manifests | shared-clones | forall -c <command> | " &
+      "provision | publish-evidence} " &
       "[--workspace-root=PATH]\n\n" &
       "workspace reports: the workspace verbs (init, sync, pull, lock, " &
       "status, list, manifests, shared-clones, forall, develop, hooks " &
@@ -22491,6 +22496,18 @@ type
       ## RA-8 — the host bootstrap config's ``[projects] default`` set. Used
       ## to fill the project-to-init when the user did not pass an explicit
       ## positional project name.
+    additionalProjects: seq[string]
+      ## PS-6 — projects to materialize ALONGSIDE ``projectName``, unioned into
+      ## one participating repo set.
+      ##
+      ## An interactive ``repro workspace init <project>`` names exactly one
+      ## project on purpose (see ``resolveWorkspaceInitProject``), so this stays
+      ## empty there. It is set by callers that are reproducing an EXISTING
+      ## workspace's membership rather than starting a fresh one — the fork
+      ## form of ``repro branch``, whose new workspace must contain the same
+      ## repos as the workspace it was cut from. Without it the fork clones the
+      ## primary project only and every repo belonging to the other enabled
+      ## projects has no checkout to branch.
     verifySpec: ManifestVerifySpec
       ## RA-17 — manifest provenance trust anchor resolved from the host
       ## bootstrap config's ``[manifest] revision`` + ``[verify]`` table. When
@@ -22807,6 +22824,16 @@ proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs):
   ## path uses the extended composer entry point so an unreachable
   ## URL-backed layer is dropped and reported back to the caller rather
   ## than aborting the whole init.
+  # PS-6 — union in the caller-supplied extra projects. Applied to BOTH
+  # resolver paths so "materialize this exact membership" means the same thing
+  # in a compositional and a single-project workspace.
+  proc withAdditional(primary: ResolvedProject): ResolvedProject =
+    var extra: seq[string]
+    for name in parsed.additionalProjects:
+      if name.len > 0 and name != primary.projectName and name notin extra:
+        extra.add(name)
+    if extra.len == 0: primary
+    else: unionProjectSet(parsed.workspaceRoot, primary, extra)
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     let options = ComposeOptions(
@@ -22815,8 +22842,8 @@ proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs):
       workspaceToml, options)
     # PS-2 — init restores the WHOLE workspace, so a recorded project set is
     # materialized in full rather than just its primary project.
-    result.project = extendWithActiveProjectSet(parsed.workspaceRoot,
-      composed.project)
+    result.project = withAdditional(extendWithActiveProjectSet(
+      parsed.workspaceRoot, composed.project))
     for sl in composed.skippedLayers:
       result.skippedLayers.add(WorkspaceInitSkippedLayerEntry(
         index: sl.index,
@@ -22833,12 +22860,14 @@ proc resolveWorkspaceInitProject(parsed: WorkspaceInitArgs):
   # initializes exactly that one; the active project set is materialized by
   # ``repro sync`` / ``repro workspace enable`` instead. (The
   # compositional branch above has no explicit-name semantics — membership
-  # there comes from workspace.toml — so it does extend.)
+  # there comes from workspace.toml — so it does extend.) ``additionalProjects``
+  # is the caller saying "this membership, explicitly", which is not the same
+  # as inferring one, so it applies here too.
   if fileExists(projectFile):
-    result.project = resolveProject(projectFile)
+    result.project = withAdditional(resolveProject(projectFile))
     return
   if fileExists(variantFile):
-    result.project = resolveVariant(variantFile)
+    result.project = withAdditional(resolveVariant(variantFile))
     return
   raise newException(ValueError,
     "no project or variant named '" & parsed.projectName &
@@ -38952,6 +38981,11 @@ type
       ## M27 fork form only: whether ``--include-changes`` was requested.
     featureStarted*: bool
       ## M27 fork form only: the M16 feature mark recorded in the NEW workspace.
+    projects*: seq[string]
+      ## PS-6 fork form only: the project set the new workspace was given —
+      ## inherited from the source, or the ``--projects`` override. Reported so
+      ## a fork's membership is auditable without diffing two workspace.toml
+      ## files after the fact.
 
 proc branchOutcomeTag(outcome: BranchRepoOutcome): string =
   case outcome
@@ -38985,6 +39019,10 @@ proc toJsonNode*(report: BranchReport): JsonNode =
   if report.sourceWorkspaceRoot.len > 0:
     result["sourceWorkspaceRoot"] = %report.sourceWorkspaceRoot
     result["includeChanges"] = %report.includeChanges
+    var projects = newJArray()
+    for name in report.projects:
+      projects.add(%name)
+    result["projects"] = projects
 
 proc renderBranchTextLines*(report: BranchReport): seq[string] =
   if report.form == "show":
@@ -39021,17 +39059,37 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
       result.add("workspace branch: cd " & report.workspaceRoot &
         " && repro health")
   else:
-    # Aborted: branch creation is atomic, so NOTHING was created in ANY repo —
-    # the per-repo lines above only report which repos passed their checks
-    # (``ready``) versus which blocked the operation. Make that unmistakable so
-    # a list of ``ready`` lines is not misread as success.
+    # Failure. There are two shapes and they must not be worded the same way.
+    #
+    # A REFUSAL happens in the pre-flight pass: every repo was checked, at
+    # least one blocked, and nothing was created anywhere. A PARTIAL ADVANCE
+    # happens once the execute pass has started: the branch exists in the
+    # repos that succeeded and the tree is deliberately left in place for the
+    # re-run (the no-rollback contract).
+    #
+    # Reporting a partial advance as "no branch was created in any repo
+    # (creation is atomic)" is worse than saying nothing: the operator has
+    # branches on disk that the summary swears do not exist, so they neither
+    # clean them up nor trust the re-run. Which case this is, is decided by
+    # the per-repo outcomes rather than asserted up front.
     var blockers: seq[string]
+    var created: seq[string]
     for entry in report.repos:
-      if entry.outcome != "ready" and
+      if entry.outcome in ["branched", "branched_with_changes",
+                           branchOutcomeTag(broCreated)]:
+        created.add(entry.path)
+      elif entry.outcome != "ready" and
           entry.outcome != branchOutcomeTag(broAlreadyAtHead):
         blockers.add(entry.path & "=" & entry.outcome)
-    var summary = "workspace branch: ABORTED — no branch '" &
-      report.branch & "' was created in any repo (creation is atomic)"
+    var summary =
+      if created.len > 0:
+        "workspace branch: INCOMPLETE — '" & report.branch &
+          "' was created in " & $created.len & " repo(s) and the partial " &
+          "workspace is left in place; re-run the same command to finish it"
+      else:
+        "workspace branch: ABORTED — no branch '" & report.branch &
+          "' was created in any repo (nothing had been created when the " &
+          "first blocker was found)"
     if blockers.len > 0:
       summary.add("; " & $blockers.len & " repo(s) blocked: " &
         blockers.join(", "))
@@ -39046,6 +39104,14 @@ type
     forkPath: string        ## WV-6: the positional — the fork destination.
     includeChanges: bool    ## M27: also copy the source's uncommitted work.
     existingBranch: bool    ## WV-6: adopt an existing branch instead of cutting one.
+    projects: seq[string]
+      ## PS-6 ``--projects=A,B`` — the project set the NEW workspace should
+      ## have. Empty (the default) means "whatever this workspace has", which
+      ## is the only answer that makes a fork a fork: a branch of a workspace
+      ## is the same workspace on a different branch, so its membership is
+      ## inherited rather than re-derived. A non-empty value REPLACES the
+      ## inherited set, which is how a developer forks a narrower (or wider)
+      ## slice than they currently have checked out.
     destinationRefusal: string
       ## WV-6 — a destination guard that fired during parsing. Carried rather
       ## than raised so the command reports it as an ordinary refusal (exit 2,
@@ -39131,6 +39197,13 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
       result.existingBranch = true
     elif arg == "--include-changes":
       result.includeChanges = true
+    elif arg == "--projects" or arg.startsWith("--projects="):
+      # Comma-separated and repeatable both work, so the flag reads the same
+      # whether it is typed by hand or assembled by a script.
+      for name in valueFromFlag(args, i, "--projects").split(','):
+        let trimmed = name.strip()
+        if trimmed.len > 0 and trimmed notin result.projects:
+          result.projects.add(trimmed)
     elif arg == "--json":
       result.json = true
     elif consumeReportFlag(arg, result.report):
@@ -39155,9 +39228,11 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
           "branch this workspace is on, run `repro branch`")
     # The read-only show form. Every flag below only means something for a
     # destination, so accepting them here would silently do nothing.
-    if explicitBranch.len > 0 or result.existingBranch or result.includeChanges:
+    if explicitBranch.len > 0 or result.existingBranch or
+        result.includeChanges or result.projects.len > 0:
       raise newException(ValueError,
-        "`--branch` / `--existing-branch` / `--include-changes` require a " &
+        "`--branch` / `--existing-branch` / `--include-changes` / " &
+          "`--projects` require a " &
           "destination path (`" & verb & " <path>`); with no path " &
           "`repro branch` only reports the current workspace branch")
     return
@@ -39605,17 +39680,23 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
   ## FORKS: it materializes a new workspace there with every repo (and the
   ## workspace root repo) on the branch, cut from THIS workspace's committed
   ## HEADs, leaving the current workspace untouched.
+  ##
+  ## PS-6 — the new workspace inherits this workspace's enabled PROJECT SET;
+  ## ``--projects=A,B`` replaces it. See ``executeBranchFork``.
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
     echo verb & " [<path>] [--branch=NAME] [--existing-branch] " &
-      "[--include-changes] [--workspace-root=PATH] [--json] " &
-      "[--write-report[=PATH]]"
+      "[--include-changes] [--projects=A,B] [--workspace-root=PATH] " &
+      "[--json] [--write-report[=PATH]]"
     echo "  (no argument)     print the current workspace branch"
     echo "  <path>            fork into a NEW workspace directory at <path>;"
     echo "                    the branch is named after the path's basename"
     echo "  --branch=NAME     name the branch something other than the basename"
     echo "  --existing-branch check out an EXISTING branch instead of creating one"
     echo "  --include-changes also copy the source's uncommitted work"
+    echo "  --projects=A,B    give the new workspace THIS project set instead"
+    echo "                    of inheriting the current one (repeatable)"
     echo ""
+    echo "  The new workspace inherits this workspace's enabled projects."
     echo "  To switch THIS workspace onto a branch, use `repro switch`."
     return 0
   let parsed = parseBranchArgs(args, verb, requirePath)
@@ -41552,20 +41633,57 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   ## ``--include-changes`` says so — which is also why a dirty source is not a
   ## refusal here, unlike the in-place form where dirt would be switched on top
   ## of. See ``reprobuild-specs/CLI/branch.md``.
+  ##
+  ## PS-6 — membership is INHERITED: the new workspace gets the source's
+  ## enabled project set, so it holds the same repos. ``--projects=A,B``
+  ## replaces that set outright for the new workspace only; the source's
+  ## membership is never edited either way.
   result.branch = parsed.branchName
   result.form = "fork"
   result.sourceWorkspaceRoot = parsed.workspaceRoot
   result.workspaceRoot = parsed.forkPath
   result.includeChanges = parsed.includeChanges
 
-  let parsedSwitch = SwitchArgs(
-    workspaceRoot: parsed.workspaceRoot,
-    projectName: parsed.projectName,
-    branchName: parsed.branchName,
-    assumeYes: true,
-    toolProvisioning: parsed.toolProvisioning)
-  let (resolved, _) = resolveSwitchProject(parsedSwitch)
+  # ---- membership of the NEW workspace -----------------------------------
+  # PS-6 — a fork INHERITS the source workspace's enabled project set. It is
+  # the same workspace on a different branch, so it must contain the same
+  # repos; deriving membership afresh from the primary project instead would
+  # silently drop every repo the other enabled projects contribute, and those
+  # repos then have no checkout for the branch pass to act on.
+  #
+  # ``--projects`` replaces the inherited set outright (not extends it), so
+  # forking a narrower slice is expressible without first disabling projects
+  # in the source workspace.
+  var forkProjects: seq[string]
+  var resolved: ResolvedProject
+  if parsed.projects.len > 0:
+    forkProjects = parsed.projects
+    try:
+      resolved = resolveProjectSet(parsed.workspaceRoot, forkProjects)
+    except CatchableError as err:
+      # Refused before anything is created, like every other fork guard.
+      result.exitCode = 2
+      result.repos.add(BranchRepoEntry(
+        outcome: "projects_unresolved",
+        diagnostic: "`--projects=" & forkProjects.join(",") &
+          "` does not resolve against '" & parsed.workspaceRoot & "': " &
+          err.msg))
+      return
+  else:
+    let parsedSwitch = SwitchArgs(
+      workspaceRoot: parsed.workspaceRoot,
+      projectName: parsed.projectName,
+      branchName: parsed.branchName,
+      assumeYes: true,
+      toolProvisioning: parsed.toolProvisioning)
+    (resolved, _) = resolveSwitchProject(parsedSwitch)
+    forkProjects = activeProjectSetOrEmpty(parsed.workspaceRoot)
+  if forkProjects.len == 0:
+    # No recorded set (a single-project workspace, or unreadable metadata):
+    # the resolved primary IS the membership.
+    forkProjects = @[resolved.projectName]
   result.project = resolved.projectName
+  result.projects = forkProjects
 
   let identity = ensureGitToolResolvable(
     parsed.toolProvisioning, getEnv("PATH"))
@@ -41718,7 +41836,13 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   # re-run after a partial fork only clones what is still missing.
   var initArgs: WorkspaceInitArgs
   initArgs.workspaceRoot = parsed.forkPath
-  initArgs.projectName = resolved.projectName
+  initArgs.projectName = forkProjects[0]
+  # PS-6 — materialize the WHOLE inherited set, not just its primary. The
+  # branch pass below iterates `resolved.repos` (the union), so anything init
+  # leaves uncloned reaches it as a missing target rather than as a repo it
+  # knows to skip.
+  if forkProjects.len > 1:
+    initArgs.additionalProjects = forkProjects[1 .. ^1]
   initArgs.toolProvisioning = parsed.toolProvisioning
   let initOutcome = executeWorkspaceInit(initArgs)
   if initOutcome.cloneFailures > 0:
@@ -41873,9 +41997,13 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     return
 
   # ---- metadata (only after every repo landed) --------------------------
+  # Order matters: the project set is written FIRST so the branch writer's
+  # read-modify-write preserves it. Both writers go through the strict reader,
+  # so the second one carries the first one's fields forward verbatim.
   try:
+    writeWorkspaceProjects(parsed.forkPath, forkProjects)
     writeWorkspaceBranchWithStarted(parsed.forkPath,
-      project = resolved.projectName, branch = parsed.branchName,
+      project = forkProjects[0], branch = parsed.branchName,
       featureStarted = true)
     result.recordedBranch = parsed.branchName
     result.featureStarted = true

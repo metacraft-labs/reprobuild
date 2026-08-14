@@ -15,6 +15,13 @@
 ##      is what let (1) go unnoticed: the workspace silently rotted, and the
 ##      first visible symptom was an unrelated command refusing much later.
 ##
+## A third defect of the same shape: `--branch` also rejects a FULLY-QUALIFIED
+## ref. A fragment pinning `refs/tags/v1.0.0` died with "Remote branch
+## refs/tags/v1.0.0 not found in upstream origin" even though the tag existed,
+## so a tag-pinned repo could not be cloned either. The qualified spelling is
+## the only way a manifest can say "the TAG v1.0.0" rather than "whichever ref
+## is named v1.0.0", so it is normalized for `--branch` instead of rejected.
+##
 ## Asserted:
 ##   1. A fragment pinned to a commit id that is NOT a branch tip clones, and
 ##      the checkout lands on exactly that commit.
@@ -22,6 +29,8 @@
 ##      is reported `clone_failed`, the summary counts it, and the exit code is
 ##      non-zero — while the OTHER repos in the same run still converge (the
 ##      partial-advance contract is preserved, only the reporting is honest).
+##   3. A fragment pinned to `refs/tags/<tag>` clones and lands on the tagged
+##      commit.
 ##
 ## No mocks: real `git init --bare` upstreams, the real clone action, and the
 ## engine-built `build/bin/repro`.
@@ -178,3 +187,43 @@ suite "sync clones a commit-pinned repo, and a failed clone fails the run":
         if entry["path"].getStr() == "bad-lib":
           badStatus = entry["executionStatus"].getStr()
       check badStatus == "clone_failed"
+
+  test "t_sync_clones_repo_pinned_to_a_fully_qualified_tag":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let scratch = createTempDir("repro-tagclone-", "")
+      defer: removeDir(scratch)
+      let workspaceRoot = scratch / "workspace"
+      createDir(workspaceRoot / "projects")
+      createDir(workspaceRoot / "repos")
+
+      let origin = scratch / "origin-tagged-lib.git"
+      let seed = scratch / "seed-tagged-lib"
+      # Tag the FIRST commit, so landing on the tag is distinguishable from
+      # landing on the branch tip.
+      let tagged = seedOrigin(gitBin, origin, seed)
+      discard requireGit(q(gitBin) & " -C " & q(seed) &
+        " tag v1.0.0 " & q(tagged))
+      discard requireGit(q(gitBin) & " -C " & q(seed) &
+        " push origin v1.0.0")
+
+      writeFile(workspaceRoot / "repos" / "tagged-lib.toml",
+        repoFragment("tagged-lib", "tagged-origin", "refs/tags/v1.0.0"))
+      writeFile(workspaceRoot / "projects" / "pinned.toml",
+        projectFile("[[remote]]\nname = \"tagged-origin\"\nfetch = \"" &
+          fileUrl(origin) & "\"\n\n", ["repos/tagged-lib.toml"]))
+
+      let res = runShell(shellCommand(@[reproBinary(), "workspace", "enable",
+        "pinned", "--workspace-root=" & workspaceRoot]))
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      check dirExists(workspaceRoot / "tagged-lib" / ".git")
+      let head = requireGit(q(gitBin) & " -C " &
+        q(workspaceRoot / "tagged-lib") & " rev-parse HEAD").strip()
+      check head == tagged
+      check fileExists(workspaceRoot / "tagged-lib" / "first.txt")
+      check not fileExists(workspaceRoot / "tagged-lib" / "second.txt")

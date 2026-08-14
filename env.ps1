@@ -10,6 +10,11 @@
 #   * Nim 2.2.x + a working C compiler (gcc/clang/cl)         -- via
 #     ../repo-workspaces/env.ps1 (Ensure-Nim + Ensure-Gcc).
 #   * just + gh + python + gpg + git-repo                     -- same.
+#   * bash                                                    -- resolved from
+#     git's own installation and put AHEAD of the WSL launcher that Windows
+#     puts on PATH by default. Both build entry points below are bash scripts,
+#     so without this the environment reports "ready" and then the build fails
+#     with a WSL "no installed distributions" message.
 #   * clingo.dll (the ASP solver repro_solver dlopens at module init)
 #                                                             -- via
 #     windows/ensure-clingo.ps1. reprobuild-specific, so it lives here
@@ -17,6 +22,10 @@
 #     devShell supplies it (`pkgs.clingo`); this is the Windows
 #     counterpart, and `scripts/build_apps.sh` stages the DLL it
 #     installs next to the built `repro.exe`.
+#   * nim-bearssl + its csources submodule (repro_peer_cache/auth.nim
+#     imports `bearssl/ec`)                                   -- via
+#     windows/ensure-nim-bearssl.ps1, the Windows counterpart of the
+#     flake's `bearssl-src` input, pinned to the same revision.
 #   * Sibling repos checked out alongside `reprobuild/`:
 #       - codetracer/                  (libs/nim-stew, libs/nim-faststreams,
 #                                       libs/nim-serialization, libs/nimcrypto
@@ -44,6 +53,10 @@
 #       `could not load: clingo.dll` unless clingo is on PATH by some
 #       other means -- the skip exists for hosts that provision it
 #       independently, not as a way to opt out of the dependency.
+#   $env:WINDOWS_DIY_SKIP_NIM_BEARSSL = "1" skip the nim-bearssl step. The
+#       build then fails with `cannot open file: bearssl/ec` unless
+#       $BEARSSL_SRC or a `../nim-bearssl` sibling supplies it. Same
+#       caveat as clingo: for hosts that provision it independently.
 #   $env:STACKABLE_HOOKS_SRC = <path>  override `../nim-stackable-hooks/src`.
 #   $env:RUNQUOTA_SRC     = <path>  override `../runquota`.
 #   $env:NIMCRYPTO_SRC    = <path>  override `../codetracer/libs/nimcrypto`.
@@ -84,6 +97,25 @@ if (Test-BootstrapStepEnabled "CLINGO") {
     # ordering against some other clingo that may be ahead of it.
     Add-PathEntry -Dir $clingoDir
     $env:REPRO_WINDOWS_CLINGO_DIR = $clingoDir
+}
+
+# --- 1c. nim-bearssl (reprobuild-specific) -----------------------------------
+# `repro_peer_cache/auth.nim` imports `bearssl/ec`, so this is a hard build
+# dependency of `repro` itself. Linux/macOS receive it from the flake's
+# `bearssl-src` input; on Windows `config.nims` would otherwise fall back to
+# searching `../nim-bearssl`, which exists only on hosts where somebody cloned
+# it by hand. Fatal for the same reason as clingo: a build that proceeds
+# without it fails deep in the C stage with `cannot open file: bearssl/ec`,
+# which reads as a reprobuild bug rather than a missing dependency.
+$bearsslDir = ""
+if (Test-BootstrapStepEnabled "NIM_BEARSSL") {
+    . (Join-Path $scriptDir "windows\ensure-nim-bearssl.ps1")
+    $reproToolchain = Read-KeyValueFile -Path (Join-Path $scriptDir "windows\toolchain-versions.env")
+    $bearsslDir = Ensure-NimBearssl -Root $installRoot -Toolchain $reproToolchain
+    # `config.nims` reads $BEARSSL_SRC first and only then probes the sibling
+    # candidates, so exporting it makes the pinned checkout win over any stale
+    # hand-cloned `../nim-bearssl` a developer may still have lying around.
+    $env:BEARSSL_SRC = $bearsslDir
 }
 
 # --- 2. Sibling repo discovery -----------------------------------------------
@@ -157,6 +189,66 @@ if ($ioMonDir) {
     $env:IO_MON_SRC = Join-Path $ioMonDir "src"
 }
 
+# --- 2b. bash (the thing every "Next steps" line below invokes) --------------
+# `scripts/build_apps.sh` and `scripts/run_tests.sh` are bash scripts, so this
+# environment is not "ready" without a bash that can run them. Windows makes
+# that a real trap: `C:\Windows\System32\bash.exe` (the WSL launcher, also
+# surfaced via the WindowsApps alias) is on PATH by DEFAULT and shadows Git
+# Bash. On a host with no WSL distro installed it does not fail as "bash is
+# missing" — it prints a WSL advertisement, exits non-zero, and the build dies
+# with a message about distributions that has nothing to do with reprobuild.
+#
+# git ships the bash we want and `Ensure-Git` (framework, above) has already
+# put git on PATH, so the fix is to resolve bash from git's own installation
+# and put it AHEAD of the WSL stub rather than to provision anything new.
+function Get-CommandSourceOrEmpty {
+    param([string]$Name)
+    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($null -eq $cmd) { return "" }
+    if ($cmd.CommandType -eq "Alias") { return $cmd.Definition }
+    return $cmd.Source
+}
+
+function Test-UsableBash {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    # The WSL launcher lives in System32 / WindowsApps and is never the bash we
+    # want here, even when a distro IS installed: the build must run against the
+    # host filesystem with the host toolchain on PATH, not inside a Linux VM.
+    $dir = Split-Path -Parent $Path
+    if ($dir -match '\\(System32|SysWOW64|WindowsApps)$') { return $false }
+    return $true
+}
+
+function Resolve-GitBashDir {
+    # `git.exe` lives in `<root>\cmd` (or `<root>\bin`); bash sits in
+    # `<root>\bin\bash.exe` for every supported layout (Git for Windows,
+    # scoop, winget).
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if ($null -eq $git) { return "" }
+    $gitExe = if ($git.CommandType -eq "Alias") { $git.Definition } else { $git.Source }
+    if ([string]::IsNullOrWhiteSpace($gitExe)) { return "" }
+    $root = Split-Path -Parent (Split-Path -Parent $gitExe)
+    foreach ($candidate in @((Join-Path $root "bin"), (Join-Path $root "usr\bin"))) {
+        if (Test-Path -LiteralPath (Join-Path $candidate "bash.exe")) {
+            return $candidate
+        }
+    }
+    return ""
+}
+
+$currentBash = Get-CommandSourceOrEmpty 'bash'
+if (-not (Test-UsableBash $currentBash)) {
+    $gitBashDir = Resolve-GitBashDir
+    if ($gitBashDir) {
+        Add-PathEntry -Dir $gitBashDir
+    } else {
+        Write-Warning "reprobuild env.ps1: no usable bash found (PATH resolves bash to '$currentBash', and git's own bash could not be located). 'bash scripts/build_apps.sh' will fail -- install Git for Windows."
+    }
+}
+$bashPath = Get-CommandSourceOrEmpty 'bash'
+
 # --- 3. Status summary -------------------------------------------------------
 function Get-CommandSource {
     # `repo-workspaces/env.ps1` exposes nim / just / python / gh / repo as
@@ -177,7 +269,9 @@ Write-Host "reprobuild dev environment ready."
 Write-Host "  nim          = $(Get-CommandSource 'nim')"
 Write-Host "  gcc          = $(Get-CommandSource 'gcc')"
 Write-Host "  just         = $(Get-CommandSource 'just')"
+Write-Host "  bash         = $(if ($bashPath) { $bashPath } else { '(missing -- the build scripts cannot run)' })"
 Write-Host "  clingo       = $(if ($clingoDir) { Join-Path $clingoDir 'clingo.dll' } else { '(skipped -- repro.exe will not start)' })"
+Write-Host "  nim-bearssl  = $(if ($bearsslDir) { $bearsslDir } else { '(skipped -- repro will not build)' })"
 Write-Host "  codetracer   = $(if ($codetracerDir) { $codetracerDir } else { '(missing -- see warning)' })"
 Write-Host "  runquota     = $(if ($runquotaDir) { $runquotaDir } else { '(missing -- see warning)' })"
 Write-Host "  stackable-hooks = $(if ($stackableHooksDir) { $stackableHooksDir } else { '(missing -- see warning)' })"

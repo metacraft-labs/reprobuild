@@ -613,6 +613,26 @@ proc isCommitSha(revision: string): bool =
   ## already uses to land on an arbitrary revision.
   revision.len == 40 and revision.allCharsInSet(HexDigits)
 
+proc cloneBranchRef(revision: string): string =
+  ## The spelling of ``revision`` that ``git clone --branch`` accepts.
+  ##
+  ## ``--branch`` takes a SHORT branch or tag name and resolves it against the
+  ## remote itself; handed a fully-qualified ref it reports "Remote branch
+  ## refs/tags/v1 not found in upstream origin" even though the tag is right
+  ## there. Manifests legitimately pin the qualified form (it is the only way
+  ## to say "the TAG v1", not "whichever ref happens to be named v1"), so the
+  ## qualified spelling is normalized here rather than banned in the manifest
+  ## schema.
+  ##
+  ## Only the two ref namespaces ``--branch`` can reach are stripped. Anything
+  ## else (``refs/pull/…``, a bare name, a SHA) is passed through untouched so
+  ## an unsupported pin still fails loudly at git rather than being silently
+  ## rewritten into a different ref.
+  for prefix in ["refs/heads/", "refs/tags/"]:
+    if revision.startsWith(prefix):
+      return revision[prefix.len .. ^1]
+  revision
+
 proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResult =
   let target = absoluteRepoPath(payload, cwd)
   let parent = target.splitPath.head
@@ -677,7 +697,7 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
   args.add(target)
   if payload.revision.len > 0 and not pinnedCommit:
     args.add("--branch")
-    args.add(payload.revision)
+    args.add(cloneBranchRef(payload.revision))
   var cloneRes = runGit(payload, args)
   if cloneRes.exitCode != 0 and useReference:
     # Best-effort fallback: drop the reference and clone standalone so a
@@ -693,7 +713,7 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     plain.add(target)
     if payload.revision.len > 0 and not pinnedCommit:
       plain.add("--branch")
-      plain.add(payload.revision)
+      plain.add(cloneBranchRef(payload.revision))
     cloneRes = runGit(payload, plain)
   if cloneRes.exitCode != 0:
     return failed("clone-failed",

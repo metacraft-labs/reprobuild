@@ -50,21 +50,13 @@ proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
-proc removeDirEventually(path: string) =
-  ## Git may still be closing files from a just-finished branch/create flow.
-  ## Retry teardown, but still fail if the workspace remains non-empty.
-  if not dirExists(path):
-    return
-  var lastMsg = ""
-  for _ in 0 ..< 40:
-    try:
-      removeDir(path)
-      return
-    except OSError as e:
-      lastMsg = e.msg
-      sleep(50)
-  checkpoint("cleanup still failed for " & path & ": " & lastMsg)
-  removeDir(path)
+# Teardown uses ``repro_test_support.removeDirEventually``. A local copy used
+# to live here and retried for two seconds, which is the wrong medicine: the
+# failure is not only git closing files, it is also Windows' MAX_PATH — the
+# engine action-cache records under a scratch root exceed 260 characters and
+# ``FindFirstFileW`` silently refuses to enumerate them, so no amount of
+# retrying empties the directory. The shared helper escalates to the ``\\?\``
+# form, so keeping a private one here just reintroduced the bug.
 
 # ---- bare-repo seed fixture ----------------------------------------------
 
