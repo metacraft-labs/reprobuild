@@ -99,6 +99,8 @@ import std/[algorithm, atomics, json, locks, os, osproc, parseopt, streams,
 
 when defined(posix):
   import std/posix
+elif defined(windows):
+  import std/winlean
 
 const
   DefaultBinDir = "build/test-bin"
@@ -558,15 +560,82 @@ proc probeTimeoutSec(): int =
 
 const ProbePollIntervalMs = 50
 
+const ProbeDrainBudgetBytes = 64 * 1024
+
+when defined(posix):
+  proc makeProbePipeNonBlocking(handle: FileHandle): bool =
+    let fd = cint(handle)
+    let flags = fcntl(fd, F_GETFL, cint(0))
+    flags != -1 and fcntl(fd, F_SETFL, flags or O_NONBLOCK) != -1
+
+  proc drainProbePipe(handle: FileHandle; sink: File):
+      tuple[bytes: int; eof: bool] =
+    ## Drain one probe channel without ever letting it monopolise discovery.
+    ## stdout and stderr each receive the same per-pass budget, so a child
+    ## flooding one channel cannot fill and deadlock the other before the
+    ## timeout poll gets another turn.
+    let fd = cint(handle)
+    var buf: array[4096, char]
+    while result.bytes < ProbeDrainBudgetBytes:
+      let remaining = ProbeDrainBudgetBytes - result.bytes
+      let requested = min(buf.len, remaining)
+      let n = read(fd, addr buf[0], requested)
+      if n > 0:
+        let count = int(n)
+        discard sink.writeBuffer(addr buf[0], count)
+        result.bytes += count
+      elif n == 0:
+        result.eof = true
+        break
+      else:
+        let e = errno
+        if e == EINTR:
+          continue
+        break
+elif defined(windows):
+  proc drainProbePipe(handle: FileHandle; sink: File):
+      tuple[bytes: int; eof: bool] =
+    ## Windows anonymous pipes support PeekNamedPipe. Ask how many bytes can
+    ## be read before every ReadFile so discovery never blocks on either
+    ## channel; a broken pipe is EOF after the direct child exits.
+    let pipe = Handle(handle)
+    var available: int32
+    if not peekNamedPipe(pipe, lpTotalBytesAvail = addr available):
+      # ERROR_BROKEN_PIPE (109) is the ordinary EOF result. Other errors are
+      # also treated as a closed capture channel: retrying a failed readiness
+      # query must never turn into a blocking read before the timeout check.
+      result.eof = true
+      return
+    while available > 0 and result.bytes < ProbeDrainBudgetBytes:
+      var buf: array[4096, char]
+      let requested = int32(min(buf.len,
+        min(int(available), ProbeDrainBudgetBytes - result.bytes)))
+      var count: int32
+      if readFile(pipe, addr buf[0], requested, addr count, nil) == 0:
+        result.eof = true
+        return
+      if count <= 0:
+        break
+      discard sink.writeBuffer(addr buf[0], int(count))
+      result.bytes += int(count)
+      available -= count
+
 proc runListJson(binary: string): tuple[output: string; stderrOutput: string;
                                         exitCode: int; timedOut: bool] =
   ## Execute ``<binary> --list-json`` under a wall-clock bound.
   ##
-  ## Output is redirected to a temp file by the shell rather than piped,
-  ## so the poll loop never has to drain a pipe and a chatty probe can
-  ## not deadlock against a full pipe buffer while we are waiting on the
-  ## clock. ``stdin`` is ``/dev/null`` so a probe that reads stdin fails
-  ## fast instead of inheriting the runner's terminal.
+  ## The executable is launched directly with an argv vector. In particular,
+  ## there is no ``/bin/sh -c`` between the runner and the probe: macOS SIP
+  ## strips ``DYLD_*`` variables while starting Apple's protected shell, which
+  ## made every Clingo-linked catalog probe fail before its Nim ``main`` even
+  ## though the same binary ran successfully as a test case. Direct execution
+  ## also means paths and arguments never acquire shell syntax.
+  ##
+  ## Direct children expose separate stdout/stderr pipes. On POSIX both are
+  ## nonblocking and drained round-robin into separate temp files while the
+  ## timeout is polled. A fixed per-channel budget keeps either stream from
+  ## starving the other or the clock. The stdin pipe is closed immediately,
+  ## preserving the former ``/dev/null`` EOF behaviour.
   ##
   ## **stdout and stderr go to separate files.** They used to be merged
   ## with ``2>&1``, which made this probe corrupt its own input: the
@@ -605,19 +674,50 @@ proc runListJson(binary: string): tuple[output: string; stderrOutput: string;
         try: removeFile(path)
         except CatchableError: discard
 
-  let shellCmd = "exec " & quoteShell(binary) & " --list-json > " &
-    quoteShell(tmpPath) & " 2> " & quoteShell(errPath) & " < /dev/null"
+  var stdoutFile: File
+  var stderrFile: File
+  try:
+    stdoutFile = open(tmpPath, fmAppend)
+    stderrFile = open(errPath, fmAppend)
+  except CatchableError:
+    if stdoutFile != nil:
+      stdoutFile.close()
+    return
+  defer:
+    stdoutFile.close()
+    stderrFile.close()
+
   var p: Process
   try:
-    p = startProcess("/bin/sh", args = ["-c", shellCmd], env = nil,
-                     options = {poParentStreams})
+    p = startProcess(binary, args = ["--list-json"], env = nil, options = {})
+    let probeStdin = p.inputStream
+    if probeStdin != nil:
+      probeStdin.close()
   except CatchableError:
     return
+
+  when defined(posix):
+    # A failed fcntl would leave a blocking fd behind. Refuse this probe and
+    # reap its child rather than allowing the first read to bypass the wall
+    # clock forever.
+    if not makeProbePipeNonBlocking(p.outputHandle) or
+        not makeProbePipeNonBlocking(p.errorHandle):
+      try:
+        p.kill()
+        discard p.waitForExit()
+      except CatchableError:
+        discard
+      try: p.close()
+      except CatchableError: discard
+      return
 
   let deadline = epochTime() + probeTimeoutSec().float
   var exitCode = -1
   try:
     while true:
+      when defined(posix) or defined(windows):
+        discard drainProbePipe(p.outputHandle, stdoutFile)
+        discard drainProbePipe(p.errorHandle, stderrFile)
       if not p.running():
         exitCode = p.waitForExit()
         break
@@ -630,9 +730,38 @@ proc runListJson(binary: string): tuple[output: string; stderrOutput: string;
           discard
         break
       sleep(ProbePollIntervalMs)
+
+    # Collect bytes already in flight after exit/kill. This stays bounded even
+    # if a malformed probe leaked a descendant holding one of the pipes open.
+    when defined(posix) or defined(windows):
+      let drainDeadline = epochTime() + 1.0
+      var stdoutEof = false
+      var stderrEof = false
+      while (not stdoutEof or not stderrEof) and epochTime() < drainDeadline:
+        var progressed = false
+        if not stdoutEof:
+          let drained = drainProbePipe(p.outputHandle, stdoutFile)
+          stdoutEof = drained.eof
+          progressed = progressed or drained.bytes > 0
+        if not stderrEof:
+          let drained = drainProbePipe(p.errorHandle, stderrFile)
+          stderrEof = drained.eof
+          progressed = progressed or drained.bytes > 0
+        if not progressed and (not stdoutEof or not stderrEof):
+          sleep(10)
+    else:
+      # Unusual non-POSIX targets retain a compileable direct-process fallback.
+      # Windows uses PeekNamedPipe above and does not enter this branch.
+      if p.outputStream != nil:
+        stdoutFile.write(p.outputStream.readAll())
+      if p.errorStream != nil:
+        stderrFile.write(p.errorStream.readAll())
   finally:
     try: p.close()
     except CatchableError: discard
+
+  stdoutFile.flushFile()
+  stderrFile.flushFile()
 
   if result.timedOut:
     return
@@ -3179,6 +3308,12 @@ proc main() =
   let opts = parseArgs()
   let cwd = getCurrentDir()
 
+  # Catalog discovery executes test binaries, so it needs the same Nix loader
+  # environment as the later test-case execution path. Establish it before
+  # anything can call probeBinary/runListJson; doing this only before worker
+  # creation is too late for every probe in the catalog-building loop below.
+  ensureNixRuntimeLibraryEnv()
+
   if opts.runBuild:
     if not buildEngine(cwd):
       quit(1)
@@ -3354,7 +3489,6 @@ proc main() =
     putEnv("GIT_CONFIG_GLOBAL", hermeticGitConfigFile)
     putEnv("GIT_CONFIG_NOSYSTEM", "1")
 
-  ensureNixRuntimeLibraryEnv()
   ensureWorkspaceSourceEnv(cwd)
 
   var exclusiveItems: seq[TestCase] = @[]

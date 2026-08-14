@@ -1537,10 +1537,13 @@ def catalog_probe_env() -> dict[str, str]:
     """Environment for probing test binaries.
 
     Mirrors the runtime library-path construction in scripts/run_tests.sh so
-    a probe sees exactly what the suite runner sees. Note that in the current
-    nix dev shell ``CLINGO_LIB``/``ZSTD_LIB`` are empty and the working
-    mechanism is the dev shell's own ``LD_LIBRARY_PATH``; this construction is
-    kept for parity with run_tests.sh on hosts that do set them.
+    a probe sees exactly what the suite runner sees. In the current Darwin nix
+    dev shell ``CLINGO_LIB``/``ZSTD_LIB`` are empty and the closure is exposed
+    through ``LD_LIBRARY_PATH``. Darwin's loader does not consult that Linux
+    variable, so copy its entries into both ``DYLD_*`` paths in the CHILD
+    environment before the first probe starts. Keeping this normalization
+    probe-local is deliberate: exporting ``DYLD_*`` before the graph build
+    would change every build action's environment and force a cold rebuild.
     """
     env = dict(os.environ)
     runtime_lib_dirs = [
@@ -1557,6 +1560,19 @@ def catalog_probe_env() -> dict[str, str]:
         ):
             existing = env.get(var, "")
             env[var] = f"{joined}:{existing}" if existing else joined
+
+    if sys.platform == "darwin":
+        # Nix's Darwin dev shell currently carries the complete runtime
+        # closure in LD_LIBRARY_PATH. Preserve order and discard empty path
+        # components (which dyld would otherwise interpret as the current
+        # directory) while avoiding duplicate growth when CLINGO_LIB/ZSTD_LIB
+        # were also present above.
+        inherited = [
+            entry for entry in env.get("LD_LIBRARY_PATH", "").split(":") if entry
+        ]
+        for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"):
+            existing = [entry for entry in env.get(var, "").split(":") if entry]
+            env[var] = ":".join(dict.fromkeys([*inherited, *existing]))
     return env
 
 

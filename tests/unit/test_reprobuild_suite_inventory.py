@@ -2285,6 +2285,32 @@ test "incomplete name" and:
         The required behaviour: retry serially with a longer budget, and if
         the retry also fails, ABORT with an explicit environment error.
         """
+        # Darwin's nix dev shell publishes its runtime closure through the
+        # Linux-named variable only. The inventory must translate that value
+        # into the child environment BEFORE subprocess.run starts; mutating
+        # os.environ after this snapshot cannot repair an already-created
+        # probe environment.
+        with mock.patch.object(sys, "platform", "darwin"), mock.patch.dict(
+            os.environ,
+            {
+                "LD_LIBRARY_PATH": "/nix/store/clingo/lib:/nix/store/zstd/lib",
+                "DYLD_LIBRARY_PATH": "/existing/dyld:/nix/store/clingo/lib",
+                "DYLD_FALLBACK_LIBRARY_PATH": "/existing/fallback",
+            },
+            clear=True,
+        ):
+            probe_env = inventory.catalog_probe_env()
+            self.assertEqual(
+                probe_env["DYLD_LIBRARY_PATH"],
+                "/nix/store/clingo/lib:/nix/store/zstd/lib:/existing/dyld",
+            )
+            self.assertEqual(
+                probe_env["DYLD_FALLBACK_LIBRARY_PATH"],
+                "/nix/store/clingo/lib:/nix/store/zstd/lib:/existing/fallback",
+            )
+            os.environ["LD_LIBRARY_PATH"] = "/too/late"
+            self.assertNotIn("/too/late", probe_env["DYLD_LIBRARY_PATH"])
+
         spec = inventory.TestSpec(
             source="tests/unit/t_declared_package_deps_from_recipe.nim",
             binary="build/test-bin/t_declared_package_deps_from_recipe",

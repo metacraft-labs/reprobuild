@@ -62,7 +62,7 @@
 ## fail-closed test, which are damaged copies of a genuine catalog the
 ## runner itself wrote moments earlier.
 
-import std/[json, os, osproc, strutils, tables, tempfiles, unittest]
+import std/[json, os, osproc, strutils, tables, tempfiles, times, unittest]
 
 const RepoRootMarker = "repro.nim"
 
@@ -99,6 +99,73 @@ suite "catalog_fixture":
     check "x" & "y" == "xy"
 """
 
+const RuntimeProbeFixture = """
+import std/[os, strutils, unittest]
+
+let probeArgs = commandLineParams()
+if "--list-json" in probeArgs:
+  # The runner contract is an exact argv vector, not a command string with
+  # shell-added or shell-consumed words.
+  if probeArgs != @["--list-json"]:
+    quit(92)
+
+  # Catalog stdin must be closed: an inherited terminal would park discovery.
+  var unexpectedInput = ""
+  if stdin.readLine(unexpectedInput):
+    quit(93)
+
+  if getEnv("REPRO_CATALOG_FIXTURE_HANG") == "1":
+    sleep(3000)
+  let forcedExit = getEnv("REPRO_CATALOG_FIXTURE_EXIT")
+  if forcedExit.len > 0:
+    quit(parseInt(forcedExit))
+
+  # Both channels exceed ordinary pipe capacity. stderr begins with a valid
+  # but deliberately false catalog: if the runner merges the streams or reads
+  # stderr as catalog input, it will enumerate the wrong case. stdout carries
+  # leading noise so the real catalog extraction path is exercised too.
+  stderr.write("{\"tests\":[{\"name\":\"forged::stderr\",\"suite\":\"forged\"}]}\n")
+  stderr.write(repeat("stderr-probe-noise-", 8192))
+  stderr.flushFile()
+  stdout.write(repeat("stdout-probe-noise-", 8192))
+  stdout.flushFile()
+
+suite "runtime_probe_fixture":
+  test "direct argv and loader environment survive catalog probing":
+    check true
+"""
+
+const InventoryProbeScript = """
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+module_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location(
+    "reprobuild_suite_inventory_runtime_probe", module_path
+)
+inventory = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = inventory
+spec.loader.exec_module(inventory)
+
+binary = pathlib.Path(sys.argv[2])
+cwd = pathlib.Path(sys.argv[3])
+
+# Snapshot the probe environment before the Nix runtime closure is available.
+# Updating the parent environment afterwards is deliberately too late for this
+# dict: subprocess.run receives the snapshot, not a live view of os.environ.
+late_env = inventory.catalog_probe_env()
+os.environ["LD_LIBRARY_PATH"] = sys.argv[4]
+ready_env = inventory.catalog_probe_env()
+
+print(json.dumps({
+    "late": inventory.probe_binary_catalog(binary, cwd, late_env, 30),
+    "ready": inventory.probe_binary_catalog(binary, cwd, ready_env, 30),
+}))
+"""
+
 proc fixtureSource(editedValue: string): string =
   FixtureTemplate.replace("@@EDIT@@", editedValue)
 
@@ -108,14 +175,39 @@ proc compileFixture(workRoot, source, binary: string): bool =
     "--out:" & quoteShell(binary) & " " & quoteShell(source)
   execCmd(cmd) == 0
 
+proc compileRealClingoFixture(workRoot, binary: string): bool =
+  ## Compile the repository's actual Clingo smoke source in place, so Nim
+  ## discovers the same config.nims and produces the same relocatable loader
+  ## shape as the full suite rather than a synthetic approximation of it.
+  let source = findRepoRoot() / "libs" / "repro_solver" / "tests" /
+    "t_clingo_smoke.nim"
+  let cmd = "nim c --threads:on --hints:off --warnings:off " &
+    "--nimcache:" & quoteShell(workRoot / "nimcache-clingo") & " " &
+    "--out:" & quoteShell(binary) & " " & quoteShell(source)
+  execCmd(cmd) == 0
+
 type RunOutcome = object
   exitCode: int
   output: string
   summary: JsonNode
 
 proc runRunner(runner, binDir, workRoot, tag: string;
-               catalogWrite = ""; catalogRead = ""): RunOutcome =
+               catalogWrite = ""; catalogRead = "";
+               envOverrides: openArray[tuple[name, value: string]] = []):
+               RunOutcome =
   ## Drive the real runner once and parse the summary it wrote.
+  var savedEnv: seq[tuple[name: string; existed: bool; value: string]] = @[]
+  for override in envOverrides:
+    savedEnv.add((name: override.name, existed: existsEnv(override.name),
+                  value: getEnv(override.name)))
+    putEnv(override.name, override.value)
+  defer:
+    for saved in savedEnv:
+      if saved.existed:
+        putEnv(saved.name, saved.value)
+      else:
+        delEnv(saved.name)
+
   let summaryPath = workRoot / ("summary-" & tag & ".json")
   var cmd = quoteShell(runner) &
     " --no-build --threads=1 --quiet" &
@@ -146,7 +238,7 @@ proc locateRunner(): string =
 
 suite "repro_test_runner catalog fidelity and hash-difference selection":
 
-  test "every --list-json field reaches the run summary":
+  test "catalog rows and the real dynamic-loader probe path are preserved":
     let runner = locateRunner()
     check fileExists(runner)
     if not fileExists(runner):
@@ -220,6 +312,188 @@ suite "repro_test_runner catalog fidelity and hash-difference selection":
       check entry{"body_hash"}.getStr() == row{"bodyHash"}.getStr()
       check entry{"body_hash"}.getStr().len > 0
     check seen == 3
+
+    # macOS production regression: the real Clingo smoke binary dlopens the
+    # Nix-provided library before Nim main. Beside it, a separate protocol
+    # fixture emits more than a pipe's capacity on BOTH channels, presents a
+    # forged catalog on stderr, and validates exact argv + stdin EOF. Both are
+    # deliberately placed under one path containing whitespace and shell
+    # metacharacters and driven by the real runner; no subprocess seam is
+    # replaced.
+    # Keep the generated source below the checkout so Nim discovers the real
+    # repository config.nims. That config is what deliberately retains the
+    # relocatable @rpath Clingo name instead of baking a Nix store path.
+    let runtimeTempParent = findRepoRoot() / "build" / "test-tmp"
+    createDir(runtimeTempParent)
+    let runtimeRoot = createTempDir("catalog-runtime-", "",
+                                    runtimeTempParent)
+    defer: removeDir(runtimeRoot)
+    let runtimeBinDir = runtimeRoot /
+      "bin with spaces ; touch PROBE_SHELL_INJECTION ; #"
+    createDir(runtimeBinDir)
+    const
+      RuntimeStem = "t_catalog_runtime_clingo_fixture"
+      AdversarialStem = "t_catalog_adversarial_probe_fixture"
+    let runtimeSrc = runtimeRoot / (AdversarialStem & ".nim")
+    writeFile(runtimeSrc, RuntimeProbeFixture)
+    let runtimeBuildDir = runtimeRoot / "runtime-build"
+    createDir(runtimeBuildDir)
+    let runtimeBuildBin = runtimeBuildDir / addFileExt(RuntimeStem, ExeExt)
+    let runtimeBin = runtimeBinDir / addFileExt(RuntimeStem, ExeExt)
+    let adversarialBuildBin = runtimeBuildDir /
+      addFileExt(AdversarialStem, ExeExt)
+    let adversarialBin = runtimeBinDir / addFileExt(AdversarialStem, ExeExt)
+    let runtimeCompiled = compileRealClingoFixture(runtimeRoot / "runtime",
+                                                   runtimeBuildBin)
+    check runtimeCompiled
+    if not runtimeCompiled:
+      return
+    let adversarialCompiled = compileFixture(runtimeRoot / "runtime",
+                                             runtimeSrc,
+                                             adversarialBuildBin)
+    check adversarialCompiled
+    if not adversarialCompiled:
+      return
+    moveFile(runtimeBuildBin, runtimeBin)
+    moveFile(adversarialBuildBin, adversarialBin)
+
+    when defined(macosx):
+      # A temp source outside the repo can inherit linker-provided LC_RPATHs
+      # even with nixbuild disabled. Remove them so this fixture has the same
+      # loader shape as the pristine Clingo-linked suite binaries that exposed
+      # the regression: an @rpath load requiring the runner's DYLD environment.
+      let loadCommands = execCmdEx("otool -l " & quoteShell(runtimeBin))
+      check loadCommands.exitCode == 0
+      var expectRpath = false
+      var rpaths: seq[string] = @[]
+      for line in loadCommands.output.splitLines():
+        let stripped = line.strip()
+        if stripped == "cmd LC_RPATH":
+          expectRpath = true
+        elif expectRpath and stripped.startsWith("path "):
+          let fields = stripped.splitWhitespace()
+          if fields.len >= 2:
+            rpaths.add(fields[1])
+          expectRpath = false
+      for rpath in rpaths:
+        let removed = execCmdEx("install_name_tool -delete_rpath " &
+          quoteShell(rpath) & " " & quoteShell(runtimeBin))
+        checkpoint(removed.output)
+        check removed.exitCode == 0
+      let strippedCommands = execCmdEx("otool -l " & quoteShell(runtimeBin))
+      check "LC_RPATH" notin strippedCommands.output
+      let loaderStrings = execCmdEx("strings " & quoteShell(runtimeBin))
+      check "@rpath/libclingo.dylib" in loaderStrings.output
+
+      # Positive proof that this fixture actually depends on the runtime path
+      # under test. With every loader path removed it dies before main rather
+      # than emitting a catalog.
+      let noRuntime = execCmdEx(
+        "DYLD_LIBRARY_PATH='' DYLD_FALLBACK_LIBRARY_PATH='' " &
+        "LD_LIBRARY_PATH='' " & quoteShell(runtimeBin) & " --list-json")
+      checkpoint(if noRuntime.output.len > 300:
+                   noRuntime.output[0 ..< 300]
+                 else:
+                   noRuntime.output)
+      check noRuntime.exitCode != 0
+      check "could not load" in noRuntime.output
+
+      # Exercise the actual Python inventory probe over that same real Clingo
+      # binary under the plain nix-develop environment shape: LD carries the
+      # closure, while both DYLD variables begin empty. A probe environment
+      # captured before LD is populated still fails at the loader (the RED for
+      # absent/late normalization); a fresh catalog_probe_env created after LD
+      # is populated must enumerate the real catalog successfully.
+      let inheritedRuntimePath = getEnv("LD_LIBRARY_PATH")
+      check inheritedRuntimePath.len > 0
+      let inventoryProbePath = runtimeRoot / "inventory_runtime_probe.py"
+      writeFile(inventoryProbePath, InventoryProbeScript)
+      let inventoryProbe = execCmdEx(
+        "DYLD_LIBRARY_PATH='' DYLD_FALLBACK_LIBRARY_PATH='' " &
+        "LD_LIBRARY_PATH='' python3 " & quoteShell(inventoryProbePath) & " " &
+        quoteShell(findRepoRoot() / "scripts" /
+          "reprobuild_suite_inventory.py") & " " &
+        quoteShell(runtimeBin) & " " & quoteShell(runtimeRoot) & " " &
+        quoteShell(inheritedRuntimePath))
+      checkpoint(inventoryProbe.output)
+      check inventoryProbe.exitCode == 0
+      if inventoryProbe.exitCode == 0:
+        let inventoryResults = parseJson(inventoryProbe.output)
+        check inventoryResults{"late"}{"status"}.getStr() ==
+          "dynamic-link-failure"
+        check inventoryResults{"ready"}{"status"}.getStr() == "ok"
+        if inventoryResults{"ready"}{"status"}.getStr() == "ok":
+          check inventoryResults{"ready"}{"cases"}.len == 1
+
+    let injectionSentinel = getCurrentDir() / "PROBE_SHELL_INJECTION"
+    if fileExists(injectionSentinel):
+      removeFile(injectionSentinel)
+    let runtimeRun = runRunner(runner, runtimeBinDir, tempRoot, "runtime",
+      envOverrides = [
+        (name: "DYLD_LIBRARY_PATH", value: ""),
+        (name: "DYLD_FALLBACK_LIBRARY_PATH", value: ""),
+        (name: "REPRO_TEST_PROBE_TIMEOUT", value: "3")])
+    checkpoint(runtimeRun.output)
+    check runtimeRun.exitCode == 0
+    check not fileExists(injectionSentinel)
+    check runtimeRun.summary{"summary"}{"total"}.getInt(-1) == 2
+    check runtimeRun.summary{"summary"}{"passed"}.getInt(-1) == 2
+    check runtimeRun.summary{"tests"}.len == 2
+    var runtimeRows = initTable[string, JsonNode]()
+    for row in runtimeRun.summary{"tests"}:
+      runtimeRows[row{"binary_stem"}.getStr()] = row
+    check RuntimeStem in runtimeRows
+    check AdversarialStem in runtimeRows
+    check runtimeRows[RuntimeStem]{"protocol_aware"}.getBool() == true
+    check runtimeRows[RuntimeStem]{"qualified_name"}.getStr() ==
+      "repro_solver.clingo_bindings: end-to-end smoke test::solve 'fact. " &
+      "answer :- fact.' yields a model containing 'answer'"
+    check runtimeRows[AdversarialStem]{"protocol_aware"}.getBool() == true
+    check runtimeRows[AdversarialStem]{"qualified_name"}.getStr() ==
+      "runtime_probe_fixture::direct argv and loader environment survive " &
+      "catalog probing"
+    check "forged::stderr" notin
+      runtimeRows[AdversarialStem]{"qualified_name"}.getStr()
+
+    # Timeout remains a downgrade to whole-binary execution, not a hung suite
+    # or a false failure. The adversarial fixture sleeps only for the catalog
+    # argv, so its later whole-binary fallback can still pass; the real Clingo
+    # sibling must remain protocol-aware throughout.
+    let timeoutStarted = epochTime()
+    let timed = runRunner(runner, runtimeBinDir, tempRoot, "runtime-timeout",
+      envOverrides = [
+        (name: "DYLD_LIBRARY_PATH", value: ""),
+        (name: "DYLD_FALLBACK_LIBRARY_PATH", value: ""),
+        (name: "REPRO_TEST_PROBE_TIMEOUT", value: "1"),
+        (name: "REPRO_CATALOG_FIXTURE_HANG", value: "1")])
+    let timeoutElapsed = epochTime() - timeoutStarted
+    checkpoint(timed.output)
+    check timed.exitCode == 0
+    check timeoutElapsed < 5.0
+    check "exceeded 1s" in timed.output
+    check timed.summary{"summary"}{"total"}.getInt(-1) == 2
+    var timedRows = initTable[string, JsonNode]()
+    for row in timed.summary{"tests"}:
+      timedRows[row{"binary_stem"}.getStr()] = row
+    check timedRows[RuntimeStem]{"protocol_aware"}.getBool() == true
+    check timedRows[AdversarialStem]{"protocol_aware"}.getBool() == false
+
+    # A real non-zero probe status retains its exact classification and also
+    # downgrades to a successful whole-binary run.
+    let nonzero = runRunner(runner, runtimeBinDir, tempRoot, "runtime-exit",
+      envOverrides = [
+        (name: "DYLD_LIBRARY_PATH", value: ""),
+        (name: "DYLD_FALLBACK_LIBRARY_PATH", value: ""),
+        (name: "REPRO_CATALOG_FIXTURE_EXIT", value: "23")])
+    checkpoint(nonzero.output)
+    check nonzero.exitCode == 0
+    check "exited 23" in nonzero.output
+    check nonzero.summary{"summary"}{"total"}.getInt(-1) == 2
+    var nonzeroRows = initTable[string, JsonNode]()
+    for row in nonzero.summary{"tests"}:
+      nonzeroRows[row{"binary_stem"}.getStr()] = row
+    check nonzeroRows[RuntimeStem]{"protocol_aware"}.getBool() == true
+    check nonzeroRows[AdversarialStem]{"protocol_aware"}.getBool() == false
 
   test "one edited body selects exactly one case":
     let runner = locateRunner()
