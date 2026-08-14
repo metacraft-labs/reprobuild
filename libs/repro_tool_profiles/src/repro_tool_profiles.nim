@@ -1731,7 +1731,7 @@ proc validateTarEntries(archivePath, archiveType: string) =
       @["tar", "-tjf", archivePath]
     of "tar":
       @["tar", "-tf", archivePath]
-    of "zip", "7z", "7z.exe", "raw":
+    of "zip", "7z", "7z.exe", "raw", "conda":
       return
     else:
       raise newException(ValueError,
@@ -2025,6 +2025,89 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
       raise newException(OSError,
         "tool-resolution failed: zip extraction failed for " & archivePath &
         "\n" & res.output)
+    flattenStripComponents(destination, stripComponents)
+  of "conda":
+    # conda-forge's package format: a ZIP envelope carrying exactly two
+    # zstd-compressed tars — ``info-<name>.tar.zst`` (metadata, discarded) and
+    # ``pkg-<name>.tar.zst`` (the payload). Binaries land under
+    # ``Library/bin`` inside the payload on Windows.
+    #
+    # It exists as an archiveType because for some libraries it is the only
+    # redistributable upstream form. clingo is the motivating case: potassco
+    # publishes source tarballs only, and the PyPI wheel statically links the C
+    # library into a ``.pyd``, so conda-forge is the sole source of a standalone
+    # ``clingo.dll``. Before this, the only way to provision it on Windows was
+    # an out-of-band PowerShell script.
+    #
+    # Nothing new is needed to unpack either layer — the ZIP arm above and the
+    # host tar both already exist — so the arm composes them rather than adding
+    # an extractor. The outer layer recurses through this same proc so the ZIP
+    # extractor discovery (PowerShell / unzip) stays in one place.
+    let staging = destination & ".conda-staging"
+    removeDir(extendedPath(staging))
+    createDir(extendedPath(staging))
+    try:
+      extractTarballArchive(archivePath, staging, "zip", 0)
+      var payload = ""
+      for kind, entry in walkDir(extendedPath(staging)):
+        if kind != pcFile: continue
+        let leaf = entry.extractFilename.toLowerAscii()
+        if leaf.startsWith("pkg-") and leaf.endsWith(".tar.zst"):
+          payload = entry
+          break
+      if payload.len == 0:
+        raise newException(OSError,
+          "tool-resolution failed: no pkg-*.tar.zst payload inside conda " &
+          "archive " & archivePath &
+          " (expected the conda-forge two-member envelope)")
+      # Decompressing the payload needs a ZSTD-CAPABLE tar, which "tar" on
+      # PATH is not guaranteed to be. GNU tar shells out to a separate zstd
+      # binary and dies with "zstd: Cannot exec" when it is absent (observed
+      # with GNU tar 1.35 under MSYS); libarchive/bsdtar links libzstd and
+      # handles it directly. Windows' bundled System32\tar.exe is bsdtar —
+      # 3.8.4 reports libzstd/1.5.7 — which is why the PowerShell provisioner
+      # this replaces called that binary by absolute path rather than "tar".
+      #
+      # So probe for a tar that can actually do it instead of assuming, and
+      # fall back to piping a standalone zstd. Mirrors the strategy discovery
+      # `extractTarZst` in repro_home_apply/builtin_adapter.nim already uses.
+      proc tarSpeaksZstd(exe: string): bool =
+        if exe.len == 0: return false
+        let probe = execCmdEx(shellCommand(@[exe, "--version"]))
+        probe.exitCode == 0 and probe.output.toLowerAscii().contains("libarchive")
+
+      var zstdTar = ""
+      when defined(windows):
+        let systemTar = getEnv("WINDIR", r"C:\Windows") / "System32" / "tar.exe"
+        if fileExists(extendedPath(systemTar)) and tarSpeaksZstd(systemTar):
+          zstdTar = systemTar
+      if zstdTar.len == 0:
+        for candidate in ["bsdtar", "tar"]:
+          let exe = findExe(candidate)
+          if tarSpeaksZstd(exe):
+            zstdTar = exe
+            break
+
+      var res: tuple[output: string, exitCode: int]
+      if zstdTar.len > 0:
+        res = execCmdEx(shellCommand(@[zstdTar, "-xf", payload, "-C", destination]))
+      else:
+        let zstdExe = findExe("zstd")
+        let gnuTar = findExe("tar")
+        if zstdExe.len == 0 or gnuTar.len == 0:
+          raise newException(OSError,
+            "tool-resolution failed: extracting the conda payload " & payload &
+            " needs a zstd-capable tar (libarchive/bsdtar, e.g. Windows' " &
+            "System32\\tar.exe) or a standalone 'zstd' alongside tar; " &
+            "neither was found")
+        res = execCmdEx(quoteShell(zstdExe) & " -dc " & quoteShell(payload) &
+          " | " & quoteShell(gnuTar) & " -xf - -C " & quoteShell(destination))
+      if res.exitCode != 0:
+        raise newException(OSError,
+          "tool-resolution failed: conda payload extraction failed for " &
+          payload & "\n" & res.output)
+    finally:
+      removeDir(extendedPath(staging))
     flattenStripComponents(destination, stripComponents)
   of "7z", "7z.exe":
     let sevenZipExe = resolveSevenZipExe()
