@@ -9,7 +9,7 @@
 ##      local filesystem path (both read straight off disk — the hermetic
 ##      test path). A 404 on an HTTP source is a soft miss (no manifest yet
 ##      → wait), any other fetch error is a hard, retryable failure.
-##   2. DECODE each fetched manifest (the ``RDM1`` envelope).
+##   2. DECODE each fetched manifest (the ``RDMF`` envelope).
 ##   3. VERIFY each manifest against the ALLOWED-SIGNERS set: the signature
 ##      must verify AND the producer pubkey must be a trust anchor. A
 ##      manifest for a DIFFERENT target is IGNORED (per-target schema). A

@@ -96,9 +96,14 @@ type
     ## Signature did not verify (bad signature or untrusted signer).
 
 const
-  DeployManifestMagic* = "RDM1"
-    ## "Reprobuild Deploy Manifest". The magic is unchanged across format
-    ## versions; the version field below is what discriminates.
+  DeployManifestMagic* = "RDMF"
+    ## "Reprobuild Deploy ManiFest" — the FORMAT FAMILY identifier, and
+    ## nothing else. It carries no version and must never be bumped for a
+    ## schema change; `formatVersion` below is the sole version. This is the
+    ## PNG/RIFF split, and it is deliberate: the previous magic was `RDM1`,
+    ## whose trailing digit read as a version and then contradicted a v2
+    ## envelope that still began with the bytes `RDM1`. Anyone hexdumping a
+    ## manifest while debugging met that contradiction at the worst moment.
   DeployManifestFormatVersionV1* = 1'u16
     ## Original envelope: desired state only, entirely plaintext.
   DeployManifestFormatVersionV2* = 2'u16

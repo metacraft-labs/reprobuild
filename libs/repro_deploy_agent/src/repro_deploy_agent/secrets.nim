@@ -1,8 +1,8 @@
-## Windows-Runner-Binary-Cache-Deploy — encrypted secrets for RDM1 v2.
+## Encrypted secrets for the reprobuild deploy manifest (RDMF v2).
 ##
 ## ## Why this exists
 ##
-## An RDM1 manifest is SIGNED, not encrypted: every field is plaintext, the
+## An RDMF manifest is SIGNED, not encrypted: every field is plaintext, the
 ## publish directory is world-readable by design ("the signature, not the ACL,
 ## is what makes them trustworthy"), and the guest hop is plain HTTP. That is
 ## the right shape for desired state, which is a public assertion. It is the
@@ -33,10 +33,10 @@
 ##
 ##   Z        = ECDH(ephemeralPrivate, recipientPublic).X     (32 bytes)
 ##   K || N   = HKDF-SHA256(ikm = Z,
-##                          salt = "RDM1-secrets-v2",
+##                          salt = "RDMF-secrets-v2",
 ##                          info = target || ephemeralPublic || recipientPublic)
 ##   sealed   = AES-256-GCM(key = K, nonce = N,
-##                          aad = "RDM1v2:" & target,
+##                          aad = "RDMF-v2:" & target,
 ##                          plaintext = encoded secret-file list)
 ##
 ## `K` is 32 bytes and `N` is 12, taken from one 44-byte HKDF stream.
@@ -78,8 +78,8 @@ const
   AesKeyLen* = 32
   SharedSecretLen* = 32
 
-  HkdfSalt = "RDM1-secrets-v2"
-  AadPrefix = "RDM1v2:"
+  HkdfSalt = "RDMF-secrets-v2"
+  AadPrefix = "RDMF-v2:"
 
   P256Curve = cint(bsslEc.EC_secp256r1)
 
