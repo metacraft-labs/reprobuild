@@ -87,14 +87,33 @@ and shrinking.
 ## Compile-time enforcement
 
 The textual check is fast enough for pre-commit but is still grep: it can be
-fooled by a comment or a string literal. The authoritative form is the
-term-rewriting linter in `lints/ambient_execution.nim`, force-imported through
-`config.nims` so it applies to every compiled module without any source changes.
+fooled by a comment or a string literal. The intended authoritative form is a
+term-rewriting linter, force-imported through `config.nims` so it applies to
+every compiled module without source changes, at the **warning** tier (~427
+existing call sites make errors a non-starter until the baseline shrinks).
 
-It runs at the **warning** tier. With ~427 existing call sites, errors would make
-the tree uncompilable; warnings make every violation visible in build output
-while the baseline shrinks. Individual APIs flip to `{.error.}` as they reach
-zero.
+**Status: prototyped in `lints/ambient_execution.nim`, NOT wired.** It is not
+imported by `config.nims` and does not run. Two defects block it, both
+reproduced standalone outside this repo:
+
+1. **The `findExe` rule never fires.** The identical pattern
+   (`{findExe(a, b, c)}(a: string, b: bool, c: auto)`) warns correctly in a
+   minimal two-module test, but produces nothing from this module. Cause not
+   yet identified — suspicion is interaction with the sibling rules or with the
+   `when not defined(ambientExecutionAllowed)` wrapper, but that is unconfirmed
+   and `execCmdEx` fires from inside the same `when`.
+2. **`execCmdEx` emits 301 warnings for a single call site.** The rewrite is
+   re-applied across semantic passes; `{.noRewrite.}` on the call-through
+   bounds it but does not stop it. At ~192 real call sites this would bury the
+   build log.
+
+Do not wire this until both are fixed, and re-verify in BOTH directions
+afterwards — a rule that silently stops firing is indistinguishable from a
+clean tree, which is exactly defect (1).
+
+Until then `scripts/check_ambient_execution.sh` is the only enforcement, and it
+is sufficient for the ratchet: it catches all five APIs regardless of signature,
+and it runs in pre-commit.
 
 For the mechanism itself — pattern arity, `auto` parameters, the export-marker
 pitfall, the warning tier and why a receive-the-call escape hatch silently fails
