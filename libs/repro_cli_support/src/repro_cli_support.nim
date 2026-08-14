@@ -20421,12 +20421,20 @@ type
     strict: bool             ## DS-3 — ``--strict`` promotes the personal-tier
                              ## unreachable-backend WARNING to the same refusal
                              ## the public/team tiers get.
+    dryRun: bool             ## ``--dry-run`` (CLI/develop.md §"Action axis") —
+                             ## resolve the lock set and print the actions that
+                             ## WOULD be taken, then exit. Mutates NOTHING: no
+                             ## clone, no reset, no override file write. It is
+                             ## the query form of the placement step, the way
+                             ## ``--list`` is the query form of the lock set.
 
   DevelopAllNodeOutcome = object
     node: string
     path: string
     revision: string
-    mode: string             ## cloned / adopted / reset / idempotent / refused / error
+    mode: string             ## cloned / adopted / reset / idempotent / refused
+                             ## / error, plus the ``--dry-run`` plan modes
+                             ## would-clone / would-reset
     diagnostic: string
     ok: bool
 
@@ -20467,6 +20475,7 @@ type
     reachable: bool
     diagnostic: string
     repos: seq[string]       ## the repos this backend was asked about
+    records: int             ## how many lock records it actually contributed
 
   DevelopLockSet = object
     ## The composed workspace lock set. ``lock`` is the union across every
@@ -20592,6 +20601,36 @@ proc gitHeadShaOf(gitBinary, repoDir: string): string =
   except CatchableError:
     result = ""
 
+proc isExactLockedRevision*(value: string): bool =
+  ## DS-5 (CLI/develop.md §"A revision comes from a lock record or not at all")
+  ## — the EXACT-PIN predicate of the develop set: exactly 40 LOWERCASE hex
+  ## characters, a full git object id and nothing else.
+  ##
+  ## Deliberately NOT ``looksLikeSha``, which is a divergence-classification
+  ## HEURISTIC (7..64 hex, so it answers "is this more likely a SHA than a
+  ## branch name?") and is used by ``repro sync`` / workspace-init to decide
+  ## whether a MANIFEST revision should be compared as an object id or as a
+  ## ref. Two of its accepts are actively harmful once the answer decides what
+  ## a checkout is reset to:
+  ##
+  ##   * an ABBREVIATION (``deadbeef``) is not an exact pin — a prefix can
+  ##     become ambiguous as the repo grows, and the develop set's whole
+  ##     contract is that the checkout lands at the one revision a lock record
+  ##     names;
+  ##   * an ALL-HEX BRANCH NAME (a branch literally called ``deadbeef``) is the
+  ##     ``revision = "main"`` hazard wearing a costume — the same class of
+  ##     defect that let a CI resolver build a moving branch tip;
+  ##   * a 41-hex string is not a git object id at all: the clone runs, the
+  ##     ``git reset --hard`` fails, and (before this) a checkout was LEFT
+  ##     BEHIND at the branch tip — a revision nobody locked.
+  ##
+  ## Uppercase hex is refused too: git renders object ids lowercase, and a lock
+  ## record that does not is not a record this reader will guess about.
+  if value.len != 40: return false
+  for ch in value:
+    if ch notin {'0'..'9', 'a'..'f'}: return false
+  true
+
 proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
                                node: LockedDep;
                                identity: GitToolIdentity):
@@ -20614,26 +20653,64 @@ proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
     return (ok: false,
       diagnostic: "node '" & node.name &
         "' has no locked revision in the lock; refusing branch-tip fallback")
+  if not isExactLockedRevision(coords.revision):
+    # DS-5 — the LAST gate before any filesystem effect. The composer already
+    # refuses a non-exact revision, but the committed lock is an equal-status
+    # source read through the same path, so the placement step asks the
+    # question itself rather than trusting an upstream caller to have asked.
+    # Refusing HERE is what keeps the "no partial mutation" promise cheap: no
+    # clone has run yet, so there is nothing to unwind.
+    return (ok: false,
+      diagnostic: "node '" & node.name & "' is pinned to '" & coords.revision &
+        "', which is not an EXACT locked revision (exactly 40 lowercase hex " &
+        "characters). An abbreviation, a 41-hex string, or a hex-looking " &
+        "branch name is not an exact pin, and this command never checks out " &
+        "a revision no lock record names; refusing to place it.")
   let relTarget = relativePath(absTarget, workspaceRoot)
   let receiptDir = workspaceRoot / ".repro" / "workspace" / "receipts"
   createDir(receiptDir)
   let idSeg = safeDevelopPathSegment(node.name)
+  # The receipt identifies a PLACEMENT — a (node, target path) pair — not a
+  # node. ``--into`` (and the lock's own ``path``) decide where the checkout
+  # lands, so a key that ignores the target makes two different placements of
+  # the same node share one receipt and one action id: the second run reports
+  # the first run's receipt as its own.
+  let placementSeg = idSeg & "-" &
+    digestHex(blake3DomainDigest(relTarget.bytesOf(), hdMetadataEnvelope))[0 ..< 16]
   let cloneReceiptRel = ".repro" / "workspace" / "receipts" /
-    ("develop-all-clone-" & idSeg & ".receipt")
+    ("develop-all-clone-" & placementSeg & ".receipt")
   let resetReceiptRel = ".repro" / "workspace" / "receipts" /
-    ("develop-all-reset-" & idSeg & ".receipt")
+    ("develop-all-reset-" & placementSeg & ".receipt")
   # (1) clone — ``ref`` (advisory branch/tag) narrows the clone; a bare SHA is
   # NOT passed as ``--branch`` (git refuses that). The reset step pins the SHA.
   let cloneBranch =
     if coords.gitRef.len > 0 and coords.gitRef != coords.revision:
       coords.gitRef
     else: ""
-  var cloneAction = gitCloneAction("workspace-develop-all-clone-" & idSeg,
+  # ``cacheable = false``, for the same reason ``gitForceResetAction`` is: the
+  # PRODUCT of this action is a WORKING TREE at ``relTarget``, and a working
+  # tree is not a declared output — only the receipt is. The clone
+  # fingerprint deliberately OMITS ``repoPath`` (git_actions.nim
+  # ``fingerprintPayload``, M2 design rule 1) so two temp roots cloning the
+  # same (remote, revision, identity) share one cache entry; that is sound
+  # when the receipt IS the product, and unsound here. With the engine
+  # default ``rebuildMissingOutputsOnCacheHit = false``, a second
+  # ``develop --all`` into a DIFFERENT ``--into`` root hit that shared entry,
+  # materialized the receipt, cloned NOTHING, and the chained force-reset
+  # then failed against a directory that was never created:
+  #   `force-reset target is not a git working tree: <into>/<node>`
+  # Always executing is correct and cheap: this path only ever clones into a
+  # target it has just proved absent (or has deliberately removed for
+  # ``--reset``), so there is nothing for a cache hit to save.
+  var cloneAction = gitCloneAction(
+    "workspace-develop-all-clone-" & placementSeg,
     identity, remoteUrl = coords.url, repoPath = relTarget,
-    receiptPath = cloneReceiptRel, revision = cloneBranch)
+    receiptPath = cloneReceiptRel, revision = cloneBranch,
+    cacheable = false)
   cloneAction.cwd = workspaceRoot
   # (2) force-reset onto the exact locked SHA (depends on the clone).
-  var resetAction = gitForceResetAction("workspace-develop-all-reset-" & idSeg,
+  var resetAction = gitForceResetAction(
+    "workspace-develop-all-reset-" & placementSeg,
     identity, revision = coords.revision, repoPath = relTarget,
     receiptPath = resetReceiptRel, deps = @[cloneAction.id])
   resetAction.cwd = workspaceRoot
@@ -20657,27 +20734,49 @@ proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
         diag = "reset-to-locked-revision failed: status=" & $outcome.status &
           " reason=" & outcome.reason &
           (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "")
+  proc discardPartialCheckout() =
+    ## DS-5 — a FAILED placement leaves NO checkout behind.
+    ##
+    ## The two actions are chained: the clone lands a working tree, and only
+    ## then does the reset pin it to the locked SHA. When the reset fails
+    ## (an unresolvable revision is exactly how it fails) the clone's tree
+    ## survives — sitting at whatever the remote's default branch tip happened
+    ## to be, i.e. a revision NOBODY locked, in the one command whose contract
+    ## is that a checkout is only ever at a locked revision. A partial mutation
+    ## at a wrong revision is worse than a refusal: the next run sees a
+    ## populated directory and reports `already exists ... refusing to
+    ## overwrite`, so the wrong tree becomes sticky.
+    ##
+    ## The caller either created ``absTarget`` in this call (the fresh-clone
+    ## path) or deliberately removed a pre-existing one first (the ``--reset``
+    ## path), so in both cases nothing that predates this call is destroyed.
+    try:
+      if dirExists(absTarget): removeDir(absTarget)
+    except CatchableError:
+      discard
   if not cloneSeen or not resetSeen:
+    discardPartialCheckout()
     return (ok: false,
       diagnostic: if diag.len > 0: diag
                   else: "build engine returned no result for clone/reset of " &
                     node.name)
   if cloneStatus notin {asSucceeded, asCacheHit, asUpToDate} or
       resetStatus notin {asSucceeded, asCacheHit, asUpToDate}:
+    discardPartialCheckout()
     return (ok: false, diagnostic: diag)
   (ok: true, diagnostic: "")
 
 proc executeDevelopAll(args: DevelopAllArgs):
     tuple[outcomes: seq[DevelopAllNodeOutcome]; notices: seq[string];
           exitCode: int] =
-  ## L1 driver, DS-1..DS-4 shape. (1) Resolve the git tool. (2) COMPOSE the
+  ## L1 driver, DS-1..DS-5 shape. (1) Resolve the git tool. (2) COMPOSE the
   ## workspace lock set across EVERY backend the configuration plane resolves —
-  ## FAIL LOUD when the committed lock is absent, when two backends disagree
-  ## about a revision (DS-2), or when a public/team backend cannot be read
-  ## (DS-3). (3) Resolve the develop set over the union, excluding evidence-only
-  ## repos (DS-4). (4) For each node: adopt a suitable existing checkout, else
-  ## clone at the locked revision — FAIL LOUD on an unmappable node. (5) Record
-  ## every successfully placed node's override via M20.
+  ## FAIL LOUD when the UNION is empty, when two backends disagree about a
+  ## revision (DS-2), or when a public/team backend cannot be read (DS-3).
+  ## (3) Resolve the develop set over the union, excluding evidence-only repos
+  ## (DS-4). (4) For each node: adopt a suitable existing checkout, else clone
+  ## at the locked revision — FAIL LOUD on an unmappable node. (5) Record every
+  ## successfully placed node's override via M20.
   let root = args.workspaceRoot
 
   # (1) Resolve the git tool once for the whole batch. This moved AHEAD of the
@@ -20692,13 +20791,19 @@ proc executeDevelopAll(args: DevelopAllArgs):
       diagnostic: "git tool not resolvable: " & err.msg)], @[], 1)
   let gitBinary = identity.binaryPath
 
-  # (2) The committed lock is the PUBLIC tier's backend and is still required:
-  # its ABSENCE is a loud failure (no branch-tip fallback, no manifest-HEAD
-  # reconstruction).
-  let lockP = committedLockPath(root)
-  if not fileExists(extendedPath(lockP)):
-    return (@[], @[], 1)  # caller emits the missing-lock diagnostic (needs the path)
-
+  # (2) DS-1 — "No single row is a precondition for the others."
+  #
+  # The committed lock USED to be gated here: a workspace with no ``repro.lock``
+  # returned exit 1 BEFORE the composer ever ran, so a workspace whose lock
+  # records live entirely in a routed team backend — the metacraft workspaces,
+  # which carry 126 published ``locks/<project>/<repo>/<sha>.toml`` records and
+  # no ``repro.lock`` at all — could not resolve a single repo. Reading the
+  # union as "the committed lock, optionally augmented" INVERTS the rule: the
+  # committed lock is one source of EQUAL STATUS, not a gate.
+  #
+  # So the composer always runs, and the ONLY lock-set failure is an EMPTY
+  # UNION (below), which names every backend it consulted.
+  #
   # DS-1 — the whole lock set, across every backend, not one file.
   let composed = composeDevelopLockSet(root, identity, args.strict)
   # DS-1 compatibility contract: a public-only workspace resolves to the
@@ -20724,7 +20829,34 @@ proc executeDevelopAll(args: DevelopAllArgs):
 
   let lock = composed.lock
   if lock.deps.len == 0:
-    return (@[], notices, 1)
+    # DS-1 — "An empty union — no backend yielded any record — is the only
+    # lock-set failure, and it names every backend consulted."
+    #
+    # Naming them is the whole point. The previous shape returned a bare exit 1
+    # whose message was about ONE file (``repro.lock``), which was both wrong
+    # (that file is not a precondition) and unactionable for a routed workspace
+    # (it named a backend the user was not using). The inventory below tells
+    # the user exactly which media were asked and what each one said, so an
+    # empty answer is attributable rather than mysterious.
+    var inventory: seq[string]
+    for b in composed.backends:
+      var line = "  - " & b.tier & " tier / " & b.backendKind & " backend at " &
+        b.location & ": "
+      if b.diagnostic.len > 0: line.add(b.diagnostic)
+      elif b.records > 0: line.add($b.records & " record(s), all filtered out")
+      else: line.add("readable, but it holds no lock record for this workspace")
+      if b.repos.len > 0:
+        line.add(" (asked about: " & b.repos.join(", ") & ")")
+      inventory.add(line)
+    let msg = "the workspace lock set at " & root & " is EMPTY: no lock " &
+      "backend readable from this workspace yielded a single lock record, so " &
+      "there is nothing `repro develop` can manage. Every backend the " &
+      "configuration plane resolved was consulted:\n" & inventory.join("\n") &
+      "\nPublish a lock record through one of them (`repro lock refresh` " &
+      "writes the committed lock; `repro workspace lock` records a routed " &
+      "tier's per-repo entries)."
+    return (@[DevelopAllNodeOutcome(node: "*", mode: "error", ok: false,
+      diagnostic: msg)], notices, 1)
 
   # DS-4 — evidence-only repos are excluded from the develop set, but they are
   # NAMED here rather than silently dropped, and naming one explicitly is a
@@ -20811,6 +20943,23 @@ proc executeDevelopAll(args: DevelopAllArgs):
       outcomes.add(outcome)
       anyFailure = true
       continue
+    # DS-5 — a revision comes from a lock record or not at all, and a record
+    # pins an EXACT 40-hex revision. Asked BEFORE any placement decision so the
+    # answer is the same for a real run and for ``--dry-run``: an inexact pin
+    # is a per-node refusal, never a checkout at a revision nobody locked.
+    if not isExactLockedRevision(node.coordinates.revision):
+      outcome.mode = "error"
+      outcome.ok = false
+      outcome.diagnostic = "node '" & node.name & "' is pinned to '" &
+        node.coordinates.revision & "', which is NOT an exact locked " &
+        "revision (a lock record pins exactly 40 lowercase hex characters). " &
+        "An abbreviated SHA, a 41-hex string and an all-hex branch name are " &
+        "all refused: an abbreviation is not an exact pin, and a hex-looking " &
+        "branch name is the `revision = \"main\"` hazard wearing a costume. " &
+        "Nothing was placed for this node."
+      outcomes.add(outcome)
+      anyFailure = true
+      continue
 
     let absTarget = developAllTargetPath(node, root, args.intoDir)
     outcome.path = absTarget
@@ -20845,6 +20994,11 @@ proc executeDevelopAll(args: DevelopAllArgs):
       if headSha.len > 0 and headSha == node.coordinates.revision:
         outcome.mode = "adopted"
         outcome.ok = true
+      elif args.reset and args.dryRun:
+        # ``--dry-run`` reports the plan and stops short of the destructive
+        # re-clone. Nothing is removed, nothing is fetched.
+        outcome.mode = "would-reset"
+        outcome.ok = true
       elif args.reset:
         # ``--reset``: the drift is the expected case (e.g. a CI pre-clone
         # placed the sibling at a `=dev` branch tip). Force it back to the
@@ -20878,6 +21032,12 @@ proc executeDevelopAll(args: DevelopAllArgs):
         outcomes.add(outcome)
         anyFailure = true
         continue
+    elif args.dryRun:
+      # ``--dry-run`` — the node WOULD be cloned at its locked revision. The
+      # revision was already proved exact above, so this plan line is a
+      # commitment, not a guess.
+      outcome.mode = "would-clone"
+      outcome.ok = true
     else:
       # Clone fresh at the locked revision.
       let cloneRes = cloneNodeAtLockedRevision(root, absTarget, node, identity)
@@ -20890,6 +21050,11 @@ proc executeDevelopAll(args: DevelopAllArgs):
         continue
       outcome.mode = "cloned"
       outcome.ok = true
+
+    if args.dryRun:
+      # Mutate NOTHING: no override entry is folded in, so nothing is written.
+      outcomes.add(outcome)
+      continue
 
     # Record the override (solved node -> local path) via M20.
     var entry: repro_workspace_manifests.DevelopOverrideEntry
@@ -20913,19 +21078,14 @@ proc executeDevelopAll(args: DevelopAllArgs):
   (outcomes, notices, if anyFailure: 1 else: 0)
 
 proc runDevelopAllCommand(args: DevelopAllArgs): int =
-  ## Emit the missing-lock loud failure (it needs the resolved path), then run
-  ## the driver and render per-node results.
-  let lockP = committedLockPath(args.workspaceRoot)
-  if not fileExists(extendedPath(lockP)):
-    let msg = "repro develop --all: no committed lock at " & lockP &
-      " — run `repro lock refresh` first (a missing lock is a hard error; " &
-      "there is no branch-tip fallback)"
-    if args.json:
-      stdout.writeLine(pretty(%*{"error": msg, "exitCode": 1}, indent = 2))
-    else:
-      stderr.writeLine(msg)
-    return 1
-
+  ## Run the driver and render per-node results.
+  ##
+  ## DS-1 — this used to short-circuit on a missing ``repro.lock`` BEFORE the
+  ## driver ran, which made the committed lock a precondition for every other
+  ## lock source rather than one source of equal status. The empty-lock-set
+  ## failure now comes from the composer, which is the only place that knows
+  ## which backends were actually consulted; it names all of them, including
+  ## the committed lock and its path.
   let (outcomes, notices, exitCode) = executeDevelopAll(args)
 
   if args.json:
@@ -20960,6 +21120,13 @@ proc runDevelopAllCommand(args: DevelopAllArgs): int =
       of "reset":
         stdout.writeLine("repro develop --all: reset drifted checkout of " &
           o.node & " to locked revision " & o.revision & " -> " & o.path)
+      of "would-clone":
+        stdout.writeLine("repro develop --all: would clone " & o.node & " @ " &
+          o.revision & " -> " & o.path & " (dry run; nothing was changed)")
+      of "would-reset":
+        stdout.writeLine("repro develop --all: would reset drifted checkout " &
+          "of " & o.node & " to locked revision " & o.revision & " -> " &
+          o.path & " (dry run; nothing was changed)")
       of "idempotent":
         stdout.writeLine("repro develop --all: " & o.node &
           " already in develop mode at " & o.path & " (no change)")
@@ -20975,9 +21142,14 @@ proc runDevelopAllCommand(args: DevelopAllArgs): int =
 
 proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
   ## ``repro develop --all|--direct|--transitive-of=<pkg>|--only=<list>
-  ## [--filter=<pat>] [--into=<dir>] [--reset] [--strict]
+  ## [--filter=<pat>] [--into=<dir>] [--reset] [--strict] [--dry-run]
   ## [--workspace-root=<path>]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ##
+  ## ``--dry-run`` (CLI/develop.md §"Action axis") resolves the lock set and
+  ## prints the actions that WOULD be taken, mutating nothing — no clone, no
+  ## reset, no override file. It is the read-only way to ask what a workspace's
+  ## lock set manages.
   ##
   ## ``--only=<list>`` narrows the selection to these EXACT names; a name that
   ## matches nothing in the workspace lock set is a loud error, and naming an
@@ -21024,6 +21196,8 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
       result.json = true
     elif arg == "--reset":
       result.reset = true
+    elif arg == "--dry-run":
+      result.dryRun = true
     else:
       raise newException(ValueError,
         "unsupported `repro develop --all` argument: " & arg)
@@ -25306,14 +25480,30 @@ method readabilityDiagnostic*(s: GitCheckoutLockStore): string =
   ## existing root that merely holds no records yet is reachable and
   ## legitimately contributes nothing.
   ##
+  ## An EXISTING root that cannot be enumerated is treated exactly like an
+  ## absent one, per "an existing-but-unreadable backend must refuse exactly
+  ## like an absent one". The ``locks/`` subtree is probed separately: a root
+  ## whose ``locks/`` exists but is unreadable is the finer case that used to
+  ## come out as "reachable, holds no record" — a SILENTLY NARROWED set.
+  ##
   ## Deliberately NOT ``checkoutRootRefusal``: RA-21 allows a manifest layer
   ## the gate only READS from to be a plain directory, and
   ## ``orderedLockCandidates`` falls back to a working-tree scan for exactly
   ## that shape. Refusing a readable plain directory here would narrow the
   ## develop set for a workspace whose records are perfectly readable.
-  if dirExists(extendedPath(s.manifestRepoRoot)): ""
-  else:
-    "git-checkout lock store root does not exist: " & s.manifestRepoRoot
+  if not dirExists(extendedPath(s.manifestRepoRoot)):
+    return "git-checkout lock store root does not exist: " & s.manifestRepoRoot
+  let rootDiag = directoryReadDiagnostic(s.manifestRepoRoot)
+  if rootDiag.len > 0:
+    return "git-checkout lock store root exists but cannot be read: " &
+      s.manifestRepoRoot & " (" & rootDiag & ")"
+  let locksDir = s.manifestRepoRoot / "locks"
+  if dirExists(extendedPath(locksDir)):
+    let locksDiag = directoryReadDiagnostic(locksDir)
+    if locksDiag.len > 0:
+      return "git-checkout lock store's `locks/` subtree exists but cannot " &
+        "be read: " & locksDir & " (" & locksDiag & ")"
+  ""
 
 proc lockRecordAtCommit*(store: LockStore; project, repo, sha: string):
     Option[StoreLockRecord] =
@@ -26487,11 +26677,16 @@ proc resolveWorkspaceLockedDeps*(workspaceRoot, projectName: string;
 #   1. the PUBLIC tier's backend — the in-repo committed ``repro.lock``, via
 #      ``populateLockedDeps(LockSource(kind: lskCommittedLock, ...))``. This is
 #      exactly what the pre-DS-1 driver read, and for a workspace with no
-#      routing config it is ALSO the whole answer (byte-identical);
+#      routing config it is ALSO the whole answer (byte-identical). Its ABSENCE
+#      is NOT a failure — "no single row is a precondition for the others";
 #   2. the CONFIGURATION PLANE — ``composeLockingRouting`` folds layers 2..5
 #      (system / dotfiles / parent-workspace / VCS-private) and
 #      ``resolveRepoBackends`` resolves every participating repo to exactly one
 #      ``(tier, backend)``;
+#   2b. every DECLARED ROUTE's medium is PROBED FOR READABILITY BEFORE
+#      membership is resolved (step "(2b)" in the body below). Membership
+#      resolution reads the same media, so a probe placed after it can be
+#      pre-empted by membership silently degrading;
 #   3. every DISTINCT resolved backend — each read through the SAME
 #      ``populateLockedDeps(source)`` entry point, with a commit-keyed
 #      ``lockRecordAtCommit`` seed for commit-addressed backends.
@@ -26500,6 +26695,37 @@ proc resolveWorkspaceLockedDeps*(workspaceRoot, projectName: string;
 # composer, the backend construction, the record readers and the populator are
 # all the existing machinery.
 # ---------------------------------------------------------------------------
+
+proc unreadableBackendRemedy(tierLbl, kind, location: string): string =
+  ## The ONE copy-pasteable remedy an unreadable-backend refusal carries. Shared
+  ## by the route-level probe (DS-3, before membership) and the per-assignment
+  ## probe (DS-3, after membership) so both refusals read identically — the
+  ## whole point of "the rule binds the observable outcome, not one code path".
+  ## An ABSENT medium and an UNREADABLE one refuse identically (that is the
+  ## rule), but they are not fixed the same way, and a remedy that cannot be
+  ## pasted is not a remedy. Pick by what is actually on disk, and pick for
+  ## EVERY kind — "make the … readable" is prose, not a command, and the rule
+  ## asks each refusal to carry one copy-pasteable remedy regardless of which
+  ## backend kind happened to be routed.
+  if kind == "external-cli":
+    if fileExists(extendedPath(location)):
+      "make the " & tierLbl & " lock backend program executable (e.g. " &
+        "`chmod u+x " & location & "`)"
+    else:
+      "install the " & tierLbl & " lock backend program at " & location
+  elif dirExists(extendedPath(location)):
+    "make the " & tierLbl & " lock backend readable (e.g. `chmod -R u+rX " &
+      location & "`)"
+  elif kind == "git-checkout":
+    "clone the " & tierLbl & " lock backend to " & location &
+      " (e.g. `git clone <its-remote> " & location & "`)"
+  else:
+    "create or restore the " & tierLbl & " lock backend at " & location
+
+proc unreadableBackendMessage(tierLbl, kind, location, diag: string): string =
+  tierLbl & " lock backend (kind=" & kind & " location=" & location &
+    ") could not be read: " & diag & " — " &
+    unreadableBackendRemedy(tierLbl, kind, location)
 
 proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
                            strict: bool): DevelopLockSet =
@@ -26512,8 +26738,23 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
   # Kept as the WHOLE result object (schema / platform / solved-graph payload
   # included) so a public-only workspace comes out byte-identical to the
   # pre-DS-1 single-source read.
+  #
+  # An ABSENT ``repro.lock`` yields an empty ``deps`` set and is recorded as a
+  # backend that contributed nothing — NOT as a refusal. "No single row is a
+  # precondition for the others": a workspace with no committed lock but a
+  # declared team route resolves that route's repos, and only an EMPTY UNION
+  # (checked by the caller, which then names every backend below) fails.
+  let committedLockP = committedLockPath(root)
+  let committedLockPresent = fileExists(extendedPath(committedLockP))
   result.lock = populateLockedDeps(
     LockSource(kind: lskCommittedLock, workspaceRoot: root))
+  let committedLockReport = DevelopBackendReport(tier: "public",
+    backendKind: "committed-lock", location: committedLockP,
+    reachable: committedLockPresent,
+    diagnostic:
+      (if committedLockPresent: ""
+       else: "no committed lock at " & committedLockP),
+    records: result.lock.deps.len)
   var indexByName = initTable[string, int]()
   # PROVENANCE of each entry already IN the union — which tier/backend actually
   # supplied it. Deliberately distinct from ``result.tierOf`` / ``backendOf``,
@@ -26545,9 +26786,79 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     # No layer declares a route: the built-in public default is the only tier,
     # so the workspace lock set IS the committed lock. Nothing else is read and
     # nothing else is reported — the compatibility contract of DS-1.
-    result.backends.add(DevelopBackendReport(tier: "public",
-      backendKind: "committed-lock", location: committedLockPath(root),
-      reachable: true))
+    result.backends.add(committedLockReport)
+    return
+
+  result.backends.add(committedLockReport)
+
+  # ---- (2b) DS-3, BEFORE membership: probe every DECLARED route's medium. --
+  #
+  # "'Unreadable' includes degrading to silence. The rule binds the OBSERVABLE
+  # OUTCOME, not one code path. […] an unreadable backend must never be allowed
+  # to degrade MEMBERSHIP RESOLUTION first, such that its repos never become
+  # assignments and the policy above is bypassed entirely."
+  #
+  # That bypass is real and it is the common shape: the routed medium for a
+  # team tier is typically the SAME ``.repro/manifests`` checkout that supplies
+  # the workspace's membership. Make it unreadable and membership resolution
+  # quietly yields a smaller repo set, so the route's repos never become
+  # ``RepoBackendAssignment``s, so no ``LockStore`` is ever constructed for
+  # them, so the per-backend probe below never runs — exit 0, set narrowed,
+  # nothing said. Probing the DECLARED routes (which come from the
+  # configuration plane alone, and are therefore immune to membership
+  # degrading) closes that door.
+  #
+  # Only routes that name a location WITHOUT needing a repo are probed here:
+  # ``git-notes`` / ``separate-branch`` without an explicit ``path`` are
+  # per-repo media whose location is a repo path, so they have nothing to probe
+  # until membership resolves, and they are covered by the per-backend probe.
+  var probedRouteLocations = initHashSet[string]()
+  # Backends the route-level probe already refused-or-warned about. The
+  # per-backend probe below must not report the SAME medium twice (a personal
+  # route warns and continues, so its repos may still reach that loop).
+  var alreadyReportedUnreadable = initHashSet[string]()
+  for route in composed.routes:
+    let entry = route.entry
+    let kind = entry.backend.strip().toLowerAscii()
+    let hasPath = entry.path.isSome and entry.path.get().len > 0
+    if kind notin ["git-checkout", "committed-file", "external-cli"] and
+        not hasPath:
+      continue
+    var probeStore: LockStore
+    try:
+      probeStore = constructRoutedBackend(entry, root, "", identity, gitBin)
+    except CatchableError:
+      # A malformed route (missing `path`/`program`) is the routing layer's own
+      # loud error, raised by ``resolveRepoBackends`` below with the full
+      # remedy. Nothing to probe here.
+      continue
+    if probeStore.isNil: continue
+    let location = probeStore.storeLocationLabel()
+    let tierLbl = lockingTierLabel(route.tier)
+    let probeKey = tierLbl & "\0" & kind & "\0" & location
+    if probeKey in probedRouteLocations: continue
+    probedRouteLocations.incl(probeKey)
+    let diag = probeStore.readabilityDiagnostic()
+    if diag.len == 0: continue
+    alreadyReportedUnreadable.incl(probeKey)
+    var report = DevelopBackendReport(tier: tierLbl, backendKind: kind,
+      location: location, reachable: false, diagnostic: diag)
+    report.repos = route.repos
+    result.backends.add(report)
+    let message = unreadableBackendMessage(tierLbl, kind, location, diag) &
+      (if route.repos.len > 0:
+         " (this route declares: " & route.repos.join(", ") & ")"
+       else: "")
+    if route.tier == wvPersonal and not strict:
+      result.warnings.add("WARNING: " & message &
+        "; continuing without it (pass --strict to make this fatal)")
+      for r in route.repos: result.omitted.add(r & " (tier=personal)")
+    else:
+      result.refusals.add(message)
+  if result.refusals.len > 0:
+    # A public/team/org medium that cannot be read refuses HERE, before
+    # membership resolution is even attempted — otherwise the membership read
+    # of that same medium decides the outcome instead of this rule.
     return
 
   var resolved: ResolvedProject
@@ -26569,10 +26880,6 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
   except CatchableError as err:
     result.refusals.add("lock-backend routing failed: " & err.msg)
     return
-
-  result.backends.add(DevelopBackendReport(tier: "public",
-    backendKind: "committed-lock", location: committedLockPath(root),
-    reachable: true))
 
   # ---- (3) Group the assignments by DISTINCT backend. --------------------
   # Two repos of the same tier routed to the same medium share one backend
@@ -26632,19 +26939,15 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     # DS-3 — an unreachable backend must NEVER narrow the set silently.
     let diag = store.readabilityDiagnostic()
     if diag.len > 0:
+      if key in alreadyReportedUnreadable:
+        # The route-level probe (2b) already refused-or-warned about this exact
+        # medium. Reporting it twice would double the warning and the omitted
+        # list; the outcome is unchanged either way.
+        continue
       report.reachable = false
       report.diagnostic = diag
       result.backends.add(report)
-      let remedy =
-        if kind == "git-checkout":
-          "clone the " & tierLbl & " lock backend to " & location &
-            " (e.g. `git clone <its-remote> " & location & "`)"
-        elif kind == "external-cli":
-          "install the " & tierLbl & " lock backend program at " & location
-        else:
-          "make the " & tierLbl & " lock backend at " & location & " readable"
-      let message = tierLbl & " lock backend (kind=" & kind & " location=" &
-        location & ") could not be read: " & diag & " — " & remedy
+      let message = unreadableBackendMessage(tierLbl, kind, location, diag)
       if tier == wvPersonal and not strict:
         result.warnings.add("WARNING: " & message &
           "; continuing without it (pass --strict to make this fatal)")
@@ -26652,6 +26955,11 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       else:
         result.refusals.add(message)
       continue
+    # Remember where this backend's report sits so its contributed-record count
+    # can be filled in as the fold below adds entries. The empty-union failure
+    # prints that count, so "readable but held nothing" is distinguishable from
+    # "contributed, then everything was filtered out".
+    let reportIdx = result.backends.len
     result.backends.add(report)
 
     # A commit-addressed backend is keyed by a commit. The key is the workspace
@@ -26698,6 +27006,7 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
           result.lock.deps.add(d)
           provTier[d.name] = tierLbl
           provBackend[d.name] = kind
+          inc result.backends[reportIdx].records
         continue
       # "A repo is develop-manageable in workspace W if some lock record
       # readable from W NAMES it and PINS IT TO AN EXACT REVISION."
@@ -26715,10 +27024,20 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       # answer to also be an exact revision. A repo failing either half
       # contributes nothing, and says so — no branch-tip fallback and no
       # manifest-advisory fallback.
+      #
+      # "Exact" is ``isExactLockedRevision`` (exactly 40 lowercase hex), NOT the
+      # ``looksLikeSha`` heuristic this used to call. That heuristic accepts
+      # 7..64 hex, so it admitted an ABBREVIATION, an all-hex BRANCH NAME, and
+      # a 41-hex string — and for the 41-hex case the clone ran, the reset
+      # failed, and a checkout was left behind at a revision nobody locked.
+      # Both halves are checked: the record the backend HOLDS and the revision
+      # the populator RESOLVED must each be an exact pin.
       let backendRev =
         if commitKeyed.hasKey(d.path): commitKeyed[d.path]
         else: lockedShaFromStore(store, resolved.projectName, d.name, d.path)
-      if backendRev.len == 0 or not looksLikeSha(d.coordinates.revision):
+      if backendRev.len == 0 or
+          not isExactLockedRevision(backendRev) or
+          not isExactLockedRevision(d.coordinates.revision):
         result.noRecord.add(d.name & " (tier=" & tierLbl & " backend=" &
           kind & ")")
         continue
@@ -26745,6 +27064,7 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       result.lock.deps.add(d)
       provTier[d.name] = tierLbl
       provBackend[d.name] = kind
+      inc result.backends[reportIdx].records
 
 proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
     ld: LockedDependencies): seq[LockedIntegrityFailure] =

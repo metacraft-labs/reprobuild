@@ -277,8 +277,47 @@ method readabilityDiagnostic*(s: LockStore): string {.base.} =
   ## with this before its records are read, so an absent one is named rather
   ## than quietly dropped.
   ##
-  ## The probe is deliberately narrow — it asks only whether the medium EXISTS
-  ## (the directory, the program). A present-but-empty medium is reachable.
+  ## The probe asks whether the medium can be READ, not merely whether a name
+  ## for it resolves. A present-but-empty medium is reachable and legitimately
+  ## contributes nothing; a present-but-UNREADABLE one is not, and must be
+  ## reported like an absent one (CLI/develop.md §"Unreachable backends never
+  ## narrow the set silently": "'Unreadable' includes degrading to silence").
+  ""
+
+proc directoryReadDiagnostic*(path: string): string =
+  ## "" when ``path`` can actually be ENUMERATED; otherwise the OS diagnostic.
+  ##
+  ## ``dirExists`` only needs the PARENT to be traversable, so a directory at
+  ## mode ``000`` "exists" while every read inside it fails with EACCES. That
+  ## gap is how an existing-but-unreadable backend comes out looking identical
+  ## to an empty one — the backend then reports "holds no record" about records
+  ## it simply could not see. ``walkDir(checkDir = true)`` raises instead of
+  ## yielding nothing, which is the distinction the rule needs.
+  try:
+    for _ in walkDir(path, checkDir = true):
+      break
+    ""
+  except OSError as err:
+    err.msg
+  except CatchableError as err:
+    err.msg
+
+proc storeSubtreeDiagnostic*(root, label: string): string =
+  ## Shared shape of the readability probe for a DIRECTORY-BACKED store: the
+  ## root must exist AND be enumerable, and when a ``locks/`` subtree is
+  ## present it must be enumerable too (a readable root over an unreadable
+  ## ``locks/`` is the finer case that otherwise reads as "holds no record").
+  if not dirExists(root):
+    return label & " does not exist: " & root
+  let rootDiag = directoryReadDiagnostic(root)
+  if rootDiag.len > 0:
+    return label & " exists but cannot be read: " & root & " (" & rootDiag & ")"
+  let locksDir = root / "locks"
+  if dirExists(locksDir):
+    let locksDiag = directoryReadDiagnostic(locksDir)
+    if locksDiag.len > 0:
+      return label & "'s `locks/` subtree exists but cannot be read: " &
+        locksDir & " (" & locksDiag & ")"
   ""
 
 # ---------------------------------------------------------------------------
@@ -325,9 +364,15 @@ method storeLocationLabel*(s: CommittedFileLockStore): string = s.baseDir
 
 method readabilityDiagnostic*(s: CommittedFileLockStore): string =
   ## DS-3 — the medium is the ``baseDir`` tree. An ABSENT directory cannot be
-  ## read; an existing-but-empty one is reachable and simply holds no records.
-  if dirExists(s.baseDir): ""
-  else: "committed-file lock store directory does not exist: " & s.baseDir
+  ## read; an existing-but-empty one is reachable and simply holds no records;
+  ## an existing-but-UNREADABLE one refuses exactly like an absent one.
+  ##
+  ## The last case is not hypothetical: ``latestLock`` reaches its records with
+  ## plain ``fileExists``/``readFile``, and under an unreadable ``baseDir``
+  ## every one of those probes answers "no such record" rather than raising —
+  ## so the store silently reports that it holds nothing while holding a
+  ## published record.
+  storeSubtreeDiagnostic(s.baseDir, "committed-file lock store directory")
 
 method putLock*(s: CommittedFileLockStore;
     rec: StoreLockRecord): StorePutResult =
@@ -406,9 +451,11 @@ method storeLocationLabel*(s: GitNotesLockStore): string = s.repoPath
 
 method readabilityDiagnostic*(s: GitNotesLockStore): string =
   ## DS-3 — the medium is a notes namespace inside ``repoPath``; an absent
-  ## checkout cannot be read.
-  if dirExists(s.repoPath): ""
-  else: "git-notes lock store repository does not exist: " & s.repoPath
+  ## checkout cannot be read, and neither can an unreadable one. ``gnReadNoteAt``
+  ## turns a failing ``git`` into ``none`` (a note may legitimately be absent),
+  ## so an unreadable repository is otherwise indistinguishable from one that
+  ## simply carries no lock note.
+  storeSubtreeDiagnostic(s.repoPath, "git-notes lock store repository")
 
 method putLock*(s: GitNotesLockStore; rec: StoreLockRecord): StorePutResult =
   let blob = encodeRecord(rec)
@@ -497,9 +544,11 @@ method storeLocationLabel*(s: SeparateBranchLockStore): string = s.repoPath
 
 method readabilityDiagnostic*(s: SeparateBranchLockStore): string =
   ## DS-3 — the medium is an orphan branch inside ``repoPath``; an absent
-  ## checkout cannot be read.
-  if dirExists(s.repoPath): ""
-  else: "separate-branch lock store repository does not exist: " & s.repoPath
+  ## checkout cannot be read, and neither can an unreadable one. Like the
+  ## git-notes backend, a failing ``git`` read is reported as "no record"
+  ## rather than raising, so without this probe an unreadable repository
+  ## narrows the set silently.
+  storeSubtreeDiagnostic(s.repoPath, "separate-branch lock store repository")
 
 proc sbHashObject(s: SeparateBranchLockStore; content: string):
     tuple[ok: bool; sha, diag: string] =
@@ -647,9 +696,23 @@ method storeLocationLabel*(s: ExternalCliLockStore): string = s.program
 
 method readabilityDiagnostic*(s: ExternalCliLockStore): string =
   ## DS-3 — the medium is reached ONLY through ``program``; an absent program
-  ## cannot be invoked, so no record can be read.
-  if fileExists(s.program): ""
-  else: "external-cli lock store program does not exist: " & s.program
+  ## cannot be invoked, so no record can be read. A PRESENT but non-executable
+  ## program cannot be invoked either: ``startProcess`` raises, which the
+  ## composer already turns into a refusal, but naming the cause here gives the
+  ## same DS-3 message and remedy the other backends produce instead of a
+  ## generic "failed while reading its records".
+  if not fileExists(s.program):
+    return "external-cli lock store program does not exist: " & s.program
+  when defined(posix):
+    try:
+      let perms = getFilePermissions(s.program)
+      if fpUserExec notin perms and fpGroupExec notin perms and
+          fpOthersExec notin perms:
+        return "external-cli lock store program is not executable: " & s.program
+    except OSError as err:
+      return "external-cli lock store program cannot be inspected: " &
+        s.program & " (" & err.msg & ")"
+  ""
 
 proc ecPutRaw(s: ExternalCliLockStore; key, value: string): StorePutResult =
   let request = $(%*{
