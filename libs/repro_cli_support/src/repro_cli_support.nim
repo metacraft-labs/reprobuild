@@ -31636,17 +31636,73 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
 # adds the M19-specific log/report layout, and avoids leaking the
 # best-effort surface into the operator-facing ``repro workspace lock``.
 
+# M19b: post-commit reports WRITE-vs-PUBLISH, never a bare "ok".
+#
+# Post-commit is local-only by design (Workspace-Manifests.md § "Lock
+# publication (commit + push)": the publish table's post-commit row is
+# "writes: yes (best-effort) / publishes: **no — local only**"; it must not
+# require the network). Publication is the job of the pre-push gate and of an
+# explicit ``repro workspace lock``.
+#
+# The defect this vocabulary replaces: the wrapper reported ``ok wrote <path>``
+# for a record that existed on exactly one disk and nowhere else. The message
+# was true and useless — a workspace whose publication had been dead for two
+# weeks logged an unbroken run of successes. The same held for the two "no lock
+# at all" branches, which reported ``skipped-dirty`` / ``failed`` and exit 0
+# with no operator-visible trace outside a log file nobody reads.
+#
+# The rules now are:
+#
+#   * ``ok`` is spelled ``published`` and is reserved for a record actually
+#     present in the lock store's last-known upstream. A local write alone
+#     never earns it.
+#   * Every other outcome names what did NOT happen (``written-*`` = the
+#     record exists but has not been published; ``no-lock-*`` = no record
+#     exists) and why, plus the remedy.
+#   * Anything that is not the DESIGNED steady state also prints one line to
+#     stderr so the operator sees it at the terminal. Post-commit still exits
+#     0 unconditionally: loud, never blocking. A hook that fails commits would
+#     be strictly worse than the starvation it reports.
+
 type
   PostCommitOutcome* = enum
-    pcoOk                ## Per-repo lock TOML written (RA-1: no index).
-    pcoSkippedDirty      ## At least one sibling repo is dirty; strict
-                         ## M11 would have refused with exit 2. The
-                         ## post-commit policy is to skip silently.
+    pcoPublished         ## Per-repo lock TOML written (RA-1: no index) AND
+                         ## already present in the store's last-known
+                         ## upstream. The only success tag.
+    pcoWrittenPending    ## Record written to a PUBLISHABLE store but not yet
+                         ## in its upstream. The designed post-commit steady
+                         ## state — pre-push publishes it. Loud only when the
+                         ## store carries STRANDED records (below).
+    pcoWrittenLocalOnly  ## Record written, but the store is not publishable
+                         ## (not its own checkout / no upstream). This record
+                         ## will never leave this machine.
+    pcoWrittenUnknown    ## Record written; the publication probe itself
+                         ## failed. Never reported as success.
+    pcoNoManifestRecord  ## The lock writer succeeded but wrote no manifest
+                         ## record: this workspace routes per-repo records to
+                         ## their own backends, or is public-only and carries
+                         ## its lock in the in-repo ``repro.lock``. Nothing to
+                         ## publish here, and nothing claimed.
+    pcoNoLockDirty       ## At least one in-scope repo is dirty; strict M11
+                         ## refused with exit 2 and NO lock exists.
     pcoSkippedNoWorkspace ## No ``.repo/workspace.toml`` or no resolvable
                           ## project; common in a freshly-cloned repo
-                          ## that has not been initialised.
-    pcoFailed            ## Lock writer raised (IO error, VCS query
-                         ## failure, etc.). Logged and downgraded.
+                          ## that has not been initialised. A genuine
+                          ## "this hook does not apply here" no-op, not a
+                          ## starvation: log-only.
+    pcoNoLockFailed      ## Lock writer raised (IO error, VCS query
+                         ## failure, missing checkout, ...) and NO lock
+                         ## exists.
+
+  PostCommitPublication* = enum
+    ## Publication state of the record this run wrote, probed WITHOUT any
+    ## network access (post-commit must not require the network, so the
+    ## comparison is against the last-fetched remote-tracking ref).
+    pcpNoRecord          ## No lock record was written by this run.
+    pcpPublished         ## The record is present in the store's upstream.
+    pcpPending           ## Store is publishable; record is not upstream yet.
+    pcpLocalOnly         ## Store is not publishable; nothing can ever be.
+    pcpUnknown           ## The probe failed; publication state is unproven.
 
   PostCommitReport* = object
     workspaceRoot*: string
@@ -31660,13 +31716,40 @@ type
     diagnostic*: string
     timestamp*: string
     exitCode*: int
+    lockWritten*: bool
+      ## M19b — did this run leave a lock RECORD on disk at all? The three
+      ## exit-0 starvation modes are exactly the runs where this is false
+      ## plus the runs where it is true and ``publication`` is not
+      ## ``published``.
+    publication*: string
+      ## M19b — ``postCommitPublicationTag`` of the state above.
+    pendingRecords*: int
+      ## M19b — how many lock records for the trigger repo exist in the
+      ## store but are absent from its last-known upstream.
+    strandedRecords*: int
+      ## M19b — of ``pendingRecords``, how many are anchored to a trigger
+      ## commit that is ALREADY published in the trigger repo. Each one is
+      ## proof that a push went out without its lock: publication is broken,
+      ## not merely pending. Any non-zero value is loud.
 
 proc postCommitOutcomeTag(outcome: PostCommitOutcome): string =
   case outcome
-  of pcoOk: "ok"
-  of pcoSkippedDirty: "skipped-dirty"
+  of pcoPublished: "published"
+  of pcoWrittenPending: "written-pending-publish"
+  of pcoWrittenLocalOnly: "written-local-only"
+  of pcoWrittenUnknown: "written-publication-unknown"
+  of pcoNoManifestRecord: "no-manifest-record"
+  of pcoNoLockDirty: "no-lock-dirty-siblings"
   of pcoSkippedNoWorkspace: "skipped-no-workspace"
-  of pcoFailed: "failed"
+  of pcoNoLockFailed: "no-lock-failed"
+
+proc postCommitPublicationTag(state: PostCommitPublication): string =
+  case state
+  of pcpNoRecord: "no-record"
+  of pcpPublished: "published"
+  of pcpPending: "pending"
+  of pcpLocalOnly: "local-only"
+  of pcpUnknown: "unknown"
 
 proc toJsonNode*(report: PostCommitReport): JsonNode =
   result = newJObject()
@@ -31681,6 +31764,10 @@ proc toJsonNode*(report: PostCommitReport): JsonNode =
   result["diagnostic"] = %report.diagnostic
   result["timestamp"] = %report.timestamp
   result["exitCode"] = %report.exitCode
+  result["lockWritten"] = %report.lockWritten
+  result["publication"] = %report.publication
+  result["pendingRecords"] = %report.pendingRecords
+  result["strandedRecords"] = %report.strandedRecords
 
 proc resolvePostCommitWorkspaceRoot(currentRepo, workspaceRoot: string): string =
   ## Walk up from ``--current-repo`` to find ``.repro/``. Matches the M18
@@ -31720,6 +31807,24 @@ proc appendPostCommitLog(workspaceRoot, line: string) =
     if open(f, logPath, fmAppend):
       f.writeLine(line)
       f.close()
+  except CatchableError:
+    discard
+
+proc emitPostCommitWarning(tag, diagnostic, workspaceRoot: string) =
+  ## M19b — one line to stderr for any post-commit run that did not end with a
+  ## published lock record and is not the designed local-only steady state.
+  ##
+  ## Loud, NOT blocking: the caller still returns 0. Failing the commit would
+  ## be a worse defect than the starvation this reports — the operator's work
+  ## is already committed and a hook has no business rejecting it after the
+  ## fact. Git relays a post-commit hook's stderr to the terminal, so this is
+  ## the only channel that reaches a human without one; the log file is where
+  ## the same line goes for anyone reading after the fact.
+  try:
+    stderr.writeLine("repro post-commit: " & tag & ": " & diagnostic)
+    if workspaceRoot.len > 0:
+      stderr.writeLine("repro post-commit: details in " &
+        (workspaceRoot / ".repro" / "workspace" / "post-commit-lock.log"))
   except CatchableError:
     discard
 
@@ -32076,6 +32181,132 @@ proc refreshEvidenceOnlyRepoAtPostCommit(workspaceRoot, currentRepoAbs: string):
   except CatchableError as err:
     return "evidence refresh failed: '" & repo.name & "' (" & err.msg & ")"
 
+# ---- M19b: post-commit publication probe (local-only) -------------------
+#
+# Answers "did the record this run wrote actually reach anyone?" using only
+# LOCAL git state. Post-commit must not require the network, so "published"
+# here means "present in the store's last-fetched remote-tracking ref". That
+# is the strongest claim a local-only hook is entitled to make, and it is
+# strictly stronger than the claim the old ``ok wrote <path>`` made, which was
+# none at all.
+#
+# It also counts the store's BACKLOG for the trigger repo, and within that the
+# STRANDED records: pending records whose trigger commit is already published
+# in the trigger repo. A stranded record is not "publication has not happened
+# yet" — it is "a push went out and left its lock behind", i.e. proof that the
+# publication path is broken. That distinction is what separates the designed
+# steady state (quiet) from the two-week starvation (loud), without inventing
+# an arbitrary backlog threshold.
+
+const PostCommitBacklogScanLimit = 256
+  ## Bound on how many backlog records the probe inspects. A post-commit hook
+  ## may not turn into an unbounded git-call loop on a store with years of
+  ## history; the counts saturate at this bound and the diagnostic says so.
+
+type
+  PostCommitPublicationProbe = object
+    state: PostCommitPublication
+    detail: string       ## Why the store is/is not publishable, when relevant.
+    pending: int
+    stranded: int
+    saturated: bool
+
+proc lockStoreUpstreamRef(identity: GitToolIdentity; storeRoot: string): string =
+  ## The store's upstream tracking ref (``origin/main``), or "" when the store
+  ## has no upstream. Read-only, no network.
+  let res = gitRunPlain(identity,
+    ["-C", storeRoot, "rev-parse", "--abbrev-ref",
+     "--symbolic-full-name", "@{u}"])
+  if res.code != 0: return ""
+  res.output.strip()
+
+proc pathIsInGitTree(identity: GitToolIdentity; repoRoot, treeish,
+                     relPath: string): bool =
+  ## Is ``relPath`` present in ``treeish``? ``git cat-file -e`` is the cheapest
+  ## existence probe and touches no working tree.
+  gitRunPlain(identity,
+    ["-C", repoRoot, "cat-file", "-e",
+     treeish & ":" & relPath.replace('\\', '/')]).code == 0
+
+proc probePostCommitPublication(identity: GitToolIdentity;
+                                storeRoot, lockFilePath, triggerRepoRoot: string):
+                                PostCommitPublicationProbe =
+  ## Classify the record at ``lockFilePath`` inside the lock store at
+  ## ``storeRoot``, and count the trigger repo's backlog alongside it. Never
+  ## raises and never fetches; any git failure degrades to ``pcpUnknown``
+  ## rather than to a success.
+  result.state = pcpUnknown
+  if lockFilePath.len == 0:
+    result.state = pcpNoRecord
+    return
+  if storeRoot.len == 0:
+    result.state = pcpLocalOnly
+    result.detail = "no lock store is configured for this workspace"
+    return
+
+  # Publishability uses the SAME two preconditions ``publishWorkspaceLock``
+  # applies, so the probe cannot claim "pending" for a store the publisher
+  # would decline as ``lpoNotPublishable``. In particular the default
+  # ``<workspace>/.repro/manifests`` layer is a plain directory nested inside
+  # the workspace's own checkout: git's upward discovery answers for the
+  # ENCLOSING repo, so "is a git checkout" is not enough — it must BE the
+  # worktree root.
+  let worktree = discoverGitWorktree(identity, storeRoot)
+  if not worktree.ok:
+    result.state = pcpLocalOnly
+    result.detail = "lock store '" & storeRoot & "' is not a git checkout"
+    return
+  if not samePathIdentity(worktree.worktreeRoot, storeRoot):
+    result.state = pcpLocalOnly
+    result.detail = "lock store '" & storeRoot &
+      "' is not its own git checkout (it lives inside '" &
+      worktree.worktreeRoot & "'), so it has nothing to publish to"
+    return
+  let upstream = lockStoreUpstreamRef(identity, storeRoot)
+  if upstream.len == 0:
+    result.state = pcpLocalOnly
+    result.detail = "lock store '" & storeRoot & "' has no upstream (@{u})"
+    return
+
+  let storeRel = relativePath(lockFilePath, storeRoot).replace('\\', '/')
+  if storeRel.len == 0 or storeRel.startsWith(".."):
+    result.detail = "lock record '" & lockFilePath &
+      "' is not inside the lock store '" & storeRoot & "'"
+    return
+
+  result.state =
+    if pathIsInGitTree(identity, storeRoot, upstream, storeRel): pcpPublished
+    else: pcpPending
+  result.detail = "upstream " & upstream
+
+  # Backlog + stranded counts, scoped to the trigger repo's own lock directory
+  # (``locks/<project>/<repo>/``) — the directory this run just wrote into, and
+  # the only one whose trigger SHAs we can resolve against a checkout we hold.
+  let recordDir = parentDir(lockFilePath)
+  if not dirExists(recordDir): return
+  let dirRel = relativePath(recordDir, storeRoot).replace('\\', '/')
+  var scanned = 0
+  for entry in walkDir(recordDir):
+    if entry.kind notin {pcFile, pcLinkToFile}: continue
+    let base = extractFilename(entry.path)
+    if not base.endsWith(".toml"): continue
+    if scanned >= PostCommitBacklogScanLimit:
+      result.saturated = true
+      break
+    inc scanned
+    if pathIsInGitTree(identity, storeRoot, upstream, dirRel & "/" & base):
+      continue
+    inc result.pending
+    # Stranded: the commit this record is anchored to is ALREADY published in
+    # the trigger repo, so the push that carried it did not carry the lock.
+    if triggerRepoRoot.len == 0: continue
+    let sha = base[0 ..< base.len - ".toml".len]
+    if sha.len < 7: continue
+    if gitRunPlain(identity,
+        ["-C", triggerRepoRoot, "merge-base", "--is-ancestor", sha,
+         "@{u}"]).code == 0:
+      inc result.stranded
+
 proc runPostCommitLockCommand*(args: openArray[string]): int =
   ## ``repro hooks dispatch post-commit --repo-root=<repo>`` (and the
   ## operator-facing manual entry point) routes here. The M19 policy is
@@ -32105,6 +32336,7 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   # commit must never be blocked by hook failure, so this always exits 0.
   if workspaceRoot.len == 0 or not isInitializedWorkspace(workspaceRoot):
     report.outcome = postCommitOutcomeTag(pcoSkippedNoWorkspace)
+    report.publication = postCommitPublicationTag(pcpNoRecord)
     report.diagnostic =
       if workspaceRoot.len == 0:
         "no workspace root found from --current-repo=" & parsed.currentRepo
@@ -32143,7 +32375,7 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
         evidenceStatus)
 
   # Build the strict M11 args from the dispatched argv and invoke the
-  # M11 executor in-process. Any raise is downgraded to ``pcoFailed``.
+  # M11 executor in-process. Any raise is downgraded to ``pcoNoLockFailed``.
   var lockArgs: WorkspaceLockArgs
   lockArgs.workspaceRoot = workspaceRoot
   lockArgs.triggerSha = parsed.triggerSha
@@ -32168,11 +32400,17 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
     raisedDiagnostic = err.msg
 
   if raised:
-    report.outcome = postCommitOutcomeTag(pcoFailed)
-    report.diagnostic = raisedDiagnostic
+    # M19b mode 3: no lock exists. The commonest instance of this branch is
+    # ``repo '<x>' has no on-disk checkout``, which in one workspace produced
+    # 68 consecutive attempts and zero locks while every one of them exited 0
+    # in silence. Say what did not happen, and say it at the terminal.
+    report.outcome = postCommitOutcomeTag(pcoNoLockFailed)
+    report.publication = postCommitPublicationTag(pcpNoRecord)
+    report.diagnostic = "NO lock written: " & raisedDiagnostic
     writePostCommitReport(workspaceRoot, report)
     appendPostCommitLog(workspaceRoot,
-      timestamp & " " & report.outcome & " " & raisedDiagnostic)
+      timestamp & " " & report.outcome & " " & report.diagnostic)
+    emitPostCommitWarning(report.outcome, report.diagnostic, workspaceRoot)
     return 0
 
   report.project = outcome.report.project
@@ -32181,10 +32419,102 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   report.triggerRepo = outcome.report.triggerRepo
   report.triggerSha = outcome.report.triggerSha
 
+  var loud = true
   case outcome.report.exitCode
   of 0:
-    report.outcome = postCommitOutcomeTag(pcoOk)
-    report.diagnostic = "wrote " & outcome.report.lockFilePath
+    report.lockWritten = outcome.report.lockFilePath.len > 0
+    # M19b mode 1 — THE defect. The old code stopped here with
+    # ``outcome = "ok"`` and ``diagnostic = "wrote <path>"``, which is a claim
+    # about a filesystem, not about a lock store. Probe what actually reached
+    # the store's upstream and report THAT.
+    var probe: PostCommitPublicationProbe
+    # Unproven until proven otherwise: a probe that cannot run must never
+    # decay into a success. The one state we can assert without git is "this
+    # run wrote no manifest record at all".
+    probe.state =
+      if outcome.report.lockFilePath.len == 0: pcpNoRecord else: pcpUnknown
+    # The backlog lives under ``locks/<project>/<triggerRepo>/``, so the
+    # ancestry test for a stranded record must run against the TRIGGER repo's
+    # checkout — which is not necessarily ``--current-repo``: the anchor is
+    # picked by ``pickTriggerRepo`` (project-named repo, else the first
+    # declared one) and post-commit passes no explicit trigger. Resolve it from
+    # the locked entries, where each repo's declared path is recorded, and
+    # leave it empty if it cannot be resolved (the counts then stay at 0
+    # rather than being computed against the wrong repository).
+    var triggerRepoRoot = ""
+    for entry in outcome.report.repos:
+      if entry.name == outcome.report.triggerRepo:
+        triggerRepoRoot = workspaceRoot / entry.path
+        break
+    try:
+      let identity = ensureGitToolResolvable(
+        parsed.toolProvisioning, getEnv("PATH"))
+      probe = probePostCommitPublication(identity,
+        outcome.report.manifestLayerRoot, outcome.report.lockFilePath,
+        triggerRepoRoot)
+    except CatchableError as err:
+      probe.detail = err.msg
+    report.publication = postCommitPublicationTag(probe.state)
+    report.pendingRecords = probe.pending
+    report.strandedRecords = probe.stranded
+
+    let backlog =
+      if probe.pending > 0:
+        "; " & $probe.pending & (if probe.saturated: "+" else: "") &
+          " unpublished record(s) for '" & outcome.report.triggerRepo &
+          "' in the store" &
+          (if probe.stranded > 0:
+            ", " & $probe.stranded &
+              " of them anchored to ALREADY-PUSHED commits — publication " &
+              "is not merely pending, it is not running"
+          else: "")
+      else: ""
+    case probe.state
+    of pcpPublished:
+      # The only success tag: the record is demonstrably in the store's
+      # upstream, not merely on this disk.
+      report.outcome = postCommitOutcomeTag(pcoPublished)
+      report.diagnostic = "published " & outcome.report.lockFilePath &
+        " (" & probe.detail & ")"
+      loud = false
+    of pcpPending:
+      report.outcome = postCommitOutcomeTag(pcoWrittenPending)
+      report.diagnostic = "wrote " & outcome.report.lockFilePath &
+        " — NOT published (" & probe.detail &
+        "); post-commit is local-only, publication happens at pre-push or " &
+        "`repro workspace lock`" & backlog
+      # The designed steady state (Workspace-Manifests.md publish table) is
+      # quiet; a backlog of records stranded behind pushes that already went
+      # out is not the steady state and is not quiet.
+      loud = probe.stranded > 0
+    of pcpLocalOnly:
+      report.outcome = postCommitOutcomeTag(pcoWrittenLocalOnly)
+      report.diagnostic = "wrote " & outcome.report.lockFilePath &
+        " — NOT published and never will be: " & probe.detail &
+        "; this record exists on this machine only"
+      # A workspace with no publishable store is a benign configuration, not
+      # an incident (``lpoNotPublishable`` is a skip, not a failure), so this
+      # states itself in the log on every commit but does not shout at the
+      # terminal on every commit. It is no longer ``ok``, which is the part
+      # that was lying.
+      loud = false
+    of pcpNoRecord:
+      # HL-2 §6 Decision 1 / §8.4 "public-only workspace": no monolithic
+      # trigger-keyed lock file is written when the workspace declares
+      # explicit `[locking]` routes or is public-only (the in-repo
+      # ``repro.lock`` is the record). There is nothing for THIS probe to
+      # classify, and nothing was claimed to be published.
+      report.outcome = postCommitOutcomeTag(pcoNoManifestRecord)
+      report.diagnostic = "no manifest lock record for this workspace " &
+        "(records are routed per-repo / carried by the in-repo repro.lock); " &
+        "nothing published by post-commit, which is local-only"
+      loud = false
+    of pcpUnknown:
+      report.outcome = postCommitOutcomeTag(pcoWrittenUnknown)
+      report.diagnostic = "wrote " & outcome.report.lockFilePath &
+        " — publication state UNPROVEN" &
+        (if probe.detail.len > 0: " (" & probe.detail & ")" else: "") &
+        "; treat this record as unpublished"
     # Best-effort write of the M11 lock-report.json so a manual
     # invocation matches the operator-facing surface. The post-commit
     # hook is driven by git, not by an operator-supplied argv, so there
@@ -32196,22 +32526,42 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
           "lock-report.json")
     except CatchableError: discard
   of 2:
-    # Strict M11 exit-2 = dirty working tree. The post-commit policy
-    # is "skip silently" — the operator already saw the diff during
-    # the just-completed commit and may have intentionally left
-    # sibling repos untouched.
-    report.outcome = postCommitOutcomeTag(pcoSkippedDirty)
+    # M19b mode 2. Strict M11 exit-2 = a repo in scope has uncommitted
+    # changes, so NO lock was written.
+    #
+    # Why the refusal is KEPT (and not downgraded to "lock the dirty repo's
+    # HEAD anyway"): a lock's whole contract is that checking out the recorded
+    # revisions reproduces the state it was taken from. A dirty repo's HEAD
+    # does not reproduce the tree that was observed, so a lock recorded over it
+    # is not a weaker lock, it is a false one — and it is false in the
+    # direction that matters, because the consumer (CI sibling resolution)
+    # cannot tell the difference. Recording it would trade a visible gap for an
+    # invisible lie.
+    #
+    # What was actually wrong here was never the refusal; it was that the
+    # refusal was inaudible. Two weeks of "skipped-dirty … exit 0" scrolled
+    # past in a log nobody reads while the blocker rotated between siblings, so
+    # clearing one never revealed the next. It is now loud, and it names the
+    # repos to clear.
+    report.outcome = postCommitOutcomeTag(pcoNoLockDirty)
+    report.publication = postCommitPublicationTag(pcpNoRecord)
     var dirtyNames: seq[string]
     for e in outcome.report.dirty: dirtyNames.add(e.path)
-    report.diagnostic = "dirty sibling(s): " & dirtyNames.join(", ")
+    report.diagnostic = "NO lock written: dirty sibling(s): " &
+      dirtyNames.join(", ") &
+      " — a lock recorded over uncommitted changes would not reproduce the " &
+      "tree it claims; commit or stash them, then run `repro workspace lock`"
   else:
-    report.outcome = postCommitOutcomeTag(pcoFailed)
-    report.diagnostic = "executeWorkspaceLock returned exit code " &
-      $outcome.report.exitCode
+    report.outcome = postCommitOutcomeTag(pcoNoLockFailed)
+    report.publication = postCommitPublicationTag(pcpNoRecord)
+    report.diagnostic = "NO lock written: executeWorkspaceLock returned " &
+      "exit code " & $outcome.report.exitCode
 
   writePostCommitReport(workspaceRoot, report)
   appendPostCommitLog(workspaceRoot,
     timestamp & " " & report.outcome & " " & report.diagnostic)
+  if loud:
+    emitPostCommitWarning(report.outcome, report.diagnostic, workspaceRoot)
   return 0
 
 # ---- M19a: post-merge / post-checkout manifest auto-refresh ---------------

@@ -429,6 +429,31 @@ make sense.
   is excluded from the cache push (its source objects are never
   propagated). Any failure is logged; the commit always succeeds.
 
+  Because post-commit cannot publish, it never reports a bare success for
+  writing a record. Its outcome — in
+  `.repro/workspace/post-commit-lock.log` and
+  `.repro/workspace/post-commit-report.json` — says what became of the
+  record:
+
+  | Outcome | Meaning |
+  |---|---|
+  | `published` | The record is present in the lock store's last-known upstream. The only success. |
+  | `written-pending-publish` | Written to a publishable store; not upstream yet. The normal state between a commit and a push — pre-push publishes it. |
+  | `written-local-only` | Written, but the store is not publishable (not its own checkout, or no upstream). The record will not leave this machine. |
+  | `written-publication-unknown` | Written; the publication check itself failed. Treat as unpublished. |
+  | `no-manifest-record` | The lock writer succeeded but wrote no manifest record — records are routed per-repo, or the workspace is public-only and carries its lock in the in-repo `repro.lock`. |
+  | `no-lock-dirty-siblings` | **No lock exists.** An in-scope repo has uncommitted changes; a lock recorded over them would not reproduce the tree it claims. Commit or stash them and run `repro workspace lock`. |
+  | `no-lock-failed` | **No lock exists.** The lock writer failed; the diagnostic names the reason (commonly a declared repo with no checkout). |
+  | `skipped-no-workspace` | Not a workspace; the hook does not apply here. |
+
+  The report also carries `pendingRecords` (unpublished records for the
+  trigger repo in the store) and `strandedRecords` — those pending
+  records whose trigger commit has **already been pushed**. A stranded
+  record means a push went out without its lock, so publication is not
+  merely pending: it is not running. Any stranded record, any refusal,
+  and any writer failure also prints a line to stderr, which git shows
+  you at the terminal. The commit still succeeds in every case.
+
 - **pre-push** (client gate; `--no-verify` bypasses it) — the currency +
   publication check for the whole publication boundary. It reads each
   in-scope repo's locked SHA from **its own tier's backend**, verifies
