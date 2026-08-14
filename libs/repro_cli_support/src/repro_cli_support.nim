@@ -258,9 +258,11 @@ proc renderUsage*(programName: string): string =
           programName &
       " hcr prepare-object --input PATH --output PATH (--function NAME|--all-code) [--segment NAME]\n       " &
           programName &
-      " develop --list\n       " &
+      " develop --list [--json] [--at=REV] [membership selectors] [--workspace-root=PATH]\n       " &
           programName &
-      " develop --all|--direct|--transitive-of=PKG [--filter=PAT] [--into=DIR] [--reset] [--workspace-root=PATH]\n       " &
+      " develop --list-overrides\n       " &
+          programName &
+      " develop --all|--direct|--indirect|--transitive-of=PKG [--project=LIST] [--group=LIST] [--filter=GLOB] [--only=LIST] [--except=LIST] [--tier=LIST] [--at=REV] [--lock-store=KIND:LOCATION]... [--into=DIR] [--reset] [--strict] [--dry-run] [--json] [--workspace-root=PATH]\n       " &
           programName &
       " develop <dependency> --into=PATH\n       " &
           programName &
@@ -20395,16 +20397,71 @@ type
   DevelopAllSelectionMode = enum
     dasmAll            ## every dependency node in the lock (the closure)
     dasmDirect         ## only the root repo's direct dependency edges
+    dasmIndirect       ## DS-7 — everything the closure holds that is NOT a
+                       ## direct edge of the root repo (specified in the V1
+                       ## proposal since the beginning, never implemented)
     dasmTransitiveOf   ## the transitive closure below one named dependency
+
+  DevelopAdhocLockStore = object
+    ## DS-8 — one ``--lock-store=[<tier>:]<kind>:<location>`` declaration.
+    ## An INVOCATION-LAYER route (``clkInvocation``, above every configuration
+    ## file layer), so it composes with the configuration plane through the
+    ## same precedence vocabulary rather than bypassing it.
+    tier: WorkspaceVisibility
+    tierExplicit: bool       ## whether the argv named the tier, or it came
+                             ## from the documented `team` default (which is
+                             ## ANNOUNCED, never silent — see
+                             ## ``parseAdhocLockStore``)
+    kind: string             ## one of the five MO-3 backend kinds
+    location: string         ## path (or program, for ``external-cli``)
+    spec: string             ## the verbatim argv value, for diagnostics
+
+  DevelopSelectionStage = object
+    ## DS-7 — one stage of the FIXED composition order, and how many repos
+    ## survived it. Emitted in the report so "each stage narrows the previous
+    ## one" is OBSERVABLE: swapping two stages changes these counts, which is
+    ## what makes the fixed order testable rather than merely asserted.
+    stage: string            ## mode / project / group / filter / only / except
+    flag: string             ## the flag text this stage applied ("" = inactive)
+    kept: int                ## repos remaining AFTER this stage
 
   DevelopAllArgs = object
     mode: DevelopAllSelectionMode
     transitiveOf: string
-    filter: string
+    filter: string           ## ``--filter=<glob>`` (CLI/develop.md §"Membership
+                             ## axis") — a GLOB (``*`` / ``?``), matched against
+                             ## the whole repo name. It may legitimately match
+                             ## nothing, which is an empty selection, NOT an
+                             ## error (unlike the exact-name selectors).
     only: seq[string]        ## ``--only=<list>`` — keep ONLY these exact names
                              ## (CLI/develop.md §"Membership axis"). Names are
                              ## matched EXACTLY; a name matching nothing is a
                              ## loud error, never a silent no-op.
+    exceptNames: seq[string]     ## ``--except=<list>`` — REMOVE these exact names.
+                             ## Same exact-name loudness as ``--only``.
+    projects: seq[string]    ## ``--project=<list>`` — keep only repos
+                             ## contributed by these projects of the ACTIVE
+                             ## PROJECT SET. This is a MEMBERSHIP filter and is
+                             ## deliberately NOT the lock-record key: a
+                             ## commit-addressed record is keyed on the PRIMARY
+                             ## project (Workspace-And-Develop-Mode.md §"The
+                             ## Primary Project") whatever ``--project`` says.
+    groups: seq[string]      ## ``--group=<list>`` — keep only repos in these
+                             ## manifest groups (``repos/<repo>.toml``
+                             ## ``groups``; a repo with no declared groups is
+                             ## in the implicit ``default`` group).
+    tiers: seq[string]       ## DS-8 ``--tier=<list>`` — restrict which TIERS'
+                             ## backends contribute records at all. A SOURCE
+                             ## axis flag: it narrows the lock set itself, not
+                             ## the selection over it.
+    lockStores: seq[DevelopAdhocLockStore]
+                             ## DS-8 ``--lock-store=<kind>:<location>``,
+                             ## repeatable, in INCREASING precedence.
+    at: string               ## DS-5 ``--at=<rev>`` — key commit-addressed
+                             ## backends on this revision instead of the
+                             ## workspace root repo's ``HEAD``.
+    list: bool               ## DS-6 ``--list`` — print the resolved lock set
+                             ## and exit; mutate nothing.
     intoDir: string          ## ``--into=<dir>`` checkout-placement root (empty
                              ## = sibling ``../<name>`` default)
     workspaceRoot: string
@@ -20476,6 +20533,13 @@ type
     diagnostic: string
     repos: seq[string]       ## the repos this backend was asked about
     records: int             ## how many lock records it actually contributed
+    adhoc: bool              ## DS-8 — declared by ``--lock-store`` rather than
+                             ## by a configuration file layer
+    excluded: bool           ## DS-8 — present and readable, but ``--tier``
+                             ## excluded its tier from contributing
+    keyedOn: string          ## DS-5 — the commit this commit-addressed backend
+                             ## was keyed on (empty when not commit-addressed
+                             ## or when the workspace names no root repo)
 
   DevelopLockSet = object
     ## The composed workspace lock set. ``lock`` is the union across every
@@ -20490,9 +20554,59 @@ type
     noRecord: seq[string]    ## repos a reachable backend held no exact pin for
     tierOf: Table[string, string]      ## repo name -> resolved tier
     backendOf: Table[string, string]   ## repo name -> resolved backend kind
+    locationOf: Table[string, string]  ## repo name -> backend location label
+    pinTierOf: Table[string, string]
+      ## DS-6 — repo name -> the tier of the backend that ACTUALLY SUPPLIED the
+      ## entry now in the union. Deliberately distinct from ``tierOf``, which
+      ## is the repo's RESOLVED ``(tier, backend)`` ASSIGNMENT. The two differ
+      ## whenever a repo is assigned to one backend and pinned by another —
+      ## most visibly under ``--lock-store``, whose invocation-layer route
+      ## claims every participating repo, so a public repo whose pin still
+      ## comes from the committed lock is ASSIGNED to the ad-hoc backend. The
+      ## `--list` columns report the PIN's provenance, because "which backend
+      ## does this revision come from" is the question a lock-set listing
+      ## answers; the assignment drives the routing diagnostics.
+    pinBackendOf: Table[string, string]
+    groupsOf: Table[string, seq[string]]
+      ## DS-7 — repo name -> its EFFECTIVE manifest groups (``groups`` when
+      ## declared, else the implicit ``["default"]``), read from the resolved
+      ## manifest membership. Carried on the lock set because selection runs
+      ## over ``LockedDep``s, which have no group field.
+    projectsOf: Table[string, seq[string]]
+      ## DS-7 — repo name -> the projects of the ACTIVE PROJECT SET that
+      ## contribute it. MEMBERSHIP only: lock-record lookup is keyed on the
+      ## PRIMARY project regardless (see ``DevelopAllArgs.projects``).
+    activeProjects: seq[string]        ## the active project set, in order
+    knownGroups: seq[string]           ## every group any participating repo is in
+    keyNotes: seq[string]  ## DS-5 — one line per commit-addressed backend whose
+                           ## record was found at an ANCESTOR of the requested
+                           ## key rather than at the key itself
+
+  DevelopListRow = object
+    ## DS-6 — one row of ``repro develop --list``: the six columns
+    ## CLI/develop.md §"Action axis" names.
+    name: string
+    tier: string
+    backend: string
+    revision: string
+    path: string
+    state: string            ## absent / at-lock / drifted / develop /
+                             ## evidence-only
+
+  DevelopAllResult = object
+    ## Everything one ``repro develop`` set-form invocation produced. Grown
+    ## from the pre-DS-6 ``(outcomes, notices, exitCode)`` tuple so the query
+    ## forms can carry their own payload without a second driver.
+    outcomes: seq[DevelopAllNodeOutcome]
+    notices: seq[string]
+    exitCode: int
+    listed: bool             ## DS-6 — this run was a ``--list`` query
+    rows: seq[DevelopListRow]
+    stages: seq[DevelopSelectionStage]
+    backends: seq[DevelopBackendReport]
 
 proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
-                           strict: bool): DevelopLockSet
+                           args: DevelopAllArgs): DevelopLockSet
   ## Forward declaration: the body needs the configuration plane
   ## (``composeLockingRouting`` / ``resolveRepoBackends``) and the
   ## ``LockStore`` backends, which are declared far below this driver.
@@ -20510,21 +20624,69 @@ proc isEvidenceOnlyLockedDep(d: LockedDep): bool
   ## ``ResolvedRepo`` sibling) so both read the SAME
   ## ``participationEvidenceOnly`` constant.
 
-proc developSetFromLock(lock: LockedDependencies;
-                        args: DevelopAllArgs): seq[LockedDep] =
-  ## Resolve the requested selection to the concrete solved dependency nodes
-  ## (per CLI/develop.md: "resolve the requested selection to concrete solved
-  ## dependency nodes before deciding where any checkout should live").
+proc developNameGlobMatches*(name, pattern: string): bool =
+  ## DS-7 — ``--filter=<glob>``. ``*`` matches any (possibly empty) run of
+  ## characters, ``?`` matches exactly one; every other character is literal
+  ## and the whole NAME must be consumed. A pattern carrying no metacharacter
+  ## therefore matches EXACTLY one name, not every name containing it — the
+  ## glob is a glob, not a substring test, and a user who wants a substring
+  ## writes ``*sub*``. Deliberately anchored at both ends for the same reason
+  ## ``--only`` is exact: a selector that quietly matches more than it looks
+  ## like it matches is how a bulk mutation hits a repo nobody named.
+  var i, j = 0
+  var starI = -1
+  var starJ = 0
+  while i < name.len:
+    if j < pattern.len and (pattern[j] == '?' or pattern[j] == name[i]):
+      inc i; inc j
+    elif j < pattern.len and pattern[j] == '*':
+      starI = i; starJ = j; inc j
+    elif starI >= 0:
+      inc starI; i = starI; j = starJ + 1
+    else:
+      return false
+  while j < pattern.len and pattern[j] == '*': inc j
+  j == pattern.len
+
+proc developSetFromLock(lock: LockedDependencies; composed: DevelopLockSet;
+                        args: DevelopAllArgs;
+                        keepEvidenceOnly = false):
+    tuple[nodes: seq[LockedDep]; stages: seq[DevelopSelectionStage]] =
+  ## DS-7 — the MEMBERSHIP AXIS. Resolve the requested selection to the
+  ## concrete solved dependency nodes (per CLI/develop.md: "resolve the
+  ## requested selection to concrete solved dependency nodes before deciding
+  ## where any checkout should live").
   ##
   ## Selection is orthogonal to checkout placement — this proc only picks the
   ## SET; the caller maps each node to a path.
+  ##
+  ## The selectors compose in the spec's **FIXED ORDER**, each stage narrowing
+  ## the previous one:
+  ##
+  ##   1. mode (``--all`` | ``--direct`` | ``--indirect`` | ``--transitive-of``)
+  ##   2. ``--project``   3. ``--group``   4. ``--filter``
+  ##   5. ``--only``      6. ``--except``
+  ##
+  ## The order is fixed **so the result never depends on argv order**. Every
+  ## stage is a set intersection or subtraction over the same universe, and the
+  ## flags are read into a value BEFORE any of them is applied, so no stage can
+  ## observe where in the argv its flag appeared. The per-stage ``kept`` counts
+  ## are returned (and printed) precisely so the order is OBSERVABLE rather
+  ## than merely asserted: swapping any two stages changes them.
   # Index by name for the edge-following selection modes.
   var byName = initTable[string, LockedDep]()
   for d in lock.deps:
     if d.name.len > 0:
       byName[d.name] = d
 
+  # ---- stage 1: mode ------------------------------------------------------
   var selectedNames: seq[string]
+  var modeFlag = "--all"
+  proc directEdges(): HashSet[string] =
+    result = initHashSet[string]()
+    for d in lock.deps:
+      if isRootLockedDep(d):
+        for dep in d.depends: result.incl(dep)
   case args.mode
   of dasmAll:
     for d in lock.deps:
@@ -20532,13 +20694,25 @@ proc developSetFromLock(lock: LockedDependencies;
         selectedNames.add(d.name)
   of dasmDirect:
     # The root repo's declared ``depends`` edges name its DIRECT dependencies.
+    modeFlag = "--direct"
     for d in lock.deps:
       if isRootLockedDep(d):
         for dep in d.depends:
           selectedNames.add(dep)
+  of dasmIndirect:
+    # DS-7 — "all indirect dependencies": the closure MINUS the root repo's
+    # direct edges. Specified in the V1 proposal from the start and never
+    # implemented; ``--indirect`` used to be rejected as an unsupported flag.
+    modeFlag = "--indirect"
+    let direct = directEdges()
+    for d in lock.deps:
+      if not isRootLockedDep(d) and d.name notin direct:
+        selectedNames.add(d.name)
   of dasmTransitiveOf:
+    modeFlag = "--transitive-of=" & args.transitiveOf
     if args.transitiveOf notin byName:
-      return @[]   # caller reports the unmappable root name
+      return (@[], @[DevelopSelectionStage(stage: "mode", flag: modeFlag,
+        kept: 0)])   # caller reports the unmappable root name
     var pending = @[args.transitiveOf]
     var seen = initHashSet[string]()
     while pending.len > 0:
@@ -20553,26 +20727,79 @@ proc developSetFromLock(lock: LockedDependencies;
       # the consumer, just like everything below it).
       selectedNames.add(cur)
 
-  # Materialize the selection back into LockedDep records, de-duplicated and in
-  # a stable (name-sorted) order so the report + clone scheduling is
-  # deterministic. Apply the optional ``--filter`` name substring, then the
-  # exact-name ``--only`` narrowing, last.
-  var onlySet = initHashSet[string]()
-  for n in args.only: onlySet.incl(n)
+  # Materialize stage 1 into a de-duplicated, name-sorted working set so every
+  # later stage — and the report, and the clone scheduling — is deterministic.
+  var working: seq[string]
   var emitted = initHashSet[string]()
   for name in selectedNames:
-    if name in emitted: continue
-    if name notin byName: continue
+    if name in emitted or name notin byName: continue
     # DS-4 — an evidence-only repo is NEVER placed into develop mode: it
     # publishes a source-free evidence triple and never its source, so there is
     # no checkout to make. The caller enumerates the exclusions; naming one
     # explicitly is a loud error handled there, never a silent omission here.
-    if isEvidenceOnlyLockedDep(byName[name]): continue
-    if args.filter.len > 0 and not name.contains(args.filter): continue
-    if onlySet.len > 0 and name notin onlySet: continue
+    # ``--list`` (DS-6) passes ``keepEvidenceOnly`` because a QUERY must SHOW
+    # the repo with state `evidence-only` rather than hide it.
+    if not keepEvidenceOnly and isEvidenceOnlyLockedDep(byName[name]): continue
     emitted.incl(name)
-    result.add(byName[name])
-  result.sort(proc(a, b: LockedDep): int = cmp(a.name, b.name))
+    working.add(name)
+  working.sort()
+  var stages = @[DevelopSelectionStage(stage: "mode", flag: modeFlag,
+    kept: working.len)]
+
+  proc narrow(stage, flag: string; keep: proc (n: string): bool {.closure.}) =
+    if flag.len == 0:
+      stages.add(DevelopSelectionStage(stage: stage, flag: "",
+        kept: working.len))
+      return
+    var next: seq[string]
+    for n in working:
+      if keep(n): next.add(n)
+    working = next
+    stages.add(DevelopSelectionStage(stage: stage, flag: flag,
+      kept: working.len))
+
+  # ---- stage 2: --project -------------------------------------------------
+  var projectSet = initHashSet[string]()
+  for p in args.projects: projectSet.incl(p)
+  narrow("project",
+    (if args.projects.len > 0: "--project=" & args.projects.join(",") else: ""),
+    proc (n: string): bool =
+      for p in composed.projectsOf.getOrDefault(n, @[]):
+        if p in projectSet: return true
+      false)
+
+  # ---- stage 3: --group ---------------------------------------------------
+  var groupSet = initHashSet[string]()
+  for g in args.groups: groupSet.incl(g)
+  narrow("group",
+    (if args.groups.len > 0: "--group=" & args.groups.join(",") else: ""),
+    proc (n: string): bool =
+      for g in composed.groupsOf.getOrDefault(n, @[]):
+        if g in groupSet: return true
+      false)
+
+  # ---- stage 4: --filter (a GLOB; may legitimately match nothing) ---------
+  narrow("filter",
+    (if args.filter.len > 0: "--filter=" & args.filter else: ""),
+    proc (n: string): bool = developNameGlobMatches(n, args.filter))
+
+  # ---- stage 5: --only (EXACT names) --------------------------------------
+  var onlySet = initHashSet[string]()
+  for n in args.only: onlySet.incl(n)
+  narrow("only",
+    (if args.only.len > 0: "--only=" & args.only.join(",") else: ""),
+    proc (n: string): bool = n in onlySet)
+
+  # ---- stage 6: --except (EXACT names) ------------------------------------
+  var exceptSet = initHashSet[string]()
+  for n in args.exceptNames: exceptSet.incl(n)
+  narrow("except",
+    (if args.exceptNames.len > 0: "--except=" & args.exceptNames.join(",") else: ""),
+    proc (n: string): bool = n notin exceptSet)
+
+  var nodes: seq[LockedDep]
+  for n in working: nodes.add(byName[n])
+  (nodes, stages)
 
 proc developAllTargetPath(node: LockedDep; workspaceRoot, intoDir: string):
     string =
@@ -20766,9 +20993,14 @@ proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
     return (ok: false, diagnostic: diag)
   (ok: true, diagnostic: "")
 
-proc executeDevelopAll(args: DevelopAllArgs):
-    tuple[outcomes: seq[DevelopAllNodeOutcome]; notices: seq[string];
-          exitCode: int] =
+proc failure(diagnostic: string; notices: seq[string]; code: int):
+    DevelopAllResult =
+  DevelopAllResult(
+    outcomes: @[DevelopAllNodeOutcome(node: "*", mode: "error", ok: false,
+      diagnostic: diagnostic)],
+    notices: notices, exitCode: code)
+
+proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
   ## L1 driver, DS-1..DS-5 shape. (1) Resolve the git tool. (2) COMPOSE the
   ## workspace lock set across EVERY backend the configuration plane resolves —
   ## FAIL LOUD when the UNION is empty, when two backends disagree about a
@@ -20787,8 +21019,7 @@ proc executeDevelopAll(args: DevelopAllArgs):
     identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
     installGitVcsExecutor()
   except CatchableError as err:
-    return (@[DevelopAllNodeOutcome(node: "*", mode: "error", ok: false,
-      diagnostic: "git tool not resolvable: " & err.msg)], @[], 1)
+    return failure("git tool not resolvable: " & err.msg, @[], 1)
   let gitBinary = identity.binaryPath
 
   # (2) DS-1 — "No single row is a precondition for the others."
@@ -20805,13 +21036,18 @@ proc executeDevelopAll(args: DevelopAllArgs):
   # UNION (below), which names every backend it consulted.
   #
   # DS-1 — the whole lock set, across every backend, not one file.
-  let composed = composeDevelopLockSet(root, identity, args.strict)
+  var composed = composeDevelopLockSet(root, identity, args)
   # DS-1 compatibility contract: a public-only workspace resolves to the
   # built-in public default alone, so the composer reports NO warning, NO
   # omission and NO unpinned repo, and this notice list stays EMPTY — the
   # command's output is byte-identical to the pre-DS-1 single-backend read.
   # The per-backend inventory belongs to `--list` (DS-6), not to every run.
   var notices: seq[string]
+  # DS-5 — the ancestry walk NAMES the ancestor it landed on. A pin silently
+  # resolved from a different commit than the one asked for is exactly the
+  # class of surprise this command exists to prevent, so this is a notice on
+  # EVERY run, not a `--list`-only detail.
+  for k in composed.keyNotes: notices.add(k)
   for w in composed.warnings: notices.add(w)
   for n in composed.omitted:
     notices.add("OMITTED from the develop set (its backend was unreadable): " & n)
@@ -20825,7 +21061,8 @@ proc executeDevelopAll(args: DevelopAllArgs):
     for r in composed.refusals:
       outcomes.add(DevelopAllNodeOutcome(node: "*", mode: "error", ok: false,
         diagnostic: r))
-    return (outcomes, notices, 2)
+    return DevelopAllResult(outcomes: outcomes, notices: notices, exitCode: 2,
+      backends: composed.backends)
 
   let lock = composed.lock
   if lock.deps.len == 0:
@@ -20842,7 +21079,13 @@ proc executeDevelopAll(args: DevelopAllArgs):
     for b in composed.backends:
       var line = "  - " & b.tier & " tier / " & b.backendKind & " backend at " &
         b.location & ": "
-      if b.diagnostic.len > 0: line.add(b.diagnostic)
+      if b.excluded:
+        # DS-8 — this backend was NOT asked for its records: `--tier` excluded
+        # its tier. Saying "readable but holds nothing" here would blame the
+        # backend for a restriction the invocation imposed.
+        line.add("excluded from this invocation by --tier=" &
+          args.tiers.join(","))
+      elif b.diagnostic.len > 0: line.add(b.diagnostic)
       elif b.records > 0: line.add($b.records & " record(s), all filtered out")
       else: line.add("readable, but it holds no lock record for this workspace")
       if b.repos.len > 0:
@@ -20855,8 +21098,9 @@ proc executeDevelopAll(args: DevelopAllArgs):
       "\nPublish a lock record through one of them (`repro lock refresh` " &
       "writes the committed lock; `repro workspace lock` records a routed " &
       "tier's per-repo entries)."
-    return (@[DevelopAllNodeOutcome(node: "*", mode: "error", ok: false,
-      diagnostic: msg)], notices, 1)
+    var r = failure(msg, notices, 1)
+    r.backends = composed.backends
+    return r
 
   # DS-4 — evidence-only repos are excluded from the develop set, but they are
   # NAMED here rather than silently dropped, and naming one explicitly is a
@@ -20868,22 +21112,130 @@ proc executeDevelopAll(args: DevelopAllArgs):
     if isEvidenceOnlyLockedDep(d) and not isRootLockedDep(d):
       evidenceOnlyNames.add(d.name)
   evidenceOnlyNames.sort()
-  for n in evidenceOnlyNames:
-    notices.add("excluded from the develop set: '" & n &
-      "' is evidence-only (state=evidence-only, tier=" &
-      composed.tierOf.getOrDefault(n, "private") &
-      ") — it publishes a source-free evidence triple and never its source, " &
-      "so it has no obtainable source to check out")
+
+  # DS-7 — GROUP attribution, for every repo in the union rather than only for
+  # those the MANIFEST pass reached.
+  #
+  # ``composed.groupsOf`` is filled from the resolved manifest membership, and
+  # the composer only gets that far when some configuration layer declares a
+  # route. "A workspace with no routing config resolves to the built-in public
+  # default alone" (CLI/develop.md §"Composing the lock set") — the DS-1
+  # compatibility baseline — so in exactly that shape the composer returns
+  # early and every group table is empty. `--group=<group>` then refused with
+  # "the declared groups are: (none)" for a group the committed lock ITSELF
+  # declares, which is not a narrower answer but a false one.
+  #
+  # A lock record carries the repo's ``groups``, so use it for any repo the
+  # manifest pass did not attribute. The manifest values still win where both
+  # exist, and the implicit-``default`` rule is the same one ``effectiveGroups``
+  # applies: a repo that lists groups without naming `default` is not in it.
+  for d in lock.deps:
+    if d.name.len == 0 or composed.groupsOf.hasKey(d.name): continue
+    let gs = if d.groups.len > 0: d.groups else: @[defaultManifestGroup]
+    composed.groupsOf[d.name] = gs
+    for g in gs:
+      if g notin composed.knownGroups: composed.knownGroups.add(g)
+  composed.knownGroups.sort()
+  if not args.list:
+    # ``--list`` shows each of these as a ROW with state `evidence-only`
+    # (CLI/develop.md §"Evidence-only repos"), so repeating them as notices
+    # would say the same thing twice. Every mutating run still names them.
+    for n in evidenceOnlyNames:
+      notices.add("excluded from the develop set: '" & n &
+        "' is evidence-only (state=evidence-only, tier=" &
+        composed.tierOf.getOrDefault(n, "private") &
+        ") — it publishes a source-free evidence triple and never its source, " &
+        "so it has no obtainable source to check out")
+
+  # ---- DS-7 — EXACT-NAME loudness for every exact-name selector. ----------
+  #
+  # "``--only`` and ``--except`` name repos EXACTLY; a name matching nothing is
+  # a loud error, never a silent no-op." The same rule binds ``--project`` and
+  # ``--group``, which also name things exactly. Only ``--filter`` is a glob,
+  # and it alone may legitimately match nothing.
+  #
+  # Every exact-name selector is validated against the WHOLE lock set (or the
+  # whole active project / group universe), NOT against whatever an earlier
+  # stage happened to leave: `--direct --except=X` for an X that exists but is
+  # not a direct edge is a legitimate no-op, not a typo, and validating against
+  # a stage's input would additionally make the ERROR depend on argv order,
+  # which is the very thing the fixed composition order exists to prevent.
+  block exactNameSelectors:
+    var outcomes: seq[DevelopAllNodeOutcome]
+    proc unknownName(flag, name, universe, hint: string) =
+      outcomes.add(DevelopAllNodeOutcome(node: name, mode: "error", ok: false,
+        diagnostic: "'" & flag & "=" & name & "' names no " & universe &
+          " (names are matched EXACTLY" & hint & ")"))
+    # ``--transitive-of`` also names a repo EXACTLY, so it obeys the same rule
+    # — and it must obey it on the QUERY path too, where an unknown name would
+    # otherwise come out as a plausible-looking empty table.
+    if args.mode == dasmTransitiveOf and args.transitiveOf.len > 0 and
+        args.transitiveOf notin knownNames:
+      unknownName("--transitive-of", args.transitiveOf,
+        "repo in this workspace's lock set",
+        "; use `repro develop --list` to see the set")
+    # ``--only`` / ``--except`` — repo names, against the composed lock set.
+    for n in args.only:
+      if n notin knownNames:
+        unknownName("--only", n, "repo in this workspace's lock set",
+          "; use --filter for a glob, or `repro develop --list` to see the set")
+    for n in args.exceptNames:
+      if n notin knownNames:
+        unknownName("--except", n, "repo in this workspace's lock set",
+          "; use --filter for a glob, or `repro develop --list` to see the set")
+    # ``--project`` — against the ACTIVE PROJECT SET. Note this is a MEMBERSHIP
+    # filter and nothing else: a commit-addressed backend's record is looked up
+    # under the PRIMARY project (Workspace-And-Develop-Mode.md §"The Primary
+    # Project") whether or not ``--project`` names it. The two concerns are
+    # deliberately separate — re-keying record lookup off a membership filter
+    # would make the same commit resolve different pins depending on which
+    # projects the caller asked to see.
+    for p in args.projects:
+      if p notin composed.activeProjects:
+        unknownName("--project", p,
+          "project in this workspace's active project set",
+          "; this workspace's set is: " &
+            (if composed.activeProjects.len > 0:
+               composed.activeProjects.join(", ")
+             else: "(none recorded)"))
+    # ``--group`` — against the groups the participating manifest fragments
+    # actually declare (plus the implicit ``default``).
+    for g in args.groups:
+      if g notin composed.knownGroups:
+        unknownName("--group", g, "manifest group in this workspace",
+          "; the declared groups are: " &
+            (if composed.knownGroups.len > 0: composed.knownGroups.join(", ")
+             else: "(none)"))
+    if outcomes.len > 0:
+      return DevelopAllResult(outcomes: outcomes, notices: notices,
+        exitCode: 2, backends: composed.backends)
+
   block namedEvidenceOnly:
+    # DS-4 — naming an evidence-only repo for PLACEMENT is a loud error that
+    # explains why. ``--list`` is a query with no placement, and the spec says
+    # the repo "appears in --list output with state evidence-only", so the
+    # query lists it instead of refusing.
+    if args.list: break namedEvidenceOnly
     var named: seq[string] = args.only
     if args.mode == dasmTransitiveOf and args.transitiveOf.len > 0:
       named.add(args.transitiveOf)
-    var unknown: seq[string]
-    var evidence: seq[string]
+    # The develop-manageable set is the union "**minus** the workspace root
+    # repo itself (`path == "."`, the consumer) and **minus** evidence-only
+    # repos" (CLI/develop.md §"Composing the lock set"). BOTH exclusions
+    # remove a repo that IS in the lock set, so an exact name hitting either
+    # one is a name that resolves to nothing placeable — and the rule
+    # "``--only`` and ``--except`` name repos EXACTLY; a name matching nothing
+    # is a LOUD ERROR, never a silent no-op" binds them the same way. The
+    # upstream exact-name check cannot catch these: it validates against the
+    # whole lock set, which contains both.
+    var rootNames: seq[string]
+    for d in lock.deps:
+      if isRootLockedDep(d) and d.name.len > 0: rootNames.add(d.name)
+    var evidence, roots: seq[string]
     for n in named:
       if n in evidenceOnlyNames: evidence.add(n)
-      elif n notin knownNames: unknown.add(n)
-    if evidence.len > 0:
+      elif n in rootNames: roots.add(n)
+    if evidence.len > 0 or roots.len > 0:
       var outcomes: seq[DevelopAllNodeOutcome]
       for n in evidence:
         outcomes.add(DevelopAllNodeOutcome(node: n, mode: "error", ok: false,
@@ -20894,36 +21246,81 @@ proc executeDevelopAll(args: DevelopAllArgs):
             "(head-sha / clean / published) and never its source, so it can " &
             "never be placed into develop mode. It appears in the lock set " &
             "with state `evidence-only`; drop it from the selection."))
-      return (outcomes, notices, 2)
-    if unknown.len > 0 and args.only.len > 0:
-      var outcomes: seq[DevelopAllNodeOutcome]
-      for n in unknown:
-        if n notin args.only: continue
+      for n in roots:
         outcomes.add(DevelopAllNodeOutcome(node: n, mode: "error", ok: false,
-          diagnostic: "'--only=" & n &
-            "' names no repo in this workspace's lock set (names are matched " &
-            "EXACTLY; use --filter for a glob/substring)"))
-      if outcomes.len > 0:
-        return (outcomes, notices, 2)
+          diagnostic: "'" & n & "' is THIS WORKSPACE'S ROOT REPO (path \".\"): " &
+            "it is the consumer the develop set is assembled FOR, not a " &
+            "dependency of it, so it can never be placed into develop mode " &
+            "— you are already standing in it. Drop it from the selection " &
+            "(`repro develop --list` shows what the lock set does manage)."))
+      return DevelopAllResult(outcomes: outcomes, notices: notices,
+        exitCode: 2, backends: composed.backends)
 
-  # (3) Resolve the develop set over the UNION.
-  let selected = developSetFromLock(lock, args)
-  if selected.len == 0:
-    # A selection that resolves to no node is itself a loud failure when the
-    # user asked for a specific ``--transitive-of`` root that is not in the set.
-    if args.mode == dasmTransitiveOf:
-      return (@[DevelopAllNodeOutcome(node: args.transitiveOf, mode: "error",
-        ok: false, diagnostic: "'--transitive-of=" & args.transitiveOf &
-          "' names no dependency in this workspace's lock set")], notices, 1)
-    return (@[], notices, 0)
+  # (3) Resolve the develop set over the UNION, through the fixed-order
+  # membership axis (DS-7).
+  let (selected, stages) = developSetFromLock(lock, composed, args,
+    keepEvidenceOnly = args.list)
 
-  # Load the existing override file once; fold every placed node into it.
+  # Load the existing override file once; fold every placed node into it. Read
+  # BEFORE the ``--list`` branch too: the `develop` state of a row is exactly
+  # "this repo has an override entry".
   var overrides =
     try:
       let existing = readDevelopOverridesFile(root)
       if existing.isSome: existing.get() else: newDevelopOverrides()
     except WorkspaceManifestParseError:
       newDevelopOverrides()
+
+  # ---- DS-6 — ``--list``: print the resolved lock set and exit. -----------
+  #
+  # "``--list`` is the query form of the rule at the top of this section: it
+  # answers 'what does this workspace's lock set manage?' WITHOUT TOUCHING THE
+  # TREE." It therefore returns here, before the override file, the engine
+  # cache, the receipts dir or any checkout is written — a query has no
+  # destructive edge, and a `--list` that left a receipt behind would not be
+  # read-only however it was documented.
+  if args.list:
+    var rows: seq[DevelopListRow]
+    for node in selected:
+      var row = DevelopListRow(name: node.name,
+        # The PIN's provenance, not the routing assignment — see
+        # ``DevelopLockSet.pinTierOf``.
+        tier: composed.pinTierOf.getOrDefault(node.name,
+          composed.tierOf.getOrDefault(node.name, "public")),
+        backend: composed.pinBackendOf.getOrDefault(node.name,
+          composed.backendOf.getOrDefault(node.name, "committed-lock")),
+        revision: node.coordinates.revision,
+        path: developAllTargetPath(node, root, args.intoDir))
+      if isEvidenceOnlyLockedDep(node):
+        # An evidence-only repo has no obtainable source by construction, so
+        # neither `absent` nor `at-lock` is a truthful answer for it.
+        row.state = "evidence-only"
+        row.path = ""
+      else:
+        let prior = findOverride(overrides, node.name)
+        if prior.isSome:
+          row.state = "develop"
+          row.path = os.normalizedPath(absolutePath(prior.get().local_path))
+        elif not dirExists(extendedPath(row.path)):
+          row.state = "absent"
+        else:
+          let headSha = gitHeadShaOf(gitBinary, row.path)
+          row.state =
+            if headSha.len > 0 and headSha == node.coordinates.revision:
+              "at-lock"
+            else: "drifted"
+      rows.add(row)
+    return DevelopAllResult(notices: notices, exitCode: 0, listed: true,
+      rows: rows, stages: stages, backends: composed.backends)
+
+  if selected.len == 0:
+    # An UNKNOWN ``--transitive-of`` root already refused above, with the same
+    # exact-name loudness every other name-taking selector gets. Reaching here
+    # means every name was real and the composed selectors simply left nothing:
+    # an empty selection, which is a legitimate outcome (``--filter`` may match
+    # nothing) and is reported as such rather than as a failure.
+    return DevelopAllResult(notices: notices, exitCode: 0, stages: stages,
+      backends: composed.backends)
 
   var outcomes: seq[DevelopAllNodeOutcome]
   var anyFailure = false
@@ -21075,7 +21472,9 @@ proc executeDevelopAll(args: DevelopAllArgs):
         diagnostic: "failed to write develop-overrides.toml: " & err.msg))
       anyFailure = true
 
-  (outcomes, notices, if anyFailure: 1 else: 0)
+  DevelopAllResult(outcomes: outcomes, notices: notices,
+    exitCode: (if anyFailure: 1 else: 0), stages: stages,
+    backends: composed.backends)
 
 proc runDevelopAllCommand(args: DevelopAllArgs): int =
   ## Run the driver and render per-node results.
@@ -21086,7 +21485,92 @@ proc runDevelopAllCommand(args: DevelopAllArgs): int =
   ## failure now comes from the composer, which is the only place that knows
   ## which backends were actually consulted; it names all of them, including
   ## the committed lock and its path.
-  let (outcomes, notices, exitCode) = executeDevelopAll(args)
+  let res = executeDevelopAll(args)
+  let outcomes = res.outcomes
+  let notices = res.notices
+  let exitCode = res.exitCode
+  let label = if args.list: "repro develop --list" else: "repro develop --all"
+
+  # DS-6/DS-7/DS-8 — the shared machine-readable blocks. The per-backend
+  # inventory (tier / kind / location / reachable / repos / records) was
+  # computed by the composer on EVERY run but printed only on an empty union;
+  # it belongs to the query, so `--list` reports it and `--json` carries it.
+  proc backendsJson(): JsonNode =
+    result = newJArray()
+    for b in res.backends:
+      var o = %*{"tier": b.tier, "kind": b.backendKind, "location": b.location,
+        "reachable": b.reachable, "records": b.records, "adhoc": b.adhoc,
+        "excluded": b.excluded}
+      if b.diagnostic.len > 0: o["diagnostic"] = %b.diagnostic
+      if b.keyedOn.len > 0: o["keyedOn"] = %b.keyedOn
+      var repos = newJArray()
+      for r in b.repos: repos.add(%r)
+      o["repos"] = repos
+      result.add(o)
+  proc stagesJson(): JsonNode =
+    result = newJArray()
+    for s in res.stages:
+      result.add(%*{"stage": s.stage, "flag": s.flag, "kept": s.kept})
+
+  if args.list:
+    # DS-6 — the query form. Mutates nothing; prints the resolved lock set.
+    if args.json:
+      var rows = newJArray()
+      for r in res.rows:
+        rows.add(%*{"name": r.name, "tier": r.tier, "backend": r.backend,
+          "revision": r.revision, "path": r.path, "state": r.state})
+      var noticeArr = newJArray()
+      for n in notices: noticeArr.add(%n)
+      # "Machine consumers should use ``--json``" (CLI/develop.md §"Action
+      # axis"). A refusal on the query path — an unknown ``--only`` name, an
+      # unresolvable ``--at``, an unreadable backend — sets ``exitCode`` and
+      # produces NO rows, and its explanation lives in ``outcomes``. Dropping
+      # them here left the machine consumer holding a non-zero exit, an empty
+      # repo list and nothing at all saying why, while the text form printed
+      # the full diagnostic. The two forms answer the same question.
+      var errorArr = newJArray()
+      for o in outcomes:
+        if not o.ok:
+          errorArr.add(%*{"node": o.node, "diagnostic": o.diagnostic})
+      stdout.writeLine(pretty(%*{"schemaId": "reprobuild.develop-list.v1",
+        "workspaceRoot": args.workspaceRoot, "repos": rows,
+        "backends": backendsJson(), "selection": stagesJson(),
+        "notices": noticeArr, "errors": errorArr,
+        "exitCode": exitCode}, indent = 2))
+    else:
+      for n in notices:
+        stderr.writeLine(label & ": " & n)
+      if res.listed:
+        for b in res.backends:
+          var line = "backend: " & b.tier & " tier / " & b.backendKind & " at " &
+            b.location & " — " &
+            (if not b.reachable: "UNREADABLE: " & b.diagnostic
+             elif b.excluded: "excluded by --tier"
+             else: $b.records & " record(s)")
+          if b.adhoc: line.add(" [--lock-store]")
+          if b.keyedOn.len > 0: line.add(" [keyed on " & b.keyedOn & "]")
+          stdout.writeLine(line)
+        for s in res.stages:
+          stdout.writeLine("selection: " & s.stage &
+            (if s.flag.len > 0: " " & s.flag else: " (not given)") &
+            " -> " & $s.kept & " repo(s)")
+        # Six columns, per CLI/develop.md §"Action axis": name, resolved tier,
+        # backend, locked revision, intended path, state.
+        var w = "REPO".len
+        for r in res.rows: w = max(w, r.name.len)
+        stdout.writeLine("REPO".alignLeft(w) & "  TIER      BACKEND         " &
+          "REVISION                                  STATE         PATH")
+        for r in res.rows:
+          stdout.writeLine(r.name.alignLeft(w) & "  " &
+            r.tier.alignLeft(8) & "  " & r.backend.alignLeft(14) & "  " &
+            (if r.revision.len > 0: r.revision else: "-").alignLeft(40) & "  " &
+            r.state.alignLeft(12) & "  " & r.path)
+        if res.rows.len == 0:
+          stdout.writeLine(label & ": the selection is empty")
+      else:
+        for o in outcomes:
+          stderr.writeLine(label & ": error " & o.node & " — " & o.diagnostic)
+    return exitCode
 
   if args.json:
     var arr = newJArray()
@@ -21101,7 +21585,8 @@ proc runDevelopAllCommand(args: DevelopAllArgs): int =
     for n in notices: noticeArr.add(%n)
     stdout.writeLine(pretty(%*{"schemaId": "reprobuild.develop-all.v1",
       "workspaceRoot": args.workspaceRoot, "nodes": arr,
-      "notices": noticeArr,
+      "notices": noticeArr, "backends": backendsJson(),
+      "selection": stagesJson(),
       "exitCode": exitCode}, indent = 2))
   else:
     # DS-3/DS-4 — every notice is printed. A narrowed set that is not named is
@@ -21140,20 +21625,101 @@ proc runDevelopAllCommand(args: DevelopAllArgs): int =
       stdout.writeLine("repro develop --all: no dependency nodes selected")
   exitCode
 
+proc parseCommaList(value: string): seq[string] =
+  for n in value.split(','):
+    let item = n.strip()
+    if item.len > 0: result.add(item)
+
+const developLockStoreKinds = ["committed-file", "git-checkout", "git-notes",
+                               "separate-branch", "external-cli"]
+
+proc parseAdhocLockStore(spec: string): DevelopAdhocLockStore =
+  ## DS-8 — parse ``--lock-store=[<tier>:]<kind>:<location>``.
+  ##
+  ## The spec's documented (and CI) form is the two-field
+  ## ``<kind>:<location>``. A route needs a TIER to compose with the
+  ## configuration plane at all, and the two-field form does not carry one, so
+  ## the tier is **`team`** — announced on every run that uses the flag, never
+  ## applied silently. That choice is not arbitrary: `--lock-store` exists
+  ## because "a CI checkout is shallow and has no VCS-private layer-5 config —
+  ## that file is never pushed, by design — so the private route must be
+  ## supplied explicitly", and `public` is precisely the one tier that needs no
+  ## escape hatch (its records are the in-tree committed lock). Any other tier
+  ## is named explicitly with the three-field
+  ## ``<tier>:<kind>:<location>`` form.
+  ##
+  ## A location containing ``:`` (a Windows drive letter, a URL) is preserved:
+  ## the split is from the LEFT and only over the recognized leading tokens.
+  let raw = spec.strip()
+  if raw.len == 0:
+    raise newException(ValueError,
+      "--lock-store requires a value of the form <kind>:<location> " &
+      "(kinds: " & developLockStoreKinds.join(" | ") & ")")
+  result.spec = raw
+  result.tier = wvTeam
+  var rest = raw
+  let firstColon = rest.find(':')
+  if firstColon <= 0:
+    raise newException(ValueError,
+      "--lock-store=" & raw & " is malformed: expected " &
+      "<kind>:<location> (kinds: " & developLockStoreKinds.join(" | ") &
+      "), optionally prefixed with <tier>: (public | org | team | personal)")
+  let firstTok = rest[0 ..< firstColon].strip().toLowerAscii()
+  if firstTok in ["public", "org", "team", "personal", "private"]:
+    result.tierExplicit = true
+    result.tier =
+      case firstTok
+      of "public": wvPublic
+      of "org": wvOrg
+      of "team": wvTeam
+      else: wvPersonal
+    rest = rest[firstColon + 1 .. ^1]
+  let kindColon = rest.find(':')
+  if kindColon <= 0:
+    raise newException(ValueError,
+      "--lock-store=" & raw & " is malformed: expected " &
+      "<kind>:<location> after the tier (kinds: " &
+      developLockStoreKinds.join(" | ") & ")")
+  result.kind = rest[0 ..< kindColon].strip().toLowerAscii()
+  result.location = rest[kindColon + 1 .. ^1].strip()
+  if result.kind notin developLockStoreKinds:
+    raise newException(ValueError,
+      "--lock-store=" & raw & " names an unknown backend kind '" &
+      result.kind & "' (expected one of: " &
+      developLockStoreKinds.join(" | ") & ")")
+  if result.location.len == 0:
+    raise newException(ValueError,
+      "--lock-store=" & raw & " names no location for the '" & result.kind &
+      "' backend")
+
 proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
-  ## ``repro develop --all|--direct|--transitive-of=<pkg>|--only=<list>
-  ## [--filter=<pat>] [--into=<dir>] [--reset] [--strict] [--dry-run]
-  ## [--workspace-root=<path>]
+  ## ``repro develop --list|--all|--direct|--indirect|--transitive-of=<pkg>
+  ## [--project=<list>] [--group=<list>] [--filter=<glob>] [--only=<list>]
+  ## [--except=<list>] [--tier=<list>] [--at=<rev>]
+  ## [--lock-store=<kind>:<location>]... [--into=<dir>] [--reset] [--strict]
+  ## [--dry-run] [--workspace-root=<path>]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
   ##
-  ## ``--dry-run`` (CLI/develop.md §"Action axis") resolves the lock set and
-  ## prints the actions that WOULD be taken, mutating nothing — no clone, no
-  ## reset, no override file. It is the read-only way to ask what a workspace's
-  ## lock set manages.
+  ## The three axes of CLI/develop.md §"Command Surface" are kept separate, and
+  ## a flag belongs to exactly one of them:
   ##
-  ## ``--only=<list>`` narrows the selection to these EXACT names; a name that
-  ## matches nothing in the workspace lock set is a loud error, and naming an
-  ## evidence-only repo is a loud error explaining why (DS-4).
+  ##   * SOURCE — ``--tier``, ``--at``, ``--lock-store``, ``--strict``: which
+  ##     lock records contribute at all;
+  ##   * MEMBERSHIP — the mode flags, ``--project``, ``--group``, ``--filter``,
+  ##     ``--only``, ``--except``: which repos are selected, composed in the
+  ##     FIXED order the spec fixes so the result never depends on argv order;
+  ##   * ACTION — ``--list``, ``--dry-run``, ``--into``, ``--reset``, ``--json``:
+  ##     what happens to the selected set.
+  ##
+  ## ``--list`` (DS-6) prints the resolved lock set and exits, mutating
+  ## nothing. It REQUIRES NO SELECTOR and defaults to the whole lock set,
+  ## because a query has no destructive edge. ``--dry-run`` is the same
+  ## promise one step further down: it resolves the set AND the placement plan
+  ## and prints what WOULD happen.
+  ##
+  ## ``--only`` / ``--except`` / ``--project`` / ``--group`` name things
+  ## EXACTLY; a name that matches nothing is a loud error, never a silent
+  ## no-op. ``--filter`` is a glob and may legitimately match nothing.
   ##
   ## ``--strict`` promotes the personal-tier unreachable-backend warning to the
   ## same refusal the public/team tiers get (DS-3).
@@ -21165,23 +21731,92 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
   result.toolProvisioning = tpmPathOnly
   var i = 0
   var sawSelector = false
+  var sawMode = false
+  # "Selectors compose in a FIXED ORDER, **so the result never depends on argv
+  # order**" (CLI/develop.md §"Membership axis"). The fixed stage order alone
+  # does not deliver that promise: the list-valued selectors (`--only`,
+  # `--except`, `--project`, `--group`) ACCUMULATE and are order-free, but the
+  # SINGLE-VALUED ones would silently take the LAST occurrence — so
+  # `--all --direct` and `--direct --all` are the same flag set in two argv
+  # orders and would answer differently, which is exactly what the rule
+  # forbids. A repeated single-valued selector is therefore a LOUD refusal
+  # rather than a silent last-wins; repeating the SAME value is harmless and
+  # stays accepted, because a script assembling argv from several fragments
+  # legitimately does that.
+  var modeFlag = ""
+  proc chooseMode(flag: string) =
+    if modeFlag.len > 0 and modeFlag != flag:
+      raise newException(ValueError,
+        "`repro develop` was given two different selection modes (" &
+        modeFlag & " and " & flag & "). They are alternatives, not a " &
+        "composition, and taking the last one would make the answer depend " &
+        "on argv order — which the fixed selector order exists to prevent. " &
+        "Pass exactly one of --all / --direct / --indirect / --transitive-of.")
+    modeFlag = flag
+  proc single(field: var string; flag, value: string) =
+    if field.len > 0 and field != value:
+      raise newException(ValueError,
+        flag & " was given twice with different values ('" & field &
+        "' and '" & value & "'). It takes a single value, and taking the " &
+        "last one would make the answer depend on argv order. Pass one " &
+        flag & (if flag == "--filter":
+                  " (a glob: `--filter='{a,b}'` is not supported, but " &
+                  "`--only=a,b` names both exactly)"
+                else: "") & ".")
+    field = value
   while i < args.len:
     let arg = args[i]
     if arg == "--all":
-      result.mode = dasmAll; sawSelector = true
+      chooseMode("--all")
+      result.mode = dasmAll; sawSelector = true; sawMode = true
     elif arg == "--direct":
-      result.mode = dasmDirect; sawSelector = true
+      chooseMode("--direct")
+      result.mode = dasmDirect; sawSelector = true; sawMode = true
+    elif arg == "--indirect":
+      chooseMode("--indirect")
+      result.mode = dasmIndirect; sawSelector = true; sawMode = true
     elif arg == "--transitive-of" or arg.startsWith("--transitive-of="):
+      let pkg = valueFromFlag(args, i, "--transitive-of")
+      chooseMode("--transitive-of=" & pkg)
       result.mode = dasmTransitiveOf
-      result.transitiveOf = valueFromFlag(args, i, "--transitive-of")
-      sawSelector = true
+      single(result.transitiveOf, "--transitive-of", pkg)
+      sawSelector = true; sawMode = true
     elif arg == "--filter" or arg.startsWith("--filter="):
-      result.filter = valueFromFlag(args, i, "--filter")
+      single(result.filter, "--filter", valueFromFlag(args, i, "--filter"))
     elif arg == "--only" or arg.startsWith("--only="):
-      for n in valueFromFlag(args, i, "--only").split(','):
-        let name = n.strip()
-        if name.len > 0: result.only.add(name)
+      result.only.add(parseCommaList(valueFromFlag(args, i, "--only")))
       sawSelector = true
+    elif arg == "--except" or arg.startsWith("--except="):
+      result.exceptNames.add(parseCommaList(valueFromFlag(args, i, "--except")))
+    elif arg == "--project" or arg.startsWith("--project="):
+      result.projects.add(parseCommaList(valueFromFlag(args, i, "--project")))
+      sawSelector = true
+    elif arg == "--group" or arg.startsWith("--group="):
+      result.groups.add(parseCommaList(valueFromFlag(args, i, "--group")))
+      sawSelector = true
+    elif arg == "--tier" or arg.startsWith("--tier="):
+      for t in parseCommaList(valueFromFlag(args, i, "--tier")):
+        let tier = t.toLowerAscii()
+        if tier notin ["public", "org", "team", "personal", "private"]:
+          raise newException(ValueError,
+            "--tier=" & t & " names no locking tier (expected one or more " &
+            "of: public | org | team | personal)")
+        # `private` is the workspace TOML's other spelling of `personal`
+        # (WorkspaceVisibility carries one canonical name); normalize so the
+        # tier compares equal to ``lockingTierLabel``'s output.
+        result.tiers.add(if tier == "private": "personal" else: tier)
+    elif arg == "--lock-store" or arg.startsWith("--lock-store="):
+      result.lockStores.add(
+        parseAdhocLockStore(valueFromFlag(args, i, "--lock-store")))
+    elif arg == "--at" or arg.startsWith("--at="):
+      let rev = valueFromFlag(args, i, "--at").strip()
+      if rev.len == 0:
+        raise newException(ValueError, "--at requires a revision")
+      # Single-valued for the same reason the mode flags are: two `--at`s
+      # would key the commit-addressed backends on whichever came last.
+      single(result.at, "--at", rev)
+    elif arg == "--list":
+      result.list = true
     elif arg == "--strict":
       result.strict = true
     elif arg == "--into" or arg.startsWith("--into="):
@@ -21200,29 +21835,52 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
       result.dryRun = true
     else:
       raise newException(ValueError,
-        "unsupported `repro develop --all` argument: " & arg)
+        "unsupported `repro develop` set-form argument: " & arg)
     inc i
   if not sawSelector and result.transitiveOf.len == 0:
     result.mode = dasmAll
   if result.mode == dasmTransitiveOf and result.transitiveOf.len == 0:
     raise newException(ValueError,
       "`repro develop --transitive-of=<pkg>` requires a package name")
+  if result.list and result.reset:
+    raise newException(ValueError,
+      "`repro develop --list` is a query and cannot be combined with " &
+      "--reset (a destructive action)")
+  # ``--list`` requires no selector; every OTHER form does, because "a bulk
+  # mutation of the working tree is never implicit".
+  if not result.list and not sawMode and not sawSelector:
+    raise newException(ValueError,
+      "`repro develop` with no target and no selector is not a bulk " &
+      "operation: pass --all/--direct/--indirect/--transitive-of, a " &
+      "membership selector, or --list to query the lock set")
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
 proc looksLikeDevelopAllArgs(args: openArray[string]): bool =
-  ## The L1 develop-SET form is distinguished by a set-selection flag:
-  ## ``--all``, ``--direct``, or ``--transitive-of``. ``--into`` / ``--filter``
-  ## alone stay on the pre-L1 single-dependency ``--into`` route (that route
-  ## already owns ``--into``); only a set-selector routes here.
+  ## The L1 develop-SET form is distinguished by a set-selection flag
+  ## (``--all`` / ``--direct`` / ``--indirect`` / ``--transitive-of`` /
+  ## ``--only`` / ``--project`` / ``--group``) or by the SET-PATH ``--list``
+  ## (DS-6). ``--into`` / ``--filter`` alone stay on the pre-L1
+  ## single-dependency ``--into`` route (that route already owns ``--into``).
+  ##
+  ## DS-6 — ``--list`` used to route AWAY from here unconditionally, which is
+  ## why "today `--list` only reaches the pre-set route". The pre-set route's
+  ## `--list` printed the local develop-OVERRIDE map; that output now lives on
+  ## the explicit ``--list-overrides``, and bare ``--list`` answers the
+  ## question CLI/develop.md §"Action axis" assigns it: "what does this
+  ## workspace's lock set manage?". Nothing is lost — every override still
+  ## appears, as a row with state `develop`.
   for arg in args:
-    if arg == "--" or arg == "--cmake" or arg == "--list":
+    if arg == "--" or arg == "--cmake" or arg == "--list-overrides":
       return false
   for arg in args:
-    if arg == "--all" or arg == "--direct" or
+    if arg == "--all" or arg == "--direct" or arg == "--indirect" or
+        arg == "--list" or
         arg == "--transitive-of" or arg.startsWith("--transitive-of=") or
-        arg == "--only" or arg.startsWith("--only="):
+        arg == "--only" or arg.startsWith("--only=") or
+        arg == "--project" or arg.startsWith("--project=") or
+        arg == "--group" or arg.startsWith("--group="):
       return true
   false
 
@@ -21247,7 +21905,7 @@ proc looksLikeWorkspaceDevelopArgs(args: openArray[string]): bool =
         arg == "--write-report" or arg.startsWith("--write-report=") or
         arg == "--workspace-root" or arg.startsWith("--workspace-root="):
       hasM22Marker = true
-    if arg == "--list" or
+    if arg == "--list" or arg == "--list-overrides" or
         arg == "--into" or arg.startsWith("--into=") or
         arg == "--cmake" or
         arg == "--cmake-binary" or arg.startsWith("--cmake-binary=") or
@@ -21290,7 +21948,11 @@ proc runDevelopCommand(args: openArray[string]): int =
       afterSeparator = true
     elif arg == "--cmake":
       cmakeMode = true
-    elif arg == "--list":
+    elif arg == "--list-overrides":
+      # DS-6 — this is the pre-set route's old ``--list``: the local
+      # develop-OVERRIDE map (`<node>\t<path>`), byte-identical. Bare ``--list``
+      # now answers the lock-set question CLI/develop.md assigns it, so the two
+      # meanings got one name each instead of sharing one.
       listOverrides = true
     elif arg == "--into" or arg.startsWith("--into="):
       intoPath = valueFromFlag(args, i, "--into")
@@ -21322,7 +21984,8 @@ proc runDevelopCommand(args: openArray[string]): int =
   if listOverrides:
     if target.len > 0 or intoPath.len > 0 or command.len > 0 or cmakeMode:
       raise newException(ValueError,
-        "repro develop --list does not accept a target, --into, --cmake, or a command")
+        "repro develop --list-overrides does not accept a target, --into, " &
+        "--cmake, or a command")
     let projectRoot = activeProjectRootFromCwd()
     for entry in readDevelopOverrides(developOverridesMetadataPath(projectRoot)):
       echo entry.node & "\t" & entry.path
@@ -25621,6 +26284,14 @@ type
     clkUserDotfiles      ## layer 3 — user dotfiles (~/.config/reprobuild)
     clkParentWorkspace   ## layer 4 — parent ``.repro-workspace.toml`` [locking]
     clkVcsPrivate        ## layer 5 — VCS-private dir (<git-common-dir>/repro)
+    clkInvocation        ## DS-8 — layer 6, THIS INVOCATION's
+                         ## ``--lock-store=<kind>:<location>``. Above every
+                         ## configuration file layer, because it is the escape
+                         ## hatch for a context (a CI checkout) that cannot
+                         ## carry one. It is a LAYER, not a bypass: it claims
+                         ## repos, agrees-or-conflicts on tier, and loses to
+                         ## nothing except a later ``--lock-store`` — the same
+                         ## precedence vocabulary layers 2..5 use.
 
   RepoBackendAssignment* = object
     ## One repo's resolved store assignment. ``store`` is ``nil`` exactly for
@@ -25893,6 +26564,7 @@ proc layerLabel*(k: ConfigLayerKind): string =
   of clkUserDotfiles: "dotfiles"
   of clkParentWorkspace: "parent-workspace-repo"
   of clkVcsPrivate: "vcs-private"
+  of clkInvocation: "invocation (--lock-store)"
 
 type
   ComposedRoute* = object
@@ -26727,12 +27399,81 @@ proc unreadableBackendMessage(tierLbl, kind, location, diag: string): string =
     ") could not be read: " & diag & " — " &
     unreadableBackendRemedy(tierLbl, kind, location)
 
+proc lockRecordAtCommitOrAncestor*(store: LockStore; project, repo, sha: string;
+                                   gitBin, repoRoot: string;
+                                   maxWalk = 4096):
+    tuple[rec: Option[StoreLockRecord]; foundAt: string; distance: int] =
+  ## DS-5 — the commit-keyed record read, EXTENDED with the FIRST-PARENT
+  ## ANCESTRY WALK the resolver behavior of
+  ## Workspace-Manifests.md §"No shared lock index" already specifies:
+  ##
+  ##   > The resolver walks first-parent ancestry to the nearest locked commit
+  ##   > when an exact commit has no lock yet.
+  ##
+  ## This WRAPS ``lockRecordAtCommit`` rather than forking a second reader: the
+  ## exact-commit read stays the one entry point, and this proc only decides
+  ## WHICH commits to ask it about. A record found at ``sha`` itself answers
+  ## with ``distance == 0``; otherwise the first-parent chain of ``sha`` is
+  ## walked oldest-first-order-preserved (``git rev-list --first-parent``, which
+  ## emits ``sha`` then each first parent in turn) and the FIRST commit holding
+  ## a record wins.
+  ##
+  ## There is deliberately **no branch-tip fallback**: the walk only ever goes
+  ## BACKWARD through the asked-for commit's own history, so every candidate is
+  ## an ancestor of what the caller asked about. When the whole chain holds
+  ## nothing, this answers ``none`` and the caller says so.
+  ##
+  ## ``foundAt`` is returned so the caller can REPORT which ancestor it landed
+  ## on. A pin silently resolved from a different commit than the one asked for
+  ## is exactly the class of surprise `repro develop` exists to prevent, so an
+  ## ancestor hit is never allowed to look like an exact hit.
+  result.foundAt = ""
+  result.distance = 0
+  result.rec = lockRecordAtCommit(store, project, repo, sha)
+  if result.rec.isSome:
+    result.foundAt = sha
+    return
+  if store.isNil or not (store of GitCheckoutLockStore): return
+  if gitBin.len == 0 or repoRoot.len == 0 or sha.len == 0: return
+  var chain: seq[string]
+  try:
+    let res = execCmdEx(quoteShell(gitBin) & " -C " & quoteShell(repoRoot) &
+      " rev-list --first-parent --max-count=" & $maxWalk & " " &
+      quoteShell(sha), options = {poUsePath})
+    if res.exitCode != 0: return
+    for line in res.output.splitLines():
+      let c = line.strip()
+      if c.len == 40: chain.add(c)
+  except CatchableError:
+    return
+  for idx, ancestor in chain:
+    if idx == 0 and ancestor == sha: continue   # already asked, above
+    let rec = lockRecordAtCommit(store, project, repo, ancestor)
+    if rec.isSome:
+      return (rec: rec, foundAt: ancestor, distance: idx)
+
 proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
-                           strict: bool): DevelopLockSet =
+                           args: DevelopAllArgs): DevelopLockSet =
   let root = absolutePath(workspaceRoot)
   let gitBin = identity.binaryPath
+  let strict = args.strict
   result.tierOf = initTable[string, string]()
   result.backendOf = initTable[string, string]()
+  result.locationOf = initTable[string, string]()
+  result.pinTierOf = initTable[string, string]()
+  result.pinBackendOf = initTable[string, string]()
+  result.groupsOf = initTable[string, seq[string]]()
+  result.projectsOf = initTable[string, seq[string]]()
+
+  # DS-8 — ``--tier=<list>``: which TIERS may contribute records at all. This
+  # is a SOURCE-axis restriction: an excluded tier's backend is still probed
+  # for readability (an unreadable declared backend is fatal whether or not
+  # this invocation wanted its records) but folds nothing, and says so in the
+  # inventory. Empty list = no restriction.
+  var tierAllowed = initHashSet[string]()
+  for t in args.tiers: tierAllowed.incl(t)
+  proc tierContributes(tierLbl: string): bool =
+    tierAllowed.len == 0 or tierLbl in tierAllowed
 
   # ---- (1) PUBLIC tier: the in-repo committed lock. ----------------------
   # Kept as the WHOLE result object (schema / platform / solved-graph payload
@@ -26746,15 +27487,23 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
   # (checked by the caller, which then names every backend below) fails.
   let committedLockP = committedLockPath(root)
   let committedLockPresent = fileExists(extendedPath(committedLockP))
-  result.lock = populateLockedDeps(
-    LockSource(kind: lskCommittedLock, workspaceRoot: root))
-  let committedLockReport = DevelopBackendReport(tier: "public",
+  let publicContributes = tierContributes("public")
+  if publicContributes:
+    result.lock = populateLockedDeps(
+      LockSource(kind: lskCommittedLock, workspaceRoot: root))
+  var committedLockReport = DevelopBackendReport(tier: "public",
     backendKind: "committed-lock", location: committedLockP,
     reachable: committedLockPresent,
     diagnostic:
       (if committedLockPresent: ""
        else: "no committed lock at " & committedLockP),
     records: result.lock.deps.len)
+  if not publicContributes:
+    # DS-8 — ``--tier`` excluded the public tier. The committed lock is not
+    # read at all, and the inventory says exactly that rather than implying the
+    # file was missing or empty.
+    committedLockReport.excluded = true
+    committedLockReport.records = 0
   var indexByName = initTable[string, int]()
   # PROVENANCE of each entry already IN the union — which tier/backend actually
   # supplied it. Deliberately distinct from ``result.tierOf`` / ``backendOf``,
@@ -26770,6 +27519,8 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       provTier[d.name] =
         (if d.visibility.len > 0: d.visibility else: "public")
       provBackend[d.name] = "committed-lock"
+      result.pinTierOf[d.name] = provTier[d.name]
+      result.pinBackendOf[d.name] = "committed-lock"
       result.tierOf[d.name] = provTier[d.name]
       result.backendOf[d.name] = "committed-lock"
 
@@ -26782,6 +27533,42 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       "composed for " & root & ": " & err.msg &
       " — fix the offending configuration layer and re-run")
     return
+  # ---- (2a) DS-8 — the INVOCATION layer: ``--lock-store``. ---------------
+  #
+  # "The escape hatch for contexts that cannot carry a configuration layer."
+  # A CI checkout is shallow and has no VCS-private layer-5 config (that file
+  # is never pushed, by design), so the private route must be supplied on the
+  # command line — and it must COMPOSE with the configuration plane in the same
+  # precedence vocabulary rather than bypass it. So each ``--lock-store``
+  # becomes an ordinary ``ComposedRoute`` at ``clkInvocation`` (layer 6),
+  # appended in argv order so a later one out-precedes an earlier one:
+  # "repeatable, in increasing precedence".
+  #
+  # The entries are built with an EMPTY ``repos`` list here so the readability
+  # probe below can run BEFORE membership resolution (an unreadable
+  # ``--lock-store`` is fatal exactly like any other declared backend, and must
+  # never downgrade to "just use what the config plane found"). The repo list
+  # is filled in once membership resolves, at (2c).
+  var adhocRoutes: seq[ComposedRoute]
+  for ls in args.lockStores:
+    var entry = LockingRouteEntry(visibility: lockingTierLabel(ls.tier),
+      backend: ls.kind)
+    if ls.kind == "external-cli": entry.program = some(ls.location)
+    else: entry.path = some(ls.location)
+    adhocRoutes.add(ComposedRoute(tier: ls.tier, entry: entry,
+      layer: clkInvocation,
+      source: "--lock-store=" & ls.spec, repos: @[]))
+    if not ls.tierExplicit:
+      # NEVER a silent default: every run that leans on the two-field form is
+      # told, in the report, which tier it just declared.
+      result.keyNotes.add("--lock-store=" & ls.spec &
+        " declares a " & lockingTierLabel(ls.tier) & "-tier " & ls.kind &
+        " backend at " & ls.location &
+        " (the two-field form carries no tier; write " &
+        "--lock-store=<tier>:" & ls.kind & ":" & ls.location &
+        " to declare another)")
+  composed.routes.add(adhocRoutes)
+
   if not composed.hasExplicitRoutes:
     # No layer declares a route: the built-in public default is the only tier,
     # so the workspace lock set IS the committed lock. Nothing else is read and
@@ -26817,6 +27604,9 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
   # per-backend probe below must not report the SAME medium twice (a personal
   # route warns and continues, so its repos may still reach that loop).
   var alreadyReportedUnreadable = initHashSet[string]()
+  # DS-8 — which resolved media came from ``--lock-store`` rather than from a
+  # configuration file, so `--list` can label them.
+  var adhocBackendLocations = initHashSet[string]()
   for route in composed.routes:
     let entry = route.entry
     let kind = entry.backend.strip().toLowerAscii()
@@ -26836,20 +27626,31 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     let location = probeStore.storeLocationLabel()
     let tierLbl = lockingTierLabel(route.tier)
     let probeKey = tierLbl & "\0" & kind & "\0" & location
+    if route.layer == clkInvocation: adhocBackendLocations.incl(probeKey)
     if probeKey in probedRouteLocations: continue
     probedRouteLocations.incl(probeKey)
     let diag = probeStore.readabilityDiagnostic()
     if diag.len == 0: continue
     alreadyReportedUnreadable.incl(probeKey)
     var report = DevelopBackendReport(tier: tierLbl, backendKind: kind,
-      location: location, reachable: false, diagnostic: diag)
+      location: location, reachable: false, diagnostic: diag,
+      adhoc: route.layer == clkInvocation)
     report.repos = route.repos
     result.backends.add(report)
     let message = unreadableBackendMessage(tierLbl, kind, location, diag) &
-      (if route.repos.len > 0:
+      (if route.layer == clkInvocation:
+         " (declared by " & route.source & " for this invocation)"
+       elif route.repos.len > 0:
          " (this route declares: " & route.repos.join(", ") & ")"
        else: "")
-    if route.tier == wvPersonal and not strict:
+    # DS-8 — an unreadable ``--lock-store`` is FATAL whatever tier it names,
+    # including `personal`: the flag is an explicit, per-invocation assertion
+    # that THIS backend is the route, so degrading it to "just use what the
+    # configuration plane found" would silently answer a different question
+    # than the one asked. The personal-tier warn-and-continue rule exists for a
+    # route the user did not restate on this command line.
+    if route.tier == wvPersonal and not strict and
+        route.layer != clkInvocation:
       result.warnings.add("WARNING: " & message &
         "; continuing without it (pass --strict to make this fatal)")
       for r in route.repos: result.omitted.add(r & " (tier=personal)")
@@ -26869,6 +27670,79 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       "membership could not be resolved at " & root & ": " & err.msg &
       " — run `repro sync` to materialize the manifest layers, then re-run")
     return
+
+  # ---- (2c) DS-8 — finish the invocation-layer routes now that membership
+  #          is known, and DS-7 — record the group / project attribution the
+  #          membership axis selects on. -----------------------------------
+  #
+  # An ad-hoc ``--lock-store`` NAMES every participating repo. A visibility-
+  # keyed route would match nothing in exactly the workspaces the flag exists
+  # for: a repo carries the default ``wvPublic`` visibility unless a manifest
+  # layer says otherwise, and the routes that make such a repo team-tier are
+  # the NAMED ones a configuration layer declares — the layer a CI checkout
+  # does not have. Naming every repo is what makes the flag able to SUPPLY that
+  # missing route rather than merely relocate one that is already there.
+  #
+  # It is still tier-checked, not a bypass: ``resolveRepoBackends`` requires
+  # every named claim on a repo to AGREE on the tier, so an invocation route at
+  # a tier the configuration plane contradicts is a loud cross-tier refusal,
+  # and within an agreed tier the invocation layer (highest) wins the backend.
+  if adhocRoutes.len > 0:
+    var allRepoNames: seq[string]
+    for r in resolved.repos:
+      if r.name.len > 0: allRepoNames.add(r.name)
+    var rebuilt: seq[ComposedRoute]
+    for r in composed.routes:
+      if r.layer != clkInvocation: rebuilt.add(r)
+    for r in adhocRoutes:
+      var withRepos = r
+      withRepos.repos = allRepoNames
+      withRepos.entry.repos = allRepoNames
+      rebuilt.add(withRepos)
+    composed.routes = rebuilt
+
+  for r in resolved.repos:
+    if r.name.len == 0: continue
+    let groups = effectiveGroups(r)
+    result.groupsOf[r.name] = groups
+    for g in groups:
+      if g notin result.knownGroups: result.knownGroups.add(g)
+  result.knownGroups.sort()
+
+  # DS-7 ``--project`` attribution. The active project set is the workspace's
+  # recorded ``[workspace] projects``; each project is resolved on its own to
+  # learn which repos IT contributes. This is MEMBERSHIP bookkeeping and
+  # nothing more: ``resolved.projectName`` — the PRIMARY project
+  # (Workspace-And-Develop-Mode.md §"The Primary Project") — remains the key
+  # every lock-record lookup below uses, whatever ``--project`` names. Keeping
+  # them separate is the point: re-keying record lookup off a membership filter
+  # would make one commit resolve different pins depending on which projects
+  # the caller asked to see.
+  result.activeProjects = activeProjectSetOrEmpty(root)
+  if result.activeProjects.len == 0 and resolved.projectName.len > 0:
+    result.activeProjects = @[resolved.projectName]
+  if result.activeProjects.len <= 1:
+    for r in resolved.repos:
+      if r.name.len > 0:
+        result.projectsOf[r.name] = @[result.activeProjects[0]]
+  else:
+    for p in result.activeProjects:
+      var contributed: ResolvedProject
+      try:
+        contributed = resolveWorkspaceProjectByName(root, p)
+      except CatchableError:
+        # An unresolvable member of the recorded set is reported by the
+        # membership ladder itself; here it simply contributes no attribution,
+        # and ``--project=<that name>`` therefore selects nothing — which the
+        # exact-name check upstream turns into a loud error rather than a
+        # silent empty selection.
+        continue
+      for r in contributed.repos:
+        if r.name.len == 0: continue
+        var cur = result.projectsOf.getOrDefault(r.name, @[])
+        if p notin cur:
+          cur.add(p)
+          result.projectsOf[r.name] = cur
 
   var assignments: seq[RepoBackendAssignment]
   try:
@@ -26915,15 +27789,48 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       reposOfBackend[key] = reposOfBackend[key] & @[repo]
     result.tierOf[asg.repoName] = lockingTierLabel(asg.visibility)
     result.backendOf[asg.repoName] = asg.backendKind
+    result.locationOf[asg.repoName] = asg.store.storeLocationLabel()
 
   # The root repo's identity, for the commit-keyed read of a commit-addressed
   # backend (CLI/develop.md §"Which record, for a commit-addressed backend").
   var rootRepoName = ""
   for r in resolved.repos:
     if r.path == "." or r.path.len == 0: rootRepoName = r.name; break
+  # DS-5 — the KEY. Default: the workspace ROOT repo's ``HEAD``.
+  # ``--at=<rev>`` overrides it. The override is resolved THROUGH GIT (so a
+  # tag, a branch name or an abbreviation names the commit it names) and the
+  # result must be a full object id: a key that cannot be resolved is a
+  # refusal, never a fall-through to HEAD — asking about one commit and
+  # silently being answered about another is the whole hazard here.
   var rootHeadSha = ""
   if rootRepoName.len > 0:
     rootHeadSha = gitHeadShaOf(gitBin, root)
+  if args.at.len > 0:
+    var resolvedAt = ""
+    if gitBin.len > 0:
+      try:
+        let rp = execCmdEx(quoteShell(gitBin) & " -C " & quoteShell(root) &
+          " rev-parse --verify --quiet " & quoteShell(args.at & "^{commit}"),
+          options = {poUsePath})
+        if rp.exitCode == 0: resolvedAt = rp.output.strip()
+      except CatchableError:
+        resolvedAt = ""
+    if resolvedAt.len != 40 or not isExactLockedRevision(resolvedAt):
+      result.refusals.add("--at=" & args.at & " does not resolve to a commit " &
+        "in the workspace root repository at " & root &
+        " — commit-addressed lock backends are keyed on a commit of THIS " &
+        "repository, and this command never silently keys on a different one. " &
+        "Fetch the commit (e.g. `git -C " & root & " fetch --unshallow`) or " &
+        "pass a revision this repository has.")
+      return
+    if rootRepoName.len == 0:
+      # No manifest entry places a repo at ``.``, so nothing keys a
+      # commit-addressed backend on a commit at all and ``--at`` would be a
+      # no-op. Saying so beats appearing to honour it.
+      result.keyNotes.add("--at=" & args.at & " resolved to " & resolvedAt &
+        ", but this workspace's manifest declares no repo at path \".\", so " &
+        "no lock backend is commit-addressed here and the key is unused")
+    rootHeadSha = resolvedAt
 
   for key in backendOrder:
     let store = storeOfBackend[key]
@@ -26933,7 +27840,9 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     let location = store.storeLocationLabel()
     let repos = reposOfBackend[key]
     var report = DevelopBackendReport(tier: tierLbl, backendKind: kind,
-      location: location, reachable: true)
+      location: location, reachable: true,
+      adhoc: adhocBackendLocations.contains(
+        lockingTierLabel(tier) & "\0" & kind & "\0" & location))
     for r in repos: report.repos.add(r.name)
 
     # DS-3 — an unreachable backend must NEVER narrow the set silently.
@@ -26955,6 +27864,15 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       else:
         result.refusals.add(message)
       continue
+    # DS-8 — ``--tier`` excluded this tier from contributing. The backend was
+    # still PROBED above (a declared backend that cannot be read is fatal
+    # whether or not this invocation wanted its records), and it is still named
+    # in the inventory — it simply folds nothing.
+    if not tierContributes(tierLbl):
+      report.excluded = true
+      result.backends.add(report)
+      continue
+
     # Remember where this backend's report sits so its contributed-record count
     # can be filled in as the fold below adds entries. The empty-union failure
     # prints that count, so "readable but held nothing" is distinguishable from
@@ -26962,17 +27880,39 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     let reportIdx = result.backends.len
     result.backends.add(report)
 
-    # A commit-addressed backend is keyed by a commit. The key is the workspace
-    # ROOT repo's HEAD; the record it holds pins every repo the lock covers.
-    # There is NO branch-tip fallback: when the backend yields no record for
-    # the resolved key, this seed is simply empty and each repo falls back to
-    # the ordinary ``latestLock`` resolver below.
+    # DS-5 — a commit-addressed backend is keyed by a commit. The key is the
+    # workspace ROOT repo's ``HEAD``, or ``--at=<rev>`` when given, and the
+    # record it holds pins every repo the lock covers.
+    #
+    # When the key itself carries no record the FIRST-PARENT ANCESTRY WALK
+    # finds the nearest LOCKED ANCESTOR — the resolver behavior
+    # Workspace-Manifests.md §"No shared lock index" already specifies, and the
+    # reason a workspace whose HEAD has not been published yet still resolves
+    # its pins. The walk only ever goes backward through the key's own history,
+    # so there is still NO BRANCH-TIP FALLBACK; and it REPORTS the ancestor it
+    # landed on, because a pin silently resolved from a different commit than
+    # the one asked for is precisely the surprise this command exists to
+    # prevent.
     var commitKeyed = initTable[string, string]()
     if rootRepoName.len > 0 and rootHeadSha.len > 0:
-      let rec = lockRecordAtCommit(
-        store, resolved.projectName, rootRepoName, rootHeadSha)
-      if rec.isSome:
-        commitKeyed = shasFromBody(rec.get().body)
+      let hit = lockRecordAtCommitOrAncestor(
+        store, resolved.projectName, rootRepoName, rootHeadSha, gitBin, root)
+      if hit.rec.isSome:
+        commitKeyed = shasFromBody(hit.rec.get().body)
+        result.backends[reportIdx].keyedOn = hit.foundAt
+        if hit.foundAt != rootHeadSha:
+          result.keyNotes.add(tierLbl & " tier / " & kind & " backend (" &
+            location & ") holds no lock record for " & rootHeadSha &
+            "; the first-parent ancestry walk resolved it from the nearest " &
+            "locked ancestor " & hit.foundAt & " (" & $hit.distance &
+            " commit(s) back). Every pin below comes from THAT commit's " &
+            "record, not from " & rootHeadSha & ".")
+      else:
+        result.backends[reportIdx].keyedOn = rootHeadSha
+        result.keyNotes.add(tierLbl & " tier / " & kind & " backend (" &
+          location & ") holds no lock record for " & rootHeadSha &
+          " nor for any first-parent ancestor of it; it contributes nothing " &
+          "commit-keyed (there is no branch-tip fallback)")
 
     # The ONE populator entry point, per backend.
     let srcKind =
@@ -27006,6 +27946,8 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
           result.lock.deps.add(d)
           provTier[d.name] = tierLbl
           provBackend[d.name] = kind
+          result.pinTierOf[d.name] = tierLbl
+          result.pinBackendOf[d.name] = kind
           inc result.backends[reportIdx].records
         continue
       # "A repo is develop-manageable in workspace W if some lock record
@@ -27064,6 +28006,8 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       result.lock.deps.add(d)
       provTier[d.name] = tierLbl
       provBackend[d.name] = kind
+      result.pinTierOf[d.name] = tierLbl
+      result.pinBackendOf[d.name] = kind
       inc result.backends[reportIdx].records
 
 proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;

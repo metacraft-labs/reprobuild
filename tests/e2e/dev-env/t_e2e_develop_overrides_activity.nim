@@ -170,7 +170,13 @@ suite "e2e_develop_overrides_activity":
       check metadata["overrides"][0]["node"].getStr() == "fixture-lib"
       check metadata["overrides"][0]["path"].getStr() == c.libRoot
 
-      let listOutput = requireRepro(c, @["develop", "--list"], cwd = c.appRoot)
+      # DS-6 -- this listing is the local develop-OVERRIDE map, and its flag
+      # is now the explicit `--list-overrides`. Bare `--list` answers the
+      # lock-set question CLI/develop.md assigns it ("what does this
+      # workspace's lock set manage?"); the two meanings got one name each.
+      # The output below is byte-identical to what `--list` printed.
+      let listOutput = requireRepro(c, @["develop", "--list-overrides"],
+        cwd = c.appRoot)
       check listOutput.strip() == "fixture-lib\t" & c.libRoot
 
       let statsPath = c.tempRoot / "override-stats.json"
