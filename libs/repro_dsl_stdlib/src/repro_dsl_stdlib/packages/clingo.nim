@@ -104,13 +104,15 @@ package clingo:
       os = "windows",
       lockIdentity = "tarball:clingo@5.8.0:sha256:a9e5eb699dd8de3dcc555c28f47a46ca0b3005f784f76aadf70f47267e5afee9"
 
-  # Producer side of the runtime-library contract. This package does not only
-  # provide a `clingo` CLI — it provides the SHARED LIBRARY that
-  # `repro_solver` dlopens at module init. Declaring that makes the fact
-  # semantic, so a consumer states "I need clingo's runtime library" instead of
-  # every consumer re-discovering `clingo.dll` by probing PATH and copying it
-  # around (see docs/runtime-library-dependencies.md for the gap that still
-  # separates this declaration from the engine acting on it).
-  library clingo:
-    kind: shared
-    exportedPath: "Library/bin"
+  # NOTE: this package provides the SHARED LIBRARY `repro_solver` dlopens at
+  # module init, not only a `clingo` CLI — but there is currently no correct way
+  # to declare that. The DSL's `library <name>:` block is NOT the vehicle: its
+  # `exportedPath` is "the producer-relative directory a Nim library-consumer
+  # threads onto its `nim c --path:`" (types.nim:185), i.e. a Nim SOURCE path,
+  # and its `kind:` describes a library the package BUILDS. Pointing
+  # `exportedPath` at `Library/bin` would tell Nim consumers to add a DLL
+  # directory to their source path.
+  #
+  # See docs/runtime-library-dependencies.md — the runtime-library dependency
+  # model needs its own declaration surface on both the producer and consumer
+  # sides.

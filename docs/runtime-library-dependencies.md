@@ -65,15 +65,32 @@ nothing — which is why consumers resort to copying DLLs by hand.
 There is no way to say "this executable loads library L at runtime". Searching
 `repro_project_dsl` for `runtimeLib` / `loadLibrary` returns nothing.
 
-The producer side *is* expressible — `packages/clingo.nim` now declares:
+**The producer side is not expressible either.** The DSL's `library <name>:`
+block looks like the vehicle and is not:
+
+- `exportedPath` is documented (`types.nim:185`) as "the producer-relative
+  directory a Nim library-consumer threads onto its `nim c --path:`" — a Nim
+  **source** path, defaulting to `src`. Pointing it at `Library/bin` would tell
+  Nim consumers to add a DLL directory to their source path.
+- `kind: shared` describes a library the package **builds** (".so / .dylib /
+  .dll"), not a shared library that arrives inside a provisioned prefix.
+
+So both ends of the contract need a new declaration surface, not just the
+consumer end.
+
+### The `library` body silently ignores what it does not recognise
+
+Worth knowing before extending it. The body loop in `macros_a.nim` ends:
 
 ```nim
-library clingo:
-  kind: shared
-  exportedPath: "Library/bin"
+of "discard": discard
+else:          discard      # <- unknown statements are dropped
 ```
 
-which is the first use of that declaration anywhere in the tree.
+A statement the parser does not recognise is neither applied nor rejected. A
+`when defined(windows): exportedPath: "…"` inside the body **compiles cleanly
+and sets nothing**. Any work here should fix that `else` to error before adding
+new keys, or the next author gets a declaration that appears to work.
 
 ## What the gap costs today
 
@@ -107,15 +124,39 @@ primary strategy is unreachable.
 4. **Retire the hand-rolled staging** as each consumer moves over, removing the
    corresponding baseline entries.
 
-### Known wrinkles
+### Expressing per-platform layout
 
-- **`exportedPath` is single-valued but the layout is per-platform.** clingo is
-  `Library/bin` from conda-forge on Windows and `lib` from nixpkgs on
-  Linux/macOS. Either `exportedPath` needs a per-platform form, or it must be
-  resolved against the selected provisioning entry rather than the package.
-  The declaration added to `packages/clingo.nim` currently states the Windows
-  layout only, and is therefore incomplete on POSIX — deliberately, so the
-  limitation is visible rather than papered over with a wrong single value.
+The library directory differs by provisioning source, not merely by OS: clingo
+is `Library/bin` from conda-forge on Windows and `lib` from nixpkgs on
+Linux/macOS. Two styles should work, and today neither does:
+
+**`when` statements.** These are the obvious smoothing tool, but the DSL bodies
+silently drop them (see above). Supporting them means teaching the relevant
+macros to handle `nnkWhenStmt` by evaluating the active branch, instead of
+falling into the catch-all `discard`.
+
+**Reusable platform abstractions.** Better than scattering `when` at every
+declaration: a shared vocabulary of prefix layouts, e.g.
+
+```nim
+## repro_dsl_stdlib/prefix_layout.nim
+type PrefixLayout* = enum
+  plUnix     ## bin/, lib/       — nixpkgs, most tarballs
+  plConda    ## Library/bin/     — conda-forge win-64
+  plFlat     ## prefix root      — many Windows zips
+
+func sharedLibDir*(layout: PrefixLayout): string
+```
+
+so a package writes `sharedLibDir(plConda)` rather than a bare string, and the
+layout is named once and reused. This needs a second macro change: the setters
+currently demand a **string literal** (`error("… requires a string literal")`),
+so a `const` or `func` call is rejected. They would need to accept any
+const-foldable expression.
+
+Both changes are small and belong together — a per-platform value is only
+useful if it can be produced by a helper, and a helper is only useful if the
+setter accepts one.
 - **The bootstrap floor still applies.** None of this helps `repro.exe` find
   `clingo.dll` while it is *being built* — the engine cannot prepare an
   execution environment for the binary that runs the engine. Build-time staging
