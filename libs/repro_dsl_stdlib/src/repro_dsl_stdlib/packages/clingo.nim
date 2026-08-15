@@ -103,3 +103,14 @@ package clingo:
       cpu = "x86_64",
       os = "windows",
       lockIdentity = "tarball:clingo@5.8.0:sha256:a9e5eb699dd8de3dcc555c28f47a46ca0b3005f784f76aadf70f47267e5afee9"
+
+  # Producer side of the runtime-library contract. This package does not only
+  # provide a `clingo` CLI — it provides the SHARED LIBRARY that
+  # `repro_solver` dlopens at module init. Declaring that makes the fact
+  # semantic, so a consumer states "I need clingo's runtime library" instead of
+  # every consumer re-discovering `clingo.dll` by probing PATH and copying it
+  # around (see docs/runtime-library-dependencies.md for the gap that still
+  # separates this declaration from the engine acting on it).
+  library clingo:
+    kind: shared
+    exportedPath: "Library/bin"
