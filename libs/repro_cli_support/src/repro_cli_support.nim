@@ -3370,7 +3370,8 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     for a in args:
       cmd.add(" ")
       cmd.add(quoteShell(a))
-    let r = execCmdEx(cmd, options = {poUsePath}, workingDir = cwd)
+    let r = execCmdEx(cmd, options = {poUsePath}, workingDir = cwd,
+      env = scrubbedGitRepositoryEnv())
     (code: r.exitCode, output: r.output)
 
   proc verifyRevisionIntegrity() =
@@ -11237,7 +11238,7 @@ proc uninstallNativeShellHook(shell: NativeShellKind) =
 
 proc gitTopLevel(targetPath: string): string =
   let res = execCmdEx(shellCommand(@["git", "-C", resolveHooksTarget(targetPath),
-    "rev-parse", "--show-toplevel"]))
+    "rev-parse", "--show-toplevel"]), env = scrubbedGitRepositoryEnv())
   if res.exitCode == 0:
     result = os.normalizedPath(res.output.strip())
 
@@ -11252,12 +11253,13 @@ proc gitHooksDir(targetPath: string): string =
   # appending `hooks` to --absolute-git-dir silently installs an unused bundle
   # when core.hooksPath is configured.
   var res = execCmdEx(shellCommand(@["git", "-C", repoRoot, "rev-parse",
-    "--path-format=absolute", "--git-path", "hooks"]))
+    "--path-format=absolute", "--git-path", "hooks"]),
+    env = scrubbedGitRepositoryEnv())
   if res.exitCode == 0 and res.output.strip().len > 0:
     return os.normalizedPath(res.output.strip())
   # Compatibility fallback for Git versions predating --path-format.
   res = execCmdEx(shellCommand(@["git", "-C", repoRoot, "rev-parse",
-    "--git-path", "hooks"]))
+    "--git-path", "hooks"]), env = scrubbedGitRepositoryEnv())
   if res.exitCode != 0 or res.output.strip().len == 0:
     raise newException(ValueError,
       "could not locate Git hooks directory for " & repoRoot & ": " &
@@ -11428,6 +11430,22 @@ proc vcsManagedHookContent(hookName: string): string =
   result.add("}\n\n")
   result.add("REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)\n")
   result.add("cd \"$REPO_ROOT\"\n")
+  # Resolve the invoking checkout first: Git's hook environment is the source
+  # of truth for a linked worktree's root. Only the managed child boundary is
+  # scrubbed; the dispatcher has already invoked a preserved user hook with
+  # the original Git repository bindings, argv, and stdin.
+  result.add("unset " & GitRepositoryLocalEnv.join(" ") & "\n")
+  # Do not trust GIT_CONFIG_COUNT to enumerate the indexed variables. A stale
+  # or hostile hook environment can contain higher or malformed suffixes, and
+  # the in-process scrubber deliberately treats the complete prefixes as
+  # repository-local. Environment names cannot contain whitespace, so this
+  # POSIX loop safely enumerates every matching name without inspecting values.
+  result.add("for REPROBUILD_GIT_CONFIG_NAME in $(env | sed -n " &
+    "-e 's/^\\(GIT_CONFIG_KEY_[A-Za-z0-9_]*\\)=.*/\\1/p' " &
+    "-e 's/^\\(GIT_CONFIG_VALUE_[A-Za-z0-9_]*\\)=.*/\\1/p'); do\n")
+  result.add("  unset \"$REPROBUILD_GIT_CONFIG_NAME\"\n")
+  result.add("done\n")
+  result.add("unset REPROBUILD_GIT_CONFIG_NAME\n")
   result.add("if REPRO_CMD=$(find_repro_cmd); then\n")
   if hookName == "pre-push":
     result.add("  if [ \"$REPROBUILD_CAPTURED_DISPATCH_PROTOCOL\" != \"2\" ]; then\n")
@@ -14816,7 +14834,8 @@ proc committedLockRepoFacts(repoRoot: string):
     for a in extra:
       cmd.add(" ")
       cmd.add(quoteShell(a))
-    let r = execCmdEx(cmd, options = {poUsePath})
+    let r = execCmdEx(cmd, options = {poUsePath},
+      env = scrubbedGitRepositoryEnv())
     if r.exitCode == 0: r.output.strip() else: ""
   proc remoteUrl(name: string): string =
     if name.len == 0: "" else: run(["-C", repoRoot, "remote", "get-url", name])
@@ -15006,7 +15025,8 @@ proc gitObjectFormatOf(repoRoot: string): string =
   let gitBin = findExe("git")
   if gitBin.len == 0: return "sha1"
   let r = execCmdEx(quoteShell(gitBin) & " -C " & quoteShell(repoRoot) &
-    " rev-parse --show-object-format", options = {poUsePath})
+    " rev-parse --show-object-format", options = {poUsePath},
+    env = scrubbedGitRepositoryEnv())
   if r.exitCode == 0 and r.output.strip().len > 0: r.output.strip()
   else: "sha1"
 
@@ -20823,6 +20843,7 @@ proc gitHeadShaOf(gitBinary, repoDir: string): string =
   try:
     let res = execProcess(gitBinary,
       args = ["-C", repoDir, "rev-parse", "HEAD"],
+      env = scrubbedGitRepositoryEnv(),
       options = {poUsePath})
     result = res.strip()
   except CatchableError:
@@ -23733,7 +23754,8 @@ proc revParse(identity: GitToolIdentity;
   let res = execCmdEx(
     quoteShell(identity.binaryPath) & " -C " & quoteShell(repoPath) &
       " rev-parse " & quoteShell(refSpec),
-    options = {poStdErrToStdOut, poUsePath})
+    options = {poStdErrToStdOut, poUsePath},
+    env = scrubbedGitRepositoryEnv())
   if res.exitCode == 0:
     res.output.strip()
   else:
@@ -23838,7 +23860,8 @@ proc gitRemoteOriginUrl(identity: GitToolIdentity; repoPath: string): string =
   let res = execCmdEx(
     quoteShell(identity.binaryPath) & " -C " & quoteShell(repoPath) &
       " config --get remote.origin.url",
-    options = {poStdErrToStdOut, poUsePath})
+    options = {poStdErrToStdOut, poUsePath},
+    env = scrubbedGitRepositoryEnv())
   if res.exitCode == 0:
     res.output.strip()
   else:
@@ -24671,7 +24694,8 @@ proc cloneOrgRootRepo(identity: GitToolIdentity;
   var cmd = quoteShell(identity.binaryPath) &
     " clone --recurse-submodules " & quoteShell(url) &
     " " & quoteShell(destination)
-  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath})
+  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+    env = scrubbedGitRepositoryEnv())
   if res.exitCode != 0:
     return (ok: false, diagnostic: res.output.strip())
   (ok: true, diagnostic: "")
@@ -25343,22 +25367,6 @@ proc scopeRepoPathSet(workspaceRoot: string;
     let proj = resolveNamedProjectOrVariant(workspaceRoot, name)
     for repo in proj.repos:
       result.incl(repo.path)
-
-const GitRepositoryLocalEnv = [
-  "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR",
-  "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_NAMESPACE", "GIT_PREFIX",
-  "GIT_QUARANTINE_PATH", "GIT_REPLACE_REF_BASE"]
-
-proc scrubbedGitRepositoryEnv(): StringTableRef =
-  ## Git exports repository-local variables to hooks. In a linked worktree
-  ## GIT_DIR is an absolute per-worktree directory, so an otherwise explicit
-  ## `git -C <different-backend>` silently keeps operating on the source repo.
-  ## Every cross-repository invocation supplies its own -C and must start from
-  ## an environment with those inherited bindings removed.
-  result = newStringTable(modeCaseSensitive)
-  for key, value in envPairs(): result[key] = value
-  for key in GitRepositoryLocalEnv: result.del(key)
 
 proc gitRunPlain(identity: GitToolIdentity;
                  args: openArray[string]): tuple[code: int; output: string] =
@@ -26635,7 +26643,8 @@ proc vcsPrivateMetadataDir*(repoRoot: string; gitBin = ""): string =
     if git.len > 0:
       let res = execCmdEx(quoteShell(git) & " -C " & quoteShell(root) &
         " rev-parse --git-common-dir",
-        options = {poStdErrToStdOut, poUsePath})
+        options = {poStdErrToStdOut, poUsePath},
+        env = scrubbedGitRepositoryEnv())
       if res.exitCode == 0:
         var common = res.output.strip()
         if common.len > 0:
@@ -27453,7 +27462,8 @@ proc lockRecordAtCommitOrAncestor*(store: LockStore; project, repo, sha: string;
   try:
     let res = execCmdEx(quoteShell(gitBin) & " -C " & quoteShell(repoRoot) &
       " rev-list --first-parent --max-count=" & $maxWalk & " " &
-      quoteShell(sha), options = {poUsePath})
+      quoteShell(sha), options = {poUsePath},
+      env = scrubbedGitRepositoryEnv())
     if res.exitCode != 0: return
     for line in res.output.splitLines():
       let c = line.strip()
@@ -27825,7 +27835,7 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       try:
         let rp = execCmdEx(quoteShell(gitBin) & " -C " & quoteShell(root) &
           " rev-parse --verify --quiet " & quoteShell(args.at & "^{commit}"),
-          options = {poUsePath})
+          options = {poUsePath}, env = scrubbedGitRepositoryEnv())
         if rp.exitCode == 0: resolvedAt = rp.output.strip()
       except CatchableError:
         resolvedAt = ""
@@ -28094,7 +28104,7 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
         let rp = execCmdEx(quoteShell(gitBin) & " -C " & quoteShell(repoAbs) &
           " rev-parse --verify --quiet " &
           quoteShell(d.coordinates.revision & "^{commit}"),
-          options = {poUsePath})
+          options = {poUsePath}, env = scrubbedGitRepositoryEnv())
         if rp.exitCode != 0 or rp.output.strip().len == 0:
           result.add(LockedIntegrityFailure(name: d.name, path: d.path,
             expected: d.integrity, observed: "",
@@ -33775,7 +33785,8 @@ proc gitNoteRun(gitBin: string;
   for arg in args:
     cmd.add(" ")
     cmd.add(quoteShell(arg))
-  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath})
+  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+    env = scrubbedGitRepositoryEnv())
   (code: res.exitCode, output: res.output)
 
 proc framedCertificateRecord(cert: TestCertificate): string =

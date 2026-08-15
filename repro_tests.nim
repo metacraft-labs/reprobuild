@@ -7230,6 +7230,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_linked_worktree_pre_push_repository_env.nim",
+    binary: "build/test-bin/t_linked_worktree_pre_push_repository_env",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_local_daemons_control_plane_m0.nim",
     binary: "build/test-bin/t_local_daemons_control_plane_m0",
     defines: @[],

@@ -17,7 +17,7 @@
 ## plan is declared. Until then those modes raise ``EGitToolUnresolved``
 ## with a clear message naming the active ``--tool-provisioning=`` mode.
 
-import std/[os, osproc, strutils]
+import std/[os, osproc, strtabs, strutils]
 
 import repro_core/codec
 import repro_hash
@@ -62,6 +62,53 @@ const
     ## ``InterfaceToolUse`` we hand to ``repro_tool_profiles``. The
     ## selector also forms part of the identity digest so collisions
     ## with other typed tools cannot occur.
+
+  GitRepositoryLocalEnv* = [
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+    # These additional repository/invocation bindings are exported by some
+    # Git hook and receive-pack paths even though not every Git version lists
+    # them in `git rev-parse --local-env-vars`.
+    "GIT_NAMESPACE",
+    "GIT_QUARANTINE_PATH",
+    "GIT_INTERNAL_SUPER_PREFIX"]
+    ## Git variables whose values bind a child process to the invoking
+    ## repository. Git exports them to hooks; they must not override an
+    ## explicit `git -C <other-repository>` in cross-repository operations.
+
+  GitRepositoryLocalEnvPrefixes* = [
+    "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"]
+    ## `GIT_CONFIG_COUNT` expands to an arbitrary number of indexed key/value
+    ## variables, so the complete local environment cannot be a fixed list.
+
+proc isRepositoryLocalGitEnvKey(key: string): bool =
+  for candidate in GitRepositoryLocalEnv:
+    if key == candidate:
+      return true
+  for prefix in GitRepositoryLocalEnvPrefixes:
+    if key.startsWith(prefix):
+      return true
+
+proc scrubbedGitRepositoryEnv*(): StringTableRef =
+  ## Return the ambient process environment without Git's repository-local
+  ## bindings. All unrelated environment entries are preserved byte-for-byte.
+  result = newStringTable(modeCaseSensitive)
+  for key, value in envPairs():
+    if not isRepositoryLocalGitEnvKey(key):
+      result[key] = value
 
 proc modeName(mode: ToolProvisioningMode): string =
   case mode

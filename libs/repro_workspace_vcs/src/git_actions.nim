@@ -387,7 +387,8 @@ proc runGit(payload: GitVcsPayload; args: openArray[string];
   for arg in args:
     cmd.add(" ")
     cmd.add(quoteShell(arg))
-  let res = execCmdEx(cmd, workingDir = workingDir)
+  let res = execCmdEx(cmd, workingDir = workingDir,
+    env = scrubbedGitRepositoryEnv())
   (exitCode: res.exitCode, output: res.output)
 
 proc trimmed(value: string): string = value.strip()
@@ -1670,4 +1671,3 @@ proc queryGitState*(query: GitQueryAction;
       unmergedBranches: unmergedBranches,
       fileDetails: fileDetails
     )
-

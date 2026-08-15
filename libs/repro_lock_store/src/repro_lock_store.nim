@@ -36,6 +36,7 @@
 import std/[base64, json, options, os, osproc, streams, strtabs, strutils, tables]
 
 import evidence as workspaceVcsEvidence
+import git_tool
 
 export workspaceVcsEvidence.WorkspaceVcsEvidence
 
@@ -330,8 +331,7 @@ proc runGit(gitBin: string; args: openArray[string];
   ## Run git with stderr folded into stdout. ``extraEnv`` overlays the
   ## inherited environment (used by the separate-branch backend to point
   ## ``GIT_INDEX_FILE`` at a scratch index).
-  var env = newStringTable()
-  for k, v in envPairs(): env[k] = v
+  var env = scrubbedGitRepositoryEnv()
   for (k, v) in extraEnv: env[k] = v
   var p = startProcess(gitBin, args = @args, env = env,
     options = {poStdErrToStdOut, poUsePath})

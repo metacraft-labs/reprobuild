@@ -153,7 +153,8 @@ proc runGit(identity: GitToolIdentity;
   for arg in args:
     cmd.add(" ")
     cmd.add(q(arg))
-  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath})
+  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+    env = scrubbedGitRepositoryEnv())
   (code: res.exitCode, output: res.output)
 
 proc headSha(identity: GitToolIdentity; repoPath: string): string =
