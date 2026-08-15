@@ -875,6 +875,22 @@ test "incomplete name" and:
                 "sourceCaseCount": 1,
                 "class": "integration",
             },
+            # The linked-worktree hook regression added by this branch. Its
+            # three cases independently cover the canonical scrub helper,
+            # Workspace-VCS selection under a poisoned repository-local Git
+            # environment, and a real protocol-v2 pre-push through a linked
+            # worktree. Pin the exact source, generated binary, catalog size,
+            # and classification so the aggregate +1 source / +3 cases below
+            # cannot mask a missing or weakened enrollment.
+            "tests/integration/"
+            "t_linked_worktree_pre_push_repository_env.nim": {
+                "binary": "build/test-bin/"
+                "t_linked_worktree_pre_push_repository_env",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 3,
+                "class": "integration",
+            },
         }
         for source, expected in expected_enrollments.items():
             with self.subTest(enrolled_source=source):
@@ -1278,7 +1294,10 @@ test "incomplete name" and:
         # newly enrolled, the fail-closed gate is new (+5 specs), and upstream
         # 11cea6789 contributes the six pinned develop-selection specs above.
         # The e106faf6 runtime-loader edits add cases only, not specs.
-        self.assertEqual(len(nim_specs), 1236)
+        # This branch adds the linked-worktree regression pinned above: one
+        # source with three independently cataloged and statically scanned
+        # cases, moving 1236 -> 1237 specs.
+        self.assertEqual(len(nim_specs), 1237)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -1353,8 +1372,9 @@ test "incomplete name" and:
         # e106faf6 adds three pinned runtime-loader cases; the four recovered
         # enrollments add 29; legacy-wire + fail-closed add two host-visible
         # cases; 11cea6789 adds six. Darwin/Linux therefore move 6860/6861 to
-        # 6900/6901.
-        expected_nim_total = 6900 if sys.platform == "darwin" else 6901
+        # 6900/6901. The linked-worktree source adds the same three catalog
+        # cases on both platforms, producing the final 6903/6904.
+        expected_nim_total = 6903 if sys.platform == "darwin" else 6904
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -1413,7 +1433,7 @@ test "incomplete name" and:
         # `python_total`), so this aggregate is a backstop for them rather
         # than a place either delta can hide.
         #
-        # The final aggregate is 6946 on Darwin / 6947 on Linux: 6900/6901
+        # The final aggregate is 6949 on Darwin / 6950 on Linux: 6903/6904
         # Nim plus 46 Python. ``assert_linux_darwin_catalog_delta_is_exact``
         # pins every qualified identity on both sides of that exact delta.
         self.assertEqual(
@@ -1446,14 +1466,15 @@ test "incomplete name" and:
         # 6777; its five new one-case sources then produce 6782. The recovered
         # enrollments add 29, e106faf6 adds 3, the migration adds 3 static
         # declarations (two conditional cache cases plus fail-closed), and
-        # 11cea6789 adds six: 6823.
+        # 11cea6789 adds six: 6823. The linked-worktree source's independent
+        # static scan adds the same three cases, giving 6826.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6823,
+            6826,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
@@ -2083,10 +2104,11 @@ test "incomplete name" and:
         # entries are unchanged, so 1224 = 1225 Nim specs - 1 quarantined.
         # Four recovered enrollments plus fail-closed bring that bucket to
         # 1229; upstream 11cea6789 adds six more. The sole quarantine and five
-        # Python-static entries remain.
+        # Python-static entries remain. The linked-worktree regression is a
+        # normal built catalog entry, moving the catalog bucket 1235 -> 1236.
         self.assertEqual(
             catalog["countSourceCounts"],
-            {"catalog": 1235, "quarantined": 1, "static": 5},
+            {"catalog": 1236, "quarantined": 1, "static": 5},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         self.assertEqual(
@@ -3070,8 +3092,9 @@ test "incomplete name" and:
         # 1220 -> 1225: the five one-case develop regressions from upstream
         # `391a892a4`, pinned individually in `expected_enrollments` above.
         # Four recovered graph enrollments plus fail-closed: 1225 -> 1230;
-        # upstream 11cea6789 then adds six: 1236.
-        self.assertEqual(declared_nim_count, 1236)
+        # upstream 11cea6789 then adds six: 1236. The linked-worktree source
+        # is the one new generated graph entry, producing 1237.
+        self.assertEqual(declared_nim_count, 1237)
         self.assertEqual(declared_python_count, 5)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -3117,8 +3140,9 @@ test "incomplete name" and:
         # additional, individually pinned develop sources.
         # The recovered graph enrollments plus fail-closed move 1230 -> 1235;
         # upstream 11cea6789's six pinned sources move 1235 -> 1241.
-        # Final graph: 1236 Nim + 5 Python = 1241 entries.
-        self.assertEqual(data["static"]["testEntryCount"], 1241)
+        # The linked-worktree regression then adds one Nim entry.
+        # Final graph: 1237 Nim + 5 Python = 1242 entries.
+        self.assertEqual(data["static"]["testEntryCount"], 1242)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),
