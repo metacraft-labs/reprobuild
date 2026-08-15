@@ -80,9 +80,51 @@ and shrinking.
 - `libs/repro_standard_provider` (29 files) — the largest single concentration.
 - `repro.nim`'s Windows runtime-DLL staging edges — these resolve `clingo`,
   `zstd`, `sqlite3` and OpenSSL via `findExe` at graph-construction time and bake
-  machine-specific absolute paths into copy edges. They exist because those
-  libraries had no package entries; as each gains one, the edge should consume
-  the realized store prefix instead.
+  machine-specific absolute paths into copy edges.
+
+  **Blocked on a missing capability, not on effort.** `clingo` and `zstd` are now
+  wired packages, so the obvious fix is for the edge to copy out of the realized
+  store prefix. There is currently no way to express that:
+
+  * The `provisioning:` DSL forms accept no `env:` key — `tarball` takes
+    url / sha256 / archiveType / executablePath / packageId / cpu / os /
+    stripComponents / mirror / lockIdentity, and `nixPackage` a similar set. So a
+    package cannot export `CLINGO_ROOT=${prefix}` for consumers to address into.
+    (The `env:` field on `VersionedProvisioning` is the *harvested catalog*
+    surface, a different thing.)
+  * The engine's tool mechanism is `toolIdentityRefs`, which prepends the
+    realized tool's **bin directory to PATH**. That hands an action the
+    *executable*, not the *prefix* — enough to run `clingo`, not enough to copy
+    `clingo.dll` out from beside it.
+  * reprobuild's own recipe declares `defaultToolProvisioning "path"`, so even
+    `uses: "clingo"` resolves from ambient PATH rather than the store. That is
+    deliberate (see the bootstrap floor below) and would have to change per-tool
+    first.
+
+  Closing this needs one of: `env:` support on the provisioning forms so a
+  package can export a prefix-derived variable, or an action-time accessor such
+  as `toolPrefix("clingo")` that the engine resolves. Both are DSL/engine
+  features and a design decision, so the edges stay as they are, on the baseline,
+  until one lands.
+
+- `sqlite3` needs **no** Windows package slice, contrary to an earlier reading of
+  this list. The Windows Nim distribution ships `bin/sqlite3_64.dll` inside its
+  own tree — which is exactly where `scripts/build_apps.sh` already probes — and
+  `nim` is a wired package. A DLL-only package would also not be expressible:
+  `tarball` requires `executablePath`, and sqlite.org's DLL archive contains no
+  executable.
+
+## The bootstrap floor
+
+Native provisioning cannot retire the env.ps1 scripts for tools needed to *build*
+reprobuild itself. `scripts/build_apps.sh` must stage `clingo.dll` before
+`repro.exe` exists, and the engine is what would provision it — so
+`windows/ensure-clingo.ps1` is load-bearing and must not be deleted. The same
+applies to `nim` and `gcc`.
+
+What native provisioning does retire is the env.ps1 dependency for **recipes and
+dev-envs**, i.e. everything after a working `repro` is installed. The
+from-source bootstrap keeps its own path.
 
 ## Compile-time enforcement
 
