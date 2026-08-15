@@ -16,6 +16,35 @@ const
     "2a98164dfa3a03b42d3cdd440ce0ebc4a22ef592bf7a1161e267706e4d50a363"
   PinnedCodeTracerConfigPayloadSha256 =
     "3ce6cff73a75c6bfed6e3ed9d0fe1128dff8bca2ef5ef0e23caa5450305d299e"
+  CodeTracerProvisionAction =
+    ".github/actions/reprobuild-provision/action.yml"
+  CodeTracerRequiredNimGitlinks = [
+    (
+      path: "libs/nim-serialization",
+      revision: "9eb88077063bf7e16357e1ed6aaa7c1391b4d7c4",
+      module: "serialization.nim"
+    ),
+    (
+      path: "libs/nim-faststreams",
+      revision: "37a183153c071539ab870f427c09a1376ba311b9",
+      module: "faststreams.nim"
+    ),
+    (
+      path: "libs/nim-json-serialization",
+      revision: "f0f77c1e05955a5369a41b936f864e0a2dad54c7",
+      module: "json_serialization.nim"
+    ),
+    (
+      path: "libs/nim-stew",
+      revision: "9c3596d9de809a5933fd777cec1183c2cdf521ec",
+      module: "stew/results.nim"
+    ),
+    (
+      path: "libs/nimcrypto",
+      revision: "69eec0375dd146aede41f920c702c531bfe89c6b",
+      module: "nimcrypto.nim"
+    )
+  ]
 
 const GccProxySource = r"""
 #include <fcntl.h>
@@ -383,6 +412,157 @@ proc runShell(command: repro_test_support.CmdSpec; cwd = getCurrentDir()):
 proc requireSuccess(command: repro_test_support.CmdSpec;
                     cwd = getCurrentDir()): string =
   repro_test_support.requireSuccess(command, cwd)
+
+proc provisionedCodeTracerNimGitlinks(actionText, actionPath: string):
+    seq[string] =
+  const
+    CommandPrefix =
+      "git -C \"${WS}/codetracer\" submodule update"
+    ExactCommand = CommandPrefix &
+      " --init --depth 1 --recursive -- \\"
+
+  let lines = actionText.splitLines()
+  var blockStarts: seq[int]
+  for index, rawLine in lines:
+    let line = rawLine.strip()
+    if line.startsWith(CommandPrefix):
+      if line != ExactCommand:
+        raise newException(MissingTestFixtureError,
+          "CodeTracer CI provisioning has a malformed submodule command in " &
+          actionPath & ": " & line)
+      blockStarts.add(index)
+
+  if blockStarts.len != 1:
+    raise newException(MissingTestFixtureError,
+      "CodeTracer CI provisioning must contain exactly one pinned submodule " &
+      "command in " & actionPath & "; found " & $blockStarts.len)
+
+  var index = blockStarts[0] + 1
+  var terminated = false
+  while index < lines.len:
+    let line = lines[index].strip()
+    if line.len == 0:
+      raise newException(MissingTestFixtureError,
+        "CodeTracer CI provisioning has a blank continued submodule entry in " &
+        actionPath)
+
+    let hasContinuation = line.endsWith("\\")
+    let entry =
+      (if hasContinuation: line[0 ..< line.high] else: line).strip()
+    var validEntry = entry.startsWith("libs/") and entry.len > "libs/".len
+    for character in entry:
+      if character notin {'a'..'z', 'A'..'Z', '0'..'9', '/', '_', '-', '.'}:
+        validEntry = false
+    if not validEntry:
+      raise newException(MissingTestFixtureError,
+        "CodeTracer CI provisioning has a malformed submodule entry in " &
+        actionPath & ": " & line)
+    if entry in result:
+      raise newException(MissingTestFixtureError,
+        "CodeTracer CI provisioning repeats submodule entry '" & entry &
+        "' in " & actionPath)
+    result.add(entry)
+
+    if not hasContinuation:
+      terminated = true
+      break
+    inc index
+
+  if not terminated:
+    raise newException(MissingTestFixtureError,
+      "CodeTracer CI provisioning has an unterminated submodule command in " &
+      actionPath)
+
+proc requireCodeTracerNimGitlinkProvisioningText(actionText,
+    actionPath: string) =
+  let provisioned = provisionedCodeTracerNimGitlinks(actionText, actionPath)
+  for dependency in CodeTracerRequiredNimGitlinks:
+    if dependency.path notin provisioned:
+      raise newException(MissingTestFixtureError,
+        "CodeTracer CI provisioning omits required Nim gitlink '" &
+        dependency.path & "' from " & actionPath)
+
+proc requireCodeTracerNimGitlinkProvisioning(repoRoot: string) =
+  let actionPath = repoRoot / CodeTracerProvisionAction
+  if not fileExists(actionPath):
+    raise newException(MissingTestFixtureError,
+      "CodeTracer CI provisioning action is missing: " & actionPath)
+  requireCodeTracerNimGitlinkProvisioningText(readFile(actionPath), actionPath)
+
+proc requireCodeTracerProvisioningParserRejection(actionText, actionPath,
+    mutation: string) =
+  try:
+    requireCodeTracerNimGitlinkProvisioningText(actionText, actionPath)
+  except MissingTestFixtureError:
+    return
+  raise newException(ValueError,
+    "CodeTracer provisioning parser accepted unsafe " & mutation)
+
+proc requireCodeTracerNimGitlinkProvisioningContract(repoRoot: string) =
+  let actionPath = repoRoot / CodeTracerProvisionAction
+  if not fileExists(actionPath):
+    raise newException(MissingTestFixtureError,
+      "CodeTracer CI provisioning action is missing: " & actionPath)
+  let actionText = readFile(actionPath)
+  requireCodeTracerNimGitlinkProvisioningText(actionText, actionPath)
+
+  const
+    JsonEntry = "libs/nim-json-serialization \\"
+    Command = "git -C \"${WS}/codetracer\" submodule update --init " &
+      "--depth 1 --recursive -- \\"
+  if actionText.count(JsonEntry) != 1 or actionText.count(Command) != 1:
+    raise newException(MissingTestFixtureError,
+      "CodeTracer provisioning mutation oracle is ambiguous in " & actionPath)
+  requireCodeTracerProvisioningParserRejection(
+    actionText.replace(JsonEntry, "# " & JsonEntry), actionPath,
+    "commented-out required entry")
+  requireCodeTracerProvisioningParserRejection(
+    actionText.replace(JsonEntry, JsonEntry & "\n          " & JsonEntry),
+    actionPath, "duplicate required entry")
+  requireCodeTracerProvisioningParserRejection(
+    actionText.replace(JsonEntry,
+      "libs/nim-json-serialization unexpected \\"), actionPath,
+    "malformed required entry")
+  requireCodeTracerProvisioningParserRejection(
+    actionText.replace(Command,
+      "git -C \"${WS}/codetracer\" submodule update --init --recursive -- \\"),
+    actionPath, "malformed submodule command")
+  requireCodeTracerProvisioningParserRejection(
+    actionText & "\n" & Command & "\n  libs/duplicate-block\n", actionPath,
+    "duplicate submodule command block")
+
+proc validateCodeTracerNimGitlink(
+    dependency: tuple[path, revision, module: string]; statusOutput: string;
+    modulePresent: bool; codeTracerRoot: string) =
+  let observed = statusOutput.strip(leading = false)
+  let expectedPrefix = " " & dependency.revision & " " & dependency.path
+  let exactGitlink = observed.startsWith(expectedPrefix) and
+    (observed.len == expectedPrefix.len or
+      observed[expectedPrefix.len] in {' ', '('})
+  if exactGitlink and modulePresent:
+    return
+
+  raise newException(MissingTestFixtureError,
+    "CodeTracer Nim fixture gitlink is not ready: " & dependency.path &
+    "\n  expected revision: " & dependency.revision &
+    "\n  observed submodule status: " & observed &
+    "\n  required module: " & dependency.path / dependency.module &
+    "\n  run: git -C " & quoteShell(codeTracerRoot) &
+    " submodule update --init --depth 1 -- " & dependency.path)
+
+proc requireCodeTracerNimGitlinks(codeTracerRoot: string) =
+  for dependency in CodeTracerRequiredNimGitlinks:
+    let status = runShell(shellCommand([
+      "git", "-C", codeTracerRoot, "submodule", "status", "--",
+      dependency.path
+    ]))
+    if status.code != 0:
+      raise newException(MissingTestFixtureError,
+        "cannot inspect CodeTracer Nim fixture gitlink '" & dependency.path &
+        "': " & status.output.strip())
+    validateCodeTracerNimGitlink(dependency, status.output,
+      fileExists(codeTracerRoot / dependency.path / dependency.module),
+      codeTracerRoot)
 
 proc mustCompareLiveProjectContract(codeTracerRoot: string): bool =
   ## CI's sibling contract selects CodeTracer ``dev``. A local sibling may be
@@ -1583,7 +1763,22 @@ when defined(macosx) or defined(linux):
 
     test "selected db-backend-record target builds real native Nim binary":
       let repoRoot = getCurrentDir()
+      requireCodeTracerNimGitlinkProvisioningContract(repoRoot)
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      for dependency in CodeTracerRequiredNimGitlinks:
+        expect MissingTestFixtureError:
+          validateCodeTracerNimGitlink(dependency,
+            "-" & dependency.revision & " " & dependency.path, true,
+            codeTracerRoot)
+        expect MissingTestFixtureError:
+          validateCodeTracerNimGitlink(dependency,
+            " " & repeat('0', 40) & " " & dependency.path, true,
+            codeTracerRoot)
+        expect MissingTestFixtureError:
+          validateCodeTracerNimGitlink(dependency,
+            " " & dependency.revision & " " & dependency.path, false,
+            codeTracerRoot)
+      requireCodeTracerNimGitlinks(codeTracerRoot)
       let realProjectFile =
         pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
 
@@ -1681,7 +1876,9 @@ when defined(macosx) or defined(linux):
 
     test "selected ct target builds real native Nim binary":
       let repoRoot = getCurrentDir()
+      requireCodeTracerNimGitlinkProvisioning(repoRoot)
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      requireCodeTracerNimGitlinks(codeTracerRoot)
       let realProjectFile =
         pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
 
@@ -1783,7 +1980,9 @@ when defined(macosx) or defined(linux):
 
     test "selected codetracer aggregate builds implemented app slice":
       let repoRoot = getCurrentDir()
+      requireCodeTracerNimGitlinkProvisioning(repoRoot)
       let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
+      requireCodeTracerNimGitlinks(codeTracerRoot)
       let realProjectFile =
         pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot)
 
