@@ -349,17 +349,17 @@
     "ct-trace-format-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1783787749,
-        "narHash": "sha256-Y+OV7VXQx9Nam643t1P102VSMaXDtdZWDC4dKsLq3Lg=",
+        "lastModified": 1786674317,
+        "narHash": "sha256-feW0vlgU6JTVkCLnZ1iyS2FwjXQuRCXHr3V+27oyDAw=",
         "owner": "metacraft-labs",
         "repo": "codetracer-trace-format-nim",
-        "rev": "c2f3dfc3bcb423a939ff4d6eab42f848957f7048",
+        "rev": "bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "codetracer-trace-format-nim",
-        "rev": "c2f3dfc3bcb423a939ff4d6eab42f848957f7048",
+        "rev": "bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26",
         "type": "github"
       }
     },

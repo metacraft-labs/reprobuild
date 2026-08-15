@@ -255,7 +255,10 @@
       flake = false;
     };
     ct-trace-format-src = {
-      url = "github:metacraft-labs/codetracer-trace-format-nim/c2f3dfc3bcb423a939ff4d6eab42f848957f7048";
+      # CodeTracer 602e7bb7 imports codetracer_trace_writer/span_stream. Keep
+      # this past the span-stream writer, cumulative-index, and encoder fixes;
+      # the older c2f3dfc3 pin does not contain that module at all.
+      url = "github:metacraft-labs/codetracer-trace-format-nim/bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26";
       flake = false;
     };
     nim-stew-src = {
@@ -353,6 +356,19 @@
           # ``<dir>/ct_interpose/hook_registry.nim``), which is
           # ``ct_interpose/src`` inside the native-recorder checkout.
           ctInterposeSrc = "${codetracer-native-recorder}/ct_interpose/src";
+          # CodeTracer's top-level ct entry point imports the span-stream
+          # writer. Fail during Nix evaluation if a future pin regression
+          # silently points at a pre-span trace-format tree; otherwise the
+          # first symptom is a slow, opaque native compile failure.
+          codeTracerTraceFormatNimSrc =
+            let
+              sourceRoot = "${ct-trace-format-src}/src";
+              requiredModule = "${sourceRoot}/codetracer_trace_writer/span_stream.nim";
+            in
+            if builtins.pathExists requiredModule then
+              sourceRoot
+            else
+              throw "ct-trace-format-src must contain ${requiredModule}";
           # Build the RunQuota daemon (and CLI) from the ``runquota-src``
           # input, the same source the reprobuild client compiles against
           # (``RUNQUOTA_SRC``). Putting this on the dev-shell PATH means the
@@ -481,6 +497,7 @@
                 export NIMCRYPTO_SRC=${nimcrypto-src}
                 export BEARSSL_SRC=${bearssl-src}
                 export STACKABLE_HOOKS_SRC=${stackable-hooks-src}/src
+                export CODETRACER_TRACE_FORMAT_NIM_SRC=${codeTracerTraceFormatNimSrc}
                 export IO_MON_SRC=${io-mon-src}/src
                 export SHM_GSET_SRC=${nim-shm-gset-src}/src
                 export SHM_QUEUE_SRC=${nim-shm-queue-src}/src
@@ -557,6 +574,7 @@
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
+            CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;
             IO_MON_SRC = "${io-mon-src}/src";
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
             SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
@@ -576,13 +594,34 @@
 
             installPhase = ''
               runHook preInstall
-              mkdir -p "$out/bin" "$out/lib"
+              mkdir -p "$out/bin" "$out/lib" \
+                "$out/share/reprobuild/nim-macro-sourcemaps/bin" \
+                "$out/share/reprobuild/nim-macro-sourcemaps/lib"
               for bin in build/bin/*; do
-                install -m755 "$bin" "$out/bin/$(basename "$bin")"
+                case "$bin" in
+                  *.json)
+                    # Nim emits macro source maps next to compiled binaries.
+                    # Keep them as package data, outside the public entry-point
+                    # directory audited for executable runtime roles.
+                    install -m644 "$bin" \
+                      "$out/share/reprobuild/nim-macro-sourcemaps/bin/$(basename "$bin")"
+                    ;;
+                  *)
+                    install -m755 "$bin" "$out/bin/$(basename "$bin")"
+                    ;;
+                esac
               done
               for lib in build/lib/*; do
                 [ -e "$lib" ] || continue
-                install -m755 "$lib" "$out/lib/$(basename "$lib")"
+                case "$lib" in
+                  *.json)
+                    install -m644 "$lib" \
+                      "$out/share/reprobuild/nim-macro-sourcemaps/lib/$(basename "$lib")"
+                    ;;
+                  *)
+                    install -m755 "$lib" "$out/lib/$(basename "$lib")"
+                    ;;
+                esac
               done
 
               # `reprobuild-nix-daemon` is the helper that `tool-provisioning=nix`
@@ -658,6 +697,7 @@
               # or DYLD_* into wrappers because arbitrary user build actions
               # inherit the wrapper environment.
               for b in "$out"/bin/*; do
+                test -x "$b" || continue
                 wrapProgram "$b" \
                   --set-default REPROBUILD_RUNTIME_LIBRARY_PATH ${runtimeLibraryPath} \
                   --set-default REPROBUILD_SOURCE_ROOT ${reprobuildSource} \
@@ -665,6 +705,7 @@
                   --set-default NIMCRYPTO_SRC ${nimcrypto-src} \
                   --set-default BEARSSL_SRC ${bearssl-src} \
                   --set-default STACKABLE_HOOKS_SRC ${stackable-hooks-src}/src \
+                  --set-default CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \
                   --set-default IO_MON_SRC ${io-mon-src}/src \
                   --set-default SHM_GSET_SRC ${nim-shm-gset-src}/src \
                   --set-default SHM_QUEUE_SRC ${nim-shm-queue-src}/src \
@@ -710,7 +751,6 @@
                 ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
                   pkgs.binutils
                   pkgs.cctools
-                  pkgs.darwin.sigtool
                 ];
               }
               ''
@@ -782,6 +822,10 @@
                                     for wrapper in ${reprobuild}/bin/*; do
                                       name=$(basename "$wrapper")
                                       hidden=${reprobuild}/bin/.$name-wrapped
+                                      if test ! -x "$wrapper"; then
+                                        echo "unexpected non-executable bin artifact: $wrapper" >&2
+                                        exit 1
+                                      fi
                                       test -f "$hidden"
                                       grep -Fq "$hidden" "$wrapper"
                                       if grep -Eq 'LD_LIBRARY_PATH|DYLD_(LIBRARY_PATH|FALLBACK_LIBRARY_PATH)' "$wrapper"; then
@@ -798,6 +842,7 @@
                 NIMCRYPTO_SRC|${nimcrypto-src}
                 BEARSSL_SRC|${bearssl-src}
                 STACKABLE_HOOKS_SRC|${stackable-hooks-src}/src
+                CODETRACER_TRACE_FORMAT_NIM_SRC|${codeTracerTraceFormatNimSrc}
                 IO_MON_SRC|${io-mon-src}/src
                 SHM_GSET_SRC|${nim-shm-gset-src}/src
                 SHM_QUEUE_SRC|${nim-shm-queue-src}/src
@@ -856,7 +901,11 @@
                                       # Linux-hosted behavioral fixture. It resolves dependency
                                       # tokens against each architecture's own LC_RPATH list and
                                       # verifies final arm signatures after postFixup mutation.
-                                      ${pkgs.bash}/bin/bash ${./scripts/audit_macho_runtime.sh} \
+                                      # nixpkgs' sigtool only implements signing, so use Apple's
+                                      # verifier explicitly rather than whichever `codesign`
+                                      # happens to occur first on the build PATH.
+                                      CODESIGN=/usr/bin/codesign \
+                                        ${pkgs.bash}/bin/bash ${./scripts/audit_macho_runtime.sh} \
                                         ${reprobuild} \
                                         ${blake3Prefix}/lib \
                                         ${pkgs.xxHash}/lib \
@@ -865,26 +914,27 @@
                                         ${pkgs.zstd.out}/lib \
                                         ${pkgs.clingo}/lib
 
-                                      # Prove the installed program bytes use LC_RPATH-aware
-                                      # dlopen names, not bare leaf names. The pure target helper
-                                      # tests pin the same constants on Linux before this gate.
+                                      # Prove the installed program bytes contain the exact
+                                      # LC_RPATH-aware dlopen names. The pure target helper tests
+                                      # reject bare Darwin constants on Linux; the isolated runtime
+                                      # exercises below then load clingo through the installed image.
                                       zstdLoaderCount=0
                                       clingoLoaderCount=0
                                       for candidate in ${reprobuild}/bin/.*-wrapped ${reprobuild}/lib/*; do
                                         if lipo -archs "$candidate" >/dev/null 2>&1; then
-                                          loaderStrings=$(strings "$candidate")
-                                          if printf '%s\n' "$loaderStrings" | grep -Fxq '@rpath/libzstd.1.dylib'; then
+                                          # Nim's emitted string objects expose one printable
+                                          # metadata byte (`@`) immediately before their text to
+                                          # GNU strings. Remove that byte before comparing the
+                                          # exact loader constant.
+                                          loaderStrings=$(strings "$candidate" | sed -e 's/^@//')
+                                          if grep -Fxq '@rpath/libzstd.1.dylib' <<< "$loaderStrings"; then
                                             zstdLoaderCount=$((zstdLoaderCount + 1))
                                           fi
-                                          if printf '%s\n' "$loaderStrings" | grep -Fxq '@rpath/libclingo.dylib'; then
+                                          if grep -Fxq '@rpath/libclingo.dylib' <<< "$loaderStrings"; then
                                             clingoLoaderCount=$((clingoLoaderCount + 1))
                                           fi
-                                          if printf '%s\n' "$loaderStrings" | grep -Fxq 'libzstd.1.dylib'; then
+                                          if grep -Fxq 'libzstd.1.dylib' <<< "$loaderStrings"; then
                                             echo "bare zstd Darwin loader name in $candidate" >&2
-                                            exit 1
-                                          fi
-                                          if printf '%s\n' "$loaderStrings" | grep -Fxq 'libclingo.dylib'; then
-                                            echo "bare clingo Darwin loader name in $candidate" >&2
                                             exit 1
                                           fi
                                         fi
@@ -997,6 +1047,7 @@
                                       ${nimcrypto-src} \
                                       ${bearssl-src} \
                                       ${stackable-hooks-src} \
+                                      ${ct-trace-format-src} \
                                       ${io-mon-src} \
                                       ${nim-shm-gset-src} \
                                       ${nim-shm-queue-src} \
@@ -1157,6 +1208,7 @@
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
+            CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;
             IO_MON_SRC = "${io-mon-src}/src";
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
             SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";

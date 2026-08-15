@@ -788,7 +788,20 @@ proc linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot: string) =
               "nim-agent-harbor", "nim-agents", "nim-everywhere",
               "nim-shm-gset", "nim-shm-queue", "nim-stackable-hooks"]:
     var sourcePath = codeTracerRoot.parentDir / dep
-    if dep == "isonim":
+    if dep == "codetracer-trace-format-nim":
+      # The CodeTracer checkout's sibling may be on a different revision than
+      # Reprobuild's flake pin. Mixing modules from both trees can compile the
+      # pinned span_stream beside a stale codetracer_ct_print_lib, so the
+      # canonical Nix test fixture must materialize the explicit source as one
+      # coherent package.
+      let pinnedSource = getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC")
+      if pinnedSource.len > 0:
+        sourcePath =
+          if pinnedSource.lastPathPart == "src": pinnedSource.parentDir
+          else: pinnedSource
+        check fileExists(sourcePath / "src" /
+          "codetracer_trace_writer" / "span_stream.nim")
+    elif dep == "isonim":
       # This override selects the source copied into the disposable fixture;
       # unlike ISONIM_SRC it is deliberately not inherited by build actions.
       # That keeps the test exercising the prepared fixture and its patches.
@@ -979,7 +992,13 @@ proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   let sourcePath = binDir / "gcc-proxy.c"
   let gccPath = binDir / "gcc"
   let clangPath = binDir / "clang"
-  let realGcc = findExe("gcc")
+  # Apple's signed /usr/bin/gcc tool shim strips DYLD interposition across
+  # exec, which makes an otherwise successful compile report an unmonitored
+  # subtree and prevents a sound action-cache publish. The dev-shell clang is
+  # unsigned, injectable, and already carries the pinned SDK/toolchain paths.
+  let realGcc = findExe(
+    when defined(macosx): "clang"
+    else: "gcc")
   check realGcc.len > 0
   writeFile(sourcePath, GccProxySource.replace("@REAL_GCC_PATH@", realGcc))
   discard requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
@@ -1077,7 +1096,9 @@ proc nativeLibraryEnv(repoRoot: string): seq[(string, string)] =
     "nixpkgs#openssl.out",
     "nixpkgs#sqlite.out",
     "nixpkgs#pcre.out",
-    "nixpkgs#libzip.out"
+    "nixpkgs#libzip.out",
+    # The pinned trace-format span reader links zstd directly with -lzstd.
+    "nixpkgs#zstd.out"
   ]
   when defined(linux):
     packages.add("nixpkgs#libbpf")
@@ -1087,9 +1108,9 @@ proc nativeLibraryEnv(repoRoot: string): seq[(string, string)] =
   let output = requireSuccess(shellCommand(packages), repoRoot)
   let storePaths = nixStorePaths(output)
   when defined(linux):
-    check storePaths.len >= 7
+    check storePaths.len >= 8
   else:
-    check storePaths.len >= 4
+    check storePaths.len >= 5
 
   var libraryPaths: seq[string] = @[]
   var includePaths: seq[string] = @[]
