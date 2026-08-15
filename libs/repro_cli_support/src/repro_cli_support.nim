@@ -24655,7 +24655,21 @@ proc cloneOrgRootRepo(identity: GitToolIdentity;
   ## Clone the org root workspace repo at ``url`` into ``destination`` (a
   ## fresh named directory). Best-effort; returns a structured failure so
   ## the caller can report a clear error instead of crashing.
-  var cmd = quoteShell(identity.binaryPath) & " clone " & quoteShell(url) &
+  ##
+  ## ``--recurse-submodules`` because the root repo's submodules are part of
+  ## the workspace, not of some repo inside it. Reprobuild treats a develop-mode
+  ## sibling as a submodule REPLACEMENT and so declares member repos in the
+  ## manifest — but that rule governs the repos the manifest owns, and says
+  ## nothing about the root repo's own git dependencies. Cloning it plainly
+  ## left every such path an empty directory in a forked or freshly-joined
+  ## workspace: present enough that nothing reported it missing, empty enough
+  ## that whatever needed it failed later and elsewhere. (On Windows the
+  ## visible symptom was `reprobuild/env.ps1` aborting on a missing
+  ## `../repo-workspaces/env.ps1`, so a brand-new workspace could not build.)
+  ##
+  ## A repo with no submodules is unaffected — the flag is a no-op there.
+  var cmd = quoteShell(identity.binaryPath) &
+    " clone --recurse-submodules " & quoteShell(url) &
     " " & quoteShell(destination)
   let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath})
   if res.exitCode != 0:
