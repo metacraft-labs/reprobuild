@@ -13,6 +13,34 @@
 codetracer=dev
 codetracer-trace-format-nim=dev
 
+# The two siblings CodeTracer's own build REQUIRES, as opposed to the ones its
+# Nim `--path` merely prefers. `scripts/build-once.sh` refuses to start without
+# them and names them, which is the failure this declaration exists to prevent:
+#
+#   * codetracer-trace-format — five `path = "../../../codetracer-trace-format/
+#     ..."` dependencies in `src/db-backend/Cargo.toml`. cargo cannot parse the
+#     manifest at all without it.
+#   * codetracer-native-recorder — `src/db-backend/build.rs` compiles the Nim
+#     MCR emulator out of `ct_emulator/` and links it; without it the db-backend
+#     link fails with 81 undefined `mcr*` symbols.
+#
+# Neither appears in CodeTracer's committed `repro.lock`, so `repro develop
+# --all` cannot supply them: they are not dependency-graph nodes, they are
+# adjacent source trees the build reads directly. They have to be declared here
+# or they are not cloned at all.
+#
+# They were missing, and the Test job only passed on hosts where an earlier job
+# happened to have left them behind: mcl-001/003/005 passed, mcl-002/004 failed
+# with "Cannot start the CodeTracer build: 2 required sibling repo(s) are
+# missing". A check whose outcome depends on which runner picked up the job is
+# not a check.
+#
+# Refs match the inputs CodeTracer's own `flake.nix` pins: trace-format at
+# `main`, native-recorder at `dev` (db-backend's emulator FFI contract moves
+# with recorder dev; `stable` is only the last released snapshot).
+codetracer-trace-format=main
+codetracer-native-recorder=dev
+
 # codetracer's `ct` binary (built via codetracer/reprobuild.nim's `ct` target so
 # ct_incremental_adapter can exec `ct test --incremental`) imports the IsoNim UI
 # stack and the shared Nim agent libs, so its Nim compile needs these adjacent on
