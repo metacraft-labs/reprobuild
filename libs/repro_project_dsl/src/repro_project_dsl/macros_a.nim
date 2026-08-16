@@ -1686,8 +1686,13 @@ proc packageLiteral(pkg: PackageDef): string =
   for libIndex, lib in pkg.libraries:
     if libIndex > 0:
       result.add(", ")
+    # ``exportedPath`` was parsed by the body loop but omitted here, so a
+    # ``library foo: exportedPath: "…"`` declaration silently lost its value on
+    # the way to the emitted literal — the setter appeared to work and produced
+    # a LibraryDef whose exportedPath was always "".
     result.add("LibraryDef(name: " & escForCode(lib.name) &
       ", kind: " & $lib.kind &
+      ", exportedPath: " & escForCode(lib.exportedPath) &
       ", sourceFile: " & escForCode(lib.sourceFile) &
       ", sourceLine: " & $lib.sourceLine & ")")
   # Recipe-Val M8: emit the package-level multi-output partition list.

@@ -131,9 +131,51 @@ is `Library/bin` from conda-forge on Windows and `lib` from nixpkgs on
 Linux/macOS. Two styles should work, and today neither does:
 
 **`when` statements.** These are the obvious smoothing tool, but the DSL bodies
-silently drop them (see above). Supporting them means teaching the relevant
-macros to handle `nnkWhenStmt` by evaluating the active branch, instead of
-falling into the catch-all `discard`.
+silently drop them (see above).
+
+The wrong way to support them is to teach the macro to *evaluate* the `when` —
+to look at the condition, decide which branch is live, and take the value. That
+is an evaluator inside a macro, and it can never cover the ways an expression
+may legitimately be written. It also fails the same way the current setters do:
+by rejecting or ignoring anything it does not recognise.
+
+The right way is a **transformation**: rewrite the DSL body into ordinary Nim
+and let the compiler do what it already does. Emit the `when` into the generated
+code with its condition untouched, recursing into each branch to turn setters
+into assignments:
+
+```nim
+# from
+library clingo:
+  kind: shared
+  when defined(windows): exportedPath: "Library/bin"
+  else:                  exportedPath: sharedLibDir(plUnix)
+
+# emit
+block:
+  var lib = LibraryDef(name: "clingo", kind: lkShared)
+  when defined(windows): lib.exportedPath = "Library/bin"
+  else:                  lib.exportedPath = sharedLibDir(plUnix)
+  registerLibrary(lib)
+```
+
+The macro never inspects the condition or the value. Nim resolves both.
+
+### Why the current design forces the evaluator
+
+`macros_a.nim` builds a compile-time `LibraryDef` and then **re-serialises it
+back into Nim source text** (`result.add("LibraryDef(name: " & escForCode(...)`).
+Because the generated source must contain a literal, the macro has to already
+know the value — hence `stringLiteral()` and "requires a string literal". The
+evaluator is not an accident of this code; it is what re-serialisation demands.
+
+The same file already contains the correct pattern, for typed outputs: the M1
+"reparse" hook stores the user's expression as the `.repr` of the source
+`NimNode` and inlines it *verbatim* into the generated source, so the outer
+`parseStmt` re-parses it in the call-site scope. Its own comment says "Inline the
+user's pathExpr source verbatim". Applying that to the setters — store
+`node.repr`, emit it unchanged — removes the literal restriction without any
+evaluation, and makes helper calls work for free.
 
 **Reusable platform abstractions.** Better than scattering `when` at every
 declaration: a shared vocabulary of prefix layouts, e.g.
@@ -149,14 +191,14 @@ func sharedLibDir*(layout: PrefixLayout): string
 ```
 
 so a package writes `sharedLibDir(plConda)` rather than a bare string, and the
-layout is named once and reused. This needs a second macro change: the setters
-currently demand a **string literal** (`error("… requires a string literal")`),
-so a `const` or `func` call is rejected. They would need to accept any
-const-foldable expression.
+layout is named once and reused. Note the axis: the layout follows the
+**provisioning source** (conda-forge vs nixpkgs vs a bare zip), with the
+platform only correlating — so the vocabulary should name layouts, not
+operating systems.
 
-Both changes are small and belong together — a per-platform value is only
-useful if it can be produced by a helper, and a helper is only useful if the
-setter accepts one.
+This needs no separate mechanism. Once the setters inline the user's expression
+verbatim instead of demanding a literal, a `func` call is just another
+expression the compiler resolves. The two changes are one change.
 - **The bootstrap floor still applies.** None of this helps `repro.exe` find
   `clingo.dll` while it is *being built* — the engine cannot prepare an
   execution environment for the binary that runs the engine. Build-time staging
