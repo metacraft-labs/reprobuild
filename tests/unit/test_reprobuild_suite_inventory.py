@@ -910,13 +910,17 @@ test "incomplete name" and:
             # invisible to them, which is how the +4 on
             # `t_branch_forks_new_workspace_on_feature_branch.nim` once hid.
             # 1 suite / 5 cases -> 2 suites / 8 cases.
+            # 8 -> 10 (RA-30): the two anchoring cases — a lock is filed under
+            # the repo whose commit fired the hook, and an undeclared
+            # triggering checkout writes none at all. Both land in the
+            # existing M19b suite, so `sourceSuiteCount` is unchanged.
             "tests/integration/"
             "t_workspace_post_commit_lock_refresh_is_best_effort.nim": {
                 "binary": "build/test-bin/"
                 "t_workspace_post_commit_lock_refresh_is_best_effort",
                 "language": "nim",
                 "sourceSuiteCount": 2,
-                "sourceCaseCount": 8,
+                "sourceCaseCount": 10,
                 "class": "integration",
             },
         }
@@ -1416,12 +1420,21 @@ test "incomplete name" and:
         # 6906/6907 -> 6907/6908: the one discarded-checkout case added to
         # `t_sync_clones_commit_pinned_repo.nim`, pinned per source in
         # `expected_enrollments` above. It arrived without either aggregate
-        # moving, which is what this recompute repairs. Recomputed, not
+        # moving, which is what that recompute repaired. Recomputed, not
         # bumped: that binary was rebuilt first and the number read out of a
         # live `build_inventory` (`nim_total` 6908 on Linux, with 1237 specs,
         # no missing binary and nothing source-newer-than-binary). The case is
         # unconditional, so the Linux-vs-Darwin delta is still +1.
-        expected_nim_total = 6907 if sys.platform == "darwin" else 6908
+        #
+        # 6907/6908 -> 6909/6910: the two RA-30 anchoring cases added to
+        # `t_workspace_post_commit_lock_refresh_is_best_effort.nim`, pinned per
+        # source in `expected_enrollments` above. Recomputed the same way —
+        # read out of a live `build_inventory` after rebuilding that binary,
+        # never bumped by the size of the diff. On the rebase onto the repaired
+        # base the whole measurement was taken again rather than the +2 carried
+        # arithmetically over a moved baseline. Both cases are unconditional
+        # too, so the Linux-vs-Darwin delta is still +1.
+        expected_nim_total = 6909 if sys.platform == "darwin" else 6910
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -1484,15 +1497,19 @@ test "incomplete name" and:
         # ``assert_linux_darwin_catalog_delta_is_exact`` pins every qualified
         # identity on both sides of that exact delta.
         #
-        # This change moves it 6949/6950 -> 6952/6953 = 6906/6907 nim + 46
-        # python. All +3 is nim; the python half is untouched, which is why
-        # the aggregate is stated relative to `expected_nim_total` rather
-        # than as an independent literal that could drift away from it.
+        # The publication-reporting change moved it 6949/6950 -> 6952/6953 =
+        # 6906/6907 nim + 46 python. All +3 was nim; the python half was
+        # untouched, which is why the aggregate is stated relative to
+        # `expected_nim_total` rather than as an independent literal that could
+        # drift away from it.
         #
-        # The discarded-checkout recompute moves it again, 6952/6953 ->
-        # 6953/6954 = 6907/6908 nim + 46 python, and it moves without this
-        # line being touched — which is the point of keeping it symbolic. The
-        # measured `data["static"]["sourceCaseCount"]` on Linux is 6954.
+        # The discarded-checkout recompute moved it again, 6952/6953 ->
+        # 6953/6954 = 6907/6908 nim + 46 python, and it moved without this line
+        # being touched — which is the point of keeping it symbolic.
+        #
+        # This change moves it to 6955/6956 = 6909/6910 nim + 46 python. All +2
+        # is nim (the two RA-30 anchoring cases); the python half is untouched
+        # again, and this line still does not have to move for it.
         self.assertEqual(
             data["static"]["sourceCaseCount"], expected_nim_total + 46
         )
@@ -1538,13 +1555,18 @@ test "incomplete name" and:
         # text and `nim_total` reads the REBUILT BINARY; they were derived
         # independently and both moved by exactly one, which is what makes
         # "one new case" a fact about the suite rather than about one surface.
+        #
+        # 6830 -> 6832 = +2, the same +2 `nim_total` moved by, and the whole of
+        # it is the one grown source. Source scan and binary catalog agreeing
+        # on the same +2 is what makes "two new cases" a fact about the suite
+        # rather than about one surface.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6830,
+            6832,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):

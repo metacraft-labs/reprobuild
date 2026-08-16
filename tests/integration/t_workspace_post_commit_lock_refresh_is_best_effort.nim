@@ -280,15 +280,19 @@ proc publishLockStore(gitBin: string; fx: M19Fixture) =
     " commit -m \"Publish workspace lock entries\"")
   discard requireGit(q(gitBin) & " -C " & q(store) & " push origin main")
 
-proc commitInLibA(gitBin: string; fx: M19Fixture; fileName: string): string =
-  ## Add one unpushed commit to lib-a and return its SHA. Post-commit's real
-  ## trigger: a commit that has NOT reached its remote yet.
-  let libAPath = fx.workspaceRoot / "lib-a"
-  writeFile(libAPath / fileName, fileName & "\n")
-  discard requireGit(q(gitBin) & " -C " & q(libAPath) & " add " & q(fileName))
-  discard requireGit(q(gitBin) & " -C " & q(libAPath) &
+proc commitInRepo(gitBin: string; fx: M19Fixture;
+                  repoDir, fileName: string): string =
+  ## Add one unpushed commit to ``<workspace>/<repoDir>`` and return its SHA.
+  ## Post-commit's real trigger: a commit that has NOT reached its remote yet.
+  let repoPath = fx.workspaceRoot / repoDir
+  writeFile(repoPath / fileName, fileName & "\n")
+  discard requireGit(q(gitBin) & " -C " & q(repoPath) & " add " & q(fileName))
+  discard requireGit(q(gitBin) & " -C " & q(repoPath) &
     " commit -m " & q("commit " & fileName))
-  requireGit(q(gitBin) & " -C " & q(libAPath) & " rev-parse HEAD").strip()
+  requireGit(q(gitBin) & " -C " & q(repoPath) & " rev-parse HEAD").strip()
+
+proc commitInLibA(gitBin: string; fx: M19Fixture; fileName: string): string =
+  commitInRepo(gitBin, fx, "lib-a", fileName)
 
 proc readPostCommitLog(fx: M19Fixture): string =
   let logPath = fx.workspaceRoot / ".repro" / "workspace" /
@@ -680,3 +684,90 @@ suite "M19b — post-commit reports publication, not just the write":
       # blocked commits would be a worse defect than the one it reports.
       check res.output.contains("repro post-commit:")
       check res.output.contains("ALREADY-PUSHED")
+
+  test "test_ra30_lock_is_anchored_at_the_repo_whose_commit_fired_the_hook":
+    ## RA-30 — the anchor is the addressing scheme, not a label.
+    ##
+    ## A consumer resolves a lock at ``locks/<project>/<repo>/<sha>`` for the
+    ## COMMIT UNDER TEST: the `clone-siblings` CI action probes exactly that
+    ## path for the pushed repo and fails the job when it is absent. So a lock
+    ## written for a lib-b commit but filed under lib-a is not "filed
+    ## differently" — it is unreachable, keyed by a SHA (lib-a's HEAD) that no
+    ## consumer of lib-b will ever look up.
+    ##
+    ## Every case above this one dispatches from lib-a, which is BOTH the
+    ## project name and the fallback anchor, so they cannot tell a resolved
+    ## anchor from a defaulted one. This one dispatches from lib-b.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "anchor")
+      defer: removeDir(fx.scratch)
+      cloneAll(gitBin, fx)
+      seedWorkspaceToml(fx)
+
+      let libBSha = commitInRepo(gitBin, fx, "lib-b", "in-lib-b.txt")
+      check libBSha != fx.libA.sha
+
+      let res = invokePostCommit(fx, fx.workspaceRoot / "lib-b")
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      let report = readPostCommitReport(fx)
+      check report["lockWritten"].getBool()
+      # The trigger is the committed repo and ITS new commit — not the
+      # project-named repo and not lib-a's untouched HEAD.
+      check report["triggerRepo"].getStr() == "lib-b"
+      check report["triggerSha"].getStr() == libBSha
+
+      let lockPath = report["lockFilePath"].getStr()
+      check lockPath == fx.workspaceRoot / ".repro" / "manifests" /
+        "locks" / "lib-a" / "lib-b" / (libBSha & ".toml")
+      check fileExists(lockPath)
+
+      # ...and nothing was filed under the project anchor. Before RA-30 this
+      # exact run wrote ``locks/lib-a/lib-a/<lib-a HEAD>.toml``: a record whose
+      # name claimed a commit the hook never saw.
+      check not dirExists(fx.workspaceRoot / ".repro" / "manifests" /
+        "locks" / "lib-a" / "lib-a")
+
+      # The body is still the whole workspace — only the ADDRESS changed.
+      let body = readFile(lockPath)
+      check body.contains("revision = \"" & libBSha & "\"")
+      check body.contains("revision = \"" & fx.libA.sha & "\"")
+      check body.contains("revision = \"" & fx.libC.sha & "\"")
+
+  test "test_ra30_undeclared_triggering_repo_writes_no_lock_and_says_so":
+    ## The other half of the same decision. When the hook fires in a checkout
+    ## the project does not declare, there is no anchor that any consumer of
+    ## that checkout could resolve, so there is no lock worth writing. The old
+    ## fallback wrote one anyway, under the project anchor's name and SHA.
+    ##
+    ## Refusing is the honest answer, and post-commit's contract still holds:
+    ## it says what did not happen, at the terminal, and exits 0.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "undeclared")
+      defer: removeDir(fx.scratch)
+      cloneAll(gitBin, fx)
+      seedWorkspaceToml(fx)
+
+      # The lock store itself is a git checkout inside the workspace, and it
+      # is emphatically not a declared project repo.
+      let undeclared = lockStoreRoot(fx)
+      let res = invokePostCommit(fx, undeclared)
+      check res.code == 0
+
+      let report = readPostCommitReport(fx)
+      check report["outcome"].getStr() == "no-lock-failed"
+      check not report["lockWritten"].getBool()
+      check report["diagnostic"].getStr().contains("is not declared in project")
+      check report["diagnostic"].getStr().contains("NO lock written")
+      check res.output.contains("repro post-commit:")
+
+      check not dirExists(fx.workspaceRoot / ".repro" / "manifests" /
+        "locks" / "lib-a" / "lib-a")
