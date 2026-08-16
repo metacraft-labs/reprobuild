@@ -30478,6 +30478,37 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # same file, so "replaced an existing lock" is simply "the lock file
   # already existed on disk before this write".
   let lockAlreadyExisted = fileExists(lockPath)
+  # RA-31 — "a file is at that path" and "a record is published there" are
+  # different claims, and only the second one is immutable.
+  #
+  # The refusal below exists to stop a re-run from REWRITING AN ALREADY-TRACKED
+  # RECORD (its own wording). It was testing ``fileExists``, which also matches
+  # a file this same workspace wrote moments ago and has not committed. Two
+  # hooks legitimately address the same key: post-commit writes
+  # ``locks/<p>/<repo>/<sha>`` when the commit lands, and the pre-push gate
+  # writes the same key when that commit is pushed. Between them the OTHER
+  # repos in the workspace may move — the key is (trigger repo, trigger sha),
+  # so it does not change when a sibling commits. The gate then found its own
+  # uncommitted draft, saw different coordinates for the siblings, and refused
+  # the push:
+  #
+  #   lock-failure — immutable lock record already exists at
+  #   'locks/app/lib/<libSha>.toml' with different repository coordinates
+  #   (changed paths: app, other)
+  #
+  # The draft was strictly LESS complete than the record the gate was about to
+  # write; superseding it is what "create or refresh the lock" means. Only a
+  # record git is tracking is history, and history is what must not be
+  # rewritten. An untracked path is a draft.
+  let lockRelForTracking =
+    if manifestLayerRoot.len > 0 and lockPath.startsWith(manifestLayerRoot):
+      lockPath[manifestLayerRoot.len .. ^1].strip(
+        chars = {DirSep, '/'}, trailing = false).replace('\\', '/')
+    else: ""
+  let lockAlreadyPublished =
+    lockAlreadyExisted and lockRelForTracking.len > 0 and
+      gitRunPlain(identity, ["-C", manifestLayerRoot, "ls-files",
+        "--error-unmatch", "--", lockRelForTracking]).code == 0
   # HL-2 (§6 Decision 1) — the monolithic trigger-keyed ``writeLockFile`` is
   # kept ONLY for the no-explicit-route single-tier shape (today's common
   # ``.repo/manifests`` workspace), where it stays BYTE-IDENTICAL to pre-HL-2.
@@ -30494,7 +30525,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # to the process CWD and scatter a ``locks/`` tree wherever the gate happened
   # to run. Public-only workspaces write no manifest lock at all.
   if not composed.hasExplicitRoutes and manifestLayerRoot.len > 0:
-    if lockAlreadyExisted:
+    if lockAlreadyPublished:
       # The path is content-addressed by the exact trigger commit and lock
       # publication accepts canonical additions only. Re-running a gate must
       # therefore never rewrite an already-tracked record merely because
@@ -30502,6 +30533,10 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
       # immutable record only when its complete path→revision coordinate map is
       # identical to the state we would write; otherwise fail closed instead of
       # turning an addition into a mutable lock-history update.
+      #
+      # RA-31 — gated on TRACKED, not on present-on-disk. An untracked file at
+      # this path is this workspace's own unpublished draft (see above); it is
+      # overwritten by the ``else`` arm rather than defended.
       let existingShas = shasFromBody(readFile(lockPath))
       var sameCoordinates = existingShas.len == lock.repos.len
       var mismatchedPaths: seq[string]

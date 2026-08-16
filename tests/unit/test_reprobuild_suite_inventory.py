@@ -915,12 +915,21 @@ test "incomplete name" and:
             # triggering checkout writes none at all. Both land in the
             # existing M19b suite, so `sourceSuiteCount` is unchanged.
             "tests/integration/"
+            # 10 -> 12: the two RA-31 cases pinning that the gate may
+            # supersede its OWN unpublished lock draft but still refuses a
+            # TRACKED record. Recomputed, not bumped: the binary was rebuilt
+            # from the source that carries them and its own `--list-json`
+            # counted (12); the independent static scan of the source agrees
+            # (12). Both are unconditional -- they `skip()` when `git` is
+            # absent rather than declaring themselves away -- so they move
+            # Linux and Darwin alike and the exact platform delta is
+            # untouched.
             "t_workspace_post_commit_lock_refresh_is_best_effort.nim": {
                 "binary": "build/test-bin/"
                 "t_workspace_post_commit_lock_refresh_is_best_effort",
                 "language": "nim",
                 "sourceSuiteCount": 2,
-                "sourceCaseCount": 10,
+                "sourceCaseCount": 12,
                 "class": "integration",
             },
             # The `repro develop --all` post-condition added by this branch.
@@ -1482,7 +1491,16 @@ test "incomplete name" and:
         # bumped: both binaries were built and each reported one case through
         # its own `--list-json`; the static scan agrees on both. Both are
         # unconditional, so the Linux-vs-Darwin delta is still +1.
-        expected_nim_total = 6911 if sys.platform == "darwin" else 6912
+        #
+        # 6911/6912 -> 6913/6914: the two RA-31 cases added to
+        # `t_workspace_post_commit_lock_refresh_is_best_effort.nim`, pinned per
+        # source in `expected_enrollments` above. Recomputed, not bumped: that
+        # binary was rebuilt first and the number read out of a live
+        # `build_inventory` (`nim_total` 6914 on Linux, with 1244 specs, no
+        # missing binary and nothing source-newer-than-binary). The catalog sum
+        # over the REBUILT BINARIES independently reads 6914 too. Both cases
+        # are unconditional, so the Linux-vs-Darwin delta is still +1.
+        expected_nim_total = 6913 if sys.platform == "darwin" else 6914
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -1564,6 +1582,11 @@ test "incomplete name" and:
         # two one-case sources the graph regeneration enrols. Python is
         # untouched a third time, and the measured
         # `data["static"]["sourceCaseCount"]` on Linux is 6958.
+        #
+        # The RA-31 recompute moves it again, 6957/6958 -> 6959/6960 =
+        # 6913/6914 nim + 46 python, and it moves without this line being
+        # touched — which is the point of keeping it symbolic. The measured
+        # `data["static"]["sourceCaseCount"]` on Linux is 6960.
         self.assertEqual(
             data["static"]["sourceCaseCount"], expected_nim_total + 46
         )
@@ -1618,13 +1641,21 @@ test "incomplete name" and:
         # 6832 -> 6834 = +2, the same +2 `nim_total` moved by: one statically
         # visible case in each of the two newly enrolled sources, each
         # independently matching its binary's one-case catalog.
+        #
+        # 6834 -> 6836 = +2, the same +2 `nim_total` moved by, and the whole of
+        # it is the two RA-31 cases in
+        # `t_workspace_post_commit_lock_refresh_is_best_effort.nim`. This scan
+        # reads the SOURCE text and `nim_total` reads the REBUILT BINARY; they
+        # were derived independently and both moved by exactly two, which is
+        # what makes "two new cases" a fact about the suite rather than about
+        # either surface.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6834,
+            6836,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
