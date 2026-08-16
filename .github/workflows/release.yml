@@ -140,88 +140,66 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ── Windows: make `bash` reachable before anything needs it ────────────
+      # ── Windows: fail fast, and legibly, if the image has no Git ───────────
       #
-      # This is the fix for the failure that killed the Windows leg on EVERY
-      # release attempt, including the most recent one:
+      # Git for Windows supplies bash.exe. Without it this workflow dies with
+      # `##[error]bash: command not found` inside the FIRST step of
+      # setup-dev-env (its `shell: bash` env-flavor check), and actions/checkout
+      # above silently degrades to the REST-API tarball, logging "add Git 2.18
+      # or higher to the PATH" and leaving no .git behind.
       #
-      #   ##[error]bash: command not found
+      # This step is an ASSERTION, not a workaround. An earlier version tried to
+      # rescue an installed-but-unexported Git by searching the usual install
+      # roots and appending them to GITHUB_PATH. That was written before the
+      # cause was known; the Windows runner image simply had no Git installed at
+      # all, so the rescue path could never have fired. Keeping it would have
+      # been worse than useless: it would let a half-provisioned image pass CI
+      # and hide the image defect from whoever has to fix it.
       #
-      # It aborts inside the FIRST step of setup-dev-env (its `shell: bash`
-      # env-flavor validation), so the leg dies before a single line of
-      # reprobuild is built. The same run shows the underlying cause upstream,
-      # in actions/checkout:
-      #
-      #   The repository will be downloaded using the GitHub REST API
-      #   To create a local Git repository instead, add Git 2.18 or higher to the PATH
-      #
-      # Git for Windows is what supplies bash.exe, so both messages are one
-      # defect: the `eph-win-x64` golden image does not expose Git on the
-      # runner service's PATH. That is an image defect, not a repo defect --
-      # the real fix belongs in infra's libvirt Win11 golden. This step is the
-      # contained mitigation: if Git is merely installed-but-not-on-PATH (the
-      # common GARM/cloudbase case, where the service PATH is captured before
-      # provisioning finishes) it puts it back on PATH and the leg proceeds. If
-      # Git is genuinely absent it fails HERE with a message naming the image
-      # and the fix, instead of the anonymous `bash: command not found` five
-      # steps later.
-      - name: Ensure Git for Windows (bash) is on PATH
+      # So we assert instead. A correctly built runner image has Git on the
+      # MACHINE PATH (services capture their environment from the machine
+      # environment at service start, so a user-scoped PATH never reaches the
+      # runner service) and this step is a no-op costing one second. A bad image
+      # fails here, named, instead of anonymously five steps later.
+      - name: Assert Git for Windows is available
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          if (Get-Command bash -ErrorAction SilentlyContinue) {
-            Write-Host "bash already on PATH: $((Get-Command bash).Source)"
+          $bash = Get-Command bash -ErrorAction SilentlyContinue
+          $git = Get-Command git -ErrorAction SilentlyContinue
+
+          if ($bash -and $git) {
+            Write-Host "bash: $($bash.Source)"
+            Write-Host "git:  $($git.Source)"
+            & git --version
             exit 0
           }
 
-          Write-Host "bash not on PATH; searching for a Git for Windows installation..."
+          $missing = @()
+          if (-not $bash) { $missing += 'bash' }
+          if (-not $git) { $missing += 'git' }
 
-          # Standard install roots, plus the scoop/winget shim locations the
-          # golden image may have used.
-          $candidates = @(
-            "$env:ProgramFiles\Git",
-            "${env:ProgramFiles(x86)}\Git",
-            "$env:LOCALAPPDATA\Programs\Git",
-            "$env:USERPROFILE\scoop\apps\git\current"
-          ) | Where-Object { $_ -and (Test-Path $_) }
-
-          $gitRoot = $candidates | Select-Object -First 1
-
-          if (-not $gitRoot) {
-            # Built by joining an array rather than with a here-string: a
-            # PowerShell here-string terminator must sit flush against the left
-            # margin, which would break out of this YAML block scalar.
-            throw (@(
-              "Git for Windows is not installed on this runner, so no 'bash' exists.",
-              "",
-              "Every 'shell: bash' step in this workflow -- including the first step of",
-              "setup-dev-env -- fails with 'bash: command not found' without it. This is a",
-              "defect in the eph-win-x64 golden image",
-              "(infra/services/garm-incus-runners.nix -> providers.win, a libvirt overlay",
-              "of /storage/iso/golden-win11-cloudbase.qcow2), not in this repository.",
-              "",
-              "Fix: install Git for Windows into the golden image and ensure",
-              "'<GitRoot>\bin' and '<GitRoot>\usr\bin' are on the MACHINE PATH so the",
-              "actions-runner service inherits them."
-            ) -join [Environment]::NewLine)
-          }
-
-          # bin/ carries bash.exe and git.exe; usr/bin carries the coreutils
-          # (sha256sum, awk, unzip) that the packaging and verification steps
-          # and setup-reprobuild's installer rely on.
-          $toAdd = @("$gitRoot\bin", "$gitRoot\usr\bin") | Where-Object { Test-Path $_ }
-          foreach ($p in $toAdd) {
-            Write-Host "Adding to PATH: $p"
-            Add-Content -Path $env:GITHUB_PATH -Value $p
-          }
-          $env:Path = ($toAdd -join [IO.Path]::PathSeparator) + [IO.Path]::PathSeparator + $env:Path
-
-          if (-not (Get-Command bash -ErrorAction SilentlyContinue)) {
-            throw "Found Git at '$gitRoot' but still cannot resolve bash after extending PATH."
-          }
-          Write-Host "bash now resolves to: $((Get-Command bash).Source)"
+          # Built by joining an array rather than with a here-string: a
+          # PowerShell here-string terminator must sit flush against the left
+          # margin, which would break out of this YAML block scalar.
+          throw (@(
+            "Missing on this Windows runner: $($missing -join ', ')",
+            "",
+            "Git for Windows provides both. Without it every 'shell: bash' step in this",
+            "workflow -- including the first step of setup-dev-env -- fails with",
+            "'bash: command not found', and actions/checkout cannot create a real",
+            "repository.",
+            "",
+            "This is a defect in the Windows runner image, not in this repository, and it",
+            "cannot be worked around from a workflow: the runner runs as a service, and a",
+            "service's environment is captured from the MACHINE environment when the",
+            "service starts.",
+            "",
+            "Fix it in the image: install Git for Windows and add its 'bin' directory to",
+            "the machine PATH before the image is captured."
+          ) -join [Environment]::NewLine)
 
       # Mint a GitHub App installation token via the CI Token Provider
       # app so the setup-dev-env / clone-siblings actions can clone private
