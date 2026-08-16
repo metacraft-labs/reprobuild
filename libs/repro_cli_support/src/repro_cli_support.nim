@@ -29992,6 +29992,15 @@ type
     projectName: string
     manifestLayerRoot: string
     triggerRepo: string
+    triggerRepoPath: string
+      ## RA-30 — the ON-DISK path of the repo whose commit triggered this
+      ## lock, for callers that know the directory but not the manifest
+      ## NAME. The two are not interchangeable: a repo's ``name`` may
+      ## differ from its ``path`` (``nim`` lives at ``codetracer-nim``),
+      ## and the post-commit hook is handed a directory
+      ## (``--current-repo=<dir>``), never a name. Consulted only when
+      ## ``triggerRepo`` is empty; resolved against the project's declared
+      ## repos by ``pickTriggerRepo``.
     triggerSha: string
     toolProvisioning: ToolProvisioningMode
     # RA-21 — when non-empty, the dirty-tree refusal only considers repos
@@ -30189,15 +30198,48 @@ proc pickManifestLayerRoot(parsed: WorkspaceLockArgs;
     return nativeStore
   ""
 
+proc sameFilesystemPath(a, b: string): bool =
+  ## Compare paths robustly across native vs forward-slash spelling.
+  if a == b:
+    return true
+  var aN = os.normalizedPath(absolutePath(a)).replace('\\', '/')
+  var bN = os.normalizedPath(absolutePath(b)).replace('\\', '/')
+  try: aN = os.normalizedPath(expandFilename(a)).replace('\\', '/')
+  except OSError: discard
+  try: bN = os.normalizedPath(expandFilename(b)).replace('\\', '/')
+  except OSError: discard
+  when defined(windows):
+    aN.toLowerAscii == bN.toLowerAscii
+  else:
+    aN == bN
+
 proc pickTriggerRepo(resolved: ResolvedProject;
-                     explicit: string): ResolvedRepo =
-  ## Choose the repo whose HEAD anchors the lock filename. The
-  ## explicit ``--trigger-repo=NAME`` flag wins; otherwise default to
-  ## the repo whose ``name`` matches the project name (the
-  ## "project-named anchor" pattern the spec example uses —
-  ## ``[[repo]] name = "reprobuild"`` in the ``reprobuild`` project
-  ## anchors lock files at ``locks/reprobuild/reprobuild-<sha>.toml``).
-  ## If no name match exists we fall back to the first declared repo.
+                     explicit, explicitPath, workspaceRoot: string):
+    ResolvedRepo =
+  ## Choose the repo whose commit anchors the lock filename.
+  ##
+  ## The anchor is not cosmetic: consumers resolve a lock at
+  ## ``locks/<project>/<repo>/<sha>`` for the COMMIT UNDER TEST (the
+  ## `clone-siblings` CI action probes exactly that path for the pushed
+  ## repo). A lock anchored at any other repo is therefore unreachable —
+  ## it is keyed by a commit nobody will ever look up.
+  ##
+  ## Precedence:
+  ##   1. an explicit ``--trigger-repo=NAME``;
+  ##   2. ``triggerRepoPath`` — the on-disk directory of the triggering
+  ##      repo, matched against the project's declared repo paths. This is
+  ##      what hook-driven callers have: git hands a hook a working
+  ##      directory, not a manifest name, and a repo's name and path are
+  ##      allowed to differ;
+  ##   3. only when NEITHER was supplied, the project-named anchor (the
+  ##      repo whose ``name`` equals the project name), falling back to the
+  ##      first declared repo.
+  ##
+  ## (3) is the right default for a caller that genuinely has no trigger —
+  ## "lock the workspace as it stands" — and the wrong answer for every
+  ## caller that does. A hook that knows the committed repo and lets the
+  ## lock fall through to (3) files each repo's lock under the project
+  ## anchor's name and SHA, where no consumer looks.
   if explicit.len > 0:
     for repo in resolved.repos:
       if repo.name == explicit:
@@ -30205,6 +30247,20 @@ proc pickTriggerRepo(resolved: ResolvedProject;
     raise newException(ValueError,
       "trigger repo '" & explicit &
         "' is not declared in project '" & resolved.projectName & "'")
+  if explicitPath.len > 0:
+    for repo in resolved.repos:
+      if sameFilesystemPath(workspaceRoot / repo.path, explicitPath):
+        return repo
+    # Refuse rather than fall through to the project anchor. The caller
+    # named a specific triggering checkout; anchoring its lock at a
+    # DIFFERENT repo's name and SHA would publish a record that claims a
+    # commit this operation never observed, and that no consumer of the
+    # triggering repo can find. "No lock" is recoverable and legible;
+    # a misfiled one is neither.
+    raise newException(ValueError,
+      "triggering repo at '" & explicitPath &
+        "' is not declared in project '" & resolved.projectName &
+        "'; no lock can be anchored at it")
   for repo in resolved.repos:
     if repo.name == resolved.projectName:
       return repo
@@ -30294,7 +30350,8 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
     result.report = report
     return
 
-  let triggerRepo = pickTriggerRepo(resolved, args.triggerRepo)
+  let triggerRepo = pickTriggerRepo(resolved, args.triggerRepo,
+    args.triggerRepoPath, args.workspaceRoot)
   let triggerSha =
     if args.triggerSha.len > 0: args.triggerSha
     else: headShas[triggerRepo.path]
@@ -32380,6 +32437,19 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   lockArgs.workspaceRoot = workspaceRoot
   lockArgs.triggerSha = parsed.triggerSha
   lockArgs.triggerRepo = parsed.triggerRepo
+  # RA-30 — anchor the lock at the repo whose commit fired this hook.
+  # git hands a post-commit hook a working directory, never a manifest
+  # name, so we pass the PATH and let the resolver map it to the declared
+  # repo. Leaving this empty made every post-commit lock fall through to
+  # ``pickTriggerRepo``'s project-named anchor: six ``ok`` runs across
+  # several repos in one workspace produced three records, all filed under
+  # ``locks/reprobuild/reprobuild/<sha>`` at reprobuild's own SHAs. CI
+  # resolves ``locks/<project>/<repo>/<sha>`` for the commit under test, so
+  # for a commit in any repo but the anchor that path could never exist —
+  # the write succeeded and the record was unreachable.
+  lockArgs.triggerRepoPath =
+    if parsed.currentRepo.len > 0: absolutePath(parsed.currentRepo)
+    else: ""
   lockArgs.toolProvisioning = parsed.toolProvisioning
   # RA-10: an initialized workspace may resolve from a single
   # ``projects/*.toml`` with no metadata-only ``workspace.toml`` yet. The
@@ -33171,21 +33241,6 @@ type
       ## Exact URL declared for a URL-backed manifest layer. Local-path layers
       ## leave this empty: a checkout path is not authority for an alternate
       ## Git push remote.
-
-proc sameFilesystemPath(a, b: string): bool =
-  ## Compare paths robustly across native vs forward-slash spelling.
-  if a == b:
-    return true
-  var aN = os.normalizedPath(absolutePath(a)).replace('\\', '/')
-  var bN = os.normalizedPath(absolutePath(b)).replace('\\', '/')
-  try: aN = os.normalizedPath(expandFilename(a)).replace('\\', '/')
-  except OSError: discard
-  try: bN = os.normalizedPath(expandFilename(b)).replace('\\', '/')
-  except OSError: discard
-  when defined(windows):
-    aN.toLowerAscii == bN.toLowerAscii
-  else:
-    aN == bN
 
 proc sanitizeManifestUrlForPath(raw: string): string =
   ## Mirror of ``compose.sanitizeForPath`` — the dotted alphanumeric +
