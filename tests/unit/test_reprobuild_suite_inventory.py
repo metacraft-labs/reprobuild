@@ -682,11 +682,22 @@ test "incomplete name" and:
             # source-to-binary mapping and current catalog count so the +1
             # static reconciliation below cannot be left as an unattributed
             # aggregate adjustment.
+            # 3 -> 4: the discarded-checkout regression
+            # (`t_sync_discards_a_checkout_that_failed_after_the_clone`)
+            # landed in this source without moving this pin or either
+            # aggregate, so `dev` has been failing its own inventory gate
+            # since. Recomputed, not bumped: the binary was rebuilt from the
+            # source that carries the fourth case and its own `--list-json`
+            # counted (4); the independent static scan of the source agrees
+            # (4). The case is unconditional — it `skip()`s when `git` is
+            # absent rather than declaring itself away — so it moves Linux
+            # and Darwin alike and the exact platform delta below is
+            # untouched.
             "tests/integration/t_sync_clones_commit_pinned_repo.nim": {
                 "binary": "build/test-bin/t_sync_clones_commit_pinned_repo",
                 "language": "nim",
                 "sourceSuiteCount": 1,
-                "sourceCaseCount": 3,
+                "sourceCaseCount": 4,
                 "class": "integration",
             },
             # Upstream 391a892a4 adds five independently enrolled `develop`
@@ -1401,7 +1412,16 @@ test "incomplete name" and:
         # change enrols no new source, it grows an existing one. All three
         # cases are unconditional, so the Linux-vs-Darwin delta stays +1 and
         # `assert_linux_darwin_catalog_delta_is_exact` is untouched.
-        expected_nim_total = 6906 if sys.platform == "darwin" else 6907
+        #
+        # 6906/6907 -> 6907/6908: the one discarded-checkout case added to
+        # `t_sync_clones_commit_pinned_repo.nim`, pinned per source in
+        # `expected_enrollments` above. It arrived without either aggregate
+        # moving, which is what this recompute repairs. Recomputed, not
+        # bumped: that binary was rebuilt first and the number read out of a
+        # live `build_inventory` (`nim_total` 6908 on Linux, with 1237 specs,
+        # no missing binary and nothing source-newer-than-binary). The case is
+        # unconditional, so the Linux-vs-Darwin delta is still +1.
+        expected_nim_total = 6907 if sys.platform == "darwin" else 6908
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -1468,6 +1488,11 @@ test "incomplete name" and:
         # python. All +3 is nim; the python half is untouched, which is why
         # the aggregate is stated relative to `expected_nim_total` rather
         # than as an independent literal that could drift away from it.
+        #
+        # The discarded-checkout recompute moves it again, 6952/6953 ->
+        # 6953/6954 = 6907/6908 nim + 46 python, and it moves without this
+        # line being touched — which is the point of keeping it symbolic. The
+        # measured `data["static"]["sourceCaseCount"]` on Linux is 6954.
         self.assertEqual(
             data["static"]["sourceCaseCount"], expected_nim_total + 46
         )
@@ -1506,13 +1531,20 @@ test "incomplete name" and:
         # reads the BINARIES, so their agreeing that the file now holds eight
         # cases is what makes that a fact about the suite rather than about one
         # surface.
+        #
+        # 6829 -> 6830 = +1, the same +1 `nim_total` moved by, and the whole of
+        # it is the discarded-checkout case in
+        # `t_sync_clones_commit_pinned_repo.nim`. This scan reads the SOURCE
+        # text and `nim_total` reads the REBUILT BINARY; they were derived
+        # independently and both moved by exactly one, which is what makes
+        # "one new case" a fact about the suite rather than about one surface.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6829,
+            6830,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
