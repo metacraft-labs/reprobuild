@@ -362,8 +362,11 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       check pcReal.code == 0
       let realReport = postCommitReport(fx, fx.workspaceRoot)
       check realReport["exitCode"].getInt() == 0
-      # It RAN the lock refresh — outcome "ok", a lock file was written.
-      check realReport["outcome"].getStr() == "ok"
+      # It RAN the lock refresh — a lock file was written. M19b: the outcome
+      # names what happened to that record (this fixture's store has no
+      # upstream, so it is local-only) rather than claiming a bare "ok".
+      check realReport["outcome"].getStr() == "written-local-only"
+      check realReport["lockWritten"].getBool()
       let realLock = realReport["lockFilePath"].getStr()
       check realLock.len > 0
       check fileExists(realLock)

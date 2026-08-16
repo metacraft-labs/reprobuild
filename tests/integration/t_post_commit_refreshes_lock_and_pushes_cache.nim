@@ -171,7 +171,12 @@ suite "RA-4 — post-commit refreshes lock and pushes cache ref":
         "post-commit-report.json"
       check fileExists(reportPath)
       let report = parseFile(reportPath)
-      check report["outcome"].getStr() == "ok"
+      # M19b: the lock is refreshed LOCALLY and nothing publishes it —
+      # post-commit is local-only by design. This fixture's store has no
+      # upstream at all, so the record can never be published and the report
+      # says exactly that instead of the old bare ``ok``.
+      check report["outcome"].getStr() == "written-local-only"
+      check report["lockWritten"].getBool()
       check report["triggerSha"].getStr() == newSha
       let lockPath = report["lockFilePath"].getStr()
       check lockPath == workspaceRoot / ".repro" / "manifests" / "locks" /

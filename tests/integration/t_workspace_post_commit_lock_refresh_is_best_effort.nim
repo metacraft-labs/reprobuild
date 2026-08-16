@@ -12,18 +12,40 @@
 ## This suite exercises the five M19 invariants:
 ##
 ##   1. Happy path — clean workspace → per-repo lock TOML written
-##      (RA-1: no index) + JSON report carries ``outcome = "ok"`` +
-##      exit 0.
+##      (RA-1: no index) + exit 0. M19b: the JSON report says what
+##      happened to that record — ``written-local-only`` for this
+##      fixture's upstream-less store — and NEVER a bare ``ok``.
 ##   2. Dirty workspace → strict M11 would have refused with exit 2;
-##      post-commit downgrades to ``outcome = "skipped-dirty"`` + exit 0
-##      and writes NO lock file.
+##      post-commit downgrades to exit 0 with
+##      ``outcome = "no-lock-dirty-siblings"`` and writes NO lock file.
 ##   3. No ``.repro/workspace.toml`` → wrapper logs
 ##      ``outcome = "skipped-no-workspace"`` + exit 0 without touching
 ##      the (missing) manifest layer.
 ##   4. Lock writer fails (manifests/ directory made non-writable) →
-##      wrapper logs ``outcome = "failed"`` with a diagnostic + exit 0.
+##      wrapper logs ``outcome = "no-lock-failed"`` with a diagnostic + exit 0.
 ##   5. Two consecutive invocations → log file has TWO lines, JSON
 ##      report carries the second (latest) invocation only.
+##
+## M19b adds the publication invariants. Post-commit is local-only by
+## design (Workspace-Manifests.md § "Lock publication (commit + push)":
+## the publish table's post-commit row is "writes yes / publishes **no —
+## local only**"), so it can never itself publish. What it MUST NOT do is
+## call a local write a success — that is precisely how a workspace logged
+## an unbroken run of ``ok wrote <path>`` for two weeks while every one of
+## those records sat untracked on one disk and CI reported the commits as
+## unlocked. The regression cases here are:
+##
+##   6. Publishable store (a real clone with an upstream), record not yet
+##      upstream → ``written-pending-publish`` / ``publication = "pending"``.
+##      The report must NOT contain the tag ``ok`` or ``published``.
+##   7. Same store, record actually committed + pushed → ``published``.
+##      This is the ONLY outcome that reads as success, and it is earned by
+##      the record's presence in the store's upstream, not by a write.
+##   8. A backlog of pending records anchored to ALREADY-PUSHED commits
+##      (the two-week starvation, reproduced) → counted as ``stranded`` and
+##      announced on stderr. Pushes went out without their locks.
+##   9. The two "no lock at all" branches (dirty siblings / writer failure)
+##      announce themselves on stderr too, still exiting 0.
 ##
 ## Skip rule: ``git`` missing on PATH (same convention as M9 / M10 /
 ## M11 / M17 / M18).
@@ -229,6 +251,45 @@ proc readPostCommitReport(fx: M19Fixture): JsonNode =
   check fileExists(reportPath)
   parseFile(reportPath)
 
+proc lockStoreRoot(fx: M19Fixture): string =
+  fx.workspaceRoot / ".repro" / "manifests"
+
+proc makeLockStorePublishable(gitBin: string; fx: M19Fixture) =
+  ## M19b — give the fixture's lock store a real upstream.
+  ##
+  ## ``setupFixture`` leaves the store as a standalone ``git init`` with no
+  ## remote, which is a store nothing can EVER be published to
+  ## (``lpoNotPublishable``). That is a legitimate configuration and the suite
+  ## covers it, but it cannot exhibit the defect: the interesting failure is a
+  ## store that CAN publish and simply never does. Adding an upstream is what
+  ## separates "will never be published" from "has not been published".
+  let store = lockStoreRoot(fx)
+  let origin = fx.scratch / "origin-lock-store.git"
+  discard requireGit(q(gitBin) & " init --bare -b main " & q(origin))
+  discard requireGit(q(gitBin) & " -C " & q(store) &
+    " remote add origin " & q(origin))
+  discard requireGit(q(gitBin) & " -C " & q(store) & " push -u origin main")
+
+proc publishLockStore(gitBin: string; fx: M19Fixture) =
+  ## Do by hand what the pre-push gate's ``publishWorkspaceLock`` does: commit
+  ## the ``locks/`` subtree and push it. ``-f`` mirrors the publisher, which
+  ## forces its own generated records past any ignore rules.
+  let store = lockStoreRoot(fx)
+  discard requireGit(q(gitBin) & " -C " & q(store) & " add -f -- locks")
+  discard requireGit(q(gitBin) & " -C " & q(store) &
+    " commit -m \"Publish workspace lock entries\"")
+  discard requireGit(q(gitBin) & " -C " & q(store) & " push origin main")
+
+proc commitInLibA(gitBin: string; fx: M19Fixture; fileName: string): string =
+  ## Add one unpushed commit to lib-a and return its SHA. Post-commit's real
+  ## trigger: a commit that has NOT reached its remote yet.
+  let libAPath = fx.workspaceRoot / "lib-a"
+  writeFile(libAPath / fileName, fileName & "\n")
+  discard requireGit(q(gitBin) & " -C " & q(libAPath) & " add " & q(fileName))
+  discard requireGit(q(gitBin) & " -C " & q(libAPath) &
+    " commit -m " & q("commit " & fileName))
+  requireGit(q(gitBin) & " -C " & q(libAPath) & " rev-parse HEAD").strip()
+
 proc readPostCommitLog(fx: M19Fixture): string =
   let logPath = fx.workspaceRoot / ".repro" / "workspace" /
     "post-commit-lock.log"
@@ -258,7 +319,12 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
 
       let report = readPostCommitReport(fx)
       check report["exitCode"].getInt() == 0
-      check report["outcome"].getStr() == "ok"
+      # M19b: this fixture's store is a standalone `git init` with no remote,
+      # so the record it just wrote can never be published to anyone. That is
+      # reported as such. It is emphatically NOT "ok".
+      check report["outcome"].getStr() == "written-local-only"
+      check report["publication"].getStr() == "local-only"
+      check report["lockWritten"].getBool()
       check report["project"].getStr() == "lib-a"
       check report["triggerRepo"].getStr() == "lib-a"
       check report["triggerSha"].getStr() == fx.libA.sha
@@ -275,9 +341,12 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       check not fileExists(fx.workspaceRoot / ".repro" / "manifests" /
         "locks" / "lib-a" / "index.toml")
 
-      # Log file has exactly one ``ok`` line.
+      # Log file has exactly one line, and that line states the record was
+      # not published rather than implying it was.
       let logBody = readPostCommitLog(fx)
-      check logBody.contains(" ok ")
+      check logBody.contains(" written-local-only ")
+      check logBody.contains("NOT published")
+      check not logBody.contains(" ok ")
       check logBody.splitLines().filterIt(it.len > 0).len == 1
 
   test "test_m19_post_commit_succeeds_when_workspace_dirty":
@@ -302,7 +371,9 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
 
       let report = readPostCommitReport(fx)
       check report["exitCode"].getInt() == 0
-      check report["outcome"].getStr() == "skipped-dirty"
+      check report["outcome"].getStr() == "no-lock-dirty-siblings"
+      check not report["lockWritten"].getBool()
+      check report["publication"].getStr() == "no-record"
       # No lock file path recorded — the wrapper never reached the
       # writer phase.
       check report["lockFilePath"].getStr() == ""
@@ -310,11 +381,21 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       check (not dirExists(lockDir)) or
         (toSeq(walkDirRec(lockDir, yieldFilter = {pcFile})).len == 0)
 
-      # Log file carries exactly one ``skipped-dirty`` line naming the
-      # offending sibling so the operator can find it.
+      # Log file carries exactly one line naming the offending sibling AND
+      # stating that no lock exists — the old ``skipped-dirty`` wording
+      # described the wrapper's control flow, not the outcome the operator
+      # cares about.
       let logBody = readPostCommitLog(fx)
-      check logBody.contains("skipped-dirty")
+      check logBody.contains("no-lock-dirty-siblings")
+      check logBody.contains("NO lock written")
       check logBody.contains("lib-b")
+
+      # M19b mode 2 is LOUD: git relays post-commit's stderr, so the operator
+      # learns at the terminal that this commit produced no lock. The two-week
+      # starvation happened because this branch said nothing anywhere the
+      # operator would look, while the blocking sibling rotated between repos.
+      check res.output.contains("repro post-commit:")
+      check res.output.contains("lib-b")
 
   test "test_m19_post_commit_succeeds_when_no_workspace_toml":
     let gitBin = findExe("git")
@@ -404,11 +485,18 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
 
       let report = readPostCommitReport(fx)
       check report["exitCode"].getInt() == 0
-      check report["outcome"].getStr() == "failed"
+      check report["outcome"].getStr() == "no-lock-failed"
+      check not report["lockWritten"].getBool()
       check report["diagnostic"].getStr().len > 0
 
       let logBody = readPostCommitLog(fx)
-      check logBody.contains("failed")
+      check logBody.contains("no-lock-failed")
+      check logBody.contains("NO lock written")
+
+      # M19b mode 3 is LOUD. One workspace ran this branch 68 times
+      # (``repo '<x>' has no on-disk checkout``) and produced zero locks, every
+      # run exiting 0 without a word at the terminal.
+      check res.output.contains("repro post-commit:")
 
   test "test_m19_post_commit_log_file_appended_on_each_run":
     let gitBin = findExe("git")
@@ -423,7 +511,7 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       let firstRes = invokePostCommit(fx, fx.workspaceRoot / "lib-a")
       check firstRes.code == 0
       let firstReport = readPostCommitReport(fx)
-      check firstReport["outcome"].getStr() == "ok"
+      check firstReport["outcome"].getStr() == "written-local-only"
       let firstTimestamp = firstReport["timestamp"].getStr()
 
       # Second run with a brand-new commit in lib-a so the trigger SHA
@@ -441,19 +529,154 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       let secondRes = invokePostCommit(fx, fx.workspaceRoot / "lib-a")
       check secondRes.code == 0
       let secondReport = readPostCommitReport(fx)
-      check secondReport["outcome"].getStr() == "ok"
+      check secondReport["outcome"].getStr() == "written-local-only"
       check secondReport["triggerSha"].getStr() == secondSha
       # ``post-commit-report.json`` is overwrite-not-append: the latest
       # invocation's SHA replaces the previous run's.
       check secondReport["triggerSha"].getStr() != fx.libA.sha
       let secondTimestamp = secondReport["timestamp"].getStr()
 
-      # Log file is append-only: TWO non-empty lines, both ``ok``, with
-      # the two distinct timestamps from the two runs.
+      # Log file is append-only: TWO non-empty lines, with the two distinct
+      # timestamps from the two runs.
       let logBody = readPostCommitLog(fx)
       let lines = logBody.splitLines().filterIt(it.len > 0)
       check lines.len == 2
       check lines[0].startsWith(firstTimestamp)
       check lines[1].startsWith(secondTimestamp)
       for line in lines:
-        check line.contains(" ok ")
+        check line.contains(" written-local-only ")
+
+suite "M19b — post-commit reports publication, not just the write":
+
+  test "test_m19b_unpublished_lock_is_never_reported_as_success":
+    ## THE regression test. A post-commit run that produces no PUBLISHED lock
+    ## must not report success — in the report, in the log, or in its wording.
+    ##
+    ## Reverting the wrapper to ``outcome = "ok"`` / ``diagnostic = "wrote
+    ## <path>"`` fails this test on every one of the assertions below.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "pending")
+      defer: removeDir(fx.scratch)
+      cloneAll(gitBin, fx)
+      seedWorkspaceToml(fx)
+      makeLockStorePublishable(gitBin, fx)
+
+      # The commit post-commit fires on has not been pushed yet — this is the
+      # ordinary case, and the resulting record is legitimately PENDING.
+      let sha = commitInLibA(gitBin, fx, "pending.txt")
+
+      let res = invokePostCommit(fx, fx.workspaceRoot / "lib-a")
+      check res.code == 0
+
+      let report = readPostCommitReport(fx)
+      check report["exitCode"].getInt() == 0
+      check report["triggerSha"].getStr() == sha
+
+      # The record exists on disk...
+      check report["lockWritten"].getBool()
+      let lockPath = report["lockFilePath"].getStr()
+      check fileExists(lockPath)
+
+      # ...and that is ALL it does. The report says so.
+      check report["outcome"].getStr() == "written-pending-publish"
+      check report["publication"].getStr() == "pending"
+      check report["outcome"].getStr() != "ok"
+      check report["outcome"].getStr() != "published"
+      check report["diagnostic"].getStr().contains("NOT published")
+
+      # The store's upstream really does not have it — the report is not
+      # merely asserting a label, it matches the git state.
+      let store = lockStoreRoot(fx)
+      let relPath = relativePath(lockPath, store)
+      check runCmd(q(gitBin) & " -C " & q(store) & " cat-file -e " &
+        q("origin/main:" & relPath.replace('\\', '/'))).code != 0
+
+      let logBody = readPostCommitLog(fx)
+      check logBody.contains(" written-pending-publish ")
+      check logBody.contains("NOT published")
+      check not logBody.contains(" ok ")
+
+      # Pending-with-no-backlog is the DESIGNED steady state (post-commit is
+      # local-only; pre-push publishes), so it is honest in the log without
+      # shouting at the terminal on every single commit.
+      check report["strandedRecords"].getInt() == 0
+      check not res.output.contains("repro post-commit:")
+
+  test "test_m19b_published_is_earned_by_reaching_the_upstream":
+    ## The one outcome that reads as success, and what it costs to get it.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "published")
+      defer: removeDir(fx.scratch)
+      cloneAll(gitBin, fx)
+      seedWorkspaceToml(fx)
+      makeLockStorePublishable(gitBin, fx)
+      discard commitInLibA(gitBin, fx, "published.txt")
+
+      # First run writes the record; nothing has published it.
+      check invokePostCommit(fx, fx.workspaceRoot / "lib-a").code == 0
+      check readPostCommitReport(fx)["outcome"].getStr() ==
+        "written-pending-publish"
+
+      # Publish it the way the pre-push gate would, then re-run post-commit at
+      # the same SHA (the idempotent re-lock path).
+      publishLockStore(gitBin, fx)
+      let res = invokePostCommit(fx, fx.workspaceRoot / "lib-a")
+      check res.code == 0
+
+      let report = readPostCommitReport(fx)
+      check report["outcome"].getStr() == "published"
+      check report["publication"].getStr() == "published"
+      check report["pendingRecords"].getInt() == 0
+      check report["strandedRecords"].getInt() == 0
+      # Read the tag FIELD of the latest log line rather than searching the
+      # whole file: the first run's ``... — NOT published (...)`` also contains
+      # the word, and a substring match would pass on it.
+      let lastLine = readPostCommitLog(fx).splitLines()
+        .filterIt(it.len > 0)[^1]
+      check lastLine.split(' ')[1] == "published"
+      # A genuinely published record is the one thing worth staying quiet about.
+      check not res.output.contains("repro post-commit:")
+
+  test "test_m19b_records_stranded_behind_pushed_commits_are_loud":
+    ## The two-week starvation, reproduced. A lock record whose trigger commit
+    ## has ALREADY been pushed is not "publication has not happened yet" — it
+    ## is proof that a push went out and left its lock behind. That is not the
+    ## designed steady state and it does not get to be quiet.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "stranded")
+      defer: removeDir(fx.scratch)
+      cloneAll(gitBin, fx)
+      seedWorkspaceToml(fx)
+      makeLockStorePublishable(gitBin, fx)
+
+      # Commit, lock, push the commit — and never publish the lock. Exactly
+      # the sequence that left 20 untracked records in one workspace's store.
+      discard commitInLibA(gitBin, fx, "stranded-one.txt")
+      check invokePostCommit(fx, fx.workspaceRoot / "lib-a").code == 0
+      discard requireGit(q(gitBin) & " -C " &
+        q(fx.workspaceRoot / "lib-a") & " push origin main")
+
+      # The next commit's post-commit run can now SEE the stranded predecessor.
+      discard commitInLibA(gitBin, fx, "stranded-two.txt")
+      let res = invokePostCommit(fx, fx.workspaceRoot / "lib-a")
+      check res.code == 0
+
+      let report = readPostCommitReport(fx)
+      check report["outcome"].getStr() == "written-pending-publish"
+      check report["pendingRecords"].getInt() >= 2
+      check report["strandedRecords"].getInt() >= 1
+      check report["diagnostic"].getStr().contains("ALREADY-PUSHED")
+
+      # Loud at the terminal, and still exit 0 — a post-commit hook that
+      # blocked commits would be a worse defect than the one it reports.
+      check res.output.contains("repro post-commit:")
+      check res.output.contains("ALREADY-PUSHED")

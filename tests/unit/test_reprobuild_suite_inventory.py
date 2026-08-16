@@ -891,6 +891,23 @@ test "incomplete name" and:
                 "sourceCaseCount": 3,
                 "class": "integration",
             },
+            # The post-commit publication-reporting guard (M19b). An EXISTING
+            # enrollment that gained a second suite and three cases: post-commit
+            # must never report a locally-written, unpublished lock as success.
+            # Pinned per source so those three cases are the whole of this
+            # change's delta on the aggregates below — the source is otherwise
+            # invisible to them, which is how the +4 on
+            # `t_branch_forks_new_workspace_on_feature_branch.nim` once hid.
+            # 1 suite / 5 cases -> 2 suites / 8 cases.
+            "tests/integration/"
+            "t_workspace_post_commit_lock_refresh_is_best_effort.nim": {
+                "binary": "build/test-bin/"
+                "t_workspace_post_commit_lock_refresh_is_best_effort",
+                "language": "nim",
+                "sourceSuiteCount": 2,
+                "sourceCaseCount": 8,
+                "class": "integration",
+            },
         }
         for source, expected in expected_enrollments.items():
             with self.subTest(enrolled_source=source):
@@ -1374,7 +1391,17 @@ test "incomplete name" and:
         # cases; 11cea6789 adds six. Darwin/Linux therefore move 6860/6861 to
         # 6900/6901. The linked-worktree source adds the same three catalog
         # cases on both platforms, producing the final 6903/6904.
-        expected_nim_total = 6903 if sys.platform == "darwin" else 6904
+        #
+        # 6903/6904 -> 6906/6907: the three M19b publication cases added to
+        # `t_workspace_post_commit_lock_refresh_is_best_effort.nim`, pinned
+        # per source in `expected_enrollments` above. Recomputed, not bumped:
+        # read out of a live `build_inventory` with that binary REBUILT first
+        # (a count read from a stale binary agrees with a stale pin forever).
+        # `len(nim_specs)` and the catalog bucket below are unchanged — the
+        # change enrols no new source, it grows an existing one. All three
+        # cases are unconditional, so the Linux-vs-Darwin delta stays +1 and
+        # `assert_linux_darwin_catalog_delta_is_exact` is untouched.
+        expected_nim_total = 6906 if sys.platform == "darwin" else 6907
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -1433,9 +1460,14 @@ test "incomplete name" and:
         # `python_total`), so this aggregate is a backstop for them rather
         # than a place either delta can hide.
         #
-        # The final aggregate is 6949 on Darwin / 6950 on Linux: 6903/6904
-        # Nim plus 46 Python. ``assert_linux_darwin_catalog_delta_is_exact``
-        # pins every qualified identity on both sides of that exact delta.
+        # The aggregate is `expected_nim_total` + 46 Python.
+        # ``assert_linux_darwin_catalog_delta_is_exact`` pins every qualified
+        # identity on both sides of that exact delta.
+        #
+        # This change moves it 6949/6950 -> 6952/6953 = 6906/6907 nim + 46
+        # python. All +3 is nim; the python half is untouched, which is why
+        # the aggregate is stated relative to `expected_nim_total` rather
+        # than as an independent literal that could drift away from it.
         self.assertEqual(
             data["static"]["sourceCaseCount"], expected_nim_total + 46
         )
@@ -1468,13 +1500,19 @@ test "incomplete name" and:
         # declarations (two conditional cache cases plus fail-closed), and
         # 11cea6789 adds six: 6823. The linked-worktree source's independent
         # static scan adds the same three cases, giving 6826.
+        #
+        # 6826 -> 6829 = +3, the same +3 `nim_total` moved by, and the whole of
+        # it is the one grown source. The scan reads the SOURCES and `nim_total`
+        # reads the BINARIES, so their agreeing that the file now holds eight
+        # cases is what makes that a fact about the suite rather than about one
+        # surface.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6826,
+            6829,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
