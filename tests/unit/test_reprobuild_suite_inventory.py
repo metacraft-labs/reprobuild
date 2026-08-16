@@ -923,6 +923,33 @@ test "incomplete name" and:
                 "sourceCaseCount": 10,
                 "class": "integration",
             },
+            # The `repro develop --all` post-condition added by this branch.
+            # One case, and it is the whole of this change's delta on the
+            # aggregates: the command must not report a checkout it cannot
+            # show you. Drives the real `repro` binary against real git
+            # repositories, hence `integration`.
+            "tests/integration/"
+            "t_develop_all_refuses_to_report_an_absent_checkout.nim": {
+                "binary": "build/test-bin/"
+                "t_develop_all_refuses_to_report_an_absent_checkout",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
+            # A RECOVERED enrollment, not a new test. This source was already
+            # on disk and already passing, but it was missing from the
+            # checked-in generated graph, so it was never compiled and never
+            # executed in CI. Regenerating the graph enrolls it. Pinned here
+            # separately from the source above so the +2 on the spec count
+            # below is two attributable facts rather than one rounded one.
+            "tests/integration/t_branch_fork_clones_root_submodules.nim": {
+                "binary": "build/test-bin/t_branch_fork_clones_root_submodules",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
         }
         for source, expected in expected_enrollments.items():
             with self.subTest(enrolled_source=source):
@@ -1329,7 +1356,20 @@ test "incomplete name" and:
         # This branch adds the linked-worktree regression pinned above: one
         # source with three independently cataloged and statically scanned
         # cases, moving 1236 -> 1237 specs.
-        self.assertEqual(len(nim_specs), 1237)
+        #
+        # 1237 -> 1239. Regenerating the graph enrolls exactly two sources,
+        # both pinned individually in `expected_enrollments` above:
+        #   + tests/integration/
+        #       t_develop_all_refuses_to_report_an_absent_checkout.nim   (1)
+        #     the post-condition this change adds to `repro develop --all`.
+        #   + tests/integration/t_branch_fork_clones_root_submodules.nim (1)
+        #     ALREADY on disk and already passing, but absent from the
+        #     checked-in generated graph — so it was never built and never run
+        #     in CI. Regeneration recovers it. It is called out separately
+        #     because it is not this change's subject: folding it into the
+        #     "one new test" story would be exactly the unattributed aggregate
+        #     adjustment these per-source pins exist to prevent.
+        self.assertEqual(len(nim_specs), 1239)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -1434,7 +1474,15 @@ test "incomplete name" and:
         # base the whole measurement was taken again rather than the +2 carried
         # arithmetically over a moved baseline. Both cases are unconditional
         # too, so the Linux-vs-Darwin delta is still +1.
-        expected_nim_total = 6909 if sys.platform == "darwin" else 6910
+        #
+        # 6909/6910 -> 6911/6912: the two one-case sources the graph
+        # regeneration enrols, pinned per source in `expected_enrollments`
+        # above — the `develop --all` post-condition (+1) and the recovered
+        # `t_branch_fork_clones_root_submodules.nim` (+1). Recomputed, not
+        # bumped: both binaries were built and each reported one case through
+        # its own `--list-json`; the static scan agrees on both. Both are
+        # unconditional, so the Linux-vs-Darwin delta is still +1.
+        expected_nim_total = 6911 if sys.platform == "darwin" else 6912
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -1507,9 +1555,15 @@ test "incomplete name" and:
         # 6953/6954 = 6907/6908 nim + 46 python, and it moved without this line
         # being touched — which is the point of keeping it symbolic.
         #
-        # This change moves it to 6955/6956 = 6909/6910 nim + 46 python. All +2
-        # is nim (the two RA-30 anchoring cases); the python half is untouched
-        # again, and this line still does not have to move for it.
+        # The anchoring change moved it to 6955/6956 = 6909/6910 nim + 46
+        # python. All +2 was nim (the two RA-30 anchoring cases); the python
+        # half was untouched again, and this line still did not have to move
+        # for it.
+        #
+        # This change moves it to 6957/6958 = 6911/6912 nim + 46 python — the
+        # two one-case sources the graph regeneration enrols. Python is
+        # untouched a third time, and the measured
+        # `data["static"]["sourceCaseCount"]` on Linux is 6958.
         self.assertEqual(
             data["static"]["sourceCaseCount"], expected_nim_total + 46
         )
@@ -1560,13 +1614,17 @@ test "incomplete name" and:
         # it is the one grown source. Source scan and binary catalog agreeing
         # on the same +2 is what makes "two new cases" a fact about the suite
         # rather than about one surface.
+        #
+        # 6832 -> 6834 = +2, the same +2 `nim_total` moved by: one statically
+        # visible case in each of the two newly enrolled sources, each
+        # independently matching its binary's one-case catalog.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6832,
+            6834,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
@@ -2200,7 +2258,11 @@ test "incomplete name" and:
         # normal built catalog entry, moving the catalog bucket 1235 -> 1236.
         self.assertEqual(
             catalog["countSourceCounts"],
-            {"catalog": 1236, "quarantined": 1, "static": 5},
+            # 1236 -> 1238: the two sources the graph regeneration enrols. Both
+            # binaries are built and probed, so both join the `catalog` bucket
+            # and `missing-binary` stays empty: 1238 = 1239 Nim specs - 1
+            # quarantined.
+            {"catalog": 1238, "quarantined": 1, "static": 5},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         self.assertEqual(
@@ -3186,7 +3248,10 @@ test "incomplete name" and:
         # Four recovered graph enrollments plus fail-closed: 1225 -> 1230;
         # upstream 11cea6789 then adds six: 1236. The linked-worktree source
         # is the one new generated graph entry, producing 1237.
-        self.assertEqual(declared_nim_count, 1237)
+        # 1237 -> 1239: the `develop --all` post-condition source and the
+        # recovered `t_branch_fork_clones_root_submodules.nim`, both pinned
+        # individually beside the parsed-spec aggregate above.
+        self.assertEqual(declared_nim_count, 1239)
         self.assertEqual(declared_python_count, 5)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -3233,8 +3298,10 @@ test "incomplete name" and:
         # The recovered graph enrollments plus fail-closed move 1230 -> 1235;
         # upstream 11cea6789's six pinned sources move 1235 -> 1241.
         # The linked-worktree regression then adds one Nim entry.
-        # Final graph: 1237 Nim + 5 Python = 1242 entries.
-        self.assertEqual(data["static"]["testEntryCount"], 1242)
+        # The linked-worktree regression then adds one Nim entry: 1242.
+        # Final graph: 1239 Nim + 5 Python = 1244 entries — the two sources
+        # the graph regeneration enrols.
+        self.assertEqual(data["static"]["testEntryCount"], 1244)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),

@@ -48,6 +48,7 @@ jobs:
             codetracer
             codetracer-design-system
             codetracer-example-recordings
+            codetracer-trace-format
             codetracer-trace-format-nim
             ethereum.nix
             io-mon
@@ -205,6 +206,7 @@ jobs:
             codetracer
             codetracer-design-system
             codetracer-example-recordings
+            codetracer-trace-format
             codetracer-trace-format-nim
             ethereum.nix
             io-mon
@@ -556,6 +558,43 @@ jobs:
       # warm bootstrap the phases above plus a measured 2h15m execution
       # phase total ~8h. Raising REPROBUILD_MAX_PARALLELISM is not the
       # lever -- see the note on that variable in `env:` above.
+      #
+      # RUNNER-CLASS NOTE. `runs-on` selects a POOL, and the two host classes
+      # in it are not interchangeable for this job. Measured over the last 60
+      # CI runs, by the runner that picked up the Test job:
+      #
+      #   gpu-server-002-*   every run that reached the END of the suite --
+      #                      build phase plus Nim execution, terminating on
+      #                      real per-case failures rather than on a clock --
+      #                      was on this class: 1h55m, 1h56m, 1h57m, 2h10m.
+      #   high-mem-server-*  not once. Two runs (31542890603, 31542884617)
+      #                      died on "Timed out building .#test-builds after
+      #                      4h" at 917/1212 and 934/1212. Four more were
+      #                      killed at exactly 6h00m, GitHub's per-job
+      #                      ceiling, one of them with the build phase still
+      #                      at 446/1237. The runs that did finish building
+      #                      then spent 3h32m-5h55m and failed in the Python
+      #                      inventory, including once on a
+      #                      CatalogEnvironmentError -- host contention
+      #                      reported as such, which is itself a symptom of
+      #                      the class rather than of the suite.
+      #   gpu-server-001-*   between the two: ~1h04m typical, 4h01m/4h51m at
+      #                      worst.
+      #
+      # So `REPROBUILD_BUILD_TIMEOUT` (4h, scripts/run_tests.sh) is not a
+      # budget this host class overruns by a little, and the timeouts are not
+      # noise. On `high-mem-server-*` the build phase alone consumes most of
+      # the six-hour ceiling, so raising the 4h backstop would not buy a
+      # completed suite: it would only move where the job dies, from a legible
+      # "Timed out building .#test-builds" to an illegible ceiling kill. The
+      # timeout is a symptom of the `cacheable = false` phase above, amplified
+      # by scheduling this job onto a host class roughly 2x slower for it --
+      # not a number that is merely set too low.
+      #
+      # Documented here rather than acted on: narrowing `runs-on` to the
+      # faster class is a fleet-capacity decision, not a workflow edit, and
+      # making the phase cacheable is the fix that would make either class
+      # fit.
       - name: just test
         env:
           CT_BIN: ${{ env.CT_BIN }}
@@ -606,6 +645,7 @@ jobs:
             codetracer
             codetracer-design-system
             codetracer-example-recordings
+            codetracer-trace-format
             codetracer-trace-format-nim
             ethereum.nix
             io-mon

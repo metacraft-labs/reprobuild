@@ -21485,6 +21485,72 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
     mutated = true
     outcomes.add(outcome)
 
+  # POST-CONDITION. Every mode this command reports as done is a claim that a
+  # checkout of <node> is now on disk at <path>: `cloned` and `reset` say this
+  # run put it there, `adopted` and `idempotent` say it was already there. Not
+  # one of them was ever checked against the filesystem AFTER the fact — the
+  # claim was inferred from a helper's exit status, or from an override record
+  # written on some earlier run. So a clone that exited zero without leaving a
+  # tree, and an override naming a directory that has since been deleted, both
+  # rendered as success and the command exited 0.
+  #
+  # That is the same shape as a build reporting a target built because the
+  # compiler did not complain: the only evidence that settles it is the
+  # artefact, so look at the artefact.
+  #
+  # What is verified is deliberately different per mode, because the modes
+  # promise different things:
+  #
+  #   cloned / reset  — THIS run placed the tree at the LOCKED revision, so
+  #                     both the checkout and its exact HEAD are verified.
+  #   adopted         — the revision was proved before adoption; re-verify only
+  #                     that the checkout is still there.
+  #   idempotent      — develop mode means an EDITABLE checkout, and a
+  #                     developer is expected to commit on top of the lock, so
+  #                     HEAD is NOT required to match. Only its existence as a
+  #                     git checkout is, which is exactly the claim "already in
+  #                     develop mode at <path>" makes.
+  #
+  # `--dry-run` promises nothing was placed, so it is exempt: verifying a plan
+  # against the filesystem would fail it for being a plan.
+  if not args.dryRun:
+    for outcome in outcomes.mitems:
+      if not outcome.ok: continue
+      if outcome.mode notin ["cloned", "reset", "adopted", "idempotent"]:
+        continue
+      if outcome.path.len == 0: continue
+      if not dirExists(outcome.path):
+        outcome.diagnostic = "reported '" & outcome.mode & "' for '" &
+          outcome.node & "' but no checkout exists at " & outcome.path &
+          ". Nothing that reads this dependency from disk will find it, so " &
+          "the run is reported as the failure it is rather than as success."
+        outcome.mode = "error"
+        outcome.ok = false
+        anyFailure = true
+        continue
+      # `.git` is a DIRECTORY in an ordinary clone and a FILE in a linked
+      # worktree or a submodule, so both count as a checkout here. Only the
+      # absence of either is evidence that nothing was placed.
+      let gitEntry = outcome.path / ".git"
+      if not (dirExists(gitEntry) or fileExists(gitEntry)):
+        outcome.diagnostic = "reported '" & outcome.mode & "' for '" &
+          outcome.node & "' but " & outcome.path &
+          " is not a git checkout (no .git). Whatever is at that path, it is " &
+          "not the dependency this run claims to have placed."
+        outcome.mode = "error"
+        outcome.ok = false
+        anyFailure = true
+        continue
+      let headSha = gitHeadShaOf(gitBinary, outcome.path)
+      if outcome.mode in ["cloned", "reset"] and
+          outcome.revision.len > 0 and headSha != outcome.revision:
+        outcome.diagnostic = "reported '" & outcome.mode & "' for '" &
+          outcome.node & "' at the locked revision " & outcome.revision &
+          ", but " & outcome.path & " is at " & headSha & "."
+        outcome.mode = "error"
+        outcome.ok = false
+        anyFailure = true
+
   if mutated:
     try:
       writeDevelopOverridesFile(root, overrides)
