@@ -717,9 +717,37 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
       plain.add(cloneBranchRef(payload.revision))
     cloneRes = runGit(payload, plain)
   if cloneRes.exitCode != 0:
+    # A clone can fail in two shapes, and only one of them leaves nothing
+    # behind. "Could not read from remote" fails before anything is created;
+    # "Clone succeeded, but checkout failed" leaves a populated ``.git`` with a
+    # half-written working tree. The second shape must not be left on disk: the
+    # next sync classifies any directory with a ``.git`` as an existing
+    # checkout and takes the UPDATE path, so the clone is never retried and the
+    # repo stays half-checked-out indefinitely — the same trap the pinned-commit
+    # branch below already guards against, reached by a different route.
+    if dirExists(target):
+      try: removeDir(target)
+      except OSError: discard
+    # git-lfs is the common cause of a checkout-stage failure, and its own
+    # error names a filter rather than the repo, so the raw output reads as a
+    # reprobuild bug. Say what actually happened and what can be done about it.
+    let cloneOut = cloneRes.output.trimmed
+    if cloneOut.contains("smudge filter lfs failed") or
+        cloneOut.contains("Object does not exist on the server"):
+      return failed("clone-lfs-objects-missing",
+        "git clone of " & payload.remoteUrl & " checked out its tree but " &
+        "git-lfs could not fetch the LFS content it points at (the server " &
+        "answered 404 for at least one object), so the checkout was " &
+        "discarded rather than left half-written.\n" &
+        "  This is missing data on the LFS remote, not a bad revision — no " &
+        "revision of this repo can be checked out until it is restored.\n" &
+        "  To proceed WITHOUT the LFS content (pointer files in place of the " &
+        "real ones), clone it once by hand with the smudge filter disabled:\n" &
+        "    git -c filter.lfs.smudge= -c filter.lfs.process= clone " &
+        payload.remoteUrl & " " & target & "\n" &
+        "  git output: " & cloneOut)
     return failed("clone-failed",
-      "git clone exited " & $cloneRes.exitCode & ": " &
-        cloneRes.output.trimmed)
+      "git clone exited " & $cloneRes.exitCode & ": " & cloneOut)
   if pinnedCommit:
     # The clone landed on the remote's default branch; move to the pinned
     # commit. Fetch it explicitly first — it need not be a branch tip, and

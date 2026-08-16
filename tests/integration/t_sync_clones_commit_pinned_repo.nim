@@ -31,6 +31,14 @@
 ##      partial-advance contract is preserved, only the reporting is honest).
 ##   3. A fragment pinned to `refs/tags/<tag>` clones and lands on the tagged
 ##      commit.
+##   4. A clone that fails at the CHECKOUT stage leaves nothing on disk. git
+##      reports "Clone succeeded, but checkout failed" and exits non-zero after
+##      having already populated `.git`, so the failure leaves a directory that
+##      the next sync classifies as an existing checkout — it then takes the
+##      update path and never retries the clone, and the repo stays
+##      half-checked-out indefinitely. Reached here through a checkout filter
+##      that fails, which is how git-lfs fails when its objects are missing
+##      from the server.
 ##
 ## No mocks: real `git init --bare` upstreams, the real clone action, and the
 ## engine-built `build/bin/repro`.
@@ -227,3 +235,66 @@ suite "sync clones a commit-pinned repo, and a failed clone fails the run":
       check head == tagged
       check fileExists(workspaceRoot / "tagged-lib" / "first.txt")
       check not fileExists(workspaceRoot / "tagged-lib" / "second.txt")
+
+  test "t_sync_discards_a_checkout_that_failed_after_the_clone":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let scratch = createTempDir("repro-checkoutfail-", "")
+      defer: removeDirEventually(scratch)
+      let workspaceRoot = scratch / "workspace"
+      createDir(workspaceRoot / "projects")
+      createDir(workspaceRoot / "repos")
+
+      # A repo whose checkout cannot complete: a .gitattributes routes a file
+      # through a filter that always fails. This is the shape git-lfs produces
+      # when its objects are missing from the server — the clone itself
+      # succeeds, then the working-tree write fails.
+      let origin = scratch / "origin-filtered-lib.git"
+      let seed = scratch / "seed-filtered-lib"
+      discard requireGit(q(gitBin) & " init --bare -b main " & q(origin))
+      discard requireGit(q(gitBin) & " init -b main " & q(seed))
+      discard requireGit(q(gitBin) & " -C " & q(seed) &
+        " config user.email tester@example.invalid")
+      discard requireGit(q(gitBin) & " -C " & q(seed) &
+        " config user.name \"Filter Tester\"")
+      writeFile(seed / ".gitattributes", "*.bin filter=explode\n")
+      writeFile(seed / "payload.bin", "content\n")
+      discard requireGit(q(gitBin) & " -C " & q(seed) & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(seed) & " commit -m fixture")
+      discard requireGit(q(gitBin) & " -C " & q(seed) &
+        " remote add origin " & q(fileUrl(origin)))
+      discard requireGit(q(gitBin) & " -C " & q(seed) & " push origin main")
+
+      writeFile(workspaceRoot / "repos" / "filtered-lib.toml",
+        repoFragment("filtered-lib", "filtered-origin", "main"))
+      writeFile(workspaceRoot / "projects" / "pinned.toml",
+        projectFile("[[remote]]\nname = \"filtered-origin\"\nfetch = \"" &
+          fileUrl(origin) & "\"\n\n", ["repos/filtered-lib.toml"]))
+
+      # The filter is defined only for the SYNC's git, so the clone's checkout
+      # is what fails (the seed above committed the file unfiltered).
+      #
+      # ``required = true`` is what makes a smudge failure ABORT the checkout
+      # rather than pass the blob through unchanged — git-lfs sets it, and
+      # without it git treats the failure as advisory and the clone succeeds.
+      #
+      # Delivered through ``GIT_CONFIG_GLOBAL`` rather than the indexed
+      # ``GIT_CONFIG_COUNT`` variables because `scrubbedGitRepositoryEnv`
+      # deliberately strips the latter before invoking git, so a test that used
+      # them would silently exercise nothing.
+      let globalConfig = scratch / "filter.gitconfig"
+      writeFile(globalConfig,
+        "[filter \"explode\"]\n\tsmudge = false\n\trequired = true\n")
+      let res = runShell(shellCommand(
+        @[reproBinary(), "workspace", "enable", "pinned",
+          "--workspace-root=" & workspaceRoot],
+        @[("GIT_CONFIG_GLOBAL", globalConfig)]))
+      checkpoint("output: " & res.output)
+      check res.code != 0
+
+      # The whole point: nothing is left behind. A surviving `.git` here would
+      # be classified as an existing checkout by the next sync, which would
+      # then take the update path and never retry the clone.
+      check not dirExists(workspaceRoot / "filtered-lib")
