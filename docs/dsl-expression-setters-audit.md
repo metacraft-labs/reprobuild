@@ -84,7 +84,7 @@ that was observed to FAIL before the change.
 | `usesImportPath` | path | silent corruption | **fixed** — errors |
 | `defaultToolProvisioning` | mode | loud (whitelist, by luck) | **fixed** — errors clearly |
 | `executable` / `library` / interface command | name | ident by design | unchanged — correct |
-| `library` body | unknown members | silent drop | **open** — see below |
+| `library` body | unknown members | silent drop | **fixed** — warns |
 
 ### Where "errors" is the right answer, not a consolation
 
@@ -142,18 +142,47 @@ Evidence: 78 `repro_project_dsl` tests pass; all 258 catalog packages and
 missing generated sibling shims — confirmed pre-existing by reverting the macro
 edits and observing the same errors, not assumed from the message.
 
+## The `library` body, and why "measure first" is in this document twice
+
+`library` bodies dropped unknown members silently. The catch-all could not
+simply be turned into an error, because the body is consumed by more than one
+pass. Taking the inventory it needed:
+
+| member | consumed by |
+| --- | --- |
+| `kind`, `exportedPath`, `discard` | `parseLibrary` |
+| `build` | `emitM4ArtifactBuildLowering` (re-classifies the body, claims `soM4Build`) |
+| `cli` | `emitM6CliLowering` (head-matches on any M3 artifact body) |
+| anything else | nobody — now warns |
+
+Two things came out of doing this by measurement rather than by grep.
+
+**The blast radius was wrong by two orders of magnitude.** An earlier revision
+claimed "41 bodies contain `build:` blocks". An indentation-aware scan of every
+`library` body in the tree finds 307 `discard`, 7 `kind`, 4 `build`, 3
+`exportedPath` — and nothing else. All the `kind`/`exportedPath` uses are in the
+DSL's own tests; exactly **three real recipes** put a `build:` in a library body.
+The original figure came from a `grep -A4` spilling into neighbouring lines.
+
+**Making the catch-all speak exposed dead code.** The `of "discard":` arm never
+matched: a bare `discard` is `nnkDiscardStmt`, and `calleeName` returns `""` for
+anything that is not a Call/Command, so it had been falling through the silent
+catch-all since M12. Harmless while the catch-all was silent — and it would have
+warned on 307 of the 321 library-body statements in the tree the moment it
+wasn't. The silence was hiding its own bug.
+
 ## Open
 
-**`library` bodies still drop unknown members silently.** The catch-all cannot
-simply error, because the same body is consumed by a *second* pass: the M3
-artifact lowerer walks it independently to emit `registerArtifact(...)`, and
-`build:` blocks — well over a hundred of them in recipes — are handled entirely
-there. Erroring would reject valid declarations.
+**A `when` inside a `library` body still sets nothing.** It now warns, which
+reports the drop rather than fixing it. Supporting it needs the
+store-the-body-in-a-template shape described in
+`runtime-library-dependencies.md` — the macro stops parsing the body and emits
+it as a template that each consumption mode instantiates with its own bindings,
+so the compiler resolves the `when` and the macro never sees it.
 
-The fix needs a cross-pass inventory of which members each pass consumes, after
-which the residue can warn. Until then a `when` inside a `library` body compiles
-and sets nothing, which remains the blocker for expressing per-platform library
-layout (see `runtime-library-dependencies.md`).
+**The catalog still repeats its pins.** Nothing forces it to now, but migrating
+~227 entries to a shared const — and retiring the grep-based audit that enforces
+the duplication — is a separate change.
 
 **The catalog still repeats its pins.** Nothing forces it to now, but migrating
 ~227 entries to a shared const — and retiring the grep-based audit that enforces

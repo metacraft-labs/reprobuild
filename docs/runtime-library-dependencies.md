@@ -91,21 +91,52 @@ A statement the parser does not recognise is neither applied nor rejected. A
 `when defined(windows): exportedPath: "…"` inside the body **compiles cleanly
 and sets nothing**.
 
-An earlier revision of this document advised fixing that `else` to error before
-adding new keys. **That advice is wrong**, and the correction matters for
-anyone who acts on it: the same body is consumed by a SECOND pass. `parseLibrary`
-populates `pkg.libraries`, while the M3 artifact lowerer in `macros_b.nim`
-independently walks the same statements through `m3ArtifactEntryAst` to emit
-`registerArtifact(...)` — the two pathways co-exist by design (see the comment
-block above `m3ArtifactNameNode`). `build:` blocks appear in well over a hundred
-recipe library bodies and are handled entirely by that second pass, so making
-`parseLibrary`'s `else` an error would reject valid, working declarations.
+An earlier revision of this document advised fixing that `else` to error. **That
+advice was wrong**: the same body is consumed by more than one pass, so
+"`parseLibrary` ignores it" is not the same as "nobody consumes it". Erroring
+would have rejected valid, working declarations.
 
-The defect is real but narrower than stated: the catch-all cannot distinguish
-"handled by another pass" from "handled by nobody". A fix needs a cross-pass
-inventory of the members each pass consumes, after which the residue can warn.
-Until that inventory exists, a `when` inside a `library` body is still silently
-dropped, and that remains the blocker for expressing per-platform layout here.
+**This is now fixed** — the catch-all warns, after taking the cross-pass
+inventory it needed:
+
+| member | consumed by |
+| --- | --- |
+| `kind`, `exportedPath`, `discard` | `parseLibrary` (`macros_a.nim`) |
+| `build` | `emitM4ArtifactBuildLowering`, which re-classifies the body and claims `soM4Build` |
+| `cli` | `emitM6CliLowering`, which head-matches `cli` on any M3 artifact body, library included |
+| anything else | **nobody** — now warns |
+
+A `when` gets its own message, since it is the case that motivated the work and
+`calleeName` returns `""` for it.
+
+### Measure before you claim a blast radius
+
+Two figures in earlier revisions of this document — "41 bodies contain `build:`
+blocks", "well over a hundred" — were both wrong, from a `grep -A4` that spilled
+into neighbouring lines. An indentation-aware scan of every `library` body in
+the tree gives the real distribution:
+
+| member | count |
+| --- | --- |
+| `discard` | 307 |
+| `kind` | 7 |
+| `build` | 4 |
+| `exportedPath` | 3 |
+
+Nothing else appears at all. All 7 `kind` and 3 `exportedPath` uses are in the
+DSL's own test file; only **three real recipes** put a `build:` in a library
+body (`boost`, `clingo`, `nss`), and every other real body is a bare `discard`.
+
+Making the catch-all speak immediately surfaced a latent defect: the
+`of "discard":` arm was **dead code** and always had been. A bare `discard`
+parses as `nnkDiscardStmt`, for which `calleeName` returns `""`, so it had been
+falling through to the silent catch-all since M12 — harmlessly, until the
+catch-all started warning, at which point it would have warned on 307 of the
+321 library-body statements in the tree.
+
+A `when` inside a `library` body still sets nothing — the warning reports the
+drop, it does not implement the branch. Supporting it needs the
+store-the-body-in-a-template shape below.
 
 ## What the gap costs today
 
@@ -220,13 +251,17 @@ it. This is the same shape as the existing mode split (`reproProviderMode` /
 `reproInterfaceMode`), which today is done by emitting `when defined(...)`
 guards around generated procs rather than by re-instantiating a stored body.
 
-**`library` is the wrong declaration to pilot this on.** It is used by **208
-recipes carrying 308 declarations**, and 41 of those bodies contain `build:`
-blocks that the current parser drops through its catch-all. Converting it means
-changing the meaning of every one of those, with no way to validate short of
-building every recipe. Pick a declaration with few real consumers for the first
-conversion, and move `library` once the vocabulary-binding design has been
-exercised somewhere cheaper.
+**`library` was the wrong declaration to pilot this on**, and the pilot went to
+`service` instead. It is used by **208 recipes carrying 309 declarations** — a
+lot of call sites to change meaning under, with no way to validate short of
+building every recipe.
+
+The "41 of those bodies contain `build:` blocks" figure that also appeared here
+was wrong; the real count is **3 recipes** (see the measured distribution
+above). The bodies are overwhelmingly a bare `discard`, which makes the eventual
+conversion far less risky than this section originally implied — the risk is
+concentrated in the *number* of declarations, not in the variety of what they
+contain.
 
 The conversion also ripples further than the parser. `packageLiteral(pkg)`
 produces a `PackageDef(...)` **expression**, consumed at three sites

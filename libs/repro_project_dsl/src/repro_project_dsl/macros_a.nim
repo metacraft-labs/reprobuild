@@ -744,11 +744,67 @@ proc parseLibrary(packageName: string; node: NimNode): LibraryDef =
       result.exportedPath = pathNode.repr
     of "discard":
       discard
-    else:
-      # Unknown body member — ignore for forward compatibility but the
-      # bare ``discard`` and a ``kind:`` setter are the only recognised
-      # forms in M12.
+    # Members this parser does not handle but ANOTHER pass does. The library
+    # body is walked more than once, so "parseLibrary ignores it" is not the
+    # same as "nobody consumes it" — which is precisely why this arm could not
+    # simply be turned into an error.
+    #
+    # The cross-pass inventory for a ``library <name>:`` body:
+    #
+    #   kind, exportedPath, discard  → here
+    #   build                        → emitM4ArtifactBuildLowering, which
+    #                                  re-classifies the body and claims
+    #                                  soM4Build (macros_b.nim)
+    #   cli                          → emitM6CliLowering, which head-matches
+    #                                  ``cli`` on any M3 artifact body,
+    #                                  library included
+    #
+    # Nothing else is claimed by anything.
+    of "build", "cli":
       discard
+    else:
+      # Claimed by nobody, so it does nothing at all. Warn rather than error:
+      # this arm is on the path of every library declaration in the tree, and
+      # a forward-compatible member may exist that predates this check.
+      #
+      # The case that motivates saying anything is `when`: a
+      # ``when defined(windows): exportedPath: "Library/bin"`` inside a library
+      # body compiles cleanly and sets NOTHING, which is the blocker for
+      # expressing per-platform library layout (see
+      # docs/runtime-library-dependencies.md). `calleeName` returns "" for a
+      # `when`, so name it explicitly instead of printing an empty quote.
+      case stmt.kind
+      of nnkCommentStmt:
+        discard
+      of nnkDiscardStmt:
+        # The `of "discard":` arm above is DEAD CODE and always has been: a
+        # bare `discard` parses as nnkDiscardStmt, and `calleeName` returns ""
+        # for anything that is not a Call/Command. It has been reaching the
+        # catch-all since M12 and being silently ignored — which happened to
+        # be the right outcome, so nothing ever surfaced it. Making the
+        # catch-all speak is what exposed it: 307 of the 321 library-body
+        # statements in the tree are bare `discard`, so this would have
+        # warned on almost every library declaration.
+        #
+        # The arm above is left in place: it costs nothing and correctly
+        # handles `discard` written as a call. This is the shape that
+        # actually occurs.
+        discard
+      of nnkWhenStmt:
+        warning("a `when` inside a library body is not evaluated — the " &
+          "parser walks the statements literally, so neither branch's " &
+          "setters are applied and the declaration is silently left at its " &
+          "defaults", stmt)
+      else:
+        let member = calleeName(stmt)
+        if member.len > 0:
+          warning("unknown library body member '" & member &
+            "' — recognised members are kind, exportedPath, build, cli and " &
+            "discard; this statement is ignored", stmt)
+        else:
+          warning("this statement in a library body is not a recognised " &
+            "member and is ignored; recognised members are kind, " &
+            "exportedPath, build, cli and discard", stmt)
 
 proc selectorFromConstraint(value: string): string =
   let parts = value.strip().splitWhitespace()
