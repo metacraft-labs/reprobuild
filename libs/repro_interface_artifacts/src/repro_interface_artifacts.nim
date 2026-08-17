@@ -1500,6 +1500,26 @@ proc sameSourceFile(a, b: string): bool =
   except CatchableError:
     a == b
 
+proc sourceFileWithinProject(sourceFile, rootSourceFile: string): bool =
+  ## Package modules imported from below the root recipe are part of the same
+  ## project interface. Imported stdlib and sibling-repository packages are
+  ## deliberately excluded.
+  if sourceFile.len == 0 or rootSourceFile.len == 0:
+    return false
+  try:
+    let projectRoot = os.normalizedPath(absolutePath(
+      parentDir(rootSourceFile))).replace('\\', '/')
+    let candidate = os.normalizedPath(
+      absolutePath(sourceFile)).replace('\\', '/')
+    let rootPrefix = projectRoot.strip(
+      leading = false, trailing = true, chars = {'/'}) & "/"
+    when defined(windows):
+      candidate.toLowerAscii().startsWith(rootPrefix.toLowerAscii())
+    else:
+      candidate.startsWith(rootPrefix)
+  except CatchableError:
+    false
+
 const
   RegisteredStandardConventionToolchains* = ["nim", "rust", "rustc", "cargo",
     "go",
@@ -1751,26 +1771,27 @@ proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
   let packages = registeredPackages()
   let contributions = registeredProvisioningContributions()
   if rootSourceFile.len > 0:
-    var matches: seq[PackageDef] = @[]
+    var rootPackages: seq[PackageDef] = @[]
+    var localPackageModules: seq[PackageDef] = @[]
     for pkg in packages:
       if sameSourceFile(pkg.sourceFile, rootSourceFile):
-        matches.add(pkg)
+        rootPackages.add(pkg)
+      elif sourceFileWithinProject(pkg.sourceFile, rootSourceFile):
+        localPackageModules.add(pkg)
+    let matches =
+      if rootPackages.len > 0: rootPackages & localPackageModules
+      else: newSeq[PackageDef]()
     if matches.len == 1:
       var pi = toProjectInterface(matches[0], packages, contributions)
       pi.standardBuildEligible =
         detectStandardBuildEligible(rootSourceFile, matches[0])
       return artifactFor(pi)
     if matches.len > 1:
-      # Multi-package single-file (Mode 3 + the upcoming C/C++ work):
-      # collapse every package declared in the same Nim file into one
-      # interface envelope. The marker collision that previously blocked
-      # this at compile-time is fixed in
-      # ``libs/repro_project_dsl/src/repro_project_dsl/macros_a.nim``;
-      # the merge logic here is the artifact-layer side of the same
-      # change.
+      # Root packages own the project identity and default provisioning;
+      # imported local modules contribute public members and tool requirements.
       var pi = mergeProjectInterfaces(matches, packages, contributions)
       var allEligible = true
-      for pkg in matches:
+      for pkg in rootPackages:
         if not detectStandardBuildEligible(rootSourceFile, pkg):
           allEligible = false
           break

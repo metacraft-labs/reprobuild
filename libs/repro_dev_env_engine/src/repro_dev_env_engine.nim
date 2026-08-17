@@ -184,7 +184,7 @@ proc parseDevEnvToolProvisioning(value: string): ToolProvisioningMode =
     tpmTarball
   of "scoop":
     tpmScoop
-  of "fromsource", "source":
+  of "from-source", "fromsource", "source":
     tpmFromSource
   else:
     raiseDevEnvEdge("unsupported dev-env tool provisioning mode: " & value)
