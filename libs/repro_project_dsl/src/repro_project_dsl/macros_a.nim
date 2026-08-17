@@ -661,14 +661,29 @@ proc parseLibrary(packageName: string; node: NimNode): LibraryDef =
       # Defaults (empty) to the convention ``"src"`` at the splice seam.
       # ``exportedPath: "lib"`` parses to ``Call(exportedPath,
       # StmtList(<lit>))``; walk to the leaf string literal.
+      #
+      # The value is stored as the ``.repr`` of the source node and inlined
+      # VERBATIM into the generated source, so the outer ``parseStmt``
+      # re-parses it in the call-site scope and the Nim compiler evaluates it.
+      # This is the same "reparse" hook the typed-output ``pathExpr`` uses
+      # ("Inline the user's pathExpr source verbatim", below).
+      #
+      # It used to demand ``nnkStrLit``. That restriction came from the macro
+      # re-serialising a known value back into source text: to emit a literal
+      # you must first BE a literal. Storing the expression instead means a
+      # `const`, a `func` call such as ``sharedLibDir(plConda)``, or anything
+      # else the compiler can fold is accepted without the macro evaluating —
+      # or even inspecting — it.
       if stmt.len < 2:
         error("library exportedPath: requires a string value", stmt)
       var pathNode = stmt[1]
       while pathNode.kind == nnkStmtList and pathNode.len == 1:
         pathNode = pathNode[0]
-      if pathNode.kind != nnkStrLit:
-        error("library exportedPath: requires a string literal", pathNode)
-      result.exportedPath = pathNode.strVal
+      # NOTE the two lifetimes of this field. On the macro-time ``LibraryDef``
+      # built here it carries the EXPRESSION SOURCE; on the runtime
+      # ``LibraryDef`` produced by the emitted literal it carries the evaluated
+      # VALUE. They are different instances, and the emitter is the seam.
+      result.exportedPath = pathNode.repr
     of "discard":
       discard
     else:
@@ -1690,9 +1705,17 @@ proc packageLiteral(pkg: PackageDef): string =
     # ``library foo: exportedPath: "…"`` declaration silently lost its value on
     # the way to the emitted literal — the setter appeared to work and produced
     # a LibraryDef whose exportedPath was always "".
+    # ``exportedPath`` is inlined VERBATIM rather than escForCode'd: the parser
+    # stored the user's expression source, and the outer ``parseStmt``
+    # re-parses it in the call-site scope so the compiler evaluates it. A plain
+    # ``"custom/dir"`` reprs back to itself, so literals are unaffected; a
+    # ``sharedLibDir(plConda)`` survives as a call. Empty means unset — emit a
+    # literal empty string rather than nothing, or the constructor breaks.
+    let exportedPathCode =
+      if lib.exportedPath.len == 0: "\"\"" else: lib.exportedPath
     result.add("LibraryDef(name: " & escForCode(lib.name) &
       ", kind: " & $lib.kind &
-      ", exportedPath: " & escForCode(lib.exportedPath) &
+      ", exportedPath: " & exportedPathCode &
       ", sourceFile: " & escForCode(lib.sourceFile) &
       ", sourceLine: " & $lib.sourceLine & ")")
   # Recipe-Val M8: emit the package-level multi-output partition list.
