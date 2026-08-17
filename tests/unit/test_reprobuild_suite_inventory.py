@@ -942,12 +942,25 @@ test "incomplete name" and:
             # absent rather than declaring themselves away -- so they move
             # Linux and Darwin alike and the exact platform delta is
             # untouched.
+            # 12 -> 13: one case pinning that this file's own fixture seeds
+            # three DISTINGUISHABLE repos. Identical seed content plus one
+            # shared identity left the commit timestamp as the only input to
+            # the seed SHAs, so three seeds made in one second hashed to a
+            # single commit object -- and a case asserting a superseded
+            # revision was gone from a lock record then read a sibling's
+            # entry that carried the same SHA, failing 4 runs in 10 on a
+            # correct record. Recomputed, not bumped: the binary was rebuilt
+            # and its own `--list-json` counted (13 cases, 2 suites); the
+            # independent static scan of the source agrees (13/2). The case
+            # is unconditional -- it `skip()`s when `git` is absent rather
+            # than declaring itself away -- so it moves Linux and Darwin
+            # alike and the exact platform delta is untouched.
             "t_workspace_post_commit_lock_refresh_is_best_effort.nim": {
                 "binary": "build/test-bin/"
                 "t_workspace_post_commit_lock_refresh_is_best_effort",
                 "language": "nim",
                 "sourceSuiteCount": 2,
-                "sourceCaseCount": 12,
+                "sourceCaseCount": 13,
                 "class": "integration",
             },
             # The `repro develop --all` post-condition added by this branch.
@@ -1567,7 +1580,26 @@ test "incomplete name" and:
         # the static scan of the SOURCE text (`count_nim_cases`) independently
         # reports `caseCount 17, suiteCount 2`. All seventeen cases are
         # unconditional, so the Linux-vs-Darwin delta is still +1.
-        expected_nim_total = 6932 if sys.platform == "darwin" else 6933
+        #
+        # 6932/6933 -> 6933/6934: the one seed-distinctness case added to
+        # `t_workspace_post_commit_lock_refresh_is_best_effort.nim`, pinned per
+        # source in `expected_enrollments` above. It enrols no new source and
+        # regenerates no `repro_tests.nim` entry, so `len(nim_specs)` and the
+        # catalog bucket are unchanged; it grows an existing source by one.
+        # Measured, not bumped, on both surfaces independently after rebuilding
+        # that binary: its `--list-json` reports 13 cases in 2 suites and the
+        # static scan of the source reports 13/2, so the delta is +1 on the
+        # catalog aggregate and +1 on the static aggregate below. The case is
+        # unconditional, so the Linux-vs-Darwin delta is still +1.
+        #
+        # A full-catalog read of `nim_total` was not available on the tree this
+        # was measured on: 1143 of 1240 Nim specs had no built binary, so a
+        # live `build_inventory` reports what the 81 built binaries enumerate
+        # (154), not this total. The +1 is therefore attributed from the one
+        # binary that WAS rebuilt for it, with the source's independent static
+        # scan agreeing — the two-surface rule this file is built on — rather
+        # than read off an aggregate the tree could not produce.
+        expected_nim_total = 6933 if sys.platform == "darwin" else 6934
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -1751,13 +1783,28 @@ test "incomplete name" and:
         # stale binary — the number moving here while `nim_total` held is
         # precisely the signal this pin is documented to give. Rebuilding
         # reconciled them at 6838/6916.
+        #
+        # 6838 -> 6839 = +1, the same +1 `nim_total` moved by, and the whole of
+        # it is the seed-distinctness case in
+        # `t_workspace_post_commit_lock_refresh_is_best_effort.nim`. Measured
+        # by scanning the source before and after the change: 6857 and 6858.
+        #
+        # Which is this pin's own signal, fired at us: this scan reads 6857 on
+        # an UNTOUCHED `dev`, nineteen above the 6838 pinned here, so nineteen
+        # statically visible cases reached the tree without moving it. Those
+        # nineteen are not this change's and are deliberately NOT absorbed —
+        # bumping this number to whatever the tree currently sums to is exactly
+        # the aggregate laundering the per-source pins above exist to prevent.
+        # This line moves by the one case that is attributable here and no
+        # more, so the residual drift stays visible and attributable to
+        # whichever changes owe it.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6838,
+            6839,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):

@@ -87,6 +87,22 @@ proc reproBinary(): string =
 
 proc seedGitOrigin(gitBin, originPath, workPath: string;
                    branch = "main"): string =
+  ## Seed one origin + working checkout and return the seed commit's SHA.
+  ##
+  ## The seed content is keyed on ``workPath``'s own directory name, and that
+  ## is load-bearing rather than decorative. A commit SHA is a hash of (tree,
+  ## message, author, committer, timestamps) — nothing else. This fixture seeds
+  ## three repos back to back with the same author, the same committer and, if
+  ## the content is the same too, the same tree; three such commits that land
+  ## in one clock second are therefore BYTE-IDENTICAL objects with ONE SHA.
+  ##
+  ## That is not a theoretical hazard. With a constant README this collided on
+  ## every single one of 20 consecutive fixture builds, and it made the suite
+  ## flaky: a case asserting that a sibling's stale revision is gone from a
+  ## lock record read a DIFFERENT repo's entry that happened to carry the same
+  ## SHA. Distinct trees make distinct SHAs a property of the fixture rather
+  ## than of how fast the machine ran.
+  let seedTag = workPath.lastPathPart
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " &
     q(originPath))
   discard requireGit(q(gitBin) & " init -b " & branch & " " & q(workPath))
@@ -94,10 +110,10 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.name \"M19 Tester\"")
-  writeFile(workPath / "README.md", "M19 fixture\n")
+  writeFile(workPath / "README.md", "M19 fixture: " & seedTag & "\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " commit -m fixture")
+    " commit -m " & q("seed " & seedTag))
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " remote add origin " & q(originPath))
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
@@ -301,9 +317,60 @@ proc readPostCommitLog(fx: M19Fixture): string =
     return ""
   readFile(logPath)
 
+proc lockedRevision(recordBody, repoName: string): string =
+  ## The ``revision`` carried by ONE named ``[[repo]]`` entry of a
+  ## ``reprobuild.workspace.lock.v1`` record, or ``""`` when the record does
+  ## not mention that repo at all.
+  ##
+  ## Asserting on the record as one flat string cannot tell lib-a's
+  ## coordinates from lib-c's — a whole-file ``contains`` answers "some repo
+  ## in here is pinned at this SHA", which is not what any of these cases
+  ## mean to say. Reading the entry by name says it exactly, and reports the
+  ## revision it did find when it disagrees.
+  var currentRepo = ""
+  for rawLine in recordBody.splitLines():
+    let line = rawLine.strip()
+    if line == "[[repo]]":
+      currentRepo = ""
+    elif line.startsWith("name = "):
+      currentRepo = line[len("name = ") .. ^1].strip(chars = {'"'})
+    elif line.startsWith("revision = ") and currentRepo == repoName:
+      return line[len("revision = ") .. ^1].strip(chars = {'"'})
+  ""
+
 # ---- the suite -------------------------------------------------------------
 
 suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
+
+  test "test_m19_fixture_seeds_three_distinguishable_repos":
+    ## Every case below reasons about WHICH repo a lock record pins at WHICH
+    ## revision, so the three seeded repos have to be distinguishable by their
+    ## SHAs. They were not.
+    ##
+    ## ``setupFixture`` seeds lib-a, lib-b and lib-c back to back, and a commit
+    ## SHA is a hash of tree + message + author + committer + timestamps. With
+    ## identical content, identical messages and one shared identity, the only
+    ## remaining input is the one-second-resolution timestamp — so three seeds
+    ## created inside the same second hashed to ONE commit object. Measured on
+    ## this fixture, that happened in 20 of 20 consecutive builds.
+    ##
+    ## The damage was a flaky suite, not a cosmetic one: with lib-c's revision
+    ## coincidentally equal to lib-a's original head, a case asserting that
+    ## lib-a's superseded revision no longer appears in a refreshed lock record
+    ## failed on lib-c's entry — a correct record read as a broken one, 4 runs
+    ## in 10. This case pins the fixture property that stops it.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "distinct-seeds")
+      defer: removeDir(fx.scratch)
+      checkpoint("lib-a=" & fx.libA.sha & " lib-b=" & fx.libB.sha &
+        " lib-c=" & fx.libC.sha)
+      check fx.libA.sha.len == 40
+      check fx.libA.sha != fx.libB.sha
+      check fx.libA.sha != fx.libC.sha
+      check fx.libB.sha != fx.libC.sha
 
   test "test_m19_post_commit_writes_lock_when_workspace_clean":
     let gitBin = findExe("git")
@@ -734,10 +801,13 @@ suite "M19b — post-commit reports publication, not just the write":
         "locks" / "lib-a" / "lib-a")
 
       # The body is still the whole workspace — only the ADDRESS changed.
+      # Each revision is read out of its OWN ``[[repo]]`` entry: "lib-c is
+      # pinned at lib-c's head" is the claim, and a whole-file substring
+      # search cannot make it.
       let body = readFile(lockPath)
-      check body.contains("revision = \"" & libBSha & "\"")
-      check body.contains("revision = \"" & fx.libA.sha & "\"")
-      check body.contains("revision = \"" & fx.libC.sha & "\"")
+      check lockedRevision(body, "lib-b") == libBSha
+      check lockedRevision(body, "lib-a") == fx.libA.sha
+      check lockedRevision(body, "lib-c") == fx.libC.sha
 
   test "test_ra30_undeclared_triggering_repo_writes_no_lock_and_says_so":
     ## The other half of the same decision. When the hook fires in a checkout
@@ -805,7 +875,7 @@ suite "M19b — post-commit reports publication, not just the write":
       check fileExists(lockPath)
       # The draft records lib-a at its ORIGINAL head, because that is where
       # lib-a stood when the lib-b commit fired the hook.
-      check readFile(lockPath).contains("revision = \"" & fx.libA.sha & "\"")
+      check lockedRevision(readFile(lockPath), "lib-a") == fx.libA.sha
       # It is a draft precisely because nothing has committed it.
       check runCmd(q(gitBin) & " -C " & q(lockStoreRoot(fx)) &
         " ls-files --error-unmatch -- " &
@@ -827,7 +897,13 @@ suite "M19b — post-commit reports publication, not just the write":
       check report["triggerSha"].getStr() == libBSha
       check not report["diagnostic"].getStr().contains("immutable lock record")
       let refreshed = readFile(lockPath)
-      check refreshed.contains("revision = \"" & libASha & "\"")
+      # lib-a's OWN entry now names lib-a's new head...
+      check lockedRevision(refreshed, "lib-a") == libASha
+      # ...and the superseded revision survives nowhere in the record. This
+      # second check is the regression proper — before RA-31 the refreshed
+      # record still carried the pre-refresh SHA — and it is deliberately
+      # kept as a whole-record statement: no entry, lib-a's or anyone's, may
+      # still point at the stale commit.
       check not refreshed.contains("revision = \"" & fx.libA.sha & "\"")
 
   test "test_ra31_a_published_record_is_still_immutable":
