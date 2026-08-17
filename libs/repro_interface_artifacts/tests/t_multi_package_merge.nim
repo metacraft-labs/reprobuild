@@ -20,7 +20,7 @@
 ## package and one executable-bearing package, both declared in the same
 ## Nim module (this file).
 
-import std/[unittest]
+import std/[os, unittest]
 
 import repro_interface_artifacts
 import repro_project_dsl
@@ -62,3 +62,36 @@ suite "ProjectInterfaceArtifact multi-package merge":
     # so the merged envelope should expose ONE entry, not two.
     check pi.toolUses.len == 1
     check pi.toolUses[0].packageSelector == "nim"
+
+  test "project-local package modules contribute tool requirements":
+    resetPackageRegistry()
+    let rootSource = currentSourcePath()
+    let localModule = parentDir(rootSource) / "fixtures" / "package.nim"
+    let externalModule = parentDir(parentDir(rootSource)) / "external-package.nim"
+    registerPackageDef(PackageDef(
+      packageName: "root",
+      sourceFile: rootSource,
+      toolUses: @[PackageUseDef(
+        rawConstraint: "root-tool",
+        packageSelector: "root-tool",
+        executableName: "root-tool")]))
+    registerPackageDef(PackageDef(
+      packageName: "localModule",
+      sourceFile: localModule,
+      toolUses: @[PackageUseDef(
+        rawConstraint: "local-tool",
+        packageSelector: "local-tool",
+        executableName: "local-tool")]))
+    registerPackageDef(PackageDef(
+      packageName: "externalModule",
+      sourceFile: externalModule,
+      toolUses: @[PackageUseDef(
+        rawConstraint: "external-tool",
+        packageSelector: "external-tool",
+        executableName: "external-tool")]))
+
+    let pi = artifactFromRegisteredDsl(rootSource).projectInterface
+    check pi.packageName == "root"
+    check pi.toolUses.len == 2
+    check pi.toolUses[0].packageSelector == "root-tool"
+    check pi.toolUses[1].packageSelector == "local-tool"
