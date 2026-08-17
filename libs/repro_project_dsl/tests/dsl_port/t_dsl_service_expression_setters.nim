@@ -47,6 +47,35 @@ package svcExprPkg:
     # func call — the reusable-vocabulary case, also previously dropped
     `type` unitType(sfSystem)
 
+# `m5ServiceStringLitArg` is shared by ELEVEN setters, so relaxing it should
+# have relaxed all eleven. "Shared helper, therefore all work" is an inference,
+# not a result — this exercises each one rather than trusting the reasoning.
+const
+  Target = "multi-user.target"
+  UnitName = "network-online.target"
+  SvcUser = "repro"
+
+func restartPolicy(always: bool): string =
+  if always: "always" else: "on-failure"
+
+package svcExprAllPkg:
+  executable allBin:
+    build:
+      discard
+  service allSvc:
+    executable allBin
+    description SharedDescription
+    `type` unitType(sfSystem)
+    execStart "/usr/bin/" & "true"
+    wantedBy Target
+    wants UnitName
+    requires UnitName
+    before Target
+    after UnitName
+    restart restartPolicy(true)
+    user SvcUser
+    group SvcUser
+
 package svcExprMixedPkg:
   executable mixedBin:
     build:
@@ -66,6 +95,22 @@ suite "service setters accept expressions, not only literals":
   test "a func call reaches the registry — the reusable-vocabulary case":
     let svcs = registeredServices("svcExprPkg")
     check svcs[0].serviceType == "notify"
+
+  test "all eleven shared setters accept an expression":
+    let svcs = registeredServices("svcExprAllPkg")
+    check svcs.len == 1
+    let s = svcs[0]
+    check s.description == "Shared description from a const"
+    check s.serviceType == "notify"
+    check s.execStart == "/usr/bin/true"
+    check s.wantedBy == @["multi-user.target"]
+    check s.wants == @["network-online.target"]
+    check s.requires == @["network-online.target"]
+    check s.before == @["multi-user.target"]
+    check s.after == @["network-online.target"]
+    check s.restart == "always"
+    check s.user == "repro"
+    check s.group == "repro"
 
   test "literals are unaffected alongside expressions":
     let svcs = registeredServices("svcExprMixedPkg")
