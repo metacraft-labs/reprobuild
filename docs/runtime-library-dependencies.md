@@ -205,6 +205,22 @@ it. This is the same shape as the existing mode split (`reproProviderMode` /
 `reproInterfaceMode`), which today is done by emitting `when defined(...)`
 guards around generated procs rather than by re-instantiating a stored body.
 
+**`library` is the wrong declaration to pilot this on.** It is used by **208
+recipes carrying 308 declarations**, and 41 of those bodies contain `build:`
+blocks that the current parser drops through its catch-all. Converting it means
+changing the meaning of every one of those, with no way to validate short of
+building every recipe. Pick a declaration with few real consumers for the first
+conversion, and move `library` once the vocabulary-binding design has been
+exercised somewhere cheaper.
+
+The conversion also ripples further than the parser. `packageLiteral(pkg)`
+produces a `PackageDef(...)` **expression**, consumed at three sites
+(`macros_b.nim:228`, `:243` via `parseExpr`, `:3542`). Making `libraries:`
+runtime-built means emitting a generated proc and referencing it from that
+expression, and `parseLibrary` returns a shared `LibraryDef` with nowhere to
+stash an unparsed body — so the body AST has to be threaded alongside `pkg`
+through to the emitter.
+
 Two constraints found while proving it:
 
 - **The instantiating scope must supply the whole vocabulary**, not just the
