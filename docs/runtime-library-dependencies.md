@@ -161,6 +161,61 @@ block:
 
 The macro never inspects the condition or the value. Nim resolves both.
 
+### The general form: store the body in a template
+
+The verbatim-`repr` trick above fixes one setter's *value*. It does not help
+with control flow, because the parser still has one compile-time object to fill
+in and a `when` has two branches.
+
+The general fix is to stop parsing the body at all: **emit a template whose body
+is the user's body, verbatim** — a template used as a named variable holding AST
+— and let each consumption mode instantiate it with its own bindings for the
+setter names. Validated end to end:
+
+```nim
+# dsl.nim — the macro parses nothing
+macro library*(name, body: untyped): untyped =
+  let t = ident("libBody_" & name.strVal)
+  result = newStmtList()
+  result.add(newProc(name = postfix(t, "*"), body = body,
+                     procType = nnkTemplateDef))
+```
+
+```nim
+library foo:
+  kind: shared
+  when defined(windows): exportedPath: "Library/bin"
+  else:                  exportedPath: sharedLibDir(plUnix)
+
+block modeA:                      # collect the declared shape
+  template kind(v: untyped) = got.add("kind=" & v)
+  template exportedPath(v: untyped) = got.add("exportedPath=" & v)
+  libBody_foo()
+# -> @["kind=shared", "exportedPath=Library/bin"]
+
+block modeB:                      # same AST, different interpretation
+  template kind(v: untyped) = inc n
+  template exportedPath(v: untyped) = inc n
+  libBody_foo()
+# -> setters seen: 2
+```
+
+The `when` is resolved by the compiler at instantiation; the macro never sees
+it. This is the same shape as the existing mode split (`reproProviderMode` /
+`reproInterfaceMode`), which today is done by emitting `when defined(...)`
+guards around generated procs rather than by re-instantiating a stored body.
+
+Two constraints found while proving it:
+
+- **The instantiating scope must supply the whole vocabulary**, not just the
+  setters. `kind: shared` uses `shared` as a bare identifier, so each mode must
+  bind the value idents too. That is arguably the point — a mode defines what
+  the vocabulary means — but it has to be designed rather than discovered.
+- **Setter names can collide with imported symbols.** `kind` clashed with
+  `macros.kind(NimNode)` when `std/macros` was in scope at the instantiation
+  site, and overload resolution picked the import. The DSL vocabulary wants its
+  own module and careful naming.
+
 ### Why the current design forces the evaluator
 
 `macros_a.nim` builds a compile-time `LibraryDef` and then **re-serialises it
