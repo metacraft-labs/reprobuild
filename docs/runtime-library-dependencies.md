@@ -60,10 +60,33 @@ Hardcoded empty. Every launch plan claims no runtime library directories, so
 the binding algorithm has nothing to bind and the platform launchers do
 nothing — which is why consumers resort to copying DLLs by hand.
 
-**2. There is no consumer-side declaration.**
-`uses:` declares a dependency on a *tool* (an executable resolved onto PATH).
-There is no way to say "this executable loads library L at runtime". Searching
-`repro_project_dsl` for `runtimeLib` / `loadLibrary` returns nothing.
+**2. The consumer-side declaration exists and is unwired.**
+
+An earlier revision of this document said "there is no consumer-side
+declaration" and proposed inventing a `loads:` block. **That was wrong, and
+acting on it would have produced a second surface duplicating the first.**
+
+`runtimeDeps:` is already the declaration. It is documented in `macros_a.nim` as
+carrying "HOST-platform tools/libraries consumers need at runtime or link time",
+parses with the same constraint grammar as `uses:` / `buildDeps:`, and lands in
+its own `PackageDef.runtimeDeps` slot so it does not leak into `toolUses`.
+
+Measured across the recipe tree:
+
+| | count |
+| --- | --- |
+| recipes declaring a `runtimeDeps:` block | 286 |
+| …whose block is an empty `discard` / TODO stub | 226 |
+| …carrying real entries | **60** |
+
+The populated ones say exactly what the model wants — `accountsservice` declares
+`"glib2"`, `"polkit"`, `"dbus"`; `audit` declares `"libcap-ng"`.
+
+What is missing is the wiring, not the vocabulary. `runtimeDeps` reaches the
+build engine's platform routing (`repro_build_engine/platform.nim` routes it as
+`dkRuntime` against the host triple) and stops there. Grepping
+`repro_home_apply` and `repro_launch_plan` for `runtimeDeps` returns nothing at
+all.
 
 **The producer side is not expressible either.** The DSL's `library <name>:`
 block looks like the vehicle and is not:
@@ -171,18 +194,51 @@ primary strategy is unreachable.
 
 ## Implementation path
 
-1. **Consumer declaration.** A way for an executable (or package) to state a
-   runtime library dependency. The natural spelling parallels `uses:`, e.g. a
-   `loads:` block naming packages whose shared libraries must be resolvable at
-   run time.
-2. **Resolution.** For each declared runtime dependency, resolve the providing
-   package's realized prefix and append `prefix / exportedPath` to
-   `runtimeLibraryDirs` — replacing the hardcoded `@[]`.
+Step 1 of the original plan — "invent a consumer declaration" — is struck: the
+declaration is `runtimeDeps:`, and inventing a `loads:` block alongside it would
+have created two ways to say the same thing.
+
+1. **Carry `runtimeDeps` to the launcher layer.** This is the whole of the
+   remaining work, and it is a multi-layer change rather than a wiring
+   one-liner. `materializeLaunchers` already receives every realized prefix
+   (`realized: seq[RealizedRecord]`), so the destination has what it needs. What
+   it lacks is any statement of *which* packages a given launcher's package
+   loads at run time: `PlannedLauncher` carries only `commandName` and
+   `fromPackageId`, and `RealizedRecord` carries no dependency list. So the
+   dependency set has to be threaded from the package model through the planner
+   to here.
+2. **Resolve to directories.** For each runtime dependency, look up its realized
+   record and append `prefixAbsolutePath / runtimeLibDir(<layout>)` to
+   `runtimeLibraryDirs`, replacing the hardcoded `@[]` at
+   `materialize_launchers.nim:86`. Use the *runtime* library dir, not the link
+   one — see the vocabulary note above; on Windows they differ, and this is
+   precisely where a naive `lib` would fail to find `clingo.dll`.
 3. **Let the existing binding algorithm act.** No new platform code should be
    needed for the common cases: `decideBinding()` and the launcher kinds are
-   already there.
+   already there and already consume `dependencyDirs`.
 4. **Retire the hand-rolled staging** as each consumer moves over, removing the
    corresponding baseline entries.
+
+### Design questions to settle before step 1
+
+These are the reason this is a feature rather than a patch, and they should be
+answered deliberately rather than discovered during implementation:
+
+- **Which `runtimeDeps` entries are libraries?** The field is documented as
+  carrying "tools/libraries". A tool needs `PATH`; a library needs the loader
+  search path. Treating every entry as a library would widen the launcher's
+  search path beyond what the spec permits ("never wider than
+  `runtimeLibraryDirs`").
+- **How does a constraint string map to a realized package id?** `"glib2 >=2.70"`
+  has to resolve to whatever `RealizedRecord.packageId` the planner produced.
+- **What does an unresolvable entry do?** Failing the launcher build is
+  defensible; silently omitting the directory is not — that reproduces the
+  original bug in a new place.
+- **The 226 empty stubs.** Most `runtimeDeps:` blocks are TODO placeholders, so
+  populating `runtimeLibraryDirs` from this field alone will do nothing for most
+  packages until those are filled in. That is fine — it is the correct place for
+  the information — but it means this change will not, on its own, fix a given
+  package's runtime loading.
 
 ### Expressing per-platform layout
 
