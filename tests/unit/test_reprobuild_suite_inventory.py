@@ -915,12 +915,21 @@ test "incomplete name" and:
             # triggering checkout writes none at all. Both land in the
             # existing M19b suite, so `sourceSuiteCount` is unchanged.
             "tests/integration/"
+            # 10 -> 12: the two RA-31 cases pinning that the gate may
+            # supersede its OWN unpublished lock draft but still refuses a
+            # TRACKED record. Recomputed, not bumped: the binary was rebuilt
+            # from the source that carries them and its own `--list-json`
+            # counted (12); the independent static scan of the source agrees
+            # (12). Both are unconditional -- they `skip()` when `git` is
+            # absent rather than declaring themselves away -- so they move
+            # Linux and Darwin alike and the exact platform delta is
+            # untouched.
             "t_workspace_post_commit_lock_refresh_is_best_effort.nim": {
                 "binary": "build/test-bin/"
                 "t_workspace_post_commit_lock_refresh_is_best_effort",
                 "language": "nim",
                 "sourceSuiteCount": 2,
-                "sourceCaseCount": 10,
+                "sourceCaseCount": 12,
                 "class": "integration",
             },
             # The `repro develop --all` post-condition added by this branch.
@@ -1482,7 +1491,30 @@ test "incomplete name" and:
         # bumped: both binaries were built and each reported one case through
         # its own `--list-json`; the static scan agrees on both. Both are
         # unconditional, so the Linux-vs-Darwin delta is still +1.
-        expected_nim_total = 6911 if sys.platform == "darwin" else 6912
+        #
+        # 6911/6912 -> 6913/6914: the two RA-31 cases added to
+        # `t_workspace_post_commit_lock_refresh_is_best_effort.nim`, pinned per
+        # source in `expected_enrollments` above. Recomputed, not bumped: that
+        # binary was rebuilt first and the number read out of a live
+        # `build_inventory` (`nim_total` 6914 on Linux, with 1244 specs, no
+        # missing binary and nothing source-newer-than-binary). The catalog sum
+        # over the REBUILT BINARIES independently reads 6914 too. Both cases
+        # are unconditional, so the Linux-vs-Darwin delta is still +1.
+        #
+        # 6913/6914 -> 6915/6916: NOT this branch's doing. `5688d28e` added two
+        # cases to `libs/repro_project_dsl/tests/test_library_macro.nim`
+        # (`exportedPath survives to the emitted LibraryDef` and `an unset
+        # exportedPath stays empty`) without moving either aggregate — the same
+        # shape of omission `f3319113` made. It was invisible until now because
+        # `build/test-bin/test_library_macro` had not been rebuilt: the stale
+        # binary reported 8 cases, the pin said 8's worth, and the two agreed
+        # with each other forever. The static scan of the SOURCE read 10 the
+        # whole time, which is exactly the disagreement the two-surface design
+        # exists to expose. Recomputed after rebuilding that binary: its own
+        # `--list-json` now reports 10 and the catalog sum reads 6916, matching
+        # the static scan's +2. Both cases are unconditional, so the
+        # Linux-vs-Darwin delta is still +1.
+        expected_nim_total = 6915 if sys.platform == "darwin" else 6916
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -1567,15 +1599,23 @@ test "incomplete name" and:
         # The sibling-repos change moved it to 6957/6958 = 6911/6912 nim + 46
         # python — the two one-case sources the graph regeneration enrolled.
         #
+        # The RA-31 recompute moved it again, 6957/6958 -> 6959/6960 =
+        # 6913/6914 nim + 46 python, and it moved without this line being
+        # touched — which is the point of keeping it symbolic.
+        #
         # This change is the first in a while to move the PYTHON half instead:
-        # 6958 -> 6959 = 6911/6912 nim + 47 python, the one new Python guard
+        # 6962 -> 6963 = 6915/6916 nim + 47 python, the one new Python guard
         # for the `missing-binary` rule. The Nim half is untouched — the
         # `missing-binary` bucket is empty on a complete build, so making it
         # contribute zero changes no number on a tree that is fully built. That
         # is the point: the change is invisible until the build is incomplete,
         # which is exactly when the old behaviour was lying. The `+ 47` literal
         # is the python half only; the nim half stays symbolic so the two pins
-        # cannot drift apart.
+        # cannot drift apart. Measured on the merged base rather than carried
+        # arithmetically over it: `data["static"]["sourceCaseCount"]` on Linux
+        # is 6963. (The nim half of that total moved under this branch while it
+        # was open — see the `expected_nim_total` note — which is why it was
+        # measured on the merged base instead of carried across.)
         self.assertEqual(
             data["static"]["sourceCaseCount"], expected_nim_total + 47
         )
@@ -1630,13 +1670,28 @@ test "incomplete name" and:
         # 6832 -> 6834 = +2, the same +2 `nim_total` moved by: one statically
         # visible case in each of the two newly enrolled sources, each
         # independently matching its binary's one-case catalog.
+        #
+        # 6834 -> 6836 = +2, the same +2 `nim_total` moved by, and the whole of
+        # it is the two RA-31 cases in
+        # `t_workspace_post_commit_lock_refresh_is_best_effort.nim`. This scan
+        # reads the SOURCE text and `nim_total` reads the REBUILT BINARY; they
+        # were derived independently and both moved by exactly two, which is
+        # what makes "two new cases" a fact about the suite rather than about
+        # either surface.
+        #
+        # 6836 -> 6838 = +2, the two `test_library_macro.nim` cases `5688d28e`
+        # enrolled without pinning. This scan read 6838 from the SOURCE before
+        # that binary was rebuilt, while the catalog still read 6836 from the
+        # stale binary — the number moving here while `nim_total` held is
+        # precisely the signal this pin is documented to give. Rebuilding
+        # reconciled them at 6838/6916.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6834,
+            6838,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
