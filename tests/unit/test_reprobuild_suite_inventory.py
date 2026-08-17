@@ -1615,7 +1615,12 @@ test "incomplete name" and:
         # 46 -> 47: `test_a_source_with_no_built_binary_contributes_nothing`
         # in this file — the rule-level guard for the `missing-binary` change.
         # Read out of a live `build_inventory` (`python_total` 47), not bumped.
-        self.assertEqual(python_total, 47)
+        # 47 -> 50: the three cases pinning the stale-binary rule — that a
+        # binary older than its source contributes nothing, that the detection
+        # names both timestamps, and that summing an absent field raises
+        # instead of returning zero. Read out of a live `build_inventory`
+        # (`python_total` 50), not bumped.
+        self.assertEqual(python_total, 50)
         # 6856 -> 6862: -1 from the quarantined source no longer imputing a
         # static count, +7 from the new Python cases above.
         #
@@ -1669,8 +1674,16 @@ test "incomplete name" and:
         # is 6963. (The nim half of that total moved under this branch while it
         # was open — see the `expected_nim_total` note — which is why it was
         # measured on the merged base instead of carried across.)
+        #
+        # The stale-binary rule moves the python half again, 47 -> 50, so the
+        # aggregate measures 6966 = 6916 nim + 50 python on Linux. The NIM half
+        # is deliberately untouched: a staleness check must not change any
+        # count on a tree where nothing is stale, and this one does not. It DID
+        # change them on the tree it was written on — three binaries were
+        # behind their sources and `nim_total` came back 6884 until they were
+        # rebuilt. That is the check working, not the pins moving.
         self.assertEqual(
-            data["static"]["sourceCaseCount"], expected_nim_total + 47
+            data["static"]["sourceCaseCount"], expected_nim_total + 50
         )
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
@@ -2391,6 +2404,23 @@ test "incomplete name" and:
             {"catalog": 1238, "quarantined": 1, "static": 5},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
+        # ...and no source outran its binary, which is now a statement that
+        # CAN be false. While no such field existed, a reader summing it got
+        # 0 from a healthy tree and 0 from a document that had never heard of
+        # the property. `sum_field` raises on the second case; the field being
+        # emitted for every spec, in every language, is the other half.
+        self.assertEqual(catalog["staleBinaryCount"], 0)
+        self.assertEqual(catalog["staleBinaries"], [])
+        self.assertEqual(catalog["staleBinaryNote"], "")
+        self.assertTrue(catalog["staleBinaryCasesExcludedFromTotal"])
+        self.assertNotIn(
+            inventory.STALE_BINARY_STATUS, catalog["countSourceCounts"]
+        )
+        self.assertEqual(
+            inventory.sum_field(data["tests"], "sourceNewerThanBinary"), 0
+        )
+        for item in data["tests"]:
+            self.assertIn("sourceNewerThanBinary", item)
         self.assertEqual(
             sum(catalog["countSourceCounts"].values()),
             data["static"]["testEntryCount"],
@@ -2810,13 +2840,170 @@ test "incomplete name" and:
                 )
         self.assertEqual(
             set(inventory.CASE_COUNT_AUTHORITY_ZERO_SOURCES),
-            {"missing-binary", "quarantined"},
+            # Three ways a binary can fail to represent its source, all
+            # voting zero. `source-newer-than-binary` joined them after a
+            # stale binary reached `dev` reporting 8 cases for a source that
+            # had 10.
+            {"missing-binary", "quarantined", "source-newer-than-binary"},
         )
         # `static` is the one label for which the scan IS the only surface:
         # `--no-catalog`, and Python files, which have no binary to ask.
         self.assertEqual(
             inventory.authoritative_case_count("static", None, 7), 7
         )
+
+    def test_a_binary_older_than_its_source_contributes_nothing(self):
+        """The third way a binary can fail to represent its source.
+
+        Unlike the other two this one ANSWERS. A missing binary is silent
+        and an unenumerable binary fails loudly, but a stale binary exits 0
+        with a well-formed catalog describing a revision that no longer
+        exists on disk -- and nothing in that answer says so.
+
+        Measured instance, which is why this is a rule and not a warning:
+        `5688d28e` added two cases to
+        `libs/repro_project_dsl/tests/test_library_macro.nim`. Its binary
+        was 18 hours older and reported 8 where the source had 10. The
+        pinned Nim total agreed with the stale 8 exactly, and would have
+        gone on agreeing for as long as nobody rebuilt that one binary.
+        Only the independent static scan of the SOURCE read 10.
+
+        Substituting the static scan here would look defensible and be the
+        same defect in a different coat: it would report a count for a
+        source that nothing current measured. Zero is the only honest
+        contribution, and refusing to count is what turns the two surfaces'
+        disagreement into a failure instead of a number.
+        """
+        cases = [{"name": "a"}, {"name": "b"}]
+        self.assertEqual(
+            inventory.authoritative_case_count(
+                inventory.STALE_BINARY_STATUS, None, 7
+            ),
+            0,
+        )
+        # And it is its own label, not a quarantine reason: quarantine means
+        # "could not answer", which is a different fact from "answered about
+        # a different file".
+        self.assertEqual(
+            inventory.catalog_count_source(
+                {"status": inventory.STALE_BINARY_STATUS}
+            ),
+            inventory.STALE_BINARY_STATUS,
+        )
+        self.assertNotEqual(
+            inventory.STALE_BINARY_STATUS, "quarantined"
+        )
+        # A binary that DID answer and is current still wins, unchanged.
+        self.assertEqual(
+            inventory.authoritative_case_count("catalog", cases, 99), 2
+        )
+
+    def test_staleness_is_detected_and_names_both_timestamps(self):
+        """mtime over-reports; the diagnostic has to make that legible.
+
+        A branch switch rewrites source mtimes without touching binaries, so
+        a switched tree can flag hundreds of sources that are not really
+        stale. That direction is deliberate -- refusing to count costs a
+        rebuild, while counting from a binary that does not match its source
+        is silent and wrong. The price is that the diagnostic must let a
+        developer tell the two apart in one read, which means naming every
+        flagged source with BOTH timestamps.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "t_thing.nim"
+            binary = root / "t_thing"
+            source.write_text("suite \"s\":\n  test \"t\":\n    check true\n")
+            binary.write_text("binary")
+
+            # Binary newer than source: believable, so no outcome at all.
+            os.utime(source, (1_000_000, 1_000_000))
+            os.utime(binary, (1_000_100, 1_000_100))
+            self.assertIsNone(inventory.binary_staleness(source, binary))
+
+            # Equal mtimes are also believable -- a rebuild that lands in the
+            # same second must not be flagged.
+            os.utime(binary, (1_000_000, 1_000_000))
+            self.assertIsNone(inventory.binary_staleness(source, binary))
+
+            # Source newer: refused, with both timestamps and the gap.
+            os.utime(source, (1_000_500, 1_000_500))
+            outcome = inventory.binary_staleness(source, binary)
+            self.assertIsNotNone(outcome)
+            self.assertEqual(
+                outcome["status"], inventory.STALE_BINARY_STATUS
+            )
+            self.assertEqual(outcome["staleBySeconds"], 500.0)
+            self.assertIn("Z", outcome["sourceMtime"])
+            self.assertIn("Z", outcome["binaryMtime"])
+            self.assertIn("rebuild it", outcome["detail"])
+
+            # The aggregate note names the source and both timestamps, so the
+            # classification can be checked rather than trusted.
+            note = inventory.stale_binary_note(
+                [
+                    {
+                        "source": "tests/integration/t_thing.nim",
+                        "binary": "build/test-bin/t_thing",
+                        "sourceMtime": outcome["sourceMtime"],
+                        "binaryMtime": outcome["binaryMtime"],
+                        "staleBySeconds": outcome["staleBySeconds"],
+                        "staticCaseCount": 1,
+                    }
+                ]
+            )
+            self.assertIn("tests/integration/t_thing.nim", note)
+            self.assertIn(outcome["sourceMtime"], note)
+            self.assertIn(outcome["binaryMtime"], note)
+            self.assertIn("REFUSED", note)
+            # One source is not a branch switch, so it must not be blamed on
+            # one.
+            self.assertNotIn("branch switch", note)
+            # Many at once is, and the hint has to appear or the developer
+            # reads a wall of names with no interpretation.
+            many = inventory.stale_binary_note(
+                [
+                    {
+                        "source": f"tests/integration/t_{index}.nim",
+                        "binary": f"build/test-bin/t_{index}",
+                        "sourceMtime": outcome["sourceMtime"],
+                        "binaryMtime": outcome["binaryMtime"],
+                        "staleBySeconds": 1.0,
+                        "staticCaseCount": 1,
+                    }
+                    for index in range(
+                        inventory.STALE_BINARY_BRANCH_SWITCH_HINT_THRESHOLD
+                    )
+                ]
+            )
+            self.assertIn("branch switch", many)
+            self.assertEqual(inventory.stale_binary_note([]), "")
+
+    def test_summing_a_field_that_does_not_exist_is_an_error(self):
+        """A missing field must not read as a zero count.
+
+        This is the shape that let a fabricated measurement look verified in
+        three separate places. `0 source-newer-than-binary` was reported as a
+        measured property of the tree while `build_inventory` emitted no such
+        field: every per-spec lookup returned `None`, `sum(... or 0)`
+        returned 0, and 0 is exactly what a healthy tree reports too. The
+        query and the passing check were indistinguishable.
+
+        So the summing path indexes rather than `get`s, and says which record
+        and which field when it cannot.
+        """
+        records = [{"sourceCaseCount": 2}, {"sourceCaseCount": 3}]
+        self.assertEqual(inventory.sum_field(records, "sourceCaseCount"), 5)
+        with self.assertRaises(KeyError) as caught:
+            inventory.sum_field(records, "sourceNewerThanBinary")
+        message = str(caught.exception)
+        self.assertIn("sourceNewerThanBinary", message)
+        self.assertIn("must not read as a zero count", message)
+        # And it names the offending record, not just the field.
+        named = [{"source": "tests/integration/t_x.nim"}]
+        with self.assertRaises(KeyError) as caught_named:
+            inventory.sum_field(named, "sourceCaseCount")
+        self.assertIn("t_x.nim", str(caught_named.exception))
 
     def test_catalog_index_memo_is_keyed_by_the_spec_set(self):
         """A one-spec index must never satisfy a full-tree request.

@@ -31,6 +31,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1733,6 +1734,144 @@ def probe_binary_catalog(
     return {"status": "ok", "cases": cases}
 
 
+STALE_BINARY_STATUS = "source-newer-than-binary"
+
+
+def _iso_from_ns(mtime_ns: int) -> str:
+    return (
+        datetime.fromtimestamp(mtime_ns / 1_000_000_000, tz=timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def binary_staleness(
+    source_path: Path, binary_path: Path
+) -> dict[str, Any] | None:
+    """Probe outcome when a binary predates the source it was built from.
+
+    Returns ``None`` when the binary is at least as new as its source (the
+    normal case, and the only case in which the binary may be believed), and
+    a probe outcome carrying both timestamps otherwise.
+
+    **mtime deliberately over-reports.** A branch switch rewrites source
+    mtimes without touching binaries, so a freshly switched tree can flag
+    hundreds of sources that are not really stale. That is the safe
+    direction and it is chosen on purpose: refusing to report a count costs
+    a rebuild, whereas reporting a count derived from a binary that does not
+    match its source is exactly the failure this exists to stop, and it is
+    silent. An over-report is loud and self-correcting -- rebuild and it
+    goes away.
+
+    Because it over-reports, the diagnostic has to be readable: every
+    flagged source is named with both timestamps, so "I just switched
+    branches" (hundreds of sources, all with nearly identical source
+    mtimes) is distinguishable from "this binary is genuinely stale" (one
+    or two sources, source mtime long after the binary) in one read.
+
+    The authoritative version of this question is not mtime at all: `repro`'s
+    action cache keys each test-compile edge on source CONTENT, so it alone
+    knows whether `build/test-bin/<x>` corresponds to the current source
+    regardless of timestamps, and it would not over-report on a branch
+    switch. Wiring the inventory to consult it is the better long-term
+    shape and is deliberately not done here -- the CAS for those edges is
+    empty today (every test compile is `cacheable = false`), so it could not
+    answer, and mtime is the version that ships now.
+    """
+    try:
+        source_ns = source_path.stat().st_mtime_ns
+        binary_ns = binary_path.stat().st_mtime_ns
+    except OSError:
+        return None
+    if source_ns <= binary_ns:
+        return None
+    return {
+        "status": STALE_BINARY_STATUS,
+        "detail": (
+            f"source modified {_iso_from_ns(source_ns)} but its binary was "
+            f"built {_iso_from_ns(binary_ns)}; rebuild it before believing "
+            "any count derived from it"
+        ),
+        "sourceMtime": _iso_from_ns(source_ns),
+        "binaryMtime": _iso_from_ns(binary_ns),
+        "staleBySeconds": round((source_ns - binary_ns) / 1_000_000_000, 3),
+    }
+
+
+STALE_BINARY_BRANCH_SWITCH_HINT_THRESHOLD = 20
+
+
+def stale_binary_note(stale: list[dict[str, Any]]) -> str:
+    """A diagnostic a developer can act on in one read.
+
+    mtime over-reports by design (see ``binary_staleness``), so the note has
+    to make the two situations tell themselves apart:
+
+    * a branch switch rewrites every checked-out source's mtime at once, so
+      it flags MANY sources whose source mtimes are within seconds of each
+      other -- the remedy is a rebuild, nothing is really stale;
+    * a genuinely stale binary is usually ONE source, edited long after its
+      binary was built.
+
+    Both get the same refusal; only the wording differs, and the individual
+    sources are always named with both timestamps so the reader can check
+    the classification rather than trust it.
+    """
+    if not stale:
+        return ""
+    lines = [
+        f"{len(stale)} source(s) are newer than their built binary; their "
+        "case counts are REFUSED (contributing zero), because a binary "
+        "enumerates the revision it was built from, not the one on disk."
+    ]
+    spread = 0.0
+    if len(stale) > 1:
+        mtimes = sorted(item["sourceMtime"] for item in stale)
+        spread = 1.0 if mtimes[0] != mtimes[-1] else 0.0
+    if len(stale) >= STALE_BINARY_BRANCH_SWITCH_HINT_THRESHOLD:
+        lines.append(
+            "This many at once usually means a branch switch or a fresh "
+            "checkout rewrote source mtimes rather than that the tree is "
+            "genuinely stale -- compare the source timestamps below: if they "
+            "are all within moments of each other, rebuild and re-run."
+        )
+    for item in sorted(stale, key=lambda entry: entry["source"]):
+        lines.append(
+            f"  {item['source']}: source {item['sourceMtime']} > binary "
+            f"{item['binaryMtime']} (by {item['staleBySeconds']}s); "
+            f"static scan reads {item['staticCaseCount']} case(s)"
+        )
+    return "\n".join(lines)
+
+
+def sum_field(records: list[dict[str, Any]], field: str) -> int:
+    """Sum ``field`` across ``records``, refusing to invent a zero.
+
+    ``sum(item.get(field, 0) for item in records)`` is indistinguishable
+    from a passed check when ``field`` does not exist: it returns 0, and 0
+    is what a healthy tree also reports. That shape is exactly how
+    ``0 source-newer-than-binary`` came to be stated as a measured fact
+    three times over while nothing measured it -- the query named a field
+    the document never had, every lookup returned ``None``, and the sum was
+    vacuously clean.
+
+    So: index, never ``get``. A field this function cannot find is a bug in
+    the caller or a document from a different version, and both should stop
+    the run rather than report zero.
+    """
+    total = 0
+    for index, item in enumerate(records):
+        if field not in item:
+            raise KeyError(
+                f"inventory record {index} "
+                f"({item.get('source', '<no source>')!r}) has no {field!r}; "
+                "refusing to sum a field that does not exist -- a missing "
+                "field must not read as a zero count"
+            )
+        total += int(item[field])
+    return total
+
+
 def binary_cache_key(path: Path) -> str | None:
     try:
         info = path.stat()
@@ -1852,6 +1991,25 @@ def catalog_index(
                 "status": "missing-binary",
                 "detail": "no built binary under build/test-bin",
             }
+            continue
+        # A binary older than its source is not evidence about the source.
+        # It enumerates whatever it was built from, which is by definition
+        # not what is on disk now, and it does so CONFIDENTLY -- exit 0, a
+        # well-formed catalog, nothing anywhere saying the answer is about a
+        # different file. That is how `5688d28e` reached `dev`: two cases
+        # were added to `test_library_macro.nim`, the binary was 18 hours
+        # older, it reported 8 where the source had 10, and the pinned total
+        # agreed with the stale count. Only the independent static scan of
+        # the SOURCE saw the other two.
+        #
+        # Note what `binary_cache_key` does and does not cover: it keys the
+        # CATALOG CACHE on the binary's own `size:mtime`, so a REBUILT binary
+        # correctly invalidates. It says nothing about the binary's age
+        # relative to its source, so a never-rebuilt binary and its pin agree
+        # with each other indefinitely.
+        staleness = binary_staleness(root / spec.source, binary_path)
+        if staleness is not None:
+            results[spec.source] = staleness
             continue
         entry = cached.get(spec.source)
         if (
@@ -3124,16 +3282,28 @@ def run_suite(root: Path, warm_runs: int, clean_first: bool, timeout_seconds: in
 def catalog_count_source(outcome: dict[str, Any] | None) -> str:
     """Label the provenance of one Nim source's case count.
 
-    Four distinct labels, deliberately not three:
+    Five distinct labels, deliberately not four:
 
-    ``catalog``        the built binary enumerated itself (authoritative);
-    ``missing-binary`` no binary was built, so nothing could enumerate;
-    ``quarantined``    a binary exists and could not enumerate;
-    ``static``         no probe was attempted at all (``--no-catalog``).
+    ``catalog``                 the built binary enumerated itself
+                                (authoritative);
+    ``missing-binary``          no binary was built, so nothing could
+                                enumerate;
+    ``source-newer-than-binary`` a binary exists and enumerates a DIFFERENT
+                                revision of the source;
+    ``quarantined``             a binary exists and could not enumerate;
+    ``static``                  no probe was attempted at all
+                                (``--no-catalog``).
 
     ``missing-binary`` used to be folded into ``static``, which made it
     indistinguishable from a Python file that legitimately has no binary —
     a build gap and a language property reported with the same word.
+
+    ``source-newer-than-binary`` is the third way a binary can fail to
+    represent its source, and it is the dangerous one: unlike the other two
+    it produces a confident, well-formed answer about the wrong revision.
+    It is its own label rather than a ``quarantined`` reason because
+    quarantine means "the binary could not answer" — here it answered, and
+    the answer is about a file that no longer exists.
     """
     if outcome is None:
         return "static"
@@ -3142,10 +3312,16 @@ def catalog_count_source(outcome: dict[str, Any] | None) -> str:
         return "catalog"
     if status == "missing-binary":
         return "missing-binary"
+    if status == STALE_BINARY_STATUS:
+        return STALE_BINARY_STATUS
     return "quarantined"
 
 
-CASE_COUNT_AUTHORITY_ZERO_SOURCES = ("missing-binary", "quarantined")
+CASE_COUNT_AUTHORITY_ZERO_SOURCES = (
+    "missing-binary",
+    "quarantined",
+    STALE_BINARY_STATUS,
+)
 
 
 def authoritative_case_count(
@@ -3181,6 +3357,23 @@ def authoritative_case_count(
                        number to the case, while a fiftieth of the suite was
                        not built. A pin that cannot move when the tree is
                        broken is not checking anything.
+    ``source-newer-than-binary``
+                       a binary exists and enumerates a DIFFERENT revision of
+                       the source -> ZERO, and for a sharper reason than the
+                       other two. A missing or unenumerable binary is silent;
+                       a stale one is CONFIDENT, returning exit 0 and a
+                       well-formed catalog describing a file that no longer
+                       exists. Substituting the static scan here would be
+                       defensible-looking and wrong in the same way: it would
+                       let a count be reported for a source nothing current
+                       measured. Measured instance: `5688d28e` added two cases
+                       to `test_library_macro.nim`; its binary was 18 hours
+                       older, reported 8 against the source's 10, and the
+                       pinned Nim total agreed with the stale 8 while the
+                       independent static scan read 10. Zero is the only
+                       honest contribution, and refusing it is what makes the
+                       disagreement surface as a failure rather than as a
+                       number.
     ``static``         no probe was attempted (``--no-catalog``), or the source
                        is Python and HAS no binary -> the static scan, which is
                        the only surface there is.
@@ -3215,6 +3408,7 @@ def build_inventory(
         else {}
     )
     quarantine: list[dict[str, Any]] = []
+    stale_binaries: list[dict[str, Any]] = []
     count_source_counts: dict[str, int] = {}
 
     for spec in all_specs:
@@ -3230,11 +3424,22 @@ def build_inventory(
         catalog_cases: list[dict[str, Any]] | None = None
         catalog_suite_count: int | None = None
         quarantine_reason = ""
+        stale_record: dict[str, Any] | None = None
         if spec.language == "python":
             count_source = "static"
         else:
             outcome = catalog.get(spec.source)
             count_source = catalog_count_source(outcome)
+            if count_source == STALE_BINARY_STATUS:
+                stale_record = {
+                    "source": spec.source,
+                    "binary": spec.binary,
+                    "sourceMtime": outcome["sourceMtime"],
+                    "binaryMtime": outcome["binaryMtime"],
+                    "staleBySeconds": outcome["staleBySeconds"],
+                    "staticCaseCount": static_case_count,
+                }
+                stale_binaries.append(stale_record)
             if count_source == "catalog":
                 catalog_cases = outcome["cases"]
                 catalog_suite_count = len(
@@ -3293,7 +3498,19 @@ def build_inventory(
             "classificationReason": reason,
             "staticallyDetectedRuntimeCompilerFlow": bool(compiles),
             "localDependencyShape": local_dependency_shape(spec, text),
+            # ALWAYS emitted, for every spec in every language, so that
+            # "0 source-newer-than-binary" is a statement that can be false.
+            # While this key did not exist, a reader summing it got 0 from a
+            # healthy tree and 0 from a document that had never heard of the
+            # property, and those are not the same fact. `sum_field` refuses
+            # the second case; emitting the key unconditionally is the other
+            # half of making that refusal meaningful.
+            "sourceNewerThanBinary": stale_record is not None,
         }
+        if stale_record is not None:
+            entry["sourceMtime"] = stale_record["sourceMtime"]
+            entry["binaryMtime"] = stale_record["binaryMtime"]
+            entry["staleBySeconds"] = stale_record["staleBySeconds"]
         if quarantine_reason:
             entry["quarantineReason"] = quarantine_reason
         if catalog_cases is not None:
@@ -3343,6 +3560,13 @@ def build_inventory(
         # whose binary is absent. `countSourceCounts["missing-binary"]` is how
         # many sources that silence covers.
         "missingBinaryCasesExcludedFromTotal": True,
+        # The third way a binary can fail to represent its source, and the
+        # only one that answers confidently. Excluded for the same reason as
+        # the other two, and published so the exclusion is checkable.
+        "staleBinaryCasesExcludedFromTotal": True,
+        "staleBinaryCount": len(stale_binaries),
+        "staleBinaries": stale_binaries,
+        "staleBinaryNote": stale_binary_note(stale_binaries),
         "enabled": use_catalog,
         "countSourceCounts": count_source_counts,
         "quarantineCount": len(quarantine),
@@ -3366,6 +3590,12 @@ def build_inventory(
         print(
             "reprobuild_suite_inventory: WARNING: "
             + catalog_enumeration["environmentNote"],
+            file=sys.stderr,
+        )
+    if stale_binaries:
+        print(
+            "reprobuild_suite_inventory: "
+            + catalog_enumeration["staleBinaryNote"],
             file=sys.stderr,
         )
 
