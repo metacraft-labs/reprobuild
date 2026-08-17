@@ -1378,7 +1378,9 @@ test "incomplete name" and:
         #     because it is not this change's subject: folding it into the
         #     "one new test" story would be exactly the unattributed aggregate
         #     adjustment these per-source pins exist to prevent.
-        self.assertEqual(len(nim_specs), 1239)
+        # 1239 -> 1240: one new source, `t_tool_acquisition_does_not_inherit_
+        # the_loader_env.nim`, enrolled by regenerating the graph.
+        self.assertEqual(len(nim_specs), 1240)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -1514,7 +1516,16 @@ test "incomplete name" and:
         # `--list-json` now reports 10 and the catalog sum reads 6916, matching
         # the static scan's +2. Both cases are unconditional, so the
         # Linux-vs-Darwin delta is still +1.
-        expected_nim_total = 6915 if sys.platform == "darwin" else 6916
+        #
+        # 6915/6916 -> 6917/6918: the two cases of the newly enrolled
+        # `t_tool_acquisition_does_not_inherit_the_loader_env.nim`. Recomputed,
+        # not bumped: its binary was built first and its own `--list-json`
+        # reported 2, the catalog sum then reading 6918, and the independent
+        # static scan of the source agrees (+2). Both cases are unconditional --
+        # they `skip()` when `tar`/`sh` are absent or the host is Windows rather
+        # than declaring themselves away -- so the Linux-vs-Darwin delta is
+        # still +1.
+        expected_nim_total = 6917 if sys.platform == "darwin" else 6918
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -1604,7 +1615,7 @@ test "incomplete name" and:
         # touched — which is the point of keeping it symbolic.
         #
         # This change is the first in a while to move the PYTHON half instead:
-        # 6962 -> 6963 = 6915/6916 nim + 47 python, the one new Python guard
+        # 6964 -> 6965 = 6917/6918 nim + 47 python, the one new Python guard
         # for the `missing-binary` rule. The Nim half is untouched — the
         # `missing-binary` bucket is empty on a complete build, so making it
         # contribute zero changes no number on a tree that is fully built. That
@@ -1613,7 +1624,7 @@ test "incomplete name" and:
         # is the python half only; the nim half stays symbolic so the two pins
         # cannot drift apart. Measured on the merged base rather than carried
         # arithmetically over it: `data["static"]["sourceCaseCount"]` on Linux
-        # is 6963. (The nim half of that total moved under this branch while it
+        # is 6965. (The nim half of that total moved under this branch while it
         # was open — see the `expected_nim_total` note — which is why it was
         # measured on the merged base instead of carried across.)
         self.assertEqual(
@@ -1685,13 +1696,19 @@ test "incomplete name" and:
         # stale binary — the number moving here while `nim_total` held is
         # precisely the signal this pin is documented to give. Rebuilding
         # reconciled them at 6838/6916.
+        #
+        # 6838 -> 6840 = +2, the same +2 `nim_total` moved by, and the whole of
+        # it is the two cases of the newly enrolled
+        # `t_tool_acquisition_does_not_inherit_the_loader_env.nim`. This scan
+        # reads the SOURCE text and `nim_total` reads the BUILT BINARY; both
+        # moved by exactly two.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6838,
+            6840,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
@@ -2335,7 +2352,10 @@ test "incomplete name" and:
             # binaries are built and probed, so both join the `catalog` bucket
             # and `missing-binary` stays empty: 1238 = 1239 Nim specs - 1
             # quarantined.
-            {"catalog": 1238, "quarantined": 1, "static": 5},
+            # 1238 -> 1239: the one new source. Its binary is built and
+            # probed, so it joins the `catalog` bucket and `missing-binary`
+            # stays empty: 1239 = 1240 Nim specs - 1 quarantined.
+            {"catalog": 1239, "quarantined": 1, "static": 5},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         self.assertEqual(
@@ -3369,7 +3389,9 @@ test "incomplete name" and:
         # 1237 -> 1239: the `develop --all` post-condition source and the
         # recovered `t_branch_fork_clones_root_submodules.nim`, both pinned
         # individually beside the parsed-spec aggregate above.
-        self.assertEqual(declared_nim_count, 1239)
+        # 1239 -> 1240: the one new source,
+        # `t_tool_acquisition_does_not_inherit_the_loader_env.nim`.
+        self.assertEqual(declared_nim_count, 1240)
         self.assertEqual(declared_python_count, 5)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -3417,9 +3439,9 @@ test "incomplete name" and:
         # upstream 11cea6789's six pinned sources move 1235 -> 1241.
         # The linked-worktree regression then adds one Nim entry.
         # The linked-worktree regression then adds one Nim entry: 1242.
-        # Final graph: 1239 Nim + 5 Python = 1244 entries — the two sources
+        # Final graph: 1240 Nim + 5 Python = 1245 entries — the two sources
         # the graph regeneration enrols.
-        self.assertEqual(data["static"]["testEntryCount"], 1244)
+        self.assertEqual(data["static"]["testEntryCount"], 1245)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),

@@ -8510,6 +8510,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_tool_acquisition_does_not_inherit_the_loader_env.nim",
+    binary: "build/test-bin/t_tool_acquisition_does_not_inherit_the_loader_env",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_top_level_sync_pull_shortcuts_match_workspace_forms.nim",
     binary: "build/test-bin/t_top_level_sync_pull_shortcuts_match_workspace_forms",
     defines: @[],

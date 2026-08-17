@@ -1,4 +1,5 @@
-import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, times, net]
+import std/[algorithm, json, os, osproc, sequtils, sets, streams, strtabs,
+            strutils, tables, times, net]
 
 import blake3
 import cbor
@@ -1664,15 +1665,55 @@ proc downloadUrlToFile(url, destination: string) =
     if curl.len == 0:
       raise newException(IOError,
         "curl is required to download archive URL: " & url)
+    # M9.R.40.2 shape — do NOT hand this child the caller's loader
+    # environment. Tool acquisition is the class-2 PATH-only tier: it runs
+    # BEFORE a store exists, so the binary it finds is whichever host `curl`
+    # is on PATH, linked against that host's libc and OpenSSL. Reprobuild's
+    # own devshell exports an `LD_LIBRARY_PATH` full of nix-store libraries;
+    # inheriting it forces nix-store `libssl.so.3` / `libcrypto.so.3` onto a
+    # host binary that was never linked against them, and the loader kills it
+    # before `main` with `GLIBC_2.38 not found`. Observed exactly that, and
+    # the archive is sha256-pinned and content-addressed, so the URL was
+    # never the problem.
+    #
+    # The child needs no loader configuration from us: it resolves its own
+    # libraries the way its packager intended. `childEnvWithoutLdLibPath`
+    # (`repro_profile/hardware_probe.nim`) is the same remedy applied to the
+    # hardware probes for the same reason; this module cannot import it
+    # without taking a dependency on `repro_profile`, so the strip is
+    # inlined.
+    var childEnv = newStringTable(modeCaseSensitive)
+    for key, value in envPairs():
+      case key
+      of "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT",
+         "LD_DEBUG", "LD_DEBUG_OUTPUT",
+         "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+         "DYLD_FALLBACK_LIBRARY_PATH":
+        discard
+      else:
+        childEnv[key] = value
+    # `poStdErrToStdOut` + a pipe rather than `poParentStreams`: with the
+    # parent's streams the loader's diagnostic goes to the terminal and never
+    # reaches the exception, so `verifiedDownload` reports only "all tarball
+    # archive URLs failed" and the actual cause -- a dynamic-link failure
+    # naming the missing symbol version -- is nowhere in the error. Keeping
+    # it means the next instance of this is one line of output, not a bisect.
     let process = startProcess(curl,
       args = ["-L", "--fail", "--silent", "--show-error", "-o",
         destination, url],
-      options = {poUsePath, poParentStreams})
+      env = childEnv,
+      options = {poUsePath, poStdErrToStdOut})
+    var diagnostic = ""
+    try:
+      diagnostic = process.outputStream().readAll().strip()
+    except CatchableError:
+      discard
     let exitCode = waitForExit(process)
     close(process)
     if exitCode != 0:
       raise newException(IOError,
-        "curl failed while downloading archive URL: " & url)
+        "curl failed (exit " & $exitCode & ") while downloading archive URL: " &
+        url & (if diagnostic.len > 0: " -- " & diagnostic else: ""))
   else:
     if not fileExists(extendedPath(url)):
       raise newException(IOError, "unsupported archive URL or missing file: " & url)
