@@ -27,12 +27,13 @@
 ## once + never re-uploads, so the hash is stable.
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 package `texinfo`:
   provisioning:
     nixPackage "nixpkgs#texinfo", executablePath = "bin/makeinfo",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # Direct-download: GNU upstream release tarball. Cross-platform —
     # builds on Linux + Windows (via MSYS2/Cygwin perl). The tarball
     # lays out ``texinfo-7.2/`` at the root; ``stripComponents = 1``

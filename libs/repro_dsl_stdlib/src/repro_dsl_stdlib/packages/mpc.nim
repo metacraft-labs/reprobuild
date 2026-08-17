@@ -11,12 +11,13 @@
 ## package.nix`` (version 1.4.0).
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 package `mpc`:
   provisioning:
     nixPackage "nixpkgs#libmpc", executablePath = "include/mpc.h",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # **executablePath = "configure"** (M9.R.11 source-tarball
     # placeholder): see ``packages/texinfo.nim`` for the rationale.
     tarball url = "https://ftp.gnu.org/gnu/mpc/mpc-1.4.0.tar.gz",

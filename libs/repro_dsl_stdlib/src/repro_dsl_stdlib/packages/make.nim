@@ -1,4 +1,5 @@
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 # DSL-port M9.R.2c — typed slot var for ``executable makeBin:``.
 import repro_dsl_stdlib/types/executable
 
@@ -13,8 +14,8 @@ import repro_dsl_stdlib/types/executable
 package make:
   provisioning:
     nixPackage "nixpkgs#gnumake", executablePath = "bin/make",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # M9.R.13b.4 — direct-download tarball channel pointing at the
     # WinLibs gcc distribution which BUNDLES a 64-bit ``mingw32-make.exe``
     # at ``bin/mingw32-make.exe``. The previous M9.R.13b.2 attempt

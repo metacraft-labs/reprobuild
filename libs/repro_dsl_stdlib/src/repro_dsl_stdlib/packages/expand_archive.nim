@@ -51,6 +51,7 @@
 import std/strutils
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 # The native real-tools' provisioning blocks must land in
 # ``registeredPackages()`` so the engine can resolve them via
@@ -334,8 +335,8 @@ package `expandArchive`:
     # Nix provides ``coreutils`` as an inert anchor; the real fork
     # never invokes it.
     nixPackage "nixpkgs#coreutils", executablePath = "bin/true",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 # ---------------------------------------------------------------------------
 # Typed ``build:`` callable

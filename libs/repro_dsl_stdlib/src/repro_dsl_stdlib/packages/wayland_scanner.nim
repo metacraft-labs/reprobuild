@@ -20,6 +20,7 @@
 ## with the post-weekend Plasma/KWin campaign.
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 package `wayland-scanner`:
   provisioning:
@@ -30,5 +31,5 @@ package `wayland-scanner`:
     # pinned to match wayland_protocols.nim + qt6_tools.nim so the
     # cross-package fetch graph stays shareable.
     nixPackage "nixpkgs#wayland-scanner", executablePath = "bin/wayland-scanner",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash

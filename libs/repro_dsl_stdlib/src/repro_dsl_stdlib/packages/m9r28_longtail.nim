@@ -14,74 +14,75 @@
 ## values per the sibling stubs (``audit.nim``, ``libxcrypt.nim``, ...).
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 package `ncurses`:
   provisioning:
     nixPackage "nixpkgs#ncurses", executablePath = "lib/libncurses.so",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package `popt`:
   provisioning:
     nixPackage "nixpkgs#popt", executablePath = "lib/libpopt.so",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package `readline`:
   provisioning:
     nixPackage "nixpkgs#readline", executablePath = "lib/libreadline.so",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package `zlib`:
   provisioning:
     nixPackage "nixpkgs#zlib", executablePath = "lib/libz.so",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package `lzo`:
   provisioning:
     nixPackage "nixpkgs#lzo", executablePath = "lib/liblzo2.so",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package `libgcrypt`:
   provisioning:
     nixPackage "nixpkgs#libgcrypt", executablePath = "lib/libgcrypt.so",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package `json-c`:
   provisioning:
     nixPackage "nixpkgs#json_c", executablePath = "lib/libjson-c.so",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package `device-mapper`:
   provisioning:
     nixPackage "nixpkgs#lvm2.lib", executablePath = "lib/libdevmapper.so",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package `util-linux`:
   provisioning:
     nixPackage "nixpkgs#util-linux", executablePath = "lib/libblkid.so",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package `pam`:
   provisioning:
     nixPackage "nixpkgs#linux-pam", executablePath = "lib/libpam.so",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package `libbsd`:
   ## shadow-utils' configure tests for ``readpassphrase()`` which
   ## glibc lacks; libbsd provides it.
   provisioning:
     nixPackage "nixpkgs#libbsd.dev", executablePath = "lib/pkgconfig/libbsd-overlay.pc",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package `libmd`:
   ## libmd ships ``libmd.so`` which libbsd's runtime depends on
@@ -91,24 +92,24 @@ package `libmd`:
   ## ``cannot find -lmd``).
   provisioning:
     nixPackage "nixpkgs#libmd", executablePath = "lib/libmd.so",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package `libcap`:
   ## shadow-utils' helpers (``newuidmap``, ``newgidmap``) link against
   ## libcap for fine-grained capability management.
   provisioning:
     nixPackage "nixpkgs#libcap", executablePath = "lib/libcap.so",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package `libaio`:
   ## Linux native AIO userspace library (libaio.so + libaio.h);
   ## lvm2 reaches for it for bcache async I/O.
   provisioning:
     nixPackage "nixpkgs#libaio", executablePath = "lib/libaio.so",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package `gettext`:
   ## gettext provides ``msgfmt`` (compile .po → .mo locale catalogs)
@@ -117,5 +118,5 @@ package `gettext`:
   ## the runtime libintl.so + the msgfmt binary in the same package.
   provisioning:
     nixPackage "nixpkgs#gettext", executablePath = "bin/msgfmt",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash

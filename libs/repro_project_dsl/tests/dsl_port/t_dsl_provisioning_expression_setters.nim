@@ -42,10 +42,14 @@ func binDir(layout: PrefixLayout): string =
   of plUnix: "bin"
   of plConda: "Library/bin"
 
-# The case the catalog actually has: ~227 entries repeat the same nixpkgs rev
-# and narHash as bare literals, and t_smoke_catalog_audit_m29 enforces the
-# repetition by grepping for the literal text — because until now the DSL could
-# not accept the shared const that would make the audit unnecessary.
+# The case the catalog actually had: 274 entries across 219 files repeated the
+# same nixpkgs rev and narHash as bare literals, and t_smoke_catalog_audit_m29
+# enforced the repetition by grepping for the literal text — because the DSL
+# could not accept the shared const that would make the audit unnecessary.
+#
+# The catalog has since been migrated onto `repro_dsl_stdlib/nixpkgs_pin`, so
+# this test now guards the mechanism that migration depends on. If it regresses,
+# 274 entries silently pick up the string "CanonicalNixpkgsRev" as their pin.
 const
   CanonicalRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8"
   CanonicalNarHash = "sha256-0Ax7hsY2rZ2xEbfLbSjTHXbNyMmS5oCNDoZzC1EWNAg="

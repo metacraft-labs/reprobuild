@@ -12,10 +12,10 @@ forms it was neither.
 Two things in this tree are workarounds for this defect, and both name it in
 their own comments:
 
-- **~227 catalog entries** repeat one `nixpkgsRev` and one `nixpkgsNarHash` as
-  bare literals, and `t_smoke_catalog_audit_m29` *enforces* the repetition by
-  grepping for the literal text. The audit exists because the shared const
-  could not be written.
+- **274 catalog entries across 219 files** repeated one `nixpkgsRev` and one
+  `nixpkgsNarHash` as bare literals, and `t_smoke_catalog_audit_m29` *enforced*
+  the repetition by grepping for the literal text. The audit existed because the
+  shared const could not be written. **Now migrated** — see below.
 - **Recipes carry comments** of the form *"Keep the version string in sync with
   `AptJammyAdapterVersion` in the stdlib module"*
   (`recipes/packages/adapters/apt-jammy/repro.nim`). The const already existed.
@@ -180,10 +180,39 @@ store-the-body-in-a-template shape described in
 it as a template that each consumption mode instantiates with its own bindings,
 so the compiler resolves the `when` and the macro never sees it.
 
-**The catalog still repeats its pins.** Nothing forces it to now, but migrating
-~227 entries to a shared const — and retiring the grep-based audit that enforces
-the duplication — is a separate change.
+## The payoff: the catalog pin is declared once
 
-**The catalog still repeats its pins.** Nothing forces it to now, but migrating
-~227 entries to a shared const — and retiring the grep-based audit that enforces
-the duplication — is a separate change.
+274 provisioning entries across 219 catalog files now reference
+`CanonicalNixpkgsRev` / `CanonicalNixpkgsNarHash` from
+`repro_dsl_stdlib/nixpkgs_pin` instead of carrying a pasted copy of each string.
+548 literals became 2.
+
+The point is not that there is less text. It is that **divergence became
+unrepresentable**: an entry can no longer drift from the snapshot by being
+forgotten during a bump, because there is nothing per-entry left to forget. The
+one deliberate divergence — `accountsservice`, held at release-24.11 for a
+documented ABI reason — keeps its own literals, which is what makes it visibly a
+decision rather than an oversight.
+
+The audit's job changed shape accordingly. It no longer asks "are these 274
+strings still equal to each other" — unanswerable-by-construction now — but
+"does every entry go through the const, with no literal left behind". A file
+carrying *both* would drift silently at the next bump, so the check requires the
+literal to be **gone**, not merely accompanied. The test also stopped carrying
+its own third copy of the values and imports the same module the catalog does;
+otherwise it could check the catalog against a stale expectation and report
+green.
+
+Verified by breaking it on purpose: re-pasting the literal into a migrated entry
+fails the audit, and so does a divergent rev; restoring the file makes it green
+again. The values reach the registry unchanged, including the derived
+`nixpkgsRef` and `lockIdentity` that the Nix CI gate actually probes — checked
+against 40 provisioning entries drawn from the multi-entry files
+(`host_system_tools` alone has 31).
+
+### Bumping the snapshot now
+
+Edit the two constants in `repro_dsl_stdlib/nixpkgs_pin.nim`. That is the whole
+procedure. They are a pair — the rev names the commit, the narHash pins its
+content — and a mismatched pair fails at realization with a hash error rather
+than at compile time, so change them together.

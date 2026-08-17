@@ -21,14 +21,15 @@
 ##   ``bin/makensis.exe`` directly.
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 # DSL-port M9.R.2c — typed slot var for ``executable makensis:``.
 import repro_dsl_stdlib/types/executable
 
 package nsis:
   provisioning:
     nixPackage "nixpkgs#nsis", executablePath = "bin/makensis",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # Windows: ScoopInstaller/Extras bucket. The manifest already
     # exposes makensis via env_add_path = "bin"; the executablePath
     # below matches the on-disk layout after Scoop's flatten.

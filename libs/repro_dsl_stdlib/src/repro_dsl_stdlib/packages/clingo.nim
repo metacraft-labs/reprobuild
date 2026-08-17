@@ -70,14 +70,15 @@
 ## beside ``repro.exe`` -- ``scripts/verify_release.sh`` enforces that.
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 package clingo:
   provisioning:
     # POSIX only for now. Matches the ``pkgs.clingo`` input flake.nix already
     # uses for the devShell, on the repo's dominant nixpkgs pin.
     nixPackage "nixpkgs#clingo", executablePath = "bin/clingo",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # Windows: conda-forge, via the `conda` archiveType. When this entry was
     # first scaffolded the arm did not exist and a `tarball` here would have
     # unpacked to the two inner `.tar.zst` members rather than to `clingo.dll`

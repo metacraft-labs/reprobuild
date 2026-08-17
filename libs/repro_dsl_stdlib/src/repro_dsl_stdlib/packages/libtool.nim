@@ -13,20 +13,21 @@
 
 import std/tables
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
 package libtool:
   provisioning:
     nixPackage "nixpkgs#libtool", executablePath = "bin/libtool",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 package libtoolize:
   provisioning:
     nixPackage "nixpkgs#libtool", executablePath = "bin/libtoolize",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 # ---------------------------------------------------------------------------
 # Harvested MSYS2 catalog (cakBuiltin adapter consumer on Windows).

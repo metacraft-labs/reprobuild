@@ -28,6 +28,7 @@
 ## separate Scoop manifest is harvested here.
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 # DSL-port M9.R.2c — typed slot var for each ``executable <tool>Bin:``
 # declared below (ldBin / arBin / ranlibBin / stripBin / nmBin /
 # objdumpBin / objcopyBin / gasBin).
@@ -39,8 +40,8 @@ import repro_dsl_stdlib/types/executable
 package binutils:
   provisioning:
     nixPackage "nixpkgs#binutils", executablePath = "bin/ld",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
 # ---------------------------------------------------------------------------
 # ld — GNU linker.
@@ -51,8 +52,8 @@ package binutils:
 package ld:
   provisioning:
     nixPackage "nixpkgs#binutils", executablePath = "bin/ld",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
   executable ldBin:
     cli:
@@ -101,8 +102,8 @@ package ld:
 package ar:
   provisioning:
     nixPackage "nixpkgs#binutils", executablePath = "bin/ar",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
   executable arBin:
     cli:
@@ -129,8 +130,8 @@ package ar:
 package ranlib:
   provisioning:
     nixPackage "nixpkgs#binutils", executablePath = "bin/ranlib",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
   executable ranlibBin:
     cli:
@@ -152,8 +153,8 @@ package ranlib:
 package strip:
   provisioning:
     nixPackage "nixpkgs#binutils", executablePath = "bin/strip",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
   executable stripBin:
     cli:
@@ -179,8 +180,8 @@ package strip:
 package nm:
   provisioning:
     nixPackage "nixpkgs#binutils", executablePath = "bin/nm",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
   executable nmBin:
     cli:
@@ -203,8 +204,8 @@ package nm:
 package objdump:
   provisioning:
     nixPackage "nixpkgs#binutils", executablePath = "bin/objdump",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
   executable objdumpBin:
     cli:
@@ -229,8 +230,8 @@ package objdump:
 package objcopy:
   provisioning:
     nixPackage "nixpkgs#binutils", executablePath = "bin/objcopy",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
   executable objcopyBin:
     cli:
@@ -267,8 +268,8 @@ package objcopy:
 package gas:
   provisioning:
     nixPackage "nixpkgs#binutils", executablePath = "bin/as",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
   executable gasBin:
     cli:

@@ -6,6 +6,7 @@
 ## wrapper but invokes ``clang`` instead.
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/types/library
 import repro_dsl_stdlib/types/options
 import repro_dsl_stdlib/operations/buildtype
@@ -13,8 +14,8 @@ import repro_dsl_stdlib/operations/buildtype
 package clang:
   provisioning:
     nixPackage "nixpkgs#clang", executablePath = "bin/clang",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
   executable clang:
     cli:
