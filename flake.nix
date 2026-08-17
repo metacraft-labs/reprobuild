@@ -247,7 +247,7 @@
     #     Both of this repository's consumers already keep the two streams
     #     apart, so they see a clean document rather than a merged one.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=0aceda824ebc303ab4ab42704d61420a4d47db59";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=5c77edb2a9eaeaea42c5fe980671484a445d1fc9";
       flake = false;
     };
     nim-csources-src = {
