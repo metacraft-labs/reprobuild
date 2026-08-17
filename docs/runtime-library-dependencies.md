@@ -138,6 +138,20 @@ A `when` inside a `library` body still sets nothing — the warning reports the
 drop, it does not implement the branch. Supporting it needs the
 store-the-body-in-a-template shape below.
 
+**This no longer blocks per-platform layout**, which is what the `when` was
+wanted for. The setters take expressions now, so the better route works today:
+
+```nim
+import repro_dsl_stdlib/prefix_layout
+
+library clingo:
+  kind: shared
+  exportedPath: runtimeLibDir(plConda)   # "Library/bin"
+```
+
+See "Reusable platform abstractions" below — the vocabulary is implemented in
+`repro_dsl_stdlib/prefix_layout`.
+
 ## What the gap costs today
 
 `clingo.dll` alone is arranged for in five hand-written places:
@@ -298,28 +312,38 @@ user's pathExpr source verbatim". Applying that to the setters — store
 `node.repr`, emit it unchanged — removes the literal restriction without any
 evaluation, and makes helper calls work for free.
 
-**Reusable platform abstractions.** Better than scattering `when` at every
-declaration: a shared vocabulary of prefix layouts, e.g.
+**Reusable platform abstractions — implemented.** Better than scattering `when`
+at every declaration: a shared vocabulary of prefix layouts, now in
+`repro_dsl_stdlib/prefix_layout`.
 
 ```nim
-## repro_dsl_stdlib/prefix_layout.nim
-type PrefixLayout* = enum
-  plUnix     ## bin/, lib/       — nixpkgs, most tarballs
-  plConda    ## Library/bin/     — conda-forge win-64
-  plFlat     ## prefix root      — many Windows zips
+import repro_dsl_stdlib/prefix_layout
 
-func sharedLibDir*(layout: PrefixLayout): string
+library clingo:
+  kind: shared
+  exportedPath: runtimeLibDir(plConda)   # "Library/bin"
 ```
 
-so a package writes `sharedLibDir(plConda)` rather than a bare string, and the
-layout is named once and reused. Note the axis: the layout follows the
-**provisioning source** (conda-forge vs nixpkgs vs a bare zip), with the
-platform only correlating — so the vocabulary should name layouts, not
-operating systems.
+The axis is the **provisioning source** (conda-forge vs nixpkgs vs a bare zip),
+with the platform only correlating — so the enum names layouts, not operating
+systems. `plConda` is not "Windows": conda-forge uses the `Library/` prefix on
+win-64 specifically, while its Linux packages are ordinary `bin/`+`lib/`.
 
-This needs no separate mechanism. Once the setters inline the user's expression
+The distinction worth knowing about is **loadable vs linkable**. On Unix one
+directory holds both. On Windows they differ: the loadable `foo.dll` sits in
+`bin/` beside the executables while the import library `foo.lib` sits in `lib/`.
+A recipe reaching for "the lib directory" to find a DLL finds nothing — which is
+not hypothetical, since `clingo.dll` is at `Library/bin/clingo.dll` in the
+conda-forge win-64 package. Hence `runtimeLibDir` and `linkLibDir` rather than
+one `libDir`; the earlier sketch in this document had only `sharedLibDir` and
+would have led straight into that trap.
+
+This needed no separate mechanism. Once the setters inline the user's expression
 verbatim instead of demanding a literal, a `func` call is just another
-expression the compiler resolves. The two changes are one change.
+expression the compiler resolves — the two changes were one change, and both
+have landed. `t_prefix_layout` pins the values against the paths production
+actually uses, and pins that a call reaches the registry as its value from
+inside both a `library` body and a provisioning setter.
 - **The bootstrap floor still applies.** None of this helps `repro.exe` find
   `clingo.dll` while it is *being built* — the engine cannot prepare an
   execution environment for the binary that runs the engine. Build-time staging

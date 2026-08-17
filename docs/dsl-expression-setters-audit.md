@@ -180,6 +180,21 @@ store-the-body-in-a-template shape described in
 it as a template that each consumption mode instantiates with its own bindings,
 so the compiler resolves the `when` and the macro never sees it.
 
+This is **no longer a blocker for per-platform layout**, and an earlier revision
+of these notes said it was. Since the setters take expressions, the preferred
+route works today: a `func` over a layout enum, called at the point of
+declaration.
+
+```nim
+library clingo:
+  kind: shared
+  exportedPath: runtimeLibDir(plConda)   # "Library/bin"
+```
+
+`repro_dsl_stdlib/prefix_layout` provides that vocabulary. `when` remains the
+lesser option anyway — it re-derives the condition at every declaration, where a
+named layout is defined once and reused.
+
 ## The payoff: the catalog pin is declared once
 
 274 provisioning entries across 219 catalog files now reference
