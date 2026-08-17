@@ -1,0 +1,299 @@
+{
+  "artifact_footprint": {
+    "peercache_bundle_48": {
+      "binary_mb": 5.6,
+      "c_files": 143,
+      "nimcache_mb": 8.4
+    },
+    "peercache_one_test": {
+      "c_files": [
+        54,
+        73
+      ],
+      "nimcache_mb": [
+        1.8,
+        3.4
+      ]
+    },
+    "recipe_bundle_196": {
+      "c_files": 1996,
+      "nimcache_mb": 72
+    },
+    "recipe_bundle_32": {
+      "binary_mb": 6.9,
+      "c_files": 431,
+      "nimcache_mb": 13
+    },
+    "recipe_bundle_8": {
+      "c_files": 349
+    },
+    "recipe_one_test": {
+      "binary_mb": 1.8,
+      "c_files": 220,
+      "nimcache_mb": 3.8
+    },
+    "solver_bundle_24": {
+      "binary_mb": 2.0,
+      "c_files": 60,
+      "nimcache_mb": 2.8
+    },
+    "solver_one_test": {
+      "c_files": [
+        26,
+        35
+      ],
+      "nimcache_mb": [
+        0.537,
+        0.981
+      ]
+    }
+  },
+  "case_identity_parity": {
+    "peercache_48": {
+      "enumerated": 68,
+      "expected_union": 68,
+      "extra": 0,
+      "fields_changed": {
+        "bodyHash": 47
+      },
+      "missing": 0
+    },
+    "recipe_196": {
+      "enumerated": 1058,
+      "expected_union": 1058,
+      "extra": 0,
+      "fields_changed": {
+        "bodyHash": 792
+      },
+      "missing": 0
+    },
+    "solver_24": {
+      "enumerated": 82,
+      "expected_union": 82,
+      "extra": 0,
+      "fields_changed": {
+        "bodyHash": 55
+      },
+      "missing": 0
+    }
+  },
+  "contamination_hypotheses_falsified": {
+    "member_set_property_window_17_24": {
+      "cases": 41,
+      "conclusion": "falsified: an 8-member window containing that pair is clean",
+      "fail": 0,
+      "members": 8
+    },
+    "specific_pair_dbus_plus_dbus_broker": {
+      "cases": 16,
+      "conclusion": "falsified: the named pair alone is clean",
+      "fail": 0,
+      "members": 2
+    },
+    "surviving_model": "accumulation-dependent: failure depends on how many recipes share the process, not which"
+  },
+  "extrapolation_note": "standalone per-test build cost is a sample mean (8 recipe, 4 peer cache, 4 solver) extrapolated over group membership; bundle costs are whole-group measurements",
+  "inventory_rederived": {
+    "classification": {
+      "graph-fixture": 16,
+      "integration": 510,
+      "platform/destructive": 90,
+      "pure unit": 628
+    },
+    "consolidation_groups": 42,
+    "grouped_cases": 3175,
+    "grouped_members": 537,
+    "nim_cases": 6916,
+    "nim_test_binaries": 1239,
+    "pure_unit_nim": 624,
+    "suite_wide_duplicate_case_names": 0,
+    "total_cases": 6966,
+    "total_test_entries": 1244
+  },
+  "peercache_group": {
+    "bundle_build_cpu_seconds": 468.4,
+    "bundle_build_wall_seconds": 68.0,
+    "bundle_init_cpu_seconds": 0.009,
+    "bundle_percase_run_cpu_seconds": 0.013,
+    "cases": 68,
+    "individual_build_cpu_mean": 200.0,
+    "individual_build_cpu_samples": [
+      248.3,
+      169.0,
+      167.3,
+      215.3
+    ],
+    "owner": "libs/repro_peer_cache",
+    "percase_run_exit_codes": {
+      "0": 68
+    },
+    "sources": 48,
+    "whole_binary_exit_code": 1,
+    "whole_binary_failed": 1,
+    "whole_binary_failure": "off-CIDR announcement dropped, warning logged once per peer [OSError]",
+    "whole_binary_ok": 67
+  },
+  "provenance": {
+    "branch": "bump-nim-fork-unittest-helper-proc-fix",
+    "cpu_metric": "user+sys of the compile process tree; wall reported but noisy under host contention",
+    "head": "e0e4b4379d378f8ed3f3dfc9c38c44e71c88507e",
+    "host": "32 logical cores, shared, load average 20-98 during the campaign",
+    "init_metric": "getrusage(RUSAGE_CHILDREN) delta over one child invocation, min of 3 reps",
+    "method": "nim c --threads:on --hints:off --warnings:off --nimcache:<private> --out:<private> <source>, run under `nix develop --command`",
+    "toolchain": "nim-fork-2.3.1-codetracer (flake pin from reprobuild#82 / nim#7)"
+  },
+  "recipe_group": {
+    "build_cpu_seconds": {
+      "1": 174.2,
+      "16": 376.6,
+      "196": 2598.0,
+      "24": 412.4,
+      "32": 483.9,
+      "4": 302.7,
+      "40": 688.2,
+      "48": 697.7,
+      "8": 316.6,
+      "96": 1482.8
+    },
+    "build_wall_seconds": {
+      "1": 55.2,
+      "16": 102.4,
+      "196": 970.9,
+      "24": 95.7,
+      "32": 120.8,
+      "4": 100.0,
+      "40": 171.0,
+      "48": 139.9,
+      "8": 93.1,
+      "96": 465.0
+    },
+    "bundle_cases_enumerated": {
+      "16": 106,
+      "196": 1058,
+      "24": 147,
+      "32": 200,
+      "4": 22,
+      "40": 260,
+      "48": 303,
+      "8": 58,
+      "96": 518
+    },
+    "cases": 1058,
+    "init_cpu_seconds": {
+      "1": 0.009,
+      "16": 1.986,
+      "196": 825.863,
+      "24": 1.867,
+      "32": 1.965,
+      "4": 1.481,
+      "40": 17.367,
+      "48": 16.695,
+      "8": 1.655,
+      "96": 305.972
+    },
+    "n1_build_cpu_mean": 174.2,
+    "n1_build_cpu_samples": [
+      147.3,
+      165.2,
+      203.9,
+      250.5,
+      157.6,
+      147.3,
+      144.5,
+      177.5
+    ],
+    "owner": "recipes/packages/source",
+    "percase_pass_verdict": {
+      "1": {
+        "cases": 8,
+        "fail": 0,
+        "pass": 8
+      },
+      "16": {
+        "cases": 106,
+        "fail": 0,
+        "pass": 106
+      },
+      "24": {
+        "cases": 147,
+        "fail": 2,
+        "pass": 145
+      },
+      "32": {
+        "cases": 200,
+        "fail": 9,
+        "pass": 191
+      },
+      "4": {
+        "cases": 22,
+        "fail": 0,
+        "pass": 22
+      },
+      "8": {
+        "cases": 58,
+        "fail": 0,
+        "pass": 58
+      }
+    },
+    "sources": 196,
+    "whole_binary": {
+      "24": {
+        "failed": 2,
+        "ok": 145,
+        "rc": 1
+      },
+      "32": {
+        "failed": 9,
+        "ok": 191,
+        "rc": 1
+      }
+    }
+  },
+  "runner_execution_model": {
+    "batching_mode_available": false,
+    "consequence": "every bundled case pays the bundle's full module-init cost once per case",
+    "per_case_process": true,
+    "whole_binary_mode": "fallback only, for binaries whose --list-json cannot be enumerated"
+  },
+  "solver_group": {
+    "bundle_build_cpu_seconds": 127.4,
+    "bundle_build_wall_seconds": 23.9,
+    "bundle_init_cpu_seconds": 0.006,
+    "bundle_percase_run_cpu_seconds": 0.011,
+    "cases": 82,
+    "individual_build_cpu_mean": 50.0,
+    "individual_build_cpu_samples": [
+      32.1,
+      55.6,
+      56.3,
+      55.9
+    ],
+    "owner": "libs/repro_solver",
+    "percase_run_exit_codes": {
+      "0": 82
+    },
+    "sources": 24,
+    "whole_binary_exit_code": 0
+  },
+  "standalone_controls": {
+    "expat_standalone": {
+      "cases": 8,
+      "note": "includes the two cases that fail at n=32",
+      "pass": 8
+    },
+    "peercache_cidr_standalone": {
+      "failed": 0,
+      "note": "the case that fails inside the merged peer-cache binary run whole",
+      "ok": 1,
+      "rc": 0
+    }
+  },
+  "strict_purity_scan_of_624": {
+    "cwd_mutation": 3,
+    "env_mutation": 48,
+    "file_writes": 171,
+    "network": 4,
+    "subprocess": 9,
+    "threads": 35
+  }
+}
