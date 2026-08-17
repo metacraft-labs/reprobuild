@@ -172,6 +172,200 @@ INTEGRATION_CONTENT_PATTERNS = [
     re.compile(r"\brunShell\("),
 ]
 
+# --------------------------------------------------------------------------
+# The pure-unit predicate
+# --------------------------------------------------------------------------
+#
+# `pure unit` used to be whatever was left after the other classes had taken
+# what they recognized. That is a name, not a safety property, and M4 measured
+# what it cost: the residual class admitted 9 sources that spawn subprocesses,
+# 48 that mutate the process environment and 4 that touch the network, and both
+# groups in which consolidation produced failures were drawn from inside it.
+# `execProcess` slipping past the subprocess pattern list is the specific tell —
+# a denylist of primitives will miss the next primitive too.
+#
+# So the direction is inverted. Membership is granted on evidence, not on the
+# absence of evidence, and the decisive check is an ALLOWLIST OF IMPORTS: a
+# test cannot spawn, listen, dlopen or signal without reaching a module that
+# grants it. Naming the modules a pure unit test may use fails closed against
+# primitives nobody has thought of, because the new primitive still has to
+# arrive through a module, and an unrecognized module is refused rather than
+# waved through.
+#
+# Refusal is a real outcome here: `unclassified` means "this scan cannot show
+# the test is safe to share a process", which is the honest answer and keeps
+# the entry out of every consolidation group.
+
+PURE_UNIT_FORBIDDEN_MODULES = {
+    # Subprocesses.
+    "osproc",
+    # Sockets, servers, clients, and the process-global async dispatcher.
+    "net",
+    "nativesockets",
+    "asyncnet",
+    "asyncdispatch",
+    "asynchttpserver",
+    "asyncfile",
+    "asyncstreams",
+    "httpclient",
+    "smtp",
+    "selectors",
+    # Loading code into, or reaching outside, this process.
+    "dynlib",
+    "posix",
+    "winlean",
+    "os_proc",
+    # Process-wide terminal and fault state.
+    "terminal",
+    "segfaults",
+}
+
+# Stdlib modules a pure unit test may use. Anything outside this set, and
+# outside the project's own modules, is UNRECOGNIZED and refuses the entry.
+PURE_UNIT_ALLOWED_STDLIB = {
+    "algorithm", "assertions", "base64", "bitops", "cmdline", "colors",
+    "complex", "cpuinfo", "critbits", "deques", "editdistance", "encodings",
+    "enumerate", "enumutils", "exitprocs", "fenv", "hashes", "heapqueue",
+    "importutils", "intsets", "isolation", "json", "jsonutils", "lenientops",
+    "lists", "locks", "logging", "macrocache", "macros", "math", "md5",
+    "memfiles", "monotimes", "objectdollar", "oids", "options", "os",
+    "packedsets", "parsecfg", "parsecsv", "parsejson", "parseopt", "parsesql",
+    "parseutils", "parsexml", "paths", "pegs", "punycode", "random",
+    "rationals", "re", "rdstdin", "registry", "ropes", "sequtils", "sets",
+    "sha1", "setutils", "streams", "strbasics", "strformat", "strmisc",
+    "strscans", "strtabs", "strutils", "sugar", "syncio", "tables",
+    "tempfiles", "times", "typetraits", "unicode", "unidecode", "unittest",
+    "uri", "varints", "volatile", "with", "wordwrap", "xmlparser", "xmltree",
+    "htmlparser", "typeinfo", "atomics", "genasts", "compilesettings",
+    "effecttraits", "since", "sysrand", "dirs", "files", "symlinks",
+    "appdirs", "widestrs", "decls", "私", "threading", "cstrutils",
+    "strimpl", "envvars", "cpuload", "marshal", "endians", "bitset",
+    "sums", "integerops", "vmutils", "stackframes", "formatfloat",
+    "dollars", "tasks", "channels", "smartptrs", "sharedlist", "sharedtables",
+}
+
+# Symbols that mutate state the whole process shares, or that make module
+# initialization depend on how the process was invoked. Each one is a reason a
+# case can pass alone and behave differently with neighbours in the binary.
+PURE_UNIT_DISQUALIFYING_SYMBOLS = [
+    (re.compile(r"\bputEnv\("), "mutates the process environment"),
+    (re.compile(r"\bdelEnv\("), "mutates the process environment"),
+    (re.compile(r"\bsetCurrentDir\("), "mutates the process working directory"),
+    (re.compile(r"\bgetAppFilename\("), "re-enters its own executable"),
+    (re.compile(r"\bparamStr\(|\bparamCount\(|\bcommandLineParams\("),
+     "module initialization reads the argument vector"),
+    (re.compile(r"\bexecProcess\(|\bexecShellCmd\(|\bexecCmd\(|\bstartProcess\(|"
+                r"\bexecCmdEx\("), "spawns a subprocess"),
+    (re.compile(r"\bcreateThread\(|\bThread\["), "creates threads"),
+    (re.compile(r"\baddExitProc\("), "registers a process-wide exit hook"),
+    (re.compile(r"\bdisableParamFiltering\("),
+     "reconfigures the process-wide unittest protocol"),
+    # The peer-cache acceptance case: a fixed, non-zero port is an OS-global
+    # name. Two tests in one process cannot both hold it, and the second one
+    # fails with an OSError that has nothing to do with what it asserts.
+    # `Port(0)` asks the kernel for a free port and is fine.
+    (re.compile(r"\bPort\(\s*(?!0\s*\))[A-Za-z0-9_]+\s*\)"),
+     "binds a fixed OS-global port"),
+    (re.compile(r"\bbindAddr\(|\bjoinGroup\(|\bbindUnix\("),
+     "binds an OS-global endpoint"),
+]
+
+IMPORT_LINE_RE = re.compile(
+    r"(?m)^\s*(?:import|from|include)\s+([^\n#]+)"
+)
+
+
+def imported_module_roots(text: str) -> list[str]:
+    """Every module name a source imports, one entry per name.
+
+    Handles `import std/[a, b]`, `import std/a`, `import a, b`,
+    `from x import y`, `import a as b`, and quoted relative paths.
+    """
+    roots: list[str] = []
+    for match in IMPORT_LINE_RE.finditer(text):
+        clause = match.group(1).strip()
+        clause = re.sub(r"\s+as\s+\w+", "", clause)
+        clause = re.sub(r"\s+except\b.*$", "", clause)
+        # `from x import y` names the module in `x`; `y` is a symbol, not a
+        # module, and treating it as one would refuse the file for importing
+        # something unrecognized that was never a module at all.
+        clause = re.sub(r"\s+import\b.*$", "", clause)
+        # Bracket groups FIRST. `import std/[json, os, unittest]` is one
+        # clause whose commas belong to the group, so splitting on commas
+        # before expanding it yields `std/[json`, `os`, `unittest]` — and the
+        # trailing `unittest]` is then an unrecognized module that refuses a
+        # perfectly ordinary test. Expand the groups, then split what is left.
+        def expand(group: re.Match[str]) -> str:
+            prefix = group.group(1)
+            for inner in group.group(2).split(","):
+                inner = inner.strip()
+                if inner:
+                    roots.append(prefix + inner)
+            return " "
+
+        clause = re.sub(r"([\w/\.]*?)\[([^\]]*)\]", expand, clause, flags=re.S)
+        for piece in clause.split(","):
+            piece = piece.strip().strip('"')
+            if not piece:
+                continue
+            roots.append(piece)
+    return roots
+
+
+def module_leaf(name: str) -> str:
+    return name.replace("\\", "/").rstrip("/").split("/")[-1]
+
+
+def project_module_prefixes(root: Path) -> set[str]:
+    """Module roots owned by this repository, read from the tree, not guessed."""
+    owned = {"repro", "repro_tests"}
+    libs = root / "libs"
+    if libs.is_dir():
+        for entry in libs.iterdir():
+            if entry.is_dir():
+                owned.add(entry.name)
+    return owned
+
+
+def pure_unit_verdict(
+    root: Path, spec: TestSpec, text: str
+) -> tuple[bool, str]:
+    """Decide whether `spec` is demonstrably safe to share a process.
+
+    Returns `(True, reason)` only on positive evidence. Returns `(False, reason)`
+    both for a test shown to be impure AND for one this scan cannot judge; the
+    caller must treat the two the same way, because "unknown" and "unsafe" have
+    the same consequence for consolidation.
+    """
+    for pattern, why in PURE_UNIT_DISQUALIFYING_SYMBOLS:
+        if pattern.search(text):
+            return False, why
+
+    owned = project_module_prefixes(root)
+    for name in imported_module_roots(text):
+        if name.startswith(".") or "/" in name and name.split("/")[0] in owned:
+            continue
+        head = name.split("/")[0]
+        if head in owned:
+            continue
+        leaf = module_leaf(name)
+        if head == "std" or head == "pure" or head == "system":
+            candidate = leaf
+        else:
+            candidate = head
+        if candidate in PURE_UNIT_FORBIDDEN_MODULES:
+            return False, f"imports `{candidate}`, which grants out-of-process reach"
+        if candidate in PURE_UNIT_ALLOWED_STDLIB:
+            continue
+        # Relative or vendored path we cannot resolve to a known module.
+        if "/" in name or ".." in name:
+            continue
+        return False, (
+            f"imports `{candidate}`, which this scan does not recognize; "
+            "refusing to call it pure rather than assuming it is"
+        )
+    return True, "no subprocess, network, process-global mutation or unrecognized import"
+
 
 @dataclasses.dataclass
 class TestSpec:
@@ -2803,7 +2997,12 @@ def compiler_invocations(path: str, text: str) -> list[dict[str, Any]]:
     )
 
 
-def classify(spec: TestSpec, text: str, compile_matches: list[dict[str, Any]]) -> tuple[str, str]:
+def classify(
+    spec: TestSpec,
+    text: str,
+    compile_matches: list[dict[str, Any]],
+    root: Path | None = None,
+) -> tuple[str, str]:
     source = spec.source
     lower_path = source.lower()
 
@@ -2826,7 +3025,17 @@ def classify(spec: TestSpec, text: str, compile_matches: list[dict[str, Any]]) -
     if any(p.search(text) for p in INTEGRATION_CONTENT_PATTERNS):
         return "integration", "subprocess or repro CLI invocation in test body"
 
-    return "pure unit", "in-process source-level test with no detected subprocess or fixture compile"
+    # Everything above recognized this entry as something. What is left is NOT
+    # automatically pure: it has to earn the label. `unclassified` is the
+    # honest answer when the scan cannot show a test tolerates neighbours, and
+    # it keeps the entry out of every consolidation group — which is the only
+    # decision this class feeds.
+    if root is None:
+        return "unclassified", "purity not evaluated (no repository root supplied)"
+    pure, reason = pure_unit_verdict(root, spec, text)
+    if pure:
+        return "pure unit", reason
+    return "unclassified", reason
 
 
 def local_dependency_shape(spec: TestSpec, text: str) -> list[str]:
@@ -3540,7 +3749,7 @@ def build_inventory(
         source_case_count += case_count
 
         compiles = compiler_invocations(spec.source, text)
-        category, reason = classify(spec, text, compiles)
+        category, reason = classify(spec, text, compiles, root=root)
         class_counts[category] = class_counts.get(category, 0) + 1
         if compiles:
             helper_compiles.append(

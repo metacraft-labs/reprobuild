@@ -1578,7 +1578,12 @@ test "incomplete name" and:
         # names both timestamps, and that summing an absent field raises
         # instead of returning zero. Read out of a live `build_inventory`
         # (`python_total` 50), not bumped.
-        self.assertEqual(python_total, 50)
+        # 50 -> 51: `test_static_scan_follows_a_bundle_into_its_members` in
+        # this file, the rule-level guard for M4's bundle expansion. This file
+        # is itself one of the five counted Python test files, so a test added
+        # here moves the suite's own totals — read out of a live
+        # `build_inventory` (`python_total` 51), not bumped.
+        self.assertEqual(python_total, 51)
         # 6856 -> 6862: -1 from the quarantined source no longer imputing a
         # static count, +7 from the new Python cases above.
         #
@@ -1640,8 +1645,12 @@ test "incomplete name" and:
         # change them on the tree it was written on — three binaries were
         # behind their sources and `nim_total` came back 6884 until they were
         # rebuilt. That is the check working, not the pins moving.
+        # M4's bundle-expansion guard adds one Python case in this file, so the
+        # python half moves 50 -> 51 and the aggregate 6966 -> 6967. The NIM
+        # half is again deliberately untouched: consolidating 24 sources into
+        # one binary must not change any case count, and it does not.
         self.assertEqual(
-            data["static"]["sourceCaseCount"], expected_nim_total + 50
+            data["static"]["sourceCaseCount"], expected_nim_total + 51
         )
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total

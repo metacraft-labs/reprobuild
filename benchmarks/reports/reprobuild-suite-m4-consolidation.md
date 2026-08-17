@@ -69,9 +69,46 @@ properties M4 cares about:
 | creates threads | 35 |
 | writes files | 171 |
 
-So the label is weaker than the criterion M4 needs, and the gap is
+So the label was weaker than the criterion M4 needs, and the gap was
 load-bearing: both groups in which consolidation produced failures below were
 drawn entirely from the pure-unit set.
+
+### The predicate that replaced it
+
+`pure unit` is no longer a residual. Membership is granted on evidence, and the
+decisive check is an **allowlist of imports** rather than a denylist of
+primitives: a test cannot spawn, listen, dlopen or signal without reaching a
+module that grants it, so naming the modules a pure unit may use fails closed
+against primitives nobody has enumerated. `execProcess` slipping past the old
+pattern list is exactly the failure a denylist repeats.
+
+An entry that cannot be shown safe is **refused**, not defaulted to pure:
+`unclassified` is a real outcome and keeps the entry out of every consolidation
+group, which is the only decision this class feeds.
+
+| Class | Before | After |
+| --- | --- | --- |
+| pure unit | 605 | 500 |
+| unclassified | — | 105 |
+| integration / platform / graph-fixture | unchanged | unchanged |
+| consolidation groups | 42 | 33 |
+| grouped members | 537 | 423 |
+
+Refusals, by reason: 48 mutate the process environment, 27 import
+`asyncdispatch` (a process-global event loop), 7 bind a fixed OS-global port, 5
+spawn a subprocess, 2 mutate the working directory, and ~16 import a module the
+scan cannot resolve — refused rather than assumed.
+
+Verified by mutation: fed the 59 sources independently identified as touching
+subprocesses, the network, the environment or the working directory, the
+predicate rejects **59 of 59**. The acceptance case is the peer-cache multicast
+test, which passed 68/68 under `--run` and failed only when its binary was run
+whole: it is now excluded from every consolidation group on the fixed-port
+dependency alone, statically, without a run needing to discover it. The
+peer-cache group correspondingly drops from 48 candidate members to 13.
+
+`nim_total` is unchanged at 6,916 across the reclassification: this changes
+which tests are *eligible* to share a binary, never how many cases exist.
 
 ## The run-side cost, and why it is not free
 
@@ -247,6 +284,81 @@ Two of the milestone's open questions are now answered by measurement rather
 than argument: the maximum shared-binary size for the recipe family is <= 16
 and is set by correctness, and the recipe family is the only one of the three
 measured that has a size limit at all.
+
+## The init cost is an M3 defect, not an M4 one
+
+Following the cost curve to its cause moves it out of this milestone.
+
+`finalizeVariants()` runs a **full clingo ASP solve** at module initialization —
+Spack-style concretization over variant values and package versions under
+`requires`/`conflicts`/`propagates` constraints, with priority bands as
+optimization weights. The `package` macro emits one `finalizeVariants()` call
+per package (`macros_b.nim`, `emitVariantDeclarations`), and
+`pendingSolverPackages` is a thread-local that accumulates process-wide. So a
+bundle of N recipes runs **N solves over a growing package set**, not one
+N-package solve: measured directly, 63 clingo grounding blocks at n=8 and 85 at
+n=32, and the memo below records 85 distinct solves at n=32 and 768 at n=96.
+
+The result is already capturable and the machinery exists: `finalizeVariants()`
+renders the exact inputs it consumed through `renderSolverInputsFixture` when
+`REPRO_EMIT_SOLVER_INPUTS` is set, those parse back through
+`parseExplainFixture`, and `solutionToLock` turns a solution into a committed
+lock. **The runtime consults none of it.** The only cache is
+`lastUnifiedSolution`, an in-process memo discarded at exit. Concretization is
+therefore captured for lock refresh and recomputed from scratch on every
+execution — including every one of the suite's ~6,900 per-case invocations.
+
+Runtime *solving* is the same category as the runtime *compilation* M3 exists
+to eliminate, and is arguably worse: it is superlinear in what the process
+happens to have imported. M4's cost crossover is a symptom of it.
+
+### Is the solve a pure function of its inputs?
+
+Yes, on the evidence available, and this matters because an impure solve would
+mean the committed lock is not reproducible either:
+
+* `REPRO_VARIANTS` is the one ambient input, and it is **captured**: env pairs
+  become `prSet` contributions on the node (`applyCliContributionFor`) before
+  `buildVariantDecls` runs, so they are rendered into the fixture like any
+  other contribution rather than read inside the solver.
+* `buildPackageDecls` and the encoders perform no filesystem, clock, or RNG
+  reads.
+* clingo is driven with no seed, parallel-mode, or configuration call.
+
+One caveat, and it is about key stability rather than soundness: the inputs are
+ordered by module-initialization order, so the same package set imported in a
+different order renders differently and would key differently. Whether the
+*solution* can differ under reordering was not tested.
+
+The natural key is a content hash of `renderSolverInputsFixture` output, which
+already exists and is already the lock-refresh capture format. Where the lookup
+should live is a real question this measurement does not settle: reprobuild's
+CAS is currently unused by test-compile edges (`cacheable = false`), so "put it
+in the CAS" may inherit that problem.
+
+### Measured ceiling: caching helps a lot, and does not remove the cap
+
+An experimental keyed disk memo around `solve()` — hash the rendered inputs,
+store and reload the assignments — was built locally to measure the ceiling. It
+is deliberately **not** committed.
+
+| Bundle size | init CPU, solving | init CPU, memo warm | speedup | distinct solves |
+| --- | --- | --- | --- | --- |
+| n=32 | 2.574 s | **0.180 s** | 14.3x | 85 |
+| n=96 | 306.706 s | **15.312 s** | 20.0x | 768 |
+
+So caching is worth roughly 14-20x. But it does **not** flatten init: warm cost
+still climbs 0.180 s -> 15.312 s from n=32 to n=96, an 85x rise for 3x the
+members. The residue is the key computation itself — rendering the solver
+inputs is O(size of the accumulated set) per solve, so summed over N solves it
+stays quadratic even when every solve is a cache hit.
+
+The consequence for M4 is specific, and it corrects the natural expectation:
+**caching alone would not make bundle size stop affecting init cost.** Flatting
+it needs the process-wide accumulation scoped per package, not just a cache in
+front of it. And in any case the recipe family's binding constraint is the
+*correctness* cap at 24, which caching does not touch at all — the failures
+there are registry collisions, not solver cost.
 
 ## Campaign claims this measurement retires
 

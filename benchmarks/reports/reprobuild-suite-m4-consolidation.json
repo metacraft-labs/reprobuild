@@ -77,6 +77,29 @@
       "missing": 0
     }
   },
+  "classifier_rewrite": {
+    "acceptance_case": "peer-cache multicast test excluded on fixed-port dependency, statically",
+    "groups_after": 33,
+    "groups_before": 42,
+    "impure_rejection": "59/59",
+    "members_after": 423,
+    "members_before": 537,
+    "method": "import allowlist (fails closed on unrecognized modules) + process-global symbol denylist; refusal is a class",
+    "nim_total_unchanged": 6916,
+    "peercache_candidates_after": 13,
+    "peercache_candidates_before": 48,
+    "pure_unit_after": 500,
+    "pure_unit_before": 605,
+    "refusal_reasons": {
+      "asyncdispatch": 27,
+      "cwd": 2,
+      "env-mutation": 48,
+      "fixed-port": 7,
+      "subprocess": 5,
+      "unresolved-import": 16
+    },
+    "unclassified_after": 105
+  },
   "contamination_hypotheses_falsified": {
     "member_set_property_window_17_24": {
       "cases": 41,
@@ -109,6 +132,27 @@
     "suite_wide_duplicate_case_names": 0,
     "total_cases": 6966,
     "total_test_entries": 1244
+  },
+  "landed_batch_repro_solver": {
+    "binaries_after": 1,
+    "binaries_before": 24,
+    "cases": 82,
+    "catalog_extra": 0,
+    "catalog_missing": 0,
+    "entries_after": 1221,
+    "entries_before": 1244,
+    "fields_changed": {
+      "bodyHash": 55
+    },
+    "members": 24,
+    "nim_specs_after": 1216,
+    "nim_specs_before": 1239,
+    "nim_total_after": 6916,
+    "nim_total_before": 6916,
+    "percase_run_exit_codes": {
+      "0": 82
+    },
+    "whole_binary_exit_code": 0
   },
   "peercache_group": {
     "bundle_build_cpu_seconds": 468.4,
@@ -274,6 +318,32 @@
     },
     "sources": 24,
     "whole_binary_exit_code": 0
+  },
+  "solver_is_m3_not_m4": {
+    "ceiling_experiment": {
+      "committed": false,
+      "n32": {
+        "memo_warm_cpu_s": 0.18,
+        "solving_cpu_s": 2.574,
+        "speedup": 14.3
+      },
+      "n96": {
+        "memo_warm_cpu_s": 15.312,
+        "solving_cpu_s": 306.706,
+        "speedup": 20.0
+      }
+    },
+    "conclusion": "caching is worth 14-20x but does NOT flatten init (0.180s -> 15.312s from n=32 to n=96); the residue is rendering the accumulating inputs to compute the key, so the fix is scoping the accumulation, not only caching it",
+    "existing_capture": "REPRO_EMIT_SOLVER_INPUTS -> renderSolverInputsFixture -> parseExplainFixture -> solutionToLock",
+    "finding": "finalizeVariants() runs a full clingo ASP solve at module init; one call per package macro; pendingSolverPackages accumulates process-wide",
+    "natural_key": "content hash of renderSolverInputsFixture output",
+    "purity": "pure function of rendered inputs; REPRO_VARIANTS captured as prSet contributions before rendering; no fs/clock/rng reads; clingo unseeded",
+    "purity_caveat": "inputs ordered by module-init order, so key varies with import order; whether the solution can vary was not tested",
+    "runtime_cache": "none; lastUnifiedSolution is an in-process memo discarded at exit",
+    "solves_per_bundle": {
+      "32": 85,
+      "96": 768
+    }
   },
   "standalone_controls": {
     "expat_standalone": {
