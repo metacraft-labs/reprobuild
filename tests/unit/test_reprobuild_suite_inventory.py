@@ -1500,7 +1500,21 @@ test "incomplete name" and:
         # missing binary and nothing source-newer-than-binary). The catalog sum
         # over the REBUILT BINARIES independently reads 6914 too. Both cases
         # are unconditional, so the Linux-vs-Darwin delta is still +1.
-        expected_nim_total = 6913 if sys.platform == "darwin" else 6914
+        #
+        # 6913/6914 -> 6915/6916: NOT this branch's doing. `5688d28e` added two
+        # cases to `libs/repro_project_dsl/tests/test_library_macro.nim`
+        # (`exportedPath survives to the emitted LibraryDef` and `an unset
+        # exportedPath stays empty`) without moving either aggregate — the same
+        # shape of omission `f3319113` made. It was invisible until now because
+        # `build/test-bin/test_library_macro` had not been rebuilt: the stale
+        # binary reported 8 cases, the pin said 8's worth, and the two agreed
+        # with each other forever. The static scan of the SOURCE read 10 the
+        # whole time, which is exactly the disagreement the two-surface design
+        # exists to expose. Recomputed after rebuilding that binary: its own
+        # `--list-json` now reports 10 and the catalog sum reads 6916, matching
+        # the static scan's +2. Both cases are unconditional, so the
+        # Linux-vs-Darwin delta is still +1.
+        expected_nim_total = 6915 if sys.platform == "darwin" else 6916
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -1544,7 +1558,11 @@ test "incomplete name" and:
         #
         # Python files have no built binary, so this number still comes from
         # the static `unittest` scan.
-        self.assertEqual(python_total, 46)
+        #
+        # 46 -> 47: `test_a_source_with_no_built_binary_contributes_nothing`
+        # in this file — the rule-level guard for the `missing-binary` change.
+        # Read out of a live `build_inventory` (`python_total` 47), not bumped.
+        self.assertEqual(python_total, 47)
         # 6856 -> 6862: -1 from the quarantined source no longer imputing a
         # static count, +7 from the new Python cases above.
         #
@@ -1578,17 +1596,28 @@ test "incomplete name" and:
         # half was untouched again, and this line still did not have to move
         # for it.
         #
-        # This change moves it to 6957/6958 = 6911/6912 nim + 46 python — the
-        # two one-case sources the graph regeneration enrols. Python is
-        # untouched a third time, and the measured
-        # `data["static"]["sourceCaseCount"]` on Linux is 6958.
+        # The sibling-repos change moved it to 6957/6958 = 6911/6912 nim + 46
+        # python — the two one-case sources the graph regeneration enrolled.
         #
-        # The RA-31 recompute moves it again, 6957/6958 -> 6959/6960 =
-        # 6913/6914 nim + 46 python, and it moves without this line being
-        # touched — which is the point of keeping it symbolic. The measured
-        # `data["static"]["sourceCaseCount"]` on Linux is 6960.
+        # The RA-31 recompute moved it again, 6957/6958 -> 6959/6960 =
+        # 6913/6914 nim + 46 python, and it moved without this line being
+        # touched — which is the point of keeping it symbolic.
+        #
+        # This change is the first in a while to move the PYTHON half instead:
+        # 6962 -> 6963 = 6915/6916 nim + 47 python, the one new Python guard
+        # for the `missing-binary` rule. The Nim half is untouched — the
+        # `missing-binary` bucket is empty on a complete build, so making it
+        # contribute zero changes no number on a tree that is fully built. That
+        # is the point: the change is invisible until the build is incomplete,
+        # which is exactly when the old behaviour was lying. The `+ 47` literal
+        # is the python half only; the nim half stays symbolic so the two pins
+        # cannot drift apart. Measured on the merged base rather than carried
+        # arithmetically over it: `data["static"]["sourceCaseCount"]` on Linux
+        # is 6963. (The nim half of that total moved under this branch while it
+        # was open — see the `expected_nim_total` note — which is why it was
+        # measured on the merged base instead of carried across.)
         self.assertEqual(
-            data["static"]["sourceCaseCount"], expected_nim_total + 46
+            data["static"]["sourceCaseCount"], expected_nim_total + 47
         )
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
@@ -1649,13 +1678,20 @@ test "incomplete name" and:
         # were derived independently and both moved by exactly two, which is
         # what makes "two new cases" a fact about the suite rather than about
         # either surface.
+        #
+        # 6836 -> 6838 = +2, the two `test_library_macro.nim` cases `5688d28e`
+        # enrolled without pinning. This scan read 6838 from the SOURCE before
+        # that binary was rebuilt, while the catalog still read 6836 from the
+        # stale binary — the number moving here while `nim_total` held is
+        # precisely the signal this pin is documented to give. Rebuilding
+        # reconciled them at 6838/6916.
         self.assertEqual(
             sum(
                 item["staticCaseCount"]
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6836,
+            6838,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
@@ -2217,6 +2253,12 @@ test "incomplete name" and:
         # be satisfied by the static scan quietly also becoming 0.
         self.assertEqual(catalog["quarantine"][0]["staticCaseCount"], 1)
         self.assertTrue(catalog["quarantinedCasesExcludedFromTotal"])
+        # Published beside it: a source whose binary was never built imputes
+        # nothing either, so the total reads BUILT BINARIES ONLY. Asserted on
+        # the artifact rather than only in `authoritative_case_count`'s unit
+        # test, because the artifact is what a reader who never opens this
+        # repository actually sees.
+        self.assertTrue(catalog["missingBinaryCasesExcludedFromTotal"])
 
         # The taxonomy partitions every declared reason. A reason belonging
         # to neither set (or both) would silently pick up whichever default
@@ -2677,6 +2719,51 @@ test "incomplete name" and:
         )
         # No probe attempted at all (`--no-catalog`) is the only `static`.
         self.assertEqual(inventory.catalog_count_source(None), "static")
+
+    def test_a_source_with_no_built_binary_contributes_nothing(self):
+        """`missing-binary` votes zero, exactly as `quarantined` does.
+
+        A source whose binary was never built has no enumeration to offer, so
+        it must contribute NOTHING to a total documented as reading built
+        binaries. It used to fall through to the static source scan instead,
+        which is how a build gap donated its source-text count to the
+        authoritative number.
+
+        Why that mattered more than it looks: it made the aggregate pin
+        unfalsifiable. Measured on this tree with 24 binaries moved aside --
+        sources registering 60 catalog cases, static scan also 60 -- the total
+        came back 6912, the pinned number to the case, while 24 binaries were
+        absent. The pin agreed with reality because it could not disagree.
+
+        Pinned here at the level of the rule rather than through a broken
+        build, so the property survives without a 1200-binary fixture. The
+        aggregate assertions in
+        `assert_inventory_case_counts_pin_multiline_and_fixture_regressions`
+        are the same property measured end to end: `nim_total` must equal
+        `sum(len(catalogCases))` over catalog-counted sources, which is an
+        identity only while nothing else contributes.
+        """
+        cases = [{"name": "a"}, {"name": "b"}, {"name": "c"}]
+
+        # The binary answered: its own catalog, and nothing else.
+        self.assertEqual(
+            inventory.authoritative_case_count("catalog", cases, 99), 3
+        )
+        # Neither silence is allowed to speak with the source text's voice.
+        for silent in ("missing-binary", "quarantined"):
+            with self.subTest(count_source=silent):
+                self.assertEqual(
+                    inventory.authoritative_case_count(silent, None, 7), 0
+                )
+        self.assertEqual(
+            set(inventory.CASE_COUNT_AUTHORITY_ZERO_SOURCES),
+            {"missing-binary", "quarantined"},
+        )
+        # `static` is the one label for which the scan IS the only surface:
+        # `--no-catalog`, and Python files, which have no binary to ask.
+        self.assertEqual(
+            inventory.authoritative_case_count("static", None, 7), 7
+        )
 
     def test_catalog_index_memo_is_keyed_by_the_spec_set(self):
         """A one-spec index must never satisfy a full-tree request.

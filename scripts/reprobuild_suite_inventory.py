@@ -3145,6 +3145,57 @@ def catalog_count_source(outcome: dict[str, Any] | None) -> str:
     return "quarantined"
 
 
+CASE_COUNT_AUTHORITY_ZERO_SOURCES = ("missing-binary", "quarantined")
+
+
+def authoritative_case_count(
+    count_source: str,
+    catalog_cases: list[dict[str, Any]] | None,
+    static_case_count: int,
+) -> int:
+    """How many cases one source contributes to the authoritative total.
+
+    The built binary is the enumeration authority. This function is the single
+    place that says what happens when it does not answer, because the four
+    ``countSource`` labels are not four shades of the same thing:
+
+    ``catalog``        the binary enumerated itself -> its own case count.
+    ``quarantined``    a binary exists and could not enumerate -> ZERO. The
+                       honest number is "unknown", and substituting the static
+                       scan is exactly the ``when``-branch over-count the
+                       binary-as-authority rework exists to remove.
+                       Concretely, ``t_n7_multicast_windows_smoke.nim`` wraps
+                       its whole body in ``when defined(windows)`` with
+                       ``else: discard``: it registers 0 cases on Linux while
+                       the static scanner sees 1, and feeding that 1 in made
+                       the pinned Nim total 6821 against a true 6820.
+    ``missing-binary`` no binary was built, so nothing could enumerate -> ZERO,
+                       for the same reason. This used to fall through to the
+                       static scan, so a BUILD GAP silently donated its
+                       SOURCE-TEXT count to a total documented as reading only
+                       binaries -- and that made the total's agreement with its
+                       pin unfalsifiable rather than verified. Measured on this
+                       tree with 24 binaries moved aside: those sources
+                       register 60 cases between them, their static scan also
+                       reads 60, and the total came back 6912, the pinned
+                       number to the case, while a fiftieth of the suite was
+                       not built. A pin that cannot move when the tree is
+                       broken is not checking anything.
+    ``static``         no probe was attempted (``--no-catalog``), or the source
+                       is Python and HAS no binary -> the static scan, which is
+                       the only surface there is.
+
+    In both zero cases the number stays visible per entry as
+    ``staticCaseCount``, and the reason stays visible as its own bucket in
+    ``countSourceCounts``. Neither is hidden; neither votes.
+    """
+    if catalog_cases is not None:
+        return len(catalog_cases)
+    if count_source in CASE_COUNT_AUTHORITY_ZERO_SOURCES:
+        return 0
+    return static_case_count
+
+
 def build_inventory(
     root: Path,
     run_data: dict[str, Any] | None,
@@ -3209,26 +3260,9 @@ def build_inventory(
                     }
                 )
 
-        if catalog_cases is not None:
-            case_count = len(catalog_cases)
-        elif count_source == "quarantined":
-            # A quarantined source contributes NOTHING to the authoritative
-            # total. The binary is the enumeration authority; when it cannot
-            # answer, the honest number is "unknown", and substituting the
-            # static scan is precisely the `when`-branch over-count this
-            # rework exists to remove.
-            #
-            # Concretely: t_n7_multicast_windows_smoke.nim wraps its whole
-            # body in `when defined(windows)` with `else: discard`, so it
-            # registers 0 cases on Linux while the static scanner sees 1.
-            # Feeding that 1 into the total made the pinned Nim total 6821
-            # against a true registered total of 6820 — the number the
-            # independent `--list` cross-check produces. The static count
-            # stays visible
-            # as `staticCaseCount`; it just no longer votes.
-            case_count = 0
-        else:
-            case_count = static_case_count
+        case_count = authoritative_case_count(
+            count_source, catalog_cases, static_case_count
+        )
         count_source_counts[count_source] = count_source_counts.get(count_source, 0) + 1
         source_case_count += case_count
 
@@ -3304,6 +3338,11 @@ def build_inventory(
             "join the quarantine set or change any case count"
         ),
         "quarantinedCasesExcludedFromTotal": True,
+        # Published alongside it so a reader of the artifact can tell that the
+        # total reads BUILT BINARIES ONLY, with nothing imputed for a source
+        # whose binary is absent. `countSourceCounts["missing-binary"]` is how
+        # many sources that silence covers.
+        "missingBinaryCasesExcludedFromTotal": True,
         "enabled": use_catalog,
         "countSourceCounts": count_source_counts,
         "quarantineCount": len(quarantine),
