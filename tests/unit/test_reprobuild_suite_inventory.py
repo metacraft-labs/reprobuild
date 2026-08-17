@@ -1378,7 +1378,18 @@ test "incomplete name" and:
         #     because it is not this change's subject: folding it into the
         #     "one new test" story would be exactly the unattributed aggregate
         #     adjustment these per-source pins exist to prevent.
-        self.assertEqual(len(nim_specs), 1239)
+        #
+        # 1239 -> 1216. Suite-Modernization M4's first consolidation batch
+        # folds the 24 `libs/repro_solver/tests/` pure-unit sources into the
+        # single shared binary `tests/bundles/bundle_repro_solver_pure_unit.nim`
+        # (-24 members, +1 bundle = -23). This is the ONE count that is
+        # SUPPOSED to fall: the whole point of consolidation is fewer binaries.
+        # The count that must NOT fall is `nim_total` below, and it does not —
+        # the bundle's `--list-json` reports all 82 of its members' cases, so
+        # 6916 is unchanged. A batch that moved this number without holding
+        # that one would be dropping cases, which is the failure mode the
+        # catalog authority exists to catch.
+        self.assertEqual(len(nim_specs), 1216)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -2346,9 +2357,14 @@ test "incomplete name" and:
             catalog["countSourceCounts"],
             # 1236 -> 1238: the two sources the graph regeneration enrols. Both
             # binaries are built and probed, so both join the `catalog` bucket
-            # and `missing-binary` stays empty: 1238 = 1239 Nim specs - 1
-            # quarantined.
-            {"catalog": 1238, "quarantined": 1, "static": 5},
+            # and `missing-binary` stays empty.
+            # 1238 -> 1215: M4's solver consolidation batch retires 24 member
+            # specs and adds one bundle spec. The bundle is built and probed
+            # like any other binary, so it joins the same `catalog` bucket:
+            # 1215 = 1216 Nim specs - 1 quarantined. `missing-binary` must
+            # stay empty — a bundled member that still had a spec would show
+            # up there and double-count its cases.
+            {"catalog": 1215, "quarantined": 1, "static": 5},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         # ...and no source outran its binary, which is now a statement that
@@ -2749,6 +2765,72 @@ test "incomplete name" and:
         )
         # No probe attempted at all (`--no-catalog`) is the only `static`.
         self.assertEqual(inventory.catalog_count_source(None), "static")
+
+    def test_static_scan_follows_a_bundle_into_its_members(self):
+        """A shared pure-unit binary is scanned through, not scanned flat.
+
+        Suite-Modernization M4 folds several pure-unit sources into one
+        generated `tests/bundles/` aggregator whose body is nothing but
+        `import` lines. Scanning that file literally reads ZERO cases, while
+        the built binary enumerates every member's — and the static sum would
+        silently drop the whole batch while `nim_total` held.
+
+        The number is the smaller half of the problem. The static scan's job
+        is to corroborate the catalog INDEPENDENTLY, so that two mechanisms
+        moving together make a case-count change a fact about the suite rather
+        than about one surface. A consolidation that zeroed one side would
+        leave every total explainable and the cross-check gone.
+
+        The negative arms are the ones that keep the expansion honest: it must
+        refuse anything that is not demonstrably an aggregator, or an ordinary
+        test opening with a quoted import would be credited with cases it does
+        not own.
+        """
+        root = REPO_ROOT
+        source = "tests/bundles/bundle_repro_solver_pure_unit.nim"
+        text = (root / source).read_text(encoding="utf-8")
+
+        members = inventory.bundle_member_paths(root, source, text)
+        self.assertEqual(len(members), 24)
+        for member in members:
+            self.assertTrue((root / member).is_file(), member)
+
+        # The expansion is load-bearing: flat, the aggregator declares nothing.
+        self.assertEqual(inventory.count_nim_cases(text)["caseCount"], 0)
+        summed = sum(
+            inventory.count_nim_cases((root / member).read_text(encoding="utf-8"))[
+                "caseCount"
+            ]
+            for member in members
+        )
+        self.assertEqual(summed, 82)
+
+        # Follows the imports that are actually there, not a fixed count.
+        one_fewer = "\n".join(
+            line for line in text.splitlines() if "t_clingo_smoke" not in line
+        )
+        self.assertEqual(
+            len(inventory.bundle_member_paths(root, source, one_fewer)), 23
+        )
+
+        # Same body, ordinary test path: never expanded.
+        self.assertEqual(
+            inventory.bundle_member_paths(
+                root, "libs/repro_solver/tests/t_not_a_bundle.nim", text
+            ),
+            [],
+        )
+        # Bundle path, but it declares something of its own: never expanded.
+        self.assertEqual(
+            inventory.bundle_member_paths(
+                root, source, text + '\nsuite "s":\n  test "t":\n    discard\n'
+            ),
+            [],
+        )
+        # Nothing to follow.
+        self.assertEqual(
+            inventory.bundle_member_paths(root, source, "# only comments\n"), []
+        )
 
     def test_a_source_with_no_built_binary_contributes_nothing(self):
         """`missing-binary` votes zero, exactly as `quarantined` does.
@@ -3556,7 +3638,10 @@ test "incomplete name" and:
         # 1237 -> 1239: the `develop --all` post-condition source and the
         # recovered `t_branch_fork_clones_root_submodules.nim`, both pinned
         # individually beside the parsed-spec aggregate above.
-        self.assertEqual(declared_nim_count, 1239)
+        # 1239 -> 1216: M4's solver consolidation batch (-24 members, +1
+        # bundle). See the `len(nim_specs)` pin above for why this number
+        # falling is the intent and `nim_total` holding is the check.
+        self.assertEqual(declared_nim_count, 1216)
         self.assertEqual(declared_python_count, 5)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -3606,7 +3691,8 @@ test "incomplete name" and:
         # The linked-worktree regression then adds one Nim entry: 1242.
         # Final graph: 1239 Nim + 5 Python = 1244 entries — the two sources
         # the graph regeneration enrols.
-        self.assertEqual(data["static"]["testEntryCount"], 1244)
+        # 1244 -> 1221 = 1216 Nim + 5 Python: M4's solver consolidation batch.
+        self.assertEqual(data["static"]["testEntryCount"], 1221)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),

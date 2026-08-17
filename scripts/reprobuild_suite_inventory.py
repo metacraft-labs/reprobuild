@@ -1291,6 +1291,55 @@ def nim_declarations(tokens: list[NimToken]) -> list[NimDeclaration]:
     return declarations
 
 
+BUNDLE_IMPORT_RE = re.compile(r'(?m)^\s*import\s+"([^"]+)"\s*$')
+
+
+def bundle_member_paths(root: Path, source: str, text: str) -> list[str]:
+    """Return the members a shared pure-unit binary folds in, or [] if it is not one.
+
+    A bundle (Suite-Modernization M4) is a generated source under
+    ``tests/bundles/`` whose entire body is quoted relative ``import`` lines.
+    It declares no ``suite`` and no ``test`` of its own, so a static scan of
+    the bundle file alone reads zero cases while the built binary enumerates
+    every member's — and the two surfaces would disagree by the whole batch.
+
+    That disagreement matters more than the number. The static scan exists to
+    corroborate the catalog INDEPENDENTLY: when both move by the same amount,
+    "N new cases" is a fact about the suite rather than about one mechanism.
+    Letting consolidation silently zero one side would keep the totals
+    explainable while destroying the cross-check, which is the opposite of
+    what the pins around it are for. So the scan follows the imports and sums
+    the members it actually finds.
+
+    Recognition is deliberately narrow — the directory AND an import-only body
+    — so an ordinary test that happens to open with a quoted import is never
+    mistaken for an aggregator and expanded into cases it does not own.
+    """
+    if not source.startswith("tests/bundles/"):
+        return []
+    body = [
+        line
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not body:
+        return []
+    imports = BUNDLE_IMPORT_RE.findall(text)
+    if len(imports) != len(body):
+        # Something other than imports lives here; not an aggregator.
+        return []
+    members: list[str] = []
+    bundle_dir = (root / source).parent
+    for target in imports:
+        resolved = (bundle_dir / (target + ".nim")).resolve()
+        try:
+            members.append(resolved.relative_to(root.resolve()).as_posix())
+        except ValueError:
+            # Outside the repo; record nothing rather than guess.
+            continue
+    return members
+
+
 def count_nim_cases(text: str) -> dict[str, Any]:
     tokens = nim_tokens(text)
     declarations = nim_declarations(tokens)
@@ -3415,6 +3464,25 @@ def build_inventory(
         source_path = root / spec.source
         text = read_text(source_path)
         case_info = count_python_cases(source_path) if spec.language == "python" else count_nim_cases(text)
+        bundle_members = (
+            []
+            if spec.language == "python"
+            else bundle_member_paths(root, spec.source, text)
+        )
+        if bundle_members:
+            # Scan the members, not the aggregator. See `bundle_member_paths`.
+            merged_suites: list[str] = []
+            merged_count = 0
+            merged_suite_count = 0
+            for member in bundle_members:
+                member_info = count_nim_cases(read_text(root / member))
+                merged_count += member_info["caseCount"]
+                merged_suite_count += member_info["suiteCount"]
+                merged_suites.extend(member_info.get("suites", []))
+            case_info = dict(case_info)
+            case_info["caseCount"] = merged_count
+            case_info["suiteCount"] = merged_suite_count
+            case_info["suites"] = merged_suites
         static_case_count = case_info["caseCount"]
 
         # Authoritative case count. The built binary wins whenever it can

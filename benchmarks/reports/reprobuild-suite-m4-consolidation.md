@@ -248,16 +248,71 @@ than argument: the maximum shared-binary size for the recipe family is <= 16
 and is set by correctness, and the recipe family is the only one of the three
 measured that has a size limit at all.
 
-## Recommended first batch
+## Campaign claims this measurement retires
 
-`libs/repro_solver`: 24 sources, 82 cases, one binary. It is the only group
-measured that is clean on every axis — flat init, 82/82 under `--run`, exit 0
-run whole, exact case parity — for a 9.4x build-CPU reduction. `libs/repro_peer_cache`
-is a larger prize (20.5x) but must first either fix the fixed-port multicast
-test or model its isolation explicitly.
+Two things repeated in this campaign's planning notes are not true of the
+current tree, and are recorded here so they stop being cited as constraints:
+
+* **`synthesize{Meson,Cmake}Package` "cannot be called twice per process."**
+  Already fixed in-tree. `withOwningPackage` /
+  `setCurrentOwningPackageOverride` scopes each synthesized package's implicit
+  target exports to the consuming recipe, and the source comment in
+  `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/synthesis/from_source_default_build.nim`
+  documents the repair. It is not a consolidation blocker.
+* **"36 binaries `quit(0)` at module init."** The real figure is 11 files
+  containing a module-init `quit(`, of which exactly one is classified pure
+  unit (`libs/repro_dsl_stdlib/tests/t_smoke_expand_archive.nim`, which carries
+  a self-exec subprocess mode). The rest are integration tests, which are not
+  consolidation candidates.
+
+The genuine process-sharing hazards are the ones measured above — the
+accumulating module-init solve, and fixed-port/global-dispatcher tests — not
+these two.
+
+## Batch landed: `libs/repro_solver`
+
+The solver group is consolidated: 24 sources folded into
+`tests/bundles/bundle_repro_solver_pure_unit.nim`, one binary
+`build/test-bin/bundle_repro_solver_pure_unit`.
+
+| Property | Before | After |
+| --- | --- | --- |
+| Nim test binaries (suite-wide) | 1,239 | 1,216 |
+| Test entries (suite-wide) | 1,244 | 1,221 |
+| Catalog-source bucket | 1,238 | 1,215 |
+| **Nim cases (`nim_total`)** | **6,916** | **6,916** |
+| **Total cases** | **6,966** | **6,966** |
+| Group build cost | 1,199 CPU s | 127 CPU s |
+| Consolidation groups | 42 | 41 |
+
+Verified by execution after a rebuild, not read from a pre-existing binary:
+82 cases enumerated, exactly the union of the 24 members' catalogs, zero
+missing and zero extra; 82/82 pass individually under `--run`; the binary exits
+0 run whole; `bodyHash` moves for 55 of 82 and no other protocol field moves.
+
+The static source scan follows a bundle into its members rather than reading
+the aggregator flat, so it still corroborates the catalog independently: both
+surfaces are unchanged at 6,838 static and 6,916 catalog. Without that, the
+static sum would have silently dropped 82 while `nim_total` held — every total
+still explainable, and the cross-check gone.
+
+**This batch clears one group. The other 41 are not cleared by it.** Membership
+is an explicit list in the generator rather than a directory glob precisely so
+a newly added test cannot join a shared process without a human deciding it
+tolerates neighbours.
+
+## Recommended next batch
+
+`libs/repro_peer_cache` is the largest measured prize at 20.5x, but it must
+first either fix the fixed-port multicast test or model its isolation
+explicitly — it is the group whose merged binary exits 1 run whole.
 
 The recipe family should not be consolidated on the strength of this report.
-The accumulating module-init solve is a product-level cost that also applies to
+Its 16-per-binary figure is **a bound we failed to falsify, not a measured
+limit**: bundles of 4, 8 and 16 ran clean, 24 and 32 did not, and nothing here
+establishes that some other set of 16 would pass. Treating 16 as a proven
+ceiling would be reading this artifact for more than it says. The accumulating
+module-init solve underneath it is also a product-level cost that applies to
 any real project declaring many packages in one process; that is worth
 understanding before it is worked around with a bundle-size cap.
 
