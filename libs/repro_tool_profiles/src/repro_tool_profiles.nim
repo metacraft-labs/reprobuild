@@ -2524,6 +2524,18 @@ proc bumpWindowsNimStack(nimExePath: string) =
     except CatchableError, OSError:
       discard
 
+proc compilerPathForShellEnvironment*(path: string;
+                                      windowsHost: bool): string =
+  ## Render an executable path for conventional compiler environment
+  ## variables such as ``CC``. Autotools copies these values into generated
+  ## make recipes, where an MSYS shell treats Windows backslashes as escape
+  ## characters. Native Windows programs accept forward slashes, so this form
+  ## works for both the configure probes and the generated recipes.
+  if windowsHost:
+    path.replace('\\', '/')
+  else:
+    path
+
 proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
                                   storeRoot: string) =
   ## MR5 — before the engine's interface-extract step shells out to
@@ -2589,7 +2601,7 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
     if bootstrapGcc.len > 0:
       putEnv("REPRO_BOOTSTRAP_CC", bootstrapGcc)
       if getEnv("CC").len == 0:
-        putEnv("CC", bootstrapGcc)
+        putEnv("CC", compilerPathForShellEnvironment(bootstrapGcc, true))
 
 proc blake3HexBytes*(bytes: openArray[byte]): string =
   blake3.toHex(blake3.digest(bytes))
