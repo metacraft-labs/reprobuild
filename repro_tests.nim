@@ -486,6 +486,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim",
+    binary: "build/test-bin/t_lock_record_repo_component_is_one_path_segment",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim",
     binary: "build/test-bin/t_m5_peer_cache_build_wiring",
     defines: @[],

@@ -308,7 +308,8 @@ proc renderUsage*(programName: string): string =
       "remove <name>} | repos {list [--project=NAME] | add <repo> " &
       "--remote=URL [--project=NAME]... | remove <repo>} | " &
       "manifests | shared-clones | forall -c <command> | " &
-      "provision | publish-evidence} " &
+      "provision | publish-evidence | " &
+      "migrate-locks [--dry-run|--apply]} " &
       "[--workspace-root=PATH]\n\n" &
       "workspace reports: the workspace verbs (init, sync, pull, lock, " &
       "status, list, manifests, shared-clones, forall, develop, hooks " &
@@ -25654,14 +25655,18 @@ proc parseTriggerFromLockRelPath*(relPath: string):
   ## ``locks/<project>/<repo>/<sha>.toml`` into its trigger repo and
   ## trigger SHA (the filename stem). Returns empty strings when the
   ## path does not match the RA-1 layout. Forward slashes expected.
-  let parts = relPath.replace('\\', '/').split('/')
-  if parts.len < 4 or parts[0] != "locks":
+  ##
+  ## RA-32 — this used to accept ``parts.len < 4`` (i.e. FOUR OR MORE) and
+  ## then read ``parts[^2]``, while four other call sites required exactly
+  ## four. That disagreement is why a record written one level too deep was
+  ## accepted here — silently reporting ``sync-engine`` as the trigger repo
+  ## of a record belonging to ``stripe/sync-engine`` — and refused much later
+  ## at publish, with a diagnostic pointing at the publisher rather than at
+  ## the write. All five now share ``parseLockRecordRelPath``.
+  let parsed = parseLockRecordRelPath(relPath)
+  if not parsed.ok:
     return ("", "")
-  result.repo = parts[^2]
-  var base = parts[^1]
-  if base.endsWith(".toml"):
-    base = base[0 ..< base.len - ".toml".len]
-  result.sha = base
+  (repo: parsed.repo, sha: parsed.sha)
 
 proc latestLockRelPathForRepoViaGit*(identity: GitToolIdentity;
     manifestLayerRoot, project, repo: string): string =
@@ -25687,7 +25692,11 @@ proc latestLockShasViaGit(identity: GitToolIdentity;
   ## Returns an empty table + "" when no lock exists. Replaces the
   ## former index-backed ``readLatestLockedShasByPath``.
   result.shas = initTable[string, string]()
-  let lockPrefix = "locks/" & project & "/"
+  # RA-32 — the PROJECT is a name too, and the writer encodes it into one path
+  # component. A raw join here reads a prefix nothing was ever written under, so
+  # for any project name outside ``[A-Za-z0-9._-]`` this query silently answered
+  # "no lock" and `repro check` stage 5 / `repro workspace status` saw none.
+  let lockPrefix = "locks/" & encodeLockPathSegment(project) & "/"
   let candidates = orderedLockCandidates(identity, manifestLayerRoot, lockPrefix)
   if candidates.len == 0:
     return
@@ -25706,10 +25715,10 @@ proc latestLockShasViaGit(identity: GitToolIdentity;
   # most recent revision for each repo.
   for cand in candidates:
     let lockPath = manifestLayerRoot / cand.relPath.replace('/', DirSep)
-    if not fileExists(lockPath):
+    if not fileExists(extendedPath(lockPath)):
       continue
     let body =
-      try: readFile(lockPath)
+      try: readFile(extendedPath(lockPath))
       except CatchableError: ""
     for path, rev in shasFromBody(body):
       if path notin result.shas:
@@ -25967,8 +25976,12 @@ proc resolveCoherenceLayerRoot(workspaceRoot, project: string): string =
   ## pins folded in and a workspace in neither simply contributes no DB claim.
   if project.len == 0:
     return ""
+  # RA-32 — the thing we probe for is the directory the WRITER created, which is
+  # the encoded project component. Probing the raw name made a workspace whose
+  # project name is not filename-shaped contribute no DB claim at all.
+  let segment = encodeLockPathSegment(project)
   for candidate in [workspaceRoot / ".repro" / "manifests", workspaceRoot]:
-    if dirExists(extendedPath(candidate / "locks" / project)):
+    if dirExists(extendedPath(candidate / "locks" / segment)):
       return candidate
   ""
 
@@ -26124,8 +26137,25 @@ method putLock*(s: GitCheckoutLockStore;
     let refusal = checkoutRootRefusal(s, "record lock")
     if refusal.len > 0:
       return failed(refusal)
-    let rel = "locks/" & rec.key.project & "/" & rec.key.repo & "/" &
-      rec.key.sha & ".toml"
+    # RA-32 — the store key becomes the path through the ONE encoder the
+    # readers invert (``lockFileRepoRelativePath``), not a raw string join.
+    # The raw join is what produced ``locks/codetracer/stripe/sync-engine/
+    # <sha>.toml``: a repo NAME carrying a slash (twelve of this workspace's
+    # repos are named the way the forge names them) silently became two path
+    # components, so the record landed at depth 5 where the format has 4. It
+    # was committed here and then refused by the publisher forever after.
+    if not isLockPathName(rec.key.project) or
+        not isLockPathName(rec.key.repo) or
+        not isLockPathName(rec.key.sha):
+      return failed("lock store key has an empty or NUL-bearing component " &
+        "(project='" & rec.key.project & "' repo='" & rec.key.repo &
+        "' sha='" & rec.key.sha & "')")
+    if not isCanonicalRepoName(rec.key.repo):
+      return failed("lock store key names a repo that is not a canonical " &
+        "repo name (a name may carry '/' but not a backslash, an absolute " &
+        "anchor, or a '.'/'..'/empty component): '" & rec.key.repo & "'")
+    let rel = lockFileRepoRelativePath(rec.key.project, rec.key.repo,
+      rec.key.sha)
     let coordinates = shasFromBody(rec.body)
     if coordinates.len != 1:
       return failed("Git lock backend requires one exact repository " &
@@ -26142,13 +26172,20 @@ method putLock*(s: GitCheckoutLockStore;
         if item.relPath == expected.relPath: return
       s.pendingExpected.add(expected)
     let abs = s.manifestRepoRoot / rel.replace('/', DirSep)
-    createDir(parentDir(abs))
-    if fileExists(abs):
-      if readFile(abs) != rec.body:
+    # RA-32 — ``extendedPath`` at the filesystem boundary, the same rule
+    # ``putEvidence`` below already applied. Its comment cites LOCK paths as
+    # the reason, but the lock write itself was left bare, so on Windows the
+    # evidence blob survived a long path while the primary record — the longest
+    # path in the subsystem, and the one component encoding LENGTHENS (``%HH``
+    # expands a byte up to 3x) — did not. The ordinary form is what is stored,
+    # compared and handed to ``git``; only these calls take the extended form.
+    createDir(extendedPath(parentDir(abs)))
+    if fileExists(extendedPath(abs)):
+      if readFile(extendedPath(abs)) != rec.body:
         return failed("immutable lock record already exists with different " &
           "content at " & rel)
     else:
-      writeFile(abs, rec.body)
+      writeFile(extendedPath(abs), rec.body)
     # ``-f`` for the same reason ``publishWorkspaceLock`` forces its stage: the
     # operator may legitimately ignore the manifest layer (a global
     # ``core.excludesFile`` or a ``.gitignore`` naming ``.repro/`` / ``locks/``
@@ -26201,8 +26238,10 @@ method latestLockAny*(s: GitCheckoutLockStore; project: string):
   # verbatim record BODY (no workspace-lock schema parse — the store records
   # an arbitrary body, unlike ``latestLockShas`` which extracts path/revision
   # from a real workspace lock).
+  # RA-32 — encoded project component, exactly as ``putLock`` wrote it.
   let candidates = orderedLockCandidates(
-    s.identity, s.manifestRepoRoot, "locks/" & project & "/")
+    s.identity, s.manifestRepoRoot,
+    "locks/" & encodeLockPathSegment(project) & "/")
   if candidates.len == 0: return none(StoreLockRecord)
   let rel = candidates[0].relPath
   let abs = s.manifestRepoRoot / rel.replace('/', DirSep)
@@ -26292,10 +26331,20 @@ method putEvidence*(s: GitCheckoutLockStore; project, repo: string;
     let refusal = checkoutRootRefusal(s, "record evidence")
     if refusal.len > 0:
       return failed(refusal)
-    let rel = "evidence/" & project & "/" & repo & ".ev"
+    # RA-32 — same component encoding as ``putLock``: a repo NAME is one path
+    # component here too, and ``../../etc`` must not write outside
+    # ``evidence/``.
+    if not isLockPathName(project) or not isCanonicalRepoName(repo):
+      return failed("evidence key has a non-canonical project/repo name " &
+        "(project='" & project & "' repo='" & repo & "')")
+    let rel = "evidence/" & encodeLockPathSegment(project) & "/" &
+      encodeLockPathSegment(repo) & ".ev"
     let abs = s.manifestRepoRoot / rel.replace('/', DirSep)
-    createDir(parentDir(abs))
-    writeFile(abs, encodeEvidenceBlob(ev))
+    # ``extendedPath`` at the filesystem boundary only: ``%HH`` escapes expand a
+    # name up to 3x, so an evidence or lock path is measurably closer to
+    # Windows' 260-char MAX_PATH than the raw name was.
+    createDir(extendedPath(parentDir(abs)))
+    writeFile(extendedPath(abs), encodeEvidenceBlob(ev))
     # ``-f``: same generated-record-under-a-possibly-ignored-layer case as
     # ``putLock`` above — the operator may legitimately ignore the manifest
     # layer, and this one generated blob must still be recorded under it.
@@ -26331,9 +26380,10 @@ method putEvidence*(s: GitCheckoutLockStore; project, repo: string;
 method getEvidence*(s: GitCheckoutLockStore; project, repo: string):
     seq[WorkspaceVcsEvidence] =
   let abs = s.manifestRepoRoot /
-    ("evidence/" & project & "/" & repo & ".ev").replace('/', DirSep)
-  if not fileExists(abs): return @[]
-  decodeEvidenceBlob(readFile(abs))
+    ("evidence/" & encodeLockPathSegment(project) & "/" &
+      encodeLockPathSegment(repo) & ".ev").replace('/', DirSep)
+  if not fileExists(extendedPath(abs)): return @[]
+  decodeEvidenceBlob(readFile(extendedPath(abs)))
 
 # ---------------------------------------------------------------------------
 # MO-4 — per-repo-set locking-backend routing (config → per-repo backend)
@@ -30477,7 +30527,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # shared index is written. Re-locking the same SHA overwrites the
   # same file, so "replaced an existing lock" is simply "the lock file
   # already existed on disk before this write".
-  let lockAlreadyExisted = fileExists(lockPath)
+  let lockAlreadyExisted = fileExists(extendedPath(lockPath))
   # RA-31 — "a file is at that path" and "a record is published there" are
   # different claims, and only the second one is immutable.
   #
@@ -30537,7 +30587,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
       # RA-31 — gated on TRACKED, not on present-on-disk. An untracked file at
       # this path is this workspace's own unpublished draft (see above); it is
       # overwritten by the ``else`` arm rather than defended.
-      let existingShas = shasFromBody(readFile(lockPath))
+      let existingShas = shasFromBody(readFile(extendedPath(lockPath)))
       var sameCoordinates = existingShas.len == lock.repos.len
       var mismatchedPaths: seq[string]
       if sameCoordinates:
@@ -30960,8 +31010,13 @@ proc minimalRoutedRepoName(body: string): string =
     let value = line[(eq + 1) .. ^1].strip()
     if value.len < 2 or value[0] != '"' or value[^1] != '"': return ""
     let decoded = value[1 ..< value.high]
-    if decoded.len == 0 or '\\' in decoded or '/' in decoded or
-        decoded == "." or decoded == "..": return ""
+    # RA-32 — a '/' in the NAME is legitimate (forge-shaped names such as
+    # ``stripe/sync-engine``); it is only in the PATH that it must not appear
+    # as a separator, and the path component is an encoding of this name, so
+    # the binding below (``routedName == <decoded path component>``) stays
+    # exact. What must still be refused is anything that is not a NAME:
+    # a backslash, an absolute anchor, an empty/'.'/'..' component.
+    if not isCanonicalRepoName(decoded): return ""
     result = decoded
     seen = true
   if not seen: result = ""
@@ -30981,19 +31036,21 @@ proc verifyLockRecordPath(identity: GitToolIdentity; repoRoot, commit,
     relPath, objectFormat: string;
     expected = none(ExpectedLockRecord)):
     tuple[ok: bool; diagnostic: string] =
-  let parts = relPath.replace('\\', '/').split('/')
-  if parts.len != 4 or parts[0] != "locks" or
-      not parts[3].endsWith(".toml"):
-    return (false, "non-canonical lock record path: " & relPath)
-  let oid = parts[3][0 ..< parts[3].len - ".toml".len]
+  # RA-32 — one shared decomposer. It carries an ACTIONABLE diagnostic: for the
+  # historical too-deep record it names the canonical path the record belongs
+  # at, which is what the publish-time migration acts on.
+  let parsed = parseLockRecordRelPath(relPath)
+  if not parsed.ok:
+    return (false, "non-canonical lock record path: " & parsed.diagnostic)
+  let oid = parsed.sha
   let oidLength = if objectFormat == "sha256": 64 else: 40
   if not isFullHexOid(oid, oidLength):
     return (false, "lock record filename is not a full " & objectFormat &
       " object id: " & relPath)
   if expected.isSome:
     let wanted = expected.get()
-    if relPath != wanted.relPath or parts[1] != wanted.project or
-        parts[2] != wanted.repoName or
+    if relPath != wanted.relPath or parsed.project != wanted.project or
+        parsed.repo != wanted.repoName or
         oid.toLowerAscii() != wanted.oid.toLowerAscii():
       return (false, "lock record path does not match the exact operation " &
         "coordinate: " & relPath)
@@ -31012,7 +31069,7 @@ proc verifyLockRecordPath(identity: GitToolIdentity; repoRoot, commit,
     var triggerMatches = false
     try:
       let lock = readLock(tempPath)
-      if lock.lock.project != parts[1]:
+      if lock.lock.project != parsed.project:
         return (false, "lock project does not match its path: " & relPath)
       for entry in lock.repo:
         let coordinateMatches =
@@ -31021,7 +31078,7 @@ proc verifyLockRecordPath(identity: GitToolIdentity; repoRoot, commit,
               entry.path == expected.get().repoPath and
               entry.revision.toLowerAscii() == expected.get().oid.toLowerAscii()
           else:
-            entry.name == parts[2] and canonicalRepoCoordinate(entry.path) and
+            entry.name == parsed.repo and canonicalRepoCoordinate(entry.path) and
               entry.revision.toLowerAscii() == oid.toLowerAscii()
         if coordinateMatches:
           triggerMatches = true
@@ -31035,7 +31092,7 @@ proc verifyLockRecordPath(identity: GitToolIdentity; repoRoot, commit,
       # non-empty repo coordinate bound to the exact path SHA.
       let routed = shasFromBody(show.output)
       let routedName = minimalRoutedRepoName(show.output)
-      if routed.len != 1 or routedName != parts[2]:
+      if routed.len != 1 or routedName != parsed.repo:
         return (false, "lock record parse/integrity failure at " & relPath &
           ": " & workspaceLockError.msg)
       for repoPath, revision in routed:
@@ -31064,11 +31121,11 @@ proc expectedLockRecordFromBody(relPath, body: string):
   ## Compatibility seam for explicit `repro workspace lock` and the exported
   ## low-level publisher. Normal pre-push/repro-push paths carry the expected
   ## coordinate from the resolved manifest instead of deriving it here.
-  let parts = relPath.replace('\\', '/').split('/')
-  if parts.len != 4 or parts[0] != "locks" or
-      not parts[3].endsWith(".toml"):
+  # RA-32 — same shared decomposer as ``verifyLockRecordPath``.
+  let parsed = parseLockRecordRelPath(relPath)
+  if not parsed.ok:
     return none(ExpectedLockRecord)
-  let oid = parts[3][0 ..< parts[3].len - ".toml".len]
+  let oid = parsed.sha
   var repoPath = ""
   let temp = createTempFile("repro-lock-expected-", ".toml")
   let tempPath = temp.path
@@ -31077,23 +31134,23 @@ proc expectedLockRecordFromBody(relPath, body: string):
     temp.cfile.close()
     try:
       let lock = readLock(tempPath)
-      if lock.lock.project != parts[1]: return none(ExpectedLockRecord)
+      if lock.lock.project != parsed.project: return none(ExpectedLockRecord)
       for entry in lock.repo:
-        if entry.name == parts[2] and
+        if entry.name == parsed.repo and
             entry.revision.toLowerAscii() == oid.toLowerAscii():
           repoPath = entry.path
           break
     except CatchableError:
       let routed = shasFromBody(body)
-      if routed.len == 1 and minimalRoutedRepoName(body) == parts[2]:
+      if routed.len == 1 and minimalRoutedRepoName(body) == parsed.repo:
         for path, revision in routed:
           if revision.toLowerAscii() == oid.toLowerAscii(): repoPath = path
   finally:
     try: removeFile(tempPath)
     except CatchableError: discard
   if not canonicalRepoCoordinate(repoPath): return none(ExpectedLockRecord)
-  some(ExpectedLockRecord(project: parts[1], repoName: parts[2],
-    repoPath: repoPath, oid: oid, relPath: relPath))
+  some(ExpectedLockRecord(project: parsed.project, repoName: parsed.repo,
+    repoPath: repoPath, oid: oid, relPath: parsed.relPath))
 
 proc verifyLockBlobAt(identity: GitToolIdentity; repoRoot, commit,
     relPath: string): tuple[ok: bool; diagnostic: string] =
@@ -31169,6 +31226,29 @@ proc verifyLockOnlyAheadChain(identity: GitToolIdentity; repoRoot, base,
   let commits = commitsRes.output.splitLines().filterIt(it.strip().len > 0)
   if commits.len == 0:
     return (false, "backend is not ahead of the fetched upstream")
+
+  # RA-32 — the ahead chain is ADDITIONS-ONLY, with NO exception.
+  #
+  # Every commit between the fetched upstream and the local backend HEAD must
+  # consist solely of ``A`` entries under ``locks/``, and every added path must
+  # be a canonical lock record that verifies against the operation binding.
+  # Nothing is ever removed from the chain, at any depth, for any reason: a
+  # published record is immutable, and a record that is NOT canonical is not
+  # something this verifier may make publishable by rewriting a shared store on
+  # the operator's behalf.
+  #
+  # An earlier revision carved out a "migration" exception here — a commit that
+  # deleted one non-canonical record and re-added it at its canonical path —
+  # and drove it automatically from ``publishWorkspaceLock``. Every defect two
+  # review rounds found came from that machinery, never from the encoding or
+  # the shared parser: it committed deletions the verifier then refused
+  # forever, mis-parsed quoted paths AFTER moving the files, dropped a path
+  # silently, relocated files that were never records, and authorized its own
+  # writes to a shared remote past the very guard that exists to stop that. It
+  # is gone. A store that already holds a non-canonical record is repaired by
+  # the EXPLICIT ``repro workspace migrate-locks`` verb, which rebuilds the
+  # UNPUBLISHED portion of the branch so that what reaches this verifier is,
+  # once again, additions-only.
   var added: HashSet[string]
   for rawCommit in commits:
     let commit = rawCommit.strip()
@@ -31183,8 +31263,7 @@ proc verifyLockOnlyAheadChain(identity: GitToolIdentity; repoRoot, base,
       let fields = rawLine.split('\t')
       if fields.len != 2 or fields[0] != "A":
         return (false, "backend ahead chain is not additions-only at " &
-          commit &
-          ": " & rawLine)
+          commit & ": " & rawLine)
       let path = fields[1]
       if not pathIsUnderLocks(path):
         return (false, "backend ahead chain touches outside locks/: " & path)
@@ -31197,15 +31276,13 @@ proc verifyLockOnlyAheadChain(identity: GitToolIdentity; repoRoot, base,
         return (false, "backend ahead chain contains an unexpected lock " &
           "record: " & path)
       if exact.isNone and restrictToExpectedCoordinates:
-        let parts = path.replace('\\', '/').split('/')
-        if parts.len == 4 and parts[0] == "locks" and
-            parts[3].endsWith(".toml"):
-          let oid = parts[3][0 ..< parts[3].len - ".toml".len]
+        let parsed = parseLockRecordRelPath(path)
+        if parsed.ok:
           for item in expected:
-            if item.project == parts[1] and item.repoName == parts[2]:
+            if item.project == parsed.project and item.repoName == parsed.repo:
               exact = some(ExpectedLockRecord(project: item.project,
-                repoName: item.repoName, repoPath: item.repoPath, oid: oid,
-                relPath: path))
+                repoName: item.repoName, repoPath: item.repoPath,
+                oid: parsed.sha, relPath: path))
               break
         if exact.isNone:
           return (false, "backend ahead chain contains a lock record outside " &
@@ -31280,9 +31357,26 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
   result.outcome = lpoFailed
   for entry in gitPorcelainEntries(identity, repoRoot):
     # Recovery starts only from an exact clean index/worktree. A pathname being
-    # under locks/ is not sufficient: modified, deleted, renamed, symlinked, or
-    # unrelated untracked lock files are user state and must never be swept into
-    # a resumed publication.
+    # under locks/ is not sufficient: modified, deleted, renamed, symlinked
+    # lock files are user state and must never be swept into a resumed
+    # publication.
+    #
+    # RA-32 — with ONE exception, and it is an exception about what this code
+    # can reach, not about what it trusts. An UNTRACKED file under ``locks/``
+    # that is not a canonical record path can no longer be swept into anything:
+    # every writer here stages by explicit path (``putLock`` stages its one
+    # record, ``publishWorkspaceLock`` stages the canonical paths it selected)
+    # and commits with that same explicit pathspec, so such a file is
+    # unreachable from the index and from every commit. Aborting over it gave
+    # one unrelated file — an operator's ``NOTES.toml``, or a record some older
+    # writer left at a non-canonical path and never tracked — a veto over
+    # publication for every repo in the workspace. A canonical untracked record
+    # is NOT excused: the publisher stages those, so by the time control
+    # reaches here one can only mean the staging step disagreed with this one,
+    # which is exactly the kind of split this change exists to remove.
+    if entry.code == "??" and pathIsUnderLocks(entry.path) and
+        not parseLockRecordRelPath(entry.path).ok:
+      continue
     result.diagnostic = "backend has uncommitted state (" & entry.code & " " &
       entry.path & "); refusing verified lock recovery"
     return
@@ -31428,6 +31522,26 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
       return
     result.verifiedLocalHead = refreshedHead.output.strip().toLowerAscii()
 
+proc nulSeparatedPaths(output: string): seq[string] =
+  ## Split the output of a ``-z`` git query into paths.
+  ##
+  ## ``-z`` NUL-TERMINATES each path, and the captured output still carries the
+  ## trailing newline the child wrote after the last record. Splitting on NUL
+  ## therefore yields a final element that is ``"\n"`` rather than ``""``, and a
+  ## plain ``if raw.len == 0: continue`` does not drop it. That element then
+  ## flows on as if it were a path: it is not under ``locks/``, so the repair
+  ## planner read it as "this branch touches something outside locks/" and
+  ## refused every store it was pointed at, naming a path that renders as
+  ## nothing at all.
+  ##
+  ## Strip the trailing newlines ONCE, from the whole output, before splitting;
+  ## every element is then either a real path or empty. Not a per-element
+  ## ``strip``: a path may legitimately begin or end with a byte ``strip``
+  ## would eat.
+  for raw in output.strip(leading = false, chars = {'\n', '\r'}).split('\0'):
+    if raw.len == 0: continue
+    result.add(raw.replace('\\', '/'))
+
 proc publishWorkspaceLock*(identity: GitToolIdentity;
                            manifestRepoRoot: string;
                            exactExpected: seq[ExpectedLockRecord] = @[]):
@@ -31474,25 +31588,105 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
         "nothing to publish to"
     return
 
-  # Stage only the locks subtree. ``git add`` of a non-existent path errors;
-  # guard so a manifest layer that has never produced a lock is a clean
-  # "nothing to publish", not a failure.
+  # RA-32 — the publish OWNS exactly one kind of path: a CANONICAL lock record
+  # under ``locks/``. It stages those, commits those, and pushes those. Every
+  # other file under ``locks/`` — an operator's ``README.md``, the store's
+  # legacy ``.xml`` records, a ``NOTES.toml``, or a record some earlier writer
+  # left at a non-canonical path — it does not stage, does not commit, and
+  # does not refuse over.
+  #
+  # This replaced a blanket ``git add -f -- locks``. That staged the WHOLE
+  # subtree, so a single unrelated file sitting under ``locks/`` became a
+  # staged addition the canonical-additions check then refused, denying
+  # publication to every repo in the workspace. Selecting the paths makes the
+  # isolation real rather than incidental: an unrelated file is never in the
+  # index, so it cannot be in the commit, so it cannot be in the ahead chain.
   #
   # ``-f`` (force) because the operator is entitled to keep the whole manifest
   # layer out of ordinary status/add noise — a global ``core.excludesFile`` or
   # a repo ``.gitignore`` naming e.g. ``.repro/`` or ``locks/`` is a legitimate
   # configuration, and lock publication must still work under it. These paths
-  # are generated and owned by reprobuild, and the pathspec is pinned to
-  # ``locks`` alone, so the force can only ever stage this tool's own records;
-  # everything the operator authored is still governed by their ignore rules.
-  # This is safe ONLY because the guard above proved ``manifestRepoRoot`` is
-  # the checkout ROOT: without it, Git's upward repository discovery would
-  # point these commands at an enclosing repository and the force would commit
-  # the lock into — and push the branch of — a repo that merely happens to
-  # contain the manifest layer.
-  if dirExists(manifestRepoRoot / "locks"):
+  # are generated and owned by reprobuild, and the pathspec is now pinned to
+  # individual canonical record paths, so the force can only ever stage this
+  # tool's own records. This is safe ONLY because the guard above proved
+  # ``manifestRepoRoot`` is the checkout ROOT: without it, Git's upward
+  # repository discovery would point these commands at an enclosing repository
+  # and the force would commit the lock into — and push the branch of — a repo
+  # that merely happens to contain the manifest layer.
+  #
+  # ``-z`` on every enumeration: ``core.quotePath`` C-quotes any path carrying
+  # a byte outside ASCII, and a quoted path does not compare equal to what the
+  # writer wrote. The encoder's own output alphabet is ``[A-Za-z0-9._%-]`` so a
+  # canonical record is never quoted, but a legacy or operator file may be, and
+  # it must be recognised as "not ours" rather than mis-parsed.
+  var canonicalToStage: seq[string]
+  var strayRecords: seq[string]
+  var vanishedRecords: seq[string]
+  if dirExists(extendedPath(manifestRepoRoot / "locks")):
+    # Candidates for staging: untracked (``--others``, deliberately WITHOUT
+    # ``--exclude-standard`` so an ignored manifest layer still publishes) and
+    # tracked-but-changed (``--modified``, which also reports a tracked file
+    # deleted from the worktree).
+    let cand = gitRunPlain(identity,
+      ["-C", manifestRepoRoot, "ls-files", "-z", "--modified", "--others",
+       "--", "locks"])
+    if cand.code != 0:
+      result.diagnostic = "git ls-files locks failed: " & cand.output.strip()
+      return
+    var seenCandidate = initHashSet[string]()
+    for rel in nulSeparatedPaths(cand.output):
+      if rel in seenCandidate: continue
+      seenCandidate.incl(rel)
+      if not parseLockRecordRelPath(rel).ok:
+        if rel.endsWith(lockRecordExt): strayRecords.add(rel)
+        continue
+      if fileExists(extendedPath(manifestRepoRoot / rel.replace('/', DirSep))):
+        canonicalToStage.add(rel)
+      else:
+        vanishedRecords.add(rel)
+    canonicalToStage.sort()
+    vanishedRecords.sort()
+
+    # A record-shaped file already TRACKED at a non-canonical path is the state
+    # an operator most needs told about: it is committed, so it sits in the
+    # ahead chain and the additions-only verifier will refuse the chain until
+    # it is repaired. It never shows up in the candidate scan above (it is
+    # tracked and unmodified), so scan the index for it too.
+    let trackedRes = gitRunPlain(identity,
+      ["-C", manifestRepoRoot, "ls-files", "-z", "--cached", "--", "locks"])
+    if trackedRes.code == 0:
+      for rel in nulSeparatedPaths(trackedRes.output):
+        if not rel.endsWith(lockRecordExt): continue
+        if parseLockRecordRelPath(rel).ok: continue
+        if rel in seenCandidate: continue
+        strayRecords.add(rel)
+    strayRecords.sort()
+
+  # Unstage exactly what we staged, and NOTHING when we staged nothing.
+  # ``git reset HEAD --`` with an EMPTY pathspec is not a no-op: git treats it
+  # as "no pathspec" and performs a full mixed reset, which would silently
+  # unstage whatever the operator had staged themselves. The guard is the
+  # whole point of routing every unstage through here.
+  proc unstageOurs() =
+    if canonicalToStage.len == 0: return
+    discard gitRunPlain(identity,
+      @["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--"] &
+        canonicalToStage)
+
+  # REPORT, never relocate. Naming the file, the reason, and the exact repair
+  # verb is the whole remedy this offers: nothing here mutates a shared store,
+  # and nothing here denies publication to the canonical records below.
+  for stray in strayRecords:
+    let parsedStray = parseLockRecordRelPath(stray)
+    stderr.writeLine("repro: not publishing '" & stray & "': " &
+      parsedStray.diagnostic)
+    stderr.writeLine("repro:   repair it with 'repro workspace migrate-locks " &
+      "--dry-run' (then '--apply'); publication of the other records in " &
+      "this store is unaffected")
+
+  if canonicalToStage.len > 0:
     let addRes = gitRunPlain(identity,
-      ["-C", manifestRepoRoot, "add", "-f", "--", "locks"])
+      @["-C", manifestRepoRoot, "add", "-f", "--"] & canonicalToStage)
     if addRes.code != 0:
       result.diagnostic = "git add locks failed: " & addRes.output.strip()
       return
@@ -31509,43 +31703,67 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
   if dirtyOutside.len > 0:
     # Reset only the locks subtree we staged; leave any pre-existing
     # staging of unrelated paths exactly as we found it.
-    discard gitRunPlain(identity,
-      ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+    unstageOurs()
     result.outcome = lpoRefusedDirty
     result.diagnostic =
       "manifest repo is dirty outside locks/ (" &
         dirtyOutside.join(", ") & "); refusing to publish lock"
     return
 
+  # A canonical record that is tracked but GONE from the worktree. Lock records
+  # are immutable, so this is never something to publish past: say so, and name
+  # the restore. Refusing here is not "blocking an unrelated record" — the
+  # missing file IS a published record of this store. Ordered AFTER the
+  # dirty-outside guard so that guard keeps its precedence: a tree that is
+  # inconsistent outside locks/ is the more fundamental refusal, and it is the
+  # one whose outcome (``lpoRefusedDirty``) callers already act on.
+  if vanishedRecords.len > 0:
+    unstageOurs()
+    result.outcome = lpoFailed
+    result.diagnostic =
+      "lock record(s) missing from the manifest working tree (" &
+        vanishedRecords.join(", ") &
+        "); lock records are immutable — restore them with 'git -C " &
+        manifestRepoRoot & " checkout -- locks' and re-run"
+    return
+
   # Collect the staged lock paths and reject empty/zero-byte locks.
-  let stagedRes = gitRunPlain(identity,
-    ["-C", manifestRepoRoot, "diff", "--cached", "--name-status",
-     "--no-renames", "--", "locks"])
+  # Pathspec = exactly what we staged. Anything else the operator may have
+  # staged under ``locks/`` is not this publish's business and must not be
+  # able to fail it.
+  let stagedRes =
+    if canonicalToStage.len == 0:
+      (code: 0, output: "")
+    else:
+      gitRunPlain(identity,
+        @["-C", manifestRepoRoot, "diff", "--cached", "--name-status",
+          "--no-renames", "--"] & canonicalToStage)
   var stagedLocks: seq[string]
   if stagedRes.code == 0:
     for line in stagedRes.output.splitLines():
       if line.len == 0: continue
       let fields = line.split('\t')
       if fields.len != 2 or fields[0] != "A":
-        discard gitRunPlain(identity,
-          ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+        unstageOurs()
         result.diagnostic = "lock publication accepts canonical additions only: " &
           line
         return
       let p = fields[1]
-      let parts = p.replace('\\', '/').split('/')
-      if parts.len != 4 or parts[0] != "locks" or
-          not parts[3].endsWith(".toml"):
-        discard gitRunPlain(identity,
-          ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
-        result.diagnostic = "non-canonical generated lock addition: " & p
+      # RA-32 — the same shared decomposer the writer and the ahead-chain
+      # verifier use. Its diagnostic names the canonical path, so an operator
+      # who somehow still lands here is told what to do rather than just that
+      # something is "non-canonical".
+      let parsedStaged = parseLockRecordRelPath(p)
+      if not parsedStaged.ok:
+        unstageOurs()
+        result.diagnostic = "non-canonical generated lock addition: " &
+          parsedStaged.diagnostic
         return
       let stage = gitRunPlain(identity,
         ["-C", manifestRepoRoot, "ls-files", "--stage", "--", p])
       let stageFields = stage.output.strip().splitWhitespace()
       if stage.code != 0 or stageFields.len < 4 or stageFields[0] != "100644":
-        discard gitRunPlain(identity,
-          ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+        unstageOurs()
         result.diagnostic = "generated lock addition has unsafe mode/type: " & p
         return
       stagedLocks.add(p)
@@ -31554,8 +31772,7 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     let abs = manifestRepoRoot / rel.replace('/', DirSep)
     if fileExists(abs) and getFileSize(abs) == 0:
       # Unstage the locks subtree; an empty lock must never be committed.
-      discard gitRunPlain(identity,
-        ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+      unstageOurs()
       result.outcome = lpoFailed
       result.diagnostic =
         "refusing to publish empty/zero-byte lock file: " & rel
@@ -31563,8 +31780,7 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
 
   let upstream = resolveLockUpstream(identity, manifestRepoRoot)
   if not upstream.ok:
-    discard gitRunPlain(identity,
-      ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+    unstageOurs()
     result.outcome =
       if "no upstream" in upstream.diagnostic: lpoNotPublishable
       else: lpoFailed
@@ -31575,8 +31791,8 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     let plural = if stagedLocks.len == 1: "entry" else: "entries"
     let message = "Publish " & $stagedLocks.len & " workspace lock " & plural
     let commitRes = gitRunPlainEnv(identity,
-      ["-C", manifestRepoRoot, "commit", "--quiet", "-m", message,
-       "--", "locks"], internalContext = InternalLockCommitContext)
+      @["-C", manifestRepoRoot, "commit", "--quiet", "-m", message, "--"] &
+        stagedLocks, internalContext = InternalLockCommitContext)
     if commitRes.code != 0:
       result.outcome = lpoFailed
       result.diagnostic = "git commit failed: " & commitRes.output.strip()
@@ -31600,8 +31816,539 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
         "coordinate: " & rel
       return
     expected.add(inferred.get())
+
   result = publishVerifiedLockState(identity, manifestRepoRoot,
     upstream.target, expected)
+
+  # RA-32 — the one case where a refusal genuinely does hold up unrelated
+  # records: a non-canonical record that is already COMMITTED sits in the ahead
+  # chain, and a branch push moves a ref, so there is no way to publish the
+  # healthy commits and leave that one behind. The chain verifier names the
+  # record; attach the repair so an operator is never left with a refusal and
+  # no route forward. Appended rather than substituted — the verifier's own
+  # diagnostic is the precise reason, and this is the remedy for it.
+  if result.outcome notin {lpoPublished, lpoNothingToPublish} and
+      strayRecords.len > 0:
+    result.diagnostic = result.diagnostic & " — this store also holds " &
+      $strayRecords.len & " lock record(s) at a non-canonical path (" &
+      strayRecords[0] & (if strayRecords.len > 1: ", ..." else: "") &
+      "); repair with 'repro workspace migrate-locks --dry-run', then " &
+      "'--apply'"
+
+# ---------------------------------------------------------------------------
+# RA-32 — `repro workspace migrate-locks`: the EXPLICIT lock-record repair.
+#
+# A manifest store can hold a lock record at a non-canonical path, because an
+# earlier `GitCheckoutLockStore.putLock` joined the store key straight into the
+# path: a repo whose NAME carries a slash (`stripe/sync-engine`, and eleven
+# more in this workspace, because upstream forks are named the way the forge
+# names them) became TWO path components, so the record landed at depth 5 where
+# the format has 4. `putLock` COMMITS as it writes, so the record is already in
+# the local branch, and the publisher — which requires every record in the
+# ahead chain to be canonical — refuses that chain from then on.
+#
+# This verb is that store's repair, and it is the ONLY one. It is never invoked
+# implicitly: not by `repro push`, not by the pre-push gate, not by
+# `publishWorkspaceLock`. An earlier revision did run a repair automatically
+# inside the push path, and it was withdrawn: machinery that mutates a shared
+# store, authorizes its own writes to a remote, and runs unbidden is the wrong
+# shape for a repair, however correct its individual steps.
+#
+# ## What the repair actually is
+#
+# NOT "relocate the record and commit the move". A commit that DELETES a path
+# is not publishable — the ahead chain is additions-only with no exception —
+# so a move-on-top would swap one permanent wedge for another.
+#
+# The repair is instead a rebuild of the UNPUBLISHED portion of the branch. It
+# is sound precisely because a non-canonical record is unpublishable BY
+# CONSTRUCTION: the publisher refused it, so it never reached the remote. The
+# verb resets the branch to the fetched upstream, moves each record to its
+# canonical path on disk, and re-commits every ahead record as a single
+# ADDITIONS-ONLY commit. Nothing published is rewritten; nothing shared is
+# touched. What the publisher then sees is a chain it accepts.
+#
+# ## Plan before move
+#
+# Every predicate the publisher will apply is checked BEFORE the first
+# `moveFile`, and the verb refuses AS A WHOLE rather than committing a move it
+# cannot publish:
+#
+#   * the record is absent from the fetched upstream (it was never published);
+#   * a canonical target is derivable, and is itself canonical;
+#   * the target stem is a FULL hex object id of the repo's object format —
+#     the publisher's `verifyLockRecordPath` demands it, and a record whose
+#     stem is not one could be moved and then refused forever;
+#   * the body binds to an exact repository coordinate
+#     (`expectedLockRecordFromBody`), which is what authorizes its publication;
+#   * the body's own repo name agrees with the target path's;
+#   * the target does not already hold a DIFFERENT body;
+#   * no two records claim one target (the canonical path is derived by
+#     DECODING, so `locks/proj/...` and `locks/%70roj/...` share one) — an
+#     N-into-1 collapse would silently lose N-1 records;
+#   * every ahead commit touches `locks/` only, and deletes nothing, so the
+#     rebuild cannot drop anything the plan did not name.
+#
+# If any one of these fails, NOTHING moves.
+# ---------------------------------------------------------------------------
+
+type
+  LockMigrationStep* = object
+    ## One record's relocation: `old` -> `target`, both store-relative.
+    oldPath*: string
+    target*: string
+
+  LockMigrationPlan* = object
+    ok*: bool
+    diagnostic*: string
+    steps*: seq[LockMigrationStep]
+      ## Records to relocate.
+    carried*: seq[string]
+      ## Canonical records already ahead of upstream. They are re-added
+      ## unchanged by the rebuild; naming them is what makes "the rebuild
+      ## loses nothing" checkable rather than asserted.
+    orphans*: seq[string]
+      ## Tracked ahead-only paths under `locks/` that are NOT canonical
+      ## records and are not relocatable. The rebuild leaves them on disk as
+      ## untracked files; they were never published, so nothing is lost, but
+      ## the operator is told.
+    baseOid*: string
+    upstreamDisplay*: string
+
+proc lockMigrationNothingToDo*(plan: LockMigrationPlan): bool =
+  plan.ok and plan.steps.len == 0
+
+proc planLockRecordMigration*(identity: GitToolIdentity;
+    manifestRepoRoot: string): LockMigrationPlan =
+  ## Plan the repair without touching anything. Read-only: every git command
+  ## below is a query, except the `fetch` that establishes what "published"
+  ## means, which writes only a remote-tracking ref.
+  result.ok = false
+
+  let worktree = discoverGitWorktree(identity, manifestRepoRoot)
+  if not worktree.ok:
+    result.diagnostic = "manifest repo root '" & manifestRepoRoot &
+      "' is not a git checkout (" & worktree.diagnostic & ")"
+    return
+  if not samePathIdentity(worktree.worktreeRoot, manifestRepoRoot):
+    result.diagnostic = "manifest repo root '" & manifestRepoRoot &
+      "' is not its own git checkout (it lives inside '" &
+      worktree.worktreeRoot & "'); there is no lock store here to repair"
+    return
+
+  let upstream = resolveLockUpstream(identity, manifestRepoRoot)
+  if not upstream.ok:
+    result.diagnostic = upstream.diagnostic
+    return
+  result.upstreamDisplay = upstream.target.display
+
+  let tip = fetchImmutableLockTip(identity, manifestRepoRoot, upstream.target)
+  if not tip.ok:
+    result.diagnostic = tip.diagnostic
+    return
+  result.baseOid = tip.oid
+
+  let format = storageObjectFormat(identity.binaryPath, manifestRepoRoot)
+  if format.len == 0:
+    result.diagnostic = "cannot determine manifest repo Git object format"
+    return
+  let oidLength = if format == "sha256": 64 else: 40
+
+  # The rebuild replays the ahead commits, so the branch must BE ahead of the
+  # upstream and not diverged from it.
+  let ancestry = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "merge-base", "--is-ancestor", tip.oid, "HEAD"])
+  if ancestry.code != 0:
+    result.diagnostic = "the manifest branch has diverged from " &
+      upstream.target.display & "; reconcile it (fetch + rebase) before " &
+      "repairing lock records"
+    return
+
+  # Tracked content must match HEAD exactly, or the rebuild would re-commit a
+  # working tree that is not the history it claims to replay. Untracked files
+  # are fine — the rebuild never adds them.
+  var dirtyTracked: seq[string]
+  for entry in gitPorcelainEntries(identity, manifestRepoRoot):
+    if entry.code == "??": continue
+    dirtyTracked.add(entry.path)
+  if dirtyTracked.len > 0:
+    result.diagnostic = "the manifest repo has uncommitted changes to " &
+      "tracked files (" & dirtyTracked.join(", ") &
+      "); commit, stash or discard them before repairing lock records"
+    return
+
+  # Every ahead commit must touch locks/ only, and must delete nothing: the
+  # rebuild re-adds what it finds under locks/, so anything else in the ahead
+  # range would be silently dropped.
+  let aheadNames = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "diff", "--name-only", "--no-renames", "-z",
+     tip.oid, "HEAD"])
+  if aheadNames.code != 0:
+    result.diagnostic = "cannot inspect the commits this branch holds beyond " &
+      upstream.target.display
+    return
+  var outsideLocks: seq[string]
+  for rel in nulSeparatedPaths(aheadNames.output):
+    if not pathIsUnderLocks(rel):
+      outsideLocks.add(rel)
+  if outsideLocks.len > 0:
+    outsideLocks.sort()
+    result.diagnostic = "the commits this branch holds beyond " &
+      upstream.target.display & " touch paths outside locks/ (" &
+      outsideLocks.join(", ") &
+      "); this repair only rebuilds lock records, so it refuses rather than " &
+      "risk dropping them"
+    return
+  let aheadDeletes = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "diff", "--diff-filter=D", "--name-only",
+     "--no-renames", "-z", tip.oid, "HEAD"])
+  if aheadDeletes.code == 0 and nulSeparatedPaths(aheadDeletes.output).len > 0:
+    result.diagnostic = "the commits this branch holds beyond " &
+      upstream.target.display &
+      " delete tracked paths; a lock record is immutable, so this state is " &
+      "not one this repair will rebuild"
+    return
+
+  # The record inventory: everything tracked under locks/.
+  let tracked = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "ls-files", "-z", "--cached", "--", "locks"])
+  if tracked.code != 0:
+    result.diagnostic = "cannot list the manifest repo's tracked lock paths"
+    return
+
+  proc existsInBase(path: string): bool =
+    gitRunPlain(identity,
+      ["-C", manifestRepoRoot, "cat-file", "-e", tip.oid & ":" & path]).code == 0
+
+  var claimed = initTable[string, string]()
+  var steps: seq[LockMigrationStep]
+  var carried: seq[string]
+  var orphans: seq[string]
+  for rel in nulSeparatedPaths(tracked.output):
+    let parsed = parseLockRecordRelPath(rel)
+    if parsed.ok:
+      if existsInBase(rel): continue
+      # An ahead-only record that is ALREADY canonical. The rebuild re-commits
+      # it, so it is part of the chain this plan promises would publish, and it
+      # has to earn that on its own merits — a canonical PATH is not the same
+      # thing as a publishable RECORD. ``locks/<p>/<r>/NOTES.toml`` is a
+      # perfectly canonical path whose stem is not an object id, and re-adding
+      # it would build a chain the publisher then refuses forever: the wedge
+      # again, created by the very thing meant to clear it.
+      let carriedAbs = manifestRepoRoot / rel.replace('/', DirSep)
+      var carriedBody: string
+      try:
+        carriedBody = readFile(extendedPath(carriedAbs))
+      except CatchableError as err:
+        result.diagnostic = "'" & rel & "' cannot be read (" & err.msg & ")"
+        return
+      if not isFullHexOid(parsed.sha, oidLength):
+        result.diagnostic = "'" & rel & "' sits at a canonical path but its " &
+          "filename stem '" & parsed.sha & "' is not a full " & format &
+          " object id, so the publisher refuses it wherever it sits. This " &
+          "repair will not rebuild a branch it knows would not publish: " &
+          "delete the file if it is not a lock record, and re-run."
+        return
+      if expectedLockRecordFromBody(rel, carriedBody).isNone:
+        result.diagnostic = "'" & rel & "' sits at a canonical path but " &
+          "cannot be bound to an exact repository coordinate, so the " &
+          "publisher would refuse it. This repair will not rebuild a branch " &
+          "it knows would not publish: delete the file if it is not a lock " &
+          "record, and re-run."
+        return
+      carried.add(rel)
+      continue
+    if not rel.endsWith(lockRecordExt) or parsed.canonicalRelPath.len == 0:
+      # Not a lock record at all — either not a ``.toml``, or a ``.toml`` with
+      # no project/repo structure to derive a canonical path from
+      # (``locks/NOTES.toml``, ``locks/<project>/NOTES.toml``). It is the
+      # operator's file. The repair has no opinion about it beyond not losing
+      # it, and MUST NOT refuse the whole store over it: relocating files that
+      # were never records is exactly what the withdrawn migration did.
+      if not existsInBase(rel): orphans.add(rel)
+      continue
+
+    # A record-shaped path that is not canonical. This is the repair's subject.
+    if existsInBase(rel):
+      result.diagnostic = "'" & rel & "' is a non-canonical lock record that " &
+        "is ALREADY PUBLISHED on " & upstream.target.display &
+        ". This repair only rebuilds commits that never left this machine, " &
+        "and a published record is immutable, so it refuses. Removing it " &
+        "requires a coordinated change to the manifest repo's shared " &
+        "history, agreed with everyone who has cloned it — this tool will " &
+        "not do that for you."
+      return
+    let target = parsed.canonicalRelPath
+    if not parseLockRecordRelPath(target).ok:
+      result.diagnostic = "'" & rel & "' cannot be repaired automatically: " &
+        parsed.diagnostic & ". Move it to the path its own body describes by " &
+        "hand, or delete it if it is not a lock record."
+      return
+    let targetParsed = parseLockRecordRelPath(target)
+    # Full hex OID stem, or the publisher would refuse the record after the
+    # move and this repair would have created a second wedge.
+    if not isFullHexOid(targetParsed.sha, oidLength):
+      result.diagnostic = "'" & rel & "' cannot be repaired: its filename " &
+        "stem '" & targetParsed.sha & "' is not a full " & format &
+        " object id, so the publisher would refuse the record wherever it " &
+        "sits. Delete it — the lock writer regenerates a correct record on " &
+        "the next lock operation."
+      return
+    let abs = manifestRepoRoot / rel.replace('/', DirSep)
+    var body: string
+    try:
+      body = readFile(extendedPath(abs))
+    except CatchableError as err:
+      result.diagnostic = "'" & rel & "' cannot be read (" & err.msg & ")"
+      return
+    if body.len == 0:
+      result.diagnostic = "'" & rel & "' is empty; an empty record is not " &
+        "publishable at any path. Delete it — the lock writer regenerates a " &
+        "correct record on the next lock operation."
+      return
+    let named = minimalRoutedRepoName(body)
+    if named.len > 0 and named != targetParsed.repo:
+      result.diagnostic = "'" & rel & "' names repo '" & named &
+        "' in its body but its path decodes to '" & targetParsed.repo &
+        "'; the two disagree, so this repair will not guess. Move it to the " &
+        "record's own path by hand."
+      return
+    if expectedLockRecordFromBody(target, body).isNone:
+      result.diagnostic = "'" & rel & "' cannot be bound to an exact " &
+        "repository coordinate, so it would not publish even from its " &
+        "canonical path " & target & ". Delete it — the lock writer " &
+        "regenerates a correct record on the next lock operation."
+      return
+    let absTarget = manifestRepoRoot / target.replace('/', DirSep)
+    if fileExists(extendedPath(absTarget)):
+      var targetBody: string
+      try:
+        targetBody = readFile(extendedPath(absTarget))
+      except CatchableError as err:
+        result.diagnostic = "cannot read the canonical record at " & target &
+          " (" & err.msg & ")"
+        return
+      if targetBody != body:
+        result.diagnostic = "'" & rel & "' would move onto " & target &
+          ", which already holds a DIFFERENT record. A lock record is " &
+          "immutable, so which body survives is your decision, not this " &
+          "tool's: compare the two files and delete the one that is wrong."
+        return
+    if target in claimed:
+      result.diagnostic = "'" & rel & "' and '" & claimed[target] &
+        "' both resolve to the same canonical path " & target &
+        ". Repairing them together would silently lose one, so this repair " &
+        "refuses: delete whichever is redundant and re-run."
+      return
+    claimed[target] = rel
+    steps.add(LockMigrationStep(oldPath: rel, target: target))
+
+  steps.sort(proc (a, b: LockMigrationStep): int = cmp(a.oldPath, b.oldPath))
+  carried.sort()
+  orphans.sort()
+  result.steps = steps
+  result.carried = carried
+  result.orphans = orphans
+  result.ok = true
+
+proc applyLockRecordMigration*(identity: GitToolIdentity;
+    manifestRepoRoot: string; plan: LockMigrationPlan):
+    tuple[ok: bool; diagnostic: string] =
+  ## Execute a plan that `planLockRecordMigration` already proved publishable.
+  ## Order matters: the branch is reset FIRST, so that the relocations are
+  ## additions relative to the new base rather than a delete-and-add pair.
+  if not plan.ok: return (false, plan.diagnostic)
+  if plan.steps.len == 0: return (true, "")
+
+  let reset = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "reset", "--quiet", "--mixed", plan.baseOid])
+  if reset.code != 0:
+    return (false, "could not rewind the manifest branch to " &
+      plan.upstreamDisplay & ": " & reset.output.strip())
+
+  let locksDir = manifestRepoRoot / "locks"
+
+  proc dirIsEmpty(dir: string): bool =
+    for _ in walkDir(extendedPath(dir)): return false
+    true
+
+  proc pruneEmptyParents(absOld: string) =
+    ## Leave no empty husk of the mis-shaped subtree behind. Path arithmetic is
+    ## done on the ORDINARY form (`extendedPath` output must never be compared
+    ## or stored); only the filesystem calls take the extended form.
+    var dir = parentDir(absOld)
+    while dir.len > locksDir.len and dir.startsWith(locksDir):
+      try:
+        if not dirIsEmpty(dir): break
+        removeDir(extendedPath(dir))
+      except CatchableError: break
+      dir = parentDir(dir)
+
+  var toAdd = plan.carried
+  for step in plan.steps:
+    let absOld = manifestRepoRoot / step.oldPath.replace('/', DirSep)
+    let absNew = manifestRepoRoot / step.target.replace('/', DirSep)
+    try:
+      createDir(extendedPath(parentDir(absNew)))
+      if fileExists(extendedPath(absNew)):
+        # Byte-identical by the plan's own check: the record already exists
+        # canonically and this file is a redundant duplicate.
+        removeFile(extendedPath(absOld))
+      else:
+        moveFile(extendedPath(absOld), extendedPath(absNew))
+    except CatchableError as err:
+      return (false, "failed to relocate " & step.oldPath & " to " &
+        step.target & ": " & err.msg &
+        " (the manifest branch has been rewound to " & plan.upstreamDisplay &
+        "; re-run once the filesystem error is resolved)")
+    pruneEmptyParents(absOld)
+    toAdd.add(step.target)
+
+  toAdd.sort()
+  var deduped: seq[string]
+  for path in toAdd:
+    if deduped.len == 0 or deduped[^1] != path: deduped.add(path)
+  if deduped.len == 0: return (true, "")
+
+  let addRes = gitRunPlain(identity,
+    @["-C", manifestRepoRoot, "add", "-f", "--"] & deduped)
+  if addRes.code != 0:
+    return (false, "git add failed during the lock-record repair: " &
+      addRes.output.strip())
+  let staged = gitRunPlain(identity,
+    @["-C", manifestRepoRoot, "diff", "--cached", "--quiet", "--"] & deduped)
+  if staged.code == 0:
+    # Nothing differs from the base tree; the branch is already repaired.
+    return (true, "")
+  let plural = if deduped.len == 1: "record" else: "records"
+  let commitRes = gitRunPlainEnv(identity,
+    @["-C", manifestRepoRoot, "commit", "--quiet", "-m",
+      "Rebuild " & $deduped.len & " unpublished workspace lock " & plural &
+        " at their canonical paths", "--"] & deduped,
+    internalContext = InternalLockCommitContext)
+  if commitRes.code != 0:
+    return (false, "git commit failed during the lock-record repair: " &
+      commitRes.output.strip())
+  (true, "")
+
+proc renderLockMigrationPlan*(plan: LockMigrationPlan): seq[string] =
+  for step in plan.steps:
+    result.add("  relocate  " & step.oldPath)
+    result.add("        ->  " & step.target)
+  for path in plan.carried:
+    result.add("  re-commit " & path & " (unchanged)")
+  for path in plan.orphans:
+    result.add("  leave     " & path &
+      " (not a lock record; it becomes an untracked file on disk)")
+
+proc runWorkspaceMigrateLocksCommand*(args: openArray[string]): int =
+  ## `repro workspace migrate-locks [--dry-run|--apply]
+  ## [--manifest-layer-root=PATH] [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop]`.
+  ##
+  ## Exit codes:
+  ##   - 0 — nothing to repair, or the repair succeeded, or a dry run planned
+  ##         a repair successfully.
+  ##   - 1 — the store cannot be repaired automatically; the diagnostic names
+  ##         the file and the manual step.
+  ##   - 2 — bad usage.
+  var apply = false
+  var dryRun = false
+  var manifestLayerRoot = ""
+  var workspaceRoot = ""
+  var toolProvisioning = tpmUnspecified
+  var i = 0
+  # ``--flag=VALUE`` and ``--flag VALUE`` both accepted, resolved inline: a
+  # nested helper would have to capture ``args``, and an ``openArray`` cannot be
+  # captured by a closure.
+  var flagValue = ""
+  var flagName = ""
+  while i < args.len:
+    let arg = args[i]
+    flagName = ""
+    flagValue = ""
+    for candidate in ["--manifest-layer-root", "--workspace-root",
+                      "--tool-provisioning"]:
+      if arg == candidate:
+        flagName = candidate
+        if i + 1 < args.len:
+          inc i
+          flagValue = args[i]
+        break
+      elif arg.startsWith(candidate & "="):
+        flagName = candidate
+        flagValue = arg[(candidate.len + 1) .. ^1]
+        break
+    if arg == "--apply": apply = true
+    elif arg == "--dry-run": dryRun = true
+    elif flagName.len > 0:
+      if flagValue.len == 0:
+        stderr.writeLine("repro workspace migrate-locks: " & flagName &
+          " requires a value")
+        return 2
+      case flagName
+      of "--manifest-layer-root": manifestLayerRoot = flagValue
+      of "--workspace-root": workspaceRoot = flagValue
+      else: toolProvisioning = parseToolProvisioning(flagValue)
+    elif arg.startsWith("--"):
+      stderr.writeLine("repro workspace migrate-locks: unknown flag " & arg)
+      return 2
+    else:
+      stderr.writeLine("repro workspace migrate-locks: " &
+        "unexpected argument " & arg)
+      return 2
+    inc i
+  if apply and dryRun:
+    stderr.writeLine("repro workspace migrate-locks: " &
+      "--apply and --dry-run are mutually exclusive")
+    return 2
+
+  # Same default as ``repro workspace lock``: the current directory, with no
+  # upward search, so the two verbs agree about which workspace they mean.
+  if workspaceRoot.len == 0: workspaceRoot = getCurrentDir()
+  workspaceRoot = absolutePath(workspaceRoot)
+  if manifestLayerRoot.len == 0:
+    manifestLayerRoot = workspaceRoot / ".repro" / "manifests"
+  manifestLayerRoot = absolutePath(manifestLayerRoot)
+  if not dirExists(extendedPath(manifestLayerRoot)):
+    stderr.writeLine("repro workspace migrate-locks: no manifest layer at '" &
+      manifestLayerRoot & "'")
+    return 1
+
+  let identity = ensureGitToolResolvable(toolProvisioning, getEnv("PATH"))
+  let plan = planLockRecordMigration(identity, manifestLayerRoot)
+  if not plan.ok:
+    stderr.writeLine("repro workspace migrate-locks: " & plan.diagnostic)
+    return 1
+  if plan.steps.len == 0:
+    stdout.writeLine("repro workspace migrate-locks: every lock record in '" &
+      manifestLayerRoot & "' is already at its canonical path; nothing to do")
+    return 0
+
+  let plural = if plan.steps.len == 1: "record" else: "records"
+  stdout.writeLine("repro workspace migrate-locks: " & $plan.steps.len &
+    " unpublished lock " & plural & " to relocate (base " &
+    plan.upstreamDisplay & "):")
+  for line in renderLockMigrationPlan(plan):
+    stdout.writeLine(line)
+
+  if not apply:
+    stdout.writeLine("")
+    stdout.writeLine("This was a dry run; nothing has changed. Re-run with " &
+      "--apply to rebuild the unpublished commits with these records at " &
+      "their canonical paths.")
+    return 0
+
+  let outcome = applyLockRecordMigration(identity, manifestLayerRoot, plan)
+  if not outcome.ok:
+    stderr.writeLine("repro workspace migrate-locks: " & outcome.diagnostic)
+    return 1
+  stdout.writeLine("repro workspace migrate-locks: relocated " &
+    $plan.steps.len & " lock " & plural &
+    "; the manifest branch now publishes normally")
+  0
+
+
 
 proc completeExpectedLockPublication*(identity: GitToolIdentity;
     backendRoot: string;
@@ -33528,7 +34275,10 @@ proc lockPathsTouchedInPush(identity: GitToolIdentity;
   if not discoverGitWorktree(identity, currentRepo).ok:
     return
   let zeroSha = "0000000000000000000000000000000000000000"
-  let lockPrefix = "locks/" & projectName & "/"
+  # RA-32 — a fourth reader of the ``locks/<project>/`` prefix (the reviewer
+  # named three). Same rule: the prefix is the ENCODED project component, or the
+  # pre-push gate sees no touched lock paths at all.
+  let lockPrefix = "locks/" & encodeLockPathSegment(projectName) & "/"
   var seen = initHashSet[string]()
   for rawLine in readFile(refsPath).splitLines():
     let line = rawLine.strip()
@@ -36355,8 +37105,15 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     # which lock backed the check. MO-3: the store's ``lockKey`` carries the
     # RA-1 identity tuple, from which the ``locks/<p>/<repo>/<sha>.toml`` path
     # and trigger (repo, sha) reconstruct byte-identically.
-    let lockRel = "locks/" & latest.lockKey.project & "/" &
-      latest.lockKey.repo & "/" & latest.lockKey.sha & ".toml"
+    #
+    # RA-32 — "byte-identically" is only true through the SAME encoder the
+    # writer used. This raw join was the fifth site to disagree with it: for a
+    # forge-shaped repo name it showed the operator
+    # ``locks/<p>/stripe/sync-engine/<sha>.toml`` — a depth-5 path that does
+    # not exist — as the audit trail of a lock that had in fact been written
+    # correctly at depth 4.
+    let lockRel = lockFileRepoRelativePath(
+      latest.lockKey.project, latest.lockKey.repo, latest.lockKey.sha)
     result.lockUpdate.lockFilePath =
       manifestLayerRoot / lockRel.replace('/', DirSep)
     result.lockUpdate.indexFilePath = ""
@@ -48166,6 +48923,8 @@ const reproWorkspaceSubcommands = [
   # WV-2..WV-6 — membership, definition, and the two branch-family verbs.
   "enable", "disable", "projects", "repos", "new", "switch",
   "publish-evidence",
+  # RA-32 — the explicit lock-record repair. Never invoked implicitly.
+  "migrate-locks",
 ]
 
 proc renderCompletionSnippet(shell, reproBin: string): string =
@@ -49774,6 +50533,22 @@ proc runThinAppDispatch(programName: string): int =
       return runWorkspaceLockCommand(lockArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace lock: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "migrate-locks":
+    # RA-32 — `repro workspace migrate-locks`. The EXPLICIT repair for a
+    # manifest store holding a lock record at a non-canonical path. Same
+    # dispatch convention as the M9-M12 family. Nothing invokes this
+    # implicitly: not `repro push`, not the pre-push gate, not the publisher.
+    try:
+      let migrateArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspaceMigrateLocksCommand(migrateArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace migrate-locks: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "status":

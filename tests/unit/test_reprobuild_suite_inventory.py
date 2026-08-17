@@ -509,6 +509,24 @@ test "incomplete name" and:
                 "sourceCaseCount": 7,
                 "class": "pure unit",
             },
+            # RA-32 — the lock record's repo component is ONE path
+            # component; a record written before that rule is REFUSED and
+            # reported by the publisher, never relocated by it, and repaired
+            # only by the explicit ``repro workspace migrate-locks`` verb.
+            # Drives the real ``GitCheckoutLockStore``,
+            # ``CommittedFileLockStore`` and ``SeparateBranchLockStore``
+            # against real ``git`` checkouts, so it classifies as integration
+            # rather than pure unit despite living beside the pure-unit
+            # classifier test above.
+            "libs/repro_cli_support/tests/"
+            "t_lock_record_repo_component_is_one_path_segment.nim": {
+                "binary": "build/test-bin/"
+                "t_lock_record_repo_component_is_one_path_segment",
+                "language": "nim",
+                "sourceSuiteCount": 2,
+                "sourceCaseCount": 17,
+                "class": "integration",
+            },
             # The `repro infra apply` hung-lock-owner gate. Spawns a real
             # child process that holds the apply lock, so it classifies as
             # integration rather than pure unit.
@@ -1378,7 +1396,7 @@ test "incomplete name" and:
         #     because it is not this change's subject: folding it into the
         #     "one new test" story would be exactly the unattributed aggregate
         #     adjustment these per-source pins exist to prevent.
-        self.assertEqual(len(nim_specs), 1239)
+        self.assertEqual(len(nim_specs), 1240)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -1514,7 +1532,42 @@ test "incomplete name" and:
         # `--list-json` now reports 10 and the catalog sum reads 6916, matching
         # the static scan's +2. Both cases are unconditional, so the
         # Linux-vs-Darwin delta is still +1.
-        expected_nim_total = 6915 if sys.platform == "darwin" else 6916
+        #
+        # 6915/6916 -> 6932/6933, SPECS 1239 -> 1240: the RA-32 suite,
+        # `libs/repro_cli_support/tests/`
+        # `t_lock_record_repo_component_is_one_path_segment.nim`, pinned per
+        # source in `expected_enrollments` above. ONE purely additive
+        # `repro_tests.nim` entry (regenerated with
+        # `scripts/generate_test_edges.nim`, 1239 -> 1240 Nim tests) carrying
+        # SEVENTEEN cases across TWO suites.
+        #
+        # Suite 1 (five) is the write/read path: component encoding at depth
+        # four, publication of a slash-named repo, the refusal that names a
+        # committed non-canonical record and its repair route, traversal +
+        # reserved names, and encoder injectivity.
+        #
+        # Suite 2 (twelve) is refuse/report/repair: a stray that is NOT already
+        # upstream not denying publication (the case the first version of this
+        # suite avoided by pushing the stray first), an unresolvable twin not
+        # denying publication, the publish moving and deleting nothing, the
+        # append-only rule having NO exception (four commit shapes, two of them
+        # the ones the withdrawn migration exception used to admit), the repair
+        # verb planning without touching the store, refusing as a whole before
+        # the first move, repairing into a chain that then publishes, refusing
+        # an already-published record, every `locks/<project>/` reader using the
+        # encoded component, and the two sibling backends' traversal. Two
+        # more pin regressions found while reviewing this change: a refused
+        # publish must not unstage the operator's own staged work (an empty
+        # pathspec makes `git reset HEAD --` a FULL mixed reset), and the
+        # repair must refuse a canonical PATH whose stem is not an object id
+        # rather than rebuild a branch it knows would not publish.
+        #
+        # Recomputed, not bumped, on both surfaces independently: the freshly
+        # built binary's own `--list-json` reports `"total":17,"suites":2`, and
+        # the static scan of the SOURCE text (`count_nim_cases`) independently
+        # reports `caseCount 17, suiteCount 2`. All seventeen cases are
+        # unconditional, so the Linux-vs-Darwin delta is still +1.
+        expected_nim_total = 6932 if sys.platform == "darwin" else 6933
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
