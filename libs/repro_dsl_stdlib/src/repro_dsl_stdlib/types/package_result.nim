@@ -124,6 +124,9 @@ type
       ## emission joins ``buildDir / destdir`` to locate the
       ## DESTDIR staging tree on disk. Empty string means the destdir
       ## value is interpreted relative to the recipe root directly.
+    postInstallDependencyPolicy*: BuildActionDependencyPolicy
+      ## Dependency evidence for mirror and stage actions, whose cwd is the
+      ## recipe root rather than ``buildDir``.
     components*: Table[string, string]
 
 # ---------------------------------------------------------------------------
@@ -163,13 +166,16 @@ proc componentPath(components: Table[string, string]; name: string): string =
 # copy logic in one block at the bottom of the module where the
 # autotools slicing methods consume it too.
 proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
-                            buildDir, destdir, packageName, kind, name: string)
+                            buildDir, destdir, packageName, kind, name: string;
+                            dependencyPolicy = automaticMonitorPolicy())
 proc emitInstallTreeMirror*(installEdge: BuildActionDef;
                             buildDir, destdir, packageName,
-                            conventionTag: string)
+                            conventionTag: string;
+                            dependencyPolicy = automaticMonitorPolicy())
 proc emitStageCopyAlias(installEdge: BuildActionDef;
                         buildDir, destdir, packageName, aliasName,
-                        sourceName: string)
+                        sourceName: string;
+                        dependencyPolicy = automaticMonitorPolicy())
 
 proc executable*(r: MesonPackageResult; name: string): Executable =
   ## Slice the meson install edge into an executable artifact. The
@@ -1479,7 +1485,8 @@ proc m9r14e2NormalizeGlibcMirrorScript*(dstUsr: string): string =
 
 proc emitInstallTreeMirror*(installEdge: BuildActionDef;
                             buildDir, destdir, packageName,
-                            conventionTag: string) =
+                            conventionTag: string;
+                            dependencyPolicy: BuildActionDependencyPolicy) =
   ## DSL-port M9.R.14e.2 — mirror the recipe's DESTDIR install tree
   ## (``<recipeRoot>/<buildDir>/<destdir>/usr/``) to the canonical
   ## stable location at ``<recipeRoot>/.repro/output/install/usr/`` so
@@ -1688,7 +1695,7 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     inputs = installEdge.outputs,
     outputs = @[stampPath, realizationInfoPath(recipesRoot, packageName)],
     pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
+    dependencyPolicy = dependencyPolicy,
     commandStatsId = "autotools_package.install_mirror",
     toolIdentityRefs = mirrorToolRefs,
     publishToBinaryCache = true,
@@ -1752,7 +1759,8 @@ proc m9r14dPascalToKebabWithDigits*(value: string): string =
       result.add(ch)
 
 proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
-                            buildDir, destdir, packageName, kind, name: string) =
+                            buildDir, destdir, packageName, kind, name: string;
+                            dependencyPolicy: BuildActionDependencyPolicy) =
   ## Emit a single stage-copy action that copies the installed
   ## artefact at ``destdir/usr/{bin,lib}/<name>`` into the canonical
   ## ``<projectRoot>/.repro/output/<name>/<name>`` location so the
@@ -2162,13 +2170,14 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     inputs = installEdge.outputs,
     outputs = @[outputPath],
     pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
+    dependencyPolicy = dependencyPolicy,
     commandStatsId = "autotools_package.stage." & kind,
     toolIdentityRefs = @["sh"])
 
 proc emitStageCopyAlias(installEdge: BuildActionDef;
                         buildDir, destdir, packageName, aliasName,
-                        sourceName: string) =
+                        sourceName: string;
+                        dependencyPolicy: BuildActionDependencyPolicy) =
   ## M9.R.15g.1 — emit a stage-copy that copies the installed binary
   ## ``<destdir>/usr/bin/<sourceName>`` into the canonical from-source
   ## resolver path ``.repro/output/<aliasName>/<aliasName>`` so a dep
@@ -2244,7 +2253,7 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
     inputs = installEdge.outputs,
     outputs = aliasOutputs,
     pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
+    dependencyPolicy = dependencyPolicy,
     commandStatsId = "autotools_package.stage.executable_alias",
     toolIdentityRefs = @["sh"])
 
@@ -2259,11 +2268,12 @@ proc executable*(r: AutotoolsPackageResult; name: string): Executable =
   # (``.repro/output/<name>/<name>``) so consumers of the recipe can
   # resolve the artefact at the location the resolver looks for it.
   emitAutotoolsStageCopy(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage(), "executable", name)
+    currentOwningPackage(), "executable", name,
+    r.postInstallDependencyPolicy)
   # M9.R.14e.2 — install-tree mirror at the canonical layout-stable
   # location ``.repro/output/install/usr/`` (see ``emitInstallTreeMirror``).
   emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage(), "autotools")
+    currentOwningPackage(), "autotools", r.postInstallDependencyPolicy)
   newExecutable(
     install = r.installEdge,
     executableName = name,
@@ -2282,9 +2292,10 @@ proc executableAlias*(r: AutotoolsPackageResult; aliasName, sourceName: string):
   ## the recipe author bridge the DSL-side name to the upstream
   ## on-disk basename verbatim.
   emitStageCopyAlias(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage(), aliasName, sourceName)
+    currentOwningPackage(), aliasName, sourceName,
+    r.postInstallDependencyPolicy)
   emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage(), "autotools")
+    currentOwningPackage(), "autotools", r.postInstallDependencyPolicy)
   newExecutable(
     install = r.installEdge,
     executableName = aliasName,
@@ -2292,9 +2303,10 @@ proc executableAlias*(r: AutotoolsPackageResult; aliasName, sourceName: string):
 
 proc library*(r: AutotoolsPackageResult; name: string): Library =
   emitAutotoolsStageCopy(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage(), "library", name)
+    currentOwningPackage(), "library", name,
+    r.postInstallDependencyPolicy)
   emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage(), "autotools")
+    currentOwningPackage(), "autotools", r.postInstallDependencyPolicy)
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))
@@ -2312,4 +2324,4 @@ proc installTreeMirror*(r: AutotoolsPackageResult) =
   ## ``.repro/output/install/usr/`` and consumer recipes' M9.R.28.4
   ## pkgconfig-only-package fast-path can't see the .pc / .h files.
   emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
-    currentOwningPackage(), "autotools")
+    currentOwningPackage(), "autotools", r.postInstallDependencyPolicy)
