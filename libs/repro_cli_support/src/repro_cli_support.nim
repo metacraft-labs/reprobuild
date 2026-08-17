@@ -222,9 +222,19 @@ proc renderUsage*(programName: string): string =
       " capabilities [--format=json|text]\n       " & programName &
       " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--publish-cache-hits] [--publish-materialized] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
-      " graph [target[#name]] [--view=actions|neighborhood|inputs|dependents|blast-radius|critical-path|partition-candidates] [--focus=ACTION] [--path=PATH] [--run=last|ID] [--kind=dylib] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
+      " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
-      " why <package-or-action> [target[#name]] [--action=ACTION] [--format=text|json] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
+      " bench [build options]\n       " &
+          programName &
+      " lint [build options]\n       " &
+          programName &
+      " run [task:NAME|PACKAGE:NAME|NAME] [--choose] [--activity=NAME] [--work-root=PATH] [-- ARGS...]\n       " &
+          programName &
+      " tasks [selector] [--activity=NAME] [--work-root=PATH]\n       " &
+          programName &
+      " graph [target[#name]] [--view=actions|neighborhood|inputs|dependents|blast-radius|critical-path|partition-candidates] [--focus=ACTION] [--path=PATH] [--run=last|ID] [--kind=dylib] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop|from-source] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
+          programName &
+      " why <package-or-action> [target[#name]] [--action=ACTION] [--format=text|json] [--tool-provisioning=path|nix|tarball|scoop|from-source] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
           programName &
       " exec [selector] [--activity=name] [--dev-env-stats=PATH] -- <command> [args...]\n       " &
           programName &
@@ -2611,7 +2621,11 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
     actionNodes[i].payload = inferredActions[i]
   var aliasForAction = initTable[string, string]()
   for target in targets.values:
-    if target.actions.len == 1 and target.targets.len == 0:
+    # A collection names a set; it does not rename its sole member. Treating
+    # one-member collections as aliases makes an action that also has a public
+    # target appear to have two conflicting names.
+    if target.kind == btkAggregate and target.actions.len == 1 and
+        target.targets.len == 0:
       let actionId = target.actions[0]
       if aliasForAction.hasKey(actionId) and aliasForAction[actionId] !=
           target.name:
@@ -6439,13 +6453,80 @@ proc seedCmakeRegenerationCache(meta: CmakeRegenerationMetadata;
 proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
                             projectRoot, originalPackageName: string;
                             mode: ToolProvisioningMode;
-                            publicCliPath, workRoot: string): string
+                            publicCliPath, workRoot: string;
+                            lowerGraph = true): string
   ## Workspace-Manifest-Optional MO-6 — forward declaration. Defined
   ## after ``prepareBuildGraphInspection`` (which it reuses to compile +
   ## evaluate each discovered extension recipe). ``executeBuildTarget``
   ## and ``prepareBuildGraphInspection`` both call it to fold any
   ## present ``projectExtension`` sibling's fragments into the target
   ## project's snapshot before lowering / target-export aggregation.
+
+proc refreshRecipeProviderSnapshot(target: string;
+                                   mode: ToolProvisioningMode;
+                                   publicCliPath, workRoot: string):
+    Option[ProviderGraphSnapshot]
+  ## Forward declaration for focused tool provisioning. The implementation
+  ## reuses metadata-only graph inspection and is defined below it.
+
+proc selectedToolIdentitySelectors(snapshot: ProviderGraphSnapshot;
+                                   projectRoot: string;
+                                   selectedActionIds: openArray[string]):
+    HashSet[string] =
+  ## Resolve the selected action closure without provisioning tools, then
+  ## return the package/executable selectors that closure actually references.
+  ## Synthetic profiles only satisfy the lowering layer's typed-call lookup;
+  ## they are never persisted or used to execute an action.
+  var identity = PathOnlyBuildIdentity(projectName: "metadata-selection")
+  var packageNamesByExecutable = initTable[string, seq[string]]()
+  var seenProfiles = initHashSet[string]()
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      let action = decodeBuildActionPayload(toBytes(node.payload))
+      let packageName = action.call.packageName
+      let executableName = action.call.executableName
+      if packageName.len == 0 or executableName.len == 0:
+        continue
+      let key = packageName & "\0" & executableName
+      if not seenProfiles.containsOrIncl(key):
+        identity.profiles.add(PathOnlyToolProfile(
+          packageSelector: packageName,
+          executableName: executableName,
+          resolvedExecutablePath: executableName))
+      if not packageNamesByExecutable.hasKey(executableName):
+        packageNamesByExecutable[executableName] = @[]
+      if packageNamesByExecutable[executableName].find(packageName) < 0:
+        packageNamesByExecutable[executableName].add(packageName)
+
+  let selected = lowerProviderSnapshot(snapshot, identity, projectRoot,
+    selectedActionIds)
+  for action in selected.actions:
+    for selector in action.toolIdentityRefs:
+      if selector.len > 0:
+        result.incl(selector)
+    if action.argv.len > 0 and
+        packageNamesByExecutable.hasKey(action.argv[0]):
+      result.incl(action.argv[0])
+      for packageName in packageNamesByExecutable[action.argv[0]]:
+        result.incl(packageName)
+
+proc scopedToolArtifact(artifact: ProjectInterfaceArtifact;
+                        snapshot: ProviderGraphSnapshot;
+                        projectRoot: string;
+                        selectedActionIds: openArray[string]):
+    ProjectInterfaceArtifact =
+  ## Keep the full interface fingerprint for provider/cache invalidation while
+  ## narrowing identity realization to tools referenced by the selected graph.
+  result = artifact
+  let required = selectedToolIdentitySelectors(snapshot, projectRoot,
+    selectedActionIds)
+  result.projectInterface.toolUses = @[]
+  for useDef in artifact.projectInterface.toolUses:
+    if useDef.packageSelector in required or
+        useDef.executableName in required:
+      result.projectInterface.toolUses.add(useDef)
 
 proc selectorFilesystemKey(selector: string): string =
   ## A filesystem-safe directory name for a cross-repo producer selector:
@@ -6484,6 +6565,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         eventSink: BuildCommandEventSink = nil;
                         cancelCheck: BuildCancelCallback = nil;
                         extraNameSelectors: seq[string] = @[];
+                        forwardedActionArgs: seq[string] = @[];
                         peerCacheFetcher: PeerCacheActionFetcher = nil;
                         peerCachePublisher: PeerCacheActionPublisher = nil;
                         peerCacheInstaller: PeerCacheActionBundleInstaller =
@@ -6713,6 +6795,25 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # below is a nested proc whose own ``result`` is an ``int``.
   var collectedInputEvidence: seq[string] = @[]
 
+  proc appendForwardedArgs(actions: var seq[BuildAction];
+                           selectedActionId: string) =
+    if forwardedActionArgs.len == 0:
+      return
+    if selectedActionId.len == 0:
+      raise newException(ValueError,
+        "forwarded action arguments require one selected build action")
+    for action in actions.mitems:
+      if action.id == selectedActionId:
+        if action.kind != bakProcess:
+          raise newException(ValueError,
+            "forwarded action arguments require a process target: " &
+              selectedActionId)
+        action.argv.add(forwardedActionArgs)
+        return
+    raise newException(ValueError,
+      "selected action does not accept forwarded arguments: " &
+        selectedActionId)
+
   proc collectInputEvidence(buildResult: BuildRunResult) =
     for item in buildResult.results:
       for group in [item.evidence.declaredInputs, item.evidence.depfileInputs,
@@ -6828,6 +6929,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # of the consumer cache key. Both are no-ops when nothing was materialized
     # (byte-identical to today).
     var scheduledActions = lowered.actions
+    appendForwardedArgs(scheduledActions, selectedActionId)
     attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
     # Cross-Repo-Source-Consumption SC-4 (§4.3): fold each materialized
@@ -7131,8 +7233,29 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       artifact.projectInterface.defaultToolProvisioning)
     fallbackToRunQuotaBypass = effectiveMode in {tpmPathOnly, tpmScoop}
 
+  var buildArtifact = artifact
+  if not materializedOnly and shouldEnterBuildPipeline(effectiveMode) and
+      moduleHasBuildBlock(modulePath):
+    let snapshot = refreshRecipeProviderSnapshot(target, effectiveMode,
+      publicCliPath, workRoot)
+    if snapshot.isSome:
+      var selectors: seq[string] = @[]
+      var selectedActionId = parsedTarget.selectedActionId
+      if effectiveSelectDefaultAction and selectedActionId.len == 0:
+        selectedActionId = defaultBuildActionId(snapshot.get())
+      if selectedActionId.len > 0:
+        selectors.add(selectedActionId)
+      for selector in extraNameSelectors:
+        if selector.len > 0 and selectors.find(selector) < 0:
+          selectors.add(selector)
+      buildArtifact = scopedToolArtifact(artifact, snapshot.get(),
+        result.projectRoot, selectors)
+      logSummary("selected tool identities: " &
+        $buildArtifact.projectInterface.toolUses.len & "/" &
+        $artifact.projectInterface.toolUses.len)
+
   if not materializedOnly and
-      artifact.projectInterface.toolUses.len > 0 and
+      buildArtifact.projectInterface.toolUses.len > 0 and
       effectiveMode == tpmUnspecified:
     raise newException(ValueError,
       "typed tool provisioning is required for uses declarations; refusing " &
@@ -7171,7 +7294,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # floor; the upper layers (autoconf / automake / expat / libffi /
     # etc.) still build from source.
     seedBootstrapCycleBreakTools()
-    for useDef in artifact.projectInterface.toolUses:
+    for useDef in buildArtifact.projectInterface.toolUses:
       # A completed source mirror remains authoritative even for a
       # bootstrap tool. The cycle-break set only suppresses recursive
       # construction when that mirror is absent; this lets later
@@ -7329,7 +7452,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # build that consumes no cross-repo producer is byte-identical to today.
   if not materializedOnly and not prepareOnly and
       result.projectRoot.len > 0:
-    for useDef in artifact.projectInterface.toolUses:
+    for useDef in buildArtifact.projectInterface.toolUses:
       let selector = useDef.packageSelector
       if selector.len == 0:
         continue
@@ -7806,7 +7929,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           inspectionPath: "")
       else:
         progressRenderer.renderPhase("resolving tool identities")
-        warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
+        warmResolveAndWriteIdentity(buildArtifact, outDir, effectiveMode)
     finishStat(buildStats, statsEnabled, "repro tool identity resolve",
       identityStart)
     let identity = resolved.identity
@@ -8090,7 +8213,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         targetResolutions.add(resolveTargetExportSelector(exportTable,
           actionIds, explicitTargets, sel, collectionMembers))
 
-    let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
+    let graphCacheKey = loweredGraphCacheKey(buildArtifact, effectiveMode,
       providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
       extensionSignature)
     let graphCacheReadStart = statStart(statsEnabled)
@@ -8245,6 +8368,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # of the consumer cache key. Both are no-ops when nothing was materialized
     # (byte-identical to today).
     var scheduledActions = lowered.actions
+    appendForwardedArgs(scheduledActions, selectedActionId)
     attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
     # Cross-Repo-Source-Consumption SC-4 (§4.3): fold each materialized
@@ -9426,7 +9550,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  selectDefaultAction = false;
                                  workRoot = "";
                                  forceRefresh = false;
-                                 mergeExtensions = true): BuildGraphInspection
+                                 mergeExtensions = true;
+                                 lowerGraph = true): BuildGraphInspection
 
 proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
                                extraPools: openArray[BuildPool] = []):
@@ -9473,28 +9598,52 @@ proc runEdgeExportEntries(publicCliPath: string):
   ## listing. Best-effort: a project with no recipe / no export table
   ## yields an empty seq so ``repro run`` listing degrades to the
   ## dev-env-task-only view rather than erroring.
-  var autoRunQuota = startAutoRunQuotaIfNeeded(false)
-  try:
-    let info =
-      try:
-        prepareBuildGraphInspection(".", tpmPathOnly, publicCliPath,
-          selectDefaultAction = false)
-      except CatchableError:
-        return @[]
-    for entry in info.targetExportTable.entries:
-      if entry.kind == tekRunEdge:
-        result.add(entry)
-    result.sort(proc(a, b: TargetExportEntry): int =
-      let pkgCmp = cmp(a.owningPackage, b.owningPackage)
-      if pkgCmp != 0: pkgCmp else: cmp(a.name, b.name))
-  finally:
-    if autoRunQuota != nil:
-      try:
-        autoRunQuota.terminate()
-        discard autoRunQuota.waitForExit()
-        autoRunQuota.close()
-      except CatchableError:
-        discard
+  let info =
+    try:
+      prepareBuildGraphInspection(".", tpmPathOnly, publicCliPath,
+        selectDefaultAction = false, lowerGraph = false)
+    except CatchableError:
+      return @[]
+  for entry in info.targetExportTable.entries:
+    if entry.kind == tekRunEdge:
+      result.add(entry)
+  result.sort(proc(a, b: TargetExportEntry): int =
+    let pkgCmp = cmp(a.owningPackage, b.owningPackage)
+    if pkgCmp != 0: pkgCmp else: cmp(a.name, b.name))
+
+proc inspectDevEnvTasks(selection: DevEnvCliSelection;
+                        publicCliPath: string): seq[DevEnvTaskSummary] =
+  ## Task listing reads provider metadata without provisioning the dev env.
+  let info = prepareBuildGraphInspection(selection.selector, tpmPathOnly,
+    publicCliPath, selectDefaultAction = false, workRoot = selection.workRoot,
+    lowerGraph = false)
+  if info.providerBinaryPath.len == 0 or info.providerArtifactId.len == 0:
+    return @[]
+
+  let provider = ProviderExecutionConfig(
+    binaryPath: info.providerBinaryPath,
+    workingDir: info.projectRoot,
+    tempRoot: info.outDir / "provider-task-inspection")
+  let manifest = readProviderManifest(provider, info.providerArtifactId)
+  var entryPointId = ""
+  for descriptor in manifest.entryPoints:
+    if descriptor.kind == gpkDevEnvIntrospection:
+      entryPointId = descriptor.id
+      break
+  if entryPointId.len == 0:
+    return @[]
+
+  let devEnv = invokeProviderDevEnvIntrospection(provider,
+    info.providerArtifactId, info.projectRoot,
+    entryPointId = entryPointId,
+    activity = selection.activity,
+    lockSliceId = selection.lockSliceId)
+  for task in devEnv.tasks:
+    result.add(DevEnvTaskSummary(
+      name: task.name,
+      description: task.description,
+      activityRequirements: task.activityRequirements,
+      command: task.command))
 
 proc resolveRunTarget(parsed: ParsedReproRun;
                       publicCliPath: string): RunTargetResolution =
@@ -9509,45 +9658,44 @@ proc resolveRunTarget(parsed: ParsedReproRun;
       parsed.qualifierPackage & ":" & parsed.target
     else:
       parsed.target
-  var autoRunQuota = startAutoRunQuotaIfNeeded(false)
-  try:
-    let info = prepareBuildGraphInspection(".", tpmPathOnly, publicCliPath,
-      selectDefaultAction = false)
-    var actionIds: seq[string] = @[]
-    for action in info.actions:
-      actionIds.add(action.id)
-    result.record = resolveTargetExportSelector(info.targetExportTable,
-      actionIds, info.explicitTargetNames, selector)
-    if result.record.kind == trkResolved:
-      result.entryKind = result.record.targetKind
-      result.hasEntry = true
-      # Named-Runnable-Edges N2: capture the resolved run-edge row (its
-      # ``consumes``) + the project's resource-lane graph so the leased-
-      # consumes bridge can reconcile the consumed ``stateGroup`` without a
-      # second inspection pass. Match on the resolved (name, actionId): a
-      # run-edge row is keyed by both, so this pins the exact row even when a
-      # name is shared across kinds.
-      for entry in info.targetExportTable.entries:
-        if entry.kind == tekRunEdge and
-            entry.actionId == result.record.actionId and
-            (entry.name == parsed.target or
-             (parsed.qualifier == rtqPackage and
-              entry.owningPackage == parsed.qualifierPackage and
-              entry.name == parsed.target)):
-          result.entry = entry
-          break
-      let aggregated = aggregateResourceGraph(info.snapshot)
-      result.resources = aggregated.resources
-      result.groups = aggregated.groups
-      result.providerArtifacts = aggregated.providerArtifacts
-  finally:
-    if autoRunQuota != nil:
-      try:
-        autoRunQuota.terminate()
-        discard autoRunQuota.waitForExit()
-        autoRunQuota.close()
-      except CatchableError:
-        discard
+  let info = prepareBuildGraphInspection(".", tpmPathOnly, publicCliPath,
+    selectDefaultAction = false, lowerGraph = false)
+  var actionIds: seq[string] = @[]
+  for action in info.actions:
+    actionIds.add(action.id)
+
+  # A same-name artifact is not a runnable candidate, while multiple matching
+  # run edges remain an ambiguity for the shared selector resolver.
+  var resolutionTable = info.targetExportTable
+  var explicitTargetNames = info.explicitTargetNames
+  var matchingRunEntries: seq[TargetExportEntry] = @[]
+  for entry in info.targetExportTable.entries:
+    if entry.kind == tekRunEdge and entry.name == parsed.target and
+        (parsed.qualifier != rtqPackage or
+         entry.owningPackage == parsed.qualifierPackage):
+      matchingRunEntries.add(entry)
+  if matchingRunEntries.len > 0:
+    resolutionTable.entries = matchingRunEntries
+    resolutionTable.ambiguities = @[]
+    explicitTargetNames.setLen(0)
+  result.record = resolveTargetExportSelector(resolutionTable,
+    actionIds, explicitTargetNames, selector)
+  if result.record.kind == trkResolved:
+    result.entryKind = result.record.targetKind
+    result.hasEntry = true
+    for entry in info.targetExportTable.entries:
+      if entry.kind == tekRunEdge and
+          entry.actionId == result.record.actionId and
+          (entry.name == parsed.target or
+           (parsed.qualifier == rtqPackage and
+            entry.owningPackage == parsed.qualifierPackage and
+            entry.name == parsed.target)):
+        result.entry = entry
+        break
+    let aggregated = aggregateResourceGraph(info.snapshot)
+    result.resources = aggregated.resources
+    result.groups = aggregated.groups
+    result.providerArtifacts = aggregated.providerArtifacts
 
 proc emitMergedRunListing(tasks: seq[DevEnvTaskSummary];
                           runEdges: seq[TargetExportEntry]) =
@@ -9795,18 +9943,21 @@ proc buildRunEdgeSessionResolver*(
 proc runReproRunCommand(args: openArray[string];
                         publicCliPath: string): int =
   let parsed = parseReproRunArgs(args)
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath)
-  writeDevEnvStats(parsed.selection.statsPath, edge, "run")
-  let artifact = readDevEnvArtifact(edge.artifactPath)
-  if emitDevEnvDiagnostics(artifact):
-    return 1
+  var listedTasks = inspectDevEnvTasks(parsed.selection, publicCliPath)
+  if parsed.selection.statsPath.len > 0:
+    let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+    writeDevEnvStats(parsed.selection.statsPath, edge, "run")
+    let artifact = readDevEnvArtifact(edge.artifactPath)
+    if emitDevEnvDiagnostics(artifact):
+      return 1
+    listedTasks = artifact.tasks
 
   # Named-Runnable-Edges N1: bare ``repro run`` / ``--choose`` lists BOTH
   # dev-env tasks and named run-edges, source-labelled (spec §5). The
   # run-edge rows come from the same target-export table ``repro build``
   # resolves against.
   if parsed.target.len == 0 or parsed.choose:
-    emitMergedRunListing(artifact.tasks, runEdgeExportEntries(publicCliPath))
+    emitMergedRunListing(listedTasks, runEdgeExportEntries(publicCliPath))
     return 0
 
   # Tier 1 — dev-env task (today's behaviour, unchanged). A ``task:<name>``
@@ -9814,7 +9965,7 @@ proc runReproRunCommand(args: openArray[string];
   # (it explicitly names an export-table row).
   var matchingTask: Option[DevEnvTaskSummary]
   if parsed.qualifier != rtqPackage:
-    for task in artifact.tasks:
+    for task in listedTasks:
       if task.name == parsed.target:
         matchingTask = some(task)
         break
@@ -9831,7 +9982,16 @@ proc runReproRunCommand(args: openArray[string];
           "' names both a dev-env task and a run-edge; running the task. " &
           "Use 'task:" & parsed.target & "' or '<package>:" & parsed.target &
           "' to disambiguate.")
-    let task = matchingTask.get()
+    let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+    writeDevEnvStats(parsed.selection.statsPath, edge, "run")
+    let artifact = readDevEnvArtifact(edge.artifactPath)
+    if emitDevEnvDiagnostics(artifact):
+      return 1
+    var task = matchingTask.get()
+    for activeTask in artifact.tasks:
+      if activeTask.name == parsed.target:
+        task = activeTask
+        break
     return runTaskCommand(artifact, edge.artifactPath, task,
       parsed.forwardedArgs, parsed.selection.projectRoot)
 
@@ -9900,9 +10060,13 @@ proc runReproRunCommand(args: openArray[string];
       # Run-edge (or a collection of run-edges) — delegate to the build
       # engine, which executes it. Collections mirror ``repro build test``.
       var buildArgs = @[parsed.rawTarget]
-      if parsed.forwardedArgs.len > 0:
+      var actionArgs: seq[string] = @[]
+      if resolution.hasEntry and resolution.entry.kind == tekRunEdge:
+        actionArgs.add(resolution.entry.runArgs)
+      actionArgs.add(parsed.forwardedArgs)
+      if actionArgs.len > 0:
         buildArgs.add("--")
-        for a in parsed.forwardedArgs:
+        for a in actionArgs:
           buildArgs.add(a)
       return runBuildCommand(buildArgs, publicCliPath)
     else:
@@ -9936,15 +10100,18 @@ proc runReproRunCommand(args: openArray[string];
 proc runReproTasksCommand(args: openArray[string];
                           publicCliPath: string): int =
   let parsed = parseReproTasksArgs(args)
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath)
-  writeDevEnvStats(parsed.selection.statsPath, edge, "tasks")
-  let artifact = readDevEnvArtifact(edge.artifactPath)
-  if emitDevEnvDiagnostics(artifact):
-    return 1
+  var listedTasks = inspectDevEnvTasks(parsed.selection, publicCliPath)
+  if parsed.selection.statsPath.len > 0:
+    let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+    writeDevEnvStats(parsed.selection.statsPath, edge, "tasks")
+    let artifact = readDevEnvArtifact(edge.artifactPath)
+    if emitDevEnvDiagnostics(artifact):
+      return 1
+    listedTasks = artifact.tasks
 
   # Named-Runnable-Edges N1: ``repro tasks`` lists dev-env tasks AND named
   # run-edges, source-labelled (spec §5), matching ``repro run --choose``.
-  emitMergedRunListing(artifact.tasks, runEdgeExportEntries(publicCliPath))
+  emitMergedRunListing(listedTasks, runEdgeExportEntries(publicCliPath))
   0
 
 proc runReproExecCommand(args: openArray[string];
@@ -15342,6 +15509,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var publishCacheHits = false
   var publishMaterialized = false
   var skipCmakeRegeneration = false
+  var forwardedActionArgs: seq[string] = @[]
+  var afterArgumentSeparator = false
   # MO-1 — committed solved-graph lock. ``--lock <file>`` selects an
   # alternate committed lock (default = ``<projectDir>/repro.lock``);
   # ``--print-solved-graph`` resolves + prints the solved graph the build
@@ -15377,7 +15546,11 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var i = 0
   while i < args.len:
     let arg = args[i]
-    if arg == "--daemon" or arg.startsWith("--daemon="):
+    if afterArgumentSeparator:
+      forwardedActionArgs.add(arg)
+    elif arg == "--":
+      afterArgumentSeparator = true
+    elif arg == "--daemon" or arg.startsWith("--daemon="):
       daemonMode = parseBuildDaemonMode(valueFromFlag(args, i, "--daemon"),
         "--daemon")
       daemonModeExplicit = true
@@ -15752,6 +15925,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         eventSink = eventSink,
         cancelCheck = cancelCheck,
         extraNameSelectors = extraNameSelectors,
+        forwardedActionArgs = forwardedActionArgs,
         peerCacheFetcher = peerCacheBuildWiring.fetcher,
         peerCachePublisher = peerCacheBuildWiring.publisher,
         peerCacheInstaller = peerCacheBuildWiring.installer).exitCode
@@ -16201,7 +16375,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  selectDefaultAction = false;
                                  workRoot = "";
                                  forceRefresh = false;
-                                 mergeExtensions = true): BuildGraphInspection =
+                                 mergeExtensions = true;
+                                 lowerGraph: bool): BuildGraphInspection =
   ## ``mergeExtensions`` (MO-6) folds any present ``projectExtension``
   ## sibling's fragments into this project's snapshot before lowering /
   ## target-export aggregation. It is set to ``false`` when this proc is
@@ -16245,7 +16420,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   var identity = PathOnlyBuildIdentity(
     projectName: artifact.projectInterface.projectName,
     interfaceFingerprint: artifact.interfaceFingerprint)
-  if shouldEnterBuildPipeline(effectiveMode):
+  if lowerGraph and shouldEnterBuildPipeline(effectiveMode):
     let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
     identity = resolved.identity
     result.toolIdentityPath = resolved.identityPath
@@ -16348,11 +16523,24 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   if mergeExtensions:
     extensionSignature = mergeProjectExtensions(refresh.snapshot, projectRoot,
       artifact.projectInterface.packageName, effectiveMode, publicCliPath,
-      workRoot)
+      workRoot, lowerGraph = lowerGraph)
   result.snapshot = refresh.snapshot
   result.providerGraphSnapshotPath = refresh.persistedSnapshotPath
   result.providerInvocations = refresh.invoked.len
   result.defaultActionId = defaultBuildActionId(refresh.snapshot)
+
+  # Metadata consumers do not need tool resolution or a lowered action graph.
+  result.targetExportTable = aggregateTargetExportTable(refresh.snapshot)
+  for fragment in refresh.snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        let target = decodeBuildTargetPayload(toBytes(node.payload))
+        if result.explicitTargetNames.find(target.name) < 0:
+          result.explicitTargetNames.add(target.name)
+
+  if not lowerGraph:
+    return
 
   var selectedActionId = parsedTarget.selectedActionId
   if selectDefaultAction and selectedActionId.len == 0:
@@ -16383,19 +16571,6 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       computed
   result.actions = lowered.actions
   result.pools = lowered.pools
-  # Named-Targets M5: surface the project-scoped target-export table and
-  # the explicit-target labels so ``runGraphCommand`` / ``runWhyCommand``
-  # / ``--list-targets`` can route name-shaped selectors through the
-  # shared ``resolveTargetExportSelector`` helper without a second pass
-  # over the snapshot.
-  result.targetExportTable = aggregateTargetExportTable(refresh.snapshot)
-  for fragment in refresh.snapshot.fragments:
-    for node in fragment.nodes:
-      if node.kind == gnkMetadata and
-          node.stableName == "reprobuild.build-target.v1":
-        let target = decodeBuildTargetPayload(toBytes(node.payload))
-        if result.explicitTargetNames.find(target.name) < 0:
-          result.explicitTargetNames.add(target.name)
 
 proc refreshRecipeProviderSnapshot(target: string;
                                    mode: ToolProvisioningMode;
@@ -16506,7 +16681,7 @@ proc refreshRecipeProviderSnapshot(target: string;
       providerWorkingDir: projectRoot))
   discard mergeProjectExtensions(refresh.snapshot, projectRoot,
     artifact.projectInterface.packageName, effectiveMode, publicCliPath,
-    workRoot)
+    workRoot, lowerGraph = false)
   some(refresh.snapshot)
 
 proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
@@ -16745,7 +16920,8 @@ proc rehomeExtensionFragment(frag: StoredGraphFragment;
 proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
                             projectRoot, originalPackageName: string;
                             mode: ToolProvisioningMode;
-                            publicCliPath, workRoot: string): string =
+                            publicCliPath, workRoot: string;
+                            lowerGraph: bool): string =
   ## Fold every present ``projectExtension`` sibling's provider-graph
   ## fragments into ``snapshot`` (the target project's graph). Composition
   ## rules (Project-DSL-Composition.md §"Project extensions"):
@@ -16784,7 +16960,7 @@ proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
     # keeps an extension from recursively merging its own extensions.
     let info = prepareBuildGraphInspection(ext.recipePath, mode,
       publicCliPath, selectDefaultAction = false, workRoot = workRoot,
-      mergeExtensions = false)
+      mergeExtensions = false, lowerGraph = lowerGraph)
     let extFrags = info.snapshot.fragments
     for name in fragmentTargetNames(extFrags):
       if targetOrigin.hasKey(name):
@@ -16821,75 +16997,62 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
   ## are sorted by ``(package, name)`` for deterministic CLI output and
   ## JSON consumers. ``packageFilter`` (if non-empty) restricts the
   ## listing to one owning package.
+  discard bypassRunQuota
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified:
     effectiveMode = tpmPathOnly
-  var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
-  try:
-    let info = prepareBuildGraphInspection(target, effectiveMode,
-      publicCliPath, selectDefaultAction = false, workRoot = workRoot)
-    var entries: seq[TargetExportEntry] = @[]
-    for entry in info.targetExportTable.entries:
-      if packageFilter.len > 0 and entry.owningPackage != packageFilter:
-        continue
-      entries.add(entry)
-    entries.sort(proc(a, b: TargetExportEntry): int =
-      let pkgCmp = cmp(a.owningPackage, b.owningPackage)
-      if pkgCmp != 0: pkgCmp else: cmp(a.name, b.name))
-    # Spec-Implementation M5: ``--list-targets`` JSON / text formatter
-    # extended with the new ``aggregate`` and ``collection`` row kinds
-    # per Build-Graph-Collections.md §"Persistence and the Target-Export
-    # Table" / §"--list-targets". The text formatter widens the ``kind``
-    # column so the longer ``collection`` label aligns.
-    proc kindToText(k: TargetExportKind): string =
-      case k
-      of tekImplicit: "implicit"
-      of tekExplicit: "explicit"
-      of tekAggregate: "aggregate"
-      of tekCollection: "collection"
-      of tekRunEdge: "run-edge"
-    if asJson:
-      var arr = newJArray()
-      for entry in entries:
-        arr.add(%*{
-          "name": entry.name,
-          "kind": kindToText(entry.kind),
-          "package": entry.owningPackage,
-          "actionId": entry.actionId,
-          "source-file": entry.sourceFile,
-          "source-line": entry.sourceLine
-        })
-      var node = %*{
-        "schemaId": "reprobuild.list-targets.v1",
-        "projectRoot": info.projectRoot,
-        "modulePath": info.modulePath,
-        "targets": arr
-      }
+  let info = prepareBuildGraphInspection(target, effectiveMode,
+    publicCliPath, selectDefaultAction = false, workRoot = workRoot,
+    lowerGraph = false)
+  var entries: seq[TargetExportEntry] = @[]
+  for entry in info.targetExportTable.entries:
+    if packageFilter.len > 0 and entry.owningPackage != packageFilter:
+      continue
+    entries.add(entry)
+  entries.sort(proc(a, b: TargetExportEntry): int =
+    let pkgCmp = cmp(a.owningPackage, b.owningPackage)
+    if pkgCmp != 0: pkgCmp else: cmp(a.name, b.name))
+  proc kindToText(k: TargetExportKind): string =
+    case k
+    of tekImplicit: "implicit"
+    of tekExplicit: "explicit"
+    of tekAggregate: "aggregate"
+    of tekCollection: "collection"
+    of tekRunEdge: "run-edge"
+  if asJson:
+    var arr = newJArray()
+    for entry in entries:
+      arr.add(%*{
+        "name": entry.name,
+        "kind": kindToText(entry.kind),
+        "package": entry.owningPackage,
+        "actionId": entry.actionId,
+        "source-file": entry.sourceFile,
+        "source-line": entry.sourceLine
+      })
+    var node = %*{
+      "schemaId": "reprobuild.list-targets.v1",
+      "projectRoot": info.projectRoot,
+      "modulePath": info.modulePath,
+      "targets": arr
+    }
+    if packageFilter.len > 0:
+      node["package"] = %packageFilter
+    echo $node
+  else:
+    if entries.len == 0:
       if packageFilter.len > 0:
-        node["package"] = %packageFilter
-      echo $node
-    else:
-      if entries.len == 0:
-        if packageFilter.len > 0:
-          echo "repro build --list-targets: no targets for package=" &
-            packageFilter
-        else:
-          echo "repro build --list-targets: no named targets in this project"
+        echo "repro build --list-targets: no targets for package=" &
+          packageFilter
       else:
-        echo "kind        package                   name                      source"
-        for entry in entries:
-          let source = entry.sourceFile & ":" & $entry.sourceLine
-          echo kindToText(entry.kind) & "  " & entry.owningPackage & "  " &
-            entry.name & "  " & source
-    return 0
-  finally:
-    if autoRunQuota != nil:
-      try:
-        autoRunQuota.terminate()
-        discard autoRunQuota.waitForExit()
-        autoRunQuota.close()
-      except CatchableError:
-        discard
+        echo "repro build --list-targets: no named targets in this project"
+    else:
+      echo "kind        package                   name                      source"
+      for entry in entries:
+        let source = entry.sourceFile & ":" & $entry.sourceLine
+        echo kindToText(entry.kind) & "  " & entry.owningPackage & "  " &
+          entry.name & "  " & source
+  0
 
 proc renderFocusedGraphJson(info: BuildGraphInspection; focus: string): JsonNode =
   let action = requireAction(info.actions, focus)
