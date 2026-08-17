@@ -1486,14 +1486,22 @@ proc m5ServiceStringLitArg(stmt: NimNode): NimNode =
   ##   * ``restart "..."``
   ##   * ``user "..."``
   ##   * ``group "..."``
+  ## The argument is spliced VERBATIM into the generated call
+  ## (``quote do: setActiveServiceDescription(`lit`)``), so it does not have to
+  ## be a literal — the Nim compiler type-checks and evaluates whatever is
+  ## written. Restricting to ``nnkStrLit`` meant a ``const`` or a helper call
+  ## was SILENTLY DROPPED: this proc returned nil and the caller simply left the
+  ## field unset, with no diagnostic.
+  ##
+  ## Accepting any expression means a non-string one now fails at the spliced
+  ## call site with an ordinary type mismatch instead of vanishing. That is the
+  ## point — the macro never evaluates or inspects the value, it only relocates
+  ## it, and the compiler does the rest.
   if stmt.kind notin {nnkCall, nnkCommand}:
     return nil
   if stmt.len != 2:
     return nil
-  let arg = stmt[1]
-  if arg.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
-    return nil
-  return arg.copyNimTree()
+  return stmt[1].copyNimTree()
 
 proc m5ParseServiceBody(body: NimNode): tuple[
     executableRef: string; argStringLits: seq[NimNode];
