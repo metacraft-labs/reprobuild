@@ -771,3 +771,105 @@ suite "M19b — post-commit reports publication, not just the write":
 
       check not dirExists(fx.workspaceRoot / ".repro" / "manifests" /
         "locks" / "lib-a" / "lib-a")
+
+  test "test_ra31_gate_supersedes_its_own_unpublished_draft":
+    ## RA-31 — an untracked file at the lock path is a draft, not history.
+    ##
+    ## Two hooks legitimately address the same key. post-commit writes
+    ## ``locks/<p>/<repo>/<sha>`` when a commit lands; the pre-push gate writes
+    ## the SAME key when that commit is pushed. The key is (trigger repo,
+    ## trigger sha), so a sibling committing in between does not move it — but
+    ## it does move the coordinates the record carries.
+    ##
+    ## The immutability rule was testing ``fileExists``, so the second write
+    ## found the first one's uncommitted draft, saw the sibling had moved, and
+    ## refused. In the real workspace that refusal surfaced as a REFUSED PUSH:
+    ##   lock-failure — immutable lock record already exists at
+    ##   'locks/app/lib/<libSha>.toml' with different repository coordinates
+    ##   (changed paths: app, other)
+    ## The draft was strictly less complete than the record being written.
+    ## Superseding it is what "refresh the lock" means.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "ra31-draft")
+      defer: removeDir(fx.scratch)
+      cloneAll(gitBin, fx)
+      seedWorkspaceToml(fx)
+
+      let libBSha = commitInRepo(gitBin, fx, "lib-b", "in-lib-b.txt")
+      check invokePostCommit(fx, fx.workspaceRoot / "lib-b").code == 0
+      let lockPath = fx.workspaceRoot / ".repro" / "manifests" /
+        "locks" / "lib-a" / "lib-b" / (libBSha & ".toml")
+      check fileExists(lockPath)
+      # The draft records lib-a at its ORIGINAL head, because that is where
+      # lib-a stood when the lib-b commit fired the hook.
+      check readFile(lockPath).contains("revision = \"" & fx.libA.sha & "\"")
+      # It is a draft precisely because nothing has committed it.
+      check runCmd(q(gitBin) & " -C " & q(lockStoreRoot(fx)) &
+        " ls-files --error-unmatch -- " &
+        q("locks/lib-a/lib-b/" & libBSha & ".toml")).code != 0
+
+      # A sibling moves. lib-b's HEAD does not, so the key does not either.
+      let libASha = commitInRepo(gitBin, fx, "lib-a", "in-lib-a.txt")
+      check libASha != fx.libA.sha
+
+      let second = invokePostCommit(fx, fx.workspaceRoot / "lib-b")
+      if second.code != 0:
+        checkpoint("output: " & second.output)
+      check second.code == 0
+      let report = readPostCommitReport(fx)
+      # Before RA-31 this was `no-lock-failed`, with the immutability refusal
+      # as its diagnostic, and the record still carried the stale lib-a SHA.
+      check report["lockWritten"].getBool()
+      check report["triggerRepo"].getStr() == "lib-b"
+      check report["triggerSha"].getStr() == libBSha
+      check not report["diagnostic"].getStr().contains("immutable lock record")
+      let refreshed = readFile(lockPath)
+      check refreshed.contains("revision = \"" & libASha & "\"")
+      check not refreshed.contains("revision = \"" & fx.libA.sha & "\"")
+
+  test "test_ra31_a_published_record_is_still_immutable":
+    ## The other half: RA-31 narrows the rule, it does not remove it. Once the
+    ## record is TRACKED it is history, and history is what must not be
+    ## rewritten — the refusal must survive verbatim.
+    ##
+    ## Identical to the case above except that the lock store is committed and
+    ## pushed in between, which is the only difference that should matter.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "ra31-published")
+      defer: removeDir(fx.scratch)
+      cloneAll(gitBin, fx)
+      seedWorkspaceToml(fx)
+      makeLockStorePublishable(gitBin, fx)
+
+      let libBSha = commitInRepo(gitBin, fx, "lib-b", "in-lib-b.txt")
+      check invokePostCommit(fx, fx.workspaceRoot / "lib-b").code == 0
+      let lockPath = fx.workspaceRoot / ".repro" / "manifests" /
+        "locks" / "lib-a" / "lib-b" / (libBSha & ".toml")
+      check fileExists(lockPath)
+      let publishedBody = readFile(lockPath)
+
+      # Publish it: now git tracks the record, so it is history.
+      publishLockStore(gitBin, fx)
+      check runCmd(q(gitBin) & " -C " & q(lockStoreRoot(fx)) &
+        " ls-files --error-unmatch -- " &
+        q("locks/lib-a/lib-b/" & libBSha & ".toml")).code == 0
+
+      let libASha = commitInRepo(gitBin, fx, "lib-a", "in-lib-a.txt")
+      check libASha != fx.libA.sha
+
+      let second = invokePostCommit(fx, fx.workspaceRoot / "lib-b")
+      # post-commit never blocks a commit, so the refusal arrives as a report,
+      # not as an exit code.
+      check second.code == 0
+      let report = readPostCommitReport(fx)
+      check not report["lockWritten"].getBool()
+      check report["diagnostic"].getStr().contains(
+        "immutable lock record already exists")
+      # And the published bytes are untouched.
+      check readFile(lockPath) == publishedBody
