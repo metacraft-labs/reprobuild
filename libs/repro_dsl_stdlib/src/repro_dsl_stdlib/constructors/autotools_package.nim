@@ -237,6 +237,9 @@ proc autotools_package*(srcDir: string;
                         destdir = "out";
                         prefix = "/usr";
                         configureOptions: seq[string] = @[];
+                        makeJobs = 0;
+                        makeDependencyPolicy = automaticMonitorPolicy();
+                        postInstallDependencyPolicy = automaticMonitorPolicy();
                         installTarget = "install";
                         configureScriptName = "configure";
                         prefixFlagFormat = "--prefix=";
@@ -259,8 +262,13 @@ proc autotools_package*(srcDir: string;
   ## on its stamp so the configure step doesn't run before the source
   ## tree is extracted.
   ##
-  ## ``extraEnv`` supplies recipe-specific environment overrides to the
-  ## configure, compile, and install actions. The values are kept outside
+  ## ``makeJobs`` caps compile and install parallelism when greater than zero;
+  ## zero selects the host-aware default. ``makeDependencyPolicy`` replaces the
+  ## make tool's automatic-monitor default when an upstream build emits a
+  ## recognized dependency report. ``postInstallDependencyPolicy`` provides
+  ## the corresponding recipe-root-relative evidence for mirror and stage
+  ## actions. ``extraEnv`` supplies recipe-specific environment overrides to
+  ## the configure, compile, and install actions. The values are kept outside
   ## the typed call identity, matching the other package constructors.
   # M9.R.15a.3 — accept a custom prefix flag format (openssl's
   # ``./Configure`` uses ``--prefix=`` like autotools, but Configure
@@ -580,7 +588,9 @@ proc autotools_package*(srcDir: string;
   # We deliberately do NOT pass ``-j N`` via the typed ``jobs`` flag
   # because that would put host-local parallelism into the typed CLI
   # surface even though the explicit action id ignores it.
-  let jobs = max(1, min(countProcessors(), 8))
+  let jobs =
+    if makeJobs > 0: makeJobs
+    else: max(1, min(countProcessors(), 8))
   let makeflags = "-j" & $jobs
   # M9.R.15q.11.4 — when ``skipConfigure`` is true, ``configureOptions``
   # are passed as command-line ``VAR=VALUE`` overrides to ``make``
@@ -601,6 +611,8 @@ proc autotools_package*(srcDir: string;
     after = @[configureEdge],
     extraInputs = @[m9r79ConfBuildDirAbs],
     extraEnv = buildEnv)
+  buildEdge.dependencyPolicy = makeDependencyPolicy
+  setRegisteredActionDependencyPolicy(buildEdge.id, makeDependencyPolicy)
   # M9.R.84 — run make from the configured build directory instead of
   # running from the recipe root with ``make -C <buildDir>``. GNU make
   # and recursive libtool children then report relative writes such as
@@ -654,11 +666,11 @@ proc autotools_package*(srcDir: string;
   var installEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
   for envVar in extraEnv:
     installEnv.add(envVar)
-  let installDestdir =
+  let installDestdir = (block:
     if providerProjectRoot.len > 0:
       providerProjectRoot / buildDir / destdir
     else:
-      destdir
+      destdir).replace('\\', '/')
   installEnv.add(("DESTDIR", installDestdir))
   installVars.add("DESTDIR=" & installDestdir)
   # M9.R.15q.11.4 — propagate skipConfigure VAR overrides into install
@@ -686,6 +698,8 @@ proc autotools_package*(srcDir: string;
     after = @[configureEdge, buildEdge],
     extraInputs = @[m9r79ConfBuildDirAbs],
     extraEnv = installEnv)
+  installEdge.dependencyPolicy = makeDependencyPolicy
+  setRegisteredActionDependencyPolicy(installEdge.id, makeDependencyPolicy)
   installEdge.cwdKind = acwdBuild
   installEdge.cwdCustomPath = buildDir
   setRegisteredActionCwd(installEdge.id, acwdBuild, buildDir)
@@ -768,4 +782,5 @@ proc autotools_package*(srcDir: string;
     installMakeEdge: installEdge,
     destdir: destdir,
     buildDir: buildDir,
+    postInstallDependencyPolicy: postInstallDependencyPolicy,
     components: standardComponents())

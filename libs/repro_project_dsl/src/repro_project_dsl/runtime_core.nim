@@ -1886,6 +1886,18 @@ proc setRegisteredActionDeclaredOutputs*(actionId: string;
       buildActionRegistry[i].declaredOutputs = @outputs
       return
 
+proc setRegisteredActionDependencyPolicy*(
+    actionId: string;
+    policy: BuildActionDependencyPolicy) {.dynOrStatic.} =
+  ## Replace the dependency policy on an action that a typed-tool wrapper has
+  ## already registered. Package constructors use this when an upstream build
+  ## emits a recognized dependency report and therefore does not need the
+  ## wrapper's opaque-tool monitoring default.
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      buildActionRegistry[i].dependencyPolicy = policy
+      return
+
 proc setRegisteredActionPublish*(actionId: string;
                                  publishToBinaryCache: bool;
                                  cacheEntryIdentity: Option[CacheEntryIdentity])

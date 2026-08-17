@@ -105,6 +105,64 @@ suite "DSL-port M9.R.14c.1 — autotools_package parallel-make wiring":
     finally:
       clearCurrentOwningPackageOverride()
 
+  test "recipe can cap compile and install parallelism":
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("serialMakePkg")
+    try:
+      let pkg = autotools_package(srcDir = "./src", makeJobs = 1)
+      check ("MAKEFLAGS", "-j1") in pkg.compileEdge.env
+      check ("MAKEFLAGS", "-j1") in pkg.installMakeEdge.env
+    finally:
+      clearCurrentOwningPackageOverride()
+
+  test "recognized make depfiles replace monitoring on both edges":
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("depfileMakePkg")
+    try:
+      let policy = makeDepfilePolicy(depfiles = [
+        "src/.deps/*.Po",
+        "src/.deps/*.Plo",
+      ])
+      let postInstallPolicy = makeDepfilePolicy(depfiles = [
+        "build/src/.deps/*.Po",
+        "build/src/.deps/*.Plo",
+      ])
+      let pkg = autotools_package(
+        srcDir = "./src",
+        makeDependencyPolicy = policy,
+        postInstallDependencyPolicy = postInstallPolicy)
+      check pkg.compileEdge.dependencyPolicy == policy
+      check pkg.installMakeEdge.dependencyPolicy == policy
+      check pkg.postInstallDependencyPolicy == postInstallPolicy
+
+      var registeredCompile = default(BuildActionDef)
+      var registeredInstall = default(BuildActionDef)
+      for action in registeredBuildActions():
+        if action.id == pkg.compileEdge.id:
+          registeredCompile = action
+        elif action.id == pkg.installMakeEdge.id:
+          registeredInstall = action
+      check registeredCompile.dependencyPolicy == policy
+      check registeredInstall.dependencyPolicy == policy
+    finally:
+      clearCurrentOwningPackageOverride()
+
+  test "Windows DESTDIR remains valid in generated make recipes":
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("windowsDestdirPkg")
+    try:
+      let pkg = autotools_package(
+        srcDir = "./src",
+        destdir = "D:\\work\\pcre2\\out")
+      check ("DESTDIR", "D:/work/pcre2/out") in pkg.installMakeEdge.env
+      var registeredInstall = default(BuildActionDef)
+      for action in registeredBuildActions():
+        if action.id == pkg.installMakeEdge.id:
+          registeredInstall = action
+      check "D:/work/pcre2/out" in registeredInstall.declaredOutputs
+    finally:
+      clearCurrentOwningPackageOverride()
+
   test "compile + install action ids are stable across host core counts":
     # The action id derivation must not depend on the host's core
     # count. The actual stability is proved by the choice to inject
