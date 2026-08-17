@@ -215,13 +215,22 @@ proc commit(fx: Fixture; label: string) =
     discard fx.git(["add", "README.md"])
     discard fx.git(["commit", "-m", label])
 
-proc assertRefused(res: tuple[code: int; output: string]; needle: string) =
+# `template`, not `proc`, and the difference is not style. `check` expands to
+# `unittest.fail()`, which propagates a failure by assigning the enclosing
+# test's INJECTED `testStatusIMPL`. Inside a plain `proc` that symbol is not in
+# scope, so `fail()` takes its `else` branch -- `setProgramResult 1` -- and the
+# process exits non-zero while the case it belongs to still prints `[OK]`.
+# Measured here: all three cases reported `[OK]` while the binary exited 1 with
+# six failed checks, so the per-case output and the exit code disagreed by
+# construction. Templates expand at the call site, where `testStatusIMPL` IS in
+# scope, and the failure lands on the case that caused it.
+template assertRefused(res: tuple[code: int; output: string]; needle: string) =
     if res.code == 0:
         checkpoint("push unexpectedly passed:\n" & res.output)
     check res.code != 0
     check needle in res.output
 
-proc exerciseManifestRemoteAlias(gitBin: string) =
+template exerciseManifestRemoteAlias(gitBin: string) =
     ## Reproduce the production naming mismatch exactly: the manifest calls the
     ## repository remote ``origin``, while the checkout has only the local
     ## alias ``metacraft-labs``. All destinations remain real bare Git repos.
@@ -379,7 +388,7 @@ proc exerciseManifestRemoteAlias(gitBin: string) =
     check require(q(gitBin) & " --git-dir=" & q(fx.origin) &
       " rev-parse refs/heads/main").strip() == published
 
-proc exerciseFormat(gitBin, objectFormat: string) =
+template exerciseFormat(gitBin, objectFormat: string) =
     var fx = setupFixture(gitBin, objectFormat)
     defer: removeDir(fx.scratch)
     let priorRepro = overrideEnv("REPROBUILD_REPRO", fx.reproBin)
