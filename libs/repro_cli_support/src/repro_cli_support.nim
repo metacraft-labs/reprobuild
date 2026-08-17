@@ -36641,15 +36641,40 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     if not obs.isPublished and not
         (outgoing.outgoingCurrent and obs.name == currentRepoName and
          obs.headSha == outgoing.headOid):
+      # RA-32 — when the repo being refused IS the one whose push we are
+      # gating, and the object we are gating IS its HEAD, "unpublished" is a
+      # true statement with a false remedy: the push it tells you to run is the
+      # push it just refused. That shape appears whenever the self-exemption
+      # above declines for a reason of its own -- a non-fast-forward update
+      # (`--force-with-lease`) being the common one, since `evaluateOutgoing`
+      # computes exactly that diagnostic and then discards it, leaving
+      # `protocolOk` true so nothing else surfaces it either.
+      #
+      # This changes no policy: the refusal still stands and a force update is
+      # still declined. It stops the operator being handed an impossible
+      # instruction and names the actual reason instead.
+      let selfPush =
+        obs.name == currentRepoName and obs.headSha.len > 0 and
+        obs.headSha == outgoing.headOid and not outgoing.outgoingCurrent
       let evidence =
-        if obs.pubDiagnostic.len > 0:
+        if selfPush and outgoing.diagnostic.len > 0:
+          "this push is the publication being gated (HEAD " & obs.headSha &
+          "), and it was not accepted as outgoing-current: " &
+          outgoing.diagnostic
+        elif obs.pubDiagnostic.len > 0:
           "publish-probe-failed: " & obs.pubDiagnostic
         else: "HEAD " & obs.headSha &
           " not on a '" & obs.remoteName & "/*' remote-tracking branch"
+      let remediation =
+        if selfPush and outgoing.diagnostic.len > 0:
+          "resolve '" & outgoing.diagnostic & "' in " & obs.path &
+          " — re-running 'git push' will not help, this refusal IS that push"
+        else:
+          "run 'git push' in " & obs.path & " first"
       result.failures.add(CheckFailure(
         repo: obs.path,
         property: "unpublished",
-        remediation: "run 'git push' in " & obs.path & " first",
+        remediation: remediation,
         evidence: evidence))
       result.exitCode = 2
       return
