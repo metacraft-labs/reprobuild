@@ -19,11 +19,49 @@ proc identText(node: NimNode): string =
     result = node.repr
 
 proc stringLiteral(node: NimNode): string =
+  ## The `else` branch is load-bearing and is NOT a value accessor: several
+  ## call sites pass an identifier on purpose (``executable foo`` names its
+  ## binary with an ident, ``call`` heads, interface command names), and rely
+  ## on getting the ident's spelling back.
+  ##
+  ## That makes it the wrong helper for a *value* field. On a `const` or a
+  ## `func` call it returns the SOURCE TEXT, which the emitters then
+  ## `escForCode` into the generated literal — so `sha256 = PinnedSha` reaches
+  ## the registry as the 9-character string `PinnedSha`. No error, no warning,
+  ## a plausible wrong value in the one field where wrong is most expensive.
+  ## Value fields must use `exprCode` below instead.
   case node.kind
   of nnkStrLit..nnkTripleStrLit:
     result = node.strVal
   else:
     result = node.repr
+
+proc isStrLit(node: NimNode): bool =
+  not node.isNil and node.kind in {nnkStrLit..nnkTripleStrLit}
+
+proc exprCode(node: NimNode): string =
+  ## Source text for a *value* field, to be spliced VERBATIM into the
+  ## generated literal so the Nim COMPILER evaluates it rather than this
+  ## macro. Transform, don't evaluate.
+  ##
+  ## A literal is still normalised through `escape()` so the emitted source is
+  ## byte-identical to what the previous `escForCode(stringLiteral(...))` path
+  ## produced — the literal case must not shift at all. Anything else is
+  ## emitted unchanged and resolved in the call-site scope, which is what
+  ## makes a shared vocabulary (`condaUrl(...)`, `binDir(plConda)`) usable at
+  ## the point of declaration.
+  if node.isNil: "\"\""
+  elif node.isStrLit: node.strVal.escape()
+  else: node.repr
+
+proc litText(node: NimNode): string =
+  ## The value, but ONLY when it is a literal — otherwise the empty string.
+  ##
+  ## Macro-time validation (whitelists, relative-path checks) can only inspect
+  ## text it actually has. Callers must treat "" as "not knowable here" and
+  ## skip the check rather than reject the declaration: the alternative is
+  ## refusing every expression, which is the restriction being removed.
+  if node.isStrLit: node.strVal else: ""
 
 proc stringSeqLiteral(node: NimNode): seq[string] =
   let values =
@@ -1030,61 +1068,104 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
       node)
   result.sourceFile = loc.file
   result.sourceLine = loc.line
-  result.archiveType = "tar.gz"
+  # NOTE the two lifetimes of these fields. On the macro-time
+  # ``TarballProvisioningDef`` built here every string field carries the
+  # EXPRESSION SOURCE (already quoted when it came from a literal); on the
+  # runtime instance produced by the emitted literal it carries the evaluated
+  # VALUE. The emitters in ``packageLiteral`` / ``contributionLiteral`` are the
+  # seam, and they splice these verbatim — no ``escForCode``.
+  result.archiveType = "\"tar.gz\""
   result.stripComponents = 0
+  # Keep the argument nodes so presence, literalness and value stay separable.
+  # ``.len == 0`` can no longer stand in for "absent": an absent field and one
+  # set to an expression are different states, and only the first is an error.
+  var
+    urlNode, sha256Node, executablePathNode: NimNode = nil
+    cpuNode, osNode: NimNode = nil
+    packageIdNode, lockIdentityNode: NimNode = nil
+    stripComponentsNode: NimNode = nil
   for i in 1 ..< node.len:
     let urlValue = namedValue(node[i], "url")
     if not urlValue.isNil:
-      result.url = stringLiteral(urlValue)
+      urlNode = urlValue
+      result.url = exprCode(urlValue)
     let mirrorValue = namedValue(node[i], "mirror")
     if not mirrorValue.isNil:
-      result.mirrors.add(stringLiteral(mirrorValue))
+      result.mirrors.add(exprCode(mirrorValue))
     let sha256Value = namedValue(node[i], "sha256")
     if not sha256Value.isNil:
-      result.sha256 = stringLiteral(sha256Value)
+      sha256Node = sha256Value
+      result.sha256 = exprCode(sha256Value)
     let archiveTypeValue = namedValue(node[i], "archiveType")
     if not archiveTypeValue.isNil:
-      result.archiveType = stringLiteral(archiveTypeValue)
+      result.archiveType = exprCode(archiveTypeValue)
     let executablePathValue = namedValue(node[i], "executablePath")
     if not executablePathValue.isNil:
-      result.executablePath = stringLiteral(executablePathValue)
+      executablePathNode = executablePathValue
+      result.executablePath = exprCode(executablePathValue)
     let stripComponentsValue = namedValue(node[i], "stripComponents")
     if not stripComponentsValue.isNil:
+      stripComponentsNode = stripComponentsValue
       result.stripComponents = intLiteral(stripComponentsValue, 0)
     let packageIdValue = namedValue(node[i], "packageId")
     if not packageIdValue.isNil:
-      result.packageId = stringLiteral(packageIdValue)
+      packageIdNode = packageIdValue
+      result.packageId = exprCode(packageIdValue)
     let lockIdentityValue = namedValue(node[i], "lockIdentity")
     if not lockIdentityValue.isNil:
-      result.lockIdentity = stringLiteral(lockIdentityValue)
+      lockIdentityNode = lockIdentityValue
+      result.lockIdentity = exprCode(lockIdentityValue)
     let cpuValue = namedValue(node[i], "cpu")
     if not cpuValue.isNil:
-      result.cpu = stringLiteral(cpuValue)
+      cpuNode = cpuValue
+      result.cpu = exprCode(cpuValue)
     let osValue = namedValue(node[i], "os")
     if not osValue.isNil:
-      result.os = stringLiteral(osValue)
-  if result.url.len == 0:
+      osNode = osValue
+      result.os = exprCode(osValue)
+  # Presence is checked on the NODE; emptiness of the emitted code would also
+  # be true for `url = ""`, which is a different mistake and keeps its own
+  # diagnostic below.
+  if urlNode.isNil:
     error("tarball requires url = \"...\"", node)
-  if result.sha256.len == 0:
+  if sha256Node.isNil:
     error("tarball requires sha256 = \"...\"", node)
-  if result.executablePath.len == 0:
+  if executablePathNode.isNil:
     error("tarball requires executablePath = \"bin/name\"", node)
-  if result.executablePath.unsafeRelativePath:
+  if urlNode.isStrLit and urlNode.strVal.len == 0:
+    error("tarball requires url = \"...\"", node)
+  if sha256Node.isStrLit and sha256Node.strVal.len == 0:
+    error("tarball requires sha256 = \"...\"", node)
+  if executablePathNode.isStrLit and executablePathNode.strVal.len == 0:
+    error("tarball requires executablePath = \"bin/name\"", node)
+  # Text-inspecting checks run only where there is text to inspect. An
+  # expression is validated at its own call site by the type system, and by
+  # the runtime consumers of the realized prefix.
+  let executablePathText = litText(executablePathNode)
+  if executablePathText.len > 0 and executablePathText.unsafeRelativePath:
     error("tarball executablePath must be relative to the realized prefix", node)
+  if not stripComponentsNode.isNil and
+      stripComponentsNode.kind notin {nnkIntLit..nnkUInt64Lit}:
+    # `intLiteral` silently substitutes its fallback, so a non-literal here
+    # would quietly mean 0. Say so instead.
+    error("tarball stripComponents must be an integer literal", node)
   if result.stripComponents < 0:
     error("tarball stripComponents must not be negative", node)
-  if result.cpu.len > 0 and
-      result.cpu.toLowerAscii() notin ["any", "x86_64", "aarch64"]:
+  let cpuText = litText(cpuNode)
+  if cpuText.len > 0 and cpuText.toLowerAscii() notin ["any", "x86_64", "aarch64"]:
     error("tarball cpu must be one of any|x86_64|aarch64; got '" &
-      result.cpu & "'", node)
-  if result.os.len > 0 and
-      result.os.toLowerAscii() notin ["any", "windows", "linux", "macos", "darwin"]:
+      cpuText & "'", node)
+  let osText = litText(osNode)
+  if osText.len > 0 and
+      osText.toLowerAscii() notin ["any", "windows", "linux", "macos", "darwin"]:
     error("tarball os must be one of any|windows|linux|macos|darwin; got '" &
-      result.os & "'", node)
-  if result.packageId.len == 0:
+      osText & "'", node)
+  # The derived defaults are now derived in the EMITTED code, so they follow
+  # an expression-valued url/sha256 instead of capturing its source text.
+  if packageIdNode.isNil:
     result.packageId = result.url
-  if result.lockIdentity.len == 0:
-    result.lockIdentity = "sha256:" & result.sha256
+  if lockIdentityNode.isNil:
+    result.lockIdentity = "(\"sha256:\" & (" & result.sha256 & "))"
 
 proc parseScoopProvisioning(node: NimNode): ScoopProvisioningDef =
   let loc = lineFile(node)
@@ -1553,20 +1634,24 @@ proc packageLiteral(pkg: PackageDef): string =
   for provisioningIndex, provisioning in pkg.tarballProvisioning:
     if provisioningIndex > 0:
       result.add(", ")
-    result.add("TarballProvisioningDef(url: " & escForCode(provisioning.url) &
+    # Every string field below already holds emittable SOURCE (see
+    # ``parseTarballProvisioning``), so it is spliced verbatim. Wrapping it in
+    # ``escForCode`` here is what turned `sha256 = PinnedSha` into the literal
+    # string "PinnedSha".
+    result.add("TarballProvisioningDef(url: " & provisioning.url &
       ", mirrors: @[")
     for mirrorIndex, mirror in provisioning.mirrors:
       if mirrorIndex > 0:
         result.add(", ")
-      result.add(escForCode(mirror))
-    result.add("], sha256: " & escForCode(provisioning.sha256) &
-      ", archiveType: " & escForCode(provisioning.archiveType) &
-      ", executablePath: " & escForCode(provisioning.executablePath) &
+      result.add(mirror)
+    result.add("], sha256: " & provisioning.sha256 &
+      ", archiveType: " & provisioning.archiveType &
+      ", executablePath: " & provisioning.executablePath &
       ", stripComponents: " & $provisioning.stripComponents &
-      ", packageId: " & escForCode(provisioning.packageId) &
-      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
-      ", cpu: " & escForCode(provisioning.cpu) &
-      ", os: " & escForCode(provisioning.os) &
+      ", packageId: " & provisioning.packageId &
+      ", lockIdentity: " & provisioning.lockIdentity &
+      ", cpu: " & (if provisioning.cpu.len == 0: "\"\"" else: provisioning.cpu) &
+      ", os: " & (if provisioning.os.len == 0: "\"\"" else: provisioning.os) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], scoopProvisioning: @[")

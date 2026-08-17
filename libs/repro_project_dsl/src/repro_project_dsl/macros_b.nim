@@ -3351,19 +3351,23 @@ proc provisioningContributionLiteral(
   result.add("], tarballProvisioning: @[")
   for i, provisioning in contribution.tarballProvisioning:
     if i > 0: result.add(", ")
+    # Spliced verbatim — these fields hold emittable SOURCE. Kept in step with
+    # the identical emitter in ``macros_a.packageLiteral``; the two must agree,
+    # since a `provisioningFor` contribution and an in-package `provisioning:`
+    # block are the same declaration reached by different routes.
     result.add("TarballProvisioningDef(url: " &
-      escForCode(provisioning.url) & ", mirrors: @[")
+      provisioning.url & ", mirrors: @[")
     for j, mirror in provisioning.mirrors:
       if j > 0: result.add(", ")
-      result.add(escForCode(mirror))
-    result.add("], sha256: " & escForCode(provisioning.sha256) &
-      ", archiveType: " & escForCode(provisioning.archiveType) &
-      ", executablePath: " & escForCode(provisioning.executablePath) &
+      result.add(mirror)
+    result.add("], sha256: " & provisioning.sha256 &
+      ", archiveType: " & provisioning.archiveType &
+      ", executablePath: " & provisioning.executablePath &
       ", stripComponents: " & $provisioning.stripComponents &
-      ", packageId: " & escForCode(provisioning.packageId) &
-      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
-      ", cpu: " & escForCode(provisioning.cpu) &
-      ", os: " & escForCode(provisioning.os) &
+      ", packageId: " & provisioning.packageId &
+      ", lockIdentity: " & provisioning.lockIdentity &
+      ", cpu: " & (if provisioning.cpu.len == 0: "\"\"" else: provisioning.cpu) &
+      ", os: " & (if provisioning.os.len == 0: "\"\"" else: provisioning.os) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], scoopProvisioning: @[")
