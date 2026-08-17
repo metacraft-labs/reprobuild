@@ -89,8 +89,23 @@ else:          discard      # <- unknown statements are dropped
 
 A statement the parser does not recognise is neither applied nor rejected. A
 `when defined(windows): exportedPath: "…"` inside the body **compiles cleanly
-and sets nothing**. Any work here should fix that `else` to error before adding
-new keys, or the next author gets a declaration that appears to work.
+and sets nothing**.
+
+An earlier revision of this document advised fixing that `else` to error before
+adding new keys. **That advice is wrong**, and the correction matters for
+anyone who acts on it: the same body is consumed by a SECOND pass. `parseLibrary`
+populates `pkg.libraries`, while the M3 artifact lowerer in `macros_b.nim`
+independently walks the same statements through `m3ArtifactEntryAst` to emit
+`registerArtifact(...)` — the two pathways co-exist by design (see the comment
+block above `m3ArtifactNameNode`). `build:` blocks appear in well over a hundred
+recipe library bodies and are handled entirely by that second pass, so making
+`parseLibrary`'s `else` an error would reject valid, working declarations.
+
+The defect is real but narrower than stated: the catch-all cannot distinguish
+"handled by another pass" from "handled by nobody". A fix needs a cross-pass
+inventory of the members each pass consumes, after which the residue can warn.
+Until that inventory exists, a `when` inside a `library` body is still silently
+dropped, and that remains the blocker for expressing per-platform layout here.
 
 ## What the gap costs today
 

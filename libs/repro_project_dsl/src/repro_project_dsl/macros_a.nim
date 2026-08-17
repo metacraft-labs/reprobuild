@@ -63,6 +63,20 @@ proc litText(node: NimNode): string =
   ## refusing every expression, which is the restriction being removed.
   if node.isStrLit: node.strVal else: ""
 
+proc requireStrLit(node: NimNode; what: string): string =
+  ## For the fields the macro genuinely must KNOW, because it uses the text to
+  ## do something at compile time — deduplicate it, generate a file from it,
+  ## key a table by it. Those cannot take an expression, and the honest answer
+  ## is to say so.
+  ##
+  ## What they must not do is call `stringLiteral` and accept its `.repr`
+  ## fallback, which turns `alias = ShortFlag` into the alias "ShortFlag" —
+  ## wrong, silent, and discovered only when the flag fails to parse.
+  if not node.isStrLit:
+    error(what & " must be a string literal: it is used at compile time and " &
+      "the macro cannot evaluate an expression here", node)
+  node.strVal
+
 proc codeOrEmpty(code: string): string =
   ## Emit-side companion to `exprCode`. An unset field holds no source at all,
   ## and splicing "" would produce `field: ,` — a syntax error in the generated
@@ -78,7 +92,7 @@ proc stringSeqLiteral(node: NimNode): seq[string] =
   if values.kind notin {nnkBracket, nnkPar}:
     error("expected a string sequence literal", node)
   for item in values:
-    result.add(stringLiteral(item))
+    result.add(requireStrLit(item, "string sequence element"))
 
 proc intLiteral(node: NimNode; fallback: int): int =
   case node.kind
@@ -209,7 +223,7 @@ proc parseParam(node: NimNode): CliParamDef =
     for i in optionStart ..< node.len:
       let aliasValue = namedValue(node[i], "alias")
       if not aliasValue.isNil:
-        result.alias = stringLiteral(aliasValue)
+        result.alias = requireStrLit(aliasValue, "param alias")
       let requiredValue = namedValue(node[i], "required")
       if not requiredValue.isNil:
         result.required = boolLiteral(requiredValue, result.required)
@@ -248,7 +262,7 @@ proc parseCommandDependencyPolicy(node: NimNode;
   for i in 2 ..< node.len:
     let depfileValue = namedValue(node[i], "depfile")
     if not depfileValue.isNil:
-      let single = stringLiteral(depfileValue)
+      let single = requireStrLit(depfileValue, "dependencyPolicy depfile")
       if single.len > 0 and single notin result.depfiles:
         result.depfiles.add(single)
     let depfilesValue = namedValue(node[i], "depfiles")
@@ -1537,7 +1551,7 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
     elif calleeName(stmt).normalize in ["defaulttoolprovisioning", "toolprovisioning"]:
       if stmt.len != 2:
         error("defaultToolProvisioning expects exactly one string literal", stmt)
-      let provisioning = stringLiteral(stmt[1])
+      let provisioning = requireStrLit(stmt[1], "defaultToolProvisioning")
       # M9.R.8 — accept ``from-source`` (the CLI canonical spelling)
       # alongside the four pre-existing modes so a recipe can opt in
       # to from-source provisioning declaratively without depending on
@@ -1587,7 +1601,7 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
     elif calleeName(stmt).normalize == "usesimportpath":
       if stmt.len != 2:
         error("usesImportPath expects exactly one string literal", stmt)
-      result.usesImportPaths.add(stringLiteral(stmt[1]))
+      result.usesImportPaths.add(requireStrLit(stmt[1], "usesImportPath"))
     elif calleeName(stmt).normalize == "devenv":
       if stmt.len < 2:
         error("devEnv expects a body", stmt)
@@ -3351,7 +3365,7 @@ proc parseInterfaceParam(node: NimNode;
   for i in optionStart ..< node.len:
     let aliasValue = namedValue(node[i], "alias")
     if not aliasValue.isNil:
-      result.alias = stringLiteral(aliasValue)
+      result.alias = requireStrLit(aliasValue, "interface param alias")
     let requiredValue = namedValue(node[i], "required")
     if not requiredValue.isNil:
       result.required = boolLiteral(requiredValue, result.required)
@@ -3397,7 +3411,7 @@ proc parseInterfaceDependencyPolicy(node: NimNode;
   for i in 2 ..< node.len:
     let depfileValue = namedValue(node[i], "depfile")
     if not depfileValue.isNil:
-      let single = stringLiteral(depfileValue)
+      let single = requireStrLit(depfileValue, "dependencyPolicy depfile")
       if single.len > 0 and single notin result.depfiles:
         result.depfiles.add(single)
     let depfilesValue = namedValue(node[i], "depfiles")
