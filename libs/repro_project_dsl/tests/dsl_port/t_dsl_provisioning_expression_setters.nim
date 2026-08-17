@@ -42,6 +42,28 @@ func binDir(layout: PrefixLayout): string =
   of plUnix: "bin"
   of plConda: "Library/bin"
 
+# The case the catalog actually has: ~227 entries repeat the same nixpkgs rev
+# and narHash as bare literals, and t_smoke_catalog_audit_m29 enforces the
+# repetition by grepping for the literal text — because until now the DSL could
+# not accept the shared const that would make the audit unnecessary.
+const
+  CanonicalRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8"
+  CanonicalNarHash = "sha256-0Ax7hsY2rZ2xEbfLbSjTHXbNyMmS5oCNDoZzC1EWNAg="
+
+package nixExprPkg:
+  provisioning:
+    nixPackage "nixpkgs#ripgrep",
+      executablePath = binDir(plUnix) & "/rg",
+      nixpkgsRev = CanonicalRev,
+      nixpkgsNarHash = CanonicalNarHash
+
+package scoopExprPkg:
+  provisioning:
+    scoopApp(bucket = "main",
+      app = "ripgrep",
+      version = "14.1.0",
+      executablePath = binDir(plConda) & "/rg.exe")
+
 package provExprPkg:
   provisioning:
     tarball(
@@ -77,3 +99,47 @@ suite "provisioning setters accept expressions, not only literals":
 
   test "literals alongside expressions are unaffected":
     check pkg.tarballProvisioning[0].archiveType == "conda"
+
+suite "nixPackage setters accept expressions":
+  var nixPkg: PackageDef
+  for p in registeredPackages():
+    if p.packageName == "nixExprPkg":
+      nixPkg = p
+
+  test "a shared const reaches nixpkgsRev — the catalog's repeated pin":
+    check nixPkg.nixProvisioning.len == 1
+    check nixPkg.nixProvisioning[0].nixpkgsRev == CanonicalRev
+
+  test "a shared const reaches nixpkgsNarHash":
+    check nixPkg.nixProvisioning[0].nixpkgsNarHash == CanonicalNarHash
+
+  test "an expression reaches executablePath":
+    check nixPkg.nixProvisioning[0].executablePath == "bin/rg"
+
+  test "the derived nixpkgsRef follows an expression-valued rev":
+    # Was macro-time concatenation over the macro's view of `rev`, which for a
+    # const was the spelling "CanonicalRev".
+    check nixPkg.nixProvisioning[0].nixpkgsRef ==
+      "github:NixOS/nixpkgs/" & CanonicalRev
+
+  test "the derived lockIdentity follows expression-valued ref and narHash":
+    check nixPkg.nixProvisioning[0].lockIdentity ==
+      "github:NixOS/nixpkgs/" & CanonicalRev &
+      "?narHash=" & CanonicalNarHash & "#ripgrep"
+
+suite "scoopApp setters accept expressions":
+  var scoopPkg: PackageDef
+  for p in registeredPackages():
+    if p.packageName == "scoopExprPkg":
+      scoopPkg = p
+
+  test "an expression reaches executablePath":
+    check scoopPkg.scoopProvisioning.len == 1
+    check scoopPkg.scoopProvisioning[0].executablePath == "Library/bin/rg.exe"
+
+  test "the derived packageId is built from the fields, not their source":
+    check scoopPkg.scoopProvisioning[0].packageId == "main/ripgrep@14.1.0"
+
+  test "the derived lockIdentity is built from the fields, not their source":
+    check scoopPkg.scoopProvisioning[0].lockIdentity ==
+      "scoop:main/ripgrep@14.1.0"

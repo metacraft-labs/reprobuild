@@ -63,6 +63,12 @@ proc litText(node: NimNode): string =
   ## refusing every expression, which is the restriction being removed.
   if node.isStrLit: node.strVal else: ""
 
+proc codeOrEmpty(code: string): string =
+  ## Emit-side companion to `exprCode`. An unset field holds no source at all,
+  ## and splicing "" would produce `field: ,` — a syntax error in the generated
+  ## literal rather than the empty string that was meant.
+  if code.len == 0: "\"\"" else: code
+
 proc stringSeqLiteral(node: NimNode): seq[string] =
   let values =
     if node.kind == nnkPrefix and node.len == 2 and node[0].eqIdent("@"):
@@ -1004,54 +1010,105 @@ proc parseNixPackageProvisioning(node: NimNode): NixPackageProvisioningDef =
   if calleeName(node).normalize != "nixpackage" or node.len < 2:
     error("provisioning expects nixPackage \"selector\", executablePath = \"bin/name\"",
       node)
-  result.selector = stringLiteral(node[1])
+  # As in ``parseTarballProvisioning``, the string fields on the macro-time def
+  # carry emittable SOURCE; the emitters splice them verbatim.
+  #
+  # Two fields are deliberately NOT expression-valued, because the macro makes
+  # structural decisions from their text and cannot make them from an opaque
+  # expression:
+  #
+  #   * the positional selector — tested for the ``nixpkgs#`` prefix and SLICED
+  #     to build the default lock identity;
+  #   * ``expressionFile`` — resolved here against the declaring file's
+  #     directory, which is knowable only at macro time.
+  #
+  # Both now say so instead of silently taking the source text. Everything else
+  # — including ``nixpkgsRev`` / ``nixpkgsNarHash``, the fields ~227 catalog
+  # entries repeat verbatim — accepts an expression, so a shared
+  # ``CanonicalNixpkgsRev`` const can be named once and referenced.
+  if not node[1].isStrLit:
+    error("nixPackage selector must be a string literal: the macro tests it " &
+      "for the \"nixpkgs#\" prefix and slices it to derive lockIdentity", node[1])
+  let selectorText = node[1].strVal
+  result.selector = exprCode(node[1])
   result.packageId = result.selector
   result.sourceFile = loc.file
   result.sourceLine = loc.line
+  var
+    executablePathNode, expressionFileNode: NimNode = nil
+    nixpkgsRefNode, nixpkgsRevNode, nixpkgsNarHashNode: NimNode = nil
+    lockIdentityNode: NimNode = nil
   for i in 2 ..< node.len:
     let executablePathValue = namedValue(node[i], "executablePath")
     if not executablePathValue.isNil:
-      result.executablePath = stringLiteral(executablePathValue)
+      executablePathNode = executablePathValue
+      result.executablePath = exprCode(executablePathValue)
     let expressionFileValue = namedValue(node[i], "expressionFile")
     if not expressionFileValue.isNil:
-      result.expressionFile = stringLiteral(expressionFileValue)
+      expressionFileNode = expressionFileValue
+      if not expressionFileValue.isStrLit:
+        error("nixPackage expressionFile must be a string literal: it is " &
+          "resolved against the declaring file's directory at compile time",
+          expressionFileValue)
+      result.expressionFile = expressionFileValue.strVal
     let nixpkgsRefValue = namedValue(node[i], "nixpkgsRef")
     if not nixpkgsRefValue.isNil:
-      result.nixpkgsRef = stringLiteral(nixpkgsRefValue)
+      nixpkgsRefNode = nixpkgsRefValue
+      result.nixpkgsRef = exprCode(nixpkgsRefValue)
     let nixpkgsRevValue = namedValue(node[i], "nixpkgsRev")
     if not nixpkgsRevValue.isNil:
-      result.nixpkgsRev = stringLiteral(nixpkgsRevValue)
+      nixpkgsRevNode = nixpkgsRevValue
+      result.nixpkgsRev = exprCode(nixpkgsRevValue)
     let nixpkgsNarHashValue = namedValue(node[i], "nixpkgsNarHash")
     if not nixpkgsNarHashValue.isNil:
-      result.nixpkgsNarHash = stringLiteral(nixpkgsNarHashValue)
+      nixpkgsNarHashNode = nixpkgsNarHashValue
+      result.nixpkgsNarHash = exprCode(nixpkgsNarHashValue)
     let packageIdValue = namedValue(node[i], "packageId")
     if not packageIdValue.isNil:
-      result.packageId = stringLiteral(packageIdValue)
+      result.packageId = exprCode(packageIdValue)
     let lockIdentityValue = namedValue(node[i], "lockIdentity")
     if not lockIdentityValue.isNil:
-      result.lockIdentity = stringLiteral(lockIdentityValue)
-  if result.selector.len == 0:
+      lockIdentityNode = lockIdentityValue
+      result.lockIdentity = exprCode(lockIdentityValue)
+  if selectorText.len == 0:
     error("nixPackage selector must not be empty", node)
-  if result.nixpkgsRev.len > 0 and result.nixpkgsRef.len == 0:
-    result.nixpkgsRef = "github:NixOS/nixpkgs/" & result.nixpkgsRev
-  if result.nixpkgsRef.len > 0 and not result.selector.startsWith("nixpkgs#"):
+  # Presence is a property of the NODE now: an expression-valued nixpkgsRev is
+  # present even though nothing here can know what it evaluates to.
+  if not nixpkgsRevNode.isNil and nixpkgsRefNode.isNil:
+    result.nixpkgsRef = "(\"github:NixOS/nixpkgs/\" & (" & result.nixpkgsRev & "))"
+  let hasNixpkgsRef = not nixpkgsRefNode.isNil or not nixpkgsRevNode.isNil
+  if hasNixpkgsRef and not selectorText.startsWith("nixpkgs#"):
     error("nixPackage nixpkgsRef/nixpkgsRev metadata applies only to nixpkgs# selectors",
       node)
-  if result.lockIdentity.len == 0:
-    if result.nixpkgsRef.len > 0:
-      result.lockIdentity = result.nixpkgsRef
-      if result.nixpkgsNarHash.len > 0:
-        result.lockIdentity.add("?narHash=" & result.nixpkgsNarHash)
-      result.lockIdentity.add("#" & result.selector["nixpkgs#".len .. ^1])
+  if lockIdentityNode.isNil:
+    if hasNixpkgsRef:
+      # Built as an EMITTED expression so it follows an expression-valued ref
+      # or narHash. The selector suffix is a compile-time constant because the
+      # selector is required to be a literal above.
+      var parts = @[result.nixpkgsRef]
+      if not nixpkgsNarHashNode.isNil:
+        parts.add("\"?narHash=\"")
+        parts.add(result.nixpkgsNarHash)
+      parts.add(("#" & selectorText["nixpkgs#".len .. ^1]).escape())
+      result.lockIdentity = "(" & parts.join(" & ") & ")"
     else:
       result.lockIdentity = result.selector
-  if result.executablePath.len == 0:
+  if executablePathNode.isNil:
     error("nixPackage requires executablePath = \"bin/name\"", node)
-  if result.executablePath.isAbsolute or result.executablePath.startsWith(".."):
+  let executablePathText = litText(executablePathNode)
+  if executablePathText.len > 0 and
+      (executablePathText.isAbsolute or executablePathText.startsWith("..")):
     error("nixPackage executablePath must be relative to the realized output",
       node)
+  if executablePathNode.isStrLit and executablePathText.len == 0:
+    error("nixPackage requires executablePath = \"bin/name\"", node)
   if result.expressionFile.len > 0 and not result.expressionFile.isAbsolute:
     result.expressionFile = loc.file.splitPath.head / result.expressionFile
+  # ``expressionFile`` stays a macro-time VALUE (it was just resolved against
+  # the source directory), so it is the one field the emitters must still
+  # quote. Do it here so every emitter can treat the record uniformly.
+  if not expressionFileNode.isNil:
+    result.expressionFile = result.expressionFile.escape()
 
 proc unsafeRelativePath(value: string): bool =
   let normalized = value.replace('\\', '/')
@@ -1175,69 +1232,96 @@ proc parseScoopProvisioning(node: NimNode): ScoopProvisioningDef =
   result.sourceFile = loc.file
   result.sourceLine = loc.line
   result.requiresExecutionProfileChecksum = true
+  # String fields carry emittable SOURCE; see ``parseTarballProvisioning``.
+  # Nothing here decides anything structural from the text, so every string
+  # field accepts an expression — the presence and mutual-exclusion rules are
+  # properties of which arguments were WRITTEN, which the nodes still answer.
+  var
+    bucketNode, appNode, versionNode, preferredVersionNode: NimNode = nil
+    manifestChecksumNode, executablePathNode: NimNode = nil
+    packageIdNode, lockIdentityNode: NimNode = nil
+    requiresExecProfileNode: NimNode = nil
   for i in 1 ..< node.len:
     let bucketValue = namedValue(node[i], "bucket")
     if not bucketValue.isNil:
-      result.bucket = stringLiteral(bucketValue)
+      bucketNode = bucketValue
+      result.bucket = exprCode(bucketValue)
     let appValue = namedValue(node[i], "app")
     if not appValue.isNil:
-      result.app = stringLiteral(appValue)
+      appNode = appValue
+      result.app = exprCode(appValue)
     let versionValue = namedValue(node[i], "version")
     if not versionValue.isNil:
-      result.version = stringLiteral(versionValue)
+      versionNode = versionValue
+      result.version = exprCode(versionValue)
     let preferredVersionValue = namedValue(node[i], "preferredVersion")
     if not preferredVersionValue.isNil:
-      result.preferredVersion = stringLiteral(preferredVersionValue)
+      preferredVersionNode = preferredVersionValue
+      result.preferredVersion = exprCode(preferredVersionValue)
     let manifestChecksumValue = namedValue(node[i], "manifestChecksum")
     if not manifestChecksumValue.isNil:
-      result.manifestChecksum = stringLiteral(manifestChecksumValue)
+      manifestChecksumNode = manifestChecksumValue
+      result.manifestChecksum = exprCode(manifestChecksumValue)
     let manifestUrlValue = namedValue(node[i], "manifestUrl")
     if not manifestUrlValue.isNil:
-      result.manifestUrl = stringLiteral(manifestUrlValue)
+      result.manifestUrl = exprCode(manifestUrlValue)
     let executablePathValue = namedValue(node[i], "executablePath")
     if not executablePathValue.isNil:
-      result.executablePath = stringLiteral(executablePathValue)
+      executablePathNode = executablePathValue
+      result.executablePath = exprCode(executablePathValue)
     let requiresExecProfileValue = namedValue(node[i],
       "requiresExecutionProfileChecksum")
     if not requiresExecProfileValue.isNil:
+      requiresExecProfileNode = requiresExecProfileValue
       result.requiresExecutionProfileChecksum = boolLiteral(
         requiresExecProfileValue, true)
     let packageIdValue = namedValue(node[i], "packageId")
     if not packageIdValue.isNil:
-      result.packageId = stringLiteral(packageIdValue)
+      packageIdNode = packageIdValue
+      result.packageId = exprCode(packageIdValue)
     let lockIdentityValue = namedValue(node[i], "lockIdentity")
     if not lockIdentityValue.isNil:
-      result.lockIdentity = stringLiteral(lockIdentityValue)
-  if result.bucket.len == 0:
+      lockIdentityNode = lockIdentityValue
+      result.lockIdentity = exprCode(lockIdentityValue)
+  if bucketNode.isNil or (bucketNode.isStrLit and bucketNode.strVal.len == 0):
     error("scoopApp requires bucket = \"<name>\"", node)
-  if result.app.len == 0:
+  if appNode.isNil or (appNode.isStrLit and appNode.strVal.len == 0):
     error("scoopApp requires app = \"<name>\"", node)
-  if result.version.len > 0 and result.preferredVersion.len > 0:
+  if not versionNode.isNil and not preferredVersionNode.isNil:
     error("scoopApp accepts version OR preferredVersion, not both", node)
-  if result.version.len == 0 and result.preferredVersion.len == 0:
+  if versionNode.isNil and preferredVersionNode.isNil:
     error("scoopApp requires version = \"<exact>\" or preferredVersion = " &
       "\"<range>\"", node)
-  if result.executablePath.len == 0:
+  if executablePathNode.isNil:
     error("scoopApp requires executablePath = \"<relative-path>\"", node)
-  if result.executablePath.unsafeRelativePath:
+  let executablePathText = litText(executablePathNode)
+  if executablePathNode.isStrLit and
+      (executablePathText.len == 0 or executablePathText.unsafeRelativePath):
     error("scoopApp executablePath must be a relative path inside the " &
       "Scoop app prefix", node)
-  if result.packageId.len == 0:
-    result.packageId =
-      if result.version.len > 0:
-        result.bucket & "/" & result.app & "@" & result.version
-      else:
-        result.bucket & "/" & result.app & "@" & result.preferredVersion
-  if result.lockIdentity.len == 0:
+  # ``boolLiteral`` shares the silent-fallback shape of ``intLiteral``: a
+  # non-literal quietly meant `true`, which is the SAFE default here but still
+  # not what was written. Reject rather than reinterpret.
+  if not requiresExecProfileNode.isNil and
+      requiresExecProfileNode.kind notin {nnkIdent, nnkSym} and
+      requiresExecProfileNode.kind notin {nnkNilLit}:
+    error("scoopApp requiresExecutionProfileChecksum must be true or false",
+      node)
+  # Derived identities become emitted expressions over whatever the fields
+  # hold, instead of macro-time concatenation of the macro's view of them.
+  let versionCode =
+    if versionNode.isNil: result.preferredVersion else: result.version
+  if packageIdNode.isNil:
+    result.packageId = "(" & result.bucket & " & \"/\" & " & result.app &
+      " & \"@\" & " & versionCode & ")"
+  if lockIdentityNode.isNil:
     result.lockIdentity =
-      if result.manifestChecksum.len > 0:
-        "scoop:" & result.bucket & "/" & result.app & ":" &
-          result.manifestChecksum
-      elif result.version.len > 0:
-        "scoop:" & result.bucket & "/" & result.app & "@" & result.version
+      if not manifestChecksumNode.isNil:
+        "(\"scoop:\" & " & result.bucket & " & \"/\" & " & result.app &
+          " & \":\" & " & result.manifestChecksum & ")"
       else:
-        "scoop:" & result.bucket & "/" & result.app & "@" &
-          result.preferredVersion
+        "(\"scoop:\" & " & result.bucket & " & \"/\" & " & result.app &
+          " & \"@\" & " & versionCode & ")"
 
 proc collectProvisioning(node: NimNode;
                          nixOutput: var seq[NixPackageProvisioningDef];
@@ -1619,15 +1703,18 @@ proc packageLiteral(pkg: PackageDef): string =
   for provisioningIndex, provisioning in pkg.nixProvisioning:
     if provisioningIndex > 0:
       result.add(", ")
-    result.add("NixPackageProvisioningDef(selector: " & escForCode(
-        provisioning.selector) &
-      ", executablePath: " & escForCode(provisioning.executablePath) &
-      ", expressionFile: " & escForCode(provisioning.expressionFile) &
-      ", nixpkgsRef: " & escForCode(provisioning.nixpkgsRef) &
-      ", nixpkgsRev: " & escForCode(provisioning.nixpkgsRev) &
-      ", nixpkgsNarHash: " & escForCode(provisioning.nixpkgsNarHash) &
-      ", packageId: " & escForCode(provisioning.packageId) &
-      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+    # Spliced verbatim — these fields hold emittable SOURCE (see
+    # ``parseNixPackageProvisioning``), including ``expressionFile``, which is
+    # a macro-resolved value the parser re-quotes before handing it over.
+    result.add("NixPackageProvisioningDef(selector: " &
+        codeOrEmpty(provisioning.selector) &
+      ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
+      ", expressionFile: " & codeOrEmpty(provisioning.expressionFile) &
+      ", nixpkgsRef: " & codeOrEmpty(provisioning.nixpkgsRef) &
+      ", nixpkgsRev: " & codeOrEmpty(provisioning.nixpkgsRev) &
+      ", nixpkgsNarHash: " & codeOrEmpty(provisioning.nixpkgsNarHash) &
+      ", packageId: " & codeOrEmpty(provisioning.packageId) &
+      ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], tarballProvisioning: @[")
@@ -1638,37 +1725,38 @@ proc packageLiteral(pkg: PackageDef): string =
     # ``parseTarballProvisioning``), so it is spliced verbatim. Wrapping it in
     # ``escForCode`` here is what turned `sha256 = PinnedSha` into the literal
     # string "PinnedSha".
-    result.add("TarballProvisioningDef(url: " & provisioning.url &
+    result.add("TarballProvisioningDef(url: " & codeOrEmpty(provisioning.url) &
       ", mirrors: @[")
     for mirrorIndex, mirror in provisioning.mirrors:
       if mirrorIndex > 0:
         result.add(", ")
       result.add(mirror)
-    result.add("], sha256: " & provisioning.sha256 &
-      ", archiveType: " & provisioning.archiveType &
-      ", executablePath: " & provisioning.executablePath &
+    result.add("], sha256: " & codeOrEmpty(provisioning.sha256) &
+      ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
+      ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", stripComponents: " & $provisioning.stripComponents &
-      ", packageId: " & provisioning.packageId &
-      ", lockIdentity: " & provisioning.lockIdentity &
-      ", cpu: " & (if provisioning.cpu.len == 0: "\"\"" else: provisioning.cpu) &
-      ", os: " & (if provisioning.os.len == 0: "\"\"" else: provisioning.os) &
+      ", packageId: " & codeOrEmpty(provisioning.packageId) &
+      ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
+      ", cpu: " & codeOrEmpty(provisioning.cpu) &
+      ", os: " & codeOrEmpty(provisioning.os) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], scoopProvisioning: @[")
   for provisioningIndex, provisioning in pkg.scoopProvisioning:
     if provisioningIndex > 0:
       result.add(", ")
-    result.add("ScoopProvisioningDef(bucket: " & escForCode(provisioning.bucket) &
-      ", app: " & escForCode(provisioning.app) &
-      ", version: " & escForCode(provisioning.version) &
-      ", preferredVersion: " & escForCode(provisioning.preferredVersion) &
-      ", manifestChecksum: " & escForCode(provisioning.manifestChecksum) &
-      ", manifestUrl: " & escForCode(provisioning.manifestUrl) &
-      ", executablePath: " & escForCode(provisioning.executablePath) &
+    # Spliced verbatim — see ``parseScoopProvisioning``.
+    result.add("ScoopProvisioningDef(bucket: " & codeOrEmpty(provisioning.bucket) &
+      ", app: " & codeOrEmpty(provisioning.app) &
+      ", version: " & codeOrEmpty(provisioning.version) &
+      ", preferredVersion: " & codeOrEmpty(provisioning.preferredVersion) &
+      ", manifestChecksum: " & codeOrEmpty(provisioning.manifestChecksum) &
+      ", manifestUrl: " & codeOrEmpty(provisioning.manifestUrl) &
+      ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", requiresExecutionProfileChecksum: " &
         $provisioning.requiresExecutionProfileChecksum &
-      ", packageId: " & escForCode(provisioning.packageId) &
-      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+      ", packageId: " & codeOrEmpty(provisioning.packageId) &
+      ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], usesImportPaths: @[")
