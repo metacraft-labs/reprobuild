@@ -81,26 +81,6 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
     " --out:" & quoteShell(outBinary)
   for path in profileNimPaths(repoRootAbs):
     compileCmd.add " --path:" & quoteShell(path)
-  # The repo ROOT, which `profileNimPaths` deliberately does not return — it
-  # enumerates `libs/*/src`. Root-level modules are nonetheless part of the
-  # import graph a profile drags in: `repro_core/convention_attribution.nim`
-  # imports `lints/ambient_execution`, which lives at the root.
-  #
-  # An ordinary build gets the root from `config.nims`'s `switch("path", ".")`.
-  # A profile compile does not, and this is the same NimScript rule the note
-  # below is about, hit from the other side: the config is evaluated with the
-  # PROJECT directory as cwd, so `.` resolves to the profile's own directory.
-  # Measured — a marker `echo` in `config.nims` during a profile compile prints
-  # `thisDir=…\machines\server\_win-ci-bare-001`, i.e. the profile's directory
-  # and not this repo. `thisDir()` is therefore NOT a fix; only an absolute
-  # path known to the CALLER is, and `repoRootAbs` is exactly that.
-  #
-  # Symptom when this is missing: every COLD profile compile fails with
-  # `cannot open file: lints/ambient_execution`, taking `repro infra
-  # plan/apply` and the deploy agent with it, while `nim c` over the tree keeps
-  # working. A warm profile cache hides it completely, so it surfaces as "the
-  # box converged for weeks and then stopped accepting new desired state".
-  compileCmd.add " --path:" & quoteShell(repoRootAbs)
   compileCmd.add " " & quoteShell(profileRoot)
   if verbose:
     stderr.writeLine("repro profile compile: " & compileCmd)
