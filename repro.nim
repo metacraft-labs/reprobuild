@@ -37,6 +37,12 @@
 ## them out of the ``nix develop`` shell.
 
 import std/[os, osproc, strutils]
+# Ambient-execution hatches. Every call below is bootstrap tier: the recipe has
+# to locate a host tool BEFORE any engine-provisioned prefix exists, so a typed
+# execution profile is not available to it. Naming the hatch says so at the
+# call site instead of leaving it to be inferred — `git grep uncontrolled` is
+# the audit surface.
+import lints/ambient_execution
               # Incremental-Test-Runner M7: getEnv + the `/` path operator
               # for the io-mon / nim-stackable-hooks sibling resolution in the
               # test-fixtures monitor-shim build edge below.
@@ -433,13 +439,13 @@ package reprobuild:
         if not fileExists("flake.nix"):
           return ""
         let systemResult =
-          execCmdEx("nix eval --raw --impure --expr 'builtins.currentSystem' 2>/dev/null")
+          uncontrolledExecCmdEx("nix eval --raw --impure --expr 'builtins.currentSystem' 2>/dev/null")
         if systemResult.exitCode != 0:
           return ""
         let system = systemResult.output.strip()
         if system.len == 0:
           return ""
-        let valueResult = execCmdEx(
+        let valueResult = uncontrolledExecCmdEx(
           "nix eval --raw '.#devShells." & system & ".default." & envName &
           "' 2>/dev/null")
         if valueResult.exitCode != 0:
@@ -860,7 +866,7 @@ package reprobuild:
         ""
 
       proc siblingOf(exeName, dllName: string): string =
-        let exe = findExe(exeName)
+        let exe = uncontrolledFindExe(exeName)
         if exe.len == 0: "" else: exe.parentDir / dllName
 
       # clingo — dlopen'd at MODULE INIT by repro_solver, so a repro.exe
@@ -877,7 +883,7 @@ package reprobuild:
       # libzstd — lazily loaded by `repro cache substitute`. Two upstream
       # layouts: MSYS2 co-locates the DLL with zstd.exe; the facebook/zstd
       # win64 release puts it under a sibling dll/ directory.
-      let zstdExe = findExe("zstd")
+      let zstdExe = uncontrolledFindExe("zstd")
       let zstdDir = if zstdExe.len == 0: "" else: zstdExe.parentDir
       let zstdSrc = firstExistingDll([
         (if zstdDir.len > 0: zstdDir / "libzstd.dll" else: ""),
@@ -891,7 +897,7 @@ package reprobuild:
       # ships it inside its own tree; probe the layouts Nim has used, then the
       # bare DLL on PATH. Staged under BOTH names because the Nim binding's
       # candidate list tries `sqlite3_64.dll` and `sqlite3.dll`.
-      let nimExe = findExe("nim")
+      let nimExe = uncontrolledFindExe("nim")
       let nimBinDir = if nimExe.len == 0: "" else: nimExe.parentDir
       let nimRootDir = if nimBinDir.len == 0: "" else: nimBinDir.parentDir
       let sqliteSrc = firstExistingDll([
@@ -899,7 +905,7 @@ package reprobuild:
         (if nimRootDir.len > 0: nimRootDir / "dist" / "sqlite3_64.dll" else: ""),
         (if nimRootDir.len > 0: nimRootDir / "dlls" / "sqlite3_64.dll" else: ""),
         (if nimRootDir.len > 0: nimRootDir / "bin" / "sqlite3_64.dll" else: ""),
-        findExe("sqlite3_64.dll")])
+        uncontrolledFindExe("sqlite3_64.dll")])
       if sqliteSrc.len > 0:
         reprobuildAppsActions.add(dslfs.copyFile(sqliteSrc,
           "build/bin/sqlite3_64.dll", cacheable = false,
@@ -916,7 +922,7 @@ package reprobuild:
       # the fallback rather than being contradicted by an empty copy.
       for opensslDll in ["libcrypto-3-x64.dll", "libssl-3-x64.dll"]:
         let opensslSrc = firstExistingDll([
-          siblingOf("openssl", opensslDll), findExe(opensslDll)])
+          siblingOf("openssl", opensslDll), uncontrolledFindExe(opensslDll)])
         if opensslSrc.len > 0:
           reprobuildAppsActions.add(dslfs.copyFile(opensslSrc,
             "build/bin/" & opensslDll, cacheable = false,

@@ -12,7 +12,6 @@ libs/repro_cli_support/src/repro_cli_support/home.nim
 libs/repro_cli_support/src/repro_cli_support/infra_install_root.nim
 libs/repro_cli_support/src/repro_cli_support/partition.nim
 libs/repro_cli_support/src/repro_cli_support/push_hook_protocol.nim
-libs/repro_core/src/repro_core/convention_attribution.nim
 libs/repro_daemon_core/src/repro_daemon_core/runtime.nim
 libs/repro_dev_env_activation/src/repro_dev_env_activation.nim
 libs/repro_dsl_stdlib/src/repro_dsl_stdlib/generated_config/actions.nim
@@ -87,4 +86,3 @@ libs/repro_workspace_vcs/src/git_tool.nim
 libs/repro_workspace_vcs/src/hg_actions.nim
 libs/repro_workspace_vcs/src/hg_tool.nim
 libs/repro_workspace_vcs/src/shared_clones.nim
-repro.nim

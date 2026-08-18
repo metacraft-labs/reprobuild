@@ -11,10 +11,27 @@
 ## (``switch("import", "lints/ambient_execution")``), so it applies with no
 ## source changes anywhere.
 ##
-## **Warning tier, on purpose.** ~427 call sites already violate the rule;
-## errors would make the tree uncompilable and the linter would be deleted
-## rather than obeyed. Each rule flips to ``{.error.}`` once its call sites
-## reach zero. ``docs/ambient-execution-linter.md`` tracks the baseline.
+## **Warning tier, on purpose.** Errors would make the tree uncompilable and
+## the linter would be deleted rather than obeyed. Each rule flips to
+## ``{.error.}`` once its call sites reach zero.
+##
+## An earlier revision of this header said "~427 call sites already violate the
+## rule". That figure came from counting grep hits across the tree and was
+## badly misleading about the enforcement cost. Measured by actually
+## force-importing and compiling ``repro.nim`` — the real question, since only
+## code in the compile closure can warn — the violation count was **16**, of
+## which 11 were in reprobuild proper. Those 11 are now labelled with the
+## hatches below, and the compile closure is clean; the remaining 5 live in
+## sibling repos.
+##
+## The lesson generalises past this file: a grep count over a source tree
+## measures text, and the thing that matters is what the compiler sees.
+##
+## ``scripts/check_ambient_execution.sh`` keeps a separate grep-based ratchet
+## over 88 baseline files. That is not the same measurement and is not meant to
+## be — it is deliberately cheap enough to run pre-commit, where a full compile
+## is not affordable, and it catches a violation before it is committed rather
+## than after. ``docs/ambient-execution-linter.md`` tracks it.
 ##
 ## Two ways to satisfy the rule at a call site:
 ##

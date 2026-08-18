@@ -43,6 +43,8 @@
 ## truth at build time — this heuristic is for diagnostics only.
 
 import std/[algorithm, os, osproc, strutils, tables]
+# Ambient-execution hatches for the PATH-only toolchain probe below.
+import lints/ambient_execution
 
 import ./project_file
 
@@ -791,7 +793,17 @@ proc probeToolchainSpec(spec: ToolchainProbeSpec): ToolchainProbeResult =
     return toolchainProbeCache[spec.convention]
   result.available = false
   result.version = ""
-  result.path = findExe(spec.exeName)
+  # Ambient-execution hatches, deliberately. This is the PATH-only probe tier
+  # (Package-Model.md §"execution profiles", class 2): the whole purpose is to
+  # discover whether an UNPROVISIONED host toolchain exists and what version it
+  # reports, so resolving through ambient PATH is the operation, not an
+  # accident — a typed execution profile would answer a different question.
+  #
+  # It is not yet fully class 2. That class also requires the search path and
+  # the probes to be recorded into the action identity; this records only the
+  # resolved path (`result.path`). Naming the hatch marks it as unclassified
+  # rather than letting it read as sanctioned.
+  result.path = uncontrolledFindExe(spec.exeName)
   if result.path.len == 0:
     toolchainProbeCache[spec.convention] = result
     return
@@ -799,7 +811,7 @@ proc probeToolchainSpec(spec: ToolchainProbeSpec): ToolchainProbeResult =
   for a in spec.versionArgs:
     argv.add(a)
   try:
-    let (output, exitCode) = execCmdEx(quoteShellCommand(argv),
+    let (output, exitCode) = uncontrolledExecCmdEx(quoteShellCommand(argv),
       options = {poStdErrToStdOut, poUsePath})
     if exitCode == 0 and output.len > 0:
       result.version = firstNonEmptyLine(output)

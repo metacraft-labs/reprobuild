@@ -57,7 +57,7 @@ The repository currently contains roughly **170 `findExe`, 192 `execCmdEx` and
 tree uncompilable, and the predictable outcome of a linter that blocks all work
 is that someone deletes the linter.
 
-So `scripts/ambient-execution-baseline.txt` lists the **90 files that already
+So `scripts/ambient-execution-baseline.txt` lists the **88 files that already
 violate the rule**. The check fails only when a file *not* on that list acquires
 a banned call. New pollution is blocked; existing pollution is visible, counted,
 and shrinking.
@@ -81,6 +81,13 @@ and shrinking.
 - `repro.nim`'s Windows runtime-DLL staging edges — these resolve `clingo`,
   `zstd`, `sqlite3` and OpenSSL via `findExe` at graph-construction time and bake
   machine-specific absolute paths into copy edges.
+
+  **Now labelled, still not fixed.** These call sites use `uncontrolledFindExe`
+  so the compile closure is clean and `git grep uncontrolled` finds them, and
+  `repro.nim` has left the baseline. That is honest labelling of an accepted
+  hazard, not a resolution — the paths are still machine-specific and still
+  resolved from ambient `PATH`. The capability gap below is what would actually
+  fix them.
 
   **Blocked on a missing capability, not on effort.** `clingo` and `zstd` are now
   wired packages, so the obvious fix is for the edge to copy out of the realized
@@ -131,31 +138,67 @@ from-source bootstrap keeps its own path.
 The textual check is fast enough for pre-commit but is still grep: it can be
 fooled by a comment or a string literal. The intended authoritative form is a
 term-rewriting linter, force-imported through `config.nims` so it applies to
-every compiled module without source changes, at the **warning** tier (~427
-existing call sites make errors a non-starter until the baseline shrinks).
+every compiled module without source changes, at the **warning** tier (measured
+cost below; errors stay a non-starter until the baseline shrinks).
 
-**Status: prototyped in `lints/ambient_execution.nim`, NOT wired.** It is not
-imported by `config.nims` and does not run. Two defects block it, both
-reproduced standalone outside this repo:
+**Status: both blocking defects are resolved.** Measured per rule, one call
+site each:
 
-1. **The `findExe` rule never fires.** The identical pattern
-   (`{findExe(a, b, c)}(a: string, b: bool, c: auto)`) warns correctly in a
-   minimal two-module test, but produces nothing from this module. Cause not
-   yet identified — suspicion is interaction with the sibling rules or with the
-   `when not defined(ambientExecutionAllowed)` wrapper, but that is unconfirmed
-   and `execCmdEx` fires from inside the same `when`.
-2. **`execCmdEx` emits 301 warnings for a single call site.** The rewrite is
-   re-applied across semantic passes; `{.noRewrite.}` on the call-through
-   bounds it but does not stop it. At ~192 real call sites this would bury the
-   build log.
+| rule | before | after |
+| --- | --- | --- |
+| `findExe` | 1 | 1 |
+| `execCmdEx` | **301** | 1 |
+| `execProcess` | 1 | 1 |
+| `execShellCmd` | 1 | 1 |
+| `startProcess` | 1 | 1 |
 
-Do not wire this until both are fixed, and re-verify in BOTH directions
-afterwards — a rule that silently stops firing is indistinguishable from a
-clean tree, which is exactly defect (1).
+**Defect 1 — "the `findExe` rule never fires" — was not real.** It fires, and
+appears to have been fixed by the export-marker/arity corrections made while
+the rule was being written; the note outlived the problem. Recorded here rather
+than quietly deleted, because a stale "this is broken" note costs real time:
+the natural response to it is to go re-debug something that already works.
 
-Until then `scripts/check_ambient_execution.sh` is the only enforcement, and it
-is sufficient for the ratchet: it catches all five APIs regardless of signature,
-and it runs in pre-commit.
+**Defect 2 — 301 warnings for one `execCmdEx` — was real, and is fixed.** The
+cause was the declared return type. `warnExecCmdEx` spelled it as the actual
+`tuple[output: string, exitCode: int]`, and the structured type makes the
+compiler re-analyse the template body for a conversion; that re-analysis
+re-matches the pattern despite `{.noRewrite.}`, up to Nim's rewrite-iteration
+limit. The other four rules all return simple types and never recursed.
+Declaring the return type `auto` fixes it — verified by changing only that and
+re-measuring, 301 → 1.
+
+It is the same class as the pattern-parameter rule already documented in the
+general guide (state the type as `auto` unless a concrete type is demonstrably
+fine), one position further along the signature.
+
+### What wiring it actually costs
+
+Also measured, because the estimate in this document was wrong by an order of
+magnitude. The "~427 existing call sites" figure counted grep hits across the
+tree. The number that matters is how many sites *the compiler sees*, since only
+code in the compile closure can warn. Force-importing and compiling `repro.nim`:
+
+| | count |
+| --- | --- |
+| total warnings | 16 |
+| in reprobuild proper | 11 (10 in `repro.nim`, 1 in `repro_core`) |
+| in sibling repos | 5 |
+
+All 11 in-repo sites are now labelled with `uncontrolled*` hatches — they are
+bootstrap tier, resolving a host tool before any engine-provisioned prefix
+exists, so a typed profile is not available to them and honest labelling is the
+correct outcome rather than a stopgap. **reprobuild's own compile closure is
+clean.**
+
+Nim reports these warnings at the `{.warning.}` pragma inside the template, not
+at the call site — but it prints a `template/generic instantiation of ... from
+here` line immediately above, which carries the real location. Grep for the
+warning alone and you get a count with no addresses; grep with `-B1` and you
+get the offender.
+
+`scripts/check_ambient_execution.sh` remains the pre-commit ratchet. It is a
+different measurement on purpose: cheap enough to run without a compile, and it
+catches a violation before it is committed rather than after.
 
 For the mechanism itself — pattern arity, `auto` parameters, the export-marker
 pitfall, the warning tier and why a receive-the-call escape hatch silently fails
