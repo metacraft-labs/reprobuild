@@ -8,6 +8,85 @@ if [[ ! -d "${cmake_root}" ]]; then
   exit 0
 fi
 
+activate_msvc_dev_env() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) return 0 ;;
+  esac
+
+  if [[ -n "${VCToolsInstallDir:-}" && -n "${INCLUDE:-}" &&
+        -n "${LIB:-}" ]]; then
+    return 0
+  fi
+
+  local vsdevcmd=""
+  local vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+  if [[ -x "${vswhere}" ]]; then
+    local install_path
+    install_path="$("${vswhere}" -latest -products '*' \
+      -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
+      -property installationPath | tr -d '\r')"
+    if [[ -n "${install_path}" ]]; then
+      vsdevcmd="$(cygpath -u "${install_path}\\Common7\\Tools\\VsDevCmd.bat")"
+    fi
+  fi
+
+  if [[ ! -f "${vsdevcmd}" ]]; then
+    local candidate
+    for candidate in \
+      /c/Program\ Files/Microsoft\ Visual\ Studio/2022/*/Common7/Tools/VsDevCmd.bat \
+      /c/Program\ Files\ \(x86\)/Microsoft\ Visual\ Studio/2019/*/Common7/Tools/VsDevCmd.bat; do
+      if [[ -f "${candidate}" ]]; then
+        vsdevcmd="${candidate}"
+        break
+      fi
+    done
+  fi
+
+  if [[ ! -f "${vsdevcmd}" ]]; then
+    echo "Visual Studio C++ environment unavailable: VsDevCmd.bat not found" >&2
+    return 1
+  fi
+
+  local activation_script
+  activation_script="$(mktemp "${TMPDIR:-/tmp}/repro-msvc-env.XXXXXX.bat")"
+  printf '@call "%s" -arch=x64 -host_arch=x64 -no_logo >nul\r\n' \
+    "$(cygpath -w "${vsdevcmd}")" > "${activation_script}"
+  printf '@if errorlevel 1 exit /b %%errorlevel%%\r\n@set\r\n' \
+    >> "${activation_script}"
+
+  local env_dump
+  if ! env_dump="$(MSYS2_ARG_CONV_EXCL='/d;/c' cmd.exe /d /c \
+      "$(cygpath -w "${activation_script}")")"; then
+    rm -f "${activation_script}"
+    echo "Visual Studio C++ environment activation failed" >&2
+    return 1
+  fi
+  rm -f "${activation_script}"
+
+  local key value windows_path=""
+  while IFS='=' read -r key value; do
+    value="${value%$'\r'}"
+    case "${key}" in
+      INCLUDE|LIB|LIBPATH|UniversalCRTSdkDir|UCRTVersion|VCINSTALLDIR|\
+      VCToolsInstallDir|VCToolsVersion|VSINSTALLDIR|WindowsLibPath|\
+      WindowsSdkBinPath|WindowsSdkDir|WindowsSDKLibVersion|\
+      WindowsSDKVersion)
+        export "${key}=${value}"
+        ;;
+      Path|PATH)
+        windows_path="${value}"
+        ;;
+    esac
+  done <<< "${env_dump}"
+
+  if [[ -n "${windows_path}" ]]; then
+    export PATH="$(cygpath -p "${windows_path}")"
+  fi
+}
+
+activate_msvc_dev_env
+
 # A previously-built binary is NOT evidence that it is current. This guard used
 # to `exit 0` whenever build/bin/cmake existed, so no change to the fork's
 # sources was ever compiled again: consumers silently kept exercising a stale
