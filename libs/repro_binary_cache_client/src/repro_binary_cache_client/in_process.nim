@@ -22,8 +22,8 @@
 ## a thin wrapper that builds a ``PublishInProcessRequest`` from CLI
 ## flags and forwards.
 
-import std/[algorithm, httpclient, httpcore, net, os, random,
-            sequtils, strutils, times]
+import std/[algorithm, httpclient, httpcore, net, os,
+            sequtils, strutils, tempfiles, times]
 
 when defined(ssl):
   import wrappers/openssl
@@ -79,6 +79,8 @@ type
     identity*: CacheEntryIdentity
     endpoint*: string
     keypair*: peerAuth.PeerKeypair
+    ## Zero selects the protocol maximum. Positive values may lower it.
+    maxArchiveBytes*: int64
 
   PublishInProcessResult* = object
     ## Outcome of a single ``publishInProcess`` call.
@@ -104,6 +106,13 @@ const
   ArchiveMagic = "RBCA"
   ArchiveVersion = 2'u32
   ArchiveVersionV1 = 1'u32
+  # The server accepts 1 GiB request bodies. Reserve ample room for the
+  # signed manifest and multipart framing before deciding a payload fits.
+  MaxPublishBodyBytes = 1024'i64 * 1024 * 1024
+  MultipartFramingAllowance = 1024'i64 * 1024
+  DefaultMaxPublishArchiveBytes* =
+    MaxPublishBodyBytes - MultipartFramingAllowance
+  ArchiveCopyBufferBytes = 256 * 1024
 
 type
   ArchiveEntryKind = enum
@@ -114,6 +123,17 @@ type
   ArchiveEntry = object
     path: string
     kind: ArchiveEntryKind
+
+  PrefixArchivePlan = object
+    root: string
+    rootIsDirectory: bool
+    entries: seq[ArchiveEntry]
+    size: int64
+
+  ArchiveFileWriter = object
+    output: File
+    hasher: Blake3Hasher
+    bytesWritten: int64
 
 # ---------------------------------------------------------------------------
 # Archive writer (the shared deterministic ``rbcarc-v2`` writer).
@@ -190,6 +210,99 @@ proc fileModeOctal*(path: string): uint32 =
     return 0o644'u32
   else:
     filePermissionsMode(getFilePermissions(path))
+
+proc archiveEntryPath(plan: PrefixArchivePlan;
+                      entry: ArchiveEntry): string =
+  if plan.rootIsDirectory: plan.root / entry.path else: plan.root
+
+proc archiveEntryPayloadSize(plan: PrefixArchivePlan;
+                             entry: ArchiveEntry): int64 =
+  let path = archiveEntryPath(plan, entry)
+  case entry.kind
+  of aekFile: getFileSize(path)
+  of aekDirectory: 0
+  of aekSymlink: int64(expandSymlink(path).len)
+
+proc planPrefixArchive(prefix: string): PrefixArchivePlan =
+  result.root = absolutePath(prefix)
+  result.rootIsDirectory = dirExists(prefix)
+  result.entries =
+    if result.rootIsDirectory:
+      walkPrefix(result.root)
+    else:
+      @[ArchiveEntry(path: extractFilename(result.root), kind: aekFile)]
+  if uint64(result.entries.len) > uint64(high(uint32)):
+    raise newException(IOError, "rbcarc contains too many entries")
+  result.size = 12 # magic, version, and entry count
+  for entry in result.entries:
+    if uint64(entry.path.len) > uint64(high(uint32)):
+      raise newException(IOError, "rbcarc path is too long: " & entry.path)
+    let payloadSize = archiveEntryPayloadSize(result, entry)
+    if payloadSize < 0:
+      raise newException(IOError,
+        "cannot determine rbcarc payload size: " & entry.path)
+    let entrySize = 4'i64 + int64(entry.path.len) + 1 + 4 + 8 + payloadSize
+    if result.size > high(int64) - entrySize:
+      raise newException(IOError, "rbcarc size exceeds int64 capacity")
+    result.size += entrySize
+
+proc littleEndianBytes(value: uint64; width: int): string =
+  result = newString(width)
+  for i in 0 ..< width:
+    result[i] = char((value shr uint64(i * 8)) and 0xff'u64)
+
+proc writeArchiveBytes(writer: var ArchiveFileWriter;
+                       data: pointer; dataLen: int) =
+  if dataLen == 0:
+    return
+  if writer.output.writeBuffer(data, dataLen) != dataLen:
+    raise newException(IOError, "short write while creating rbcarc")
+  writer.hasher.update(data, dataLen)
+  writer.bytesWritten += int64(dataLen)
+
+proc writeArchiveString(writer: var ArchiveFileWriter; data: string) =
+  if data.len > 0:
+    writer.writeArchiveBytes(unsafeAddr data[0], data.len)
+
+proc writeArchiveFile(plan: PrefixArchivePlan; output: File): Blake3Digest =
+  var writer = ArchiveFileWriter(output: output, hasher: initHasher())
+  defer: writer.hasher.close()
+  writer.writeArchiveString(ArchiveMagic)
+  writer.writeArchiveString(littleEndianBytes(uint64(ArchiveVersion), 4))
+  writer.writeArchiveString(littleEndianBytes(uint64(plan.entries.len), 4))
+  for entry in plan.entries:
+    let path = archiveEntryPath(plan, entry)
+    writer.writeArchiveString(littleEndianBytes(uint64(entry.path.len), 4))
+    writer.writeArchiveString(entry.path)
+    writer.writeArchiveString($char(ord(entry.kind)))
+    let mode =
+      if entry.kind == aekSymlink: 0'u32 else: fileModeOctal(path)
+    writer.writeArchiveString(littleEndianBytes(uint64(mode), 4))
+    let payloadSize = archiveEntryPayloadSize(plan, entry)
+    writer.writeArchiveString(littleEndianBytes(uint64(payloadSize), 8))
+    case entry.kind
+    of aekFile:
+      var input: File
+      if not open(input, path, fmRead):
+        raise newException(IOError, "cannot open rbcarc input: " & path)
+      try:
+        var buffer = newString(ArchiveCopyBufferBytes)
+        while true:
+          let bytesRead = input.readBuffer(addr buffer[0], buffer.len)
+          if bytesRead == 0:
+            break
+          writer.writeArchiveBytes(addr buffer[0], bytesRead)
+      finally:
+        close(input)
+    of aekDirectory:
+      discard
+    of aekSymlink:
+      writer.writeArchiveString(expandSymlink(path))
+  if writer.bytesWritten != plan.size:
+    raise newException(IOError,
+      "rbcarc size changed while archiving: expected " & $plan.size &
+      ", wrote " & $writer.bytesWritten)
+  result = writer.hasher.finalize()
 
 proc packPrefix*(prefix: string): seq[byte] =
   ## Builds the deterministic archive bytes for the prefix tree. Same
@@ -427,16 +540,16 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
   ##      compare against ``entryKeyHex``; hard-fail on mismatch.
   ##      Without this gate, a stale baked-in hex on the caller side
   ##      would silently publish under the wrong key.
-  ##   2. Pack the prefix (directory → ``rbcarc-v2`` archive; single
-  ##      file → one-entry archive). Determinism mirrors the CLI's
-  ##      ``packPrefix``.
-  ##   3. BLAKE3-256 the archive bytes; populate the ``PayloadObject``
+  ##   2. Plan the deterministic ``rbcarc-v2`` archive and reject payloads
+  ##      that cannot fit within the server's publish-request limit.
+  ##   3. Stream the archive to a temporary file while calculating its
+  ##      BLAKE3-256 digest; populate the ``PayloadObject``
   ##      descriptor + ``realizedPrefixDigest`` (placeholder == payload
   ##      digest for v1).
   ##   4. Build + sign the ``BinaryCacheManifest`` (key, payloads,
   ##      depReferences, relocationPolicy=optional, createdAtUnix).
-  ##   5. POST the manifest + payload as multipart/form-data to
-  ##      ``<endpoint>/publish``.
+  ##   5. Stream the manifest + payload as multipart/form-data to
+  ##      ``<endpoint>/publish`` without retaining the archive in memory.
   ##
   ## Soft-fail semantics: every error populates ``result.error`` and
   ## leaves ``result.ok == false``. The caller decides whether a
@@ -461,13 +574,48 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
     result.error = "publish: prefix path does not exist: " & req.prefixDir
     return
 
-  # Pack the prefix into the deterministic archive bytes.
-  let payloadBytes =
-    if dirExists(req.prefixDir): packPrefix(req.prefixDir)
-    else: packSingleFilePrefix(req.prefixDir)
+  let archivePlan =
+    try:
+      planPrefixArchive(req.prefixDir)
+    except CatchableError as e:
+      result.error = "publish: cannot plan prefix archive: " & e.msg
+      return
+  if req.maxArchiveBytes < 0:
+    result.error = "publish: maxArchiveBytes cannot be negative"
+    return
+  let maxArchiveBytes =
+    if req.maxArchiveBytes == 0:
+      DefaultMaxPublishArchiveBytes
+    else:
+      min(req.maxArchiveBytes, DefaultMaxPublishArchiveBytes)
+  if archivePlan.size > maxArchiveBytes:
+    result.error = "publish skipped: prefix archive is " &
+      $archivePlan.size & " bytes, exceeding the " & $maxArchiveBytes &
+      "-byte /publish payload limit"
+    return
 
-  # Hash the payload bytes (the digest the manifest must declare).
-  let rawDigest = blake3.digest(payloadBytes)
+  var archiveFile: File
+  var archivePath = ""
+  var archiveOpen = false
+  defer:
+    if archiveOpen:
+      try: close(archiveFile)
+      except CatchableError: discard
+    if archivePath.len > 0 and fileExists(archivePath):
+      try: removeFile(archivePath)
+      except CatchableError: discard
+  var rawDigest: Blake3Digest
+  try:
+    let temp = createTempFile("repro-publish-", ".rbcarc")
+    archiveFile = temp.cfile
+    archivePath = temp.path
+    archiveOpen = true
+    rawDigest = writeArchiveFile(archivePlan, archiveFile)
+    close(archiveFile)
+    archiveOpen = false
+  except CatchableError as e:
+    result.error = "publish: cannot create prefix archive: " & e.msg
+    return
   var payloadDigest: bcsTypes.Blake3Hash
   for i in 0 ..< 32:
     payloadDigest[i] = rawDigest[i]
@@ -484,8 +632,8 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
   let payloadObj = bcsTypes.PayloadObject(
     kind: bcsTypes.pkPrefixArchive,
     compression: bcsTypes.ckNone,
-    declaredSize: uint64(payloadBytes.len),
-    uncompressedSize: uint64(payloadBytes.len),
+    declaredSize: uint64(archivePlan.size),
+    uncompressedSize: uint64(archivePlan.size),
     digest: payloadDigest,
     name: "prefix.rbcarc")
   var manifest = bcsTypes.BinaryCacheManifest(
@@ -499,9 +647,12 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
   serverCodec.signManifest(req.keypair, manifest)
   let manifestBytes = serverCodec.encodeManifest(manifest)
 
-  randomize()
-  let boundary = "----RBC-cli-" & $rand(99_999_999)
-  let body = buildMultipartBody(boundary, manifestBytes, payloadBytes)
+  var manifestContent = newString(manifestBytes.len)
+  for i, value in manifestBytes:
+    manifestContent[i] = char(value)
+  let multipart = newMultipartData()
+  multipart.add("manifest", manifestContent)
+  discard multipart.addFiles({"payload": archivePath})
   let baseUrl =
     if req.endpoint.len > 0: req.endpoint
     else: "http://localhost:7878"
@@ -533,10 +684,9 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
     else:
       newHttpClient(timeout = 60_000)
   defer: client.close()
-  client.headers["Content-Type"] = "multipart/form-data; boundary=" & boundary
-  result.bytesUploaded = body.len
   try:
-    let resp = client.request(url, HttpPost, body)
+    let resp = client.request(url, HttpPost, multipart = multipart)
+    result.bytesUploaded = int(parseBiggestInt(client.headers["Content-Length"]))
     result.statusCode = int(resp.code)
     result.responseBody = resp.body
     if result.statusCode >= 300:
