@@ -46,9 +46,23 @@ package rlpNotAProvider:
     "nim >=2.2 <3.0"
 
 proc tempRoot(name: string): string =
-  result = getTempDir() / ("repro-rlp-" & name)
+  ## A scratch root unique to this process.
+  ##
+  ## An earlier version keyed the path on `name` alone and `removeDir`'d it
+  ## first. That collides between concurrent runs of the suite, and on Windows
+  ## the `removeDir` itself can fail outright — store files are frequently
+  ## read-only, and any lingering handle makes the whole test error rather than
+  ## fail, which reads as a code defect when it is a fixture defect. Including
+  ## the pid means each run gets its own tree and nothing has to be deleted
+  ## before use.
+  result = getTempDir() / ("repro-rlp-" & $getCurrentProcessId() & "-" & name)
   if dirExists(result):
-    removeDir(result)
+    try:
+      removeDir(result)
+    except OSError:
+      # Same-pid reuse within one run is not expected; if the directory cannot
+      # be cleared, a fresh suffix is better than aborting the test.
+      result = result & "-b"
   createDir(result)
 
 proc realized(pkg, prefix, exe: string): RealizedRecord =
