@@ -7,25 +7,49 @@
 ## is none of the three sanctioned classes: it resolves an arbitrary host binary
 ## through ambient ``PATH`` and records nothing.
 ##
-## This module is force-imported into every compiled module by ``config.nims``
-## (``switch("import", "lints/ambient_execution")``), so it applies with no
-## source changes anywhere.
+## This module is intended to be force-imported into every compiled module by
+## ``config.nims`` (``switch("import", "lints/ambient_execution")``), so the
+## rules apply with no source changes anywhere. **It is not yet**, and the
+## measured reason is below.
+##
+## Where it IS active it is imported explicitly, by the modules that use the
+## ``uncontrolled*`` hatches.
 ##
 ## **Warning tier, on purpose.** Errors would make the tree uncompilable and
 ## the linter would be deleted rather than obeyed. Each rule flips to
 ## ``{.error.}`` once its call sites reach zero.
 ##
-## An earlier revision of this header said "~427 call sites already violate the
-## rule". That figure came from counting grep hits across the tree and was
-## badly misleading about the enforcement cost. Measured by actually
-## force-importing and compiling ``repro.nim`` — the real question, since only
-## code in the compile closure can warn — the violation count was **16**, of
-## which 11 were in reprobuild proper. Those 11 are now labelled with the
-## hatches below, and the compile closure is clean; the remaining 5 live in
-## sibling repos.
+## ## What force-importing costs — measured twice, because the first
+## ## measurement was too narrow
 ##
-## The lesson generalises past this file: a grep count over a source tree
-## measures text, and the thing that matters is what the compiler sees.
+## An earlier revision of this header cited "~427 call sites" from grep hits,
+## and a later one cited **16** from compiling ``repro.nim`` with the linter
+## force-imported. The second was measured, but on the wrong thing:
+## ``repro.nim`` is the BUILD RECIPE. It does not import ``repro_home_apply``,
+## ``repro_tool_profiles`` or most of the engine, so it was never going to see
+## their call sites. Concluding "the compile closure is clean" from it was an
+## overreach.
+##
+## Compiling the actual test suite (118 binaries) with the linter
+## force-imported gives the real figure: **175 distinct call sites**,
+## concentrated in
+##
+##   * ``repro_home_apply/builtin_adapter.nim`` — 55
+##   * ``repro_tool_profiles.nim`` — 24
+##   * the rest spread thinly across drivers, recipes and tests.
+##
+## Those 175 sites emit 1812 warning LINES across a full test run, because each
+## binary that transitively imports a module re-emits its warnings. That volume
+## is what makes force-importing unusable today — not any breakage. All 118
+## binaries built and passed with it on.
+##
+## So the original grep-based estimate was closer to right than the narrow
+## compile-based one. The lesson is not "grep is fine"; it is that a compile
+## measurement is only as good as the entry point you compile, and a single
+## entry point is not the tree.
+##
+## Wiring it needs the concentration migrated first — ``builtin_adapter`` and
+## ``repro_tool_profiles`` are over half the total between them.
 ##
 ## ``scripts/check_ambient_execution.sh`` keeps a separate grep-based ratchet
 ## over 88 baseline files. That is not the same measurement and is not meant to

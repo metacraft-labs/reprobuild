@@ -171,24 +171,49 @@ It is the same class as the pattern-parameter rule already documented in the
 general guide (state the type as `auto` unless a concrete type is demonstrably
 fine), one position further along the signature.
 
-### What wiring it actually costs
+### What wiring it actually costs — and a measurement mistake worth keeping
 
-Also measured, because the estimate in this document was wrong by an order of
-magnitude. The "~427 existing call sites" figure counted grep hits across the
-tree. The number that matters is how many sites *the compiler sees*, since only
-code in the compile closure can warn. Force-importing and compiling `repro.nim`:
+**Still not wired.** Two figures were produced before the right one, and the
+sequence is instructive.
+
+*First:* "~427 existing call sites", from grep hits across the tree. Text, not
+compilation — a comment or a string literal counts.
+
+*Second:* **16**, from force-importing the linter and compiling `repro.nim`.
+This was a compile measurement, which sounds like the right kind — but on the
+wrong entry point. `repro.nim` is the **build recipe**. It does not import
+`repro_home_apply`, `repro_tool_profiles`, or most of the engine, so it was
+never going to see their call sites. Concluding "reprobuild's compile closure
+is clean" from it was an overreach, and the 11 sites it did find were fixed on
+the strength of a number that did not mean what it appeared to.
+
+*Third, and correct:* compile the **test suite** — 118 binaries, covering the
+engine properly:
 
 | | count |
 | --- | --- |
-| total warnings | 16 |
-| in reprobuild proper | 11 (10 in `repro.nim`, 1 in `repro_core`) |
-| in sibling repos | 5 |
+| distinct call sites | **175** |
+| warning lines across a full run | 1812 |
+| `repro_home_apply/builtin_adapter.nim` | 55 sites |
+| `repro_tool_profiles.nim` | 24 sites |
+| everything else | thinly spread across drivers, recipes and tests |
 
-All 11 in-repo sites are now labelled with `uncontrolled*` hatches — they are
-bootstrap tier, resolving a host tool before any engine-provisioned prefix
+The 1812 is the same 175 sites re-warned by every binary that transitively
+imports the module. Nothing breaks — all 118 binaries built and passed with the
+force-import on — but that volume is unusable as a default.
+
+So the original grep estimate was closer to right than the narrow compile one.
+The lesson is not "grep is fine": it is that **a compile measurement is only as
+good as the entry point you compile**, and one entry point is not the tree.
+
+Wiring needs the concentration migrated first — `builtin_adapter` and
+`repro_tool_profiles` are over half the total between them, and both are named
+in "Known offenders worth migrating first" above.
+
+The 11 sites the narrow measurement found are still worth having labelled: they
+are bootstrap tier, resolving a host tool before any engine-provisioned prefix
 exists, so a typed profile is not available to them and honest labelling is the
-correct outcome rather than a stopgap. **reprobuild's own compile closure is
-clean.**
+right outcome regardless of how they were found.
 
 Nim reports these warnings at the `{.warning.}` pragma inside the template, not
 at the call site — but it prints a `template/generic instantiation of ... from
