@@ -4450,10 +4450,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           error: "binary-cache publisher raised: " & e.msg)
     if not res.ok:
       stats.addCounterMetric("repro binary-cache publish failures", 1)
+      var detail = "status=" & $res.statusCode
+      if res.error.len > 0:
+        detail.add(" error=" & res.error)
+      runResult.trace(action.id, "binary-cache-publish-failed", detail)
     else:
       stats.addCounterMetric("repro binary-cache publish ok", 1)
       stats.addCounterMetric("repro binary-cache publish bytes uploaded",
         res.bytesUploaded)
+      runResult.trace(action.id, "binary-cache-published",
+        "status=" & $res.statusCode & " bytes=" & $res.bytesUploaded)
     finishStat("repro binary-cache publish", publishStart)
 
   proc tryFastNoopCacheHits(): Option[BuildRunResult] =
