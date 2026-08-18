@@ -562,15 +562,17 @@ package reprobuild:
         requiredBinaries.add(reproBinaryPath)
       if spec.source ==
           "tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim":
-        # Both separately compiled compatibility peers are runtime fixtures of
-        # this integration binary. The typed input paths make a focused graph
-        # target build them, while the explicit ids make the ordering contract
-        # unambiguous even though helper declarations occur later in this
-        # project body.
-        requiredBinaries.add("build/test-bin/legacy_cache_peer_origin_dev")
-        requiredBinaries.add("build/test-bin/legacy_cache_peer_legacy_wire")
-        executeDeps.add("reprobuild.test_helpers.legacy_cache_peer_origin_dev")
-        executeDeps.add("reprobuild.test_helpers.legacy_cache_peer_legacy_wire")
+        when not defined(windows):
+          # Both separately compiled compatibility peers are runtime fixtures
+          # of this integration binary. The typed input paths make a focused
+          # graph target build them, while the explicit ids make the ordering
+          # contract unambiguous even though helper declarations occur later.
+          requiredBinaries.add("build/test-bin/legacy_cache_peer_origin_dev")
+          requiredBinaries.add("build/test-bin/legacy_cache_peer_legacy_wire")
+          executeDeps.add(
+            "reprobuild.test_helpers.legacy_cache_peer_origin_dev")
+          executeDeps.add(
+            "reprobuild.test_helpers.legacy_cache_peer_legacy_wire")
       let executeEdge = edge.testBinary.run(
         deps = executeDeps,
         requiredBinaries = requiredBinaries,
@@ -1019,40 +1021,41 @@ package reprobuild:
       cacheable = false)
     reprobuildTestHelpersActions.add(legacyWireGenerator)
 
-    reprobuildTestHelpersActions.add(nim.c(
-      source = "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer.nim",
-      binary = "build/test-bin/legacy_cache_peer_origin_dev",
-      paths = sourceOnlyNimPaths,
-      extraInputs = @[
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/README.md",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_main.nim",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index.nim",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/atomics_shm.nim",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/daemon.nim",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/layout.nim",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/mapping.nim",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/ring.nim",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/segment.nim",
-      ],
-      extraEnv = sourceOnlyEnv,
-      nimcache = "build/nimcache/legacy_cache_peer_origin_dev",
-      cacheable = false,
-      actionId = "reprobuild.test_helpers.legacy_cache_peer_origin_dev"))
+    when not defined(windows):
+      reprobuildTestHelpersActions.add(nim.c(
+        source = "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer.nim",
+        binary = "build/test-bin/legacy_cache_peer_origin_dev",
+        paths = sourceOnlyNimPaths,
+        extraInputs = @[
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/README.md",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_main.nim",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index.nim",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/atomics_shm.nim",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/daemon.nim",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/layout.nim",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/mapping.nim",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/ring.nim",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/segment.nim",
+        ],
+        extraEnv = sourceOnlyEnv,
+        nimcache = "build/nimcache/legacy_cache_peer_origin_dev",
+        cacheable = false,
+        actionId = "reprobuild.test_helpers.legacy_cache_peer_origin_dev"))
 
-    reprobuildTestHelpersActions.add(nim.c(
-      source = "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_legacy_wire.nim",
-      binary = "build/test-bin/legacy_cache_peer_legacy_wire",
-      paths = sourceOnlyNimPaths,
-      extraInputs = legacyWireGeneratedSources & @[
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/README.md",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/generate_legacy_wire.py",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_main.nim",
-      ],
-      after = [legacyWireGenerator],
-      extraEnv = sourceOnlyEnv,
-      nimcache = "build/nimcache/legacy_cache_peer_legacy_wire",
-      cacheable = false,
-      actionId = "reprobuild.test_helpers.legacy_cache_peer_legacy_wire"))
+      reprobuildTestHelpersActions.add(nim.c(
+        source = "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_legacy_wire.nim",
+        binary = "build/test-bin/legacy_cache_peer_legacy_wire",
+        paths = sourceOnlyNimPaths,
+        extraInputs = legacyWireGeneratedSources & @[
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/README.md",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/generate_legacy_wire.py",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_main.nim",
+        ],
+        after = [legacyWireGenerator],
+        extraEnv = sourceOnlyEnv,
+        nimcache = "build/nimcache/legacy_cache_peer_legacy_wire",
+        cacheable = false,
+        actionId = "reprobuild.test_helpers.legacy_cache_peer_legacy_wire"))
 
     # Binary-cache integration-test subprocess helpers (A2/A2.5/A3/A4).
     #
