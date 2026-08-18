@@ -820,6 +820,9 @@ proc startDirect*(command: ReproCommandSpec): ReproDirectRunningProcess =
   except CatchableError as err:
     raise newException(ReproRunQuotaError, err.msg)
 
+proc processId*(running: ReproDirectRunningProcess): int =
+  int(running.child.info.processId)
+
 proc pollCompletion*(running: var ReproDirectRunningProcess): bool =
   if running.completed:
     return true

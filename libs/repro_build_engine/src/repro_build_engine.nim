@@ -2341,7 +2341,14 @@ when defined(windows):
     ## each process is opened once and reused across wait iterations.
     if item.processWaitHandle != 0:
       return item.processWaitHandle
-    let pid = processID(item.process)
+    let pid =
+      case item.processKind
+      of rpkHelperProcess:
+        processID(item.process)
+      of rpkBypassProcess:
+        item.directProcess.processId()
+      else:
+        0
     if pid <= 0:
       return 0
     let handle = openProcess(SYNCHRONIZE, WINBOOL(0), DWORD(pid))
@@ -2370,7 +2377,7 @@ when defined(windows):
       if count >= MAXIMUM_WAIT_OBJECTS:
         break
       case running[i].processKind
-      of rpkHelperProcess:
+      of rpkHelperProcess, rpkBypassProcess:
         let h = ensureRunningProcessHandle(running[i])
         if h != 0:
           handles[count] = h
@@ -2379,13 +2386,17 @@ when defined(windows):
       else:
         discard
     if count == 0:
+      sleep(timeoutMs)
       return -1
     let ret = waitForMultipleObjects(DWORD(count), addr handles,
                                      WINBOOL(0), DWORD(timeoutMs))
     const WAIT_OBJECT_0_DWORD = DWORD(0)
     const WAIT_TIMEOUT_DWORD = DWORD(0x102)
     const WAIT_FAILED_DWORD = cast[DWORD](0xFFFFFFFF'u32)
-    if ret == WAIT_TIMEOUT_DWORD or ret == WAIT_FAILED_DWORD:
+    if ret == WAIT_TIMEOUT_DWORD:
+      return -1
+    if ret == WAIT_FAILED_DWORD:
+      sleep(timeoutMs)
       return -1
     let signaled = int(ret - WAIT_OBJECT_0_DWORD)
     if signaled < 0 or signaled >= count:
