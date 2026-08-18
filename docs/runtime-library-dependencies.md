@@ -49,18 +49,16 @@ and a per-platform **binding decision algorithm**:
 
 Two links are missing, and they are small and specific.
 
-**1. Nothing populates `runtimeLibraryDirs`.**
-`libs/repro_home_apply/src/repro_home_apply/materialize_launchers.nim:86`:
+**1. Nothing populates `runtimeLibraryDirs`.** — **CLOSED.**
 
-```nim
-result.runtimeLibraryDirs = @[]
-```
+`materialize_launchers.nim` read `result.runtimeLibraryDirs = @[]` since the
+field was introduced, so every launch plan claimed no runtime library
+directories, the binding algorithm had nothing to bind, and the platform
+launchers did nothing — which is why consumers resorted to copying DLLs by
+hand. It is now supplied from the declared model; see "How it fits together"
+below.
 
-Hardcoded empty. Every launch plan claims no runtime library directories, so
-the binding algorithm has nothing to bind and the platform launchers do
-nothing — which is why consumers resort to copying DLLs by hand.
-
-**2. The consumer-side declaration exists and is unwired.**
+**2. The consumer-side declaration exists and was unwired.** — **CLOSED.**
 
 An earlier revision of this document said "there is no consumer-side
 declaration" and proposed inventing a `loads:` block. **That was wrong, and
@@ -192,7 +190,68 @@ baseline (`docs/ambient-execution-linter.md`). All five are the "app-local DLL
 layout" strategy — the spec's Windows *fallback #2* — applied because the
 primary strategy is unreachable.
 
+## How it fits together
+
+The model is wired end to end. Both halves are declarations; the engine joins
+them and the existing binding algorithm acts on the result.
+
+```nim
+# producer — the package that PROVIDES the library says where it lives,
+# because it is the only party that knows its own prefix layout
+package clingo:
+  runtimeLibrary "clingo", dir = runtimeLibDir(plConda),
+    cpu = "x86_64", os = "windows"
+  runtimeLibrary "clingo", dir = runtimeLibDir(plUnix), os = "linux"
+
+# consumer — names the dependency, and nothing about its layout
+package someTool:
+  runtimeDeps:
+    "clingo"
+```
+
+| stage | where |
+| --- | --- |
+| producer declaration | `runtimeLibrary` → `PackageDef.runtimeLibraries` |
+| consumer declaration | `runtimeDeps:` → `PackageDef.runtimeDeps` |
+| host slice selection | `selectRuntimeLibraries(pkg, cpu, os)` |
+| the join | `resolveRuntimeLibraryDirs(deps, cpu, os, prefixOf)` |
+| population | `materializeLaunchers` → `LaunchPlan.runtimeLibraryDirs` |
+| binding | `decideBinding()` — unchanged, it already consumed `dependencyDirs` |
+
+**Which dependencies are libraries** is answered without a heuristic: a
+dependency contributes a directory exactly when the package providing it
+declares a `runtimeLibrary` matching this host. `runtimeDeps:` carries
+"tools/libraries" together, so classifying by name would have been unreliable
+and invisible when wrong. A tool declares none and contributes none.
+
+**An unresolved dependency raises.** A package that declares a runtime library
+for this host but has no realized prefix is a planner bug, and omitting its
+directory would produce a launcher that looks complete and dies at load time
+with the "could not load" this whole model exists to prevent.
+
+**One trap worth knowing.** `hostArch()` in the launcher layer reports `arm64`
+for the machine the DSL's `cpu = "..."` fields call `aarch64`. Passing it
+straight into the matcher makes every `cpu = "aarch64"` declaration match no
+host — silently, since a non-matching slice is indistinguishable from an absent
+one. The vocabularies are converted in `dslCpuToken`, not conflated.
+
+### What this does *not* do yet
+
+Most `runtimeDeps:` blocks are empty TODO stubs (226 of 286), so populating
+directories from this field does nothing for most packages until those are
+filled in. That is the correct place for the information, but it means this
+change on its own does not fix a given package's runtime loading — the recipe
+has to declare the dependency first.
+
+The five hand-rolled `clingo.dll` arrangements below are also still in place.
+Retiring them is per-consumer work now that the mechanism exists, not a
+prerequisite of it, and the bootstrap floor means at least the build-time
+staging stays regardless.
+
 ## Implementation path
+
+*(Historical — all four steps are done. Kept because the reasoning about what
+was struck and why is still the best summary of the design.)*
 
 Step 1 of the original plan — "invent a consumer declaration" — is struck: the
 declaration is `runtimeDeps:`, and inventing a `loads:` block alongside it would
@@ -219,10 +278,24 @@ have created two ways to say the same thing.
 4. **Retire the hand-rolled staging** as each consumer moves over, removing the
    corresponding baseline entries.
 
-### Design questions to settle before step 1
+### Design questions, and how each was answered
 
-These are the reason this is a feature rather than a patch, and they should be
-answered deliberately rather than discovered during implementation:
+These were recorded as things to settle deliberately rather than discover
+mid-implementation. Each is now decided; the answers are the interesting part
+of the design:
+
+- **Which entries are libraries?** → Ask the provider. A dependency contributes
+  a directory exactly when the providing package declares a `runtimeLibrary`
+  for this host. No name-based classification.
+- **How does a constraint string map to a package?** → The leading token, the
+  same rule `selectorFromConstraint` applies at macro time.
+- **What does an unresolvable entry do?** → Raises. Silently omitting is the
+  original bug relocated.
+- **The empty stubs** → left empty. The mechanism works; the 226 TODO blocks are
+  recipe-authoring work, and filling them in is what makes it act.
+
+The original statements of each follow, since the reasoning behind them is why
+those answers are the right ones:
 
 - **Which `runtimeDeps` entries are libraries?** The field is documented as
   carrying "tools/libraries". A tool needs `PATH`; a library needs the loader
