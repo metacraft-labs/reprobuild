@@ -232,7 +232,8 @@ suite "M9.L.4-refactor Step A — publishInProcess library API":
     createDir(prefixDir / "share")
     writeFile(prefixDir / "bin" / "exec", "executable-payload")
     writeFile(prefixDir / "share" / "data.txt", "text payload\nline two\n")
-    var blob = newString(2048)
+    # Exercise the same bounded HTTP upload path used by production artifacts.
+    var blob = newString(24 * 1024 * 1024)
     for i in 0 ..< blob.len:
       blob[i] = char(i mod 256)
     writeFile(prefixDir / "blob.bin", blob)
