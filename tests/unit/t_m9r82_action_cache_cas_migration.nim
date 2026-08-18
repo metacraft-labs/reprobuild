@@ -85,6 +85,50 @@ suite "M9.R.82 action-cache R11 CAS migration":
     cas.materializeActionCacheOutputs(hit.record, actionRoot)
     check readFile(outputPath) == "cached alpha\n"
 
+  test "directory outputs round-trip through R11 CAS":
+    let tempRoot = createTempDir("repro-m9r82-r11-directory-", "")
+    defer:
+      try: removeDir(extendedPath(tempRoot)) except OSError: discard
+
+    let sharedRoot = tempRoot / ".repro"
+    let actionRoot = tempRoot / "work"
+    let inputPath = actionRoot / "input.txt"
+    let outputDir = actionRoot / "tree"
+    writeFixture(inputPath, "alpha\n")
+    writeFixture(outputDir / "nested" / "payload.txt", "cached tree\n")
+    createDir(outputDir / "empty")
+    when defined(posix):
+      createSymlink("nested/payload.txt", outputDir / "payload-link")
+
+    var cas = openCasStore(sharedRoot)
+    defer: cas.close()
+    var cache = openActionCache(sharedRoot / "action-cache")
+    let record = cache.recordActionResult(cas.inner,
+      weakFor("r11-directory"), ffpChecksum, [inputPath], ["tree"],
+      actionRoot)
+    require record.outputs.len == 1
+    check record.outputs[0].metadata.kind == ffkDirectory
+    let snapshot = cas.casGet(record.outputs[0].blob.r11Hash())
+    check snapshot.len >= 4
+    check snapshot[0 .. 3] == @[byte('R'), byte('B'), byte('D'), byte('T')]
+
+    removeDir(outputDir)
+    var reloaded = openActionCache(sharedRoot / "action-cache")
+    let hit = reloaded.lookupActionResult(cas.inner,
+      weakFor("r11-directory"), ffpChecksum)
+    check hit.status == aclHit
+    cas.materializeActionCacheOutputs(hit.record, actionRoot)
+    check readFile(outputDir / "nested" / "payload.txt") == "cached tree\n"
+    check dirExists(outputDir / "empty")
+    when defined(posix):
+      check symlinkExists(outputDir / "payload-link")
+      check expandSymlink(outputDir / "payload-link") == "nested/payload.txt"
+
+    writeFile(outputDir / "stale.txt", "must be replaced\n")
+    cas.materializeActionCacheOutputs(hit.record, actionRoot)
+    check not fileExists(outputDir / "stale.txt")
+    check readFile(outputDir / "nested" / "payload.txt") == "cached tree\n"
+
   test "legacy LocalCas records reject cleanly under R11 verifier":
     let tempRoot = createTempDir("repro-m9r82-legacy-reject-", "")
     defer:

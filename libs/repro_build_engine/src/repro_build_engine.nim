@@ -915,14 +915,24 @@ proc materializeActionCacheOutputs*(cas: CasStore;
   if record.outputPayloadKind != opkCasBlobs:
     raise newException(CacheIntegrityError,
       "cache record does not contain output payloads")
+  var payloads: seq[seq[byte]] = @[]
+  for output in record.outputs:
+    payloads.add(cas.casGet(contentHashForActionBlob(output.blob)))
   var entries: seq[CasMaterialization] = @[]
   for output in record.outputs:
+    if output.metadata.kind == ffkDirectory:
+      continue
     entries.add(CasMaterialization(
       hash: contentHashForActionBlob(output.blob),
       destination: actionOutputPath(outputRoot, output.path),
       applyPermissions: true,
       permissions: output.permissions))
   cas.casMaterialize(entries)
+  for i, output in record.outputs:
+    if output.metadata.kind != ffkDirectory:
+      continue
+    materializeDirectorySnapshotPayload(payloads[i],
+      actionOutputPath(outputRoot, output.path), output.permissions)
 
 proc defaultBuildEngineConfig*(cacheRoot: string;
                                actionCacheRoot: string = ""): BuildEngineConfig =
