@@ -20,6 +20,472 @@ sys.modules[SPEC.name] = inventory
 SPEC.loader.exec_module(inventory)
 
 
+def built_test_binaries(root):
+    """(present, declared) counts of Nim test binaries on disk.
+
+    A REAL capability probe, not a heuristic: it asks the checked-in graph
+    which binaries the suite declares and then stats each one under `root`.
+    Everything in `SuiteInventoryTests` that reads a per-binary catalog needs
+    `present == declared`; a tree with 97 of 1240 cannot answer those
+    questions at all.
+    """
+    nim_specs, _ = inventory.parse_repro_tests(root)
+    present = sum(1 for spec in nim_specs if (root / spec.binary).is_file())
+    return present, len(nim_specs)
+
+
+# Set by `scripts/run_tests.sh`, which builds `.#test-builds` immediately
+# before running the Python tests. In THAT context a declared binary that is
+# not on disk is a build defect, not a working-tree state, so the capability
+# check must refuse rather than step aside.
+REQUIRE_BUILT_TREE_ENV = "REPROBUILD_SUITE_INVENTORY_REQUIRE_BUILT_TREE"
+
+
+def static_entry_baseline_mismatches(tests, recorded):
+    """Entries of a built inventory that disagree with the checked-in baseline.
+
+    The inventory document is scanned from the SOURCES per entry; the
+    baseline is the checked-in record of the same scan. Comparing them PER
+    ENTRY rather than in aggregate is the point: two offsetting errors sum to
+    the same total, and the old hand-typed aggregate could not tell them
+    apart from a clean tree.
+
+    Returns `(source, recorded, measured)` triples, empty when they agree. An
+    entry naming a source the baseline has never heard of is a mismatch too,
+    reported with `None` on the recorded side rather than raising.
+    """
+    mismatches = []
+    for item in tests:
+        measured = (item["language"], item["staticCaseCount"])
+        if recorded.get(item["source"]) != measured:
+            mismatches.append(
+                (item["source"], recorded.get(item["source"]), measured)
+            )
+    return sorted(mismatches)
+
+
+def built_tree_verdict(present, declared, require):
+    """Decide what a partially built tree means. Returns (verdict, message).
+
+    Extracted so the DECISION is testable on its own. A guard that always
+    skipped would turn a whole file green while proving nothing, and nothing
+    inside a skipped test can notice that — so the three-way choice is pinned
+    by `BuiltTreeCapabilityTests` against synthetic counts instead.
+    """
+    if present == declared:
+        return "run", ""
+    message = (
+        f"this tree has {present} of {declared} declared test binaries built "
+        f"({declared - present} missing). The assertions in this test read a "
+        "catalog enumerated from BUILT binaries and cannot be evaluated "
+        "against a partial tree. Build them with `just test` (or `repro "
+        "build .#test-builds`) and re-run. The case-count gate does not "
+        "depend on this and ran: see StaticCaseCountBaselineTests."
+    )
+    if require:
+        return "fail", f"{REQUIRE_BUILT_TREE_ENV}=1 but {message}"
+    return "skip", message
+
+
+class BuiltTreeCapabilityTests(unittest.TestCase):
+    """The capability check must be a check, not a blanket exemption.
+
+    `require_fully_built_test_tree` is the reason seven tests in this file
+    stopped being permanently red. That makes it exactly the kind of code
+    that must not be allowed to rot into "always step aside": nothing inside
+    a skipped test can report that it was skipped for a bad reason.
+    """
+
+    def test_a_complete_tree_runs_the_assertions(self):
+        self.assertEqual(built_tree_verdict(1240, 1240, False)[0], "run")
+        self.assertEqual(built_tree_verdict(1240, 1240, True)[0], "run")
+
+    def test_a_partial_tree_steps_aside_and_says_by_how_much(self):
+        verdict, message = built_tree_verdict(97, 1240, False)
+        self.assertEqual(verdict, "skip")
+        self.assertIn("97 of 1240", message)
+        self.assertIn("1143 missing", message)
+        self.assertIn("StaticCaseCountBaselineTests", message)
+
+    def test_one_missing_binary_is_enough_to_step_aside(self):
+        """No fractional threshold. 1239 of 1240 is still not a full tree."""
+        self.assertEqual(built_tree_verdict(1239, 1240, False)[0], "skip")
+
+    def test_the_suite_runner_turns_the_same_shortfall_into_a_failure(self):
+        """`scripts/run_tests.sh` has just built everything, so a gap is a bug."""
+        verdict, message = built_tree_verdict(97, 1240, True)
+        self.assertEqual(verdict, "fail")
+        self.assertIn(REQUIRE_BUILT_TREE_ENV, message)
+        self.assertIn("97 of 1240", message)
+
+    def test_the_suite_runner_sets_that_variable(self):
+        """The wiring, not just the branch: the two must not drift apart."""
+        runner = (REPO_ROOT / "scripts/run_tests.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertTrue(
+            f"export {REQUIRE_BUILT_TREE_ENV}=1" in runner,
+            "scripts/run_tests.sh must export "
+            f"{REQUIRE_BUILT_TREE_ENV}=1 before running the Python tests; "
+            "without it the one context that guarantees a complete tree "
+            "would report a missing binary as a skip.",
+        )
+
+    def test_the_probe_stats_the_root_it_is_given(self):
+        """Not a global, and not a constant: point it at an empty tree.
+
+        A probe that read the ambient repository would report a full tree
+        from anywhere, which is how a capability check quietly becomes a
+        blanket skip.
+        """
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / "repro_tests.nim").write_text(
+                (REPO_ROOT / "repro_tests.nim").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            present, declared = built_test_binaries(root)
+        self.assertEqual(present, 0)
+        self.assertGreater(declared, 1000)
+        live_present, live_declared = built_test_binaries(REPO_ROOT)
+        self.assertEqual(live_declared, declared)
+        self.assertLessEqual(live_present, live_declared)
+
+
+class StaticCaseCountBaselineTests(unittest.TestCase):
+    """The always-on half of the suite-inventory gate.
+
+    WHY THIS CLASS EXISTS SEPARATELY FROM ``SuiteInventoryTests``.
+
+    The suite's case-count gate used to be a single hand-typed integer
+    (``... == 6839``) asserted at the tail of
+    ``test_static_inventory_covers_every_declared_test``, which first calls
+    ``build_inventory`` and therefore requires a tree with all ~1240 test
+    binaries built and probed. Two consequences, both observed:
+
+      * In a working tree (97 of 1240 binaries built) the assertion is
+        NEVER REACHED — the same test dies earlier on
+        ``'missing-binary' != 'catalog'`` — so no contributor has ever seen
+        the gate's verdict locally.
+      * In CI it is reached only after hours of building plus ~30 minutes of
+        probing, and the CI workflow's own budget note records that the job
+        is routinely consumed before it gets there. When it does fire it
+        fires as ``6844 != 6847`` at 5h54m: maximally expensive, and it does
+        not name a single file.
+
+    So the number could neither be checked nor regenerated by the people
+    obliged to move it, and twenty-six statically visible cases reached
+    `dev` without it moving. A gate that is permanently red — or permanently
+    unreachable — teaches everyone to ignore it, which is worse than no gate.
+
+    These tests read ONLY the source tree, need NO built binaries, and never
+    skip. They are the gate for the property the pin existed to protect:
+    a test case may not leave the catalog unnoticed.
+    """
+
+    _MEASURED = None
+
+    @classmethod
+    def measured(cls):
+        """One static scan of the whole tree, shared by every test here."""
+        if cls._MEASURED is None:
+            cls._MEASURED = inventory.static_case_counts(REPO_ROOT)
+        return cls._MEASURED
+
+    def test_baseline_file_is_tracked_and_parses(self):
+        """The baseline is a checked-in file, and a malformed row is an error.
+
+        A parser that shrugged at a bad row would let the file be emptied by
+        a bad merge and still report "no drift" — the same silence this
+        mechanism exists to remove. So the negative cases are asserted here,
+        not just the happy path.
+        """
+        path = REPO_ROOT / inventory.STATIC_CASE_COUNTS_PATH
+        self.assertTrue(path.is_file(), f"missing baseline: {path}")
+        recorded = inventory.load_static_case_counts(REPO_ROOT)
+        self.assertGreater(len(recorded), 1000)
+        for text, fragment in (
+            ("a\tnim\n", "expected <source>"),
+            ("a\tnim\tb\n", "not an integer"),
+            ("a\trust\t1\n", "unknown language"),
+            ("a\tnim\t1\na\tnim\t2\n", "appears twice"),
+        ):
+            with self.subTest(malformed=text):
+                with self.assertRaises(ValueError) as caught:
+                    inventory.parse_static_case_counts(text)
+                self.assertIn(fragment, str(caught.exception))
+
+    def test_baseline_is_byte_identical_to_what_the_writer_produces(self):
+        """Hand-editing the baseline is not a supported way to move it.
+
+        The regeneration command is the only sanctioned path, so the file on
+        disk must be exactly what that command writes for the counts it
+        records. Otherwise a contributor could paste a plausible row in by
+        hand and the diff would stop meaning "the tree changed".
+        """
+        recorded = inventory.load_static_case_counts(REPO_ROOT)
+        self.assertEqual(
+            (REPO_ROOT / inventory.STATIC_CASE_COUNTS_PATH).read_text(
+                encoding="utf-8"
+            ),
+            inventory.render_static_case_counts(recorded),
+        )
+
+    def test_baseline_covers_exactly_the_declared_test_sources(self):
+        """Every declared source has a row; no row names a source that is gone.
+
+        This is the membership half of "a test may not silently disappear":
+        dropping a source from `repro_tests.nim` without regenerating leaves
+        an orphan row here.
+        """
+        nim_specs, python_specs = inventory.parse_repro_tests(REPO_ROOT)
+        declared = {spec.source for spec in nim_specs + python_specs}
+        recorded = inventory.load_static_case_counts(REPO_ROOT)
+        self.assertEqual(set(recorded), declared)
+        for spec in nim_specs:
+            self.assertEqual(recorded[spec.source][0], "nim")
+        for spec in python_specs:
+            self.assertEqual(recorded[spec.source][0], "python")
+
+    def test_the_tree_matches_the_baseline_case_for_case(self):
+        """THE GATE. Every source's statically visible case count is pinned.
+
+        This replaces the hand-typed aggregate. It is strictly stronger: the
+        aggregate could only say "some number moved", while this names the
+        file and both numbers, and it separates the dangerous direction
+        (cases LOST) from the benign one (cases added without regenerating).
+        """
+        recorded = inventory.load_static_case_counts(REPO_ROOT)
+        drift = inventory.static_case_count_drift(recorded, self.measured())
+        self.assertTrue(
+            drift["clean"], "\n" + inventory.format_static_case_count_drift(drift)
+        )
+
+    def test_a_case_that_disappears_is_reported_as_a_loss(self):
+        """The gate has teeth: prove it against a synthetic regression.
+
+        Asserting only `drift["clean"]` on a clean tree proves nothing about
+        what happens when the tree is dirty — the assertion would pass just
+        as well against a comparator that always returned "clean". So take
+        the REAL checked-in baseline, delete one case from one real source,
+        and require the report to classify it as a loss and to name the file
+        and both numbers.
+
+        Built from the baseline rather than from the live scan on purpose: a
+        genuine drift in the tree must fail THE GATE and nothing else, so
+        that the one failure a reader sees names the file that moved.
+        """
+        recorded = inventory.load_static_case_counts(REPO_ROOT)
+        measured = dict(recorded)
+        victim = next(
+            source
+            for source, (language, count) in sorted(measured.items())
+            if language == "nim" and count > 1
+        )
+        language, count = measured[victim]
+        measured[victim] = (language, count - 1)
+        drift = inventory.static_case_count_drift(recorded, measured)
+        self.assertFalse(drift["clean"])
+        self.assertEqual(drift["decreased"], [(victim, count, count - 1)])
+        self.assertEqual(drift["increased"], [])
+        report = inventory.format_static_case_count_drift(drift)
+        self.assertIn("COVERAGE LOST", report)
+        self.assertIn(victim, report)
+        self.assertIn(f"{count} -> {count - 1}", report)
+        self.assertIn(inventory.STATIC_CASE_COUNTS_REGENERATE_COMMAND, report)
+
+    def test_a_source_that_leaves_the_graph_is_reported_as_a_loss(self):
+        """The other way coverage vanishes: the whole source stops being built.
+
+        `repro_tests.nim` is generated, and a source that falls out of it is
+        never compiled and never run. The old aggregate could not tell that
+        apart from a source that merely shrank; this does.
+        """
+        recorded = inventory.load_static_case_counts(REPO_ROOT)
+        measured = dict(recorded)
+        victim = sorted(measured)[0]
+        del measured[victim]
+        drift = inventory.static_case_count_drift(recorded, measured)
+        self.assertFalse(drift["clean"])
+        self.assertEqual(drift["lostSources"], [victim])
+        report = inventory.format_static_case_count_drift(drift)
+        self.assertIn("no longer declared in repro_tests.nim", report)
+        self.assertIn(victim, report)
+
+    def test_added_cases_are_reported_separately_from_lost_ones(self):
+        """A gain is a forgotten regeneration; a loss is coverage leaving.
+
+        They must not read the same, or the reviewer learns to treat both as
+        "just rerun the command".
+        """
+        recorded = inventory.load_static_case_counts(REPO_ROOT)
+        measured = dict(recorded)
+        grown = sorted(measured)[0]
+        language, count = measured[grown]
+        measured[grown] = (language, count + 3)
+        measured["tests/unit/t_invented_source.nim"] = ("nim", 2)
+        drift = inventory.static_case_count_drift(recorded, measured)
+        self.assertFalse(drift["clean"])
+        self.assertEqual(drift["increased"], [(grown, count, count + 3)])
+        self.assertEqual(drift["decreased"], [])
+        self.assertEqual(drift["lostSources"], [])
+        self.assertEqual(
+            drift["gainedSources"], ["tests/unit/t_invented_source.nim"]
+        )
+        report = inventory.format_static_case_count_drift(drift)
+        self.assertNotIn("COVERAGE LOST", report)
+        self.assertIn("new sources, not yet in the baseline", report)
+
+    def test_the_gate_is_reachable_without_compiling_anything(self):
+        """`just lint` runs the check, and the check exits non-zero on drift.
+
+        The old pin could only be evaluated at the tail of a build that the
+        CI job usually never finished. This one is a source scan, so it
+        belongs in the cheap gate — and the wiring is asserted here so the
+        two cannot drift apart.
+        """
+        justfile = (REPO_ROOT / "Justfile").read_text(encoding="utf-8")
+        self.assertTrue(
+            "--check-static-case-counts" in justfile,
+            "`just lint` must run "
+            "`scripts/reprobuild_suite_inventory.py "
+            "--check-static-case-counts`; without it the only place the "
+            "case-count gate runs is behind the full test build.",
+        )
+        clean = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts/reprobuild_suite_inventory.py"),
+                "--repo-root",
+                str(REPO_ROOT),
+                "--check-static-case-counts",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
+        self.assertIn("as recorded", clean.stdout)
+
+    def test_the_gate_command_refuses_a_tree_that_lost_a_case(self):
+        """…and it must actually refuse, not merely print.
+
+        Run the same command against a scratch root whose baseline records
+        one more case than its sources contain. A checker that exited 0 and
+        printed a warning would be exactly the gate everyone learns to skip.
+        """
+        recorded = inventory.load_static_case_counts(REPO_ROOT)
+        victim = next(
+            source for source, (language, _) in sorted(recorded.items())
+            if language == "nim"
+        )
+        inflated = dict(recorded)
+        inflated[victim] = (recorded[victim][0], recorded[victim][1] + 1)
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / inventory.STATIC_CASE_COUNTS_PATH).parent.mkdir(
+                parents=True, exist_ok=True
+            )
+            (root / inventory.STATIC_CASE_COUNTS_PATH).write_text(
+                inventory.render_static_case_counts(inflated), encoding="utf-8"
+            )
+            (root / "repro_tests.nim").write_text(
+                (REPO_ROOT / "repro_tests.nim").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            for source in recorded:
+                target = root / source
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(
+                    (REPO_ROOT / source).read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts/reprobuild_suite_inventory.py"),
+                    "--repo-root",
+                    str(root),
+                    "--check-static-case-counts",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("COVERAGE LOST", result.stderr)
+        self.assertIn(victim, result.stderr)
+
+    def test_a_built_inventory_is_checked_against_the_baseline_per_entry(self):
+        """The cross-surface check that replaced the hand-typed aggregate.
+
+        `test_static_inventory_covers_every_declared_test` compares a BUILT
+        inventory's per-entry static scan against this baseline. That
+        assertion only runs on a fully built tree, so the comparison itself
+        is pinned here against synthetic inventory entries — otherwise the
+        one piece of the fix that CI evaluates would be the one piece no
+        test in a working tree can exercise.
+
+        Aggregate-equal but entry-wrong is the case that matters: it is what
+        the old `sum(...) == 6839` could not see.
+        """
+        recorded = inventory.load_static_case_counts(REPO_ROOT)
+        clean = [
+            {"source": source, "language": language, "staticCaseCount": count}
+            for source, (language, count) in sorted(recorded.items())
+        ]
+        self.assertEqual(static_entry_baseline_mismatches(clean, recorded), [])
+
+        movers = [
+            entry for entry in clean if entry["staticCaseCount"] > 0
+        ][:2]
+        self.assertEqual(len(movers), 2)
+        offsetting = copy.deepcopy(clean)
+        by_source = {entry["source"]: entry for entry in offsetting}
+        by_source[movers[0]["source"]]["staticCaseCount"] += 4
+        by_source[movers[1]["source"]]["staticCaseCount"] -= 4
+        self.assertEqual(
+            sum(entry["staticCaseCount"] for entry in offsetting),
+            sum(entry["staticCaseCount"] for entry in clean),
+        )
+        self.assertEqual(
+            [source for source, _, _ in
+             static_entry_baseline_mismatches(offsetting, recorded)],
+            sorted(entry["source"] for entry in movers),
+        )
+
+        unknown = copy.deepcopy(clean)
+        unknown[0]["source"] = "tests/unit/t_never_declared.nim"
+        mismatches = static_entry_baseline_mismatches(unknown, recorded)
+        self.assertIn(
+            ("tests/unit/t_never_declared.nim", None,
+             (unknown[0]["language"], unknown[0]["staticCaseCount"])),
+            mismatches,
+        )
+
+    def test_regeneration_is_a_pure_function_of_the_tree(self):
+        """`--write-static-case-counts` must reproduce the checked-in file.
+
+        The command a contributor is told to run has to be the command that
+        produced what is on disk, or the instruction is a trap. Run it into a
+        scratch root that only shadows the baseline path, and require byte
+        equality with the tracked file.
+        """
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / inventory.STATIC_CASE_COUNTS_PATH).parent.mkdir(
+                parents=True, exist_ok=True
+            )
+            with mock.patch.object(
+                inventory, "static_case_counts", return_value=self.measured()
+            ):
+                written = inventory.write_static_case_counts(root)
+            self.assertEqual(
+                written.read_text(encoding="utf-8"),
+                (REPO_ROOT / inventory.STATIC_CASE_COUNTS_PATH).read_text(
+                    encoding="utf-8"
+                ),
+            )
+
+
 class SuiteInventoryTests(unittest.TestCase):
     def assert_nim_case_counter_lexes_declarations_not_fixture_text(self):
         source = r'''
@@ -1720,91 +2186,38 @@ test "incomplete name" and:
         self.assertEqual(
             data["static"]["sourceCaseCount"], nim_total + python_total
         )
-        # The static scan is retained per entry and pinned in aggregate too,
-        # so a change in the SCANNER can still be told apart from a change
-        # in the SUITE: if this number moves while `nim_total` holds, the
-        # lexer regressed, not the tests.
+        # The static scan is retained per entry, and it is still pinned — but
+        # by `scripts/reprobuild-suite-static-case-counts.tsv`, checked per
+        # SOURCE in `StaticCaseCountBaselineTests`, not by a hand-typed total
+        # here.
         #
-        # 6755 -> 6768 = +13, the same +13 `nim_total` moved by and split the
-        # same way (+5, +4, +4, and 0 for the six renames). The scan reads the
-        # SOURCES, `nim_total` reads the BINARIES, and they were derived
-        # independently, so their agreeing on the decomposition is the check
-        # that the `0b9205f7` recomputation above is a fact about the suite
-        # rather than about one of the two surfaces.
+        # What used to stand at this spot was `... == 6839`, the tail of an
+        # eighty-line ledger reconciling every past bump. It did not work, and
+        # the ledger is the evidence: the number could only be produced by a
+        # full `build_inventory` over ~1240 built binaries, so no contributor
+        # could regenerate it, and this assertion is not even REACHED in a
+        # working tree — the same test dies earlier on `'missing-binary' !=
+        # 'catalog'`. In CI it is reached at ~5h54m, after the build phase the
+        # workflow's own budget note says usually consumes the job first.
+        # Twenty-six statically visible cases reached `dev` without moving it.
         #
-        # 6765 -> 6769 = +4, the same +4 `nim_total` moved by, and the whole
-        # of it is the one new source. The scan reads the SOURCES and
-        # `nim_total` reads the BINARIES, so their agreeing that the new file
-        # holds four cases is what makes that a fact about the suite rather
-        # than about one surface.
+        # What survives, and is the reason this assertion is still here: the
+        # cross-surface check. The baseline is scanned from the SOURCES, and
+        # `nim_total` is enumerated from the BUILT BINARIES. Requiring the
+        # inventory's own per-entry static scan to equal what the checked-in
+        # baseline records means a scanner regression, or a spec
+        # `build_inventory` silently drops, still fails here — while the
+        # "which file moved" question is answered by a one-line diff instead
+        # of by an integer nobody can attribute.
         #
-        # 6769 -> 6776 = +7: each added develop source contains one statically
-        # visible case, independently matching its binary's one-case catalog.
-        # The rebased upstream tree before `391a892a4` independently scans to
-        # 6777; its five new one-case sources then produce 6782. The recovered
-        # enrollments add 29, e106faf6 adds 3, the migration adds 3 static
-        # declarations (two conditional cache cases plus fail-closed), and
-        # 11cea6789 adds six: 6823. The linked-worktree source's independent
-        # static scan adds the same three cases, giving 6826.
-        #
-        # 6826 -> 6829 = +3, the same +3 `nim_total` moved by, and the whole of
-        # it is the one grown source. The scan reads the SOURCES and `nim_total`
-        # reads the BINARIES, so their agreeing that the file now holds eight
-        # cases is what makes that a fact about the suite rather than about one
-        # surface.
-        #
-        # 6829 -> 6830 = +1, the same +1 `nim_total` moved by, and the whole of
-        # it is the discarded-checkout case in
-        # `t_sync_clones_commit_pinned_repo.nim`. This scan reads the SOURCE
-        # text and `nim_total` reads the REBUILT BINARY; they were derived
-        # independently and both moved by exactly one, which is what makes
-        # "one new case" a fact about the suite rather than about one surface.
-        #
-        # 6830 -> 6832 = +2, the same +2 `nim_total` moved by, and the whole of
-        # it is the one grown source. Source scan and binary catalog agreeing
-        # on the same +2 is what makes "two new cases" a fact about the suite
-        # rather than about one surface.
-        #
-        # 6832 -> 6834 = +2, the same +2 `nim_total` moved by: one statically
-        # visible case in each of the two newly enrolled sources, each
-        # independently matching its binary's one-case catalog.
-        #
-        # 6834 -> 6836 = +2, the same +2 `nim_total` moved by, and the whole of
-        # it is the two RA-31 cases in
-        # `t_workspace_post_commit_lock_refresh_is_best_effort.nim`. This scan
-        # reads the SOURCE text and `nim_total` reads the REBUILT BINARY; they
-        # were derived independently and both moved by exactly two, which is
-        # what makes "two new cases" a fact about the suite rather than about
-        # either surface.
-        #
-        # 6836 -> 6838 = +2, the two `test_library_macro.nim` cases `5688d28e`
-        # enrolled without pinning. This scan read 6838 from the SOURCE before
-        # that binary was rebuilt, while the catalog still read 6836 from the
-        # stale binary — the number moving here while `nim_total` held is
-        # precisely the signal this pin is documented to give. Rebuilding
-        # reconciled them at 6838/6916.
-        #
-        # 6838 -> 6839 = +1, the same +1 `nim_total` moved by, and the whole of
-        # it is the seed-distinctness case in
-        # `t_workspace_post_commit_lock_refresh_is_best_effort.nim`. Measured
-        # by scanning the source before and after the change: 6857 and 6858.
-        #
-        # Which is this pin's own signal, fired at us: this scan reads 6857 on
-        # an UNTOUCHED `dev`, nineteen above the 6838 pinned here, so nineteen
-        # statically visible cases reached the tree without moving it. Those
-        # nineteen are not this change's and are deliberately NOT absorbed —
-        # bumping this number to whatever the tree currently sums to is exactly
-        # the aggregate laundering the per-source pins above exist to prevent.
-        # This line moves by the one case that is attributable here and no
-        # more, so the residual drift stays visible and attributable to
-        # whichever changes owe it.
+        # Per ENTRY, not merely in aggregate: two offsetting errors sum to the
+        # same total, and this document is the one place the source scan and
+        # the binary catalog meet.
+        recorded_static = inventory.load_static_case_counts(REPO_ROOT)
+        self.assertEqual(len(data["tests"]), len(recorded_static))
         self.assertEqual(
-            sum(
-                item["staticCaseCount"]
-                for item in data["tests"]
-                if item["language"] == "nim"
-            ),
-            6839,
+            static_entry_baseline_mismatches(data["tests"], recorded_static),
+            [],
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
@@ -2130,6 +2543,52 @@ test "incomplete name" and:
             cls._INVENTORY = inventory.build_inventory(REPO_ROOT, None)
         return cls._INVENTORY
 
+    def require_fully_built_test_tree(self):
+        """Real capability check for the per-binary assertions below.
+
+        Everything guarded by this reads a catalog enumerated from BUILT test
+        binaries: `--list-json` output, quarantine membership, probe caching,
+        `countSource == "catalog"`. A tree with 97 of 1240 binaries cannot
+        answer any of those questions, and the answers it gives instead are
+        artefacts of the missing binaries — `AssertionError: 97 not greater
+        than 1000`, `'missing-binary' != 'catalog'`. Those were being read as
+        "environmental" and dismissed, one test at a time, until the whole
+        file was noise and a real regression in it could not be seen.
+
+        This is NOT a way to reach green. It stats every binary the checked-in
+        graph declares and states the shortfall out loud, the reason is
+        printed by unittest, and under `scripts/run_tests.sh` — which has just
+        built `.#test-builds` — the same shortfall is a hard failure instead.
+
+        The property these tests exist to protect, "a test case may not
+        silently leave the catalog", is NOT behind this check: it lives in
+        `StaticCaseCountBaselineTests`, which needs no binaries and never
+        skips.
+        """
+        present, declared = built_test_binaries(REPO_ROOT)
+        verdict, message = built_tree_verdict(
+            present,
+            declared,
+            os.environ.get(REQUIRE_BUILT_TREE_ENV) == "1",
+        )
+        if verdict == "run":
+            return
+        # Name one of them, so "go build it" is actionable rather than a
+        # number. The verdict itself stays in `built_tree_verdict`, which is
+        # tested on its own.
+        message = f"{message} First missing: {self._first_missing_binary()}."
+        if verdict == "fail":
+            self.fail(message)
+        raise unittest.SkipTest(message)
+
+    @staticmethod
+    def _first_missing_binary():
+        nim_specs, _ = inventory.parse_repro_tests(REPO_ROOT)
+        for spec in nim_specs:
+            if not (REPO_ROOT / spec.binary).is_file():
+                return spec.binary
+        return "(none)"
+
     @classmethod
     def _list_names(cls, binary_path, env, cwd, timeout=None):
         """Case names as reported by the binary's `--list` surface.
@@ -2170,6 +2629,7 @@ test "incomplete name" and:
         records, or a binary silently stops answering the protocol, the
         inventory can no longer quietly keep a stale number.
         """
+        self.require_fully_built_test_tree()
         data = self.inventory_data()
         catalog_entries = [
             item
@@ -2299,6 +2759,7 @@ test "incomplete name" and:
         pinned, not just the size, so one binary dropping out and another
         dropping in cannot cancel out.
         """
+        self.require_fully_built_test_tree()
         data = self.inventory_data()
         catalog = data["catalogEnumeration"]
 
@@ -3065,6 +3526,9 @@ test "incomplete name" and:
 
         This reproduces the collision through the public entry point.
         """
+        # Both arms of the collision have to be able to answer `ok`, which
+        # means the real binary behind `other` must exist.
+        self.require_fully_built_test_tree()
         one = inventory.TestSpec(
             source="tests/unit/t_declared_package_deps_from_recipe.nim",
             binary="build/test-bin/definitely_not_built_binary",
@@ -3105,6 +3569,9 @@ test "incomplete name" and:
         this change (`plasma-workspace` needs ~230 s and the probe budget
         was 300 s).
         """
+        # The cache key is `size:mtime_ns` of a REAL binary; without it there
+        # is no key to write a negative entry under.
+        self.require_fully_built_test_tree()
         source = "tests/unit/t_declared_package_deps_from_recipe.nim"
         binary = "build/test-bin/t_declared_package_deps_from_recipe"
         # An isolated cache file inside the repo, so the code under test
@@ -3222,6 +3689,7 @@ test "incomplete name" and:
         The required behaviour: retry serially with a longer budget, and if
         the retry also fails, ABORT with an explicit environment error.
         """
+        self.require_fully_built_test_tree()
         # Run the real shim binary under the protocol variables supplied by an
         # outer per-case runner.  Those variables are not themselves the cause:
         # the codetracer Nim fork redirects descriptor 1 to stderr during
@@ -3361,6 +3829,11 @@ test "incomplete name" and:
         directory. With `cwd` at the repo root that stray file is an
         untracked file, so the measurement perturbed its own input.
         """
+        # `catalog_index` only reaches the probe for a binary that EXISTS, so
+        # with the binary absent `seen` stays empty and the assertion below
+        # measures the missing build rather than the probe's working
+        # directory.
+        self.require_fully_built_test_tree()
         seen: list[Path] = []
 
         def record_cwd(binary_path, cwd, env, timeout_seconds):
@@ -3599,16 +4072,28 @@ test "incomplete name" and:
         }
         self.assertIn("Check failed: 1 == 2", inventory.failure_excerpt(per_case))
 
+    def test_nim_case_counter_reads_declarations_not_fixture_text(self):
+        """The lexer's own properties, lifted out of the binary-gated test.
+
+        These four assertions read fixture STRINGS, not the tree: they need
+        no built binary and no inventory. They used to be reached only
+        through `test_static_inventory_covers_every_declared_test`, which
+        dies on the first missing binary — so in a working tree the scanner
+        had no coverage at all. They now run unconditionally, and the
+        capability check below can no longer take them down with it.
+        """
+        self.assert_nim_case_counter_lexes_declarations_not_fixture_text()
+        self.assert_nim_case_counter_accepts_compiler_backed_statement_forms()
+        self.assert_nim_case_counter_resolves_only_imported_unittest_receivers()
+        self.assert_nim_case_counter_rejects_compiler_rejected_operator_endings()
+
     def test_static_inventory_covers_every_declared_test(self):
+        self.require_fully_built_test_tree()
         data = self.inventory_data()
         self.assert_nde0a_catalog_preserves_real_cross_platform_and_linux_coverage(
             data
         )
         self.assert_linux_darwin_catalog_delta_is_exact(data)
-        self.assert_nim_case_counter_lexes_declarations_not_fixture_text()
-        self.assert_nim_case_counter_accepts_compiler_backed_statement_forms()
-        self.assert_nim_case_counter_resolves_only_imported_unittest_receivers()
-        self.assert_nim_case_counter_rejects_compiler_rejected_operator_endings()
         self.assert_inventory_case_counts_pin_multiline_and_fixture_regressions(data)
         self.assert_runtime_compiler_flow_inventory(data)
         nim_specs, python_specs = inventory.parse_repro_tests(REPO_ROOT)

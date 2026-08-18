@@ -1339,6 +1339,249 @@ def count_python_cases(path: Path) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Static case-count baseline
+# ---------------------------------------------------------------------------
+#
+# WHY THIS FILE EXISTS, and what it replaces.
+#
+# The suite-inventory gate used to pin the static case total as a single
+# hand-typed integer inside the test file ("the nim sources sum to 6839").
+# That mechanism cannot work, for three compounding reasons:
+#
+#   1. NOTHING REGENERATES IT. The number could only be produced by a full
+#      ``build_inventory`` run, which probes every test binary and therefore
+#      needs a tree with ~1240 built binaries. A contributor adding one
+#      ``test "…":`` line had no command to run and no way to learn the new
+#      value short of a full build.
+#   2. OWNERSHIP IS NON-LOCAL. A global sum over 1240 sources is moved by an
+#      edit to any one of them, but nothing in the edited file points at the
+#      pin, so the obligation is invisible at the point of the change.
+#   3. IT WAS PERMANENTLY RED, so its signal carried no information. Because
+#      the assertion lived behind a full-binary inventory that a normal tree
+#      cannot satisfy, contributors saw the gate fail for environmental
+#      reasons and stopped reading it — and 19, then 26, statically visible
+#      cases reached the tree without anyone moving the pin.
+#
+# A permanently red gate teaches everyone to ignore it, which is strictly
+# worse than no gate. So the aggregate is no longer a literal: it is DERIVED
+# from this checked-in per-source baseline, which is
+#
+#   * regenerable in under a minute in ANY tree, built or not
+#     (``--write-static-case-counts``), because a static source scan needs no
+#     binaries at all — against roughly six hours of building plus a
+#     half-hour of binary probing for the number it replaces;
+#   * a REVIEWABLE DIFF rather than an opaque integer — ``-4`` on a named
+#     source is visible in code review, whereas ``6839 -> 6835`` is not;
+#   * still exactly the gate it was: a case that silently disappears from
+#     the catalog shows up here as a decrease or a dropped row, and the
+#     failure message names the source and both numbers.
+STATIC_CASE_COUNTS_PATH = Path("scripts/reprobuild-suite-static-case-counts.tsv")
+STATIC_CASE_COUNTS_REGENERATE_COMMAND = (
+    "python3 scripts/reprobuild_suite_inventory.py --write-static-case-counts"
+)
+STATIC_CASE_COUNTS_HEADER = (
+    "# reprobuild suite static case-count baseline\n"
+    "#\n"
+    "# One row per test source declared in repro_tests.nim, sorted by source.\n"
+    "# Columns: <source>\\t<language>\\t<static case count>\n"
+    "#\n"
+    "# This is a SOURCE-TEXT scan, not the authoritative per-binary catalog\n"
+    "# count: it sums every when/else branch and cannot expand wrapper\n"
+    "# templates or loops that register a case per element. It is pinned\n"
+    "# anyway because it is the only case-count surface that can be measured\n"
+    "# — and regenerated — without a fully built tree, which is what makes it\n"
+    "# a gate everyone can actually keep green.\n"
+    "#\n"
+    "# Regenerate after adding or removing test cases:\n"
+    f"#   {STATIC_CASE_COUNTS_REGENERATE_COMMAND}\n"
+    "#\n"
+    "# Review the diff. A row that DECREASES or DISAPPEARS is a test leaving\n"
+    "# the suite; that is the event this baseline exists to make visible.\n"
+)
+
+
+def static_case_counts(root: Path) -> dict[str, tuple[str, int]]:
+    """Per-source static case counts for every declared test source.
+
+    Pure function of the source tree plus ``repro_tests.nim``. Deliberately
+    independent of ``build_inventory``: it must be measurable in a tree with
+    no built test binaries, which is the normal state of a working checkout
+    and the state in which the old integer pin was unmaintainable.
+    """
+    nim_specs, python_specs = parse_repro_tests(root)
+    counts: dict[str, tuple[str, int]] = {}
+    for spec in nim_specs:
+        counts[spec.source] = (
+            "nim",
+            count_nim_cases(read_text(root / spec.source))["caseCount"],
+        )
+    for spec in python_specs:
+        counts[spec.source] = (
+            "python",
+            count_python_cases(root / spec.source)["caseCount"],
+        )
+    return counts
+
+
+def render_static_case_counts(counts: Mapping[str, tuple[str, int]]) -> str:
+    lines = [STATIC_CASE_COUNTS_HEADER]
+    for source in sorted(counts):
+        language, count = counts[source]
+        lines.append(f"{source}\t{language}\t{count}\n")
+    return "".join(lines)
+
+
+def parse_static_case_counts(text: str) -> dict[str, tuple[str, int]]:
+    """Read the baseline back. A malformed row is an error, never a skip.
+
+    A parser that shrugged at a bad row would let the baseline be emptied by
+    corruption and still report "no drift", which is the exact failure mode
+    this whole mechanism exists to remove.
+    """
+    counts: dict[str, tuple[str, int]] = {}
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 3:
+            raise ValueError(
+                f"{STATIC_CASE_COUNTS_PATH}:{number}: expected "
+                f"<source>\\t<language>\\t<count>, got {line!r}"
+            )
+        source, language, raw = fields
+        if language not in ("nim", "python"):
+            raise ValueError(
+                f"{STATIC_CASE_COUNTS_PATH}:{number}: unknown language "
+                f"{language!r}"
+            )
+        try:
+            count = int(raw)
+        except ValueError:
+            raise ValueError(
+                f"{STATIC_CASE_COUNTS_PATH}:{number}: case count {raw!r} is "
+                "not an integer"
+            ) from None
+        if source in counts:
+            raise ValueError(
+                f"{STATIC_CASE_COUNTS_PATH}:{number}: {source} appears twice"
+            )
+        counts[source] = (language, count)
+    return counts
+
+
+def load_static_case_counts(root: Path) -> dict[str, tuple[str, int]]:
+    return parse_static_case_counts(
+        (root / STATIC_CASE_COUNTS_PATH).read_text(encoding="utf-8")
+    )
+
+
+def write_static_case_counts(
+    root: Path, counts: Mapping[str, tuple[str, int]] | None = None
+) -> Path:
+    """Write the baseline. `counts` lets a caller reuse a scan it already did.
+
+    The scan walks and tokenizes every declared source, so doing it twice for
+    one command is the difference between a check people run and one they
+    stop running.
+    """
+    if counts is None:
+        counts = static_case_counts(root)
+    path = root / STATIC_CASE_COUNTS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_static_case_counts(counts), encoding="utf-8")
+    return path
+
+
+def static_case_count_drift(
+    recorded: Mapping[str, tuple[str, int]],
+    measured: Mapping[str, tuple[str, int]],
+) -> dict[str, Any]:
+    """Classify baseline-vs-tree disagreement by DIRECTION, not just presence.
+
+    Losses (a source that dropped rows, or vanished from the catalog) are
+    reported separately from gains because they are the dangerous direction:
+    a gain is a contributor who forgot to regenerate, a loss is coverage
+    leaving the suite.
+    """
+    lost = sorted(set(recorded) - set(measured))
+    gained = sorted(set(measured) - set(recorded))
+    decreased: list[tuple[str, int, int]] = []
+    increased: list[tuple[str, int, int]] = []
+    relabelled: list[tuple[str, str, str]] = []
+    for source in sorted(set(recorded) & set(measured)):
+        was_language, was = recorded[source]
+        now_language, now = measured[source]
+        if was_language != now_language:
+            relabelled.append((source, was_language, now_language))
+        if now < was:
+            decreased.append((source, was, now))
+        elif now > was:
+            increased.append((source, was, now))
+    return {
+        "lostSources": lost,
+        "gainedSources": gained,
+        "decreased": decreased,
+        "increased": increased,
+        "relabelled": relabelled,
+        "recordedTotal": sum(count for _, count in recorded.values()),
+        "measuredTotal": sum(count for _, count in measured.values()),
+        "clean": not (lost or gained or decreased or increased or relabelled),
+    }
+
+
+def format_static_case_count_drift(drift: Mapping[str, Any]) -> str:
+    if drift["clean"]:
+        return ""
+    lines = [
+        f"{STATIC_CASE_COUNTS_PATH} disagrees with the tree "
+        f"({drift['recordedTotal']} recorded vs {drift['measuredTotal']} "
+        "statically scanned).",
+        "",
+    ]
+    if drift["lostSources"]:
+        lines.append(
+            "COVERAGE LOST — these sources are in the baseline but are no "
+            "longer declared in repro_tests.nim:"
+        )
+        lines.extend(f"  - {source}" for source in drift["lostSources"])
+        lines.append("")
+    if drift["decreased"]:
+        lines.append(
+            "COVERAGE LOST — these sources declare FEWER cases than the "
+            "baseline records:"
+        )
+        lines.extend(
+            f"  - {source}: {was} -> {now} ({now - was})"
+            for source, was, now in drift["decreased"]
+        )
+        lines.append("")
+    if drift["gainedSources"]:
+        lines.append("new sources, not yet in the baseline:")
+        lines.extend(f"  + {source}" for source in drift["gainedSources"])
+        lines.append("")
+    if drift["increased"]:
+        lines.append("sources that gained cases since the baseline:")
+        lines.extend(
+            f"  + {source}: {was} -> {now} (+{now - was})"
+            for source, was, now in drift["increased"]
+        )
+        lines.append("")
+    if drift["relabelled"]:
+        lines.append("sources whose language changed:")
+        lines.extend(
+            f"  ! {source}: {was} -> {now}"
+            for source, was, now in drift["relabelled"]
+        )
+        lines.append("")
+    lines.append(
+        "If every line above is intended, regenerate the baseline and "
+        "commit the diff:"
+    )
+    lines.append(f"  {STATIC_CASE_COUNTS_REGENERATE_COMMAND}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Built-binary case catalog (spec §3.2 / §6.5 ``--list-json``, §16.4 catalog)
 # ---------------------------------------------------------------------------
 #
@@ -4815,6 +5058,27 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--write-static-case-counts",
+        action="store_true",
+        help=(
+            "regenerate " + str(STATIC_CASE_COUNTS_PATH) + " from the source "
+            "tree and exit. Needs NO built test binaries and runs in under a "
+            "minute, which is the whole point: it is the one case-count "
+            "surface a contributor can refresh in a normal working tree"
+        ),
+    )
+    parser.add_argument(
+        "--check-static-case-counts",
+        action="store_true",
+        help=(
+            "compare the source tree against " + str(STATIC_CASE_COUNTS_PATH)
+            + " and exit non-zero on any disagreement, naming the sources "
+            "that moved. Needs no built test binaries, so this is the form "
+            "`just lint` runs — the gate is reachable before anything is "
+            "compiled"
+        ),
+    )
+    parser.add_argument(
         "--no-catalog",
         action="store_true",
         help=(
@@ -4838,6 +5102,36 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     root = Path(args.repo_root).resolve()
+
+    # Early exit, BEFORE any binary probing: the baseline is a static scan and
+    # must stay refreshable in a tree with nothing built. Making it depend on
+    # `build_inventory` would recreate the defect it replaces.
+    if args.write_static_case_counts:
+        recorded: dict[str, tuple[str, int]] = {}
+        if (root / STATIC_CASE_COUNTS_PATH).is_file():
+            recorded = load_static_case_counts(root)
+        measured = static_case_counts(root)
+        drift = static_case_count_drift(recorded, measured)
+        written = write_static_case_counts(root, measured)
+        print(f"wrote {rel(written, root)} ({len(measured)} sources, "
+              f"{drift['measuredTotal']} statically visible cases)")
+        if recorded and not drift["clean"]:
+            print(format_static_case_count_drift(drift))
+        return 0
+
+    if args.check_static_case_counts:
+        measured = static_case_counts(root)
+        drift = static_case_count_drift(load_static_case_counts(root), measured)
+        if drift["clean"]:
+            print(
+                f"{STATIC_CASE_COUNTS_PATH}: "
+                f"{drift['measuredTotal']} test cases across "
+                f"{len(measured)} sources, as recorded"
+            )
+            return 0
+        print(format_static_case_count_drift(drift), file=sys.stderr)
+        return 1
+
     json_path = Path(args.json)
     report_path = Path(args.write_report)
     if not json_path.is_absolute():
