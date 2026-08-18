@@ -26820,15 +26820,58 @@ proc routedParticipationBody(repoName, repoPath, sha: string): string =
   "[[repo]]\nname = \"" & repoName & "\"\npath = \"" & repoPath &
     "\"\nrevision = \"" & sha & "\"\n"
 
+proc isWorkspaceLockDocument*(body: string): bool =
+  ## True when ``body`` is a ``reprobuild.workspace.lock.v1`` DOCUMENT — it
+  ## announces a top-level ``schema`` key, i.e. one appearing before any table
+  ## header — as opposed to a routed ``routedParticipationBody`` record, which
+  ## is a bare ``[[repo]]`` table announcing nothing. This is the same
+  ## discriminator ``resolve-sibling-rev.sh`` applies at discovery (its
+  ## ``is_participation_record``), and the same one that separates reprobuild's
+  ## strict ``readLock`` from the tolerant ``shasFromBody``.
+  for rawLine in body.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"): continue
+    if line.startsWith("["): return false
+    let eq = line.find('=')
+    if eq <= 0: continue
+    if line[0 ..< eq].strip() == "schema": return true
+  false
+
+proc storeRootMatches(store: LockStore; manifestLayerRoot: string): bool
+  ## Forward declaration — defined with the HL-2 partition helpers below.
+
 proc prepareWorkspaceParticipation(
     assignments: seq[RepoBackendAssignment]; projectName: string;
-    repoShas: Table[string, string]): seq[DeferredParticipationWrite] =
+    repoShas: Table[string, string]; partitionRoot = ""):
+    seq[DeferredParticipationWrite] =
+  ## HL-2 (§6 Decision 1) — ``partitionRoot``, when non-empty, is the
+  ## git-checkout manifest root whose repos are recorded by the PARTITION LOCK
+  ## (the ``locks/<project>/<trigger>/<sha>.toml`` workspace-lock document
+  ## ``executeWorkspaceLock`` writes into that same backend). Decision 1 gives
+  ## the team partition ONE such document — "a ``locks/<project>/<repo>/<sha>``
+  ## .toml written into the team's durable backend, containing only the team
+  ## partition's repos" — and reserves the per-repo ``routedParticipationBody``
+  ## records for the PERSONAL/other backends. Emitting both into one
+  ## git-checkout store is not additive; the two writers collide on the SAME
+  ## key for the trigger repo, and ``GitCheckoutLockStore.putLock`` correctly
+  ## refuses to rewrite what the partition just wrote ("immutable lock record
+  ## already exists with different content"). The partition survives, but the
+  ## trigger repo's participation is then a FAILED team-tier outcome, which
+  ## §6 Decision 2 escalates to a push REFUSAL. And at every other repo's
+  ## ``(repo, sha)`` key the minimal record lands unopposed, permanently
+  ## costing that repo the lock document its own pre-push would have published
+  ## there: a published coordinate can afterwards be neither rewritten
+  ## (publication is additions-only) nor refused (that would block the push).
+  ## Repos covered by the partition are therefore skipped here; the partition
+  ## lock is their record.
   for asg in assignments:
     var outc = ParticipationOutcome(
       repoName: asg.repoName, repoPath: asg.repoPath,
       backendKind: asg.backendKind, tier: asg.visibility)
     if asg.store.isNil:
       result.add(DeferredParticipationWrite(outcome: outc))
+      continue
+    if partitionRoot.len > 0 and storeRootMatches(asg.store, partitionRoot):
       continue
     outc.backendLocation = asg.store.storeLocationLabel()
     let sha = repoShas.getOrDefault(asg.repoPath,
@@ -26856,15 +26899,18 @@ proc executeParticipationWrites(
     result.add(outc)
 
 proc recordWorkspaceParticipation*(assignments: seq[RepoBackendAssignment];
-    projectName: string; repoShas: Table[string, string]):
-    seq[ParticipationOutcome] =
+    projectName: string; repoShas: Table[string, string];
+    partitionRoot = ""): seq[ParticipationOutcome] =
   ## The MO-4 workspace operation: record EACH repo's participation through
   ## its ASSIGNED backend. A committed-lock (public, ``store == nil``) repo is
   ## already captured by the committed solved-graph lock, so it is not
   ## re-recorded. Every repo with a real backend gets a ``StoreLockRecord``
-  ## written into that backend's own medium.
+  ## written into that backend's own medium — except the repos covered by the
+  ## ``partitionRoot`` workspace-lock partition (see
+  ## ``prepareWorkspaceParticipation``).
   executeParticipationWrites(
-    prepareWorkspaceParticipation(assignments, projectName, repoShas))
+    prepareWorkspaceParticipation(
+      assignments, projectName, repoShas, partitionRoot))
 
 proc loadLockingRouting*(workspaceRoot: string): BootstrapLockingBody =
   ## Read the ``[locking]`` routing table from the host bootstrap config, or an
@@ -27187,7 +27233,7 @@ proc resolveWorkspaceRepoBackends*(workspaceRoot: string;
 
 proc recordRoutedParticipation*(workspaceRoot: string;
     repos: seq[ResolvedRepo]; repoShas: Table[string, string];
-    projectName: string; identity: GitToolIdentity):
+    projectName: string; identity: GitToolIdentity; partitionRoot = ""):
     seq[ParticipationOutcome] =
   ## MO-4 / HL-1 — the shared step the lock / publish operations call. A no-op
   ## (empty result) when NO configuration layer declares a route, so the
@@ -27202,17 +27248,19 @@ proc recordRoutedParticipation*(workspaceRoot: string;
   if not composed.hasExplicitRoutes: return @[]
   let assignments = resolveRepoBackends(
     composed, repos, workspaceRoot, identity, identity.binaryPath)
-  recordWorkspaceParticipation(assignments, projectName, repoShas)
+  recordWorkspaceParticipation(
+    assignments, projectName, repoShas, partitionRoot)
 
 proc prepareRoutedParticipation(workspaceRoot: string;
     repos: seq[ResolvedRepo]; repoShas: Table[string, string];
-    projectName: string; identity: GitToolIdentity):
+    projectName: string; identity: GitToolIdentity; partitionRoot = ""):
     seq[DeferredParticipationWrite] =
   let composed = composeLockingRouting(workspaceRoot, identity.binaryPath)
   if not composed.hasExplicitRoutes: return @[]
   let assignments = resolveRepoBackends(
     composed, repos, workspaceRoot, identity, identity.binaryPath)
-  prepareWorkspaceParticipation(assignments, projectName, repoShas)
+  prepareWorkspaceParticipation(
+    assignments, projectName, repoShas, partitionRoot)
 
 # ---------------------------------------------------------------------------
 # HL-2 (Unified-Locking-And-Hooks §6 Decision 1) — strict per-backend, tier-
@@ -27225,7 +27273,7 @@ proc prepareRoutedParticipation(workspaceRoot: string;
 
 proc storeRootMatches(store: LockStore; manifestLayerRoot: string): bool =
   ## True when ``store`` is a durable backend whose on-disk root is exactly
-  ## ``manifestLayerRoot`` (the git-checkout manifest the monolithic
+  ## ``manifestLayerRoot`` (the git-checkout manifest the partitioned
   ## ``writeLockFile`` targets). Used to decide which observed repos belong in
   ## the manifest lock file: only the repos routed to THAT git-checkout backend.
   if store.isNil: return false
@@ -30283,10 +30331,12 @@ proc renderLockTextLines*(report: WorkspaceLockReport): seq[string] =
         " (trigger=" & report.triggerRepo & "@" &
         report.triggerSha & ")")
     else:
-      # HL-2 (§6 Decision 1) routed case: no monolithic trigger-keyed lock
-      # file is written when explicit `[locking]` routes are declared; each
-      # repo's record is routed to its assigned backend and reported by the
-      # `recorded … via … backend` lines below. Avoid printing a blank path.
+      # HL-2 (§6 Decision 1) routed case: no manifest partition lock was
+      # written because the git-checkout manifest backend owns no repo in this
+      # workspace (every declared route points elsewhere, or the workspace is
+      # public-only). Each repo's record went to its assigned backend and is
+      # reported by the `recorded … via … backend` lines below. Avoid printing
+      # a blank path.
       result.add("workspace lock: recorded per-repo lock entries" &
         " (trigger=" & report.triggerRepo & "@" &
         report.triggerSha & ")")
@@ -30770,14 +30820,27 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
     lockAlreadyExisted and lockRelForTracking.len > 0 and
       gitRunPlain(identity, ["-C", manifestLayerRoot, "ls-files",
         "--error-unmatch", "--", lockRelForTracking]).code == 0
-  # HL-2 (§6 Decision 1) — the monolithic trigger-keyed ``writeLockFile`` is
-  # kept ONLY for the no-explicit-route single-tier shape (today's common
-  # ``.repo/manifests`` workspace), where it stays BYTE-IDENTICAL to pre-HL-2.
-  # When routes ARE declared, each repo's participation is recorded per-repo
-  # through its ASSIGNED backend by ``recordRoutedParticipation`` below (the
-  # team git-checkout backend included, at its own ``locks/<p>/<repo>/<sha>``
-  # path), so the trigger-keyed monolithic file is redundant AND would drop a
-  # cross-tier mix keyed on a possibly-non-team trigger repo. We skip it.
+  # HL-2 (§6 Decision 1 — target write path) — the trigger-keyed
+  # ``writeLockFile`` is the git-checkout manifest backend's PARTITION of the
+  # workspace lock, and it is written whenever that backend owns the trigger
+  # repo (see the anchoring rule below). Decision 1 spells the team row out:
+  # "**team** partition → a
+  # ``locks/<project>/<repo>/<sha>.toml`` written into the team's durable
+  # backend, containing only the team partition's repos", and closes with "the
+  # git manifest lock file, when one is produced, contains **only** the repos
+  # routed to that backend". ``manifestOwnedRepos`` above computes exactly that
+  # subset, so tier isolation is enforced by WHAT the document contains, not by
+  # suppressing the document.
+  #
+  # Suppressing it on ``hasExplicitRoutes`` (as this gate previously did) threw
+  # that partition away precisely when it is meaningful, and left the
+  # per-repo ``routedParticipationBody`` records as the only thing in the
+  # manifest. Those records announce no ``schema`` and pin one repo each, so
+  # they answer no cross-repo question: CI sibling resolution
+  # (``clone-siblings`` / ``resolve-sibling-rev.sh``, which reads exactly this
+  # path) degraded to "no workspace lock found" for every commit locked that
+  # way. The partition lock is what that consumer reads, and the reason the
+  # record is keyed by the TRIGGER commit at all.
   #
   # ``manifestLayerRoot`` is EMPTY when no manifest-backed route is declared
   # (§10 "No implicit team route"): there is no git-checkout store to write a
@@ -30785,7 +30848,31 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # whole publication story. Writing anyway would resolve ``lockPath`` relative
   # to the process CWD and scatter a ``locks/`` tree wherever the gate happened
   # to run. Public-only workspaces write no manifest lock at all.
-  if not composed.hasExplicitRoutes and manifestLayerRoot.len > 0:
+  #
+  # The routed partition is additionally anchored ONLY at a trigger that
+  # BELONGS to it. The record's path is ``locks/<project>/<TRIGGER>/<sha>``, and
+  # a consumer reaches it by asking "what did the workspace look like at THIS
+  # repo's commit" (``pickTriggerRepo``'s own contract). Filing the team
+  # partition under a public or personal trigger would both put a record where
+  # nobody looks and drop a team SHA into a directory named for a repo of
+  # another tier. When the trigger is outside the partition the manifest simply
+  # gets no trigger-keyed document for this operation, and its repos keep their
+  # per-repo participation records until one of them is itself the trigger.
+  var triggerInManifestPartition = false
+  for repo in manifestRepos:
+    if repo.path == triggerRepo.path:
+      triggerInManifestPartition = true
+      break
+  let writeManifestPartition = manifestLayerRoot.len > 0 and
+    (not composed.hasExplicitRoutes or triggerInManifestPartition)
+  # False only when the trigger coordinate is already occupied by a PUBLISHED
+  # participation record, which this operation must neither overwrite nor claim
+  # as its own lock (see below). The report must not name a path holding
+  # somebody else's record, and the repos the partition would have covered must
+  # keep their per-repo records, so both follow this flag rather than the
+  # intent above.
+  var partitionRecordPresent = writeManifestPartition
+  if writeManifestPartition:
     if lockAlreadyPublished:
       # The path is content-addressed by the exact trigger commit and lock
       # publication accepts canonical additions only. Re-running a gate must
@@ -30798,31 +30885,68 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
       # RA-31 — gated on TRACKED, not on present-on-disk. An untracked file at
       # this path is this workspace's own unpublished draft (see above); it is
       # overwritten by the ``else`` arm rather than defended.
-      let existingShas = shasFromBody(readFile(extendedPath(lockPath)))
-      var sameCoordinates = existingShas.len == lock.repos.len
-      var mismatchedPaths: seq[string]
-      if sameCoordinates:
-        for entry in lock.repos:
-          if entry.path notin existingShas or
-              existingShas[entry.path] != entry.revision:
-            sameCoordinates = false
-            mismatchedPaths.add(entry.path)
+      let existingBody = readFile(extendedPath(lockPath))
+      # HL-2 — a routed ``routedParticipationBody`` record announces no
+      # ``schema`` and pins one repo; it is not a workspace lock and never was
+      # one. Workspaces that locked while the partition write was suppressed
+      # have such records TRACKED at exactly the coordinates their own partition
+      # lock would occupy. Two things must not happen there:
+      #
+      #   * the coordinate-mismatch refusal below (1 path vs N) must not fire —
+      #     it reads as "someone published a different workspace state at this
+      #     commit", which is false, and it would turn every lock in such a
+      #     workspace into a lock-failure and block the push; and
+      #   * the partition must not be written over it — publication is
+      #     ADDITIONS-ONLY at both the staging check and the ahead-chain
+      #     verifier (``verifyLockOnlyAheadChain``: "additions-only, with NO
+      #     exception"), so an ``M`` entry would be refused on this and every
+      #     later publish, wedging the store rather than repairing it.
+      #
+      # So the historical record is left exactly as published, and the operator
+      # is told plainly what it costs. No repair verb is named: ``repro
+      # workspace migrate-locks`` repairs a record at a NON-CANONICAL PATH,
+      # which this is not — the path is canonical and the BODY is the wrong
+      # shape — so pointing at it would send the operator to a verb whose
+      # planner will not select this record. Commits already carrying such a
+      # record stay unresolvable for cross-repo CI (the resolver treats them as
+      # unlocked, which is the mild, correct answer for history); every NEW
+      # commit gets its partition normally.
+      if not isWorkspaceLockDocument(existingBody):
+        partitionRecordPresent = false
+        stderr.writeLine(
+          "repro workspace lock: '" & lockPath & "' already holds a published " &
+          "per-repo participation record, which is where this workspace's " &
+          "lock document belongs. Published lock records are immutable and " &
+          "lock publication is additions-only, so it is left untouched: this " &
+          "commit cannot be used for cross-repo sibling resolution. Later " &
+          "commits lock normally.")
       else:
-        for entry in lock.repos:
-          if entry.path notin existingShas or
-              existingShas[entry.path] != entry.revision:
-            mismatchedPaths.add(entry.path)
-      if not sameCoordinates:
-        raise newException(ValueError,
-          "immutable lock record already exists at '" & lockPath &
-          "' with different repository coordinates" &
-          (if mismatchedPaths.len > 0:
-            " (changed paths: " & mismatchedPaths.join(", ") & ")"
-          else: "") &
-          "; keep the existing record and create a lock anchored by the " &
-          "commit that changed")
+        let existingShas = shasFromBody(existingBody)
+        var sameCoordinates = existingShas.len == lock.repos.len
+        var mismatchedPaths: seq[string]
+        if sameCoordinates:
+          for entry in lock.repos:
+            if entry.path notin existingShas or
+                existingShas[entry.path] != entry.revision:
+              sameCoordinates = false
+              mismatchedPaths.add(entry.path)
+        else:
+          for entry in lock.repos:
+            if entry.path notin existingShas or
+                existingShas[entry.path] != entry.revision:
+              mismatchedPaths.add(entry.path)
+        if not sameCoordinates:
+          raise newException(ValueError,
+            "immutable lock record already exists at '" & lockPath &
+            "' with different repository coordinates" &
+            (if mismatchedPaths.len > 0:
+              " (changed paths: " & mismatchedPaths.join(", ") & ")"
+            else: "") &
+            "; keep the existing record and create a lock anchored by the " &
+            "commit that changed")
     else:
       writeLockFile(lock, lockPath)
+  if partitionRecordPresent:
     report.lockFilePath = lockPath
     report.replacedExistingEntry = lockAlreadyExisted
     for entry in lock.repos:
@@ -30844,12 +30968,25 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # every manifest-present operation are byte-unchanged. An unrouted private
   # repo raises `StoreRoutingError` (loud, names the repo) — propagated to the
   # operator by `repro workspace lock`; the gate surfaces it as a lock-failure.
+  #
+  # HL-2 (§6 Decision 1) — repos covered by the manifest PARTITION LOCK written
+  # just above are recorded by that document, so they are excluded here rather
+  # than double-written as minimal per-repo records into the very same
+  # git-checkout store (where the trigger repo's write collides with the
+  # partition and fails — a failed TEAM outcome the gate escalates to a push
+  # refusal — and every other repo's write squats on its own future key).
+  # `partitionRoot` is empty when no partition was written, so the per-repo
+  # fan-out is unchanged there.
+  let participationPartitionRoot =
+    if partitionRecordPresent: manifestLayerRoot else: ""
   if deferParticipation:
     result.deferredParticipation = prepareRoutedParticipation(
-      args.workspaceRoot, lockRepos, headShas, resolved.projectName, identity)
+      args.workspaceRoot, lockRepos, headShas, resolved.projectName, identity,
+      participationPartitionRoot)
   else:
     report.participation = recordRoutedParticipation(
-      args.workspaceRoot, lockRepos, headShas, resolved.projectName, identity)
+      args.workspaceRoot, lockRepos, headShas, resolved.projectName, identity,
+      participationPartitionRoot)
 
   report.exitCode = 0
   result.report = report
