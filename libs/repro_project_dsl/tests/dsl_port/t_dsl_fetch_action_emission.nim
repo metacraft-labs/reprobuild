@@ -97,6 +97,7 @@ suite "DSL-port M9.K — fetch action emission from registry":
     check argvJoined.contains("mv ")
     check argvJoined.contains(CurlFetchRetryArgs)
     check argvJoined.contains("--retry-all-errors")
+    check argvJoined.contains("--max-time 300")
     check argvJoined.contains("[ -s")
     check argvJoined.contains(".tar.part")
     check argvJoined.contains("mv -f")

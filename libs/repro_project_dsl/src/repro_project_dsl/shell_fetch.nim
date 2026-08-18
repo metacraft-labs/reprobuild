@@ -5,7 +5,7 @@ import std/strutils
 const
   CurlFetchRetryArgs* =
     "--retry 5 --retry-delay 2 --retry-max-time 300 --retry-all-errors " &
-    "--connect-timeout 30"
+    "--connect-timeout 30 --max-time 300"
 
 proc shellDoubleQuote(value: string): string =
   value.replace("\\", "/").replace("\"", "\\\"")
