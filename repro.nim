@@ -42,7 +42,7 @@ import std/[os, osproc, strutils]
 # execution profile is not available to it. Naming the hatch says so at the
 # call site instead of leaving it to be inferred — `git grep uncontrolled` is
 # the audit surface.
-import lints/ambient_execution
+import repro_core/ambient_execution
               # Incremental-Test-Runner M7: getEnv + the `/` path operator
               # for the io-mon / nim-stackable-hooks sibling resolution in the
               # test-fixtures monitor-shim build edge below.

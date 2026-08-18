@@ -8,8 +8,8 @@ import cbor
 # Using the hatches states that explicitly instead of leaving bare findExe /
 # execCmdEx calls that read like an oversight. See
 # docs/ambient-execution-linter.md.
-import lints/ambient_execution
 import repro_core
+import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_domain_types
 import repro_hash

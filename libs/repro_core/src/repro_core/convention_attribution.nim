@@ -44,7 +44,7 @@
 
 import std/[algorithm, os, osproc, strutils, tables]
 # Ambient-execution hatches for the PATH-only toolchain probe below.
-import lints/ambient_execution
+import ./ambient_execution
 
 import ./project_file
 

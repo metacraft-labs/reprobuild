@@ -137,9 +137,12 @@ from-source bootstrap keeps its own path.
 
 The textual check is fast enough for pre-commit but is still grep: it can be
 fooled by a comment or a string literal. The intended authoritative form is a
-term-rewriting linter, force-imported through `config.nims` so it applies to
-every compiled module without source changes, at the **warning** tier (measured
-cost below; errors stay a non-starter until the baseline shrinks).
+term-rewriting linter in
+`libs/repro_core/src/repro_core/ambient_execution.nim`, force-imported through
+`config.nims` so it applies to every compiled module without source changes, at
+the **warning** tier (measured cost below; errors stay a non-starter until the
+baseline shrinks). `lints/ambient_execution.nim` remains a compatibility
+re-export for older internal imports.
 
 **Status: both blocking defects are resolved.** Measured per rule, one call
 site each:
