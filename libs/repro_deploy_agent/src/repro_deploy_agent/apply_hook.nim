@@ -16,42 +16,103 @@ import std/os
 import repro_elevation
 import repro_infra
 import repro_profile_compile
+# For `ProfileBuildAction`, which the resolver signature below names
+# explicitly. It was previously reachable only implicitly, through the typed
+# `ApplyOptions.buildActions` field.
+import repro_profile
 
 import ./manifest
 import ./agent
 
+type
+  ProfileResolver* = proc(profileText: string; outText: var string;
+                          outBuildActions: var seq[ProfileBuildAction]):
+                       bool {.gcsafe.}
+    ## Turn a manifest's ``profileText`` into the canonical resource text
+    ## ``runInfraApply`` consumes, returning ``false`` (with a diagnostic
+    ## already emitted) when the profile does not compile.
+    ##
+    ## Injected rather than imported: the Phase-F3 implementation
+    ## (``resolveSystemProfileText``) lives in ``repro_cli_support``, and
+    ## ``repro_cli_support`` already depends on THIS library, so importing it
+    ## here would close a cycle. The CLI wires it in
+    ## ``repro_cli_support/deploy_agent.nim``, which is in the same library as
+    ## the implementation.
+
 proc mkRunInfraApplyHook*(stateDir: string;
                           cacheRoot: string;
                           hostIdentity = "reprobuild-deploy-agent";
-                          reproExe = ""): ApplyHook =
+                          reproExe = "";
+                          profileResolver: ProfileResolver = nil): ApplyHook =
   ## Build the production apply hook. Each converged manifest is applied
   ## via ``runInfraApply`` with the M4 ``mkBuildActionDispatcher`` closure
-  ## injected — the SAME closure ``repro infra apply`` uses. The manifest's
-  ## ``profileText`` is the desired ``system.nim`` text and its
-  ## ``buildActions`` are the action-edge intent items the dispatcher
-  ## substitutes from / publishes to the binary cache.
+  ## injected — the SAME closure ``repro infra apply`` uses.
   ##
   ## ``cacheRoot`` is the apply-scoped engine/action cache root (the M4
   ## substitute scratch lives under ``cacheRoot/binary-cache-substitute``).
   ## ``stateDir`` is the durable infra state directory.
+  ##
+  ## ON ``profileResolver`` — WHY THE HOOK CANNOT JUST PASS ``m.profileText``
+  ## STRAIGHT TO ``runInfraApply``.
+  ##
+  ## ``repro infra apply`` does NOT do that. It calls
+  ## ``resolveSystemProfileText`` first — the M83 Phase-F3 compile-then-adapt
+  ## step that turns a ``system.nim`` into canonical resource text — and only
+  ## then calls ``runInfraApply``. This hook used to skip that step, so the
+  ## canonical-text parser met ``import repro_profile`` on line 1 of any real
+  ## profile and raised ``unknown system resource kind 'import repro_profile'``.
+  ##
+  ## Measured on win-ci-bare-001, 2026-08-18: the SAME binary applied the SAME
+  ## profile successfully via ``repro infra apply --profile`` and could not
+  ## parse it via ``deploy-agent``. Two paths that must agree did not.
+  ##
+  ## The resolver is optional so the hermetic gates — which inject canonical
+  ## text directly and must not drag in a compiler — keep working unchanged;
+  ## production passes one. A nil resolver preserves the old behaviour exactly.
   let capturedStateDir = stateDir
   let capturedCacheRoot = cacheRoot
   let capturedHost = hostIdentity
   let capturedReproExe = if reproExe.len > 0: reproExe else: getAppFilename()
+  let capturedResolver = profileResolver
   result = proc(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.} =
     {.cast(gcsafe).}:
       try:
         let ctx = FixtureContext(filePrefix: capturedStateDir)
+
+        # Compile the manifest's profile the way the CLI does, when a resolver
+        # was injected. `resolvedActions` is only consulted below.
+        var applyText = m.profileText
+        var resolvedActions: seq[ProfileBuildAction] = @[]
+        if capturedResolver != nil:
+          if not capturedResolver(m.profileText, applyText, resolvedActions):
+            return (ok: false,
+              message: "profile did not compile; see the diagnostic above")
+
+        # WHICH buildActions win, decided on purpose rather than by accident.
+        #
+        # A compiled profile carries its own action edges, and the manifest has
+        # a `buildActions` field of its own for producers that pre-compiled.
+        # Taking the manifest's unconditionally would mean that a producer which
+        # ships none — which is every producer today, since the renderer's
+        # `--build-actions` is optional and unset — silently reduces the apply
+        # to LIVE-STATE ONLY: no downloads, no extracts, no registration. That
+        # failure reports success, which is the worst shape a failure can take.
+        #
+        # So: an explicit producer-supplied set wins (it is a deliberate act),
+        # and otherwise the compiled profile speaks for its own edges.
+        let effectiveActions =
+          if m.buildActions.len > 0: m.buildActions else: resolvedActions
+
         var opts = ApplyOptions(
           stateDir: capturedStateDir,
           hostIdentity: capturedHost,
           reproExe: capturedReproExe,
           elevationMode: emNoElevate,
           noPreview: true,
-          buildActions: m.buildActions,
+          buildActions: effectiveActions,
           buildActionDispatcher:
             mkBuildActionDispatcher(capturedCacheRoot, ctx))
-        let res = runInfraApply(m.profileText, opts)
+        let res = runInfraApply(applyText, opts)
         if res.errorCount > 0 or res.driftCount > 0:
           return (ok: false,
             message: "apply reported " & $res.errorCount & " errors, " &
