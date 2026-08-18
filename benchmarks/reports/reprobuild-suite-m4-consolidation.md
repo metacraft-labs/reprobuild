@@ -336,6 +336,54 @@ should live is a real question this measurement does not settle: reprobuild's
 CAS is currently unused by test-compile edges (`cacheable = false`), so "put it
 in the CAS" may inherit that problem.
 
+### Does a committed lock get consulted at init? No — in any mode
+
+`finalizeVariants()` consults no lock, and there is **no mode branch in that
+code path at all**: `grep` for a develop-mode concept across `repro_lock` and
+`repro_dsl_stdlib` finds nothing. So this is a missing feature rather than a
+deliberate develop-mode carve-out.
+
+But the scoping matters, and it cuts against calling the current behaviour a
+bug *here*. `Locking-And-Solver.md`'s constraint-union rule is explicitly
+scoped to **non-develop mode**, and its neighbouring per-dependency-coordinates
+block is marked "target design — not yet implemented". This workspace is in
+develop mode, where sources can change under the build and re-solving is the
+defensible thing to do. The conformance gap is therefore the *absent
+non-develop path*, not a wrong answer in the path we actually run.
+
+There is also a third option neither the spec nor the lock design covers: a
+test binary that only asserts registry contents has no reason to concretize at
+all. The suite's cost here is not a lock-lookup problem; it is a
+`package`-macro-at-module-init problem.
+
+### What the lock would have to carry
+
+`SolvedGraphLock` (`libs/repro_lock/src/repro_lock.nim`) already carries most
+of it, and `lockToSolution` — the reverse direction — is already implemented:
+
+| Needed | Present? |
+| --- | --- |
+| resolved version per package, keyed by name | **yes**, `packages: seq[LockedPackage{name, version, source}]` |
+| resolved variant values, keyed by name | **yes**, `variants: seq[LockedVariant{name, value}]` |
+| order independence of the content | **yes**, both lists sorted by name, explicitly so "two solves of the same graph produce byte-identical locks" |
+| order independence of *validation* | **no** — `inputsDigest` is a digest of the rendered inputs text, which is emitted in module-initialization order |
+| per-dependency checkout coordinates + integrity | **no** — `LockedPackage.source` is a placeholder equal to the name; the spec marks this "not yet implemented" |
+
+Two further gaps a workspace-scoped design has to close, both consequences of
+the accumulation:
+
+* **Variant keys are not package-qualified.** They are `scopeDerivedName`s, and
+  a collision is disambiguated with a registration-order `#N` suffix. Today
+  each package gets a fresh context (`finalizeVariants` finalizes and pops, and
+  `ensureAmbientVariantContext` re-creates), so collisions do not arise in
+  practice — but a single workspace-scoped table keyed on those names would
+  reintroduce exactly the order dependence the sorted lists were designed to
+  avoid.
+* **Completeness currently rides on the accumulation.** `repro lock refresh`
+  re-solves the inputs the provider emitted, and those are complete only
+  because the last solve saw every package imported so far. Scope the
+  accumulation per package and the union has to be built deliberately instead.
+
 ### Measured ceiling: caching helps a lot, and does not remove the cap
 
 An experimental keyed disk memo around `solve()` — hash the rendered inputs,
@@ -356,9 +404,72 @@ stays quadratic even when every solve is a cache hit.
 The consequence for M4 is specific, and it corrects the natural expectation:
 **caching alone would not make bundle size stop affecting init cost.** Flatting
 it needs the process-wide accumulation scoped per package, not just a cache in
-front of it. And in any case the recipe family's binding constraint is the
-*correctness* cap at 24, which caching does not touch at all — the failures
-there are registry collisions, not solver cost.
+front of it.
+
+### The lock-lookup design, measured by removing the solve entirely
+
+The memo above caches at the wrong granularity — it memoizes each per-package
+solve, so computing the key still means rendering an accumulating input set. A
+workspace-scoped lock indexed by package inverts that: init resolves its own
+entry and never materializes the accumulated set. To measure the ceiling that
+design reaches, `finalizeVariants()` was stubbed to skip **both** the solve and
+the accumulated `buildVariantDecls`/`buildPackageDecls` rendering. The stub is
+env-gated and deliberately **not** committed.
+
+| Bundle | solving | solve removed | speedup | per member |
+| --- | --- | --- | --- | --- |
+| n=1 | 0.009 s | 0.009 s | 1.0x | — |
+| n=32 | 3.181 s | **0.155 s** | 20.5x | 4.8 ms |
+| n=96 | 340.566 s | **1.330 s** | 256x | 13.9 ms |
+| n=196 | 825.863 s | **9.514 s** | 86.8x | 48.5 ms |
+
+The win is large — up to 256x, far beyond the memo's 14-20x, and it confirms
+the granularity argument. **But init is still superlinear.** Removing the
+solver entirely leaves a curve that climbs 8.6x from n=32 to n=96 (3x the
+members) and 7.2x from n=96 to n=196 (2.04x the members) — an exponent near
+2.8, the same shape as before with a roughly 87x smaller constant. Per-member
+cost still triples as membership triples.
+
+So the crux reasoning — that a per-package lookup makes cost O(my declared
+deps) and the size dependence disappears — **does not survive measurement**.
+The solve was the dominant term, not the only accumulating one: the artifact
+and version registries the `package` macro writes at module init accumulate
+too, and they are what remains. A lock lookup is the right shape for the
+dominant term and is worth doing on its own merits; it is not, by itself, the
+flat-init fix.
+
+What it would buy M4's cost axis, using the measured stub init:
+
+| n | binaries | build CPU s | run CPU s | total | vs unbundled |
+| --- | --- | --- | --- | --- | --- |
+| 32 | 7 | 3,387 | 165 | 3,552 | **9.6x** |
+| 96 | 3 | 4,448 | 1,411 | 5,859 | 5.8x |
+| 196 | 1 | 2,598 | 10,075 | 12,673 | 2.7x |
+
+Better than the 6.2x the solving path reaches, and the catastrophic tail is
+gone — but the optimum is still around n=32, and whole-group consolidation is
+still 3.5x worse than that optimum. The cost crossover is softened and pushed
+out, not removed.
+
+### The isolation cap is independent of all of this
+
+With the solve stubbed out entirely, the n=32 recipe bundle fails **the same 9
+of 200 cases**, by name — the `registeredArtifacts` / `registeredVersions`
+assertions. Removing concretization does not remove the contamination, because
+the contamination was never the solver's: it is the artifact and version
+registries colliding as they accumulate.
+
+That settles the relationship between the two axes. **M4's isolation blocker
+survives every caching or locking design and must be stated as independent.**
+The correctness cap at 24 stands whatever happens to the solve.
+
+### Where this needs a decision
+
+The conformance gap belongs in `reprobuild-specs` (`Locking-And-Solver.md` and
+the M2/M3 milestone scoping), not here — this artifact is evidence, not a
+ruling. It is deliberately not written there by this change: that repository is
+currently on another agent's feature branch with uncommitted work, and adding a
+decision note to it would mix this into a review that did not ask for it.
 
 ## Campaign claims this measurement retires
 

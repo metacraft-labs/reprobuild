@@ -133,6 +133,15 @@
     "total_cases": 6966,
     "total_test_entries": 1244
   },
+  "isolation_cap_is_independent": {
+    "cases": 200,
+    "conclusion": "contamination is registry accumulation, not solver; M4's isolation blocker survives every caching or locking design and is independent of the cost axis",
+    "experiment": "n=32 recipe bundle run per-case with the solve stubbed out",
+    "failing_assertions": "registeredArtifacts / registeredVersions",
+    "failures_with_solve": 9,
+    "failures_without_solve": 9,
+    "same_cases": true
+  },
   "landed_batch_repro_solver": {
     "binaries_after": 1,
     "binaries_before": 24,
@@ -153,6 +162,59 @@
       "0": 82
     },
     "whole_binary_exit_code": 0
+  },
+  "lock_consulted_at_init": {
+    "answer": "no, in any mode; no mode branch exists in the finalizeVariants path",
+    "classification": "missing feature, not a develop-mode carve-out",
+    "nuance": "the spec's constraint-union rule is scoped to non-develop mode and this workspace is in develop mode, where re-solving is defensible; the gap is the absent non-develop path, so current behaviour is not a bug here",
+    "third_option": "a test binary asserting only registry contents has no reason to concretize at all"
+  },
+  "lock_lookup_design": {
+    "best_ratio": "9.6x at n=32 (vs 6.2x on the solving path); optimum still ~n=32",
+    "cost_model_totals_cpu_seconds": {
+      "196": 12673,
+      "32": 3552,
+      "96": 5859,
+      "unbundled": 34154
+    },
+    "experiment": "finalizeVariants() stubbed to skip BOTH the solve and the accumulated buildVariantDecls/buildPackageDecls rendering; env-gated, NOT committed",
+    "growth": "x8.6 from n=32->96 (x3 members); x7.2 from n=96->196 (x2.04 members); exponent ~2.8",
+    "init_cpu_seconds": {
+      "1": 0.009,
+      "196": 9.514,
+      "32": 0.155,
+      "96": 1.33
+    },
+    "per_member_ms": {
+      "196": 48.5,
+      "32": 4.8,
+      "96": 13.9
+    },
+    "solving_baseline_cpu_seconds": {
+      "1": 0.009,
+      "196": 825.863,
+      "32": 3.181,
+      "96": 340.566
+    },
+    "speedup": {
+      "196": 86.8,
+      "32": 20.5,
+      "96": 256.1
+    },
+    "verdict": "still superlinear with solver fully removed; the crux claim that a per-package lookup makes cost O(my deps) does NOT survive measurement. Solve was the dominant term, not the only accumulating one; artifact/version registries accumulate too."
+  },
+  "lock_schema_gaps": {
+    "completeness_note": "repro lock refresh re-solves emitted inputs whose completeness rides on the accumulation; scoping it per package means the union must be built deliberately",
+    "content_order_independent": true,
+    "has_per_package_version_keyed_by_name": true,
+    "has_per_variant_value_keyed_by_name": true,
+    "per_dependency_coordinates_and_integrity": false,
+    "per_dependency_note": "LockedPackage.source is a placeholder equal to the name; spec marks coordinates+integrity 'not yet implemented'",
+    "reverse_direction_implemented": "lockToSolution exists",
+    "validation_note": "inputsDigest is over the rendered inputs text, emitted in module-init order",
+    "validation_order_independent": false,
+    "variant_key_note": "scopeDerivedName with an order-dependent #N collision suffix; safe today only because each package gets a fresh context",
+    "variant_keys_package_qualified": false
   },
   "peercache_group": {
     "bundle_build_cpu_seconds": 468.4,
