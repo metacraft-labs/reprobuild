@@ -115,8 +115,22 @@ when not defined(ambientExecutionAllowed):
                "uncontrolledFindExe() if that is genuinely intended.".}
     {.noRewrite.}: os.findExe(a, b, c)
 
+  # NOTE the `auto` return type. Spelled as the actual
+  # `tuple[output: string, exitCode: int]` this rule fires 301 times for ONE
+  # call site — Nim's rewrite-iteration limit — because the declared structured
+  # return type makes the compiler re-analyse the body for a conversion, and
+  # that re-analysis re-matches the pattern despite `{.noRewrite.}`. Every
+  # other rule here returns a simple type (`string`, `int`, `owned(Process)`)
+  # and fires exactly once.
+  #
+  # It is the same lesson as the parameter-type note at the top of this file,
+  # one position further along the signature: state the return type as `auto`
+  # unless a simple type is demonstrably fine. And it fails LOUDLY rather than
+  # silently, which makes it the friendlier of the two traps — 301 identical
+  # warnings are hard to miss, where a rule that never fires looks like a clean
+  # tree.
   template warnExecCmdEx*{execCmdEx(c, o, e, w, i)}(
-      c: string, o, e, w, i: auto): tuple[output: string, exitCode: int] =
+      c: string, o, e, w, i: auto): auto =
     {.warning: "ambient execution: execCmdEx runs a binary reprobuild does " &
                "not control. Use a typed execution profile, or " &
                "uncontrolledExecCmdEx() if that is genuinely intended.".}
