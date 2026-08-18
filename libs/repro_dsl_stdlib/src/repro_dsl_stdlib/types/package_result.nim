@@ -167,7 +167,8 @@ proc componentPath(components: Table[string, string]; name: string): string =
 # autotools slicing methods consume it too.
 proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
                             buildDir, destdir, packageName, kind, name: string;
-                            dependencyPolicy = automaticMonitorPolicy())
+                            dependencyPolicy = automaticMonitorPolicy();
+                            sourceName = "")
 proc emitInstallTreeMirror*(installEdge: BuildActionDef;
                             buildDir, destdir, packageName,
                             conventionTag: string;
@@ -1762,7 +1763,8 @@ proc m9r14dPascalToKebabWithDigits*(value: string): string =
 
 proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
                             buildDir, destdir, packageName, kind, name: string;
-                            dependencyPolicy: BuildActionDependencyPolicy) =
+                            dependencyPolicy: BuildActionDependencyPolicy;
+                            sourceName: string) =
   ## Emit a single stage-copy action that copies the installed
   ## artefact at ``destdir/usr/{bin,lib}/<name>`` into the canonical
   ## ``<projectRoot>/.repro/output/<name>/<name>`` location so the
@@ -1792,7 +1794,10 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
   let installPrefix = effectiveDestRoot & "/usr/" & (if kind ==
       "library": "lib" else: "bin")
   let escapedSrcDir = installPrefix.replace("\\", "/").replace("\"", "\\\"")
-  let escapedName = name.replace("\"", "\\\"")
+  let effectiveSourceName =
+    if sourceName.len > 0: sourceName
+    else: name
+  let escapedName = effectiveSourceName.replace("\"", "\\\"")
   # Probe order: <prefix>/<name>, <prefix>/<name>.exe (cross-build
   # safety), <prefix>/lib<name>.so (library shape).
   var script = "set -e; mkdir -p \"" & escapedOutDir & "\"; "
@@ -1830,13 +1835,13 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       else:
         dir & "/lib" & stem & ".so.\"*"
 
-    let escapedLowerName = name.toLowerAscii.replace("\"", "\\\"")
-    let kebabName = m9r14dPascalToKebab(name).replace("\"", "\\\"")
+    let escapedLowerName = effectiveSourceName.toLowerAscii.replace("\"", "\\\"")
+    let kebabName = m9r14dPascalToKebab(effectiveSourceName).replace("\"", "\\\"")
     let kebabDigitsName =
-      m9r14dPascalToKebabWithDigits(name).replace("\"", "\\\"")
+      m9r14dPascalToKebabWithDigits(effectiveSourceName).replace("\"", "\\\"")
     # M9.R.14f.9 — snake_case probe for libdrm / mesa-style naming
     # where ``libdrmAmdgpu`` maps to ``libdrm_amdgpu.so``.
-    let snakeName = m9r14fPascalToSnake(name).replace("\"", "\\\"")
+    let snakeName = m9r14fPascalToSnake(effectiveSourceName).replace("\"", "\\\"")
     # M9.R.14g.7 — strip a leading ``lib`` prefix from the DSL name so
     # recipes that already wrote ``library libGModule:`` (the DSL
     # convention) probe the same file shapes recipes using bare
@@ -1848,12 +1853,14 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
         value[3 ..< value.len]
       else:
         value
-    let strippedName = stripLibPrefix(name).replace("\"", "\\\"")
+    let strippedName = stripLibPrefix(effectiveSourceName).replace("\"", "\\\"")
     let strippedLowerName = strippedName.toLowerAscii
-    let strippedKebab = m9r14dPascalToKebab(stripLibPrefix(name)).replace("\"", "\\\"")
-    let strippedKebabDigits = m9r14dPascalToKebabWithDigits(stripLibPrefix(
-        name)).replace("\"", "\\\"")
-    let strippedSnake = m9r14fPascalToSnake(stripLibPrefix(name)).replace("\"", "\\\"")
+    let strippedKebab = m9r14dPascalToKebab(
+      stripLibPrefix(effectiveSourceName)).replace("\"", "\\\"")
+    let strippedKebabDigits = m9r14dPascalToKebabWithDigits(
+      stripLibPrefix(effectiveSourceName)).replace("\"", "\\\"")
+    let strippedSnake = m9r14fPascalToSnake(
+      stripLibPrefix(effectiveSourceName)).replace("\"", "\\\"")
     when isWindows:
       # PE/COFF runtime libraries install under bindir; their import
       # libraries remain under libdir. Prefer the runtime DLL and retain the
@@ -1865,7 +1872,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       script.add("\"" & windowsBinDir & "/" & escapedLowerName & libExt & "\" ")
       script.add("\"" & windowsBinDir & "/" & kebabName & libExt & "\" ")
       script.add("\"" & windowsBinDir & "/" & snakeName & libExt & "\" ")
-      if strippedName != name:
+      if strippedName != effectiveSourceName:
         script.add("\"" & windowsBinDir & "/lib" & strippedName & libExt & "\" ")
         script.add("\"" & windowsBinDir & "/lib" & strippedLowerName & libExt & "\" ")
         if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
@@ -1901,7 +1908,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     script.add("\"" & escapedSrcDir & "/" & escapedName & libExt & "\" ")
     script.add("\"" & escapedSrcDir & "/" & escapedLowerName & libExt & "\" ")
     # M9.R.14g.7 — stripped-prefix variants for ``library libFoo:`` shapes.
-    if strippedName != name:
+    if strippedName != effectiveSourceName:
       script.add("\"" & escapedSrcDir & "/lib" & strippedName & libExt & "\" ")
       script.add("\"" & escapedSrcDir & "/lib" & strippedLowerName & libExt & "\" ")
       # M9.R.14h.8 — kebab + snake variants on the stripped form so
@@ -1964,13 +1971,13 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # upstream installs.  The strippedName drops one of the two libs
     # so the glob becomes ``libKGlobalAccelD.so.*`` and matches the
     # real install.
-    if strippedName != name:
+    if strippedName != effectiveSourceName:
       script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dotGlob(
           escapedSrcDir, strippedName) & " 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
       script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dotGlob(
           escapedSrcDir, strippedLowerName) & " 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
     # M9.R.14g.7 — stripped-prefix glob variants (libgmodule-2.0.so etc.)
-    if strippedName != name:
+    if strippedName != effectiveSourceName:
       script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(
           escapedSrcDir, strippedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(
@@ -1985,7 +1992,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
           result.add(ch)
         elif ch in {'A' .. 'Z'}:
           result.add(chr(ord(ch) - ord('A') + ord('a')))
-    let lettersOnly = lettersOnlyLower(stripLibPrefix(name))
+    let lettersOnly = lettersOnlyLower(stripLibPrefix(effectiveSourceName))
     if lettersOnly.len > 0 and lettersOnly != strippedLowerName:
       script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(
           escapedSrcDir, lettersOnly) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
@@ -2040,7 +2047,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
           strippedSnake != strippedKebab:
         script.add("\"" & lib64Dir & "/lib" & strippedSnake & libExt & "\" ")
-      if strippedName != name:
+      if strippedName != effectiveSourceName:
         script.add("\"" & lib64Dir & "/lib" & strippedName & libExt & "\" ")
         script.add("\"" & lib64Dir & "/lib" & strippedLowerName & libExt & "\"; ")
       else:
@@ -2050,7 +2057,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       script.add("first=$(ls -1 \"" & dashGlob(lib64Dir, escapedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); ")
       script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(
           lib64Dir, escapedLowerName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
-      if strippedName != name:
+      if strippedName != effectiveSourceName:
         script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(
             lib64Dir, strippedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(
@@ -2104,7 +2111,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
         if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
             strippedSnake != strippedKebab:
           script.add("\"" & dirPath & "/lib" & strippedSnake & libExt & "\" ")
-        if strippedName != name:
+        if strippedName != effectiveSourceName:
           script.add("\"" & dirPath & "/lib" & strippedName & libExt & "\" ")
           script.add("\"" & dirPath & "/lib" & strippedLowerName & libExt & "\"; ")
         else:
@@ -2115,7 +2122,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
         script.add("first=$(ls -1 \"" & dashGlob(dirPath, escapedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); ")
         script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(
             dirPath, escapedLowerName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
-        if strippedName != name:
+        if strippedName != effectiveSourceName:
           script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(
               dirPath, strippedName) & " 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
           script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dashGlob(
@@ -2237,7 +2244,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
         script.add("elif [ -f \"" & dir & "/" & snakeName & "\" ]; then ")
         script.add("cp -fL \"" & dir & "/" & snakeName & "\" \"" & escapedOut &
             "\"; chmod +x \"" & escapedOut & "\"; ")
-      if strippedName != name:
+      if strippedName != effectiveSourceName:
         script.add("elif [ -f \"" & dir & "/" & strippedEscaped & "\" ]; then ")
         script.add("cp -fL \"" & dir & "/" & strippedEscaped & "\" \"" &
             escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
@@ -2407,6 +2414,20 @@ proc library*(r: AutotoolsPackageResult; name: string): Library =
   emitAutotoolsStageCopy(r.installEdge, r.buildDir, r.destdir,
     currentOwningPackage(), "library", name,
     r.postInstallDependencyPolicy)
+  emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
+    currentOwningPackage(), "autotools", r.postInstallDependencyPolicy)
+  newLibrary(
+    install = r.installEdge,
+    installPrefix = componentPath(r.components, "library"))
+
+proc libraryAlias*(r: AutotoolsPackageResult; aliasName, sourceName: string):
+    Library =
+  ## Stage an upstream library whose installed basename differs from the
+  ## package interface name. The install-tree mirror keeps the upstream ABI
+  ## filename, while the resolver-facing output uses ``aliasName``.
+  emitAutotoolsStageCopy(r.installEdge, r.buildDir, r.destdir,
+    currentOwningPackage(), "library", aliasName,
+    r.postInstallDependencyPolicy, sourceName = sourceName)
   emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
     currentOwningPackage(), "autotools", r.postInstallDependencyPolicy)
   newLibrary(
