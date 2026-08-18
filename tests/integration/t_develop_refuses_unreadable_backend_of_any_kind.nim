@@ -54,9 +54,24 @@
 ## cannot express the condition under test — a skip is honest where a pass
 ## would be a lie).
 
-import std/[os, osproc, posix, strutils, tempfiles, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
+
+when defined(posix):
+  from std/posix import Mode, chmod, geteuid
 
 const reproBinary = "./build/bin/repro"
+
+proc cannotModelUnreadableDirectory(): bool =
+  when defined(posix):
+    geteuid() == 0
+  else:
+    true
+
+proc setDirectoryMode(path: string; mode: int): int =
+  when defined(posix):
+    int(chmod(path.cstring, Mode(mode)))
+  else:
+    -1
 
 proc q(value: string): string = quoteShell(value)
 
@@ -135,7 +150,8 @@ suite "DS-3: an unreadable backend refuses whatever KIND it is":
 
   test "t_develop_refuses_unreadable_backend_of_any_kind":
     let gitBin = findExe("git")
-    if gitBin.len == 0 or not fileExists(reproBinary) or geteuid() == 0:
+    if gitBin.len == 0 or not fileExists(reproBinary) or
+        cannotModelUnreadableDirectory():
       skip()
     else:
       let repro = absolutePath(reproBinary)
@@ -154,7 +170,7 @@ suite "DS-3: an unreadable backend refuses whatever KIND it is":
       # the backend's own readability probe.
       let storeDir = ws / ".repro" / "lockstore-team"
       defer:
-        discard chmod(storeDir.cstring, 0o755)
+        discard setDirectoryMode(storeDir, 0o755)
         removeDir(scratch)
 
       createDir(manifestsRoot / "projects")
@@ -206,11 +222,11 @@ suite "DS-3: an unreadable backend refuses whatever KIND it is":
       check dirExists(storeDir)
 
       # ---- the store EXISTS, holds a record, and cannot be read. ---------
-      check chmod(storeDir.cstring, 0o000) == 0
+      check setDirectoryMode(storeDir, 0o000) == 0
       let deps = scratch / "deps"
       let r = run(repro & " develop --all --into=" & q(deps) &
         " --tool-provisioning=path", cwd = ws)
-      check chmod(storeDir.cstring, 0o755) == 0
+      check setDirectoryMode(storeDir, 0o755) == 0
       if r.code != 2:
         checkpoint("unreadable committed-file output: " & r.output)
 

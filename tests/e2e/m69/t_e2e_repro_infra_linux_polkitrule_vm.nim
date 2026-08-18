@@ -13,7 +13,9 @@
 ## Gated by `defined(linux)` AND `REPRO_M69_POLKIT_VM=1`. Off-sandbox the
 ## program is a no-op smoke (exit 0).
 
-import std/[os, unittest]
+import std/os
+
+import ct_test_unittest_parallel
 
 import repro_elevation
 

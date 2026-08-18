@@ -16,7 +16,9 @@
 ##
 ## Gated by `defined(linux)` AND `REPRO_M69_LINUX_FIREWALL_VM=1`.
 
-import std/[os, strutils, osproc, unittest]
+import std/[os, strutils, osproc]
+
+import ct_test_unittest_parallel
 
 import repro_elevation
 

@@ -28,7 +28,9 @@
 ## No `skip`, no `xfail` — the pure-logic half ALWAYS runs and always
 ## asserts; only the real-install half is VM-gated.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, strutils, tempfiles]
+
+import ct_test_unittest_parallel
 
 import repro_elevation
 import repro_infra

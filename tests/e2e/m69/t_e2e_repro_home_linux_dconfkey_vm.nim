@@ -13,7 +13,9 @@
 ##
 ## Gated by `defined(linux)` AND `REPRO_M69_DCONF_KEY_VM=1`.
 
-import std/[os, strutils, osproc, unittest]
+import std/[os, strutils, osproc]
+
+import ct_test_unittest_parallel
 
 import repro_home_resources
 

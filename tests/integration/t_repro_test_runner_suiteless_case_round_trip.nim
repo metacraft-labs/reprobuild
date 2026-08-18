@@ -37,6 +37,12 @@
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
+template testWithReturn(name: string; body: untyped) =
+  test name:
+    proc runTestBody() =
+      body
+    runTestBody()
+
 const RepoRootMarker = "repro.nim"
 
 proc findRepoRoot(): string =
@@ -72,7 +78,7 @@ proc compileFixture(workRoot, source, binary: string): bool =
   execCmd(cmd) == 0
 
 suite "repro_test_runner suite-less case round-trip":
-  test "a suite-less case is run via its verbatim catalog name":
+  testWithReturn "a suite-less case is run via its verbatim catalog name":
     let repoRoot = findRepoRoot()
     let runner = repoRoot / "build" / "bin" /
       addFileExt("repro_test_runner", ExeExt)

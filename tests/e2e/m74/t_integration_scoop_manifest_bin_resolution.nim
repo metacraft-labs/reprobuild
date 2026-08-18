@@ -27,7 +27,9 @@
 ## `LaunchPlan.executablePath = rec.resolvedExecutablePath`), so a
 ## strong assertion on that field is a strong assertion on the launcher.
 
-import std/[json, os, strutils, tempfiles, unittest]
+import std/[json, os, strutils, tempfiles]
+
+import ct_test_unittest_parallel
 
 import repro_tool_profiles
 

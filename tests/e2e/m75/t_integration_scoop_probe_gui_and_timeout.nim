@@ -37,7 +37,9 @@
 ##   * Case console/normal: a normal console fixture app still probes
 ##     and verifies as before — realization succeeds, the probe ran.
 
-import std/[json, os, osproc, strutils, tempfiles, times, unittest]
+import std/[json, os, osproc, strutils, tempfiles, times]
+
+import ct_test_unittest_parallel
 
 import repro_tool_profiles
 

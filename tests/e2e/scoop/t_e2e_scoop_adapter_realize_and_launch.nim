@@ -26,7 +26,9 @@
 ##    (NOT `current/`), the build action ran the Scoop-provisioned tool,
 ##    and the receipt records the practical-hardening tier.
 
-import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[json, os, osproc, sequtils, strutils, tempfiles]
+
+import ct_test_unittest_parallel
 
 import repro_tool_profiles
 

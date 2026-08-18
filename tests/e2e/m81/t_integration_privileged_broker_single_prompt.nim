@@ -50,7 +50,9 @@
 ## additionally unit-tested in
 ## `libs/repro_elevation/tests/t_smoke_repro_elevation.nim`.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, strutils, tempfiles]
+
+import ct_test_unittest_parallel
 
 import repro_core
 import repro_elevation

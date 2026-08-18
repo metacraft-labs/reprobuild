@@ -20,7 +20,9 @@
 ##
 ## Gated by `defined(linux)` AND `REPRO_M69_UDEV_VM=1`.
 
-import std/[os, osproc, strutils, unittest]
+import std/[os, osproc, strutils]
+
+import ct_test_unittest_parallel
 when defined(posix):
   import std/posix
 

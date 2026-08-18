@@ -60,9 +60,24 @@
 ## (root bypasses the permission bits, so the fixture cannot express the
 ## condition under test — a skip is honest where a pass would be a lie).
 
-import std/[os, osproc, posix, strutils, tempfiles, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
+
+when defined(posix):
+  from std/posix import Mode, chmod, geteuid
 
 const reproBinary = "./build/bin/repro"
+
+proc cannotModelUnreadableDirectory(): bool =
+  when defined(posix):
+    geteuid() == 0
+  else:
+    true
+
+proc setDirectoryMode(path: string; mode: int): int =
+  when defined(posix):
+    int(chmod(path.cstring, Mode(mode)))
+  else:
+    -1
 
 proc q(value: string): string = quoteShell(value)
 
@@ -141,7 +156,8 @@ suite "DS-3: an existing-but-UNREADABLE backend refuses like an absent one":
 
   test "t_develop_refuses_unreadable_backend_before_membership_degrades":
     let gitBin = findExe("git")
-    if gitBin.len == 0 or not fileExists(reproBinary) or geteuid() == 0:
+    if gitBin.len == 0 or not fileExists(reproBinary) or
+        cannotModelUnreadableDirectory():
       # root reads a mode-000 directory regardless of its bits, so the fixture
       # cannot express "unreadable" at all under root.
       skip()
@@ -161,8 +177,8 @@ suite "DS-3: an existing-but-UNREADABLE backend refuses like an absent one":
       # Restore the bits no matter how this test exits, or the tempdir cleanup
       # itself fails and the next run inherits an undeletable directory.
       defer:
-        discard chmod(manifestsRoot.cstring, 0o755)
-        discard chmod(locksDir.cstring, 0o755)
+        discard setDirectoryMode(manifestsRoot, 0o755)
+        discard setDirectoryMode(locksDir, 0o755)
         removeDir(scratch)
 
       createDir(manifestsRoot / "projects")
@@ -218,11 +234,11 @@ suite "DS-3: an existing-but-UNREADABLE backend refuses like an absent one":
 
       # ---- Case A: the whole routed checkout is unreadable. --------------
       # It is ALSO the manifest layer, so membership resolution reads it too.
-      check chmod(manifestsRoot.cstring, 0o000) == 0
+      check setDirectoryMode(manifestsRoot, 0o000) == 0
       let depsA = scratch / "deps-a"
       let a = run(repro & " develop --all --into=" & q(depsA) &
         " --tool-provisioning=path", cwd = ws)
-      check chmod(manifestsRoot.cstring, 0o755) == 0
+      check setDirectoryMode(manifestsRoot, 0o755) == 0
       if a.code != 2:
         checkpoint("case A output: " & a.output)
       check a.code == 2
@@ -245,11 +261,11 @@ suite "DS-3: an existing-but-UNREADABLE backend refuses like an absent one":
       # ---- Case B: only the `locks/` subtree is unreadable. --------------
       # Membership resolves fine here, so this case DID emit a notice before —
       # and still exited 0. A team-tier backend that cannot be read is exit 2.
-      check chmod(locksDir.cstring, 0o000) == 0
+      check setDirectoryMode(locksDir, 0o000) == 0
       let depsB = scratch / "deps-b"
       let b = run(repro & " develop --all --into=" & q(depsB) &
         " --tool-provisioning=path", cwd = ws)
-      check chmod(locksDir.cstring, 0o755) == 0
+      check setDirectoryMode(locksDir, 0o755) == 0
       if b.code != 2:
         checkpoint("case B output: " & b.output)
       check b.code == 2

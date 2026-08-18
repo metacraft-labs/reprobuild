@@ -58,6 +58,12 @@
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
+template testWithReturn(name: string; body: untyped) =
+  test name:
+    proc runTestBody() =
+      body
+    runTestBody()
+
 const RepoRootMarker = "repro.nim"
 
 proc findRepoRoot(): string =
@@ -324,7 +330,7 @@ proc buildAndRun(stem, source: string;
 
 suite "repro_test_runner reporting contract":
 
-  test "a stderr-polluted --list-json still enumerates individual cases":
+  testWithReturn "a stderr-polluted --list-json still enumerates individual cases":
     # The regression this pins: the probe used to merge the child's
     # stderr into the stream it parsed, so a binary whose libraries chat
     # on stderr was classified opaque and reported as ONE whole-binary
@@ -353,7 +359,7 @@ suite "repro_test_runner reporting contract":
     check alpha{"protocol_aware"}.getBool() == true
     check beta{"protocol_aware"}.getBool() == true
 
-  test "stderr spliced into the catalog does not hide the cases":
+  testWithReturn "stderr spliced into the catalog does not hide the cases":
     # Separation of the two streams, isolated: this fixture's stdout is
     # a valid catalog and its stderr is noise, but the two interleave
     # into an unparseable file the moment they share a descriptor.
@@ -375,7 +381,7 @@ suite "repro_test_runner reporting contract":
       return
     check gamma{"protocol_aware"}.getBool() == true
 
-  test "every summary entry carries name, suite and run_name":
+  testWithReturn "every summary entry carries name, suite and run_name":
     var doc: JsonNode
     var exitCode = -1
     if not buildAndRun("t_noisy_catalog_fixture", NoisyFixtureSource,
@@ -410,7 +416,7 @@ suite "repro_test_runner reporting contract":
     # therefore NOT the same field as ``name``.
     check alpha{"run_name"}.getStr() == "noisy::alpha case"
 
-  test "a harness fault is ERROR, not FAIL, and fails the run":
+  testWithReturn "a harness fault is ERROR, not FAIL, and fails the run":
     var doc: JsonNode
     var exitCode = -1
     if not buildAndRun("t_harness_fault_fixture", HarnessFaultFixtureSource,

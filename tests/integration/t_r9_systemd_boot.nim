@@ -9,7 +9,9 @@
 ## Override ISO via $VMH_REPROOS_R9_ISO; default is
 ## D:/metacraft/reprobuild/build/r9-build/reproos-r9.iso.
 
-import std/[os, osproc, strutils, tables, times, unittest]
+import std/[os, osproc, strutils, tables, times]
+
+import ct_test_unittest_parallel
 
 const HostRunsGate = defined(windows)
   ## The Hyper-V backend needs a Windows host. This used to be enforced

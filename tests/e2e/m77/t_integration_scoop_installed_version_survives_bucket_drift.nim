@@ -37,7 +37,9 @@
 ## The adapter is exercised through the real `resolveScoopTool` entry
 ## point against a sandboxed Scoop root.
 
-import std/[json, os, strutils, tempfiles, unittest]
+import std/[json, os, strutils, tempfiles]
+
+import ct_test_unittest_parallel
 
 import repro_tool_profiles
 import repro_interface_artifacts

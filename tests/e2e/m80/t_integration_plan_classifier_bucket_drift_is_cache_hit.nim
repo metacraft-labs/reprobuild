@@ -45,8 +45,9 @@
 ## Scoop adapter is the real M55 `resolveScoopTool`. No `skip`.
 
 import std/[algorithm, json, os, osproc, streams, strtabs, strutils,
-  tempfiles, unittest]
+  tempfiles]
 
+import ct_test_unittest_parallel
 import repro_home_generations
 import repro_local_store
 import repro_test_support

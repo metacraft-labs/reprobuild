@@ -11,7 +11,9 @@
 ## Each failure must be a CatchableError of the documented subtype,
 ## not a generic OSError or ValueError.
 
-import std/[os, tempfiles, unittest]
+import std/[os, tempfiles]
+
+import ct_test_unittest_parallel
 
 import repro_tool_profiles
 
