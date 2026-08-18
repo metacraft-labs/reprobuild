@@ -2294,6 +2294,8 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
   ## destination so the same upstream binary can be staged under
   ## multiple names. Idempotent — keyed by ``(packageName, "executable",
   ## aliasName)`` so repeated declarations only emit one action.
+  ## Windows aliases copy and declare the native ``.exe`` directly;
+  ## POSIX aliases remain shell launchers into the install-tree mirror.
   let projectRoot = activeProviderProjectRoot()
   if projectRoot.len == 0:
     return
@@ -2326,32 +2328,56 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
   let libLibexec = (effectiveDestRoot & "/usr/lib/libexec").replace("\\",
       "/").replace("\"", "\\\"")
   let candidateDirs = [bin, sbin, rootBin, rootSbin, libexec, libLibexec]
-  let launchPrefix =
-    if sourceName == "g-ir-scanner": "exec env -u PYTHONPATH "
-    else: "exec "
   var script = "set -e; mkdir -p \"" & escapedOutDir & "\"; "
   var firstClause = true
-  for index, dir in candidateDirs:
-    let leader = (if firstClause: "if" else: "elif")
-    script.add(leader & " [ -f \"" & dir & "/" & escapedSrc & "\" ]; then ")
-    let installSubdir = ["usr/bin", "usr/sbin", "bin", "sbin",
-      "usr/libexec", "usr/lib/libexec"][index]
-    script.add("printf '%s\\n' '#!/bin/sh' '" & launchPrefix &
-      "\"$(dirname \"$0\")/../install/" &
-      installSubdir & "/" & escapedSrc & "\" \"$@\"' > \"" & escapedOut &
-      "\"; chmod +x \"" & escapedOut & "\"; ")
-    script.add("elif [ -f \"" & dir & "/" & escapedSrc & ".exe\" ]; then ")
-    script.add("cp -fL \"" & dir & "/" & escapedSrc & ".exe\" \"" & escapedOut & ".exe\"; ")
-    firstClause = false
+  var aliasOutputs: seq[string] = @[]
+  when defined(windows):
+    let outputExe = outputPath & ".exe"
+    let escapedOutputExe = outputExe.replace("\\", "/").replace("\"", "\\\"")
+    aliasOutputs.add(outputExe)
+    var escapedSourceOutputExe = ""
+    if sourceName != aliasName:
+      let sourceOutputExe = outputDir / (sourceName & ".exe")
+      escapedSourceOutputExe = sourceOutputExe.replace("\\", "/").replace(
+        "\"", "\\\"")
+      aliasOutputs.add(sourceOutputExe)
+    for dir in candidateDirs:
+      let leader = (if firstClause: "if" else: "elif")
+      script.add(leader & " [ -f \"" & dir & "/" & escapedSrc &
+        ".exe\" ]; then ")
+      script.add("cp -fL \"" & dir & "/" & escapedSrc & ".exe\" \"" &
+        escapedOutputExe & "\"; ")
+      if sourceName != aliasName:
+        script.add("cp -fL \"" & escapedOutputExe & "\" \"" &
+          escapedSourceOutputExe & "\"; ")
+      firstClause = false
+  else:
+    let launchPrefix =
+      if sourceName == "g-ir-scanner": "exec env -u PYTHONPATH "
+      else: "exec "
+    aliasOutputs.add(outputPath)
+    for index, dir in candidateDirs:
+      let leader = (if firstClause: "if" else: "elif")
+      script.add(leader & " [ -f \"" & dir & "/" & escapedSrc &
+        "\" ]; then ")
+      let installSubdir = ["usr/bin", "usr/sbin", "bin", "sbin",
+        "usr/libexec", "usr/lib/libexec"][index]
+      script.add("printf '%s\\n' '#!/bin/sh' '" & launchPrefix &
+        "\"$(dirname \"$0\")/../install/" & installSubdir & "/" &
+        escapedSrc & "\" \"$@\"' > \"" & escapedOut &
+        "\"; chmod +x \"" & escapedOut & "\"; ")
+      firstClause = false
   script.add("else echo \"executableAlias stage-copy: no source binary " &
       escapedSrc & " under " & bin & " or " & sbin & " or " & rootBin & " or " &
       rootSbin & " or " & libexec & " or " & libLibexec & "\" >&2; exit 1; fi")
-  var aliasOutputs = @[outputPath]
-  if sourceName != aliasName:
-    let sourceOutput = outputDir / sourceName
-    let escapedSourceOutput = sourceOutput.replace("\\", "/").replace("\"", "\\\"")
-    script.add("; ln -sfn \"" & aliasName & "\" \"" & escapedSourceOutput & "\"")
-    aliasOutputs.add(sourceOutput)
+  when not defined(windows):
+    if sourceName != aliasName:
+      let sourceOutput = outputDir / sourceName
+      let escapedSourceOutput = sourceOutput.replace("\\", "/").replace(
+        "\"", "\\\"")
+      script.add("; ln -sfn \"" & aliasName & "\" \"" &
+        escapedSourceOutput & "\"")
+      aliasOutputs.add(sourceOutput)
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-alias-" & sanitizeStageCopyName(packageName) &
     "-" & sanitizeStageCopyName(aliasName)

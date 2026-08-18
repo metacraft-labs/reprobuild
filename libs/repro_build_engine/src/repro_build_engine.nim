@@ -3689,6 +3689,17 @@ proc prepareBuiltinFileOutput(path: string) =
   if symlinkExists(expanded):
     removeFile(expanded)
 
+proc builtinCopyDestinationMatches(source, destination: string): bool =
+  let sourcePath = extendedPath(source)
+  let destinationPath = extendedPath(destination)
+  if not fileExists(destinationPath) or
+      not sameFileContent(sourcePath, destinationPath):
+    return false
+  when defined(posix):
+    getFilePermissions(sourcePath) == getFilePermissions(destinationPath)
+  else:
+    true
+
 proc removeExistingPath(path: string) =
   let expanded = extendedPath(path)
   if symlinkExists(expanded) or fileExists(expanded):
@@ -3756,14 +3767,18 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           action.id)
       let source = action.builtinPath(action.inputs[0])
       let destination = action.builtinPath(action.outputs[0])
-      createDir(extendedPath(destination.splitPath.head))
-      prepareBuiltinFileOutput(destination)
+      let destinationMatches =
+        builtinCopyDestinationMatches(source, destination)
+      if not destinationMatches:
+        createDir(extendedPath(destination.splitPath.head))
+        prepareBuiltinFileOutput(destination)
       # Preserve the source file's mode bits — plain ``copyFile`` creates the
       # destination with the process umask default (typically 0644), which
       # silently drops the executable bit. CodeTracer's recipe copies the
       # cargo-built ``replay-server`` / ``session-manager`` binaries through
       # this action; without the exec bit they fail to launch (exit 126).
-      copyFileWithPermissions(extendedPath(source), extendedPath(destination))
+      if not destinationMatches:
+        copyFileWithPermissions(extendedPath(source), extendedPath(destination))
     of bakEnsureDir:
       if action.outputs.len != 1:
         raiseEngine("ensureDir action requires exactly one output: " & action.id)

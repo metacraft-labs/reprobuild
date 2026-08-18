@@ -88,3 +88,62 @@ suite "library stage aliases":
         check "upstream-runtime" in script
     else:
       skip()
+
+suite "executable stage aliases":
+  test "stage a host-native executable under its public interface name":
+    when defined(reproProviderMode):
+      let scratch = getTempDir() / "repro-executable-stage-alias"
+      let projectRoot = scratch / "executableAliasPkg"
+      if dirExists(scratch):
+        removeDir(scratch)
+      createDir(projectRoot)
+      defer:
+        if dirExists(scratch):
+          removeDir(scratch)
+
+      let pkg = PackageDef(
+        packageName: "executableAliasPkg",
+        sourceFile: projectRoot / "repro.nim",
+        hasDevEnv: false,
+        devEnvBodyHash: "",
+        toolUses: @[])
+      let fragment = buildPackageFragment(
+        pkg,
+        dummyRequest(projectRoot),
+        proc() =
+        setCurrentOwningPackageOverride("executableAliasPkg")
+        try:
+          let build = autotools_package(
+            srcDir = "./src",
+            skipConfigure = true)
+          let executable = build.executableAlias(
+            "toolAlias", "upstream-tool")
+          check executable.cli.executableName == "toolAlias"
+        finally:
+          clearCurrentOwningPackageOverride(),
+        includeDefault = false)
+
+      let actions = extractActions(fragment)
+      let stage = findById(actions,
+        "autotools-stage-alias-executableAliasPkg-toolAlias")
+      let script = stage.inlineScriptOf()
+      let outputDir = projectRoot / ".repro" / "output" / "toolAlias"
+
+      when defined(windows):
+        check stage.outputs == @[
+          outputDir / "toolAlias.exe",
+          outputDir / "upstream-tool.exe",
+        ]
+        check "build/out/usr/bin/upstream-tool.exe" in script
+        check "toolAlias.exe" in script
+        check "#!/bin/sh" notin script
+      else:
+        check stage.outputs == @[
+          outputDir / "toolAlias",
+          outputDir / "upstream-tool",
+        ]
+        check "build/out/usr/bin/upstream-tool" in script
+        check "#!/bin/sh" in script
+        check "ln -sfn \"toolAlias\"" in script
+    else:
+      skip()
