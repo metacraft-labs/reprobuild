@@ -1298,6 +1298,11 @@ proc moduleHasBuildBlock(modulePath: string): bool =
     if line.strip() == "build:":
       return true
 
+proc moduleHasDevEnvBlock(modulePath: string): bool =
+  for line in readFile(extendedPath(modulePath)).splitLines:
+    if line.strip() == "devEnv:":
+      return true
+
 proc materialProjectPath(projectRoot, path: string): string =
   if path.len == 0 or path.isAbsolute:
     path
@@ -9552,6 +9557,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  workRoot = "";
                                  forceRefresh = false;
                                  mergeExtensions = true;
+                                 includeDevEnvOnlyProvider = false;
                                  lowerGraph = true): BuildGraphInspection
 
 proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
@@ -9617,7 +9623,7 @@ proc inspectDevEnvTasks(selection: DevEnvCliSelection;
   ## Task listing reads provider metadata without provisioning the dev env.
   let info = prepareBuildGraphInspection(selection.selector, tpmPathOnly,
     publicCliPath, selectDefaultAction = false, workRoot = selection.workRoot,
-    lowerGraph = false)
+    includeDevEnvOnlyProvider = true, lowerGraph = false)
   if info.providerBinaryPath.len == 0 or info.providerArtifactId.len == 0:
     return @[]
 
@@ -16385,6 +16391,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  workRoot = "";
                                  forceRefresh = false;
                                  mergeExtensions = true;
+                                 includeDevEnvOnlyProvider = false;
                                  lowerGraph: bool): BuildGraphInspection =
   ## ``mergeExtensions`` (MO-6) folds any present ``projectExtension``
   ## sibling's fragments into this project's snapshot before lowering /
@@ -16435,7 +16442,9 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     result.toolIdentityPath = resolved.identityPath
     result.toolInspectionPath = resolved.inspectionPath
 
-  if not moduleHasBuildBlock(modulePath):
+  let hasBuildBlock = moduleHasBuildBlock(modulePath)
+  if not hasBuildBlock and
+      (not includeDevEnvOnlyProvider or not moduleHasDevEnvBlock(modulePath)):
     return
 
   let providerBinaryPath = outDir / "provider" / "project-provider"
@@ -16501,6 +16510,11 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
 
   result.providerArtifactId = digestHex(provider.providerFingerprint)
   result.providerBinaryPath = provider.outputBinaryPath
+
+  # Task introspection needs the provider manifest, but a dev-env-only recipe
+  # has no project-root graph to refresh or lower.
+  if not hasBuildBlock:
+    return
 
   let providerGraphStore = providerGraphStoreRoot(outDir / "provider-graph")
   var refresh: ProviderRefreshReport

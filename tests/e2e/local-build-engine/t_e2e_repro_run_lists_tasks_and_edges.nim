@@ -68,6 +68,14 @@ proc writeProject(path: string) =
     "      output = \"build/app\")\n" &
     "    run(\"app-run\", build = \"build-app\")\n")
 
+proc writeTaskOnlyProject(path: string) =
+  writeFile(path,
+    "import repro_project_dsl\n\n" &
+    "package n1TaskOnlyPkg:\n" &
+    "  devEnv:\n" &
+    "    task \"greet\", command = \"echo task-only-hi\", " &
+      "description = \"say hi without a build graph\"\n")
+
 proc runRepro(reproBin, pathValue: string; cwd: string;
               subArgs: openArray[string]): string =
   var args = @[reproBin]
@@ -80,6 +88,26 @@ proc runRepro(reproBin, pathValue: string; cwd: string;
   requireSuccess(shellCommand(args, entries), cwd)
 
 suite "t_e2e_repro_run_lists_tasks_and_edges":
+
+  test "dev-env-only recipe lists and runs its task":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-n1-task-only", "")
+    defer: removeDir(tempRoot)
+
+    let reproBin = reproBinary(repoRoot)
+    let projectRoot = tempRoot / "project"
+    createDir(projectRoot)
+    writeTaskOnlyProject(projectRoot / "repro.nim")
+
+    let tasksOut = runRepro(reproBin, getEnv("PATH"), projectRoot,
+      ["tasks"])
+    check tasksOut.contains("[task]")
+    check tasksOut.contains("greet")
+    check tasksOut.contains("say hi without a build graph")
+
+    let runOut = runRepro(reproBin, getEnv("PATH"), projectRoot,
+      ["run", "task:greet"])
+    check runOut.contains("task-only-hi")
 
   test "t_e2e_repro_run_lists_tasks_and_edges":
     let repoRoot = getCurrentDir()
