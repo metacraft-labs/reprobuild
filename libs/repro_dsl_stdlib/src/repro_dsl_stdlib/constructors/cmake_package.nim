@@ -99,7 +99,6 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     let absPath = projectRoot / relPath
     let posixAbs = absPath.replace("\\", "/")
     resolvedUrl = "file://" & posixAbs
-  let escapedUrl = resolvedUrl.replace("\"", "\\\"")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
@@ -108,9 +107,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   var script = "set -e; "
   script.add("rm -rf \"" & escapedStaged & "\"; ")
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
-  script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
-  script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" & escapedUrl &
-    "\"; fi; ")
+  script.appendCurlDownload(tarball, resolvedUrl)
   case spec.hashAlg
   of dshaSha256:
     script.add("echo \"" & escapedHash & "  " & escapedTarball &

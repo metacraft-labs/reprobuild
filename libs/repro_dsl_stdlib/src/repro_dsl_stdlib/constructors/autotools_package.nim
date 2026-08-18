@@ -153,7 +153,6 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     let absPath = projectRoot / relPath
     let posixAbs = absPath.replace("\\", "/")
     resolvedUrl = "file://" & posixAbs
-  let escapedUrl = resolvedUrl.replace("\"", "\\\"")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
@@ -164,9 +163,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
   # Download (curl) → hash-verify → extract → write stamp. ``file://``
   # URLs are handled by curl natively for the vendored-tarball case.
-  script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
-  script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" & escapedUrl &
-    "\"; fi; ")
+  script.appendCurlDownload(tarball, resolvedUrl)
   case spec.hashAlg
   of dshaSha256:
     script.add("echo \"" & escapedHash & "  " & escapedTarball &

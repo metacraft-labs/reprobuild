@@ -4006,7 +4006,6 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
   ## meson constructors' fetch-script shape: curl → hash-verify → tar
   ## --force-local extract → touch stamp. ``file://`` URLs work natively
   ## via curl.
-  let escapedUrl = spec.url.replace("\"", "\\\"")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
@@ -4015,9 +4014,7 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
   var script = "set -e; "
   script.add("rm -rf \"" & escapedStaged & "\"; ")
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
-  script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
-  script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" & escapedUrl &
-    "\"; fi; ")
+  script.appendCurlDownload(tarball, spec.url)
   case spec.hashAlg
   of dshaSha256:
     script.add("echo \"" & escapedHash & "  " & escapedTarball &
