@@ -21395,6 +21395,54 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
       return DevelopAllResult(outcomes: outcomes, notices: notices,
         exitCode: 2, backends: composed.backends)
 
+  block contradictorySelection:
+    # DS-7 (CLI/develop.md §"Membership axis") — a name given to BOTH
+    # ``--only`` and ``--except`` is a contradiction and refuses.
+    #
+    # ``--only=X --except=X`` used to exit 0 having selected nothing: stage 5
+    # keeps exactly {X}, stage 6 removes X, and the run reported an empty
+    # selection and did no work. Neither name is unknown, so the exact-name
+    # check above has nothing to say about it — yet the caller asked for X and
+    # simultaneously for not-X, which cannot be anything but a mistake, and
+    # silently doing nothing is the failure mode this section legislates
+    # against everywhere else. `--filter` is the selector that may match
+    # nothing; the exact-name selectors are loud.
+    #
+    # Stated over the NAMES, not over the resulting set. ``--only=a,b
+    # --except=b`` refuses too: it is exactly ``--only=a`` written in a way
+    # that also says "not b", and a rule that fired only when the FINAL
+    # selection came out empty would depend on which other repos happen to
+    # exist — the same "the answer depends on something other than what you
+    # typed" hazard the fixed composition order exists to remove.
+    #
+    # Checked AFTER the exact-name block so a typo is still diagnosed as a
+    # typo: ``--only=X --except=X-typo`` names an unknown repo, which is the
+    # more basic error and the more useful message.
+    if args.only.len > 0 and args.exceptNames.len > 0:
+      var exceptSet = initHashSet[string]()
+      for n in args.exceptNames: exceptSet.incl(n)
+      var contradicted: seq[string]
+      var seenContradiction = initHashSet[string]()
+      for n in args.only:
+        if n in exceptSet and n notin seenContradiction:
+          seenContradiction.incl(n)
+          contradicted.add(n)
+      if contradicted.len > 0:
+        contradicted.sort()
+        var outcomes: seq[DevelopAllNodeOutcome]
+        for n in contradicted:
+          outcomes.add(DevelopAllNodeOutcome(node: n, mode: "error", ok: false,
+            diagnostic: "'" & n & "' is named by BOTH --only and --except: " &
+              "the selection asks for it and excludes it at once, so it can " &
+              "never be selected. Neither flag wins — drop '" & n &
+              "' from one of them (dropping it from --only is the same " &
+              "selection written without the contradiction). --filter is " &
+              "the selector that may legitimately match nothing; --only and " &
+              "--except name repos exactly and refuse rather than silently " &
+              "select nothing."))
+        return DevelopAllResult(outcomes: outcomes, notices: notices,
+          exitCode: 2, backends: composed.backends)
+
   block namedEvidenceOnly:
     # DS-4 — naming an evidence-only repo for PLACEMENT is a loud error that
     # explains why. ``--list`` is a query with no placement, and the spec says

@@ -45,6 +45,15 @@
 ##   8. `--list --json` carries the same diagnostics in an `errors` array —
 ##      the form the spec tells machine consumers to prefer must not be the
 ##      one that says nothing about why it refused.
+##   9. a SELF-CANCELLING selection refuses: `--only=X --except=X` names X
+##      twice, once to keep it and once to drop it, and used to exit 0 having
+##      selected nothing. Both names are real, so (1) and (2) have nothing to
+##      say about it — but the outcome is the silent no-op the whole section
+##      exists to forbid. The rule is over the NAMES, so `--only=a,b
+##      --except=b` refuses too, and it is reported after the unknown-name
+##      check so a typo is still diagnosed as a typo.
+##  10. the same refusal reaches `--list --json`'s `errors` array, for the
+##      same reason as (8).
 ##
 ## Falsifiability / pre-fix failure: against ``391a892a`` this test fails at
 ## (2) with
@@ -55,7 +64,10 @@
 ## Mutation check: dropping the `--except` arm of the exact-name block makes
 ## (2) exit 0 with the repo still selected; validating `--except` against the
 ## post-`--group` stage input instead of the lock set makes (7) refuse a name
-## that names a real repo.
+## that names a real repo; deleting the `contradictorySelection` block makes
+## (9) exit 0 with an empty selection, and ordering it BEFORE the exact-name
+## block makes (9)'s typo arm report a contradiction instead of the unknown
+## name it actually contains.
 ##
 ## Mocks: NONE. Real git repositories, a real manifest checkout, the real
 ## ``repro`` binary, the real git-checkout lock backend.
@@ -305,3 +317,65 @@ suite "DS-7: exact-name selectors refuse a name that matches nothing":
       let okJson = list("--json --all")
       check okJson.code == 0
       check parseJson(okJson.output)["errors"].len == 0
+
+      # ---- (9) a SELF-CANCELLING selection is a loud refusal. -------------
+      #
+      # `--only=X --except=X` asks for exactly X and simultaneously for not-X.
+      # Both names resolve, so (1) and (2) pass it through; before this rule
+      # the run exited 0 with an empty selection and did nothing — the
+      # silent-no-op outcome this whole section exists to forbid. The
+      # dangerous shape is the scripted one: an `--only` list and an
+      # `--except` list assembled by different callers that happen to
+      # overlap, where "did nothing" is indistinguishable from "nothing to
+      # do".
+      let selfCancel = develop("--only=tool-a --except=tool-a")
+      check selfCancel.code == 2
+      check "'tool-a' is named by BOTH --only and --except" in
+        selfCancel.output
+      check "never be selected" in selfCancel.output
+      check not dirExists(deps)
+
+      # Stated over the NAMES, not over the resulting set: this one leaves a
+      # NON-EMPTY selection (`lib-core` survives) and still refuses, because
+      # it is `--only=lib-core` written in a way that also says "not tool-a".
+      # A rule that fired only on an empty result would depend on which other
+      # repos happen to exist rather than on what was typed.
+      let partialCancel = develop("--only=lib-core,tool-a --except=tool-a")
+      check partialCancel.code == 2
+      check "'tool-a' is named by BOTH --only and --except" in
+        partialCancel.output
+      check "'lib-core' is named by BOTH" notin partialCancel.output
+      check not dirExists(deps)
+
+      # Every contradicted name is reported, not just the first.
+      let twoCancel = develop("--only=lib-core,tool-a --except=tool-a,lib-core")
+      check twoCancel.code == 2
+      check "'lib-core' is named by BOTH --only and --except" in
+        twoCancel.output
+      check "'tool-a' is named by BOTH --only and --except" in twoCancel.output
+
+      # A disjoint pair is NOT a contradiction and still works: `--only`
+      # keeps two, `--except` drops one of the others.
+      let disjoint = list("--only=lib-core,tool-a --except=tool-b")
+      check disjoint.code == 0
+      check selectedRepos(disjoint.output) == @["lib-core", "tool-a"]
+
+      # Ordering: an UNKNOWN name is the more basic error, so a selection
+      # that is both contradictory and misspelled reports the typo. This is
+      # what pins the contradiction check to run AFTER the exact-name block.
+      let typoWins = develop("--only=tool-a,ghost --except=tool-a")
+      check typoWins.code == 2
+      check "'--only=ghost' names no repo in this workspace's lock set" in
+        typoWins.output
+      check "named by BOTH" notin typoWins.output
+
+      # ---- (10) and the machine-readable form says so too. ----------------
+      let cancelJson = list("--json --only=tool-a --except=tool-a")
+      check cancelJson.code == 2
+      let cancelReport = parseJson(cancelJson.output)
+      check cancelReport["exitCode"].getInt() == 2
+      check cancelReport["repos"].len == 0
+      check cancelReport["errors"].len == 1
+      check cancelReport["errors"][0]["node"].getStr() == "tool-a"
+      check "named by BOTH --only and --except" in
+        cancelReport["errors"][0]["diagnostic"].getStr()
