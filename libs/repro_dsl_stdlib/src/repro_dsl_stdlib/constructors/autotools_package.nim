@@ -727,7 +727,11 @@ proc autotools_package*(srcDir: string;
     "true"
   let laCleanupArgv = @["sh", "-c", laCleanupScript]
   let laCleanupCall = inlineExecCall(laCleanupArgv)
-  let laCleanupId = "autotools-la-cleanup-" & sanitizedPackageName(pkgName)
+  # A package may legitimately configure the same source tree for more than
+  # one target platform. Keep each terminal cleanup edge scoped to its build
+  # directory, matching the compile and install action identities above.
+  let laCleanupId = "autotools-la-cleanup-" &
+    sanitizedPackageName(pkgName) & "-" & sanitizedPackageName(buildDir)
   let laCleanupEdge = buildAction(
     id = laCleanupId,
     call = laCleanupCall,

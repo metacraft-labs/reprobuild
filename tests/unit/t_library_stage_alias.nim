@@ -79,13 +79,57 @@ suite "library stage aliases":
         "libPublic" / "libPublic"
 
       check stage.outputs == @[expectedOutput]
-      check stage.deps == @["autotools-la-cleanup-libraryAliasPkg"]
+      check stage.deps == @["autotools-la-cleanup-libraryAliasPkg-build"]
       check mirror.id.len > 0
       when defined(windows):
         check "build/out/usr/bin/upstream-runtime.dll" in script
         check "build/out/usr/bin/libPublic.dll" notin script
       else:
         check "upstream-runtime" in script
+    else:
+      skip()
+
+suite "autotools multi-build action identities":
+  test "scope cleanup edges by build directory":
+    when defined(reproProviderMode):
+      let scratch = getTempDir() / "repro-autotools-multi-build"
+      let projectRoot = scratch / "multiBuildPkg"
+      if dirExists(scratch):
+        removeDir(scratch)
+      createDir(projectRoot)
+      defer:
+        if dirExists(scratch):
+          removeDir(scratch)
+
+      let pkg = PackageDef(
+        packageName: "multiBuildPkg",
+        sourceFile: projectRoot / "repro.nim",
+        hasDevEnv: false,
+        devEnvBodyHash: "",
+        toolUses: @[])
+      let fragment = buildPackageFragment(
+        pkg,
+        dummyRequest(projectRoot),
+        proc() =
+        setCurrentOwningPackageOverride("multiBuildPkg")
+        try:
+          discard autotools_package(
+            srcDir = "./src",
+            buildDir = "build-bios",
+            skipConfigure = true)
+          discard autotools_package(
+            srcDir = "./src",
+            buildDir = "build-efi",
+            skipConfigure = true)
+        finally:
+          clearCurrentOwningPackageOverride(),
+        includeDefault = false)
+
+      let actions = extractActions(fragment)
+      check findById(actions,
+        "autotools-la-cleanup-multiBuildPkg-build-bios").id.len > 0
+      check findById(actions,
+        "autotools-la-cleanup-multiBuildPkg-build-efi").id.len > 0
     else:
       skip()
 
