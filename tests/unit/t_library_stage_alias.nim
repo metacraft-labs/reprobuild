@@ -111,6 +111,16 @@ suite "autotools multi-build action identities":
         pkg,
         dummyRequest(projectRoot),
         proc() =
+        registerFetchSpec(
+          packageName = "multiBuildPkg",
+          url = "https://example.org/multi-build.tar.xz",
+          gitRevision = "",
+          hashAlg = dshaSha256,
+          hashHex = "b53606f443ac8f01d1d5fc9c39497f2a" &
+            "f322d99e14cea5c0b4b124d630379365",
+          kind = dfkTarball,
+          extractStrip = 1,
+          extractedRoot = "")
         setCurrentOwningPackageOverride("multiBuildPkg")
         try:
           discard autotools_package(
@@ -126,6 +136,11 @@ suite "autotools multi-build action identities":
         includeDefault = false)
 
       let actions = extractActions(fragment)
+      var fetchCount = 0
+      for action in actions:
+        if action.id == "autotools-fetch-multiBuildPkg":
+          inc fetchCount
+      check fetchCount == 1
       check findById(actions,
         "autotools-la-cleanup-multiBuildPkg-build-bios").id.len > 0
       check findById(actions,

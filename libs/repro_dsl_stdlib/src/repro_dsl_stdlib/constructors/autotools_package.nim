@@ -130,6 +130,10 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   let spec = registeredFetchSpec(packageName)
   if spec.url.len == 0 or spec.hashHex.len == 0:
     return none(BuildActionDef)
+  let fetchActionId = autotoolsFetchActionId(packageName)
+  for action in registeredBuildActions():
+    if action.id == fetchActionId:
+      return some(action)
   let scratch = projectRoot / FetchScratchSubdir
   createDir(scratch)
   let stamp = scratch / (spec.hashHex & ".stamp")
@@ -214,7 +218,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   # so that, when the action IS monitored, any incidental file reads are
   # captured rather than silently ignored.
   let act = buildAction(
-    id = autotoolsFetchActionId(packageName),
+    id = fetchActionId,
     call = inlineExecCall(argv),
     inputs = @[],
     outputs = @[stamp],
