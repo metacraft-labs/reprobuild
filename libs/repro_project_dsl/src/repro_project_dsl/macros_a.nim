@@ -1654,6 +1654,71 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
         error("provisioning expects a body", stmt)
       collectProvisioning(stmt[stmt.len - 1], result.nixProvisioning,
         result.tarballProvisioning, result.scoopProvisioning)
+    elif calleeName(stmt).normalize == "runtimelibrary":
+      # Producer-side runtime library declaration:
+      #
+      #   runtimeLibrary "clingo", dir = runtimeLibDir(plConda), os = "windows"
+      #
+      # The package that PROVIDES the library declares where it lives, because
+      # it is the only party that knows its own prefix layout. The consuming
+      # half is the existing ``runtimeDeps:`` block, and the engine joins the
+      # two — a consumer never has to know that clingo happens to be
+      # ``Library/bin`` on conda-forge win-64 and ``lib`` on nixpkgs.
+      #
+      # Repeated per (cpu, os) slice, exactly like ``tarball`` entries, since
+      # the directory follows the provisioning source rather than the package.
+      if stmt.len < 2:
+        error("runtimeLibrary expects a name, e.g. " &
+          "runtimeLibrary \"clingo\", dir = runtimeLibDir(plConda)", stmt)
+      var lib: RuntimeLibraryDef
+      let libLoc = lineFile(stmt)
+      lib.sourceFile = libLoc.file
+      lib.sourceLine = libLoc.line
+      # The name is a map key on the consumer side, so it must be knowable
+      # here. Everything else is spliced verbatim and evaluated by the
+      # compiler, which is what lets the layout vocabulary be used.
+      lib.name = requireStrLit(stmt[1], "runtimeLibrary name")
+      if lib.name.len == 0:
+        error("runtimeLibrary name must not be empty", stmt)
+      var dirNode: NimNode = nil
+      var cpuNode, osNode: NimNode = nil
+      for i in 2 ..< stmt.len:
+        let dirValue = namedValue(stmt[i], "dir")
+        if not dirValue.isNil:
+          dirNode = dirValue
+          lib.dir = exprCode(dirValue)
+        let cpuValue = namedValue(stmt[i], "cpu")
+        if not cpuValue.isNil:
+          cpuNode = cpuValue
+          lib.cpu = exprCode(cpuValue)
+        let osValue = namedValue(stmt[i], "os")
+        if not osValue.isNil:
+          osNode = osValue
+          lib.os = exprCode(osValue)
+      if dirNode.isNil:
+        error("runtimeLibrary requires dir = \"<prefix-relative-dir>\" — the " &
+          "directory holding the LOADABLE artifact, which on Windows is the " &
+          "bin directory, not the lib one", stmt)
+      let dirText = litText(dirNode)
+      if dirNode.isStrLit and dirText.len == 0:
+        error("runtimeLibrary dir must not be empty", stmt)
+      if dirText.len > 0 and dirText != "." and dirText.unsafeRelativePath:
+        error("runtimeLibrary dir must be relative to the realized prefix",
+          stmt)
+      # Same whitelists as tarball provisioning, checked only where the text
+      # is knowable. A mismatch here would silently make the entry match no
+      # host at all, which is the failure this refuses to allow.
+      let cpuText = litText(cpuNode)
+      if cpuText.len > 0 and
+          cpuText.toLowerAscii() notin ["any", "x86_64", "aarch64"]:
+        error("runtimeLibrary cpu must be one of any|x86_64|aarch64; got '" &
+          cpuText & "'", stmt)
+      let osText = litText(osNode)
+      if osText.len > 0 and osText.toLowerAscii() notin
+          ["any", "windows", "linux", "macos", "darwin"]:
+        error("runtimeLibrary os must be one of " &
+          "any|windows|linux|macos|darwin; got '" & osText & "'", stmt)
+      result.runtimeLibraries.add(lib)
     elif calleeName(stmt).normalize == "usesimportpath":
       if stmt.len != 2:
         error("usesImportPath expects exactly one string literal", stmt)
@@ -1961,6 +2026,19 @@ proc packageLiteral(pkg: PackageDef): string =
       ", exportedPath: " & exportedPathCode &
       ", sourceFile: " & escForCode(lib.sourceFile) &
       ", sourceLine: " & $lib.sourceLine & ")")
+  # Producer-side runtime library declarations. `dir` / `cpu` / `os` hold
+  # emittable SOURCE (see the parse arm), so they splice verbatim; the name is
+  # a required literal and is quoted here.
+  result.add("], runtimeLibraries: @[")
+  for rlIndex, rl in pkg.runtimeLibraries:
+    if rlIndex > 0:
+      result.add(", ")
+    result.add("RuntimeLibraryDef(name: " & escForCode(rl.name) &
+      ", dir: " & codeOrEmpty(rl.dir) &
+      ", cpu: " & codeOrEmpty(rl.cpu) &
+      ", os: " & codeOrEmpty(rl.os) &
+      ", sourceFile: " & escForCode(rl.sourceFile) &
+      ", sourceLine: " & $rl.sourceLine & ")")
   # Recipe-Val M8: emit the package-level multi-output partition list.
   # Empty ``outputs`` serialises as ``@[]`` so legacy single-output
   # recipes round-trip byte-identically to their pre-M8 packageLiteral

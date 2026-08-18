@@ -71,6 +71,7 @@
 
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
+import repro_dsl_stdlib/prefix_layout
 
 package clingo:
   provisioning:
@@ -99,21 +100,27 @@ package clingo:
     tarball url = "https://anaconda.org/conda-forge/clingo/5.8.0/download/win-64/clingo-5.8.0-py312he3f8637_1.conda",
       sha256 = "a9e5eb699dd8de3dcc555c28f47a46ca0b3005f784f76aadf70f47267e5afee9",
       archiveType = "conda",
-      executablePath = "Library/bin/clingo.exe",
+      executablePath = binDir(plConda) & "/clingo.exe",
       packageId = "clingo@5.8.0",
       cpu = "x86_64",
       os = "windows",
       lockIdentity = "tarball:clingo@5.8.0:sha256:a9e5eb699dd8de3dcc555c28f47a46ca0b3005f784f76aadf70f47267e5afee9"
 
-  # NOTE: this package provides the SHARED LIBRARY `repro_solver` dlopens at
-  # module init, not only a `clingo` CLI — but there is currently no correct way
-  # to declare that. The DSL's `library <name>:` block is NOT the vehicle: its
-  # `exportedPath` is "the producer-relative directory a Nim library-consumer
-  # threads onto its `nim c --path:`" (types.nim:185), i.e. a Nim SOURCE path,
-  # and its `kind:` describes a library the package BUILDS. Pointing
-  # `exportedPath` at `Library/bin` would tell Nim consumers to add a DLL
-  # directory to their source path.
+  # This package provides the SHARED LIBRARY `repro_solver` dlopens at module
+  # init, not only a `clingo` CLI. That is now declarable.
   #
-  # See docs/runtime-library-dependencies.md — the runtime-library dependency
-  # model needs its own declaration surface on both the producer and consumer
-  # sides.
+  # `library <name>:` is still NOT the vehicle and never was: its
+  # `exportedPath` is "the producer-relative directory a Nim library-consumer
+  # threads onto its `nim c --path:`" (types.nim), i.e. a Nim SOURCE path, and
+  # its `kind:` describes a library the package BUILDS. Pointing `exportedPath`
+  # at `Library/bin` would tell Nim consumers to add a DLL directory to their
+  # source path. Hence a separate `runtimeLibrary` member.
+  #
+  # One entry per provisioning arm, because the directory follows the SOURCE:
+  # conda-forge win-64 puts the loadable DLL under `Library/bin` (Windows keeps
+  # DLLs beside the executables, not in `lib`), while nixpkgs uses `lib`.
+  # `runtimeLibDir` names both — see repro_dsl_stdlib/prefix_layout.
+  runtimeLibrary "clingo", dir = runtimeLibDir(plConda),
+    cpu = "x86_64", os = "windows"
+  runtimeLibrary "clingo", dir = runtimeLibDir(plUnix), os = "linux"
+  runtimeLibrary "clingo", dir = runtimeLibDir(plUnix), os = "macos"

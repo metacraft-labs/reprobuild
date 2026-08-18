@@ -328,6 +328,51 @@ proc registerPackageDef*(pkg: PackageDef) {.dynOrStatic.} =
 proc registeredPackages*(): seq[PackageDef] {.dynOrStatic.} =
   registry
 
+proc registeredRuntimeLibraries*(packageName: string):
+    seq[RuntimeLibraryDef] {.dynOrStatic.} =
+  ## Every ``runtimeLibrary`` declaration for ``packageName``, in source order
+  ## and unfiltered — including entries for other platforms. Returns the empty
+  ## seq for a package that declares none, so a caller need not know whether
+  ## the package opted into the surface.
+  for pkg in registry:
+    if pkg.packageName == packageName:
+      return pkg.runtimeLibraries
+  @[]
+
+proc runtimeLibraryMatchesHost*(lib: RuntimeLibraryDef;
+                                hostCpu, hostOs: string): bool =
+  ## Empty (or ``any``) cpu / os means "every host". ``darwin`` and ``macos``
+  ## are aliases because the DSL parser accepts both spellings.
+  ##
+  ## Deliberately mirrors ``matchesHostPlatform`` in
+  ## ``repro_tool_profiles`` — the rule for a ``runtimeLibrary`` slice must be
+  ## the same one that picks a ``tarball`` slice, or a package could resolve
+  ## its provisioning from one arm and its library directory from another.
+  ## The host tokens are parameters rather than read from `defined()` here so
+  ## the rule can be tested for a host other than the one running the test.
+  let cpuNorm = lib.cpu.toLowerAscii()
+  let cpuOk = cpuNorm.len == 0 or cpuNorm == "any" or
+    cpuNorm == hostCpu.toLowerAscii()
+  let osNorm = lib.os.toLowerAscii()
+  let hostOsNorm = hostOs.toLowerAscii()
+  let osOk = osNorm.len == 0 or osNorm == "any" or
+    osNorm == hostOsNorm or
+    (hostOsNorm == "macos" and osNorm == "darwin") or
+    (hostOsNorm == "darwin" and osNorm == "macos")
+  cpuOk and osOk
+
+proc selectRuntimeLibraries*(packageName, hostCpu, hostOs: string):
+    seq[RuntimeLibraryDef] {.dynOrStatic.} =
+  ## The declarations that apply to the given host, in source order.
+  ##
+  ## Returns ALL matching entries rather than the first: a package may provide
+  ## several libraries on one platform. Where two entries share a name and both
+  ## match, source order wins, matching the "first entry whose constraints
+  ## match" rule the tarball resolver uses.
+  for lib in registeredRuntimeLibraries(packageName):
+    if runtimeLibraryMatchesHost(lib, hostCpu, hostOs):
+      result.add(lib)
+
 proc resetProvisioningContributionRegistry*() {.dynOrStatic.} =
   provisioningContributionRegistry.setLen(0)
 

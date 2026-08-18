@@ -359,11 +359,56 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  RuntimeLibraryDef* = object
+    ## A shared library this package PROVIDES, and where the dynamic loader
+    ## finds it inside the realized prefix.
+    ##
+    ## Distinct from ``LibraryDef`` on purpose, and the distinction is the
+    ## reason this type exists rather than a field being bolted onto that one.
+    ## ``LibraryDef.exportedPath`` is a Nim SOURCE directory — what a
+    ## library-consumer threads onto ``nim c --path:`` — and ``LibraryDef.kind``
+    ## describes a library the package BUILDS from source. Neither says anything
+    ## about a prebuilt ``.dll`` arriving inside a provisioned prefix, which is
+    ## the case that matters for loading. Pointing ``exportedPath`` at
+    ## ``Library/bin`` would tell Nim consumers to add a DLL directory to their
+    ## source path.
+    ##
+    ## The declaration is per (cpu, os) slice for the same reason ``tarball``
+    ## entries are: the directory follows the PROVISIONING SOURCE, so one
+    ## package can be ``Library/bin`` when it arrives from conda-forge win-64
+    ## and ``lib`` when it arrives from nixpkgs. See
+    ## ``repro_dsl_stdlib/prefix_layout`` for the vocabulary that names those.
+    name*: string
+      ## The library's stem, as a consumer would name it — ``clingo``, not
+      ## ``clingo.dll`` or ``libclingo.so``. The decorated file name is a
+      ## platform property, and baking it in here would make the declaration
+      ## unusable for the other platform.
+    dir*: string
+      ## Prefix-relative directory holding the LOADABLE artifact. This is the
+      ## directory a launcher must make searchable, and on Windows it is the
+      ## bin directory, not the lib one — ``clingo.dll`` really is at
+      ## ``Library/bin/clingo.dll``.
+    cpu*: string
+      ## Empty (= "any") matches every host. Same taxonomy as
+      ## ``TarballProvisioningDef.cpu``.
+    os*: string
+      ## Empty (= "any") matches every host. Same taxonomy as
+      ## ``TarballProvisioningDef.os``.
+    sourceFile*: string
+    sourceLine*: int
+
   PackageDef* = object
     packageName*: string
     defaultToolProvisioning*: string
     executables*: seq[ExecutableDef]
     libraries*: seq[LibraryDef]
+    runtimeLibraries*: seq[RuntimeLibraryDef]
+      ## Shared libraries this package PROVIDES to consumers at run time,
+      ## declared by the producing package because it is the only place that
+      ## knows its own prefix layout. Populated by the ``runtimeLibrary``
+      ## member; accessor ``registeredRuntimeLibraries(packageName)``.
+      ##
+      ## The consuming half is ``runtimeDeps:``, which already exists.
     toolUses*: seq[PackageUseDef]
       ## DSL-port M9.R.1: legacy ``uses:`` AND the new ``buildDeps:``
       ## block both populate this seq. ``buildDeps:`` is the canonical
