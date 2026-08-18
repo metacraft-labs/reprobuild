@@ -966,6 +966,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_solver_inputs_render_order_independent.nim",
+    binary: "build/test-bin/t_solver_inputs_render_order_independent",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_versioned_provisioning_schema.nim",
     binary: "build/test-bin/t_versioned_provisioning_schema",
     defines: @[],

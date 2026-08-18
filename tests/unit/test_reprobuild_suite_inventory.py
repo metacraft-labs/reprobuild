@@ -1389,7 +1389,9 @@ test "incomplete name" and:
         # 6916 is unchanged. A batch that moved this number without holding
         # that one would be dropping cases, which is the failure mode the
         # catalog authority exists to catch.
-        self.assertEqual(len(nim_specs), 1216)
+        # 1216 -> 1217: the solver-input rendering order-independence
+        # regression, one source with nine cases.
+        self.assertEqual(len(nim_specs), 1217)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -1525,7 +1527,10 @@ test "incomplete name" and:
         # `--list-json` now reports 10 and the catalog sum reads 6916, matching
         # the static scan's +2. Both cases are unconditional, so the
         # Linux-vs-Darwin delta is still +1.
-        expected_nim_total = 6915 if sys.platform == "darwin" else 6916
+        # 6915/6916 -> 6924/6925: the nine cases of the solver-input
+        # order-independence regression. Read out of a live
+        # `build_inventory` after rebuilding, not bumped arithmetically.
+        expected_nim_total = 6924 if sys.platform == "darwin" else 6925
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -1724,7 +1729,11 @@ test "incomplete name" and:
                 for item in data["tests"]
                 if item["language"] == "nim"
             ),
-            6838,
+            # 6838 -> 6847: the same nine cases. This scan reads the SOURCE
+            # and `nim_total` reads the REBUILT BINARY; both moved by
+            # exactly nine, which is what makes "nine new cases" a fact
+            # about the suite rather than about either surface.
+            6847,
         )
 
     def assert_runtime_compiler_flow_inventory(self, data):
@@ -2373,7 +2382,9 @@ test "incomplete name" and:
             # 1215 = 1216 Nim specs - 1 quarantined. `missing-binary` must
             # stay empty — a bundled member that still had a spec would show
             # up there and double-count its cases.
-            {"catalog": 1215, "quarantined": 1, "static": 5},
+            # 1215 -> 1216: the order-independence regression, built and
+            # probed like any other binary.
+            {"catalog": 1216, "quarantined": 1, "static": 5},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         # ...and no source outran its binary, which is now a statement that
@@ -3650,7 +3661,8 @@ test "incomplete name" and:
         # 1239 -> 1216: M4's solver consolidation batch (-24 members, +1
         # bundle). See the `len(nim_specs)` pin above for why this number
         # falling is the intent and `nim_total` holding is the check.
-        self.assertEqual(declared_nim_count, 1216)
+        # 1216 -> 1217: the order-independence regression.
+        self.assertEqual(declared_nim_count, 1217)
         self.assertEqual(declared_python_count, 5)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -3701,7 +3713,8 @@ test "incomplete name" and:
         # Final graph: 1239 Nim + 5 Python = 1244 entries — the two sources
         # the graph regeneration enrols.
         # 1244 -> 1221 = 1216 Nim + 5 Python: M4's solver consolidation batch.
-        self.assertEqual(data["static"]["testEntryCount"], 1221)
+        # 1221 -> 1222 = 1217 Nim + 5 Python.
+        self.assertEqual(data["static"]["testEntryCount"], 1222)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),
