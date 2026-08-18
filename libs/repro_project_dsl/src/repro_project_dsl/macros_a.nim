@@ -2916,6 +2916,8 @@ proc producerSourceStamp(producerReproPath: string;
     hex.add(Hex[int((h shr shift) and 0xF'u64)])
   hex
 
+const ResourceAccessorCacheVersion = "2"
+
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   proc isBundledStdlibSelector(selector: string): bool =
     # M29 (Provisioning catalog cleanup): autoconf, automake, bun,
@@ -3320,10 +3322,15 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       # subdirectory resource-module schema edit invalidates the cached accessor
       # (a root-only stamp would miss it → serve a stale splice).
       let producerDecl = producerResourceModuleFor(selector, consumerSourceFile)
-      let stamp =
+      let sourceStamp =
         if producerRepro.len > 0:
           producerSourceStamp(producerRepro, producerDecl)
         else: ""
+      let stamp =
+        if sourceStamp.len > 0:
+          ResourceAccessorCacheVersion & ":" & sourceStamp
+        else:
+          ""
       let selectorKey = selectorModuleName(selector)
       let accDir = cacheBase / selectorKey
       if not dirExists(accDir):
@@ -3381,18 +3388,27 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
           "stdout.write(\"IFP:\" & c.interfaceFingerprint & \"\\n\")\n" &
           "stdout.write(emitResourceContractAccessors(c))\n"
         writeFile(genPath, genSrc)
-        # ``staticExec`` runs a real process out of the macro VM, so the
-        # generator's ``nim c`` extractor subprocess + ``getCurrentDir`` are
-        # fine. It has no working-dir parameter, so embed a ``cd`` into the
-        # command to run with CWD = repoRoot (its ``config.nims`` supplies the
-        # lib ``--path`` the generator compile needs).
+        # ``staticExec`` executes a program directly on Windows, so shell
+        # composition must be passed to an explicit platform shell. The CWD is
+        # significant because ``config.nims`` contains sibling paths relative
+        # to the repository root.
         let nimCmd =
           "nim c -r --hints:off --warnings:off " &
           "--nimcache:" & quoteShell(accDir / ("nc_" & selectorKey)) &
           " " & quoteShell(genPath)
         let genCmd =
-          if repoRoot.len > 0: "cd " & quoteShell(repoRoot) & " && " & nimCmd
-          else: nimCmd
+          if repoRoot.len == 0:
+            nimCmd
+          else:
+            let cdAndCompile =
+              when defined(windows):
+                "cd /d " & quoteShell(repoRoot) & " && " & nimCmd
+              else:
+                "cd " & quoteShell(repoRoot) & " && exec " & nimCmd
+            when defined(windows):
+              "cmd.exe /d /c " & quoteShell(cdAndCompile)
+            else:
+              "sh -c " & quoteShell(cdAndCompile)
         let genOut = staticExec(genCmd)
         # Split the framed output: first ``IFP:<hex>`` line, then the accessor
         # source. A generator that failed / was killed returns empty/partial
@@ -3406,10 +3422,11 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
             newFingerprint = genOut[4 ..< nl].strip()
             accessorSrc = genOut[nl + 1 .. ^1]
           else:
-            # No frame (older/edge output shape) — treat the whole thing as the
-            # accessor source; TI3's reuse-in-place simply doesn't engage and we
-            # fall back to TI2 behavior (regenerate on any source-stamp change).
-            accessorSrc = genOut
+            error("resource accessor generation failed for '" & selector &
+              "': expected an IFP frame, got:\n" & genOut.strip())
+        if genOut.len == 0:
+          error("resource accessor generation failed for '" & selector &
+            "': generator produced no output")
 
         # TI3 Level-2 reuse-in-place: the producer's source changed (stamp miss)
         # but if the InterfaceFingerprint matches the ``.ifp`` sidecar the edit
