@@ -1538,6 +1538,7 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   let stampPath = dstUsrRoot / ".m9r14e_2_install_mirror.stamp"
   let escapedStamp = stampPath.replace("\\", "/").replace("\"", "\\\"")
   let recipesRoot = parentDir(projectRoot)
+  let recipeName = projectRoot.extractFilename
   let publishVersion = installMirrorPublishVersion(packageName)
   var script = "set -e; "
   # Remove the previous mirror to avoid stale artefacts. ``rm -rf`` is
@@ -1655,7 +1656,7 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     ownManifestPath = ownManifestPath,
     packageName = packageName))
   script.add("touch \"" & escapedStamp & "\"; ")
-  script.add(emitInstallMirrorStorePublish(recipesRoot, packageName,
+  script.add(emitInstallMirrorStorePublish(recipesRoot, recipeName,
     publishVersion, dstUsrRoot))
   # M9.R.76.4 — spec R10 read-only enforcement. In legacy mode this
   # returns the empty string (the mutable stable path stays writable
@@ -1696,7 +1697,7 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     call = inlineExecCall(argv),
     deps = @[installEdge.id],
     inputs = installEdge.outputs,
-    outputs = @[stampPath, realizationInfoPath(recipesRoot, packageName)],
+    outputs = @[stampPath, realizationInfoPath(recipesRoot, recipeName)],
     pool = "compile",
     dependencyPolicy = dependencyPolicy,
     commandStatsId = "autotools_package.install_mirror",

@@ -43,7 +43,7 @@ suite "M9.R.83 install mirror emitted action shape":
   test "typed emitInstallTreeMirror keeps legacy copy and adds publish":
     when defined(reproProviderMode):
       let scratch = getTempDir() / "m9r83-typed-action-shape"
-      let projectRoot = scratch / "m9r83TypedPkg"
+      let projectRoot = scratch / "typed-recipe"
       if dirExists(scratch):
         removeDir(scratch)
       createDir(projectRoot)
@@ -68,12 +68,14 @@ suite "M9.R.83 install mirror emitted action shape":
               ".install.stamp"],
             pool = "compile",
             toolIdentityRefs = @["sh"])
-          emitInstallTreeMirror(installEdge, "build", "dest", PackageName),
+          emitInstallTreeMirror(installEdge, "build", "dest", PackageName,
+            "autotools"),
         includeDefault = false)
 
       let actions = extractActions(fragment)
       let mirror = findById(actions, "install-mirror-" & PackageName)
-      let sidecar = realizationInfoPath(parentDir(projectRoot), PackageName)
+      let sidecar = realizationInfoPath(parentDir(projectRoot),
+        projectRoot.extractFilename)
       let stamp = projectRoot / ".repro" / "output" / "install" /
         ".m9r14e_2_install_mirror.stamp"
       let script = inlineScriptOf(mirror)
@@ -92,6 +94,8 @@ suite "M9.R.83 install mirror emitted action shape":
       check InstallMirrorPublishToolName in script
       check InstallMirrorModeEnvVar in script
       check "hashed|hashed-with-legacy-fallback" in script
+      check "--package \"typed-recipe\"" in script
+      check "--package \"" & PackageName & "\"" notin script
       check "--version \"2.4.6\"" in script
       check "--source \"" & (projectRoot / ".repro" / "output" /
         "install").replace("\\", "/") & "\"" in script
@@ -103,7 +107,7 @@ suite "M9.R.83 install mirror emitted action shape":
   test "custom-shell synthesizer emits mirror publish action":
     when defined(reproProviderMode):
       let scratch = getTempDir() / "m9r83-custom-shell-action-shape"
-      let projectRoot = scratch / "m9r83CustomShellPkg"
+      let projectRoot = scratch / "custom-shell-recipe"
       if dirExists(scratch):
         removeDir(scratch)
       createDir(projectRoot)
@@ -134,7 +138,8 @@ suite "M9.R.83 install mirror emitted action shape":
       let actions = extractActions(fragment)
       let mirror = findById(actions, "from-source-custom-mirror-" &
         PackageName)
-      let sidecar = realizationInfoPath(parentDir(projectRoot), PackageName)
+      let sidecar = realizationInfoPath(parentDir(projectRoot),
+        projectRoot.extractFilename)
       let script = inlineScriptOf(mirror)
 
       check actions.len == 3
@@ -145,6 +150,8 @@ suite "M9.R.83 install mirror emitted action shape":
       check InstallMirrorPublishToolName in script
       check InstallMirrorModeEnvVar in script
       check "hashed|hashed-with-legacy-fallback" in script
+      check "--package \"custom-shell-recipe\"" in script
+      check "--package \"" & PackageName & "\"" notin script
       check "--version \"8.3.0\"" in script
       check "*) mkdir -p \"" & parentDir(sidecar).replace("\\", "/") &
         "\"; : > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script

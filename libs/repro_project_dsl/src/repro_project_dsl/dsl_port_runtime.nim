@@ -4224,6 +4224,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     let escapedOutPath = outPath.replace("\\", "/").
       replace("\"", "\\\"")
     let recipesRoot = parentDir(projectRoot)
+    let recipeName = projectRoot.extractFilename
     let publishVersion = dslPortInstallMirrorPublishVersion(packageName)
     var script = "set -e; "
     script.add("rm -rf \"" & escapedMirrorUsr & "\"; ")
@@ -4260,7 +4261,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     script.add("; s|^datarootdir=/usr/share|datarootdir=" & escapedMirrorUsr & "/share|' ")
     script.add("\"$pc\"; fi; done; fi; done; ")
     script.add("touch \"" & escapedMirrorStamp & "\"; ")
-    script.add(emitInstallMirrorStorePublish(recipesRoot, packageName,
+    script.add(emitInstallMirrorStorePublish(recipesRoot, recipeName,
       publishVersion, mirrorRoot))
     let mirrorActionId = "from-source-custom-mirror-" &
       dslPortSanitizeIdPart(packageName)
@@ -4274,7 +4275,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       call = inlineExecCall(@["sh", "-c", script], projectRoot),
       deps = @[prevId],
       inputs = @[prevStamp],
-      outputs = @[mirrorStamp, realizationInfoPath(recipesRoot, packageName)],
+      outputs = @[mirrorStamp, realizationInfoPath(recipesRoot, recipeName)],
       pool = "compile",
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "from-source-custom.mirror",
