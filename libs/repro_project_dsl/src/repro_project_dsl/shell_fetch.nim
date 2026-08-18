@@ -4,7 +4,8 @@ import std/strutils
 
 const
   CurlFetchRetryArgs* =
-    "--retry 5 --retry-delay 2 --retry-max-time 300 --connect-timeout 30"
+    "--retry 5 --retry-delay 2 --retry-max-time 300 --retry-all-errors " &
+    "--connect-timeout 30"
 
 proc shellDoubleQuote(value: string): string =
   value.replace("\\", "/").replace("\"", "\\\"")
@@ -18,7 +19,8 @@ proc appendCurlDownload*(script: var string; destination, url: string) =
   script.add("if [ ! -f \"" & escapedDestination & "\" ]; then ")
   script.add("rm -f \"" & escapedPartial & "\"; ")
   script.add("if curl -fsSL " & CurlFetchRetryArgs & " -o \"" &
-    escapedPartial & "\" \"" & escapedUrl & "\"; then ")
+    escapedPartial & "\" \"" & escapedUrl & "\" && [ -s \"" &
+    escapedPartial & "\" ]; then ")
   script.add("mv -f \"" & escapedPartial & "\" \"" &
     escapedDestination & "\"; ")
   script.add("else rc=$?; rm -f \"" & escapedPartial &

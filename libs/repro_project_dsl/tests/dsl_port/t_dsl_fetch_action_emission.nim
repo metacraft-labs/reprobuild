@@ -96,6 +96,8 @@ suite "DSL-port M9.K — fetch action emission from registry":
     check argvJoined.contains(".repro-extract-" & spec.hashHex)
     check argvJoined.contains("mv ")
     check argvJoined.contains(CurlFetchRetryArgs)
+    check argvJoined.contains("--retry-all-errors")
+    check argvJoined.contains("[ -s")
     check argvJoined.contains(".tar.part")
     check argvJoined.contains("mv -f")
     check argvJoined.contains("rm -f")
