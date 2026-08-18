@@ -1269,6 +1269,12 @@
               pkgs.repomix
               pkgs.pre-commit
               pkgs.shellcheck
+              # Validates .github/workflows/ the way GitHub does, via
+              # scripts/check_workflows.sh in `just lint`. Actions expression
+              # syntax lives inside YAML scalars, so a YAML parser cannot see a
+              # malformed expression -- and a workflow GitHub rejects at load
+              # time produces a failure run with no jobs and no annotation.
+              pkgs.actionlint
               pkgs.shfmt
               pkgs.typos
               # Spec-Implementation M2a: clingo for the repro_solver

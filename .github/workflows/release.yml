@@ -584,10 +584,19 @@ jobs:
         with:
           script: |
             const tag = context.ref.replace('refs/tags/', '');
-            // Read through `env`, not a `${{ }}` interpolation inside the
-            // script body: an expression is pasted in textually, so an asset
-            // name containing a backtick or `${` would break out of the
-            // template literal it was being pasted into.
+            // Read through `env`, not an Actions expression interpolation
+            // inside the script body: an expression is pasted in textually,
+            // so an asset name containing a backtick or a JS `${` would break
+            // out of the template literal it was being pasted into.
+            //
+            // Editing this block: `script` is an Actions *input*, so its whole
+            // body -- comments included -- is scanned for expression syntax
+            // before any JavaScript runs. Writing the literal two-brace
+            // interpolation sequence here, even inside a `//` comment, is a
+            // workflow LOAD error ("An expression was expected") that fails
+            // the run before a single job is created, on every push, for every
+            // event -- including ones this workflow does not subscribe to.
+            // Describe the syntax in words; never spell it out.
             const expected = new Set(
               (process.env.EXPECTED || '').split('\n').map(s => s.trim()).filter(Boolean)
             );

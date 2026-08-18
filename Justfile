@@ -431,6 +431,7 @@ lint:
     # suite: it reads the sources and needs nothing compiled, so it is the
     # one coverage check that can answer before a six-hour build phase.
     python3 ./scripts/reprobuild_suite_inventory.py --check-static-case-counts 2>&1 | tee -a test-logs/lint.log
+    bash ./scripts/check_workflows.sh 2>&1 | tee -a test-logs/lint.log
 
 format:
     bash ./scripts/format_sources.sh
