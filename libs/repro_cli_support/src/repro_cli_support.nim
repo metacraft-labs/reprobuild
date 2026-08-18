@@ -6464,7 +6464,8 @@ proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
 
 proc refreshRecipeProviderSnapshot(target: string;
                                    mode: ToolProvisioningMode;
-                                   publicCliPath, workRoot: string):
+                                   publicCliPath, workRoot: string;
+                                   bypassRunQuotaExplicit: bool):
     Option[ProviderGraphSnapshot]
   ## Forward declaration for focused tool provisioning. The implementation
   ## reuses metadata-only graph inspection and is defined below it.
@@ -7237,7 +7238,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   if not materializedOnly and shouldEnterBuildPipeline(effectiveMode) and
       moduleHasBuildBlock(modulePath):
     let snapshot = refreshRecipeProviderSnapshot(target, effectiveMode,
-      publicCliPath, workRoot)
+      publicCliPath, workRoot, bypassRunQuotaExplicit)
     if snapshot.isSome:
       var selectors: seq[string] = @[]
       var selectedActionId = parsedTarget.selectedActionId
@@ -14121,7 +14122,8 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
 # daemon as ``--pool NAME=CAP``. Best-effort — defined after
 # ``prepareBuildGraphInspection`` (which it reuses) further down in the file.
 proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
-                             publicCliPath, workRoot: string): seq[BuildPool]
+                             publicCliPath, workRoot: string;
+                             bypassRunQuota: bool): seq[BuildPool]
 
 # ---------------------------------------------------------------------------
 # Workspace-Manifest-Optional MO-1 — committed solved-graph lock.
@@ -15887,7 +15889,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     # warm provider caches before the visible build.
     let recipePools =
       if autoRunQuotaNeedsPoolPreflight(bypassRunQuota):
-        extractRecipeBuildPools(target, mode, publicCliPath, workRoot)
+        extractRecipeBuildPools(target, mode, publicCliPath, workRoot,
+          bypassRunQuota)
       else:
         @[]
     var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota, recipePools)
@@ -16370,6 +16373,12 @@ proc runQuotaBypassedByEnv(): bool =
   ## ``build`` command parser.)
   getEnv("REPROBUILD_NO_RUNQUOTA").normalize in ["1", "true", "yes", "on"]
 
+proc effectiveProviderCompileRunQuotaBypass*(explicitBypass: bool): bool =
+  ## Provider compilation is scheduled before the main recipe graph. Carry the
+  ## parsed CLI decision into that scheduler instead of relying only on the
+  ## environment fallback used by nested invocations.
+  explicitBypass or runQuotaBypassedByEnv()
+
 proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  publicCliPath: string;
                                  selectDefaultAction = false;
@@ -16574,7 +16583,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
 
 proc refreshRecipeProviderSnapshot(target: string;
                                    mode: ToolProvisioningMode;
-                                   publicCliPath, workRoot: string):
+                                   publicCliPath, workRoot: string;
+                                   bypassRunQuotaExplicit: bool):
     Option[ProviderGraphSnapshot] =
   ## Produce the recipe's (extension-merged) provider-graph snapshot — the
   ## SNAPSHOT ONLY, with NO tool-identity resolution and NO graph lowering.
@@ -16645,7 +16655,8 @@ proc refreshRecipeProviderSnapshot(target: string;
       stderrLimit: 1024 * 1024,
       rebuildMissingOutputsOnCacheHit: true,
       deferLocalOutputBlobs: true,
-      bypassRunQuota: runQuotaBypassedByEnv(),
+      bypassRunQuota:
+        effectiveProviderCompileRunQuotaBypass(bypassRunQuotaExplicit),
       fallbackToRunQuotaBypass: effectiveMode in {tpmPathOnly, tpmScoop},
       inlineRunQuota: true,
       dryRun: false,
@@ -16685,7 +16696,8 @@ proc refreshRecipeProviderSnapshot(target: string;
   some(refresh.snapshot)
 
 proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
-                             publicCliPath, workRoot: string): seq[BuildPool] =
+                             publicCliPath, workRoot: string;
+                             bypassRunQuota: bool): seq[BuildPool] =
   ## RX pool-forwarding — return the recipe's declared build pools (the
   ## ``buildGraph.pools`` present in the extracted project graph) so the
   ## caller can forward them to ``runquotad`` alongside the convention
@@ -16711,7 +16723,7 @@ proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
     effectiveMode = tpmPathOnly
   try:
     let snapshot = refreshRecipeProviderSnapshot(target, effectiveMode,
-      publicCliPath, workRoot)
+      publicCliPath, workRoot, bypassRunQuota)
     if snapshot.isSome:
       result = poolsFromSnapshot(snapshot.get())
     else:
