@@ -8694,6 +8694,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_workspace_lock_partition_resolves_a_sibling_for_ci.nim",
+    binary: "build/test-bin/t_workspace_lock_partition_resolves_a_sibling_for_ci",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_lock_round_trips_through_resolver.nim",
     binary: "build/test-bin/t_workspace_lock_round_trips_through_resolver",
     defines: @[],
