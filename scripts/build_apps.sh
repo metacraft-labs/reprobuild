@@ -619,3 +619,56 @@ case "${REPRO_HOST_PLATFORM}" in
     fi
     ;;
 esac
+
+# Windows self-containment, HTTPS half: stage cacert.pem next to repro.exe.
+#
+# Nim's ``net.newContext(CVerifyPeer)`` delegates to
+# ``std/ssl_certs.scanSSLCertificates``, which on Windows looks in exactly two
+# places, in this order:
+#
+#   1. ``getAppDir() / "cacert.pem"``  -- beside the executable
+#   2. ``cacert.pem`` in each ``PATH`` entry
+#
+# and nothing else. In particular it does NOT read ``SSL_CERT_FILE``: that is
+# only consulted for ``CVerifyPeerUseEnvVars``, which reprobuild does not pass.
+# Setting SSL_CERT_FILE therefore looks like a fix and is not -- measured on
+# win-ci-bare-001, 2026-08-19, where it changed nothing.
+#
+# Without (1), whether HTTPS works depends on whether the CALLER's PATH happens
+# to contain a directory holding a cacert.pem -- typically Nim's own bin dir.
+# That makes it work for a developer and fail for a service. Observed exactly
+# that: `repro deploy-agent` succeeded by hand and failed every 10 minutes from
+# its SYSTEM scheduled task with
+#
+#   repro deploy-agent: tick failed: No SSL/TLS CA certificates found.
+#
+# The box had not self-converged since the loop was installed, and nothing said
+# so -- the task simply recorded exit 1 on a schedule. Staging the bundle beside
+# the binary removes the dependency on the caller's environment entirely.
+case "${REPRO_HOST_PLATFORM}" in
+  windows)
+    cacert_src=""
+    nim_exe="$(command -v nim.exe 2>/dev/null || true)"
+    if [ -n "${nim_exe}" ]; then
+      nim_bin_dir="$(dirname "${nim_exe}")"
+      nim_root_dir="$(dirname "${nim_bin_dir}")"
+      for cand in \
+        "${nim_bin_dir}/cacert.pem" \
+        "${nim_root_dir}/dist/cacert.pem" \
+        "${nim_root_dir}/bin/cacert.pem"; do
+        if [ -f "${cand}" ]; then
+          cacert_src="${cand}"
+          break
+        fi
+      done
+    fi
+    if [ -n "${cacert_src}" ]; then
+      if [ ! "${cacert_src}" -ef build/bin/cacert.pem ]; then
+        cp -f "${cacert_src}" build/bin/cacert.pem
+        echo "Staged cacert.pem from ${cacert_src} -> build/bin/"
+      fi
+    else
+      windows_dll_staging_problem "cacert.pem not found near nim.exe; cannot stage it next to repro.exe -- every HTTPS fetch (cache substitute, deploy-agent manifest poll) will fail with 'No SSL/TLS CA certificates found.' unless the caller's PATH happens to contain one"
+    fi
+    ;;
+esac
