@@ -61,12 +61,14 @@
 ## the ones above rather than instead of them, because the manifest repo is
 ## converted in a separate step and must resolve byte-identically until it is:
 ##
-##   - `members` (NAMES) as well as `includes` (paths). A name resolves against
-##     two namespaces — `repos/<name>.toml` and `repo-sets/<name>.toml` — and a
-##     name carried by both is refused, because the two are resolved together
-##     and one name cannot mean two things.
-##   - repo-sets expand depth-first to any depth, with cycle detection that
-##     names the full path (`a -> b -> a`) rather than overflowing the stack.
+##   - `member_sets` / `member_repos` (NAMES) as well as `includes` (paths).
+##     The two keys are two NAMESPACES: a bare name is resolved against
+##     `repo-sets/` or `repos/` according to the key it sits under, never both,
+##     so a set and a repo may share a name and each key still has exactly one
+##     answer.
+##   - repo-sets expand depth-first to any depth, `member_sets` before
+##     `member_repos`, with cycle detection that names the full path
+##     (`a -> b -> a`) rather than overflowing the stack.
 ##   - `url-prefixes/<name>.toml` resolves `url_prefix`, with `url =
 ##     url_prefix / url_suffix` and `url_suffix` defaulting to the repo's
 ##     `name`. The old `remote` spelling still resolves through the project's
@@ -866,19 +868,16 @@ proc resolveFragment(ctx: FragmentContext; fragmentAbs: string;
       return ResolvedRemote(localName: entry.name,
                             projectRemote: entry.url_prefix,
                             fetchUrl: composePrefixedUrl(prefix, suffix))
+    # `remote` resolves against the project's `[[remote]]` table and NOWHERE
+    # else. Falling back to `url-prefixes/` when the table has no such entry
+    # was tried and removed: it only ever fires where resolution would have
+    # failed, which is exactly where a typo lives, and turning a typo into a
+    # silent success is a worse failure mode than the transitional convenience
+    # is worth. The conversion is one scripted commit and never lands in the
+    # half-state the fallback was protecting.
     if entry.remote in ctx.remotes:
       return ResolvedRemote(localName: entry.name, projectRemote: entry.remote,
         fetchUrl: getFetchUrl(ctx.remotes[entry.remote], fragment.repo.name))
-    # A `remote` name the project's table does not carry may still be a url
-    # prefix: that is the state a manifest repo is in while its remotes have
-    # been hoisted into `url-prefixes/` but its fragments still say `remote`.
-    # Only reachable where resolution used to FAIL, so it cannot move a
-    # manifest that resolves today.
-    if entry.remote in ctx.urlPrefixes:
-      let suffix =
-        if entry.url_suffix.len > 0: entry.url_suffix else: fragment.repo.name
-      return ResolvedRemote(localName: entry.name, projectRemote: entry.remote,
-        fetchUrl: composePrefixedUrl(ctx.urlPrefixes[entry.remote], suffix))
     raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
       "fragment '" & reference & "' references unknown remote '" &
         entry.remote & "' (not declared in " & ctx.ownerLabel &
@@ -945,10 +944,6 @@ proc resolveFragment(ctx: FragmentContext; fragmentAbs: string;
       if result.projectRemote in ctx.remotes:
         result.fetchUrl =
           getFetchUrl(ctx.remotes[result.projectRemote], fragment.repo.name)
-      elif result.projectRemote in ctx.urlPrefixes:
-        # Same hoisted-remotes intermediate state as in `resolveBinding`.
-        result.fetchUrl = composePrefixedUrl(
-          ctx.urlPrefixes[result.projectRemote], defaultSuffix)
       else:
         raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
           "fragment '" & reference & "' references unknown remote '" &
@@ -1011,7 +1006,7 @@ proc resolveFragment(ctx: FragmentContext; fragmentAbs: string;
   # RA-21 — carry the develop-set dependency edges through verbatim.
   result.depends = fragment.repo.depends
 
-# ---- Workspace-Membership-Model.md: `members` expansion --------------------
+# ---- Workspace-Membership-Model.md: membership expansion -------------------
 
 type
   MemberAccumulator = object
@@ -1050,48 +1045,50 @@ proc chainSuffix(chain: openArray[string]): string =
 
 proc expandMembers(ctx: FragmentContext; manifestRoot: string;
                    ownerFile, ownerSchema: string;
-                   members: openArray[string]; chain: seq[string];
-                   acc: var MemberAccumulator) =
-  ## Depth-first expansion of one `members` list.
+                   memberSets, memberRepos: openArray[string];
+                   chain: seq[string]; acc: var MemberAccumulator) =
+  ## Depth-first expansion of one manifest's membership.
   ##
-  ## An entry names a repo or a repo-set, resolved against those two
-  ## namespaces rather than against the filesystem — which is the whole point
-  ## of `members` over `includes`, whose entries were paths while every other
-  ## reference in the schema (`depends`, `remote`) was a name.
-  for idx, member in members.pairs:
-    let keyPath = "members[" & $idx & "]"
-    let fragmentAbs = manifestRoot / reposDirName / (member & ".toml")
+  ## The two keys are separate NAMESPACES, not a stylistic split: a bare name
+  ## is resolved against exactly one of `repo-sets/` or `repos/`, decided by
+  ## the key it was written under. That is what makes
+  ## `member_repos = ["codetracer"]` inside `repo-sets/codetracer.toml` legal
+  ## and unambiguous, where a single `members` list had to consult both and
+  ## then arbitrate — and 7 of the 11 projects in the metacraft manifest repo
+  ## carry a set and a repo of the same name, so the arbitration would have
+  ## been the common case rather than the corner one.
+  ##
+  ## `member_sets` expands BEFORE `member_repos`, declaration order preserved
+  ## within each. That ordering is load-bearing, not incidental: dedup keys on
+  ## FIRST-SEEN, so it decides which declaration of a shared path is the one
+  ## kept and which is merely checked against it, and it decides the order of
+  ## `ResolvedProject.repos`. Leaving it to the order the code happens to walk
+  ## in would make the resolved repo order an implementation accident.
+  for idx, member in memberSets.pairs:
+    let keyPath = "member_sets[" & $idx & "]"
     let setAbs = manifestRoot / repoSetsDirName / (member & ".toml")
-    let isRepo = fileExists(fragmentAbs)
-    let isSet = fileExists(setAbs)
-
-    if isRepo and isSet:
-      # The two namespaces are resolved TOGETHER, so a name carried by both has
-      # no answer. Refusing is the only option that does not silently pick one.
+    if not fileExists(setAbs):
       raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
-        "member '" & member & "' is BOTH a repo fragment (" &
-          reposDirName / (member & ".toml") & ") and a repo-set (" &
-          repoSetsDirName / (member & ".toml") &
-          "); members resolve against both namespaces, so one name cannot " &
-          "mean two things — rename one of them" & chainSuffix(chain))
-
-    if isSet:
-      if member in chain:
-        raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
-          "repo-set cycle: " & (chain & @[member]).join(" -> ") &
-            "; a set that contains itself has no expansion")
-      let setManifest = readRepoSet(setAbs)
-      expandMembers(ctx, manifestRoot, setAbs, schemaRepoSetV1,
-        setManifest.members, chain & @[member], acc)
-      continue
-
-    if not isRepo:
-      raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
-        "member '" & member & "' names neither a repo nor a repo-set " &
-          "(looked for '" & reposDirName / (member & ".toml") & "' and '" &
+        "member set '" & member & "' does not exist (looked for '" &
           repoSetsDirName / (member & ".toml") & "' under '" & manifestRoot &
           "')" & chainSuffix(chain))
+    if member in chain:
+      raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+        "repo-set cycle: " & (chain & @[member]).join(" -> ") &
+          "; a set that contains itself has no expansion")
+    let setManifest = readRepoSet(setAbs)
+    expandMembers(ctx, manifestRoot, setAbs, schemaRepoSetV1,
+      setManifest.member_sets, setManifest.member_repos,
+      chain & @[member], acc)
 
+  for idx, member in memberRepos.pairs:
+    let keyPath = "member_repos[" & $idx & "]"
+    let fragmentAbs = manifestRoot / reposDirName / (member & ".toml")
+    if not fileExists(fragmentAbs):
+      raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+        "member repo '" & member & "' does not exist (looked for '" &
+          reposDirName / (member & ".toml") & "' under '" & manifestRoot &
+          "')" & chainSuffix(chain))
     let resolved = resolveFragment(ctx, fragmentAbs, ownerFile, ownerSchema,
       keyPath, member)
     let owner =
@@ -1177,9 +1174,9 @@ proc resolveProject*(projectFile: string): ResolvedProject =
     # use forward slashes; remote names are TOML identifiers).
     #
     # This is the `includes` rule and it stays exactly as it was: a repeated
-    # include is an authoring mistake in a hand-written list. `members` dedups
-    # by checkout PATH instead, because reaching one repo through two sets is
-    # the normal case there rather than a mistake.
+    # include is an authoring mistake in a hand-written list. `member_repos`
+    # dedups by checkout PATH instead, because reaching one repo through two
+    # sets is the normal case there rather than a mistake.
     let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.projectRemote
     if triple in seen:
       raiseManifestError(absProject,
@@ -1194,9 +1191,9 @@ proc resolveProject*(projectFile: string): ResolvedProject =
 
   # Workspace-Membership-Model.md — `members`, expanded after `includes` so a
   # half-converted project keeps its include order and merely appends. A
-  # project that declares no `members` (every project in an unconverted
-  # manifest repo) does not enter this at all.
-  if project.members.len > 0:
+  # project that declares neither membership key (every project in an
+  # unconverted manifest repo) does not enter this at all.
+  if project.member_sets.len > 0 or project.member_repos.len > 0:
     var acc = MemberAccumulator(
       byPath: initTable[string, int](),
       declaredBy: initTable[string, string]())
@@ -1206,7 +1203,7 @@ proc resolveProject*(projectFile: string): ResolvedProject =
         acc.declaredBy[repo.path] = project.project.name
     acc.repos = result.repos
     expandMembers(ctx, manifestRoot, absProject, schemaProjectManifestV1,
-      project.members, @[], acc)
+      project.member_sets, project.member_repos, @[], acc)
     result.repos = acc.repos
 
 proc resolveRepoSet*(setFile: string): ResolvedProject =
@@ -1240,7 +1237,8 @@ proc resolveRepoSet*(setFile: string): ResolvedProject =
     byPath: initTable[string, int](),
     declaredBy: initTable[string, string]())
   expandMembers(ctx, manifestRoot, absSet, schemaRepoSetV1,
-    manifest.members, @[manifest.`repo-set`.name], acc)
+    manifest.member_sets, manifest.member_repos,
+    @[manifest.`repo-set`.name], acc)
   result.repos = acc.repos
 
 # ---- string-based entry point --------------------------------------------

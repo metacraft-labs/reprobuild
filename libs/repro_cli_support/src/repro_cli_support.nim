@@ -49863,15 +49863,21 @@ proc repoSetManifestStub(name: string): string =
   ## fragment fully determining its own checkout is the invariant that makes it
   ## portable between workspaces.
   ##
-  ## Unlike `projectManifestStub`, the `members` array IS written out. A
+  ## Unlike `projectManifestStub`, the membership arrays ARE written out. A
   ## repo-set manifest has no array-of-tables for a bare key to attach itself
   ## to, so the "written after `[[remote]]` and read as a field of the last
   ## remote" trap that forced the project stub to omit `includes` cannot arise
   ## here — verified against the pinned reader in both key orders.
+  ##
+  ## Both keys are stubbed even though a new set has neither, because which one
+  ## an entry belongs in is the whole point: `member_sets` and `member_repos`
+  ## are two NAMESPACES, and a stub carrying only one would invite the next
+  ## entry into whichever happened to be there.
   "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &
   "[repo-set]\n" &
   "name = \"" & name & "\"\n\n" &
-  "members = [\n]\n"
+  "member_sets = [\n]\n\n" &
+  "member_repos = [\n]\n"
 
 proc commitAndPushManifest(identity: GitToolIdentity;
                            gitBin, manifestRoot, message: string;
@@ -50001,40 +50007,78 @@ proc membershipFileFor(manifestRoot, name: string): MembershipFile =
   MembershipFile(name: name, kind: mkRepoSet, abs: "",
     rel: "repo-sets/" & name & ".toml")
 
-proc appendSetMember(setFile, member: string): bool =
-  ## Append ``"<member>",`` to a repo-set's ``members = [ … ]`` array.
-  ## Returns true when it was added, false when already present (idempotent) —
-  ## the `members` mirror of ``appendFragmentInclude``.
-  let content = readFile(setFile)
-  let quoted = "\"" & member & "\""
-  if quoted in content:
-    return false
-  var outLines: seq[string]
-  var inserted = false
-  for line in content.splitLines():
-    if not inserted and line.strip() == "]":
-      outLines.add("  " & quoted & ",")
-      inserted = true
-    outLines.add(line)
-  if not inserted:
-    outLines.add("")
-    outLines.add("members = [")
-    outLines.add("  " & quoted & ",")
-    outLines.add("]")
-  writeFile(setFile, outLines.join("\n"))
-  true
+const
+  memberSetsKey = "member_sets"
+  memberReposKey = "member_repos"
 
-proc removeSetMember(setFile, member: string): bool =
-  ## Drop ``"<member>",`` from a repo-set's ``members = [ … ]`` array. The
-  ## mirror of ``appendSetMember``; false when no entry was present.
+proc membershipKeyFor(manifestRoot, name: string): string =
+  ## Which membership key a name belongs under — ``member_repos`` when
+  ## ``repos/<name>.toml`` defines it, ``member_sets`` when
+  ## ``repo-sets/<name>.toml`` does, and "" when NEITHER does.
+  ##
+  ## The key is read off what the name actually resolves to rather than
+  ## inferred from the verb, because the two keys are two namespaces and
+  ## putting a name in the wrong one makes it resolve to nothing (or, worse,
+  ## to a different thing that happens to share the name — 7 of the 11
+  ## projects in the metacraft manifest repo have a set and a repo with the
+  ## same name). A caller that gets "" must fail rather than pick: guessing is
+  ## how a name ends up in the key that silently means something else.
+  if fileExists(manifestRoot / "repos" / (name & ".toml")):
+    return memberReposKey
+  if fileExists(manifestRoot / "repo-sets" / (name & ".toml")):
+    return memberSetsKey
+  ""
+
+proc editSetMember(setFile, key, member: string; add: bool): bool =
+  ## Add or drop ``"<member>",`` in the named membership array of a repo-set.
+  ## Returns true when the file changed, false when it already said what was
+  ## asked (idempotent) — the two-key mirror of ``appendFragmentInclude`` /
+  ## ``removeFragmentInclude``.
+  ##
+  ## The array is located by its KEY rather than by "the next line that is a
+  ## lone ``]``": a repo-set carries two arrays, so the positional rule the
+  ## include helpers can afford would put half the entries in the wrong
+  ## namespace.
   let content = readFile(setFile)
   let quoted = "\"" & member & "\""
-  if quoted notin content:
+  var lines = content.splitLines()
+  var arrayStart = -1
+  for idx, line in lines:
+    let stripped = line.strip()
+    if stripped.startsWith(key) and stripped.endsWith("["):
+      arrayStart = idx
+      break
+  var arrayEnd = -1
+  if arrayStart >= 0:
+    for idx in arrayStart + 1 ..< lines.len:
+      if lines[idx].strip() == "]":
+        arrayEnd = idx
+        break
+
+  if add:
+    if arrayStart >= 0 and arrayEnd >= 0:
+      for idx in arrayStart + 1 ..< arrayEnd:
+        if lines[idx].strip().startsWith(quoted):
+          return false
+      lines.insert("  " & quoted & ",", arrayEnd)
+      writeFile(setFile, lines.join("\n"))
+      return true
+    # No such array yet — append a fresh one rather than guessing that the
+    # other key's array was meant.
+    lines.add("")
+    lines.add(key & " = [")
+    lines.add("  " & quoted & ",")
+    lines.add("]")
+    writeFile(setFile, lines.join("\n"))
+    return true
+
+  if arrayStart < 0 or arrayEnd < 0:
     return false
   var outLines: seq[string]
   var removed = false
-  for line in content.splitLines():
-    if line.strip().startsWith(quoted):
+  for idx, line in lines:
+    if idx > arrayStart and idx < arrayEnd and
+        line.strip().startsWith(quoted):
       removed = true
       continue
     outLines.add(line)
@@ -50080,11 +50124,12 @@ proc membershipsDeclaringRepo(manifestRoot, repoName: string): seq[string] =
       if ("\"" & repoName & "\"") in readFile(file):
         result.add(file.splitFile.name)
       continue
-    # A repo-set may also NAME another set; only a member matching this repo's
-    # name counts, and members naming sets are irrelevant here because a set is
-    # never a `repos/` fragment (the two namespaces cannot overlap — the
-    # resolver refuses a name carried by both).
-    if repoName in manifest.members and file.splitFile.name notin result:
+    # Only `member_repos` is consulted. `member_sets` is a different NAMESPACE:
+    # a set may legitimately carry the same name as this repo (7 of the 11
+    # projects in the metacraft manifest repo do), and counting that as a
+    # reference would report a fragment as still-declared by a set that names
+    # a set.
+    if repoName in manifest.member_repos and file.splitFile.name notin result:
       result.add(file.splitFile.name)
 
 proc validateFragmentPath(value: string): string =
@@ -50305,8 +50350,9 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       of mkProject:
         referencedFragments = readProjectManifest(target.abs).includes
       of mkRepoSet:
-        for member in readRepoSet(target.abs).members:
-          # A member naming another SET has no fragment to orphan.
+        # `member_repos` only: an entry under `member_sets` names a set, and a
+        # set has no fragment to orphan even when a repo shares its name.
+        for member in readRepoSet(target.abs).member_repos:
           if fileExists(manifestRoot / "repos" / (member & ".toml")):
             referencedFragments.add("repos/" & member & ".toml")
     except CatchableError as exc:
@@ -50679,7 +50725,17 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
              else: ""))
           paths.add(fragmentRel)
           fragmentExisted = true
-        discard appendSetMember(target.abs, repo)
+        # The fragment was just written, so the name resolves to a repo and the
+        # key is `member_repos`. Routed through `membershipKeyFor` all the same,
+        # so there is ONE rule deciding which namespace a name goes in.
+        let memberKey = membershipKeyFor(manifestRoot, repo)
+        if memberKey != memberReposKey:
+          stderr.writeLine("repro workspace repos add: '" & repo &
+            "' does not resolve to a repo fragment (" &
+            (manifestRoot / "repos" / (repo & ".toml")) &
+            "); refusing to guess which membership key it belongs under")
+          return 2
+        discard editSetMember(target.abs, memberKey, repo, add = true)
         paths.add(target.rel)
         remoteNames.add(target.name & "=" & plan.prefixName &
           (if plan.mintedUrl.len > 0: " (new prefix, url " & plan.mintedUrl & ")"
@@ -50770,10 +50826,25 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           (manifestRoot / "repo-sets" / (project & ".toml")) & " and " &
           (manifestRoot / "projects" / (project & ".toml")) & ")")
         return 1
-      let dropped =
-        case target.kind
-        of mkRepoSet: removeSetMember(target.abs, repo)
-        of mkProject: removeFragmentInclude(target.abs, fragmentRel)
+      var dropped = false
+      case target.kind
+      of mkRepoSet:
+        # Which key the entry sits under is read off what the name resolves to,
+        # never off the verb. A repo whose fragment is already gone resolves to
+        # nothing, and removing "whichever array mentions it" could strip a
+        # same-named entry out of `member_sets` instead.
+        let memberKey = membershipKeyFor(manifestRoot, repo)
+        if memberKey.len == 0:
+          stderr.writeLine("repro workspace repos remove: '" & repo &
+            "' resolves to neither a repo fragment nor a repo-set (looked " &
+            "for " & (manifestRoot / "repos" / (repo & ".toml")) & " and " &
+            (manifestRoot / "repo-sets" / (repo & ".toml")) &
+            "); refusing to guess which membership key to edit in " &
+            target.rel)
+          return 2
+        dropped = editSetMember(target.abs, memberKey, repo, add = false)
+      of mkProject:
+        dropped = removeFragmentInclude(target.abs, fragmentRel)
       if dropped:
         droppedFrom.add(project)
         paths.add(target.rel)

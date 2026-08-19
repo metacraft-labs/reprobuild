@@ -8,12 +8,16 @@
 ##
 ## Asserted:
 ##   1. A url-prefix manifest round-trips.
-##   2. A repo-set round-trips, and `members` holds NAMES, not paths.
-##   3. A repo-set REFUSES identity fields. This is the property that keeps a
+##   2. A repo-set round-trips; `member_sets` and `member_repos` both hold
+##      NAMES, not paths; and a set may carry the same name as one of its
+##      member repos, which is the case the two keys exist to make legal.
+##   3. The single-list `members` spelling is REFUSED, so there is no third
+##      form in which a bare name has to be resolved against both namespaces.
+##   4. A repo-set REFUSES identity fields. This is the property that keeps a
 ##      shared set from drifting into a half-project, and it has to be enforced
 ##      by the strict decode: a comment saying "don't put default_revision here"
 ##      is not a mechanism.
-##   4. A repo fragment accepts `branch`, `url_prefix`, `url_suffix`, and
+##   5. A repo fragment accepts `branch`, `url_prefix`, `url_suffix`, and
 ##      per-binding `url_suffix` on a secondary remote — the fork case that was
 ##      previously inexpressible, because one shared `name` could only ever
 ##      compose `<other-prefix>/<same-name>`.
@@ -47,22 +51,55 @@ url = "https://github.com/metacraft-labs"
   test "t_repo_set_members_are_names_not_paths":
     let d = createTempDir("repro-mm-set-", "")
     defer: removeDir(d)
-    let f = write(d, "shared-infrastructure.toml", """
+    # Membership is TWO keys, and the reason is that one was not expressible:
+    # a single `members` list had to resolve each bare name against both the
+    # repo and the repo-set namespace, and 7 of the 11 projects in the
+    # metacraft manifest repo carry a set and a repo with the same name. Two
+    # keys make `member_repos = ["codetracer"]` inside
+    # `repo-sets/codetracer.toml` unambiguous instead of arbitrated.
+    let f = write(d, "codetracer.toml", """
 schema = "reprobuild.workspace.repo-set.v1"
 
 [repo-set]
-name = "shared-infrastructure"
+name = "codetracer"
 
-members = ["infra", "garm", "metacraft-dev-guidelines"]
+member_sets = ["shared-infrastructure"]
+member_repos = ["codetracer", "codetracer-rr"]
 """)
     let m = readRepoSet(f)
-    check m.`repo-set`.name == "shared-infrastructure"
-    check m.members == @["infra", "garm", "metacraft-dev-guidelines"]
+    check m.`repo-set`.name == "codetracer"
+    check m.member_sets == @["shared-infrastructure"]
+    # The set is named `codetracer` and so is one of its member REPOS. Legal,
+    # and the assertion that it is legal is the point of the two keys.
+    check m.member_repos == @["codetracer", "codetracer-rr"]
     # Names, not `repos/<name>.toml` paths — consistent with `depends`, and the
     # reason `includes` is being retired.
-    for entry in m.members:
+    for entry in m.member_sets & m.member_repos:
       check not entry.contains("/")
       check not entry.endsWith(".toml")
+
+  test "t_repo_set_refuses_the_single_members_list":
+    let d = createTempDir("repro-mm-single-", "")
+    defer: removeDir(d)
+    # The spelling this replaced. It is refused rather than carried as a third
+    # accepted form: a bare name under it would have to mean "a repo or a set,
+    # whichever is there", which is the ambiguity the two keys exist to make
+    # unrepresentable. No real manifest ever used it, so there is nothing to
+    # keep compatible with.
+    let f = write(d, "legacy.toml", """
+schema = "reprobuild.workspace.repo-set.v1"
+
+[repo-set]
+name = "legacy"
+
+members = ["infra"]
+""")
+    var refused = false
+    try:
+      discard readRepoSet(f)
+    except WorkspaceManifestParseError:
+      refused = true
+    check refused
 
   test "t_repo_set_refuses_identity_fields":
     let d = createTempDir("repro-mm-identity-", "")
@@ -77,7 +114,7 @@ schema = "reprobuild.workspace.repo-set.v1"
 name = "bad"
 default_revision = "dev"
 
-members = ["infra"]
+member_repos = ["infra"]
 """)
     var refused = false
     try:

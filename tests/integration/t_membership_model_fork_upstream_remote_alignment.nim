@@ -120,7 +120,7 @@ suite "membership model — fork upstream reaches the checkout":
           "url_suffix = \"CMake\" }]\n")
       writeFile(manifestRoot / "repo-sets" / "cmake.toml",
         "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &
-        "[repo-set]\nname = \"cmake\"\n\nmembers = [\"reprobuild-cmake\"]\n")
+        "[repo-set]\nname = \"cmake\"\n\nmember_repos = [\"reprobuild-cmake\"]\n")
 
       let resolved = resolveRepoSet(manifestRoot / "repo-sets" / "cmake.toml")
       check resolved.repos.len == 1
@@ -180,7 +180,7 @@ suite "membership model — fork upstream reaches the checkout":
         "branch = \"reprobuild\"\nurl_prefix = \"metacraft-labs\"\n")
       writeFile(manifestRoot / "repo-sets" / "cmake.toml",
         "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &
-        "[repo-set]\nname = \"cmake\"\n\nmembers = [\"reprobuild-cmake\"]\n")
+        "[repo-set]\nname = \"cmake\"\n\nmember_repos = [\"reprobuild-cmake\"]\n")
       let resolved = resolveRepoSet(manifestRoot / "repo-sets" / "cmake.toml")
 
       # A FOREIGN checkout occupying the repo's path: its own remote, its own

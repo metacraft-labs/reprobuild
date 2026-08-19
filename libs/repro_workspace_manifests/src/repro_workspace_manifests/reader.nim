@@ -142,9 +142,12 @@ proc readUrlPrefix*(path: string): UrlPrefixManifest =
 # ---- repo-sets/<set>.toml --------------------------------------------------
 
 proc readRepoSet*(path: string): RepoSetManifest =
-  ## A named membership list. The strict decode is what forbids identity
-  ## fields: `default_revision`, `trunk` and friends are simply not on
-  ## `RepoSetManifest`, so a shared set cannot quietly become a half-project.
+  ## A named membership list (`member_sets` + `member_repos`). The strict
+  ## decode is what forbids identity fields: `default_revision`, `trunk` and
+  ## friends are simply not on `RepoSetManifest`, so a shared set cannot
+  ## quietly become a half-project. It is also what rejects the single-list
+  ## `members` spelling this replaced — a bare name that had to be resolved
+  ## against both namespaces at once, which no manifest can express now.
   let content = slurpManifest(path, schemaRepoSetV1)
   validateSchema(path, content, schemaRepoSetV1)
   result = decodeStrict(path, content, schemaRepoSetV1, RepoSetManifest)

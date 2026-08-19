@@ -17,7 +17,8 @@
 ##      reader accepts, and does NOT enable it.
 ##   2. `repos add --set=` writes a fragment carrying `url_prefix` (not
 ##      `remote`), mints ONE org-named `url-prefixes/<org>.toml`, and names the
-##      repo in the set's `members`.
+##      repo in the set's `member_repos` — the key chosen from what the name
+##      actually resolves to in the manifest repo, never from the verb.
 ##   3. A second repo from the SAME org reuses that prefix and mints nothing —
 ##      the property that stops the prefix table growing one entry per repo.
 ##   4. A repo whose path under the org differs from its name gets a
@@ -138,7 +139,7 @@ suite "membership model — `repro ws sets` authoring":
       check fileExists(prefixFile)
       check readUrlPrefix(prefixFile).`url-prefix`.url ==
         "https://git.example.invalid/acme"
-      check "infra" in readRepoSet(setFile).members
+      check "infra" in readRepoSet(setFile).member_repos
 
       # ---- second repo, same org: reuses the prefix -----------------------
       check runRepro(fx, ["ws", "repos", "add", "garm",
@@ -255,9 +256,9 @@ suite "membership model — `repro ws sets` authoring":
         "--remote=https://git.example.invalid/acme/lib-y",
         "--branch=dev"]).code == 0
       check "lib-y" in readRepoSet(
-        fx.workspaceRoot / "repo-sets" / "beta.toml").members
+        fx.workspaceRoot / "repo-sets" / "beta.toml").member_repos
       check "lib-y" in readRepoSet(
-        fx.workspaceRoot / "repo-sets" / "delta.toml").members
+        fx.workspaceRoot / "repo-sets" / "delta.toml").member_repos
 
       # --delete-fragment is refused while another set still names it.
       let refused = runRepro(fx, ["ws", "repos", "remove", "lib-y",
@@ -265,18 +266,27 @@ suite "membership model — `repro ws sets` authoring":
       check refused.code == 2
       check fileExists(fx.workspaceRoot / "repos" / "lib-y.toml")
       check "lib-y" notin readRepoSet(
-        fx.workspaceRoot / "repo-sets" / "beta.toml").members
+        fx.workspaceRoot / "repo-sets" / "beta.toml").member_repos
       check "lib-y" in readRepoSet(
-        fx.workspaceRoot / "repo-sets" / "delta.toml").members
+        fx.workspaceRoot / "repo-sets" / "delta.toml").member_repos
 
       # With no target it stops declaring the repo everywhere, and the
       # fragment survives as a reusable declaration.
       check runRepro(fx, ["ws", "repos", "remove", "lib-y"]).code == 0
       check "lib-y" notin readRepoSet(
-        fx.workspaceRoot / "repo-sets" / "delta.toml").members
+        fx.workspaceRoot / "repo-sets" / "delta.toml").member_repos
       check fileExists(fx.workspaceRoot / "repos" / "lib-y.toml")
 
       # Now that nothing declares it, deleting it is allowed.
       check runRepro(fx, ["ws", "repos", "remove", "lib-y",
         "--delete-fragment"]).code == 0
       check not fileExists(fx.workspaceRoot / "repos" / "lib-y.toml")
+
+      # ...and with the fragment gone the name resolves to NEITHER namespace,
+      # so a later `remove` has no key to edit. It says so and exits 2 rather
+      # than stripping whichever array happens to mention the name — a set of
+      # that name could legitimately sit in `member_sets`.
+      let unguessable = runRepro(fx, ["ws", "repos", "remove", "lib-y",
+        "--set=delta"])
+      check unguessable.code == 2
+      check unguessable.output.contains("resolves to neither")

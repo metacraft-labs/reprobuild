@@ -11,28 +11,33 @@
 ## together and neither could be verified against the other.
 ##
 ## Asserted:
-##   1. A `members` list expands, and a member that names a repo-set expands to
-##      ITS members, recursively — the shared-infrastructure case, where one
-##      set is pulled in by many.
-##   2. A cycle is refused with the FULL path named (`a -> b -> a`). A stack
+##   1. Membership expands, and an entry under `member_sets` expands to ITS
+##      members, recursively — the shared-infrastructure case, where one set is
+##      pulled in by many.
+##   2. `member_sets` expands BEFORE `member_repos`, declaration order kept
+##      within each. Asserted rather than left to inspection because the dedup
+##      rule keys on FIRST-SEEN, so this order decides which declaration of a
+##      shared path is kept and what order `repos` comes out in.
+##   3. A set and a repo may share a name, and each key still resolves to
+##      exactly one thing. This is the case a single `members` list could not
+##      express: 7 of the 11 projects in the metacraft manifest repo carry a
+##      set and a repo of the same name, so an ambiguity here would have been
+##      the common case rather than a corner one.
+##   4. A cycle is refused with the FULL path named (`a -> b -> a`). A stack
 ##      overflow names nothing and is indistinguishable from a compiler bug.
-##   3. Dedup identity is the checkout PATH: a repo reached by two routes is
+##   5. Dedup identity is the checkout PATH: a repo reached by two routes is
 ##      ONE entry and merges silently, while two members declaring one path
 ##      with different facts is a refusal naming the path, both sources, and
 ##      the differing fields.
-##   4. `url = url_prefix + "/" + url_suffix`, `url_suffix` defaults to `name`,
+##   6. `url = url_prefix + "/" + url_suffix`, `url_suffix` defaults to `name`,
 ##      and a per-binding `url_prefix` / `url_suffix` puts a fork's `upstream`
 ##      at a DIFFERENT path than its `origin` — the case that was previously
 ##      inexpressible, because one shared `name` could only ever compose
 ##      `<other-prefix>/<same-name>`.
-##   5. The primary binding is always the local git remote `origin`.
-##   6. `branch` wins over `revision` when both are present; `revision` still
+##   7. The primary binding is always the local git remote `origin`.
+##   8. `branch` wins over `revision` when both are present; `revision` still
 ##      resolves alone.
-##   7. A name carried by BOTH `repos/` and `repo-sets/` is refused. Members
-##      resolve against both namespaces together, so one name cannot mean two
-##      things, and silently preferring one would make the workspace depend on
-##      which.
-##   8. An UNCONVERTED project resolves identically to before — the regression
+##   9. An UNCONVERTED project resolves identically to before — the regression
 ##      guard described above.
 ##
 ## No mocks: real TOML files on disk, driven through the real
@@ -54,12 +59,16 @@ proc urlPrefix(root, name, url: string) =
     "name = \"" & name & "\"\n" &
     "url = \"" & url & "\"\n")
 
-proc repoSet(root, name: string; members: openArray[string]) =
+proc repoSet(root, name: string; memberSets: openArray[string] = [];
+             memberRepos: openArray[string] = []) =
   var body = "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &
     "[repo-set]\n" &
     "name = \"" & name & "\"\n\n" &
-    "members = [\n"
-  for m in members:
+    "member_sets = [\n"
+  for m in memberSets:
+    body.add("  \"" & m & "\",\n")
+  body.add("]\n\nmember_repos = [\n")
+  for m in memberRepos:
     body.add("  \"" & m & "\",\n")
   body.add("]\n")
   writeManifest(root, "repo-sets" / (name & ".toml"), body)
@@ -81,28 +90,29 @@ suite "membership model — resolution":
     let root = createTempDir("repro-mm-expand-", "")
     defer: removeDir(root)
     urlPrefix(root, "metacraft-labs", "https://github.com/metacraft-labs")
-    for name in ["infra", "garm", "metacraft-dev-guidelines", "product"]:
+    for name in ["infra", "garm", "metacraft-dev-guidelines", "codetracer",
+                 "codetracer-rr"]:
       repoFragment(root, name,
         "name = \"" & name & "\"\n" &
         "path = \"" & name & "\"\n" &
         "branch = \"dev\"\n" &
         "url_prefix = \"metacraft-labs\"\n")
     repoSet(root, "shared-infrastructure",
-      ["infra", "garm", "metacraft-dev-guidelines"])
-    # A set whose members include another SET. Depth-first, so the nested set's
-    # members land where the reference to it sat.
-    #
-    # The set is NOT named after the product repo it contains, because the two
-    # namespaces are resolved together and a name in both is refused — see
-    # `t_member_that_is_both_a_repo_and_a_set_is_refused`.
-    repoSet(root, "product-set", ["shared-infrastructure", "product"])
+      memberRepos = ["infra", "garm", "metacraft-dev-guidelines"])
+    # The spec's own worked example, and it only became writable with two keys:
+    # the SET is named `codetracer` and so is one of its member REPOS.
+    repoSet(root, "codetracer",
+      memberSets = ["shared-infrastructure"],
+      memberRepos = ["codetracer", "codetracer-rr"])
 
-    let resolved = resolveRepoSet(root / "repo-sets" / "product-set.toml")
-    check resolved.projectName == "product-set"
+    let resolved = resolveRepoSet(root / "repo-sets" / "codetracer.toml")
+    check resolved.projectName == "codetracer"
     var paths: seq[string]
     for repo in resolved.repos:
       paths.add(repo.path)
-    check paths == @["infra", "garm", "metacraft-dev-guidelines", "product"]
+    # `member_sets` first, then `member_repos`, declaration order within each.
+    check paths == @["infra", "garm", "metacraft-dev-guidelines",
+                     "codetracer", "codetracer-rr"]
     let infra = findRepo(resolved, "infra")
     check infra.fetchUrl == "https://github.com/metacraft-labs/infra"
     # The primary binding is ALWAYS `origin`: a checkout's remotes have to look
@@ -110,13 +120,45 @@ suite "membership model — resolution":
     check infra.remotes.len == 1
     check infra.remotes[0].localName == "origin"
     check infra.remotes[0].fetchUrl == infra.fetchUrl
+    # ...and the member repo sharing the set's name resolved to the REPO.
+    check findRepo(resolved, "codetracer").fetchUrl ==
+      "https://github.com/metacraft-labs/codetracer"
+
+  test "t_member_sets_expand_before_member_repos":
+    let root = createTempDir("repro-mm-order-", "")
+    defer: removeDir(root)
+    urlPrefix(root, "acme", "https://git.example.invalid/acme")
+    for name in ["a", "b", "c", "d"]:
+      repoFragment(root, name,
+        "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
+        "branch = \"dev\"\nurl_prefix = \"acme\"\n")
+    repoSet(root, "first", memberRepos = ["a", "b"])
+    repoSet(root, "second", memberRepos = ["c"])
+    # `member_repos` is written FIRST in the manifest and names `d`. If
+    # expansion followed file order rather than the stated rule, `d` would lead.
+    writeManifest(root, "repo-sets" / "top.toml",
+      "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &
+      "[repo-set]\nname = \"top\"\n\n" &
+      "member_repos = [\"d\"]\n" &
+      "member_sets = [\"first\", \"second\"]\n")
+
+    let resolved = resolveRepoSet(root / "repo-sets" / "top.toml")
+    var paths: seq[string]
+    for repo in resolved.repos:
+      paths.add(repo.path)
+    # Sets before repos, declaration order preserved within each. The rule is
+    # stated rather than emergent because dedup keys on FIRST-SEEN: whichever
+    # declaration of a shared path arrives first is the one kept, so leaving
+    # this to the order the code happens to walk in would make the resolved
+    # repo set an implementation accident.
+    check paths == @["a", "b", "c", "d"]
 
   test "t_repo_set_cycle_is_refused_naming_the_path":
     let root = createTempDir("repro-mm-cycle-", "")
     defer: removeDir(root)
     urlPrefix(root, "acme", "https://git.example.invalid/acme")
-    repoSet(root, "a", ["b"])
-    repoSet(root, "b", ["a"])
+    repoSet(root, "a", memberSets = ["b"])
+    repoSet(root, "b", memberSets = ["a"])
 
     var refused = false
     try:
@@ -141,9 +183,9 @@ suite "membership model — resolution":
     repoFragment(root, "app",
       "name = \"app\"\npath = \"app\"\nbranch = \"dev\"\n" &
       "url_prefix = \"metacraft-labs\"\n")
-    repoSet(root, "left", ["metacraft-dev-guidelines", "app"])
-    repoSet(root, "right", ["metacraft-dev-guidelines"])
-    repoSet(root, "both", ["left", "right"])
+    repoSet(root, "left", memberRepos = ["metacraft-dev-guidelines", "app"])
+    repoSet(root, "right", memberRepos = ["metacraft-dev-guidelines"])
+    repoSet(root, "both", memberSets = ["left", "right"])
 
     # The common case: two sets both pull in the shared repo. One checkout,
     # one entry, no complaint.
@@ -159,8 +201,8 @@ suite "membership model — resolution":
       "name = \"app\"\npath = \"app\"\nbranch = \"dev\"\n" &
       "url_prefix = \"metacraft-labs\"\n" &
       "url_suffix = \"app-fork\"\n")
-    repoSet(root, "right-conflicting", ["app-fork"])
-    repoSet(root, "conflicting", ["left", "right-conflicting"])
+    repoSet(root, "right-conflicting", memberRepos = ["app-fork"])
+    repoSet(root, "conflicting", memberSets = ["left", "right-conflicting"])
     var conflicted = false
     try:
       discard resolveRepoSet(root / "repo-sets" / "conflicting.toml")
@@ -192,7 +234,7 @@ suite "membership model — resolution":
       "name = \"0install\"\npath = \"0install\"\nbranch = \"master\"\n" &
       "url_prefix = \"github\"\n" &
       "url_suffix = \"0install/0install\"\n")
-    repoSet(root, "forks", ["reprobuild-cmake", "0install"])
+    repoSet(root, "forks", memberRepos = ["reprobuild-cmake", "0install"])
 
     let resolved = resolveRepoSet(root / "repo-sets" / "forks.toml")
     let cmake = findRepo(resolved, "reprobuild-cmake")
@@ -210,25 +252,31 @@ suite "membership model — resolution":
     check zeroInstall.name == "0install"
     check zeroInstall.fetchUrl == "https://github.com/0install/0install"
 
-  test "t_member_that_is_both_a_repo_and_a_set_is_refused":
-    let root = createTempDir("repro-mm-collide-", "")
+  test "t_a_shared_name_means_a_different_thing_under_each_key":
+    let root = createTempDir("repro-mm-shared-name-", "")
     defer: removeDir(root)
     urlPrefix(root, "acme", "https://git.example.invalid/acme")
+    # One name, `tools`, carried by BOTH namespaces — and legal, because a bare
+    # name is never resolved against both. Under `member_sets` it is the set;
+    # under `member_repos` it is the fragment. Nothing is arbitrated, so
+    # nothing depends on which rule won.
     repoFragment(root, "tools",
       "name = \"tools\"\npath = \"tools\"\nbranch = \"dev\"\n" &
       "url_prefix = \"acme\"\n")
-    repoSet(root, "tools", [])
-    repoSet(root, "top", ["tools"])
+    repoFragment(root, "tools-helper",
+      "name = \"tools-helper\"\npath = \"tools-helper\"\nbranch = \"dev\"\n" &
+      "url_prefix = \"acme\"\n")
+    repoSet(root, "tools", memberRepos = ["tools-helper"])
+    repoSet(root, "top", memberSets = ["tools"], memberRepos = ["tools"])
 
-    var refused = false
-    try:
-      discard resolveRepoSet(root / "repo-sets" / "top.toml")
-    except WorkspaceManifestParseError as err:
-      refused = true
-      check "tools" in err.innerMessage
-      check "repos/tools.toml" in err.innerMessage.replace('\\', '/')
-      check "repo-sets/tools.toml" in err.innerMessage.replace('\\', '/')
-    check refused
+    let resolved = resolveRepoSet(root / "repo-sets" / "top.toml")
+    var paths: seq[string]
+    for repo in resolved.repos:
+      paths.add(repo.path)
+    # The SET's member first (sets expand first), then the REPO of that name.
+    check paths == @["tools-helper", "tools"]
+    check findRepo(resolved, "tools").fetchUrl ==
+      "https://git.example.invalid/acme/tools"
 
   test "t_project_members_and_branch_precedence":
     let root = createTempDir("repro-mm-project-", "")
@@ -246,16 +294,16 @@ suite "membership model — resolution":
       "name = \"lib-b\"\npath = \"lib-b\"\n" &
       "url_prefix = \"acme\"\n" &
       "revision = \"main\"\n")
-    repoSet(root, "libs", ["lib-a", "lib-b"])
-    # `members` sits BEFORE `[project]`. This is the TOML trap the model's
-    # "Consequences" section describes, and it is not fully gone for project
-    # manifests: a bare key written after a table binds to THAT table, so
-    # `members` under `[project]` is read as `[project] members` and the strict
-    # decode rejects it. Repo-set manifests accept either order (verified), so
-    # only the transitional `[project] + members` shape has to care.
+    repoSet(root, "libs", memberRepos = ["lib-a", "lib-b"])
+    # The membership keys sit BEFORE `[project]`. This is the TOML trap the
+    # model's "Consequences" section describes, and it is not fully gone for
+    # project manifests: a bare key written after a table binds to THAT table,
+    # so `member_sets` under `[project]` is read as `[project] member_sets` and
+    # the strict decode rejects it. Repo-set manifests accept either order
+    # (verified), so only the transitional project shape has to care.
     writeManifest(root, "projects" / "app.toml",
       "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-      "members = [\"libs\"]\n\n" &
+      "member_sets = [\"libs\"]\n\n" &
       "[project]\nname = \"app\"\n")
 
     let resolved = resolveProject(root / "projects" / "app.toml")
