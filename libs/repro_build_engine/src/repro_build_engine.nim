@@ -4590,7 +4590,6 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var poolRunning = initTable[string, uint32]()
   var ready: seq[string] = @[]
   var actionsById = initTable[string, BuildAction]()
-  var launchedSucceeded = initHashSet[string]()
   var dynamicDepsLoaded = initHashSet[string]()
   var fileMetadataCache = initFileMetadataCache()
   var inlineRunQuotaSession: ReproRunQuotaSession
@@ -4684,6 +4683,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     cmp(idToIndex[a], idToIndex[b])
 
   var running: seq[RunningAction] = @[]
+  var launchedSucceeded = initHashSet[string]()
   var runQuotaDaemonReachable: Option[bool]
 
   # ``REPROBUILD_NO_RUNQUOTA=1`` is the engine's own documented full-bypass
@@ -5122,13 +5122,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if launchedSucceeded.contains(dep):
             dependencyLaunched = true
             break
-        if dependencyLaunched:
-          runResult.results[idToIndex.resultIndex(id)].cacheDecision =
-            if action.cacheable: cdMiss else: cdNotCacheable
-          runResult.results[idToIndex.resultIndex(id)].reason =
-            "dependency-launched"
-          runResult.trace(id, "cache-skipped", "dependency-launched")
-        elif config.forceRebuild:
+        # A launched dependency does not by itself invalidate this action.
+        # The normal cache lookup below fingerprints declared and monitored
+        # inputs after dependencies settle, so changed outputs still miss while
+        # byte-identical producer reruns leave consumers reusable.
+        if config.forceRebuild:
           runResult.results[idToIndex.resultIndex(id)].cacheDecision =
             if action.cacheable: cdMiss else: cdNotCacheable
           runResult.results[idToIndex.resultIndex(id)].reason = "force-rebuild"
