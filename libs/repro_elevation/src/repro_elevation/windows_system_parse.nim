@@ -621,6 +621,69 @@ proc parseScheduledTaskQuery*(rawOutput: string): ScheduledTaskObservation =
     result.schedule = ScheduledTaskScheduleSpec(kind: wstskOnBoot,
       delaySeconds: 0)
 
+proc digestScheduleToken*(s: ScheduledTaskScheduleSpec): string =
+  ## Schedule rendering for the DRIFT DIGEST, which is not the same job as
+  ## `encodeScheduledTaskScheduleSpec` (the wire encoding) and must not reuse
+  ## it.
+  ##
+  ## The digest is compared as bytes between an observed rendering and a
+  ## desired rendering, so any field Windows synthesises on its own becomes
+  ## permanent, unfixable drift. `interval` has exactly one such field:
+  ## a task registered with a repetition but no explicit start gets a
+  ## `StartBoundary` of `1970-01-01T00:00:00+00:00`, while the profile that
+  ## asked for it left `startAt` empty. Byte-comparing those renders the task
+  ## drifted on EVERY plan and every apply, forever — measured on
+  ## win-ci-bare-001, 2026-08-19, where the converge loop's own task could
+  ## never reach a no-op:
+  ##
+  ##   observed ... interval:10:1970-01-01T00:00:00+00:00:enabled
+  ##   desired  ... interval:10::enabled
+  ##
+  ## So `startAt` is omitted here. It is NOT unchecked: `scheduleMatchesDesired`
+  ## still enforces it post-apply whenever a profile actually pins one. What is
+  ## given up is planner-visible drift on `startAt` alone, which is the correct
+  ## trade — the alternative is a resource that can never converge.
+  ##
+  ## The other kinds render as-is; none of them has a driver-synthesised slot.
+  case s.kind
+  of wstskInterval:
+    "interval:" & $s.everyMinutes
+  else:
+    encodeScheduledTaskScheduleSpec(s)
+
+proc scheduleMatchesDesired*(observed, desired: ScheduledTaskScheduleSpec): bool =
+  ## Schedule half of the drift comparator, field-wise.
+  ##
+  ## This used to be a whole-object `!=`, which quietly broke the
+  ## "empty desired string means leave at the driver default" convention
+  ## that `scheduledTaskMatchesDesired` documents for every OTHER slot.
+  ##
+  ## It matters most for `interval`. A profile that says
+  ## `scheduleInterval(everyMinutes = 10)` leaves `startAt` empty, but
+  ## Windows always materialises a `StartBoundary` (observed:
+  ## `1970-01-01T00:00:00+00:00`). Compared as whole objects those never
+  ## agree, so the task reconciles as drifted on EVERY apply — the same
+  ## every-run re-apply shape as the `fs.systemDirectory` + ACL digest
+  ## asymmetry documented in the win-ci profiles, reached from a different
+  ## direction. An unmanaged field must not manufacture drift.
+  if observed.kind != desired.kind:
+    return false
+  case desired.kind
+  of wstskOnBoot:
+    observed.delaySeconds == desired.delaySeconds
+  of wstskOnLogon:
+    # Empty desired `forUser` is the documented "any user" case.
+    desired.forUser.len == 0 or observed.forUser == desired.forUser
+  of wstskOnce:
+    observed.runAt == desired.runAt
+  of wstskDaily:
+    observed.timeOfDay == desired.timeOfDay
+  of wstskInterval:
+    # `everyMinutes` is always load-bearing; `startAt` only when the
+    # profile actually pinned one.
+    observed.everyMinutes == desired.everyMinutes and
+      (desired.startAt.len == 0 or observed.startAt == desired.startAt)
+
 proc scheduledTaskMatchesDesired*(obs: ScheduledTaskObservation;
                                   wantTaskName: string;
                                   wantExecutable: string;
@@ -652,7 +715,7 @@ proc scheduledTaskMatchesDesired*(obs: ScheduledTaskObservation;
     return false
   if obs.enabled != wantEnabled:
     return false
-  if obs.schedule != wantSchedule:
+  if not scheduleMatchesDesired(obs.schedule, wantSchedule):
     return false
   true
 
@@ -670,7 +733,7 @@ proc canonicalScheduledTaskState*(obs: ScheduledTaskObservation): string =
   "scheduledTask:" & obs.taskName & ":" & obs.executable & ":" &
     argv & ":" & obs.workingDirectory & ":" & obs.runAsUser & ":" &
     (if obs.runWithHighestPrivileges: "highest" else: "limited") &
-    ":" & encodeScheduledTaskScheduleSpec(obs.schedule) & ":" &
+    ":" & digestScheduleToken(obs.schedule) & ":" &
     (if obs.enabled: "enabled" else: "disabled")
 
 proc canonicalScheduledTaskDesired*(taskName, executable: string;
@@ -691,7 +754,7 @@ proc canonicalScheduledTaskDesired*(taskName, executable: string;
   "scheduledTask:" & taskName & ":" & executable & ":" & argv & ":" &
     workingDirectory & ":" & runAsUser & ":" &
     (if runWithHighestPrivileges: "highest" else: "limited") & ":" &
-    encodeScheduledTaskScheduleSpec(schedule) & ":" &
+    digestScheduleToken(schedule) & ":" &
     (if enabled: "enabled" else: "disabled")
 
 proc canonicalServiceDesired*(wantStartType: string;

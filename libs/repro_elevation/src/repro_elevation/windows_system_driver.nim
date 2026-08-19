@@ -1518,6 +1518,21 @@ when defined(windows):
       "} elseif ($tr.CimClass.CimClassName -eq 'MSFT_TaskTimeTrigger') { " &
       "  if ($tr.Repetition -and $tr.Repetition.Interval) { " &
       "    'ScheduleKind=interval'; " &
+      # WITHOUT THIS LINE AN INTERVAL TASK CAN NEVER CONVERGE. The parser
+      # (`windows_system_parse.parseScheduledTaskQuery`) reads
+      # `ScheduleEveryMinutes`; nothing emitted it, so `everyMinutes`
+      # observed as 0, and the canonical-state encoder then raised
+      # `windows.scheduledTask interval everyMinutes '0' must be > 0` on
+      # every apply after the task existed. Measured on win-ci-bare-001
+      # 2026-08-19: the task was created correctly (`PT10M` in its XML) and
+      # the very next reconcile errored on reading it back.
+      #
+      # `Repetition.Interval` is an ISO-8601 duration (`PT10M`), so parse it
+      # as one rather than string-slicing: `PT1H30M` must come back as 90,
+      # not 1 or 30.
+      "    'ScheduleEveryMinutes=' + " &
+      "      [int][System.Xml.XmlConvert]::ToTimeSpan(" &
+      "        $tr.Repetition.Interval).TotalMinutes; " &
       "    'ScheduleStartAt=' + $tr.StartBoundary " &
       "  } else { " &
       "    'ScheduleKind=once'; " &

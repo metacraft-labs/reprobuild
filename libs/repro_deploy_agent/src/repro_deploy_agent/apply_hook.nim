@@ -103,11 +103,37 @@ proc mkRunInfraApplyHook*(stateDir: string;
         let effectiveActions =
           if m.buildActions.len > 0: m.buildActions else: resolvedActions
 
+        # `emBroker`, NOT `emNoElevate`, and the difference is the whole value
+        # of the agent on Windows.
+        #
+        # `emNoElevate` does not mean "do not prompt" — apply.nim implements it
+        # as `reportPrivilegedSetSkipped`, i.e. SKIP every privileged operation,
+        # with its own comment noting the non-privileged remainder is "none, for
+        # a pure-Windows profile". So a hardcoded `emNoElevate` made the agent
+        # structurally incapable of applying live state: services, ACLs,
+        # timezone, registry values and scheduled tasks were all skipped.
+        #
+        # And it did so SILENTLY. Skipped operations are not errors, so
+        # `res.errorCount` stayed 0 and the tick returned `aoApplied` with a
+        # healthy-looking "applied N" — where N counted only build actions.
+        # Measured on win-ci-bare-001, 2026-08-19: a tick reported
+        # `aoApplied ... applied 8` while the apply log recorded
+        # `windows.scheduledTask deployAgentTimer skipped` and the task did not
+        # exist afterwards. A pull-model box was reporting convergence it had
+        # not performed.
+        #
+        # `emBroker` is the CLI's default and degrades correctly rather than
+        # prompting an unattended box: apply.nim takes the already-elevated
+        # fast path in-process when `isProcessElevated()`, which is the normal
+        # case here since the converge loop runs as SYSTEM from Task Scheduler;
+        # and if a broker is genuinely needed but elevation is declined,
+        # `EElevationDeclined` is handled as a clean partial result rather than
+        # a crash.
         var opts = ApplyOptions(
           stateDir: capturedStateDir,
           hostIdentity: capturedHost,
           reproExe: capturedReproExe,
-          elevationMode: emNoElevate,
+          elevationMode: emBroker,
           noPreview: true,
           buildActions: effectiveActions,
           buildActionDispatcher:
