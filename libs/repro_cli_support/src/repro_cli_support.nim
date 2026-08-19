@@ -3223,42 +3223,12 @@ var producerSourceBindings*: Table[string, ResolvedPackageBinding] =
   ## Exported for the SC-4 integration test to observe the fold.
 
 proc attachProducerAuxRefs*(actions: var seq[BuildAction]) =
-  ## Cross-Repo-Source-Consumption SC-3: a LIBRARY-channel producer is consumed
-  ## through the aux channels (``CPATH``/``LIBRARY_PATH``/``LD_LIBRARY_PATH``),
-  ## which the engine threads by walking each action's ``toolIdentityRefs``
-  ## through the tool-identity resolver
-  ## (``repro_build_engine.nim`` ``resolveToolAuxPaths``/``resolvedToolAuxPaths``).
-  ## Unlike the executable channel (a ``shell(...)`` action that invokes the
-  ## producer executable already carries its name as a ref), a consuming action
-  ## that merely LINKS/LOADS the producer's library does NOT name the producer
-  ## as a tool ref by construction. Attach every materialized library-producer
-  ## selector as a ``toolIdentityRef`` on every consumer action so the engine's
-  ## per-ref resolver fires and threads the producer's realized library dirs
-  ## onto the aux channels. This is the string-surface behavior (the producer's
-  ## library reaches the consuming actions); the typed surface (SC-10) refines
-  ## it to the specific typed-accessor call sites.
-  ##
-  ## Aux channels only BROADEN a search path (they never remove entries), so
-  ## attaching the ref is safe for actions that do not link the library. No-op
-  ## when no library producer materialized (``producerMaterializedAuxPaths``
-  ## empty), so a build consuming no cross-repo LIBRARY producer is
-  ## byte-identical to today.
-  if producerMaterializedAuxPaths.len == 0:
-    return
-  for action in actions.mitems:
-    for selector in producerMaterializedAuxPaths.keys:
-      if selector.len == 0:
-        continue
-      if selector in action.toolIdentityRefs:
-        continue
-      action.toolIdentityRefs.add(selector)
-      # Keep ``toolIdentityRefKinds`` in sync when the action carries an
-      # explicit per-ref kind array (else it would silently fall back to the
-      # ``dkBuild`` default for every ref). ``dkBuild`` is the legacy ``uses:``
-      # kind — the HOST-platform cache key that collapses to ``"native"`` on a
-      # native build (``repro_build_engine.nim`` ``kindForRef``).
-      if action.toolIdentityRefKinds.len > 0:
-        action.toolIdentityRefKinds.add(dkBuild)
+  ## Resolve library aux channels only for the producer refs already carried by
+  ## each action. Selecting a producer for one target must not change unrelated
+  ## action identities or expose search paths those actions did not request.
+  ## String-based shell actions register library refs explicitly; typed
+  ## producer calls register the same refs while lowering.
+  discard actions
 
 proc foldProducerActionHashes*(actions: var seq[BuildAction]) =
   ## SC-2 (§4.2 point 3): after the consumer graph is lowered, fold each

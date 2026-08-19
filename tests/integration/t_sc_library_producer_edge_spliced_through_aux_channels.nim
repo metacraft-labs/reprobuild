@@ -66,7 +66,7 @@
 ## same channels carry ``.dylib`` but the test's hard-coded ``.so`` basename
 ## would need the platform ext — kept Linux-only to stay hermetic).
 
-import std/[os, osproc, strutils, unittest]
+import std/[json, os, osproc, strutils, unittest]
 
 const reproBinary = "./build/bin/repro"
 
@@ -140,6 +140,11 @@ const consumerRepro = """
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
 
+proc withToolIdentities(action: BuildActionDef;
+                        tools: openArray[string]): BuildActionDef =
+  appendRegisteredActionToolIdentityRefs(action.id, tools)
+  action
+
 package consumer:
   defaultToolProvisioning "path"
 
@@ -148,14 +153,21 @@ package consumer:
     "libprod"
 
   build:
-    discard shell(
+    let base = shell(
+      command = "mkdir -p build && printf 'base\n' > build/base.txt",
+      actionId = "consumer.build.base",
+      extraOutputs = @["build/base.txt"])
+    let consume = shell(
       command = "mkdir -p build && " &
         "cc -o build/consume main.c -lscprodlib && " &
         "./build/consume",
       actionId = "consumer.build.consume",
+      deps = @[base.id],
       extraInputs = @["main.c"],
       extraOutputs = @["build/consume", "build/consumed.txt"],
-      cacheable = false)
+      cacheable = false).withToolIdentities(["libprod"])
+    discard target("base", [base])
+    discard target("consume", [base, consume])
 """
 
 proc q(value: string): string = quoteShell(value)
@@ -177,7 +189,6 @@ suite "SC-3: library producer edge spliced through aux channels":
       checkpoint("skipped — cc/sh missing on PATH or repro unbuilt")
       skip()
     else:
-      let repoRoot = getCurrentDir()
       let reproAbs = absolutePath(reproBinary)
       let scratch = getTempDir() / "sc3-" & $getCurrentProcessId()
       removeDir(scratch)
@@ -234,12 +245,25 @@ created_at = "2026-07-02T00:00:00Z"
       # cache-behavior change.
       let cacheRoot = absolutePath(scratch / "action-cache-root")
       createDir(cacheRoot)
-      let cmd = q(reproAbs) & " build " & q(consumerRoot / "repro.nim") &
+      let baseCmd = q(reproAbs) & " build base" &
         " --tool-provisioning=path --daemon=off --log=quiet" &
         " --progress=quiet --measure=none" &
         " --action-cache-root=" & q(cacheRoot)
+      checkpoint("running: " & baseCmd)
+      let (baseCode, baseOutput) = run(baseCmd, consumerRoot)
+      checkpoint("base exit=" & $baseCode)
+      checkpoint(baseOutput)
+      check baseCode == 0
+      check not fileExists(producerLibrary)
+
+      let reportPath = absolutePath(scratch / "consume-report.json")
+      let cmd = q(reproAbs) & " build consume" &
+        " --tool-provisioning=path --daemon=off --log=quiet" &
+        " --progress=quiet --measure=all" &
+        " --write-report=" & q(reportPath) &
+        " --action-cache-root=" & q(cacheRoot)
       checkpoint("running: " & cmd)
-      let (code, output) = run(cmd, repoRoot)
+      let (code, output) = run(cmd, consumerRoot)
       checkpoint("exit=" & $code)
       checkpoint(output)
 
@@ -248,6 +272,18 @@ created_at = "2026-07-02T00:00:00Z"
 
       # (2) The producer library was materialized from source BY THIS RUN.
       check fileExists(producerLibrary)
+
+      # Selecting the producer-consuming target must not perturb the shared,
+      # producer-independent base action's identity.
+      check fileExists(reportPath)
+      if fileExists(reportPath):
+        let report = parseFile(reportPath)
+        var foundBase = false
+        for action in report{"actions"}:
+          if action{"id"}.getStr() == "base":
+            foundBase = true
+            check action{"cacheDecision"}.getStr() == "cdHit"
+        check foundBase
 
       # (3) The consumer action linked + loaded the freshly-built producer
       # library: the marker file carries the library's unique stamp, returned
