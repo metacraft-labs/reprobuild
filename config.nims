@@ -1,5 +1,24 @@
 import std/[os, strutils]
 
+# The directory holding THIS file, resolved independently of whatever project
+# nim happens to be compiling.
+#
+# `thisDir()` cannot be used for this and the difference is not academic.
+# `repro_profile_compile` compiles a profile that lives outside this repo, and
+# it makes this config reachable by STAGING a wrapper `config.nims` next to the
+# profile which `include`s this file (see `compile.nim`). Under an `include`,
+# `thisDir()` reports the INCLUDER's directory — the profile's — while
+# `currentSourcePath()` reports this file. Measured during a real profile
+# compile:
+#
+#   thisDir()           -> C:\rt\cspprobe            (the profile's directory)
+#   currentSourcePath() -> ...\reprobuild\src\config.nims
+#
+# So every relative path below is relative to the PROFILE when a profile is
+# being compiled, and to this repo the rest of the time. Anything that must
+# denote a location in THIS repository has to be anchored here instead.
+let reproRepoRoot = currentSourcePath().parentDir()
+
 switch("styleCheck", "hint")
 
 if defined(windows):
@@ -62,6 +81,29 @@ switch("undef", "nixbuild")
 # delete either without reading `tests/unit/test_package_root_anchor.py`,
 # which measures the property both of them exist to hold.
 switch("path", ".")
+
+# The same anchor, absolute — and the one that actually holds when the project
+# being compiled is NOT in this repo.
+#
+# `.` above resolves against the project, so during a profile compile it points
+# at the profile's own directory and every root-level module in this repository
+# silently stops resolving. That is not hypothetical: after
+# `repro_core/convention_attribution.nim` gained `import lints/ambient_execution`
+# — `lints/` being a root-level directory — `nim c` over this tree kept working
+# while every COLD profile compile failed with
+# `cannot open file: lints/ambient_execution`, taking `repro infra plan`,
+# `repro infra apply` and the deploy agent with it. A warm profile cache hid it,
+# so it surfaced as "converged for weeks, then stopped accepting new desired
+# state".
+#
+# Keeping both lines is deliberate. `.` is documented above as the package-root
+# anchor with a test measuring the property it holds
+# (`tests/unit/test_package_root_anchor.py`), so it is not removed on the
+# strength of this; and over-inclusion is safe for the reason
+# `repro_profile_compile/sources.nim` documents — extra `--path` entries only
+# supply modules that would otherwise not resolve, and cannot hijack one that
+# already does.
+switch("path", reproRepoRoot)
 
 # Test-Edges-And-Parallel-Runner M1: ``repro.nim`` consumes the
 # generated ``repro_tests.nim`` whose data entries each become a
@@ -564,9 +606,14 @@ if not useSystemHashLibs:
 # configured system prefixes instead.
 if not useSystemHashLibs:
   switch("passC", "-DREPRO_VENDORED_HASH")
-  let vendoredBlake3Inc = thisDir() / "libs" / "blake3" / "src" /
+  # `reproRepoRoot`, not `thisDir()`: these name vendored C headers inside THIS
+  # repository, and under a profile compile `thisDir()` is the profile's
+  # directory (see the note at the top). The `fileExists` guards below meant the
+  # miss was silent — the `-I` flags were simply not added, and the failure
+  # surfaced later as a C compile error about a missing `blake3.h`.
+  let vendoredBlake3Inc = reproRepoRoot / "libs" / "blake3" / "src" /
     "blake3" / "vendor"
-  let vendoredXxhashInc = thisDir() / "libs" / "xxh3" / "src" /
+  let vendoredXxhashInc = reproRepoRoot / "libs" / "xxh3" / "src" /
     "xxh3" / "vendor"
   if fileExists(vendoredBlake3Inc / "blake3.h"):
     switch("passC", "-I" & vendoredBlake3Inc)

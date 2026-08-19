@@ -1,0 +1,21 @@
+# actionlint configuration -- see scripts/check_workflows.sh for how this runs.
+#
+# actionlint validates `runs-on` against GitHub's hosted-runner labels. Every
+# label below belongs to a Metacraft self-hosted pool, so actionlint cannot know
+# it and would otherwise report each one as unknown. Declaring them here keeps
+# the runner-label check ON: a typo'd pool name is still an error, because it
+# will not match this list.
+self-hosted-runner:
+  labels:
+    # Ephemeral pools. These are the names used by .github/release-platforms.json
+    # and by ci.yml; release-platforms.json feeds `runner` in through the build
+    # matrix, so those uses reach actionlint as an expression rather than a
+    # literal -- they are listed here anyway so a literal use stays checked.
+    - eph-linux-x64
+    - eph-linux-arm64
+    - eph-macos-arm64
+    - eph-win-x64
+    - eph-win-arm64
+    # Persistent bare-metal NixOS host (ci.yml's monitor/benchmark leg).
+    - bare-metal
+    - nixos

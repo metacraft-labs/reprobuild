@@ -31,7 +31,7 @@ when not defined(windows):
   # catalog, stayed an opaque whole-binary exit-0 PASS, and these three
   # cases were invisible to every gate. The names must stay in step with
   # the ``else`` branch.
-  import std/unittest
+  import ct_test_unittest_parallel
 
   suite "M83 Phase F3 gate: profile compile failure is a HARD error":
 
@@ -44,8 +44,9 @@ when not defined(windows):
     test "repro home plan hard-errors on a broken Phase A profile":
       skip(PlatformSkipReason)
 else:
-  import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+  import std/[os, osproc, streams, strtabs, strutils, tempfiles]
 
+  import ct_test_unittest_parallel
   import repro_home_generations
 
   const ProjectRoot = currentSourcePath().parentDir().parentDir()

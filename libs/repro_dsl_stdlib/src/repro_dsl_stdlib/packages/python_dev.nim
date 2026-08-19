@@ -25,6 +25,7 @@
 ## ensure-script path until M9 cleanup retires it).
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 package `python-dev`:
   provisioning:
@@ -32,8 +33,8 @@ package `python-dev`:
     # alongside the interpreter under the same prefix; reuse it rather
     # than carving out a "python-dev" Nix package that doesn't exist.
     nixPackage "nixpkgs#python3", executablePath = "bin/python3",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # Windows: astral-sh/python-build-standalone install_only tarball.
     # Top-level ``python/`` directory holds ``python.exe`` plus the
     # full Lib/ + include/ + libs/ tree the PyO3 link step needs.

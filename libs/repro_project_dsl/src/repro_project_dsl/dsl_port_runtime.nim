@@ -4006,7 +4006,6 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
   ## meson constructors' fetch-script shape: curl → hash-verify → tar
   ## --force-local extract → touch stamp. ``file://`` URLs work natively
   ## via curl.
-  let escapedUrl = spec.url.replace("\"", "\\\"")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
@@ -4015,9 +4014,7 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
   var script = "set -e; "
   script.add("rm -rf \"" & escapedStaged & "\"; ")
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
-  script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
-  script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" & escapedUrl &
-    "\"; fi; ")
+  script.appendCurlDownload(tarball, spec.url)
   case spec.hashAlg
   of dshaSha256:
     script.add("echo \"" & escapedHash & "  " & escapedTarball &
@@ -4224,6 +4221,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     let escapedOutPath = outPath.replace("\\", "/").
       replace("\"", "\\\"")
     let recipesRoot = parentDir(projectRoot)
+    let recipeName = projectRoot.extractFilename
     let publishVersion = dslPortInstallMirrorPublishVersion(packageName)
     var script = "set -e; "
     script.add("rm -rf \"" & escapedMirrorUsr & "\"; ")
@@ -4260,7 +4258,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     script.add("; s|^datarootdir=/usr/share|datarootdir=" & escapedMirrorUsr & "/share|' ")
     script.add("\"$pc\"; fi; done; fi; done; ")
     script.add("touch \"" & escapedMirrorStamp & "\"; ")
-    script.add(emitInstallMirrorStorePublish(recipesRoot, packageName,
+    script.add(emitInstallMirrorStorePublish(recipesRoot, recipeName,
       publishVersion, mirrorRoot))
     let mirrorActionId = "from-source-custom-mirror-" &
       dslPortSanitizeIdPart(packageName)
@@ -4274,7 +4272,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       call = inlineExecCall(@["sh", "-c", script], projectRoot),
       deps = @[prevId],
       inputs = @[prevStamp],
-      outputs = @[mirrorStamp, realizationInfoPath(recipesRoot, packageName)],
+      outputs = @[mirrorStamp, realizationInfoPath(recipesRoot, recipeName)],
       pool = "compile",
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "from-source-custom.mirror",

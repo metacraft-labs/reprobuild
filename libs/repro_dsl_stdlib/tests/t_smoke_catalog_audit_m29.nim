@@ -21,12 +21,16 @@
 
 import std/[os, strutils, unittest]
 
+# The pin values come from the module the catalog itself imports. This test
+# used to carry its own copy of both strings — a third copy alongside the 274
+# in the entries — which could go stale against the catalog and still report
+# green. There is now exactly one declaration, and this suite checks the
+# entries against it rather than against a duplicate of it.
+import repro_dsl_stdlib/nixpkgs_pin
+
 const
   PackagesRel = "libs" / "repro_dsl_stdlib" / "src" / "repro_dsl_stdlib" /
     "packages"
-  CanonicalNixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8"
-  CanonicalNixpkgsNarHash =
-    "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 
   # M29 deliverable (per
   # Standard-Provider-Implementation.milestones.org §M29): catalog entries
@@ -156,13 +160,24 @@ suite "M29 Part B — catalog audit":
     # Sanity: the catalog can't have shrunk to nothing.
     check seen >= 60
 
-  test "every nixpkgs# entry uses the canonical nixpkgs pin":
-    # Catalog hygiene: every entry that uses the ``nixpkgs#`` selector
-    # form pins to the same nixpkgs rev + hash so the Nix CI gate can
-    # probe them against a single flake input. A divergence usually
-    # means a hand-edited file forgot to bump in lockstep with the rest
-    # of the catalog. Entries pinned to a local expression
-    # (``expressionFile = ...``) are exempt — they're self-contained.
+  test "every nixpkgs# entry references the canonical pin, not a copy of it":
+    # Catalog hygiene: every entry that uses the ``nixpkgs#`` selector form
+    # resolves against the same nixpkgs snapshot, so the Nix CI gate can probe
+    # the whole catalog against a single flake input. Entries pinned to a local
+    # expression (``expressionFile = ...``) are exempt — they're self-contained.
+    #
+    # This check used to compare 274 pasted copies of two strings against the
+    # expected literals, because the DSL could not accept a `const` in a
+    # provisioning setter. It can now, and the entries reference
+    # `CanonicalNixpkgsRev` / `CanonicalNixpkgsNarHash` from
+    # ``repro_dsl_stdlib/nixpkgs_pin``.
+    #
+    # So the question this test asks has changed, and got smaller. It is no
+    # longer "are these 274 strings still equal to each other" — that is now
+    # unrepresentable, which is the whole point. It is "does every entry go
+    # through the shared const", i.e. has someone re-introduced a literal.
+    # A pasted literal is the regression; catching it early is what keeps the
+    # guarantee structural rather than conventional.
     for entry in catalogFiles():
       let body = readCatalog(entry.path)
       if "\"nixpkgs#" notin body:
@@ -170,11 +185,26 @@ suite "M29 Part B — catalog audit":
         continue
       if entry.name in CanonicalPinExemptions:
         # Graduated per-package pin (see CanonicalPinExemptions) — a
-        # documented, ABI-driven divergence from the coherent snapshot.
+        # documented, ABI-driven divergence from the coherent snapshot. These
+        # write their own literals on purpose, so they are exempt from the
+        # must-reference-the-const rule too.
         continue
       checkpoint "entry: " & entry.name & " (" & entry.path & ")"
-      check "nixpkgsRev = \"" & CanonicalNixpkgsRev & "\"" in body
-      check "nixpkgsNarHash = \"" & CanonicalNixpkgsNarHash & "\"" in body
+      check "nixpkgsRev = CanonicalNixpkgsRev" in body
+      check "nixpkgsNarHash = CanonicalNixpkgsNarHash" in body
+      # The literal must be GONE, not merely accompanied by the const. A file
+      # carrying both would drift silently the next time the pin is bumped —
+      # exactly the failure this suite exists to prevent.
+      check "nixpkgsRev = \"" & CanonicalNixpkgsRev & "\"" notin body
+      check "nixpkgsNarHash = \"" & CanonicalNixpkgsNarHash & "\"" notin body
+
+  test "the shared pin module holds well-formed values":
+    # Cheap shape check on the single declaration everything now depends on.
+    # A truncated rev or a narHash missing its algorithm prefix would fail at
+    # realization with a hash error, far from the edit that caused it.
+    check CanonicalNixpkgsRev.len == 40
+    check CanonicalNixpkgsRev.allCharsInSet(HexDigits)
+    check CanonicalNixpkgsNarHash.startsWith("sha256-")
 
   test "no duplicate catalog entries (case-folded basename)":
     var seen: seq[string] = @[]

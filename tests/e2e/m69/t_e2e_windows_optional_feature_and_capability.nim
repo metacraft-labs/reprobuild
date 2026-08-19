@@ -93,7 +93,9 @@
 ## original WSL scenario was supposed to cover is now covered by an
 ## equivalent scenario, mostly more explicitly.
 
-import std/[os, osproc, strutils, tempfiles, times, unittest]
+import std/[os, osproc, strutils, tempfiles, times]
+
+import ct_test_unittest_parallel
 
 import repro_elevation
 import repro_infra

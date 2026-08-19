@@ -30,7 +30,9 @@
 ## `REPRO_M69_VM_SENTINEL_FILE` (or `/tmp/repro-vm-test/sentinels.txt`
 ## when unset). The orchestrator greps for the gate's `OK:` line.
 
-import std/[os, strutils, unittest]
+import std/[os, strutils]
+
+import ct_test_unittest_parallel
 
 import repro_elevation
 

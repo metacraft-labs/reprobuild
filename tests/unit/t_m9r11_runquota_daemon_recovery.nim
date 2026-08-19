@@ -187,6 +187,15 @@ suite "DSL-port M9.R.11 — runquota daemon discovery + recovery":
       check getEnv("REPROBUILD_NO_RUNQUOTA").normalize == value.normalize
     resetEnv()
 
+  test "explicit bypass reaches metadata-only provider compilation":
+    putEnv("REPROBUILD_NO_RUNQUOTA", "")
+    check effectiveProviderCompileRunQuotaBypass(true)
+    check not effectiveProviderCompileRunQuotaBypass(false)
+
+    putEnv("REPROBUILD_NO_RUNQUOTA", "1")
+    check effectiveProviderCompileRunQuotaBypass(false)
+    resetEnv()
+
   test "REPROBUILD_AUTO_RUNQUOTA=0 disables auto-spawn entirely":
     # Mirror gate for the opposite direction.
     for value in ["0", "false", "no", "off"]:

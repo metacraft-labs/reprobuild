@@ -383,8 +383,17 @@ template exerciseManifestRemoteAlias(gitBin: string) =
     discard fx.git(["add", "README.md"])
     discard fx.git(["commit", "-m", "alias rewritten"])
     discard fx.git(["branch", "-M", "main"])
-    assertRefused(fx.git(["push", "--force", "metacraft-labs", "main"],
-      required = false), "unpublished")
+    let aliasForce = fx.git(["push", "--force", "metacraft-labs", "main"],
+      required = false)
+    assertRefused(aliasForce, "unpublished")
+    # RA-32 — the refusal must name the reason it actually declined. The
+    # property is still `unpublished`, and the push is still refused; what
+    # changes is that the operator is no longer told to run the very push
+    # being refused. Before RA-32 the only remedy printed was
+    # "run 'git push' in . first", while `evaluateOutgoing` had computed
+    # "outgoing update is not a fast-forward" and discarded it.
+    check "not a fast-forward" in aliasForce.output
+    check "will not help" in aliasForce.output
     check require(q(gitBin) & " --git-dir=" & q(fx.origin) &
       " rev-parse refs/heads/main").strip() == published
 
@@ -582,8 +591,12 @@ template exerciseFormat(gitBin, objectFormat: string) =
     discard fx.git(["add", "README.md"])
     discard fx.git(["commit", "-m", "rewritten"])
     discard fx.git(["branch", "-M", "main"])
-    assertRefused(fx.git(["push", "--force", "origin", "main"],
-      required = false), "unpublished")
+    let originForce = fx.git(["push", "--force", "origin", "main"],
+      required = false)
+    assertRefused(originForce, "unpublished")
+    # RA-32, same property through the plain `origin` remote.
+    check "not a fast-forward" in originForce.output
+    check "will not help" in originForce.output
     discard fx.git(["fetch", "origin", "main"])
     discard fx.git(["reset", "--hard", published])
 

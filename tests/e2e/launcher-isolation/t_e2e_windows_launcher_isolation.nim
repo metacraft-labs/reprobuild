@@ -22,7 +22,9 @@
 ## Allowed mocks: temporary fixture prefixes only. No fake launcher,
 ## no fake DLL probes.
 
-import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[os, osproc, sequtils, strutils, tempfiles]
+
+import ct_test_unittest_parallel
 
 import repro_launch_plan
 import repro_local_store

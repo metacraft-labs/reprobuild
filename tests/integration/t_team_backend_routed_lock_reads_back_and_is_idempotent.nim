@@ -17,10 +17,14 @@
 ##     non-zero after ``adopt-manifest``. The fix merges every candidate record
 ##     tolerantly (``shasFromBody``). Asserted: ``status --json`` exits 0 and
 ##     reports every repo ``at-lock``.
-##   * **#1 — the lock summary line has no blank path.** On the routed path no
-##     monolithic lock file is written, so the renderer printed
-##     ``workspace lock: wrote  (trigger=…)`` with an empty path. Asserted: the
-##     output says ``recorded per-repo lock entries`` and never ``wrote  (``.
+##   * **#1 — the lock summary line has no blank path.** The renderer printed
+##     ``workspace lock: wrote  (trigger=…)`` with an empty path whenever no
+##     lock file path was set. Asserted: the summary never contains ``wrote  (``.
+##     (HL-2 §6 Decision 1 later restored the trigger-keyed PARTITION write on
+##     this path — the team backend's lock document, holding only the repos
+##     routed to it — so the summary now names a real path. The blank-path
+##     assertion still holds and still guards the routed-but-unowned shape,
+##     where the manifest backend owns no repo and no path exists to print.)
 ##   * **#4 — idempotent re-lock.** Re-writing an identical record stages no
 ##     change, so the backend's ``git commit`` exited non-zero ("nothing to
 ##     commit") and was surfaced as ``failed to record … via git-checkout
@@ -165,12 +169,21 @@ suite "regression — manifest team backend routed lock reads back + idempotent"
         checkpoint("workspace lock output: " & lock1.output)
       check lock1.code == 0
       # #1 — no blank-path summary line on the routed path.
-      check lock1.output.contains("recorded per-repo lock entries")
       check not lock1.output.contains("wrote  (")
-      # The records exist under the manifest checkout, keyed by each repo's HEAD.
-      check fileExists(manifestsRoot / "locks" / "mix" / "core" /
-        (coreSha & ".toml"))
-      check fileExists(manifestsRoot / "locks" / "mix" / "lib" /
+      # HL-2 §6 Decision 1 — the team backend's record is the trigger-keyed
+      # PARTITION LOCK (trigger = ``core``, the project's first declared repo),
+      # a ``reprobuild.workspace.lock.v1`` document holding every repo routed to
+      # this backend. Non-trigger repos are recorded BY that document, not by a
+      # minimal per-repo body squatting on their own future coordinate; see
+      # ``t_workspace_lock_partition_resolves_a_sibling_for_ci`` for why that
+      # distinction is load-bearing for CI.
+      let partitionPath =
+        manifestsRoot / "locks" / "mix" / "core" / (coreSha & ".toml")
+      check fileExists(partitionPath)
+      let partition = readFile(partitionPath)
+      check partition.contains("schema = \"reprobuild.workspace.lock.v1\"")
+      check partition.contains("revision = \"" & libSha & "\"")
+      check not fileExists(manifestsRoot / "locks" / "mix" / "lib" /
         (libSha & ".toml"))
 
       # ---- #2 (the crash): status reads the routed records back ----------

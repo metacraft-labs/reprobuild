@@ -130,6 +130,10 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   let spec = registeredFetchSpec(packageName)
   if spec.url.len == 0 or spec.hashHex.len == 0:
     return none(BuildActionDef)
+  let fetchActionId = autotoolsFetchActionId(packageName)
+  for action in registeredBuildActions():
+    if action.id == fetchActionId:
+      return some(action)
   let scratch = projectRoot / FetchScratchSubdir
   createDir(scratch)
   let stamp = scratch / (spec.hashHex & ".stamp")
@@ -153,7 +157,6 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     let absPath = projectRoot / relPath
     let posixAbs = absPath.replace("\\", "/")
     resolvedUrl = "file://" & posixAbs
-  let escapedUrl = resolvedUrl.replace("\"", "\\\"")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
@@ -164,9 +167,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
   # Download (curl) → hash-verify → extract → write stamp. ``file://``
   # URLs are handled by curl natively for the vendored-tarball case.
-  script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
-  script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" & escapedUrl &
-    "\"; fi; ")
+  script.appendCurlDownload(tarball, resolvedUrl)
   case spec.hashAlg
   of dshaSha256:
     script.add("echo \"" & escapedHash & "  " & escapedTarball &
@@ -217,7 +218,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   # so that, when the action IS monitored, any incidental file reads are
   # captured rather than silently ignored.
   let act = buildAction(
-    id = autotoolsFetchActionId(packageName),
+    id = fetchActionId,
     call = inlineExecCall(argv),
     inputs = @[],
     outputs = @[stamp],
@@ -237,14 +238,19 @@ proc autotools_package*(srcDir: string;
                         destdir = "out";
                         prefix = "/usr";
                         configureOptions: seq[string] = @[];
+                        makeJobs = 0;
+                        makeDependencyPolicy = automaticMonitorPolicy();
+                        postInstallDependencyPolicy = automaticMonitorPolicy();
                         installTarget = "install";
                         configureScriptName = "configure";
                         prefixFlagFormat = "--prefix=";
                         patchHardcodedFile = false;
                         allowSourceWrites = false;
                         skipConfigure = false;
+                        makeVars: seq[string] = @[];
                         installMakeVars: seq[string] = @[];
                         srcPatches: seq[string] = @[];
+                        postConfigureCommands: seq[string] = @[];
                         extraEnv: seq[(string, string)] = @[]):
                         AutotoolsPackageResult =
   ## Configure → build → install pipeline for an upstream autotools
@@ -259,9 +265,19 @@ proc autotools_package*(srcDir: string;
   ## on its stamp so the configure step doesn't run before the source
   ## tree is extracted.
   ##
-  ## ``extraEnv`` supplies recipe-specific environment overrides to the
-  ## configure, compile, and install actions. The values are kept outside
-  ## the typed call identity, matching the other package constructors.
+  ## ``makeJobs`` caps compile and install parallelism when greater than zero;
+  ## zero selects the host-aware default. ``makeDependencyPolicy`` replaces the
+  ## make tool's automatic-monitor default when an upstream build emits a
+  ## recognized dependency report. ``postInstallDependencyPolicy`` provides
+  ## the corresponding recipe-root-relative evidence for mirror and stage
+  ## actions. ``makeVars`` supplies GNU make command-line assignments shared by
+  ## the compile and install invocations; ``installMakeVars`` adds assignments
+  ## used only by the install invocation. ``postConfigureCommands`` supplies
+  ## shell commands that run from the configured build directory after a
+  ## successful configure and before the make edge. ``extraEnv`` supplies
+  ## recipe-specific environment overrides to the configure, compile, and
+  ## install actions. The values are kept outside the typed call identity,
+  ## matching the other package constructors.
   # M9.R.15a.3 — accept a custom prefix flag format (openssl's
   # ``./Configure`` uses ``--prefix=`` like autotools, but Configure
   # also accepts ``--openssldir=`` etc. via the same channel; we keep
@@ -475,6 +491,9 @@ proc autotools_package*(srcDir: string;
     "export BUILD_CFLAGS=\"${BUILD_CFLAGS:-${CFLAGS_FOR_BUILD}}\"; " &
     "export BUILD_CPPFLAGS=\"${BUILD_CPPFLAGS:-${CPPFLAGS_FOR_BUILD}}\"; " &
     "export BUILD_LDFLAGS=\"${BUILD_LDFLAGS:-${LDFLAGS_FOR_BUILD}}\"; "
+  var postConfigureSuffix = ""
+  for command in postConfigureCommands:
+    postConfigureSuffix.add(" && ( " & command & " )")
   let configureScript =
     if skipConfigure:
       patchPrefix & bootstrapPrefix &
@@ -484,7 +503,8 @@ proc autotools_package*(srcDir: string;
       patchPrefix & bootstrapPrefix &
       cleanBuildPrefix & "mkdir -p " & shellBuildDir & " && cd " &
         shellBuildDir & " && " & nativeBuildEnvPrefix & srcFromBuild & "/" &
-        configureScriptName & " " & configureArgs.join(" ")
+        configureScriptName & " " & configureArgs.join(" ") &
+        postConfigureSuffix
   let configureArgv = @["sh", "-c", configureScript]
   let call = inlineExecCall(configureArgv)
   let actionId = defaultToolActionId(call)
@@ -580,7 +600,9 @@ proc autotools_package*(srcDir: string;
   # We deliberately do NOT pass ``-j N`` via the typed ``jobs`` flag
   # because that would put host-local parallelism into the typed CLI
   # surface even though the explicit action id ignores it.
-  let jobs = max(1, min(countProcessors(), 8))
+  let jobs =
+    if makeJobs > 0: makeJobs
+    else: max(1, min(countProcessors(), 8))
   let makeflags = "-j" & $jobs
   # M9.R.15q.11.4 — when ``skipConfigure`` is true, ``configureOptions``
   # are passed as command-line ``VAR=VALUE`` overrides to ``make``
@@ -588,6 +610,8 @@ proc autotools_package*(srcDir: string;
   # the make invocation rather than into a configure script that doesn't
   # exist).
   var buildVars: seq[string] = @[]
+  for value in makeVars:
+    buildVars.add(value)
   if skipConfigure:
     for o in configureOptions:
       buildVars.add(o)
@@ -601,6 +625,8 @@ proc autotools_package*(srcDir: string;
     after = @[configureEdge],
     extraInputs = @[m9r79ConfBuildDirAbs],
     extraEnv = buildEnv)
+  buildEdge.dependencyPolicy = makeDependencyPolicy
+  setRegisteredActionDependencyPolicy(buildEdge.id, makeDependencyPolicy)
   # M9.R.84 — run make from the configured build directory instead of
   # running from the recipe root with ``make -C <buildDir>``. GNU make
   # and recursive libtool children then report relative writes such as
@@ -654,11 +680,11 @@ proc autotools_package*(srcDir: string;
   var installEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
   for envVar in extraEnv:
     installEnv.add(envVar)
-  let installDestdir =
+  let installDestdir = (block:
     if providerProjectRoot.len > 0:
       providerProjectRoot / buildDir / destdir
     else:
-      destdir
+      destdir).replace('\\', '/')
   installEnv.add(("DESTDIR", installDestdir))
   installVars.add("DESTDIR=" & installDestdir)
   # M9.R.15q.11.4 — propagate skipConfigure VAR overrides into install
@@ -667,6 +693,8 @@ proc autotools_package*(srcDir: string;
   if skipConfigure:
     for o in configureOptions:
       installVars.add(o)
+  for value in makeVars:
+    installVars.add(value)
   # M9.R.29.3 — sudo's ``install:`` target runs ``install -o 0 -g 0``
   # to set the binary uid/gid to root. The non-privileged build user
   # can't chown to root so the action fails with "Operation not
@@ -686,6 +714,8 @@ proc autotools_package*(srcDir: string;
     after = @[configureEdge, buildEdge],
     extraInputs = @[m9r79ConfBuildDirAbs],
     extraEnv = installEnv)
+  installEdge.dependencyPolicy = makeDependencyPolicy
+  setRegisteredActionDependencyPolicy(installEdge.id, makeDependencyPolicy)
   installEdge.cwdKind = acwdBuild
   installEdge.cwdCustomPath = buildDir
   setRegisteredActionCwd(installEdge.id, acwdBuild, buildDir)
@@ -716,7 +746,11 @@ proc autotools_package*(srcDir: string;
     "true"
   let laCleanupArgv = @["sh", "-c", laCleanupScript]
   let laCleanupCall = inlineExecCall(laCleanupArgv)
-  let laCleanupId = "autotools-la-cleanup-" & sanitizedPackageName(pkgName)
+  # A package may legitimately configure the same source tree for more than
+  # one target platform. Keep each terminal cleanup edge scoped to its build
+  # directory, matching the compile and install action identities above.
+  let laCleanupId = "autotools-la-cleanup-" &
+    sanitizedPackageName(pkgName) & "-" & sanitizedPackageName(buildDir)
   let laCleanupEdge = buildAction(
     id = laCleanupId,
     call = laCleanupCall,
@@ -768,4 +802,5 @@ proc autotools_package*(srcDir: string;
     installMakeEdge: installEdge,
     destdir: destdir,
     buildDir: buildDir,
+    postInstallDependencyPolicy: postInstallDependencyPolicy,
     components: standardComponents())

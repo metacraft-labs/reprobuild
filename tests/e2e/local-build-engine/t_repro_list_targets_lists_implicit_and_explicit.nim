@@ -13,35 +13,9 @@
 ## ``aggregateTargetExportTable`` rollup and emits one entry per
 ## name with ``kind`` in ``{implicit, explicit}``.
 
-import std/[json, os, osproc, strutils, tempfiles, unittest]
+import std/[json, os, strutils, tempfiles, unittest]
 
 import repro_test_support
-
-proc pathExists(path: string): bool =
-  try:
-    discard getFileInfo(path, followSymlink = false)
-    true
-  except OSError:
-    false
-
-proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
-    socket: string] =
-  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
-  let socketPath = "/tmp/repro-m5-list-rq-" & $getCurrentProcessId() & ".sock"
-  if fileExists(socketPath):
-    removeFile(socketPath)
-  let daemon = startProcess(daemonBin, args = [
-    "--socket", socketPath,
-    "--cpu-milli", "16000",
-    "--memory-bytes", "17179869184"
-  ], options = {poUsePath})
-  putEnv("RUNQUOTA_SOCKET", socketPath)
-  for _ in 0 ..< 200:
-    if pathExists(socketPath):
-      return (process: daemon, socket: socketPath)
-    sleep(25)
-  daemon.terminate()
-  raise newException(OSError, "runquotad socket did not appear")
 
 proc reproBinary(repoRoot: string): string =
   ## Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
@@ -114,20 +88,20 @@ proc requireSuccessOutput(args: openArray[string]; cwd: string;
                               tuple[name, value: string]]): string =
   result = requireSuccess(shellCommand(@args, env), cwd)
 
+proc parseTargetListing(output: string): JsonNode =
+  const SchemaMarker = "{\"schemaId\""
+  let payloadStart = output.find(SchemaMarker)
+  if payloadStart < 0:
+    raise newException(JsonParsingError,
+      "target-listing output did not contain a JSON schema marker")
+  parseJson(output[payloadStart .. ^1].strip())
+
 suite "t_repro_list_targets_lists_implicit_and_explicit":
 
   test "t_repro_list_targets_lists_implicit_and_explicit":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m5-list-targets", "")
     defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
 
     let reproBin = reproBinary(repoRoot)
 
@@ -148,12 +122,7 @@ suite "t_repro_list_targets_lists_implicit_and_explicit":
       "--tool-provisioning=path"
     ], projectRoot, [("PATH", pathValue)])
 
-    # The CLI prefixes the JSON object onto stdout; capture the
-    # first ``{`` and consume to the matching ``}``.
-    let firstBrace = output.find('{')
-    check firstBrace >= 0
-    let jsonText = output[firstBrace .. ^1].strip()
-    let node = parseJson(jsonText)
+    let node = parseTargetListing(output)
     check node{"schemaId"}.getStr() == "reprobuild.list-targets.v1"
     let targets = node{"targets"}
     check targets.kind == JArray
@@ -215,9 +184,7 @@ suite "t_repro_list_targets_lists_implicit_and_explicit":
       "--package=m5ListPkg",
       "--tool-provisioning=path"
     ], projectRoot, [("PATH", pathValue)])
-    let filteredBrace = filteredOutput.find('{')
-    check filteredBrace >= 0
-    let filteredJson = parseJson(filteredOutput[filteredBrace .. ^1].strip())
+    let filteredJson = parseTargetListing(filteredOutput)
     check filteredJson{"package"}.getStr() == "m5ListPkg"
     check filteredJson{"targets"}.len == targets.len
 
@@ -229,8 +196,15 @@ suite "t_repro_list_targets_lists_implicit_and_explicit":
       "--package=does-not-exist",
       "--tool-provisioning=path"
     ], projectRoot, [("PATH", pathValue)])
-    let emptyBrace = emptyOutput.find('{')
-    check emptyBrace >= 0
-    let emptyJson = parseJson(emptyOutput[emptyBrace .. ^1].strip())
+    let emptyJson = parseTargetListing(emptyOutput)
     check emptyJson{"targets"}.kind == JArray
     check emptyJson{"targets"}.len == 0
+
+    # Listing is provider-metadata inspection, not a build. The declared tool
+    # is deliberately absent from PATH here; target discovery must still work.
+    let metadataOnlyOutput = requireSuccessOutput([
+      reproBin, "build", "--list-targets", "--json",
+      "--tool-provisioning=path"
+    ], projectRoot, [("PATH", getEnv("PATH"))])
+    let metadataOnlyJson = parseTargetListing(metadataOnlyOutput)
+    check metadataOnlyJson{"targets"}.len == targets.len

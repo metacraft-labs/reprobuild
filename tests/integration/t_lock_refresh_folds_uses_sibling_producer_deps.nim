@@ -101,9 +101,14 @@ suite "FUP-M: lock refresh folds uses: sibling producer deps":
 
       # ---- The consumer workspace repo. Its ONLY edge to the sibling is the
       # recipe's ``uses: "producer"`` — there is NO develop-override file.
-      let consumer = scratch / "consumer"
+      # The checkout basename intentionally differs from its origin repository
+      # name. A committed lock must remain stable when the same repository is
+      # cloned into another directory.
+      let consumer = scratch / "consumer-checkout"
       createDir(consumer)
       initRepo(gitBin, consumer)
+      check git(gitBin, consumer,
+        "remote add origin https://example.invalid/acme/consumer.git").code == 0
       writeFile(consumer / "repro.nim", consumerRecipe)
       check git(gitBin, consumer, "add repro.nim").code == 0
       check git(gitBin, consumer, "commit -q -m consumer").code == 0
@@ -118,6 +123,9 @@ suite "FUP-M: lock refresh folds uses: sibling producer deps":
       check refresh.code == 0
       check fileExists(consumer / "repro.lock")
       let lockBody = readFile(consumer / "repro.lock")
+
+      check "name = \"consumer\", path = \".\"" in lockBody
+      check "name = \"consumer-checkout\", path = \".\"" notin lockBody
 
       # (1) The sibling producer is a first-class locked dep: workspace-relative
       # path, VCS coordinates (kind + revision) + a self-describing integrity.

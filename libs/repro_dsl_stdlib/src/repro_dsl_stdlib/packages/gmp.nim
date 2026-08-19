@@ -14,12 +14,13 @@
 ## gmp/6.x.nix`` (version 6.3.0).
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 package `gmp`:
   provisioning:
     nixPackage "nixpkgs#gmp", executablePath = "include/gmp.h",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # **executablePath = "configure"** (M9.R.11 source-tarball
     # placeholder): the gmp source tarball ships ``configure`` at the
     # root with +x. See ``packages/texinfo.nim`` for the broader

@@ -10,12 +10,13 @@
 ## ``gperf`` manifest; tarball is the cross-platform fall-through.
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 package `gperf`:
   provisioning:
     nixPackage "nixpkgs#gperf", executablePath = "bin/gperf",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # **executablePath = "configure"** (M9.R.11 source-tarball
     # placeholder): see ``packages/texinfo.nim`` for the rationale.
     tarball url = "https://ftp.gnu.org/gnu/gperf/gperf-3.3.tar.gz",

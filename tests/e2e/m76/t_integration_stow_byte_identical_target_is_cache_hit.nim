@@ -55,7 +55,7 @@ when not defined(windows):
   # no catalog, stayed an opaque whole-binary exit-0 PASS, and these
   # four cases were invisible to every gate. The names must stay in step
   # with the ``else`` branch.
-  import std/unittest
+  import ct_test_unittest_parallel
 
   suite "M76 gate: integration_stow_byte_identical_target_is_cache_hit":
 
@@ -76,8 +76,9 @@ when not defined(windows):
       skip(PlatformSkipReason)
 else:
   import std/[os, osproc, streams, strtabs, strutils, tempfiles,
-    times, unittest]
+    times]
 
+  import ct_test_unittest_parallel
   import repro_home_generations
   import repro_local_store
   import repro_home_apply

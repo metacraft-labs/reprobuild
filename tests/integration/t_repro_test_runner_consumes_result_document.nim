@@ -57,6 +57,12 @@
 
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
+template testWithReturn(name: string; body: untyped) =
+  test name:
+    proc runTestBody() =
+      body
+    runTestBody()
+
 const RepoRootMarker = "repro.nim"
 
 proc findRepoRoot(): string =
@@ -188,7 +194,7 @@ proc entryFor(doc: JsonNode; qualified: string): JsonNode =
       return entry
 
 suite "repro_test_runner consumes the whole result document":
-  test "pass/fail/skip-with-reason/bare-skip all round-trip":
+  testWithReturn "pass/fail/skip-with-reason/bare-skip all round-trip":
     let repoRoot = findRepoRoot()
     let runner = repoRoot / "build" / "bin" /
       addFileExt("repro_test_runner", ExeExt)
@@ -259,7 +265,7 @@ suite "repro_test_runner consumes the whole result document":
       check not entry.hasKey("status_disagreement")
     check doc{"summary"}{"status_disagreements"}.getInt(-1) == 0
 
-  test "a document contradicting the exit code wins and is reported":
+  testWithReturn "a document contradicting the exit code wins and is reported":
     let repoRoot = findRepoRoot()
     let runner = repoRoot / "build" / "bin" /
       addFileExt("repro_test_runner", ExeExt)
@@ -323,7 +329,7 @@ suite "repro_test_runner consumes the whole result document":
     check exitCode != 0
     check exitCode == 1
 
-  test "a child that dies before writing its document still reports why":
+  testWithReturn "a child that dies before writing its document still reports why":
     # The gap this closes, reproduced verbatim before the fix:
     #
     #   status      = FAIL
@@ -462,7 +468,7 @@ suite "repro_test_runner consumes the whole result document":
       check not entry.hasKey("status_disagreement")
     check doc{"summary"}{"status_disagreements"}.getInt(-1) == 0
 
-  test "a failing case's report carries the diagnosis, not just a count":
+  testWithReturn "a failing case's report carries the diagnosis, not just a count":
     # The regression this pins, observed on a completed 6825-case run:
     # four cases were reported ``FAIL`` and NO artifact said why. Their
     # summary entries had no ``stdout``, the console log had one bare

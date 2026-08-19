@@ -23,7 +23,9 @@
 ##     receipt's practicalHardening is pinned (exact) or ranged
 ##     (range), still cache-local.
 
-import std/[json, os, tempfiles, unittest]
+import std/[json, os, tempfiles]
+
+import ct_test_unittest_parallel
 
 import repro_tool_profiles
 

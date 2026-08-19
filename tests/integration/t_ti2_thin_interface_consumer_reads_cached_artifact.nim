@@ -117,7 +117,8 @@ proc countWitness(path: string): int =
 
 proc compileConsumer(consumerDir, witnessPath, producerSelector, bindStmt,
                      nimcache: string;
-                     checkOnly = false): tuple[ok: bool, output: string] =
+                     checkOnly = false;
+                     withoutAmbientNim = false): tuple[ok: bool, output: string] =
   ## Materialize a consumer ``repro.nim`` under ``consumerDir`` (a sibling of
   ## ``../producer``) and compile it as a SUBPROCESS with the accessor witness
   ## redirected to ``witnessPath``. The consumer lives UNDER the repo tree so
@@ -137,7 +138,14 @@ proc compileConsumer(consumerDir, witnessPath, producerSelector, bindStmt,
     consumerRepro(producerSelector, bindStmt))
   let nimExe = findExe("nim")
   doAssert nimExe.len > 0, "nim compiler not on PATH"
-  let env = "REPRO_TI2_ACCESSOR_WITNESS=" & quoteShell(witnessPath)
+  var env = "REPRO_TI2_ACCESSOR_WITNESS=" & quoteShell(witnessPath)
+  if withoutAmbientNim:
+    let nimDir = nimExe.parentDir.normalizedPath
+    var filteredPath: seq[string]
+    for entry in getEnv("PATH").split(PathSep):
+      if entry.normalizedPath != nimDir:
+        filteredPath.add(entry)
+    env.add(" PATH=" & quoteShell(filteredPath.join($PathSep)))
   let compileVerb =
     if checkOnly:
       "check --hints:off --warnings:off"
@@ -178,7 +186,8 @@ suite "TI2: thin-interface consumer reads the cached interface artifact":
     # ---- (1) FIRST consumer — COLD: the generator runs ONCE. ----
     let c1 = compileConsumer(base / "consumer1", witness, producerSelector,
       "  discard container(\"web\", image = \"nginx\", cpus = 2)",
-      base / "nc1")
+      base / "nc1", withoutAmbientNim = true)
+    checkpoint c1.output
     check c1.ok                          # the contract crossed + bind type-checks
     check countWitness(witness) == 1     # exactly one cold generation
 
@@ -192,6 +201,7 @@ suite "TI2: thin-interface consumer reads the cached interface artifact":
     let c2 = compileConsumer(base / "consumer2", witness, producerSelector,
       "  discard container(\"api\", image = \"redis\", cpus = 4)",
       base / "nc2", checkOnly = true)
+    checkpoint c2.output
     check c2.ok
     check countWitness(witness) == 1     # STILL one — the 2nd consumer re-used
 
@@ -214,6 +224,7 @@ suite "TI2: thin-interface consumer reads the cached interface artifact":
     let cNew = compileConsumer(base / "consumer3", witness, producerSelector,
       "  discard container(\"db\", image = \"pg\", vcpus = 8)",
       base / "nc3")
+    checkpoint cNew.output
     check cNew.ok
     check countWitness(witness) == 2     # the rename forced a real re-gen
 
@@ -225,5 +236,6 @@ suite "TI2: thin-interface consumer reads the cached interface artifact":
     let cStale = compileConsumer(base / "consumer4", witness, producerSelector,
       "  discard container(\"cache\", image = \"mc\", cpus = 8)",
       base / "nc4", checkOnly = true)
+    checkpoint cStale.output
     check not cStale.ok
     check countWitness(witness) == 2     # no new gen — the stale read hit cache

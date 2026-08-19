@@ -268,6 +268,14 @@ export PATH="${REPROBUILD_BIN_ABS}:${PATH}"
 
 # Step 4 (B5): run Python tests first, then the Nim binaries via
 # ct-test-runner when available or the M3 fallback runner.
+#
+# `.#test-builds` has just completed, so every test binary the checked-in
+# graph declares is supposed to be on disk. The suite-inventory tests that
+# read a per-binary catalog step aside with a loud reason in a partially
+# built working tree; HERE a missing binary is a build defect, so tell them
+# to refuse instead. Without this the same shortfall would be reported as a
+# skip in the one place it must be an error.
+export REPROBUILD_SUITE_INVENTORY_REQUIRE_BUILT_TREE=1
 while IFS= read -r -d '' test_file; do
   python3 "${test_file}"
 done < <(

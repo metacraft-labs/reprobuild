@@ -25,12 +25,13 @@
 ## build.rs fallback path).
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 package zstd:
   provisioning:
     nixPackage "nixpkgs#zstd", executablePath = "bin/zstd",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # Windows: facebook/zstd v1.5.6 win64 release. The zip's top-level
     # dir is ``zstd-v1.5.6-win64/`` containing ``zstd.exe`` (the CLI
     # the resolver probes), ``dll/libzstd.dll[.a]`` (runtime + import

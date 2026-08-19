@@ -23,6 +23,8 @@ import std/[os, strutils]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
+import repro_profile
+import ./infra
 
 type
   DeployAgentFlags = object
@@ -130,11 +132,42 @@ proc runDeployAgentCommand*(args: seq[string]): int =
     fetchTimeoutMs: flags.fetchTimeoutMs,
     secretsKeyPath: flags.secretsKey,
     secretsDir: flags.secretsDir)
+  # Compile the manifest's profile through the SAME Phase-F3 path
+  # `repro infra apply` uses. Without this the agent hands raw `system.nim`
+  # source to a parser that expects canonical resource text, and every real
+  # profile dies on `import repro_profile` at line 1.
+  #
+  # It is wired here, rather than imported inside `apply_hook`, because
+  # `resolveSystemProfileText` lives next door in `./infra` and
+  # `repro_cli_support` already depends on `repro_deploy_agent` — importing
+  # upward from the hook would close a cycle.
+  #
+  # The compiler needs a FILE, so the text is staged under the state dir. It is
+  # written on every tick and deliberately not cached on content: the compile
+  # step downstream keys its own cache on the profile's sources, so a repeat
+  # tick with an unchanged profile still short-circuits there.
+  let capturedStateDir = flags.stateDir
+  let resolver: ProfileResolver = proc(profileText: string; outText: var string;
+                                       outBuildActions: var seq[ProfileBuildAction]):
+                                    bool {.gcsafe.} =
+    {.cast(gcsafe).}:
+      let scratch = capturedStateDir / "deploy-agent"
+      createDir(scratch)
+      # Must be `.nim` and a valid Nim module name — the compiler rejects a
+      # hyphenated stem outright.
+      let profilePath = scratch / "manifest_profile.nim"
+      writeFile(profilePath, profileText)
+      result = resolveSystemProfileText(profilePath, profileText,
+        capturedStateDir, "repro deploy-agent", outText,
+        planCommand = "repro infra plan",
+        outBuildActions = addr outBuildActions)
+
   let deps = AgentDeps(
     apply: mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,
       hostIdentity =
         (if flags.hostIdentity.len > 0: flags.hostIdentity
-         else: "reprobuild-deploy-agent")))
+         else: "reprobuild-deploy-agent"),
+      profileResolver = resolver))
 
   let outcome =
     try:

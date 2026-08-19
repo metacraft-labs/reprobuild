@@ -8,7 +8,9 @@
 ## PID-scoped group name guarantees no collision with the rootfs's
 ## existing groups.
 
-import std/[os, unittest]
+import std/os
+
+import ct_test_unittest_parallel
 
 import repro_elevation
 

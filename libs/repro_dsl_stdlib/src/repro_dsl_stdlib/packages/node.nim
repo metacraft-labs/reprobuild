@@ -37,6 +37,7 @@
 
 import std/tables
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
@@ -47,8 +48,8 @@ export packages_schema
 package node:
   provisioning:
     nixPackage "nixpkgs#nodejs", executablePath = "bin/node",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # Windows / non-Nix Linux: Node.js zip via ScoopInstaller/Main. The
     # manifest extracts the `node-vX.Y.Z-win-x64/` subtree to the prefix
     # root, so node.exe ends up at the top level.

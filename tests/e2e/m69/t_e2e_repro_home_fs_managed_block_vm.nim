@@ -11,7 +11,9 @@
 ##
 ## Gated by `defined(linux)` AND `REPRO_M69_FS_MANAGED_BLOCK_VM=1`.
 
-import std/[os, strutils, unittest]
+import std/[os, strutils]
+
+import ct_test_unittest_parallel
 
 import repro_home_resources
 

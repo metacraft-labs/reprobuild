@@ -37,6 +37,11 @@ import std/[base64, json, options, os, osproc, streams, strtabs, strutils, table
 
 import evidence as workspaceVcsEvidence
 import git_tool
+# RA-32 — the ONE lock-path component grammar. Every backend in this file keys
+# its records by ``(project, repo, sha)`` NAMES, and a name is not a path: a repo
+# named ``stripe/sync-engine`` is one component, and a repo named ``..`` must not
+# be able to address a parent directory. See ``lock_paths.nim``.
+import repro_workspace_manifests/lock_paths
 
 export workspaceVcsEvidence.WorkspaceVcsEvidence
 
@@ -355,8 +360,24 @@ type
 proc newCommittedFileLockStore*(baseDir: string): CommittedFileLockStore =
   CommittedFileLockStore(baseDir: absolutePath(baseDir))
 
+proc cfRepoDir(s: CommittedFileLockStore; project, repo: string): string =
+  ## RA-32 — one path component per NAME. The raw join this replaced deepened
+  ## the path for every forge-shaped repo name (``stripe/sync-engine``), and for
+  ## ``repo == ".."`` it wrote ``baseDir/locks/<project>/../<sha>.rec`` — outside
+  ## the project's own subtree. ``encodeLockPathSegment`` maps ``..`` to ``.%2E``,
+  ## so no name can traverse.
+  s.baseDir / "locks" / encodeLockPathSegment(project) /
+    encodeLockPathSegment(repo)
+
+proc cfProjectDir(s: CommittedFileLockStore; project: string): string =
+  s.baseDir / "locks" / encodeLockPathSegment(project)
+
 proc cfRecordPath(s: CommittedFileLockStore; k: StoreLockKey): string =
-  s.baseDir / "locks" / k.project / k.repo / (k.sha & ".rec")
+  cfRepoDir(s, k.project, k.repo) / (encodeLockPathSegment(k.sha) & ".rec")
+
+proc cfEvidencePath(s: CommittedFileLockStore; project, repo: string): string =
+  s.baseDir / "evidence" / encodeLockPathSegment(project) /
+    (encodeLockPathSegment(repo) & ".ev")
 
 method backendId*(s: CommittedFileLockStore): string = "committed-file"
 
@@ -377,14 +398,20 @@ method readabilityDiagnostic*(s: CommittedFileLockStore): string =
 method putLock*(s: CommittedFileLockStore;
     rec: StoreLockRecord): StorePutResult =
   try:
+    # RA-32 — refuse a key that is not a set of NAMES before any path is built.
+    if not isLockPathName(rec.key.project) or not isLockPathName(rec.key.sha) or
+        not isCanonicalRepoName(rec.key.repo):
+      return failed("lock store key is not a canonical (project, repo, sha) " &
+        "name triple (project='" & rec.key.project & "' repo='" &
+        rec.key.repo & "' sha='" & rec.key.sha & "')")
     let path = cfRecordPath(s, rec.key)
     createDir(parentDir(path))
     writeFile(path, encodeRecord(rec))
     # Latest pointers: a per-repo HEAD (the sha) and a per-project HEAD
     # (repo TAB sha) so latestLock / latestLockAny are O(1) reads.
-    writeFile(s.baseDir / "locks" / rec.key.project / rec.key.repo / "HEAD",
+    writeFile(cfRepoDir(s, rec.key.project, rec.key.repo) / "HEAD",
       rec.key.sha & "\n")
-    let projDir = s.baseDir / "locks" / rec.key.project
+    let projDir = cfProjectDir(s, rec.key.project)
     createDir(projDir)
     writeFile(projDir / "HEAD", rec.key.repo & "\t" & rec.key.sha & "\n")
     ok()
@@ -393,7 +420,7 @@ method putLock*(s: CommittedFileLockStore;
 
 method latestLock*(s: CommittedFileLockStore; project, repo: string):
     Option[StoreLockRecord] =
-  let headPath = s.baseDir / "locks" / project / repo / "HEAD"
+  let headPath = cfRepoDir(s, project, repo) / "HEAD"
   if not fileExists(headPath): return none(StoreLockRecord)
   let sha = readFile(headPath).strip()
   let recPath = cfRecordPath(s, StoreLockKey(project: project, repo: repo, sha: sha))
@@ -402,7 +429,7 @@ method latestLock*(s: CommittedFileLockStore; project, repo: string):
 
 method latestLockAny*(s: CommittedFileLockStore; project: string):
     Option[StoreLockRecord] =
-  let headPath = s.baseDir / "locks" / project / "HEAD"
+  let headPath = cfProjectDir(s, project) / "HEAD"
   if not fileExists(headPath): return none(StoreLockRecord)
   let parts = readFile(headPath).strip().split('\t')
   if parts.len != 2: return none(StoreLockRecord)
@@ -411,16 +438,19 @@ method latestLockAny*(s: CommittedFileLockStore; project: string):
 method putEvidence*(s: CommittedFileLockStore; project, repo: string;
     ev: seq[WorkspaceVcsEvidence]): StorePutResult =
   try:
-    let dir = s.baseDir / "evidence" / project
-    createDir(dir)
-    writeFile(dir / (repo & ".ev"), encodeEvidenceBlob(ev))
+    if not isLockPathName(project) or not isCanonicalRepoName(repo):
+      return failed("evidence key is not a canonical (project, repo) name " &
+        "pair (project='" & project & "' repo='" & repo & "')")
+    let path = cfEvidencePath(s, project, repo)
+    createDir(parentDir(path))
+    writeFile(path, encodeEvidenceBlob(ev))
     ok()
   except CatchableError as err:
     failed(err.msg)
 
 method getEvidence*(s: CommittedFileLockStore; project, repo: string):
     seq[WorkspaceVcsEvidence] =
-  let path = s.baseDir / "evidence" / project / (repo & ".ev")
+  let path = cfEvidencePath(s, project, repo)
   if not fileExists(path): return @[]
   decodeEvidenceBlob(readFile(path))
 
@@ -440,6 +470,19 @@ proc newGitNotesLockStore*(gitBin, repoPath: string): GitNotesLockStore =
   GitNotesLockStore(gitBin: gitBin, repoPath: absolutePath(repoPath))
 
 proc gnLatestRef(project, repo: string): string =
+  ## RA-32, KNOWN GAP — deliberately NOT run through
+  ## ``encodeLockPathSegment``. This is a git REF namespace, and ref components
+  ## have validity rules the PATH encoder does not satisfy: a component may not
+  ## begin with ``.`` (so ``.gitignore`` encodes to itself and is still an
+  ## invalid ref) nor end with ``.lock``. Making this injective therefore needs
+  ## a refname encoder rather than the path one, which is a separate change.
+  ##
+  ## Until then two distinct keys can share one ref — ``("a/b", "c")`` and
+  ## ``("a", "b/c")`` both name ``refs/reprobuild/lockstore/a/b/c/latest`` —
+  ## and a repo literally named ``latest`` collides with ``gnLatestAnyRef`` as
+  ## a git directory/file conflict. ``putLock`` above rejects the keys that
+  ## would produce an OUTRIGHT INVALID ref; it does not make the mapping
+  ## injective.
   "refs/reprobuild/lockstore/" & project & "/" & repo & "/latest"
 proc gnLatestAnyRef(project: string): string =
   "refs/reprobuild/lockstore/" & project & "/latest"
@@ -458,6 +501,17 @@ method readabilityDiagnostic*(s: GitNotesLockStore): string =
   storeSubtreeDiagnostic(s.repoPath, "git-notes lock store repository")
 
 method putLock*(s: GitNotesLockStore; rec: StoreLockRecord): StorePutResult =
+  # RA-32 — this backend addresses a record by a git REF NAME rather than a
+  # path, but a name is no more a ref than it is a path: ``repo == ".."``
+  # builds ``refs/reprobuild/lockstore/<p>/../latest``, which git rejects with
+  # a message about nothing the operator did. Refuse the key here, where the
+  # diagnostic can name it. See ``gnLatestRef`` for the injectivity gap this
+  # validation does NOT close.
+  if not isLockPathName(rec.key.project) or not isLockPathName(rec.key.sha) or
+      not isCanonicalRepoName(rec.key.repo):
+    return failed("lock store key is not a canonical (project, repo, sha) " &
+      "name triple (project='" & rec.key.project & "' repo='" &
+      rec.key.repo & "' sha='" & rec.key.sha & "')")
   let blob = encodeRecord(rec)
   # Overwrite any prior note on this exact commit (a re-lock at the same
   # sha is idempotent).
@@ -498,6 +552,9 @@ method putEvidence*(s: GitNotesLockStore; project, repo: string;
     ev: seq[WorkspaceVcsEvidence]): StorePutResult =
   # Evidence rides as a note on the latest-locked commit for the repo so it
   # travels with the same single ref the lock record does.
+  if not isLockPathName(project) or not isCanonicalRepoName(repo):
+    return failed("evidence key is not a canonical (project, repo) name pair " &
+      "(project='" & project & "' repo='" & repo & "')")
   let rev = runGit(s.gitBin, ["-C", s.repoPath, "rev-parse", "--verify",
     "--quiet", gnLatestRef(project, repo)])
   if rev.code != 0:
@@ -607,16 +664,31 @@ proc sbCommitFiles(s: SeparateBranchLockStore;
   finally:
     if fileExists(scratchIndex): removeFile(scratchIndex)
 
+proc sbRepoDir(project, repo: string): string =
+  ## RA-32 — one path component per NAME, the same grammar the git-checkout
+  ## backend and every reader use. See ``cfRepoDir``.
+  "locks/" & encodeLockPathSegment(project) & "/" &
+    encodeLockPathSegment(repo)
+
 proc sbRecordPath(k: StoreLockKey): string =
-  "locks/" & k.project & "/" & k.repo & "/" & k.sha & ".rec"
+  sbRepoDir(k.project, k.repo) & "/" & encodeLockPathSegment(k.sha) & ".rec"
+
+proc sbEvidencePath(project, repo: string): string =
+  "evidence/" & encodeLockPathSegment(project) & "/" &
+    encodeLockPathSegment(repo) & ".ev"
 
 method putLock*(s: SeparateBranchLockStore;
     rec: StoreLockRecord): StorePutResult =
+  if not isLockPathName(rec.key.project) or not isLockPathName(rec.key.sha) or
+      not isCanonicalRepoName(rec.key.repo):
+    return failed("lock store key is not a canonical (project, repo, sha) " &
+      "name triple (project='" & rec.key.project & "' repo='" & rec.key.repo &
+      "' sha='" & rec.key.sha & "')")
   sbCommitFiles(s, @[
     (sbRecordPath(rec.key), encodeRecord(rec)),
-    ("locks/" & rec.key.project & "/" & rec.key.repo & "/HEAD",
+    (sbRepoDir(rec.key.project, rec.key.repo) & "/HEAD",
      rec.key.sha & "\n"),
-    ("locks/" & rec.key.project & "/HEAD",
+    ("locks/" & encodeLockPathSegment(rec.key.project) & "/HEAD",
      rec.key.repo & "\t" & rec.key.sha & "\n")],
     "lockstore: " & rec.key.project & "/" & rec.key.repo & "@" & rec.key.sha)
 
@@ -628,7 +700,7 @@ proc sbShow(s: SeparateBranchLockStore; path: string): Option[string] =
 
 method latestLock*(s: SeparateBranchLockStore; project, repo: string):
     Option[StoreLockRecord] =
-  let head = sbShow(s, "locks/" & project & "/" & repo & "/HEAD")
+  let head = sbShow(s, sbRepoDir(project, repo) & "/HEAD")
   if head.isNone: return none(StoreLockRecord)
   let sha = head.get().strip()
   let rec = sbShow(s, sbRecordPath(
@@ -638,7 +710,7 @@ method latestLock*(s: SeparateBranchLockStore; project, repo: string):
 
 method latestLockAny*(s: SeparateBranchLockStore; project: string):
     Option[StoreLockRecord] =
-  let head = sbShow(s, "locks/" & project & "/HEAD")
+  let head = sbShow(s, "locks/" & encodeLockPathSegment(project) & "/HEAD")
   if head.isNone: return none(StoreLockRecord)
   let parts = head.get().strip().split('\t')
   if parts.len != 2: return none(StoreLockRecord)
@@ -646,12 +718,17 @@ method latestLockAny*(s: SeparateBranchLockStore; project: string):
 
 method putEvidence*(s: SeparateBranchLockStore; project, repo: string;
     ev: seq[WorkspaceVcsEvidence]): StorePutResult =
-  sbCommitFiles(s, @[("evidence/" & project & "/" & repo & ".ev",
+  # RA-32 — the git-checkout backend's ``putEvidence`` was hardened; this one
+  # raw-joined the same two names into the same shape of path.
+  if not isLockPathName(project) or not isCanonicalRepoName(repo):
+    return failed("evidence key is not a canonical (project, repo) name pair " &
+      "(project='" & project & "' repo='" & repo & "')")
+  sbCommitFiles(s, @[(sbEvidencePath(project, repo),
     encodeEvidenceBlob(ev))], "lockstore evidence: " & project & "/" & repo)
 
 method getEvidence*(s: SeparateBranchLockStore; project, repo: string):
     seq[WorkspaceVcsEvidence] =
-  let blob = sbShow(s, "evidence/" & project & "/" & repo & ".ev")
+  let blob = sbShow(s, sbEvidencePath(project, repo))
   if blob.isNone: return @[]
   decodeEvidenceBlob(blob.get())
 
@@ -749,6 +826,14 @@ proc ecGetRaw(s: ExternalCliLockStore; key: string): Option[string] =
   some(base64.decode(node["value"].getStr()))
 
 proc ecKeyRecord(k: StoreLockKey): string =
+  ## RA-32, KNOWN GAP — deliberately NOT run through
+  ## ``encodeLockPathSegment``. These strings are the WIRE CONTRACT with a
+  ## third-party ``get``/``put`` program, so changing their shape would orphan
+  ## every record in an existing external store; that is a versioned protocol
+  ## change, not a path fix. As with ``gnLatestRef``, two distinct keys can
+  ## therefore still collide (``("a/b", "c")`` and ``("a", "b/c")`` both spell
+  ## ``lock/a/b/c/...``). ``putLock`` rejects non-name keys; it does not make
+  ## the mapping injective.
   "lock/" & k.project & "/" & k.repo & "/" & k.sha
 proc ecKeyLatest(project, repo: string): string =
   "latest/" & project & "/" & repo
@@ -759,6 +844,13 @@ proc ecKeyEvidence(project, repo: string): string =
 
 method putLock*(s: ExternalCliLockStore;
     rec: StoreLockRecord): StorePutResult =
+  # RA-32 — same key rejection as every other backend. See ``ecKeyRecord`` for
+  # the injectivity gap this validation does NOT close.
+  if not isLockPathName(rec.key.project) or not isLockPathName(rec.key.sha) or
+      not isCanonicalRepoName(rec.key.repo):
+    return failed("lock store key is not a canonical (project, repo, sha) " &
+      "name triple (project='" & rec.key.project & "' repo='" &
+      rec.key.repo & "' sha='" & rec.key.sha & "')")
   let blob = encodeRecord(rec)
   for key in [ecKeyRecord(rec.key), ecKeyLatest(rec.key.project, rec.key.repo),
               ecKeyLatestAny(rec.key.project)]:

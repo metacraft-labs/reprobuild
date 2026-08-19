@@ -222,9 +222,19 @@ proc renderUsage*(programName: string): string =
       " capabilities [--format=json|text]\n       " & programName &
       " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--publish-cache-hits] [--publish-materialized] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
-      " graph [target[#name]] [--view=actions|neighborhood|inputs|dependents|blast-radius|critical-path|partition-candidates] [--focus=ACTION] [--path=PATH] [--run=last|ID] [--kind=dylib] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
+      " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
-      " why <package-or-action> [target[#name]] [--action=ACTION] [--format=text|json] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
+      " bench [build options]\n       " &
+          programName &
+      " lint [build options]\n       " &
+          programName &
+      " run [task:NAME|PACKAGE:NAME|NAME] [--choose] [--activity=NAME] [--work-root=PATH] [-- ARGS...]\n       " &
+          programName &
+      " tasks [selector] [--activity=NAME] [--work-root=PATH]\n       " &
+          programName &
+      " graph [target[#name]] [--view=actions|neighborhood|inputs|dependents|blast-radius|critical-path|partition-candidates] [--focus=ACTION] [--path=PATH] [--run=last|ID] [--kind=dylib] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop|from-source] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
+          programName &
+      " why <package-or-action> [target[#name]] [--action=ACTION] [--format=text|json] [--tool-provisioning=path|nix|tarball|scoop|from-source] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
           programName &
       " exec [selector] [--activity=name] [--dev-env-stats=PATH] -- <command> [args...]\n       " &
           programName &
@@ -308,7 +318,8 @@ proc renderUsage*(programName: string): string =
       "remove <name>} | repos {list [--project=NAME] | add <repo> " &
       "--remote=URL [--project=NAME]... | remove <repo>} | " &
       "manifests | shared-clones | forall -c <command> | " &
-      "provision | publish-evidence} " &
+      "provision | publish-evidence | " &
+      "migrate-locks [--dry-run|--apply]} " &
       "[--workspace-root=PATH]\n\n" &
       "workspace reports: the workspace verbs (init, sync, pull, lock, " &
       "status, list, manifests, shared-clones, forall, develop, hooks " &
@@ -1285,6 +1296,11 @@ proc resolveMonitorShimLibPath(): string =
 proc moduleHasBuildBlock(modulePath: string): bool =
   for line in readFile(extendedPath(modulePath)).splitLines:
     if line.strip() == "build:":
+      return true
+
+proc moduleHasDevEnvBlock(modulePath: string): bool =
+  for line in readFile(extendedPath(modulePath)).splitLines:
+    if line.strip() == "devEnv:":
       return true
 
 proc materialProjectPath(projectRoot, path: string): string =
@@ -2610,7 +2626,11 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
     actionNodes[i].payload = inferredActions[i]
   var aliasForAction = initTable[string, string]()
   for target in targets.values:
-    if target.actions.len == 1 and target.targets.len == 0:
+    # A collection names a set; it does not rename its sole member. Treating
+    # one-member collections as aliases makes an action that also has a public
+    # target appear to have two conflicting names.
+    if target.kind == btkAggregate and target.actions.len == 1 and
+        target.targets.len == 0:
       let actionId = target.actions[0]
       if aliasForAction.hasKey(actionId) and aliasForAction[actionId] !=
           target.name:
@@ -6438,13 +6458,81 @@ proc seedCmakeRegenerationCache(meta: CmakeRegenerationMetadata;
 proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
                             projectRoot, originalPackageName: string;
                             mode: ToolProvisioningMode;
-                            publicCliPath, workRoot: string): string
+                            publicCliPath, workRoot: string;
+                            lowerGraph = true): string
   ## Workspace-Manifest-Optional MO-6 — forward declaration. Defined
   ## after ``prepareBuildGraphInspection`` (which it reuses to compile +
   ## evaluate each discovered extension recipe). ``executeBuildTarget``
   ## and ``prepareBuildGraphInspection`` both call it to fold any
   ## present ``projectExtension`` sibling's fragments into the target
   ## project's snapshot before lowering / target-export aggregation.
+
+proc refreshRecipeProviderSnapshot(target: string;
+                                   mode: ToolProvisioningMode;
+                                   publicCliPath, workRoot: string;
+                                   bypassRunQuotaExplicit: bool):
+    Option[ProviderGraphSnapshot]
+  ## Forward declaration for focused tool provisioning. The implementation
+  ## reuses metadata-only graph inspection and is defined below it.
+
+proc selectedToolIdentitySelectors(snapshot: ProviderGraphSnapshot;
+                                   projectRoot: string;
+                                   selectedActionIds: openArray[string]):
+    HashSet[string] =
+  ## Resolve the selected action closure without provisioning tools, then
+  ## return the package/executable selectors that closure actually references.
+  ## Synthetic profiles only satisfy the lowering layer's typed-call lookup;
+  ## they are never persisted or used to execute an action.
+  var identity = PathOnlyBuildIdentity(projectName: "metadata-selection")
+  var packageNamesByExecutable = initTable[string, seq[string]]()
+  var seenProfiles = initHashSet[string]()
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      let action = decodeBuildActionPayload(toBytes(node.payload))
+      let packageName = action.call.packageName
+      let executableName = action.call.executableName
+      if packageName.len == 0 or executableName.len == 0:
+        continue
+      let key = packageName & "\0" & executableName
+      if not seenProfiles.containsOrIncl(key):
+        identity.profiles.add(PathOnlyToolProfile(
+          packageSelector: packageName,
+          executableName: executableName,
+          resolvedExecutablePath: executableName))
+      if not packageNamesByExecutable.hasKey(executableName):
+        packageNamesByExecutable[executableName] = @[]
+      if packageNamesByExecutable[executableName].find(packageName) < 0:
+        packageNamesByExecutable[executableName].add(packageName)
+
+  let selected = lowerProviderSnapshot(snapshot, identity, projectRoot,
+    selectedActionIds)
+  for action in selected.actions:
+    for selector in action.toolIdentityRefs:
+      if selector.len > 0:
+        result.incl(selector)
+    if action.argv.len > 0 and
+        packageNamesByExecutable.hasKey(action.argv[0]):
+      result.incl(action.argv[0])
+      for packageName in packageNamesByExecutable[action.argv[0]]:
+        result.incl(packageName)
+
+proc scopedToolArtifact(artifact: ProjectInterfaceArtifact;
+                        snapshot: ProviderGraphSnapshot;
+                        projectRoot: string;
+                        selectedActionIds: openArray[string]):
+    ProjectInterfaceArtifact =
+  ## Keep the full interface fingerprint for provider/cache invalidation while
+  ## narrowing identity realization to tools referenced by the selected graph.
+  result = artifact
+  let required = selectedToolIdentitySelectors(snapshot, projectRoot,
+    selectedActionIds)
+  result.projectInterface.toolUses = @[]
+  for useDef in artifact.projectInterface.toolUses:
+    if useDef.packageSelector in required or
+        useDef.executableName in required:
+      result.projectInterface.toolUses.add(useDef)
 
 proc selectorFilesystemKey(selector: string): string =
   ## A filesystem-safe directory name for a cross-repo producer selector:
@@ -6483,6 +6571,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         eventSink: BuildCommandEventSink = nil;
                         cancelCheck: BuildCancelCallback = nil;
                         extraNameSelectors: seq[string] = @[];
+                        forwardedActionArgs: seq[string] = @[];
                         peerCacheFetcher: PeerCacheActionFetcher = nil;
                         peerCachePublisher: PeerCacheActionPublisher = nil;
                         peerCacheInstaller: PeerCacheActionBundleInstaller =
@@ -6712,6 +6801,25 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # below is a nested proc whose own ``result`` is an ``int``.
   var collectedInputEvidence: seq[string] = @[]
 
+  proc appendForwardedArgs(actions: var seq[BuildAction];
+                           selectedActionId: string) =
+    if forwardedActionArgs.len == 0:
+      return
+    if selectedActionId.len == 0:
+      raise newException(ValueError,
+        "forwarded action arguments require one selected build action")
+    for action in actions.mitems:
+      if action.id == selectedActionId:
+        if action.kind != bakProcess:
+          raise newException(ValueError,
+            "forwarded action arguments require a process target: " &
+              selectedActionId)
+        action.argv.add(forwardedActionArgs)
+        return
+    raise newException(ValueError,
+      "selected action does not accept forwarded arguments: " &
+        selectedActionId)
+
   proc collectInputEvidence(buildResult: BuildRunResult) =
     for item in buildResult.results:
       for group in [item.evidence.declaredInputs, item.evidence.depfileInputs,
@@ -6827,6 +6935,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # of the consumer cache key. Both are no-ops when nothing was materialized
     # (byte-identical to today).
     var scheduledActions = lowered.actions
+    appendForwardedArgs(scheduledActions, selectedActionId)
     attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
     # Cross-Repo-Source-Consumption SC-4 (§4.3): fold each materialized
@@ -7130,8 +7239,29 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       artifact.projectInterface.defaultToolProvisioning)
     fallbackToRunQuotaBypass = effectiveMode in {tpmPathOnly, tpmScoop}
 
+  var buildArtifact = artifact
+  if not materializedOnly and shouldEnterBuildPipeline(effectiveMode) and
+      moduleHasBuildBlock(modulePath):
+    let snapshot = refreshRecipeProviderSnapshot(target, effectiveMode,
+      publicCliPath, workRoot, bypassRunQuotaExplicit)
+    if snapshot.isSome:
+      var selectors: seq[string] = @[]
+      var selectedActionId = parsedTarget.selectedActionId
+      if effectiveSelectDefaultAction and selectedActionId.len == 0:
+        selectedActionId = defaultBuildActionId(snapshot.get())
+      if selectedActionId.len > 0:
+        selectors.add(selectedActionId)
+      for selector in extraNameSelectors:
+        if selector.len > 0 and selectors.find(selector) < 0:
+          selectors.add(selector)
+      buildArtifact = scopedToolArtifact(artifact, snapshot.get(),
+        result.projectRoot, selectors)
+      logSummary("selected tool identities: " &
+        $buildArtifact.projectInterface.toolUses.len & "/" &
+        $artifact.projectInterface.toolUses.len)
+
   if not materializedOnly and
-      artifact.projectInterface.toolUses.len > 0 and
+      buildArtifact.projectInterface.toolUses.len > 0 and
       effectiveMode == tpmUnspecified:
     raise newException(ValueError,
       "typed tool provisioning is required for uses declarations; refusing " &
@@ -7170,7 +7300,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # floor; the upper layers (autoconf / automake / expat / libffi /
     # etc.) still build from source.
     seedBootstrapCycleBreakTools()
-    for useDef in artifact.projectInterface.toolUses:
+    for useDef in buildArtifact.projectInterface.toolUses:
       # A completed source mirror remains authoritative even for a
       # bootstrap tool. The cycle-break set only suppresses recursive
       # construction when that mirror is absent; this lets later
@@ -7328,7 +7458,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # build that consumes no cross-repo producer is byte-identical to today.
   if not materializedOnly and not prepareOnly and
       result.projectRoot.len > 0:
-    for useDef in artifact.projectInterface.toolUses:
+    for useDef in buildArtifact.projectInterface.toolUses:
       let selector = useDef.packageSelector
       if selector.len == 0:
         continue
@@ -7805,7 +7935,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           inspectionPath: "")
       else:
         progressRenderer.renderPhase("resolving tool identities")
-        warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
+        warmResolveAndWriteIdentity(buildArtifact, outDir, effectiveMode)
     finishStat(buildStats, statsEnabled, "repro tool identity resolve",
       identityStart)
     let identity = resolved.identity
@@ -8089,7 +8219,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         targetResolutions.add(resolveTargetExportSelector(exportTable,
           actionIds, explicitTargets, sel, collectionMembers))
 
-    let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
+    let graphCacheKey = loweredGraphCacheKey(buildArtifact, effectiveMode,
       providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
       extensionSignature)
     let graphCacheReadStart = statStart(statsEnabled)
@@ -8244,6 +8374,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # of the consumer cache key. Both are no-ops when nothing was materialized
     # (byte-identical to today).
     var scheduledActions = lowered.actions
+    appendForwardedArgs(scheduledActions, selectedActionId)
     attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
     # Cross-Repo-Source-Consumption SC-4 (§4.3): fold each materialized
@@ -9425,7 +9556,9 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  selectDefaultAction = false;
                                  workRoot = "";
                                  forceRefresh = false;
-                                 mergeExtensions = true): BuildGraphInspection
+                                 mergeExtensions = true;
+                                 includeDevEnvOnlyProvider = false;
+                                 lowerGraph = true): BuildGraphInspection
 
 proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
                                extraPools: openArray[BuildPool] = []):
@@ -9472,28 +9605,52 @@ proc runEdgeExportEntries(publicCliPath: string):
   ## listing. Best-effort: a project with no recipe / no export table
   ## yields an empty seq so ``repro run`` listing degrades to the
   ## dev-env-task-only view rather than erroring.
-  var autoRunQuota = startAutoRunQuotaIfNeeded(false)
-  try:
-    let info =
-      try:
-        prepareBuildGraphInspection(".", tpmPathOnly, publicCliPath,
-          selectDefaultAction = false)
-      except CatchableError:
-        return @[]
-    for entry in info.targetExportTable.entries:
-      if entry.kind == tekRunEdge:
-        result.add(entry)
-    result.sort(proc(a, b: TargetExportEntry): int =
-      let pkgCmp = cmp(a.owningPackage, b.owningPackage)
-      if pkgCmp != 0: pkgCmp else: cmp(a.name, b.name))
-  finally:
-    if autoRunQuota != nil:
-      try:
-        autoRunQuota.terminate()
-        discard autoRunQuota.waitForExit()
-        autoRunQuota.close()
-      except CatchableError:
-        discard
+  let info =
+    try:
+      prepareBuildGraphInspection(".", tpmPathOnly, publicCliPath,
+        selectDefaultAction = false, lowerGraph = false)
+    except CatchableError:
+      return @[]
+  for entry in info.targetExportTable.entries:
+    if entry.kind == tekRunEdge:
+      result.add(entry)
+  result.sort(proc(a, b: TargetExportEntry): int =
+    let pkgCmp = cmp(a.owningPackage, b.owningPackage)
+    if pkgCmp != 0: pkgCmp else: cmp(a.name, b.name))
+
+proc inspectDevEnvTasks(selection: DevEnvCliSelection;
+                        publicCliPath: string): seq[DevEnvTaskSummary] =
+  ## Task listing reads provider metadata without provisioning the dev env.
+  let info = prepareBuildGraphInspection(selection.selector, tpmPathOnly,
+    publicCliPath, selectDefaultAction = false, workRoot = selection.workRoot,
+    includeDevEnvOnlyProvider = true, lowerGraph = false)
+  if info.providerBinaryPath.len == 0 or info.providerArtifactId.len == 0:
+    return @[]
+
+  let provider = ProviderExecutionConfig(
+    binaryPath: info.providerBinaryPath,
+    workingDir: info.projectRoot,
+    tempRoot: info.outDir / "provider-task-inspection")
+  let manifest = readProviderManifest(provider, info.providerArtifactId)
+  var entryPointId = ""
+  for descriptor in manifest.entryPoints:
+    if descriptor.kind == gpkDevEnvIntrospection:
+      entryPointId = descriptor.id
+      break
+  if entryPointId.len == 0:
+    return @[]
+
+  let devEnv = invokeProviderDevEnvIntrospection(provider,
+    info.providerArtifactId, info.projectRoot,
+    entryPointId = entryPointId,
+    activity = selection.activity,
+    lockSliceId = selection.lockSliceId)
+  for task in devEnv.tasks:
+    result.add(DevEnvTaskSummary(
+      name: task.name,
+      description: task.description,
+      activityRequirements: task.activityRequirements,
+      command: task.command))
 
 proc resolveRunTarget(parsed: ParsedReproRun;
                       publicCliPath: string): RunTargetResolution =
@@ -9508,45 +9665,44 @@ proc resolveRunTarget(parsed: ParsedReproRun;
       parsed.qualifierPackage & ":" & parsed.target
     else:
       parsed.target
-  var autoRunQuota = startAutoRunQuotaIfNeeded(false)
-  try:
-    let info = prepareBuildGraphInspection(".", tpmPathOnly, publicCliPath,
-      selectDefaultAction = false)
-    var actionIds: seq[string] = @[]
-    for action in info.actions:
-      actionIds.add(action.id)
-    result.record = resolveTargetExportSelector(info.targetExportTable,
-      actionIds, info.explicitTargetNames, selector)
-    if result.record.kind == trkResolved:
-      result.entryKind = result.record.targetKind
-      result.hasEntry = true
-      # Named-Runnable-Edges N2: capture the resolved run-edge row (its
-      # ``consumes``) + the project's resource-lane graph so the leased-
-      # consumes bridge can reconcile the consumed ``stateGroup`` without a
-      # second inspection pass. Match on the resolved (name, actionId): a
-      # run-edge row is keyed by both, so this pins the exact row even when a
-      # name is shared across kinds.
-      for entry in info.targetExportTable.entries:
-        if entry.kind == tekRunEdge and
-            entry.actionId == result.record.actionId and
-            (entry.name == parsed.target or
-             (parsed.qualifier == rtqPackage and
-              entry.owningPackage == parsed.qualifierPackage and
-              entry.name == parsed.target)):
-          result.entry = entry
-          break
-      let aggregated = aggregateResourceGraph(info.snapshot)
-      result.resources = aggregated.resources
-      result.groups = aggregated.groups
-      result.providerArtifacts = aggregated.providerArtifacts
-  finally:
-    if autoRunQuota != nil:
-      try:
-        autoRunQuota.terminate()
-        discard autoRunQuota.waitForExit()
-        autoRunQuota.close()
-      except CatchableError:
-        discard
+  let info = prepareBuildGraphInspection(".", tpmPathOnly, publicCliPath,
+    selectDefaultAction = false, lowerGraph = false)
+  var actionIds: seq[string] = @[]
+  for action in info.actions:
+    actionIds.add(action.id)
+
+  # A same-name artifact is not a runnable candidate, while multiple matching
+  # run edges remain an ambiguity for the shared selector resolver.
+  var resolutionTable = info.targetExportTable
+  var explicitTargetNames = info.explicitTargetNames
+  var matchingRunEntries: seq[TargetExportEntry] = @[]
+  for entry in info.targetExportTable.entries:
+    if entry.kind == tekRunEdge and entry.name == parsed.target and
+        (parsed.qualifier != rtqPackage or
+         entry.owningPackage == parsed.qualifierPackage):
+      matchingRunEntries.add(entry)
+  if matchingRunEntries.len > 0:
+    resolutionTable.entries = matchingRunEntries
+    resolutionTable.ambiguities = @[]
+    explicitTargetNames.setLen(0)
+  result.record = resolveTargetExportSelector(resolutionTable,
+    actionIds, explicitTargetNames, selector)
+  if result.record.kind == trkResolved:
+    result.entryKind = result.record.targetKind
+    result.hasEntry = true
+    for entry in info.targetExportTable.entries:
+      if entry.kind == tekRunEdge and
+          entry.actionId == result.record.actionId and
+          (entry.name == parsed.target or
+           (parsed.qualifier == rtqPackage and
+            entry.owningPackage == parsed.qualifierPackage and
+            entry.name == parsed.target)):
+        result.entry = entry
+        break
+    let aggregated = aggregateResourceGraph(info.snapshot)
+    result.resources = aggregated.resources
+    result.groups = aggregated.groups
+    result.providerArtifacts = aggregated.providerArtifacts
 
 proc emitMergedRunListing(tasks: seq[DevEnvTaskSummary];
                           runEdges: seq[TargetExportEntry]) =
@@ -9794,18 +9950,21 @@ proc buildRunEdgeSessionResolver*(
 proc runReproRunCommand(args: openArray[string];
                         publicCliPath: string): int =
   let parsed = parseReproRunArgs(args)
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath)
-  writeDevEnvStats(parsed.selection.statsPath, edge, "run")
-  let artifact = readDevEnvArtifact(edge.artifactPath)
-  if emitDevEnvDiagnostics(artifact):
-    return 1
+  var listedTasks = inspectDevEnvTasks(parsed.selection, publicCliPath)
+  if parsed.selection.statsPath.len > 0:
+    let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+    writeDevEnvStats(parsed.selection.statsPath, edge, "run")
+    let artifact = readDevEnvArtifact(edge.artifactPath)
+    if emitDevEnvDiagnostics(artifact):
+      return 1
+    listedTasks = artifact.tasks
 
   # Named-Runnable-Edges N1: bare ``repro run`` / ``--choose`` lists BOTH
   # dev-env tasks and named run-edges, source-labelled (spec §5). The
   # run-edge rows come from the same target-export table ``repro build``
   # resolves against.
   if parsed.target.len == 0 or parsed.choose:
-    emitMergedRunListing(artifact.tasks, runEdgeExportEntries(publicCliPath))
+    emitMergedRunListing(listedTasks, runEdgeExportEntries(publicCliPath))
     return 0
 
   # Tier 1 — dev-env task (today's behaviour, unchanged). A ``task:<name>``
@@ -9813,7 +9972,7 @@ proc runReproRunCommand(args: openArray[string];
   # (it explicitly names an export-table row).
   var matchingTask: Option[DevEnvTaskSummary]
   if parsed.qualifier != rtqPackage:
-    for task in artifact.tasks:
+    for task in listedTasks:
       if task.name == parsed.target:
         matchingTask = some(task)
         break
@@ -9830,7 +9989,16 @@ proc runReproRunCommand(args: openArray[string];
           "' names both a dev-env task and a run-edge; running the task. " &
           "Use 'task:" & parsed.target & "' or '<package>:" & parsed.target &
           "' to disambiguate.")
-    let task = matchingTask.get()
+    let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+    writeDevEnvStats(parsed.selection.statsPath, edge, "run")
+    let artifact = readDevEnvArtifact(edge.artifactPath)
+    if emitDevEnvDiagnostics(artifact):
+      return 1
+    var task = matchingTask.get()
+    for activeTask in artifact.tasks:
+      if activeTask.name == parsed.target:
+        task = activeTask
+        break
     return runTaskCommand(artifact, edge.artifactPath, task,
       parsed.forwardedArgs, parsed.selection.projectRoot)
 
@@ -9899,9 +10067,13 @@ proc runReproRunCommand(args: openArray[string];
       # Run-edge (or a collection of run-edges) — delegate to the build
       # engine, which executes it. Collections mirror ``repro build test``.
       var buildArgs = @[parsed.rawTarget]
-      if parsed.forwardedArgs.len > 0:
+      var actionArgs: seq[string] = @[]
+      if resolution.hasEntry and resolution.entry.kind == tekRunEdge:
+        actionArgs.add(resolution.entry.runArgs)
+      actionArgs.add(parsed.forwardedArgs)
+      if actionArgs.len > 0:
         buildArgs.add("--")
-        for a in parsed.forwardedArgs:
+        for a in actionArgs:
           buildArgs.add(a)
       return runBuildCommand(buildArgs, publicCliPath)
     else:
@@ -9935,15 +10107,18 @@ proc runReproRunCommand(args: openArray[string];
 proc runReproTasksCommand(args: openArray[string];
                           publicCliPath: string): int =
   let parsed = parseReproTasksArgs(args)
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath)
-  writeDevEnvStats(parsed.selection.statsPath, edge, "tasks")
-  let artifact = readDevEnvArtifact(edge.artifactPath)
-  if emitDevEnvDiagnostics(artifact):
-    return 1
+  var listedTasks = inspectDevEnvTasks(parsed.selection, publicCliPath)
+  if parsed.selection.statsPath.len > 0:
+    let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+    writeDevEnvStats(parsed.selection.statsPath, edge, "tasks")
+    let artifact = readDevEnvArtifact(edge.artifactPath)
+    if emitDevEnvDiagnostics(artifact):
+      return 1
+    listedTasks = artifact.tasks
 
   # Named-Runnable-Edges N1: ``repro tasks`` lists dev-env tasks AND named
   # run-edges, source-labelled (spec §5), matching ``repro run --choose``.
-  emitMergedRunListing(artifact.tasks, runEdgeExportEntries(publicCliPath))
+  emitMergedRunListing(listedTasks, runEdgeExportEntries(publicCliPath))
   0
 
 proc runReproExecCommand(args: openArray[string];
@@ -13953,7 +14128,8 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
 # daemon as ``--pool NAME=CAP``. Best-effort — defined after
 # ``prepareBuildGraphInspection`` (which it reuses) further down in the file.
 proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
-                             publicCliPath, workRoot: string): seq[BuildPool]
+                             publicCliPath, workRoot: string;
+                             bypassRunQuota: bool): seq[BuildPool]
 
 # ---------------------------------------------------------------------------
 # Workspace-Manifest-Optional MO-1 — committed solved-graph lock.
@@ -15096,6 +15272,20 @@ proc usesProducerLockedDep(selector, root: string;
       return some(d)
   none(LockedDep)
 
+proc repositoryNameFromUrl(url: string): string =
+  ## Return the repository leaf from HTTPS, SSH/scp, file, or local-path Git
+  ## coordinates. Lock identities must survive cloning the same repository into
+  ## a differently named checkout directory.
+  var value = url.strip()
+  while value.len > 0 and value[^1] in {'/', '\\'}:
+    value.setLen(value.len - 1)
+  let separator = max(value.rfind('/'), max(value.rfind('\\'), value.rfind(':')))
+  if separator >= 0 and separator + 1 < value.len:
+    value = value[separator + 1 .. ^1]
+  if value.toLowerAscii().endsWith(".git"):
+    value.setLen(value.len - 4)
+  value
+
 proc lockedDepsForWorkspace(workspaceRoot: string;
                             usesSelectors: seq[string] = @[]): seq[LockedDep] =
   ## MO-8 — observe the workspace's participating repos and produce a
@@ -15120,7 +15310,11 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   let nested = discoverDevelopDeps(root)
   let bare = extractFilename(root.strip(
     leading = false, trailing = true, chars = {'/', '\\'}))
-  let rootName = if bare.len > 0: bare else: "workspace"
+  let originName = repositoryNameFromUrl(rootFacts.originUrl)
+  let rootName =
+    if originName.len > 0: originName
+    elif bare.len > 0: bare
+    else: "workspace"
   # Existing committed lock — the carry-forward source for a ``uses:`` sibling
   # that is pinned but not checked out here.
   var existingDeps: seq[LockedDep] = @[]
@@ -15341,6 +15535,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var publishCacheHits = false
   var publishMaterialized = false
   var skipCmakeRegeneration = false
+  var forwardedActionArgs: seq[string] = @[]
+  var afterArgumentSeparator = false
   # MO-1 — committed solved-graph lock. ``--lock <file>`` selects an
   # alternate committed lock (default = ``<projectDir>/repro.lock``);
   # ``--print-solved-graph`` resolves + prints the solved graph the build
@@ -15376,7 +15572,11 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var i = 0
   while i < args.len:
     let arg = args[i]
-    if arg == "--daemon" or arg.startsWith("--daemon="):
+    if afterArgumentSeparator:
+      forwardedActionArgs.add(arg)
+    elif arg == "--":
+      afterArgumentSeparator = true
+    elif arg == "--daemon" or arg.startsWith("--daemon="):
       daemonMode = parseBuildDaemonMode(valueFromFlag(args, i, "--daemon"),
         "--daemon")
       daemonModeExplicit = true
@@ -15713,7 +15913,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     # warm provider caches before the visible build.
     let recipePools =
       if autoRunQuotaNeedsPoolPreflight(bypassRunQuota):
-        extractRecipeBuildPools(target, mode, publicCliPath, workRoot)
+        extractRecipeBuildPools(target, mode, publicCliPath, workRoot,
+          bypassRunQuota)
       else:
         @[]
     var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota, recipePools)
@@ -15751,6 +15952,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         eventSink = eventSink,
         cancelCheck = cancelCheck,
         extraNameSelectors = extraNameSelectors,
+        forwardedActionArgs = forwardedActionArgs,
         peerCacheFetcher = peerCacheBuildWiring.fetcher,
         peerCachePublisher = peerCacheBuildWiring.publisher,
         peerCacheInstaller = peerCacheBuildWiring.installer).exitCode
@@ -16195,12 +16397,20 @@ proc runQuotaBypassedByEnv(): bool =
   ## ``build`` command parser.)
   getEnv("REPROBUILD_NO_RUNQUOTA").normalize in ["1", "true", "yes", "on"]
 
+proc effectiveProviderCompileRunQuotaBypass*(explicitBypass: bool): bool =
+  ## Provider compilation is scheduled before the main recipe graph. Carry the
+  ## parsed CLI decision into that scheduler instead of relying only on the
+  ## environment fallback used by nested invocations.
+  explicitBypass or runQuotaBypassedByEnv()
+
 proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  publicCliPath: string;
                                  selectDefaultAction = false;
                                  workRoot = "";
                                  forceRefresh = false;
-                                 mergeExtensions = true): BuildGraphInspection =
+                                 mergeExtensions = true;
+                                 includeDevEnvOnlyProvider = false;
+                                 lowerGraph: bool): BuildGraphInspection =
   ## ``mergeExtensions`` (MO-6) folds any present ``projectExtension``
   ## sibling's fragments into this project's snapshot before lowering /
   ## target-export aggregation. It is set to ``false`` when this proc is
@@ -16244,13 +16454,15 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   var identity = PathOnlyBuildIdentity(
     projectName: artifact.projectInterface.projectName,
     interfaceFingerprint: artifact.interfaceFingerprint)
-  if shouldEnterBuildPipeline(effectiveMode):
+  if lowerGraph and shouldEnterBuildPipeline(effectiveMode):
     let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
     identity = resolved.identity
     result.toolIdentityPath = resolved.identityPath
     result.toolInspectionPath = resolved.inspectionPath
 
-  if not moduleHasBuildBlock(modulePath):
+  let hasBuildBlock = moduleHasBuildBlock(modulePath)
+  if not hasBuildBlock and
+      (not includeDevEnvOnlyProvider or not moduleHasDevEnvBlock(modulePath)):
     return
 
   let providerBinaryPath = outDir / "provider" / "project-provider"
@@ -16317,6 +16529,11 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   result.providerArtifactId = digestHex(provider.providerFingerprint)
   result.providerBinaryPath = provider.outputBinaryPath
 
+  # Task introspection needs the provider manifest, but a dev-env-only recipe
+  # has no project-root graph to refresh or lower.
+  if not hasBuildBlock:
+    return
+
   let providerGraphStore = providerGraphStoreRoot(outDir / "provider-graph")
   var refresh: ProviderRefreshReport
   let freshSnapshot =
@@ -16347,11 +16564,24 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   if mergeExtensions:
     extensionSignature = mergeProjectExtensions(refresh.snapshot, projectRoot,
       artifact.projectInterface.packageName, effectiveMode, publicCliPath,
-      workRoot)
+      workRoot, lowerGraph = lowerGraph)
   result.snapshot = refresh.snapshot
   result.providerGraphSnapshotPath = refresh.persistedSnapshotPath
   result.providerInvocations = refresh.invoked.len
   result.defaultActionId = defaultBuildActionId(refresh.snapshot)
+
+  # Metadata consumers do not need tool resolution or a lowered action graph.
+  result.targetExportTable = aggregateTargetExportTable(refresh.snapshot)
+  for fragment in refresh.snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        let target = decodeBuildTargetPayload(toBytes(node.payload))
+        if result.explicitTargetNames.find(target.name) < 0:
+          result.explicitTargetNames.add(target.name)
+
+  if not lowerGraph:
+    return
 
   var selectedActionId = parsedTarget.selectedActionId
   if selectDefaultAction and selectedActionId.len == 0:
@@ -16382,23 +16612,11 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       computed
   result.actions = lowered.actions
   result.pools = lowered.pools
-  # Named-Targets M5: surface the project-scoped target-export table and
-  # the explicit-target labels so ``runGraphCommand`` / ``runWhyCommand``
-  # / ``--list-targets`` can route name-shaped selectors through the
-  # shared ``resolveTargetExportSelector`` helper without a second pass
-  # over the snapshot.
-  result.targetExportTable = aggregateTargetExportTable(refresh.snapshot)
-  for fragment in refresh.snapshot.fragments:
-    for node in fragment.nodes:
-      if node.kind == gnkMetadata and
-          node.stableName == "reprobuild.build-target.v1":
-        let target = decodeBuildTargetPayload(toBytes(node.payload))
-        if result.explicitTargetNames.find(target.name) < 0:
-          result.explicitTargetNames.add(target.name)
 
 proc refreshRecipeProviderSnapshot(target: string;
                                    mode: ToolProvisioningMode;
-                                   publicCliPath, workRoot: string):
+                                   publicCliPath, workRoot: string;
+                                   bypassRunQuotaExplicit: bool):
     Option[ProviderGraphSnapshot] =
   ## Produce the recipe's (extension-merged) provider-graph snapshot — the
   ## SNAPSHOT ONLY, with NO tool-identity resolution and NO graph lowering.
@@ -16469,7 +16687,8 @@ proc refreshRecipeProviderSnapshot(target: string;
       stderrLimit: 1024 * 1024,
       rebuildMissingOutputsOnCacheHit: true,
       deferLocalOutputBlobs: true,
-      bypassRunQuota: runQuotaBypassedByEnv(),
+      bypassRunQuota:
+        effectiveProviderCompileRunQuotaBypass(bypassRunQuotaExplicit),
       fallbackToRunQuotaBypass: effectiveMode in {tpmPathOnly, tpmScoop},
       inlineRunQuota: true,
       dryRun: false,
@@ -16505,11 +16724,12 @@ proc refreshRecipeProviderSnapshot(target: string;
       providerWorkingDir: projectRoot))
   discard mergeProjectExtensions(refresh.snapshot, projectRoot,
     artifact.projectInterface.packageName, effectiveMode, publicCliPath,
-    workRoot)
+    workRoot, lowerGraph = false)
   some(refresh.snapshot)
 
 proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
-                             publicCliPath, workRoot: string): seq[BuildPool] =
+                             publicCliPath, workRoot: string;
+                             bypassRunQuota: bool): seq[BuildPool] =
   ## RX pool-forwarding — return the recipe's declared build pools (the
   ## ``buildGraph.pools`` present in the extracted project graph) so the
   ## caller can forward them to ``runquotad`` alongside the convention
@@ -16535,7 +16755,7 @@ proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
     effectiveMode = tpmPathOnly
   try:
     let snapshot = refreshRecipeProviderSnapshot(target, effectiveMode,
-      publicCliPath, workRoot)
+      publicCliPath, workRoot, bypassRunQuota)
     if snapshot.isSome:
       result = poolsFromSnapshot(snapshot.get())
     else:
@@ -16744,7 +16964,8 @@ proc rehomeExtensionFragment(frag: StoredGraphFragment;
 proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
                             projectRoot, originalPackageName: string;
                             mode: ToolProvisioningMode;
-                            publicCliPath, workRoot: string): string =
+                            publicCliPath, workRoot: string;
+                            lowerGraph: bool): string =
   ## Fold every present ``projectExtension`` sibling's provider-graph
   ## fragments into ``snapshot`` (the target project's graph). Composition
   ## rules (Project-DSL-Composition.md §"Project extensions"):
@@ -16783,7 +17004,7 @@ proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
     # keeps an extension from recursively merging its own extensions.
     let info = prepareBuildGraphInspection(ext.recipePath, mode,
       publicCliPath, selectDefaultAction = false, workRoot = workRoot,
-      mergeExtensions = false)
+      mergeExtensions = false, lowerGraph = lowerGraph)
     let extFrags = info.snapshot.fragments
     for name in fragmentTargetNames(extFrags):
       if targetOrigin.hasKey(name):
@@ -16820,75 +17041,62 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
   ## are sorted by ``(package, name)`` for deterministic CLI output and
   ## JSON consumers. ``packageFilter`` (if non-empty) restricts the
   ## listing to one owning package.
+  discard bypassRunQuota
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified:
     effectiveMode = tpmPathOnly
-  var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
-  try:
-    let info = prepareBuildGraphInspection(target, effectiveMode,
-      publicCliPath, selectDefaultAction = false, workRoot = workRoot)
-    var entries: seq[TargetExportEntry] = @[]
-    for entry in info.targetExportTable.entries:
-      if packageFilter.len > 0 and entry.owningPackage != packageFilter:
-        continue
-      entries.add(entry)
-    entries.sort(proc(a, b: TargetExportEntry): int =
-      let pkgCmp = cmp(a.owningPackage, b.owningPackage)
-      if pkgCmp != 0: pkgCmp else: cmp(a.name, b.name))
-    # Spec-Implementation M5: ``--list-targets`` JSON / text formatter
-    # extended with the new ``aggregate`` and ``collection`` row kinds
-    # per Build-Graph-Collections.md §"Persistence and the Target-Export
-    # Table" / §"--list-targets". The text formatter widens the ``kind``
-    # column so the longer ``collection`` label aligns.
-    proc kindToText(k: TargetExportKind): string =
-      case k
-      of tekImplicit: "implicit"
-      of tekExplicit: "explicit"
-      of tekAggregate: "aggregate"
-      of tekCollection: "collection"
-      of tekRunEdge: "run-edge"
-    if asJson:
-      var arr = newJArray()
-      for entry in entries:
-        arr.add(%*{
-          "name": entry.name,
-          "kind": kindToText(entry.kind),
-          "package": entry.owningPackage,
-          "actionId": entry.actionId,
-          "source-file": entry.sourceFile,
-          "source-line": entry.sourceLine
-        })
-      var node = %*{
-        "schemaId": "reprobuild.list-targets.v1",
-        "projectRoot": info.projectRoot,
-        "modulePath": info.modulePath,
-        "targets": arr
-      }
+  let info = prepareBuildGraphInspection(target, effectiveMode,
+    publicCliPath, selectDefaultAction = false, workRoot = workRoot,
+    lowerGraph = false)
+  var entries: seq[TargetExportEntry] = @[]
+  for entry in info.targetExportTable.entries:
+    if packageFilter.len > 0 and entry.owningPackage != packageFilter:
+      continue
+    entries.add(entry)
+  entries.sort(proc(a, b: TargetExportEntry): int =
+    let pkgCmp = cmp(a.owningPackage, b.owningPackage)
+    if pkgCmp != 0: pkgCmp else: cmp(a.name, b.name))
+  proc kindToText(k: TargetExportKind): string =
+    case k
+    of tekImplicit: "implicit"
+    of tekExplicit: "explicit"
+    of tekAggregate: "aggregate"
+    of tekCollection: "collection"
+    of tekRunEdge: "run-edge"
+  if asJson:
+    var arr = newJArray()
+    for entry in entries:
+      arr.add(%*{
+        "name": entry.name,
+        "kind": kindToText(entry.kind),
+        "package": entry.owningPackage,
+        "actionId": entry.actionId,
+        "source-file": entry.sourceFile,
+        "source-line": entry.sourceLine
+      })
+    var node = %*{
+      "schemaId": "reprobuild.list-targets.v1",
+      "projectRoot": info.projectRoot,
+      "modulePath": info.modulePath,
+      "targets": arr
+    }
+    if packageFilter.len > 0:
+      node["package"] = %packageFilter
+    echo $node
+  else:
+    if entries.len == 0:
       if packageFilter.len > 0:
-        node["package"] = %packageFilter
-      echo $node
-    else:
-      if entries.len == 0:
-        if packageFilter.len > 0:
-          echo "repro build --list-targets: no targets for package=" &
-            packageFilter
-        else:
-          echo "repro build --list-targets: no named targets in this project"
+        echo "repro build --list-targets: no targets for package=" &
+          packageFilter
       else:
-        echo "kind        package                   name                      source"
-        for entry in entries:
-          let source = entry.sourceFile & ":" & $entry.sourceLine
-          echo kindToText(entry.kind) & "  " & entry.owningPackage & "  " &
-            entry.name & "  " & source
-    return 0
-  finally:
-    if autoRunQuota != nil:
-      try:
-        autoRunQuota.terminate()
-        discard autoRunQuota.waitForExit()
-        autoRunQuota.close()
-      except CatchableError:
-        discard
+        echo "repro build --list-targets: no named targets in this project"
+    else:
+      echo "kind        package                   name                      source"
+      for entry in entries:
+        let source = entry.sourceFile & ":" & $entry.sourceLine
+        echo kindToText(entry.kind) & "  " & entry.owningPackage & "  " &
+          entry.name & "  " & source
+  0
 
 proc renderFocusedGraphJson(info: BuildGraphInspection; focus: string): JsonNode =
   let action = requireAction(info.actions, focus)
@@ -21230,6 +21438,54 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
     if outcomes.len > 0:
       return DevelopAllResult(outcomes: outcomes, notices: notices,
         exitCode: 2, backends: composed.backends)
+
+  block contradictorySelection:
+    # DS-7 (CLI/develop.md §"Membership axis") — a name given to BOTH
+    # ``--only`` and ``--except`` is a contradiction and refuses.
+    #
+    # ``--only=X --except=X`` used to exit 0 having selected nothing: stage 5
+    # keeps exactly {X}, stage 6 removes X, and the run reported an empty
+    # selection and did no work. Neither name is unknown, so the exact-name
+    # check above has nothing to say about it — yet the caller asked for X and
+    # simultaneously for not-X, which cannot be anything but a mistake, and
+    # silently doing nothing is the failure mode this section legislates
+    # against everywhere else. `--filter` is the selector that may match
+    # nothing; the exact-name selectors are loud.
+    #
+    # Stated over the NAMES, not over the resulting set. ``--only=a,b
+    # --except=b`` refuses too: it is exactly ``--only=a`` written in a way
+    # that also says "not b", and a rule that fired only when the FINAL
+    # selection came out empty would depend on which other repos happen to
+    # exist — the same "the answer depends on something other than what you
+    # typed" hazard the fixed composition order exists to remove.
+    #
+    # Checked AFTER the exact-name block so a typo is still diagnosed as a
+    # typo: ``--only=X --except=X-typo`` names an unknown repo, which is the
+    # more basic error and the more useful message.
+    if args.only.len > 0 and args.exceptNames.len > 0:
+      var exceptSet = initHashSet[string]()
+      for n in args.exceptNames: exceptSet.incl(n)
+      var contradicted: seq[string]
+      var seenContradiction = initHashSet[string]()
+      for n in args.only:
+        if n in exceptSet and n notin seenContradiction:
+          seenContradiction.incl(n)
+          contradicted.add(n)
+      if contradicted.len > 0:
+        contradicted.sort()
+        var outcomes: seq[DevelopAllNodeOutcome]
+        for n in contradicted:
+          outcomes.add(DevelopAllNodeOutcome(node: n, mode: "error", ok: false,
+            diagnostic: "'" & n & "' is named by BOTH --only and --except: " &
+              "the selection asks for it and excludes it at once, so it can " &
+              "never be selected. Neither flag wins — drop '" & n &
+              "' from one of them (dropping it from --only is the same " &
+              "selection written without the contradiction). --filter is " &
+              "the selector that may legitimately match nothing; --only and " &
+              "--except name repos exactly and refuse rather than silently " &
+              "select nothing."))
+        return DevelopAllResult(outcomes: outcomes, notices: notices,
+          exitCode: 2, backends: composed.backends)
 
   block namedEvidenceOnly:
     # DS-4 — naming an evidence-only repo for PLACEMENT is a loud error that
@@ -25654,14 +25910,18 @@ proc parseTriggerFromLockRelPath*(relPath: string):
   ## ``locks/<project>/<repo>/<sha>.toml`` into its trigger repo and
   ## trigger SHA (the filename stem). Returns empty strings when the
   ## path does not match the RA-1 layout. Forward slashes expected.
-  let parts = relPath.replace('\\', '/').split('/')
-  if parts.len < 4 or parts[0] != "locks":
+  ##
+  ## RA-32 — this used to accept ``parts.len < 4`` (i.e. FOUR OR MORE) and
+  ## then read ``parts[^2]``, while four other call sites required exactly
+  ## four. That disagreement is why a record written one level too deep was
+  ## accepted here — silently reporting ``sync-engine`` as the trigger repo
+  ## of a record belonging to ``stripe/sync-engine`` — and refused much later
+  ## at publish, with a diagnostic pointing at the publisher rather than at
+  ## the write. All five now share ``parseLockRecordRelPath``.
+  let parsed = parseLockRecordRelPath(relPath)
+  if not parsed.ok:
     return ("", "")
-  result.repo = parts[^2]
-  var base = parts[^1]
-  if base.endsWith(".toml"):
-    base = base[0 ..< base.len - ".toml".len]
-  result.sha = base
+  (repo: parsed.repo, sha: parsed.sha)
 
 proc latestLockRelPathForRepoViaGit*(identity: GitToolIdentity;
     manifestLayerRoot, project, repo: string): string =
@@ -25687,7 +25947,11 @@ proc latestLockShasViaGit(identity: GitToolIdentity;
   ## Returns an empty table + "" when no lock exists. Replaces the
   ## former index-backed ``readLatestLockedShasByPath``.
   result.shas = initTable[string, string]()
-  let lockPrefix = "locks/" & project & "/"
+  # RA-32 — the PROJECT is a name too, and the writer encodes it into one path
+  # component. A raw join here reads a prefix nothing was ever written under, so
+  # for any project name outside ``[A-Za-z0-9._-]`` this query silently answered
+  # "no lock" and `repro check` stage 5 / `repro workspace status` saw none.
+  let lockPrefix = "locks/" & encodeLockPathSegment(project) & "/"
   let candidates = orderedLockCandidates(identity, manifestLayerRoot, lockPrefix)
   if candidates.len == 0:
     return
@@ -25706,10 +25970,10 @@ proc latestLockShasViaGit(identity: GitToolIdentity;
   # most recent revision for each repo.
   for cand in candidates:
     let lockPath = manifestLayerRoot / cand.relPath.replace('/', DirSep)
-    if not fileExists(lockPath):
+    if not fileExists(extendedPath(lockPath)):
       continue
     let body =
-      try: readFile(lockPath)
+      try: readFile(extendedPath(lockPath))
       except CatchableError: ""
     for path, rev in shasFromBody(body):
       if path notin result.shas:
@@ -25967,8 +26231,12 @@ proc resolveCoherenceLayerRoot(workspaceRoot, project: string): string =
   ## pins folded in and a workspace in neither simply contributes no DB claim.
   if project.len == 0:
     return ""
+  # RA-32 — the thing we probe for is the directory the WRITER created, which is
+  # the encoded project component. Probing the raw name made a workspace whose
+  # project name is not filename-shaped contribute no DB claim at all.
+  let segment = encodeLockPathSegment(project)
   for candidate in [workspaceRoot / ".repro" / "manifests", workspaceRoot]:
-    if dirExists(extendedPath(candidate / "locks" / project)):
+    if dirExists(extendedPath(candidate / "locks" / segment)):
       return candidate
   ""
 
@@ -26124,8 +26392,25 @@ method putLock*(s: GitCheckoutLockStore;
     let refusal = checkoutRootRefusal(s, "record lock")
     if refusal.len > 0:
       return failed(refusal)
-    let rel = "locks/" & rec.key.project & "/" & rec.key.repo & "/" &
-      rec.key.sha & ".toml"
+    # RA-32 — the store key becomes the path through the ONE encoder the
+    # readers invert (``lockFileRepoRelativePath``), not a raw string join.
+    # The raw join is what produced ``locks/codetracer/stripe/sync-engine/
+    # <sha>.toml``: a repo NAME carrying a slash (twelve of this workspace's
+    # repos are named the way the forge names them) silently became two path
+    # components, so the record landed at depth 5 where the format has 4. It
+    # was committed here and then refused by the publisher forever after.
+    if not isLockPathName(rec.key.project) or
+        not isLockPathName(rec.key.repo) or
+        not isLockPathName(rec.key.sha):
+      return failed("lock store key has an empty or NUL-bearing component " &
+        "(project='" & rec.key.project & "' repo='" & rec.key.repo &
+        "' sha='" & rec.key.sha & "')")
+    if not isCanonicalRepoName(rec.key.repo):
+      return failed("lock store key names a repo that is not a canonical " &
+        "repo name (a name may carry '/' but not a backslash, an absolute " &
+        "anchor, or a '.'/'..'/empty component): '" & rec.key.repo & "'")
+    let rel = lockFileRepoRelativePath(rec.key.project, rec.key.repo,
+      rec.key.sha)
     let coordinates = shasFromBody(rec.body)
     if coordinates.len != 1:
       return failed("Git lock backend requires one exact repository " &
@@ -26142,13 +26427,20 @@ method putLock*(s: GitCheckoutLockStore;
         if item.relPath == expected.relPath: return
       s.pendingExpected.add(expected)
     let abs = s.manifestRepoRoot / rel.replace('/', DirSep)
-    createDir(parentDir(abs))
-    if fileExists(abs):
-      if readFile(abs) != rec.body:
+    # RA-32 — ``extendedPath`` at the filesystem boundary, the same rule
+    # ``putEvidence`` below already applied. Its comment cites LOCK paths as
+    # the reason, but the lock write itself was left bare, so on Windows the
+    # evidence blob survived a long path while the primary record — the longest
+    # path in the subsystem, and the one component encoding LENGTHENS (``%HH``
+    # expands a byte up to 3x) — did not. The ordinary form is what is stored,
+    # compared and handed to ``git``; only these calls take the extended form.
+    createDir(extendedPath(parentDir(abs)))
+    if fileExists(extendedPath(abs)):
+      if readFile(extendedPath(abs)) != rec.body:
         return failed("immutable lock record already exists with different " &
           "content at " & rel)
     else:
-      writeFile(abs, rec.body)
+      writeFile(extendedPath(abs), rec.body)
     # ``-f`` for the same reason ``publishWorkspaceLock`` forces its stage: the
     # operator may legitimately ignore the manifest layer (a global
     # ``core.excludesFile`` or a ``.gitignore`` naming ``.repro/`` / ``locks/``
@@ -26201,8 +26493,10 @@ method latestLockAny*(s: GitCheckoutLockStore; project: string):
   # verbatim record BODY (no workspace-lock schema parse — the store records
   # an arbitrary body, unlike ``latestLockShas`` which extracts path/revision
   # from a real workspace lock).
+  # RA-32 — encoded project component, exactly as ``putLock`` wrote it.
   let candidates = orderedLockCandidates(
-    s.identity, s.manifestRepoRoot, "locks/" & project & "/")
+    s.identity, s.manifestRepoRoot,
+    "locks/" & encodeLockPathSegment(project) & "/")
   if candidates.len == 0: return none(StoreLockRecord)
   let rel = candidates[0].relPath
   let abs = s.manifestRepoRoot / rel.replace('/', DirSep)
@@ -26292,10 +26586,20 @@ method putEvidence*(s: GitCheckoutLockStore; project, repo: string;
     let refusal = checkoutRootRefusal(s, "record evidence")
     if refusal.len > 0:
       return failed(refusal)
-    let rel = "evidence/" & project & "/" & repo & ".ev"
+    # RA-32 — same component encoding as ``putLock``: a repo NAME is one path
+    # component here too, and ``../../etc`` must not write outside
+    # ``evidence/``.
+    if not isLockPathName(project) or not isCanonicalRepoName(repo):
+      return failed("evidence key has a non-canonical project/repo name " &
+        "(project='" & project & "' repo='" & repo & "')")
+    let rel = "evidence/" & encodeLockPathSegment(project) & "/" &
+      encodeLockPathSegment(repo) & ".ev"
     let abs = s.manifestRepoRoot / rel.replace('/', DirSep)
-    createDir(parentDir(abs))
-    writeFile(abs, encodeEvidenceBlob(ev))
+    # ``extendedPath`` at the filesystem boundary only: ``%HH`` escapes expand a
+    # name up to 3x, so an evidence or lock path is measurably closer to
+    # Windows' 260-char MAX_PATH than the raw name was.
+    createDir(extendedPath(parentDir(abs)))
+    writeFile(extendedPath(abs), encodeEvidenceBlob(ev))
     # ``-f``: same generated-record-under-a-possibly-ignored-layer case as
     # ``putLock`` above — the operator may legitimately ignore the manifest
     # layer, and this one generated blob must still be recorded under it.
@@ -26331,9 +26635,10 @@ method putEvidence*(s: GitCheckoutLockStore; project, repo: string;
 method getEvidence*(s: GitCheckoutLockStore; project, repo: string):
     seq[WorkspaceVcsEvidence] =
   let abs = s.manifestRepoRoot /
-    ("evidence/" & project & "/" & repo & ".ev").replace('/', DirSep)
-  if not fileExists(abs): return @[]
-  decodeEvidenceBlob(readFile(abs))
+    ("evidence/" & encodeLockPathSegment(project) & "/" &
+      encodeLockPathSegment(repo) & ".ev").replace('/', DirSep)
+  if not fileExists(extendedPath(abs)): return @[]
+  decodeEvidenceBlob(readFile(extendedPath(abs)))
 
 # ---------------------------------------------------------------------------
 # MO-4 — per-repo-set locking-backend routing (config → per-repo backend)
@@ -26559,15 +26864,58 @@ proc routedParticipationBody(repoName, repoPath, sha: string): string =
   "[[repo]]\nname = \"" & repoName & "\"\npath = \"" & repoPath &
     "\"\nrevision = \"" & sha & "\"\n"
 
+proc isWorkspaceLockDocument*(body: string): bool =
+  ## True when ``body`` is a ``reprobuild.workspace.lock.v1`` DOCUMENT — it
+  ## announces a top-level ``schema`` key, i.e. one appearing before any table
+  ## header — as opposed to a routed ``routedParticipationBody`` record, which
+  ## is a bare ``[[repo]]`` table announcing nothing. This is the same
+  ## discriminator ``resolve-sibling-rev.sh`` applies at discovery (its
+  ## ``is_participation_record``), and the same one that separates reprobuild's
+  ## strict ``readLock`` from the tolerant ``shasFromBody``.
+  for rawLine in body.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"): continue
+    if line.startsWith("["): return false
+    let eq = line.find('=')
+    if eq <= 0: continue
+    if line[0 ..< eq].strip() == "schema": return true
+  false
+
+proc storeRootMatches(store: LockStore; manifestLayerRoot: string): bool
+  ## Forward declaration — defined with the HL-2 partition helpers below.
+
 proc prepareWorkspaceParticipation(
     assignments: seq[RepoBackendAssignment]; projectName: string;
-    repoShas: Table[string, string]): seq[DeferredParticipationWrite] =
+    repoShas: Table[string, string]; partitionRoot = ""):
+    seq[DeferredParticipationWrite] =
+  ## HL-2 (§6 Decision 1) — ``partitionRoot``, when non-empty, is the
+  ## git-checkout manifest root whose repos are recorded by the PARTITION LOCK
+  ## (the ``locks/<project>/<trigger>/<sha>.toml`` workspace-lock document
+  ## ``executeWorkspaceLock`` writes into that same backend). Decision 1 gives
+  ## the team partition ONE such document — "a ``locks/<project>/<repo>/<sha>``
+  ## .toml written into the team's durable backend, containing only the team
+  ## partition's repos" — and reserves the per-repo ``routedParticipationBody``
+  ## records for the PERSONAL/other backends. Emitting both into one
+  ## git-checkout store is not additive; the two writers collide on the SAME
+  ## key for the trigger repo, and ``GitCheckoutLockStore.putLock`` correctly
+  ## refuses to rewrite what the partition just wrote ("immutable lock record
+  ## already exists with different content"). The partition survives, but the
+  ## trigger repo's participation is then a FAILED team-tier outcome, which
+  ## §6 Decision 2 escalates to a push REFUSAL. And at every other repo's
+  ## ``(repo, sha)`` key the minimal record lands unopposed, permanently
+  ## costing that repo the lock document its own pre-push would have published
+  ## there: a published coordinate can afterwards be neither rewritten
+  ## (publication is additions-only) nor refused (that would block the push).
+  ## Repos covered by the partition are therefore skipped here; the partition
+  ## lock is their record.
   for asg in assignments:
     var outc = ParticipationOutcome(
       repoName: asg.repoName, repoPath: asg.repoPath,
       backendKind: asg.backendKind, tier: asg.visibility)
     if asg.store.isNil:
       result.add(DeferredParticipationWrite(outcome: outc))
+      continue
+    if partitionRoot.len > 0 and storeRootMatches(asg.store, partitionRoot):
       continue
     outc.backendLocation = asg.store.storeLocationLabel()
     let sha = repoShas.getOrDefault(asg.repoPath,
@@ -26595,15 +26943,18 @@ proc executeParticipationWrites(
     result.add(outc)
 
 proc recordWorkspaceParticipation*(assignments: seq[RepoBackendAssignment];
-    projectName: string; repoShas: Table[string, string]):
-    seq[ParticipationOutcome] =
+    projectName: string; repoShas: Table[string, string];
+    partitionRoot = ""): seq[ParticipationOutcome] =
   ## The MO-4 workspace operation: record EACH repo's participation through
   ## its ASSIGNED backend. A committed-lock (public, ``store == nil``) repo is
   ## already captured by the committed solved-graph lock, so it is not
   ## re-recorded. Every repo with a real backend gets a ``StoreLockRecord``
-  ## written into that backend's own medium.
+  ## written into that backend's own medium — except the repos covered by the
+  ## ``partitionRoot`` workspace-lock partition (see
+  ## ``prepareWorkspaceParticipation``).
   executeParticipationWrites(
-    prepareWorkspaceParticipation(assignments, projectName, repoShas))
+    prepareWorkspaceParticipation(
+      assignments, projectName, repoShas, partitionRoot))
 
 proc loadLockingRouting*(workspaceRoot: string): BootstrapLockingBody =
   ## Read the ``[locking]`` routing table from the host bootstrap config, or an
@@ -26926,7 +27277,7 @@ proc resolveWorkspaceRepoBackends*(workspaceRoot: string;
 
 proc recordRoutedParticipation*(workspaceRoot: string;
     repos: seq[ResolvedRepo]; repoShas: Table[string, string];
-    projectName: string; identity: GitToolIdentity):
+    projectName: string; identity: GitToolIdentity; partitionRoot = ""):
     seq[ParticipationOutcome] =
   ## MO-4 / HL-1 — the shared step the lock / publish operations call. A no-op
   ## (empty result) when NO configuration layer declares a route, so the
@@ -26941,17 +27292,19 @@ proc recordRoutedParticipation*(workspaceRoot: string;
   if not composed.hasExplicitRoutes: return @[]
   let assignments = resolveRepoBackends(
     composed, repos, workspaceRoot, identity, identity.binaryPath)
-  recordWorkspaceParticipation(assignments, projectName, repoShas)
+  recordWorkspaceParticipation(
+    assignments, projectName, repoShas, partitionRoot)
 
 proc prepareRoutedParticipation(workspaceRoot: string;
     repos: seq[ResolvedRepo]; repoShas: Table[string, string];
-    projectName: string; identity: GitToolIdentity):
+    projectName: string; identity: GitToolIdentity; partitionRoot = ""):
     seq[DeferredParticipationWrite] =
   let composed = composeLockingRouting(workspaceRoot, identity.binaryPath)
   if not composed.hasExplicitRoutes: return @[]
   let assignments = resolveRepoBackends(
     composed, repos, workspaceRoot, identity, identity.binaryPath)
-  prepareWorkspaceParticipation(assignments, projectName, repoShas)
+  prepareWorkspaceParticipation(
+    assignments, projectName, repoShas, partitionRoot)
 
 # ---------------------------------------------------------------------------
 # HL-2 (Unified-Locking-And-Hooks §6 Decision 1) — strict per-backend, tier-
@@ -26964,7 +27317,7 @@ proc prepareRoutedParticipation(workspaceRoot: string;
 
 proc storeRootMatches(store: LockStore; manifestLayerRoot: string): bool =
   ## True when ``store`` is a durable backend whose on-disk root is exactly
-  ## ``manifestLayerRoot`` (the git-checkout manifest the monolithic
+  ## ``manifestLayerRoot`` (the git-checkout manifest the partitioned
   ## ``writeLockFile`` targets). Used to decide which observed repos belong in
   ## the manifest lock file: only the repos routed to THAT git-checkout backend.
   if store.isNil: return false
@@ -30022,10 +30375,12 @@ proc renderLockTextLines*(report: WorkspaceLockReport): seq[string] =
         " (trigger=" & report.triggerRepo & "@" &
         report.triggerSha & ")")
     else:
-      # HL-2 (§6 Decision 1) routed case: no monolithic trigger-keyed lock
-      # file is written when explicit `[locking]` routes are declared; each
-      # repo's record is routed to its assigned backend and reported by the
-      # `recorded … via … backend` lines below. Avoid printing a blank path.
+      # HL-2 (§6 Decision 1) routed case: no manifest partition lock was
+      # written because the git-checkout manifest backend owns no repo in this
+      # workspace (every declared route points elsewhere, or the workspace is
+      # public-only). Each repo's record went to its assigned backend and is
+      # reported by the `recorded … via … backend` lines below. Avoid printing
+      # a blank path.
       result.add("workspace lock: recorded per-repo lock entries" &
         " (trigger=" & report.triggerRepo & "@" &
         report.triggerSha & ")")
@@ -30477,7 +30832,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # shared index is written. Re-locking the same SHA overwrites the
   # same file, so "replaced an existing lock" is simply "the lock file
   # already existed on disk before this write".
-  let lockAlreadyExisted = fileExists(lockPath)
+  let lockAlreadyExisted = fileExists(extendedPath(lockPath))
   # RA-31 — "a file is at that path" and "a record is published there" are
   # different claims, and only the second one is immutable.
   #
@@ -30509,14 +30864,27 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
     lockAlreadyExisted and lockRelForTracking.len > 0 and
       gitRunPlain(identity, ["-C", manifestLayerRoot, "ls-files",
         "--error-unmatch", "--", lockRelForTracking]).code == 0
-  # HL-2 (§6 Decision 1) — the monolithic trigger-keyed ``writeLockFile`` is
-  # kept ONLY for the no-explicit-route single-tier shape (today's common
-  # ``.repo/manifests`` workspace), where it stays BYTE-IDENTICAL to pre-HL-2.
-  # When routes ARE declared, each repo's participation is recorded per-repo
-  # through its ASSIGNED backend by ``recordRoutedParticipation`` below (the
-  # team git-checkout backend included, at its own ``locks/<p>/<repo>/<sha>``
-  # path), so the trigger-keyed monolithic file is redundant AND would drop a
-  # cross-tier mix keyed on a possibly-non-team trigger repo. We skip it.
+  # HL-2 (§6 Decision 1 — target write path) — the trigger-keyed
+  # ``writeLockFile`` is the git-checkout manifest backend's PARTITION of the
+  # workspace lock, and it is written whenever that backend owns the trigger
+  # repo (see the anchoring rule below). Decision 1 spells the team row out:
+  # "**team** partition → a
+  # ``locks/<project>/<repo>/<sha>.toml`` written into the team's durable
+  # backend, containing only the team partition's repos", and closes with "the
+  # git manifest lock file, when one is produced, contains **only** the repos
+  # routed to that backend". ``manifestOwnedRepos`` above computes exactly that
+  # subset, so tier isolation is enforced by WHAT the document contains, not by
+  # suppressing the document.
+  #
+  # Suppressing it on ``hasExplicitRoutes`` (as this gate previously did) threw
+  # that partition away precisely when it is meaningful, and left the
+  # per-repo ``routedParticipationBody`` records as the only thing in the
+  # manifest. Those records announce no ``schema`` and pin one repo each, so
+  # they answer no cross-repo question: CI sibling resolution
+  # (``clone-siblings`` / ``resolve-sibling-rev.sh``, which reads exactly this
+  # path) degraded to "no workspace lock found" for every commit locked that
+  # way. The partition lock is what that consumer reads, and the reason the
+  # record is keyed by the TRIGGER commit at all.
   #
   # ``manifestLayerRoot`` is EMPTY when no manifest-backed route is declared
   # (§10 "No implicit team route"): there is no git-checkout store to write a
@@ -30524,7 +30892,31 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # whole publication story. Writing anyway would resolve ``lockPath`` relative
   # to the process CWD and scatter a ``locks/`` tree wherever the gate happened
   # to run. Public-only workspaces write no manifest lock at all.
-  if not composed.hasExplicitRoutes and manifestLayerRoot.len > 0:
+  #
+  # The routed partition is additionally anchored ONLY at a trigger that
+  # BELONGS to it. The record's path is ``locks/<project>/<TRIGGER>/<sha>``, and
+  # a consumer reaches it by asking "what did the workspace look like at THIS
+  # repo's commit" (``pickTriggerRepo``'s own contract). Filing the team
+  # partition under a public or personal trigger would both put a record where
+  # nobody looks and drop a team SHA into a directory named for a repo of
+  # another tier. When the trigger is outside the partition the manifest simply
+  # gets no trigger-keyed document for this operation, and its repos keep their
+  # per-repo participation records until one of them is itself the trigger.
+  var triggerInManifestPartition = false
+  for repo in manifestRepos:
+    if repo.path == triggerRepo.path:
+      triggerInManifestPartition = true
+      break
+  let writeManifestPartition = manifestLayerRoot.len > 0 and
+    (not composed.hasExplicitRoutes or triggerInManifestPartition)
+  # False only when the trigger coordinate is already occupied by a PUBLISHED
+  # participation record, which this operation must neither overwrite nor claim
+  # as its own lock (see below). The report must not name a path holding
+  # somebody else's record, and the repos the partition would have covered must
+  # keep their per-repo records, so both follow this flag rather than the
+  # intent above.
+  var partitionRecordPresent = writeManifestPartition
+  if writeManifestPartition:
     if lockAlreadyPublished:
       # The path is content-addressed by the exact trigger commit and lock
       # publication accepts canonical additions only. Re-running a gate must
@@ -30537,31 +30929,68 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
       # RA-31 — gated on TRACKED, not on present-on-disk. An untracked file at
       # this path is this workspace's own unpublished draft (see above); it is
       # overwritten by the ``else`` arm rather than defended.
-      let existingShas = shasFromBody(readFile(lockPath))
-      var sameCoordinates = existingShas.len == lock.repos.len
-      var mismatchedPaths: seq[string]
-      if sameCoordinates:
-        for entry in lock.repos:
-          if entry.path notin existingShas or
-              existingShas[entry.path] != entry.revision:
-            sameCoordinates = false
-            mismatchedPaths.add(entry.path)
+      let existingBody = readFile(extendedPath(lockPath))
+      # HL-2 — a routed ``routedParticipationBody`` record announces no
+      # ``schema`` and pins one repo; it is not a workspace lock and never was
+      # one. Workspaces that locked while the partition write was suppressed
+      # have such records TRACKED at exactly the coordinates their own partition
+      # lock would occupy. Two things must not happen there:
+      #
+      #   * the coordinate-mismatch refusal below (1 path vs N) must not fire —
+      #     it reads as "someone published a different workspace state at this
+      #     commit", which is false, and it would turn every lock in such a
+      #     workspace into a lock-failure and block the push; and
+      #   * the partition must not be written over it — publication is
+      #     ADDITIONS-ONLY at both the staging check and the ahead-chain
+      #     verifier (``verifyLockOnlyAheadChain``: "additions-only, with NO
+      #     exception"), so an ``M`` entry would be refused on this and every
+      #     later publish, wedging the store rather than repairing it.
+      #
+      # So the historical record is left exactly as published, and the operator
+      # is told plainly what it costs. No repair verb is named: ``repro
+      # workspace migrate-locks`` repairs a record at a NON-CANONICAL PATH,
+      # which this is not — the path is canonical and the BODY is the wrong
+      # shape — so pointing at it would send the operator to a verb whose
+      # planner will not select this record. Commits already carrying such a
+      # record stay unresolvable for cross-repo CI (the resolver treats them as
+      # unlocked, which is the mild, correct answer for history); every NEW
+      # commit gets its partition normally.
+      if not isWorkspaceLockDocument(existingBody):
+        partitionRecordPresent = false
+        stderr.writeLine(
+          "repro workspace lock: '" & lockPath & "' already holds a published " &
+          "per-repo participation record, which is where this workspace's " &
+          "lock document belongs. Published lock records are immutable and " &
+          "lock publication is additions-only, so it is left untouched: this " &
+          "commit cannot be used for cross-repo sibling resolution. Later " &
+          "commits lock normally.")
       else:
-        for entry in lock.repos:
-          if entry.path notin existingShas or
-              existingShas[entry.path] != entry.revision:
-            mismatchedPaths.add(entry.path)
-      if not sameCoordinates:
-        raise newException(ValueError,
-          "immutable lock record already exists at '" & lockPath &
-          "' with different repository coordinates" &
-          (if mismatchedPaths.len > 0:
-            " (changed paths: " & mismatchedPaths.join(", ") & ")"
-          else: "") &
-          "; keep the existing record and create a lock anchored by the " &
-          "commit that changed")
+        let existingShas = shasFromBody(existingBody)
+        var sameCoordinates = existingShas.len == lock.repos.len
+        var mismatchedPaths: seq[string]
+        if sameCoordinates:
+          for entry in lock.repos:
+            if entry.path notin existingShas or
+                existingShas[entry.path] != entry.revision:
+              sameCoordinates = false
+              mismatchedPaths.add(entry.path)
+        else:
+          for entry in lock.repos:
+            if entry.path notin existingShas or
+                existingShas[entry.path] != entry.revision:
+              mismatchedPaths.add(entry.path)
+        if not sameCoordinates:
+          raise newException(ValueError,
+            "immutable lock record already exists at '" & lockPath &
+            "' with different repository coordinates" &
+            (if mismatchedPaths.len > 0:
+              " (changed paths: " & mismatchedPaths.join(", ") & ")"
+            else: "") &
+            "; keep the existing record and create a lock anchored by the " &
+            "commit that changed")
     else:
       writeLockFile(lock, lockPath)
+  if partitionRecordPresent:
     report.lockFilePath = lockPath
     report.replacedExistingEntry = lockAlreadyExisted
     for entry in lock.repos:
@@ -30583,12 +31012,25 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # every manifest-present operation are byte-unchanged. An unrouted private
   # repo raises `StoreRoutingError` (loud, names the repo) — propagated to the
   # operator by `repro workspace lock`; the gate surfaces it as a lock-failure.
+  #
+  # HL-2 (§6 Decision 1) — repos covered by the manifest PARTITION LOCK written
+  # just above are recorded by that document, so they are excluded here rather
+  # than double-written as minimal per-repo records into the very same
+  # git-checkout store (where the trigger repo's write collides with the
+  # partition and fails — a failed TEAM outcome the gate escalates to a push
+  # refusal — and every other repo's write squats on its own future key).
+  # `partitionRoot` is empty when no partition was written, so the per-repo
+  # fan-out is unchanged there.
+  let participationPartitionRoot =
+    if partitionRecordPresent: manifestLayerRoot else: ""
   if deferParticipation:
     result.deferredParticipation = prepareRoutedParticipation(
-      args.workspaceRoot, lockRepos, headShas, resolved.projectName, identity)
+      args.workspaceRoot, lockRepos, headShas, resolved.projectName, identity,
+      participationPartitionRoot)
   else:
     report.participation = recordRoutedParticipation(
-      args.workspaceRoot, lockRepos, headShas, resolved.projectName, identity)
+      args.workspaceRoot, lockRepos, headShas, resolved.projectName, identity,
+      participationPartitionRoot)
 
   report.exitCode = 0
   result.report = report
@@ -30960,8 +31402,13 @@ proc minimalRoutedRepoName(body: string): string =
     let value = line[(eq + 1) .. ^1].strip()
     if value.len < 2 or value[0] != '"' or value[^1] != '"': return ""
     let decoded = value[1 ..< value.high]
-    if decoded.len == 0 or '\\' in decoded or '/' in decoded or
-        decoded == "." or decoded == "..": return ""
+    # RA-32 — a '/' in the NAME is legitimate (forge-shaped names such as
+    # ``stripe/sync-engine``); it is only in the PATH that it must not appear
+    # as a separator, and the path component is an encoding of this name, so
+    # the binding below (``routedName == <decoded path component>``) stays
+    # exact. What must still be refused is anything that is not a NAME:
+    # a backslash, an absolute anchor, an empty/'.'/'..' component.
+    if not isCanonicalRepoName(decoded): return ""
     result = decoded
     seen = true
   if not seen: result = ""
@@ -30981,19 +31428,21 @@ proc verifyLockRecordPath(identity: GitToolIdentity; repoRoot, commit,
     relPath, objectFormat: string;
     expected = none(ExpectedLockRecord)):
     tuple[ok: bool; diagnostic: string] =
-  let parts = relPath.replace('\\', '/').split('/')
-  if parts.len != 4 or parts[0] != "locks" or
-      not parts[3].endsWith(".toml"):
-    return (false, "non-canonical lock record path: " & relPath)
-  let oid = parts[3][0 ..< parts[3].len - ".toml".len]
+  # RA-32 — one shared decomposer. It carries an ACTIONABLE diagnostic: for the
+  # historical too-deep record it names the canonical path the record belongs
+  # at, which is what the publish-time migration acts on.
+  let parsed = parseLockRecordRelPath(relPath)
+  if not parsed.ok:
+    return (false, "non-canonical lock record path: " & parsed.diagnostic)
+  let oid = parsed.sha
   let oidLength = if objectFormat == "sha256": 64 else: 40
   if not isFullHexOid(oid, oidLength):
     return (false, "lock record filename is not a full " & objectFormat &
       " object id: " & relPath)
   if expected.isSome:
     let wanted = expected.get()
-    if relPath != wanted.relPath or parts[1] != wanted.project or
-        parts[2] != wanted.repoName or
+    if relPath != wanted.relPath or parsed.project != wanted.project or
+        parsed.repo != wanted.repoName or
         oid.toLowerAscii() != wanted.oid.toLowerAscii():
       return (false, "lock record path does not match the exact operation " &
         "coordinate: " & relPath)
@@ -31012,7 +31461,7 @@ proc verifyLockRecordPath(identity: GitToolIdentity; repoRoot, commit,
     var triggerMatches = false
     try:
       let lock = readLock(tempPath)
-      if lock.lock.project != parts[1]:
+      if lock.lock.project != parsed.project:
         return (false, "lock project does not match its path: " & relPath)
       for entry in lock.repo:
         let coordinateMatches =
@@ -31021,7 +31470,7 @@ proc verifyLockRecordPath(identity: GitToolIdentity; repoRoot, commit,
               entry.path == expected.get().repoPath and
               entry.revision.toLowerAscii() == expected.get().oid.toLowerAscii()
           else:
-            entry.name == parts[2] and canonicalRepoCoordinate(entry.path) and
+            entry.name == parsed.repo and canonicalRepoCoordinate(entry.path) and
               entry.revision.toLowerAscii() == oid.toLowerAscii()
         if coordinateMatches:
           triggerMatches = true
@@ -31035,7 +31484,7 @@ proc verifyLockRecordPath(identity: GitToolIdentity; repoRoot, commit,
       # non-empty repo coordinate bound to the exact path SHA.
       let routed = shasFromBody(show.output)
       let routedName = minimalRoutedRepoName(show.output)
-      if routed.len != 1 or routedName != parts[2]:
+      if routed.len != 1 or routedName != parsed.repo:
         return (false, "lock record parse/integrity failure at " & relPath &
           ": " & workspaceLockError.msg)
       for repoPath, revision in routed:
@@ -31064,11 +31513,11 @@ proc expectedLockRecordFromBody(relPath, body: string):
   ## Compatibility seam for explicit `repro workspace lock` and the exported
   ## low-level publisher. Normal pre-push/repro-push paths carry the expected
   ## coordinate from the resolved manifest instead of deriving it here.
-  let parts = relPath.replace('\\', '/').split('/')
-  if parts.len != 4 or parts[0] != "locks" or
-      not parts[3].endsWith(".toml"):
+  # RA-32 — same shared decomposer as ``verifyLockRecordPath``.
+  let parsed = parseLockRecordRelPath(relPath)
+  if not parsed.ok:
     return none(ExpectedLockRecord)
-  let oid = parts[3][0 ..< parts[3].len - ".toml".len]
+  let oid = parsed.sha
   var repoPath = ""
   let temp = createTempFile("repro-lock-expected-", ".toml")
   let tempPath = temp.path
@@ -31077,23 +31526,23 @@ proc expectedLockRecordFromBody(relPath, body: string):
     temp.cfile.close()
     try:
       let lock = readLock(tempPath)
-      if lock.lock.project != parts[1]: return none(ExpectedLockRecord)
+      if lock.lock.project != parsed.project: return none(ExpectedLockRecord)
       for entry in lock.repo:
-        if entry.name == parts[2] and
+        if entry.name == parsed.repo and
             entry.revision.toLowerAscii() == oid.toLowerAscii():
           repoPath = entry.path
           break
     except CatchableError:
       let routed = shasFromBody(body)
-      if routed.len == 1 and minimalRoutedRepoName(body) == parts[2]:
+      if routed.len == 1 and minimalRoutedRepoName(body) == parsed.repo:
         for path, revision in routed:
           if revision.toLowerAscii() == oid.toLowerAscii(): repoPath = path
   finally:
     try: removeFile(tempPath)
     except CatchableError: discard
   if not canonicalRepoCoordinate(repoPath): return none(ExpectedLockRecord)
-  some(ExpectedLockRecord(project: parts[1], repoName: parts[2],
-    repoPath: repoPath, oid: oid, relPath: relPath))
+  some(ExpectedLockRecord(project: parsed.project, repoName: parsed.repo,
+    repoPath: repoPath, oid: oid, relPath: parsed.relPath))
 
 proc verifyLockBlobAt(identity: GitToolIdentity; repoRoot, commit,
     relPath: string): tuple[ok: bool; diagnostic: string] =
@@ -31169,6 +31618,29 @@ proc verifyLockOnlyAheadChain(identity: GitToolIdentity; repoRoot, base,
   let commits = commitsRes.output.splitLines().filterIt(it.strip().len > 0)
   if commits.len == 0:
     return (false, "backend is not ahead of the fetched upstream")
+
+  # RA-32 — the ahead chain is ADDITIONS-ONLY, with NO exception.
+  #
+  # Every commit between the fetched upstream and the local backend HEAD must
+  # consist solely of ``A`` entries under ``locks/``, and every added path must
+  # be a canonical lock record that verifies against the operation binding.
+  # Nothing is ever removed from the chain, at any depth, for any reason: a
+  # published record is immutable, and a record that is NOT canonical is not
+  # something this verifier may make publishable by rewriting a shared store on
+  # the operator's behalf.
+  #
+  # An earlier revision carved out a "migration" exception here — a commit that
+  # deleted one non-canonical record and re-added it at its canonical path —
+  # and drove it automatically from ``publishWorkspaceLock``. Every defect two
+  # review rounds found came from that machinery, never from the encoding or
+  # the shared parser: it committed deletions the verifier then refused
+  # forever, mis-parsed quoted paths AFTER moving the files, dropped a path
+  # silently, relocated files that were never records, and authorized its own
+  # writes to a shared remote past the very guard that exists to stop that. It
+  # is gone. A store that already holds a non-canonical record is repaired by
+  # the EXPLICIT ``repro workspace migrate-locks`` verb, which rebuilds the
+  # UNPUBLISHED portion of the branch so that what reaches this verifier is,
+  # once again, additions-only.
   var added: HashSet[string]
   for rawCommit in commits:
     let commit = rawCommit.strip()
@@ -31183,8 +31655,7 @@ proc verifyLockOnlyAheadChain(identity: GitToolIdentity; repoRoot, base,
       let fields = rawLine.split('\t')
       if fields.len != 2 or fields[0] != "A":
         return (false, "backend ahead chain is not additions-only at " &
-          commit &
-          ": " & rawLine)
+          commit & ": " & rawLine)
       let path = fields[1]
       if not pathIsUnderLocks(path):
         return (false, "backend ahead chain touches outside locks/: " & path)
@@ -31197,15 +31668,13 @@ proc verifyLockOnlyAheadChain(identity: GitToolIdentity; repoRoot, base,
         return (false, "backend ahead chain contains an unexpected lock " &
           "record: " & path)
       if exact.isNone and restrictToExpectedCoordinates:
-        let parts = path.replace('\\', '/').split('/')
-        if parts.len == 4 and parts[0] == "locks" and
-            parts[3].endsWith(".toml"):
-          let oid = parts[3][0 ..< parts[3].len - ".toml".len]
+        let parsed = parseLockRecordRelPath(path)
+        if parsed.ok:
           for item in expected:
-            if item.project == parts[1] and item.repoName == parts[2]:
+            if item.project == parsed.project and item.repoName == parsed.repo:
               exact = some(ExpectedLockRecord(project: item.project,
-                repoName: item.repoName, repoPath: item.repoPath, oid: oid,
-                relPath: path))
+                repoName: item.repoName, repoPath: item.repoPath,
+                oid: parsed.sha, relPath: path))
               break
         if exact.isNone:
           return (false, "backend ahead chain contains a lock record outside " &
@@ -31280,9 +31749,26 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
   result.outcome = lpoFailed
   for entry in gitPorcelainEntries(identity, repoRoot):
     # Recovery starts only from an exact clean index/worktree. A pathname being
-    # under locks/ is not sufficient: modified, deleted, renamed, symlinked, or
-    # unrelated untracked lock files are user state and must never be swept into
-    # a resumed publication.
+    # under locks/ is not sufficient: modified, deleted, renamed, symlinked
+    # lock files are user state and must never be swept into a resumed
+    # publication.
+    #
+    # RA-32 — with ONE exception, and it is an exception about what this code
+    # can reach, not about what it trusts. An UNTRACKED file under ``locks/``
+    # that is not a canonical record path can no longer be swept into anything:
+    # every writer here stages by explicit path (``putLock`` stages its one
+    # record, ``publishWorkspaceLock`` stages the canonical paths it selected)
+    # and commits with that same explicit pathspec, so such a file is
+    # unreachable from the index and from every commit. Aborting over it gave
+    # one unrelated file — an operator's ``NOTES.toml``, or a record some older
+    # writer left at a non-canonical path and never tracked — a veto over
+    # publication for every repo in the workspace. A canonical untracked record
+    # is NOT excused: the publisher stages those, so by the time control
+    # reaches here one can only mean the staging step disagreed with this one,
+    # which is exactly the kind of split this change exists to remove.
+    if entry.code == "??" and pathIsUnderLocks(entry.path) and
+        not parseLockRecordRelPath(entry.path).ok:
+      continue
     result.diagnostic = "backend has uncommitted state (" & entry.code & " " &
       entry.path & "); refusing verified lock recovery"
     return
@@ -31428,6 +31914,26 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
       return
     result.verifiedLocalHead = refreshedHead.output.strip().toLowerAscii()
 
+proc nulSeparatedPaths(output: string): seq[string] =
+  ## Split the output of a ``-z`` git query into paths.
+  ##
+  ## ``-z`` NUL-TERMINATES each path, and the captured output still carries the
+  ## trailing newline the child wrote after the last record. Splitting on NUL
+  ## therefore yields a final element that is ``"\n"`` rather than ``""``, and a
+  ## plain ``if raw.len == 0: continue`` does not drop it. That element then
+  ## flows on as if it were a path: it is not under ``locks/``, so the repair
+  ## planner read it as "this branch touches something outside locks/" and
+  ## refused every store it was pointed at, naming a path that renders as
+  ## nothing at all.
+  ##
+  ## Strip the trailing newlines ONCE, from the whole output, before splitting;
+  ## every element is then either a real path or empty. Not a per-element
+  ## ``strip``: a path may legitimately begin or end with a byte ``strip``
+  ## would eat.
+  for raw in output.strip(leading = false, chars = {'\n', '\r'}).split('\0'):
+    if raw.len == 0: continue
+    result.add(raw.replace('\\', '/'))
+
 proc publishWorkspaceLock*(identity: GitToolIdentity;
                            manifestRepoRoot: string;
                            exactExpected: seq[ExpectedLockRecord] = @[]):
@@ -31474,25 +31980,105 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
         "nothing to publish to"
     return
 
-  # Stage only the locks subtree. ``git add`` of a non-existent path errors;
-  # guard so a manifest layer that has never produced a lock is a clean
-  # "nothing to publish", not a failure.
+  # RA-32 — the publish OWNS exactly one kind of path: a CANONICAL lock record
+  # under ``locks/``. It stages those, commits those, and pushes those. Every
+  # other file under ``locks/`` — an operator's ``README.md``, the store's
+  # legacy ``.xml`` records, a ``NOTES.toml``, or a record some earlier writer
+  # left at a non-canonical path — it does not stage, does not commit, and
+  # does not refuse over.
+  #
+  # This replaced a blanket ``git add -f -- locks``. That staged the WHOLE
+  # subtree, so a single unrelated file sitting under ``locks/`` became a
+  # staged addition the canonical-additions check then refused, denying
+  # publication to every repo in the workspace. Selecting the paths makes the
+  # isolation real rather than incidental: an unrelated file is never in the
+  # index, so it cannot be in the commit, so it cannot be in the ahead chain.
   #
   # ``-f`` (force) because the operator is entitled to keep the whole manifest
   # layer out of ordinary status/add noise — a global ``core.excludesFile`` or
   # a repo ``.gitignore`` naming e.g. ``.repro/`` or ``locks/`` is a legitimate
   # configuration, and lock publication must still work under it. These paths
-  # are generated and owned by reprobuild, and the pathspec is pinned to
-  # ``locks`` alone, so the force can only ever stage this tool's own records;
-  # everything the operator authored is still governed by their ignore rules.
-  # This is safe ONLY because the guard above proved ``manifestRepoRoot`` is
-  # the checkout ROOT: without it, Git's upward repository discovery would
-  # point these commands at an enclosing repository and the force would commit
-  # the lock into — and push the branch of — a repo that merely happens to
-  # contain the manifest layer.
-  if dirExists(manifestRepoRoot / "locks"):
+  # are generated and owned by reprobuild, and the pathspec is now pinned to
+  # individual canonical record paths, so the force can only ever stage this
+  # tool's own records. This is safe ONLY because the guard above proved
+  # ``manifestRepoRoot`` is the checkout ROOT: without it, Git's upward
+  # repository discovery would point these commands at an enclosing repository
+  # and the force would commit the lock into — and push the branch of — a repo
+  # that merely happens to contain the manifest layer.
+  #
+  # ``-z`` on every enumeration: ``core.quotePath`` C-quotes any path carrying
+  # a byte outside ASCII, and a quoted path does not compare equal to what the
+  # writer wrote. The encoder's own output alphabet is ``[A-Za-z0-9._%-]`` so a
+  # canonical record is never quoted, but a legacy or operator file may be, and
+  # it must be recognised as "not ours" rather than mis-parsed.
+  var canonicalToStage: seq[string]
+  var strayRecords: seq[string]
+  var vanishedRecords: seq[string]
+  if dirExists(extendedPath(manifestRepoRoot / "locks")):
+    # Candidates for staging: untracked (``--others``, deliberately WITHOUT
+    # ``--exclude-standard`` so an ignored manifest layer still publishes) and
+    # tracked-but-changed (``--modified``, which also reports a tracked file
+    # deleted from the worktree).
+    let cand = gitRunPlain(identity,
+      ["-C", manifestRepoRoot, "ls-files", "-z", "--modified", "--others",
+       "--", "locks"])
+    if cand.code != 0:
+      result.diagnostic = "git ls-files locks failed: " & cand.output.strip()
+      return
+    var seenCandidate = initHashSet[string]()
+    for rel in nulSeparatedPaths(cand.output):
+      if rel in seenCandidate: continue
+      seenCandidate.incl(rel)
+      if not parseLockRecordRelPath(rel).ok:
+        if rel.endsWith(lockRecordExt): strayRecords.add(rel)
+        continue
+      if fileExists(extendedPath(manifestRepoRoot / rel.replace('/', DirSep))):
+        canonicalToStage.add(rel)
+      else:
+        vanishedRecords.add(rel)
+    canonicalToStage.sort()
+    vanishedRecords.sort()
+
+    # A record-shaped file already TRACKED at a non-canonical path is the state
+    # an operator most needs told about: it is committed, so it sits in the
+    # ahead chain and the additions-only verifier will refuse the chain until
+    # it is repaired. It never shows up in the candidate scan above (it is
+    # tracked and unmodified), so scan the index for it too.
+    let trackedRes = gitRunPlain(identity,
+      ["-C", manifestRepoRoot, "ls-files", "-z", "--cached", "--", "locks"])
+    if trackedRes.code == 0:
+      for rel in nulSeparatedPaths(trackedRes.output):
+        if not rel.endsWith(lockRecordExt): continue
+        if parseLockRecordRelPath(rel).ok: continue
+        if rel in seenCandidate: continue
+        strayRecords.add(rel)
+    strayRecords.sort()
+
+  # Unstage exactly what we staged, and NOTHING when we staged nothing.
+  # ``git reset HEAD --`` with an EMPTY pathspec is not a no-op: git treats it
+  # as "no pathspec" and performs a full mixed reset, which would silently
+  # unstage whatever the operator had staged themselves. The guard is the
+  # whole point of routing every unstage through here.
+  proc unstageOurs() =
+    if canonicalToStage.len == 0: return
+    discard gitRunPlain(identity,
+      @["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--"] &
+        canonicalToStage)
+
+  # REPORT, never relocate. Naming the file, the reason, and the exact repair
+  # verb is the whole remedy this offers: nothing here mutates a shared store,
+  # and nothing here denies publication to the canonical records below.
+  for stray in strayRecords:
+    let parsedStray = parseLockRecordRelPath(stray)
+    stderr.writeLine("repro: not publishing '" & stray & "': " &
+      parsedStray.diagnostic)
+    stderr.writeLine("repro:   repair it with 'repro workspace migrate-locks " &
+      "--dry-run' (then '--apply'); publication of the other records in " &
+      "this store is unaffected")
+
+  if canonicalToStage.len > 0:
     let addRes = gitRunPlain(identity,
-      ["-C", manifestRepoRoot, "add", "-f", "--", "locks"])
+      @["-C", manifestRepoRoot, "add", "-f", "--"] & canonicalToStage)
     if addRes.code != 0:
       result.diagnostic = "git add locks failed: " & addRes.output.strip()
       return
@@ -31509,43 +32095,67 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
   if dirtyOutside.len > 0:
     # Reset only the locks subtree we staged; leave any pre-existing
     # staging of unrelated paths exactly as we found it.
-    discard gitRunPlain(identity,
-      ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+    unstageOurs()
     result.outcome = lpoRefusedDirty
     result.diagnostic =
       "manifest repo is dirty outside locks/ (" &
         dirtyOutside.join(", ") & "); refusing to publish lock"
     return
 
+  # A canonical record that is tracked but GONE from the worktree. Lock records
+  # are immutable, so this is never something to publish past: say so, and name
+  # the restore. Refusing here is not "blocking an unrelated record" — the
+  # missing file IS a published record of this store. Ordered AFTER the
+  # dirty-outside guard so that guard keeps its precedence: a tree that is
+  # inconsistent outside locks/ is the more fundamental refusal, and it is the
+  # one whose outcome (``lpoRefusedDirty``) callers already act on.
+  if vanishedRecords.len > 0:
+    unstageOurs()
+    result.outcome = lpoFailed
+    result.diagnostic =
+      "lock record(s) missing from the manifest working tree (" &
+        vanishedRecords.join(", ") &
+        "); lock records are immutable — restore them with 'git -C " &
+        manifestRepoRoot & " checkout -- locks' and re-run"
+    return
+
   # Collect the staged lock paths and reject empty/zero-byte locks.
-  let stagedRes = gitRunPlain(identity,
-    ["-C", manifestRepoRoot, "diff", "--cached", "--name-status",
-     "--no-renames", "--", "locks"])
+  # Pathspec = exactly what we staged. Anything else the operator may have
+  # staged under ``locks/`` is not this publish's business and must not be
+  # able to fail it.
+  let stagedRes =
+    if canonicalToStage.len == 0:
+      (code: 0, output: "")
+    else:
+      gitRunPlain(identity,
+        @["-C", manifestRepoRoot, "diff", "--cached", "--name-status",
+          "--no-renames", "--"] & canonicalToStage)
   var stagedLocks: seq[string]
   if stagedRes.code == 0:
     for line in stagedRes.output.splitLines():
       if line.len == 0: continue
       let fields = line.split('\t')
       if fields.len != 2 or fields[0] != "A":
-        discard gitRunPlain(identity,
-          ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+        unstageOurs()
         result.diagnostic = "lock publication accepts canonical additions only: " &
           line
         return
       let p = fields[1]
-      let parts = p.replace('\\', '/').split('/')
-      if parts.len != 4 or parts[0] != "locks" or
-          not parts[3].endsWith(".toml"):
-        discard gitRunPlain(identity,
-          ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
-        result.diagnostic = "non-canonical generated lock addition: " & p
+      # RA-32 — the same shared decomposer the writer and the ahead-chain
+      # verifier use. Its diagnostic names the canonical path, so an operator
+      # who somehow still lands here is told what to do rather than just that
+      # something is "non-canonical".
+      let parsedStaged = parseLockRecordRelPath(p)
+      if not parsedStaged.ok:
+        unstageOurs()
+        result.diagnostic = "non-canonical generated lock addition: " &
+          parsedStaged.diagnostic
         return
       let stage = gitRunPlain(identity,
         ["-C", manifestRepoRoot, "ls-files", "--stage", "--", p])
       let stageFields = stage.output.strip().splitWhitespace()
       if stage.code != 0 or stageFields.len < 4 or stageFields[0] != "100644":
-        discard gitRunPlain(identity,
-          ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+        unstageOurs()
         result.diagnostic = "generated lock addition has unsafe mode/type: " & p
         return
       stagedLocks.add(p)
@@ -31554,8 +32164,7 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     let abs = manifestRepoRoot / rel.replace('/', DirSep)
     if fileExists(abs) and getFileSize(abs) == 0:
       # Unstage the locks subtree; an empty lock must never be committed.
-      discard gitRunPlain(identity,
-        ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+      unstageOurs()
       result.outcome = lpoFailed
       result.diagnostic =
         "refusing to publish empty/zero-byte lock file: " & rel
@@ -31563,8 +32172,7 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
 
   let upstream = resolveLockUpstream(identity, manifestRepoRoot)
   if not upstream.ok:
-    discard gitRunPlain(identity,
-      ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+    unstageOurs()
     result.outcome =
       if "no upstream" in upstream.diagnostic: lpoNotPublishable
       else: lpoFailed
@@ -31575,8 +32183,8 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     let plural = if stagedLocks.len == 1: "entry" else: "entries"
     let message = "Publish " & $stagedLocks.len & " workspace lock " & plural
     let commitRes = gitRunPlainEnv(identity,
-      ["-C", manifestRepoRoot, "commit", "--quiet", "-m", message,
-       "--", "locks"], internalContext = InternalLockCommitContext)
+      @["-C", manifestRepoRoot, "commit", "--quiet", "-m", message, "--"] &
+        stagedLocks, internalContext = InternalLockCommitContext)
     if commitRes.code != 0:
       result.outcome = lpoFailed
       result.diagnostic = "git commit failed: " & commitRes.output.strip()
@@ -31600,8 +32208,539 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
         "coordinate: " & rel
       return
     expected.add(inferred.get())
+
   result = publishVerifiedLockState(identity, manifestRepoRoot,
     upstream.target, expected)
+
+  # RA-32 — the one case where a refusal genuinely does hold up unrelated
+  # records: a non-canonical record that is already COMMITTED sits in the ahead
+  # chain, and a branch push moves a ref, so there is no way to publish the
+  # healthy commits and leave that one behind. The chain verifier names the
+  # record; attach the repair so an operator is never left with a refusal and
+  # no route forward. Appended rather than substituted — the verifier's own
+  # diagnostic is the precise reason, and this is the remedy for it.
+  if result.outcome notin {lpoPublished, lpoNothingToPublish} and
+      strayRecords.len > 0:
+    result.diagnostic = result.diagnostic & " — this store also holds " &
+      $strayRecords.len & " lock record(s) at a non-canonical path (" &
+      strayRecords[0] & (if strayRecords.len > 1: ", ..." else: "") &
+      "); repair with 'repro workspace migrate-locks --dry-run', then " &
+      "'--apply'"
+
+# ---------------------------------------------------------------------------
+# RA-32 — `repro workspace migrate-locks`: the EXPLICIT lock-record repair.
+#
+# A manifest store can hold a lock record at a non-canonical path, because an
+# earlier `GitCheckoutLockStore.putLock` joined the store key straight into the
+# path: a repo whose NAME carries a slash (`stripe/sync-engine`, and eleven
+# more in this workspace, because upstream forks are named the way the forge
+# names them) became TWO path components, so the record landed at depth 5 where
+# the format has 4. `putLock` COMMITS as it writes, so the record is already in
+# the local branch, and the publisher — which requires every record in the
+# ahead chain to be canonical — refuses that chain from then on.
+#
+# This verb is that store's repair, and it is the ONLY one. It is never invoked
+# implicitly: not by `repro push`, not by the pre-push gate, not by
+# `publishWorkspaceLock`. An earlier revision did run a repair automatically
+# inside the push path, and it was withdrawn: machinery that mutates a shared
+# store, authorizes its own writes to a remote, and runs unbidden is the wrong
+# shape for a repair, however correct its individual steps.
+#
+# ## What the repair actually is
+#
+# NOT "relocate the record and commit the move". A commit that DELETES a path
+# is not publishable — the ahead chain is additions-only with no exception —
+# so a move-on-top would swap one permanent wedge for another.
+#
+# The repair is instead a rebuild of the UNPUBLISHED portion of the branch. It
+# is sound precisely because a non-canonical record is unpublishable BY
+# CONSTRUCTION: the publisher refused it, so it never reached the remote. The
+# verb resets the branch to the fetched upstream, moves each record to its
+# canonical path on disk, and re-commits every ahead record as a single
+# ADDITIONS-ONLY commit. Nothing published is rewritten; nothing shared is
+# touched. What the publisher then sees is a chain it accepts.
+#
+# ## Plan before move
+#
+# Every predicate the publisher will apply is checked BEFORE the first
+# `moveFile`, and the verb refuses AS A WHOLE rather than committing a move it
+# cannot publish:
+#
+#   * the record is absent from the fetched upstream (it was never published);
+#   * a canonical target is derivable, and is itself canonical;
+#   * the target stem is a FULL hex object id of the repo's object format —
+#     the publisher's `verifyLockRecordPath` demands it, and a record whose
+#     stem is not one could be moved and then refused forever;
+#   * the body binds to an exact repository coordinate
+#     (`expectedLockRecordFromBody`), which is what authorizes its publication;
+#   * the body's own repo name agrees with the target path's;
+#   * the target does not already hold a DIFFERENT body;
+#   * no two records claim one target (the canonical path is derived by
+#     DECODING, so `locks/proj/...` and `locks/%70roj/...` share one) — an
+#     N-into-1 collapse would silently lose N-1 records;
+#   * every ahead commit touches `locks/` only, and deletes nothing, so the
+#     rebuild cannot drop anything the plan did not name.
+#
+# If any one of these fails, NOTHING moves.
+# ---------------------------------------------------------------------------
+
+type
+  LockMigrationStep* = object
+    ## One record's relocation: `old` -> `target`, both store-relative.
+    oldPath*: string
+    target*: string
+
+  LockMigrationPlan* = object
+    ok*: bool
+    diagnostic*: string
+    steps*: seq[LockMigrationStep]
+      ## Records to relocate.
+    carried*: seq[string]
+      ## Canonical records already ahead of upstream. They are re-added
+      ## unchanged by the rebuild; naming them is what makes "the rebuild
+      ## loses nothing" checkable rather than asserted.
+    orphans*: seq[string]
+      ## Tracked ahead-only paths under `locks/` that are NOT canonical
+      ## records and are not relocatable. The rebuild leaves them on disk as
+      ## untracked files; they were never published, so nothing is lost, but
+      ## the operator is told.
+    baseOid*: string
+    upstreamDisplay*: string
+
+proc lockMigrationNothingToDo*(plan: LockMigrationPlan): bool =
+  plan.ok and plan.steps.len == 0
+
+proc planLockRecordMigration*(identity: GitToolIdentity;
+    manifestRepoRoot: string): LockMigrationPlan =
+  ## Plan the repair without touching anything. Read-only: every git command
+  ## below is a query, except the `fetch` that establishes what "published"
+  ## means, which writes only a remote-tracking ref.
+  result.ok = false
+
+  let worktree = discoverGitWorktree(identity, manifestRepoRoot)
+  if not worktree.ok:
+    result.diagnostic = "manifest repo root '" & manifestRepoRoot &
+      "' is not a git checkout (" & worktree.diagnostic & ")"
+    return
+  if not samePathIdentity(worktree.worktreeRoot, manifestRepoRoot):
+    result.diagnostic = "manifest repo root '" & manifestRepoRoot &
+      "' is not its own git checkout (it lives inside '" &
+      worktree.worktreeRoot & "'); there is no lock store here to repair"
+    return
+
+  let upstream = resolveLockUpstream(identity, manifestRepoRoot)
+  if not upstream.ok:
+    result.diagnostic = upstream.diagnostic
+    return
+  result.upstreamDisplay = upstream.target.display
+
+  let tip = fetchImmutableLockTip(identity, manifestRepoRoot, upstream.target)
+  if not tip.ok:
+    result.diagnostic = tip.diagnostic
+    return
+  result.baseOid = tip.oid
+
+  let format = storageObjectFormat(identity.binaryPath, manifestRepoRoot)
+  if format.len == 0:
+    result.diagnostic = "cannot determine manifest repo Git object format"
+    return
+  let oidLength = if format == "sha256": 64 else: 40
+
+  # The rebuild replays the ahead commits, so the branch must BE ahead of the
+  # upstream and not diverged from it.
+  let ancestry = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "merge-base", "--is-ancestor", tip.oid, "HEAD"])
+  if ancestry.code != 0:
+    result.diagnostic = "the manifest branch has diverged from " &
+      upstream.target.display & "; reconcile it (fetch + rebase) before " &
+      "repairing lock records"
+    return
+
+  # Tracked content must match HEAD exactly, or the rebuild would re-commit a
+  # working tree that is not the history it claims to replay. Untracked files
+  # are fine — the rebuild never adds them.
+  var dirtyTracked: seq[string]
+  for entry in gitPorcelainEntries(identity, manifestRepoRoot):
+    if entry.code == "??": continue
+    dirtyTracked.add(entry.path)
+  if dirtyTracked.len > 0:
+    result.diagnostic = "the manifest repo has uncommitted changes to " &
+      "tracked files (" & dirtyTracked.join(", ") &
+      "); commit, stash or discard them before repairing lock records"
+    return
+
+  # Every ahead commit must touch locks/ only, and must delete nothing: the
+  # rebuild re-adds what it finds under locks/, so anything else in the ahead
+  # range would be silently dropped.
+  let aheadNames = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "diff", "--name-only", "--no-renames", "-z",
+     tip.oid, "HEAD"])
+  if aheadNames.code != 0:
+    result.diagnostic = "cannot inspect the commits this branch holds beyond " &
+      upstream.target.display
+    return
+  var outsideLocks: seq[string]
+  for rel in nulSeparatedPaths(aheadNames.output):
+    if not pathIsUnderLocks(rel):
+      outsideLocks.add(rel)
+  if outsideLocks.len > 0:
+    outsideLocks.sort()
+    result.diagnostic = "the commits this branch holds beyond " &
+      upstream.target.display & " touch paths outside locks/ (" &
+      outsideLocks.join(", ") &
+      "); this repair only rebuilds lock records, so it refuses rather than " &
+      "risk dropping them"
+    return
+  let aheadDeletes = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "diff", "--diff-filter=D", "--name-only",
+     "--no-renames", "-z", tip.oid, "HEAD"])
+  if aheadDeletes.code == 0 and nulSeparatedPaths(aheadDeletes.output).len > 0:
+    result.diagnostic = "the commits this branch holds beyond " &
+      upstream.target.display &
+      " delete tracked paths; a lock record is immutable, so this state is " &
+      "not one this repair will rebuild"
+    return
+
+  # The record inventory: everything tracked under locks/.
+  let tracked = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "ls-files", "-z", "--cached", "--", "locks"])
+  if tracked.code != 0:
+    result.diagnostic = "cannot list the manifest repo's tracked lock paths"
+    return
+
+  proc existsInBase(path: string): bool =
+    gitRunPlain(identity,
+      ["-C", manifestRepoRoot, "cat-file", "-e", tip.oid & ":" & path]).code == 0
+
+  var claimed = initTable[string, string]()
+  var steps: seq[LockMigrationStep]
+  var carried: seq[string]
+  var orphans: seq[string]
+  for rel in nulSeparatedPaths(tracked.output):
+    let parsed = parseLockRecordRelPath(rel)
+    if parsed.ok:
+      if existsInBase(rel): continue
+      # An ahead-only record that is ALREADY canonical. The rebuild re-commits
+      # it, so it is part of the chain this plan promises would publish, and it
+      # has to earn that on its own merits — a canonical PATH is not the same
+      # thing as a publishable RECORD. ``locks/<p>/<r>/NOTES.toml`` is a
+      # perfectly canonical path whose stem is not an object id, and re-adding
+      # it would build a chain the publisher then refuses forever: the wedge
+      # again, created by the very thing meant to clear it.
+      let carriedAbs = manifestRepoRoot / rel.replace('/', DirSep)
+      var carriedBody: string
+      try:
+        carriedBody = readFile(extendedPath(carriedAbs))
+      except CatchableError as err:
+        result.diagnostic = "'" & rel & "' cannot be read (" & err.msg & ")"
+        return
+      if not isFullHexOid(parsed.sha, oidLength):
+        result.diagnostic = "'" & rel & "' sits at a canonical path but its " &
+          "filename stem '" & parsed.sha & "' is not a full " & format &
+          " object id, so the publisher refuses it wherever it sits. This " &
+          "repair will not rebuild a branch it knows would not publish: " &
+          "delete the file if it is not a lock record, and re-run."
+        return
+      if expectedLockRecordFromBody(rel, carriedBody).isNone:
+        result.diagnostic = "'" & rel & "' sits at a canonical path but " &
+          "cannot be bound to an exact repository coordinate, so the " &
+          "publisher would refuse it. This repair will not rebuild a branch " &
+          "it knows would not publish: delete the file if it is not a lock " &
+          "record, and re-run."
+        return
+      carried.add(rel)
+      continue
+    if not rel.endsWith(lockRecordExt) or parsed.canonicalRelPath.len == 0:
+      # Not a lock record at all — either not a ``.toml``, or a ``.toml`` with
+      # no project/repo structure to derive a canonical path from
+      # (``locks/NOTES.toml``, ``locks/<project>/NOTES.toml``). It is the
+      # operator's file. The repair has no opinion about it beyond not losing
+      # it, and MUST NOT refuse the whole store over it: relocating files that
+      # were never records is exactly what the withdrawn migration did.
+      if not existsInBase(rel): orphans.add(rel)
+      continue
+
+    # A record-shaped path that is not canonical. This is the repair's subject.
+    if existsInBase(rel):
+      result.diagnostic = "'" & rel & "' is a non-canonical lock record that " &
+        "is ALREADY PUBLISHED on " & upstream.target.display &
+        ". This repair only rebuilds commits that never left this machine, " &
+        "and a published record is immutable, so it refuses. Removing it " &
+        "requires a coordinated change to the manifest repo's shared " &
+        "history, agreed with everyone who has cloned it — this tool will " &
+        "not do that for you."
+      return
+    let target = parsed.canonicalRelPath
+    if not parseLockRecordRelPath(target).ok:
+      result.diagnostic = "'" & rel & "' cannot be repaired automatically: " &
+        parsed.diagnostic & ". Move it to the path its own body describes by " &
+        "hand, or delete it if it is not a lock record."
+      return
+    let targetParsed = parseLockRecordRelPath(target)
+    # Full hex OID stem, or the publisher would refuse the record after the
+    # move and this repair would have created a second wedge.
+    if not isFullHexOid(targetParsed.sha, oidLength):
+      result.diagnostic = "'" & rel & "' cannot be repaired: its filename " &
+        "stem '" & targetParsed.sha & "' is not a full " & format &
+        " object id, so the publisher would refuse the record wherever it " &
+        "sits. Delete it — the lock writer regenerates a correct record on " &
+        "the next lock operation."
+      return
+    let abs = manifestRepoRoot / rel.replace('/', DirSep)
+    var body: string
+    try:
+      body = readFile(extendedPath(abs))
+    except CatchableError as err:
+      result.diagnostic = "'" & rel & "' cannot be read (" & err.msg & ")"
+      return
+    if body.len == 0:
+      result.diagnostic = "'" & rel & "' is empty; an empty record is not " &
+        "publishable at any path. Delete it — the lock writer regenerates a " &
+        "correct record on the next lock operation."
+      return
+    let named = minimalRoutedRepoName(body)
+    if named.len > 0 and named != targetParsed.repo:
+      result.diagnostic = "'" & rel & "' names repo '" & named &
+        "' in its body but its path decodes to '" & targetParsed.repo &
+        "'; the two disagree, so this repair will not guess. Move it to the " &
+        "record's own path by hand."
+      return
+    if expectedLockRecordFromBody(target, body).isNone:
+      result.diagnostic = "'" & rel & "' cannot be bound to an exact " &
+        "repository coordinate, so it would not publish even from its " &
+        "canonical path " & target & ". Delete it — the lock writer " &
+        "regenerates a correct record on the next lock operation."
+      return
+    let absTarget = manifestRepoRoot / target.replace('/', DirSep)
+    if fileExists(extendedPath(absTarget)):
+      var targetBody: string
+      try:
+        targetBody = readFile(extendedPath(absTarget))
+      except CatchableError as err:
+        result.diagnostic = "cannot read the canonical record at " & target &
+          " (" & err.msg & ")"
+        return
+      if targetBody != body:
+        result.diagnostic = "'" & rel & "' would move onto " & target &
+          ", which already holds a DIFFERENT record. A lock record is " &
+          "immutable, so which body survives is your decision, not this " &
+          "tool's: compare the two files and delete the one that is wrong."
+        return
+    if target in claimed:
+      result.diagnostic = "'" & rel & "' and '" & claimed[target] &
+        "' both resolve to the same canonical path " & target &
+        ". Repairing them together would silently lose one, so this repair " &
+        "refuses: delete whichever is redundant and re-run."
+      return
+    claimed[target] = rel
+    steps.add(LockMigrationStep(oldPath: rel, target: target))
+
+  steps.sort(proc (a, b: LockMigrationStep): int = cmp(a.oldPath, b.oldPath))
+  carried.sort()
+  orphans.sort()
+  result.steps = steps
+  result.carried = carried
+  result.orphans = orphans
+  result.ok = true
+
+proc applyLockRecordMigration*(identity: GitToolIdentity;
+    manifestRepoRoot: string; plan: LockMigrationPlan):
+    tuple[ok: bool; diagnostic: string] =
+  ## Execute a plan that `planLockRecordMigration` already proved publishable.
+  ## Order matters: the branch is reset FIRST, so that the relocations are
+  ## additions relative to the new base rather than a delete-and-add pair.
+  if not plan.ok: return (false, plan.diagnostic)
+  if plan.steps.len == 0: return (true, "")
+
+  let reset = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "reset", "--quiet", "--mixed", plan.baseOid])
+  if reset.code != 0:
+    return (false, "could not rewind the manifest branch to " &
+      plan.upstreamDisplay & ": " & reset.output.strip())
+
+  let locksDir = manifestRepoRoot / "locks"
+
+  proc dirIsEmpty(dir: string): bool =
+    for _ in walkDir(extendedPath(dir)): return false
+    true
+
+  proc pruneEmptyParents(absOld: string) =
+    ## Leave no empty husk of the mis-shaped subtree behind. Path arithmetic is
+    ## done on the ORDINARY form (`extendedPath` output must never be compared
+    ## or stored); only the filesystem calls take the extended form.
+    var dir = parentDir(absOld)
+    while dir.len > locksDir.len and dir.startsWith(locksDir):
+      try:
+        if not dirIsEmpty(dir): break
+        removeDir(extendedPath(dir))
+      except CatchableError: break
+      dir = parentDir(dir)
+
+  var toAdd = plan.carried
+  for step in plan.steps:
+    let absOld = manifestRepoRoot / step.oldPath.replace('/', DirSep)
+    let absNew = manifestRepoRoot / step.target.replace('/', DirSep)
+    try:
+      createDir(extendedPath(parentDir(absNew)))
+      if fileExists(extendedPath(absNew)):
+        # Byte-identical by the plan's own check: the record already exists
+        # canonically and this file is a redundant duplicate.
+        removeFile(extendedPath(absOld))
+      else:
+        moveFile(extendedPath(absOld), extendedPath(absNew))
+    except CatchableError as err:
+      return (false, "failed to relocate " & step.oldPath & " to " &
+        step.target & ": " & err.msg &
+        " (the manifest branch has been rewound to " & plan.upstreamDisplay &
+        "; re-run once the filesystem error is resolved)")
+    pruneEmptyParents(absOld)
+    toAdd.add(step.target)
+
+  toAdd.sort()
+  var deduped: seq[string]
+  for path in toAdd:
+    if deduped.len == 0 or deduped[^1] != path: deduped.add(path)
+  if deduped.len == 0: return (true, "")
+
+  let addRes = gitRunPlain(identity,
+    @["-C", manifestRepoRoot, "add", "-f", "--"] & deduped)
+  if addRes.code != 0:
+    return (false, "git add failed during the lock-record repair: " &
+      addRes.output.strip())
+  let staged = gitRunPlain(identity,
+    @["-C", manifestRepoRoot, "diff", "--cached", "--quiet", "--"] & deduped)
+  if staged.code == 0:
+    # Nothing differs from the base tree; the branch is already repaired.
+    return (true, "")
+  let plural = if deduped.len == 1: "record" else: "records"
+  let commitRes = gitRunPlainEnv(identity,
+    @["-C", manifestRepoRoot, "commit", "--quiet", "-m",
+      "Rebuild " & $deduped.len & " unpublished workspace lock " & plural &
+        " at their canonical paths", "--"] & deduped,
+    internalContext = InternalLockCommitContext)
+  if commitRes.code != 0:
+    return (false, "git commit failed during the lock-record repair: " &
+      commitRes.output.strip())
+  (true, "")
+
+proc renderLockMigrationPlan*(plan: LockMigrationPlan): seq[string] =
+  for step in plan.steps:
+    result.add("  relocate  " & step.oldPath)
+    result.add("        ->  " & step.target)
+  for path in plan.carried:
+    result.add("  re-commit " & path & " (unchanged)")
+  for path in plan.orphans:
+    result.add("  leave     " & path &
+      " (not a lock record; it becomes an untracked file on disk)")
+
+proc runWorkspaceMigrateLocksCommand*(args: openArray[string]): int =
+  ## `repro workspace migrate-locks [--dry-run|--apply]
+  ## [--manifest-layer-root=PATH] [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop]`.
+  ##
+  ## Exit codes:
+  ##   - 0 — nothing to repair, or the repair succeeded, or a dry run planned
+  ##         a repair successfully.
+  ##   - 1 — the store cannot be repaired automatically; the diagnostic names
+  ##         the file and the manual step.
+  ##   - 2 — bad usage.
+  var apply = false
+  var dryRun = false
+  var manifestLayerRoot = ""
+  var workspaceRoot = ""
+  var toolProvisioning = tpmUnspecified
+  var i = 0
+  # ``--flag=VALUE`` and ``--flag VALUE`` both accepted, resolved inline: a
+  # nested helper would have to capture ``args``, and an ``openArray`` cannot be
+  # captured by a closure.
+  var flagValue = ""
+  var flagName = ""
+  while i < args.len:
+    let arg = args[i]
+    flagName = ""
+    flagValue = ""
+    for candidate in ["--manifest-layer-root", "--workspace-root",
+                      "--tool-provisioning"]:
+      if arg == candidate:
+        flagName = candidate
+        if i + 1 < args.len:
+          inc i
+          flagValue = args[i]
+        break
+      elif arg.startsWith(candidate & "="):
+        flagName = candidate
+        flagValue = arg[(candidate.len + 1) .. ^1]
+        break
+    if arg == "--apply": apply = true
+    elif arg == "--dry-run": dryRun = true
+    elif flagName.len > 0:
+      if flagValue.len == 0:
+        stderr.writeLine("repro workspace migrate-locks: " & flagName &
+          " requires a value")
+        return 2
+      case flagName
+      of "--manifest-layer-root": manifestLayerRoot = flagValue
+      of "--workspace-root": workspaceRoot = flagValue
+      else: toolProvisioning = parseToolProvisioning(flagValue)
+    elif arg.startsWith("--"):
+      stderr.writeLine("repro workspace migrate-locks: unknown flag " & arg)
+      return 2
+    else:
+      stderr.writeLine("repro workspace migrate-locks: " &
+        "unexpected argument " & arg)
+      return 2
+    inc i
+  if apply and dryRun:
+    stderr.writeLine("repro workspace migrate-locks: " &
+      "--apply and --dry-run are mutually exclusive")
+    return 2
+
+  # Same default as ``repro workspace lock``: the current directory, with no
+  # upward search, so the two verbs agree about which workspace they mean.
+  if workspaceRoot.len == 0: workspaceRoot = getCurrentDir()
+  workspaceRoot = absolutePath(workspaceRoot)
+  if manifestLayerRoot.len == 0:
+    manifestLayerRoot = workspaceRoot / ".repro" / "manifests"
+  manifestLayerRoot = absolutePath(manifestLayerRoot)
+  if not dirExists(extendedPath(manifestLayerRoot)):
+    stderr.writeLine("repro workspace migrate-locks: no manifest layer at '" &
+      manifestLayerRoot & "'")
+    return 1
+
+  let identity = ensureGitToolResolvable(toolProvisioning, getEnv("PATH"))
+  let plan = planLockRecordMigration(identity, manifestLayerRoot)
+  if not plan.ok:
+    stderr.writeLine("repro workspace migrate-locks: " & plan.diagnostic)
+    return 1
+  if plan.steps.len == 0:
+    stdout.writeLine("repro workspace migrate-locks: every lock record in '" &
+      manifestLayerRoot & "' is already at its canonical path; nothing to do")
+    return 0
+
+  let plural = if plan.steps.len == 1: "record" else: "records"
+  stdout.writeLine("repro workspace migrate-locks: " & $plan.steps.len &
+    " unpublished lock " & plural & " to relocate (base " &
+    plan.upstreamDisplay & "):")
+  for line in renderLockMigrationPlan(plan):
+    stdout.writeLine(line)
+
+  if not apply:
+    stdout.writeLine("")
+    stdout.writeLine("This was a dry run; nothing has changed. Re-run with " &
+      "--apply to rebuild the unpublished commits with these records at " &
+      "their canonical paths.")
+    return 0
+
+  let outcome = applyLockRecordMigration(identity, manifestLayerRoot, plan)
+  if not outcome.ok:
+    stderr.writeLine("repro workspace migrate-locks: " & outcome.diagnostic)
+    return 1
+  stdout.writeLine("repro workspace migrate-locks: relocated " &
+    $plan.steps.len & " lock " & plural &
+    "; the manifest branch now publishes normally")
+  0
+
+
 
 proc completeExpectedLockPublication*(identity: GitToolIdentity;
     backendRoot: string;
@@ -33528,7 +34667,10 @@ proc lockPathsTouchedInPush(identity: GitToolIdentity;
   if not discoverGitWorktree(identity, currentRepo).ok:
     return
   let zeroSha = "0000000000000000000000000000000000000000"
-  let lockPrefix = "locks/" & projectName & "/"
+  # RA-32 — a fourth reader of the ``locks/<project>/`` prefix (the reviewer
+  # named three). Same rule: the prefix is the ENCODED project component, or the
+  # pre-push gate sees no touched lock paths at all.
+  let lockPrefix = "locks/" & encodeLockPathSegment(projectName) & "/"
   var seen = initHashSet[string]()
   for rawLine in readFile(refsPath).splitLines():
     let line = rawLine.strip()
@@ -35891,15 +37033,40 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     if not obs.isPublished and not
         (outgoing.outgoingCurrent and obs.name == currentRepoName and
          obs.headSha == outgoing.headOid):
+      # RA-32 — when the repo being refused IS the one whose push we are
+      # gating, and the object we are gating IS its HEAD, "unpublished" is a
+      # true statement with a false remedy: the push it tells you to run is the
+      # push it just refused. That shape appears whenever the self-exemption
+      # above declines for a reason of its own -- a non-fast-forward update
+      # (`--force-with-lease`) being the common one, since `evaluateOutgoing`
+      # computes exactly that diagnostic and then discards it, leaving
+      # `protocolOk` true so nothing else surfaces it either.
+      #
+      # This changes no policy: the refusal still stands and a force update is
+      # still declined. It stops the operator being handed an impossible
+      # instruction and names the actual reason instead.
+      let selfPush =
+        obs.name == currentRepoName and obs.headSha.len > 0 and
+        obs.headSha == outgoing.headOid and not outgoing.outgoingCurrent
       let evidence =
-        if obs.pubDiagnostic.len > 0:
+        if selfPush and outgoing.diagnostic.len > 0:
+          "this push is the publication being gated (HEAD " & obs.headSha &
+          "), and it was not accepted as outgoing-current: " &
+          outgoing.diagnostic
+        elif obs.pubDiagnostic.len > 0:
           "publish-probe-failed: " & obs.pubDiagnostic
         else: "HEAD " & obs.headSha &
           " not on a '" & obs.remoteName & "/*' remote-tracking branch"
+      let remediation =
+        if selfPush and outgoing.diagnostic.len > 0:
+          "resolve '" & outgoing.diagnostic & "' in " & obs.path &
+          " — re-running 'git push' will not help, this refusal IS that push"
+        else:
+          "run 'git push' in " & obs.path & " first"
       result.failures.add(CheckFailure(
         repo: obs.path,
         property: "unpublished",
-        remediation: "run 'git push' in " & obs.path & " first",
+        remediation: remediation,
         evidence: evidence))
       result.exitCode = 2
       return
@@ -36355,8 +37522,15 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     # which lock backed the check. MO-3: the store's ``lockKey`` carries the
     # RA-1 identity tuple, from which the ``locks/<p>/<repo>/<sha>.toml`` path
     # and trigger (repo, sha) reconstruct byte-identically.
-    let lockRel = "locks/" & latest.lockKey.project & "/" &
-      latest.lockKey.repo & "/" & latest.lockKey.sha & ".toml"
+    #
+    # RA-32 — "byte-identically" is only true through the SAME encoder the
+    # writer used. This raw join was the fifth site to disagree with it: for a
+    # forge-shaped repo name it showed the operator
+    # ``locks/<p>/stripe/sync-engine/<sha>.toml`` — a depth-5 path that does
+    # not exist — as the audit trail of a lock that had in fact been written
+    # correctly at depth 4.
+    let lockRel = lockFileRepoRelativePath(
+      latest.lockKey.project, latest.lockKey.repo, latest.lockKey.sha)
     result.lockUpdate.lockFilePath =
       manifestLayerRoot / lockRel.replace('/', DirSep)
     result.lockUpdate.indexFilePath = ""
@@ -48166,6 +49340,8 @@ const reproWorkspaceSubcommands = [
   # WV-2..WV-6 — membership, definition, and the two branch-family verbs.
   "enable", "disable", "projects", "repos", "new", "switch",
   "publish-evidence",
+  # RA-32 — the explicit lock-record repair. Never invoked implicitly.
+  "migrate-locks",
 ]
 
 proc renderCompletionSnippet(shell, reproBin: string): string =
@@ -49774,6 +50950,22 @@ proc runThinAppDispatch(programName: string): int =
       return runWorkspaceLockCommand(lockArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace lock: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "migrate-locks":
+    # RA-32 — `repro workspace migrate-locks`. The EXPLICIT repair for a
+    # manifest store holding a lock record at a non-canonical path. Same
+    # dispatch convention as the M9-M12 family. Nothing invokes this
+    # implicitly: not `repro push`, not the pre-push gate, not the publisher.
+    try:
+      let migrateArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspaceMigrateLocksCommand(migrateArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace migrate-locks: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "status":

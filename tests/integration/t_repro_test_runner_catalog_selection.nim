@@ -64,6 +64,12 @@
 
 import std/[json, os, osproc, strutils, tables, tempfiles, times, unittest]
 
+template testWithReturn(name: string; body: untyped) =
+  test name:
+    proc runTestBody() =
+      body
+    runTestBody()
+
 const RepoRootMarker = "repro.nim"
 
 proc findRepoRoot(): string =
@@ -238,7 +244,7 @@ proc locateRunner(): string =
 
 suite "repro_test_runner catalog fidelity and hash-difference selection":
 
-  test "catalog rows and the real dynamic-loader probe path are preserved":
+  testWithReturn "catalog rows and the real dynamic-loader probe path are preserved":
     let runner = locateRunner()
     check fileExists(runner)
     if not fileExists(runner):
@@ -495,7 +501,7 @@ suite "repro_test_runner catalog fidelity and hash-difference selection":
     check nonzeroRows[RuntimeStem]{"protocol_aware"}.getBool() == true
     check nonzeroRows[AdversarialStem]{"protocol_aware"}.getBool() == false
 
-  test "one edited body selects exactly one case":
+  testWithReturn "one edited body selects exactly one case":
     let runner = locateRunner()
     check fileExists(runner)
     if not fileExists(runner):
@@ -640,7 +646,7 @@ suite "repro_test_runner catalog fidelity and hash-difference selection":
     check full.summary{"summary"}{"selection"}{
       "selected_subset"}.getBool() == false
 
-  test "an untrustworthy catalog runs every case, never none":
+  testWithReturn "an untrustworthy catalog runs every case, never none":
     let runner = locateRunner()
     check fileExists(runner)
     if not fileExists(runner):
@@ -744,7 +750,7 @@ suite "repro_test_runner catalog fidelity and hash-difference selection":
     check blank.summary{"summary"}{"selection"}{
       "deselected_unchanged"}.getInt(-1) == 0
 
-  test "a producer that emits no bodyHash is never deselected":
+  testWithReturn "a producer that emits no bodyHash is never deselected":
     ## The reachable negative control for the empty-hash guard, using a
     ## REAL second producer rather than a fabricated one.
     ##

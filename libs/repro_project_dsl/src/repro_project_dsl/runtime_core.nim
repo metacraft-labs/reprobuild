@@ -328,6 +328,125 @@ proc registerPackageDef*(pkg: PackageDef) {.dynOrStatic.} =
 proc registeredPackages*(): seq[PackageDef] {.dynOrStatic.} =
   registry
 
+proc registeredRuntimeLibraries*(packageName: string):
+    seq[RuntimeLibraryDef] {.dynOrStatic.} =
+  ## Every ``runtimeLibrary`` declaration for ``packageName``, in source order
+  ## and unfiltered — including entries for other platforms. Returns the empty
+  ## seq for a package that declares none, so a caller need not know whether
+  ## the package opted into the surface.
+  for pkg in registry:
+    if pkg.packageName == packageName:
+      return pkg.runtimeLibraries
+  @[]
+
+proc runtimeLibraryMatchesHost*(lib: RuntimeLibraryDef;
+                                hostCpu, hostOs: string): bool =
+  ## Empty (or ``any``) cpu / os means "every host". ``darwin`` and ``macos``
+  ## are aliases because the DSL parser accepts both spellings.
+  ##
+  ## Deliberately mirrors ``matchesHostPlatform`` in
+  ## ``repro_tool_profiles`` — the rule for a ``runtimeLibrary`` slice must be
+  ## the same one that picks a ``tarball`` slice, or a package could resolve
+  ## its provisioning from one arm and its library directory from another.
+  ## The host tokens are parameters rather than read from `defined()` here so
+  ## the rule can be tested for a host other than the one running the test.
+  let cpuNorm = lib.cpu.toLowerAscii()
+  let cpuOk = cpuNorm.len == 0 or cpuNorm == "any" or
+    cpuNorm == hostCpu.toLowerAscii()
+  let osNorm = lib.os.toLowerAscii()
+  let hostOsNorm = hostOs.toLowerAscii()
+  let osOk = osNorm.len == 0 or osNorm == "any" or
+    osNorm == hostOsNorm or
+    (hostOsNorm == "macos" and osNorm == "darwin") or
+    (hostOsNorm == "darwin" and osNorm == "macos")
+  cpuOk and osOk
+
+proc selectRuntimeLibraries*(packageName, hostCpu, hostOs: string):
+    seq[RuntimeLibraryDef] {.dynOrStatic.} =
+  ## The declarations that apply to the given host, in source order.
+  ##
+  ## Returns ALL matching entries rather than the first: a package may provide
+  ## several libraries on one platform. Where two entries share a name and both
+  ## match, source order wins, matching the "first entry whose constraints
+  ## match" rule the tarball resolver uses.
+  for lib in registeredRuntimeLibraries(packageName):
+    if runtimeLibraryMatchesHost(lib, hostCpu, hostOs):
+      result.add(lib)
+
+type
+  RuntimeLibraryResolution* = object
+    ## The outcome of joining a consumer's runtime dependencies to the
+    ## producers' ``runtimeLibrary`` declarations.
+    dirs*: seq[string]
+      ## Absolute directories the loader must be able to search, in dependency
+      ## declaration order and deduplicated. This is what populates
+      ## ``LaunchPlan.runtimeLibraryDirs``.
+    unresolved*: seq[string]
+      ## Dependencies that declare a runtime library for this host but whose
+      ## prefix the caller could not supply.
+      ##
+      ## Reported rather than skipped, deliberately. Silently omitting a
+      ## directory produces a launcher that looks complete and fails at load
+      ## time with the same "could not load: clingo.dll" this whole model
+      ## exists to prevent — the original bug, moved to a new place. The caller
+      ## decides whether that is fatal; it does not get to not know.
+    providedNone*: seq[string]
+      ## Dependencies that resolved fine but declare no runtime library for
+      ## this host. Not an error and usually not interesting — an ordinary tool
+      ## dependency looks exactly like this — but surfaced so a caller
+      ## debugging a missing directory can tell "declared nothing" apart from
+      ## "could not be found".
+
+proc resolveRuntimeLibraryDirs*(runtimeDepSelectors: openArray[string];
+                                hostCpu, hostOs: string;
+                                prefixOf: proc(packageName: string): string
+                                  {.raises: [].}):
+    RuntimeLibraryResolution =
+  ## Join the consumer side (``runtimeDeps:``) to the producer side
+  ## (``runtimeLibrary``), yielding the directories a launcher must make
+  ## searchable.
+  ##
+  ## The join answers "which runtime dependencies are LIBRARIES?" without a
+  ## heuristic: a dependency contributes a directory exactly when the package
+  ## providing it declares a ``runtimeLibrary`` matching this host. A tool
+  ## dependency declares none and contributes none. This matters because
+  ## ``runtimeDeps:`` is documented as carrying "tools/libraries" together, and
+  ## guessing from the name would be both unreliable and invisible when wrong.
+  ##
+  ## ``prefixOf`` returns the realized prefix for a package, or the empty
+  ## string when it is not realized. It is a parameter rather than a direct
+  ## registry read so this stays a pure function: the realization layer lives
+  ## in another library, and inverting the dependency would make the join
+  ## untestable without a store.
+  ##
+  ## Order follows the consumer's declaration order, which the spec requires
+  ## of the resulting search path ("prepend-only and never wider than
+  ## runtimeLibraryDirs"). Duplicates are dropped, keeping the first
+  ## occurrence — two dependencies sharing a prefix is normal, and a repeated
+  ## directory would widen nothing but would make the plan harder to read.
+  for selector in runtimeDepSelectors:
+    if selector.len == 0:
+      continue
+    let declared = selectRuntimeLibraries(selector, hostCpu, hostOs)
+    if declared.len == 0:
+      if selector notin result.providedNone:
+        result.providedNone.add(selector)
+      continue
+    let prefix = prefixOf(selector)
+    if prefix.len == 0:
+      if selector notin result.unresolved:
+        result.unresolved.add(selector)
+      continue
+    for lib in declared:
+      # A `dir` of "." means the loadable artifact sits at the prefix root —
+      # the flat-zip layout. Joining "." would produce a path ending in "/.",
+      # which works but reads badly in a plan a human has to audit.
+      let dir =
+        if lib.dir.len == 0 or lib.dir == ".": prefix
+        else: prefix & "/" & lib.dir
+      if dir notin result.dirs:
+        result.dirs.add(dir)
+
 proc resetProvisioningContributionRegistry*() {.dynOrStatic.} =
   provisioningContributionRegistry.setLen(0)
 
@@ -1884,6 +2003,30 @@ proc setRegisteredActionDeclaredOutputs*(actionId: string;
   for i in 0 ..< buildActionRegistry.len:
     if buildActionRegistry[i].id == actionId:
       buildActionRegistry[i].declaredOutputs = @outputs
+      return
+
+proc setRegisteredActionDependencyPolicy*(
+    actionId: string;
+    policy: BuildActionDependencyPolicy) {.dynOrStatic.} =
+  ## Replace the dependency policy on an action that a typed-tool wrapper has
+  ## already registered. Package constructors use this when an upstream build
+  ## emits a recognized dependency report and therefore does not need the
+  ## wrapper's opaque-tool monitoring default.
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      buildActionRegistry[i].dependencyPolicy = policy
+      return
+
+proc setRegisteredActionInputs*(actionId: string;
+                                inputs: openArray[string]) {.dynOrStatic.} =
+  ## Replace role-derived inputs on an already-registered typed-tool action.
+  ## Multi-stage package constructors use this when a command consumes and
+  ## mutates the same build tree: the immutable phase stamp is the declared
+  ## input, while the automatic monitor continues to discover source and tool
+  ## inputs outside that mutable tree.
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      buildActionRegistry[i].inputs = @inputs
       return
 
 proc setRegisteredActionPublish*(actionId: string;

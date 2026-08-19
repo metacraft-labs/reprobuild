@@ -6,7 +6,9 @@
 ##
 ## Gated by `defined(linux)` AND `REPRO_M69_NIX_VM=1`.
 
-import std/[os, unittest]
+import std/os
+
+import ct_test_unittest_parallel
 
 import repro_elevation
 

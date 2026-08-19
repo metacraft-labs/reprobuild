@@ -1,4 +1,4 @@
-import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, times, net]
+import std/[algorithm, json, os, osproc, sequtils, sets, strtabs, strutils, tables, times, net]
 
 import blake3
 import cbor
@@ -8,8 +8,8 @@ import cbor
 # Using the hatches states that explicitly instead of leaving bare findExe /
 # execCmdEx calls that read like an oversight. See
 # docs/ambient-execution-linter.md.
-import lints/ambient_execution
 import repro_core
+import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_domain_types
 import repro_hash
@@ -1652,6 +1652,27 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
       else:
         "sha256:" & sha256))
 
+proc systemToolEnv(): StringTableRef =
+  ## A copy of the current environment with the dynamic-linker override
+  ## variables removed, for spawning a SYSTEM tool resolved off PATH.
+  ##
+  ## A nix-built `repro` runs with `LD_LIBRARY_PATH` pointing at nix-store lib
+  ## dirs so it can dlopen its own clingo / zstd / openssl by leaf name (the
+  ## build strips rpath — the `.rodata`-bake guard). Those vars are inherited by
+  ## every child process, so a SYSTEM binary like the runner's `/usr/bin/curl`
+  ## is forced to load the nix `libssl`/`libcrypto` instead of its own — which
+  ## fails when the nix build needs a newer glibc than the (e.g. Debian) runner
+  ## has: `/usr/bin/curl: libc.so.6: version 'GLIBC_2.38' not found (required by
+  ## …/openssl-3.6.1/lib/libssl.so.3)`. A system tool must use its own system
+  ## libraries; scrub the overrides so it does. `repro`'s own env is untouched.
+  result = newStringTable(modeCaseSensitive)
+  for k, v in envPairs():
+    result[k] = v
+  for override in ["LD_LIBRARY_PATH", "LD_PRELOAD",
+                   "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"]:
+    if result.hasKey(override):
+      result.del(override)
+
 proc downloadUrlToFile(url, destination: string) =
   createDir(extendedPath(parentDir(destination)))
   if url.startsWith("file://"):
@@ -1667,6 +1688,7 @@ proc downloadUrlToFile(url, destination: string) =
     let process = startProcess(curl,
       args = ["-L", "--fail", "--silent", "--show-error", "-o",
         destination, url],
+      env = systemToolEnv(),
       options = {poUsePath, poParentStreams})
     let exitCode = waitForExit(process)
     close(process)
@@ -2502,6 +2524,18 @@ proc bumpWindowsNimStack(nimExePath: string) =
     except CatchableError, OSError:
       discard
 
+proc compilerPathForShellEnvironment*(path: string;
+                                      windowsHost: bool): string =
+  ## Render an executable path for conventional compiler environment
+  ## variables such as ``CC``. Autotools copies these values into generated
+  ## make recipes, where an MSYS shell treats Windows backslashes as escape
+  ## characters. Native Windows programs accept forward slashes, so this form
+  ## works for both the configure probes and the generated recipes.
+  if windowsHost:
+    path.replace('\\', '/')
+  else:
+    path
+
 proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
                                   storeRoot: string) =
   ## MR5 — before the engine's interface-extract step shells out to
@@ -2567,7 +2601,7 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
     if bootstrapGcc.len > 0:
       putEnv("REPRO_BOOTSTRAP_CC", bootstrapGcc)
       if getEnv("CC").len == 0:
-        putEnv("CC", bootstrapGcc)
+        putEnv("CC", compilerPathForShellEnvironment(bootstrapGcc, true))
 
 proc blake3HexBytes*(bytes: openArray[byte]): string =
   blake3.toHex(blake3.digest(bytes))

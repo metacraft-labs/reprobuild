@@ -34,7 +34,8 @@
 # Shrinking ALLOWLIST is the work. Adding to it needs a reason in review.
 #
 # The authoritative enforcement is the compile-time linter in
-# `lints/ambient_execution.nim` (see docs/ambient-execution-linter.md); this
+# `libs/repro_core/src/repro_core/ambient_execution.nim` (re-exported from
+# `lints/ambient_execution.nim`; see docs/ambient-execution-linter.md). This
 # script exists because pre-commit cannot afford a full compile, and because
 # grep catches the violation before it is committed rather than after.
 set -euo pipefail
@@ -52,9 +53,17 @@ BASELINE="scripts/ambient-execution-baseline.txt"
 
 scan() {
   # Only production Nim sources. Tests legitimately shell out to build fixtures.
+  # The linter implementation necessarily names and wraps every banned API.
   grep -rlnE "\b(${BANNED})\(" --include=*.nim libs repro.nim apps 2>/dev/null \
     | grep -v '/tests/' \
+    | grep -v '^libs/repro_core/src/repro_core/ambient_execution\.nim$' \
     | sort -u
+}
+
+normalized_baseline() {
+  # Git may check the baseline out with CRLF on Windows. ``comm`` compares
+  # bytes, so normalize it before comparing with grep's LF-only path stream.
+  tr -d '\r' < "$BASELINE" | sort -u
 }
 
 if [[ "${1:-}" == "--write-baseline" ]]; then
@@ -70,7 +79,7 @@ fi
 
 current=$(scan)
 # Anything in `current` that is not in the baseline is a new offender.
-new_offenders=$(comm -23 <(printf '%s\n' "$current") <(sort -u "$BASELINE") || true)
+new_offenders=$(comm -23 <(printf '%s\n' "$current") <(normalized_baseline) || true)
 
 if [[ -n "$new_offenders" ]]; then
   echo "error: ambient binary resolution/execution added to file(s) not on the baseline:" >&2
@@ -89,7 +98,7 @@ fi
 
 # Also report shrinkage so the ratchet is visible in CI logs: a baseline entry
 # that no longer pollutes should be removed from the file.
-stale=$(comm -13 <(printf '%s\n' "$current") <(sort -u "$BASELINE") || true)
+stale=$(comm -13 <(printf '%s\n' "$current") <(normalized_baseline) || true)
 if [[ -n "$stale" ]]; then
   echo "note: these baseline entries no longer contain banned calls — remove them" >&2
   echo "      from $BASELINE to lock in the improvement:" >&2

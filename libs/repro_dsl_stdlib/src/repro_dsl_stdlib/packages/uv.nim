@@ -6,12 +6,13 @@
 ## ``uv pip install`` / ``uv tool install``).
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 package uv:
   provisioning:
     nixPackage "nixpkgs#uv", executablePath = "bin/uv",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # Windows: astral-sh/uv ``uv-x86_64-pc-windows-msvc.zip`` ships
     # ``uv.exe`` + ``uvx.exe`` flat at the archive root (no inner
     # directory).

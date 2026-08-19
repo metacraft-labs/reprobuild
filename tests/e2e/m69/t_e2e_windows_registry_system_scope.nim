@@ -18,7 +18,9 @@
 ##
 ## No `skip`, no `xfail`.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, strutils, tempfiles]
+
+import ct_test_unittest_parallel
 
 import repro_elevation
 import repro_infra

@@ -1,4 +1,6 @@
-import std/[json, os, osproc, strutils, tempfiles, unittest]
+import std/[json, os, osproc, strutils, tempfiles]
+
+import ct_test_unittest_parallel
 
 import io_mon
 from repro_test_support import requireBinary, monitorShimPath

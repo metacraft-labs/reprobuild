@@ -53,9 +53,20 @@
 
 import std/[algorithm, os, strutils, tables, times]
 
+# RA-32 — the record path this module builds is the LONGEST path in the lock
+# subsystem, and component encoding lengthens it (``%HH`` expands a byte up to
+# 3x). ``extendedPath`` is applied at the filesystem calls in ``writeLockFile``
+# so a deep workspace does not hit Windows' 260-char ``MAX_PATH`` on the one
+# write that matters most. Boundary only: the ordinary form is what is
+# returned, stored, compared and handed to ``git``.
+from repro_core/paths import extendedPath
+
 import types
 import diagnostics
 import resolver
+import lock_paths
+
+export lock_paths
 
 type
   WorkspaceLockEntry* = object
@@ -100,19 +111,6 @@ proc shortSha*(sha: string; width: int = 8): string =
   if sha.len <= width: sha
   else: sha[0 ..< width]
 
-proc safeFilenameSegment(value: string): string =
-  ## Sanitize a repo or project name into a filesystem-safe segment
-  ## for the lock filename. Identical policy to M9's
-  ## ``safeRepoIdSegment``: alphanumerics + dash / underscore /
-  ## period pass through; everything else collapses to ``-``.
-  for ch in value:
-    if ch in {'A'..'Z', 'a'..'z', '0'..'9', '-', '_', '.'}:
-      result.add(ch)
-    else:
-      result.add('-')
-  if result.len == 0:
-    result = "lock"
-
 proc tomlEscape(value: string): string =
   ## Escape a string for inclusion in a TOML basic string literal.
   ## We deliberately stick to the basic-string subset (backslash +
@@ -146,7 +144,7 @@ proc lockFileName*(triggerSha: string): string =
   ## SHA plus ``.toml``. RA-1 (pilot ``418f109``) keys the file by the
   ## full SHA inside a per-repo directory, so the repo name is a path
   ## segment (see ``lockFilePath``) rather than a filename prefix.
-  safeFilenameSegment(triggerSha) & ".toml"
+  lockRecordFileName(triggerSha)
 
 proc lockFilePath*(manifestLayerRoot, project, triggerRepo,
                    triggerSha: string): string =
@@ -156,8 +154,13 @@ proc lockFilePath*(manifestLayerRoot, project, triggerRepo,
   ## ``locks/``). The path layout matches the RA-1 spec verbatim:
   ## ``<manifest-layer>/locks/<project>/<repo>/<sha>.toml`` — a
   ## **per-repo** subtree keyed by the trigger repo.
-  manifestLayerRoot / "locks" / project /
-    safeFilenameSegment(triggerRepo) / lockFileName(triggerSha)
+  ##
+  ## RA-32 — the project and repo NAMES become ONE path component each
+  ## via ``encodeLockPathSegment``, so a forge-shaped name carrying a
+  ## slash (``stripe/sync-engine``) cannot deepen the path past the
+  ## four components the format has. See ``lock_paths.nim``.
+  manifestLayerRoot /
+    lockRecordRelPath(project, triggerRepo, triggerSha).replace('/', DirSep)
 
 proc lockFileRepoRelativePath*(project, triggerRepo,
                                triggerSha: string): string =
@@ -165,17 +168,19 @@ proc lockFileRepoRelativePath*(project, triggerRepo,
   ## forward slashes, always relative to the manifest layer's root
   ## (so the file is discoverable irrespective of where the manifest
   ## repo is checked out). RA-1 per-repo layout:
-  ## ``locks/<project>/<repo>/<sha>.toml``.
-  "locks/" & project & "/" & safeFilenameSegment(triggerRepo) & "/" &
-    lockFileName(triggerSha)
+  ## ``locks/<project>/<repo>/<sha>.toml``, RA-32 component encoding.
+  lockRecordRelPath(project, triggerRepo, triggerSha)
 
 proc lockRepoSubtreeRelativePath*(project, triggerRepo: string): string =
   ## The manifest-layer-relative path of a repo's lock **subtree**
   ## (forward slashes, trailing slash). This is the exact pathspec the
   ## "latest published lock for repo X" Git-history query reads:
   ## ``git log -1 -- locks/<project>/<repo>/``. RA-1 made this subtree
-  ## load-bearing in place of the dropped shared index.
-  "locks/" & project & "/" & safeFilenameSegment(triggerRepo) & "/"
+  ## load-bearing in place of the dropped shared index, which is
+  ## precisely why RA-32 keeps the repo to ONE component: a
+  ## variable-depth path makes this pathspec address something other
+  ## than one repo.
+  lockRecordSubtreeRelPath(project, triggerRepo)
 
 # ---- builder: live state -> lock model -------------------------------------
 
@@ -278,7 +283,7 @@ proc writeLockFile*(lock: WorkspaceLockFile; path: string) =
   ## yet on a first-ever lock). Idempotent: re-running with the
   ## same lock content overwrites the file with identical bytes
   ## (the serializer is deterministic).
-  createDir(parentDir(path))
+  createDir(extendedPath(parentDir(path)))
   let body = serializeLockToToml(lock)
   # RA-7: never write an empty / zero-byte lock. A zero-byte lock would
   # be silently committed and published as a "reproducible state" that
@@ -286,7 +291,7 @@ proc writeLockFile*(lock: WorkspaceLockFile; path: string) =
   if body.strip().len == 0:
     raise newException(ValueError,
       "refusing to write empty/zero-byte lock file: " & path)
-  writeFile(path, body)
+  writeFile(extendedPath(path), body)
 
 # ---- convenience: ensure stable ordering of repos --------------------------
 

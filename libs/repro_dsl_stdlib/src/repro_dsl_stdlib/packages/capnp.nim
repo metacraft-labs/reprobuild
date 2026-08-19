@@ -1,10 +1,11 @@
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 package capnp:
   provisioning:
     nixPackage "nixpkgs#capnproto", executablePath = "bin/capnp",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # Windows / non-Nix Linux: capnproto-tools-win32 via ScoopInstaller/Main.
     # Scoop unzips the upstream `capnproto-tools-win32-<ver>.zip` archive
     # without flattening, so capnp.exe lives at the nested

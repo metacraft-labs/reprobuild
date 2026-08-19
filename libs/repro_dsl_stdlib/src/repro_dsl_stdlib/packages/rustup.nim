@@ -1,10 +1,11 @@
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 package rustup:
   provisioning:
     nixPackage "nixpkgs#rustup", executablePath = "bin/rustup",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # Windows / non-Nix Linux: rustup-init shipped via ScoopInstaller/Main's
     # ``rustup-msvc`` package. rustup-init.exe runs once on scoop install
     # and lays down a fully wired rustup tree under

@@ -38,6 +38,7 @@
 
 import std/tables
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
@@ -48,8 +49,8 @@ export packages_schema
 package ruby:
   provisioning:
     nixPackage "nixpkgs#ruby", executablePath = "bin/ruby",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # MR2 Windows: rubyinstaller2 portable 7z for Ruby 3.3.5-1. Inner
     # dir ``rubyinstaller-3.3.5-1-x64/`` flattens via stripComponents=1
     # so ``bin/ruby.exe``, ``bin/gem.cmd``, ``bin/irb.cmd``, plus the

@@ -21,7 +21,9 @@
 ##
 ## Override the ISO location via ``$VMH_REPROOS_ISO``.
 
-import std/[os, osproc, strutils, tables, times, unittest]
+import std/[os, osproc, strutils, tables, times]
+
+import ct_test_unittest_parallel
 
 const HostRunsGate = defined(windows)
   ## The Hyper-V backend needs a Windows host. This used to be enforced
