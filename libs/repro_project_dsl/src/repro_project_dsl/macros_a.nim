@@ -3288,6 +3288,24 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         if envRoot.len > 0 and fileExists(envRoot / "config.nims") and
             fileExists(envRoot / "reprobuild.nimble"):
           repoRoot = envRoot
+      # Daemon-hosted provider compiles intentionally carry a narrowed
+      # environment, so an out-of-tree consumer cannot rely on either override
+      # reaching macro expansion. The DSL module's own source location is the
+      # authoritative final anchor: walk from this included file to the checkout
+      # whose config declares every library path needed by the cold generator.
+      if repoRoot.len == 0:
+        var dir = currentSourcePath().parentDir
+        for _ in 0 ..< 8:
+          if dir.len == 0:
+            break
+          if fileExists(dir / "config.nims") and
+              fileExists(dir / "reprobuild.nimble"):
+            repoRoot = dir
+            break
+          let parent = dir.parentDir
+          if parent == dir:
+            break
+          dir = parent
     # The emitted-accessor cache is keyed by the PRODUCER, not the consumer, so
     # every consumer of the same producer shares ONE lift + ONE cached splice.
     # Anchor it under ``<repoRoot>/build/nimcache`` (Nim's config walk keys off
