@@ -6318,6 +6318,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim",
+    binary: "build/test-bin/t_checkout_path_cannot_escape_the_workspace_root",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_ci_skips_targets_covered_by_valid_certificate_per_platform.nim",
     binary: "build/test-bin/t_ci_skips_targets_covered_by_valid_certificate_per_platform",
     defines: @[],

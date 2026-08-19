@@ -795,6 +795,7 @@ tests/integration/t_cert_gate_defaults_off_and_advisory_does_not_block.nim	nim	1
 tests/integration/t_certificate_policy_required_advisory_off_modes.nim	nim	1
 tests/integration/t_certificate_signature_verifies_against_registered_key.nim	nim	1
 tests/integration/t_certificates_travel_with_pushed_commit.nim	nim	1
+tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	nim	3
 tests/integration/t_ci_skips_targets_covered_by_valid_certificate_per_platform.nim	nim	1
 tests/integration/t_cli_repro_lock_explain.nim	nim	5
 tests/integration/t_clone_action_honors_partial_blobless_and_single_branch.nim	nim	2

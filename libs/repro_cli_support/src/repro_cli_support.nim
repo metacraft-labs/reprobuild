@@ -50237,13 +50237,19 @@ proc runWorkspaceDisableCommand*(args: openArray[string]): int =
     # turn this into a recursive delete of the workspace or something outside
     # it. Manifest data is not trusted with that: refuse the individual removal
     # and say so, rather than resolving the path and hoping.
+    #
+    # The manifest reader now refuses those shapes at the schema boundary, so
+    # this is a second line rather than the only one — but it asks the SAME
+    # question, via `checkoutPathRejection`, instead of keeping a private copy
+    # of the rule. Two independently-written definitions of "degenerate path"
+    # is how one of them ends up narrower than the other, and the narrower one
+    # is always the one standing in front of the `removeDir`.
     let normalized = path.strip()
-    if normalized.len == 0 or normalized == "." or isAbsolute(normalized) or
-        ".." in normalized.split({'/', DirSep}):
+    let rejection = checkoutPathRejection(normalized)
+    if rejection.len > 0:
       inc removalFailures
       stderr.writeLine("repro workspace disable: refusing to remove the " &
-        "declared checkout path '" & path & "' — it is not a plain " &
-        "workspace-relative directory")
+        "declared checkout path '" & path & "' — it " & rejection)
       continue
     let dir = workspaceRoot / normalized
     if not dirExists(dir):
