@@ -150,6 +150,7 @@ proc isProviderModePath(path: string): bool =
     "tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim",
     "tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim",
     "tests/unit/t_configure_build_tree_cleanup.nim",
+    "tests/unit/t_m9r83_install_mirror_action_shapes.nim",
   ]:
     if p == exact:
       return true

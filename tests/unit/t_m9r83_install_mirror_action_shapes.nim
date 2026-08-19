@@ -87,6 +87,8 @@ suite "M9.R.83 install mirror emitted action shape":
       check sidecar in mirror.outputs
       check "sh" in mirror.toolIdentityRefs
       check InstallMirrorPublishToolName in mirror.toolIdentityRefs
+      when defined(linux):
+        check "patchelf" in mirror.toolIdentityRefs
       check "rm -rf" in script
       check "build/dest/usr" in script
       check "cp -a --" in script

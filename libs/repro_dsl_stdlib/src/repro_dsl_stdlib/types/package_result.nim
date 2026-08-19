@@ -1158,11 +1158,10 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   ## Idempotent: ``patchelf`` overwrites the existing RPATH every time,
   ## so re-running the install-mirror produces the same final RPATH.
   ##
-  ## Graceful skip: when ``patchelf`` is not on PATH (host orchestration
-  ## that builds the action graph but doesn't run it), the loop short-
-  ## circuits without failing. Inside the Linux smoke environment
-  ## (where patchelf IS provisioned via the bootstrap-linux-smoke.sh
-  ## nix-shell deps), the loop runs over every ELF.
+  ## Graceful skip: non-Linux hosts can construct the same action graph
+  ## without providing ``patchelf``. Linux install-mirror actions declare
+  ## the typed ``patchelf`` tool explicitly below, so executed ELF
+  ## normalization never depends on the caller's ambient PATH.
   var script = ""
   script.add("if command -v patchelf >/dev/null 2>&1; then ")
   # Build the RPATH string. Single-quote ``$ORIGIN`` so the shell does
@@ -1684,6 +1683,9 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   var mirrorToolRefs = @["sh"]
   if InstallMirrorPublishToolName notin mirrorToolRefs:
     mirrorToolRefs.add(InstallMirrorPublishToolName)
+  when defined(linux):
+    if "patchelf" notin mirrorToolRefs:
+      mirrorToolRefs.add("patchelf")
   for raw in registeredNativeBuildDeps(packageName):
     let dep = m9r14fStripDepConstraint(raw)
     if dep.len > 0 and dep notin mirrorToolRefs:

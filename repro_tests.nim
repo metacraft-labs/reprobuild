@@ -9936,7 +9936,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_m9r83_install_mirror_action_shapes.nim",
     binary: "build/test-bin/t_m9r83_install_mirror_action_shapes",
-    defines: @[],
+    defines: @["reproProviderMode"],
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
