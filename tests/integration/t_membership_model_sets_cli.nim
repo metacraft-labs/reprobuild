@@ -34,11 +34,17 @@
 ##   7. Mixing `--set` and `--project` in one `repos add` is refused: a
 ##      fragment carries one spelling of where it comes from, and a fragment
 ##      that half-resolves for one of two targets is worse than a refusal.
+##   8. The `--json` surfaces name what the model HAS. "Project" was a ROLE a
+##      set plays when enabled, not a kind, so a schema keyed on it described a
+##      distinction that does not exist. Both the schema STRING and the payload
+##      key move together, so a consumer keyed on the schema breaks loudly on
+##      the shape change rather than reading a `sets` payload as the old
+##      `projects` one.
 ##
 ## No mocks: the manifest edits are read back through the real strict readers
 ## and the real resolver, and the commits land in a real git repo.
 
-import std/[options, os, osproc, strutils, tempfiles, unittest]
+import std/[json, options, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_workspace_manifests
@@ -290,3 +296,54 @@ suite "membership model — `repro ws sets` authoring":
         "--set=delta"])
       check unguessable.code == 2
       check unguessable.output.contains("resolves to neither")
+
+  test "t_json_surfaces_are_set_based":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "json")
+      defer: removeDir(fx.scratch)
+
+      check runRepro(fx, ["ws", "sets", "add", "beta"]).code == 0
+      check runRepro(fx, ["ws", "repos", "add", "lib-j",
+        "--set=beta",
+        "--remote=https://git.example.invalid/acme/lib-j",
+        "--branch=dev"]).code == 0
+
+      # ---- sets list --json --------------------------------------------
+      let setsJson = runRepro(fx, ["ws", "sets", "list", "--json"])
+      check setsJson.code == 0
+      let setsDoc = parseJson(setsJson.output)
+      check setsDoc["schema"].getStr() == "reprobuild.workspace-sets-list.v1"
+      check setsDoc.hasKey("sets")
+      # The retired spellings are ABSENT, not merely joined by the new ones:
+      # emitting both would leave a consumer free to keep reading the old key
+      # and never learn the model changed.
+      check not setsDoc.hasKey("projects")
+      var names: seq[string]
+      for row in setsDoc["sets"]:
+        names.add(row["name"].getStr())
+      check "alpha" in names   # a project…
+      check "beta" in names    # …and a repo-set, in ONE listing.
+
+      # ---- repos list --json -------------------------------------------
+      let reposJson = runRepro(fx, ["ws", "repos", "list", "--json",
+        "--set=beta"])
+      check reposJson.code == 0
+      let reposDoc = parseJson(reposJson.output)
+      check reposDoc["schema"].getStr() ==
+        "reprobuild.workspace-set-repos-list.v1"
+      check reposDoc["set"].getStr() == "beta"
+      check not reposDoc.hasKey("project")
+      var repoNames: seq[string]
+      for row in reposDoc["repos"]:
+        repoNames.add(row["repo"].getStr())
+      check repoNames == @["lib-j"]
+
+      # The retained `--project=` flag names the SAME namespace, so it reports
+      # under the same key — the scope word is the model's, not the flag's.
+      let aliasJson = runRepro(fx, ["ws", "repos", "list", "--json",
+        "--project=beta"])
+      check aliasJson.code == 0
+      check parseJson(aliasJson.output)["set"].getStr() == "beta"

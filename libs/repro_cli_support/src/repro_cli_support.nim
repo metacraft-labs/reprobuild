@@ -49050,8 +49050,8 @@ proc normalizeWorkspaceNamespaceAlias*(args: seq[string]): seq[string] =
 #     when the user has not chosen an explicit set.
 #   * ``repro completion <shell>`` — emit a shell completion script
 #     (RA-26 ``prompt init`` style: print a snippet, mutate nothing).
-#   * ``repro workspace projects`` / ``repos`` — manifest-authoring verbs that
-#     write + commit + push project and repo DEFINITIONS to the manifest repo.
+#   * ``repro workspace sets`` / ``repos`` — manifest-authoring verbs that
+#     write + commit + push repo-set and repo DEFINITIONS to the manifest repo.
 
 const
   bootstrapEnvrcContent = """# shellcheck shell=bash
@@ -49074,20 +49074,20 @@ This is a multi-repo reprobuild workspace. Sibling repos are cloned
 side-by-side and coordinated through the workspace manifest. Read
 @workspace-projects.md for the active project set and per-repo descriptions.
 
-To activate a project in this workspace use `repro ws enable <project>`
-(and `repro ws disable <project>` to drop it). To DEFINE a new project or
-repo for everyone, use `repro ws projects add` / `repro ws repos add`; the
+To activate a repo-set in this workspace use `repro ws enable <set>`
+(and `repro ws disable <set>` to drop it). To DEFINE a new repo-set or
+repo for everyone, use `repro ws sets add` / `repro ws repos add`; the
 manifest is the workspace bill of materials. `workspace-projects.md` is
 generated from the manifest — do not edit it by hand.
 """
 
   bootstrapProjectsDocContent = """# Workspace Projects
 
-This file is generated from the workspace manifest. It lists the projects
-layered into this workspace and the repos each project contributes.
+This file is generated from the workspace manifest. It lists the repo-sets
+layered into this workspace and the repos each one contributes.
 
-Run `repro workspace projects list` to see every defined project and
-whether it is enabled here, and `repro workspace enable <project>` to layer
+Run `repro workspace sets list` to see every defined repo-set and
+whether it is enabled here, and `repro workspace enable <set>` to layer
 another one in.
 """
 
@@ -51111,10 +51111,16 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       var arr = newJArray()
       for r in rows:
         arr.add(%*{"name": r.name, "enabled": r.enabled, "defined": r.defined})
-      echo (%*{"schema": "reprobuild.workspace-projects-list.v1",
+      # The machine surface names what the model has: repo-sets. "Project" was
+      # a ROLE a set plays when it is enabled, not a kind, so a schema keyed on
+      # it described a distinction that does not exist. Renaming the schema
+      # STRING (rather than only the array key) is deliberate: a consumer that
+      # keys off the schema breaks loudly on the shape change instead of
+      # reading a `sets` payload as though it were the old `projects` one.
+      echo (%*{"schema": "reprobuild.workspace-sets-list.v1",
                "workspaceRoot": workspaceRoot,
                "primary": (if active.len > 0: active[0] else: ""),
-               "projects": arr}).pretty
+               "sets": arr}).pretty
       return 0
     for r in rows:
       var line = r.name & "\t" & (if r.enabled: "enabled" else: "disabled")
@@ -51405,13 +51411,16 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     return 1
 
   if sub == "list":
-    var scopeProject = ""
+    # ONE namespace, whichever flag spelling named it. `--project=` is the
+    # retained spelling of `--set=`; the variable is named for the model rather
+    # than for the older of the two words.
+    var scopeSet = ""
     var wantEnabled = false
     var wantDisabled = false
     var asJson = false
     for arg in rest:
       if arg.startsWith("--project=") or arg.startsWith("--set="):
-        scopeProject = arg[arg.find('=') + 1 .. ^1]
+        scopeSet = arg[arg.find('=') + 1 .. ^1]
       elif arg == "--enabled": wantEnabled = true
       elif arg == "--disabled": wantDisabled = true
       elif arg == "--all": wantEnabled = false; wantDisabled = false
@@ -51433,12 +51442,12 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
       except CatchableError:
         discard
     var scopePaths: seq[string]
-    if scopeProject.len > 0:
+    if scopeSet.len > 0:
       try:
-        scopePaths = projectSetRepoPaths(workspaceRoot, @[scopeProject])
+        scopePaths = projectSetRepoPaths(workspaceRoot, @[scopeSet])
       except CatchableError as err:
         stderr.writeLine("repro workspace repos list: cannot resolve " &
-          "project '" & scopeProject & "': " & err.msg)
+          "repo-set '" & scopeSet & "': " & err.msg)
         return 1
     let reposDir = manifestRoot / "repos"
     var files: seq[string]
@@ -51464,7 +51473,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         revision = m.repo.branch.get(m.repo.revision.get(""))
       except CatchableError:
         discard
-      if scopeProject.len > 0 and repoPath notin scopePaths:
+      if scopeSet.len > 0 and repoPath notin scopePaths:
         continue
       let enabled = repoPath in enabledPaths
       if wantEnabled and not enabled: continue
@@ -51478,9 +51487,13 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           (if revision.len > 0: revision else: "(inherited)") & "\t" &
           (if enabled: "enabled" else: "disabled"))
     if asJson:
-      echo (%*{"schema": "reprobuild.workspace-repos-list.v1",
+      # `set` rather than `project`: the scope flag accepts either spelling but
+      # names ONE namespace, and reporting it under the retired word would make
+      # the machine surface the last place the two look like different kinds.
+      # The schema string moves with the payload so the break is loud.
+      echo (%*{"schema": "reprobuild.workspace-set-repos-list.v1",
                "workspaceRoot": workspaceRoot,
-               "project": scopeProject,
+               "set": scopeSet,
                "repos": arr}).pretty
     else:
       for line in lines:
