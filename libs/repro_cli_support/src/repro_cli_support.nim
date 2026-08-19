@@ -339,6 +339,8 @@ proc renderInternalUsage*(programName: string): string =
       "(alias of __repro-runquota-helper)\n" &
     "  compile-provider …                          provider-compile helper " &
       "(alias of __repro-compile-provider)\n" &
+    "  extract-interface …                         interface-extraction " &
+      "helper (alias of __repro-extract-interface)\n" &
     "  compile-profile …                           profile-compile helper " &
       "(alias of __repro-compile-profile)\n" &
     "  dev-env-introspect …                        dev-env introspection " &
@@ -6447,6 +6449,210 @@ proc selectorFilesystemKey(selector: string): string =
   if result.len == 0:
     result = "package"
 
+# ---------------------------------------------------------------------
+# Interface extraction as an ordinary build edge.
+#
+# ``reprobuild-specs/Compiles-Are-Normal-Edges.md``: every compile reprobuild
+# performs — including the ones it performs on its own behalf — is an
+# ordinary build-graph edge executed through the engine and subject to
+# io-mon monitoring. The recipe interface-extraction compile was the
+# exception: ``extractInterfaceFromModule`` spawned ``nim c`` with
+# ``startProcess``, so ``monitoredAction`` (which only wraps ``bakProcess``
+# actions) never saw it, and its freshness rested on hand-enumerated keys.
+#
+# The failure mode that produced the rule: ``--define:reproBin`` /
+# ``--define:reproConsumerRoot`` were added to that compile, reached the
+# command line, and had no effect, because the hand-written key did not
+# mention defines. A green build reported success while the dependent
+# feature did nothing.
+#
+# The edge below is shaped exactly like the provider-compile edge
+# (``providerCompileBuildAction`` + ``__repro-compile-provider``): a helper
+# subcommand does the work in a child process the engine can monitor. The
+# whole extraction — the ``nim c`` AND the runner execution that projects
+# the interface — is one action, so the outputs it is addressed by are the
+# stable artifact/stub paths rather than the per-invocation scratch
+# directory the raw compile writes into.
+# ---------------------------------------------------------------------
+
+var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
+  ## Per-PROCESS memo of extraction edges already materialized in this run,
+  ## keyed by the edge's own identity (its argv hash).
+  ##
+  ## This is NOT a freshness cache and deliberately holds no input list: it
+  ## only says "this exact edge already ran, in this process, a moment ago".
+  ## One ``repro build`` reaches the same extraction several times (graph
+  ## inspection, snapshot refresh, the build itself), and re-entering the
+  ## engine for each would re-validate the same evidence with nothing able to
+  ## have changed in between.
+
+proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
+                          workDir, scratchDir, consumerRoot, publicCliPath,
+                          cacheRoot: string;
+                          stats: var BuildStats;
+                          requireStub = true;
+                          resourceModule = "";
+                          extraPaths: openArray[string] = [];
+                          bypassRunQuota = false;
+                          fallbackToRunQuotaBypass = false;
+                          forceRebuild = false;
+                          suppressTrace = true;
+                          skipCacheHitEvidence = true;
+                          statsEnabled = false;
+                          cancelCheck: BuildCancelCallback = nil):
+    ProjectInterfaceArtifact =
+  ## Materialize a project interface through the build engine.
+  ##
+  ## THE ENGINE ALONE decides whether the edge re-runs. There is deliberately
+  ## no hand-written freshness check in front of it any more.
+  ##
+  ## There used to be one (``cachedInterfaceArtifact``), because io-mon graded
+  ## every monitored action that consumed an OS pipe as
+  ## ``out-of-tree content channel consumed`` — a Level 2 (unknown-scope)
+  ## loss. ``collectEvidence`` set ``disableCacheHits``, the engine skipped
+  ## ``recordActionResult``, and the edge had NO cache entry to hit on this or
+  ## any later build; without the gate every ``repro build`` paid the full
+  ## extraction (~55 s instead of ~1.5 s). The helper captures the compiler's
+  ## output through a pipe, so the extraction was always in that class.
+  ##
+  ## io-mon IM-3/IM-4 (IoMon-Pipeline-Capture.milestones.org) removed the
+  ## cause: the shim now records ``pipe``/``pipe2``/``socketpair`` creates, so
+  ## a channel created inside the monitored tree pairs with its consume, and
+  ## an unpaired consume whose producer is a monitored pid no longer
+  ## downgrades. A pipeline that is closed under monitoring is graded
+  ## ``mcComplete`` and the edge publishes normally.
+  ##
+  ## Deleting the gate is not just a tidy-up: it was UNSOUND. It was keyed by
+  ## an import walk of the recipe's TEXT bounded to the project root, so a
+  ## dependency the recipe acquires during macro expansion — a ``dslDeps``
+  ## package's own ``repro.nim``, or anything a ``staticExec`` in a macro
+  ## reads — could not appear in it. Editing such a file left the gate warm
+  ## and served a stale interface with a green build. The engine's decision
+  ## comes from the monitored read set, which does see those files.
+  let helperCliPath = internalReproHelperCliPath(publicCliPath)
+  if helperCliPath.len == 0 or not cliPathExists(helperCliPath):
+    # No engine-executable image to spawn back into. Embedded callers and
+    # the bootstrap path land here; they get the pre-existing in-process
+    # extraction, which is the same code the helper runs.
+    return extractInterfaceFromModule(modulePath, artifactPath, stubPath,
+      workDir, scratchDir, requireStub, resourceModule, extraPaths,
+      consumerRoot)
+
+  var command = @[
+    helperCliPath,
+    "__repro-extract-interface",
+    "--module", modulePath,
+    "--artifact", artifactPath,
+    "--stub", stubPath,
+    "--work-dir", workDir,
+    "--consumer-root", consumerRoot,
+    "--require-stub", (if requireStub: "1" else: "0")]
+  if scratchDir.len > 0:
+    command.add("--scratch-dir")
+    command.add(scratchDir)
+  if resourceModule.len > 0:
+    command.add("--resource-module")
+    command.add(resourceModule)
+  for extra in extraPaths:
+    if extra.len > 0:
+      command.add("--extra-path")
+      command.add(extra)
+
+  createDir(extendedPath(parentDir(artifactPath)))
+  let edgeCwd =
+    if scratchDir.len > 0: scratchDir else: parentDir(artifactPath)
+  createDir(extendedPath(edgeCwd))
+  var inputs = @[modulePath]
+  if resourceModule.len > 0 and resourceModule != modulePath:
+    inputs.add(resourceModule)
+  # The action key must distinguish one consumer's extraction from another's.
+  # ``action()``'s default weak fingerprint is derived from the action ID
+  # alone, so a fixed ID would give every project in a shared action-cache
+  # root the SAME key — one consumer's interface restored into another's
+  # build. The fingerprint is taken from the ARGV instead, which already
+  # names the module, the artifact, the work dir and the consumer root. That
+  # is the property the spec is after: the command line is an input by
+  # construction, not a list somebody maintains. Content changes are caught
+  # by the engine's recorded-input revalidation on top of it.
+  let edgeIdentity = weakFingerprintFromText(command.join("\x00"))
+  let sessionKey = toHex(edgeIdentity.bytes)
+  if not forceRebuild and interfaceEdgeSessionResults.hasKey(sessionKey) and
+      fileExists(extendedPath(artifactPath)):
+    return interfaceEdgeSessionResults[sessionKey]
+  let actionId = "__repro_interface_extract-" &
+    toHex(weakFingerprintFromText(absolutePath(artifactPath)).bytes)[0 .. 15]
+  # The extraction's own scratch is NOT an input. It reads back what it just
+  # wrote there: the Nim incremental cache (``nimcache-interface``), the
+  # generated extract-runner tree under ``m7-temp`` (a fresh random directory
+  # every invocation), and the runner binary it links and then executes.
+  # Recording those as inputs would make the edge miss its cache on every
+  # single build — the random directory does not even exist next time — and
+  # would turn a correct warm build into a full recompile. Everything under
+  # the scratch root is machine-local derived state; the real inputs are the
+  # recipe, the reprobuild libs, the toolchain and the config files, all of
+  # which live elsewhere and stay recorded.
+  var ignoredInputPrefixes: seq[string] = @[]
+  if scratchDir.len > 0:
+    ignoredInputPrefixes.add(absolutePath(scratchDir))
+  when defined(windows):
+    ignoredInputPrefixes.add(
+      absolutePath(getTempDir() / "repro-interface-extract"))
+  let extractAction = action(actionId, command,
+    cwd = edgeCwd,
+    inputs = inputs,
+    outputs = interfaceExtractionOutputs(artifactPath, stubPath),
+    commandStatsId = "repro interface extract edge",
+    cacheable = true,
+    weakFingerprint = edgeIdentity,
+    dependencyPolicy =
+      automaticMonitorGatheringPolicy(ignoredInputPrefixes))
+  var edgeConfig = BuildEngineConfig(
+    cacheRoot: cacheRoot,
+    actionCacheRoot: currentActionCacheRoot(),
+    runQuotaCliPath: publicCliPath,
+    monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
+    monitorCliArgs: internalIoMonitorArgs,
+    maxParallelism: 1'u32,
+    stdoutLimit: 1024 * 1024,
+    stderrLimit: 1024 * 1024,
+    rebuildMissingOutputsOnCacheHit: true,
+    deferLocalOutputBlobs: true,
+    bypassRunQuota: bypassRunQuota,
+    fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
+    inlineRunQuota: true,
+    dryRun: false,
+    forceRebuild: forceRebuild,
+    suppressTrace: suppressTrace,
+    skipCacheHitEvidence: skipCacheHitEvidence,
+    cancelCallback: cancelCheck)
+  edgeConfig.statsEnabled = statsEnabled
+  let edgeResult = runBuild(graph([extractAction]), edgeConfig)
+  stats.mergeStats(edgeResult.stats)
+  if edgeResult.hasFailedActions():
+    # The child's captured stdout/stderr carries the recipe's own compiler
+    # diagnostics (file, line, message). Surfacing them verbatim is the whole
+    # reason the extraction can be a monitored child at all: a failed edge
+    # must still read like a failed recipe compile.
+    var detail = ""
+    for item in edgeResult.results:
+      if item.status in {asFailed, asBlocked}:
+        var parts = @["interface extraction edge " & $item.status &
+          " for " & modulePath]
+        if item.stderr.len > 0:
+          parts.add(item.stderr)
+        if item.stdout.len > 0:
+          parts.add(item.stdout)
+        detail = parts.join("\n")
+        break
+    if detail.len == 0:
+      detail = "interface extraction edge failed for " & modulePath
+    raise newException(OSError, detail)
+  if not fileExists(extendedPath(artifactPath)):
+    raise newException(IOError,
+      "interface extraction edge did not write artifact: " & artifactPath)
+  result = readInterfaceArtifact(artifactPath)
+  interfaceEdgeSessionResults[sessionKey] = result
+
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
                         selectDefaultAction = false;
@@ -7105,8 +7311,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # for the rationale. Bootstrap toolchain is cached in the per-user
   # tool-store (shared across projects), not the per-build outDir.
   ensureBootstrapToolchainEnv(mode, resolveStoreRoot() / "tool-store")
-  let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
-    compileWorkDir, compileScratchDir, requireStub = false)
+  let artifact = extractInterfaceEdge(modulePath, interfacePath, stubPath,
+    compileWorkDir, compileScratchDir, result.projectRoot, publicCliPath,
+    outDir / "build-engine-cache", buildStats,
+    requireStub = false,
+    bypassRunQuota = bypassRunQuota,
+    fallbackToRunQuotaBypass = fallbackToRunQuotaBypass,
+    forceRebuild = forceRebuild,
+    suppressTrace = mcTrace notin measureSet,
+    skipCacheHitEvidence = mcCacheEvidence notin measureSet,
+    statsEnabled = statsEnabled,
+    cancelCheck = cancelCheck)
   finishStat(buildStats, statsEnabled, "repro interface extract",
     interfaceStart)
   recordInterfaceArtifactWarmStats(buildStats, statsEnabled)
@@ -7415,9 +7630,25 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         var realizedBinaries: seq[string] = @[]
         let producerArtifact =
           try:
-            extractInterfaceFromModule(producerProjectFile, producerIface,
+            # The producer's OWN root is the consumer root for ITS recipe —
+            # not the consumer that pulled it in. Passing it explicitly is
+            # what keeps two producers extracted in one session from
+            # resolving their declared dependencies against each other's
+            # workspace; an ambient ``getCurrentDir()`` would hand both the
+            # same (wrong) root.
+            extractInterfaceEdge(producerProjectFile, producerIface,
               producerStub, reprobuildLibraryWorkDir(),
-              producerOutDirBase / "producer-iface-work", requireStub = false)
+              producerOutDirBase / "producer-iface-work",
+              projectRootForModule(producerProjectFile), publicCliPath,
+              producerOutDirBase / "build-engine-cache", buildStats,
+              requireStub = false,
+              bypassRunQuota = bypassRunQuota,
+              fallbackToRunQuotaBypass = fallbackToRunQuotaBypass,
+              forceRebuild = forceRebuild,
+              suppressTrace = mcTrace notin measureSet,
+              skipCacheHitEvidence = mcCacheEvidence notin measureSet,
+              statsEnabled = statsEnabled,
+              cancelCheck = cancelCheck)
           except CatchableError:
             raise newException(OSError,
               "cross-repo producer \"" & selector & "\" at " &
@@ -8455,6 +8686,52 @@ proc runProviderCompileHelper(args: openArray[string]): int =
     return 0
   except CatchableError as err:
     stderr.writeLine("repro provider compile: error: " & err.msg)
+    return 1
+
+proc runInterfaceExtractHelper(args: openArray[string]): int =
+  ## Child side of the interface-extraction edge. Runs INSIDE the monitored
+  ## process, so everything the extraction reads — the recipe, every module
+  ## it imports, every nim config file, and whatever a ``staticExec`` in a
+  ## recipe macro reaches — is observed by io-mon and becomes evidence for
+  ## the edge, without anyone declaring it.
+  let modulePath = valueAfterFlag(args, "--module")
+  let artifactPath = valueAfterFlag(args, "--artifact")
+  let stubPath = valueAfterFlag(args, "--stub")
+  let workDir = valueAfterFlag(args, "--work-dir")
+  let scratchDir = valueAfterFlag(args, "--scratch-dir")
+  # Passed explicitly, never taken from the child's cwd: the engine chooses
+  # the action's working directory, and this value is baked into the
+  # compiled recipe as ``-d:reproConsumerRoot``. Deriving it from the
+  # ambient cwd here would silently point a recipe's dependency resolution
+  # at the wrong workspace.
+  let consumerRoot = valueAfterFlag(args, "--consumer-root")
+  let resourceModule = valueAfterFlag(args, "--resource-module")
+  let requireStub = valueAfterFlag(args, "--require-stub") == "1"
+  var extraPaths: seq[string] = @[]
+  for i in 0 ..< args.len - 1:
+    if args[i] == "--extra-path" and args[i + 1].len > 0:
+      extraPaths.add(args[i + 1])
+  for (name, value) in [
+    ("--module", modulePath),
+    ("--artifact", artifactPath),
+    ("--stub", stubPath),
+    ("--work-dir", workDir)
+  ]:
+    if value.len == 0:
+      stderr.writeLine("repro interface extract: missing " & name)
+      return 2
+  try:
+    # ``useExtractionCache = false``: reaching this process at all means the
+    # engine already decided the edge must run. Re-asking the narrower
+    # text-closure key here could only ever overrule that decision, and it
+    # would do so exactly in the cases the edge was introduced for — a
+    # dependency acquired during macro expansion, which that key cannot see.
+    discard extractInterfaceFromModule(modulePath, artifactPath, stubPath,
+      workDir, scratchDir, requireStub, resourceModule, extraPaths,
+      consumerRoot, useExtractionCache = false)
+    return 0
+  except CatchableError as err:
+    stderr.writeLine("repro interface extract: error: " & err.msg)
     return 1
 
 proc splitDevEnvActivities(value: string): seq[string] =
@@ -16193,8 +16470,10 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   let compileScratchDir = outDir / "provider-work"
   # MR5 — see executeBuildTarget for the bootstrap toolchain rationale.
   ensureBootstrapToolchainEnv(mode, resolveStoreRoot() / "tool-store")
-  let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
-    compileWorkDir, compileScratchDir, requireStub = false)
+  var inspectionStats: BuildStats
+  let artifact = extractInterfaceEdge(modulePath, interfacePath, stubPath,
+    compileWorkDir, compileScratchDir, projectRoot, publicCliPath,
+    outDir / "build-engine-cache", inspectionStats, requireStub = false)
   result.interfacePath = interfacePath
 
   var effectiveMode = mode
@@ -16396,8 +16675,10 @@ proc refreshRecipeProviderSnapshot(target: string;
   let compileWorkDir = reprobuildLibraryWorkDir()
   let compileScratchDir = outDir / "provider-work"
   ensureBootstrapToolchainEnv(mode, resolveStoreRoot() / "tool-store")
-  let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
-    compileWorkDir, compileScratchDir, requireStub = false)
+  var snapshotStats: BuildStats
+  let artifact = extractInterfaceEdge(modulePath, interfacePath, stubPath,
+    compileWorkDir, compileScratchDir, projectRoot, publicCliPath,
+    outDir / "build-engine-cache", snapshotStats, requireStub = false)
 
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified and
@@ -21004,8 +21285,10 @@ proc runDevelopCommand(args: openArray[string]): int =
   let compileScratchDir = outDir / "provider-work"
   # MR5 — see executeBuildTarget for the bootstrap toolchain rationale.
   ensureBootstrapToolchainEnv(mode, resolveStoreRoot() / "tool-store")
-  let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
-    compileWorkDir, compileScratchDir)
+  var developStats: BuildStats
+  let artifact = extractInterfaceEdge(modulePath, interfacePath, stubPath,
+    compileWorkDir, compileScratchDir, projectRootForModule(modulePath),
+    stablePublicCliPath(), outDir / "build-engine-cache", developStats)
 
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified and
@@ -43773,8 +44056,15 @@ proc solverInputsFromCompiledProvider(projectDir: string): Option[tuple[
     ensureBootstrapToolchainEnv(tpmPathOnly, resolveStoreRoot() / "tool-store")
     let interfacePath = scratchRoot / "project-interface.rbsz"
     let stubPath = scratchRoot / "project-interface.nim"
+    # Deliberately NOT the extraction edge (Compiles-Are-Normal-Edges.md):
+    # every path here — artifact, stub, sidecars, nimcache — lives under a
+    # temp root this proc creates and deletes in the same call, so an edge
+    # would be keyed on paths that never exist again and could never hit.
+    # This is a best-effort probe for the lock refresh, not a build; its
+    # results are thrown away and it writes nothing into the project tree.
     let artifact = extractInterfaceFromModule(modulePath, interfacePath,
-      stubPath, compileWorkDir, scratchDir, requireStub = false)
+      stubPath, compileWorkDir, scratchDir, requireStub = false,
+      consumerRoot = projectRootForModule(modulePath))
     # Only recipes with solver-bound ``uses:`` produce a non-trivial solve;
     # skip the (more expensive) provider compile otherwise so a plain recipe
     # falls straight back to the sidecar without paying for it.
@@ -44550,6 +44840,7 @@ const internalHelperAliases = {
   # is ``repro debug io monitor``).
   "runquota-helper": "__repro-runquota-helper",
   "compile-provider": "__repro-compile-provider",
+  "extract-interface": "__repro-extract-interface",
   "compile-profile": "__repro-compile-profile",
   "dev-env-introspect": "__repro-dev-env-introspect",
   "render-dev-env-shell": "__repro-render-dev-env-shell",
@@ -45749,6 +46040,30 @@ proc runThinAppDispatch(programName: string): int =
   # the right handler.) ``repro internal`` is intentionally absent from
   # the primary ``repro help`` body; it is documented via
   # ``renderInternalUsage`` (and ``CLI/internal/`` in the specs).
+  if args.len >= 4 and args[0] == "internal" and args[1] == "resolve-package":
+    # ``repro internal resolve-package <consumerDir> <name>``
+    #
+    # Resolve one declared package dependency to its checkout and print the
+    # absolute path, or print nothing when it is not checked out.
+    #
+    # This exists to be called from a recipe's own macro expansion via
+    # ``staticExec``. A macro cannot reuse the engine's resolution directly --
+    # it runs at compile time, in a scratch directory, with none of the
+    # engine's state -- and reimplementing workspace lookup inside the macro
+    # would create a second resolver free to drift from the one that builds
+    # ``--path:``. Shelling back into the engine keeps exactly one.
+    #
+    # ALWAYS exits 0, including when unresolved. ``staticExec`` surfaces a
+    # non-zero status as an opaque compile failure with no useful location,
+    # so "not found" is reported as empty output and diagnosed by the caller,
+    # which can say which recipe asked and for what.
+    let consumerDir = args[2]
+    let name = args[3]
+    let resolved = resolvePackageRoot(consumerDir, name)
+    if resolved.len > 0:
+      echo resolved
+    return 0
+
   if args.len > 0 and args[0] == "internal":
     # Bare ``repro internal``, ``repro internal --help``, or an unrecognized
     # subcommand: print the internal-namespace usage. Exit 0 for an explicit
@@ -45773,6 +46088,13 @@ proc runThinAppDispatch(programName: string): int =
       else:
         @[]
     return runProviderCompileHelper(helperArgs)
+  if args.len > 0 and args[0] == "__repro-extract-interface":
+    let helperArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runInterfaceExtractHelper(helperArgs)
   if args.len > 0 and args[0] == "__repro-compile-profile":
     let helperArgs =
       if args.len > 1:

@@ -412,8 +412,12 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
       discard
 
   if not useCachedInterface:
+    # ``consumerRoot`` is the recipe's OWN project root. Left implicit it
+    # would be the process cwd, which is only incidentally the same thing —
+    # and is baked into the compiled recipe, so a wrong value is silent.
     interfaceArtifact = extractInterfaceFromModule(active.modulePath,
-      interfacePath, stubPath, workDir, compileScratchDir)
+      interfacePath, stubPath, workDir, compileScratchDir,
+      consumerRoot = parentDir(absolutePath(active.modulePath)))
   let effectiveProvisioning =
     active.effectiveToolProvisioning(interfaceArtifact)
 

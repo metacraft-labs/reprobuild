@@ -428,7 +428,16 @@ proc isKnownPackageSection(stmt: NimNode): bool =
                  # platform runtime / link deps that propagate to
                  # consumers). Each block accepts the same minispec
                  # grammar as ``uses:`` (``"name >=version"``).
-                 "builddeps", "nativebuilddeps", "runtimedeps"]
+                 "builddeps", "nativebuilddeps", "runtimedeps",
+                 # DSL-export dependencies: packages whose own ``repro.nim``
+                 # defines public symbols this recipe wants in scope. A
+                 # SEPARATE category on purpose -- ``uses:`` / ``buildDeps:``
+                 # declare TOOLS to provision (the engine resolves them
+                 # through PATH / the provisioning catalog and refuses an
+                 # unprovisioned name), which is a different question from
+                 # "whose DSL constructors do I import". A package can be
+                 # either, both, or neither.
+                 "dsldeps"]
 
 proc preservedTopLevelNodes(body: NimNode): NimNode =
   ## Collect everything in `body` that is NOT a recognised DSL section.

@@ -541,6 +541,128 @@ suite "integration_scheduler_dependency_gathering_policies":
           commandStatsId = "m17-corrupt-monitor"), failRoot, app,
           "monitor depfile read failed", monitorTools.monitorCliPath,
           monitorTools.monitorCliArgs)
+
+      test "monitored_pipeline_action_hits_cache_on_rebuild":
+        ## IM-5 acceptance (IoMon-Pipeline-Capture.milestones.org).
+        ##
+        ## A monitored action whose command is a SHELL PIPELINE publishes an
+        ## action-cache entry, and a second identical build HITS it.
+        ##
+        ## The property under test is the CACHE DECISION, not the absence of
+        ## a loss record. Before io-mon IM-3 (``pipe``/``pipe2``/
+        ## ``socketpair`` create records) the reader end of the pipe was an
+        ## unpaired ``mrExternalContent`` consume, graded
+        ## ``out-of-tree content channel consumed`` — a Level 2 unknown-scope
+        ## loss, which sets ``disableCacheHits``, which skips
+        ## ``recordActionResult``. Such an edge has NO entry to hit, on this
+        ## or any later build. Every monitored compile that captures its
+        ## child's output through a pipe was in that class.
+        ##
+        ## Run 3 is the decisive arm: with the output file deleted, only a
+        ## really-published entry can put it back without launching, so the
+        ## assertion cannot be satisfied by an "outputs are already present"
+        ## short-circuit.
+        let repoRoot = getCurrentDir()
+        let tempRoot = createTempDir("repro-im5-pipeline", "")
+        defer: removeDir(tempRoot)
+
+        # No runquotad here, unlike the cases above: this test is about the
+        # cache decision the MONITOR evidence produces, and a lease
+        # coordinator is one more way for it to fail for an unrelated reason.
+        let app = getAppFilename()
+        let monitorTools = policyMonitorTools(repoRoot, tempRoot)
+        let shellPath = findExe("sh")
+        check shellPath.len > 0
+
+        let caseDir = tempRoot / "pipeline"
+        createDir(caseDir)
+        let inputPath = caseDir / "input.txt"
+        let outputPath = caseDir / "out.txt"
+        writeFixture(inputPath, "pipeline v1\n")
+        let cacheRoot = tempRoot / ".repro-cache"
+
+        # Two processes joined by an OS pipe, both children of the monitored
+        # shell: the producer is in-tree and its own inputs are captured, so
+        # the pipeline is closed under monitoring and there is no invisible
+        # input. That is precisely the case io-mon used to refuse to cache.
+        proc pipelineAction(): BuildAction =
+          action("monitored-pipeline",
+            [shellPath, "-c", "cat input.txt | tr 'a-z' 'A-Z' > out.txt"],
+            cwd = caseDir,
+            inputs = [inputPath],
+            outputs = ["out.txt"],
+            cacheable = true,
+            weakFingerprint = weak("monitored-pipeline"),
+            dependencyPolicy = DependencyGatheringPolicy(
+              kind: dgAutomaticMonitor,
+              completeness: decComplete),
+            commandStatsId = "im5-monitored-pipeline",
+            env = @["REPRO_MONITOR_SHIM_LIB=" & monitorTools.shim])
+
+        proc runPipeline(action: BuildAction): ActionResult =
+          runBuild(graph([action]), BuildEngineConfig(
+            cacheRoot: cacheRoot,
+            runQuotaCliPath: app,
+            monitorCliPath: monitorTools.monitorCliPath,
+            monitorCliArgs: monitorTools.monitorCliArgs,
+            maxParallelism: 1'u32,
+            stdoutLimit: 512 * 1024,
+            stderrLimit: 512 * 1024,
+            bypassRunQuota: true)).singleResult()
+
+        let beforeFirst = cacheRecordsSize(cacheRoot)
+        let firstRun = runBuild(graph([pipelineAction()]), BuildEngineConfig(
+          cacheRoot: cacheRoot,
+          runQuotaCliPath: app,
+          monitorCliPath: monitorTools.monitorCliPath,
+          monitorCliArgs: monitorTools.monitorCliArgs,
+          maxParallelism: 1'u32,
+          stdoutLimit: 512 * 1024,
+          stderrLimit: 512 * 1024,
+          bypassRunQuota: true))
+        let first = firstRun.singleResult()
+        if first.status != asSucceeded:
+          checkpoint(first.stderr)
+        check first.status == asSucceeded
+        check first.launched
+        check first.cacheDecision == cdMiss
+        check readFile(outputPath) == "PIPELINE V1\n"
+        check first.monitorDepfilePath.len > 0
+        check fileExists(first.monitorDepfilePath)
+        for diagnostic in first.evidence.diagnostics:
+          checkpoint(diagnostic)
+          check not diagnostic.contains("unknown-scope loss")
+        # PUBLICATION. Without this the run below could only ever miss.
+        check cacheRecordsSize(cacheRoot) > beforeFirst
+        let afterFirst = cacheRecordsSize(cacheRoot)
+
+        # THE DELIVERABLE: a second identical build resolves from the action
+        # cache and does not launch the pipeline again.
+        let second = runPipeline(pipelineAction())
+        if second.cacheDecision != cdHit:
+          checkpoint(second.reason)
+        check second.cacheDecision == cdHit
+        check not second.launched
+        check second.status in {asCacheHit, asUpToDate}
+        check cacheRecordsSize(cacheRoot) == afterFirst
+
+        # DECISIVE: delete the output. Only a published entry can restore it
+        # without running anything.
+        removeFile(outputPath)
+        let third = runPipeline(pipelineAction())
+        check third.cacheDecision == cdHit
+        check third.status == asCacheHit
+        check not third.launched
+        check fileExists(outputPath)
+        check readFile(outputPath) == "PIPELINE V1\n"
+
+        # NON-VACUITY: the hit is keyed on the input, not unconditional.
+        writeFixture(inputPath, "pipeline v2\n")
+        let fourth = runPipeline(pipelineAction())
+        check fourth.status == asSucceeded
+        check fourth.launched
+        check fourth.cacheDecision == cdMiss
+        check readFile(outputPath) == "PIPELINE V2\n"
     else:
       test "automatic monitor policies are unsupported on this platform":
         skip()

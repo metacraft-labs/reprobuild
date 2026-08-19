@@ -3426,6 +3426,105 @@ macro provisioningFor*(target: untyped; body: untyped): untyped =
   parseStmt("registerProvisioningContributionDef(" &
     provisioningContributionLiteral(contribution) & ")")
 
+
+const
+  reproBin* {.strdefine.} = ""
+    ## Absolute path to the engine binary, handed in by the recipe compile.
+    ## Empty outside that compile (a plain `nim c` of a recipe), which is
+    ## exactly when the import emission below must stay silent.
+  reproConsumerRoot* {.strdefine.} = ""
+    ## The consumer repo the recipe belongs to. The macro cannot derive it:
+    ## it expands in the extraction scratch directory, so `getProjectPath()`
+    ## points there rather than at the project.
+
+proc collectDslDeps(sectionStmts: NimNode): seq[string] =
+  ## Package names listed in a top-level ``dslDeps:`` block, in declaration
+  ## order, deduplicated.
+  ##
+  ## NOT ``uses:``. ``uses:`` declares TOOLS to provision and mixes bare
+  ## version requirements (``"nim >=2.0"``) with nested ``uses "<x>"``
+  ## package entries, which is why the engine-side reader
+  ## (``declaredPackageDeps``) has to tell those apart. A ``dslDeps:`` body
+  ## is uniformly one bare package name per line, so every string literal in
+  ## it is a name and there is no version grammar to filter.
+  for section in sectionStmts:
+    if section.kind notin {nnkCall, nnkCommand}:
+      continue
+    if section.len < 2 or section[0].kind notin {nnkIdent, nnkSym}:
+      continue
+    if ($section[0]).normalize != "dsldeps":
+      continue
+    let body = section[^1]
+    if body.kind != nnkStmtList:
+      continue
+    # Body is a sequence of bare string literals, one package per line --
+    # the same shape `mesonOptions:` / `cmakeFlags:` use. No version
+    # grammar here: a DSL-export dependency is imported at recipe-compile
+    # time from a workspace checkout, so there is no version to resolve.
+    for stmt in body:
+      if stmt.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+        continue
+      let name = stmt.strVal
+      if name.len > 0 and name notin result:
+        result.add(name)
+
+proc importAliasFor(name: string): string =
+  ## A collision-free alias. EVERY package's DSL export module is named
+  ## ``repro.nim``, so a bare ``import repro`` would be ambiguous across two
+  ## dependencies and would also clash with the consumer's own recipe. The
+  ## import is therefore path-qualified and aliased per dependency.
+  result = "repro_dep_"
+  for ch in name:
+    let ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or
+             (ch >= '0' and ch <= '9')
+    result.add(if ok: ch else: '_')
+
+proc emitDeclaredPackageImports(sectionStmts: NimNode): NimNode =
+  ## STAGE 1 of the two-stage expansion: turn each declared package
+  ## dependency into an ``import`` of that package's own ``repro.nim``, so
+  ## the public ``foo*`` symbols it defines are in scope for the rest of the
+  ## recipe -- the standard Nim export mechanism, with no separate manifest
+  ## of "what this package contributes to the DSL".
+  ##
+  ## Resolution goes through the ENGINE (``internal resolve-package``) rather
+  ## than being reimplemented here, so the path this imports and the path the
+  ## engine puts on ``--path:`` come from one function and cannot drift.
+  ##
+  ## Emits NOTHING unless every precondition holds: the defines are present
+  ## (so a plain ``nim c`` of a recipe is unchanged), the dependency resolves,
+  ## and it actually ships a ``repro.nim``. A dependency with no DSL surface
+  ## is normal -- most are ordinary build dependencies -- and must not become
+  ## a compile error.
+  result = newStmtList()
+  when reproBin.len == 0 or reproConsumerRoot.len == 0:
+    when defined(reproDslDepsDebug):
+      static: echo "DSLDEPS-DEBUG: defines absent"
+    return
+  else:
+    when defined(reproDslDepsDebug):
+      static: echo "DSLDEPS-DEBUG: bin=" & reproBin & " root=" & reproConsumerRoot
+    let collected = collectDslDeps(sectionStmts)
+    when defined(reproDslDepsDebug):
+      echo "DSLDEPS-DEBUG: collected=" & $collected
+    for name in collected:
+      # Quoted by hand rather than with `quoteShell`: this module is
+      # `include`d, so it inherits whatever the host imported, and the
+      # emission must not add a new import dependency to every recipe.
+      let resolved = staticExec(
+        reproBin & " internal resolve-package \"" &
+        reproConsumerRoot & "\" \"" & name & "\"").strip()
+      if resolved.len == 0:
+        continue
+      let recipe = resolved & "/repro.nim"
+      if not fileExists(recipe):
+        continue
+      result.add(
+        nnkImportStmt.newTree(
+          nnkInfix.newTree(
+            ident("as"),
+            newLit(recipe),
+            ident(importAliasFor(name)))))
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##
@@ -3486,6 +3585,7 @@ macro package*(name: untyped; body: untyped): untyped =
   # statements have run — that ordering keeps the M2 surface available
   # to downstream code regardless of whether the caller imports the
   # package's recipe before or after the host module's own setup.
+  let declaredImports = emitDeclaredPackageImports(sectionStmts)
   let m2ConfigEmission = emitM2ConfigDefaults(packageName, sectionStmts)
   let m2VersionsEmission = emitM2Versions(packageName, sectionStmts)
   # ── DSL-port M3: classify sections + emit artifact registrations.
@@ -3542,6 +3642,13 @@ macro package*(name: untyped; body: untyped): untyped =
     "registerPackageDef(" & packageLiteral(pkg) & ")\n" &
     wrapperCode(pkg, recordActions))
   result = newStmtList()
+  # Stage-1 imports for declared package dependencies, emitted BEFORE the
+  # generated body so the symbols a dependency's `repro.nim` exports are in
+  # scope for it. `usesImportCode` below covers only the hardcoded allowlist
+  # of BUNDLED stdlib packages; this covers everything else, which is what
+  # lets a third-party package contribute DSL constructors without being
+  # vendored into reprobuild's `libs/`.
+  result.add(declaredImports)
   # Named-Targets M1: emit the per-tool ``implicitTargetName`` hook
   # procs BEFORE the typed-tool wrapper procs so the wrapper's
   # generated call site (``implicitTargetNameFor<TitleExportName>``)

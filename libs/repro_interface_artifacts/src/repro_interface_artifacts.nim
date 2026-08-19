@@ -2727,17 +2727,35 @@ proc declaredPackageDeps*(workDir: string): seq[string] =
     if not seen.containsOrIncl(name):
       result.add(name)
 
+proc resolvePackageRoot*(consumerDir, name: string): string =
+  ## Resolve ONE declared package name to a checkout next to the consumer.
+  ##
+  ## PURE: a directory-existence check and nothing else. No daemon, no lock,
+  ## no sub-build. That matters because this is reachable from a recipe's
+  ## own macro expansion via ``staticExec`` DURING a build -- anything that
+  ## took a build lock here could deadlock against the build that spawned
+  ## it, and anything slow would be paid by every recipe compile.
+  ##
+  ## The single source of truth for the resolution: ``declaredPackageRoots``
+  ## and the ``internal resolve-package`` subcommand both route through it,
+  ## so the path a macro imports and the path the engine puts on ``--path:``
+  ## cannot drift apart.
+  if consumerDir.len == 0 or name.len == 0:
+    return ""
+  let candidate = consumerDir.parentDir / name
+  if dirExists(extendedPath(candidate)):
+    return os.normalizedPath(candidate).replace('\\', '/')
+
 proc declaredPackageRoots*(workDir: string): seq[string] =
   ## Resolve ``declaredPackageDeps`` to sibling checkouts next to the
   ## consumer. A declared dependency that is not checked out is SKIPPED
   ## rather than failing here: the recipe compile that follows reports the
   ## unresolved import with a real file and line, which is a far better
   ## diagnostic than a path-assembly error naming a directory.
-  let siblingsRoot = workDir.parentDir
   for name in declaredPackageDeps(workDir):
-    let candidate = siblingsRoot / name
-    if dirExists(extendedPath(candidate)):
-      result.add(os.normalizedPath(candidate).replace('\\', '/'))
+    let resolved = resolvePackageRoot(workDir, name)
+    if resolved.len > 0:
+      result.add(resolved)
 
 proc reproLibPathFlags(workDir: string): seq[string] =
   ## Build the ``--path:`` flags the engine passes to ``nim c`` when
@@ -3343,6 +3361,72 @@ proc cachedInterfaceArtifactByFingerprint(artifactPath, stubPath: string;
   except CatchableError:
     return none(ProjectInterfaceArtifact)
 
+proc interfaceExtractionCacheProbe(modulePath, artifactPath, stubPath: string;
+                                   workDir: string;
+                                   requireStub: bool;
+                                   resourceModule: string;
+                                   extraPaths: openArray[string]):
+    tuple[artifact: Option[ProjectInterfaceArtifact];
+          fingerprintContext: InterfaceExtractionContext;
+          inputFingerprint: ContentDigest] =
+  ## The two-stage warm check every interface extraction performs before it
+  ## considers compiling anything: a cheap metadata/stamp revalidation, then
+  ## a content fingerprint.
+  ##
+  ## Factored out of ``extractInterfaceFromModule`` so the engine-side caller
+  ## can ask the SAME question without spawning the extraction edge — the
+  ## edge costs a process launch plus io-monitor wiring, which is pure
+  ## overhead on the overwhelmingly common warm path. The returned
+  ## fingerprint context is handed back so a MISS does not pay for hashing
+  ## every source a second time inside the extractor.
+  let extractionContext = interfaceExtractionCacheContext(modulePath, workDir,
+    resourceModule, extraPaths)
+  let metadataCached = cachedInterfaceArtifactByMetadata(artifactPath,
+    stubPath, extractionContext, requireStub)
+  if metadataCached.isSome:
+    result.artifact = metadataCached
+    return
+
+  result.fingerprintContext = interfaceExtractionContext(modulePath, workDir,
+    includeReproLibFingerprint = true, resourceModule = resourceModule,
+    extraPaths = extraPaths)
+  result.inputFingerprint =
+    interfaceExtractionFingerprint(result.fingerprintContext)
+  let cached = cachedInterfaceArtifactByFingerprint(artifactPath, stubPath,
+    result.inputFingerprint, requireStub)
+  if cached.isSome:
+    writeInterfaceExtractionCacheRecord(artifactPath,
+      result.fingerprintContext, result.inputFingerprint)
+    result.artifact = cached
+
+## There is deliberately no exported "is the interface already fresh?" probe
+## here. One existed (``cachedInterfaceArtifact``) so ``repro_cli_support``
+## could short-circuit the extraction EDGE, and it was UNSOUND: its key is an
+## import walk of the recipe's TEXT, which cannot see a dependency the recipe
+## acquires during macro expansion, so editing such a file left it warm and
+## served a stale interface behind a green build. The engine decides whether
+## the edge re-runs, from the monitored read set. See ``extractInterfaceEdge``
+## in ``repro_cli_support`` and Compiles-Are-Normal-Edges.md.
+##
+## ``interfaceExtractionCacheProbe`` above is retained for the in-process
+## ``extractInterfaceFromModule`` path (tests, bootstrap, and the temp-root
+## solver probe), which has no engine to defer to.
+
+proc interfaceExtractionOutputs*(artifactPath, stubPath: string): seq[string] =
+  ## Every file one interface extraction writes and that a later run reads
+  ## back — the artifact, the Nim stub, and the two freshness sidecars.
+  ##
+  ## All four must be DECLARED outputs of the extraction edge. Declaring only
+  ## the artifact would make a cache hit restore a file whose sidecars are
+  ## absent, so the in-process freshness probe would miss and every direct
+  ## (non-edge) caller would re-extract — a silent loss of the cache rather
+  ## than an error.
+  result = @[artifactPath]
+  if stubPath.len > 0:
+    result.add(stubPath)
+  result.add(interfaceExtractionCachePath(artifactPath))
+  result.add(interfaceExtractionMetadataPath(artifactPath))
+
 proc firstExistingPrefix(candidates: openArray[string]; header: string;
                          libraryNames: openArray[string]): string =
   proc hasLibrary(prefix, libraryName: string): bool =
@@ -3908,6 +3992,16 @@ proc sharedProviderNimcacheKey*(workDir: string;
   ## keep Nim's `.sha1` incremental benefit. M9.R.13a closed the per-pid
   ## divergence that made each subprocess pay the full ~5 min provider
   ## compile from scratch.
+  ##
+  ## SCOPE (Compiles-Are-Normal-Edges.md): this selects a SCRATCH DIRECTORY
+  ## for Nim's own incremental cache. It is NOT the cache key of any artifact.
+  ## Both compiles that use it -- the provider compile and the interface
+  ## extraction -- now run as monitored build edges, so what those compiles
+  ## produce is addressed by the engine's action key over the observed argv,
+  ## inputs and reads. Nothing this function forgets to mention can cause a
+  ## stale artifact to be served; the worst case is a nimcache directory
+  ## shared more or less widely than optimal, which Nim's own content-hashed
+  ## reuse handles. Do not grow it back into an input enumeration.
   var parts = @[nimCompilerPath(), absolutePath(workDir),
                 "session=" & providerNimcacheSessionToken()]
   for f in hostFlags:
@@ -3951,8 +4045,31 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
                                  scratchDir = "";
                                  requireStub = true;
                                  resourceModule = "";
-                                 extraPaths: openArray[string] = []):
+                                 extraPaths: openArray[string] = [];
+                                 consumerRoot = "";
+                                 useExtractionCache = true):
     ProjectInterfaceArtifact =
+  ## ``useExtractionCache`` controls the built-in warm short-circuit. It is
+  ## ``false`` for exactly one caller: the child of the extraction EDGE.
+  ##
+  ## That short-circuit is keyed by ``interfaceExtractionFingerprint``, whose
+  ## source closure is an import walk of the recipe's TEXT. It therefore
+  ## cannot see a dependency the recipe acquires during macro expansion — a
+  ## ``dslDeps`` package's own ``repro.nim``, or anything a ``staticExec`` in
+  ## a macro reads. When the engine has decided the edge must re-run, it did
+  ## so from monitored evidence that DOES see those files; consulting the
+  ## narrower key inside the child would then veto the engine's decision and
+  ## serve the stale artifact the edge was re-run to replace.
+  ## ``consumerRoot`` is the project root the extracted recipe belongs to. It
+  ## is handed to the recipe's macro expansion as ``-d:reproConsumerRoot`` so
+  ## a macro can resolve a declared dependency against the RIGHT workspace.
+  ## Defaults to the process working directory, which is what every direct
+  ## (test / bootstrap) caller means. The engine-side caller passes it
+  ## EXPLICITLY: once the extraction runs as a build edge it runs in a child
+  ## process whose cwd is chosen by the engine, so an ambient
+  ## ``getCurrentDir()`` there would name the wrong project — and, because the
+  ## value is baked into the compiled recipe, would do so silently.
+  ##
   ## TI1 (Project-Provider-Runtime-Protocol.milestones.org) — a producer may
   ## declare a RESOURCE MODULE (e.g. vm-harness's ``src/vm_harness/repro/
   ## resources.nim``) that carries its ``resourceType`` blocks, plus the extra
@@ -3963,23 +4080,20 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   ## types, not a stub. The resource-module driver closure is producer-side
   ## only (compiled once, here, at lift time). ``extraPaths`` are appended as
   ## ``--path:`` flags for the runner compile.
-  let extractionContext = interfaceExtractionCacheContext(modulePath, workDir,
-    resourceModule, extraPaths)
-  let metadataCached = cachedInterfaceArtifactByMetadata(artifactPath,
-    stubPath, extractionContext, requireStub)
-  if metadataCached.isSome:
-    return metadataCached.get()
-
-  let fingerprintContext = interfaceExtractionContext(modulePath, workDir,
-    includeReproLibFingerprint = true, resourceModule = resourceModule,
-    extraPaths = extraPaths)
-  let inputFingerprint = interfaceExtractionFingerprint(fingerprintContext)
-  let cached = cachedInterfaceArtifactByFingerprint(artifactPath, stubPath,
-    inputFingerprint, requireStub)
-  if cached.isSome:
-    writeInterfaceExtractionCacheRecord(artifactPath, fingerprintContext,
-      inputFingerprint)
-    return cached.get()
+  var fingerprintContext: InterfaceExtractionContext
+  var inputFingerprint: ContentDigest
+  if useExtractionCache:
+    let probe = interfaceExtractionCacheProbe(modulePath, artifactPath,
+      stubPath, workDir, requireStub, resourceModule, extraPaths)
+    if probe.artifact.isSome:
+      return probe.artifact.get()
+    fingerprintContext = probe.fingerprintContext
+    inputFingerprint = probe.inputFingerprint
+  else:
+    fingerprintContext = interfaceExtractionContext(modulePath, workDir,
+      includeReproLibFingerprint = true, resourceModule = resourceModule,
+      extraPaths = extraPaths)
+    inputFingerprint = interfaceExtractionFingerprint(fingerprintContext)
 
   let moduleDir = parentDir(modulePath)
   # Windows: the extract_runner.nim path is passed verbatim to a child
@@ -4064,6 +4178,33 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # extractions still share the bulk of the standard-library compile
   # cost. `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` keeps each
   # extraction's nimcache fully isolated.
+  # The engine's own binary and the consumer's root are handed to the recipe's
+  # macro expansion. A macro that needs to resolve a declared dependency calls
+  # back through `staticExec` (see `internal resolve-package`) rather than
+  # reimplementing workspace lookup: it runs at compile time in a scratch
+  # directory and can derive neither on its own -- `getProjectPath` points at
+  # that scratch dir, not at the consumer.
+  #
+  # These are ordinary elements of the compile's ARGV, which is the point:
+  # when this compile runs as a monitored build edge the argv IS part of the
+  # action key, so a define cannot be added without re-keying the edge. The
+  # hand-written `sharedProviderNimcacheKey` had no such property -- it never
+  # mentioned defines, which is how `-d:reproBin` was once introduced,
+  # reached the command line, and still had no effect.
+  let effectiveConsumerRoot =
+    if consumerRoot.len > 0: absolutePath(consumerRoot) else: getCurrentDir()
+  let interfaceDefines = @[
+    "--define:reproInterfaceMode",
+    "--define:reproBin=" & getAppFilename(),
+    # NOT workDir. On the cross-repo producer path workDir comes from
+    # `reprobuildLibraryWorkDir()`, which resolves through
+    # `currentSourcePath()` and therefore names REPROBUILD's own root -- so
+    # `-d:reproConsumerRoot=workDir` handed the macro reprobuild instead of
+    # the consumer, and every dependency resolved against the wrong
+    # workspace.
+    "--define:reproConsumerRoot=" & effectiveConsumerRoot,
+  ] & (if getEnv("REPRO_DSLDEPS_DEBUG").len > 0:
+         @["--define:reproDslDepsDebug"] else: @[])
   let nimcache =
     if providerNimcacheMode() == "per-binary":
       tempRoot / "nimcache"
@@ -4074,14 +4215,14 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
       else:
         buildScratchRoot(workDir, scratchDir) / "nimcache-interface" /
           sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
-  var command = @[
-    nimCompilerPath(), "c",
-    "--define:reproInterfaceMode",
+  var command = @[nimCompilerPath(), "c"]
+  command.add(interfaceDefines)
+  command.add(@[
     "--path:" & moduleDir,
     "--nimcache:" & nimcache,
     "--out:" & runnerBin,
     runnerPath
-  ]
+  ])
   command.insert(hostFlags, 2)
   command.insert(externalHashFlags(workDir), 2)
   command.insert(reproPackagePathFlags(workDir), 2)
@@ -4923,9 +5064,15 @@ proc liftInterfaceArtifact*(plan: InterfaceLiftPlan): ProjectInterfaceArtifact =
   ## trips through the existing ``ProjectInterfaceArtifact`` codec.
   if interfaceArtifactFresh(plan):
     return readInterfaceArtifactWithWarm(plan.artifactPath)
+  # The consumer root for a LIFT is the lifted recipe's OWN project root, not
+  # the process cwd. This path lifts a PRODUCER's interface while the process
+  # is sitting in a CONSUMER's directory, so an ambient ``getCurrentDir()``
+  # would compile the producer's recipe with the consumer's root baked in —
+  # and would give a different answer for every consumer that lifted it.
   result = extractInterfaceFromModule(plan.modulePath, plan.artifactPath,
     plan.stubPath, plan.workDir, requireStub = plan.stubPath.len > 0,
-    resourceModule = plan.resourceModule, extraPaths = plan.extraPaths)
+    resourceModule = plan.resourceModule, extraPaths = plan.extraPaths,
+    consumerRoot = parentDir(absolutePath(plan.modulePath)))
   try:
     writeFile(extendedPath(interfaceLiftActionKeyPath(plan.artifactPath)),
       toHex(plan.interfaceLiftActionKey.bytes))
