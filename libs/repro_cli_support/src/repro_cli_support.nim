@@ -7688,16 +7688,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # build that consumes no cross-repo producer is byte-identical to today.
   if not materializedOnly and not prepareOnly and
       result.projectRoot.len > 0:
-    # Producer discovery must inspect the full package-level ``uses:`` set,
-    # not the focused tool-provisioning subset in ``buildArtifact``. Library
-    # producers are deliberately not present on an action's ``toolIdentityRefs``
-    # yet: this pass materializes their aux channels first, and only then does
-    # ``attachProducerAuxRefs`` add them to the selected consumer actions. If
-    # we scope them out here, the later attachment has no producer to attach
-    # and a Nim library's ``nimPathDirs`` silently disappears. Ordinary host /
-    # catalog tools still resolve from ``buildArtifact`` below, so focused
-    # builds remain lightweight.
-    for useDef in artifact.projectInterface.toolUses:
+    # Producer materialization follows the selected action closure. Both typed
+    # calls and library-consuming actions carry their dependencies through
+    # ``toolIdentityRefs``; ``scopedToolArtifact`` retains only those refs.
+    # Package-wide ``uses:`` declarations remain available while compiling the
+    # provider and its public interface, but must not materialize producers for
+    # an unrelated target.
+    for useDef in buildArtifact.projectInterface.toolUses:
       let selector = useDef.packageSelector
       if selector.len == 0:
         continue
