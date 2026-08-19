@@ -24,11 +24,14 @@
 ## finalize raises the structured ``EVariantNotResolved`` error rather
 ## than returning the default value silently.
 
-import std/[options, os, strutils, tables]
+import std/[algorithm, options, os, strutils, tables]
 
 import ./types
 import ./context
 import ./api
+import ./develop_sources
+
+export develop_sources.EDevelopVersionUnknown
 
 # Spec-Implementation M2d: ``finalizeVariants()`` now drives the
 # Spack-shaped unified solver. We import the solver library here rather
@@ -157,6 +160,7 @@ proc resetVariantState*() =
   pendingCliOverrides.setLen(0)
   loadedEnvOverrides = false
   pendingSolverPackages.setLen(0)
+  resetDevelopSourceCache()
   lastUnifiedSolution = UnifiedSolution(
     variants: initTable[string, string](),
     packages: initTable[string, string](),
@@ -351,6 +355,21 @@ proc buildVariantDecls(ctx: ConfigContext): seq[VariantDecl] =
       decl = newEnumVariant(node.scopeDerivedName, allowed,
         contributions = contributions)
     result.add(decl)
+  # Canonical order, for the same reason `buildPackageDecls` sorts: these
+  # declarations are rendered into the text `inputsDigest` is taken over, and
+  # `ctx.nodes` is in declaration order. The approved named-lock design makes
+  # feature selections key material, so an unstable variant order would move
+  # the key exactly as an unstable package order did.
+  #
+  # KNOWN LIMIT, not fixed by sorting: `scopeDerivedName` disambiguates a
+  # collision with a registration-order `#N` suffix (see `context.nim`), so two
+  # variants whose scope names collide are named by the order they were
+  # declared. Sorting makes the RENDERING canonical for a given set of names;
+  # it cannot make the NAMES independent of declaration order. Today each
+  # package finalizes and pops its own context, so collisions do not arise
+  # across packages — a workspace-scoped table keyed on these names would have
+  # to qualify them by package first.
+  result.sort(proc (a, b: VariantDecl): int = cmp(a.name, b.name))
 
 proc smallestSatisfyingVersion(rng: string): string =
   ## Spec-Implementation M2d: derive a single synthetic version that
@@ -405,8 +424,24 @@ proc buildPackageDecls(parentPackages: openArray[string]): seq[PackageDecl] =
   ## Conditional gates from ``case variant.value:`` arms land as
   ## ``ConditionalGate`` on the dependency record so the solver only
   ## activates the relevant arm.
+  # NLF-M2 (`Named-Lock-Files.md` §10.1, §10.3). A dependency whose source is
+  # a local develop checkout has its version READ off that checkout, and never
+  # reaches `smallestSatisfyingVersion` — the milestone's exit criterion is
+  # that no call path from a develop entry to that proc survives.
+  #
+  # The two halves are independent and this only moves one of them. Q-4
+  # settles that a develop package's VARIANTS are solved, so the package stays
+  # in the program; what stops being solved for is its version, which was
+  # never a question. `pinned` carries that distinction into the encoder.
   var depVersions: Table[string, seq[string]]
+  var pinnedVersions: Table[string, string]
   for entry in pendingSolverPackages:
+    if entry.depPackage in pinnedVersions:
+      continue
+    let developed = developSourceFor(entry.depPackage)
+    if developed.isSome:
+      pinnedVersions[entry.depPackage] = developed.get().version
+      continue
     let rangePart = rangePartOf(entry.rng)
     let v = smallestSatisfyingVersion(rangePart)
     if entry.depPackage notin depVersions:
@@ -414,24 +449,79 @@ proc buildPackageDecls(parentPackages: openArray[string]): seq[PackageDecl] =
     if v notin depVersions[entry.depPackage]:
       depVersions[entry.depPackage].add(v)
 
+  # CANONICAL ORDER. Everything below is emitted in sorted order, and that is
+  # load-bearing rather than tidiness.
+  #
+  # These declarations are rendered by `renderSolverInputsFixture`, and
+  # `repro_lock.inputsDigestOf` is taken over that rendering. The inputs arrive
+  # from `pendingSolverPackages`, a process-wide registry appended to by each
+  # `package` macro at module initialization — so their order is the import
+  # order of whatever modules happen to be linked into the running binary.
+  # Rendering in arrival order therefore made the digest a function of import
+  # order: two runs that declared exactly the same dependencies disagreed about
+  # whether their inputs matched, and a digest that moves when nothing
+  # meaningful changed cannot be used to decide whether a lock is current.
+  #
+  # `repro_lock.solutionToLock` already sorts for precisely this reason and
+  # says so — "so the serialized lock is deterministic regardless of the
+  # (unordered) `Table` iteration order". This is the same rule one stage
+  # earlier, at the renderer that feeds it.
+  #
+  # Three separate orderings had to be pinned, and sorting only one leaves the
+  # rendering unstable:
+  #
+  #   1. `depVersions` is a `Table`, so iterating it yields hash order. Even
+  #      the same SET of dependencies inserted in a different sequence can
+  #      enumerate differently.
+  #   2. `parentPackages` arrives as literal registration order.
+  #   3. Each parent's dependency edges are collected by scanning
+  #      `pendingSolverPackages`, so they too come out in arrival order.
+  #
+  # The version lists are sorted as well: they are accumulated by appending
+  # each newly seen version, so their order tracked arrival too.
+  var depNames: seq[string] = @[]
+  for depName in depVersions.keys:
+    depNames.add(depName)
+  for depName in pinnedVersions.keys:
+    depNames.add(depName)
+  depNames.sort()
+
   # Materialize the dep packages first so they're available before the
   # parent packages reference them.
-  for depName, versions in depVersions:
-    result.add(newPackage(depName, versions))
+  for depName in depNames:
+    if depName in pinnedVersions:
+      result.add(newPinnedPackage(depName, pinnedVersions[depName]))
+    else:
+      var versions = depVersions[depName]
+      versions.sort()
+      result.add(newPackage(depName, versions))
 
   # Materialize parent packages with their dependency edges.
+  var sortedParents: seq[string] = @[]
   for parent in parentPackages:
-    var deps: seq[DependencyDecl] = @[]
+    sortedParents.add(parent)
+  sortedParents.sort()
+
+  for parent in sortedParents:
+    var edges: seq[(string, string, string, string)] = @[]
     for entry in pendingSolverPackages:
       if entry.parentPackage != parent: continue
       let rng = rangePartOf(entry.rng)
       let rngForSolver =
         if rng.len == 0: ">=0.0.0" else: rng
-      if entry.gateVariant.len > 0 and entry.gateValue.len > 0:
-        deps.add(newConditionalDependency(entry.depPackage, rngForSolver,
-          entry.gateVariant, entry.gateValue))
+      edges.add((entry.depPackage, rngForSolver, entry.gateVariant,
+                 entry.gateValue))
+    # Sorted on the whole tuple: two edges to the same dependency can differ
+    # only in their range or in their conditional gate, so name alone is not a
+    # total order and would leave those pairs in arrival order.
+    edges.sort()
+    var deps: seq[DependencyDecl] = @[]
+    for (depName, rngForSolver, gateVariant, gateValue) in edges:
+      if gateVariant.len > 0 and gateValue.len > 0:
+        deps.add(newConditionalDependency(depName, rngForSolver,
+          gateVariant, gateValue))
       else:
-        deps.add(newDependency(entry.depPackage, rngForSolver))
+        deps.add(newDependency(depName, rngForSolver))
     result.add(newPackage(parent, ["0.1.0"], depends = deps))
 
 proc applySolverAssignments(ctx: ConfigContext;
@@ -527,6 +617,15 @@ proc renderSolverInputsFixture*(variants: openArray[VariantDecl];
     var b = "package " & p.name & "\n"
     if p.versions.len > 0:
       b.add("versions: " & p.versions.join(", ") & "\n")
+    if p.pinned:
+      # NLF-M2. Rendered because `inputsDigest` is taken over this text, and a
+      # pinned package is a DIFFERENT solver input from a package that happens
+      # to have one candidate — one asserts its version, the other searches a
+      # one-element space. Without this line the two render identically and
+      # collide on the digest, which is the same class of defect the canonical
+      # ordering was landed to remove: a digest that fails to distinguish
+      # inputs it should.
+      b.add("pinned: true\n")
     for d in p.depends:
       var line = "depends: " & d.name
       if d.range.len > 0:
@@ -546,6 +645,52 @@ proc renderSolverInputsFixture*(variants: openArray[VariantDecl];
   result = blocks.join("\n")
   if result.len > 0 and not result.endsWith("\n"):
     result.add("\n")
+
+proc currentSolverInputsFixture*(): string =
+  ## Render the solver inputs the CURRENT registration state would feed to the
+  ## solver, without solving.
+  ##
+  ## This is the same pair `finalizeVariants` builds and hands to `solve` — the
+  ## ambient context's variant declarations and the pending dependency
+  ## registry's package declarations — rendered through the same
+  ## `renderSolverInputsFixture` that produces the emitted fixture and, through
+  ## it, `inputsDigest`. It exists so the rendering can be tested for
+  ## order-independence directly: driving `finalizeVariants` instead would run
+  ## a full clingo solve per call and make the property under test depend on
+  ## the solver being installed and satisfiable.
+  var variants: seq[VariantDecl] = @[]
+  if not ambientVariantContext.isNil and
+      ambientVariantContext.state != ccsFinalized:
+    variants = buildVariantDecls(ambientVariantContext)
+  var parentSet: seq[string] = @[]
+  for entry in pendingSolverPackages:
+    if entry.parentPackage notin parentSet:
+      parentSet.add(entry.parentPackage)
+  renderSolverInputsFixture(variants, buildPackageDecls(parentSet))
+
+proc currentSolverPackageDecls*(): seq[PackageDecl] =
+  ## Test-facing accessor for the `PackageDecl` list the CURRENT registration
+  ## state would hand to the solver — the same list
+  ## `currentSolverInputsFixture` renders and `finalizeVariants` solves,
+  ## returned structurally instead of as text.
+  ##
+  ## It exists because some properties are about the ENCODING and not about
+  ## the rendering. "A develop-mode dependency contributes no version-selection
+  ## choice" (`Named-Lock-Files.md` §10.3, corpus NLF-DEV-3) is one: the
+  ## difference between a pinned package and a package with exactly one
+  ## candidate is invisible in the rendered fixture — both show one version —
+  ## and visible only in what `repro_solver`'s encoder emits for it, a
+  ## `package_chosen` FACT versus a `{ ... } = 1` cardinality rule. A test
+  ## restricted to the text surface could not tell those apart, which is
+  ## precisely the substitution the corpus case warns against.
+  ##
+  ## Returns a copy; callers cannot mutate the thread-local registry through
+  ## it. Same contract as `pendingSolverDependencies`.
+  var parentSet: seq[string] = @[]
+  for entry in pendingSolverPackages:
+    if entry.parentPackage notin parentSet:
+      parentSet.add(entry.parentPackage)
+  buildPackageDecls(parentSet)
 
 proc emitSolverInputsIfRequested(variants: openArray[VariantDecl];
                                  packages: openArray[PackageDecl]) =
