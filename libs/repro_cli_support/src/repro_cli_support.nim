@@ -15272,6 +15272,20 @@ proc usesProducerLockedDep(selector, root: string;
       return some(d)
   none(LockedDep)
 
+proc repositoryNameFromUrl(url: string): string =
+  ## Return the repository leaf from HTTPS, SSH/scp, file, or local-path Git
+  ## coordinates. Lock identities must survive cloning the same repository into
+  ## a differently named checkout directory.
+  var value = url.strip()
+  while value.len > 0 and value[^1] in {'/', '\\'}:
+    value.setLen(value.len - 1)
+  let separator = max(value.rfind('/'), max(value.rfind('\\'), value.rfind(':')))
+  if separator >= 0 and separator + 1 < value.len:
+    value = value[separator + 1 .. ^1]
+  if value.toLowerAscii().endsWith(".git"):
+    value.setLen(value.len - 4)
+  value
+
 proc lockedDepsForWorkspace(workspaceRoot: string;
                             usesSelectors: seq[string] = @[]): seq[LockedDep] =
   ## MO-8 — observe the workspace's participating repos and produce a
@@ -15296,7 +15310,11 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   let nested = discoverDevelopDeps(root)
   let bare = extractFilename(root.strip(
     leading = false, trailing = true, chars = {'/', '\\'}))
-  let rootName = if bare.len > 0: bare else: "workspace"
+  let originName = repositoryNameFromUrl(rootFacts.originUrl)
+  let rootName =
+    if originName.len > 0: originName
+    elif bare.len > 0: bare
+    else: "workspace"
   # Existing committed lock — the carry-forward source for a ``uses:`` sibling
   # that is pinned but not checked out here.
   var existingDeps: seq[LockedDep] = @[]

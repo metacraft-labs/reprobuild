@@ -3276,13 +3276,15 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       # tree is NOT under the reprobuild checkout (e.g. an infra recipe) cannot
       # reach reprobuild's ``config.nims`` by walking up. Honour the standard
       # ``$REPROBUILD_REPO_ROOT`` override the interface-artifact / profile-compile
-      # edges already use for out-of-tree lib-path resolution, so the generator
-      # ``nim c -r`` below runs with ``cd <repoRoot>`` and resolves
-      # ``import repro_cli_support`` via reprobuild's own ``config.nims``. This is
-      # NOT the obsolete ``REPRO_ACCESSOR_*`` knob (removed): it reuses the single
-      # repo-root env the rest of reprobuild's out-of-tree machinery keys off.
-      if repoRoot.len == 0 and existsEnv("REPROBUILD_REPO_ROOT"):
-        let envRoot = getEnv("REPROBUILD_REPO_ROOT")
+      # edges already use for out-of-tree lib-path resolution. External recipes
+      # conventionally expose that same checkout as ``$REPROBUILD_SRC`` from
+      # their ``config.nims``, so accept it as the compatibility fallback. The
+      # generator ``nim c -r`` below then runs with ``cd <repoRoot>`` and resolves
+      # ``import repro_cli_support`` via reprobuild's own ``config.nims``.
+      for envName in ["REPROBUILD_REPO_ROOT", "REPROBUILD_SRC"]:
+        if repoRoot.len > 0:
+          break
+        let envRoot = getEnv(envName)
         if envRoot.len > 0 and fileExists(envRoot / "config.nims") and
             fileExists(envRoot / "reprobuild.nimble"):
           repoRoot = envRoot
@@ -3377,12 +3379,15 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       # ---- Level 2 / COLD: run the generator (drives the cached lift). ----
       if not cacheHit:
         let genPath = accDir / ("ti2_gen_" & selectorKey & ".nim")
+        let compilerExe = getCurrentCompilerExe()
         # The generator emits a framed output: a leading ``IFP:<hex>`` line
         # carrying the producer's InterfaceFingerprint (from TI1's cached lift),
         # then the driver-free accessor source. The VM reads the fingerprint to
         # decide reuse-in-place vs regenerate WITHOUT a second lift.
         let genSrc =
+          "import std/os\n" &
           "import repro_cli_support\n" &
+          "putEnv(\"REPRO_NIM_COMPILER\", " & escape(compilerExe) & ")\n" &
           "let c = resolveProducerTypedContract(" & escape(selector) & ", " &
           escape(workspaceRoot) & ")\n" &
           "stdout.write(\"IFP:\" & c.interfaceFingerprint & \"\\n\")\n" &
@@ -3393,7 +3398,8 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         # significant because ``config.nims`` contains sibling paths relative
         # to the repository root.
         let nimCmd =
-          "nim c -r --hints:off --warnings:off " &
+          quoteShell(compilerExe) &
+          " c -r --hints:off --warnings:off " &
           "--nimcache:" & quoteShell(accDir / ("nc_" & selectorKey)) &
           " " & quoteShell(genPath)
         let genCmd =
