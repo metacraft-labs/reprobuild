@@ -538,7 +538,21 @@ proc parseBuildTarget(target: string): ParsedBuildTarget =
   let parts = splitTarget(target)
   if parts.fragment.len > 0:
     if dirExists(extendedPath(parts.base)):
-      let fragmentModule = parts.base / (parts.fragment & ".nim")
+      let fragmentFileName = parts.fragment & ".nim"
+      let fragmentModule = parts.base / fragmentFileName
+      # A named target may legitimately have the same name as the project
+      # file (for example ``repro build repro`` in a directory containing
+      # ``repro.nim``). Bare-name resolution represents that selector as
+      # ``.#repro``. Anchor that case in the project file instead of treating
+      # it as the legacy ``directory#module`` form.
+      if fragmentFileName in ProjectFileNames:
+        let projectMatch = resolveProjectFile(parts.base)
+        if projectMatch.fileName == fragmentFileName:
+          return ParsedBuildTarget(
+            modulePath: projectMatch.path,
+            outputName: splitFile(projectMatch.path).name,
+            selectedActionId: parts.fragment,
+            fragmentKind: tfkActionSelection)
       if fileExists(extendedPath(fragmentModule)):
         return ParsedBuildTarget(
           modulePath: fragmentModule,

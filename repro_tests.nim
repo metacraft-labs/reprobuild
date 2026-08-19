@@ -5302,6 +5302,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/e2e/local-build-engine/t_repro_build_target_matching_project_file_stem.nim",
+    binary: "build/test-bin/t_repro_build_target_matching_project_file_stem",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/e2e/local-build-engine/t_repro_build_unknown_target_diagnostic.nim",
     binary: "build/test-bin/t_repro_build_unknown_target_diagnostic",
     defines: @[],
