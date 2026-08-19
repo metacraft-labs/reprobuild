@@ -115,6 +115,29 @@ suite "DSL-port M9.R.14c.1 — autotools_package parallel-make wiring":
     finally:
       clearCurrentOwningPackageOverride()
 
+  test "shared make variables reach compile and install invocations":
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("sharedMakeVarsPkg")
+    try:
+      let pkg = autotools_package(
+        srcDir = "./src",
+        makeVars = @["PROGRAM_MODE=dynamic"],
+        installMakeVars = @["INSTALL_OWNER=builder"])
+      var compileVars = ""
+      var installVars = ""
+      for arg in pkg.compileEdge.call.arguments:
+        if arg.name == "vars":
+          compileVars = arg.encodedValue
+      for arg in pkg.installMakeEdge.call.arguments:
+        if arg.name == "vars":
+          installVars = arg.encodedValue
+      check compileVars.contains("PROGRAM_MODE=dynamic")
+      check installVars.contains("PROGRAM_MODE=dynamic")
+      check not compileVars.contains("INSTALL_OWNER=builder")
+      check installVars.contains("INSTALL_OWNER=builder")
+    finally:
+      clearCurrentOwningPackageOverride()
+
   test "recognized make depfiles replace monitoring on both edges":
     resetDslPortFetchState()
     setCurrentOwningPackageOverride("depfileMakePkg")

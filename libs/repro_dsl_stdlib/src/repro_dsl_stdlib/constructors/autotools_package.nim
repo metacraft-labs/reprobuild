@@ -247,6 +247,7 @@ proc autotools_package*(srcDir: string;
                         patchHardcodedFile = false;
                         allowSourceWrites = false;
                         skipConfigure = false;
+                        makeVars: seq[string] = @[];
                         installMakeVars: seq[string] = @[];
                         srcPatches: seq[string] = @[];
                         extraEnv: seq[(string, string)] = @[]):
@@ -268,9 +269,12 @@ proc autotools_package*(srcDir: string;
   ## make tool's automatic-monitor default when an upstream build emits a
   ## recognized dependency report. ``postInstallDependencyPolicy`` provides
   ## the corresponding recipe-root-relative evidence for mirror and stage
-  ## actions. ``extraEnv`` supplies recipe-specific environment overrides to
-  ## the configure, compile, and install actions. The values are kept outside
-  ## the typed call identity, matching the other package constructors.
+  ## actions. ``makeVars`` supplies GNU make command-line assignments shared by
+  ## the compile and install invocations; ``installMakeVars`` adds assignments
+  ## used only by the install invocation. ``extraEnv`` supplies recipe-specific
+  ## environment overrides to the configure, compile, and install actions. The
+  ## values are kept outside the typed call identity, matching the other
+  ## package constructors.
   # M9.R.15a.3 — accept a custom prefix flag format (openssl's
   # ``./Configure`` uses ``--prefix=`` like autotools, but Configure
   # also accepts ``--openssldir=`` etc. via the same channel; we keep
@@ -599,6 +603,8 @@ proc autotools_package*(srcDir: string;
   # the make invocation rather than into a configure script that doesn't
   # exist).
   var buildVars: seq[string] = @[]
+  for value in makeVars:
+    buildVars.add(value)
   if skipConfigure:
     for o in configureOptions:
       buildVars.add(o)
@@ -680,6 +686,8 @@ proc autotools_package*(srcDir: string;
   if skipConfigure:
     for o in configureOptions:
       installVars.add(o)
+  for value in makeVars:
+    installVars.add(value)
   # M9.R.29.3 — sudo's ``install:`` target runs ``install -o 0 -g 0``
   # to set the binary uid/gid to root. The non-privileged build user
   # can't chown to root so the action fails with "Operation not
