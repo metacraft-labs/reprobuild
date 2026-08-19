@@ -178,12 +178,12 @@ type
     cloneFilter*: string
     depth*: int
     singleBranch*: bool
-    # RA-18 — post-sync file materialization + group membership, carried
-    # verbatim from the fragment. An empty `groups` means the repo belongs
-    # to the implicit `default` group only (see `repoInGroups`).
+    # RA-18 — post-sync file materialization + subset tags, carried
+    # verbatim from the fragment. An empty `tags` means the repo belongs
+    # to the implicit `default` tag only (see `effectiveTags`).
     copyfile*: seq[CopyLinkFileEntry]
     linkfile*: seq[CopyLinkFileEntry]
-    groups*: seq[string]
+    tags*: seq[string]
     # RA-21 — develop-set dependency edges carried verbatim from the
     # fragment. Names the other repos this repo depends on; the pre-push
     # gate uses these to compute the pushed repo's transitive dependency
@@ -250,10 +250,10 @@ type
 const
   defaultRepoVcs* = "git"
   defaultRepoStability* = "tracked"
-  defaultManifestGroup* = "default"
-    ## RA-18 — a repo with no declared `groups` belongs to this implicit
-    ## group (the `repo`-tool convention). A repo's effective group set is
-    ## therefore `groups` when non-empty, else `["default"]`.
+  defaultManifestTag* = "default"
+    ## RA-18 — a repo with no declared `tags` belongs to this implicit
+    ## tag (the `repo`-tool convention). A repo's effective tag set is
+    ## therefore `tags` when non-empty, else `["default"]`.
   urlPrefixesDirName* = "url-prefixes"
     ## Workspace-Membership-Model.md — where the workspace's URL prefixes are
     ## declared, ONCE each, rather than re-declared per project.
@@ -337,32 +337,38 @@ proc resolveCertificatePolicy*(body: CertificatesBody;
         "invalid `certificates.ci_trust` value '" & raw &
           "' (expected: advisory | skip)")
 
-# ---- RA-18 group membership -----------------------------------------------
+# ---- RA-18 subset tags -----------------------------------------------------
+#
+# A tag is a FILTER over a repo set, not a repo set. The distinction is why the
+# field is no longer spelled `groups`: membership — which repos belong together
+# — is `member_repos` / `member_sets` on a repo-set manifest, and the word
+# "group" was holding a filter that only ever narrowed an already-resolved set
+# (Workspace-Membership-Model.md §"Reclaiming `groups`").
 
-proc effectiveGroups*(repo: ResolvedRepo): seq[string] =
-  ## The repo's effective group membership: its declared `groups` when it
-  ## has any, otherwise the implicit `["default"]`. A repo that explicitly
-  ## lists groups WITHOUT naming `default` is NOT in `default` (mirroring
-  ## `repo`, where listing a group opts out of the implicit membership).
-  if repo.groups.len > 0: repo.groups
-  else: @[defaultManifestGroup]
+proc effectiveTags*(repo: ResolvedRepo): seq[string] =
+  ## The repo's effective tag set: its declared `tags` when it has any,
+  ## otherwise the implicit `["default"]`. A repo that explicitly lists tags
+  ## WITHOUT naming `default` is NOT in `default` (mirroring `repo`, where
+  ## listing a group opts out of the implicit membership).
+  if repo.tags.len > 0: repo.tags
+  else: @[defaultManifestTag]
 
-proc repoSelectedByGroups*(repo: ResolvedRepo;
-                           includeGroups, excludeGroups: seq[string]): bool =
-  ## RA-18 subset selection. `includeGroups` is the requested `--groups`
-  ## set (empty means "no `--groups` filter": every repo is selected unless
-  ## excluded). `excludeGroups` is the `-<group>` set. A repo is selected
-  ## when (a) `includeGroups` is empty OR the repo is in at least one
-  ## included group, AND (b) the repo is in NONE of the excluded groups.
+proc repoSelectedByTags*(repo: ResolvedRepo;
+                         includeTags, excludeTags: seq[string]): bool =
+  ## RA-18 subset selection. `includeTags` is the requested `--tags`
+  ## set (empty means "no `--tags` filter": every repo is selected unless
+  ## excluded). `excludeTags` is the `-<tag>` set. A repo is selected
+  ## when (a) `includeTags` is empty OR the repo carries at least one
+  ## included tag, AND (b) the repo carries NONE of the excluded tags.
   ## Exclusion wins over inclusion, matching `repo`'s `groups=foo,-bar`.
-  let groups = effectiveGroups(repo)
-  for g in excludeGroups:
-    if g in groups:
+  let tags = effectiveTags(repo)
+  for t in excludeTags:
+    if t in tags:
       return false
-  if includeGroups.len == 0:
+  if includeTags.len == 0:
     return true
-  for g in includeGroups:
-    if g in groups:
+  for t in includeTags:
+    if t in tags:
       return true
   false
 
@@ -1009,7 +1015,7 @@ proc resolveFragment(ctx: FragmentContext; fragmentAbs: string;
   # the materialization step runs post-checkout in the CLI driver.
   result.copyfile = fragment.repo.copyfile
   result.linkfile = fragment.repo.linkfile
-  result.groups = fragment.repo.groups
+  result.tags = fragment.repo.tags
 
   # RA-21 — carry the develop-set dependency edges through verbatim.
   result.depends = fragment.repo.depends

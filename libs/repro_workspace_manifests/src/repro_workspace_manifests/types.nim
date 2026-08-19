@@ -157,15 +157,21 @@ type
     clone_filter*: Option[string]  ## partial clone: "blob:none" / "tree:0"
     depth*: Option[int]            ## shallow clone depth (deepened on demand)
     single_branch*: Option[bool]   ## fetch only the pinned revision's branch
-    # RA-18 — post-sync file materialization + group membership
-    # (Workspace-Manifests.md §§"copyfile / linkfile", "Manifest Groups").
-    # A missing/empty `groups` means the repo belongs to the implicit
-    # `default` group only. `copyfile`/`linkfile` are applied after a
+    # RA-18 — post-sync file materialization + subset tagging
+    # (Workspace-Manifests.md §"copyfile / linkfile";
+    # Workspace-Membership-Model.md §"Reclaiming `groups`").
+    # A missing/empty `tags` means the repo belongs to the implicit
+    # `default` tag only. `copyfile`/`linkfile` are applied after a
     # successful checkout and re-applied on every sync (idempotent), so the
     # materialized files track the checked-out revision.
     copyfile*: seq[CopyLinkFileEntry]
     linkfile*: seq[CopyLinkFileEntry]
-    groups*: seq[string]
+    tags*: seq[string]
+      ## Subset-selection labels (`repro sync --tags=…`). This is a FILTER over
+      ## a repo set, not a repo set: membership is `member_repos` /
+      ## `member_sets` on a repo-set manifest. The field was spelled `groups`
+      ## until the membership model reclaimed that word for the membership
+      ## concept; the old spelling is retired and fails as an unknown key.
     # RA-21 — develop-set dependency edges. Names the OTHER repos in the
     # same workspace that THIS repo depends on (a develop-mode sibling is
     # a git-submodule replacement; see Workspace-And-Develop-Mode.md

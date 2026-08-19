@@ -272,7 +272,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " develop --list-overrides\n       " &
           programName &
-      " develop --all|--direct|--indirect|--transitive-of=PKG [--project=LIST] [--group=LIST] [--filter=GLOB] [--only=LIST] [--except=LIST] [--tier=LIST] [--at=REV] [--lock-store=KIND:LOCATION]... [--into=DIR] [--reset] [--strict] [--dry-run] [--json] [--workspace-root=PATH]\n       " &
+      " develop --all|--direct|--indirect|--transitive-of=PKG [--project=LIST] [--tag=LIST] [--filter=GLOB] [--only=LIST] [--except=LIST] [--tier=LIST] [--at=REV] [--lock-store=KIND:LOCATION]... [--into=DIR] [--reset] [--strict] [--dry-run] [--json] [--workspace-root=PATH]\n       " &
           programName &
       " develop <dependency> --into=PATH\n       " &
           programName &
@@ -15594,7 +15594,7 @@ proc usesProducerLockedDep(selector, root: string;
         gitRef: facts.branch, revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
-      depends: @[], groups: @[]))
+      depends: @[], tags: @[]))
   # Not discoverable on disk — carry an existing VCS lock pin forward if present.
   for d in existingDeps:
     if d.name == selector and d.coordinates.kind == ckVcs:
@@ -15666,7 +15666,7 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
         gitRef: facts.branch, revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
-      depends: @[], groups: @[]))
+      depends: @[], tags: @[]))
     seenPaths.add(d.path)
     seenNames.add(d.name)
   for selector in usesSelectors:
@@ -15686,7 +15686,7 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
       gitRef: rootFacts.branch, revision: rootFacts.headSha),
     integrity: computeDepIntegrity(root, rootFacts.headSha),
     version: "", visibility: "public", participation: "",
-    depends: rootDepends, groups: @[]))
+    depends: rootDepends, tags: @[]))
   for d in siblingDeps:
     result.add(d)
 
@@ -15752,7 +15752,7 @@ proc committedLockDerivedProject(workspaceRoot: string):
         fetchUrl: d.coordinates.url, revision: d.coordinates.revision,
         vcs: defaultRepoVcs, stability: defaultRepoStability,
         visibility: visibilityFromLockString(d.visibility),
-        participation: d.participation, depends: d.depends, groups: d.groups))
+        participation: d.participation, depends: d.depends, tags: d.tags))
       lockedPaths.add(d.path)
       if d.path == ".":
         rootIdx = repos.high
@@ -21012,10 +21012,10 @@ type
                              ## commit-addressed record is keyed on the PRIMARY
                              ## project (Workspace-And-Develop-Mode.md §"The
                              ## Primary Project") whatever ``--project`` says.
-    groups: seq[string]      ## ``--group=<list>`` — keep only repos in these
-                             ## manifest groups (``repos/<repo>.toml``
-                             ## ``groups``; a repo with no declared groups is
-                             ## in the implicit ``default`` group).
+    tags: seq[string]        ## ``--tag=<list>`` — keep only repos carrying
+                             ## these manifest tags (``repos/<repo>.toml``
+                             ## ``tags``; a repo with no declared tags is
+                             ## in the implicit ``default`` tag).
     tiers: seq[string]       ## DS-8 ``--tier=<list>`` — restrict which TIERS'
                              ## backends contribute records at all. A SOURCE
                              ## axis flag: it narrows the lock set itself, not
@@ -21133,7 +21133,7 @@ type
       ## does this revision come from" is the question a lock-set listing
       ## answers; the assignment drives the routing diagnostics.
     pinBackendOf: Table[string, string]
-    groupsOf: Table[string, seq[string]]
+    tagsOf: Table[string, seq[string]]
       ## DS-7 — repo name -> its EFFECTIVE manifest groups (``groups`` when
       ## declared, else the implicit ``["default"]``), read from the resolved
       ## manifest membership. Carried on the lock set because selection runs
@@ -21143,7 +21143,7 @@ type
       ## contribute it. MEMBERSHIP only: lock-record lookup is keyed on the
       ## PRIMARY project regardless (see ``DevelopAllArgs.projects``).
     activeProjects: seq[string]        ## the active project set, in order
-    knownGroups: seq[string]           ## every group any participating repo is in
+    knownTags: seq[string]             ## every tag any participating repo carries
     keyNotes: seq[string]  ## DS-5 — one line per commit-addressed backend whose
                            ## record was found at an ANCESTOR of the requested
                            ## key rather than at the key itself
@@ -21230,7 +21230,7 @@ proc developSetFromLock(lock: LockedDependencies; composed: DevelopLockSet;
   ## the previous one:
   ##
   ##   1. mode (``--all`` | ``--direct`` | ``--indirect`` | ``--transitive-of``)
-  ##   2. ``--project``   3. ``--group``   4. ``--filter``
+  ##   2. ``--project``   3. ``--tag``     4. ``--filter``
   ##   5. ``--only``      6. ``--except``
   ##
   ## The order is fixed **so the result never depends on argv order**. Every
@@ -21334,14 +21334,14 @@ proc developSetFromLock(lock: LockedDependencies; composed: DevelopLockSet;
         if p in projectSet: return true
       false)
 
-  # ---- stage 3: --group ---------------------------------------------------
-  var groupSet = initHashSet[string]()
-  for g in args.groups: groupSet.incl(g)
-  narrow("group",
-    (if args.groups.len > 0: "--group=" & args.groups.join(",") else: ""),
+  # ---- stage 3: --tag -----------------------------------------------------
+  var tagSet = initHashSet[string]()
+  for t in args.tags: tagSet.incl(t)
+  narrow("tag",
+    (if args.tags.len > 0: "--tag=" & args.tags.join(",") else: ""),
     proc (n: string): bool =
-      for g in composed.groupsOf.getOrDefault(n, @[]):
-        if g in groupSet: return true
+      for t in composed.tagsOf.getOrDefault(n, @[]):
+        if t in tagSet: return true
       false)
 
   # ---- stage 4: --filter (a GLOB; may legitimately match nothing) ---------
@@ -21680,29 +21680,29 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
       evidenceOnlyNames.add(d.name)
   evidenceOnlyNames.sort()
 
-  # DS-7 — GROUP attribution, for every repo in the union rather than only for
+  # DS-7 — TAG attribution, for every repo in the union rather than only for
   # those the MANIFEST pass reached.
   #
-  # ``composed.groupsOf`` is filled from the resolved manifest membership, and
+  # ``composed.tagsOf`` is filled from the resolved manifest membership, and
   # the composer only gets that far when some configuration layer declares a
   # route. "A workspace with no routing config resolves to the built-in public
   # default alone" (CLI/develop.md §"Composing the lock set") — the DS-1
   # compatibility baseline — so in exactly that shape the composer returns
-  # early and every group table is empty. `--group=<group>` then refused with
-  # "the declared groups are: (none)" for a group the committed lock ITSELF
+  # early and every tag table is empty. `--tag=<tag>` then refused with
+  # "the declared tags are: (none)" for a tag the committed lock ITSELF
   # declares, which is not a narrower answer but a false one.
   #
-  # A lock record carries the repo's ``groups``, so use it for any repo the
+  # A lock record carries the repo's ``tags``, so use it for any repo the
   # manifest pass did not attribute. The manifest values still win where both
-  # exist, and the implicit-``default`` rule is the same one ``effectiveGroups``
-  # applies: a repo that lists groups without naming `default` is not in it.
+  # exist, and the implicit-``default`` rule is the same one ``effectiveTags``
+  # applies: a repo that lists tags without naming `default` is not in it.
   for d in lock.deps:
-    if d.name.len == 0 or composed.groupsOf.hasKey(d.name): continue
-    let gs = if d.groups.len > 0: d.groups else: @[defaultManifestGroup]
-    composed.groupsOf[d.name] = gs
-    for g in gs:
-      if g notin composed.knownGroups: composed.knownGroups.add(g)
-  composed.knownGroups.sort()
+    if d.name.len == 0 or composed.tagsOf.hasKey(d.name): continue
+    let ts = if d.tags.len > 0: d.tags else: @[defaultManifestTag]
+    composed.tagsOf[d.name] = ts
+    for t in ts:
+      if t notin composed.knownTags: composed.knownTags.add(t)
+  composed.knownTags.sort()
   if not args.list:
     # ``--list`` shows each of these as a ROW with state `evidence-only`
     # (CLI/develop.md §"Evidence-only repos"), so repeating them as notices
@@ -21718,7 +21718,7 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
   #
   # "``--only`` and ``--except`` name repos EXACTLY; a name matching nothing is
   # a loud error, never a silent no-op." The same rule binds ``--project`` and
-  # ``--group``, which also name things exactly. Only ``--filter`` is a glob,
+  # ``--tag``, which also name things exactly. Only ``--filter`` is a glob,
   # and it alone may legitimately match nothing.
   #
   # Every exact-name selector is validated against the WHOLE lock set (or the
@@ -21765,13 +21765,13 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
             (if composed.activeProjects.len > 0:
                composed.activeProjects.join(", ")
              else: "(none recorded)"))
-    # ``--group`` — against the groups the participating manifest fragments
+    # ``--tag`` — against the tags the participating manifest fragments
     # actually declare (plus the implicit ``default``).
-    for g in args.groups:
-      if g notin composed.knownGroups:
-        unknownName("--group", g, "manifest group in this workspace",
-          "; the declared groups are: " &
-            (if composed.knownGroups.len > 0: composed.knownGroups.join(", ")
+    for t in args.tags:
+      if t notin composed.knownTags:
+        unknownName("--tag", t, "manifest tag in this workspace",
+          "; the declared tags are: " &
+            (if composed.knownTags.len > 0: composed.knownTags.join(", ")
              else: "(none)"))
     if outcomes.len > 0:
       return DevelopAllResult(outcomes: outcomes, notices: notices,
@@ -22375,7 +22375,7 @@ proc parseAdhocLockStore(spec: string): DevelopAdhocLockStore =
 
 proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
   ## ``repro develop --list|--all|--direct|--indirect|--transitive-of=<pkg>
-  ## [--project=<list>] [--group=<list>] [--filter=<glob>] [--only=<list>]
+  ## [--project=<list>] [--tag=<list>] [--filter=<glob>] [--only=<list>]
   ## [--except=<list>] [--tier=<list>] [--at=<rev>]
   ## [--lock-store=<kind>:<location>]... [--into=<dir>] [--reset] [--strict]
   ## [--dry-run] [--workspace-root=<path>]
@@ -22386,7 +22386,7 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
   ##
   ##   * SOURCE — ``--tier``, ``--at``, ``--lock-store``, ``--strict``: which
   ##     lock records contribute at all;
-  ##   * MEMBERSHIP — the mode flags, ``--project``, ``--group``, ``--filter``,
+  ##   * MEMBERSHIP — the mode flags, ``--project``, ``--tag``, ``--filter``,
   ##     ``--only``, ``--except``: which repos are selected, composed in the
   ##     FIXED order the spec fixes so the result never depends on argv order;
   ##   * ACTION — ``--list``, ``--dry-run``, ``--into``, ``--reset``, ``--json``:
@@ -22398,7 +22398,7 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
   ## promise one step further down: it resolves the set AND the placement plan
   ## and prints what WOULD happen.
   ##
-  ## ``--only`` / ``--except`` / ``--project`` / ``--group`` name things
+  ## ``--only`` / ``--except`` / ``--project`` / ``--tag`` name things
   ## EXACTLY; a name that matches nothing is a loud error, never a silent
   ## no-op. ``--filter`` is a glob and may legitimately match nothing.
   ##
@@ -22416,7 +22416,7 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
   # "Selectors compose in a FIXED ORDER, **so the result never depends on argv
   # order**" (CLI/develop.md §"Membership axis"). The fixed stage order alone
   # does not deliver that promise: the list-valued selectors (`--only`,
-  # `--except`, `--project`, `--group`) ACCUMULATE and are order-free, but the
+  # `--except`, `--project`, `--tag`) ACCUMULATE and are order-free, but the
   # SINGLE-VALUED ones would silently take the LAST occurrence — so
   # `--all --direct` and `--direct --all` are the same flag set in two argv
   # orders and would answer differently, which is exactly what the rule
@@ -22472,8 +22472,8 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
     elif arg == "--project" or arg.startsWith("--project="):
       result.projects.add(parseCommaList(valueFromFlag(args, i, "--project")))
       sawSelector = true
-    elif arg == "--group" or arg.startsWith("--group="):
-      result.groups.add(parseCommaList(valueFromFlag(args, i, "--group")))
+    elif arg == "--tag" or arg.startsWith("--tag="):
+      result.tags.add(parseCommaList(valueFromFlag(args, i, "--tag")))
       sawSelector = true
     elif arg == "--tier" or arg.startsWith("--tier="):
       for t in parseCommaList(valueFromFlag(args, i, "--tier")):
@@ -22541,7 +22541,7 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
 proc looksLikeDevelopAllArgs(args: openArray[string]): bool =
   ## The L1 develop-SET form is distinguished by a set-selection flag
   ## (``--all`` / ``--direct`` / ``--indirect`` / ``--transitive-of`` /
-  ## ``--only`` / ``--project`` / ``--group``) or by the SET-PATH ``--list``
+  ## ``--only`` / ``--project`` / ``--tag``) or by the SET-PATH ``--list``
   ## (DS-6). ``--into`` / ``--filter`` alone stay on the pre-L1
   ## single-dependency ``--into`` route (that route already owns ``--into``).
   ##
@@ -22561,7 +22561,7 @@ proc looksLikeDevelopAllArgs(args: openArray[string]): bool =
         arg == "--transitive-of" or arg.startsWith("--transitive-of=") or
         arg == "--only" or arg.startsWith("--only=") or
         arg == "--project" or arg.startsWith("--project=") or
-        arg == "--group" or arg.startsWith("--group="):
+        arg == "--tag" or arg.startsWith("--tag="):
       return true
   false
 
@@ -25781,11 +25781,11 @@ type
     dryRun: bool         ## RA-27 ``--dry-run``: print the plan and exit WITHOUT mutating.
     json: bool           ## RA-27 ``--json``: machine surface (plan + per-repo results).
     verbose: bool        ## RA-27 ``--verbose``/``-v``: include raw tool output diagnostics.
-    includeGroups: seq[string]
-      ## RA-18 ``--groups=a,b``: only repos in one of these groups (plus the
-      ## implicit ``default`` rule) are synced. Empty = no group filter.
-    excludeGroups: seq[string]
-      ## RA-18 ``--groups=-a`` / ``-a`` entries: repos in any of these groups
+    includeTags: seq[string]
+      ## RA-18 ``--tags=a,b``: only repos carrying one of these tags (plus the
+      ## implicit ``default`` rule) are synced. Empty = no tag filter.
+    excludeTags: seq[string]
+      ## RA-18 ``--tags=-a`` / ``-a`` entries: repos carrying any of these tags
       ## are excluded (exclusion wins over inclusion).
     report: ReportSpec   ## Opt-in ``--write-report[=PATH]`` artifact.
 
@@ -25852,20 +25852,21 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
     elif arg == "--jobs-checkout" or arg.startsWith("--jobs-checkout="):
       result.jobsCheckout = parseSyncJobsValue(
         valueFromFlag(args, i, "--jobs-checkout"), "--jobs-checkout")
-    elif arg == "--groups" or arg.startsWith("--groups="):
+    elif arg == "--tags" or arg.startsWith("--tags="):
       # RA-18 subset selection. A comma-separated list; an entry prefixed
-      # with ``-`` (e.g. ``--groups=default,-heavy``) is an EXCLUDE term,
-      # otherwise an INCLUDE term. Mirrors ``repo``'s ``--groups`` syntax.
-      for raw in valueFromFlag(args, i, "--groups").split(','):
+      # with ``-`` (e.g. ``--tags=default,-heavy``) is an EXCLUDE term,
+      # otherwise an INCLUDE term. Mirrors ``repo``'s ``--groups`` syntax,
+      # under the word the membership model left free for a filter.
+      for raw in valueFromFlag(args, i, "--tags").split(','):
         let term = raw.strip()
         if term.len == 0:
           continue
         if term.startsWith("-"):
-          let g = term[1 .. ^1]
-          if g.len > 0:
-            result.excludeGroups.add(g)
+          let t = term[1 .. ^1]
+          if t.len > 0:
+            result.excludeTags.add(t)
         else:
-          result.includeGroups.add(term)
+          result.includeTags.add(term)
     elif arg == "--no-interleaved":
       result.noInterleaved = true
     elif arg == "--fail-fast":
@@ -28190,7 +28191,7 @@ proc lockedDepFromStoreRepo(source: LockSource; repo: ResolvedRepo): LockedDep =
     integrity: integrity, version: "",
     visibility: lockingTierLabel(repo.visibility),
     participation: repo.participation, depends: repo.depends,
-    groups: repo.groups)
+    tags: repo.tags)
 
 proc populateLockedDeps*(source: LockSource): LockedDependencies =
   ## MO-9 — the ONE entry point that fills the MO-8 ``LockedDependencies`` model
@@ -28420,7 +28421,7 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
   result.locationOf = initTable[string, string]()
   result.pinTierOf = initTable[string, string]()
   result.pinBackendOf = initTable[string, string]()
-  result.groupsOf = initTable[string, seq[string]]()
+  result.tagsOf = initTable[string, seq[string]]()
   result.projectsOf = initTable[string, seq[string]]()
 
   # DS-8 — ``--tier=<list>``: which TIERS may contribute records at all. This
@@ -28661,11 +28662,11 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
 
   for r in resolved.repos:
     if r.name.len == 0: continue
-    let groups = effectiveGroups(r)
-    result.groupsOf[r.name] = groups
-    for g in groups:
-      if g notin result.knownGroups: result.knownGroups.add(g)
-  result.knownGroups.sort()
+    let tags = effectiveTags(r)
+    result.tagsOf[r.name] = tags
+    for t in tags:
+      if t notin result.knownTags: result.knownTags.add(t)
+  result.knownTags.sort()
 
   # DS-7 ``--project`` attribution. The active project set is the workspace's
   # recorded ``[workspace] projects``; each project is resolved on its own to
@@ -29616,17 +29617,17 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         kept.add(repo)
     resolved.repos = kept
 
-  # RA-18: subset selection by manifest group. ``--groups=a,b`` keeps only
-  # repos in one of the requested groups; ``-<group>`` excludes. A repo with
-  # no declared ``groups`` belongs to the implicit ``default`` group, so a
-  # plain ``--groups=default`` (or no filter at all) keeps every un-grouped
-  # repo. When no group flags are given the filter is a no-op and the repo
+  # RA-18: subset selection by manifest tag. ``--tags=a,b`` keeps only
+  # repos carrying one of the requested tags; ``-<tag>`` excludes. A repo with
+  # no declared ``tags`` carries the implicit ``default`` tag, so a
+  # plain ``--tags=default`` (or no filter at all) keeps every untagged
+  # repo. When no tag flags are given the filter is a no-op and the repo
   # set is exactly the resolved set (no regression for fragments without
-  # ``groups``).
-  if args.includeGroups.len > 0 or args.excludeGroups.len > 0:
+  # ``tags``).
+  if args.includeTags.len > 0 or args.excludeTags.len > 0:
     var kept: seq[ResolvedRepo]
     for repo in resolved.repos:
-      if repoSelectedByGroups(repo, args.includeGroups, args.excludeGroups):
+      if repoSelectedByTags(repo, args.includeTags, args.excludeTags):
         kept.add(repo)
     resolved.repos = kept
 
@@ -49449,7 +49450,7 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
       discard
     elif arg == "--json" or arg == "--verbose" or arg == "--dry-run" or
         arg == "--write-report" or arg.startsWith("--write-report=") or
-        arg.startsWith("--jobs") or arg.startsWith("--groups="):
+        arg.startsWith("--jobs") or arg.startsWith("--tags="):
       forwarded.add(arg)
     elif arg.startsWith("-"):
       stderr.writeLine("repro workspace enable: unknown flag " & arg)
@@ -52851,7 +52852,7 @@ proc runThinAppDispatch(programName: string): int =
     # the `repro switch`/`push` top-level arms above: routes to the same
     # handler `repro workspace sync` uses (``runWorkspaceSyncCommand``),
     # forwarding the remaining args unchanged so every flag (scoped
-    # ``<project>``, ``--jobs*``, ``--groups``, ``--force-sync``,
+    # ``<project>``, ``--jobs*``, ``--tags``, ``--force-sync``,
     # ``--dry-run``, ``--json``, ``--verbose``) behaves identically.
     try:
       let syncArgs =

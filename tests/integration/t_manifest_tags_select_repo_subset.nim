@@ -1,26 +1,31 @@
-## RA-18 — manifest groups select a repo subset on sync.
+## RA-18 — manifest tags select a repo subset on sync.
 ##
-## Three repos with different group membership:
-##   * ``lib-core``  — no ``groups`` declared  → implicit ``default`` group.
-##   * ``lib-tools`` — ``groups = ["tools"]``  → ``tools`` only (NOT default).
-##   * ``lib-heavy`` — ``groups = ["heavy"]``  → ``heavy`` only.
+## Three repos with different tag sets:
+##   * ``lib-core``  — no ``tags`` declared    → implicit ``default`` tag.
+##   * ``lib-tools`` — ``tags = ["tools"]``    → ``tools`` only (NOT default).
+##   * ``lib-heavy`` — ``tags = ["heavy"]``    → ``heavy`` only.
 ##
-## ``repro workspace sync`` filters the repo set by ``--groups`` (include)
-## and ``-<group>`` (exclude). The sync report's ``repos`` array lists
+## ``repro workspace sync`` filters the repo set by ``--tags`` (include)
+## and ``-<tag>`` (exclude). The sync report's ``repos`` array lists
 ## exactly the SELECTED repos, so it is the observable for subset selection.
 ##
+## A tag is a FILTER over a repo set, not a repo set — which is why it is no
+## longer spelled ``groups``: the membership model reclaimed that word for the
+## membership concept (``member_repos`` / ``member_sets``), and a filter and a
+## collection sharing one word is the defect class that campaign removes.
+##
 ## Cases (hermetic — local bare upstreams, no network):
-##   1. No ``--groups``               → all three repos selected.
-##   2. ``--groups=default``          → only the no-groups repo (implicit
-##                                      default). Proves a no-groups repo IS
-##                                      in ``default`` and a grouped repo is
+##   1. No ``--tags``                 → all three repos selected.
+##   2. ``--tags=default``            → only the untagged repo (implicit
+##                                      default). Proves an untagged repo IS
+##                                      in ``default`` and a tagged repo is
 ##                                      NOT.
-##   3. ``--groups=tools``            → only ``lib-tools``.
-##   4. ``--groups=default,tools``    → ``lib-core`` + ``lib-tools``.
-##   5. ``--groups=-heavy``           → all but ``lib-heavy`` (exclude).
+##   3. ``--tags=tools``              → only ``lib-tools``.
+##   4. ``--tags=default,tools``      → ``lib-core`` + ``lib-tools``.
+##   5. ``--tags=-heavy``             → all but ``lib-heavy`` (exclude).
 ##
 ## Falsifiability: each case asserts the EXACT selected path set, so a
-## filter that selected too many (e.g. ignored ``--groups``) or too few
+## filter that selected too many (e.g. ignored ``--tags``) or too few
 ## (e.g. dropped the implicit ``default``) fails the set equality. The
 ## negative members are checked explicitly (``notin``).
 ##
@@ -59,7 +64,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.name \"RA-18 Tester\"")
-  writeFile(workPath / "README.md", "ra18-groups\n")
+  writeFile(workPath / "README.md", "ra18-tags\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " commit -m seed")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
@@ -103,7 +108,7 @@ name = "lib-tools"
 path = "lib-tools"
 remote = "tools-origin"
 revision = "main"
-groups = ["tools"]
+tags = ["tools"]
 """
 
 const heavyFragment = """
@@ -114,7 +119,7 @@ name = "lib-heavy"
 path = "lib-heavy"
 remote = "heavy-origin"
 revision = "main"
-groups = ["heavy"]
+tags = ["heavy"]
 """
 
 # ---- fixture --------------------------------------------------------------
@@ -126,7 +131,7 @@ type
     workspaceRoot: string
 
 proc setupFixture(gitBin: string): Fixture =
-  result.scratch = createTempDir("repro-ra18-groups-", "")
+  result.scratch = createTempDir("repro-ra18-tags-", "")
   result.reproBin = reproBinary()
   let coreOrigin = result.scratch / "origin-core.git"
   let toolsOrigin = result.scratch / "origin-tools.git"
@@ -147,13 +152,13 @@ proc setupFixture(gitBin: string): Fixture =
   writeFile(manifestsRoot / "repos" / "lib-heavy.toml", heavyFragment)
   result.workspaceRoot = workspaceRoot
 
-proc syncPaths(fx: Fixture; groupsArg: string): HashSet[string] =
-  ## Run sync (optionally with a ``--groups=...`` flag) and return the set
+proc syncPaths(fx: Fixture; tagsArg: string): HashSet[string] =
+  ## Run sync (optionally with a ``--tags=...`` flag) and return the set
   ## of repo paths the report classified — i.e. the selected subset.
   var argv = @[fx.reproBin, "workspace", "sync", "--write-report", "myproject",
     "--workspace-root=" & fx.workspaceRoot]
-  if groupsArg.len > 0:
-    argv.add("--groups=" & groupsArg)
+  if tagsArg.len > 0:
+    argv.add("--tags=" & tagsArg)
   let res = runShell(shellCommand(argv))
   if res.code notin {0, 2}:
     checkpoint("sync output: " & res.output)
@@ -163,9 +168,9 @@ proc syncPaths(fx: Fixture; groupsArg: string): HashSet[string] =
   for entry in report["repos"]:
     result.incl(entry["path"].getStr())
 
-suite "RA-18 — manifest groups subset selection":
+suite "RA-18 — manifest tags subset selection":
 
-  test "groups select the expected repo subset on sync":
+  test "tags select the expected repo subset on sync":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -174,7 +179,7 @@ suite "RA-18 — manifest groups subset selection":
       defer: removeDir(fx.scratch)
 
       # init first so every repo has a working tree (clones are not subject
-      # to the group filter; the filter is a sync-time selection).
+      # to the tag filter; the filter is a sync-time selection).
       let initRes = runShell(shellCommand(@[
         fx.reproBin, "workspace", "init", "myproject",
         "--workspace-root=" & fx.workspaceRoot]))
@@ -182,27 +187,27 @@ suite "RA-18 — manifest groups subset selection":
         checkpoint("init output: " & initRes.output)
       check initRes.code == 0
 
-      # Case 1: no --groups → all three.
+      # Case 1: no --tags → all three.
       let all = syncPaths(fx, "")
       check all == ["lib-core", "lib-tools", "lib-heavy"].toHashSet
 
-      # Case 2: --groups=default → only the no-groups repo (implicit default).
+      # Case 2: --tags=default → only the untagged repo (implicit default).
       let onlyDefault = syncPaths(fx, "default")
       check onlyDefault == ["lib-core"].toHashSet
       check "lib-tools" notin onlyDefault
       check "lib-heavy" notin onlyDefault
 
-      # Case 3: --groups=tools → only lib-tools.
+      # Case 3: --tags=tools → only lib-tools.
       let onlyTools = syncPaths(fx, "tools")
       check onlyTools == ["lib-tools"].toHashSet
       check "lib-core" notin onlyTools
 
-      # Case 4: --groups=default,tools → lib-core + lib-tools.
+      # Case 4: --tags=default,tools → lib-core + lib-tools.
       let defaultAndTools = syncPaths(fx, "default,tools")
       check defaultAndTools == ["lib-core", "lib-tools"].toHashSet
       check "lib-heavy" notin defaultAndTools
 
-      # Case 5: --groups=-heavy → exclude lib-heavy, keep the rest.
+      # Case 5: --tags=-heavy → exclude lib-heavy, keep the rest.
       let exceptHeavy = syncPaths(fx, "-heavy")
       check exceptHeavy == ["lib-core", "lib-tools"].toHashSet
       check "lib-heavy" notin exceptHeavy

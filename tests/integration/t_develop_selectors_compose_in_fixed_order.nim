@@ -6,13 +6,13 @@
 ##   >
 ##   > 1. **mode** — `--all` (default) | `--direct` | `--indirect` |
 ##   >    `--transitive-of=<pkg>`
-##   > 2. **`--project=<list>`** … 3. **`--group=<list>`** …
+##   > 2. **`--project=<list>`** … 3. **`--tag=<list>`** …
 ##   > 4. **`--filter=<glob>`** … 5. **`--only=<list>`** …
 ##   > 6. **`--except=<list>`**
 ##
 ## Why this is not cosmetic. Three of the six stages did not exist:
 ## `--indirect` was specified in the V1 proposal from the beginning and never
-## implemented (the parser rejected it outright), and `--project`, `--group`
+## implemented (the parser rejected it outright), and `--project`, `--tag`
 ## and `--except` had no implementation at all. `--filter` existed but was a
 ## SUBSTRING test rather than a glob, so `--filter=lib` silently also selected
 ## `zlib-extra` — a selector that matches more than it looks like it matches is
@@ -34,13 +34,13 @@
 ##       .repro/manifests/projects/alpha.toml   — contributes: lib-core,
 ##                                                lib-extra, tool-a, shared
 ##                 projects/beta.toml           — contributes: tool-b, shared
-##                 repos/*.toml                 — `groups` declared per repo
+##                 repos/*.toml                 — `tags` declared per repo
 ##       .repro/workspace.toml                  — projects = ["alpha", "beta"]
 ##       .repro-workspace.toml                  — layer 4 route: team ->
 ##                                                git-checkout
 ##
 ## Asserts:
-##   1. every stage narrows on its own: `--project`, `--group`, `--filter`
+##   1. every stage narrows on its own: `--project`, `--tag`, `--filter`
 ##      (as a GLOB, anchored at both ends), `--only`, `--except`;
 ##   2. `--indirect` exists and selects the closure minus the root repo's
 ##      direct edges;
@@ -67,7 +67,7 @@
 ##   --project=alpha
 ##
 ## Mutation check: swapping stages in ``developSetFromLock`` (e.g. applying
-## `--filter` before `--group`) changes the reported `kept` counts in the
+## `--filter` before `--tag`) changes the reported `kept` counts in the
 ## witnesses below and fails (4); restoring the last-one-wins parse for the
 ## mode flags, `--filter` or `--at` fails (3b); restoring `--filter` to a
 ## substring test fails (1)'s anchored-glob assertions. Note that NO mutation
@@ -117,15 +117,15 @@ proc seedGitOrigin(gitBin, originPath, workPath: string): string =
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " push origin main")
   requireGit(q(gitBin) & " -C " & q(workPath) & " rev-parse HEAD").strip()
 
-proc repoFragment(name, remote: string; groups: seq[string]): string =
+proc repoFragment(name, remote: string; tags: seq[string]): string =
   result = "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
     "[repo]\n" &
     "name = \"" & name & "\"\n" &
     "path = \"" & name & "\"\n" &
     "remote = \"" & remote & "\"\n" &
     "revision = \"main\"\n"
-  if groups.len > 0:
-    result.add("groups = [\"" & groups.join("\", \"") & "\"]\n")
+  if tags.len > 0:
+    result.add("tags = [\"" & tags.join("\", \"") & "\"]\n")
 
 proc selectedRepos(output: string): seq[string] =
   ## The repo names of a ``--list`` table, in the order printed.
@@ -172,9 +172,9 @@ suite "DS-7: the membership axis composes in a fixed order":
         remoteBlock.add("[[remote]]\nname = \"" & name & "-origin\"\n" &
           "fetch = \"file://" & origins[i] & "\"\n\n")
 
-      # `groups`: lib-core + lib-extra are `libs`; tool-a + tool-b are `tools`;
-      # `shared` declares NO groups, so it is in the implicit `default` group
-      # ONLY (a repo that lists groups without naming `default` is not in it).
+      # `tags`: lib-core + lib-extra are `libs`; tool-a + tool-b are `tools`;
+      # `shared` declares NO tags, so it is in the implicit `default` tag
+      # ONLY (a repo that lists tags without naming `default` is not in it).
       writeFile(manifestsRoot / "repos" / "lib-core.toml",
         repoFragment("lib-core", "lib-core-origin", @["libs"]))
       writeFile(manifestsRoot / "repos" / "lib-extra.toml",
@@ -262,12 +262,12 @@ suite "DS-7: the membership axis composes in a fixed order":
       check beta.code == 0
       check selectedRepos(beta.output) == @["shared", "tool-b"]
 
-      # --group: the manifest fragments' declared groups.
-      let libs = list("--group=libs")
+      # --tag: the manifest fragments' declared tags.
+      let libs = list("--tag=libs")
       check libs.code == 0
       check selectedRepos(libs.output) == @["lib-core", "lib-extra"]
-      # `shared` declares no groups, so it is in `default` and nothing else.
-      let defaults = list("--group=default")
+      # `shared` declares no tags, so it is in `default` and nothing else.
+      let defaults = list("--tag=default")
       check defaults.code == 0
       check selectedRepos(defaults.output) == @["shared"]
 
@@ -314,17 +314,17 @@ suite "DS-7: the membership axis composes in a fixed order":
       # witness in this all-stage pipeline; the dedicated `exceptCounted`
       # witness below proves that `--except` narrows at its fixed stage too.
       let permutations = [
-        "--all --project=alpha --group=libs --filter='lib-*' " &
+        "--all --project=alpha --tag=libs --filter='lib-*' " &
           "--only=lib-core --except=tool-a",
         "--except=tool-a --only=lib-core --filter='lib-*' " &
-          "--group=libs --project=alpha --all",
-        "--group=libs --except=tool-a --all --filter='lib-*' " &
+          "--tag=libs --project=alpha --all",
+        "--tag=libs --except=tool-a --all --filter='lib-*' " &
           "--project=alpha --only=lib-core",
         "--only=lib-core --all --except=tool-a --project=alpha " &
-          "--filter='lib-*' --group=libs",
-        "--filter='lib-*' --group=libs --project=alpha --all " &
+          "--filter='lib-*' --tag=libs",
+        "--filter='lib-*' --tag=libs --project=alpha --all " &
           "--except=tool-a --only=lib-core",
-        "--project=alpha --filter='lib-*' --except=tool-a --group=libs " &
+        "--project=alpha --filter='lib-*' --except=tool-a --tag=libs " &
           "--only=lib-core --all",
       ]
       let reference = list(permutations[0])
@@ -355,7 +355,7 @@ suite "DS-7: the membership axis composes in a fixed order":
       #   repro develop --list --direct --all   -> mode --all,    5 repo(s)
       #
       # …the same flag set, two argv orders, two different answers. The
-      # list-valued selectors (`--only` / `--except` / `--project` / `--group`)
+      # list-valued selectors (`--only` / `--except` / `--project` / `--tag`)
       # accumulate and were always order-free; the single-valued ones now
       # REFUSE rather than silently pick one.
       let twoModes = list("--all --direct")
@@ -396,7 +396,7 @@ suite "DS-7: the membership axis composes in a fixed order":
       check stageLines(reference.output) == @[
         "selection: mode --all -> 5 repo(s)",
         "selection: project --project=alpha -> 4 repo(s)",
-        "selection: group --group=libs -> 2 repo(s)",
+        "selection: tag --tag=libs -> 2 repo(s)",
         "selection: filter --filter=lib-* -> 2 repo(s)",
         "selection: only --only=lib-core -> 1 repo(s)",
         "selection: except --except=tool-a -> 1 repo(s)",
@@ -413,23 +413,23 @@ suite "DS-7: the membership axis composes in a fixed order":
       check stageLines(exceptCounted.output) == @[
         "selection: mode --all -> 5 repo(s)",
         "selection: project --project=alpha -> 4 repo(s)",
-        "selection: group (not given) -> 4 repo(s)",
+        "selection: tag (not given) -> 4 repo(s)",
         "selection: filter (not given) -> 4 repo(s)",
         "selection: only (not given) -> 4 repo(s)",
         "selection: except --except=tool-a -> 3 repo(s)",
       ]
 
       # …and the counts themselves, not only the labels, depend on the order.
-      # `--group=libs` keeps 2 of 5; `--filter='*-a'` then keeps 0 of those 2.
+      # `--tag=libs` keeps 2 of 5; `--filter='*-a'` then keeps 0 of those 2.
       # Run the other way round the filter would keep 1 of 5 (`tool-a`) and the
-      # group would then keep 0 — same empty answer, different narrowing. A
+      # tag would then keep 0 — same empty answer, different narrowing. A
       # report that cannot tell those apart cannot show a fixed order at all.
-      let counted = list("--all --group=libs --filter='*-a'")
+      let counted = list("--all --tag=libs --filter='*-a'")
       check counted.code == 0
       check stageLines(counted.output) == @[
         "selection: mode --all -> 5 repo(s)",
         "selection: project (not given) -> 5 repo(s)",
-        "selection: group --group=libs -> 2 repo(s)",
+        "selection: tag --tag=libs -> 2 repo(s)",
         "selection: filter --filter=*-a -> 0 repo(s)",
         "selection: only (not given) -> 0 repo(s)",
         "selection: except (not given) -> 0 repo(s)",

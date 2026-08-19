@@ -28,10 +28,10 @@
 ## activated a routed read breaks (3). Confirmed by mutating the composer to
 ## emit its per-backend inventory unconditionally — (1) then fails.
 ##
-## Also asserts (4) that the DS-7 `--group` selector works in THIS shape: its
-## group attribution comes from the resolved manifest membership, which a
-## workspace with no routing config never reaches, so `--group=<a group the
-## committed lock itself declares>` refused with "the declared groups are:
+## Also asserts (4) that the DS-7 `--tag` selector works in THIS shape: its
+## tag attribution comes from the resolved manifest membership, which a
+## workspace with no routing config never reaches, so `--tag=<a tag the
+## committed lock itself declares>` refused with "the declared tags are:
 ## (none)" -- a false answer, not a narrow one.
 ##
 ## Mocks: NONE. Real git repos on the real filesystem and the real ``repro``
@@ -75,12 +75,12 @@ proc seedGitOrigin(gitBin, originPath, workPath: string): string =
   requireGit(q(gitBin) & " -C " & q(workPath) & " rev-parse HEAD").strip()
 
 proc depInline(name, path, url, sha, depends: string;
-               groups = ""): string =
+               tags = ""): string =
   "{ name = \"" & name & "\", path = \"" & path &
     "\", coord_kind = \"vcs\", url = \"" & url & "\", ref = \"main\"" &
     ", revision = \"" & sha & "\", integrity = \"git-sha1:" & sha &
     "\", version = \"\", visibility = \"public\", participation = \"\"" &
-    ", depends = \"" & depends & "\", groups = \"" & groups & "\" }"
+    ", depends = \"" & depends & "\", tags = \"" & tags & "\" }"
 
 proc committedLock(deps: string): string =
   "schema = \"reprobuild.solved-graph-lock.v2\"\n\n" &
@@ -179,46 +179,46 @@ suite "DS-1: a public-only workspace is unchanged by the lock-set composer":
         "repro develop --all: cloned libb @ " & libbSha & " -> " &
           (deps3 / "libb") & "\n"
 
-      # ---- (4) `--group` works HERE too, on the committed lock's own
-      #          `groups`, and does not claim the workspace has none. -------
+      # ---- (4) `--tag` works HERE too, on the committed lock's own
+      #          `tags`, and does not claim the workspace has none. -------
       #
-      # DS-7's group attribution is read from the resolved MANIFEST membership,
+      # DS-7's tag attribution is read from the resolved MANIFEST membership,
       # which the composer only reaches when a configuration layer declares a
       # route. This workspace shape — "a workspace with no routing config
       # resolves to the built-in public default alone" (CLI/develop.md
       # §"Composing the lock set") — is precisely the one where it does not,
-      # and `--group=libs` refused with
+      # and `--tag=libs` refused with
       #
-      #   '--group=libs' names no manifest group in this workspace (names are
-      #   matched EXACTLY; the declared groups are: (none))
+      #   '--tag=libs' names no manifest tag in this workspace (names are
+      #   matched EXACTLY; the declared tags are: (none))
       #
-      # for a group the committed lock ITSELF declares on both repos. That is
+      # for a tag the committed lock ITSELF declares on both repos. That is
       # not a narrower answer, it is a false one — the exact failure mode the
       # exact-name loudness rule exists to produce truthfully.
-      let groupedLock = committedLock(
+      let taggedLock = committedLock(
         depInline("app", ".", "file://" & appOrigin, appSha, "liba,libb") &
         ", " & depInline("liba", "liba", "file://" & libaOrigin, libaSha, "",
-                         groups = "libs") &
+                         tags = "libs") &
         ", " & depInline("libb", "libb", "file://" & libbOrigin, libbSha, "",
-                         groups = "tools"))
-      let ws4 = scratch / "ws-groups"
+                         tags = "tools"))
+      let ws4 = scratch / "ws-tags"
       createDir(ws4)
-      writeFile(ws4 / "repro.lock", groupedLock)
+      writeFile(ws4 / "repro.lock", taggedLock)
       proc list4(flags: string): tuple[code: int; output: string] =
         run(repro & " develop --list --tool-provisioning=path " & flags,
           cwd = ws4)
-      let libsOnly = list4("--group=libs")
+      let libsOnly = list4("--tag=libs")
       if libsOnly.code != 0:
-        checkpoint("develop --list --group=libs output: " & libsOnly.output)
+        checkpoint("develop --list --tag=libs output: " & libsOnly.output)
       check libsOnly.code == 0
       check "liba" in libsOnly.output
       check "libb" notin libsOnly.output
-      check "selection: group --group=libs -> 1 repo(s)" in libsOnly.output
-      # …and an unknown group is still the loud refusal, now NAMING the groups
+      check "selection: tag --tag=libs -> 1 repo(s)" in libsOnly.output
+      # …and an unknown tag is still the loud refusal, now NAMING the tags
       # the lock actually declares rather than "(none)".
-      let badGroup = list4("--group=nope")
-      check badGroup.code == 2
-      check "'--group=nope' names no manifest group in this workspace" in
-        badGroup.output
-      # `app` declares no groups, so it is in the implicit `default` one.
-      check "the declared groups are: default, libs, tools" in badGroup.output
+      let badTag = list4("--tag=nope")
+      check badTag.code == 2
+      check "'--tag=nope' names no manifest tag in this workspace" in
+        badTag.output
+      # `app` declares no tags, so it is in the implicit `default` one.
+      check "the declared tags are: default, libs, tools" in badTag.output
