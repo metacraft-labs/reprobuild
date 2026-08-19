@@ -71,6 +71,15 @@ type
 
 const
   schemaRepoFragmentV1*     = "reprobuild.workspace.repo.v1"
+  schemaRepoSetV1*          = "reprobuild.workspace.repo-set.v1"
+    ## Workspace-Membership-Model.md — a named membership list. A repo-set that
+    ## is enabled in a workspace is what used to be called a project; there is
+    ## no second kind. Carries `name` and `members` and nothing else, so a
+    ## shared set cannot drift into a half-project.
+  schemaUrlPrefixV1*        = "reprobuild.workspace.url-prefix.v1"
+    ## A URL prefix shared by many repos (`https://github.com/<org>`), declared
+    ## ONCE for the workspace. Distinct from a git remote (`origin`,
+    ## `upstream`), which is what `RepoRemoteEntry.name` holds.
   schemaProjectManifestV1*  = "reprobuild.workspace.project.v1"
   schemaVariantManifestV1*  = "reprobuild.workspace.variant.v1"
   schemaLockV1*             = "reprobuild.workspace.lock.v1"
@@ -106,15 +115,29 @@ type
     dest*: string
 
   RepoRemoteEntry* = object
-    name*: string
-    remote*: string
+    ## One git-remote binding: the local remote name, and where it points.
+    name*: string        ## the LOCAL git remote name (`origin`, `upstream`).
+    remote*: string      ## deprecated spelling of `url_prefix`.
+    url_prefix*: string  ## the workspace URL prefix this binding resolves through.
+    url_suffix*: string
+      ## The path under that prefix; `url = url_prefix / url_suffix`. Carried
+      ## PER BINDING because a fork's upstream has a different path than the
+      ## fork: `reprobuild-cmake` forks `Kitware/CMake`, so a shared name would
+      ## compose `Kitware/reprobuild-cmake`. Empty means "default to the repo's
+      ## `name`", which is the common single-binding case.
 
   RepoBody* = object
     name*: string
     path*: string
-    remote*: Option[string]
+    remote*: Option[string]        ## deprecated spelling of `url_prefix`.
     remotes*: seq[RepoRemoteEntry]
-    revision*: Option[string]
+    revision*: Option[string]      ## deprecated; split into `branch` + the lock.
+    branch*: Option[string]
+      ## The branch this repo follows. Only ever a branch name — never a commit
+      ## id and never a fully-qualified ref, so it is always a legal argument to
+      ## `git clone --branch`. Pins live in lock files.
+    url_prefix*: Option[string]
+    url_suffix*: Option[string]
     vcs*: Option[string]
     stability*: Option[string]
     # MO-5 — evidence-only private participation marker
@@ -155,6 +178,32 @@ type
   RepoFragment* = object
     schema*: string
     repo*: RepoBody
+    extensions*: Extensions
+
+  # --- url-prefixes/<name>.toml ----------------------------------------------
+
+  UrlPrefixBody* = object
+    name*: string
+    url*: string
+
+  UrlPrefixManifest* = object
+    schema*: string
+    `url-prefix`*: UrlPrefixBody
+    extensions*: Extensions
+
+  # --- repo-sets/<set>.toml --------------------------------------------------
+
+  RepoSetBody* = object
+    ## Deliberately just a name and a membership list. Identity fields are
+    ## absent by construction rather than by convention.
+    name*: string
+
+  RepoSetManifest* = object
+    schema*: string
+    `repo-set`*: RepoSetBody
+    members*: seq[string]
+      ## Names of repos or other repo-sets. By NAME, not path, consistent with
+      ## `depends` and unlike the `includes` this replaces.
     extensions*: Extensions
 
   # --- projects/<project>.toml -----------------------------------------------
@@ -217,7 +266,8 @@ type
     schema*: string
     project*: ProjectBody
     remote*: seq[RemoteEntry]
-    includes*: seq[string]
+    includes*: seq[string]         ## deprecated; path-based. Superseded by `members`.
+    members*: seq[string]
     binary_dependency*: seq[BinaryDependencyEntry]
       ## RA-22 — binary-mode dependencies (see `BinaryDependencyEntry`). A
       ## missing/empty array means the project declares no binary

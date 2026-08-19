@@ -123,6 +123,34 @@ proc readRepoFragment*(path: string): RepoFragment =
   requireNonEmpty(path, schemaRepoFragmentV1, "repo.name", result.repo.name)
   requireNonEmpty(path, schemaRepoFragmentV1, "repo.path", result.repo.path)
 
+# ---- url-prefixes/<name>.toml ----------------------------------------------
+
+proc readUrlPrefix*(path: string): UrlPrefixManifest =
+  ## Workspace-Membership-Model.md — a URL prefix shared by many repos,
+  ## declared once for the workspace. `url` is a PREFIX in every case: the
+  ## former "a fetch base ending in .git is used verbatim" special case is not
+  ## carried over, because a field whose meaning depends on the shape of its own
+  ## value is a defect waiting for the first input of the other shape.
+  let content = slurpManifest(path, schemaUrlPrefixV1)
+  validateSchema(path, content, schemaUrlPrefixV1)
+  result = decodeStrict(path, content, schemaUrlPrefixV1, UrlPrefixManifest)
+  requireNonEmpty(path, schemaUrlPrefixV1, "url-prefix.name",
+                  result.`url-prefix`.name)
+  requireNonEmpty(path, schemaUrlPrefixV1, "url-prefix.url",
+                  result.`url-prefix`.url)
+
+# ---- repo-sets/<set>.toml --------------------------------------------------
+
+proc readRepoSet*(path: string): RepoSetManifest =
+  ## A named membership list. The strict decode is what forbids identity
+  ## fields: `default_revision`, `trunk` and friends are simply not on
+  ## `RepoSetManifest`, so a shared set cannot quietly become a half-project.
+  let content = slurpManifest(path, schemaRepoSetV1)
+  validateSchema(path, content, schemaRepoSetV1)
+  result = decodeStrict(path, content, schemaRepoSetV1, RepoSetManifest)
+  requireNonEmpty(path, schemaRepoSetV1, "repo-set.name",
+                  result.`repo-set`.name)
+
 # ---- projects/<project>.toml ----------------------------------------------
 
 proc readProjectManifest*(path: string): ProjectManifest =
