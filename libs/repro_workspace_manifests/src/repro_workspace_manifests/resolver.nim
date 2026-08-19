@@ -664,6 +664,87 @@ proc planRepoRemote*(remotes: openArray[RemoteEntry];
   result.remoteName = name
   result.mintedFetch = base
 
+type
+  RepoUrlPrefixPlan* = object
+    ## The membership-model counterpart of `RepoRemotePlan`: how a requested
+    ## clone URL is split into a declared `url_prefix` plus the `url_suffix`
+    ## under it. Same reuse-the-most-specific-then-mint rules, minus the
+    ## verbatim case, which does not exist on this path.
+    prefixName*: string
+    urlSuffix*: string
+      ## Written into the fragment only when it differs from the repo's `name`
+      ## — the whole point of splitting the two fields is that `name` stops
+      ## carrying URL structure.
+    mintedUrl*: string
+      ## When non-empty, the `url` of a NEW `url-prefixes/<prefixName>.toml`
+      ## the caller must create. Empty means an existing prefix was reused.
+    error*: string
+
+proc planRepoUrlPrefix*(prefixes: Table[string, string];
+                        repoName, requestedUrl: string): RepoUrlPrefixPlan =
+  ## Plan the `url_prefix` / `url_suffix` of a fragment for `repoName` cloned
+  ## from `requestedUrl`, against the workspace's declared url prefixes.
+  ##
+  ## Rule 1, REUSE THE MOST SPECIFIC: of every declared prefix that the URL
+  ## sits under, take the longest, and put the remainder in `url_suffix`. So a
+  ## workspace declaring both `github` → `https://github.com` and
+  ## `metacraft-labs` → `https://github.com/metacraft-labs` gets a bare suffix
+  ## for the org's own repos and `llvm/llvm-project` for the generic one.
+  ##
+  ## Rule 2, MINT ONE: no declared prefix serves the URL, so add exactly one,
+  ## named after the org, carrying the org base — and the NEXT repo from that
+  ## org hits rule 1 and adds nothing. Growing one prefix per repo is what this
+  ## avoids, and is why the minted prefix is the org base rather than the full
+  ## repo URL.
+  if requestedUrl.len == 0:
+    result.error = "remote URL is empty"
+    return
+  let wanted = canonicalGitUrl(requestedUrl)
+
+  var bestLen = -1
+  for name, url in prefixes:
+    let base = canonicalGitUrl(url)
+    if base.len == 0: continue
+    if not wanted.startsWith(base & "/"): continue
+    let suffix = wanted[base.len + 1 .. ^1]
+    if suffix.len == 0: continue
+    # Ties broken by name so the plan is deterministic across table orders —
+    # a `Table` iteration order is not one an operator can predict, and a
+    # scaffolding decision that varies run to run is not reviewable.
+    if base.len > bestLen or (base.len == bestLen and name < result.prefixName):
+      bestLen = base.len
+      result.prefixName = name
+      result.urlSuffix = suffix
+  if result.prefixName.len > 0:
+    return
+
+  let (base, leaf) = splitLastSegment(wanted)
+  if base.len == 0 or leaf.len == 0:
+    result.error = "remote URL '" & requestedUrl &
+      "' has no repository path segment to compose a manifest entry from"
+    return
+  result.urlSuffix = leaf
+  var candidate = orgLabelFor(base)
+  if candidate.len == 0: candidate = hostLabelFor(base)
+  if candidate.len == 0: candidate = "origin"
+  var name = candidate
+  var attempt = 0
+  while name in prefixes:
+    if canonicalGitUrl(prefixes[name]) == base:
+      # The same base under a different name — reuse rather than duplicate.
+      result.prefixName = name
+      result.mintedUrl = ""
+      return
+    inc attempt
+    name =
+      if attempt == 1 and hostLabelFor(base).len > 0 and
+          hostLabelFor(base) != candidate:
+        hostLabelFor(base) & "-" & candidate
+      else:
+        candidate & "-" & $(attempt + 1)
+  result.prefixName = name
+  result.mintedUrl = base
+
 # ---- Workspace-Membership-Model.md: url prefixes ---------------------------
 
 proc loadUrlPrefixes*(manifestRoot: string): Table[string, string] =

@@ -8734,6 +8734,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_membership_model_fork_upstream_remote_alignment.nim",
+    binary: "build/test-bin/t_membership_model_fork_upstream_remote_alignment",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_membership_model_sets_cli.nim",
+    binary: "build/test-bin/t_membership_model_sets_cli",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_manifests_repo_fragment_round_trip.nim",
     binary: "build/test-bin/t_workspace_manifests_repo_fragment_round_trip",
     defines: @[],

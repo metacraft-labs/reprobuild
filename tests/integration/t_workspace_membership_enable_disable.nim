@@ -228,10 +228,12 @@ suite "WV-1/WV-2 — workspace membership (enable / disable / ws alias)":
       let fx = setupFixture(gitBin, "undefined")
       defer: removeDir(fx.scratch)
 
-      # Enabling is not how a project comes into existence — recording
+      # Enabling is not how a repo-set comes into existence — recording
       # membership no manifest layer can resolve breaks every later command.
       let refused = runRepro(fx, ["workspace", "enable", "nosuchproject"])
       check refused.code == 2
       check refused.output.contains("nosuchproject")
-      check refused.output.contains("projects add")
+      # The verb the refusal points at is the DEFINITION one, now named for
+      # the thing it defines (Workspace-Membership-Model.md retires "project").
+      check refused.output.contains("sets add")
       check activeSet(fx) == @["alpha"]
