@@ -1,8 +1,8 @@
 ## Multi-package artifact merge: when a single ``repro.nim`` declares
 ## two or more ``package`` blocks, ``artifactFromRegisteredDsl`` must
 ## collapse the resulting registry entries into a single
-## ``ProjectInterfaceArtifact`` whose ``publicExecutables`` /
-## ``publicLibraries`` aggregate across every package in the file.
+## ``ProjectInterfaceArtifact`` whose public executables, libraries, and
+## module-global resource contracts aggregate across every package in the file.
 ##
 ## Until M12-marker-fix landed this code path raised
 ## ``ValueError("expected one root package in <file>, got <N>")`` because
@@ -44,6 +44,14 @@ package `multi_artifact_hello`:
 suite "ProjectInterfaceArtifact multi-package merge":
 
   test "two packages in one file collapse into a single artifact":
+    resetResourceTypeInterfaceRegistry()
+    registerResourceTypeInterface(ResourceTypeInterfaceDef(
+      typeId: "multi_artifact.workspace",
+      determinismOrd: 0,
+      attributes: @[ResourceAttrDef(name: "root", nimType: "string")],
+      observeEntrypoint: "multi_artifact.workspace.observe",
+      planEntrypoint: "multi_artifact.workspace.plan",
+      applyEntrypoint: "multi_artifact.workspace.apply"))
     # ``rootSourceFile = ""`` picks up every registered package and
     # exercises the ``packages.len != 1`` merge branch in
     # ``artifactFromRegisteredDsl`` — the same branch the build pipeline
@@ -58,6 +66,12 @@ suite "ProjectInterfaceArtifact multi-package merge":
     check pi.publicLibraries[0].name == "greet"
     check pi.publicExecutables.len == 1
     check pi.publicExecutables[0].binaryName == "hello"
+    # Resource interfaces are module-global. Each package projection sees the
+    # registry, so the merge must retain the contract exactly once.
+    check pi.publicResources.len == 1
+    check pi.publicResources[0].typeId == "multi_artifact.workspace"
+    check pi.publicResources[0].attributes.len == 1
+    check pi.publicResources[0].attributes[0].name == "root"
     # Tool-uses dedup: both packages declare the same ``nim`` constraint
     # so the merged envelope should expose ONE entry, not two.
     check pi.toolUses.len == 1

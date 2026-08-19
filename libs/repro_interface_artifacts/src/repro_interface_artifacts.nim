@@ -1718,6 +1718,9 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
   ##     guarantees member-name uniqueness within a package, and
   ##     multi-package files almost always partition members one per
   ##     package, so duplicates are not expected here);
+  ##   * retaining each module-global ``publicResources`` contract once,
+  ##     deduplicated by ``typeId`` (each package projection sees the same
+  ##     resource registry);
   ##   * deduplicating ``toolUses`` by
   ##     ``(packageSelector, executableName)`` so a constraint listed in
   ##     two ``uses:`` blocks (typical for shared toolchains like
@@ -1740,6 +1743,7 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
     line: matches[0].sourceLine)
   var seenToolUses: seq[string] = @[]
   var seenSigDeps: seq[string] = @[]
+  var seenResourceTypeIds: seq[string] = @[]
   for pkg in matches:
     let projection = toProjectInterface(pkg, packages, contributions)
     if result.provisioningContributions.len == 0:
@@ -1748,6 +1752,11 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
       result.publicExecutables.add(exe)
     for lib in projection.publicLibraries:
       result.publicLibraries.add(lib)
+    for resource in projection.publicResources:
+      if seenResourceTypeIds.find(resource.typeId) >= 0:
+        continue
+      seenResourceTypeIds.add(resource.typeId)
+      result.publicResources.add(resource)
     for use in projection.toolUses:
       let key = use.packageSelector & "\x1f" & use.executableName
       if seenToolUses.find(key) >= 0:
