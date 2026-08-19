@@ -8397,6 +8397,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # M2 dispatch would have raised a typed exception for unresolvable
     # name selectors before reaching here).
     var targetResolutions: seq[TargetResolutionRecord] = @[]
+    var publicActionAliases = initTable[string, string]()
     block computeTargetResolutions:
       let exportTable = aggregateTargetExportTable(refresh.snapshot)
       var actionIds: seq[string] = @[]
@@ -8420,6 +8421,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             let targetDef = decodeBuildTargetPayload(toBytes(node.payload))
             if not seenExplicit.containsOrIncl(targetDef.name):
               explicitTargets.add(targetDef.name)
+            if targetDef.kind == btkAggregate and
+                targetDef.actions.len == 1 and targetDef.targets.len == 0:
+              publicActionAliases[targetDef.actions[0]] = targetDef.name
             if targetDef.kind == btkCollection:
               if collectionMembers.hasKey(targetDef.name):
                 for a in targetDef.actions:
@@ -8437,6 +8441,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       for sel in userSelectors:
         targetResolutions.add(resolveTargetExportSelector(exportTable,
           actionIds, explicitTargets, sel, collectionMembers))
+
+    # A named run-edge selector is an export-table name, not necessarily the
+    # underlying action id. Forward arguments to the exact action selected by
+    # the shared resolver rather than guessing from the lowered graph shape.
+    var forwardedActionId = selectedActionId
+    if forwardedActionArgs.len > 0 and targetResolutions.len == 1 and
+        targetResolutions[0].kind == trkResolved:
+      forwardedActionId = targetResolutions[0].actionId
+      if publicActionAliases.hasKey(forwardedActionId):
+        forwardedActionId = publicActionAliases[forwardedActionId]
 
     let graphCacheKey = loweredGraphCacheKey(buildArtifact, effectiveMode,
       providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
@@ -8593,7 +8607,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # of the consumer cache key. Both are no-ops when nothing was materialized
     # (byte-identical to today).
     var scheduledActions = lowered.actions
-    appendForwardedArgs(scheduledActions, selectedActionId)
+    appendForwardedArgs(scheduledActions, forwardedActionId)
     attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
     # Cross-Repo-Source-Consumption SC-4 (§4.3): fold each materialized

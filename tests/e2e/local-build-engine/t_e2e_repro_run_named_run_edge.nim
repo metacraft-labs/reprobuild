@@ -7,9 +7,9 @@
 ## Spec cite: Named-Runnable-Edges.md §3.1 / §5; the N1 milestone
 ## Verification `t_e2e_repro_run_named_run_edge`.
 ##
-## The fixture registers both an ordinary `app-run` target and a
-## `run "app-run", build = "build-app"` run-target via the N0 DSL surface
-## (`repro_resources`' `run`). `build-app` is a
+## The fixture registers an ordinary `app-build` target and a separately
+## named `run "app-run", build = "build-app"` run-target via the N0 DSL
+## surface (`repro_resources`' `run`). `build-app` is a
 ## typed-tool edge that copies its input to `build/app` and appends a line
 ## to a marker file every time it actually fires — so the marker line count
 ## is an exact witness of how many times the edge was *executed* vs served
@@ -107,7 +107,7 @@ proc writeRunEdgeProject(path: string) =
     "      input = \"src/main.txt\",\n" &
     "      output = \"build/app\",\n" &
     "      marker = marker)\n" &
-    "    discard target(\"app-run\", app)\n" &
+    "    discard target(\"app-build\", app)\n" &
     "    discard collect(\"lint\", [app])\n" &
     "    run(\"app-run\", build = \"build-app\")\n")
 
@@ -141,6 +141,7 @@ proc listRunTargets(reproBin, pathValue, cwd: string): string =
   requireSuccess(shellCommand(@[reproBin, "tasks"], @[
     ("PATH", pathValue),
     ("REPRO_TOOL_PROVISIONING", "path"),
+    ("REPROBUILD_NO_RUNQUOTA", "1"),
     ("REPRO_DAEMON", "off")
   ]), cwd)
 
@@ -166,9 +167,8 @@ suite "t_e2e_repro_run_named_run_edge":
     check listing.contains("[run-edge]")
     check listing.contains("app-run")
 
-    # First run: `repro run app-run` selects the `tekRunEdge` row despite the
-    # same-name ordinary target, then executes `build-app` (the tool fires
-    # once). The output
+    # First run: `repro run app-run` selects the `tekRunEdge` export name,
+    # resolves it to `build-app`, then executes the tool once. The output
     # file + the single marker line are the authoritative witnesses that the
     # edge actually ran (stdout formatting is not asserted — the filesystem
     # effects are the meaningful check).
