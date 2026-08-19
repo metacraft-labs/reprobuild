@@ -669,6 +669,7 @@ tests/e2e/local-build-engine/t_e2e_repro_run_qualified_and_ambiguous.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_repro_run_unknown_and_nonrunnable.nim	nim	1
 tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim	nim	1
 tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim	nim	1
+tests/e2e/local-build-engine/t_repro_build_target_matching_project_file_stem.nim	nim	1
 tests/e2e/local-build-engine/t_repro_build_unknown_target_diagnostic.nim	nim	1
 tests/e2e/local-build-engine/t_repro_list_targets_lists_implicit_and_explicit.nim	nim	1
 tests/e2e/m68/t_e2e_repro_home_depends_on_topological.nim	nim	5
