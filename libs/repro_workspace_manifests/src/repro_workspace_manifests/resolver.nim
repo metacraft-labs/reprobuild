@@ -150,14 +150,17 @@ type
     remotes*: seq[ResolvedRemote]
     revision*: string
     branch*: string
-      ## Workspace-Membership-Model.md — the fragment's `branch`, when it
-      ## declared one. Only ever a branch NAME, so it is always a legal
-      ## `git clone --branch` argument; `revision` conflated that with "an
-      ## exact commit to sit at" and the conflation cost two defects. Empty for
-      ## an unconverted fragment (which declares `revision` instead), and when
-      ## non-empty it is also mirrored into `revision`, so every existing
-      ## consumer keeps reading one field and nothing has to be taught the new
-      ## one before the manifest repo is converted.
+      ## The branch this repo TRACKS, when the fragment declared one. Only ever
+      ## a branch NAME, so it is always a legal `git clone --branch` argument;
+      ## `revision` conflated that with "an exact commit to sit at" and the
+      ## conflation cost two defects. Empty for a fragment that declares only
+      ## `revision`.
+      ##
+      ## Independent of `revision`, which is where the checkout SITS. A
+      ## fragment declaring only `branch` gets that branch name copied into
+      ## `revision` so every existing consumer keeps reading one field; a
+      ## fragment declaring BOTH keeps its own `revision`, because the pin is
+      ## the whole reason it was written.
     vcs*: string
     stability*: string
     # MO-5 — evidence-only private participation marker carried verbatim from
@@ -953,22 +956,27 @@ proc resolveFragment(ctx: FragmentContext; fragmentAbs: string;
         projectRemote: result.projectRemote, fetchUrl: result.fetchUrl))
     result.remotes = resolvedRemotes
 
-  # Resolve revision. `branch` WINS over `revision` when both are present:
-  # `branch` carries only branch names, so it is the one that is always a legal
-  # `git clone --branch` argument, and a pin belongs in the lock rather than in
-  # a manifest. `revision` still resolves alone, for every unconverted
-  # fragment. With neither set we fall back to the project's
-  # `default_revision`, then leave the field empty — downstream policy decides
-  # what an empty revision means; we do NOT inject a hardcoded branch name.
+  # Resolve branch and revision. They answer DIFFERENT questions and a fragment
+  # may legitimately answer both: `branch` is what the repo TRACKS, `revision`
+  # is where it SITS. For most repos only the first is declared and the second
+  # is supplied by the lock. A read-only third-party source tree is the case
+  # where both belong in the fragment — it appears in no dependency graph, so
+  # no lock covers it, and without a pin the checkout floats on whatever the
+  # upstream branch tip happens to be.
+  #
+  # So `branch` does not overwrite `revision`. It only SUPPLIES it when the
+  # fragment pinned nothing, which keeps a branch-only fragment resolving to a
+  # legal `git clone --branch` argument. Overwriting instead meant a fragment
+  # carrying both silently discarded its SHA: the pin was recorded in the
+  # manifest but bound nothing, which reads as protected while floating.
   let fragmentBranch =
     if fragment.repo.branch.isSome: fragment.repo.branch.get() else: ""
   let fragmentRevision =
     if fragment.repo.revision.isSome: fragment.repo.revision.get() else: ""
-  if fragmentBranch.len > 0:
-    result.branch = fragmentBranch
-    result.revision = fragmentBranch
-  elif fragmentRevision.len > 0:
-    result.revision = fragmentRevision
+  result.branch = fragmentBranch
+  if fragmentBranch.len > 0 or fragmentRevision.len > 0:
+    result.revision =
+      if fragmentRevision.len > 0: fragmentRevision else: fragmentBranch
   else:
     result.revision = ctx.defaultRevision
 
