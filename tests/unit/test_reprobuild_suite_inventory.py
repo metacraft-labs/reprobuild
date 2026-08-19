@@ -1905,7 +1905,13 @@ test "incomplete name" and:
         # This branch's own delta is separately checked and is exactly -22:
         # 24 `libs/repro_solver/tests/` sources leave, the bundle and the
         # solver-input regression arrive. 1256 - 22 = 1234.
-        self.assertEqual(len(nim_specs), 1234)
+        #
+        # 1234 -> 1235: the develop-mode source-identity regression,
+        # `libs/repro_dsl_stdlib/tests/`
+        # `t_develop_dependency_source_is_read_not_solved.nim`. Regenerated
+        # with `scripts/generate_test_edges.nim`, which reported exactly one
+        # new Nim test and no other movement.
+        self.assertEqual(len(nim_specs), 1235)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -2121,7 +2127,15 @@ test "incomplete name" and:
         # Recording that rather than presenting the composition as a
         # measurement, because the only thing worse than a stale pin is a
         # stale pin that reads as if someone had checked it.
-        expected_nim_total = 6942 if sys.platform == "darwin" else 6943
+        #
+        # 6942/6943 -> 6953/6954: the eleven cases of the develop-mode
+        # source-identity regression. This delta IS measured, on both surfaces
+        # independently and after building the binary: its own `--list-json`
+        # reports `"total": 11, "suites": 4`, and the static scan of the
+        # source reports 11 in the baseline TSV. All eleven are
+        # unconditional, so the Linux-vs-Darwin delta is still +1. The BASE it
+        # is added to remains the composed number described above.
+        expected_nim_total = 6953 if sys.platform == "darwin" else 6954
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated

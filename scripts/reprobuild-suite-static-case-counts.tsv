@@ -113,6 +113,7 @@ libs/repro_dsl_stdlib/tests/t_c2_recursive_identity.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_catalog_claude_code.nim	nim	10
 libs/repro_dsl_stdlib/tests/t_d2_dnf_index.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_d2_pacman_index.nim	nim	7
+libs/repro_dsl_stdlib/tests/t_develop_dependency_source_is_read_not_solved.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_m67_bulk_catalog.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_m68_baseline_catalog.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_m8_bulk_catalog.nim	nim	11

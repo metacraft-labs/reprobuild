@@ -29,6 +29,9 @@ import std/[algorithm, options, os, strutils, tables]
 import ./types
 import ./context
 import ./api
+import ./develop_sources
+
+export develop_sources.EDevelopVersionUnknown
 
 # Spec-Implementation M2d: ``finalizeVariants()`` now drives the
 # Spack-shaped unified solver. We import the solver library here rather
@@ -157,6 +160,7 @@ proc resetVariantState*() =
   pendingCliOverrides.setLen(0)
   loadedEnvOverrides = false
   pendingSolverPackages.setLen(0)
+  resetDevelopSourceCache()
   lastUnifiedSolution = UnifiedSolution(
     variants: initTable[string, string](),
     packages: initTable[string, string](),
@@ -420,8 +424,24 @@ proc buildPackageDecls(parentPackages: openArray[string]): seq[PackageDecl] =
   ## Conditional gates from ``case variant.value:`` arms land as
   ## ``ConditionalGate`` on the dependency record so the solver only
   ## activates the relevant arm.
+  # NLF-M2 (`Named-Lock-Files.md` §10.1, §10.3). A dependency whose source is
+  # a local develop checkout has its version READ off that checkout, and never
+  # reaches `smallestSatisfyingVersion` — the milestone's exit criterion is
+  # that no call path from a develop entry to that proc survives.
+  #
+  # The two halves are independent and this only moves one of them. Q-4
+  # settles that a develop package's VARIANTS are solved, so the package stays
+  # in the program; what stops being solved for is its version, which was
+  # never a question. `pinned` carries that distinction into the encoder.
   var depVersions: Table[string, seq[string]]
+  var pinnedVersions: Table[string, string]
   for entry in pendingSolverPackages:
+    if entry.depPackage in pinnedVersions:
+      continue
+    let developed = developSourceFor(entry.depPackage)
+    if developed.isSome:
+      pinnedVersions[entry.depPackage] = developed.get().version
+      continue
     let rangePart = rangePartOf(entry.rng)
     let v = smallestSatisfyingVersion(rangePart)
     if entry.depPackage notin depVersions:
@@ -462,14 +482,19 @@ proc buildPackageDecls(parentPackages: openArray[string]): seq[PackageDecl] =
   var depNames: seq[string] = @[]
   for depName in depVersions.keys:
     depNames.add(depName)
+  for depName in pinnedVersions.keys:
+    depNames.add(depName)
   depNames.sort()
 
   # Materialize the dep packages first so they're available before the
   # parent packages reference them.
   for depName in depNames:
-    var versions = depVersions[depName]
-    versions.sort()
-    result.add(newPackage(depName, versions))
+    if depName in pinnedVersions:
+      result.add(newPinnedPackage(depName, pinnedVersions[depName]))
+    else:
+      var versions = depVersions[depName]
+      versions.sort()
+      result.add(newPackage(depName, versions))
 
   # Materialize parent packages with their dependency edges.
   var sortedParents: seq[string] = @[]
@@ -592,6 +617,15 @@ proc renderSolverInputsFixture*(variants: openArray[VariantDecl];
     var b = "package " & p.name & "\n"
     if p.versions.len > 0:
       b.add("versions: " & p.versions.join(", ") & "\n")
+    if p.pinned:
+      # NLF-M2. Rendered because `inputsDigest` is taken over this text, and a
+      # pinned package is a DIFFERENT solver input from a package that happens
+      # to have one candidate — one asserts its version, the other searches a
+      # one-element space. Without this line the two render identically and
+      # collide on the digest, which is the same class of defect the canonical
+      # ordering was landed to remove: a digest that fails to distinguish
+      # inputs it should.
+      b.add("pinned: true\n")
     for d in p.depends:
       var line = "depends: " & d.name
       if d.range.len > 0:
@@ -633,6 +667,30 @@ proc currentSolverInputsFixture*(): string =
     if entry.parentPackage notin parentSet:
       parentSet.add(entry.parentPackage)
   renderSolverInputsFixture(variants, buildPackageDecls(parentSet))
+
+proc currentSolverPackageDecls*(): seq[PackageDecl] =
+  ## Test-facing accessor for the `PackageDecl` list the CURRENT registration
+  ## state would hand to the solver — the same list
+  ## `currentSolverInputsFixture` renders and `finalizeVariants` solves,
+  ## returned structurally instead of as text.
+  ##
+  ## It exists because some properties are about the ENCODING and not about
+  ## the rendering. "A develop-mode dependency contributes no version-selection
+  ## choice" (`Named-Lock-Files.md` §10.3, corpus NLF-DEV-3) is one: the
+  ## difference between a pinned package and a package with exactly one
+  ## candidate is invisible in the rendered fixture — both show one version —
+  ## and visible only in what `repro_solver`'s encoder emits for it, a
+  ## `package_chosen` FACT versus a `{ ... } = 1` cardinality rule. A test
+  ## restricted to the text surface could not tell those apart, which is
+  ## precisely the substitution the corpus case warns against.
+  ##
+  ## Returns a copy; callers cannot mutate the thread-local registry through
+  ## it. Same contract as `pendingSolverDependencies`.
+  var parentSet: seq[string] = @[]
+  for entry in pendingSolverPackages:
+    if entry.parentPackage notin parentSet:
+      parentSet.add(entry.parentPackage)
+  buildPackageDecls(parentSet)
 
 proc emitSolverInputsIfRequested(variants: openArray[VariantDecl];
                                  packages: openArray[PackageDecl]) =

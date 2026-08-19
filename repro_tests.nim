@@ -854,6 +854,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_develop_dependency_source_is_read_not_solved.nim",
+    binary: "build/test-bin/t_develop_dependency_source_is_read_not_solved",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_m67_bulk_catalog.nim",
     binary: "build/test-bin/t_m67_bulk_catalog",
     defines: @[],

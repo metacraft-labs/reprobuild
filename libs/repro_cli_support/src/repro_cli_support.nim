@@ -47179,6 +47179,7 @@ type
     pVersions: seq[string]
     pDepends: seq[DependencyDecl]
     pSource: string
+    pPinned: bool
 
 proc flushFixtureBlock(s: var FixtureParserState) =
   if s.currentKind == "variant":
@@ -47190,7 +47191,8 @@ proc flushFixtureBlock(s: var FixtureParserState) =
   elif s.currentKind == "package":
     s.packages.add(PackageDecl(
       name: s.currentName, versions: s.pVersions,
-      depends: s.pDepends, variants: @[], source: s.pSource))
+      depends: s.pDepends, variants: @[], source: s.pSource,
+      pinned: s.pPinned))
   s.currentKind = ""
   s.currentName = ""
   s.vKind = vkEnum
@@ -47200,6 +47202,7 @@ proc flushFixtureBlock(s: var FixtureParserState) =
   s.pVersions = @[]
   s.pDepends = @[]
   s.pSource = ""
+  s.pPinned = false
 
 proc parseExplainFixture(text: string): tuple[
     variants: seq[variant_encoder.VariantDecl],
@@ -47226,6 +47229,7 @@ proc parseExplainFixture(text: string): tuple[
   ##   depends: <name> <range> when <variant>=<value>
   ##   source: store                  (MO-11 — a repro-store-realized artifact)
   ##   source: registry <registry>    (MO-11 — a package-registry dependency)
+  ##   pinned: true                   (NLF-M2 — version observed, not solved)
   var s = FixtureParserState(
     variants: @[], packages: @[],
     currentKind: "", currentName: "",
@@ -47326,6 +47330,14 @@ proc parseExplainFixture(text: string): tuple[
               depName, depRange, gateVariant, gateValue))
           else:
             s.pDepends.add(newDependency(depName, depRange))
+      of "pinned":
+        # NLF-M2 — the package's version is OBSERVED (a develop-mode
+        # checkout), not selected. Round-tripped because this reader is what
+        # re-solves a rendered fixture: dropping the flag here would turn a
+        # pinned package back into a searched one on the way in, and the
+        # re-solve would silently answer a different question than the solve
+        # that produced the text.
+        s.pPinned = val.strip().toLowerAscii() in ["true", "yes", "1"]
       of "source":
         # MO-11 — the package's source provenance. ``store`` marks a
         # repro-store-realized artifact; ``registry <name>`` marks a
