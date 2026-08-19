@@ -250,6 +250,7 @@ proc autotools_package*(srcDir: string;
                         makeVars: seq[string] = @[];
                         installMakeVars: seq[string] = @[];
                         srcPatches: seq[string] = @[];
+                        postConfigureCommands: seq[string] = @[];
                         extraEnv: seq[(string, string)] = @[]):
                         AutotoolsPackageResult =
   ## Configure → build → install pipeline for an upstream autotools
@@ -271,10 +272,12 @@ proc autotools_package*(srcDir: string;
   ## the corresponding recipe-root-relative evidence for mirror and stage
   ## actions. ``makeVars`` supplies GNU make command-line assignments shared by
   ## the compile and install invocations; ``installMakeVars`` adds assignments
-  ## used only by the install invocation. ``extraEnv`` supplies recipe-specific
-  ## environment overrides to the configure, compile, and install actions. The
-  ## values are kept outside the typed call identity, matching the other
-  ## package constructors.
+  ## used only by the install invocation. ``postConfigureCommands`` supplies
+  ## shell commands that run from the configured build directory after a
+  ## successful configure and before the make edge. ``extraEnv`` supplies
+  ## recipe-specific environment overrides to the configure, compile, and
+  ## install actions. The values are kept outside the typed call identity,
+  ## matching the other package constructors.
   # M9.R.15a.3 — accept a custom prefix flag format (openssl's
   # ``./Configure`` uses ``--prefix=`` like autotools, but Configure
   # also accepts ``--openssldir=`` etc. via the same channel; we keep
@@ -488,6 +491,9 @@ proc autotools_package*(srcDir: string;
     "export BUILD_CFLAGS=\"${BUILD_CFLAGS:-${CFLAGS_FOR_BUILD}}\"; " &
     "export BUILD_CPPFLAGS=\"${BUILD_CPPFLAGS:-${CPPFLAGS_FOR_BUILD}}\"; " &
     "export BUILD_LDFLAGS=\"${BUILD_LDFLAGS:-${LDFLAGS_FOR_BUILD}}\"; "
+  var postConfigureSuffix = ""
+  for command in postConfigureCommands:
+    postConfigureSuffix.add(" && ( " & command & " )")
   let configureScript =
     if skipConfigure:
       patchPrefix & bootstrapPrefix &
@@ -497,7 +503,8 @@ proc autotools_package*(srcDir: string;
       patchPrefix & bootstrapPrefix &
       cleanBuildPrefix & "mkdir -p " & shellBuildDir & " && cd " &
         shellBuildDir & " && " & nativeBuildEnvPrefix & srcFromBuild & "/" &
-        configureScriptName & " " & configureArgs.join(" ")
+        configureScriptName & " " & configureArgs.join(" ") &
+        postConfigureSuffix
   let configureArgv = @["sh", "-c", configureScript]
   let call = inlineExecCall(configureArgv)
   let actionId = defaultToolActionId(call)

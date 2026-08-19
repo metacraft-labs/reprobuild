@@ -138,6 +138,26 @@ suite "DSL-port M9.R.14c.1 — autotools_package parallel-make wiring":
     finally:
       clearCurrentOwningPackageOverride()
 
+  test "post-configure commands run from the configured build directory":
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("postConfigurePkg")
+    try:
+      let pkg = autotools_package(
+        srcDir = "./src",
+        postConfigureCommands = @["mkdir -p generated"])
+      var configureArgv = ""
+      for arg in pkg.buildEdge.call.arguments:
+        if arg.name == "argv":
+          configureArgv = arg.encodedValue
+      let buildDirPos = configureArgv.find("cd build")
+      let configurePos = configureArgv.find("../src/configure")
+      let postConfigurePos = configureArgv.find("mkdir -p generated")
+      check buildDirPos >= 0
+      check configurePos > buildDirPos
+      check postConfigurePos > configurePos
+    finally:
+      clearCurrentOwningPackageOverride()
+
   test "recognized make depfiles replace monitoring on both edges":
     resetDslPortFetchState()
     setCurrentOwningPackageOverride("depfileMakePkg")
