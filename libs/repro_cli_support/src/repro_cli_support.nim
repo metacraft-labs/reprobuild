@@ -49319,6 +49319,25 @@ proc parseProjectsWorkspaceRoot(args: openArray[string]): string =
     return ascended
   result = absolutePath(result)
 
+proc readDefaultTemplateFromHostConfig(workspaceRoot: string): string =
+  ## Workspace-Membership-Model.md §"Templates" — the host bootstrap config's
+  ## `[projects] default_template`. Policy lives in ORG CONFIG, never hardcoded
+  ## in the binary, so an absent config or an absent key means "no default" and
+  ## the empty stub is what gets written.
+  ##
+  ## Best-effort in the same sense `[projects] default` is: an unreadable
+  ## config yields "" rather than failing the `add`. That is the safe
+  ## direction here — no template is the pre-template behaviour, whereas
+  ## refusing would make an unrelated config typo block authoring entirely.
+  let configPath = findBootstrapConfigPath(workspaceRoot)
+  if configPath.len == 0:
+    return ""
+  try:
+    let cfg = readWorkspaceBootstrap(configPath)
+    return cfg.projects.default_template.get("")
+  except CatchableError:
+    return ""
+
 proc readDefaultProjectsFromHostConfig(workspaceRoot: string): seq[string] =
   ## RA-8 fallback source for ``enable --default``: the host bootstrap
   ## config's ``[projects] default`` set. Best-effort — a missing/malformed
@@ -50675,22 +50694,52 @@ proc remoteRevisionState(gitBin, remoteUrl, revision: string): tuple[
       return (rrsOk, "")
   (rrsMissing, "")
 
-proc projectManifestStub(project: string): string =
-  ## A NEW project has no repos and no remotes yet, so the stub carries
-  ## neither. The `includes` array is deliberately absent rather than empty:
-  ## a bare `includes = [ … ]` written directly under `[project]` is read as
-  ## a key OF that table and the manifest stops parsing (the pilot manifests
-  ## only work because their `[[remote]]` blocks sit between the two). The
-  ## array is created by `repos add` once the file has a `[[remote]]`
-  ## table for it to follow, which is the layout every hand-written manifest
-  ## in the pilot has.
+type
+  MembershipSeed = object
+    ## What a template contributes to a freshly scaffolded set: the same two
+    ## membership keys the set itself carries, so what is seeded reads as the
+    ## thing it produces.
+    memberSets: seq[string]
+    memberRepos: seq[string]
+
+proc renderMemberArray(key: string; members: openArray[string]): string =
+  ## One membership array, one entry per line — the shape `editSetMember`
+  ## expects to find later, so a seeded set stays editable by the same CLI that
+  ## created it.
+  result = key & " = [\n"
+  for m in members:
+    result.add("  \"" & m & "\",\n")
+  result.add("]\n")
+
+proc projectManifestStub(project: string; seed: MembershipSeed): string =
+  ## A NEW project has no remotes yet, so the stub carries none.
+  ##
+  ## The membership arrays are written BEFORE the `[project]` table, and the
+  ## order is load-bearing rather than stylistic: a bare `member_sets = [ … ]`
+  ## written AFTER `[project]` is standard-TOML-bound to that table, the strict
+  ## decode then rejects `project.member_sets`, and the file stops parsing.
+  ## (The old `includes` array had the same problem and was simply omitted from
+  ## the stub; a template has content to place, so it is placed where it
+  ## parses. Verified against the pinned reader in both orders.)
+  ##
+  ## Both keys are written whenever a template applies, even when it seeds only
+  ## one, because which one an entry belongs in is the whole point:
+  ## `member_sets` and `member_repos` are two NAMESPACES, and a file carrying
+  ## only one would invite the next entry into whichever happened to be there.
+  let membership =
+    if seed.memberSets.len > 0 or seed.memberRepos.len > 0:
+      renderMemberArray("member_sets", seed.memberSets) & "\n" &
+      renderMemberArray("member_repos", seed.memberRepos) & "\n"
+    else:
+      ""
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
+  membership &
   "[project]\n" &
   "name = \"" & project & "\"\n" &
   "default_revision = \"main\"\n" &
   "trunk = \"main\"\n"
 
-proc repoSetManifestStub(name: string): string =
+proc repoSetManifestStub(name: string; seed: MembershipSeed): string =
   ## Workspace-Membership-Model.md — a NEW repo-set: a name and an empty
   ## membership list, and nothing else. There is no `default_revision` and no
   ## `default_remote` to stub, deliberately: a set that carried them would make
@@ -50707,12 +50756,14 @@ proc repoSetManifestStub(name: string): string =
   ## Both keys are stubbed even though a new set has neither, because which one
   ## an entry belongs in is the whole point: `member_sets` and `member_repos`
   ## are two NAMESPACES, and a stub carrying only one would invite the next
-  ## entry into whichever happened to be there.
+  ## entry into whichever happened to be there. A template seeds those same two
+  ## arrays; an empty seed leaves them empty, which is the pre-template stub
+  ## byte for byte.
   "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &
   "[repo-set]\n" &
   "name = \"" & name & "\"\n\n" &
-  "member_sets = [\n]\n\n" &
-  "member_repos = [\n]\n"
+  renderMemberArray("member_sets", seed.memberSets) & "\n" &
+  renderMemberArray("member_repos", seed.memberRepos)
 
 proc commitAndPushManifest(identity: GitToolIdentity;
                            gitBin, manifestRoot, message: string;
@@ -51002,7 +51053,7 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
   let verb = "repro workspace " & spelling
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
     echo verb & " list [--enabled|--disabled|--all] [--json]"
-    echo verb & " add <name> [-m DESC]"
+    echo verb & " add <name> [--template=NAME|--no-template] [-m DESC]"
     echo verb & " remove <name> [--prune-orphan-repos]"
     echo "  list   every DEFINED repo-set, marked enabled/disabled for this " &
       "workspace."
@@ -51010,6 +51061,10 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       (if spelling == "sets": "repo-set (repo-sets/<name>.toml)"
        else: "project (projects/<name>.toml)") &
       ". To activate an existing one, use `repro ws enable <name>`."
+    echo "  --template=NAME  scaffold from templates/<NAME>.toml. Without it, " &
+      "the host config's [projects] default_template applies — and is " &
+      "REPORTED when it does."
+    echo "  --no-template    opt out of that default and write the empty stub."
     echo "  remove delete the definition. Disable it here first."
     return 0
   let sub = if args.len > 0 and not args[0].startsWith("-"): args[0] else: "list"
@@ -51087,6 +51142,8 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
   of "add":
     var name = ""
     var desc = ""
+    var requestedTemplate = ""
+    var noTemplate = false
     var i = 0
     while i < rest.len:
       let a = rest[i]
@@ -51095,6 +51152,10 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
           desc = rest[i + 1]; inc i
       elif a.startsWith("--message="):
         desc = a["--message=".len .. ^1]
+      elif a.startsWith("--template="):
+        requestedTemplate = a["--template=".len .. ^1]
+      elif a == "--no-template":
+        noTemplate = true
       elif a.startsWith("--workspace-root="):
         discard
       elif a.startsWith("-"):
@@ -51105,6 +51166,13 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       inc i
     if name.len == 0:
       stderr.writeLine(verb & " add: missing <name>")
+      return 2
+    # Naming a template and opting out of templates in one invocation is a
+    # contradiction, and picking a winner would make one of the two flags a
+    # no-op the operator never sees. Refuse instead.
+    if requestedTemplate.len > 0 and noTemplate:
+      stderr.writeLine(verb & " add: --template=" & requestedTemplate &
+        " and --no-template contradict each other")
       return 2
     # The guard consults BOTH directories even though only one is scaffolded
     # into: `sets add codetracer` in a repo whose `projects/codetracer.toml`
@@ -51120,12 +51188,48 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       stderr.writeLine("  `" & spelling & " add` DEFINES a new one. To " &
         "activate this in this workspace: repro ws enable " & name)
       return 1
+    # ---- template resolution ------------------------------------------------
+    #
+    # Templates exist because an empty stub makes every new set hand-list
+    # whatever the last one had. A default that applied INVISIBLY would
+    # reproduce exactly that defect one level up — the operator would again not
+    # know what their set contains or why — so the default is reported on every
+    # application, and `--no-template` is how you decline it.
+    var templateName = requestedTemplate
+    var templateSource = "--template"
+    if templateName.len == 0 and not noTemplate:
+      templateName = readDefaultTemplateFromHostConfig(workspaceRoot)
+      templateSource = bootstrapConfigFileName & " [projects] default_template"
+    var seed = MembershipSeed()
+    if templateName.len > 0:
+      let templateRel = "templates/" & templateName & ".toml"
+      let templateAbs = manifestRoot / templateRel
+      if not fileExists(templateAbs):
+        # Loud in BOTH directions. An explicit `--template=` naming nothing is
+        # obviously an error; a configured default naming nothing is the more
+        # dangerous one, because silently falling back to the empty stub is
+        # indistinguishable from the template having been applied.
+        stderr.writeLine(verb & " add: template '" & templateName &
+          "' (from " & templateSource & ") does not exist at " & templateAbs)
+        if requestedTemplate.len == 0:
+          stderr.writeLine("  fix the host config, or pass --no-template to " &
+            "scaffold without one")
+        return 1
+      var loaded: TemplateManifest
+      try:
+        loaded = readTemplate(templateAbs)
+      except CatchableError as exc:
+        stderr.writeLine(verb & " add: cannot read " & templateRel & ": " &
+          exc.msg)
+        return 1
+      seed.memberSets = loaded.member_sets
+      seed.memberRepos = loaded.member_repos
     createDir(manifestRoot / addDir)
     let fileRel = addDir & "/" & name & ".toml"
     let fileAbs = manifestRoot / addDir / (name & ".toml")
     writeFile(fileAbs,
-      if addDir == "repo-sets": repoSetManifestStub(name)
-      else: projectManifestStub(name))
+      if addDir == "repo-sets": repoSetManifestStub(name, seed)
+      else: projectManifestStub(name, seed))
     var paths = @[fileRel]
     if desc.len > 0:
       let docRel = addDir & "/" & name & ".md"
@@ -51133,9 +51237,18 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
         "# " & name & "\n\n" & desc & "\n")
       paths.add(docRel)
     let msg = "Add " & (if addDir == "repo-sets": "repo-set " else: "project ") &
-      name & (if desc.len > 0: " (" & desc & ")" else: "")
+      name & (if desc.len > 0: " (" & desc & ")" else: "") &
+      (if templateName.len > 0: " from template " & templateName else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
     stdout.writeLine(verb & " add: " & name & " — " & res.diagnostic)
+    if templateName.len > 0:
+      # The reported line names the template AND where the choice came from, so
+      # "why does my new set contain these" is answerable from the transcript
+      # rather than by reading the org config.
+      stdout.writeLine(verb & " add: applied template '" & templateName &
+        "' (from " & templateSource & ") — seeded " &
+        $seed.memberSets.len & " member_sets, " &
+        $seed.memberRepos.len & " member_repos")
     stdout.writeLine(verb & " add: defined, not enabled — " &
       "`repro ws repos add <repo> --" &
       (if addDir == "repo-sets": "set=" else: "project=") & name &

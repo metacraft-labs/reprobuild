@@ -76,6 +76,13 @@ const
     ## is enabled in a workspace is what used to be called a project; there is
     ## no second kind. Carries `name`, `member_sets` and `member_repos` and
     ## nothing else, so a shared set cannot drift into a half-project.
+  schemaTemplateV1*         = "reprobuild.workspace.template.v1"
+    ## Workspace-Membership-Model.md §"Templates" — the starting shape a NEW
+    ## repo-set is scaffolded from. A DISTINCT schema rather than a repo-set
+    ## with a reserved name, which is what lets the reader forbid the one thing
+    ## a template must not carry: a fixed set name. `[template] name` is the
+    ## TEMPLATE's identity (what `--template=` selects); the scaffolded set's
+    ## name always comes from the `add` argument.
   schemaUrlPrefixV1*        = "reprobuild.workspace.url-prefix.v1"
     ## A URL prefix shared by many repos (`https://github.com/<org>`), declared
     ## ONCE for the workspace. Distinct from a git remote (`origin`,
@@ -223,6 +230,36 @@ type
     member_repos*: seq[string]
       ## Names of repo fragments. By NAME, not path, consistent with `depends`
       ## and unlike the `includes` this replaces.
+    extensions*: Extensions
+
+  # --- templates/<template>.toml ----------------------------------------------
+
+  TemplateBody* = object
+    ## A template's own identity, and nothing else. It carries no
+    ## `default_revision` / `default_remote` / `trunk` for the same reason a
+    ## repo-set does not: a collection-level default would make a member
+    ## resolve differently depending on which template happened to scaffold the
+    ## set that names it.
+    name*: string
+      ## The TEMPLATE's name — the value `--template=<name>` and
+      ## `[projects] default_template` select. NOT the scaffolded set's name,
+      ## which always comes from the `add` argument. That separation is the
+      ## whole reason this is a distinct schema: a template that could carry a
+      ## set name would be a repo-set that scaffolds a copy of itself.
+
+  TemplateManifest* = object
+    ## Workspace-Membership-Model.md §"Templates" — a starting membership for a
+    ## new repo-set.
+    ##
+    ## Templates exist because an empty stub makes every new set hand-list
+    ## whatever the last one had, and a set added minutes later can silently
+    ## lack something every other set has. The two membership keys are the SAME
+    ## two a repo-set carries, so what a template seeds is readable as the
+    ## thing it produces rather than as a separate dialect.
+    schema*: string
+    `template`*: TemplateBody
+    member_sets*: seq[string]
+    member_repos*: seq[string]
     extensions*: Extensions
 
   # --- projects/<project>.toml -----------------------------------------------
@@ -453,6 +490,16 @@ type
     default*: seq[string]
       ## Default project set auto-layered when the user hasn't chosen an
       ## explicit project set (consumed by init / `enable --default`).
+    default_template*: Option[string]
+      ## Workspace-Membership-Model.md §"Templates" — the template
+      ## `repro ws sets add` / `projects add` scaffolds from when the operator
+      ## names none. Declared in ORG CONFIG, never hardcoded in the binary: an
+      ## absent key means "no default", and the stub is the empty one.
+      ##
+      ## Applying it is REPORTED, never silent. The mechanism exists because
+      ## membership was being invisibly hand-copied, so a default that applied
+      ## invisibly would reproduce the defect it was introduced to fix;
+      ## `--no-template` opts out for the one set that should not have it.
 
   BootstrapVerifyBody* = object
     ## RA-17 — manifest provenance / trust anchor (Workspace-Manifests.md

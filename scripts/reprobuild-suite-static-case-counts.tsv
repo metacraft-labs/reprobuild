@@ -946,6 +946,7 @@ tests/integration/t_membership_model_resolves_sets_and_prefixes.nim	nim	8
 tests/integration/t_membership_model_retired_names_fail_as_unknown.nim	nim	5
 tests/integration/t_membership_model_schemas_round_trip.nim	nim	6
 tests/integration/t_membership_model_sets_cli.nim	nim	4
+tests/integration/t_membership_model_templates_scaffold_sets.nim	nim	7
 tests/integration/t_migrated_repo_workspace_real_pre_push.nim	nim	1
 tests/integration/t_mixed_public_clean_team_unpublished_refuses.nim	nim	1
 tests/integration/t_mixed_workspace_each_record_in_its_own_backend_only.nim	nim	1

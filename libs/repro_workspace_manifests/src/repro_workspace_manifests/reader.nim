@@ -154,6 +154,21 @@ proc readRepoSet*(path: string): RepoSetManifest =
   requireNonEmpty(path, schemaRepoSetV1, "repo-set.name",
                   result.`repo-set`.name)
 
+# ---- templates/<template>.toml ---------------------------------------------
+
+proc readTemplate*(path: string): TemplateManifest =
+  ## Workspace-Membership-Model.md §"Templates". The strict decode is what
+  ## forbids a template carrying the scaffolded set's name: `TemplateManifest`
+  ## has a `[template] name` (the template's own identity) and the two
+  ## membership keys, and nothing else — so `[repo-set] name = "…"` in a
+  ## template file is an unknown key rather than a silent second source of the
+  ## name the `add` argument already gave.
+  let content = slurpManifest(path, schemaTemplateV1)
+  validateSchema(path, content, schemaTemplateV1)
+  result = decodeStrict(path, content, schemaTemplateV1, TemplateManifest)
+  requireNonEmpty(path, schemaTemplateV1, "template.name",
+                  result.`template`.name)
+
 # ---- projects/<project>.toml ----------------------------------------------
 
 proc readProjectManifest*(path: string): ProjectManifest =

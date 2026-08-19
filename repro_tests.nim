@@ -7518,6 +7518,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_membership_model_templates_scaffold_sets.nim",
+    binary: "build/test-bin/t_membership_model_templates_scaffold_sets",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_membership_model_sets_cli.nim",
     binary: "build/test-bin/t_membership_model_sets_cli",
     defines: @[],
