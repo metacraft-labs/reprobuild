@@ -12899,6 +12899,13 @@ const
     "PATH", "HOME", "USER", "TMPDIR", "TEMP", "TMP",
     "RUNQUOTA_SOCKET", "RUNQUOTAD_BIN", "RUNQUOTA_BIN",
     "REPROBUILD_STORE_ROOT", "REPROBUILD_SOURCE_ROOT",
+    # Source/provider lookup overrides used by workspace builds. These are
+    # distinct from REPROBUILD_SOURCE_ROOT in existing project configuration,
+    # so preserve all supported spellings across the daemon boundary.
+    "REPROBUILD_REPO_ROOT", "REPROBUILD_SRC", "REPROBUILD_PACKAGES_ROOT",
+    # The Nix provisioner is an out-of-process helper. Development builds keep
+    # it beside the freshly built CLI rather than on the systemd-user PATH.
+    "REPROBUILD_NIX_DAEMON_BIN",
     "REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_MAX_PARALLELISM",
     "REPROBUILD_RUNQUOTA_MEMORY_BYTES",
     "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
@@ -12909,6 +12916,11 @@ const
     # REPRO_DAEMON_* under a temporary endpoint/state/runtime root.
     "REPRO_DAEMON_ENDPOINT", "REPRO_DAEMON_STATE_DIR",
     "REPRO_DAEMON_RUNTIME_DIR",
+    # Binary-cache configuration is resolved inside the daemon-hosted build.
+    # Credential variables contain filesystem paths, not key material.
+    "REPRO_CACHES_CONFIG", "REPRO_BINARY_CACHE_URL",
+    "REPRO_BINARY_CACHE_KEY_PATH", "REPRO_BINARY_CACHE_CERT_PATH",
+    "REPRO_BINARY_CACHE_SCOPE",
     # Source checkout overrides used by repro.nim/config.nims to resolve
     # workspace sibling libraries when the daemon-hosted executor evaluates the
     # provider under a login-launched daemon environment.

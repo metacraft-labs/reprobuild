@@ -98,6 +98,33 @@ suite "daemon carried environment":
       runtimeLibraryPath)
     check carried.hasEnvPair("SHM_QUEUE_SRC", shmQueueSrc)
 
+  test "source provisioning and cache configuration follow daemon-hosted builds":
+    let settings = [
+      ("REPROBUILD_REPO_ROOT", "/workspace/reprobuild-repo"),
+      ("REPROBUILD_SRC", "/workspace/reprobuild"),
+      ("REPROBUILD_PACKAGES_ROOT", "/workspace/reprobuild-packages"),
+      ("REPROBUILD_NIX_DAEMON_BIN", "/workspace/reprobuild-nix-daemon"),
+      ("REPRO_CACHES_CONFIG", "/home/test/.config/repro/caches.conf"),
+      ("REPRO_BINARY_CACHE_URL", "https://cache.example.invalid"),
+      ("REPRO_BINARY_CACHE_KEY_PATH", "/home/test/.config/repro/publisher.key"),
+      ("REPRO_BINARY_CACHE_CERT_PATH", "/home/test/.config/repro/publisher.cert"),
+      ("REPRO_BINARY_CACHE_SCOPE", "release"),
+    ]
+    var previous: seq[tuple[key: string; value: string; present: bool]]
+    for (key, value) in settings:
+      previous.add((key: key, value: getEnv(key), present: existsEnv(key)))
+      putEnv(key, value)
+    defer:
+      for item in previous:
+        if item.present:
+          putEnv(item.key, item.value)
+        else:
+          delEnv(item.key)
+
+    let carried = daemonCarriedEnvironment()
+    for (key, value) in settings:
+      check carried.hasEnvPair(key, value)
+
   test "private runner ownership is excluded without changing unrelated env":
     const
       OwnerTokenEnv = "REPRO_TEST_RUNNER_OWNER_TOKEN"
