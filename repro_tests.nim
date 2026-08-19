@@ -7918,6 +7918,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_pull_refuses_to_rewind_unpublished_work.nim",
+    binary: "build/test-bin/t_pull_refuses_to_rewind_unpublished_work",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_r2_iso_boot.nim",
     binary: "build/test-bin/t_r2_iso_boot",
     defines: @[],

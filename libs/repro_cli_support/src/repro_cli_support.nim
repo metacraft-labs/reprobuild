@@ -25015,8 +25015,8 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
     #
     # The invariant, stated as the outcome rather than as a property of the
     # input: ALIGNMENT NEVER LEAVES A CHECKOUT WITH ZERO REMOTES. A tidying
-    # step has no business disconnecting a working tree from everywhere it came
-    # from, whatever the manifest happens to say.
+    # step has no business disconnecting a working tree from everywhere it
+    # came from, whatever the manifest happens to say.
     #
     # Guarding on "the declared set is empty" was the first attempt and it was
     # too narrow, because it reasons about the input to a step whose damage
@@ -25026,9 +25026,9 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
     #   * the declared name is one git will not accept — `git remote add ""`
     #     exits 128 — so the add silently does nothing while the name still
     #     counts as "expected", and the prune then removes the real remote;
-    #   * an add or rename fails for any other reason (a locked config, a name
-    #     collision) and the replacement that justified the prune was never
-    #     actually created.
+    #   * an add or rename fails for any other reason (a locked config, a
+    #     name collision) and the replacement that justified the prune was
+    #     never actually created.
     #
     # So the decision is made against what the checkout ACTUALLY has after the
     # add/rename pass, re-read from git rather than from this proc's own
@@ -30404,6 +30404,10 @@ type
     ppoCloned              ## Missing checkout cloned + put on a tracking
                            ## branch at the manifest revision.
     ppoFailed              ## A clone / fetch / branch-attach step failed.
+    ppoSkippedWorkAtRisk   ## Converging would have repointed a branch (or
+                           ## moved HEAD off one) carrying work no remote
+                           ## carries. The checkout is left EXACTLY as it was
+                           ## and the report names what stopped it.
 
   WorkspacePullRepoEntry* = object
     ## One per declared repo after ``pull``. ``trackingBranch`` is the
@@ -30442,6 +30446,7 @@ proc pullOutcomeTag(outcome: WorkspacePullRepoOutcome): string =
   of ppoConvergedExisting: "converged"
   of ppoCloned: "cloned"
   of ppoFailed: "failed"
+  of ppoSkippedWorkAtRisk: "skipped_work_at_risk"
 
 proc toJsonNode*(report: WorkspacePullReport): JsonNode =
   result = newJObject()
@@ -30505,6 +30510,17 @@ proc renderPullTextLines*(report: WorkspacePullReport): seq[string] =
     result.add("workspace pull: STOPPED after a step failed — the manifest " &
       "repo was advanced and is NOT rolled back; rerun `repro workspace " &
       "pull` to resume from the partial state")
+  var skipped = 0
+  for entry in report.repos:
+    if entry.outcome == pullOutcomeTag(ppoSkippedWorkAtRisk):
+      inc skipped
+  if skipped > 0:
+    # Said once, at the end, in the summary position. The per-repo lines above
+    # already carry the detail; what a reader needs here is the count and the
+    # fact that the rest of the workspace DID converge, so a non-zero exit is
+    # not mistaken for "nothing happened".
+    result.add("workspace pull: " & $skipped & " checkout(s) left untouched " &
+      "to protect work that exists nowhere else; every other repo converged")
   for line in renderTrustReportLines("workspace pull", report.autoTrust):
     result.add(line)
 
@@ -30514,6 +30530,11 @@ type
     projectName: string
     toolProvisioning: ToolProvisioningMode
     report: ReportSpec   ## Opt-in ``--write-report[=PATH]`` artifact.
+    force: bool
+      ## Converge a repo even when doing so repoints a branch carrying commits
+      ## no remote has. Same spelling and same meaning as `disable --force` and
+      ## `remove --force`: the work-loss refusal is the default, and this is
+      ## how the operator says they have decided otherwise.
 
 proc parseWorkspacePullArgs(args: openArray[string]): WorkspacePullArgs =
   ## ``repro workspace pull`` argv parser. Mirrors ``sync``'s shape: an
@@ -30530,6 +30551,8 @@ proc parseWorkspacePullArgs(args: openArray[string]): WorkspacePullArgs =
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
         valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--force":
+      result.force = true
     elif consumeReportFlag(arg, result.report):
       discard
     elif arg.startsWith("-"):
@@ -30553,6 +30576,175 @@ proc resolveWorkspacePullProject(parsed: WorkspacePullArgs): ResolvedProject =
   ## workspace.toml can supply the project name).
   resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
     "`repro workspace pull`").resolved
+
+# ---- work-loss probes, shared by every destructive workspace verb ---------
+#
+# Three verbs in this file destroy local state that no remote carries:
+# `disable` deletes a checkout, `pull` repoints a branch ref, and `migrate`
+# moves a detached HEAD. They endanger DIFFERENT things, so they must ask
+# different questions — but they must ask them the same WAY, or the narrowest
+# implementation ends up in front of the widest destruction. Hence one probe
+# per question here, composed per verb below, rather than a single omnibus
+# check that each caller either over- or under-applies.
+#
+# The shared rule across all of them: a probe that FAILS is itself a blocker.
+# "We could not tell" and "there is nothing there" must never collapse into
+# the same answer when the consequence is irreversible.
+
+proc uncommittedChangesBlocker(identity: GitToolIdentity;
+                               repoDir: string): seq[string] =
+  let status = gitRunPlain(identity, ["-C", repoDir, "status", "--porcelain"])
+  if status.code != 0:
+    return @["could not read git status: " & status.output.strip()]
+  let body = status.output.strip()
+  if body.len > 0:
+    return @[$body.splitLines().len & " uncommitted change(s)"]
+  @[]
+
+proc unpushedCommitsBlocker(identity: GitToolIdentity;
+                            repoDir: string): seq[string] =
+  ## Commits on ANY local branch that no remote carries.
+  ##
+  ## `rev-list --branches --not --remotes` is every commit reachable from some
+  ## local branch and from no remote-tracking ref — exactly "work that would be
+  ## gone" when the whole checkout is deleted. Counting is enough; naming the
+  ## branches is the report's job.
+  let unpushed = gitRunPlain(identity,
+    ["-C", repoDir, "rev-list", "--count", "--branches", "--not", "--remotes"])
+  if unpushed.code != 0:
+    return @["could not check for unpushed commits: " & unpushed.output.strip()]
+  try:
+    let n = parseInt(unpushed.output.strip())
+    if n > 0:
+      return @[$n & " unpushed commit(s)"]
+  except ValueError:
+    return @["could not check for unpushed commits: unexpected output '" &
+      unpushed.output.strip() & "'"]
+  @[]
+
+proc branchAheadOfRemoteBlocker(identity: GitToolIdentity;
+                                repoDir, branch, remoteName: string):
+    seq[string] =
+  ## Commits on ONE branch that its remote-tracking ref does not carry.
+  ##
+  ## This is the question a branch REPOINT has to ask, and it is deliberately
+  ## narrower than the all-branches probe above. Repointing `dev` cannot harm a
+  ## commit on some unrelated feature branch, so refusing over one would make
+  ## the safe answer useless: nearly every real checkout has an unpushed branch
+  ## somewhere, and a gate that fires on all of them is a gate people pass
+  ## `--force` to by reflex.
+  if branch.len == 0:
+    return @[]
+  let localRef = "refs/heads/" & branch
+  if revParse(identity, repoDir, localRef).len == 0:
+    return @[]                    # no such local branch: nothing to repoint
+  let remoteRef = "refs/remotes/" & remoteName & "/" & branch
+  if revParse(identity, repoDir, remoteRef).len == 0:
+    # The branch exists locally and the remote-tracking ref does not, so
+    # EVERYTHING on it is unpublished by definition.
+    return @["local branch '" & branch & "' has no '" & remoteName &
+      "/" & branch & "' to compare against, so all of it is unpublished"]
+  let ahead = gitRunPlain(identity, ["-C", repoDir, "rev-list", "--count",
+    localRef, "--not", remoteRef])
+  if ahead.code != 0:
+    return @["could not compare '" & branch & "' against " & remoteName &
+      "/" & branch & ": " & ahead.output.strip()]
+  try:
+    let n = parseInt(ahead.output.strip())
+    if n > 0:
+      return @[$n & " commit(s) on '" & branch & "' that " & remoteName &
+        "/" & branch & " does not carry"]
+  except ValueError:
+    return @["could not compare '" & branch & "' against " & remoteName &
+      "/" & branch & ": unexpected output '" & ahead.output.strip() & "'"]
+  @[]
+
+proc detachedHeadOnlyCommits(identity: GitToolIdentity;
+                             repoDir: string): seq[string] =
+  ## Work that exists ONLY at a detached HEAD.
+  ##
+  ## The all-branches probe structurally cannot see it: a commit made while
+  ## HEAD is detached belongs to no branch, so it falls outside `--branches` by
+  ## construction. Both moving HEAD onto a branch and repointing the branch
+  ## HEAD is about to land on would leave such a commit reachable only from the
+  ## reflog, which is the exact loss these gates exist to prevent.
+  let res = gitRunPlain(identity, ["-C", repoDir, "rev-list", "--count",
+    "HEAD", "--not", "--branches", "--remotes"])
+  if res.code != 0:
+    return @["could not check for commits held only by the detached HEAD: " &
+      res.output.strip()]
+  try:
+    let n = parseInt(res.output.strip())
+    if n > 0:
+      return @[$n & " commit(s) reachable only from the detached HEAD"]
+  except ValueError:
+    return @["could not check for commits held only by the detached HEAD: " &
+      "unexpected output '" & res.output.strip() & "'"]
+  @[]
+
+proc stashBlocker(identity: GitToolIdentity; repoDir: string): seq[string] =
+  let stash = gitRunPlain(identity, ["-C", repoDir, "stash", "list"])
+  if stash.code != 0:
+    return @["could not read the stash list: " & stash.output.strip()]
+  let body = stash.output.strip()
+  if body.len > 0:
+    return @[$body.splitLines().len & " stash entr(ies)"]
+  @[]
+
+proc repoRemovalBlockers(identity: GitToolIdentity;
+                         repoDir: string): seq[string] =
+  ## Reasons this checkout must not be DELETED without an explicit override.
+  ##
+  ## Deleting the tree destroys everything in it, so this composes the widest
+  ## set: work in the working tree, on any local branch, or in the stash. A
+  ## checkout with none of them is reconstructible from its remote, which is
+  ## what makes deleting it a cheap, reversible act rather than data loss.
+  if not dirExists(repoDir):
+    return @[]
+  if not dirExists(repoDir / ".git"):
+    # Occupied, but not a checkout we can reason about. Its contents are not
+    # reconstructible from any remote and no probe below applies, so it is a
+    # blocker by construction: "we cannot tell" must never collapse into "there
+    # is nothing there" when the consequence is a recursive delete.
+    var entries = 0
+    for _ in walkDir(repoDir):
+      inc entries
+      break
+    if entries > 0:
+      return @["not a git checkout, and not empty"]
+    return @[]
+  result.add(uncommittedChangesBlocker(identity, repoDir))
+  result.add(unpushedCommitsBlocker(identity, repoDir))
+  result.add(stashBlocker(identity, repoDir))
+
+proc branchConvergenceBlockers(identity: GitToolIdentity;
+                               repoDir, branch, remoteName: string):
+    seq[string] =
+  ## Reasons this checkout must not be CONVERGED onto `branch` without an
+  ## explicit override.
+  ##
+  ## Narrower than the removal set, and deliberately so, because converging
+  ## destroys less: `checkout -B <branch> --track <remote>/<branch>` repoints
+  ## ONE branch ref and moves HEAD. It cannot touch another branch, and it
+  ## cannot touch the stash — so this asks about the working tree, about the
+  ## one branch being repointed, and about a detached HEAD whose commits would
+  ## be left unreferenced when HEAD moves away. The stash is checked anyway
+  ## because a stash entry means an interrupted piece of work whose owner is
+  ## almost certainly not expecting their branch to move underneath it, and the
+  ## probe is one cheap command.
+  if not dirExists(repoDir / ".git"):
+    return @[]
+  result.add(uncommittedChangesBlocker(identity, repoDir))
+  let attached = gitRunPlain(identity,
+    ["-C", repoDir, "symbolic-ref", "--short", "-q", "HEAD"])
+  if attached.code == 0 and attached.output.strip().len > 0:
+    result.add(branchAheadOfRemoteBlocker(identity, repoDir, branch,
+      remoteName))
+  else:
+    result.add(detachedHeadOnlyCommits(identity, repoDir))
+    result.add(branchAheadOfRemoteBlocker(identity, repoDir, branch,
+      remoteName))
+  result.add(stashBlocker(identity, repoDir))
 
 proc convergeRepoToManifestRevision(
     identity: GitToolIdentity;
@@ -30670,6 +30862,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     reference
 
   var anyFailure = false
+  var anySkipped = false
   for idx, repo in resolved.repos:
     let absPath = args.workspaceRoot / repo.path
     var entry = WorkspacePullRepoEntry(
@@ -30714,6 +30907,32 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     else:
       entry.outcome = pullOutcomeTag(ppoConvergedExisting)
 
+      # The work-loss gate. Convergence repoints `<revision>` to the remote
+      # tip, so any commit on it that the remote does not carry stops being
+      # referenced by anything — and until now nothing asked. `disable` refuses
+      # to delete a checkout over a single uncommitted file while `pull` would
+      # silently rewind that same checkout's branch; being reflog-recoverable
+      # is not a defence when nothing in the report tells the developer to go
+      # looking.
+      #
+      # Skipped, not fatal: the rest of the workspace still converges, which is
+      # the partial-advance contract every other verb here follows. A repo left
+      # behind is named with its remedy and counted in the exit code.
+      #
+      # Only an EXISTING checkout is gated. A tree this run just cloned has, by
+      # construction, no work in it that a remote does not carry.
+      if not args.force:
+        let blockers = branchConvergenceBlockers(identity, absPath,
+          repo.revision, gitRemoteNameFor(repo))
+        if blockers.len > 0:
+          entry.outcome = pullOutcomeTag(ppoSkippedWorkAtRisk)
+          entry.diagnostic = "converging to '" & repo.revision &
+            "' would put work at risk: " & blockers.join(", ") &
+            "; push or stash it and rerun, or pass --force to converge anyway"
+          report.repos.add(entry)
+          anySkipped = true
+          continue
+
     # Converge to the manifest revision on a local tracking branch.
     let converged = convergeRepoToManifestRevision(
       identity, absPath, repo.revision, remoteName = gitRemoteNameFor(repo))
@@ -30734,6 +30953,11 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     # rerun) rather than being silently reverted.
     if manifestAdvanced:
       report.manifestStopped = true
+  elif anySkipped:
+    # 2, matching every other verb here that declines to touch something to
+    # protect work. Distinct from 1: nothing went wrong, some repos are simply
+    # still waiting on a decision only their owner can make.
+    report.exitCode = 2
   else:
     report.exitCode = 0
     # On full success, record the converged branch in workspace metadata
@@ -30783,6 +31007,12 @@ proc runWorkspacePullCommand*(args: openArray[string]): int =
   ##         manifest had already advanced, it is NOT rolled back: the
   ##         report names the before→after SHAs and the partial state is
   ##         left for a rerun.
+  ##   - 2 — every repo that could be converged was, and at least one was
+  ##         SKIPPED because converging it would have repointed a branch
+  ##         carrying commits no remote has (or moved HEAD off commits held
+  ##         only by a detached HEAD). Those checkouts are untouched; the
+  ##         report names each one and its remedy. ``--force`` converges them
+  ##         anyway, which is the pre-gate behaviour.
   let parsed = parseWorkspacePullArgs(args)
   let outcome = executeWorkspacePull(parsed)
   writeWorkspacePullReport(outcome.report,
@@ -49585,60 +49815,6 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
     syncArgs.add(f)
   return runWorkspaceSyncCommand(syncArgs)
 
-proc repoRemovalBlockers(identity: GitToolIdentity;
-                         repoDir: string): seq[string] =
-  ## Reasons this checkout must not be deleted without an explicit override.
-  ##
-  ## Each reason names work that exists ONLY here: uncommitted changes, commits
-  ## on a local branch that no remote carries, and stash entries. A checkout
-  ## with none of them is reconstructible from its remote, which is what makes
-  ## deleting it a cheap, reversible act rather than data loss.
-  ##
-  ## A probe that FAILS is itself a blocker. "We could not tell" and "there is
-  ## nothing there" must not collapse into the same answer when the consequence
-  ## is an `rm -rf`.
-  if not dirExists(repoDir):
-    return @[]
-  if not dirExists(repoDir / ".git"):
-    # Occupied, but not a checkout we can reason about. Its contents are not
-    # reconstructible from any remote and no probe below applies, so it is a
-    # blocker by construction: "we cannot tell" must never collapse into "there
-    # is nothing there" when the consequence is a recursive delete.
-    var entries = 0
-    for _ in walkDir(repoDir):
-      inc entries
-      break
-    if entries > 0:
-      return @["not a git checkout, and not empty"]
-    return @[]
-  let status = gitRunPlain(identity, ["-C", repoDir, "status", "--porcelain"])
-  if status.code != 0:
-    result.add("could not read git status: " & status.output.strip())
-  elif status.output.strip().len > 0:
-    let changed = status.output.strip().splitLines().len
-    result.add($changed & " uncommitted change(s)")
-  # `rev-list --branches --not --remotes` is every commit reachable from some
-  # local branch and from no remote-tracking ref — exactly "work that would be
-  # gone". Counting is enough; naming the branches is the report's job.
-  let unpushed = gitRunPlain(identity,
-    ["-C", repoDir, "rev-list", "--count", "--branches", "--not", "--remotes"])
-  if unpushed.code != 0:
-    result.add("could not check for unpushed commits: " &
-      unpushed.output.strip())
-  else:
-    try:
-      let n = parseInt(unpushed.output.strip())
-      if n > 0:
-        result.add($n & " unpushed commit(s)")
-    except ValueError:
-      result.add("could not check for unpushed commits: unexpected output '" &
-        unpushed.output.strip() & "'")
-  let stash = gitRunPlain(identity, ["-C", repoDir, "stash", "list"])
-  if stash.code != 0:
-    result.add("could not read the stash list: " & stash.output.strip())
-  elif stash.output.strip().len > 0:
-    result.add($stash.output.strip().splitLines().len & " stash entr(ies)")
-
 # ---- Workspace-Membership-Model.md: local-state reconciliation -------------
 #
 # Manifests arrive by `git pull`; CHECKOUTS do not follow. Three facts about a
@@ -49739,30 +49915,6 @@ proc toJsonNode*(report: WorkspaceLocalStateReport): JsonNode =
   result["repos"] = repos
   result["membership"] = %report.membership
   result["exitCode"] = %report.exitCode
-
-proc detachedHeadOnlyCommits(identity: GitToolIdentity;
-                             repoDir: string): seq[string] =
-  ## Work that exists ONLY at a detached HEAD.
-  ##
-  ## `repoRemovalBlockers` structurally cannot see it: its unpushed-commit
-  ## probe is `rev-list --branches --not --remotes`, and a commit made while
-  ## HEAD is detached belongs to no branch, so it falls outside `--branches` by
-  ## construction. Reattaching HEAD would leave such a commit reachable only
-  ## from the reflog, which is the exact loss this whole gate exists to
-  ## prevent. Same rule as its sibling: a probe that FAILS is itself a blocker.
-  let res = gitRunPlain(identity, ["-C", repoDir, "rev-list", "--count",
-    "HEAD", "--not", "--branches", "--remotes"])
-  if res.code != 0:
-    return @["could not check for commits held only by the detached HEAD: " &
-      res.output.strip()]
-  try:
-    let n = parseInt(res.output.strip())
-    if n > 0:
-      return @[$n & " commit(s) reachable only from the detached HEAD"]
-  except ValueError:
-    return @["could not check for commits held only by the detached HEAD: " &
-      "unexpected output '" & res.output.strip() & "'"]
-  @[]
 
 proc observedGitRemotes(identity: GitToolIdentity;
                         repoDir: string): seq[tuple[name, url: string]] =
@@ -50280,7 +50432,7 @@ proc runWorkspaceDisableCommand*(args: openArray[string]): int =
     # question, via `checkoutPathRejection`, instead of keeping a private copy
     # of the rule. Two independently-written definitions of "degenerate path"
     # is how one of them ends up narrower than the other, and the narrower one
-    # is always the one standing in front of the `removeDir`.
+    # is always the one in front of the `removeDir`.
     let normalized = path.strip()
     let rejection = checkoutPathRejection(normalized)
     if rejection.len > 0:
