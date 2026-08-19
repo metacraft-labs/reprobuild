@@ -7654,6 +7654,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_post_merge_hook_reconciles_local_state.nim",
+    binary: "build/test-bin/t_post_merge_hook_reconciles_local_state",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks.nim",
     binary: "build/test-bin/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks",
     defines: @[],
@@ -8848,6 +8856,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_workspace_metadata_branch_survives_init_and_status.nim",
     binary: "build/test-bin/t_workspace_metadata_branch_survives_init_and_status",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_workspace_migrate_reconciles_local_state.nim",
+    binary: "build/test-bin/t_workspace_migrate_reconciles_local_state",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_workspace_migrate_refuses_to_endanger_work.nim",
+    binary: "build/test-bin/t_workspace_migrate_refuses_to_endanger_work",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
