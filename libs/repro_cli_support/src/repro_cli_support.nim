@@ -24960,17 +24960,51 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
     var expectedRemotes = initHashSet[string]()
     for r in repo.remotes:
       expectedRemotes.incl(r.localName)
+    for r in repo.remotes:
       if r.localName in existingRemotes:
         let getRes = gitRunPlain(identity, ["-C", repoAbs, "remote", "get-url", r.localName])
         if getRes.code == 0 and getRes.output.strip() != r.fetchUrl:
           discard gitRunPlain(identity, ["-C", repoAbs, "remote", "set-url", r.localName, r.fetchUrl])
-      else:
-        discard gitRunPlain(identity, ["-C", repoAbs, "remote", "add", r.localName, r.fetchUrl])
+        continue
+      # The declared name is absent. Before adding it — and letting step 3
+      # prune whatever carried the same URL under another name — look for THAT
+      # remote and RENAME it. Add-then-prune reaches the same URL under the
+      # same name, but it destroys `refs/remotes/<old>/*` and orphans every
+      # `branch.<b>.remote` that named it, so a checkout whose remote was named
+      # after its org (the predecessor tool's convention) silently loses its
+      # tracking configuration on the first sync after the rename.
+      var renamedFrom = ""
+      for existing in existingRemotes:
+        if existing in expectedRemotes:
+          continue
+        let urlRes = gitRunPlain(identity,
+          ["-C", repoAbs, "remote", "get-url", existing])
+        if urlRes.code == 0 and urlRes.output.strip() == r.fetchUrl:
+          renamedFrom = existing
+          break
+      if renamedFrom.len > 0:
+        let renamed = gitRunPlain(identity,
+          ["-C", repoAbs, "remote", "rename", renamedFrom, r.localName])
+        if renamed.code == 0:
+          existingRemotes.excl(renamedFrom)
+          existingRemotes.incl(r.localName)
+          continue
+      discard gitRunPlain(identity, ["-C", repoAbs, "remote", "add", r.localName, r.fetchUrl])
 
-    # 3. Clean up/remove unexpected remotes
-    for name in existingRemotes:
-      if name notin expectedRemotes:
-        discard gitRunPlain(identity, ["-C", repoAbs, "remote", "remove", name])
+    # 3. Clean up/remove unexpected remotes.
+    #
+    # Guarded on a NON-EMPTY expected set. "Remove every remote the manifest
+    # does not declare" applied to a manifest that declares none means "remove
+    # every remote", which leaves a real checkout with no way back to its
+    # upstream and no remote-tracking refs — a repair job, from a step whose
+    # entire purpose is tidying. A repo that resolves with an empty `remotes`
+    # list is a resolution the caller should be looking at, never a licence to
+    # strip a working tree, so the prune is skipped and the add/rename pass
+    # above (which did nothing either) is left as the whole of the alignment.
+    if expectedRemotes.len > 0:
+      for name in existingRemotes:
+        if name notin expectedRemotes:
+          discard gitRunPlain(identity, ["-C", repoAbs, "remote", "remove", name])
 
 proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## End-to-end driver. Resolves the named project / variant, classifies

@@ -7918,6 +7918,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim",
+    binary: "build/test-bin/t_remote_alignment_never_strips_a_checkouts_remotes",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty.nim",
     binary: "build/test-bin/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty",
     defines: @[],
