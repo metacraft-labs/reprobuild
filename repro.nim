@@ -823,7 +823,7 @@ package reprobuild:
       cacheable = false,
       actionId = "reprobuild.apps.repro-harvest-apt"))
 
-    reprobuildAppsActions.add(shell(
+    let reprobuildNixDaemon = shell(
       command = "mkdir -p build/bin && " &
         "cp tools/reprobuild-nix-daemon/reprobuild-nix-daemon " &
         "build/bin/reprobuild-nix-daemon && " &
@@ -832,9 +832,11 @@ package reprobuild:
       extraInputs = @[
         "tools/reprobuild-nix-daemon/reprobuild-nix-daemon",
       ],
-       extraOutputs = @[
-         "build/bin/reprobuild-nix-daemon",
-       ]))
+      extraOutputs = @[
+        "build/bin/reprobuild-nix-daemon",
+      ])
+    reprobuildAppsActions.add(reprobuildNixDaemon)
+    discard target("reprobuild-nix-daemon", reprobuildNixDaemon)
 
     # B5: Windows runtime-DLL staging, previously ~200 lines of shell inside the
     # wrapper. Every non-system library reprobuild uses on Windows is dlopen'd
