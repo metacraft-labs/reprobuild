@@ -55,6 +55,7 @@ libs/repro_build_engine/tests/t_engine_typed_output_recorded_in_normalized_graph
 libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim	nim	9
 libs/repro_build_engine/tests/test_builtin_copy_file_idempotent.nim	nim	1
 libs/repro_build_engine/tests/test_bypass_argv_fidelity.nim	nim	2
+libs/repro_build_engine/tests/test_dependency_rerun_cache_lookup.nim	nim	1
 libs/repro_build_engine/tests/test_elevated_inline_exec_hook.nim	nim	5
 libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim	nim	8
 libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim	nim	4
@@ -905,7 +906,7 @@ tests/integration/t_just_test_hot_cache_is_no_op_build.nim	nim	1
 tests/integration/t_just_test_via_ct_test_runner.nim	nim	1
 tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim	nim	1
 tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim	nim	1
-tests/integration/t_linked_worktree_pre_push_repository_env.nim	nim	3
+tests/integration/t_linked_worktree_pre_push_repository_env.nim	nim	4
 tests/integration/t_local_daemons_control_plane_m0.nim	nim	3
 tests/integration/t_local_daemons_control_plane_m1.nim	nim	3
 tests/integration/t_local_daemons_control_plane_m10.nim	nim	6

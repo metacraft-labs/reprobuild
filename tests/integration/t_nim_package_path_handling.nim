@@ -100,7 +100,12 @@ created_at = "2026-07-02T00:00:00Z"
 
       # Verify repro.paths content
       let pathsContent1 = readFile(reproPaths)
-      let expectedPath1 = (sibRoot / "src").replace('\\', '/')
+      # The provider resolves sibling paths from the process cwd.  On hosts
+      # where the temporary directory is reached through a symlink (notably
+      # Darwin's /tmp -> /private/tmp), getcwd returns the physical spelling.
+      # Match that contract exactly rather than retaining the logical alias.
+      let expectedPath1 = normalizedPath(
+        expandFilename(sibRoot / "src")).replace('\\', '/')
       check "switch(\"path\", \"" & expectedPath1 & "\")" in pathsContent1
 
       # Verify gitignore has been updated
@@ -189,7 +194,8 @@ created_at = "2026-07-02T00:00:00Z"
 
       # Verify repro.paths updated with new path
       let pathsContent3 = readFile(reproPaths)
-      let expectedPath2 = (sibRoot2 / "src").replace('\\', '/')
+      let expectedPath2 = normalizedPath(
+        expandFilename(sibRoot2 / "src")).replace('\\', '/')
       check "switch(\"path\", \"" & expectedPath1 & "\")" in pathsContent3
       check "switch(\"path\", \"" & expectedPath2 & "\")" in pathsContent3
 

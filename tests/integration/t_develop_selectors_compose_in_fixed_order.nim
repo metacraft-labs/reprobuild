@@ -54,8 +54,11 @@
 ##      pipeline is written, and (3) alone would pass against a pipeline with
 ##      no fixed order at all. `--all --direct` vs `--direct --all` is where
 ##      argv order actually decided the answer;
-##   4. the per-stage counts show each stage narrowing the previous one, in
-##      the spec's order — the observable consequence of the fixed order.
+##   4. the per-stage counts show the stages executing in the spec's order,
+##      including dedicated witnesses where `--only` and `--except` each
+##      narrow. They cannot both narrow in ONE accepted pipeline: DS-7's loud
+##      exact-name rule rejects any name present in both sets, and a disjoint
+##      `--except` set cannot remove a member retained by `--only`.
 ##
 ## Falsifiability / pre-fix failure: against ``391a892a`` this test fails at
 ## (1) with
@@ -63,12 +66,13 @@
 ##   repro develop: error: unsupported `repro develop --all` argument:
 ##   --project=alpha
 ##
-## Mutation check: swapping any two stages in ``developSetFromLock`` (e.g.
-## applying `--filter` before `--group`) changes the reported `kept` counts and
-## fails (4); restoring the last-one-wins parse for the mode flags, `--filter`
-## or `--at` fails (3b); restoring `--filter` to a substring test fails (1)'s
-## anchored-glob assertions. Note that NO mutation of the stage pipeline can
-## fail (3) on its own — that is what (3b) exists to cover.
+## Mutation check: swapping stages in ``developSetFromLock`` (e.g. applying
+## `--filter` before `--group`) changes the reported `kept` counts in the
+## witnesses below and fails (4); restoring the last-one-wins parse for the
+## mode flags, `--filter` or `--at` fails (3b); restoring `--filter` to a
+## substring test fails (1)'s anchored-glob assertions. Note that NO mutation
+## of the stage pipeline can fail (3) on its own — that is what the count
+## witnesses and (3b) exist to cover.
 ##
 ## Mocks: NONE. Real git repositories, a real multi-project manifest checkout,
 ## the real ``repro`` binary, the real git-checkout lock backend.
@@ -303,20 +307,25 @@ suite "DS-7: the membership axis composes in a fixed order":
       check "selection: mode --direct" in direct.output
 
       # ---- (3) ARGV-ORDER INDEPENDENCE. ----------------------------------
-      # One selector per stage, in six different argv arrangements.
+      # One selector per stage, in six different argv arrangements. `--only`
+      # and `--except` deliberately name DISJOINT sets: the loudness contract
+      # tested by `t_develop_only_except_refuse_unknown_names` rejects even a
+      # partial overlap as contradictory. `--only=lib-core` is the narrowing
+      # witness in this all-stage pipeline; the dedicated `exceptCounted`
+      # witness below proves that `--except` narrows at its fixed stage too.
       let permutations = [
         "--all --project=alpha --group=libs --filter='lib-*' " &
-          "--only=lib-core,lib-extra --except=lib-extra",
-        "--except=lib-extra --only=lib-core,lib-extra --filter='lib-*' " &
+          "--only=lib-core --except=tool-a",
+        "--except=tool-a --only=lib-core --filter='lib-*' " &
           "--group=libs --project=alpha --all",
-        "--group=libs --except=lib-extra --all --filter='lib-*' " &
-          "--project=alpha --only=lib-core,lib-extra",
-        "--only=lib-core,lib-extra --all --except=lib-extra --project=alpha " &
+        "--group=libs --except=tool-a --all --filter='lib-*' " &
+          "--project=alpha --only=lib-core",
+        "--only=lib-core --all --except=tool-a --project=alpha " &
           "--filter='lib-*' --group=libs",
         "--filter='lib-*' --group=libs --project=alpha --all " &
-          "--except=lib-extra --only=lib-core,lib-extra",
-        "--project=alpha --filter='lib-*' --except=lib-extra --group=libs " &
-          "--only=lib-core,lib-extra --all",
+          "--except=tool-a --only=lib-core",
+        "--project=alpha --filter='lib-*' --except=tool-a --group=libs " &
+          "--only=lib-core --all",
       ]
       let reference = list(permutations[0])
       if reference.code != 0:
@@ -381,14 +390,33 @@ suite "DS-7: the membership axis composes in a fixed order":
 
       # ---- (4) the per-stage counts show the FIXED order narrowing. ------
       # 5 repos in the closure; alpha contributes 4 of them; `libs` keeps 2;
-      # the glob keeps those 2; `--only` keeps those 2; `--except` drops 1.
+      # the glob keeps those 2; `--only=lib-core` keeps 1; the disjoint
+      # `--except=tool-a` correctly keeps that 1. Overlapping the sets merely
+      # to make the final stage narrow would violate the loud-failure contract.
       check stageLines(reference.output) == @[
         "selection: mode --all -> 5 repo(s)",
         "selection: project --project=alpha -> 4 repo(s)",
         "selection: group --group=libs -> 2 repo(s)",
         "selection: filter --filter=lib-* -> 2 repo(s)",
-        "selection: only --only=lib-core,lib-extra -> 2 repo(s)",
-        "selection: except --except=lib-extra -> 1 repo(s)",
+        "selection: only --only=lib-core -> 1 repo(s)",
+        "selection: except --except=tool-a -> 1 repo(s)",
+      ]
+
+      # A separate accepted pipeline is required to observe `--except`
+      # narrowing: after a disjoint `--only` has run, it is mathematically
+      # impossible for `--except` to remove anything. Here no `--only` is
+      # given, so `--except=tool-a` removes exactly one alpha repo at stage 6.
+      let exceptCounted = list("--all --project=alpha --except=tool-a")
+      check exceptCounted.code == 0
+      check selectedRepos(exceptCounted.output) ==
+        @["lib-core", "lib-extra", "shared"]
+      check stageLines(exceptCounted.output) == @[
+        "selection: mode --all -> 5 repo(s)",
+        "selection: project --project=alpha -> 4 repo(s)",
+        "selection: group (not given) -> 4 repo(s)",
+        "selection: filter (not given) -> 4 repo(s)",
+        "selection: only (not given) -> 4 repo(s)",
+        "selection: except --except=tool-a -> 3 repo(s)",
       ]
 
       # …and the counts themselves, not only the labels, depend on the order.

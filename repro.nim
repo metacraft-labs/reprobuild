@@ -508,7 +508,7 @@ package reprobuild:
         "ct_test_runner_adapter.nim"),
       sourceOnlyPackagePath("RUNQUOTA_SRC", [
         repoParent / "runquota",
-      ], "runquota.nim"),
+      ], "repro.nim"),
       sourceOnlyPackagePath("STACKABLE_HOOKS_SRC", [
         repoParent / "nim-stackable-hooks" / "src",
       ], "stackable_hooks.nim"),

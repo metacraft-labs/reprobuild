@@ -3059,13 +3059,26 @@ proc monitorPayloadArgIndex(argv: openArray[string]): int =
       return i + 1
   -1
 
+when defined(macosx):
+  proc resolveNonSipShell*(): string
+
 proc wrapMonitoredPayloadWithRuntimeEnv(argv: openArray[string];
                                         payloadIndex: int;
                                         exportPrefix: string): seq[string] =
   result = newSeqOfCap[string](argv.len + 4)
   for i in 0 ..< payloadIndex:
     result.add(argv[i])
-  result.add("/bin/sh")
+  var shell = "/bin/sh"
+  when defined(macosx):
+    # The monitor itself has already started without the dependency-provided
+    # loader paths. Keep that protection while avoiding a SIP boundary before
+    # the real payload: macOS' /bin/sh strips the injected monitor shim, which
+    # makes the whole child subtree unobservable and forces every otherwise
+    # cacheable automatic-monitor action to skip publishing its record.
+    let nonSipShell = resolveNonSipShell()
+    if nonSipShell.len > 0:
+      shell = nonSipShell
+  result.add(shell)
   result.add("-c")
   result.add(exportPrefix & "exec \"$@\"")
   result.add("sh")
@@ -3431,6 +3444,10 @@ proc preparedRunQuotaCommand(action: BuildAction;
   ## Build one argv/env contract for direct, helper, and inline launches.
   ## Sharing this prevents bypass execution from drifting away from normal
   ## RunQuota execution as tool-path and compiler flags evolve.
+  when defined(macosx):
+    if action.monitorDepfile.len > 0 and resolveNonSipShell().len == 0:
+      raiseEngine("SIP-safe monitored launch requires a non-SIP shell; " &
+        "configure CT_SANDBOX_TOOLS_DIR or put a Nix/Homebrew sh on PATH")
   let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action, config))
   let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)

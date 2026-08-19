@@ -211,13 +211,14 @@ proc isProviderModePath(path: string): bool =
   ]:
     if p.startsWith(prefix):
       return true
-  # The Named-Targets M2 and M5 e2e ambiguity / qualified-target tests
-  # also drive ``buildPackageFragment`` directly.
+  # These tests also drive ``buildPackageFragment`` directly and must execute
+  # their provider-mode bodies rather than registering a skipped fallback.
   for exact in [
     "tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim",
     "tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim",
     "tests/unit/t_configure_build_tree_cleanup.nim",
     "tests/unit/t_m9r83_install_mirror_action_shapes.nim",
+    "tests/unit/t_library_stage_alias.nim",
   ]:
     if p == exact:
       return true

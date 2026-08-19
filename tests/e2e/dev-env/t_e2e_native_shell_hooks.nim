@@ -69,6 +69,7 @@ proc prepareCase(prefix: string): M6Case =
   result.projectB = result.tempRoot / "project-b"
   createDir(result.homeDir)
   createDir(result.xdgConfig)
+  createDir(result.tempRoot / "runtime-libs")
   writeFixture(result.projectA, "one", "alpha")
   writeFixture(result.projectB, "two", "beta")
   result.reproBin = reproBinary()
@@ -109,6 +110,12 @@ proc envFor(c: M6Case): StringTableRef =
   result["REPRO_DAEMON_STATE_DIR"] = c.tempRoot / "daemon-state"
   result["REPROBUILD_REPRO"] = c.reproBin
   result["REPRO_MONITOR_SHIM_LIB"] = c.shim
+  # Exercise the monitored-direct runtime-loader deferral regardless of the
+  # caller's environment. Keep any real caller paths after the fixture path so
+  # Nix-built binaries still find their required runtime libraries.
+  result["LD_LIBRARY_PATH"] = c.tempRoot / "runtime-libs" &
+    (if existsEnv("LD_LIBRARY_PATH"):
+      $PathSep & getEnv("LD_LIBRARY_PATH") else: "")
   result["PATH"] = parentDir(c.reproBin) & $PathSep & getEnv("PATH")
   createDir(result["XDG_CACHE_HOME"])
   createDir(result["XDG_DATA_HOME"])

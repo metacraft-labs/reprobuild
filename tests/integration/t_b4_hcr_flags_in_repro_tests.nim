@@ -17,17 +17,22 @@
 ##      surface in place. This is the strong PASS arm — no engine
 ##      cooperation required.
 ##
-##   2. ENGINE — on macOS-arm64 only, drive ``./build/bin/repro build
-##      <hcr-stem>`` and assert the build edge's argv includes
+##   2. ENGINE — on macOS-arm64 only, drive ``./build/bin/repro graph``
+##      for one HCR build member and assert the lowered action's argv includes
 ##      ``--passC:-fpatchable-function-entry=16,0`` and
 ##      ``--passL:-Wl,-segprot,__HCR,rwx,rwx``. On Linux this arm
 ##      SKIPs because the HCR tests are macOS-only at runtime anyway
 ##      (no benefit to forcing the engine path on a host that can't
 ##      validate the flag).
 ##
-## Skip-with-classifier follows the standard B0/B1/B2/B3 shape.
+## The old engine arm skipped unconditionally on Apple Silicon with a stale
+## claim that buildNimUnittest lacked a path-mode profile. The graph now lowers
+## that profile, so this case checks the real engine payload rather than
+## preserving a historical limitation as a permanent skip.
 
-import std/[os, strutils, unittest]
+import std/[json, os, strutils, unittest]
+
+import repro_test_support
 
 const RepoMarker = "repro.nim"
 const HcrStems = [
@@ -61,6 +66,12 @@ proc sliceForStem(content, stem: string): string =
     return ""
   let limit = min(content.len, pos + 600)
   content[pos ..< limit]
+
+proc parseGraphOutput(output: string): JsonNode =
+  let start = output.find('{')
+  if start < 0:
+    raise newException(ValueError, "repro graph emitted no JSON object")
+  parseJson(output[start .. ^1])
 
 suite "Bootstrap-And-Self-Build B4: HCR flags carry through the typed-tool DSL":
 
@@ -134,15 +145,48 @@ suite "Bootstrap-And-Self-Build B4: HCR flags carry through the typed-tool DSL":
 
   test "engine: HCR flags reach nim c argv on macOS-arm64":
     when defined(macosx) and (defined(arm64) or defined(aarch64)):
-      # On Apple Silicon the engine path should produce a build edge that
-      # passes the codesign workaround flags down to ``nim c``. The
-      # detailed assertion lives in a follow-on that wires the path-mode
-      # tool resolver for buildNimUnittest. Today this arm skips because
-      # of the B3-outcome tool-profile gap.
-      checkpoint("skipped — HCR engine-arm pending the buildNimUnittest " &
-        "path-mode tool profile (per the B3 outcome). Structural arm " &
-        "above covers the source-level migration intent.")
-      skip()
+      let repoRoot = findRepoRoot()
+      let reproBin = requireBinary(repoRoot / "build" / "bin" /
+        addFileExt("repro", ExeExt), "reprobuild.apps.repro")
+      let runquotad = requireRunQuotaDaemonBin(repoRoot)
+      let targetStem = HcrStems[0]
+      let target = ".#test-builds#" & targetStem
+      let res = runShell(shellCommand(@[
+        reproBin,
+        "graph",
+        target,
+        "--tool-provisioning=path",
+        "--format=json",
+      ], @[("PATH", runquotad.parentDir & $PathSep & getEnv("PATH"))]),
+        repoRoot)
+      if res.code != 0:
+        checkpoint(res.output)
+      check res.code == 0
+      if res.code == 0:
+        let graph = parseGraphOutput(res.output)
+        var matchedAction = false
+        for action in graph{"actions"}:
+          var hasInput = false
+          for input in action{"inputs"}:
+            if input.getStr("").endsWith("/" & targetStem & ".nim"):
+              hasInput = true
+          if not hasInput:
+            continue
+
+          var hasPassC = false
+          var hasPassL = false
+          for arg in action{"argv"}:
+            let value = arg.getStr("")
+            if value == "--passC:" & ExpectedPassC:
+              hasPassC = true
+            if value == "--passL:" & ExpectedPassL:
+              hasPassL = true
+          checkpoint("HCR lowered action id=" & action{"id"}.getStr("") &
+            " passC=" & $hasPassC & " passL=" & $hasPassL)
+          check hasPassC
+          check hasPassL
+          matchedAction = true
+        check matchedAction
     else:
       checkpoint("skipped — HCR tests are macOS-arm64-only at runtime; " &
         "the build flags are gated on cross-target aarch64-darwin. On " &

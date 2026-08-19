@@ -390,6 +390,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_build_engine/tests/test_dependency_rerun_cache_lookup.nim",
+    binary: "build/test-bin/test_dependency_rerun_cache_lookup",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/test_elevated_inline_exec_hook.nim",
     binary: "build/test-bin/test_elevated_inline_exec_hook",
     defines: @[],
@@ -7470,6 +7478,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_membership_model_schemas_round_trip.nim",
+    binary: "build/test-bin/t_membership_model_schemas_round_trip",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_migrated_repo_workspace_real_pre_push.nim",
     binary: "build/test-bin/t_migrated_repo_workspace_real_pre_push",
     defines: @[],
@@ -9168,7 +9184,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_library_stage_alias.nim",
     binary: "build/test-bin/t_library_stage_alias",
-    defines: @[],
+    defines: @["reproProviderMode"],
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],

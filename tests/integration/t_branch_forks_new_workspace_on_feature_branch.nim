@@ -581,6 +581,37 @@ suite "M27/WV-6 — repro branch <path> forks a new workspace":
       check res.output.contains("repro branch ../my-feature")
       check not dirExists(fx.workspaceRoot / "my-feature")
 
+      # Canonical identity, not lexical spelling, defines containment. This
+      # catches both a general symlink alias and macOS's /var -> /private/var
+      # cwd alias while the child destination itself does not exist yet.
+      when not defined(windows):
+        let workspaceAlias = fx.scratch / "source-workspace-alias"
+        createSymlink(fx.workspaceRoot, workspaceAlias)
+        defer:
+          if symlinkExists(workspaceAlias):
+            removeFile(workspaceAlias)
+        let aliased = runShell(shellCommand(@[
+          fx.reproBin, "branch", workspaceAlias / "aliased-feature",
+          "--workspace-root=" & fx.workspaceRoot,
+        ]))
+        check aliased.code == 2
+        check aliased.output.contains("inside the current workspace")
+        check not dirExists(fx.workspaceRoot / "aliased-feature")
+
+      # Refuse the inverse overlap too. Running outside the source workspace
+      # proves this is source/destination safety, not merely the cwd guard in
+      # the materializer or the later generic non-empty collision check.
+      let enclosing = runShell(shellCommand(@[
+        fx.reproBin, "branch", fx.scratch,
+        "--branch=parent-destination",
+        "--workspace-root=" & fx.workspaceRoot,
+      ]), cwd = repoRoot())
+      check enclosing.code == 2
+      check enclosing.output.contains("contains the current workspace")
+      check currentBranch(gitBin, fx.workspaceRoot) == "main"
+      check not localBranchExists(gitBin, fx.workspaceRoot,
+        "parent-destination")
+
   test "t_workspace_new_existing_branch_checks_out":
     let gitBin = findExe("git")
     if gitBin.len == 0:

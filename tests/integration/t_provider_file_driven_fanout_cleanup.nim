@@ -23,6 +23,7 @@ import std/[algorithm, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_core
 import repro_provider_runtime
+import lints/ambient_execution
 import repro_test_support
 
 const
@@ -34,7 +35,11 @@ proc q(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
 
 proc requireNimSuccess(args: openArray[string]; cwd = getCurrentDir()): string =
-  let res = execCmdEx(args.mapIt(q(it)).join(" "), workingDir = cwd)
+  # This test intentionally compiles a generated fixture with the host Nim.
+  # Mark that bootstrap-tier boundary explicitly so the ambient-execution
+  # linter does not rewrite this sequence-expression call inside the compiler.
+  let res = uncontrolledExecCmdEx(args.mapIt(q(it)).join(" "),
+    workingDir = cwd)
   if res.exitCode != 0:
     checkpoint(res.output)
     raise newException(OSError, "nim command failed with code " & $res.exitCode)

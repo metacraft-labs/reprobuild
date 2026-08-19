@@ -538,18 +538,23 @@ proc executableFromEnvOrPath*(envName, exeName: string): string =
     return normalizedPath(fromPath)
   ""
 
+proc workspaceRootForRepo*(repoRoot: string): string
+
 proc runquotaSourceRoot*(repoRoot: string): string =
   ## Locate a built runquota checkout for tests that need to spawn their own
   ## daemon. The full test harness may run from a temporary reprobuild
   ## worktree, so ``repoRoot.parentDir / "runquota"`` is not always valid.
   let fromEnv = getEnv("RUNQUOTA_SRC")
   let sibling = repoRoot.parentDir / "runquota"
+  let workspaceSibling = workspaceRootForRepo(repoRoot) / "runquota"
   if fromEnv.len > 0 and dirExists(fromEnv):
     let normalized = normalizedPath(fromEnv)
     let envDaemon = normalized / "build" / "bin" /
       addFileExt("runquotad", ExeExt)
     if not normalized.startsWith("/nix/store/") or fileExists(envDaemon):
       return normalized
+  if dirExists(workspaceSibling):
+    return normalizedPath(workspaceSibling)
   if dirExists(sibling):
     return normalizedPath(sibling)
   if fromEnv.len > 0 and dirExists(fromEnv):
@@ -608,9 +613,6 @@ proc workspaceRootForRepo*(repoRoot: string): string =
   ## common dir back to the primary checkout and use its parent as the
   ## workspace root.
   let direct = repoRoot.parentDir
-  if hasKnownWorkspaceSibling(direct):
-    return normalizedPath(direct)
-
   let commonDir = gitCommonDir(repoRoot)
   if commonDir.len > 0:
     let repoWorkspace = repoManagedWorkspace(commonDir)
@@ -619,6 +621,9 @@ proc workspaceRootForRepo*(repoRoot: string): string =
     let workspace = commonDir.parentDir.parentDir
     if hasKnownWorkspaceSibling(workspace):
       return normalizedPath(workspace)
+
+  if hasKnownWorkspaceSibling(direct):
+    return normalizedPath(direct)
 
   normalizedPath(direct)
 
@@ -670,6 +675,17 @@ proc resolveRunQuotaExecutable*(repoRoot, envName, exeName: string): string =
         "runquota source candidate is not executable: " & candidate)
     if executableFile(candidate):
       return normalizedPath(candidate)
+
+proc requireRunQuotaSourceRoot*(repoRoot: string): string =
+  ## A runquota checkout is a declared fixture dependency for cross-project
+  ## build cases. Resolve it through the canonical workspace identity so a
+  ## linked reprobuild worktree still reaches the workspace's runquota member;
+  ## absence is a hard, actionable fixture error rather than a skipped test.
+  result = runquotaSourceRoot(repoRoot)
+  if result.len == 0:
+    raise newException(OSError,
+      "runquota checkout missing; set RUNQUOTA_SRC or add runquota to the " &
+      "workspace that owns " & repoRoot)
 
 proc requireRunQuotaDaemonBin*(repoRoot: string): string =
   result = resolveRunQuotaExecutable(repoRoot, "RUNQUOTAD_BIN", "runquotad")

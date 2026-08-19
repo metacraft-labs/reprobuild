@@ -47,6 +47,8 @@
 
 import std/[json, os, osproc, strtabs, strutils, unittest]
 
+import repro_test_support
+
 const RepoMarker = "repro.nim"
 
 proc findRepoRoot(): string =
@@ -64,7 +66,7 @@ proc findRepoRoot(): string =
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
-  let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
+  let runquotaBin = requireRunQuotaDaemonBin(repoRoot).parentDir
   var env = newStringTable()
   for k, v in envPairs():
     env[k] = v
@@ -146,17 +148,12 @@ suite "Bootstrap-And-Self-Build B1: apps action cache hits on second run":
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /
       addFileExt("repro", ExeExt)
-    let runquotad = repoRoot.parentDir / "runquota" / "build" / "bin" /
-      addFileExt("runquotad", ExeExt)
     if not fileExists(reproBin):
       checkpoint("skipped — " & reproBin &
         " is missing; run `just build` first")
       skip()
-    elif not fileExists(runquotad):
-      checkpoint("skipped — " & runquotad &
-        " is missing; build runquota first")
-      skip()
     else:
+      discard requireRunQuotaDaemonBin(repoRoot)
       let names = readEntrypointNames(repoRoot)
       check names.len >= 11
 

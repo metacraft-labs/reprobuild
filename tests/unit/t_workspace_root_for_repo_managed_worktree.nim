@@ -31,7 +31,9 @@ suite "workspace root discovery for repo-managed worktrees":
       let worktree = outside / "reprobuild"
       createDir(commonDir.parentDir)
       createDir(outside / "codetracer")
+      createDir(outside / "runquota")
       createDir(workspace / "reprobuild-examples")
+      createDir(workspace / "runquota")
 
       require(q(gitBin) & " init --bare -b main " & q(commonDir))
       require(q(gitBin) & " init -b main " & q(seed))
@@ -45,3 +47,4 @@ suite "workspace root discovery for repo-managed worktrees":
         q(worktree) & " main")
 
       check sameFile(workspaceRootForRepo(worktree), workspace)
+      check sameFile(runquotaSourceRoot(worktree), workspace / "runquota")

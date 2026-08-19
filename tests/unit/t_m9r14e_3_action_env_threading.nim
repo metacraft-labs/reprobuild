@@ -232,7 +232,13 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       check envValue(deferred.env, "LD_LIBRARY_PATH") == ""
       check envValue(deferred.env, "PATH") == "/usr/bin"
       check deferred.argv[0 .. 6] == argv[0 .. 6]
-      check deferred.argv[7 .. 8] == @["/bin/sh", "-c"]
+      when defined(macosx):
+        check deferred.argv[7] == resolveNonSipShell()
+        check deferred.argv[7].len > 0
+        check deferred.argv[7] != "/bin/sh"
+      else:
+        check deferred.argv[7] == "/bin/sh"
+      check deferred.argv[8] == "-c"
       check deferred.argv[9].startsWith(
         "export LD_LIBRARY_PATH=/source/sqlite/lib; ")
       check deferred.argv[9].endsWith("exec \"$@\"")
@@ -266,7 +272,13 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       table["LD_LIBRARY_PATH"] = "/source/sqlite/lib"
       let deferredArgv = deferRuntimeLibraryEnvForShell(argv, table)
       check not table.hasKey("LD_LIBRARY_PATH")
-      check deferredArgv[7 .. 8] == @["/bin/sh", "-c"]
+      when defined(macosx):
+        check deferredArgv[7] == resolveNonSipShell()
+        check deferredArgv[7].len > 0
+        check deferredArgv[7] != "/bin/sh"
+      else:
+        check deferredArgv[7] == "/bin/sh"
+      check deferredArgv[8] == "-c"
       check deferredArgv[9].contains(
         "export LD_LIBRARY_PATH=/source/sqlite/lib; ")
       check deferredArgv[9].endsWith("exec \"$@\"")

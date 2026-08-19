@@ -22,10 +22,9 @@
 ## fast. The cache-hit assertion lives in its own test
 ## (``t_b1_apps_action_cache_hit.nim``).
 ##
-## Skip-when-absent: if the sibling ``../runquota/`` is missing or its
-## ``runquotad`` binary isn't built, the path-mode resolver fails before
-## the engine schedules anything. That is a genuine environment gate,
-## checked BEFORE the build is attempted, and it still skips.
+## ``runquota`` is a declared workspace dependency. Its daemon is resolved
+## through the workspace-aware fixture helper, including when this test runs
+## from a linked reprobuild worktree; absence is a hard fixture error.
 ##
 ## No failure classifier. This case used to run its non-zero exit past a
 ## ``looksLike…(output)`` predicate that matched the engine's own diagnostic
@@ -39,6 +38,8 @@
 ## work starts is now simply asserted.
 
 import std/[os, osproc, strtabs, strutils, unittest]
+
+import repro_test_support
 
 const RepoMarker = "repro.nim"
 
@@ -54,9 +55,6 @@ proc findRepoRoot(): string =
     dir = parent
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
-
-proc runquotaRoot(reprobuildRoot: string): string =
-  reprobuildRoot.parentDir / "runquota"
 
 proc readEntrypointNames(repoRoot: string): seq[string] =
   ## Parse ``apps/entrypoints.txt`` — first whitespace-separated field
@@ -75,10 +73,10 @@ proc readEntrypointNames(repoRoot: string): seq[string] =
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
-  ## Spawn ``cmd`` from ``repoRoot`` with ``../runquota/build/bin``
+  ## Spawn ``cmd`` from ``repoRoot`` with the workspace's runquota bin dir
   ## prepended to ``PATH``. The path-mode resolver consults ``PATH``
   ## for every ``uses:`` selector — ``"runquotad"`` is one of them.
-  let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
+  let runquotaBin = requireRunQuotaDaemonBin(repoRoot).parentDir
   var env = newStringTable()
   for k, v in envPairs():
     env[k] = v
@@ -116,20 +114,13 @@ suite "Bootstrap-And-Self-Build B1: repro build apps collection":
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /
       addFileExt("repro", ExeExt)
-    let runquotaCheckout = runquotaRoot(repoRoot)
-    let runquotad = runquotaCheckout / "build" / "bin" /
-      addFileExt("runquotad", ExeExt)
 
     if not fileExists(reproBin):
       checkpoint("skipped — " & reproBin &
         " is missing; run `just build` first")
       skip()
-    elif not fileExists(runquotad):
-      checkpoint("skipped — " & runquotad &
-        " is missing; build runquota first " &
-        "(``cd ../runquota && just build``)")
-      skip()
     else:
+      discard requireRunQuotaDaemonBin(repoRoot)
       let names = readEntrypointNames(repoRoot)
       check names.len >= 11
       checkpoint("entrypoints.txt declares " & $names.len & " binaries")

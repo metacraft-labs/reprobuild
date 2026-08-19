@@ -8,8 +8,8 @@
 ##    hosts where no sibling checkout exists to drive a behavioural
 ##    test.
 ##
-## 2. **Behavioural** (skip-when-absent). When the sibling ``../runquota``
-##    checkout AND ``./build/bin/repro`` are both present, run
+## 2. **Behavioural**. Resolve the declared ``runquota`` workspace member
+##    (including from a linked reprobuild worktree), then run
 ##    ``./build/bin/repro build runquota:runquotad --tool-provisioning=path
 ##    --daemon=off`` and assert the invocation exits cleanly (no usage
 ##    dump). When exit code is 0, additionally assert the sibling's
@@ -21,6 +21,8 @@
 ## resolver doesn't silently regress to the pre-D2 "usage dump" shape.
 
 import std/[os, osproc, strutils, unittest]
+
+import repro_test_support
 
 const RepoMarker = "repro.nim"
 
@@ -36,9 +38,6 @@ proc findRepoRoot(): string =
     dir = parent
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
-
-proc runquotaRoot(reprobuildRoot: string): string =
-  reprobuildRoot.parentDir / "runquota"
 
 proc looksLikeUsageDump(output: string): bool =
   ## The pre-D2 failure shape: the CLI's top-level dispatcher prints the
@@ -75,50 +74,45 @@ suite "Deferred Item D2: <pkg>:<target> cross-project selector recognised":
 
   test "engine accepts runquota:runquotad without a usage dump":
     let reprobuildRoot = findRepoRoot()
-    let runquotaCheckout = runquotaRoot(reprobuildRoot)
-    if not dirExists(runquotaCheckout):
-      checkpoint("skipped — " & runquotaCheckout &
-        " is missing (sibling runquota repo not present)")
+    let runquotaCheckout = requireRunQuotaSourceRoot(reprobuildRoot)
+    let reproBin = reprobuildRoot / "build" / "bin" /
+      addFileExt("repro", ExeExt)
+    if not fileExists(reproBin):
+      checkpoint("skipped — " & reproBin &
+        " is missing; run `just build` first")
       skip()
     else:
-      let reproBin = reprobuildRoot / "build" / "bin" /
-        addFileExt("repro", ExeExt)
-      if not fileExists(reproBin):
-        checkpoint("skipped — " & reproBin &
-          " is missing; run `just build` first")
-        skip()
-      else:
-        let runquotadBinary = runquotaCheckout / "build" / "bin" /
-          addFileExt("runquotad", ExeExt)
-        # Remove any stale artifact so the post-invocation check
-        # measures whether THIS run produced the binary.
-        if fileExists(runquotadBinary):
-          removeFile(runquotadBinary)
+      let runquotadBinary = runquotaCheckout / "build" / "bin" /
+        addFileExt("runquotad", ExeExt)
+      # Remove any stale artifact so the post-invocation check
+      # measures whether THIS run produced the binary.
+      if fileExists(runquotadBinary):
+        removeFile(runquotadBinary)
 
-        let args = @[
-          reproBin.quoteShell,
-          "build",
-          "runquota:runquotad",
-          "--tool-provisioning=path",
-          "--daemon=off",
-        ]
-        let cmd = args.join(" ")
-        checkpoint("running: " & cmd)
-        let (output, exitCode) =
-          execCmdEx(cmd, workingDir = reprobuildRoot)
-        checkpoint("exit=" & $exitCode)
-        # The pre-D2 failure shape: CLI rejection with usage dump. Even
-        # when the run can't complete (tool-resolution / nim missing /
-        # libclingo issues), the selector must NOT trigger a usage
-        # dump — that's the D2 contract.
-        check not looksLikeUsageDump(output)
-        if exitCode == 0:
-          # Stretch behavioural check — when the build actually
-          # completed, the sibling artifact must exist.
-          check fileExists(runquotadBinary)
-          if fileExists(runquotadBinary):
-            check getFileInfo(runquotadBinary).size > 0
-        else:
-          # MVP arm — exit code != 0 is acceptable as long as it's not
-          # the pre-D2 usage-dump shape. Surface the output for triage.
-          checkpoint(output)
+      let args = @[
+        reproBin.quoteShell,
+        "build",
+        "runquota:runquotad",
+        "--tool-provisioning=path",
+        "--daemon=off",
+      ]
+      let cmd = args.join(" ")
+      checkpoint("running: " & cmd)
+      let (output, exitCode) =
+        execCmdEx(cmd, workingDir = reprobuildRoot)
+      checkpoint("exit=" & $exitCode)
+      # The pre-D2 failure shape: CLI rejection with usage dump. Even
+      # when the run can't complete (tool-resolution / nim missing /
+      # libclingo issues), the selector must NOT trigger a usage
+      # dump — that's the D2 contract.
+      check not looksLikeUsageDump(output)
+      if exitCode == 0:
+        # Stretch behavioural check — when the build actually
+        # completed, the sibling artifact must exist.
+        check fileExists(runquotadBinary)
+        if fileExists(runquotadBinary):
+          check getFileInfo(runquotadBinary).size > 0
+      else:
+        # MVP arm — exit code != 0 is acceptable as long as it's not
+        # the pre-D2 usage-dump shape. Surface the output for triage.
+        checkpoint(output)

@@ -31,10 +31,11 @@
 ## The list covered ordinary engine failures — tool resolution, provisioning,
 ## the CLI usage dump — so any NEW failure phrased in those terms disappeared
 ## silently, which is a way of manufacturing green rather than a record of an
-## environment limitation. The genuine environment gates (is the sibling
-## checkout present, is ``./build/bin/repro`` built) are unchanged: they are
-## checked BEFORE the work and they still skip. What the engine does once the
-## work starts is now simply asserted.
+## environment limitation. ``runquota`` is a declared workspace dependency;
+## resolve its daemon through the workspace-aware fixture helper so linked
+## reprobuild worktrees execute this arm. A missing daemon is a hard fixture
+## error. ``./build/bin/repro`` remains a build-order gate checked before the
+## engine work starts.
 ##
 ## The report check lost a classifier too. An absent execute action used to
 ## skip — with a long note about the bare-name selector routing to the BUILD
@@ -54,6 +55,8 @@
 ## current process tree.
 
 import std/[json, os, osproc, strtabs, strutils, unittest]
+
+import repro_test_support
 
 const RepoMarker = "repro.nim"
 const TargetTest = "t_dsl_outputs_statement_basic_accepted"
@@ -79,7 +82,7 @@ proc findRepoRoot(): string =
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
-  let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
+  let runquotaBin = requireRunQuotaDaemonBin(repoRoot).parentDir
   var env = newStringTable()
   for k, v in envPairs():
     env[k] = v
@@ -160,18 +163,13 @@ suite "Bootstrap-And-Self-Build B3: repro test runs through engine":
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /
       addFileExt("repro", ExeExt)
-    let runquotad = repoRoot.parentDir / "runquota" / "build" / "bin" /
-      addFileExt("runquotad", ExeExt)
 
     if not fileExists(reproBin):
       checkpoint("skipped — " & reproBin &
         " is missing; run `just build` first")
       skip()
-    elif not fileExists(runquotad):
-      checkpoint("skipped — " & runquotad &
-        " is missing; build runquota first")
-      skip()
     else:
+      discard requireRunQuotaDaemonBin(repoRoot)
       # Prefer the fragment selector form ``.#test#<name>`` (Named-
       # Targets M3 nested-fragment shape: the outer ``test`` selects
       # the collection, the inner ``<name>`` resolves a single member).

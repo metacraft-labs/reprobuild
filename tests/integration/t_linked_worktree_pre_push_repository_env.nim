@@ -8,7 +8,7 @@
 ##
 ## This suite uses real Git repositories, a real linked worktree, the generated
 ## protocol-2 hooks, and the built `repro` executable.  No VCS or hook boundary
-## is mocked.  The two tests are independently falsifiable: removing the scrub
+## is mocked.  The tests are independently falsifiable: removing the scrub
 ## from Workspace-VCS queries makes the first test report repo A's SHA for repo
 ## B, while removing it from the CLI rev-parse/lock-coherence path makes the
 ## second test emit a false coherence notice even if the Workspace-VCS queries
@@ -30,9 +30,10 @@ type
     value: string
 
   Fixture = object
-    scratch, workspace, app, dep, linked, appOrigin, depOrigin: string
+    scratch, workspace, app, dep, unrelated, linked: string
+    appOrigin, depOrigin, unrelatedOrigin: string
     lockStore, hookDir, userLog, userRefs, wrapperLog, wrapper: string
-    gitBin, reproBin, appSha, depSha, linkedGitDir: string
+    gitBin, reproBin, appSha, depSha, unrelatedSha, linkedGitDir: string
 
 proc q(value: string): string = quoteShell(value)
 
@@ -103,13 +104,16 @@ proc cloneRepo(gitBin, origin, target: string) =
   discard require(q(gitBin) & " -C " & q(target) &
     " config user.name 'Linked Worktree Tester'")
 
-proc projectToml(appUrl, depUrl: string): string =
+proc projectToml(appUrl, depUrl, unrelatedUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"app-origin\"\nfetch = \"" & appUrl & "\"\n\n" &
     "[[remote]]\nname = \"dep-origin\"\nfetch = \"" & depUrl & "\"\n\n" &
-    "includes = [\"repos/app.toml\", \"repos/dep.toml\"]\n"
+    "[[remote]]\nname = \"unrelated-origin\"\nfetch = \"" &
+      unrelatedUrl & "\"\n\n" &
+    "includes = [\"repos/app.toml\", \"repos/dep.toml\", " &
+      "\"repos/unrelated.toml\"]\n"
 
 const
   AppToml = """
@@ -131,6 +135,15 @@ path = "dep"
 remote = "dep-origin"
 revision = "main"
 """
+  UnrelatedToml = """
+schema = "reprobuild.workspace.repo.v1"
+
+[repo]
+name = "unrelated"
+path = "other/app-linked"
+remote = "unrelated-origin"
+revision = "main"
+"""
 
 proc setup(gitBin: string): Fixture =
   result.scratch = createTempDir("repro-linked-pre-push-env-", "")
@@ -143,9 +156,13 @@ proc setup(gitBin: string): Fixture =
   result.workspace = result.scratch / "workspace"
   result.app = result.workspace / "app"
   result.dep = result.workspace / "dep"
+  # Same leaf name as the linked worktree, but a distinct repository. A
+  # basename-based resolver will select or scope this checkout incorrectly.
+  result.unrelated = result.workspace / "other" / "app-linked"
   result.linked = result.workspace / "worktrees" / "app-linked"
   result.appOrigin = result.scratch / "app-origin.git"
   result.depOrigin = result.scratch / "dep-origin.git"
+  result.unrelatedOrigin = result.scratch / "unrelated-origin.git"
   result.lockStore = result.workspace / ".repro" / "manifests"
   result.userLog = result.scratch / "user-hook-env.log"
   result.userRefs = result.scratch / "user-hook-refs.bin"
@@ -159,17 +176,23 @@ proc setup(gitBin: string): Fixture =
     result.scratch / "app-seed", "app")
   result.depSha = initOrigin(gitBin, result.depOrigin,
     result.scratch / "dep-seed", "dependency with a distinct commit")
+  result.unrelatedSha = initOrigin(gitBin, result.unrelatedOrigin,
+    result.scratch / "unrelated-seed", "unrelated same-basename checkout")
   doAssert result.appSha != result.depSha
   cloneRepo(gitBin, result.appOrigin, result.app)
   cloneRepo(gitBin, result.depOrigin, result.dep)
+  createDir(result.unrelated.parentDir())
+  cloneRepo(gitBin, result.unrelatedOrigin, result.unrelated)
 
   createDir(result.workspace / "projects")
   createDir(result.workspace / "repos")
   writeFile(result.workspace / "projects" / "app.toml",
-    projectToml(fileUrl(result.appOrigin), fileUrl(result.depOrigin)))
+    projectToml(fileUrl(result.appOrigin), fileUrl(result.depOrigin),
+      fileUrl(result.unrelatedOrigin)))
   writeFile(result.workspace / "repos" / "app.toml", AppToml)
   writeFile(result.workspace / "repos" / "dep.toml", DepToml)
-  writeWorkspaceBranch(result.workspace, project = "app", branch = "main")
+  writeFile(result.workspace / "repos" / "unrelated.toml", UnrelatedToml)
+  writeWorkspaceProjects(result.workspace, @["app"])
 
   createDir(result.lockStore)
   discard require(q(gitBin) & " init -b main " & q(result.lockStore))
@@ -197,9 +220,10 @@ proc setup(gitBin: string): Fixture =
     " rev-parse --path-format=absolute --git-path hooks").strip()
   complete = true
 
-proc latestLock(fx: Fixture): string =
+proc latestLock(fx: Fixture; sha = ""): string =
+  let triggerSha = if sha.len > 0: sha else: fx.appSha
   let path = fx.lockStore / "locks" / "app" / "app" /
-    (fx.appSha & ".toml")
+    (triggerSha & ".toml")
   doAssert fileExists(path)
   path
 
@@ -224,6 +248,13 @@ proc report(fx: Fixture): JsonNode =
 
 proc refsRecord(localRef, localSha, remoteRef, remoteSha: string): string =
   localRef & " " & localSha & " " & remoteRef & " " & remoteSha & "\n"
+
+proc stableLockBody(content: string): string =
+  ## The local-directory lock backend rewrites ``created_at`` on each gate.
+  ## Compare the durable repository observations, not wall-clock metadata.
+  for line in content.splitLines():
+    if not line.startsWith("created_at = "):
+      result.add(line & "\n")
 
 suite "linked-worktree pre-push repository-local environment isolation":
   test "canonical scrub removes the complete repository namespace only":
@@ -322,7 +353,20 @@ suite "linked-worktree pre-push repository-local environment isolation":
       let fx = setup(gitBin)
       defer: removeDir(fx.scratch)
       let zero = repeat('0', 40)
-      let expectedRefs = refsRecord("refs/heads/linked", fx.appSha,
+      writeFile(fx.linked / "linked-only.txt", "linked worktree head\n")
+      discard require(q(gitBin) & " -C " & q(fx.linked) &
+        " add linked-only.txt")
+      discard require(q(gitBin) & " -C " & q(fx.linked) &
+        " commit -m 'linked-only head'")
+      let linkedSha = require(q(gitBin) & " -C " & q(fx.linked) &
+        " rev-parse HEAD").strip()
+      check linkedSha != fx.appSha
+      check require(q(gitBin) & " -C " & q(fx.app) &
+        " rev-parse HEAD").strip() == fx.appSha
+      # Unrelated and deliberately same-basename as the linked worktree. It is
+      # outside app's declared dependency closure and must not block this push.
+      writeFile(fx.unrelated / "unrelated-dirty.txt", "must remain dirty\n")
+      let expectedRefs = refsRecord("refs/heads/linked", linkedSha,
         "refs/heads/linked", zero)
 
       executable(fx.hookDir / "pre-push",
@@ -420,14 +464,27 @@ suite "linked-worktree pre-push repository-local environment isolation":
       check firstReport["exitCode"].getInt() == 0
       check firstReport["failures"].len == 0
       check firstReport["notices"].len == 0
-      check firstReport["lockUpdate"]["kind"].getStr() == "already-current"
-      let lockBefore = readFile(fx.latestLock())
-      check fx.appSha in lockBefore
+      check firstReport["project"].getStr() == "app"
+      # macOS reports a temporary directory below /private/var even when the
+      # fixture was created through its /var symlink. Repository identity is
+      # physical-path identity, so compare the two canonical spellings.
+      check expandFilename(firstReport["currentRepo"].getStr()) ==
+        expandFilename(fx.linked)
+      check firstReport["activeBranch"].getStr() == "linked"
+      check firstReport["pushedBranch"].getStr() == "linked"
+      check firstReport["lockUpdate"]["triggerRepo"].getStr() == "app"
+      check firstReport["lockUpdate"]["triggerSha"].getStr() == linkedSha
+      check firstReport["lockUpdate"]["kind"].getStr() == "created"
+      let lockBefore = readFile(fx.latestLock(linkedSha))
+      check linkedSha in lockBefore
+      check fx.appSha notin lockBefore
       check fx.depSha in lockBefore
+      check fx.unrelatedSha in lockBefore
+      check fileExists(fx.unrelated / "unrelated-dirty.txt")
 
       let directRefs = fx.scratch / "direct-refs.bin"
-      writeFile(directRefs, refsRecord("refs/heads/linked", fx.appSha,
-        "refs/heads/direct-protocol", zero))
+      writeFile(directRefs, refsRecord("HEAD", linkedSha,
+        "refs/heads/linked", linkedSha))
       let directEnv = childEnvironment(poison(fx.linked, fx.linkedGitDir) & @[
         ("REPRO_TEST_UNRELATED", "direct-preserved")])
       let direct = runProcess(fx.reproBin,
@@ -437,11 +494,17 @@ suite "linked-worktree pre-push repository-local environment isolation":
       if direct.code != 0: checkpoint(direct.output)
       check direct.code == 0
       let directReport = fx.report()
+      if directReport["notices"].len != 0:
+        checkpoint($directReport)
       check directReport["exitCode"].getInt() == 0
       check directReport["failures"].len == 0
       check directReport["notices"].len == 0
-      check directReport["lockUpdate"]["kind"].getStr() == "already-current"
-      check readFile(fx.latestLock()) == lockBefore
+      check directReport["activeBranch"].getStr() == "linked"
+      check directReport["pushedBranch"].getStr() == "linked"
+      check directReport["lockUpdate"]["triggerSha"].getStr() == linkedSha
+      check directReport["lockUpdate"]["kind"].getStr() == "created"
+      check stableLockBody(readFile(fx.latestLock(linkedSha))) ==
+        stableLockBody(lockBefore)
 
       # Ordinary checkouts use the same protocol and retain the pre-fix result.
       let standardRefs = fx.scratch / "standard-refs.bin"
@@ -453,4 +516,43 @@ suite "linked-worktree pre-push repository-local environment isolation":
          "origin", fileUrl(fx.appOrigin)], childEnvironment([]))
       if standard.code != 0: checkpoint(standard.output)
       check standard.code == 0
+      if fx.report()["notices"].len != 0:
+        checkpoint($fx.report())
       check fx.report()["notices"].len == 0
+
+  test "a dirty declared dependency still blocks the linked push":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      check gitBin.len > 0
+    else:
+      let fx = setup(gitBin)
+      defer: removeDir(fx.scratch)
+      writeFile(fx.linked / "blocked-head.txt", "must not publish\n")
+      discard require(q(gitBin) & " -C " & q(fx.linked) &
+        " add blocked-head.txt")
+      discard require(q(gitBin) & " -C " & q(fx.linked) &
+        " commit -m 'linked head with dirty dependency'")
+      writeFile(fx.dep / "dependency-dirty.txt", "legitimate blocker\n")
+
+      let ensured = run(q(fx.reproBin) & " hooks ensure --vcs " & q(fx.linked))
+      if ensured.code != 0: checkpoint(ensured.output)
+      check ensured.code == 0
+      let pushed = runProcess(gitBin,
+        ["-C", fx.linked, "push", "origin",
+         "refs/heads/linked:refs/heads/blocked-by-dependency"],
+        childEnvironment([("REPROBUILD_REPRO", fx.reproBin)]))
+      check pushed.code != 0
+      let blocked = fx.report()
+      check blocked["exitCode"].getInt() == 2
+      check blocked["project"].getStr() == "app"
+      check expandFilename(blocked["currentRepo"].getStr()) ==
+        expandFilename(fx.linked)
+      check blocked["activeBranch"].getStr() == "linked"
+      check blocked["pushedBranch"].getStr() == "linked"
+      check blocked["failures"].len == 1
+      check blocked["failures"][0]["repo"].getStr() == "dep"
+      check blocked["failures"][0]["property"].getStr() == "dirty"
+      check fileExists(fx.dep / "dependency-dirty.txt")
+      let advertised = require(q(gitBin) & " -C " & q(fx.linked) &
+        " ls-remote --heads origin refs/heads/blocked-by-dependency")
+      check advertised.strip().len == 0

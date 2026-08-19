@@ -15,10 +15,10 @@
 ## binary is the right helper and not a zero-byte stub or wrong-arch
 ## artifact.
 ##
-## Skip-when-absent: same pattern as the B0 / B1 tests. If
-## ``./build/bin/repro`` is missing (no prior ``just build``) or the
-## sibling ``runquotad`` isn't on PATH, we skip cleanly rather than
-## fail — those are genuine environment gates, checked BEFORE the build.
+## ``runquota`` is a declared workspace dependency. Its daemon is resolved
+## through the workspace-aware fixture helper, including from linked
+## reprobuild worktrees; a genuinely missing daemon is a hard, actionable
+## fixture error rather than a skipped engine assertion.
 ##
 ## No failure classifier. This case used to run its non-zero exit past a
 ## ``looksLike…(output)`` predicate that matched the engine's own diagnostic
@@ -32,6 +32,8 @@
 ## work starts is now simply asserted.
 
 import std/[os, osproc, strtabs, strutils, unittest]
+
+import repro_test_support
 
 const RepoMarker = "repro.nim"
 
@@ -56,7 +58,7 @@ proc findRepoRoot(): string =
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
-  let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
+  let runquotaBin = requireRunQuotaDaemonBin(repoRoot).parentDir
   var env = newStringTable()
   for k, v in envPairs():
     env[k] = v
@@ -70,19 +72,13 @@ suite "Bootstrap-And-Self-Build B2: test-helpers built by engine":
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /
       addFileExt("repro", ExeExt)
-    let runquotad = repoRoot.parentDir / "runquota" / "build" / "bin" /
-      addFileExt("runquotad", ExeExt)
 
     if not fileExists(reproBin):
       checkpoint("skipped — " & reproBin &
         " is missing; run `just build` first")
       skip()
-    elif not fileExists(runquotad):
-      checkpoint("skipped — " & runquotad &
-        " is missing; build runquota first " &
-        "(``cd ../runquota && just build``)")
-      skip()
     else:
+      discard requireRunQuotaDaemonBin(repoRoot)
       # Remove the three helper binaries first so we know the engine
       # produced them on this run (not residual artifacts from an
       # earlier ``scripts/run_tests.sh`` invocation).

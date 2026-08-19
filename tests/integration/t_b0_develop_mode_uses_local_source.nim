@@ -34,10 +34,14 @@
 ## construction, so a failure here is a fact about the engine and it fails
 ## the case.
 ##
-## Skip-when-absent: the sibling ``../runquota/`` may not be present
-## in every CI environment. Skip cleanly in that case.
+## ``runquota`` is a declared workspace dependency. Resolve its source through
+## the workspace-aware fixture helper so a linked reprobuild worktree reaches
+## the same checkout as the primary workspace. A genuinely missing checkout is
+## a hard, actionable fixture error rather than a skipped engine assertion.
 
-import std/[json, os, osproc, strutils, unittest]
+import std/[json, os, osproc, strtabs, strutils, unittest]
+
+import repro_test_support
 
 const RepoMarker = "repro.nim"
 
@@ -53,9 +57,6 @@ proc findRepoRoot(): string =
     dir = parent
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
-
-proc runquotaRoot(reprobuildRoot: string): string =
-  reprobuildRoot.parentDir / "runquota"
 
 proc graphMentionsRunquotad(payload: JsonNode;
                             runquotaCheckout: string): bool =
@@ -130,72 +131,81 @@ suite "Bootstrap-And-Self-Build B0: develop-mode resolves runquotad":
 
   test "repro graph records a path-mode runquotad profile":
     let reprobuildRoot = findRepoRoot()
-    let runquotaCheckout = runquotaRoot(reprobuildRoot)
-    if not dirExists(runquotaCheckout):
-      checkpoint("skipped — " & runquotaCheckout &
-        " is missing (sibling runquota repo not present)")
+    let runquotaCheckout = requireRunQuotaSourceRoot(reprobuildRoot)
+    let runquotad = requireBinary(runquotaCheckout / "build" / "bin" /
+      addFileExt("runquotad", ExeExt), "runquota.apps.runquotad")
+    let reproBin = reprobuildRoot / "build" / "bin" /
+      addFileExt("repro", ExeExt)
+    if not fileExists(reproBin):
+      checkpoint("skipped — " & reproBin &
+        " is missing; run `just build` first")
       skip()
     else:
-      let reproBin = reprobuildRoot / "build" / "bin" /
-        addFileExt("repro", ExeExt)
-      if not fileExists(reproBin):
-        checkpoint("skipped — " & reproBin &
-          " is missing; run `just build` first")
-        skip()
+      # Per ``repro --help``: ``--daemon`` is a ``build``/``watch``
+      # flag, NOT a global flag and NOT a ``graph`` flag. Passing
+      # it here would dump the CLI usage and exit 2 before any
+      # graph payload is rendered. Likewise, ``--tool-provisioning``
+      # must follow the subcommand to be bound to it.
+      let args = @[
+        reproBin.quoteShell,
+        "graph",
+        "--tool-provisioning=path",
+        "--format=json",
+      ]
+      let cmd = args.join(" ")
+      checkpoint("running: " & cmd)
+      var env = newStringTable(modeCaseSensitive)
+      for key, value in envPairs():
+        env[key] = value
+      env["PATH"] = runquotad.parentDir & $PathSep &
+        env.getOrDefault("PATH")
+      let (output, exitCode) =
+        execCmdEx(cmd, workingDir = reprobuildRoot, env = env)
+      checkpoint("exit=" & $exitCode)
+      if exitCode != 0:
+        checkpoint(output)
+        check exitCode == 0
       else:
-        # Per ``repro --help``: ``--daemon`` is a ``build``/``watch``
-        # flag, NOT a global flag and NOT a ``graph`` flag. Passing
-        # it here would dump the CLI usage and exit 2 before any
-        # graph payload is rendered. Likewise, ``--tool-provisioning``
-        # must follow the subcommand to be bound to it.
-        let args = @[
-          reproBin.quoteShell,
-          "graph",
-          "--tool-provisioning=path",
-          "--format=json",
-        ]
-        let cmd = args.join(" ")
-        checkpoint("running: " & cmd)
-        let (output, exitCode) =
-          execCmdEx(cmd, workingDir = reprobuildRoot)
-        checkpoint("exit=" & $exitCode)
-        if exitCode != 0:
+        # JSON payload may be preceded by progress lines; find the
+        # first ``{`` character and parse from there.
+        let braceIdx = output.find('{')
+        if braceIdx < 0:
+          checkpoint("no JSON object found in graph output")
           checkpoint(output)
-          check exitCode == 0
+          check false
         else:
-          # JSON payload may be preceded by progress lines; find the
-          # first ``{`` character and parse from there.
-          let braceIdx = output.find('{')
-          if braceIdx < 0:
-            checkpoint("no JSON object found in graph output")
+          var payload: JsonNode = nil
+          var parseError = ""
+          try:
+            payload = parseJson(output[braceIdx .. ^1])
+          except JsonParsingError as err:
+            parseError = err.msg
+          if payload.isNil:
+            checkpoint("could not parse graph JSON: " & parseError)
             checkpoint(output)
             check false
           else:
-            var payload: JsonNode = nil
-            var parseError = ""
-            try:
-              payload = parseJson(output[braceIdx .. ^1])
-            except JsonParsingError as err:
-              parseError = err.msg
-            if payload.isNil:
-              checkpoint("could not parse graph JSON: " & parseError)
-              checkpoint(output)
-              check false
+            let resolved = inspectionResolvesRunquotad(payload)
+            checkpoint("tool inspection resolves runquotad: " &
+              $resolved.found)
+            checkpoint("runquotad resolved path: " & resolved.resolvedPath)
+            if resolved.found:
+              check resolved.resolvedPath.len > 0
             else:
-              let resolved = inspectionResolvesRunquotad(payload)
-              checkpoint("tool inspection resolves runquotad: " &
-                $resolved.found)
-              checkpoint("runquotad resolved path: " & resolved.resolvedPath)
-              if resolved.found:
-                check resolved.resolvedPath.len > 0
-              else:
-                # Older graph payloads exposed the bare selector directly in
-                # the graph JSON. Keep that as a compatibility fallback.
-                let sawAny = graphMentionsRunquotadAtAll(payload)
-                checkpoint("graph mentions runquotad: " & $sawAny)
-                check sawAny
+              # Older graph payloads exposed the bare selector directly in
+              # the graph JSON. Keep that as a compatibility fallback.
+              let sawAny = graphMentionsRunquotadAtAll(payload)
+              checkpoint("graph mentions runquotad: " & $sawAny)
+              check sawAny
 
-              let sawLocalSource =
+            let checkoutRoot = normalizedPath(runquotaCheckout)
+            let sawLocalSource =
+              if resolved.found:
+                let resolvedPath = normalizedPath(resolved.resolvedPath)
+                resolvedPath == checkoutRoot or
+                  resolvedPath.startsWith(checkoutRoot & $DirSep)
+              else:
                 graphMentionsRunquotad(payload, runquotaCheckout)
-              checkpoint("graph roots runquotad at local sibling: " &
-                $sawLocalSource)
+            checkpoint("graph roots runquotad at workspace checkout: " &
+              $sawLocalSource)
+            check sawLocalSource

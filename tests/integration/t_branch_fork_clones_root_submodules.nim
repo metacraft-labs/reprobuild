@@ -119,11 +119,19 @@ suite "repro branch fork materialises the root repo's submodules":
       writeWorkspaceBranch(source, project = "alpha", branch = "main")
 
       let dest = scratch / "feature-work"
+      # This fixture deliberately uses file:// remotes. Grant that transport
+      # through a dedicated fixture-only global config: the production Git
+      # boundary correctly strips GIT_CONFIG_COUNT and its indexed key/value
+      # variables before crossing repositories, but preserves an explicitly
+      # selected GIT_CONFIG_GLOBAL. GIT_CONFIG_NOSYSTEM keeps the fixture
+      # independent of the host's Git configuration.
+      let globalConfig = scratch / "file-transport.gitconfig"
+      writeFile(globalConfig,
+        "[protocol \"file\"]\n\tallow = always\n")
       let res = runShell(shellCommand(
         @[reproBinary(), "branch", dest, "--workspace-root=" & source],
-        @[("GIT_CONFIG_COUNT", "1"),
-          ("GIT_CONFIG_KEY_0", "protocol.file.allow"),
-          ("GIT_CONFIG_VALUE_0", "always")]))
+        @[("GIT_CONFIG_GLOBAL", globalConfig),
+          ("GIT_CONFIG_NOSYSTEM", "1")]))
       if res.code != 0:
         checkpoint("output: " & res.output)
       check res.code == 0

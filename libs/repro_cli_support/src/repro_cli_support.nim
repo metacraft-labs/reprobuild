@@ -4105,6 +4105,7 @@ proc runQuotaAuthorityHeaderLine*(bypassed: bool): string =
 
 proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
                       refresh: ProviderRefreshReport;
+                      providerInvocationCount: int;
                       cmakeRegenerationResult,
                       providerCompileResult,
                       buildResult: BuildRunResult;
@@ -4152,7 +4153,7 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
     "cmakeRegenerationActions": cmakeRegenerationActions,
     "providerCompileActions": providerCompileActions,
     "providerSnapshot": refresh.persistedSnapshotPath,
-    "providerInvocations": refresh.invoked.len,
+    "providerInvocations": providerInvocationCount,
     "actions": actions,
     "trace": trace,
     "workspaceVcs": workspaceVcsEvidence.toJson(workspaceVcs),
@@ -6474,11 +6475,16 @@ proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
   ## present ``projectExtension`` sibling's fragments into the target
   ## project's snapshot before lowering / target-export aggregation.
 
+type
+  RecipeProviderSnapshotRefresh = object
+    snapshot: Option[ProviderGraphSnapshot]
+    providerInvocations: int
+
 proc refreshRecipeProviderSnapshot(target: string;
                                    mode: ToolProvisioningMode;
                                    publicCliPath, workRoot: string;
                                    bypassRunQuotaExplicit: bool):
-    Option[ProviderGraphSnapshot]
+    RecipeProviderSnapshotRefresh
   ## Forward declaration for focused tool provisioning. The implementation
   ## reuses metadata-only graph inspection and is defined below it.
 
@@ -7460,21 +7466,25 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     fallbackToRunQuotaBypass = effectiveMode in {tpmPathOnly, tpmScoop}
 
   var buildArtifact = artifact
-  if not materializedOnly and shouldEnterBuildPipeline(effectiveMode) and
+  var focusedSnapshotInvocations = 0
+  if not materializedOnly and artifact.projectInterface.toolUses.len > 0 and
+      shouldEnterBuildPipeline(effectiveMode) and
       moduleHasBuildBlock(modulePath):
-    let snapshot = refreshRecipeProviderSnapshot(target, effectiveMode,
+    let focusedRefresh = refreshRecipeProviderSnapshot(target, effectiveMode,
       publicCliPath, workRoot, bypassRunQuotaExplicit)
-    if snapshot.isSome:
+    if focusedRefresh.snapshot.isSome:
+      focusedSnapshotInvocations = focusedRefresh.providerInvocations
+      let snapshot = focusedRefresh.snapshot.get()
       var selectors: seq[string] = @[]
       var selectedActionId = parsedTarget.selectedActionId
       if effectiveSelectDefaultAction and selectedActionId.len == 0:
-        selectedActionId = defaultBuildActionId(snapshot.get())
+        selectedActionId = defaultBuildActionId(snapshot)
       if selectedActionId.len > 0:
         selectors.add(selectedActionId)
       for selector in extraNameSelectors:
         if selector.len > 0 and selectors.find(selector) < 0:
           selectors.add(selector)
-      buildArtifact = scopedToolArtifact(artifact, snapshot.get(),
+      buildArtifact = scopedToolArtifact(artifact, snapshot,
         result.projectRoot, selectors)
       logSummary("selected tool identities: " &
         $buildArtifact.projectInterface.toolUses.len & "/" &
@@ -7678,7 +7688,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # build that consumes no cross-repo producer is byte-identical to today.
   if not materializedOnly and not prepareOnly and
       result.projectRoot.len > 0:
-    for useDef in buildArtifact.projectInterface.toolUses:
+    # Producer discovery must inspect the full package-level ``uses:`` set,
+    # not the focused tool-provisioning subset in ``buildArtifact``. Library
+    # producers are deliberately not present on an action's ``toolIdentityRefs``
+    # yet: this pass materializes their aux channels first, and only then does
+    # ``attachProducerAuxRefs`` add them to the selected consumer actions. If
+    # we scope them out here, the later attachment has no producer to attach
+    # and a Nim library's ``nimPathDirs`` silently disappears. Ordinary host /
+    # catalog tools still resolve from ``buildArtifact`` below, so focused
+    # builds remain lightweight.
+    for useDef in artifact.projectInterface.toolUses:
       let selector = useDef.packageSelector
       if selector.len == 0:
         continue
@@ -8329,8 +8348,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         providerWorkingDir: projectRoot))
     finishStat(buildStats, statsEnabled, "repro provider graph refresh",
       providerGraphStart)
+    let providerInvocationCount =
+      focusedSnapshotInvocations + refresh.invoked.len
     logSummary("providerGraphSnapshot: " & refresh.persistedSnapshotPath)
-    logSummary("providerInvocations: " & $refresh.invoked.len)
+    logSummary("providerInvocations: " & $providerInvocationCount)
 
     # Workspace-Manifest-Optional MO-6 — presence-driven projectExtension
     # auto-activation. Any develop-mode sibling carrying a
@@ -8645,8 +8666,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       else: outDir / "build-report.json"
     if reportPersistence.requested and not reportPersistence.suppressed:
       let reportStart = statStart(statsEnabled)
-      writeBuildReport(reportPath, provider, refresh, cmakeRegenerationResult,
-        providerCompileResult, buildResult,
+      writeBuildReport(reportPath, provider, refresh, providerInvocationCount,
+        cmakeRegenerationResult, providerCompileResult, buildResult,
         targetResolutions = targetResolutions)
       finishStat(buildStats, statsEnabled, "repro report write", reportStart)
       buildResult.stats = buildStats
@@ -16913,7 +16934,7 @@ proc refreshRecipeProviderSnapshot(target: string;
                                    mode: ToolProvisioningMode;
                                    publicCliPath, workRoot: string;
                                    bypassRunQuotaExplicit: bool):
-    Option[ProviderGraphSnapshot] =
+    RecipeProviderSnapshotRefresh =
   ## Produce the recipe's (extension-merged) provider-graph snapshot — the
   ## SNAPSHOT ONLY, with NO tool-identity resolution and NO graph lowering.
   ##
@@ -16956,7 +16977,8 @@ proc refreshRecipeProviderSnapshot(target: string;
   # unresolved-sibling CONSUMER at spawn time.
 
   if not moduleHasBuildBlock(modulePath):
-    return none(ProviderGraphSnapshot)
+    return RecipeProviderSnapshotRefresh(
+      snapshot: none(ProviderGraphSnapshot))
 
   let providerBinaryPath = outDir / "provider" / "project-provider"
   let providerArtifactPath = outDir / "provider-compile.rbsz"
@@ -17023,7 +17045,8 @@ proc refreshRecipeProviderSnapshot(target: string;
   discard mergeProjectExtensions(refresh.snapshot, projectRoot,
     artifact.projectInterface.packageName, effectiveMode, publicCliPath,
     workRoot, lowerGraph = false)
-  some(refresh.snapshot)
+  result.snapshot = some(refresh.snapshot)
+  result.providerInvocations = refresh.invoked.len
 
 proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
                              publicCliPath, workRoot: string;
@@ -17052,10 +17075,10 @@ proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
   if effectiveMode == tpmUnspecified:
     effectiveMode = tpmPathOnly
   try:
-    let snapshot = refreshRecipeProviderSnapshot(target, effectiveMode,
+    let refresh = refreshRecipeProviderSnapshot(target, effectiveMode,
       publicCliPath, workRoot, bypassRunQuota)
-    if snapshot.isSome:
-      result = poolsFromSnapshot(snapshot.get())
+    if refresh.snapshot.isSome:
+      result = poolsFromSnapshot(refresh.snapshot.get())
     else:
       result = @[]
   except CatchableError:
@@ -26051,6 +26074,13 @@ type
     commonDir: string
     diagnostic: string
 
+  RepoWorktreeMatch = object
+    found: bool
+    ambiguous: bool
+    repoIndex: int
+    worktree: GitWorktreeDiscovery
+    diagnostic: string
+
 proc canonicalDiscoveredGitPath(repoRoot, value: string): string =
   let candidate =
     if value.isAbsolute: value
@@ -26120,6 +26150,99 @@ proc discoverGitWorktree(identity: GitToolIdentity;
   result.worktreeRoot = worktreeRoot
   result.commonDir = commonDir
   result.ok = true
+
+proc configuredRemoteDigests(identity: GitToolIdentity;
+    repoRoot: string): HashSet[string] =
+  ## Repository identity may need a remote fallback when the workspace's
+  ## canonical checkout is absent. Keep URLs out of diagnostics and compare the
+  ## same credential-insensitive canonical digests used by protocol v2.
+  result = initHashSet[string]()
+  let remotes = gitRunPlain(identity, ["-C", repoRoot, "remote"])
+  if remotes.code != 0:
+    return
+  for rawName in remotes.output.splitLines():
+    let name = rawName.strip()
+    if name.len == 0:
+      continue
+    let urls = gitRunPlain(identity,
+      ["-C", repoRoot, "remote", "get-url", "--all", name])
+    if urls.code != 0:
+      continue
+    for rawUrl in urls.output.splitLines():
+      let value = rawUrl.strip()
+      if value.len > 0:
+        result.incl(remoteLocationDigest(value))
+
+proc expectedRemoteDigests(repo: ResolvedRepo): HashSet[string] =
+  result = initHashSet[string]()
+  for value in [repo.fetchUrl, cloneUrlFor(repo)]:
+    if value.len > 0:
+      result.incl(remoteLocationDigest(value))
+  for remote in repo.remotes:
+    if remote.fetchUrl.len > 0:
+      result.incl(remoteLocationDigest(remote.fetchUrl))
+
+proc sharesRemoteIdentity(actual, expected: HashSet[string]): bool =
+  for digest in actual:
+    if digest in expected:
+      return true
+
+proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
+    workspaceRoot: string; repos: openArray[ResolvedRepo];
+    currentRepo: string): RepoWorktreeMatch =
+  ## Resolve a hook's checkout to one manifest repo without using a basename or
+  ## project/repo name. Linked worktrees have different top-level paths but the
+  ## same Git common directory as the workspace checkout; that is the primary
+  ## identity. A unique manifest-remote match is the conservative fallback for
+  ## a valid checkout whose canonical workspace worktree is absent.
+  result.repoIndex = -1
+  result.worktree = discoverGitWorktree(identity, currentRepo)
+  if not result.worktree.ok:
+    result.diagnostic = result.worktree.diagnostic
+    return
+
+  var pathMatches: seq[int]
+  var commonMatches: seq[int]
+  for index, repo in repos:
+    let declaredPath = workspaceRoot / repo.path
+    if samePathIdentity(result.worktree.worktreeRoot, declaredPath):
+      pathMatches.add(index)
+      continue
+    let declaredWorktree = discoverGitWorktree(identity, declaredPath)
+    if declaredWorktree.ok and
+        samePathIdentity(result.worktree.commonDir, declaredWorktree.commonDir):
+      commonMatches.add(index)
+
+  let structural = if pathMatches.len > 0: pathMatches else: commonMatches
+  if structural.len == 1:
+    result.found = true
+    result.repoIndex = structural[0]
+    return
+  if structural.len > 1:
+    result.ambiguous = true
+    result.diagnostic = "more than one declared repo shares the pushed " &
+      "worktree's filesystem identity"
+    return
+
+  let actualRemotes = configuredRemoteDigests(identity,
+    result.worktree.worktreeRoot)
+  if actualRemotes.len == 0:
+    result.diagnostic = "the pushed worktree has no configured remote identity"
+    return
+  var remoteMatches: seq[int]
+  for index, repo in repos:
+    if sharesRemoteIdentity(actualRemotes, expectedRemoteDigests(repo)):
+      remoteMatches.add(index)
+  if remoteMatches.len == 1:
+    result.found = true
+    result.repoIndex = remoteMatches[0]
+  elif remoteMatches.len > 1:
+    result.ambiguous = true
+    result.diagnostic = "more than one declared repo matches the pushed " &
+      "worktree's configured remote identity"
+  else:
+    result.diagnostic = "the pushed worktree does not match a declared repo " &
+      "by path, Git common directory, or configured remote"
 
 # ---- RA-1: per-repo lock resolution via Git history ------------------------
 #
@@ -27857,17 +27980,36 @@ proc evaluateEvidenceOnlyParticipation*(store: LockStore;
 
 proc lockedShaFromStore*(store: LockStore; project, repoName, repoPath: string):
     string =
-  ## Read the locked revision an evidence-only repo's assigned backend holds
-  ## for it (the MO-4 participation record's ``path -> revision`` body). The
-  ## locked SHA the published evidence head-sha must match. "" when absent.
+  ## Read the newest locked revision a repo's assigned backend holds for its
+  ## PATH.  The path is the identity inside a workspace-lock body; ``repoName``
+  ## is only the trigger/key used by legacy one-record-per-repo backends.
+  ##
+  ## A git-checkout partition is deliberately written ONCE, under the repo that
+  ## triggered ``workspace lock``, and its body can name every sibling routed
+  ## to that backend.  Looking only at ``latestLock(project, repoName)`` makes
+  ## those siblings disappear: no duplicate file is (or should be) written
+  ## under each sibling's key.  ``latestLockShas(project)`` is the canonical
+  ## project read.  For git-checkout it folds every trigger-keyed candidate in
+  ## the existing deterministic newest-first Git-history order, first claim
+  ## winning per path; for the other backends its default is their existing
+  ## project-latest record.  Thus stale/overlapping partitions have one defined
+  ## winner without a mutable index, aliases, or duplicated lock contents.
+  ##
+  ## The exact-key fallback preserves legacy single-repo stores whose newest
+  ## project record belongs to another repo.  The final single-coordinate
+  ## fallback tolerates the historical path-spelling case it was written for,
+  ## but never guesses from a multi-coordinate partition.
   if store.isNil: return ""
+  let projectLatest = store.latestLockShas(project).shas
+  if repoPath in projectLatest: return projectLatest[repoPath]
   let latest = store.latestLock(project, repoName)
   if latest.isNone: return ""
   let shas = shasFromBody(latest.get().body)
   if repoPath in shas: return shas[repoPath]
   # Fall back to a single-entry body keyed by some other path form.
-  for _, v in shas:
-    return v
+  if shas.len == 1:
+    for _, v in shas:
+      return v
   ""
 
 # ---------------------------------------------------------------------------
@@ -29529,13 +29671,10 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
           identity.binaryPath)
         for asg in syncAssignments:
           if asg.store.isNil: continue
-          let got = asg.store.latestLock(resolved.projectName, asg.repoName)
-          if got.isNone: continue
-          let shas = shasFromBody(got.get().body)
-          if shas.hasKey(asg.repoPath):
-            lockedShasByPath[asg.repoPath] = shas[asg.repoPath]
-          elif shas.len == 1:
-            for _, v in shas: lockedShasByPath[asg.repoPath] = v
+          let revision = lockedShaFromStore(asg.store,
+            resolved.projectName, asg.repoName, asg.repoPath)
+          if revision.len > 0:
+            lockedShasByPath[asg.repoPath] = revision
     except CatchableError:
       # Best-effort: an unresolvable routing layer must never break a plain
       # sync. The reconstruction below simply falls back to the manifest map.
@@ -30944,7 +31083,8 @@ proc sameFilesystemPath(a, b: string): bool =
     aN == bN
 
 proc pickTriggerRepo(resolved: ResolvedProject;
-                     explicit, explicitPath, workspaceRoot: string):
+                     explicit, explicitPath, workspaceRoot: string;
+                     identity: GitToolIdentity):
     ResolvedRepo =
   ## Choose the repo whose commit anchors the lock filename.
   ##
@@ -30971,16 +31111,27 @@ proc pickTriggerRepo(resolved: ResolvedProject;
   ## lock fall through to (3) files each repo's lock under the project
   ## anchor's name and SHA, where no consumer looks.
   if explicit.len > 0:
-    for repo in resolved.repos:
+    for index, repo in resolved.repos:
       if repo.name == explicit:
+        if explicitPath.len > 0:
+          let matched = resolveRepoWorktreeMatch(
+            identity, workspaceRoot, resolved.repos, explicitPath)
+          if not matched.found or matched.repoIndex != index:
+            raise newException(ValueError,
+              "triggering worktree at '" & explicitPath &
+                "' does not identify declared repo '" & explicit & "'" &
+                (if matched.diagnostic.len > 0:
+                  " (" & matched.diagnostic & ")"
+                else: ""))
         return repo
     raise newException(ValueError,
       "trigger repo '" & explicit &
         "' is not declared in project '" & resolved.projectName & "'")
   if explicitPath.len > 0:
-    for repo in resolved.repos:
-      if sameFilesystemPath(workspaceRoot / repo.path, explicitPath):
-        return repo
+    let matched = resolveRepoWorktreeMatch(
+      identity, workspaceRoot, resolved.repos, explicitPath)
+    if matched.found:
+      return resolved.repos[matched.repoIndex]
     # Refuse rather than fall through to the project anchor. The caller
     # named a specific triggering checkout; anchoring its lock at a
     # DIFFERENT repo's name and SHA would publish a record that claims a
@@ -30990,7 +31141,10 @@ proc pickTriggerRepo(resolved: ResolvedProject;
     raise newException(ValueError,
       "triggering repo at '" & explicitPath &
         "' is not declared in project '" & resolved.projectName &
-        "'; no lock can be anchored at it")
+        "'; no lock can be anchored at it" &
+        (if matched.diagnostic.len > 0:
+          " (" & matched.diagnostic & ")"
+        else: ""))
   for repo in resolved.repos:
     if repo.name == resolved.projectName:
       return repo
@@ -31021,6 +31175,13 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
     args.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
 
+  # Resolve the trigger before observing repositories so a linked worktree is
+  # both anchored under the right manifest repo name and observed at the
+  # checkout that actually fired the hook. Reading the workspace's primary
+  # checkout here can capture a different branch and HEAD.
+  let triggerRepo = pickTriggerRepo(resolved, args.triggerRepo,
+    args.triggerRepoPath, args.workspaceRoot, identity)
+
   # Observation pass. We gather all three values for every repo in
   # one walk so the dirty refusal can land alongside the trigger-
   # resolution check below.
@@ -31034,7 +31195,11 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # its HEAD recorded in the lock, but its dirtiness/absence never refuses.
   let scopeDirty = args.dirtyScopeNames.len > 0
   for repo in resolved.repos:
-    let repoPath = args.workspaceRoot / repo.path
+    let repoPath =
+      if args.triggerRepoPath.len > 0 and repo.name == triggerRepo.name:
+        args.triggerRepoPath
+      else:
+        args.workspaceRoot / repo.path
     let inDirtyScope = (not scopeDirty) or repo.name in args.dirtyScopeNames
     if not discoverGitWorktree(identity, repoPath).ok:
       if inDirtyScope:
@@ -31080,8 +31245,6 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
     result.report = report
     return
 
-  let triggerRepo = pickTriggerRepo(resolved, args.triggerRepo,
-    args.triggerRepoPath, args.workspaceRoot)
   let triggerSha =
     if args.triggerSha.len > 0: args.triggerSha
     else: headShas[triggerRepo.path]
@@ -36982,12 +37145,46 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
 
   let (resolved, workspaceLocal) = resolveCheckProject(parsed)
   result.project = resolved.projectName
-  result.activeBranch = deriveCheckActiveBranch(
-    parsed, workspaceLocal, resolved)
 
   let identity = ensureGitToolResolvable(
     parsed.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
+
+  # Build a name-keyed lookup of the pushed checkout before any repository
+  # observation. A linked worktree is intentionally outside the declared
+  # checkout path, but it still has the same authoritative Git common-dir
+  # identity. Every observer (including the advisory coherence pass) must use
+  # the actual worktree for that repo rather than its sibling primary checkout.
+  var currentRepoPath = ""
+  var currentRepoName = ""
+  var currentRepoMatch: RepoWorktreeMatch
+  if parsed.currentRepo.len > 0:
+    currentRepoMatch = resolveRepoWorktreeMatch(
+      identity, parsed.workspaceRoot, resolved.repos, parsed.currentRepo)
+    if currentRepoMatch.found:
+      let repo = resolved.repos[currentRepoMatch.repoIndex]
+      currentRepoPath = repo.path
+      currentRepoName = repo.name
+    elif currentRepoMatch.ambiguous:
+      result.failures.add(CheckFailure(
+        repo: "",
+        property: "current-repo-identity",
+        remediation: "remove the ambiguous workspace repo declaration or " &
+          "repair its Git remote, then retry the push",
+        evidence: currentRepoMatch.diagnostic))
+      result.exitCode = 2
+      return
+
+  result.activeBranch = deriveCheckActiveBranch(
+    parsed, workspaceLocal, resolved)
+  var currentRepoBranch = ""
+  if currentRepoName.len > 0:
+    let branch = gitRunPlain(identity,
+      ["-C", parsed.currentRepo, "symbolic-ref", "--short", "-q", "HEAD"])
+    if branch.code == 0:
+      currentRepoBranch = branch.output.strip()
+      if result.activeBranch.len == 0:
+        result.activeBranch = currentRepoBranch
   let toolDigest = digestHex(identity)
   let observedAt = getTime().toUnix * 1000
 
@@ -36999,7 +37196,11 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   try:
     var pairs: seq[tuple[name, path: string]]
     for repo in resolved.repos:
-      pairs.add((repo.name, repo.path))
+      pairs.add((repo.name,
+        if repo.name == currentRepoName and parsed.currentRepo.len > 0:
+          parsed.currentRepo
+        else:
+          repo.path))
     for line in renderCoherenceTextLines(lockCoherenceFor(identity,
         parsed.workspaceRoot, resolved.projectName, pairs)):
       result.notices.add(line)
@@ -37007,19 +37208,6 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     # An advisory diff must never be able to fail a gate run.
     discard
 
-  # Build a name-keyed lookup of the offending repo. The ``--current-repo``
-  # flag is the directory the hook was invoked in; convert it to the
-  # workspace-relative path so all the per-repo gate stages report
-  # consistent identifiers.
-  var currentRepoPath = ""
-  var currentRepoName = ""
-  if parsed.currentRepo.len > 0:
-    for repo in resolved.repos:
-      let abs = absolutePath(parsed.workspaceRoot / repo.path)
-      if sameFilesystemPath(abs, parsed.currentRepo):
-        currentRepoPath = repo.path
-        currentRepoName = repo.name
-        break
   let layerLocations = enumerateManifestLayerLocations(
     parsed.workspaceRoot, workspaceLocal)
   let currentManifestLayer = findCurrentManifestLayer(
@@ -37076,6 +37264,9 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # policies are first-class and the lock pins SHAs, so the published
   # state is reproducible regardless of which branch each repo is on.
   result.pushedBranch = parsePushedBranchFromRefs(parsed.pushedRefsPath)
+  if currentRepoBranch.len > 0 and
+      (result.pushedBranch.len == 0 or result.pushedBranch == "HEAD"):
+    result.pushedBranch = currentRepoBranch
   discard currentRepoPath
 
   # RA-21: scope the gate to the pushed repo's transitive develop-set
@@ -37142,7 +37333,11 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   for repo in resolved.repos:
     if not repoInScope(repo.name):
       continue
-    let absRepo = parsed.workspaceRoot / repo.path
+    let absRepo =
+      if repo.name == currentRepoName and parsed.currentRepo.len > 0:
+        parsed.currentRepo
+      else:
+        parsed.workspaceRoot / repo.path
     var obs = RepoObs(name: repo.name, path: repo.path, absPath: absRepo)
     if not discoverGitWorktree(identity, absRepo).ok:
       if repo.visibility != wvPublic:
@@ -37520,6 +37715,9 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     toolProvisioning: parsed.toolProvisioning,
     dirtyScopeNames: scopeClosure)
   lockArgs.triggerRepo = currentRepoName
+  lockArgs.triggerRepoPath =
+    if currentRepoName.len > 0: parsed.currentRepo
+    else: ""
   let manifestLayerRoot = pickManifestLayerRoot(lockArgs, workspaceLocal)
   # MO-2 — manifest-optional gate. When the workspace has NO resolved manifest
   # checkout on disk (a committed-lock-only / manifest-less workspace), there
@@ -37701,13 +37899,10 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       # Routed to a durable backend (team / personal / other) — read this repo's
       # locked SHA from ITS backend via the tolerant per-record reader.
       routedBackendRepos.add(obs)
-      let got = asg.store.latestLock(resolved.projectName, asg.repoName)
-      if got.isSome:
-        let shas = shasFromBody(got.get().body)
-        if shas.hasKey(obs.path):
-          lockedShas[obs.path] = shas[obs.path]
-        elif shas.len == 1:
-          for _, v in shas: lockedShas[obs.path] = v
+      let revision = lockedShaFromStore(asg.store,
+        resolved.projectName, asg.repoName, obs.path)
+      if revision.len > 0:
+        lockedShas[obs.path] = revision
     # HL-4 (§8.2 / §8.4 integrity-mismatch row) — PER-TIER INTEGRITY on the
     # manifest-present / MIXED path. The store-SHA currency comparison above only
     # detects a locked SHA that DIFFERS from the observed HEAD (a stale record,
@@ -38070,11 +38265,10 @@ proc perBackendPublishTargets(parsed: CheckArgs; manifestLayerRoot: string;
   # participated in the write, so only those backends have pending records.
   var currentRepoName = ""
   if parsed.currentRepo.len > 0:
-    for repo in resolved.repos:
-      if sameFilesystemPath(parsed.workspaceRoot / repo.path,
-          parsed.currentRepo):
-        currentRepoName = repo.name
-        break
+    let matched = resolveRepoWorktreeMatch(
+      identity, parsed.workspaceRoot, resolved.repos, parsed.currentRepo)
+    if matched.found:
+      currentRepoName = resolved.repos[matched.repoIndex].name
   let layerLocations = enumerateManifestLayerLocations(
     parsed.workspaceRoot, workspaceLocal)
   let currentLayer = findCurrentManifestLayer(
@@ -38130,11 +38324,11 @@ proc manifestBackendParticipates(parsed: CheckArgs; manifestLayerRoot: string;
   except CatchableError:
     return true
   var currentRepoName = ""
-  for repo in resolved.repos:
-    if sameFilesystemPath(parsed.workspaceRoot / repo.path,
-        parsed.currentRepo):
-      currentRepoName = repo.name
-      break
+  if parsed.currentRepo.len > 0:
+    let matched = resolveRepoWorktreeMatch(
+      identity, parsed.workspaceRoot, resolved.repos, parsed.currentRepo)
+    if matched.found:
+      currentRepoName = resolved.repos[matched.repoIndex].name
   let layerLocations = enumerateManifestLayerLocations(
     parsed.workspaceRoot, workspaceLocal)
   let currentLayer = findCurrentManifestLayer(
@@ -42521,8 +42715,7 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
   # (`repro branch my-feature`) lands here, which is exactly the argument most
   # likely to be typed by accident. Failing loudly beats producing a nested
   # workspace that only misbehaves later.
-  if destination == result.workspaceRoot or
-      destination.startsWith(result.workspaceRoot & DirSep):
+  if pathIsCwdOrAncestor(result.workspaceRoot, destination):
     result.destinationRefusal =
       "'" & result.forkPath & "' is inside the current workspace (" &
       result.workspaceRoot & ").\n" &
@@ -42530,6 +42723,15 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
       "repro switch -b " & lastPathPart(result.forkPath) & "\n" &
       "  To fork into a new workspace directory:                " &
       verb & " ../" & lastPathPart(result.forkPath)
+  elif pathIsCwdOrAncestor(destination, result.workspaceRoot):
+    # The inverse overlap is just as unsafe: cloning into an ancestor of the
+    # source would collide with the source tree itself.  Compare through the
+    # deepest existing ancestor so a not-yet-created spelling reached through
+    # a symlink (notably macOS /var -> /private/var) cannot evade the guard.
+    result.destinationRefusal =
+      "'" & result.forkPath & "' contains the current workspace (" &
+      result.workspaceRoot & "); the fork destination must be a separate " &
+      "directory outside the source workspace"
   result.forkPath = destination
   result.branchName =
     if explicitBranch.len > 0: explicitBranch

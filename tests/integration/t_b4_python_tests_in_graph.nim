@@ -14,16 +14,24 @@
 ##      assert the ``python_unittest_runner`` stdlib package is present
 ##      and exposes ``pythonUnittest`` + ``run``. This arm PASSes today.
 ##
-##   2. ENGINE — drive ``./build/bin/repro test --daemon=off`` and assert
-##      the build report records each Python test as a separate execute
-##      action. SKIPs with the "no pythonUnittest tool profile"
-##      classifier (per the B3 outcome; the path-mode tool resolver
-##      doesn't yet have a profile for either
-##      ``ct_test_nim_unittest.buildNimUnittest`` or ``python_unittest``).
+##   2. ENGINE — drive one small Python member through
+##      ``./build/bin/repro build .#test#<stem>`` and assert the build report
+##      records its successful ``reprobuild.python_test.<stem>`` execute
+##      action. The structural arm proves all discovered Python tests use the
+##      same wrapper; the focused execution avoids accidentally scheduling
+##      the full mixed-language suite.
+##
+## The old engine arm skipped unconditionally with a stale claim that
+## pythonUnittest lacked a path-mode profile. The current graph lowers the
+## profile to ``python3`` and executes it, so retaining that skip would hide a
+## regression in working engine plumbing.
 
-import std/[os, strutils, unittest]
+import std/[json, os, strutils, unittest]
+
+import repro_test_support
 
 const RepoMarker = "repro.nim"
+const EngineFixture = "tests/test_dev_env_m9_policy.py"
 
 proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -64,6 +72,12 @@ proc extractPythonTestPaths(reproTestsText: string): seq[string] =
     # Expected form: `"tests/.../test_*.py"`.
     if inner.startsWith("\"") and inner.endsWith("\"") and inner.len >= 2:
       result.add(inner[1 ..< inner.len - 1])
+
+proc valueAfter(output, prefix: string): string =
+  for line in output.splitLines:
+    if line.startsWith(prefix):
+      return line[prefix.len .. ^1].strip()
+  ""
 
 suite "Bootstrap-And-Self-Build B4: Python tests participate in the graph":
 
@@ -132,14 +146,44 @@ suite "Bootstrap-And-Self-Build B4: Python tests participate in the graph":
     checkpoint("B4 Python-tests-in-graph structural assertion: OK")
 
   test "engine: build report records python_test execute actions":
-    # Per the B3 outcome and the B4 spec's "Known constraints" section,
-    # the path-mode tool resolver doesn't yet have a profile for
-    # ``python_unittest``. The execute actions ARE registered in the
-    # graph (the structural arm above verifies the source-level
-    # migration intent); engine-level materialisation is a follow-on.
-    checkpoint("skipped — no pythonUnittest tool profile. The path-mode " &
-      "tool resolver lacks a python_unittest profile (analogous to the " &
-      "ct_test_nim_unittest.buildNimUnittest gap documented in B3). " &
-      "The structural arm above verifies the source-level wiring; engine " &
-      "materialisation lands in a follow-on.")
-    skip()
+    let repoRoot = findRepoRoot()
+    let reproBin = requireBinary(repoRoot / "build" / "bin" /
+      addFileExt("repro", ExeExt), "reprobuild.apps.repro")
+    let runquotad = requireRunQuotaDaemonBin(repoRoot)
+    check fileExists(repoRoot / EngineFixture)
+
+    let fixtureStem = EngineFixture.splitFile().name
+    let actionId = "reprobuild.python_test." & fixtureStem
+    let res = runShell(shellCommand(@[
+      reproBin,
+      "build",
+      ".#test#" & fixtureStem,
+      "--tool-provisioning=path",
+      "--daemon=off",
+      "--no-runquota",
+      "--write-report",
+      "--log=actions",
+      "--progress=quiet",
+    ], @[("PATH", runquotad.parentDir & $PathSep & getEnv("PATH"))]),
+      repoRoot)
+    if res.code != 0:
+      checkpoint(res.output)
+    check res.code == 0
+
+    let reportPath = valueAfter(res.output, "buildReport:")
+    checkpoint("build report: " & reportPath)
+    check reportPath.len > 0
+    check fileExists(reportPath)
+    if reportPath.len > 0 and fileExists(reportPath):
+      let report = parseFile(reportPath)
+      var matchedAction = false
+      for action in report{"actions"}:
+        if action{"id"}.getStr("") != actionId:
+          continue
+        checkpoint(actionId & " status=" & action{"status"}.getStr("") &
+          " exit=" & $action{"exitCode"}.getInt(-1))
+        check action{"status"}.getStr("") == "asSucceeded"
+        check action{"exitCode"}.getInt(-1) == 0
+        check action{"launched"}.getBool(false)
+        matchedAction = true
+      check matchedAction

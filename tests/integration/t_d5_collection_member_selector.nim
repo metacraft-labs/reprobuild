@@ -29,6 +29,8 @@
 
 import std/[json, os, osproc, strtabs, strutils, unittest]
 
+import repro_test_support
+
 const RepoMarker = "repro.nim"
 
 # Small, fast DSL parse test (mirrors D1's pick). The build edge is
@@ -62,7 +64,7 @@ proc findRepoRoot(): string =
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
-  let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
+  let runquotaBin = requireRunQuotaDaemonBin(repoRoot).parentDir
   var env = newStringTable()
   for k, v in envPairs():
     env[k] = v
@@ -129,18 +131,13 @@ suite "Deferred Item D5: .#<collection>#<member> selector resolves through the e
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /
       addFileExt("repro", ExeExt)
-    let runquotad = repoRoot.parentDir / "runquota" / "build" / "bin" /
-      addFileExt("runquotad", ExeExt)
 
     if not fileExists(reproBin):
       checkpoint("skipped — " & reproBin &
         " is missing; run `just build` first")
       skip()
-    elif not fileExists(runquotad):
-      checkpoint("skipped — " & runquotad &
-        " is missing; build runquota first")
-      skip()
     else:
+      discard requireRunQuotaDaemonBin(repoRoot)
       let selector = ".#test#" & TargetTest
       let (output, exitCode) = runBuild(reproBin, repoRoot, selector,
         withReport = true)
@@ -181,18 +178,13 @@ suite "Deferred Item D5: .#<collection>#<member> selector resolves through the e
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /
       addFileExt("repro", ExeExt)
-    let runquotad = repoRoot.parentDir / "runquota" / "build" / "bin" /
-      addFileExt("runquotad", ExeExt)
 
     if not fileExists(reproBin):
       checkpoint("skipped — " & reproBin &
         " is missing; run `just build` first")
       skip()
-    elif not fileExists(runquotad):
-      checkpoint("skipped — " & runquotad &
-        " is missing; build runquota first")
-      skip()
     else:
+      discard requireRunQuotaDaemonBin(repoRoot)
       # ``test-builds`` carries build edges whose action ids are
       # auto-generated (``nim-c-<hash>``), so the resolver must reach
       # the implicit-name index — the binary's basename
@@ -216,18 +208,13 @@ suite "Deferred Item D5: .#<collection>#<member> selector resolves through the e
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /
       addFileExt("repro", ExeExt)
-    let runquotad = repoRoot.parentDir / "runquota" / "build" / "bin" /
-      addFileExt("runquotad", ExeExt)
 
     if not fileExists(reproBin):
       checkpoint("skipped — " & reproBin &
         " is missing; run `just build` first")
       skip()
-    elif not fileExists(runquotad):
-      checkpoint("skipped — " & runquotad &
-        " is missing; build runquota first")
-      skip()
     else:
+      discard requireRunQuotaDaemonBin(repoRoot)
       let selector = ".#apps#" & AppsMember
       let (output, exitCode) = runBuild(reproBin, repoRoot, selector,
         withReport = true)
@@ -263,18 +250,13 @@ suite "Deferred Item D5: .#<collection>#<member> selector resolves through the e
     let repoRoot = findRepoRoot()
     let reproBin = repoRoot / "build" / "bin" /
       addFileExt("repro", ExeExt)
-    let runquotad = repoRoot.parentDir / "runquota" / "build" / "bin" /
-      addFileExt("runquotad", ExeExt)
 
     if not fileExists(reproBin):
       checkpoint("skipped — " & reproBin &
         " is missing; run `just build` first")
       skip()
-    elif not fileExists(runquotad):
-      checkpoint("skipped — " & runquotad &
-        " is missing; build runquota first")
-      skip()
     else:
+      discard requireRunQuotaDaemonBin(repoRoot)
       let selector = ".#test#nonexistent_member_xyz"
       let (output, exitCode) = runBuild(reproBin, repoRoot, selector,
         withReport = false)

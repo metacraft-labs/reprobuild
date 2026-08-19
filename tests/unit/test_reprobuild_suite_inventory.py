@@ -797,10 +797,18 @@ test "incomplete name" and:
         # Every value in this block is unchanged by the move to catalog
         # counting: the binary and the scanner agree on all nine sources.
         expected_rebased_source_counts = {
-            # 6, not 5: the automatic-build-memory-capacity change added a
-            # sixth case here without bumping this pin, which is exactly the
-            # drift these per-source pins exist to catch.
-            "libs/repro_cli_support/tests/t_daemon_carried_environment.nim": 6,
+            # Upstream 8a82077f9 adds the unconditional pre-allocation /
+            # pre-HTTP archive-size refusal to this existing binary.  The
+            # rebuilt binary's own ``--list-json`` advertises seven cases and
+            # the independent static baseline records the same 6 -> 7 move.
+            # Pinning the source here makes the aggregate +1 below attributable
+            # to the streaming-publication change rather than an opaque bump.
+            "libs/repro_binary_cache_client/tests/"
+            "test_publish_in_process.nim": 7,
+            # 7, not 6: the rebuilt binary and independent static baseline
+            # both include the carried-environment regression now present on
+            # the reconciled upstream tree.
+            "libs/repro_cli_support/tests/t_daemon_carried_environment.nim": 7,
             "libs/repro_resources/tests/"
             "t_attr_missing_interface_diagnostic.nim": 1,
             "libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim": 3,
@@ -1371,11 +1379,12 @@ test "incomplete name" and:
                 "class": "integration",
             },
             # The linked-worktree hook regression added by this branch. Its
-            # three cases independently cover the canonical scrub helper,
+            # four cases independently cover the canonical scrub helper,
             # Workspace-VCS selection under a poisoned repository-local Git
-            # environment, and a real protocol-v2 pre-push through a linked
-            # worktree. Pin the exact source, generated binary, catalog size,
-            # and classification so the aggregate +1 source / +3 cases below
+            # environment, a real protocol-v2 pre-push through a linked
+            # worktree, and refusal when a declared dependency is dirty. Pin
+            # the exact source, generated binary, catalog size, and
+            # classification so the aggregate +1 source / +4 cases below
             # cannot mask a missing or weakened enrollment.
             "tests/integration/"
             "t_linked_worktree_pre_push_repository_env.nim": {
@@ -1383,8 +1392,63 @@ test "incomplete name" and:
                 "t_linked_worktree_pre_push_repository_env",
                 "language": "nim",
                 "sourceSuiteCount": 1,
-                "sourceCaseCount": 3,
+                "sourceCaseCount": 4,
                 "class": "integration",
+            },
+            # Upstream 19613ab39 adds one graph member for the routed-lock
+            # repair. Its real binary advertises one suite and one case; this
+            # explicit membership pin keeps the 1240 -> 1241 spec movement
+            # attributable instead of hiding it in the aggregate below.
+            "tests/integration/"
+            "t_workspace_lock_partition_resolves_a_sibling_for_ci.nim": {
+                "binary": "build/test-bin/"
+                "t_workspace_lock_partition_resolves_a_sibling_for_ci",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 1,
+                "class": "integration",
+            },
+            # These five existing graph members gained cases on upstream after
+            # the last aggregate measurement. Pin each binary's catalog and
+            # classification so their +9 cannot be represented by an opaque
+            # total adjustment: 2 + 1 before 21f3318d6, then 1 + 2 + 3 after.
+            "libs/repro_project_dsl/tests/test_library_macro.nim": {
+                "binary": "build/test-bin/test_library_macro",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 12,
+                "class": "pure unit",
+            },
+            "libs/repro_dsl_stdlib/tests/"
+            "t_smoke_catalog_audit_m29.nim": {
+                "binary": "build/test-bin/t_smoke_catalog_audit_m29",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 5,
+                "class": "pure unit",
+            },
+            "libs/repro_interface_artifacts/tests/"
+            "t_multi_package_merge.nim": {
+                "binary": "build/test-bin/t_multi_package_merge",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 2,
+                "class": "pure unit",
+            },
+            "tests/unit/t_m9r13a_provider_compile_sharing.nim": {
+                "binary": "build/test-bin/t_m9r13a_provider_compile_sharing",
+                "language": "nim",
+                "sourceSuiteCount": 2,
+                "sourceCaseCount": 10,
+                "class": "graph-fixture",
+            },
+            "tests/unit/t_m9r14c_1_autotools_parallel_make.nim": {
+                "binary": "build/test-bin/"
+                "t_m9r14c_1_autotools_parallel_make",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 10,
+                "class": "platform/destructive",
             },
             # The post-commit publication-reporting guard (M19b). An EXISTING
             # enrollment that gained a second suite and three cases: post-commit
@@ -1457,6 +1521,97 @@ test "incomplete name" and:
                 "class": "integration",
             },
         }
+
+        # Regenerating the authoritative edge table on bb1fbfffa recovered
+        # fourteen tracked sources that were present in the tree but absent
+        # from repro_tests.nim. Pin every recovered source, binary, suite
+        # count, catalog count, and class individually: their 96 catalog cases
+        # must not be represented by an unattributed aggregate bump. The
+        # Autotools source was already one of the fourteen; bb1fbfffa grows it
+        # from two to three cases and the generator marks it provider-mode so
+        # those cases execute instead of taking their skip fallback.
+        recovered_unregistered = {
+            # These remain deliberately unclassified: the former imports
+            # dynlib and the latter re-enters its own executable. Neither may
+            # be admitted to a shared-process pure-unit bundle by assertion.
+            "libs/repro_build_engine/tests/test_builtin_copy_file_idempotent.nim":
+                ("test_builtin_copy_file_idempotent", 1, 1, "unclassified"),
+            "libs/repro_build_engine/tests/test_bypass_argv_fidelity.nim":
+                ("test_bypass_argv_fidelity", 1, 1, "unclassified"),
+            "libs/repro_core/tests/t_ambient_execution_external_import.nim":
+                ("t_ambient_execution_external_import", 1, 1, "integration"),
+            "libs/repro_dsl_stdlib/tests/t_prefix_layout.nim":
+                ("t_prefix_layout", 2, 7, "pure unit"),
+            "libs/repro_home_apply/tests/t_runtime_library_binding.nim":
+                ("t_runtime_library_binding", 2, 8, "pure unit"),
+            "libs/repro_home_apply/tests/t_runtime_library_launch_plan.nim":
+                ("t_runtime_library_launch_plan", 1, 5, "pure unit"),
+            "libs/repro_project_dsl/tests/dsl_port/"
+            "t_dsl_library_body_unclaimed_members.nim":
+                ("t_dsl_library_body_unclaimed_members", 1, 6, "pure unit"),
+            "libs/repro_project_dsl/tests/dsl_port/"
+            "t_dsl_provisioning_expression_setters.nim":
+                ("t_dsl_provisioning_expression_setters", 3, 13, "pure unit"),
+            "libs/repro_project_dsl/tests/dsl_port/"
+            "t_dsl_provisioning_literal_unchanged.nim":
+                ("t_dsl_provisioning_literal_unchanged", 4, 17, "pure unit"),
+            "libs/repro_project_dsl/tests/dsl_port/"
+            "t_dsl_runtime_library_declaration.nim":
+                ("t_dsl_runtime_library_declaration", 2, 11, "pure unit"),
+            "libs/repro_project_dsl/tests/dsl_port/"
+            "t_dsl_runtime_library_resolution.nim":
+                ("t_dsl_runtime_library_resolution", 1, 12, "pure unit"),
+            "libs/repro_project_dsl/tests/dsl_port/"
+            "t_dsl_service_expression_setters.nim":
+                ("t_dsl_service_expression_setters", 1, 4, "pure unit"),
+            "libs/repro_project_dsl/tests/dsl_port/"
+            "t_dsl_versions_expression_values.nim":
+                ("t_dsl_versions_expression_values", 1, 7, "pure unit"),
+            "tests/unit/t_library_stage_alias.nim":
+                ("t_library_stage_alias", 3, 3, "pure unit"),
+        }
+        for source, (binary, suites, cases, classification) in (
+            recovered_unregistered.items()
+        ):
+            expected_enrollments[source] = {
+                "binary": "build/test-bin/" + binary,
+                "language": "nim",
+                "sourceSuiteCount": suites,
+                "sourceCaseCount": cases,
+                "class": classification,
+            }
+
+        # Upstream fdaf4d3b adds this provider-mode regression, and a267613c
+        # extends it with CMake and Meson mutable-tree cases. Its built catalog
+        # and the independent source scan both report exactly four cases, so
+        # pin the graph member instead of absorbing it into the aggregate
+        # counts below.
+        expected_enrollments[
+            "tests/unit/t_configure_build_tree_cleanup.nim"
+        ] = {
+            "binary": "build/test-bin/t_configure_build_tree_cleanup",
+            "language": "nim",
+            "sourceSuiteCount": 1,
+            "sourceCaseCount": 4,
+            "class": "pure unit",
+        }
+
+        # Upstream 4294d5763 adds the dependency-rerun cache-lookup
+        # regression. The generator enrolls it as a standalone binary (bundle
+        # membership remains explicit), while the current fail-closed purity
+        # classifier independently admits it as a pure unit. Pin both facts,
+        # plus the binary's one-suite/one-case protocol catalog.
+        expected_enrollments[
+            "libs/repro_build_engine/tests/"
+            "test_dependency_rerun_cache_lookup.nim"
+        ] = {
+            "binary": "build/test-bin/test_dependency_rerun_cache_lookup",
+            "language": "nim",
+            "sourceSuiteCount": 1,
+            "sourceCaseCount": 1,
+            "class": "pure unit",
+        }
+
         for source, expected in expected_enrollments.items():
             with self.subTest(enrolled_source=source):
                 self.assertTrue((REPO_ROOT / source).is_file())
@@ -1911,7 +2066,10 @@ test "incomplete name" and:
         # `t_develop_dependency_source_is_read_not_solved.nim`. Regenerated
         # with `scripts/generate_test_edges.nim`, which reported exactly one
         # new Nim test and no other movement.
-        self.assertEqual(len(nim_specs), 1235)
+        # Upstream 4294d5763 adds one standalone dependency-rerun cache test,
+        # so the reconciled graph contains 1237 declared Nim sources;
+        # this was measured directly from the regenerated repro_tests.nim.
+        self.assertEqual(len(nim_specs), 1237)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -1924,7 +2082,7 @@ test "incomplete name" and:
             for item in data["tests"]
             if item["language"] == "python"
         )
-        provider_only_sources = []
+        implicit_framework_sources = []
         for spec in nim_specs:
             source = (REPO_ROOT / spec.source).read_text(
                 encoding="utf-8", errors="replace"
@@ -1942,21 +2100,25 @@ test "incomplete name" and:
                 )
                 is not None
             )
+            has_parallel_unittest = (
+                re.search(
+                    r"(?m)^[ \t]*import[ \t]+ct_test_unittest_parallel\b",
+                    source,
+                )
+                is not None
+            )
             if (
                 not has_std_unittest
+                and not has_parallel_unittest
                 and inventory.count_nim_cases(source)["caseCount"] > 0
             ):
-                provider_only_sources.append(spec.source)
+                implicit_framework_sources.append(spec.source)
         # This is intentionally independent from the token scanner. It pins
-        # the sole current direct re-export provider so a future implicit
-        # import/re-export cannot silently disappear from the inventory.
-        self.assertEqual(
-            provider_only_sources,
-            [
-                "libs/ct_test_unittest_parallel/tests/"
-                "t_smoke_ct_test_unittest_parallel.nim"
-            ],
-        )
+        # that every statically counted source imports either std/unittest or
+        # reprobuild's declared protocol provider directly. Upstream
+        # a2e203d56 deliberately moved the portable platform gates to the
+        # latter; an implicit import/re-export must still fail this audit.
+        self.assertEqual(implicit_framework_sources, [])
         # Language totals and the overall total. These are the aggregate
         # backstop for the per-source pins above, not a substitute for them.
         #
@@ -2135,7 +2297,11 @@ test "incomplete name" and:
         # source reports 11 in the baseline TSV. All eleven are
         # unconditional, so the Linux-vs-Darwin delta is still +1. The BASE it
         # is added to remains the composed number described above.
-        expected_nim_total = 6953 if sys.platform == "darwin" else 6954
+        # Freshly measured on the fully built reconciled graph: 7079 catalog
+        # cases on Darwin, including upstream 4294d5763's one new case. The
+        # independently pinned platform-qualified census below retains the
+        # exact one-case Linux delta.
+        expected_nim_total = 7079 if sys.platform == "darwin" else 7080
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -3013,7 +3179,9 @@ test "incomplete name" and:
             # up there and double-count its cases.
             # 1215 -> 1216: the order-independence regression, built and
             # probed like any other binary.
-            {"catalog": 1216, "quarantined": 1, "static": 5},
+            # Freshly measured after rebuilding every source-newer-than-binary
+            # entry: 1237 Nim specs, exactly one intrinsic quarantine.
+            {"catalog": 1236, "quarantined": 1, "static": 5},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         # ...and no source outran its binary, which is now a statement that
@@ -3043,13 +3211,13 @@ test "incomplete name" and:
         # and `deterministic` to survive into this inventory, so the sources
         # that do NOT supply them are pinned rather than left implicit.
         #
-        # Exactly one does: reprobuild's own `ct_test_unittest_parallel`
-        # shim implements a narrower `--list-json` than the codetracer-nim
-        # `std/unittest` fork — it emits `name`, `suite`, `file` and `line`
-        # only. Its two cases therefore carry null for the rich fields. This
-        # is a real gap in the shim, not in the inventory; when the shim is
-        # brought up to the fork's catalog, this pin drops to zero and the
-        # assertion below is what will say so.
+        # Reprobuild's `ct_test_unittest_parallel` provider implements a
+        # narrower `--list-json` than the codetracer-nim `std/unittest` fork:
+        # it emits `name`, `suite`, `file` and `line` only. Upstream
+        # a2e203d56 migrated the portable platform gates to that provider, so
+        # their cases correctly join the existing shim smoke in this list.
+        # This is a real provider gap, not an inventory gap; pinning every
+        # source keeps a future migration or provider enrichment explicit.
         incomplete = sorted(
             {
                 item["source"]
@@ -3062,7 +3230,64 @@ test "incomplete name" and:
             incomplete,
             [
                 "libs/ct_test_unittest_parallel/tests/"
-                "t_smoke_ct_test_unittest_parallel.nim"
+                "t_smoke_ct_test_unittest_parallel.nim",
+                "tests/e2e/io-monitor/"
+                "t_debug_io_monitor_reads_monitor_depfile.nim",
+                "tests/e2e/launcher-isolation/"
+                "t_e2e_windows_launcher_isolation.nim",
+                "tests/e2e/m69/t_e2e_repro_home_env_user_path_vm.nim",
+                "tests/e2e/m69/t_e2e_repro_home_fs_managed_block_vm.nim",
+                "tests/e2e/m69/t_e2e_repro_home_fs_user_file_vm.nim",
+                "tests/e2e/m69/t_e2e_repro_home_linux_dconfkey_vm.nim",
+                "tests/e2e/m69/"
+                "t_e2e_repro_home_linux_kdeconfigkey_vm.nim",
+                "tests/e2e/m69/t_e2e_repro_home_shell_integration_vm.nim",
+                "tests/e2e/m69/t_e2e_repro_home_systemd_user_unit_vm.nim",
+                "tests/e2e/m69/"
+                "t_e2e_repro_infra_linux_firewallrule_vm.nim",
+                "tests/e2e/m69/"
+                "t_e2e_repro_infra_linux_nixdaemonsetting_vm.nim",
+                "tests/e2e/m69/"
+                "t_e2e_repro_infra_linux_polkitrule_vm.nim",
+                "tests/e2e/m69/"
+                "t_e2e_repro_infra_linux_sudoersrule_vm.nim",
+                "tests/e2e/m69/t_e2e_repro_infra_linux_sysctl_vm.nim",
+                "tests/e2e/m69/"
+                "t_e2e_repro_infra_linux_tmpfilesrule_vm.nim",
+                "tests/e2e/m69/t_e2e_repro_infra_linux_udevrule_vm.nim",
+                "tests/e2e/m69/"
+                "t_e2e_repro_infra_os_hostname_posix_vm.nim",
+                "tests/e2e/m69/"
+                "t_e2e_repro_infra_os_timezone_posix_vm.nim",
+                "tests/e2e/m69/t_e2e_repro_infra_passwd_group_vm.nim",
+                "tests/e2e/m69/"
+                "t_e2e_repro_infra_plan_apply_convergent.nim",
+                "tests/e2e/m69/"
+                "t_e2e_repro_infra_systemd_system_timer_vm.nim",
+                "tests/e2e/m69/t_e2e_repro_system_command_family.nim",
+                "tests/e2e/m69/"
+                "t_e2e_windows_optional_feature_and_capability.nim",
+                "tests/e2e/m69/t_e2e_windows_registry_system_scope.nim",
+                "tests/e2e/m69/t_e2e_windows_vs_installer.nim",
+                "tests/e2e/m74/"
+                "t_integration_scoop_manifest_bin_resolution.nim",
+                "tests/e2e/m75/"
+                "t_integration_scoop_probe_gui_and_timeout.nim",
+                "tests/e2e/m76/"
+                "t_integration_stow_byte_identical_target_is_cache_hit.nim",
+                "tests/e2e/m77/"
+                "t_integration_scoop_installed_version_survives_bucket_drift.nim",
+                "tests/e2e/m80/"
+                "t_integration_plan_classifier_bucket_drift_is_cache_hit.nim",
+                "tests/e2e/m81/"
+                "t_integration_privileged_broker_single_prompt.nim",
+                "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
+                "tests/e2e/scoop/t_e2e_scoop_adapter_diagnostics.nim",
+                "tests/e2e/scoop/"
+                "t_e2e_scoop_adapter_realize_and_launch.nim",
+                "tests/e2e/scoop/t_e2e_scoop_practical_hardening.nim",
+                "tests/integration/t_r2_iso_boot.nim",
+                "tests/integration/t_r9_systemd_boot.nim",
             ],
         )
         # Every other catalog-counted case carries the full field set.
@@ -4315,7 +4540,7 @@ test "incomplete name" and:
         # bundle). See the `len(nim_specs)` pin above for why this number
         # falling is the intent and `nim_total` holding is the check.
         # 1216 -> 1217: the order-independence regression.
-        self.assertEqual(declared_nim_count, 1217)
+        self.assertEqual(declared_nim_count, 1237)
         self.assertEqual(declared_python_count, 5)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -4361,13 +4586,12 @@ test "incomplete name" and:
         # additional, individually pinned develop sources.
         # The recovered graph enrollments plus fail-closed move 1230 -> 1235;
         # upstream 11cea6789's six pinned sources move 1235 -> 1241.
-        # The linked-worktree regression then adds one Nim entry.
         # The linked-worktree regression then adds one Nim entry: 1242.
         # Final graph: 1239 Nim + 5 Python = 1244 entries — the two sources
         # the graph regeneration enrols.
         # 1244 -> 1221 = 1216 Nim + 5 Python: M4's solver consolidation batch.
         # 1221 -> 1222 = 1217 Nim + 5 Python.
-        self.assertEqual(data["static"]["testEntryCount"], 1222)
+        self.assertEqual(data["static"]["testEntryCount"], 1242)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),
