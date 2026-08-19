@@ -56,39 +56,28 @@ proc resolveWorkspaceProjectByName*(workspaceRoot, name: string):
   let manifests = manifestsRoot(workspaceRoot)
   let projectFile = manifests / "projects" / (name & ".toml")
   let variantFile = manifests / "variants" / (name & ".toml")
+  # Workspace-Membership-Model.md — a repo-set that is ENABLED is what used to
+  # be called a project, so `repo-sets/<name>.toml` joins the same ladder
+  # rather than getting a parallel one. Looked up last, so a converted manifest
+  # repo and an unconverted one both resolve the name they actually carry, and
+  # a workspace mid-conversion keeps preferring the project it already had.
+  let repoSetFile = manifests / "repo-sets" / (name & ".toml")
   if fileExists(projectFile):
     return resolveProject(projectFile)
   if fileExists(variantFile):
     return resolveVariant(variantFile)
+  if fileExists(repoSetFile):
+    return resolveRepoSet(repoSetFile)
   raise newException(ValueError,
-    "no project or variant named '" & name & "' found under '" & manifests &
-      "' (looked for '" & projectFile & "' and '" & variantFile & "')")
+    "no repo-set, project or variant named '" & name & "' found under '" &
+      manifests & "' (looked for '" & projectFile & "', '" & variantFile &
+      "' and '" & repoSetFile & "')")
 
-type
-  WorkspaceProjectSetConflictError* = object of WorkspaceManifestParseError
-    ## PS-4 — raised ONLY when two projects of the set declare one checkout
-    ## path with different facts. Callers distinguish this from every other
-    ## resolution failure: a conflict is a decision the operator has to make
-    ## (the set cannot be resolved at all), whereas an unresolvable or
-    ## not-yet-materialized manifest may simply be a workspace whose manifest
-    ## checkout has not landed yet.
-
-proc conflictingFields(existing, candidate: ResolvedRepo): seq[string] =
-  ## The load-bearing facts of a checkout: what would be cloned, from where,
-  ## at which revision, with which VCS. Two projects may reach these through
-  ## differently-NAMED remotes (`origin` vs `metacraft-labs` pointing at the
-  ## same fetch base) without disagreeing about anything real, so the remote
-  ## KEY is deliberately not compared — the resolved fetch URL is.
-  if existing.name != candidate.name:
-    result.add("name (" & existing.name & " vs " & candidate.name & ")")
-  if existing.fetchUrl != candidate.fetchUrl:
-    result.add("fetch url (" & existing.fetchUrl & " vs " &
-      candidate.fetchUrl & ")")
-  if existing.revision != candidate.revision:
-    result.add("revision (" & existing.revision & " vs " &
-      candidate.revision & ")")
-  if existing.vcs != candidate.vcs:
-    result.add("vcs (" & existing.vcs & " vs " & candidate.vcs & ")")
+# `WorkspaceProjectSetConflictError` and `conflictingFields` moved to
+# `resolver.nim` when repo-set expansion gained the same dedup-by-path rule:
+# one refusal, one set of evidence, whichever route reached the second
+# declaration. Re-exported here so every existing caller is unaffected.
+export WorkspaceProjectSetConflictError, conflictingFields
 
 proc raiseProjectSetConflict(workspaceRoot, path: string;
                              owningProject, otherProject: string;

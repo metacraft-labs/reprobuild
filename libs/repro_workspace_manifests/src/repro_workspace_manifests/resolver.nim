@@ -54,7 +54,29 @@
 ##   happened, so the caller always knows which project to look at.
 ## - `innerMessage` carries the human-readable reason.
 
-import std/[options, os, strutils, tables]
+## Workspace-Membership-Model.md
+## -----------------------------
+##
+## The resolver additionally accepts the membership-model spellings, ALONGSIDE
+## the ones above rather than instead of them, because the manifest repo is
+## converted in a separate step and must resolve byte-identically until it is:
+##
+##   - `members` (NAMES) as well as `includes` (paths). A name resolves against
+##     two namespaces — `repos/<name>.toml` and `repo-sets/<name>.toml` — and a
+##     name carried by both is refused, because the two are resolved together
+##     and one name cannot mean two things.
+##   - repo-sets expand depth-first to any depth, with cycle detection that
+##     names the full path (`a -> b -> a`) rather than overflowing the stack.
+##   - `url-prefixes/<name>.toml` resolves `url_prefix`, with `url =
+##     url_prefix / url_suffix` and `url_suffix` defaulting to the repo's
+##     `name`. The old `remote` spelling still resolves through the project's
+##     `[[remote]]` table, and only THAT path keeps `getFetchUrl`'s
+##     "a base ending in .git is used verbatim" special case.
+##   - per-binding `url_prefix` / `url_suffix` on `remotes = [{ … }]`, so a
+##     fork's `upstream` lands on a different path than its `origin`.
+##   - `branch` takes precedence over `revision` when both are present.
+
+import std/[algorithm, options, os, strutils, tables]
 import types
 import diagnostics
 import reader
@@ -125,6 +147,15 @@ type
     fetchUrl*: string
     remotes*: seq[ResolvedRemote]
     revision*: string
+    branch*: string
+      ## Workspace-Membership-Model.md — the fragment's `branch`, when it
+      ## declared one. Only ever a branch NAME, so it is always a legal
+      ## `git clone --branch` argument; `revision` conflated that with "an
+      ## exact commit to sit at" and the conflation cost two defects. Empty for
+      ## an unconverted fragment (which declares `revision` instead), and when
+      ## non-empty it is also mirrored into `revision`, so every existing
+      ## consumer keeps reading one field and nothing has to be taught the new
+      ## one before the manifest repo is converted.
     vcs*: string
     stability*: string
     # MO-5 — evidence-only private participation marker carried verbatim from
@@ -218,6 +249,45 @@ const
     ## RA-18 — a repo with no declared `groups` belongs to this implicit
     ## group (the `repo`-tool convention). A repo's effective group set is
     ## therefore `groups` when non-empty, else `["default"]`.
+  urlPrefixesDirName* = "url-prefixes"
+    ## Workspace-Membership-Model.md — where the workspace's URL prefixes are
+    ## declared, ONCE each, rather than re-declared per project.
+  repoSetsDirName* = "repo-sets"
+  reposDirName* = "repos"
+
+# ---- the dedup-by-path conflict rule --------------------------------------
+#
+# Declared here rather than in `project_set.nim` because there are now TWO
+# places a repo can be reached by more than one route — across the projects of
+# an active set, and across the members of a repo-set — and they must refuse
+# for the same reason with the same evidence. `project_set.nim` re-exports
+# both, so its callers are unaffected.
+
+type
+  WorkspaceProjectSetConflictError* = object of WorkspaceManifestParseError
+    ## PS-4 — raised ONLY when two sources declare one checkout path with
+    ## different facts. Callers distinguish this from every other resolution
+    ## failure: a conflict is a decision the operator has to make (the set
+    ## cannot be resolved at all), whereas an unresolvable or
+    ## not-yet-materialized manifest may simply be a workspace whose manifest
+    ## checkout has not landed yet.
+
+proc conflictingFields*(existing, candidate: ResolvedRepo): seq[string] =
+  ## The load-bearing facts of a checkout: what would be cloned, from where,
+  ## at which revision, with which VCS. Two sources may reach these through
+  ## differently-NAMED remotes (`origin` vs `metacraft-labs` pointing at the
+  ## same fetch base) without disagreeing about anything real, so the remote
+  ## KEY is deliberately not compared — the resolved fetch URL is.
+  if existing.name != candidate.name:
+    result.add("name (" & existing.name & " vs " & candidate.name & ")")
+  if existing.fetchUrl != candidate.fetchUrl:
+    result.add("fetch url (" & existing.fetchUrl & " vs " &
+      candidate.fetchUrl & ")")
+  if existing.revision != candidate.revision:
+    result.add("revision (" & existing.revision & " vs " &
+      candidate.revision & ")")
+  if existing.vcs != candidate.vcs:
+    result.add("vcs (" & existing.vcs & " vs " & candidate.vcs & ")")
 
 # ---- TC-3 / TC-6 / RA-32 certificate policy resolution --------------------
 
@@ -594,6 +664,369 @@ proc planRepoRemote*(remotes: openArray[RemoteEntry];
   result.remoteName = name
   result.mintedFetch = base
 
+# ---- Workspace-Membership-Model.md: url prefixes ---------------------------
+
+proc loadUrlPrefixes*(manifestRoot: string): Table[string, string] =
+  ## Every `url-prefixes/<name>.toml` under `manifestRoot`, as name -> url.
+  ##
+  ## Declared ONCE for the workspace rather than per project: a label like
+  ## `metacraft-labs` is a fact about where an org's repos live, not a fact
+  ## about any one project, and re-declaring it per project is what made a
+  ## fragment unshareable without every consumer also learning the remote names
+  ## it happens to reference.
+  ##
+  ## A missing directory is not an error — an unconverted manifest repo has
+  ## none, and every fragment in it resolves through the project's
+  ## `[[remote]]` table instead.
+  result = initTable[string, string]()
+  let dir = manifestRoot / urlPrefixesDirName
+  if not dirExists(dir):
+    return
+  var files: seq[string]
+  for kind, path in walkDir(dir):
+    if kind in {pcFile, pcLinkToFile} and path.splitFile.ext == ".toml":
+      files.add(path)
+  sort(files)
+  for file in files:
+    let manifest = readUrlPrefix(file)
+    let name = manifest.`url-prefix`.name
+    let url = manifest.`url-prefix`.url
+    if name in result and result[name] != url:
+      raiseManifestError(file, "url-prefix.name",
+        schemaUrlPrefixV1, schemaUrlPrefixV1,
+        "url prefix '" & name & "' is declared twice with different urls ('" &
+          result[name] & "' vs '" & url &
+          "'); a prefix is workspace-wide, so the name has to mean one place")
+    result[name] = url
+
+# ---- shared per-fragment resolution ---------------------------------------
+#
+# One proc serves `includes`, `members`, and the variant composer's extra
+# includes. They differ only in what they blame in a diagnostic, never in how a
+# fragment resolves — and keeping that single is what lets the membership model
+# land without the unconverted manifests moving.
+
+type
+  FragmentContext = object
+    ## Everything OUTSIDE a repo fragment that its resolution consults.
+    remotes: Table[string, string]
+      ## The project's `[[remote]]` table: name -> `fetch` base. Empty when the
+      ## owner is a repo-set, which has no such table by construction.
+    urlPrefixes: Table[string, string]
+      ## `url-prefixes/<name>.toml`: name -> url.
+    defaultRemote: string
+    defaultRevision: string
+    ownerLabel: string
+      ## How a diagnostic refers to the manifest carrying the remote table —
+      ## "the project" for M6, "the base project" for M7's variant composer.
+
+proc resolveUrlPrefix(ctx: FragmentContext; ownerFile, ownerSchema, keyPath,
+                      reference, prefixName: string): string =
+  ## The url a `url_prefix` name resolves to. An undeclared name is refused
+  ## rather than composed into a broken URL that only fails at clone time on
+  ## somebody else's machine.
+  if prefixName in ctx.urlPrefixes:
+    return ctx.urlPrefixes[prefixName]
+  raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+    "fragment '" & reference & "' references unknown url prefix '" &
+      prefixName & "' (no `" & urlPrefixesDirName / (prefixName & ".toml") &
+      "` declares it)")
+
+proc composePrefixedUrl(prefixUrl, suffix: string): string =
+  ## `url = url_prefix + "/" + url_suffix`. Unconditionally — there is
+  ## deliberately no "a prefix that already ends in .git is used verbatim"
+  ## branch here, because a field whose meaning depends on the shape of its own
+  ## value is a defect waiting for the first input of the other shape. That
+  ## special case survives only on the old `remote` path, in `getFetchUrl`.
+  var base = prefixUrl
+  while base.len > 1 and base.endsWith("/"):
+    base.setLen(base.len - 1)
+  base & "/" & suffix
+
+proc resolveFragment(ctx: FragmentContext; fragmentAbs: string;
+                     ownerFile, ownerSchema, keyPath, reference: string):
+    ResolvedRepo =
+  ## Read one `repos/<r>.toml` and resolve it against `ctx`.
+  ##
+  ## `reference` is how the owning manifest named this fragment — an include
+  ## PATH (`repos/foo.toml`) or a member NAME (`foo`) — and appears verbatim in
+  ## every diagnostic, so the operator is pointed at what they actually wrote.
+  let fragment = readRepoFragment(fragmentAbs)
+
+  result.name = fragment.repo.name
+  result.path =
+    if fragment.repo.path.len > 0: fragment.repo.path
+    else: fragment.repo.name
+  result.fragmentPath = fragmentAbs
+
+  let repoUrlPrefix =
+    if fragment.repo.url_prefix.isSome: fragment.repo.url_prefix.get()
+    else: ""
+  let repoUrlSuffix =
+    if fragment.repo.url_suffix.isSome: fragment.repo.url_suffix.get()
+    else: ""
+  # `url_suffix` defaults to `name`, which is the common single-binding case.
+  # The two are separate fields precisely so `name` can go back to being
+  # identity in the workspace rather than doubling as the path under the
+  # prefix (`name = "microsoft/BuildXL"`).
+  let defaultSuffix =
+    if repoUrlSuffix.len > 0: repoUrlSuffix else: fragment.repo.name
+
+  # Resolve one `remotes = [{ … }]` binding. A binding that names a
+  # `url_prefix` takes the new path (its OWN suffix, so a fork's upstream can
+  # sit at a different path); one that names only the old `remote` keeps
+  # composing through the project's `[[remote]]` table exactly as before.
+  proc resolveBinding(entry: RepoRemoteEntry): ResolvedRemote =
+    if entry.url_prefix.len > 0:
+      let suffix =
+        if entry.url_suffix.len > 0: entry.url_suffix else: fragment.repo.name
+      let prefix = resolveUrlPrefix(ctx, ownerFile, ownerSchema, keyPath,
+        reference, entry.url_prefix)
+      return ResolvedRemote(localName: entry.name,
+                            projectRemote: entry.url_prefix,
+                            fetchUrl: composePrefixedUrl(prefix, suffix))
+    if entry.remote in ctx.remotes:
+      return ResolvedRemote(localName: entry.name, projectRemote: entry.remote,
+        fetchUrl: getFetchUrl(ctx.remotes[entry.remote], fragment.repo.name))
+    # A `remote` name the project's table does not carry may still be a url
+    # prefix: that is the state a manifest repo is in while its remotes have
+    # been hoisted into `url-prefixes/` but its fragments still say `remote`.
+    # Only reachable where resolution used to FAIL, so it cannot move a
+    # manifest that resolves today.
+    if entry.remote in ctx.urlPrefixes:
+      let suffix =
+        if entry.url_suffix.len > 0: entry.url_suffix else: fragment.repo.name
+      return ResolvedRemote(localName: entry.name, projectRemote: entry.remote,
+        fetchUrl: composePrefixedUrl(ctx.urlPrefixes[entry.remote], suffix))
+    raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+      "fragment '" & reference & "' references unknown remote '" &
+        entry.remote & "' (not declared in " & ctx.ownerLabel &
+        "'s [[remote]] table)")
+
+  if repoUrlPrefix.len > 0:
+    # Membership-model path. The primary binding is ALWAYS the local remote
+    # `origin`, so a checkout's remotes look like an ordinary clone's; the
+    # predecessor tool named the primary after the MANIFEST remote, which is
+    # why its checkouts did not.
+    let prefix = resolveUrlPrefix(ctx, ownerFile, ownerSchema, keyPath,
+      reference, repoUrlPrefix)
+    let originUrl = composePrefixedUrl(prefix, defaultSuffix)
+    var resolvedRemotes = @[ResolvedRemote(localName: "origin",
+      projectRemote: repoUrlPrefix, fetchUrl: originUrl)]
+    for entry in fragment.repo.remotes:
+      let binding = resolveBinding(entry)
+      # A binding that names `origin` itself is the operator being explicit
+      # about the primary, not a second remote with the same name.
+      var replaced = false
+      for i in 0 ..< resolvedRemotes.len:
+        if resolvedRemotes[i].localName == binding.localName:
+          resolvedRemotes[i] = binding
+          replaced = true
+          break
+      if not replaced:
+        resolvedRemotes.add(binding)
+    result.remotes = resolvedRemotes
+    result.projectRemote = resolvedRemotes[0].projectRemote
+    result.fetchUrl = resolvedRemotes[0].fetchUrl
+  else:
+    # Pre-membership-model path, unchanged. `projectRemote` keeps its
+    # documented irregularity (see `ResolvedRepo.projectRemote`): a fragment
+    # that lists `remotes` but omits the scalar `repo.remote` puts the FIRST
+    # binding's LOCAL name there rather than a `[[remote]]` key.
+    let fragmentRemote =
+      if fragment.repo.remote.isSome: fragment.repo.remote.get()
+      else: ""
+    if fragmentRemote.len > 0:
+      result.projectRemote = fragmentRemote
+    elif ctx.defaultRemote.len > 0:
+      result.projectRemote = ctx.defaultRemote
+    else:
+      raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+        "fragment '" & reference &
+          "' omits `repo.remote` and " & ctx.ownerLabel &
+          " has no `default_remote`")
+
+    var resolvedRemotes = newSeq[ResolvedRemote]()
+    if fragment.repo.remotes.len > 0:
+      for entry in fragment.repo.remotes:
+        resolvedRemotes.add(resolveBinding(entry))
+      let primaryName =
+        if fragmentRemote.len > 0: fragmentRemote
+        else: resolvedRemotes[0].localName
+      result.projectRemote = primaryName
+      var primary = resolvedRemotes[0]
+      for r in resolvedRemotes:
+        if r.localName == primaryName:
+          primary = r
+          break
+      result.fetchUrl = primary.fetchUrl
+    else:
+      if result.projectRemote in ctx.remotes:
+        result.fetchUrl =
+          getFetchUrl(ctx.remotes[result.projectRemote], fragment.repo.name)
+      elif result.projectRemote in ctx.urlPrefixes:
+        # Same hoisted-remotes intermediate state as in `resolveBinding`.
+        result.fetchUrl = composePrefixedUrl(
+          ctx.urlPrefixes[result.projectRemote], defaultSuffix)
+      else:
+        raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+          "fragment '" & reference & "' references unknown remote '" &
+            result.projectRemote & "' (not declared in " & ctx.ownerLabel &
+            "'s [[remote]] table)")
+      resolvedRemotes.add(ResolvedRemote(localName: "origin",
+        projectRemote: result.projectRemote, fetchUrl: result.fetchUrl))
+    result.remotes = resolvedRemotes
+
+  # Resolve revision. `branch` WINS over `revision` when both are present:
+  # `branch` carries only branch names, so it is the one that is always a legal
+  # `git clone --branch` argument, and a pin belongs in the lock rather than in
+  # a manifest. `revision` still resolves alone, for every unconverted
+  # fragment. With neither set we fall back to the project's
+  # `default_revision`, then leave the field empty — downstream policy decides
+  # what an empty revision means; we do NOT inject a hardcoded branch name.
+  let fragmentBranch =
+    if fragment.repo.branch.isSome: fragment.repo.branch.get() else: ""
+  let fragmentRevision =
+    if fragment.repo.revision.isSome: fragment.repo.revision.get() else: ""
+  if fragmentBranch.len > 0:
+    result.branch = fragmentBranch
+    result.revision = fragmentBranch
+  elif fragmentRevision.len > 0:
+    result.revision = fragmentRevision
+  else:
+    result.revision = ctx.defaultRevision
+
+  result.vcs =
+    if fragment.repo.vcs.isSome and fragment.repo.vcs.get().len > 0:
+      fragment.repo.vcs.get()
+    else:
+      defaultRepoVcs
+  result.stability =
+    if fragment.repo.stability.isSome and fragment.repo.stability.get().len > 0:
+      fragment.repo.stability.get()
+    else:
+      defaultRepoStability
+  # MO-5 — carry the evidence-only participation marker verbatim (default "").
+  if fragment.repo.participation.isSome:
+    result.participation = fragment.repo.participation.get()
+
+  # RA-14 — carry the fetch-acceleration hints through unchanged. They are pure
+  # download knobs; the resolved revision above is the single source of truth
+  # for what the checkout resolves to.
+  if fragment.repo.clone_filter.isSome:
+    result.cloneFilter = fragment.repo.clone_filter.get()
+  if fragment.repo.depth.isSome:
+    result.depth = fragment.repo.depth.get()
+  if fragment.repo.single_branch.isSome:
+    result.singleBranch = fragment.repo.single_branch.get()
+
+  # RA-18 — carry the copyfile/linkfile directives and group membership
+  # through verbatim. These are workspace-layout facts, not download knobs;
+  # the materialization step runs post-checkout in the CLI driver.
+  result.copyfile = fragment.repo.copyfile
+  result.linkfile = fragment.repo.linkfile
+  result.groups = fragment.repo.groups
+
+  # RA-21 — carry the develop-set dependency edges through verbatim.
+  result.depends = fragment.repo.depends
+
+# ---- Workspace-Membership-Model.md: `members` expansion --------------------
+
+type
+  MemberAccumulator = object
+    ## Expansion state threaded through the depth-first walk. Dedup identity is
+    ## the checkout PATH: a repo reachable by two routes is ONE checkout.
+    repos: seq[ResolvedRepo]
+    byPath: Table[string, int]
+    declaredBy: Table[string, string]
+
+proc raiseMemberConflict(ownerFile, ownerSchema, keyPath, checkoutPath,
+                         owningSource, otherSource: string;
+                         differences: seq[string]) {.noreturn.} =
+  ## The dedup refusal. Nothing shadows anything here: identical declarations
+  ## merge silently (the common case — two sets both pulling in
+  ## `metacraft-dev-guidelines`), and a genuine disagreement is a decision the
+  ## operator has to make, so it names the path, both sources, and the fields.
+  let inner = "'" & owningSource & "' and '" & otherSource &
+    "' declare checkout path '" & checkoutPath & "' with different " &
+    differences.join(", ") &
+    "; a path is ONE working tree, so the membership cannot be resolved. " &
+    "Align the two declarations (normally by having both sets name the same " &
+    "repo) or drop one of them"
+  var e = newException(WorkspaceProjectSetConflictError, "")
+  e.path = ownerFile
+  e.keyPath = keyPath
+  e.expectedSchema = ownerSchema
+  e.observedSchema = ownerSchema
+  e.innerMessage = inner
+  e.msg = "[" & e.path & "] at key '" & keyPath & "': " & inner
+  raise e
+
+proc chainSuffix(chain: openArray[string]): string =
+  ## " (reached via a -> b)" — so a diagnostic deep inside a nested repo-set
+  ## says how resolution got there, not just where it stopped.
+  if chain.len == 0: "" else: " (reached via " & chain.join(" -> ") & ")"
+
+proc expandMembers(ctx: FragmentContext; manifestRoot: string;
+                   ownerFile, ownerSchema: string;
+                   members: openArray[string]; chain: seq[string];
+                   acc: var MemberAccumulator) =
+  ## Depth-first expansion of one `members` list.
+  ##
+  ## An entry names a repo or a repo-set, resolved against those two
+  ## namespaces rather than against the filesystem — which is the whole point
+  ## of `members` over `includes`, whose entries were paths while every other
+  ## reference in the schema (`depends`, `remote`) was a name.
+  for idx, member in members.pairs:
+    let keyPath = "members[" & $idx & "]"
+    let fragmentAbs = manifestRoot / reposDirName / (member & ".toml")
+    let setAbs = manifestRoot / repoSetsDirName / (member & ".toml")
+    let isRepo = fileExists(fragmentAbs)
+    let isSet = fileExists(setAbs)
+
+    if isRepo and isSet:
+      # The two namespaces are resolved TOGETHER, so a name carried by both has
+      # no answer. Refusing is the only option that does not silently pick one.
+      raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+        "member '" & member & "' is BOTH a repo fragment (" &
+          reposDirName / (member & ".toml") & ") and a repo-set (" &
+          repoSetsDirName / (member & ".toml") &
+          "); members resolve against both namespaces, so one name cannot " &
+          "mean two things — rename one of them" & chainSuffix(chain))
+
+    if isSet:
+      if member in chain:
+        raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+          "repo-set cycle: " & (chain & @[member]).join(" -> ") &
+            "; a set that contains itself has no expansion")
+      let setManifest = readRepoSet(setAbs)
+      expandMembers(ctx, manifestRoot, setAbs, schemaRepoSetV1,
+        setManifest.members, chain & @[member], acc)
+      continue
+
+    if not isRepo:
+      raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+        "member '" & member & "' names neither a repo nor a repo-set " &
+          "(looked for '" & reposDirName / (member & ".toml") & "' and '" &
+          repoSetsDirName / (member & ".toml") & "' under '" & manifestRoot &
+          "')" & chainSuffix(chain))
+
+    let resolved = resolveFragment(ctx, fragmentAbs, ownerFile, ownerSchema,
+      keyPath, member)
+    let owner =
+      if chain.len > 0: chain[^1] else: ownerFile.splitFile.name
+    if resolved.path in acc.byPath:
+      let differences =
+        conflictingFields(acc.repos[acc.byPath[resolved.path]], resolved)
+      if differences.len > 0:
+        raiseMemberConflict(ownerFile, ownerSchema, keyPath, resolved.path,
+          acc.declaredBy.getOrDefault(resolved.path, owner), owner, differences)
+      # Identical declaration — one checkout, one entry.
+      continue
+    acc.byPath[resolved.path] = acc.repos.len
+    acc.declaredBy[resolved.path] = owner
+    acc.repos.add(resolved)
+
 # ---- on-disk entry point --------------------------------------------------
 
 proc resolveProject*(projectFile: string): ResolvedProject =
@@ -632,6 +1065,14 @@ proc resolveProject*(projectFile: string): ResolvedProject =
     else:
       ""
 
+  let manifestRoot = parentDir(parentDir(absProject))
+  let ctx = FragmentContext(
+    remotes: remotes,
+    urlPrefixes: loadUrlPrefixes(manifestRoot),
+    defaultRemote: defaultRemoteName,
+    defaultRevision: result.defaultRevision,
+    ownerLabel: "the project")
+
   # Track `(name, path, projectRemote)` triples to detect genuine duplicates.
   # Two distinct fragments with the same `repo.name` but different `path`
   # and/or `remote` (the accounting / accounting-blocksense pattern) MUST
@@ -646,118 +1087,18 @@ proc resolveProject*(projectFile: string): ResolvedProject =
         schemaProjectManifestV1, schemaProjectManifestV1,
         "include target does not exist: '" & rawInclude &
           "' (resolved to '" & fragmentAbs & "')")
-    let fragment = readRepoFragment(fragmentAbs)
-
-    var resolved: ResolvedRepo
-    resolved.name = fragment.repo.name
-    resolved.path =
-      if fragment.repo.path.len > 0: fragment.repo.path
-      else: fragment.repo.name
-    resolved.fragmentPath = fragmentAbs
-
-    # Resolve remote name: fragment's explicit value wins; otherwise the
-    # project's `default_remote`. If the fragment omits `remote` and the
-    # project declares no `default_remote`, that's a structural error.
-    let fragmentRemote =
-      if fragment.repo.remote.isSome: fragment.repo.remote.get()
-      else: ""
-    if fragmentRemote.len > 0:
-      resolved.projectRemote = fragmentRemote
-    elif defaultRemoteName.len > 0:
-      resolved.projectRemote = defaultRemoteName
-    else:
-      raiseManifestError(absProject,
-        "includes[" & $incIdx & "]",
-        schemaProjectManifestV1, schemaProjectManifestV1,
-        "fragment '" & rawInclude &
-          "' omits `repo.remote` and the project has no `default_remote`")
-
-    var resolvedRemotes = newSeq[ResolvedRemote]()
-    if fragment.repo.remotes.len > 0:
-      for r in fragment.repo.remotes:
-        if r.remote notin remotes:
-          raiseManifestError(absProject,
-            "includes[" & $incIdx & "]",
-            schemaProjectManifestV1, schemaProjectManifestV1,
-            "fragment '" & rawInclude & "' references unknown remote '" &
-              r.remote & "' (not declared in the project's [[remote]] table)")
-        let fullUrl = getFetchUrl(remotes[r.remote], fragment.repo.name)
-        resolvedRemotes.add(ResolvedRemote(localName: r.name, projectRemote: r.remote, fetchUrl: fullUrl))
-
-      let primaryName = if fragmentRemote.len > 0: fragmentRemote else: resolvedRemotes[0].localName
-      resolved.projectRemote = primaryName
-      var primaryProjectRemote = ""
-      for r in resolvedRemotes:
-        if r.localName == primaryName:
-          primaryProjectRemote = r.projectRemote
-          break
-      if primaryProjectRemote.len == 0:
-        primaryProjectRemote = resolvedRemotes[0].projectRemote
-      resolved.fetchUrl = getFetchUrl(remotes[primaryProjectRemote], fragment.repo.name)
-    else:
-      if resolved.projectRemote notin remotes:
-        raiseManifestError(absProject,
-          "includes[" & $incIdx & "]",
-          schemaProjectManifestV1, schemaProjectManifestV1,
-          "fragment '" & rawInclude & "' references unknown remote '" &
-            resolved.projectRemote & "' (not declared in the project's [[remote]] table)")
-      let fullUrl = getFetchUrl(remotes[resolved.projectRemote], fragment.repo.name)
-      resolved.fetchUrl = fullUrl
-      resolvedRemotes.add(ResolvedRemote(localName: "origin", projectRemote: resolved.projectRemote, fetchUrl: fullUrl))
-
-    resolved.remotes = resolvedRemotes
-
-    # Resolve revision: fragment's explicit value wins; otherwise the
-    # project's `default_revision`. If neither is set we leave the field
-    # empty — the caller's downstream policy (e.g. M9's `workspace init`)
-    # decides what an empty revision means. We do NOT inject a hardcoded
-    # branch name here.
-    let fragmentRevision =
-      if fragment.repo.revision.isSome: fragment.repo.revision.get()
-      else: ""
-    if fragmentRevision.len > 0:
-      resolved.revision = fragmentRevision
-    else:
-      resolved.revision = result.defaultRevision
-
-    resolved.vcs =
-      if fragment.repo.vcs.isSome and fragment.repo.vcs.get().len > 0:
-        fragment.repo.vcs.get()
-      else:
-        defaultRepoVcs
-    resolved.stability =
-      if fragment.repo.stability.isSome and fragment.repo.stability.get().len > 0:
-        fragment.repo.stability.get()
-      else:
-        defaultRepoStability
-    # MO-5 — carry the evidence-only participation marker verbatim (default "").
-    if fragment.repo.participation.isSome:
-      resolved.participation = fragment.repo.participation.get()
-
-    # RA-14 — carry the fetch-acceleration hints through unchanged. They
-    # are pure download knobs; the resolved revision above is the single
-    # source of truth for what the checkout resolves to.
-    if fragment.repo.clone_filter.isSome:
-      resolved.cloneFilter = fragment.repo.clone_filter.get()
-    if fragment.repo.depth.isSome:
-      resolved.depth = fragment.repo.depth.get()
-    if fragment.repo.single_branch.isSome:
-      resolved.singleBranch = fragment.repo.single_branch.get()
-
-    # RA-18 — carry the copyfile/linkfile directives and group membership
-    # through verbatim. These are workspace-layout facts, not download
-    # knobs; the materialization step runs post-checkout in the CLI driver.
-    resolved.copyfile = fragment.repo.copyfile
-    resolved.linkfile = fragment.repo.linkfile
-    resolved.groups = fragment.repo.groups
-
-    # RA-21 — carry the develop-set dependency edges through verbatim.
-    resolved.depends = fragment.repo.depends
+    let resolved = resolveFragment(ctx, fragmentAbs, absProject,
+      schemaProjectManifestV1, "includes[" & $incIdx & "]", rawInclude)
 
     # Duplicate check on the `(name, path, projectRemote)` triple. We use
     # a tab-joined key because none of the three components legally
     # contains a tab character (repo names are file-system-safe; paths
     # use forward slashes; remote names are TOML identifiers).
+    #
+    # This is the `includes` rule and it stays exactly as it was: a repeated
+    # include is an authoring mistake in a hand-written list. `members` dedups
+    # by checkout PATH instead, because reaching one repo through two sets is
+    # the normal case there rather than a mistake.
     let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.projectRemote
     if triple in seen:
       raiseManifestError(absProject,
@@ -769,6 +1110,57 @@ proc resolveProject*(projectFile: string): ResolvedProject =
     seen[triple] = incIdx
 
     result.repos.add(resolved)
+
+  # Workspace-Membership-Model.md — `members`, expanded after `includes` so a
+  # half-converted project keeps its include order and merely appends. A
+  # project that declares no `members` (every project in an unconverted
+  # manifest repo) does not enter this at all.
+  if project.members.len > 0:
+    var acc = MemberAccumulator(
+      byPath: initTable[string, int](),
+      declaredBy: initTable[string, string]())
+    for i, repo in result.repos:
+      if repo.path notin acc.byPath:
+        acc.byPath[repo.path] = i
+        acc.declaredBy[repo.path] = project.project.name
+    acc.repos = result.repos
+    expandMembers(ctx, manifestRoot, absProject, schemaProjectManifestV1,
+      project.members, @[], acc)
+    result.repos = acc.repos
+
+proc resolveRepoSet*(setFile: string): ResolvedProject =
+  ## Resolve a `repo-sets/<set>.toml` into the SAME `ResolvedProject` a project
+  ## resolves to.
+  ##
+  ## That the return type is the same is the point of the model: a repo-set
+  ## that is enabled in a workspace is what used to be called a project, so
+  ## every downstream consumer — sync, lock, status, the project-set union —
+  ## cannot tell one from the other and does not have to.
+  ##
+  ## A repo-set carries NO remote table and NO defaults by construction, so
+  ## every member fragment resolves through `url-prefixes/` and declares its
+  ## own branch. That is the invariant the model rests on: a repo fragment
+  ## fully determines its own checkout, and nothing about which set referenced
+  ## it can change where it lands.
+  let absSet = absolutePath(setFile)
+  let manifest = readRepoSet(absSet)
+  let manifestRoot = parentDir(parentDir(absSet))
+
+  result.projectFile = absSet
+  result.projectName = manifest.`repo-set`.name
+
+  let ctx = FragmentContext(
+    remotes: initTable[string, string](),
+    urlPrefixes: loadUrlPrefixes(manifestRoot),
+    defaultRemote: "",
+    defaultRevision: "",
+    ownerLabel: "the repo-set")
+  var acc = MemberAccumulator(
+    byPath: initTable[string, int](),
+    declaredBy: initTable[string, string]())
+  expandMembers(ctx, manifestRoot, absSet, schemaRepoSetV1,
+    manifest.members, @[manifest.`repo-set`.name], acc)
+  result.repos = acc.repos
 
 # ---- string-based entry point --------------------------------------------
 
@@ -904,6 +1296,12 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
       baseProject.project.default_remote.get()
     else:
       ""
+  let variantCtx = FragmentContext(
+    remotes: remotes,
+    urlPrefixes: loadUrlPrefixes(parentDir(parentDir(absVariant))),
+    defaultRemote: defaultRemoteName,
+    defaultRevision: result.defaultRevision,
+    ownerLabel: "the base project")
 
   # ---- step 2: apply the variant's extra includes ------------------------
   #
@@ -925,104 +1323,8 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
         schemaVariantManifestV1, schemaVariantManifestV1,
         "include target does not exist: '" & rawInclude &
           "' (resolved to '" & fragmentAbs & "')")
-    let fragment = readRepoFragment(fragmentAbs)
-
-    var resolved: ResolvedRepo
-    resolved.name = fragment.repo.name
-    resolved.path =
-      if fragment.repo.path.len > 0: fragment.repo.path
-      else: fragment.repo.name
-    resolved.fragmentPath = fragmentAbs
-
-    let fragmentRemote =
-      if fragment.repo.remote.isSome: fragment.repo.remote.get()
-      else: ""
-    if fragmentRemote.len > 0:
-      resolved.projectRemote = fragmentRemote
-    elif defaultRemoteName.len > 0:
-      resolved.projectRemote = defaultRemoteName
-    else:
-      raiseManifestError(absVariant,
-        "includes[" & $incIdx & "]",
-        schemaVariantManifestV1, schemaVariantManifestV1,
-        "fragment '" & rawInclude &
-          "' omits `repo.remote` and the base project has no `default_remote`")
-
-    var resolvedRemotes = newSeq[ResolvedRemote]()
-    if fragment.repo.remotes.len > 0:
-      for r in fragment.repo.remotes:
-        if r.remote notin remotes:
-          raiseManifestError(absVariant,
-            "includes[" & $incIdx & "]",
-            schemaVariantManifestV1, schemaVariantManifestV1,
-            "fragment '" & rawInclude & "' references unknown remote '" &
-              r.remote & "' (not declared in the base project's [[remote]] table)")
-        let fullUrl = getFetchUrl(remotes[r.remote], fragment.repo.name)
-        resolvedRemotes.add(ResolvedRemote(localName: r.name, projectRemote: r.remote, fetchUrl: fullUrl))
-      
-      let primaryName = if fragmentRemote.len > 0: fragmentRemote else: resolvedRemotes[0].localName
-      resolved.projectRemote = primaryName
-      var primaryProjectRemote = ""
-      for r in resolvedRemotes:
-        if r.localName == primaryName:
-          primaryProjectRemote = r.projectRemote
-          break
-      if primaryProjectRemote.len == 0:
-        primaryProjectRemote = resolvedRemotes[0].projectRemote
-      resolved.fetchUrl = getFetchUrl(remotes[primaryProjectRemote], fragment.repo.name)
-    else:
-      if resolved.projectRemote notin remotes:
-        raiseManifestError(absVariant,
-          "includes[" & $incIdx & "]",
-          schemaVariantManifestV1, schemaVariantManifestV1,
-          "fragment '" & rawInclude & "' references unknown remote '" &
-            resolved.projectRemote & "' (not declared in the base project's [[remote]] table)")
-      let fullUrl = getFetchUrl(remotes[resolved.projectRemote], fragment.repo.name)
-      resolved.fetchUrl = fullUrl
-      resolvedRemotes.add(ResolvedRemote(localName: "origin", projectRemote: resolved.projectRemote, fetchUrl: fullUrl))
-
-    resolved.remotes = resolvedRemotes
-
-    let fragmentRevision =
-      if fragment.repo.revision.isSome: fragment.repo.revision.get()
-      else: ""
-    if fragmentRevision.len > 0:
-      resolved.revision = fragmentRevision
-    else:
-      resolved.revision = result.defaultRevision
-
-    resolved.vcs =
-      if fragment.repo.vcs.isSome and fragment.repo.vcs.get().len > 0:
-        fragment.repo.vcs.get()
-      else:
-        defaultRepoVcs
-    resolved.stability =
-      if fragment.repo.stability.isSome and fragment.repo.stability.get().len > 0:
-        fragment.repo.stability.get()
-      else:
-        defaultRepoStability
-    # MO-5 — carry the evidence-only participation marker verbatim (default "").
-    if fragment.repo.participation.isSome:
-      resolved.participation = fragment.repo.participation.get()
-
-    # RA-14 — carry the fetch-acceleration hints through unchanged. They
-    # are pure download knobs; the resolved revision above is the single
-    # source of truth for what the checkout resolves to.
-    if fragment.repo.clone_filter.isSome:
-      resolved.cloneFilter = fragment.repo.clone_filter.get()
-    if fragment.repo.depth.isSome:
-      resolved.depth = fragment.repo.depth.get()
-    if fragment.repo.single_branch.isSome:
-      resolved.singleBranch = fragment.repo.single_branch.get()
-
-    # RA-18 — carry the copyfile/linkfile directives and group membership
-    # through verbatim (same as the project path above).
-    resolved.copyfile = fragment.repo.copyfile
-    resolved.linkfile = fragment.repo.linkfile
-    resolved.groups = fragment.repo.groups
-
-    # RA-21 — carry the develop-set dependency edges through verbatim.
-    resolved.depends = fragment.repo.depends
+    let resolved = resolveFragment(variantCtx, fragmentAbs, absVariant,
+      schemaVariantManifestV1, "includes[" & $incIdx & "]", rawInclude)
 
     let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.projectRemote
     if triple in seen:

@@ -8726,6 +8726,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_membership_model_resolves_sets_and_prefixes.nim",
+    binary: "build/test-bin/t_membership_model_resolves_sets_and_prefixes",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_manifests_repo_fragment_round_trip.nim",
     binary: "build/test-bin/t_workspace_manifests_repo_fragment_round_trip",
     defines: @[],
