@@ -12411,6 +12411,12 @@ proc runCachePushCommand*(args: openArray[string]): int
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string]
 proc runManifestRefreshHookCommand*(hookName: string;
                                     args: openArray[string]): int
+# Workspace-Membership-Model.md — the ``post-merge`` hook's local-state
+# reconciliation. Returns one report line per checkout it changed or deferred
+# and NOTHING when the workspace is already consistent. Declared here because
+# the implementation needs ``repoRemovalBlockers``, which lives beside the
+# membership verbs far below.
+proc reconcileLocalStateForHook(workspaceRoot: string): seq[string]
 
 proc runHooksDispatchCommand(args: openArray[string]): int =
   ## ``repro hooks dispatch <hook-name> [--repo-root=PATH]
@@ -24960,17 +24966,51 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
     var expectedRemotes = initHashSet[string]()
     for r in repo.remotes:
       expectedRemotes.incl(r.localName)
+    for r in repo.remotes:
       if r.localName in existingRemotes:
         let getRes = gitRunPlain(identity, ["-C", repoAbs, "remote", "get-url", r.localName])
         if getRes.code == 0 and getRes.output.strip() != r.fetchUrl:
           discard gitRunPlain(identity, ["-C", repoAbs, "remote", "set-url", r.localName, r.fetchUrl])
-      else:
-        discard gitRunPlain(identity, ["-C", repoAbs, "remote", "add", r.localName, r.fetchUrl])
+        continue
+      # The declared name is absent. Before adding it — and letting step 3
+      # prune whatever carried the same URL under another name — look for THAT
+      # remote and RENAME it. Add-then-prune reaches the same URL under the
+      # same name, but it destroys `refs/remotes/<old>/*` and orphans every
+      # `branch.<b>.remote` that named it, so a checkout whose remote was named
+      # after its org (the predecessor tool's convention) silently loses its
+      # tracking configuration on the first sync after the rename.
+      var renamedFrom = ""
+      for existing in existingRemotes:
+        if existing in expectedRemotes:
+          continue
+        let urlRes = gitRunPlain(identity,
+          ["-C", repoAbs, "remote", "get-url", existing])
+        if urlRes.code == 0 and urlRes.output.strip() == r.fetchUrl:
+          renamedFrom = existing
+          break
+      if renamedFrom.len > 0:
+        let renamed = gitRunPlain(identity,
+          ["-C", repoAbs, "remote", "rename", renamedFrom, r.localName])
+        if renamed.code == 0:
+          existingRemotes.excl(renamedFrom)
+          existingRemotes.incl(r.localName)
+          continue
+      discard gitRunPlain(identity, ["-C", repoAbs, "remote", "add", r.localName, r.fetchUrl])
 
-    # 3. Clean up/remove unexpected remotes
-    for name in existingRemotes:
-      if name notin expectedRemotes:
-        discard gitRunPlain(identity, ["-C", repoAbs, "remote", "remove", name])
+    # 3. Clean up/remove unexpected remotes.
+    #
+    # Guarded on a NON-EMPTY expected set. "Remove every remote the manifest
+    # does not declare" applied to a manifest that declares none means "remove
+    # every remote", which leaves a real checkout with no way back to its
+    # upstream and no remote-tracking refs — a repair job, from a step whose
+    # entire purpose is tidying. A repo that resolves with an empty `remotes`
+    # list is a resolution the caller should be looking at, never a licence to
+    # strip a working tree, so the prune is skipped and the add/rename pass
+    # above (which did nothing either) is left as the whole of the alignment.
+    if expectedRemotes.len > 0:
+      for name in existingRemotes:
+        if name notin expectedRemotes:
+          discard gitRunPlain(identity, ["-C", repoAbs, "remote", "remove", name])
 
 proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## End-to-end driver. Resolves the named project / variant, classifies
@@ -25964,14 +26004,27 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
     if membershipFromMetadata:
       extendWithActiveProjectSet(workspaceRoot, resolved)
     else: resolved
+  # Workspace-Membership-Model.md — a repo-set that is ENABLED is what used to
+  # be called a project, so `repo-sets/<name>.toml` joins THIS ladder too,
+  # under the same name and in the same last position `project_set.nim` gives
+  # it. Without this rung a workspace whose recorded active set predates the
+  # manifest repo's conversion keeps resolving through `project_set.nim` (which
+  # already knows repo-sets) while sync / pull / check — the verbs that come
+  # through here — fail with "no project or variant named …" for a name that is
+  # perfectly resolvable. Looked up LAST, so a manifest repo mid-conversion
+  # keeps preferring the project it already has and nothing resolves
+  # differently until the `projects/` file is actually gone.
+  let repoSetFile = manifestsRoot / repoSetsDirName / (name & ".toml")
   if fileExists(projectFile):
     return (withSet(resolveProject(projectFile)), none(WorkspaceLocal))
   if fileExists(variantFile):
     return (withSet(resolveVariant(variantFile)), none(WorkspaceLocal))
+  if fileExists(repoSetFile):
+    return (withSet(resolveRepoSet(repoSetFile)), none(WorkspaceLocal))
   raise newException(ValueError,
-    "no project or variant named '" & name & "' found under '" &
-      manifestsRoot & "' (looked for '" & projectFile & "' and '" &
-      variantFile & "')")
+    "no repo-set, project or variant named '" & name & "' found under '" &
+      manifestsRoot & "' (looked for '" & projectFile & "', '" &
+      variantFile & "' and '" & repoSetFile & "')")
 
 proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs): ResolvedProject =
   ## MO-9 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder
@@ -34423,6 +34476,38 @@ proc parseManifestRefreshArgs(args: openArray[string]):
       result.positional.add(arg)
     inc i
 
+proc reconcileLocalStateAfterHook(hookName, workspaceRoot,
+                                  timestamp: string) =
+  ## Workspace-Membership-Model.md — the automatic half of local-state
+  ## migration, run on the SAME hooks that already react to "the manifest may
+  ## have moved". That is the whole point: a developer who already has the
+  ## workspace checked out should need no more than `git pull`, and `git pull`
+  ## is precisely what fires `post-merge`.
+  ##
+  ## Three properties this must not lose, all of them the hook contract's:
+  ## it never blocks (the caller returns 0 regardless), it never raises
+  ## (`reconcileLocalStateForHook` catches everything), and it is SILENT when
+  ## the workspace is already consistent — which is the steady state after the
+  ## first pull, so the noisy case is the rare one.
+  ##
+  ## When it does act it reports to stderr as well as the log. Rewriting
+  ## somebody's git remotes without telling them is not an acceptable thing
+  ## for a hook to do quietly, and the log alone is a place nobody looks until
+  ## after they are already confused.
+  if workspaceRoot.len == 0:
+    return
+  let lines = reconcileLocalStateForHook(workspaceRoot)
+  if lines.len == 0:
+    return
+  stderr.writeLine("repro " & hookName & ": reconciled workspace-local git " &
+    "state against the manifest —")
+  for line in lines:
+    stderr.writeLine("  " & line)
+    appendManifestRefreshLog(timestamp & " " & hookName &
+      " local-state " & line)
+  stderr.writeLine("  `repro workspace migrate --dry-run` re-reports this " &
+    "at any time")
+
 proc runManifestRefreshHookCommand*(hookName: string;
                                     args: openArray[string]): int =
   ## Best-effort manifest-layer refresh for ``post-merge`` /
@@ -34458,6 +34543,7 @@ proc runManifestRefreshHookCommand*(hookName: string;
     # can correlate; never raise.
     appendManifestRefreshLog(timestamp & " " & hookName &
       " skipped: no workspace.toml at " & workspaceRoot)
+    reconcileLocalStateAfterHook(hookName, workspaceRoot, timestamp)
     return 0
 
   var report: ManifestRefreshReport
@@ -34466,15 +34552,19 @@ proc runManifestRefreshHookCommand*(hookName: string;
   except CatchableError as err:
     appendManifestRefreshLog(timestamp & " " & hookName &
       " fetch failed: " & err.msg & " (workspace=" & workspaceRoot & ")")
+    reconcileLocalStateAfterHook(hookName, workspaceRoot, timestamp)
     return 0
 
   if report.layers.len == 0:
     # workspace.toml exists but declares no [[manifest]] layers — the
-    # M9-init single-project metadata-only shape. Nothing to do; emit
-    # one log line so the operator can audit hook activity.
+    # M9-init single-project metadata-only shape, which is also the FLAT
+    # shape a manifest repo at the workspace root produces. Nothing to
+    # refresh, but the checkouts still have to be reconciled: that shape is
+    # exactly the one whose manifests arrive by a plain `git pull`.
     appendManifestRefreshLog(timestamp & " " & hookName &
       " noop: workspace declares no manifest layers (" &
       workspaceRoot & ")")
+    reconcileLocalStateAfterHook(hookName, workspaceRoot, timestamp)
     return 0
 
   for entry in report.layers:
@@ -34510,6 +34600,7 @@ proc runManifestRefreshHookCommand*(hookName: string;
         " fetch failed (layer=" & entry.provenance & "): " &
         entry.diagnostic)
 
+  reconcileLocalStateAfterHook(hookName, workspaceRoot, timestamp)
   return 0
 
 # ---- M18 / M23 / M26: `repro check --mode=pre-push` (publication gate) ----
@@ -49497,6 +49588,548 @@ proc repoRemovalBlockers(identity: GitToolIdentity;
   elif stash.output.strip().len > 0:
     result.add($stash.output.strip().splitLines().len & " stash entr(ies)")
 
+# ---- Workspace-Membership-Model.md: local-state reconciliation -------------
+#
+# Manifests arrive by `git pull`; CHECKOUTS do not follow. Three facts about a
+# workspace live in `.git/config` and `.git/HEAD` rather than in any manifest,
+# so converting the manifest repo leaves every existing checkout stale in ways
+# no amount of re-resolving fixes:
+#
+#   * the primary remote may carry the URL-PREFIX name (`metacraft-labs`)
+#     instead of `origin`, which the model makes the always-primary binding;
+#   * a fork's `upstream` binding only became expressible with per-binding
+#     `url_prefix` / `url_suffix`, so no pre-existing checkout has one;
+#   * a checkout may sit on a DETACHED HEAD, which a branch declaration cannot
+#     move on its own.
+#
+# `alignWorkspaceRemotes` already converges the remote SET, but it converges
+# it by add-then-prune, and add-then-prune is not a rename: dropping
+# `metacraft-labs` deletes `refs/remotes/metacraft-labs/*` and orphans every
+# `branch.<b>.remote` that named it, so the developer's tracking configuration
+# evaporates while the URL looks right. Reconciliation renames, and says so.
+#
+# What it refuses to do, and why:
+#
+#   * It never touches a checkout `repoCheckoutRecognized` cannot identify as
+#     the manifest's repo — the same "observe, don't auto-modify an
+#     unrecognized checkout" contract sync already follows.
+#   * It never PRUNES an undeclared remote. Pruning belongs to sync, where the
+#     operator asked for convergence; a migration that also deleted somebody's
+#     personal fork remote would be doing a second, unrequested job.
+#   * It performs NO network I/O. It runs inside a git hook, so a fetch would
+#     make every `git pull` pay for a second round trip — and every question it
+#     asks (does this branch exist, is this commit published) is answerable
+#     from refs already on disk.
+#   * It moves a detached HEAD only when nothing would be lost, and it moves it
+#     with `checkout <branch>` rather than `checkout -B <branch>`, so no branch
+#     ref is ever repointed. `pull`'s converge step deliberately DOES reset;
+#     migration deliberately does not, because a migration nobody asked for
+#     must not be able to rewind anybody's branch.
+#
+# A note for whoever next reads this and wonders whether the RENAME path is
+# dead code: measured against the workspace this was written for, it is
+# currently inert. Every checkout there already has `origin`, and the only two
+# detached HEADs are commit-pinned fragments that are CORRECTLY detached (this
+# code defers them, because a pin declares no branch). That is a statement
+# about one workspace on one day, not about the code. The paths that carry
+# their weight today are `upstream` — which no pre-existing checkout has,
+# because per-binding `url_prefix` / `url_suffix` is what made a fork's
+# upstream expressible at all — and every OTHER developer's workspace, which
+# may predate any of this and is exactly the case that cannot be inspected
+# from here. Deleting the rename because the local `git remote -v` looks tidy
+# would remove the only thing standing between those workspaces and a silent
+# add-then-prune.
+
+type
+  LocalStateRepoReport* = object
+    ## One checkout's reconciliation outcome.
+    ##
+    ## `changes` are mutations that happened (or, under `--dry-run`, would);
+    ## `deferrals` are the ones this refused to make, each paired with the
+    ## `remedy` that unblocks it; `failures` are git operations that were
+    ## attempted and did not succeed. A checkout that needed nothing produces
+    ## an entry with all three empty, and the drivers drop it — silence is the
+    ## steady state, so a second run reports nothing at all.
+    name*: string
+    path*: string
+    changes*: seq[string]
+    deferrals*: seq[string]
+    remedy*: string
+    failures*: seq[string]
+
+  WorkspaceLocalStateReport* = object
+    ## Structured outcome of one `repro workspace migrate` invocation.
+    ## `membership` carries active-set entries that no longer name anything
+    ## resolvable — reported, never rewritten.
+    workspaceRoot*: string
+    project*: string
+    dryRun*: bool
+    inspected*: int
+    repos*: seq[LocalStateRepoReport]
+    membership*: seq[string]
+    exitCode*: int
+
+proc toJsonNode*(report: WorkspaceLocalStateReport): JsonNode =
+  result = newJObject()
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["project"] = %report.project
+  result["dryRun"] = %report.dryRun
+  result["inspected"] = %report.inspected
+  var repos = newJArray()
+  for entry in report.repos:
+    var node = newJObject()
+    node["name"] = %entry.name
+    node["path"] = %entry.path
+    node["changes"] = %entry.changes
+    node["deferrals"] = %entry.deferrals
+    node["remedy"] = %entry.remedy
+    node["failures"] = %entry.failures
+    repos.add(node)
+  result["repos"] = repos
+  result["membership"] = %report.membership
+  result["exitCode"] = %report.exitCode
+
+proc detachedHeadOnlyCommits(identity: GitToolIdentity;
+                             repoDir: string): seq[string] =
+  ## Work that exists ONLY at a detached HEAD.
+  ##
+  ## `repoRemovalBlockers` structurally cannot see it: its unpushed-commit
+  ## probe is `rev-list --branches --not --remotes`, and a commit made while
+  ## HEAD is detached belongs to no branch, so it falls outside `--branches` by
+  ## construction. Reattaching HEAD would leave such a commit reachable only
+  ## from the reflog, which is the exact loss this whole gate exists to
+  ## prevent. Same rule as its sibling: a probe that FAILS is itself a blocker.
+  let res = gitRunPlain(identity, ["-C", repoDir, "rev-list", "--count",
+    "HEAD", "--not", "--branches", "--remotes"])
+  if res.code != 0:
+    return @["could not check for commits held only by the detached HEAD: " &
+      res.output.strip()]
+  try:
+    let n = parseInt(res.output.strip())
+    if n > 0:
+      return @[$n & " commit(s) reachable only from the detached HEAD"]
+  except ValueError:
+    return @["could not check for commits held only by the detached HEAD: " &
+      "unexpected output '" & res.output.strip() & "'"]
+  @[]
+
+proc observedGitRemotes(identity: GitToolIdentity;
+                        repoDir: string): seq[tuple[name, url: string]] =
+  let names = gitRunPlain(identity, ["-C", repoDir, "remote"])
+  if names.code != 0:
+    return
+  for raw in names.output.strip().splitLines():
+    let name = raw.strip()
+    if name.len == 0:
+      continue
+    let url = gitRunPlain(identity, ["-C", repoDir, "remote", "get-url", name])
+    result.add((name: name,
+      url: (if url.code == 0: url.output.strip() else: "")))
+
+proc declaredBranchFor(repo: ResolvedRepo): string =
+  ## The branch a detached checkout should land on, or "" when the fragment
+  ## does not name one.
+  ##
+  ## `branch` is authoritative because it can only ever hold a branch name.
+  ## `revision` is accepted as the unconverted spelling but only when its value
+  ## is branch-SHAPED: a commit id or a fully-qualified ref is a pin, and a pin
+  ## is precisely the case where a detached HEAD is CORRECT rather than stale.
+  if repo.branch.len > 0:
+    return repo.branch
+  if repo.revision.len > 0 and not looksLikeSha(repo.revision) and
+      not repo.revision.startsWith("refs/"):
+    return repo.revision
+  ""
+
+proc primaryRemoteNameFor(repo: ResolvedRepo): string =
+  ## The LOCAL git remote name of the repo's primary binding. The model makes
+  ## that `origin` always; the fallbacks exist so a `ResolvedRepo` synthesized
+  ## outside the resolver (lock files, develop-set discovery) still answers.
+  for r in repo.remotes:
+    if r.localName == "origin":
+      return "origin"
+  if repo.remotes.len > 0 and repo.remotes[0].localName.len > 0:
+    return repo.remotes[0].localName
+  "origin"
+
+proc localStateMayBeStale(workspaceRoot: string; repo: ResolvedRepo): bool =
+  ## A SUBPROCESS-FREE pre-filter: could this checkout possibly need work?
+  ##
+  ## The managed `post-merge` hook fires in every participating repo, and a
+  ## workspace of this size has a couple of hundred of them. Probing each one
+  ## with git would cost ~800 process spawns on every merge, which is how a
+  ## helpful hook becomes the reason people disable hooks. Reading
+  ## `.git/HEAD` and `.git/config` answers the same question from two file
+  ## reads.
+  ##
+  ## Deliberately biased toward "yes": a false positive costs one full probe
+  ## that then decides correctly, so the filter can never change an outcome —
+  ## only how long reaching it takes. `repro workspace migrate` skips the
+  ## filter entirely and probes everything, which is what makes it the
+  ## debuggable surface.
+  let gitDir = workspaceRoot / repo.path / ".git"
+  if not dirExists(gitDir):
+    # A `.git` FILE (worktree / submodule link) or nothing at all. Not a shape
+    # this filter can read, so hand it to the full probe rather than guess.
+    return fileExists(gitDir)
+  try:
+    let head = readFile(gitDir / "HEAD").strip()
+    if not head.startsWith("ref:"):
+      return true                       # detached
+  except CatchableError:
+    return true
+  var config = ""
+  try:
+    config = readFile(gitDir / "config")
+  except CatchableError:
+    return true
+  for binding in repo.remotes:
+    if binding.localName.len == 0 or binding.fetchUrl.len == 0:
+      continue
+    # Look for the section header and, after it, the exact URL. Matching the
+    # url anywhere in the file would accept a correct URL filed under the WRONG
+    # remote name, which is the very drift being looked for.
+    let header = "[remote \"" & binding.localName & "\"]"
+    let at = config.find(header)
+    if at < 0:
+      return true
+    var section = config[(at + header.len) .. ^1]
+    let nextSection = section.find("\n[")
+    if nextSection >= 0:
+      section = section[0 ..< nextSection]
+    var sawUrl = false
+    for line in section.splitLines():
+      let trimmed = line.strip()
+      if trimmed.startsWith("url"):
+        let eq = trimmed.find('=')
+        if eq >= 0 and trimmed[(eq + 1) .. ^1].strip() == binding.fetchUrl:
+          sawUrl = true
+    if not sawUrl:
+      return true
+  false
+
+proc reconcileRepoLocalState(identity: GitToolIdentity;
+                             workspaceRoot: string; repo: ResolvedRepo;
+                             dryRun: bool): LocalStateRepoReport =
+  ## Reconcile ONE checkout's git remotes and HEAD attachment against its
+  ## resolved fragment. Idempotent: every step is expressed as "the observed
+  ## state differs from the declared state", so a second run finds no
+  ## difference, runs no git command, and reports nothing.
+  result.name = repo.name
+  result.path = repo.path
+  let repoAbs = workspaceRoot / repo.path
+  if not dirExists(repoAbs / ".git"):
+    # Not materialized. Cloning is sync's job; a migration invents no
+    # checkouts.
+    return
+
+  var live = observedGitRemotes(identity, repoAbs)
+  var urls: seq[string]
+  for r in live:
+    if r.url.len > 0 and r.url notin urls:
+      urls.add(r.url)
+  if not repoCheckoutRecognized(identity, repoAbs, repo, urls):
+    result.deferrals.add("its git remotes (" &
+      (if urls.len > 0: urls.join(", ") else: "<none>") &
+      ") match no manifest URL and its HEAD is not at the declared revision")
+    result.remedy = "inspect what is checked out at '" & repo.path &
+      "'; nothing in it was modified"
+    return
+
+  proc isDeclaredName(name: string): bool =
+    for b in repo.remotes:
+      if b.localName == name:
+        return true
+    false
+
+  # A template rather than a nested proc: the body appends to `result`, and a
+  # closure may not capture it.
+  template runGit(gitArgs: openArray[string]; description: string) =
+    if dryRun:
+      result.changes.add(description)
+    else:
+      let res = gitRunPlain(identity, gitArgs)
+      if res.code == 0:
+        result.changes.add(description)
+      else:
+        result.failures.add(description & " — failed: " & res.output.strip())
+
+  # ---- remotes -------------------------------------------------------------
+  for binding in repo.remotes:
+    if binding.localName.len == 0 or binding.fetchUrl.len == 0:
+      continue
+    var presentIdx = -1
+    for i, r in live:
+      if r.name == binding.localName:
+        presentIdx = i
+        break
+    if presentIdx >= 0:
+      if live[presentIdx].url != binding.fetchUrl:
+        runGit(["-C", repoAbs, "remote", "set-url", binding.localName,
+          binding.fetchUrl],
+          "remote '" & binding.localName & "' retargeted: " &
+            live[presentIdx].url & " -> " & binding.fetchUrl)
+        live[presentIdx].url = binding.fetchUrl
+      continue
+
+    # Absent under the declared name. Before adding a second remote, look for
+    # the SAME remote under a different name — the predecessor tool named the
+    # primary after the URL prefix — and RENAME it. `git remote rename` carries
+    # `refs/remotes/<old>/*` and rewrites every `branch.<b>.remote` that named
+    # it; add-then-prune silently discards both.
+    var renameFrom = -1
+    for i, r in live:
+      if r.url == binding.fetchUrl and not isDeclaredName(r.name):
+        renameFrom = i
+        break
+    if renameFrom < 0 and binding.localName == primaryRemoteNameFor(repo) and
+        repo.projectRemote.len > 0:
+      # No URL match. A remote named after this repo's URL PREFIX is still the
+      # predecessor spelling of the primary binding even when the URL has since
+      # drifted (an org rename is exactly that case), so rename it and correct
+      # the URL below rather than stranding it beside a new `origin`.
+      for i, r in live:
+        if r.name == repo.projectRemote and not isDeclaredName(r.name):
+          renameFrom = i
+          break
+    if renameFrom >= 0:
+      let oldName = live[renameFrom].name
+      runGit(["-C", repoAbs, "remote", "rename", oldName, binding.localName],
+        "remote '" & oldName & "' renamed to '" & binding.localName &
+          "' (tracking refs and branch upstreams carried over)")
+      live[renameFrom].name = binding.localName
+      if live[renameFrom].url != binding.fetchUrl:
+        runGit(["-C", repoAbs, "remote", "set-url", binding.localName,
+          binding.fetchUrl],
+          "remote '" & binding.localName & "' retargeted: " &
+            live[renameFrom].url & " -> " & binding.fetchUrl)
+        live[renameFrom].url = binding.fetchUrl
+    else:
+      runGit(["-C", repoAbs, "remote", "add", binding.localName,
+        binding.fetchUrl],
+        "remote '" & binding.localName & "' added at " & binding.fetchUrl)
+      live.add((name: binding.localName, url: binding.fetchUrl))
+
+  # ---- HEAD ----------------------------------------------------------------
+  let attached = gitRunPlain(identity,
+    ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
+  if attached.code == 0 and attached.output.strip().len > 0:
+    # Already on a branch. WHICH branch is not this command's business: a
+    # developer on a feature branch is working, not drifting, and moving them
+    # off it would be the data loss this whole gate exists to prevent.
+    return
+
+  let declared = declaredBranchFor(repo)
+  if declared.len == 0:
+    result.deferrals.add("HEAD is detached and the fragment declares no " &
+      "branch to attach it to")
+    result.remedy = "declare `branch = \"<name>\"` in the repo fragment for '" &
+      repo.name & "', then rerun `repro workspace migrate`"
+    return
+
+  var blockers = repoRemovalBlockers(identity, repoAbs)
+  for extra in detachedHeadOnlyCommits(identity, repoAbs):
+    blockers.add(extra)
+  if blockers.len > 0:
+    result.deferrals.add("HEAD is detached, but attaching it to '" & declared &
+      "' would put work at risk: " & blockers.join(", "))
+    result.remedy = "commit and push (or stash) the work in '" & repo.path &
+      "', then rerun `repro workspace migrate`; nothing in it was modified"
+    return
+
+  let remoteName = primaryRemoteNameFor(repo)
+  let tracking = "refs/remotes/" & remoteName & "/" & declared
+  if revParse(identity, repoAbs, "refs/heads/" & declared).len > 0:
+    runGit(["-C", repoAbs, "checkout", "--quiet", declared],
+      "detached HEAD attached to existing local branch '" & declared & "'")
+  elif revParse(identity, repoAbs, tracking).len > 0:
+    runGit(["-C", repoAbs, "checkout", "--quiet", "-b", declared,
+      "--track", tracking],
+      "detached HEAD attached to a new local branch '" & declared &
+        "' tracking " & remoteName & "/" & declared)
+  else:
+    # No local branch and no remote-tracking ref on disk. Fetching would fix
+    # it, and fetching is exactly what this must not do from inside a hook.
+    result.deferrals.add("HEAD is detached and neither a local branch '" &
+      declared & "' nor '" & remoteName & "/" & declared & "' exists here")
+    result.remedy = "run `repro workspace sync` to fetch '" & declared &
+      "', then rerun `repro workspace migrate`"
+
+proc reconcileWorkspaceLocalState*(workspaceRoot: string;
+                                   repos: seq[ResolvedRepo];
+                                   identity: GitToolIdentity;
+                                   dryRun = false;
+                                   prefilter = false):
+    seq[LocalStateRepoReport] =
+  ## Reconcile every declared checkout. Only repos with something to say are
+  ## returned, so an already-consistent workspace yields an empty seq — which
+  ## is what lets the hook stay silent without a second "did anything happen"
+  ## test.
+  for repo in repos:
+    if prefilter and not localStateMayBeStale(workspaceRoot, repo):
+      continue
+    let entry = reconcileRepoLocalState(identity, workspaceRoot, repo, dryRun)
+    if entry.changes.len > 0 or entry.deferrals.len > 0 or
+        entry.failures.len > 0:
+      result.add(entry)
+
+proc unresolvableActiveSetNames(workspaceRoot: string): seq[string] =
+  ## Entries of the recorded active set that no longer name anything.
+  ##
+  ## A name that used to be a project and is now a repo-set needs no rewrite —
+  ## the resolution ladder consults `repo-sets/` too, so the same string keeps
+  ## resolving. What DOES need saying is a name that resolves nowhere. It is
+  ## reported and never rewritten: membership is the developer's statement
+  ## about which trees they want side by side, and guessing a replacement for a
+  ## vanished name would silently change what their workspace builds.
+  for name in activeProjectSetOrEmpty(workspaceRoot):
+    try:
+      discard resolveWorkspaceProjectByName(workspaceRoot, name)
+    except CatchableError:
+      result.add(name)
+
+proc renderLocalStateTextLines(report: WorkspaceLocalStateReport): seq[string] =
+  let verb = if report.dryRun: "would " else: ""
+  if report.repos.len == 0 and report.membership.len == 0:
+    result.add("repro workspace migrate: " & $report.inspected &
+      " checkout(s) already match the manifest; nothing to do")
+    return
+  for entry in report.repos:
+    result.add(entry.path & ":")
+    for change in entry.changes:
+      result.add("  " & verb & change)
+    for deferral in entry.deferrals:
+      result.add("  SKIPPED — " & deferral)
+    for failure in entry.failures:
+      result.add("  FAILED — " & failure)
+    if entry.remedy.len > 0:
+      result.add("  remedy: " & entry.remedy)
+  for name in report.membership:
+    result.add("active set entry '" & name & "' resolves to no repo-set, " &
+      "project or variant")
+    result.add("  remedy: `repro ws sets list` shows what exists; " &
+      "`repro ws disable " & name & "` drops it from this workspace")
+  var changed = 0
+  var deferred = 0
+  var failed = 0
+  for entry in report.repos:
+    if entry.changes.len > 0: inc changed
+    if entry.deferrals.len > 0: inc deferred
+    if entry.failures.len > 0: inc failed
+  result.add("repro workspace migrate: " & $report.inspected &
+    " checkout(s) inspected, " & $changed & " " & verb & "reconciled, " &
+    $deferred & " skipped, " & $failed & " failed")
+
+proc runWorkspaceMigrateCommand*(args: openArray[string]): int =
+  ## ``repro workspace migrate [--dry-run] [--json] [--workspace-root=PATH]``
+  ##
+  ## Reconcile every checkout's LOCAL git state with the resolved manifest:
+  ## rename the primary remote to `origin` carrying its URL and tracking refs,
+  ## add or correct a fork's `upstream`, and attach a detached HEAD to the
+  ## branch its fragment declares.
+  ##
+  ## Explicit AND automatic on purpose. The managed `post-merge` hook runs the
+  ## same reconciliation so `git pull` is genuinely all a developer needs, but a
+  ## hook is a bad place to LEARN what a tool did: it cannot be re-run on
+  ## demand, its output competes with git's, and a `--dry-run` of it does not
+  ## exist. This verb is the surface you point somebody at when the hook
+  ## reported something they did not expect.
+  ##
+  ## Exit codes follow sync's convention:
+  ##   0 — everything reconciled, or already consistent.
+  ##   1 — a git operation was attempted and failed.
+  ##   2 — at least one checkout was skipped to protect work that exists
+  ##       nowhere else. Nothing in it was modified.
+  var workspaceRoot = ""
+  var dryRun = false
+  var json = false
+  var reportSpec = ReportSpec()
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--dry-run":
+      dryRun = true
+    elif arg == "--json":
+      json = true
+    elif consumeReportFlag(arg, reportSpec):
+      discard
+    elif arg.startsWith("-"):
+      stderr.writeLine("repro workspace migrate: unknown flag " & arg)
+      return 2
+    else:
+      stderr.writeLine("repro workspace migrate: unexpected argument " & arg)
+      return 2
+    inc i
+  if workspaceRoot.len == 0:
+    workspaceRoot = getCurrentDir()
+  workspaceRoot = os.normalizedPath(absolutePath(workspaceRoot))
+
+  var report: WorkspaceLocalStateReport
+  report.workspaceRoot = workspaceRoot
+  report.dryRun = dryRun
+
+  let resolved = resolveWorkspaceProjectShared(workspaceRoot, "",
+    "`repro workspace migrate`").resolved
+  report.project = resolved.projectName
+  report.inspected = resolved.repos.len
+
+  let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  report.repos = reconcileWorkspaceLocalState(workspaceRoot, resolved.repos,
+    identity, dryRun = dryRun)
+  report.membership = unresolvableActiveSetNames(workspaceRoot)
+
+  var anyFailure = false
+  var anyDeferral = false
+  for entry in report.repos:
+    if entry.failures.len > 0: anyFailure = true
+    if entry.deferrals.len > 0: anyDeferral = true
+  report.exitCode =
+    if anyFailure: 1
+    elif anyDeferral: 2
+    else: 0
+
+  let destination = reportDestination(reportSpec, workspaceRoot, "migrate")
+  if destination.len > 0:
+    createDir(parentDir(destination))
+    writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
+  stageFailureReport(reportSpec, workspaceRoot, "migrate", report.toJsonNode())
+  if json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderLocalStateTextLines(report):
+      stdout.writeLine(line)
+  report.exitCode
+
+proc reconcileLocalStateForHook(workspaceRoot: string): seq[string] =
+  ## The `post-merge` arm. Best-effort by construction: every failure path
+  ## becomes a log line and NOTHING propagates, because a checkout that could
+  ## not be reconciled is a thing to fix later, never a reason for somebody's
+  ## `git pull` to fail.
+  ##
+  ## Returns one line per checkout that changed or was deferred, and an empty
+  ## seq otherwise. A hook that speaks on every pull teaches its user to stop
+  ## reading it, so the quiet path has to be genuinely quiet.
+  try:
+    let resolved = resolveWorkspaceProjectShared(workspaceRoot, "",
+      "`repro hooks dispatch post-merge`").resolved
+    let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+    for entry in reconcileWorkspaceLocalState(workspaceRoot, resolved.repos,
+        identity, dryRun = false, prefilter = true):
+      for change in entry.changes:
+        result.add(entry.path & ": " & change)
+      for deferral in entry.deferrals:
+        result.add(entry.path & ": SKIPPED — " & deferral &
+          (if entry.remedy.len > 0: " (remedy: " & entry.remedy & ")" else: ""))
+      for failure in entry.failures:
+        result.add(entry.path & ": FAILED — " & failure)
+    for name in unresolvableActiveSetNames(workspaceRoot):
+      result.add("active set entry '" & name & "' resolves to no repo-set, " &
+        "project or variant (remedy: `repro ws sets list`)")
+  except CatchableError as err:
+    result.add("local-state reconciliation skipped: " & err.msg)
+
 proc runWorkspaceDisableCommand*(args: openArray[string]): int =
   ## ``repro workspace disable <project>... [--keep-checkouts] [--force]`` —
   ## deactivate projects in this workspace and remove the working trees that
@@ -49880,6 +50513,10 @@ const reproWorkspaceSubcommands = [
   "publish-evidence",
   # RA-32 — the explicit lock-record repair. Never invoked implicitly.
   "migrate-locks",
+  # Workspace-Membership-Model.md — the explicit local-state reconciliation.
+  # Also runs automatically from the managed `post-merge` hook, so this
+  # spelling exists to be re-run and dry-run rather than to be required.
+  "migrate",
 ]
 
 proc renderCompletionSnippet(shell, reproBin: string): string =
@@ -51853,6 +52490,23 @@ proc runThinAppDispatch(programName: string): int =
       return runWorkspaceLockCommand(lockArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace lock: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "migrate":
+    # Workspace-Membership-Model.md — `repro workspace migrate`. Reconcile
+    # every checkout's LOCAL git state (remote names / URLs, detached HEADs)
+    # with the resolved manifest. The managed `post-merge` hook runs the same
+    # reconciliation automatically; this is the surface that can be re-run,
+    # dry-run, and read.
+    try:
+      let migrateArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspaceMigrateCommand(migrateArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace migrate: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "migrate-locks":
