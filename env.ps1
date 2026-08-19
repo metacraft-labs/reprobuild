@@ -8,8 +8,11 @@
 # `bash scripts/build_apps.sh` and `just test` need:
 #
 #   * Nim 2.2.x + a working C compiler (gcc/clang/cl)         -- via
-#     ../repo-workspaces/env.ps1 (Ensure-Nim + Ensure-Gcc).
-#   * just + gh + python + gpg + git-repo                     -- same.
+#     windows/bootstrap-toolchain.ps1 (Ensure-Nim + Ensure-Gcc), which
+#     lives in THIS repo: no sibling checkout of any other repo is needed
+#     to bootstrap. `just`, `gh`, `python3`, `gpg` and `git-repo` are NOT
+#     provisioned -- none is required to build repro, and the gpg step in
+#     particular used to trigger a UAC elevation prompt.
 #   * bash                                                    -- resolved from
 #     git's own installation and put AHEAD of the WSL launcher that Windows
 #     puts on PATH by default. Both build entry points below are bash scripts,
@@ -36,16 +39,13 @@
 #   Once the sibling layout is satisfied, `config.nims` resolves every
 #   third-party package without touching `nimble install`.
 #
-# Knobs (shared with repo-workspaces/env.ps1):
+# Knobs (unchanged from the framework these scripts came from):
 #   $env:WINDOWS_DIY_SYNC = "0"            skip all toolchain downloads
 #   $env:WINDOWS_DIY_SKIP_NIM = "1"        skip the nim step
 #   $env:WINDOWS_DIY_SKIP_GCC = "1"        skip the gcc step
-#   $env:WINDOWS_DIY_SKIP_JUST = "1"       skip the just step
-#   $env:WINDOWS_DIY_SKIP_GH = "1"         skip the gh step
-#   $env:WINDOWS_DIY_SKIP_PYTHON = "1"     skip the python step
-#   $env:WINDOWS_DIY_SKIP_REPO = "1"       skip the git-repo step
-#   $env:WINDOWS_DIY_SKIP_GPG = "1"        skip the gpg step
 #   $env:WINDOWS_DIY_INSTALL_ROOT = <dir>  where toolchains land
+#   (the JUST / GH / PYTHON / REPO / GPG skips are gone with the steps
+#   themselves -- see the nim/gcc note above)
 #
 # Knobs specific to reprobuild:
 #   $env:WINDOWS_DIY_SKIP_CLINGO = "1" skip the clingo step. Note that
@@ -67,18 +67,28 @@ $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
-# --- 1. Shared repo-workspaces bootstrap -------------------------------------
-$repoWorkspacesEnv = Join-Path (Split-Path -Parent $scriptDir) "repo-workspaces\env.ps1"
-if (-not (Test-Path $repoWorkspacesEnv)) {
-    throw "reprobuild env.ps1: cannot find $repoWorkspacesEnv -- check out the repo-workspaces framework as a sibling of this repo."
-}
-. $repoWorkspacesEnv -Quiet
+# --- 1. Cold-start toolchain bootstrap (nim + gcc) ---------------------------
+# Self-contained: this repo now carries its own copies of the provisioning
+# scripts under windows/ (toolchain-utils.ps1, ensure-nim.ps1, ensure-gcc.ps1
+# plus the bootstrap-toolchain.ps1 driver), moved here from the archived
+# repo-workspaces framework this script used to require as a sibling
+# checkout. A reprobuild checkout on a bare Windows box now bootstraps with
+# no other repo present.
+#
+# Scope note: this is the ONLY provisioning that cannot go through
+# reprobuild's own builtin catalog, because running the catalog needs a
+# working `repro` and `just bootstrap` is exactly the case where there is
+# not one. See windows/bootstrap-toolchain.ps1 for the full rationale, and
+# libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/{nim,gcc_winlibs}.nim
+# for the declarative entries that supersede it once a repro exists.
+. (Join-Path $scriptDir "windows\bootstrap-toolchain.ps1")
+$installRoot = Invoke-ReproToolchainBootstrap
 
 # --- 1b. clingo (reprobuild-specific) ----------------------------------------
-# Dot-sourcing the framework env above brought its helpers ($installRoot,
-# Get-WindowsArch, Test-BootstrapStepEnabled, Read-KeyValueFile, ...) into this
-# scope. The framework's own $toolchain comes from repo-workspaces'
-# toolchain-versions.env, so read THIS repo's pin file for the clingo entries.
+# The bootstrap above brought the shared helpers ($installRoot,
+# Get-WindowsArch, Test-BootstrapStepEnabled, Read-KeyValueFile, ...) into
+# this scope. Its $toolchain covers only the cold-start nim/gcc pins, so read
+# THIS repo's pin file again here for the clingo entries.
 #
 # Unlike the framework steps, a failure here is fatal rather than a warning:
 # every `repro` binary built without clingo aborts at module init, so a build

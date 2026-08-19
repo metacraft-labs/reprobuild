@@ -131,6 +131,80 @@ import ct_test_runner_install
 # identifiers in ``import`` statements).
 import repro_tests
 
+proc windowsDiyInstallRoot(): string =
+  ## The metacraft Windows DIY toolchain root, resolved exactly as the
+  ## workspace ``env.ps1``'s ``Get-DefaultInstallRoot`` does: explicit
+  ## override first, then ``D:\`` (where the shared binary cache lives),
+  ## then ``%LOCALAPPDATA%``. Empty when none of those exist.
+  result = getEnv("WINDOWS_DIY_INSTALL_ROOT")
+  if result.len > 0:
+    return
+  if dirExists("D:\\"):
+    return "D:/metacraft-dev-deps"
+  let localAppData = getEnv("LOCALAPPDATA")
+  if localAppData.len > 0:
+    return localAppData / "metacraft-dev-deps"
+
+const
+  ## Fixture toolchain pins, moved here verbatim from the metacraft
+  ## workspace's ``windows/toolchain-versions.env`` along with the
+  ## toolchains themselves. These are NOT "whatever is installed" — each
+  ## one is part of a fixture contract:
+  ##
+  ##   * ``ZigVersion`` is a pre-1.0 pin; bumping it requires re-auditing
+  ##     the M44 zig-mode3 / mixed-zig fixtures.
+  ##   * ``DotnetSdkVersion`` stays in the 8.0 LTS band so the SDK's own
+  ##     shared runtime keeps the same major as the deployed 8.0.3 CoreCLR
+  ##     the fixtures target (patch roll-forward is automatic, major is
+  ##     not). 8.0 goes EOL 2026-11-10 — once the fixtures no longer have
+  ##     to match an 8.0.3 host, move to the 10.0 LTS pin.
+  ##   * ``FpcVersion`` bumps require re-validating the ``_lang_survey``
+  ##     pascal fixture.
+  ##
+  ## Discovery must not second-guess them: resolving "the newest directory
+  ## under ``<root>/<tool>/``" would pick a 9.0 .NET SDK over the pinned
+  ## 8.0 one, and sorts ``3.9.9`` above ``3.9.16``. An unpinned version
+  ## present on disk is not the version these fixtures were validated
+  ## against, so it reads as "not provisioned".
+  JdkVersion = "21.0.5"
+  MavenVersion = "3.9.16"
+  GradleVersion = "8.10.2"
+  SwiftVersion = "5.10.1"
+  ZigVersion = "0.13.0"
+  GoVersion = "1.23.4"
+  DotnetSdkVersion = "8.0.424"
+  FpcVersion = "3.2.2"
+
+proc newestDirWith(root, probe: string): string =
+  ## Highest-sorting directory under `root` that carries `probe`, mirroring
+  ## ``env.ps1``'s ``Get-ChildItem -Directory | Sort-Object -Descending``
+  ## walks. Used ONLY for gcc, which — unlike the fixture toolchains above
+  ## — carries no version pin: it is provisioned by the framework's
+  ## ``ensure-gcc.ps1`` (WinLibs, one version per install), so "whichever
+  ## one is there" is the correct answer rather than a pin violation.
+  if root.len == 0 or not dirExists(root):
+    return ""
+  var newest = ""
+  for kind, path in walkDir(root):
+    if kind notin {pcDir, pcLinkToDir}:
+      continue
+    if not (fileExists(path / probe) or dirExists(path / probe)):
+      continue
+    if newest.len == 0 or path > newest:
+      newest = path
+  newest
+
+proc pinnedToolDir(root, tool, version, probe: string): string =
+  ## ``<root>/<tool>/<version>`` when it exists and carries `probe`, else
+  ## "". Same contract as ``env.ps1``'s ``Test-Path`` guards: a missing or
+  ## differently-versioned install reads as "not provisioned" rather than
+  ## as a broken path, which is what makes the fixtures SKIP cleanly.
+  if root.len == 0:
+    return ""
+  let dir = root / tool / version
+  if fileExists(dir / probe) or dirExists(dir / probe):
+    return dir
+
 package reprobuild:
   # Declare ``path``-mode tool provisioning so the engine adopts it
   # automatically. Without this, ``repro build`` refuses to run with
@@ -166,17 +240,28 @@ package reprobuild:
     # Build B4 outcome documented this gap; D1 closes it.
     "python3"
 
-    # Bootstrap-And-Self-Build B0: ``runquotad`` is a runtime
-    # dependency (spawned as a subprocess by daemon tests at
-    # ``../runquota/build/bin/runquotad``). Declaring it in ``uses:``
-    # makes the dependency explicit + lets path-mode resolution find
-    # the sibling-built binary when ``../runquota/build/bin`` is on
-    # ``$PATH``. The sibling ``runquota`` repo now ships its own
-    # ``repro.nim`` so later milestones (B1+) can flip this to
-    # ``uses: "runquota"`` and consume runquota's typed
-    # ``executable runquotad`` output via cross-project resolution;
-    # ``runquotad`` (the bare executable selector) is the path-mode
-    # form that works today.
+    # ``runquotad`` is a runtime dependency (spawned as a subprocess by
+    # daemon tests at ``../runquota/build/bin/runquotad``). This is the
+    # bare-executable, path-mode selector: it resolves when
+    # ``../runquota/build/bin`` is on ``$PATH``, i.e. after a prebuild.
+    #
+    # The typed alternative — ``uses: "runquota"``, consuming runquota's
+    # declared ``executable runquotad`` from source with no prebuild — is
+    # NO LONGER future work. Cross-Repo-Source-Consumption SC-1..SC-12 are
+    # all done; SC-7 is the capstone that names this exact flip
+    # (reprobuild -> runquota, develop AND lock-pinned modes) and proves it
+    # hermetically. SC-7 needed no production change, which is why this
+    # selector was never migrated onto the capability it validated.
+    #
+    # Flipping it is a deliberate change with a prerequisite, not a
+    # cleanup: the producer seam fires ONLY for a develop override or a
+    # committed ``LockedDep`` (``declaresProducerEdge``,
+    # ``repro_cli_support.nim``). With neither, ``uses: "runquota"`` falls
+    # through to path resolution and fails outright:
+    #   tool-resolution failed: <name> requested by uses "<name>" was not
+    #   found in PATH while --tool-provisioning=path is active
+    # So the flip has to land together with a lock pin for runquota, or
+    # every checkout without a runquota develop override breaks.
     "runquotad"
 
     # Note: the system hash libraries (libblake3, xxhash, sqlite3) and
@@ -194,6 +279,150 @@ package reprobuild:
     # shape for header-only / source-only deps) the list above will
     # grow back to capture them; until then the constraints live in
     # ``flake.nix`` and ``config.nims``.
+
+  devEnv:
+    # Windows language-fixture toolchains for the 73
+    # ``scripts/validate-standard-provider-*.ps1`` harnesses and their
+    # Tier 2b conventions: java-maven (M40), kotlin-gradle (M41),
+    # swift-swiftpm (M43), zig (M44), ocaml-dune (M46), c-cpp-autotools
+    # (M28), csharp-dotnet, pascal (``_lang_survey``), and the Go tests
+    # that shell out to ``go`` (cmake ``build_test_helper``, m9
+    # sibling-build).
+    #
+    # These are DELIBERATELY not in ``uses:`` above. Path-mode resolution
+    # requires every ``uses:`` selector to resolve on ``$PATH``, so listing
+    # optional fixture toolchains there would make ``repro build`` fail on
+    # any host without a Swift or OCaml install. Their absence is supposed
+    # to be a SKIP, not a build error — which is exactly what a dev-env
+    # contribution gives: present ones get wired, missing ones are silent.
+    #
+    # This block replaces the workspace-root ``env.ps1`` these scripts
+    # source today (``. "$PSScriptRoot\..\..\env.ps1"``) and the ad-hoc
+    # "lift the managed JDK into PATH" fallbacks each one carries. The
+    # workspace no longer exports a shared toolchain environment; the repo
+    # that needs a toolchain declares it. Provisioning is unchanged — the
+    # DIY root is still populated by ``windows/ensure-*.ps1`` /
+    # ``repro home apply``; this only finds what they installed, probe-
+    # gated exactly like ``env.ps1``'s ``Test-Path`` guards.
+    #
+    # Linux / macOS need none of it: the validation harness is PowerShell-
+    # only and reprobuild's flake devShell carries no language fixtures.
+    when defined(windows):
+      let diyRoot = windowsDiyInstallRoot()
+      let msys2Root = diyRoot / "msys2" / "msys64"
+      let mingwBin = msys2Root / "mingw64" / "bin"
+
+      # env.ps1 prepends its managed set in one call, entry 0 landing
+      # first. ``prependPath`` puts its most recent argument first, so the
+      # list is walked backwards to reproduce that order.
+      var managedPath: seq[string] = @[]
+
+      let swiftDir = pinnedToolDir(diyRoot, "swift", SwiftVersion,
+        "usr/bin/swift.exe")
+      if swiftDir.len > 0:
+        # DEVELOPER_DIR is the swift.org Windows toolchain's equivalent of
+        # the macOS Xcode-CLT marker; SwiftPM and swift-driver consult it
+        # for the bundled stdlib + Foundation overlays. The Foundation /
+        # Dispatch runtime DLLs live outside the toolchain dir, under
+        # ``%LOCALAPPDATA%\Programs\Swift\Runtimes\<ver>\``.
+        setEnv "DEVELOPER_DIR", swiftDir
+        let swiftRuntimeBin = getEnv("LOCALAPPDATA") / "Programs" /
+          "Swift" / "Runtimes" / SwiftVersion / "usr" / "bin"
+        if dirExists(swiftRuntimeBin):
+          managedPath.add(swiftRuntimeBin)
+        managedPath.add(swiftDir / "usr" / "bin")
+
+      let gradleDir = pinnedToolDir(diyRoot, "gradle", GradleVersion,
+        "bin/gradle.bat")
+      if gradleDir.len > 0:
+        setEnv "GRADLE_HOME", gradleDir
+        managedPath.add(gradleDir / "bin")
+
+      let mavenDir = pinnedToolDir(diyRoot, "maven", MavenVersion, "bin/mvn.cmd")
+      if mavenDir.len > 0:
+        setEnv "MAVEN_HOME", mavenDir
+        managedPath.add(mavenDir / "bin")
+
+      let jdkDir = pinnedToolDir(diyRoot, "jdk", JdkVersion, "bin/java.exe")
+      if jdkDir.len > 0:
+        setEnv "JAVA_HOME", jdkDir
+        managedPath.add(jdkDir / "bin")
+
+      # zig.exe sits at the root of its version dir (no bin/ subdir).
+      let zigDir = pinnedToolDir(diyRoot, "zig", ZigVersion, "zig.exe")
+      if zigDir.len > 0:
+        managedPath.add(zigDir)
+
+      let goDir = pinnedToolDir(diyRoot, "go", GoVersion, "bin/go.exe")
+      if goDir.len > 0:
+        managedPath.add(goDir / "bin")
+
+      # The xcopy .NET layout puts the muxer at the root of the version dir
+      # alongside the ``sdk\`` / ``shared\`` trees it resolves relative to
+      # itself, so the version dir goes on PATH — and has to beat the
+      # machine-wide runtime-only install that reports zero SDKs.
+      # DOTNET_ROOT is how apphost-launched fixtures find a shared runtime.
+      let dotnetDir = pinnedToolDir(diyRoot, "dotnet", DotnetSdkVersion,
+        "dotnet.exe")
+      if dotnetDir.len > 0:
+        setEnv "DOTNET_ROOT", dotnetDir
+        setEnv "DOTNET_MULTILEVEL_LOOKUP", "0"
+        managedPath.add(dotnetDir)
+
+      for i in countdown(managedPath.high, 0):
+        prependPath "PATH", managedPath[i]
+
+      # MSYS2's POSIX usr/bin carries autoreconf/autoconf/automake/m4 as
+      # extensionless shell scripts; the c-cpp-autotools convention's
+      # recognise step needs them on PATH. Gated on autoreconf so hosts
+      # without the M28 provisioning don't get a second copy of
+      # grep/sort/... shadowing Git's.
+      if fileExists(msys2Root / "usr" / "bin" / "autoreconf"):
+        prependPath "PATH", msys2Root / "usr" / "bin"
+
+      # OCaml ships via MSYS2's mingw64 pacman package. ``ocamlc -config``
+      # reports an MSYS-style standard_library (/mingw64/lib/ocaml) that
+      # dune cannot use; the Windows-form OCAMLLIB overrides that lookup,
+      # and CAML_LD_LIBRARY_PATH points at stublibs so dynamically loaded
+      # unix.cma stubs resolve at run time.
+      if fileExists(mingwBin / "ocaml.exe"):
+        prependPath "PATH", mingwBin
+        let ocamlLib = msys2Root / "mingw64" / "lib" / "ocaml"
+        if dirExists(ocamlLib):
+          setEnv "OCAMLLIB", ocamlLib
+          if dirExists(ocamlLib / "stublibs"):
+            setEnv "CAML_LD_LIBRARY_PATH", ocamlLib / "stublibs"
+
+      # FPC is APPENDED, never prepended: alongside fpc.exe its bin dir
+      # ships a full 1998-vintage GNU userland (gcc 2.95, ld, as, grep,
+      # make, ...). Prepending it puts that gcc ahead of the WinLibs one
+      # and every ``nim c`` dies on "nimbase.h: No such file or directory".
+      # Nothing else on PATH is named fpc.exe, so the tail resolves it.
+      let fpcDir = pinnedToolDir(diyRoot, "fpc", FpcVersion,
+        "bin/i386-win32/fpc.exe")
+      if fpcDir.len > 0:
+        appendPath "PATH", fpcDir / "bin" / "i386-win32"
+
+      # LIBRARY_PATH for the M37 ``mixed/cpp-uses-fortran-lib`` fixture:
+      # its C++ binary links a Fortran static library, so ``fortran_direct``
+      # emits the C++ link argv with ``-lgfortran -lquadmath``. Those live
+      # in the WinLibs gcc lib dir, which is NOT on g++'s default search
+      # path — gcc honours LIBRARY_PATH as a fallback during ``-l<name>``
+      # resolution, which closes the gap without touching the convention's
+      # argv emission. MSYS2's mingw64 is probed too, as a future-proof
+      # fallback for hosts that do install
+      # ``mingw-w64-x86_64-gcc-fortran`` (MSYS2 does not ship it today).
+      var libraryPath: seq[string] = @[]
+      let winLibsGcc = newestDirWith(diyRoot / "gcc", "lib/libgfortran.dll.a")
+      if winLibsGcc.len > 0:
+        libraryPath.add(winLibsGcc / "lib")
+      let msys2Gcc = newestDirWith(
+        msys2Root / "mingw64" / "lib" / "gcc" / "x86_64-w64-mingw32",
+        "libgfortran.dll.a")
+      if msys2Gcc.len > 0:
+        libraryPath.add(msys2Gcc)
+      for i in countdown(libraryPath.high, 0):
+        prependPath "LIBRARY_PATH", libraryPath[i]
 
   # Library declaration — every ``.nim`` file under ``libs/<name>/src``
   # that ``config.nims`` adds to ``--path`` is importable when this
@@ -541,7 +770,7 @@ package reprobuild:
         extraPassC = platformPassC,
         extraPassL = platformPassL & testRuntimePassL,
         extraEnv = sourceOnlyEnv,
-        cacheable = false)
+        )
       reprobuildTestBuildActions.add(edge.action)
       # B3: emit the EXECUTE edge.
       #
@@ -675,7 +904,6 @@ package reprobuild:
       paths = ioMonNimPaths & sourceOnlyNimPaths,
       passL = reproRuntimePassL,
       nimcache = "build/nimcache/repro",
-      cacheable = false,
       # The public launcher sits on the prompt-time dev-env no-op path.
       # Build it with the vendored portable hash backend so each no-op spawn
       # does not load the system libblake3 -> TBB/C++ runtime closure.
@@ -693,7 +921,6 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-cache-daemon",
-      cacheable = false,
       actionId = "reprobuild.apps.repro-cache-daemon"))
 
     reprobuildAppsActions.add(nim.c(
@@ -703,7 +930,6 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-peer-cache-tier2",
-      cacheable = false,
       actionId = "reprobuild.apps.repro-peer-cache-tier2"))
 
     reprobuildAppsActions.add(nim.c(
@@ -713,7 +939,6 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-peer-cache-admin",
-      cacheable = false,
       actionId = "reprobuild.apps.repro-peer-cache-admin"))
 
     reprobuildAppsActions.add(nim.c(
@@ -723,7 +948,6 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-peer-cache-mint-cert",
-      cacheable = false,
       actionId = "reprobuild.apps.repro-peer-cache-mint-cert"))
 
     reprobuildAppsActions.add(nim.c(
@@ -733,7 +957,6 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-cmake-dyndep-fragment",
-      cacheable = false,
       actionId = "reprobuild.apps.repro-cmake-dyndep-fragment"))
 
     # Provider-mode entries carry ``-d:reproProviderMode`` per the
@@ -745,7 +968,6 @@ package reprobuild:
       defines = @["release", "reproProviderMode"],
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
-      cacheable = false,
       actionId = "reprobuild.apps.repro-cmake-trycompile-provider"))
 
     reprobuildAppsActions.add(nim.c(
@@ -755,14 +977,29 @@ package reprobuild:
       defines = @["release", "reproProviderMode"],
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
-      cacheable = false,
       actionId = "reprobuild.apps.repro-standard-provider"))
 
-    # ``cacheable = false`` is not incidental here, and this edge was the only
-    # one in the block missing it. Via ``compileDependencyPolicy`` it is what
-    # selects ``makeDepfilePolicy`` — evidence from the compiler's own depfile,
-    # and NO monitor wrapping. Left at the default the edge takes
-    # ``defaultDependencyPolicy()`` and is monitored like an opaque tool.
+    # HISTORY (superseded 2026-08-19): this edge, and every other compile
+    # edge in the file, used to carry ``cacheable = false``. Via
+    # ``compileDependencyPolicy`` that selected ``makeDepfilePolicy`` —
+    # crucially NOT for the depfile, but because it is the only
+    # non-monitoring policy kind, and monitored compiles were killing clang
+    # on macOS. See ``reprobuild-specs/Compiles-Are-Normal-Edges.md``.
+    #
+    # The retreat has been reversed deliberately. Its own premise no longer
+    # holds: the depfile it named was never produced by anything, so these
+    # edges had NO dependency evidence of any kind, and the spec's ordering
+    # ("give these edges real dependency evidence" first) is satisfied by
+    # monitoring, not by a depfile nim does not emit. IM-5 (specs 02d228c,
+    # 2026-08-19) also removed the blocker that made monitored Nim binaries
+    # unpublishable — raw SYS_getrandom graded as a Level-2 loss, "a
+    # classification gap, not a monitoring one" — so monitored pipelines now
+    # publish and hit the cache.
+    #
+    # These edges are therefore back on ``defaultDependencyPolicy()``:
+    # monitored, complete evidence, cacheable. If the macOS clang failure
+    # still reproduces under the current shim, that is now a monitor bug to
+    # fix rather than a reason to give the compiles no evidence at all.
     #
     # On macOS that is the difference between building and not: in run
     # 30719789911 the release collection reported built=15/15 with every
@@ -776,15 +1013,14 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-install-mirror-publish",
-      cacheable = false,
       actionId = "reprobuild.apps.repro-install-mirror-publish"))
 
     # B5: the last three ``apps/entrypoints.txt`` rows that had no edge and so
     # existed only inside the ``bash scripts/build_apps.sh`` wrapper. Moving
-    # them here is not only bookkeeping — a ``nim.c`` edge with
-    # ``cacheable = false`` resolves to ``makeDepfilePolicy`` (see
-    # ``compileDependencyPolicy``), i.e. it is NOT monitor-wrapped, whereas
-    # everything inside the wrapper runs as a child under the io-mon shim.
+    # them here is not only bookkeeping: inside the wrapper every compile ran
+    # as an unowned child under the io-mon shim, whereas an edge is monitored
+    # in its own right and its evidence belongs to it. (These edges carried
+    # ``cacheable = false`` until 2026-08-19; see the history note above.)
     #
     # ``ssl`` in ``defines`` is what the entrypoints file spells
     # ``--define:ssl``; the ``nim.c`` alias appends OpenSSL's ``-L`` itself via
@@ -797,7 +1033,6 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-binary-cache",
-      cacheable = false,
       actionId = "reprobuild.apps.repro-binary-cache"))
 
     reprobuildAppsActions.add(nim.c(
@@ -808,7 +1043,6 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-binary-cache-crosshost",
-      cacheable = false,
       actionId = "reprobuild.apps.repro-binary-cache-crosshost"))
 
     # The only entrypoint with a row-local ``--path:``; it becomes an ordinary
@@ -820,7 +1054,6 @@ package reprobuild:
       paths = @["apps/repro-harvest-apt/src"] & sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-harvest-apt",
-      cacheable = false,
       actionId = "reprobuild.apps.repro-harvest-apt"))
 
     let reprobuildNixDaemon = shell(
@@ -965,7 +1198,6 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/live_endpoint_helper",
-      cacheable = false,
       actionId = "reprobuild.test_helpers.live_endpoint_helper"))
 
     reprobuildTestHelpersActions.add(nim.c(
@@ -974,7 +1206,6 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/fake_protocol_daemon_helper",
-      cacheable = false,
       actionId = "reprobuild.test_helpers.fake_protocol_daemon_helper"))
 
     reprobuildTestHelpersActions.add(nim.c(
@@ -983,7 +1214,6 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/harness_apply_lock_holder",
-      cacheable = false,
       actionId = "reprobuild.test_helpers.harness_apply_lock_holder"))
 
     # Cross-version action-cache lifecycle peers. The exact peer compiles all
@@ -1047,7 +1277,6 @@ package reprobuild:
         ],
         extraEnv = sourceOnlyEnv,
         nimcache = "build/nimcache/legacy_cache_peer_origin_dev",
-        cacheable = false,
         actionId = "reprobuild.test_helpers.legacy_cache_peer_origin_dev"))
 
       reprobuildTestHelpersActions.add(nim.c(
@@ -1062,7 +1291,6 @@ package reprobuild:
         after = [legacyWireGenerator],
         extraEnv = sourceOnlyEnv,
         nimcache = "build/nimcache/legacy_cache_peer_legacy_wire",
-        cacheable = false,
         actionId = "reprobuild.test_helpers.legacy_cache_peer_legacy_wire"))
 
     # Binary-cache integration-test subprocess helpers (A2/A2.5/A3/A4).
@@ -1105,7 +1333,6 @@ package reprobuild:
       passL = testRuntimePassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_binary_cache",
-      cacheable = false,
       actionId = "reprobuild.test_helpers.repro_binary_cache"))
 
     reprobuildTestHelpersActions.add(nim.c(
@@ -1116,7 +1343,6 @@ package reprobuild:
       passL = testRuntimePassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_binary_cache_m6",
-      cacheable = false,
       actionId = "reprobuild.test_helpers.repro_binary_cache_m6"))
 
     reprobuildTestHelpersActions.add(nim.c(
@@ -1127,7 +1353,6 @@ package reprobuild:
       passL = testRuntimePassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_binary_cache_client_cli",
-      cacheable = false,
       actionId = "reprobuild.test_helpers.repro_binary_cache_client_cli"))
 
     discard collect("test-helpers", reprobuildTestHelpersActions)
@@ -1179,7 +1404,6 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_shell_hook_counting_shim",
-      cacheable = false,
       actionId = "reprobuild.test_fixtures.shell_hook_counting_shim"))
 
     # Variant/configuration tests need subprocess probes so module-level
@@ -1192,7 +1416,6 @@ package reprobuild:
       passL = reproRuntimePassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/variant_feature_flag_probe",
-      cacheable = false,
       actionId = "reprobuild.test_fixtures.variant_feature_flag_probe"))
     reprobuildTestFixturesActions.add(nim.c(
       source = "tests/fixtures/spec-examples/buildtype-output/probe_release.nim",
@@ -1201,7 +1424,6 @@ package reprobuild:
       passL = reproRuntimePassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/buildtype_output_probe",
-      cacheable = false,
       actionId = "reprobuild.test_fixtures.buildtype_output_probe"))
 
     let ioMonSrc = block:
@@ -1233,7 +1455,6 @@ package reprobuild:
         passC = macosShimArchFlags,
         passL = macosShimArchFlags,
         nimcache = monitorShimNimcache,
-        cacheable = false,
         dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
       reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
@@ -1248,7 +1469,6 @@ package reprobuild:
         threadsOn = true,
         paths = @[ioMonSrc, stackableHooksSrc],
         nimcache = monitorShimNimcache,
-        cacheable = false,
         dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
       reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
@@ -1270,7 +1490,6 @@ package reprobuild:
         paths = @[ioMonSrc, stackableHooksSrc],
         passL = @["-Wl,--version-script=" & linuxShimVersionScript],
         nimcache = monitorShimNimcache,
-        cacheable = false,
         dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
       reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
@@ -1289,11 +1508,12 @@ package reprobuild:
     # takes ``automaticMonitorPolicy()``, so the wrapper ran the ENTIRE build —
     # every nim compile, every clang link — as children under the io-mon shim,
     # and on macOS those children die producing no output (empty ``uname``,
-    # silent clang). The replacement edges are ``nim.c`` with
-    # ``cacheable = false``, which resolves to ``makeDepfilePolicy``: real
-    # dependency evidence from the compiler's own depfiles, and no monitor
-    # wrapping. That is the sanctioned route — NOT the ``declaredOnly`` policy
-    # removed in runtime_core.nim as an unapproved soundness hole.
+    # silent clang). The replacement edges are ordinary ``nim.c`` edges, each
+    # monitored in its own right under ``defaultDependencyPolicy()`` rather
+    # than as an unowned child of a wrapper. They briefly used
+    # ``makeDepfilePolicy`` to avoid monitoring altogether; that is reversed
+    # (see the history note above). Neither route is the ``declaredOnly``
+    # policy removed in runtime_core.nim as an unapproved soundness hole.
     #
     # ``scripts/build_apps.sh`` itself stays and remains a complete standalone
     # build: it is what ``just bootstrap`` runs to produce the engine in the
@@ -1310,8 +1530,8 @@ package reprobuild:
     # ``.new.<ext>`` and then ``mv``-ed it over the live file. The rename dance
     # exists because a shell script has no way to say "this file is my output";
     # an edge does, so the edge writes the final path directly and the engine
-    # owns it. Like every other ``nim.c`` edge here it is ``cacheable = false``
-    # and therefore depfile-policied rather than monitor-wrapped.
+    # owns it. Like every other ``nim.c`` edge here it is monitored under
+    # ``defaultDependencyPolicy()`` (see the history note above).
     const dslRuntimeDllExt =
       when defined(macosx): "dylib"
       elif defined(windows): "dll"
@@ -1327,7 +1547,6 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-project-dsl-runtime-dll",
-      cacheable = false,
       actionId = "reprobuild.test_fixtures.project_dsl_runtime_dll"))
     reprobuildLibActions.add(reprobuildTestFixturesActions[^1])
 
