@@ -82,12 +82,16 @@ and shrinking.
   `zstd`, `sqlite3` and OpenSSL via `findExe` at graph-construction time and bake
   machine-specific absolute paths into copy edges.
 
-  **Now labelled, still not fixed.** These call sites use `uncontrolledFindExe`
-  so the compile closure is clean and `git grep uncontrolled` finds them, and
-  `repro.nim` has left the baseline. That is honest labelling of an accepted
-  hazard, not a resolution — the paths are still machine-specific and still
-  resolved from ambient `PATH`. The capability gap below is what would actually
-  fix them.
+  **Now labelled, still not fixed.** These call sites use `uncontrolledFindExe`,
+  so `git grep uncontrolled` finds them and `repro.nim` has left the baseline.
+  That is honest labelling of an accepted hazard, not a resolution — the paths
+  are still machine-specific and still resolved from ambient `PATH`. The
+  capability gap below is what would actually fix them.
+
+  (An earlier revision added "so the compile closure is clean" here. That was
+  the over-broad claim retracted under "What wiring it actually costs" below —
+  it was true only of `repro.nim`'s own closure, which does not reach the
+  engine.)
 
   **Blocked on a missing capability, not on effort.** `clingo` and `zstd` are now
   wired packages, so the obvious fix is for the edge to copy out of the realized
