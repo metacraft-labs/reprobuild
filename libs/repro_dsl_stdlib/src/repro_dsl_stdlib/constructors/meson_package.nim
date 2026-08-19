@@ -299,6 +299,10 @@ proc meson_package*(srcDir: string;
       commandStatsId = "meson_package.clean_build_dir",
       toolIdentityRefs = @["sh"])
     setupAfter = @[cleanEdge]
+
+  var setupIdentityInputs: seq[string] = @[]
+  for predecessor in setupAfter:
+    setupIdentityInputs.add(predecessor.outputs)
   let setup = meson.setup(
     srcDir = srcDir,
     buildDir = buildDir,
@@ -340,6 +344,8 @@ proc meson_package*(srcDir: string;
     else: srcDir
   setRegisteredActionDeclaredOutputs(setup.id, @[m9r79BuildDirAbs])
   setRegisteredActionReadOnlyRoots(setup.id, @[m9r79SrcDirAbs])
+  setRegisteredActionDependencyPolicy(setup.id,
+    automaticMonitorPolicy(@[m9r79BuildDirAbs]))
   # M9.R.14g.9 — compile MUST depend on setup. Mirror the install fix
   # below; the automatic-monitor evidence on ``meson setup`` may not
   # land before the scheduler dispatches ``meson compile``, races the
@@ -350,14 +356,17 @@ proc meson_package*(srcDir: string;
     call = inlineExecCall(@["sh", "-c", "touch \"" &
       buildNinja.replace("\"", "\\\"") & "\""]),
     deps = @[setup.id],
-    inputs = setup.outputs,
+    inputs = setupIdentityInputs,
     outputs = @[buildNinja],
-    cacheable = false,
-    dependencyPolicy = automaticMonitorPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(@[m9r79BuildDirAbs]),
     commandStatsId = "meson_package.refresh_generated_mtime",
     toolIdentityRefs = @["sh"])
-  let compileEdge = meson.compile(workDir = buildDir,
+  var compileEdge = meson.compile(workDir = buildDir,
     after = @[refreshGeneratedMtime], extraEnv = extraEnv)
+  compileEdge.inputs = setupIdentityInputs
+  setRegisteredActionInputs(compileEdge.id, setupIdentityInputs)
+  setRegisteredActionDependencyPolicy(compileEdge.id,
+    automaticMonitorPolicy(@[m9r79BuildDirAbs]))
   m9r14eThreadRecipeDepsAsToolRefs(compileEdge.id, pkgName)
   # M9.R.79.2 — compile continues writing to buildDir; source stays
   # read-only.  Sequential edge via ``after = @[setup]`` — R7 dep-chain

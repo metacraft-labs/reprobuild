@@ -528,6 +528,10 @@ proc cmake_package*(srcDir: string;
       toolIdentityRefs = @["sh"])
     configureAfter = @[cleanEdge]
 
+  var configureIdentityInputs: seq[string] = @[]
+  for predecessor in configureAfter:
+    configureIdentityInputs.add(predecessor.outputs)
+
   let configureEdge = cmake.configure(
     srcDir = srcDir,
     buildDir = buildDir,
@@ -553,6 +557,8 @@ proc cmake_package*(srcDir: string;
     else: @[m9r79CmSrcDirAbs]
   setRegisteredActionDeclaredOutputs(configureEdge.id, @[m9r79CmBuildDirAbs])
   setRegisteredActionReadOnlyRoots(configureEdge.id, m9r79CmReadOnly)
+  setRegisteredActionDependencyPolicy(configureEdge.id,
+    automaticMonitorPolicy(@[m9r79CmBuildDirAbs]))
   # M9.R.14g.6 — inline-exec build action. cmake's real "build" mode is
   # selected by the ``--build`` flag, NOT by a ``build`` subcommand
   # literal.
@@ -629,10 +635,13 @@ proc cmake_package*(srcDir: string;
     id = "cmake-build-" & pkgName,
     call = inlineExecCall(@["sh", "-c", buildScript]),
     deps = @[configureEdge.id],
-    inputs = configureEdge.outputs,
+    # The configured tree is both consumed and mutated by this phase. Its
+    # immutable cleanup/configuration identity is the declared input; sources
+    # and tools remain dynamically discovered outside the ignored build tree.
+    inputs = configureIdentityInputs,
     outputs = @[buildStamp],
     pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(@[m9r79CmBuildDirAbs]),
     commandStatsId = "cmake_package.build",
     toolIdentityRefs = @["cmake", "sh"] & cmakeDepRefs,
     env = extraEnv,

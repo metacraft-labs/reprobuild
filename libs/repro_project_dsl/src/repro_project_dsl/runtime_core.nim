@@ -2017,6 +2017,18 @@ proc setRegisteredActionDependencyPolicy*(
       buildActionRegistry[i].dependencyPolicy = policy
       return
 
+proc setRegisteredActionInputs*(actionId: string;
+                                inputs: openArray[string]) {.dynOrStatic.} =
+  ## Replace role-derived inputs on an already-registered typed-tool action.
+  ## Multi-stage package constructors use this when a command consumes and
+  ## mutates the same build tree: the immutable phase stamp is the declared
+  ## input, while the automatic monitor continues to discover source and tool
+  ## inputs outside that mutable tree.
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      buildActionRegistry[i].inputs = @inputs
+      return
+
 proc setRegisteredActionPublish*(actionId: string;
                                  publishToBinaryCache: bool;
                                  cacheEntryIdentity: Option[CacheEntryIdentity])

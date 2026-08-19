@@ -33,8 +33,8 @@ when defined(reproProviderMode):
       if arg.name == "argv":
         return arg.encodedValue.split("\x1f")
 
-  proc cmakeCleanup(projectRoot, generator: string;
-                    cacheVars: seq[string]): BuildActionDef =
+  proc cmakeActions(projectRoot, generator: string;
+                    cacheVars: seq[string]): seq[BuildActionDef] =
     let packageName = "cmakeCleanupTest"
     let pkg = PackageDef(
       packageName: packageName,
@@ -52,11 +52,10 @@ when defined(reproProviderMode):
           generator = generator,
           cacheVars = cacheVars),
       includeDefault = false)
-    findById(extractActions(fragment),
-      "cmake-clean-build-dir-" & packageName)
+    extractActions(fragment)
 
-  proc mesonCleanup(projectRoot, buildtype: string;
-                    options: seq[string]): BuildActionDef =
+  proc mesonActions(projectRoot, buildtype: string;
+                    options: seq[string]): seq[BuildActionDef] =
     let packageName = "mesonCleanupTest"
     let pkg = PackageDef(
       packageName: packageName,
@@ -74,8 +73,7 @@ when defined(reproProviderMode):
           buildtype = buildtype,
           configureOptions = options),
       includeDefault = false)
-    findById(extractActions(fragment),
-      "meson-clean-build-dir-" & packageName)
+    extractActions(fragment)
 
 suite "configure build-tree cleanup caching":
   test "CMake cleanup is reusable until configure identity changes":
@@ -89,9 +87,12 @@ suite "configure build-tree cleanup caching":
           removeDir(root)
       writeFile(root / "repro.nim", "package cmakeCleanupTest:\n  discard\n")
 
-      let first = cmakeCleanup(root, "Ninja", @["FEATURE=ON"])
-      let same = cmakeCleanup(root, "Ninja", @["FEATURE=ON"])
-      let changed = cmakeCleanup(root, "Unix Makefiles", @["FEATURE=ON"])
+      let first = findById(cmakeActions(root, "Ninja", @["FEATURE=ON"]),
+        "cmake-clean-build-dir-cmakeCleanupTest")
+      let same = findById(cmakeActions(root, "Ninja", @["FEATURE=ON"]),
+        "cmake-clean-build-dir-cmakeCleanupTest")
+      let changed = findById(cmakeActions(root, "Unix Makefiles",
+        @["FEATURE=ON"]), "cmake-clean-build-dir-cmakeCleanupTest")
 
       check first.cacheable
       check first.dependencyPolicy.kind == bdpAutomaticMonitor
@@ -99,6 +100,36 @@ suite "configure build-tree cleanup caching":
         @[root / "build-cmake"]
       check first.inlineArgv() == same.inlineArgv()
       check first.inlineArgv() != changed.inlineArgv()
+
+  test "CMake pipeline excludes its shared mutable build tree":
+    when defined(reproProviderMode):
+      let root = getTempDir() / "repro-cmake-mutable-tree"
+      if dirExists(root):
+        removeDir(root)
+      createDir(root)
+      defer:
+        if dirExists(root):
+          removeDir(root)
+      writeFile(root / "repro.nim", "package cmakeCleanupTest:\n  discard\n")
+
+      let actions = cmakeActions(root, "Ninja", @["FEATURE=ON"])
+      let cleanup = findById(actions,
+        "cmake-clean-build-dir-cmakeCleanupTest")
+      var configure, build: BuildActionDef
+      for action in actions:
+        if action.call.packageName == "cmake" and
+            action.call.subcommand == "configure":
+          configure = action
+        elif action.id == "cmake-build-cmakeCleanupTest":
+          build = action
+
+      check configure.id.len > 0
+      check build.id.len > 0
+      check configure.dependencyPolicy.ignoredInputPrefixes ==
+        @[root / "build-cmake"]
+      check build.dependencyPolicy.ignoredInputPrefixes ==
+        @[root / "build-cmake"]
+      check build.inputs == cleanup.outputs
     else:
       skip()
 
@@ -113,9 +144,12 @@ suite "configure build-tree cleanup caching":
           removeDir(root)
       writeFile(root / "repro.nim", "package mesonCleanupTest:\n  discard\n")
 
-      let first = mesonCleanup(root, "release", @["feature=enabled"])
-      let same = mesonCleanup(root, "release", @["feature=enabled"])
-      let changed = mesonCleanup(root, "debug", @["feature=enabled"])
+      let first = findById(mesonActions(root, "release",
+        @["feature=enabled"]), "meson-clean-build-dir-mesonCleanupTest")
+      let same = findById(mesonActions(root, "release",
+        @["feature=enabled"]), "meson-clean-build-dir-mesonCleanupTest")
+      let changed = findById(mesonActions(root, "debug",
+        @["feature=enabled"]), "meson-clean-build-dir-mesonCleanupTest")
 
       check first.cacheable
       check first.dependencyPolicy.kind == bdpAutomaticMonitor
@@ -123,5 +157,39 @@ suite "configure build-tree cleanup caching":
         @[root / "build-meson"]
       check first.inlineArgv() == same.inlineArgv()
       check first.inlineArgv() != changed.inlineArgv()
+
+  test "Meson pipeline excludes its shared mutable build tree":
+    when defined(reproProviderMode):
+      let root = getTempDir() / "repro-meson-mutable-tree"
+      if dirExists(root):
+        removeDir(root)
+      createDir(root)
+      defer:
+        if dirExists(root):
+          removeDir(root)
+      writeFile(root / "repro.nim", "package mesonCleanupTest:\n  discard\n")
+
+      let actions = mesonActions(root, "release", @["feature=enabled"])
+      let cleanup = findById(actions,
+        "meson-clean-build-dir-mesonCleanupTest")
+      let refresh = findById(actions,
+        "meson-refresh-generated-mtime-mesonCleanupTest")
+      var setup, compile: BuildActionDef
+      for action in actions:
+        if action.call.packageName == "meson" and
+            action.call.subcommand == "setup":
+          setup = action
+        elif action.call.packageName == "meson" and
+            action.call.subcommand == "compile":
+          compile = action
+
+      check setup.id.len > 0
+      check compile.id.len > 0
+      for action in [setup, refresh, compile]:
+        check action.dependencyPolicy.ignoredInputPrefixes ==
+          @[root / "build-meson"]
+      check refresh.cacheable
+      check refresh.inputs == cleanup.outputs
+      check compile.inputs == cleanup.outputs
     else:
       skip()
