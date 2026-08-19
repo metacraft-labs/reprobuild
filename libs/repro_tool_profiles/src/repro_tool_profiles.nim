@@ -98,6 +98,11 @@ type
     pkgConfigDirs*: seq[string]
     cmakePrefixDirs*: seq[string]
 
+  ProducerExecutableDirs* = object
+    ## Cross-repo executable producers are resolved from their own realized
+    ## bin dirs without perturbing the PATH used to fingerprint other tools.
+    binDirs*: seq[string]
+
   PathOnlyToolProfile* = object
     installMethod*: string
     packageSelector*: string
@@ -5123,9 +5128,18 @@ proc mkAuxChannelProducerProfile(useDef: InterfaceToolUse;
 
 proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
                     pathValue, storeRoot: string;
+                    producerExecutableSelectors:
+                      Table[string, ProducerExecutableDirs] =
+                        initTable[string, ProducerExecutableDirs]();
                     producerAuxSelectors: Table[string, ProducerAuxDirs] =
                       initTable[string, ProducerAuxDirs]()):
     PathOnlyToolProfile =
+  if useDef.packageSelector.len > 0 and
+      producerExecutableSelectors.hasKey(useDef.packageSelector):
+    let producerPath =
+      producerExecutableSelectors[useDef.packageSelector].binDirs.
+        join($PathSep)
+    return resolvePathOnlyTool(useDef, producerPath)
   # SC-3: a selector materialized as a library-channel producer is consumed
   # through the aux channels, not PATH — skip path-mode executable resolution
   # for it and hand back a profile carrying the producer's realized library
@@ -5303,6 +5317,9 @@ proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
                         mode: ToolProvisioningMode;
                         pathValue = getEnv("PATH");
                         storeRoot = "";
+                        producerExecutableSelectors:
+                          Table[string, ProducerExecutableDirs] =
+                            initTable[string, ProducerExecutableDirs]();
                         producerAuxSelectors: Table[string, ProducerAuxDirs] =
                           initTable[string, ProducerAuxDirs]()):
     PathOnlyBuildIdentity =
@@ -5317,7 +5334,7 @@ proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
   result.interfaceFingerprint = artifact.interfaceFingerprint
   for useDef in artifact.projectInterface.toolUses:
     let profile = toolProfileFor(useDef, mode, pathValue, storeRoot,
-      producerAuxSelectors)
+      producerExecutableSelectors, producerAuxSelectors)
     result.profiles.add(profile)
     result.actionIdentities.add(actionIdentityFor(useDef, profile))
 

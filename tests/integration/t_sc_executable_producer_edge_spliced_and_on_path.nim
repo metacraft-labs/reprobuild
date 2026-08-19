@@ -22,12 +22,11 @@
 ##       .repro/develop-overrides.toml   develop override: prod -> ../prod
 ##
 ## The develop override maps the consumer's ``uses: "prod"`` selector to the
-## sibling checkout (§5.1). ``repro build`` on the consumer must, via the SC-2
-## pre-pass, load ``../prod/repro.nim``, build its declared ``executable``'s
-## producing edge from source (recursively, in-process), realize
-## ``../prod/build/bin/prod``, and splice that ``bin`` dir onto the consuming
-## action's ``PATH`` so the consumer's ``sh -c "prod ..."`` action resolves the
-## freshly-built binary.
+## sibling checkout (§5.1). The fixture first builds a producer-independent
+## target, then selects the producer-consuming target. The SC-2 pre-pass must
+## load ``../prod/repro.nim``, build its declared executable from source,
+## realize ``../prod/build/bin/prod``, and splice that ``bin`` dir onto only the
+## consuming action's ``PATH``. The shared base action must retain its cache key.
 ##
 ## Assertions:
 ##   1. ``repro build`` on the consumer exits 0.
@@ -38,17 +37,17 @@
 ##      stamp (proving the bare ``prod`` name resolved to the sibling's binary,
 ##      i.e. the splice put its bin dir on PATH — not a host ``prod``, which
 ##      does not exist).
+##   4. The base action cache-hits when the second target introduces ``prod``;
+##      producer selection must not perturb unrelated action fingerprints.
 ##
-## Falsifiability (reproduced by the implementation agent): editing the SC-2
-## pre-pass so it SKIPS the ``putEnv("PATH", ...)`` splice (leaving the producer
-## bin dir off the process PATH) makes the consumer's ``sh -c "prod ..."``
-## action fail to find ``prod`` — the build exits non-zero (assertion 1 trips)
-## and the marker file is never written (assertion 3 trips). Reverting the edit
-## restores green.
+## Falsifiability: omitting the explicit producer profile prevents identity
+## resolution or action launch. Resolving it through a process-wide PATH
+## overlay changes the base tool profile and makes assertion 4 report
+## ``cdMiss`` instead of ``cdHit``.
 ##
 ## Skip rule: ``sh`` missing on PATH, or ``./build/bin/repro`` unbuilt.
 
-import std/[os, osproc, strutils, unittest]
+import std/[json, os, osproc, strutils, unittest]
 
 const reproBinary = "./build/bin/repro"
 
@@ -91,6 +90,11 @@ const consumerRepro = """
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
 
+proc withToolIdentities(action: BuildActionDef;
+                        tools: openArray[string]): BuildActionDef =
+  appendRegisteredActionToolIdentityRefs(action.id, tools)
+  action
+
 package consumer:
   defaultToolProvisioning "path"
 
@@ -99,10 +103,17 @@ package consumer:
     "prod"
 
   build:
-    discard shell(
+    let base = shell(
+      command = "mkdir -p build && printf 'base\n' > build/base.txt",
+      actionId = "consumer.build.base",
+      extraOutputs = @["build/base.txt"])
+    let consume = shell(
       command = "mkdir -p build && prod > build/consumed.txt",
       actionId = "consumer.build.consume",
-      extraOutputs = @["build/consumed.txt"])
+      deps = @[base.id],
+      extraOutputs = @["build/consumed.txt"]).withToolIdentities(["prod"])
+    discard target("base", [base])
+    discard target("consume", [base, consume])
 """
 
 proc q(value: string): string = quoteShell(value)
@@ -160,9 +171,9 @@ created_at = "2026-07-02T00:00:00Z"
       # SC-2 splice of the sibling's freshly-built bin dir.
       check findExe("prod").len == 0
 
-      # ---- Build the consumer. The SC-2 pre-pass must build ../prod first and
-      # splice its bin dir onto PATH so the consumer's ``sh -c "prod ..."``
-      # action resolves the freshly-built producer binary. ----
+      # ---- Build the producer-independent target first, then select the
+      # producer-consuming target. The shared base action must retain the same
+      # fingerprint when the second target adds the producer identity. ----
       # Hermetic action-cache root: this heavy test drives ``repro build``, which
       # otherwise shares the developer's ``~/.cache/repro/action-cache``. A
       # co-tenant-bloated shared cache (multi-GB) makes the build wedge on a
@@ -173,17 +184,48 @@ created_at = "2026-07-02T00:00:00Z"
       # cache-behavior change.
       let cacheRoot = absolutePath(scratch / "action-cache-root")
       createDir(cacheRoot)
-      let cmd = q(reproAbs) & " build " & q(consumerRoot / "repro.nim") &
+      let baseCmd = q(reproAbs) & " build base" &
         " --tool-provisioning=path --daemon=off --log=quiet" &
         " --progress=quiet --measure=none" &
         " --action-cache-root=" & q(cacheRoot)
-      checkpoint("running: " & cmd)
-      let (code, output) = run(cmd, repoRoot)
-      checkpoint("exit=" & $code)
+      checkpoint("running: " & baseCmd)
+      let (baseCode, baseOutput) = run(baseCmd, consumerRoot)
+      checkpoint("base exit=" & $baseCode)
+      checkpoint(baseOutput)
+      check baseCode == 0
+      check not fileExists(producerBinary)
+
+      let reportPath = absolutePath(scratch / "consume-report.json")
+      let consumeCmd = q(reproAbs) & " build consume" &
+        " --tool-provisioning=path --daemon=off --log=quiet" &
+        " --progress=quiet --measure=all" &
+        " --write-report=" & q(reportPath) &
+        " --action-cache-root=" & q(cacheRoot)
+      checkpoint("running: " & consumeCmd)
+      let (code, output) = run(consumeCmd, consumerRoot)
+      checkpoint("consume exit=" & $code)
       checkpoint(output)
 
       # (1) The consumer build succeeds.
       check code == 0
+
+      # Producer identity resolution is scoped to the consuming action, so the
+      # shared producer-independent action cache-hits.
+      check fileExists(reportPath)
+      if fileExists(reportPath):
+        let report = parseFile(reportPath)
+        var foundBase = false
+        for action in report{"actions"}:
+          checkpoint("reported action=" & action{"id"}.getStr() &
+            " cacheDecision=" & action{"cacheDecision"}.getStr() &
+            " status=" & action{"status"}.getStr() &
+            " reason=" & action{"reason"}.getStr())
+          if action{"id"}.getStr() == "base":
+            foundBase = true
+            checkpoint("base cacheDecision=" &
+              action{"cacheDecision"}.getStr())
+            check action{"cacheDecision"}.getStr() == "cdHit"
+        check foundBase
 
       # (2) The producer binary was materialized from source BY THIS RUN.
       check fileExists(producerBinary)

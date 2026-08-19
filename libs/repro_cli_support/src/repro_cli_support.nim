@@ -1510,12 +1510,41 @@ proc profileIndex(identity: PathOnlyBuildIdentity):
     if not result.hasKey(profile.executableName):
       result[profile.executableName] = profile
 
-proc toolPathPrefix(profiles: Table[string, PathOnlyToolProfile]): string =
+proc bareToolSelector(value: string): string =
+  result = value
+  for i, ch in result:
+    if ch == ' ' or ch in {'>', '<', '=', '~', '^'}:
+      result = result[0 ..< i]
+      break
+
+proc toolPathPrefix(profiles: Table[string, PathOnlyToolProfile];
+                    packageName, executableName: string;
+                    refs: openArray[string]): string =
   var dirs: seq[string] = @[]
-  for profile in profiles.values:
+  proc addDir(profile: PathOnlyToolProfile) =
     let dir = parentDir(profile.resolvedExecutablePath)
     if dir.len > 0 and dirs.find(dir) < 0:
       dirs.add(dir)
+
+  let exactKey = packageName & "|" & executableName
+  if profiles.hasKey(exactKey):
+    addDir(profiles[exactKey])
+  elif profiles.hasKey(executableName):
+    addDir(profiles[executableName])
+
+  for refName in refs:
+    var matchingDirs: seq[string] = @[]
+    for profile in profiles.values:
+      if profile.executableName != refName and
+          bareToolSelector(profile.packageSelector) != refName:
+        continue
+      let dir = parentDir(profile.resolvedExecutablePath)
+      if dir.len > 0 and dir notin matchingDirs:
+        matchingDirs.add(dir)
+    matchingDirs.sort()
+    for dir in matchingDirs:
+      if dir notin dirs:
+        dirs.add(dir)
   dirs.join($PathSep)
 
 proc argvForCall(call: PublicCliCall; profile: PathOnlyToolProfile): seq[string] =
@@ -1709,8 +1738,10 @@ proc resolveCanonicalExecRoot*(cwdKind: ActionCwdKind; cwdCustomPath: string;
     raw
 
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
-                      projectRoot: string; actionPathPrefix = ""): BuildAction =
+                      projectRoot: string): BuildAction =
   let payload = decodeBuildActionPayload(toBytes(node.payload))
+  let actionPathPrefix = toolPathPrefix(profiles, payload.call.packageName,
+    payload.call.executableName, payload.toolIdentityRefs)
   # Named-Targets M1: copy implicit-target names off the decoded
   # payload onto every constructed ``BuildAction`` at the bottom of
   # this proc. The action constructors below don't know about
@@ -1841,9 +1872,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # ``make`` against the host's PATH (empty in a from-source
     # nix-shell), failing with diagnostics like:
     #   ``configure: error: no acceptable m4 could be found in $PATH``
-    # The fix mirrors the typed-tool path below: prepend
-    # ``actionPathPrefix`` (the union of every resolved tool profile's
-    # bin dir) to PATH, then append the per-edge env overrides.
+    # The fix mirrors the typed-tool path below: prepend the called tool and
+    # this action's explicit tool refs to PATH, then append per-edge overrides.
     var inlineEnv: seq[string] = @[]
     if actionPathPrefix.len > 0:
       inlineEnv.add("PATH=" & actionPathPrefix & $PathSep & getEnv("PATH"))
@@ -2596,7 +2626,6 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
   ## matches no edge, raises ``BuildTargetUnknownError`` with up to
   ## three closest known names.
   let profiles = profileIndex(identity)
-  let actionPathPrefix = toolPathPrefix(profiles)
   var actionNodes: seq[tuple[node: GraphNode; payload: BuildActionDef]] = @[]
   var targets = initTable[string, BuildTargetDef]()
   var pools = initTable[string, BuildPoolDef]()
@@ -2653,7 +2682,7 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
       BuildAction =
     var node = item.node
     node.payload = actionPayload(publicPayload(item.payload))
-    lowerGraphAction(node, profiles, projectRoot, actionPathPrefix)
+    lowerGraphAction(node, profiles, projectRoot)
 
   # When no selector is provided, schedule every emitted edge — the
   # legacy "build everything" behavior preserved from the single-target
@@ -4598,7 +4627,7 @@ proc addCacheField(payload: var string; value: string) =
 proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
                           mode: ToolProvisioningMode): string =
   var payload = ""
-  payload.addCacheField("reprobuild.toolIdentityCache.v2")
+  payload.addCacheField("reprobuild.toolIdentityCache.v3")
   payload.addCacheField(mode.modeName)
   payload.addCacheField(artifact.projectInterface.projectName)
   payload.addCacheField(artifact.projectInterface.packageName)
@@ -4607,18 +4636,18 @@ proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(getEnv("PATH"))
   # Cross-Repo-Source-Consumption SC-6 (§5.2 "a changed pin invalidates the
   # consumer") — fold each materialized cross-repo LIBRARY producer's realized
-  # aux directories into the tool-identity cache key. The executable channel is
-  # already covered by the ``getEnv("PATH")`` field above (the SC-2 PATH
-  # prepend shifts it when a producer bin dir changes); the LIBRARY channel is
-  # threaded through the resolver aux paths, NOT PATH, so a changed producer
+  # producer directories into the tool-identity cache key. Both channels are
+  # passed explicitly to identity construction, so a changed producer
   # realized dir (a refreshed lock pin fetches into a NEW revision-keyed dir,
-  # ``<ws>/.repro/cross-repo-producers/<name>/<rev>/build/lib``) would
+  # ``<ws>/.repro/cross-repo-producers/<name>/<rev>/build``) would
   # otherwise reuse the stale on-disk tool identity from the previous pin and
-  # link/load the OLD library. Folding the realized aux dirs here re-resolves
+  # execute/link/load the old product. Folding the realized dirs here re-resolves
   # the identity when the pin changes; an unchanged pin (same dirs) keeps the
-  # key stable. Empty ``producerMaterializedAuxPaths`` (the common case — no
-  # cross-repo library producer) contributes nothing, so this is byte-identical
-  # to today for a build consuming no cross-repo library producer.
+  # key stable.
+  for selector in toSeq(producerMaterializedBinDirs.keys).sorted:
+    payload.addCacheField("producer-bin")
+    payload.addCacheField(selector)
+    payload.addCacheField(producerMaterializedBinDirs[selector].join("\n"))
   for selector in toSeq(producerMaterializedAuxPaths.keys).sorted:
     let aux = producerMaterializedAuxPaths[selector]
     payload.addCacheField("producer-aux")
@@ -4903,8 +4932,14 @@ proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
       libDirs: aux.libDirs,
       pkgConfigDirs: aux.pkgConfigDirs,
       cmakePrefixDirs: aux.cmakePrefixDirs)
+  var producerExecutableSelectors =
+    initTable[string, ProducerExecutableDirs]()
+  for selector, binDirs in producerMaterializedBinDirs.pairs:
+    producerExecutableSelectors[selector] = ProducerExecutableDirs(
+      binDirs: binDirs)
   let identity = toolBuildIdentity(artifact, mode,
     storeRoot = outDir / "tool-store",
+    producerExecutableSelectors = producerExecutableSelectors,
     producerAuxSelectors = producerAuxSelectors)
   writePathOnlyBuildIdentity(paths.identityPath, identity)
   writeInspectionJson(paths.inspectionPath, identity)
@@ -8053,29 +8088,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           discard
         of pbkNotProducer:
           discard
-        # Prepend the freshly-built producer bin dir(s) to the process ``PATH``
-        # so the DOWNSTREAM path-mode identity resolution
-        # (``warmResolveAndWriteIdentity`` -> ``resolvePathOnlyTool``, which
-        # reads ``getEnv("PATH")``) finds the producer's executable as a normal
-        # profile — the same "build first, then the resolver finds artifacts on
-        # disk" contract the from-source auto-recurse pass relies on. Without
-        # this the path-mode resolver would reject the ``uses:`` producer
-        # selector as "not on PATH" before the consumer's engine pass even
-        # started. (The SC-1 producer branch in ``mkToolIdentityResolver``
-        # additionally splices the bin dir for a selector the path-mode profile
-        # loop does not claim — belt-and-suspenders for both channels.) A
-        # pure-library producer (SC-3, no executable) skips the PATH prepend —
-        # its library reaches the consumer through the aux channels the resolver
-        # closure returns, not through PATH.
+        # The identity resolver consumes ``producerMaterializedBinDirs``
+        # explicitly. Do not mutate the process PATH here: doing so changes the
+        # pathSearchList and profile fingerprint of every unrelated tool.
         if binDirs.len > 0:
-          block prependProducerPath:
-            var pathParts: seq[string] = binDirs
-            let existing = getEnv("PATH")
-            if existing.len > 0:
-              pathParts.add(existing)
-            putEnv("PATH", pathParts.join($PathSep))
           logSummary("cross-repo producer: spliced \"" & selector &
-            "\" bin dir(s) onto PATH: " & binDirs.join(", "))
+            "\" bin dir(s) into tool identities: " & binDirs.join(", "))
       finally:
         if producerBuildStack.len > 0 and
             producerBuildStack[^1] == producerRootAbs:
@@ -16529,6 +16547,9 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "depfile": action.depfile,
     "dynamicDepsFile": action.dynamicDepsFile,
     "monitorDepfile": action.monitorDepfile,
+    "toolIdentityRefs": jsonStringSeq(action.toolIdentityRefs),
+    "toolIdentityRefKinds": jsonStringSeq(
+      action.toolIdentityRefKinds.mapIt($it)),
     "dependencyPolicy": dependencyPolicyJson(action.dependencyPolicy),
     "builtinText": action.builtinText,
     "builtinEntries": jsonStringSeq(action.builtinEntries)
