@@ -5,7 +5,7 @@
     "caseDetailTracked": false,
     "caseDetailUntrackedReason": "bodyHash is a function of the project's absolute path (campaign defect #52), so tracking per-case detail would rewrite every hash per checkout path and defeat byte-level catalog diffing",
     "countSourceCounts": {
-      "catalog": 1236,
+      "catalog": 1239,
       "quarantined": 1,
       "static": 5
     },
@@ -68,14 +68,14 @@
     "branch": "agent/review-land-linked-identity-20260818",
     "dirty": true,
     "environmentReportPath": "build/reprobuild-suite-m0-environment.md",
-    "head": "4294d5763b046d4d44c6882c3fc39f0844d289aa",
-    "headShort": "4294d576",
+    "head": "fa84dab9077238134e1a1019a544a4dcefb57788",
+    "headShort": "fa84dab9",
     "repoRoot": ".",
     "runtimeDetailPath": "build/reprobuild-suite-case-catalog.json",
     "runtimeDetailReason": "footprint, host, tool versions, the recorded environment and the sibling-checkout paths are properties of the machine and of the moment, not of the tree; keeping them here made the tracked artifact differ on every build and every host, which is the defect spec \u00a716.4 forbids for an embedded build timestamp",
     "runtimeDetailTracked": false,
     "sourceCheckoutRevisions": {},
-    "sourceFingerprint": "bc6f655785a28aadcd765539e9a3418ea3e6195b19916dbd2278df059d7ea844"
+    "sourceFingerprint": "c619a44a241a6611f315c91093922e83fb4caeec1f86821834b5995552b73a60"
   },
   "performanceAssessment": {
     "deferredMeasurementCommand": "REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 2 --suite-timeout-seconds 7200",
@@ -96,12 +96,12 @@
     },
     "observedStructuralFacts": {
       "graphOwnedHelperArtifacts": 15,
-      "nimTestBinaries": 1237,
+      "nimTestBinaries": 1240,
       "pureUnitConsolidationGroups": 34,
       "pureUnitTests": 514,
-      "sourceCases": 7148,
+      "sourceCases": 7163,
       "staticallyDetectedRuntimeCompilerFlowTests": 71,
-      "testEntries": 1242
+      "testEntries": 1245
     },
     "status": "structural-inference-only"
   },
@@ -1013,7 +1013,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 16,
-      "integration": 515,
+      "integration": 518,
       "platform/destructive": 90,
       "pure unit": 514,
       "unclassified": 107
@@ -1111,10 +1111,10 @@
       }
     ],
     "measuredProtocolAwareCaseCount": null,
-    "nimTestBinaryCount": 1237,
+    "nimTestBinaryCount": 1240,
     "pythonTestFileCount": 5,
-    "sourceCaseCount": 7148,
-    "testEntryCount": 1242
+    "sourceCaseCount": 7163,
+    "testEntryCount": 1245
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -24453,6 +24453,49 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_membership_model_fork_upstream_remote_alignment",
+      "catalogSuiteCount": 1,
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "countSource": "catalog",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_membership_model_fork_upstream_remote_alignment.nim",
+      "sourceCaseCount": 2,
+      "sourceNewerThanBinary": false,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_membership_model_resolves_sets_and_prefixes",
+      "catalogSuiteCount": 1,
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "countSource": "catalog",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_membership_model_resolves_sets_and_prefixes.nim",
+      "sourceCaseCount": 8,
+      "sourceNewerThanBinary": false,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_membership_model_schemas_round_trip",
       "catalogSuiteCount": 1,
       "class": "integration",
@@ -24466,10 +24509,32 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_membership_model_schemas_round_trip.nim",
-      "sourceCaseCount": 5,
+      "sourceCaseCount": 6,
       "sourceNewerThanBinary": false,
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_membership_model_sets_cli",
+      "catalogSuiteCount": 1,
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "countSource": "catalog",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_membership_model_sets_cli.nim",
+      "sourceCaseCount": 4,
+      "sourceNewerThanBinary": false,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31294,7 +31359,7 @@
   ],
   "timing": {
     "complete": false,
-    "currentSourceFingerprint": "bc6f655785a28aadcd765539e9a3418ea3e6195b19916dbd2278df059d7ea844",
+    "currentSourceFingerprint": "c619a44a241a6611f315c91093922e83fb4caeec1f86821834b5995552b73a60",
     "notes": [
       "No suite run was requested for this inventory."
     ],

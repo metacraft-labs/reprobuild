@@ -26,10 +26,10 @@ REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/
 
 | Field | Value |
 | --- | --- |
-| HEAD | 4294d5763b046d4d44c6882c3fc39f0844d289aa |
-| HEAD short | 4294d576 |
+| HEAD | fa84dab9077238134e1a1019a544a4dcefb57788 |
+| HEAD short | fa84dab9 |
 | Branch | agent/review-land-linked-identity-20260818 |
-| Source fingerprint | bc6f655785a28aadcd765539e9a3418ea3e6195b19916dbd2278df059d7ea844 |
+| Source fingerprint | c619a44a241a6611f315c91093922e83fb4caeec1f86821834b5995552b73a60 |
 | External source revisions | {} |
 | Inventory JSON | benchmarks/reports/reprobuild-suite-m0-inventory.json |
 | Per-case protocol detail | build/reprobuild-suite-case-catalog.json |
@@ -41,10 +41,10 @@ The measurement environment — host kernel and glibc, tool versions, the record
 
 | Metric | Value |
 | --- | --- |
-| Test entries | 1242 |
-| Nim test binaries | 1237 |
+| Test entries | 1245 |
+| Nim test binaries | 1240 |
 | Python test files | 5 |
-| Case count (catalog-authoritative) | 7148 |
+| Case count (catalog-authoritative) | 7163 |
 | Measured protocol-aware cases | not measured (requires runner summary) |
 | Graph-owned helper/fixture artifacts | 15 |
 | Tests with statically detected runtime compiler flows | 71 |
@@ -56,7 +56,7 @@ Case counts come from each built binary's `--list-json` catalog (spec §3.2/§6.
 
 | Count source | Test entries | Meaning |
 | --- | --- | --- |
-| catalog | 1236 | authoritative: enumerated from the built binary |
+| catalog | 1239 | authoritative: enumerated from the built binary |
 | static | 5 | Python file, or probing disabled; counted by source scan |
 | missing-binary | 0 | Nim source with no built binary; counted by source scan |
 | quarantined | 1 | binary exists but could not enumerate; contributes 0 cases to the total |
@@ -85,7 +85,7 @@ Earlier contended or rejected timing attempts are diagnostic only and are intent
 
 ## Theoretical Performance Assessment
 
-The current graph contains 1237 Nim test binaries, 514 statically classified pure-unit entries in 34 compatible consolidation groups, and 71 tests with statically detected runtime compiler flows. These are structural counts, not timing results or an exhaustive semantic proof.
+The current graph contains 1240 Nim test binaries, 514 statically classified pure-unit entries in 34 compatible consolidation groups, and 71 tests with statically detected runtime compiler flows. These are structural counts, not timing results or an exhaustive semantic proof.
 
 - Parallel execution can reduce the serial execution component, but the exclusive lane and longest dependency chain bound the achievable wall-time reduction.
 - Consolidating compatible pure-unit groups should reduce repeated Nim compilation, link, and process-start overhead while preserving logical case identity.
@@ -114,7 +114,7 @@ The following paths are measured on every run: `build/bin`, `build/test-bin`, `b
 | Class | Count |
 | --- | --- |
 | graph-fixture | 16 |
-| integration | 515 |
+| integration | 518 |
 | platform/destructive | 90 |
 | pure unit | 514 |
 | unclassified | 107 |

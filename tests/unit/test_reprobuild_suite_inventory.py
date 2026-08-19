@@ -1612,6 +1612,36 @@ test "incomplete name" and:
             "class": "pure unit",
         }
 
+        # Upstream 84dd86a35 adds three membership-model integration sources.
+        # Pin each generated edge and catalog independently so their +3 graph
+        # entries and +14 cases cannot be hidden in aggregate count bumps.
+        for source, binary, cases in (
+            (
+                "tests/integration/"
+                "t_membership_model_fork_upstream_remote_alignment.nim",
+                "t_membership_model_fork_upstream_remote_alignment",
+                2,
+            ),
+            (
+                "tests/integration/"
+                "t_membership_model_resolves_sets_and_prefixes.nim",
+                "t_membership_model_resolves_sets_and_prefixes",
+                8,
+            ),
+            (
+                "tests/integration/t_membership_model_sets_cli.nim",
+                "t_membership_model_sets_cli",
+                4,
+            ),
+        ):
+            expected_enrollments[source] = {
+                "binary": "build/test-bin/" + binary,
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": cases,
+                "class": "integration",
+            }
+
         for source, expected in expected_enrollments.items():
             with self.subTest(enrolled_source=source):
                 self.assertTrue((REPO_ROOT / source).is_file())
@@ -2066,10 +2096,10 @@ test "incomplete name" and:
         # `t_develop_dependency_source_is_read_not_solved.nim`. Regenerated
         # with `scripts/generate_test_edges.nim`, which reported exactly one
         # new Nim test and no other movement.
-        # Upstream 4294d5763 adds one standalone dependency-rerun cache test,
-        # so the reconciled graph contains 1237 declared Nim sources;
-        # this was measured directly from the regenerated repro_tests.nim.
-        self.assertEqual(len(nim_specs), 1237)
+        # Upstream 4294d5763 adds one standalone dependency-rerun cache test.
+        # Upstream 84dd86a35 then adds the three membership-model sources
+        # pinned above, so the regenerated graph contains 1240 Nim sources.
+        self.assertEqual(len(nim_specs), 1240)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -2297,11 +2327,13 @@ test "incomplete name" and:
         # source reports 11 in the baseline TSV. All eleven are
         # unconditional, so the Linux-vs-Darwin delta is still +1. The BASE it
         # is added to remains the composed number described above.
-        # Freshly measured on the fully built reconciled graph: 7079 catalog
-        # cases on Darwin, including upstream 4294d5763's one new case. The
-        # independently pinned platform-qualified census below retains the
+        # Freshly measured base: 7079 catalog cases on Darwin, including
+        # upstream 4294d5763's one new case. Upstream 84dd86a35 contributes
+        # 15 independently scanned/cataloged cases: 14 in its three new
+        # sources and one added to the existing schema-round-trip source.
+        # The independently pinned platform-qualified census retains the
         # exact one-case Linux delta.
-        expected_nim_total = 7079 if sys.platform == "darwin" else 7080
+        expected_nim_total = 7094 if sys.platform == "darwin" else 7095
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated
@@ -3180,8 +3212,10 @@ test "incomplete name" and:
             # 1215 -> 1216: the order-independence regression, built and
             # probed like any other binary.
             # Freshly measured after rebuilding every source-newer-than-binary
-            # entry: 1237 Nim specs, exactly one intrinsic quarantine.
-            {"catalog": 1236, "quarantined": 1, "static": 5},
+            # entry: 1240 Nim specs, exactly one intrinsic quarantine. The
+            # three membership-model binaries added by upstream 84dd86a35
+            # account for the catalog movement from 1236 to 1239.
+            {"catalog": 1239, "quarantined": 1, "static": 5},
         )
         self.assertNotIn("missing-binary", catalog["countSourceCounts"])
         # ...and no source outran its binary, which is now a statement that
@@ -4540,7 +4574,7 @@ test "incomplete name" and:
         # bundle). See the `len(nim_specs)` pin above for why this number
         # falling is the intent and `nim_total` holding is the check.
         # 1216 -> 1217: the order-independence regression.
-        self.assertEqual(declared_nim_count, 1237)
+        self.assertEqual(declared_nim_count, 1240)
         self.assertEqual(declared_python_count, 5)
         self.assertEqual(len(nim_specs), declared_nim_count)
         self.assertEqual(len(python_specs), declared_python_count)
@@ -4591,7 +4625,8 @@ test "incomplete name" and:
         # the graph regeneration enrols.
         # 1244 -> 1221 = 1216 Nim + 5 Python: M4's solver consolidation batch.
         # 1221 -> 1222 = 1217 Nim + 5 Python.
-        self.assertEqual(data["static"]["testEntryCount"], 1242)
+        # Upstream 84dd86a35 adds three membership-model sources: 1245.
+        self.assertEqual(data["static"]["testEntryCount"], 1245)
         self.assertEqual(len(data["tests"]), data["static"]["testEntryCount"])
         self.assertEqual(
             sum(data["static"]["classificationCounts"].values()),
