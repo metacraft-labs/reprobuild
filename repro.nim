@@ -900,7 +900,7 @@ package reprobuild:
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro/repro.nim",
       binary = "build/bin/repro",
-      defines = @["release", "reproVendoredHash"],
+      defines = @["release", "reproVendoredHash", "ssl"],
       paths = ioMonNimPaths & sourceOnlyNimPaths,
       passL = reproRuntimePassL,
       nimcache = "build/nimcache/repro",
