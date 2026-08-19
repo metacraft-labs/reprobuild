@@ -116,12 +116,71 @@ template requireNonEmpty(path, expectedSchema, keyPath, value: untyped) =
 
 # ---- repos/<repo>.toml -----------------------------------------------------
 
+proc checkoutPathRejection*(value: string): string =
+  ## Why `value` is not usable as a checkout path, or "" when it is fine.
+  ##
+  ## A checkout path is a plain directory BENEATH the workspace root, and that
+  ## has to be a schema rule rather than each consumer's private caution. The
+  ## reason is what the value is eventually handed to: the paths declared here
+  ## become `<workspaceRoot> / <path>` at every clone, sync, remove and
+  ## reconcile site, and several of those legitimately delete the directory
+  ## they compute — a half-finished clone is cleaned up by removing its target,
+  ## which is correct exactly as long as the target is the repo's own tree.
+  ## Given `path = "."` that same line computes the WORKSPACE ROOT, and given
+  ## `path = "../x"` it computes a sibling; `..` inside a longer path is the
+  ## same escape with more steps. So a degenerate value here is not a bad
+  ## checkout, it is an unbounded delete somewhere else on the disk.
+  ##
+  ## `repro workspace disable` already refused these immediately before its own
+  ## `removeDir`, and that is the wrong altitude: it protects one call site and
+  ## silently leaves every other one exposed, which is precisely how a guard
+  ## that exists still fails to hold. Refusing at the schema boundary makes the
+  ## degenerate value unrepresentable, so no consumer has to remember.
+  ##
+  ## Nested paths stay legal — `a/b/c` is a normal declaration, and one repo
+  ## checked out underneath another's tree is an existing, supported layout.
+  ## Only escaping and self-referential shapes are refused.
+  if value.len == 0:
+    return "must not be empty"
+  if isAbsolute(value):
+    return "must be relative to the workspace root, not absolute"
+  # Windows drive-relative (`C:foo`) is neither absolute nor safely relative:
+  # it resolves against that drive's current directory, which is process state
+  # this code does not control.
+  if value.len >= 2 and value[1] == ':':
+    return "must not be drive-relative"
+  var segments: seq[string]
+  for raw in value.split({'/', '\\'}):
+    let segment = raw.strip()
+    if segment.len == 0:
+      continue
+    segments.add(segment)
+  if segments.len == 0:
+    return "must name a directory"
+  for segment in segments:
+    if segment == "..":
+      return "must not contain a `..` segment (it would escape the " &
+        "workspace root)"
+  var meaningful = 0
+  for segment in segments:
+    if segment != ".":
+      inc meaningful
+  if meaningful == 0:
+    return "must name a directory beneath the workspace root, not the " &
+      "workspace root itself"
+  ""
+
 proc readRepoFragment*(path: string): RepoFragment =
   let content = slurpManifest(path, schemaRepoFragmentV1)
   validateSchema(path, content, schemaRepoFragmentV1)
   result = decodeStrict(path, content, schemaRepoFragmentV1, RepoFragment)
   requireNonEmpty(path, schemaRepoFragmentV1, "repo.name", result.repo.name)
   requireNonEmpty(path, schemaRepoFragmentV1, "repo.path", result.repo.path)
+  let rejection = checkoutPathRejection(result.repo.path)
+  if rejection.len > 0:
+    raiseManifestError(path, "repo.path", schemaRepoFragmentV1,
+      schemaRepoFragmentV1,
+      "checkout path '" & result.repo.path & "' " & rejection)
 
 # ---- url-prefixes/<name>.toml ----------------------------------------------
 

@@ -796,6 +796,7 @@ tests/integration/t_cert_gate_defaults_off_and_advisory_does_not_block.nim	nim	1
 tests/integration/t_certificate_policy_required_advisory_off_modes.nim	nim	1
 tests/integration/t_certificate_signature_verifies_against_registered_key.nim	nim	1
 tests/integration/t_certificates_travel_with_pushed_commit.nim	nim	1
+tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	nim	3
 tests/integration/t_ci_skips_targets_covered_by_valid_certificate_per_platform.nim	nim	1
 tests/integration/t_cli_repro_lock_explain.nim	nim	5
 tests/integration/t_clone_action_honors_partial_blobless_and_single_branch.nim	nim	2
@@ -997,10 +998,11 @@ tests/integration/t_provider_library_c_abi_reconcile.nim	nim	2
 tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim	nim	1
 tests/integration/t_provisioning_contributions.nim	nim	6
 tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim	nim	2
+tests/integration/t_pull_refuses_to_rewind_unpublished_work.nim	nim	2
 tests/integration/t_r2_iso_boot.nim	nim	2
 tests/integration/t_r9_systemd_boot.nim	nim	2
 tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim	nim	1
-tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	nim	2
+tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	nim	3
 tests/integration/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty.nim	nim	3
 tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	nim	5
 tests/integration/t_repro_build_test_aggregate_builds_every_test.nim	nim	2
