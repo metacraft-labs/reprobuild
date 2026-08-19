@@ -246,8 +246,14 @@
     #     the saved descriptor; the author's output stays readable on stderr.
     #     Both of this repository's consumers already keep the two streams
     #     apart, so they see a clean document rather than a merged one.
+    #
+    # Advanced again from 5c77edb2 to 0b5b5ec5. The fork now runs its stdlib
+    # Testament category in CI and fixes std/unittest under the JavaScript
+    # hot-code-reloading transform. The latter is required by CodeTracer's
+    # monitored import/restore path: an initialized local could make the JS HCR
+    # transform absorb the following try and emit an orphaned finally.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=5c77edb2a9eaeaea42c5fe980671484a445d1fc9";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=0b5b5ec507d2d9c731d222184c625851377a02c8";
       flake = false;
     };
     nim-csources-src = {
