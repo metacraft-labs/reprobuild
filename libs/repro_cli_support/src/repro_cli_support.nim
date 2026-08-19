@@ -24915,6 +24915,15 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
   ## (``repoCheckoutRecognized`` false) is skipped and reported rather than
   ## having its remotes rewritten. This protects an unrelated repository that
   ## happens to occupy a repo path from being silently re-pointed.
+  ##
+  ## Workspace-Membership-Model.md — the loop below is already the model's
+  ## contract and needs no special case for it: it configures EVERY
+  ## `ResolvedRepo.remotes` entry under the LOCAL name the fragment gave it,
+  ## so a fork's `upstream` lands beside `origin` and at its own URL, which
+  ## per-binding `url_prefix` / `url_suffix` now makes a different path than
+  ## the fork's. The resolver guarantees the primary entry is named `origin`;
+  ## nothing here has to enforce that, and nothing here may assume the list has
+  ## exactly one entry.
   for repo in repos:
     let repoAbs = workspaceRoot / repo.path
     if not dirExists(repoAbs / ".git"):
@@ -49042,15 +49051,22 @@ proc readDefaultProjectsFromHostConfig(workspaceRoot: string): seq[string] =
 # `reprobuild-specs/CLI/workspace.md` §"The Two Axes".
 
 proc definedProjectNames*(workspaceRoot: string): seq[string] =
-  ## Every project (and variant) the workspace's manifests root DEFINES, sorted.
+  ## Every repo-set (project, variant) the workspace's manifests root DEFINES,
+  ## sorted.
   ##
   ## This is the definition axis's view of the world and it is deliberately a
-  ## directory listing rather than a resolve: a project whose manifest is
+  ## directory listing rather than a resolve: a set whose manifest is
   ## malformed still EXISTS, and reporting it as undefined would send the
-  ## operator to `projects add` to create a file that is already there.
+  ## operator to `sets add` to create a file that is already there.
+  ##
+  ## `repo-sets/` joins the same listing rather than getting a parallel one:
+  ## Workspace-Membership-Model.md retires "project" as a separate kind, so a
+  ## set and a project are one namespace here as they are in resolution
+  ## (`resolveWorkspaceProjectByName`). An unconverted manifest repo has no
+  ## `repo-sets/` directory and the listing is unchanged for it.
   let manifests = manifestsRoot(workspaceRoot)
   var seen: seq[string]
-  for sub in ["projects", "variants"]:
+  for sub in ["projects", "variants", "repo-sets"]:
     let dir = manifests / sub
     if not dirExists(dir):
       continue
@@ -49074,7 +49090,8 @@ proc manifestDefinitionsAreVisible*(workspaceRoot: string): bool =
   ## answer is "no manifests yet" — the PS-4 lesson, which learned the same
   ## thing the hard way about conflict refusal.
   let manifests = manifestsRoot(workspaceRoot)
-  dirExists(manifests / "projects") or dirExists(manifests / "variants")
+  dirExists(manifests / "projects") or dirExists(manifests / "variants") or
+    dirExists(manifests / "repo-sets")
 
 proc projectSetRepoPaths(workspaceRoot: string;
                          names: openArray[string]): seq[string] =
@@ -49186,8 +49203,8 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
         undefined.join(", "))
       stderr.writeLine("  defined projects: " &
         (if defined.len > 0: defined.join(", ") else: "<none>"))
-      stderr.writeLine("  `repro ws projects list` shows them all; " &
-        "`repro ws projects add <name>` defines a new one")
+      stderr.writeLine("  `repro ws sets list` shows them all; " &
+        "`repro ws sets add <name>` defines a new one")
       return 2
 
   let existing = readWorkspaceProjects(workspaceRoot)
@@ -49674,7 +49691,9 @@ const reproWorkspaceSubcommands = [
   "init", "sync", "pull", "lock", "status", "list", "manifests",
   "shared-clones", "forall", "bootstrap", "provision",
   # WV-2..WV-6 — membership, definition, and the two branch-family verbs.
-  "enable", "disable", "projects", "repos", "new", "switch",
+  # `sets` is the membership model's spelling of `projects`, which is kept
+  # alongside it until the manifest repo is converted.
+  "enable", "disable", "sets", "projects", "repos", "new", "switch",
   "publish-evidence",
   # RA-32 — the explicit lock-record repair. Never invoked implicitly.
   "migrate-locks",
@@ -49836,6 +49855,30 @@ proc projectManifestStub(project: string): string =
   "default_revision = \"main\"\n" &
   "trunk = \"main\"\n"
 
+proc repoSetManifestStub(name: string): string =
+  ## Workspace-Membership-Model.md — a NEW repo-set: a name and an empty
+  ## membership list, and nothing else. There is no `default_revision` and no
+  ## `default_remote` to stub, deliberately: a set that carried them would make
+  ## a member resolve differently depending on who referenced it, and a repo
+  ## fragment fully determining its own checkout is the invariant that makes it
+  ## portable between workspaces.
+  ##
+  ## Unlike `projectManifestStub`, the membership arrays ARE written out. A
+  ## repo-set manifest has no array-of-tables for a bare key to attach itself
+  ## to, so the "written after `[[remote]]` and read as a field of the last
+  ## remote" trap that forced the project stub to omit `includes` cannot arise
+  ## here — verified against the pinned reader in both key orders.
+  ##
+  ## Both keys are stubbed even though a new set has neither, because which one
+  ## an entry belongs in is the whole point: `member_sets` and `member_repos`
+  ## are two NAMESPACES, and a stub carrying only one would invite the next
+  ## entry into whichever happened to be there.
+  "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &
+  "[repo-set]\n" &
+  "name = \"" & name & "\"\n\n" &
+  "member_sets = [\n]\n\n" &
+  "member_repos = [\n]\n"
+
 proc commitAndPushManifest(identity: GitToolIdentity;
                            gitBin, manifestRoot, message: string;
                            paths: openArray[string]): tuple[
@@ -49920,11 +49963,135 @@ proc projectFilesUnder(manifestRoot: string): seq[string] =
       result.add(path)
   sort(result)
 
+proc repoSetFilesUnder(manifestRoot: string): seq[string] =
+  ## Absolute paths of every ``repo-sets/*.toml`` under the manifest root,
+  ## sorted by set name. Empty for an unconverted manifest repo.
+  let dir = manifestRoot / "repo-sets"
+  if not dirExists(dir):
+    return @[]
+  for kind, path in walkDir(dir):
+    if kind in {pcFile, pcLinkToFile} and path.splitFile.ext == ".toml":
+      result.add(path)
+  sort(result)
+
+type
+  MembershipKind = enum
+    ## Which file kind a membership name resolves to. The distinction exists
+    ## only where the two are AUTHORED differently — a repo-set names members,
+    ## a project lists include paths and carries a remote table. Everywhere
+    ## else (listing, enabling, resolving) they are one namespace.
+    mkRepoSet
+    mkProject
+
+  MembershipFile = object
+    name: string
+    kind: MembershipKind
+    abs: string
+    rel: string    ## manifest-root-relative, for git staging and messages
+
+proc membershipFileFor(manifestRoot, name: string): MembershipFile =
+  ## The `repo-sets/<name>.toml` or `projects/<name>.toml` that DEFINES
+  ## `name`, or a record with an empty `abs` when neither exists.
+  ##
+  ## `repo-sets/` is consulted first because it is the model's one file kind;
+  ## `projects/` remains because the manifest repo is not converted, and while
+  ## it is not, a name that exists only there has to keep resolving.
+  let setAbs = manifestRoot / "repo-sets" / (name & ".toml")
+  if fileExists(setAbs):
+    return MembershipFile(name: name, kind: mkRepoSet, abs: setAbs,
+      rel: "repo-sets/" & name & ".toml")
+  let projectAbs = manifestRoot / "projects" / (name & ".toml")
+  if fileExists(projectAbs):
+    return MembershipFile(name: name, kind: mkProject, abs: projectAbs,
+      rel: "projects/" & name & ".toml")
+  MembershipFile(name: name, kind: mkRepoSet, abs: "",
+    rel: "repo-sets/" & name & ".toml")
+
+const
+  memberSetsKey = "member_sets"
+  memberReposKey = "member_repos"
+
+proc membershipKeyFor(manifestRoot, name: string): string =
+  ## Which membership key a name belongs under — ``member_repos`` when
+  ## ``repos/<name>.toml`` defines it, ``member_sets`` when
+  ## ``repo-sets/<name>.toml`` does, and "" when NEITHER does.
+  ##
+  ## The key is read off what the name actually resolves to rather than
+  ## inferred from the verb, because the two keys are two namespaces and
+  ## putting a name in the wrong one makes it resolve to nothing (or, worse,
+  ## to a different thing that happens to share the name — 7 of the 11
+  ## projects in the metacraft manifest repo have a set and a repo with the
+  ## same name). A caller that gets "" must fail rather than pick: guessing is
+  ## how a name ends up in the key that silently means something else.
+  if fileExists(manifestRoot / "repos" / (name & ".toml")):
+    return memberReposKey
+  if fileExists(manifestRoot / "repo-sets" / (name & ".toml")):
+    return memberSetsKey
+  ""
+
+proc editSetMember(setFile, key, member: string; add: bool): bool =
+  ## Add or drop ``"<member>",`` in the named membership array of a repo-set.
+  ## Returns true when the file changed, false when it already said what was
+  ## asked (idempotent) — the two-key mirror of ``appendFragmentInclude`` /
+  ## ``removeFragmentInclude``.
+  ##
+  ## The array is located by its KEY rather than by "the next line that is a
+  ## lone ``]``": a repo-set carries two arrays, so the positional rule the
+  ## include helpers can afford would put half the entries in the wrong
+  ## namespace.
+  let content = readFile(setFile)
+  let quoted = "\"" & member & "\""
+  var lines = content.splitLines()
+  var arrayStart = -1
+  for idx, line in lines:
+    let stripped = line.strip()
+    if stripped.startsWith(key) and stripped.endsWith("["):
+      arrayStart = idx
+      break
+  var arrayEnd = -1
+  if arrayStart >= 0:
+    for idx in arrayStart + 1 ..< lines.len:
+      if lines[idx].strip() == "]":
+        arrayEnd = idx
+        break
+
+  if add:
+    if arrayStart >= 0 and arrayEnd >= 0:
+      for idx in arrayStart + 1 ..< arrayEnd:
+        if lines[idx].strip().startsWith(quoted):
+          return false
+      lines.insert("  " & quoted & ",", arrayEnd)
+      writeFile(setFile, lines.join("\n"))
+      return true
+    # No such array yet — append a fresh one rather than guessing that the
+    # other key's array was meant.
+    lines.add("")
+    lines.add(key & " = [")
+    lines.add("  " & quoted & ",")
+    lines.add("]")
+    writeFile(setFile, lines.join("\n"))
+    return true
+
+  if arrayStart < 0 or arrayEnd < 0:
+    return false
+  var outLines: seq[string]
+  var removed = false
+  for idx, line in lines:
+    if idx > arrayStart and idx < arrayEnd and
+        line.strip().startsWith(quoted):
+      removed = true
+      continue
+    outLines.add(line)
+  if not removed:
+    return false
+  writeFile(setFile, outLines.join("\n"))
+  true
+
 proc projectsIncludingFragment(manifestRoot, fragmentRel: string): seq[string] =
   ## Which projects carry an ``includes`` edge to ``fragmentRel``. This is the
   ## authority for "is this fragment still referenced" — the question both
-  ## `projects remove --prune-orphan-repos` and `repos remove
-  ## --delete-fragment` have to answer before deleting a shared declaration.
+  ## `sets remove --prune-orphan-repos` and `repos remove --delete-fragment`
+  ## have to answer before deleting a shared declaration.
   for file in projectFilesUnder(manifestRoot):
     var manifest: ProjectManifest
     try:
@@ -49936,6 +50103,33 @@ proc projectsIncludingFragment(manifestRoot, fragmentRel: string): seq[string] =
         result.add(file.splitFile.name)
       continue
     if fragmentRel in manifest.includes:
+      result.add(file.splitFile.name)
+
+proc membershipsDeclaringRepo(manifestRoot, repoName: string): seq[string] =
+  ## Every repo-set OR project that declares the repo named `repoName` — by
+  ## `members` name or by `includes` path.
+  ##
+  ## The two spellings have to be asked TOGETHER. Half-converted, a fragment
+  ## can be referenced from a repo-set by name and from a project by path at
+  ## the same time, and answering "is anything still referencing this" from
+  ## only one of them is how a `--delete-fragment` deletes a declaration
+  ## something still needs.
+  let fragmentRel = "repos/" & repoName & ".toml"
+  result = projectsIncludingFragment(manifestRoot, fragmentRel)
+  for file in repoSetFilesUnder(manifestRoot):
+    var manifest: RepoSetManifest
+    try:
+      manifest = readRepoSet(file)
+    except CatchableError:
+      if ("\"" & repoName & "\"") in readFile(file):
+        result.add(file.splitFile.name)
+      continue
+    # Only `member_repos` is consulted. `member_sets` is a different NAMESPACE:
+    # a set may legitimately carry the same name as this repo (7 of the 11
+    # projects in the metacraft manifest repo do), and counting that as a
+    # reference would report a fragment as still-declared by a set that names
+    # a set.
+    if repoName in manifest.member_repos and file.splitFile.name notin result:
       result.add(file.splitFile.name)
 
 proc validateFragmentPath(value: string): string =
@@ -49953,21 +50147,34 @@ proc validateFragmentPath(value: string): string =
       return "--path may not contain a '..' segment, got '" & value & "'"
   ""
 
-proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
-  ## ``repro workspace projects list|add|remove`` — the DEFINITION axis for
-  ## projects. `add` / `remove` write, commit and push to the manifest repo;
+proc runWorkspaceSetsCommand*(args: openArray[string];
+                              spelling = "sets"): int =
+  ## ``repro workspace sets list|add|remove`` — the DEFINITION axis for repo
+  ## sets. `add` / `remove` write, commit and push to the manifest repo;
   ## `list` is read-only.
   ##
-  ## Activating a project in this workspace is `enable` / `disable`; see
+  ## Enabling a set in this workspace is `enable` / `disable`; see
   ## `reprobuild-specs/CLI/workspace.md` §"The Two Axes".
+  ##
+  ## `spelling` is the verb the operator actually typed. `repro ws projects …`
+  ## is retained as an alias while the manifest repo is unconverted, and it is
+  ## not merely a rename: `sets add` scaffolds a `repo-sets/<name>.toml`, while
+  ## `projects add` keeps scaffolding a `projects/<name>.toml`, so the alias
+  ## keeps doing exactly what it did rather than quietly converting a repo one
+  ## file at a time. Every other operation — listing, removing, resolving —
+  ## treats the two directories as ONE namespace, which is the model's claim
+  ## that "project" was a role and not a kind.
+  let verb = "repro workspace " & spelling
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
-    echo "repro workspace projects list [--enabled|--disabled|--all] [--json]"
-    echo "repro workspace projects add <name> [-m DESC]"
-    echo "repro workspace projects remove <name> [--prune-orphan-repos]"
-    echo "  list   every DEFINED project, marked enabled/disabled for this " &
+    echo verb & " list [--enabled|--disabled|--all] [--json]"
+    echo verb & " add <name> [-m DESC]"
+    echo verb & " remove <name> [--prune-orphan-repos]"
+    echo "  list   every DEFINED repo-set, marked enabled/disabled for this " &
       "workspace."
-    echo "  add    define a NEW project in the manifest repo. To activate an " &
-      "existing one, use `repro ws enable <name>`."
+    echo "  add    define a NEW " &
+      (if spelling == "sets": "repo-set (repo-sets/<name>.toml)"
+       else: "project (projects/<name>.toml)") &
+      ". To activate an existing one, use `repro ws enable <name>`."
     echo "  remove delete the definition. Disable it here first."
     return 0
   let sub = if args.len > 0 and not args[0].startsWith("-"): args[0] else: "list"
@@ -49989,7 +50196,7 @@ proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
         if arg.startsWith("--workspace-root="):
           discard
         elif arg.startsWith("-"):
-          stderr.writeLine("repro workspace projects list: unknown flag " & arg)
+          stderr.writeLine(verb & " list: unknown flag " & arg)
           return 2
     let active = readWorkspaceProjects(workspaceRoot)
     let defined = definedProjectNames(workspaceRoot)
@@ -50031,11 +50238,15 @@ proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
 
   let manifestRoot = manifestRepoRootFor(workspaceRoot)
   if not dirExists(manifestRoot):
-    stderr.writeLine("repro workspace projects: no manifest repo at " &
+    stderr.writeLine(verb & ": no manifest repo at " &
       manifestRoot & " (run `repro workspace init` first)")
     return 1
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   let gitBin = identity.binaryPath
+  # Which directory `add` scaffolds into. `remove` and `list` do not consult
+  # this: they take whichever file DEFINES the name (`membershipFileFor`), so
+  # a set defined either way is removable by either spelling.
+  let addDir = if spelling == "sets": "repo-sets" else: "projects"
 
   case sub
   of "add":
@@ -50052,41 +50263,49 @@ proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
       elif a.startsWith("--workspace-root="):
         discard
       elif a.startsWith("-"):
-        stderr.writeLine("repro workspace projects add: unknown flag " & a)
+        stderr.writeLine(verb & " add: unknown flag " & a)
         return 2
       else:
         name = a
       inc i
     if name.len == 0:
-      stderr.writeLine("repro workspace projects add: missing <name>")
+      stderr.writeLine(verb & " add: missing <name>")
       return 2
-    createDir(manifestRoot / "projects")
-    let projectFileRel = "projects/" & name & ".toml"
-    let projectFileAbs = manifestRoot / "projects" / (name & ".toml")
-    if fileExists(projectFileAbs):
+    # The guard consults BOTH directories even though only one is scaffolded
+    # into: `sets add codetracer` in a repo whose `projects/codetracer.toml`
+    # exists must not create a second definition of the same name, because the
+    # two are one namespace to every reader.
+    let existing = membershipFileFor(manifestRoot, name)
+    if existing.abs.len > 0:
       # The one guard the axis split needs. This spelling did not disappear, it
       # changed meaning, so it cannot fail as an unknown subcommand — and an
-      # operator reaching for the old "activate this project" sense lands here.
-      stderr.writeLine("repro workspace projects add: project '" & name &
-        "' already exists at " & projectFileAbs)
-      stderr.writeLine("  `projects add` DEFINES a new project. To activate " &
-        "this one in this workspace: repro ws enable " & name)
+      # operator reaching for the old "activate this" sense lands here.
+      stderr.writeLine(verb & " add: '" & name &
+        "' already exists at " & existing.abs)
+      stderr.writeLine("  `" & spelling & " add` DEFINES a new one. To " &
+        "activate this in this workspace: repro ws enable " & name)
       return 1
-    writeFile(projectFileAbs, projectManifestStub(name))
-    var paths = @[projectFileRel]
+    createDir(manifestRoot / addDir)
+    let fileRel = addDir & "/" & name & ".toml"
+    let fileAbs = manifestRoot / addDir / (name & ".toml")
+    writeFile(fileAbs,
+      if addDir == "repo-sets": repoSetManifestStub(name)
+      else: projectManifestStub(name))
+    var paths = @[fileRel]
     if desc.len > 0:
-      let docRel = "projects/" & name & ".md"
-      writeFile(manifestRoot / "projects" / (name & ".md"),
+      let docRel = addDir & "/" & name & ".md"
+      writeFile(manifestRoot / addDir / (name & ".md"),
         "# " & name & "\n\n" & desc & "\n")
       paths.add(docRel)
-    let msg = "Add project " & name &
-      (if desc.len > 0: " (" & desc & ")" else: "")
+    let msg = "Add " & (if addDir == "repo-sets": "repo-set " else: "project ") &
+      name & (if desc.len > 0: " (" & desc & ")" else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
-    stdout.writeLine("repro workspace projects add: " & name & " — " &
-      res.diagnostic)
-    stdout.writeLine("repro workspace projects add: defined, not enabled — " &
-      "`repro ws repos add <repo> --project=" & name & "` to give it repos, " &
-      "`repro ws enable " & name & "` to activate it here")
+    stdout.writeLine(verb & " add: " & name & " — " & res.diagnostic)
+    stdout.writeLine(verb & " add: defined, not enabled — " &
+      "`repro ws repos add <repo> --" &
+      (if addDir == "repo-sets": "set=" else: "project=") & name &
+      "` to give it repos, `repro ws enable " & name &
+      "` to activate it here")
     return res.code
   of "remove":
     var name = ""
@@ -50097,17 +50316,19 @@ proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
       elif a.startsWith("--workspace-root="):
         discard
       elif a.startsWith("-"):
-        stderr.writeLine("repro workspace projects remove: unknown flag " & a)
+        stderr.writeLine(verb & " remove: unknown flag " & a)
         return 2
       else:
         name = a
     if name.len == 0:
-      stderr.writeLine("repro workspace projects remove: missing <name>")
+      stderr.writeLine(verb & " remove: missing <name>")
       return 2
-    let projectFileAbs = manifestRoot / "projects" / (name & ".toml")
-    if not fileExists(projectFileAbs):
-      stderr.writeLine("repro workspace projects remove: project '" & name &
-        "' does not exist (" & projectFileAbs & ")")
+    let target = membershipFileFor(manifestRoot, name)
+    if target.abs.len == 0:
+      stderr.writeLine(verb & " remove: '" & name &
+        "' does not exist (looked for " &
+        (manifestRoot / "repo-sets" / (name & ".toml")) & " and " &
+        (manifestRoot / "projects" / (name & ".toml")) & ")")
       return 1
     # Removing the definition under a live membership record leaves a set entry
     # no manifest layer can resolve, which breaks every subsequent workspace
@@ -50115,33 +50336,42 @@ proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
     # their behalf, because that would delete checkouts as a side effect of a
     # manifest edit.
     if name in readWorkspaceProjects(workspaceRoot):
-      stderr.writeLine("repro workspace projects remove: '" & name &
+      stderr.writeLine(verb & " remove: '" & name &
         "' is enabled in this workspace")
       stderr.writeLine("  run `repro ws disable " & name & "` first, then " &
         "remove the definition")
       return 2
-    var manifest: ProjectManifest
-    var includedFragments: seq[string]
+    # What this definition referenced, as `repos/<r>.toml` paths regardless of
+    # which spelling it used to reference them — the orphan question is about
+    # FRAGMENTS, and a member name and an include path name the same file.
+    var referencedFragments: seq[string]
     try:
-      manifest = readProjectManifest(projectFileAbs)
-      includedFragments = manifest.includes
+      case target.kind
+      of mkProject:
+        referencedFragments = readProjectManifest(target.abs).includes
+      of mkRepoSet:
+        # `member_repos` only: an entry under `member_sets` names a set, and a
+        # set has no fragment to orphan even when a repo shares its name.
+        for member in readRepoSet(target.abs).member_repos:
+          if fileExists(manifestRoot / "repos" / (member & ".toml")):
+            referencedFragments.add("repos/" & member & ".toml")
     except CatchableError as exc:
-      stderr.writeLine("repro workspace projects remove: warning: cannot " &
-        "read " & projectFileAbs & " (" & exc.msg & "); removing it without " &
-        "an orphan report")
-    var paths = @["projects/" & name & ".toml"]
-    removeFile(projectFileAbs)
-    let docAbs = manifestRoot / "projects" / (name & ".md")
-    if fileExists(docAbs):
-      removeFile(docAbs)
-      paths.add("projects/" & name & ".md")
+      stderr.writeLine(verb & " remove: warning: cannot read " & target.abs &
+        " (" & exc.msg & "); removing it without an orphan report")
+    var paths = @[target.rel]
+    removeFile(target.abs)
+    let docRel = target.rel.changeFileExt("md")
+    if fileExists(manifestRoot / docRel):
+      removeFile(manifestRoot / docRel)
+      paths.add(docRel)
     # Now that the definition is gone, anything it alone referenced is an
     # orphan. A fragment is a REUSABLE declaration, so the default is to leave
-    # it: another project may adopt it tomorrow, and deleting it would make
-    # that a re-authoring job rather than one include line.
+    # it: another set may adopt it tomorrow, and deleting it would make that a
+    # re-authoring job rather than one member line.
     var orphans: seq[string]
-    for fragmentRel in includedFragments:
-      if projectsIncludingFragment(manifestRoot, fragmentRel).len == 0:
+    for fragmentRel in referencedFragments:
+      let repoName = fragmentRel.splitFile.name
+      if membershipsDeclaringRepo(manifestRoot, repoName).len == 0:
         orphans.add(fragmentRel)
     if pruneOrphans:
       for fragmentRel in orphans:
@@ -50149,54 +50379,69 @@ proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
         if fileExists(abs):
           removeFile(abs)
           paths.add(fragmentRel)
-        let docRel = fragmentRel.changeFileExt("md")
-        if fileExists(manifestRoot / docRel):
-          removeFile(manifestRoot / docRel)
-          paths.add(docRel)
-    let msg = "Remove project " & name &
+        let fragmentDocRel = fragmentRel.changeFileExt("md")
+        if fileExists(manifestRoot / fragmentDocRel):
+          removeFile(manifestRoot / fragmentDocRel)
+          paths.add(fragmentDocRel)
+    let msg = "Remove " &
+      (if target.kind == mkRepoSet: "repo-set " else: "project ") & name &
       (if pruneOrphans and orphans.len > 0:
          " (and " & $orphans.len & " orphaned repo fragment(s))"
        else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
-    stdout.writeLine("repro workspace projects remove: " & name & " — " &
-      res.diagnostic)
+    stdout.writeLine(verb & " remove: " & name & " — " & res.diagnostic)
     if orphans.len > 0:
       if pruneOrphans:
-        stdout.writeLine("repro workspace projects remove: pruned " &
-          $orphans.len & " orphaned fragment(s): " & orphans.join(", "))
+        stdout.writeLine(verb & " remove: pruned " & $orphans.len &
+          " orphaned fragment(s): " & orphans.join(", "))
       else:
-        stdout.writeLine("repro workspace projects remove: " & $orphans.len &
+        stdout.writeLine(verb & " remove: " & $orphans.len &
           " fragment(s) are now unreferenced and were KEPT: " &
           orphans.join(", "))
         stdout.writeLine("  pass --prune-orphan-repos to delete them too")
     return res.code
   else:
-    stderr.writeLine("repro workspace projects: unknown subcommand '" & sub &
+    stderr.writeLine(verb & ": unknown subcommand '" & sub &
       "' (expected: list, add, remove)")
     return 2
 
+proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
+  ## ``repro workspace projects …`` — the retained spelling of `sets`.
+  ##
+  ## Kept because the manifest repo still carries `projects/*.toml`, and a verb
+  ## that named the thing an operator is looking at cannot fail as unknown
+  ## while that is true. It is retired from the docs, not from the CLI, and it
+  ## is removed with the third migration step rather than the second.
+  runWorkspaceSetsCommand(args, "projects")
+
 proc runWorkspaceReposCommand*(args: openArray[string]): int =
   ## ``repro workspace repos list|add|remove`` — the DEFINITION axis for repos:
-  ## the fragments under ``repos/`` and the ``includes`` edges that wire them
-  ## into projects.
+  ## the fragments under ``repos/`` and the membership edges that wire them
+  ## into repo-sets (``members``) or projects (``includes``).
   ##
-  ## A repo fragment is declared ONCE and included by any number of projects,
-  ## which is precisely what keeps two projects from conflicting over a
-  ## checkout path (`project_set.nim`). That is why the project is a repeatable
-  ## flag here rather than a positional implying exactly one.
+  ## A repo fragment is declared ONCE and named by any number of sets, which is
+  ## precisely what keeps two sets from conflicting over a checkout path
+  ## (`resolver.nim`'s dedup-by-path rule). That is why the target is a
+  ## repeatable flag here rather than a positional implying exactly one.
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
-    echo "repro workspace repos list [--project=NAME] " &
+    echo "repro workspace repos list [--set=NAME|--project=NAME] " &
       "[--enabled|--disabled|--all] [--json]"
-    echo "repro workspace repos add <repo> --remote=URL [--project=NAME]... " &
-      "[--revision=REV] [--path=DIR] [-m DESC]"
-    echo "repro workspace repos remove <repo> [--project=NAME]... " &
-      "[--delete-fragment]"
-    echo "  --project      repeatable; defaults to this workspace's primary " &
-      "project."
-    echo "  --remote=URL   reuses the project's matching [[remote]] when one " &
-      "already serves that URL; otherwise adds one org-named remote."
+    echo "repro workspace repos add <repo> --remote=URL " &
+      "[--set=NAME|--project=NAME]... [--branch=B] [--revision=REV] " &
+      "[--path=DIR] [-m DESC]"
+    echo "repro workspace repos remove <repo> " &
+      "[--set=NAME|--project=NAME]... [--delete-fragment]"
+    echo "  --set          repeatable; the repo-set to name the repo in. " &
+      "Defaults to this workspace's primary set."
+    echo "  --project      the retained spelling of --set, for a manifest " &
+      "repo still carrying projects/<name>.toml."
+    echo "  --remote=URL   reuses the matching url-prefix (or, for a project " &
+      "target, the matching [[remote]]) when one already serves that URL; " &
+      "otherwise adds one org-named prefix."
+    echo "  --branch=B     the branch the repo follows. Every fragment " &
+      "should declare one — nothing else determines its checkout."
     echo "  --revision=REV pins the fragment (validated against the remote). " &
-      "Omitted, the repo inherits the project's default_revision."
+      "Superseded by --branch; pins belong in lock files."
     echo "  --path=DIR     checkout directory; defaults to <repo>."
     echo "  -m DESC        writes repos/<repo>.md, the source of the " &
       "generated project docs."
@@ -50217,8 +50462,8 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     var wantDisabled = false
     var asJson = false
     for arg in rest:
-      if arg.startsWith("--project="):
-        scopeProject = arg["--project=".len .. ^1]
+      if arg.startsWith("--project=") or arg.startsWith("--set="):
+        scopeProject = arg[arg.find('=') + 1 .. ^1]
       elif arg == "--enabled": wantEnabled = true
       elif arg == "--disabled": wantDisabled = true
       elif arg == "--all": wantEnabled = false; wantDisabled = false
@@ -50264,8 +50509,11 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
       try:
         let m = readRepoFragment(file)
         repoPath = m.repo.path
-        remote = m.repo.remote.get("")
-        revision = m.repo.revision.get("")
+        # Report whichever spelling the fragment actually uses, so a listing of
+        # a half-converted manifest repo shows what is there rather than a
+        # blank column for every converted fragment.
+        remote = m.repo.url_prefix.get(m.repo.remote.get(""))
+        revision = m.repo.branch.get(m.repo.revision.get(""))
       except CatchableError:
         discard
       if scopeProject.len > 0 and repoPath notin scopePaths:
@@ -50298,19 +50546,24 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
   var projects: seq[string]
   var remote = ""
   var revision = ""
+  var branch = ""
   var checkoutPath = ""
   var desc = ""
   var deleteFragment = false
   var i = 0
   while i < rest.len:
     let a = rest[i]
-    if a.startsWith("--project="):
-      let p = a["--project=".len .. ^1]
+    # `--set=` and `--project=` name the SAME namespace; which file backs the
+    # name is `membershipFileFor`'s answer, not the operator's to state twice.
+    if a.startsWith("--project=") or a.startsWith("--set="):
+      let p = a[a.find('=') + 1 .. ^1]
       if p notin projects: projects.add(p)
     elif a.startsWith("--remote="):
       remote = a["--remote=".len .. ^1]
     elif a.startsWith("--revision="):
       revision = a["--revision=".len .. ^1]
+    elif a.startsWith("--branch="):
+      branch = a["--branch=".len .. ^1]
     elif a.startsWith("--path="):
       checkoutPath = a["--path=".len .. ^1]
     elif a == "--delete-fragment":
@@ -50346,22 +50599,43 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         stderr.writeLine("repro workspace repos add: " & pathError)
         return 2
     if projects.len == 0:
-      # Default to the workspace's PRIMARY project — the same project every
-      # other single-project verb falls back to, so `repos add` in a
-      # single-project workspace needs no flag at all.
+      # Default to the workspace's PRIMARY set — the same one every other
+      # single-set verb falls back to, so `repos add` in a single-set
+      # workspace needs no flag at all.
       let active = readWorkspaceProjects(workspaceRoot)
       if active.len == 0:
-        stderr.writeLine("repro workspace repos add: no --project given and " &
-          "this workspace has no active project to default to")
-        stderr.writeLine("  pass --project=<name> (repeatable)")
+        stderr.writeLine("repro workspace repos add: no --set given and " &
+          "this workspace has no active repo-set to default to")
+        stderr.writeLine("  pass --set=<name> (repeatable)")
         return 2
       projects.add(active[0])
+    var targets: seq[MembershipFile]
     for project in projects:
-      if not fileExists(manifestRoot / "projects" / (project & ".toml")):
-        stderr.writeLine("repro workspace repos add: project '" & project &
-          "' does not exist (" &
+      let target = membershipFileFor(manifestRoot, project)
+      if target.abs.len == 0:
+        stderr.writeLine("repro workspace repos add: '" & project &
+          "' does not exist (looked for " &
+          (manifestRoot / "repo-sets" / (project & ".toml")) & " and " &
           (manifestRoot / "projects" / (project & ".toml")) & ")")
         return 1
+      targets.add(target)
+    # A fragment carries ONE spelling of where it comes from. A repo-set has no
+    # `[[remote]]` table to reference and a project has no `url-prefixes/`
+    # contract, so one `add` cannot satisfy both at once. Refusing is honest;
+    # writing a fragment that half-resolves for one of the two targets is not.
+    var hasSet = false
+    var hasProject = false
+    for target in targets:
+      case target.kind
+      of mkRepoSet: hasSet = true
+      of mkProject: hasProject = true
+    if hasSet and hasProject:
+      stderr.writeLine("repro workspace repos add: the named targets mix a " &
+        "repo-set and a project, and a fragment can only carry one of " &
+        "`url_prefix` (repo-set) or `remote` (project)")
+      stderr.writeLine("  run `repos add` once per kind, or convert the " &
+        "project to a repo-set first")
+      return 2
 
     let effectivePath = if checkoutPath.len > 0: checkoutPath else: repo
     # An EXISTING fragment is reused, never rewritten: other projects already
@@ -50383,6 +50657,9 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
       if revision.len > 0 and existing.repo.revision.get("") != revision:
         conflicts.add("revision (" & existing.repo.revision.get("(inherited)") &
           " vs " & revision & ")")
+      if branch.len > 0 and existing.repo.branch.get("") != branch:
+        conflicts.add("branch (" & existing.repo.branch.get("(none)") &
+          " vs " & branch & ")")
       if conflicts.len > 0:
         stderr.writeLine("repro workspace repos add: '" & repo &
           "' is already declared with different " & conflicts.join(", "))
@@ -50390,68 +50667,122 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           " directly if the declaration itself should change")
         return 1
 
+    # `--branch` is validated the same way `--revision` always was, and for the
+    # same reason: a manifest naming a branch that does not exist authors fine
+    # and fails at sync time on everyone else's machine.
+    let requestedRef = if branch.len > 0: branch else: revision
+    if requestedRef.len > 0 and not fragmentExisted:
+      let check = remoteRevisionState(gitBin, remote, requestedRef)
+      if check.state == rrsMissing:
+        stderr.writeLine("repro workspace repos add: '" & requestedRef &
+          "' does not exist on " & remote & " (no matching branch or tag).")
+        return 1
+      elif check.state == rrsUnknown:
+        stderr.writeLine("repro workspace repos add: warning: could " &
+          "not verify '" & requestedRef & "' on " & remote & ": " &
+          check.diagnostic)
+
     var paths: seq[string]
     var remoteNames: seq[string]
-    for project in projects:
-      let projectFileAbs = manifestRoot / "projects" / (project & ".toml")
-      var manifest: ProjectManifest
-      try:
-        manifest = readProjectManifest(projectFileAbs)
-      except CatchableError as exc:
-        stderr.writeLine("repro workspace repos add: cannot read " &
-          projectFileAbs & ": " & exc.msg)
-        return 1
-      let defaultRemote =
-        if manifest.project.default_remote.isSome:
-          manifest.project.default_remote.get()
-        else:
-          ""
-      let defaultRevision =
-        if manifest.project.default_revision.isSome:
-          manifest.project.default_revision.get()
-        else:
-          ""
-      let plan = planRepoRemote(manifest.remote, defaultRemote, repo, remote)
-      if plan.error.len > 0:
-        stderr.writeLine("repro workspace repos add: " & project & ": " &
-          plan.error)
-        return 1
-      # The revision is NEVER guessed. Without `--revision` the fragment omits
-      # the key and inherits the project's `default_revision`; a guessed value
-      # pins the repo to a branch that need not exist, and the failure only
-      # surfaces later, at sync time, for everyone.
-      if revision.len > 0 and not fragmentExisted:
-        let check = remoteRevisionState(gitBin, remote, revision)
-        if check.state == rrsMissing:
-          stderr.writeLine("repro workspace repos add: revision '" &
-            revision & "' does not exist on " & remote &
-            " (no matching branch or tag). Omit --revision to inherit the " &
-            "project's default_revision" &
-            (if defaultRevision.len > 0: " (" & defaultRevision & ")" else: "") &
-            ".")
+    for target in targets:
+      case target.kind
+      of mkRepoSet:
+        # Membership-model authoring: the URL is split against the WORKSPACE's
+        # url prefixes rather than against any one collection's remote table,
+        # which is what makes the fragment shareable — a consumer no longer has
+        # to also learn the remote names it happens to reference.
+        let prefixes = loadUrlPrefixes(manifestRoot)
+        let plan = planRepoUrlPrefix(prefixes, repo, remote)
+        if plan.error.len > 0:
+          stderr.writeLine("repro workspace repos add: " & target.name & ": " &
+            plan.error)
           return 1
-        elif check.state == rrsUnknown:
-          stderr.writeLine("repro workspace repos add: warning: could " &
-            "not verify revision '" & revision & "' on " & remote & ": " &
-            check.diagnostic)
-      if not fragmentExisted:
-        createDir(manifestRoot / "repos")
-        writeFile(fragmentAbs,
-          "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-          "[repo]\n" &
-          "name = \"" & plan.repoName & "\"\n" &
-          "path = \"" & effectivePath & "\"\n" &
-          "remote = \"" & plan.remoteName & "\"\n" &
-          (if revision.len > 0: "revision = \"" & revision & "\"\n" else: ""))
-        paths.add(fragmentRel)
-        fragmentExisted = true
-      if plan.mintedFetch.len > 0:
-        ensureRemoteEntry(projectFileAbs, plan.remoteName, plan.mintedFetch)
-      discard appendFragmentInclude(projectFileAbs, fragmentRel)
-      paths.add("projects/" & project & ".toml")
-      remoteNames.add(project & "=" & plan.remoteName &
-        (if plan.mintedFetch.len > 0: " (new, fetch " & plan.mintedFetch & ")"
-         else: " (reused)"))
+        if plan.mintedUrl.len > 0:
+          createDir(manifestRoot / "url-prefixes")
+          let prefixRel = "url-prefixes/" & plan.prefixName & ".toml"
+          writeFile(manifestRoot / prefixRel,
+            "schema = \"reprobuild.workspace.url-prefix.v1\"\n\n" &
+            "[url-prefix]\n" &
+            "name = \"" & plan.prefixName & "\"\n" &
+            "url = \"" & plan.mintedUrl & "\"\n")
+          paths.add(prefixRel)
+        if not fragmentExisted:
+          createDir(manifestRoot / "repos")
+          writeFile(fragmentAbs,
+            "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+            "[repo]\n" &
+            "name = \"" & repo & "\"\n" &
+            "path = \"" & effectivePath & "\"\n" &
+            (if branch.len > 0: "branch = \"" & branch & "\"\n"
+             elif revision.len > 0: "revision = \"" & revision & "\"\n"
+             else: "") &
+            "url_prefix = \"" & plan.prefixName & "\"\n" &
+            # `url_suffix` is written only when it differs from `name` — the
+            # point of the split is that identity stops carrying URL structure,
+            # so restating it would put the coupling straight back.
+            (if plan.urlSuffix != repo:
+               "url_suffix = \"" & plan.urlSuffix & "\"\n"
+             else: ""))
+          paths.add(fragmentRel)
+          fragmentExisted = true
+        # The fragment was just written, so the name resolves to a repo and the
+        # key is `member_repos`. Routed through `membershipKeyFor` all the same,
+        # so there is ONE rule deciding which namespace a name goes in.
+        let memberKey = membershipKeyFor(manifestRoot, repo)
+        if memberKey != memberReposKey:
+          stderr.writeLine("repro workspace repos add: '" & repo &
+            "' does not resolve to a repo fragment (" &
+            (manifestRoot / "repos" / (repo & ".toml")) &
+            "); refusing to guess which membership key it belongs under")
+          return 2
+        discard editSetMember(target.abs, memberKey, repo, add = true)
+        paths.add(target.rel)
+        remoteNames.add(target.name & "=" & plan.prefixName &
+          (if plan.mintedUrl.len > 0: " (new prefix, url " & plan.mintedUrl & ")"
+           else: " (reused)"))
+      of mkProject:
+        var manifest: ProjectManifest
+        try:
+          manifest = readProjectManifest(target.abs)
+        except CatchableError as exc:
+          stderr.writeLine("repro workspace repos add: cannot read " &
+            target.abs & ": " & exc.msg)
+          return 1
+        let defaultRemote =
+          if manifest.project.default_remote.isSome:
+            manifest.project.default_remote.get()
+          else:
+            ""
+        let plan = planRepoRemote(manifest.remote, defaultRemote, repo, remote)
+        if plan.error.len > 0:
+          stderr.writeLine("repro workspace repos add: " & target.name & ": " &
+            plan.error)
+          return 1
+        if not fragmentExisted:
+          createDir(manifestRoot / "repos")
+          writeFile(fragmentAbs,
+            "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+            "[repo]\n" &
+            "name = \"" & plan.repoName & "\"\n" &
+            "path = \"" & effectivePath & "\"\n" &
+            "remote = \"" & plan.remoteName & "\"\n" &
+            (if branch.len > 0: "branch = \"" & branch & "\"\n" else: "") &
+            (if revision.len > 0: "revision = \"" & revision & "\"\n" else: ""))
+          paths.add(fragmentRel)
+          fragmentExisted = true
+        if plan.mintedFetch.len > 0:
+          ensureRemoteEntry(target.abs, plan.remoteName, plan.mintedFetch)
+        discard appendFragmentInclude(target.abs, fragmentRel)
+        paths.add(target.rel)
+        remoteNames.add(target.name & "=" & plan.remoteName &
+          (if plan.mintedFetch.len > 0: " (new, fetch " & plan.mintedFetch & ")"
+           else: " (reused)"))
+    if branch.len == 0 and revision.len == 0 and hasSet:
+      # Reported, not silent. A repo fragment fully determines its own
+      # checkout, and one that declares no branch determines it incompletely.
+      stderr.writeLine("repro workspace repos add: note: " & fragmentRel &
+        " declares no `branch`; nothing else determines which branch this " &
+        "repo lands on. Pass --branch=<name>.")
 
     let docRel = "repos/" & repo & ".md"
     let docAbs = manifestRoot / "repos" / (repo & ".md")
@@ -50463,40 +50794,62 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
       stderr.writeLine("repro workspace repos add: note: no " & docRel &
         " description written (pass -m \"<description>\"); the generated " &
         "project docs will have no entry for " & repo)
-    let msg = "Add repo " & repo & " to project" &
-      (if projects.len > 1: "s " else: " ") & projects.join(", ") &
+    let msg = "Add repo " & repo & " to " & projects.join(", ") &
       (if desc.len > 0: " (" & desc.strip().splitLines()[0] & ")" else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
     stdout.writeLine("repro workspace repos add: " & repo & " -> " &
       projects.join(", ") & " — path " & effectivePath & ", remote " &
-      remoteNames.join(" ") & ", revision " &
-      (if revision.len > 0: revision & " (pinned)" else: "(inherited)") &
+      remoteNames.join(" ") & ", " &
+      (if branch.len > 0: "branch " & branch
+       elif revision.len > 0: "revision " & revision & " (pinned)"
+       else: "revision (inherited)") &
       " — " & res.diagnostic)
     return res.code
   of "remove":
-    let including = projectsIncludingFragment(manifestRoot, fragmentRel)
+    let including = membershipsDeclaringRepo(manifestRoot, repo)
     if projects.len == 0:
-      # No --project means "stop declaring this repo anywhere". Narrowing the
-      # default to the primary project would leave the repo half-declared and
-      # is never what "remove this repo" reads as.
+      # No --set means "stop declaring this repo anywhere". Narrowing the
+      # default to the primary set would leave the repo half-declared and is
+      # never what "remove this repo" reads as.
       projects = including
     if projects.len == 0 and not deleteFragment:
-      stdout.writeLine("repro workspace repos remove: no project includes " &
-        fragmentRel & "; nothing to do")
+      stdout.writeLine("repro workspace repos remove: no repo-set or " &
+        "project declares " & fragmentRel & "; nothing to do")
       return 0
     var paths: seq[string]
     var droppedFrom: seq[string]
     for project in projects:
-      let projectFileAbs = manifestRoot / "projects" / (project & ".toml")
-      if not fileExists(projectFileAbs):
-        stderr.writeLine("repro workspace repos remove: project '" & project &
-          "' does not exist (" & projectFileAbs & ")")
+      let target = membershipFileFor(manifestRoot, project)
+      if target.abs.len == 0:
+        stderr.writeLine("repro workspace repos remove: '" & project &
+          "' does not exist (looked for " &
+          (manifestRoot / "repo-sets" / (project & ".toml")) & " and " &
+          (manifestRoot / "projects" / (project & ".toml")) & ")")
         return 1
-      if removeFragmentInclude(projectFileAbs, fragmentRel):
+      var dropped = false
+      case target.kind
+      of mkRepoSet:
+        # Which key the entry sits under is read off what the name resolves to,
+        # never off the verb. A repo whose fragment is already gone resolves to
+        # nothing, and removing "whichever array mentions it" could strip a
+        # same-named entry out of `member_sets` instead.
+        let memberKey = membershipKeyFor(manifestRoot, repo)
+        if memberKey.len == 0:
+          stderr.writeLine("repro workspace repos remove: '" & repo &
+            "' resolves to neither a repo fragment nor a repo-set (looked " &
+            "for " & (manifestRoot / "repos" / (repo & ".toml")) & " and " &
+            (manifestRoot / "repo-sets" / (repo & ".toml")) &
+            "); refusing to guess which membership key to edit in " &
+            target.rel)
+          return 2
+        dropped = editSetMember(target.abs, memberKey, repo, add = false)
+      of mkProject:
+        dropped = removeFragmentInclude(target.abs, fragmentRel)
+      if dropped:
         droppedFrom.add(project)
-        paths.add("projects/" & project & ".toml")
+        paths.add(target.rel)
     if deleteFragment:
-      let stillIncluding = projectsIncludingFragment(manifestRoot, fragmentRel)
+      let stillIncluding = membershipsDeclaringRepo(manifestRoot, repo)
       if stillIncluding.len > 0:
         stderr.writeLine("repro workspace repos remove: refusing " &
           "--delete-fragment: " & fragmentRel & " is still included by " &
@@ -51512,10 +51865,24 @@ proc runThinAppDispatch(programName: string): int =
       stderr.writeLine("repro workspace disable: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "sets":
+    # Workspace-Membership-Model.md — `repro workspace sets list|add|remove`.
+    # DEFINITION: inspect or author repo-set definitions in the manifest repo.
+    # Enabling one in this workspace is `enable`.
+    try:
+      let pArgs =
+        if args.len > 2: args[2 .. ^1]
+        else: @[]
+      return runWorkspaceSetsCommand(pArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace sets: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "projects":
-    # WV-3 — `repro workspace projects list|add|remove`. DEFINITION: inspect
-    # or author project definitions in the manifest repo. Activating one in
-    # this workspace is `enable`.
+    # WV-3 — `repro workspace projects list|add|remove`, the retained spelling
+    # of `sets`. Kept while the manifest repo still carries `projects/*.toml`;
+    # it differs from `sets` in exactly one respect, which directory `add`
+    # scaffolds into.
     try:
       let pArgs =
         if args.len > 2: args[2 .. ^1]

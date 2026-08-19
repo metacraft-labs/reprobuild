@@ -74,8 +74,8 @@ const
   schemaRepoSetV1*          = "reprobuild.workspace.repo-set.v1"
     ## Workspace-Membership-Model.md — a named membership list. A repo-set that
     ## is enabled in a workspace is what used to be called a project; there is
-    ## no second kind. Carries `name` and `members` and nothing else, so a
-    ## shared set cannot drift into a half-project.
+    ## no second kind. Carries `name`, `member_sets` and `member_repos` and
+    ## nothing else, so a shared set cannot drift into a half-project.
   schemaUrlPrefixV1*        = "reprobuild.workspace.url-prefix.v1"
     ## A URL prefix shared by many repos (`https://github.com/<org>`), declared
     ## ONCE for the workspace. Distinct from a git remote (`origin`,
@@ -199,11 +199,24 @@ type
     name*: string
 
   RepoSetManifest* = object
+    ## Membership is declared as TWO keys rather than one, and that is what
+    ## makes a name in both namespaces unrepresentable rather than arbitrated.
+    ## A single `members` list had to resolve each bare name against both the
+    ## repo and the repo-set namespace, and 7 of the 11 projects in the
+    ## metacraft manifest repo carry a set and a repo of the same name
+    ## (`codetracer`, `garm`, `isonim`, …). Any tie-break would have made those
+    ## resolve by rule rather than by declaration; two keys make
+    ## `member_repos = ["codetracer"]` inside `repo-sets/codetracer.toml`
+    ## simply unambiguous.
     schema*: string
     `repo-set`*: RepoSetBody
-    members*: seq[string]
-      ## Names of repos or other repo-sets. By NAME, not path, consistent with
-      ## `depends` and unlike the `includes` this replaces.
+    member_sets*: seq[string]
+      ## Names of other repo-sets, expanded recursively. Expanded BEFORE
+      ## `member_repos` — see `expandMembers`; the order is load-bearing
+      ## because dedup keys on first-seen.
+    member_repos*: seq[string]
+      ## Names of repo fragments. By NAME, not path, consistent with `depends`
+      ## and unlike the `includes` this replaces.
     extensions*: Extensions
 
   # --- projects/<project>.toml -----------------------------------------------
@@ -266,8 +279,14 @@ type
     schema*: string
     project*: ProjectBody
     remote*: seq[RemoteEntry]
-    includes*: seq[string]         ## deprecated; path-based. Superseded by `members`.
-    members*: seq[string]
+    includes*: seq[string]
+      ## deprecated; path-based. Superseded by `member_sets` / `member_repos`.
+    member_sets*: seq[string]
+    member_repos*: seq[string]
+      ## Workspace-Membership-Model.md — the same two membership keys a
+      ## repo-set carries. A project IS a repo-set that happens to be enabled,
+      ## so it declares membership the same way; only the identity fields above
+      ## make it look like a different kind, and those are being retired.
     binary_dependency*: seq[BinaryDependencyEntry]
       ## RA-22 — binary-mode dependencies (see `BinaryDependencyEntry`). A
       ## missing/empty array means the project declares no binary

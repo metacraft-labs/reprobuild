@@ -884,7 +884,7 @@ tests/integration/t_integration_local_store_layout_and_atomic_writes.nim	nim	5
 tests/integration/t_integration_provider_fragment_refresh_and_pruning.nim	nim	1
 tests/integration/t_integration_recipe_consumes_interface.nim	nim	4
 tests/integration/t_integration_reprobuild_sessions_share_runquota.nim	nim	1
-tests/integration/t_integration_scheduler_dependency_gathering_policies.nim	nim	4
+tests/integration/t_integration_scheduler_dependency_gathering_policies.nim	nim	5
 tests/integration/t_integration_solver_chosen_version.nim	nim	4
 tests/integration/t_integration_solver_resolves_variants.nim	nim	3
 tests/integration/t_integration_target_export_table_v2_schema.nim	nim	4
@@ -940,7 +940,10 @@ tests/integration/t_manifest_init_rejects_unsigned_or_tampered_manifest.nim	nim	
 tests/integration/t_manifest_store_ops_routed_through_interface_not_literals.nim	nim	1
 tests/integration/t_manifests_reports_single_project_workspace.nim	nim	1
 tests/integration/t_measurement_flags_cli.nim	nim	11
-tests/integration/t_membership_model_schemas_round_trip.nim	nim	5
+tests/integration/t_membership_model_fork_upstream_remote_alignment.nim	nim	2
+tests/integration/t_membership_model_resolves_sets_and_prefixes.nim	nim	8
+tests/integration/t_membership_model_schemas_round_trip.nim	nim	6
+tests/integration/t_membership_model_sets_cli.nim	nim	4
 tests/integration/t_migrated_repo_workspace_real_pre_push.nim	nim	1
 tests/integration/t_mixed_public_clean_team_unpublished_refuses.nim	nim	1
 tests/integration/t_mixed_workspace_each_record_in_its_own_backend_only.nim	nim	1
