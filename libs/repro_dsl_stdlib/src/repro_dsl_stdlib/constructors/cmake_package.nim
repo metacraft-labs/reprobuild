@@ -488,10 +488,22 @@ proc cmake_package*(srcDir: string;
 
   # CMake records its generator and toolchain in the build tree. Reusing a
   # directory configured by another generator makes a fresh source build fail
-  # before it can update any cache entries, so configure must start clean.
+  # before it can update any cache entries. Key cleanup on the complete
+  # configure identity so a changed configuration starts clean while an
+  # identical warm build preserves the configured tree.
   if projectRoot.len > 0:
     let cleanStamp = projectRoot / ".repro" / "build" / "cmake-clean.stamp"
     let buildDirAbs = projectRoot / buildDir
+    var cleanIdentityParts = @[
+      "reprobuild.cmake-clean.v1",
+      srcDir,
+      buildDir,
+      generator,
+    ]
+    cleanIdentityParts.add(effectiveCacheVars)
+    for entry in extraEnv:
+      cleanIdentityParts.add(entry[0] & "=" & entry[1])
+    let cleanIdentity = cleanIdentityParts.join("\x1e")
     let cleanScript = "set -e; rm -rf \"" &
       buildDirAbs.replace("\"", "\\\"") & "\"; : > \"" &
       cleanStamp.replace("\"", "\\\"") & "\""
@@ -503,12 +515,15 @@ proc cmake_package*(srcDir: string;
         cleanInputs.add(output)
     let cleanEdge = buildAction(
       id = "cmake-clean-build-dir-" & pkgName,
-      call = inlineExecCall(@["sh", "-c", cleanScript]),
+      call = inlineExecCall(@[
+        "sh", "-c", cleanScript, "reprobuild-cmake-clean", cleanIdentity]),
       deps = cleanDeps,
       inputs = cleanInputs,
       outputs = @[cleanStamp],
-      cacheable = false,
-      dependencyPolicy = automaticMonitorPolicy(),
+      # The existing build tree is intentionally discarded state, not an
+      # input. Monitoring it would make the downstream configure/build writes
+      # invalidate this cleanup edge on every warm build.
+      dependencyPolicy = automaticMonitorPolicy(@[buildDirAbs]),
       commandStatsId = "cmake_package.clean_build_dir",
       toolIdentityRefs = @["sh"])
     configureAfter = @[cleanEdge]

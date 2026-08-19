@@ -262,6 +262,20 @@ proc meson_package*(srcDir: string;
   if projectRoot.len > 0:
     let cleanStamp = projectRoot / ".repro" / "build" / "meson-clean.stamp"
     let buildDirAbs = projectRoot / buildDir
+    var cleanIdentityParts = @[
+      "reprobuild.meson-clean.v1",
+      srcDir,
+      buildDir,
+      prefix,
+      buildtype,
+      crossFile,
+      nativeFile,
+      wrapMode,
+    ]
+    cleanIdentityParts.add(effectiveConfigureOptions)
+    for entry in extraEnv:
+      cleanIdentityParts.add(entry[0] & "=" & entry[1])
+    let cleanIdentity = cleanIdentityParts.join("\x1e")
     let cleanScript = "set -e; rm -rf \"" &
       buildDirAbs.replace("\"", "\\\"") & "\"; : > \"" &
       cleanStamp.replace("\"", "\\\"") & "\""
@@ -273,12 +287,15 @@ proc meson_package*(srcDir: string;
         cleanInputs.add(output)
     let cleanEdge = buildAction(
       id = "meson-clean-build-dir-" & pkgName,
-      call = inlineExecCall(@["sh", "-c", cleanScript]),
+      call = inlineExecCall(@[
+        "sh", "-c", cleanScript, "reprobuild-meson-clean", cleanIdentity]),
       deps = cleanDeps,
       inputs = cleanInputs,
       outputs = @[cleanStamp],
-      cacheable = false,
-      dependencyPolicy = automaticMonitorPolicy(),
+      # The existing build tree is intentionally discarded state, not an
+      # input. Monitoring it would make the downstream setup/compile writes
+      # invalidate this cleanup edge on every warm build.
+      dependencyPolicy = automaticMonitorPolicy(@[buildDirAbs]),
       commandStatsId = "meson_package.clean_build_dir",
       toolIdentityRefs = @["sh"])
     setupAfter = @[cleanEdge]
