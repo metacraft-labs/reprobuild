@@ -18,8 +18,11 @@ import std/[os, unittest]
 
 import repro_home_generations
 import repro_local_store
+from repro_test_support import testCaseScratchSlug
 
-const FixtureDir = "build/test-tmp/m62-gate2"
+# The suite body resets this tree on every case, so it has to be
+# private to the process running one case — see ``testCaseScratchSlug``.
+let FixtureDir = "build/test-tmp/m62-gate2-" & testCaseScratchSlug()
 
 proc resetDir(path: string) =
   if dirExists(path):

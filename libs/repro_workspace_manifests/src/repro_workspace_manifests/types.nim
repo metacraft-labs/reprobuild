@@ -309,7 +309,7 @@ type
     project*: string
     projects*: seq[string]
       ## RA-6 — the active PROJECT SET layered into this workspace. The
-      ## pilot's ``repro workspace projects add`` tracks a SET of project
+      ## pilot's ``repro workspace enable`` tracks a SET of project
       ## names (not a single project); this array records that set. The
       ## scalar ``project`` field remains the PRIMARY project (the first
       ## entry of the set, kept non-empty for the M6/M8 single-project
@@ -377,7 +377,7 @@ type
   BootstrapProjectsBody* = object
     default*: seq[string]
       ## Default project set auto-layered when the user hasn't chosen an
-      ## explicit project set (consumed by init / `projects add --default`).
+      ## explicit project set (consumed by init / `enable --default`).
 
   BootstrapVerifyBody* = object
     ## RA-17 — manifest provenance / trust anchor (Workspace-Manifests.md

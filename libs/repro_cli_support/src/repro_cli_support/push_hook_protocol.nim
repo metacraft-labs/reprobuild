@@ -3,9 +3,10 @@
 ## ``git push --no-verify``), but an ordinary environment variable must never
 ## be enough to disable it.
 
-import std/[json, os, osproc, strtabs, strutils, times]
+import std/[json, os, osproc, strutils, times]
 import nimcrypto/sysrand
 import blake3
+import git_tool
 
 when defined(posix):
   import std/posix
@@ -386,19 +387,11 @@ proc runGit(gitBin, repoRoot: string; args: openArray[string]):
     cmd.add(" -C " & quoteShell(repoRoot))
   for arg in args:
     cmd.add(" " & quoteShell(arg))
-  var childEnv = newStringTable(modeCaseSensitive)
-  for key, value in envPairs(): childEnv[key] = value
   # Git exports repository-local bindings to hooks. A nested publication from
   # a linked source worktree must let `-C <backend>` select the backend instead
   # of silently inheriting the source's absolute GIT_DIR.
-  for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE",
-      "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-      "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_GRAFT_FILE",
-      "GIT_SHALLOW_FILE", "GIT_NAMESPACE", "GIT_PREFIX",
-      "GIT_QUARANTINE_PATH", "GIT_REPLACE_REF_BASE"]:
-    childEnv.del(key)
   let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
-    env = childEnv)
+    env = scrubbedGitRepositoryEnv())
   (res.exitCode, res.output)
 
 proc gitValue(gitBin, repoRoot: string; args: openArray[string]): string =

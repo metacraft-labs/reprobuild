@@ -37,6 +37,12 @@
 ## them out of the ``nix develop`` shell.
 
 import std/[os, osproc, strutils]
+# Ambient-execution hatches. Every call below is bootstrap tier: the recipe has
+# to locate a host tool BEFORE any engine-provisioned prefix exists, so a typed
+# execution profile is not available to it. Naming the hatch says so at the
+# call site instead of leaving it to be inferred — `git grep uncontrolled` is
+# the audit surface.
+import repro_core/ambient_execution
               # Incremental-Test-Runner M7: getEnv + the `/` path operator
               # for the io-mon / nim-stackable-hooks sibling resolution in the
               # test-fixtures monitor-shim build edge below.
@@ -413,6 +419,7 @@ package reprobuild:
     let reproRuntimePassL = nixRuntimePassLForLibraries(@[
       "libclingo.so", "libclingo.dylib"])
     let testRuntimePassL = nixRuntimePassLForLibraries(@[
+      "libclingo.so", "libclingo.dylib",
       "libzstd.so.1", "libzstd.dylib"])
 
     proc findNixStoreSourceDir(namePart, marker: string): string =
@@ -432,13 +439,13 @@ package reprobuild:
         if not fileExists("flake.nix"):
           return ""
         let systemResult =
-          execCmdEx("nix eval --raw --impure --expr 'builtins.currentSystem' 2>/dev/null")
+          uncontrolledExecCmdEx("nix eval --raw --impure --expr 'builtins.currentSystem' 2>/dev/null")
         if systemResult.exitCode != 0:
           return ""
         let system = systemResult.output.strip()
         if system.len == 0:
           return ""
-        let valueResult = execCmdEx(
+        let valueResult = uncontrolledExecCmdEx(
           "nix eval --raw '.#devShells." & system & ".default." & envName &
           "' 2>/dev/null")
         if valueResult.exitCode != 0:
@@ -555,16 +562,28 @@ package reprobuild:
       # table rejects the duplicate with a ``duplicate implicit target
       # name`` diagnostic at provider time. The explicit ``actionId``
       # is the selector for the execute edge.
-      let executeEdge =
-        if spec.requiresReproBinary:
-          edge.testBinary.run(
-            requiredBinaries = [reproBinaryPath],
-            actionId = executeActionId,
-            registerImplicitName = false)
-        else:
-          edge.testBinary.run(
-            actionId = executeActionId,
-            registerImplicitName = false)
+      var requiredBinaries: seq[string] = @[]
+      var executeDeps: seq[string] = @[]
+      if spec.requiresReproBinary:
+        requiredBinaries.add(reproBinaryPath)
+      if spec.source ==
+          "tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim":
+        when not defined(windows):
+          # Both separately compiled compatibility peers are runtime fixtures
+          # of this integration binary. The typed input paths make a focused
+          # graph target build them, while the explicit ids make the ordering
+          # contract unambiguous even though helper declarations occur later.
+          requiredBinaries.add("build/test-bin/legacy_cache_peer_origin_dev")
+          requiredBinaries.add("build/test-bin/legacy_cache_peer_legacy_wire")
+          executeDeps.add(
+            "reprobuild.test_helpers.legacy_cache_peer_origin_dev")
+          executeDeps.add(
+            "reprobuild.test_helpers.legacy_cache_peer_legacy_wire")
+      let executeEdge = edge.testBinary.run(
+        deps = executeDeps,
+        requiredBinaries = requiredBinaries,
+        actionId = executeActionId,
+        registerImplicitName = false)
       reprobuildTestExecuteActions.add(executeEdge)
 
     # Bootstrap-And-Self-Build B4: Python tests join the ``test``
@@ -804,7 +823,7 @@ package reprobuild:
       cacheable = false,
       actionId = "reprobuild.apps.repro-harvest-apt"))
 
-    reprobuildAppsActions.add(shell(
+    let reprobuildNixDaemon = shell(
       command = "mkdir -p build/bin && " &
         "cp tools/reprobuild-nix-daemon/reprobuild-nix-daemon " &
         "build/bin/reprobuild-nix-daemon && " &
@@ -813,9 +832,11 @@ package reprobuild:
       extraInputs = @[
         "tools/reprobuild-nix-daemon/reprobuild-nix-daemon",
       ],
-       extraOutputs = @[
-         "build/bin/reprobuild-nix-daemon",
-       ]))
+      extraOutputs = @[
+        "build/bin/reprobuild-nix-daemon",
+      ])
+    reprobuildAppsActions.add(reprobuildNixDaemon)
+    discard target("reprobuild-nix-daemon", reprobuildNixDaemon)
 
     # B5: Windows runtime-DLL staging, previously ~200 lines of shell inside the
     # wrapper. Every non-system library reprobuild uses on Windows is dlopen'd
@@ -847,7 +868,7 @@ package reprobuild:
         ""
 
       proc siblingOf(exeName, dllName: string): string =
-        let exe = findExe(exeName)
+        let exe = uncontrolledFindExe(exeName)
         if exe.len == 0: "" else: exe.parentDir / dllName
 
       # clingo — dlopen'd at MODULE INIT by repro_solver, so a repro.exe
@@ -864,7 +885,7 @@ package reprobuild:
       # libzstd — lazily loaded by `repro cache substitute`. Two upstream
       # layouts: MSYS2 co-locates the DLL with zstd.exe; the facebook/zstd
       # win64 release puts it under a sibling dll/ directory.
-      let zstdExe = findExe("zstd")
+      let zstdExe = uncontrolledFindExe("zstd")
       let zstdDir = if zstdExe.len == 0: "" else: zstdExe.parentDir
       let zstdSrc = firstExistingDll([
         (if zstdDir.len > 0: zstdDir / "libzstd.dll" else: ""),
@@ -878,7 +899,7 @@ package reprobuild:
       # ships it inside its own tree; probe the layouts Nim has used, then the
       # bare DLL on PATH. Staged under BOTH names because the Nim binding's
       # candidate list tries `sqlite3_64.dll` and `sqlite3.dll`.
-      let nimExe = findExe("nim")
+      let nimExe = uncontrolledFindExe("nim")
       let nimBinDir = if nimExe.len == 0: "" else: nimExe.parentDir
       let nimRootDir = if nimBinDir.len == 0: "" else: nimBinDir.parentDir
       let sqliteSrc = firstExistingDll([
@@ -886,7 +907,7 @@ package reprobuild:
         (if nimRootDir.len > 0: nimRootDir / "dist" / "sqlite3_64.dll" else: ""),
         (if nimRootDir.len > 0: nimRootDir / "dlls" / "sqlite3_64.dll" else: ""),
         (if nimRootDir.len > 0: nimRootDir / "bin" / "sqlite3_64.dll" else: ""),
-        findExe("sqlite3_64.dll")])
+        uncontrolledFindExe("sqlite3_64.dll")])
       if sqliteSrc.len > 0:
         reprobuildAppsActions.add(dslfs.copyFile(sqliteSrc,
           "build/bin/sqlite3_64.dll", cacheable = false,
@@ -903,7 +924,7 @@ package reprobuild:
       # the fallback rather than being contradicted by an empty copy.
       for opensslDll in ["libcrypto-3-x64.dll", "libssl-3-x64.dll"]:
         let opensslSrc = firstExistingDll([
-          siblingOf("openssl", opensslDll), findExe(opensslDll)])
+          siblingOf("openssl", opensslDll), uncontrolledFindExe(opensslDll)])
         if opensslSrc.len > 0:
           reprobuildAppsActions.add(dslfs.copyFile(opensslSrc,
             "build/bin/" & opensslDll, cacheable = false,
@@ -965,28 +986,84 @@ package reprobuild:
       cacheable = false,
       actionId = "reprobuild.test_helpers.harness_apply_lock_holder"))
 
-    # Cross-version action-cache lifecycle peer. All shared-memory and daemon
-    # implementation files are byte-identical blobs from the pinned origin/dev
-    # commit documented by the fixture README. Keeping the helper in this
-    # collection makes the compatibility gate fully offline and graph-native.
-    reprobuildTestHelpersActions.add(nim.c(
-      source = "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer.nim",
-      binary = "build/test-bin/legacy_cache_peer_origin_dev",
-      paths = sourceOnlyNimPaths,
-      extraInputs = @[
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/README.md",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index.nim",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/atomics_shm.nim",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/daemon.nim",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/layout.nim",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/mapping.nim",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/ring.nim",
-        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/segment.nim",
+    # Cross-version action-cache lifecycle peers. The exact peer compiles all
+    # implementation files byte-for-byte from the pinned origin/dev commit.
+    # The legacy-wire peer is generated from those same audited blobs; five
+    # modules remain byte-identical and only the top/segment modules receive
+    # cardinality-checked Darwin boot-id + lifecycle-name substitutions.
+    let legacyWireGeneratedRoot =
+      "build/test-fixtures/cache-daemon-legacy-wire"
+    let legacyWireGeneratedSources = @[
+      legacyWireGeneratedRoot &
+        "/libs/repro_shm_index/src/repro_shm_index.nim",
+      legacyWireGeneratedRoot &
+        "/libs/repro_shm_index/src/repro_shm_index/atomics_shm.nim",
+      legacyWireGeneratedRoot &
+        "/libs/repro_shm_index/src/repro_shm_index/daemon.nim",
+      legacyWireGeneratedRoot &
+        "/libs/repro_shm_index/src/repro_shm_index/layout.nim",
+      legacyWireGeneratedRoot &
+        "/libs/repro_shm_index/src/repro_shm_index/mapping.nim",
+      legacyWireGeneratedRoot &
+        "/libs/repro_shm_index/src/repro_shm_index/ring.nim",
+      legacyWireGeneratedRoot &
+        "/libs/repro_shm_index/src/repro_shm_index/segment.nim",
+    ]
+    let legacyWireOriginSources = @[
+      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index.nim",
+      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/atomics_shm.nim",
+      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/daemon.nim",
+      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/layout.nim",
+      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/mapping.nim",
+      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/ring.nim",
+      "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/segment.nim",
+    ]
+    let legacyWireGenerator = sh.shell(
+      command = "python3 tests/fixtures/cache-daemon-origin-dev-9f0a9be/generate_legacy_wire.py --output-root " &
+        legacyWireGeneratedRoot,
+      actionId = "reprobuild.test_helpers.generate_legacy_cache_peer_wire",
+      extraInputs = legacyWireOriginSources & @[
+        "tests/fixtures/cache-daemon-origin-dev-9f0a9be/generate_legacy_wire.py",
       ],
-      extraEnv = sourceOnlyEnv,
-      nimcache = "build/nimcache/legacy_cache_peer_origin_dev",
-      cacheable = false,
-      actionId = "reprobuild.test_helpers.legacy_cache_peer_origin_dev"))
+      extraOutputs = legacyWireGeneratedSources,
+      cacheable = false)
+    reprobuildTestHelpersActions.add(legacyWireGenerator)
+
+    when not defined(windows):
+      reprobuildTestHelpersActions.add(nim.c(
+        source = "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer.nim",
+        binary = "build/test-bin/legacy_cache_peer_origin_dev",
+        paths = sourceOnlyNimPaths,
+        extraInputs = @[
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/README.md",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_main.nim",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index.nim",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/atomics_shm.nim",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/daemon.nim",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/layout.nim",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/mapping.nim",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/ring.nim",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/libs/repro_shm_index/src/repro_shm_index/segment.nim",
+        ],
+        extraEnv = sourceOnlyEnv,
+        nimcache = "build/nimcache/legacy_cache_peer_origin_dev",
+        cacheable = false,
+        actionId = "reprobuild.test_helpers.legacy_cache_peer_origin_dev"))
+
+      reprobuildTestHelpersActions.add(nim.c(
+        source = "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_legacy_wire.nim",
+        binary = "build/test-bin/legacy_cache_peer_legacy_wire",
+        paths = sourceOnlyNimPaths,
+        extraInputs = legacyWireGeneratedSources & @[
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/README.md",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/generate_legacy_wire.py",
+          "tests/fixtures/cache-daemon-origin-dev-9f0a9be/legacy_cache_peer_main.nim",
+        ],
+        after = [legacyWireGenerator],
+        extraEnv = sourceOnlyEnv,
+        nimcache = "build/nimcache/legacy_cache_peer_legacy_wire",
+        cacheable = false,
+        actionId = "reprobuild.test_helpers.legacy_cache_peer_legacy_wire"))
 
     # Binary-cache integration-test subprocess helpers (A2/A2.5/A3/A4).
     #

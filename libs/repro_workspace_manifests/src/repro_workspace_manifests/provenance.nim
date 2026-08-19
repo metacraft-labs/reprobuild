@@ -32,6 +32,7 @@
 import std/[options, os, osproc, strutils, tempfiles]
 
 import types
+import git_tool
 
 type
   ManifestProvenanceError* = object of CatchableError
@@ -102,7 +103,8 @@ proc runGit(gitBin: string; args: openArray[string]):
   for a in args:
     cmd.add(" ")
     cmd.add(q(a))
-  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath})
+  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+    env = scrubbedGitRepositoryEnv())
   (code: res.exitCode, output: res.output)
 
 proc resolveRev(gitBin, manifestPath, rev: string): string =

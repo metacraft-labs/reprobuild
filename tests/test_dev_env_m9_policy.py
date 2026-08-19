@@ -94,8 +94,19 @@ class DevEnvM9PolicyTest(unittest.TestCase):
         ci_workflow = text(WORKFLOW_DIR / "ci.yml")
         self.assertIn("bash ./scripts/run_tests.sh", justfile)
         self.assertIn("dev-env-full-regression:", justfile)
+        # Build parallelism stays pinned: the CI host is shared by a dozen
+        # runner instances, so this number is a deliberate share of the
+        # machine rather than a tuning knob that should track `nproc`.
         self.assertIn('REPROBUILD_MAX_PARALLELISM: "12"', ci_workflow)
-        self.assertIn('REPROBUILD_TEST_THREADS: "1"', ci_workflow)
+        # Execution threads must simply be greater than one -- pinning the
+        # exact value here previously froze the single-threaded default in
+        # place, so this gate asserted the misconfiguration it was meant to
+        # protect. Assert the property that matters instead.
+        threads = re.search(r'REPROBUILD_TEST_THREADS: "(\d+)"', ci_workflow)
+        self.assertIsNotNone(threads,
+                             "ci.yml must set REPROBUILD_TEST_THREADS")
+        self.assertGreater(int(threads.group(1)), 1,
+                           "the ~6,800-case suite cannot execute on one thread")
         self.assertIn("cancel-in-progress: true", ci_workflow)
         # Python policy gates still run via the `find tests -name 'test_*.py'`
         # loop after the engine-driven Nim build.

@@ -860,7 +860,7 @@ proc runInfraInstallRootCli(args: seq[string]): int =
     of irfMissingTarget, irfMissingSource: return 2
     of irfRsyncFailed, irfGrubInstallFailed,
        irfFstabWriteFailed, irfGrubCfgWriteFailed,
-       irfDiskoLoadFailed: return 1
+       irfDiskoLoadFailed, irfBootArtifactMissing: return 1
   echo "repro infra install-root"
   echo "  rsync exit       : " & $outcome.rsyncExitCode
   echo "  mount entries    : " & $outcome.mountPlan.len

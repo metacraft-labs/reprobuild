@@ -11,8 +11,10 @@
 ## * ``--run "<suite>::<test>"`` — run a single test, exit 0/1/2
 ##   (pass/fail/skip)
 ## * ``$NIMTEST_RESULT_FILE`` — if set, write JSON results
-##   (``status``, ``duration_ms``, ``checkpoints``, ``exception``)
-##   before exiting
+##   (``status``, ``duration_ms``, ``checkpoints``, ``exception``, and
+##   ``skipReason`` when a case used the reason-carrying ``skip``)
+##   before exiting. ``skipReason`` is present only when non-empty, so
+##   consumers must tolerate its absence.
 ## * default (no protocol flag) — behave EXACTLY like ``std/unittest``:
 ##   run every registered test sequentially with the standard console
 ##   formatter.
@@ -33,10 +35,59 @@
 ## * Tests that ``import std/unittest`` directly (without going through
 ##   this library) are completely unaffected — the protocol surface
 ##   only attaches to binaries that explicitly link this module.
+##
+## Coexistence with the protocol-carrying ``std/unittest``
+## ------------------------------------------------------
+##
+## Since the codetracer-nim fork landed the same Tier-1 protocol inside
+## ``std/unittest`` itself, this shim is no longer the only thing in the
+## process that answers ``--list`` / ``--list-json``. ``std/unittest``'s
+## own ``suite`` template calls its ``ensureProtocolExitProc``, so the
+## moment a shim-linked binary expands ONE suite the stdlib installs an
+## exit hook that will emit a catalog of everything IT registered.
+##
+## The two implementations must therefore not both emit. Because the
+## shim's ``test`` override registers only into ``gRegistry``, the
+## stdlib's registry stays empty, and an unguarded run printed an empty
+## stdlib catalog followed by the shim's populated one — two JSON
+## documents on stdout, which no consumer can parse, and which silently
+## demoted every shim-linked binary to whole-binary execution in
+## ``repro_test_runner``.
+##
+## The shim stays the single emitter, and it wins by *registration
+## order*. ``std/exitprocs`` runs hooks LIFO, and ``quit`` from inside a
+## hook terminates the process without running the ones still queued
+## behind it. ``std/unittest`` installs its hook from inside its
+## ``suite`` template, i.e. before the suite body expands; the shim
+## therefore defers its own ``addExitProc`` to the first ``test``
+## expansion — which is inside that body, hence strictly later, hence
+## strictly first to run. It emits the catalog and quits, and the
+## stdlib hook never fires.
+##
+## Delegating listing to ``std/unittest`` instead is NOT equivalent:
+## its ``test`` template resolves ``instantiationInfo`` at its own
+## expansion site, so forwarding to it from inside the shim's ``test``
+## template records every case as living in this file rather than in
+## the test source, losing the ``file``/``line`` fidelity the catalog
+## exists to carry.
+##
+## ``--run`` needs no such care: it is the shim's hook that writes
+## ``$NIMTEST_RESULT_FILE`` and picks the 0/1/2 exit code, and quitting
+## first only makes that more certain.
+
+# Import this leaf before ``std/unittest``: its module initialiser preserves the
+# real stdout before the protocol-carrying fork redirects descriptor 1.
+from ct_test_unittest_parallel/protocol_output import writeShimProtocolLine
 
 import std/[exitprocs, json, os, strutils, times]
 import std/unittest as stdUnittest
-export stdUnittest except suite, test
+# ``skip`` joins ``suite``/``test`` as an override rather than a
+# re-export: the shim writes ``$NIMTEST_RESULT_FILE`` from its own
+# formatter, and the reason a case passes to ``skip`` is otherwise
+# recorded in a private ``std/unittest`` threadvar the shim cannot
+# read. Overriding is what lets the shim's result document carry the
+# same ``skipReason`` the protocol-carrying ``std/unittest`` emits.
+export stdUnittest except suite, test, skip
 
 type
   TestEntry* = object
@@ -59,6 +110,10 @@ type
     status: stdUnittest.TestStatus
     checkpoints: seq[string]
     exception: string
+    skipReason: string
+      ## Human-readable reason recorded by ``skip(reason)``. Empty for a
+      ## bare ``skip()`` and for every non-skipped outcome; the result
+      ## file omits the ``skipReason`` key entirely when it is empty.
     durationMs: int
     started: float
     matched: bool
@@ -80,6 +135,34 @@ var
   gRunFilter {.threadvar.}: string
   gCapturedResult {.threadvar.}: CapturedResult
   gProtocolInitialized {.threadvar.}: bool
+  gProtocolExitHookQueued {.threadvar.}: bool
+  gSkipReason* {.threadvar.}: string
+    ## Reason recorded by the ``skip`` override below and read back by
+    ## ``testEnded``. It is a module global rather than a formatter
+    ## field because ``skip`` expands inside the *test body*, which has
+    ## no handle on the active formatter. Exported so the template can
+    ## ``bind`` it from a foreign instantiation scope.
+
+template skip*(reason = "") =
+  ## ``std/unittest.skip``, plus capture of the reason.
+  ##
+  ## Signature-compatible with both the stock no-argument ``skip()``
+  ## and the protocol-carrying fork's ``skip(reason = "")``, so every
+  ## existing call site keeps working unchanged. The reason is stashed
+  ## for ``testEnded`` and ends up in the result document, which is what
+  ## makes a skip census say *why* rather than merely *that*.
+  ##
+  ## Status assignment and checkpoint clearing are delegated to
+  ## ``std/unittest`` rather than reimplemented, so this cannot drift
+  ## from the stdlib's notion of what a skip is. The ``compiles``
+  ## branch keeps the shim usable against a stock ``std/unittest``
+  ## whose ``skip`` takes no argument.
+  bind gSkipReason
+  gSkipReason = reason
+  when compiles(stdUnittest.skip(reason)):
+    stdUnittest.skip(reason)
+  else:
+    stdUnittest.skip()
 
 proc currentProtocolMode*(): ProtocolMode =
   ## Return the active protocol mode for the current process. Resolved
@@ -96,12 +179,16 @@ method suiteStarted*(formatter: ProtocolFormatter, suiteName: string) =
   formatter.currentSuite = suiteName
 
 method testStarted*(formatter: ProtocolFormatter, testName: string) =
+  # Clear any reason left by a previously executed case so a bare
+  # ``skip()`` can never inherit an earlier case's reason.
+  gSkipReason = ""
   formatter.current = CapturedResult(
     suite: formatter.currentSuite,
     name: testName,
     status: stdUnittest.TestStatus.OK,
     checkpoints: @[],
     exception: "",
+    skipReason: "",
     started: epochTime(),
     matched: true)
 
@@ -121,6 +208,8 @@ method failureOccurred*(formatter: ProtocolFormatter,
 method testEnded*(formatter: ProtocolFormatter,
                  testResult: stdUnittest.TestResult) =
   formatter.current.status = testResult.status
+  if testResult.status == stdUnittest.TestStatus.SKIPPED:
+    formatter.current.skipReason = gSkipReason
   formatter.current.durationMs =
     int((epochTime() - formatter.current.started) * 1000)
   gCapturedResult = formatter.current
@@ -152,7 +241,7 @@ proc detectProtocolMode(): ProtocolMode =
 
 proc emitListPlain() =
   for entry in gRegistry:
-    echo entry.suite & "::" & entry.name
+    writeShimProtocolLine(entry.suite & "::" & entry.name)
 
 proc emitListJson() =
   var tests = newJArray()
@@ -168,7 +257,7 @@ proc emitListJson() =
   var summary = newJObject()
   summary["total"] = %gRegistry.len
   doc["summary"] = summary
-  echo doc.pretty()
+  writeShimProtocolLine(doc.pretty())
 
 proc writeResultFile(path: string; status: string;
                      durationMs: int; checkpoints: seq[string];
@@ -207,6 +296,11 @@ proc statusToExitCode(s: stdUnittest.TestStatus): int =
 proc handleProtocolExit() {.noconv.} =
   ## Exit hook installed for every protocol mode. Dispatches to the
   ## per-mode output emission and quits with the right code.
+  ##
+  ## Every branch ends in ``quit``. That is load-bearing, not just
+  ## tidy: it is what stops the protocol-carrying ``std/unittest``'s
+  ## own exit hook — queued behind this one — from appending a second
+  ## payload. See the module header.
   case gProtocolMode
   of pmDefault:
     discard
@@ -229,15 +323,34 @@ proc handleProtocolExit() {.noconv.} =
         gRunFilter
       quit(1)
     if resultFile.len > 0:
-      let skipReason =
-        if captured.status == stdUnittest.TestStatus.SKIPPED:
-          "skipped"
-        else:
-          ""
+      # Emit the reason the case itself supplied via ``skip(reason)``.
+      # A bare ``skip()`` carries none, and the writer then omits the
+      # ``skipReason`` key entirely rather than inventing the
+      # content-free placeholder this used to write for every skip.
       writeResultFile(resultFile, statusToString(captured.status),
                       captured.durationMs, captured.checkpoints,
-                      captured.exception, skipReason)
+                      captured.exception, captured.skipReason)
     quit(statusToExitCode(captured.status))
+
+proc queueProtocolExitHook*() =
+  ## Install ``handleProtocolExit`` — but deliberately LATE, on the
+  ## first ``test`` expansion rather than at module init.
+  ##
+  ## ``std/exitprocs`` runs hooks LIFO, and the protocol-carrying
+  ## ``std/unittest`` installs its own hook from inside its ``suite``
+  ## template, i.e. before the suite body expands. Registering here —
+  ## from inside that body — therefore puts this hook *after* the
+  ## stdlib's in registration order and *before* it in execution order,
+  ## which is what lets ``handleProtocolExit``'s ``quit`` stop the
+  ## stdlib from appending a second payload.
+  ##
+  ## Registering at module-init time instead would invert the order and
+  ## reintroduce the double emission. Idempotent; a no-op outside a
+  ## protocol mode.
+  if gProtocolMode == pmDefault or gProtocolExitHookQueued:
+    return
+  gProtocolExitHookQueued = true
+  addExitProc(handleProtocolExit)
 
 proc initProtocol*() =
   ## Initialize the protocol shim. Runs once at module-init time.
@@ -261,12 +374,10 @@ proc initProtocol*() =
     stdUnittest.disableParamFiltering()
     stdUnittest.resetOutputFormatters()
     stdUnittest.addOutputFormatter(SilentFormatter())
-    addExitProc(handleProtocolExit)
   of pmRunOne:
     stdUnittest.disableParamFiltering()
     stdUnittest.resetOutputFormatters()
     stdUnittest.addOutputFormatter(ProtocolFormatter())
-    addExitProc(handleProtocolExit)
 
 # Initialize protocol mode as soon as the module is loaded. Module
 # init runs before any ``suite``/``test`` top-level blocks in importing
@@ -293,8 +404,12 @@ template test*(testName, body: untyped) =
   ## then delegates to ``std/unittest.test`` in the modes where the
   ## body should actually run.
   bind gRegistry, gProtocolMode, gRunFilter,
-       gCapturedResult, TestEntry, ProtocolMode
+       gCapturedResult, TestEntry, ProtocolMode, queueProtocolExitHook
   block:
+    # Must run before anything else in the expansion: it is the
+    # relative registration order against std/unittest's own exit hook
+    # that decides which implementation gets to emit.
+    queueProtocolExitHook()
     let ctpInfo = instantiationInfo()
     let ctpSuite = when declared(testSuiteName): testSuiteName else: ""
     gRegistry.add(TestEntry(

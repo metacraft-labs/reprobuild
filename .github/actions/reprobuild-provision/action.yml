@@ -103,6 +103,7 @@ runs:
         git -C "${WS}/codetracer" submodule update --init --depth 1 --recursive -- \
           libs/nim-serialization \
           libs/nim-faststreams \
+          libs/nim-json-serialization \
           libs/nim-stew \
           libs/nimcrypto
 

@@ -23,6 +23,8 @@ import std/[os, strutils]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
+import repro_profile
+import ./infra
 
 type
   DeployAgentFlags = object
@@ -33,6 +35,8 @@ type
     cacheRoot: string
     fetchTimeoutMs: int
     hostIdentity: string
+    secretsKey: string
+    secretsDir: string
 
 proc parseFlags(args: openArray[string]): DeployAgentFlags =
   result.fetchTimeoutMs = 30_000
@@ -52,6 +56,8 @@ proc parseFlags(args: openArray[string]): DeployAgentFlags =
     of "--state-dir": result.stateDir = need(i, a, args)
     of "--cache-root": result.cacheRoot = need(i, a, args)
     of "--host": result.hostIdentity = need(i, a, args)
+    of "--secrets-key": result.secretsKey = need(i, a, args)
+    of "--secrets-dir": result.secretsDir = need(i, a, args)
     of "--fetch-timeout-ms":
       result.fetchTimeoutMs = parseInt(need(i, a, args))
     else:
@@ -66,6 +72,10 @@ proc parseFlags(args: openArray[string]): DeployAgentFlags =
         result.cacheRoot = a["--cache-root=".len .. ^1]
       elif a.startsWith("--host="):
         result.hostIdentity = a["--host=".len .. ^1]
+      elif a.startsWith("--secrets-key="):
+        result.secretsKey = a["--secrets-key=".len .. ^1]
+      elif a.startsWith("--secrets-dir="):
+        result.secretsDir = a["--secrets-dir=".len .. ^1]
       elif a.startsWith("--fetch-timeout-ms="):
         result.fetchTimeoutMs = parseInt(a["--fetch-timeout-ms=".len .. ^1])
       else:
@@ -94,6 +104,17 @@ proc runDeployAgentCommand*(args: seq[string]): int =
     flags.stateDir = getCurrentDir() / ".repro-deploy-agent"
   if flags.cacheRoot.len == 0:
     flags.cacheRoot = flags.stateDir / "cache"
+  # `--secrets-dir` defaults, but `--secrets-key` deliberately does NOT: a box
+  # that is meant to receive secrets and was started without its key must fail
+  # loudly on the first sealed manifest (`secrets_not_configured`), not fall
+  # back to some conventional path and then report a decrypt error that reads
+  # like key corruption.
+  if flags.secretsKey.len > 0 and flags.secretsDir.len == 0:
+    flags.secretsDir = flags.stateDir / "secrets"
+  if flags.secretsKey.len == 0 and flags.secretsDir.len > 0:
+    stderr.writeLine("repro deploy-agent: --secrets-dir given without " &
+      "--secrets-key; the directory alone cannot open a sealed section")
+    return 2
 
   let anchors =
     try:
@@ -108,12 +129,45 @@ proc runDeployAgentCommand*(args: seq[string]): int =
     sources: flags.sources,
     anchors: anchors,
     stateDir: flags.stateDir,
-    fetchTimeoutMs: flags.fetchTimeoutMs)
+    fetchTimeoutMs: flags.fetchTimeoutMs,
+    secretsKeyPath: flags.secretsKey,
+    secretsDir: flags.secretsDir)
+  # Compile the manifest's profile through the SAME Phase-F3 path
+  # `repro infra apply` uses. Without this the agent hands raw `system.nim`
+  # source to a parser that expects canonical resource text, and every real
+  # profile dies on `import repro_profile` at line 1.
+  #
+  # It is wired here, rather than imported inside `apply_hook`, because
+  # `resolveSystemProfileText` lives next door in `./infra` and
+  # `repro_cli_support` already depends on `repro_deploy_agent` — importing
+  # upward from the hook would close a cycle.
+  #
+  # The compiler needs a FILE, so the text is staged under the state dir. It is
+  # written on every tick and deliberately not cached on content: the compile
+  # step downstream keys its own cache on the profile's sources, so a repeat
+  # tick with an unchanged profile still short-circuits there.
+  let capturedStateDir = flags.stateDir
+  let resolver: ProfileResolver = proc(profileText: string; outText: var string;
+                                       outBuildActions: var seq[ProfileBuildAction]):
+                                    bool {.gcsafe.} =
+    {.cast(gcsafe).}:
+      let scratch = capturedStateDir / "deploy-agent"
+      createDir(scratch)
+      # Must be `.nim` and a valid Nim module name — the compiler rejects a
+      # hyphenated stem outright.
+      let profilePath = scratch / "manifest_profile.nim"
+      writeFile(profilePath, profileText)
+      result = resolveSystemProfileText(profilePath, profileText,
+        capturedStateDir, "repro deploy-agent", outText,
+        planCommand = "repro infra plan",
+        outBuildActions = addr outBuildActions)
+
   let deps = AgentDeps(
     apply: mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,
       hostIdentity =
         (if flags.hostIdentity.len > 0: flags.hostIdentity
-         else: "reprobuild-deploy-agent")))
+         else: "reprobuild-deploy-agent"),
+      profileResolver = resolver))
 
   let outcome =
     try:
@@ -134,4 +188,8 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   case outcome.kind
   of aoApplied, aoConverged, aoWaiting: return 0
   of aoApplyFailed, aoSourceError: return 1
-  of aoRejected, aoAmbiguous: return 2
+  # `2` is the "operator must act" class, alongside a rejected or ambiguous
+  # manifest. A secrets failure is deliberately NOT `1`: retrying on the timer
+  # will not fix a wrong recipient key or a missing --secrets-key, and grouping
+  # it with the retryable failures would bury it in a loop that never converges.
+  of aoRejected, aoAmbiguous, aoSecretsFailed: return 2

@@ -1,8 +1,15 @@
-import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, times, net]
+import std/[algorithm, json, os, osproc, sequtils, sets, strtabs, strutils, tables, times, net]
 
 import blake3
 import cbor
+# Blessed escape hatches for ambient binary resolution/execution. This module is
+# the class-2 "PATH-only" tier of Package-Model.md:263-268 — it resolves tools
+# BEFORE a store exists, so it cannot route through a typed execution profile.
+# Using the hatches states that explicitly instead of leaving bare findExe /
+# execCmdEx calls that read like an oversight. See
+# docs/ambient-execution-linter.md.
 import repro_core
+import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_domain_types
 import repro_hash
@@ -1645,6 +1652,27 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
       else:
         "sha256:" & sha256))
 
+proc systemToolEnv(): StringTableRef =
+  ## A copy of the current environment with the dynamic-linker override
+  ## variables removed, for spawning a SYSTEM tool resolved off PATH.
+  ##
+  ## A nix-built `repro` runs with `LD_LIBRARY_PATH` pointing at nix-store lib
+  ## dirs so it can dlopen its own clingo / zstd / openssl by leaf name (the
+  ## build strips rpath — the `.rodata`-bake guard). Those vars are inherited by
+  ## every child process, so a SYSTEM binary like the runner's `/usr/bin/curl`
+  ## is forced to load the nix `libssl`/`libcrypto` instead of its own — which
+  ## fails when the nix build needs a newer glibc than the (e.g. Debian) runner
+  ## has: `/usr/bin/curl: libc.so.6: version 'GLIBC_2.38' not found (required by
+  ## …/openssl-3.6.1/lib/libssl.so.3)`. A system tool must use its own system
+  ## libraries; scrub the overrides so it does. `repro`'s own env is untouched.
+  result = newStringTable(modeCaseSensitive)
+  for k, v in envPairs():
+    result[k] = v
+  for override in ["LD_LIBRARY_PATH", "LD_PRELOAD",
+                   "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"]:
+    if result.hasKey(override):
+      result.del(override)
+
 proc downloadUrlToFile(url, destination: string) =
   createDir(extendedPath(parentDir(destination)))
   if url.startsWith("file://"):
@@ -1660,6 +1688,7 @@ proc downloadUrlToFile(url, destination: string) =
     let process = startProcess(curl,
       args = ["-L", "--fail", "--silent", "--show-error", "-o",
         destination, url],
+      env = systemToolEnv(),
       options = {poUsePath, poParentStreams})
     let exitCode = waitForExit(process)
     close(process)
@@ -1731,7 +1760,7 @@ proc validateTarEntries(archivePath, archiveType: string) =
       @["tar", "-tjf", archivePath]
     of "tar":
       @["tar", "-tf", archivePath]
-    of "zip", "7z", "7z.exe", "raw":
+    of "zip", "7z", "7z.exe", "raw", "conda":
       return
     else:
       raise newException(ValueError,
@@ -2025,6 +2054,118 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
       raise newException(OSError,
         "tool-resolution failed: zip extraction failed for " & archivePath &
         "\n" & res.output)
+    flattenStripComponents(destination, stripComponents)
+  of "conda":
+    # conda-forge's package format: a ZIP envelope carrying exactly two
+    # zstd-compressed tars — ``info-<name>.tar.zst`` (metadata, discarded) and
+    # ``pkg-<name>.tar.zst`` (the payload). Binaries land under
+    # ``Library/bin`` inside the payload on Windows.
+    #
+    # It exists as an archiveType because for some libraries it is the only
+    # redistributable upstream form. clingo is the motivating case: potassco
+    # publishes source tarballs only, and the PyPI wheel statically links the C
+    # library into a ``.pyd``, so conda-forge is the sole source of a standalone
+    # ``clingo.dll``. Before this, the only way to provision it on Windows was
+    # an out-of-band PowerShell script.
+    #
+    # Nothing new is needed to unpack either layer — the ZIP arm above and the
+    # host tar both already exist — so the arm composes them rather than adding
+    # an extractor. The outer layer recurses through this same proc so the ZIP
+    # extractor discovery (PowerShell / unzip) stays in one place.
+    let staging = destination & ".conda-staging"
+    removeDir(extendedPath(staging))
+    createDir(extendedPath(staging))
+    try:
+      extractTarballArchive(archivePath, staging, "zip", 0)
+      var payload = ""
+      for kind, entry in walkDir(extendedPath(staging)):
+        if kind != pcFile: continue
+        let leaf = entry.extractFilename.toLowerAscii()
+        if leaf.startsWith("pkg-") and leaf.endsWith(".tar.zst"):
+          payload = entry
+          break
+      if payload.len == 0:
+        raise newException(OSError,
+          "tool-resolution failed: no pkg-*.tar.zst payload inside conda " &
+          "archive " & archivePath &
+          " (expected the conda-forge two-member envelope)")
+      # Decompressing the payload needs a ZSTD-CAPABLE tar, which "tar" on
+      # PATH is not guaranteed to be. GNU tar shells out to a separate zstd
+      # binary and dies with "zstd: Cannot exec" when it is absent (observed
+      # with GNU tar 1.35 under MSYS); libarchive/bsdtar links libzstd and
+      # handles it directly. Windows' bundled System32\tar.exe is bsdtar —
+      # 3.8.4 reports libzstd/1.5.7 — which is why the PowerShell provisioner
+      # this replaces called that binary by absolute path rather than "tar".
+      #
+      # So probe for a tar that can actually do it instead of assuming, and
+      # fall back to piping a standalone zstd. Mirrors the strategy discovery
+      # `extractTarZst` in repro_home_apply/builtin_adapter.nim already uses.
+      # Class 2 requires the action identity to record "the search path, resolved
+      # executable path, and configured probes" — probing and discarding the
+      # answer is not class 2, it is unclassified. `probes` accumulates every
+      # candidate considered and its verdict, and every exit path below reports
+      # it, so a failure says WHICH binaries were examined and why each was
+      # rejected rather than only that nothing was found.
+      var probes: seq[string] = @[]
+
+      proc tarSpeaksZstd(exe: string): bool =
+        if exe.len == 0: return false
+        let probe = uncontrolledExecCmdEx(shellCommand(@[exe, "--version"]))
+        let firstLine =
+          if probe.output.len == 0: "<no output>"
+          else: probe.output.splitLines()[0].strip()
+        result = probe.exitCode == 0 and
+          probe.output.toLowerAscii().contains("libarchive")
+        probes.add(exe & " -> " & (if result: "libarchive (usable)"
+                                   else: "not libarchive: " & firstLine))
+
+      var zstdTar = ""
+      when defined(windows):
+        let systemTar = getEnv("WINDIR", r"C:\Windows") / "System32" / "tar.exe"
+        if fileExists(extendedPath(systemTar)):
+          if tarSpeaksZstd(systemTar):
+            zstdTar = systemTar
+        else:
+          probes.add(systemTar & " -> absent")
+      if zstdTar.len == 0:
+        for candidate in ["bsdtar", "tar"]:
+          let exe = uncontrolledFindExe(candidate)
+          if exe.len == 0:
+            probes.add(candidate & " -> not on PATH")
+            continue
+          if tarSpeaksZstd(exe):
+            zstdTar = exe
+            break
+
+      let probeTrail = "\n  probes:\n    " & probes.join("\n    ")
+
+      var res: tuple[output: string, exitCode: int]
+      var resolvedVia = ""
+      if zstdTar.len > 0:
+        resolvedVia = zstdTar
+        res = uncontrolledExecCmdEx(shellCommand(
+          @[zstdTar, "-xf", payload, "-C", destination]))
+      else:
+        let zstdExe = uncontrolledFindExe("zstd")
+        let gnuTar = uncontrolledFindExe("tar")
+        if zstdExe.len == 0 or gnuTar.len == 0:
+          raise newException(OSError,
+            "tool-resolution failed: extracting the conda payload " & payload &
+            " needs a zstd-capable tar (libarchive/bsdtar, e.g. Windows' " &
+            "System32\\tar.exe) or a standalone 'zstd' alongside tar; " &
+            "neither was found." & probeTrail &
+            "\n    zstd -> " & (if zstdExe.len == 0: "not on PATH" else: zstdExe) &
+            "\n    tar  -> " & (if gnuTar.len == 0: "not on PATH" else: gnuTar))
+        resolvedVia = zstdExe & " | " & gnuTar
+        res = uncontrolledExecCmdEx(quoteShell(zstdExe) & " -dc " &
+          quoteShell(payload) & " | " & quoteShell(gnuTar) & " -xf - -C " &
+          quoteShell(destination))
+      if res.exitCode != 0:
+        raise newException(OSError,
+          "tool-resolution failed: conda payload extraction failed for " &
+          payload & " using " & resolvedVia & probeTrail & "\n" & res.output)
+    finally:
+      removeDir(extendedPath(staging))
     flattenStripComponents(destination, stripComponents)
   of "7z", "7z.exe":
     let sevenZipExe = resolveSevenZipExe()
@@ -2383,6 +2524,18 @@ proc bumpWindowsNimStack(nimExePath: string) =
     except CatchableError, OSError:
       discard
 
+proc compilerPathForShellEnvironment*(path: string;
+                                      windowsHost: bool): string =
+  ## Render an executable path for conventional compiler environment
+  ## variables such as ``CC``. Autotools copies these values into generated
+  ## make recipes, where an MSYS shell treats Windows backslashes as escape
+  ## characters. Native Windows programs accept forward slashes, so this form
+  ## works for both the configure probes and the generated recipes.
+  if windowsHost:
+    path.replace('\\', '/')
+  else:
+    path
+
 proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
                                   storeRoot: string) =
   ## MR5 — before the engine's interface-extract step shells out to
@@ -2448,7 +2601,7 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
     if bootstrapGcc.len > 0:
       putEnv("REPRO_BOOTSTRAP_CC", bootstrapGcc)
       if getEnv("CC").len == 0:
-        putEnv("CC", bootstrapGcc)
+        putEnv("CC", compilerPathForShellEnvironment(bootstrapGcc, true))
 
 proc blake3HexBytes*(bytes: openArray[byte]): string =
   blake3.toHex(blake3.digest(bytes))

@@ -1,14 +1,14 @@
-## RA-6 — `repro workspace project new` writes + commits + pushes a project
+## RA-6 — `repro workspace projects add` writes + commits + pushes a project
 ## manifest to the manifest repo (hermetic: a local bare upstream).
 ##
 ## The manifest repo (the workspace root) is a real git repo whose `origin`
-## is a local bare repo. `repro workspace project new <name>` writes
+## is a local bare repo. `repro workspace projects add <name>` writes
 ## `projects/<name>.toml`, commits it, and pushes to the bare. The test
 ## asserts: the project file exists locally, a commit landed, and the bare
 ## upstream received the commit (the project file is present in the bare's
 ## tree).
 ##
-## `project repo add` then records a repo fragment + include and pushes again.
+## `repos add` then records a repo fragment + include and pushes again.
 ##
 ## The second case pins WHICH repository those verbs act on: a workspace root
 ## that is a plain directory nested inside an unrelated checkout must be
@@ -48,9 +48,9 @@ proc gitConfig(gitBin, repoPath: string) =
   discard requireGit(q(gitBin) & " -C " & q(repoPath) &
     " config user.name \"RA6 Tester\"")
 
-suite "RA-6 — repro workspace project new (writes + pushes manifest)":
+suite "RA-6/WV-3 — repro workspace projects add (writes + pushes manifest)":
 
-  test "test_ra6_project_new_and_repo_add_push_to_bare_upstream":
+  test "test_ra6_projects_add_and_repos_add_push_to_bare_upstream":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -79,9 +79,9 @@ suite "RA-6 — repro workspace project new (writes + pushes manifest)":
       discard requireGit(q(gitBin) & " -C " & q(manifestRoot) &
         " push -u origin main")
 
-      # `project new myproj`.
-      let newRes = runShell(shellCommand(@[reproBin, "workspace", "project",
-        "new", "myproj", "-m", "My project",
+      # `projects add myproj`.
+      let newRes = runShell(shellCommand(@[reproBin, "workspace", "projects",
+        "add", "myproj", "-m", "My project",
         "--workspace-root=" & workspaceRoot]))
       if newRes.code != 0:
         checkpoint("new output: " & newRes.output)
@@ -101,9 +101,9 @@ suite "RA-6 — repro workspace project new (writes + pushes manifest)":
       # The command reported a push.
       check newRes.output.contains("pushed")
 
-      # `project repo add myproj lib-x --remote=...`.
-      let addRes = runShell(shellCommand(@[reproBin, "workspace", "project",
-        "repo", "add", "myproj", "lib-x",
+      # `repos add lib-x --project=myproj --remote=...`.
+      let addRes = runShell(shellCommand(@[reproBin, "workspace", "repos",
+        "add", "lib-x", "--project=myproj",
         "--remote=https://example.invalid/lib-x.git",
         "--workspace-root=" & workspaceRoot]))
       if addRes.code != 0:
@@ -116,7 +116,7 @@ suite "RA-6 — repro workspace project new (writes + pushes manifest)":
       check bareProj.code == 0
       check bareProj.output.contains("repos/lib-x.toml")
 
-  test "test_ra6_project_new_refuses_a_workspace_root_inside_another_checkout":
+  test "test_ra6_projects_add_refuses_a_workspace_root_inside_another_checkout":
     ## The manifest verbs commit and PUSH; which repository they act on is
     ## decided by Git's repository discovery, which walks UPWARDS. With a
     ## workspace root that is a plain directory nested inside somebody else's
@@ -152,9 +152,9 @@ suite "RA-6 — repro workspace project new (writes + pushes manifest)":
       # workspace (and therefore manifest-repo) root.
       let nested = outer / "workspace"
       createDir(nested)
-      let res = runShell(shellCommand(@[reproBin, "workspace", "project",
-        "new", "nested-proj", "-m", "Nested", "--workspace-root=" & nested]))
-      checkpoint("nested project new output: " & res.output)
+      let res = runShell(shellCommand(@[reproBin, "workspace", "projects",
+        "add", "nested-proj", "-m", "Nested", "--workspace-root=" & nested]))
+      checkpoint("nested projects add output: " & res.output)
       check res.code != 0
       check res.output.contains("is not a git checkout")
       check res.output.contains(nested)

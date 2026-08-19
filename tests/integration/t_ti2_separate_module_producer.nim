@@ -131,11 +131,33 @@ proc writeProducer(producerDir: string; resourcesSrc: string) =
   writeFile(producerDir / "repro" / "resources.nim", resourcesSrc)
 
 proc compileConsumer(consumerDir, witnessPath, producerSelector, bindStmt,
-                     nimcache: string;
-                     checkOnly = false): tuple[ok: bool, output: string] =
+                      nimcache: string;
+                      checkOnly = false;
+                      clearRepoRootEnv = false): tuple[ok: bool, output: string] =
   createDir(consumerDir)
   writeFile(consumerDir / "repro.nim",
     consumerRepro(producerSelector, bindStmt))
+  var explicitRepoPaths = ""
+  if clearRepoRootEnv:
+    # The external project still needs the normal DSL search paths to compile
+    # its first import. Supply those paths explicitly without supplying the
+    # environment hints whose absence the cold accessor path must tolerate.
+    for kind, libDir in walkDir(repoRoot / "libs"):
+      if kind == pcDir and dirExists(libDir / "src"):
+        explicitRepoPaths.add(" --path:" & quoteShell(libDir / "src"))
+    explicitRepoPaths.add(" --path:" &
+      quoteShell(repoRoot / "libs" / "nimcrypto"))
+    for envName in [
+        "BEARSSL_SRC",
+        "REPRO_CT_TEST_RUNNER_SRC",
+        "REPRO_TEST_ADAPTERS_SRC",
+        "SHM_GSET_SRC",
+        "SHM_QUEUE_SRC",
+        "STACKABLE_HOOKS_SRC",
+      ]:
+      let sourceRoot = getEnv(envName)
+      if sourceRoot.len > 0 and dirExists(sourceRoot):
+        explicitRepoPaths.add(" --path:" & quoteShell(sourceRoot))
   let nimExe = findExe("nim")
   doAssert nimExe.len > 0, "nim compiler not on PATH"
   let env = "REPRO_TI2_ACCESSOR_WITNESS=" & quoteShell(witnessPath)
@@ -147,12 +169,49 @@ proc compileConsumer(consumerDir, witnessPath, producerSelector, bindStmt,
         quoteShell(nimcache / "consumer_bin")
   let cmd =
     env & " " & nimExe & " " & compileVerb &
+    explicitRepoPaths &
     " --nimcache:" & quoteShell(nimcache) &
     " " & quoteShell(consumerDir / "repro.nim")
+  let hadRepoRoot = existsEnv("REPROBUILD_REPO_ROOT")
+  let oldRepoRoot = getEnv("REPROBUILD_REPO_ROOT")
+  let hadSourceRoot = existsEnv("REPROBUILD_SRC")
+  let oldSourceRoot = getEnv("REPROBUILD_SRC")
+  if clearRepoRootEnv:
+    delEnv("REPROBUILD_REPO_ROOT")
+    delEnv("REPROBUILD_SRC")
+  defer:
+    if clearRepoRootEnv:
+      if hadRepoRoot: putEnv("REPROBUILD_REPO_ROOT", oldRepoRoot)
+      else: delEnv("REPROBUILD_REPO_ROOT")
+      if hadSourceRoot: putEnv("REPROBUILD_SRC", oldSourceRoot)
+      else: delEnv("REPROBUILD_SRC")
   let (output, code) = execCmdEx("cd " & quoteShell(repoRoot) & " && " & cmd)
   (code == 0, output)
 
 suite "TI2: separate-module producer (vm-harness shape)":
+
+  test "cold accessor generation locates the DSL for an external consumer":
+    let base = getTempDir() /
+      ("ti2-external-fixtures-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base)
+    defer: removeDir(base)
+
+    let producerSelector = "producer_external_" & $getCurrentProcessId()
+    let accCache = repoRoot / "build" / "nimcache" /
+      "ti2-resource-accessors" / producerSelector
+    removeDir(accCache)
+    defer: removeDir(accCache)
+    writeProducer(base / producerSelector, resourcesModule)
+
+    let witness = base / "witness.log"
+    let compiled = compileConsumer(base / "consumer", witness,
+      producerSelector,
+      "  discard container(\"external\", image = \"nginx\", cpus = 2)",
+      base / "nimcache", clearRepoRootEnv = true)
+    checkpoint compiled.output
+    check compiled.ok
+    check countWitness(witness) == 1
 
   test "t_ti2_separate_module_producer_detected_fresh_and_shared":
     let base = repoRoot / "build" / "nimcache" /

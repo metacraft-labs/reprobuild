@@ -821,10 +821,20 @@ proc m2VersionsEntryAst(stmt: NimNode):
     return
   if stmt.len < 2:
     return
-  if stmt[0].kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
-    return
   if stmt[^1].kind != nnkStmtList:
     return
+  # Shape-matched as an entry (a call with an indented body) but keyed by
+  # something other than a string literal. Previously this returned unmatched
+  # and the CALLER skipped it, so the whole version entry — revision, url,
+  # repository and all — vanished without a word.
+  #
+  # The key stays literal-only on purpose: it is the map key `registerVersion`
+  # is indexed by, and it is compared and looked up as text. But saying so
+  # beats dropping the entry.
+  if stmt[0].kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    error("a versions: entry must be keyed by a string literal, e.g. " &
+      "\"1.2.3\": — the key is the version identity the entry registers under",
+      stmt[0])
   result.matched = true
   result.version = stmt[0].strVal
   result.body = stmt[^1]
@@ -855,32 +865,53 @@ proc emitM2Versions(packageName: string;
       let parsed = m2VersionsEntryAst(versionStmt)
       if not parsed.matched:
         continue
-      var sourceRevision = ""
-      var sourceChecksum = ""
-      var sourceUrl = ""
-      var sourceRepository = ""
+      # These hold emittable SOURCE, not values — the same
+      # transform-don't-evaluate treatment the provisioning setters get. A
+      # non-literal used to hit the `continue` below and be dropped in
+      # silence, so `sourceRevision = AptJammyAdapterVersion` compiled and
+      # registered an EMPTY revision.
+      #
+      # That is the drop behind the "keep the version string in sync with
+      # <Const> in the stdlib module" comments in the recipes: the const
+      # existed, the DSL just could not accept it, so the value was pasted and
+      # a comment asked a human to keep the two aligned.
+      var sourceRevision = "\"\""
+      var sourceChecksum = "\"\""
+      var sourceUrl = "\"\""
+      var sourceRepository = "\"\""
       for assignment in parsed.body:
+        # Doc comments and `discard` legitimately appear in these bodies, so a
+        # non-assignment is still skipped quietly.
         if assignment.kind notin {nnkAsgn, nnkFastAsgn}:
           continue
         if assignment[0].kind notin {nnkIdent, nnkSym}:
           continue
-        if assignment[1].kind notin {nnkStrLit, nnkRStrLit,
-                                      nnkTripleStrLit}:
-          continue
         let key = identText(assignment[0])
-        let value = assignment[1].strVal
+        let value =
+          if assignment[1].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+            assignment[1].strVal.escape()
+          else:
+            assignment[1].repr
         case key
         of "sourceRevision": sourceRevision = value
         of "sourceChecksum": sourceChecksum = value
         of "sourceUrl": sourceUrl = value
         of "sourceRepository": sourceRepository = value
-        else: discard
+        else:
+          # A misspelt key is the same silent drop wearing a different hat.
+          # Warn rather than error: this arm is reached by 400+ recipe files
+          # and an unrecognised key may predate this check, so make the signal
+          # visible without breaking a build that used to pass.
+          warning("unknown versions: entry key '" & key &
+            "' — recognised keys are sourceRevision, sourceChecksum, " &
+            "sourceUrl, sourceRepository; this assignment is ignored",
+            assignment[0])
       let pkgLit = escForCode(packageName)
       let versionLit = escForCode(parsed.version)
-      let revLit = escForCode(sourceRevision)
-      let sumLit = escForCode(sourceChecksum)
-      let urlLit = escForCode(sourceUrl)
-      let repoLit = escForCode(sourceRepository)
+      let revLit = sourceRevision
+      let sumLit = sourceChecksum
+      let urlLit = sourceUrl
+      let repoLit = sourceRepository
       result.add(parseStmt(
         "registerVersion(" & pkgLit & ", DslVersionInfo(\n" &
         "  version: " & versionLit & ",\n" &
@@ -1486,14 +1517,22 @@ proc m5ServiceStringLitArg(stmt: NimNode): NimNode =
   ##   * ``restart "..."``
   ##   * ``user "..."``
   ##   * ``group "..."``
+  ## The argument is spliced VERBATIM into the generated call
+  ## (``quote do: setActiveServiceDescription(`lit`)``), so it does not have to
+  ## be a literal — the Nim compiler type-checks and evaluates whatever is
+  ## written. Restricting to ``nnkStrLit`` meant a ``const`` or a helper call
+  ## was SILENTLY DROPPED: this proc returned nil and the caller simply left the
+  ## field unset, with no diagnostic.
+  ##
+  ## Accepting any expression means a non-string one now fails at the spliced
+  ## call site with an ordinary type mismatch instead of vanishing. That is the
+  ## point — the macro never evaluates or inspects the value, it only relocates
+  ## it, and the compiler does the rest.
   if stmt.kind notin {nnkCall, nnkCommand}:
     return nil
   if stmt.len != 2:
     return nil
-  let arg = stmt[1]
-  if arg.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
-    return nil
-  return arg.copyNimTree()
+  return stmt[1].copyNimTree()
 
 proc m5ParseServiceBody(body: NimNode): tuple[
     executableRef: string; argStringLits: seq[NimNode];
@@ -2108,8 +2147,15 @@ proc m9eCollectUsesClauses(armBody: NimNode): seq[NimNode] =
     if identText(head).normalize != "uses":
       continue
     let arg = stmt[1]
-    if arg.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
-      continue
+    # A statement that IS a `uses` clause but whose argument is not a literal
+    # used to be skipped here, which silently discarded a declared dependency
+    # — the one failure mode this DSL must not have. The arg is spliced
+    # verbatim into the emitted clause, so any expression the compiler can
+    # resolve to the dependency string is fine; it just has to reach the
+    # emitter rather than being dropped on the way.
+    if arg.kind in {nnkStmtList, nnkStmtListExpr}:
+      error("uses in a variant arm expects a single dependency expression",
+        arg)
     result.add(arg.copyNimTree())
 
 proc emitM9EVariantArms*(packageName: string;
@@ -3329,50 +3375,56 @@ proc provisioningContributionLiteral(
     ", nixProvisioning: @["
   for i, provisioning in contribution.nixProvisioning:
     if i > 0: result.add(", ")
+    # Spliced verbatim, in step with ``macros_a.packageLiteral``.
     result.add("NixPackageProvisioningDef(selector: " &
-      escForCode(provisioning.selector) &
-      ", executablePath: " & escForCode(provisioning.executablePath) &
-      ", expressionFile: " & escForCode(provisioning.expressionFile) &
-      ", nixpkgsRef: " & escForCode(provisioning.nixpkgsRef) &
-      ", nixpkgsRev: " & escForCode(provisioning.nixpkgsRev) &
-      ", nixpkgsNarHash: " & escForCode(provisioning.nixpkgsNarHash) &
-      ", packageId: " & escForCode(provisioning.packageId) &
-      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+      codeOrEmpty(provisioning.selector) &
+      ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
+      ", expressionFile: " & codeOrEmpty(provisioning.expressionFile) &
+      ", nixpkgsRef: " & codeOrEmpty(provisioning.nixpkgsRef) &
+      ", nixpkgsRev: " & codeOrEmpty(provisioning.nixpkgsRev) &
+      ", nixpkgsNarHash: " & codeOrEmpty(provisioning.nixpkgsNarHash) &
+      ", packageId: " & codeOrEmpty(provisioning.packageId) &
+      ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], tarballProvisioning: @[")
   for i, provisioning in contribution.tarballProvisioning:
     if i > 0: result.add(", ")
+    # Spliced verbatim — these fields hold emittable SOURCE. Kept in step with
+    # the identical emitter in ``macros_a.packageLiteral``; the two must agree,
+    # since a `provisioningFor` contribution and an in-package `provisioning:`
+    # block are the same declaration reached by different routes.
     result.add("TarballProvisioningDef(url: " &
-      escForCode(provisioning.url) & ", mirrors: @[")
+      codeOrEmpty(provisioning.url) & ", mirrors: @[")
     for j, mirror in provisioning.mirrors:
       if j > 0: result.add(", ")
-      result.add(escForCode(mirror))
-    result.add("], sha256: " & escForCode(provisioning.sha256) &
-      ", archiveType: " & escForCode(provisioning.archiveType) &
-      ", executablePath: " & escForCode(provisioning.executablePath) &
+      result.add(mirror)
+    result.add("], sha256: " & codeOrEmpty(provisioning.sha256) &
+      ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
+      ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", stripComponents: " & $provisioning.stripComponents &
-      ", packageId: " & escForCode(provisioning.packageId) &
-      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
-      ", cpu: " & escForCode(provisioning.cpu) &
-      ", os: " & escForCode(provisioning.os) &
+      ", packageId: " & codeOrEmpty(provisioning.packageId) &
+      ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
+      ", cpu: " & codeOrEmpty(provisioning.cpu) &
+      ", os: " & codeOrEmpty(provisioning.os) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], scoopProvisioning: @[")
   for i, provisioning in contribution.scoopProvisioning:
     if i > 0: result.add(", ")
+    # Spliced verbatim, in step with ``macros_a.packageLiteral``.
     result.add("ScoopProvisioningDef(bucket: " &
-      escForCode(provisioning.bucket) &
-      ", app: " & escForCode(provisioning.app) &
-      ", version: " & escForCode(provisioning.version) &
-      ", preferredVersion: " & escForCode(provisioning.preferredVersion) &
-      ", manifestChecksum: " & escForCode(provisioning.manifestChecksum) &
-      ", manifestUrl: " & escForCode(provisioning.manifestUrl) &
-      ", executablePath: " & escForCode(provisioning.executablePath) &
+      codeOrEmpty(provisioning.bucket) &
+      ", app: " & codeOrEmpty(provisioning.app) &
+      ", version: " & codeOrEmpty(provisioning.version) &
+      ", preferredVersion: " & codeOrEmpty(provisioning.preferredVersion) &
+      ", manifestChecksum: " & codeOrEmpty(provisioning.manifestChecksum) &
+      ", manifestUrl: " & codeOrEmpty(provisioning.manifestUrl) &
+      ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", requiresExecutionProfileChecksum: " &
         $provisioning.requiresExecutionProfileChecksum &
-      ", packageId: " & escForCode(provisioning.packageId) &
-      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+      ", packageId: " & codeOrEmpty(provisioning.packageId) &
+      ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], sourceFile: " & escForCode(contribution.sourceFile) &

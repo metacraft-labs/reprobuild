@@ -70,21 +70,57 @@
 ## beside ``repro.exe`` -- ``scripts/verify_release.sh`` enforces that.
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
+import repro_dsl_stdlib/prefix_layout
 
 package clingo:
   provisioning:
     # POSIX only for now. Matches the ``pkgs.clingo`` input flake.nix already
     # uses for the devShell, on the repo's dominant nixpkgs pin.
     nixPackage "nixpkgs#clingo", executablePath = "bin/clingo",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
-    # Windows: intentionally absent. A `tarball` entry pointing at
-    # https://anaconda.org/conda-forge/clingo/5.8.0/download/win-64/
-    #   clingo-5.8.0-py312he3f8637_1.conda
-    # (sha256 a9e5eb699dd8de3dcc555c28f47a46ca0b3005f784f76aadf70f47267e5afee9)
-    # would fetch and checksum correctly but unpack to the two inner
-    # `.tar.zst` members rather than to `clingo.dll`, leaving a prefix whose
-    # `executablePath` does not exist. Declaring it would trade a clear
-    # "no Windows source" for a resolver that succeeds and then produces a
-    # broken realization, so the gap stays visible until a source kind can
-    # express it.
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: conda-forge, via the `conda` archiveType. When this entry was
+    # first scaffolded the arm did not exist and a `tarball` here would have
+    # unpacked to the two inner `.tar.zst` members rather than to `clingo.dll`
+    # — a resolver that succeeds and then produces a broken realization. The
+    # archiveType now unwraps both layers, so the entry is real.
+    #
+    # conda-forge is the only redistributable source: potassco ships source
+    # tarballs only, and the PyPI wheel statically links the C library into
+    # `_clingo.cp312-win_amd64.pyd`. The `pyXXX` build string is part of the
+    # asset name and therefore part of the pin, but it only affects the bundled
+    # `.pyd` we discard — `clingo.dll` itself is ABI-stable across those
+    # variants.
+    #
+    # No stripComponents: the payload's own `Library/bin` layout is the prefix
+    # shape, and `executablePath` addresses into it. Verified by realizing the
+    # pinned asset by hand — the resulting clingo.dll is sha256 a55d01d3…,
+    # byte-identical to the one in a working install.
+    tarball url = "https://anaconda.org/conda-forge/clingo/5.8.0/download/win-64/clingo-5.8.0-py312he3f8637_1.conda",
+      sha256 = "a9e5eb699dd8de3dcc555c28f47a46ca0b3005f784f76aadf70f47267e5afee9",
+      archiveType = "conda",
+      executablePath = binDir(plConda) & "/clingo.exe",
+      packageId = "clingo@5.8.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:clingo@5.8.0:sha256:a9e5eb699dd8de3dcc555c28f47a46ca0b3005f784f76aadf70f47267e5afee9"
+
+  # This package provides the SHARED LIBRARY `repro_solver` dlopens at module
+  # init, not only a `clingo` CLI. That is now declarable.
+  #
+  # `library <name>:` is still NOT the vehicle and never was: its
+  # `exportedPath` is "the producer-relative directory a Nim library-consumer
+  # threads onto its `nim c --path:`" (types.nim), i.e. a Nim SOURCE path, and
+  # its `kind:` describes a library the package BUILDS. Pointing `exportedPath`
+  # at `Library/bin` would tell Nim consumers to add a DLL directory to their
+  # source path. Hence a separate `runtimeLibrary` member.
+  #
+  # One entry per provisioning arm, because the directory follows the SOURCE:
+  # conda-forge win-64 puts the loadable DLL under `Library/bin` (Windows keeps
+  # DLLs beside the executables, not in `lib`), while nixpkgs uses `lib`.
+  # `runtimeLibDir` names both — see repro_dsl_stdlib/prefix_layout.
+  runtimeLibrary "clingo", dir = runtimeLibDir(plConda),
+    cpu = "x86_64", os = "windows"
+  runtimeLibrary "clingo", dir = runtimeLibDir(plUnix), os = "linux"
+  runtimeLibrary "clingo", dir = runtimeLibDir(plUnix), os = "macos"

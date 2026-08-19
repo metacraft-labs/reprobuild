@@ -60,6 +60,15 @@ type
     completed*: bool
     execution*: ReproRunQuotaExecution
 
+  ReproDirectRunningProcess* = object
+    ## A directly launched command that uses RunQuota's argv-preserving,
+    ## output-draining process backend without acquiring a daemon lease.
+    ## Reprobuild uses this only for its explicitly unsafe RunQuota bypass.
+    child: LaunchedProcess
+    active*: bool
+    completed*: bool
+    execution*: ReproRunQuotaExecution
+
   ReproRunQuotaQueuedProcess* = object
     candidateId*: uint64
     lease: RunQuotaLease
@@ -795,6 +804,77 @@ proc executionFromCompletion(leaseId: uint64; completion: ProcessCompletion;
     backendName: backendName,
     leaseFinishedSent: leaseFinishedSent,
     leaseReleased: leaseReleased)
+
+proc startDirect*(command: ReproCommandSpec): ReproDirectRunningProcess =
+  ## Launch ``command.argv`` directly, with no shell and no RunQuota lease.
+  ## The shared process backend preserves argument boundaries and drains child
+  ## output while the command runs, including on Windows.
+  try:
+    result.child = launchProcess(commandSpec(
+      command.argv,
+      cwd = command.cwd,
+      env = command.env,
+      stdoutLimit = command.stdoutLimit,
+      stderrLimit = command.stderrLimit))
+    result.active = true
+  except CatchableError as err:
+    raise newException(ReproRunQuotaError, err.msg)
+
+proc processId*(running: ReproDirectRunningProcess): int =
+  int(running.child.info.processId)
+
+proc pollCompletion*(running: var ReproDirectRunningProcess): bool =
+  if running.completed:
+    return true
+  if not running.active:
+    return false
+  running.child.pollCompletion()
+
+proc finishCompleted*(running: var ReproDirectRunningProcess):
+    ReproRunQuotaExecution =
+  if running.completed:
+    return running.execution
+  if not running.active:
+    raise newException(ReproRunQuotaError, "direct process is not active")
+  try:
+    if not running.child.pollCompletion():
+      discard running.child.waitForCompletion()
+    let completion = running.child.completion
+    let backendName = running.child.info.backend.name
+    running.child.close()
+    running.execution = executionFromCompletion(
+      0'u64,
+      completion,
+      backendName,
+      leaseFinishedSent = false,
+      leaseReleased = false)
+    running.completed = true
+    running.active = false
+    running.execution
+  except CatchableError as err:
+    raise newException(ReproRunQuotaError, err.msg)
+
+proc cancelAndWait*(running: var ReproDirectRunningProcess):
+    ReproRunQuotaExecution =
+  if running.completed:
+    return running.execution
+  if not running.active:
+    raise newException(ReproRunQuotaError, "direct process is not active")
+  try:
+    let completion = running.child.cancelAndWait()
+    let backendName = running.child.info.backend.name
+    running.child.close()
+    running.execution = executionFromCompletion(
+      0'u64,
+      completion,
+      backendName,
+      leaseFinishedSent = false,
+      leaseReleased = false)
+    running.completed = true
+    running.active = false
+    running.execution
+  except CatchableError as err:
+    raise newException(ReproRunQuotaError, err.msg)
 
 proc openRunQuotaSession*(name = "reprobuild action";
                           version = "0.1.0"): ReproRunQuotaSession =

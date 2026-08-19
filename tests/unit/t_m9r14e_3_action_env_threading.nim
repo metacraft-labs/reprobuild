@@ -163,6 +163,33 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     let r2 = applyResolvedAuxPathsArgv(env, paths)
     check r1 == r2
 
+  test "explicit runtime loader env overrides dependency projection":
+    let paths = ResolvedAuxPaths(libDirs: @["/source/readline/lib"])
+
+    let projectedArgv = applyResolvedAuxPathsArgv(
+      @["LD_LIBRARY_PATH=/inherited/lib"], paths)
+    let overriddenArgv = applyExplicitRuntimeLibraryEnvOverrides(
+      projectedArgv, @["LD_LIBRARY_PATH="])
+    check envValue(overriddenArgv, "LD_LIBRARY_PATH") == ""
+
+    let table = newStringTable(modeCaseSensitive)
+    table["LD_LIBRARY_PATH"] = "/inherited/lib"
+    applyResolvedAuxPathsTable(table, paths)
+    applyExplicitRuntimeLibraryEnvOverrides(table, @["LD_LIBRARY_PATH="])
+    check table.hasKey("LD_LIBRARY_PATH")
+    check table["LD_LIBRARY_PATH"] == ""
+
+  test "explicit runtime loader env uses last action value":
+    let projected = @["PATH=/usr/bin", "LD_LIBRARY_PATH=/source/lib"]
+    let overridden = applyExplicitRuntimeLibraryEnvOverrides(projected,
+      @["LD_LIBRARY_PATH=/first", "LD_LIBRARY_PATH=/selected"])
+    check envValue(overridden, "LD_LIBRARY_PATH") == "/selected"
+    var loaderEntries = 0
+    for entry in overridden:
+      if entry.startsWith("LD_LIBRARY_PATH="):
+        inc loaderEntries
+    check loaderEntries == 1
+
   when defined(posix):
     test "shell actions export runtime paths after interpreter startup":
       let argv = @["/nix/store/bash/bin/sh", "-c", "printf ready"]

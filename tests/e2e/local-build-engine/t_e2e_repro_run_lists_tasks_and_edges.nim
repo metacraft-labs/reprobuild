@@ -12,35 +12,9 @@
 ## run-edge under `[run-edge]` — proving the listing merges the two
 ## resolution sources rather than the old task-only view.
 
-import std/[os, osproc, strutils, tempfiles, unittest]
+import std/[os, strutils, tempfiles, unittest]
 
 import repro_test_support
-
-proc pathExists(path: string): bool =
-  try:
-    discard getFileInfo(path, followSymlink = false)
-    true
-  except OSError:
-    false
-
-proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
-    socket: string] =
-  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
-  let socketPath = "/tmp/repro-n1-list-rq-" & $getCurrentProcessId() & ".sock"
-  if fileExists(socketPath):
-    removeFile(socketPath)
-  let daemon = startProcess(daemonBin, args = [
-    "--socket", socketPath,
-    "--cpu-milli", "16000",
-    "--memory-bytes", "17179869184"
-  ], options = {poUsePath})
-  putEnv("RUNQUOTA_SOCKET", socketPath)
-  for _ in 0 ..< 200:
-    if pathExists(socketPath):
-      return (process: daemon, socket: socketPath)
-    sleep(25)
-  daemon.terminate()
-  raise newException(OSError, "runquotad socket did not appear")
 
 proc reproBinary(repoRoot: string): string =
   requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
@@ -94,6 +68,14 @@ proc writeProject(path: string) =
     "      output = \"build/app\")\n" &
     "    run(\"app-run\", build = \"build-app\")\n")
 
+proc writeTaskOnlyProject(path: string) =
+  writeFile(path,
+    "import repro_project_dsl\n\n" &
+    "package n1TaskOnlyPkg:\n" &
+    "  devEnv:\n" &
+    "    task \"greet\", command = \"echo task-only-hi\", " &
+      "description = \"say hi without a build graph\"\n")
+
 proc runRepro(reproBin, pathValue: string; cwd: string;
               subArgs: openArray[string]): string =
   var args = @[reproBin]
@@ -107,18 +89,30 @@ proc runRepro(reproBin, pathValue: string; cwd: string;
 
 suite "t_e2e_repro_run_lists_tasks_and_edges":
 
+  test "dev-env-only recipe lists and runs its task":
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-n1-task-only", "")
+    defer: removeDir(tempRoot)
+
+    let reproBin = reproBinary(repoRoot)
+    let projectRoot = tempRoot / "project"
+    createDir(projectRoot)
+    writeTaskOnlyProject(projectRoot / "repro.nim")
+
+    let tasksOut = runRepro(reproBin, getEnv("PATH"), projectRoot,
+      ["tasks"])
+    check tasksOut.contains("[task]")
+    check tasksOut.contains("greet")
+    check tasksOut.contains("say hi without a build graph")
+
+    let runOut = runRepro(reproBin, getEnv("PATH"), projectRoot,
+      ["run", "task:greet"])
+    check runOut.contains("task-only-hi")
+
   test "t_e2e_repro_run_lists_tasks_and_edges":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-n1-list", "")
     defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
 
     let reproBin = reproBinary(repoRoot)
     let binDir = tempRoot / "bin"
@@ -145,3 +139,16 @@ suite "t_e2e_repro_run_lists_tasks_and_edges":
     check tasksOut.contains("greet")
     check tasksOut.contains("[run-edge]")
     check tasksOut.contains("app-run")
+
+    # The documented from-source spelling must be accepted by dev-env
+    # introspection, and listing the run edge must not resolve the missing
+    # build-only n1-tool from PATH.
+    let sourceModeOut = requireSuccess(shellCommand(
+      @[reproBin, "tasks"], @[
+        ("PATH", getEnv("PATH")),
+        ("REPRO_TOOL_PROVISIONING", "from-source"),
+      ]), projectRoot)
+    check sourceModeOut.contains("[task]")
+    check sourceModeOut.contains("greet")
+    check sourceModeOut.contains("[run-edge]")
+    check sourceModeOut.contains("app-run")

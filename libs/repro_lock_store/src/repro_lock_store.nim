@@ -36,6 +36,12 @@
 import std/[base64, json, options, os, osproc, streams, strtabs, strutils, tables]
 
 import evidence as workspaceVcsEvidence
+import git_tool
+# RA-32 — the ONE lock-path component grammar. Every backend in this file keys
+# its records by ``(project, repo, sha)`` NAMES, and a name is not a path: a repo
+# named ``stripe/sync-engine`` is one component, and a repo named ``..`` must not
+# be able to address a parent directory. See ``lock_paths.nim``.
+import repro_workspace_manifests/lock_paths
 
 export workspaceVcsEvidence.WorkspaceVcsEvidence
 
@@ -264,6 +270,62 @@ method storeLocationLabel*(s: LockStore): string {.base.} =
   ## The base returns the empty string; concrete backends override.
   ""
 
+method readabilityDiagnostic*(s: LockStore): string {.base.} =
+  ## DS-3 (CLI/develop.md §"Unreachable backends never narrow the set
+  ## silently") — "" when the backend's medium can be READ at all; otherwise a
+  ## human diagnostic saying why it cannot.
+  ##
+  ## This answers a different question from "does the backend hold a record for
+  ## repo X". A backend that is present and empty legitimately contributes
+  ## nothing; a backend that is *absent* would ALSO contribute nothing, and a
+  ## consumer that cannot tell the two apart silently narrows the set it
+  ## reports. Every distinct backend the develop-set composer folds is probed
+  ## with this before its records are read, so an absent one is named rather
+  ## than quietly dropped.
+  ##
+  ## The probe asks whether the medium can be READ, not merely whether a name
+  ## for it resolves. A present-but-empty medium is reachable and legitimately
+  ## contributes nothing; a present-but-UNREADABLE one is not, and must be
+  ## reported like an absent one (CLI/develop.md §"Unreachable backends never
+  ## narrow the set silently": "'Unreadable' includes degrading to silence").
+  ""
+
+proc directoryReadDiagnostic*(path: string): string =
+  ## "" when ``path`` can actually be ENUMERATED; otherwise the OS diagnostic.
+  ##
+  ## ``dirExists`` only needs the PARENT to be traversable, so a directory at
+  ## mode ``000`` "exists" while every read inside it fails with EACCES. That
+  ## gap is how an existing-but-unreadable backend comes out looking identical
+  ## to an empty one — the backend then reports "holds no record" about records
+  ## it simply could not see. ``walkDir(checkDir = true)`` raises instead of
+  ## yielding nothing, which is the distinction the rule needs.
+  try:
+    for _ in walkDir(path, checkDir = true):
+      break
+    ""
+  except OSError as err:
+    err.msg
+  except CatchableError as err:
+    err.msg
+
+proc storeSubtreeDiagnostic*(root, label: string): string =
+  ## Shared shape of the readability probe for a DIRECTORY-BACKED store: the
+  ## root must exist AND be enumerable, and when a ``locks/`` subtree is
+  ## present it must be enumerable too (a readable root over an unreadable
+  ## ``locks/`` is the finer case that otherwise reads as "holds no record").
+  if not dirExists(root):
+    return label & " does not exist: " & root
+  let rootDiag = directoryReadDiagnostic(root)
+  if rootDiag.len > 0:
+    return label & " exists but cannot be read: " & root & " (" & rootDiag & ")"
+  let locksDir = root / "locks"
+  if dirExists(locksDir):
+    let locksDiag = directoryReadDiagnostic(locksDir)
+    if locksDiag.len > 0:
+      return label & "'s `locks/` subtree exists but cannot be read: " &
+        locksDir & " (" & locksDiag & ")"
+  ""
+
 # ---------------------------------------------------------------------------
 # Shared git runner
 # ---------------------------------------------------------------------------
@@ -274,8 +336,7 @@ proc runGit(gitBin: string; args: openArray[string];
   ## Run git with stderr folded into stdout. ``extraEnv`` overlays the
   ## inherited environment (used by the separate-branch backend to point
   ## ``GIT_INDEX_FILE`` at a scratch index).
-  var env = newStringTable()
-  for k, v in envPairs(): env[k] = v
+  var env = scrubbedGitRepositoryEnv()
   for (k, v) in extraEnv: env[k] = v
   var p = startProcess(gitBin, args = @args, env = env,
     options = {poStdErrToStdOut, poUsePath})
@@ -299,24 +360,58 @@ type
 proc newCommittedFileLockStore*(baseDir: string): CommittedFileLockStore =
   CommittedFileLockStore(baseDir: absolutePath(baseDir))
 
+proc cfRepoDir(s: CommittedFileLockStore; project, repo: string): string =
+  ## RA-32 — one path component per NAME. The raw join this replaced deepened
+  ## the path for every forge-shaped repo name (``stripe/sync-engine``), and for
+  ## ``repo == ".."`` it wrote ``baseDir/locks/<project>/../<sha>.rec`` — outside
+  ## the project's own subtree. ``encodeLockPathSegment`` maps ``..`` to ``.%2E``,
+  ## so no name can traverse.
+  s.baseDir / "locks" / encodeLockPathSegment(project) /
+    encodeLockPathSegment(repo)
+
+proc cfProjectDir(s: CommittedFileLockStore; project: string): string =
+  s.baseDir / "locks" / encodeLockPathSegment(project)
+
 proc cfRecordPath(s: CommittedFileLockStore; k: StoreLockKey): string =
-  s.baseDir / "locks" / k.project / k.repo / (k.sha & ".rec")
+  cfRepoDir(s, k.project, k.repo) / (encodeLockPathSegment(k.sha) & ".rec")
+
+proc cfEvidencePath(s: CommittedFileLockStore; project, repo: string): string =
+  s.baseDir / "evidence" / encodeLockPathSegment(project) /
+    (encodeLockPathSegment(repo) & ".ev")
 
 method backendId*(s: CommittedFileLockStore): string = "committed-file"
 
 method storeLocationLabel*(s: CommittedFileLockStore): string = s.baseDir
 
+method readabilityDiagnostic*(s: CommittedFileLockStore): string =
+  ## DS-3 — the medium is the ``baseDir`` tree. An ABSENT directory cannot be
+  ## read; an existing-but-empty one is reachable and simply holds no records;
+  ## an existing-but-UNREADABLE one refuses exactly like an absent one.
+  ##
+  ## The last case is not hypothetical: ``latestLock`` reaches its records with
+  ## plain ``fileExists``/``readFile``, and under an unreadable ``baseDir``
+  ## every one of those probes answers "no such record" rather than raising —
+  ## so the store silently reports that it holds nothing while holding a
+  ## published record.
+  storeSubtreeDiagnostic(s.baseDir, "committed-file lock store directory")
+
 method putLock*(s: CommittedFileLockStore;
     rec: StoreLockRecord): StorePutResult =
   try:
+    # RA-32 — refuse a key that is not a set of NAMES before any path is built.
+    if not isLockPathName(rec.key.project) or not isLockPathName(rec.key.sha) or
+        not isCanonicalRepoName(rec.key.repo):
+      return failed("lock store key is not a canonical (project, repo, sha) " &
+        "name triple (project='" & rec.key.project & "' repo='" &
+        rec.key.repo & "' sha='" & rec.key.sha & "')")
     let path = cfRecordPath(s, rec.key)
     createDir(parentDir(path))
     writeFile(path, encodeRecord(rec))
     # Latest pointers: a per-repo HEAD (the sha) and a per-project HEAD
     # (repo TAB sha) so latestLock / latestLockAny are O(1) reads.
-    writeFile(s.baseDir / "locks" / rec.key.project / rec.key.repo / "HEAD",
+    writeFile(cfRepoDir(s, rec.key.project, rec.key.repo) / "HEAD",
       rec.key.sha & "\n")
-    let projDir = s.baseDir / "locks" / rec.key.project
+    let projDir = cfProjectDir(s, rec.key.project)
     createDir(projDir)
     writeFile(projDir / "HEAD", rec.key.repo & "\t" & rec.key.sha & "\n")
     ok()
@@ -325,7 +420,7 @@ method putLock*(s: CommittedFileLockStore;
 
 method latestLock*(s: CommittedFileLockStore; project, repo: string):
     Option[StoreLockRecord] =
-  let headPath = s.baseDir / "locks" / project / repo / "HEAD"
+  let headPath = cfRepoDir(s, project, repo) / "HEAD"
   if not fileExists(headPath): return none(StoreLockRecord)
   let sha = readFile(headPath).strip()
   let recPath = cfRecordPath(s, StoreLockKey(project: project, repo: repo, sha: sha))
@@ -334,7 +429,7 @@ method latestLock*(s: CommittedFileLockStore; project, repo: string):
 
 method latestLockAny*(s: CommittedFileLockStore; project: string):
     Option[StoreLockRecord] =
-  let headPath = s.baseDir / "locks" / project / "HEAD"
+  let headPath = cfProjectDir(s, project) / "HEAD"
   if not fileExists(headPath): return none(StoreLockRecord)
   let parts = readFile(headPath).strip().split('\t')
   if parts.len != 2: return none(StoreLockRecord)
@@ -343,16 +438,19 @@ method latestLockAny*(s: CommittedFileLockStore; project: string):
 method putEvidence*(s: CommittedFileLockStore; project, repo: string;
     ev: seq[WorkspaceVcsEvidence]): StorePutResult =
   try:
-    let dir = s.baseDir / "evidence" / project
-    createDir(dir)
-    writeFile(dir / (repo & ".ev"), encodeEvidenceBlob(ev))
+    if not isLockPathName(project) or not isCanonicalRepoName(repo):
+      return failed("evidence key is not a canonical (project, repo) name " &
+        "pair (project='" & project & "' repo='" & repo & "')")
+    let path = cfEvidencePath(s, project, repo)
+    createDir(parentDir(path))
+    writeFile(path, encodeEvidenceBlob(ev))
     ok()
   except CatchableError as err:
     failed(err.msg)
 
 method getEvidence*(s: CommittedFileLockStore; project, repo: string):
     seq[WorkspaceVcsEvidence] =
-  let path = s.baseDir / "evidence" / project / (repo & ".ev")
+  let path = cfEvidencePath(s, project, repo)
   if not fileExists(path): return @[]
   decodeEvidenceBlob(readFile(path))
 
@@ -372,6 +470,19 @@ proc newGitNotesLockStore*(gitBin, repoPath: string): GitNotesLockStore =
   GitNotesLockStore(gitBin: gitBin, repoPath: absolutePath(repoPath))
 
 proc gnLatestRef(project, repo: string): string =
+  ## RA-32, KNOWN GAP — deliberately NOT run through
+  ## ``encodeLockPathSegment``. This is a git REF namespace, and ref components
+  ## have validity rules the PATH encoder does not satisfy: a component may not
+  ## begin with ``.`` (so ``.gitignore`` encodes to itself and is still an
+  ## invalid ref) nor end with ``.lock``. Making this injective therefore needs
+  ## a refname encoder rather than the path one, which is a separate change.
+  ##
+  ## Until then two distinct keys can share one ref — ``("a/b", "c")`` and
+  ## ``("a", "b/c")`` both name ``refs/reprobuild/lockstore/a/b/c/latest`` —
+  ## and a repo literally named ``latest`` collides with ``gnLatestAnyRef`` as
+  ## a git directory/file conflict. ``putLock`` above rejects the keys that
+  ## would produce an OUTRIGHT INVALID ref; it does not make the mapping
+  ## injective.
   "refs/reprobuild/lockstore/" & project & "/" & repo & "/latest"
 proc gnLatestAnyRef(project: string): string =
   "refs/reprobuild/lockstore/" & project & "/latest"
@@ -381,7 +492,26 @@ method backendId*(s: GitNotesLockStore): string = "git-notes"
 
 method storeLocationLabel*(s: GitNotesLockStore): string = s.repoPath
 
+method readabilityDiagnostic*(s: GitNotesLockStore): string =
+  ## DS-3 — the medium is a notes namespace inside ``repoPath``; an absent
+  ## checkout cannot be read, and neither can an unreadable one. ``gnReadNoteAt``
+  ## turns a failing ``git`` into ``none`` (a note may legitimately be absent),
+  ## so an unreadable repository is otherwise indistinguishable from one that
+  ## simply carries no lock note.
+  storeSubtreeDiagnostic(s.repoPath, "git-notes lock store repository")
+
 method putLock*(s: GitNotesLockStore; rec: StoreLockRecord): StorePutResult =
+  # RA-32 — this backend addresses a record by a git REF NAME rather than a
+  # path, but a name is no more a ref than it is a path: ``repo == ".."``
+  # builds ``refs/reprobuild/lockstore/<p>/../latest``, which git rejects with
+  # a message about nothing the operator did. Refuse the key here, where the
+  # diagnostic can name it. See ``gnLatestRef`` for the injectivity gap this
+  # validation does NOT close.
+  if not isLockPathName(rec.key.project) or not isLockPathName(rec.key.sha) or
+      not isCanonicalRepoName(rec.key.repo):
+    return failed("lock store key is not a canonical (project, repo, sha) " &
+      "name triple (project='" & rec.key.project & "' repo='" &
+      rec.key.repo & "' sha='" & rec.key.sha & "')")
   let blob = encodeRecord(rec)
   # Overwrite any prior note on this exact commit (a re-lock at the same
   # sha is idempotent).
@@ -422,6 +552,9 @@ method putEvidence*(s: GitNotesLockStore; project, repo: string;
     ev: seq[WorkspaceVcsEvidence]): StorePutResult =
   # Evidence rides as a note on the latest-locked commit for the repo so it
   # travels with the same single ref the lock record does.
+  if not isLockPathName(project) or not isCanonicalRepoName(repo):
+    return failed("evidence key is not a canonical (project, repo) name pair " &
+      "(project='" & project & "' repo='" & repo & "')")
   let rev = runGit(s.gitBin, ["-C", s.repoPath, "rev-parse", "--verify",
     "--quiet", gnLatestRef(project, repo)])
   if rev.code != 0:
@@ -465,6 +598,14 @@ proc newSeparateBranchLockStore*(gitBin, repoPath: string):
 method backendId*(s: SeparateBranchLockStore): string = "separate-branch"
 
 method storeLocationLabel*(s: SeparateBranchLockStore): string = s.repoPath
+
+method readabilityDiagnostic*(s: SeparateBranchLockStore): string =
+  ## DS-3 — the medium is an orphan branch inside ``repoPath``; an absent
+  ## checkout cannot be read, and neither can an unreadable one. Like the
+  ## git-notes backend, a failing ``git`` read is reported as "no record"
+  ## rather than raising, so without this probe an unreadable repository
+  ## narrows the set silently.
+  storeSubtreeDiagnostic(s.repoPath, "separate-branch lock store repository")
 
 proc sbHashObject(s: SeparateBranchLockStore; content: string):
     tuple[ok: bool; sha, diag: string] =
@@ -523,16 +664,31 @@ proc sbCommitFiles(s: SeparateBranchLockStore;
   finally:
     if fileExists(scratchIndex): removeFile(scratchIndex)
 
+proc sbRepoDir(project, repo: string): string =
+  ## RA-32 — one path component per NAME, the same grammar the git-checkout
+  ## backend and every reader use. See ``cfRepoDir``.
+  "locks/" & encodeLockPathSegment(project) & "/" &
+    encodeLockPathSegment(repo)
+
 proc sbRecordPath(k: StoreLockKey): string =
-  "locks/" & k.project & "/" & k.repo & "/" & k.sha & ".rec"
+  sbRepoDir(k.project, k.repo) & "/" & encodeLockPathSegment(k.sha) & ".rec"
+
+proc sbEvidencePath(project, repo: string): string =
+  "evidence/" & encodeLockPathSegment(project) & "/" &
+    encodeLockPathSegment(repo) & ".ev"
 
 method putLock*(s: SeparateBranchLockStore;
     rec: StoreLockRecord): StorePutResult =
+  if not isLockPathName(rec.key.project) or not isLockPathName(rec.key.sha) or
+      not isCanonicalRepoName(rec.key.repo):
+    return failed("lock store key is not a canonical (project, repo, sha) " &
+      "name triple (project='" & rec.key.project & "' repo='" & rec.key.repo &
+      "' sha='" & rec.key.sha & "')")
   sbCommitFiles(s, @[
     (sbRecordPath(rec.key), encodeRecord(rec)),
-    ("locks/" & rec.key.project & "/" & rec.key.repo & "/HEAD",
+    (sbRepoDir(rec.key.project, rec.key.repo) & "/HEAD",
      rec.key.sha & "\n"),
-    ("locks/" & rec.key.project & "/HEAD",
+    ("locks/" & encodeLockPathSegment(rec.key.project) & "/HEAD",
      rec.key.repo & "\t" & rec.key.sha & "\n")],
     "lockstore: " & rec.key.project & "/" & rec.key.repo & "@" & rec.key.sha)
 
@@ -544,7 +700,7 @@ proc sbShow(s: SeparateBranchLockStore; path: string): Option[string] =
 
 method latestLock*(s: SeparateBranchLockStore; project, repo: string):
     Option[StoreLockRecord] =
-  let head = sbShow(s, "locks/" & project & "/" & repo & "/HEAD")
+  let head = sbShow(s, sbRepoDir(project, repo) & "/HEAD")
   if head.isNone: return none(StoreLockRecord)
   let sha = head.get().strip()
   let rec = sbShow(s, sbRecordPath(
@@ -554,7 +710,7 @@ method latestLock*(s: SeparateBranchLockStore; project, repo: string):
 
 method latestLockAny*(s: SeparateBranchLockStore; project: string):
     Option[StoreLockRecord] =
-  let head = sbShow(s, "locks/" & project & "/HEAD")
+  let head = sbShow(s, "locks/" & encodeLockPathSegment(project) & "/HEAD")
   if head.isNone: return none(StoreLockRecord)
   let parts = head.get().strip().split('\t')
   if parts.len != 2: return none(StoreLockRecord)
@@ -562,12 +718,17 @@ method latestLockAny*(s: SeparateBranchLockStore; project: string):
 
 method putEvidence*(s: SeparateBranchLockStore; project, repo: string;
     ev: seq[WorkspaceVcsEvidence]): StorePutResult =
-  sbCommitFiles(s, @[("evidence/" & project & "/" & repo & ".ev",
+  # RA-32 — the git-checkout backend's ``putEvidence`` was hardened; this one
+  # raw-joined the same two names into the same shape of path.
+  if not isLockPathName(project) or not isCanonicalRepoName(repo):
+    return failed("evidence key is not a canonical (project, repo) name pair " &
+      "(project='" & project & "' repo='" & repo & "')")
+  sbCommitFiles(s, @[(sbEvidencePath(project, repo),
     encodeEvidenceBlob(ev))], "lockstore evidence: " & project & "/" & repo)
 
 method getEvidence*(s: SeparateBranchLockStore; project, repo: string):
     seq[WorkspaceVcsEvidence] =
-  let blob = sbShow(s, "evidence/" & project & "/" & repo & ".ev")
+  let blob = sbShow(s, sbEvidencePath(project, repo))
   if blob.isNone: return @[]
   decodeEvidenceBlob(blob.get())
 
@@ -610,6 +771,26 @@ method backendId*(s: ExternalCliLockStore): string = "external-cli"
 
 method storeLocationLabel*(s: ExternalCliLockStore): string = s.program
 
+method readabilityDiagnostic*(s: ExternalCliLockStore): string =
+  ## DS-3 — the medium is reached ONLY through ``program``; an absent program
+  ## cannot be invoked, so no record can be read. A PRESENT but non-executable
+  ## program cannot be invoked either: ``startProcess`` raises, which the
+  ## composer already turns into a refusal, but naming the cause here gives the
+  ## same DS-3 message and remedy the other backends produce instead of a
+  ## generic "failed while reading its records".
+  if not fileExists(s.program):
+    return "external-cli lock store program does not exist: " & s.program
+  when defined(posix):
+    try:
+      let perms = getFilePermissions(s.program)
+      if fpUserExec notin perms and fpGroupExec notin perms and
+          fpOthersExec notin perms:
+        return "external-cli lock store program is not executable: " & s.program
+    except OSError as err:
+      return "external-cli lock store program cannot be inspected: " &
+        s.program & " (" & err.msg & ")"
+  ""
+
 proc ecPutRaw(s: ExternalCliLockStore; key, value: string): StorePutResult =
   let request = $(%*{
     "schema": ExternalCliContractSchemaV1,
@@ -645,6 +826,14 @@ proc ecGetRaw(s: ExternalCliLockStore; key: string): Option[string] =
   some(base64.decode(node["value"].getStr()))
 
 proc ecKeyRecord(k: StoreLockKey): string =
+  ## RA-32, KNOWN GAP — deliberately NOT run through
+  ## ``encodeLockPathSegment``. These strings are the WIRE CONTRACT with a
+  ## third-party ``get``/``put`` program, so changing their shape would orphan
+  ## every record in an existing external store; that is a versioned protocol
+  ## change, not a path fix. As with ``gnLatestRef``, two distinct keys can
+  ## therefore still collide (``("a/b", "c")`` and ``("a", "b/c")`` both spell
+  ## ``lock/a/b/c/...``). ``putLock`` rejects non-name keys; it does not make
+  ## the mapping injective.
   "lock/" & k.project & "/" & k.repo & "/" & k.sha
 proc ecKeyLatest(project, repo: string): string =
   "latest/" & project & "/" & repo
@@ -655,6 +844,13 @@ proc ecKeyEvidence(project, repo: string): string =
 
 method putLock*(s: ExternalCliLockStore;
     rec: StoreLockRecord): StorePutResult =
+  # RA-32 — same key rejection as every other backend. See ``ecKeyRecord`` for
+  # the injectivity gap this validation does NOT close.
+  if not isLockPathName(rec.key.project) or not isLockPathName(rec.key.sha) or
+      not isCanonicalRepoName(rec.key.repo):
+    return failed("lock store key is not a canonical (project, repo, sha) " &
+      "name triple (project='" & rec.key.project & "' repo='" &
+      rec.key.repo & "' sha='" & rec.key.sha & "')")
   let blob = encodeRecord(rec)
   for key in [ecKeyRecord(rec.key), ecKeyLatest(rec.key.project, rec.key.repo),
               ecKeyLatestAny(rec.key.project)]:

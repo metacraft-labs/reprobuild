@@ -17,13 +17,13 @@
 ##   - sync-unreadable       ``repro sync`` skipping a newly-declared repo whose
 ##                           clone fails (unreadable origin).
 ##   - remove-dirty          ``repro remove`` refusing a dirty repo in non-TTY.
-##   - checkout-dirty        ``repro checkout`` of a dirty repo refused by the
+##   - switch-dirty          ``repro switch`` of a dirty repo refused by the
 ##                           RA-9 destructive-switch gate (non-TTY, no
 ##                           ``--yes``). RA-29 stashes a dirty repo's WIP rather
 ##                           than refusing it, so the offending act is the
 ##                           working-tree switch the gate guards; the remedy is
-##                           ``repro checkout <branch> --yes``.
-##   - checkout-missing      ``repro checkout`` of an absent branch.
+##                           ``repro switch <branch> --yes``.
+##   - switch-missing        ``repro switch`` of an absent branch.
 ##
 ## For EACH case: the offender (the real repo / branch name) must appear in
 ## the refusal text AND a copy-pasteable command (``repro …`` / ``git …``)
@@ -206,7 +206,7 @@ proc invokeSync(fx: Fixture; project = "lib-a"): CmdResult =
 
 proc invokeCheckout(fx: Fixture; branch: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "checkout", "--write-report", branch,
+    fx.reproBin, "switch", "--write-report", branch,
     "--workspace-root=" & fx.workspaceRoot, "--json",
   ]))
 
@@ -362,14 +362,15 @@ suite "RA-28 — refusals name the offender and a remedy command":
       writeFile(fx.manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
       check not dirExists(fx.workspaceRoot / "lib-b")
       let res = invokeSync(fx)
-      # An unreadable NEW repo must NOT make the whole sync fail fatally.
-      check res.code != 1
+      # An unreadable NEW repo does not ABORT the run, but it does FAIL it —
+      # the workspace is missing a declared repo (CLI/sync.md exit `1`).
+      check res.code == 1
       let report = syncReport(fx)
       var entry: JsonNode = nil
       for e in report["repos"]:
         if e["path"].getStr() == "lib-b": entry = e
       check entry != nil
-      check entry["executionStatus"].getStr() == "skipped"
+      check entry["executionStatus"].getStr() == "clone_failed"
       assertNamesOffenderAndRemedy(
         entry["executionDiagnostic"].getStr(), "lib-b")
 
@@ -414,7 +415,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       let res = invokeCheckout(fx, "feat")
       check res.code == 2
       let rep = parseFile(
-        fx.workspaceRoot / ".repro" / "build" / "reports" / "checkout-report.json")
+        fx.workspaceRoot / ".repro" / "build" / "reports" / "switch-report.json")
       var entry: JsonNode = nil
       for e in rep["repos"]:
         if e["path"].getStr() == "lib-a": entry = e
@@ -422,7 +423,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       check entry["outcome"].getStr() == "confirm_refused"
       # RA-28: the per-repo refusal diagnostic must NAME the offender (lib-a,
       # whose dirty working tree would be switched and whose WIP would be
-      # stashed) AND a copy-pasteable remedy command (``repro checkout … --yes``).
+      # stashed) AND a copy-pasteable remedy command (``repro switch … --yes``).
       let diag = entry["diagnostic"].getStr()
       assertNamesOffenderAndRemedy(diag, "lib-a")
       check diag.contains("--yes")
@@ -435,13 +436,13 @@ suite "RA-28 — refusals name the offender and a remedy command":
     if gitBin.len == 0:
       skip()
     else:
-      let fx = baseFixture(gitBin, "checkout-missing")
+      let fx = baseFixture(gitBin, "switch-missing  ")
       defer: removeDir(fx.scratch)
       # No such branch anywhere → branch-missing refusal.
       let res = invokeCheckout(fx, "nope-not-a-branch")
       check res.code == 2
       let rep = parseFile(
-        fx.workspaceRoot / ".repro" / "build" / "reports" / "checkout-report.json")
+        fx.workspaceRoot / ".repro" / "build" / "reports" / "switch-report.json")
       var entry: JsonNode = nil
       for e in rep["repos"]:
         if e["path"].getStr() == "lib-a": entry = e

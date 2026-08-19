@@ -1,4 +1,4 @@
-## `repro workspace project repo add` writes manifest entries that match the
+## `repro workspace repos add` writes manifest entries that match the
 ## hand-written ones: it REUSES the MOST SPECIFIC declared `[[remote]]` base
 ## that prefixes the requested URL (putting whatever path remains in
 ## `[repo].name`), mints at most ONE reusable org-named remote when no declared
@@ -25,7 +25,7 @@
 ## manifest repo on a real filesystem, and reads the results back through the
 ## real manifest resolver (`resolveProject`) rather than re-implementing its
 ## semantics. The two URL families used for the remote-reuse cases are
-## unreachable network URLs on purpose — `project repo add` is a manifest
+## unreachable network URLs on purpose — `repos add` is a manifest
 ## AUTHORING verb and never contacts them. The one case that does contact a
 ## remote (explicit `--revision=` validation) uses a real local bare repo, so
 ## the test stays hermetic and offline.
@@ -100,7 +100,7 @@ remote = "metacraft-labs"
 # the project declares no `llvm` org base, so the repo goes through the generic
 # `github` base and the org segment travels in `[repo].name` — the server-side
 # path — while `path` stays the local checkout dir. Identical to the real file
-# except for its nested `path` (which `project repo add` derives from the
+# except for its nested `path` (which `repos add` derives from the
 # `<repo>` argument) and its pinned `revision` (this project has a
 # `default_revision` to inherit).
 const thirdPartyFragment = """schema = "reprobuild.workspace.repo.v1"
@@ -137,8 +137,14 @@ proc setupFixture(gitBin, slug: string): Fixture =
     " commit -m fixture")
 
 proc addRepo(fx: Fixture; extra: seq[string]): tuple[code: int; output: string] =
-  var argv = @[fx.reproBin, "workspace", "project", "repo", "add"]
-  for e in extra: argv.add(e)
+  ## WV-4 — the project moved from a positional to a repeatable `--project`
+  ## flag (a fragment is declared once and included by any number of projects).
+  ## The call sites still read `<project> <repo> …`, so translate the first
+  ## element here rather than at every one of them.
+  var argv = @[fx.reproBin, "workspace", "repos", "add"]
+  for i, e in extra:
+    if i == 0: argv.add("--project=" & e)
+    else: argv.add(e)
   argv.add("--workspace-root=" & fx.workspaceRoot)
   runShell(shellCommand(argv))
 
@@ -168,7 +174,7 @@ proc remoteOf(projectFile, repoName: string): string =
     if repo.name == repoName: return repo.projectRemote
   ""
 
-suite "repro workspace project repo add — remote reuse and revision inheritance":
+suite "repro workspace repos add — remote reuse and revision inheritance":
 
   test "test_repo_add_reuses_matching_org_remote_and_omits_revision":
     let gitBin = findExe("git")
@@ -315,7 +321,7 @@ suite "repro workspace project repo add — remote reuse and revision inheritanc
       check revisionOf(fx.projectFile, "second-lib") == "dev"
 
   test "test_repo_add_to_a_freshly_created_project_stays_readable":
-    # `project new` + `project repo add` must leave a manifest the RESOLVER
+    # `projects add` + `repos add` must leave a manifest the RESOLVER
     # can read. A `includes = [ … ]` array written directly under `[project]`
     # is parsed as a key of that table and the whole manifest stops loading,
     # so the fresh-project path is asserted end-to-end here rather than only
@@ -328,7 +334,7 @@ suite "repro workspace project repo add — remote reuse and revision inheritanc
       defer: removeDir(fx.scratch)
 
       let created = runShell(shellCommand(@[fx.reproBin, "workspace",
-        "project", "new", "fresh-proj", "-m", "A brand new project.",
+        "projects", "add", "fresh-proj", "-m", "A brand new project.",
         "--workspace-root=" & fx.workspaceRoot]))
       if created.code != 0:
         checkpoint("output: " & created.output)

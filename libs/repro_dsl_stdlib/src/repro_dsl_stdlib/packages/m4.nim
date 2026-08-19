@@ -11,12 +11,13 @@
 ## minimal-bootstrap/gnum4/default.nix`` (version 1.4.21).
 
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 package `m4`:
   provisioning:
     nixPackage "nixpkgs#gnum4", executablePath = "bin/m4",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     scoopApp(bucket = "main", app = "m4",
       preferredVersion = ">=1", executablePath = "bin/m4.exe",
       requiresExecutionProfileChecksum = false)

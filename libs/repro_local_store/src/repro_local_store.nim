@@ -191,6 +191,10 @@ const
   RecordTailMask = 0xffff_ffff'u64
   MaxActionRecordFrameBytes = 64 * 1024 * 1024
   MaxRecordsPerWeakFingerprint = 2
+  DirectorySnapshotMagic = "RBDT"
+  DirectorySnapshotVersion = 1'u16
+  MaxDirectorySnapshotEntries = 10_000_000'u32
+  MaxDirectorySnapshotPathBytes = 32 * 1024
   # AC-1b: Tier-1 is a DIRECTORY per edge (`hot-records/<key>/`) with one
   # `<nonce>.rec` file per observed path-set, so two independent concurrent
   # builds of the same edge that saw DIFFERENT path-sets (different strong
@@ -302,6 +306,283 @@ proc readPermissions(data: openArray[byte]; pos: var int): set[FilePermission] =
     for permission in AllFilePermissions:
       if (mask and (1'u16 shl ord(permission))) != 0:
         result.incl(permission)
+
+type
+  DirectorySnapshotEntryKind = enum
+    dsekDirectory
+    dsekRegularFile
+    dsekSymlink
+
+  DirectorySnapshotEntry = object
+    kind: DirectorySnapshotEntryKind
+    relativePath: string
+    permissions: set[FilePermission]
+    sourcePath: string
+    symlinkTarget: string
+
+  DecodedDirectorySnapshotEntry = object
+    kind: DirectorySnapshotEntryKind
+    relativePath: string
+    permissions: set[FilePermission]
+    contentStart: int
+    contentLength: int
+    symlinkTarget: string
+
+proc snapshotPermissions(path: string): set[FilePermission] =
+  when defined(windows):
+    result = {}
+  else:
+    try:
+      result = getFilePermissions(extendedPath(path))
+    except OSError:
+      result = {}
+
+proc directorySnapshotRelativePath(root, path: string): string =
+  # ``walkDir(extendedPath(...))`` preserves the ``\\?\`` prefix in paths it
+  # yields on Windows. Compare against the root in the same namespace so the
+  # prefix cannot be mistaken for part of a relative output path.
+  result = relativePath(path, extendedPath(root)).replace('\\', '/')
+  if result.len == 0 or result == "." or result.startsWith("/"):
+    raise newException(CacheIntegrityError,
+      "directory snapshot produced an invalid relative path: " & result)
+  for component in result.split('/'):
+    if component.len == 0 or component == "." or component == "..":
+      raise newException(CacheIntegrityError,
+        "directory snapshot path escapes its root: " & result)
+
+proc collectDirectorySnapshotEntries(root, current: string;
+                                     entries: var seq[DirectorySnapshotEntry]) =
+  for kind, path in walkDir(extendedPath(current)):
+    let relative = directorySnapshotRelativePath(root, path)
+    case kind
+    of pcDir:
+      entries.add(DirectorySnapshotEntry(
+        kind: dsekDirectory,
+        relativePath: relative,
+        permissions: snapshotPermissions(path),
+        sourcePath: path))
+      collectDirectorySnapshotEntries(root, path, entries)
+    of pcFile:
+      entries.add(DirectorySnapshotEntry(
+        kind: dsekRegularFile,
+        relativePath: relative,
+        permissions: snapshotPermissions(path),
+        sourcePath: path))
+    of pcLinkToFile, pcLinkToDir:
+      when defined(windows):
+        raise newException(CacheIntegrityError,
+          "directory snapshots containing symbolic links are not supported " &
+          "on Windows: " & path)
+      else:
+        entries.add(DirectorySnapshotEntry(
+          kind: dsekSymlink,
+          relativePath: relative,
+          permissions: {},
+          sourcePath: path,
+          symlinkTarget: expandSymlink(path)))
+
+proc directorySnapshotPayload*(root: string): seq[byte] =
+  ## Encode a directory output as one deterministic CAS payload. Traversal
+  ## never follows symbolic links; sorted relative paths make identical trees
+  ## produce identical blobs regardless of filesystem enumeration order.
+  if symlinkExists(extendedPath(root)) or not dirExists(extendedPath(root)):
+    raise newException(CacheIntegrityError,
+      "directory snapshot root is not a direct directory: " & root)
+  var entries: seq[DirectorySnapshotEntry] = @[]
+  collectDirectorySnapshotEntries(root, root, entries)
+  entries.sort(proc(a, b: DirectorySnapshotEntry): int =
+    cmp(a.relativePath, b.relativePath))
+  if uint64(entries.len) > uint64(MaxDirectorySnapshotEntries):
+    raise newException(CacheIntegrityError,
+      "directory snapshot has too many entries: " & $entries.len)
+
+  for ch in DirectorySnapshotMagic:
+    result.add(byte(ord(ch)))
+  result.writeU16Le(DirectorySnapshotVersion)
+  result.writeU32Le(uint32(entries.len))
+  for entry in entries:
+    result.add(byte(ord(entry.kind)))
+    result.writeString(entry.relativePath)
+    result.writePermissions(entry.permissions)
+    case entry.kind
+    of dsekDirectory:
+      discard
+    of dsekRegularFile:
+      let content = bytes(readFile(extendedPath(entry.sourcePath)))
+      result.writeU64Le(uint64(content.len))
+      result.add(content)
+    of dsekSymlink:
+      result.writeString(entry.symlinkTarget)
+
+proc validSnapshotRelativePath(path: string): bool =
+  if path.len == 0 or path.len > MaxDirectorySnapshotPathBytes or
+      path.startsWith("/") or '\\' in path:
+    return false
+  when defined(windows):
+    if ':' in path:
+      return false
+  for component in path.split('/'):
+    if component.len == 0 or component == "." or component == "..":
+      return false
+  true
+
+proc decodeDirectorySnapshot(payload: openArray[byte]):
+    seq[DecodedDirectorySnapshotEntry] =
+  var pos = 0
+  for expected in DirectorySnapshotMagic:
+    if readByte(payload, pos) != byte(ord(expected)):
+      raise newException(CacheIntegrityError,
+        "invalid directory snapshot magic")
+  if readU16Le(payload, pos) != DirectorySnapshotVersion:
+    raise newException(CacheIntegrityError,
+      "unsupported directory snapshot version")
+  let entryCount = readU32Le(payload, pos)
+  if entryCount > MaxDirectorySnapshotEntries:
+    raise newException(CacheIntegrityError,
+      "directory snapshot has too many entries: " & $entryCount)
+
+  var seen = initHashSet[string]()
+  var symlinks = initHashSet[string]()
+  var previous = ""
+  for _ in 0 ..< int(entryCount):
+    let rawKind = readByte(payload, pos)
+    if rawKind > byte(ord(dsekSymlink)):
+      raise newException(CacheIntegrityError,
+        "invalid directory snapshot entry kind")
+    var entry = DecodedDirectorySnapshotEntry(
+      kind: DirectorySnapshotEntryKind(rawKind),
+      relativePath: readString(payload, pos))
+    if not validSnapshotRelativePath(entry.relativePath):
+      raise newException(CacheIntegrityError,
+        "invalid directory snapshot path: " & entry.relativePath)
+    if entry.relativePath in seen or
+        (previous.len > 0 and cmp(previous, entry.relativePath) >= 0):
+      raise newException(CacheIntegrityError,
+        "directory snapshot paths are duplicated or unsorted: " &
+        entry.relativePath)
+    var ancestor = ""
+    let components = entry.relativePath.split('/')
+    for i in 0 ..< components.len - 1:
+      if ancestor.len > 0:
+        ancestor.add('/')
+      ancestor.add(components[i])
+      if ancestor in symlinks:
+        raise newException(CacheIntegrityError,
+          "directory snapshot entry descends through a symbolic link: " &
+          entry.relativePath)
+    seen.incl(entry.relativePath)
+    previous = entry.relativePath
+    entry.permissions = readPermissions(payload, pos)
+    case entry.kind
+    of dsekDirectory:
+      discard
+    of dsekRegularFile:
+      let contentLength = readU64Le(payload, pos)
+      if contentLength > uint64(high(int)) or
+          contentLength > uint64(payload.len - pos):
+        raise newException(CacheIntegrityError,
+          "truncated directory snapshot file: " & entry.relativePath)
+      entry.contentStart = pos
+      entry.contentLength = int(contentLength)
+      pos += entry.contentLength
+    of dsekSymlink:
+      when defined(windows):
+        raise newException(CacheIntegrityError,
+          "directory snapshot symbolic links cannot be restored on Windows")
+      else:
+        entry.symlinkTarget = readString(payload, pos)
+        if '\x00' in entry.symlinkTarget:
+          raise newException(CacheIntegrityError,
+            "directory snapshot symbolic link target contains NUL")
+        symlinks.incl(entry.relativePath)
+    result.add(entry)
+  if pos != payload.len:
+    raise newException(CacheIntegrityError,
+      "directory snapshot has trailing bytes")
+
+proc materialPathExists(path: string): bool =
+  symlinkExists(extendedPath(path)) or fileExists(extendedPath(path)) or
+    dirExists(extendedPath(path))
+
+proc removeMaterialPath(path: string) =
+  if symlinkExists(extendedPath(path)) or fileExists(extendedPath(path)):
+    removeFile(extendedPath(path))
+  elif dirExists(extendedPath(path)):
+    removeDir(extendedPath(path))
+
+proc moveMaterialPath(source, destination: string) =
+  if symlinkExists(extendedPath(source)) or fileExists(extendedPath(source)):
+    moveFile(extendedPath(source), extendedPath(destination))
+  else:
+    moveDir(extendedPath(source), extendedPath(destination))
+
+proc materializeDirectorySnapshotPayload*(payload: openArray[byte];
+                                          destination: string;
+                                          rootPermissions:
+                                            set[FilePermission] = {}) =
+  ## Restore a validated directory snapshot through a sibling staging tree,
+  ## then rename it into place. A malformed payload never touches the current
+  ## destination, and a failed final rename rolls the previous tree back.
+  let entries = decodeDirectorySnapshot(payload)
+  let now = getTime()
+  let nonce = $getCurrentProcessId() & "." & $now.toUnix & "." &
+    $now.nanosecond
+  let stage = destination & ".reprotmp." & nonce
+  let backup = destination & ".reprobackup." & nonce
+  createDir(extendedPath(parentDir(destination)))
+  if stage.materialPathExists():
+    removeMaterialPath(stage)
+  createDir(extendedPath(stage))
+  var staged = true
+  try:
+    var directories: seq[tuple[path: string,
+      permissions: set[FilePermission]]] = @[]
+    for entry in entries:
+      let target = stage / entry.relativePath.replace('/', DirSep)
+      case entry.kind
+      of dsekDirectory:
+        createDir(extendedPath(target))
+        directories.add((path: target, permissions: entry.permissions))
+      of dsekRegularFile:
+        createDir(extendedPath(parentDir(target)))
+        let last = entry.contentStart + entry.contentLength - 1
+        let content =
+          if entry.contentLength == 0: ""
+          else: byteString(payload.toOpenArray(entry.contentStart, last))
+        writeFile(extendedPath(target), content)
+        when not defined(windows):
+          setFilePermissions(extendedPath(target), entry.permissions)
+      of dsekSymlink:
+        createDir(extendedPath(parentDir(target)))
+        createSymlink(entry.symlinkTarget, extendedPath(target))
+    when not defined(windows):
+      for i in countdown(directories.high, 0):
+        setFilePermissions(extendedPath(directories[i].path),
+          directories[i].permissions)
+      setFilePermissions(extendedPath(stage), rootPermissions)
+
+    var backedUp = false
+    if destination.materialPathExists():
+      if backup.materialPathExists():
+        removeMaterialPath(backup)
+      moveMaterialPath(destination, backup)
+      backedUp = true
+    try:
+      moveDir(extendedPath(stage), extendedPath(destination))
+      staged = false
+    except CatchableError:
+      if backedUp and not destination.materialPathExists():
+        moveMaterialPath(backup, destination)
+        backedUp = false
+      raise
+    if backedUp:
+      removeMaterialPath(backup)
+  finally:
+    if staged and stage.materialPathExists():
+      try:
+        removeMaterialPath(stage)
+      except OSError:
+        discard
 
 proc writeFingerprint(outp: var seq[byte]; fp: FileFingerprint) =
   outp.writeString(fp.path)
@@ -679,6 +960,10 @@ proc restoreOutputs*(cas: LocalCas; record: ActionResultRecord;
     payloads.add(cas.readBlob(output.blob))
   for i, output in record.outputs:
     let destination = materialPath(outputRoot, output.path)
+    if output.metadata.kind == ffkDirectory:
+      materializeDirectorySnapshotPayload(payloads[i], destination,
+        output.permissions)
+      continue
     createDir(extendedPath(destination.splitPath.head))
     let tmpPath = destination & ".reprotmp." & $getCurrentProcessId()
     writeFile(extendedPath(tmpPath), byteString(payloads[i]))
@@ -1760,7 +2045,9 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
           set[FilePermission]({})
     let blob =
       if storeOutputBlobs:
-        if sourceMetadata.kind == ffkRegular and isDirectRegularFile(source):
+        if sourceMetadata.kind == ffkDirectory:
+          cas.storeBlob(directorySnapshotPayload(source))
+        elif sourceMetadata.kind == ffkRegular and isDirectRegularFile(source):
           cas.storeFileBlob(source, sourceMetadata.sizeBytes)
         else:
           cas.storeBlob(bytes(readFile(extendedPath(source))))
@@ -1798,7 +2085,9 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
       let perms = getFilePermissions(extendedPath(source))
     let blob =
       if storeOutputBlobs:
-        if sourceMetadata.kind == ffkRegular and isDirectRegularFile(source):
+        if sourceMetadata.kind == ffkDirectory:
+          cas.storeBlob(directorySnapshotPayload(source))
+        elif sourceMetadata.kind == ffkRegular and isDirectRegularFile(source):
           cas.storeFileBlob(source, sourceMetadata.sizeBytes)
         else:
           cas.storeBlob(bytes(readFile(extendedPath(source))))

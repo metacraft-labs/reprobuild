@@ -14,12 +14,9 @@
 ##
 ## No `skip`, no `xfail`.
 
-when not defined(windows):
-  echo "[platform N/A] t_e2e_repro_system_command_family: the " &
-    "system-scope drivers are Windows-only in M69"
-  quit(0)
+import std/[os, osproc, strutils, tempfiles]
 
-import std/[os, osproc, strutils, tempfiles, unittest]
+import ct_test_unittest_parallel
 
 import repro_elevation
 import repro_infra
@@ -85,13 +82,40 @@ proc observeLeaf(leaf, name: string): ObservedOperationState =
     hklmValueName: name,
     hklmValueKind: srvkString, hklmValueLiteral: ""))
 
+const HostRunsGate = defined(windows)
+  ## This gate needs a real Windows host. It used to be enforced by an
+  ## ``echo`` + ``quit(0)`` at module init, before any ``test`` template
+  ## expanded: the binary emitted no catalog, stayed an opaque
+  ## whole-binary exit-0 PASS, and its declared cases were invisible to
+  ## every gate -- not counted as passes, not as skips, not at all.
+
+const PlatformSkipReason =
+  "[platform N/A] t_e2e_repro_system_command_family: the " &
+    "system-scope drivers are Windows-only in M69"
+
+template gatedTest(name: string; body: untyped) =
+  ## Register the case unconditionally, and on a host that cannot run it
+  ## record a skip whose reason is visible in the run summary and the
+  ## skip census.
+  ##
+  ## The guard is a runtime ``if`` on a compile-time constant rather than
+  ## a ``when``, deliberately: ``when`` would stop type-checking the
+  ## Windows-only body on Linux, and that compile coverage is exactly
+  ## what the previous module-init gate already gave us. Nim folds the
+  ## constant, so the dead branch still costs nothing at runtime.
+  test name:
+    if HostRunsGate:
+      body
+    else:
+      skip(PlatformSkipReason)
+
 suite "e2e_repro_system_command_family":
   when isNixSupported:
 
-    test "the host is already elevated (gate precondition)":
+    gatedTest "the host is already elevated (gate precondition)":
       check isProcessElevated()
 
-    test "add edits system.nim through the structural editor":
+    gatedTest "add edits system.nim through the structural editor":
       let stateDir = createTempDir("repro-m69b-add-", "")
       defer: removeDir(stateDir)
       let r = runRepro(stateDir,
@@ -107,7 +131,7 @@ suite "e2e_repro_system_command_family":
       check profile.resources.len == 1
       check profile.resources[0].kind == srkWindowsRegistryValue
 
-    test "add then remove of a fresh resource round-trips byte-identically":
+    gatedTest "add then remove of a fresh resource round-trips byte-identically":
       let stateDir = createTempDir("repro-m69b-rt-", "")
       defer: removeDir(stateDir)
       let profilePath = stateDir / "system.nim"
@@ -129,7 +153,7 @@ suite "e2e_repro_system_command_family":
       check removed.code == 0
       check readFile(profilePath) == original    # byte-identical round-trip
 
-    test "add refuses a duplicate address":
+    gatedTest "add refuses a duplicate address":
       let stateDir = createTempDir("repro-m69b-dup-", "")
       defer: removeDir(stateDir)
       let first = runRepro(stateDir,
@@ -142,7 +166,7 @@ suite "e2e_repro_system_command_family":
       check dup.code != 0
       check dup.output.toLowerAscii().contains("already exists")
 
-    test "remove of an absent address fails with a clear diagnostic":
+    gatedTest "remove of an absent address fails with a clear diagnostic":
       let stateDir = createTempDir("repro-m69b-rmabsent-", "")
       defer: removeDir(stateDir)
       discard runRepro(stateDir,
@@ -151,7 +175,7 @@ suite "e2e_repro_system_command_family":
       check r.code != 0
       check r.output.contains("no resource with address")
 
-    test "list and why query the profile":
+    gatedTest "list and why query the profile":
       let stateDir = createTempDir("repro-m69b-listwhy-", "")
       defer: removeDir(stateDir)
       discard runRepro(stateDir,
@@ -175,7 +199,7 @@ suite "e2e_repro_system_command_family":
       let whyMiss = runRepro(stateDir, ["system", "why", "feature:nope"])
       check whyMiss.code != 0
 
-    test "sync applies the profile through the single broker":
+    gatedTest "sync applies the profile through the single broker":
       cleanupSandbox()
       let stateDir = createTempDir("repro-m69b-sync-", "")
       defer:
@@ -197,7 +221,7 @@ suite "e2e_repro_system_command_family":
       check sync2.code == 0
       check sync2.output.contains("no-op        : 1")
 
-    test "history enumerates the RBSG generations of distinct applies":
+    gatedTest "history enumerates the RBSG generations of distinct applies":
       cleanupSandbox()
       let stateDir = createTempDir("repro-m69b-hist-", "")
       defer:
@@ -231,7 +255,7 @@ suite "e2e_repro_system_command_family":
           inc activeCount
       check activeCount == 1
 
-    test "rollback re-applies a prior generation and reverts added resources":
+    gatedTest "rollback re-applies a prior generation and reverts added resources":
       cleanupSandbox()
       let stateDir = createTempDir("repro-m69b-rb-", "")
       defer:
@@ -273,7 +297,7 @@ suite "e2e_repro_system_command_family":
       check observeLeaf("rb-v1", "P").present
       check not observeLeaf("rb-v2", "P").present
 
-    test "rollback of a feature/capability removal needs --accept-feature-destroy":
+    gatedTest "rollback of a feature/capability removal needs --accept-feature-destroy":
       cleanupSandbox()
       let stateDir = createTempDir("repro-m69b-rbgate-", "")
       defer:
@@ -312,7 +336,7 @@ suite "e2e_repro_system_command_family":
       # With the flag it is allowed.
       enforceFeatureDestroyGate(decision, acceptFeatureDestroy = true)
 
-    test "the isolated HKLM test subtree is left clean":
+    gatedTest "the isolated HKLM test subtree is left clean":
       cleanupSandbox()
       check not observeLeaf("synced", "Probe").present
       check not observeLeaf("rb-v1", "P").present

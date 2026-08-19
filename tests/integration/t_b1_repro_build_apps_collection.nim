@@ -4,8 +4,7 @@
 ## Drives ``./build/bin/repro --tool-provisioning=path --daemon=off
 ## build apps`` from the reprobuild repo root and asserts:
 ##
-##   1. Exit code 0 (or skip-with-documented-limitation if the engine
-##      surfaces a known gap — same classifier shape B0 introduced).
+##   1. Exit code 0.
 ##   2. Every non-comment entry in ``apps/entrypoints.txt`` has a
 ##      corresponding ``build/bin/<name>`` artifact that is non-empty
 ##      and executable.
@@ -25,8 +24,19 @@
 ##
 ## Skip-when-absent: if the sibling ``../runquota/`` is missing or its
 ## ``runquotad`` binary isn't built, the path-mode resolver fails before
-## the engine schedules anything. We classify that as a documented
-## environment limitation and skip cleanly.
+## the engine schedules anything. That is a genuine environment gate,
+## checked BEFORE the build is attempted, and it still skips.
+##
+## No failure classifier. This case used to run its non-zero exit past a
+## ``looksLike…(output)`` predicate that matched the engine's own diagnostic
+## against a needle list and reclassified the failure as a skip on a match.
+## The list covered ordinary engine failures — tool resolution, provisioning,
+## the CLI usage dump — so any NEW failure phrased in those terms disappeared
+## silently, which is a way of manufacturing green rather than a record of an
+## environment limitation. The genuine environment gates (is the sibling
+## checkout present, is ``./build/bin/repro`` built) are unchanged: they are
+## checked BEFORE the work and they still skip. What the engine does once the
+## work starts is now simply asserted.
 
 import std/[os, osproc, strtabs, strutils, unittest]
 
@@ -62,33 +72,6 @@ proc readEntrypointNames(repoRoot: string): seq[string] =
     if fields.len < 2:
       continue
     result.add(fields[0])
-
-proc looksLikeProvisioningOrLimitation(output: string): bool =
-  ## Same diagnostic taxonomy as the B0 tests: when the engine fails
-  ## before scheduling because of tool-resolution, libclingo, or the
-  ## CLI rejecting our flag combination, we classify as a documented
-  ## limitation rather than a hard failure.
-  for needle in [
-    "tool-resolution failed",
-    "typed tool provisioning is required",
-    "does not declare provisioning",
-    "PATH-only resolver",
-    "could not locate executable",
-    "is not on PATH",
-    "could not load: libclingo",
-    "extract_runner",
-  ]:
-    if needle in output:
-      return true
-  for needle in [
-    "usage: repro --version",
-    "repro build [target[#name]",
-    "repro graph [target[#name]",
-    "repro show-conventions [--project=PATH]",
-  ]:
-    if needle in output:
-      return true
-  return false
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
@@ -182,14 +165,7 @@ suite "Bootstrap-And-Self-Build B1: repro build apps collection":
 
       if exitCode != 0:
         checkpoint(output)
-        if looksLikeProvisioningOrLimitation(output):
-          checkpoint("skipped — engine surfaced a known provisioning " &
-            "/ CLI-rejection diagnostic before scheduling the " &
-            "``apps`` collection. A future milestone may flip this " &
-            "arm.")
-          skip()
-        else:
-          check exitCode == 0
+        check exitCode == 0
       else:
         # Engine returned 0 — every entrypoint must now exist on disk.
         # We assert presence + non-empty + runnable; the per-binary

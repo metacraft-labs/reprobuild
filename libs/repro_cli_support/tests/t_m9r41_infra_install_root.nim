@@ -62,20 +62,28 @@ suite "M9.R.41 install-root arg parser":
       "--device", "/dev/nvme0n1",
       "--hostname", "host42",
       "--disko", "/etc/repro/hardware.nim",
+      "--kernel", "/artifacts/vmlinuz",
+      "--initrd", "/artifacts/initrd.img",
     ])
     check opts.target == "/mnt/x"
     check opts.source == "/run/live/rootfs"
     check opts.device == "/dev/nvme0n1"
     check opts.hostName == "host42"
     check opts.diskoSource == "/etc/repro/hardware.nim"
+    check opts.kernelSource == "/artifacts/vmlinuz"
+    check opts.initrdSource == "/artifacts/initrd.img"
 
   test "long-form flags parse via --key=value":
     let opts = parseInstallRootArgs(@[
       "--target=/mnt2",
       "--device=/dev/sda",
+      "--kernel=/boot/kernel",
+      "--initrd=/boot/initramfs",
     ])
     check opts.target == "/mnt2"
     check opts.device == "/dev/sda"
+    check opts.kernelSource == "/boot/kernel"
+    check opts.initrdSource == "/boot/initramfs"
 
   test "--exclude is repeatable":
     let opts = parseInstallRootArgs(@[

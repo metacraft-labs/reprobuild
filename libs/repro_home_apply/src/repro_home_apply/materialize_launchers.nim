@@ -23,6 +23,12 @@ from repro_core/paths import extendedPath
 import repro_home_generations
 import repro_local_store
 import repro_launch_plan
+# Runtime-library binding: `registeredRuntimeDeps` (the consumer half) and
+# `resolveRuntimeLibraryDirs` (the join with the producer half). The registry
+# these read is populated at module init by the `package` blocks in
+# `repro_dsl_stdlib/packages/*`, which `catalog_registry` already imports —
+# so this adds no new link-time surface, only a use of what is already there.
+import repro_project_dsl
 
 import ./errors
 import ./plan
@@ -69,12 +75,50 @@ proc hostArch(): string =
   else:
     "unknown"
 
-proc buildLaunchPlan(rec: RealizedRecord; commandName: string): LaunchPlan =
-  ## Synthesize a minimal LaunchPlan for the phase-A case: no
-  ## environment shaping, no executable bindings, no runtime library
-  ## dirs. The binding decision is platform-driven and recorded so
-  ## the launcher can pick the right materialization at activation
-  ## time.
+proc dslCpuToken*(): string =
+  ## The host CPU in the taxonomy the DSL's `cpu = "..."` fields use.
+  ##
+  ## NOT the same strings as `hostArch()` above, which reports `arm64` for the
+  ## same machine the DSL calls `aarch64`. Feeding `hostArch()` straight into
+  ## the matcher would make every `cpu = "aarch64"` declaration match no host —
+  ## silently, since a non-matching slice is indistinguishable from an absent
+  ## one. The two vocabularies are kept separate and converted here rather than
+  ## conflated.
+  when defined(amd64) or defined(x86_64):
+    "x86_64"
+  elif defined(arm64) or defined(aarch64):
+    "aarch64"
+  else:
+    ""
+
+proc dslOsToken*(): string =
+  ## The host OS in the DSL's taxonomy. Mirrors `hostOsToken` in
+  ## `repro_tool_profiles`; the DSL accepts `darwin` as an alias for `macos`
+  ## and `runtimeLibraryMatchesHost` handles that, so reporting `macos` here is
+  ## enough.
+  when defined(windows): "windows"
+  elif defined(macosx): "macos"
+  elif defined(linux): "linux"
+  else: ""
+
+proc runtimeDepSelectors*(packageName: string): seq[string] =
+  ## The package names a consumer's `runtimeDeps:` entries refer to.
+  ##
+  ## Entries are constraint strings (`"glib2 >=2.70"`), and the selector is the
+  ## leading token — the same rule `selectorFromConstraint` applies at macro
+  ## time when it fills `PackageUseDef.packageSelector`.
+  for constraint in registeredRuntimeDeps(packageName):
+    let parts = constraint.strip().splitWhitespace()
+    if parts.len > 0 and parts[0].len > 0:
+      result.add(parts[0])
+
+proc buildLaunchPlan(rec: RealizedRecord; commandName: string;
+                     runtimeLibraryDirs: seq[string]): LaunchPlan =
+  ## Synthesize a LaunchPlan. Environment shaping and executable bindings are
+  ## still empty (phase A); `runtimeLibraryDirs` is now supplied by the caller,
+  ## which is the only party holding every realized prefix. The binding
+  ## decision is platform-driven and recorded so the launcher can pick the
+  ## right materialization at activation time.
   result.schemaVersion = LaunchPlanCurrentSchemaVersion
   result.realizedPrefix = rec.prefixAbsolutePath
   result.exportedCommand = commandName
@@ -83,7 +127,7 @@ proc buildLaunchPlan(rec: RealizedRecord; commandName: string): LaunchPlan =
   result.hasWorkingDirectory = false
   result.environmentBindings = @[]
   result.executableBindings = @[]
-  result.runtimeLibraryDirs = @[]
+  result.runtimeLibraryDirs = runtimeLibraryDirs
   result.projectedRuntimeImage = ProjectedRuntimeImage(present: false)
   result.executionProfile = ExecutionProfileChecksum(present: false)
   when defined(windows):
@@ -172,7 +216,33 @@ proc materializeLaunchers*(store: var Store; binDir: string;
     # gets NO launcher: skip it gracefully, it is not an error.
     if rec.resolvedExecutablePath.len == 0:
       continue
-    let plan = buildLaunchPlan(rec, l.commandName)
+    # Runtime-library binding. The consumer's `runtimeDeps:` entries are joined
+    # to the producers' `runtimeLibrary` declarations; a dependency contributes
+    # a directory exactly when the package providing it declares one for this
+    # host, so an ordinary tool dependency contributes nothing without needing
+    # to be told apart by name.
+    #
+    # `prefixOf` closes over the realized set rather than consulting the store:
+    # every prefix for this apply is already in `byPkg`, and a package that was
+    # not realized has no prefix by definition.
+    let resolution = resolveRuntimeLibraryDirs(
+      runtimeDepSelectors(l.fromPackageId), dslCpuToken(), dslOsToken(),
+      proc(pkg: string): string {.raises: [].} =
+        for (k, v) in byPkg:
+          if k == pkg:
+            return v.prefixAbsolutePath
+        "")
+    if resolution.unresolved.len > 0:
+      # A dependency that DECLARES a runtime library for this host but has no
+      # realized prefix. Refusing here is the point: omitting the directory
+      # would produce a launcher that looks complete and dies at load time with
+      # the "could not load: <lib>" this model exists to prevent — the original
+      # bug, moved somewhere harder to find.
+      raiseLauncherFailed(l.fromPackageId,
+        "runtime library dependencies declared but not realized: " &
+        resolution.unresolved.join(", ") &
+        " (planner/realize-step bug — the dependency was not planned)")
+    let plan = buildLaunchPlan(rec, l.commandName, resolution.dirs)
     let key = storeLaunchPlan(store, plan)
     let digest = digestFromKey(key)
     let idHex = prefixIdHex(key)

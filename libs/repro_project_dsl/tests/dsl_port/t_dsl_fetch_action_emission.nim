@@ -95,6 +95,13 @@ suite "DSL-port M9.K — fetch action emission from registry":
     check argvJoined.contains(extractedRel)
     check argvJoined.contains(".repro-extract-" & spec.hashHex)
     check argvJoined.contains("mv ")
+    check argvJoined.contains(CurlFetchRetryArgs)
+    check argvJoined.contains("--retry-all-errors")
+    check argvJoined.contains("--max-time 300")
+    check argvJoined.contains("[ -s")
+    check argvJoined.contains(".tar.part")
+    check argvJoined.contains("mv -f")
+    check argvJoined.contains("rm -f")
 
   test "registered data file lowers to a copy action":
     let spec = registeredFetchSpec("dataFileActionPkg")
@@ -113,4 +120,6 @@ suite "DSL-port M9.K — fetch action emission from registry":
     check argvJoined.contains(spec.hashHex)
     check argvJoined.contains("cp ")
     check argvJoined.contains("/source")
+    check argvJoined.contains(CurlFetchRetryArgs)
+    check argvJoined.contains(".tar.part")
     check not argvJoined.contains("tar -xf")

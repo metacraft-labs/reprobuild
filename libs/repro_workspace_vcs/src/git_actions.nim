@@ -387,7 +387,8 @@ proc runGit(payload: GitVcsPayload; args: openArray[string];
   for arg in args:
     cmd.add(" ")
     cmd.add(quoteShell(arg))
-  let res = execCmdEx(cmd, workingDir = workingDir)
+  let res = execCmdEx(cmd, workingDir = workingDir,
+    env = scrubbedGitRepositoryEnv())
   (exitCode: res.exitCode, output: res.output)
 
 proc trimmed(value: string): string = value.strip()
@@ -603,6 +604,36 @@ proc succeeded(): ActionResult =
     launched: true,
     runQuotaBackend: "workspace-vcs")
 
+proc isCommitSha(revision: string): bool =
+  ## Whether ``revision`` is a full 40-hex commit id rather than a branch or
+  ## tag name. This matters because ``git clone --branch`` accepts ONLY a
+  ## branch or tag: handed a commit id it fails with "Remote branch <sha> not
+  ## found in upstream origin", so a SHA-pinned repo fragment could never be
+  ## cloned at all. A pinned commit is reached by cloning, fetching that
+  ## object, and checking it out — the same three steps ``executeForkBranch``
+  ## already uses to land on an arbitrary revision.
+  revision.len == 40 and revision.allCharsInSet(HexDigits)
+
+proc cloneBranchRef(revision: string): string =
+  ## The spelling of ``revision`` that ``git clone --branch`` accepts.
+  ##
+  ## ``--branch`` takes a SHORT branch or tag name and resolves it against the
+  ## remote itself; handed a fully-qualified ref it reports "Remote branch
+  ## refs/tags/v1 not found in upstream origin" even though the tag is right
+  ## there. Manifests legitimately pin the qualified form (it is the only way
+  ## to say "the TAG v1", not "whichever ref happens to be named v1"), so the
+  ## qualified spelling is normalized here rather than banned in the manifest
+  ## schema.
+  ##
+  ## Only the two ref namespaces ``--branch`` can reach are stripped. Anything
+  ## else (``refs/pull/…``, a bare name, a SHA) is passed through untouched so
+  ## an unsupported pin still fails loudly at git rather than being silently
+  ## rewritten into a different ref.
+  for prefix in ["refs/heads/", "refs/tags/"]:
+    if revision.startsWith(prefix):
+      return revision[prefix.len .. ^1]
+  revision
+
 proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResult =
   let target = absoluteRepoPath(payload, cwd)
   let parent = target.splitPath.head
@@ -631,13 +662,19 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
   # remote heads, ``--filter`` makes a partial (promisor) clone, and
   # ``--depth`` truncates history. They are appended to BOTH the
   # accelerated and the fallback plain-clone command lines.
+  let pinnedCommit = isCommitSha(payload.revision)
   proc accelFlags(): seq[string] =
     result = @[]
     if payload.singleBranch:
       result.add("--single-branch")
     if payload.cloneFilter.len > 0:
       result.add("--filter=" & payload.cloneFilter)
-    if payload.depth > 0:
+    # ``--depth`` is dropped for a commit-id pin. The other accelerators only
+    # narrow what is downloaded and the pinned commit is fetched explicitly
+    # below, but a depth-truncated history cannot be guaranteed to contain an
+    # arbitrary commit, and deepening it afterwards would download more than
+    # the unshallowed clone would have.
+    if payload.depth > 0 and not pinnedCommit:
       result.add("--depth")
       result.add($payload.depth)
 
@@ -659,9 +696,9 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     args.add(f)
   args.add(payload.remoteUrl)
   args.add(target)
-  if payload.revision.len > 0:
+  if payload.revision.len > 0 and not pinnedCommit:
     args.add("--branch")
-    args.add(payload.revision)
+    args.add(cloneBranchRef(payload.revision))
   var cloneRes = runGit(payload, args)
   if cloneRes.exitCode != 0 and useReference:
     # Best-effort fallback: drop the reference and clone standalone so a
@@ -675,14 +712,81 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
       plain.add(f)
     plain.add(payload.remoteUrl)
     plain.add(target)
-    if payload.revision.len > 0:
+    if payload.revision.len > 0 and not pinnedCommit:
       plain.add("--branch")
-      plain.add(payload.revision)
+      plain.add(cloneBranchRef(payload.revision))
     cloneRes = runGit(payload, plain)
   if cloneRes.exitCode != 0:
+    # A clone can fail in two shapes, and only one of them leaves nothing
+    # behind. "Could not read from remote" fails before anything is created;
+    # "Clone succeeded, but checkout failed" leaves a populated ``.git`` with a
+    # half-written working tree. The second shape must not be left on disk: the
+    # next sync classifies any directory with a ``.git`` as an existing
+    # checkout and takes the UPDATE path, so the clone is never retried and the
+    # repo stays half-checked-out indefinitely — the same trap the pinned-commit
+    # branch below already guards against, reached by a different route.
+    if dirExists(target):
+      try: removeDir(target)
+      except OSError: discard
+    # git-lfs is the common cause of a checkout-stage failure, and its own
+    # error names a filter rather than the repo, so the raw output reads as a
+    # reprobuild bug. Say what actually happened and what can be done about it.
+    let cloneOut = cloneRes.output.trimmed
+    if cloneOut.contains("smudge filter lfs failed") or
+        cloneOut.contains("Object does not exist on the server"):
+      return failed("clone-lfs-objects-missing",
+        "git clone of " & payload.remoteUrl & " checked out its tree but " &
+        "git-lfs could not fetch the LFS content it points at (the server " &
+        "answered 404 for at least one object), so the checkout was " &
+        "discarded rather than left half-written.\n" &
+        "  This is missing data on the LFS remote, not a bad revision — no " &
+        "revision of this repo can be checked out until it is restored.\n" &
+        "  To proceed WITHOUT the LFS content (pointer files in place of the " &
+        "real ones), clone it once by hand with the smudge filter disabled:\n" &
+        "    git -c filter.lfs.smudge= -c filter.lfs.process= clone " &
+        payload.remoteUrl & " " & target & "\n" &
+        "  git output: " & cloneOut)
     return failed("clone-failed",
-      "git clone exited " & $cloneRes.exitCode & ": " &
-        cloneRes.output.trimmed)
+      "git clone exited " & $cloneRes.exitCode & ": " & cloneOut)
+  if pinnedCommit:
+    # The clone landed on the remote's default branch; move to the pinned
+    # commit. Fetch it explicitly first — it need not be a branch tip, and
+    # with ``--single-branch`` or a partial clone it may not be present.
+    #
+    # If we cannot land on the pin, the checkout is REMOVED rather than left
+    # behind. A tree that exists but sits on the default branch is worse than
+    # no tree at all: the next sync classifies it as an existing checkout and
+    # takes the update path, so it never retries the clone and the repo stays
+    # silently at the wrong revision forever.
+    proc discardPartial() =
+      if dirExists(target):
+        try: removeDir(target)
+        except OSError: discard
+    let wanted = payload.revision
+    let present = runGit(payload,
+      ["-C", target, "cat-file", "-e", wanted & "^{commit}"])
+    if present.exitCode != 0:
+      let fetched = runGit(payload,
+        ["-C", target, "fetch", "--no-tags", "origin", wanted])
+      if fetched.exitCode != 0:
+        discardPartial()
+        return failed("clone-revision-fetch-failed",
+          "could not fetch pinned revision " & wanted & " from " &
+            payload.remoteUrl & " (" & $fetched.exitCode & "): " &
+            fetched.output.trimmed)
+      let recheck = runGit(payload,
+        ["-C", target, "cat-file", "-e", wanted & "^{commit}"])
+      if recheck.exitCode != 0:
+        discardPartial()
+        return failed("clone-revision-missing",
+          "pinned revision " & wanted & " is still absent after fetching " &
+            "from " & payload.remoteUrl)
+    let co = runGit(payload, ["-C", target, "checkout", "--detach", wanted])
+    if co.exitCode != 0:
+      discardPartial()
+      return failed("clone-revision-checkout-failed",
+        "git checkout --detach " & wanted & " exited " & $co.exitCode &
+          ": " & co.output.trimmed)
   let headRes = resolveHeadSha(payload, target)
   if not headRes.ok:
     return failed("clone-head-probe-failed", headRes.diagnostic)
@@ -1293,7 +1397,7 @@ proc gitSwitchAction*(id: string; identity: GitToolIdentity;
   ## deterministic function of the declared inputs (branch + repo). Caching
   ## its receipt is unsound: once a switch to branch ``B`` succeeded, a
   ## later switch to ``B`` from a DIFFERENT branch would be served as a
-  ## cache hit and skip the actual ``git switch``, so ``repro checkout``
+  ## cache hit and skip the actual ``git switch``, so ``repro switch``
   ## would report ``switched`` while HEAD never moved. ``git switch`` is
   ## idempotent (already-on-branch is a safe no-op), so always executing is
   ## both correct and cheap.
@@ -1312,7 +1416,7 @@ proc gitBranchCreate*(id: string; identity: GitToolIdentity;
   ## (``repro branch <name>``). The executor invokes
   ## ``git branch <name> <HEAD-sha>`` in the named working tree —
   ## the branch is created from the current HEAD and the working tree
-  ## is NOT switched to it (M15 ``repro checkout`` is the switching
+  ## is NOT switched to it (M15 ``repro switch`` is the switching
   ## form). Idempotent: a pre-existing branch by the same name at
   ## the same HEAD short-circuits to ``outcome = already-at-head``
   ## in the receipt; a branch by that name at a different SHA fails
@@ -1595,4 +1699,3 @@ proc queryGitState*(query: GitQueryAction;
       unmergedBranches: unmergedBranches,
       fileDetails: fileDetails
     )
-

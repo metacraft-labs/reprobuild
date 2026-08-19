@@ -31,6 +31,8 @@
 
 import std/[os, osproc, streams, strtabs, strutils, unittest]
 
+from repro_core/paths import extendedPath
+
 when defined(windows):
   import std/winlean
 else:
@@ -325,6 +327,52 @@ proc requireFailure*(cmd: CmdSpec; cwd = getCurrentDir()): string =
   check res.code != 0
   res.output
 
+proc testCaseScratchSlug*(): string =
+  ## Suffix that makes a test binary's scratch directory private to the
+  ## process executing ONE test case.
+  ##
+  ## Under the binary-runner protocol a test binary is executed once per
+  ## case (``<binary> --run "<suite>::<test>"``), so sibling cases of the
+  ## same binary run as CONCURRENT processes. A scratch path baked in as
+  ## a module-level constant is therefore shared mutable state across
+  ## processes: the suite-level reset performed by one case deletes the
+  ## fixture another case is part-way through using. That is not a
+  ## hypothetical — it is what made ``t_adapter_chain``,
+  ## ``t_integration_apply_lock_serializes`` and
+  ## ``t_integration_pointer_envelope_and_history_enumeration`` fail the
+  ## moment the suite gained per-case granularity, and each of them
+  ## reproduces standalone at ``--threads=8`` and passes at
+  ## ``--threads=1``.
+  ##
+  ## Keying on the ``--run`` name rather than on the pid is deliberate:
+  ## it keeps the set of scratch directories BOUNDED (one per case, not
+  ## one per execution) and stable across runs, so the tree does not
+  ## grow without limit and a failed run's fixture is still there to
+  ## inspect. Whole-binary execution — one process, cases strictly
+  ## sequential — keeps the single shared directory it always had.
+  ##
+  ## The full case name is hashed rather than embedded so the result
+  ## stays a short, filesystem-legal, collision-free component
+  ## regardless of how long or how punctuated the suite/test names are.
+  var runName = ""
+  var i = 1
+  while i <= paramCount():
+    let p = paramStr(i)
+    if p == "--run" and i < paramCount():
+      runName = paramStr(i + 1)
+      break
+    elif p.startsWith("--run="):
+      runName = p["--run=".len .. ^1]
+      break
+    inc i
+  if runName.len == 0:
+    return "whole"
+  var h: uint32 = 2166136261'u32
+  for c in runName:
+    h = h xor uint32(ord(c))
+    h = h * 16777619'u32
+  "case-" & toHex(h, 8).toLowerAscii
+
 proc isTransientDirectoryNotEmpty(e: ref OSError): bool =
   ## Nim's OSError does not expose the failing errno portably. Keep this
   ## deliberately narrow: retry only the ENOTEMPTY-shaped cleanup race the
@@ -340,6 +388,20 @@ proc removeDirEventually*(path: string; attempts = 25; sleepMs = 40) =
   ## `removeDir` can lose that race and fail with "Directory not empty". This
   ## helper gives that narrow condition a bounded chance to settle, then
   ## re-raises the final OSError so cleanup regressions stay visible.
+  ##
+  ## ENOTEMPTY on Windows has a SECOND cause that no amount of waiting fixes,
+  ## and the two are indistinguishable from the error alone. `removeDir` walks
+  ## with `FindFirstFileW`, which without the `\\?\` prefix cannot enumerate
+  ## entries whose full path exceeds `MAX_PATH` (260). Such entries are not
+  ## reported as an error — they are simply not yielded, so the walk deletes
+  ## nothing, and the following `RemoveDirectory` fails on a directory the
+  ## walk believed was empty. A workspace fork writes engine action-cache
+  ## records at `…/hot-records/0-1-<64 hex>.rbar/<64 hex>.rec`, which is ~277
+  ## characters under a `%TEMP%` fixture root — past the limit — so every fork
+  ## test failed teardown on a host without `LongPathsEnabled` while its
+  ## assertions had all passed. Retrying the extended-length form is what
+  ## actually clears it, so a persistent ENOTEMPTY escalates to that before
+  ## the error is allowed to stand.
   if path.len == 0 or not dirExists(path):
     return
   var last: ref OSError
@@ -355,6 +417,16 @@ proc removeDirEventually*(path: string; attempts = 25; sleepMs = 40) =
       last = e
       if attempt + 1 < attempts:
         sleep(sleepMs)
+  # Waiting did not help: try the long-path form before giving up. Kept as an
+  # escalation rather than the default so the ordinary path stays exercised.
+  when defined(windows):
+    try:
+      removeDir(extendedPath(path))
+      return
+    except OSError:
+      discard
+    if not dirExists(path):
+      return
   if last != nil:
     raise last
 

@@ -61,6 +61,76 @@ const
   HcrExtraPassC = "-fpatchable-function-entry=16,0"
   HcrExtraPassL = "-Wl,-segprot,__HCR,rwx,rwx"
 
+  BootIdUnavailableTest =
+    "tests/integration/t_shm_index_boot_id_unavailable_fails_closed.nim"
+
+  BundleRoot = "tests/bundles"
+    ## Where generated shared-binary sources live. Deliberately not under a
+    ## directory the walkers accept, and deliberately named ``bundle_*`` rather
+    ## than ``t_*`` / ``test_*``, so a bundle can never be discovered as a test
+    ## in its own right and compiled a second time.
+
+type
+  PureUnitBundle = object
+    ## Suite-Modernization M4: one shared protocol-aware binary carrying the
+    ## cases of several pure-unit test sources.
+    ##
+    ## Consolidation is worth doing because each test binary today re-compiles
+    ## the whole shared library closure into its own private nimcache: one
+    ## solver test emits 26-35 C files, and 24 of them emit that closure 24
+    ## times. Bundled, the closure is compiled once — measured at 1,199 -> 127
+    ## CPU seconds for this group, 24 binaries -> 1.
+    ##
+    ## Membership is an EXPLICIT list, not a directory glob, and that is the
+    ## point. Sharing a process is not safe by default: the M4 measurement
+    ## (benchmarks/reports/reprobuild-suite-m4-consolidation.md) found cases
+    ## that pass alone and fail merged in two of the three groups it measured.
+    ## A glob would enrol a new test into a shared process the moment someone
+    ## added it, with nothing having checked that it tolerates neighbours. An
+    ## explicit list means a new test keeps its own binary until a human moves
+    ## it here, and it keeps each batch small enough to bisect.
+    name: string          # binary stem, also the generated source's stem
+    members: seq[string]  # repo-relative .nim paths folded into the binary
+
+const PureUnitBundles: seq[PureUnitBundle] = @[
+  # The only group cleared so far. It is clean on every axis measured:
+  # module-init cost unchanged from standalone (0.006 s), 82/82 cases pass
+  # individually under ``--run``, the binary exits 0 when run whole, and its
+  # ``--list-json`` catalog is exactly the union of the 24 members' catalogs.
+  # None of its members spawns a subprocess, touches the network, or mutates
+  # the process environment or working directory.
+  #
+  # The other 41 consolidation groups are NOT cleared by this one.
+  PureUnitBundle(
+    name: "bundle_repro_solver_pure_unit",
+    members: @[
+      "libs/repro_solver/tests/t_clingo_smoke.nim",
+      "libs/repro_solver/tests/t_cross_package_propagates.nim",
+      "libs/repro_solver/tests/t_explainer_chosen_basic.nim",
+      "libs/repro_solver/tests/t_explainer_chosen_cross_package.nim",
+      "libs/repro_solver/tests/t_explainer_chosen_with_constraints.nim",
+      "libs/repro_solver/tests/t_explainer_chosen_with_override.nim",
+      "libs/repro_solver/tests/t_explainer_unsat_basic.nim",
+      "libs/repro_solver/tests/t_explainer_unsat_version_range.nim",
+      "libs/repro_solver/tests/t_semver_range_parsing.nim",
+      "libs/repro_solver/tests/t_semver_satisfies.nim",
+      "libs/repro_solver/tests/t_solve_unified_end_to_end.nim",
+      "libs/repro_solver/tests/t_solve_unified_unsatisfiable.nim",
+      "libs/repro_solver/tests/t_solve_variants_end_to_end.nim",
+      "libs/repro_solver/tests/t_solve_variants_unsatisfiable.nim",
+      "libs/repro_solver/tests/t_variant_encoder_bool_universe.nim",
+      "libs/repro_solver/tests/t_variant_encoder_conflicts.nim",
+      "libs/repro_solver/tests/t_variant_encoder_enum_universe.nim",
+      "libs/repro_solver/tests/t_variant_encoder_priorities.nim",
+      "libs/repro_solver/tests/t_variant_encoder_propagates.nim",
+      "libs/repro_solver/tests/t_variant_encoder_requires.nim",
+      "libs/repro_solver/tests/t_version_encoder_conditional_deps.nim",
+      "libs/repro_solver/tests/t_version_encoder_constraints.nim",
+      "libs/repro_solver/tests/t_version_encoder_transitive.nim",
+      "libs/repro_solver/tests/t_version_encoder_universe.nim",
+    ]),
+]
+
 type
   TargetOs = enum
     ## Bootstrap-And-Self-Build B4: per-test target-OS guard. ``soAny``
@@ -146,6 +216,8 @@ proc isProviderModePath(path: string): bool =
   for exact in [
     "tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim",
     "tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim",
+    "tests/unit/t_configure_build_tree_cleanup.nim",
+    "tests/unit/t_m9r83_install_mirror_action_shapes.nim",
   ]:
     if p == exact:
       return true
@@ -240,21 +312,91 @@ proc isHcrTestStem(stem: string): bool =
       return true
   false
 
+proc bundleSourcePath(bundle: PureUnitBundle): string =
+  BundleRoot & "/" & bundle.name & ".nim"
+
+proc renderBundleSource(bundle: PureUnitBundle): string =
+  ## Emit the shared binary's source: one quoted relative ``import`` per
+  ## member and nothing else.
+  ##
+  ## ``import`` rather than ``include`` is load-bearing. Included files share
+  ## one module scope, so the first two members that both declare a top-level
+  ## ``ExpectedUrl`` would collide and the bundle would not compile. Importing
+  ## keeps each member in its own module scope; ``suite`` / ``test`` register
+  ## into ``unittest``'s process-wide tables during the importer's module
+  ## initialization, which is what makes one binary carry every member's cases.
+  ##
+  ## The paths are quoted because Nim's dotted import syntax cannot express a
+  ## directory containing ``-`` (``recipes/packages/source/adwaita-icon-theme``
+  ## parses as subtraction).
+  result = "# AUTO-GENERATED by scripts/generate_test_edges.nim — " &
+    "do not edit by hand.\n"
+  result.add("# Regenerate with: nim r scripts/generate_test_edges.nim\n")
+  result.add("#\n")
+  result.add("# Suite-Modernization M4 shared pure-unit binary. Each import\n")
+  result.add("# below contributes its module's ``suite``/``test`` cases to\n")
+  result.add("# this one binary; every case stays individually addressable\n")
+  result.add("# through ``--run \"suite::test\"`` because the protocol's case\n")
+  result.add("# names are unique suite-wide and never depended on the binary\n")
+  result.add("# boundary. Membership is declared in the generator's\n")
+  result.add("# ``PureUnitBundles`` table; see the rationale there before\n")
+  result.add("# adding a member.\n")
+  result.add("\n")
+  let upDir = block:
+    var ups = ""
+    for _ in BundleRoot.split('/'):
+      ups.add("../")
+    ups
+  for member in bundle.members:
+    result.add("import \"" & upDir & member[0 ..< member.len - 4] & "\"\n")
+
+proc writeBundleSources(repoRoot: string): int =
+  ## Materialise every bundle source. Returns the number of files written
+  ## (0 when all are already up to date), so the run stays idempotent and a
+  ## no-op regeneration produces no diff.
+  result = 0
+  if PureUnitBundles.len == 0:
+    return
+  createDir(repoRoot / BundleRoot)
+  for bundle in PureUnitBundles:
+    let path = repoRoot / bundleSourcePath(bundle)
+    let content = renderBundleSource(bundle)
+    let existing = if fileExists(path): readFile(path) else: ""
+    if existing != content:
+      writeFile(path, content)
+      inc result
+
+proc bundledMembers(): HashSet[string] =
+  ## Every source folded into some bundle. These must NOT also be emitted as
+  ## their own TestSpec: doing so would compile each member twice and count
+  ## its cases twice, which is exactly the double-count the inventory's
+  ## catalog authority exists to prevent.
+  result = initHashSet[string]()
+  for bundle in PureUnitBundles:
+    for member in bundle.members:
+      result.incl(member)
+
 proc discoverTests(repoRoot: string): seq[TestEdge] =
   result = @[]
   var seenBinaries = initHashSet[string]()
+  let bundled = bundledMembers()
 
   var candidates: seq[string] = @[]
   candidates.add(walkRoot(repoRoot, "tests", acceptTestsTree))
   candidates.add(walkRoot(repoRoot, "libs", acceptLibsTree))
   candidates.add(walkRoot(repoRoot, "tools", acceptToolsTree))
   candidates.add(walkRoot(repoRoot, "recipes", acceptRecipesTree))
+  for bundle in PureUnitBundles:
+    candidates.add(bundleSourcePath(bundle))
 
   # Deterministic sort by source path so the generated file diffs
   # cleanly across runs.
   candidates.sort()
 
   for rel in candidates:
+    if rel in bundled:
+      # Folded into a shared binary; the bundle's own spec carries its cases.
+      continue
     let stem = rel.splitFile().name
     let binary = BinaryRoot & "/" & stem
     if binary in seenBinaries:
@@ -402,6 +544,8 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
     var definesList: seq[string] = @[]
     if edge.needsProviderMode: definesList.add("reproProviderMode")
     if edge.needsSsl: definesList.add("ssl")
+    if edge.source == BootIdUnavailableTest:
+      definesList.add("reproShmIndexTestBootIdUnavailable")
     let definesLit = seqLiteral(definesList)
     let reqLit = if edge.requiresReproBinary: "true" else: "false"
     let targetOsLit = case edge.targetOs
@@ -430,6 +574,12 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
 
 proc main() =
   let repoRoot = getCurrentDir()
+  # Bundle sources must exist before discovery: each one is enrolled as an
+  # ordinary TestSpec by path, and ``detectReproBinaryUsage`` reads it.
+  let bundlesWritten = writeBundleSources(repoRoot)
+  if bundlesWritten > 0:
+    stderr.writeLine("generate_test_edges: wrote " & $bundlesWritten &
+      " bundle source(s) under " & BundleRoot)
   let edges = discoverTests(repoRoot)
   let pythonTests = discoverPythonTests(repoRoot)
   let outputPath = repoRoot / GeneratedFile

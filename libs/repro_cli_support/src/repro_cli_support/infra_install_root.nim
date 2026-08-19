@@ -40,10 +40,10 @@
 ##      ``/vmlinuz`` + ``/initrd.img`` on the ESP root (matching the
 ##      M9.R.37.8 ESP-root layout the live ISO uses).
 ##
-## ``--target`` defaults to ``/mnt`` and ``--source`` defaults to ``/``;
-## both can be overridden so a non-live-ISO host (the smoke harness
-## fixture set) can materialise an install image without running on the
-## live ISO.
+## ``--target`` defaults to ``/mnt`` and ``--source`` defaults to ``/``.
+## ``--kernel`` and ``--initrd`` provide explicit boot artifacts when they
+## are not part of the mirrored source tree. These inputs let a non-live-ISO
+## host materialise an install image without mutating a shared staged rootfs.
 
 import std/[os, options, osproc, sequtils, strutils, tables]
 
@@ -60,6 +60,8 @@ type
     device*: string         ## --device for grub-install (e.g. /dev/vda)
     diskoSource*: string    ## --disko PATH (override /mnt/etc/repro/hardware.nim)
     hostName*: string       ## --hostname for /etc/hostname; default "reproos"
+    kernelSource*: string   ## --kernel PATH (explicit installed kernel input)
+    initrdSource*: string   ## --initrd PATH (explicit installed initrd input)
     skipRsync*: bool        ## --no-rsync (test seam; skip the bulk copy)
     skipGrub*: bool         ## --no-grub  (test seam; skip grub-install)
     skipFstab*: bool        ## --no-fstab (test seam; skip fstab emit)
@@ -75,6 +77,7 @@ type
     irfGrubInstallFailed
     irfFstabWriteFailed
     irfGrubCfgWriteFailed
+    irfBootArtifactMissing
 
   InstallRootFailure* = object
     kind*: InstallRootFailureKind
@@ -127,6 +130,12 @@ proc parseInstallRootArgs*(args: seq[string]): InstallRootOptions =
     elif a == "--hostname": result.hostName = valueOf()
     elif a.startsWith("--hostname="):
       result.hostName = a["--hostname=".len .. ^1]
+    elif a == "--kernel": result.kernelSource = valueOf()
+    elif a.startsWith("--kernel="):
+      result.kernelSource = a["--kernel=".len .. ^1]
+    elif a == "--initrd": result.initrdSource = valueOf()
+    elif a.startsWith("--initrd="):
+      result.initrdSource = a["--initrd=".len .. ^1]
     elif a == "--exclude": result.extraExcludes.add valueOf()
     elif a.startsWith("--exclude="):
       result.extraExcludes.add a["--exclude=".len .. ^1]
@@ -355,46 +364,48 @@ proc copyLiveKernelAndInitrd(opts: InstallRootOptions;
   let srcPrefix =
     if opts.source == "/" or opts.source.len == 0: ""
     else: opts.source
-  let kernelCandidates = [
+  let kernelCandidates = @[
     srcPrefix & "/boot/vmlinuz",
     "/run/live/medium/live/vmlinuz",
     "/vmlinuz",
     "/run/live/medium/vmlinuz",
     "/boot/vmlinuz",
   ]
-  let initrdCandidates = [
+  let initrdCandidates = @[
     srcPrefix & "/boot/initrd.img",
     "/run/live/medium/live/initrd.img",
     "/initrd.img",
     "/run/live/medium/initrd.img",
     "/boot/initrd.img",
   ]
-  var kernelFound = false
-  for src in kernelCandidates:
-    if fileExists(src):
-      try:
-        copyFile(src, bootDir / "vmlinuz")
-        kernelFound = true
-        break
-      except CatchableError:
-        discard
-  var initrdFound = false
-  for src in initrdCandidates:
-    if fileExists(src):
-      try:
-        copyFile(src, bootDir / "initrd.img")
-        initrdFound = true
-        break
-      except CatchableError:
-        discard
-  if not kernelFound:
-    stderr.writeLine("repro infra install-root: WARNING: no vmlinuz " &
-      "found in any candidate path; the installed system will not " &
-      "boot.  Probed: " & kernelCandidates.join(", "))
-  if not initrdFound:
-    stderr.writeLine("repro infra install-root: WARNING: no initrd.img " &
-      "found in any candidate path; the installed system will not " &
-      "boot.  Probed: " & initrdCandidates.join(", "))
+  proc copyBootArtifact(explicitSource, destination, label: string;
+                        candidates: seq[string]): bool =
+    let sources =
+      if explicitSource.len > 0: @[explicitSource]
+      else: candidates
+    for source in sources:
+      if fileExists(source):
+        try:
+          copyFile(source, destination)
+          return true
+        except CatchableError:
+          discard
+    let qualifier =
+      if explicitSource.len > 0: "explicit source"
+      else: "candidate paths"
+    stderr.writeLine("repro infra install-root: WARNING: no " & label &
+      " found in " & qualifier & "; the installed system will not boot. " &
+      "Probed: " & sources.join(", "))
+
+  let kernelFound = copyBootArtifact(opts.kernelSource,
+    bootDir / "vmlinuz", "vmlinuz", kernelCandidates)
+  let initrdFound = copyBootArtifact(opts.initrdSource,
+    bootDir / "initrd.img", "initrd.img", initrdCandidates)
+  if (opts.kernelSource.len > 0 and not kernelFound) or
+      (opts.initrdSource.len > 0 and not initrdFound):
+    outcome.failure = true
+    outcome.failureKind = irfBootArtifactMissing
+    outcome.failureMsg = "an explicit kernel or initrd input is unavailable"
   discard outcome
 
 proc runGrubInstall(opts: InstallRootOptions;
@@ -526,6 +537,7 @@ proc runInstallRoot*(args: seq[string];
   # They live OUTSIDE the live overlay (on the ISO medium) so rsync
   # with --one-file-system cannot reach them.
   copyLiveKernelAndInitrd(opts, result)
+  if result.failure: return
 
   # Phase 6: GRUB install + cfg.
   runGrubInstall(opts, result)

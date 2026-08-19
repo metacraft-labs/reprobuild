@@ -1,10 +1,11 @@
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 
 package emcc:
   provisioning:
     nixPackage "nixpkgs#emscripten", executablePath = "bin/emcc",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # Windows / non-Nix Linux: Scoop's `emscripten` manifest unzips the
     # upstream `emsdk` source tree to the prefix root. Unlike a true
     # `bin/<tool>` install, a freshly-scooped emsdk is NOT a working

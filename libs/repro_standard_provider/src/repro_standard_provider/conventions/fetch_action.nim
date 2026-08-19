@@ -125,9 +125,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
     of dfkTarball:
       # Download (curl) → hash-verify → extract → touch stamp. Local
       # ``file://`` URLs are handled by curl natively.
-      script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
-      script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" &
-        escapedUrl & "\"; fi; ")
+      script.appendCurlDownload(tarball, spec.url)
       case spec.hashAlg
       of dshaSha256:
         script.add("echo \"" & escapedHash & "  " & escapedTarball &
@@ -167,9 +165,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
         escapedStaged & "\" --strip-components=" & $spec.extractStrip &
         "; ")
     of dfkDataFile:
-      script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
-      script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" &
-        escapedUrl & "\"; fi; ")
+      script.appendCurlDownload(tarball, spec.url)
       case spec.hashAlg
       of dshaSha256:
         script.add("echo \"" & escapedHash & "  " & escapedTarball &

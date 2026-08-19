@@ -54,7 +54,10 @@ func digestEq(a: openArray[byte]; base: ShmBase; off: int): bool =
 # --- create / attach ------------------------------------------------------
 
 proc segPath*(cacheRoot: string; gen: uint32): string =
-  cacheRoot / ("action-index." & $gen & ".seg")
+  when LifecycleNamespaceVersion == 2:
+    cacheRoot / ("action-index-v2." & $gen & ".seg")
+  else:
+    cacheRoot / ("action-index." & $gen & ".seg")
 
 proc createSegment*(cacheRoot: string; gen: uint32; slotCap: int;
     bootId: uint64): SegmentTable =

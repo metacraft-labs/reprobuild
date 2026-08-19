@@ -13,8 +13,10 @@ Reprobuild implements the Metacraft repository requirements locally through:
 
 Workspace source dependencies must be selected by workspace locks. This
 repository must not commit `.github/sibling-pins`,
-`.github/sibling-pins.json`, `.github/rr-backend-pin.txt`, or
-`.repo-workspaces.env`. It MAY commit `.github/sibling-repos` — that file is
+`.github/sibling-pins.json`, `.github/rr-backend-pin.txt`, or a host
+workspace bootstrap config (`.repro-workspace.toml`, or the retired
+`.repo-workspaces.env`) — those belong to the workspace root repo, not to a
+member repo. It MAY commit `.github/sibling-repos` — that file is
 the blessed clone-list declaring which sibling repos CI needs (one repo name
 per line; it does not pin revisions). The shared `setup-dev-env` action clones
 each listed sibling at the workspace-lock-pinned revision.

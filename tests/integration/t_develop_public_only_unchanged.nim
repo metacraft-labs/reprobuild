@@ -1,0 +1,224 @@
+## DS-1 compatibility contract (CLI/develop.md §"Composing the lock set") —
+## **a public-only workspace must come out byte-identical.**
+##
+##   > A workspace with no routing config resolves to the built-in public
+##   > default alone (Unified-Locking-And-Hooks.md §4.1 layer 1), so its lock
+##   > set *is* the committed lock and `--all` selects exactly what it selects
+##   > today.
+##
+## The lock-set composer is a strict superset of the pre-DS-1 single-backend
+## read. That claim is only worth anything if it is *tested*, not asserted: a
+## composer that folded a spurious extra backend, emitted an extra report line,
+## or reordered the selection would still "work" while silently changing what
+## every existing public-only consumer sees.
+##
+## So this test pins the WHOLE observable surface of a public-only run:
+##
+##   1. the combined stdout+stderr is EXACTLY the two per-node lines, in
+##      name-sorted order, and nothing else — no backend inventory, no notice,
+##      no warning;
+##   2. the selected set is EXACTLY the committed lock's deps minus the root
+##      ``.`` consumer, at the lock's exact revisions (checked through `--json`
+##      on a second, untouched copy of the same fixture);
+##   3. adding a ``.repro-workspace.toml`` that carries NO ``[locking]`` table
+##      changes nothing — the built-in public default is still the only tier.
+##
+## Falsifiability: any extra emitted line breaks (1) by exact string equality;
+## any extra or missing node breaks (2); a bootstrap config that accidentally
+## activated a routed read breaks (3). Confirmed by mutating the composer to
+## emit its per-backend inventory unconditionally — (1) then fails.
+##
+## Also asserts (4) that the DS-7 `--group` selector works in THIS shape: its
+## group attribution comes from the resolved manifest membership, which a
+## workspace with no routing config never reaches, so `--group=<a group the
+## committed lock itself declares>` refused with "the declared groups are:
+## (none)" -- a false answer, not a narrow one.
+##
+## Mocks: NONE. Real git repos on the real filesystem and the real ``repro``
+## binary.
+##
+## Hermetic: fresh tempdir; the other config layers are silenced. Skip: ``git``
+## missing or repro unbuilt.
+
+import std/[algorithm, json, os, osproc, strutils, tempfiles, unittest]
+
+const reproBinary = "./build/bin/repro"
+
+proc q(value: string): string = quoteShell(value)
+
+proc run(command: string; cwd = ""): tuple[code: int; output: string] =
+  let res = execCmdEx(command, workingDir = cwd)
+  (code: res.exitCode, output: res.output)
+
+proc requireGit(command: string; cwd = ""): string =
+  let res = run(command, cwd)
+  if res.code != 0:
+    checkpoint("command failed: " & command & "\nexit=" & $res.code &
+      "\n" & res.output)
+    quit 1
+  res.output
+
+proc seedGitOrigin(gitBin, originPath, workPath: string): string =
+  discard requireGit(q(gitBin) & " init --bare -b main " & q(originPath))
+  createDir(workPath)
+  discard requireGit(q(gitBin) & " init -b main " & q(workPath))
+  discard requireGit(q(gitBin) & " -C " & q(workPath) &
+    " config user.email tester@example.invalid")
+  discard requireGit(q(gitBin) & " -C " & q(workPath) &
+    " config user.name \"Public Only Tester\"")
+  writeFile(workPath / "seed.txt", "seed\n")
+  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add seed.txt")
+  discard requireGit(q(gitBin) & " -C " & q(workPath) & " commit -m seed")
+  discard requireGit(q(gitBin) & " -C " & q(workPath) &
+    " remote add origin " & q(originPath))
+  discard requireGit(q(gitBin) & " -C " & q(workPath) & " push origin main")
+  requireGit(q(gitBin) & " -C " & q(workPath) & " rev-parse HEAD").strip()
+
+proc depInline(name, path, url, sha, depends: string;
+               groups = ""): string =
+  "{ name = \"" & name & "\", path = \"" & path &
+    "\", coord_kind = \"vcs\", url = \"" & url & "\", ref = \"main\"" &
+    ", revision = \"" & sha & "\", integrity = \"git-sha1:" & sha &
+    "\", version = \"\", visibility = \"public\", participation = \"\"" &
+    ", depends = \"" & depends & "\", groups = \"" & groups & "\" }"
+
+proc committedLock(deps: string): string =
+  "schema = \"reprobuild.solved-graph-lock.v2\"\n\n" &
+  "[lock]\n" &
+  "platform = \"x86_64-linux\"\n" &
+  "optimal = true\n" &
+  "inputs_digest = \"ds1-public-only\"\n" &
+  "variants = []\n" &
+  "packages = []\n" &
+  "deps = [" & deps & "]\n"
+
+suite "DS-1: a public-only workspace is unchanged by the lock-set composer":
+
+  test "t_develop_public_only_unchanged":
+    let gitBin = findExe("git")
+    if gitBin.len == 0 or not fileExists(reproBinary):
+      skip()
+    else:
+      let repro = absolutePath(reproBinary)
+      let scratch = createTempDir("ds1-public-only-", "")
+      defer: removeDir(scratch)
+
+      let libaOrigin = scratch / "origin-liba.git"
+      let libbOrigin = scratch / "origin-libb.git"
+      let libaSha = seedGitOrigin(gitBin, libaOrigin, scratch / "seed-liba")
+      let libbSha = seedGitOrigin(gitBin, libbOrigin, scratch / "seed-libb")
+      let appOrigin = scratch / "origin-app.git"
+      let appSha = seedGitOrigin(gitBin, appOrigin, scratch / "seed-app")
+
+      let lockBody = committedLock(
+        depInline("app", ".", "file://" & appOrigin, appSha, "liba,libb") &
+        ", " & depInline("liba", "liba", "file://" & libaOrigin, libaSha, "") &
+        ", " & depInline("libb", "libb", "file://" & libbOrigin, libbSha, ""))
+
+      putEnv("REPROBUILD_SYSTEM_CONFIG", scratch / "no-system.toml")
+      putEnv("REPROBUILD_USER_CONFIG", scratch / "no-user.toml")
+      putEnv("REPROBUILD_VCS_PRIVATE_CONFIG", scratch / "no-vcs.toml")
+      defer:
+        delEnv("REPROBUILD_SYSTEM_CONFIG")
+        delEnv("REPROBUILD_USER_CONFIG")
+        delEnv("REPROBUILD_VCS_PRIVATE_CONFIG")
+
+      # ---- (1) the WHOLE observable output of a public-only run. ---------
+      let ws1 = scratch / "ws-text"
+      createDir(ws1)
+      writeFile(ws1 / "repro.lock", lockBody)
+      let deps1 = scratch / "deps-text"
+      let res1 = run(repro & " develop --all --into=" & q(deps1) &
+        " --tool-provisioning=path", cwd = ws1)
+      if res1.code != 0:
+        checkpoint("develop --all output: " & res1.output)
+      check res1.code == 0
+      let expected =
+        "repro develop --all: cloned liba @ " & libaSha & " -> " &
+          (deps1 / "liba") & "\n" &
+        "repro develop --all: cloned libb @ " & libbSha & " -> " &
+          (deps1 / "libb") & "\n"
+      if res1.output != expected:
+        checkpoint("expected:\n" & expected & "\nactual:\n" & res1.output)
+      check res1.output == expected
+
+      # ---- (2) the selected set IS the committed lock's deps minus root. -
+      let ws2 = scratch / "ws-json"
+      createDir(ws2)
+      writeFile(ws2 / "repro.lock", lockBody)
+      let deps2 = scratch / "deps-json"
+      let res2 = run(repro & " develop --all --json --into=" & q(deps2) &
+        " --tool-provisioning=path", cwd = ws2)
+      check res2.code == 0
+      let report = parseJson(res2.output)
+      check report["exitCode"].getInt() == 0
+      var got: seq[string]
+      for node in report["nodes"]:
+        check node["ok"].getBool()
+        got.add(node["node"].getStr() & "@" & node["revision"].getStr())
+      got.sort()
+      check got == @["liba@" & libaSha, "libb@" & libbSha]
+      # The root `.` consumer is never selected.
+      check "\"node\": \"app\"" notin res2.output
+
+      # ---- (3) a bootstrap config with NO [locking] table changes nothing.
+      let ws3 = scratch / "ws-nolocking"
+      createDir(ws3)
+      writeFile(ws3 / "repro.lock", lockBody)
+      writeFile(ws3 / ".repro-workspace.toml",
+        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
+        "[manifest]\n" &
+        "url = \"https://example.invalid/manifests.git\"\n")
+      let deps3 = scratch / "deps-nolocking"
+      let res3 = run(repro & " develop --all --into=" & q(deps3) &
+        " --tool-provisioning=path", cwd = ws3)
+      check res3.code == 0
+      check res3.output ==
+        "repro develop --all: cloned liba @ " & libaSha & " -> " &
+          (deps3 / "liba") & "\n" &
+        "repro develop --all: cloned libb @ " & libbSha & " -> " &
+          (deps3 / "libb") & "\n"
+
+      # ---- (4) `--group` works HERE too, on the committed lock's own
+      #          `groups`, and does not claim the workspace has none. -------
+      #
+      # DS-7's group attribution is read from the resolved MANIFEST membership,
+      # which the composer only reaches when a configuration layer declares a
+      # route. This workspace shape — "a workspace with no routing config
+      # resolves to the built-in public default alone" (CLI/develop.md
+      # §"Composing the lock set") — is precisely the one where it does not,
+      # and `--group=libs` refused with
+      #
+      #   '--group=libs' names no manifest group in this workspace (names are
+      #   matched EXACTLY; the declared groups are: (none))
+      #
+      # for a group the committed lock ITSELF declares on both repos. That is
+      # not a narrower answer, it is a false one — the exact failure mode the
+      # exact-name loudness rule exists to produce truthfully.
+      let groupedLock = committedLock(
+        depInline("app", ".", "file://" & appOrigin, appSha, "liba,libb") &
+        ", " & depInline("liba", "liba", "file://" & libaOrigin, libaSha, "",
+                         groups = "libs") &
+        ", " & depInline("libb", "libb", "file://" & libbOrigin, libbSha, "",
+                         groups = "tools"))
+      let ws4 = scratch / "ws-groups"
+      createDir(ws4)
+      writeFile(ws4 / "repro.lock", groupedLock)
+      proc list4(flags: string): tuple[code: int; output: string] =
+        run(repro & " develop --list --tool-provisioning=path " & flags,
+          cwd = ws4)
+      let libsOnly = list4("--group=libs")
+      if libsOnly.code != 0:
+        checkpoint("develop --list --group=libs output: " & libsOnly.output)
+      check libsOnly.code == 0
+      check "liba" in libsOnly.output
+      check "libb" notin libsOnly.output
+      check "selection: group --group=libs -> 1 repo(s)" in libsOnly.output
+      # …and an unknown group is still the loud refusal, now NAMING the groups
+      # the lock actually declares rather than "(none)".
+      let badGroup = list4("--group=nope")
+      check badGroup.code == 2
+      check "'--group=nope' names no manifest group in this workspace" in
+        badGroup.output
+      # `app` declares no groups, so it is in the implicit `default` one.
+      check "the declared groups are: default, libs, tools" in badGroup.output

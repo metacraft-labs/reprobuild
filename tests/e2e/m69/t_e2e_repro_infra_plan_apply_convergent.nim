@@ -18,12 +18,9 @@
 ##
 ## No `skip`, no `xfail`.
 
-when not defined(windows):
-  echo "[platform N/A] t_e2e_repro_infra_plan_apply_convergent: the " &
-    "system-scope drivers are Windows-only in M69 Phase A"
-  quit(0)
+import std/[os, osproc, strutils, tempfiles]
 
-import std/[os, osproc, strutils, tempfiles, unittest]
+import ct_test_unittest_parallel
 
 import repro_elevation
 import repro_infra
@@ -107,13 +104,40 @@ proc observeLeaf(leaf: string): ObservedOperationState =
     hklmValueName: "ConvergentValue",
     hklmValueKind: srvkString, hklmValueLiteral: ""))
 
+const HostRunsGate = defined(windows)
+  ## This gate needs a real Windows host. It used to be enforced by an
+  ## ``echo`` + ``quit(0)`` at module init, before any ``test`` template
+  ## expanded: the binary emitted no catalog, stayed an opaque
+  ## whole-binary exit-0 PASS, and its declared cases were invisible to
+  ## every gate -- not counted as passes, not as skips, not at all.
+
+const PlatformSkipReason =
+  "[platform N/A] t_e2e_repro_infra_plan_apply_convergent: the " &
+    "system-scope drivers are Windows-only in M69 Phase A"
+
+template gatedTest(name: string; body: untyped) =
+  ## Register the case unconditionally, and on a host that cannot run it
+  ## record a skip whose reason is visible in the run summary and the
+  ## skip census.
+  ##
+  ## The guard is a runtime ``if`` on a compile-time constant rather than
+  ## a ``when``, deliberately: ``when`` would stop type-checking the
+  ## Windows-only body on Linux, and that compile coverage is exactly
+  ## what the previous module-init gate already gave us. Nim folds the
+  ## constant, so the dead branch still costs nothing at runtime.
+  test name:
+    if HostRunsGate:
+      body
+    else:
+      skip(PlatformSkipReason)
+
 suite "e2e_repro_infra_plan_apply_convergent":
   when isNixSupported:
 
-    test "the host is already elevated (gate precondition)":
+    gatedTest "the host is already elevated (gate precondition)":
       check isProcessElevated()
 
-    test "plan -> apply <plan-id> -> re-plan is a no-op (convergent)":
+    gatedTest "plan -> apply <plan-id> -> re-plan is a no-op (convergent)":
       cleanupSandbox()
       let stateDir = createTempDir("repro-m69-conv-", "")
       defer:
@@ -142,7 +166,7 @@ suite "e2e_repro_infra_plan_apply_convergent":
       check plan2.code == 0
       check plan2.output.contains("no changes")
 
-    test "--no-preview apply (fresh plan) converges without a plan id":
+    gatedTest "--no-preview apply (fresh plan) converges without a plan id":
       cleanupSandbox()
       let stateDir = createTempDir("repro-m69-nopreview-", "")
       defer:
@@ -159,7 +183,7 @@ suite "e2e_repro_infra_plan_apply_convergent":
       let plan = runRepro(stateDir, ["infra", "plan"])
       check plan.output.contains("no changes")
 
-    test "--no-elevate applies the non-privileged subset, skips privileged":
+    gatedTest "--no-elevate applies the non-privileged subset, skips privileged":
       cleanupSandbox()
       let stateDir = createTempDir("repro-m69-ne-", "")
       defer:
@@ -175,7 +199,7 @@ suite "e2e_repro_infra_plan_apply_convergent":
       # NOTHING privileged was mutated.
       check not observeLeaf("noelevate").present
 
-    test "a stale plan is rejected before any mutation (EPlanStale)":
+    gatedTest "a stale plan is rejected before any mutation (EPlanStale)":
       cleanupSandbox()
       let stateDir = createTempDir("repro-m69-stale-", "")
       defer:
@@ -210,7 +234,7 @@ suite "e2e_repro_infra_plan_apply_convergent":
         encodeSystemRegistryPayload(srvkString,
           "out-of-band-divergent-value"))
 
-    test "concurrent applies are serialized through the apply lock":
+    gatedTest "concurrent applies are serialized through the apply lock":
       cleanupSandbox()
       let stateDir = createTempDir("repro-m69-lock-", "")
       defer:
@@ -226,6 +250,6 @@ suite "e2e_repro_infra_plan_apply_convergent":
       check apply.output.contains("another system apply is in progress")
       releaseApplyLock(stateDir)
 
-    test "the isolated HKLM test subtree is left clean":
+    gatedTest "the isolated HKLM test subtree is left clean":
       cleanupSandbox()
       check not observeLeaf("convergent").present

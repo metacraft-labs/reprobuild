@@ -182,7 +182,7 @@ proc extendWithActiveProjectSet*(workspaceRoot: string;
 proc resolveProjectSet*(workspaceRoot: string;
                         names: openArray[string]): ResolvedProject =
   ## Resolve an EXPLICIT project set (rather than the recorded one) into a
-  ## single participating repo set. `repro workspace projects add` uses this
+  ## single participating repo set. `repro workspace enable` uses this
   ## to validate a PROSPECTIVE set before it writes membership: a set that
   ## would not resolve must be refused with nothing mutated (PS-4).
   if names.len == 0:

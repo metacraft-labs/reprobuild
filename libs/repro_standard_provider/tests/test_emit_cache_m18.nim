@@ -111,12 +111,34 @@ suite "emit_cache helper (M18)":
     check not emitCacheIsUsable(scratch, "test", differentFp, [output])
     removeDir(scratch)
 
-proc nimConventionAvailable(): bool =
-  if not fileExists(FixtureRoot / "reprobuild.nim"):
+proc caseFixtureRoot(): string =
+  ## Private copy of the shared example project for the process running
+  ## one test case.
+  ##
+  ## Both convention cases below wipe ``.repro/build/<entry>`` and then
+  ## time the manifest's mtime across two emits; one of them also drops
+  ## a throwaway ``src/*.nim`` into the tree specifically to force a
+  ## cache MISS. Run concurrently against one shared project — which is
+  ## what per-case execution does — each case invalidates the other's
+  ## cache, so the mtime probes stop measuring the emit cache and start
+  ## measuring the race. Copying also stops the suite writing build
+  ## scratch into the sibling ``reprobuild-examples`` checkout, which
+  ## the workspace expects to stay clean.
+  result = absolutePath("build" / "test-tmp" / "emit-cache-m18" /
+    testCaseScratchSlug() / "binary")
+  removeDirEventually(result)
+  createDir(result.parentDir)
+  copyDir(FixtureRoot, result)
+  # Never inherit the shared project's build scratch: the point of the
+  # copy is that each case starts from a cold emit cache.
+  removeDirEventually(result / ".repro")
+
+proc nimConventionAvailable(root: string): bool =
+  if not fileExists(root / "reprobuild.nim"):
     return false
   let conv = nim_convention.nimConvention()
-  let request = dummyRequest(FixtureRoot)
-  conv.recognize(FixtureRoot, request)
+  let request = dummyRequest(root)
+  conv.recognize(root, request)
 
 suite "nim convention M18 — emit-cache short-circuits nim c --compileOnly":
 
@@ -127,19 +149,20 @@ suite "nim convention M18 — emit-cache short-circuits nim c --compileOnly":
     # by snapshotting the manifest's last-modified time before+after
     # the second call. Equal mtimes prove the file wasn't rewritten,
     # which means the subprocess didn't run.
-    if not nimConventionAvailable():
+    if not nimConventionAvailable(FixtureRoot):
       checkpoint "fixture or nim toolchain missing — skipping"
       skip()
     else:
+      let projectRoot = caseFixtureRoot()
       let conv = nim_convention.nimConvention()
-      let request = dummyRequest(FixtureRoot)
-      let scratchEntry = FixtureRoot / ".repro" / "build" / FixtureEntry
+      let request = dummyRequest(projectRoot)
+      let scratchEntry = projectRoot / ".repro" / "build" / FixtureEntry
       let nimcacheDir = scratchEntry / "nimcache"
       let manifestPath = nimcacheDir / (FixtureEntry & ".json")
       # Wipe the entry's scratch so the test is hermetic.
       if dirExists(scratchEntry):
         removeDir(scratchEntry)
-      discard conv.emitFragment(FixtureRoot, request)
+      discard conv.emitFragment(projectRoot, request)
       check fileExists(manifestPath)
       let firstMtime = getLastModificationTime(manifestPath)
       # Sleep a beat so a subprocess re-write would have a measurably
@@ -148,7 +171,7 @@ suite "nim convention M18 — emit-cache short-circuits nim c --compileOnly":
       sleep(1500)
       # Second emit: warm. With the M18 emit cache the subprocess MUST
       # NOT fire, so the manifest mtime must be unchanged.
-      discard conv.emitFragment(FixtureRoot, request)
+      discard conv.emitFragment(projectRoot, request)
       check fileExists(manifestPath)
       let secondMtime = getLastModificationTime(manifestPath)
       check secondMtime == firstMtime
@@ -162,27 +185,28 @@ suite "nim convention M18 — emit-cache short-circuits nim c --compileOnly":
     # cache miss MUST fire the subprocess. We synthesise the change by
     # touching a throwaway ``.nim`` file under the fixture's ``src/``
     # subdirectory and confirming the manifest gets re-written.
-    if not nimConventionAvailable():
+    if not nimConventionAvailable(FixtureRoot):
       checkpoint "fixture or nim toolchain missing — skipping"
       skip()
     else:
+      let projectRoot = caseFixtureRoot()
       let conv = nim_convention.nimConvention()
-      let request = dummyRequest(FixtureRoot)
-      let scratchEntry = FixtureRoot / ".repro" / "build" / FixtureEntry
+      let request = dummyRequest(projectRoot)
+      let scratchEntry = projectRoot / ".repro" / "build" / FixtureEntry
       let nimcacheDir = scratchEntry / "nimcache"
       let manifestPath = nimcacheDir / (FixtureEntry & ".json")
       if dirExists(scratchEntry):
         removeDir(scratchEntry)
-      discard conv.emitFragment(FixtureRoot, request)
+      discard conv.emitFragment(projectRoot, request)
       check fileExists(manifestPath)
       let firstMtime = getLastModificationTime(manifestPath)
       sleep(1500)
       # Drop a throwaway extra source file under src/ that the
       # convention will pick up as a fingerprint input.
-      let extra = FixtureRoot / "src" / "extra_m18_probe.nim"
+      let extra = projectRoot / "src" / "extra_m18_probe.nim"
       writeFile(extra, "## extra_m18_probe\n")
       try:
-        discard conv.emitFragment(FixtureRoot, request)
+        discard conv.emitFragment(projectRoot, request)
         let secondMtime = getLastModificationTime(manifestPath)
         # Cache miss must have re-rewritten the manifest — mtimes must
         # differ.

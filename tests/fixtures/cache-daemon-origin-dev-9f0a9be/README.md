@@ -24,8 +24,29 @@ commit:
 release call the complete, unmodified pinned `daemon.nim`; producer, consumer,
 layout, mapping, ring, segment, and atomic operations call the pinned modules
 directly. It deliberately does not import the working-tree `repro_shm_index`,
-so mixed-version tests exercise two independently compiled implementations
-instead of imitating the old behavior inside the new test binary.
+so the Linux compatibility gate exercises two independently compiled
+implementations instead of imitating old behavior inside the new test binary.
+
+Darwin lifecycle namespace 2 intentionally cannot share its volatile control
+or segment files with this exact peer: the old code derives its creator boot ID
+from wall-clock time. `legacy_cache_peer_legacy_wire.nim` supplies a second,
+separately compiled peer for full Darwin compatibility. Its source tree is
+materialized under `build/test-fixtures/cache-daemon-legacy-wire/` by
+`generate_legacy_wire.py` from the seven pinned inputs above. The generator:
+
+- verifies an exact SHA-256 for every pinned input before doing any work;
+- copies daemon, layout, mapping, ring, and atomics byte-for-byte;
+- applies cardinality-checked substitutions only for authoritative
+  `kern.boottime`, boot-ID-unavailable fail-closed behavior, and Darwin v2 ctl
+  and segment names in the old top-level/segment modules; and
+- prints a canonical tree digest (`c5ce500974dda9fcde33ab796b3c6bd65c5241e0e5583c1564c581a1d965e432`
+  for this fixture revision).
+
+Both entrypoints include the same `legacy_cache_peer_main.nim` command frontend,
+so differences in interoperability come only from the selected implementation
+tree. The graph declares the generator's seven inputs and seven outputs, orders
+the legacy-wire helper compile after generation, and declares both peer
+binaries as typed runtime inputs of the cache-daemon integration test.
 
 To audit the checked-in source snapshot:
 
@@ -45,4 +66,13 @@ do
   cmp <(git show "$revision:$src") \
     "tests/fixtures/cache-daemon-origin-dev-9f0a9be/origin/$src"
 done
+```
+
+The SHA-256 audit and deterministic materialization can also be driven directly:
+
+```sh
+python3 tests/fixtures/cache-daemon-origin-dev-9f0a9be/generate_legacy_wire.py \
+  --check-origin
+python3 tests/fixtures/cache-daemon-origin-dev-9f0a9be/generate_legacy_wire.py \
+  --output-root build/test-fixtures/cache-daemon-legacy-wire
 ```

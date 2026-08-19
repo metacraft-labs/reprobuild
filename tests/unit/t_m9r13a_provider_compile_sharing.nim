@@ -95,6 +95,7 @@
 import std/[os, osproc, sequtils, streams, strutils, times, unittest]
 
 import repro_interface_artifacts
+import repro_tool_profiles
 
 # ---------------------------------------------------------------------------
 # Test fixture helpers
@@ -202,6 +203,18 @@ proc compileWithMeasuredCpu(nimExe, nimcache, source, outBin: string): float =
 # ---------------------------------------------------------------------------
 # Arms
 # ---------------------------------------------------------------------------
+
+suite "bootstrap compiler environment paths":
+  test "Windows paths remain valid in generated shell recipes":
+    check compilerPathForShellEnvironment(
+      "C:\\Users\\builder\\AppData\\Local\\repro\\gcc.exe", true) ==
+      "C:/Users/builder/AppData/Local/repro/gcc.exe"
+
+  test "portable paths and non-Windows hosts are unchanged":
+    check compilerPathForShellEnvironment("C:/tools/gcc.exe", true) ==
+      "C:/tools/gcc.exe"
+    check compilerPathForShellEnvironment("/opt/toolchain/bin/gcc", false) ==
+      "/opt/toolchain/bin/gcc"
 
 suite "M9.R.13a provider-compile cache sharing":
 

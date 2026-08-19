@@ -23,6 +23,21 @@ import repro_project_dsl
 # DSL-port M9.R.2c — Library/Executable in scope for typed artifact slot vars.
 import repro_dsl_stdlib/types
 
+# Reusable platform vocabulary of exactly the shape a package should be able to
+# use instead of repeating bare strings. The setter must accept these without
+# the macro evaluating anything: it inlines the expression source and the Nim
+# compiler resolves it.
+type PrefixLayout = enum
+  plUnix    ## bin/, lib/      — nixpkgs, most tarballs
+  plConda   ## Library/bin/    — conda-forge win-64
+
+func sharedLibDir(layout: PrefixLayout): string =
+  case layout
+  of plUnix: "lib"
+  of plConda: "Library/bin"
+
+const ConstLayoutDir = "const/dir"
+
 package libraryMacroTestPackage:
   uses:
     "nim >=2.2 <3.0"
@@ -47,6 +62,26 @@ package libraryMacroTestPackage:
   library lib_header_only:
     kind: `header-only`
 
+  # Case 7: ``exportedPath:`` must survive to the emitted literal. It did not:
+  # the body loop parsed the setter but the ``LibraryDef(...)`` constructor in
+  # macros_a.nim omitted the field, so every declaration produced
+  # ``exportedPath == ""`` no matter what was written. Nothing covered it,
+  # which is how it went unnoticed.
+  library lib_exported_path:
+    kind: shared
+    exportedPath: "custom/dir"
+
+  # Case 8: the setter takes an EXPRESSION, not only a literal. Both of these
+  # were rejected outright with "requires a string literal" before the emitter
+  # started inlining the expression source verbatim.
+  library lib_const_path:
+    kind: shared
+    exportedPath: ConstLayoutDir
+
+  library lib_func_path:
+    kind: shared
+    exportedPath: sharedLibDir(plConda)
+
   # Case 6: ``library foo:`` with ``kind: static`` explicit.
   library lib_static_explicit:
     kind: static
@@ -67,7 +102,7 @@ suite "DSL library macro M12":
 
   test "registry sees the test package":
     check pkg.packageName == "libraryMacroTestPackage"
-    check pkg.libraries.len == 6
+    check pkg.libraries.len == 9
     check pkg.executables.len == 0
 
   test "bare library defaults to lkStatic":
@@ -95,7 +130,19 @@ suite "DSL library macro M12":
     let lib = libByName("lib_static_explicit")
     check lib.kind == lkStatic
 
+  test "exportedPath survives to the emitted LibraryDef":
+    check libByName("lib_exported_path").exportedPath == "custom/dir"
+
+  test "an unset exportedPath stays empty (convention default applies later)":
+    check libByName("lib_shared_kind").exportedPath == ""
+
   test "library declarations carry source location":
     let lib = libByName("lib_static_default")
     check lib.sourceFile.len > 0
     check lib.sourceLine > 0
+
+  test "exportedPath accepts a const (no macro-side evaluation)":
+    check libByName("lib_const_path").exportedPath == "const/dir"
+
+  test "exportedPath accepts a func call — the reusable-vocabulary case":
+    check libByName("lib_func_path").exportedPath == "Library/bin"

@@ -46,6 +46,16 @@ require_contains() {
   grep -Fq "${text}" "${path}" || fail "${path} must contain ${text}"
 }
 
+require_count() {
+  local path="$1"
+  local text="$2"
+  local expected="$3"
+  local actual
+  actual="$(grep -Fc -- "${text}" "${path}" || true)"
+  [ "${actual}" = "${expected}" ] ||
+    fail "${path} must contain ${text} exactly ${expected} time(s), found ${actual}"
+}
+
 for path in README.md LICENSE flake.nix flake.lock .envrc .gitignore Justfile reprobuild.nimble config.nims AGENTS.md; do
   require_file "${path}"
 done
@@ -72,6 +82,37 @@ require_contains flake.nix "packages.default"
 require_contains flake.nix "checks ="
 require_contains flake.nix "git-hooks.lib"
 require_contains flake.nix "shellHook = pre-commit-check.shellHook"
+
+# CodeTracer's canonical native target imports span_stream. The trace-format
+# pin and every Nix execution surface must therefore agree on one immutable
+# source root. Exact counts make removal of any one surface fail this quick
+# repository check instead of surfacing after a minute-long CodeTracer compile.
+trace_format_rev="bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26"
+require_contains flake.nix "github:metacraft-labs/codetracer-trace-format-nim/${trace_format_rev}"
+require_count flake.lock "\"rev\": \"${trace_format_rev}\"" 2
+require_contains flake.nix 'requiredModule = "${sourceRoot}/codetracer_trace_writer/span_stream.nim";'
+require_count flake.nix 'export CODETRACER_TRACE_FORMAT_NIM_SRC=${codeTracerTraceFormatNimSrc}' 1
+require_count flake.nix 'CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;' 2
+require_count flake.nix '--set-default CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \' 1
+require_count flake.nix 'CODETRACER_TRACE_FORMAT_NIM_SRC|${codeTracerTraceFormatNimSrc}' 1
+require_count flake.nix '                                      ${ct-trace-format-src} \' 1
+require_contains tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim \
+  '"CODETRACER_TRACE_FORMAT_NIM_SRC",'
+require_contains tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim \
+  'let pinnedSource = getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC")'
+require_contains tests/fixtures/codetracer-subset/config-602e7bb7.nims \
+  'addPathIfDir(getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC"))'
+
+# Compiler macro source maps are package data. If they regain executable mode
+# or enter the wrapper loop, the Darwin runtime audit sees a hidden non-Mach-O
+# "entry point" and the packaged-runtime gate cannot reach its compile checks.
+require_count flake.nix 'nim-macro-sourcemaps/' 4
+require_count flake.nix 'install -m644' 2
+require_count flake.nix 'test -x "$b" || continue' 1
+require_contains flake.nix 'unexpected non-executable bin artifact: $wrapper'
+require_count flake.nix 'CODESIGN=/usr/bin/codesign \' 1
+require_count flake.nix "loaderStrings=\$(strings \"\$candidate\" | sed -e 's/^@//')" 1
+require_count flake.nix '<<< "$loaderStrings"' 3
 
 # Capture `just --summary` once and check it through a here-string. Piping into
 # `grep -q` under `set -o pipefail` can surface SIGPIPE as a false "missing

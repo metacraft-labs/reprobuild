@@ -18,7 +18,7 @@
 ## ``BuildAction.cacheEntryIdentity`` / ``BuildEngineConfig.
 ## binaryCachePublisher`` for the seam under test.
 
-import std/[options, os, tables, unittest]
+import std/[options, os, unittest]
 
 import repro_binary_cache_client/cache_key
 import repro_binary_cache_server/types as bcsTypes
@@ -146,6 +146,13 @@ suite "M9.L.4-refactor Step A — engine binary-cache publisher hook":
     check req.declaredOutputs == @[outputPath]
     check req.recordOutputs.len == 1
     check req.recordOutputs[0] == outputPath
+    var sawPublished = false
+    for event in res.trace:
+      if event.actionId == "t-bcp-write" and
+          event.event == "binary-cache-published":
+        sawPublished = true
+        check event.detail == "status=200 bytes=1024"
+    check sawPublished
 
   test "cache hits are not published by default":
     resetTmp()
@@ -327,5 +334,12 @@ suite "M9.L.4-refactor Step A — engine binary-cache publisher hook":
     check res.results[0].status == asSucceeded
     check recorder.invocations.len == 1
     # The action's result must NOT carry the publish error as a build
-    # failure — soft-fail is engine-internal stats only.
+    # failure. The trace retains the diagnostic for reports.
     check res.results[0].stderr == ""
+    var sawFailure = false
+    for event in res.trace:
+      if event.actionId == "t-bcp-write" and
+          event.event == "binary-cache-publish-failed":
+        sawFailure = true
+        check event.detail == "status=500 error=synthetic server error"
+    check sawFailure

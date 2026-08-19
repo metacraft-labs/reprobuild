@@ -1,27 +1,27 @@
-## PS-3 — ``repro workspace projects add <p>`` MATERIALIZES what it records.
+## PS-3 — ``repro workspace enable <p>`` MATERIALIZES what it records.
 ##
-## The command this replaces (``workspace projects add`` from
-## ``repo-workspaces``) layered the project's manifest AND checked its repos
+## The pilot command this replaces (the ``repo-workspaces``
+## ``workspace`` CLI) layered the project's manifest AND checked its repos
 ## out. Recording membership without working trees leaves the workspace in a
 ## state no other command can act on, so recording and materializing are one
-## operation (CLI/workspace.md §``repro workspace projects``).
+## operation (CLI/workspace.md §``repro workspace enable``).
 ##
 ## Fixture (hermetic, local ``git init --bare`` upstreams): projects ``alpha``
 ## (repo ``alpha-only``) and ``beta`` (repo ``beta-only``); the workspace
 ## starts with the active set ``[alpha]`` and ``alpha-only`` checked out.
 ##
 ## Asserted:
-##   1. ``projects add beta`` records ``[alpha, beta]`` AND clones
+##   1. ``enable beta`` records ``[alpha, beta]`` AND clones
 ##      ``beta-only`` into the workspace.
-##   2. ``projects add beta --no-sync`` records membership only — the repo is
+##   2. ``enable beta --no-sync`` records membership only — the repo is
 ##      NOT on disk afterwards (the scripted-bootstrap / offline escape
 ##      hatch).
-##   3. Re-running ``projects add beta`` on that same workspace is the REPAIR
+##   3. Re-running ``enable beta`` on that same workspace is the REPAIR
 ##      path: membership is already correct and idempotent, and the missing
 ##      checkout is created.
 ##
 ## Falsifiability (confirmed by hand, then reverted): removing the
-## materialization call from ``runWorkspaceProjectsCommand`` leaves
+## materialization call from ``runWorkspaceEnableCommand`` leaves
 ## ``beta-only`` absent in assertions 1 and 3 — which is exactly the bug this
 ## milestone fixes.
 
@@ -112,23 +112,25 @@ proc setupFixture(gitBin, slug: string): Fixture =
     q(workspaceRoot / "alpha-only"))
   result.workspaceRoot = workspaceRoot
 
-proc projectsAdd(fx: Fixture; args: openArray[string]): CmdResult =
-  var argv = @[fx.reproBin, "workspace", "projects", "add"]
+proc enableProjects(fx: Fixture; args: openArray[string]): CmdResult =
+  var argv = @[fx.reproBin, "workspace", "enable"]
   for a in args: argv.add(a)
   argv.add("--workspace-root=" & fx.workspaceRoot)
   runShell(shellCommand(argv))
 
 proc activeSet(fx: Fixture): seq[string] =
   let listed = runShell(shellCommand(@[fx.reproBin, "workspace", "projects",
-    "list", "--workspace-root=" & fx.workspaceRoot]))
+    "list", "--enabled", "--workspace-root=" & fx.workspaceRoot]))
   for line in listed.output.splitLines():
     let t = line.strip()
     if t.len > 0:
-      result.add(t)
+      # `projects list` now emits `<name>\t<enabled|disabled>`; the active set
+      # is the name column of the `--enabled` rows.
+      result.add(t.split('\t')[0])
 
-suite "PS-3 — projects add materializes what it records":
+suite "PS-3/WV-2 — enable materializes what it records":
 
-  test "t_workspace_projects_add_clones_added_repos":
+  test "t_workspace_enable_materializes_added_projects":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -138,7 +140,7 @@ suite "PS-3 — projects add materializes what it records":
 
       check not dirExists(fx.workspaceRoot / "beta-only")
 
-      let added = projectsAdd(fx, ["beta"])
+      let added = enableProjects(fx, ["beta"])
       if added.code notin [0, 2]:
         checkpoint("add output: " & added.output)
       check added.code in [0, 2]
@@ -150,7 +152,7 @@ suite "PS-3 — projects add materializes what it records":
       # Repos already present are left alone (still a valid checkout).
       check dirExists(fx.workspaceRoot / "alpha-only" / ".git")
 
-  test "t_workspace_projects_add_no_sync_records_only":
+  test "t_workspace_enable_no_sync_records_only":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -158,7 +160,7 @@ suite "PS-3 — projects add materializes what it records":
       let fx = setupFixture(gitBin, "nosync")
       defer: removeDir(fx.scratch)
 
-      let added = projectsAdd(fx, ["beta", "--no-sync"])
+      let added = enableProjects(fx, ["beta", "--no-sync"])
       if added.code != 0:
         checkpoint("add --no-sync output: " & added.output)
       check added.code == 0
@@ -168,7 +170,7 @@ suite "PS-3 — projects add materializes what it records":
 
       # Re-running WITHOUT --no-sync is the repair path for exactly this
       # partially-materialized state.
-      let repaired = projectsAdd(fx, ["beta"])
+      let repaired = enableProjects(fx, ["beta"])
       check repaired.code in [0, 2]
       check activeSet(fx) == @["alpha", "beta"]
       check dirExists(fx.workspaceRoot / "beta-only" / ".git")

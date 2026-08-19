@@ -32,6 +32,7 @@
 
 import std/tables
 import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
 import repro_dsl_stdlib/types/library
 import repro_dsl_stdlib/types/options
@@ -45,8 +46,8 @@ export packages_schema
 package gcc:
   provisioning:
     nixPackage "nixpkgs#gcc", executablePath = "bin/gcc",
-      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
-      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     # Windows / non-Nix Linux: nuwen.net's `components-20.0` mingw
     # distribution shipped via ScoopInstaller/Main. The manifest's
     # `env_add_path: "bin"` is what exposes gcc.exe on PATH.

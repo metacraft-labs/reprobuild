@@ -28,12 +28,9 @@
 ## No `skip`, no `xfail` — the pure-logic half ALWAYS runs and always
 ## asserts; only the real-install half is VM-gated.
 
-when not defined(windows):
-  echo "[platform N/A] t_e2e_windows_vs_installer: the " &
-    "windows.vsInstaller driver is Windows-only"
-  quit(0)
+import std/[os, strutils, tempfiles]
 
-import std/[os, strutils, tempfiles, unittest]
+import ct_test_unittest_parallel
 
 import repro_elevation
 import repro_infra
@@ -115,9 +112,36 @@ const SampleVsWhereJson = """
 # drift classification + strict policy. These always run.
 # ===========================================================================
 
+const HostRunsGate = defined(windows)
+  ## This gate needs a real Windows host. It used to be enforced by an
+  ## ``echo`` + ``quit(0)`` at module init, before any ``test`` template
+  ## expanded: the binary emitted no catalog, stayed an opaque
+  ## whole-binary exit-0 PASS, and its declared cases were invisible to
+  ## every gate -- not counted as passes, not as skips, not at all.
+
+const PlatformSkipReason =
+  "[platform N/A] t_e2e_windows_vs_installer: the " &
+    "windows.vsInstaller driver is Windows-only"
+
+template gatedTest(name: string; body: untyped) =
+  ## Register the case unconditionally, and on a host that cannot run it
+  ## record a skip whose reason is visible in the run summary and the
+  ## skip census.
+  ##
+  ## The guard is a runtime ``if`` on a compile-time constant rather than
+  ## a ``when``, deliberately: ``when`` would stop type-checking the
+  ## Windows-only body on Linux, and that compile coverage is exactly
+  ## what the previous module-init gate already gave us. Nim folds the
+  ## constant, so the dead branch still costs nothing at runtime.
+  test name:
+    if HostRunsGate:
+      body
+    else:
+      skip(PlatformSkipReason)
+
 suite "windows.vsInstaller: pure vswhere-output parsing":
 
-  test "parseVsWhereOutput reads the product + its packages":
+  gatedTest "parseVsWhereOutput reads the product + its packages":
     let products = parseVsWhereOutput(SampleVsWhereJson)
     check products.len == 1
     let p = products[0]
@@ -126,18 +150,18 @@ suite "windows.vsInstaller: pure vswhere-output parsing":
     check p.installationPath.contains("BuildTools")
     check p.packages.len == 6
 
-  test "an empty vswhere document means no VS product is installed":
+  gatedTest "an empty vswhere document means no VS product is installed":
     check parseVsWhereOutput("[]").len == 0
     check parseVsWhereOutput("   ").len == 0
     check parseVsWhereOutput("").len == 0
 
-  test "a malformed vswhere document raises VsWhereParseError":
+  gatedTest "a malformed vswhere document raises VsWhereParseError":
     expect VsWhereParseError:
       discard parseVsWhereOutput("{ not an array")
     expect VsWhereParseError:
       discard parseVsWhereOutput("[ {\"id\": } ]")
 
-  test "workload / component package ids are extracted by type":
+  gatedTest "workload / component package ids are extracted by type":
     let products = parseVsWhereOutput(SampleVsWhereJson)
     let workloads = installedWorkloadIds(products[0])
     let components = installedComponentIds(products[0])
@@ -150,7 +174,7 @@ suite "windows.vsInstaller: pure vswhere-output parsing":
 
 suite "windows.vsInstaller: membership diff + drift classification":
 
-  test "an in-sync installation classifies as in-sync":
+  gatedTest "an in-sync installation classifies as in-sync":
     let products = parseVsWhereOutput(SampleVsWhereJson)
     let desired = VsInstallerDesiredState(
       edition: "BuildTools", channel: "VisualStudio.17.Release",
@@ -168,7 +192,7 @@ suite "windows.vsInstaller: membership diff + drift classification":
     check classifyDrift(diff) == vsdInSync
     check not requiresMutation(diff, strict = false)
 
-  test "a not-installed product classifies as needs-install":
+  gatedTest "a not-installed product classifies as needs-install":
     let desired = VsInstallerDesiredState(
       edition: "BuildTools", channel: "VisualStudio.17.Release",
       installPath: r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools",
@@ -180,7 +204,7 @@ suite "windows.vsInstaller: membership diff + drift classification":
     check classifyDrift(diff) == vsdNeedsInstall
     check requiresMutation(diff, strict = false)
 
-  test "a missing declared workload classifies as needs-modify":
+  gatedTest "a missing declared workload classifies as needs-modify":
     let products = parseVsWhereOutput(SampleVsWhereJson)
     let desired = VsInstallerDesiredState(
       edition: "BuildTools", channel: "VisualStudio.17.Release",
@@ -197,7 +221,7 @@ suite "windows.vsInstaller: membership diff + drift classification":
     check classifyDrift(diff) == vsdNeedsModify
     check requiresMutation(diff, strict = false)
 
-  test "component VERSION drift is benign — the diff compares IDs only":
+  gatedTest "component VERSION drift is benign — the diff compares IDs only":
     # A vswhere document where the Git component reports a DIFFERENT
     # version than any baseline; the resource pins membership, not
     # versions, so this must NOT be reported as a difference.
@@ -226,7 +250,7 @@ suite "windows.vsInstaller: membership diff + drift classification":
     check diff.extraComponents.len == 0
     check classifyDrift(diff) == vsdInSync
 
-  test "an out-of-spec workload is membership-drift; strict flips the policy":
+  gatedTest "an out-of-spec workload is membership-drift; strict flips the policy":
     let products = parseVsWhereOutput(SampleVsWhereJson)
     # The resource declares ONLY VCTools — the install also has
     # MSBuildTools, a user-added out-of-spec workload.
@@ -257,7 +281,7 @@ suite "windows.vsInstaller: membership diff + drift classification":
     check "Microsoft.VisualStudio.Workload.MSBuildTools" in strictArgs
     check "--norestart" in strictArgs
 
-  test "the canonical state makes a non-strict drift a cache-hit":
+  gatedTest "the canonical state makes a non-strict drift a cache-hit":
     # With strict = false an extra workload does not change the
     # canonical observed state, so the broker's drift gate treats a
     # re-apply over a user-added workload as a no-op (no endless
@@ -276,7 +300,7 @@ suite "windows.vsInstaller: membership diff + drift classification":
     check canonicalVsInstallerState(diff, strict = true) !=
       canonicalVsInstallerDesired()
 
-  test "the installer exit codes map to success / reboot-needed":
+  gatedTest "the installer exit codes map to success / reboot-needed":
     check vsInstallerSucceeded(0)
     check vsInstallerSucceeded(3010)
     check not vsInstallerSucceeded(1)
@@ -285,7 +309,7 @@ suite "windows.vsInstaller: membership diff + drift classification":
 
 suite "windows.vsInstaller: typed-operation wiring into the M81 closed set":
 
-  test "a system.nim vsInstaller stanza parses and types":
+  gatedTest "a system.nim vsInstaller stanza parses and types":
     let profile = parseSystemProfile("""
 windows.vsInstaller {
   edition = "BuildTools"
@@ -321,7 +345,7 @@ windows.vsInstaller {
     check part.privilegedOperations.len == 1
     check requiresElevation(pokWindowsVsInstaller)
 
-  test "the closed-set validator + protocol codec round-trip the op":
+  gatedTest "the closed-set validator + protocol codec round-trip the op":
     let op = PrivilegedOperation(kind: pokWindowsVsInstaller,
       address: "vsInstaller:BuildTools",
       vsEdition: "BuildTools", vsChannel: "VisualStudio.17.Release",
@@ -342,7 +366,7 @@ windows.vsInstaller {
     # The kind tag is in the closed set.
     check isKnownPrivilegedOperationKind("windows.vsInstaller")
 
-  test "an empty edition / channel is rejected by the validator":
+  gatedTest "an empty edition / channel is rejected by the validator":
     check operationValidationError(PrivilegedOperation(
       kind: pokWindowsVsInstaller, address: "x",
       vsEdition: "", vsChannel: "Release")).len > 0
@@ -350,7 +374,7 @@ windows.vsInstaller {
       kind: pokWindowsVsInstaller, address: "x",
       vsEdition: "BuildTools", vsChannel: "")).len > 0
 
-  test "the planner desired-digest helper covers the vsInstaller kind":
+  gatedTest "the planner desired-digest helper covers the vsInstaller kind":
     # `desiredDigestForKind` must route the vsInstaller kind to the
     # vsInstaller digest, not raise (the Phase-A `systemDesiredDigestHex`
     # rejects a non-Phase-A kind).
@@ -369,7 +393,7 @@ windows.vsInstaller {
 
 suite "windows.vsInstaller: REAL install (VM-only)":
 
-  test "real VS Build Tools apply (only runs under REPRO_M69_VSINSTALLER_VM=1)":
+  gatedTest "real VS Build Tools apply (only runs under REPRO_M69_VSINSTALLER_VM=1)":
     if not vmMode:
       echo "  [VM-gated] REPRO_M69_VSINSTALLER_VM not set — the real " &
         "VS Build Tools install / modify scenario is NOT EXERCISED on " &

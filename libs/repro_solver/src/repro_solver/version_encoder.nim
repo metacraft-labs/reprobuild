@@ -109,6 +109,23 @@ type
       ## ``"registry:<registry-name>"`` (a package-registry dependency). The
       ## committed-lock writer reads it to LIFT the solved package into a
       ## first-class ``LockedDep`` with store/registry coordinates + integrity.
+    pinned*: bool
+      ## Named-Lock-Files NLF-M2 (§10.1) — the package's version is OBSERVED,
+      ## not selected. Set for a develop-mode dependency, whose source is a
+      ## local checkout: its version is read off that checkout, so there is
+      ## nothing for the solver to choose.
+      ##
+      ## A pinned package asserts ``package_chosen`` as a FACT and emits no
+      ## cardinality rule. That is deliberately stronger than declaring a
+      ## one-element candidate set, which would encode the same answer as a
+      ## search: the corpus (NLF-DEV-3) rejects the one-element form because
+      ## it leaves the solver free to pick something else under pressure and
+      ## bills the search space for a version already known.
+      ##
+      ## Pinning the VERSION says nothing about the package's VARIANTS, which
+      ## remain solved — owner decision Q-4, and the reason this is a field on
+      ## the package rather than the package's removal from the program.
+      ## ``versions`` must hold exactly one entry when this is set.
 
 # ---------------------------------------------------------------------------
 # Constructors (terse construction for tests / lib code)
@@ -128,9 +145,20 @@ proc newConditionalDependency*(name, rangeStr, variantName,
 proc newPackage*(name: string;
                  versions: openArray[string];
                  depends: openArray[DependencyDecl] = @[];
-                 variants: openArray[VariantDecl] = @[]): PackageDecl =
+                 variants: openArray[VariantDecl] = @[];
+                 pinned = false): PackageDecl =
   PackageDecl(name: name, versions: @versions, depends: @depends,
-              variants: @variants)
+              variants: @variants, pinned: pinned)
+
+proc newPinnedPackage*(name, version: string;
+                       depends: openArray[DependencyDecl] = @[];
+                       variants: openArray[VariantDecl] = @[]): PackageDecl =
+  ## A package whose version is OBSERVED rather than selected — see
+  ## ``PackageDecl.pinned``. Takes a single version rather than a list,
+  ## because "pinned to a set" is not a thing and accepting a list here
+  ## would make the invalid state representable at the one call site that
+  ## exists to avoid it.
+  newPackage(name, [version], depends, variants, pinned = true)
 
 # ---------------------------------------------------------------------------
 # Encoding helpers
@@ -169,12 +197,27 @@ proc encodePackageUniverse*(p: PackageDecl): string =
   for v in p.versions:
     parts.add("package_version(\"" & aspQuote(p.name) & "\", \"" &
               aspQuote(v) & "\").")
+  if p.pinned and p.versions.len > 0:
+    # An observed version is stated, not searched for. The fact still has to
+    # be emitted: every dependency constraint downstream is gated on
+    # ``package_chosen`` for this package, so dropping the choice without
+    # asserting the answer would silently stop those constraints applying —
+    # coverage lost rather than a wrong answer.
+    parts.add("package_chosen(\"" & aspQuote(p.name) & "\", \"" &
+              aspQuote(p.versions[0]) & "\").")
   parts.join("\n")
 
 proc encodePackageCardinality*(p: PackageDecl): string =
   ## Pick exactly one version per active package. Gating on
   ## ``package_active`` lets future work disable the cardinality for
   ## inactive packages without rewriting the program shape.
+  ##
+  ## A pinned package gets no rule at all: its ``package_chosen`` atom is
+  ## asserted as a fact by ``encodePackageUniverse``, and emitting a
+  ## cardinality rule alongside that fact would re-open as a search the very
+  ## thing the pin settled.
+  if p.pinned:
+    return ""
   "{ package_chosen(\"" & aspQuote(p.name) & "\", V) : " &
     "package_version(\"" & aspQuote(p.name) & "\", V) } = 1 :- " &
     "package_active(\"" & aspQuote(p.name) & "\")."
@@ -337,7 +380,9 @@ proc encodePackages*(packages: openArray[PackageDecl]): string =
     let universe = encodePackageUniverse(p)
     if universe.len > 0:
       sections.add(universe)
-    sections.add(encodePackageCardinality(p))
+    let cardinality = encodePackageCardinality(p)
+    if cardinality.len > 0:
+      sections.add(cardinality)
     let edges = encodeDependencyEdges(p)
     if edges.len > 0:
       sections.add(edges)

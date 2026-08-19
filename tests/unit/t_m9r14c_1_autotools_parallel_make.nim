@@ -105,6 +105,107 @@ suite "DSL-port M9.R.14c.1 — autotools_package parallel-make wiring":
     finally:
       clearCurrentOwningPackageOverride()
 
+  test "recipe can cap compile and install parallelism":
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("serialMakePkg")
+    try:
+      let pkg = autotools_package(srcDir = "./src", makeJobs = 1)
+      check ("MAKEFLAGS", "-j1") in pkg.compileEdge.env
+      check ("MAKEFLAGS", "-j1") in pkg.installMakeEdge.env
+    finally:
+      clearCurrentOwningPackageOverride()
+
+  test "shared make variables reach compile and install invocations":
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("sharedMakeVarsPkg")
+    try:
+      let pkg = autotools_package(
+        srcDir = "./src",
+        makeVars = @["PROGRAM_MODE=dynamic"],
+        installMakeVars = @["INSTALL_OWNER=builder"])
+      var compileVars = ""
+      var installVars = ""
+      for arg in pkg.compileEdge.call.arguments:
+        if arg.name == "vars":
+          compileVars = arg.encodedValue
+      for arg in pkg.installMakeEdge.call.arguments:
+        if arg.name == "vars":
+          installVars = arg.encodedValue
+      check compileVars.contains("PROGRAM_MODE=dynamic")
+      check installVars.contains("PROGRAM_MODE=dynamic")
+      check not compileVars.contains("INSTALL_OWNER=builder")
+      check installVars.contains("INSTALL_OWNER=builder")
+    finally:
+      clearCurrentOwningPackageOverride()
+
+  test "post-configure commands run from the configured build directory":
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("postConfigurePkg")
+    try:
+      let pkg = autotools_package(
+        srcDir = "./src",
+        postConfigureCommands = @["mkdir -p generated"])
+      var configureArgv = ""
+      for arg in pkg.buildEdge.call.arguments:
+        if arg.name == "argv":
+          configureArgv = arg.encodedValue
+      let buildDirPos = configureArgv.find("cd build")
+      let configurePos = configureArgv.find("../src/configure")
+      let postConfigurePos = configureArgv.find("mkdir -p generated")
+      check buildDirPos >= 0
+      check configurePos > buildDirPos
+      check postConfigurePos > configurePos
+    finally:
+      clearCurrentOwningPackageOverride()
+
+  test "recognized make depfiles replace monitoring on both edges":
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("depfileMakePkg")
+    try:
+      let policy = makeDepfilePolicy(depfiles = [
+        "src/.deps/*.Po",
+        "src/.deps/*.Plo",
+      ])
+      let postInstallPolicy = makeDepfilePolicy(depfiles = [
+        "build/src/.deps/*.Po",
+        "build/src/.deps/*.Plo",
+      ])
+      let pkg = autotools_package(
+        srcDir = "./src",
+        makeDependencyPolicy = policy,
+        postInstallDependencyPolicy = postInstallPolicy)
+      check pkg.compileEdge.dependencyPolicy == policy
+      check pkg.installMakeEdge.dependencyPolicy == policy
+      check pkg.postInstallDependencyPolicy == postInstallPolicy
+
+      var registeredCompile = default(BuildActionDef)
+      var registeredInstall = default(BuildActionDef)
+      for action in registeredBuildActions():
+        if action.id == pkg.compileEdge.id:
+          registeredCompile = action
+        elif action.id == pkg.installMakeEdge.id:
+          registeredInstall = action
+      check registeredCompile.dependencyPolicy == policy
+      check registeredInstall.dependencyPolicy == policy
+    finally:
+      clearCurrentOwningPackageOverride()
+
+  test "Windows DESTDIR remains valid in generated make recipes":
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("windowsDestdirPkg")
+    try:
+      let pkg = autotools_package(
+        srcDir = "./src",
+        destdir = "D:\\work\\pcre2\\out")
+      check ("DESTDIR", "D:/work/pcre2/out") in pkg.installMakeEdge.env
+      var registeredInstall = default(BuildActionDef)
+      for action in registeredBuildActions():
+        if action.id == pkg.installMakeEdge.id:
+          registeredInstall = action
+      check "D:/work/pcre2/out" in registeredInstall.declaredOutputs
+    finally:
+      clearCurrentOwningPackageOverride()
+
   test "compile + install action ids are stable across host core counts":
     # The action id derivation must not depend on the host's core
     # count. The actual stability is proved by the choice to inject

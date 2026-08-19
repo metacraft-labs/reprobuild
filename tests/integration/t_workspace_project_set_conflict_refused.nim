@@ -119,23 +119,23 @@ suite "PS-4 — a conflicting project set is refused before mutation":
 
       writeWorkspaceProjects(workspaceRoot, @["alpha"])
 
-      let refused = runShell(shellCommand(@[reproBin, "workspace", "projects",
-        "add", "gamma", "--workspace-root=" & workspaceRoot]))
+      let refused = runShell(shellCommand(@[reproBin, "workspace",
+        "enable", "gamma", "--workspace-root=" & workspaceRoot]))
       check refused.code != 0
       check refused.output.contains("shared")
       check refused.output.contains("alpha")
       check refused.output.contains("gamma")
       check refused.output.contains("revision")
 
-      # The active set is untouched: a refused add leaves the workspace
+      # The active set is untouched: a refused enable leaves the workspace
       # exactly as it was.
       let listed = runShell(shellCommand(@[reproBin, "workspace", "projects",
-        "list", "--workspace-root=" & workspaceRoot]))
+        "list", "--enabled", "--workspace-root=" & workspaceRoot]))
       check listed.code == 0
       var active: seq[string]
       for line in listed.output.splitLines():
         let t = line.strip()
-        if t.len > 0: active.add(t)
+        if t.len > 0: active.add(t.split('\t')[0])
       check active == @["alpha"]
 
       # ...and no working tree was created, so the refusal preceded the
@@ -159,16 +159,16 @@ suite "PS-4 — a conflicting project set is refused before mutation":
       "[project]\nname = \"delta\"\ndefault_revision = \"main\"\n" &
       "trunk = \"main\"\n\nincludes = [\n]\n")
 
-    let added = runShell(shellCommand(@[reproBin, "workspace", "projects",
-      "add", "delta", "--workspace-root=" & workspaceRoot]))
+    let added = runShell(shellCommand(@[reproBin, "workspace",
+      "enable", "delta", "--workspace-root=" & workspaceRoot]))
     if added.code != 0:
       checkpoint("add output: " & added.output)
     check added.code == 0
 
     let listed = runShell(shellCommand(@[reproBin, "workspace", "projects",
-      "list", "--workspace-root=" & workspaceRoot]))
+      "list", "--enabled", "--workspace-root=" & workspaceRoot]))
     var active: seq[string]
     for line in listed.output.splitLines():
       let t = line.strip()
-      if t.len > 0: active.add(t)
+      if t.len > 0: active.add(t.split('\t')[0])
     check active == @["delta"]

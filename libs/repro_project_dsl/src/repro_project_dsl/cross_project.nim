@@ -392,6 +392,14 @@ proc isKnownPackageSection(stmt: NimNode): bool =
     return false
   let n = ($head).normalize
   result = n in ["build", "executable", "library", "files", "service",
+                 # Producer-side runtime library declaration:
+                 #   runtimeLibrary "clingo", dir = runtimeLibDir(plConda)
+                 # Must be listed here or `partitionPackageBody` treats it as
+                 # ordinary user code and emits it into the preserved body,
+                 # where it fails as an undeclared identifier. A member absent
+                 # from this list is not silently ignored — it is a compile
+                 # error at the call site — so the failure is at least loud.
+                 "runtimelibrary",
                  "devenv", "uses", "usesimportpath", "defaulttoolprovisioning",
                  "toolprovisioning", "provisioning", "versions", "config",
                  "depends_on", "dependson",

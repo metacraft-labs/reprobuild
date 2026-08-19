@@ -7,12 +7,23 @@
 ##
 ## Gated by `defined(linux)` AND `REPRO_M69_SUDOERS_VM=1`.
 
-import std/[os]
+import std/os
+
+import ct_test_unittest_parallel
 
 import repro_elevation
 
 const SentinelDefault = "/tmp/repro-vm-test/sentinels.txt"
 const GateName = "linux.sudoersRule"
+const GateEnv = "REPRO_M69_SUDOERS_VM"
+  ## Sandbox gate. The disposable-VM harness sets this; on an
+  ## ordinary developer or CI host it is unset and the case
+  ## below registers as a skip carrying GateSkipReason, so the
+  ## run counts it and the skip census says why. It used to
+  ## ``echo`` and ``quit(0)`` at module init instead, which made
+  ## the binary an opaque exit-0 PASS that no gate could see.
+const GateSkipReason =
+  "[sandbox-gated] REPRO_M69_SUDOERS_VM not set."
 
 proc writeSentinel(gate: string) =
   let path = getEnv("REPRO_M69_VM_SENTINEL_FILE", SentinelDefault)
@@ -27,12 +38,6 @@ proc writeSentinel(gate: string) =
       close(f)
 
 proc main() =
-  let sandboxMode =
-    defined(linux) and getEnv("REPRO_M69_SUDOERS_VM") == "1"
-  if not sandboxMode:
-    echo "  [sandbox-gated] REPRO_M69_SUDOERS_VM not set."
-    quit(0)
-
   when defined(linux):
     # sudoers.d basenames must NOT contain a '.' — the parser enforces
     # this. Use only letters/digits/dashes/underscores.
@@ -73,4 +78,9 @@ proc main() =
   else:
     discard
 
-main()
+suite "e2e_repro_infra_linux_sudoersrule_vm":
+  test "linux.sudoersRule disposable-VM lifecycle":
+    if defined(linux) and getEnv(GateEnv) == "1":
+      main()
+    else:
+      skip(GateSkipReason)

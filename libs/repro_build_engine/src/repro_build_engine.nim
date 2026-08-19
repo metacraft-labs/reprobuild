@@ -819,6 +819,7 @@ type
     action: BuildAction
     processKind: RunningProcessKind
     process: Process
+    directProcess: ReproDirectRunningProcess
     runQuotaProcess: ReproRunQuotaRunningProcess
     queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
     inlineFailure: ActionResult
@@ -914,14 +915,24 @@ proc materializeActionCacheOutputs*(cas: CasStore;
   if record.outputPayloadKind != opkCasBlobs:
     raise newException(CacheIntegrityError,
       "cache record does not contain output payloads")
+  var payloads: seq[seq[byte]] = @[]
+  for output in record.outputs:
+    payloads.add(cas.casGet(contentHashForActionBlob(output.blob)))
   var entries: seq[CasMaterialization] = @[]
   for output in record.outputs:
+    if output.metadata.kind == ffkDirectory:
+      continue
     entries.add(CasMaterialization(
       hash: contentHashForActionBlob(output.blob),
       destination: actionOutputPath(outputRoot, output.path),
       applyPermissions: true,
       permissions: output.permissions))
   cas.casMaterialize(entries)
+  for i, output in record.outputs:
+    if output.metadata.kind != ffkDirectory:
+      continue
+    materializeDirectorySnapshotPayload(payloads[i],
+      actionOutputPath(outputRoot, output.path), output.permissions)
 
 proc defaultBuildEngineConfig*(cacheRoot: string;
                                actionCacheRoot: string = ""): BuildEngineConfig =
@@ -2268,22 +2279,6 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
     # invalidate the binary-cache lookup. See ``launchChildEnv`` for
     # the launch-time injection.
 
-proc envTableFromArgvStyle(env: openArray[string]): StringTableRef =
-  ## Convert the ``"NAME=VALUE"`` argv-style env (carried on BuildAction.env)
-  ## into the StringTableRef shape that ``osproc.startProcess`` expects.
-  ## Returns ``nil`` when no overrides are provided so the child inherits the
-  ## parent process environment.
-  if env.len == 0:
-    return nil
-  result = newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
-    result[key] = value
-  for entry in env:
-    let eq = entry.find('=')
-    if eq <= 0:
-      continue
-    result[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
-
 when defined(posix):
   proc assignProcessGroup(process: Process): int =
     ## Best-effort process-group isolation for externally launched actions.
@@ -2356,7 +2351,14 @@ when defined(windows):
     ## each process is opened once and reused across wait iterations.
     if item.processWaitHandle != 0:
       return item.processWaitHandle
-    let pid = processID(item.process)
+    let pid =
+      case item.processKind
+      of rpkHelperProcess:
+        processID(item.process)
+      of rpkBypassProcess:
+        item.directProcess.processId()
+      else:
+        0
     if pid <= 0:
       return 0
     let handle = openProcess(SYNCHRONIZE, WINBOOL(0), DWORD(pid))
@@ -2394,37 +2396,22 @@ when defined(windows):
       else:
         discard
     if count == 0:
+      sleep(timeoutMs)
       return -1
     let ret = waitForMultipleObjects(DWORD(count), addr handles,
                                      WINBOOL(0), DWORD(timeoutMs))
     const WAIT_OBJECT_0_DWORD = DWORD(0)
     const WAIT_TIMEOUT_DWORD = DWORD(0x102)
     const WAIT_FAILED_DWORD = cast[DWORD](0xFFFFFFFF'u32)
-    if ret == WAIT_TIMEOUT_DWORD or ret == WAIT_FAILED_DWORD:
+    if ret == WAIT_TIMEOUT_DWORD:
+      return -1
+    if ret == WAIT_FAILED_DWORD:
+      sleep(timeoutMs)
       return -1
     let signaled = int(ret - WAIT_OBJECT_0_DWORD)
     if signaled < 0 or signaled >= count:
       return -1
     indices[signaled]
-
-proc findPathKey(table: StringTableRef): string =
-  ## Return the ``PATH`` env var key as it currently appears in
-  ## ``table``, accounting for Windows' case-insensitive env-var
-  ## naming. ``VsDevCmd.bat`` exports the variable as ``Path``;
-  ## ``REPROBUILD_NO_RUNQUOTA`` etc. use uppercase. Returns
-  ## ``"PATH"`` when the table doesn't already have an entry, so the
-  ## new entry stays consistent with POSIX-style uppercase.
-  for key, _ in table.pairs:
-    if cmpIgnoreCase(key, "PATH") == 0:
-      return key
-  "PATH"
-
-proc readPathValue(table: StringTableRef): string =
-  ## Read the table's existing ``PATH`` value regardless of case.
-  for key, value in table.pairs:
-    if cmpIgnoreCase(key, "PATH") == 0:
-      return value
-  ""
 
 proc prependPathDirsToArgvEnv(env: seq[string];
                               binDirs: openArray[string]): seq[string] =
@@ -2476,43 +2463,6 @@ proc prependPathDirsToArgvEnv(env: seq[string];
         seenP.incl(ent)
         parts.add(ent)
   result.add("PATH=" & parts.join(sep))
-
-proc prependPathDirs(table: StringTableRef; binDirs: openArray[string]) =
-  ## Prepend ``binDirs`` to the table's existing ``PATH`` value,
-  ## preserving case-insensitive key match on Windows. Removes any
-  ## duplicate ``Path`` / ``PATH`` entries so the final env carries
-  ## a single canonical ``PATH``.
-  if table == nil or binDirs.len == 0:
-    return
-  let sep =
-    when defined(windows): ";"
-    else: ":"
-  # M9.R.15q.3.3 — dedup as in the argv-style counterpart so a host
-  # PATH with overlapping nix-shell + scoop entries doesn't push the
-  # combined env past ARG_MAX.
-  var parts: seq[string] = @[]
-  var seenP = initHashSet[string]()
-  for d in binDirs:
-    if d.len > 0 and d notin seenP:
-      seenP.incl(d)
-      parts.add(d)
-  let existing = readPathValue(table)
-  if existing.len > 0:
-    for ent in existing.split(sep):
-      if ent.len > 0 and ent notin seenP:
-        seenP.incl(ent)
-        parts.add(ent)
-  let combined = parts.join(sep)
-  # Remove any case-variant duplicates so the resulting table only
-  # has one PATH key. Without this step Windows' StartProcess sees
-  # both ``PATH`` and ``Path`` and may pick the wrong one.
-  var keysToDel: seq[string] = @[]
-  for key, _ in table.pairs:
-    if cmpIgnoreCase(key, "PATH") == 0:
-      keysToDel.add(key)
-  for key in keysToDel:
-    table.del(key)
-  table["PATH"] = combined
 
 proc prependEnvDirs*(table: StringTableRef; varName: string;
                      dirs: openArray[string]) =
@@ -2775,7 +2725,8 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
     let packageName =
       if packageEnd < 0: normalized[packageStart .. ^1]
       else: normalized[packageStart ..< packageEnd]
-    if packageName == "glibc" or packageName == "python3" or
+    if packageName == "glibc" or packageName == "readline" or
+        packageName == "python3" or
         packageName.startsWith("python3-"):
       return true
   const storePrefix = "/nix/store/"
@@ -2791,6 +2742,7 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
     return false
   let packageName = storeEntry[hashSeparator + 1 .. ^1]
   packageName == "glibc" or packageName.startsWith("glibc-") or
+    packageName == "readline" or packageName.startsWith("readline-") or
     packageName == "python3" or packageName.startsWith("python3-")
 
 proc runtimeSafeLibDirs(paths: ResolvedAuxPaths): seq[string] =
@@ -3062,6 +3014,40 @@ proc shellScriptArgIndex(argv: openArray[string]): int =
 proc isRuntimeLibraryEnv(name: string): bool {.inline.} =
   name == "LD_LIBRARY_PATH" or name == "DYLD_LIBRARY_PATH"
 
+proc applyExplicitRuntimeLibraryEnvOverrides*(env: seq[string];
+    actionEnv: openArray[string]): seq[string] =
+  ## Runtime search paths assembled from dependency profiles are useful for
+  ## most actions, but they can also make a provisioned tool load a different
+  ## ABI-compatible-by-name library than the one it was built against. Allow a
+  ## recipe to take ownership of the loader environment explicitly. Reapply
+  ## only runtime-library variables here; the other auxiliary channels remain
+  ## dependency-first by design.
+  result = @[]
+  for entry in env:
+    result.add(entry)
+  for entry in actionEnv:
+    let eq = entry.find('=')
+    if eq <= 0 or not isRuntimeLibraryEnv(entry[0 ..< eq]):
+      continue
+    let name = entry[0 ..< eq]
+    var retained = newSeqOfCap[string](result.len)
+    for existing in result:
+      let itemEq = existing.find('=')
+      if itemEq <= 0 or existing[0 ..< itemEq] != name:
+        retained.add(existing)
+    result = retained
+    result.add(entry)
+
+proc applyExplicitRuntimeLibraryEnvOverrides*(env: StringTableRef;
+    actionEnv: openArray[string]) =
+  ## StringTable counterpart for the direct RunQuota-bypass launcher.
+  if env == nil:
+    return
+  for entry in actionEnv:
+    let eq = entry.find('=')
+    if eq > 0 and isRuntimeLibraryEnv(entry[0 ..< eq]):
+      env[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
+
 proc monitorPayloadArgIndex(argv: openArray[string]): int =
   ## Return the first argument of an io-monitor payload, or -1 when argv is
   ## not the canonical ``repro internal io monitor ... -- <command>`` shape.
@@ -3257,9 +3243,8 @@ proc launchChildEnv(action: BuildAction;
   ## the outer lease's group measurement — exactly the "outer managed, inner
   ## unmanaged, outer measures the whole tree" model.
   ##
-  ## The runquota launcher (``runquota_process.applyChildEnv`` on POSIX /
-  ## ``windowsChildEnv`` on Windows) and ``envTableFromArgvStyle`` both LAYER
-  ## this over the inherited environment, so ``PATH`` etc. survive. The value
+  ## The RunQuota process launcher layers these entries over the inherited
+  ## environment, so ``PATH`` and other host values survive. The value
   ## is constant, so it does not perturb the action-cache fingerprint, and is
   ## inert for the ~99% of actions (plain ``nim c`` compiles) whose children
   ## never invoke ``repro``. Any explicit ``action.env`` entry wins (appended
@@ -3276,9 +3261,9 @@ proc launchChildEnv(action: BuildAction;
   # machines and invalidate the binary-cache lookup. The seed is
   # constant across actions on the same machine (one repro install
   # surface) so it does not perturb action-ordering or partitioning.
-  # An explicit ``action.env`` override wins because the action env
-  # is appended AFTER the seed and ``envTableFromArgvStyle``'s overlay
-  # is last-write-wins.
+  # An explicit ``action.env`` override wins because the action env is
+  # appended after the seed and the process launcher's overlay is
+  # last-write-wins.
   let shimLib = findShimLibrary()
   if shimLib.len > 0:
     result.add("REPRO_MONITOR_SHIM_LIB=" & shimLib)
@@ -3296,14 +3281,6 @@ proc launchChildEnv(action: BuildAction;
   # those are for local A/B diagnosis, not something the engine seeds.)
   for entry in action.env:
     result.add(entry)
-  # M9.N Batch B: the resolved-tool ``PATH`` prepend happens in
-  # ``envTableFromArgvStyle`` rather than as a ``PATH=...`` argv entry
-  # so that Windows' case-insensitive env-var matching (``Path`` vs
-  # ``PATH``) is honoured. The argv-style env is filtered into a
-  # ``StringTableRef`` first, then ``prependPathDirs`` (next to that
-  # filter) does a single case-insensitive PATH override. This avoids
-  # the "MSVC's ``Path`` and the action's ``PATH`` are stored as
-  # separate keys; Windows CreateProcess picks one" pitfall.
 
 proc bypassActionLogDir(cacheRoot: string): string =
   ## **M1 milestone** (Windows-bypass-stdio-capture). Per-action log
@@ -3377,19 +3354,6 @@ proc bypassActionStdoutLogPath(cacheRoot, actionId: string): string =
 proc bypassActionStderrLogPath(cacheRoot, actionId: string): string =
   bypassActionLogDir(cacheRoot) / (actionId & ".stderr.log")
 
-proc readBypassActionLog(path: string): string =
-  ## Read a bypass-mode per-action log file. Missing-file is the common
-  ## "tool produced no output" case and is squashed to an empty string;
-  ## any other error is also squashed (the bypass path is best-effort
-  ## diagnostic capture — a failed read mustn't escalate into an engine
-  ## failure that hides the real action failure).
-  if not fileExists(extendedPath(path)):
-    return ""
-  try:
-    readFile(extendedPath(path))
-  except CatchableError:
-    ""
-
 proc stripMonitorBanner*(captured: string): string =
   ## Portable-Macos-Sandbox-Tools B2: the io-mon shim writes a per-process
   ## diagnostic banner to stderr on every monitored (grand)child
@@ -3462,197 +3426,50 @@ proc umaskWrappedArgv*(argv: openArray[string]): seq[string] =
   else:
     for entry in argv: result.add(entry)
 
-proc startBypassRunQuotaProcess(action: BuildAction;
-                                config: BuildEngineConfig): Process =
-  ## Path-mode escape hatch: spawn the action's argv directly via osproc,
-  ## bypassing the RunQuota helper. Only used when
-  ## ``BuildEngineConfig.bypassRunQuota`` is true (currently set on
-  ## Windows under ``--tool-provisioning=path`` AND whenever the
-  ## ``fallbackToRunQuotaBypass`` probe sees an unreachable runquotad).
-  ## All resource accounting, named-pool leases, and quota enforcement
-  ## are skipped — the engine still honours its own ``poolRunning``
-  ## capacity tracking so action graphs that declare pools stay
-  ## sequenced, but no daemon-side enforcement happens.
-  ##
-  ## **Stdio (M1 milestone, Windows-bypass-stdio-capture)**: each
-  ## action gets a pair of dedicated log files under
-  ## ``<cacheRoot>/actions/<id>.{stdout,stderr}.log`` and the child's
-  ## stdout / stderr are routed there via a tiny shell wrapper
-  ## (``cmd /D /C`` on Windows, ``sh -c`` on POSIX). The wrapper does
-  ## the redirection in the kernel — there is no Nim-side pipe drainer
-  ## involved — so the multi-process pipe-buffer deadlock that the
-  ## previous ``poStdErrToStdOut`` experiment hit (cargo spawning
-  ## rustc spawning link.exe collectively filling a shared kernel
-  ## pipe buffer faster than one Nim reader thread could drain) does
-  ## NOT recur here. ``finishBypassRunQuotaProcess`` reads the two
-  ## files back and stuffs their contents into the same
-  ## ``writeBypassResultJson`` payload the helper-path parser already
-  ## consumes, so the build-report's per-action ``stdout`` / ``stderr``
-  ## fields are now populated under bypass too. This is "option (3)"
-  ## from the bypass-stdio design discussion (file-tee per action,
-  ## not pipe inheritance).
-  ##
-  ## Under direct (non-daemon) invocations the user no longer sees the
-  ## action's output streaming in the terminal — they see it via the
-  ## build report instead. ``repro why <action-id>`` reads the same
-  ## result JSON for the same content; the log files themselves stay
-  ## on disk under ``cacheRoot`` for ad-hoc inspection.
-  if action.argv.len == 0:
-    raiseEngine("bypassRunQuota: action has empty argv: " & action.id)
-  # MR8: prepend the cached MSVC dev-env diff on Windows so daemon-spawned
-  # cargo / cc-rs / link.exe actions land on a coherent MSVC toolchain
-  # (cl.exe on PATH + INCLUDE/LIB/LIBPATH/VCToolsInstallDir/WindowsSdk*).
-  # No-op on non-Windows and when VS Build Tools is not installed; the
-  # action's own ``env`` entries override on key collision.
-  let cacheRoot = config.cacheRoot
+proc preparedRunQuotaCommand(action: BuildAction;
+                             config: BuildEngineConfig): ReproCommandSpec =
+  ## Build one argv/env contract for direct, helper, and inline launches.
+  ## Sharing this prevents bypass execution from drifting away from normal
+  ## RunQuota execution as tool-path and compiler flags evolve.
   let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action, config))
-  var env = envTableFromArgvStyle(mergedEnv)
-  # M9.N Batch B: prepend the resolved-tool bin dirs to PATH after the
-  # MSVC + action env layers have been merged into the StringTableRef.
-  # Doing it here (not as a PATH= argv entry) ensures case-insensitive
-  # key matching on Windows (``Path`` vs ``PATH``) so the resolved
-  # dirs win regardless of which casing the upstream merge produced.
-  let binDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
+  let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
-  let hasAuxPaths = auxPaths.pkgConfigDirs.len + auxPaths.cmakePrefixDirs.len +
-    auxPaths.includeDirs.len + auxPaths.libDirs.len + auxPaths.nimPathDirs.len > 0
-  if binDirs.len > 0 or hasAuxPaths:
-    if env == nil:
-      env = newStringTable(modeCaseSensitive)
-      for key, value in envPairs():
-        env[key] = value
-    if binDirs.len > 0:
-      prependPathDirs(env, binDirs)
-    if hasAuxPaths:
-      applyResolvedAuxPathsTable(env, auxPaths)
-  let cwd = if action.cwd.len > 0: action.cwd else: getCurrentDir()
-  let stdoutLog = bypassActionStdoutLogPath(cacheRoot, action.id)
-  let stderrLog = bypassActionStderrLogPath(cacheRoot, action.id)
-  createDir(extendedPath(bypassActionLogDir(cacheRoot)))
-  # Truncate any prior log so a re-run doesn't read stale content from
-  # a previous launch of the same action id.
-  try: writeFile(extendedPath(stdoutLog), "")
-  except CatchableError: discard
-  try: writeFile(extendedPath(stderrLog), "")
-  except CatchableError: discard
-  # Build the shell-wrapped command. ``quoteShell`` handles each argv
-  # element per the host platform's shell rules; both branches end up
-  # with one redirected-output pipeline that ``cmd`` / ``sh`` will
-  # tokenize back into argv before exec'ing the real tool.
-  # SC-11 (§4.2a.3): thread the resolved Nim library source roots onto a
-  # ``nim c`` argv as ``--path:<dir>`` flags before quoting (identity for a
-  # non-Nim argv or when no cross-repo Nim library producer was resolved).
+  var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
+  threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
+  threadedEnv = applyExplicitRuntimeLibraryEnvOverrides(threadedEnv,
+    action.env)
   let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
   let includePaths = partitionCompilerIncludePaths(auxPaths)
-  var adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
+  let adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
     includePaths.systemDirs)
-  adjustedArgv = deferRuntimeLibraryEnvForShell(adjustedArgv, env)
-  var quotedArgv = ""
-  for i, a in adjustedArgv:
-    if i > 0: quotedArgv.add(" ")
-    quotedArgv.add(quoteShell(a))
-  let redirectedArgv =
-    quotedArgv & " > " & quoteShell(stdoutLog) &
-      " 2> " & quoteShell(stderrLog)
-  when defined(windows):
-    # ``/D`` disables AutoRun (HKCU\Software\Microsoft\Command Processor\
-    # AutoRun) so a user-injected init script can't mutate the action's
-    # environment; ``/C`` runs the command and terminates. Path lookup
-    # for the real tool is delegated to ``cmd`` rather than ``startProcess``
-    # because the wrapped command line itself contains the tool name.
-    let cmdExe = getEnv("SystemRoot") / "System32" / "cmd.exe"
-    let cmdLine = "\"" & cmdExe & "\" /D /C \"" & redirectedArgv & "\""
-    result = startProcess(command = cmdLine,
-      workingDir = cwd,
-      env = env,
-      options = {poEvalCommand})
-  else:
-    # POSIX wrapper shell. On Linux ``/bin/sh`` is not SIP-protected so it is
-    # used directly. On macOS we prefer a non-SIP shell when one is available:
-    # a SIP-protected ``/bin/sh`` strips ``DYLD_*`` at the top of the tree,
-    # which breaks both monitored io-mon injection and unmonitored actions that
-    # need DYLD_LIBRARY_PATH for dlopen-only libraries.
-    var wrapperShell = "/bin/sh"
-    when defined(macosx):
-      # SIP-protected /bin/sh strips all DYLD_* variables, not only
-      # DYLD_INSERT_LIBRARIES. The action environment may receive those
-      # variables after the daemon process itself started, so testing only
-      # getEnv("DYLD_LIBRARY_PATH") here misses daemon-hosted builds. Prefer the
-      # non-SIP shell whenever it exists; require it when correctness depends on
-      # preserving monitor injection or DYLD loader paths.
-      let nonSipShell = resolveNonSipShell()
-      if nonSipShell.len > 0:
-        wrapperShell = nonSipShell
-      else:
-        let needsDyldEnv =
-          getEnv("DYLD_LIBRARY_PATH").len > 0 or
-          getEnv("DYLD_FALLBACK_LIBRARY_PATH").len > 0 or
-          (env != nil and (
-            env.hasKey("DYLD_LIBRARY_PATH") or
-            env.hasKey("DYLD_FALLBACK_LIBRARY_PATH") or
-            env.hasKey("DYLD_INSERT_LIBRARIES")))
-        if action.monitorDepfile.len > 0 or needsDyldEnv:
-          # Monitor-Hook-Shim.md:501 fail-safe: monitoring is required for this
-          # action but no injectable (non-SIP) wrapper shell is available, so we
-          # cannot launch it without losing shim injection on macOS. Running it
-          # under the SIP ``/bin/sh`` anyway would silently produce incomplete
-          # dependency evidence and let it be cached as if its deps were fully
-          # captured — exactly the "successful child exit MUST NOT hide monitor
-          # failure" hazard the spec forbids. Fail the launch conservatively
-          # instead; ``runBuild`` surfaces this as an action failure (and the
-          # action is therefore never published to the cache).
-          let reason =
-            if action.monitorDepfile.len > 0:
-              "monitor injection"
-            else:
-              "DYLD_* loader path propagation"
-          raiseEngine(
-            "action " & action.id & " cannot be launched SIP-safely for " &
-            reason & " on macOS: no non-SIP shell found " &
-            "(set CT_SANDBOX_TOOLS_DIR to a " &
-            "drop-in bundle or provide a non-SIP sh on PATH). Refusing to run " &
-            "under SIP /bin/sh, which would strip DYLD_* loader variables and " &
-            "break either monitor injection or dlopen-only runtime libraries.")
-    # M9.R.35.1 — pin the action's umask to a deterministic 022 so every
-    # spawned tool creates files with the canonical ``rw-r--r--``
-    # (0644) / ``rwxr-xr-x`` (0755) permissions. Without this pin, the
-    # umask is inherited from whatever shell launched ``repro build``
-    # — and on WSL the inherited value can drift between invocations
-    # (observed: Qt6 ``qmlcachegen`` emitting ``qmlcache_loader.cpp``
-    # at modes ``0300`` / ``0254`` / ``0044`` / ``0204``, which then
-    # trips a downstream ``cc1plus: fatal error: <file>: Permission
-    # denied``).  qmlcachegen calls ``QSaveFile::open`` which delegates
-    # to ``QTemporaryFileEngine::initialize(0666)``, then commits via
-    # rename(); the kernel applies the calling process's umask at
-    # ``mkstemp`` time, so any process-state umask drift in the
-    # CMake → ninja → qmlcachegen fork chain bleeds into the final
-    # file's mode bits.  Pinning umask at the shell-wrap level closes
-    # the drift channel for every build action, not just qmlcachegen
-    # — the same protection benefits any tool that relies on the
-    # process umask for file-creation modes (mostly: every tool that
-    # uses libc's ``fopen`` / ``mkstemp`` / ``open(O_CREAT)`` without
-    # an explicit ``mode`` argument).
-    #
-    # Reconciliation note (merge of M9.R.35.1 umask-pin + the io-mon
-    # SIP-safe-launch work): the umask wrap and the non-SIP wrapper-shell
-    # selection are orthogonal and both required on macOS. We DELIBERATELY
-    # run ``umask 022 && …`` through ``wrapperShell`` (the non-SIP shell
-    # resolved above for monitored actions) rather than the SIP-protected
-    # ``/bin/sh`` — using ``/bin/sh`` here would re-introduce the
-    # DYLD_INSERT_LIBRARIES-stripping hazard for monitored macOS actions.
-    # For Linux / non-monitored actions ``wrapperShell`` is ``/bin/sh``, so
-    # the umask determinism is preserved unchanged on those paths.
-    let wrapped = "umask 022 && " & redirectedArgv
-    result = startProcess(wrapperShell,
-      args = @["-c", wrapped],
-      env = env,
-      workingDir = cwd,
-      options = {})
+  let deferred = deferRuntimeLibraryEnvForShell(adjustedArgv, threadedEnv)
+  ReproCommandSpec(
+    argv: umaskWrappedArgv(deferred.argv),
+    cwd: action.cwd,
+    env: deferred.env,
+    stdoutLimit: config.stdoutLimit,
+    stderrLimit: config.stderrLimit)
+
+proc startBypassRunQuotaProcess(action: BuildAction;
+                                config: BuildEngineConfig):
+    ReproDirectRunningProcess =
+  ## Use RunQuota's native process backend without acquiring a lease. On
+  ## Windows this preserves argument boundaries instead of expanding valid
+  ## percent signs, carets, quotes, and backslashes through ``cmd.exe``.
+  if action.argv.len == 0:
+    raiseEngine("bypassRunQuota: action has empty argv: " & action.id)
+  createDir(extendedPath(bypassActionLogDir(config.cacheRoot)))
+  for path in [
+      bypassActionStdoutLogPath(config.cacheRoot, action.id),
+      bypassActionStderrLogPath(config.cacheRoot, action.id)]:
+    try:
+      writeFile(extendedPath(path), "")
+    except CatchableError:
+      discard
+  return startDirect(preparedRunQuotaCommand(action, config))
 
 proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
-                          resultPath: string; bypassRunQuota: bool): Process =
-  if bypassRunQuota:
-    return startBypassRunQuotaProcess(action, config)
+                          resultPath: string): Process =
   let rq = ReproResourceRequest(
     label: action.id,
     commandStatsId: action.commandStatsId,
@@ -3660,36 +3477,7 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
     memoryBytes: action.memoryBytes,
     namedPool: action.pool,
     namedPoolUnits: action.poolUnits)
-  # MR8: prepend the cached MSVC dev-env diff on Windows so the
-  # runquota helper hands the action a coherent MSVC toolchain
-  # (cl.exe / INCLUDE / LIB / LIBPATH / VCToolsInstallDir / WindowsSdk*).
-  # The action's own ``env`` entries are appended after, so any
-  # recipe-supplied overrides win on key collision. No-op on non-Windows
-  # and when VS Build Tools is not installed.
-  let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action, config))
-  let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
-  let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
-  var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
-  threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
-  let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
-  let includePaths = partitionCompilerIncludePaths(auxPaths)
-  let adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
-    includePaths.systemDirs)
-  let deferred = deferRuntimeLibraryEnvForShell(adjustedArgv, threadedEnv)
-  # M9.R.36.3 — same umask-022 pin we apply on the bypass path. The
-  # runquota helper forwards ``command.argv`` straight through to its
-  # ``launchProcess`` call site, so without this wrap the daemon-mode
-  # build inherits whatever umask the runquotad daemon's parent shell
-  # had — recreating the qmlcachegen mode-corruption channel that
-  # M9.R.35.1 closed on the ``bypassRunQuota`` path.
-  # SC-11 (§4.2a.3): thread resolved Nim library source roots onto a ``nim c``
-  # argv as ``--path:<dir>`` flags before the umask wrap (identity otherwise).
-  let command = ReproCommandSpec(
-    argv: umaskWrappedArgv(deferred.argv),
-    cwd: action.cwd,
-    env: deferred.env,
-    stdoutLimit: config.stdoutLimit,
-    stderrLimit: config.stderrLimit)
+  let command = preparedRunQuotaCommand(action, config)
   let helper = if config.runQuotaCliPath.len > 0: config.runQuotaCliPath
     else: defaultRunQuotaHelperPath()
   startProcess(helper, args = helperCliArgs(rq, command, resultPath),
@@ -3706,94 +3494,51 @@ proc runQuotaRequest(action: BuildAction): ReproResourceRequest =
 
 proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
     ReproCommandSpec =
-  # MR8: prepend the cached MSVC dev-env diff (Windows-only) so the
-  # inline-runquota batch path matches the helper-spawn path's env
-  # shape. The action's own ``env`` entries override on key collision.
-  let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action, config))
-  let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
-  let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
-  var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
-  threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
-  let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
-  let includePaths = partitionCompilerIncludePaths(auxPaths)
-  let adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
-    includePaths.systemDirs)
-  let deferred = deferRuntimeLibraryEnvForShell(adjustedArgv, threadedEnv)
-  # M9.R.36.3 — apply the same umask-022 wrap the helper-spawn and
-  # bypass paths use. The inline-runquota path likewise forwards
-  # ``command.argv`` to ``launchProcess`` inside the helper / inline
-  # batch, so an unwrapped argv would resurrect the qmlcachegen mode
-  # drift.
-  # SC-11 (§4.2a.3): thread resolved Nim library source roots onto a ``nim c``
-  # argv as ``--path:<dir>`` flags before the umask wrap (identity otherwise).
-  ReproCommandSpec(
-    argv: umaskWrappedArgv(deferred.argv),
-    cwd: action.cwd,
-    env: deferred.env,
-    stdoutLimit: config.stdoutLimit,
-    stderrLimit: config.stderrLimit)
+  preparedRunQuotaCommand(action, config)
 
-proc writeBypassResultJson(resultPath: string; exitCode: int;
-                           stdoutPayload, stderrPayload: string) =
-  ## Synthesize the same result-JSON schema the RunQuota helper writes, so the
-  ## downstream parser in ``finishRunQuotaProcess`` can consume it unchanged.
-  ## Keep field names and types byte-for-byte aligned with
-  ## ``repro_runquota.executionJson``.
-  let payload = %*{
-    "runner_error": "",
-    "lease_id": 0,
-    "exit_code": exitCode,
-    "exited": true,
-    "signaled": false,
-    "signal": 0,
-    "stdout": stdoutPayload,
-    "stderr": stderrPayload,
-    "backend_name": "runquota-bypass",
-    "runquota_socket": "",
-    "lease_finished_sent": false,
-    "lease_released": false
-  }
-  createDir(extendedPath(parentDir(resultPath)))
-  writeFile(extendedPath(resultPath), $payload)
-
-proc finishBypassRunQuotaProcess(id: string; process: Process;
-                                 resultPath: string; cacheRoot: string) =
-  ## Path-mode escape hatch: wait for the directly-spawned process and
-  ## synthesize the result JSON the standard parser expects.
-  ##
-  ## **M1 milestone (Windows-bypass-stdio-capture)**: read the per-action
-  ## ``<cacheRoot>/actions/<id>.{stdout,stderr}.log`` files
-  ## ``startBypassRunQuotaProcess`` redirected the child into and embed
-  ## their contents in the result JSON. The previous behaviour swallowed
-  ## stdio (``poParentStreams`` inherited the engine's stdio but was
-  ## invisible under daemon-mode invocations), which surfaced as "exit
-  ## code 101 with empty stderr" in build reports. The log-file route
-  ## avoids the multi-process pipe-buffer deadlock the in-process
-  ## drainer hit; see the rationale in ``startBypassRunQuotaProcess``.
-  let exitCode = process.waitForExit()
-  let stdoutPayload = readBypassActionLog(
-    bypassActionStdoutLogPath(cacheRoot, id))
-  # B2: strip the io-mon shim's per-process banner from the surfaced stderr so
-  # a failing monitored action shows its REAL error instead of dozens of
-  # ``io-mon: macOS body-patch …`` noise lines (Monitor-Hook-Shim.md). The raw
-  # ``<id>.stderr.log`` on disk keeps the banner for deep diagnosis.
-  let stderrPayload = stripMonitorBanner(readBypassActionLog(
-    bypassActionStderrLogPath(cacheRoot, id)))
-  writeBypassResultJson(resultPath, exitCode, stdoutPayload, stderrPayload)
+proc finishBypassRunQuotaProcess(id: string;
+                                 process: var ReproDirectRunningProcess;
+                                 cacheRoot: string): ActionResult =
+  ## Finish the argv-preserving direct launch and retain the historical
+  ## per-action log files used by diagnostics and focused engine tests.
+  result = ActionResult(
+    id: id,
+    launched: true,
+    runQuotaBackend: "runquota-bypass")
+  try:
+    let execution = process.finishCompleted()
+    let stdoutPayload = stripMonitorBanner(execution.stdout)
+    let stderrPayload = stripMonitorBanner(execution.stderr)
+    try:
+      writeFile(extendedPath(bypassActionStdoutLogPath(cacheRoot, id)),
+        execution.stdout)
+    except CatchableError:
+      discard
+    try:
+      writeFile(extendedPath(bypassActionStderrLogPath(cacheRoot, id)),
+        execution.stderr)
+    except CatchableError:
+      discard
+    result.exitCode = execution.exitCode
+    result.stdout = stdoutPayload
+    result.stderr = stderrPayload
+    result.status =
+      if execution.exited and execution.exitCode == 0: asSucceeded
+      else: asFailed
+  except CatchableError as err:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = "direct process finish failed: " & err.msg
 
 proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
-                           bypassRunQuota: bool;
                            cacheRoot: string): ActionResult =
-  let backendLabel =
-    if bypassRunQuota: "runquota-bypass" else: "runquota-helper"
-  result = ActionResult(id: id, launched: true, runQuotaBackend: backendLabel)
-  if bypassRunQuota:
-    finishBypassRunQuotaProcess(id, process, resultPath, cacheRoot)
-  let helperExit =
-    if bypassRunQuota: 0
-    else: process.waitForExit()
+  result = ActionResult(
+    id: id,
+    launched: true,
+    runQuotaBackend: "runquota-helper")
+  let helperExit = process.waitForExit()
   var helperOutput = ""
-  if not bypassRunQuota and process.outputStream != nil:
+  if process.outputStream != nil:
     helperOutput = process.outputStream.readAll()
   if not fileExists(extendedPath(resultPath)):
     result.status = asFailed
@@ -3965,6 +3710,17 @@ proc prepareBuiltinFileOutput(path: string) =
   if symlinkExists(expanded):
     removeFile(expanded)
 
+proc builtinCopyDestinationMatches(source, destination: string): bool =
+  let sourcePath = extendedPath(source)
+  let destinationPath = extendedPath(destination)
+  if not fileExists(destinationPath) or
+      not sameFileContent(sourcePath, destinationPath):
+    return false
+  when defined(posix):
+    getFilePermissions(sourcePath) == getFilePermissions(destinationPath)
+  else:
+    true
+
 proc removeExistingPath(path: string) =
   let expanded = extendedPath(path)
   if symlinkExists(expanded) or fileExists(expanded):
@@ -4032,14 +3788,18 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           action.id)
       let source = action.builtinPath(action.inputs[0])
       let destination = action.builtinPath(action.outputs[0])
-      createDir(extendedPath(destination.splitPath.head))
-      prepareBuiltinFileOutput(destination)
+      let destinationMatches =
+        builtinCopyDestinationMatches(source, destination)
+      if not destinationMatches:
+        createDir(extendedPath(destination.splitPath.head))
+        prepareBuiltinFileOutput(destination)
       # Preserve the source file's mode bits — plain ``copyFile`` creates the
       # destination with the process umask default (typically 0644), which
       # silently drops the executable bit. CodeTracer's recipe copies the
       # cargo-built ``replay-server`` / ``session-manager`` binaries through
       # this action; without the exec bit they fail to launch (exit 126).
-      copyFileWithPermissions(extendedPath(source), extendedPath(destination))
+      if not destinationMatches:
+        copyFileWithPermissions(extendedPath(source), extendedPath(destination))
     of bakEnsureDir:
       if action.outputs.len != 1:
         raiseEngine("ensureDir action requires exactly one output: " & action.id)
@@ -4711,10 +4471,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           error: "binary-cache publisher raised: " & e.msg)
     if not res.ok:
       stats.addCounterMetric("repro binary-cache publish failures", 1)
+      var detail = "status=" & $res.statusCode
+      if res.error.len > 0:
+        detail.add(" error=" & res.error)
+      runResult.trace(action.id, "binary-cache-publish-failed", detail)
     else:
       stats.addCounterMetric("repro binary-cache publish ok", 1)
       stats.addCounterMetric("repro binary-cache publish bytes uploaded",
         res.bytesUploaded)
+      runResult.trace(action.id, "binary-cache-published",
+        "status=" & $res.statusCode & " bytes=" & $res.bytesUploaded)
     finishStat("repro binary-cache publish", publishStart)
 
   proc tryFastNoopCacheHits(): Option[BuildRunResult] =
@@ -5075,14 +4841,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     false
 
   proc anyInlineRunQuotaProcess(): bool =
-    ## True when any running entry uses the inline RunQuota path (active
-    ## or pending). The Windows event-driven wait can't include these
-    ## (they don't expose a SYNCHRONIZE handle to us), so a non-zero
-    ## answer caps the WaitForMultipleObjects timeout so we still poll
-    ## `pollCompletion` periodically. Zero answer lets us wait longer.
+    ## True when a running entry needs periodic ``pollCompletion`` calls to
+    ## drain its output. The Windows event-driven wait cannot include these
+    ## entries, so cap its timeout while one is active.
     for item in running:
       if item.processKind in {rpkInlineRunQuota, rpkInlineRunQuotaPending,
-                              rpkInlineRunQuotaFailed}:
+                              rpkInlineRunQuotaFailed, rpkBypassProcess}:
         return true
     false
 
@@ -5857,6 +5621,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           continue
         let launchStart = statStart()
         var process: Process
+        var directProcess: ReproDirectRunningProcess
         var processKind =
           if bypassRunQuota: rpkBypassProcess
           else: rpkHelperProcess
@@ -5864,8 +5629,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         let startDetail = "pool=" & poolName
         var launchFailure = ""
         try:
-          process = startRunQuotaProcess(plan.action, config, resultPath,
-            bypassRunQuota)
+          if bypassRunQuota:
+            directProcess = startBypassRunQuotaProcess(plan.action, config)
+          else:
+            process = startRunQuotaProcess(plan.action, config, resultPath)
         except CatchableError as err:
           launchFailure = err.msg
         finishStat("repro runquota launch", launchStart)
@@ -5901,10 +5668,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           action: plan.action,
           processKind: processKind,
           process: process,
+          directProcess: directProcess,
           resultPath: resultPath
         )
         when defined(posix):
-          runningAction.processGroupPid = assignProcessGroup(process)
+          if not bypassRunQuota:
+            runningAction.processGroupPid = assignProcessGroup(process)
         running.add(runningAction)
         runResult.trace(id, startEvent, startDetail)
         emitProgress(bpkActionStarted, id)
@@ -6070,7 +5839,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           of rpkInlineRunQuotaFailed:
             runIndex = j
             break
-          of rpkHelperProcess, rpkBypassProcess:
+          of rpkBypassProcess:
+            if running[j].directProcess.pollCompletion():
+              runIndex = j
+              break
+          of rpkHelperProcess:
             when defined(windows):
               # Handled by the event-driven block below; skip here.
               discard
@@ -6118,23 +5891,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         of rpkInlineRunQuotaFailed:
           runningItem.inlineFailure
         of rpkBypassProcess:
-          finishRunQuotaProcess(
+          finishBypassRunQuotaProcess(
             runningItem.id,
-            runningItem.process,
-            runningItem.resultPath,
-            true,
+            runningItem.directProcess,
             cacheRoot)
         of rpkHelperProcess:
           finishRunQuotaProcess(
             runningItem.id,
             runningItem.process,
             runningItem.resultPath,
-            false,
             cacheRoot)
       finishStat("repro runquota finish", finishStart)
       if runIndex < 0:
         raiseEngine("internal missing running action: " & finished.id)
-      if runningItem.processKind in {rpkHelperProcess, rpkBypassProcess}:
+      if runningItem.processKind == rpkHelperProcess:
         runningItem.process.close()
       let finishedUsed = poolRunning.getOrDefault(runningItem.pool, 0'u32)
       poolRunning[runningItem.pool] =
@@ -6249,7 +6019,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           discard item.runQuotaProcess.cancelAndWait()
       of rpkInlineRunQuotaFailed:
         discard
-      of rpkHelperProcess, rpkBypassProcess:
+      of rpkBypassProcess:
+        if item.directProcess.active and not item.directProcess.completed:
+          discard item.directProcess.cancelAndWait()
+      of rpkHelperProcess:
         terminateRunningAction(item)
         item.process.close()
     if inlineRunQuotaSessionOpen:

@@ -23,6 +23,15 @@ const
   RingSlotRecCap* = SlotInlineCap
     ## inline metadata-record capacity of one submission slot.
 
+# The in-file ABI remains version 1 on every platform. Darwin's lifecycle
+# namespace is versioned separately because peers using the historical
+# wall-clock boot identity must never share either volatile mapping with
+# authoritative-boot-ID peers.
+when defined(macosx):
+  const LifecycleNamespaceVersion* = 2'u32
+else:
+  const LifecycleNamespaceVersion* = 1'u32
+
 static:
   # RingCap must be a power of two so `tail mod RingCap` is a mask.
   doAssert (RingCap and (RingCap - 1)) == 0

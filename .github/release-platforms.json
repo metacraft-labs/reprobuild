@@ -1,0 +1,92 @@
+{
+  "$comment": [
+    "SINGLE SOURCE OF TRUTH for what a reprobuild release contains.",
+    "",
+    "release.yml reads this file twice: once to build the job matrix, and once,",
+    "in the publish job, to compute the exact set of assets that must exist",
+    "before anything is made visible. Because both come from here, 'the matrix'",
+    "and 'what the release must carry' cannot drift apart -- which is what let",
+    "v0.1.0..v0.1.3 each ship a DIFFERENT subset of platforms.",
+    "",
+    "Adding a leg: the bar is a GREEN BUILD OF THIS REPO on that platform, not",
+    "'a runner class exists for it'. Since the release is all-or-nothing, a row",
+    "that has never produced a binary blocks EVERY release, forever -- it does",
+    "not merely miss one asset. A runner that boots and reports its uname",
+    "proves the fleet, not the toolchain; get the platform green in ci.yml",
+    "first, then add it here. Prove, then gate.",
+    "",
+    "Removing a leg is a deliberate, reviewed act: it narrows what the release",
+    "promises. Consumers on a dropped platform then fall back to the",
+    "setup-reprobuild source build with a loud warning, instead of downloading",
+    "an asset that does not exist. Never remove a leg just to get a red release",
+    "green -- fix the leg, or accept and record the narrower promise here."
+  ],
+  "platforms": [
+    {
+      "os-name": "linux",
+      "runner": "eph-linux-x64",
+      "env-flavor": "nix",
+      "platform": "linux",
+      "arch": "x86_64",
+      "archive_ext": "tar.gz"
+    },
+    {
+      "os-name": "macos",
+      "runner": "eph-macos-arm64",
+      "env-flavor": "nix",
+      "platform": "darwin",
+      "arch": "aarch64",
+      "archive_ext": "tar.gz"
+    },
+    {
+      "os-name": "windows",
+      "runner": "eph-win-x64",
+      "env-flavor": "windows-diy",
+      "platform": "windows",
+      "arch": "x86_64",
+      "archive_ext": "zip"
+    }
+  ],
+  "$deliberately-absent": {
+    "linux-aarch64": [
+      "The runner class is real -- eph-linux-arm64 (Tart Linux guest on m3,",
+      "maxRunners=3) has executed hundreds of genuine jobs across the workspace.",
+      "It is absent for the two reasons that actually matter to an",
+      "all-or-nothing release, neither of which is 'does a runner exist':",
+      "",
+      "  1. reprobuild has NEVER built on aarch64-linux. Across the workspace,",
+      "     ci-reprobuild.yml has run 319 jobs on eph-linux-arm64 with ZERO",
+      "     successes. reprobuild's own ci.yml has no aarch64-linux leg either,",
+      "     so nothing has entered this flake's devshell on Linux ARM. The",
+      "     proven set is x86_64-linux and aarch64-darwin.",
+      "  2. The pool has not scheduled a job since 2026-08-01; jobs queued",
+      "     against eph-linux-arm64 since then sit with no runner assigned.",
+      "",
+      "Because the release is all-or-nothing, adding this row would make every",
+      "release wait out the queue timeout on a platform that has never produced",
+      "a binary -- turning 'releases ship a subset' into 'releases never ship'.",
+      "flake.nix listing aarch64-linux is what makes this leg look available; a",
+      "declared system is not a proven build.",
+      "",
+      "Add the row when a real aarch64-linux build of reprobuild goes green --",
+      "the cheap way is an aarch64-linux leg in ci.yml first. Prove, then gate."
+    ],
+    "darwin-x86_64": [
+      "No runner exists and none is planned. metacraft-dev-guidelines",
+      "policies/ci-workflow-standards.md marks macOS AMD64 'N/A -- no Intel-Mac",
+      "runner': the macOS fleet is Apple-silicon only (eph-macos-arm64 on m3).",
+      "flake.nix still lists x86_64-darwin among its systems, which is what makes",
+      "this leg look available; it is not."
+    ],
+    "windows-aarch64": [
+      "A runner DOES exist (eph-win-arm64, m3, qemu-windows-arm + swtpm,",
+      "maxRunners=2), so unlike darwin-x86_64 this is blocked by the toolchain,",
+      "not the fleet. windows/ensure-clingo.ps1 throws: 'conda-forge publishes",
+      "clingo for win-64 only ... A native ARM64 repro.exe cannot load an x64",
+      "clingo.dll.' clingo is dlopen'd at module init, so this is fatal, not",
+      "degraded. The staged runtime DLLs are x64-specific by name too",
+      "(libcrypto-3-x64.dll). Enable this row only after an ARM64 clingo exists;",
+      "adding it now would permanently block every release."
+    ]
+  }
+}

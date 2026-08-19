@@ -217,6 +217,27 @@ suite "M9.L.4-refactor Step A — publishInProcess library API":
     check (not res.ok)
     check res.error.contains("prefix path does not exist")
 
+  test "oversized archive is rejected before allocation or HTTP":
+    let prefixDir = getTempDir() / ("pub_in_proc_oversized_" & $rand(999_999))
+    createDir(prefixDir)
+    defer:
+      try: removeDir(prefixDir) except CatchableError: discard
+    writeFile(prefixDir / "payload.bin", newString(4096))
+
+    let identity = stubIdentity(rev = "oversized-prefix")
+    let req = PublishInProcessRequest(
+      entryKeyHex: deriveCacheEntryKeyHex(identity),
+      prefixDir: prefixDir,
+      identity: identity,
+      endpoint: "http://127.0.0.1:1",
+      keypair: peerAuth.generateKeypair(),
+      maxArchiveBytes: 1024)
+    let res = publishInProcess(req)
+    check (not res.ok)
+    check res.statusCode == 0
+    check res.bytesUploaded == 0
+    check res.error.contains("exceeding the 1024-byte /publish payload limit")
+
   test "multi-file directory round-trip + signature verifies":
     let port = pickPort()
     let serverRoot = getTempDir() / ("pub_in_proc_srv_" & $rand(999_999))
@@ -232,7 +253,8 @@ suite "M9.L.4-refactor Step A — publishInProcess library API":
     createDir(prefixDir / "share")
     writeFile(prefixDir / "bin" / "exec", "executable-payload")
     writeFile(prefixDir / "share" / "data.txt", "text payload\nline two\n")
-    var blob = newString(2048)
+    # Exercise the same bounded HTTP upload path used by production artifacts.
+    var blob = newString(24 * 1024 * 1024)
     for i in 0 ..< blob.len:
       blob[i] = char(i mod 256)
     writeFile(prefixDir / "blob.bin", blob)

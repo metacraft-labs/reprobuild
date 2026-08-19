@@ -158,6 +158,36 @@
       url = "git+https://github.com/metacraft-labs/codetracer-native-recorder?ref=stable";
       flake = false;
     };
+    codetracer-src = {
+      # CodeTracer owns the cross-language test driver ``ct-test``
+      # (``src/ct_test/ct_test.nim``): TestCatalog v1 discovery over the
+      # provider registry plus the partitioned parallel runner, declared as
+      # the ``ct-test`` target in codetracer's ``repro.nim``. ``ctTestTools``
+      # below builds that binary from this input and the dev shell puts it on
+      # PATH, exactly as ``runquotaTools`` does for ``runquota-src`` — so the
+      # shipped tool tracks a pinned/overridable source instead of whatever
+      # someone hand-compiled into a sibling checkout.
+      #
+      # Pinned to ``dev``, CodeTracer's active branch, mirroring the
+      # ``runquota/dev`` pin above and for the same reason: the repo's default
+      # branch is ``stable``, a release pointer that can sit behind ``dev``.
+      # (At this pin ``stable`` and ``dev`` happen to name the same commit, and
+      # that commit is a strict descendant of ``main``; all three carry
+      # ``src/ct_test``.)
+      #
+      # ``flake = false`` — we want the source tree only. CodeTracer's own
+      # flake drags in the Electron/frontend/db-backend toolchain, none of
+      # which ``ct-test`` needs (its only non-stdlib dependency is runquota;
+      # see ctTestTools). The ``.envrc`` auto-override
+      # (NIX_FLAKE_OVERRIDE_AUTO + the ``-src`` suffix convention) names this
+      # input for a ``../codetracer`` sibling when one exists. Be aware of what
+      # that costs before leaning on it: overriding a source input to a plain
+      # path copies the whole directory into the store, and a working
+      # CodeTracer checkout is several gigabytes. An override-free shell builds
+      # the pin, which is the cheap and reproducible default.
+      url = "github:metacraft-labs/codetracer/dev";
+      flake = false;
+    };
 
     # ── reprobuild Nim toolchain: the metacraft-labs/nim fork ──────────────
     # The fork (codetracer-nim, Nim 2.3.1 devel) replaces nixpkgs'
@@ -167,8 +197,57 @@
     # by nix/nim-fork.nix. The fork uses the ``git+https`` clone form (its
     # codeload tarball 404s, same as codetracer-native-recorder above); the
     # compiler itself imports the three vendored deps below (trace/stew/results).
+    #
+    # This revision also renders the source location that `check` / `require` /
+    # `expect` / `assert` plant into the expanded body as a package-anchored
+    # canonical path (`tests/a/t.nim`, `std/tables`) instead of an absolute one.
+    # Those literals are hashed verbatim into every test's `--list-json`
+    # `bodyHash`, so before it the catalog changed with the checkout directory
+    # and the stdlib install path, and two hosts building the same commit
+    # agreed about nothing. The rendering is anchored on the PACKAGE ROOT, which
+    # this repository supplies twice over — see the notes beside
+    # `switch("path", ".")` in `config.nims` and at the top of
+    # `reprobuild.nimble`, and the guard in
+    # `tests/unit/test_package_root_anchor.py`.
+    #
+    # Advanced from 4e93a8a4 to the `codetracer` tip. That is eight commits,
+    # revCount 23089 -> 23097: three changes and their three merges, plus a
+    # documentation commit and its merge that add `doc/intern.md` and touch no
+    # compiler or stdlib source. Nothing else rides along:
+    #
+    #   * The five per-case metadata fields the protocol advertises can now
+    #     take a second value. `xfail`, `tags`, `group`, `threadsRequired` and
+    #     `deterministic` were literals in the emitter, so a consumer could
+    #     carry all five, assert that it had carried them, and be asserting on
+    #     something no input could change. They now have a source — the test
+    #     author — every default is what the field held before, and the module
+    #     gained a written conformance contract for the other producers a
+    #     project may put behind these flags. Before this commit the syntax did
+    #     not compile at all (`unknown named parameter: xfail`).
+    #
+    #   * A body hash no longer depends on the bodies above it. A hygienic
+    #     template local was identified by its gensym name, whose counter
+    #     records how many template expansions preceded it IN THE MODULE, so
+    #     adding an assertion above a test moved that test's `bodyHash`.
+    #     `check`, `require` and `expect` all reach such a local by way of
+    #     `fail`, so this bump rehashes every test body that uses an assertion
+    #     macro, and only those. The hash is the incremental runner's re-run
+    #     signal, so the movement costs one full re-run and then stops costing:
+    #     what it buys is that an edit above a test no longer re-runs it.
+    #
+    #   * The three stdout-bearing protocol modes own descriptor 1. `--list`,
+    #     `--list-json` and `--catalog -` write their document to the same
+    #     channel the program prints on, and a suite body runs during
+    #     REGISTRATION in every mode — so an ordinary `echo` in one could make
+    #     the document unparseable, and on `--list`, which has no framing at
+    #     all, a partial write fused onto the front of a real case name where
+    #     no consumer could undo it. The module now dups the real stdout aside
+    #     at initialisation and points fd 1 at stderr, emitting the document to
+    #     the saved descriptor; the author's output stays readable on stderr.
+    #     Both of this repository's consumers already keep the two streams
+    #     apart, so they see a clean document rather than a merged one.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=6d14bb1d22dd8d27ddfe331c73a50085568adb71";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=5c77edb2a9eaeaea42c5fe980671484a445d1fc9";
       flake = false;
     };
     nim-csources-src = {
@@ -176,7 +255,10 @@
       flake = false;
     };
     ct-trace-format-src = {
-      url = "github:metacraft-labs/codetracer-trace-format-nim/c2f3dfc3bcb423a939ff4d6eab42f848957f7048";
+      # CodeTracer 602e7bb7 imports codetracer_trace_writer/span_stream. Keep
+      # this past the span-stream writer, cumulative-index, and encoder fixes;
+      # the older c2f3dfc3 pin does not contain that module at all.
+      url = "github:metacraft-labs/codetracer-trace-format-nim/bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26";
       flake = false;
     };
     nim-stew-src = {
@@ -211,6 +293,7 @@
       reprobuild-ct-test-runner-src,
       reprobuild-test-adapters-src,
       codetracer-native-recorder,
+      codetracer-src,
       runquota-src,
       io-mon-src,
       nim-shm-gset-src,
@@ -273,6 +356,19 @@
           # ``<dir>/ct_interpose/hook_registry.nim``), which is
           # ``ct_interpose/src`` inside the native-recorder checkout.
           ctInterposeSrc = "${codetracer-native-recorder}/ct_interpose/src";
+          # CodeTracer's top-level ct entry point imports the span-stream
+          # writer. Fail during Nix evaluation if a future pin regression
+          # silently points at a pre-span trace-format tree; otherwise the
+          # first symptom is a slow, opaque native compile failure.
+          codeTracerTraceFormatNimSrc =
+            let
+              sourceRoot = "${ct-trace-format-src}/src";
+              requiredModule = "${sourceRoot}/codetracer_trace_writer/span_stream.nim";
+            in
+            if builtins.pathExists requiredModule then
+              sourceRoot
+            else
+              throw "ct-trace-format-src must contain ${requiredModule}";
           # Build the RunQuota daemon (and CLI) from the ``runquota-src``
           # input, the same source the reprobuild client compiles against
           # (``RUNQUOTA_SRC``). Putting this on the dev-shell PATH means the
@@ -307,6 +403,81 @@
               runHook postInstall
             '';
           };
+          # Build CodeTracer's standalone cross-language test driver ``ct-test``
+          # from the ``codetracer-src`` input and put it on the dev-shell PATH.
+          # Same shape and same motivation as ``runquotaTools`` above: the tool
+          # tracks a pinned, overridable source rather than a hand-built binary
+          # in someone's sibling checkout, so
+          # ``--override-input codetracer-src path:../codetracer`` (which the
+          # ``.envrc`` auto-override does for you when the sibling exists)
+          # yields a ``ct-test`` built from the local tree with no push.
+          #
+          # Dependency surface: ``ct-test`` compiles from ``src/ct_test/**``,
+          # the Nim stdlib, and runquota's ``runquota_process`` /
+          # ``runquota_core`` / ``runquota_host*`` packages — and nothing else.
+          # (Verified against the Nim compilation cache of a full build: no
+          # vendored ``libs/`` tree, no Electron/frontend stack, no db-backend,
+          # no io-mon, no codetracer-trace-format-nim.) That is why this
+          # derivation is cheap despite CodeTracer being a large repo, why a
+          # submodule-less source input suffices, and why ``RUNQUOTA_SRC`` is
+          # the only source path it has to thread through: codetracer's
+          # repo-root ``config.nims`` reads that variable and adds the runquota
+          # library paths, the sandbox having no ``../runquota`` sibling.
+          ctTestTools = pkgs.stdenv.mkDerivation {
+            pname = "ct-test";
+            version = "0.1.0";
+            src = codetracer-src;
+            strictDeps = true;
+            dontConfigure = true;
+            nativeBuildInputs = [
+              pkgs.bash
+              pkgs.coreutils
+              nimFork
+            ];
+            RUNQUOTA_SRC = runquota-src;
+            # The compile is spelled out here rather than delegated to a script
+            # in the codetracer checkout (which is how ``runquotaTools`` calls
+            # ``scripts/build_apps.sh``) for one concrete reason: codetracer has
+            # no such script, and adding one would make this derivation
+            # unbuildable at the pinned revision until that script is pushed —
+            # i.e. an override-free ``nix develop`` would break. Keeping the
+            # invocation self-contained means this input can be pinned to any
+            # codetracer revision that carries ``src/ct_test``.
+            #
+            # It intentionally mirrors the ``ct-test`` target in codetracer's
+            # ``repro.nim``, which stays the graph's declaration of this binary.
+            # The two are not flag-identical — the graph target additionally
+            # asks for debug info, line/stack traces and bound checks, and this
+            # one does not — so treat the graph as authoritative for the shipped
+            # product and this as the dev-shell convenience build.
+            #
+            # They do agree on the one flag that changes what the binary can do:
+            # ``--mm:orc``. It is spelled out below rather than left to the
+            # compiler's default because ``test run`` drives a worker pool whose
+            # threads share the discovered sequences, which refc's per-thread
+            # heaps cannot support; a refc build of these sources therefore
+            # either refuses ``run`` outright (newer sources, which carry an
+            # explicit guard) or crashes in the worker loop (older ones). Either
+            # way, silently inheriting a changed default would turn this from a
+            # runner into a discover-only tool, so the flag is stated.
+            buildPhase = ''
+              runHook preBuild
+              mkdir -p build/bin build/nimcache
+              nim c \
+                --threads:on \
+                --mm:orc \
+                --nimcache:build/nimcache/ct-test \
+                --out:build/bin/ct-test \
+                src/ct_test/ct_test.nim
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out/bin"
+              install -m755 build/bin/ct-test "$out/bin/ct-test"
+              runHook postInstall
+            '';
+          };
           pre-commit-check = git-hooks.lib.${system}.run {
             src = ./.;
             hooks.just-lint = {
@@ -326,6 +497,7 @@
                 export NIMCRYPTO_SRC=${nimcrypto-src}
                 export BEARSSL_SRC=${bearssl-src}
                 export STACKABLE_HOOKS_SRC=${stackable-hooks-src}/src
+                export CODETRACER_TRACE_FORMAT_NIM_SRC=${codeTracerTraceFormatNimSrc}
                 export IO_MON_SRC=${io-mon-src}/src
                 export SHM_GSET_SRC=${nim-shm-gset-src}/src
                 export SHM_QUEUE_SRC=${nim-shm-queue-src}/src
@@ -402,6 +574,7 @@
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
+            CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;
             IO_MON_SRC = "${io-mon-src}/src";
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
             SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
@@ -421,13 +594,34 @@
 
             installPhase = ''
               runHook preInstall
-              mkdir -p "$out/bin" "$out/lib"
+              mkdir -p "$out/bin" "$out/lib" \
+                "$out/share/reprobuild/nim-macro-sourcemaps/bin" \
+                "$out/share/reprobuild/nim-macro-sourcemaps/lib"
               for bin in build/bin/*; do
-                install -m755 "$bin" "$out/bin/$(basename "$bin")"
+                case "$bin" in
+                  *.json)
+                    # Nim emits macro source maps next to compiled binaries.
+                    # Keep them as package data, outside the public entry-point
+                    # directory audited for executable runtime roles.
+                    install -m644 "$bin" \
+                      "$out/share/reprobuild/nim-macro-sourcemaps/bin/$(basename "$bin")"
+                    ;;
+                  *)
+                    install -m755 "$bin" "$out/bin/$(basename "$bin")"
+                    ;;
+                esac
               done
               for lib in build/lib/*; do
                 [ -e "$lib" ] || continue
-                install -m755 "$lib" "$out/lib/$(basename "$lib")"
+                case "$lib" in
+                  *.json)
+                    install -m644 "$lib" \
+                      "$out/share/reprobuild/nim-macro-sourcemaps/lib/$(basename "$lib")"
+                    ;;
+                  *)
+                    install -m755 "$lib" "$out/lib/$(basename "$lib")"
+                    ;;
+                esac
               done
 
               # `reprobuild-nix-daemon` is the helper that `tool-provisioning=nix`
@@ -503,6 +697,7 @@
               # or DYLD_* into wrappers because arbitrary user build actions
               # inherit the wrapper environment.
               for b in "$out"/bin/*; do
+                test -x "$b" || continue
                 wrapProgram "$b" \
                   --set-default REPROBUILD_RUNTIME_LIBRARY_PATH ${runtimeLibraryPath} \
                   --set-default REPROBUILD_SOURCE_ROOT ${reprobuildSource} \
@@ -510,6 +705,7 @@
                   --set-default NIMCRYPTO_SRC ${nimcrypto-src} \
                   --set-default BEARSSL_SRC ${bearssl-src} \
                   --set-default STACKABLE_HOOKS_SRC ${stackable-hooks-src}/src \
+                  --set-default CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \
                   --set-default IO_MON_SRC ${io-mon-src}/src \
                   --set-default SHM_GSET_SRC ${nim-shm-gset-src}/src \
                   --set-default SHM_QUEUE_SRC ${nim-shm-queue-src}/src \
@@ -555,7 +751,6 @@
                 ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
                   pkgs.binutils
                   pkgs.cctools
-                  pkgs.darwin.sigtool
                 ];
               }
               ''
@@ -627,6 +822,10 @@
                                     for wrapper in ${reprobuild}/bin/*; do
                                       name=$(basename "$wrapper")
                                       hidden=${reprobuild}/bin/.$name-wrapped
+                                      if test ! -x "$wrapper"; then
+                                        echo "unexpected non-executable bin artifact: $wrapper" >&2
+                                        exit 1
+                                      fi
                                       test -f "$hidden"
                                       grep -Fq "$hidden" "$wrapper"
                                       if grep -Eq 'LD_LIBRARY_PATH|DYLD_(LIBRARY_PATH|FALLBACK_LIBRARY_PATH)' "$wrapper"; then
@@ -643,6 +842,7 @@
                 NIMCRYPTO_SRC|${nimcrypto-src}
                 BEARSSL_SRC|${bearssl-src}
                 STACKABLE_HOOKS_SRC|${stackable-hooks-src}/src
+                CODETRACER_TRACE_FORMAT_NIM_SRC|${codeTracerTraceFormatNimSrc}
                 IO_MON_SRC|${io-mon-src}/src
                 SHM_GSET_SRC|${nim-shm-gset-src}/src
                 SHM_QUEUE_SRC|${nim-shm-queue-src}/src
@@ -701,7 +901,11 @@
                                       # Linux-hosted behavioral fixture. It resolves dependency
                                       # tokens against each architecture's own LC_RPATH list and
                                       # verifies final arm signatures after postFixup mutation.
-                                      ${pkgs.bash}/bin/bash ${./scripts/audit_macho_runtime.sh} \
+                                      # nixpkgs' sigtool only implements signing, so use Apple's
+                                      # verifier explicitly rather than whichever `codesign`
+                                      # happens to occur first on the build PATH.
+                                      CODESIGN=/usr/bin/codesign \
+                                        ${pkgs.bash}/bin/bash ${./scripts/audit_macho_runtime.sh} \
                                         ${reprobuild} \
                                         ${blake3Prefix}/lib \
                                         ${pkgs.xxHash}/lib \
@@ -710,26 +914,27 @@
                                         ${pkgs.zstd.out}/lib \
                                         ${pkgs.clingo}/lib
 
-                                      # Prove the installed program bytes use LC_RPATH-aware
-                                      # dlopen names, not bare leaf names. The pure target helper
-                                      # tests pin the same constants on Linux before this gate.
+                                      # Prove the installed program bytes contain the exact
+                                      # LC_RPATH-aware dlopen names. The pure target helper tests
+                                      # reject bare Darwin constants on Linux; the isolated runtime
+                                      # exercises below then load clingo through the installed image.
                                       zstdLoaderCount=0
                                       clingoLoaderCount=0
                                       for candidate in ${reprobuild}/bin/.*-wrapped ${reprobuild}/lib/*; do
                                         if lipo -archs "$candidate" >/dev/null 2>&1; then
-                                          loaderStrings=$(strings "$candidate")
-                                          if printf '%s\n' "$loaderStrings" | grep -Fxq '@rpath/libzstd.1.dylib'; then
+                                          # Nim's emitted string objects expose one printable
+                                          # metadata byte (`@`) immediately before their text to
+                                          # GNU strings. Remove that byte before comparing the
+                                          # exact loader constant.
+                                          loaderStrings=$(strings "$candidate" | sed -e 's/^@//')
+                                          if grep -Fxq '@rpath/libzstd.1.dylib' <<< "$loaderStrings"; then
                                             zstdLoaderCount=$((zstdLoaderCount + 1))
                                           fi
-                                          if printf '%s\n' "$loaderStrings" | grep -Fxq '@rpath/libclingo.dylib'; then
+                                          if grep -Fxq '@rpath/libclingo.dylib' <<< "$loaderStrings"; then
                                             clingoLoaderCount=$((clingoLoaderCount + 1))
                                           fi
-                                          if printf '%s\n' "$loaderStrings" | grep -Fxq 'libzstd.1.dylib'; then
+                                          if grep -Fxq 'libzstd.1.dylib' <<< "$loaderStrings"; then
                                             echo "bare zstd Darwin loader name in $candidate" >&2
-                                            exit 1
-                                          fi
-                                          if printf '%s\n' "$loaderStrings" | grep -Fxq 'libclingo.dylib'; then
-                                            echo "bare clingo Darwin loader name in $candidate" >&2
                                             exit 1
                                           fi
                                         fi
@@ -842,6 +1047,7 @@
                                       ${nimcrypto-src} \
                                       ${bearssl-src} \
                                       ${stackable-hooks-src} \
+                                      ${ct-trace-format-src} \
                                       ${io-mon-src} \
                                       ${nim-shm-gset-src} \
                                       ${nim-shm-queue-src} \
@@ -1002,6 +1208,7 @@
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
+            CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;
             IO_MON_SRC = "${io-mon-src}/src";
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
             SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
@@ -1014,6 +1221,25 @@
             XXHASH_PREFIX = pkgs.xxHash;
             packages = [
               runquotaTools
+              # ``ct-test`` — CodeTracer's cross-language test driver. On PATH
+              # so `ct-test test discover|run` is available in the dev shell
+              # without a hand build. Nothing in reprobuild's own build or test
+              # path consumes it yet; wiring it into scripts/run_tests.sh is a
+              # separate, later step. One thing to know before relying on it:
+              # it is whatever ``codetracer-src`` is pinned to, not whatever is
+              # in a sibling checkout. Changes made in a local codetracer tree
+              # reach this binary only once they are pushed and the pin is
+              # bumped (or the input is overridden for the session).
+              #
+              # ``test run`` is safe at any ``--threads`` value on this pin. An
+              # earlier pin aborted during teardown once a run used 21 or more
+              # workers — a heap-lifetime bug in CodeTracer's
+              # ``run_orchestration.runUnits``, where worker-allocated results
+              # were freed after their threads had exited. It is fixed at the
+              # source by that module's ``ResultHandoff``, and the pin is now
+              # past the fix. Any ``--threads`` cap set because of it can go;
+              # such a cap never made anything safe in the first place.
+              ctTestTools
               pkgs.just
               nimFork
               # Used by the ct-build CI step to bake reprobuild's runtime library
@@ -1043,6 +1269,12 @@
               pkgs.repomix
               pkgs.pre-commit
               pkgs.shellcheck
+              # Validates .github/workflows/ the way GitHub does, via
+              # scripts/check_workflows.sh in `just lint`. Actions expression
+              # syntax lives inside YAML scalars, so a YAML parser cannot see a
+              # malformed expression -- and a workflow GitHub rejects at load
+              # time produces a failure run with no jobs and no annotation.
+              pkgs.actionlint
               pkgs.shfmt
               pkgs.typos
               # Spec-Implementation M2a: clingo for the repro_solver

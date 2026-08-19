@@ -99,7 +99,6 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     let absPath = projectRoot / relPath
     let posixAbs = absPath.replace("\\", "/")
     resolvedUrl = "file://" & posixAbs
-  let escapedUrl = resolvedUrl.replace("\"", "\\\"")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
@@ -108,9 +107,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   var script = "set -e; "
   script.add("rm -rf \"" & escapedStaged & "\"; ")
   script.add("mkdir -p \"" & escapedStaged & "\"; ")
-  script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
-  script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" & escapedUrl &
-    "\"; fi; ")
+  script.appendCurlDownload(tarball, resolvedUrl)
   case spec.hashAlg
   of dshaSha256:
     script.add("echo \"" & escapedHash & "  " & escapedTarball &
@@ -491,10 +488,22 @@ proc cmake_package*(srcDir: string;
 
   # CMake records its generator and toolchain in the build tree. Reusing a
   # directory configured by another generator makes a fresh source build fail
-  # before it can update any cache entries, so configure must start clean.
+  # before it can update any cache entries. Key cleanup on the complete
+  # configure identity so a changed configuration starts clean while an
+  # identical warm build preserves the configured tree.
   if projectRoot.len > 0:
     let cleanStamp = projectRoot / ".repro" / "build" / "cmake-clean.stamp"
     let buildDirAbs = projectRoot / buildDir
+    var cleanIdentityParts = @[
+      "reprobuild.cmake-clean.v1",
+      srcDir,
+      buildDir,
+      generator,
+    ]
+    cleanIdentityParts.add(effectiveCacheVars)
+    for entry in extraEnv:
+      cleanIdentityParts.add(entry[0] & "=" & entry[1])
+    let cleanIdentity = cleanIdentityParts.join("\x1e")
     let cleanScript = "set -e; rm -rf \"" &
       buildDirAbs.replace("\"", "\\\"") & "\"; : > \"" &
       cleanStamp.replace("\"", "\\\"") & "\""
@@ -506,15 +515,22 @@ proc cmake_package*(srcDir: string;
         cleanInputs.add(output)
     let cleanEdge = buildAction(
       id = "cmake-clean-build-dir-" & pkgName,
-      call = inlineExecCall(@["sh", "-c", cleanScript]),
+      call = inlineExecCall(@[
+        "sh", "-c", cleanScript, "reprobuild-cmake-clean", cleanIdentity]),
       deps = cleanDeps,
       inputs = cleanInputs,
       outputs = @[cleanStamp],
-      cacheable = false,
-      dependencyPolicy = automaticMonitorPolicy(),
+      # The existing build tree is intentionally discarded state, not an
+      # input. Monitoring it would make the downstream configure/build writes
+      # invalidate this cleanup edge on every warm build.
+      dependencyPolicy = automaticMonitorPolicy(@[buildDirAbs]),
       commandStatsId = "cmake_package.clean_build_dir",
       toolIdentityRefs = @["sh"])
     configureAfter = @[cleanEdge]
+
+  var configureIdentityInputs: seq[string] = @[]
+  for predecessor in configureAfter:
+    configureIdentityInputs.add(predecessor.outputs)
 
   let configureEdge = cmake.configure(
     srcDir = srcDir,
@@ -541,6 +557,8 @@ proc cmake_package*(srcDir: string;
     else: @[m9r79CmSrcDirAbs]
   setRegisteredActionDeclaredOutputs(configureEdge.id, @[m9r79CmBuildDirAbs])
   setRegisteredActionReadOnlyRoots(configureEdge.id, m9r79CmReadOnly)
+  setRegisteredActionDependencyPolicy(configureEdge.id,
+    automaticMonitorPolicy(@[m9r79CmBuildDirAbs]))
   # M9.R.14g.6 — inline-exec build action. cmake's real "build" mode is
   # selected by the ``--build`` flag, NOT by a ``build`` subcommand
   # literal.
@@ -617,10 +635,13 @@ proc cmake_package*(srcDir: string;
     id = "cmake-build-" & pkgName,
     call = inlineExecCall(@["sh", "-c", buildScript]),
     deps = @[configureEdge.id],
-    inputs = configureEdge.outputs,
+    # The configured tree is both consumed and mutated by this phase. Its
+    # immutable cleanup/configuration identity is the declared input; sources
+    # and tools remain dynamically discovered outside the ignored build tree.
+    inputs = configureIdentityInputs,
     outputs = @[buildStamp],
     pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(@[m9r79CmBuildDirAbs]),
     commandStatsId = "cmake_package.build",
     toolIdentityRefs = @["cmake", "sh"] & cmakeDepRefs,
     env = extraEnv,

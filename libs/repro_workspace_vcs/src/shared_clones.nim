@@ -31,6 +31,8 @@
 
 import std/[os, osproc, strutils, times]
 
+import git_tool
+
 const
   AlternatesRelPath* = "objects/info/alternates"
     ## Path, relative to a git object-store root, of the alternates file
@@ -273,7 +275,8 @@ proc runGit(gitBin: string; args: openArray[string];
   for arg in args:
     cmd.add(" ")
     cmd.add(quoteShell(arg))
-  let res = execCmdEx(cmd, workingDir = workingDir)
+  let res = execCmdEx(cmd, workingDir = workingDir,
+    env = scrubbedGitRepositoryEnv())
   (code: res.exitCode, output: res.output)
 
 proc looksLikeGitDir(path: string): bool =

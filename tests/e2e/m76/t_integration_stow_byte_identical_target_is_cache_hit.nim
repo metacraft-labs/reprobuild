@@ -43,15 +43,42 @@
 ##      trivially byte-identical. Apply must materialize it cleanly as
 ##      a cache-hit, not raise `EStowConflict`.
 
-when not defined(windows):
-  {.warning[UnreachableCode]: off.}
-  echo "[platform N/A] t_integration_stow_byte_identical_target_is_cache_hit: " &
+const PlatformSkipReason =
+  "[platform N/A] t_integration_stow_byte_identical_target_is_cache_hit: " &
     "requires Windows stow junction fixtures"
-  quit(0)
+
+when not defined(windows):
+  # The Windows-only branch below cannot be compiled here (its imports
+  # and stow-junction fixtures are Windows-shaped), so the cases are
+  # re-declared as skips rather than left undeclared. Previously this
+  # branch did ``echo`` + ``quit(0)`` at module init: the binary emitted
+  # no catalog, stayed an opaque whole-binary exit-0 PASS, and these
+  # four cases were invisible to every gate. The names must stay in step
+  # with the ``else`` branch.
+  import ct_test_unittest_parallel
+
+  suite "M76 gate: integration_stow_byte_identical_target_is_cache_hit":
+
+    test "byte-identical regular-file target is a no-op cache-hit; " &
+         "apply succeeds, file untouched, plan and apply agree":
+      skip(PlatformSkipReason)
+
+    test "wrong-source link whose resolved content is byte-identical " &
+         "to the stow source is a cache-hit":
+      skip(PlatformSkipReason)
+
+    test "genuinely-differing regular-file target still raises " &
+         "EStowConflict; --reconcile-drift required (M72 contract)":
+      skip(PlatformSkipReason)
+
+    test "stow target reached through a parent directory junction into " &
+         "the stow tree materializes cleanly as a cache-hit":
+      skip(PlatformSkipReason)
 else:
   import std/[os, osproc, streams, strtabs, strutils, tempfiles,
-    times, unittest]
+    times]
 
+  import ct_test_unittest_parallel
   import repro_home_generations
   import repro_local_store
   import repro_home_apply

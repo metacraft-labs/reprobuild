@@ -29,8 +29,35 @@ import repro_depfile
 import repro_hash
 import repro_local_store
 import io_mon/writer
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/test_tool_identity_env_plumbing"
+# One scratch root PER CASE, not per binary.
+#
+# Every case here calls ``resetTmp()``, which is ``removeDir`` +
+# ``createDir`` on this path. As a module-level constant that path was
+# shared mutable state the moment the runner began executing this binary
+# once per case: eight sibling processes then raced on one directory, and
+# a completed 6825-case run recorded exactly the two shapes that race
+# produces —
+#
+#   Unhandled exception: Directory not empty
+#     Additional info: build/test-tmp/test_tool_identity_env_plumbing/cache-skip
+#   Unhandled exception: sqlite3_exec failed (10): disk I/O error
+#     (SQL: PRAGMA journal_mode = WAL)
+#
+# — the first from one case's ``removeDir`` walking a tree another case
+# was repopulating, the second from a case's local store being deleted
+# out from under an open sqlite handle. All four affected cases pass
+# standalone and at ``--threads=1``, which is the signature of shared
+# state rather than a logic defect.
+#
+# ``testCaseScratchSlug`` keys on the ``--run`` name, so the directory
+# set stays bounded and stable across runs and whole-binary execution
+# (one process, cases strictly sequential) keeps the single shared
+# directory it always had. Same remedy as commit 4b82e936 applied to
+# t_adapter_chain and its siblings; this binary was missed there.
+let TmpDir = "build" / "test-tmp" / "test_tool_identity_env_plumbing" /
+  testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):
@@ -105,10 +132,12 @@ proc makeResolver(table: Table[string, ResolvedToolIdentity]):
       none(ResolvedToolIdentity)
 
 proc mockedIdentity(binDirs: openArray[string];
-                    resolvedExe = ""): ResolvedToolIdentity =
+                    resolvedExe = "";
+                    libDirs: openArray[string] = []): ResolvedToolIdentity =
   ResolvedToolIdentity(
     binDirs: @binDirs,
-    resolvedExecutablePath: resolvedExe)
+    resolvedExecutablePath: resolvedExe,
+    libDirs: @libDirs)
 
 proc fingerprintForToken(token: string): ContentDigest =
   casDigest(token.toOpenArrayByte(0, token.high),
@@ -116,8 +145,10 @@ proc fingerprintForToken(token: string): ContentDigest =
 
 proc oneAction(actionId: string;
                refs: seq[string];
-               fingerprintToken = "default"): BuildGraph =
-  let argv = stubArgv()
+               fingerprintToken = "default";
+               actionEnv: seq[string] = @[];
+               argvOverride: seq[string] = @[]): BuildGraph =
+  let argv = if argvOverride.len > 0: argvOverride else: stubArgv()
   var act = BuildAction(
     kind: bakProcess,
     id: actionId,
@@ -126,6 +157,7 @@ proc oneAction(actionId: string;
     outputs: @[],
     argv: argv,
     cwd: getCurrentDir(),
+    env: actionEnv,
     cacheable: false,
     weakFingerprint: fingerprintForToken(actionId & "|" & fingerprintToken),
     actionCachePolicy: ffpTimestamp,
@@ -244,6 +276,10 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
       "/work/recipes/packages/source/python3/.repro/output/install/usr/lib"
     let sourcePythonBundleLib =
       "/work/recipes/packages/source/python3-with-modules/.repro/output/install/usr/lib"
+    let sourceReadlineLib =
+      "/work/recipes/packages/source/readline/.repro/output/install/usr/lib"
+    let nixReadlineLib =
+      "/nix/store/0123456789abcdefghijklmnopqrstuv-readline-8.2p13/lib"
     let compilerBootstrapLib = absolutePath(TmpDir / "compiler-bootstrap-lib")
     createDir(compilerBootstrapLib)
     writeFile(compilerBootstrapLib / "libc.so.6", "synthetic bootstrap libc")
@@ -251,7 +287,7 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     let paths = ResolvedAuxPaths(
       libDirs: @[nixGlibcLib, sourceGlibcLib, federatedGlibcLib, nixPythonLib,
         sourcePythonLib, sourcePythonBundleLib, compilerBootstrapLib,
-        dependencyLib])
+        sourceReadlineLib, nixReadlineLib, dependencyLib])
 
     let argvEnv = applyResolvedAuxPathsArgv(
       @["LIBRARY_PATH=/existing/link", "LD_LIBRARY_PATH=/existing/runtime"],
@@ -259,7 +295,8 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     check envValue(argvEnv, "LIBRARY_PATH").split(pathSeparator()) ==
       @[nixGlibcLib, sourceGlibcLib, federatedGlibcLib, nixPythonLib,
         sourcePythonLib,
-        sourcePythonBundleLib, compilerBootstrapLib, dependencyLib,
+        sourcePythonBundleLib, compilerBootstrapLib, sourceReadlineLib,
+        nixReadlineLib, dependencyLib,
         "/existing/link"]
     check envValue(argvEnv, "LD_LIBRARY_PATH").split(pathSeparator()) ==
       @[dependencyLib, "/existing/runtime"]
@@ -271,10 +308,31 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     check tableEnv["LIBRARY_PATH"].split(pathSeparator()) ==
       @[nixGlibcLib, sourceGlibcLib, federatedGlibcLib, nixPythonLib,
         sourcePythonLib,
-        sourcePythonBundleLib, compilerBootstrapLib, dependencyLib,
+        sourcePythonBundleLib, compilerBootstrapLib, sourceReadlineLib,
+        nixReadlineLib, dependencyLib,
         "/existing/link"]
     check tableEnv["LD_LIBRARY_PATH"].split(pathSeparator()) ==
       @[dependencyLib, "/existing/runtime"]
+
+  when defined(posix):
+    test "explicit action loader env wins at process launch":
+      resetTmp()
+      let cacheRoot = TmpDir / "cache-loader-override"
+      createDir(cacheRoot)
+      var table = initTable[string, ResolvedToolIdentity]()
+      table["readline"] = mockedIdentity(@[],
+        libDirs = @["/synthetic/source/readline/lib"])
+      let resolver = makeResolver(table)
+      let g = oneAction("loader-override", @["readline"],
+        fingerprintToken = "loader-override",
+        actionEnv = @["LD_LIBRARY_PATH="],
+        argvOverride = @["sh", "-c", "printf %s \"$LD_LIBRARY_PATH\""])
+
+      let res = runBuild(g, runnerCfg(cacheRoot, resolver))
+
+      check res.results.len == 1
+      check res.results[0].status == asSucceeded
+      check readBypassStdout(cacheRoot, "loader-override") == ""
 
   test "PATH is prepended with the resolved bin dir when ref + resolver are set":
     resetTmp()

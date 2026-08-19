@@ -19,11 +19,69 @@ proc identText(node: NimNode): string =
     result = node.repr
 
 proc stringLiteral(node: NimNode): string =
+  ## The `else` branch is load-bearing and is NOT a value accessor: several
+  ## call sites pass an identifier on purpose (``executable foo`` names its
+  ## binary with an ident, ``call`` heads, interface command names), and rely
+  ## on getting the ident's spelling back.
+  ##
+  ## That makes it the wrong helper for a *value* field. On a `const` or a
+  ## `func` call it returns the SOURCE TEXT, which the emitters then
+  ## `escForCode` into the generated literal — so `sha256 = PinnedSha` reaches
+  ## the registry as the 9-character string `PinnedSha`. No error, no warning,
+  ## a plausible wrong value in the one field where wrong is most expensive.
+  ## Value fields must use `exprCode` below instead.
   case node.kind
   of nnkStrLit..nnkTripleStrLit:
     result = node.strVal
   else:
     result = node.repr
+
+proc isStrLit(node: NimNode): bool =
+  not node.isNil and node.kind in {nnkStrLit..nnkTripleStrLit}
+
+proc exprCode(node: NimNode): string =
+  ## Source text for a *value* field, to be spliced VERBATIM into the
+  ## generated literal so the Nim COMPILER evaluates it rather than this
+  ## macro. Transform, don't evaluate.
+  ##
+  ## A literal is still normalised through `escape()` so the emitted source is
+  ## byte-identical to what the previous `escForCode(stringLiteral(...))` path
+  ## produced — the literal case must not shift at all. Anything else is
+  ## emitted unchanged and resolved in the call-site scope, which is what
+  ## makes a shared vocabulary (`condaUrl(...)`, `binDir(plConda)`) usable at
+  ## the point of declaration.
+  if node.isNil: "\"\""
+  elif node.isStrLit: node.strVal.escape()
+  else: node.repr
+
+proc litText(node: NimNode): string =
+  ## The value, but ONLY when it is a literal — otherwise the empty string.
+  ##
+  ## Macro-time validation (whitelists, relative-path checks) can only inspect
+  ## text it actually has. Callers must treat "" as "not knowable here" and
+  ## skip the check rather than reject the declaration: the alternative is
+  ## refusing every expression, which is the restriction being removed.
+  if node.isStrLit: node.strVal else: ""
+
+proc requireStrLit(node: NimNode; what: string): string =
+  ## For the fields the macro genuinely must KNOW, because it uses the text to
+  ## do something at compile time — deduplicate it, generate a file from it,
+  ## key a table by it. Those cannot take an expression, and the honest answer
+  ## is to say so.
+  ##
+  ## What they must not do is call `stringLiteral` and accept its `.repr`
+  ## fallback, which turns `alias = ShortFlag` into the alias "ShortFlag" —
+  ## wrong, silent, and discovered only when the flag fails to parse.
+  if not node.isStrLit:
+    error(what & " must be a string literal: it is used at compile time and " &
+      "the macro cannot evaluate an expression here", node)
+  node.strVal
+
+proc codeOrEmpty(code: string): string =
+  ## Emit-side companion to `exprCode`. An unset field holds no source at all,
+  ## and splicing "" would produce `field: ,` — a syntax error in the generated
+  ## literal rather than the empty string that was meant.
+  if code.len == 0: "\"\"" else: code
 
 proc stringSeqLiteral(node: NimNode): seq[string] =
   let values =
@@ -34,7 +92,7 @@ proc stringSeqLiteral(node: NimNode): seq[string] =
   if values.kind notin {nnkBracket, nnkPar}:
     error("expected a string sequence literal", node)
   for item in values:
-    result.add(stringLiteral(item))
+    result.add(requireStrLit(item, "string sequence element"))
 
 proc intLiteral(node: NimNode; fallback: int): int =
   case node.kind
@@ -165,7 +223,7 @@ proc parseParam(node: NimNode): CliParamDef =
     for i in optionStart ..< node.len:
       let aliasValue = namedValue(node[i], "alias")
       if not aliasValue.isNil:
-        result.alias = stringLiteral(aliasValue)
+        result.alias = requireStrLit(aliasValue, "param alias")
       let requiredValue = namedValue(node[i], "required")
       if not requiredValue.isNil:
         result.required = boolLiteral(requiredValue, result.required)
@@ -204,7 +262,7 @@ proc parseCommandDependencyPolicy(node: NimNode;
   for i in 2 ..< node.len:
     let depfileValue = namedValue(node[i], "depfile")
     if not depfileValue.isNil:
-      let single = stringLiteral(depfileValue)
+      let single = requireStrLit(depfileValue, "dependencyPolicy depfile")
       if single.len > 0 and single notin result.depfiles:
         result.depfiles.add(single)
     let depfilesValue = namedValue(node[i], "depfiles")
@@ -661,21 +719,92 @@ proc parseLibrary(packageName: string; node: NimNode): LibraryDef =
       # Defaults (empty) to the convention ``"src"`` at the splice seam.
       # ``exportedPath: "lib"`` parses to ``Call(exportedPath,
       # StmtList(<lit>))``; walk to the leaf string literal.
+      #
+      # The value is stored as the ``.repr`` of the source node and inlined
+      # VERBATIM into the generated source, so the outer ``parseStmt``
+      # re-parses it in the call-site scope and the Nim compiler evaluates it.
+      # This is the same "reparse" hook the typed-output ``pathExpr`` uses
+      # ("Inline the user's pathExpr source verbatim", below).
+      #
+      # It used to demand ``nnkStrLit``. That restriction came from the macro
+      # re-serialising a known value back into source text: to emit a literal
+      # you must first BE a literal. Storing the expression instead means a
+      # `const`, a `func` call such as ``sharedLibDir(plConda)``, or anything
+      # else the compiler can fold is accepted without the macro evaluating —
+      # or even inspecting — it.
       if stmt.len < 2:
         error("library exportedPath: requires a string value", stmt)
       var pathNode = stmt[1]
       while pathNode.kind == nnkStmtList and pathNode.len == 1:
         pathNode = pathNode[0]
-      if pathNode.kind != nnkStrLit:
-        error("library exportedPath: requires a string literal", pathNode)
-      result.exportedPath = pathNode.strVal
+      # NOTE the two lifetimes of this field. On the macro-time ``LibraryDef``
+      # built here it carries the EXPRESSION SOURCE; on the runtime
+      # ``LibraryDef`` produced by the emitted literal it carries the evaluated
+      # VALUE. They are different instances, and the emitter is the seam.
+      result.exportedPath = pathNode.repr
     of "discard":
       discard
-    else:
-      # Unknown body member — ignore for forward compatibility but the
-      # bare ``discard`` and a ``kind:`` setter are the only recognised
-      # forms in M12.
+    # Members this parser does not handle but ANOTHER pass does. The library
+    # body is walked more than once, so "parseLibrary ignores it" is not the
+    # same as "nobody consumes it" — which is precisely why this arm could not
+    # simply be turned into an error.
+    #
+    # The cross-pass inventory for a ``library <name>:`` body:
+    #
+    #   kind, exportedPath, discard  → here
+    #   build                        → emitM4ArtifactBuildLowering, which
+    #                                  re-classifies the body and claims
+    #                                  soM4Build (macros_b.nim)
+    #   cli                          → emitM6CliLowering, which head-matches
+    #                                  ``cli`` on any M3 artifact body,
+    #                                  library included
+    #
+    # Nothing else is claimed by anything.
+    of "build", "cli":
       discard
+    else:
+      # Claimed by nobody, so it does nothing at all. Warn rather than error:
+      # this arm is on the path of every library declaration in the tree, and
+      # a forward-compatible member may exist that predates this check.
+      #
+      # The case that motivates saying anything is `when`: a
+      # ``when defined(windows): exportedPath: "Library/bin"`` inside a library
+      # body compiles cleanly and sets NOTHING, which is the blocker for
+      # expressing per-platform library layout (see
+      # docs/runtime-library-dependencies.md). `calleeName` returns "" for a
+      # `when`, so name it explicitly instead of printing an empty quote.
+      case stmt.kind
+      of nnkCommentStmt:
+        discard
+      of nnkDiscardStmt:
+        # The `of "discard":` arm above is DEAD CODE and always has been: a
+        # bare `discard` parses as nnkDiscardStmt, and `calleeName` returns ""
+        # for anything that is not a Call/Command. It has been reaching the
+        # catch-all since M12 and being silently ignored — which happened to
+        # be the right outcome, so nothing ever surfaced it. Making the
+        # catch-all speak is what exposed it: 307 of the 321 library-body
+        # statements in the tree are bare `discard`, so this would have
+        # warned on almost every library declaration.
+        #
+        # The arm above is left in place: it costs nothing and correctly
+        # handles `discard` written as a call. This is the shape that
+        # actually occurs.
+        discard
+      of nnkWhenStmt:
+        warning("a `when` inside a library body is not evaluated — the " &
+          "parser walks the statements literally, so neither branch's " &
+          "setters are applied and the declaration is silently left at its " &
+          "defaults", stmt)
+      else:
+        let member = calleeName(stmt)
+        if member.len > 0:
+          warning("unknown library body member '" & member &
+            "' — recognised members are kind, exportedPath, build, cli and " &
+            "discard; this statement is ignored", stmt)
+        else:
+          warning("this statement in a library body is not a recognised " &
+            "member and is ignored; recognised members are kind, " &
+            "exportedPath, build, cli and discard", stmt)
 
 proc selectorFromConstraint(value: string): string =
   let parts = value.strip().splitWhitespace()
@@ -951,54 +1080,105 @@ proc parseNixPackageProvisioning(node: NimNode): NixPackageProvisioningDef =
   if calleeName(node).normalize != "nixpackage" or node.len < 2:
     error("provisioning expects nixPackage \"selector\", executablePath = \"bin/name\"",
       node)
-  result.selector = stringLiteral(node[1])
+  # As in ``parseTarballProvisioning``, the string fields on the macro-time def
+  # carry emittable SOURCE; the emitters splice them verbatim.
+  #
+  # Two fields are deliberately NOT expression-valued, because the macro makes
+  # structural decisions from their text and cannot make them from an opaque
+  # expression:
+  #
+  #   * the positional selector — tested for the ``nixpkgs#`` prefix and SLICED
+  #     to build the default lock identity;
+  #   * ``expressionFile`` — resolved here against the declaring file's
+  #     directory, which is knowable only at macro time.
+  #
+  # Both now say so instead of silently taking the source text. Everything else
+  # — including ``nixpkgsRev`` / ``nixpkgsNarHash``, the fields ~227 catalog
+  # entries repeat verbatim — accepts an expression, so a shared
+  # ``CanonicalNixpkgsRev`` const can be named once and referenced.
+  if not node[1].isStrLit:
+    error("nixPackage selector must be a string literal: the macro tests it " &
+      "for the \"nixpkgs#\" prefix and slices it to derive lockIdentity", node[1])
+  let selectorText = node[1].strVal
+  result.selector = exprCode(node[1])
   result.packageId = result.selector
   result.sourceFile = loc.file
   result.sourceLine = loc.line
+  var
+    executablePathNode, expressionFileNode: NimNode = nil
+    nixpkgsRefNode, nixpkgsRevNode, nixpkgsNarHashNode: NimNode = nil
+    lockIdentityNode: NimNode = nil
   for i in 2 ..< node.len:
     let executablePathValue = namedValue(node[i], "executablePath")
     if not executablePathValue.isNil:
-      result.executablePath = stringLiteral(executablePathValue)
+      executablePathNode = executablePathValue
+      result.executablePath = exprCode(executablePathValue)
     let expressionFileValue = namedValue(node[i], "expressionFile")
     if not expressionFileValue.isNil:
-      result.expressionFile = stringLiteral(expressionFileValue)
+      expressionFileNode = expressionFileValue
+      if not expressionFileValue.isStrLit:
+        error("nixPackage expressionFile must be a string literal: it is " &
+          "resolved against the declaring file's directory at compile time",
+          expressionFileValue)
+      result.expressionFile = expressionFileValue.strVal
     let nixpkgsRefValue = namedValue(node[i], "nixpkgsRef")
     if not nixpkgsRefValue.isNil:
-      result.nixpkgsRef = stringLiteral(nixpkgsRefValue)
+      nixpkgsRefNode = nixpkgsRefValue
+      result.nixpkgsRef = exprCode(nixpkgsRefValue)
     let nixpkgsRevValue = namedValue(node[i], "nixpkgsRev")
     if not nixpkgsRevValue.isNil:
-      result.nixpkgsRev = stringLiteral(nixpkgsRevValue)
+      nixpkgsRevNode = nixpkgsRevValue
+      result.nixpkgsRev = exprCode(nixpkgsRevValue)
     let nixpkgsNarHashValue = namedValue(node[i], "nixpkgsNarHash")
     if not nixpkgsNarHashValue.isNil:
-      result.nixpkgsNarHash = stringLiteral(nixpkgsNarHashValue)
+      nixpkgsNarHashNode = nixpkgsNarHashValue
+      result.nixpkgsNarHash = exprCode(nixpkgsNarHashValue)
     let packageIdValue = namedValue(node[i], "packageId")
     if not packageIdValue.isNil:
-      result.packageId = stringLiteral(packageIdValue)
+      result.packageId = exprCode(packageIdValue)
     let lockIdentityValue = namedValue(node[i], "lockIdentity")
     if not lockIdentityValue.isNil:
-      result.lockIdentity = stringLiteral(lockIdentityValue)
-  if result.selector.len == 0:
+      lockIdentityNode = lockIdentityValue
+      result.lockIdentity = exprCode(lockIdentityValue)
+  if selectorText.len == 0:
     error("nixPackage selector must not be empty", node)
-  if result.nixpkgsRev.len > 0 and result.nixpkgsRef.len == 0:
-    result.nixpkgsRef = "github:NixOS/nixpkgs/" & result.nixpkgsRev
-  if result.nixpkgsRef.len > 0 and not result.selector.startsWith("nixpkgs#"):
+  # Presence is a property of the NODE now: an expression-valued nixpkgsRev is
+  # present even though nothing here can know what it evaluates to.
+  if not nixpkgsRevNode.isNil and nixpkgsRefNode.isNil:
+    result.nixpkgsRef = "(\"github:NixOS/nixpkgs/\" & (" & result.nixpkgsRev & "))"
+  let hasNixpkgsRef = not nixpkgsRefNode.isNil or not nixpkgsRevNode.isNil
+  if hasNixpkgsRef and not selectorText.startsWith("nixpkgs#"):
     error("nixPackage nixpkgsRef/nixpkgsRev metadata applies only to nixpkgs# selectors",
       node)
-  if result.lockIdentity.len == 0:
-    if result.nixpkgsRef.len > 0:
-      result.lockIdentity = result.nixpkgsRef
-      if result.nixpkgsNarHash.len > 0:
-        result.lockIdentity.add("?narHash=" & result.nixpkgsNarHash)
-      result.lockIdentity.add("#" & result.selector["nixpkgs#".len .. ^1])
+  if lockIdentityNode.isNil:
+    if hasNixpkgsRef:
+      # Built as an EMITTED expression so it follows an expression-valued ref
+      # or narHash. The selector suffix is a compile-time constant because the
+      # selector is required to be a literal above.
+      var parts = @[result.nixpkgsRef]
+      if not nixpkgsNarHashNode.isNil:
+        parts.add("\"?narHash=\"")
+        parts.add(result.nixpkgsNarHash)
+      parts.add(("#" & selectorText["nixpkgs#".len .. ^1]).escape())
+      result.lockIdentity = "(" & parts.join(" & ") & ")"
     else:
       result.lockIdentity = result.selector
-  if result.executablePath.len == 0:
+  if executablePathNode.isNil:
     error("nixPackage requires executablePath = \"bin/name\"", node)
-  if result.executablePath.isAbsolute or result.executablePath.startsWith(".."):
+  let executablePathText = litText(executablePathNode)
+  if executablePathText.len > 0 and
+      (executablePathText.isAbsolute or executablePathText.startsWith("..")):
     error("nixPackage executablePath must be relative to the realized output",
       node)
+  if executablePathNode.isStrLit and executablePathText.len == 0:
+    error("nixPackage requires executablePath = \"bin/name\"", node)
   if result.expressionFile.len > 0 and not result.expressionFile.isAbsolute:
     result.expressionFile = loc.file.splitPath.head / result.expressionFile
+  # ``expressionFile`` stays a macro-time VALUE (it was just resolved against
+  # the source directory), so it is the one field the emitters must still
+  # quote. Do it here so every emitter can treat the record uniformly.
+  if not expressionFileNode.isNil:
+    result.expressionFile = result.expressionFile.escape()
 
 proc unsafeRelativePath(value: string): bool =
   let normalized = value.replace('\\', '/')
@@ -1015,61 +1195,104 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
       node)
   result.sourceFile = loc.file
   result.sourceLine = loc.line
-  result.archiveType = "tar.gz"
+  # NOTE the two lifetimes of these fields. On the macro-time
+  # ``TarballProvisioningDef`` built here every string field carries the
+  # EXPRESSION SOURCE (already quoted when it came from a literal); on the
+  # runtime instance produced by the emitted literal it carries the evaluated
+  # VALUE. The emitters in ``packageLiteral`` / ``contributionLiteral`` are the
+  # seam, and they splice these verbatim — no ``escForCode``.
+  result.archiveType = "\"tar.gz\""
   result.stripComponents = 0
+  # Keep the argument nodes so presence, literalness and value stay separable.
+  # ``.len == 0`` can no longer stand in for "absent": an absent field and one
+  # set to an expression are different states, and only the first is an error.
+  var
+    urlNode, sha256Node, executablePathNode: NimNode = nil
+    cpuNode, osNode: NimNode = nil
+    packageIdNode, lockIdentityNode: NimNode = nil
+    stripComponentsNode: NimNode = nil
   for i in 1 ..< node.len:
     let urlValue = namedValue(node[i], "url")
     if not urlValue.isNil:
-      result.url = stringLiteral(urlValue)
+      urlNode = urlValue
+      result.url = exprCode(urlValue)
     let mirrorValue = namedValue(node[i], "mirror")
     if not mirrorValue.isNil:
-      result.mirrors.add(stringLiteral(mirrorValue))
+      result.mirrors.add(exprCode(mirrorValue))
     let sha256Value = namedValue(node[i], "sha256")
     if not sha256Value.isNil:
-      result.sha256 = stringLiteral(sha256Value)
+      sha256Node = sha256Value
+      result.sha256 = exprCode(sha256Value)
     let archiveTypeValue = namedValue(node[i], "archiveType")
     if not archiveTypeValue.isNil:
-      result.archiveType = stringLiteral(archiveTypeValue)
+      result.archiveType = exprCode(archiveTypeValue)
     let executablePathValue = namedValue(node[i], "executablePath")
     if not executablePathValue.isNil:
-      result.executablePath = stringLiteral(executablePathValue)
+      executablePathNode = executablePathValue
+      result.executablePath = exprCode(executablePathValue)
     let stripComponentsValue = namedValue(node[i], "stripComponents")
     if not stripComponentsValue.isNil:
+      stripComponentsNode = stripComponentsValue
       result.stripComponents = intLiteral(stripComponentsValue, 0)
     let packageIdValue = namedValue(node[i], "packageId")
     if not packageIdValue.isNil:
-      result.packageId = stringLiteral(packageIdValue)
+      packageIdNode = packageIdValue
+      result.packageId = exprCode(packageIdValue)
     let lockIdentityValue = namedValue(node[i], "lockIdentity")
     if not lockIdentityValue.isNil:
-      result.lockIdentity = stringLiteral(lockIdentityValue)
+      lockIdentityNode = lockIdentityValue
+      result.lockIdentity = exprCode(lockIdentityValue)
     let cpuValue = namedValue(node[i], "cpu")
     if not cpuValue.isNil:
-      result.cpu = stringLiteral(cpuValue)
+      cpuNode = cpuValue
+      result.cpu = exprCode(cpuValue)
     let osValue = namedValue(node[i], "os")
     if not osValue.isNil:
-      result.os = stringLiteral(osValue)
-  if result.url.len == 0:
+      osNode = osValue
+      result.os = exprCode(osValue)
+  # Presence is checked on the NODE; emptiness of the emitted code would also
+  # be true for `url = ""`, which is a different mistake and keeps its own
+  # diagnostic below.
+  if urlNode.isNil:
     error("tarball requires url = \"...\"", node)
-  if result.sha256.len == 0:
+  if sha256Node.isNil:
     error("tarball requires sha256 = \"...\"", node)
-  if result.executablePath.len == 0:
+  if executablePathNode.isNil:
     error("tarball requires executablePath = \"bin/name\"", node)
-  if result.executablePath.unsafeRelativePath:
+  if urlNode.isStrLit and urlNode.strVal.len == 0:
+    error("tarball requires url = \"...\"", node)
+  if sha256Node.isStrLit and sha256Node.strVal.len == 0:
+    error("tarball requires sha256 = \"...\"", node)
+  if executablePathNode.isStrLit and executablePathNode.strVal.len == 0:
+    error("tarball requires executablePath = \"bin/name\"", node)
+  # Text-inspecting checks run only where there is text to inspect. An
+  # expression is validated at its own call site by the type system, and by
+  # the runtime consumers of the realized prefix.
+  let executablePathText = litText(executablePathNode)
+  if executablePathText.len > 0 and executablePathText.unsafeRelativePath:
     error("tarball executablePath must be relative to the realized prefix", node)
+  if not stripComponentsNode.isNil and
+      stripComponentsNode.kind notin {nnkIntLit..nnkUInt64Lit}:
+    # `intLiteral` silently substitutes its fallback, so a non-literal here
+    # would quietly mean 0. Say so instead.
+    error("tarball stripComponents must be an integer literal", node)
   if result.stripComponents < 0:
     error("tarball stripComponents must not be negative", node)
-  if result.cpu.len > 0 and
-      result.cpu.toLowerAscii() notin ["any", "x86_64", "aarch64"]:
+  let cpuText = litText(cpuNode)
+  if cpuText.len > 0 and cpuText.toLowerAscii() notin ["any", "x86_64", "aarch64"]:
     error("tarball cpu must be one of any|x86_64|aarch64; got '" &
-      result.cpu & "'", node)
-  if result.os.len > 0 and
-      result.os.toLowerAscii() notin ["any", "windows", "linux", "macos", "darwin"]:
+      cpuText & "'", node)
+  let osText = litText(osNode)
+  if osText.len > 0 and
+      osText.toLowerAscii() notin ["any", "windows", "linux", "macos", "darwin"]:
     error("tarball os must be one of any|windows|linux|macos|darwin; got '" &
-      result.os & "'", node)
-  if result.packageId.len == 0:
+      osText & "'", node)
+  # The derived defaults are now derived in the EMITTED code, so they follow
+  # an expression-valued url/sha256 instead of capturing its source text.
+  if packageIdNode.isNil:
     result.packageId = result.url
-  if result.lockIdentity.len == 0:
-    result.lockIdentity = "sha256:" & result.sha256
+  if lockIdentityNode.isNil:
+    result.lockIdentity = "(\"sha256:\" & (" & result.sha256 & "))"
 
 proc parseScoopProvisioning(node: NimNode): ScoopProvisioningDef =
   let loc = lineFile(node)
@@ -1079,69 +1302,96 @@ proc parseScoopProvisioning(node: NimNode): ScoopProvisioningDef =
   result.sourceFile = loc.file
   result.sourceLine = loc.line
   result.requiresExecutionProfileChecksum = true
+  # String fields carry emittable SOURCE; see ``parseTarballProvisioning``.
+  # Nothing here decides anything structural from the text, so every string
+  # field accepts an expression — the presence and mutual-exclusion rules are
+  # properties of which arguments were WRITTEN, which the nodes still answer.
+  var
+    bucketNode, appNode, versionNode, preferredVersionNode: NimNode = nil
+    manifestChecksumNode, executablePathNode: NimNode = nil
+    packageIdNode, lockIdentityNode: NimNode = nil
+    requiresExecProfileNode: NimNode = nil
   for i in 1 ..< node.len:
     let bucketValue = namedValue(node[i], "bucket")
     if not bucketValue.isNil:
-      result.bucket = stringLiteral(bucketValue)
+      bucketNode = bucketValue
+      result.bucket = exprCode(bucketValue)
     let appValue = namedValue(node[i], "app")
     if not appValue.isNil:
-      result.app = stringLiteral(appValue)
+      appNode = appValue
+      result.app = exprCode(appValue)
     let versionValue = namedValue(node[i], "version")
     if not versionValue.isNil:
-      result.version = stringLiteral(versionValue)
+      versionNode = versionValue
+      result.version = exprCode(versionValue)
     let preferredVersionValue = namedValue(node[i], "preferredVersion")
     if not preferredVersionValue.isNil:
-      result.preferredVersion = stringLiteral(preferredVersionValue)
+      preferredVersionNode = preferredVersionValue
+      result.preferredVersion = exprCode(preferredVersionValue)
     let manifestChecksumValue = namedValue(node[i], "manifestChecksum")
     if not manifestChecksumValue.isNil:
-      result.manifestChecksum = stringLiteral(manifestChecksumValue)
+      manifestChecksumNode = manifestChecksumValue
+      result.manifestChecksum = exprCode(manifestChecksumValue)
     let manifestUrlValue = namedValue(node[i], "manifestUrl")
     if not manifestUrlValue.isNil:
-      result.manifestUrl = stringLiteral(manifestUrlValue)
+      result.manifestUrl = exprCode(manifestUrlValue)
     let executablePathValue = namedValue(node[i], "executablePath")
     if not executablePathValue.isNil:
-      result.executablePath = stringLiteral(executablePathValue)
+      executablePathNode = executablePathValue
+      result.executablePath = exprCode(executablePathValue)
     let requiresExecProfileValue = namedValue(node[i],
       "requiresExecutionProfileChecksum")
     if not requiresExecProfileValue.isNil:
+      requiresExecProfileNode = requiresExecProfileValue
       result.requiresExecutionProfileChecksum = boolLiteral(
         requiresExecProfileValue, true)
     let packageIdValue = namedValue(node[i], "packageId")
     if not packageIdValue.isNil:
-      result.packageId = stringLiteral(packageIdValue)
+      packageIdNode = packageIdValue
+      result.packageId = exprCode(packageIdValue)
     let lockIdentityValue = namedValue(node[i], "lockIdentity")
     if not lockIdentityValue.isNil:
-      result.lockIdentity = stringLiteral(lockIdentityValue)
-  if result.bucket.len == 0:
+      lockIdentityNode = lockIdentityValue
+      result.lockIdentity = exprCode(lockIdentityValue)
+  if bucketNode.isNil or (bucketNode.isStrLit and bucketNode.strVal.len == 0):
     error("scoopApp requires bucket = \"<name>\"", node)
-  if result.app.len == 0:
+  if appNode.isNil or (appNode.isStrLit and appNode.strVal.len == 0):
     error("scoopApp requires app = \"<name>\"", node)
-  if result.version.len > 0 and result.preferredVersion.len > 0:
+  if not versionNode.isNil and not preferredVersionNode.isNil:
     error("scoopApp accepts version OR preferredVersion, not both", node)
-  if result.version.len == 0 and result.preferredVersion.len == 0:
+  if versionNode.isNil and preferredVersionNode.isNil:
     error("scoopApp requires version = \"<exact>\" or preferredVersion = " &
       "\"<range>\"", node)
-  if result.executablePath.len == 0:
+  if executablePathNode.isNil:
     error("scoopApp requires executablePath = \"<relative-path>\"", node)
-  if result.executablePath.unsafeRelativePath:
+  let executablePathText = litText(executablePathNode)
+  if executablePathNode.isStrLit and
+      (executablePathText.len == 0 or executablePathText.unsafeRelativePath):
     error("scoopApp executablePath must be a relative path inside the " &
       "Scoop app prefix", node)
-  if result.packageId.len == 0:
-    result.packageId =
-      if result.version.len > 0:
-        result.bucket & "/" & result.app & "@" & result.version
-      else:
-        result.bucket & "/" & result.app & "@" & result.preferredVersion
-  if result.lockIdentity.len == 0:
+  # ``boolLiteral`` shares the silent-fallback shape of ``intLiteral``: a
+  # non-literal quietly meant `true`, which is the SAFE default here but still
+  # not what was written. Reject rather than reinterpret.
+  if not requiresExecProfileNode.isNil and
+      requiresExecProfileNode.kind notin {nnkIdent, nnkSym} and
+      requiresExecProfileNode.kind notin {nnkNilLit}:
+    error("scoopApp requiresExecutionProfileChecksum must be true or false",
+      node)
+  # Derived identities become emitted expressions over whatever the fields
+  # hold, instead of macro-time concatenation of the macro's view of them.
+  let versionCode =
+    if versionNode.isNil: result.preferredVersion else: result.version
+  if packageIdNode.isNil:
+    result.packageId = "(" & result.bucket & " & \"/\" & " & result.app &
+      " & \"@\" & " & versionCode & ")"
+  if lockIdentityNode.isNil:
     result.lockIdentity =
-      if result.manifestChecksum.len > 0:
-        "scoop:" & result.bucket & "/" & result.app & ":" &
-          result.manifestChecksum
-      elif result.version.len > 0:
-        "scoop:" & result.bucket & "/" & result.app & "@" & result.version
+      if not manifestChecksumNode.isNil:
+        "(\"scoop:\" & " & result.bucket & " & \"/\" & " & result.app &
+          " & \":\" & " & result.manifestChecksum & ")"
       else:
-        "scoop:" & result.bucket & "/" & result.app & "@" &
-          result.preferredVersion
+        "(\"scoop:\" & " & result.bucket & " & \"/\" & " & result.app &
+          " & \"@\" & " & versionCode & ")"
 
 proc collectProvisioning(node: NimNode;
                          nixOutput: var seq[NixPackageProvisioningDef];
@@ -1357,7 +1607,7 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
     elif calleeName(stmt).normalize in ["defaulttoolprovisioning", "toolprovisioning"]:
       if stmt.len != 2:
         error("defaultToolProvisioning expects exactly one string literal", stmt)
-      let provisioning = stringLiteral(stmt[1])
+      let provisioning = requireStrLit(stmt[1], "defaultToolProvisioning")
       # M9.R.8 — accept ``from-source`` (the CLI canonical spelling)
       # alongside the four pre-existing modes so a recipe can opt in
       # to from-source provisioning declaratively without depending on
@@ -1404,10 +1654,75 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
         error("provisioning expects a body", stmt)
       collectProvisioning(stmt[stmt.len - 1], result.nixProvisioning,
         result.tarballProvisioning, result.scoopProvisioning)
+    elif calleeName(stmt).normalize == "runtimelibrary":
+      # Producer-side runtime library declaration:
+      #
+      #   runtimeLibrary "clingo", dir = runtimeLibDir(plConda), os = "windows"
+      #
+      # The package that PROVIDES the library declares where it lives, because
+      # it is the only party that knows its own prefix layout. The consuming
+      # half is the existing ``runtimeDeps:`` block, and the engine joins the
+      # two — a consumer never has to know that clingo happens to be
+      # ``Library/bin`` on conda-forge win-64 and ``lib`` on nixpkgs.
+      #
+      # Repeated per (cpu, os) slice, exactly like ``tarball`` entries, since
+      # the directory follows the provisioning source rather than the package.
+      if stmt.len < 2:
+        error("runtimeLibrary expects a name, e.g. " &
+          "runtimeLibrary \"clingo\", dir = runtimeLibDir(plConda)", stmt)
+      var lib: RuntimeLibraryDef
+      let libLoc = lineFile(stmt)
+      lib.sourceFile = libLoc.file
+      lib.sourceLine = libLoc.line
+      # The name is a map key on the consumer side, so it must be knowable
+      # here. Everything else is spliced verbatim and evaluated by the
+      # compiler, which is what lets the layout vocabulary be used.
+      lib.name = requireStrLit(stmt[1], "runtimeLibrary name")
+      if lib.name.len == 0:
+        error("runtimeLibrary name must not be empty", stmt)
+      var dirNode: NimNode = nil
+      var cpuNode, osNode: NimNode = nil
+      for i in 2 ..< stmt.len:
+        let dirValue = namedValue(stmt[i], "dir")
+        if not dirValue.isNil:
+          dirNode = dirValue
+          lib.dir = exprCode(dirValue)
+        let cpuValue = namedValue(stmt[i], "cpu")
+        if not cpuValue.isNil:
+          cpuNode = cpuValue
+          lib.cpu = exprCode(cpuValue)
+        let osValue = namedValue(stmt[i], "os")
+        if not osValue.isNil:
+          osNode = osValue
+          lib.os = exprCode(osValue)
+      if dirNode.isNil:
+        error("runtimeLibrary requires dir = \"<prefix-relative-dir>\" — the " &
+          "directory holding the LOADABLE artifact, which on Windows is the " &
+          "bin directory, not the lib one", stmt)
+      let dirText = litText(dirNode)
+      if dirNode.isStrLit and dirText.len == 0:
+        error("runtimeLibrary dir must not be empty", stmt)
+      if dirText.len > 0 and dirText != "." and dirText.unsafeRelativePath:
+        error("runtimeLibrary dir must be relative to the realized prefix",
+          stmt)
+      # Same whitelists as tarball provisioning, checked only where the text
+      # is knowable. A mismatch here would silently make the entry match no
+      # host at all, which is the failure this refuses to allow.
+      let cpuText = litText(cpuNode)
+      if cpuText.len > 0 and
+          cpuText.toLowerAscii() notin ["any", "x86_64", "aarch64"]:
+        error("runtimeLibrary cpu must be one of any|x86_64|aarch64; got '" &
+          cpuText & "'", stmt)
+      let osText = litText(osNode)
+      if osText.len > 0 and osText.toLowerAscii() notin
+          ["any", "windows", "linux", "macos", "darwin"]:
+        error("runtimeLibrary os must be one of " &
+          "any|windows|linux|macos|darwin; got '" & osText & "'", stmt)
+      result.runtimeLibraries.add(lib)
     elif calleeName(stmt).normalize == "usesimportpath":
       if stmt.len != 2:
         error("usesImportPath expects exactly one string literal", stmt)
-      result.usesImportPaths.add(stringLiteral(stmt[1]))
+      result.usesImportPaths.add(requireStrLit(stmt[1], "usesImportPath"))
     elif calleeName(stmt).normalize == "devenv":
       if stmt.len < 2:
         error("devEnv expects a body", stmt)
@@ -1523,52 +1838,60 @@ proc packageLiteral(pkg: PackageDef): string =
   for provisioningIndex, provisioning in pkg.nixProvisioning:
     if provisioningIndex > 0:
       result.add(", ")
-    result.add("NixPackageProvisioningDef(selector: " & escForCode(
-        provisioning.selector) &
-      ", executablePath: " & escForCode(provisioning.executablePath) &
-      ", expressionFile: " & escForCode(provisioning.expressionFile) &
-      ", nixpkgsRef: " & escForCode(provisioning.nixpkgsRef) &
-      ", nixpkgsRev: " & escForCode(provisioning.nixpkgsRev) &
-      ", nixpkgsNarHash: " & escForCode(provisioning.nixpkgsNarHash) &
-      ", packageId: " & escForCode(provisioning.packageId) &
-      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+    # Spliced verbatim — these fields hold emittable SOURCE (see
+    # ``parseNixPackageProvisioning``), including ``expressionFile``, which is
+    # a macro-resolved value the parser re-quotes before handing it over.
+    result.add("NixPackageProvisioningDef(selector: " &
+        codeOrEmpty(provisioning.selector) &
+      ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
+      ", expressionFile: " & codeOrEmpty(provisioning.expressionFile) &
+      ", nixpkgsRef: " & codeOrEmpty(provisioning.nixpkgsRef) &
+      ", nixpkgsRev: " & codeOrEmpty(provisioning.nixpkgsRev) &
+      ", nixpkgsNarHash: " & codeOrEmpty(provisioning.nixpkgsNarHash) &
+      ", packageId: " & codeOrEmpty(provisioning.packageId) &
+      ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], tarballProvisioning: @[")
   for provisioningIndex, provisioning in pkg.tarballProvisioning:
     if provisioningIndex > 0:
       result.add(", ")
-    result.add("TarballProvisioningDef(url: " & escForCode(provisioning.url) &
+    # Every string field below already holds emittable SOURCE (see
+    # ``parseTarballProvisioning``), so it is spliced verbatim. Wrapping it in
+    # ``escForCode`` here is what turned `sha256 = PinnedSha` into the literal
+    # string "PinnedSha".
+    result.add("TarballProvisioningDef(url: " & codeOrEmpty(provisioning.url) &
       ", mirrors: @[")
     for mirrorIndex, mirror in provisioning.mirrors:
       if mirrorIndex > 0:
         result.add(", ")
-      result.add(escForCode(mirror))
-    result.add("], sha256: " & escForCode(provisioning.sha256) &
-      ", archiveType: " & escForCode(provisioning.archiveType) &
-      ", executablePath: " & escForCode(provisioning.executablePath) &
+      result.add(mirror)
+    result.add("], sha256: " & codeOrEmpty(provisioning.sha256) &
+      ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
+      ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", stripComponents: " & $provisioning.stripComponents &
-      ", packageId: " & escForCode(provisioning.packageId) &
-      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
-      ", cpu: " & escForCode(provisioning.cpu) &
-      ", os: " & escForCode(provisioning.os) &
+      ", packageId: " & codeOrEmpty(provisioning.packageId) &
+      ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
+      ", cpu: " & codeOrEmpty(provisioning.cpu) &
+      ", os: " & codeOrEmpty(provisioning.os) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], scoopProvisioning: @[")
   for provisioningIndex, provisioning in pkg.scoopProvisioning:
     if provisioningIndex > 0:
       result.add(", ")
-    result.add("ScoopProvisioningDef(bucket: " & escForCode(provisioning.bucket) &
-      ", app: " & escForCode(provisioning.app) &
-      ", version: " & escForCode(provisioning.version) &
-      ", preferredVersion: " & escForCode(provisioning.preferredVersion) &
-      ", manifestChecksum: " & escForCode(provisioning.manifestChecksum) &
-      ", manifestUrl: " & escForCode(provisioning.manifestUrl) &
-      ", executablePath: " & escForCode(provisioning.executablePath) &
+    # Spliced verbatim — see ``parseScoopProvisioning``.
+    result.add("ScoopProvisioningDef(bucket: " & codeOrEmpty(provisioning.bucket) &
+      ", app: " & codeOrEmpty(provisioning.app) &
+      ", version: " & codeOrEmpty(provisioning.version) &
+      ", preferredVersion: " & codeOrEmpty(provisioning.preferredVersion) &
+      ", manifestChecksum: " & codeOrEmpty(provisioning.manifestChecksum) &
+      ", manifestUrl: " & codeOrEmpty(provisioning.manifestUrl) &
+      ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", requiresExecutionProfileChecksum: " &
         $provisioning.requiresExecutionProfileChecksum &
-      ", packageId: " & escForCode(provisioning.packageId) &
-      ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+      ", packageId: " & codeOrEmpty(provisioning.packageId) &
+      ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], usesImportPaths: @[")
@@ -1686,10 +2009,36 @@ proc packageLiteral(pkg: PackageDef): string =
   for libIndex, lib in pkg.libraries:
     if libIndex > 0:
       result.add(", ")
+    # ``exportedPath`` was parsed by the body loop but omitted here, so a
+    # ``library foo: exportedPath: "…"`` declaration silently lost its value on
+    # the way to the emitted literal — the setter appeared to work and produced
+    # a LibraryDef whose exportedPath was always "".
+    # ``exportedPath`` is inlined VERBATIM rather than escForCode'd: the parser
+    # stored the user's expression source, and the outer ``parseStmt``
+    # re-parses it in the call-site scope so the compiler evaluates it. A plain
+    # ``"custom/dir"`` reprs back to itself, so literals are unaffected; a
+    # ``sharedLibDir(plConda)`` survives as a call. Empty means unset — emit a
+    # literal empty string rather than nothing, or the constructor breaks.
+    let exportedPathCode =
+      if lib.exportedPath.len == 0: "\"\"" else: lib.exportedPath
     result.add("LibraryDef(name: " & escForCode(lib.name) &
       ", kind: " & $lib.kind &
+      ", exportedPath: " & exportedPathCode &
       ", sourceFile: " & escForCode(lib.sourceFile) &
       ", sourceLine: " & $lib.sourceLine & ")")
+  # Producer-side runtime library declarations. `dir` / `cpu` / `os` hold
+  # emittable SOURCE (see the parse arm), so they splice verbatim; the name is
+  # a required literal and is quoted here.
+  result.add("], runtimeLibraries: @[")
+  for rlIndex, rl in pkg.runtimeLibraries:
+    if rlIndex > 0:
+      result.add(", ")
+    result.add("RuntimeLibraryDef(name: " & escForCode(rl.name) &
+      ", dir: " & codeOrEmpty(rl.dir) &
+      ", cpu: " & codeOrEmpty(rl.cpu) &
+      ", os: " & codeOrEmpty(rl.os) &
+      ", sourceFile: " & escForCode(rl.sourceFile) &
+      ", sourceLine: " & $rl.sourceLine & ")")
   # Recipe-Val M8: emit the package-level multi-output partition list.
   # Empty ``outputs`` serialises as ``@[]`` so legacy single-output
   # recipes round-trip byte-identically to their pre-M8 packageLiteral
@@ -2567,6 +2916,8 @@ proc producerSourceStamp(producerReproPath: string;
     hex.add(Hex[int((h shr shift) and 0xF'u64)])
   hex
 
+const ResourceAccessorCacheVersion = "2"
+
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   proc isBundledStdlibSelector(selector: string): bool =
     # M29 (Provisioning catalog cleanup): autoconf, automake, bun,
@@ -2925,16 +3276,36 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       # tree is NOT under the reprobuild checkout (e.g. an infra recipe) cannot
       # reach reprobuild's ``config.nims`` by walking up. Honour the standard
       # ``$REPROBUILD_REPO_ROOT`` override the interface-artifact / profile-compile
-      # edges already use for out-of-tree lib-path resolution, so the generator
-      # ``nim c -r`` below runs with ``cd <repoRoot>`` and resolves
-      # ``import repro_cli_support`` via reprobuild's own ``config.nims``. This is
-      # NOT the obsolete ``REPRO_ACCESSOR_*`` knob (removed): it reuses the single
-      # repo-root env the rest of reprobuild's out-of-tree machinery keys off.
-      if repoRoot.len == 0 and existsEnv("REPROBUILD_REPO_ROOT"):
-        let envRoot = getEnv("REPROBUILD_REPO_ROOT")
+      # edges already use for out-of-tree lib-path resolution. External recipes
+      # conventionally expose that same checkout as ``$REPROBUILD_SRC`` from
+      # their ``config.nims``, so accept it as the compatibility fallback. The
+      # generator ``nim c -r`` below then runs with ``cd <repoRoot>`` and resolves
+      # ``import repro_cli_support`` via reprobuild's own ``config.nims``.
+      for envName in ["REPROBUILD_REPO_ROOT", "REPROBUILD_SRC"]:
+        if repoRoot.len > 0:
+          break
+        let envRoot = getEnv(envName)
         if envRoot.len > 0 and fileExists(envRoot / "config.nims") and
             fileExists(envRoot / "reprobuild.nimble"):
           repoRoot = envRoot
+      # Daemon-hosted provider compiles intentionally carry a narrowed
+      # environment, so an out-of-tree consumer cannot rely on either override
+      # reaching macro expansion. The DSL module's own source location is the
+      # authoritative final anchor: walk from this included file to the checkout
+      # whose config declares every library path needed by the cold generator.
+      if repoRoot.len == 0:
+        var dir = currentSourcePath().parentDir
+        for _ in 0 ..< 8:
+          if dir.len == 0:
+            break
+          if fileExists(dir / "config.nims") and
+              fileExists(dir / "reprobuild.nimble"):
+            repoRoot = dir
+            break
+          let parent = dir.parentDir
+          if parent == dir:
+            break
+          dir = parent
     # The emitted-accessor cache is keyed by the PRODUCER, not the consumer, so
     # every consumer of the same producer shares ONE lift + ONE cached splice.
     # Anchor it under ``<repoRoot>/build/nimcache`` (Nim's config walk keys off
@@ -2971,10 +3342,15 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       # subdirectory resource-module schema edit invalidates the cached accessor
       # (a root-only stamp would miss it → serve a stale splice).
       let producerDecl = producerResourceModuleFor(selector, consumerSourceFile)
-      let stamp =
+      let sourceStamp =
         if producerRepro.len > 0:
           producerSourceStamp(producerRepro, producerDecl)
         else: ""
+      let stamp =
+        if sourceStamp.len > 0:
+          ResourceAccessorCacheVersion & ":" & sourceStamp
+        else:
+          ""
       let selectorKey = selectorModuleName(selector)
       let accDir = cacheBase / selectorKey
       if not dirExists(accDir):
@@ -3021,29 +3397,42 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       # ---- Level 2 / COLD: run the generator (drives the cached lift). ----
       if not cacheHit:
         let genPath = accDir / ("ti2_gen_" & selectorKey & ".nim")
+        let compilerExe = getCurrentCompilerExe()
         # The generator emits a framed output: a leading ``IFP:<hex>`` line
         # carrying the producer's InterfaceFingerprint (from TI1's cached lift),
         # then the driver-free accessor source. The VM reads the fingerprint to
         # decide reuse-in-place vs regenerate WITHOUT a second lift.
         let genSrc =
+          "import std/os\n" &
           "import repro_cli_support\n" &
+          "putEnv(\"REPRO_NIM_COMPILER\", " & escape(compilerExe) & ")\n" &
           "let c = resolveProducerTypedContract(" & escape(selector) & ", " &
           escape(workspaceRoot) & ")\n" &
           "stdout.write(\"IFP:\" & c.interfaceFingerprint & \"\\n\")\n" &
           "stdout.write(emitResourceContractAccessors(c))\n"
         writeFile(genPath, genSrc)
-        # ``staticExec`` runs a real process out of the macro VM, so the
-        # generator's ``nim c`` extractor subprocess + ``getCurrentDir`` are
-        # fine. It has no working-dir parameter, so embed a ``cd`` into the
-        # command to run with CWD = repoRoot (its ``config.nims`` supplies the
-        # lib ``--path`` the generator compile needs).
+        # ``staticExec`` executes a program directly on Windows, so shell
+        # composition must be passed to an explicit platform shell. The CWD is
+        # significant because ``config.nims`` contains sibling paths relative
+        # to the repository root.
         let nimCmd =
-          "nim c -r --hints:off --warnings:off " &
+          quoteShell(compilerExe) &
+          " c -r --hints:off --warnings:off " &
           "--nimcache:" & quoteShell(accDir / ("nc_" & selectorKey)) &
           " " & quoteShell(genPath)
         let genCmd =
-          if repoRoot.len > 0: "cd " & quoteShell(repoRoot) & " && " & nimCmd
-          else: nimCmd
+          if repoRoot.len == 0:
+            nimCmd
+          else:
+            let cdAndCompile =
+              when defined(windows):
+                "cd /d " & quoteShell(repoRoot) & " && " & nimCmd
+              else:
+                "cd " & quoteShell(repoRoot) & " && exec " & nimCmd
+            when defined(windows):
+              "cmd.exe /d /c " & quoteShell(cdAndCompile)
+            else:
+              "sh -c " & quoteShell(cdAndCompile)
         let genOut = staticExec(genCmd)
         # Split the framed output: first ``IFP:<hex>`` line, then the accessor
         # source. A generator that failed / was killed returns empty/partial
@@ -3057,10 +3446,11 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
             newFingerprint = genOut[4 ..< nl].strip()
             accessorSrc = genOut[nl + 1 .. ^1]
           else:
-            # No frame (older/edge output shape) — treat the whole thing as the
-            # accessor source; TI3's reuse-in-place simply doesn't engage and we
-            # fall back to TI2 behavior (regenerate on any source-stamp change).
-            accessorSrc = genOut
+            error("resource accessor generation failed for '" & selector &
+              "': expected an IFP frame, got:\n" & genOut.strip())
+        if genOut.len == 0:
+          error("resource accessor generation failed for '" & selector &
+            "': generator produced no output")
 
         # TI3 Level-2 reuse-in-place: the producer's source changed (stamp miss)
         # but if the InterfaceFingerprint matches the ``.ifp`` sidecar the edit
@@ -3150,7 +3540,7 @@ proc parseInterfaceParam(node: NimNode;
   for i in optionStart ..< node.len:
     let aliasValue = namedValue(node[i], "alias")
     if not aliasValue.isNil:
-      result.alias = stringLiteral(aliasValue)
+      result.alias = requireStrLit(aliasValue, "interface param alias")
     let requiredValue = namedValue(node[i], "required")
     if not requiredValue.isNil:
       result.required = boolLiteral(requiredValue, result.required)
@@ -3196,7 +3586,7 @@ proc parseInterfaceDependencyPolicy(node: NimNode;
   for i in 2 ..< node.len:
     let depfileValue = namedValue(node[i], "depfile")
     if not depfileValue.isNil:
-      let single = stringLiteral(depfileValue)
+      let single = requireStrLit(depfileValue, "dependencyPolicy depfile")
       if single.len > 0 and single notin result.depfiles:
         result.depfiles.add(single)
     let depfilesValue = namedValue(node[i], "depfiles")

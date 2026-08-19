@@ -44,15 +44,10 @@
 ## The classifier is exercised through the real `repro` binary; the
 ## Scoop adapter is the real M55 `resolveScoopTool`. No `skip`.
 
-when not defined(windows):
-  {.warning[UnreachableCode]: off.}
-  echo "[platform N/A] t_integration_plan_classifier_bucket_drift_is_cache_hit: " &
-    "requires Windows and a real Scoop install"
-  quit(0)
-
 import std/[algorithm, json, os, osproc, streams, strtabs, strutils,
-  tempfiles, unittest]
+  tempfiles]
 
+import ct_test_unittest_parallel
 import repro_home_generations
 import repro_local_store
 import repro_test_support
@@ -186,8 +181,35 @@ proc writeBucketManifest(sandbox: ScoopSandbox; app, headVersion,
          "description": "Reprobuild M80 bucket-drift fixture",
          "bin": executableName}).pretty())
 
+const HostRunsGate = defined(windows)
+  ## This gate needs a real Windows host. It used to be enforced by an
+  ## ``echo`` + ``quit(0)`` at module init, before any ``test`` template
+  ## expanded: the binary emitted no catalog, stayed an opaque
+  ## whole-binary exit-0 PASS, and its declared cases were invisible to
+  ## every gate -- not counted as passes, not as skips, not at all.
+
+const PlatformSkipReason =
+  "[platform N/A] t_integration_plan_classifier_bucket_drift_is_cache_hit: " &
+    "requires Windows and a real Scoop install"
+
+template gatedTest(name: string; body: untyped) =
+  ## Register the case unconditionally, and on a host that cannot run it
+  ## record a skip whose reason is visible in the run summary and the
+  ## skip census.
+  ##
+  ## The guard is a runtime ``if`` on a compile-time constant rather than
+  ## a ``when``, deliberately: ``when`` would stop type-checking the
+  ## Windows-only body on Linux, and that compile coverage is exactly
+  ## what the previous module-init gate already gave us. Nim folds the
+  ## constant, so the dead branch still costs nothing at runtime.
+  test name:
+    if HostRunsGate:
+      body
+    else:
+      skip(PlatformSkipReason)
+
 suite "integration_plan_classifier_bucket_drift_is_cache_hit":
-  test "integration_plan_classifier_bucket_drift_is_cache_hit":
+  gatedTest "integration_plan_classifier_bucket_drift_is_cache_hit":
     let scoopBinary = resolveScoopBinary()
     doAssert scoopBinary.len > 0,
       "M80 gate requires a real scoop binary on PATH (none found). " &

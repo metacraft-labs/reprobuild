@@ -7,8 +7,9 @@
 ## Spec cite: Named-Runnable-Edges.md §3.1 / §5; the N1 milestone
 ## Verification `t_e2e_repro_run_named_run_edge`.
 ##
-## The fixture registers a `run "app-run", build = "build-app"` run-target
-## via the N0 DSL surface (`repro_resources`' `run`). `build-app` is a
+## The fixture registers both an ordinary `app-run` target and a
+## `run "app-run", build = "build-app"` run-target via the N0 DSL surface
+## (`repro_resources`' `run`). `build-app` is a
 ## typed-tool edge that copies its input to `build/app` and appends a line
 ## to a marker file every time it actually fires — so the marker line count
 ## is an exact witness of how many times the edge was *executed* vs served
@@ -16,36 +17,9 @@
 ## through the `tekRunEdge` export row to that edge and run it; the second
 ## invocation must reuse the cache (marker stays at one line).
 
-import std/[os, osproc, strutils, tempfiles, unittest]
+import std/[os, strutils, tempfiles, unittest]
 
 import repro_test_support
-
-proc pathExists(path: string): bool =
-  try:
-    discard getFileInfo(path, followSymlink = false)
-    true
-  except OSError:
-    false
-
-proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
-    socket: string] =
-  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
-  let socketPath = "/tmp/repro-n1-run-edge-rq-" & $getCurrentProcessId() &
-    ".sock"
-  if fileExists(socketPath):
-    removeFile(socketPath)
-  let daemon = startProcess(daemonBin, args = [
-    "--socket", socketPath,
-    "--cpu-milli", "16000",
-    "--memory-bytes", "17179869184"
-  ], options = {poUsePath})
-  putEnv("RUNQUOTA_SOCKET", socketPath)
-  for _ in 0 ..< 200:
-    if pathExists(socketPath):
-      return (process: daemon, socket: socketPath)
-    sleep(25)
-  daemon.terminate()
-  raise newException(OSError, "runquotad socket did not appear")
 
 proc reproBinary(repoRoot: string): string =
   requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
@@ -59,22 +33,45 @@ proc writeExecutable(path, content: string) =
 
 proc writeRunTool(binDir: string) =
   ## Copies input to output and stamps a marker line each time it fires.
-  writeExecutable(binDir / "n1-tool",
-    "#!/bin/sh\n" &
-    "set -eu\n" &
-    "if [ \"${1:-}\" = \"--version\" ]; then echo 'n1-tool 1.0.0'; exit 0; fi\n" &
-    "input= output= marker=\n" &
-    "while [ \"$#\" -gt 0 ]; do\n" &
-    "  case \"$1\" in\n" &
-    "    --input) input=$2; shift 2 ;;\n" &
-    "    --output) output=$2; shift 2 ;;\n" &
-    "    --marker) marker=$2; shift 2 ;;\n" &
-    "    *) echo \"unknown arg $1\" >&2; exit 64 ;;\n" &
-    "  esac\n" &
-    "done\n" &
-    "mkdir -p \"$(dirname \"$output\")\" \"$(dirname \"$marker\")\"\n" &
-    "cp \"$input\" \"$output\"\n" &
-    "printf '%s\\n' \"$output\" >> \"$marker\"\n")
+  when defined(windows):
+    writeExecutable(binDir / "n1-tool.cmd",
+      "@echo off\n" &
+      "if \"%~1\"==\"--version\" (echo n1-tool 1.0.0& exit /b 0)\n" &
+      "set \"input=\"\nset \"output=\"\nset \"marker=\"\nset \"forwarded=\"\n" &
+      ":parse\n" &
+      "if \"%~1\"==\"\" goto run\n" &
+      "if \"%~1\"==\"--input\" set \"input=%~2\"& shift& shift& goto parse\n" &
+      "if \"%~1\"==\"--output\" set \"output=%~2\"& shift& shift& goto parse\n" &
+      "if \"%~1\"==\"--marker\" set \"marker=%~2\"& shift& shift& goto parse\n" &
+      "if \"%~1\"==\"--forwarded\" set \"forwarded=%~2\"& shift& shift& goto parse\n" &
+      "echo unknown arg %~1 1>&2\nexit /b 64\n" &
+      ":run\n" &
+      "set \"input=%input:/=\\%\"\n" &
+      "set \"output=%output:/=\\%\"\n" &
+      "set \"marker=%marker:/=\\%\"\n" &
+      "for %%I in (\"%output%\") do if not exist \"%%~dpI\" mkdir \"%%~dpI\"\n" &
+      "for %%I in (\"%marker%\") do if not exist \"%%~dpI\" mkdir \"%%~dpI\"\n" &
+      "copy /Y \"%input%\" \"%output%\" >nul\n" &
+      "if errorlevel 1 exit /b %errorlevel%\n" &
+      "echo %output% %forwarded%>>\"%marker%\"\n")
+  else:
+    writeExecutable(binDir / "n1-tool",
+      "#!/bin/sh\n" &
+      "set -eu\n" &
+      "if [ \"${1:-}\" = \"--version\" ]; then echo 'n1-tool 1.0.0'; exit 0; fi\n" &
+      "input= output= marker= forwarded=\n" &
+      "while [ \"$#\" -gt 0 ]; do\n" &
+      "  case \"$1\" in\n" &
+      "    --input) input=$2; shift 2 ;;\n" &
+      "    --output) output=$2; shift 2 ;;\n" &
+      "    --marker) marker=$2; shift 2 ;;\n" &
+      "    --forwarded) forwarded=$2; shift 2 ;;\n" &
+      "    *) echo \"unknown arg $1\" >&2; exit 64 ;;\n" &
+      "  esac\n" &
+      "done\n" &
+      "mkdir -p \"$(dirname \"$output\")\" \"$(dirname \"$marker\")\"\n" &
+      "cp \"$input\" \"$output\"\n" &
+      "printf '%s %s\\n' \"$output\" \"$forwarded\" >> \"$marker\"\n")
 
 proc writeRunEdgeProject(path: string) =
   ## A typed-tool edge (`build-app`) plus a `run "app-run", build =
@@ -90,19 +87,28 @@ proc writeRunEdgeProject(path: string) =
     "    flag output is string, alias = \"--output\", role = output, required = true\n" &
     "    flag marker is string, alias = \"--marker\", required = true\n" &
     "    outputs output\n")
+  writeFile(projectRoot / "reprobuild" / "packages" / "unused_tool.nim",
+    "import repro_project_dsl\n\n" &
+    "defineCliInterface unusedTool, \"unused-tool\":\n" &
+    "  call:\n" &
+    "    flag output is string, alias = \"--output\", role = output\n" &
+    "    outputs output\n")
   writeFile(path,
     "import repro_project_dsl\n" &
     "import repro_resources\n\n" &
     "package n1RunPkg:\n" &
     "  usesImportPath \"reprobuild/packages\"\n" &
     "  uses:\n" &
-    "    \"n1-tool >=1.0 <2.0\"\n\n" &
+    "    \"n1-tool >=1.0 <2.0\"\n" &
+    "    \"unused-tool >=1.0 <2.0\"\n\n" &
     "  build:\n" &
     "    let marker = \".repro/n1-runs.log\"\n" &
-    "    n1Tool(actionId = \"build-app\",\n" &
+    "    let app = n1Tool(actionId = \"build-app\",\n" &
     "      input = \"src/main.txt\",\n" &
     "      output = \"build/app\",\n" &
     "      marker = marker)\n" &
+    "    discard target(\"app-run\", app)\n" &
+    "    discard collect(\"lint\", [app])\n" &
     "    run(\"app-run\", build = \"build-app\")\n")
 
 proc nonEmptyLines(path: string): seq[string] =
@@ -125,9 +131,18 @@ proc runRun(reproBin, pathValue: string; cwd: string;
     args.add(a)
   let entries = @[
     ("PATH", pathValue),
-    ("REPRO_TOOL_PROVISIONING", "path")
+    ("REPRO_TOOL_PROVISIONING", "path"),
+    ("REPROBUILD_NO_RUNQUOTA", "1"),
+    ("REPRO_DAEMON", "off")
   ]
   requireSuccess(shellCommand(args, entries), cwd)
+
+proc listRunTargets(reproBin, pathValue, cwd: string): string =
+  requireSuccess(shellCommand(@[reproBin, "tasks"], @[
+    ("PATH", pathValue),
+    ("REPRO_TOOL_PROVISIONING", "path"),
+    ("REPRO_DAEMON", "off")
+  ]), cwd)
 
 suite "t_e2e_repro_run_named_run_edge":
 
@@ -135,14 +150,6 @@ suite "t_e2e_repro_run_named_run_edge":
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-n1-run-edge", "")
     defer: removeDir(tempRoot)
-
-    var daemon = ensureRunQuotaDaemon(repoRoot)
-    defer:
-      daemon.process.terminate()
-      discard daemon.process.waitForExit()
-      daemon.process.close()
-      if pathExists(daemon.socket):
-        removeFile(daemon.socket)
 
     let reproBin = reproBinary(repoRoot)
 
@@ -155,17 +162,32 @@ suite "t_e2e_repro_run_named_run_edge":
     writeFile(projectRoot / "src" / "main.txt", "main v1\n")
     writeRunEdgeProject(projectRoot / "reprobuild.nim")
 
-    # First run: `repro run app-run` resolves the `tekRunEdge` export row to
-    # the `build-app` edge and executes it (the tool fires once). The output
+    let listing = listRunTargets(reproBin, pathValue, projectRoot)
+    check listing.contains("[run-edge]")
+    check listing.contains("app-run")
+
+    # First run: `repro run app-run` selects the `tekRunEdge` row despite the
+    # same-name ordinary target, then executes `build-app` (the tool fires
+    # once). The output
     # file + the single marker line are the authoritative witnesses that the
     # edge actually ran (stdout formatting is not asserted — the filesystem
     # effects are the meaningful check).
-    discard runRun(reproBin, pathValue, projectRoot, ["app-run"])
+    let runArgs = ["app-run", "--", "--forwarded", "forwarded-one"]
+    let firstRun = runRun(reproBin, pathValue, projectRoot, runArgs)
+    checkpoint firstRun
+    # ``unused-tool`` is absent from PATH and belongs to no action in this
+    # closure. Focused execution must not provision unrelated project tools.
+    check not firstRun.contains("unused-tool")
+    checkpoint "marker: " & nonEmptyLines(
+      projectRoot / ".repro" / "n1-runs.log").join(" | ")
     check fileExists(projectRoot / "build" / "app")
     check nonEmptyLines(projectRoot / ".repro" / "n1-runs.log").len == 1
+    check nonEmptyLines(projectRoot / ".repro" / "n1-runs.log")[0].contains(
+      "forwarded-one")
 
     # Second run: the build step is action-cache warm — the tool must NOT
     # be relaunched, so the marker stays at exactly one line. This proves
     # `repro run` delegated to the same action-cached build path.
-    discard runRun(reproBin, pathValue, projectRoot, ["app-run"])
+    let secondRun = runRun(reproBin, pathValue, projectRoot, runArgs)
+    checkpoint secondRun
     check nonEmptyLines(projectRoot / ".repro" / "n1-runs.log").len == 1

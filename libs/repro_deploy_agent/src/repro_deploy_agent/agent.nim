@@ -9,7 +9,7 @@
 ##      local filesystem path (both read straight off disk — the hermetic
 ##      test path). A 404 on an HTTP source is a soft miss (no manifest yet
 ##      → wait), any other fetch error is a hard, retryable failure.
-##   2. DECODE each fetched manifest (the ``RDM1`` envelope).
+##   2. DECODE each fetched manifest (the ``RDMF`` envelope).
 ##   3. VERIFY each manifest against the ALLOWED-SIGNERS set: the signature
 ##      must verify AND the producer pubkey must be a trust anchor. A
 ##      manifest for a DIFFERENT target is IGNORED (per-target schema). A
@@ -39,6 +39,7 @@ when defined(ssl):
   import wrappers/openssl
 
 import ./manifest
+import ./secrets
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
 # Windows-Runner-Binary-Cache-Deploy M7 (prereq b): HTTPS manifest sources.
@@ -96,6 +97,7 @@ type
     aoAmbiguous        ## two manifests tie on the highest sequence
     aoSourceError      ## a source read/fetch failed (retryable)
     aoApplyFailed      ## the apply hook returned failure
+    aoSecretsFailed    ## a sealed section could not be opened / materialised
 
   AgentOutcome* = object
     kind*: AgentOutcomeKind
@@ -119,6 +121,14 @@ type
     anchors*: peerAuth.TrustAnchors
     stateDir*: string            ## durable last-applied-sequence lives here
     fetchTimeoutMs*: int
+    secretsKeyPath*: string
+      ## Path to this target's RECIPIENT private key (`ecdsa-p256:<hex>`), used
+      ## to open a v2 manifest's sealed section. Empty ⇒ this box is not
+      ## configured to receive secrets, and a manifest that carries them is a
+      ## hard failure rather than a silent partial apply. See `runAgentTick`.
+    secretsDir*: string
+      ## Directory the opened secret files are materialised under. Securing it
+      ## is the profile's job (see `materialiseSecrets`).
 
   AgentDeps* = object
     ## Test seam. ``apply`` is the apply hook. ``httpGet`` overrides the
@@ -327,6 +337,32 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
       sequence: selected.sequence, deploymentId: selected.deploymentId,
       message: "already converged at sequence " & $lastApplied &
         " (selected " & $selected.sequence & " is not newer)")
+
+  # -- SECRETS (before the apply, because the apply consumes them) -------
+  #
+  # Ordering is load-bearing. `register-runner.ps1` reads the registration
+  # token during the apply, so the token has to be on disk before the apply
+  # starts, not after it. Equally, a failure here must NOT fall through to the
+  # apply: converging desired state that depends on a secret which never
+  # arrived produces a box that looks applied and cannot run a job -- the exact
+  # shape of failure this campaign keeps rediscovering.
+  if selected.hasSecrets:
+    if cfg.secretsKeyPath.len == 0 or cfg.secretsDir.len == 0:
+      return AgentOutcome(kind: aoSecretsFailed, target: cfg.target,
+        sequence: selected.sequence, deploymentId: selected.deploymentId,
+        message: "manifest carries a sealed secrets section but this agent " &
+          "has no --secrets-key/--secrets-dir configured; refusing to apply " &
+          "desired state whose secrets would be missing",
+        errorCode: "secrets_not_configured")
+    try:
+      let recipientKey = peerAuth.loadPrivateKeyFile(cfg.secretsKeyPath)
+      let opened = openSecrets(recipientKey, selected.target, selected.secrets)
+      discard materialiseSecrets(opened, cfg.secretsDir)
+    except CatchableError as e:
+      return AgentOutcome(kind: aoSecretsFailed, target: cfg.target,
+        sequence: selected.sequence, deploymentId: selected.deploymentId,
+        message: "sealed secrets could not be opened: " & e.msg,
+        errorCode: "secrets_failed")
 
   # -- APPLY (strictly-higher valid sequence) ----------------------------
   let applied = deps.apply(selected)

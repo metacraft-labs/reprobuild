@@ -1500,6 +1500,26 @@ proc sameSourceFile(a, b: string): bool =
   except CatchableError:
     a == b
 
+proc sourceFileWithinProject(sourceFile, rootSourceFile: string): bool =
+  ## Package modules imported from below the root recipe are part of the same
+  ## project interface. Imported stdlib and sibling-repository packages are
+  ## deliberately excluded.
+  if sourceFile.len == 0 or rootSourceFile.len == 0:
+    return false
+  try:
+    let projectRoot = os.normalizedPath(absolutePath(
+      parentDir(rootSourceFile))).replace('\\', '/')
+    let candidate = os.normalizedPath(
+      absolutePath(sourceFile)).replace('\\', '/')
+    let rootPrefix = projectRoot.strip(
+      leading = false, trailing = true, chars = {'/'}) & "/"
+    when defined(windows):
+      candidate.toLowerAscii().startsWith(rootPrefix.toLowerAscii())
+    else:
+      candidate.startsWith(rootPrefix)
+  except CatchableError:
+    false
+
 const
   RegisteredStandardConventionToolchains* = ["nim", "rust", "rustc", "cargo",
     "go",
@@ -1751,26 +1771,27 @@ proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
   let packages = registeredPackages()
   let contributions = registeredProvisioningContributions()
   if rootSourceFile.len > 0:
-    var matches: seq[PackageDef] = @[]
+    var rootPackages: seq[PackageDef] = @[]
+    var localPackageModules: seq[PackageDef] = @[]
     for pkg in packages:
       if sameSourceFile(pkg.sourceFile, rootSourceFile):
-        matches.add(pkg)
+        rootPackages.add(pkg)
+      elif sourceFileWithinProject(pkg.sourceFile, rootSourceFile):
+        localPackageModules.add(pkg)
+    let matches =
+      if rootPackages.len > 0: rootPackages & localPackageModules
+      else: newSeq[PackageDef]()
     if matches.len == 1:
       var pi = toProjectInterface(matches[0], packages, contributions)
       pi.standardBuildEligible =
         detectStandardBuildEligible(rootSourceFile, matches[0])
       return artifactFor(pi)
     if matches.len > 1:
-      # Multi-package single-file (Mode 3 + the upcoming C/C++ work):
-      # collapse every package declared in the same Nim file into one
-      # interface envelope. The marker collision that previously blocked
-      # this at compile-time is fixed in
-      # ``libs/repro_project_dsl/src/repro_project_dsl/macros_a.nim``;
-      # the merge logic here is the artifact-layer side of the same
-      # change.
+      # Root packages own the project identity and default provisioning;
+      # imported local modules contribute public members and tool requirements.
       var pi = mergeProjectInterfaces(matches, packages, contributions)
       var allEligible = true
-      for pkg in matches:
+      for pkg in rootPackages:
         if not detectStandardBuildEligible(rootSourceFile, pkg):
           allEligible = false
           break
@@ -3457,6 +3478,61 @@ proc firstExistingPrefix(candidates: openArray[string]; header: string;
         return prefix
   ""
 
+proc nixLibFile(prefix, libraryName: string): string =
+  ## The actual library file under ``prefix/lib`` matching ``libraryName``
+  ## (exact, or ``<stem>.*`` for a versioned soname), or "" — mirrors the
+  ## resolution in ``firstExistingPrefix.hasLibrary`` but returns the file.
+  let libDir = prefix / "lib"
+  let exact = libDir / libraryName
+  if fileExists(extendedPath(exact)):
+    return exact
+  let dot = libraryName.find('.')
+  let stem =
+    if dot > 0: libraryName[0 ..< dot]
+    else: libraryName
+  if not dirExists(extendedPath(libDir)):
+    return ""
+  for kind, path in walkDir(extendedPath(libDir)):
+    if kind == pcFile:
+      let tail = splitPath(path).tail
+      if tail == libraryName or tail.startsWith(stem & "."):
+        return path
+  ""
+
+proc soMatchesHostArch(libFile: string): bool =
+  ## Guard ``nixPrefix``'s ``/nix/store`` glob against picking a
+  ## wrong-architecture build. The fleet's shared store holds BOTH x86-64 and
+  ## aarch64 copies of libraries like xxHash under indistinguishable
+  ## ``*-xxHash-*`` store-path names, so a bare glob can return the aarch64
+  ## ``libxxhash.so`` on an x86-64 runner — the extract-runner link then fails
+  ## with ``ld: … libxxhash.so is incompatible with elf64-x86-64``. Reject an
+  ## ELF whose machine differs from the build host. A non-ELF file (macOS
+  ## Mach-O ``.dylib``), a static archive (``.a``), or an unreadable/short file
+  ## is treated as a match — let the platform/linker decide.
+  var f: File
+  if not open(f, extendedPath(libFile)):
+    return true
+  defer: close(f)
+  var hdr: array[20, byte]
+  if readBytes(f, hdr, 0, 20) < 20:
+    return true
+  if not (hdr[0] == 0x7F'u8 and hdr[1] == byte('E') and
+          hdr[2] == byte('L') and hdr[3] == byte('F')):
+    return true                       # not ELF -> not our concern
+  if hdr[5] != 1'u8:                   # EI_DATA: only handle little-endian
+    return true
+  let eMachine = uint16(hdr[18]) or (uint16(hdr[19]) shl 8)
+  const
+    EM_X86_64 = 0x3E'u16
+    EM_AARCH64 = 0xB7'u16
+  let hostMachine =
+    when hostCPU == "amd64": EM_X86_64
+    elif hostCPU == "arm64": EM_AARCH64
+    else: 0'u16
+  if hostMachine == 0'u16:
+    return true                       # unknown host arch -> don't reject
+  eMachine == hostMachine
+
 proc nixPrefix(namePattern, header: string;
                libraryNames: openArray[string]): string =
   if not dirExists(extendedPath("/nix/store")):
@@ -3472,7 +3548,11 @@ proc nixPrefix(namePattern, header: string;
     if not fileExists(extendedPath(path / header)):
       continue
     for libraryName in libraryNames:
-      if firstExistingPrefix([path], header, [libraryName]).len > 0:
+      let lib = nixLibFile(path, libraryName)
+      # Skip a store build whose library is for the wrong architecture — the
+      # shared store holds both x86-64 and aarch64 copies under the same
+      # ``*-xxHash-*`` name and this glob would otherwise pick either one.
+      if lib.len > 0 and soMatchesHostArch(lib):
         return path
   ""
 

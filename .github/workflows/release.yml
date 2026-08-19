@@ -6,55 +6,200 @@ permissions:
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Release shape: build everything, THEN publish once, atomically.
+#
+# History this structure exists to prevent. Every release to date shipped a
+# different subset of platforms, and no release ever carried all of them:
+#
+#   v0.1.0  darwin-aarch64 + linux-x86_64   (no windows)
+#   v0.1.1  draft, holding a stray v0.1.0 linux tarball
+#   v0.1.2  windows-x86_64 only -- and that asset was uploaded BY HAND
+#           (uploader=zah, 8 days after the tag); CI published nothing at all
+#   v0.1.3  linux-x86_64 only  <- and this one is tagged "Latest"
+#
+# The cause was structural, not incidental: each matrix leg carried its own
+# `softprops/action-gh-release` step, and `fail-fast: false` let the green legs
+# publish while the red ones simply did not. A partially-published release is
+# strictly worse than no release -- consumers on the missing platforms get a
+# confident-looking "Latest" whose asset 404s.
+#
+# So, now:
+#
+#   plan     -- reads .github/release-platforms.json, the ONE declaration of
+#               which platforms a release contains, and derives both the build
+#               matrix and the exact asset list the release must carry.
+#   build    -- per-platform build/package/verify. Publishes NOTHING. Emits a
+#               workflow artifact and a checksum.
+#   publish  -- runs only for tags, gated on EVERY leg succeeding, asserts the
+#               full asset set is present, then creates the release as a DRAFT,
+#               uploads everything, re-verifies against the API, and only then
+#               flips it visible.
+#
+# Two independent guarantees, because a gate alone is not enough:
+#   1. No leg can publish on its own -- only `publish` touches the release.
+#   2. Even `publish` cannot half-finish visibly -- the release stays a draft
+#      until every expected asset is confirmed present on it. A dropped upload
+#      or a mid-flight network failure leaves an invisible draft, not a broken
+#      "Latest".
+#
+# Note on `workflow_dispatch`: it is a dry run ONLY when dispatched against a
+# branch. `publish` is gated on `startsWith(github.ref, 'refs/tags/')`, and a
+# dispatch can be aimed at a tag ref -- in which case github.ref IS
+# `refs/tags/vX.Y.Z` and the publish job runs and publishes for real. Dispatch
+# from a branch (the normal case: every dispatch run to date was against `dev`)
+# builds and publishes nothing, which is what made the 2026-08-01 dispatch run
+# show green macOS and Linux legs yet add nothing to any release.
+# ─────────────────────────────────────────────────────────────────────────────
+
 jobs:
+  plan:
+    name: Plan release
+    runs-on: eph-linux-x64
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      version: ${{ steps.plan.outputs.version }}
+      expected-assets: ${{ steps.plan.outputs.expected-assets }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # `actions/github-script` rather than jq/python: this job runs on a bare
+      # runner before any dev-env provisioning, and the GARM Debian/macOS/Windows
+      # images cannot be assumed to carry either. A JS action runs wherever the
+      # Actions runner itself runs.
+      - name: Derive matrix and expected asset set
+        id: plan
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            const spec = JSON.parse(fs.readFileSync('.github/release-platforms.json', 'utf8'));
+            const platforms = spec.platforms;
+            if (!Array.isArray(platforms) || platforms.length === 0) {
+              core.setFailed('.github/release-platforms.json declares no platforms; a release with no platforms is not a release.');
+              return;
+            }
+
+            const nimble = fs.readFileSync('reprobuild.nimble', 'utf8');
+            const m = nimble.match(/^\s*version\s*=\s*"([^"]+)"/m);
+            if (!m) {
+              core.setFailed('could not read `version` from reprobuild.nimble');
+              return;
+            }
+            const version = m[1];
+
+            // The tag and the nimble version MUST agree. Asset names embed the
+            // nimble version while the download URL embeds the tag, so if they
+            // drift the published asset is unreachable at the URL every
+            // consumer constructs -- including setup-reprobuild's installer,
+            // which derives the asset name from the tag. Catch it here, before
+            // spending an hour of build time on an unusable release.
+            const ref = context.ref || '';
+            if (ref.startsWith('refs/tags/')) {
+              const tag = ref.slice('refs/tags/'.length);
+              if (tag !== `v${version}`) {
+                core.setFailed(
+                  `tag ${tag} does not match reprobuild.nimble version ${version} (expected tag v${version}). ` +
+                  `Asset names embed the nimble version and the download path embeds the tag, so these must agree.`);
+                return;
+              }
+            }
+
+            const assets = platforms.map(p =>
+              `reprobuild-${version}-${p.platform}-${p.arch}.${p['archive_ext']}`);
+
+            const dupes = assets.filter((a, i) => assets.indexOf(a) !== i);
+            if (dupes.length) {
+              core.setFailed(`.github/release-platforms.json yields duplicate asset names: ${[...new Set(dupes)].join(', ')}`);
+              return;
+            }
+
+            core.info(`release ${version} will consist of exactly ${assets.length} archives:`);
+            for (const a of assets) core.info(`  - ${a}`);
+
+            core.setOutput('matrix', JSON.stringify(platforms));
+            core.setOutput('version', version);
+            core.setOutput('expected-assets', assets.join('\n'));
+
   build-release:
     name: ${{ matrix.os-name }} (${{ matrix.arch }}) Release Build
+    needs: plan
     runs-on: ${{ matrix.runner }}
     strategy:
+      # fail-fast stays false so ONE broken leg still lets the others report.
+      # That is a diagnostics choice only -- it no longer affects what gets
+      # published, because publishing is gated on the aggregate result below.
       fail-fast: false
       matrix:
-        include:
-          - os-name: linux
-            runner: eph-linux-x64  # CIP-5: nix release build → eph-linux-x64
-            env-flavor: nix
-            platform: linux
-            arch: x86_64
-            archive_ext: tar.gz
-          - os-name: macos
-            runner: eph-macos-arm64  # CIP-5: nix release build → eph-macos-arm64
-            env-flavor: nix
-            platform: darwin
-            arch: aarch64
-            archive_ext: tar.gz
-          # Single label, not an array. `runs-on: [a, b]` is an AND over labels
-          # -- it demands ONE runner carrying BOTH -- not a choice between two
-          # classes. `eph-win-x64` and `eph-win-arm64` are separate pools on
-          # separate hosts (a libvirt Windows 11 VM on high-mem-server vs a
-          # QEMU/HVF Windows-ARM VM on m3; see infra's
-          # services/ephemeral-runner-host/darwin.nix and
-          # services/garm-incus-runners.nix), so no runner ever matched and this
-          # job was never scheduled: every release since v0.1.0 ended with
-          # "exceeded the maximum execution time while awaiting a runner for
-          # 24h0m0s". The ephemeral-fleet runbook documents the single-value
-          # form as the way these classes compose in a matrix.
-          #
-          # No ARM64 Windows row: conda-forge publishes clingo for win-64 only
-          # (windows/ensure-clingo.ps1 rejects arm64 rather than install an x64
-          # DLL a native ARM64 repro.exe cannot load), and the staged runtime
-          # DLLs are x64-specific by name (libcrypto-3-x64.dll). Adding the row
-          # before those exist would just add a permanently-red release leg.
-          - os-name: windows
-            runner: eph-win-x64  # CIP-5: windows-diy release build → eph-win-x64
-            env-flavor: windows-diy
-            platform: windows
-            arch: x86_64
-            archive_ext: zip
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v4
+
+      # ── Windows: fail fast, and legibly, if the image has no Git ───────────
+      #
+      # Git for Windows supplies bash.exe. Without it this workflow dies with
+      # `##[error]bash: command not found` inside the FIRST step of
+      # setup-dev-env (its `shell: bash` env-flavor check), and actions/checkout
+      # above silently degrades to the REST-API tarball, logging "add Git 2.18
+      # or higher to the PATH" and leaving no .git behind.
+      #
+      # This step is an ASSERTION, not a workaround. An earlier version tried to
+      # rescue an installed-but-unexported Git by searching the usual install
+      # roots and appending them to GITHUB_PATH. That was written before the
+      # cause was known; the Windows runner image simply had no Git installed at
+      # all, so the rescue path could never have fired. Keeping it would have
+      # been worse than useless: it would let a half-provisioned image pass CI
+      # and hide the image defect from whoever has to fix it.
+      #
+      # So we assert instead. A correctly built runner image has Git on the
+      # MACHINE PATH (services capture their environment from the machine
+      # environment at service start, so a user-scoped PATH never reaches the
+      # runner service) and this step is a no-op costing one second. A bad image
+      # fails here, named, instead of anonymously five steps later.
+      - name: Assert Git for Windows is available
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $bash = Get-Command bash -ErrorAction SilentlyContinue
+          $git = Get-Command git -ErrorAction SilentlyContinue
+
+          if ($bash -and $git) {
+            Write-Host "bash: $($bash.Source)"
+            Write-Host "git:  $($git.Source)"
+            & git --version
+            exit 0
+          }
+
+          $missing = @()
+          if (-not $bash) { $missing += 'bash' }
+          if (-not $git) { $missing += 'git' }
+
+          # Built by joining an array rather than with a here-string: a
+          # PowerShell here-string terminator must sit flush against the left
+          # margin, which would break out of this YAML block scalar.
+          throw (@(
+            "Missing on this Windows runner: $($missing -join ', ')",
+            "",
+            "Git for Windows provides both. Without it every 'shell: bash' step in this",
+            "workflow -- including the first step of setup-dev-env -- fails with",
+            "'bash: command not found', and actions/checkout cannot create a real",
+            "repository.",
+            "",
+            "This is a defect in the Windows runner image, not in this repository, and it",
+            "cannot be worked around from a workflow: the runner runs as a service, and a",
+            "service's environment is captured from the MACHINE environment when the",
+            "service starts.",
+            "",
+            "Fix it in the image: install Git for Windows and add its 'bin' directory to",
+            "the machine PATH before the image is captured."
+          ) -join [Environment]::NewLine)
 
       # Mint a GitHub App installation token via the CI Token Provider
       # app so the setup-dev-env / clone-siblings actions can clone private
@@ -86,7 +231,6 @@ jobs:
             stackable-hooks-src=../nim-stackable-hooks
             reprobuild-test-adapters-src=../reprobuild-test-adapters
 
-
       # Clone status-im/nim-bearssl manually on Windows (since it belongs to a
       # foreign organization and is not resolvable by metacraft-labs clone-siblings).
       - name: Clone nim-bearssl (Windows)
@@ -103,9 +247,8 @@ jobs:
       # the REPRO_BINARY_CACHE_* env vars picked up by the build steps below; it is a
       # no-op when the secrets are empty (fork PRs) and publish failures are non-fatal
       # (see .github/actions/setup-repro-publish). It selects bash vs pwsh by
-      # runner.os, so it covers every matrix leg — including any currently-missing
-      # os x arch runner added later (linux-arm64, macos-x64, windows-arm64), which
-      # only need a matrix row + runner, not a change here.
+      # runner.os, so it covers every matrix leg -- including any leg added later to
+      # .github/release-platforms.json, which needs no change here.
       - name: Configure repro binary-cache publish
         uses: ./.github/actions/setup-repro-publish
         with:
@@ -118,12 +261,14 @@ jobs:
       # `.#release` (B5) replaced `.#reprobuild.build_apps`. That wrapper ran the
       # whole build inside ONE shell() action, which takes the automatic-monitor
       # policy, so every nim compile and clang link executed as a child under the
-      # io-mon shim — where, on macOS, children die producing no output. The
-      # `release` collection is per-artifact `nim.c` / `fs.copyFile` edges, which
-      # are depfile-policied and unmonitored, and it covers both `build/bin` and
-      # the `build/lib` libraries the tarball packages.
+      # io-mon shim -- where, on macOS, children die producing no output. (That is
+      # precisely how the v0.1.3 macOS leg died: `repro build: action failed:
+      # reprobuild.build_apps (exit code 2)` / `unsupported platform for the
+      # io-mon shim`.) The `release` collection is per-artifact `nim.c` /
+      # `fs.copyFile` edges, which are depfile-policied and unmonitored, and it
+      # covers both `build/bin` and the `build/lib` libraries the tarball packages.
       #
-      # `just bootstrap` still runs scripts/build_apps.sh directly — unmonitored,
+      # `just bootstrap` still runs scripts/build_apps.sh directly -- unmonitored,
       # and the only way to get an engine binary in the first place.
       - name: Bootstrap and Build (POSIX)
         if: matrix.os-name != 'windows'
@@ -189,8 +334,11 @@ jobs:
 
           .\build\bin\repro.exe build --tool-provisioning=path --daemon=off --no-runquota .#release
 
-
-      # Package the artifacts preserving the bin/ and lib/ structures
+      # Package the artifacts preserving the bin/ and lib/ structures.
+      #
+      # The archive name is derived here the same way `plan` derives the expected
+      # asset list, and the publish job asserts the two sets match exactly -- so a
+      # naming drift becomes a hard failure rather than a mystery missing asset.
       - name: Package release assets (POSIX)
         if: matrix.os-name != 'windows'
         shell: bash
@@ -206,6 +354,7 @@ jobs:
 
             tar -czf "${pkg_name}.tar.gz" "${pkg_name}"
             echo "ASSET_PATH=${pkg_name}.tar.gz" >> "$GITHUB_ENV"
+            echo "ASSET_NAME=${pkg_name}.tar.gz" >> "$GITHUB_ENV"
           '
 
       - name: Package release assets (Windows)
@@ -222,6 +371,7 @@ jobs:
 
           Compress-Archive -Path "${pkg_name}" -DestinationPath "${pkg_name}.zip" -Force
           Add-Content -Path $env:GITHUB_ENV -Value "ASSET_PATH=${pkg_name}.zip"
+          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_NAME=${pkg_name}.zip"
 
       # Smoke-tests the PACKAGED archive, not the build tree: on Windows it
       # asserts the runtime-DLL manifest and runs the binary with PATH scrubbed
@@ -239,12 +389,271 @@ jobs:
         run: |
           bash scripts/verify_release.sh "${{ env.ASSET_PATH }}"
 
-      # Upload to GitHub Releases when a version tag is pushed
-      - name: Upload Release Assets
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+      # Checksum at the point of production. The publish job RE-computes this
+      # from the downloaded artifact and compares, which is what makes the
+      # artifact round-trip itself verified rather than assumed.
+      - name: Compute checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="${{ env.ASSET_NAME }}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${asset}" > "${asset}.sha256"
+          else
+            shasum -a 256 "${asset}" > "${asset}.sha256"
+          fi
+          cat "${asset}.sha256"
+
+      # Publish NOTHING to the release from here. The artifact is the only
+      # output of a build leg; a leg that uploads directly to the release is
+      # exactly the bug this workflow was restructured to remove.
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: ${{ env.ASSET_PATH }}
+          name: release-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            ${{ env.ASSET_NAME }}
+            ${{ env.ASSET_NAME }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-release:
+    name: Publish release (all-or-nothing)
+    needs: [plan, build-release]
+    runs-on: eph-linux-x64
+    # `always()` so a failed matrix reaches the explicit assertion below and
+    # reports a RED publish job. Plain `needs:` semantics would SKIP this job,
+    # which renders green-ish in the UI -- the same quiet non-event that let
+    # partial releases look normal for four releases running.
+    if: always() && startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Assert every platform built
+        if: needs.build-release.result != 'success' || needs.plan.result != 'success'
+        run: |
+          echo "::error::Refusing to publish. plan=${{ needs.plan.result }} build=${{ needs.build-release.result }}"
+          echo "::error::A release publishes every platform in .github/release-platforms.json or it publishes nothing."
+          echo "::error::Fix the failing leg and re-run, or -- as a reviewed, deliberate decision -- remove that"
+          echo "::error::platform from .github/release-platforms.json to narrow what this release promises."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: staging
+          merge-multiple: true
+
+      # Belt-and-braces over the job gate: a green leg whose upload silently
+      # produced nothing would otherwise still yield a short release. This
+      # compares what actually landed against `plan`'s derived list, in BOTH
+      # directions, and re-verifies each checksum after the artifact round trip.
+      - name: Assert the complete, expected asset set is present
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.plan.outputs.expected-assets }}
+        run: |
+          set -euo pipefail
+          cd staging
+
+          echo "=== staged files ==="
+          ls -la
+
+          missing=()
+          while IFS= read -r asset; do
+            [ -n "${asset}" ] || continue
+            if [ ! -f "${asset}" ]; then
+              missing+=("${asset}")
+              continue
+            fi
+            if [ ! -f "${asset}.sha256" ]; then
+              missing+=("${asset}.sha256")
+              continue
+            fi
+            # Re-derive the digest here and compare with the one the build leg
+            # produced, so artifact upload/download corruption cannot pass.
+            expected_sum="$(awk '{print $1}' "${asset}.sha256")"
+            actual_sum="$(sha256sum "${asset}" | awk '{print $1}')"
+            if [ "${expected_sum}" != "${actual_sum}" ]; then
+              echo "::error::${asset} changed in transit: build leg recorded ${expected_sum}, staged copy is ${actual_sum}"
+              exit 1
+            fi
+            echo "ok  ${asset}  ${actual_sum}"
+          done <<< "${EXPECTED}"
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Release is incomplete; refusing to publish. Missing: ${missing[*]}"
+            exit 1
+          fi
+
+          # And the other direction: nothing unexpected rides along.
+          for f in *; do
+            case "${f}" in
+              *.sha256) continue ;;
+            esac
+            if ! grep -Fxq "${f}" <<< "${EXPECTED}"; then
+              echo "::error::Unexpected asset '${f}' staged for release; it is not in .github/release-platforms.json"
+              exit 1
+            fi
+          done
+
+          echo "All $(grep -c . <<< "${EXPECTED}") expected archives present and verified."
+
+      # One combined manifest is what `setup-reprobuild` verifies downloads
+      # against. Before this, releases published no checksums at all, so the
+      # only integrity guarantee a consumer had was TLS to github.com.
+      - name: Build SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd staging
+          rm -f SHA256SUMS
+          # Sorted for a stable, diffable manifest.
+          for f in $(ls *.sha256 | sort); do
+            cat "${f}"
+          done > SHA256SUMS
+          rm -f -- *.sha256
+          echo "=== SHA256SUMS ==="
+          cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      # ── Force any pre-existing release for this tag back to draft ──────────
+      #
+      # `softprops/action-gh-release@v2` does NOT honour `draft: true` for a
+      # release that already exists. Its update path passes
+      # `draft: existingRelease.draft` (src/github.ts), i.e. it preserves
+      # whatever the release already was and ignores the input. So on a re-run
+      # of an already-PUBLISHED tag the next step would upload assets straight
+      # onto the live, consumer-visible release, one at a time -- precisely the
+      # "visible but incomplete" state this workflow exists to make impossible.
+      # A failure midway would then leave a broken public release while the
+      # verify step below reported "leaving it as a DRAFT", which would be
+      # false.
+      #
+      # So we draft it ourselves first, and only then upload. A release being
+      # rebuilt is momentarily hidden rather than momentarily inconsistent.
+      - name: Force existing release for this tag back to draft
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner, repo: context.repo.repo, per_page: 100,
+            });
+            const existing = releases.filter(r => r.tag_name === tag);
+            if (!existing.length) {
+              core.info(`no existing release for ${tag}; it will be created as a draft.`);
+              return;
+            }
+            for (const r of existing) {
+              if (r.draft) {
+                core.info(`release ${tag} (id=${r.id}) is already a draft.`);
+                continue;
+              }
+              core.warning(
+                `release ${tag} (id=${r.id}) is currently PUBLISHED. Hiding it as a draft for the ` +
+                `duration of this run so consumers cannot observe a partially re-uploaded release. ` +
+                `It is republished at the end only if every expected asset is confirmed present.`);
+              await github.rest.repos.updateRelease({
+                owner: context.repo.owner, repo: context.repo.repo,
+                release_id: r.id, draft: true,
+              });
+            }
+
+      # Create/refresh the release as a DRAFT holding every asset. A draft is
+      # invisible to consumers and is never "Latest", so even a partial or
+      # interrupted upload cannot be seen by anyone.
+      - name: Upload assets to a draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
           generate_release_notes: true
+          files: |
+            staging/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Confirm against the API that the draft really carries everything, then
+      # -- and only then -- make it visible. This is the step that converts
+      # "we uploaded" into "the published release is complete".
+      - name: Verify the draft, then publish it
+        uses: actions/github-script@v7
+        env:
+          EXPECTED: ${{ needs.plan.outputs.expected-assets }}
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            // Read through `env`, not an Actions expression interpolation
+            // inside the script body: an expression is pasted in textually,
+            // so an asset name containing a backtick or a JS `${` would break
+            // out of the template literal it was being pasted into.
+            //
+            // Editing this block: `script` is an Actions *input*, so its whole
+            // body -- comments included -- is scanned for expression syntax
+            // before any JavaScript runs. Writing the literal two-brace
+            // interpolation sequence here, even inside a `//` comment, is a
+            // workflow LOAD error ("An expression was expected") that fails
+            // the run before a single job is created, on every push, for every
+            // event -- including ones this workflow does not subscribe to.
+            // Describe the syntax in words; never spell it out.
+            const expected = new Set(
+              (process.env.EXPECTED || '').split('\n').map(s => s.trim()).filter(Boolean)
+            );
+            expected.add('SHA256SUMS');
+
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner, repo: context.repo.repo, per_page: 100,
+            });
+            const matching = releases.filter(r => r.tag_name === tag);
+            if (matching.length === 0) {
+              core.setFailed(`no release found for tag ${tag}`);
+              return;
+            }
+            if (matching.length > 1) {
+              // Picking "the first one" here would be picking at random which
+              // release becomes visible.
+              core.setFailed(
+                `${matching.length} releases share tag ${tag} (ids: ${matching.map(r => r.id).join(', ')}). ` +
+                `Refusing to guess which one to publish -- delete the stale ones and re-run.`);
+              return;
+            }
+            const release = matching[0];
+            if (!release.draft) {
+              // Everything above is built on "nothing is visible until the
+              // asset set is confirmed". If the release is already live at
+              // this point that invariant is broken and the reassuring
+              // "leaving it as a DRAFT" messages below would be lies.
+              core.setFailed(
+                `release ${tag} (id=${release.id}) is already PUBLISHED before verification. ` +
+                `Refusing to proceed: consumers may already have seen an incomplete release.`);
+              return;
+            }
+
+            const present = new Set(release.assets.map(a => a.name));
+            const missing = [...expected].filter(a => !present.has(a));
+            const extra = [...present].filter(a => !expected.has(a));
+
+            core.info(`release ${tag} (id=${release.id}, draft=${release.draft}) carries: ${[...present].sort().join(', ') || '(nothing)'}`);
+
+            if (missing.length) {
+              core.setFailed(
+                `Draft release ${tag} is missing ${missing.join(', ')}. Leaving it as a DRAFT so no consumer ` +
+                `can see a partial release. Delete the draft, fix the cause, and re-run.`);
+              return;
+            }
+            if (extra.length) {
+              // A stale asset from an earlier attempt at the same tag would
+              // ship alongside the intended set; that is a different release
+              // than the one this run built.
+              core.setFailed(
+                `Draft release ${tag} carries unexpected asset(s): ${extra.join(', ')}. ` +
+                `Leaving it as a DRAFT. Delete the stale assets (or the draft) and re-run.`);
+              return;
+            }
+
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner, repo: context.repo.repo,
+              release_id: release.id, draft: false,
+            });
+            core.info(`Published ${tag} with all ${expected.size} assets.`);
