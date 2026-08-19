@@ -115,20 +115,25 @@ suite "configure build-tree cleanup caching":
       let actions = cmakeActions(root, "Ninja", @["FEATURE=ON"])
       let cleanup = findById(actions,
         "cmake-clean-build-dir-cmakeCleanupTest")
-      var configure, build: BuildActionDef
+      var configure, build, install: BuildActionDef
       for action in actions:
         if action.call.packageName == "cmake" and
             action.call.subcommand == "configure":
           configure = action
         elif action.id == "cmake-build-cmakeCleanupTest":
           build = action
+        elif action.id == "cmake-install-cmakeCleanupTest":
+          install = action
 
       check configure.id.len > 0
       check build.id.len > 0
+      check install.id.len > 0
       check configure.dependencyPolicy.ignoredInputPrefixes ==
         @[root / "build-cmake"]
       check build.dependencyPolicy.ignoredInputPrefixes ==
         @[root / "build-cmake"]
+      check install.dependencyPolicy.ignoredInputPrefixes ==
+        @[root / "build-cmake", root / "build-cmake" / "out"]
       check build.inputs == cleanup.outputs
     else:
       skip()

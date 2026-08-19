@@ -697,7 +697,15 @@ proc cmake_package*(srcDir: string;
     inputs = buildEdge.outputs,
     outputs = @[installStamp],
     pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
+    # CMake's install driver both reads and mutates its configured build tree
+    # (notably InstallScripts.json and install_manifest.txt), and probes files
+    # already present below the destination before replacing them. Treating
+    # either mutable tree as a discovered input makes the install edge depend
+    # on its own previous writes and miss on every warm build. The build stamp
+    # is the immutable declared identity for the configured tree; source and
+    # tool reads outside these write scopes remain monitored.
+    dependencyPolicy = automaticMonitorPolicy(
+      @[m9r79CmBuildDirAbs, effectiveDestRoot]),
     commandStatsId = "cmake_package.install",
     toolIdentityRefs = @["cmake", "sh"] & cmakeDepRefs,
     env = extraEnv,
