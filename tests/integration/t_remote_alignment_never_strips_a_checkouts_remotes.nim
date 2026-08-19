@@ -24,9 +24,23 @@
 ## URL" — that passes against the destructive implementation too — but the
 ## tracking ref and the branch upstream that only a rename carries across.
 ##
+## The first version of this guard asked whether the DECLARED set was empty,
+## and that was too narrow — it reasons about the input to a step whose damage
+## depends on its output. `git remote add ""` exits 128, so a binding with an
+## unusable local name makes every add silently do nothing while still counting
+## as "expected", and the prune then removes the checkout's real remote. Same
+## end state, non-empty declaration. The guard is now stated as the outcome it
+## must preserve: alignment never leaves a checkout with zero remotes, decided
+## against what git actually reports after the add/rename pass rather than
+## against the proc's own bookkeeping — the bookkeeping is precisely what was
+## wrong in both routes.
+##
 ## Asserted:
 ##   1. A repo that resolves with NO declared remotes leaves the checkout's
 ##      existing remotes, URLs, and remote-tracking refs exactly as they were.
+##   1b. A repo that resolves with a NON-EMPTY `remotes` list whose bindings
+##      cannot be created (an unusable local name) likewise leaves the checkout
+##      connected — the case the narrower first guard let through.
 ##   2. A primary remote carrying the URL-prefix name is RENAMED to `origin`:
 ##      the tracking ref survives under the new name and the local branch
 ##      still has an upstream.
@@ -130,6 +144,48 @@ suite "remote alignment never strips a checkout's remotes":
 
       # Nothing was taken away. Before the guard this left the checkout with
       # zero remotes and no remote-tracking refs at all.
+      check remoteNames(gitBin, checkout) == @["origin"]
+      check remoteUrl(gitBin, checkout, "origin") == prefix & "/lib-a"
+      check refSha(gitBin, checkout, "refs/remotes/origin/dev") ==
+        trackedBefore
+      check configValue(gitBin, checkout, "branch.dev.remote") == "origin"
+
+  test "t_alignment_leaves_a_checkout_alone_when_no_binding_can_be_created":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let scratch = createTempDir("repro-align-unusable-", "")
+      defer: removeDir(scratch)
+      let identity = ensureGitToolResolvable(tpmPathOnly, gitBin.parentDir)
+
+      let orgDir = scratch / "remotes"
+      createDir(orgDir)
+      seedBare(gitBin, orgDir / "lib-a", "dev", "lib-a")
+      let prefix = "file://" & orgDir.replace('\\', '/')
+
+      let workspaceRoot = scratch / "workspace"
+      createDir(workspaceRoot)
+      let checkout = workspaceRoot / "lib-a"
+      discard requireCmd(quoteShellCommand([gitBin, "clone", "--quiet",
+        prefix & "/lib-a", checkout]))
+      let trackedBefore = refSha(gitBin, checkout, "refs/remotes/origin/dev")
+      check trackedBefore.len > 0
+
+      # A NON-EMPTY bindings list whose only entry git cannot create: an empty
+      # local remote name is rejected outright (`git remote add ''` exits 128).
+      # The narrower "is the declared set empty" guard passes this straight
+      # through — the set has one member — and the prune then had nothing left
+      # to protect `origin` from. This is the second route to the same total
+      # disconnection, and the reason the guard now asks about the outcome.
+      let unusable = @[ResolvedRepo(
+        name: "lib-a", path: "lib-a", projectRemote: "metacraft-labs",
+        fetchUrl: prefix & "/lib-a", revision: "dev", branch: "dev",
+        remotes: @[ResolvedRemote(localName: "",
+          projectRemote: "metacraft-labs", fetchUrl: prefix & "/lib-a")])]
+
+      alignWorkspaceRemotes(workspaceRoot, unusable, identity)
+
       check remoteNames(gitBin, checkout) == @["origin"]
       check remoteUrl(gitBin, checkout, "origin") == prefix & "/lib-a"
       check refSha(gitBin, checkout, "refs/remotes/origin/dev") ==

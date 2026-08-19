@@ -998,7 +998,7 @@ tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim	nim	2
 tests/integration/t_r2_iso_boot.nim	nim	2
 tests/integration/t_r9_systemd_boot.nim	nim	2
 tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim	nim	1
-tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	nim	2
+tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	nim	3
 tests/integration/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty.nim	nim	3
 tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	nim	5
 tests/integration/t_repro_build_test_aggregate_builds_every_test.nim	nim	2

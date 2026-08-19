@@ -25013,18 +25013,55 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
 
     # 3. Clean up/remove unexpected remotes.
     #
-    # Guarded on a NON-EMPTY expected set. "Remove every remote the manifest
-    # does not declare" applied to a manifest that declares none means "remove
-    # every remote", which leaves a real checkout with no way back to its
-    # upstream and no remote-tracking refs — a repair job, from a step whose
-    # entire purpose is tidying. A repo that resolves with an empty `remotes`
-    # list is a resolution the caller should be looking at, never a licence to
-    # strip a working tree, so the prune is skipped and the add/rename pass
-    # above (which did nothing either) is left as the whole of the alignment.
-    if expectedRemotes.len > 0:
-      for name in existingRemotes:
-        if name notin expectedRemotes:
-          discard gitRunPlain(identity, ["-C", repoAbs, "remote", "remove", name])
+    # The invariant, stated as the outcome rather than as a property of the
+    # input: ALIGNMENT NEVER LEAVES A CHECKOUT WITH ZERO REMOTES. A tidying
+    # step has no business disconnecting a working tree from everywhere it came
+    # from, whatever the manifest happens to say.
+    #
+    # Guarding on "the declared set is empty" was the first attempt and it was
+    # too narrow, because it reasons about the input to a step whose damage
+    # depends on the OUTPUT. Two ways a non-empty declaration still strips
+    # everything:
+    #
+    #   * the declared name is one git will not accept — `git remote add ""`
+    #     exits 128 — so the add silently does nothing while the name still
+    #     counts as "expected", and the prune then removes the real remote;
+    #   * an add or rename fails for any other reason (a locked config, a name
+    #     collision) and the replacement that justified the prune was never
+    #     actually created.
+    #
+    # So the decision is made against what the checkout ACTUALLY has after the
+    # add/rename pass, re-read from git rather than from this proc's own
+    # bookkeeping — the bookkeeping is what was wrong in both cases above. If
+    # every surviving remote would be pruned, the whole prune is refused and
+    # SAID OUT LOUD, because at that point the manifest and the checkout
+    # disagree in a way no amount of quiet tidying can settle.
+    var actualRemotes: seq[string]
+    let afterAdds = gitRunPlain(identity, ["-C", repoAbs, "remote"])
+    if afterAdds.code == 0:
+      for line in afterAdds.output.strip().splitLines():
+        let name = line.strip()
+        if name.len > 0:
+          actualRemotes.add(name)
+    var prunable: seq[string]
+    var surviving = 0
+    for name in actualRemotes:
+      if name in expectedRemotes:
+        inc surviving
+      else:
+        prunable.add(name)
+    if prunable.len > 0 and surviving == 0:
+      stderr.writeLine("workspace: refusing to prune the remote(s) of '" &
+        repo.path & "' (" & prunable.join(", ") &
+        ") — the manifest declares " &
+        (if expectedRemotes.len == 0: "none"
+         else: "only remote(s) this checkout does not have and could not be " &
+           "given") &
+        ", so pruning would leave it with no remote at all. Left untouched; " &
+        "check what '" & repo.name & "' resolves to.")
+    else:
+      for name in prunable:
+        discard gitRunPlain(identity, ["-C", repoAbs, "remote", "remove", name])
 
 proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## End-to-end driver. Resolves the named project / variant, classifies
