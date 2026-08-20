@@ -190,6 +190,47 @@ proc baselineCorpusActions*(): seq[BuildAction] =
     weakFingerprint: weakFingerprintFromText("stat4/provision-nix"),
     builtinText: "nix\t/nix/store/aaaa-foo"))
 
+proc postBaselineCorpusActions*(): seq[BuildAction] =
+  ## Edge kinds introduced AFTER the NLF-STAT-4 baseline was recorded.
+  ##
+  ## Kept apart from `baselineCorpusActions` on purpose, and the split is the
+  ## whole point rather than a filing convenience. NLF-STAT-4's property is
+  ## that "an existing workspace with no lock-file declarations" has
+  ## byte-identical fingerprints across the campaign. An edge kind that did
+  ## not exist when the baseline was recorded appears in NO existing
+  ## workspace, so appending it to the recorded fixture would not be measuring
+  ## that property — it would be relaxing the fixture's "no row was added"
+  ## check, which is one of the two directions the gate catches.
+  ##
+  ## The coverage obligation is separate and is NOT relaxed:
+  ## `assertEveryEdgeKindCovered` reads BOTH lists, so a kind added without a
+  ## corpus entry still fails, and `t_fingerprint_audit_every_action_has_lock_identity`
+  ## audits both so a new kind cannot quietly opt out of §7.2 either.
+  ##
+  ## NLF-M5 (`bakMetadataFetch` / `bakSolveLock`): both are constructed
+  ## through `builtinAction`, and the fetch edge carries the `netFetch`
+  ## network mode plus its tracked destination — the declaration
+  ## `Sandbox-And-Monitoring.md` §"The Network Dimension" requires to be
+  ## visible in the graph before the action runs.
+  result = @[]
+  result.add(builtinAction(bakMetadataFetch, "stat4/fetch-libfoo-versions",
+    governingLockIdentity = CorpusLockIdentity,
+    outputs = ["generation/libfoo.versions"],
+    text = "http://index.example.invalid/metadata/libfoo.versions",
+    networkMode = netFetch,
+    netDestinations = ["http://index.example.invalid/metadata/"]))
+  result.add(builtinAction(bakSolveLock, "stat4/solve-lock",
+    governingLockIdentity = CorpusLockIdentity,
+    deps = ["stat4/fetch-libfoo-versions"],
+    inputs = ["generation/libfoo.versions"],
+    outputs = ["generation/repro.lock"]))
+
+proc everyEdgeKindActions*(): seq[BuildAction] =
+  ## The baseline corpus plus every post-baseline kind: the graph the §7.2
+  ## whole-graph audit runs against, and the one coverage is measured over.
+  result = baselineCorpusActions()
+  result.add(postBaselineCorpusActions())
+
 proc baselineCorpusText*(): string =
   ## The whole fixture body: a header line, then one row per action in
   ## declaration order (which is the graph's own order — not sorted, so a
@@ -202,8 +243,11 @@ proc assertEveryEdgeKindCovered*(): string =
   ## Returns "" when every `BuildActionKind` appears in the corpus, or a
   ## diagnostic naming the missing kinds. A migration gate that silently
   ## stopped covering a kind would be the §7.2 failure shape in miniature.
+  ##
+  ## Reads the UNION of the frozen baseline and the post-baseline kinds, so
+  ## the fixture can stay frozen without the coverage obligation narrowing.
   var seen: set[BuildActionKind] = {}
-  for a in baselineCorpusActions():
+  for a in everyEdgeKindActions():
     seen.incl(a.kind)
   var missing: seq[string] = @[]
   for k in BuildActionKind:
