@@ -429,6 +429,8 @@ proc effectiveValuesE(v: VariantDecl): seq[string] =
   for c in v.contributions:
     if c.value notin result:
       result.add(c.value)
+  if v.pinnedValue.len > 0 and v.pinnedValue notin result:
+    result.add(v.pinnedValue)
 
 proc encodeWithAssumptions*(variants: openArray[VariantDecl];
                             packages: openArray[PackageDecl]):
@@ -493,7 +495,8 @@ proc encodeWithAssumptions*(variants: openArray[VariantDecl];
           name: v.name, kind: v.kind,
           allowedValues: v.allowedValues,
           contributions: v.contributions,
-          constraints: kept))
+          constraints: kept,
+          pinnedValue: v.pinnedValue))
 
   # ---- Phase 2: emit the variant universe + cardinality + priority
   # facts. These do not get assumption guards — they are structural.
@@ -502,9 +505,16 @@ proc encodeWithAssumptions*(variants: openArray[VariantDecl];
     for value in values:
       sections.add("variant_value(\"" & aspQuoteE(v.name) & "\", \"" &
                    aspQuoteE(value) & "\").")
-    sections.add("{ variant_assigned(\"" & aspQuoteE(v.name) &
-                 "\", X) : variant_value(\"" & aspQuoteE(v.name) &
-                 "\", X) } = 1.")
+    if v.pinnedValue.len > 0:
+      # NLF-M3 — a lock-pinned variant is a fact here too. The unsat core this
+      # program produces has to be a core of the program that actually failed;
+      # re-opening the pin as a choice would explain a different question.
+      sections.add("variant_assigned(\"" & aspQuoteE(v.name) & "\", \"" &
+                   aspQuoteE(v.pinnedValue) & "\").")
+    else:
+      sections.add("{ variant_assigned(\"" & aspQuoteE(v.name) &
+                   "\", X) : variant_value(\"" & aspQuoteE(v.name) &
+                   "\", X) } = 1.")
     # Priority facts.
     var bestByValue: Table[string, int]
     for c in v.contributions:
@@ -556,10 +566,18 @@ proc encodeWithAssumptions*(variants: openArray[VariantDecl];
     for ver in p.versions:
       sections.add("package_version(\"" & aspQuoteE(p.name) &
                    "\", \"" & aspQuoteE(ver) & "\").")
-    sections.add("{ package_chosen(\"" & aspQuoteE(p.name) &
-                 "\", V) : package_version(\"" & aspQuoteE(p.name) &
-                 "\", V) } = 1 :- package_active(\"" &
-                 aspQuoteE(p.name) & "\").")
+    if p.pinned and p.versions.len > 0:
+      # NLF-M2 shape, carried into the explainer by NLF-M3: an OBSERVED or
+      # LOCK-PINNED version is a fact, not a choice. The explainer builds the
+      # program the unsat core is computed over, so a pin the explainer does
+      # not honour explains a program that never ran.
+      sections.add("package_chosen(\"" & aspQuoteE(p.name) & "\", \"" &
+                   aspQuoteE(p.versions[0]) & "\").")
+    else:
+      sections.add("{ package_chosen(\"" & aspQuoteE(p.name) &
+                   "\", V) : package_version(\"" & aspQuoteE(p.name) &
+                   "\", V) } = 1 :- package_active(\"" &
+                   aspQuoteE(p.name) & "\").")
 
   # Range membership facts (no guards — purely structural).
   var seenRange: HashSet[string]

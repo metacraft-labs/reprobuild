@@ -846,6 +846,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_committed_lock_pins_versions.nim",
+    binary: "build/test-bin/t_committed_lock_pins_versions",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_committed_lock_variants_are_hard.nim",
+    binary: "build/test-bin/t_committed_lock_variants_are_hard",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_d2_dnf_index.nim",
     binary: "build/test-bin/t_d2_dnf_index",
     defines: @[],
@@ -1024,6 +1040,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_solver_inputs_render_order_independent.nim",
     binary: "build/test-bin/t_solver_inputs_render_order_independent",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_unsatisfiable_lock_reports_conflict.nim",
+    binary: "build/test-bin/t_unsatisfiable_lock_reports_conflict",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
