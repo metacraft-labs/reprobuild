@@ -109,9 +109,19 @@ proc writeNativeMembership(fx: Fixture) =
     "remote = \"origin\"\nrevision = \"main\"\n")
 
 proc writeConflictingLegacyMembership(fx: Fixture) =
-  ## This valid legacy project names a missing checkout. Any accidental
-  ## ``.repo/manifests`` membership fallback makes the gate fail, so the happy
-  ## path positively proves that only native root membership was resolved.
+  ## This valid legacy project names a repo that has no checkout, and declares
+  ## it under a DIFFERENT name than native root membership does. Any accidental
+  ## ``.repo/manifests`` membership fallback is therefore observable in the
+  ## happy path, which is what makes that path a positive proof that only
+  ## native root membership was resolved.
+  ##
+  ## The observable used to be "the gate fails". It no longer is: a declared
+  ## repo with no on-disk checkout is a legitimate state and does not refuse
+  ## (Workspace-Manifests.md §"Declared repos with no on-disk checkout"), so
+  ## resting the control on a refusal would have quietly made it vacuous. The
+  ## happy path instead asserts that ``legacy-ghost`` appears NOWHERE in the
+  ## gate's report — a sharper control, because it names the ghost rather than
+  ## inferring it from a generic failure.
   let legacy = fx.workspace / ".repo" / "manifests"
   createDir(legacy / "projects")
   createDir(legacy / "repos")
@@ -311,6 +321,11 @@ suite "migrated Google Repo workspace pre-push compatibility":
     check goodReport["failures"].len == 0
     check goodReport["lockUpdate"]["kind"].getStr() in
       ["created", "already-current"]
+    # The `.repo/manifests` fallback must not have been consulted. A consulted
+    # fallback resolves `legacy-ghost` into the participating set, where its
+    # absent checkout would surface as an `unmaterialized` lock record and a
+    # gate notice naming it. Its total absence from the report is the proof.
+    check "legacy-ghost" notin $goodReport
 
     let capture = readFile(fx.capture)
     let exactRefLine = "refs/heads/main " & outgoing &

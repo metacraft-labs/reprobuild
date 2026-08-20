@@ -112,6 +112,8 @@ libs/repro_dsl_stdlib/tests/t_c1_dsl_realize_hash.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_c2_apt_index.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_c2_recursive_identity.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_catalog_claude_code.nim	nim	10
+libs/repro_dsl_stdlib/tests/t_committed_lock_pins_versions.nim	nim	8
+libs/repro_dsl_stdlib/tests/t_committed_lock_variants_are_hard.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_d2_dnf_index.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_d2_pacman_index.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_develop_dependency_source_is_read_not_solved.nim	nim	11
@@ -136,6 +138,7 @@ libs/repro_dsl_stdlib/tests/t_smoke_expand_archive.nim	nim	39
 libs/repro_dsl_stdlib/tests/t_smoke_generated_config.nim	nim	15
 libs/repro_dsl_stdlib/tests/t_smoke_phase_e_requires_elevation.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_solver_inputs_render_order_independent.nim	nim	9
+libs/repro_dsl_stdlib/tests/t_unsatisfiable_lock_reports_conflict.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_versioned_provisioning_schema.nim	nim	31
 libs/repro_dsl_stdlib/tests/test_m69_package_macro.nim	nim	4
 libs/repro_elevation/tests/t_m2_nixos_darwin_modules.nim	nim	21
@@ -978,6 +981,7 @@ tests/integration/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_o
 tests/integration/t_pre_push_consumes_evidence_and_applies_tier_unreachable_policy.nim	nim	1
 tests/integration/t_pre_push_currency_read_routes_per_backend.nim	nim	1
 tests/integration/t_pre_push_gate_checks_only_pushed_repo_dependency_closure.nim	nim	1
+tests/integration/t_pre_push_lock_records_unmaterialized_declared_repo.nim	nim	3
 tests/integration/t_pre_push_membership_repo_scopes_to_touched_fragments.nim	nim	2
 tests/integration/t_pre_push_passes_on_heterogeneous_branches.nim	nim	1
 tests/integration/t_pre_push_protocol_v2_policy_regressions.nim	nim	5
@@ -1268,7 +1272,7 @@ tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1
 tests/unit/test_cmake_generator_competitiveness_bench.py	python	9
 tests/unit/test_continuous_benchmarking_policy.py	python	7
 tests/unit/test_package_root_anchor.py	python	3
-tests/unit/test_reprobuild_suite_inventory.py	python	46
+tests/unit/test_reprobuild_suite_inventory.py	python	49
 tools/catalog-harvester/tests/test_gh_releases_source.nim	nim	26
 tools/catalog-harvester/tests/test_harvester_app_name_validation.nim	nim	6
 tools/catalog-harvester/tests/test_harvester_history.nim	nim	3

@@ -91,6 +91,18 @@ jobs:
           attic-token: ${{ secrets.ATTIC_TOKEN }}
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+      # The suite case-count baseline gate, ahead of the whole-tree lint.
+      #
+      # `just lint` runs this same check, but only after several minutes of
+      # `nim check` over every library and entry point. A stale baseline is
+      # the single most common way this job goes red, and it is a source
+      # scan that answers in seconds -- so it is asked first, and the
+      # failure annotation names this step rather than a lint log.
+      #
+      # The pre-push hook (flake.nix `pre-commit-check`) is the first line
+      # of defence; this is the one that cannot be bypassed.
+      - name: Suite case-count baseline
+        run: dev-exec bash scripts/check_suite_case_counts.sh
       - name: just lint
         run: dev-exec just lint
       - name: Upload logs

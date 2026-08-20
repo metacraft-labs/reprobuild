@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -484,6 +485,271 @@ class StaticCaseCountBaselineTests(unittest.TestCase):
                     encoding="utf-8"
                 ),
             )
+
+
+class SuiteCaseCountPushGateTests(unittest.TestCase):
+    """The baseline gate at the push boundary, exercised through real git.
+
+    `StaticCaseCountBaselineTests` proves the CHECK is correct. These prove
+    it is REACHED before a commit becomes everyone's problem -- which is the
+    part that was missing, and the reason a stale baseline landed on the
+    shared branch twice, each time leaving the next contributor to carry
+    somebody else's regeneration in order to get their own change green.
+
+    Nothing here is mocked. A real bare repository is the remote, a real
+    working repository pushes to it, and the gate runs as a real
+    `.git/hooks/pre-push`. The assertion that matters is not "the checker
+    printed something" but "the remote ref did not move" -- a gate that
+    reports a failure and lets the push through would be indistinguishable
+    from no gate at all, and only a real push can tell the two apart.
+    """
+
+    # The hook body git itself invokes. It drains the ref list git streams
+    # to a pre-push hook's stdin and then delegates, which is exactly the
+    # shape of the shim the dev shell installs; `check_suite_case_counts.sh`
+    # -- the file this repository actually ships and that flake.nix and CI
+    # both invoke -- stays stdin-agnostic and is the code under test.
+    PRE_PUSH_HOOK = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "cat >/dev/null\n"
+        'cd "$(git rev-parse --show-toplevel)"\n'
+        "exec bash scripts/check_suite_case_counts.sh\n"
+    )
+
+    GATE_SCRIPT = Path("scripts/check_suite_case_counts.sh")
+
+    def setUp(self):
+        # Isolate from the developer's own git configuration: a global
+        # `core.hooksPath` would silently disable the very hook under test,
+        # and an absent user.name would fail the commit for an unrelated
+        # reason.
+        self.env = dict(os.environ)
+        self.env.update(
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GIT_CONFIG_SYSTEM=os.devnull,
+            GIT_AUTHOR_NAME="Suite Gate Test",
+            GIT_AUTHOR_EMAIL="suite-gate@example.invalid",
+            GIT_COMMITTER_NAME="Suite Gate Test",
+            GIT_COMMITTER_EMAIL="suite-gate@example.invalid",
+            GIT_TERMINAL_PROMPT="0",
+        )
+        for leaked in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+            self.env.pop(leaked, None)
+
+    def git(self, repo, *args, check=True):
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            env=self.env,
+        )
+        if check:
+            self.assertEqual(
+                result.returncode, 0, result.stdout + result.stderr
+            )
+        return result
+
+    def head_of(self, repo, ref):
+        return self.git(repo, "rev-parse", ref).stdout.strip()
+
+    def populate(self, root):
+        """A scratch tree the inventory scanner can measure for real.
+
+        Every source the baseline names, plus `repro_tests.nim` (which
+        declares them), the members of every consolidation bundle (whose own
+        body is nothing but imports, so the scan reads THEM), and the two
+        scripts under test. The scan is a pure function of exactly these
+        files, so this is the whole input -- no build directory, no
+        binaries, nothing compiled.
+        """
+        recorded = inventory.load_static_case_counts(REPO_ROOT)
+        wanted = [
+            Path("repro_tests.nim"),
+            Path("scripts/reprobuild_suite_inventory.py"),
+            self.GATE_SCRIPT,
+            inventory.STATIC_CASE_COUNTS_PATH,
+        ]
+        wanted.extend(Path(source) for source in recorded)
+        for source in recorded:
+            members = inventory.bundle_member_paths(
+                REPO_ROOT, source, inventory.read_text(REPO_ROOT / source)
+            )
+            wanted.extend(Path(member) for member in members)
+        for relative in wanted:
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO_ROOT / relative, target)
+        return recorded
+
+    def test_a_stale_baseline_cannot_reach_the_remote(self):
+        """Fresh baseline pushes; stale baseline is refused; regenerate fixes it.
+
+        One test rather than three because the three claims are only
+        meaningful together: a gate that refuses everything also "refuses a
+        stale baseline". The clean push at the start is what makes the
+        refusal in the middle evidence of anything.
+        """
+        with tempfile.TemporaryDirectory() as scratch:
+            scratch = Path(scratch)
+            remote = scratch / "remote.git"
+            work = scratch / "work"
+            work.mkdir()
+            subprocess.run(
+                ["git", "init", "--bare", "-b", "main", str(remote)],
+                check=True,
+                capture_output=True,
+                env=self.env,
+            )
+            self.git(work, "init", "-b", "main")
+            recorded = self.populate(work)
+            hook = work / ".git" / "hooks" / "pre-push"
+            hook.parent.mkdir(parents=True, exist_ok=True)
+            hook.write_text(self.PRE_PUSH_HOOK, encoding="utf-8")
+            hook.chmod(0o755)
+            self.git(work, "remote", "add", "origin", str(remote))
+            self.git(work, "add", "-A")
+            self.git(work, "commit", "-m", "import the tree")
+
+            clean = self.git(work, "push", "origin", "main", check=False)
+            self.assertEqual(
+                clean.returncode,
+                0,
+                "a tree whose baseline matches its sources must push:\n"
+                + clean.stdout
+                + clean.stderr,
+            )
+            published = self.head_of(remote, "refs/heads/main")
+            self.assertEqual(published, self.head_of(work, "HEAD"))
+
+            # Add a case the way a contributor does, and forget the baseline.
+            victim = next(
+                source
+                for source, (language, count) in sorted(recorded.items())
+                if language == "nim" and count > 0
+            )
+            with (work / victim).open("a", encoding="utf-8") as handle:
+                handle.write(
+                    '\ntest "a case the baseline has never seen":\n'
+                    "  check true\n"
+                )
+            self.git(work, "commit", "-am", "add a case, forget the baseline")
+
+            stale = self.git(work, "push", "origin", "main", check=False)
+            transcript = stale.stdout + stale.stderr
+            self.assertNotEqual(
+                stale.returncode,
+                0,
+                "a stale baseline must refuse the push:\n" + transcript,
+            )
+            self.assertIn(victim, transcript)
+            self.assertIn(
+                inventory.STATIC_CASE_COUNTS_REGENERATE_COMMAND,
+                transcript,
+                "the refusal must name the exact regeneration command; a "
+                "contributor who has to go looking for it is a contributor "
+                "who reaches for --no-verify.",
+            )
+            # The claim under test: refused, not merely complained about.
+            self.assertEqual(
+                self.head_of(remote, "refs/heads/main"),
+                published,
+                "the remote advanced despite the refusal",
+            )
+
+            regenerated = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/reprobuild_suite_inventory.py",
+                    "--write-static-case-counts",
+                ],
+                cwd=str(work),
+                capture_output=True,
+                text=True,
+                env=self.env,
+            )
+            self.assertEqual(
+                regenerated.returncode,
+                0,
+                regenerated.stdout + regenerated.stderr,
+            )
+            self.git(work, "commit", "-am", "record the added case")
+
+            fresh = self.git(work, "push", "origin", "main", check=False)
+            self.assertEqual(
+                fresh.returncode,
+                0,
+                "a regenerated baseline must push:\n"
+                + fresh.stdout
+                + fresh.stderr,
+            )
+            self.assertEqual(
+                self.head_of(remote, "refs/heads/main"),
+                self.head_of(work, "HEAD"),
+            )
+
+    def test_the_gate_is_wired_where_contributors_and_ci_will_run_it(self):
+        """The hook body is only a gate if something installs and runs it.
+
+        Asserted textually, next to the behavioural test above, so the two
+        cannot drift apart: the previous incarnation of this gate was
+        correct and simply never reached.
+        """
+        script = REPO_ROOT / self.GATE_SCRIPT
+        self.assertTrue(script.is_file(), f"missing {self.GATE_SCRIPT}")
+        self.assertTrue(
+            os.access(script, os.X_OK),
+            f"{self.GATE_SCRIPT} must be executable; a hook cannot run it "
+            "otherwise",
+        )
+
+        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
+        self.assertIsNotNone(
+            re.search(
+                r"hooks\.suite-case-counts\s*=.*?"
+                r"stages\s*=\s*\[\s*\"pre-push\"\s*\].*?"
+                + re.escape(str(self.GATE_SCRIPT)),
+                flake,
+                re.S,
+            ),
+            "flake.nix must declare the suite case-count hook at the "
+            "pre-push stage and point it at "
+            f"{self.GATE_SCRIPT}; without that the dev shell installs no "
+            "push-time gate and a stale baseline reaches the branch again.",
+        )
+
+        ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            str(self.GATE_SCRIPT),
+            ci,
+            "CI must run the gate too; a hook is bypassable with "
+            "--no-verify, so it cannot be the only line of defence.",
+        )
+
+    def test_the_gate_needs_nothing_built(self):
+        """It must stay a source scan, or it stops being hook-affordable.
+
+        Run it against a tree containing only the sources and the scripts --
+        no `build/`, no test binaries, no compiler output of any kind. If
+        this ever starts needing a build, the hook becomes a multi-minute
+        tax and the next contributor disables it.
+        """
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            self.populate(root)
+            self.assertFalse((root / "build").exists())
+            result = subprocess.run(
+                ["bash", str(self.GATE_SCRIPT), str(root)],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                env=self.env,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("as recorded", result.stdout)
 
 
 class SuiteInventoryTests(unittest.TestCase):
@@ -2099,7 +2365,16 @@ test "incomplete name" and:
         # Upstream 4294d5763 adds one standalone dependency-rerun cache test.
         # Upstream 84dd86a35 then adds the three membership-model sources
         # pinned above, so the regenerated graph contains 1240 Nim sources.
-        self.assertEqual(len(nim_specs), 1240)
+        #
+        # 1240 -> 1243: Named-Lock-Files NLF-M3 enrols three regressions for
+        # the committed lock becoming a PIN rather than a bias, all under
+        # `libs/repro_dsl_stdlib/tests/`:
+        #   t_committed_lock_pins_versions.nim
+        #   t_committed_lock_variants_are_hard.nim
+        #   t_unsatisfiable_lock_reports_conflict.nim
+        # Regenerated with `scripts/generate_test_edges.nim`, which reported
+        # 1243 Nim tests and no other movement.
+        self.assertEqual(len(nim_specs), 1243)
         self.assertEqual(len(python_specs), 5)
 
         nim_total = sum(
@@ -2333,7 +2608,17 @@ test "incomplete name" and:
         # sources and one added to the existing schema-round-trip source.
         # The independently pinned platform-qualified census retains the
         # exact one-case Linux delta.
-        expected_nim_total = 7094 if sys.platform == "darwin" else 7095
+        #
+        # +21: Named-Lock-Files NLF-M3's three lock-pinning regressions, 8 + 7
+        # + 6 cases. ATTRIBUTED FROM THE STATIC SCAN, not from a live catalog
+        # read: `nim_total` here is the sum over BUILT BINARIES' `--list-json`,
+        # and the three new binaries are built by the suite's own edges, which
+        # a tree without a full build does not have. The static baseline TSV
+        # was regenerated and reports exactly 8 / 7 / 6 for the three sources,
+        # and every case is unconditional, so the Linux-vs-Darwin delta is
+        # still +1. Recorded as an attribution rather than presented as a
+        # measurement, on the same principle as the composed base above.
+        expected_nim_total = 7115 if sys.platform == "darwin" else 7116
         self.assertEqual(nim_total, expected_nim_total)
         # Independently: the total is the sum of what the BINARIES report,
         # with nothing imputed for a binary that could not report. Stated

@@ -45,6 +45,12 @@ import repro_solver/variant_encoder
 import repro_solver/version_encoder
 import repro_solver/version_constraints
 import repro_solver/solver_api
+# Named-Lock-Files NLF-M3: the committed lock's answer reaches this process as
+# pins (``repro_solver/lock_pins``). The module is std-only, so consuming it
+# adds nothing to the provider's dependency closure.
+import repro_solver/lock_pins
+
+export lock_pins.ELockConflict
 
 # ---------------------------------------------------------------------------
 # Process-wide ambient variant context
@@ -106,6 +112,21 @@ var pendingSolverPackages {.threadvar.}: seq[SolverPackageInput]
   ## solver consumes without importing the ``repro_project_dsl``
   ## registry (that would create a layering loop).
 
+var governingLockPins {.threadvar.}: LockPins
+var governingLockPinsLoaded {.threadvar.}: bool
+  ## Named-Lock-Files NLF-M3 — the pins from the committed lock governing this
+  ## build, memoized for the process. Empty when no lock governs (the ordinary
+  ## no-lock build, and every unit test that does not ask for one).
+
+proc currentLockPins*(): LockPins =
+  ## The governing committed lock's pins, read once per thread. Exposed so a
+  ## caller can report WHICH lock is in force; the solve path consults it
+  ## through ``buildPackageDecls`` / ``buildVariantDecls``.
+  if not governingLockPinsLoaded:
+    governingLockPinsLoaded = true
+    governingLockPins = lockPinsFromEnv()
+  governingLockPins
+
 var lastUnifiedSolution {.threadvar.}: UnifiedSolution
 var hasUnifiedSolution {.threadvar.}: bool
   ## Spec-Implementation M2d: cache the last ``solve(...)`` result so
@@ -161,6 +182,10 @@ proc resetVariantState*() =
   loadedEnvOverrides = false
   pendingSolverPackages.setLen(0)
   resetDevelopSourceCache()
+  # NLF-M3: a test that points the lock-pin env somewhere new must not be
+  # served the previous scenario's pins. Same contract as the develop cache.
+  governingLockPins = initLockPins()
+  governingLockPinsLoaded = false
   lastUnifiedSolution = UnifiedSolution(
     variants: initTable[string, string](),
     packages: initTable[string, string](),
@@ -334,11 +359,50 @@ proc allowedValuesFromContributions(node: ConfigurableNode): seq[string] =
     if s notin result:
       result.add(s)
 
+proc lockedValueFor(name: string; kind: VariantKind): string =
+  ## Named-Lock-Files NLF-M3 (§1.2) — the value a governing committed lock
+  ## assigns to variant ``name``, or ``""`` when none does.
+  ##
+  ## An EXPLICIT ``--variant`` (or ``REPRO_VARIANTS``) entry for the same
+  ## variant wins and suppresses the pin. That is the documented layering
+  ## (§2.5: the lock is mode-agnostic and CLI/mode overrides sit above it), and
+  ## it is also why the CLI no longer folds the lock's variants into
+  ## ``REPRO_VARIANTS``: doing so would make every locked variant look like an
+  ## explicit override and the pin would never apply to anything.
+  let pins = currentLockPins()
+  if name notin pins.variants:
+    return ""
+  for entry in pendingCliOverrides:
+    if entry.name == name:
+      return ""
+  result = pins.variants[name]
+  if kind == vkBool and result.toLowerAscii() notin ["true", "false"]:
+    # A bool variant has a closed universe, so this pin cannot be honoured by
+    # any model. Refused by name rather than folded into the universe as a
+    # third boolean value, which is how a stale lock would otherwise turn into
+    # an unexplained UNSAT much further downstream.
+    raise newException(ELockConflict,
+      "the " & lockSourceDescription(pins) & " pins variant '" & name &
+      "' to '" & result & "', but '" & name &
+      "' is declared as a bool variant whose only values are true and " &
+      "false. The lock disagrees with the recipe; regenerate it with " &
+      "`repro lock refresh` or correct the declaration.")
+  if kind == vkBool:
+    # The bool universe is spelled lowercase; a pin that differs only in case
+    # would otherwise be admitted as a THIRD boolean value.
+    result = result.toLowerAscii()
+
 proc buildVariantDecls(ctx: ConfigContext): seq[VariantDecl] =
   ## Walk the ambient variant context's nodes and project each
   ## solver-participating node onto a ``VariantDecl`` the M2c encoder
   ## consumes. Non-variant nodes are skipped so the encoder doesn't see
   ## stray plain Configurables.
+  ##
+  ## NLF-M3: a variant the governing committed lock assigns is carried as a
+  ## PIN (``VariantDecl.pinnedValue``), not as a contribution. The measured
+  ## implementation forwarded the lock's assignments as ordinary contributions,
+  ## which the encoder renders as ``#minimize`` weights — outvotable, and
+  ## outvoted.
   for node in ctx.nodes:
     if not node.solverParticipating: continue
     let kind = variantKindFor(node.valueKind)
@@ -346,14 +410,16 @@ proc buildVariantDecls(ctx: ConfigContext): seq[VariantDecl] =
     for c in node.contributions:
       contributions.add(contribution(priorityToVariantPriority(c.priority),
         valueToString(c.value)))
+    let locked = lockedValueFor(node.scopeDerivedName, kind)
     var decl: VariantDecl
     case kind
     of vkBool:
-      decl = newBoolVariant(node.scopeDerivedName, contributions = contributions)
+      decl = newBoolVariant(node.scopeDerivedName,
+        contributions = contributions, pinnedValue = locked)
     else:
       let allowed = allowedValuesFromContributions(node)
       decl = newEnumVariant(node.scopeDerivedName, allowed,
-        contributions = contributions)
+        contributions = contributions, pinnedValue = locked)
     result.add(decl)
   # Canonical order, for the same reason `buildPackageDecls` sorts: these
   # declarations are rendered into the text `inputsDigest` is taken over, and
@@ -406,6 +472,53 @@ proc rangePartOf(rawConstraint: string): string =
     return ""
   trimmed[space + 1 .. ^1].strip()
 
+proc assertLockedVersionsSatisfyDeclaredRanges(pins: LockPins) =
+  ## Named-Lock-Files NLF-M3, deliverable 3 — a lock that cannot be satisfied
+  ## FAILS, naming the conflicting constraint, instead of silently resolving to
+  ## something the lock does not say.
+  ##
+  ## The check is made here, before the encoding, rather than left to clingo.
+  ## Both routes reject the graph, but they reject it very differently: a
+  ## pinned version that violates a declared range makes the whole program
+  ## unsatisfiable, and what comes back is an unsat core over ASP atoms. The
+  ## reader's actual question — "which of my constraints does my lock
+  ## contradict?" — is answerable exactly here, where both sides are still in
+  ## the vocabulary the recipe is written in.
+  ##
+  ## ONLY UNCONDITIONAL EDGES ARE CHECKED. A variant-gated arm's range binds
+  ## the graph only when its gate fires, and the gate may well be off BECAUSE
+  ## of the pin: that is the ordinary, correct outcome of pinning an older
+  ## version (the arm that wanted the newer one simply loses). Treating a
+  ## conditional range as a constraint the lock must satisfy would reject
+  ## exactly the case the milestone exists to make work.
+  if pins.packages.len == 0:
+    return
+  for entry in pendingSolverPackages:
+    if entry.gateVariant.len > 0: continue
+    if entry.depPackage notin pins.packages: continue
+    if developSourceFor(entry.depPackage).isSome: continue
+    let rangePart = rangePartOf(entry.rng)
+    if rangePart.len == 0: continue
+    let locked = pins.packages[entry.depPackage]
+    var satisfied = true
+    try:
+      satisfied = satisfies(parseSemver(locked), parseSemverRange(rangePart))
+    except ESemverParse:
+      # One of the two sides is not semver-shaped, so this check cannot prove a
+      # conflict. Staying silent is right: claiming one on an unparsed string
+      # would fail builds that are fine.
+      continue
+    if not satisfied:
+      raise newException(ELockConflict,
+        "the " & lockSourceDescription(pins) & " pins '" & entry.depPackage &
+        "' to " & locked & ", but package '" & entry.parentPackage &
+        "' declares `uses: " & entry.depPackage & " " & rangePart &
+        "`, which " & locked & " does not satisfy. A committed lock is a " &
+        "pin, not a preference: the build refuses to re-solve '" &
+        entry.depPackage & "' to a version the lock does not name. " &
+        "Regenerate the lock with `repro lock refresh` or relax the " &
+        "declared constraint.")
+
 proc buildPackageDecls(parentPackages: openArray[string]): seq[PackageDecl] =
   ## Build the solver-side ``PackageDecl`` list from the pending
   ## dependency registry. We emit:
@@ -433,6 +546,21 @@ proc buildPackageDecls(parentPackages: openArray[string]): seq[PackageDecl] =
   # settles that a develop package's VARIANTS are solved, so the package stays
   # in the program; what stops being solved for is its version, which was
   # never a question. `pinned` carries that distinction into the encoder.
+  #
+  # NLF-M3 (§1.2) adds the second source of a pinned version: the COMMITTED
+  # LOCK. A locked version is not a candidate to be re-derived from the
+  # declared range — it is the answer a previous solve already committed to,
+  # and re-deriving it is precisely what made the lock a bias rather than a
+  # pin. It takes the same `pinned` road into the encoder as a develop
+  # checkout's version does, for the same reason: a one-element candidate set
+  # would state the answer as a search.
+  #
+  # DEVELOP OVERRIDES LAYER ABOVE THE LOCK (§2.5, and the design's "the lock is
+  # mode-agnostic; develop-mode overrides layer above it"). A sibling in
+  # develop mode has its version READ from the checkout even when the lock
+  # records something else — the checkout is what will actually be built.
+  let pins = currentLockPins()
+  assertLockedVersionsSatisfyDeclaredRanges(pins)
   var depVersions: Table[string, seq[string]]
   var pinnedVersions: Table[string, string]
   for entry in pendingSolverPackages:
@@ -441,6 +569,9 @@ proc buildPackageDecls(parentPackages: openArray[string]): seq[PackageDecl] =
     let developed = developSourceFor(entry.depPackage)
     if developed.isSome:
       pinnedVersions[entry.depPackage] = developed.get().version
+      continue
+    if entry.depPackage in pins.packages:
+      pinnedVersions[entry.depPackage] = pins.packages[entry.depPackage]
       continue
     let rangePart = rangePartOf(entry.rng)
     let v = smallestSatisfyingVersion(rangePart)
@@ -607,6 +738,14 @@ proc renderSolverInputsFixture*(variants: openArray[VariantDecl];
       b.add("kind: enum\n")
       if v.allowedValues.len > 0:
         b.add("values: " & v.allowedValues.join(", ") & "\n")
+    if v.pinnedValue.len > 0:
+      # NLF-M3, and the same argument NLF-M2 made for a pinned package:
+      # `inputsDigest` is taken over this text, and a lock-pinned variant is a
+      # DIFFERENT solver input from a variant that merely has a contribution
+      # naming the same value — one asserts the assignment, the other prefers
+      # it. Leaving the pin out of the rendering would collide the two on the
+      # digest.
+      b.add("pinned: " & v.pinnedValue & "\n")
     for c in v.contributions:
       b.add(solverPriorityKeyword(c.priority) & ": " & c.value & "\n")
     for con in v.constraints:
@@ -691,6 +830,24 @@ proc currentSolverPackageDecls*(): seq[PackageDecl] =
     if entry.parentPackage notin parentSet:
       parentSet.add(entry.parentPackage)
   buildPackageDecls(parentSet)
+
+proc currentSolverVariantDecls*(): seq[VariantDecl] =
+  ## Test-facing accessor for the `VariantDecl` list the CURRENT declaration
+  ## state would hand to the solver — the variant-side twin of
+  ## `currentSolverPackageDecls`, and it exists for the same reason.
+  ##
+  ## NLF-M3's property is that a locked variant assignment is a CONSTRAINT
+  ## rather than a preference, and those two are indistinguishable in the
+  ## solved answer whenever the preference happens to win anyway. They are
+  ## distinguishable only in what is handed to the encoder: a `pinnedValue`
+  ## that becomes an asserted `variant_assigned` fact, versus a contribution
+  ## that becomes a `#minimize` weight over a choice rule.
+  ##
+  ## Returns a copy; callers cannot mutate the ambient context through it.
+  if ambientVariantContext.isNil or
+      ambientVariantContext.state == ccsFinalized:
+    return @[]
+  buildVariantDecls(ambientVariantContext)
 
 proc emitSolverInputsIfRequested(variants: openArray[VariantDecl];
                                  packages: openArray[PackageDecl]) =

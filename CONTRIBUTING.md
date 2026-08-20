@@ -29,6 +29,19 @@ suite, which is the event this file exists to make visible. The check runs in
 `tests/unit/test_reprobuild_suite_inventory.py` and names the source and both
 numbers when it fails, so there is never a total to reconcile by hand.
 
+Forgetting the refresh used to be somebody else's problem: `just lint` went
+red for everyone, and the next branch had to carry the regeneration in order
+to land. `scripts/check_suite_case_counts.sh` now runs at three points, so it
+cannot get that far:
+
+- as a **pre-push hook** installed by the Nix dev shell (`flake.nix`,
+  `pre-commit-check`), which refuses the push and prints the command above;
+- as an early step of the CI lint job, ahead of the whole-tree compile;
+- inside `just lint`, where it always ran.
+
+It is a source scan — no compiler, no built binaries, a few seconds on the
+full tree — which is what makes it affordable at every push.
+
 ## Nix Dev Shell
 
 `nix develop` activates the compiler and library toolchain. To handle private
