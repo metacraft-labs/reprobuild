@@ -46366,6 +46366,8 @@ type
     fixturePath: string
     binDir: string
     reportPath: string
+    buildFlags: seq[string]        # Build-only flags retained for the
+                                   # non-sharded ``repro build test`` alias.
     daemonFlag: string             # ``--daemon=on|off|auto`` carry-through
                                    # for the verb-alias path.
     lockFlag: string               # MO-1 ``--lock=<file>`` carry-through:
@@ -47168,8 +47170,13 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
       result.fixturePath = valueFromFlag(args, i, "--fixture-from")
     elif arg == "--bin-dir" or arg.startsWith("--bin-dir="):
       result.binDir = valueFromFlag(args, i, "--bin-dir")
-    elif arg == "--write-report" or arg.startsWith("--write-report="):
+    elif arg == "--write-report":
+      # The build verb accepts the bare form and writes to its conventional
+      # report path. Do not consume the following selector as a path.
+      result.buildFlags.add(arg)
+    elif arg.startsWith("--write-report="):
       result.reportPath = valueFromFlag(args, i, "--write-report")
+      result.buildFlags.add("--write-report=" & result.reportPath)
     elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
         valueFromFlag(args, i, "--tool-provisioning"))
@@ -47213,6 +47220,53 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
       # lock for the verb-alias path. ``runBuildCommand`` honours
       # ``--lock <file>`` (default = the canonical ``repro.lock``).
       result.lockFlag = "--lock=" & valueFromFlag(args, i, "--lock")
+    elif arg == "--work-root" or arg.startsWith("--work-root="):
+      result.buildFlags.add("--work-root=" &
+        valueFromFlag(args, i, "--work-root"))
+    elif arg == "--action-cache-root" or
+        arg.startsWith("--action-cache-root="):
+      result.buildFlags.add("--action-cache-root=" &
+        valueFromFlag(args, i, "--action-cache-root"))
+    elif arg == "--progress" or arg.startsWith("--progress="):
+      result.buildFlags.add("--progress=" &
+        valueFromFlag(args, i, "--progress"))
+    elif arg == "--progress-bars" or arg.startsWith("--progress-bars="):
+      result.buildFlags.add("--progress-bars=" &
+        valueFromFlag(args, i, "--progress-bars"))
+    elif arg == "--measure" or arg.startsWith("--measure="):
+      result.buildFlags.add("--measure=" &
+        valueFromFlag(args, i, "--measure"))
+    elif arg == "--show" or arg.startsWith("--show="):
+      result.buildFlags.add("--show=" & valueFromFlag(args, i, "--show"))
+    elif arg == "--write-diagnostics" or
+        arg.startsWith("--write-diagnostics="):
+      result.buildFlags.add("--write-diagnostics=" &
+        valueFromFlag(args, i, "--write-diagnostics"))
+    elif arg == "--write-benchmark" or
+        arg.startsWith("--write-benchmark="):
+      result.buildFlags.add("--write-benchmark=" &
+        valueFromFlag(args, i, "--write-benchmark"))
+    elif arg == "--write-stats":
+      result.buildFlags.add(arg)
+    elif arg.startsWith("--write-stats="):
+      result.buildFlags.add(arg)
+    elif arg == "--stats-groups" or arg.startsWith("--stats-groups="):
+      result.buildFlags.add("--stats-groups=" &
+        valueFromFlag(args, i, "--stats-groups"))
+    elif arg == "--log" or arg.startsWith("--log="):
+      result.buildFlags.add("--log=" & valueFromFlag(args, i, "--log"))
+    elif arg == "--package" or arg.startsWith("--package="):
+      result.buildFlags.add("--package=" &
+        valueFromFlag(args, i, "--package"))
+    elif arg in [
+        "--no-write-report", "-v", "--verbose", "-vv", "--very-verbose",
+        "--prepare-only", "--dry-run", "--force-rebuild", "--rebuild",
+        "--no-output-cleanup", "--publish-cache-hits",
+        "--publish-materialized", "--skip-cmake-regeneration",
+        "--no-runquota", "--runquota", "--unicode", "--no-unicode",
+        "--list-targets", "--list-targets-json", "--json",
+        "--print-solved-graph"]:
+      result.buildFlags.add(arg)
     elif arg == "--certify":
       result.certify = true
       result.certifyExplicit = true
@@ -48186,13 +48240,15 @@ proc runReproTestCommand*(args: openArray[string];
     # the CI-sharding-specific surface. The shard CLI is the
     # multi-machine CI path; the alias is the inner-loop "run my
     # tests" path.
-    var buildArgs: seq[string] = @[]
+    var buildArgs = opts.buildFlags
     if opts.toolProvisioning != tpmUnspecified:
       buildArgs.add("--tool-provisioning=" & opts.toolProvisioning.modeName)
     if opts.daemonFlag.len > 0:
       buildArgs.add(opts.daemonFlag)
     if opts.lockFlag.len > 0:
       buildArgs.add(opts.lockFlag)
+    if opts.peerCacheSpec.len > 0:
+      buildArgs.add("--peer-cache=" & opts.peerCacheSpec)
     if opts.selectors.len == 0:
       buildArgs.add("test")
     else:
