@@ -1006,6 +1006,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_nim_c_windows_exe_output.nim",
+    binary: "build/test-bin/t_nim_c_windows_exe_output",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nim_ssl_dependency.nim",
     binary: "build/test-bin/t_nim_ssl_dependency",
     defines: @[],
