@@ -299,7 +299,7 @@ proc handlePublish*(s: BinaryCacheServerState;
     var incoming: int64 = 0
     for blob in req.payloadBlocks:
       incoming += int64(blob.len)
-    let current = currentFootprintBytes(s.store)
+    let current = s.payloadFootprintBytes
     # Refresh pins from disk if a pin-list path is configured so
     # the operator can adjust pin coverage without bouncing the
     # daemon. The pin set isn't used in the projection itself but
@@ -318,7 +318,10 @@ proc handlePublish*(s: BinaryCacheServerState;
   # Verify every declared payload object has a matching attached blob.
   var attachedByDigest = initTable[Blake3Hash, seq[byte]]()
   for blob in req.payloadBlocks:
-    let prefixDigest = storeCasBlob(s.store, blob)
+    let stored = storeCasBlobWithStatus(s.store, blob)
+    let prefixDigest = stored.digest
+    if stored.inserted:
+      s.payloadFootprintBytes += int64(blob.len)
     var hash: Blake3Hash
     for i in 0 ..< 32:
       hash[i] = prefixDigest[i]

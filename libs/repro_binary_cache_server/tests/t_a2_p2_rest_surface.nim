@@ -217,3 +217,33 @@ proc runScenario() {.async.} =
 suite "A2 P2 — repro-binary-cache HTTP REST surface":
   test "publish + GET manifest + GET payload + cache-info round-trip":
     waitFor runScenario()
+
+  test "payload footprint is cached, deduplicated, and reconciled at restart":
+    randomize()
+    let root = getTempDir() / ("rbc-p2-footprint-" & $rand(999_999))
+    removeDir(root)
+    createDir(root)
+    defer:
+      try: removeDir(root) except CatchableError: discard
+
+    var payload = newSeq[byte](257)
+    for i in 0 ..< payload.len:
+      payload[i] = byte((i * 29 + 7) and 0xff)
+    let manifest = buildSignedManifest(peerAuth.generateKeypair(), payload)
+    let request = PublishRequest(
+      manifestBytes: encodeManifest(manifest),
+      payloadBlocks: @[payload])
+
+    let state = openBinaryCacheServer(
+      root, softCapBytes = 0, hardCapBytes = 1024)
+    check state.payloadFootprintBytes == 0
+    discard handlePublish(state, request)
+    check state.payloadFootprintBytes == int64(payload.len)
+    discard handlePublish(state, request)
+    check state.payloadFootprintBytes == int64(payload.len)
+    close(state)
+
+    let reopened = openBinaryCacheServer(
+      root, softCapBytes = 0, hardCapBytes = 1024)
+    defer: close(reopened)
+    check reopened.payloadFootprintBytes == int64(payload.len)

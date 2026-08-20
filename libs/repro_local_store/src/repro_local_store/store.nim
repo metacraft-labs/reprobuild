@@ -647,11 +647,14 @@ proc textOf(bytes: openArray[byte]): string =
   for i, b in bytes:
     result[i] = char(b)
 
-proc storeCasBlob*(s: var Store; payload: openArray[byte]): PrefixIdBytes =
-  ## Inserts `payload` into the content-addressed blob store. Returns
-  ## the BLAKE3-256 key the caller uses to read it back. Idempotent.
-  result = blake3.digest(payload)
-  let finalPath = s.casPath(result)
+proc storeCasBlobWithStatus*(s: var Store; payload: openArray[byte]):
+    tuple[digest: PrefixIdBytes, inserted: bool] =
+  ## Inserts `payload` and reports whether this call created the CAS blob.
+  ## The digest is computed once, and concurrent deduplication is reflected in
+  ## `inserted`, so callers can maintain byte accounting without a racy
+  ## pre-insert filesystem probe.
+  result.digest = blake3.digest(payload)
+  let finalPath = s.casPath(result.digest)
   if fileExists(extendedPath(finalPath)):
     return
   createDir(extendedPath(parentDir(finalPath)))
@@ -660,10 +663,16 @@ proc storeCasBlob*(s: var Store; payload: openArray[byte]): PrefixIdBytes =
   writeFile(extendedPath(stagePath), textOf(payload))
   try:
     moveFile(extendedPath(stagePath), extendedPath(finalPath))
+    result.inserted = true
   except OSError:
     if fileExists(extendedPath(stagePath)): removeFile(extendedPath(stagePath))
     if not fileExists(extendedPath(finalPath)):
       raise
+
+proc storeCasBlob*(s: var Store; payload: openArray[byte]): PrefixIdBytes =
+  ## Inserts `payload` into the content-addressed blob store. Returns
+  ## the BLAKE3-256 key the caller uses to read it back. Idempotent.
+  result = s.storeCasBlobWithStatus(payload).digest
 
 proc storeCasFileBlob*(s: var Store; path: string;
                        sizeBytes: uint64): PrefixIdBytes =
