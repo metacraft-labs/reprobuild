@@ -173,7 +173,8 @@ suite "A2.5 P4 — engine-dispatch":
       kind = bakBinaryCacheSubstitute,
       id = "substitute-p4",
       cwd = engineCacheRoot,
-      text = actionPayload)
+      text = actionPayload,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
     let g = graph(@[action])
 
     let engineCfg = BuildEngineConfig(

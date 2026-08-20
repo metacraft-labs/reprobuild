@@ -135,7 +135,8 @@ when defined(macosx):
 
       let buildResult = runBuild(graph([
         action("sip-failsafe", ["/usr/bin/true"], cwd = workRoot,
-          outputs = @[], commandStatsId = "b1-failsafe")
+          outputs = @[], commandStatsId = "b1-failsafe",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
       ]), config)
 
       var sawAction = false
@@ -202,7 +203,8 @@ when defined(macosx):
       let buildResult = runBuild(graph([
         action("sip-positive",
           ["/bin/sh", "-c", "printf ok > " & marker],
-          cwd = workRoot, outputs = @[], commandStatsId = "b1-positive")
+          cwd = workRoot, outputs = @[], commandStatsId = "b1-positive",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
       ]), config)
 
       var sawAction = false

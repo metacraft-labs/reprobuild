@@ -107,6 +107,7 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
         removeFile(receiptFile)
 
       let action = BuildAction(
+        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
         kind: bakForeignProvision,
         id: "test.foreign.nix.nonexec-daemon",
         argv: @["nix", FixtureSelector],
@@ -132,7 +133,7 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
     let previousUser = getEnv("USER")
     putEnv("USER", "repro-nix-provisioner-" & $getCurrentProcessId())
     defer: putEnv("USER", previousUser)
-    
+
     # Assert daemon binary is built and present
     check fileExists(daemonPath)
 
@@ -147,6 +148,7 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
     # present in the dev shell; this verifies real materialization without
     # rebuilding the full repo package.
     let action = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
       kind: bakForeignProvision,
       id: "test.foreign.nix.resolve",
       argv: @["nix", FixtureSelector],
@@ -157,7 +159,7 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
 
     # Execute the builtin action (which spawns the daemon and performs socket query)
     let res = executeBuiltinAction(action)
-    
+
     # Assert success status
     if res.status != asSucceeded:
       echo "=== Action Failed ==="
@@ -168,7 +170,7 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
 
     check res.status == asSucceeded
     check res.exitCode == 0
-    
+
     # Verify receipt output contains a valid Nix store path
     check fileExists(receiptFile)
     let storePath = readFile(receiptFile).strip()
@@ -180,7 +182,7 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
     # inputs used for resolution.
     let reads = res.evidence.monitorReads
     check reads.len > 0
-    
+
     var foundFlakeNix = false
     var foundFlakeLock = false
     for path in reads:
@@ -188,7 +190,7 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
         foundFlakeNix = true
       if path == "flake.lock":
         foundFlakeLock = true
-        
+
     check foundFlakeNix
     check foundFlakeLock
     checkpoint("Observed dependencies: " & $reads)

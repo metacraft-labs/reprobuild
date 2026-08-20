@@ -88,6 +88,7 @@ proc oneAction(outputPath, payload: string;
                fingerprintToken = "default";
                publishPrefix = ""): BuildGraph =
   let action = BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakWriteText,
     id: "t-bcp-write",
     deps: @[],

@@ -99,6 +99,7 @@ proc elevatedAction(id, outputPath: string;
                     cacheable = true;
                     fingerprintToken = "default"): BuildAction =
   result = BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakProcess,
     id: id,
     outputs: @[outputPath],
@@ -121,6 +122,7 @@ proc nonElevatedAction(id, outputPath: string;
                        argv: seq[string];
                        fingerprintToken = "default"): BuildAction =
   result = BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakProcess,
     id: id,
     outputs: @[outputPath],
@@ -331,6 +333,7 @@ suite "Windows-System-Resources Phase E — engine broker-dispatch hook":
     # decision point without depending on a usable /usr/bin/echo or
     # cmd.exe on the test host.
     let action = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
       kind: bakWriteText,
       id: "t-plain",
       outputs: @[outputPath],

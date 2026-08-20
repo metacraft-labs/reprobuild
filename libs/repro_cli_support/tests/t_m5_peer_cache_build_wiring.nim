@@ -71,6 +71,7 @@ proc buildOneAction(outputPath, payload, fingerprintToken: string):
   ## fingerprint AND a distinct payload (so a cross-recipe peer cache
   ## hit would be a real bug).
   let action = BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakWriteText,
     id: "t-m5-write",
     deps: @[],

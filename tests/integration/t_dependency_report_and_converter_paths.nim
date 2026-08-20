@@ -244,7 +244,8 @@ suite "integration_dependency_report_and_converter_paths":
           cacheable = true,
           weakFingerprint = weak("native"),
           dependencyPolicy = reportPolicy(MakeDepfileFormatName, "native/out.d"),
-          commandStatsId = "m13-native")
+          commandStatsId = "m13-native",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       var native = buildOne(nativeAction(), cacheRoot, app)
       check native.status == asSucceeded
@@ -279,7 +280,8 @@ suite "integration_dependency_report_and_converter_paths":
           cacheable = true,
           weakFingerprint = weak("custom"),
           dependencyPolicy = converterPolicy(app, workRoot, customDeps, convertedDeps),
-          commandStatsId = "m13-custom")
+          commandStatsId = "m13-custom",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       var custom = buildOne(customAction("ok"), cacheRoot, app)
       check custom.status == asSucceeded
@@ -308,7 +310,8 @@ suite "integration_dependency_report_and_converter_paths":
         cacheable = true,
         weakFingerprint = weak("missing-report"),
         dependencyPolicy = reportPolicy(NinjaDepfileFormatName, "fail/missing.d"),
-        commandStatsId = "m13-missing"), failCacheRoot, app)
+        commandStatsId = "m13-missing",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph()), failCacheRoot, app)
       check missingDep.status == asFailed
       check missingDep.launched
       check missingDep.stderr.contains("dependency report missing")
@@ -322,7 +325,8 @@ suite "integration_dependency_report_and_converter_paths":
         cacheable = true,
         weakFingerprint = weak("malformed-report"),
         dependencyPolicy = reportPolicy(MakeDepfileFormatName, "fail/malformed.d"),
-        commandStatsId = "m13-malformed"), failCacheRoot, app)
+        commandStatsId = "m13-malformed",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph()), failCacheRoot, app)
       check malformedDep.status == asFailed
       check malformedDep.stderr.contains("dependency report invalid")
       check cacheRecordsSize(failCacheRoot) == beforeFailures
@@ -337,7 +341,8 @@ suite "integration_dependency_report_and_converter_paths":
         weakFingerprint = weak("converter-fail"),
         dependencyPolicy = converterPolicy(app, workRoot,
           "fail/converter.custom", "fail/converter.rpset"),
-        commandStatsId = "m13-converter-fail"), failCacheRoot, app)
+        commandStatsId = "m13-converter-fail",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph()), failCacheRoot, app)
       check converterFail.status == asFailed
       check converterFail.stderr.contains("dependency converter")
       check cacheRecordsSize(failCacheRoot) == beforeFailures
@@ -352,7 +357,8 @@ suite "integration_dependency_report_and_converter_paths":
         weakFingerprint = weak("converter-bad-output"),
         dependencyPolicy = converterPolicy(app, workRoot,
           "fail/converter-bad.custom", "fail/converter-bad.rpset"),
-        commandStatsId = "m13-converter-bad"), failCacheRoot, app)
+        commandStatsId = "m13-converter-bad",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph()), failCacheRoot, app)
       check converterBad.status == asFailed
       check converterBad.stderr.contains("converted dependency report invalid")
       check cacheRecordsSize(failCacheRoot) == beforeFailures

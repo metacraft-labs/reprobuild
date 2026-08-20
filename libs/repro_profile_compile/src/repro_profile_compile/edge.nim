@@ -121,6 +121,10 @@ proc profileCompileBuildAction*(profileRoot, rbpiPath, manifestPath,
     if workDir.len > 0: workDir
     else: profileRoot.parentDir
   action("__repro_profile_compile", argv,
+    # Named-Lock-Files §7.2. A profile compile's inputs are the discovered
+    # repo-local source set; no solved package instance reaches this edge.
+    # See `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = cwd,
     inputs = inputs,
     outputs = @[rbpiPath, manifestPath],

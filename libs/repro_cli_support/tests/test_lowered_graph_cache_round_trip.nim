@@ -24,6 +24,7 @@ suite "lowered graph cache action round trip":
     identity.addDep(
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     let action = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
       kind: bakProcess,
       id: "install-mirror-zlib",
       deps: @["install-zlib"],

@@ -124,7 +124,8 @@ suite "RA-13 runquota bypass surfaced in build header + report":
         actions.add action("link-" & $i, [fixture, $i,
           tempRoot / "link-log", workRoot / "link" / ($i & ".txt")],
           cwd = workRoot, outputs = ["link/" & $i & ".txt"],
-          pool = "link", poolUnits = 1'u32, commandStatsId = "link-" & $i)
+          pool = "link", poolUnits = 1'u32, commandStatsId = "link-" & $i,
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       # Bypass run: NO RunQuota lease. The local link pool cap of 2 is the only
       # enforcement; without it the 6 actions would run up to maxParallelism=8
@@ -180,7 +181,8 @@ suite "RA-13 runquota bypass surfaced in build header + report":
       var config = defaultBuildEngineConfig(cacheRoot)
       config.suppressTrace = true
       let copyAction = builtinAction(bakCopyFile, "active-copy",
-        cwd = workRoot, inputs = ["src/in.txt"], outputs = ["out/copied.txt"])
+        cwd = workRoot, inputs = ["src/in.txt"], outputs = ["out/copied.txt"],
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
       let buildResult = runBuild(graph([copyAction]), config)
       check buildResult.results[0].status == asSucceeded
       check not buildResult.runQuotaBypassed

@@ -52,6 +52,7 @@ suite "M2a — no-progress diagnostic surfaces terminal failures":
     let badOut = absolutePath(TmpDir / "outputs" / "bad.out")
     let depOut = absolutePath(TmpDir / "outputs" / "dep.out")
     let failing = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
       kind: bakCopyFile,
       id: "provision-tool",
       inputs: @[],                 # <- wrong arity => raises => asFailed
@@ -62,6 +63,7 @@ suite "M2a — no-progress diagnostic surfaces terminal failures":
     # A dependent that can only run after the failing action — it gets
     # cascaded to ``asBlocked`` and must be named as such.
     let dependent = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
       kind: bakWriteText,
       id: "activate-dev-env",
       outputs: @[depOut],

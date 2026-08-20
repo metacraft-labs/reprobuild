@@ -35,6 +35,7 @@ suite "built-in copyFile idempotence":
           removeDir(scratch)
 
     let action = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
       kind: bakCopyFile,
       id: "copy-identical-file",
       inputs: @[source],

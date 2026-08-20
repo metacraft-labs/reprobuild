@@ -300,6 +300,7 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
 
   test "host dependency paths precede native toolchain paths":
     let action = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
       toolIdentityRefs: @["gcc", "libdrm", "wayland"],
       toolIdentityRefKinds: @[dkNative, dkBuild, dkBuild])
     let resolver: ToolIdentityResolver =

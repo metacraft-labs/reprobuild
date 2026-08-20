@@ -143,6 +143,11 @@ proc profileBuildActionToBuildAction*(pba: ProfileBuildAction):
   # while silently dropping runtime read-set discovery" hole the old
   # declared-only kind opened.
   result = action(
+    # Named-Lock-Files §7.2. The apply driver lowers a `ProfileBuildAction`
+    # from a compiled profile; the profile records no solved graph, so the
+    # honest governing graph is the empty one. See
+    # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     id = pba.id,
     argv = pba.argv,
     cwd = pba.cwd,

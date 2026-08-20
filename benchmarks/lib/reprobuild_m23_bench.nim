@@ -231,7 +231,8 @@ proc runBuildWorkload(app, workRoot, cacheRoot: string; count: int):
       outputs = ["wide/" & $i & ".txt"], cpuMilli = 100'u32,
       memoryBytes = 4'u64 * 1024'u64 * 1024'u64,
       commandStatsId = "m23-wide-" & $i,
-      dependencyPolicy = benchActionPolicy())
+      dependencyPolicy = benchActionPolicy(),
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
   let start = epochTime()
   result.result = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   result.millis = elapsedMillis(start)
@@ -249,7 +250,8 @@ proc runNoopWorkload(app, workRoot, cacheRoot: string; count: int):
       commandStatsId = "m23-noop-" & $i,
       cacheable = true,
       weakFingerprint = weak("noop-" & $i),
-      dependencyPolicy = benchActionPolicy())
+      dependencyPolicy = benchActionPolicy(),
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
   discard runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   let start = epochTime()
   result.result = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
@@ -274,7 +276,8 @@ proc runCacheRestoreWorkload(app, workRoot, cacheRoot: string; count: int):
       cpuMilli = 100'u32,
       memoryBytes = 4'u64 * 1024'u64 * 1024'u64,
       commandStatsId = "m23-cache-" & $i,
-      dependencyPolicy = benchActionPolicy())
+      dependencyPolicy = benchActionPolicy(),
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
   discard runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   for i in 0 ..< count:
     let outputPath = workRoot / "cache" / ($i & ".txt")

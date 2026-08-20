@@ -498,6 +498,12 @@ proc hgCloneAction*(id: string; identity: HgToolIdentity;
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
+    # Named-Lock-Files §7.2. A workspace VCS operation materialises a
+    # CHECKOUT, and `Workspace-Manifests.md` §"Mode-agnostic" is explicit
+    # that develop-vs-store-installed "is never recorded in the lock" — so
+    # no solved package instance governs this edge. See
+    # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     text = encodePayload(payload))
 
 proc hgPullAction*(id: string; identity: HgToolIdentity;
@@ -515,6 +521,12 @@ proc hgPullAction*(id: string; identity: HgToolIdentity;
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
+    # Named-Lock-Files §7.2. A workspace VCS operation materialises a
+    # CHECKOUT, and `Workspace-Manifests.md` §"Mode-agnostic" is explicit
+    # that develop-vs-store-installed "is never recorded in the lock" — so
+    # no solved package instance governs this edge. See
+    # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     text = encodePayload(payload))
 
 proc hgUpdateAction*(id: string; identity: HgToolIdentity;
@@ -529,6 +541,12 @@ proc hgUpdateAction*(id: string; identity: HgToolIdentity;
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
+    # Named-Lock-Files §7.2. A workspace VCS operation materialises a
+    # CHECKOUT, and `Workspace-Manifests.md` §"Mode-agnostic" is explicit
+    # that develop-vs-store-installed "is never recorded in the lock" — so
+    # no solved package instance governs this edge. See
+    # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     text = encodePayload(payload))
 
 # ---- Query operations (observation-only, per M2 design rule 3) ----

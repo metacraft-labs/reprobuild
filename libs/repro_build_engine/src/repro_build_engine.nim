@@ -48,6 +48,16 @@ import repro_binary_cache_client/cache_key
 import repro_build_engine/platform
 export platform
 
+# Named-Lock-Files §7.2. ``repro_lock/identity`` is a LEAF module — ``std`` +
+# ``repro_multihash`` and nothing else — precisely so the engine can carry a
+# governing lock identity on every action without acquiring a dependency on
+# ``repro_lock.nim``, which imports ``repro_solver`` and therefore dlopens
+# ``libclingo`` at module-init time. Importing the parent here would put a
+# clingo runtime requirement on every engine binary. Do not "simplify" this to
+# ``import repro_lock``.
+import repro_lock/identity
+export identity
+
 type
   BuildEngineError* = object of CatchableError
 
@@ -112,6 +122,41 @@ type
     path*: string
 
   BuildAction* = object
+    governingLockIdentity* {.requiresInit.}: LockIdentity
+      ## Named-Lock-Files §7.2 — the identity of the lock file governing this
+      ## edge. **Required, by the type system.**
+      ##
+      ## §7 keys action identity on the governing lock (design A, decided by
+      ## the owner on 2026-08-18 in favour of A over path-partitioning,
+      ## because B "requires every action's outputs to sit under a root
+      ## Reprobuild controls" and `Foreign-Provisioner-Contracts.md` exists
+      ## precisely because some instances are materialised by provisioners
+      ## Reprobuild does not own). A's one real weakness is that it can be
+      ## applied INCOMPLETELY, and incompleteness is silent: "a single edge
+      ## whose fingerprint forgets the governing lock identity is a silent
+      ## poisoning vector — it serves one lock file's artifacts to another and
+      ## reports success."
+      ##
+      ## §7.2 closes that "by a structural check, not by care", and names two
+      ## halves. This field is the first: "The governing lock identity is a
+      ## non-optional field on the action construction path, so an action
+      ## cannot be built without one. Absence is a compile error where the
+      ## type system can reach it, and a hard failure at graph construction
+      ## where it cannot." `{.requiresInit.}` is the compile-error half and it
+      ## reaches further than the constructors — it rejects a direct
+      ## `BuildAction(...)` object construction that omits the field, so a
+      ## newly added edge kind cannot quietly opt out by bypassing `action()`
+      ## / `builtinAction()`. `auditGoverningLockIdentity` is the second half:
+      ## a whole-graph assertion, enforced from `validateGraph`.
+      ##
+      ## It is FIRST in the field list deliberately. A required field placed
+      ## among optional ones reads as one more knob; placed first it is the
+      ## first thing an author of a new edge kind meets.
+      ##
+      ## The value is content-derived (§6.2) and the lock-file NAME is not in
+      ## it. Provenance — which name or names resolved to this identity — is a
+      ## side table (`repro_lock/identity.LockProvenance`), read by
+      ## diagnostics and never mixed into a key.
     kind*: BuildActionKind
     id*: string
     deps*: seq[string]
@@ -1019,7 +1064,12 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              dynamicDepsFile = "";
              dependencyPolicy = automaticMonitorGatheringPolicy();
              env: openArray[string] = [];
-             requiresElevation = false): BuildAction =
+             requiresElevation = false;
+             governingLockIdentity: LockIdentity): BuildAction =
+  ## Named-Lock-Files §7.2: `governingLockIdentity` has NO DEFAULT, and that
+  ## is the point. "An action constructed without a governing lock identity is
+  ## a build-time error, not a default." A default here would be the
+  ## convention §7.2 explicitly refuses to rely on.
   let effectiveDependencyPolicy =
     if depfile.len > 0 and monitorDepfile.len == 0 and
         dependencyPolicy.kind == dgAutomaticMonitor:
@@ -1028,6 +1078,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     else:
       dependencyPolicy
   BuildAction(
+    governingLockIdentity: governingLockIdentity,
     kind: bakProcess,
     id: id,
     deps: @deps,
@@ -1057,10 +1108,12 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
                     commandStatsId = ""; cacheable = true;
                     weakFingerprint = weakFingerprintFromText(id);
                     actionCachePolicy = ffpTimestamp;
-                    text = ""; entries: openArray[string] = []): BuildAction =
+                    text = ""; entries: openArray[string] = [];
+                    governingLockIdentity: LockIdentity): BuildAction =
   if kind == bakProcess:
     raise newException(BuildEngineError, "builtinAction requires a built-in action kind")
   BuildAction(
+    governingLockIdentity: governingLockIdentity,
     kind: kind,
     id: id,
     deps: @deps,
@@ -1160,7 +1213,80 @@ proc detectSourceWrites*(readOnlyRoots, monitorWrites: openArray[string]):
         result.add((write: write, root: root))
         break
 
+type
+  LockIdentityAuditFinding* = object
+    ## One edge KIND that failed the §7.2 whole-graph audit, plus the action
+    ## ids that failed under it.
+    ##
+    ## Grouped by kind on purpose. NLF-ID-6's mutation is "remove the field
+    ## from one edge kind's construction path; the audit must fail naming that
+    ## kind", and a finding list keyed on individual action ids would report
+    ## the symptom (fifty nameless actions) instead of the cause (one
+    ## construction path). The corpus is explicit about why the whole-graph
+    ## shape matters: this failure "is about the one nobody thought to
+    ## exercise", so "assert over the whole graph, so a newly added edge kind
+    ## cannot quietly opt out".
+    kind*: BuildActionKind
+    actionIds*: seq[string]
+
+proc auditGoverningLockIdentity*(g: BuildGraph): seq[LockIdentityAuditFinding] =
+  ## Named-Lock-Files §7.2's whole-graph fingerprint audit: "A fingerprint
+  ## audit enumerates every action in a built graph and asserts the field is
+  ## present and non-empty."
+  ##
+  ## Returns one finding per offending edge KIND, in enum order, with the
+  ## offending action ids in graph order. An empty result means the graph
+  ## passes.
+  ##
+  ## "Present and non-empty" is checked as `isValid` — a well-formed
+  ## self-describing multihash — rather than as `len > 0`. A whitespace string
+  ## or a truncated hex fragment is "non-empty" and would pass a length check
+  ## while being just as unusable as a key; §7.2 asks for "a real check from a
+  ## lint", and a check that accepts `" "` is the lint.
+  var byKind: array[BuildActionKind, seq[string]]
+  for action in g.actions:
+    if not action.governingLockIdentity.isValid():
+      byKind[action.kind].add(action.id)
+  result = @[]
+  for kind in BuildActionKind:
+    if byKind[kind].len > 0:
+      result.add(LockIdentityAuditFinding(kind: kind, actionIds: byKind[kind]))
+
+proc formatLockIdentityAudit*(findings: seq[LockIdentityAuditFinding]): string =
+  ## The audit's diagnostic. Names the edge KIND first, because that is what a
+  ## reader has to go and fix, then up to five action ids as evidence.
+  if findings.len == 0:
+    return ""
+  var total = 0
+  for f in findings: total += f.actionIds.len
+  result = "governing lock identity missing on " & $total &
+    " action(s) — Named-Lock-Files.md §7.2 requires every action fingerprint " &
+    "to carry the identity of its governing lock file"
+  for f in findings:
+    result.add("\n  edge kind " & $f.kind & ": " & $f.actionIds.len &
+      " action(s) without a governing lock identity")
+    for i, id in f.actionIds:
+      if i >= 5:
+        result.add("\n      … and " & $(f.actionIds.len - 5) & " more")
+        break
+      result.add("\n      " & id)
+
 proc validateGraph(g: BuildGraph) =
+  # Named-Lock-Files §7.2 — the second half of the structural check, and the
+  # release gate. `{.requiresInit.}` on `BuildAction.governingLockIdentity` is
+  # the compile-error half and it reaches every construction expression; this
+  # is "a hard failure at graph construction where it cannot" — it catches an
+  # identity that was supplied but is empty or malformed, which the type
+  # system cannot see.
+  #
+  # It runs FIRST, before the id / duplicate-output / write-root passes. An
+  # action that cannot be keyed correctly is not worth diagnosing further, and
+  # a reader who gets the write-root error first will fix that and never learn
+  # about the poisoning vector.
+  let lockFindings = auditGoverningLockIdentity(g)
+  if lockFindings.len > 0:
+    raiseEngine(formatLockIdentityAudit(lockFindings))
+
   var ids = initHashSet[string]()
   var byId = initTable[string, BuildAction]()
   var outputs = initHashSet[string]()
@@ -1365,11 +1491,27 @@ proc materialPath(root, path: string): string =
   else:
     root / path
 
-proc parseCreateActionRecord(payload, path: string; lineNo: int): BuildAction =
+proc parseCreateActionRecord(payload, path: string; lineNo: int;
+                             governingLockIdentity: LockIdentity): BuildAction =
   ## Decode an M25 ``create-action`` JSON payload into a BuildAction. The
   ## payload format is a single-line JSON object; embedded newlines are
   ## forbidden so the surrounding line-oriented fragment parser stays
   ## simple.
+  ##
+  ## Named-Lock-Files §4.1/§7.2: `governingLockIdentity` is the identity of
+  ## the action that PRODUCED this fragment, and it is a required parameter
+  ## rather than a field of the JSON payload. Two reasons, and both matter.
+  ##
+  ## First, §4.1: "An edge is built under the lock file of the consumer that
+  ## pulled it in." A dynamically created action is pulled in by its producer,
+  ## so inheriting the producer's identity is the propagation rule, not a
+  ## fallback.
+  ##
+  ## Second, §7.2: a payload field would be OPTIONAL — a fragment written by
+  ## an older producer, or by a tool that never heard of lock files, would
+  ## simply omit it and the engine would have to invent something. That is the
+  ## silent-incompleteness shape the structural check exists to remove. The
+  ## producer does not get to decide; the engine supplies it.
   proc fail(message: string) {.noreturn.} =
     raiseEngine(path & ":" & $lineNo & ": create-action " & message)
 
@@ -1432,9 +1574,12 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int): BuildAction =
   result = action(id, argv, cwd = cwd, deps = deps, inputs = inputs,
     outputs = outputs, pool = pool, poolUnits = poolUnits, cpuMilli = cpuMilli,
     commandStatsId = commandStatsId, cacheable = cacheable,
-    weakFingerprint = weakFingerprint, env = env)
+    weakFingerprint = weakFingerprint, env = env,
+    governingLockIdentity = governingLockIdentity)
 
-proc readDynamicGraphFragment(path: string): DynamicGraphFragment =
+proc readDynamicGraphFragment(path: string;
+                              governingLockIdentity: LockIdentity):
+    DynamicGraphFragment =
   if path.len == 0 or not fileExists(extendedPath(path)):
     raiseEngine("dynamic dependency fragment missing: " & path)
   let lines = readFile(extendedPath(path)).splitLines()
@@ -1469,7 +1614,8 @@ proc readDynamicGraphFragment(path: string): DynamicGraphFragment =
       # object describing the BuildAction to materialise. Validation
       # of cross-action invariants (unique id, no cycle, dep targets
       # exist) happens at ingest time in applyDynamicDeps.
-      result.createdActions.add(parseCreateActionRecord(rest, path, lineNo + 1))
+      result.createdActions.add(parseCreateActionRecord(
+        rest, path, lineNo + 1, governingLockIdentity))
     else:
       raiseEngine(path & ":" & $(lineNo + 1) &
         ": unsupported dynamic graph record kind: " & kind)
@@ -5031,7 +5177,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       return true
     let fragmentPath = materialPath(action.cwd, action.dynamicDepsFile)
     let dyndepStart = statStart()
-    let fragment = readDynamicGraphFragment(fragmentPath)
+    # Named-Lock-Files §4.1: a dynamically created edge inherits the
+    # governing lock identity of the action that pulled it in.
+    let fragment = readDynamicGraphFragment(
+      fragmentPath, action.governingLockIdentity)
     finishStat("repro dynamic deps load", dyndepStart)
     # M25: materialise any ``create-action`` records FIRST so subsequent
     # ``dep`` edges can name them. The order in the fragment is preserved;

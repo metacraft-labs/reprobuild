@@ -1205,6 +1205,10 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
     "--public-cli", publicCliPath,
     "--depfile", depfilePath
   ],
+    # Named-Lock-Files §7.2. CMake regeneration re-runs the generator over
+    # recorded metadata; no solved package instance reaches it. See
+    # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = meta.binaryDir,
     inputs = cmakeRegenerationInputs(meta, publicCliPath),
     outputs = cmakeRegenerationOutputs(meta),
@@ -1699,6 +1703,116 @@ proc lowerDependencyPolicy(actionId, depfile: string;
     result = depfilePolicyMulti(merged)
   result.ignoredInputPrefixes = policy.ignoredInputPrefixes
 
+# ---------------------------------------------------------------------------
+# Named-Lock-Files §3.1 / §7.2 — the workspace's governing lock identity
+# ---------------------------------------------------------------------------
+
+const CommittedLockFileNameForIdentity = "repro.lock"
+  ## Deliberately a separate constant from `CommittedLockFileName`, which is
+  ## declared thousands of lines below this point and cannot be forward-
+  ## referenced. A drift guard asserts the two agree
+  ## (`t_lock_identity_two_names_one_content` reads the real committed lock
+  ## through this resolver, so a divergence fails a test rather than going
+  ## unnoticed).
+
+const DefaultLockFileName* = "default"
+  ## Named-Lock-Files §3.1 — "The stdlib declares one well-known lock file,
+  ## `default`." A workspace that declares nothing, binds nothing and passes
+  ## nothing is governed by it.
+
+var lockProvenanceTable {.threadvar.}: LockProvenance
+var lockProvenanceInit {.threadvar.}: bool
+
+proc recordLockBinding*(name: string; identity: LockIdentity) =
+  ## Record that lock-file name `name` resolved to `identity` (§6.3).
+  ##
+  ## The table is a SIDE table: nothing in this module composes a name with an
+  ## identity to form a key, and `BuildAction.governingLockIdentity` carries
+  ## the identity alone. §6.3: "maintained alongside the cache and never mixed
+  ## into any key. Diagnostics read from it; identity does not."
+  if not lockProvenanceInit:
+    lockProvenanceTable = initLockProvenance()
+    lockProvenanceInit = true
+  lockProvenanceTable.recordBinding(identity, name)
+
+proc lockProvenance*(): LockProvenance =
+  ## The provenance side table as diagnostics see it.
+  if not lockProvenanceInit:
+    lockProvenanceTable = initLockProvenance()
+    lockProvenanceInit = true
+  lockProvenanceTable
+
+var workspaceLockIdentityCache {.threadvar.}: Table[string, LockIdentity]
+var workspaceLockIdentityCacheInit {.threadvar.}: bool
+
+proc workspaceGoverningLockIdentity*(projectRoot: string): LockIdentity =
+  ## The identity of the lock file governing every edge in `projectRoot`.
+  ##
+  ## Named-Lock-Files §3.1: a workspace that declares no lock files has
+  ## exactly one — `default` — and it governs everything, "precisely the
+  ## behaviour specified in §2.1: one workspace lock file, committed, unifying
+  ## versions **and** variants across every package in the workspace". Until
+  ## NLF-M7 lands the declaration and designation surface, that is every
+  ## workspace, so this single resolver is the whole binding.
+  ##
+  ## The identity is content-derived (§6.2) from the committed lock's SOLVED
+  ## GRAPH. Two consequences worth stating because they are the properties
+  ## corpus cases NLF-ID-1/2 test:
+  ##
+  ##   * the lock's *path* and any *name* bound to it are not inputs, so
+  ##     renaming a binding invalidates nothing;
+  ##   * two workspaces whose committed locks resolve to the same graph share
+  ##     one identity, which is sharing and not a collision (§6.3).
+  ##
+  ## **This reads the lock; it never solves.** Lowering a graph must not
+  ## invoke clingo — `Core-Invariants.md` §"Static Metadata Is The Hot Path"
+  ## requires ordinary operations to be answerable from lock files, and a
+  ## per-action solve would reintroduce §1.1's curve at a new site. When no
+  ## committed lock exists there is no solved graph to be governed by, and the
+  ## edges say so explicitly via `lockIdentityOutsideSolvedGraph`.
+  ##
+  ## Memoised per project root: `lowerGraphAction` runs once per edge and a
+  ## large graph has thousands.
+  if not workspaceLockIdentityCacheInit:
+    workspaceLockIdentityCache = initTable[string, LockIdentity]()
+    workspaceLockIdentityCacheInit = true
+  if workspaceLockIdentityCache.hasKey(projectRoot):
+    return workspaceLockIdentityCache[projectRoot]
+  var identity = lockIdentityOutsideSolvedGraph()
+  let lockPath = projectRoot / CommittedLockFileNameForIdentity
+  if fileExists(extendedPath(lockPath)):
+    try:
+      identity = lockIdentityOf(
+        parseSolvedGraphLock(readFile(extendedPath(lockPath))))
+    except CatchableError:
+      # A malformed or wrong-schema lock is diagnosed loudly by the build
+      # path's own reader (`resolveSolvedGraphForBuild`), which runs before
+      # any edge executes. Swallowing it HERE and reporting the
+      # outside-the-solved-graph identity keeps one diagnostic instead of
+      # two, and cannot mask the failure: the build still stops.
+      identity = lockIdentityOutsideSolvedGraph()
+  workspaceLockIdentityCache[projectRoot] = identity
+  # Named-Lock-Files §6.3: record the binding in the provenance side table.
+  # Until NLF-M7 lands the declaration surface there is exactly one name —
+  # `default`, the stdlib's well-known lock file (§3.1) — and recording it
+  # here means `repro why` can already say which lock file governs an edge.
+  recordLockBinding(DefaultLockFileName, identity)
+  identity
+
+proc noScheduledAction*(): BuildAction =
+  ## A `BuildAction` value for a slot that carries NO scheduled edge — the
+  ## `action` half of a `(hasAction: false, action: …)` tuple, never read.
+  ##
+  ## Named-Lock-Files §7.2 makes `governingLockIdentity` non-optional, which
+  ## removes `BuildAction()` as a spelling for "nothing here". Rather than let
+  ## each such site invent a value, they share this one and its name says what
+  ## it is. Constructed through `builtinAction` so it goes down the same
+  ## required-field path as every other action; the `bakStamp` kind and the
+  ## sentinel id make it obvious in a debugger if one ever escapes.
+  builtinAction(bakStamp, "__repro_no_scheduled_action",
+    cacheable = false,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+
 proc resolveCanonicalExecRoot*(cwdKind: ActionCwdKind; cwdCustomPath: string;
                                projectRoot: string): string =
   ## M9.R.74 — canonical execution root (R2) resolver.
@@ -1897,6 +2011,9 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     return repro_build_engine.action(
       payload.id,
       argv,
+      # Named-Lock-Files §3.1/§7.2: every edge in a workspace that declares
+      # no lock files is governed by `default`, the one workspace lock.
+      governingLockIdentity = workspaceGoverningLockIdentity(projectRoot),
       cwd = resolveCanonicalExecRoot(effectiveCwdKind,
         effectiveCwdCustomPath, projectRoot),
       deps = payload.deps,
@@ -1943,6 +2060,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     return repro_build_engine.builtinAction(
       kind,
       payload.id,
+      # Named-Lock-Files §3.1/§7.2: every edge in a workspace that declares
+      # no lock files is governed by `default`, the one workspace lock.
+      governingLockIdentity = workspaceGoverningLockIdentity(projectRoot),
+
       # M9.R.74 — honour the DSL's ``cwdKind`` declaration. Default
       # ``acwdRecipeRoot`` collapses to ``projectRoot`` so every
       # legacy ``reprobuild.builtin.fs`` action gets byte-identical
@@ -2003,6 +2124,9 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     return repro_build_engine.action(
       payload.id,
       argv,
+      # Named-Lock-Files §3.1/§7.2: every edge in a workspace that declares
+      # no lock files is governed by `default`, the one workspace lock.
+      governingLockIdentity = workspaceGoverningLockIdentity(projectRoot),
       # M9.R.74 — R2 declaration wins; legacy default = projectRoot.
       cwd = resolveCanonicalExecRoot(payload.cwdKind,
         payload.cwdCustomPath, projectRoot),
@@ -2145,6 +2269,9 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     return repro_build_engine.action(
       payload.id,
       argv,
+      # Named-Lock-Files §3.1/§7.2: every edge in a workspace that declares
+      # no lock files is governed by `default`, the one workspace lock.
+      governingLockIdentity = workspaceGoverningLockIdentity(projectRoot),
       # M9.R.74 — R2 declaration wins; legacy default = projectRoot.
       cwd = resolveCanonicalExecRoot(payload.cwdKind,
         payload.cwdCustomPath, projectRoot),
@@ -2217,6 +2344,9 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   repro_build_engine.action(
     payload.id,
     argvForCall(payload.call, profile),
+    # Named-Lock-Files §3.1/§7.2: every edge in a workspace that declares no
+    # lock files is governed by `default`, the one workspace lock.
+    governingLockIdentity = workspaceGoverningLockIdentity(projectRoot),
     # M9.R.74 — R2 declaration wins; legacy default = projectRoot so
     # every pre-milestone typed-tool action gets byte-identical CWD.
     cwd = resolveCanonicalExecRoot(payload.cwdKind,
@@ -4354,6 +4484,8 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
   # unapproved soundness hole and has been removed; monitored builds work on
   # arm64e after the io-mon fix.
   action("__repro_provider_compile", command,
+    # Named-Lock-Files §7.2 — see `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = compilerCwd,
     inputs = inputs,
     outputs = providerCompileOutputs(artifactPath, plan.outputBinaryPath),
@@ -6806,6 +6938,8 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     ignoredInputPrefixes.add(
       absolutePath(getTempDir() / "repro-interface-extract"))
   let extractAction = action(actionId, command,
+    # Named-Lock-Files §7.2 — see `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = edgeCwd,
     inputs = inputs,
     outputs = interfaceExtractionOutputs(artifactPath, stubPath),
@@ -14390,6 +14524,18 @@ const
   CommittedLockFileName* = "repro.lock"
   SolverInputsFileName* = "repro.solver"
 
+static:
+  # Named-Lock-Files §7.2 drift guard. `workspaceGoverningLockIdentity` (above,
+  # before this declaration point) must resolve the SAME file the build path
+  # reads, or the governing lock identity stamped on every action would be
+  # derived from a document nobody builds against. A forward reference is not
+  # available in this module, so the duplicate is asserted away at compile
+  # time rather than left to drift.
+  doAssert CommittedLockFileNameForIdentity == CommittedLockFileName,
+    "committed-lock filename drift: workspaceGoverningLockIdentity reads " &
+    CommittedLockFileNameForIdentity & " but the build path reads " &
+    CommittedLockFileName
+
 proc committedLockPath*(projectDir: string): string =
   projectDir / CommittedLockFileName
 
@@ -18900,7 +19046,13 @@ proc whyActionJson(info: BuildGraphInspection; actionId: string): JsonNode =
     "path": jsonStringSeq(path),
     "directDependencies": jsonStringSeq(directDependencies(info.actions, actionId)),
     "directDependents": jsonStringSeq(directDependents(info.actions, actionId)),
-    "action": buildActionJson(action)
+    "action": buildActionJson(action),
+    # Named-Lock-Files §6.3. The identity is the key; the names are
+    # provenance, carried as an ARRAY so a consumer sees the whole set rather
+    # than whichever name happened to be recorded first.
+    "governingLockIdentity": %($action.governingLockIdentity),
+    "lockFileNames": jsonStringSeq(
+      lockProvenance().namesFor(action.governingLockIdentity))
   }
   if report.isSome:
     let item = report.get()
@@ -18953,6 +19105,15 @@ proc renderWhyActionText(info: BuildGraphInspection; actionId: string): string =
   lines.add("directDependents: " &
     (if dependents.len > 0: dependents.join(", ") else: "-"))
   lines.add("command: " & commandDisplay(action))
+  # Named-Lock-Files §6.3 / corpus NLF-ID-5. Which lock file governs this
+  # edge, and — when more than one name resolved to it — that the names
+  # resolved identically and their artifacts are SHARED. Presented as
+  # sharing, never as a warning: §6.3 is explicit that "a collision in the
+  # provenance table means genuine sharing, not a lost name … It is a success
+  # condition."
+  for line in lockProvenanceReportLines(lockProvenance(),
+      action.governingLockIdentity):
+    lines.add(line)
   lines.add("dependencyPolicy: " & $action.dependencyPolicy.kind &
     " completeness=" & $action.dependencyPolicy.completeness)
   let report = latestReportAction(info, actionId)
@@ -29302,6 +29463,10 @@ proc syncFetchActionFor(identity: GitToolIdentity; workspaceRoot: string;
   let rName = gitRemoteNameFor(repo)
   result = action(id,
     @[identity.binaryPath, "-C", repoAbs, "fetch", "--quiet", rName],
+    # Named-Lock-Files §7.2. `repro sync` fetches workspace CHECKOUTS;
+    # `Workspace-Manifests.md` §"Mode-agnostic" keeps checkout state out of
+    # the lock entirely. See `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = workspaceRoot,
     deps = deps,
     pool = SyncFetchPool,
@@ -29331,8 +29496,11 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
   case decision.action
   of saNone:
     if decision.syncCase in {scDirty, scLocallyUnpublished, scForcePushRebase}:
-      return (false, BuildAction(), "refused", decision.refusalReason)
-    return (false, BuildAction(), "noop", "")
+      # Named-Lock-Files §7.2. `hasAction: false` means the `action` field
+      # is never read; the identity is supplied because the type requires it,
+      # and it is the honest one for an edge that does not exist.
+      return (false, noScheduledAction(), "refused", decision.refusalReason)
+    return (false, noScheduledAction(), "noop", "")
   of saClone:
     let receiptRel = ".repro" / "workspace" / "receipts" /
       ("sync-clone-" & idSeg & ".receipt")

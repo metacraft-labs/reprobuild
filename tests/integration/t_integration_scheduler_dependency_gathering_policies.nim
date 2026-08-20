@@ -305,7 +305,8 @@ proc requirePolicyCase(name, mode: string; policy: DependencyGatheringPolicy;
       weakFingerprint = weak(name),
       dependencyPolicy = policy,
       commandStatsId = "m17-" & name,
-      env = env)
+      env = env,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
   let before = cacheRecordsSize(cacheRoot)
   let firstRun = runOne(makeAction(), cacheRoot, app, monitorCli,
@@ -438,7 +439,8 @@ suite "integration_scheduler_dependency_gathering_policies":
         cacheable = true,
         weakFingerprint = weak("missing-recognized-report"),
         dependencyPolicy = reportPolicy(dgRecognizedFormat, "missing.d"),
-        commandStatsId = "m17-missing-report"), failRoot, app,
+        commandStatsId = "m17-missing-report",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph()), failRoot, app,
         "dependency report missing")
 
       requireFailureNoPublish(action("converter-failure",
@@ -451,7 +453,8 @@ suite "integration_scheduler_dependency_gathering_policies":
         weakFingerprint = weak("converter-failure"),
         dependencyPolicy = converterPolicy(app, failDir,
           "converter.custom", "converter.rpset", dgPostBuildConverter),
-        commandStatsId = "m17-converter-failure"), failRoot, app,
+        commandStatsId = "m17-converter-failure",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph()), failRoot, app,
         "dependency converter")
 
       requireFailureNoPublish(action("converter-malformed-output",
@@ -465,7 +468,8 @@ suite "integration_scheduler_dependency_gathering_policies":
         weakFingerprint = weak("converter-malformed-output"),
         dependencyPolicy = converterPolicy(app, failDir,
           "converter-bad.custom", "converter-bad.rpset", dgPostBuildConverter),
-        commandStatsId = "m17-converter-malformed"), failRoot, app,
+        commandStatsId = "m17-converter-malformed",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph()), failRoot, app,
         "converted dependency report invalid")
 
     when defined(macosx) or defined(linux):
@@ -538,7 +542,8 @@ suite "integration_scheduler_dependency_gathering_policies":
           dependencyPolicy = DependencyGatheringPolicy(
             kind: dgAutomaticMonitor,
             completeness: decComplete),
-          commandStatsId = "m17-corrupt-monitor"), failRoot, app,
+          commandStatsId = "m17-corrupt-monitor",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph()), failRoot, app,
           "monitor depfile read failed", monitorTools.monitorCliPath,
           monitorTools.monitorCliArgs)
 
@@ -597,7 +602,8 @@ suite "integration_scheduler_dependency_gathering_policies":
               kind: dgAutomaticMonitor,
               completeness: decComplete),
             commandStatsId = "im5-monitored-pipeline",
-            env = @["REPRO_MONITOR_SHIM_LIB=" & monitorTools.shim])
+            env = @["REPRO_MONITOR_SHIM_LIB=" & monitorTools.shim],
+            governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
         proc runPipeline(action: BuildAction): ActionResult =
           runBuild(graph([action]), BuildEngineConfig(

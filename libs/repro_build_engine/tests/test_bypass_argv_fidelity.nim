@@ -34,7 +34,8 @@ suite "RunQuota bypass argv fidelity":
       let buildAction = action(
         "wait-without-spin",
         @[getAppFilename(), "--sleep-child"],
-        cacheable = false)
+        cacheable = false,
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
       var config = defaultBuildEngineConfig(cacheRoot)
       config.bypassRunQuota = true
       config.maxParallelism = 1
@@ -81,7 +82,8 @@ suite "RunQuota bypass argv fidelity":
       @["sh", "-c", Script],
       cwd = workDir,
       outputs = @[outputPath],
-      cacheable = false)
+      cacheable = false,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
     var config = defaultBuildEngineConfig(cacheRoot)
     config.bypassRunQuota = true
     config.maxParallelism = 1

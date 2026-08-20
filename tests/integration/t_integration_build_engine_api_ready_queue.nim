@@ -260,8 +260,10 @@ suite "integration_build_engine_api_ready_queue":
       let tempRoot = createTempDir("repro-m12-cycle", "")
       defer: removeDir(tempRoot)
       let buildGraph = graph([
-        action("cycle-a", ["unused"], deps = ["cycle-b"], outputs = ["a.out"]),
-        action("cycle-b", ["unused"], deps = ["cycle-a"], outputs = ["b.out"])
+        action("cycle-a", ["unused"], deps = ["cycle-b"], outputs = ["a.out"],
+        governingLockIdentity = lockIdentityOutsideSolvedGraph()),
+        action("cycle-b", ["unused"], deps = ["cycle-a"], outputs = ["b.out"],
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
       ])
       expect BuildEngineError:
         discard runBuild(buildGraph, defaultBuildEngineConfig(tempRoot))
@@ -296,7 +298,8 @@ suite "integration_build_engine_api_ready_queue":
       let buildResult = runBuild(graph([
         action("copy-progress", [app, "fixture-action", "copy", "progress",
           inputPath, outputPath], cwd = workRoot, inputs = [inputPath],
-          outputs = ["out/progress.txt"], commandStatsId = "progress-copy")
+          outputs = ["out/progress.txt"], commandStatsId = "progress-copy",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
       ]), config)
 
       check buildResult.results.len == 1
@@ -378,7 +381,8 @@ suite "integration_build_engine_api_ready_queue":
       let buildAction = action("copy-fast-noop", [app, "fixture-action", "copy",
         "fast-noop", inputPath, outputPath], cwd = workRoot,
         inputs = [inputPath], outputs = ["out/fast-noop.txt"],
-        cacheable = true, weakFingerprint = weak("fast-noop"))
+        cacheable = true, weakFingerprint = weak("fast-noop"),
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       let first = runBuild(graph([buildAction]), config)
       check first.results.len == 1
@@ -415,7 +419,8 @@ suite "integration_build_engine_api_ready_queue":
         inputs = ["src/input.txt"],
         outputs = ["out/copied.txt"],
         cacheable = true,
-        weakFingerprint = weak("relative-copy"))
+        weakFingerprint = weak("relative-copy"),
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       let first = runBuild(graph([copyAction]), config)
       check first.results.len == 1
@@ -452,11 +457,13 @@ suite "integration_build_engine_api_ready_queue":
       let selectedAction = action("selected", [app, "fixture-action", "copy",
         "selected", selectedInput, selectedOutput], cwd = workRoot,
         inputs = [selectedInput], outputs = ["out/selected.txt"],
-        cacheable = true, weakFingerprint = weak("fast-noop-selected"))
+        cacheable = true, weakFingerprint = weak("fast-noop-selected"),
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
       let staleAction = action("stale", [app, "fixture-action", "copy",
         "stale", staleInput, staleOutput], cwd = workRoot,
         inputs = [staleInput], outputs = ["out/stale.txt"],
-        cacheable = true, weakFingerprint = weak("fast-noop-stale"))
+        cacheable = true, weakFingerprint = weak("fast-noop-stale"),
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       var cas = openStore(cacheRoot)
       var cache = openActionCache(cacheRoot / "action-cache")
@@ -509,11 +516,13 @@ suite "integration_build_engine_api_ready_queue":
         action("inline-a", [app, "fixture-action", "pool", "0",
           tempRoot / "inline-log", workRoot / "inline" / "a.txt"],
           cwd = workRoot, outputs = ["inline/a.txt"], cpuMilli = 1000'u32,
-          commandStatsId = "inline-a"),
+          commandStatsId = "inline-a",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph()),
         action("inline-b", [app, "fixture-action", "pool", "1",
           tempRoot / "inline-log", workRoot / "inline" / "b.txt"],
           cwd = workRoot, outputs = ["inline/b.txt"], cpuMilli = 1000'u32,
-          commandStatsId = "inline-b")
+          commandStatsId = "inline-b",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
@@ -580,7 +589,8 @@ suite "integration_build_engine_api_ready_queue":
         let buildResult = runBuild(graph([
           action("inline-denied", [app, "fixture-action", "wide", "denied",
             outputPath], cwd = workRoot, outputs = ["denied/out.txt"],
-            cpuMilli = 2000'u32, commandStatsId = "inline-denied")
+            cpuMilli = 2000'u32, commandStatsId = "inline-denied",
+            governingLockIdentity = lockIdentityOutsideSolvedGraph())
         ]), BuildEngineConfig(
           cacheRoot: cacheRoot,
           runQuotaCliPath: app,
@@ -620,11 +630,13 @@ suite "integration_build_engine_api_ready_queue":
       let buildResult = runBuild(graph([
         action("produce", [app, "fixture-action", "copy", "producer",
           inputPath, generatedPath], cwd = workRoot, inputs = [inputPath],
-          outputs = ["gen/generated.txt"], commandStatsId = "m46-api-produce"),
+          outputs = ["gen/generated.txt"], commandStatsId = "m46-api-produce",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph()),
         action("consume", [app, "fixture-action", "copy", "consumer",
           generatedPath, finalPath], cwd = workRoot,
           inputs = ["gen/generated.txt"], outputs = ["dist/final.txt"],
-          commandStatsId = "m46-api-consume")
+          commandStatsId = "m46-api-consume",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
@@ -680,10 +692,12 @@ suite "integration_build_engine_api_ready_queue":
         action("consumer", [app, "fixture-action", "copy", "consumer",
           providerOutput, consumerOutput], cwd = workRoot,
           outputs = ["consumer/out.txt"], dynamicDepsFile = "deps/graph.rbdyn",
-          commandStatsId = "m6-dyndep-consumer"),
+          commandStatsId = "m6-dyndep-consumer",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph()),
         action("provider", [app, "fixture-action", "wide", "provider",
           providerOutput], cwd = workRoot, outputs = ["provider/out.txt"],
-          commandStatsId = "m6-dyndep-provider")
+          commandStatsId = "m6-dyndep-provider",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
@@ -728,7 +742,8 @@ suite "integration_build_engine_api_ready_queue":
           action("consumer", [app, "fixture-action", "wide", "bad", outputPath],
             cwd = workRoot, outputs = ["out.txt"],
             dynamicDepsFile = "deps/bad.rbdyn",
-            commandStatsId = "m6-dyndep-bad")
+            commandStatsId = "m6-dyndep-bad",
+            governingLockIdentity = lockIdentityOutsideSolvedGraph())
         ]), BuildEngineConfig(
           cacheRoot: cacheRoot,
           runQuotaCliPath: app,
@@ -783,13 +798,15 @@ suite "integration_build_engine_api_ready_queue":
         action("producer", [app, "fixture-action", "emit-dyndep",
           fragmentPath, fragmentSource],
           cwd = workRoot, outputs = ["build/consumer.rbdyn"],
-          commandStatsId = "m25-producer"),
+          commandStatsId = "m25-producer",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph()),
         action("consumer", [app, "fixture-action", "copy", "consumer",
           synthOutput, consumerOutput],
           cwd = workRoot, deps = ["producer"],
           outputs = ["build/consumer.txt"],
           dynamicDepsFile = "build/consumer.rbdyn",
-          commandStatsId = "m25-consumer")
+          commandStatsId = "m25-consumer",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
@@ -863,7 +880,8 @@ suite "integration_build_engine_api_ready_queue":
           action("consumer", [app, "fixture-action", "wide", "consumer",
             consumerOutput], cwd = workRoot, outputs = ["build/consumer.txt"],
             dynamicDepsFile = "build/consumer.rbdyn",
-            commandStatsId = "m25-bad-dep-consumer")
+            commandStatsId = "m25-bad-dep-consumer",
+            governingLockIdentity = lockIdentityOutsideSolvedGraph())
         ]), BuildEngineConfig(
           cacheRoot: cacheRoot,
           runQuotaCliPath: app,
@@ -903,7 +921,8 @@ suite "integration_build_engine_api_ready_queue":
           action("consumer", [app, "fixture-action", "wide", "consumer",
             consumerOutput], cwd = workRoot, outputs = ["build/consumer.txt"],
             dynamicDepsFile = "build/consumer.rbdyn",
-            commandStatsId = "m25-dup-consumer")
+            commandStatsId = "m25-dup-consumer",
+            governingLockIdentity = lockIdentityOutsideSolvedGraph())
         ]), BuildEngineConfig(
           cacheRoot: cacheRoot,
           runQuotaCliPath: app,
@@ -932,7 +951,8 @@ suite "integration_build_engine_api_ready_queue":
           action("consumer", [app, "fixture-action", "wide", "consumer",
             consumerOutput], cwd = workRoot, outputs = ["build/consumer.txt"],
             dynamicDepsFile = "build/consumer.rbdyn",
-            commandStatsId = "m25-bad-json-consumer")
+            commandStatsId = "m25-bad-json-consumer",
+            governingLockIdentity = lockIdentityOutsideSolvedGraph())
         ]), BuildEngineConfig(
           cacheRoot: cacheRoot,
           runQuotaCliPath: app,
@@ -988,7 +1008,8 @@ suite "integration_build_engine_api_ready_queue":
           stageB, consumerOutput], cwd = workRoot,
           outputs = ["build/consumer.txt"],
           dynamicDepsFile = "build/consumer.rbdyn",
-          commandStatsId = "m25-two-create-consumer")
+          commandStatsId = "m25-two-create-consumer",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
@@ -1044,24 +1065,28 @@ suite "integration_build_engine_api_ready_queue":
         [app, "fixture-action", "copy", "seed", inputPath, presentOutputPath],
         cwd = workRoot, inputs = [inputPath], outputs = ["out/present.txt"],
         cacheable = true, weakFingerprint = weak("cache-present-output"),
-        commandStatsId = "cache-present-output")
+        commandStatsId = "cache-present-output",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
       let presentRestoreOnlyAction = action("cache-present-output",
         [app, "fixture-action", "cache-should-not-run", presentMarkerPath,
           presentOutputPath],
         cwd = workRoot, inputs = [inputPath], outputs = ["out/present.txt"],
         cacheable = true, weakFingerprint = weak("cache-present-output"),
-        commandStatsId = "cache-present-output")
+        commandStatsId = "cache-present-output",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
       let missingCacheAction = action("cache-missing-output",
         [app, "fixture-action", "copy", "seed", inputPath, missingOutputPath],
         cwd = workRoot, inputs = [inputPath], outputs = ["out/missing.txt"],
         cacheable = true, weakFingerprint = weak("cache-missing-output"),
-        commandStatsId = "cache-missing-output")
+        commandStatsId = "cache-missing-output",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
       let missingRestoreOnlyAction = action("cache-missing-output",
         [app, "fixture-action", "cache-should-not-run", missingMarkerPath,
           missingOutputPath],
         cwd = workRoot, inputs = [inputPath], outputs = ["out/missing.txt"],
         cacheable = true, weakFingerprint = weak("cache-missing-output"),
-        commandStatsId = "cache-missing-output")
+        commandStatsId = "cache-missing-output",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       proc runOne(buildAction: BuildAction): ActionResult =
         let buildResult = runBuild(graph([buildAction]), BuildEngineConfig(
@@ -1148,7 +1173,8 @@ suite "integration_build_engine_api_ready_queue":
           cwd = workRoot, inputs = [inputPath], outputs = ["out/cached.txt"],
           cacheable = true, weakFingerprint = weak("explicit-checksum"),
           actionCachePolicy = ffpChecksum,
-          commandStatsId = "explicit-checksum")
+          commandStatsId = "explicit-checksum",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
@@ -1202,43 +1228,52 @@ suite "integration_build_engine_api_ready_queue":
       var actions: seq[BuildAction] = @[]
       actions.add action("diamond-left", [app, "fixture-action", "copy", "left", srcA,
         workRoot / "diamond" / "left.txt"], cwd = workRoot, inputs = [srcA],
-        outputs = ["diamond/left.txt"], commandStatsId = "diamond-left")
+        outputs = ["diamond/left.txt"], commandStatsId = "diamond-left",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
       actions.add action("diamond-right", [app, "fixture-action", "copy", "right", srcB,
         workRoot / "diamond" / "right.txt"], cwd = workRoot, inputs = [srcB],
-        outputs = ["diamond/right.txt"], commandStatsId = "diamond-right")
+        outputs = ["diamond/right.txt"], commandStatsId = "diamond-right",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
       actions.add action("diamond-join", [app, "fixture-action", "copy", "join",
         workRoot / "diamond" / "left.txt", workRoot / "diamond" / "joined.txt"],
         cwd = workRoot, deps = ["diamond-left", "diamond-right"],
         inputs = [workRoot / "diamond" / "left.txt", workRoot / "diamond" / "right.txt"],
-        outputs = ["diamond/joined.txt"], commandStatsId = "diamond-join")
+        outputs = ["diamond/joined.txt"], commandStatsId = "diamond-join",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       for i in 0 ..< 64:
         actions.add action("wide-" & $i, [app, "fixture-action", "wide", $i,
           workRoot / "wide" / ($i & ".txt")], cwd = workRoot,
-          outputs = ["wide/" & $i & ".txt"], commandStatsId = "wide-" & $i)
+          outputs = ["wide/" & $i & ".txt"], commandStatsId = "wide-" & $i,
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       for i in 0 ..< 8:
         actions.add action("link-" & $i, [app, "fixture-action", "pool", $i,
           tempRoot / "link-log", workRoot / "link" / ($i & ".txt")], cwd = workRoot,
           outputs = ["link/" & $i & ".txt"], pool = "link", poolUnits = 1'u32,
-          commandStatsId = "link-" & $i)
+          commandStatsId = "link-" & $i,
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       actions.add action("cache-hit", [app, "fixture-action", "cache-should-not-run",
         cacheMarker, cacheOutput], cwd = workRoot, inputs = [workRoot / "cache" / "input.txt"],
         outputs = ["cache/out.txt"], cacheable = true, weakFingerprint = weak("cache-hit"),
-        commandStatsId = "cache-hit")
+        commandStatsId = "cache-hit",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
       actions.add action("cache-dependent", [app, "fixture-action", "copy", "cache-dep",
         cacheOutput, workRoot / "cache" / "dependent.txt"], cwd = workRoot,
         deps = ["cache-hit"], inputs = [cacheOutput], outputs = ["cache/dependent.txt"],
-        commandStatsId = "cache-dependent")
+        commandStatsId = "cache-dependent",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       actions.add action("will-fail", [app, "fixture-action", "fail",
         workRoot / "failure" / "ran.txt"], cwd = workRoot,
-        outputs = ["failure/failed.txt"], commandStatsId = "will-fail")
+        outputs = ["failure/failed.txt"], commandStatsId = "will-fail",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
       actions.add action("blocked-child", [app, "fixture-action", "copy", "blocked",
         workRoot / "failure" / "failed.txt", workRoot / "failure" / "blocked.txt"],
         cwd = workRoot, deps = ["will-fail"], outputs = ["failure/blocked.txt"],
-        commandStatsId = "blocked-child")
+        commandStatsId = "blocked-child",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       # dgDeclaredOnly removal: the legacy ``depfile`` convenience field is
       # gone. Declare an explicit ``dgRecognizedFormat`` policy whose Make-format
@@ -1249,7 +1284,8 @@ suite "integration_build_engine_api_ready_queue":
         depInputA, depInputB, workRoot / "deps" / "out.txt", depfilePath],
         cwd = workRoot, inputs = [depInputA], outputs = ["deps/out.txt"],
         dependencyPolicy = reportPolicy(dgRecognizedFormat, "deps/action.d"),
-        commandStatsId = "depfile-action")
+        commandStatsId = "depfile-action",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       # dgDeclaredOnly removal: the legacy ``monitorDepfile`` field (which made
       # the engine read a hand-written RMDF) is gone. Under the default
@@ -1263,7 +1299,8 @@ suite "integration_build_engine_api_ready_queue":
         monitorInput, workRoot / "monitor" / "out.txt"],
         cwd = workRoot, inputs = [monitorInput], outputs = ["monitor/out.txt"],
         dependencyPolicy = automaticMonitorGatheringPolicy(),
-        commandStatsId = "monitor-action")
+        commandStatsId = "monitor-action",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       let buildGraph = graph(actions, [pool("link", 2'u32)])
       let buildResult = runBuild(buildGraph, BuildEngineConfig(
