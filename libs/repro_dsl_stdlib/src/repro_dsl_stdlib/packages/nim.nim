@@ -428,13 +428,40 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   ## so a hand-authored recipe's public-interface binaries publish with
   ## no extra ceremony.
   discard imports
+  # Windows: nim appends `.exe` to an executable regardless of what `--out:`
+  # says, so a recipe that writes `binary = "build/bin/foo"` produces
+  # `build/bin/foo.exe`. The `output` flag is `role = output` and is what
+  # `outputs output` declares, so leaving it unsuffixed declares a file that
+  # never exists.
+  #
+  # The cost was not cosmetic. The engine could not find the declared output,
+  # so it could not capture it into the CAS -- every record was published
+  # without payloads -- and the outputs-present fast path could not fire
+  # either. A cache lookup whose fingerprint matched then failed on "cache
+  # record does not contain output payloads" and re-ran. Every nim executable
+  # edge on Windows was permanently uncacheable for this reason alone.
+  #
+  # `--out:foo.exe` produces exactly `foo.exe`, so naming the real file keeps
+  # the argv and the declared output in agreement. Library edges are left
+  # alone: `--app:lib` yields `.dll`, and the recipes that use it already
+  # spell the extension out.
+  let effectiveBinary =
+    when defined(windows):
+      if appLib or binary.len == 0 or binary.endsWith(".exe") or
+          binary.endsWith(".dll"):
+        binary
+      else:
+        binary & ".exe"
+    else:
+      binary
   let cacheDir = if nimcache.len > 0: nimcache else: defaultNimcacheDir(binary)
   let effectivePassL = passL & opensslPassLForSsl(defines)
   var inputs = @extraInputs
   if reproNimPathsEnabled and reproConfigNimsFile.len > 0:
     inputs.add(reproConfigNimsFile)
 
-  result = c(pkg = pkg, source = source, output = binary, defines = defines,
+  result = c(pkg = pkg, source = source, output = effectiveBinary,
+    defines = defines,
     cc = cc, gccExe = gccExe, mm = mm,
     paths = paths, passC = passC, passL = effectivePassL, nimcache = cacheDir,
     appLib = appLib, threadsOn = threadsOn, parallelBuild = parallelBuild,
