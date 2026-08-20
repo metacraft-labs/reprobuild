@@ -426,6 +426,18 @@ package reprobuild:
         "libgfortran.dll.a")
       if msys2Gcc.len > 0:
         libraryPath.add(msys2Gcc)
+
+      # OpenSSL's import libraries live in the same MSYS2 mingw64 lib dir
+      # (`pacman -S mingw-w64-x86_64-openssl`). Adding it here serves tools
+      # invoked BY HAND from the activated shell; graph-built binaries get
+      # `-L` on their argv instead (see `windowsOpensslPassL` below), because
+      # the engine composes each action's environment rather than inheriting
+      # the shell's, so LIBRARY_PATH would never reach them.
+      let msys2OpenSsl = msys2Root / "mingw64" / "lib"
+      if fileExists(msys2OpenSsl / "libssl.dll.a") or
+          fileExists(msys2OpenSsl / "libssl.a"):
+        libraryPath.add(msys2OpenSsl)
+
       for i in countdown(libraryPath.high, 0):
         prependPath "LIBRARY_PATH", libraryPath[i]
 
@@ -649,6 +661,50 @@ package reprobuild:
             result.add("-Wl,-rpath," & libDir)
       else:
         @[]
+
+    proc windowsOpensslPassL(): seq[string] =
+      ## ``-L`` for OpenSSL's import libraries on Windows.
+      ##
+      ## ``uses: "openssl"`` above states the intent: graph-built binaries
+      ## should receive OpenSSL's library channels "instead of depending on
+      ## ambient NIX_LDFLAGS". On Linux and macOS the ``nixPackage`` entry in
+      ## ``packages/openssl.nim`` delivers exactly that. On Windows it
+      ## delivered nothing, because that package declares ONLY a nixPackage:
+      ## path-mode resolution finds whichever ``openssl.exe`` is on PATH --
+      ## typically Git-for-Windows', which ships the executable and no
+      ## development libraries at all.
+      ##
+      ## Meanwhile ``nim.c`` appends ``-lssl -lcrypto`` whenever ``-d:ssl`` is
+      ## set (``opensslPassLForSsl``), with no ``-L`` to go with them. So both
+      ## SSL-linking edges failed with ``ld.exe: cannot find -lssl`` even in a
+      ## fully activated environment -- a declared dependency that reached
+      ## neither the flags nor the paths.
+      ##
+      ## The flags go on the ARGV rather than into LIBRARY_PATH/CPATH. gcc
+      ## does honour those (verified: the same link succeeds with them set),
+      ## but the engine composes each action's environment deliberately
+      ## instead of inheriting the launching shell's -- which is the whole
+      ## point of the "not ambient NIX_LDFLAGS" requirement. An env-var fix
+      ## would re-introduce the dependency the declaration exists to remove,
+      ## and would leave the action's inputs under-described.
+      ##
+      ## MSYS2's mingw64 is where a Windows host actually has these
+      ## (``pacman -S mingw-w64-x86_64-openssl``). Probing for the import
+      ## library rather than assuming the directory means a host without the
+      ## package contributes nothing, and the link fails with the same clear
+      ## "cannot find -lssl" rather than a bogus ``-L`` that resolves nothing.
+      when defined(windows):
+        let libDir = windowsDiyInstallRoot() / "msys2" / "msys64" /
+          "mingw64" / "lib"
+        if fileExists(libDir / "libssl.dll.a") or
+            fileExists(libDir / "libssl.a"):
+          @["-L" & libDir]
+        else:
+          @[]
+      else:
+        @[]
+
+    let opensslPassL = windowsOpensslPassL()
 
     let reproRuntimePassL = nixRuntimePassLForLibraries(@[
       "libclingo.so", "libclingo.dylib"])
@@ -1345,7 +1401,7 @@ package reprobuild:
       binary = "build/test-bin/repro_binary_cache_m6",
       defines = @["ssl"],
       paths = sourceOnlyNimPaths,
-      passL = testRuntimePassL,
+      passL = testRuntimePassL & opensslPassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_binary_cache_m6",
       actionId = "reprobuild.test_helpers.repro_binary_cache_m6"))
@@ -1355,7 +1411,7 @@ package reprobuild:
       binary = "build/test-bin/repro_binary_cache_client_cli",
       defines = @["ssl"],
       paths = sourceOnlyNimPaths,
-      passL = testRuntimePassL,
+      passL = testRuntimePassL & opensslPassL,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro_binary_cache_client_cli",
       actionId = "reprobuild.test_helpers.repro_binary_cache_client_cli"))
