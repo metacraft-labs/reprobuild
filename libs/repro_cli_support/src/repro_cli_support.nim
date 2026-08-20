@@ -3176,6 +3176,32 @@ type ProducerAuxPaths* = object
   cmakePrefixDirs*: seq[string]
   nimPathDirs*: seq[string]
 
+proc mergeProducerRuntimeIdentity*(identity: PathOnlyBuildIdentity;
+                                   binDirs: var seq[string];
+                                   aux: var ProducerAuxPaths) =
+  ## Project a consumed executable's declared runtime tools onto the same
+  ## PATH and auxiliary channels as the executable producer itself.
+  template addUnique(target: var seq[string]; value: string) =
+    if value.len > 0 and value notin target:
+      target.add(value)
+
+  for actionIdentity in identity.actionIdentities:
+    if actionIdentity.resolvedExecutablePath.len > 0:
+      binDirs.addUnique(parentDir(actionIdentity.resolvedExecutablePath))
+    for path in actionIdentity.pathSearchList:
+      binDirs.addUnique(path)
+    for path in actionIdentity.pkgConfigSearchList:
+      aux.pkgConfigDirs.addUnique(path)
+    for path in actionIdentity.cmakePrefixList:
+      aux.cmakePrefixDirs.addUnique(path)
+      let prefixBin = path / "bin"
+      if dirExists(extendedPath(prefixBin)):
+        binDirs.addUnique(prefixBin)
+    for path in actionIdentity.cpathList:
+      aux.includeDirs.addUnique(path)
+    for path in actionIdentity.libraryPathList:
+      aux.libDirs.addUnique(path)
+
 var producerMaterializedAuxPaths*: Table[string, ProducerAuxPaths] =
   initTable[string, ProducerAuxPaths]()
   ## SC-3 splice sink: consumer selector -> the producer's realized library
@@ -7805,6 +7831,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         let producerStub = producerOutDirBase / "producer-interface.nim"
         var binDirs: seq[string] = @[]
         var realizedBinaries: seq[string] = @[]
+        var producerRuntimeIdentity = PathOnlyBuildIdentity()
         let producerArtifact =
           try:
             # The producer's OWN root is the consumer root for ITS recipe —
@@ -7831,6 +7858,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
               "cross-repo producer \"" & selector & "\" at " &
               producerRootAbs & "'s interface could not be loaded to bind " &
               "the declared executable / library to its output.")
+        if producerArtifact.projectInterface.runtimeToolUses.len > 0:
+          var runtimeArtifact = producerArtifact
+          runtimeArtifact.projectInterface.toolUses =
+            producerArtifact.projectInterface.runtimeToolUses
+          runtimeArtifact.projectInterface.runtimeToolUses = @[]
+          producerRuntimeIdentity = toolBuildIdentity(runtimeArtifact,
+            effectiveMode, storeRoot = producerOutDirBase / "runtime-tool-store")
         # Decide whether the producer sub-build is required for the CONSUMED
         # artifact. A build is needed only when the producer exposes a
         # COMPILED artifact on disk:
@@ -7945,6 +7979,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         # platform extension, so the realized file the producer's edge actually
         # wrote is located regardless of the host's shared-library extension.
         var aux = ProducerAuxPaths()
+        mergeProducerRuntimeIdentity(producerRuntimeIdentity, binDirs, aux)
         var realizedLibraries: seq[string] = @[]
         block libraryChannel:
           let libOutDir = producerRootAbs / "build" / "lib"
@@ -8062,6 +8097,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           actionHashPayload.add(extractFilename(realizedLib))
           actionHashPayload.add('\x00')
           actionHashPayload.add(fileContentDigest(realizedLib))
+          actionHashPayload.add('\x00')
+        var runtimeFingerprints: seq[string] = @[]
+        for actionIdentity in producerRuntimeIdentity.actionIdentities:
+          runtimeFingerprints.add(actionIdentity.packageSelector & "\x00" &
+            actionIdentity.executableName & "\x00" &
+            digestHex(actionIdentity.actionFingerprint))
+        runtimeFingerprints.sort()
+        for runtimeFingerprint in runtimeFingerprints:
+          actionHashPayload.add("runtime:")
+          actionHashPayload.add(runtimeFingerprint)
           actionHashPayload.add('\x00')
         producerActionHashes[selector] =
           digestHex(blake3DomainDigest(actionHashPayload.bytesOf(),
