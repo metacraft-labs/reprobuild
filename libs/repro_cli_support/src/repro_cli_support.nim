@@ -2569,18 +2569,12 @@ proc resolveTargetExportSelector*(exportTable: TargetExportTable;
       result.targetKind = entry.kind
       return
 
-  # 2. Existing explicit target / action id pass-through.
+  # 2. Existing action id pass-through.
   for actionId in knownActionIds:
     if actionId == selector:
       result.kind = trkResolved
       result.actionId = selector
       result.targetKind = tekImplicit
-      return
-  for explicitName in knownExplicitTargets:
-    if explicitName == selector:
-      result.kind = trkResolved
-      result.actionId = selector
-      result.targetKind = tekExplicit
       return
 
   # **Deferred Item D5** ``<collection>#<member>`` shorthand.
@@ -2657,7 +2651,18 @@ proc resolveTargetExportSelector*(exportTable: TargetExportTable;
     result.targetKind = chosen.kind
     return
 
-  # 4. Unknown — synthesize Levenshtein suggestions.
+  # 4. Legacy explicit-target fallback. Current provider snapshots carry an
+  # export-table row with the real action
+  # handle and target kind. Older snapshots may only carry the build-target
+  # metadata name, so retain this fallback after the richer row lookup.
+  for explicitName in knownExplicitTargets:
+    if explicitName == selector:
+      result.kind = trkResolved
+      result.actionId = selector
+      result.targetKind = tekExplicit
+      return
+
+  # 5. Unknown — synthesize Levenshtein suggestions.
   var known: seq[string] = @[]
   for actionId in knownActionIds:
     if known.find(actionId) < 0:
@@ -18875,7 +18880,15 @@ proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
         actionIds, info.explicitTargetNames, nameSelector)
       case resolution.kind
       of trkResolved:
-        focus = resolution.actionId
+        # Aggregate and collection selectors lower a multi-action closure and
+        # therefore have no single focus action. A legacy explicit-target
+        # fallback can likewise resolve to the target name rather than an
+        # action id. Keep the full selected graph in both cases.
+        if resolution.targetKind notin {tekAggregate, tekCollection} and
+            resolution.actionId in actionIds:
+          focus = resolution.actionId
+        else:
+          focus = ""
       of trkAmbiguous:
         var err = newException(BuildTargetAmbiguousError,
           "target '" & nameSelector &

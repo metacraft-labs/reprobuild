@@ -20,6 +20,8 @@
 ##   3. Pass-through action-id / explicit-name resolutions report
 ##      ``tekImplicit`` / ``tekExplicit`` respectively so the field is
 ##      always populated for ``trkResolved`` outcomes.
+##   4. A current export-table row takes precedence over the legacy
+##      explicit-name fallback, preserving its real action id and kind.
 
 import std/unittest
 
@@ -132,3 +134,20 @@ suite "Spec-Implementation M5: build report targetResolution kind":
     check r2.kind == trkResolved
     check r2.targetKind == tekExplicit
     check r2.actionId == "my-explicit-target"
+
+  test "export row takes precedence over explicit-name fallback":
+    let table = TargetExportTable(
+      entries: @[
+        TargetExportEntry(
+          name: "release",
+          kind: tekAggregate,
+          owningPackage: "pkg",
+          actionId: "release.root"),
+      ])
+
+    let resolved = resolveTargetExportSelector(table,
+      @["release.root"], @["release"], "release")
+
+    check resolved.kind == trkResolved
+    check resolved.targetKind == tekAggregate
+    check resolved.actionId == "release.root"

@@ -260,6 +260,7 @@ created_at = "2026-07-02T00:00:00Z"
         if braceIdx >= 0:
           let payload = parseJson(graphOutput[braceIdx .. ^1])
           let inspectionPath = payload{"toolInspectionPath"}.getStr("")
+          check inspectionPath.len > 0
           check fileExists(inspectionPath)
           if fileExists(inspectionPath):
             let inspection = parseFile(inspectionPath)

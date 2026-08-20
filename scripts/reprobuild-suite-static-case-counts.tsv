@@ -882,7 +882,7 @@ tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim	nim	1
 tests/integration/t_hooks_noop_outside_initialized_workspace.nim	nim	1
 tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	nim	3
 tests/integration/t_integration_build_engine_api_ready_queue.nim	nim	18
-tests/integration/t_integration_build_report_target_resolution_kind.nim	nim	4
+tests/integration/t_integration_build_report_target_resolution_kind.nim	nim	5
 tests/integration/t_integration_cli_variant_flag_drives_solver.nim	nim	3
 tests/integration/t_integration_collection_distinct_from_aggregate.nim	nim	5
 tests/integration/t_integration_configurable_doc_comment_directives.nim	nim	8
