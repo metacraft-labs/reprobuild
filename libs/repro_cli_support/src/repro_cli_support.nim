@@ -50989,6 +50989,18 @@ proc projectManifestStub(project: string; seed: MembershipSeed): string =
   ## one, because which one an entry belongs in is the whole point:
   ## `member_sets` and `member_repos` are two NAMESPACES, and a file carrying
   ## only one would invite the next entry into whichever happened to be there.
+  ##
+  ## No `default_revision`. The model removes it: revision is lock territory,
+  ## and the value it carried was org branching policy restated once per
+  ## project. A stub that keeps emitting it re-seeds, into every project
+  ## authored from now on, exactly the field a manifest conversion has just
+  ## finished deleting — and the next conversion would have to delete it again.
+  ## The reader still ACCEPTS the key, so manifests that predate the conversion
+  ## keep parsing; what stops is this tool authoring new ones.
+  ##
+  ## `trunk` stays. It is not the same kind of field: it is live data with no
+  ## other declaration site, selecting the workspace branch for `repro branch`,
+  ## `repro switch` and `workspace init`.
   let membership =
     if seed.memberSets.len > 0 or seed.memberRepos.len > 0:
       renderMemberArray("member_sets", seed.memberSets) & "\n" &
@@ -50999,7 +51011,6 @@ proc projectManifestStub(project: string; seed: MembershipSeed): string =
   membership &
   "[project]\n" &
   "name = \"" & project & "\"\n" &
-  "default_revision = \"main\"\n" &
   "trunk = \"main\"\n"
 
 proc repoSetManifestStub(name: string; seed: MembershipSeed): string =
@@ -51643,8 +51654,8 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
     echo "repro workspace repos list [--set=NAME|--project=NAME] " &
       "[--enabled|--disabled|--all] [--json]"
-    echo "repro workspace repos add <repo> --remote=URL " &
-      "[--set=NAME|--project=NAME]... [--branch=B] [--revision=REV] " &
+    echo "repro workspace repos add <repo> --remote=URL --branch=B " &
+      "[--set=NAME|--project=NAME]... [--revision=REV] " &
       "[--path=DIR] [-m DESC]"
     echo "repro workspace repos remove <repo> " &
       "[--set=NAME|--project=NAME]... [--delete-fragment]"
@@ -51655,10 +51666,15 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     echo "  --remote=URL   reuses the matching url-prefix (or, for a project " &
       "target, the matching [[remote]]) when one already serves that URL; " &
       "otherwise adds one org-named prefix."
-    echo "  --branch=B     the branch the repo follows. Every fragment " &
-      "should declare one — nothing else determines its checkout."
-    echo "  --revision=REV pins the fragment (validated against the remote). " &
-      "Superseded by --branch; pins belong in lock files."
+    echo "  --branch=B     REQUIRED when declaring a new repo: the branch " &
+      "the fragment follows. Every fragment declares its own — there is no " &
+      "workspace default and none is inferred, so nothing else determines " &
+      "its checkout. Optional only when the fragment already exists, or " &
+      "when --revision pins an exact commit instead."
+    echo "  --revision=REV an exact commit this fragment sits at, validated " &
+      "against the remote. Use alongside --branch (\"tracks B, sits at " &
+      "REV\") for a vendored source tree. Ordinary repos take --branch " &
+      "alone and let a lock record the commit."
     echo "  --path=DIR     checkout directory; defaults to <repo>."
     echo "  -m DESC        writes repos/<repo>.md, the source of the " &
       "generated project docs."
@@ -51890,6 +51906,43 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         stderr.writeLine("  the fragment is shared; edit " & fragmentRel &
           " directly if the declaration itself should change")
         return 1
+
+    # Workspace-Membership-Model.md — "every repo fragment declares its own
+    # branch … written once per repo, by hand, when the repo is added". A NEW
+    # fragment with neither `--branch` nor `--revision` would declare neither
+    # key, and this is where that has to be caught.
+    #
+    # It used to resolve anyway, by inheriting the project's
+    # `default_revision` — which is precisely the collection-level default the
+    # model removes, and the reason a fragment declaring nothing was writable
+    # in the first place. With that field gone from the stub, the same input
+    # writes a fragment that resolves to an empty revision: an invalid state,
+    # authored silently, discovered by whoever syncs next.
+    #
+    # The branch is NOT inferred to fill the gap. Deriving it from the remote's
+    # default was considered and rejected: measured across this workspace the
+    # remote default disagrees with the branch actually in use for roughly a
+    # third of the repos, so inference writes a confidently WRONG value where
+    # refusing writes an obviously missing one. The whole point of the model is
+    # that a fragment fully determines its own checkout, by hand.
+    #
+    # Placed before the first write of ANY file — ahead of the url-prefix
+    # minting in the loop below — so a refused `add` leaves nothing behind, and
+    # ahead of the remote probe so it costs no network round trip.
+    if not fragmentExisted and branch.len == 0 and revision.len == 0:
+      stderr.writeLine("repro workspace repos add: " & repo &
+        ": --branch is required when declaring a new repo")
+      stderr.writeLine("  Every repo fragment declares the branch it tracks. " &
+        "There is no workspace default and none is inferred, so a fragment " &
+        "that names no branch has no checkout to resolve to.")
+      stderr.writeLine("  Add the branch this repo's mainline lives on, e.g.:")
+      stderr.writeLine("    repro workspace repos add " & repo &
+        " --remote=" & remote & " --branch=dev")
+      stderr.writeLine("  Use --revision=<commit> INSTEAD only to pin a " &
+        "vendored source tree to an exact commit, or alongside --branch to " &
+        "say \"tracks <branch>, sits at <commit>\".")
+      stderr.writeLine("  Nothing was written.")
+      return 2
 
     # `--branch` is validated the same way `--revision` always was, and for the
     # same reason: a manifest naming a branch that does not exist authors fine
