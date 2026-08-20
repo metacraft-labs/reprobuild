@@ -128,6 +128,7 @@ libs/repro_dsl_stdlib/tests/t_nde_h1_sway.nim	nim	22
 libs/repro_dsl_stdlib/tests/t_nde_k1_plasma.nim	nim	24
 libs/repro_dsl_stdlib/tests/t_ndem1_reproos_desktop.nim	nim	26
 libs/repro_dsl_stdlib/tests/t_ndem2_generation_log.nim	nim	21
+libs/repro_dsl_stdlib/tests/t_nim_ssl_dependency.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_prefix_layout.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_smoke_catalog_audit_m29.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_smoke_configurables.nim	nim	3
@@ -181,6 +182,7 @@ libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	1
 libs/repro_interface_artifacts/tests/t_rp1_provider_artifact_edge_identity.nim	nim	8
 libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim	nim	9
+libs/repro_interface_artifacts/tests/t_runtime_tool_uses_codec.nim	nim	3
 libs/repro_interface_artifacts/tests/t_windows_dynlib_staging.nim	nim	4
 libs/repro_interface_artifacts/tests/t_windows_long_command_script.nim	nim	2
 libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim	nim	6
@@ -1155,6 +1157,7 @@ tests/test_dev_env_m9_policy.py	python	4
 tests/unit/t_capabilities.nim	nim	2
 tests/unit/t_config_nims_lib_resolution.nim	nim	7
 tests/unit/t_configure_build_tree_cleanup.nim	nim	4
+tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	1
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	5
 tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
 tests/unit/t_fribidi_dev_stub.nim	nim	1

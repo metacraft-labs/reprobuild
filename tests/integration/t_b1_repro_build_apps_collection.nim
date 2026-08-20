@@ -122,6 +122,12 @@ suite "Bootstrap-And-Self-Build B1: repro build apps collection":
     check reproEntrypoint.contains("--define:ssl")
 
     let projectText = readFile(repoRoot / "repro.nim")
+    let usesStart = projectText.find("  uses:")
+    let devEnvStart = projectText.find("  devEnv:", usesStart)
+    check usesStart >= 0
+    check devEnvStart > usesStart
+    if usesStart >= 0 and devEnvStart > usesStart:
+      check "\"openssl\"" in projectText[usesStart ..< devEnvStart]
     let actionStart = projectText.find(
       "source = \"apps/repro/repro.nim\"")
     let actionEnd = projectText.find(

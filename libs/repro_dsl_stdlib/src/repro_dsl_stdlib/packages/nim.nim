@@ -261,14 +261,8 @@ proc usesSslDefine(defines: openArray[string]): bool =
       return true
 
 proc opensslPassLForSsl(defines: openArray[string]): seq[string] =
-  if not usesSslDefine(defines):
-    return
-  for token in getEnv("NIX_LDFLAGS").splitWhitespace:
-    if token.startsWith("-L") and token.contains("openssl"):
-      result.add(token)
-      result.add("-lssl")
-      result.add("-lcrypto")
-      return
+  if usesSslDefine(defines):
+    result = @["-lssl", "-lcrypto"]
 
 proc compileDependencyPolicy(cacheDir: string;
                              cacheable: bool;
@@ -452,6 +446,10 @@ proc c*(pkg: NimPackage; source: string; binary: string;
       cacheDir, cacheable, dependencyPolicy),
     actionCachePolicy = actionCachePolicy,
     commandStatsId = commandStatsId)
+  if usesSslDefine(defines):
+    # The OpenSSL profile supplies the platform-specific library directories;
+    # the linker arguments above intentionally contain no host paths.
+    appendRegisteredActionToolIdentityRefs(result.id, ["openssl"])
   maybeTagPublicInterface(result, publish, publishAs)
 
 # ---------------------------------------------------------------------------
