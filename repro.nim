@@ -132,18 +132,60 @@ import ct_test_runner_install
 import repro_tests
 
 proc windowsDiyInstallRoot(): string =
-  ## The metacraft Windows DIY toolchain root, resolved exactly as the
-  ## workspace ``env.ps1``'s ``Get-DefaultInstallRoot`` does: explicit
-  ## override first, then ``D:\`` (where the shared binary cache lives),
-  ## then ``%LOCALAPPDATA%``. Empty when none of those exist.
-  result = getEnv("WINDOWS_DIY_INSTALL_ROOT")
-  if result.len > 0:
-    return
+  ## The metacraft Windows DIY toolchain root, resolved as the workspace
+  ## ``env.ps1``'s ``Get-DefaultInstallRoot`` does: explicit override first,
+  ## then ``D:\`` (where the shared binary cache lives), then
+  ## ``%LOCALAPPDATA%``. Empty when none of those exist.
+  ##
+  ## Candidates are VALIDATED rather than taken on faith, because
+  ## ``WINDOWS_DIY_INSTALL_ROOT`` means two different things in this tree.
+  ## ``windows/bootstrap-toolchain.ps1`` sets it to the TOOLCHAIN install
+  ## root -- ``%LOCALAPPDATA%\repo-workspaces\toolchains``, where
+  ## ``ensure-nim.ps1`` and ``ensure-gcc.ps1`` unpack nim and gcc -- while
+  ## everything below wants the metacraft-dev-deps root that holds msys2 and
+  ## the fixture toolchains. One name, two roots.
+  ##
+  ## Taking the variable literally therefore broke every probe in the
+  ## Windows ``devEnv:`` block the moment ``env.ps1`` had run: swift, gradle,
+  ## maven, jdk, zig, go, dotnet, fpc, the WinLibs gcc lib dir and msys2 all
+  ## resolved under a directory with none of that layout, so each one
+  ## silently contributed nothing while the dev-env reported success. The
+  ## marker check below is what turns "wrong root" into "keep looking".
+  proc looksLikeDiyRoot(candidate: string): bool =
+    if candidate.len == 0 or not dirExists(candidate):
+      return false
+    # The markers are exactly the fixtures this root is probed FOR, which is
+    # also what makes them discriminating: the toolchain install root that
+    # bootstrap-toolchain.ps1 points the variable at holds nim, gcc, clingo,
+    # gh and git-repo -- so `gcc` and `clingo` would match BOTH roots and
+    # settle nothing. None of the entries below appears there.
+    # A host need not have provisioned all of them; one is enough.
+    for marker in ["msys2", "swift", "gradle", "maven", "jdk", "zig", "go",
+                   "dotnet", "fpc"]:
+      if dirExists(candidate / marker):
+        return true
+    false
+
+  var candidates: seq[string] = @[]
+  let explicitRoot = getEnv("WINDOWS_DIY_INSTALL_ROOT")
+  if explicitRoot.len > 0:
+    candidates.add(explicitRoot)
   if dirExists("D:\\"):
-    return "D:/metacraft-dev-deps"
+    candidates.add("D:/metacraft-dev-deps")
   let localAppData = getEnv("LOCALAPPDATA")
   if localAppData.len > 0:
-    return localAppData / "metacraft-dev-deps"
+    candidates.add(localAppData / "metacraft-dev-deps")
+
+  for candidate in candidates:
+    if looksLikeDiyRoot(candidate):
+      return candidate
+  # None carried the layout: fall back to the first candidate that at least
+  # exists, preserving the previous behaviour for a host that set the
+  # variable deliberately at a root not yet populated.
+  for candidate in candidates:
+    if dirExists(candidate):
+      return candidate
+  ""
 
 const
   ## Fixture toolchain pins, moved here verbatim from the metacraft
