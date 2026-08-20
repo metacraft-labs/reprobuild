@@ -1,6 +1,6 @@
 {.define: reproLoweredGraphCodecTest.}
 
-import std/[options, tables, unittest]
+import std/[options, strutils, tables, unittest]
 
 import repro_binary_cache_client/cache_key
 import repro_build_engine
@@ -24,7 +24,7 @@ suite "lowered graph cache action round trip":
     identity.addDep(
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     let action = BuildAction(
-      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+      governingLockIdentity: emptySolvedGraphIdentity("codec-round-trip-test"),
       kind: bakProcess,
       id: "install-mirror-zlib",
       deps: @["install-zlib"],
@@ -58,6 +58,7 @@ suite "lowered graph cache action round trip":
     let decoded = loweredGraphActionRoundTripForTest(@[action])
     check decoded.len == 1
     let roundTrip = decoded[0]
+    check roundTrip.governingLockIdentity == action.governingLockIdentity
     check roundTrip.id == action.id
     check roundTrip.targetNames == action.targetNames
     check roundTrip.typedOutputs.len == 1
@@ -72,3 +73,21 @@ suite "lowered graph cache action round trip":
     check roundTrip.declaredOutputs == action.declaredOutputs
     check roundTrip.readOnlyRoots == action.readOnlyRoots
     check roundTrip.requiresElevation
+
+  test "rejects the previous cache version instead of decoding without lock identity":
+    let action = BuildAction(
+      governingLockIdentity: emptySolvedGraphIdentity("codec-version-test"),
+      kind: bakStamp,
+      id: "codec-version-test")
+    var encoded = loweredGraphCacheBytesForTest(@[action])
+    let versionOffset = loweredGraphCacheVersionOffsetForTest()
+    check encoded[versionOffset] == 5'u8
+    check encoded[versionOffset + 1] == 0'u8
+    encoded[versionOffset] = 4'u8
+    var rejected = false
+    try:
+      discard loweredGraphCacheActionsForTest(encoded)
+    except CatchableError as err:
+      rejected = true
+      check "unsupported lowered graph cache version" in err.msg
+    check rejected

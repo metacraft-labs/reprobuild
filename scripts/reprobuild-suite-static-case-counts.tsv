@@ -82,7 +82,7 @@ libs/repro_cli_support/tests/t_partition_planner_reads_runquota_estimates.nim	ni
 libs/repro_cli_support/tests/t_phase_g_cli_wiring.nim	nim	6
 libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim	nim	3
 libs/repro_cli_support/tests/test_engine_publisher_wiring.nim	nim	5
-libs/repro_cli_support/tests/test_lowered_graph_cache_round_trip.nim	nim	1
+libs/repro_cli_support/tests/test_lowered_graph_cache_round_trip.nim	nim	2
 libs/repro_cli_support/tests/test_m10_home_gc_cli.nim	nim	7
 libs/repro_cli_support/tests/test_m2_env_ps1_migration_clean.nim	nim	8
 libs/repro_cli_support/tests/test_m69_home_add_versioned.nim	nim	5

@@ -1868,6 +1868,10 @@ proc resolveCanonicalExecRoot*(cwdKind: ActionCwdKind; cwdCustomPath: string;
 
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
                       projectRoot: string): BuildAction =
+  # `BuildAction.governingLockIdentity` is required. Give `result` a complete
+  # sentinel value before the deferred metadata copier can observe it; every
+  # successful branch below replaces the sentinel with its real action.
+  result = noScheduledAction()
   let payload = decodeBuildActionPayload(toBytes(node.payload))
   let actionPathPrefix = toolPathPrefix(profiles, payload.call.packageName,
     payload.call.executableName, payload.toolIdentityRefs)
@@ -2341,7 +2345,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   # explicitly sets ``PATH`` via ``extraEnv`` overrides the prefix.
   for entry in payload.env:
     mergedEnv.add(entry[0] & "=" & entry[1])
-  repro_build_engine.action(
+  result = repro_build_engine.action(
     payload.id,
     argvForCall(payload.call, profile),
     # Named-Lock-Files §3.1/§7.2: every edge in a workspace that declares no
@@ -2796,8 +2800,10 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
         pools[pool.name] = pool
   for pool in pools.values:
     result.pools.add(repro_build_engine.pool(pool.name, pool.capacity))
-  let inferredActions = inferDeclaredActionDeps(
-    actionNodes.mapIt(it.payload), projectRoot)
+  var declaredActions = newSeq[BuildActionDef](actionNodes.len)
+  for i in 0 ..< actionNodes.len:
+    declaredActions[i] = actionNodes[i].payload
+  let inferredActions = inferDeclaredActionDeps(declaredActions, projectRoot)
   for i in 0 ..< actionNodes.len:
     actionNodes[i].payload = inferredActions[i]
   var aliasForAction = initTable[string, string]()
@@ -3187,7 +3193,7 @@ proc defaultBuildActionId(snapshot: ProviderGraphSnapshot): string =
 
 const
   LoweredGraphCacheMagic = "RBLG"
-  LoweredGraphCacheVersion = 4'u16
+  LoweredGraphCacheVersion = 5'u16
   LoweredGraphAlgorithmVersion = "reprobuild.loweredGraph.v1"
 
 type
@@ -3898,6 +3904,7 @@ proc readCacheEntryIdentity(bytes: openArray[byte]; pos: var int):
   result.providerRevision = readString(bytes, pos)
 
 proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
+  outp.writeString($action.governingLockIdentity)
   outp.add(byte(ord(action.kind)))
   outp.writeString(action.id)
   outp.writeStringSeq(action.deps)
@@ -3942,6 +3949,8 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.add(if action.requiresElevation: 1'u8 else: 0'u8)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
+  result = BuildAction(
+    governingLockIdentity: LockIdentity(readString(bytes, pos)))
   let kind = readByteValue(bytes, pos)
   if kind > byte(ord(high(BuildActionKind))):
     raiseEnvelopeError(eeMalformed, "invalid build action kind")
@@ -4048,10 +4057,20 @@ proc decodeLoweredGraphCache(bytes: openArray[byte]): LoweredGraphCacheRecord =
     raiseEnvelopeError(eeMalformed, "trailing lowered graph cache bytes")
 
 when defined(reproLoweredGraphCodecTest):
+  proc loweredGraphCacheBytesForTest*(actions: seq[BuildAction]): seq[byte] =
+    encodeLoweredGraphCache(LoweredGraphCacheRecord(actions: actions))
+
+  proc loweredGraphCacheActionsForTest*(bytes: seq[byte]): seq[BuildAction] =
+    decodeLoweredGraphCache(bytes).actions
+
+  proc loweredGraphCacheVersionOffsetForTest*(): int =
+    var prefix: seq[byte]
+    prefix.writeString(LoweredGraphCacheMagic)
+    prefix.len
+
   proc loweredGraphActionRoundTripForTest*(actions: seq[BuildAction]):
       seq[BuildAction] =
-    let record = LoweredGraphCacheRecord(actions: actions)
-    decodeLoweredGraphCache(encodeLoweredGraphCache(record)).actions
+    loweredGraphCacheActionsForTest(loweredGraphCacheBytesForTest(actions))
 
 proc loweredGraphCachePath(outDir, selectedActionId: string): string =
   let label =
