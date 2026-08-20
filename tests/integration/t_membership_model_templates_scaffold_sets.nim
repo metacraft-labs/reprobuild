@@ -47,7 +47,7 @@
 ## No mocks: a real git manifest repo on disk, the real `repro` binary, and the
 ## real strict readers. Skip rule: only when `git` is missing from PATH.
 
-import std/[os, osproc, strutils, tempfiles, unittest]
+import std/[options, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_workspace_manifests
@@ -268,6 +268,23 @@ suite "membership model — repo-set templates":
       check m.project.name == "legacy-service"
       check m.member_sets == @["shared-infrastructure"]
       check m.member_repos == @["service-scaffolding"]
+
+      # The scaffold does not re-seed `default_revision`. The model removes the
+      # field — revision is lock territory, and its value was org branching
+      # policy restated once per project — so a stub that kept emitting it
+      # would reintroduce, into every project authored from here on, exactly
+      # what a manifest conversion has just finished deleting.
+      #
+      # Asserted BOTH ways on purpose. The decoded field is what callers see,
+      # and the raw bytes are what the next reader of the file sees; a stub
+      # that emitted the key with an empty value would satisfy only one of
+      # them. `trunk` is checked as still present in the same breath, because
+      # the point is that one specific field went away and the file is
+      # otherwise intact.
+      check m.project.default_revision.isNone
+      let projectText = readFile(projectFile)
+      check "default_revision" notin projectText
+      check "trunk = \"main\"" in projectText
 
   test "t_template_may_not_carry_a_fixed_set_name":
     # (8) A distinct schema exists precisely so this is unrepresentable. If a

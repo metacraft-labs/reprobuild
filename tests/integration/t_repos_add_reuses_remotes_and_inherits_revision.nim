@@ -2,7 +2,15 @@
 ## hand-written ones: it REUSES the MOST SPECIFIC declared `[[remote]]` base
 ## that prefixes the requested URL (putting whatever path remains in
 ## `[repo].name`), mints at most ONE reusable org-named remote when no declared
-## base does, and never guesses a `revision`.
+## base does, and never guesses a `revision` OR a `branch`.
+##
+## "Never guesses a branch" is now a REFUSAL rather than an omission. A new
+## fragment given neither `--branch` nor `--revision` used to be written
+## carrying neither key, resolving only because the project stub seeded a
+## `default_revision` for it to inherit — the collection-level default the
+## membership model exists to remove. With that gone the same input would
+## author a repo with an empty revision, so it is rejected at the point of
+## authorship instead, and nothing is written.
 ##
 ## Regression origin: adding `nim-shm-lease` to the `reprobuild` project (whose
 ## manifest already declares `metacraft-labs` → `https://github.com/metacraft-labs`
@@ -93,6 +101,7 @@ const siblingFragment = """schema = "reprobuild.workspace.repo.v1"
 name = "nim-shm-queue"
 path = "nim-shm-queue"
 remote = "metacraft-labs"
+branch = "dev"
 """
 
 # The hand-written THIRD-PARTY shape (`repos/llvm-project.toml`,
@@ -109,6 +118,7 @@ const thirdPartyFragment = """schema = "reprobuild.workspace.repo.v1"
 name = "llvm/llvm-project"
 path = "llvm-project"
 remote = "github"
+branch = "main"
 """
 
 type Fixture = object
@@ -186,7 +196,8 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
 
       let remotesBefore = countRemotes(fx.projectFile)
       let res = addRepo(fx, @["reprobuild", "nim-shm-lease",
-        "--remote=https://github.com/metacraft-labs/nim-shm-lease.git"])
+        "--remote=https://github.com/metacraft-labs/nim-shm-lease.git",
+        "--branch=dev"])
       if res.code != 0:
         checkpoint("output: " & res.output)
       check res.code == 0
@@ -245,7 +256,8 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
 
       let remotesBefore = countRemotes(fx.projectFile)
       let res = addRepo(fx, @["reprobuild", "llvm-project",
-        "--remote=https://github.com/llvm/llvm-project.git"])
+        "--remote=https://github.com/llvm/llvm-project.git",
+        "--branch=main"])
       if res.code != 0:
         checkpoint("output: " & res.output)
       check res.code == 0
@@ -263,14 +275,20 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       check res.output.contains("(reused)")
 
       # Round-trip through the real resolver: the composed clone URL is the
-      # one that was requested, the checkout dir is still the `<repo>`
-      # argument, and the revision is inherited rather than pinned.
+      # one that was requested, and the checkout dir is still the `<repo>`
+      # argument.
       check remoteOf(fx.projectFile, "llvm/llvm-project") == "github"
       check fetchUrlOf(fx.projectFile, "llvm/llvm-project") ==
         "https://github.com/llvm/llvm-project"
       check checkoutPathOf(fx.projectFile, "llvm/llvm-project") ==
         "llvm-project"
-      check revisionOf(fx.projectFile, "llvm/llvm-project") == "dev"
+      # `main`, from the fragment — NOT the `dev` this project's
+      # `default_revision` carries. This assertion used to read `"dev"`, and
+      # that is the defect in miniature: a vendored third-party tree whose
+      # mainline is `main` was landing on `dev` purely because of which
+      # collection it was reached through. A fragment now fully determines its
+      # own checkout, so the project's default cannot reach it.
+      check revisionOf(fx.projectFile, "llvm/llvm-project") == "main"
 
   test "test_repo_add_mints_one_org_named_remote_that_the_next_repo_reuses":
     let gitBin = findExe("git")
@@ -286,6 +304,7 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       let remotesBefore = countRemotes(fx.projectFile)
       let first = addRepo(fx, @["reprobuild", "first-lib",
         "--remote=https://git.example.invalid/acme/first-lib.git",
+        "--branch=dev",
         "-m", "First library from a host the project has never seen."])
       if first.code != 0:
         checkpoint("output: " & first.output)
@@ -310,7 +329,8 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
 
       # A SECOND repo from the same org reuses that remote and adds nothing.
       let second = addRepo(fx, @["reprobuild", "second-lib",
-        "--remote=https://git.example.invalid/acme/second-lib.git"])
+        "--remote=https://git.example.invalid/acme/second-lib.git",
+        "--branch=dev"])
       if second.code != 0:
         checkpoint("output: " & second.output)
       check second.code == 0
@@ -341,8 +361,15 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       check created.code == 0
 
       let freshProject = fx.workspaceRoot / "projects" / "fresh-proj.toml"
+
+      # A scaffolded project carries no `default_revision` — the model removed
+      # it — so there is nothing for a fragment to inherit and `--branch` is
+      # what makes the repo resolvable. This is the end-to-end check that the
+      # two changes compose: the stub stopped seeding the field, and `repos
+      # add` now requires the fragment to state its own branch.
       let added = addRepo(fx, @["fresh-proj", "brand-new-lib",
-        "--remote=https://git.example.invalid/acme/brand-new-lib.git"])
+        "--remote=https://git.example.invalid/acme/brand-new-lib.git",
+        "--branch=dev"])
       if added.code != 0:
         checkpoint("output: " & added.output)
       check added.code == 0
@@ -352,8 +379,76 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       check resolved.repos[0].projectRemote == "acme"
       check resolved.repos[0].fetchUrl ==
         "https://git.example.invalid/acme/brand-new-lib"
-      # `project new` seeds `default_revision`, which the fragment inherits.
-      check resolved.repos[0].revision == "main"
+      # The branch came from the fragment, not from any collection-level
+      # default, and the revision follows it because no exact pin was given.
+      check resolved.repos[0].branch == "dev"
+      check resolved.repos[0].revision == "dev"
+      check readFile(fx.workspaceRoot / "repos" / "brand-new-lib.toml")
+        .contains("branch = \"dev\"")
+
+  test "test_repo_add_without_a_branch_is_refused_and_writes_nothing":
+    # Workspace-Membership-Model.md — "every repo fragment declares its own
+    # branch". A NEW fragment given neither `--branch` nor `--revision` would
+    # declare neither key and resolve to an empty revision.
+    #
+    # This used to be writable because the project stub seeded
+    # `default_revision` for the fragment to inherit, which is the
+    # collection-level default the model exists to remove. The branch is not
+    # inferred to fill the gap — the remote default was measured wrong for
+    # about a third of this workspace, so inference would write a confidently
+    # WRONG value where refusing writes an obviously missing one.
+    #
+    # The positive control is the point: without it, a refusal that fired on
+    # EVERY add would pass this test just as well.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "needsbranch")
+      defer: removeDir(fx.scratch)
+
+      let remotesBefore = countRemotes(fx.projectFile)
+      let projectBefore = readFile(fx.projectFile)
+      let refused = addRepo(fx, @["reprobuild", "unbranched-lib",
+        "--remote=https://git.example.invalid/acme/unbranched-lib.git"])
+      check refused.code != 0
+      # The diagnostic has to carry the fix, because this is the first thing
+      # an author hits: the flag, the rule, and a runnable example.
+      check refused.output.contains("--branch is required")
+      check refused.output.contains("declares the branch it tracks")
+      check refused.output.contains("--branch=dev")
+      check refused.output.contains("Nothing was written")
+
+      # "Write nothing" asserted on disk, not inferred from the exit code: the
+      # refusal sits ahead of the url-prefix minting and the fragment write, so
+      # neither a fragment, nor a doc, nor a new remote, nor an include edge is
+      # left behind for the next run to trip over.
+      check not fileExists(fx.workspaceRoot / "repos" / "unbranched-lib.toml")
+      check not fileExists(fx.workspaceRoot / "repos" / "unbranched-lib.md")
+      check countRemotes(fx.projectFile) == remotesBefore
+      check readFile(fx.projectFile) == projectBefore
+
+      # POSITIVE CONTROL: the identical command with a branch succeeds, so the
+      # refusal is proven specific to the missing declaration.
+      let accepted = addRepo(fx, @["reprobuild", "unbranched-lib",
+        "--remote=https://git.example.invalid/acme/unbranched-lib.git",
+        "--branch=dev"])
+      if accepted.code != 0:
+        checkpoint("output: " & accepted.output)
+      check accepted.code == 0
+      check fileExists(fx.workspaceRoot / "repos" / "unbranched-lib.toml")
+      check revisionOf(fx.projectFile, "unbranched-lib") == "dev"
+
+      # SECOND CONTROL: an exact pin with no branch is also accepted. The rule
+      # is "declare something", not "always pass --branch"; a vendored tree
+      # pinned to a commit is the case the model carves out.
+      let pinned = addRepo(fx, @["reprobuild", "pinned-only-lib",
+        "--remote=https://git.example.invalid/acme/pinned-only-lib.git",
+        "--revision=" & "0123456789abcdef0123456789abcdef01234567"])
+      if pinned.code != 0:
+        checkpoint("output: " & pinned.output)
+      check pinned.code == 0
+      check fileExists(fx.workspaceRoot / "repos" / "pinned-only-lib.toml")
 
   test "test_repo_add_validates_an_explicit_revision_against_the_remote":
     let gitBin = findExe("git")
