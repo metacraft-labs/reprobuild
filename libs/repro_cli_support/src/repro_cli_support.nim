@@ -49949,14 +49949,42 @@ proc observedGitRemotes(identity: GitToolIdentity;
     result.add((name: name,
       url: (if url.code == 0: url.output.strip() else: "")))
 
+proc declaresExactPin(repo: ResolvedRepo): bool =
+  ## Does this fragment pin an exact commit, as opposed to tracking a branch?
+  ##
+  ## `branch` and `revision` are not alternatives once a fragment carries both:
+  ## `branch` says WHERE TO CLONE FROM and `revision` says WHERE TO SIT, and for
+  ## a vendored reference tree those are deliberately different — clone `main`,
+  ## then sit on the commit the consumer was built against. So a pin has to be
+  ## detected from `revision` ALONE. Reading it as "no pin, because a branch is
+  ## declared" is exactly the mistake that made this reconciler walk four
+  ## vendored trees off their pinned commits and onto whatever `main` had
+  ## reached.
+  ##
+  ## Both pin spellings count: a commit id, and a fully-qualified ref
+  ## (`refs/tags/v1`), which names one commit just as narrowly.
+  repo.revision.len > 0 and
+    (looksLikeSha(repo.revision) or repo.revision.startsWith("refs/"))
+
+proc pinnedCommitFor(identity: GitToolIdentity; repoAbs: string;
+                     repo: ResolvedRepo): string =
+  ## The commit `declaresExactPin` refers to, resolved against this checkout,
+  ## or "" when it cannot be resolved here (an unfetched tag). Callers must
+  ## treat "" as "I cannot confirm this checkout is at its pin", never as "it
+  ## has no pin" — the two have opposite consequences.
+  if not declaresExactPin(repo):
+    return ""
+  if looksLikeSha(repo.revision):
+    return repo.revision
+  revParse(identity, repoAbs, repo.revision)
+
 proc declaredBranchFor(repo: ResolvedRepo): string =
   ## The branch a detached checkout should land on, or "" when the fragment
   ## does not name one.
   ##
-  ## `branch` is authoritative because it can only ever hold a branch name.
-  ## `revision` is accepted as the unconverted spelling but only when its value
-  ## is branch-SHAPED: a commit id or a fully-qualified ref is a pin, and a pin
-  ## is precisely the case where a detached HEAD is CORRECT rather than stale.
+  ## Only consulted for a repo that `declaresExactPin` says is NOT pinned; a
+  ## pinned one is answered before this is reached, because for those the
+  ## declared branch is the clone source rather than the resting place.
   if repo.branch.len > 0:
     return repo.branch
   if repo.revision.len > 0 and not looksLikeSha(repo.revision) and
@@ -50134,6 +50162,46 @@ proc reconcileRepoLocalState(identity: GitToolIdentity;
       live.add((name: binding.localName, url: binding.fetchUrl))
 
   # ---- HEAD ----------------------------------------------------------------
+  #
+  # A pinned fragment is asking for a DETACHED HEAD at its pinned commit — that
+  # is what a pin is, and it is why the vendored reference trees sit detached.
+  # Answered BEFORE anything reads `branch`, because those fragments declare a
+  # branch too: it is the ref to clone, not the ref to rest on. Reading the
+  # branch first is what turned this reconciler into the "reference trees float
+  # off their pin" regression the retained pin exists to prevent.
+  let pinned = pinnedCommitFor(identity, repoAbs, repo)
+  if declaresExactPin(repo):
+    let head = localHeadOrEmpty(identity, repoAbs)
+    if head.len > 0 and pinned.len > 0 and
+        (head.startsWith(pinned) or pinned.startsWith(head)):
+      # Exactly where the manifest says it should be. Silent: a detached HEAD
+      # here is the steady state, not drift, and a reconciler that narrated it
+      # would report four repos on every merge forever.
+      return
+    let onBranch = gitRunPlain(identity,
+      ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
+    if onBranch.code == 0 and onBranch.output.strip().len > 0:
+      # Pinned, but somebody has deliberately put it on a branch. Left alone
+      # and left unmentioned, for the same reason every other attached checkout
+      # is: being on a branch is a human decision this verb does not overrule.
+      # "Is this repo at its pinned revision" is a real question, but it
+      # belongs to `sync` (which converges it) and `workspace status` (which
+      # reports it); answering it a second time from inside a post-merge hook
+      # would just add a voice that fires on every merge.
+      return
+    # Detached and NOT at the pin. Attaching would move it to the branch TIP —
+    # further from the pin, not closer — so this is the one case where the
+    # reconciler must say something and do nothing.
+    result.deferrals.add("HEAD is detached at " &
+      (if pinned.len == 0: "an unknown commit"
+       else: localHeadOrEmpty(identity, repoAbs)) &
+      " but the fragment pins " & repo.revision &
+      (if pinned.len == 0: " (which this checkout cannot resolve)" else: ""))
+    result.remedy = "run `repro workspace sync` to bring '" & repo.path &
+      "' back to its pinned revision; attaching it to a branch would move it " &
+      "further away"
+    return
+
   let attached = gitRunPlain(identity,
     ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
   if attached.code == 0 and attached.output.strip().len > 0:
