@@ -770,7 +770,7 @@ tests/integration/t_b0_repro_build_runquota_daemon.nim	nim	1
 tests/integration/t_b0_runquota_repro_nim_compiles.nim	nim	2
 tests/integration/t_b1_apps_action_cache_hit.nim	nim	1
 tests/integration/t_b1_repro_build_apps_byte_equivalent.nim	nim	3
-tests/integration/t_b1_repro_build_apps_collection.nim	nim	2
+tests/integration/t_b1_repro_build_apps_collection.nim	nim	3
 tests/integration/t_b2_helper_invalidation.nim	nim	1
 tests/integration/t_b2_helpers_built_by_engine.nim	nim	2
 tests/integration/t_b3_repro_test_runs_through_engine.nim	nim	2
