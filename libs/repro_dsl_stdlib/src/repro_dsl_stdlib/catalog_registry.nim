@@ -29,6 +29,16 @@
 
 import std/[options, sets]
 
+# PMC-1 (Platform-And-Microarchitecture-Constraints): the package-level
+# ``platforms:`` declaration lives on ``PackageDef``, which the ``package``
+# macro registers into ``repro_project_dsl``'s process-wide registry at module
+# init. Every ``packages/<tool>.nim`` this module imports below already pulls
+# ``repro_project_dsl`` in, so the direct import adds no weight — it only
+# brings ``declaredPackagePlatforms`` into scope so the resolver can ask this
+# module (the one place that guarantees the stdlib recipes are IMPORTED, and
+# therefore registered) where a package is allowed to exist.
+import repro_project_dsl
+
 import ./packages_schema
 import ./packages/jdk
 # M67 bulk-harvested catalogs. The Scoop bucket provenance and per-tool
@@ -337,6 +347,35 @@ proc getCatalog*(toolName: string):
   of "create-dmg":  selectIfNonEmpty(create_dmgCatalog)
   else:
     none(seq[VersionedProvisioning])
+
+proc packageAvailability*(packageId: string): PackageAvailability =
+  ## PMC-1: where is ``packageId`` DECLARED to exist?
+  ##
+  ## Reads the package-level ``platforms:`` block off the registered
+  ## ``PackageDef``. Returns ``declared = false`` when the package wrote no
+  ## such block, when the name is not a registered package, or when the
+  ## recipe module was never imported into this process — all three of which
+  ## must behave exactly as they did before PMC-1, so the resolver leaves the
+  ## adapter chain alone for them.
+  ##
+  ## Lookup is by DSL package name, the same key ``registeredPackages()``
+  ## uses. That is the name the ``uses:`` selector and the apply pipeline's
+  ## ``packageId`` already carry.
+  let declaration = declaredPackagePlatforms(packageId)
+  if not declaration.declared:
+    return PackageAvailability(declared: false)
+  result.declared = true
+  result.message = declaration.message
+  for constraint in declaration.platforms:
+    # The DSL stores the coordinate as the same token vocabulary the arm
+    # setters use; the resolver works in the schema enums. A token that fails
+    # to parse cannot reach here — the ``package`` macro rejects it at
+    # authoring time — but a defensive skip keeps a future vocabulary drift
+    # from turning into a package that is available nowhere.
+    let cpu = parsePlatformCpuToken(constraint.cpu)
+    let os = parsePlatformOsToken(constraint.os)
+    if cpu.ok and os.ok:
+      result.platforms.add(PackagePlatform(cpu: cpu.cpu, os: os.os))
 
 proc isRegistered*(toolName: string): bool =
   ## True when ``toolName`` has an entry in the registry, independent

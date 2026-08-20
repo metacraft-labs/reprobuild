@@ -195,6 +195,26 @@ type
     chain*: seq[CatalogAdapterKind]
     chainTrace*: seq[ChainStep]
 
+  EPackageUnavailableOnPlatform* = object of CatchableError
+    ## PMC-1 (Platform-And-Microarchitecture-Constraints): the package
+    ## DECLARED, via a package-level ``platforms:`` block, that it cannot
+    ## exist on this host.
+    ##
+    ## Distinct from ``EAdapterChainExhausted`` on purpose, and that is the
+    ## whole milestone. Chain-exhausted means "no adapter could supply this
+    ## package HERE, YET" and its remediation — catalogue it, put it on PATH,
+    ## reorder ``adapter_preference:`` — is advice a reader can act on. For a
+    ## Windows package manager on Linux every one of those is impossible, and
+    ## the old message sent the reader to add a Linux arm for a tool that has
+    ## no POSIX build. This error names the reason instead, and carries the
+    ## author's own ``msg`` when the declaration supplied one.
+    packageId*: string
+    declaredPlatforms*: string
+      ## Rendered form of the declaration, e.g. ``windows only``.
+    hostTarget*: string
+      ## Rendered form of the host, on the same axes, e.g. ``linux``.
+    authorMessage*: string
+
   ProductionCatalog* = object
     ## Per-apply catalog handle. Built once; the installed-app table
     ## and the bucket inventory are memoized so a multi-package apply
@@ -217,6 +237,75 @@ proc raiseUnknownPackage*(packageId: string;
     "adapter binding.")
   e.packageId = packageId
   e.searchedCatalogs = searched
+  raise e
+
+# ---------------------------------------------------------------------------
+# Host target detection
+# ---------------------------------------------------------------------------
+#
+# Declared here rather than beside the M64 built-in resolver because BOTH
+# resolution entry points (the legacy ``resolvePackage`` below and M65's
+# ``chainResolvePackage``) take the host target as a DEFAULTED PARAMETER, and
+# a default expression can only name something already declared. Keeping that
+# seam is a hard requirement of the Platform-And-Microarchitecture-Constraints
+# campaign: every platform test passes a SYNTHETIC host through these
+# parameters, so the suite runs identically on any machine. Do not convert
+# them into a global lookup.
+
+proc detectHostCpu*(): PlatformCpu =
+  ## Map the Nim `hostCPU` token to the schema's `PlatformCpu` enum.
+  ## Unknown CPUs fall through to `pcAny` (the realize loop will then
+  ## look for an arch-independent slice; if none exists,
+  ## `selectPlatformBinary` reports `found=false`).
+  when defined(amd64) or defined(x86_64):
+    pcX86_64
+  elif defined(arm64) or defined(aarch64):
+    pcAArch64
+  elif defined(i386) or defined(i686) or defined(x86):
+    pcX86
+  else:
+    pcAny
+
+proc detectHostOs*(): PlatformOs =
+  when defined(windows):
+    poWindows
+  elif defined(linux):
+    poLinux
+  elif defined(macosx) or defined(osx):
+    poMacos
+  else:
+    poAny
+
+proc raisePackageUnavailableOnPlatform*(packageId: string;
+                                        availability: PackageAvailability;
+                                        hostCpu: PlatformCpu;
+                                        hostOs: PlatformOs) {.noreturn.} =
+  ## PMC-1: the package declared where it can exist and this host is not in
+  ## that set. The message NAMES the reason — "chocolatey is declared for
+  ## windows only; this host is linux" — because the remediation for a
+  ## declared unavailability is categorically different from the remediation
+  ## for a missing catalog entry, and the reader cannot tell the two apart
+  ## from a chain trace.
+  ##
+  ## The advice deliberately does NOT mention PATH. Putting a same-named
+  ## binary on PATH is exactly the silent-wrong-thing this milestone closes:
+  ## it would resolve to something nobody declared.
+  let declared = availability.describeDeclaredPlatforms()
+  let host = availability.describeHostTarget(hostCpu, hostOs)
+  var text = packageId & " is declared for " & declared &
+    "; this host is " & host & "."
+  if availability.message.len > 0:
+    text.add(" " & availability.message)
+  text.add(" This is a declared platform constraint (`platforms:` on the " &
+    "package), not a missing catalog entry: no adapter can supply it here. " &
+    "Guard the dependency at the point of use (`when defined(windows):` " &
+    "around the `uses:` entry) if it is genuinely optional, or widen the " &
+    "package's `platforms:` if it really does exist on this platform.")
+  var e = newException(EPackageUnavailableOnPlatform, text)
+  e.packageId = packageId
+  e.declaredPlatforms = declared
+  e.hostTarget = host
+  e.authorMessage = availability.message
   raise e
 
 # ---------------------------------------------------------------------------
@@ -588,7 +677,10 @@ proc resolvePathPackage(packageId: string; searched: var seq[string];
   (true, r)
 
 proc resolvePackage*(cat: var ProductionCatalog; packageId: string;
-                     binaries: seq[string] = @[]):
+                     binaries: seq[string] = @[];
+                     hostCpu = detectHostCpu();
+                     hostOs = detectHostOs();
+                     availability = none(PackageAvailability)):
     CatalogResolution =
   ## Resolve one `PlannedPackage` reference against the production
   ## catalog. Raises `EUnknownPackage` (naming the package and the
@@ -597,6 +689,23 @@ proc resolvePackage*(cat: var ProductionCatalog; packageId: string;
   ## Resolution order on Windows:
   ##   1. installed Scoop app (`scoop list`) — cache-hit candidate.
   ##   2. available in a configured Scoop bucket — realize via Scoop.
+  ##
+  ## PMC-1: raises ``EPackageUnavailableOnPlatform`` first when the package
+  ## declared a ``platforms:`` set this host is not in. This entry point
+  ## needs the gate as much as ``chainResolvePackage`` does — arguably more.
+  ## It is the LEGACY path the realize dispatcher takes for a package with no
+  ## built-in catalog registration (``useChain`` is false in
+  ## ``realizeViaProductionCatalog``), which is exactly the shape a
+  ## DSL-``tarball`` package like ``chocolatey`` has; and both of its exits
+  ## end at ``resolvePathPackage``. Gating only the chain would have left the
+  ## fallthrough-to-PATH hole open on the path that a declared-unavailable
+  ## package actually takes.
+  let declaredAvailability =
+    if availability.isSome: availability.get
+    else: packageAvailability(packageId)
+  if not declaredAvailability.isAvailableOn(hostCpu, hostOs):
+    raisePackageUnavailableOnPlatform(packageId, declaredAvailability,
+      hostCpu, hostOs)
   result.packageId = packageId
   result.adapter = cakPath
   result.app = packageId
@@ -720,30 +829,6 @@ type
     resolution*: CatalogResolution
     error*: BuiltinResolveError
     errorDetail*: string
-
-proc detectHostCpu*(): PlatformCpu =
-  ## Map the Nim `hostCPU` token to the schema's `PlatformCpu` enum.
-  ## Unknown CPUs fall through to `pcAny` (the realize loop will then
-  ## look for an arch-independent slice; if none exists,
-  ## `selectPlatformBinary` reports `found=false`).
-  when defined(amd64) or defined(x86_64):
-    pcX86_64
-  elif defined(arm64) or defined(aarch64):
-    pcAArch64
-  elif defined(i386) or defined(i686) or defined(x86):
-    pcX86
-  else:
-    pcAny
-
-proc detectHostOs*(): PlatformOs =
-  when defined(windows):
-    poWindows
-  elif defined(linux):
-    poLinux
-  elif defined(macosx) or defined(osx):
-    poMacos
-  else:
-    poAny
 
 proc resolveBuiltinPackage*(packageId: string;
                             catalog: openArray[VersionedProvisioning];
@@ -1136,7 +1221,8 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
                           version = "";
                           binaries: seq[string] = @[];
                           hostCpu = detectHostCpu();
-                          hostOs = detectHostOs()):
+                          hostOs = detectHostOs();
+                          availability = none(PackageAvailability)):
     CatalogResolution =
   ## M65: the production adapter selection chain. Walks ``chain`` in
   ## order, returning the first adapter's resolution. When ``chain`` is
@@ -1146,10 +1232,31 @@ proc chainResolvePackage*(cat: var ProductionCatalog;
   ## Raises ``EAdapterChainExhausted`` if every adapter in the chain
   ## was tried and none resolved.
   ##
+  ## PMC-1: raises ``EPackageUnavailableOnPlatform`` BEFORE walking the
+  ## chain when the package declared a ``platforms:`` set this host is not
+  ## in. ``availability`` overrides the registry lookup; leave it ``none``
+  ## in production and pass a synthetic value in tests that need a
+  ## declaration without a registered recipe.
+  ##
   ## The returned ``CatalogResolution.chainTrace`` carries one entry
   ## per adapter consulted, in order, with the per-adapter outcome +
   ## skip reason (the final entry on a hit has
   ## ``outcome == csoResolved`` — the others are skip reasons).
+  # PMC-1: declared availability is consulted BEFORE the adapter chain.
+  #
+  # Ordering is the substance of the deliverable, not a detail. The last
+  # adapter in every default chain is ``cakPath``, which probes the host's
+  # PATH for a same-named executable — so a package that cannot exist here
+  # did not merely fail with a confusing message, it could RESOLVE, to an
+  # undeclared binary that happened to share the name. That looks like
+  # success. Gating in front of the loop is what makes ``cakPath``
+  # unreachable for a package known to be unavailable.
+  let declaredAvailability =
+    if availability.isSome: availability.get
+    else: packageAvailability(packageId)
+  if not declaredAvailability.isAvailableOn(hostCpu, hostOs):
+    raisePackageUnavailableOnPlatform(packageId, declaredAvailability,
+      hostCpu, hostOs)
   let effective =
     if chain.len == 0: defaultAdapterChain()
     else: chain

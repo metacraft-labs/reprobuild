@@ -413,6 +413,148 @@ proc runtimeLibraryMatchesHost*(lib: RuntimeLibraryDef;
     (hostOsNorm == "darwin" and osNorm == "macos")
   cpuOk and osOk
 
+# ---------------------------------------------------------------------------
+# PMC-1 — package-level ``platforms:`` (declared availability)
+# ---------------------------------------------------------------------------
+#
+# These are plain (non-``dynOrStatic``) procs on purpose: the ``package``
+# macro's arm lint calls them at COMPILE time from the Nim VM, and a
+# ``dynOrStatic`` proc has its body replaced by ``discard`` in the dynamic
+# provider mode, which the VM cannot execute. They are also cheap and pure,
+# so there is nothing to gain from routing them through the shared DLL.
+
+const
+  KnownPlatformCpuTokens* = ["any", "x86_64", "aarch64", "x86"]
+    ## PMC-1: the CPU vocabulary a ``platforms:`` entry may name. The same
+    ## four the ``PlatformCpu`` enum carries — microarchitecture levels
+    ## (``x86-64-v2``…) are PMC-2 and are NOT accepted here, so an author who
+    ## writes one gets a refusal now rather than a silently-ignored token.
+  KnownPlatformOsTokens* = ["any", "windows", "linux", "macos", "darwin"]
+    ## PMC-1: the OS vocabulary. ``darwin`` is an accepted alias of ``macos``
+    ## because the per-arm ``os =`` setter accepts both and a second spelling
+    ## rule would be a trap.
+
+proc canonicalPlatformOsToken*(text: string): string =
+  ## Fold the accepted OS spellings onto one. ``darwin`` -> ``macos``.
+  let lowered = text.toLowerAscii()
+  if lowered == "darwin" or lowered == "osx": "macos" else: lowered
+
+proc canonicalPlatformCpuToken*(text: string): string =
+  let lowered = text.toLowerAscii()
+  case lowered
+  of "amd64", "x64": "x86_64"
+  of "arm64": "aarch64"
+  of "i386", "i686": "x86"
+  else: lowered
+
+proc parsePlatformConstraintToken*(text: string):
+    tuple[ok: bool; cpu: string; os: string] =
+  ## Parse one ``platforms:`` entry into its (cpu, os) coordinate.
+  ##
+  ## Accepts a bare OS token (``windows``), a bare CPU token
+  ## (``aarch64``), or a ``<cpu>-<os>`` pair (``x86_64-windows``). Empty
+  ## strings mean "any" on that axis. Kept in lockstep with
+  ## ``repro_dsl_stdlib/packages_schema.parsePackagePlatformToken``, which
+  ## is the same grammar on the resolver side; the two are separate because
+  ## the DSL layer must not depend on the stdlib layer.
+  let trimmed = text.strip()
+  let cut = trimmed.rfind('-')
+  if cut > 0 and cut + 1 < trimmed.len:
+    let cpuPart = canonicalPlatformCpuToken(trimmed[0 ..< cut])
+    let osPart = canonicalPlatformOsToken(trimmed[cut + 1 .. ^1])
+    if cpuPart in KnownPlatformCpuTokens and osPart in KnownPlatformOsTokens:
+      return (true, cpuPart, osPart)
+  let asOs = canonicalPlatformOsToken(trimmed)
+  if asOs.len > 0 and asOs != "any" and asOs in KnownPlatformOsTokens:
+    return (true, "any", asOs)
+  let asCpu = canonicalPlatformCpuToken(trimmed)
+  if asCpu.len > 0 and asCpu != "any" and asCpu in KnownPlatformCpuTokens:
+    return (true, asCpu, "any")
+  if trimmed.len == 0 or trimmed.toLowerAscii() == "any":
+    return (true, "any", "any")
+  (false, "", "")
+
+proc platformConstraintMatchesHost*(constraint: PlatformConstraintDef;
+                                    hostCpu, hostOs: string): bool =
+  ## Does ``(hostCpu, hostOs)`` fall inside one declared coordinate?
+  ## Empty / ``any`` on either side matches, for the same fail-open reason
+  ## ``runtimeLibraryMatchesHost`` gives.
+  let cpuNorm = canonicalPlatformCpuToken(constraint.cpu)
+  let hostCpuNorm = canonicalPlatformCpuToken(hostCpu)
+  let cpuOk = cpuNorm.len == 0 or cpuNorm == "any" or
+    hostCpuNorm.len == 0 or hostCpuNorm == "any" or cpuNorm == hostCpuNorm
+  let osNorm = canonicalPlatformOsToken(constraint.os)
+  let hostOsNorm = canonicalPlatformOsToken(hostOs)
+  let osOk = osNorm.len == 0 or osNorm == "any" or
+    hostOsNorm.len == 0 or hostOsNorm == "any" or osNorm == hostOsNorm
+  cpuOk and osOk
+
+proc inferredPackagePlatforms*(pkg: PackageDef): seq[PlatformConstraintDef] =
+  ## PMC-1's DEFAULT: "wherever an arm exists".
+  ##
+  ## This reproduces, as an explicit value, the rule that was previously only
+  ## implicit — a package's availability was whatever set of provisioning arms
+  ## happened to be written. A ``nixPackage`` arm carries no platform of its
+  ## own and therefore contributes ``any``; a ``scoopApp`` arm is Windows by
+  ## construction; a ``tarball`` arm contributes its own ``cpu`` / ``os``
+  ## (empty = any). A package with no arms at all infers ``any``.
+  ##
+  ## It is NOT what the resolver gates on — see
+  ## ``PackageAvailability.declared``. An inference is a good default for a
+  ## lint and a bad basis for a refusal.
+  # The stored arm fields hold emittable SOURCE (see ``exprCode``): a literal
+  # arrives quoted, an expression arrives as its Nim text. Only a literal is
+  # knowable here; anything else widens to ``any``, which is the honest answer
+  # for a value this layer cannot evaluate.
+  proc literalOf(code: string): string =
+    if code.len >= 2 and code[0] == '"' and code[^1] == '"':
+      try:
+        result = code.unescape()
+      except CatchableError:
+        result = ""
+    else:
+      result = ""
+  proc addPlatform(res: var seq[PlatformConstraintDef]; cpu, os: string) =
+    let c = if cpu.len == 0: "any" else: cpu
+    let o = if os.len == 0: "any" else: os
+    for existing in res:
+      if existing.cpu == c and existing.os == o:
+        return
+    res.add(PlatformConstraintDef(cpu: c, os: o))
+  for _ in pkg.nixProvisioning:
+    addPlatform(result, "any", "any")
+  for _ in pkg.scoopProvisioning:
+    addPlatform(result, "any", "windows")
+  for arm in pkg.tarballProvisioning:
+    addPlatform(result,
+      canonicalPlatformCpuToken(literalOf(arm.cpu)),
+      canonicalPlatformOsToken(literalOf(arm.os)))
+  if result.len == 0:
+    addPlatform(result, "any", "any")
+
+proc effectivePackagePlatforms*(pkg: PackageDef): seq[PlatformConstraintDef] =
+  ## The declared set when the package declared one, the inferred set
+  ## otherwise. The single place that spells out "defaults to wherever an arm
+  ## exists".
+  if pkg.platformsDeclared: pkg.declaredPlatforms
+  else: inferredPackagePlatforms(pkg)
+
+proc declaredPackagePlatforms*(packageName: string):
+    tuple[declared: bool; platforms: seq[PlatformConstraintDef];
+          message: string] =
+  ## PMC-1 registry accessor: the explicit ``platforms:`` declaration for
+  ## ``packageName``, or ``declared = false`` when the package did not write
+  ## one (or is not registered in this process at all).
+  ##
+  ## Fail-open on an unregistered name is deliberate: the resolver consults
+  ## this before walking the adapter chain, and a package whose recipe module
+  ## simply was not imported must keep resolving the way it did before PMC-1
+  ## rather than become unavailable everywhere.
+  for pkg in registry:
+    if pkg.packageName == packageName and pkg.platformsDeclared:
+      return (true, pkg.declaredPlatforms, pkg.platformsMessage)
+  (false, @[], "")
+
 proc selectRuntimeLibraries*(packageName, hostCpu, hostOs: string):
     seq[RuntimeLibraryDef] {.dynOrStatic.} =
   ## The declarations that apply to the given host, in source order.

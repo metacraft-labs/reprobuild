@@ -175,6 +175,45 @@ type
     poLinux = "linux"
     poMacos = "macos"
 
+  PackagePlatform* = object
+    ## PMC-1 (Platform-And-Microarchitecture-Constraints spec,
+    ## Package-Model.md §"Proposed shape"): ONE coordinate of a
+    ## package-level ``platforms:`` declaration — the COARSE axis only
+    ## (OS, plus CPU family). Microarchitecture levels and feature sets
+    ## are PMC-2 / PMC-3 and deliberately absent here.
+    ##
+    ## Distinct from ``PlatformBinary``, which says "here is the
+    ## artifact for this (cpu, os)". This says "the package can EXIST
+    ## on this (cpu, os)" — availability, not provisioning. Nix keeps
+    ## the same split (``meta.platforms`` vs the per-system derivation)
+    ## and so does Spack (``requires("platform=…")`` vs
+    ## ``depends_on(…, when=…)``).
+    cpu*: PlatformCpu
+    os*: PlatformOs
+
+  PackageAvailability* = object
+    ## PMC-1: the answer to "where can this package exist?" for one
+    ## package.
+    ##
+    ## ``declared`` is the load-bearing field. It is ``true`` ONLY when
+    ## the package wrote an explicit ``platforms:`` block. When it is
+    ## ``false`` the ``platforms`` seq still carries the set INFERRED
+    ## from whichever provisioning arms happen to exist (the status quo
+    ## before PMC-1: availability was never stated, only inferred), but
+    ## the resolver treats an undeclared package exactly as it did
+    ## before — it does NOT gate on an inference. Gating on a guess
+    ## would change how existing catalog entries resolve, which PMC-1
+    ## explicitly forbids; PMC-5 converts the inferences into
+    ## declarations one entry at a time, and each conversion is what
+    ## turns the gate on for that entry.
+    declared*: bool
+    platforms*: seq[PackagePlatform]
+    message*: string
+      ## Optional author-supplied reason, the equivalent of Spack's
+      ## ``requires(…, msg="…")``. Rendered verbatim in the
+      ## unavailable-package diagnostic so the author's knowledge
+      ## reaches the reader instead of being guessed at.
+
   PlatformBinary* = object
     ## Per-(cpu, os) download slice: one URL + one digest + one
     ## extract-path. The ``extract_path`` is the inner directory the
@@ -687,6 +726,134 @@ proc validateCatalog*(entries: openArray[VersionedProvisioning]):
   var warnings: seq[string] = @[]
   result = validateCatalogEx(entries, warnings)
   for w in warnings: logSchemaWarning("WSchema: " & w)
+
+# ---------------------------------------------------------------------------
+# PMC-1 — declared package availability (the COARSE axis)
+# ---------------------------------------------------------------------------
+#
+# The token vocabulary is deliberately the SAME one the per-arm ``cpu =`` /
+# ``os =`` setters already accept, so a reader does not have to learn a second
+# spelling of "windows". ``darwin`` is accepted as an alias of ``macos``
+# because the DSL's arm parser accepts both.
+
+proc parsePlatformCpuToken*(token: string):
+    tuple[ok: bool; cpu: PlatformCpu] =
+  ## Map a ``platforms:`` CPU token onto ``PlatformCpu``. Empty or
+  ## ``any`` means "every CPU family".
+  case token.toLowerAscii()
+  of "", "any":     (true, pcAny)
+  of "x86_64", "amd64", "x64": (true, pcX86_64)
+  of "aarch64", "arm64":       (true, pcAArch64)
+  of "x86", "i386", "i686":    (true, pcX86)
+  else:             (false, pcAny)
+
+proc parsePlatformOsToken*(token: string):
+    tuple[ok: bool; os: PlatformOs] =
+  ## Map a ``platforms:`` OS token onto ``PlatformOs``. Empty or ``any``
+  ## means "every OS".
+  case token.toLowerAscii()
+  of "", "any":            (true, poAny)
+  of "windows", "win":     (true, poWindows)
+  of "linux":              (true, poLinux)
+  of "macos", "darwin", "osx": (true, poMacos)
+  else:                    (false, poAny)
+
+proc parsePackagePlatformToken*(token: string):
+    tuple[ok: bool; platform: PackagePlatform] =
+  ## Parse ONE ``platforms:`` entry. Two shapes are accepted:
+  ##
+  ##   * a bare OS or CPU token — ``windows``, ``linux``, ``aarch64``;
+  ##   * a ``<cpu>-<os>`` pair — ``x86_64-windows``, ``aarch64-linux``.
+  ##
+  ## The bare form is the common case and reads as the milestone writes
+  ## it (``platforms: [windows]``); the paired form is what a package
+  ## available on only one architecture of one OS needs. A bare token is
+  ## resolved against the OS vocabulary first and the CPU vocabulary
+  ## second, so ``windows`` means "any CPU, Windows" and ``aarch64``
+  ## means "aarch64, any OS".
+  let trimmed = token.strip()
+  let cut = trimmed.rfind('-')
+  if cut > 0 and cut + 1 < trimmed.len:
+    let cpuPart = parsePlatformCpuToken(trimmed[0 ..< cut])
+    let osPart = parsePlatformOsToken(trimmed[cut + 1 .. ^1])
+    if cpuPart.ok and osPart.ok:
+      return (true, PackagePlatform(cpu: cpuPart.cpu, os: osPart.os))
+  let asOs = parsePlatformOsToken(trimmed)
+  if asOs.ok and trimmed.len > 0 and trimmed.toLowerAscii() != "any":
+    return (true, PackagePlatform(cpu: pcAny, os: asOs.os))
+  let asCpu = parsePlatformCpuToken(trimmed)
+  if asCpu.ok and trimmed.len > 0 and trimmed.toLowerAscii() != "any":
+    return (true, PackagePlatform(cpu: asCpu.cpu, os: poAny))
+  if trimmed.len == 0 or trimmed.toLowerAscii() == "any":
+    return (true, PackagePlatform(cpu: pcAny, os: poAny))
+  (false, PackagePlatform())
+
+proc platformMatchesHost*(p: PackagePlatform;
+                          hostCpu: PlatformCpu; hostOs: PlatformOs): bool =
+  ## Does a host at ``(hostCpu, hostOs)`` fall inside coordinate ``p``?
+  ##
+  ## ``pcAny`` / ``poAny`` on EITHER side match. On the declaration side
+  ## that is the point of the token. On the host side it is fail-open:
+  ## ``detectHostCpu`` reports ``pcAny`` for a CPU it does not recognise,
+  ## and refusing to resolve on an unrecognised host would turn a
+  ## detection gap into an outage.
+  (p.cpu == pcAny or hostCpu == pcAny or p.cpu == hostCpu) and
+  (p.os == poAny or hostOs == poAny or p.os == hostOs)
+
+proc isAvailableOn*(availability: PackageAvailability;
+                    hostCpu: PlatformCpu; hostOs: PlatformOs): bool =
+  ## True when the host satisfies at least one declared coordinate.
+  ##
+  ## An UNDECLARED package is available everywhere: PMC-1 gates only on
+  ## what an author actually wrote (see ``PackageAvailability.declared``).
+  ## An empty declared list is likewise treated as unconstrained rather
+  ## than as "nowhere" — refusing every host on an empty list would turn
+  ## a typo into a fleet-wide outage.
+  if not availability.declared or availability.platforms.len == 0:
+    return true
+  for p in availability.platforms:
+    if platformMatchesHost(p, hostCpu, hostOs):
+      return true
+  false
+
+proc constrainsCpu*(availability: PackageAvailability): bool =
+  ## True when at least one declared coordinate names a CPU family.
+  ## Drives whether the diagnostic reports the host as ``linux`` or as
+  ## ``x86_64-linux`` — naming an axis the declaration never mentions
+  ## invites the reader to go looking for a CPU problem that is not
+  ## there.
+  for p in availability.platforms:
+    if p.cpu != pcAny:
+      return true
+  false
+
+proc describePlatform*(p: PackagePlatform): string =
+  if p.cpu == pcAny and p.os == poAny: "any"
+  elif p.cpu == pcAny: $p.os
+  elif p.os == poAny: $p.cpu
+  else: $p.cpu & "-" & $p.os
+
+proc describeDeclaredPlatforms*(availability: PackageAvailability): string =
+  ## Human phrasing of the declared set, for the diagnostic. A single
+  ## OS-only coordinate renders as ``windows only`` so the sentence in
+  ## the milestone ("chocolatey is declared for windows only") comes out
+  ## verbatim; anything richer renders as a bracketed list.
+  if availability.platforms.len == 0:
+    return "no platform"
+  if availability.platforms.len == 1:
+    return describePlatform(availability.platforms[0]) & " only"
+  var parts: seq[string] = @[]
+  for p in availability.platforms:
+    parts.add(describePlatform(p))
+  "[" & parts.join(", ") & "]"
+
+proc describeHostTarget*(availability: PackageAvailability;
+                         hostCpu: PlatformCpu; hostOs: PlatformOs): string =
+  ## Human phrasing of the host, on the same axes the declaration uses.
+  if availability.constrainsCpu():
+    $hostCpu & "-" & $hostOs
+  else:
+    $hostOs
 
 # ---------------------------------------------------------------------------
 # Per-platform resolution

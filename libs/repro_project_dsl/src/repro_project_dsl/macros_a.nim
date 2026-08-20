@@ -1647,6 +1647,235 @@ proc m9r15pAutoInjectQt6Transitive(pkg: var PackageDef) =
       gateVariant: "",
       gateValue: ""))
 
+proc platformTokenText(node: NimNode): string =
+  ## The spelling of one ``platforms:`` entry.
+  ##
+  ## Three node shapes reach here and all three are the SAME token to a
+  ## reader:
+  ##
+  ##   * ``[windows]``            — an ident; the form the milestone writes;
+  ##   * ``[x86_64-windows]``     — Nim parses the hyphen as an infix ``-``,
+  ##     so the node is an ``nnkInfix`` tree that has to be folded back into
+  ##     the spelling the author typed. Refusing it would mean the paired
+  ##     form could only ever be written quoted, which reads worse than the
+  ##     bare form beside it and would be a trap nobody expects;
+  ##   * ``["x86_64-windows"]``   — a string literal; the escape hatch for
+  ##     any token that is not a legal Nim expression.
+  case node.kind
+  of nnkStrLit..nnkTripleStrLit: node.strVal
+  of nnkIdent, nnkSym: $node
+  of nnkInfix:
+    if node.len == 3 and node[0].eqIdent("-"):
+      let lhs = platformTokenText(node[1])
+      let rhs = platformTokenText(node[2])
+      if lhs.len > 0 and rhs.len > 0: lhs & "-" & rhs else: ""
+    else:
+      ""
+  else: ""
+
+proc concatenatedStrLit(node: NimNode): tuple[ok: bool; text: string] =
+  ## A string literal, or a chain of them joined with ``&``.
+  ##
+  ## ``requireStrLit`` alone would be right in principle — the macro reads the
+  ## text at compile time and cannot evaluate an expression — but it would
+  ## force every ``msg =`` onto one unwrapped line, and a diagnostic message
+  ## is exactly the field an author wants to write in prose. Folding a
+  ## literal-only ``&`` chain here keeps the compile-time guarantee and lets
+  ## the source wrap.
+  if node.isStrLit:
+    return (true, node.strVal)
+  if node.kind == nnkInfix and node.len == 3 and node[0].eqIdent("&"):
+    let lhs = concatenatedStrLit(node[1])
+    if lhs.ok:
+      let rhs = concatenatedStrLit(node[2])
+      if rhs.ok:
+        return (true, lhs.text & rhs.text)
+  (false, "")
+
+proc parsePlatformsSection(stmt: NimNode; pkg: var PackageDef) =
+  ## PMC-1 — parse a package-level ``platforms:`` declaration.
+  ##
+  ## Three shapes are accepted, all of which reach here as the ``platforms``
+  ## section head:
+  ##
+  ##   platforms: [windows]
+  ##   platforms: [x86_64-windows, aarch64-windows]
+  ##   platforms:
+  ##     [windows]
+  ##     msg = "Chocolatey is a Windows package manager; it has no " &
+  ##       "POSIX build."
+  ##   platforms [windows], msg = "…"
+  ##
+  ## ``msg`` mirrors Spack's ``requires(…, msg=…)``: it lets the author state
+  ## the reason, which is the one thing the resolver cannot infer and the
+  ## reason PMC-1's diagnostic exists at all.
+  var bracket: NimNode = nil
+  var message = ""
+  var sawMessage = false
+
+  proc takeMessage(valueNode: NimNode) =
+    if sawMessage:
+      error("platforms: msg may be given only once", valueNode)
+    let folded = concatenatedStrLit(valueNode)
+    if not folded.ok:
+      error("platforms: msg must be a string literal (or a `&` chain of " &
+        "them): it is baked into the diagnostic at compile time and the " &
+        "macro cannot evaluate an expression here", valueNode)
+    message = folded.text
+    sawMessage = true
+
+  proc consume(node: NimNode) =
+    case node.kind
+    of nnkBracket:
+      if not bracket.isNil:
+        error("platforms: expects exactly one [...] list", node)
+      bracket = node
+    of nnkPrefix:
+      # ``@[windows]`` — accepted so the list reads the same as every other
+      # seq literal in the DSL.
+      if node.len == 2 and node[0].eqIdent("@"):
+        consume(node[1])
+      else:
+        error("unsupported platforms: entry: " & node.repr, node)
+    of nnkExprEqExpr, nnkAsgn:
+      if identText(node[0]).normalize in ["msg", "message", "reason"]:
+        takeMessage(node[1])
+      else:
+        error("platforms: accepts only `msg = \"...\"` alongside the list; " &
+          "got `" & identText(node[0]) & "`", node)
+    of nnkStmtList:
+      for child in node:
+        if child.kind == nnkCommentStmt:
+          continue
+        consume(child)
+    of nnkCommentStmt:
+      discard
+    else:
+      error("platforms: expects a [...] list of platform tokens, e.g. " &
+        "`platforms: [windows]`; got " & node.repr, node)
+
+  for i in 1 ..< stmt.len:
+    consume(stmt[i])
+  if bracket.isNil:
+    error("platforms: requires a list, e.g. `platforms: [windows]`", stmt)
+
+  pkg.platformsDeclared = true
+  pkg.platformsMessage = message
+  for entry in bracket:
+    let token = platformTokenText(entry)
+    if token.len == 0:
+      error("platforms: entries must be identifiers or string literals " &
+        "(the macro reads them at compile time and cannot evaluate an " &
+        "expression here); got " & entry.repr, entry)
+    let parsed = parsePlatformConstraintToken(token)
+    if not parsed.ok:
+      error("unknown platform token '" & token & "' in platforms:. " &
+        "Expected an OS (" & KnownPlatformOsTokens.join(" | ") & "), a CPU " &
+        "family (" & KnownPlatformCpuTokens.join(" | ") & "), or a " &
+        "<cpu>-<os> pair such as x86_64-windows. Microarchitecture levels " &
+        "(x86-64-v2, …) are not part of this axis.", entry)
+    var constraint = PlatformConstraintDef(cpu: parsed.cpu, os: parsed.os)
+    let entryLoc = lineFile(entry)
+    constraint.sourceFile = entryLoc.file
+    constraint.sourceLine = entryLoc.line
+    for existing in pkg.declaredPlatforms:
+      if existing.cpu == constraint.cpu and existing.os == constraint.os:
+        error("duplicate platform '" & token & "' in platforms:", entry)
+    pkg.declaredPlatforms.add(constraint)
+  if pkg.declaredPlatforms.len == 0:
+    error("platforms: must name at least one platform. An empty list would " &
+      "declare a package that can exist nowhere, which is never what an " &
+      "author means; delete the block to leave availability inferred from " &
+      "the provisioning arms.", stmt)
+
+proc lintArmsAgainstDeclaredPlatforms(body: NimNode; pkg: PackageDef) =
+  ## PMC-1 lint: an arm whose ``os =`` / ``cpu =`` falls outside the declared
+  ## ``platforms:`` is a typo, and before PMC-1 nothing could catch it — a
+  ## Windows-only package carrying an ``os = "linux"`` tarball produced no
+  ## diagnostic anywhere, it just silently offered an arm no consumer of that
+  ## package could ever legitimately select.
+  ##
+  ## Only LITERAL ``cpu`` / ``os`` values are checked. An expression is not
+  ## knowable at macro time and is skipped rather than rejected, the same rule
+  ## ``litText`` documents for every other macro-time whitelist.
+  if not pkg.platformsDeclared:
+    return
+
+  proc declaredCovers(cpuText, osText: string): bool =
+    let constraint = PlatformConstraintDef(
+      cpu: canonicalPlatformCpuToken(cpuText),
+      os: canonicalPlatformOsToken(osText))
+    # An arm is inside the declaration when SOME declared coordinate covers
+    # it. ``platformConstraintMatchesHost`` asks the same question with the
+    # roles swapped (does this host fall inside this coordinate?), and the
+    # arm's own (cpu, os) is exactly a host coordinate.
+    for declared in pkg.declaredPlatforms:
+      if platformConstraintMatchesHost(declared, constraint.cpu, constraint.os):
+        return true
+    false
+
+  proc describeDeclared(): string =
+    var parts: seq[string] = @[]
+    for declared in pkg.declaredPlatforms:
+      if declared.cpu == "any" and declared.os == "any": parts.add("any")
+      elif declared.cpu == "any": parts.add(declared.os)
+      elif declared.os == "any": parts.add(declared.cpu)
+      else: parts.add(declared.cpu & "-" & declared.os)
+    "[" & parts.join(", ") & "]"
+
+  proc checkEntry(entry: NimNode; what: string) =
+    var cpuText = ""
+    var osText = ""
+    for i in 1 ..< entry.len:
+      let cpuValue = namedValue(entry[i], "cpu")
+      if not cpuValue.isNil: cpuText = litText(cpuValue)
+      let osValue = namedValue(entry[i], "os")
+      if not osValue.isNil: osText = litText(osValue)
+      # ``tarball(url = …, os = "linux")`` reaches here as a call whose
+      # arguments are nnkExprEqExpr children of a nnkPar / nnkCall node.
+      if entry[i].kind in {nnkPar, nnkCall, nnkCommand}:
+        for j in 0 ..< entry[i].len:
+          let nestedCpu = namedValue(entry[i][j], "cpu")
+          if not nestedCpu.isNil: cpuText = litText(nestedCpu)
+          let nestedOs = namedValue(entry[i][j], "os")
+          if not nestedOs.isNil: osText = litText(nestedOs)
+    if cpuText.len == 0 and osText.len == 0:
+      return
+    if declaredCovers(cpuText, osText):
+      return
+    let armDesc =
+      (if cpuText.len > 0: "cpu = \"" & cpuText & "\"" else: "") &
+      (if cpuText.len > 0 and osText.len > 0: ", " else: "") &
+      (if osText.len > 0: "os = \"" & osText & "\"" else: "")
+    error("package '" & pkg.packageName & "' declares platforms: " &
+      describeDeclared() & ", but this " & what & " arm targets " & armDesc &
+      ", which is outside it. Either widen platforms: or fix the arm — an " &
+      "arm no declared platform can select is unreachable, and before PMC-1 " &
+      "nothing said so.", entry)
+
+  for stmt in body:
+    if calleeName(stmt).normalize != "provisioning":
+      continue
+    if stmt.len < 2:
+      continue
+    let armBody = stmt[stmt.len - 1]
+    if armBody.kind != nnkStmtList:
+      continue
+    for entry in armBody:
+      let armName = calleeName(entry).normalize
+      case armName
+      of "tarball":
+        checkEntry(entry, "tarball")
+      of "scoopapp", "scooppackage":
+        # A Scoop arm is Windows by construction; it carries no ``os =``.
+        if not declaredCovers("", "windows"):
+          error("package '" & pkg.packageName & "' declares platforms: " &
+            describeDeclared() & ", but a scoopApp arm is Windows-only by " &
+            "construction. Either widen platforms: to include windows or " &
+            "drop the arm.", entry)
+      else:
+        discard
+
 proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
   let loc = lineFile(name)
   result.packageName = identText(name)
@@ -1678,6 +1907,14 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       # available as a default that artifacts inherit and may override."
       result.lockFile = parseLockFileDesignation(stmt,
         "package " & result.packageName)
+    elif calleeName(stmt).normalize == "platforms":
+      # PMC-1: package-level declared availability. Parsed here so the
+      # ``platforms:`` fields land on the same ``PackageDef`` the registry
+      # already carries; the arm lint runs once at the end, after every
+      # provisioning arm has been collected.
+      if result.platformsDeclared:
+        error("platforms: may be declared only once per package", stmt)
+      parsePlatformsSection(stmt, result)
     elif calleeName(stmt).normalize == "uses":
       for i in 1 ..< stmt.len:
         collectUses(stmt[i], @[], result.toolUses)
@@ -1803,6 +2040,11 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       # ``$out-doc`` / ``$out-dev``). Empty / absent ``outputs:``
       # keeps legacy single-output behavior.
       parseOutputsBlock(result.packageName, stmt, result.outputs)
+  # PMC-1 lint: every provisioning arm must fall inside the declared
+  # ``platforms:``. Runs after the section loop so it sees every arm
+  # regardless of the order the author wrote the blocks in. Inert for the
+  # ~262 stdlib entries that declare nothing.
+  lintArmsAgainstDeclaredPlatforms(body, result)
   # DSL-port M9.R.15p.0.1 — after all user-declared deps are
   # collected, auto-inject the Qt6Gui transitive ``find_dependency``
   # targets (``libxkbcommon`` + ``mesa``) into ``toolUses`` so every
@@ -1897,7 +2139,21 @@ proc packageLiteral(pkg: PackageDef): string =
   result = "PackageDef(packageName: " & escForCode(pkg.packageName) &
     ", lockFile: " & escForCode(pkg.lockFile) &
     ", defaultToolProvisioning: " & escForCode(pkg.defaultToolProvisioning) &
-    ", nixProvisioning: @["
+    # PMC-1: declared availability. A package that wrote no ``platforms:``
+    # emits ``platformsDeclared: false`` + ``@[]`` + ``""``, which is the
+    # zero value of every field — so the registered record for the ~262
+    # existing stdlib entries is unchanged in everything the resolver reads.
+    ", platformsDeclared: " & $pkg.platformsDeclared &
+    ", platformsMessage: " & escForCode(pkg.platformsMessage) &
+    ", declaredPlatforms: @["
+  for platformIndex, constraint in pkg.declaredPlatforms:
+    if platformIndex > 0:
+      result.add(", ")
+    result.add("PlatformConstraintDef(cpu: " & escForCode(constraint.cpu) &
+      ", os: " & escForCode(constraint.os) &
+      ", sourceFile: " & escForCode(constraint.sourceFile) &
+      ", sourceLine: " & $constraint.sourceLine & ")")
+  result.add("], nixProvisioning: @[")
   for provisioningIndex, provisioning in pkg.nixProvisioning:
     if provisioningIndex > 0:
       result.add(", ")

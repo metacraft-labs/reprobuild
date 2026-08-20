@@ -470,6 +470,11 @@ proc realizeViaProductionCatalog(store: var Store;
     let resolutionChain =
       try:
         callChainResolve(cat, packageId, chain, requestedVersion)
+      except EPackageUnavailableOnPlatform as err:
+        # PMC-1: a DECLARED platform constraint. Surfaced with its own
+        # adapter label so the realize failure reads as "this package cannot
+        # exist here" rather than "some adapter chain gave up".
+        raiseRealizeFailed(packageId, "<platform>", err.msg)
       except EAdapterChainExhausted as err:
         raiseRealizeFailed(packageId, "<chain>", err.msg)
       except EUnknownPackage as err:
@@ -510,6 +515,12 @@ proc realizeViaProductionCatalog(store: var Store;
   let resolution =
     try:
       resolvePackage(cat, packageId)
+    except EPackageUnavailableOnPlatform as err:
+      # PMC-1: the legacy (non-chain) dispatch is the path an unregistered
+      # DSL-``tarball`` package takes, so the availability gate has to be
+      # honoured here too or the fallthrough-to-PATH hole stays open on the
+      # exact route ``chocolatey`` travels.
+      raiseRealizeFailed(packageId, "<platform>", err.msg)
     except EUnknownPackage as err:
       raiseRealizeFailed(packageId, "<none>", err.msg)
   case resolution.adapter
@@ -671,6 +682,14 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage];
             chain = chain, version = p.requestedVersion,
             binaries = p.binaries,
             hostCpu = hostCpu, hostOs = hostOs)
+        except EPackageUnavailableOnPlatform as err:
+          # PMC-1: preview reports a declared unavailability as MISSING with
+          # the platform reason, not as an exhausted chain. The plan and the
+          # apply must agree on why, or `--plan` teaches the operator the
+          # wrong lesson.
+          preview.kind = ppkMissing
+          preview.detail = "platform-unavailable: " & err.msg
+          chainOk = false
         except EAdapterChainExhausted as err:
           preview.kind = ppkMissing
           preview.detail = "adapter-chain-exhausted: " & err.msg
@@ -748,6 +767,10 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage];
                 (if resolution.resolvedVersion.len > 0:
                    "@" & resolution.resolvedVersion else: "") &
                 " would be installed"
+          except EPackageUnavailableOnPlatform as err:
+            # PMC-1: same reporting on the legacy preview branch.
+            preview.kind = ppkMissing
+            preview.detail = "platform-unavailable: " & err.msg
           except EUnknownPackage as err:
             preview.kind = ppkMissing
             preview.detail = "unknown package; searched catalogs: " &
@@ -763,6 +786,10 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage];
             else:
               preview.kind = ppkRealize
               preview.detail = $resolution.adapter
+          except EPackageUnavailableOnPlatform as err:
+            # PMC-1: same reporting on the legacy preview branch.
+            preview.kind = ppkMissing
+            preview.detail = "platform-unavailable: " & err.msg
           except EUnknownPackage as err:
             preview.kind = ppkMissing
             preview.detail = "unknown package; searched catalogs: " &

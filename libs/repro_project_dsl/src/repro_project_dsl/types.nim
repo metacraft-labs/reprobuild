@@ -437,6 +437,29 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  PlatformConstraintDef* = object
+    ## PMC-1 (Platform-And-Microarchitecture-Constraints) — one entry of a
+    ## package-level ``platforms:`` declaration:
+    ##
+    ##   package chocolatey:
+    ##     platforms: [windows]
+    ##
+    ## Availability, NOT provisioning. ``TarballProvisioningDef.cpu`` / ``.os``
+    ## say "here is the artifact for this host"; this says "the package can
+    ## exist on this host at all". Conflating the two is the gap PMC-1 closes:
+    ## before it, a package's availability was whatever set of arms happened to
+    ## be written, so "Windows-only by nature" was unstatable and unlintable.
+    ##
+    ## Same token vocabulary as the arm setters — ``any`` / ``x86_64`` /
+    ## ``aarch64`` / ``x86`` for ``cpu``, ``any`` / ``windows`` / ``linux`` /
+    ## ``macos`` (``darwin``) for ``os``. Empty means "any". The COARSE axis
+    ## only: microarchitecture levels (``x86-64-v3``) and feature sets are
+    ## PMC-2 / PMC-3 and have no representation here.
+    cpu*: string
+    os*: string
+    sourceFile*: string
+    sourceLine*: int
+
   PackageDef* = object
     packageName*: string
     lockFile*: string
@@ -444,6 +467,23 @@ type
       ## "remains available as a default that artifacts inherit and may
       ## override". One rung below the artifact in the precedence chain.
     defaultToolProvisioning*: string
+    platformsDeclared*: bool
+      ## PMC-1: true ONLY when the package body wrote an explicit
+      ## ``platforms:`` block. The resolver's availability gate keys off this
+      ## flag, not off ``declaredPlatforms.len``, because "declared as the
+      ## empty set" and "never declared" are different facts and only the
+      ## second one must resolve exactly as it did before PMC-1.
+    declaredPlatforms*: seq[PlatformConstraintDef]
+      ## PMC-1: the declared coordinates, in source order. Empty for the ~262
+      ## stdlib entries that have not been converted yet;
+      ## ``inferredPackagePlatforms`` in ``runtime_core`` derives the
+      ## "wherever an arm exists" default for those, which is what PMC-5's
+      ## catalog-wide lint consumes.
+    platformsMessage*: string
+      ## PMC-1: optional author-supplied reason, Spack's ``msg=``. Reproduced
+      ## verbatim in the unavailable-package diagnostic. The whole point is
+      ## that the author knows WHY ("Chocolatey is a Windows package manager
+      ## and has no POSIX build") and the resolver does not.
     executables*: seq[ExecutableDef]
     libraries*: seq[LibraryDef]
     runtimeLibraries*: seq[RuntimeLibraryDef]
