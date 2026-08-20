@@ -1558,6 +1558,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_lock/tests/t_lock_writer_output_reads_back.nim",
+    binary: "build/test-bin/t_lock_writer_output_reads_back",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_lock/tests/t_provenance_reports_shared_names.nim",
     binary: "build/test-bin/t_provenance_reports_shared_names",
     defines: @[],

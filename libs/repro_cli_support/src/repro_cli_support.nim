@@ -49102,10 +49102,12 @@ proc runReproLockValidate(rest: openArray[string]): int =
   for v in lock.variants:
     if v.name.len == 0:
       problems.add("variant entry missing name")
-  # (b) loadable + round-trips deterministically.
+  # (b) loadable + round-trips deterministically. ``serializeSolvedGraphLock``
+  # delegates to ``serializeLockedDependencies``, so this is the writer the
+  # committed lock is produced by — it used to be spelled out here because the
+  # solved-graph writer emitted an unreadable ``…lock.v1`` document.
   let reparsed =
-    try: parseSolvedGraphLock(
-      serializeLockedDependencies(lockedDepsFromSolved(lock)))
+    try: parseSolvedGraphLock(serializeSolvedGraphLock(lock))
     except CatchableError:
       problems.add("lock does not round-trip through the serializer")
       lock

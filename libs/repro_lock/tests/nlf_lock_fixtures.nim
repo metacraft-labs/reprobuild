@@ -12,14 +12,16 @@
 ## the real `parseSolvedGraphLock`, the same reader
 ## `resolveSolvedGraphForBuild` calls.
 ##
-## **Deliberately NOT used: `serializeSolvedGraphLock`.** That writer emits a
-## `…lock.v1` document (`repro_lock.nim`, `serializeSolvedGraphLock`) which
-## `parseSolvedGraphLock` rejects outright, so its output cannot be read back
-## by this repository's own reader. That is a known open defect, recorded
-## against this campaign and not fixed here. Lock identity is over the SOLVED
-## GRAPH (§6.2), not over a serialized document, so nothing in these fixtures
-## needs the broken writer — and a fixture built on it would be asserting
-## against bytes the product cannot load.
+## `serializeLockedDependencies` is used directly (rather than
+## `serializeSolvedGraphLock`) because it is the call `repro lock refresh`
+## makes, so these fixtures are byte-for-byte the documents the product
+## commits. The two are no longer in tension: `serializeSolvedGraphLock` now
+## delegates to `serializeLockedDependencies`, so both emit the same
+## `…lock.v2` bytes. When NLF-M4 wrote these fixtures that was NOT true —
+## `serializeSolvedGraphLock` emitted a `…lock.v1` document that
+## `parseSolvedGraphLock` rejected outright — and avoiding the writer was how
+## this file stayed loadable. See `t_lock_writer_output_reads_back.nim` for the
+## regression that now holds the invariant.
 
 import std/tables
 

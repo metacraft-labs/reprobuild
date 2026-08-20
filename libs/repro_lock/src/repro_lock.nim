@@ -16,10 +16,10 @@
 ## project file, and serializes the SOLVER output (``UnifiedSolution``),
 ## not workspace VCS state.
 ##
-## ## On-disk format (``reprobuild.solved-graph-lock.v1``)
+## ## On-disk format (``reprobuild.solved-graph-lock.v2``)
 ##
 ## ```toml
-## schema = "reprobuild.solved-graph-lock.v1"
+## schema = "reprobuild.solved-graph-lock.v2"
 ##
 ## [lock]
 ## platform = "amd64-linux"
@@ -27,7 +27,17 @@
 ## inputs_digest = "fnv1a64:0123abcd..."
 ## variants = [{ name = "compiler", value = "clang" }]
 ## packages = [{ name = "nim", version = "2.2.0", source = "nim" }]
+## deps = []
 ## ```
+##
+## **There is exactly one on-disk schema, and every writer in this module
+## emits it.** ``serializeSolvedGraphLock`` and ``serializeLockedDependencies``
+## both produce ``…v2`` documents that ``parseSolvedGraphLock`` and
+## ``parseLockedDependencies`` accept; a document this module writes is a
+## document this module reads back. The regression that pins the invariant is
+## ``tests/t_lock_writer_output_reads_back.nim``. The historical ``…v1``
+## tag is rejected on read (regenerate with ``repro lock refresh``); nothing
+## writes it.
 ##
 ## The ``variants`` / ``packages`` arrays are **inline-table arrays**
 ## (``field = [{...}, {...}]``), not nested ``[[array.of.tables]]`` — the
@@ -62,11 +72,16 @@ export repro_multihash
 export identity
 
 const SolvedGraphLockSchemaV1* = "reprobuild.solved-graph-lock.v1"
-  ## The historical MO-1 schema string. NO LONGER a valid committed-lock
-  ## schema: the reader REJECTS a v1-tagged lock loudly (regenerate with
-  ## ``repro lock refresh``). Retained only as the in-memory tag of the
-  ## solved-graph sub-part (``SolvedGraphLock``); never read from disk and
-  ## never written to a committed lock.
+  ## The historical MO-1 schema string, retained ONLY so a stale lock can be
+  ## recognized and named in the reader's diagnostic. It is not written by
+  ## anything and not accepted by anything: the reader REJECTS a v1-tagged lock
+  ## loudly (regenerate with ``repro lock refresh``).
+  ##
+  ## Until the round-trip fix this constant was also the in-memory tag that
+  ## ``solutionToLock`` / ``solvedPartOf`` stamped on a freshly built
+  ## ``SolvedGraphLock``, and ``serializeSolvedGraphLock`` wrote it to disk —
+  ## producing documents ``parseSolvedGraphLock`` refused to read. Both now
+  ## stamp ``SolvedGraphLockSchemaV2``, which is the only schema in play.
 
 const SolvedGraphLockSchemaV2* = "reprobuild.solved-graph-lock.v2"
   ## Workspace-Manifest-Optional MO-8 — the self-describing committed lock and
@@ -158,7 +173,7 @@ type
   LockedDependencies* = object
     ## The unified locked-dependency model (MO-8). It SUBSUMES the
     ## resolved-repo facts, the manifest-repo per-repo lock revisions, and
-    ## the committed solved-graph lock's package data: the v1 solved-graph
+    ## the committed solved-graph lock's package data: the solved-graph
     ## payload is preserved as a sub-part (``platform`` / ``optimal`` /
     ## ``inputsDigest`` / ``variants`` / ``packages``) and ``deps`` is the
     ## set of per-dependency coordinates + integrity.
@@ -205,7 +220,7 @@ proc solutionToLock*(sol: UnifiedSolution; platform: string;
   ## deterministic regardless of the (unordered) ``Table`` iteration
   ## order — two solves of the same graph produce byte-identical locks.
   result = SolvedGraphLock(
-    schema: SolvedGraphLockSchemaV1,
+    schema: SolvedGraphLockSchemaV2,
     platform: platform,
     optimal: sol.optimal,
     inputsDigest: inputsDigestOf(inputsText),
@@ -271,13 +286,13 @@ proc canonicalSolvedGraph*(sol: UnifiedSolution;
   ## The projection for a LIVE solution, so an in-memory solved graph can be
   ## identified without a round-trip through the serializer.
   ##
-  ## This overload is load-bearing and not a convenience. `serializeSolvedGraphLock`
-  ## writes a `…lock.v1` document (`repro_lock.nim:297`) which
-  ## `parseSolvedGraphLock` REJECTS outright (`:406`), so the writer's own
-  ## output cannot be read back by this module's reader — a known open defect
-  ## recorded against this campaign. Identity per §6.2 is over the solved
-  ## graph, not over a serialized document, so nothing here serializes and
-  ## the defect cannot leak into a cache key.
+  ## This overload is load-bearing and not a convenience: identity per §6.2 is
+  ## over the SOLVED GRAPH, not over a serialized document, so an in-memory
+  ## solution must be identifiable without touching the serializer at all. That
+  ## separation is what kept the writer/reader schema mismatch (a `…lock.v1`
+  ## writer against a `…v2` reader, since fixed — see
+  ## `serializeSolvedGraphLock`) from ever leaking into a cache key, and it is
+  ## the reason nothing on the identity path serializes.
   ##
   ## Source identity mirrors `solutionToLock`: MO-1 records the solver-keyed
   ## definition identity, which for a live solution is the package name.
@@ -358,31 +373,10 @@ proc tomlUnescape(raw: string): string =
 # Serialize
 # ---------------------------------------------------------------------------
 
-proc serializeSolvedGraphLock*(lock: SolvedGraphLock): string =
-  ## Render a ``SolvedGraphLock`` to canonical TOML. Key order is fixed
-  ## and the arrays are pre-sorted by ``solutionToLock``, so two solves of
-  ## the same graph produce byte-identical output.
-  result = newStringOfCap(512)
-  result.add("schema = \"" & tomlEscape(SolvedGraphLockSchemaV1) & "\"\n\n")
-  result.add("[lock]\n")
-  result.add("platform = \"" & tomlEscape(lock.platform) & "\"\n")
-  result.add("optimal = " & (if lock.optimal: "true" else: "false") & "\n")
-  result.add("inputs_digest = \"" & tomlEscape(lock.inputsDigest) & "\"\n")
-  # variants — inline-table array.
-  result.add("variants = [")
-  for i, v in lock.variants:
-    if i > 0: result.add(", ")
-    result.add("{ name = \"" & tomlEscape(v.name) & "\", value = \"" &
-               tomlEscape(v.value) & "\" }")
-  result.add("]\n")
-  # packages — inline-table array.
-  result.add("packages = [")
-  for i, p in lock.packages:
-    if i > 0: result.add(", ")
-    result.add("{ name = \"" & tomlEscape(p.name) & "\", version = \"" &
-               tomlEscape(p.version) & "\", source = \"" &
-               tomlEscape(p.source) & "\" }")
-  result.add("]\n")
+# ``serializeSolvedGraphLock`` is defined below, next to
+# ``serializeLockedDependencies``, which it delegates to. It used to have its
+# own v1-emitting body here; that body is what made the module's writer and
+# reader disagree.
 
 # ---------------------------------------------------------------------------
 # Parse
@@ -435,9 +429,11 @@ iterator inlineTables(rhs: string): Table[string, string] =
 
 proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
   ## Parse a committed solved-graph lock. Round-trips
-  ## ``serializeSolvedGraphLock``. Raises ``SolvedGraphLockParseError`` on
-  ## a missing/mismatched schema. Unknown keys are ignored
-  ## (forward-compatible within the v1 schema).
+  ## ``serializeSolvedGraphLock`` (and reads the ``deps``-carrying documents
+  ## ``serializeLockedDependencies`` writes, ignoring the ``deps`` array —
+  ## ``parseLockedDependencies`` is the reader that keeps it). Raises
+  ## ``SolvedGraphLockParseError`` on a missing/mismatched schema. Unknown keys
+  ## are ignored (forward-compatible within the v2 schema).
   result = SolvedGraphLock(schema: "", variants: @[], packages: @[])
   var sawSchema = false
   for rawLine in content.splitLines():
@@ -473,9 +469,18 @@ proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
           source: fields.getOrDefault("source", "")))
     else: discard
   if not sawSchema or result.schema != SolvedGraphLockSchemaV2:
+    # A ``…v1`` tag is named specifically: it is not a typo but a lock
+    # committed by an older Reprobuild (or, before the writer was brought to
+    # v2, printed by ``repro build --print-solved-graph``), and "regenerate"
+    # is the whole of the fix. Anything else is a genuinely unknown schema.
+    let detail =
+      if result.schema == SolvedGraphLockSchemaV1:
+        "the superseded MO-1 schema; " & SolvedGraphLockSchemaV2 & " is current"
+      else:
+        "expected " & SolvedGraphLockSchemaV2
     raise newException(SolvedGraphLockParseError,
-      "unsupported lock schema '" & result.schema & "' (expected " &
-      SolvedGraphLockSchemaV2 & "); regenerate with `repro lock refresh`")
+      "unsupported lock schema '" & result.schema & "' (" & detail &
+      "); regenerate with `repro lock refresh`")
 
 # ---------------------------------------------------------------------------
 # MO-8 — the unified LockedDependencies model: v2 serialize / parse
@@ -485,10 +490,21 @@ proc joinNames(names: seq[string]): string =
   ## ``depends`` / ``tags`` are stored as a comma-joined string because the
   ## pinned ``nim-toml-serialization`` (and this module's inline-table reader)
   ## carries only quoted-string values inside an inline table, not nested
-  ## arrays. The list semantics are identical; only the surface differs.
+  ## arrays.
+  ##
+  ## THE SURFACE IS NOT LOSSLESS FOR EVERY POSSIBLE ELEMENT, and the limit is
+  ## stated here rather than assumed. ``splitNames`` splits on ``,``, strips
+  ## each element, and drops empties, so an element that CONTAINS a comma comes
+  ## back as two elements, and an empty / whitespace-only element is dropped
+  ## entirely. Both are outside the domain: a ``depends`` entry is a dependency
+  ## NAME and a ``tags`` entry is a selection tag, and the CLI surface that
+  ## produces tags (``repro sync --tags=a,b``) is itself comma-delimited, so
+  ## neither can carry a comma to begin with. If either domain ever widens, the
+  ## on-disk surface needs an escape — not a wider reader.
   names.join(",")
 
 proc splitNames(s: string): seq[string] =
+  ## Inverse of ``joinNames`` over that domain; see its limits.
   result = @[]
   for raw in s.split(','):
     let v = raw.strip()
@@ -506,7 +522,7 @@ proc solvedPartOf*(ld: LockedDependencies): SolvedGraphLock =
   ## Project the solved-graph sub-part out of a ``LockedDependencies`` (so the
   ## existing solution<->lock helpers keep working unchanged).
   SolvedGraphLock(
-    schema: SolvedGraphLockSchemaV1, platform: ld.platform,
+    schema: SolvedGraphLockSchemaV2, platform: ld.platform,
     optimal: ld.optimal, inputsDigest: ld.inputsDigest,
     variants: ld.variants, packages: ld.packages)
 
@@ -691,7 +707,7 @@ proc serializeDepInline(d: LockedDep): string =
 
 proc serializeLockedDependencies*(ld: LockedDependencies): string =
   ## Render the unified model to canonical ``reprobuild.solved-graph-lock.v2``
-  ## TOML. The v1 solved-graph payload is preserved verbatim as a sub-part;
+  ## TOML. The solved-graph payload is preserved verbatim as a sub-part;
   ## the ``deps`` set (sorted by name then path) carries each dependency's
   ## coordinates + self-describing integrity. Deterministic: a write -> read
   ## -> write round-trip is byte-identical.
@@ -701,14 +717,14 @@ proc serializeLockedDependencies*(ld: LockedDependencies): string =
   result.add("platform = \"" & tomlEscape(ld.platform) & "\"\n")
   result.add("optimal = " & (if ld.optimal: "true" else: "false") & "\n")
   result.add("inputs_digest = \"" & tomlEscape(ld.inputsDigest) & "\"\n")
-  # variants — inline-table array (v1 sub-part).
+  # variants — inline-table array (solved-graph sub-part).
   result.add("variants = [")
   for i, v in ld.variants:
     if i > 0: result.add(", ")
     result.add("{ name = \"" & tomlEscape(v.name) & "\", value = \"" &
                tomlEscape(v.value) & "\" }")
   result.add("]\n")
-  # packages — inline-table array (v1 sub-part).
+  # packages — inline-table array (solved-graph sub-part).
   result.add("packages = [")
   for i, p in ld.packages:
     if i > 0: result.add(", ")
@@ -726,6 +742,30 @@ proc serializeLockedDependencies*(ld: LockedDependencies): string =
     if i > 0: result.add(", ")
     result.add(serializeDepInline(d))
   result.add("]\n")
+
+proc serializeSolvedGraphLock*(lock: SolvedGraphLock): string =
+  ## Render a ``SolvedGraphLock`` to a canonical committed-lock document.
+  ##
+  ## This is ``serializeLockedDependencies`` over the solved-graph sub-part with
+  ## an empty ``deps`` set — DELEGATION, not duplication, and deliberately so.
+  ## A second hand-written body is how this writer drifted onto the ``…v1``
+  ## schema tag while the reader moved to ``…v2``, which left
+  ## ``parseSolvedGraphLock`` rejecting its own writer's output and
+  ## ``repro build --print-solved-graph`` printing a document that looked like a
+  ## lock file and could not be loaded as one. With one body there is one byte
+  ## format, so the two writers cannot disagree again.
+  ##
+  ## The empty ``deps`` set is the honest rendering: a ``SolvedGraphLock`` is
+  ## the solved-graph sub-part and carries no per-dependency coordinates. A
+  ## caller that HAS coordinates (``repro lock refresh``) assembles a
+  ## ``LockedDependencies`` and calls ``serializeLockedDependencies`` directly.
+  ##
+  ## Deterministic: key order is fixed and the arrays are pre-sorted by
+  ## ``solutionToLock``, so two solves of the same graph produce byte-identical
+  ## output. Round-trips through ``parseSolvedGraphLock`` and
+  ## ``parseLockedDependencies``
+  ## (``tests/t_lock_writer_output_reads_back.nim``).
+  serializeLockedDependencies(lockedDepsFromSolved(lock))
 
 proc parseLockedDependencies*(content: string): LockedDependencies =
   ## Parse a committed lock into the unified model. Accepts ONLY the v2
