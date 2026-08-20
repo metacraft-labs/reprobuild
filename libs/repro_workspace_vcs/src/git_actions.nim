@@ -1390,6 +1390,12 @@ proc gitCloneAction*(id: string; identity: GitToolIdentity;
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
+    # Named-Lock-Files §7.2. A workspace VCS operation materialises a
+    # CHECKOUT, and `Workspace-Manifests.md` §"Mode-agnostic" is explicit
+    # that develop-vs-store-installed "is never recorded in the lock" — so
+    # no solved package instance governs this edge. See
+    # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     text = encodePayload(payload))
 
 proc gitFetchAction*(id: string; identity: GitToolIdentity;
@@ -1411,6 +1417,12 @@ proc gitFetchAction*(id: string; identity: GitToolIdentity;
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
+    # Named-Lock-Files §7.2. A workspace VCS operation materialises a
+    # CHECKOUT, and `Workspace-Manifests.md` §"Mode-agnostic" is explicit
+    # that develop-vs-store-installed "is never recorded in the lock" — so
+    # no solved package instance governs this edge. See
+    # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     text = encodePayload(payload))
 
 proc gitSwitchAction*(id: string; identity: GitToolIdentity;
@@ -1436,6 +1448,12 @@ proc gitSwitchAction*(id: string; identity: GitToolIdentity;
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
+    # Named-Lock-Files §7.2. A workspace VCS operation materialises a
+    # CHECKOUT, and `Workspace-Manifests.md` §"Mode-agnostic" is explicit
+    # that develop-vs-store-installed "is never recorded in the lock" — so
+    # no solved package instance governs this edge. See
+    # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     text = encodePayload(payload))
 
 proc gitBranchCreate*(id: string; identity: GitToolIdentity;
@@ -1456,6 +1474,12 @@ proc gitBranchCreate*(id: string; identity: GitToolIdentity;
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
+    # Named-Lock-Files §7.2. A workspace VCS operation materialises a
+    # CHECKOUT, and `Workspace-Manifests.md` §"Mode-agnostic" is explicit
+    # that develop-vs-store-installed "is never recorded in the lock" — so
+    # no solved package instance governs this edge. See
+    # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     text = encodePayload(payload))
 
 proc gitForkBranchAction*(id: string; identity: GitToolIdentity;
@@ -1479,6 +1503,12 @@ proc gitForkBranchAction*(id: string; identity: GitToolIdentity;
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
+    # Named-Lock-Files §7.2. A workspace VCS operation materialises a
+    # CHECKOUT, and `Workspace-Manifests.md` §"Mode-agnostic" is explicit
+    # that develop-vs-store-installed "is never recorded in the lock" — so
+    # no solved package instance governs this edge. See
+    # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     text = encodePayload(payload))
 
 proc gitRefreshBareAction*(id: string; identity: GitToolIdentity;
@@ -1494,6 +1524,12 @@ proc gitRefreshBareAction*(id: string; identity: GitToolIdentity;
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
+    # Named-Lock-Files §7.2. A workspace VCS operation materialises a
+    # CHECKOUT, and `Workspace-Manifests.md` §"Mode-agnostic" is explicit
+    # that develop-vs-store-installed "is never recorded in the lock" — so
+    # no solved package instance governs this edge. See
+    # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     text = encodePayload(payload))
 
 proc gitMergeFfAction*(id: string; identity: GitToolIdentity;
@@ -1518,6 +1554,12 @@ proc gitMergeFfAction*(id: string; identity: GitToolIdentity;
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
+    # Named-Lock-Files §7.2. A workspace VCS operation materialises a
+    # CHECKOUT, and `Workspace-Manifests.md` §"Mode-agnostic" is explicit
+    # that develop-vs-store-installed "is never recorded in the lock" — so
+    # no solved package instance governs this edge. See
+    # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     text = encodePayload(payload))
 
 proc gitForceResetAction*(id: string; identity: GitToolIdentity;
@@ -1539,6 +1581,12 @@ proc gitForceResetAction*(id: string; identity: GitToolIdentity;
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
+    # Named-Lock-Files §7.2. A workspace VCS operation materialises a
+    # CHECKOUT, and `Workspace-Manifests.md` §"Mode-agnostic" is explicit
+    # that develop-vs-store-installed "is never recorded in the lock" — so
+    # no solved package instance governs this edge. See
+    # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     text = encodePayload(payload))
 
 proc gitForcePushRebaseAction*(id: string; identity: GitToolIdentity;
@@ -1554,6 +1602,12 @@ proc gitForcePushRebaseAction*(id: string; identity: GitToolIdentity;
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
+    # Named-Lock-Files §7.2. A workspace VCS operation materialises a
+    # CHECKOUT, and `Workspace-Manifests.md` §"Mode-agnostic" is explicit
+    # that develop-vs-store-installed "is never recorded in the lock" — so
+    # no solved package instance governs this edge. See
+    # `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     text = encodePayload(payload))
 
 # ---- Query operations (observation-only, per M2 design rule 3) ----

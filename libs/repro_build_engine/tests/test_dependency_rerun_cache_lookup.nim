@@ -24,7 +24,8 @@ suite "dependency rerun cache lookup":
       cwd = workRoot,
       inputs = ["src/input.txt"],
       outputs = ["generated/stable.txt"],
-      cacheable = false)
+      cacheable = false,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
     let consumer = builtinAction(bakCopyFile, "checksum-consumer",
       cwd = workRoot,
       deps = [producer.id],
@@ -32,7 +33,8 @@ suite "dependency rerun cache lookup":
       outputs = ["out/consumer.txt"],
       cacheable = true,
       weakFingerprint = weak("checksum-consumer"),
-      actionCachePolicy = ffpChecksum)
+      actionCachePolicy = ffpChecksum,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
     var config = defaultBuildEngineConfig(cacheRoot)
     config.rebuildMissingOutputsOnCacheHit = true
     config.bypassRunQuota = true

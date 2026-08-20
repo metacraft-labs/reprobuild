@@ -61,6 +61,7 @@ proc twoActionsWithRoots(idA, rootA, idB, rootB: string;
   let stampA = absolutePath(TmpDir / (idA & ".stamp"))
   let stampB = absolutePath(TmpDir / (idB & ".stamp"))
   let actionA = BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakWriteText,
     id: idA,
     outputs: @[stampA],
@@ -70,6 +71,7 @@ proc twoActionsWithRoots(idA, rootA, idB, rootB: string;
     builtinText: "a\n",
     declaredOutputs: @[rootA])
   let actionB = BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakWriteText,
     id: idB,
     deps: if chain: @[idA] else: @[],
@@ -151,6 +153,7 @@ suite "M9.R.75 — R7 double-write reject at graph-validation time":
     let stampA = absolutePath(TmpDir / "legacy-a.stamp")
     let stampB = absolutePath(TmpDir / "legacy-b.stamp")
     let actionA = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
       kind: bakWriteText,
       id: "legacy-a",
       outputs: @[stampA],
@@ -159,6 +162,7 @@ suite "M9.R.75 — R7 double-write reject at graph-validation time":
       weakFingerprint: stubDigest("legacy-a"),
       builtinText: "a\n")
     let actionB = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
       kind: bakWriteText,
       id: "legacy-b",
       outputs: @[stampB],
@@ -178,6 +182,7 @@ suite "M9.R.75 — R7 double-write reject at graph-validation time":
     resetTmp()
     let stamp = absolutePath(TmpDir / "self.stamp")
     let action = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
       kind: bakWriteText,
       id: "self",
       outputs: @[stamp],
@@ -232,16 +237,19 @@ suite "M9.R.75 — R7 double-write reject at graph-validation time":
     let stampCmp = absolutePath(TmpDir / "cmp.stamp")
     let stampIns = absolutePath(TmpDir / "ins.stamp")
     let cfg = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
       kind: bakWriteText, id: "cfg", outputs: @[stampCfg],
       cacheable: false, actionCachePolicy: ffpTimestamp,
       weakFingerprint: stubDigest("cfg"), builtinText: "c\n",
       declaredOutputs: @[scope])
     let cmp = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
       kind: bakWriteText, id: "cmp", deps: @["cfg"], outputs: @[stampCmp],
       cacheable: false, actionCachePolicy: ffpTimestamp,
       weakFingerprint: stubDigest("cmp"), builtinText: "m\n",
       declaredOutputs: @[scope])
     let ins = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
       kind: bakWriteText, id: "ins", deps: @["cmp"], outputs: @[stampIns],
       cacheable: false, actionCachePolicy: ffpTimestamp,
       weakFingerprint: stubDigest("ins"), builtinText: "i\n",

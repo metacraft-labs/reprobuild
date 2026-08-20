@@ -58,7 +58,8 @@ suite "M25 engine action-create dyndep ingest":
       action("consumer", ["/bin/echo", "consumer"], cwd = workRoot,
         outputs = ["consumer.out"],
         dynamicDepsFile = "consumer.rbdyn",
-        commandStatsId = "m25-engine-consumer")
+        commandStatsId = "m25-engine-consumer",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
     ]), config)
 
     proc byId(id: string): ActionResult =
@@ -104,7 +105,8 @@ suite "M25 engine action-create dyndep ingest":
       discard runBuild(graph([
         action("consumer", ["/bin/echo", "consumer"], cwd = workRoot,
           outputs = ["consumer.out"],
-          dynamicDepsFile = "consumer.rbdyn")
+          dynamicDepsFile = "consumer.rbdyn",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
       ]), config)
 
   test "create-action with duplicate declared output is rejected":
@@ -140,7 +142,8 @@ suite "M25 engine action-create dyndep ingest":
       discard runBuild(graph([
         action("consumer", ["/bin/echo", "consumer"], cwd = workRoot,
           outputs = ["consumer.out"],
-          dynamicDepsFile = "consumer.rbdyn")
+          dynamicDepsFile = "consumer.rbdyn",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
       ]), config)
 
   test "fragment header without v1 banner is rejected":
@@ -164,5 +167,6 @@ suite "M25 engine action-create dyndep ingest":
       discard runBuild(graph([
         action("consumer", ["/bin/echo", "consumer"], cwd = workRoot,
           outputs = ["consumer.out"],
-          dynamicDepsFile = "consumer.rbdyn")
+          dynamicDepsFile = "consumer.rbdyn",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
       ]), config)

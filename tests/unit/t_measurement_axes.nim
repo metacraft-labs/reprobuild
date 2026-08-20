@@ -145,11 +145,11 @@ suite "measurement axes: PERSIST (--write-report and the failure report)":
       reason: "dependency failed"))
 
     let actions = @[
-      BuildAction(id: "compile-broken",
+      BuildAction(governingLockIdentity: lockIdentityOutsideSolvedGraph(), id: "compile-broken",
         argv: @["nim", "c", "src/broken.nim"],
         cwd: "/work", inputs: @["src/broken.nim"],
         outputs: @["build/broken"], cacheable: true),
-      BuildAction(id: "compile-ok", argv: @["nim", "c", "src/ok.nim"])]
+      BuildAction(governingLockIdentity: lockIdentityOutsideSolvedGraph(), id: "compile-ok", argv: @["nim", "c", "src/ok.nim"])]
 
     writeBuildFailureReport(path, runResult, actions,
       "/work#default", "/work", "/work/.repro/build/x", 1)

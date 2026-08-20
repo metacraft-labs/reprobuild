@@ -77,6 +77,7 @@ proc fingerprintForPayload(payload: string): ContentDigest =
 
 proc oneWriteTextAction(outputPath, payload, token: string): BuildGraph =
   let action = BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakWriteText,
     id: "t-apply-cache-hit",
     deps: @[],

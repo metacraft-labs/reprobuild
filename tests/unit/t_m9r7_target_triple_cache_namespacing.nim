@@ -66,6 +66,7 @@ proc stubIdentity(packageName = "m9r7-pkg";
 
 proc stubAction(cachePlatformTag: string = ""): BuildAction =
   BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakWriteText,
     id: "m9r7-stub",
     cacheEntryIdentity: some(stubIdentity()),
@@ -73,6 +74,7 @@ proc stubAction(cachePlatformTag: string = ""): BuildAction =
 
 proc stubActionWithoutIdentity(cachePlatformTag: string = ""): BuildAction =
   BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakWriteText,
     id: "m9r7-stub-noidy",
     cacheEntryIdentity: none(CacheEntryIdentity),

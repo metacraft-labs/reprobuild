@@ -153,7 +153,8 @@ suite "RA-13 named pool enforced once via RunQuota (no double-gate)":
     # and unit cost into the RunQuota lease request; the helper argv that
     # spawns the leased child carries --pool/--pool-units. This is what lets
     # RunQuota be the sole authority for the pool.
-    let pooled = action("link-0", ["/bin/true"], pool = "link", poolUnits = 1'u32)
+    let pooled = action("link-0", ["/bin/true"], pool = "link", poolUnits = 1'u32,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph())
     check pooled.pool == "link"
     check pooled.poolUnits == 1'u32
     let request = ReproResourceRequest(
@@ -200,7 +201,8 @@ suite "RA-13 named pool enforced once via RunQuota (no double-gate)":
         actions.add action("link-" & $i, [app, "fixture-action", "pool", $i,
           tempRoot / "link-log", workRoot / "link" / ($i & ".txt")],
           cwd = workRoot, outputs = ["link/" & $i & ".txt"],
-          pool = "link", poolUnits = 1'u32, commandStatsId = "link-" & $i)
+          pool = "link", poolUnits = 1'u32, commandStatsId = "link-" & $i,
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
       # Local declared link capacity = 1 (smaller than RunQuota's 2): if the
       # engine still gated locally this would cap concurrency to 1.

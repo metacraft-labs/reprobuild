@@ -92,6 +92,7 @@ proc shellWriteOutputAction(id, outputPath, payload, fingerprintToken: string):
   ## real exec to prove the dispatchOperation path runs end-to-end.
   let script = "printf %s '" & payload & "' > '" & outputPath & "'"
   result = BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakProcess,
     id: id,
     outputs: @[outputPath],
@@ -334,6 +335,7 @@ suite "Windows-System-Resources Phase E — CLI seam end-to-end":
       # still recognises this as launched + failed, NOT as a cache
       # miss / re-tryable.
       let action = BuildAction(
+        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
         kind: bakProcess,
         id: "cli-seam-fail",
         outputs: @[outputPath],

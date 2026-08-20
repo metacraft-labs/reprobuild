@@ -150,6 +150,7 @@ proc oneAction(actionId: string;
                argvOverride: seq[string] = @[]): BuildGraph =
   let argv = if argvOverride.len > 0: argvOverride else: stubArgv()
   var act = BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakProcess,
     id: actionId,
     deps: @[],
@@ -500,7 +501,8 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
       stubArgv(),
       cwd = getCurrentDir(),
       cacheable = false,
-      dependencyPolicy = makeDepfilePolicy(depfilePath))
+      dependencyPolicy = makeDepfilePolicy(depfilePath),
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
     let g = graph(@[act], newSeq[BuildPool]())
 
     let first = runBuild(g, runnerCfg(cacheRoot, nil))

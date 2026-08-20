@@ -45,6 +45,16 @@ import std/[algorithm, strutils]
 import repro_build_engine
 import repro_hash
 
+let CorpusLockIdentity = lockIdentityOutsideSolvedGraph()
+  ## `let`, not `const`: the identity is a real BLAKE3 recompute and the Nim
+  ## VM cannot call the C hash at compile time.
+  ## Named-Lock-Files §7.2 — the corpus stands in for "a workspace with no
+  ## lock-file declarations", so its edges are governed by the empty solved
+  ## graph. The value is deliberately NOT part of `canonicalMaterial` or of
+  ## `weakFingerprint`: NLF-STAT-4's property is that the DEFAULT PATH is
+  ## unchanged, and a carrier field that moved a fingerprint would be the
+  ## regression the case exists to catch.
+
 const BaselineFixtureRelPath* =
   "fixtures/nlf_stat4_baseline_fingerprints.tsv"
   ## Relative to this module's directory.
@@ -98,6 +108,7 @@ proc baselineCorpusActions*(): seq[BuildAction] =
   # --- process edges, via `action()` ------------------------------------
   result.add(action("stat4/compile-main",
     ["/usr/bin/cc", "-c", "src/main.c", "-o", "build/main.o"],
+    governingLockIdentity = CorpusLockIdentity,
     cwd = "/workspace",
     inputs = ["src/main.c"],
     outputs = ["build/main.o"],
@@ -105,6 +116,7 @@ proc baselineCorpusActions*(): seq[BuildAction] =
     env = ["CC=/usr/bin/cc", "LANG=C"]))
   result.add(action("stat4/link-app",
     ["/usr/bin/cc", "build/main.o", "-o", "build/app"],
+    governingLockIdentity = CorpusLockIdentity,
     cwd = "/workspace",
     deps = ["stat4/compile-main"],
     inputs = ["build/main.o"],
@@ -114,6 +126,7 @@ proc baselineCorpusActions*(): seq[BuildAction] =
     cacheable = true))
   result.add(action("stat4/run-tests",
     ["build/app", "--selftest"],
+    governingLockIdentity = CorpusLockIdentity,
     cwd = "/workspace",
     deps = ["stat4/link-app"],
     inputs = ["build/app"],
@@ -122,30 +135,38 @@ proc baselineCorpusActions*(): seq[BuildAction] =
 
   # --- built-in edges, via `builtinAction()` ----------------------------
   result.add(builtinAction(bakEnsureDir, "stat4/ensure-dist",
+    governingLockIdentity = CorpusLockIdentity,
     outputs = ["dist"]))
   result.add(builtinAction(bakCopyFile, "stat4/copy-app",
+    governingLockIdentity = CorpusLockIdentity,
     deps = ["stat4/link-app", "stat4/ensure-dist"],
     inputs = ["build/app"],
     outputs = ["dist/app"]))
   result.add(builtinAction(bakWriteText, "stat4/write-manifest",
+    governingLockIdentity = CorpusLockIdentity,
     outputs = ["dist/manifest.txt"],
     text = "app\n"))
   result.add(builtinAction(bakStamp, "stat4/stamp-dist",
+    governingLockIdentity = CorpusLockIdentity,
     deps = ["stat4/copy-app", "stat4/write-manifest"],
     outputs = ["dist/.stamp"]))
   result.add(builtinAction(bakPreserveTree, "stat4/preserve-src",
+    governingLockIdentity = CorpusLockIdentity,
     inputs = ["src"],
     outputs = ["dist/src.preserved"]))
   result.add(builtinAction(bakEnsureLine, "stat4/ensure-line",
+    governingLockIdentity = CorpusLockIdentity,
     outputs = ["dist/profile"],
     text = "export PATH=/opt/bin:$PATH"))
   result.add(builtinAction(bakEnsureSnippet, "stat4/ensure-snippet",
+    governingLockIdentity = CorpusLockIdentity,
     outputs = ["dist/rc"],
     text = "# managed by repro\n",
     entries = ["begin", "end"]))
 
   # --- kinds constructed by hand today ----------------------------------
   result.add(BuildAction(
+    governingLockIdentity: CorpusLockIdentity,
     kind: bakWorkspaceVcs,
     id: "stat4/vcs-clone",
     outputs: @["checkout/.git"],
@@ -153,6 +174,7 @@ proc baselineCorpusActions*(): seq[BuildAction] =
     weakFingerprint: weakFingerprintFromText("stat4/vcs-clone"),
     builtinText: "clone\thttps://example.invalid/repo.git\tcheckout"))
   result.add(BuildAction(
+    governingLockIdentity: CorpusLockIdentity,
     kind: bakBinaryCacheSubstitute,
     id: "stat4/substitute-zlib",
     outputs: @["store/zlib.stamp"],
@@ -160,6 +182,7 @@ proc baselineCorpusActions*(): seq[BuildAction] =
     weakFingerprint: weakFingerprintFromText("stat4/substitute-zlib"),
     builtinText: "0123456789abcdef\thttps://cache.example.invalid"))
   result.add(BuildAction(
+    governingLockIdentity: CorpusLockIdentity,
     kind: bakForeignProvision,
     id: "stat4/provision-nix",
     outputs: @["store/foreign.stamp"],

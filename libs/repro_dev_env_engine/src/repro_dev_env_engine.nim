@@ -111,6 +111,11 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
       parentDir(plan.outputBinaryPath)
   createDir(extendedPath(compilerCwd))
   action("__repro_provider_compile", command,
+    # Named-Lock-Files §7.2. The provider-compile edge runs before any solve
+    # in this path, so no solved package instance governs it; see
+    # `lockIdentityOutsideSolvedGraph`'s doc comment for why that is stated
+    # here rather than defaulted.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = compilerCwd,
     inputs = inputs,
     outputs = providerCompileOutputs(artifactPath, plan.outputBinaryPath),
@@ -339,6 +344,8 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
       fileExists(extendedPath(config.developOverridesPath)):
     inputs.add(config.developOverridesPath)
   action("__repro_dev_env_introspection", argv,
+    # Named-Lock-Files §7.2 — see `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = config.workDir,
     inputs = inputs,
     outputs = @[artifactPath],
@@ -363,6 +370,8 @@ proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
     "--out", shellFragmentPath,
     "--navigator-stats", navigatorStatsPath
   ],
+    # Named-Lock-Files §7.2 — see `lockIdentityOutsideSolvedGraph`.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = config.workDir,
     inputs = @[artifactPath],
     outputs = @[shellFragmentPath, navigatorStatsPath],
@@ -439,6 +448,11 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
       let receiptFile = receiptDir / (safeStoreSegment(useDef.packageSelector, "nix-package") & ".receipt")
 
       let provAction = BuildAction(
+        # Named-Lock-Files §7.2. A foreign-provisioner edge is materialised by
+        # a provisioner Reprobuild does not own — the very case that decided
+        # design A over path-partitioning (§7.2's owner note) — and no solved
+        # package instance reaches it here.
+        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
         kind: bakForeignProvision,
         id: "nix-provision." & useDef.packageSelector,
         argv: @["nix", plan.nixSelector],

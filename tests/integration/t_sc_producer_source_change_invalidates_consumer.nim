@@ -84,6 +84,7 @@ proc mkAction(id: string; refs: seq[string]): BuildAction =
   ## A minimal ``BuildAction`` with a deterministic non-empty weak fingerprint
   ## and the given tool-identity refs — the shape the CLI hands the SC-4 fold.
   BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakProcess,
     id: id,
     cacheable: true,
